@@ -45,8 +45,8 @@ Build the core executor loop: load a Guild, invoke the entry role, call the conf
 
 - `llm.ts` is the only file that performs HTTP requests.
 - `budgets.ts` contains only budget logic; it does not call the LLM or filesystem.
-- `engine.ts` is the main orchestration and depends on `llm`, `tool-dispatch` (from Phase 3), `budgets`, and `persistence`.
-- `executor.ts` is the top-level orchestration and depends on `loader` (Phase 1/3), `engine`, and `persistence`.
+- `engine.ts` is the main orchestration and depends on `llm`, `tool-dispatch` (defined in phase 1 closeout, see `source/executor/tool-dispatch.ts`), `budgets`, and `persistence`.
+- `executor.ts` is the top-level orchestration and depends on `loader` (defined in phase 1 closeout, see `source/executor/loader.ts`), `engine`, and `persistence`.
 
 ## Dependencies note
 

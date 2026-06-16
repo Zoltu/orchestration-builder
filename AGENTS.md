@@ -182,6 +182,12 @@ export function runAnalysis(dependencies: { parseConfiguration: () => Configurat
 }
 ```
 
+### In-memory tests only
+
+Tests must run purely in-memory. Do not make network requests, hit real LLM endpoints, or depend on external services. Use fakes for the LLM caller, tool handlers, and any other external dependency. File-system tests may use temporary directories under `os.tmpdir()` but must clean up after themselves. The goal is fast iteration: every test should run in milliseconds.
+
+The LLM caller (`source/executor/llm.ts`, phase 2) is exercised in tests exclusively through a fake; integration against a real endpoint is a separate concern handled at deployment time, not in `bun test`.
+
 ---
 
 ## Architecture
@@ -232,6 +238,26 @@ When adding a new function, use this to decide its pattern:
 
 ---
 
+## Tool Dispatch
+
+Tool dispatch is the mechanism by which the executor invokes tools in response to LLM tool calls. It is defined in `source/executor/tool-dispatch.ts` and established in phase 1 so that phase 2's engine can compose against it.
+
+- `createToolDispatch(handlers)` is a factory that takes a map of tool-name → handler and returns a `ToolDispatch`.
+- The dispatcher parses the tool call's JSON arguments, validates they form an object, and invokes the handler.
+- Errors are returned as `ToolResult` with appropriate `ErrorKind`s (`unknown_tool`, `invalid_arguments`), never thrown.
+- Phase 2's engine composes the handler map from built-in tools (`finish`, `agent`) and from native tools (phase 3). Phase 3 adds the real implementations of file/shell/search tools.
+- Tool dispatch is pure orchestration and is fully testable with fake handlers; see `source/executor/tool-dispatch.test.ts`.
+
+## Guild Loader
+
+Guild loading is a leaf factory defined in `source/executor/loader.ts`.
+
+- `createGuildLoader()` returns a `GuildLoader` whose `load(guildDir)` reads `guild.json`, resolves every role's `systemPrompt` Markdown file, and validates every referenced tool-manifest JSON file. The return value is a `LoadedGuild` containing the validated `GuildConfig`, the resolved prompt text per role, and the parsed tool manifests keyed by name.
+- The loader uses the shared `validateGuildConfig` and `validateToolManifest` functions and surfaces validation errors as `ValidationError` (see `source/shared/errors.ts`).
+- The loader is a leaf and is not unit-tested; it is exercised through integration in phase 2/5.
+
+---
+
 ## Control Flow Rules
 
 ### Prefer Guard Clauses
@@ -265,6 +291,28 @@ One-line `return` or `continue` guards are especially encouraged when they let t
 
 ---
 
+## Naming Conventions
+
+Prefer verbose, descriptive names. Avoid abbreviations, acronyms, and single-letter names in identifiers, folders, and files.
+
+- `userRepository` rather than `userRepo`
+- `configuration` rather than `cfg`
+- `guild.json` rather than `g.json`
+- `source/executor/persistence.ts` rather than `src/exec/persist.ts`
+
+Single-letter names are acceptable only where the language idiom requires them (e.g., a `for` loop index). Common short forms that are already part of the project's vocabulary (`id`, `url`, `json`) are fine. The goal is clarity over brevity; do not invent new abbreviations.
+
+## Formatting
+
+Newlines carry semantic meaning. They separate statements, definitions, and logical groups. Do not insert blank lines purely to shorten a line or for visual breathing room.
+
+- If a line is too long, refactor the code (extract a variable, split a function, introduce a helper) rather than wrapping it with arbitrary newlines.
+- Long parameter lists, long import statements, and long string literals are acceptable as single lines when wrapping would reduce clarity.
+- Use exactly one blank line between top-level definitions and between logical groups. Never use two or more consecutive blank lines.
+- Files end with a single trailing newline; do not leave trailing whitespace on any line.
+
+---
+
 ## General Principles
 
 1. **TypeScript should catch errors at compile time, not runtime**
@@ -273,6 +321,12 @@ One-line `return` or `continue` guards are especially encouraged when they let t
 4. **Check preconditions before operations, don't catch expected errors**
 5. **Use type guards, not typecasts, for narrowing**
 6. **Fail fast on invalid input, unexpected results, or any other failure — do not suppress, compensate for, or guess around problems. Throw with useful debugging information instead.**
+
+## Adapting the Plan
+
+Plans are written before implementation begins and reflect the design at that point. No plan survives contact with reality unchanged. When implementation reveals that a plan's assumptions are wrong, or that a different approach is clearly better, update the plan (or this document) to match reality rather than forcing the code to match an obsolete plan.
+
+High-quality code and a well-factored end state are more important than rigid adherence to a plan written before the code existed.
 
 ---
 

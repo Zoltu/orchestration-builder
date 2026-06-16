@@ -132,3 +132,22 @@ workspace/
 | Hard safety budgets | yes | values only |
 
 The executor provides the stage. The Guild is the script being performed. The Foundry is the playwright rewriting the script.
+
+---
+
+## Benchmark isolation and environments (unsolved)
+
+The orchestrator is meant to exercise real software engineering work: reading code, running tests, installing dependencies, iterating until the build is green. Each benchmark in the suite therefore needs its own runtime environment, and runs of different benchmarks — and different Guild branches within one optimization cycle — must not be able to see or interfere with each other.
+
+**Deployment context.** The Foundry itself runs inside Docker, as does the final product (see `docs/security.md`). Inside that container, benchmark validation commands will need to spin up additional isolation boundaries per run. Options considered:
+
+- **Docker-in-Docker.** Run the executor in a child container that itself runs `docker run` per benchmark. Hard to set up correctly; exposing the parent Docker socket to children breaks the parent's sandbox guarantees.
+- **Docker Sandbox.** A newer Docker product that provides hardened per-command isolation. Appears to do what we want, but is heavy and ships a lot of machinery we don't need. A possible side quest to investigate whether we can use the underlying primitives without the full feature set.
+- **Per-run filesystem + toolchain isolation without containers.** Set `HOME` to a scratch directory inside the workspace, strip `PATH` to only the workspace `bin/` and a vetted interpreter directory, and require every dependency to be either vendored or installed via a workspace-scoped package manager (Bun's per-project `node_modules`, or a venv pinned to the benchmark). Prevents global pollution but does not contain a model that decides to e.g. `curl | sh` something from the network.
+- **LLM-as-judge only.** For benchmarks where the only signal we want is qualitative, skip the shell command entirely and have the Foundry's large model grade the final workspace. Cheapest possible path; loses deterministic reproducibility for those benchmarks.
+
+**Current position.** Docker-in-Docker is unsolved for us; Docker Sandbox is a possible side quest but not on the critical path. Until we solve per-benchmark isolation properly, the benchmark suite is constrained to tasks that do not require an additional runtime — anything Bun can validate directly with no installs. This keeps `hello_001` and the early phases viable but does not reflect the long-term shape of the work.
+
+**Long-term expectation.** Almost all real benchmarks will need an environment: test suites, build tools, language servers, sometimes a database. We are not aiming for one-shot solutions; we want a harness that can do multi-step engineering. That means returning to this problem in a later phase with a concrete proposal — likely Docker Sandbox (trimmed down) or an alternative we have not yet identified — and benchmarking the isolation mechanism itself as part of the suite.
+
+This section exists so we do not forget the problem. It is intentionally short and explicitly marked unsolved.

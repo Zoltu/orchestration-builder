@@ -26,7 +26,7 @@ Establish the project skeleton, shared contracts, runtime validation, persistenc
    - Error kinds: `invalid_tool_call`, `unknown_tool`, `invalid_arguments`, `timeout`, `llm_unavailable`, `context_budget_exceeded`, `tool_budget_exceeded`, `token_budget_exceeded`, etc.
    - `ResultCard` shape for `finish` tool output.
 
-4. `src/executor/persistence.ts` — leaf factory `createPersistence(runId)` returning:
+4. `source/executor/persistence.ts` — leaf factory `createPersistence(runId, baseDir?)` returning:
    - `createRunDirectory()`
    - `copyWorkspace(sourcePath: string)`
    - `appendLog(event: LogEvent)`
@@ -41,8 +41,8 @@ Establish the project skeleton, shared contracts, runtime validation, persistenc
 
 ## Module boundaries
 
-- `src/shared/*` are pure helpers and may be imported anywhere.
-- `src/executor/persistence.ts` is a leaf factory: it touches the filesystem only through Bun APIs, and all configuration is closed over at construction time.
+- `source/shared/*` are pure helpers and may be imported anywhere.
+- `source/executor/persistence.ts` is a leaf factory: it touches the filesystem using Bun's runtime APIs (including Node's built-in `fs`/`path` modules, which Bun fully supports), and all configuration is closed over at construction time.
 - No orchestration is written yet. This phase is purely contracts and I/O wrappers.
 
 ## Acceptance criteria
@@ -55,3 +55,14 @@ Establish the project skeleton, shared contracts, runtime validation, persistenc
 ## Estimated effort
 
 Small — mostly scaffolding and validation logic.
+
+## Phase 1 closeout additions
+
+The following were added during phase 1 closeout to prepare a solid foundation for phase 2 without enlarging phase 2's scope:
+
+- `source/executor/loader.ts` — leaf factory `createGuildLoader()` that reads and validates a Guild folder (`guild.json` + prompt Markdown files + tool-manifest JSON files). Not in the original deliverables list; built here so phase 2's executor does not have to.
+- `source/executor/tool-dispatch.ts` — pure orchestration `createToolDispatch(handlers)` that parses tool-call arguments and invokes handlers. Not in the original deliverables list; built here so phase 2's engine can compose against it without waiting for phase 3.
+- `source/shared/validation.test.ts` and `source/executor/tool-dispatch.test.ts` — in-memory unit tests covering the pure helpers and the dispatch mechanism.
+- `AGENTS.md` extended with an "In-memory tests only" subsection and a "Tool Dispatch" / "Guild Loader" top-level sections.
+- `PLAN.md` extended with a "Phase 1 closeout" section so future sessions have context for these additions.
+- `README.md` quickstart section; `package.json` `test` script scoped to `source/`; `.gitignore` covers `data/`.

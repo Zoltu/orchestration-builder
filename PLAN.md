@@ -2,6 +2,8 @@
 
 This document is the high-level roadmap for building the Adaptive Orchestrator. Each phase has a dedicated plan file under `plan/` that details goals, deliverables, module boundaries, and acceptance criteria.
 
+> **Note:** This plan is a living document. As we implement, we adapt. When reality diverges from the plan, we update the plan to match the well-factored code, not the other way around. See `AGENTS.md` ("Adapting the Plan") for the guiding principle.
+
 ## Project goals
 
 1. Build a minimal executor that runs a small language model against a JSON-driven Guild configuration.
@@ -40,6 +42,19 @@ See `AGENTS.md` for the full rules on type safety, error handling, testing, and 
 ## Implementation order
 
 Phases 1–5 are the **initial executor + seed guild** milestone. Phase 6 constitutes the first realistic training/optimization target. Phases 7 and 8 are future work and depend on a stable executor and benchmark suite.
+
+## Phase 1 closeout
+
+Phase 1's plan (`plan/01-foundation-PLAN.md`) called for shared contracts, validation, persistence primitives, and a smoke benchmark. The following were added during phase 1 closeout to give phase 2 a solid foundation without making phase 2 itself bigger:
+
+- **Guild loader** (`source/executor/loader.ts`): leaf factory that reads `guild.json`, prompt files, and tool manifests from a Guild folder and validates them.
+- **Tool dispatch interface** (`source/executor/tool-dispatch.ts`): pure orchestration factory that dispatches tool calls to a handler map; phase 2's engine composes handlers for built-in and native tools.
+- **Validation tests** (`source/shared/validation.test.ts`): in-memory Bun tests for the type guards and `validate*` functions.
+- **Tool-dispatch tests** (`source/executor/tool-dispatch.test.ts`): in-memory Bun tests for the dispatch mechanism.
+- **Testing policy** (`AGENTS.md`): tests must run in-memory only; no network or real LLM endpoints.
+- **`package.json` `test` script** scopes `bun test` to `source/` so the smoke benchmark (which expects an agent-produced `output.txt`) is not run as a unit test. A separate `bench:smoke` script runs it manually.
+- **`.gitignore`** covers `data/` (runtime artifacts under `data/runs/`).
+- **Root `README.md`** quickstart section.
 
 ## Technology choices
 

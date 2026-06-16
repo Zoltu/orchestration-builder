@@ -4,6 +4,25 @@ This repository will contain an orchestrator that lets a small, consumer-grade l
 
 For a thorough description of the project, start with the design documents in the `docs/` folder.
 
+## Getting started
+
+```bash
+bun install        # install dev dependencies (frozen lockfile)
+bun run typecheck  # bun --bun tsc --noEmit
+bun test           # unit tests under source/**/*.test.ts (in-memory, no network)
+```
+
+To exercise the smoke benchmark manually against a hand-created output:
+
+```bash
+cd benchmarks/hello_001
+printf 'hello world\n' > output.txt
+bun test tests/
+rm output.txt
+```
+
+The smoke benchmark is a Foundry validation harness, not a unit test; it is intentionally excluded from `bun test`.
+
 ## Design documents
 
 1. [`docs/overview.md`](docs/overview.md) — purpose, goals, and use cases

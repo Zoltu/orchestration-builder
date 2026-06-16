@@ -1,0 +1,11 @@
+{
+	"taskType": "smoke",
+	"description": "Write 'hello world' to output.txt.",
+	"validation": {
+		"command": "bun test tests/",
+		"expectedExitCode": 0,
+		"expectedFiles": ["output.txt"],
+		"expectedStdoutContains": "2 pass",
+		"timeoutSeconds": 60
+	}
+}
