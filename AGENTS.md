@@ -252,7 +252,7 @@ Tool dispatch is the mechanism by which the executor invokes tools in response t
 
 Guild loading is a leaf factory defined in `source/executor/loader.ts`.
 
-- `createGuildLoader()` returns a `GuildLoader` whose `load(guildDir)` reads `guild.json`, resolves every role's `systemPrompt` Markdown file, and validates every referenced tool-manifest JSON file. The return value is a `LoadedGuild` containing the validated `GuildConfig`, the resolved prompt text per role, and the parsed tool manifests keyed by name.
+- `createGuildLoader()` returns a `LoadGuild` function whose `loadGuild(guildDir)` reads `guild.json`, resolves every role's `systemPrompt` Markdown file, and validates every referenced tool-manifest JSON file. The return value is a `LoadedGuild` containing the validated `GuildConfig`, the resolved prompt text per role, and the parsed tool manifests keyed by name.
 - The loader uses the shared `validateGuildConfig` and `validateToolManifest` functions and surfaces validation errors as `ValidationError` (see `source/shared/errors.ts`).
 - The loader is a leaf and is not unit-tested; it is exercised through integration in phase 2/5.
 

@@ -1,6 +1,6 @@
 # Phase 2 — Executor Runtime
 
-## Goal
+## Goal:
 
 Build the core executor loop: load a Guild, invoke the entry role, call the configured LLM endpoint, enforce budgets, and persist the run. By the end of this phase the executor can run a minimal role that only uses the `finish` tool.
 
@@ -63,3 +63,49 @@ No default `dependencies` arguments. `main.ts` will eventually supply real leaf 
 ## Estimated effort
 
 Medium — this is the core of the executor and requires careful error surfacing.
+
+## Phase 2 closeout
+
+The following changed during implementation for AGENTS.md compliance, clarity, or a wider refactor. Future sessions re-reading the plan should treat the wording above as aspirational and the file inventory below as authoritative.
+
+### Deviations from the plan wording
+
+1. `runRole(deps, context)` (vs. plan's `(deps, context, roleName, task)`) — `roleName` and `task` were folded into the `context` object so `depth`, `startMs`, and `loadedGuild` could travel with them. Behaviorally identical.
+2. `createLlmCaller(model)` returns `{ call }` (vs. plan's "returning a function") — matches the codebase's leaf-factory shape (`createToolDispatch`, `createPersistence`, etc. all return objects).
+3. `checkRoleBudgets(state, config, roleConfig?)` (vs. plan's `(state)`) — the plan called `budgets.ts` an "orchestration helper"; we classified it as a pure helper per AGENTS.md, which requires the config to be passed explicitly.
+4. `createPersistence` was split into 4 factories: `createRunDirectory`, `createCopyWorkspace`, `createAppendLog`, `createWriteMeta`. Each closes over `runId`/`baseDir` independently. See `plan/01-foundation-PLAN.md` "Persistence and loader factory shape". The Phase 2 `executor.ts` was refactored to consume these four functions directly.
+5. `createGuildLoader()` returns a `LoadGuild` function (vs. a `GuildLoader` object) — same factory-shape refactor.
+6. `ExecutorDependencies` lists each field explicitly rather than `extends EngineDependencies` — AGENTS.md "list each dependency explicitly". The executor destructures the engine deps inline at the `runRole` call site.
+
+### Post-LLM token budget check
+
+The engine calls `checkRoleBudgets` twice per iteration: once before the LLM call (catches accumulated overruns across iterations), once after updating `promptTokens`/`completionTokens` from the LLM response (catches within-iteration overruns where the LLM call plus a `finish` tool call together exceed the budget). The `role_budget_exceeded` log event includes a `phase` field to distinguish.
+
+### Token accumulation
+
+`roleState.promptTokens` and `roleState.completionTokens` both accumulate across iterations via `+=`. OpenAI's `prompt_tokens` is per-request, so multi-turn runs legitimately consume more total tokens than the latest prompt size. The budget check sums the accumulated totals. A regression test (`engine.test.ts` "token budget accumulates across iterations") exercises two-iteration accumulation against `maxTokensPerRole`.
+
+### Engine decomposition
+
+`engine.ts` splits the role loop into two private helpers (not exported, not separately tested — covered via existing engine tests):
+
+- `handleLlmResult(llmResult, roleState, deps, roleDefinition, context, config)` — returns `{ kind: 'continue' } | { kind: 'finished'; card } | { kind: 'tool_calls'; toolCalls }`. Encapsulates the LLM-result kind switching, token update, post-LLM budget check, assistant-message push, and implicit-finish detection.
+- `dispatchAndRecord(deps, roleState, roleName, allowedTools, dispatch, toolCall)` — returns `ResultCard | null`. Encapsulates one tool call's validation, dispatch, history append, recent-tool-call tracking, and finish detection.
+
+`runRole` itself becomes ~100 lines: setup, while loop with three short blocks (budgets, build+LLM, dispatch loop).
+
+### Loader error wrapping
+
+`source/executor/loader.ts` wraps missing-prompt and missing-tool-manifest file reads in `ValidationError` with path-based messages (`roles.<name>.systemPrompt`, `tools[<path>]`). This matches the error format produced by `validateGuildConfig`.
+
+### `runExecutor` does not write a "final workspace" snapshot
+
+The plan's deliverable 6 says "write `meta.json` and final workspace". Phase 2 has no native tool that mutates the workspace, so the initial `copyWorkspace` is the final state. When Phase 3 adds file-write tools, add a `createSnapshotWorkspace(runId)` factory and call it before `writeMeta`.
+
+### Phase 3 readiness
+
+These Phase 2 items Phase 3 must address:
+- Honor the `budget` parameter passed to the `agent` tool handler (currently ignored).
+- Track `recentCompactionPromptTokens` when `edit_context` is implemented.
+- Loader should validate that role `tools` reference declared tool manifests (current code silently skips missing manifests in the LLM request).
+- Add a workspace-snapshot factory once tools mutate the workspace.

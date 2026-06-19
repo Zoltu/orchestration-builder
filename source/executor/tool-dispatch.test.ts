@@ -1,7 +1,6 @@
 import { describe, expect, test } from 'bun:test'
-
-import { createToolDispatch } from './tool-dispatch.ts'
 import type { ToolCall } from '../shared/types.js'
+import { createToolDispatch } from './tool-dispatch.ts'
 
 function makeCall(name: string, args: string): ToolCall {
 	return { id: '1', type: 'function', function: { name, arguments: args } }

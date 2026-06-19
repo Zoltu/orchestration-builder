@@ -16,9 +16,9 @@ Implement all native and built-in tools. By the end of this phase the executor s
    - Built-ins: `agent`, `finish`, `context_info`, `edit_context`, `ask_human`.
    - Native: `list_directory`, `glob_files`, `read_file`, `read_file_partial`, `search_text`, `fetch_url`.
 
-3. `src/executor/loader.ts` — leaf factory `createGuildLoader()` returning `loadGuild(path)`:
+3. `src/executor/loader.ts` — leaf factory `createGuildLoader()` returning a `LoadGuild` function:
    - Read `guild.json`.
-   - Validate with `isGuildConfig`.
+   - Validate with `validateGuildConfig`.
    - Resolve and validate all referenced prompt files and tool manifest files.
    - Return a fully loaded `LoadedGuild` object.
 

@@ -16,7 +16,7 @@ Wire the executor to a CLI, run the seed Guild against `benchmarks/hello_001`, a
 2. `src/executor/index.ts` — public executor API exporting only what external callers need:
    - `runExecutor`
    - `createLlmCaller`
-   - `createPersistence`
+   - `createRunDirectory`, `createCopyWorkspace`, `createAppendLog`, `createWriteMeta`
    - `createHumanBackend`
    - `createGuildLoader`
    - Relevant types.
