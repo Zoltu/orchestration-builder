@@ -41,7 +41,7 @@ The target user is a **non-developer**. The Guild must ask few, clear clarifying
 | 02 | CLI entry point + executor public API | pending | [`02-cli-entry-point.md`](02-cli-entry-point.md) |
 | 03 | In-memory end-to-end integration test | pending | [`03-in-memory-e2e-test.md`](03-in-memory-e2e-test.md) |
 | 04 | `run_shell` tool | pending | [`04-run-shell-tool.md`](04-run-shell-tool.md) |
-| 05 | Benchmark suite harness + authoring guide | pending | [`05-benchmark-harness.md`](05-benchmark-harness.md) |
+| 05 | Benchmark suite harness + authoring guide | ✅ complete | [`05-benchmark-harness.md`](05-benchmark-harness.md) |
 | 06 | Quick-fix benchmarks | pending | [`06-quick-fix-benchmarks.md`](06-quick-fix-benchmarks.md) |
 | 07 | Medium benchmarks | pending | [`07-medium-benchmarks.md`](07-medium-benchmarks.md) |
 | 08 | Large benchmark | pending | [`08-large-benchmark.md`](08-large-benchmark.md) |

@@ -52,3 +52,24 @@ Medium — the validation pure-logic and the suite orchestration are the bulk.
 ## Operator handoff
 
 None for code. Running the suite against a real LLM is operator work and is the subject of steps 06–08's handoffs.
+
+## Closeout (step 05 complete)
+
+Implemented in `source/benchmarks/`:
+
+- `validation.ts` — pure: `EvalConfig`, `ValidationSpec`, `BenchmarkRunOutput`, `ValidationResult` types; `parseEvalConfig` (type-guard validation, throws path-based `ValidationError`); `evaluateValidation` (pure pass/fail decision with reasons). Covers every documented `eval.json` field, including `humanResponses`.
+- `validation.test.ts` — 23 in-memory tests covering accepted/rejected configs and every evaluateValidation branch (pass, missing file, wrong exit code, missing stdout, timeout, default exit code 0, array stdout substrings, no-expectation pass, null exit code).
+- `run-validation.ts` — leaf factory `createRunValidation(defaultTimeoutSeconds)` spawning the validation command under a timeout via `Bun.spawn`, reporting `BenchmarkRunOutput`. Workspace existence is a guard clause; stream reads wrap genuine I/O errors only. Not unit-tested.
+- `run-suite.ts` — orchestration `runSuite(deps, options)` receiving five leaf dependencies explicitly (`listBenchmarkDirectories`, `readEvalConfig`, `runBenchmark`, `runValidation`, `writeSummary`) with no defaults. Writes `summary.json` with per-benchmark `pass`/`fail`/`error` status plus aggregate totals. Reads no `Bun.env`/`process.argv`.
+- `run-suite.test.ts` — 7 in-memory tests with fakes asserting aggregation, fail/error handling, validation skip on error runs, token/walltime passthrough, task/humanResponses forwarding, task override + run-id prefix, and the empty-suite case.
+- `benchmarks/README.md` — authoring guide, `eval.json` schema summary (references `docs/benchmarks.md`), the three-tier validation model, and running instructions.
+
+Health: `bun run typecheck` clean; `bun test source/` → 200 pass / 0 fail (32 new), full suite ~530ms.
+
+Deviations from the plan wording (authoritative):
+
+1. **run-suite invokes an injected `runBenchmark` leaf, not `runExecutor` directly.** The plan said run-suite "invokes the executor (via `runExecutor` with assembled dependencies…)." Per `AGENTS.md` ("main is the only place that assembles real dependencies"), orchestration must not assemble executor dependencies, so the real executor-runner leaf is assembled by the CLI entry point (step 02) / the benchmark steps (06–08) and injected here. This keeps run-suite fully testable with a fake runner (the plan's stated intent) and matches the three-tier pattern. The operator handoff (real-LLM runs) is unchanged.
+2. **run-suite takes three additional injected leaves** (`listBenchmarkDirectories`, `readEvalConfig`, `writeSummary`) so it touches no filesystem directly, matching `AGENTS.md`'s rule that orchestration receives leaf functions via `dependencies`. The plan named only "an executor runner and a validation runner"; the extra leaves are the honest three-tier application.
+3. **No real `runBenchmark` producer is shipped in this step**, consistent with the operator handoff deferring real-LLM runs to steps 06–08 and the CLI entry point to step 02. The harness, pure validation, and the validation leaf are complete and verified in-memory; `benchmarks/README.md` documents that end-to-end suite execution is wired by step 02 / 06–08.
+
+Forward note for the step that wires the real runner (step 02 / 06–08): the real `runBenchmark` leaf must source `tokens` for the summary. The executor does not currently aggregate token counts into `RunMeta` or the `llm_call` log event, so that step will need to surface token totals (e.g. accumulate usage in `RunMeta` or sum from the log). The harness itself only passes tokens through, so this is not step-05 debt; it is an executor-surfacing task for the real-runner step.
