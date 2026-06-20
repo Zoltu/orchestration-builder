@@ -1,5 +1,33 @@
 # AI Agent Guidelines
 
+## Project-Wide Principles
+
+These principles apply to every change, in every plan step. They are the high-level rules; the sections below give the detailed mechanics.
+
+### No dependencies
+
+The project must not introduce any runtime or dev dependencies beyond what is already in `package.json` (Bun's built-ins, `@types/bun`, `typescript`). The executor and all tooling rely solely on Bun built-ins and web-standard APIs. This keeps the codebase easy to audit, the deployment image tiny, and the supply chain minimal.
+
+If a dependency is deemed absolutely necessary, do not add it unilaterally. First evaluate alternatives (reimplementing with built-ins, restructuring the code, splitting the work differently). If no reasonable alternative exists, ask the operator before adding anything, and explain the alternatives you considered.
+
+### Code quality over speed
+
+Code quality is of the utmost importance. Take the time to do things well rather than rushing a product out. Prefer clear naming, small focused functions, and obvious control flow over clever or compact code. A reviewer should be able to understand any change without further explanation. When in doubt, choose the more readable and more auditable option.
+
+### In-memory, fast tests
+
+Tests must run purely in-memory, must not hit the network or real LLM endpoints, and must not depend on external services. Filesystem-touching tests may use a temporary directory under `os.tmpdir()` and must clean up after themselves. Every test should run in milliseconds so the full suite is never a burden to run frequently. See "Testing Policy" below for the full rules.
+
+### Testable business logic
+
+Business logic must be easy to test under the above constraints. Structure code so that parsing, validation, formatting, transformation, and decision-making live in pure functions or testable orchestration functions that receive their dependencies explicitly (see "Architecture" below). Keep integration glue thin so that most logic is exercisable in-memory. If a piece of logic is hard to test, that is a signal to refactor it into the testable surface area.
+
+### Maintainable and auditable
+
+The codebase must be easy to maintain and audit. Prefer explicit, readable data flow over implicit globals and magic. Avoid cleverness that obscures intent. Every external input is validated (see "External Data Validation"). Behavior should be discoverable from reading the code and the Guild data, not from tribal knowledge. A reader should be able to follow what a run does from `main` down to the leaf calls without guessing.
+
+---
+
 ## Type Safety Rules
 
 ### No Typecasts
@@ -323,6 +351,8 @@ Newlines carry semantic meaning. They separate statements, definitions, and logi
 6. **Fail fast on invalid input, unexpected results, or any other failure — do not suppress, compensate for, or guess around problems. Throw with useful debugging information instead.**
 
 ## Adapting the Plan
+
+The detailed, bite-sized development plan lives in [`plan/README.md`](plan/README.md), with one step per session-sized chunk of work. That document defines the step process: leaving the repository in a clean state at the end of every step, paying technical debt before a step closes (or tracking it explicitly against a follow-up step), and inserting/renumbering steps when discoveries demand it.
 
 Plans are written before implementation begins and reflect the design at that point. No plan survives contact with reality unchanged. When implementation reveals that a plan's assumptions are wrong, or that a different approach is clearly better, update the plan (or this document) to match reality rather than forcing the code to match an obsolete plan.
 
