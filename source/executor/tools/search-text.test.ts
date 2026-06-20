@@ -6,6 +6,14 @@ import { createSearchText } from './search-text.ts'
 
 let workspaceRoot: string
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function matchField(match: unknown, field: string): unknown {
+	return isRecord(match) ? match[field] : undefined
+}
+
 beforeEach(() => {
 	workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'orchestrator-search-'))
 	fs.writeFileSync(path.join(workspaceRoot, 'a.txt'), 'first line\nsecond line with foo\nthird line')
@@ -24,13 +32,13 @@ describe('createSearchText', () => {
 		const result = await handler({ pattern: 'foo' })
 		expect(result.kind).toBe('success')
 		if (result.kind === 'success' && Array.isArray(result.data)) {
-			const matches = result.data as Array<{ path: string; line: number; text: string }>
+			const matches = result.data
 			expect(matches.length).toBe(3)
-			const paths = matches.map((m) => m.path).sort()
+			const paths = matches.map((m) => matchField(m, 'path')).sort()
 			expect(paths).toEqual(['a.txt', 'b.txt', path.join('sub', 'c.txt')])
 			for (const m of matches) {
-				expect(m.text).toContain('foo')
-				expect(m.line).toBeGreaterThan(0)
+				expect(matchField(m, 'text')).toContain('foo')
+				expect(matchField(m, 'line')).toBeGreaterThan(0)
 			}
 		}
 	})
@@ -49,9 +57,9 @@ describe('createSearchText', () => {
 		const result = await handler({ pattern: 'foo', paths: ['a.txt'] })
 		expect(result.kind).toBe('success')
 		if (result.kind === 'success' && Array.isArray(result.data)) {
-			const matches = result.data as Array<{ path: string }>
+			const matches = result.data
 			expect(matches.length).toBe(1)
-			expect(matches[0]?.path).toBe('a.txt')
+			expect(matchField(matches[0], 'path')).toBe('a.txt')
 		}
 	})
 

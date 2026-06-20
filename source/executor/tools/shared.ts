@@ -8,43 +8,25 @@ export interface ResolvedPath {
 	relative: string
 }
 
-export function resolveWithinWorkspace(targetPath: string, workspaceRoot: string): ResolvedPath {
-	const resolvedRoot = path.resolve(workspaceRoot)
-	const candidate = path.isAbsolute(targetPath)
-		? path.resolve(targetPath)
-		: path.resolve(resolvedRoot, targetPath)
-	const relative = path.relative(resolvedRoot, candidate)
-	if (relative.startsWith('..') || path.isAbsolute(relative)) {
-		throw createToolError('invalid_arguments', `Path escapes the workspace: ${targetPath}`)
-	}
-	return { absolute: candidate, relative }
-}
+export type PathResolution = { ok: true; path: ResolvedPath } | { ok: false; error: ToolResult }
 
-export function assertWithinWorkspace(targetPath: string, workspaceRoot: string): ResolvedPath {
+export function resolveWithinWorkspace(targetPath: string, workspaceRoot: string): PathResolution {
 	const resolvedRoot = path.resolve(workspaceRoot)
 	const candidate = path.isAbsolute(targetPath)
 		? path.resolve(targetPath)
 		: path.resolve(resolvedRoot, targetPath)
-	let realCandidate: string
-	try {
+	let realCandidate = candidate
+	if (fs.existsSync(candidate)) {
 		realCandidate = fs.realpathSync(candidate)
-	} catch {
-		realCandidate = candidate
 	}
 	const relative = path.relative(resolvedRoot, realCandidate)
 	if (relative.startsWith('..') || path.isAbsolute(relative)) {
-		throw createToolError('invalid_arguments', `Path escapes the workspace: ${targetPath}`)
+		return { ok: false, error: createToolError('invalid_arguments', `Path escapes the workspace: ${targetPath}`) }
 	}
-	return { absolute: realCandidate, relative }
+	return { ok: true, path: { absolute: realCandidate, relative } }
 }
 
-export function wrapToolError(error: unknown, fallbackMessage: string): ToolResult {
-	if (error && typeof error === 'object' && 'kind' in error) {
-		const maybe = error as { kind: string; message?: string; details?: unknown }
-		if (maybe.kind !== 'success' && typeof maybe.kind === 'string') {
-			return { kind: maybe.kind as ToolResult['kind'], message: maybe.message ?? fallbackMessage, details: maybe.details }
-		}
-	}
+export function wrapIoError(error: unknown, fallbackMessage: string): ToolResult {
 	const message = error instanceof Error ? error.message : fallbackMessage
 	return createToolError('invalid_arguments', message)
 }

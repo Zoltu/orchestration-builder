@@ -13,6 +13,9 @@ export interface LoadedGuild {
 export type LoadGuild = (guildDir: string) => LoadedGuild
 
 function readRequiredFile(filePath: string, errorPath: string): string {
+	if (!fs.existsSync(filePath)) {
+		throw new ValidationError(errorPath, `file not found: ${filePath}`)
+	}
 	try {
 		return fs.readFileSync(filePath, 'utf8')
 	} catch (error) {

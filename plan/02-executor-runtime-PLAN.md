@@ -6,36 +6,36 @@ Build the core executor loop: load a Guild, invoke the entry role, call the conf
 
 ## Deliverables
 
-1. `src/executor/llm.ts` — leaf factory `createLlmCaller(config: ModelConfig)` returning a function that:
+1. `source/executor/llm.ts` — leaf factory `createLlmCaller(config: ModelConfig)` returning a function that:
    - POSTs to `/v1/chat/completions`.
    - Sends `messages` and `tools` in OpenAI-compatible format.
    - Handles retries with exponential backoff for transient HTTP errors.
    - Parses `content`, `reasoning` (from `config.reasoningField`), `tool_calls`, and `usage`.
    - Returns `ContextBudgetExceeded` when the endpoint rejects the prompt for exceeding the context window.
 
-2. `src/executor/budgets.ts` — orchestration helper `checkRoleBudgets(state)` and `checkGlobalBudgets(state)`:
+2. `source/executor/budgets.ts` — orchestration helper `checkRoleBudgets(state)` and `checkGlobalBudgets(state)`:
    - Track depth, per-role tool-call count, per-role token count, run wall-clock time.
    - Detect repeated tool calls with identical arguments beyond `maxRepeatedToolCalls`.
    - Detect repeated context compaction with no token reduction.
    - Return structured error results, never throw.
 
-3. `src/executor/context-builder.ts` — pure helper that builds the message list for a role:
+3. `source/executor/context-builder.ts` — pure helper that builds the message list for a role:
    - System prompt as first message.
    - Initial user task.
    - Prior assistant/tool messages for this role.
    - Child result cards as tool results.
 
-4. `src/executor/context-policy.ts` — pure helpers:
+4. `source/executor/context-policy.ts` — pure helpers:
    - `truncateToolOutput(text, maxChars)` — truncate tool results to `contextPolicy.maxToolOutputChars`.
    - `stripReasoning(messages, range)` — strip reasoning blocks from a range of messages.
 
-5. `src/executor/engine.ts` — orchestration function `runRole(dependencies, context, roleName, task)`:
+5. `source/executor/engine.ts` — orchestration function `runRole(dependencies, context, roleName, task)`:
    - The role execution loop described in `docs/executor.md`.
    - Calls LLM, dispatches tool calls, recurses via `agent`.
    - Handles implicit `finish` when a response has no tool calls.
    - Returns a `ResultCard`.
 
-6. `src/executor/executor.ts` — orchestration function `runExecutor(dependencies, options)`:
+6. `source/executor/executor.ts` — orchestration function `runExecutor(dependencies, options)`:
    - Create run directory, copy workspace, load and validate Guild.
    - Invoke entry role.
    - Write `meta.json` and final workspace.
@@ -102,10 +102,10 @@ The engine calls `checkRoleBudgets` twice per iteration: once before the LLM cal
 
 The plan's deliverable 6 says "write `meta.json` and final workspace". Phase 2 has no native tool that mutates the workspace, so the initial `copyWorkspace` is the final state. When Phase 3 adds file-write tools, add a `createSnapshotWorkspace(runId)` factory and call it before `writeMeta`.
 
-### Phase 3 readiness
+### Phase 3 readiness (resolved during Phase 3)
 
-These Phase 2 items Phase 3 must address:
-- Honor the `budget` parameter passed to the `agent` tool handler (currently ignored).
-- Track `recentCompactionPromptTokens` when `edit_context` is implemented.
-- Loader should validate that role `tools` reference declared tool manifests (current code silently skips missing manifests in the LLM request).
-- Add a workspace-snapshot factory once tools mutate the workspace.
+These Phase 2 items Phase 3 was expected to address. All are now done:
+- Honor the `budget` parameter passed to the `agent` tool handler — done; `builtin-tools.ts` threads `budget` into `spawnAgent`, exercised by `builtin-tools.test.ts` ("agent tool budget override").
+- Track `recentCompactionPromptTokens` when `edit_context` is implemented — done; `edit_context` pushes the post-edit estimated tokens.
+- Loader should validate that role `tools` reference declared tool manifests — done; `loader.ts` throws a `ValidationError` for any role tool not declared in the Guild's `tools` list.
+- Add a workspace-snapshot factory once tools mutate the workspace — done; `createSnapshotWorkspace` exists in `persistence.ts` and `executor.ts` calls it before `writeMeta`.

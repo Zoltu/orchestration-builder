@@ -1,8 +1,7 @@
 import * as fs from 'node:fs'
 import * as path from 'node:path'
-import { createToolError } from '../../shared/errors.js'
 import type { ToolHandler } from '../tool-dispatch.js'
-import { assertWithinWorkspace, wrapToolError } from './shared.js'
+import { resolveWithinWorkspace, wrapIoError } from './shared.js'
 
 export interface ListDirectoryEntry {
 	name: string
@@ -14,29 +13,23 @@ export function createListDirectory(workspaceRoot: string): ToolHandler {
 	return (args) => {
 		const targetRaw = args['path']
 		const target = typeof targetRaw === 'string' && targetRaw !== '' ? targetRaw : '.'
-		let resolved
-		try {
-			resolved = assertWithinWorkspace(target, resolvedRoot)
-		} catch (error) {
-			return wrapToolError(error, 'Invalid path')
-		}
+		const resolution = resolveWithinWorkspace(target, resolvedRoot)
+		if (!resolution.ok) return resolution.error
 		let entries: string[]
 		try {
-			entries = fs.readdirSync(resolved.absolute)
+			entries = fs.readdirSync(resolution.path.absolute)
 		} catch (error) {
-			const message = error instanceof Error ? error.message : 'cannot read directory'
-			return createToolError('invalid_arguments', `Cannot list directory: ${message}`)
+			return wrapIoError(error, `Cannot list directory: ${target}`)
 		}
 		const result: ListDirectoryEntry[] = []
 		for (const entry of entries) {
-			const entryPath = path.join(resolved.absolute, entry)
-			let stat: fs.Stats
+			const entryPath = path.join(resolution.path.absolute, entry)
 			try {
-				stat = fs.statSync(entryPath)
+				const stat = fs.statSync(entryPath)
+				result.push({ name: entry, type: stat.isDirectory() ? 'directory' : 'file' })
 			} catch {
 				continue
 			}
-			result.push({ name: entry, type: stat.isDirectory() ? 'directory' : 'file' })
 		}
 		result.sort((a, b) => {
 			if (a.type !== b.type) return a.type === 'directory' ? -1 : 1

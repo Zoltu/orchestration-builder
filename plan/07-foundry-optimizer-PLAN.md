@@ -6,45 +6,45 @@ Build the offline optimization loop that improves the Guild by proposing hypothe
 
 ## Deliverables
 
-1. `src/foundry/index.ts` — public Foundry API.
+1. `source/foundry/index.ts` — public Foundry API.
 
-2. `src/foundry/git.ts` — branch management:
+2. `source/foundry/git.ts` — branch management:
    - Copy baseline Guild into `data/foundry/branches/<branch_id>/`.
    - Apply hypothesis changes (file edits) to create a branch.
    - Archive promoted baselines into `data/foundry/history/<timestamp>/`.
 
-3. `src/foundry/hypothesize.ts` — hypothesis generation:
+3. `source/foundry/hypothesize.ts` — hypothesis generation:
    - Prompt a large model with recent run logs and the baseline Guild.
    - Parse hypotheses with motivation, mechanism, predicted impact, and file changes.
    - Validate each hypothesis produces a loadable Guild.
 
-4. `src/foundry/evaluate.ts` — branch evaluation:
+4. `source/foundry/evaluate.ts` — branch evaluation:
    - For each branch, run every benchmark through the executor.
    - Respect `maxConcurrentExecutorRuns`.
    - Record per-benchmark results under `data/foundry/branches/<branch_id>/results/<benchmark>.json`.
 
-5. `src/foundry/validate.ts` — result validation:
+5. `source/foundry/validate.ts` — result validation:
    - Run each benchmark’s `eval.json` validation command in the final workspace.
    - Check expected files and stdout contents.
    - Return `pass`, `fail`, or `error`.
 
-6. `src/foundry/score.ts` — scoring:
+6. `source/foundry/score.ts` — scoring:
    - Compute pass rate, error rate, average tokens, context pressure, ask frequency.
    - Apply `humanQuestionPenalty` if `ask_human` was used.
    - Repeat each benchmark N times to account for stochasticity.
 
-7. `src/foundry/merge.ts` — merge conflicting branches:
+7. `source/foundry/merge.ts` — merge conflicting branches:
    - Detect branches that edit the same files as accepted branches.
    - Prompt the large model with diffs and results to produce a merged version.
    - Re-evaluate the merged candidate against the full suite.
 
-8. `src/foundry/report.ts` — human-readable reports:
+8. `source/foundry/report.ts` — human-readable reports:
    - Write `data/foundry/reports/<timestamp>/summary.json`.
    - Write `data/foundry/reports/<timestamp>/index.html`.
    - Include diffs, scores, accepted/rejected/merged status.
 
-9. `src/foundry/main.ts` — CLI entry point:
-   - `bun src/main.ts foundry optimize --suite benchmarks/ --cycles 5`.
+9. `source/foundry/main.ts` — CLI entry point:
+   - `bun source/main.ts foundry optimize --suite benchmarks/ --cycles 5`.
    - Honor cost, cycle, and plateau budgets.
 
 ## Module boundaries

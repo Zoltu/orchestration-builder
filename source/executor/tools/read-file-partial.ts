@@ -2,7 +2,7 @@ import * as fs from 'node:fs'
 import * as path from 'node:path'
 import { createToolError } from '../../shared/errors.js'
 import type { ToolHandler } from '../tool-dispatch.js'
-import { assertWithinWorkspace, wrapToolError } from './shared.js'
+import { resolveWithinWorkspace, wrapIoError } from './shared.js'
 
 function splitLines(text: string): string[] {
 	const lines: string[] = []
@@ -33,18 +33,13 @@ export function createReadFilePartial(workspaceRoot: string): ToolHandler {
 		if (typeof limitValue !== 'number' || !Number.isFinite(limitValue) || limitValue <= 0) {
 			return createToolError('invalid_arguments', 'limit must be a positive number')
 		}
-		let resolved
-		try {
-			resolved = assertWithinWorkspace(pathValue, resolvedRoot)
-		} catch (error) {
-			return wrapToolError(error, 'Invalid path')
-		}
+		const resolution = resolveWithinWorkspace(pathValue, resolvedRoot)
+		if (!resolution.ok) return resolution.error
 		let content: string
 		try {
-			content = fs.readFileSync(resolved.absolute, 'utf8')
+			content = fs.readFileSync(resolution.path.absolute, 'utf8')
 		} catch (error) {
-			const message = error instanceof Error ? error.message : 'cannot read file'
-			return createToolError('invalid_arguments', `Cannot read file: ${message}`)
+			return wrapIoError(error, `Cannot read file: ${pathValue}`)
 		}
 		const lines = splitLines(content)
 		const startLine = Math.min(Math.floor(offsetValue), lines.length)
@@ -53,7 +48,7 @@ export function createReadFilePartial(workspaceRoot: string): ToolHandler {
 		return {
 			kind: 'success',
 			data: {
-				path: resolved.relative,
+				path: resolution.path.relative,
 				offset: startLine,
 				limit: endLine - startLine,
 				totalLines: lines.length,

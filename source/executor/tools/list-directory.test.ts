@@ -6,6 +6,18 @@ import { createListDirectory } from './list-directory.ts'
 
 let workspaceRoot: string
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function entryName(entry: unknown): string | undefined {
+	return isRecord(entry) && typeof entry['name'] === 'string' ? entry['name'] : undefined
+}
+
+function entryType(entry: unknown): string | undefined {
+	return isRecord(entry) && typeof entry['type'] === 'string' ? entry['type'] : undefined
+}
+
 beforeEach(() => {
 	workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'orchestrator-list-dir-'))
 	fs.writeFileSync(path.join(workspaceRoot, 'alpha.txt'), 'a')
@@ -24,7 +36,7 @@ describe('createListDirectory', () => {
 		const result = await handler({})
 		expect(result.kind).toBe('success')
 		if (result.kind === 'success' && Array.isArray(result.data)) {
-			const names = (result.data as Array<{ name: string; type: string }>).map((e) => `${e.type}:${e.name}`)
+			const names = result.data.map((e) => `${entryType(e)}:${entryName(e)}`)
 			expect(names).toEqual(['directory:sub', 'file:alpha.txt', 'file:beta.txt'])
 		}
 	})
@@ -34,7 +46,7 @@ describe('createListDirectory', () => {
 		const result = await handler({ path: 'sub' })
 		expect(result.kind).toBe('success')
 		if (result.kind === 'success' && Array.isArray(result.data)) {
-			expect((result.data as Array<{ name: string; type: string }>).map((e) => e.name)).toEqual(['gamma.txt'])
+			expect(result.data.map((e) => entryName(e))).toEqual(['gamma.txt'])
 		}
 	})
 

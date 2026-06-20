@@ -6,14 +6,14 @@ Wire the executor to a CLI, run the seed Guild against `benchmarks/hello_001`, a
 
 ## Deliverables
 
-1. `src/main.ts` — CLI entry point:
+1. `source/main.ts` — CLI entry point:
    - Parse CLI args: `--guild <path>`, `--workspace <path>`, `--task <text>`, optional `--run-id <id>`.
    - Read environment variables for API key (if needed).
    - Assemble real dependencies: loader, LLM caller, persistence, human backend, tools.
    - Call `runExecutor(dependencies, options)`.
    - Exit with appropriate code.
 
-2. `src/executor/index.ts` — public executor API exporting only what external callers need:
+2. `source/executor/index.ts` — public executor API exporting only what external callers need:
    - `runExecutor`
    - `createLlmCaller`
    - `createRunDirectory`, `createCopyWorkspace`, `createAppendLog`, `createWriteMeta`
@@ -32,7 +32,7 @@ Wire the executor to a CLI, run the seed Guild against `benchmarks/hello_001`, a
    - Asserts `meta.json` status is `"success"`.
 
 5. `README.md` updates:
-   - How to run `bun src/main.ts --guild guild --workspace benchmarks/hello_001 --task ...`
+   - How to run `bun source/main.ts --guild guild --workspace benchmarks/hello_001 --task ...`
    - How to run tests: `bun test`.
 
 ## Module boundaries
@@ -43,7 +43,7 @@ Wire the executor to a CLI, run the seed Guild against `benchmarks/hello_001`, a
 
 ## Acceptance criteria
 
-- [ ] `bun src/main.ts --guild guild --workspace benchmarks/hello_001 --task "Write a file greeting the user"` completes successfully.
+- [ ] `bun source/main.ts --guild guild --workspace benchmarks/hello_001 --task "Write a file greeting the user"` completes successfully.
    - Creates `data/runs/<run_id>/`.
    - Writes `meta.json` with `status: "success"`.
    - Writes `log.jsonl` with at least one LLM call and relevant tool calls.

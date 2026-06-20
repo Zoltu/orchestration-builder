@@ -4,6 +4,10 @@ import * as os from 'node:os'
 import * as path from 'node:path'
 import { createGlobFiles } from './glob-files.ts'
 
+function asStringArray(value: unknown): string[] {
+	return Array.isArray(value) ? value.filter((v): v is string => typeof v === 'string') : []
+}
+
 let workspaceRoot: string
 
 beforeEach(() => {
@@ -25,7 +29,7 @@ describe('createGlobFiles', () => {
 		const result = await handler({ pattern: '*.ts' })
 		expect(result.kind).toBe('success')
 		if (result.kind === 'success' && Array.isArray(result.data)) {
-			const sorted = (result.data as string[]).slice().sort()
+			const sorted = asStringArray(result.data).slice().sort()
 			expect(sorted).toEqual(['a.ts', 'b.ts'])
 		}
 	})
@@ -35,7 +39,7 @@ describe('createGlobFiles', () => {
 		const result = await handler({ pattern: '**/*.ts' })
 		expect(result.kind).toBe('success')
 		if (result.kind === 'success' && Array.isArray(result.data)) {
-			const sorted = (result.data as string[]).slice().sort()
+			const sorted = asStringArray(result.data).slice().sort()
 			expect(sorted).toEqual(['sub/c.ts'])
 		}
 	})
@@ -45,7 +49,7 @@ describe('createGlobFiles', () => {
 		const result = await handler({ pattern: '**' })
 		expect(result.kind).toBe('success')
 		if (result.kind === 'success' && Array.isArray(result.data)) {
-			const sorted = (result.data as string[]).slice().sort()
+			const sorted = asStringArray(result.data).slice().sort()
 			expect(sorted).toEqual(['a.ts', 'b.ts', 'sub/c.ts', 'sub/d.md'])
 		}
 	})

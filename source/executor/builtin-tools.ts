@@ -235,9 +235,17 @@ function createEditContext(context: BuiltInToolContext): ToolHandler {
 			}
 			const opValue = raw['op']
 			if (opValue === 'drop') {
-				operations.push({ op: 'drop', range: raw['range'] as [number, number] })
+				const range = validateRange(raw['range'])
+				if (range === null) {
+					return createToolError('invalid_arguments', 'drop.range must be [start, end] with non-negative integers')
+				}
+				operations.push({ op: 'drop', range })
 			} else if (opValue === 'strip_reasoning') {
-				operations.push({ op: 'strip_reasoning', range: raw['range'] as [number, number] })
+				const range = validateRange(raw['range'])
+				if (range === null) {
+					return createToolError('invalid_arguments', 'strip_reasoning.range must be [start, end] with non-negative integers')
+				}
+				operations.push({ op: 'strip_reasoning', range })
 			} else if (opValue === 'replace') {
 				const indexValue = raw['index']
 				const contentValue = raw['content']

@@ -48,31 +48,45 @@ interface FakePersistenceFns {
 }
 
 function makeFakePersistence(): FakePersistenceFns {
-	const state = {
-		events: [] as LogEvent[],
-		meta: null as RunMeta | null,
-		createRunDirectoryCalls: 0,
-		copyWorkspaceCalls: [] as string[],
-		snapshotWorkspaceCalls: 0,
-	}
+	const events: LogEvent[] = []
+	let meta: RunMeta | null = null
+	let createRunDirectoryCalls = 0
+	const copyWorkspaceCalls: string[] = []
+	let snapshotWorkspaceCalls = 0
 	return {
 		appendLog: (event) => {
-			state.events.push(event)
+			events.push(event)
 		},
 		createRunDirectory: () => {
-			state.createRunDirectoryCalls++
+			createRunDirectoryCalls++
 			return '/tmp/run'
 		},
 		copyWorkspace: (sourcePath) => {
-			state.copyWorkspaceCalls.push(sourcePath)
+			copyWorkspaceCalls.push(sourcePath)
 		},
 		snapshotWorkspace: () => {
-			state.snapshotWorkspaceCalls++
+			snapshotWorkspaceCalls++
 		},
-		writeMeta: (meta) => {
-			state.meta = meta
+		writeMeta: (written) => {
+			meta = written
 		},
-		state,
+		state: {
+			get events() {
+				return events
+			},
+			get meta() {
+				return meta
+			},
+			get createRunDirectoryCalls() {
+				return createRunDirectoryCalls
+			},
+			get copyWorkspaceCalls() {
+				return copyWorkspaceCalls
+			},
+			get snapshotWorkspaceCalls() {
+				return snapshotWorkspaceCalls
+			},
+		},
 	}
 }
 

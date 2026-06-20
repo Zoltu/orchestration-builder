@@ -7,6 +7,21 @@ import type { LoadedGuild } from './loader.ts'
 import type { AppendLog } from './persistence.ts'
 import { recordingHumanBackend, withTool } from './test-fixtures.ts'
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function parseToolContent(content: string | undefined): Record<string, unknown> {
+	const parsed: unknown = JSON.parse(content ?? '{}')
+	if (!isRecord(parsed)) throw new Error('tool result content is not a JSON object')
+	return parsed
+}
+
+function payloadField(event: LogEvent, field: string): unknown {
+	const payload = event.payload
+	return isRecord(payload) ? payload[field] : undefined
+}
+
 function success(toolCalls: ToolCall[], opts: { content?: string; promptTokens?: number } = {}): LlmCallResult {
 	return {
 		kind: 'success',
@@ -202,22 +217,25 @@ describe('context_info tool', () => {
 		const toolResultMessages = llm.calls[1]?.messages.filter((m) => m.role === 'tool') ?? []
 		expect(toolResultMessages.length).toBe(1)
 		const serialized = toolResultMessages[0]?.content ?? ''
-		const parsed = JSON.parse(serialized) as {
-			contextWindow: number
-			currentPromptTokens: number
-			lastReportedPromptTokens: number
-			budgetRemaining: number
-			messages: Array<{ index: number; role: string }>
+		const parsed = parseToolContent(serialized)
+		expect(parsed['contextWindow']).toBe(32000)
+		expect(typeof parsed['currentPromptTokens']).toBe('number')
+		expect(parsed['lastReportedPromptTokens']).toBe(500)
+		expect(parsed['budgetRemaining']).toBeGreaterThan(0)
+		const messages = parsed['messages']
+		expect(Array.isArray(messages) && messages.length > 0).toBe(true)
+		if (Array.isArray(messages)) {
+			const first = messages[0]
+			const second = messages[1]
+			expect(isRecord(first)).toBe(true)
+			expect(isRecord(second)).toBe(true)
+			if (isRecord(first) && isRecord(second)) {
+				expect(first['role']).toBe('system')
+				expect(first['index']).toBe(0)
+				expect(second['role']).toBe('user')
+				expect(second['index']).toBe(1)
+			}
 		}
-		expect(parsed.contextWindow).toBe(32000)
-		expect(typeof parsed.currentPromptTokens).toBe('number')
-		expect(parsed.lastReportedPromptTokens).toBe(500)
-		expect(parsed.budgetRemaining).toBeGreaterThan(0)
-		expect(parsed.messages.length).toBeGreaterThan(0)
-		expect(parsed.messages[0]?.role).toBe('system')
-		expect(parsed.messages[0]?.index).toBe(0)
-		expect(parsed.messages[1]?.role).toBe('user')
-		expect(parsed.messages[1]?.index).toBe(1)
 	})
 })
 
@@ -244,8 +262,8 @@ describe('edit_context tool', () => {
 
 		expect(result.status).toBe('success')
 		const toolResultMessages = llm.calls[1]?.messages.filter((m) => m.role === 'tool') ?? []
-		const parsed = JSON.parse(toolResultMessages[0]?.content ?? '{}') as { messageCount: number }
-		expect(parsed.messageCount).toBe(2)
+		const parsed = parseToolContent(toolResultMessages[0]?.content)
+		expect(parsed['messageCount']).toBe(2)
 	})
 
 	test('replace operation updates content at the given index', async () => {
@@ -320,8 +338,8 @@ describe('edit_context tool', () => {
 		expect(result.status).toBe('success')
 		const toolResultMessages = llm.calls[1]?.messages.filter((m) => m.role === 'tool') ?? []
 		expect(toolResultMessages.length).toBe(1)
-		const parsed = JSON.parse(toolResultMessages[0]?.content ?? '{}') as { kind: string }
-		expect(parsed.kind).toBe('invalid_arguments')
+		const parsed = parseToolContent(toolResultMessages[0]?.content)
+		expect(parsed['kind']).toBe('invalid_arguments')
 	})
 
 	test('rejects a drop.range that is not an array', async () => {
@@ -345,8 +363,8 @@ describe('edit_context tool', () => {
 		})
 
 		const toolResultMessages = llm.calls[1]?.messages.filter((m) => m.role === 'tool') ?? []
-		const parsed = JSON.parse(toolResultMessages[0]?.content ?? '{}') as { kind: string }
-		expect(parsed.kind).toBe('invalid_arguments')
+		const parsed = parseToolContent(toolResultMessages[0]?.content)
+		expect(parsed['kind']).toBe('invalid_arguments')
 	})
 
 	test('tracks recentCompactionPromptTokens after each edit', async () => {
@@ -370,12 +388,10 @@ describe('edit_context tool', () => {
 		})
 
 		const toolResultMessages = llm.calls[1]?.messages.filter((m) => m.role === 'tool') ?? []
-		const parsed = JSON.parse(toolResultMessages[0]?.content ?? '{}') as {
-			recentCompactionPromptTokens: number[]
-			messageCount: number
-		}
-		expect(parsed.recentCompactionPromptTokens.length).toBe(1)
-		expect(parsed.messageCount).toBeLessThanOrEqual(2)
+		const parsed = parseToolContent(toolResultMessages[0]?.content)
+		const tokens = parsed['recentCompactionPromptTokens']
+		expect(Array.isArray(tokens) && tokens.length === 1).toBe(true)
+		expect(parsed['messageCount']).toBeLessThanOrEqual(2)
 	})
 })
 
@@ -404,8 +420,8 @@ describe('ask_human tool', () => {
 		expect(result.status).toBe('success')
 		expect(human.questions).toEqual([{ question: 'What language?', context: undefined }])
 		const toolResultMessages = llm.calls[1]?.messages.filter((m) => m.role === 'tool') ?? []
-		const parsed = JSON.parse(toolResultMessages[0]?.content ?? '{}') as { answer: string }
-		expect(parsed.answer).toBe('use your best judgement')
+		const parsed = parseToolContent(toolResultMessages[0]?.content)
+		expect(parsed['answer']).toBe('use your best judgement')
 	})
 
 	test('passes context to the human backend when provided', async () => {
@@ -453,8 +469,8 @@ describe('ask_human tool', () => {
 		})
 
 		const toolResultMessages = llm.calls[1]?.messages.filter((m) => m.role === 'tool') ?? []
-		const parsed = JSON.parse(toolResultMessages[0]?.content ?? '{}') as { kind: string }
-		expect(parsed.kind).toBe('invalid_arguments')
+		const parsed = parseToolContent(toolResultMessages[0]?.content)
+		expect(parsed['kind']).toBe('invalid_arguments')
 	})
 })
 
@@ -534,12 +550,10 @@ describe('agent tool budget override', () => {
 		expect(llm.calls.length).toBe(4)
 		const roleBudgetEvents = events.filter((e) => e.type === 'role_budget_exceeded')
 		expect(roleBudgetEvents.length).toBeGreaterThanOrEqual(1)
-		const childBudgetEvent = roleBudgetEvents.find((e) => {
-			const payload = e.payload as { role?: string }
-			return payload.role === 'child'
-		})
+		const childBudgetEvent = roleBudgetEvents.find((e) => payloadField(e, 'role') === 'child')
 		expect(childBudgetEvent).toBeDefined()
-		const budgetErrorPayload = childBudgetEvent?.payload as { error?: { kind?: string } }
-		expect(budgetErrorPayload.error?.kind).toBe('tool_budget_exceeded')
+		const errorField = childBudgetEvent !== undefined ? payloadField(childBudgetEvent, 'error') : undefined
+		const errorKind = isRecord(errorField) ? errorField['kind'] : undefined
+		expect(errorKind).toBe('tool_budget_exceeded')
 	})
 })

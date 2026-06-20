@@ -2,7 +2,7 @@ import * as fs from 'node:fs'
 import * as path from 'node:path'
 import { createToolError } from '../../shared/errors.js'
 import type { ToolHandler } from '../tool-dispatch.js'
-import { assertWithinWorkspace, wrapToolError } from './shared.js'
+import { resolveWithinWorkspace, wrapIoError } from './shared.js'
 
 export interface SearchMatch {
 	path: string
@@ -53,22 +53,18 @@ export function createSearchText(workspaceRoot: string): ToolHandler {
 			}
 			targets = []
 			for (const p of pathsValue) {
-				let resolved
-				try {
-					resolved = assertWithinWorkspace(p, resolvedRoot)
-				} catch (error) {
-					return wrapToolError(error, 'Invalid path')
-				}
+				const resolution = resolveWithinWorkspace(p, resolvedRoot)
+				if (!resolution.ok) return resolution.error
 				let stat: fs.Stats
 				try {
-					stat = fs.statSync(resolved.absolute)
+					stat = fs.statSync(resolution.path.absolute)
 				} catch {
 					continue
 				}
 				if (stat.isDirectory()) {
-					collectFiles(resolved.absolute, resolved.absolute, targets)
+					collectFiles(resolution.path.absolute, resolution.path.absolute, targets)
 				} else if (stat.isFile()) {
-					targets.push(resolved.absolute)
+					targets.push(resolution.path.absolute)
 				}
 			}
 		} else {
@@ -76,8 +72,7 @@ export function createSearchText(workspaceRoot: string): ToolHandler {
 			try {
 				collectFiles(resolvedRoot, resolvedRoot, targets)
 			} catch (error) {
-				const message = error instanceof Error ? error.message : 'cannot walk workspace'
-				return createToolError('invalid_arguments', `Cannot search: ${message}`)
+				return wrapIoError(error, 'Cannot search workspace')
 			}
 		}
 		const matches: SearchMatch[] = []

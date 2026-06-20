@@ -4,6 +4,7 @@ import { isResultCard } from '../shared/validation.js'
 import { checkGlobalBudgets, checkRoleBudgets, type GlobalBudgetState, type RoleBudgetState } from './budgets.js'
 import { createBuiltInToolHandlers } from './builtin-tools.js'
 import { buildMessages } from './context-builder.js'
+import { truncateToolOutput } from './context-policy.js'
 import type { HumanBackend } from './human-backend.js'
 import type { LlmCaller, LlmCallResult } from './llm.js'
 import type { LoadedGuild } from './loader.js'
@@ -57,11 +58,14 @@ function hashArgs(args: string): string {
 	return hash.toString(36)
 }
 
-function serializeToolResult(result: ToolResult): string {
+function serializeToolResult(result: ToolResult, maxChars: number): string {
+	let text: string
 	if (result.kind === 'success') {
-		return JSON.stringify(result.data ?? null)
+		text = JSON.stringify(result.data ?? null)
+	} else {
+		text = JSON.stringify({ kind: result.kind, message: result.message, details: result.details })
 	}
-	return JSON.stringify({ kind: result.kind, message: result.message, details: result.details })
+	return truncateToolOutput(text, maxChars).text
 }
 
 function logEvent(appendLog: AppendLog, type: string, payload: unknown): void {
@@ -194,7 +198,7 @@ async function dispatchAndRecord({ deps, roleState, roleName, dispatchCtx, toolC
 
 	roleState.history.push({
 		role: 'tool',
-		content: serializeToolResult(result),
+		content: serializeToolResult(result, dispatchCtx.maxToolOutputChars),
 		tool_call_id: toolCall.id,
 	})
 

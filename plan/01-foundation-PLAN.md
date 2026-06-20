@@ -6,14 +6,14 @@ Establish the project skeleton, shared contracts, runtime validation, persistenc
 
 ## Deliverables
 
-1. `src/shared/types.ts` — TypeScript interfaces for:
+1. `source/shared/types.ts` — TypeScript interfaces for:
    - `GuildConfig`, `ModelConfig`, `ExecutorConfig`, `ContextPolicy`
    - `RoleDefinition`
    - `ToolManifest`, `ToolParameter`
    - `Message`, `AssistantResponse`, `ToolCall`, `ToolResult`
    - `RunOptions`, `RunMeta`, `ResultCard`
 
-2. `src/shared/validation.ts` — runtime type guards for every external JSON object:
+2. `source/shared/validation.ts` — runtime type guards for every external JSON object:
    - `isGuildConfig(value: unknown): value is GuildConfig`
    - `isToolManifest(value: unknown): value is ToolManifest`
    - `isMessage(value: unknown): value is Message`
@@ -21,7 +21,7 @@ Establish the project skeleton, shared contracts, runtime validation, persistenc
    - `isResultCard(value: unknown): value is ResultCard`
    - Each guard must validate type, required fields, and field types.
 
-3. `src/shared/errors.ts` — shared error/result shapes:
+3. `source/shared/errors.ts` — shared error/result shapes:
    - `ToolResult` union: success vs error with `kind`
    - Error kinds: `invalid_tool_call`, `unknown_tool`, `invalid_arguments`, `timeout`, `llm_unavailable`, `context_budget_exceeded`, `tool_budget_exceeded`, `token_budget_exceeded`, etc.
    - `ResultCard` shape for `finish` tool output.

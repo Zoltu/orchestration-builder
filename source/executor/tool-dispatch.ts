@@ -1,5 +1,4 @@
 import { createToolError } from '../shared/errors.js'
-import { truncateToolOutput } from './context-policy.js'
 import type { ToolCall, ToolResult } from '../shared/types.js'
 
 export type ToolHandler = (args: Record<string, unknown>) => ToolResult | Promise<ToolResult>
@@ -11,7 +10,6 @@ export interface ToolDispatch {
 export interface DispatchToolCallConfig {
 	allowedTools: string[]
 	manifestNames: string[]
-	maxToolOutputChars: number
 	dispatch: ToolDispatch
 }
 
@@ -52,14 +50,5 @@ export async function dispatchToolCall(config: DispatchToolCallConfig, call: Too
 	if (!config.allowedTools.includes(call.function.name)) {
 		return createToolError('invalid_tool_call', `Tool ${call.function.name} not allowed for this role`)
 	}
-	const result = await config.dispatch.dispatch(call)
-	if (result.kind === 'success') {
-		const serialized = JSON.stringify(result.data ?? null)
-		const truncated = truncateToolOutput(serialized, config.maxToolOutputChars)
-		if (truncated.truncated) {
-			return { kind: 'success', data: truncated.text }
-		}
-		return result
-	}
-	return result
+	return await config.dispatch.dispatch(call)
 }

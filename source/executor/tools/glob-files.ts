@@ -2,7 +2,6 @@ import * as fs from 'node:fs'
 import * as path from 'node:path'
 import { createToolError } from '../../shared/errors.js'
 import type { ToolHandler } from '../tool-dispatch.js'
-import { wrapToolError } from './shared.js'
 
 function globToRegex(pattern: string): RegExp {
 	let regex = ''
@@ -97,7 +96,8 @@ export function createGlobFiles(workspaceRoot: string): ToolHandler {
 			matched.sort()
 			return { kind: 'success', data: matched }
 		} catch (error) {
-			return wrapToolError(error, 'Invalid pattern')
+			const message = error instanceof Error ? error.message : 'Invalid pattern'
+			return createToolError('invalid_arguments', `Invalid pattern: ${message}`)
 		}
 	}
 }

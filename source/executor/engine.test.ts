@@ -159,6 +159,17 @@ function makeDeps(llm: FakeLlm): { deps: EngineDependencies; events: LogEvent[] 
 	return { deps, events }
 }
 
+const echoHandler: ToolHandler = (args) => ({ kind: 'success', data: args })
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function payloadField(event: LogEvent, field: string): unknown {
+	const payload = event.payload
+	return isRecord(payload) ? payload[field] : undefined
+}
+
 describe('runRole — acceptance criteria', () => {
 	test('finish-only role returns a ResultCard after one LLM call', async () => {
 		const guild = buildGuild(
@@ -211,8 +222,8 @@ describe('runRole — acceptance criteria', () => {
 
 		expect(result).toEqual({ status: 'success', summary: 'parent done' })
 		expect(llm.calls.length).toBe(3)
-		expect(events.some((e) => e.type === 'role_finished' && (e.payload as { role: string }).role === 'child')).toBe(true)
-		expect(events.some((e) => e.type === 'role_finished' && (e.payload as { role: string }).role === 'parent')).toBe(true)
+		expect(events.some((e) => e.type === 'role_finished' && payloadField(e, 'role') === 'child')).toBe(true)
+		expect(events.some((e) => e.type === 'role_finished' && payloadField(e, 'role') === 'parent')).toBe(true)
 	})
 
 	test('context_budget_exceeded surfaces a synthetic tool result and continues', async () => {
@@ -351,7 +362,7 @@ describe('runRole — acceptance criteria', () => {
 			llmCaller: llm,
 			appendLog,
 			additionalToolHandlers: {
-				echo: ((args: Record<string, unknown>) => ({ kind: 'success', data: args })) as ToolHandler,
+				echo: echoHandler,
 			},
 			humanBackend: stubHumanBackend,
 		}
@@ -403,7 +414,7 @@ describe('runRole — acceptance criteria', () => {
 			llmCaller: llm,
 			appendLog,
 			additionalToolHandlers: {
-				echo: ((args: Record<string, unknown>) => ({ kind: 'success', data: args })) as ToolHandler,
+				echo: echoHandler,
 			},
 			humanBackend: stubHumanBackend,
 		}
@@ -456,10 +467,10 @@ describe('runRole — acceptance criteria', () => {
 		expect(llm.calls.length).toBe(4)
 		const depthEvent = events.find((e) => e.type === 'depth_exceeded')
 		expect(depthEvent).toBeDefined()
-		if (depthEvent) {
-			const payload = depthEvent.payload as { depth: number }
-			expect(payload.depth).toBeGreaterThan(tight.maxAgentDepth)
-		}
+	if (depthEvent) {
+		const depth = payloadField(depthEvent, 'depth')
+		expect(typeof depth === 'number' && depth > tight.maxAgentDepth).toBe(true)
+	}
 	})
 
 	test('LLM unavailable returns ResultCard with llm_unavailable error', async () => {
@@ -649,7 +660,7 @@ describe('runRole — acceptance criteria', () => {
 		const depsWithEcho: EngineDependencies = {
 			...deps,
 			additionalToolHandlers: {
-				echo: ((args: Record<string, unknown>) => ({ kind: 'success', data: args })) as ToolHandler,
+				echo: echoHandler,
 			},
 		}
 
@@ -725,7 +736,7 @@ describe('runRole — acceptance criteria', () => {
 		const depsWithEcho: EngineDependencies = {
 			...deps,
 			additionalToolHandlers: {
-				echo: ((args: Record<string, unknown>) => ({ kind: 'success', data: args })) as ToolHandler,
+				echo: echoHandler,
 			},
 		}
 
@@ -742,5 +753,51 @@ describe('runRole — acceptance criteria', () => {
 		const secondCallMessages = llm.calls[1]?.messages ?? []
 		const assistantInSecond = secondCallMessages.find((m) => m.role === 'assistant')
 		expect(assistantInSecond?.reasoning).toBe('I considered this carefully')
+	})
+
+	test('tool output exceeding maxToolOutputChars is truncated without double-encoding', async () => {
+		const guild = withTool(
+			buildGuild(
+				{ main: { systemPrompt: 'p', tools: ['big', 'finish'] } },
+				'main',
+				{ contextPolicy: { maxToolOutputChars: 20 } },
+			),
+			{
+				name: 'big',
+				description: 'returns a large payload',
+				parameters: { type: 'object', properties: {} },
+			},
+		)
+		const bigCall: ToolCall = {
+			id: 'b1',
+			type: 'function',
+			function: { name: 'big', arguments: '{}' },
+		}
+		const bigHandler: ToolHandler = () => ({ kind: 'success', data: { text: 'x'.repeat(200) } })
+		const llm = new FakeLlm()
+		llm.responses = [
+			success([bigCall]),
+			success([finishCall({ status: 'success', summary: 'done' })]),
+		]
+		const { deps } = makeDeps(llm)
+		const depsWithBig: EngineDependencies = {
+			...deps,
+			additionalToolHandlers: { big: bigHandler },
+		}
+
+		await runRole(depsWithBig, {
+			loadedGuild: guild,
+			depth: 0,
+			startMs: Date.now(),
+			roleName: 'main',
+			task: 'do it',
+		})
+
+		const secondCallMessages = llm.calls[1]?.messages ?? []
+		const toolMessage = secondCallMessages.find((m) => m.role === 'tool')
+		const content = toolMessage?.content ?? ''
+		expect(content.includes('[truncated:')).toBe(true)
+		expect(content.startsWith('{')).toBe(true)
+		expect(content.startsWith('"')).toBe(false)
 	})
 })

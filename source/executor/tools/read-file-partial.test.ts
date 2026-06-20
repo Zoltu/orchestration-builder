@@ -6,6 +6,14 @@ import { createReadFilePartial } from './read-file-partial.ts'
 
 let workspaceRoot: string
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function field(record: unknown, key: string): unknown {
+	return isRecord(record) ? record[key] : undefined
+}
+
 beforeEach(() => {
 	workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'orchestrator-read-partial-'))
 	const content = ['line one', 'line two', 'line three', 'line four', 'line five'].join('\n') + '\n'
@@ -22,11 +30,10 @@ describe('createReadFilePartial', () => {
 		const result = await handler({ path: 'lines.txt', offset: 1, limit: 2 })
 		expect(result.kind).toBe('success')
 		if (result.kind === 'success' && typeof result.data === 'object' && result.data !== null) {
-			const data = result.data as { content: string; offset: number; limit: number; totalLines: number }
-			expect(data.content).toBe('line two\nline three')
-			expect(data.offset).toBe(1)
-			expect(data.limit).toBe(2)
-			expect(data.totalLines).toBeGreaterThanOrEqual(5)
+			expect(field(result.data, 'content')).toBe('line two\nline three')
+			expect(field(result.data, 'offset')).toBe(1)
+			expect(field(result.data, 'limit')).toBe(2)
+			expect(field(result.data, 'totalLines')).toBeGreaterThanOrEqual(5)
 		}
 	})
 
@@ -35,8 +42,10 @@ describe('createReadFilePartial', () => {
 		const result = await handler({ path: 'lines.txt', offset: 0, limit: 999 })
 		expect(result.kind).toBe('success')
 		if (result.kind === 'success' && typeof result.data === 'object' && result.data !== null) {
-			const data = result.data as { content: string; limit: number }
-			expect(data.limit).toBeLessThanOrEqual(data.content.split('\n').length)
+			const limit = field(result.data, 'limit')
+			const content = field(result.data, 'content')
+			const lineCount = typeof content === 'string' ? content.split('\n').length : 0
+			expect(typeof limit === 'number' && limit <= lineCount).toBe(true)
 		}
 	})
 
