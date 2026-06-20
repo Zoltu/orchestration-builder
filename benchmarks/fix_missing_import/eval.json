@@ -1,0 +1,10 @@
+{
+	"taskType": "quick_fix",
+	"description": "The re-export in src/index.js points at a misspelled filename. Fix the import path so the tests in tests/calculator.test.js pass.",
+	"validation": {
+		"command": "bun test tests/",
+		"expectedExitCode": 0,
+		"expectedStdoutContains": "1 pass",
+		"timeoutSeconds": 60
+	}
+}

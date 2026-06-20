@@ -1,0 +1,10 @@
+{
+	"taskType": "quick_fix",
+	"description": "The file README.md has a spelling typo. The word 'Ths' at the start of the last line should be 'The'. Edit README.md so that the sentence reads 'The service prints a friendly greeting to the console.'",
+	"validation": {
+		"command": "grep -q 'The service prints a friendly greeting to the console.' README.md && ! grep -q 'Ths service' README.md",
+		"expectedExitCode": 0,
+		"expectedFiles": ["README.md"],
+		"timeoutSeconds": 30
+	}
+}

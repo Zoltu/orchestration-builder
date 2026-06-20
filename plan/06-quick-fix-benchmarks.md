@@ -43,3 +43,26 @@ Medium — authoring good benchmarks and prompt iteration take time.
 ## Operator handoff
 
 Run the suite against a real OpenAI-compatible endpoint: `bun source/benchmarks/run-suite.ts --suite benchmarks --guild guild --output data/suite-runs/<timestamp>/summary.json` (exact flags per the harness CLI built in step 05). Report back which benchmarks passed/failed and any prompt edits needed; the agent should then iterate prompts in-environment and re-hand off until at least three quick-fix benchmarks pass.
+
+> **Blocking dependency (read before running):** the real-LLM run cannot pass any of these benchmarks until step `01-write-file-tool` lands. The seed Guild's `coder` role has no file-write tool, so today it can only *report* intended file contents in its `finish` summary; the workspace is never actually modified, so every validation that inspects the final workspace fails. Steps `01`–`04` are still pending. Re-run this handoff once `write_file` (and ideally `run_shell`, step 04) are complete and the CLI entry point (step 02) wires the real `runBenchmark` leaf into `runSuite`. No prompt iteration was performed in this step because it cannot be verified in-environment without a real LLM and a working write capability; defer prompt edits to that handoff.
+
+## Closeout (step 06 — in-environment deliverables complete)
+
+Authored four quick-fix benchmarks under `benchmarks/`, each self-contained, fast, and free of external installs:
+
+- `fix_missing_import` — `src/index.js` re-exports from a misspelled filename; fix the import so `bun test tests/` reports `1 pass`.
+- `add_input_validation` — `src/math.js` `divide()` returns `Infinity` for zero; add a guard so it throws, `2 pass`.
+- `update_readme_typo` — one spelling typo (`Ths` → `The`) in `README.md`; validated by a `grep` file-content check (portable, no test runner).
+- `add_small_test` — create `tests/string-utils.test.js` covering three cases for the untested `capitalize`; `3 pass`.
+
+Each benchmark has a non-developer-friendly `README.md`, a valid `eval.json` (`taskType: "quick_fix"`, `description`, and a `validation` block with `command` / `expectedExitCode` / `expectedStdoutContains` or `expectedFiles` / `timeoutSeconds`), and the initial workspace files. Every benchmark's initial state was verified to fail its validation and its fixed state was verified to pass (in `/tmp` scratch runs, cleaned up).
+
+Added `source/benchmarks/suite.test.ts` — a data-validity guard that discovers every benchmark directory under `benchmarks/`, parses each `eval.json` with `parseEvalConfig`, asserts it is valid, and asserts each benchmark's `README.md` (the task description copied into the run workspace) exists and is non-empty. This mirrors the repo-fixture-reading style of `source/executor/seed-guild.test.ts` and `source/executor/tool-manifests.test.ts`; it runs under `bun test source/` and touches no network.
+
+Deviations from the plan wording (authoritative):
+
+1. **Benchmark workspace files are JavaScript (`.js`), not TypeScript.** The repo `tsconfig.json` includes `benchmarks/**/*.ts`, so deliberately-broken fixtures (a misspelled import in `fix_missing_import`, a missing guard in `add_input_validation`) authored as `.ts` would break `bun run typecheck` at the repo level. Authoring the fixtures as `.js` keeps them out of `tsc --noEmit` (they are not in the `include` glob and `allowJs` is off) while remaining fully runnable by `bun test tests/` and editable by the agent. The only `.ts` file under `benchmarks/` remains the pre-existing `hello_001/tests/test_output.test.ts`, which typechecks cleanly.
+2. **`update_readme_typo` carries the precise instruction in `eval.json.description`, not in `README.md`.** Putting the exact corrected sentence in `README.md` would reproduce the typo'd phrase (`Ths service`) inside the instruction text and false-trigger the `! grep -q 'Ths service' README.md` half of the validation. The `README.md` instead gives plain-language context ("one spelling mistake that needs fixing") plus the typo'd line; the precise fix travels in the task text (`eval.json.description`), which is the default user message to the entry role. No `eval.json` validation expectation is leaked into any `README.md`.
+3. **No prompt edits were made and the operator-verified "≥3 pass" criterion is deferred.** Per the blocking-dependency note above, real-LLM runs are blocked on step `01` (`write_file`). Prompt iteration is therefore unverifiable in-environment and is left to the operator handoff once `write_file` lands. This is a sequencing dependency on a pending step, not code debt, so it is not tracked in the plan's debt table.
+
+Health: `bun run typecheck` clean; `bun test source/` → 211 pass / 0 fail (11 new from `suite.test.ts`: 1 suite-count test plus 2 per benchmark across 5 benchmarks), full suite ~515ms.

@@ -42,7 +42,7 @@ The target user is a **non-developer**. The Guild must ask few, clear clarifying
 | 03 | In-memory end-to-end integration test | pending | [`03-in-memory-e2e-test.md`](03-in-memory-e2e-test.md) |
 | 04 | `run_shell` tool | pending | [`04-run-shell-tool.md`](04-run-shell-tool.md) |
 | 05 | Benchmark suite harness + authoring guide | ✅ complete | [`05-benchmark-harness.md`](05-benchmark-harness.md) |
-| 06 | Quick-fix benchmarks | pending | [`06-quick-fix-benchmarks.md`](06-quick-fix-benchmarks.md) |
+| 06 | Quick-fix benchmarks | ✅ complete (in-env; real-run handoff blocked on step 01) | [`06-quick-fix-benchmarks.md`](06-quick-fix-benchmarks.md) |
 | 07 | Medium benchmarks | pending | [`07-medium-benchmarks.md`](07-medium-benchmarks.md) |
 | 08 | Large benchmark | pending | [`08-large-benchmark.md`](08-large-benchmark.md) |
 | 09 | Foundry foundation: types, config, branch management | pending | [`09-foundry-foundation.md`](09-foundry-foundation.md) |

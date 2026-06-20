@@ -1,0 +1,11 @@
+{
+	"taskType": "quick_fix",
+	"description": "The capitalize function in src/string-utils.js has no tests. Create tests/string-utils.test.js that imports capitalize from ../src/string-utils.js and tests three cases: capitalize('hello') === 'Hello', capitalize('HELLO') === 'Hello', and capitalize('') === ''.",
+	"validation": {
+		"command": "bun test tests/",
+		"expectedExitCode": 0,
+		"expectedStdoutContains": "3 pass",
+		"expectedFiles": ["tests/string-utils.test.js"],
+		"timeoutSeconds": 60
+	}
+}

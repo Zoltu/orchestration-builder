@@ -1,0 +1,10 @@
+{
+	"taskType": "quick_fix",
+	"description": "Add a guard to the divide() function in src/math.js so that dividing by zero throws an Error. Normal division (for example divide(10, 2) === 5) must keep working.",
+	"validation": {
+		"command": "bun test tests/",
+		"expectedExitCode": 0,
+		"expectedStdoutContains": "2 pass",
+		"timeoutSeconds": 60
+	}
+}
