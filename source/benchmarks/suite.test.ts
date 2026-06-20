@@ -43,6 +43,15 @@ describe('benchmark suite data', () => {
 		}
 	})
 
+	test('the suite contains at least one large benchmark requiring multi-file decomposition and the full toolchain', () => {
+		const largeNames = benchmarkDirs
+			.filter((dir) => parseEvalConfig(readJson(path.join(dir, 'eval.json'))).taskType === 'large')
+			.map((dir) => path.basename(dir))
+			.sort()
+		expect(largeNames.length).toBeGreaterThanOrEqual(1)
+		expect(largeNames).toContain('project_todo_cli')
+	})
+
 	for (const benchmarkDir of benchmarkDirs) {
 		const name = path.basename(benchmarkDir)
 

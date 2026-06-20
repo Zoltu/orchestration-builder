@@ -1,0 +1,16 @@
+{
+	"taskType": "large",
+	"description": "Build a command-line todo app in TypeScript. The app stores todos in a JSON file and supports these commands: `add <title>` (create a todo with the next id, starting at 1, marked not done), `list` (print all todos), `list --done` (print only completed todos), `list --open` (print only incomplete todos), `done <id>` (mark a todo complete), `open <id>` (mark a complete todo incomplete again), `remove <id>` (delete a todo), `edit <id> <new title>` (change a todo's title), and `clear` (delete every todo). Each todo is an object `{ id, title, done }` and the store file holds a JSON array of them. The project is laid out across four modules: `src/todo.ts` (the Todo type plus small pure helpers `formatTodo`, `nextTodoId`, and `parseTodoId`), `src/store.ts` (load and save the JSON store), `src/commands.ts` (the command dispatcher `runCommand(storePath, args)` returning `{ stdout, exitCode }`), and `src/cli.ts` (the entry point that reads `process.argv`, reads the store path from the `TODO_STORE` environment variable, calls `runCommand`, prints the result, and exits with its exit code). The entry point `src/cli.ts` is already wired; the other three modules are stubs that compile but do not yet do the real work. The tests in `tests/todo.test.ts`, `tests/store.test.ts`, and `tests/commands.test.ts` describe the exact behavior and output format expected; they currently fail because the modules are stubs. Implement the stubbed modules so every test passes and `bun run typecheck` is clean. Verify your work by running `bun run typecheck` and `bun test tests/`.",
+	"validation": {
+		"command": "bun run typecheck && bun test tests/",
+		"expectedExitCode": 0,
+		"expectedStdoutContains": "30 pass",
+		"expectedFiles": [
+			"src/todo.ts",
+			"src/store.ts",
+			"src/commands.ts",
+			"src/cli.ts"
+		],
+		"timeoutSeconds": 120
+	}
+}
