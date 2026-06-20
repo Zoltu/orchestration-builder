@@ -1,8 +1,8 @@
-# Step 15 — Web `ask_human` backend state machine
+# Step 16 — Web `ask_human` backend state machine
 
 ## Goal
 
-Add a `mode: 'web'` human backend that writes pending `ask_human` questions to the run state and resumes the executor when an answer is provided, keeping the `ask_human` tool interface identical to the stub/foundry backends. This is the testable core of human-in-the-loop; the HTTP surface is step 16.
+Add a `mode: 'web'` human backend that writes pending `ask_human` questions to the run state and resumes the executor when an answer is provided, keeping the `ask_human` tool interface identical to the stub/foundry backends. This is the testable core of human-in-the-loop; the HTTP surface is step 17.
 
 ## Context
 
@@ -11,14 +11,14 @@ Read `docs/executor.md` ("`ask_human`", "Human-in-the-loop backend") and `source
 ## Deliverables
 
 1. `source/executor/human-backend.ts` — extend to support `mode: 'web'`. The web backend is a small state machine: `ask(question, context)` returns a promise that resolves when `submitAnswer(id, answer)` is called. Implement with a simple in-process map of pending questions → resolvers (no external async library; Bun/web-standard only).
-2. `source/executor/run-state.ts` — a leaf/orchestration that exposes pending questions for a run (so the web UI in step 16 can list them) and accepts answers. Keep it minimal and injectable.
+2. `source/executor/run-state.ts` — a leaf/orchestration that exposes pending questions for a run (so the web UI in step 17 can list them) and accepts answers. Keep it minimal and injectable.
 3. `source/executor/human-backend.test.ts` (extend) — in-memory tests: the web backend resolves when an answer is submitted; an unanswered question stays pending; the tool result shape matches the stub backend (same fields the small model sees). No real HTTP.
-4. The backend selection is made at runtime (step 17 wires `--human-backend web`); this step only delivers the backend and its tests.
+4. The backend selection is made at runtime (step 18 wires `--human-backend web`); this step only delivers the backend and its tests.
 
 ## Module boundaries
 
 - `human-backend.ts` owns the question/answer state machine.
-- No HTTP server in this step — that is step 16. The web backend here is a promise-based resolver the server will drive.
+- No HTTP server in this step — that is step 17. The web backend here is a promise-based resolver the server will drive.
 
 ## Acceptance criteria
 
@@ -29,7 +29,7 @@ Read `docs/executor.md` ("`ask_human`", "Human-in-the-loop backend") and `source
 
 ## End-of-step evaluation
 
-Confirm the state machine has no race that drops an answer submitted before the question is registered (handle the "answer arrives then question" ordering defensively, or document why it cannot happen given sequential execution). Ensure no `as` casts. Confirm the backend selection logic stays in `main.ts` (step 17), not in the backend module.
+Confirm the state machine has no race that drops an answer submitted before the question is registered (handle the "answer arrives then question" ordering defensively, or document why it cannot happen given sequential execution). Ensure no `as` casts. Confirm the backend selection logic stays in `main.ts` (step 18), not in the backend module.
 
 ## Estimated effort
 

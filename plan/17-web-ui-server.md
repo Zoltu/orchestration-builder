@@ -1,4 +1,4 @@
-# Step 16 — Web UI server + static assets
+# Step 17 — Web UI server + static assets
 
 ## Goal
 
@@ -6,7 +6,7 @@ Add a plain HTML/JS web UI served by `Bun.serve` that displays the active run, t
 
 ## Context
 
-Read `docs/executor.md` ("Web UI") and [`15-web-human-backend.md`](15-web-human-backend.md) (the backend state machine is in place). The server is a leaf factory `createWebServer(port)`; it reads run state to render the UI and posts answers back to the step-15 backend. Static assets are plain files under `source/web/static/`.
+Read `docs/executor.md` ("Web UI") and [`16-web-human-backend.md`](16-web-human-backend.md) (the backend state machine is in place). The server is a leaf factory `createWebServer(port)`; it reads run state to render the UI and posts answers back to the step-16 backend. Static assets are plain files under `source/web/static/`.
 
 ## Deliverables
 
@@ -14,7 +14,7 @@ Read `docs/executor.md` ("Web UI") and [`15-web-human-backend.md`](15-web-human-
 2. `source/web/static/index.html`, `source/web/static/app.js`, `source/web/static/styles.css` — minimal, dependency-free client. Displays current role/status, a tailed log view, and pending questions with an answer input.
 3. `source/web/render.ts` — pure helpers that turn run state into the JSON the API returns (testable). Keep HTML construction in static files; the server returns JSON, the client renders.
 4. `source/web/render.test.ts` — in-memory tests for the JSON shaping (status, role tree, recent-log truncation, pending-question list).
-5. `source/web/server.test.ts` — in-memory test using `fetch` against the started server on an ephemeral port (Bun supports this) to assert: `GET /` returns HTML; `GET /api/questions` returns the pending list; `POST /api/answer` resolves the pending question in the step-15 backend. Clean up the server in `afterAll`.
+5. `source/web/server.test.ts` — in-memory test using `fetch` against the started server on an ephemeral port (Bun supports this) to assert: `GET /` returns HTML; `GET /api/questions` returns the pending list; `POST /api/answer` resolves the pending question in the step-16 backend. Clean up the server in `afterAll`.
 
 ## Module boundaries
 
@@ -39,4 +39,4 @@ Medium — UI is intentionally simple; the plumbing is the work.
 
 ## Operator handoff
 
-None for code. A live UI test against a real run is part of step 17's handoff.
+None for code. A live UI test against a real run is part of step 18's handoff.

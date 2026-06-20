@@ -1,12 +1,12 @@
-# Step 18 — Dockerfile + deployment docs
+# Step 19 — Dockerfile + deployment docs
 
 ## Goal
 
-Package the system as a single small Docker image and document secure deployment. This step also closes the `run_shell` safety debt tracked from step 04 (no shell allowlist in v1) by documenting that strong isolation comes from the container, not the executor.
+Package the system as a single small Docker image and document secure deployment. (Per-run benchmark isolation and `run_shell` containment are handled by step 20; this step packages the deployment container that hosts the executor and, in deployment, the per-run isolation layer.)
 
 ## Context
 
-Read `docs/security.md` ("Container and network isolation", "Shell tool policy") and [`04-run-shell-tool.md`](04-run-shell-tool.md) (tracked debt: no shell allowlist in v1). The image uses the official Bun base image, copies the project, and runs the executor — no `npm install` because there are no dependencies. Recommended container flags: no network egress for the executor, non-root user, read-only filesystem except the workspace volume.
+Read `docs/security.md` ("Container and network isolation", "Shell tool policy"), [`20-environment-isolation.md`](20-environment-isolation.md) (per-run isolation, the layer inside this container), and [`21-run-shell-tool.md`](21-run-shell-tool.md) (`run_shell` ships only after step 20 lands). The image uses the official Bun base image, copies the project, and runs the executor — no `npm install` because there are no dependencies. Recommended container flags: no network egress for the executor, non-root user, read-only filesystem except the workspace volume.
 
 ## Deliverables
 
@@ -16,9 +16,9 @@ Read `docs/security.md` ("Container and network isolation", "Shell tool policy")
    - Recommended `docker run` flags: `--network none` (or a restricted network) for the executor process, `--read-only` filesystem with a writable volume mounted at `data/`, `--user` non-root, optional `--cap-drop ALL` / seccomp.
    - How to pass API keys via environment variables (never in the Guild or image).
    - How to mount a Guild and benchmark workspace as volumes.
-   - The explicit note that v1 has **no shell allowlist**: `run_shell` runs arbitrary commands inside the workspace; the container boundary is the primary isolation. Document an optional future allowlist as a deferred enhancement (and, if concrete, insert a follow-up step).
+   - The explicit note that v1's `run_shell` (step 21) runs arbitrary commands inside the per-run isolated workspace (step 20); the container boundary (this step) is the outer isolation layer, with step 20 providing per-run containment inside it. Document an optional future in-tool allowlist as a deferred defense-in-depth enhancement (and, if concrete, insert a follow-up step).
 4. Update `docs/architecture.md`'s execution-model note ("Single Dockerfile for the final product") to reference the new `Dockerfile` and `docs/deployment.md`.
-5. Remove the step-04 tracked-debt row from [`README.md`](README.md#tracked-technical-debt) once the documentation lands (the debt was "no allowlist"; the resolution is documented container isolation + an optional future allowlist step).
+5. The `run_shell` containment debt is owned by step 20 (environment isolation), not this step; do not remove a debt row here. Confirm the deployment docs are consistent with step 20's per-run isolation running inside this container.
 
 ## Module boundaries
 
@@ -30,8 +30,7 @@ Read `docs/security.md` ("Container and network isolation", "Shell tool policy")
 
 - [ ] `bun run typecheck` and `bun test source/` still pass (no code regressions).
 - [ ] `Dockerfile` and `.dockerignore` exist and are consistent with the no-dependencies design.
-- [ ] `docs/deployment.md` documents the recommended container flags, API-key handling, volume mounts, and the v1 shell-isolation caveat.
-- [ ] The step-04 tracked-debt row is resolved in `README.md`.
+- [ ] `docs/deployment.md` documents the recommended container flags, API-key handling, volume mounts, and the `run_shell`/isolation caveat (per-run isolation is step 20's layer inside this container).
 
 ## End-of-step evaluation
 

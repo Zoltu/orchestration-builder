@@ -1,8 +1,8 @@
-# Step 14 — Foundry CLI + optimization loop + safeguards
+# Step 15 — Foundry CLI + optimization loop + safeguards
 
 ## Goal
 
-Wire the Foundry pieces (steps 09–13) into a top-level optimization loop with a CLI entry point, and enforce the termination safeguards (cycle budget, cost budget, plateau detection, no-op detection). After this step the Foundry can run a full optimize cycle end-to-end (against a real big model + real executor — operator work).
+Wire the Foundry pieces (steps 10–14) into a top-level optimization loop with a CLI entry point, and enforce the termination safeguards (cycle budget, cost budget, plateau detection, no-op detection). After this step the Foundry can run a full optimize cycle end-to-end (against a real big model + real executor — operator work).
 
 ## Context
 
@@ -10,7 +10,7 @@ Read `docs/foundry.md` ("Overview of the optimization loop", "Guardrails and ter
 
 ## Deliverables
 
-1. `source/foundry/loop.ts` — orchestration `runOptimizationCycle(dependencies, { config, suiteDir, baselineGuildPath })` implementing one cycle, and `runFoundry(dependencies, { config, suiteDir, baselineGuildPath })` implementing the repeating loop with safeguards. Dependencies are all the leaves/orchestrations from steps 09–13 plus the big-model caller; no defaults.
+1. `source/foundry/loop.ts` — orchestration `runOptimizationCycle(dependencies, { config, suiteDir, baselineGuildPath })` implementing one cycle, and `runFoundry(dependencies, { config, suiteDir, baselineGuildPath })` implementing the repeating loop with safeguards. Dependencies are all the leaves/orchestrations from steps 10–14 plus the big-model caller; no defaults.
 2. `source/foundry/loop.test.ts` — in-memory tests with fakes for every dependency. Cover: a cycle that produces an accepted branch promotes it; a cycle with no improvement increments the plateau counter; hitting the cycle budget stops the loop; no-op hypotheses (wording-only changes that don't move scores) are discarded; a regression in the merged candidate prevents promotion.
 3. `source/main.ts` (extend the step-02 CLI) — add a `foundry optimize` subcommand parsing `--suite`, `--cycles`, `--guild`, cost/plateau overrides, and the big-model endpoint env var. Assembles real Foundry dependencies and calls `runFoundry`. This CLI path is not unit-tested (integration shell).
 4. Safeguards implemented as pure helpers where possible (e.g. `shouldTerminate(state, config): TerminationReason`) so they are testable in isolation.

@@ -32,6 +32,17 @@ describe('benchmark suite data', () => {
 		expect(benchmarkDirs.map((dir) => path.basename(dir))).toContain('hello_001')
 	})
 
+	test('the suite contains at least two medium benchmarks requiring multi-file decomposition', () => {
+		const mediumNames = benchmarkDirs
+			.filter((dir) => parseEvalConfig(readJson(path.join(dir, 'eval.json'))).taskType === 'medium')
+			.map((dir) => path.basename(dir))
+			.sort()
+		expect(mediumNames.length).toBeGreaterThanOrEqual(2)
+		for (const name of ['add_cli_flag', 'feature_add_endpoint', 'refactor_extract_module']) {
+			expect(mediumNames).toContain(name)
+		}
+	})
+
 	for (const benchmarkDir of benchmarkDirs) {
 		const name = path.basename(benchmarkDir)
 

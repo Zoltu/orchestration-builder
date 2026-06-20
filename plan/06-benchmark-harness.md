@@ -1,12 +1,12 @@
-# Step 05 — Benchmark suite harness + authoring guide
+# Step 06 — Benchmark suite harness + authoring guide
 
 ## Goal
 
-Build the harness that runs the executor over a suite of benchmarks, validates each final workspace against its `eval.json`, and emits a machine-readable summary. Also document how to author and run benchmarks. This is the foundation for steps 06–08, which add the actual benchmarks.
+Build the harness that runs the executor over a suite of benchmarks, validates each final workspace against its `eval.json`, and emits a machine-readable summary. Also document how to author and run benchmarks. This is the foundation for steps 07–09, which add the actual benchmarks.
 
 ## Context
 
-Read `docs/benchmarks.md` (the `eval.json` schema and validation rules) and `docs/architecture.md` ("Benchmark isolation and environments"). Validation runs a shell command in the final workspace and checks expected files / exit code / stdout. Note the **unsolved isolation** caveat in `docs/architecture.md`: until per-benchmark container isolation is solved, the suite is constrained to tasks Bun can validate directly with no external installs. Step 08's closeout should revisit this.
+Read `docs/benchmarks.md` (the `eval.json` schema and validation rules) and `docs/architecture.md` ("Benchmark isolation and environments"). Validation runs a shell command in the final workspace and checks expected files / exit code / stdout. Note the **unsolved isolation** caveat in `docs/architecture.md`: until per-benchmark isolation is solved, the suite is constrained to tasks Bun can validate directly with no external installs. The isolation problem is now addressed by its own step, step 20.
 
 ## Deliverables
 
@@ -51,7 +51,7 @@ Medium — the validation pure-logic and the suite orchestration are the bulk.
 
 ## Operator handoff
 
-None for code. Running the suite against a real LLM is operator work and is the subject of steps 06–08's handoffs.
+None for code. Running the suite against a real LLM is operator work and is the subject of steps 07–09's handoffs.
 
 ## Closeout (step 05 complete)
 
@@ -68,8 +68,8 @@ Health: `bun run typecheck` clean; `bun test source/` → 200 pass / 0 fail (32 
 
 Deviations from the plan wording (authoritative):
 
-1. **run-suite invokes an injected `runBenchmark` leaf, not `runExecutor` directly.** The plan said run-suite "invokes the executor (via `runExecutor` with assembled dependencies…)." Per `AGENTS.md` ("main is the only place that assembles real dependencies"), orchestration must not assemble executor dependencies, so the real executor-runner leaf is assembled by the CLI entry point (step 02) / the benchmark steps (06–08) and injected here. This keeps run-suite fully testable with a fake runner (the plan's stated intent) and matches the three-tier pattern. The operator handoff (real-LLM runs) is unchanged.
+1. **run-suite invokes an injected `runBenchmark` leaf, not `runExecutor` directly.** The plan said run-suite "invokes the executor (via `runExecutor` with assembled dependencies…)." Per `AGENTS.md` ("main is the only place that assembles real dependencies"), orchestration must not assemble executor dependencies, so the real executor-runner leaf is assembled by the CLI entry point (step 02) / the benchmark steps (07–09) and injected here. This keeps run-suite fully testable with a fake runner (the plan's stated intent) and matches the three-tier pattern. The operator handoff (real-LLM runs) is unchanged.
 2. **run-suite takes three additional injected leaves** (`listBenchmarkDirectories`, `readEvalConfig`, `writeSummary`) so it touches no filesystem directly, matching `AGENTS.md`'s rule that orchestration receives leaf functions via `dependencies`. The plan named only "an executor runner and a validation runner"; the extra leaves are the honest three-tier application.
-3. **No real `runBenchmark` producer is shipped in this step**, consistent with the operator handoff deferring real-LLM runs to steps 06–08 and the CLI entry point to step 02. The harness, pure validation, and the validation leaf are complete and verified in-memory; `benchmarks/README.md` documents that end-to-end suite execution is wired by step 02 / 06–08.
+3. **No real `runBenchmark` producer is shipped in this step**, consistent with the operator handoff deferring real-LLM runs to steps 07–09 and the CLI entry point to step 02. The harness, pure validation, and the validation leaf are complete and verified in-memory; `benchmarks/README.md` documents that end-to-end suite execution is wired by step 02 / 07–09.
 
-Forward note for the step that wires the real runner (step 02 / 06–08): the real `runBenchmark` leaf must source `tokens` for the summary. The executor does not currently aggregate token counts into `RunMeta` or the `llm_call` log event, so that step will need to surface token totals (e.g. accumulate usage in `RunMeta` or sum from the log). The harness itself only passes tokens through, so this is not step-05 debt; it is an executor-surfacing task for the real-runner step.
+Forward note for the step that wires the real runner (step 02 / 07–09): the real `runBenchmark` leaf must source `tokens` for the summary. The executor does not currently aggregate token counts into `RunMeta` or the `llm_call` log event, so that step will need to surface token totals (e.g. accumulate usage in `RunMeta` or sum from the log). The harness itself only passes tokens through, so this is not step-06 debt; it is an executor-surfacing task for the real-runner step.

@@ -1,0 +1,11 @@
+{
+	"taskType": "medium",
+	"description": "Split the single-file module src/string-utils.ts into one module per function: src/capitalize.ts, src/reverse.ts, src/vowel-count.ts, and src/kebab-case.ts. Move each function's body into its own module and make src/string-utils.ts re-export every function from its new module so the existing tests in tests/string-utils.test.ts keep passing.",
+	"validation": {
+		"command": "bun test tests/",
+		"expectedExitCode": 0,
+		"expectedStdoutContains": "4 pass",
+		"expectedFiles": ["src/capitalize.ts", "src/reverse.ts", "src/vowel-count.ts", "src/kebab-case.ts"],
+		"timeoutSeconds": 60
+	}
+}

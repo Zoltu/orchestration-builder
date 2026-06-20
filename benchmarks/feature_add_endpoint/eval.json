@@ -1,0 +1,11 @@
+{
+	"taskType": "medium",
+	"description": "Add a GET /greeting endpoint to the small server in src/server.ts. The endpoint reads the `name` query parameter and returns JSON { \"greeting\": \"Hello, <name>\" }. When the name is missing or empty, use \"world\" as the default. Put the route handler in a new file src/routes/greeting.ts and call it from src/server.ts's router. The tests in tests/greeting.test.ts describe the expected behavior and currently fail; make them pass while keeping tests/health.test.ts green.",
+	"validation": {
+		"command": "bun test tests/",
+		"expectedExitCode": 0,
+		"expectedStdoutContains": "5 pass",
+		"expectedFiles": ["src/routes/greeting.ts"],
+		"timeoutSeconds": 60
+	}
+}

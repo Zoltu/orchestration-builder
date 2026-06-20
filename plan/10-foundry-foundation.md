@@ -1,4 +1,4 @@
-# Step 09 — Foundry foundation: types, config, branch management
+# Step 10 — Foundry foundation: types, config, branch management
 
 ## Goal
 
@@ -20,7 +20,7 @@ Read `docs/foundry.md` in full. The Foundry is an offline process using a **larg
 ## Module boundaries
 
 - `types.ts`/`config.ts` are pure helpers.
-- `branches.ts` is a leaf factory (filesystem) — its logic is thin; the "which files to edit" decision belongs to hypothesis generation (step 12).
+- `branches.ts` is a leaf factory (filesystem) — its logic is thin; the "which files to edit" decision belongs to hypothesis generation (step 13).
 - No LLM calls in this step.
 
 ## Acceptance criteria
