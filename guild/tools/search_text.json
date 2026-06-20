@@ -1,0 +1,21 @@
+{
+	"name": "search_text",
+	"description": "Search the contents of text files in the workspace for lines matching a regular expression. Returns matching lines with their file path and 1-based line number. Searches all searchable files unless paths are given.",
+	"parameters": {
+		"type": "object",
+		"required": ["pattern"],
+		"properties": {
+			"pattern": {
+				"type": "string",
+				"description": "Regular expression to match against each line."
+			},
+			"paths": {
+				"type": "array",
+				"description": "Optional list of workspace-relative paths to search. A path may be a file or a directory (searched recursively). If omitted, the whole workspace is searched.",
+				"items": {
+					"type": "string"
+				}
+			}
+		}
+	}
+}

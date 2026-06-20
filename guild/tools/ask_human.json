@@ -1,0 +1,18 @@
+{
+	"name": "ask_human",
+	"description": "Ask the human user a clarifying question when a reasonable guess cannot be made. Returns the user's answer. Use sparingly; prefer reasonable defaults and explain them.",
+	"parameters": {
+		"type": "object",
+		"required": ["question"],
+		"properties": {
+			"question": {
+				"type": "string",
+				"description": "A clear, non-technical question for the user."
+			},
+			"context": {
+				"type": "string",
+				"description": "Optional context explaining why the question is being asked."
+			}
+		}
+	}
+}

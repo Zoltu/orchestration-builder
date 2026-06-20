@@ -1,0 +1,13 @@
+{
+	"name": "list_directory",
+	"description": "List files and subdirectories inside a workspace-relative path. Returns entries sorted with directories first, then files alphabetically. Call with path \".\" or omit path to list the workspace root.",
+	"parameters": {
+		"type": "object",
+		"properties": {
+			"path": {
+				"type": "string",
+				"description": "Workspace-relative directory path to list. Defaults to the workspace root."
+			}
+		}
+	}
+}

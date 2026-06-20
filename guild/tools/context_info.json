@@ -1,0 +1,7 @@
+{
+	"name": "context_info",
+	"description": "Return metadata about the current role's conversation: context window size, estimated current prompt tokens, last reported prompt tokens, remaining budget, and a per-message snapshot (index, role, content length, reasoning length).",
+	"parameters": {
+		"type": "object"
+	}
+}

@@ -32,8 +32,8 @@ See `AGENTS.md` for the full rules on type safety, error handling, testing, and 
 |---|---|---|---|
 | 1 | Foundation | Shared types, validation, persistence primitives, first smoke benchmark | [`plan/01-foundation-PLAN.md`](plan/01-foundation-PLAN.md) |
 | 2 | Executor runtime | LLM client, role engine, budget enforcement, run lifecycle | [`plan/02-executor-runtime-PLAN.md`](plan/02-executor-runtime-PLAN.md) |
-| 3 | Tool layer | Native file/search tools, built-in agent/finish/context tools, `ask_human` stub | [`plan/03-tool-layer-PLAN.md`](plan/03-tool-layer-PLAN.md) |
-| 4 | Seed Guild | Role prompts, tool manifests, non-developer orchestrator workflow | [`plan/04-seed-guild-PLAN.md`](plan/04-seed-guild-PLAN.md) |
+| 3 | Tool layer | Native file/search tools, built-in agent/finish/context tools, `ask_human` stub, canonical v1 tool manifests + conformance test | [`plan/03-tool-layer-PLAN.md`](plan/03-tool-layer-PLAN.md) |
+| 4 | Seed Guild | `guild.json` and role prompts referencing the Phase 3 tool manifests, non-developer orchestrator workflow | [`plan/04-seed-guild-PLAN.md`](plan/04-seed-guild-PLAN.md) |
 | 5 | Integration & smoke testing | CLI wiring, end-to-end runs on `hello_001`, bug fixes | [`plan/05-integration-testing-PLAN.md`](plan/05-integration-testing-PLAN.md) |
 | 6 | Real benchmark suite | Diverse coding benchmarks from bug fixes to multi-hour app builds | [`plan/06-real-benchmark-suite-PLAN.md`](plan/06-real-benchmark-suite-PLAN.md) |
 | 7 | Foundry meta-optimizer | Hypothesis generation, branch evaluation, merging, reporting | [`plan/07-foundry-optimizer-PLAN.md`](plan/07-foundry-optimizer-PLAN.md) |

@@ -1,0 +1,14 @@
+{
+	"name": "read_file",
+	"description": "Read the full text contents of a file inside the workspace. Returns the file content as a string.",
+	"parameters": {
+		"type": "object",
+		"required": ["path"],
+		"properties": {
+			"path": {
+				"type": "string",
+				"description": "Workspace-relative path of the file to read."
+			}
+		}
+	}
+}

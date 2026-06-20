@@ -1,0 +1,22 @@
+{
+	"name": "read_file_partial",
+	"description": "Read a contiguous slice of lines from a file inside the workspace. Useful for large files. Returns the requested lines plus offset, returned line count, and total line count.",
+	"parameters": {
+		"type": "object",
+		"required": ["path", "offset", "limit"],
+		"properties": {
+			"path": {
+				"type": "string",
+				"description": "Workspace-relative path of the file to read."
+			},
+			"offset": {
+				"type": "number",
+				"description": "Zero-based index of the first line to return."
+			},
+			"limit": {
+				"type": "number",
+				"description": "Maximum number of lines to return. Must be greater than zero."
+			}
+		}
+	}
+}

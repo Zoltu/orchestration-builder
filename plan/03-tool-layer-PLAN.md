@@ -39,6 +39,13 @@ Implement all native and built-in tools. By the end of this phase the executor s
 
 6. `source/executor/human-backend.ts` — leaf factory `createHumanBackend({ mode: 'stub' })`. For now the only mode is stub.
 
+7. `guild/tools/*.json` — the canonical v1 tool manifests, one JSON file per tool. A tool's manifest is its contract (name + parameter schema), so it belongs with the tool layer, not with Guild behavior. Eleven files:
+   - Built-ins: `agent.json`, `finish.json`, `context_info.json`, `edit_context.json`, `ask_human.json`.
+   - Native: `list_directory.json`, `glob_files.json`, `read_file.json`, `read_file_partial.json`, `search_text.json`, `fetch_url.json`.
+   - Each file validates via `validateToolManifest` and its `parameters` (`required` + declared `properties`) matches the arguments the handler actually reads.
+
+8. `source/executor/tool-manifests.test.ts` — conformance test that loads every `guild/tools/*.json`, validates it, and asserts each manifest's name + parameter signature matches its handler (native names against `createToolHandlers`, built-in names against `createBuiltInToolHandlers`). This makes "manifests match implementation" checkable within Phase 3, independent of any Guild.
+
 ## Security boundaries
 
 - All file paths are resolved relative to `data/runs/<run_id>/workspace/` and canonicalized.
@@ -54,7 +61,7 @@ Implement all native and built-in tools. By the end of this phase the executor s
 
 ## Acceptance criteria
 
-- [ ] Each tool manifest in `guild/tools/*.json` matches the implementation in `tools.ts`.
+- [ ] Each tool manifest in `guild/tools/*.json` validates and matches its implementation, verified by `source/executor/tool-manifests.test.ts`.
 - [ ] `read_file` rejects paths that escape the workspace.
 - [ ] `agent` correctly spawns a child role and surfaces its `ResultCard`.
 - [ ] `edit_context` supports `drop`, `strip_reasoning`, and `replace` operations.
@@ -92,4 +99,12 @@ The original `resolveWithinWorkspace` was exported but never imported (dead code
 ### Loader uses `existsSync` for missing files
 
 `loader.ts`'s `readRequiredFile` previously caught `readFileSync`'s `ENOENT` to report a missing referenced file. It now checks `fs.existsSync` first (expected condition) and reserves the `try/catch` for genuine I/O errors after existence is confirmed.
+
+### Phase boundary adjustment: tool manifests moved into Phase 3
+
+The original Phase 3 acceptance criterion "Each tool manifest in `guild/tools/*.json` matches the implementation in `tools.ts`" referenced `guild/tools/*.json`, which the original Phase 4 plan listed as a Phase 4 deliverable. That made Phase 3 impossible to close without Phase 4 work — a broken phase boundary.
+
+Resolved by recognizing that a tool's manifest (its name + parameter schema) is a **contract belonging to the tool layer**, not Guild behavior. The canonical v1 manifests now ship in Phase 3 as `guild/tools/*.json` (eleven files), plus a conformance test (`source/executor/tool-manifests.test.ts`) that loads each manifest, validates it, and cross-checks every manifest name against the handler tables produced by `createToolHandlers` and `createBuiltInToolHandlers`. Phase 3's acceptance criterion is now fully checkable within the phase.
+
+Consequence for Phase 4: the seed Guild no longer authors tool manifests. Phase 4 writes only `guild/guild.json` (which references the existing `tools/*.json` paths) and `guild/prompts/*.md`. The `guild/tools/` directory is therefore populated by Phase 3 and consumed by Phase 4.
 

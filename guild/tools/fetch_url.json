@@ -1,0 +1,14 @@
+{
+	"name": "fetch_url",
+	"description": "Fetch a document over HTTP or HTTPS and return its text content. The only tool that performs external network egress. Subject to a timeout and a maximum response size.",
+	"parameters": {
+		"type": "object",
+		"required": ["url"],
+		"properties": {
+			"url": {
+				"type": "string",
+				"description": "Absolute http: or https: URL to fetch."
+			}
+		}
+	}
+}

@@ -1,0 +1,39 @@
+{
+	"name": "finish",
+	"description": "End the current role and return a ResultCard to the caller. Always use status \"success\" when the task is complete, \"error\" when it cannot be completed, or \"needs_clarification\" when essential information is missing.",
+	"parameters": {
+		"type": "object",
+		"required": ["status", "summary"],
+		"properties": {
+			"status": {
+				"type": "string",
+				"description": "One of \"success\", \"error\", or \"needs_clarification\"."
+			},
+			"summary": {
+				"type": "string",
+				"description": "Plain-language summary of what was done or why the role is finishing with this status."
+			},
+			"artifacts": {
+				"type": "array",
+				"description": "Optional list of workspace-relative paths produced or modified by this role.",
+				"items": {
+					"type": "string"
+				}
+			},
+			"error": {
+				"type": "object",
+				"description": "Required when status is \"error\". Describes the failure.",
+				"properties": {
+					"kind": {
+						"type": "string",
+						"description": "One of the executor error kinds: invalid_tool_call, unknown_tool, invalid_arguments, timeout, llm_unavailable, context_budget_exceeded, tool_budget_exceeded, token_budget_exceeded, loop_detected, compaction_failed."
+					},
+					"message": {
+						"type": "string",
+						"description": "Optional human-readable detail."
+					}
+				}
+			}
+		}
+	}
+}

@@ -47,9 +47,7 @@ Create a hand-written Guild that can perform end-to-end coding tasks for non-dev
    - Receive an error result card and decide: retry, re-delegate, ask human, or escalate.
    - Return a new `agent` call or `finish` with `status: "error"`.
 
-8. `guild/tools/*.json` — tool manifests for all v1 tools:
-   - `agent.json`, `finish.json`, `context_info.json`, `edit_context.json`, `ask_human.json`
-   - `list_directory.json`, `glob_files.json`, `read_file.json`, `read_file_partial.json`, `search_text.json`, `fetch_url.json`
+The canonical v1 tool manifests already exist at `guild/tools/*.json` (delivered and conformance-tested in Phase 3). Phase 4 does **not** author tool manifests; `guild/guild.json` simply references their paths.
 
 ## Non-developer design notes
 
@@ -60,12 +58,13 @@ Create a hand-written Guild that can perform end-to-end coding tasks for non-dev
 ## Module boundaries
 
 - The Guild is data, not code. It lives under `guild/`.
+- `guild/tools/*.json` is already populated by Phase 3; Phase 4 only adds `guild/guild.json` and `guild/prompts/*.md`.
 - No TypeScript source files are added in this phase except perhaps a validation script to check that `guild.json` loads cleanly.
 
 ## Acceptance criteria
 
 - [ ] `guild/guild.json` passes the loader and schema validation from Phase 1.
-- [ ] All referenced prompt files and tool manifests exist.
+- [ ] All referenced prompt files exist; all referenced tool manifests exist (the latter are the Phase 3 canonical manifests in `guild/tools/`).
 - [ ] Every role’s `tools` array contains only tools declared in the Guild.
 - [ ] The orchestrator prompt contains explicit guidance on when to ask clarifying questions.
 - [ ] The recovery role prompt lists the available error kinds and how to handle them.
