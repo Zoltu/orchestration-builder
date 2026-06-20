@@ -1,0 +1,75 @@
+{
+	"schemaVersion": 1,
+
+	"model": {
+		"name": "qwen2.5-coder:32b",
+		"apiBase": "http://localhost:11434/v1",
+		"apiKey": "",
+		"contextWindow": 32768,
+		"reasoningField": "reasoning",
+		"generation": {
+			"temperature": 0.2,
+			"maxTokens": 4096
+		}
+	},
+
+	"executor": {
+		"maxAgentDepth": 8,
+		"maxToolCallsPerRole": 50,
+		"maxTokensPerRole": 60000,
+		"maxRunTimeSeconds": 14400,
+		"defaultToolTimeoutSeconds": 30,
+		"maxRepeatedToolCalls": 3,
+		"maxCompactionAttempts": 5
+	},
+
+	"contextPolicy": {
+		"maxToolOutputChars": 8000
+	},
+
+	"entryRole": "orchestrator",
+
+	"roles": {
+		"orchestrator": {
+			"systemPrompt": "prompts/orchestrator.md",
+			"tools": ["agent", "ask_human", "finish"],
+			"generation": { "temperature": 0.3, "maxTokens": 2048 }
+		},
+		"planner": {
+			"systemPrompt": "prompts/planner.md",
+			"tools": ["list_directory", "glob_files", "read_file", "read_file_partial", "search_text", "finish"]
+		},
+		"coder": {
+			"systemPrompt": "prompts/coder.md",
+			"tools": ["list_directory", "glob_files", "read_file", "read_file_partial", "search_text", "fetch_url", "finish"]
+		},
+		"critic": {
+			"systemPrompt": "prompts/critic.md",
+			"tools": ["list_directory", "glob_files", "read_file", "read_file_partial", "search_text", "finish"]
+		},
+		"context_manager": {
+			"systemPrompt": "prompts/context_manager.md",
+			"tools": ["context_info", "edit_context", "finish"],
+			"generation": { "temperature": 0.1, "maxTokens": 2048 }
+		},
+		"recovery": {
+			"systemPrompt": "prompts/recovery.md",
+			"tools": ["agent", "ask_human", "finish"],
+			"generation": { "temperature": 0.2, "maxTokens": 2048 }
+		}
+	},
+
+	"tools": [
+		"tools/agent.json",
+		"tools/finish.json",
+		"tools/context_info.json",
+		"tools/edit_context.json",
+		"tools/ask_human.json",
+		"tools/list_directory.json",
+		"tools/glob_files.json",
+		"tools/read_file.json",
+		"tools/read_file_partial.json",
+		"tools/search_text.json",
+		"tools/fetch_url.json"
+	]
+}
