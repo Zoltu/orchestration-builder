@@ -8,7 +8,7 @@ export type AppendLog = (event: LogEvent) => void
 export type WriteMeta = (meta: RunMeta) => void
 export type SnapshotWorkspace = () => void
 
-function copyRecursively(source: string, destination: string): void {
+export function copyRecursively(source: string, destination: string): void {
 	const entries = fs.readdirSync(source)
 	for (const entry of entries) {
 		const sourcePathEntry = path.join(source, entry)

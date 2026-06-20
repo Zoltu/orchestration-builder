@@ -46,7 +46,7 @@ The target user is a **non-developer**. The Guild must ask few, clear clarifying
 | 07 | Quick-fix benchmarks | ✅ complete (in-env; real-run handoff blocked on step 01) | [`07-quick-fix-benchmarks.md`](07-quick-fix-benchmarks.md) |
 | 08 | Medium benchmarks | ✅ complete (in-env; real-run handoff blocked on step 01) | [`08-medium-benchmarks.md`](08-medium-benchmarks.md) |
 | 09 | Large benchmark | ✅ complete (in-env; real-run handoff blocked on step 01) | [`09-large-benchmark.md`](09-large-benchmark.md) |
-| 10 | Foundry foundation: types, config, branch management | pending | [`10-foundry-foundation.md`](10-foundry-foundation.md) |
+| 10 | Foundry foundation: types, config, branch management | ✅ complete | [`10-foundry-foundation.md`](10-foundry-foundation.md) |
 | 11 | Foundry validation + scoring | pending | [`11-foundry-validation-scoring.md`](11-foundry-validation-scoring.md) |
 | 12 | Foundry branch evaluation | pending | [`12-foundry-evaluation.md`](12-foundry-evaluation.md) |
 | 13 | Foundry hypothesis generation | pending | [`13-foundry-hypothesis.md`](13-foundry-hypothesis.md) |
