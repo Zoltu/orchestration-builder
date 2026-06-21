@@ -41,7 +41,7 @@
 		},
 		"coder": {
 			"systemPrompt": "prompts/coder.md",
-			"tools": ["list_directory", "glob_files", "read_file", "read_file_partial", "search_text", "write_file", "fetch_url", "typecheck", "finish"]
+			"tools": ["list_directory", "glob_files", "read_file", "read_file_partial", "search_text", "write_file", "fetch_url", "typecheck", "test", "finish"]
 		},
 		"critic": {
 			"systemPrompt": "prompts/critic.md",
@@ -72,6 +72,7 @@
 		"tools/search_text.json",
 		"tools/write_file.json",
 		"tools/fetch_url.json",
-		"tools/typecheck.json"
+		"tools/typecheck.json",
+		"tools/test.json"
 	]
 }

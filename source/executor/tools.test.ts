@@ -28,6 +28,7 @@ describe('createToolHandlers', () => {
 			'read_file',
 			'read_file_partial',
 			'search_text',
+			'test',
 			'typecheck',
 			'write_file',
 		])

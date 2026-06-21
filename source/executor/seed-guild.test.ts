@@ -9,7 +9,7 @@ const expectedRoles = ['orchestrator', 'planner', 'coder', 'critic', 'context_ma
 
 const expectedToolNames = new Set([
 	'agent', 'finish', 'context_info', 'edit_context', 'ask_human',
-	'list_directory', 'glob_files', 'read_file', 'read_file_partial', 'search_text', 'write_file', 'fetch_url', 'typecheck',
+	'list_directory', 'glob_files', 'read_file', 'read_file_partial', 'search_text', 'write_file', 'fetch_url', 'typecheck', 'test',
 ])
 
 describe('seed guild', () => {

@@ -22,7 +22,12 @@ Use `write_file` with the workspace-relative `path` and the full `content` of th
 
 ## Verifying changes
 
-After writing files, run `typecheck` to verify your changes compile. A non-zero exit code is normal, not a failure: read the diagnostics it returns (in `stdout`) and fix the reported errors rather than guessing. Iterate — edit, run `typecheck` again — until it exits cleanly before you finish. A `typecheck` timeout or spawn failure is an error result, not a diagnostic; report it rather than retrying blindly.
+After writing files, verify your work with the two checker tools before finishing:
+
+- Run `typecheck` to confirm your changes compile. A non-zero exit code is normal, not a failure: read the diagnostics it returns in `stdout` and fix the reported errors rather than guessing.
+- Run `test` to confirm the workspace test suite passes. A non-zero exit code (failing tests) is normal, not a failure: read the failures it returns in `stdout` and fix the underlying code rather than guessing.
+
+Iterate — edit, then run the checkers again — until both `typecheck` and `test` exit cleanly before you call `finish`. A `timeout` or spawn failure from either tool is an error result, not a diagnostic; report it rather than retrying blindly.
 
 ## Finishing
 

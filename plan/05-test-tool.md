@@ -58,3 +58,15 @@ Small to medium — near-identical in shape to step 04; the bulk is the test fix
 ## Operator handoff
 
 None — fully in-memory (tests use temp-dir fixtures). No real safety properties depend on deployment; the fixed command has no network and no installs.
+
+## Closeout
+
+Implemented as written, reusing the injectable-subprocess-runner precedent step 04 established rather than re-deriving it.
+
+**Adaptation — reuse `typecheck.ts`'s subprocess leaf instead of duplicating it.** Step 04's closeout made `createBunSubprocessRunner`, `SubprocessRunner`, and `SubprocessOutcome` exported from `source/executor/tools/typecheck.ts` as a generic, typecheck-agnostic subprocess leaf (the `Bun.spawn` wrapper with timeout-kills-child). `test.ts` imports `SubprocessRunner`/`SubprocessOutcome` from `./typecheck.js` and is itself only the `createTest(workspaceRoot, defaultTimeoutSeconds, runner)` leaf with the fixed `['bun', 'test']` command. This honors the plan's "do not refactor the two into a shared helper unless a third checker tool arrives" boundary — no new shared helper was created; `test.ts` reuses an already-public leaf exactly as `tools.ts` already does. The fixed command string, the output cap, the timeout-clamp orchestration, and the exit-code-as-success mapping live in `test.ts` itself, so the two checker tools remain independently readable and copyable.
+
+`test.test.ts` exercises the orchestration with a fake runner — passing suite (exit 0 + pass summary in stdout), failing suite (non-zero exit returned as `kind: 'success'` with failures in stdout), timeout → `kind: 'timeout'` with `details.afterSeconds`, capped-timeout details, default-vs-capped timeout selection, stdout/stderr truncation via the shared `truncateToolOutput` helper, `timeoutSeconds` validation, and spawn-throw → `invalid_arguments`. The real-subprocess timeout-kills-child safety property of the shared leaf is already covered once in `typecheck.test.ts` and is not duplicated here.
+
+`tools.ts` hoists a single `createBunSubprocessRunner()` instance shared by both `typecheck` and `test` (the runner is stateless — one factory call per process is cleaner than two identical ones).
+
+All acceptance criteria met: `bun run typecheck` and `bun test source/` pass (361 tests); a non-zero exit is a `success` result with `exitCode`; a timeout returns `kind: 'timeout'` with `details.afterSeconds`; the conformance test asserts the new manifest count (14 manifests, including `test.json`); the `coder` prompt's "Verifying changes" section composes `typecheck` and `test` into one coherent, generic instruction (no `bun`/`tsc` hardcode). The tracked debt row (hardcoded `bun test`, removed in step 20) is already in `plan/README.md`, and step 20's deliverable 4 already calls out generalizing both checker-tool commands — no plan-README edit was needed.
