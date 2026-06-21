@@ -1,4 +1,4 @@
-# Step 01 — `write_file` tool
+# Step 01 — `write_file` tool ✅ complete
 
 ## Goal
 
@@ -48,3 +48,15 @@ Small — one new leaf module, one manifest, prompt rewording, and conformance-t
 ## Operator handoff
 
 None — fully in-memory and verifiable in this environment.
+
+## Closeout (2026-06-21)
+
+Complete. `bun run typecheck` and `bun test source/` both pass (322 tests across 27 files).
+
+Deviations from the plan wording (authoritative):
+
+- The plan's deliverable list did not mention `source/executor/tools.test.ts`, but that file hard-coded the v1 native tool set as "all six native tools". It was updated to list `write_file` alongside its siblings and the test name was generalized to "returns a handler map containing all native tools" so it no longer bakes in a count that drifts as the tool set grows.
+- The `write_file` success payload is `{ path, bytes }` where `path` is the workspace-relative path resolved by `resolveWithinWorkspace` (matching the relative form sibling tools already use) and `bytes` is the UTF-8 byte length via `Buffer.byteLength`. `source/executor/tools/write-file.ts` exports a `WriteFileResult` interface describing this shape for callers and tests.
+- `coder.md` was rewritten end-to-end to instruct the model to call `write_file` (writing full file contents) rather than returning contents in its `finish` summary; the "read before editing" and "small, testable changes" guidance was preserved.
+
+No new technical debt introduced. The `write_file` handler is a leaf closing over `workspaceRoot`, identical in shape to the read-only siblings; truncation still happens once in the engine, so no engine/dispatch changes were needed.

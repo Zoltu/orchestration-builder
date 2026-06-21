@@ -19,7 +19,7 @@ afterEach(() => {
 })
 
 describe('createToolHandlers', () => {
-	test('returns a handler map containing all six native tools', () => {
+	test('returns a handler map containing all native tools', () => {
 		const handlers = createToolHandlers({ workspaceRoot, defaultToolTimeoutSeconds: 30 })
 		expect(Object.keys(handlers).sort()).toEqual([
 			'fetch_url',
@@ -28,6 +28,7 @@ describe('createToolHandlers', () => {
 			'read_file',
 			'read_file_partial',
 			'search_text',
+			'write_file',
 		])
 	})
 

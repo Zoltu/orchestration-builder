@@ -21,6 +21,7 @@ const expectedSignatures: ExpectedSignature[] = [
 	{ file: 'read_file.json', required: ['path'], properties: ['path'] },
 	{ file: 'read_file_partial.json', required: ['path', 'offset', 'limit'], properties: ['path', 'offset', 'limit'] },
 	{ file: 'search_text.json', required: ['pattern'], properties: ['pattern', 'paths'] },
+	{ file: 'write_file.json', required: ['path', 'content'], properties: ['path', 'content'] },
 	{ file: 'fetch_url.json', required: ['url'], properties: ['url'] },
 	{ file: 'agent.json', required: ['role', 'task'], properties: ['role', 'task', 'budget'] },
 	{ file: 'finish.json', required: ['status', 'summary'], properties: ['status', 'summary', 'artifacts', 'error'] },
@@ -59,7 +60,7 @@ describe('canonical tool manifests', () => {
 	})
 
 	test('native tool manifest names match the native handler table from createToolHandlers', () => {
-		const nativeNames = new Set(['list_directory', 'glob_files', 'read_file', 'read_file_partial', 'search_text', 'fetch_url'])
+		const nativeNames = new Set(['list_directory', 'glob_files', 'read_file', 'read_file_partial', 'search_text', 'write_file', 'fetch_url'])
 		const handlers = createToolHandlers({ workspaceRoot: manifestDir, defaultToolTimeoutSeconds: 30 })
 		expect(new Set(Object.keys(handlers))).toEqual(nativeNames)
 		for (const file of expectedSignatures) {

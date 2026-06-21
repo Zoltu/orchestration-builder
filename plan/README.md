@@ -35,32 +35,6 @@ The target user is a **non-developer**. The Guild must ask few, clear clarifying
 
 ## Status
 
-| Step | Focus | Status | File |
-|---|---|---|---|
-| 00 | Foundation (Phases 1–4) | ✅ complete | [`00-foundation-completed.md`](00-foundation-completed.md) |
-| 01 | `write_file` tool | pending | [`01-write-file-tool.md`](01-write-file-tool.md) |
-| 02 | CLI entry point + executor public API | pending | [`02-cli-entry-point.md`](02-cli-entry-point.md) |
-| 03 | In-memory end-to-end integration test | pending | [`03-in-memory-e2e-test.md`](03-in-memory-e2e-test.md) |
-| 04 | `typecheck` tool | pending | [`04-typecheck-tool.md`](04-typecheck-tool.md) |
-| 05 | `test` tool | pending | [`05-test-tool.md`](05-test-tool.md) |
-| 06 | Benchmark suite harness + authoring guide | ✅ complete | [`06-benchmark-harness.md`](06-benchmark-harness.md) |
-| 07 | Quick-fix benchmarks | ✅ complete (in-env; real-run handoff blocked on step 01) | [`07-quick-fix-benchmarks.md`](07-quick-fix-benchmarks.md) |
-| 08 | Medium benchmarks | ✅ complete (in-env; real-run handoff blocked on step 01) | [`08-medium-benchmarks.md`](08-medium-benchmarks.md) |
-| 09 | Large benchmark | ✅ complete (in-env; real-run handoff blocked on step 01) | [`09-large-benchmark.md`](09-large-benchmark.md) |
-| 10 | Web `ask_human` backend state machine | ✅ complete | [`10-web-human-backend.md`](10-web-human-backend.md) |
-| 11 | Web UI server + static assets | ✅ complete | [`11-web-ui-server.md`](11-web-ui-server.md) |
-| 12 | `main.ts --serve` wiring | pending | [`12-main-serve-wiring.md`](12-main-serve-wiring.md) |
-| 13 | Dockerfile + deployment docs | pending | [`13-dockerfile-deployment.md`](13-dockerfile-deployment.md) |
-| 14 | Foundry foundation: types, config, branch management | ✅ complete | [`14-foundry-foundation.md`](14-foundry-foundation.md) |
-| 15 | Foundry validation + scoring | pending | [`15-foundry-validation-scoring.md`](15-foundry-validation-scoring.md) |
-| 16 | Foundry branch evaluation | pending | [`16-foundry-evaluation.md`](16-foundry-evaluation.md) |
-| 17 | Foundry hypothesis generation | pending | [`17-foundry-hypothesis.md`](17-foundry-hypothesis.md) |
-| 18 | Foundry merge + reporting | pending | [`18-foundry-merge-report.md`](18-foundry-merge-report.md) |
-| 19 | Foundry CLI + optimization loop + safeguards | pending | [`19-foundry-cli-loop.md`](19-foundry-cli-loop.md) |
-| 20 | Per-run environment isolation (operator-collaboration) | pending | [`20-environment-isolation.md`](20-environment-isolation.md) |
-| 21 | `run_shell` tool (gated on step 20) | pending | [`21-run-shell-tool.md`](21-run-shell-tool.md) |
-| 22 | Executor role-tree log events (removes step-11 debt) | pending | [`22-executor-role-events.md`](22-executor-role-events.md) |
-
 When a step completes, mark its status `✅ complete` and add a dated closeout section to its file (see `00-foundation-completed.md` for the format) recording any deviations from the plan wording, so future sessions inherit reality rather than aspiration.
 
 ## Tracked technical debt

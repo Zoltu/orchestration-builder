@@ -5,6 +5,7 @@ import { createListDirectory } from './tools/list-directory.js'
 import { createReadFile } from './tools/read-file.js'
 import { createReadFilePartial } from './tools/read-file-partial.js'
 import { createSearchText } from './tools/search-text.js'
+import { createWriteFile } from './tools/write-file.js'
 
 export interface NativeToolsConfig {
 	workspaceRoot: string
@@ -18,6 +19,7 @@ export function createToolHandlers(config: NativeToolsConfig): Record<string, To
 	const read = createReadFile(config.workspaceRoot)
 	const readPartial = createReadFilePartial(config.workspaceRoot)
 	const search = createSearchText(config.workspaceRoot)
+	const write = createWriteFile(config.workspaceRoot)
 	const fetch = createFetchUrl(config.defaultToolTimeoutSeconds * 1000, config.fetcher)
 	return {
 		list_directory: list,
@@ -25,6 +27,7 @@ export function createToolHandlers(config: NativeToolsConfig): Record<string, To
 		read_file: read,
 		read_file_partial: readPartial,
 		search_text: search,
+		write_file: write,
 		fetch_url: fetch,
 	}
 }
