@@ -47,7 +47,7 @@ The target user is a **non-developer**. The Guild must ask few, clear clarifying
 | 07 | Quick-fix benchmarks | ✅ complete (in-env; real-run handoff blocked on step 01) | [`07-quick-fix-benchmarks.md`](07-quick-fix-benchmarks.md) |
 | 08 | Medium benchmarks | ✅ complete (in-env; real-run handoff blocked on step 01) | [`08-medium-benchmarks.md`](08-medium-benchmarks.md) |
 | 09 | Large benchmark | ✅ complete (in-env; real-run handoff blocked on step 01) | [`09-large-benchmark.md`](09-large-benchmark.md) |
-| 10 | Web `ask_human` backend state machine | pending | [`10-web-human-backend.md`](10-web-human-backend.md) |
+| 10 | Web `ask_human` backend state machine | ✅ complete | [`10-web-human-backend.md`](10-web-human-backend.md) |
 | 11 | Web UI server + static assets | pending | [`11-web-ui-server.md`](11-web-ui-server.md) |
 | 12 | `main.ts --serve` wiring | pending | [`12-main-serve-wiring.md`](12-main-serve-wiring.md) |
 | 13 | Dockerfile + deployment docs | pending | [`13-dockerfile-deployment.md`](13-dockerfile-deployment.md) |

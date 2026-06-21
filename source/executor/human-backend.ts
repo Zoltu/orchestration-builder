@@ -2,12 +2,64 @@ export interface HumanBackend {
 	ask(question: string, context?: string): Promise<string>
 }
 
-export interface HumanBackendConfig {
-	mode: 'stub'
+export type HumanBackendConfig = { mode: 'stub' } | { mode: 'web' }
+
+export interface PendingQuestion {
+	id: string
+	question: string
+	context?: string
+	askedAt: string
 }
 
-export function createHumanBackend(_config: HumanBackendConfig): HumanBackend {
+export type AnswerSubmitResult =
+	| { kind: 'resolved'; question: PendingQuestion }
+	| { kind: 'not_found' }
+
+export interface WebHumanBackend extends HumanBackend {
+	ask(question: string, context?: string): Promise<string>
+	submitAnswer(id: string, answer: string): AnswerSubmitResult
+	pendingQuestions(): PendingQuestion[]
+}
+
+interface PendingEntry {
+	question: PendingQuestion
+	resolve: (answer: string) => void
+}
+
+const stubBackend: HumanBackend = {
+	ask: async () => 'use your best judgement',
+}
+
+export function createWebHumanBackend(): WebHumanBackend {
+	const pending = new Map<string, PendingEntry>()
+
 	return {
-		ask: async () => 'use your best judgement',
+		ask(question, context) {
+			const id = crypto.randomUUID()
+			const pendingQuestion: PendingQuestion = {
+				id,
+				question,
+				...(context !== undefined ? { context } : {}),
+				askedAt: new Date().toISOString(),
+			}
+			return new Promise<string>((resolve) => {
+				pending.set(id, { question: pendingQuestion, resolve })
+			})
+		},
+		submitAnswer(id, answer) {
+			const entry = pending.get(id)
+			if (entry === undefined) return { kind: 'not_found' }
+			pending.delete(id)
+			entry.resolve(answer)
+			return { kind: 'resolved', question: entry.question }
+		},
+		pendingQuestions() {
+			return Array.from(pending.values(), (entry) => entry.question)
+		},
 	}
+}
+
+export function createHumanBackend(config: HumanBackendConfig): HumanBackend {
+	if (config.mode === 'stub') return stubBackend
+	return createWebHumanBackend()
 }
