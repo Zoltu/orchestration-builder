@@ -1,9 +1,6 @@
 // Public surface of the executor runtime.
-//
-// External callers — the CLI entry point (`source/main.ts`) and the offline
-// Foundry — import from this module only. Internal helpers (the engine loop,
-// context builder, budget checks, and the built-in tool handlers that are
-// assembled mid-run with live role state) stay private to their own modules.
+// External callers — the CLI entry point (`source/main.ts`) and the offline Foundry — import from this module only.
+// Internal helpers (the engine loop, context builder, budget checks, and the built-in tool handlers that are assembled mid-run with live role state) stay private to their own modules.
 // See docs/executor.md "Run lifecycle".
 
 export { runExecutor } from './executor.js'

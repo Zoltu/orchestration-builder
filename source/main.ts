@@ -1,11 +1,7 @@
 // CLI entry point for the Adaptive Orchestrator executor.
-//
-// This is the integration shell: the only module that reads `process.argv` and
-// `Bun.env`, and the only place that assembles real leaf factories and hands
-// them to `runExecutor`. It holds no business logic of its own — argument
-// parsing lives in `main-args.ts` (unit-tested), and the run itself is the
-// already-tested executor orchestration. Per the testing policy this file is
-// not unit-tested.
+// This is the integration shell: the only module that reads `process.argv` and `Bun.env`, and the only place that assembles real leaf factories and hands them to `runExecutor`.
+// It holds no business logic of its own — argument parsing lives in `main-args.ts` (unit-tested), and the run itself is the already-tested executor orchestration.
+// Per the testing policy this file is not unit-tested.
 
 import * as path from 'node:path'
 
@@ -41,9 +37,7 @@ function generateRunId(now: Date): string {
 function buildHumanBackend(mode: HumanBackendMode | undefined): HumanBackend {
 	const resolved = mode ?? 'stub'
 	if (resolved === 'stub') return createHumanBackend({ mode: 'stub' })
-	// 'foundry' and 'web' need infrastructure (the Foundry loop, the web UI
-	// server) that the CLI entry point does not stand up; only 'stub' answers
-	// without external help.
+	// 'foundry' and 'web' need infrastructure (the Foundry loop, the web UI server) that the CLI entry point does not stand up; only 'stub' answers without external help.
 	throw new Error(`--human-backend "${resolved}" is not supported by the CLI yet; only "stub" is available.`)
 }
 
@@ -72,9 +66,7 @@ async function run(cli: ParsedCliArgs): Promise<RunMeta> {
 		defaultToolTimeoutSeconds: loadedGuild.config.executor.defaultToolTimeoutSeconds,
 	})
 
-	// The Guild is loaded once and reused for the executor's loadGuild
-	// dependency so the model config bound to the LLM caller and the config the
-	// executor sees are the same object, with no second disk read.
+	// The Guild is loaded once and reused for the executor's loadGuild dependency so the model config bound to the LLM caller and the config the executor sees are the same object, with no second disk read.
 	const cachedLoadGuild: LoadGuild = () => loadedGuild
 
 	const dependencies: ExecutorDependencies = {

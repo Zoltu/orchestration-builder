@@ -1,8 +1,6 @@
 // Pure CLI argument parser for the executor entry point.
-//
-// `main.ts` is the integration shell and is not unit-tested; this module holds
-// the testable surface. It takes the argv slice (the tokens after the program
-// name) and returns either parsed options, a help request, or a clear error.
+// `main.ts` is the integration shell and is not unit-tested; this module holds the testable surface.
+// It takes the argv slice (the tokens after the program name) and returns either parsed options, a help request, or a clear error.
 // It performs no I/O and touches no globals.
 
 export type HumanBackendMode = 'stub' | 'foundry' | 'web'

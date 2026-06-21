@@ -1,7 +1,6 @@
 // Runtime type guards and validators for external JSON objects.
 // No typecasts are used; every check is expressed as a type predicate or assertion.
-// Boolean guards (is*) narrow types; validate* functions throw a ValidationError with
-// a precise path-based message on failure.
+// Boolean guards (is*) narrow types; validate* functions throw a ValidationError with a precise path-based message on failure.
 
 import { isErrorKind, ValidationError } from './errors.js'
 import {
@@ -264,7 +263,6 @@ export function isLogEvent(value: unknown): value is LogEvent {
 	return true
 }
 
-// Asserts that the value passes the guard; otherwise throws a ValidationError with a path-based message.
 function ensure(guard: (value: unknown) => boolean, value: unknown, path: string, message: string): void {
 	if (!guard(value)) throw new ValidationError(path, message)
 }

@@ -1,6 +1,5 @@
-// Plain, dependency-free client. Polls the JSON API and renders into the DOM using
-// createElement/textContent only — untrusted run content (log lines, summaries,
-// questions) is never injected via innerHTML, so it cannot break out of the DOM.
+// Plain, dependency-free client.
+// Polls the JSON API and renders into the DOM using createElement/textContent only — untrusted run content (log lines, summaries, questions) is never injected via innerHTML, so it cannot break out of the DOM.
 
 const STATUS_LABELS = {
 	unknown: 'in progress',

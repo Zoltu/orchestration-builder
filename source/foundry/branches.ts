@@ -1,21 +1,14 @@
-// Foundry branch management: a filesystem leaf that copies the baseline Guild
-// into per-branch directories, applies a hypothesis's file edits, and archives
-// / restores baselines through history. It is the only Foundry module that
-// touches the filesystem and is therefore exported as a factory; its logic is
-// intentionally thin (the "which files to edit" decision belongs to hypothesis
-// generation, not here). Branch Guilds are validated end-to-end with the
-// existing Guild loader so this module never re-implements Guild validation.
+// Foundry branch management: a filesystem leaf that copies the baseline Guild into per-branch directories, applies a hypothesis's file edits, and archives / restores baselines through history.
+// It is the only Foundry module that touches the filesystem and is therefore exported as a factory; its logic is intentionally thin (the "which files to edit" decision belongs to hypothesis generation, not here).
+// Branch Guilds are validated end-to-end with the existing Guild loader so this module never re-implements Guild validation.
 //
 // Data layout (docs/foundry.md "Foundry data layout"), rooted at `baseDir`:
 //   baseline/                 latest accepted baseline Guild copy
 //   branches/<branch_id>/     a candidate branch Guild
 //   history/<timestamp>/     an archived baseline, restorable on rollback
 //
-// All filesystem reads use existsSync-before-read; missing baseline / history
-// entries are surfaced as plain Errors (operational preconditions), while
-// malformed edits and invalid resulting Guilds are surfaced as ValidationError
-// (invalid data). Branch writes are confined to the branch directory so a bad
-// hypothesis cannot corrupt the baseline or other branches.
+// All filesystem reads use existsSync-before-read; missing baseline / history entries are surfaced as plain Errors (operational preconditions), while malformed edits and invalid resulting Guilds are surfaced as ValidationError (invalid data).
+// Branch writes are confined to the branch directory so a bad hypothesis cannot corrupt the baseline or other branches.
 
 import * as fs from 'node:fs'
 import * as path from 'node:path'
@@ -50,9 +43,7 @@ function isJsonFile(filePath: string): boolean {
 	return filePath.toLowerCase().endsWith('.json')
 }
 
-// Confirms a .json edit's content parses as JSON before writing it, so an
-// invalid JSON result is surfaced as a clear ValidationError at the offending
-// change index rather than as a SyntaxError crash out of the Guild loader.
+// Confirms a .json edit's content parses as JSON before writing it, so an invalid JSON result is surfaced as a clear ValidationError at the offending change index rather than as a SyntaxError crash out of the Guild loader.
 function ensureJsonEditParses(edit: string, changePath: string, changeIndex: number): void {
 	try {
 		JSON.parse(edit)
@@ -105,10 +96,8 @@ export function createBranchManager(baseDir: string): BranchManager {
 			fs.writeFileSync(targetPath, change.edit)
 		}
 
-		// Validate the resulting branch Guild end-to-end: guild.json structure,
-		// every referenced prompt file, and every referenced tool manifest. A
-		// failure here is a genuine failure to produce a usable branch, so the
-		// loader's ValidationError is allowed to propagate.
+		// Validate the resulting branch Guild end-to-end: guild.json structure, every referenced prompt file, and every referenced tool manifest.
+		// A failure here is a genuine failure to produce a usable branch, so the loader's ValidationError is allowed to propagate.
 		loadGuild(branchDir)
 	}
 

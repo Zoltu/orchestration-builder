@@ -1,7 +1,6 @@
-// Web UI server. A thin HTTP leaf built on Bun.serve: it routes requests, serves
-// the plain static assets, and delegates JSON shaping to render.ts and question/
-// answer handling to the RunState façade from source/executor/run-state.ts. No
-// business logic lives here.
+// Web UI server.
+// A thin HTTP leaf built on Bun.serve: it routes requests, serves the plain static assets, and delegates JSON shaping to render.ts and question/answer handling to the RunState façade from source/executor/run-state.ts.
+// No business logic lives here.
 
 import * as path from 'node:path'
 import { fileURLToPath } from 'node:url'

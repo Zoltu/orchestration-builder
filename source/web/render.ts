@@ -1,7 +1,5 @@
-// Pure helpers that turn raw run artifacts and pending questions into the JSON
-// shapes returned by the web API. All parsing, validation, truncation, and
-// role-activity derivation lives here so it is exercisable in-memory; the server
-// module is a thin HTTP leaf that delegates to these helpers.
+// Pure helpers that turn raw run artifacts and pending questions into the JSON shapes returned by the web API.
+// All parsing, validation, truncation, and role-activity derivation lives here so it is exercisable in-memory; the server module is a thin HTTP leaf that delegates to these helpers.
 
 import type { PendingQuestion } from '../executor/human-backend.js'
 import { isRunMeta } from '../shared/validation.js'
@@ -17,10 +15,8 @@ function isObject(value: unknown): value is Record<string, unknown> {
 	return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
-// Parses meta.json text into a validated RunMeta, or null when absent. A present
-// but malformed meta is treated as absent: meta.json is written atomically at run
-// completion, so a malformed read is most likely a torn read mid-write, and the UI
-// should fall back to "in progress" rather than crash.
+// Parses meta.json text into a validated RunMeta, or null when absent.
+// A present but malformed meta is treated as absent: meta.json is written atomically at run completion, so a malformed read is most likely a torn read mid-write, and the UI should fall back to "in progress" rather than crash.
 function parseMeta(metaText: string | null): RunMeta | null {
 	if (metaText === null) return null
 	let parsed: unknown
@@ -32,10 +28,9 @@ function parseMeta(metaText: string | null): RunMeta | null {
 	return isRunMeta(parsed) ? parsed : null
 }
 
-// Parses log.jsonl text into a list of validated log events. Each non-empty line is
-// parsed independently; lines that fail to parse or do not satisfy the LogEvent shape
-// are skipped. The log is append-only and read concurrently with writes, so a partial
-// final line is the expected failure mode and must not abort the whole tail.
+// Parses log.jsonl text into a list of validated log events.
+// Each non-empty line is parsed independently; lines that fail to parse or do not satisfy the LogEvent shape are skipped.
+// The log is append-only and read concurrently with writes, so a partial final line is the expected failure mode and must not abort the whole tail.
 export function parseLogEvents(logText: string): LogEvent[] {
 	const events: LogEvent[] = []
 	for (const line of logText.split('\n')) {
@@ -83,10 +78,9 @@ export interface RoleActivity {
 	toolsCalled: string[]
 }
 
-// Derives a per-role activity summary from the log event stream. The executor does
-// not persist a live role tree, so the UI renders the roles that appear in the log
-// with their observed activity. A strict parent-child tree would require the executor
-// to log agent-spawn events with parent, child, and depth; that is tracked as debt.
+// Derives a per-role activity summary from the log event stream.
+// The executor does not persist a live role tree, so the UI renders the roles that appear in the log with their observed activity.
+// A strict parent-child tree would require the executor to log agent-spawn events with parent, child, and depth.
 export function deriveRoleActivity(logEvents: LogEvent[]): RoleActivity[] {
 	const order: string[] = []
 	const byRole = new Map<string, RoleActivity>()
@@ -158,8 +152,8 @@ export interface ApiQuestion {
 	askedAt: string
 }
 
-// Shapes pending questions into the stable API form. `context` is included only when
-// defined so the JSON omits it for contextless questions; order is preserved.
+// Shapes pending questions into the stable API form.
+// `context` is included only when defined so the JSON omits it for contextless questions; order is preserved.
 export function renderPendingQuestions(questions: PendingQuestion[]): ApiQuestion[] {
 	return questions.map((question) => {
 		const shaped: ApiQuestion = {

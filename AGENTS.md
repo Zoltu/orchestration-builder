@@ -336,6 +336,8 @@ Newlines carry semantic meaning. They separate statements, definitions, and logi
 
 - If a line is too long, refactor the code (extract a variable, split a function, introduce a helper) rather than wrapping it with arbitrary newlines.
 - Long parameter lists, long import statements, and long string literals are acceptable as single lines when wrapping would reduce clarity.
+- Do not hand-wrap prose, comments, doc blocks, or string/format/error-message literals. Write each sentence on one line and let the editor soft-wrap. A newline in prose marks a sentence or paragraph boundary; a newline in a struct separates logically grouped fields; a newline in a function separates distinct phases. A break in the middle of a single sentence or expression is wrong even if the line is long.
+- This project ships no code formatter (no Biome/Prettier/ESLint/etc.) by policy — the dependency surface is restricted to Bun built-ins, `@types/bun`, and `typescript`, and only `bun run typecheck` and `bun test` gate a change. Wrapping is therefore a manual judgment governed by this section, not a formatter config; do not hand-wrap to defeat an imagined width, and do not introduce a formatter dependency to "fix" it.
 - Use exactly one blank line between top-level definitions and between logical groups. Never use two or more consecutive blank lines.
 - Files end with a single trailing newline; do not leave trailing whitespace on any line.
 
@@ -347,6 +349,37 @@ Source code must stand on its own. The development plan (`plan/`) is a transient
 - Comments that need to point to design context reference the permanent design docs (`docs/*.md`), which outlive the plan. Reference a doc by its filename and section heading, e.g. `docs/foundry.md "Foundry data layout"`.
 - Comments that need to point to a sibling module reference it by module path or symbol name (e.g. "applied by the branch manager", "the input to scoring"), not by the step that builds it. The plan's step boundaries are an implementation scheduling detail, not a property of the finished code.
 - The `plan/` directory is the only place that discusses steps, phases, sequencing, or the plan itself. `AGENTS.md` and `plan/README.md` are the exception: they govern the plan's own hygiene.
+
+### Comments explain why, never what
+
+A comment earns its place only by adding something the name, signature, and type cannot: the reason for a non-obvious choice, a constraint the code assumes but does not enforce, a hazard a reader would not anticipate, or a link to the decision that motivated it. A comment that paraphrases the item's name, signature, type, or obvious behavior is noise and a future source of drift — delete it.
+
+- Keep comments that explain an invariant, a hazard, an RAII/destructor-style contract, a deliberately-omitted API, a magic constant's meaning, or a non-obvious rationale. When in doubt whether a comment carries information the code itself does not, keep it.
+- No comments addressed to a future author. Bare `TODO`, `FIXME`, `XXX`, `HACK`, "later", "placeholder", and "not yet supported" notes do not belong in source. If the underlying work is real, record it in `plan/README.md`'s "Tracked technical debt" table (and name the step that will remove it) or in `docs/`, and leave an inline reference only if the project convention requires one.
+- One sentence per line in comments and doc blocks. Do not break a single sentence across multiple lines for width; let the reader's editor soft-wrap. (See "Formatting" below.)
+
+**Good** — explains *why*, information the code cannot carry (`source/web/render.ts`):
+
+```typescript
+// A present but malformed meta is treated as absent: meta.json is written atomically at run
+// completion, so a malformed read is most likely a torn read mid-write, and the UI should fall
+// back to "in progress" rather than crash.
+function parseMeta(metaText: string | null): RunMeta | null {
+```
+
+**Bad** — restates *what* the signature already says (removed during the one-time cleanup):
+
+```typescript
+// Validates an eval.json object and returns it typed as EvalConfig.
+// Throws a ValidationError with a path-based message when the input is malformed.
+export function parseEvalConfig(value: unknown): EvalConfig {
+```
+
+### Enforcement
+
+Comment and newline quality is a review judgment, not a build-gate failure. No automated check is wired into `bun test`: mechanically detecting "reiterative comments" or "arbitrary wraps" produces false positives that make a lint a burden rather than a safety net, and a bare-`TODO` gate was rejected because this project has no issue tracker for such notes to reference (real work is tracked in `plan/README.md`'s debt table instead). Re-check comment and newline hygiene against this section and "Formatting" before declaring any change done — reiterative comments and mid-sentence wraps accumulate silently.
+
+A one-time cleanup pass established this baseline: reiterative comments were deleted, future-author notes and plan/step references ("a future step", "later steps", "Steps 12–14") were removed from `source/`, and every multi-line comment was reflowed to one sentence per line. Benchmark fixture sources (`benchmarks/**/src`, `benchmarks/**/tests`, `eval.json`) were left untouched as test inputs; their README/eval spec docs already use single-line prose.
 
 ---
 

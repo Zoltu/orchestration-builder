@@ -8,8 +8,8 @@ import { createGuildLoader } from '../executor/loader.ts'
 import { createBranchManager } from './branches.ts'
 import type { Hypothesis } from './types.ts'
 
-// A minimal, loader-valid Guild tree. The branch manager validates resulting
-// branches with createGuildLoader, so the baseline must itself load cleanly.
+// A minimal, loader-valid Guild tree.
+// The branch manager validates resulting branches with createGuildLoader, so the baseline must itself load cleanly.
 const baselineGuildJson = {
 	schemaVersion: 1,
 	model: { name: 'm', apiBase: 'http://x', contextWindow: 1, generation: {} },

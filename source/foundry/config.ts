@@ -1,8 +1,6 @@
-// Pure validation for the Foundry config and hypothesis objects. Mirrors the
-// Guild validation pattern in source/shared/validation.ts: boolean guards
-// (is*) narrow types without throwing, and parseFoundryConfig asserts the
-// structure and throws a path-based ValidationError on malformed input. No
-// typecasts are used; every check is expressed as a type predicate.
+// Pure validation for the Foundry config and hypothesis objects.
+// Mirrors the Guild validation pattern in source/shared/validation.ts: boolean guards (is*) narrow types without throwing, and parseFoundryConfig asserts the structure and throws a path-based ValidationError on malformed input.
+// No typecasts are used; every check is expressed as a type predicate.
 
 import { ValidationError } from '../shared/errors.js'
 import type {
@@ -150,9 +148,7 @@ function assertFoundryConfig(value: unknown): asserts value is FoundryConfig {
 	assertFoundryEvaluationConfig(value.evaluation, 'evaluation')
 }
 
-// Validates a Foundry config object and returns it typed as FoundryConfig.
-// Throws a ValidationError with a path-based message when the input is
-// malformed. Mirrors parseEvalConfig / validateGuildConfig.
+// Mirrors parseEvalConfig / validateGuildConfig.
 export function parseFoundryConfig(value: unknown): FoundryConfig {
 	assertFoundryConfig(value)
 	return value

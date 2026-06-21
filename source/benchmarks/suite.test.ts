@@ -1,9 +1,6 @@
-// Suite-validity guard: loads every benchmark's eval.json with parseEvalConfig
-// and asserts each is valid and each referenced initial file (the README.md task
-// description that is copied into the run workspace) exists and is non-empty.
-// This guards the suite data without running the executor. It mirrors the
-// data-validity style of source/executor/seed-guild.test.ts and
-// source/executor/tool-manifests.test.ts, which read repo fixtures directly.
+// Suite-validity guard: loads every benchmark's eval.json with parseEvalConfig and asserts each is valid and each referenced initial file (the README.md task description that is copied into the run workspace) exists and is non-empty.
+// This guards the suite data without running the executor.
+// It mirrors the data-validity style of source/executor/seed-guild.test.ts and source/executor/tool-manifests.test.ts, which read repo fixtures directly.
 
 import { describe, expect, test } from 'bun:test'
 import * as fs from 'node:fs'

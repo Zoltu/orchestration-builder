@@ -1,5 +1,3 @@
-// Shared error kinds, result-card shapes, and constructors.
-
 import type { ErrorKind, ResultCard, ToolResult } from './types.js'
 
 export class ValidationError extends Error {

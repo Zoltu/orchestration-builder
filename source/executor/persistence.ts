@@ -71,9 +71,9 @@ export function createSnapshotWorkspace(runId: string, baseDir: string = 'data/r
 	}
 }
 
-// Raw run artifacts read from disk for the web UI. `metaText` is null while a run
-// is in progress (meta.json is written only at completion). `logText` is the full
-// append-only log.jsonl contents (empty string when no events have been logged).
+// Raw run artifacts read from disk for the web UI.
+// `metaText` is null while a run is in progress (meta.json is written only at completion).
+// `logText` is the full append-only log.jsonl contents (empty string when no events have been logged).
 export interface RunSnapshotRaw {
 	metaText: string | null
 	logText: string

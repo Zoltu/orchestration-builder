@@ -1,9 +1,5 @@
-// Orchestration: runs every benchmark in a suite directory through the executor
-// and the validation harness, then writes a machine-readable summary. This is
-// testable orchestration: it receives its leaf dependencies explicitly and
-// touches no environment variables, command-line arguments, or external systems
-// directly. The CLI wrapper (a future step) assembles the real leaves and calls
-// runSuite; in-memory tests inject fakes.
+// Orchestration: runs every benchmark in a suite directory through the executor and the validation harness, then writes a machine-readable summary.
+// This is testable orchestration: it receives its leaf dependencies explicitly and touches no environment variables, command-line arguments, or external systems directly.
 
 import * as path from 'node:path'
 import { evaluateValidation } from './validation.js'
