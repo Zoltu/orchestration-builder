@@ -56,3 +56,11 @@ Small to medium — a single fixed-command subprocess leaf with timeout/capture,
 ## Operator handoff
 
 None — fully in-memory (tests use temp-dir TS fixtures). No real safety properties depend on deployment; the fixed command has no network and no writes.
+
+## Closeout
+
+Implemented as written, with one adaptation to the testing approach recorded here so future sessions inherit reality.
+
+**Adaptation — injectable subprocess runner instead of real-`tsc` temp-dir fixtures.** Deliverable 3 as written suggested spawning real `bun --bun tsc --noEmit` against tiny temp-dir TS fixtures to exercise exit-code mapping. That conflicts with the project's hard "in-memory, fast, no external services" testing rule and the "leaf functions are not unit-tested" architecture: spawning `tsc` couples the unit suite to the installed toolchain and makes it slow. The leaf (`createBunSubprocessRunner`, the `Bun.spawn` wrapper) is therefore injectable, mirroring the `fetch-url.ts` / `fetcher` precedent: `createTypecheck(workspaceRoot, defaultTimeoutSeconds, runner)` takes a `SubprocessRunner` leaf. `typecheck.test.ts` exercises the orchestration (timeout cap, exit-code-as-success mapping, timeout → `kind: 'timeout'` with `details.afterSeconds`, stdout/stderr truncation via the shared `truncateToolOutput` helper, spawn-failure → error result, argument validation) with a fake runner — fully in-memory. One real-subprocess test of `createBunSubprocessRunner` itself verifies the timeout-kills-the-child safety property (no orphaned processes) that a fake cannot express; it spawns `bun -e` (always available in the test runtime) with a 200 ms timeout and asserts `timedOut`. `createToolHandlers` wires the real `createBunSubprocessRunner()` internally, so existing callers (`main.ts`, conformance tests) are unchanged.
+
+All acceptance criteria met: `bun run typecheck` and `bun test source/` pass (349 tests); a non-zero exit is a `success` result with `exitCode`; a timeout returns `kind: 'timeout'` with `details.afterSeconds`; the conformance test asserts the new manifest count (13 manifests). The tracked debt row (hardcoded `bun --bun tsc --noEmit`, removed in step 20) is already in `plan/README.md` and step 20's deliverable 4 already calls out generalizing the checker-tool commands — no plan-README edit was needed.

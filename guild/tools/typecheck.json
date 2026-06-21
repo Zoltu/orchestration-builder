@@ -1,0 +1,13 @@
+{
+	"name": "typecheck",
+	"description": "Run the workspace typechecker (currently Bun/TSC) and return its diagnostics. Runs a single fixed command with no model-chosen arguments, no network, and no installs. A non-zero exit code is a normal result to read and iterate on, not an error.",
+	"parameters": {
+		"type": "object",
+		"properties": {
+			"timeoutSeconds": {
+				"type": "number",
+				"description": "Optional timeout in seconds. Capped by the executor default tool timeout; a value above the cap is clamped to the cap."
+			}
+		}
+	}
+}

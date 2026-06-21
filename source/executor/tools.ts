@@ -5,6 +5,7 @@ import { createListDirectory } from './tools/list-directory.js'
 import { createReadFile } from './tools/read-file.js'
 import { createReadFilePartial } from './tools/read-file-partial.js'
 import { createSearchText } from './tools/search-text.js'
+import { createBunSubprocessRunner, createTypecheck } from './tools/typecheck.js'
 import { createWriteFile } from './tools/write-file.js'
 
 export interface NativeToolsConfig {
@@ -21,6 +22,7 @@ export function createToolHandlers(config: NativeToolsConfig): Record<string, To
 	const search = createSearchText(config.workspaceRoot)
 	const write = createWriteFile(config.workspaceRoot)
 	const fetch = createFetchUrl(config.defaultToolTimeoutSeconds * 1000, config.fetcher)
+	const typecheck = createTypecheck(config.workspaceRoot, config.defaultToolTimeoutSeconds, createBunSubprocessRunner())
 	return {
 		list_directory: list,
 		glob_files: glob,
@@ -29,5 +31,6 @@ export function createToolHandlers(config: NativeToolsConfig): Record<string, To
 		search_text: search,
 		write_file: write,
 		fetch_url: fetch,
+		typecheck,
 	}
 }
