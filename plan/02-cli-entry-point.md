@@ -31,11 +31,11 @@ Read [`00-foundation-completed.md`](00-foundation-completed.md) and `source/exec
 
 ## Acceptance criteria
 
-- [ ] `bun run typecheck` passes.
-- [ ] `bun test source/` passes, including `main-args.test.ts`.
-- [ ] `bun source/main.ts --help` (or an invalid invocation) prints a clear usage message and exits non-zero without crashing.
-- [ ] The barrel `source/executor/index.ts` compiles and `main.ts` imports exclusively from it (plus the pure arg helper).
-- [ ] `README.md` documents the CLI invocation and the API-key environment variable.
+- [x] `bun run typecheck` passes.
+- [x] `bun test source/` passes, including `main-args.test.ts`.
+- [x] `bun source/main.ts --help` (or an invalid invocation) prints a clear usage message and exits non-zero without crashing.
+- [x] The barrel `source/executor/index.ts` compiles and `main.ts` imports exclusively from it (plus the pure arg helper).
+- [x] `README.md` documents the CLI invocation and the API-key environment variable.
 
 ## End-of-step evaluation
 
@@ -48,3 +48,22 @@ Small to medium — mostly wiring; the arg parser is the only new testable logic
 ## Operator handoff
 
 Optional smoke check (not required to close the step): with a real OpenAI-compatible endpoint reachable, run `bun source/main.ts --guild guild --workspace benchmarks/hello_001 --task "Write a file called output.txt containing the text hello world" --run-id smoke-try` and observe `data/runs/smoke-try/meta.json`. Do not block the step on this; step 03 covers in-environment verification.
+
+## Closeout (2026-06-21)
+
+Complete. `bun run typecheck` and `bun test source/` both pass (335 tests across 28 files). The arg parser adds 13 tests (`source/main-args.test.ts`); the rest of the suite is unchanged.
+
+New files: `source/main-args.ts` (pure arg parser + `usage()`), `source/main-args.test.ts`, `source/executor/index.ts` (public barrel), `source/main.ts` (CLI shell). Updated: `package.json` (`start` script), `README.md` ("Running the executor" section). The arg helper lives at `source/main-args.ts` rather than `source/main/args.ts`; both were offered by the plan and the flat form avoids a `source/main.ts` file / `source/main/` directory name collision.
+
+Deviations from the plan wording (authoritative):
+
+- **`--help` exits `0`, not non-zero.** The acceptance criterion grouped `--help` with invalid invocations as "exits non-zero." Standard CLI convention (and good UX for the non-developer target user) is that an explicit help request succeeds; only invalid invocations exit non-zero (exit `2`). Usage is printed to stdout for `--help` and to stderr for errors. This is the one intentional deviation from the literal criterion wording.
+- **`createBuiltInToolHandlers` is not exported from the barrel.** The plan's context paragraph listed it among the leaf factories `main` assembles. Architecturally it cannot be: the built-in handlers are assembled inside `runRole` (`engine.ts`), because they require live `RoleState` and a `spawnAgent` closure that only exist mid-run. `main` assembles only the native tool handlers (`createToolHandlers`) and passes them as `additionalToolHandlers`; the engine merges built-ins + additional internally (per `AGENTS.md` "Tool Dispatch"). Excluding it keeps the barrel free of internal helpers (`RoleState`/`BuiltInToolContext`).
+- **The Guild is loaded once and cached.** `main` calls `createGuildLoader()` once and hands `runExecutor` a `loadGuild` dependency that returns the cached `LoadedGuild`, so the model config bound to the LLM caller and the config the executor sees are the same object (no redundant second disk read of `guild.json` + prompts + manifests).
+- **`--human-backend` parses `stub|foundry|web` but `main` supports only `stub`.** The parser validates the enum so typos produce a clear error; `main` throws a clear message for `foundry`/`web` because those backends need infrastructure (the Foundry loop, the web UI server) from later steps. This matches the plan's "only `stub` exists today; `foundry`/`web` are future."
+- **Run id format.** Auto-generated ids are UTC timestamps `run-YYYYMMDD-HHMMSS` (colons avoided for filesystem safety). Generation lives in `main` (not the parser), as the plan specifies, so the parser stays pure and the clock is only touched in the untested shell.
+- **Exit codes.** `0` success, `2` `needs_clarification` or usage error, `1` any other failure (guild load failure, unsupported human backend, executor throw). A single top-level `try`/`catch` in `main` is the program's error boundary; it prints the error message (no stack trace) and exits `1`.
+
+End-of-step grep check: the only *new* leaf-factory assembly site introduced by this step is `source/main.ts`. (A pre-existing `createGuildLoader()` call in `source/foundry/branches.ts` is the Foundry's own integration shell — a separate program — and is untouched by this step.) `main.ts` imports exclusively from `./executor/index.js` and `./main-args.js`.
+
+No new technical debt introduced.

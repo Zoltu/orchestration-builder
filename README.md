@@ -23,6 +23,42 @@ rm output.txt
 
 The smoke benchmark is a Foundry validation harness, not a unit test; it is intentionally excluded from `bun test`.
 
+## Running the executor
+
+The CLI entry point (`source/main.ts`) invokes the executor end-to-end against a real model endpoint. It assembles the runtime from the Guild and the environment, so no secrets are stored in the Guild itself.
+
+```bash
+bun source/main.ts \
+  --guild guild \
+  --workspace benchmarks/hello_001 \
+  --task "Write a file called output.txt containing the text hello world" \
+  --run-id smoke-try
+```
+
+Or via the `start` script:
+
+```bash
+bun run start -- --guild guild --workspace benchmarks/hello_001 --task "..." 
+```
+
+Flags:
+
+- `--guild <path>` (required) — path to the Guild directory (contains `guild.json`).
+- `--workspace <path>` (required) — workspace copied into `data/runs/<run-id>/workspace/`.
+- `--task <text>` (required) — task description handed to the entry role.
+- `--run-id <id>` (optional) — run id; auto-generated as a UTC timestamp when omitted.
+- `--human-backend <stub|foundry|web>` (optional, defaults to `stub`) — backend for `ask_human`. Only `stub` is supported by the CLI today; `foundry` and `web` require infrastructure added by later work.
+- `-h, --help` — print usage.
+
+The model API key is read from the `ORCHESTRATOR_API_KEY` environment variable and injected into the model configuration at startup; it is never read into or stored in the Guild:
+
+```bash
+export ORCHESTRATOR_API_KEY=sk-...
+bun source/main.ts --guild guild --workspace benchmarks/hello_001 --task "..."
+```
+
+Each run writes `meta.json`, `log.jsonl`, and the final `workspace/` under `data/runs/<run-id>/`. The process exits `0` on success, `2` on `needs_clarification` or a usage error, and `1` on any other failure.
+
 ## Design documents
 
 1. [`docs/overview.md`](docs/overview.md) — purpose, goals, and use cases
