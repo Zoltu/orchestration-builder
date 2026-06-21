@@ -1,0 +1,137 @@
+body {
+	font-family: system-ui, -apple-system, sans-serif;
+	margin: 0;
+	color: #1a1a1a;
+	background: #f6f6f8;
+}
+
+header {
+	padding: 1rem 1.5rem;
+	background: #1f2933;
+	color: #f0f4f8;
+}
+
+header h1 {
+	margin: 0;
+	font-size: 1.25rem;
+}
+
+.status {
+	margin: 0.25rem 0 0;
+	font-size: 0.9rem;
+	opacity: 0.85;
+}
+
+main {
+	padding: 1.5rem;
+	display: grid;
+	gap: 1.5rem;
+}
+
+.panel {
+	background: #ffffff;
+	border: 1px solid #e2e2e7;
+	border-radius: 6px;
+	padding: 1rem 1.25rem;
+}
+
+.panel h2 {
+	margin: 0 0 0.75rem;
+	font-size: 1rem;
+}
+
+dl {
+	margin: 0;
+	display: grid;
+	grid-template-columns: max-content 1fr;
+	gap: 0.25rem 1rem;
+}
+
+dt {
+	font-weight: 600;
+}
+
+dd {
+	margin: 0;
+}
+
+ul,
+ol {
+	margin: 0;
+	padding: 0;
+	list-style: none;
+}
+
+li {
+	padding: 0.4rem 0;
+	border-bottom: 1px solid #f0f0f3;
+}
+
+li:last-child {
+	border-bottom: none;
+}
+
+.role-tools {
+	margin-top: 0.25rem;
+	font-size: 0.85rem;
+	color: #52606d;
+}
+
+.question-context {
+	margin-top: 0.25rem;
+	font-size: 0.85rem;
+	color: #52606d;
+	white-space: pre-wrap;
+}
+
+.question-form {
+	display: flex;
+	gap: 0.5rem;
+	margin-top: 0.5rem;
+}
+
+.question-form input[type='text'] {
+	flex: 1;
+	padding: 0.35rem 0.5rem;
+	border: 1px solid #cbd2d9;
+	border-radius: 4px;
+}
+
+.question-form button {
+	padding: 0.35rem 0.75rem;
+	border: none;
+	border-radius: 4px;
+	background: #1f2933;
+	color: #ffffff;
+	cursor: pointer;
+}
+
+.question-form button:disabled {
+	opacity: 0.5;
+	cursor: default;
+}
+
+#log {
+	font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+	font-size: 0.8rem;
+	max-height: 24rem;
+	overflow: auto;
+}
+
+#log li {
+	white-space: pre-wrap;
+	word-break: break-word;
+}
+
+.log-timestamp {
+	color: #7b8794;
+}
+
+.log-type {
+	color: #1f6feb;
+}
+
+.log-empty {
+	color: #7b8794;
+	font-style: italic;
+}

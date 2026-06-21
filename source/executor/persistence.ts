@@ -70,3 +70,23 @@ export function createSnapshotWorkspace(runId: string, baseDir: string = 'data/r
 		copyRecursively(workspaceDir, snapshotDir)
 	}
 }
+
+// Raw run artifacts read from disk for the web UI. `metaText` is null while a run
+// is in progress (meta.json is written only at completion). `logText` is the full
+// append-only log.jsonl contents (empty string when no events have been logged).
+export interface RunSnapshotRaw {
+	metaText: string | null
+	logText: string
+}
+
+export type ReadRunSnapshot = () => RunSnapshotRaw
+
+export function createReadRunSnapshot(runId: string, baseDir: string = 'data/runs'): ReadRunSnapshot {
+	const metaPath = path.resolve(baseDir, runId, 'meta.json')
+	const logPath = path.resolve(baseDir, runId, 'log.jsonl')
+	return () => {
+		const metaText = fs.existsSync(metaPath) ? fs.readFileSync(metaPath, 'utf8') : null
+		const logText = fs.existsSync(logPath) ? fs.readFileSync(logPath, 'utf8') : ''
+		return { metaText, logText }
+	}
+}
