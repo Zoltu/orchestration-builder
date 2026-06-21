@@ -6,15 +6,19 @@
 import * as path from 'node:path'
 
 import { parseCliArgs, usage, type HumanBackendMode, type ParsedCliArgs } from './main-args.js'
+import { createWebServer, type WebServer } from './web/server.js'
 import {
 	createAppendLog,
 	createCopyWorkspace,
 	createGuildLoader,
 	createHumanBackend,
 	createLlmCaller,
+	createReadRunSnapshot,
 	createRunDirectory,
+	createRunState,
 	createSnapshotWorkspace,
 	createToolHandlers,
+	createWebHumanBackend,
 	createWriteMeta,
 	runExecutor,
 	type ExecutorDependencies,
@@ -37,8 +41,35 @@ function generateRunId(now: Date): string {
 function buildHumanBackend(mode: HumanBackendMode | undefined): HumanBackend {
 	const resolved = mode ?? 'stub'
 	if (resolved === 'stub') return createHumanBackend({ mode: 'stub' })
-	// 'foundry' and 'web' need infrastructure (the Foundry loop, the web UI server) that the CLI entry point does not stand up; only 'stub' answers without external help.
-	throw new Error(`--human-backend "${resolved}" is not supported by the CLI yet; only "stub" is available.`)
+	if (resolved === 'web') throw new Error('--human-backend web requires --serve <port> so questions can be answered in the UI.')
+	// 'foundry' needs the Foundry loop, which the CLI entry point does not stand up.
+	throw new Error(`--human-backend "${resolved}" is not supported by the CLI; it requires the Foundry loop.`)
+}
+
+// When --serve is set the run shares one WebHumanBackend between the executor (which awaits answers) and the web server (which surfaces pending questions and submits answers).
+// The server reads the same on-disk run artifacts the executor writes, so the UI tails the live run.
+function assembleHumanBackend(cli: ParsedCliArgs, runId: string): { humanBackend: HumanBackend; webServer: WebServer | undefined } {
+	if (cli.serve === undefined) {
+		return { humanBackend: buildHumanBackend(cli.humanBackend), webServer: undefined }
+	}
+
+	if (cli.humanBackend === 'stub' || cli.humanBackend === 'foundry') {
+		throw new Error(`--serve requires --human-backend web (or omit the flag); got "${cli.humanBackend}".`)
+	}
+
+	const webHumanBackend = createWebHumanBackend()
+	const runState = createRunState({ humanBackend: webHumanBackend })
+	const readRunSnapshot = createReadRunSnapshot(runId, RUNS_BASE_DIR)
+	const webServer = createWebServer({ port: cli.serve, runState, readRunSnapshot })
+	console.log(`Web UI ready: http://localhost:${webServer.port}`)
+
+	// Stop the server promptly on an interrupt so the process exits cleanly instead of lingering on the bound socket.
+	process.on('SIGINT', () => {
+		webServer.stop()
+		process.exit(130)
+	})
+
+	return { humanBackend: webHumanBackend, webServer }
 }
 
 function exitCodeForStatus(status: RunMeta['status']): number {
@@ -69,6 +100,8 @@ async function run(cli: ParsedCliArgs): Promise<RunMeta> {
 	// The Guild is loaded once and reused for the executor's loadGuild dependency so the model config bound to the LLM caller and the config the executor sees are the same object, with no second disk read.
 	const cachedLoadGuild: LoadGuild = () => loadedGuild
 
+	const { humanBackend, webServer } = assembleHumanBackend(cli, runId)
+
 	const dependencies: ExecutorDependencies = {
 		llmCaller,
 		loadGuild: cachedLoadGuild,
@@ -78,15 +111,19 @@ async function run(cli: ParsedCliArgs): Promise<RunMeta> {
 		snapshotWorkspace: createSnapshotWorkspace(runId, RUNS_BASE_DIR),
 		writeMeta: createWriteMeta(runId, RUNS_BASE_DIR),
 		additionalToolHandlers,
-		humanBackend: buildHumanBackend(cli.humanBackend),
+		humanBackend,
 	}
 
-	return runExecutor(dependencies, {
-		runId,
-		guildPath: cli.guildPath,
-		benchmarkPath: cli.workspacePath,
-		task: cli.task,
-	})
+	try {
+		return await runExecutor(dependencies, {
+			runId,
+			guildPath: cli.guildPath,
+			benchmarkPath: cli.workspacePath,
+			task: cli.task,
+		})
+	} finally {
+		webServer?.stop()
+	}
 }
 
 async function main(): Promise<void> {

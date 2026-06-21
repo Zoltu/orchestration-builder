@@ -116,6 +116,45 @@ describe('parseCliArgs', () => {
 		const args = parsed(parseCliArgs(['--guild', 'g', '--workspace', 'w', '--task', '--help']))
 		expect(args.task).toBe('--help')
 	})
+
+	test('parses --serve <port> as an integer and keeps --human-backend web', () => {
+		const args = parsed(parseCliArgs([
+			'--guild', 'g', '--workspace', 'w', '--task', 't', '--serve', '8080', '--human-backend', 'web',
+		]))
+		expect(args.serve).toBe(8080)
+		expect(args.humanBackend).toBe('web')
+	})
+
+	test('parses the --serve=<port> form', () => {
+		const args = parsed(parseCliArgs(['--guild', 'g', '--workspace', 'w', '--task', 't', '--serve=3000']))
+		expect(args.serve).toBe(3000)
+	})
+
+	test('leaves serve undefined when --serve is absent', () => {
+		const args = parsed(parseCliArgs(['--guild', 'g', '--workspace', 'w', '--task', 't', '--human-backend', 'stub']))
+		expect(args.serve).toBeUndefined()
+	})
+
+	test('rejects a non-numeric --serve value', () => {
+		const outcome = parseCliArgs(['--guild', 'g', '--workspace', 'w', '--task', 't', '--serve', 'web'])
+		expect(outcome.kind).toBe('error')
+		if (outcome.kind === 'error') {
+			expect(outcome.message).toContain('--serve')
+			expect(outcome.message).toContain('web')
+		}
+	})
+
+	test('rejects an out-of-range --serve value', () => {
+		const outcome = parseCliArgs(['--guild', 'g', '--workspace', 'w', '--task', 't', '--serve', '70000'])
+		expect(outcome.kind).toBe('error')
+		if (outcome.kind === 'error') expect(outcome.message).toContain('--serve')
+	})
+
+	test('rejects --serve 0', () => {
+		const outcome = parseCliArgs(['--guild', 'g', '--workspace', 'w', '--task', 't', '--serve', '0'])
+		expect(outcome.kind).toBe('error')
+		if (outcome.kind === 'error') expect(outcome.message).toContain('--serve')
+	})
 })
 
 describe('usage', () => {
@@ -126,6 +165,7 @@ describe('usage', () => {
 		expect(text).toContain('--task')
 		expect(text).toContain('--run-id')
 		expect(text).toContain('--human-backend')
+		expect(text).toContain('--serve')
 		expect(text).toContain('ORCHESTRATOR_API_KEY')
 	})
 })

@@ -12,8 +12,11 @@ export type { LlmCaller, LlmCallResult, LlmRequest } from './llm.js'
 export { createGuildLoader } from './loader.js'
 export type { LoadGuild, LoadedGuild } from './loader.js'
 
-export { createHumanBackend } from './human-backend.js'
-export type { HumanBackend, HumanBackendConfig } from './human-backend.js'
+export { createHumanBackend, createWebHumanBackend } from './human-backend.js'
+export type { HumanBackend, HumanBackendConfig, WebHumanBackend } from './human-backend.js'
+
+export { createRunState } from './run-state.js'
+export type { RunState } from './run-state.js'
 
 export { createToolHandlers } from './tools.js'
 export type { NativeToolsConfig } from './tools.js'
@@ -24,6 +27,7 @@ export {
 	createAppendLog,
 	createWriteMeta,
 	createSnapshotWorkspace,
+	createReadRunSnapshot,
 } from './persistence.js'
 export type {
 	RunDirectory,
@@ -31,6 +35,7 @@ export type {
 	AppendLog,
 	WriteMeta,
 	SnapshotWorkspace,
+	ReadRunSnapshot,
 } from './persistence.js'
 
 export type { ModelConfig, RunOptions, RunMeta, ResultCard } from '../shared/types.js'

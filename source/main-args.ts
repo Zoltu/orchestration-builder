@@ -11,6 +11,7 @@ export interface ParsedCliArgs {
 	task: string
 	runId?: string
 	humanBackend?: HumanBackendMode
+	serve?: number
 }
 
 export type ParseCliArgsOutcome =
@@ -18,9 +19,11 @@ export type ParseCliArgsOutcome =
 	| { kind: 'help' }
 	| { kind: 'error'; message: string }
 
-const VALUE_FLAGS = ['--guild', '--workspace', '--task', '--run-id', '--human-backend'] as const
+const VALUE_FLAGS = ['--guild', '--workspace', '--task', '--run-id', '--human-backend', '--serve'] as const
 const HELP_FLAGS = new Set(['-h', '--help'])
 const HUMAN_BACKEND_MODES: readonly HumanBackendMode[] = ['stub', 'foundry', 'web']
+const MIN_PORT = 1
+const MAX_PORT = 65535
 
 function isValueFlag(name: string): boolean {
 	return VALUE_FLAGS.some((flag) => flag === name)
@@ -30,10 +33,18 @@ function isHumanBackendMode(value: string): value is HumanBackendMode {
 	return HUMAN_BACKEND_MODES.some((mode) => mode === value)
 }
 
+// Accepts only plain decimal digit strings so forms like `0x1a`, `1e3`, `8080.0`, or ` 8080 ` are rejected rather than silently coerced by Number().
+function parsePort(value: string): number | undefined {
+	if (!/^\d+$/.test(value)) return undefined
+	const port = Number(value)
+	if (port < MIN_PORT || port > MAX_PORT) return undefined
+	return port
+}
+
 export function usage(): string {
 	return [
 		'Usage: bun source/main.ts --guild <path> --workspace <path> --task <text>',
-		'                       [--run-id <id>] [--human-backend <stub|foundry|web>]',
+		'                       [--run-id <id>] [--human-backend <stub|foundry|web>] [--serve <port>]',
 		'',
 		'Required options:',
 		'  --guild <path>            Path to the Guild directory (contains guild.json).',
@@ -43,6 +54,7 @@ export function usage(): string {
 		'Optional options:',
 		'  --run-id <id>             Run id; auto-generated as a timestamp when omitted.',
 		'  --human-backend <mode>    Backend for ask_human (stub|foundry|web); defaults to stub.',
+		'  --serve <port>            Start the web UI on <port>; implies --human-backend web so the operator can answer ask_human questions in the browser.',
 		'  -h, --help                Show this help message.',
 		'',
 		'The model API key is read from the ORCHESTRATOR_API_KEY environment variable',
@@ -121,6 +133,18 @@ export function parseCliArgs(argv: string[]): ParseCliArgsOutcome {
 			}
 		}
 		args.humanBackend = humanBackendRaw
+	}
+
+	const serveRaw = values['--serve']
+	if (serveRaw !== undefined) {
+		const port = parsePort(serveRaw)
+		if (port === undefined) {
+			return {
+				kind: 'error',
+				message: `--serve must be an integer port between ${MIN_PORT} and ${MAX_PORT} (got "${serveRaw}")`,
+			}
+		}
+		args.serve = port
 	}
 
 	return { kind: 'parsed', args }
