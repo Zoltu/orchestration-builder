@@ -1,4 +1,4 @@
-# Step 17 — Foundry hypothesis generation
+# Step 27 — Foundry hypothesis generation
 
 ## Goal
 
@@ -6,7 +6,7 @@ Add the big-model-driven hypothesis generation: prompt the large model with the 
 
 ## Context
 
-Read `docs/foundry.md` ("Hypotheses", "Human simulation and question penalty"). The Foundry is the only part using a large model. The hypothesis is metadata + a branch configuration. The big-model endpoint is configured separately from the executor's small model (`FoundryConfig.bigModel`). `ask_human` during Foundry runs is answered by the same large model simulating a persona — but the human-simulator backend wiring belongs to step 19 (loop) or a dedicated sub-step if it grows; keep this step focused on hypothesis generation.
+Read `docs/foundry.md` ("Hypotheses", "Human simulation and question penalty"). The Foundry is the only part using a large model. The hypothesis is metadata + a branch configuration. The big-model endpoint is configured separately from the executor's small model (`FoundryConfig.bigModel`). `ask_human` during Foundry runs is answered by the same large model simulating a persona — but the human-simulator backend wiring belongs to step 29 (loop) or a dedicated sub-step if it grows; keep this step focused on hypothesis generation.
 
 ## Deliverables
 
@@ -15,7 +15,7 @@ Read `docs/foundry.md` ("Hypotheses", "Human simulation and question penalty"). 
    - Builds the prompt (baseline Guild text + aggregated failure summaries + instructions to produce only actionable, testable hypotheses).
    - Calls the big model via the injected caller.
    - Parses the response into `Hypothesis[]` with a type guard (`isHypothesis`); rejects malformed output.
-   - For each hypothesis, applies its changes via the branch manager (step 14) and validates the resulting Guild loads; drops hypotheses that produce an invalid Guild, recording why.
+   - For each hypothesis, applies its changes via the branch manager (step 23) and validates the resulting Guild loads; drops hypotheses that produce an invalid Guild, recording why.
    - Returns `{ hypotheses, rejected }`.
 3. `source/foundry/hypothesize.test.ts` — in-memory test with a fake big-model caller returning a scripted hypothesis JSON. Assert: valid hypotheses are parsed and produce loadable branches; malformed hypotheses are rejected with reasons; a hypothesis whose edits break the Guild is dropped.
 4. `source/foundry/human-simulator.ts` (if not already present) — a `mode: 'foundry'` human backend that answers `ask_human` via the big model with the configured persona and the benchmark's deterministic `humanResponses` for near-exact matches. Mirrors the `ask_human` contract from `docs/executor.md`. Tested with a fake big-model caller.
@@ -43,4 +43,4 @@ Medium to large — prompt design + parsing + simulator.
 
 ## Operator handoff
 
-None for code. Real hypothesis generation requires a real big-model endpoint and is exercised in step 19.
+None for code. Real hypothesis generation requires a real big-model endpoint and is exercised in step 29.

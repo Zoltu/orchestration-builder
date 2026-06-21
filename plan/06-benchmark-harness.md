@@ -6,7 +6,7 @@ Build the harness that runs the executor over a suite of benchmarks, validates e
 
 ## Context
 
-Read `docs/benchmarks.md` (the `eval.json` schema and validation rules) and `docs/architecture.md` ("Benchmark isolation and environments"). Validation runs a shell command in the final workspace and checks expected files / exit code / stdout. Note the **unsolved isolation** caveat in `docs/architecture.md`: until per-benchmark isolation is solved, the suite is constrained to tasks Bun can validate directly with no external installs. The isolation problem is now addressed by its own step, step 20.
+Read `docs/benchmarks.md` (the `eval.json` schema and validation rules) and `docs/architecture.md` ("Benchmark isolation and environments"). Validation runs a shell command in the final workspace and checks expected files / exit code / stdout. Note the **unsolved isolation** caveat in `docs/architecture.md`: until per-benchmark isolation is solved, the suite is constrained to tasks Bun can validate directly with no external installs. The isolation problem is now addressed by its own step, step 16.
 
 ## Deliverables
 
