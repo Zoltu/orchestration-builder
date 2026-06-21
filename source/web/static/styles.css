@@ -131,6 +131,88 @@ li:last-child {
 	color: #1f6feb;
 }
 
+.status-unavailable {
+	color: #f0b429;
+}
+
+.create-run-form {
+	display: flex;
+	gap: 0.5rem;
+	margin-bottom: 0.75rem;
+}
+
+.create-run-form input[type='text'] {
+	flex: 1;
+	padding: 0.4rem 0.5rem;
+	border: 1px solid #cbd2d9;
+	border-radius: 4px;
+}
+
+.create-run-form button {
+	padding: 0.4rem 0.9rem;
+	border: none;
+	border-radius: 4px;
+	background: #1f2933;
+	color: #ffffff;
+	cursor: pointer;
+}
+
+.create-run-form button:disabled {
+	opacity: 0.5;
+	cursor: default;
+}
+
+#run-list li {
+	display: flex;
+	gap: 0.5rem;
+	align-items: baseline;
+	cursor: pointer;
+}
+
+#run-list li.selected {
+	background: #eef2ff;
+}
+
+#run-list .empty {
+	cursor: default;
+	color: #7b8794;
+	font-style: italic;
+}
+
+.run-id {
+	font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+	font-size: 0.8rem;
+	color: #323f4b;
+	flex: 0 0 auto;
+}
+
+.run-status {
+	flex: 0 0 auto;
+	font-size: 0.8rem;
+}
+
+.run-status-unknown,
+.run-status-running {
+	color: #1f6feb;
+}
+
+.run-status-success {
+	color: #1a7f37;
+}
+
+.run-status-error,
+.run-status-needs_clarification {
+	color: #cf222e;
+}
+
+.run-task {
+	flex: 1 1 auto;
+	color: #52606d;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
 .log-empty {
 	color: #7b8794;
 	font-style: italic;

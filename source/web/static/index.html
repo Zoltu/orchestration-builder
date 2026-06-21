@@ -3,8 +3,9 @@
 	<head>
 		<meta charset="utf-8" />
 		<meta name="viewport" content="width=device-width, initial-scale=1" />
-		<title>Adaptive Orchestrator — Run</title>
-		<link rel="stylesheet" href="/styles.css" />
+		<title>Adaptive Orchestrator</title>
+		<link rel="icon" href="data:," />
+		<link rel="stylesheet" href="styles.css" />
 	</head>
 	<body>
 		<header>
@@ -13,6 +14,15 @@
 		</header>
 
 		<main>
+			<section id="runs-panel" class="panel">
+				<h2>Runs</h2>
+				<form id="create-run-form" class="create-run-form">
+					<input id="create-run-input" type="text" placeholder="describe a task and start a run" autocomplete="off" />
+					<button id="create-run-button" type="submit">Start run</button>
+				</form>
+				<ul id="run-list"></ul>
+			</section>
+
 			<section id="run-summary" class="panel">
 				<h2>Run</h2>
 				<dl id="run-meta"></dl>
@@ -34,6 +44,6 @@
 			</section>
 		</main>
 
-		<script src="/app.js"></script>
+		<script src="app.js"></script>
 	</body>
 </html>

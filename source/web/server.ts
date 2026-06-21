@@ -50,7 +50,13 @@ function json(data: unknown, status = 200): Response {
 function serveStaticAsset(asset: StaticAsset): Response {
 	const filePath = path.resolve(STATIC_DIR, asset.fileName)
 	const file = Bun.file(filePath)
-	return new Response(file, { headers: { 'content-type': asset.contentType } })
+	// no-store keeps the dev server from caching stale assets (or stale 404s) across restarts, so an edit to app.js is always picked up on the next page load.
+	return new Response(file, {
+		headers: {
+			'content-type': asset.contentType,
+			'cache-control': 'no-store',
+		},
+	})
 }
 
 function handleActiveRun(readRunSnapshotById: ReadRunSnapshotById, runSubmission: RunSubmission): Response {
@@ -125,10 +131,12 @@ export function createWebServer(config: WebServerConfig): WebServer {
 					const runId = decodeURIComponent(pathname.slice('/api/runs/'.length))
 					return handleGetRunById(readRunSnapshotById, runId)
 				}
-				if (pathname === '/api/questions') return json(renderPendingQuestions(runState.pendingQuestions()))
-				const asset = STATIC_ASSETS[pathname]
-				if (asset !== undefined) return serveStaticAsset(asset)
-				return json({ ok: false, error: 'not_found' }, 404)
+			if (pathname === '/api/questions') return json(renderPendingQuestions(runState.pendingQuestions()))
+			// Browsers auto-request /favicon.ico on every page load; answer 204 so it does not pollute the console with a 404.
+			if (pathname === '/favicon.ico') return new Response(null, { status: 204 })
+			const asset = STATIC_ASSETS[pathname]
+			if (asset !== undefined) return serveStaticAsset(asset)
+			return json({ ok: false, error: 'not_found' }, 404)
 			}
 
 			if (request.method === 'POST') {
