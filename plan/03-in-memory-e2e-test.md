@@ -1,4 +1,4 @@
-# Step 03 — In-memory end-to-end integration test
+# Step 03 — In-memory end-to-end integration test ✅ complete
 
 ## Goal
 
@@ -41,3 +41,17 @@ Small to medium — the fake-LLM scripting is the fiddly part.
 ## Operator handoff
 
 None — fully in-memory.
+
+## Closeout (2026-06-21)
+
+Complete. `bun run typecheck` and `bun test source/` both pass (336 tests across 29 files). The new integration test runs in ~150 ms; the full suite stays under one second, and no `orchestrator-integration-*` entries are left behind in `os.tmpdir()` after the run.
+
+New files: `source/executor/integration.test.ts` (the one in-memory e2e test that composes real leaves with a fake LLM against the real `guild/`), additions to `source/executor/test-fixtures.ts` (the reusable multi-role scripted LLM). No production code (`executor.ts`, `engine.ts`, `tool-dispatch.ts`, the tool modules, the loader) was touched — the wiring already traversed `orchestrator → coder → write_file → finish` with a cooperative fake, so no test-only branches were added anywhere.
+
+Deviations from the plan wording (authoritative):
+
+- **Role-keyed scripted LLM, not a single flat queue.** The plan's deliverable 2 offered "a scripted multi-turn caller" if the existing fixtures did not already provide one. The existing `FakeLlm` in `executor.test.ts` is a single flat queue, which breaks under agent delegation: a parent role's request and a child role's request can interleave, and a flat queue would force the test author to interleave the two scripts by hand and brittle-order them. `createScriptedLlm` keys responses by role name so each role's queue advances independently regardless of call order, and `resolveRoleBySystemPrompt` is the standard discriminator. These live in `test-fixtures.ts` (the existing shared test-support module) and are general-purpose, not specific to this one test.
+- **The test asserts `meta.status === "success"` and the on-disk `meta.json` status, the materialized `output.txt` content, and the presence of both an `llm_call` and a `write_file` tool-call event in `log.jsonl`.** The plan's deliverable 1 assertion list is met; the log-event payload is read with a `toolNameFromEvent` narrowing helper rather than a cast (per `AGENTS.md` "No Typecasts"), and `meta.json` is read back via `readMetaStatus` for the same reason.
+- **The fake-LLM script is short and cooperative.** Orchestrator: one `agent` call to `coder`, then one `finish` with `status: "success"`. Coder: one `write_file` of `output.txt` with `hello world\n`, then one `finish` with `status: "success"`. The `hello_001` smoke benchmark's `test_output.test.ts` trims and lower-cases the file content before comparing to `"hello world"`, so the trailing newline in the canned `write_file` content matches the benchmark's actual validator.
+
+No new technical debt introduced. `test-fixtures.ts` exports the scripted-LLM helpers as part of its shared support surface; they are reachable by any future integration test (e.g. the Foundry's executor-in-the-loop tests against the real Guild) and are not exported solely for this one test.
