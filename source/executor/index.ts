@@ -18,6 +18,9 @@ export type { HumanBackend, HumanBackendConfig, WebHumanBackend } from './human-
 export { createRunState } from './run-state.js'
 export type { RunState } from './run-state.js'
 
+export { createRunSubmission } from './run-submission.js'
+export type { RunSubmission, RunSubmissionDependencies, StartRun, SubmitResult } from './run-submission.js'
+
 export { createToolHandlers } from './tools.js'
 export type { NativeToolsConfig } from './tools.js'
 
@@ -27,7 +30,8 @@ export {
 	createAppendLog,
 	createWriteMeta,
 	createSnapshotWorkspace,
-	createReadRunSnapshot,
+	createReadRunSnapshotById,
+	createListRunIds,
 } from './persistence.js'
 export type {
 	RunDirectory,
@@ -35,7 +39,9 @@ export type {
 	AppendLog,
 	WriteMeta,
 	SnapshotWorkspace,
-	ReadRunSnapshot,
+	ReadRunSnapshotById,
+	ListRunIds,
+	RunSnapshotRaw,
 } from './persistence.js'
 
 export type { ModelConfig, RunOptions, RunMeta, ResultCard } from '../shared/types.js'

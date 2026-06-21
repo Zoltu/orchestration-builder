@@ -1,43 +1,111 @@
 import { afterAll, describe, expect, test } from 'bun:test'
 import { createWebHumanBackend } from '../executor/human-backend.ts'
 import { createRunState } from '../executor/run-state.ts'
+import { createRunSubmission, type RunSubmission, type StartRun } from '../executor/run-submission.ts'
 import type { RunSnapshotRaw } from '../executor/persistence.ts'
+import type { RunMeta } from '../shared/types.js'
 import { createWebServer, type WebServer } from './server.ts'
 
-const humanBackend = createWebHumanBackend()
-const runState = createRunState({ humanBackend })
-
-const fakeSnapshot: RunSnapshotRaw = {
-	metaText: JSON.stringify({
-		runId: 'run-1',
-		guildPath: 'guild',
-		benchmarkPath: 'bench',
-		task: 'fix the bug',
-		status: 'success',
-		startTime: '2026-01-01T00:00:00.000Z',
-		endTime: '2026-01-01T00:01:00.000Z',
-	}),
-	logText: [
-		JSON.stringify({ timestamp: '2026-01-01T00:00:01.000Z', type: 'llm_call', payload: { role: 'planner' } }),
-		JSON.stringify({ timestamp: '2026-01-01T00:00:02.000Z', type: 'role_finished', payload: { role: 'planner', status: 'success' } }),
-	].join('\n'),
+function snapshotFor(runId: string, status: RunMeta['status'] = 'success'): RunSnapshotRaw {
+	return {
+		metaText: JSON.stringify({
+			runId,
+			guildPath: 'guild',
+			benchmarkPath: 'bench',
+			task: `task for ${runId}`,
+			status,
+			startTime: '2026-01-01T00:00:00.000Z',
+			endTime: '2026-01-01T00:01:00.000Z',
+		}),
+		logText: [
+			JSON.stringify({ timestamp: '2026-01-01T00:00:01.000Z', type: 'llm_call', payload: { role: 'planner' } }),
+			JSON.stringify({ timestamp: '2026-01-01T00:00:02.000Z', type: 'role_finished', payload: { role: 'planner', status: 'success' } }),
+		].join('\n'),
+	}
 }
 
-const server: WebServer = createWebServer({
+const snapshots = new Map<string, RunSnapshotRaw>([
+	['run-1', snapshotFor('run-1')],
+	['run-2', snapshotFor('run-2', 'error')],
+])
+
+const unknownRunIds = new Set(['never-started'])
+
+function readRunSnapshotById(runId: string): RunSnapshotRaw {
+	if (unknownRunIds.has(runId)) return { metaText: null, logText: '' }
+	return snapshots.get(runId) ?? snapshotFor(runId)
+}
+
+function listRunIds(): string[] {
+	return Array.from(snapshots.keys())
+}
+
+// Shared server for the read-only routes (static assets, list, get-by-id, questions, answer).
+// The submission-mutating routes get their own fresh server per test to avoid cross-test ordering coupling.
+const humanBackend = createWebHumanBackend()
+const runState = createRunState({ humanBackend })
+const readOnlyServer: WebServer = createWebServer({
 	port: 0,
 	runState,
-	readRunSnapshot: () => fakeSnapshot,
+	runSubmission: createRunSubmission({
+		startRun: async () => ({ runId: 'unused', guildPath: 'g', benchmarkPath: 'b', task: 't', status: 'success', startTime: 's' }),
+		generateRunId: () => 'unused',
+	}),
+	readRunSnapshotById,
+	listRunIds,
 })
 
 afterAll(() => {
-	server.stop()
+	readOnlyServer.stop()
 })
 
-const baseUrl = `http://localhost:${server.port}`
+const readOnlyBaseUrl = `http://localhost:${readOnlyServer.port}`
+
+interface SubmissionServer {
+	server: WebServer
+	baseUrl: string
+	submission: RunSubmission
+	resolveActive: () => ((meta: RunMeta) => void)
+}
+
+// Builds a fresh server + submission whose startRun parks on a caller-controlled resolver, so each test drives its own run lifecycle without touching shared state.
+function createSubmissionServer(): SubmissionServer {
+	let resolveActive: (meta: RunMeta) => void = () => {}
+	const startRun: StartRun = () => new Promise<RunMeta>((resolve) => {
+		resolveActive = resolve
+	})
+	let nextId = 0
+	const submission = createRunSubmission({ startRun, generateRunId: () => `test-run-${nextId++}` })
+	const server = createWebServer({
+		port: 0,
+		runState: createRunState({ humanBackend: createWebHumanBackend() }),
+		runSubmission: submission,
+		readRunSnapshotById,
+		listRunIds,
+	})
+	return {
+		server,
+		baseUrl: `http://localhost:${server.port}`,
+		submission,
+		resolveActive: () => resolveActive,
+	}
+}
+
+function terminalMeta(runId: string, task: string): RunMeta {
+	return {
+		runId,
+		guildPath: 'guild',
+		benchmarkPath: 'bench',
+		task,
+		status: 'success',
+		startTime: '2026-01-01T00:00:00.000Z',
+		endTime: '2026-01-01T00:01:00.000Z',
+	}
+}
 
 describe('createWebServer static assets', () => {
 	test('GET / returns the HTML page', async () => {
-		const response = await fetch(`${baseUrl}/`)
+		const response = await fetch(`${readOnlyBaseUrl}/`)
 		expect(response.status).toBe(200)
 		expect(response.headers.get('content-type')).toContain('text/html')
 		const body = await response.text()
@@ -45,7 +113,7 @@ describe('createWebServer static assets', () => {
 	})
 
 	test('GET /app.js returns the client script', async () => {
-		const response = await fetch(`${baseUrl}/app.js`)
+		const response = await fetch(`${readOnlyBaseUrl}/app.js`)
 		expect(response.status).toBe(200)
 		expect(response.headers.get('content-type')).toContain('text/javascript')
 		const body = await response.text()
@@ -53,7 +121,7 @@ describe('createWebServer static assets', () => {
 	})
 
 	test('GET /styles.css returns the stylesheet', async () => {
-		const response = await fetch(`${baseUrl}/styles.css`)
+		const response = await fetch(`${readOnlyBaseUrl}/styles.css`)
 		expect(response.status).toBe(200)
 		expect(response.headers.get('content-type')).toContain('text/css')
 		const body = await response.text()
@@ -61,25 +129,165 @@ describe('createWebServer static assets', () => {
 	})
 
 	test('GET /unknown returns a 404 json error', async () => {
-		const response = await fetch(`${baseUrl}/unknown`)
+		const response = await fetch(`${readOnlyBaseUrl}/unknown`)
 		expect(response.status).toBe(404)
 		const body = await response.json()
 		expect(body).toEqual({ ok: false, error: 'not_found' })
 	})
 })
 
-describe('createWebServer /api/run', () => {
-	test('returns the shaped run view from the read snapshot', async () => {
-		const response = await fetch(`${baseUrl}/api/run`)
+describe('createWebServer /api/run alias', () => {
+	test('returns the active (most recent) run view', async () => {
+		const { server, baseUrl, submission, resolveActive } = createSubmissionServer()
+		try {
+			submission.submit('bootstrap task')
+			const response = await fetch(`${baseUrl}/api/run`)
+			expect(response.status).toBe(200)
+			const view = await response.json()
+			expect(view.runId).toBe('test-run-0')
+			expect(view.task).toBe('task for test-run-0')
+
+			resolveActive()(terminalMeta('test-run-0', 'bootstrap task'))
+			await submission.awaitActive()
+		} finally {
+			server.stop()
+		}
+	})
+
+	test('returns 404 no_run when no run has ever been started', async () => {
+		const { server, baseUrl } = createSubmissionServer()
+		try {
+			const response = await fetch(`${baseUrl}/api/run`)
+			expect(response.status).toBe(404)
+			expect(await response.json()).toEqual({ ok: false, error: 'no_run' })
+		} finally {
+			server.stop()
+		}
+	})
+
+	test('keeps surfacing the most recent run after it completes', async () => {
+		const { server, baseUrl, submission, resolveActive } = createSubmissionServer()
+		try {
+			submission.submit('bootstrap task')
+			resolveActive()(terminalMeta('test-run-0', 'bootstrap task'))
+			await submission.awaitActive()
+
+			const response = await fetch(`${baseUrl}/api/run`)
+			expect(response.status).toBe(200)
+			const view = await response.json()
+			expect(view.runId).toBe('test-run-0')
+		} finally {
+			server.stop()
+		}
+	})
+})
+
+describe('createWebServer /api/runs (list)', () => {
+	test('returns the known runs as summaries, newest first by id', async () => {
+		const response = await fetch(`${readOnlyBaseUrl}/api/runs`)
 		expect(response.status).toBe(200)
-		expect(response.headers.get('content-type')).toContain('application/json')
+		const list = await response.json()
+		expect(Array.isArray(list)).toBe(true)
+		expect(list.length).toBe(2)
+		expect(list[0].runId).toBe('run-2')
+		expect(list[1].runId).toBe('run-1')
+		expect(list[0]).toEqual({
+			runId: 'run-2',
+			status: 'error',
+			task: 'task for run-2',
+			startTime: '2026-01-01T00:00:00.000Z',
+			endTime: '2026-01-01T00:01:00.000Z',
+		})
+	})
+})
+
+describe('createWebServer /api/runs/:id', () => {
+	test('returns the full run view for a known run id', async () => {
+		const response = await fetch(`${readOnlyBaseUrl}/api/runs/run-1`)
+		expect(response.status).toBe(200)
 		const view = await response.json()
-		expect(view.status).toBe('success')
 		expect(view.runId).toBe('run-1')
-		expect(view.task).toBe('fix the bug')
+		expect(view.status).toBe('success')
 		expect(view.roles.length).toBe(1)
 		expect(view.roles[0].role).toBe('planner')
 		expect(view.recentLog.length).toBe(2)
+	})
+
+	test('returns 404 for an unknown run id', async () => {
+		const response = await fetch(`${readOnlyBaseUrl}/api/runs/never-started`)
+		expect(response.status).toBe(404)
+		expect(await response.json()).toEqual({ ok: false, error: 'not_found' })
+	})
+})
+
+describe('createWebServer POST /api/runs', () => {
+	test('accepts a task when no run is active and returns 201 with the run id', async () => {
+		const { server, baseUrl, submission, resolveActive } = createSubmissionServer()
+		try {
+			const response = await fetch(`${baseUrl}/api/runs`, {
+				method: 'POST',
+				headers: { 'content-type': 'application/json' },
+				body: JSON.stringify({ task: 'a new task' }),
+			})
+			expect(response.status).toBe(201)
+			const body = await response.json()
+			expect(body.runId).toBe('test-run-0')
+			expect(submission.activeRunId()).toBe('test-run-0')
+
+			resolveActive()(terminalMeta('test-run-0', 'a new task'))
+			await submission.awaitActive()
+		} finally {
+			server.stop()
+		}
+	})
+
+	test('rejects a second submit while a run is active with 409 run_in_progress', async () => {
+		const { server, baseUrl, submission, resolveActive } = createSubmissionServer()
+		try {
+			submission.submit('first')
+			const response = await fetch(`${baseUrl}/api/runs`, {
+				method: 'POST',
+				headers: { 'content-type': 'application/json' },
+				body: JSON.stringify({ task: 'second' }),
+			})
+			expect(response.status).toBe(409)
+			expect(await response.json()).toEqual({ ok: false, error: 'run_in_progress' })
+
+			resolveActive()(terminalMeta('test-run-0', 'first'))
+			await submission.awaitActive()
+		} finally {
+			server.stop()
+		}
+	})
+
+	test('rejects a body missing the task field with 400 invalid_body', async () => {
+		const { server, baseUrl } = createSubmissionServer()
+		try {
+			const response = await fetch(`${baseUrl}/api/runs`, {
+				method: 'POST',
+				headers: { 'content-type': 'application/json' },
+				body: JSON.stringify({ notTask: 'x' }),
+			})
+			expect(response.status).toBe(400)
+			expect(await response.json()).toEqual({ ok: false, error: 'invalid_body' })
+		} finally {
+			server.stop()
+		}
+	})
+
+	test('rejects malformed json with 400 invalid_body', async () => {
+		const { server, baseUrl } = createSubmissionServer()
+		try {
+			const response = await fetch(`${baseUrl}/api/runs`, {
+				method: 'POST',
+				headers: { 'content-type': 'application/json' },
+				body: '{ not json',
+			})
+			expect(response.status).toBe(400)
+			expect(await response.json()).toEqual({ ok: false, error: 'invalid_body' })
+		} finally {
+			server.stop()
+		}
 	})
 })
 
@@ -87,7 +295,7 @@ describe('createWebServer /api/questions and /api/answer', () => {
 	test('GET /api/questions returns the pending list from the run state', async () => {
 		const askPromise = humanBackend.ask('Which framework?', 'src/index.ts')
 
-		const response = await fetch(`${baseUrl}/api/questions`)
+		const response = await fetch(`${readOnlyBaseUrl}/api/questions`)
 		expect(response.status).toBe(200)
 		const questions = await response.json()
 		expect(questions.length).toBe(1)
@@ -96,7 +304,7 @@ describe('createWebServer /api/questions and /api/answer', () => {
 		expect(typeof questions[0].id).toBe('string')
 
 		const id = questions[0].id
-		const answerResponse = await fetch(`${baseUrl}/api/answer`, {
+		const answerResponse = await fetch(`${readOnlyBaseUrl}/api/answer`, {
 			method: 'POST',
 			headers: { 'content-type': 'application/json' },
 			body: JSON.stringify({ id, answer: 'react' }),
@@ -106,13 +314,13 @@ describe('createWebServer /api/questions and /api/answer', () => {
 
 		expect(await askPromise).toBe('react')
 
-		const afterResponse = await fetch(`${baseUrl}/api/questions`)
+		const afterResponse = await fetch(`${readOnlyBaseUrl}/api/questions`)
 		const afterQuestions = await afterResponse.json()
 		expect(afterQuestions).toEqual([])
 	})
 
 	test('POST /api/answer for an unknown id returns 404 not_found', async () => {
-		const response = await fetch(`${baseUrl}/api/answer`, {
+		const response = await fetch(`${readOnlyBaseUrl}/api/answer`, {
 			method: 'POST',
 			headers: { 'content-type': 'application/json' },
 			body: JSON.stringify({ id: 'does-not-exist', answer: 'whatever' }),
@@ -122,7 +330,7 @@ describe('createWebServer /api/questions and /api/answer', () => {
 	})
 
 	test('POST /api/answer with malformed json returns 400 invalid_body', async () => {
-		const response = await fetch(`${baseUrl}/api/answer`, {
+		const response = await fetch(`${readOnlyBaseUrl}/api/answer`, {
 			method: 'POST',
 			headers: { 'content-type': 'application/json' },
 			body: '{ not json',
@@ -132,7 +340,7 @@ describe('createWebServer /api/questions and /api/answer', () => {
 	})
 
 	test('POST /api/answer with a missing id returns 400 invalid_body', async () => {
-		const response = await fetch(`${baseUrl}/api/answer`, {
+		const response = await fetch(`${readOnlyBaseUrl}/api/answer`, {
 			method: 'POST',
 			headers: { 'content-type': 'application/json' },
 			body: JSON.stringify({ answer: 'no id' }),

@@ -79,14 +79,27 @@ export interface RunSnapshotRaw {
 	logText: string
 }
 
-export type ReadRunSnapshot = () => RunSnapshotRaw
+export type ReadRunSnapshotById = (runId: string) => RunSnapshotRaw
 
-export function createReadRunSnapshot(runId: string, baseDir: string = 'data/runs'): ReadRunSnapshot {
-	const metaPath = path.resolve(baseDir, runId, 'meta.json')
-	const logPath = path.resolve(baseDir, runId, 'log.jsonl')
-	return () => {
+// Reads any run's artifacts by id, so the server can serve the active run and any completed run without re-deriving closures per run.
+// The single-active-run invariant is enforced at the submission layer, not here.
+export function createReadRunSnapshotById(baseDir: string = 'data/runs'): ReadRunSnapshotById {
+	return (runId: string) => {
+		const metaPath = path.resolve(baseDir, runId, 'meta.json')
+		const logPath = path.resolve(baseDir, runId, 'log.jsonl')
 		const metaText = fs.existsSync(metaPath) ? fs.readFileSync(metaPath, 'utf8') : null
 		const logText = fs.existsSync(logPath) ? fs.readFileSync(logPath, 'utf8') : ''
 		return { metaText, logText }
+	}
+}
+
+export type ListRunIds = () => string[]
+
+// Lists the run directory names under the runs base dir, so the server can enumerate known runs for the multi-run API.
+// Returns an empty array when the base dir does not exist yet (no runs have ever been started).
+export function createListRunIds(baseDir: string = 'data/runs'): ListRunIds {
+	return () => {
+		if (!fs.existsSync(baseDir)) return []
+		return fs.readdirSync(baseDir).filter((entry) => fs.statSync(path.resolve(baseDir, entry)).isDirectory())
 	}
 }

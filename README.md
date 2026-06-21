@@ -44,11 +44,12 @@ bun run start -- --guild guild --workspace benchmarks/hello_001 --task "..."
 Flags:
 
 - `--guild <path>` (required) — path to the Guild directory (contains `guild.json`).
-- `--workspace <path>` (required) — workspace copied into `data/runs/<run-id>/workspace/`.
-- `--task <text>` (required) — task description handed to the entry role.
-- `--run-id <id>` (optional) — run id; auto-generated as a UTC timestamp when omitted.
-- `--human-backend <stub|foundry|web>` (optional, defaults to `stub`) — backend for `ask_human`. `stub` answers immediately with a canned reply; `web` parks the question for the operator to answer in the web UI (requires `--serve`); `foundry` requires the Foundry loop and is not supported by the CLI.
-- `--serve <port>` (optional) — start the web UI on `<port>`; implies `--human-backend web`. Open `http://localhost:<port>` to watch the run and answer `ask_human` questions. The server stops when the run completes.
+- `--workspace <path>` (required in run mode) — workspace copied into `data/runs/<run-id>/workspace/`. Not used in serve mode (see `--workspace-root`).
+- `--task <text>` (required in run mode) — task description handed to the entry role. Optional in serve mode; when present at startup it bootstraps the first run.
+- `--run-id <id>` (optional, run mode only) — run id; auto-generated as a UTC timestamp when omitted.
+- `--human-backend <stub|foundry|web>` (optional, run mode only, defaults to `stub`) — backend for `ask_human`. `stub` answers immediately with a canned reply; `web` parks the question for the operator to answer in the web UI (requires `--serve`); `foundry` requires the Foundry loop and is not supported by the CLI.
+- `--serve <port>` (optional) — start the long-running service backend on `<port>`; implies `--human-backend web`. The server runs indefinitely, one task at a time, submitted via the JSON API (or bootstrapped by `--task`). See "Service mode" below.
+- `--workspace-root <path>` (optional, serve mode only, defaults to `/workspace`) — the project mounted into every run.
 - `-h, --help` — print usage.
 
 The model API key is read from the `ORCHESTRATOR_API_KEY` environment variable and injected into the model configuration at startup; it is never read into or stored in the Guild:
@@ -60,20 +61,32 @@ bun source/main.ts --guild guild --workspace benchmarks/hello_001 --task "..."
 
 Each run writes `meta.json`, `log.jsonl`, and the final `workspace/` under `data/runs/<run-id>/`. The process exits `0` on success, `2` on `needs_clarification` or a usage error, and `1` on any other failure.
 
-### Web UI (human-in-the-loop)
+### Service mode
 
-To run a task with the web UI so the operator can answer `ask_human` questions in the browser, pass `--serve <port>` (which implies `--human-backend web`):
+`--serve <port>` turns the executor into a long-running HTTP service: one project, one task at a time, no queue. The project (git repository) is mounted at a fixed path (`/workspace` by default, override with `--workspace-root`) for the life of the process. Tasks are submitted through a JSON API and the web UI renders the active run and its history.
 
 ```bash
-bun source/main.ts \
-  --serve 8080 \
-  --guild guild \
-  --workspace benchmarks/hello_001 \
-  --task "Write a file called output.txt containing the text hello world" \
-  --run-id web-try
+bun source/main.ts --serve 8080 --guild guild
+# local testing: mount or symlink a project at /workspace, or point --workspace-root at it
+bun source/main.ts --serve 8080 --guild guild --workspace-root benchmarks/hello_001
 ```
 
-Open `http://localhost:8080` to watch the run status and tailed log. If a role calls `ask_human`, the question appears in the UI; submit an answer and the run resumes. The web server stops when the run finishes (or on `SIGINT`).
+Open `http://localhost:8080` to watch the active run and answer `ask_human` questions. Submit a task programmatically (the same API the Foundry uses):
+
+```bash
+curl -X POST http://localhost:8080/api/runs -d '{"task":"Write a file called output.txt containing the text hello world"}'
+# → { "runId": "run-20260621-..." }
+```
+
+API:
+
+- `POST /api/runs` — body `{ "task": "..." }`; starts a run against the fixed workspace and returns `{ "runId": "..." }` (201). Returns `409 { "ok": false, "error": "run_in_progress" }` when a run is already active (one task at a time, no queue).
+- `GET /api/runs` — lists known runs (read from `data/runs/`), newest first.
+- `GET /api/runs/:id` — full run view (status, role activity, recent log) for a specific run.
+- `GET /api/run` — convenience alias for the most recent (active or last completed) run.
+- `GET /api/questions` / `POST /api/answer` — pending `ask_human` questions and answer submission.
+
+The server outlives every run: a completed run's view stays reachable, and a new task can be submitted once the previous one finishes. `SIGINT` and `SIGTERM` (the latter is what `docker stop` sends) trigger graceful shutdown: the active run is allowed to finish, the server stops, and the process exits (`130` if a run was interrupted mid-flight, `0` if idle).
 
 ## Design documents
 

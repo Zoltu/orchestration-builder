@@ -7,6 +7,7 @@ import {
 	parseLogEvents,
 	parseRunSnapshot,
 	renderPendingQuestions,
+	renderRunSummary,
 	renderRunView,
 } from './render.ts'
 
@@ -217,6 +218,47 @@ describe('renderRunView', () => {
 		})
 		const view = renderRunView(snapshot, { maxLogLines: 200 })
 		expect(view.result).toBeNull()
+	})
+})
+
+describe('renderRunSummary', () => {
+	test('shapes a completed run from its meta, taking runId from the directory name', () => {
+		const snapshot = parseRunSnapshot({
+			metaText: JSON.stringify(sampleRunMeta({ runId: 'on-disk-id' })),
+			logText: '',
+		})
+
+		const summary = renderRunSummary('dir-name', snapshot)
+		expect(summary).toEqual({
+			runId: 'dir-name',
+			status: 'success',
+			task: 'fix the bug',
+			startTime: '2026-01-01T00:00:00.000Z',
+			endTime: '2026-01-01T00:01:00.000Z',
+		})
+	})
+
+	test('reports unknown status and null fields when meta is absent (run in progress)', () => {
+		const snapshot = parseRunSnapshot({ metaText: null, logText: '' })
+
+		const summary = renderRunSummary('run-in-progress', snapshot)
+		expect(summary).toEqual({
+			runId: 'run-in-progress',
+			status: 'unknown',
+			task: null,
+			startTime: null,
+			endTime: null,
+		})
+	})
+
+	test('endTime is null when the meta omits it', () => {
+		const snapshot = parseRunSnapshot({
+			metaText: JSON.stringify(sampleRunMeta({ endTime: undefined })),
+			logText: '',
+		})
+
+		const summary = renderRunSummary('r', snapshot)
+		expect(summary.endTime).toBeNull()
 	})
 })
 

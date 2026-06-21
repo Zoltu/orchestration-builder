@@ -34,6 +34,8 @@ describe('parseCliArgs', () => {
 		expect(args.task).toBe('do it')
 		expect(args.runId).toBeUndefined()
 		expect(args.humanBackend).toBeUndefined()
+		expect(args.serve).toBeUndefined()
+		expect(args.workspaceRoot).toBeUndefined()
 	})
 
 	test('accepts the --flag=value form', () => {
@@ -155,10 +157,56 @@ describe('parseCliArgs', () => {
 		expect(outcome.kind).toBe('error')
 		if (outcome.kind === 'error') expect(outcome.message).toContain('--serve')
 	})
+
+	test('in serve mode, --workspace and --task are optional', () => {
+		const args = parsed(parseCliArgs(['--guild', 'guild', '--serve', '8080']))
+		expect(args.guildPath).toBe('guild')
+		expect(args.serve).toBe(8080)
+		expect(args.workspacePath).toBeUndefined()
+		expect(args.task).toBeUndefined()
+	})
+
+	test('in serve mode, --task may bootstrap the first run', () => {
+		const args = parsed(parseCliArgs(['--guild', 'guild', '--serve', '8080', '--task', 'bootstrap']))
+		expect(args.serve).toBe(8080)
+		expect(args.task).toBe('bootstrap')
+		expect(args.workspacePath).toBeUndefined()
+	})
+
+	test('parses --workspace-root in serve mode', () => {
+		const args = parsed(parseCliArgs([
+			'--guild', 'guild', '--serve', '8080', '--workspace-root', '/projects/my-app',
+		]))
+		expect(args.serve).toBe(8080)
+		expect(args.workspaceRoot).toBe('/projects/my-app')
+	})
+
+	test('parses the --workspace-root=path form', () => {
+		const args = parsed(parseCliArgs([
+			'--guild', 'guild', '--serve', '8080', '--workspace-root=/workspace',
+		]))
+		expect(args.workspaceRoot).toBe('/workspace')
+	})
+
+	test('in serve mode, missing --guild reports only --guild (not --workspace/--task)', () => {
+		const outcome = parseCliArgs(['--serve', '8080'])
+		expect(outcome.kind).toBe('error')
+		if (outcome.kind === 'error') {
+			expect(outcome.message).toContain('--guild')
+			expect(outcome.message).not.toContain('--workspace')
+			expect(outcome.message).not.toContain('--task')
+		}
+	})
+
+	test('rejects an unknown flag even in serve mode', () => {
+		const outcome = parseCliArgs(['--guild', 'g', '--serve', '8080', '--bogus', 'x'])
+		expect(outcome.kind).toBe('error')
+		if (outcome.kind === 'error') expect(outcome.message).toContain('Unknown flag')
+	})
 })
 
 describe('usage', () => {
-	test('mentions every required flag and the API-key environment variable', () => {
+	test('mentions every required flag, the serve-mode flags, and the API-key environment variable', () => {
 		const text = usage()
 		expect(text).toContain('--guild')
 		expect(text).toContain('--workspace')
@@ -166,6 +214,7 @@ describe('usage', () => {
 		expect(text).toContain('--run-id')
 		expect(text).toContain('--human-backend')
 		expect(text).toContain('--serve')
+		expect(text).toContain('--workspace-root')
 		expect(text).toContain('ORCHESTRATOR_API_KEY')
 	})
 })

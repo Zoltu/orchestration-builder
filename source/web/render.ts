@@ -145,6 +145,27 @@ export function renderRunView(snapshot: RunSnapshot, options: RenderRunViewOptio
 	}
 }
 
+export interface RunSummary {
+	runId: string
+	status: RunMeta['status'] | 'unknown'
+	task: string | null
+	startTime: string | null
+	endTime: string | null
+}
+
+// A lightweight per-run summary for the run-list endpoint: it carries the identity and lifecycle fields a listing needs without the role activity or recent log a per-run view carries.
+// `runId` comes from the directory name rather than the meta because meta is null while a run is in progress.
+export function renderRunSummary(runId: string, snapshot: RunSnapshot): RunSummary {
+	const meta = snapshot.meta
+	return {
+		runId,
+		status: meta === null ? 'unknown' : meta.status,
+		task: meta === null ? null : meta.task,
+		startTime: meta === null ? null : meta.startTime,
+		endTime: meta === null ? null : (meta.endTime ?? null),
+	}
+}
+
 export interface ApiQuestion {
 	id: string
 	question: string

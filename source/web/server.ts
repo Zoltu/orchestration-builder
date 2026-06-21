@@ -1,12 +1,13 @@
-// Web UI server.
-// A thin HTTP leaf built on Bun.serve: it routes requests, serves the plain static assets, and delegates JSON shaping to render.ts and question/answer handling to the RunState façade from source/executor/run-state.ts.
+// Web UI server for the long-running service backend.
+// A thin HTTP leaf built on Bun.serve: it routes requests, serves the plain static assets, delegates JSON shaping to render.ts, question/answer handling to the RunState façade from source/executor/run-state.ts, and run submission to the RunSubmission orchestration from source/executor/run-submission.ts.
 // No business logic lives here.
 
 import * as path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import type { ReadRunSnapshot } from '../executor/persistence.js'
+import type { ListRunIds, ReadRunSnapshotById } from '../executor/persistence.js'
 import type { RunState } from '../executor/run-state.js'
-import { parseRunSnapshot, renderPendingQuestions, renderRunView } from './render.js'
+import type { RunSubmission } from '../executor/run-submission.js'
+import { parseRunSnapshot, renderPendingQuestions, renderRunSummary, renderRunView } from './render.js'
 
 const STATIC_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), 'static')
 const MAX_LOG_LINES = 200
@@ -25,7 +26,9 @@ const STATIC_ASSETS: Record<string, StaticAsset> = {
 export interface WebServerConfig {
 	port: number
 	runState: RunState
-	readRunSnapshot: ReadRunSnapshot
+	runSubmission: RunSubmission
+	readRunSnapshotById: ReadRunSnapshotById
+	listRunIds: ListRunIds
 }
 
 export interface WebServer {
@@ -50,11 +53,38 @@ function serveStaticAsset(asset: StaticAsset): Response {
 	return new Response(file, { headers: { 'content-type': asset.contentType } })
 }
 
-function handleGetRun(readRunSnapshot: ReadRunSnapshot): Response {
-	const raw = readRunSnapshot()
-	const snapshot = parseRunSnapshot(raw)
-	const view = renderRunView(snapshot, { maxLogLines: MAX_LOG_LINES })
+function handleActiveRun(readRunSnapshotById: ReadRunSnapshotById, runSubmission: RunSubmission): Response {
+	const runId = runSubmission.lastRunId()
+	if (runId === undefined) return json({ ok: false, error: 'no_run' }, 404)
+	const view = runViewFor(readRunSnapshotById, runId)
+	if (view === null) return json({ ok: false, error: 'not_found' }, 404)
 	return json(view)
+}
+
+function handleGetRunById(readRunSnapshotById: ReadRunSnapshotById, runId: string): Response {
+	const view = runViewFor(readRunSnapshotById, runId)
+	if (view === null) return json({ ok: false, error: 'not_found' }, 404)
+	return json(view)
+}
+
+function runViewFor(readRunSnapshotById: ReadRunSnapshotById, runId: string): ReturnType<typeof renderRunView> | null {
+	if (!isKnownRun(readRunSnapshotById, runId)) return null
+	const snapshot = parseRunSnapshot(readRunSnapshotById(runId))
+	return renderRunView(snapshot, { maxLogLines: MAX_LOG_LINES })
+}
+
+// A run id is "known" if a directory exists for it under the runs base; readRunSnapshotById returns empty artifacts for a missing dir, so the existence check distinguishes a never-started id from an in-progress run.
+function isKnownRun(readRunSnapshotById: ReadRunSnapshotById, runId: string): boolean {
+	const raw = readRunSnapshotById(runId)
+	return raw.metaText !== null || raw.logText !== ''
+}
+
+function handleListRuns(readRunSnapshotById: ReadRunSnapshotById, listRunIds: ListRunIds): Response {
+	const summaries = listRunIds()
+		.slice()
+		.sort((a, b) => (a < b ? 1 : a > b ? -1 : 0))
+		.map((runId) => renderRunSummary(runId, parseRunSnapshot(readRunSnapshotById(runId))))
+	return json(summaries)
 }
 
 function handleAnswer(runState: RunState, body: unknown): Response {
@@ -68,38 +98,50 @@ function handleAnswer(runState: RunState, body: unknown): Response {
 	return json({ ok: false, error: 'not_found' }, 404)
 }
 
+function handleCreateRun(runSubmission: RunSubmission, body: unknown): Response {
+	if (!isObject(body)) return json({ ok: false, error: 'invalid_body' }, 400)
+	const taskValue = body['task']
+	if (typeof taskValue !== 'string' || taskValue === '') return json({ ok: false, error: 'invalid_body' }, 400)
+	const result = runSubmission.submit(taskValue)
+	if (result.ok) return json({ runId: result.runId }, 201)
+	return json({ ok: false, error: result.error }, 409)
+}
+
 export function createWebServer(config: WebServerConfig): WebServer {
 	const runState = config.runState
-	const readRunSnapshot = config.readRunSnapshot
+	const runSubmission = config.runSubmission
+	const readRunSnapshotById = config.readRunSnapshotById
+	const listRunIds = config.listRunIds
 
 	const server = Bun.serve({
 		port: config.port,
-		fetch(request) {
+		async fetch(request) {
 			const { pathname } = new URL(request.url)
 
 			if (request.method === 'GET') {
-				if (pathname === '/api/run') return handleGetRun(readRunSnapshot)
+				if (pathname === '/api/run') return handleActiveRun(readRunSnapshotById, runSubmission)
+				if (pathname === '/api/runs') return handleListRuns(readRunSnapshotById, listRunIds)
+				if (pathname.startsWith('/api/runs/')) {
+					const runId = decodeURIComponent(pathname.slice('/api/runs/'.length))
+					return handleGetRunById(readRunSnapshotById, runId)
+				}
 				if (pathname === '/api/questions') return json(renderPendingQuestions(runState.pendingQuestions()))
 				const asset = STATIC_ASSETS[pathname]
 				if (asset !== undefined) return serveStaticAsset(asset)
 				return json({ ok: false, error: 'not_found' }, 404)
 			}
 
-			if (request.method === 'POST' && pathname === '/api/answer') {
-				return request
-					.text()
-					.then(
-						(raw) => {
-							let parsed: unknown
-							try {
-								parsed = JSON.parse(raw)
-							} catch {
-								return json({ ok: false, error: 'invalid_body' }, 400)
-							}
-							return handleAnswer(runState, parsed)
-						},
-						() => json({ ok: false, error: 'invalid_body' }, 400),
-					)
+			if (request.method === 'POST') {
+				if (pathname === '/api/runs') {
+					const body = await readJsonBody(request)
+					if (body === undefined) return json({ ok: false, error: 'invalid_body' }, 400)
+					return handleCreateRun(runSubmission, body)
+				}
+				if (pathname === '/api/answer') {
+					const body = await readJsonBody(request)
+					if (body === undefined) return json({ ok: false, error: 'invalid_body' }, 400)
+					return handleAnswer(runState, body)
+				}
 			}
 
 			return json({ ok: false, error: 'not_found' }, 404)
@@ -115,5 +157,14 @@ export function createWebServer(config: WebServerConfig): WebServer {
 	return {
 		port,
 		stop: () => server.stop(),
+	}
+}
+
+async function readJsonBody(request: Request): Promise<unknown | undefined> {
+	try {
+		const text = await request.text()
+		return JSON.parse(text)
+	} catch {
+		return undefined
 	}
 }
