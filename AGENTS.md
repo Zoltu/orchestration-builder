@@ -339,6 +339,15 @@ Newlines carry semantic meaning. They separate statements, definitions, and logi
 - Use exactly one blank line between top-level definitions and between logical groups. Never use two or more consecutive blank lines.
 - Files end with a single trailing newline; do not leave trailing whitespace on any line.
 
+## Comments
+
+Source code must stand on its own. The development plan (`plan/`) is a transient artifact that will be deleted once the work is complete; it must never be referenced from source files, tests, or commit messages.
+
+- Do not write "step N", "phase N", "the plan", "see plan/...", or any equivalent in source comments, identifiers, error messages, or test names. A reader of the source (who has no plan in front of them) must be able to understand every file without it.
+- Comments that need to point to design context reference the permanent design docs (`docs/*.md`), which outlive the plan. Reference a doc by its filename and section heading, e.g. `docs/foundry.md "Foundry data layout"`.
+- Comments that need to point to a sibling module reference it by module path or symbol name (e.g. "applied by the branch manager", "the input to scoring"), not by the step that builds it. The plan's step boundaries are an implementation scheduling detail, not a property of the finished code.
+- The `plan/` directory is the only place that discusses steps, phases, sequencing, or the plan itself. `AGENTS.md` and `plan/README.md` are the exception: they govern the plan's own hygiene.
+
 ---
 
 ## General Principles

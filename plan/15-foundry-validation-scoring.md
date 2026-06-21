@@ -1,4 +1,4 @@
-# Step 11 — Foundry validation + scoring
+# Step 15 — Foundry validation + scoring
 
 ## Goal
 

@@ -1,4 +1,4 @@
-# Step 14 — Foundry merge + reporting
+# Step 18 — Foundry merge + reporting
 
 ## Goal
 
@@ -13,7 +13,7 @@ Read `docs/foundry.md` ("Merging and conflict resolution", "Regression testing",
 1. `source/foundry/merge.ts` — pure helpers + orchestration:
    - `classifyBranches(scoredBranches): { rejected, accepted, conflicting }` — pure decision logic.
    - `detectConflicts(acceptedBranches): ConflictSet` — pure: which branches edit overlapping files.
-   - `mergeConflicting(dependencies, { ancestor, branchA, branchB, resultsA, resultsB })` — orchestration that builds the labeled-diff prompt, calls the big model (injected caller), parses the merged file contents with a type guard, and returns a merged candidate. Re-evaluation of the merged candidate happens in the loop (step 15), not here.
+   - `mergeConflicting(dependencies, { ancestor, branchA, branchB, resultsA, resultsB })` — orchestration that builds the labeled-diff prompt, calls the big model (injected caller), parses the merged file contents with a type guard, and returns a merged candidate. Re-evaluation of the merged candidate happens in the loop (step 19), not here.
 2. `source/foundry/merge.test.ts` — in-memory tests: classification; conflict detection on overlapping vs disjoint file sets; merge with a fake big-model caller returns parsed merged content; malformed merge output is rejected.
 3. `source/foundry/report.ts` — pure helpers that render a `summary.json` and an `index.html` (plain HTML, no deps) from a cycle's results. HTML includes hypothesis summaries, branch score table, accepted/rejected/merged status, the new-baseline diff, and run-id links.
 4. `source/foundry/report.test.ts` — in-memory tests: `summary.json` shape; `index.html` contains required sections and escapes file content safely (no raw injection of untrusted diffs into HTML — escape `<`, `>`, `&`).
@@ -21,7 +21,7 @@ Read `docs/foundry.md` ("Merging and conflict resolution", "Regression testing",
 
 ## Module boundaries
 
-- `merge.ts` classification/detection are pure; the LLM merge call goes through the injected big-model caller (step 13's `llm.ts`).
+- `merge.ts` classification/detection are pure; the LLM merge call goes through the injected big-model caller (step 17's `llm.ts`).
 - `report.ts` is pure rendering — no I/O; the loop writes the files.
 - `promote.ts` is the only writer of `guild/guild.json`.
 
@@ -43,4 +43,4 @@ Medium to large — merge orchestration and report rendering.
 
 ## Operator handoff
 
-None — fully in-memory. Real merging/reporting is exercised in step 15.
+None — fully in-memory. Real merging/reporting is exercised in step 19.

@@ -3,7 +3,7 @@
 // / restores baselines through history. It is the only Foundry module that
 // touches the filesystem and is therefore exported as a factory; its logic is
 // intentionally thin (the "which files to edit" decision belongs to hypothesis
-// generation in step 13). Branch Guilds are validated end-to-end with the
+// generation, not here). Branch Guilds are validated end-to-end with the
 // existing Guild loader so this module never re-implements Guild validation.
 //
 // Data layout (docs/foundry.md "Foundry data layout"), rooted at `baseDir`:

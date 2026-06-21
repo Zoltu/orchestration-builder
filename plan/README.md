@@ -15,6 +15,7 @@ This is the working development plan for the Adaptive Orchestrator. It is broken
 Every step must leave the repository in a **clean, healthy state**. A step is not done when its acceptance criteria pass; it is done when the repository is something a reviewer would be happy to inherit.
 
 - **Leave it clean.** `bun run typecheck` and `bun test source/` must both pass at the end of the step. No failing tests, no type errors, no dead code introduced, no TODO litter left behind.
+- **Keep the plan out of source.** Source files, tests, and commit messages must never reference the plan — no "step N", "phase N", "the plan", or `plan/` paths in comments, identifiers, error messages, or test names. The plan is a transient artifact that will be deleted once the work is complete; source must stand on its own. Comments that need design context point at the permanent `docs/*.md` by filename and section; comments that need a sibling module point at its path or symbol, not at the step that builds it. See `AGENTS.md` "Comments".
 - **Pay technical debt before closing.** If the step accrued debt that can be paid within the session (a cast, a control-flow-via-catch, a missing guard, a duplicated helper), pay it before the step closes. Do not defer debt that is cheap to remove.
 - **Track debt you cannot pay.** If some debt is genuinely unavoidable (e.g. it depends on a later step's deliverable), record it explicitly in this README's [Tracked technical debt](#tracked-technical-debt) table, name the step that will remove it, and update that step's file to call out the removal work. Untracked debt is a violation.
 - **Evaluate and refactor at the end.** Before declaring a step done, re-read the changed files and the modules they touch. Is the naming clear? Is the data flow obvious? Did a helper drift from its siblings? Refactor while the context is fresh. Small refactorings at the end of each step keep the codebase healthy across the whole plan; they are not optional polish.
@@ -46,16 +47,16 @@ The target user is a **non-developer**. The Guild must ask few, clear clarifying
 | 07 | Quick-fix benchmarks | ✅ complete (in-env; real-run handoff blocked on step 01) | [`07-quick-fix-benchmarks.md`](07-quick-fix-benchmarks.md) |
 | 08 | Medium benchmarks | ✅ complete (in-env; real-run handoff blocked on step 01) | [`08-medium-benchmarks.md`](08-medium-benchmarks.md) |
 | 09 | Large benchmark | ✅ complete (in-env; real-run handoff blocked on step 01) | [`09-large-benchmark.md`](09-large-benchmark.md) |
-| 10 | Foundry foundation: types, config, branch management | ✅ complete | [`10-foundry-foundation.md`](10-foundry-foundation.md) |
-| 11 | Foundry validation + scoring | pending | [`11-foundry-validation-scoring.md`](11-foundry-validation-scoring.md) |
-| 12 | Foundry branch evaluation | pending | [`12-foundry-evaluation.md`](12-foundry-evaluation.md) |
-| 13 | Foundry hypothesis generation | pending | [`13-foundry-hypothesis.md`](13-foundry-hypothesis.md) |
-| 14 | Foundry merge + reporting | pending | [`14-foundry-merge-report.md`](14-foundry-merge-report.md) |
-| 15 | Foundry CLI + optimization loop + safeguards | pending | [`15-foundry-cli-loop.md`](15-foundry-cli-loop.md) |
-| 16 | Web `ask_human` backend state machine | pending | [`16-web-human-backend.md`](16-web-human-backend.md) |
-| 17 | Web UI server + static assets | pending | [`17-web-ui-server.md`](17-web-ui-server.md) |
-| 18 | `main.ts --serve` wiring | pending | [`18-main-serve-wiring.md`](18-main-serve-wiring.md) |
-| 19 | Dockerfile + deployment docs | pending | [`19-dockerfile-deployment.md`](19-dockerfile-deployment.md) |
+| 10 | Web `ask_human` backend state machine | pending | [`10-web-human-backend.md`](10-web-human-backend.md) |
+| 11 | Web UI server + static assets | pending | [`11-web-ui-server.md`](11-web-ui-server.md) |
+| 12 | `main.ts --serve` wiring | pending | [`12-main-serve-wiring.md`](12-main-serve-wiring.md) |
+| 13 | Dockerfile + deployment docs | pending | [`13-dockerfile-deployment.md`](13-dockerfile-deployment.md) |
+| 14 | Foundry foundation: types, config, branch management | ✅ complete | [`14-foundry-foundation.md`](14-foundry-foundation.md) |
+| 15 | Foundry validation + scoring | pending | [`15-foundry-validation-scoring.md`](15-foundry-validation-scoring.md) |
+| 16 | Foundry branch evaluation | pending | [`16-foundry-evaluation.md`](16-foundry-evaluation.md) |
+| 17 | Foundry hypothesis generation | pending | [`17-foundry-hypothesis.md`](17-foundry-hypothesis.md) |
+| 18 | Foundry merge + reporting | pending | [`18-foundry-merge-report.md`](18-foundry-merge-report.md) |
+| 19 | Foundry CLI + optimization loop + safeguards | pending | [`19-foundry-cli-loop.md`](19-foundry-cli-loop.md) |
 | 20 | Per-run environment isolation (operator-collaboration) | pending | [`20-environment-isolation.md`](20-environment-isolation.md) |
 | 21 | `run_shell` tool (gated on step 20) | pending | [`21-run-shell-tool.md`](21-run-shell-tool.md) |
 
@@ -73,6 +74,6 @@ When you add a row, also update the target step's file to describe the removal w
 
 ## Implementation order
 
-Steps 01–05 close out the original Phase 5 (integration & smoke testing) and bridge into real benchmarks by adding the missing v1 tools: `write_file` (01), the CLI (02), an in-memory e2e test (03), and the two safe checker tools `typecheck` (04) and `test` (05). Steps 06–09 build the benchmark suite (original Phase 6). Steps 10–15 build the Foundry meta-optimizer (original Phase 7). Steps 16–19 build the web UI and deployment (original Phase 8). Steps 20–21 add per-run environment isolation and the `run_shell` tool that it unblocks — placed at the end so a full, deployable product ships before the larger isolation work; step 20 is an operator-collaboration step (the agent proposes approaches and works with the operator, it does not implement isolation unilaterally), and step 21 (`run_shell`) is gated on it.
+Steps 01–05 close out the original Phase 5 (integration & smoke testing) and bridge into real benchmarks by adding the missing v1 tools: `write_file` (01), the CLI (02), an in-memory e2e test (03), and the two safe checker tools `typecheck` (04) and `test` (05). Steps 06–09 build the benchmark suite (original Phase 6). Steps 10–13 build the web UI and deployment (original Phase 8), brought forward ahead of the Foundry so a fully deployable, human-in-the-loop product ships before the offline optimizer — the executor and Guild are stable by step 05, so the web UI depends on no later work, and deferring the Foundry keeps the optimizer (which treats the executor as a black box and is not required for the product to run) last among the original phases. Steps 14–19 build the Foundry meta-optimizer (original Phase 7). Steps 20–21 add per-run environment isolation and the `run_shell` tool that it unblocks — placed at the end so a full, deployable product ships before the larger isolation work; step 20 is an operator-collaboration step (the agent proposes approaches and works with the operator, it does not implement isolation unilaterally), and step 21 (`run_shell`) is gated on it.
 
 Every original `PLAN.md` phase is accounted for: Phases 1–4 are consolidated in step 00; Phases 5–8 map to the steps above. The old top-level `PLAN.md` has been removed to avoid maintaining redundant content.

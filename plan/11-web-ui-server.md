@@ -1,4 +1,4 @@
-# Step 17 — Web UI server + static assets
+# Step 11 — Web UI server + static assets
 
 ## Goal
 
@@ -6,7 +6,7 @@ Add a plain HTML/JS web UI served by `Bun.serve` that displays the active run, t
 
 ## Context
 
-Read `docs/executor.md` ("Web UI") and [`16-web-human-backend.md`](16-web-human-backend.md) (the backend state machine is in place). The server is a leaf factory `createWebServer(port)`; it reads run state to render the UI and posts answers back to the step-16 backend. Static assets are plain files under `source/web/static/`.
+Read `docs/executor.md` ("Web UI") and [`10-web-human-backend.md`](10-web-human-backend.md) (the backend state machine is in place). The server is a leaf factory `createWebServer(port)`; it reads run state to render the UI and posts answers back to the step-10 backend. Static assets are plain files under `source/web/static/`.
 
 ## Deliverables
 
@@ -39,4 +39,4 @@ Medium — UI is intentionally simple; the plumbing is the work.
 
 ## Operator handoff
 
-None for code. A live UI test against a real run is part of step 18's handoff.
+None for code. A live UI test against a real run is part of step 12's handoff.

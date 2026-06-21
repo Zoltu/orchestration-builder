@@ -67,8 +67,7 @@ export interface HypothesisChange {
 }
 
 // A concrete, testable change to the Guild. Produced by hypothesis generation
-// (step 13) and applied by the branch manager (step 10) to produce a candidate
-// branch Guild.
+// and applied by the branch manager to produce a candidate branch Guild.
 export interface Hypothesis {
 	id: string
 	motivation: string
@@ -81,7 +80,7 @@ export type BenchmarkOutcome = 'win' | 'loss' | 'partial'
 
 // Raw per-benchmark outcome for a branch, recorded after the executor runs the
 // branch Guild against that benchmark across the configured repetitions. This
-// is the input to scoring (step 11).
+// is the input to scoring.
 export interface BenchmarkBranchResult {
 	benchmark: string
 	passRate: number
@@ -112,9 +111,9 @@ export interface BenchmarkScoreEntry {
 	outcome: BenchmarkOutcome
 }
 
-// A branch's aggregate score, produced by `aggregateBranch` (step 11). The
-// flags drive merge grouping: a regressing branch is rejected; a branch within
-// the margin is not flagged as improved.
+// A branch's aggregate score, produced by `aggregateBranch`. The flags drive
+// merge grouping: a regressing branch is rejected; a branch within the margin
+// is not flagged as improved.
 export interface BranchScore {
 	branchId: string
 	overallPassRate: number
@@ -137,7 +136,7 @@ export interface BranchResult {
 export type FoundryTerminationReason = 'cycle_budget' | 'cost_budget' | 'plateau'
 
 // The human-readable + machine-readable summary of one optimization cycle,
-// written by the loop (step 15) and the reporting step (step 14).
+// written by the optimization loop and the report renderer.
 export interface OptimizationCycleReport {
 	cycleNumber: number
 	startedAt: string

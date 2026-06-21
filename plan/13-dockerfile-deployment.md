@@ -1,4 +1,4 @@
-# Step 19 — Dockerfile + deployment docs
+# Step 13 — Dockerfile + deployment docs
 
 ## Goal
 

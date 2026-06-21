@@ -19,7 +19,7 @@ If at any point the agent cannot make progress without operator input, it stops,
 
 ## Context
 
-Read `docs/architecture.md` ("Benchmark isolation and environments (unsolved)") in full — it lists three options (Docker-in-Docker, Docker Sandbox, per-run filesystem + toolchain isolation without containers) and the long-term expectation. Read [`19-dockerfile-deployment.md`](19-dockerfile-deployment.md) (the deployment container; per-run isolation runs *inside* it in deployment), [`21-run-shell-tool.md`](21-run-shell-tool.md) (the tool this step unblocks), and [`04-typecheck-tool.md`](04-typecheck-tool.md) / [`05-test-tool.md`](05-test-tool.md) (the checker tools whose hardcoded commands this step generalizes — see tracked debt).
+Read `docs/architecture.md` ("Benchmark isolation and environments (unsolved)") in full — it lists three options (Docker-in-Docker, Docker Sandbox, per-run filesystem + toolchain isolation without containers) and the long-term expectation. Read [`13-dockerfile-deployment.md`](13-dockerfile-deployment.md) (the deployment container; per-run isolation runs *inside* it in deployment), [`21-run-shell-tool.md`](21-run-shell-tool.md) (the tool this step unblocks), and [`04-typecheck-tool.md`](04-typecheck-tool.md) / [`05-test-tool.md`](05-test-tool.md) (the checker tools whose hardcoded commands this step generalizes — see tracked debt).
 
 The no-installs constraint currently in force exists *only* because isolation is unsolved. Lifting it is the point of this step. Until this step lands, the suite stays constrained to no-install, Bun-validatable tasks, `run_shell` stays unshipped, and the checker tools stay hardcoded to `bun`/`tsc`.
 
