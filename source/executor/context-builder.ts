@@ -1,4 +1,4 @@
-import type { Message, RoleDefinition } from '../shared/types.js'
+import type { Message, RoleDefinition } from './types.js'
 import { stripReasoning } from './context-policy.js'
 
 export function buildMessages(roleDefinition: RoleDefinition, messages: Message[]): Message[] {

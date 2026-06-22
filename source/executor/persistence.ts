@@ -1,6 +1,6 @@
 import * as fs from 'node:fs'
 import * as path from 'node:path'
-import type { LogEvent, RunMeta } from '../shared/types.js'
+import type { LogEvent, RunMeta } from './types.js'
 
 export type RunDirectory = () => string
 export type AppendLog = (event: LogEvent) => void

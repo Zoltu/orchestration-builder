@@ -1,4 +1,4 @@
-// These types describe external JSON objects loaded at runtime, which is why they are paired with the type guards and validators in source/shared/validation.ts.
+// These types describe external JSON objects loaded at runtime, which is why they are paired with the type guards and validators in source/executor/validation.ts.
 
 export interface GuildConfig {
 	schemaVersion: number

@@ -23,26 +23,12 @@ bun test tests/
 rm output.txt
 ```
 
-## Architecture
-
-The codebase follows a three-tier architecture that maximizes testability. Read [`AGENTS.md`](AGENTS.md) for the full rules; the short version:
-
-- **Leaf functions** touch external systems (network, filesystem, subprocess, environment) and are exported as factories. They are thin and not unit-tested.
-- **Orchestration functions** sequence calls and make decisions. They are unit-tested and receive pre-configured leaves via a `dependencies` object with no defaults.
-- **Pure helpers** contain parsing, validation, and transformation logic. They are imported directly and unit-tested.
-
-The server entry point (`source/serve.ts`) is the only integration shell: it reads `Bun.env`, assembles real leaves, and hands them to the tested orchestration. It holds no business logic and is not unit-tested.
-
 ## Design documents
 
-1. [`docs/overview.md`](docs/overview.md) — purpose, goals, and use cases
-2. [`docs/architecture.md`](docs/architecture.md) — high-level components and data flow
-3. [`docs/security.md`](docs/security.md) — threat model and attack surface
-4. [`docs/executor.md`](docs/executor.md) — executor runtime
-5. [`docs/guild.md`](docs/guild.md) — Guild configuration format
-6. [`docs/foundry.md`](docs/foundry.md) — meta-optimization loop
-7. [`docs/benchmarks.md`](docs/benchmarks.md) — benchmark workspace format
-8. [`docs/api.md`](docs/api.md) — HTTP API reference
+1. [`docs/architecture.md`](docs/architecture.md) — high-level components, data flow, execution model
+2. [`docs/reference.md`](docs/reference.md) — executor runtime, Guild format, HTTP API, benchmarks
+3. [`docs/foundry.md`](docs/foundry.md) — meta-optimization loop (future work)
+4. [`docs/security.md`](docs/security.md) — threat model and mitigations
 
 ## Development plan
 

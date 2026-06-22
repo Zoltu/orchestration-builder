@@ -1,4 +1,4 @@
-import type { Message, ModelConfig, ToolCall, ToolManifest } from '../shared/types.js'
+import type { Message, ModelConfig, ToolCall, ToolManifest } from './types.js'
 
 export interface LlmRequest {
 	messages: Message[]

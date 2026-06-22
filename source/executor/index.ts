@@ -40,4 +40,4 @@ export type {
 	RunSnapshotRaw,
 } from './persistence.js'
 
-export type { ModelConfig, RunOptions, RunMeta, ResultCard } from '../shared/types.js'
+export type { ModelConfig, RunOptions, RunMeta, ResultCard } from './types.js'

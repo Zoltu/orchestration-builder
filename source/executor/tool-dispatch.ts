@@ -1,5 +1,5 @@
-import { createToolError } from '../shared/errors.js'
-import type { ToolCall, ToolResult } from '../shared/types.js'
+import { createToolError } from './errors.js'
+import type { ToolCall, ToolResult } from './types.js'
 
 export type ToolHandler = (args: Record<string, unknown>) => ToolResult | Promise<ToolResult>
 

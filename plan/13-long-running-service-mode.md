@@ -2,7 +2,7 @@
 
 ## Goal
 
-Turn the executor from a one-run-per-process invocation into a long-running HTTP service backend: one task at a time per container, no queue, task submission via a JSON API. This is the deployment substrate the Docker image (step 15) runs as PID 1, and the API the Foundry (steps 23+) submits runs to. It fixes the server-side halves of the step-12 tracked debt (instant teardown on run completion; `SIGTERM` unhandled). The multi-run web UI rewrite is step 14; this step keeps the existing UI functional via a backward-compatible `GET /api/run` alias.
+Turn the executor from a one-run-per-process invocation into a long-running HTTP service backend: one task at a time per container, no queue, task submission via a JSON API. This is the deployment substrate the Docker image (step 15) runs as PID 1, and the API the Foundry (step 23) submits runs to. It fixes the server-side halves of the step-12 tracked debt (instant teardown on run completion; `SIGTERM` unhandled). The multi-run web UI rewrite is step 14; this step keeps the existing UI functional via a backward-compatible `GET /api/run` alias.
 
 ## Context
 
@@ -13,7 +13,7 @@ Product constraints (from the realignment):
 - **One container = one project.** The project (git repository) is mounted into the container at a fixed path (`/workspace`) at deploy/run time. The service does not receive a workspace path per task — the workspace is fixed for the life of the container.
 - **One task at a time, no queue.** If a task is running and another is submitted, the API rejects it. (Future parallelism is out of scope; the design must not preclude it, but it is not built.)
 - **Long-lived.** The process runs indefinitely as PID 1. `SIGINT`/`SIGTERM` (the latter is what `docker stop` sends) trigger graceful shutdown: stop accepting new tasks, let the active run finish or be interrupted per the run-interrupt channel (step 19), then exit.
-- **Foundry is a client.** The same JSON API the UI uses is the API the Foundry (step 26) submits runs through. No bespoke executor coupling.
+- **Foundry is a client.** The same JSON API the UI uses is the API the Foundry (step 23) submits runs through. No bespoke executor coupling.
 
 The step-12 bugs this step removes: (a) the server is torn down the instant `runExecutor` resolves, so a fast run leaves the UI stuck; (b) only `SIGINT` is handled, not the `SIGTERM` `docker stop` sends. The third step-12 bug — `app.js` swallows fetch errors silently, leaving the page at `loading…` when the server is unreachable — is a client-side concern and is fixed in step 14's UI rewrite; this step does not touch `app.js`.
 

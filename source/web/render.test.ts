@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import type { RunSnapshotRaw } from '../executor/persistence.js'
 import type { PendingQuestion } from '../executor/human-backend.js'
-import type { LogEvent, RunMeta } from '../shared/types.js'
+import type { LogEvent, RunMeta } from '../executor/types.js'
 import {
 	deriveRoleActivity,
 	parseLogEvents,

@@ -1,153 +1,74 @@
 # Architecture
 
-## High-level components
+The Adaptive Orchestrator enables a small, consumer-grade language model to solve complex tasks by working through a network of specialized roles and tools. The system has three layers: the executor (runtime), the Guild (configuration), and the Foundry (offline optimizer).
 
-The system consists of three layers:
+## Components
+
+**Executor** — the runtime that runs the small model. It loads the Guild, starts the entry role, dispatches tool calls, enforces safety budgets, and persists results. It is small, sequential, and makes no domain decisions. See [`docs/reference.md`](reference.md) for the full runtime reference.
+
+**Guild** — a JSON configuration plus referenced prompt and tool-manifest files. It describes the model endpoint, roles, tools, context policy, and budgets. The Guild is the artifact being optimized. See [`docs/reference.md`](reference.md) for the format specification.
+
+**Foundry** — an offline optimization process that uses a large model to propose Guild changes, test them against a benchmark suite, and merge successful improvements. It is a separate program that talks to the executor over HTTP. See [`docs/foundry.md`](foundry.md).
 
 ```
-Foundry (large model, parallel, offline)
-   │
-   │ writes/reads
-   ▼
+Foundry (large model, offline optimizer)
+    │
+    │ writes/reads
+    ▼
 Guild (JSON config + prompt/tool files)
-   │
-   │ loads
-   ▼
-Executor (small model, sequential, runtime)
-   │
-   │ operates on
-   ▼
-Benchmark workspace
+    │
+    │ loads
+    ▼
+Executor (small model, sequential runtime)
+    │
+    │ operates on
+    ▼
+Workspace (the user's project, modified in place)
 ```
 
-### Executor
-
-The executor is the runtime. It is small, sequential, and makes no decisions about what a given task should look like. It only knows how to:
-
-- Load a Guild.
-- Start the configured entry role.
-- Build a prompt for the active role.
-- Call the single configured LLM endpoint.
-- Parse the response (content, reasoning, tool calls).
-- Dispatch tool calls, including the built-in `agent` tool that spawns another role.
-- Enforce hard safety budgets and surface errors as tool results.
-- Persist the run state to disk.
-
-The executor has no understanding of "planner," "coder," "router," or "compaction agent." Those are all roles defined in the Guild.
-
-### Guild
-
-The Guild is the entire behavior of the orchestrator described as data. It contains:
-
-- Model endpoint configuration.
-- Runtime budgets and context policy.
-- Role definitions (system prompt path, allowed tools, per-role budgets).
-- Tool manifests for built-in and native tools.
-- The name of the entry role.
-
-No workflow graph is defined in the Guild. Workflows emerge from roles calling the `agent` tool to invoke other roles.
-
-### Foundry
-
-The Foundry is an optimization process, not a runtime service. It uses a large language model to:
-
-- Analyze recent run traces and propose hypotheses for Guild improvements.
-- Create branch configurations from those hypotheses.
-- Run the executor against each branch on the benchmark suite.
-- Score branches versus the current baseline.
-- Merge validated improvements and write a new baseline Guild.
-- Produce human-readable reports.
-
-The Foundry may run many of its own LLM calls in parallel, and it may run multiple executor instances in parallel if the user’s hardware supports it. The executor itself remains sequential.
+The executor provides the stage. The Guild is the script. The Foundry is the playwright rewriting the script.
 
 ## Data flow: a single run
 
-1. The user mounts a project at `/workspace` and submits a task through the JSON API or web UI.
-2. The executor operates on the workspace in place — it modifies the project directly, not a per-run copy. Run bookkeeping goes under `<workspace>/.orchestration/runs/<run_id>/`.
-3. The executor loads `guild.json` and starts the configured entry role with the user goal.
-4. The active role calls tools. Tool results are appended to the role's conversation. If the role calls `ask_human`, the answer comes from the web UI.
-5. If the role calls the built-in `agent` tool, the executor spawns a child role and runs it to completion.
-6. The child returns via the built-in `finish` tool. The result card becomes the tool result for the parent.
-7. The run ends when the entry role calls `finish` or when a hard safety budget is exhausted.
-8. The executor writes `meta.json` and `log.jsonl` under `<workspace>/.orchestration/runs/<run_id>/`. The workspace itself holds the final filesystem state (mutated in place).
+1. The user mounts a project at `/workspace` and submits a task through the web UI (or HTTP API).
+2. The executor loads the Guild and starts the entry role with the task.
+3. The active role calls tools. Tool results are appended to the role's conversation. If the role calls `agent`, a child role runs to completion and returns a result card. If the role calls `ask_human`, the question surfaces in the web UI and the run pauses for an answer.
+4. The run ends when the entry role calls `finish` or a hard safety budget is exhausted.
+5. The executor writes `meta.json` and `log.jsonl` under `<workspace>/.orchestration/runs/<run_id>/`. The workspace itself holds the final filesystem state — the executor modified it in place.
 
 ## Data flow: an optimization cycle
 
-1. The Foundry reads the current `guild.json` and the most recent run logs under `<workspace>/.orchestration/runs/`.
-2. It prompts a large model to cluster failures and propose concrete hypotheses.
-3. Each hypothesis becomes a branch: `data/foundry/branches/<branch_id>/guild.json`.
-4. For each branch, the Foundry runs the benchmark suite through the executor (one run per benchmark).
-5. The Foundry validates each final workspace using the original `eval.json` files.
-6. Scores are compared to the baseline pass rate, token cost, error rate, and context pressure.
-7. Validated improvements are merged into the next baseline `guild.json`.
-8. A report is written to `data/foundry/reports/<timestamp>/`.
+The Foundry reads the current Guild and recent run logs, prompts a large model to propose hypotheses, creates branch Guilds, evaluates each branch against the benchmark suite via the executor service, scores and compares, merges accepted improvements, and writes a new baseline. See [`docs/foundry.md`](foundry.md) for the full design.
+
+## Execution model
+
+- **Single model on the executor.** The executor talks to exactly one OpenAI-compatible chat/completions endpoint.
+- **Sequential.** Only one LLM request is in flight at a time. A run is a depth-first traversal of the role tree.
+- **One task at a time.** The server runs one run at a time; there is no queue.
+- **In-place workspace.** The executor modifies the mounted project directly, exactly as a developer would. Run bookkeeping goes under `<workspace>/.orchestration/`.
+- **No dependencies.** The executor uses only Bun built-ins and web-standard APIs. No npm packages.
+- **Large model in the Foundry only.** The Foundry may use a commercial API or another local model.
 
 ## Filesystem layout
 
 ```
-workspace/
-├── README.md                  # project-level readme (not part of the design docs)
-├── docs/                      # design documents
-├── data/
-│   ├── runs/
-│   │   └── <run_id>/
-│   │       ├── meta.json
-│   │       ├── log.jsonl
-│   │       └── workspace/
-│   └── foundry/
-│       ├── branches/<branch_id>/guild.json
-│       └── reports/<timestamp>/
-├── guild/
-│   ├── guild.json             # current baseline Guild
-│   ├── prompts/
-│   └── tools/
-└── benchmarks/
-    └── <benchmark_name>/
-        ├── eval.json
-        └── workspace/
+workspace/                          # the user's project (mounted at /workspace)
+├── .orchestration/                 # orchestrator bookkeeping (can be ignored)
+│   └── runs/
+│       └── <run_id>/
+│           ├── meta.json           # run metadata, status, final result
+│           └── log.jsonl           # event stream: llm calls, tool calls, errors
+├── (project files)
+guild/                              # bundled into the image at /app/guild/
+├── guild.json                      # current baseline Guild
+├── prompts/                        # role system prompts
+└── tools/                          # tool manifests
 ```
 
-## Execution model
+## Deployment
 
-- **Single model on the executor.** The executor talks to exactly one chat/completions endpoint. That model is usually the same small local model the user wants to optimize for.
-- **Sequential in the executor.** Only one LLM request is in flight at a time. This lets the user devote all available VRAM to one large context window.
-- **No libraries in the executor code.** The executor is implemented in TypeScript running on Bun, using only Bun built-ins and web-standard APIs. There are no npm dependencies.
-- **Large model in the Foundry only.** The Foundry may use a commercial API or another local large model for hypothesis generation and merging.
-- **Web UI for human interaction.** The final product ships with a simple web UI surfaced by the server entry point (`source/serve.ts`). It displays progress and handles `ask_human` questions.
-- **Single Dockerfile for the final product.** The `Dockerfile` uses the official Bun base image (pinned by digest), copies the project source and the seed guild, and runs the long-running executor service as PID 1 via `ENTRYPOINT ["bun","source/serve.ts"]`. The build runs `bun install`, typecheck, and tests as gates, then removes `node_modules` so the production image carries no dependencies. All configuration is environment variables with production defaults, so the image runs with an empty environment. The deployment model is one container per project: the project (git repository) is mounted into the container at `/workspace` and the executor modifies it in place; run bookkeeping goes under `/workspace/.orchestration/`. See [`Dockerfile`](../Dockerfile) for the image; per-run environment isolation runs inside this container as the inner isolation layer.
+The executor ships as a Docker image that runs the long-running executor service as PID 1 via `ENTRYPOINT ["bun", "source/serve.ts"]`. The build runs `bun install`, typecheck, and tests as gates, then removes `node_modules`. All configuration is environment variables with production defaults. The deployment model is one container per project: the project is mounted at `/workspace` (read-write) and the executor modifies it in place. See [`Dockerfile`](../Dockerfile) and [`README.md`](../README.md).
 
-## Boundary between executor and guild
+## Isolation
 
-| Concern | Executor | Guild |
-|---|---|---|
-| HTTP transport to model | yes | no |
-| JSON parsing / serialization | yes | no |
-| File system / shell tool execution | yes | no |
-| Which roles exist | no | yes |
-| What each role is instructed to do | no | yes |
-| Which tools each role may use | no | yes |
-| When to delegate / plan / review | no | yes |
-| How to compact context | no | yes |
-| Model endpoint, context window | partly (config values) | yes |
-| Hard safety budgets | yes | values only |
-
-The executor provides the stage. The Guild is the script being performed. The Foundry is the playwright rewriting the script.
-
----
-
-## Benchmark isolation and environments (unsolved)
-
-The orchestrator is meant to exercise real software engineering work: reading code, running tests, installing dependencies, iterating until the build is green. Each benchmark in the suite therefore needs its own runtime environment, and runs of different benchmarks — and different Guild branches within one optimization cycle — must not be able to see or interfere with each other.
-
-**Deployment context.** The Foundry itself runs inside Docker, as does the final product (see `docs/security.md`). Inside that container, benchmark validation commands will need to spin up additional isolation boundaries per run. Options considered:
-
-- **Docker-in-Docker.** Run the executor in a child container that itself runs `docker run` per benchmark. Hard to set up correctly; exposing the parent Docker socket to children breaks the parent's sandbox guarantees.
-- **Docker Sandbox.** A newer Docker product that provides hardened per-command isolation. Appears to do what we want, but is heavy and ships a lot of machinery we don't need. A possible side quest to investigate whether we can use the underlying primitives without the full feature set.
-- **Per-run filesystem + toolchain isolation without containers.** Set `HOME` to a scratch directory inside the workspace, strip `PATH` to only the workspace `bin/` and a vetted interpreter directory, and require every dependency to be either vendored or installed via a workspace-scoped package manager (Bun's per-project `node_modules`, or a venv pinned to the benchmark). Prevents global pollution but does not contain a model that decides to e.g. `curl | sh` something from the network.
-- **LLM-as-judge only.** For benchmarks where the only signal we want is qualitative, skip the shell command entirely and have the Foundry's large model grade the final workspace. Cheapest possible path; loses deterministic reproducibility for those benchmarks.
-
-**Current position.** Docker-in-Docker is unsolved for us; Docker Sandbox is a possible side quest but not on the critical path. Until we solve per-benchmark isolation properly, the benchmark suite is constrained to tasks that do not require an additional runtime — anything Bun can validate directly with no installs. This keeps `hello_001` and the early phases viable but does not reflect the long-term shape of the work.
-
-**Long-term expectation.** Almost all real benchmarks will need an environment: test suites, build tools, language servers, sometimes a database. We are not aiming for one-shot solutions; we want a harness that can do multi-step engineering. That means returning to this problem in a later phase with a concrete proposal — likely Docker Sandbox (trimmed down) or an alternative we have not yet identified — and benchmarking the isolation mechanism itself as part of the suite.
-
-This section exists so we do not forget the problem. It is intentionally short and explicitly marked unsolved.
+The executor operates on the mounted workspace in place. File tools canonicalize paths and reject any that resolve outside the workspace. Runs are sequential, so there is no concurrent-run isolation concern. Per-run environment isolation (scoped `PATH`/`HOME`, no global pollution) is future work that unblocks the `run_shell` tool; until then, the suite is constrained to no-install tasks. Operators who want to protect a project from in-place modification give the executor a throwaway copy. See [`docs/security.md`](security.md).

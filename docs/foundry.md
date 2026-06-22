@@ -1,93 +1,73 @@
-# Foundry (Meta-Optimizer)
+# Foundry
 
-## Purpose
+The Foundry is an offline meta-optimizer that improves the Guild by proposing, testing, and merging changes. It is a separate program from the executor — it never imports from the executor codebase and talks to the executor exclusively over its HTTP API. It uses a large language model (commercial API or large local model) for hypothesis generation and merging; the executor itself never does.
 
-The Foundry is an offline optimization process that improves the Guild. It uses a large language model to propose changes to the Guild, runs the executor against a benchmark suite to test those changes, and merges the successful changes into a new baseline Guild.
+The Foundry is future work. Its design is documented here so executor and Guild decisions can account for it. Implementation is step 23 of the development plan.
 
-The Foundry is the only part of the system that uses a large model. The executor itself never does.
+## Architecture
 
-## Overview of the optimization loop
+The Foundry is a standalone program, not a subcommand of the executor service. It is an HTTP client + Docker orchestrator + big-model caller. It submits runs to the executor service via `POST /api/runs`, polls `GET /api/runs/:id` for completion, and reads the final workspace. It never imports `runExecutor` or runs inside the executor process.
 
-1. **Observe** — read the current baseline Guild and recent run traces.
-2. **Hypothesize** — prompt a large model to cluster failures and propose concrete improvement hypotheses.
-3. **Branch** — create one or more candidate Guild configurations.
-4. **Evaluate** — run each branch against the benchmark suite using the executor.
-5. **Compare** — score each branch versus the baseline.
-6. **Merge** — combine validated improvements and resolve conflicts.
-7. **Report** — write a human-readable report to disk.
-8. **Repeat**.
+Each Foundry benchmark run gets its own container (one container = one benchmark) so benchmarks that install packages or download tooling cannot pollute each other. The Foundry copies the benchmark source into a temp directory, mounts it into the container at `/workspace` (read-write), mounts the branch Guild read-only, starts the container, polls for completion, captures the result, then stops the container and deletes the temp. The copy is necessary so repeated runs start from a clean source.
 
-## Foundry execution modes
+The Foundry uses CLI args (not environment variables) because it is a batch tool with per-invocation parameters: `--suite`, `--cycles`, `--guild`, cost/plateau overrides, and the executor-service endpoint / container-image config. The project structure (in-repo subpackage vs separate repository) is decided when the step runs.
 
-The Foundry can run in two modes:
+## Optimization loop
 
-- **Sequential.** Run one experiment at a time. Useful when the target model is local and only one context window fits in VRAM.
-- **Parallel.** Run multiple experiments concurrently and generate/merge hypotheses in parallel. Useful when the target model is hosted or when multiple local endpoints are available.
+1. **Observe** — read the current baseline Guild and recent run logs.
+2. **Hypothesize** — prompt the large model to cluster failures and propose concrete, testable hypotheses.
+3. **Branch** — create candidate Guild configurations from the hypotheses.
+4. **Evaluate** — run each branch against the benchmark suite via the executor service (one container per benchmark, `repetitionsPerBenchmark` repetitions).
+5. **Score** — compare each branch against the baseline.
+6. **Merge** — combine accepted improvements and resolve conflicts via the large model.
+7. **Report** — write a human-readable report.
+8. **Promote** — write the new baseline Guild.
+9. **Repeat** until a guardrail fires.
+
+A cycle that produces an accepted branch promotes it. A cycle with no improvement increments the plateau counter. A regression in the merged candidate prevents promotion.
+
+## Configuration
 
 ```json
 {
-  "foundry": {
-    "mode": "parallel",
-    "maxConcurrentExecutorRuns": 1,
-    "maxConcurrentBigRequests": 8,
-    "bigModel": {
-      "apiBase": "https://api.openai.com/v1",
-      "apiKeyEnv": "OPENAI_API_KEY",
-      "model": "gpt-4o"
-    }
+  "mode": "parallel",
+  "maxConcurrentExecutorRuns": 1,
+  "maxConcurrentBigRequests": 8,
+  "bigModel": {
+    "apiBase": "https://api.openai.com/v1",
+    "apiKeyEnv": "OPENAI_API_KEY",
+    "model": "gpt-4o"
+  },
+  "humanSimulator": {
+    "persona": "a senior software engineer who wants the project done correctly"
+  },
+  "humanQuestionPenalty": 0.05,
+  "budgets": {
+    "maxCycles": 20,
+    "maxCostTokens": 5000000,
+    "plateauLimit": 5
+  },
+  "evaluation": {
+    "repetitionsPerBenchmark": 3,
+    "improvementMargin": 0.1
   }
 }
 ```
 
-- `maxConcurrentExecutorRuns` controls how many benchmarks the executor can run at once. For a single local model this is `1`.
-- `maxConcurrentBigRequests` controls how many meta-optimization LLM calls can happen at once.
-
-In Foundry mode, `ask_human` is answered by the same large model that generates hypotheses, configured to simulate a human persona. This lets the optimization loop run unattended while still penalizing branches that ask too many questions.
-
-## Human simulation and question penalty
-
-When `ask_human` is included in the Guild, the Foundry supplies answers so optimization does not require a real human. The same large model used for hypothesis generation and merging acts as the human simulator.
-
-The simulator is configured through a persona prompt:
-
-```json
-{
-  "foundry": {
-    "humanSimulator": {
-      "persona": "a senior software engineer who wants the project done correctly"
-    },
-    "humanQuestionPenalty": 0.05
-  }
-}
-```
-
-The simulator receives:
-
-- The question.
-- The original task description.
-- Any deterministic answers from the benchmark's `eval.json`.
-
-It answers as the persona would. If the question is too complicated, vague, or unanswerable, it may say so instead of inventing an answer.
-
-### Scoring penalty
-
-Every `ask_human` call reduces the run's score by a flat `humanQuestionPenalty`:
-
-```text
-adjustedScore = (pass ? 1.0 : 0.0) - humanQuestionPenalty * askHumanCount
-```
-
-The penalty is a hyperparameter. A typical starting value is small enough that one clarifying question does not destroy an otherwise good run, but large enough that asking repeatedly is worse than solving the task directly.
+- `maxConcurrentExecutorRuns` — pipeline parallelism of the optimize loop (not parallel executor calls). For a single-container deployment this is effectively 1 (sequential). The per-benchmark container is the concurrency boundary.
+- `humanSimulator` — optional. A run against a Guild without `ask_human` has no need for a simulator. `humanQuestionPenalty` is always required (part of the scoring formula).
+- `evaluation.repetitionsPerBenchmark` — how many times each benchmark is run per branch (accounts for stochasticity).
+- `evaluation.improvementMargin` — a branch must exceed the baseline pass rate by this margin to be considered an improvement.
 
 ## Hypotheses
 
-A hypothesis is a concrete, testable change to the Guild. The Foundry represents it as metadata plus a branch configuration.
+A hypothesis is a concrete, testable change to the Guild:
 
 ```json
 {
   "hypothesis_id": "h-001",
-  "motivation": "The coder role often ignores failing test output because it is too long to fit inline.",
-  "mechanism": "Increase max_tool_output_chars for the tester role and instruct the coder to re-invoke run_shell instead of reading inline output.",
+  "motivation": "The coder role ignores failing test output because it is too long.",
+  "mechanism": "Increase max_tool_output_chars and instruct the coder to re-invoke run_shell.",
   "predicted_impact": "+10% pass rate on medium coding tasks",
   "changes": [
     { "path": "guild/prompts/coder.md", "edit": "..." },
@@ -96,102 +76,66 @@ A hypothesis is a concrete, testable change to the Guild. The Foundry represents
 }
 ```
 
-The large model is given:
+An `edit` is the **complete new file content** for the path (not a diff/patch). This needs no patch engine and keeps branch application auditable (write-then-validate).
 
-- The current Guild.
-- Recent `log.jsonl` files.
-- Aggregated pass/fail and failure-mode summaries.
-- Instructions to produce only actionable, testable hypotheses.
+The large model is given the current Guild, recent run logs, aggregated failure summaries, and instructions to produce only actionable hypotheses. Hypotheses whose edits produce an invalid Guild are dropped (not crashed on), with the reason recorded. No-op hypotheses (wording-only changes that don't move scores) are discarded as a loop rule, not a termination reason.
 
-## Branches and experiments
+## Branch management
 
-Each hypothesis becomes a branch:
+Each hypothesis becomes a branch under `data/foundry/branches/<branch_id>/`. Branch management is filesystem-only (no executor imports, no HTTP). It exposes four operations: copy baseline into branch, apply hypothesis edits, archive baseline into history, restore historical baseline. It reuses the Guild loader/validator to validate branch Guilds end-to-end. A branch whose edits produce an invalid Guild is rejected with `ValidationError`. Branch paths are confined to their directory (path-escape is prevented).
 
+## Scoring
+
+Each run produces a `RunScore` (pass/fail, adjusted score, tokens, ask count, context-pressure count, error count). Runs are aggregated per-branch into a `BranchScore` (per-benchmark win/loss/partial counts, overall pass rate, adjusted score, regression flag, improvement flag).
+
+The adjusted score formula:
+
+```text
+adjustedScore = (pass ? 1.0 : 0.0) - humanQuestionPenalty * askHumanCount
 ```
-data/foundry/branches/<branch_id>/
-├── guild.json
-├── hypothesis.json
-└── results/
-    └── <benchmark_name>.json
-```
 
-For each branch, the Foundry:
+A branch is flagged as improved only if its adjusted pass rate exceeds the baseline by `evaluation.improvementMargin` across repetitions. A branch is flagged as regressing if any baseline-passing benchmark regresses. The margin prevents the Foundry from chasing noise.
 
-1. Copies the baseline Guild.
-2. Applies the changes.
-3. Runs the executor against every benchmark in the suite (one run per benchmark, respecting `maxConcurrentExecutorRuns`).
-4. Validates each final workspace using the benchmark’s own `eval.json`.
-5. Records the result, token usage, context events, number of `ask_human` calls, and wall-clock time.
-
-Branches are isolated. A bad branch cannot corrupt the baseline or other branches.
+Validation reuses `source/benchmarks/validation.ts` — the same helpers the benchmark harness uses. The Foundry does not duplicate validation logic.
 
 ## Evaluation
 
-The Foundry scores each branch on:
+`evaluateBranch` runs each benchmark in the suite `repetitionsPerBenchmark` times against the branch Guild via the executor service. After each run, it validates the final workspace and collects a `RunRecord` (status, tokens, ask count, context events, errors, wall time, run id, final workspace path). Results are written to `data/foundry/branches/<branch_id>/results/<benchmark>.json` (per-benchmark) and a branch-level `results.json`.
 
-- **Pass rate.** Percentage of benchmarks that pass validation.
-- **Partial rate.** Percentage that partially pass, if the validation supports it.
-- **Average tokens per successful run.**
-- **Context pressure.** Frequency and severity of `context_budget_exceeded` events.
-- **Error rate.** How often runs hit safety budgets, loops, or tool timeouts.
-- **Regression.** Pass-rate change on benchmarks that the baseline already solves.
-- **Ask frequency.** Average number of `ask_human` calls per run.
-- **Adjusted score.** Pass score minus the per-question `humanQuestionPenalty`.
+The run-submission lifecycle handles container/temp teardown on both success and error (teardown order matters: stop the container before deleting the temp). A run that does not terminate hits a configurable timeout and is still torn down.
 
-A branch must pass a confidence check before being considered for merge. Because small models are stochastic, each benchmark should be run multiple times (configurable, default 3–5) and the pass rate is computed across repetitions.
+## Merge and conflict resolution
 
-## Merging and conflict resolution
+Branches are classified: **rejected** (no improvement or worse), **accepted** (clear improvement, no conflict), **conflicting** (improves but edits the same files as another accepted branch).
 
-After scoring, the Foundry divides branches into three groups:
+Conflicting branches are merged by the large model. The Foundry provides the common ancestor, labeled diffs (baseline → A, baseline → B), and experimental results. The model produces merged file contents. The merged candidate is re-evaluated for regression by the loop (not by the merge module). If the merge introduces malformed JSON, schema violations, or regressions, the candidate is rejected.
 
-1. **Rejected** — no improvement or statistically worse.
-2. **Accepted** — clear improvement, no conflict with other accepted branches.
-3. **Conflicting** — improves things but edits the same files as another accepted branch.
+## Guardrails
 
-Accepted branches apply automatically.
+The loop terminates on:
 
-Conflicting branches are merged by the large model. All merging is done by the LLM, not by hand-written tooling. To help the LLM merge correctly, the Foundry provides:
+- **Cycle budget** — maximum optimization cycles per run.
+- **Cost budget** — maximum big-model tokens or wall-clock time.
+- **Plateau** — no branch improves the baseline for a configured number of cycles.
 
-- The common ancestor of each file.
-- Clearly labeled diffs: baseline → branch A, and baseline → branch B.
-- The experimental results for each branch.
-
-The large model produces a merged version of each conflicting file. The merged configuration is treated as a new candidate branch and re-evaluated for regression. If the merge introduces malformed JSON, schema violations, or regressions, the candidate is rejected.
-
-## Regression testing
-
-The final merged candidate is promoted to the new baseline only after it is evaluated against **all** benchmarks in the suite, not just the ones the individual branches targeted.
+No-op detection (wording-only changes) is a discard rule, not a termination reason. Termination logic is expressed as a pure `shouldTerminate(state, config)` helper.
 
 ## Promotion and rollback
 
-The Foundry writes the new baseline to `guild/guild.json` and copies the previous baseline to `data/foundry/history/<timestamp>/guild.json`. A simple rollback command restores a historical baseline to `guild/guild.json`.
+`promote.ts` is the sole writer of `guild/guild.json`. It writes the new baseline, copies the previous baseline to `data/foundry/history/<timestamp>/`, and provides rollback. Baseline writes are serialized (v1 assumes a single Foundry process). Promotion never overwrites history. The final merged candidate is promoted only after being evaluated against all benchmarks in the suite, not just the ones individual branches targeted.
 
-Only one Foundry process may promote to the baseline at a time. Branch experiments are independent and can run concurrently, but baseline writes are serialized to avoid corrupting the active Guild.
+## Human simulation
 
-## Guardrails and termination
+When `ask_human` is in the Guild, the Foundry answers questions via the large model configured with a persona. The simulator returns deterministic `humanResponses` from the benchmark's `eval.json` on near-exact matches before falling back to the big-model persona. This keeps optimization runs reproducible. The Foundry answers as an HTTP client posting to the executor's `/api/answer` endpoint — the tool schema is identical to what the small model sees in production.
 
-The Foundry loop has explicit limits to prevent unbounded spending:
-
-- **Cycle budget.** A maximum number of optimization cycles per run.
-- **Cost budget.** A maximum number of big-model tokens or a maximum wall-clock time.
-- **Plateau detection.** If no branch improves the baseline for a configured number of cycles, the loop terminates.
-- **No-op detection.** Hypotheses that only shuffle wording without changing scores are discarded.
-
-When a limit is reached, the Foundry writes a final report and exits cleanly.
-
-## Statistical evaluation
-
-Because the small model is stochastic, each benchmark is run multiple times per branch. A branch is considered better than baseline only if its pass rate exceeds the baseline by a pre-configured margin across those repetitions. The margin accounts for variance and prevents the Foundry from chasing noise.
-
-Reports include per-benchmark win/loss/partial counts so a human can see whether an improvement is consistent or the result of a lucky sample.
+Every `ask_human` call reduces the run's score by `humanQuestionPenalty`. This penalizes branches that ask too many questions while allowing occasional clarifying questions.
 
 ## Reporting
 
-After each optimization cycle, the Foundry writes a report to:
+Reports are written to `data/foundry/reports/<timestamp>/`:
 
 ```
-data/foundry/reports/<timestamp>/
-├── index.html        # human-readable summary
+├── index.html        # human-readable summary (plain HTML, no deps)
 ├── summary.json      # machine-readable summary
 └── branches/
     └── <branch_id>/
@@ -199,17 +143,9 @@ data/foundry/reports/<timestamp>/
         └── results.json
 ```
 
-The report includes:
+Reports include hypothesis summaries, a branch score table, accepted/rejected/merged status, the new-baseline diff, and run-id links. All untrusted content (diffs, summaries, file paths) is HTML-escaped.
 
-- A summary of all hypotheses.
-- A table of branches and their scores.
-- Which branches were accepted, rejected, or merged.
-- The new baseline diff.
-- Run IDs and links to full traces.
-
-Reports are plain files so a human can review them without starting any service.
-
-## Foundry data layout
+## Data layout
 
 ```
 data/foundry/
@@ -219,7 +155,9 @@ data/foundry/
 │   └── <branch_id>/
 │       ├── guild.json
 │       ├── hypothesis.json
-│       └── results.json
+│       ├── results.json
+│       └── results/
+│           └── <benchmark>.json
 ├── history/
 │   └── <timestamp>/
 │       └── guild.json
@@ -230,21 +168,6 @@ data/foundry/
         └── branches/
 ```
 
-## Separation from the executor
+## Seed Guild
 
-The Foundry never runs inside the executor process and never runs on the small model except by invoking the executor. It is a higher-level control loop. This separation means:
-
-- The executor stays simple and single-model.
-- The Foundry can parallelize large-model calls freely.
-- Experiments can be distributed across machines later without changing the executor.
-
-## Initial seed guild
-
-The Foundry needs an initial Guild to optimize. The initial Guild is hand-written and contains:
-
-- Basic roles such as `orchestrator`, `planner`, `coder`, `critic`.
-- The built-in tools.
-- A small number of native tools.
-- Conservative budgets.
-
-From this seed, the Foundry explores improvements. The seed does not need to be good; it only needs to be runnable.
+The Foundry needs an initial Guild to optimize. The seed Guild is hand-written with basic roles (`orchestrator`, `planner`, `coder`, `critic`, `context_manager`, `recovery`), built-in tools, a small number of native tools, and conservative budgets. It does not need to be good — it only needs to be runnable.

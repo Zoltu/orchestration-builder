@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 
-import type { ContextPolicy, ExecutorConfig, GuildConfig, LogEvent, ModelConfig, RoleDefinition, RunMeta, ToolCall, ToolManifest } from '../shared/types.js'
-import { ValidationError } from '../shared/errors.js'
+import type { ContextPolicy, ExecutorConfig, GuildConfig, LogEvent, ModelConfig, RoleDefinition, RunMeta, ToolCall, ToolManifest } from './types.js'
+import { ValidationError } from './errors.js'
 import { runExecutor, type ExecutorDependencies } from './executor.ts'
 import type { LlmCallResult, LlmCaller } from './llm.ts'
 import type { LoadGuild, LoadedGuild } from './loader.ts'

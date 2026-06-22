@@ -3,7 +3,7 @@ import { createWebHumanBackend } from '../executor/human-backend.ts'
 import { createRunState } from '../executor/run-state.ts'
 import { createRunSubmission, type RunSubmission, type StartRun } from '../executor/run-submission.ts'
 import type { RunSnapshotRaw } from '../executor/persistence.ts'
-import type { RunMeta } from '../shared/types.js'
+import type { RunMeta } from '../executor/types.js'
 import { createWebServer, type WebServer } from './server.ts'
 
 function snapshotFor(runId: string, status: RunMeta['status'] = 'success'): RunSnapshotRaw {

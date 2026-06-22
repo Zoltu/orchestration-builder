@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import type { RunMeta } from '../shared/types.js'
+import type { RunMeta } from './types.js'
 import { createRunSubmission, type RunSubmission, type StartRun } from './run-submission.ts'
 
 function sampleMeta(runId: string): RunMeta {

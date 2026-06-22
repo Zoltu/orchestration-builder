@@ -1,4 +1,4 @@
-import type { RunMeta } from '../shared/types.js'
+import type { RunMeta } from './types.js'
 
 // Leaf wrapper that starts a single run with the given id and task and resolves to its terminal meta.
 // The implementation builds the per-run executor dependencies and calls runExecutor; it lives in the integration shell (main.ts), not here.

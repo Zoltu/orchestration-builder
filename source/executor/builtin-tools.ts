@@ -1,5 +1,5 @@
-import { createToolError, isErrorKind } from '../shared/errors.js'
-import type { Message, ResultCard, RoleBudget, ToolResult } from '../shared/types.js'
+import { createToolError, isErrorKind } from './errors.js'
+import type { Message, ResultCard, RoleBudget, ToolResult } from './types.js'
 import { stripReasoning } from './context-policy.js'
 import type { ToolHandler } from './tool-dispatch.js'
 import type { HumanBackend } from './human-backend.js'

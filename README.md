@@ -33,4 +33,4 @@ All configuration is environment variables passed via `docker run -e`:
 
 The Guild is bundled into the image at `/app/guild/`. To override it without rebuilding, mount a different guild read-only at `/app/guild`.
 
-For programmatic access, there is an [HTTP API](docs/api.md) for submitting tasks and reading run state.
+For programmatic access, there is an [HTTP API](docs/reference.md) for submitting tasks and reading run state.

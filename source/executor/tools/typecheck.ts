@@ -1,6 +1,6 @@
 import * as path from 'node:path'
 import { truncateToolOutput } from '../context-policy.js'
-import { createToolError } from '../../shared/errors.js'
+import { createToolError } from '../errors.js'
 import type { ToolHandler } from '../tool-dispatch.js'
 
 // The command is fixed in the leaf, not in the manifest, so the model cannot influence it.

@@ -6,7 +6,7 @@ Build out the initial real Guild: write and refine every role's system prompt, v
 
 ## Context
 
-Read every prior step's closeout (the executor is now fully complete: tools, service, isolation, `run_shell`, role-tree events, interrupt channel). Read `docs/guild.md` (the Guild format), `docs/executor.md` (the tool/role contract), and the current `guild/` contents (the foundation-era seed prompts). Read [`19-run-interrupt-inquiry.md`](19-run-interrupt-inquiry.md) and [`20-run-interrupt-plan-mod.md`](20-run-interrupt-plan-mod.md) — the planner prompt must teach the interrupt contract those steps establish.
+Read every prior step's closeout (the executor is now fully complete: tools, service, isolation, `run_shell`, role-tree events, interrupt channel). Read `docs/reference.md` (the Guild format), `docs/reference.md` (the tool/role contract), and the current `guild/` contents (the foundation-era seed prompts). Read [`19-run-interrupt-inquiry.md`](19-run-interrupt-inquiry.md) and [`20-run-interrupt-plan-mod.md`](20-run-interrupt-plan-mod.md) — the planner prompt must teach the interrupt contract those steps establish.
 
 The executor is done; this step is where the Guild catches up. The foundation Guild (`guild/prompts/*.md`) was written before the executor's final shape existed (no `run_shell`, no interrupt channel, no service mode, single-run activity logs). The prompts need a grounded rewrite against the real executor surface, then real-world iteration.
 

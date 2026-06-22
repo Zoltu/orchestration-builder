@@ -2,7 +2,7 @@
 // This module is the testable surface: parseEvalConfig validates an eval.json object with type guards (no typecasts) and evaluateValidation decides pass/fail from a parsed validation spec and a run output.
 // No shell execution or filesystem access happens here.
 
-import { ValidationError } from '../shared/errors.js'
+import { ValidationError } from '../executor/errors.js'
 
 export interface ValidationSpec {
 	command: string

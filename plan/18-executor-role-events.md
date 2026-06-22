@@ -6,7 +6,7 @@ Emit structured log events when a child role is spawned and when a role complete
 
 ## Context
 
-Read [`11-web-ui-server.md`](11-web-ui-server.md) (the debt row and its Closeout decision #2), `docs/executor.md` ("Sequential scheduling", "Run lifecycle"), and `source/executor/engine.ts`. The executor is strictly sequential and depth-first: when an `agent` call is made the child runs to completion before the parent continues. That traversal is exactly the tree the UI needs, and it is already happening — it just is not being logged with enough structure.
+Read [`11-web-ui-server.md`](11-web-ui-server.md) (the debt row and its Closeout decision #2), `docs/reference.md` ("Sequential scheduling", "Run lifecycle"), and `source/executor/engine.ts`. The executor is strictly sequential and depth-first: when an `agent` call is made the child runs to completion before the parent continues. That traversal is exactly the tree the UI needs, and it is already happening — it just is not being logged with enough structure.
 
 Today the engine logs:
 - `depth_exceeded` with `{ parent, child, depth }` (when an agent call is refused).
@@ -27,7 +27,7 @@ What is missing is the linkage that ties a child run to its parent and records i
 4. `source/web/render.ts` — extend `deriveRoleActivity` (or add a sibling `deriveRoleTree`) to build a parent→children tree from `role_start`/`role_finished`/`agent_call` events when they are present, falling back to the activity summary when they are absent (so a partial log or a pre-step-17 log still renders). Add a `roles` field shape that includes the tree where available.
 5. `source/web/render.test.ts` — cover tree derivation (entry role with no parent, a parent with multiple children, a child's parent pointer, depth ordering) and the fallback-when-events-absent path.
 6. `source/web/server.test.ts` — update the fixture log so the `/api/run` view exercises the new tree shape.
-7. `docs/executor.md` — document the new event types in the "Run lifecycle" / event list, naming the payload fields. The doc outlives the plan and is the reference for the event contract.
+7. `docs/reference.md` — document the new event types in the "Run lifecycle" / event list, naming the payload fields. The doc outlives the plan and is the reference for the event contract.
 
 ## Module boundaries
 

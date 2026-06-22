@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 
-import { ValidationError } from '../shared/errors.ts'
+import { ValidationError } from '../executor/errors.ts'
 import {
 	evaluateValidation,
 	parseEvalConfig,

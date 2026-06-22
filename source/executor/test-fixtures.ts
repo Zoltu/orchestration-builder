@@ -1,7 +1,7 @@
 import type { HumanBackend } from './human-backend.js'
 import type { LlmCallResult, LlmCaller, LlmRequest } from './llm.js'
 import type { LoadedGuild } from './loader.js'
-import type { GuildConfig, ToolCall, ToolManifest } from '../shared/types.js'
+import type { GuildConfig, ToolCall, ToolManifest } from './types.js'
 
 export const stubHumanBackend: HumanBackend = {
 	ask: async () => 'use your best judgement',

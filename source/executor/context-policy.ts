@@ -1,4 +1,4 @@
-import type { Message } from '../shared/types.js'
+import type { Message } from './types.js'
 
 export interface TruncatedOutput {
 	text: string

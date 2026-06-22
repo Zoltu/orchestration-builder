@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import type { Message } from '../shared/types.js'
+import type { Message } from './types.js'
 import { stripReasoning, truncateToolOutput } from './context-policy.ts'
 
 describe('truncateToolOutput', () => {

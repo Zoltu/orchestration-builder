@@ -3,7 +3,7 @@ import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
 
-import type { LogEvent, ToolCall } from '../shared/types.js'
+import type { LogEvent, ToolCall } from './types.js'
 import { createGuildLoader } from './loader.ts'
 import {
 	createAppendLog, createRunDirectory, createWriteMeta,

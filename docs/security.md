@@ -2,78 +2,29 @@
 
 ## Threat model
 
-The executor runs a locally-hosted language model against a Guild configuration that exposes powerful tools such as file system access and shell command execution. The primary security assumption is that anything the model generates is untrusted. This includes tool names, arguments, file contents, and reasoning.
-
-The design treats the user task, workspace files, and any external data the model can read as potentially adversarial. The goal is to contain damage to the mounted workspace, not to trust the model to behave safely.
+The executor runs a language model against a Guild that exposes tools such as file system access and shell command execution. The primary assumption is that anything the model generates is untrusted — tool names, arguments, file contents, and reasoning. The goal is to contain damage to the mounted workspace, not to trust the model to behave safely.
 
 ## Attack surface
 
-### Model-generated shell commands
+- **Model-generated shell commands.** `run_shell` runs arbitrary commands. A confused model can run destructive commands by mistake. This is the same risk as any local coding agent that runs generated code.
+- **Prompt injection.** A task description or a file in the workspace can attempt to override system prompts, instruct the model to ignore safety rules, or exfiltrate data. The executor cannot prevent all prompt injection, so isolation is the defense.
+- **Network egress.** A compromised model could read workspace files and send them to a remote host via a network-capable command. Egress should be restricted in production.
+- **File traversal.** File read/write tools must not escape the workspace.
+- **Supply-chain inputs.** A workspace may contain scripts, binaries, or package manifests. The executor treats these as untrusted inputs.
 
-The most dangerous tool in a typical Guild is `run_shell`. A role may ask the model to generate arbitrary shell commands. This is the same risk as any local coding agent that runs generated code. Even if all roles are well-intentioned, a confused model can run destructive commands by mistake.
+## Mitigations
 
-### Prompt injection through the task or workspace files
-
-A task description or a file in the workspace can attempt to override system prompts, instruct the model to ignore safety rules, or exfiltrate data. The executor cannot prevent all prompt injection, so isolation is the defense.
-
-### Network egress
-
-If the process has unrestricted network access, a compromised model could read workspace files and send them to a remote host by invoking a network-capable command. Network egress should be disabled or tightly controlled in production.
-
-### File traversal
-
-File read/write tools must not escape the mounted workspace. Paths are canonicalized and any path outside the workspace is rejected.
-
-### Supply-chain inputs
-
-A workspace may contain scripts, binaries, or package manifests. The executor treats these as untrusted inputs. Running tests or build commands supplied by the workspace is part of normal operation, but it happens inside the isolated workspace.
-
-## Architectural mitigations
-
-### Workspace isolation
-
-The executor operates on the mounted project at `/workspace` in place — it modifies the project directly, exactly as a developer would. Orchestration bookkeeping (run metadata and logs) is written under `/workspace/.orchestration/runs/<run-id>/`. Tools operate within `/workspace`; file tools canonicalize paths and reject any that resolve outside it.
-
-Runs are sequential (one at a time, no queue), so there is no concurrent-run isolation concern. Per-run environment isolation (scoped `PATH`/`HOME`, no global pollution, no unapproved egress) lands in a later step and is what makes `run_shell` safe; until then, the suite is constrained to no-install tasks. Operators who want to protect the canonical project from in-place modification give the executor a throwaway copy (the Foundry does this for benchmarks).
-
-### Path canonicalization
-
-File tools resolve paths relative to the mounted workspace, canonicalize them, and reject any path that resolves outside the workspace.
-
-### Tool exposure is a Guild decision
-
-The executor only exposes tools to a role if the role explicitly lists them in its `tools` array. A Guild author can remove `run_shell` from all roles if it is not needed. The Foundry may add or remove tools as it optimizes.
-
-### Shell tool policy
-
-The Guild describes `run_shell` but the executor applies a configurable shell policy. The default design assumes:
-
-- A timeout on every shell invocation.
-- Execution only under the host process user or a dedicated runtime user.
-- Optional allowlist/denylist of commands.
-
-The strongest isolation is expected to come from the deployment environment, not the executor code.
-
-### Container and network isolation
-
-The final product ships as a single Dockerfile. The recommendation is to run the container with:
-
-- No network egress for the executor process.
-- A non-root user.
-- A read-only filesystem except for the mounted workspace volume.
-- Optional further isolation via user namespaces, seccomp, or a separate sandbox wrapper.
-
-The executor itself is not a container runtime; it relies on the surrounding environment for strong isolation.
-
-### Secrets
-
-API keys for the model endpoint are passed through environment variables, not stored in the Guild or workspace. The Foundry’s large-model endpoint key, if any, is also passed through environment variables.
+- **Workspace isolation.** The executor modifies the mounted project at `/workspace` in place. File tools canonicalize paths and reject any that resolve outside the workspace. Runs are sequential (one at a time), so there is no concurrent-run isolation concern.
+- **Path canonicalization.** File tools resolve paths relative to the workspace, canonicalize them, and reject any that escape.
+- **Tool exposure is a Guild decision.** The executor only exposes tools to a role if the role explicitly lists them. A Guild author can remove `run_shell` if it is not needed.
+- **`run_shell` containment.** `run_shell` ships only after per-run environment isolation lands. Containment comes from the isolation environment, not from an in-tool command allowlist. An in-tool allowlist is a deferred enhancement, not the v1 path.
+- **Secrets.** API keys are passed through environment variables, not stored in the Guild or workspace.
 
 ## What the design does not prevent
 
 - A deliberately destructive task given by a legitimate user. The executor does not second-guess the user; it only contains execution to the workspace.
 - A model that destructively modifies files inside the workspace. This is expected behavior for coding tasks; isolation prevents damage elsewhere.
-- Resource exhaustion. The executor enforces timeouts and budget limits, but a motivated adversary with access to the model could still trigger expensive computations within those limits.
+- Resource exhaustion within budget limits. The executor enforces timeouts and budgets, but a motivated adversary could still trigger expensive computations within those limits.
 
 ## Foundry implications
 

@@ -2,7 +2,7 @@
 
 A benchmark is a self-contained folder that defines an initial workspace and a validation rule. The executor treats the folder as a workspace; the Foundry (and the suite harness) use the `eval.json` file in the same folder to validate the final workspace state.
 
-The full `eval.json` schema, validation rules, and design rationale live in [`../docs/benchmarks.md`](../docs/benchmarks.md). This document covers authoring and running.
+The full `eval.json` schema, validation rules, and design rationale live in [`../docs/reference.md`](../docs/reference.md#benchmarks). This document covers authoring and running.
 
 ## Folder layout
 

@@ -6,7 +6,7 @@ Extend the run-interrupt channel so a user can modify the plan mid-run, with the
 
 ## Context
 
-Read [`19-run-interrupt-inquiry.md`](19-run-interrupt-inquiry.md) (the interrupt channel this step extends), `docs/executor.md` ("Sequential scheduling", "Built-in tools" — `agent`), and `source/executor/engine.ts` (the parent→child role traversal).
+Read [`19-run-interrupt-inquiry.md`](19-run-interrupt-inquiry.md) (the interrupt channel this step extends), `docs/reference.md` ("Sequential scheduling", "Built-in tools" — `agent`), and `source/executor/engine.ts` (the parent→child role traversal).
 
 The hard part of plan-modification is that the active role is usually a **descendant** of the planner (the planner delegated to a coder via `agent`, the coder delegated to a sub-role, etc.). Injecting a plan modification into the active leaf role is wrong — the leaf cannot re-plan. The modification must reach the top-level planner, which means unwinding the active role's call stack back to the planner, delivering the modification, and letting the planner re-derive a resume strategy.
 
@@ -29,7 +29,7 @@ The planner's *quality* at integrating a modification (deciding whether to resta
 2. `source/web/server.ts` (extend) — `POST /api/runs/:id/interrupt` accepts `{ kind: 'inquiry' | 'plan_modification', message }` (default `inquiry` for backward compat with step 19). The kind determines the engine path.
 3. `source/web/static/app.js` (extend) — the interrupt input offers a mode toggle (inquiry / plan-modification). Plan-mod submission warns the user that active sub-work will be aborted.
 4. `source/executor/engine.test.ts` (extend) — in-memory test: a planner→coder run with a plan-mod interrupt submitted while the coder is active; assert the coder is aborted, the planner receives the modification, and the run resumes from the planner. Assert an inquiry interrupt (step 19) still routes to the active role, not the planner. Assert the `plan_modification` log event records the aborted roles.
-5. `docs/executor.md` — extend the interrupt-channel documentation with the plan-mod path: the abort-to-planner propagation, the `aborted_for_replan` error kind, and the API `kind` field.
+5. `docs/reference.md` — extend the interrupt-channel documentation with the plan-mod path: the abort-to-planner propagation, the `aborted_for_replan` error kind, and the API `kind` field.
 
 ## Module boundaries
 
@@ -44,7 +44,7 @@ The planner's *quality* at integrating a modification (deciding whether to resta
 - [ ] An inquiry interrupt still routes to the active role (step-18 behavior unchanged).
 - [ ] The `plan_modification` log event records the aborted roles.
 - [ ] A plan-mod submitted when the planner is itself the active role injects the message directly (no abort needed).
-- [ ] `docs/executor.md` documents both interrupt kinds.
+- [ ] `docs/reference.md` documents both interrupt kinds.
 
 ## End-of-step evaluation
 

@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 
-import type { ExecutorConfig } from '../shared/types.js'
+import type { ExecutorConfig } from './types.js'
 import { checkGlobalBudgets, checkRoleBudgets, type GlobalBudgetState, type RoleBudgetState } from './budgets.ts'
 
 const config: ExecutorConfig = {

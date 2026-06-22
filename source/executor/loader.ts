@@ -1,8 +1,8 @@
 import * as fs from 'node:fs'
 import * as path from 'node:path'
-import { ValidationError } from '../shared/errors.js'
-import type { GuildConfig, ToolManifest } from '../shared/types.js'
-import { validateGuildConfig, validateToolManifest } from '../shared/validation.js'
+import { ValidationError } from './errors.js'
+import type { GuildConfig, ToolManifest } from './types.js'
+import { validateGuildConfig, validateToolManifest } from './validation.js'
 
 export interface LoadedGuild {
 	config: GuildConfig

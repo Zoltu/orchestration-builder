@@ -6,7 +6,7 @@ Add the executor mechanism for a user to pause the active run and ask the active
 
 ## Context
 
-Read [`13-long-running-service-mode.md`](13-long-running-service-mode.md) (the service the interrupt channel lives in), [`10-web-human-backend.md`](10-web-human-backend.md) (the existing pause/resume shape — `ask_human` parks a role on a promise), and `docs/executor.md` ("Sequential scheduling", "`ask_human`").
+Read [`13-long-running-service-mode.md`](13-long-running-service-mode.md) (the service the interrupt channel lives in), [`10-web-human-backend.md`](10-web-human-backend.md) (the existing pause/resume shape — `ask_human` parks a role on a promise), and `docs/reference.md` ("Sequential scheduling", "`ask_human`").
 
 The interrupt is **user-initiated** and distinct from the role-initiated `ask_human`: `ask_human` is the role deciding it needs information; an interrupt is the operator deciding to inject a message mid-run. Both pause the single active role, but an interrupt can arrive at any point in the role's loop (between tool calls, during an LLM call's await), whereas `ask_human` only fires when the role calls the tool.
 
@@ -26,7 +26,7 @@ Two interrupt modes, split across steps 18 and 19:
 3. `source/web/server.ts` (extend) — `POST /api/runs/:id/interrupt` (body: `{ message }`) submits an interrupt for the active run. Returns `202` if accepted (the run will process it at its next safe point), `409` if the run is not active or is terminal. `GET /api/runs/:id` exposes whether an interrupt is pending.
 4. `source/web/static/app.js` (extend) — an "interrupt" input on the active-run view: type a message, submit; the UI shows "interrupt pending" until the run processes it. Disabled when no run is active.
 5. `source/executor/engine.test.ts` (extend) — in-memory test with a fake LLM caller: submit an interrupt mid-run; assert the next LLM call's messages include the interrupt message, an `interrupt` log event is emitted, and the run resumes to completion afterward. Assert an interrupt submitted to a non-active or terminal run is rejected.
-6. `docs/executor.md` — document the interrupt channel: the safe-point drain, the message marker, the log event, and the API endpoint. Note that plan-modification interrupts (step 20) extend this with ancestor routing.
+6. `docs/reference.md` — document the interrupt channel: the safe-point drain, the message marker, the log event, and the API endpoint. Note that plan-modification interrupts (step 20) extend this with ancestor routing.
 
 ## Module boundaries
 
@@ -40,7 +40,7 @@ Two interrupt modes, split across steps 18 and 19:
 - [ ] An interrupt submitted mid-run is injected as a marked user message at the next safe point, logged, and the run resumes.
 - [ ] An interrupt submitted to a non-active or terminal run is rejected (`409`).
 - [ ] An in-flight LLM call is not interrupted; the drain happens between iterations.
-- [ ] `docs/executor.md` documents the channel.
+- [ ] `docs/reference.md` documents the channel.
 
 ## End-of-step evaluation
 

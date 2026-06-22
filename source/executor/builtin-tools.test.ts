@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import type { ContextPolicy, ExecutorConfig, GuildConfig, LogEvent, Message, ModelConfig, RoleDefinition, ToolCall, ToolManifest } from '../shared/types.js'
+import type { ContextPolicy, ExecutorConfig, GuildConfig, LogEvent, Message, ModelConfig, RoleDefinition, ToolCall, ToolManifest } from './types.js'
 import { runRole, type EngineDependencies } from './engine.ts'
 import type { HumanBackend } from './human-backend.ts'
 import type { LlmCallResult, LlmCaller } from './llm.ts'

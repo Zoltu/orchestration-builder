@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import * as path from 'node:path'
 import { createGuildLoader } from './loader.ts'
-import { ERROR_KINDS } from '../shared/errors.ts'
+import { ERROR_KINDS } from './errors.ts'
 
 const guildDir = path.resolve(import.meta.dir, '..', '..', 'guild')
 

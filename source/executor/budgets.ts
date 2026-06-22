@@ -1,5 +1,5 @@
-import { createToolError } from '../shared/errors.js'
-import type { ExecutorConfig, RoleBudget, ToolResult } from '../shared/types.js'
+import { createToolError } from './errors.js'
+import type { ExecutorConfig, RoleBudget, ToolResult } from './types.js'
 
 export interface RoleBudgetState {
 	toolCalls: number

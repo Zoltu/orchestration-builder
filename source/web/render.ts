@@ -2,8 +2,8 @@
 // All parsing, validation, truncation, and role-activity derivation lives here so it is exercisable in-memory; the server module is a thin HTTP leaf that delegates to these helpers.
 
 import type { PendingQuestion } from '../executor/human-backend.js'
-import { isRunMeta } from '../shared/validation.js'
-import type { LogEvent, ResultCard, RunMeta } from '../shared/types.js'
+import { isRunMeta } from '../executor/validation.js'
+import type { LogEvent, ResultCard, RunMeta } from '../executor/types.js'
 import type { RunSnapshotRaw } from '../executor/persistence.js'
 
 export interface RunSnapshot {

@@ -1,4 +1,4 @@
-import { createToolError } from '../../shared/errors.js'
+import { createToolError } from '../errors.js'
 import type { ToolHandler } from '../tool-dispatch.js'
 
 export type Fetcher = (url: string, timeoutMs: number) => Promise<string>

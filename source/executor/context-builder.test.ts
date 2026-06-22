@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import type { Message, RoleDefinition } from '../shared/types.js'
+import type { Message, RoleDefinition } from './types.js'
 import { buildMessages } from './context-builder.ts'
 
 const role: RoleDefinition = { systemPrompt: 'p', tools: ['finish'] }

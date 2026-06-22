@@ -1,6 +1,6 @@
 import * as fs from 'node:fs'
 import * as path from 'node:path'
-import { createToolError } from '../../shared/errors.js'
+import { createToolError } from '../errors.js'
 import type { ToolHandler } from '../tool-dispatch.js'
 import { resolveWithinWorkspace, wrapIoError } from './shared.js'
 

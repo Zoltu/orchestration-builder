@@ -1,4 +1,4 @@
-import type { RunMeta, RunOptions } from '../shared/types.js'
+import type { RunMeta, RunOptions } from './types.js'
 import { runRole } from './engine.js'
 import type { HumanBackend } from './human-backend.js'
 import type { LlmCaller } from './llm.js'

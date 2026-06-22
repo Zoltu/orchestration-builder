@@ -19,7 +19,7 @@ If at any point the agent cannot make progress without operator input, it stops,
 
 ## Context
 
-Read `docs/architecture.md` ("Benchmark isolation and environments (unsolved)") in full — it lists three options (Docker-in-Docker, Docker Sandbox, per-run filesystem + toolchain isolation without containers) and the long-term expectation. Read [`15-dockerfile-deployment.md`](15-dockerfile-deployment.md) (the deployment container; per-run isolation runs *inside* it in deployment), [`17-run-shell-tool.md`](17-run-shell-tool.md) (the tool this step unblocks), and [`04-typecheck-tool.md`](04-typecheck-tool.md) / [`05-test-tool.md`](05-test-tool.md) (the checker tools whose hardcoded commands this step generalizes — see tracked debt).
+Read `docs/architecture.md` ("Isolation") and `docs/security.md` in full — the architecture doc states the current isolation state and the known gap this step addresses. Read [`15-dockerfile-deployment.md`](15-dockerfile-deployment.md) (the deployment container; per-run isolation runs *inside* it in deployment), [`17-run-shell-tool.md`](17-run-shell-tool.md) (the tool this step unblocks), and [`04-typecheck-tool.md`](04-typecheck-tool.md) / [`05-test-tool.md`](05-test-tool.md) (the checker tools whose hardcoded commands this step generalizes — see tracked debt).
 
 The no-installs constraint currently in force exists *only* because isolation is unsolved. Lifting it is the point of this step. Until this step lands, the suite stays constrained to no-install, Bun-validatable tasks, `run_shell` stays unshipped, and the checker tools stay hardcoded to `bun`/`tsc`.
 
@@ -31,7 +31,7 @@ These are the candidate deliverables. The agent refines them with the operator b
 2. A per-run isolated workspace setup: `HOME` set to a scratch directory inside the workspace, `PATH` stripped to a vetted toolchain directory, workspace-scoped `bun install` enabled, no global pollution. (The non-container option from the architecture doc — the likely recommendation for the single-language local case, with full containerization deferred to a future multi-language step.)
 3. A **toolchain profile** the run environment provides, initially the Bun/TypeScript profile (`bun` + `tsc` + `bun test`). An optional `environment`/`toolchain` field on `eval.json` declares what a benchmark needs; the runner sets up the hermetic env per the spec. Only the Bun/TS profile is implemented now; the field is the language-agnostic seam for other-language support (shape now, impl later).
 4. Generalize the checker-tool commands (remove the step-04/05 tracked debt): `typecheck` and `test` read the workspace's toolchain command from the profile instead of hardcoding `bun --bun tsc --noEmit` / `bun test`.
-5. `source/benchmarks/validation.ts` `parseEvalConfig` + `docs/benchmarks.md` — accept the optional `environment`/`toolchain` field.
+5. `source/benchmarks/validation.ts` `parseEvalConfig` + `docs/reference.md` — accept the optional `environment`/`toolchain` field.
 6. Update `docs/architecture.md:138-151` from "unsolved/deferred" to "solved for single-language local; containerization for multi-language deferred," keeping the long-term text.
 7. Enable `run_shell` (step 17) to land on top of this — the two steps are sequenced 16 → 17.
 
