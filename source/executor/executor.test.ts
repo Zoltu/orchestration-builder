@@ -5,7 +5,7 @@ import { ValidationError } from '../shared/errors.js'
 import { runExecutor, type ExecutorDependencies } from './executor.ts'
 import type { LlmCallResult, LlmCaller } from './llm.ts'
 import type { LoadGuild, LoadedGuild } from './loader.ts'
-import type { AppendLog, CopyWorkspace, RunDirectory, SnapshotWorkspace, WriteMeta } from './persistence.ts'
+import type { AppendLog, RunDirectory, WriteMeta } from './persistence.ts'
 import { stubHumanBackend } from './test-fixtures.ts'
 
 function success(toolCalls: ToolCall[], opts: { content?: string } = {}): LlmCallResult {
@@ -35,15 +35,11 @@ class FakeLlm implements LlmCaller {
 interface FakePersistenceFns {
 	appendLog: AppendLog
 	createRunDirectory: RunDirectory
-	copyWorkspace: CopyWorkspace
-	snapshotWorkspace: SnapshotWorkspace
 	writeMeta: WriteMeta
 	state: {
 		events: LogEvent[]
 		meta: RunMeta | null
 		createRunDirectoryCalls: number
-		copyWorkspaceCalls: string[]
-		snapshotWorkspaceCalls: number
 	}
 }
 
@@ -51,8 +47,6 @@ function makeFakePersistence(): FakePersistenceFns {
 	const events: LogEvent[] = []
 	let meta: RunMeta | null = null
 	let createRunDirectoryCalls = 0
-	const copyWorkspaceCalls: string[] = []
-	let snapshotWorkspaceCalls = 0
 	return {
 		appendLog: (event) => {
 			events.push(event)
@@ -60,12 +54,6 @@ function makeFakePersistence(): FakePersistenceFns {
 		createRunDirectory: () => {
 			createRunDirectoryCalls++
 			return '/tmp/run'
-		},
-		copyWorkspace: (sourcePath) => {
-			copyWorkspaceCalls.push(sourcePath)
-		},
-		snapshotWorkspace: () => {
-			snapshotWorkspaceCalls++
 		},
 		writeMeta: (written) => {
 			meta = written
@@ -79,12 +67,6 @@ function makeFakePersistence(): FakePersistenceFns {
 			},
 			get createRunDirectoryCalls() {
 				return createRunDirectoryCalls
-			},
-			get copyWorkspaceCalls() {
-				return copyWorkspaceCalls
-			},
-			get snapshotWorkspaceCalls() {
-				return snapshotWorkspaceCalls
 			},
 		},
 	}
@@ -149,8 +131,6 @@ function makeDeps(llm: FakeLlm, persistence: FakePersistenceFns, loadGuild: Load
 		llmCaller: llm,
 		appendLog: persistence.appendLog,
 		createRunDirectory: persistence.createRunDirectory,
-		copyWorkspace: persistence.copyWorkspace,
-		snapshotWorkspace: persistence.snapshotWorkspace,
 		writeMeta: persistence.writeMeta,
 		additionalToolHandlers: {},
 		humanBackend: stubHumanBackend,
@@ -182,11 +162,10 @@ describe('runExecutor', () => {
 		expect(caught).toBeInstanceOf(ValidationError)
 		expect(llm.calls).toBe(0)
 		expect(persistence.state.createRunDirectoryCalls).toBe(1)
-		expect(persistence.state.copyWorkspaceCalls).toEqual(['/bench'])
 		expect(persistence.state.meta).toBeNull()
 	})
 
-	test('happy path: creates run dir, copies workspace, loads Guild, runs entry, writes meta', async () => {
+	test('happy path: creates run dir, loads Guild, runs entry, writes meta', async () => {
 		const guild = buildLoadedGuild(
 			{ main: { systemPrompt: 'p', tools: ['finish'] } },
 			'main',
@@ -213,7 +192,6 @@ describe('runExecutor', () => {
 		})
 
 		expect(persistence.state.createRunDirectoryCalls).toBe(1)
-		expect(persistence.state.copyWorkspaceCalls).toEqual(['/bench'])
 		expect(persistence.state.meta).not.toBeNull()
 		expect(meta.runId).toBe('r1')
 		expect(meta.guildPath).toBe('/guild')

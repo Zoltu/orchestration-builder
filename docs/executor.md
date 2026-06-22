@@ -28,15 +28,16 @@ The executor does not understand "planner," "coder," "compaction agent," or "orc
 A run is started with:
 
 - A Guild path.
-- A benchmark workspace path.
+- A workspace path (the mounted project the executor operates on in place).
 - A task description.
 
 The executor:
 
-- Creates `data/runs/<run_id>/`.
-- Copies everything from the benchmark workspace into `data/runs/<run_id>/workspace/`, except `eval.json`.
+- Creates `<workspace>/.orchestration/runs/<run_id>/` for run bookkeeping.
 - Loads the Guild.
 - Creates a root invocation of the configured `entryRole` with the task description as the initial user message.
+
+The executor modifies the workspace in place — it does not copy the project elsewhere. Tools operate directly on the mounted project.
 
 ### 2. Role execution loop
 
@@ -66,9 +67,10 @@ A run ends when:
 
 The executor writes:
 
-- `data/runs/<run_id>/meta.json` — run metadata, status, final status, and final result.
-- `data/runs/<run_id>/log.jsonl` — complete event stream.
-- `data/runs/<run_id>/workspace/` — final filesystem state.
+- `<workspace>/.orchestration/runs/<run_id>/meta.json` — run metadata, status, final status, and final result.
+- `<workspace>/.orchestration/runs/<run_id>/log.jsonl` — complete event stream.
+
+The workspace itself holds the final filesystem state (the executor modified it in place).
 
 ## Messages and context
 
@@ -173,7 +175,7 @@ Examples include:
 - `list_directory`
 - `run_shell`
 
-Each tool manifest in the Guild describes the name, description, and parameter schema. The executor validates calls against that schema. Native tools execute against the run workspace under the configured sandbox policy (by default, only within `data/runs/<run_id>/workspace/`).
+Each tool manifest in the Guild describes the name, description, and parameter schema. The executor validates calls against that schema. Native tools execute against the mounted workspace under the configured sandbox policy (paths are canonicalized and rejected if they resolve outside the workspace).
 
 ## Context management
 
@@ -249,21 +251,13 @@ This protects against infinite loops without the executor needing to understand 
 
 ## Human-in-the-loop backend
 
-The executor does not decide whether a question is real or simulated. The active backend is selected at runtime, usually from the command line or a config file:
+The executor does not decide whether a question is real or simulated. The web backend is the only backend: `ask_human` questions are surfaced through the web UI and answered by the operator. (The Foundry answers `ask_human` questions as an HTTP client of the executor service, posting to the same `/api/answer` endpoint the UI uses.)
 
-```bash
-# Optimization: questions answered by the Foundry's large model
-bun source/main.ts executor --human-backend foundry ...
-
-# Final product: questions surfaced in the web UI
-bun source/main.ts executor --serve 8080 --human-backend web ...
-```
-
-A role can only call `ask_human` if the Guild includes it in that role’s tool list. The tool name, schema, and in-context description are identical in both environments, so the small model does not need to know which backend is active.
+A role can only call `ask_human` if the Guild includes it in that role's tool list. The tool name, schema, and in-context description are identical regardless of who answers, so the small model does not need to know who is on the other end.
 
 ## Web UI
 
-When run with `--serve <port>`, the executor starts a small local HTTP server (`Bun.serve`) that displays the active run and its history:
+The server entry point (`source/serve.ts`) starts a small local HTTP server (`Bun.serve`) that displays the active run and its history:
 
 - Current role and message tree.
 - Tailed `log.jsonl` showing LLM calls, tool calls, and errors.
@@ -273,16 +267,15 @@ The UI is plain HTML/JS and has no external dependencies. It is the only human i
 
 ## Persistence
 
-Every run is a self-contained folder:
+The executor operates on the mounted workspace in place, so run bookkeeping lives alongside the project under `.orchestration/runs/`:
 
 ```
-data/runs/<run_id>/
+<workspace>/.orchestration/runs/<run_id>/
 ├── meta.json      # run id, guild path, start/end time, status, final result
-├── log.jsonl      # one JSON object per line: llm calls, tool calls, errors
-└── workspace/     # the benchmark workspace as mutated during the run
+└── log.jsonl      # one JSON object per line: llm calls, tool calls, errors
 ```
 
-`log.jsonl` is append-only. The executor logs every LLM call, tool call, and error event so that the Foundry and a human reviewer can reconstruct what happened.
+The workspace itself holds the final filesystem state (the executor mutated it during the run). `log.jsonl` is append-only. The executor logs every LLM call, tool call, and error event so that the Foundry and a human reviewer can reconstruct what happened.
 
 ## Sequential scheduling
 

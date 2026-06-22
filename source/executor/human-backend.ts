@@ -2,8 +2,6 @@ export interface HumanBackend {
 	ask(question: string, context?: string): Promise<string>
 }
 
-export type HumanBackendConfig = { mode: 'stub' } | { mode: 'web' }
-
 export interface PendingQuestion {
 	id: string
 	question: string
@@ -24,10 +22,6 @@ export interface WebHumanBackend extends HumanBackend {
 interface PendingEntry {
 	question: PendingQuestion
 	resolve: (answer: string) => void
-}
-
-const stubBackend: HumanBackend = {
-	ask: async () => 'use your best judgement',
 }
 
 export function createWebHumanBackend(): WebHumanBackend {
@@ -57,9 +51,4 @@ export function createWebHumanBackend(): WebHumanBackend {
 			return Array.from(pending.values(), (entry) => entry.question)
 		},
 	}
-}
-
-export function createHumanBackend(config: HumanBackendConfig): HumanBackend {
-	if (config.mode === 'stub') return stubBackend
-	return createWebHumanBackend()
 }

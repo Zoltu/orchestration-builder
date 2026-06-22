@@ -8,7 +8,7 @@
 		"typecheck": "bun --bun tsc --noEmit",
 		"test": "bun test --randomize --concurrent source/",
 		"bench:smoke": "cd benchmarks/hello_001 && bun test tests/",
-		"start": "bun source/main.ts"
+		"start": "bun source/serve.ts"
 	},
 	"devDependencies": {
 		"@types/bun": "1.3.14",

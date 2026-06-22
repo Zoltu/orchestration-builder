@@ -4,7 +4,7 @@
 
 The executor runs a locally-hosted language model against a Guild configuration that exposes powerful tools such as file system access and shell command execution. The primary security assumption is that anything the model generates is untrusted. This includes tool names, arguments, file contents, and reasoning.
 
-The design treats the user task, benchmark workspace files, and any external data the model can read as potentially adversarial. The goal is to contain damage to the per-run workspace, not to trust the model to behave safely.
+The design treats the user task, workspace files, and any external data the model can read as potentially adversarial. The goal is to contain damage to the mounted workspace, not to trust the model to behave safely.
 
 ## Attack surface
 
@@ -14,7 +14,7 @@ The most dangerous tool in a typical Guild is `run_shell`. A role may ask the mo
 
 ### Prompt injection through the task or workspace files
 
-A task description or a file in the benchmark workspace can attempt to override system prompts, instruct the model to ignore safety rules, or exfiltrate data. The executor cannot prevent all prompt injection, so isolation is the defense.
+A task description or a file in the workspace can attempt to override system prompts, instruct the model to ignore safety rules, or exfiltrate data. The executor cannot prevent all prompt injection, so isolation is the defense.
 
 ### Network egress
 
@@ -22,21 +22,23 @@ If the process has unrestricted network access, a compromised model could read w
 
 ### File traversal
 
-File read/write tools must not escape the per-run workspace. Paths are canonicalized and any path outside the workspace is rejected.
+File read/write tools must not escape the mounted workspace. Paths are canonicalized and any path outside the workspace is rejected.
 
 ### Supply-chain inputs
 
-A benchmark workspace may contain scripts, binaries, or package manifests. The executor treats these as untrusted inputs. Running tests or build commands supplied by the workspace is part of normal benchmarking, but it happens inside the isolated workspace.
+A workspace may contain scripts, binaries, or package manifests. The executor treats these as untrusted inputs. Running tests or build commands supplied by the workspace is part of normal operation, but it happens inside the isolated workspace.
 
 ## Architectural mitigations
 
-### Per-run workspace isolation
+### Workspace isolation
 
-Every run receives its own `data/runs/<run_id>/workspace/` directory. Tools operate only inside that directory. The original benchmark workspace is not modified. This ensures one run cannot corrupt another or read unrelated runs.
+The executor operates on the mounted project at `/workspace` in place — it modifies the project directly, exactly as a developer would. Orchestration bookkeeping (run metadata and logs) is written under `/workspace/.orchestration/runs/<run-id>/`. Tools operate within `/workspace`; file tools canonicalize paths and reject any that resolve outside it.
+
+Runs are sequential (one at a time, no queue), so there is no concurrent-run isolation concern. Per-run environment isolation (scoped `PATH`/`HOME`, no global pollution, no unapproved egress) lands in a later step and is what makes `run_shell` safe; until then, the suite is constrained to no-install tasks. Operators who want to protect the canonical project from in-place modification give the executor a throwaway copy (the Foundry does this for benchmarks).
 
 ### Path canonicalization
 
-File tools resolve paths relative to the run workspace, canonicalize them, and reject any path that resolves outside the workspace.
+File tools resolve paths relative to the mounted workspace, canonicalize them, and reject any path that resolves outside the workspace.
 
 ### Tool exposure is a Guild decision
 
@@ -58,7 +60,7 @@ The final product ships as a single Dockerfile. The recommendation is to run the
 
 - No network egress for the executor process.
 - A non-root user.
-- A read-only filesystem except for the per-run workspace volume.
+- A read-only filesystem except for the mounted workspace volume.
 - Optional further isolation via user namespaces, seccomp, or a separate sandbox wrapper.
 
 The executor itself is not a container runtime; it relies on the surrounding environment for strong isolation.

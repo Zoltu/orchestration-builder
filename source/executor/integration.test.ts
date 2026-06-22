@@ -6,7 +6,7 @@ import * as path from 'node:path'
 import type { LogEvent, ToolCall } from '../shared/types.js'
 import { createGuildLoader } from './loader.ts'
 import {
-	createAppendLog, createCopyWorkspace, createRunDirectory, createSnapshotWorkspace, createWriteMeta,
+	createAppendLog, createRunDirectory, createWriteMeta,
 } from './persistence.ts'
 import { createToolHandlers } from './tools.ts'
 import { stubHumanBackend } from './test-fixtures.ts'
@@ -91,10 +91,14 @@ const coderWritesAndFinishes: ToolCall[] = [
 ]
 
 describe('runExecutor end-to-end against the seed Guild and hello_001', () => {
-	test('traverses orchestrator → coder → write_file → finish and materializes output.txt', async () => {
+	test('traverses orchestrator → coder → write_file → finish and materializes output.txt in place', async () => {
 		tempRoot = makeTempRunRoot()
 		const runId = 'integration-hello'
-		const runsBaseDir = tempRoot
+
+		// The executor modifies the workspace in place, so the test gives it a throwaway copy of the benchmark (mirroring how the Foundry will hand the executor a copy of each benchmark it wants to protect).
+		const workspaceRoot = path.resolve(tempRoot, 'workspace')
+		fs.cpSync(benchmarkDir, workspaceRoot, { recursive: true })
+		const runsBaseDir = path.resolve(workspaceRoot, '.orchestration', 'runs')
 
 		const loadGuild = createGuildLoader()
 		const loadedGuild = loadGuild(guildDir)
@@ -111,7 +115,6 @@ describe('runExecutor end-to-end against the seed Guild and hello_001', () => {
 			resolveRole,
 		)
 
-		const workspaceRoot = path.resolve(runsBaseDir, runId, 'workspace')
 		const additionalToolHandlers = createToolHandlers({
 			workspaceRoot,
 			defaultToolTimeoutSeconds: loadedGuild.config.executor.defaultToolTimeoutSeconds,
@@ -123,8 +126,6 @@ describe('runExecutor end-to-end against the seed Guild and hello_001', () => {
 				loadGuild: () => loadedGuild,
 				appendLog: createAppendLog(runId, runsBaseDir),
 				createRunDirectory: createRunDirectory(runId, runsBaseDir),
-				copyWorkspace: createCopyWorkspace(runId, runsBaseDir),
-				snapshotWorkspace: createSnapshotWorkspace(runId, runsBaseDir),
 				writeMeta: createWriteMeta(runId, runsBaseDir),
 				additionalToolHandlers,
 				humanBackend: stubHumanBackend,
@@ -132,7 +133,7 @@ describe('runExecutor end-to-end against the seed Guild and hello_001', () => {
 			{
 				runId,
 				guildPath: guildDir,
-				benchmarkPath: benchmarkDir,
+				benchmarkPath: workspaceRoot,
 				task: 'Write a file called output.txt containing the text hello world.',
 			},
 		)

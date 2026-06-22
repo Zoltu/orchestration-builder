@@ -62,18 +62,18 @@ The Foundry may run many of its own LLM calls in parallel, and it may run multip
 
 ## Data flow: a single run
 
-1. The user invokes the executor with a task and a benchmark workspace.
-2. The executor copies the workspace into `data/runs/<run_id>/workspace/`, omitting `eval.json`.
+1. The user mounts a project at `/workspace` and submits a task through the JSON API or web UI.
+2. The executor operates on the workspace in place — it modifies the project directly, not a per-run copy. Run bookkeeping goes under `<workspace>/.orchestration/runs/<run_id>/`.
 3. The executor loads `guild.json` and starts the configured entry role with the user goal.
-4. The active role calls tools. Tool results are appended to the role’s conversation. If the role calls `ask_human`, the answer comes from either the Foundry simulator (during optimization) or the web UI (in the final product).
+4. The active role calls tools. Tool results are appended to the role's conversation. If the role calls `ask_human`, the answer comes from the web UI.
 5. If the role calls the built-in `agent` tool, the executor spawns a child role and runs it to completion.
 6. The child returns via the built-in `finish` tool. The result card becomes the tool result for the parent.
 7. The run ends when the entry role calls `finish` or when a hard safety budget is exhausted.
-8. The executor writes `data/runs/<run_id>/meta.json`, `log.jsonl`, and the final workspace.
+8. The executor writes `meta.json` and `log.jsonl` under `<workspace>/.orchestration/runs/<run_id>/`. The workspace itself holds the final filesystem state (mutated in place).
 
 ## Data flow: an optimization cycle
 
-1. The Foundry reads the current `guild.json` and the most recent run logs in `data/runs/`.
+1. The Foundry reads the current `guild.json` and the most recent run logs under `<workspace>/.orchestration/runs/`.
 2. It prompts a large model to cluster failures and propose concrete hypotheses.
 3. Each hypothesis becomes a branch: `data/foundry/branches/<branch_id>/guild.json`.
 4. For each branch, the Foundry runs the benchmark suite through the executor (one run per benchmark).
@@ -113,8 +113,8 @@ workspace/
 - **Sequential in the executor.** Only one LLM request is in flight at a time. This lets the user devote all available VRAM to one large context window.
 - **No libraries in the executor code.** The executor is implemented in TypeScript running on Bun, using only Bun built-ins and web-standard APIs. There are no npm dependencies.
 - **Large model in the Foundry only.** The Foundry may use a commercial API or another local large model for hypothesis generation and merging.
-- **Web UI for human interaction.** The final product ships with a simple web UI surfaced by `--serve`. It displays progress and handles `ask_human` questions.
-- **Single Dockerfile for the final product.** The Dockerfile uses the Bun base image, copies the project, and runs the executor. Because there are no dependencies to install, the image is small.
+- **Web UI for human interaction.** The final product ships with a simple web UI surfaced by the server entry point (`source/serve.ts`). It displays progress and handles `ask_human` questions.
+- **Single Dockerfile for the final product.** The `Dockerfile` uses the official Bun base image (pinned by digest), copies the project source and the seed guild, and runs the long-running executor service as PID 1 via `ENTRYPOINT ["bun","source/serve.ts"]`. The build runs `bun install`, typecheck, and tests as gates, then removes `node_modules` so the production image carries no dependencies. All configuration is environment variables with production defaults, so the image runs with an empty environment. The deployment model is one container per project: the project (git repository) is mounted into the container at `/workspace` and the executor modifies it in place; run bookkeeping goes under `/workspace/.orchestration/`. See [`Dockerfile`](../Dockerfile) for the image; per-run environment isolation runs inside this container as the inner isolation layer.
 
 ## Boundary between executor and guild
 

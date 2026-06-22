@@ -1,5 +1,5 @@
 // Public surface of the executor runtime.
-// External callers — the CLI entry point (`source/main.ts`) and the offline Foundry — import from this module only.
+// External callers — the server entry point (`source/serve.ts`) and the offline Foundry — import from this module only.
 // Internal helpers (the engine loop, context builder, budget checks, and the built-in tool handlers that are assembled mid-run with live role state) stay private to their own modules.
 // See docs/executor.md "Run lifecycle".
 
@@ -12,8 +12,8 @@ export type { LlmCaller, LlmCallResult, LlmRequest } from './llm.js'
 export { createGuildLoader } from './loader.js'
 export type { LoadGuild, LoadedGuild } from './loader.js'
 
-export { createHumanBackend, createWebHumanBackend } from './human-backend.js'
-export type { HumanBackend, HumanBackendConfig, WebHumanBackend } from './human-backend.js'
+export { createWebHumanBackend } from './human-backend.js'
+export type { HumanBackend, WebHumanBackend } from './human-backend.js'
 
 export { createRunState } from './run-state.js'
 export type { RunState } from './run-state.js'
@@ -26,19 +26,15 @@ export type { NativeToolsConfig } from './tools.js'
 
 export {
 	createRunDirectory,
-	createCopyWorkspace,
 	createAppendLog,
 	createWriteMeta,
-	createSnapshotWorkspace,
 	createReadRunSnapshotById,
 	createListRunIds,
 } from './persistence.js'
 export type {
 	RunDirectory,
-	CopyWorkspace,
 	AppendLog,
 	WriteMeta,
-	SnapshotWorkspace,
 	ReadRunSnapshotById,
 	ListRunIds,
 	RunSnapshotRaw,

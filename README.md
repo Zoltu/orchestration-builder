@@ -1,103 +1,36 @@
 # Adaptive Orchestrator
 
-This repository will contain an orchestrator that lets a small, consumer-grade language model solve complex tasks by working through a network of specialized roles and tools. The orchestrator itself is intentionally minimal; most behavior is described by a JSON configuration called the **Guild**. A separate meta-optimization process called the **Foundry** automatically improves the Guild by proposing, testing, and merging changes.
+An orchestration engine that lets a small, consumer-grade language model solve complex tasks by working through a network of specialized roles and tools. The orchestration engine itself is intentionally minimal; most behavior is described by a JSON configuration called the **Guild**. A separate meta-optimization process called the **Foundry** automatically improves the Guild by proposing, testing, and merging changes.
 
-For a thorough description of the project, start with the design documents in the `docs/` folder. For the current build roadmap and step-by-step plan, see [`plan/README.md`](plan/README.md); contributors should also read [`AGENTS.md`](AGENTS.md).
-
-## Getting started
-
-```bash
-bun install        # install dev dependencies (frozen lockfile)
-bun run typecheck  # bun --bun tsc --noEmit
-bun test           # unit tests under source/**/*.test.ts (in-memory, no network)
-```
-
-To exercise the smoke benchmark manually against a hand-created output:
-
-```bash
-cd benchmarks/hello_001
-printf 'hello world\n' > output.txt
-bun test tests/
-rm output.txt
-```
-
-The smoke benchmark is a Foundry validation harness, not a unit test; it is intentionally excluded from `bun test`.
+For contributors and development setup, see [`CONTRIBUTING.md`](CONTRIBUTING.md).
 
 ## Running the executor
 
-The CLI entry point (`source/main.ts`) invokes the executor end-to-end against a real model endpoint. It assembles the runtime from the Guild and the environment, so no secrets are stored in the Guild itself.
+The executor ships as a Docker image that serves a webpage. The deployment model is **one container = one project**: the project (e.g., a git repository, a research project, etc.) is mounted into the container and the executor works on it, exactly as a developer would. Orchestration bookkeeping is written under `<root>/.orchestration/` and can generally be ignored.
+
+### Run
 
 ```bash
-bun source/main.ts \
-  --guild guild \
-  --workspace benchmarks/hello_001 \
-  --task "Write a file called output.txt containing the text hello world" \
-  --run-id smoke-try
+docker container run --rm -p 12345:80 -v "$PWD:/workspace" -e ORCHESTRATOR_API_KEY=... adaptive-orchestrator
 ```
 
-Or via the `start` script:
+Open `http://localhost:12345` to give the orchestrator tasks, monitor progress, and respond to questions from the orchestrator.
 
 ```bash
-bun run start -- --guild guild --workspace benchmarks/hello_001 --task "..." 
-```
-
-Flags:
-
-- `--guild <path>` (required) — path to the Guild directory (contains `guild.json`).
-- `--workspace <path>` (required in run mode) — workspace copied into `data/runs/<run-id>/workspace/`. Not used in serve mode (see `--workspace-root`).
-- `--task <text>` (required in run mode) — task description handed to the entry role. Optional in serve mode; when present at startup it bootstraps the first run.
-- `--run-id <id>` (optional, run mode only) — run id; auto-generated as a UTC timestamp when omitted.
-- `--human-backend <stub|foundry|web>` (optional, run mode only, defaults to `stub`) — backend for `ask_human`. `stub` answers immediately with a canned reply; `web` parks the question for the operator to answer in the web UI (requires `--serve`); `foundry` requires the Foundry loop and is not supported by the CLI.
-- `--serve <port>` (optional) — start the long-running service backend on `<port>`; implies `--human-backend web`. The server runs indefinitely, one task at a time, submitted via the JSON API (or bootstrapped by `--task`). See "Service mode" below.
-- `--workspace-root <path>` (optional, serve mode only, defaults to `/workspace`) — the project mounted into every run.
-- `-h, --help` — print usage.
-
-The model API key is read from the `ORCHESTRATOR_API_KEY` environment variable and injected into the model configuration at startup; it is never read into or stored in the Guild:
-
-```bash
-export ORCHESTRATOR_API_KEY=sk-...
-bun source/main.ts --guild guild --workspace benchmarks/hello_001 --task "..."
-```
-
-Each run writes `meta.json`, `log.jsonl`, and the final `workspace/` under `data/runs/<run-id>/`. The process exits `0` on success, `2` on `needs_clarification` or a usage error, and `1` on any other failure.
-
-### Service mode
-
-`--serve <port>` turns the executor into a long-running HTTP service: one project, one task at a time, no queue. The project (git repository) is mounted at a fixed path (`/workspace` by default, override with `--workspace-root`) for the life of the process. Tasks are submitted through a JSON API and the web UI renders the active run and its history.
-
-```bash
-bun source/main.ts --serve 8080 --guild guild
-# local testing: mount or symlink a project at /workspace, or point --workspace-root at it
-bun source/main.ts --serve 8080 --guild guild --workspace-root benchmarks/hello_001
-```
-
-Open `http://localhost:8080` to watch the active run and answer `ask_human` questions. Submit a task programmatically (the same API the Foundry uses):
-
-```bash
-curl -X POST http://localhost:8080/api/runs -d '{"task":"Write a file called output.txt containing the text hello world"}'
+curl -X POST http://localhost:12345/api/runs -H 'content-type: application/json' -d '{"task":"Write a file called output.txt containing the text hello world"}'
 # → { "runId": "run-20260621-..." }
 ```
 
-API:
+### Configuration
 
-- `POST /api/runs` — body `{ "task": "..." }`; starts a run against the fixed workspace and returns `{ "runId": "..." }` (201). Returns `409 { "ok": false, "error": "run_in_progress" }` when a run is already active (one task at a time, no queue).
-- `GET /api/runs` — lists known runs (read from `data/runs/`), newest first.
-- `GET /api/runs/:id` — full run view (status, role activity, recent log) for a specific run.
-- `GET /api/run` — convenience alias for the most recent (active or last completed) run.
-- `GET /api/questions` / `POST /api/answer` — pending `ask_human` questions and answer submission.
+All configuration is environment variables passed via `docker run -e`:
 
-The server outlives every run: a completed run's view stays reachable, and a new task can be submitted once the previous one finishes. `SIGINT` and `SIGTERM` (the latter is what `docker stop` sends) trigger graceful shutdown: the active run is allowed to finish, the server stops, and the process exits (`130` if a run was interrupted mid-flight, `0` if idle).
+| Variable | Default | Purpose |
+|---|---|---|
+| `ORCHESTRATOR_API_KEY` | _(none)_ | Model API key, injected into the model configuration at startup and never stored in the Guild. Omit for a local endpoint that needs no key. |
+| `PORT` | `80` | Port the HTTP service listens on inside the container. |
+| `WORKSPACE_ROOT` | `/workspace` | The path inside the container that the project the executor operates on. Run artifacts are written to `<WORKSPACE_ROOT>/.orchestration/runs/`. |
 
-## Design documents
+The Guild is bundled into the image at `/app/guild/`. To override it without rebuilding, mount a different guild read-only at `/app/guild`.
 
-1. [`docs/overview.md`](docs/overview.md) — purpose, goals, and use cases
-2. [`docs/architecture.md`](docs/architecture.md) — high-level components and data flow
-3. [`docs/security.md`](docs/security.md) — threat model and attack surface
-4. [`docs/executor.md`](docs/executor.md) — executor runtime
-5. [`docs/guild.md`](docs/guild.md) — Guild configuration format
-6. [`docs/foundry.md`](docs/foundry.md) — meta-optimization loop
-7. [`docs/benchmarks.md`](docs/benchmarks.md) — benchmark workspace format
-
-## Development plan
-
-The work is broken into bite-sized, session-sized steps in [`plan/README.md`](plan/README.md). The foundation (original Phases 1–4) is complete; forward work begins at step `01`. Every step must leave the repository in a clean, healthy state — see the "Step hygiene" section of the plan and [`AGENTS.md`](AGENTS.md).
+For programmatic access, there is an [HTTP API](docs/api.md) for submitting tasks and reading run state.

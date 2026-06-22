@@ -73,20 +73,30 @@ Validation is split into three layers (see `AGENTS.md` for the three-tier patter
 
 ### Single benchmark
 
-Run the executor against one benchmark workspace (available once the CLI entry point `source/main.ts` lands in step 02):
+Run the executor image against one benchmark workspace by mounting the benchmark at `/workspace` and submitting a task through the API. The executor modifies the workspace in place, so mount a throwaway copy to protect the canonical benchmark:
 
 ```bash
-bun source/main.ts \
-  --guild guild \
-  --workspace benchmarks/hello_001 \
-  --task "Write 'hello world' to output.txt" \
-  --run-id hello-try
+cp -r hello_001 /tmp/hello-try
+docker run --rm -p 8080:80 \
+  -v "/tmp/hello-try:/workspace" \
+  -e ORCHESTRATOR_API_KEY=sk-... \
+  adaptive-orchestrator
 ```
 
-The final workspace lands in `data/runs/hello-try/workspace/`. Validate it manually with the benchmark's own command, e.g.:
+Then submit the task:
 
 ```bash
-cd data/runs/hello-try/workspace && bun test tests/
+curl -X POST http://localhost:8080/api/runs \
+  -H 'content-type: application/json' \
+  -d '{"task":"Write '"'"'hello world'"'"' to output.txt"}'
+# → { "runId": "run-20260621-..." }
+```
+
+The executor writes `output.txt` into `/tmp/hello-try` in place, and run artifacts land under `/tmp/hello-try/.orchestration/runs/<run-id>/`. Validate the result with the benchmark's own command — either from the host or from inside a throwaway container mounting the same directory:
+
+```bash
+docker run --rm -v "/tmp/hello-try:/workspace" --entrypoint sh adaptive-orchestrator \
+  -c 'cd /workspace && bun test tests/'
 ```
 
 ### The smoke benchmark

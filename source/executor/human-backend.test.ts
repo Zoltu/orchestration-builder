@@ -1,30 +1,9 @@
 import { describe, expect, test } from 'bun:test'
-import { createHumanBackend, createWebHumanBackend } from './human-backend.ts'
+import { createWebHumanBackend } from './human-backend.ts'
 
-describe('createHumanBackend (stub mode)', () => {
-	test('returns the stub answer regardless of question', async () => {
-		const backend = createHumanBackend({ mode: 'stub' })
-		const answer = await backend.ask('What framework should I use?')
-		expect(answer).toBe('use your best judgement')
-	})
-
-	test('returns the stub answer when context is provided', async () => {
-		const backend = createHumanBackend({ mode: 'stub' })
-		const answer = await backend.ask('Which file?', 'src/foo.ts')
-		expect(answer).toBe('use your best judgement')
-	})
-
-	test('stub backend ignores context entirely', async () => {
-		const backend = createHumanBackend({ mode: 'stub' })
-		const a1 = await backend.ask('question one', undefined)
-		const a2 = await backend.ask('question two', 'lots of context')
-		expect(a1).toBe(a2)
-	})
-})
-
-describe('createHumanBackend (web mode)', () => {
-	test('createHumanBackend with mode web returns a backend with an ask function', () => {
-		const backend = createHumanBackend({ mode: 'web' })
+describe('createWebHumanBackend', () => {
+	test('returns a backend with an ask function', () => {
+		const backend = createWebHumanBackend()
 		expect(typeof backend.ask).toBe('function')
 	})
 
@@ -141,17 +120,14 @@ describe('createHumanBackend (web mode)', () => {
 		expect(second.length).toBe(2)
 	})
 
-	test('the resolved answer is a string, matching the stub backend result shape seen by the model', async () => {
-		const web = createWebHumanBackend()
-		const stubAnswer = await createHumanBackend({ mode: 'stub' }).ask('q')
-		expect(typeof stubAnswer).toBe('string')
+	test('the resolved answer is a string, matching the result shape seen by the model', async () => {
+		const backend = createWebHumanBackend()
+		const promise = backend.ask('q')
+		const question = backend.pendingQuestions()[0]!
+		backend.submitAnswer(question.id, 'web answer')
 
-		const webPromise = web.ask('q')
-		const question = web.pendingQuestions()[0]!
-		web.submitAnswer(question.id, 'web answer')
-
-		const webAnswer = await webPromise
-		expect(typeof webAnswer).toBe('string')
-		expect(webAnswer).toBe('web answer')
+		const answer = await promise
+		expect(typeof answer).toBe('string')
+		expect(answer).toBe('web answer')
 	})
 })

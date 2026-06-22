@@ -114,7 +114,7 @@ These budgets are enforced by the executor regardless of what a role tries to do
 }
 ```
 
-- `maxToolOutputChars`: tool results longer than this are truncated inline, with a pointer to the full artifact stored on disk under `data/runs/<run_id>/workspace/`.
+- `maxToolOutputChars`: tool results longer than this are truncated inline, with a pointer to the full artifact stored on disk under the workspace.
 
 There is no automatic compaction threshold. Roles use the `context_info` and `edit_context` tools to manage context.
 

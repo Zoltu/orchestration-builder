@@ -15,7 +15,7 @@ benchmarks/
     └── tests/
 ```
 
-Everything in the benchmark folder except `eval.json` is copied into `data/runs/<run_id>/workspace/` at the start of a run. This means the agent can read any file in the workspace, but it cannot read the validation rules.
+The executor operates on the benchmark folder in place — it does not copy the workspace elsewhere. `eval.json` should be kept out of the workspace given to the executor (or excluded by the caller) so the agent can read any file in the workspace but cannot read the validation rules; the Foundry hands the executor a throwaway copy of each benchmark with `eval.json` omitted.
 
 ## `eval.json` schema
 

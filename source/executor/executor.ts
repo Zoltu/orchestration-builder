@@ -3,7 +3,7 @@ import { runRole } from './engine.js'
 import type { HumanBackend } from './human-backend.js'
 import type { LlmCaller } from './llm.js'
 import type { LoadGuild } from './loader.js'
-import type { AppendLog, CopyWorkspace, RunDirectory, SnapshotWorkspace, WriteMeta } from './persistence.js'
+import type { AppendLog, RunDirectory, WriteMeta } from './persistence.js'
 import type { ToolHandler } from './tool-dispatch.js'
 
 export interface ExecutorDependencies {
@@ -13,14 +13,11 @@ export interface ExecutorDependencies {
 	humanBackend: HumanBackend
 	loadGuild: LoadGuild
 	createRunDirectory: RunDirectory
-	copyWorkspace: CopyWorkspace
-	snapshotWorkspace: SnapshotWorkspace
 	writeMeta: WriteMeta
 }
 
 export async function runExecutor(deps: ExecutorDependencies, options: RunOptions): Promise<RunMeta> {
 	deps.createRunDirectory()
-	deps.copyWorkspace(options.benchmarkPath)
 
 	const loadedGuild = deps.loadGuild(options.guildPath)
 
@@ -41,8 +38,6 @@ export async function runExecutor(deps: ExecutorDependencies, options: RunOption
 			task: options.task,
 		},
 	)
-
-	deps.snapshotWorkspace()
 
 	const endTime = new Date().toISOString()
 	const meta: RunMeta = {
