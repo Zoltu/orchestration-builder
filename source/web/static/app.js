@@ -1,5 +1,6 @@
-// Plain, dependency-free client for the long-running service.
-// Polls the JSON API and renders into the DOM using createElement/textContent only — untrusted run content (task text, log payloads, summaries, question text) is never injected via innerHTML, so it cannot break out of the DOM.
+// Hyperapp client for the long-running service.
+// The whole UI is one reactive view of a single state object; polling runs as subscriptions and every side effect (fetch, POST, audio, flash) runs as an effect. Untrusted run content (task text, log payloads, summaries, question text, answers) is interpolated only as children of h() or text-node arguments, which hyperapp places into text nodes and properties — never into markup — so it cannot break out of the DOM. There is no raw-HTML/unsafe API in hyperapp.
+import { h, app } from './vendor/hyperapp.js'
 
 const POLL_INTERVAL_MS = 1000
 const TERMINAL_STATUSES = new Set(['success', 'error', 'needs_clarification'])
@@ -12,36 +13,17 @@ const STATUS_LABELS = {
 }
 const SERVER_UNAVAILABLE_MESSAGE = 'server unavailable — it may have shut down'
 
-// The run list is the source of truth for which runs exist and which (at most one) is active.
-// `justSubmittedRunId` covers the sub-second window between a successful POST and the new run appearing in the list, so the create form stays disabled through that gap.
-let currentSummaries = []
-let selectedRunId = null
-let selectedRunStatus = null
-let activeRunId = null
-let justSubmittedRunId = null
-let serverAvailable = true
+// The AudioContext is created lazily on first user interaction (browsers start it suspended until a gesture) and reused for every beep; it is module state, not app state, because it is an opaque resource with no place in the view.
+let audioContext = null
 
-// Per-run polling runs on its own interval so a terminal selected run can stop being polled while the run list keeps polling.
-// `selectionGeneration` is bumped on every selection change so a slow in-flight per-run fetch that returns after a switch cannot render a stale run's data into the newly selected view.
-let perRunInterval = null
-let selectionGeneration = 0
-
-// Signature of the last per-run view rendered into the DOM. The per-run poll fires every second even when nothing changed, so without this guard the whole panel (log rows, roles, summary) is torn down and rebuilt each tick — destroying expanded raw-payload toggles and making the DOM thrash in the debugger. When the signature is unchanged we skip the rebuild entirely.
-let lastViewSignature = ''
-
-function clearChildren(element) {
-	while (element.firstChild !== null) element.removeChild(element.firstChild)
+function ensureAudioContext() {
+	if (audioContext === null) {
+		const Ctor = window.AudioContext !== undefined ? window.AudioContext : window.webkitAudioContext
+		if (Ctor !== undefined) audioContext = new Ctor()
+	}
+	return audioContext
 }
 
-function el(tag, text, className) {
-	const node = document.createElement(tag)
-	if (text !== undefined) node.textContent = text
-	if (className !== undefined) node.className = className
-	return node
-}
-
-// Renders an absolute ISO timestamp as a relative label ("30s ago", "5m ago").
-// A negative delta (clock skew or a just-written future timestamp) reads as "just now" so the label never jumps backwards.
 function formatRelative(iso, now) {
 	if (iso === null || iso === undefined || iso === '') return '—'
 	const then = Date.parse(iso)
@@ -57,466 +39,501 @@ function formatRelative(iso, now) {
 	return `${days}d ago`
 }
 
-// Stamps a node with the absolute timestamp (via data-timestamp + a title tooltip showing the exact time)
-// and writes the initial relative label. refreshRelativeTimes() rewrites the label each tick without rebuilding the panel.
-function setTimeText(node, iso) {
-	node.dataset.timestamp = iso ?? ''
-	node.title = iso ?? ''
-	node.textContent = formatRelative(iso, Date.now())
-}
-
-// Recomputes every stamped time label on the page. The per-run poll skips rebuilding the panel when nothing changed
-// (signature guard), so without this the relative labels would freeze at the last render; this lightweight pass keeps them live.
-function refreshRelativeTimes() {
-	const now = Date.now()
-	for (const node of document.querySelectorAll('[data-timestamp]')) {
-		const iso = node.dataset.timestamp
-		node.textContent = iso === '' || iso === undefined ? '—' : formatRelative(iso, now)
-	}
+function statusLabel(status) {
+	if (status === null || status === undefined) return '—'
+	return STATUS_LABELS[status] ?? status
 }
 
 function isTerminalStatus(status) {
 	return TERMINAL_STATUSES.has(status)
 }
 
-function statusLabel(status) {
-	if (status === null || status === undefined) return '—'
-	return STATUS_LABELS[status] ?? status
+// The active run is the first non-terminal summary; derived in the view rather than stored, so it can never drift from the run list.
+function deriveActiveRunId(summaries) {
+	const active = summaries.find((summary) => !isTerminalStatus(summary.status))
+	return active === undefined ? null : active.runId
 }
-
-function renderStatusLine() {
-	const status = document.getElementById('status')
-	status.onclick = null
-	status.style.cursor = 'default'
-	if (!serverAvailable) {
-		status.textContent = SERVER_UNAVAILABLE_MESSAGE
-		status.className = 'status status-unavailable'
-		return
-	}
-	status.className = 'status'
-	if (selectedRunId === null) {
-		if (activeRunId !== null) {
-			status.textContent = 'a run is in progress — click to view'
-			status.style.cursor = 'pointer'
-			status.onclick = () => setSelectedRun(activeRunId)
-			return
-		}
-		status.textContent = currentSummaries.length === 0 ? 'no runs yet — submit a task to start one' : 'no run selected'
-		return
-	}
-	status.textContent = statusLabel(selectedRunStatus)
-}
-
-function markServerUnavailable() {
-	if (serverAvailable) {
-		serverAvailable = false
-		renderStatusLine()
-	}
-}
-
-function markServerAvailable() {
-	if (!serverAvailable) {
-		serverAvailable = true
-		renderStatusLine()
-	}
-}
-
-function renderRunList(summaries) {
-	const list = document.getElementById('run-list')
-	clearChildren(list)
-
-	if (summaries.length === 0) {
-		list.appendChild(el('li', 'No runs yet.', 'empty'))
-		return
-	}
-
-	for (const summary of summaries) {
-		const item = el('li')
-		if (summary.runId === selectedRunId) item.className = 'selected'
-		item.appendChild(el('span', summary.runId, 'run-id'))
-		item.appendChild(el('span', statusLabel(summary.status), `run-status run-status-${summary.status ?? 'unknown'}`))
-		item.appendChild(el('span', summary.task ?? '—', 'run-task'))
-		item.addEventListener('click', () => setSelectedRun(summary.runId))
-		list.appendChild(item)
-	}
-}
-
-function renderRunSummary(view) {
-	const meta = document.getElementById('run-meta')
-	clearChildren(meta)
-
-	const resultValue = view.result && view.result.summary ? view.result.summary : '—'
-
-	// `time` marks which entries render their value as a relative timestamp (stamped for refreshRelativeTimes).
-	const entries = [
-		{ label: 'Run', value: view.runId ?? '—', time: false },
-		{ label: 'Task', value: view.task ?? '—', time: false },
-		{ label: 'Status', value: statusLabel(view.status), time: false },
-		{ label: 'Started', value: view.startTime ?? null, time: true },
-		{ label: 'Ended', value: view.endTime ?? null, time: true },
-		{ label: 'Result', value: resultValue, time: false },
-	]
-	for (const entry of entries) {
-		const dd = el('dd')
-		if (entry.time) {
-			setTimeText(dd, entry.value)
-		} else {
-			dd.textContent = entry.value
-			if (entry.label === 'Task' || entry.label === 'Result') dd.className = 'preformatted'
-		}
-		meta.appendChild(el('dt', entry.label))
-		meta.appendChild(dd)
-	}
-}
-
-function renderRoles(roles, activeRole) {
-	const list = document.getElementById('roles')
-	clearChildren(list)
-
-	if (roles.length === 0) {
-		list.appendChild(el('li', 'No role activity yet.'))
-		return
-	}
-
-	for (const role of roles) {
-		const isActive = activeRole !== null && role.role === activeRole
-		const item = el('li', undefined, isActive ? 'role-active' : undefined)
-		item.appendChild(el('span', undefined, isActive ? 'role-pulse' : undefined))
-		item.appendChild(el('strong', role.role))
-		item.appendChild(el('span', ` — ${role.eventCount} events · ${role.llmCalls} LLM calls · ${role.toolCalls} tool calls`))
-		const times = el('div', undefined, 'role-times')
-		const firstSpan = el('span', undefined, 'role-time')
-		firstSpan.appendChild(document.createTextNode('first seen '))
-		const firstTime = el('time')
-		setTimeText(firstTime, role.firstSeen)
-		firstSpan.appendChild(firstTime)
-		const lastSpan = el('span', undefined, 'role-time')
-		lastSpan.appendChild(document.createTextNode('last seen '))
-		const lastTime = el('time')
-		setTimeText(lastTime, role.lastSeen)
-		lastSpan.appendChild(lastTime)
-		times.appendChild(firstSpan)
-		times.appendChild(lastSpan)
-		item.appendChild(times)
-		if (role.toolsCalled.length > 0) {
-			item.appendChild(el('div', `tools: ${role.toolsCalled.join(', ')}`, 'role-tools'))
-		}
-		list.appendChild(item)
-	}
-}
-
-// Expanded-row state is tracked across re-renders so a row the user opened stays open
-// when the next poll rebuilds the list, instead of collapsing back to hidden every second.
-const expandedLogRows = new Set()
 
 function logRowKey(entry) {
 	return `${entry.timestamp}|${entry.type}|${entry.summary}`
 }
 
-function renderLog(entries) {
-	const list = document.getElementById('log')
-	clearChildren(list)
+// --- Custom subscriptions --------------------------------------------------
+// hyperapp's @hyperapp/time package would provide onEvery, but vendoring a second file for ~5 lines is not worth the supply-chain cost; the subscriber is defined once here so its reference is stable across renders (patchSubs compares subscriber references to decide whether to restart a subscription).
 
-	if (entries.length === 0) {
-		list.appendChild(el('li', 'No events logged yet.', 'log-empty'))
-		return
-	}
+function onEverySubscriber(dispatch, payload) {
+	const id = setInterval(() => dispatch(payload.action), payload.interval)
+	return () => clearInterval(id)
+}
 
-	// Newest first so the latest activity is visible without scrolling to the bottom.
-	for (let i = entries.length - 1; i >= 0; i--) {
-		const entry = entries[i]
-		const key = logRowKey(entry)
-		const expanded = expandedLogRows.has(key)
-		const item = el('li', undefined, 'log-row')
-		const timestamp = el('time', undefined, 'log-timestamp')
-		setTimeText(timestamp, entry.timestamp)
-		item.appendChild(timestamp)
-		item.appendChild(el('span', entry.type, 'log-type'))
-		item.appendChild(el('span', entry.summary, 'log-summary'))
+function onEvery(action, interval) {
+	return [onEverySubscriber, { action, interval }]
+}
 
-		const detail = el('pre', undefined, 'log-detail')
-		detail.textContent = JSON.stringify(entry.payload, null, 2)
-		detail.hidden = !expanded
-		const toggle = el('button', expanded ? 'hide' : 'raw', 'log-toggle')
-		toggle.type = 'button'
-		toggle.addEventListener('click', () => {
-			const willExpand = detail.hidden
-			detail.hidden = !willExpand
-			toggle.textContent = willExpand ? 'hide' : 'raw'
-			if (willExpand) expandedLogRows.add(key)
-			else expandedLogRows.delete(key)
-		})
-		item.appendChild(toggle)
-		item.appendChild(detail)
-		list.appendChild(item)
+function onFirstInteractionSubscriber(dispatch, payload) {
+	const handler = () => dispatch(payload.action)
+	window.addEventListener('pointerdown', handler, { once: true })
+	window.addEventListener('keydown', handler, { once: true })
+	return () => {
+		window.removeEventListener('pointerdown', handler)
+		window.removeEventListener('keydown', handler)
 	}
 }
 
-function renderCurrentActivity(activity) {
-	const node = document.getElementById('current-activity')
-	clearChildren(node)
-	if (activity === null) return
-	node.appendChild(el('span', `now: ${activity.summary}`, 'current-activity-text'))
+function onFirstInteraction(action) {
+	return [onFirstInteractionSubscriber, { action }]
 }
 
-function renderError(error) {
-	const node = document.getElementById('run-error')
-	clearChildren(node)
-	if (error === null) return
-	node.appendChild(el('div', `${error.kind}: ${error.message}`, 'error-text'))
+// --- Custom effects --------------------------------------------------------
+// @hyperapp/http is still "planned", so the fetch effecter is hand-written. It parses the body, then dispatches the ok action on a requestAnimationFrame so the dispatch lands in step with hyperapp's repaint cycle (per hyperapp's effects doc); the fail action fires only on a network error, since any HTTP response — even a 4xx/5xx — resolves the ok branch with its status.
+
+function runFetch(dispatch, payload) {
+	fetch(payload.url, payload.init).then(
+		(response) => {
+			const status = response.status
+			const ok = response.ok
+			response.text().then((text) => {
+				let body = null
+				if (text.length > 0) {
+					try {
+						body = JSON.parse(text)
+					} catch {
+						body = text
+					}
+				}
+				requestAnimationFrame(() => dispatch(payload.ok, { status, ok, body }))
+			})
+		},
+		() => requestAnimationFrame(() => dispatch(payload.fail)),
+	)
 }
 
-function renderArtifacts(artifacts) {
-	const container = document.getElementById('run-artifacts')
-	clearChildren(container)
-	if (artifacts === undefined || artifacts.length === 0) return
-	container.appendChild(el('div', 'Artifacts', 'artifacts-heading'))
-	const list = el('ul')
-	for (const path of artifacts) list.appendChild(el('li', path, 'artifact'))
-	container.appendChild(list)
+function Fetch(payload) {
+	return [runFetch, payload]
 }
 
-function renderQuestions(questions) {
-	const list = document.getElementById('questions')
-	clearChildren(list)
-
-	if (questions.length === 0) {
-		list.appendChild(el('li', 'No pending questions.'))
-		return
-	}
-
-	for (const question of questions) {
-		const item = el('li')
-		item.appendChild(el('div', question.question))
-		if (question.context !== undefined) {
-			item.appendChild(el('div', question.context, 'question-context'))
-		}
-
-		const form = el('form')
-		form.className = 'question-form'
-		const input = document.createElement('input')
-		input.type = 'text'
-		input.placeholder = 'your answer'
-		const button = el('button', 'Answer')
-		button.type = 'submit'
-		form.appendChild(input)
-		form.appendChild(button)
-		form.addEventListener('submit', (event) => {
-			event.preventDefault()
-			if (input.value === '') return
-			submitAnswer(question.id, input.value, button)
-		})
-		item.appendChild(form)
-		list.appendChild(item)
-	}
+function runFlash(_dispatch, _payload) {
+	const panel = document.getElementById('questions-panel')
+	if (panel === null) return
+	// Web Animations API replays cleanly on every call, so a second question arriving mid-flash re-triggers it without class-list juggling.
+	panel.animate(
+		[
+			{ background: '#fff1f0', borderColor: '#cf222e', boxShadow: '0 0 0 4px rgba(207, 34, 46, 0.35)' },
+			{ background: '#ffffff', borderColor: '#e2e2e7', boxShadow: '0 0 0 0 rgba(207, 34, 46, 0)' },
+		],
+		{ duration: 1000, easing: 'ease-out' },
+	)
 }
 
-function updateFormState() {
-	const button = document.getElementById('create-run-button')
-	const input = document.getElementById('create-run-input')
-	const disabled = justSubmittedRunId !== null || activeRunId !== null
-	button.disabled = disabled
-	input.placeholder = disabled ? 'a run is already in progress' : 'describe a task and start a run'
-	button.textContent = disabled ? 'Run in progress…' : 'Start run'
+function Flash() {
+	return [runFlash, null]
 }
 
-function viewSignature(view) {
-	const last = view.recentLog.length > 0 ? view.recentLog[view.recentLog.length - 1] : null
-	const lastRole = view.roles.length > 0 ? view.roles[view.roles.length - 1] : null
+function runBeep(_dispatch, _payload) {
+	const ctx = audioContext
+	if (ctx === null || ctx.state !== 'running') return
+	const oscillator = ctx.createOscillator()
+	const gain = ctx.createGain()
+	oscillator.type = 'sine'
+	oscillator.frequency.value = 880
+	gain.gain.value = 0.08
+	oscillator.connect(gain)
+	gain.connect(ctx.destination)
+	const now = ctx.currentTime
+	oscillator.start(now)
+	oscillator.stop(now + 0.18)
+}
+
+function PlayBeep() {
+	return [runBeep, null]
+}
+
+function runPrimeAudio(_dispatch, _payload) {
+	const ctx = ensureAudioContext()
+	if (ctx !== null && ctx.state === 'suspended') ctx.resume()
+}
+
+function PrimeAudioFx() {
+	return [runPrimeAudio, null]
+}
+
+// --- Actions ---------------------------------------------------------------
+// Actions are pure state transitions; side effects are returned as effect tuples alongside the next state. The polling action returns a fresh now so relative timestamps refresh every tick even when the server returns identical data.
+
+function Tick(state) {
 	return [
-		view.status,
-		view.runId ?? '',
-		view.recentLog.length,
-		last ? `${last.timestamp}|${last.summary}` : '',
-		view.currentActivity ? view.currentActivity.summary : '',
-		view.error ? `${view.error.kind}|${view.error.message}` : '',
-		view.result ? view.result.summary : '',
-		view.roles.length,
-		lastRole ? lastRole.lastSeen : '',
-	].join('\u0001')
+		{ ...state, now: Date.now() },
+		Fetch({ url: 'api/runs', ok: GotRunList, fail: FetchFailed }),
+		Fetch({ url: 'api/questions', ok: GotQuestions, fail: FetchFailed }),
+	]
 }
 
-function stopPerRunPolling() {
-	if (perRunInterval !== null) {
-		clearInterval(perRunInterval)
-		perRunInterval = null
+function PollSelectedRun(state) {
+	if (state.selectedRunId === null) return state
+	return [
+		state,
+		Fetch({ url: `api/runs/${encodeURIComponent(state.selectedRunId)}`, ok: GotSelectedRun, fail: FetchFailed }),
+	]
+}
+
+function GotRunList(state, payload) {
+	const ok = payload.ok
+	const body = payload.body
+	const summaries = ok && Array.isArray(body) ? body : []
+	const nextState = { ...state, summaries, serverAvailable: ok }
+	if (nextState.justSubmittedRunId !== null && summaries.some((summary) => summary.runId === nextState.justSubmittedRunId)) {
+		nextState.justSubmittedRunId = null
 	}
+	// Auto-select the newest run when nothing is selected so the user lands on live activity.
+	if (nextState.selectedRunId === null && summaries.length > 0) {
+		nextState.selectedRunId = summaries[0].runId
+		nextState.selectedRunView = null
+		nextState.selectedRunStatus = null
+		nextState.expandedLogRows = {}
+	}
+	return nextState
 }
 
-function startPerRunPolling() {
-	stopPerRunPolling()
-	perRunInterval = setInterval(pollSelectedRun, POLL_INTERVAL_MS)
+function GotSelectedRun(state, payload) {
+	const status = payload.status
+	const ok = payload.ok
+	const body = payload.body
+	if (status === 404) {
+		// The run directory is created early in execution but may not be readable in the instant after submit; the per-run subscription keeps polling until the view appears.
+		return { ...state, selectedRunStatus: 'unknown', serverAvailable: ok }
+	}
+	if (!ok || body === null) return state
+	return { ...state, selectedRunView: body, selectedRunStatus: body.status, serverAvailable: true }
 }
 
-function setSelectedRun(runId) {
-	if (runId === selectedRunId) return
-	stopPerRunPolling()
-	selectionGeneration++
-	selectedRunId = runId
-	selectedRunStatus = null
-	lastViewSignature = ''
-	expandedLogRows.clear()
-	renderRunList(currentSummaries)
-	renderStatusLine()
-	pollSelectedRun()
-	startPerRunPolling()
-}
+function GotQuestions(state, payload) {
+	const ok = payload.ok
+	const body = payload.body
+	const questions = ok && Array.isArray(body) ? body : []
+	const currentIds = {}
+	for (const question of questions) currentIds[question.id] = true
 
-async function pollSelectedRun() {
-	if (selectedRunId === null) return
-	const generation = selectionGeneration
-
-	let view
-	try {
-		const response = await fetch(`api/runs/${encodeURIComponent(selectedRunId)}`)
-		if (generation !== selectionGeneration) return
-		if (response.status === 404) {
-			// The run directory is created early in execution but may not be readable in the instant after submit; keep polling until it appears.
-			selectedRunStatus = 'unknown'
-			renderStatusLine()
-			return
+	let hasNew = false
+	if (!state.firstQuestionsPoll) {
+		for (const id of Object.keys(currentIds)) {
+			if (!state.shownQuestionIds[id]) {
+				hasNew = true
+				break
+			}
 		}
-		if (!response.ok) return
-		view = await response.json()
-	} catch {
-		if (generation !== selectionGeneration) return
-		markServerUnavailable()
-		return
 	}
-	if (generation !== selectionGeneration) return
 
-	markServerAvailable()
-
-	const signature = viewSignature(view)
-	if (signature === lastViewSignature) {
-		// Nothing changed since the last render; leave the DOM (and any open raw-payload toggles) untouched.
-		if (isTerminalStatus(view.status)) stopPerRunPolling()
-		return
+	const nextState = {
+		...state,
+		pendingQuestions: questions,
+		shownQuestionIds: currentIds,
+		firstQuestionsPoll: false,
+		serverAvailable: ok,
 	}
-	lastViewSignature = signature
-
-	selectedRunStatus = view.status
-	const activeRole = !isTerminalStatus(view.status) && view.currentActivity ? view.currentActivity.role : null
-	renderRunSummary(view)
-	renderCurrentActivity(view.currentActivity)
-	renderError(view.error)
-	renderArtifacts(view.result ? view.result.artifacts : undefined)
-	renderRoles(view.roles, activeRole)
-	renderLog(view.recentLog)
-	renderStatusLine()
-	if (isTerminalStatus(view.status)) stopPerRunPolling()
+	// Flash always on a genuinely new question; beep only when not muted. Falsy effects are ignored by hyperapp, so the conditionals inline cleanly.
+	if (hasNew) {
+		return [nextState, Flash(), state.muted ? null : PlayBeep()]
+	}
+	return nextState
 }
 
-async function pollRunList() {
-	let summaries
-	try {
-		const response = await fetch('api/runs')
-		if (!response.ok) return
-		summaries = await response.json()
-	} catch {
-		markServerUnavailable()
-		return
-	}
-	markServerAvailable()
-	currentSummaries = Array.isArray(summaries) ? summaries : []
-
-	if (justSubmittedRunId !== null && currentSummaries.some((summary) => summary.runId === justSubmittedRunId)) {
-		justSubmittedRunId = null
-	}
-
-	const active = currentSummaries.find((summary) => !isTerminalStatus(summary.status))
-	activeRunId = active === undefined ? null : active.runId
-
-	if (selectedRunId === null && currentSummaries.length > 0) {
-		setSelectedRun(currentSummaries[0].runId)
-	}
-
-	renderRunList(currentSummaries)
-	updateFormState()
+function FetchFailed(state) {
+	return { ...state, serverAvailable: false }
 }
 
-async function pollQuestions() {
-	let questions
-	try {
-		const response = await fetch('api/questions')
-		if (!response.ok) return
-		questions = await response.json()
-	} catch {
-		markServerUnavailable()
-		return
-	}
-	markServerAvailable()
-	renderQuestions(Array.isArray(questions) ? questions : [])
+function SelectRun(state, runId) {
+	if (runId === state.selectedRunId) return state
+	return { ...state, selectedRunId: runId, selectedRunView: null, selectedRunStatus: null, expandedLogRows: {} }
 }
 
-async function submitCreateRun(task) {
-	const button = document.getElementById('create-run-button')
-	const input = document.getElementById('create-run-input')
-	button.disabled = true
-	input.value = ''
-
-	let runId
-	try {
-		const response = await fetch('api/runs', {
-			method: 'POST',
-			headers: { 'content-type': 'application/json' },
-			body: JSON.stringify({ task }),
-		})
-		if (response.status === 201) {
-			const body = await response.json()
-			runId = body.runId
-		} else {
-			updateFormState()
-			return
-		}
-	} catch {
-		markServerUnavailable()
-		updateFormState()
-		return
-	}
-
-	markServerAvailable()
-	justSubmittedRunId = runId
-	updateFormState()
-	setSelectedRun(runId)
-	pollRunList()
+function ToggleMute(state, event) {
+	return { ...state, muted: event.target.checked }
 }
 
-async function submitAnswer(questionId, answer, button) {
-	button.disabled = true
-	try {
-		const response = await fetch('api/answer', {
-			method: 'POST',
-			headers: { 'content-type': 'application/json' },
-			body: JSON.stringify({ id: questionId, answer }),
-		})
-		if (!response.ok) {
-			button.disabled = false
-			return
-		}
-	} catch {
-		markServerUnavailable()
-		button.disabled = false
-		return
-	}
-	markServerAvailable()
-	pollQuestions()
+function ToggleLogRow(state, key) {
+	const expandedLogRows = { ...state.expandedLogRows }
+	if (expandedLogRows[key]) delete expandedLogRows[key]
+	else expandedLogRows[key] = true
+	return { ...state, expandedLogRows }
 }
 
-function tick() {
-	pollRunList()
-	pollQuestions()
-	refreshRelativeTimes()
-}
-
-document.getElementById('create-run-form').addEventListener('submit', (event) => {
+function SubmitRun(state, event) {
 	event.preventDefault()
-	const input = document.getElementById('create-run-input')
+	if (state.justSubmittedRunId !== null || deriveActiveRunId(state.summaries) !== null) return state
+	const input = event.target.querySelector('input')
+	if (input === null) return state
 	const task = input.value.trim()
-	if (task === '') return
-	if (justSubmittedRunId !== null || activeRunId !== null) return
-	submitCreateRun(task)
-})
+	if (task === '') return state
+	input.value = ''
+	return [
+		state,
+		Fetch({
+			url: 'api/runs',
+			init: { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ task }) },
+			ok: GotCreatedRun,
+			fail: FetchFailed,
+		}),
+	]
+}
 
-tick()
-setInterval(tick, POLL_INTERVAL_MS)
+function GotCreatedRun(state, payload) {
+	const ok = payload.ok
+	const body = payload.body
+	if (!ok || body === null || typeof body !== 'object' || !('runId' in body)) return state
+	const createdRunId = body.runId
+	// Selecting the new run activates its per-run subscription; an immediate run-list fetch clears justSubmittedRunId as soon as the run appears.
+	return [
+		{ ...state, justSubmittedRunId: createdRunId, selectedRunId: createdRunId, selectedRunView: null, selectedRunStatus: null, expandedLogRows: {}, serverAvailable: true },
+		Fetch({ url: 'api/runs', ok: GotRunList, fail: FetchFailed }),
+	]
+}
+
+function SubmitAnswer(questionId) {
+	return function SubmitAnswerForQuestion(state, event) {
+		event.preventDefault()
+		const input = event.target.querySelector('input')
+		if (input === null) return state
+		const answer = input.value
+		if (answer === '') return state
+		return [
+			{ ...state, pendingAnswerId: questionId },
+			Fetch({
+				url: 'api/answer',
+				init: { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id: questionId, answer }) },
+				ok: AnswerSent,
+				fail: AnswerFailed,
+			}),
+		]
+	}
+}
+
+function AnswerSent(state) {
+	// Refresh the pending list immediately so the answered question disappears without waiting for the next tick.
+	return [{ ...state, pendingAnswerId: null, serverAvailable: true }, Fetch({ url: 'api/questions', ok: GotQuestions, fail: FetchFailed })]
+}
+
+function AnswerFailed(state) {
+	return { ...state, pendingAnswerId: null, serverAvailable: false }
+}
+
+function PrimeAudio(state) {
+	return [state, PrimeAudioFx()]
+}
+
+// --- View ------------------------------------------------------------------
+
+function StatusLine(state) {
+	const activeRunId = deriveActiveRunId(state.summaries)
+	if (!state.serverAvailable) {
+		return h('p', { id: 'status', class: 'status status-unavailable' }, SERVER_UNAVAILABLE_MESSAGE)
+	}
+	if (state.selectedRunId === null) {
+		if (activeRunId !== null) {
+			return h('p', { id: 'status', class: 'status status-clickable', onclick: [SelectRun, activeRunId] }, 'a run is in progress — click to view')
+		}
+		const message = state.summaries.length === 0 ? 'no runs yet — submit a task to start one' : 'no run selected'
+		return h('p', { id: 'status', class: 'status' }, message)
+	}
+	return h('p', { id: 'status', class: 'status' }, statusLabel(state.selectedRunStatus))
+}
+
+function Header(state) {
+	return h('header', {}, [
+		h('h1', {}, 'Adaptive Orchestrator'),
+		StatusLine(state),
+		h('label', { class: 'mute-toggle' }, [
+			h('input', { type: 'checkbox', checked: state.muted, onchange: ToggleMute }),
+			'mute alert sound',
+		]),
+	])
+}
+
+function RunList(state) {
+	if (state.summaries.length === 0) {
+		return h('ul', { id: 'run-list' }, h('li', { class: 'empty' }, 'No runs yet.'))
+	}
+	return h(
+		'ul',
+		{ id: 'run-list' },
+		state.summaries.map((summary) =>
+			h('li', { key: summary.runId, class: { selected: summary.runId === state.selectedRunId }, onclick: [SelectRun, summary.runId] }, [
+				h('span', { class: 'run-id' }, summary.runId),
+				h('span', { class: `run-status run-status-${summary.status ?? 'unknown'}` }, statusLabel(summary.status)),
+				h('span', { class: 'run-task' }, summary.task ?? '—'),
+			]),
+		),
+	)
+}
+
+function RunsPanel(state) {
+	const disabled = state.justSubmittedRunId !== null || deriveActiveRunId(state.summaries) !== null
+	return h('section', { id: 'runs-panel', class: 'panel' }, [
+		h('h2', {}, 'Runs'),
+		h('form', { class: 'create-run-form', onsubmit: SubmitRun }, [
+			h('input', { type: 'text', placeholder: disabled ? 'a run is already in progress' : 'describe a task and start a run', autocomplete: 'off' }),
+			h('button', { type: 'submit', disabled }, disabled ? 'Run in progress…' : 'Start run'),
+		]),
+		RunList(state),
+	])
+}
+
+function RunSummaryPanel(state) {
+	const view = state.selectedRunView
+	const runId = view ? view.runId : '—'
+	const task = view ? view.task ?? '—' : '—'
+	const status = view ? statusLabel(view.status) : '—'
+	const startTime = view ? view.startTime ?? null : null
+	const endTime = view ? view.endTime ?? null : null
+	const resultValue = view && view.result && view.result.summary ? view.result.summary : '—'
+
+	const entries = [
+		h('dt', {}, 'Run'), h('dd', {}, runId),
+		h('dt', {}, 'Task'), h('dd', { class: 'preformatted' }, task),
+		h('dt', {}, 'Status'), h('dd', {}, status),
+		h('dt', {}, 'Started'), h('dd', {}, h('time', { title: startTime ?? '' }, formatRelative(startTime, state.now))),
+		h('dt', {}, 'Ended'), h('dd', {}, h('time', { title: endTime ?? '' }, formatRelative(endTime, state.now))),
+		h('dt', {}, 'Result'), h('dd', { class: 'preformatted' }, resultValue),
+	]
+
+	const activity = view ? view.currentActivity : null
+	const error = view ? view.error : null
+	const artifacts = view && view.result ? view.result.artifacts : undefined
+
+	return h('section', { id: 'run-summary', class: 'panel' }, [
+		h('h2', {}, 'Run'),
+		h('p', { id: 'current-activity', class: 'current-activity' }, activity ? h('span', { class: 'current-activity-text' }, `now: ${activity.summary}`) : null),
+		h('dl', { id: 'run-meta' }, entries),
+		h('div', { id: 'run-error', class: 'run-error' }, error ? h('div', { class: 'error-text' }, `${error.kind}: ${error.message}`) : null),
+		h('div', { id: 'run-artifacts', class: 'run-artifacts' }, artifacts && artifacts.length > 0 ? [h('div', { class: 'artifacts-heading' }, 'Artifacts'), h('ul', {}, artifacts.map((path) => h('li', { key: path, class: 'artifact' }, path)))] : null),
+	])
+}
+
+function RolesPanel(state) {
+	const view = state.selectedRunView
+	const roles = view ? view.roles : []
+	const activeRole = view && !isTerminalStatus(view.status) && view.currentActivity ? view.currentActivity.role : null
+	const children = roles.length === 0
+		? [h('li', {}, 'No role activity yet.')]
+		: roles.map((role) => {
+				const isActive = activeRole !== null && role.role === activeRole
+				return h('li', { key: role.role, class: { 'role-active': isActive } }, [
+					isActive ? h('span', { class: 'role-pulse' }) : null,
+					h('strong', {}, role.role),
+					h('span', {}, ` — ${role.eventCount} events · ${role.llmCalls} LLM calls · ${role.toolCalls} tool calls`),
+					h('div', { class: 'role-times' }, [
+						h('span', { class: 'role-time' }, ['first seen ', h('time', { title: role.firstSeen ?? '' }, formatRelative(role.firstSeen, state.now))]),
+						h('span', { class: 'role-time' }, ['last seen ', h('time', { title: role.lastSeen ?? '' }, formatRelative(role.lastSeen, state.now))]),
+					]),
+					role.toolsCalled.length > 0 ? h('div', { class: 'role-tools' }, `tools: ${role.toolsCalled.join(', ')}`) : null,
+				])
+			})
+	return h('section', { id: 'roles-panel', class: 'panel' }, [h('h2', {}, 'Role activity'), h('ul', { id: 'roles' }, children)])
+}
+
+function LogPanel(state) {
+	const view = state.selectedRunView
+	const entries = view ? view.recentLog : []
+	let children
+	if (entries.length === 0) {
+		children = [h('li', { class: 'log-empty' }, 'No events logged yet.')]
+	} else {
+		// Newest first so the latest activity is visible without scrolling.
+		children = []
+		for (let i = entries.length - 1; i >= 0; i--) {
+			const entry = entries[i]
+			const key = logRowKey(entry)
+			const expanded = Boolean(state.expandedLogRows[key])
+			children.push(
+				h('li', { key, class: 'log-row' }, [
+					h('time', { class: 'log-timestamp', title: entry.timestamp ?? '' }, formatRelative(entry.timestamp, state.now)),
+					h('span', { class: 'log-type' }, entry.type),
+					h('span', { class: 'log-summary' }, entry.summary),
+					h('button', { type: 'button', class: 'log-toggle', onclick: [ToggleLogRow, key] }, expanded ? 'hide' : 'raw'),
+					h('pre', { class: 'log-detail', hidden: !expanded }, JSON.stringify(entry.payload, null, 2)),
+				]),
+			)
+		}
+	}
+	return h('section', { id: 'log-panel', class: 'panel' }, [h('h2', {}, 'Recent log'), h('ol', { id: 'log' }, children)])
+}
+
+function QuestionsPanel(state) {
+	const view = state.selectedRunView
+	const history = view ? view.questionHistory : []
+	const historyChildren = history.length === 0
+		? null
+		: [
+				h('li', { class: 'question-history-heading' }, 'Past questions'),
+				...history.map((entry) =>
+					h('li', { key: entry.id ?? entry.askedAt, class: 'question-history-entry' }, [
+						h('div', { class: 'question-history-question' }, entry.question),
+						entry.context !== undefined ? h('div', { class: 'question-context' }, entry.context) : null,
+						entry.answer !== undefined
+							? h('div', { class: 'question-history-answer' }, entry.answer)
+							: h('div', { class: 'question-history-unanswered' }, 'unanswered'),
+					]),
+				),
+			]
+
+	const questions = state.pendingQuestions
+	const pendingChildren = questions.length === 0
+		? [h('li', {}, 'No pending questions.')]
+		: questions.map((question) =>
+				h('li', { key: question.id }, [
+					h('div', {}, question.question),
+					question.context !== undefined ? h('div', { class: 'question-context' }, question.context) : null,
+					h('form', { class: 'question-form', onsubmit: SubmitAnswer(question.id) }, [
+						h('input', { type: 'text', placeholder: 'your answer', disabled: state.pendingAnswerId === question.id }),
+						h('button', { type: 'submit', disabled: state.pendingAnswerId === question.id }, 'Answer'),
+					]),
+				]),
+			)
+
+	return h('section', { id: 'questions-panel', class: 'panel' }, [
+		h('h2', {}, 'Questions'),
+		h('ul', { class: 'question-history' }, historyChildren),
+		h('ul', { class: 'pending-questions' }, pendingChildren),
+	])
+}
+
+function Main(state) {
+	return h('main', {}, [
+		RunsPanel(state),
+		RunSummaryPanel(state),
+		RolesPanel(state),
+		QuestionsPanel(state),
+		LogPanel(state),
+	])
+}
+
+function view(state) {
+	return h('div', {}, [Header(state), Main(state)])
+}
+
+// --- App -------------------------------------------------------------------
+// The subscriptions array is fixed-size with stable positions: [0] always polls the run list + questions every second; [1] polls the selected run every second but only while one is selected and non-terminal (deactivating on terminal status replaces the manual clearInterval of the prior client); [2] primes the AudioContext on the first user interaction.
+
+app({
+	init: {
+		summaries: [],
+		selectedRunId: null,
+		selectedRunView: null,
+		selectedRunStatus: null,
+		pendingQuestions: [],
+		serverAvailable: true,
+		justSubmittedRunId: null,
+		muted: false,
+		expandedLogRows: {},
+		shownQuestionIds: {},
+		firstQuestionsPoll: true,
+		pendingAnswerId: null,
+		now: Date.now(),
+	},
+	view,
+	subscriptions: (state) => [
+		onEvery(Tick, POLL_INTERVAL_MS),
+		state.selectedRunId !== null && !isTerminalStatus(state.selectedRunStatus) && onEvery(PollSelectedRun, POLL_INTERVAL_MS),
+		onFirstInteraction(PrimeAudio),
+	],
+	node: document.getElementById('app'),
+})

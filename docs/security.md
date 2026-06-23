@@ -11,6 +11,7 @@ The executor runs a language model against a Guild that exposes tools such as fi
 - **Network egress.** A compromised model could read workspace files and send them to a remote host via a network-capable command. Egress should be restricted in production.
 - **File traversal.** File read/write tools must not escape the workspace.
 - **Supply-chain inputs.** A workspace may contain scripts, binaries, or package manifests. The executor treats these as untrusted inputs.
+- **Vendored web client dependency.** The web client (`source/web/static/app.js`) is built on `hyperapp@2.0.0`, vendored as a single self-contained file at `source/web/static/vendor/hyperapp.js` (no runtime `import` of anything outside the file). This is an approved, one-time exception to the no-dependencies policy. Untrusted run content (task text, log payloads, summaries, question text, answers) is interpolated only as `h()` children or text-node arguments, which hyperapp places into text nodes and DOM properties — never into markup — so it cannot break out of the DOM. There is no raw-HTML/`unsafe()` export in hyperapp; if one is ever added to the vendored file it must not be used without revisiting this note.
 
 ## Mitigations
 

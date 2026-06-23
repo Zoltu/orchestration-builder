@@ -3,6 +3,7 @@ import type { RunSnapshotRaw } from '../executor/persistence.js'
 import type { PendingQuestion } from '../executor/human-backend.js'
 import type { LogEvent, RunMeta } from '../executor/types.js'
 import {
+	deriveQuestionHistory,
 	deriveRoleActivity,
 	formatLogEvent,
 	parseLogEvents,
@@ -14,6 +15,16 @@ import {
 
 function logEvent(type: string, role: string, timestamp: string, extra: Record<string, unknown> = {}): string {
 	return JSON.stringify({ timestamp, type, payload: { role, ...extra } })
+}
+
+function askHumanEvent(id: string, question: string, timestamp: string, context?: string): string {
+	const payload: Record<string, unknown> = { id, question }
+	if (context !== undefined) payload['context'] = context
+	return JSON.stringify({ timestamp, type: 'ask_human', payload })
+}
+
+function humanAnswerEvent(id: string, answer: string, timestamp: string): string {
+	return JSON.stringify({ timestamp, type: 'human_answer', payload: { id, answer } })
 }
 
 function sampleRunMeta(overrides: Partial<RunMeta> = {}): RunMeta {
@@ -367,6 +378,137 @@ describe('renderRunView', () => {
 		const snapshot = parseRunSnapshot({ metaText: null, logText: '' })
 		const view = renderRunView(snapshot, { maxLogLines: 200 })
 		expect(view.currentActivity).toBeNull()
+	})
+
+	test('questionHistory pairs ask_human events with their human_answer events', () => {
+		const snapshot = parseRunSnapshot({
+			metaText: null,
+			logText: [
+				askHumanEvent('q1', 'Which file?', 't1', 'src/index.ts'),
+				humanAnswerEvent('q1', 'src/index.ts', 't2'),
+				askHumanEvent('q2', 'What next?', 't3'),
+			].join('\n'),
+		})
+
+		const view = renderRunView(snapshot, { maxLogLines: 200 })
+		expect(view.questionHistory.length).toBe(2)
+		expect(view.questionHistory[0]).toEqual({
+			id: 'q1',
+			question: 'Which file?',
+			context: 'src/index.ts',
+			askedAt: 't1',
+			answer: 'src/index.ts',
+			answeredAt: 't2',
+		})
+		expect(view.questionHistory[1]).toEqual({
+			id: 'q2',
+			question: 'What next?',
+			askedAt: 't3',
+		})
+	})
+
+	test('questionHistory is empty for a log with no ask_human events', () => {
+		const snapshot = parseRunSnapshot({
+			metaText: null,
+			logText: [
+				logEvent('llm_call', 'planner', 't1'),
+				logEvent('role_finished', 'planner', 't2', { status: 'success' }),
+			].join('\n'),
+		})
+
+		const view = renderRunView(snapshot, { maxLogLines: 200 })
+		expect(view.questionHistory).toEqual([])
+	})
+})
+
+describe('deriveQuestionHistory', () => {
+	test('pairs a single ask_human with its human_answer', () => {
+		const events: LogEvent[] = [
+			{ timestamp: 't1', type: 'ask_human', payload: { id: 'q1', question: 'Which file?' } },
+			{ timestamp: 't2', type: 'human_answer', payload: { id: 'q1', answer: 'src/index.ts' } },
+		]
+
+		expect(deriveQuestionHistory(events)).toEqual([
+			{ id: 'q1', question: 'Which file?', askedAt: 't1', answer: 'src/index.ts', answeredAt: 't2' },
+		])
+	})
+
+	test('pairs multiple questions with their answers out of order', () => {
+		const events: LogEvent[] = [
+			{ timestamp: 't1', type: 'ask_human', payload: { id: 'q1', question: 'first?' } },
+			{ timestamp: 't2', type: 'ask_human', payload: { id: 'q2', question: 'second?' } },
+			{ timestamp: 't3', type: 'human_answer', payload: { id: 'q2', answer: 'second answer' } },
+			{ timestamp: 't4', type: 'human_answer', payload: { id: 'q1', answer: 'first answer' } },
+		]
+
+		expect(deriveQuestionHistory(events)).toEqual([
+			{ id: 'q1', question: 'first?', askedAt: 't1', answer: 'first answer', answeredAt: 't4' },
+			{ id: 'q2', question: 'second?', askedAt: 't2', answer: 'second answer', answeredAt: 't3' },
+		])
+	})
+
+	test('leaves an unanswered question without an answer field', () => {
+		const events: LogEvent[] = [
+			{ timestamp: 't1', type: 'ask_human', payload: { id: 'q1', question: 'answered?' } },
+			{ timestamp: 't2', type: 'ask_human', payload: { id: 'q2', question: 'still pending?' } },
+			{ timestamp: 't3', type: 'human_answer', payload: { id: 'q1', answer: 'yes' } },
+		]
+
+		const history = deriveQuestionHistory(events)
+		expect(history.length).toBe(2)
+		expect(history[0]!.answer).toBe('yes')
+		expect(history[0]!.answeredAt).toBe('t3')
+		expect(history[1]!.answer).toBeUndefined()
+		expect(history[1]!.answeredAt).toBeUndefined()
+	})
+
+	test('preserves the context field when present', () => {
+		const events: LogEvent[] = [
+			{ timestamp: 't1', type: 'ask_human', payload: { id: 'q1', question: 'q', context: 'ctx' } },
+		]
+
+		expect(deriveQuestionHistory(events)).toEqual([
+			{ id: 'q1', question: 'q', context: 'ctx', askedAt: 't1' },
+		])
+	})
+
+	test('preserves ask order in the returned list', () => {
+		const events: LogEvent[] = [
+			{ timestamp: 't1', type: 'ask_human', payload: { id: 'q3', question: 'third?' } },
+			{ timestamp: 't2', type: 'ask_human', payload: { id: 'q1', question: 'first?' } },
+			{ timestamp: 't3', type: 'ask_human', payload: { id: 'q2', question: 'second?' } },
+		]
+
+		const history = deriveQuestionHistory(events)
+		expect(history.map((entry) => entry.id)).toEqual(['q3', 'q1', 'q2'])
+	})
+
+	test('ignores a human_answer with no matching ask_human', () => {
+		const events: LogEvent[] = [
+			{ timestamp: 't1', type: 'human_answer', payload: { id: 'orphan', answer: 'no question' } },
+			{ timestamp: 't2', type: 'ask_human', payload: { id: 'q1', question: 'q?' } },
+		]
+
+		expect(deriveQuestionHistory(events)).toEqual([
+			{ id: 'q1', question: 'q?', askedAt: 't2' },
+		])
+	})
+
+	test('does not throw on a malformed payload', () => {
+		const events: LogEvent[] = [
+			{ timestamp: 't1', type: 'ask_human', payload: null },
+			{ timestamp: 't2', type: 'ask_human', payload: { question: 123 } },
+			{ timestamp: 't3', type: 'human_answer', payload: 'broken' },
+			{ timestamp: 't4', type: 'ask_human', payload: { id: 'q1', question: 'ok?' } },
+		]
+
+		expect(deriveQuestionHistory(events)).toEqual([
+			{ id: 'q1', question: 'ok?', askedAt: 't4' },
+		])
+	})
+
+	test('returns an empty list for an empty log', () => {
+		expect(deriveQuestionHistory([])).toEqual([])
 	})
 })
 

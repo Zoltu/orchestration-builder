@@ -31,6 +31,23 @@ const snapshots = new Map<string, RunSnapshotRaw>([
 		result: { status: 'error', summary: 'failed', artifacts: ['output.txt', 'logs/run.txt'] },
 		error: { kind: 'llm_unavailable', message: 'connection refused' },
 	})],
+	['run-3', {
+		metaText: JSON.stringify({
+			runId: 'run-3',
+			guildPath: 'guild',
+			benchmarkPath: 'bench',
+			task: 'task for run-3',
+			status: 'needs_clarification',
+			startTime: '2026-01-01T00:00:00.000Z',
+			endTime: '2026-01-01T00:01:00.000Z',
+		}),
+		logText: [
+			JSON.stringify({ timestamp: '2026-01-01T00:00:01.000Z', type: 'llm_call', payload: { role: 'planner' } }),
+			JSON.stringify({ timestamp: '2026-01-01T00:00:02.000Z', type: 'ask_human', payload: { id: 'q1', question: 'Which framework?', context: 'src/index.ts' } }),
+			JSON.stringify({ timestamp: '2026-01-01T00:00:30.000Z', type: 'human_answer', payload: { id: 'q1', answer: 'react' } }),
+			JSON.stringify({ timestamp: '2026-01-01T00:00:31.000Z', type: 'ask_human', payload: { id: 'q2', question: 'Still unsure?' } }),
+		].join('\n'),
+	}],
 ])
 
 const unknownRunIds = new Set(['never-started'])
@@ -124,6 +141,14 @@ describe('createWebServer static assets', () => {
 		expect(body).toContain('fetch')
 	})
 
+	test('GET /vendor/hyperapp.js returns the vendored library', async () => {
+		const response = await fetch(`${readOnlyBaseUrl}/vendor/hyperapp.js`)
+		expect(response.status).toBe(200)
+		expect(response.headers.get('content-type')).toContain('text/javascript')
+		const body = await response.text()
+		expect(body).toContain('export var app')
+	})
+
 	test('GET /styles.css returns the stylesheet', async () => {
 		const response = await fetch(`${readOnlyBaseUrl}/styles.css`)
 		expect(response.status).toBe(200)
@@ -192,10 +217,11 @@ describe('createWebServer /api/runs (list)', () => {
 		expect(response.status).toBe(200)
 		const list = await response.json()
 		expect(Array.isArray(list)).toBe(true)
-		expect(list.length).toBe(2)
-		expect(list[0].runId).toBe('run-2')
-		expect(list[1].runId).toBe('run-1')
-		expect(list[0]).toEqual({
+		expect(list.length).toBe(3)
+		expect(list[0].runId).toBe('run-3')
+		expect(list[1].runId).toBe('run-2')
+		expect(list[2].runId).toBe('run-1')
+		expect(list[1]).toEqual({
 			runId: 'run-2',
 			status: 'error',
 			task: 'task for run-2',
@@ -237,6 +263,26 @@ describe('createWebServer /api/runs/:id', () => {
 		const response = await fetch(`${readOnlyBaseUrl}/api/runs/never-started`)
 		expect(response.status).toBe(404)
 		expect(await response.json()).toEqual({ ok: false, error: 'not_found' })
+	})
+
+	test('returns questionHistory pairing ask_human with human_answer events', async () => {
+		const response = await fetch(`${readOnlyBaseUrl}/api/runs/run-3`)
+		expect(response.status).toBe(200)
+		const view = await response.json()
+		expect(view.questionHistory.length).toBe(2)
+		expect(view.questionHistory[0]).toEqual({
+			id: 'q1',
+			question: 'Which framework?',
+			context: 'src/index.ts',
+			askedAt: '2026-01-01T00:00:02.000Z',
+			answer: 'react',
+			answeredAt: '2026-01-01T00:00:30.000Z',
+		})
+		expect(view.questionHistory[1]).toEqual({
+			id: 'q2',
+			question: 'Still unsure?',
+			askedAt: '2026-01-01T00:00:31.000Z',
+		})
 	})
 })
 

@@ -20,6 +20,7 @@ interface StaticAsset {
 const STATIC_ASSETS: Record<string, StaticAsset> = {
 	'/': { fileName: 'index.html', contentType: 'text/html; charset=utf-8' },
 	'/app.js': { fileName: 'app.js', contentType: 'text/javascript; charset=utf-8' },
+	'/vendor/hyperapp.js': { fileName: 'vendor/hyperapp.js', contentType: 'text/javascript; charset=utf-8' },
 	'/styles.css': { fileName: 'styles.css', contentType: 'text/css; charset=utf-8' },
 }
 

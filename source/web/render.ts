@@ -197,6 +197,55 @@ export interface CurrentActivity {
 	summary: string
 }
 
+export interface QuestionHistoryEntry {
+	id: string | null
+	question: string
+	context?: string
+	askedAt: string
+	answer?: string
+	answeredAt?: string
+}
+
+// Pairs ask_human log events with their resolved human_answer events to reconstruct a run's Q&A history in log order.
+// Pairing is by question id (both events carry it); an ask_human whose id never receives a human_answer stays unanswered.
+// The log is append-only and read concurrently with writes, so every payload access is guarded and the function never throws on a partial or unexpected shape.
+export function deriveQuestionHistory(logEvents: LogEvent[]): QuestionHistoryEntry[] {
+	const entries: QuestionHistoryEntry[] = []
+	const indexById = new Map<string, number>()
+
+	for (const event of logEvents) {
+		const payload = event.payload
+		if (!isObject(payload)) continue
+
+		if (event.type === 'ask_human') {
+			const question = stringField(payload, 'question')
+			if (question === null) continue
+			const id = stringField(payload, 'id')
+			const context = stringField(payload, 'context')
+			const entry: QuestionHistoryEntry = {
+				id,
+				question,
+				askedAt: event.timestamp,
+				...(context !== null ? { context } : {}),
+			}
+			const index = entries.length
+			entries.push(entry)
+			if (id !== null && !indexById.has(id)) indexById.set(id, index)
+		} else if (event.type === 'human_answer') {
+			const id = stringField(payload, 'id')
+			if (id === null) continue
+			const answer = stringField(payload, 'answer')
+			if (answer === null) continue
+			const index = indexById.get(id)
+			if (index === undefined) continue
+			const entry = entries[index]!
+			entry.answer = answer
+			entry.answeredAt = event.timestamp
+		}
+	}
+	return entries
+}
+
 export interface RunView {
 	status: RunMeta['status'] | 'unknown'
 	runId: string | null
@@ -208,6 +257,7 @@ export interface RunView {
 	roles: RoleActivity[]
 	recentLog: RecentLogEntry[]
 	currentActivity: CurrentActivity | null
+	questionHistory: QuestionHistoryEntry[]
 }
 
 export interface RenderRunViewOptions {
@@ -238,6 +288,7 @@ export function renderRunView(snapshot: RunSnapshot, options: RenderRunViewOptio
 		roles: deriveRoleActivity(snapshot.logEvents),
 		recentLog,
 		currentActivity,
+		questionHistory: deriveQuestionHistory(snapshot.logEvents),
 	}
 }
 

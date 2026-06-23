@@ -8,45 +8,7 @@
 		<link rel="stylesheet" href="styles.css" />
 	</head>
 	<body>
-		<header>
-			<h1>Adaptive Orchestrator</h1>
-			<p id="status" class="status">loading…</p>
-		</header>
-
-		<main>
-			<section id="runs-panel" class="panel">
-				<h2>Runs</h2>
-				<form id="create-run-form" class="create-run-form">
-					<input id="create-run-input" type="text" placeholder="describe a task and start a run" autocomplete="off" />
-					<button id="create-run-button" type="submit">Start run</button>
-				</form>
-				<ul id="run-list"></ul>
-			</section>
-
-			<section id="run-summary" class="panel">
-				<h2>Run</h2>
-				<p id="current-activity" class="current-activity"></p>
-				<dl id="run-meta"></dl>
-				<div id="run-error" class="run-error"></div>
-				<div id="run-artifacts" class="run-artifacts"></div>
-			</section>
-
-			<section id="roles-panel" class="panel">
-				<h2>Role activity</h2>
-				<ul id="roles"></ul>
-			</section>
-
-			<section id="questions-panel" class="panel">
-				<h2>Pending questions</h2>
-				<ul id="questions"></ul>
-			</section>
-
-			<section id="log-panel" class="panel">
-				<h2>Recent log</h2>
-				<ol id="log"></ol>
-			</section>
-		</main>
-
-		<script src="app.js"></script>
+		<div id="app"></div>
+		<script type="module" src="app.js"></script>
 	</body>
 </html>

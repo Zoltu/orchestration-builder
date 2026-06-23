@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'bun:test'
+import type { LogEvent } from './types.js'
 import { createWebHumanBackend } from './human-backend.ts'
 
 describe('createWebHumanBackend', () => {
@@ -129,5 +130,99 @@ describe('createWebHumanBackend', () => {
 		const answer = await promise
 		expect(typeof answer).toBe('string')
 		expect(answer).toBe('web answer')
+	})
+})
+
+describe('createWebHumanBackend run-log binding', () => {
+	function capturingLog(): { events: LogEvent[]; append: (event: LogEvent) => void } {
+		const events: LogEvent[] = []
+		return { events, append: (event) => { events.push(event) } }
+	}
+
+	test('ask logs an ask_human event with the id, question, and context when a run log is bound', () => {
+		const backend = createWebHumanBackend()
+		const log = capturingLog()
+		backend.bindRunLog(log.append)
+
+		backend.ask('Which file?', 'src/index.ts')
+
+		expect(log.events.length).toBe(1)
+		expect(log.events[0]!.type).toBe('ask_human')
+		expect(log.events[0]!.payload).toMatchObject({ question: 'Which file?', context: 'src/index.ts' })
+		expect(typeof (log.events[0]!.payload as { id: unknown }).id).toBe('string')
+		expect(typeof log.events[0]!.timestamp).toBe('string')
+	})
+
+	test('ask without context omits context from the logged payload', () => {
+		const backend = createWebHumanBackend()
+		const log = capturingLog()
+		backend.bindRunLog(log.append)
+
+		backend.ask('just a question')
+
+		expect(log.events[0]!.payload).not.toHaveProperty('context')
+	})
+
+	test('submitAnswer logs a human_answer event carrying the id and answer', async () => {
+		const backend = createWebHumanBackend()
+		const log = capturingLog()
+		backend.bindRunLog(log.append)
+
+		const promise = backend.ask('Which framework?')
+		const id = backend.pendingQuestions()[0]!.id
+		backend.submitAnswer(id, 'react')
+		await promise
+
+		const answerEvent = log.events.find((event) => event.type === 'human_answer')!
+		expect(answerEvent).toBeDefined()
+		expect(answerEvent.payload).toEqual({ id, answer: 'react' })
+	})
+
+	test('the ask_human and human_answer events share the same id so history can pair them', async () => {
+		const backend = createWebHumanBackend()
+		const log = capturingLog()
+		backend.bindRunLog(log.append)
+
+		const promise = backend.ask('q?')
+		const id = backend.pendingQuestions()[0]!.id
+		backend.submitAnswer(id, 'a')
+		await promise
+
+		const askEvent = log.events.find((event) => event.type === 'ask_human')!
+		const answerEvent = log.events.find((event) => event.type === 'human_answer')!
+		expect((askEvent.payload as { id: string }).id).toBe(id)
+		expect((answerEvent.payload as { id: string }).id).toBe(id)
+	})
+
+	test('submitAnswer for an unknown id does not log a human_answer event', () => {
+		const backend = createWebHumanBackend()
+		const log = capturingLog()
+		backend.bindRunLog(log.append)
+
+		backend.submitAnswer('does-not-exist', 'nope')
+
+		expect(log.events).toEqual([])
+	})
+
+	test('does not log anything when no run log is bound', async () => {
+		const backend = createWebHumanBackend()
+
+		const promise = backend.ask('q?')
+		const id = backend.pendingQuestions()[0]!.id
+		backend.submitAnswer(id, 'a')
+		await promise
+
+		expect(backend.pendingQuestions()).toEqual([])
+	})
+
+	test('binding null after a run clears the log so a later ask logs nothing', () => {
+		const backend = createWebHumanBackend()
+		const log = capturingLog()
+		backend.bindRunLog(log.append)
+		backend.bindRunLog(null)
+
+		backend.ask('q?')
+
+		expect(log.events).toEqual([])
 	})
 })

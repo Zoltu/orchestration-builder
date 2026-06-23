@@ -9,7 +9,7 @@
 import * as path from 'node:path'
 
 import { createWebServer } from './web/server.js'
-import { createAppendLog, createGuildLoader, createLlmCaller, createListRunIds, createReadRunSnapshotById, createRunDirectory, createRunState, createRunSubmission, createToolHandlers, createWebHumanBackend, createWriteMeta, runExecutor, type ExecutorDependencies, type HumanBackend, type LoadedGuild, type LlmCaller, type ModelConfig, type StartRun } from './executor/index.js'
+import { createAppendLog, createGuildLoader, createLlmCaller, createListRunIds, createReadRunSnapshotById, createRunDirectory, createRunState, createRunSubmission, createToolHandlers, createWebHumanBackend, createWriteMeta, runExecutor, type ExecutorDependencies, type LoadedGuild, type LlmCaller, type ModelConfig, type StartRun, type WebHumanBackend } from './executor/index.js'
 
 const API_KEY_ENV_VAR = 'ORCHESTRATOR_API_KEY'
 const PORT_ENV_VAR = 'PORT'
@@ -58,7 +58,7 @@ function parsePort(value: string | undefined, fallback: number): number {
 function createStartRun(config: {
 	loadedGuild: LoadedGuild
 	llmCaller: LlmCaller
-	humanBackend: HumanBackend
+	humanBackend: WebHumanBackend
 	guildPath: string
 	workspaceRootPath: string
 	runsBaseDir: string
@@ -68,21 +68,28 @@ function createStartRun(config: {
 			workspaceRoot: config.workspaceRootPath,
 			defaultToolTimeoutSeconds: config.loadedGuild.config.executor.defaultToolTimeoutSeconds,
 		})
+		const appendLog = createAppendLog(runId, config.runsBaseDir)
+		// The human backend is shared with the web API; bind the active run's log so ask_human and human_answer events land in this run's log.jsonl for the question-history view.
+		config.humanBackend.bindRunLog(appendLog)
 		const dependencies: ExecutorDependencies = {
 			llmCaller: config.llmCaller,
 			loadGuild: () => config.loadedGuild,
-			appendLog: createAppendLog(runId, config.runsBaseDir),
+			appendLog,
 			createRunDirectory: createRunDirectory(runId, config.runsBaseDir),
 			writeMeta: createWriteMeta(runId, config.runsBaseDir),
 			additionalToolHandlers,
 			humanBackend: config.humanBackend,
 		}
-		return runExecutor(dependencies, {
-			runId,
-			guildPath: config.guildPath,
-			benchmarkPath: config.workspaceRootPath,
-			task,
-		})
+		try {
+			return await runExecutor(dependencies, {
+				runId,
+				guildPath: config.guildPath,
+				benchmarkPath: config.workspaceRootPath,
+				task,
+			})
+		} finally {
+			config.humanBackend.bindRunLog(null)
+		}
 	}
 }
 
