@@ -2,7 +2,7 @@
 
 ## Goal
 
-Add a `test` native tool so the agent can run the workspace test suite (`bun test`) and read failing output to iterate. Together with the `typecheck` tool (step 04), this gives the coding agent the two checkers it most needs to succeed on TypeScript coding tasks *without* opening the arbitrary-shell surface that `run_shell` (step 17) carries. `run_shell` is intentionally deferred behind environment isolation (step 16); `test` and `typecheck` are safe enough to ship now because they run a single fixed command with no model-chosen argv, no network, and no installs.
+Add a `test` native tool so the agent can run the workspace test suite (`bun test`) and read failing output to iterate. Together with the `typecheck` tool (step 04), this gives the coding agent the two checkers it most needs to succeed on TypeScript coding tasks *without* opening the arbitrary-shell surface that `run_shell` (step 27) carries. `run_shell` is deferred until its containment is in place (the deployment environment; per-run isolation lands with the Foundry, step 31); `test` and `typecheck` are safe enough to ship now because they run a single fixed command with no model-chosen argv, no network, and no installs.
 
 ## Context
 

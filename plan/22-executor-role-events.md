@@ -1,4 +1,4 @@
-# Step 17 — Executor role-tree log events
+# Step 22 — Executor role-tree log events
 
 ## Goal
 
@@ -24,7 +24,7 @@ What is missing is the linkage that ties a child run to its parent and records i
    - Extend `agent_call` / the agent tool-call path to log `{ parent, child, depth, budget }` when the agent tool is invoked (before the child runs), so the tool-call log carries the parent→child edge even for callers that do not read `role_start`. Use a new event type such as `agent_call` to avoid overloading `tool_call`.
 2. `source/executor/engine.test.ts` — extend existing run/agent tests to assert: an entry-role run logs exactly one `role_start` with `parent` omitted; a parent→child run logs `role_start` for the child carrying the correct `parent` and `depth`; `role_finished` now carries `depth` and `parent`; an `agent_call` event links parent to child. Keep existing event-shape assertions passing (additive change).
 3. `source/executor/executor.test.ts` — extend the end-to-end in-memory test (and any fixture that asserts event types) to include the new event types where relevant without dropping the old ones.
-4. `source/web/render.ts` — extend `deriveRoleActivity` (or add a sibling `deriveRoleTree`) to build a parent→children tree from `role_start`/`role_finished`/`agent_call` events when they are present, falling back to the activity summary when they are absent (so a partial log or a pre-step-17 log still renders). Add a `roles` field shape that includes the tree where available.
+4. `source/web/render.ts` — extend `deriveRoleActivity` (or add a sibling `deriveRoleTree`) to build a parent→children tree from `role_start`/`role_finished`/`agent_call` events when they are present, falling back to the activity summary when they are absent (so a partial log or a pre-step-22 log still renders). Add a `roles` field shape that includes the tree where available.
 5. `source/web/render.test.ts` — cover tree derivation (entry role with no parent, a parent with multiple children, a child's parent pointer, depth ordering) and the fallback-when-events-absent path.
 6. `source/web/server.test.ts` — update the fixture log so the `/api/run` view exercises the new tree shape.
 7. `docs/reference.md` — document the new event types in the "Run lifecycle" / event list, naming the payload fields. The doc outlives the plan and is the reference for the event contract.
@@ -50,7 +50,7 @@ What is missing is the linkage that ties a child run to its parent and records i
 
 ## End-of-step evaluation
 
-Re-read `engine.ts` around the `spawnAgent` closure and the top of `runRole`: confirm every role that runs emits exactly one `role_start` and one `role_finished`, including the depth-exceeded early-return path (a refused `agent` call should not emit a `role_start` for a child that never runs). Confirm the additive payload changes do not break any existing `executor.test.ts` / `engine.test.ts` assertion that reads `role` from a `role_finished` payload. Confirm `render.ts`'s fallback keeps an old `log.jsonl` (pre-step-17) rendering as the activity summary, not as an empty tree.
+Re-read `engine.ts` around the `spawnAgent` closure and the top of `runRole`: confirm every role that runs emits exactly one `role_start` and one `role_finished`, including the depth-exceeded early-return path (a refused `agent` call should not emit a `role_start` for a child that never runs). Confirm the additive payload changes do not break any existing `executor.test.ts` / `engine.test.ts` assertion that reads `role` from a `role_finished` payload. Confirm `render.ts`'s fallback keeps an old `log.jsonl` (pre-step-22) rendering as the activity summary, not as an empty tree.
 
 ## Estimated effort
 

@@ -1,8 +1,8 @@
-# Step 18 — Run interrupt: inquiry channel
+# Step 28 — Run interrupt: inquiry channel
 
 ## Goal
 
-Add the executor mechanism for a user to pause the active run and ask the active role a question about its current plan and progress, then resume the run after the user is done. This is the inquiry half of the run-interrupt feature; plan-modification (step 19) is the other half. The planner's behavior for handling an inquiry is taught during Guild build-out (step 20); this step delivers the channel and a minimal built-in behavior.
+Add the executor mechanism for a user to pause the active run and ask the active role a question about its current plan and progress, then resume the run after the user is done. This is the inquiry half of the run-interrupt feature; plan-modification (step 29) is the other half. The planner's behavior for handling an inquiry is taught in this step's Guild-prompt revisit (see Deliverable 7) — the seed Guild (step 25) was written before this channel existed and deliberately omits interrupt handling.
 
 ## Context
 
@@ -10,10 +10,10 @@ Read [`13-long-running-service-mode.md`](13-long-running-service-mode.md) (the s
 
 The interrupt is **user-initiated** and distinct from the role-initiated `ask_human`: `ask_human` is the role deciding it needs information; an interrupt is the operator deciding to inject a message mid-run. Both pause the single active role, but an interrupt can arrive at any point in the role's loop (between tool calls, during an LLM call's await), whereas `ask_human` only fires when the role calls the tool.
 
-Two interrupt modes, split across steps 17 and 18:
+Two interrupt modes, split across steps 28 and 29:
 
 - **Inquiry (this step):** the user asks a question; the active role receives it as a high-priority user message, answers (and may adjust its plan in light of the question), and the run resumes. Resume is automatic once the role finishes responding.
-- **Plan-modification (step 19):** the user modifies the plan; the modification is routed to the **top-level planner** (an ancestor of the active role, not necessarily the active role itself), which integrates the change and decides how the active work should resume (continue, restart a sub-task, or abort). This is harder and Guild-coupled, so it is a separate step.
+- **Plan-modification (step 29):** the user modifies the plan; the modification is routed to the **top-level planner** (an ancestor of the active role, not necessarily the active role itself), which integrates the change and decides how the active work should resume (continue, restart a sub-task, or abort). This is harder and Guild-coupled, so it is a separate step.
 
 ## Deliverables
 
@@ -26,13 +26,14 @@ Two interrupt modes, split across steps 17 and 18:
 3. `source/web/server.ts` (extend) — `POST /api/runs/:id/interrupt` (body: `{ message }`) submits an interrupt for the active run. Returns `202` if accepted (the run will process it at its next safe point), `409` if the run is not active or is terminal. `GET /api/runs/:id` exposes whether an interrupt is pending.
 4. `source/web/static/app.js` (extend) — an "interrupt" input on the active-run view: type a message, submit; the UI shows "interrupt pending" until the run processes it. Disabled when no run is active.
 5. `source/executor/engine.test.ts` (extend) — in-memory test with a fake LLM caller: submit an interrupt mid-run; assert the next LLM call's messages include the interrupt message, an `interrupt` log event is emitted, and the run resumes to completion afterward. Assert an interrupt submitted to a non-active or terminal run is rejected.
-6. `docs/reference.md` — document the interrupt channel: the safe-point drain, the message marker, the log event, and the API endpoint. Note that plan-modification interrupts (step 19) extend this with ancestor routing.
+6. `docs/reference.md` — document the interrupt channel: the safe-point drain, the message marker, the log event, and the API endpoint. Note that plan-modification interrupts (step 29) extend this with ancestor routing.
+7. `guild/prompts/orchestrator.md` and `guild/prompts/planner.md` (extend) — teach the interrupt contract this step establishes: how the entry role and planner recognize and acknowledge an inquiry marker, and that they may answer and continue. The seed Guild (step 25) was written before this channel existed; this is the deferred revisit. Exercise the taught behavior with a real run in the operator handoff.
 
 ## Module boundaries
 
 - The interrupt queue is part of run state (orchestration); the drain point is in the engine (orchestration). Both testable with fakes.
 - The HTTP endpoint is a thin leaf delegating to run state.
-- The message marker is a documented contract between the executor and the Guild prompts; the Guild's behavior for handling it is taught in step 20, not here. This step's engine only injects the marked message and lets the role respond — it does not interpret the response.
+- The message marker is a documented contract between the executor and the Guild prompts; the Guild's behavior for handling it is taught in this step's prompt revisit (Deliverable 7), not by the seed-Guild buildout (step 25 predates this channel). This step's engine only injects the marked message and lets the role respond — it does not interpret the response.
 
 ## Acceptance criteria
 
@@ -52,4 +53,4 @@ Medium — the mechanism is small but the safe-point placement and the interacti
 
 ## Operator handoff
 
-Run a service session, submit a task, and mid-run submit an inquiry interrupt via the UI. Confirm the active role acknowledges and answers the question and the run continues. Report any deadlocks or unexpected resume behavior; the agent fixes them in-environment. (Full planner-quality responses depend on the Guild prompts taught in step 20, so do not judge prompt quality here — only the channel mechanics.)
+Run a service session, submit a task, and mid-run submit an inquiry interrupt via the UI. Confirm the active role acknowledges and answers the question and the run continues. Report any deadlocks or unexpected resume behavior; the agent fixes them in-environment. (Planner-quality responses depend on the prompt revisit taught in this step's Deliverable 7 — judge both the channel mechanics and the taught acknowledgment here.)
