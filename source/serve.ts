@@ -16,7 +16,8 @@ const PORT_ENV_VAR = 'PORT'
 const WORKSPACE_ROOT_ENV_VAR = 'WORKSPACE_ROOT'
 
 // The guild directory is bundled into the image (and lives at the repo root in development); its location is an implementation detail, not a deployment variable, so it is hardcoded rather than configurable.
-const GUILD_PATH = 'guild'
+// Resolved relative to this module so the guild is found regardless of the process working directory: in the image the app lives at /app/source and the guild at /app/guild, but the container's WORKDIR is /workspace.
+const GUILD_PATH = path.resolve(import.meta.dir, '..', 'guild')
 const DEFAULT_PORT = 80
 const DEFAULT_WORKSPACE_ROOT = '/workspace'
 const ORCHESTRATION_DIR = '.orchestration'
