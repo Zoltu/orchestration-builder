@@ -1,4 +1,4 @@
-# Step 18 — Executor role-tree log events
+# Step 17 — Executor role-tree log events
 
 ## Goal
 

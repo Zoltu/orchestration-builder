@@ -1,14 +1,14 @@
-# Step 22 — Guild improvement brainstorm
+# Step 21 — Guild improvement brainstorm
 
 ## Goal
 
-After the seed Guild (step 21) has been built and exercised, step back with the operator and brainstorm further improvements: prompt patterns that did not survive real-world use, missing roles, tool-list gaps, budget tuning, and any executor limitations the build-out surfaced. Produce a concrete backlog that may spawn follow-up steps before Foundry work begins.
+After the seed Guild (step 20) has been built and exercised, step back with the operator and brainstorm further improvements: prompt patterns that did not survive real-world use, missing roles, tool-list gaps, budget tuning, and any executor limitations the build-out surfaced. Produce a concrete backlog that may spawn follow-up steps before Foundry work begins.
 
 ## Context
 
 Read [`21-seed-guild-buildout.md`](21-seed-guild-buildout.md) and its closeout (the iterations and operator sign-off), the current `guild/` contents, and recent run logs from the build-out's real-world tasks. This step is intentionally reflective: the build-out step is heads-down prompt work; this step is the retrospective that decides whether the executor+Guild are truly ready for the Foundry or whether more work is needed first.
 
-The Foundry (steps 22+) will optimize the Guild automatically, but only within the space the seed Guild defines. If the seed is missing a role, has a fundamentally broken prompt pattern, or hits an executor ceiling, the Foundry cannot fix it — it can only tune what exists. This step is the last human-judgment gate before automated optimization.
+The Foundry (step 23) will optimize the Guild automatically, but only within the space the seed Guild defines. If the seed is missing a role, has a fundamentally broken prompt pattern, or hits an executor ceiling, the Foundry cannot fix it — it can only tune what exists. This step is the last human-judgment gate before automated optimization.
 
 ## Deliverables
 

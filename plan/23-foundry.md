@@ -18,9 +18,11 @@ Collaborate with the operator to:
 
 2. **Design the architecture and implementation plan.** The design in `docs/foundry.md` is the reference, but by the time this step runs, the executor and Guild will have evolved. Re-evaluate the design against the current state and adjust as needed. Figure out the right module decomposition — the doc outlines the pieces (branch management, scoring, evaluation, hypothesis generation, merge, report, promotion, loop, entry point) but the agent and operator should decide the right breakdown together.
 
-3. **Build the Foundry end-to-end.** Implement the full optimization loop: observe → hypothesize → branch → evaluate → score → merge → report → promote → repeat, with guardrails. The Foundry submits runs to the executor service over HTTP, never imports `runExecutor`, and runs as a standalone program.
+3. **Solve per-run environment isolation.** Each Foundry benchmark run gets its own container (one container = one benchmark) so benchmarks that install packages or download tooling cannot pollute each other. This step designs and implements the isolation mechanism: hermetic per-run environment (scoped `PATH`/`HOME`, no global pollution, no unapproved egress for `bun install`/dependency fetches), the toolchain profile concept, and generalization of the checker-tool commands (removing the step-04/05 hardcoded-checker debt). The egress policy, trust boundary, and any container-runtime decisions belong to the operator — propose, don't impose.
 
-4. **Wire up the benchmarks harness.** Connect `source/benchmarks/` (or its successor in the foundry project) to the Foundry's evaluation loop. The Foundry should be able to run a full optimization cycle against the benchmark suite.
+4. **Build the Foundry end-to-end.** Implement the full optimization loop: observe → hypothesize → branch → evaluate → score → merge → report → promote → repeat, with guardrails. The Foundry submits runs to the executor service over HTTP, never imports `runExecutor`, and runs as a standalone program.
+
+5. **Wire up the benchmarks harness.** Connect `source/benchmarks/` (or its successor in the foundry project) to the Foundry's evaluation loop. The Foundry should be able to run a full optimization cycle against the benchmark suite.
 
 ## Module boundaries
 
