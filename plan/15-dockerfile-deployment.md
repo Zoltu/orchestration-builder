@@ -2,11 +2,11 @@
 
 ## Goal
 
-Package the system as a single small Docker image that runs the long-running executor service (step 13) as PID 1, and document secure deployment. (Per-run environment isolation for benchmark evaluation is part of the Foundry, step 31; `run_shell` containment comes from this deployment container. This step packages the deployment container that hosts the executor service and provides the outer isolation boundary.)
+Package the system as a single small Docker image that runs the long-running executor service (step 13) as PID 1, and document secure deployment. (Per-run environment isolation for benchmark evaluation is part of the Foundry, step 33; `run_shell` containment comes from this deployment container. This step packages the deployment container that hosts the executor service and provides the outer isolation boundary.)
 
 ## Context
 
-Read `docs/security.md` ("Container and network isolation", "Shell tool policy"), [`13-long-running-service-mode.md`](13-long-running-service-mode.md) (the service the image runs), and [`27-run-shell-tool.md`](27-run-shell-tool.md) (the general shell tool, whose containment comes from this container boundary; per-run environment isolation lands with the Foundry, step 31). The image uses the official Bun base image, copies the project, and runs the executor service — no `npm install` because there are no dependencies. Recommended container flags: no network egress for the executor (except the model endpoint), non-root user, read-only filesystem except the workspace volume.
+Read `docs/security.md` ("Container and network isolation", "Shell tool policy"), [`13-long-running-service-mode.md`](13-long-running-service-mode.md) (the service the image runs), and [`29-run-shell-tool.md`](29-run-shell-tool.md) (the general shell tool, whose containment comes from this container boundary; per-run environment isolation lands with the Foundry, step 33). The image uses the official Bun base image, copies the project, and runs the executor service — no `npm install` because there are no dependencies. Recommended container flags: no network egress for the executor (except the model endpoint), non-root user, read-only filesystem except the workspace volume.
 
 The deployment model (from the realignment): **one container = one project.** The project (git repository) is mounted into the container at the fixed `/workspace` path at run time; the executor service inside treats `/workspace` as its fixed workspace (step 13), so the `CMD` carries no `--task` and no `--workspace` — tasks are submitted at runtime via the service API (`POST /api/runs`) or the web UI.
 
@@ -19,9 +19,9 @@ The deployment model (from the realignment): **one container = one project.** Th
    - How to pass API keys via environment variables (never in the Guild or image).
    - How to mount the Guild (read-only) and the project (read-write at `/workspace`) as volumes.
    - How tasks are submitted (web UI at the exposed port, or `POST /api/runs { task }`) — no `--task` CLI flag in the service `CMD`.
-   - The explicit note that v1's `run_shell` (step 27) runs arbitrary commands inside the workspace; the container boundary (this step) is the outer isolation layer, with per-run environment isolation (Foundry, step 31) providing containment for benchmark evaluation inside it. Document an optional future in-tool allowlist as a deferred defense-in-depth enhancement (and, if concrete, insert a follow-up step).
+   - The explicit note that v1's `run_shell` (step 29) runs arbitrary commands inside the workspace; the container boundary (this step) is the outer isolation layer, with per-run environment isolation (Foundry, step 33) providing containment for benchmark evaluation inside it. Document an optional future in-tool allowlist as a deferred defense-in-depth enhancement (and, if concrete, insert a follow-up step).
 4. Update `docs/architecture.md`'s execution-model note ("Single Dockerfile for the final product") to reference the new `Dockerfile` and `docs/deployment.md`, and to describe the one-container-per-project deployment model.
-5. The `run_shell` containment debt is owned by step 27 (`run_shell`) and removed in step 31 (Foundry), not this step; do not remove a debt row here. Confirm the deployment docs are consistent with the Foundry's per-run isolation running inside this container.
+5. The `run_shell` containment debt is owned by step 29 (`run_shell`) and removed in step 33 (Foundry), not this step; do not remove a debt row here. Confirm the deployment docs are consistent with the Foundry's per-run isolation running inside this container.
 
 ## Module boundaries
 
@@ -33,11 +33,11 @@ The deployment model (from the realignment): **one container = one project.** Th
 
 - [x] `bun run typecheck` and `bun test source/` still pass (no code regressions).
 - [x] `Dockerfile` and `.dockerignore` exist and are consistent with the no-dependencies design.
-- [x] `docs/deployment.md` documents the recommended container flags, API-key handling, volume mounts (project at `/workspace`, Guild read-only, `data/` writable), task submission via API/UI, and the `run_shell`/isolation caveat (per-run isolation is the Foundry's, step 31, layer inside this container).
+- [x] `docs/deployment.md` documents the recommended container flags, API-key handling, volume mounts (project at `/workspace`, Guild read-only, `data/` writable), task submission via API/UI, and the `run_shell`/isolation caveat (per-run isolation is the Foundry's, step 33, layer inside this container).
 
 ## End-of-step evaluation
 
-Confirmed the Dockerfile adds no dependencies and no install step (only `oven/bun:1-debian` + `COPY` + a non-root-user `RUN`). `docs/deployment.md` is structured so a reviewer who is not the author can follow build → run → hardening without tribal knowledge. Re-read `docs/security.md` ("Container and network isolation", "Shell tool policy") and confirmed the deployment docs implement those mitigations (non-root, restricted egress, read-only fs, confined writes). The `run_shell` containment debt row in `plan/README.md` is left intact — it is owned by step 27 and removed in step 31, not this step; `docs/deployment.md` describes this container as the outer isolation layer with the Foundry's per-run isolation running inside it.
+Confirmed the Dockerfile adds no dependencies and no install step (only `oven/bun:1-debian` + `COPY` + a non-root-user `RUN`). `docs/deployment.md` is structured so a reviewer who is not the author can follow build → run → hardening without tribal knowledge. Re-read `docs/security.md` ("Container and network isolation", "Shell tool policy") and confirmed the deployment docs implement those mitigations (non-root, restricted egress, read-only fs, confined writes). The `run_shell` containment debt row in `plan/README.md` is left intact — it is owned by step 29 and removed in step 33, not this step; `docs/deployment.md` describes this container as the outer isolation layer with the Foundry's per-run isolation running inside it.
 
 ## Estimated effort
 
@@ -94,4 +94,4 @@ Deviations from the plan wording (authoritative):
 - **`HOME` scoped to the build `RUN`; `--mount=type=cache` for Bun's install cache.** `export HOME=/tmp` is inside the build heredoc, not `ENV HOME` image-wide (nothing in `source/` reads `HOME` at runtime; the per-run workspace is the cwd for all subprocesses). `--mount=type=cache,target=/tmp/.bun/install/cache,uid=1000,gid=1000` persists Bun's install cache across builds without landing it in the image. This required fixing the orchestrator user's uid/gid to `1000:1000` so the non-root user can write to the cache mount.
 - **`groupadd`/`useradd`, not `addgroup`/`adduser`.** The initial `Dockerfile` used `addgroup`/`adduser`, which failed at build time with `addgroup: not found`: the oven/bun Debian image is minimal and ships the low-level `passwd`/`shadow` tools (`groupadd`/`useradd`) but not the `adduser`/`addgroup` perl wrappers. Switched to `groupadd`/`useradd`. `docs/deployment.md`'s base-image rationale records this so a future reader does not regress to the wrapper commands.
 
-The `run_shell` containment debt row in `plan/README.md` is intentionally left in place; step 27 owns the debt and step 31 removes it. No new technical debt introduced.
+The `run_shell` containment debt row in `plan/README.md` is intentionally left in place; step 29 owns the debt and step 33 removes it. No new technical debt introduced.

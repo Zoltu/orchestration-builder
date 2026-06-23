@@ -30,12 +30,12 @@ The recent-log panel is the operator's main window into what a run is doing. Raw
 
 ## Acceptance criteria
 
-- [ ] `bun run typecheck` and `bun test source/` pass, including the extended `render.test.ts` and `server.test.ts`.
-- [ ] The recent-log panel shows readable rows (role · action) instead of raw JSON; raw payload is available behind a toggle.
-- [ ] A failed run surfaces its error `kind` and `message` in the run summary.
-- [ ] `result.artifacts` render in the run summary when present.
-- [ ] A current-activity line shows the latest event's role and action for an in-progress run.
-- [ ] All rendering uses `createElement`/`textContent` (no `innerHTML`); untrusted content never reaches the DOM as markup.
+- [x] `bun run typecheck` and `bun test source/` pass, including the extended `render.test.ts` and `server.test.ts`.
+- [x] The recent-log panel shows readable rows (role · action) instead of raw JSON; raw payload is available behind a toggle.
+- [x] A failed run surfaces its error `kind` and `message` in the run summary.
+- [x] `result.artifacts` render in the run summary when present.
+- [x] A current-activity line shows the latest event's role and action for an in-progress run.
+- [x] All rendering uses `createElement`/`textContent` (no `innerHTML`); untrusted content never reaches the DOM as markup.
 
 ## End-of-step evaluation
 
@@ -48,3 +48,22 @@ Small to medium — mostly a pure formatter in `render.ts` plus DOM work in `app
 ## Operator handoff
 
 Run the service against a benchmark that produces a multi-role, multi-tool run and exercise the rewritten per-run view in a browser: confirm the log reads as role · action rows, the raw payload toggles open, a failed run shows its error, artifacts list when present, and the current-activity line tracks the latest event as the run progresses. Report any event types that render as an unhelpful fallback; the agent extends `formatLogEvent` in-environment.
+
+## Closeout (2026-06-23)
+
+Complete. `bun run typecheck` and `bun test source/` both pass (346 tests across 29 files).
+
+Deliverables delivered:
+
+- `source/web/render.ts` — added the pure `formatLogEvent(event: LogEvent): string`, the `RecentLogEntry` and `CurrentActivity` interfaces, and extended `RunView` with `error` (`NonNullable<RunMeta['error']> | null`), `recentLog: RecentLogEntry[]` (each entry carries `timestamp`, `type`, a `summary` from `formatLogEvent`, and the raw `payload`), and `currentActivity`. `renderRunView` now maps the recent tail through `formatLogEvent` and derives `currentActivity` from the last event in the full log (`null` on an empty log). `error` is `null` while a run is in progress and surfaces `RunMeta.error` otherwise.
+- `source/web/render.test.ts` — added a `formatLogEvent` describe covering every logged event type (`llm_call`, `tool_call`, `tool_result`, `role_finished`, `implicit_finish`, `llm_unavailable`, `context_budget_exceeded`, `role_budget_exceeded`, `global_budget_exceeded`, `unknown_tool`, `invalid_tool_call`, `depth_exceeded`, `role_not_found`), the unknown-type `type · role` fallback, the bare-type fallback when no role is present, and the no-throw guarantee on non-object / null / undefined payloads. Added `renderRunView` tests for the `recentLog` summary shaping, `error` (in-progress null, completed-without-error null, failed-run kind+message), and `currentActivity` (derived from the last event, null on an empty log).
+- `source/web/server.test.ts` — `snapshotFor` gained a `Partial<RunMeta>` overrides parameter; the `run-2` fixture now carries a `result.artifacts` list and a `RunMeta.error`. The `/api/runs/:id` tests now assert the `recentLog` summary shape, `error`, and `currentActivity` for both a successful and a failed run.
+- `source/web/static/app.js` — `renderLog` renders readable rows (timestamp, type badge, summary) with the raw payload behind a per-row `raw`/`hide` toggle (a `JSON.stringify` into `textContent`). Added `renderCurrentActivity`, `renderError`, and `renderArtifacts`, all wired into `pollSelectedRun`. All rendering stays `createElement`/`textContent` only.
+- `source/web/static/index.html` — the run-summary panel gained `#current-activity`, `#run-error`, and `#run-artifacts` containers.
+- `source/web/static/styles.css` — minimal styling for the log rows and toggle, the error block, the artifacts list, and the current-activity line (empty containers are hidden via `:empty`).
+
+Deviations / decisions (authoritative):
+
+- `formatLogEvent` handles the two agent-spawn error events (`depth_exceeded`, `role_not_found`) using their available fields rather than letting them fall to the bare-type fallback. `depth_exceeded` uses `parent` as the acting role with a `child at depth N` detail (the plan lists `child` and `depth` as well-known fields); `role_not_found` uses `parent` when present and otherwise renders the bare `role not found (roleName)` detail. Both produce useful summaries; neither required engine changes, so no debt row was added against step 22. The existing role-activity debt (events without a standard `role` field) is unaffected and still tracked for step 22.
+- The `currentActivity.role` is derived via `roleOf`, so for an event whose payload lacks a `role` field (e.g. `depth_exceeded`, which carries `parent`) the role is `null`. `app.js` renders only `currentActivity.summary`, which always carries the full role-prefixed line, so this is not user-visible.
+- No executor or backend changes; no new endpoints. The server response shape changed additively (`error`, `currentActivity`, and a `summary` field on each `recentLog` entry with the raw `payload` preserved) — the only consumer is `app.js`, which was updated in lockstep.

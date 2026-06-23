@@ -68,6 +68,76 @@ function toolOf(payload: unknown): string | null {
 	return payload.tool
 }
 
+function stringField(payload: unknown, field: string): string | null {
+	if (!isObject(payload)) return null
+	const value = payload[field]
+	return typeof value === 'string' ? value : null
+}
+
+function numberField(payload: unknown, field: string): number | null {
+	if (!isObject(payload)) return null
+	const value = payload[field]
+	return typeof value === 'number' ? value : null
+}
+
+function withRole(role: string | null, action: string): string {
+	return role === null ? action : `${role} · ${action}`
+}
+
+// Turns a single log event into a one-line human-readable summary derived from its type and well-known payload fields.
+// The log is append-only and read concurrently with writes, so every payload access is guarded and the function never throws on a partial or unexpected shape.
+export function formatLogEvent(event: LogEvent): string {
+	const payload = event.payload
+	const role = roleOf(payload)
+
+	switch (event.type) {
+		case 'llm_call':
+			return withRole(role, 'llm call')
+		case 'tool_call':
+			return withRole(role, stringField(payload, 'tool') ?? 'tool call')
+		case 'tool_result': {
+			const tool = stringField(payload, 'tool')
+			const kind = stringField(payload, 'kind')
+			return withRole(role, `${tool ?? 'tool'} result${kind !== null ? ` (${kind})` : ''}`)
+		}
+		case 'role_finished': {
+			const status = stringField(payload, 'status')
+			return withRole(role, `finished${status !== null ? ` (${status})` : ''}`)
+		}
+		case 'implicit_finish':
+			return withRole(role, 'finished (implicit)')
+		case 'llm_unavailable':
+			return withRole(role, 'llm unavailable')
+		case 'context_budget_exceeded':
+			return withRole(role, 'context budget exceeded')
+		case 'role_budget_exceeded':
+			return withRole(role, 'role budget exceeded')
+		case 'global_budget_exceeded':
+			return withRole(role, 'global budget exceeded')
+		case 'unknown_tool': {
+			const tool = stringField(payload, 'tool')
+			return withRole(role, `unknown tool${tool !== null ? ` (${tool})` : ''}`)
+		}
+		case 'invalid_tool_call': {
+			const tool = stringField(payload, 'tool')
+			return withRole(role, `invalid tool call${tool !== null ? ` (${tool})` : ''}`)
+		}
+		case 'depth_exceeded': {
+			const parent = stringField(payload, 'parent')
+			const child = stringField(payload, 'child')
+			const depth = numberField(payload, 'depth')
+			return withRole(parent, `depth exceeded (${child ?? 'child'} at depth ${depth ?? '?'})`)
+		}
+		case 'role_not_found': {
+			const parent = stringField(payload, 'parent')
+			const roleName = stringField(payload, 'roleName')
+			return withRole(parent ?? role, `role not found${roleName !== null ? ` (${roleName})` : ''}`)
+		}
+		default:
+			return role === null ? event.type : `${event.type} · ${role}`
+	}
+}
+
 export interface RoleActivity {
 	role: string
 	firstSeen: string
@@ -115,6 +185,18 @@ export function deriveRoleActivity(logEvents: LogEvent[]): RoleActivity[] {
 	return order.map((role) => byRole.get(role)!)
 }
 
+export interface RecentLogEntry {
+	timestamp: string
+	type: string
+	summary: string
+	payload: unknown
+}
+
+export interface CurrentActivity {
+	role: string | null
+	summary: string
+}
+
 export interface RunView {
 	status: RunMeta['status'] | 'unknown'
 	runId: string | null
@@ -122,8 +204,10 @@ export interface RunView {
 	startTime: string | null
 	endTime: string | null
 	result: ResultCard | null
+	error: NonNullable<RunMeta['error']> | null
 	roles: RoleActivity[]
-	recentLog: LogEvent[]
+	recentLog: RecentLogEntry[]
+	currentActivity: CurrentActivity | null
 }
 
 export interface RenderRunViewOptions {
@@ -132,7 +216,17 @@ export interface RenderRunViewOptions {
 
 export function renderRunView(snapshot: RunSnapshot, options: RenderRunViewOptions): RunView {
 	const meta = snapshot.meta
-	const recentLog = snapshot.logEvents.slice(-options.maxLogLines)
+	const recentEvents = snapshot.logEvents.slice(-options.maxLogLines)
+	const recentLog: RecentLogEntry[] = recentEvents.map((event) => ({
+		timestamp: event.timestamp,
+		type: event.type,
+		summary: formatLogEvent(event),
+		payload: event.payload,
+	}))
+	const lastEvent = snapshot.logEvents.length > 0 ? snapshot.logEvents[snapshot.logEvents.length - 1] : null
+	const currentActivity: CurrentActivity | null = lastEvent === null || lastEvent === undefined
+		? null
+		: { role: roleOf(lastEvent.payload), summary: formatLogEvent(lastEvent) }
 	return {
 		status: meta === null ? 'unknown' : meta.status,
 		runId: meta === null ? null : meta.runId,
@@ -140,8 +234,10 @@ export function renderRunView(snapshot: RunSnapshot, options: RenderRunViewOptio
 		startTime: meta === null ? null : meta.startTime,
 		endTime: meta === null ? null : (meta.endTime ?? null),
 		result: meta === null ? null : (meta.result ?? null),
+		error: meta === null ? null : (meta.error ?? null),
 		roles: deriveRoleActivity(snapshot.logEvents),
 		recentLog,
+		currentActivity,
 	}
 }
 

@@ -1,4 +1,4 @@
-# Step 27 — `run_shell` tool
+# Step 29 — `run_shell` tool
 
 ## Goal
 
@@ -8,7 +8,7 @@ Add a `run_shell` native tool so the agent can execute arbitrary shell commands 
 
 Read `docs/security.md` ("Attack surface", "Mitigations") and `docs/architecture.md` ("Isolation"). The v1 tool layer is sandboxed to the run workspace. `run_shell` runs a command with the workspace as its working directory, under a timeout, and returns stdout/stderr/exit code. Per `docs/reference.md` the failure mode is "Native tool non-zero exit or I/O error → complete the tool call" (the result JSON carries `status: "error"` plus output), so a non-zero exit is **not** an executor error — it is a normal tool result the role can read.
 
-Containment for `run_shell` is expected to come from the deployment environment (non-root user, restricted egress, read-only filesystem, confined writes to `/workspace`). Per-run environment isolation (scoped `PATH`/`HOME`, no global pollution) is part of the Foundry's evaluation setup and will be addressed when the Foundry is built (step 31). This step implements the tool itself; it does not re-solve isolation.
+Containment for `run_shell` is expected to come from the deployment environment (non-root user, restricted egress, read-only filesystem, confined writes to `/workspace`). Per-run environment isolation (scoped `PATH`/`HOME`, no global pollution) is part of the Foundry's evaluation setup and will be addressed when the Foundry is built (step 33). This step implements the tool itself; it does not re-solve isolation.
 
 ## Deliverables
 

@@ -4,6 +4,7 @@ import type { PendingQuestion } from '../executor/human-backend.js'
 import type { LogEvent, RunMeta } from '../executor/types.js'
 import {
 	deriveRoleActivity,
+	formatLogEvent,
 	parseLogEvents,
 	parseRunSnapshot,
 	renderPendingQuestions,
@@ -158,6 +159,89 @@ describe('deriveRoleActivity', () => {
 	})
 })
 
+describe('formatLogEvent', () => {
+	function event(type: string, payload: unknown): LogEvent {
+		return { timestamp: 't', type, payload }
+	}
+
+	test('llm_call → role · llm call', () => {
+		expect(formatLogEvent(event('llm_call', { role: 'coder', messageCount: 3 }))).toBe('coder · llm call')
+	})
+
+	test('tool_call → role · tool', () => {
+		expect(formatLogEvent(event('tool_call', { role: 'coder', tool: 'write_file' }))).toBe('coder · write_file')
+	})
+
+	test('tool_result → role · tool result (kind)', () => {
+		expect(formatLogEvent(event('tool_result', { role: 'coder', tool: 'write_file', kind: 'success' }))).toBe('coder · write_file result (success)')
+	})
+
+	test('role_finished → role · finished (status)', () => {
+		expect(formatLogEvent(event('role_finished', { role: 'planner', status: 'success' }))).toBe('planner · finished (success)')
+	})
+
+	test('role_finished without status omits the parenthetical', () => {
+		expect(formatLogEvent(event('role_finished', { role: 'planner' }))).toBe('planner · finished')
+	})
+
+	test('implicit_finish → role · finished (implicit)', () => {
+		expect(formatLogEvent(event('implicit_finish', { role: 'coder', summary: 'done' }))).toBe('coder · finished (implicit)')
+	})
+
+	test('llm_unavailable → role · llm unavailable', () => {
+		expect(formatLogEvent(event('llm_unavailable', { role: 'coder', message: 'down' }))).toBe('coder · llm unavailable')
+	})
+
+	test('context_budget_exceeded → role · context budget exceeded', () => {
+		expect(formatLogEvent(event('context_budget_exceeded', { role: 'coder', promptTokens: 100, contextWindow: 50 }))).toBe('coder · context budget exceeded')
+	})
+
+	test('role_budget_exceeded → role · role budget exceeded', () => {
+		expect(formatLogEvent(event('role_budget_exceeded', { role: 'coder', phase: 'post_llm', error: { kind: 'token_budget_exceeded' } }))).toBe('coder · role budget exceeded')
+	})
+
+	test('global_budget_exceeded → role · global budget exceeded', () => {
+		expect(formatLogEvent(event('global_budget_exceeded', { role: 'coder', error: { kind: 'timeout' } }))).toBe('coder · global budget exceeded')
+	})
+
+	test('unknown_tool → role · unknown tool (tool)', () => {
+		expect(formatLogEvent(event('unknown_tool', { role: 'coder', tool: 'frobnicate' }))).toBe('coder · unknown tool (frobnicate)')
+	})
+
+	test('invalid_tool_call → role · invalid tool call (tool)', () => {
+		expect(formatLogEvent(event('invalid_tool_call', { role: 'coder', tool: 'write_file' }))).toBe('coder · invalid tool call (write_file)')
+	})
+
+	test('depth_exceeded → parent · depth exceeded (child at depth N)', () => {
+		expect(formatLogEvent(event('depth_exceeded', { parent: 'orchestrator', child: 'coder', depth: 8, error: { kind: 'agent_depth_exceeded' } }))).toBe('orchestrator · depth exceeded (coder at depth 8)')
+	})
+
+	test('role_not_found uses parent as the acting role when present', () => {
+		expect(formatLogEvent(event('role_not_found', { parent: 'orchestrator', roleName: 'missing' }))).toBe('orchestrator · role not found (missing)')
+	})
+
+	test('role_not_found without parent renders the bare detail', () => {
+		expect(formatLogEvent(event('role_not_found', { roleName: 'missing' }))).toBe('role not found (missing)')
+	})
+
+	test('an unknown event type with a role falls back to type · role', () => {
+		expect(formatLogEvent(event('something_new', { role: 'coder' }))).toBe('something_new · coder')
+	})
+
+	test('an unknown event type without a role renders the bare type', () => {
+		expect(formatLogEvent(event('something_new', { unrelated: true }))).toBe('something_new')
+	})
+
+	test('does not throw on a non-object payload', () => {
+		expect(formatLogEvent(event('llm_call', 'broken'))).toBe('llm call')
+		expect(formatLogEvent(event('tool_call', null))).toBe('tool call')
+	})
+
+	test('does not throw on an undefined payload', () => {
+		expect(formatLogEvent(event('role_finished', undefined))).toBe('finished')
+	})
+})
+
 describe('renderRunView', () => {
 	test('shapes a completed run from its meta and log', () => {
 		const snapshot = parseRunSnapshot({
@@ -218,6 +302,71 @@ describe('renderRunView', () => {
 		})
 		const view = renderRunView(snapshot, { maxLogLines: 200 })
 		expect(view.result).toBeNull()
+	})
+
+	test('recentLog entries carry a readable summary alongside the raw payload', () => {
+		const snapshot = parseRunSnapshot({
+			metaText: null,
+			logText: [
+				logEvent('llm_call', 'planner', 't1'),
+				logEvent('tool_call', 'planner', 't2', { tool: 'agent' }),
+			].join('\n'),
+		})
+
+		const view = renderRunView(snapshot, { maxLogLines: 200 })
+		expect(view.recentLog.length).toBe(2)
+		expect(view.recentLog[0]).toEqual({
+			timestamp: 't1',
+			type: 'llm_call',
+			summary: 'planner · llm call',
+			payload: { role: 'planner' },
+		})
+		expect(view.recentLog[1]!.summary).toBe('planner · agent')
+		expect(view.recentLog[1]!.payload).toEqual({ role: 'planner', tool: 'agent' })
+	})
+
+	test('error is null while a run is in progress', () => {
+		const snapshot = parseRunSnapshot({ metaText: null, logText: '' })
+		const view = renderRunView(snapshot, { maxLogLines: 200 })
+		expect(view.error).toBeNull()
+	})
+
+	test('error is null when a completed run has no error', () => {
+		const snapshot = parseRunSnapshot({ metaText: JSON.stringify(sampleRunMeta()), logText: '' })
+		const view = renderRunView(snapshot, { maxLogLines: 200 })
+		expect(view.error).toBeNull()
+	})
+
+	test('error surfaces the kind and message of a failed run', () => {
+		const snapshot = parseRunSnapshot({
+			metaText: JSON.stringify(sampleRunMeta({
+				status: 'error',
+				error: { kind: 'llm_unavailable', message: 'connection refused' },
+			})),
+			logText: '',
+		})
+
+		const view = renderRunView(snapshot, { maxLogLines: 200 })
+		expect(view.error).toEqual({ kind: 'llm_unavailable', message: 'connection refused' })
+	})
+
+	test('currentActivity reflects the most recent event role and summary', () => {
+		const snapshot = parseRunSnapshot({
+			metaText: null,
+			logText: [
+				logEvent('llm_call', 'planner', 't1'),
+				logEvent('tool_call', 'coder', 't2', { tool: 'write_file' }),
+			].join('\n'),
+		})
+
+		const view = renderRunView(snapshot, { maxLogLines: 200 })
+		expect(view.currentActivity).toEqual({ role: 'coder', summary: 'coder · write_file' })
+	})
+
+	test('currentActivity is null for an empty log', () => {
+		const snapshot = parseRunSnapshot({ metaText: null, logText: '' })
+		const view = renderRunView(snapshot, { maxLogLines: 200 })
+		expect(view.currentActivity).toBeNull()
 	})
 })
 

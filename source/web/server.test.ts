@@ -6,7 +6,7 @@ import type { RunSnapshotRaw } from '../executor/persistence.ts'
 import type { RunMeta } from '../executor/types.js'
 import { createWebServer, type WebServer } from './server.ts'
 
-function snapshotFor(runId: string, status: RunMeta['status'] = 'success'): RunSnapshotRaw {
+function snapshotFor(runId: string, status: RunMeta['status'] = 'success', overrides: Partial<RunMeta> = {}): RunSnapshotRaw {
 	return {
 		metaText: JSON.stringify({
 			runId,
@@ -16,6 +16,7 @@ function snapshotFor(runId: string, status: RunMeta['status'] = 'success'): RunS
 			status,
 			startTime: '2026-01-01T00:00:00.000Z',
 			endTime: '2026-01-01T00:01:00.000Z',
+			...overrides,
 		}),
 		logText: [
 			JSON.stringify({ timestamp: '2026-01-01T00:00:01.000Z', type: 'llm_call', payload: { role: 'planner' } }),
@@ -26,7 +27,10 @@ function snapshotFor(runId: string, status: RunMeta['status'] = 'success'): RunS
 
 const snapshots = new Map<string, RunSnapshotRaw>([
 	['run-1', snapshotFor('run-1')],
-	['run-2', snapshotFor('run-2', 'error')],
+	['run-2', snapshotFor('run-2', 'error', {
+		result: { status: 'error', summary: 'failed', artifacts: ['output.txt', 'logs/run.txt'] },
+		error: { kind: 'llm_unavailable', message: 'connection refused' },
+	})],
 ])
 
 const unknownRunIds = new Set(['never-started'])
@@ -211,6 +215,22 @@ describe('createWebServer /api/runs/:id', () => {
 		expect(view.roles.length).toBe(1)
 		expect(view.roles[0].role).toBe('planner')
 		expect(view.recentLog.length).toBe(2)
+		expect(view.recentLog[0].summary).toBe('planner · llm call')
+		expect(view.recentLog[0].payload).toEqual({ role: 'planner' })
+		expect(view.error).toBeNull()
+		expect(view.currentActivity.role).toBe('planner')
+		expect(view.currentActivity.summary).toBe('planner · finished (success)')
+	})
+
+	test('surfaces error, artifacts, currentActivity, and readable recentLog for a failed run', async () => {
+		const response = await fetch(`${readOnlyBaseUrl}/api/runs/run-2`)
+		expect(response.status).toBe(200)
+		const view = await response.json()
+		expect(view.error).toEqual({ kind: 'llm_unavailable', message: 'connection refused' })
+		expect(view.result.artifacts).toEqual(['output.txt', 'logs/run.txt'])
+		expect(view.currentActivity.summary).toBe('planner · finished (success)')
+		expect(view.recentLog[0].summary).toBe('planner · llm call')
+		expect(view.recentLog[1].summary).toBe('planner · finished (success)')
 	})
 
 	test('returns 404 for an unknown run id', async () => {

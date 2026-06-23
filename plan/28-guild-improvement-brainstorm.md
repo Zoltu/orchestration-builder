@@ -1,4 +1,4 @@
-# Step 26 — Guild improvement brainstorm
+# Step 28 — Guild improvement brainstorm
 
 ## Goal
 
@@ -8,7 +8,7 @@ After the seed Guild (step 25) has been built and exercised, step back with the 
 
 Read [`25-seed-guild-buildout.md`](25-seed-guild-buildout.md) and its closeout (the iterations and operator sign-off), the current `guild/` contents, and recent run logs from the build-out's real-world tasks. This step is intentionally reflective: the build-out step is heads-down prompt work; this step is the retrospective that decides whether the executor+Guild are truly ready for the Foundry or whether more work is needed first.
 
-The Foundry (step 31) will optimize the Guild automatically, but only within the space the seed Guild defines. If the seed is missing a role, has a fundamentally broken prompt pattern, or hits an executor ceiling, the Foundry cannot fix it — it can only tune what exists. This step is the last human-judgment gate before automated optimization.
+The Foundry (step 33) will optimize the Guild automatically, but only within the space the seed Guild defines. If the seed is missing a role, has a fundamentally broken prompt pattern, or hits an executor ceiling, the Foundry cannot fix it — it can only tune what exists. This step is the last human-judgment gate before automated optimization.
 
 ## Deliverables
 
@@ -44,4 +44,4 @@ Small to medium — mostly discussion and writing. The value is in the operator 
 
 ## Operator handoff
 
-This step *is* operator collaboration. The agent facilitates the brainstorm, drafts the backlog, and proposes the follow-up/deferred split; the operator validates and signs off. Success looks like: a documented, prioritized backlog and a clear go/no-go decision on whether Foundry work (step 31) can begin or whether follow-up steps must land first.
+This step *is* operator collaboration. The agent facilitates the brainstorm, drafts the backlog, and proposes the follow-up/deferred split; the operator validates and signs off. Success looks like: a documented, prioritized backlog and a clear go/no-go decision on whether Foundry work (step 33) can begin or whether follow-up steps must land first.

@@ -95,7 +95,8 @@ function waitForShutdownSignal(): Promise<void> {
 }
 
 // Long-running service: the server outlives every run, one task at a time, submitted via the JSON API.
-// SIGINT and SIGTERM both trigger graceful shutdown: stop accepting new tasks, await the active run, stop the server, then exit (130 if a run was interrupted mid-flight, 0 if idle).
+// SIGINT and SIGTERM both trigger shutdown: stop accepting new requests, stop the server, then exit (130 if a run was interrupted mid-flight, 0 if idle).
+// An active run is abandoned where it stands rather than awaited: the run-interrupt channel that would let the service ask a run to stop at a safe point does not exist yet, so awaiting a run could block for up to the run's full budget (hours). The run's append-only log is already durable; the missing meta.json leaves it reading as "in progress" on restart, which is the accepted graceful-degradation. When the interrupt channel lands, this can switch to a bounded graceful drain.
 // A fatal run error tears down the service and exits non-zero.
 async function serve(): Promise<void> {
 	const port = parsePort(Bun.env[PORT_ENV_VAR], DEFAULT_PORT)
@@ -143,7 +144,6 @@ async function serve(): Promise<void> {
 	}
 
 	const interrupted = runSubmission.activeRunId() !== undefined
-	await runSubmission.awaitActive()
 	webServer.stop()
 	process.exit(interrupted ? INTERRUPT_EXIT_CODE : 0)
 }
