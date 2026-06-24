@@ -405,3 +405,38 @@ li:last-child {
 .pending-questions {
 	margin-top: 0.5rem;
 }
+
+.log-export {
+	margin-bottom: 0.5rem;
+	border: 1px solid #cbd2d9;
+	border-radius: 4px;
+	background: #f6f6f8;
+	color: #323f4b;
+	font-size: 0.8rem;
+	padding: 0.25rem 0.6rem;
+	cursor: pointer;
+}
+
+.log-export:hover {
+	background: #eef2ff;
+	border-color: #1f6feb;
+	color: #1f6feb;
+}
+
+.log-load-earlier {
+	margin-top: 0.5rem;
+	border: 1px solid #cbd2d9;
+	border-radius: 4px;
+	background: #f6f6f8;
+	color: #323f4b;
+	font-size: 0.8rem;
+	padding: 0.25rem 0.6rem;
+	cursor: pointer;
+	width: 100%;
+}
+
+.log-load-earlier:hover {
+	background: #eef2ff;
+	border-color: #1f6feb;
+	color: #1f6feb;
+}

@@ -3,20 +3,20 @@
 
 	"model": {
 		"name": "qwen3.6:35b-a3b-q4_K_M",
-		"apiBase": "http://ollama:11434/v1",
+		"apiBase": "http://llama-server:8080/v1",
 		"apiKey": "",
-		"contextWindow": 32768,
+		"contextWindow": 262144,
 		"reasoningField": "reasoning",
 		"generation": {
 			"temperature": 0.2,
-			"maxTokens": 4096
+			"maxTokens": 32768
 		}
 	},
 
 	"executor": {
 		"maxAgentDepth": 8,
 		"maxToolCallsPerRole": 50,
-		"maxTokensPerRole": 60000,
+		"maxTokensPerRole": 262144,
 		"maxRunTimeSeconds": 14400,
 		"defaultToolTimeoutSeconds": 30,
 		"maxRepeatedToolCalls": 3,

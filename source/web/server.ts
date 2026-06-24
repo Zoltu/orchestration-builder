@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url'
 import type { ListRunIds, ReadRunSnapshotById } from '../executor/persistence.js'
 import type { RunState } from '../executor/run-state.js'
 import type { RunSubmission } from '../executor/run-submission.js'
-import { parseRunSnapshot, renderPendingQuestions, renderRunSummary, renderRunView } from './render.js'
+import { parseRunSnapshot, paginateLogEvents, renderPendingQuestions, renderRunSummary, renderRunView, formatLogAsText, toRecentLogEntry } from './render.js'
 
 const STATIC_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), 'static')
 const MAX_LOG_LINES = 200
@@ -74,6 +74,35 @@ function handleGetRunById(readRunSnapshotById: ReadRunSnapshotById, runId: strin
 	return json(view)
 }
 
+function runLogPage(readRunSnapshotById: ReadRunSnapshotById, runId: string, query: URLSearchParams): Response {
+	if (!isKnownRun(readRunSnapshotById, runId)) return json({ ok: false, error: 'not_found' }, 404)
+	const snapshot = parseRunSnapshot(readRunSnapshotById(runId))
+	const events = snapshot.logEvents
+	const offset = parseNonNegativeInt(query.get('offset'), 0)
+	const limit = parseNonNegativeInt(query.get('limit'), MAX_LOG_LINES)
+	// ?format=text renders the requested page as plain text with a download disposition, so export reuses the server-side formatter rather than duplicating it in the client.
+	if (query.get('format') === 'text') {
+		const page = paginateLogEvents(events, { offset, limit })
+		return new Response(formatLogAsText(page.events), {
+			headers: {
+				'content-type': 'text/plain; charset=utf-8',
+				'cache-control': 'no-store',
+				'content-disposition': `attachment; filename="${runId}.log"`,
+			},
+		})
+	}
+	const page = paginateLogEvents(events, { offset, limit })
+	return json({ runId, total: page.total, offset: page.offset, limit: page.limit, events: page.events.map(toRecentLogEntry) })
+}
+
+// Parses a query parameter as a non-negative integer, falling back to the default for absent, non-numeric, or negative values — invalid params are treated as defaults per the log endpoint's contract.
+function parseNonNegativeInt(value: string | null, defaultValue: number): number {
+	if (value === null) return defaultValue
+	const parsed = Number(value)
+	if (!Number.isInteger(parsed) || parsed < 0) return defaultValue
+	return parsed
+}
+
 function runViewFor(readRunSnapshotById: ReadRunSnapshotById, runId: string): ReturnType<typeof renderRunView> | null {
 	if (!isKnownRun(readRunSnapshotById, runId)) return null
 	const snapshot = parseRunSnapshot(readRunSnapshotById(runId))
@@ -123,14 +152,21 @@ export function createWebServer(config: WebServerConfig): WebServer {
 	const server = Bun.serve({
 		port: config.port,
 		async fetch(request) {
-			const { pathname } = new URL(request.url)
+			const url = new URL(request.url)
+			const { pathname } = url
 
 			if (request.method === 'GET') {
 				if (pathname === '/api/run') return handleActiveRun(readRunSnapshotById, runSubmission)
 				if (pathname === '/api/runs') return handleListRuns(readRunSnapshotById, listRunIds)
 				if (pathname.startsWith('/api/runs/')) {
-					const runId = decodeURIComponent(pathname.slice('/api/runs/'.length))
-					return handleGetRunById(readRunSnapshotById, runId)
+					const rest = decodeURIComponent(pathname.slice('/api/runs/'.length))
+					// Match the /log suffix before the bare :id route so /api/runs/<id>/log reaches the log endpoint rather than being swallowed as a run id of "<id>/log".
+					const slashIndex = rest.lastIndexOf('/')
+					if (slashIndex >= 0 && rest.slice(slashIndex + 1) === 'log') {
+						const runId = rest.slice(0, slashIndex)
+						if (runId !== '') return runLogPage(readRunSnapshotById, runId, url.searchParams)
+					}
+					return handleGetRunById(readRunSnapshotById, rest)
 				}
 			if (pathname === '/api/questions') return json(renderPendingQuestions(runState.pendingQuestions()))
 			// Browsers auto-request /favicon.ico on every page load; answer 204 so it does not pollute the console with a 404.

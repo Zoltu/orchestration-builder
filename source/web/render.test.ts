@@ -5,12 +5,15 @@ import type { LogEvent, RunMeta } from '../executor/types.js'
 import {
 	deriveQuestionHistory,
 	deriveRoleActivity,
+	formatLogAsText,
 	formatLogEvent,
+	paginateLogEvents,
 	parseLogEvents,
 	parseRunSnapshot,
 	renderPendingQuestions,
 	renderRunSummary,
 	renderRunView,
+	toRecentLogEntry,
 } from './render.ts'
 
 function logEvent(type: string, role: string, timestamp: string, extra: Record<string, unknown> = {}): string {
@@ -574,5 +577,97 @@ describe('renderPendingQuestions', () => {
 
 	test('returns an empty array for no pending questions', () => {
 		expect(renderPendingQuestions([])).toEqual([])
+	})
+})
+
+describe('toRecentLogEntry', () => {
+	test('pairs the readable summary with the raw payload', () => {
+		const event: LogEvent = { timestamp: 't1', type: 'tool_call', payload: { role: 'coder', tool: 'write_file' } }
+		expect(toRecentLogEntry(event)).toEqual({
+			timestamp: 't1',
+			type: 'tool_call',
+			summary: 'coder · write_file',
+			payload: { role: 'coder', tool: 'write_file' },
+		})
+	})
+
+	test('carries the payload unchanged for a malformed payload', () => {
+		const event: LogEvent = { timestamp: 't1', type: 'llm_call', payload: 'broken' }
+		const entry = toRecentLogEntry(event)
+		expect(entry.payload).toBe('broken')
+		expect(entry.summary).toBe('llm call')
+	})
+})
+
+describe('paginateLogEvents', () => {
+	function events(n: number): LogEvent[] {
+		const list: LogEvent[] = []
+		for (let i = 0; i < n; i++) list.push({ timestamp: `t${i}`, type: 'llm_call', payload: { role: 'planner' } })
+		return list
+	}
+
+	test('returns the first page with the full total and applied offset/limit', () => {
+		const page = paginateLogEvents(events(10), { offset: 0, limit: 3 })
+		expect(page.total).toBe(10)
+		expect(page.offset).toBe(0)
+		expect(page.limit).toBe(3)
+		expect(page.events.length).toBe(3)
+		expect(page.events[0]!.timestamp).toBe('t0')
+		expect(page.events[2]!.timestamp).toBe('t2')
+	})
+
+	test('returns a later page starting at offset', () => {
+		const page = paginateLogEvents(events(10), { offset: 5, limit: 3 })
+		expect(page.total).toBe(10)
+		expect(page.offset).toBe(5)
+		expect(page.events.length).toBe(3)
+		expect(page.events[0]!.timestamp).toBe('t5')
+		expect(page.events[2]!.timestamp).toBe('t7')
+	})
+
+	test('returns the partial final page when fewer than limit remain', () => {
+		const page = paginateLogEvents(events(10), { offset: 8, limit: 5 })
+		expect(page.total).toBe(10)
+		expect(page.events.length).toBe(2)
+		expect(page.events[0]!.timestamp).toBe('t8')
+		expect(page.events[1]!.timestamp).toBe('t9')
+	})
+
+	test('returns an empty page with the correct total when offset is past the end', () => {
+		const page = paginateLogEvents(events(10), { offset: 50, limit: 5 })
+		expect(page.total).toBe(10)
+		expect(page.offset).toBe(50)
+		expect(page.events).toEqual([])
+	})
+
+	test('returns an empty page for an empty log', () => {
+		const page = paginateLogEvents([], { offset: 0, limit: 5 })
+		expect(page.total).toBe(0)
+		expect(page.events).toEqual([])
+	})
+
+	test('returns the whole log when limit exceeds the count', () => {
+		const page = paginateLogEvents(events(3), { offset: 0, limit: 100 })
+		expect(page.total).toBe(3)
+		expect(page.events.length).toBe(3)
+	})
+})
+
+describe('formatLogAsText', () => {
+	test('renders one tab-separated line per event mirroring formatLogEvent', () => {
+		const events: LogEvent[] = [
+			{ timestamp: 't1', type: 'llm_call', payload: { role: 'planner' } },
+			{ timestamp: 't2', type: 'tool_call', payload: { role: 'planner', tool: 'agent' } },
+		]
+		expect(formatLogAsText(events)).toBe('t1\tllm_call\tplanner · llm call\nt2\ttool_call\tplanner · agent')
+	})
+
+	test('returns an empty string for an empty log', () => {
+		expect(formatLogAsText([])).toBe('')
+	})
+
+	test('does not throw on a malformed payload', () => {
+		const events: LogEvent[] = [{ timestamp: 't1', type: 'llm_call', payload: 'broken' }]
+		expect(formatLogAsText(events)).toBe('t1\tllm_call\tllm call')
 	})
 })

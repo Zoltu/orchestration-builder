@@ -4,6 +4,9 @@ import { h, app } from './vendor/hyperapp.js'
 
 const POLL_INTERVAL_MS = 1000
 const TERMINAL_STATUSES = new Set(['success', 'error', 'needs_clarification'])
+const LOG_PAGE_SIZE = 200
+// Large enough to mean "the whole log" for the export fetch; the server caps a single page at this limit.
+const LOG_EXPORT_LIMIT = 1000000
 const STATUS_LABELS = {
 	unknown: 'in progress',
 	running: 'running',
@@ -169,7 +172,8 @@ function Tick(state) {
 }
 
 function PollSelectedRun(state) {
-	if (state.selectedRunId === null) return state
+	// Bail on a non-string id rather than fetching `/api/runs/undefined`; `selectedRunId` is null until a run is selected and can briefly be undefined across a state transition, so the guard keeps the poll from firing on an invalid id.
+	if (typeof state.selectedRunId !== 'string' || state.selectedRunId === '') return state
 	return [
 		state,
 		Fetch({ url: `api/runs/${encodeURIComponent(state.selectedRunId)}`, ok: GotSelectedRun, fail: FetchFailed }),
@@ -190,6 +194,7 @@ function GotRunList(state, payload) {
 		nextState.selectedRunView = null
 		nextState.selectedRunStatus = null
 		nextState.expandedLogRows = {}
+		nextState.logPage = null
 	}
 	return nextState
 }
@@ -203,7 +208,11 @@ function GotSelectedRun(state, payload) {
 		return { ...state, selectedRunStatus: 'unknown', serverAvailable: ok }
 	}
 	if (!ok || body === null) return state
-	return { ...state, selectedRunView: body, selectedRunStatus: body.status, serverAvailable: true }
+	// In tail mode the log panel mirrors the run view's recent log; once the operator pages back, the panel holds its loaded range and the tail stops auto-refreshing so a frozen view is not silently jumped forward.
+	const logPage = state.logPage !== null && state.logPage.offset !== null
+		? state.logPage
+		: { offset: null, total: null, entries: Array.isArray(body.recentLog) ? body.recentLog : [] }
+	return { ...state, selectedRunView: body, selectedRunStatus: body.status, logPage, serverAvailable: true }
 }
 
 function GotQuestions(state, payload) {
@@ -243,7 +252,7 @@ function FetchFailed(state) {
 
 function SelectRun(state, runId) {
 	if (runId === state.selectedRunId) return state
-	return { ...state, selectedRunId: runId, selectedRunView: null, selectedRunStatus: null, expandedLogRows: {} }
+	return { ...state, selectedRunId: runId, selectedRunView: null, selectedRunStatus: null, expandedLogRows: {}, logPage: null }
 }
 
 function ToggleMute(state, event) {
@@ -255,6 +264,88 @@ function ToggleLogRow(state, key) {
 	if (expandedLogRows[key]) delete expandedLogRows[key]
 	else expandedLogRows[key] = true
 	return { ...state, expandedLogRows }
+}
+
+// --- Log pagination --------------------------------------------------------
+// The log panel shows the most-recent page (drawn from the run view's recentLog) and pages backward on demand.
+// `logPage.offset` is the oldest index currently loaded; it stays null in tail mode (only the recent page is shown) until the operator pages back, at which point the panel freezes the tail and prepends older events.
+// A probe fetch on the first "Load earlier" learns the true total so the backward page is contiguous with the tail (no overlap, no gap).
+
+function LoadEarlierLog(state) {
+	if (typeof state.selectedRunId !== 'string' || state.selectedRunId === '' || state.logPage === null) return state
+	const offset = state.logPage.offset
+	if (offset !== null) {
+		if (offset <= 0) return state
+		return fetchEarlierPage(state, offset)
+	}
+	// Tail mode: probe the total first so the first backward page lines up exactly with the tail's oldest index.
+	return [
+		state,
+		Fetch({
+			url: `api/runs/${encodeURIComponent(state.selectedRunId)}/log?offset=0&limit=1`,
+			ok: GotLogTotal,
+			fail: FetchFailed,
+		}),
+	]
+}
+
+function GotLogTotal(state, payload) {
+	const ok = payload.ok
+	const body = payload.body
+	if (!ok || body === null || typeof body !== 'object' || state.logPage === null) return state
+	const total = typeof body.total === 'number' ? body.total : 0
+	const tailLength = state.logPage.entries.length
+	const realOffset = Math.max(0, total - tailLength)
+	if (realOffset <= 0) {
+		// The tail already holds the whole log; nothing earlier to load.
+		return { ...state, logPage: { ...state.logPage, offset: 0, total } }
+	}
+	return fetchEarlierPage({ ...state, logPage: { ...state.logPage, offset: realOffset, total } }, realOffset)
+}
+
+function fetchEarlierPage(state, offset) {
+	const nextOffset = Math.max(0, offset - LOG_PAGE_SIZE)
+	// limit is exactly the span up to the current oldest index, so the fetched page is contiguous with what is already loaded.
+	const limit = offset - nextOffset
+	if (limit <= 0) return state
+	return [
+		state,
+		Fetch({
+			url: `api/runs/${encodeURIComponent(state.selectedRunId)}/log?offset=${nextOffset}&limit=${limit}`,
+			ok: GotEarlierLogPage,
+			fail: FetchFailed,
+		}),
+	]
+}
+
+function GotEarlierLogPage(state, payload) {
+	const ok = payload.ok
+	const body = payload.body
+	if (!ok || body === null || typeof body !== 'object' || !Array.isArray(body.events) || state.logPage === null) return state
+	const offset = typeof body.offset === 'number' ? body.offset : 0
+	const total = typeof body.total === 'number' ? body.total : state.logPage.total
+	const older = body.events
+	const entries = [...older, ...state.logPage.entries]
+	return { ...state, logPage: { ...state.logPage, entries, offset, total: total ?? null }, serverAvailable: true }
+}
+
+function ExportLog(state) {
+	if (typeof state.selectedRunId !== 'string' || state.selectedRunId === '') return state
+	const runId = state.selectedRunId
+	return [
+		state,
+		ExportLogFx({ url: `api/runs/${encodeURIComponent(runId)}/log?format=text&offset=0&limit=${LOG_EXPORT_LIMIT}` }),
+	]
+}
+
+// A top-level navigation to the text endpoint is turned by the browser into a file download because the server sets `Content-Disposition: attachment; filename="<runId>.log"`.
+// This is preferred over fetching the body and synthesizing a `blob:` anchor click: that pattern trips content blockers (uBlock Origin filters programmatic `blob:`/`data:` downloads that lack a direct user-gesture link), whereas a plain navigated URL is indistinguishable from any other link the operator follows and is not filtered.
+function runExportLog(_dispatch, payload) {
+	window.location.href = payload.url
+}
+
+function ExportLogFx(payload) {
+	return [runExportLog, payload]
 }
 
 function SubmitRun(state, event) {
@@ -283,7 +374,7 @@ function GotCreatedRun(state, payload) {
 	const createdRunId = body.runId
 	// Selecting the new run activates its per-run subscription; an immediate run-list fetch clears justSubmittedRunId as soon as the run appears.
 	return [
-		{ ...state, justSubmittedRunId: createdRunId, selectedRunId: createdRunId, selectedRunView: null, selectedRunStatus: null, expandedLogRows: {}, serverAvailable: true },
+		{ ...state, justSubmittedRunId: createdRunId, selectedRunId: createdRunId, selectedRunView: null, selectedRunStatus: null, expandedLogRows: {}, logPage: null, serverAvailable: true },
 		Fetch({ url: 'api/runs', ok: GotRunList, fail: FetchFailed }),
 	]
 }
@@ -430,31 +521,45 @@ function RolesPanel(state) {
 	return h('section', { id: 'roles-panel', class: 'panel' }, [h('h2', {}, 'Role activity'), h('ul', { id: 'roles' }, children)])
 }
 
+function canLoadEarlier(logPage) {
+	if (logPage === null) return false
+	// In extended mode the oldest loaded index must be above 0; in tail mode the recent page must be full (a full page means there may be older events beyond it).
+	if (logPage.offset !== null) return logPage.offset > 0
+	return logPage.entries.length >= LOG_PAGE_SIZE
+}
+
 function LogPanel(state) {
-	const view = state.selectedRunView
-	const entries = view ? view.recentLog : []
+	const logPage = state.logPage
+	const entries = logPage !== null ? logPage.entries : []
+	const showLoadEarlier = canLoadEarlier(logPage)
 	let children
 	if (entries.length === 0) {
 		children = [h('li', { class: 'log-empty' }, 'No events logged yet.')]
 	} else {
 		// Newest first so the latest activity is visible without scrolling.
+		// The render key is the positional index, not the event content: many log events share identical (type, role, tool) and the millisecond timestamps can collide within a rapid burst, so a content-derived key is not unique and the vendored hyperapp's keyed reconciliation then misplaces DOM nodes (insertBefore on a colliding key), which surfaces as out-of-order timestamps in the panel. A positional key is unique per render and makes the diff patch in place, so the DOM order always matches the array order.
 		children = []
+		let renderIndex = 0
 		for (let i = entries.length - 1; i >= 0; i--) {
 			const entry = entries[i]
-			const key = logRowKey(entry)
-			const expanded = Boolean(state.expandedLogRows[key])
+			const toggleKey = logRowKey(entry)
+			const expanded = Boolean(state.expandedLogRows[toggleKey])
 			children.push(
-				h('li', { key, class: 'log-row' }, [
+				h('li', { key: String(renderIndex), class: 'log-row' }, [
 					h('time', { class: 'log-timestamp', title: entry.timestamp ?? '' }, formatRelative(entry.timestamp, state.now)),
 					h('span', { class: 'log-type' }, entry.type),
 					h('span', { class: 'log-summary' }, entry.summary),
-					h('button', { type: 'button', class: 'log-toggle', onclick: [ToggleLogRow, key] }, expanded ? 'hide' : 'raw'),
+					h('button', { type: 'button', class: 'log-toggle', onclick: [ToggleLogRow, toggleKey] }, expanded ? 'hide' : 'raw'),
 					h('pre', { class: 'log-detail', hidden: !expanded }, JSON.stringify(entry.payload, null, 2)),
 				]),
 			)
+			renderIndex++
 		}
 	}
-	return h('section', { id: 'log-panel', class: 'panel' }, [h('h2', {}, 'Recent log'), h('ol', { id: 'log' }, children)])
+	// Export sits at the top (a persistent action on the whole log); "Load earlier" sits at the bottom (it extends the list downward). Keeping them separate avoids a crowded controls row and matches their scope.
+	const exportButton = state.selectedRunId !== null ? h('button', { type: 'button', class: 'log-export', onclick: [ExportLog, null] }, 'Export') : null
+	const loadEarlierButton = showLoadEarlier ? h('button', { type: 'button', class: 'log-load-earlier', onclick: [LoadEarlierLog, null] }, 'Load earlier') : null
+	return h('section', { id: 'log-panel', class: 'panel' }, [h('h2', {}, 'Log'), exportButton, h('ol', { id: 'log' }, children), loadEarlierButton])
 }
 
 function QuestionsPanel(state) {
@@ -527,12 +632,13 @@ app({
 		shownQuestionIds: {},
 		firstQuestionsPoll: true,
 		pendingAnswerId: null,
+		logPage: null,
 		now: Date.now(),
 	},
 	view,
 	subscriptions: (state) => [
 		onEvery(Tick, POLL_INTERVAL_MS),
-		state.selectedRunId !== null && !isTerminalStatus(state.selectedRunStatus) && onEvery(PollSelectedRun, POLL_INTERVAL_MS),
+		typeof state.selectedRunId === 'string' && state.selectedRunId !== '' && !isTerminalStatus(state.selectedRunStatus) && onEvery(PollSelectedRun, POLL_INTERVAL_MS),
 		onFirstInteraction(PrimeAudio),
 	],
 	node: document.getElementById('app'),

@@ -192,6 +192,40 @@ export interface RecentLogEntry {
 	payload: unknown
 }
 
+// Builds the readable-view entry for a single log event: the raw payload is carried alongside a one-line summary so the UI can render the summary by default and expose the payload on demand.
+// Centralized here so both the recent-log view and the paginated log endpoint derive entries the same way.
+export function toRecentLogEntry(event: LogEvent): RecentLogEntry {
+	return {
+		timestamp: event.timestamp,
+		type: event.type,
+		summary: formatLogEvent(event),
+		payload: event.payload,
+	}
+}
+
+export interface PaginatedLog {
+	events: LogEvent[]
+	total: number
+	offset: number
+	limit: number
+}
+
+// Returns a page of log events as a slice of the full event list, plus the paging metadata a UI needs to drive "load earlier" and report counts.
+// An offset past the end yields an empty page with the correct total rather than clamping silently, so the UI can stop offering more once offset 0 is reached.
+export function paginateLogEvents(events: LogEvent[], options: { offset: number, limit: number }): PaginatedLog {
+	const offset = options.offset
+	const limit = options.limit
+	const total = events.length
+	const page = offset >= total ? [] : events.slice(offset, offset + limit)
+	return { events: page, total, offset, limit }
+}
+
+// Renders the full log as plain text, one event per line, for export.
+// Each line is tab-separated: timestamp, type, then the readable summary from formatLogEvent, so the export mirrors exactly what the on-screen log shows.
+export function formatLogAsText(events: LogEvent[]): string {
+	return events.map((event) => `${event.timestamp}\t${event.type}\t${formatLogEvent(event)}`).join('\n')
+}
+
 export interface CurrentActivity {
 	role: string | null
 	summary: string
@@ -267,12 +301,7 @@ export interface RenderRunViewOptions {
 export function renderRunView(snapshot: RunSnapshot, options: RenderRunViewOptions): RunView {
 	const meta = snapshot.meta
 	const recentEvents = snapshot.logEvents.slice(-options.maxLogLines)
-	const recentLog: RecentLogEntry[] = recentEvents.map((event) => ({
-		timestamp: event.timestamp,
-		type: event.type,
-		summary: formatLogEvent(event),
-		payload: event.payload,
-	}))
+	const recentLog: RecentLogEntry[] = recentEvents.map(toRecentLogEntry)
 	const lastEvent = snapshot.logEvents.length > 0 ? snapshot.logEvents[snapshot.logEvents.length - 1] : null
 	const currentActivity: CurrentActivity | null = lastEvent === null || lastEvent === undefined
 		? null

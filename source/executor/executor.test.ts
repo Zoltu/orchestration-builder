@@ -39,12 +39,14 @@ interface FakePersistenceFns {
 	state: {
 		events: LogEvent[]
 		meta: RunMeta | null
+		metas: RunMeta[]
 		createRunDirectoryCalls: number
 	}
 }
 
 function makeFakePersistence(): FakePersistenceFns {
 	const events: LogEvent[] = []
+	const metas: RunMeta[] = []
 	let meta: RunMeta | null = null
 	let createRunDirectoryCalls = 0
 	return {
@@ -57,6 +59,7 @@ function makeFakePersistence(): FakePersistenceFns {
 		},
 		writeMeta: (written) => {
 			meta = written
+			metas.push(written)
 		},
 		state: {
 			get events() {
@@ -64,6 +67,9 @@ function makeFakePersistence(): FakePersistenceFns {
 			},
 			get meta() {
 				return meta
+			},
+			get metas() {
+				return metas
 			},
 			get createRunDirectoryCalls() {
 				return createRunDirectoryCalls
@@ -201,6 +207,12 @@ describe('runExecutor', () => {
 		expect(meta.result).toEqual({ status: 'success', summary: 'all done' })
 		expect(meta.startTime).toBeDefined()
 		expect(meta.endTime).toBeDefined()
+		// A running meta is written before the entry role runs and overwritten by the terminal meta on completion, so the UI can show task/start time while the run is in progress.
+		expect(persistence.state.metas.length).toBe(2)
+		expect(persistence.state.metas[0]!.status).toBe('running')
+		expect(persistence.state.metas[0]!.runId).toBe('r1')
+		expect(persistence.state.metas[0]!.task).toBe('do it')
+		expect(persistence.state.metas[0]!.endTime).toBeUndefined()
 	})
 
 	test('error path: entry role returns error → meta.status is error', async () => {

@@ -23,6 +23,15 @@ export async function runExecutor(deps: ExecutorDependencies, options: RunOption
 
 	const startTime = new Date().toISOString()
 	const startMs = Date.now()
+	// Write a running meta before the entry role begins so the UI can show the task, run id, and start time while the run is in progress, rather than only after completion. It is overwritten with the terminal meta below.
+	deps.writeMeta({
+		runId: options.runId,
+		guildPath: options.guildPath,
+		benchmarkPath: options.benchmarkPath,
+		task: options.task,
+		status: 'running',
+		startTime,
+	})
 	const result = await runRole(
 		{
 			llmCaller: deps.llmCaller,

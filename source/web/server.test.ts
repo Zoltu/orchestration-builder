@@ -61,6 +61,28 @@ function listRunIds(): string[] {
 	return Array.from(snapshots.keys())
 }
 
+// A run with more than MAX_LOG_LINES (200) events so pagination is exercisable end to end.
+function longLogRun(id: string): RunSnapshotRaw {
+	const lines: string[] = []
+	for (let i = 0; i < 250; i++) {
+		lines.push(JSON.stringify({ timestamp: `t${String(i).padStart(3, '0')}`, type: 'llm_call', payload: { role: 'planner' } }))
+	}
+	return {
+		metaText: JSON.stringify({
+			runId: id,
+			guildPath: 'guild',
+			benchmarkPath: 'bench',
+			task: `task for ${id}`,
+			status: 'success',
+			startTime: '2026-01-01T00:00:00.000Z',
+			endTime: '2026-01-01T00:01:00.000Z',
+		}),
+		logText: lines.join('\n'),
+	}
+}
+
+snapshots.set('run-long', longLogRun('run-long'))
+
 // Shared server for the read-only routes (static assets, list, get-by-id, questions, answer).
 // The submission-mutating routes get their own fresh server per test to avoid cross-test ordering coupling.
 const humanBackend = createWebHumanBackend()
@@ -217,11 +239,12 @@ describe('createWebServer /api/runs (list)', () => {
 		expect(response.status).toBe(200)
 		const list = await response.json()
 		expect(Array.isArray(list)).toBe(true)
-		expect(list.length).toBe(3)
-		expect(list[0].runId).toBe('run-3')
-		expect(list[1].runId).toBe('run-2')
-		expect(list[2].runId).toBe('run-1')
-		expect(list[1]).toEqual({
+		expect(list.length).toBe(4)
+		expect(list[0].runId).toBe('run-long')
+		expect(list[1].runId).toBe('run-3')
+		expect(list[2].runId).toBe('run-2')
+		expect(list[3].runId).toBe('run-1')
+		expect(list[2]).toEqual({
 			runId: 'run-2',
 			status: 'error',
 			task: 'task for run-2',
@@ -283,6 +306,93 @@ describe('createWebServer /api/runs/:id', () => {
 			question: 'Still unsure?',
 			askedAt: '2026-01-01T00:00:31.000Z',
 		})
+	})
+})
+
+describe('createWebServer GET /api/runs/:id/log', () => {
+	test('returns the default first page with total, offset, and limit', async () => {
+		const response = await fetch(`${readOnlyBaseUrl}/api/runs/run-long/log`)
+		expect(response.status).toBe(200)
+		const body = await response.json()
+		expect(body.runId).toBe('run-long')
+		expect(body.total).toBe(250)
+		expect(body.offset).toBe(0)
+		expect(body.limit).toBe(200)
+		expect(body.events.length).toBe(200)
+		expect(body.events[0].timestamp).toBe('t000')
+		expect(body.events[199].timestamp).toBe('t199')
+		expect(body.events[0].summary).toBe('planner · llm call')
+		expect(body.events[0].payload).toEqual({ role: 'planner' })
+	})
+
+	test('returns a later page with explicit offset and limit', async () => {
+		const response = await fetch(`${readOnlyBaseUrl}/api/runs/run-long/log?offset=240&limit=20`)
+		expect(response.status).toBe(200)
+		const body = await response.json()
+		expect(body.total).toBe(250)
+		expect(body.offset).toBe(240)
+		expect(body.limit).toBe(20)
+		expect(body.events.length).toBe(10)
+		expect(body.events[0].timestamp).toBe('t240')
+		expect(body.events[9].timestamp).toBe('t249')
+	})
+
+	test('returns an empty page with the correct total when offset is past the end', async () => {
+		const response = await fetch(`${readOnlyBaseUrl}/api/runs/run-long/log?offset=300&limit=10`)
+		expect(response.status).toBe(200)
+		const body = await response.json()
+		expect(body.total).toBe(250)
+		expect(body.offset).toBe(300)
+		expect(body.events).toEqual([])
+	})
+
+	test('treats invalid query params as defaults', async () => {
+		const response = await fetch(`${readOnlyBaseUrl}/api/runs/run-long/log?offset=abc&limit=-5`)
+		expect(response.status).toBe(200)
+		const body = await response.json()
+		expect(body.offset).toBe(0)
+		expect(body.limit).toBe(200)
+		expect(body.events.length).toBe(200)
+	})
+
+	test('returns 404 for an unknown run id', async () => {
+		const response = await fetch(`${readOnlyBaseUrl}/api/runs/never-started/log`)
+		expect(response.status).toBe(404)
+		expect(await response.json()).toEqual({ ok: false, error: 'not_found' })
+	})
+
+	test('does not regress the bare :id route (the /log suffix is not swallowed)', async () => {
+		const response = await fetch(`${readOnlyBaseUrl}/api/runs/run-1`)
+		expect(response.status).toBe(200)
+		const view = await response.json()
+		expect(view.runId).toBe('run-1')
+	})
+
+	test('format=text returns the page as a downloadable plain-text log', async () => {
+		const response = await fetch(`${readOnlyBaseUrl}/api/runs/run-1/log?format=text`)
+		expect(response.status).toBe(200)
+		expect(response.headers.get('content-type')).toContain('text/plain')
+		expect(response.headers.get('content-disposition')).toBe('attachment; filename="run-1.log"')
+		const text = await response.text()
+		const lines = text.split('\n')
+		expect(lines.length).toBe(2)
+		expect(lines[0]).toBe('2026-01-01T00:00:01.000Z\tllm_call\tplanner · llm call')
+		expect(lines[1]).toBe('2026-01-01T00:00:02.000Z\trole_finished\tplanner · finished (success)')
+	})
+
+	test('format=text honors offset and limit', async () => {
+		const response = await fetch(`${readOnlyBaseUrl}/api/runs/run-long/log?format=text&offset=0&limit=3`)
+		expect(response.status).toBe(200)
+		const lines = (await response.text()).split('\n')
+		expect(lines.length).toBe(3)
+		expect(lines[0]).toContain('t000')
+		expect(lines[2]).toContain('t002')
+	})
+
+	test('format=text returns 404 for an unknown run id', async () => {
+		const response = await fetch(`${readOnlyBaseUrl}/api/runs/never-started/log?format=text`)
+		expect(response.status).toBe(404)
+		expect(await response.json()).toEqual({ ok: false, error: 'not_found' })
 	})
 })
 
