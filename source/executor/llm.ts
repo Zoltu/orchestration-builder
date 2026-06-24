@@ -5,13 +5,20 @@ export interface LlmRequest {
 	tools?: ToolManifest[]
 }
 
+export interface LlmUsage {
+	promptTokens: number
+	completionTokens: number
+	// Cached prompt tokens reported by the endpoint via usage.prompt_tokens_details.cached_tokens, when present. Already included in promptTokens; split out because cached tokens are billed at a different (usually much lower) rate than uncached prompt tokens.
+	cachedPromptTokens?: number
+}
+
 export type LlmCallResult =
 	| {
 		kind: 'success'
 		content?: string
 		reasoning?: string | null
 		toolCalls: ToolCall[]
-		usage: { promptTokens: number; completionTokens: number }
+		usage: LlmUsage
 	}
 	| { kind: 'context_budget_exceeded'; promptTokens: number; contextWindow: number }
 	| { kind: 'llm_unavailable'; message: string }
@@ -33,7 +40,7 @@ interface ParsedSuccess {
 	content?: string
 	reasoning?: string | null
 	toolCalls: ToolCall[]
-	usage: { promptTokens: number; completionTokens: number }
+	usage: LlmUsage
 }
 
 interface ParsedError {
@@ -94,19 +101,29 @@ function parseOpenAiResponse(data: unknown, reasoningField: string | undefined):
 	const usageRaw = record['usage']
 	let promptTokens = 0
 	let completionTokens = 0
+	let cachedPromptTokens: number | undefined
 	if (isObject(usageRaw)) {
 		const pt = usageRaw['prompt_tokens']
 		const ct = usageRaw['completion_tokens']
 		if (typeof pt === 'number') promptTokens = pt
 		if (typeof ct === 'number') completionTokens = ct
+		// OpenAI exposes the cached share of the prompt as usage.prompt_tokens_details.cached_tokens; it is already counted inside prompt_tokens, so we surface it as a sub-field rather than adding it on top.
+		const promptDetails = usageRaw['prompt_tokens_details']
+		if (isObject(promptDetails)) {
+			const cached = promptDetails['cached_tokens']
+			if (typeof cached === 'number') cachedPromptTokens = cached
+		}
 	}
+
+	const usage: LlmUsage = { promptTokens, completionTokens }
+	if (cachedPromptTokens !== undefined) usage.cachedPromptTokens = cachedPromptTokens
 
 	return {
 		kind: 'success',
 		content,
 		reasoning,
 		toolCalls,
-		usage: { promptTokens, completionTokens },
+		usage,
 	}
 }
 

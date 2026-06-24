@@ -82,6 +82,7 @@ describe('canonical tool manifests', () => {
 				toolCalls: 0,
 				promptTokens: 0,
 				completionTokens: 0,
+				cachedPromptTokens: 0,
 				lastPromptTokens: 0,
 				recentToolCalls: [],
 				recentCompactionPromptTokens: [],

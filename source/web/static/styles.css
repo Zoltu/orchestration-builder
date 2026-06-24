@@ -259,6 +259,19 @@ li:last-child {
 	display: none;
 }
 
+.budgets {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 0.4rem 1.25rem;
+	margin: 0 0 0.75rem;
+	font-size: 0.85rem;
+	color: #52606d;
+}
+
+.budget-budget {
+	white-space: nowrap;
+}
+
 .role-times {
 	margin-top: 0.15rem;
 	font-size: 0.75rem;

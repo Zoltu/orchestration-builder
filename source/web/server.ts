@@ -106,7 +106,7 @@ function parseNonNegativeInt(value: string | null, defaultValue: number): number
 function runViewFor(readRunSnapshotById: ReadRunSnapshotById, runId: string): ReturnType<typeof renderRunView> | null {
 	if (!isKnownRun(readRunSnapshotById, runId)) return null
 	const snapshot = parseRunSnapshot(readRunSnapshotById(runId))
-	return renderRunView(snapshot, { maxLogLines: MAX_LOG_LINES })
+	return renderRunView(snapshot, { maxLogLines: MAX_LOG_LINES, now: new Date().toISOString() })
 }
 
 // A run id is "known" if a directory exists for it under the runs base; readRunSnapshotById returns empty artifacts for a missing dir, so the existence check distinguishes a never-started id from an in-progress run.

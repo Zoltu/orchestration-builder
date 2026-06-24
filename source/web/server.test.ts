@@ -19,7 +19,7 @@ function snapshotFor(runId: string, status: RunMeta['status'] = 'success', overr
 			...overrides,
 		}),
 		logText: [
-			JSON.stringify({ timestamp: '2026-01-01T00:00:01.000Z', type: 'llm_call', payload: { role: 'planner' } }),
+			JSON.stringify({ timestamp: '2026-01-01T00:00:01.000Z', type: 'llm_call', payload: { role: 'planner', usage: { promptTokens: 100, completionTokens: 20, totalTokens: 120 } } }),
 			JSON.stringify({ timestamp: '2026-01-01T00:00:02.000Z', type: 'role_finished', payload: { role: 'planner', status: 'success' } }),
 		].join('\n'),
 	}
@@ -82,6 +82,25 @@ function longLogRun(id: string): RunSnapshotRaw {
 }
 
 snapshots.set('run-long', longLogRun('run-long'))
+
+// A run whose llm_call events carry cached prompt tokens, so the budgets token breakdown exercises the cached-vs-uncached prompt split end to end.
+snapshots.set('run-cached', {
+	metaText: JSON.stringify({
+		runId: 'run-cached',
+		guildPath: 'guild',
+		benchmarkPath: 'bench',
+		task: 'task for run-cached',
+		status: 'success',
+		startTime: '2026-01-01T00:00:00.000Z',
+		endTime: '2026-01-01T00:01:00.000Z',
+	}),
+	logText: [
+		JSON.stringify({ timestamp: '2026-01-01T00:00:01.000Z', type: 'llm_call', payload: { role: 'planner', usage: { promptTokens: 100, completionTokens: 20, totalTokens: 120, cachedPromptTokens: 60 } } }),
+		JSON.stringify({ timestamp: '2026-01-01T00:00:02.000Z', type: 'tool_call', payload: { role: 'planner', tool: 'read_file' } }),
+		JSON.stringify({ timestamp: '2026-01-01T00:00:03.000Z', type: 'llm_call', payload: { role: 'coder', usage: { promptTokens: 200, completionTokens: 50, totalTokens: 250 } } }),
+		JSON.stringify({ timestamp: '2026-01-01T00:00:04.000Z', type: 'role_finished', payload: { role: 'coder', status: 'success' } }),
+	].join('\n'),
+})
 
 // Shared server for the read-only routes (static assets, list, get-by-id, questions, answer).
 // The submission-mutating routes get their own fresh server per test to avoid cross-test ordering coupling.
@@ -239,12 +258,13 @@ describe('createWebServer /api/runs (list)', () => {
 		expect(response.status).toBe(200)
 		const list = await response.json()
 		expect(Array.isArray(list)).toBe(true)
-		expect(list.length).toBe(4)
+		expect(list.length).toBe(5)
 		expect(list[0].runId).toBe('run-long')
-		expect(list[1].runId).toBe('run-3')
-		expect(list[2].runId).toBe('run-2')
-		expect(list[3].runId).toBe('run-1')
-		expect(list[2]).toEqual({
+		expect(list[1].runId).toBe('run-cached')
+		expect(list[2].runId).toBe('run-3')
+		expect(list[3].runId).toBe('run-2')
+		expect(list[4].runId).toBe('run-1')
+		expect(list[3]).toEqual({
 			runId: 'run-2',
 			status: 'error',
 			task: 'task for run-2',
@@ -265,10 +285,36 @@ describe('createWebServer /api/runs/:id', () => {
 		expect(view.roles[0].role).toBe('planner')
 		expect(view.recentLog.length).toBe(2)
 		expect(view.recentLog[0].summary).toBe('planner · llm call')
-		expect(view.recentLog[0].payload).toEqual({ role: 'planner' })
+		expect(view.recentLog[0].payload).toEqual({ role: 'planner', usage: { promptTokens: 100, completionTokens: 20, totalTokens: 120 } })
 		expect(view.error).toBeNull()
 		expect(view.currentActivity.role).toBe('planner')
 		expect(view.currentActivity.summary).toBe('planner · finished (success)')
+	})
+
+	test('returns budgets derived from the log and meta', async () => {
+		const response = await fetch(`${readOnlyBaseUrl}/api/runs/run-1`)
+		expect(response.status).toBe(200)
+		const view = await response.json()
+		expect(view.budgets).toEqual({
+			elapsedSeconds: 60,
+			toolCalls: 0,
+			tokensUsed: 120,
+			tokenBreakdown: { promptTokens: 100, cachedPromptTokens: 0, completionTokens: 20, totalTokens: 120 },
+		})
+	})
+
+	test('returns budgets that split cached from uncached prompt tokens', async () => {
+		const response = await fetch(`${readOnlyBaseUrl}/api/runs/run-cached`)
+		expect(response.status).toBe(200)
+		const view = await response.json()
+		expect(view.budgets.toolCalls).toBe(1)
+		expect(view.budgets.tokensUsed).toBe(370)
+		expect(view.budgets.tokenBreakdown).toEqual({
+			promptTokens: 300,
+			cachedPromptTokens: 60,
+			completionTokens: 70,
+			totalTokens: 370,
+		})
 	})
 
 	test('surfaces error, artifacts, currentActivity, and readable recentLog for a failed run', async () => {

@@ -231,6 +231,93 @@ export interface CurrentActivity {
 	summary: string
 }
 
+export interface TokenUsage {
+	// Full prompt bill: uncached + cached prompt tokens. This is what the endpoint charged against the prompt side of any per-role token budget.
+	promptTokens: number
+	// Subset of promptTokens the endpoint served from its prompt cache. Tracked separately because cached tokens are billed at a different (usually much lower) rate than uncached prompt tokens.
+	cachedPromptTokens: number
+	completionTokens: number
+	totalTokens: number
+}
+
+export interface Budgets {
+	elapsedSeconds: number
+	toolCalls: number
+	// Overall token total across the run, or null when no llm_call event carries usage (a run whose calls all failed before reporting usage, or a log written before usage was logged).
+	tokensUsed: number | null
+	// Per-bucket breakdown backing tokensUsed, or null for the same reason. Each bucket is 0 (not null) when usage is present but a given call reported no tokens for that bucket.
+	tokenBreakdown: TokenUsage | null
+}
+
+// Reads the per-call usage from an llm_call payload, or null when the payload carries no usage object.
+// totalTokens is preferred (it is what the executor logs); prompt+completion is summed as a fallback for events logged before that field existed or by older log writers, so a partial log still contributes its real cost.
+// cachedPromptTokens is read from usage.cachedPromptTokens when present (already counted inside promptTokens); when absent it contributes 0 to the cached bucket, since the endpoint simply did not report a cached share for that call.
+function usageOf(payload: unknown): { promptTokens: number; completionTokens: number; cachedPromptTokens: number; totalTokens: number } | null {
+	if (!isObject(payload)) return null
+	const usage = payload['usage']
+	if (!isObject(usage)) return null
+	const total = usage['totalTokens']
+	const prompt = usage['promptTokens']
+	const completion = usage['completionTokens']
+	const cached = usage['cachedPromptTokens']
+
+	const hasTotal = typeof total === 'number'
+	const hasPromptCompletion = typeof prompt === 'number' && typeof completion === 'number'
+	if (!hasTotal && !hasPromptCompletion) return null
+
+	const promptTokens = typeof prompt === 'number' ? prompt : 0
+	const completionTokens = typeof completion === 'number' ? completion : 0
+	const cachedPromptTokens = typeof cached === 'number' ? cached : 0
+	const totalTokens = hasTotal ? total! : promptTokens + completionTokens
+	return { promptTokens, completionTokens, cachedPromptTokens, totalTokens }
+}
+
+// Derives the run's progress against its hard safety budgets from the log stream and meta.
+// `now` is passed in (the server supplies `new Date().toISOString()`) so elapsed-time tests are deterministic; the helper never reads the clock itself.
+// Elapsed time uses meta.endTime for a completed run and `now` for an in-progress run; when meta is absent (run in progress, meta.json not yet written) the first log event's timestamp stands in for the start, so elapsed is recoverable even before meta exists.
+// Clock skew that would make `now` precede the start is clamped to 0.
+// Token totals are null when no llm_call event carries usage; otherwise each bucket is summed across all calls that reported usage, and tokensUsed is the sum of the per-call totals.
+export function deriveBudgets(logEvents: LogEvent[], meta: RunMeta | null, now: string): Budgets {
+	const startTime = meta !== null ? meta.startTime : (logEvents.length > 0 ? logEvents[0]!.timestamp : null)
+	const endTime = meta !== null && meta.endTime !== undefined ? meta.endTime : now
+
+	let elapsedSeconds = 0
+	if (startTime !== null) {
+		const startMs = Date.parse(startTime)
+		const endMs = Date.parse(endTime)
+		if (!Number.isNaN(startMs) && !Number.isNaN(endMs)) {
+			elapsedSeconds = Math.max(0, Math.round((endMs - startMs) / 1000))
+		}
+	}
+
+	let toolCalls = 0
+	let sawUsage = false
+	let promptSum = 0
+	let cachedSum = 0
+	let completionSum = 0
+	let totalSum = 0
+	for (const event of logEvents) {
+		if (event.type === 'tool_call') toolCalls++
+		if (event.type === 'llm_call') {
+			const usage = usageOf(event.payload)
+			if (usage !== null) {
+				sawUsage = true
+				promptSum += usage.promptTokens
+				cachedSum += usage.cachedPromptTokens
+				completionSum += usage.completionTokens
+				totalSum += usage.totalTokens
+			}
+		}
+	}
+
+	return {
+		elapsedSeconds,
+		toolCalls,
+		tokensUsed: sawUsage ? totalSum : null,
+		tokenBreakdown: sawUsage ? { promptTokens: promptSum, cachedPromptTokens: cachedSum, completionTokens: completionSum, totalTokens: totalSum } : null,
+	}
+}
+
 export interface QuestionHistoryEntry {
 	id: string | null
 	question: string
@@ -292,10 +379,12 @@ export interface RunView {
 	recentLog: RecentLogEntry[]
 	currentActivity: CurrentActivity | null
 	questionHistory: QuestionHistoryEntry[]
+	budgets: Budgets
 }
 
 export interface RenderRunViewOptions {
 	maxLogLines: number
+	now: string
 }
 
 export function renderRunView(snapshot: RunSnapshot, options: RenderRunViewOptions): RunView {
@@ -318,6 +407,7 @@ export function renderRunView(snapshot: RunSnapshot, options: RenderRunViewOptio
 		recentLog,
 		currentActivity,
 		questionHistory: deriveQuestionHistory(snapshot.logEvents),
+		budgets: deriveBudgets(snapshot.logEvents, meta, options.now),
 	}
 }
 

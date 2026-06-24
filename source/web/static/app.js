@@ -47,6 +47,20 @@ function statusLabel(status) {
 	return STATUS_LABELS[status] ?? status
 }
 
+function formatElapsed(seconds) {
+	if (typeof seconds !== 'number' || seconds < 0) return '—'
+	const minutes = Math.floor(seconds / 60)
+	const remaining = seconds % 60
+	if (minutes === 0) return `${remaining}s`
+	return `${minutes}m ${remaining}s`
+}
+
+function formatTokens(tokens) {
+	if (tokens === null || tokens === undefined) return '—'
+	if (typeof tokens !== 'number') return '—'
+	return tokens.toLocaleString()
+}
+
 function isTerminalStatus(status) {
 	return TERMINAL_STATUSES.has(status)
 }
@@ -489,13 +503,34 @@ function RunSummaryPanel(state) {
 	const activity = view ? view.currentActivity : null
 	const error = view ? view.error : null
 	const artifacts = view && view.result ? view.result.artifacts : undefined
+	const budgets = view ? view.budgets : null
 
 	return h('section', { id: 'run-summary', class: 'panel' }, [
 		h('h2', {}, 'Run'),
 		h('p', { id: 'current-activity', class: 'current-activity' }, activity ? h('span', { class: 'current-activity-text' }, `now: ${activity.summary}`) : null),
 		h('dl', { id: 'run-meta' }, entries),
+		budgets ? BudgetsLine(budgets) : null,
 		h('div', { id: 'run-error', class: 'run-error' }, error ? h('div', { class: 'error-text' }, `${error.kind}: ${error.message}`) : null),
 		h('div', { id: 'run-artifacts', class: 'run-artifacts' }, artifacts && artifacts.length > 0 ? [h('div', { class: 'artifacts-heading' }, 'Artifacts'), h('ul', {}, artifacts.map((path) => h('li', { key: path, class: 'artifact' }, path)))] : null),
+	])
+}
+
+// Prompt tokens are split into uncached and cached because they are billed at different rates: cachedPromptTokens is the subset of promptTokens served from the endpoint's prompt cache, so the uncached prompt bill is promptTokens - cachedPromptTokens.
+function BudgetsLine(b) {
+	const breakdown = b.tokenBreakdown
+	const tokenSpans = [h('span', { class: 'budget-token-budget' }, `tokens ${formatTokens(b.tokensUsed)}`)]
+	if (breakdown !== null && breakdown !== undefined) {
+		const uncachedPrompt = breakdown.promptTokens - breakdown.cachedPromptTokens
+		tokenSpans.push(h('span', { class: 'budget-token-detail' }, [
+			h('span', { class: 'budget-token-prompt' }, `prompt ${formatTokens(uncachedPrompt)}`),
+			breakdown.cachedPromptTokens > 0 ? h('span', { class: 'budget-token-cached' }, `cached ${formatTokens(breakdown.cachedPromptTokens)}`) : null,
+			h('span', { class: 'budget-token-completion' }, `completion ${formatTokens(breakdown.completionTokens)}`),
+		]))
+	}
+	return h('div', { class: 'budgets' }, [
+		h('span', { class: 'budget-budget' }, `elapsed ${formatElapsed(b.elapsedSeconds)}`),
+		h('span', { class: 'budget-budget' }, `tool calls ${b.toolCalls}`),
+		...tokenSpans,
 	])
 }
 

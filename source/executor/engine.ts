@@ -16,6 +16,7 @@ export interface RoleState {
 	toolCalls: number
 	promptTokens: number
 	completionTokens: number
+	cachedPromptTokens: number
 	lastPromptTokens: number
 	recentToolCalls: Array<{ name: string; argsHash: string }>
 	recentCompactionPromptTokens: Array<number>
@@ -77,6 +78,29 @@ function logEvent(appendLog: AppendLog, type: string, payload: unknown): void {
 	appendLog(event)
 }
 
+// Builds the llm_call payload, attaching the per-call usage reported by the endpoint when the call succeeded.
+// The context_budget_exceeded and llm_unavailable results carry no real usage (the over-budget prompt size on a context-budget result is a rejection signal, not consumed tokens), so usage is omitted there and the budget view treats those calls as usage-unavailable rather than zero.
+// promptTokens is the full prompt bill (cached + uncached); cachedPromptTokens is the subset the endpoint served from its prompt cache, so the uncached prompt bill is promptTokens - cachedPromptTokens. The two are tracked separately because they are billed at different rates.
+function llmCallPayload(roleName: string, messageCount: number, llmResult: LlmCallResult): unknown {
+	if (llmResult.kind === 'success') {
+		const promptTokens = llmResult.usage.promptTokens
+		const completionTokens = llmResult.usage.completionTokens
+		const cachedPromptTokens = llmResult.usage.cachedPromptTokens
+		const usage: Record<string, number> = {
+			promptTokens,
+			completionTokens,
+			totalTokens: promptTokens + completionTokens,
+		}
+		if (cachedPromptTokens !== undefined) usage['cachedPromptTokens'] = cachedPromptTokens
+		return {
+			role: roleName,
+			messageCount,
+			usage,
+		}
+	}
+	return { role: roleName, messageCount }
+}
+
 function cloneRoleDefinitionWithBudget(base: RoleDefinition, override: { maxToolCalls?: number; maxTokens?: number }): RoleDefinition {
 	const mergedBudget: { maxToolCalls?: number; maxTokens?: number } = {
 		...(base.budget?.maxToolCalls !== undefined ? { maxToolCalls: base.budget.maxToolCalls } : {}),
@@ -132,6 +156,9 @@ function handleLlmResult(
 
 	roleState.promptTokens += llmResult.usage.promptTokens
 	roleState.completionTokens += llmResult.usage.completionTokens
+	if (llmResult.usage.cachedPromptTokens !== undefined) {
+		roleState.cachedPromptTokens += llmResult.usage.cachedPromptTokens
+	}
 	roleState.lastPromptTokens = llmResult.usage.promptTokens
 
 	const postCallBudgetState: RoleBudgetState = {
@@ -237,6 +264,7 @@ export async function runRole(deps: EngineDependencies, context: EngineContext):
 		toolCalls: 0,
 		promptTokens: 0,
 		completionTokens: 0,
+		cachedPromptTokens: 0,
 		lastPromptTokens: 0,
 		recentToolCalls: [],
 		recentCompactionPromptTokens: [],
@@ -309,11 +337,12 @@ export async function runRole(deps: EngineDependencies, context: EngineContext):
 
 		const messages = buildMessages(roleDefinition, roleState.history)
 
-		logEvent(deps.appendLog, 'llm_call', { role: context.roleName, messageCount: messages.length })
 		const llmResult = await deps.llmCaller.call({
 			messages,
 			tools: allowedToolsManifests,
 		})
+		// Logged after the call returns so the per-call usage reported by the endpoint can be attached; an llm_call event is emitted on every path (including the context-budget-exceeded retry and llm-unavailable paths) so the activity trail stays consistent, with usage present only when the call actually succeeded.
+		logEvent(deps.appendLog, 'llm_call', llmCallPayload(context.roleName, messages.length, llmResult))
 
 		const handling = handleLlmResult(llmResult, roleState, deps, roleDefinition, context, guild.config.executor)
 		if (handling.kind === 'continue') continue
