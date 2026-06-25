@@ -8,8 +8,8 @@ import type { AppendLog } from './persistence.ts'
 import { stubHumanBackend, withTool } from './test-fixtures.ts'
 import type { ToolHandler } from './tool-dispatch.ts'
 
-function success(toolCalls: ToolCall[], opts: { content?: string; promptTokens?: number; completionTokens?: number } = {}): LlmCallResult {
-	return {
+function success(toolCalls: ToolCall[], opts: { content?: string; promptTokens?: number; completionTokens?: number; finishReason?: string } = {}): LlmCallResult {
+	const result: LlmCallResult = {
 		kind: 'success',
 		content: opts.content ?? '',
 		reasoning: null,
@@ -19,6 +19,8 @@ function success(toolCalls: ToolCall[], opts: { content?: string; promptTokens?:
 			completionTokens: opts.completionTokens ?? 5,
 		},
 	}
+	if (opts.finishReason !== undefined) result.finishReason = opts.finishReason
+	return result
 }
 
 function contextExceeded(promptTokens = 999, contextWindow = 100): LlmCallResult {
@@ -799,5 +801,261 @@ describe('runRole — acceptance criteria', () => {
 		expect(content.includes('[truncated:')).toBe(true)
 		expect(content.startsWith('{')).toBe(true)
 		expect(content.startsWith('"')).toBe(false)
+	})
+})
+
+describe('runRole — role-tree log events', () => {
+	test('an entry-role run logs exactly one role_start with parent omitted', async () => {
+		const guild = buildGuild(
+			{ main: { systemPrompt: 'p', tools: ['finish'] } },
+			'main',
+		)
+		const llm = new FakeLlm()
+		llm.responses = [success([finishCall({ status: 'success', summary: 'done' })])]
+		const { deps, events } = makeDeps(llm)
+
+		await runRole(deps, {
+			loadedGuild: guild,
+			depth: 0,
+			startMs: Date.now(),
+			roleName: 'main',
+			task: 'do it',
+		})
+
+		const starts = events.filter((e) => e.type === 'role_start')
+		expect(starts.length).toBe(1)
+		expect(payloadField(starts[0]!, 'role')).toBe('main')
+		expect(payloadField(starts[0]!, 'depth')).toBe(0)
+		expect(payloadField(starts[0]!, 'task')).toBe('do it')
+		expect(payloadField(starts[0]!, 'parent')).toBeUndefined()
+
+		const finishes = events.filter((e) => e.type === 'role_finished')
+		expect(finishes.length).toBe(1)
+		expect(payloadField(finishes[0]!, 'role')).toBe('main')
+		expect(payloadField(finishes[0]!, 'depth')).toBe(0)
+		expect(payloadField(finishes[0]!, 'status')).toBe('success')
+		expect(payloadField(finishes[0]!, 'parent')).toBeUndefined()
+	})
+
+	test('a parent→child run logs role_start and agent_call linking parent, child, and depth', async () => {
+		const guild = buildGuild(
+			{
+				parent: { systemPrompt: 'p', tools: ['agent', 'finish'] },
+				child: { systemPrompt: 'c', tools: ['finish'] },
+			},
+			'parent',
+		)
+		const llm = new FakeLlm()
+		llm.responses = [
+			success([agentCall('child', 'subtask')]),
+			success([finishCall({ status: 'success', summary: 'child done' })]),
+			success([finishCall({ status: 'success', summary: 'parent done' })]),
+		]
+		const { deps, events } = makeDeps(llm)
+
+		await runRole(deps, {
+			loadedGuild: guild,
+			depth: 0,
+			startMs: Date.now(),
+			roleName: 'parent',
+			task: 'delegate',
+		})
+
+		const starts = events.filter((e) => e.type === 'role_start')
+		// Exactly two role_start events: one for the entry parent, one for the child.
+		expect(starts.length).toBe(2)
+		const childStart = starts.find((e) => payloadField(e, 'role') === 'child')
+		expect(childStart).toBeDefined()
+		expect(payloadField(childStart!, 'parent')).toBe('parent')
+		expect(payloadField(childStart!, 'depth')).toBe(1)
+		expect(payloadField(childStart!, 'task')).toBe('subtask')
+
+		const agentCalls = events.filter((e) => e.type === 'agent_call')
+		expect(agentCalls.length).toBe(1)
+		expect(payloadField(agentCalls[0]!, 'parent')).toBe('parent')
+		expect(payloadField(agentCalls[0]!, 'child')).toBe('child')
+		expect(payloadField(agentCalls[0]!, 'depth')).toBe(1)
+
+		const finishes = events.filter((e) => e.type === 'role_finished')
+		expect(finishes.length).toBe(2)
+		const childFinish = finishes.find((e) => payloadField(e, 'role') === 'child')
+		expect(payloadField(childFinish!, 'parent')).toBe('parent')
+		expect(payloadField(childFinish!, 'depth')).toBe(1)
+	})
+
+	test('a refused agent call (depth exceeded) emits no role_start for the never-run child', async () => {
+		const tight: ExecutorConfig = { ...baseExecutor, maxAgentDepth: 0 }
+		const guild = buildGuild(
+			{
+				parent: { systemPrompt: 'p', tools: ['agent', 'finish'] },
+				child: { systemPrompt: 'c', tools: ['finish'] },
+			},
+			'parent',
+			{ executor: tight },
+		)
+		const llm = new FakeLlm()
+		llm.responses = [
+			success([agentCall('child', 'subtask')]),
+			success([finishCall({ status: 'success', summary: 'parent done' })]),
+		]
+		const { deps, events } = makeDeps(llm)
+
+		await runRole(deps, {
+			loadedGuild: guild,
+			depth: 0,
+			startMs: Date.now(),
+			roleName: 'parent',
+			task: 'delegate',
+		})
+
+		const starts = events.filter((e) => e.type === 'role_start')
+		// Only the parent's role_start; the refused child never runs.
+		expect(starts.length).toBe(1)
+		expect(payloadField(starts[0]!, 'role')).toBe('parent')
+		expect(events.some((e) => e.type === 'depth_exceeded')).toBe(true)
+		expect(events.some((e) => e.type === 'agent_call')).toBe(false)
+	})
+})
+
+describe('runRole — rich LLM and tool payloads', () => {
+	test('llm_call carries the sent message list, received response, finishReason, and per-call usage', async () => {
+		const guild = buildGuild(
+			{ main: { systemPrompt: 'p', tools: ['finish'] } },
+			'main',
+		)
+		const llm = new FakeLlm()
+		const finish = finishCall({ status: 'success', summary: 'done' })
+		llm.responses = [success([finish], { content: 'the answer', finishReason: 'tool_calls', promptTokens: 42, completionTokens: 7 })]
+		const { deps, events } = makeDeps(llm)
+
+		await runRole(deps, {
+			loadedGuild: guild,
+			depth: 0,
+			startMs: Date.now(),
+			roleName: 'main',
+			task: 'do it',
+		})
+
+		const llmCall = events.find((e) => e.type === 'llm_call')
+		expect(llmCall).toBeDefined()
+		const payload = llmCall!.payload
+		expect(isRecord(payload)).toBe(true)
+		if (!isRecord(payload)) throw new Error('llm_call payload is not a record')
+		expect(payload['messageCount']).toBe(2)
+		// The sent message list carries role and content for each message, with tool_calls on assistant messages included.
+		const sent = payload['sent']
+		expect(Array.isArray(sent)).toBe(true)
+		expect((sent as unknown[]).length).toBe(2)
+		expect((sent as { role: string }[])[0]!.role).toBe('system')
+		expect((sent as { role: string }[])[1]!.role).toBe('user')
+		// The received response carries the assistant content and the parsed tool calls with name and arguments.
+		const received = payload['received'] as { content?: string; toolCalls: Array<{ id: string; function: { name: string; arguments: string } }> }
+		expect(received.content).toBe('the answer')
+		expect(received.toolCalls.length).toBe(1)
+		expect(received.toolCalls[0]!.function.name).toBe('finish')
+		expect(received.toolCalls[0]!.function.arguments).toBe(finish.function.arguments)
+		expect(payload['finishReason']).toBe('tool_calls')
+		const usage = payload['usage'] as { promptTokens: number; completionTokens: number; totalTokens: number }
+		expect(usage.promptTokens).toBe(42)
+		expect(usage.completionTokens).toBe(7)
+		expect(usage.totalTokens).toBe(49)
+	})
+
+	test('llm_call is not emitted on the llm_unavailable path', async () => {
+		const guild = buildGuild(
+			{ main: { systemPrompt: 'p', tools: ['finish'] } },
+			'main',
+		)
+		const llm = new FakeLlm()
+		llm.responses = [llmUnavailable('connection refused')]
+		const { deps, events } = makeDeps(llm)
+
+		await runRole(deps, {
+			loadedGuild: guild,
+			depth: 0,
+			startMs: Date.now(),
+			roleName: 'main',
+			task: 'do it',
+		})
+
+		expect(events.some((e) => e.type === 'llm_unavailable')).toBe(true)
+		expect(events.some((e) => e.type === 'llm_call')).toBe(false)
+	})
+
+	test('llm_call is not emitted on the context_budget_exceeded path', async () => {
+		const guild = buildGuild(
+			{ main: { systemPrompt: 'p', tools: ['finish'] } },
+			'main',
+		)
+		const llm = new FakeLlm()
+		llm.responses = [
+			contextExceeded(35000, 32768),
+			success([finishCall({ status: 'success', summary: 'recovered' })]),
+		]
+		const { deps, events } = makeDeps(llm)
+
+		await runRole(deps, {
+			loadedGuild: guild,
+			depth: 0,
+			startMs: Date.now(),
+			roleName: 'main',
+			task: 'do it',
+		})
+
+		// Exactly one llm_call: the recovered success turn, not the over-budget rejection.
+		const llmCalls = events.filter((e) => e.type === 'llm_call')
+		expect(llmCalls.length).toBe(1)
+		expect(events.some((e) => e.type === 'context_budget_exceeded')).toBe(true)
+	})
+
+	test('tool_call carries the model raw arguments and tool_result carries the full un-truncated result', async () => {
+		const guild = withTool(
+			buildGuild(
+				{ main: { systemPrompt: 'p', tools: ['big', 'finish'] } },
+				'main',
+				{ contextPolicy: { maxToolOutputChars: 20 } },
+			),
+			{
+				name: 'big',
+				description: 'returns a large payload',
+				parameters: { type: 'object', properties: {} },
+			},
+		)
+		const bigCall: ToolCall = {
+			id: 'b1',
+			type: 'function',
+			function: { name: 'big', arguments: '{"path":"x.txt"}' },
+		}
+		const bigHandler: ToolHandler = () => ({ kind: 'success', data: { text: 'x'.repeat(200) } })
+		const llm = new FakeLlm()
+		llm.responses = [
+			success([bigCall]),
+			success([finishCall({ status: 'success', summary: 'done' })]),
+		]
+		const { deps, events } = makeDeps(llm)
+		const depsWithBig: EngineDependencies = {
+			...deps,
+			additionalToolHandlers: { big: bigHandler },
+		}
+
+		await runRole(depsWithBig, {
+			loadedGuild: guild,
+			depth: 0,
+			startMs: Date.now(),
+			roleName: 'main',
+			task: 'do it',
+		})
+
+		const toolCall = events.find((e) => e.type === 'tool_call' && payloadField(e, 'tool') === 'big')
+		expect(toolCall).toBeDefined()
+		expect(payloadField(toolCall!, 'arguments')).toBe('{"path":"x.txt"}')
+
+		const toolResult = events.find((e) => e.type === 'tool_result' && payloadField(e, 'tool') === 'big')
+		expect(toolResult).toBeDefined()
+		expect(payloadField(toolResult!, 'kind')).toBe('success')
+		// The logged result is the full un-truncated ToolResult, so its data retains the full 200-char string even though truncation applies to what is appended to the conversation.
+		const result = payloadField(toolResult!, 'result') as { kind: string; data: { text: string } }
+		expect(result.kind).toBe('success')
+		expect(result.data.text.length).toBe(200)
 	})
 })

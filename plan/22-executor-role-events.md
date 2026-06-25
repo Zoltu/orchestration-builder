@@ -60,6 +60,9 @@ What is missing is the linkage that ties a child run to its parent and records i
 ## Tracked technical debt
 
 - **Removes** the step-11 debt: "Web UI renders role *activity* not a role *tree*." After this step, the UI renders the real tree from executor events. Delete that row from `plan/README.md` when the removal is verified.
+- **Removes** the step-17 debt: "`log.jsonl` omits full LLM/tool detail; raw-payload toggle is a single blob." After this step, `log.jsonl` carries the full sent/received LLM turn detail (sent messages, received assistant response including `finishReason` and per-call `usage`), raw tool-call arguments, and full un-truncated tool results; the UI's raw toggle renders them as paired sections. Delete that row from `plan/README.md` when the removal is verified.
+
+Both rows were deleted from `plan/README.md`'s debt table when this step landed.
 
 ## End-of-step evaluation
 

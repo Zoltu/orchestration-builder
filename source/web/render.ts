@@ -102,7 +102,9 @@ export function formatLogEvent(event: LogEvent): string {
 		}
 		case 'role_finished': {
 			const status = stringField(payload, 'status')
-			return withRole(role, `finished${status !== null ? ` (${status})` : ''}`)
+			const statusPart = status !== null ? ` (${status})` : ''
+			// Status only: the role's full summary text can be long multi-line model prose and would inflate the one-line log row. The full summary and structured error are carried as paired detail sections (see formatLogDetailSections) so a reviewer reaches them via the raw toggle, not by widening the log line.
+			return withRole(role, `finished${statusPart}`)
 		}
 		case 'implicit_finish':
 			return withRole(role, 'finished (implicit)')
@@ -132,6 +134,13 @@ export function formatLogEvent(event: LogEvent): string {
 			const parent = stringField(payload, 'parent')
 			const roleName = stringField(payload, 'roleName')
 			return withRole(parent ?? role, `role not found${roleName !== null ? ` (${roleName})` : ''}`)
+		}
+		case 'role_start':
+			return withRole(role, 'role start')
+		case 'agent_call': {
+			const parent = stringField(payload, 'parent')
+			const child = stringField(payload, 'child')
+			return withRole(parent ?? role, `agent call${child !== null ? ` → ${child}` : ''}`)
 		}
 		default:
 			return role === null ? event.type : `${event.type} · ${role}`
@@ -198,11 +207,101 @@ export function deriveRoleActivity(logEvents: LogEvent[]): RoleActivity[] {
 	return order.map((role) => byRole.get(role)!)
 }
 
+export interface RoleTreeNode {
+	role: string
+	depth: number
+	parent: string | null
+	// Terminal status from the matching role_finished event, or null when the role is still in progress or its finish event is absent.
+	status: string | null
+	// The role's own summary from role_finished (its explanation of the result), surfaced so the tree shows why an invocation errored. Null until/unless the finish event carries one.
+	summary: string | null
+	// True only for the single invocation currently executing (the deepest in-flight role_start with no matching finish yet). The executor is strictly sequential and depth-first, so at most one role runs at a time; marking only this node active prevents every invocation of a repeated role from appearing to run in parallel.
+	active: boolean
+	children: RoleTreeNode[]
+}
+
+// Builds a parent→children tree from role_start/role_finished events, returning the root nodes (the entry role and any orphan starts) or null when those events are absent so the view falls back to the role-activity summary.
+// The executor is strictly sequential and depth-first, so the events nest like balanced parentheses: role_start pushes a node onto the active path, role_finished pops the matching node and records its status. This pairs each invocation with its own finish (not a per-role last-writer-wins status), so a role delegated to many times appears as one node per invocation, each with its own status.
+// The active invocation is the top of the stack once all events are processed — the one role currently executing. Parents waiting for a child are in-flight but not active, so only the executing role pulses in the UI.
+export function deriveRoleTree(logEvents: LogEvent[]): RoleTreeNode[] | null {
+	let sawTreeEvent = false
+	for (const event of logEvents) {
+		if (event.type === 'role_start' || event.type === 'role_finished' || event.type === 'agent_call') {
+			sawTreeEvent = true
+			break
+		}
+	}
+	if (!sawTreeEvent) return null
+
+	const roots: RoleTreeNode[] = []
+	// The active path: top is the deepest in-flight role. A role_start pushes; a role_finished pops the matching entry and records its status.
+	const stack: RoleTreeNode[] = []
+
+	for (const event of logEvents) {
+		if (event.type === 'role_start') {
+			const payload = event.payload
+			if (!isObject(payload)) continue
+			const roleValue = payload['role']
+			if (typeof roleValue !== 'string') continue
+			const depthValue = payload['depth']
+			const depth = typeof depthValue === 'number' ? depthValue : 0
+			const parentRole = stack.length > 0 ? stack[stack.length - 1]!.role : null
+			const node: RoleTreeNode = {
+				role: roleValue,
+				depth,
+				parent: parentRole,
+				status: null,
+				summary: null,
+				active: false,
+				children: [],
+			}
+			if (stack.length > 0) {
+				stack[stack.length - 1]!.children.push(node)
+			} else {
+				roots.push(node)
+			}
+			stack.push(node)
+		} else if (event.type === 'role_finished') {
+			const payload = event.payload
+			if (!isObject(payload)) continue
+			const roleValue = payload['role']
+			if (typeof roleValue !== 'string') continue
+			const statusValue = payload['status']
+			const status = typeof statusValue === 'string' ? statusValue : null
+			const summaryValue = payload['summary']
+			const summary = typeof summaryValue === 'string' ? summaryValue : null
+			// Find the topmost in-flight entry for this role. In a well-formed depth-first log the top of the stack matches; a partial log (torn read mid-write) may have skipped a child's finish, so we search down and pop the abandoned children too rather than crash.
+			let matchIndex = -1
+			for (let i = stack.length - 1; i >= 0; i--) {
+				if (stack[i]!.role === roleValue) {
+					matchIndex = i
+					break
+				}
+			}
+			if (matchIndex === -1) continue
+			stack[matchIndex]!.status = status
+			stack[matchIndex]!.summary = summary
+			stack.length = matchIndex
+		}
+	}
+
+	// The active invocation is the deepest in-flight role (the stack top): the one currently executing. A waiting parent is in-flight but suspended, so it must not pulse.
+	if (stack.length > 0) stack[stack.length - 1]!.active = true
+	return roots
+}
+
+export interface LogDetailSection {
+	label: string
+	content: unknown
+}
+
 export interface RecentLogEntry {
 	timestamp: string
 	type: string
 	summary: string
 	payload: unknown
+	// Paired sections derived from the payload so the UI's raw toggle can present an llm_call as "sent" / "received" / "finish reason" / "usage" and a tool_call/tool_result pair as "arguments" / "result" rather than a single opaque blob. Null when the event type carries no paired detail (the UI then falls back to the raw payload).
+	detailSections: LogDetailSection[] | null
 }
 
 // Builds the readable-view entry for a single log event: the raw payload is carried alongside a one-line summary so the UI can render the summary by default and expose the payload on demand.
@@ -213,7 +312,45 @@ export function toRecentLogEntry(event: LogEvent): RecentLogEntry {
 		type: event.type,
 		summary: formatLogEvent(event),
 		payload: event.payload,
+		detailSections: formatLogDetailSections(event),
 	}
+}
+
+// Derives paired detail sections from a log event's payload so the UI's raw toggle can present the rich llm_call/tool_call/tool_result payloads as labeled sections rather than a single blob.
+// Returns null when the event type carries no paired detail, so the caller falls back to rendering the raw payload.
+// Every payload access is guarded and the function never throws on a partial or unexpected shape, matching the log's append-only, read-concurrent-with-write nature.
+export function formatLogDetailSections(event: LogEvent): LogDetailSection[] | null {
+	const payload = event.payload
+	if (!isObject(payload)) return null
+	if (event.type === 'llm_call') {
+		const sections: LogDetailSection[] = []
+		const sent = payload['sent']
+		if (Array.isArray(sent)) sections.push({ label: 'sent', content: sent })
+		const received = payload['received']
+		if (isObject(received)) sections.push({ label: 'received', content: received })
+		const finishReason = payload['finishReason']
+		if (typeof finishReason === 'string') sections.push({ label: 'finish reason', content: finishReason })
+		const usage = payload['usage']
+		if (isObject(usage)) sections.push({ label: 'usage', content: usage })
+		return sections.length > 0 ? sections : null
+	}
+	if (event.type === 'tool_call' || event.type === 'tool_result') {
+		const sections: LogDetailSection[] = []
+		const argumentsValue = payload['arguments']
+		if (typeof argumentsValue === 'string') sections.push({ label: 'arguments', content: argumentsValue })
+		const result = payload['result']
+		if (isObject(result)) sections.push({ label: 'result', content: result })
+		return sections.length > 0 ? sections : null
+	}
+	if (event.type === 'role_finished') {
+		const sections: LogDetailSection[] = []
+		const summary = payload['summary']
+		if (typeof summary === 'string') sections.push({ label: 'summary', content: summary })
+		const error = payload['error']
+		if (isObject(error)) sections.push({ label: 'error', content: error })
+		return sections.length > 0 ? sections : null
+	}
+	return null
 }
 
 export interface PaginatedLog {
@@ -389,6 +526,8 @@ export interface RunView {
 	result: ResultCard | null
 	error: NonNullable<RunMeta['error']> | null
 	roles: RoleActivity[]
+	// The parent→children role tree recovered from role_start/role_finished/agent_call events, or null when those events are absent (a pre-enhancement log or a partial tail) so the UI falls back to the roles activity summary.
+	roleTree: RoleTreeNode[] | null
 	recentLog: RecentLogEntry[]
 	currentActivity: CurrentActivity | null
 	questionHistory: QuestionHistoryEntry[]
@@ -417,6 +556,7 @@ export function renderRunView(snapshot: RunSnapshot, options: RenderRunViewOptio
 		result: meta === null ? null : (meta.result ?? null),
 		error: meta === null ? null : (meta.error ?? null),
 		roles: deriveRoleActivity(snapshot.logEvents),
+		roleTree: deriveRoleTree(snapshot.logEvents),
 		recentLog,
 		currentActivity,
 		questionHistory: deriveQuestionHistory(snapshot.logEvents),

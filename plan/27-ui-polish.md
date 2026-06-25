@@ -47,3 +47,10 @@ Small to medium — pure design work, no logic; the value is in iteration agains
 ## Operator handoff
 
 Review the redesigned UI in a browser against a real multi-role run. Confirm the visual hierarchy, spacing, and responsive behavior read well, and report any panel that still feels dense or confusing. The agent iterates the CSS in-environment until the operator signs off.
+
+## Future improvements (deferred)
+
+Hints recorded for a potential follow-up; not in scope for this step.
+
+- **Auto-collapsing role tree.** In a large multi-role run the fully-expanded Role tree consumes significant vertical space. A future pass could collapse the tree up to the level of the currently-running invocation by default, expanding only the path to a node when it spawns a child — keeping the active agent visible while the rest stays compact. The user could click a row to expand/collapse manually, with the manual override winning by default. A completed run (no active invocation) would render mostly collapsed. This needs collapse state held in `app.js` state (reset on run switch, mirroring `expandedLogRows`) and an active-path set computed each render; no executor/log changes required since `deriveRoleTree` already emits `active` per invocation.
+- **Expandable leaf detail with per-invocation stats.** Collapsed leaf nodes could show only success/failure; expanding one would reveal token usage, context size, and the final response for that invocation. This requires `deriveRoleTree` to attribute `llm_call`/`tool_call` events to the stack-top invocation (the running role) during its existing pass, since the executor is strictly sequential and depth-first. New `RoleTreeNode` fields: `llmCalls`, `toolCalls`, `promptTokens`, `completionTokens`, `lastPromptTokens` (context size), and `lastAssistantContent` (final response). The expanded-detail rendering would reuse the `LogDetailSection` paired-section pattern so the raw-toggle security invariant (text nodes only) is preserved.

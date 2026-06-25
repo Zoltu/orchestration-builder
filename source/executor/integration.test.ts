@@ -66,6 +66,22 @@ function toolNameFromEvent(event: LogEvent): string | undefined {
 	return typeof tool === 'string' ? tool : undefined
 }
 
+function roleFromStart(event: LogEvent): string | undefined {
+	const payload = event.payload
+	if (typeof payload !== 'object' || payload === null) return undefined
+	if (!('role' in payload)) return undefined
+	const role = payload.role
+	return typeof role === 'string' ? role : undefined
+}
+
+function parentOf(event: LogEvent): string | null {
+	const payload = event.payload
+	if (typeof payload !== 'object' || payload === null) return null
+	if (!('parent' in payload)) return null
+	const parent = payload.parent
+	return typeof parent === 'string' ? parent : null
+}
+
 const orchestratorDelegatesToCoder: ToolCall[] = [
 	toolCall('orch-1', 'agent', {
 		role: 'coder',
@@ -153,5 +169,18 @@ describe('runExecutor end-to-end against the seed Guild and hello_001', () => {
 		const toolCallEvents = events.filter((e) => e.type === 'tool_call')
 		const toolNames = toolCallEvents.map(toolNameFromEvent)
 		expect(toolNames).toContain('write_file')
+
+		// The entry orchestrator and its spawned coder each emit a role_start/role_finished pair, and an agent_call links them.
+		const roleStarts = events.filter((e) => e.type === 'role_start')
+		expect(roleStarts.length).toBe(2)
+		const orchestratorStart = roleStarts.find((e) => roleFromStart(e) === 'orchestrator')
+		const coderStart = roleStarts.find((e) => roleFromStart(e) === 'coder')
+		expect(orchestratorStart).toBeDefined()
+		expect(coderStart).toBeDefined()
+		expect(parentOf(coderStart!)).toBe('orchestrator')
+		expect(parentOf(orchestratorStart!)).toBeNull()
+		expect(events.some((e) => e.type === 'agent_call')).toBe(true)
+		const roleFinishes = events.filter((e) => e.type === 'role_finished')
+		expect(roleFinishes.length).toBe(2)
 	})
 })

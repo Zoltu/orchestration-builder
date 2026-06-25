@@ -6,6 +6,8 @@ import {
 	deriveBudgets,
 	deriveQuestionHistory,
 	deriveRoleActivity,
+	deriveRoleTree,
+	formatLogDetailSections,
 	formatLogAsText,
 	formatLogEvent,
 	paginateLogEvents,
@@ -210,6 +212,201 @@ describe('deriveRoleActivity', () => {
 	})
 })
 
+describe('deriveRoleTree', () => {
+	function event(type: string, payload: unknown): LogEvent {
+		return { timestamp: 't', type, payload }
+	}
+
+	test('returns null when no role_start/role_finished/agent_call events are present (fallback to activity)', () => {
+		const events: LogEvent[] = [
+			event('llm_call', { role: 'planner' }),
+			event('tool_call', { role: 'planner', tool: 'finish' }),
+		]
+		expect(deriveRoleTree(events)).toBeNull()
+	})
+
+	test('an entry role with no parent is a single root node', () => {
+		const events: LogEvent[] = [
+			event('role_start', { role: 'orchestrator', depth: 0, task: 'do it' }),
+			event('role_finished', { role: 'orchestrator', depth: 0, status: 'success' }),
+		]
+		const tree = deriveRoleTree(events)
+		expect(tree).not.toBeNull()
+		expect(tree!.length).toBe(1)
+		expect(tree![0]).toEqual({
+			role: 'orchestrator',
+			depth: 0,
+			parent: null,
+			status: 'success',
+			summary: null,
+			active: false,
+			children: [],
+		})
+	})
+
+	test('a parent with multiple children links them in spawn order', () => {
+		const events: LogEvent[] = [
+			event('role_start', { role: 'orchestrator', depth: 0, task: 't' }),
+			event('agent_call', { parent: 'orchestrator', child: 'coder', depth: 1 }),
+			event('role_start', { role: 'coder', depth: 1, parent: 'orchestrator', task: 'code' }),
+			event('role_finished', { role: 'coder', depth: 1, status: 'success', parent: 'orchestrator' }),
+			event('agent_call', { parent: 'orchestrator', child: 'critic', depth: 1 }),
+			event('role_start', { role: 'critic', depth: 1, parent: 'orchestrator', task: 'review' }),
+			event('role_finished', { role: 'orchestrator', depth: 0, status: 'success' }),
+		]
+		const tree = deriveRoleTree(events)
+		expect(tree).not.toBeNull()
+		expect(tree!.length).toBe(1)
+		const root = tree![0]!
+		expect(root.role).toBe('orchestrator')
+		expect(root.children.length).toBe(2)
+		expect(root.children[0]!.role).toBe('coder')
+		expect(root.children[1]!.role).toBe('critic')
+		expect(root.children[0]!.parent).toBe('orchestrator')
+		expect(root.children[0]!.depth).toBe(1)
+		expect(root.children[0]!.status).toBe('success')
+		expect(root.children[1]!.status).toBeNull()
+	})
+
+	test('repeated sequential delegations to the same role are distinct nodes, each with its own status, not one merged node', () => {
+		const events: LogEvent[] = [
+			event('role_start', { role: 'orchestrator', depth: 0, task: 't' }),
+			event('role_start', { role: 'coder', depth: 1, parent: 'orchestrator', task: 'first' }),
+			event('role_finished', { role: 'coder', depth: 1, status: 'success', summary: 'first done', parent: 'orchestrator' }),
+			event('role_start', { role: 'coder', depth: 1, parent: 'orchestrator', task: 'second' }),
+			event('role_finished', { role: 'coder', depth: 1, status: 'error', summary: 'second failed', parent: 'orchestrator' }),
+			event('role_finished', { role: 'orchestrator', depth: 0, status: 'success' }),
+		]
+		const tree = deriveRoleTree(events)
+		expect(tree).not.toBeNull()
+		const root = tree![0]!
+		expect(root.children.length).toBe(2)
+		expect(root.children[0]!.role).toBe('coder')
+		expect(root.children[0]!.status).toBe('success')
+		expect(root.children[0]!.summary).toBe('first done')
+		expect(root.children[1]!.role).toBe('coder')
+		expect(root.children[1]!.status).toBe('error')
+		expect(root.children[1]!.summary).toBe('second failed')
+	})
+
+	test('only the single currently-running invocation is active, even when the same role name recurs', () => {
+		const events: LogEvent[] = [
+			event('role_start', { role: 'orchestrator', depth: 0, task: 't' }),
+			event('role_start', { role: 'coder', depth: 1, parent: 'orchestrator', task: 'first' }),
+			event('role_finished', { role: 'coder', depth: 1, status: 'success', parent: 'orchestrator' }),
+			event('role_start', { role: 'coder', depth: 1, parent: 'orchestrator', task: 'second' }),
+		]
+		const tree = deriveRoleTree(events)
+		expect(tree).not.toBeNull()
+		const root = tree![0]!
+		expect(root.active).toBe(false)
+		expect(root.children[0]!.active).toBe(false)
+		expect(root.children[1]!.active).toBe(true)
+	})
+
+	test('a child whose parent node never started becomes a root rather than being dropped', () => {
+		const events: LogEvent[] = [
+			event('role_start', { role: 'orphan', depth: 1, parent: 'missing-parent', task: 't' }),
+		]
+		const tree = deriveRoleTree(events)
+		expect(tree).not.toBeNull()
+		expect(tree!.length).toBe(1)
+		expect(tree![0]!.role).toBe('orphan')
+		expect(tree![0]!.active).toBe(true)
+	})
+
+	test('falls back to agent_call edges for a role_start that omitted parent (pre-enhancement log)', () => {
+		const events: LogEvent[] = [
+			event('role_start', { role: 'orchestrator', depth: 0, task: 't' }),
+			event('agent_call', { parent: 'orchestrator', child: 'coder', depth: 1 }),
+			event('role_start', { role: 'coder', depth: 1, task: 'code' }),
+			event('role_finished', { role: 'coder', depth: 1, status: 'success' }),
+			event('role_finished', { role: 'orchestrator', depth: 0, status: 'success' }),
+		]
+		const tree = deriveRoleTree(events)
+		expect(tree).not.toBeNull()
+		expect(tree!.length).toBe(1)
+		expect(tree![0]!.children.length).toBe(1)
+		expect(tree![0]!.children[0]!.role).toBe('coder')
+		expect(tree![0]!.children[0]!.parent).toBe('orchestrator')
+	})
+
+	test('does not throw on malformed payloads', () => {
+		const events: LogEvent[] = [
+			event('role_start', 'broken'),
+			event('role_start', { depth: 0 }),
+			event('agent_call', null),
+			event('role_finished', { role: 'x' }),
+		]
+		expect(deriveRoleTree(events)).toEqual([])
+	})
+})
+
+describe('formatLogDetailSections', () => {
+	function event(type: string, payload: unknown): LogEvent {
+		return { timestamp: 't', type, payload }
+	}
+
+	test('an llm_call with sent/received/finishReason/usage yields four paired sections', () => {
+		const sections = formatLogDetailSections(event('llm_call', {
+			role: 'coder',
+			messageCount: 2,
+			sent: [{ role: 'system', content: 'p' }, { role: 'user', content: 't' }],
+			received: { content: 'ok', toolCalls: [] },
+			finishReason: 'stop',
+			usage: { promptTokens: 10, completionTokens: 5, totalTokens: 15 },
+		}))
+		expect(sections).not.toBeNull()
+		expect(sections!.map((s) => s.label)).toEqual(['sent', 'received', 'finish reason', 'usage'])
+		expect(sections![0]!.content).toEqual([{ role: 'system', content: 'p' }, { role: 'user', content: 't' }])
+		expect(sections![2]!.content).toBe('stop')
+	})
+
+	test('an llm_call omitting finishReason omits the finish reason section', () => {
+		const sections = formatLogDetailSections(event('llm_call', {
+			role: 'coder',
+			sent: [{ role: 'user', content: 't' }],
+			received: { toolCalls: [] },
+			usage: { promptTokens: 10, completionTokens: 5, totalTokens: 15 },
+		}))
+		expect(sections!.map((s) => s.label)).toEqual(['sent', 'received', 'usage'])
+	})
+
+	test('a tool_call arguments and a tool_result full result each shape their paired fields', () => {
+		const callSections = formatLogDetailSections(event('tool_call', { role: 'coder', tool: 'write_file', arguments: '{"path":"x"}' }))
+		expect(callSections!.map((s) => s.label)).toEqual(['arguments'])
+		expect(callSections![0]!.content).toBe('{"path":"x"}')
+
+		const resultSections = formatLogDetailSections(event('tool_result', { role: 'coder', tool: 'write_file', kind: 'success', result: { kind: 'success', data: { path: 'x', bytes: 4 } } }))
+		expect(resultSections!.map((s) => s.label)).toEqual(['result'])
+		expect(resultSections![0]!.content).toEqual({ kind: 'success', data: { path: 'x', bytes: 4 } })
+	})
+
+	test('a tool_call carrying both arguments and a paired result yields both sections', () => {
+		const sections = formatLogDetailSections(event('tool_result', { role: 'coder', tool: 'write_file', kind: 'success', arguments: '{"path":"y"}', result: { kind: 'success', data: { path: 'y' } } }))
+		expect(sections!.map((s) => s.label)).toEqual(['arguments', 'result'])
+	})
+
+	test('a role_finished with summary and error yields paired sections', () => {
+		const sections = formatLogDetailSections(event('role_finished', { role: 'coder', status: 'error', summary: 'could not parse', error: { kind: 'invalid_arguments', message: 'bad json' } }))
+		expect(sections).not.toBeNull()
+		expect(sections!.map((s) => s.label)).toEqual(['summary', 'error'])
+		expect(sections![0]!.content).toBe('could not parse')
+		expect(sections![1]!.content).toEqual({ kind: 'invalid_arguments', message: 'bad json' })
+	})
+
+	test('returns null for an event type with no paired detail', () => {
+		// A role_finished carrying only status (no summary/error) has no paired detail.
+		expect(formatLogDetailSections(event('role_finished', { role: 'x', status: 'success' }))).toBeNull()
+		expect(formatLogDetailSections(event('llm_unavailable', { role: 'x', message: 'down' }))).toBeNull()
+	})
+
+	test('returns null for a malformed payload', () => {
+		expect(formatLogDetailSections(event('llm_call', 'broken'))).toBeNull()
+		expect(formatLogDetailSections(event('llm_call', null))).toBeNull()
+	})
+})
+
 describe('formatLogEvent', () => {
 	function event(type: string, payload: unknown): LogEvent {
 		return { timestamp: 't', type, payload }
@@ -229,6 +426,14 @@ describe('formatLogEvent', () => {
 
 	test('role_finished → role · finished (status)', () => {
 		expect(formatLogEvent(event('role_finished', { role: 'planner', status: 'success' }))).toBe('planner · finished (success)')
+	})
+
+	test('role_finished omits the summary from the one-line view to keep long model prose from widening the row', () => {
+		expect(formatLogEvent(event('role_finished', { role: 'coder', status: 'success', summary: 'wrote output.txt' }))).toBe('coder · finished (success)')
+	})
+
+	test('role_finished shows status only on error; the summary and error reach the raw detail sections instead', () => {
+		expect(formatLogEvent(event('role_finished', { role: 'coder', status: 'error', summary: 'could not parse the file', error: { kind: 'invalid_arguments', message: 'bad json' } }))).toBe('coder · finished (error)')
 	})
 
 	test('role_finished without status omits the parenthetical', () => {
@@ -273,6 +478,18 @@ describe('formatLogEvent', () => {
 
 	test('role_not_found without parent renders the bare detail', () => {
 		expect(formatLogEvent(event('role_not_found', { roleName: 'missing' }))).toBe('role not found (missing)')
+	})
+
+	test('role_start → role · role start', () => {
+		expect(formatLogEvent(event('role_start', { role: 'planner', depth: 0, task: 'do it' }))).toBe('planner · role start')
+	})
+
+	test('agent_call → parent · agent call → child', () => {
+		expect(formatLogEvent(event('agent_call', { parent: 'orchestrator', child: 'coder', depth: 1 }))).toBe('orchestrator · agent call → coder')
+	})
+
+	test('agent_call falls back to the payload role when parent is absent', () => {
+		expect(formatLogEvent(event('agent_call', { role: 'orchestrator', child: 'coder' }))).toBe('orchestrator · agent call → coder')
 	})
 
 	test('an unknown event type with a role falls back to type · role', () => {
@@ -372,6 +589,7 @@ describe('renderRunView', () => {
 			type: 'llm_call',
 			summary: 'planner · llm call',
 			payload: { role: 'planner' },
+			detailSections: null,
 		})
 		expect(view.recentLog[1]!.summary).toBe('planner · agent')
 		expect(view.recentLog[1]!.payload).toEqual({ role: 'planner', tool: 'agent' })
@@ -419,6 +637,38 @@ describe('renderRunView', () => {
 		const snapshot = parseRunSnapshot({ metaText: null, logText: '' })
 		const view = renderRunView(snapshot, { maxLogLines: 200, now: NOW })
 		expect(view.currentActivity).toBeNull()
+	})
+
+	test('roleTree is null when the log carries no role_start/role_finished/agent_call events', () => {
+		const snapshot = parseRunSnapshot({
+			metaText: null,
+			logText: [
+				logEvent('llm_call', 'planner', 't1'),
+				logEvent('tool_call', 'planner', 't2', { tool: 'finish' }),
+			].join('\n'),
+		})
+		const view = renderRunView(snapshot, { maxLogLines: 200, now: NOW })
+		expect(view.roleTree).toBeNull()
+		expect(view.roles.length).toBe(1)
+	})
+
+	test('roleTree surfaces a parent→child tree when role_start/role_finished events are present', () => {
+		const snapshot = parseRunSnapshot({
+			metaText: null,
+			logText: [
+				JSON.stringify({ timestamp: 't1', type: 'role_start', payload: { role: 'orchestrator', depth: 0, task: 't' } }),
+				JSON.stringify({ timestamp: 't2', type: 'agent_call', payload: { parent: 'orchestrator', child: 'coder', depth: 1 } }),
+				JSON.stringify({ timestamp: 't3', type: 'role_start', payload: { role: 'coder', depth: 1, parent: 'orchestrator', task: 'code' } }),
+				JSON.stringify({ timestamp: 't4', type: 'role_finished', payload: { role: 'coder', depth: 1, status: 'success', parent: 'orchestrator' } }),
+				JSON.stringify({ timestamp: 't5', type: 'role_finished', payload: { role: 'orchestrator', depth: 0, status: 'success' } }),
+			].join('\n'),
+		})
+		const view = renderRunView(snapshot, { maxLogLines: 200, now: NOW })
+		expect(view.roleTree).not.toBeNull()
+		expect(view.roleTree!.length).toBe(1)
+		expect(view.roleTree![0]!.role).toBe('orchestrator')
+		expect(view.roleTree![0]!.children.length).toBe(1)
+		expect(view.roleTree![0]!.children[0]!.role).toBe('coder')
 	})
 
 	test('questionHistory pairs ask_human events with their human_answer events', () => {
@@ -733,6 +983,7 @@ describe('toRecentLogEntry', () => {
 			type: 'tool_call',
 			summary: 'coder · write_file',
 			payload: { role: 'coder', tool: 'write_file' },
+			detailSections: null,
 		})
 	})
 

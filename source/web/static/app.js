@@ -571,27 +571,50 @@ function BudgetsLine(b) {
 	])
 }
 
+function RoleActivityItem(role, isActive, now) {
+	return h('li', { key: role.role, class: { 'role-active': isActive } }, [
+		isActive ? h('span', { class: 'role-pulse' }) : null,
+		h('strong', {}, role.role),
+		h('span', {}, ` — ${formatNumber(role.eventCount)} events · ${formatNumber(role.llmCalls)} LLM calls · ${formatNumber(role.toolCalls)} tool calls`),
+		h('div', { class: 'role-times' }, [
+			h('span', { class: 'role-time' }, ['first seen ', h('time', { title: role.firstSeen ?? '' }, formatRelative(role.firstSeen, now))]),
+			h('span', { class: 'role-time' }, ['last seen ', h('time', { title: role.lastSeen ?? '' }, formatRelative(role.lastSeen, now))]),
+		]),
+		role.recentTools.length > 0 ? h('div', { class: 'role-tools' }, `recent tools: ${role.recentTools.join(', ')}`) : null,
+		role.lastPromptTokens !== null && role.lastPromptTokens !== undefined ? h('div', { class: 'role-context' }, `last context: ${formatTokens(role.lastPromptTokens)} tokens`) : null,
+	])
+}
+
+// Renders a role tree node and its descendants indented by depth so the parent→child structure the executor logged is visible at a glance. Only the status is shown beside the name — the role's full summary can be long model prose and would inflate the row; it is reachable via the role_finished log row's detail sections. Only the single invocation the executor marked active pulses, so repeated sequential delegations to the same role are not mistaken for parallel runs.
+function RoleTreeNodeItem(node, level) {
+	const isActive = node.active === true
+	const status = node.status !== null && node.status !== undefined ? ` (${node.status})` : ''
+	const childItems = node.children.map((child) => RoleTreeNodeItem(child, level + 1))
+	return h('li', { key: `${node.role}-${level}-${node.depth}`, class: { 'role-active': isActive, 'role-tree-node': true, 'role-tree-root': level === 0 } }, [
+		isActive ? h('span', { class: 'role-pulse' }) : null,
+		h('strong', {}, node.role),
+		h('span', { class: 'role-tree-status' }, status),
+		childItems.length > 0 ? h('ul', { class: 'role-tree-children' }, childItems) : null,
+	])
+}
+
 function RolesPanel(state) {
 	const view = state.selectedRunView
-	const roles = view ? view.roles : []
 	const activeRole = view && !isTerminalStatus(view.status) && view.currentActivity ? view.currentActivity.role : null
-	const children = roles.length === 0
-		? [h('li', {}, 'No role activity yet.')]
-		: roles.map((role) => {
-				const isActive = activeRole !== null && role.role === activeRole
-				return h('li', { key: role.role, class: { 'role-active': isActive } }, [
-					isActive ? h('span', { class: 'role-pulse' }) : null,
-					h('strong', {}, role.role),
-					h('span', {}, ` — ${formatNumber(role.eventCount)} events · ${formatNumber(role.llmCalls)} LLM calls · ${formatNumber(role.toolCalls)} tool calls`),
-					h('div', { class: 'role-times' }, [
-						h('span', { class: 'role-time' }, ['first seen ', h('time', { title: role.firstSeen ?? '' }, formatRelative(role.firstSeen, state.now))]),
-						h('span', { class: 'role-time' }, ['last seen ', h('time', { title: role.lastSeen ?? '' }, formatRelative(role.lastSeen, state.now))]),
-					]),
-					role.recentTools.length > 0 ? h('div', { class: 'role-tools' }, `recent tools: ${role.recentTools.join(', ')}`) : null,
-					role.lastPromptTokens !== null && role.lastPromptTokens !== undefined ? h('div', { class: 'role-context' }, `last context: ${formatTokens(role.lastPromptTokens)} tokens`) : null,
-				])
-			})
-	return h('section', { id: 'roles-panel', class: 'panel' }, [h('h2', {}, 'Role activity'), h('ul', { id: 'roles' }, children)])
+	const tree = view ? view.roleTree : null
+	let heading
+	let children
+	if (Array.isArray(tree) && tree.length > 0) {
+		heading = 'Role tree'
+		children = tree.map((node) => RoleTreeNodeItem(node, 0))
+	} else {
+		heading = 'Role activity'
+		const roles = view ? view.roles : []
+		children = roles.length === 0
+			? [h('li', {}, 'No role activity yet.')]
+			: roles.map((role) => RoleActivityItem(role, activeRole !== null && role.role === activeRole, state.now))
+	}
+	return h('section', { id: 'roles-panel', class: 'panel' }, [h('h2', {}, heading), h('ul', { id: 'roles' }, children)])
 }
 
 function canLoadEarlier(logPage) {
@@ -599,6 +622,21 @@ function canLoadEarlier(logPage) {
 	// In extended mode the oldest loaded index must be above 0; in tail mode the recent page must be full (a full page means there may be older events beyond it).
 	if (logPage.offset !== null) return logPage.offset > 0
 	return logPage.entries.length >= LOG_PAGE_SIZE
+}
+
+function LogDetail(entry, expanded) {
+	if (expanded !== true) {
+		return h('pre', { class: 'log-detail', hidden: true }, JSON.stringify(entry.payload, null, 2))
+	}
+	const sections = entry.detailSections
+	if (!Array.isArray(sections) || sections.length === 0) {
+		return h('pre', { class: 'log-detail' }, JSON.stringify(entry.payload, null, 2))
+	}
+	// Paired sections: each label sits beside its content so an llm_call shows sent/received/finish reason/usage and a tool_call/tool_result shows arguments/result, rather than a single opaque blob. A string-valued section (e.g. a role_finished summary) is placed into the <pre> as a raw text node so its embedded newlines render as real line breaks under white-space: pre-wrap — JSON.stringify would escape them to literal "\n". Object/array content is JSON.stringify-ed for legibility. Both paths keep untrusted content as text nodes (never markup), preserving the security invariant.
+	return h('div', { class: 'log-detail log-detail-sections' }, sections.map((section) => h('div', { class: 'log-detail-section' }, [
+		h('span', { class: 'log-detail-label' }, section.label),
+		h('pre', { class: 'log-detail-content' }, typeof section.content === 'string' ? section.content : JSON.stringify(section.content, null, 2)),
+	])))
 }
 
 function LogPanel(state) {
@@ -623,7 +661,7 @@ function LogPanel(state) {
 					h('span', { class: 'log-type' }, entry.type),
 					h('span', { class: 'log-summary' }, entry.summary),
 					h('button', { type: 'button', class: 'log-toggle', onclick: [ToggleLogRow, toggleKey] }, expanded ? 'hide' : 'raw'),
-					h('pre', { class: 'log-detail', hidden: !expanded }, JSON.stringify(entry.payload, null, 2)),
+					LogDetail(entry, expanded),
 				]),
 			)
 			renderIndex++

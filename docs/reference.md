@@ -64,6 +64,20 @@ If the same tool is called with the same arguments more than `executor.maxRepeat
 
 The executor maintains a single queue of pending LLM requests. At most one is in flight at a time. A run is a depth-first traversal of the role tree: when `agent` is called, the child runs to completion before the parent continues.
 
+### Log events
+
+`log.jsonl` is append-only and carries one JSON object per line. Each event has `timestamp`, `type`, and a `payload` whose shape depends on the type. The role-tree and per-turn detail events are:
+
+- `role_start` — `{ role, depth, task, parent? }`. Emitted when a role begins, after its definition is confirmed to exist. `parent` is the calling role's name, omitted for the entry role at depth 0. A refused `agent` call (depth exceeded or unknown child) emits no `role_start` for the never-run child.
+- `role_finished` — `{ role, depth, status, summary?, error?, parent? }`. Emitted when a role returns a final card. `status` is the `ResultCard` status; `summary` is the role's own explanation of its result (so a reviewer reading only the log can see why a role errored, rather than only that it did); `error` is the structured `{ kind, message?, details? }` when the card carried one; `parent` is omitted for the entry role. Every `role_start` is paired with exactly one `role_finished`.
+- `agent_call` — `{ parent, child, depth, budget? }`. Emitted when the `agent` tool is invoked, before the child runs, carrying the parent→child edge even for callers that do not read `role_start`.
+- `llm_call` — emitted only on success paths (a turn that returned content/tool calls or finished). Payload: `{ role, messageCount, sent, received, usage, finishReason? }`. `sent` is the message list sent for the turn (each message's `role` and `content`; reasoning omitted; `tool_calls` on assistant messages included). `received` is the assistant response actually received: `content`, `reasoning` (if any), and the parsed `toolCalls` (each call's `id`, `function.name`, and `function.arguments`). `usage` carries `promptTokens`, `completionTokens`, `totalTokens`, and `cachedPromptTokens` (when the endpoint reports a cached share). `finishReason` is the OpenAI `choices[0].finish_reason` (e.g. `stop`, `length`, `tool_calls`, `content_filter`), absent when the endpoint omits it so "absent" is distinguishable from "model stopped". The `llm_unavailable` and `context_budget_exceeded` paths log their own dedicated events and do not emit a misleading `llm_call`.
+- `tool_call` — `{ role, tool, arguments }`. `arguments` is the raw JSON-arguments string the model passed, so the exact parameters are recoverable.
+- `tool_result` — `{ role, tool, kind, result }`. `result` is the full un-truncated `ToolResult` (`{ kind: 'success', data }` or `{ kind, message, details }`). Truncation still applies only to what is appended to the conversation; the log records the un-truncated result so a reviewer is not flying blind on what a tool returned.
+- `depth_exceeded` — `{ parent, child, depth, error }` when an `agent` call is refused for exceeding `maxAgentDepth`.
+- `role_not_found` — `{ roleName }` for an unknown entry role, or `{ parent, roleName }` when a child role name is invalid.
+- `role_budget_exceeded`, `global_budget_exceeded`, `llm_unavailable`, `context_budget_exceeded`, `implicit_finish`, `unknown_tool`, `invalid_tool_call` — failure and lifecycle events carrying the role and the relevant detail.
+
 ## Built-in tools
 
 Built-in tools are listed in the Guild like any other tool but are implemented by the executor.
@@ -305,4 +319,4 @@ Run bookkeeping lives alongside the project under `.orchestration/runs/`:
 └── log.jsonl      # one JSON object per line: llm calls, tool calls, errors
 ```
 
-The workspace itself holds the final filesystem state (mutated in place). `log.jsonl` is append-only — the executor logs every LLM call, tool call, and error so a reviewer can reconstruct what happened.
+The workspace itself holds the final filesystem state (mutated in place). `log.jsonl` is append-only — the executor logs every role start/finish, the parent→child agent-call edges, every LLM turn (sent messages, received response, finish reason, per-call usage), and every tool call/result (raw arguments and the full un-truncated result) so a reviewer can reconstruct exactly what happened from the log alone.

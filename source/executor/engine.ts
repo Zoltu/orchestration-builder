@@ -29,6 +29,8 @@ export interface EngineContext {
 	roleName: string
 	task: string
 	roleDefinitionOverride?: RoleDefinition
+	// The calling role's name, omitted for the entry role at depth 0 so a reviewer can distinguish a root role from a child and render.ts can build the parent→child tree.
+	parent?: string
 }
 
 export interface EngineDependencies {
@@ -78,10 +80,50 @@ function logEvent(appendLog: AppendLog, type: string, payload: unknown): void {
 	appendLog(event)
 }
 
-// Builds the llm_call payload, attaching the per-call usage reported by the endpoint when the call succeeded.
-// The context_budget_exceeded and llm_unavailable results carry no real usage (the over-budget prompt size on a context-budget result is a rejection signal, not consumed tokens), so usage is omitted there and the budget view treats those calls as usage-unavailable rather than zero.
+// Builds the role_finished payload, extending the legacy {role, status} with depth, an optional parent, and the result-card summary/error so render.ts can build the parent→child tree and a reviewer reading only log.jsonl can see why a role finished (especially why it errored — without this, an erroring role's explanation lives only on the returned ResultCard / meta.json, never in the log stream).
+// The added fields are additive: existing readers that read only role/status keep working.
+function roleFinishedPayload(roleName: string, depth: number, card: ResultCard, parent: string | undefined): unknown {
+	const payload: Record<string, unknown> = { role: roleName, depth, status: card.status }
+	if (card.summary !== '') payload['summary'] = card.summary
+	if (card.error !== undefined) payload['error'] = card.error
+	if (parent !== undefined) payload['parent'] = parent
+	return payload
+}
+
+// Shapes a sent message for the llm_call payload: role and content only. Reasoning is omitted (it is an internal field, not part of what the reviewer needs to reconstruct the request), and tool_calls on assistant messages are carried so the message-list reflects the full prior turn.
+function shapeSentMessage(message: Message): { role: string; content: string; tool_calls?: Array<{ id: string; type: string; function: { name: string; arguments: string } }> } {
+	const shaped: { role: string; content: string; tool_calls?: Array<{ id: string; type: string; function: { name: string; arguments: string } }> } = {
+		role: message.role,
+		content: message.content,
+	}
+	if (message.tool_calls !== undefined && message.tool_calls.length > 0) {
+		shaped.tool_calls = message.tool_calls.map((call) => ({
+			id: call.id,
+			type: call.type,
+			function: { name: call.function.name, arguments: call.function.arguments },
+		}))
+	}
+	return shaped
+}
+
+// Shapes the assistant response actually received so a reviewer can reconstruct what the model returned: content, reasoning (if any), and the parsed tool calls (each call's id, function.name, and function.arguments — the exact parameters recoverable).
+function shapeAssistantResponse(llmResult: { content?: string; reasoning?: string | null; toolCalls: ToolCall[] }): { content?: string; reasoning?: string | null; toolCalls: Array<{ id: string; function: { name: string; arguments: string } }> } {
+	const shaped: { content?: string; reasoning?: string | null; toolCalls: Array<{ id: string; function: { name: string; arguments: string } }> } = {
+		toolCalls: llmResult.toolCalls.map((call) => ({
+			id: call.id,
+			function: { name: call.function.name, arguments: call.function.arguments },
+		})),
+	}
+	if (llmResult.content !== undefined) shaped.content = llmResult.content
+	if (llmResult.reasoning !== undefined) shaped.reasoning = llmResult.reasoning
+	return shaped
+}
+
+// Builds the llm_call payload for a successful turn, carrying the sent message list, the received assistant response, the finishReason, and the per-call usage in one event so a reviewer can reconstruct the full turn from a single log entry.
+// This is emitted only on the success paths (continue/tool_calls and success-finished); the llm_unavailable and context_budget_exceeded paths log their own dedicated events and must not emit a misleading llm_call.
 // promptTokens is the full prompt bill (cached + uncached); cachedPromptTokens is the subset the endpoint served from its prompt cache, so the uncached prompt bill is promptTokens - cachedPromptTokens. The two are tracked separately because they are billed at different rates.
-function llmCallPayload(roleName: string, messageCount: number, llmResult: LlmCallResult): unknown {
+function llmCallPayload(roleName: string, messages: Message[], llmResult: LlmCallResult): unknown {
+	const messageCount = messages.length
 	if (llmResult.kind === 'success') {
 		const promptTokens = llmResult.usage.promptTokens
 		const completionTokens = llmResult.usage.completionTokens
@@ -92,11 +134,15 @@ function llmCallPayload(roleName: string, messageCount: number, llmResult: LlmCa
 			totalTokens: promptTokens + completionTokens,
 		}
 		if (cachedPromptTokens !== undefined) usage['cachedPromptTokens'] = cachedPromptTokens
-		return {
+		const payload: Record<string, unknown> = {
 			role: roleName,
 			messageCount,
+			sent: messages.map(shapeSentMessage),
+			received: shapeAssistantResponse(llmResult),
 			usage,
 		}
+		if (llmResult.finishReason !== undefined) payload['finishReason'] = llmResult.finishReason
+		return payload
 	}
 	return { role: roleName, messageCount }
 }
@@ -215,8 +261,9 @@ async function dispatchAndRecord({ deps, roleState, roleName, dispatchCtx, toolC
 	} else if (result.kind === 'invalid_tool_call') {
 		logEvent(deps.appendLog, 'invalid_tool_call', { role: roleName, tool: toolCall.function.name })
 	} else {
-		logEvent(deps.appendLog, 'tool_call', { role: roleName, tool: toolCall.function.name })
-		logEvent(deps.appendLog, 'tool_result', { role: roleName, tool: toolCall.function.name, kind: result.kind })
+		// tool_call carries the model's raw arguments string so the exact parameters are recoverable, and tool_result carries the full un-truncated ToolResult so a reviewer is not flying blind on what a tool actually returned. Truncation still applies only when the result is appended to the conversation below.
+		logEvent(deps.appendLog, 'tool_call', { role: roleName, tool: toolCall.function.name, arguments: toolCall.function.arguments })
+		logEvent(deps.appendLog, 'tool_result', { role: roleName, tool: toolCall.function.name, kind: result.kind, result })
 		roleState.recentToolCalls.push({ name: toolCall.function.name, argsHash })
 		if (roleState.recentToolCalls.length > 50) {
 			roleState.recentToolCalls.shift()
@@ -245,6 +292,15 @@ export async function runRole(deps: EngineDependencies, context: EngineContext):
 			error: createToolError('unknown_tool', `Unknown role: ${context.roleName}`),
 		})
 	}
+
+	// role_start is emitted after the role definition is confirmed to exist, so an unknown entry role still fires role_not_found without leaving an orphan role_start. The depth and optional parent let render.ts reconstruct the parent→child tree.
+	const roleStartPayload: Record<string, unknown> = {
+		role: context.roleName,
+		depth: context.depth,
+		task: context.task,
+	}
+	if (context.parent !== undefined) roleStartPayload['parent'] = context.parent
+	logEvent(deps.appendLog, 'role_start', roleStartPayload)
 
 	const systemPrompt = guild.prompts[context.roleName] ?? ''
 
@@ -288,12 +344,21 @@ export async function runRole(deps: EngineDependencies, context: EngineContext):
 					error: createToolError('unknown_tool', `Unknown role: ${childRoleName}`),
 				})
 			}
+			// agent_call logs the parent→child edge with depth and the delegated budget before the child runs, so the parent→child linkage is recoverable even from a caller that does not read role_start.
+			const agentCallPayload: Record<string, unknown> = {
+				parent: context.roleName,
+				child: childRoleName,
+				depth: context.depth + 1,
+			}
+			if (budget !== undefined) agentCallPayload['budget'] = budget
+			logEvent(deps.appendLog, 'agent_call', agentCallPayload)
 			const override = budget !== undefined ? cloneRoleDefinitionWithBudget(childDefinition, budget) : undefined
 			return await runRole(deps, {
 				...context,
 				depth: context.depth + 1,
 				roleName: childRoleName,
 				task: childTask,
+				parent: context.roleName,
 				...(override !== undefined ? { roleDefinitionOverride: override } : {}),
 			})
 		},
@@ -311,12 +376,27 @@ export async function runRole(deps: EngineDependencies, context: EngineContext):
 		maxToolOutputChars: guild.config.contextPolicy.maxToolOutputChars,
 	}
 
+	const finalCard = await executeRoleLoop(deps, context, roleDefinition, roleState, allowedToolsManifests, dispatchCtx, guild.config.executor)
+	logEvent(deps.appendLog, 'role_finished', roleFinishedPayload(context.roleName, context.depth, finalCard, context.parent))
+	return finalCard
+}
+
+// The role's turn loop, extracted from runRole so every exit emits exactly one role_finished at the runRole call site, guaranteeing the role_start/role_finished pairing regardless of which budget or finish path terminates the role.
+async function executeRoleLoop(
+	deps: EngineDependencies,
+	context: EngineContext,
+	roleDefinition: RoleDefinition,
+	roleState: RoleState,
+	allowedToolsManifests: ToolManifest[],
+	dispatchCtx: DispatchContext,
+	config: ExecutorConfig,
+): Promise<ResultCard> {
 	while (true) {
 		const globalState: GlobalBudgetState = {
 			startMs: context.startMs,
 			depth: context.depth,
 		}
-		const globalError = checkGlobalBudgets(globalState, guild.config.executor)
+		const globalError = checkGlobalBudgets(globalState, config)
 		if (globalError !== null) {
 			logEvent(deps.appendLog, 'global_budget_exceeded', { role: context.roleName, error: globalError })
 			return createResultCard('error', 'Global budget exceeded', { error: globalError })
@@ -329,7 +409,7 @@ export async function runRole(deps: EngineDependencies, context: EngineContext):
 			recentToolCalls: roleState.recentToolCalls,
 			recentCompactionPromptTokens: roleState.recentCompactionPromptTokens,
 		}
-		const roleError = checkRoleBudgets(roleBudgetState, guild.config.executor, roleDefinition.budget)
+		const roleError = checkRoleBudgets(roleBudgetState, config, roleDefinition.budget)
 		if (roleError !== null) {
 			logEvent(deps.appendLog, 'role_budget_exceeded', { role: context.roleName, error: roleError })
 			return createResultCard('error', 'Role budget exceeded', { error: roleError })
@@ -341,19 +421,18 @@ export async function runRole(deps: EngineDependencies, context: EngineContext):
 			messages,
 			tools: allowedToolsManifests,
 		})
-		// Logged after the call returns so the per-call usage reported by the endpoint can be attached; an llm_call event is emitted on every path (including the context-budget-exceeded retry and llm-unavailable paths) so the activity trail stays consistent, with usage present only when the call actually succeeded.
-		logEvent(deps.appendLog, 'llm_call', llmCallPayload(context.roleName, messages.length, llmResult))
 
-		const handling = handleLlmResult(llmResult, roleState, deps, roleDefinition, context, guild.config.executor)
+		const handling = handleLlmResult(llmResult, roleState, deps, roleDefinition, context, config)
+		// llm_call is emitted after handleLlmResult so the sent message list, the received assistant response, finishReason, and per-call usage all land in one event. It is emitted only on the success paths (continue/tool_calls and success-finished): the llm_unavailable and context_budget_exceeded paths log their own dedicated events inside handleLlmResult and must not also emit a misleading llm_call.
+		if (llmResult.kind === 'success') {
+			logEvent(deps.appendLog, 'llm_call', llmCallPayload(context.roleName, messages, llmResult))
+		}
 		if (handling.kind === 'continue') continue
 		if (handling.kind === 'finished') return handling.card
 
 		for (const toolCall of handling.toolCalls) {
 			const finalCard = await dispatchAndRecord({ deps, roleState, roleName: context.roleName, dispatchCtx, toolCall })
-			if (finalCard !== null) {
-				logEvent(deps.appendLog, 'role_finished', { role: context.roleName, status: finalCard.status })
-				return finalCard
-			}
+			if (finalCard !== null) return finalCard
 		}
 	}
 }

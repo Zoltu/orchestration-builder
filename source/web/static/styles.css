@@ -317,9 +317,9 @@ li:last-child {
 
 .role-pulse {
 	display: inline-block;
-	width: 0.5rem;
-	height: 0.5rem;
-	margin-right: 0.35rem;
+	width: 0.4rem;
+	height: 0.4rem;
+	margin-right: 0.25rem;
 	border-radius: 50%;
 	background: #1f6feb;
 	vertical-align: middle;
@@ -415,6 +415,59 @@ li:last-child {
 	font-size: 0.78rem;
 	white-space: pre-wrap;
 	word-break: break-word;
+}
+
+.log-detail-sections {
+	display: flex;
+	flex-direction: column;
+	gap: 0.4rem;
+}
+
+.log-detail-section {
+	display: flex;
+	flex-direction: column;
+	gap: 0.15rem;
+}
+
+.log-detail-label {
+	font-size: 0.7rem;
+	color: #52606d;
+	text-transform: uppercase;
+	letter-spacing: 0.04em;
+}
+
+.log-detail-content {
+	margin: 0;
+	padding: 0.35rem;
+	background: #ffffff;
+	border: 1px solid #e2e2e7;
+	border-radius: 4px;
+	font-size: 0.76rem;
+	white-space: pre-wrap;
+	word-break: break-word;
+}
+
+.role-tree-node {
+	padding: 0.1rem 0;
+	line-height: 1.25;
+	border-bottom: none;
+}
+
+.role-tree-children {
+	margin: 0.05rem 0 0 0.5rem;
+	padding-left: 0.4rem;
+	list-style: none;
+	border-left: 2px solid #e2e2e7;
+}
+
+.role-tree-status {
+	color: #52606d;
+	font-size: 0.75rem;
+	margin-left: 0.2rem;
+}
+
+.role-tree-root {
+	font-weight: 600;
 }
 
 .question-history:empty {

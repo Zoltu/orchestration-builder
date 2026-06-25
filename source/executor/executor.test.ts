@@ -132,6 +132,10 @@ function makeLoader(guild: LoadedGuild): LoadGuild {
 	return (_guildDir: string) => guild
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
 function makeDeps(llm: FakeLlm, persistence: FakePersistenceFns, loadGuild: LoadGuild): ExecutorDependencies {
 	return {
 		llmCaller: llm,
@@ -311,9 +315,20 @@ describe('runExecutor', () => {
 		})
 
 		const eventTypes = persistence.state.events.map((e) => e.type)
+		expect(eventTypes).toContain('role_start')
 		expect(eventTypes).toContain('llm_call')
 		expect(eventTypes).toContain('tool_call')
 		expect(eventTypes).toContain('tool_result')
 		expect(eventTypes).toContain('role_finished')
+		const finished = persistence.state.events.find((e) => e.type === 'role_finished')
+		expect(finished).toBeDefined()
+		const finishedPayload = finished!.payload
+		expect(isRecord(finishedPayload)).toBe(true)
+		if (isRecord(finishedPayload)) {
+			expect(finishedPayload['role']).toBe('main')
+			expect(finishedPayload['depth']).toBe(0)
+			expect(finishedPayload['status']).toBe('success')
+			expect('parent' in finishedPayload).toBe(false)
+		}
 	})
 })

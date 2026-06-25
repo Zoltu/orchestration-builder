@@ -130,6 +130,50 @@ snapshots.set('run-cached', {
 	].join('\n'),
 })
 
+// A run whose log carries the role-tree events and the rich llm_call/tool_call/tool_result payloads, so the /api/runs/:id view exercises the tree shape and the paired raw-payload detail end to end.
+snapshots.set('run-tree', {
+	metaText: JSON.stringify({
+		runId: 'run-tree',
+		guildPath: 'guild',
+		benchmarkPath: 'bench',
+		task: 'task for run-tree',
+		status: 'success',
+		startTime: '2026-01-01T00:00:00.000Z',
+		endTime: '2026-01-01T00:01:00.000Z',
+	}),
+	logText: [
+		JSON.stringify({ timestamp: '2026-01-01T00:00:01.000Z', type: 'role_start', payload: { role: 'orchestrator', depth: 0, task: 'task for run-tree' } }),
+		JSON.stringify({ timestamp: '2026-01-01T00:00:02.000Z', type: 'llm_call', payload: { role: 'orchestrator', messageCount: 2, sent: [{ role: 'system', content: 'p' }, { role: 'user', content: 'task for run-tree' }], received: { content: 'delegating', toolCalls: [{ id: 'c1', function: { name: 'agent', arguments: '{"role":"coder","task":"code"}' } }] }, finishReason: 'tool_calls', usage: { promptTokens: 50, completionTokens: 10, totalTokens: 60 } } }),
+		JSON.stringify({ timestamp: '2026-01-01T00:00:03.000Z', type: 'tool_call', payload: { role: 'orchestrator', tool: 'agent', arguments: '{"role":"coder","task":"code"}' } }),
+		JSON.stringify({ timestamp: '2026-01-01T00:00:04.000Z', type: 'agent_call', payload: { parent: 'orchestrator', child: 'coder', depth: 1 } }),
+		JSON.stringify({ timestamp: '2026-01-01T00:00:05.000Z', type: 'role_start', payload: { role: 'coder', depth: 1, parent: 'orchestrator', task: 'code' } }),
+		JSON.stringify({ timestamp: '2026-01-01T00:00:06.000Z', type: 'tool_result', payload: { role: 'orchestrator', tool: 'agent', kind: 'success', result: { kind: 'success', data: { status: 'success', summary: 'coded' } } } }),
+		JSON.stringify({ timestamp: '2026-01-01T00:00:07.000Z', type: 'role_finished', payload: { role: 'coder', depth: 1, status: 'success', parent: 'orchestrator' } }),
+		JSON.stringify({ timestamp: '2026-01-01T00:00:08.000Z', type: 'role_finished', payload: { role: 'orchestrator', depth: 0, status: 'success' } }),
+	].join('\n'),
+})
+
+// A run whose orchestrator delegates to coder twice (first errors, second succeeds) — mirrors a retry — so the per-invocation tree, the per-invocation status, and the inline error surfacing are all exercised end to end. Pre-fix this would have shown one merged coder pulsing while reading "error" despite the run succeeding.
+snapshots.set('run-retry', {
+	metaText: JSON.stringify({
+		runId: 'run-retry',
+		guildPath: 'guild',
+		benchmarkPath: 'bench',
+		task: 'task for run-retry',
+		status: 'success',
+		startTime: '2026-01-01T00:00:00.000Z',
+		endTime: '2026-01-01T00:02:00.000Z',
+	}),
+	logText: [
+		JSON.stringify({ timestamp: '2026-01-01T00:00:01.000Z', type: 'role_start', payload: { role: 'orchestrator', depth: 0, task: 'task for run-retry' } }),
+		JSON.stringify({ timestamp: '2026-01-01T00:00:02.000Z', type: 'role_start', payload: { role: 'coder', depth: 1, parent: 'orchestrator', task: 'first attempt' } }),
+		JSON.stringify({ timestamp: '2026-01-01T00:00:03.000Z', type: 'role_finished', payload: { role: 'coder', depth: 1, status: 'error', summary: 'file not found', error: { kind: 'invalid_arguments', message: 'no such file' }, parent: 'orchestrator' } }),
+		JSON.stringify({ timestamp: '2026-01-01T00:00:04.000Z', type: 'role_start', payload: { role: 'coder', depth: 1, parent: 'orchestrator', task: 'second attempt' } }),
+		JSON.stringify({ timestamp: '2026-01-01T00:00:05.000Z', type: 'role_finished', payload: { role: 'coder', depth: 1, status: 'success', summary: 'wrote the file', parent: 'orchestrator' } }),
+		JSON.stringify({ timestamp: '2026-01-01T00:00:06.000Z', type: 'role_finished', payload: { role: 'orchestrator', depth: 0, status: 'success', summary: 'done after retry' } }),
+	].join('\n'),
+})
+
 // Shared server for the read-only routes (static assets, list, get-by-id, questions, answer).
 // The submission-mutating routes get their own fresh server per test to avoid cross-test ordering coupling.
 const humanBackend = createWebHumanBackend()
@@ -330,13 +374,15 @@ describe('createWebServer /api/runs (list)', () => {
 		expect(response.status).toBe(200)
 		const list = await response.json()
 		expect(Array.isArray(list)).toBe(true)
-		expect(list.length).toBe(5)
-		expect(list[0].runId).toBe('run-long')
-		expect(list[1].runId).toBe('run-cached')
-		expect(list[2].runId).toBe('run-3')
-		expect(list[3].runId).toBe('run-2')
-		expect(list[4].runId).toBe('run-1')
-		expect(list[3]).toEqual({
+		expect(list.length).toBe(7)
+		expect(list[0].runId).toBe('run-tree')
+		expect(list[1].runId).toBe('run-retry')
+		expect(list[2].runId).toBe('run-long')
+		expect(list[3].runId).toBe('run-cached')
+		expect(list[4].runId).toBe('run-3')
+		expect(list[5].runId).toBe('run-2')
+		expect(list[6].runId).toBe('run-1')
+		expect(list[5]).toEqual({
 			runId: 'run-2',
 			status: 'error',
 			task: 'task for run-2',
@@ -424,6 +470,60 @@ describe('createWebServer /api/runs/:id', () => {
 			question: 'Still unsure?',
 			askedAt: '2026-01-01T00:00:31.000Z',
 		})
+	})
+
+	test('exposes the role tree and paired raw-payload detail sections for a tree-bearing run', async () => {
+		const response = await fetch(`${readOnlyBaseUrl}/api/runs/run-tree`)
+		expect(response.status).toBe(200)
+		const view = await response.json()
+		expect(view.roleTree).not.toBeNull()
+		expect(view.roleTree.length).toBe(1)
+		expect(view.roleTree[0].role).toBe('orchestrator')
+		expect(view.roleTree[0].children.length).toBe(1)
+		expect(view.roleTree[0].children[0].role).toBe('coder')
+		expect(view.roleTree[0].children[0].parent).toBe('orchestrator')
+
+		// The llm_call entry carries paired detail sections: sent messages, received response, finish reason, and usage.
+		const llmEntry = view.recentLog.find((entry: { type: string }) => entry.type === 'llm_call')
+		expect(llmEntry.detailSections).not.toBeNull()
+		expect(llmEntry.detailSections.map((s: { label: string }) => s.label)).toEqual(['sent', 'received', 'finish reason', 'usage'])
+		expect(llmEntry.detailSections[2].content).toBe('tool_calls')
+
+		// The tool_call entry carries the raw arguments; the tool_result entry carries the full un-truncated result.
+		const toolCallEntry = view.recentLog.find((entry: { type: string }) => entry.type === 'tool_call')
+		expect(toolCallEntry.detailSections.map((s: { label: string }) => s.label)).toEqual(['arguments'])
+		expect(toolCallEntry.detailSections[0].content).toBe('{"role":"coder","task":"code"}')
+		const toolResultEntry = view.recentLog.find((entry: { type: string }) => entry.type === 'tool_result')
+		expect(toolResultEntry.detailSections.map((s: { label: string }) => s.label)).toEqual(['result'])
+		expect(toolResultEntry.detailSections[0].content).toEqual({ kind: 'success', data: { status: 'success', summary: 'coded' } })
+	})
+
+	test('a retry run shows two distinct coder invocations with their own statuses and surfaces the error summary inline', async () => {
+		const response = await fetch(`${readOnlyBaseUrl}/api/runs/run-retry`)
+		expect(response.status).toBe(200)
+		const view = await response.json()
+		// The tree has two coder invocations under one orchestrator, each with its own status — not one merged node.
+		expect(view.roleTree.length).toBe(1)
+		const root = view.roleTree[0]
+		expect(root.role).toBe('orchestrator')
+		expect(root.children.length).toBe(2)
+		expect(root.children[0].role).toBe('coder')
+		expect(root.children[0].status).toBe('error')
+		expect(root.children[0].summary).toBe('file not found')
+		expect(root.children[1].role).toBe('coder')
+		expect(root.children[1].status).toBe('success')
+		expect(root.children[1].summary).toBe('wrote the file')
+		// The completed run has no active invocation.
+		expect(root.active).toBe(false)
+		expect(root.children[0].active).toBe(false)
+		expect(root.children[1].active).toBe(false)
+
+		// The erroring coder's role_finished shows status only in the one-line summary (the model's full prose is kept out of the row), with the summary text and structured error reachable as paired detail sections.
+		const errorFinish = view.recentLog.find((entry: { type: string; summary: string }) => entry.type === 'role_finished' && entry.summary === 'coder · finished (error)')
+		expect(errorFinish).toBeDefined()
+		expect(errorFinish.detailSections.map((s: { label: string }) => s.label)).toEqual(['summary', 'error'])
+		expect(errorFinish.detailSections[0].content).toBe('file not found')
+		expect(errorFinish.detailSections[1].content).toEqual({ kind: 'invalid_arguments', message: 'no such file' })
 	})
 })
 

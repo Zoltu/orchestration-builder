@@ -19,6 +19,8 @@ export type LlmCallResult =
 		reasoning?: string | null
 		toolCalls: ToolCall[]
 		usage: LlmUsage
+		// OpenAI finish_reason for choices[0] (e.g. "stop", "length", "tool_calls", "content_filter"), so a reviewer can tell why the model stopped emitting. Absent when the endpoint omits the field, so "absent" is distinguishable from a default like "".
+		finishReason?: string
 	}
 	| { kind: 'context_budget_exceeded'; promptTokens: number; contextWindow: number }
 	| { kind: 'llm_unavailable'; message: string }
@@ -41,6 +43,7 @@ interface ParsedSuccess {
 	reasoning?: string | null
 	toolCalls: ToolCall[]
 	usage: LlmUsage
+	finishReason?: string
 }
 
 interface ParsedError {
@@ -98,6 +101,10 @@ function parseOpenAiResponse(data: unknown, reasoningField: string | undefined):
 		}
 	}
 
+	// finish_reason is read before usage so it sits with the rest of the choice-derived fields; absent when the endpoint omits it, so a reviewer can distinguish "model stopped" from "field missing".
+	const finishReasonValue = firstChoice['finish_reason']
+	const finishReason = typeof finishReasonValue === 'string' ? finishReasonValue : undefined
+
 	const usageRaw = record['usage']
 	let promptTokens = 0
 	let completionTokens = 0
@@ -118,13 +125,15 @@ function parseOpenAiResponse(data: unknown, reasoningField: string | undefined):
 	const usage: LlmUsage = { promptTokens, completionTokens }
 	if (cachedPromptTokens !== undefined) usage.cachedPromptTokens = cachedPromptTokens
 
-	return {
+	const parsedSuccess: ParsedSuccess = {
 		kind: 'success',
 		content,
 		reasoning,
 		toolCalls,
 		usage,
 	}
+	if (finishReason !== undefined) parsedSuccess.finishReason = finishReason
+	return parsedSuccess
 }
 
 function detectContextBudgetExceeded(status: number, errorBody: string, data: unknown, contextWindow: number): LlmCallResult | undefined {
