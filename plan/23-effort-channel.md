@@ -64,3 +64,22 @@ Medium — a new persistence leaf with atomic write, threading through `RunOptio
 ## Operator handoff
 
 Run the service and exercise the API: `PUT /api/settings { effort: 4 }`, confirm `GET /api/settings` returns it; `POST /api/runs { task, effort: 2 }` and confirm the run's view shows effort 2; submit a run without `effort` and confirm it uses the project default. The run's *behavior* will not change with the slider until step 25 lands the Guild prompts — verify only that the value is accepted, persisted, logged, and surfaced.
+
+## Closeout (2026-06-25)
+
+`bun run typecheck` and `bun test source/` pass (476 tests). The effort channel is implemented end to end with no executor domain decisions: the executor carries, persists, logs, and injects the integer; the effort→behavior mapping is left undefined for step 25.
+
+Deviations from the plan wording, all made for a cleaner, convention-respecting end state:
+
+- **`EffortLevel` and `isEffortLevel` are split across modules by concern, not both in `types.ts`.** The plan's deliverable 1 placed the `EffortLevel` type alias *and* the `isEffortLevel` guard in `types.ts`. The repository convention is that `types.ts` holds only types and `validation.ts` holds every runtime `is*` guard (its header states this). So `EffortLevel` lives in `types.ts` (a shared type used by `RunOptions`/`RunMeta`) and `isEffortLevel` lives in `validation.ts` alongside `isRunOptions`/`isRunMeta`, which both consume it. The effort bounds (`EFFORT_MIN`/`EFFORT_MAX`), the run-level `DEFAULT_EFFORT`, and the directive string live in a new `source/executor/effort.ts` so the documented marker contract is centralized rather than inlined at the injection site.
+- **`RunMeta.effort` is optional; `RunOptions.effort` is required.** The plan said "add `effort: number` (0–5) to `RunOptions` and `RunMeta`." Making `RunMeta.effort` optional preserves backward compatibility with runs already on disk (and with the minimal-`RunMeta` guard test) — a meta written before this step has no effort and `isRunMeta` still accepts it, with the render layer surfacing `null`. `RunOptions.effort` is required because the live run always resolves a concrete effort (override → project default → `DEFAULT_EFFORT`) at submission, and requiring it forces every caller to thread it.
+- **The `effort_set` event is logged in `runExecutor`, not in `engine.ts`.** The plan's deliverable 5 attributed the `effort_set` log to `engine.ts`. "Once at run start" is run-level semantics, the effort is directly available on `RunOptions`, and logging it in `runExecutor` (before the entry role begins) keeps it decoupled from the engine's depth-0 entry-role gate and guarantees exactly one emission per run. The entry-role directive injection (the other half of deliverable 5) remains in `engine.ts`, gated on `depth === 0 && context.effort !== undefined` so the agent-spawn context spread cannot leak a global effort directive to children — the parent translates effort into delegation instructions.
+
+Design notes:
+
+- **The settings file is a new leaf pair in `persistence.ts`.** `createReadProjectSettings` returns `{}` for an absent or malformed file (torn-read handling, mirroring `meta.json`); `createWriteProjectSettings` writes atomically via write-temp + rename and creates `.orchestration/` when missing. A malformed read and an invalid-effort read both collapse to the default rather than crashing submission.
+- **`StartRun` gains an `effort` parameter** and `RunSubmissionDependencies` gains `readProjectSettings`; `submit(task, effortOverride?)` resolves the effort once (override → project default → `DEFAULT_EFFORT`) and threads it into the started run. The single-active-run invariant already rejects a second submit, so "not adjustable mid-run" needs no extra enforcement.
+- **`WebServerConfig` gains `readProjectSettings`/`writeProjectSettings`.** `POST /api/runs` accepts an optional `effort` validated by `isEffortLevel` (invalid → `400`); `GET /api/settings` returns `renderProjectSettings(...)`, `PUT /api/settings` validates and atomically persists. `renderProjectSettings` is a pure shaper in `render.ts` that emits only `{ effort }`.
+- **`RunView`/`RunSummary` carry `effort: EffortLevel | null`** (null when meta is absent or predates the channel).
+
+No new technical debt introduced beyond the planned row (the effort→behavior mapping is undefined until step 25).

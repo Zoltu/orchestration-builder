@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 
 import type { ContextPolicy, ExecutorConfig, GuildConfig, LogEvent, Message, ModelConfig, RoleDefinition, ToolCall, ToolManifest } from './types.js'
+import { effortDirective } from './effort.ts'
 import { runRole, type EngineDependencies } from './engine.ts'
 import type { LlmCallResult, LlmCaller } from './llm.ts'
 import type { LoadedGuild } from './loader.ts'
@@ -1057,5 +1058,89 @@ describe('runRole — rich LLM and tool payloads', () => {
 		const result = payloadField(toolResult!, 'result') as { kind: string; data: { text: string } }
 		expect(result.kind).toBe('success')
 		expect(result.data.text.length).toBe(200)
+	})
+})
+
+describe('runRole effort directive injection', () => {
+	test('the entry role receives the effort directive between its system prompt and the task', async () => {
+		const guild = buildGuild(
+			{ main: { systemPrompt: 'p', tools: ['finish'] } },
+			'main',
+		)
+		const llm = new FakeLlm()
+		llm.responses = [success([finishCall({ status: 'success', summary: 'Done' })])]
+		const { deps } = makeDeps(llm)
+
+		await runRole(deps, {
+			loadedGuild: guild,
+			depth: 0,
+			startMs: Date.now(),
+			roleName: 'main',
+			task: 'do it',
+			effort: 2,
+		})
+
+		expect(llm.calls.length).toBe(1)
+		const messages = llm.calls[0]!.messages
+		expect(messages[0]).toEqual({ role: 'system', content: 'prompt for main' })
+		expect(messages[1]).toEqual({ role: 'system', content: effortDirective(2) })
+		expect(messages[1]!.content).toContain('Quality level: 2 of 5')
+		expect(messages[2]).toEqual({ role: 'user', content: 'do it' })
+	})
+
+	test('the entry role receives no directive when effort is absent on the context', async () => {
+		const guild = buildGuild(
+			{ main: { systemPrompt: 'p', tools: ['finish'] } },
+			'main',
+		)
+		const llm = new FakeLlm()
+		llm.responses = [success([finishCall({ status: 'success', summary: 'Done' })])]
+		const { deps } = makeDeps(llm)
+
+		await runRole(deps, {
+			loadedGuild: guild,
+			depth: 0,
+			startMs: Date.now(),
+			roleName: 'main',
+			task: 'do it',
+		})
+
+		const messages = llm.calls[0]!.messages
+		expect(messages.length).toBe(2)
+		expect(messages[0]).toEqual({ role: 'system', content: 'prompt for main' })
+		expect(messages[1]).toEqual({ role: 'user', content: 'do it' })
+	})
+
+	test('a child role does not receive the effort directive even though the context is spread from the parent', async () => {
+		const guild = buildGuild(
+			{
+				parent: { systemPrompt: 'p', tools: ['agent', 'finish'] },
+				child: { systemPrompt: 'c', tools: ['finish'] },
+			},
+			'parent',
+		)
+		const llm = new FakeLlm()
+		llm.responses = [
+			success([agentCall('child', 'subtask')]),
+			success([finishCall({ status: 'success', summary: 'child done' })]),
+			success([finishCall({ status: 'success', summary: 'parent done' })]),
+		]
+		const { deps } = makeDeps(llm)
+
+		await runRole(deps, {
+			loadedGuild: guild,
+			depth: 0,
+			startMs: Date.now(),
+			roleName: 'parent',
+			task: 'delegate',
+			effort: 5,
+		})
+
+		// calls[0] = parent (entry, has directive); calls[1] = child (depth 1, no directive); calls[2] = parent follow-up.
+		const childMessages = llm.calls[1]!.messages
+		expect(childMessages[0]).toEqual({ role: 'system', content: 'prompt for child' })
+		expect(childMessages[1]).toEqual({ role: 'user', content: 'subtask' })
+		expect(childMessages.length).toBe(2)
+		expect(childMessages.some((m) => m.content.includes('Quality level'))).toBe(false)
 	})
 })

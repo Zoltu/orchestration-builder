@@ -593,3 +593,48 @@ li:last-child {
 	color: #52606d;
 	overflow-wrap: anywhere;
 }
+
+.effort-control {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 0.5rem;
+	margin: 0 0 0.75rem;
+	font-size: 0.85rem;
+	color: #52606d;
+}
+
+.effort-label {
+	font-weight: 600;
+	color: #1a1a1a;
+}
+
+.effort-control input[type='range'] {
+	cursor: pointer;
+}
+
+.effort-control input[type='range']:disabled {
+	opacity: 0.5;
+	cursor: default;
+}
+
+.effort-value {
+	font-variant-numeric: tabular-nums;
+	white-space: nowrap;
+}
+
+.effort-note {
+	font-size: 0.78rem;
+	color: #7b8794;
+	font-style: italic;
+}
+
+.run-effort-badge {
+	flex: 0 0 auto;
+	font-size: 0.72rem;
+	color: #1f6feb;
+	border: 1px solid #cfe0ff;
+	border-radius: 999px;
+	padding: 0 0.4rem;
+	background: #eef2ff;
+}

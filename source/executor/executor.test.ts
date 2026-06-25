@@ -164,6 +164,7 @@ describe('runExecutor', () => {
 				guildPath: '/guild',
 				benchmarkPath: '/bench',
 				task: 'do it',
+				effort: 3,
 			})
 		} catch (error) {
 			caught = error
@@ -199,6 +200,7 @@ describe('runExecutor', () => {
 			guildPath: '/guild',
 			benchmarkPath: '/bench',
 			task: 'do it',
+			effort: 3,
 		})
 
 		expect(persistence.state.createRunDirectoryCalls).toBe(1)
@@ -247,6 +249,7 @@ describe('runExecutor', () => {
 			guildPath: '/guild',
 			benchmarkPath: '/bench',
 			task: 'do it',
+			effort: 3,
 		})
 
 		expect(meta.status).toBe('error')
@@ -276,6 +279,7 @@ describe('runExecutor', () => {
 			guildPath: '/guild',
 			benchmarkPath: '/bench',
 			task: 'implicit',
+			effort: 3,
 		})
 
 		expect(persistence.state.meta).not.toBeNull()
@@ -312,6 +316,7 @@ describe('runExecutor', () => {
 			guildPath: '/guild',
 			benchmarkPath: '/bench',
 			task: 'do it',
+			effort: 3,
 		})
 
 		const eventTypes = persistence.state.events.map((e) => e.type)
@@ -330,5 +335,37 @@ describe('runExecutor', () => {
 			expect(finishedPayload['status']).toBe('success')
 			expect('parent' in finishedPayload).toBe(false)
 		}
+	})
+
+	test('logs an effort_set event once at run start and carries effort into the meta', async () => {
+		const guild = buildLoadedGuild(
+			{ main: { systemPrompt: 'p', tools: ['finish'] } },
+			'main',
+		)
+		const llm = new FakeLlm()
+		llm.responses = [success([{
+			id: 'f1',
+			type: 'function',
+			function: { name: 'finish', arguments: JSON.stringify({ status: 'success', summary: 'ok' }) },
+		}])]
+		const persistence = makeFakePersistence()
+		const deps = makeDeps(llm, persistence, makeLoader(guild))
+
+		const meta = await runExecutor(deps, {
+			runId: 'r-effort',
+			guildPath: '/guild',
+			benchmarkPath: '/bench',
+			task: 'do it',
+			effort: 4,
+		})
+
+		const effortSetEvents = persistence.state.events.filter((e) => e.type === 'effort_set')
+		expect(effortSetEvents.length).toBe(1)
+		expect(isRecord(effortSetEvents[0]!.payload)).toBe(true)
+		if (isRecord(effortSetEvents[0]!.payload)) expect(effortSetEvents[0]!.payload['effort']).toBe(4)
+		// effort_set is the first event, ahead of the entry role's role_start.
+		expect(persistence.state.events[0]!.type).toBe('effort_set')
+		expect(meta.effort).toBe(4)
+		expect(persistence.state.meta?.effort).toBe(4)
 	})
 })

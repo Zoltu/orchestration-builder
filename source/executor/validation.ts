@@ -3,9 +3,11 @@
 // Boolean guards (is*) narrow types; validate* functions throw a ValidationError with a precise path-based message on failure.
 
 import { isErrorKind, ValidationError } from './errors.js'
+import { EFFORT_MAX, EFFORT_MIN } from './effort.js'
 import {
 	AssistantResponse,
 	ContextPolicy,
+	EffortLevel,
 	ExecutorConfig,
 	GenerationConfig,
 	GuildConfig,
@@ -23,6 +25,7 @@ import {
 	ToolParameter,
 	ToolResult,
 } from './types.js'
+import type { ProjectSettings } from './persistence.js'
 
 function isObject(value: unknown): value is Record<string, unknown> {
 	return typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -229,12 +232,25 @@ export function isResultCard(value: unknown): value is ResultCard {
 	return true
 }
 
+export function isEffortLevel(value: unknown): value is EffortLevel {
+	if (typeof value !== 'number') return false
+	if (!Number.isInteger(value)) return false
+	return value >= EFFORT_MIN && value <= EFFORT_MAX
+}
+
+export function isProjectSettings(value: unknown): value is ProjectSettings {
+	if (!isObject(value)) return false
+	if (value.effort !== undefined && !isEffortLevel(value.effort)) return false
+	return true
+}
+
 export function isRunOptions(value: unknown): value is RunOptions {
 	if (!isObject(value)) return false
 	if (!isString(value.runId)) return false
 	if (!isString(value.guildPath)) return false
 	if (!isString(value.benchmarkPath)) return false
 	if (!isString(value.task)) return false
+	if (!isEffortLevel(value.effort)) return false
 	return true
 }
 
@@ -244,6 +260,7 @@ export function isRunMeta(value: unknown): value is RunMeta {
 	if (!isString(value.guildPath)) return false
 	if (!isString(value.benchmarkPath)) return false
 	if (!isString(value.task)) return false
+	if (value.effort !== undefined && !isEffortLevel(value.effort)) return false
 	if (!isString(value.status) || !runMetaStatuses.some((s) => s === value.status)) return false
 	if (!isString(value.startTime)) return false
 	if (!isOptionalString(value.endTime)) return false

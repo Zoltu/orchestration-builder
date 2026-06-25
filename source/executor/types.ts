@@ -118,6 +118,7 @@ export interface RunOptions {
 	guildPath: string
 	benchmarkPath: string
 	task: string
+	effort: EffortLevel
 }
 
 export interface RunMeta {
@@ -125,12 +126,17 @@ export interface RunMeta {
 	guildPath: string
 	benchmarkPath: string
 	task: string
+	// Absent on runs written before the effort channel existed; present on every run started since. Optional so a torn or legacy meta read still parses.
+	effort?: EffortLevel
 	status: 'running' | 'success' | 'error' | 'needs_clarification'
 	startTime: string
 	endTime?: string
 	result?: ResultCard
 	error?: { kind: ErrorKind; message: string }
 }
+
+// Per-run speed-vs-quality setting. The integer is the contract; the executor carries and logs it but makes no decision about what each level means — that mapping is Guild-defined.
+export type EffortLevel = 0 | 1 | 2 | 3 | 4 | 5
 
 export interface LogEvent {
 	timestamp: string

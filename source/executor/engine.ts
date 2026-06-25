@@ -1,5 +1,6 @@
 import { createResultCard, createToolError } from './errors.js'
-import type { ExecutorConfig, LogEvent, Message, ResultCard, RoleDefinition, ToolCall, ToolManifest, ToolResult } from './types.js'
+import { effortDirective } from './effort.js'
+import type { EffortLevel, ExecutorConfig, LogEvent, Message, ResultCard, RoleDefinition, ToolCall, ToolManifest, ToolResult } from './types.js'
 import { isResultCard } from './validation.js'
 import { checkGlobalBudgets, checkRoleBudgets, type GlobalBudgetState, type RoleBudgetState } from './budgets.js'
 import { createBuiltInToolHandlers } from './builtin-tools.js'
@@ -29,6 +30,8 @@ export interface EngineContext {
 	roleName: string
 	task: string
 	roleDefinitionOverride?: RoleDefinition
+	// The run's effort, set only on the entry-role context by runExecutor. The agent spawn spreads the context to children, but the directive is gated on depth 0 below, so children never receive a global effort directive — the parent decides how to translate effort into delegation instructions.
+	effort?: EffortLevel
 	// The calling role's name, omitted for the entry role at depth 0 so a reviewer can distinguish a root role from a child and render.ts can build the parent→child tree.
 	parent?: string
 }
@@ -282,6 +285,17 @@ async function dispatchAndRecord({ deps, roleState, roleName, dispatchCtx, toolC
 	return null
 }
 
+// Assembles a role's first messages: the system prompt, then the user task.
+// The entry role (depth 0) additionally receives the effort directive as a system message between its prompt and the task, so prompts can branch on the run's quality level. Child roles never receive the directive — the depth-0 gate ensures it even though the agent spawn copies the context — leaving the parent to translate effort into delegation instructions.
+function buildInitialHistory(systemPrompt: string, context: EngineContext): Message[] {
+	const history: Message[] = [{ role: 'system', content: systemPrompt }]
+	if (context.depth === 0 && context.effort !== undefined) {
+		history.push({ role: 'system', content: effortDirective(context.effort) })
+	}
+	history.push({ role: 'user', content: context.task })
+	return history
+}
+
 export async function runRole(deps: EngineDependencies, context: EngineContext): Promise<ResultCard> {
 	const guild = context.loadedGuild
 	const roleDefinition = context.roleDefinitionOverride ?? guild.config.roles[context.roleName]
@@ -313,10 +327,7 @@ export async function runRole(deps: EngineDependencies, context: EngineContext):
 	}
 
 	const roleState: RoleState = {
-		history: [
-			{ role: 'system', content: systemPrompt },
-			{ role: 'user', content: context.task },
-		],
+		history: buildInitialHistory(systemPrompt, context),
 		toolCalls: 0,
 		promptTokens: 0,
 		completionTokens: 0,

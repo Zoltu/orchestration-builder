@@ -151,6 +151,7 @@ describe('runExecutor end-to-end against the seed Guild and hello_001', () => {
 				guildPath: guildDir,
 				benchmarkPath: workspaceRoot,
 				task: 'Write a file called output.txt containing the text hello world.',
+				effort: 3,
 			},
 		)
 

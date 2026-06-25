@@ -21,6 +21,10 @@ export type { RunState } from './run-state.js'
 export { createRunSubmission } from './run-submission.js'
 export type { RunSubmission, RunSubmissionDependencies, StartRun, SubmitResult } from './run-submission.js'
 
+export { EFFORT_MIN, EFFORT_MAX, DEFAULT_EFFORT, effortDirective } from './effort.js'
+
+export { isEffortLevel, isProjectSettings } from './validation.js'
+
 export { createToolHandlers } from './tools.js'
 export type { NativeToolsConfig } from './tools.js'
 
@@ -30,6 +34,8 @@ export {
 	createWriteMeta,
 	createReadRunSnapshotById,
 	createListRunIds,
+	createReadProjectSettings,
+	createWriteProjectSettings,
 } from './persistence.js'
 export type {
 	RunDirectory,
@@ -38,6 +44,9 @@ export type {
 	ReadRunSnapshotById,
 	ListRunIds,
 	RunSnapshotRaw,
+	ProjectSettings,
+	ReadProjectSettings,
+	WriteProjectSettings,
 } from './persistence.js'
 
-export type { ModelConfig, RunOptions, RunMeta, ResultCard } from './types.js'
+export type { ModelConfig, RunOptions, RunMeta, ResultCard, EffortLevel } from './types.js'

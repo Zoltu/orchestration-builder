@@ -9,7 +9,7 @@
 import * as path from 'node:path'
 
 import { createWebServer } from './web/server.js'
-import { createAppendLog, createGuildLoader, createLlmCaller, createListRunIds, createReadRunSnapshotById, createRunDirectory, createRunState, createRunSubmission, createToolHandlers, createWebHumanBackend, createWriteMeta, runExecutor, type ExecutorDependencies, type LoadedGuild, type LlmCaller, type ModelConfig, type StartRun, type WebHumanBackend } from './executor/index.js'
+import { createAppendLog, createGuildLoader, createLlmCaller, createListRunIds, createReadProjectSettings, createReadRunSnapshotById, createRunDirectory, createRunState, createRunSubmission, createToolHandlers, createWebHumanBackend, createWriteMeta, createWriteProjectSettings, runExecutor, type ExecutorDependencies, type LoadedGuild, type LlmCaller, type ModelConfig, type StartRun, type WebHumanBackend } from './executor/index.js'
 
 const API_KEY_ENV_VAR = 'ORCHESTRATOR_API_KEY'
 const PORT_ENV_VAR = 'PORT'
@@ -63,7 +63,7 @@ function createStartRun(config: {
 	workspaceRootPath: string
 	runsBaseDir: string
 }): StartRun {
-	return async (runId, task) => {
+	return async (runId, task, effort) => {
 		const additionalToolHandlers = createToolHandlers({
 			workspaceRoot: config.workspaceRootPath,
 			defaultToolTimeoutSeconds: config.loadedGuild.config.executor.defaultToolTimeoutSeconds,
@@ -86,6 +86,7 @@ function createStartRun(config: {
 				guildPath: config.guildPath,
 				benchmarkPath: config.workspaceRootPath,
 				task,
+				effort,
 			})
 		} finally {
 			config.humanBackend.bindRunLog(null)
@@ -118,6 +119,8 @@ async function serve(): Promise<void> {
 	const runState = createRunState({ humanBackend: webHumanBackend })
 	const readRunSnapshotById = createReadRunSnapshotById(runsBaseDir)
 	const listRunIds = createListRunIds(runsBaseDir)
+	const readProjectSettings = createReadProjectSettings(workspaceRootPath)
+	const writeProjectSettings = createWriteProjectSettings(workspaceRootPath)
 
 	const startRun = createStartRun({
 		loadedGuild,
@@ -127,7 +130,7 @@ async function serve(): Promise<void> {
 		workspaceRootPath,
 		runsBaseDir,
 	})
-	const runSubmission = createRunSubmission({ startRun, generateRunId: () => generateRunId(new Date()) })
+	const runSubmission = createRunSubmission({ startRun, generateRunId: () => generateRunId(new Date()), readProjectSettings })
 
 	const webServer = createWebServer({
 		port,
@@ -136,6 +139,8 @@ async function serve(): Promise<void> {
 		runSubmission,
 		readRunSnapshotById,
 		listRunIds,
+		readProjectSettings,
+		writeProjectSettings,
 	})
 	console.log(`Web UI ready: http://localhost:${webServer.port}`)
 

@@ -4,11 +4,12 @@
 
 import * as path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import type { ListRunIds, ReadRunSnapshotById } from '../executor/persistence.js'
-import type { GuildConfig } from '../executor/types.js'
+import type { ListRunIds, ReadProjectSettings, ReadRunSnapshotById, WriteProjectSettings } from '../executor/persistence.js'
+import type { EffortLevel, GuildConfig } from '../executor/types.js'
+import { isEffortLevel } from '../executor/validation.js'
 import type { RunState } from '../executor/run-state.js'
 import type { RunSubmission } from '../executor/run-submission.js'
-import { parseRunSnapshot, paginateLogEvents, renderConfig, renderPendingQuestions, renderRunSummary, renderRunView, formatLogAsText, toRecentLogEntry } from './render.js'
+import { parseRunSnapshot, paginateLogEvents, renderConfig, renderProjectSettings, renderPendingQuestions, renderRunSummary, renderRunView, formatLogAsText, toRecentLogEntry } from './render.js'
 
 const STATIC_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), 'static')
 const MAX_LOG_LINES = 200
@@ -32,6 +33,8 @@ export interface WebServerConfig {
 	runSubmission: RunSubmission
 	readRunSnapshotById: ReadRunSnapshotById
 	listRunIds: ListRunIds
+	readProjectSettings: ReadProjectSettings
+	writeProjectSettings: WriteProjectSettings
 }
 
 export interface WebServer {
@@ -140,9 +143,24 @@ function handleCreateRun(runSubmission: RunSubmission, body: unknown): Response 
 	if (!isObject(body)) return json({ ok: false, error: 'invalid_body' }, 400)
 	const taskValue = body['task']
 	if (typeof taskValue !== 'string' || taskValue === '') return json({ ok: false, error: 'invalid_body' }, 400)
-	const result = runSubmission.submit(taskValue)
+	const effortValue = body['effort']
+	if (effortValue !== undefined && !isEffortLevel(effortValue)) return json({ ok: false, error: 'invalid_body' }, 400)
+	const effortOverride: EffortLevel | undefined = effortValue
+	const result = runSubmission.submit(taskValue, effortOverride)
 	if (result.ok) return json({ runId: result.runId }, 201)
 	return json({ ok: false, error: result.error }, 409)
+}
+
+function handleGetSettings(readProjectSettings: ReadProjectSettings): Response {
+	return json(renderProjectSettings(readProjectSettings()))
+}
+
+function handlePutSettings(writeProjectSettings: WriteProjectSettings, body: unknown): Response {
+	if (!isObject(body)) return json({ ok: false, error: 'invalid_body' }, 400)
+	const effortValue = body['effort']
+	if (!isEffortLevel(effortValue)) return json({ ok: false, error: 'invalid_body' }, 400)
+	writeProjectSettings({ effort: effortValue })
+	return json(renderProjectSettings({ effort: effortValue }))
 }
 
 export function createWebServer(config: WebServerConfig): WebServer {
@@ -151,6 +169,8 @@ export function createWebServer(config: WebServerConfig): WebServer {
 	const runSubmission = config.runSubmission
 	const readRunSnapshotById = config.readRunSnapshotById
 	const listRunIds = config.listRunIds
+	const readProjectSettings = config.readProjectSettings
+	const writeProjectSettings = config.writeProjectSettings
 
 	const server = Bun.serve({
 		port: config.port,
@@ -160,6 +180,7 @@ export function createWebServer(config: WebServerConfig): WebServer {
 
 		if (request.method === 'GET') {
 			if (pathname === '/api/config') return json(renderConfig(guildConfig))
+			if (pathname === '/api/settings') return handleGetSettings(readProjectSettings)
 			if (pathname === '/api/run') return handleActiveRun(readRunSnapshotById, runSubmission)
 				if (pathname === '/api/runs') return handleListRuns(readRunSnapshotById, listRunIds)
 				if (pathname.startsWith('/api/runs/')) {
@@ -180,18 +201,26 @@ export function createWebServer(config: WebServerConfig): WebServer {
 			return json({ ok: false, error: 'not_found' }, 404)
 			}
 
-			if (request.method === 'POST') {
-				if (pathname === '/api/runs') {
-					const body = await readJsonBody(request)
-					if (body === undefined) return json({ ok: false, error: 'invalid_body' }, 400)
-					return handleCreateRun(runSubmission, body)
-				}
-				if (pathname === '/api/answer') {
-					const body = await readJsonBody(request)
-					if (body === undefined) return json({ ok: false, error: 'invalid_body' }, 400)
-					return handleAnswer(runState, body)
-				}
+		if (request.method === 'POST') {
+			if (pathname === '/api/runs') {
+				const body = await readJsonBody(request)
+				if (body === undefined) return json({ ok: false, error: 'invalid_body' }, 400)
+				return handleCreateRun(runSubmission, body)
 			}
+			if (pathname === '/api/answer') {
+				const body = await readJsonBody(request)
+				if (body === undefined) return json({ ok: false, error: 'invalid_body' }, 400)
+				return handleAnswer(runState, body)
+			}
+		}
+
+		if (request.method === 'PUT') {
+			if (pathname === '/api/settings') {
+				const body = await readJsonBody(request)
+				if (body === undefined) return json({ ok: false, error: 'invalid_body' }, 400)
+				return handlePutSettings(writeProjectSettings, body)
+			}
+		}
 
 			return json({ ok: false, error: 'not_found' }, 404)
 		},

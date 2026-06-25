@@ -3,8 +3,8 @@
 
 import type { PendingQuestion } from '../executor/human-backend.js'
 import { isRunMeta } from '../executor/validation.js'
-import type { ExecutorConfig, GuildConfig, LogEvent, ResultCard, RunMeta } from '../executor/types.js'
-import type { RunSnapshotRaw } from '../executor/persistence.js'
+import type { EffortLevel, ExecutorConfig, GuildConfig, LogEvent, ResultCard, RunMeta } from '../executor/types.js'
+import type { ProjectSettings, RunSnapshotRaw } from '../executor/persistence.js'
 
 export interface RunSnapshot {
 	meta: RunMeta | null
@@ -137,6 +137,10 @@ export function formatLogEvent(event: LogEvent): string {
 		}
 		case 'role_start':
 			return withRole(role, 'role start')
+		case 'effort_set': {
+			const effort = numberField(payload, 'effort')
+			return effort === null ? 'effort set' : `effort set (${effort})`
+		}
 		case 'agent_call': {
 			const parent = stringField(payload, 'parent')
 			const child = stringField(payload, 'child')
@@ -521,6 +525,8 @@ export interface RunView {
 	status: RunMeta['status'] | 'unknown'
 	runId: string | null
 	task: string | null
+	// The run's effort level, or null when meta is absent (run in progress before meta exists) or the run predates the effort channel.
+	effort: EffortLevel | null
 	startTime: string | null
 	endTime: string | null
 	result: ResultCard | null
@@ -551,6 +557,7 @@ export function renderRunView(snapshot: RunSnapshot, options: RenderRunViewOptio
 		status: meta === null ? 'unknown' : meta.status,
 		runId: meta === null ? null : meta.runId,
 		task: meta === null ? null : meta.task,
+		effort: meta === null ? null : (meta.effort ?? null),
 		startTime: meta === null ? null : meta.startTime,
 		endTime: meta === null ? null : (meta.endTime ?? null),
 		result: meta === null ? null : (meta.result ?? null),
@@ -568,6 +575,8 @@ export interface RunSummary {
 	runId: string
 	status: RunMeta['status'] | 'unknown'
 	task: string | null
+	// Null when meta is absent (run in progress) or predates the effort channel.
+	effort: EffortLevel | null
 	startTime: string | null
 	endTime: string | null
 }
@@ -580,9 +589,21 @@ export function renderRunSummary(runId: string, snapshot: RunSnapshot): RunSumma
 		runId,
 		status: meta === null ? 'unknown' : meta.status,
 		task: meta === null ? null : meta.task,
+		effort: meta === null ? null : (meta.effort ?? null),
 		startTime: meta === null ? null : meta.startTime,
 		endTime: meta === null ? null : (meta.endTime ?? null),
 	}
+}
+
+export interface ProjectSettingsView {
+	// The project-wide default effort, or null when no default has been set (a run with no per-run override then falls back to DEFAULT_EFFORT at submission).
+	effort: EffortLevel | null
+}
+
+// Shapes the project settings for the /api/settings endpoint, carrying only the safe settings fields.
+// Currently only `effort` exists; any future secret-bearing setting must be explicitly excluded here rather than passed through.
+export function renderProjectSettings(settings: ProjectSettings): ProjectSettingsView {
+	return { effort: settings.effort ?? null }
 }
 
 export interface ApiQuestion {

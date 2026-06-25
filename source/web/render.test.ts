@@ -14,6 +14,7 @@ import {
 	parseLogEvents,
 	parseRunSnapshot,
 	renderConfig,
+	renderProjectSettings,
 	renderPendingQuestions,
 	renderRunSummary,
 	renderRunView,
@@ -484,6 +485,14 @@ describe('formatLogEvent', () => {
 		expect(formatLogEvent(event('role_start', { role: 'planner', depth: 0, task: 'do it' }))).toBe('planner · role start')
 	})
 
+	test('effort_set renders the chosen level', () => {
+		expect(formatLogEvent(event('effort_set', { effort: 3 }))).toBe('effort set (3)')
+	})
+
+	test('effort_set without an effort value renders the bare action', () => {
+		expect(formatLogEvent(event('effort_set', {}))).toBe('effort set')
+	})
+
 	test('agent_call → parent · agent call → child', () => {
 		expect(formatLogEvent(event('agent_call', { parent: 'orchestrator', child: 'coder', depth: 1 }))).toBe('orchestrator · agent call → coder')
 	})
@@ -540,6 +549,20 @@ describe('renderRunView', () => {
 		expect(view.task).toBeNull()
 		expect(view.result).toBeNull()
 		expect(view.roles.length).toBe(1)
+	})
+
+	test('surfaces the run effort from meta.effort, or null when meta is absent or predates the channel', () => {
+		const withEffort = parseRunSnapshot({
+			metaText: JSON.stringify(sampleRunMeta({ effort: 5 })),
+			logText: '',
+		})
+		expect(renderRunView(withEffort, { maxLogLines: 200, now: NOW }).effort).toBe(5)
+
+		const withoutEffort = parseRunSnapshot({ metaText: JSON.stringify(sampleRunMeta()), logText: '' })
+		expect(renderRunView(withoutEffort, { maxLogLines: 200, now: NOW }).effort).toBeNull()
+
+		const inProgress = parseRunSnapshot({ metaText: null, logText: '' })
+		expect(renderRunView(inProgress, { maxLogLines: 200, now: NOW }).effort).toBeNull()
 	})
 
 	test('truncates the recent log to the last maxLogLines events', () => {
@@ -922,6 +945,7 @@ describe('renderRunSummary', () => {
 			runId: 'dir-name',
 			status: 'success',
 			task: 'fix the bug',
+			effort: null,
 			startTime: '2026-01-01T00:00:00.000Z',
 			endTime: '2026-01-01T00:01:00.000Z',
 		})
@@ -935,6 +959,7 @@ describe('renderRunSummary', () => {
 			runId: 'run-in-progress',
 			status: 'unknown',
 			task: null,
+			effort: null,
 			startTime: null,
 			endTime: null,
 		})
@@ -948,6 +973,28 @@ describe('renderRunSummary', () => {
 
 		const summary = renderRunSummary('r', snapshot)
 		expect(summary.endTime).toBeNull()
+	})
+
+	test('carries the run effort from meta.effort', () => {
+		const snapshot = parseRunSnapshot({
+			metaText: JSON.stringify(sampleRunMeta({ effort: 4 })),
+			logText: '',
+		})
+		expect(renderRunSummary('r', snapshot).effort).toBe(4)
+	})
+})
+
+describe('renderProjectSettings', () => {
+	test('returns effort null when no default has been set', () => {
+		expect(renderProjectSettings({})).toEqual({ effort: null })
+	})
+
+	test('returns the stored effort when set', () => {
+		expect(renderProjectSettings({ effort: 5 })).toEqual({ effort: 5 })
+	})
+
+	test('returns only the effort field in its output shape', () => {
+		expect(Object.keys(renderProjectSettings({ effort: 2 }))).toEqual(['effort'])
 	})
 })
 

@@ -16,6 +16,15 @@ const STATUS_LABELS = {
 }
 const SERVER_UNAVAILABLE_MESSAGE = 'server unavailable — it may have shut down'
 
+// The effort channel's six stops, quality-graded. The integer is the contract (see docs/reference.md "Effort channel"); these labels are a UI concern only and the executor never reads them.
+const EFFORT_LABELS = ['fastest', 'quick', 'moderate', 'standard', 'thorough', 'highest quality']
+const DEFAULT_EFFORT = 3
+
+function effortLabel(effort) {
+	if (typeof effort !== 'number' || !Number.isInteger(effort) || effort < 0 || effort > 5) return '—'
+	return EFFORT_LABELS[effort] ?? '—'
+}
+
 // One shared NumberFormat so every rendered count, token total, and duration in the UI shares the user's locale and grouping; re-instantiating per render is wasteful and would let a locale change between renders drift the formatting.
 const numberFormatter = new Intl.NumberFormat(navigator.language)
 
@@ -280,6 +289,56 @@ function GotConfig(state, payload) {
 	return { ...state, config: body }
 }
 
+// The saved effort position is fetched once on load so the slider starts where the operator last left it; later settings fetches (none today) would not override a position the operator has since moved.
+function GotSettings(state, payload) {
+	const ok = payload.ok
+	const body = payload.body
+	if (state.runEffort !== null) return { ...state, serverAvailable: ok }
+	const effort = ok && body !== null && typeof body === 'object' && typeof body.effort === 'number' ? body.effort : null
+	return { ...state, runEffort: effort !== null ? effort : DEFAULT_EFFORT, serverAvailable: ok }
+}
+
+function SettingsFetchFailed(state) {
+	// The slider still needs a concrete value to render, so fall back to the default rather than sitting at null forever.
+	if (state.runEffort !== null) return { ...state, serverAvailable: false }
+	return { ...state, runEffort: DEFAULT_EFFORT, serverAvailable: false }
+}
+
+// oninput updates the readout live as the slider is dragged; the state change is pure and fires no request.
+function ChangeRunEffort(state, event) {
+	const value = Number(event.target.value)
+	if (!Number.isInteger(value) || value < 0 || value > 5) return state
+	return { ...state, runEffort: value }
+}
+
+// onchange fires once on slider release and persists the chosen position as the default for the next run, so the slider stays where the operator last left it across page reloads and restarts. One PUT per adjustment, not a stream of in-flight requests.
+function SaveRunEffort(state, event) {
+	const value = Number(event.target.value)
+	if (!Number.isInteger(value) || value < 0 || value > 5) return state
+	return [
+		{ ...state, runEffort: value, savingEffort: true },
+		Fetch({
+			url: 'api/settings',
+			init: { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ effort: value }) },
+			ok: EffortSaved,
+			fail: EffortSaveFailed,
+		}),
+	]
+}
+
+function EffortSaved(state, payload) {
+	const ok = payload.ok
+	const body = payload.body
+	if (!ok || body === null || typeof body !== 'object' || typeof body.effort !== 'number') {
+		return { ...state, savingEffort: false, serverAvailable: true }
+	}
+	return { ...state, savingEffort: false, runEffort: body.effort, serverAvailable: true }
+}
+
+function EffortSaveFailed(state) {
+	return { ...state, savingEffort: false, serverAvailable: false }
+}
+
 function SelectRun(state, runId) {
 	if (runId === state.selectedRunId) return state
 	return { ...state, selectedRunId: runId, selectedRunView: null, selectedRunStatus: null, expandedLogRows: {}, logPage: null }
@@ -381,7 +440,8 @@ function ExportLogFx(payload) {
 function SubmitRun(state, event) {
 	event.preventDefault()
 	if (state.justSubmittedRunId !== null || deriveActiveRunId(state.summaries) !== null) return state
-	const input = event.target.querySelector('input')
+	const form = event.target
+	const input = form.querySelector('input[type="text"]')
 	if (input === null) return state
 	const task = input.value.trim()
 	if (task === '') return state
@@ -390,11 +450,19 @@ function SubmitRun(state, event) {
 		state,
 		Fetch({
 			url: 'api/runs',
-			init: { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ task }) },
+			init: { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(buildRunBody(task, state.runEffort)) },
 			ok: GotCreatedRun,
 			fail: FetchFailed,
 		}),
 	]
+}
+
+// effort is omitted when the slider has not yet initialized (settings still loading), so the server applies the project default rather than receiving a null.
+function buildRunBody(task, runEffort) {
+	if (typeof runEffort === 'number' && Number.isInteger(runEffort) && runEffort >= 0 && runEffort <= 5) {
+		return { task, effort: runEffort }
+	}
+	return { task }
 }
 
 // A re-run is a one-click resubmit of a past run's task; it reuses the create path (POST /api/runs → GotCreatedRun) so the new run is selected and the active-run guard applies identically.
@@ -408,7 +476,7 @@ function RerunTask(state, event) {
 		state,
 		Fetch({
 			url: 'api/runs',
-			init: { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ task }) },
+			init: { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(buildRunBody(task, state.runEffort)) },
 			ok: GotCreatedRun,
 			fail: FetchFailed,
 		}),
@@ -500,6 +568,7 @@ function RunList(state) {
 			h('li', { key: summary.runId, class: { selected: summary.runId === state.selectedRunId }, onclick: [SelectRun, summary.runId] }, [
 				h('span', { class: 'run-id' }, summary.runId),
 				h('span', { class: `run-status run-status-${summary.status ?? 'unknown'}` }, statusLabel(summary.status)),
+				summary.effort !== null && summary.effort !== undefined ? h('span', { class: 'run-effort-badge', title: `effort ${summary.effort} — ${effortLabel(summary.effort)}` }, `effort ${summary.effort}`) : null,
 				h('span', { class: 'run-task' }, summary.task ?? '—'),
 				h('button', { type: 'button', class: 'rerun-button', 'data-task': summary.task ?? '', disabled: rerunDisabled || typeof summary.task !== 'string' || summary.task === '', onclick: RerunTask }, 're-run'),
 			]),
@@ -509,11 +578,18 @@ function RunList(state) {
 
 function RunsPanel(state) {
 	const disabled = state.justSubmittedRunId !== null || deriveActiveRunId(state.summaries) !== null
+	const runEffort = typeof state.runEffort === 'number' ? state.runEffort : DEFAULT_EFFORT
 	return h('section', { id: 'runs-panel', class: 'panel' }, [
 		h('h2', {}, 'Runs'),
 		h('form', { class: 'create-run-form', onsubmit: SubmitRun }, [
 			h('input', { type: 'text', placeholder: disabled ? 'a run is already in progress' : 'describe a task and start a run', autocomplete: 'off' }),
 			h('button', { type: 'submit', disabled }, disabled ? 'Run in progress…' : 'Start run'),
+		]),
+		h('div', { class: 'effort-control run-effort-control' }, [
+			h('label', { class: 'effort-label', for: 'run-effort' }, 'Effort'),
+			h('input', { id: 'run-effort', type: 'range', min: '0', max: '5', step: '1', value: String(runEffort), disabled, oninput: ChangeRunEffort, onchange: SaveRunEffort }),
+			h('span', { class: 'effort-value' }, `${runEffort} — ${effortLabel(runEffort)}`),
+			state.savingEffort === true ? h('span', { class: 'effort-note' }, 'saving…') : null,
 		]),
 		RunList(state),
 	])
@@ -524,6 +600,7 @@ function RunSummaryPanel(state) {
 	const runId = view ? view.runId : '—'
 	const task = view ? view.task ?? '—' : '—'
 	const status = view ? statusLabel(view.status) : '—'
+	const effort = view && typeof view.effort === 'number' ? view.effort : null
 	const startTime = view ? view.startTime ?? null : null
 	const endTime = view ? view.endTime ?? null : null
 	const resultValue = view && view.result && view.result.summary ? view.result.summary : '—'
@@ -532,6 +609,7 @@ function RunSummaryPanel(state) {
 		h('dt', {}, 'Run'), h('dd', {}, runId),
 		h('dt', {}, 'Task'), h('dd', { class: 'preformatted' }, task),
 		h('dt', {}, 'Status'), h('dd', {}, status),
+		h('dt', {}, 'Effort'), h('dd', {}, effort !== null ? `${effort} — ${effortLabel(effort)}` : '—'),
 		h('dt', {}, 'Started'), h('dd', {}, h('time', { title: startTime ?? '' }, formatRelative(startTime, state.now))),
 		h('dt', {}, 'Ended'), h('dd', {}, h('time', { title: endTime ?? '' }, formatRelative(endTime, state.now))),
 		h('dt', {}, 'Result'), h('dd', { class: 'preformatted' }, resultValue),
@@ -784,10 +862,14 @@ app({
 			pendingAnswerId: null,
 			logPage: null,
 			config: null,
+			// null until the saved effort loads; the slider initializes from the persisted position on first load.
+			runEffort: null,
+			savingEffort: false,
 			now: Date.now(),
 		},
 		// The config panel is loaded once and never polled, so its fetch is an init effect rather than a subscription.
 		Fetch({ url: 'api/config', ok: GotConfig, fail: FetchFailed }),
+		Fetch({ url: 'api/settings', ok: GotSettings, fail: SettingsFetchFailed }),
 	],
 	view,
 	subscriptions: (state) => [

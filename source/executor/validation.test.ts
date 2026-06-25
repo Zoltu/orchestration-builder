@@ -3,11 +3,14 @@ import { describe, expect, test } from 'bun:test'
 import { ValidationError } from './errors.js'
 import {
 	isAssistantResponse,
+	isEffortLevel,
 	isGuildConfig,
 	isLogEvent,
 	isMessage,
+	isProjectSettings,
 	isResultCard,
 	isRunMeta,
+	isRunOptions,
 	isToolCall,
 	isToolManifest,
 	isToolResult,
@@ -95,6 +98,50 @@ describe('boolean guards', () => {
 			status: 'running',
 			startTime: 'now',
 		})).toBe(true)
+	})
+	test('isRunMeta accepts an optional effort and rejects an invalid one', () => {
+		const base = {
+			runId: 'r',
+			guildPath: 'g',
+			benchmarkPath: 'b',
+			task: 't',
+			status: 'running' as const,
+			startTime: 'now',
+		}
+		expect(isRunMeta({ ...base, effort: 3 })).toBe(true)
+		expect(isRunMeta({ ...base, effort: 9 })).toBe(false)
+		expect(isRunMeta({ ...base, effort: 1.5 })).toBe(false)
+	})
+	test('isEffortLevel accepts integers 0–5 and rejects everything else', () => {
+		for (let i = 0; i <= 5; i++) expect(isEffortLevel(i)).toBe(true)
+		expect(isEffortLevel(-1)).toBe(false)
+		expect(isEffortLevel(6)).toBe(false)
+		expect(isEffortLevel(2.5)).toBe(false)
+		expect(isEffortLevel('3')).toBe(false)
+		expect(isEffortLevel(null)).toBe(false)
+		expect(isEffortLevel(undefined)).toBe(false)
+		expect(isEffortLevel(Number.NaN)).toBe(false)
+	})
+	test('isRunOptions requires a valid effort', () => {
+		const base = {
+			runId: 'r',
+			guildPath: 'g',
+			benchmarkPath: 'b',
+			task: 't',
+		}
+		expect(isRunOptions({ ...base, effort: 0 })).toBe(true)
+		expect(isRunOptions({ ...base, effort: 5 })).toBe(true)
+		expect(isRunOptions({ ...base })).toBe(false)
+		expect(isRunOptions({ ...base, effort: 7 })).toBe(false)
+		expect(isRunOptions({ ...base, effort: 2.5 })).toBe(false)
+	})
+	test('isProjectSettings accepts empty, valid effort, and rejects invalid effort', () => {
+		expect(isProjectSettings({})).toBe(true)
+		expect(isProjectSettings({ effort: 3 })).toBe(true)
+		expect(isProjectSettings({ effort: 9 })).toBe(false)
+		expect(isProjectSettings({ effort: '3' })).toBe(false)
+		expect(isProjectSettings('not an object')).toBe(false)
+		expect(isProjectSettings(null)).toBe(false)
 	})
 	test('isLogEvent accepts a minimal valid LogEvent', () => {
 		expect(isLogEvent({ timestamp: 'now', type: 'x' })).toBe(true)

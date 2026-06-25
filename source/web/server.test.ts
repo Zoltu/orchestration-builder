@@ -1,8 +1,11 @@
 import { afterAll, describe, expect, test } from 'bun:test'
+import * as fs from 'node:fs'
+import * as os from 'node:os'
+import * as path from 'node:path'
 import { createWebHumanBackend } from '../executor/human-backend.ts'
 import { createRunState } from '../executor/run-state.ts'
 import { createRunSubmission, type RunSubmission, type StartRun } from '../executor/run-submission.ts'
-import type { RunSnapshotRaw } from '../executor/persistence.ts'
+import { createReadProjectSettings, createWriteProjectSettings, type ProjectSettings, type ReadProjectSettings, type WriteProjectSettings, type RunSnapshotRaw } from '../executor/persistence.ts'
 import type { GuildConfig, RunMeta } from '../executor/types.js'
 import { createWebServer, type WebServer } from './server.ts'
 
@@ -87,6 +90,23 @@ function readRunSnapshotById(runId: string): RunSnapshotRaw {
 
 function listRunIds(): string[] {
 	return Array.from(snapshots.keys())
+}
+
+interface InMemorySettings {
+	read: ReadProjectSettings
+	write: WriteProjectSettings
+	snapshot: () => ProjectSettings
+}
+
+function createInMemorySettings(initial: ProjectSettings = {}): InMemorySettings {
+	let current: ProjectSettings = initial
+	return {
+		read: () => current,
+		write: (settings) => {
+			current = settings
+		},
+		snapshot: () => current,
+	}
 }
 
 // A run with more than MAX_LOG_LINES (200) events so pagination is exercisable end to end.
@@ -174,10 +194,29 @@ snapshots.set('run-retry', {
 	].join('\n'),
 })
 
-// Shared server for the read-only routes (static assets, list, get-by-id, questions, answer).
+// A run whose meta carries an effort level, so the /api/runs/:id effort-surfacing and the list summary are exercised end to end.
+snapshots.set('run-effort', {
+	metaText: JSON.stringify({
+		runId: 'run-effort',
+		guildPath: 'guild',
+		benchmarkPath: 'bench',
+		task: 'task for run-effort',
+		effort: 4,
+		status: 'success',
+		startTime: '2026-01-01T00:00:00.000Z',
+		endTime: '2026-01-01T00:01:00.000Z',
+	}),
+	logText: [
+		JSON.stringify({ timestamp: '2026-01-01T00:00:00.000Z', type: 'effort_set', payload: { effort: 4 } }),
+		JSON.stringify({ timestamp: '2026-01-01T00:00:01.000Z', type: 'role_finished', payload: { role: 'planner', status: 'success' } }),
+	].join('\n'),
+})
+
+// Shared server for the read-only routes (static assets, list, get-by-id, questions, answer, settings read).
 // The submission-mutating routes get their own fresh server per test to avoid cross-test ordering coupling.
 const humanBackend = createWebHumanBackend()
 const runState = createRunState({ humanBackend })
+const readOnlySettings = createInMemorySettings()
 const readOnlyServer: WebServer = createWebServer({
 	port: 0,
 	guildConfig: sampleGuildConfig,
@@ -185,9 +224,12 @@ const readOnlyServer: WebServer = createWebServer({
 	runSubmission: createRunSubmission({
 		startRun: async () => ({ runId: 'unused', guildPath: 'g', benchmarkPath: 'b', task: 't', status: 'success', startTime: 's' }),
 		generateRunId: () => 'unused',
+		readProjectSettings: readOnlySettings.read,
 	}),
 	readRunSnapshotById,
 	listRunIds,
+	readProjectSettings: readOnlySettings.read,
+	writeProjectSettings: readOnlySettings.write,
 })
 
 afterAll(() => {
@@ -200,17 +242,25 @@ interface SubmissionServer {
 	server: WebServer
 	baseUrl: string
 	submission: RunSubmission
+	settings: InMemorySettings
+	// The effort most recently passed to startRun, so a test can assert the API-threaded effort reached the run.
+	lastEffort: () => number | undefined
 	resolveActive: () => ((meta: RunMeta) => void)
 }
 
 // Builds a fresh server + submission whose startRun parks on a caller-controlled resolver, so each test drives its own run lifecycle without touching shared state.
 function createSubmissionServer(): SubmissionServer {
 	let resolveActive: (meta: RunMeta) => void = () => {}
-	const startRun: StartRun = () => new Promise<RunMeta>((resolve) => {
-		resolveActive = resolve
-	})
+	let capturedEffort: number | undefined
+	const startRun: StartRun = (_runId, _task, effort) => {
+		capturedEffort = effort
+		return new Promise<RunMeta>((resolve) => {
+			resolveActive = resolve
+		})
+	}
 	let nextId = 0
-	const submission = createRunSubmission({ startRun, generateRunId: () => `test-run-${nextId++}` })
+	const settings = createInMemorySettings()
+	const submission = createRunSubmission({ startRun, generateRunId: () => `test-run-${nextId++}`, readProjectSettings: settings.read })
 	const server = createWebServer({
 		port: 0,
 		guildConfig: sampleGuildConfig,
@@ -218,11 +268,15 @@ function createSubmissionServer(): SubmissionServer {
 		runSubmission: submission,
 		readRunSnapshotById,
 		listRunIds,
+		readProjectSettings: settings.read,
+		writeProjectSettings: settings.write,
 	})
 	return {
 		server,
 		baseUrl: `http://localhost:${server.port}`,
 		submission,
+		settings,
+		lastEffort: () => capturedEffort,
 		resolveActive: () => resolveActive,
 	}
 }
@@ -374,18 +428,28 @@ describe('createWebServer /api/runs (list)', () => {
 		expect(response.status).toBe(200)
 		const list = await response.json()
 		expect(Array.isArray(list)).toBe(true)
-		expect(list.length).toBe(7)
+		expect(list.length).toBe(8)
 		expect(list[0].runId).toBe('run-tree')
 		expect(list[1].runId).toBe('run-retry')
 		expect(list[2].runId).toBe('run-long')
-		expect(list[3].runId).toBe('run-cached')
-		expect(list[4].runId).toBe('run-3')
-		expect(list[5].runId).toBe('run-2')
-		expect(list[6].runId).toBe('run-1')
-		expect(list[5]).toEqual({
+		expect(list[3].runId).toBe('run-effort')
+		expect(list[4].runId).toBe('run-cached')
+		expect(list[5].runId).toBe('run-3')
+		expect(list[6].runId).toBe('run-2')
+		expect(list[7].runId).toBe('run-1')
+		expect(list[3]).toEqual({
+			runId: 'run-effort',
+			status: 'success',
+			task: 'task for run-effort',
+			effort: 4,
+			startTime: '2026-01-01T00:00:00.000Z',
+			endTime: '2026-01-01T00:01:00.000Z',
+		})
+		expect(list[6]).toEqual({
 			runId: 'run-2',
 			status: 'error',
 			task: 'task for run-2',
+			effort: null,
 			startTime: '2026-01-01T00:00:00.000Z',
 			endTime: '2026-01-01T00:01:00.000Z',
 		})
@@ -524,6 +588,16 @@ describe('createWebServer /api/runs/:id', () => {
 		expect(errorFinish.detailSections.map((s: { label: string }) => s.label)).toEqual(['summary', 'error'])
 		expect(errorFinish.detailSections[0].content).toBe('file not found')
 		expect(errorFinish.detailSections[1].content).toEqual({ kind: 'invalid_arguments', message: 'no such file' })
+	})
+
+	test('includes the run effort from meta.effort, or null when the run predates the channel', async () => {
+		const withEffort = await fetch(`${readOnlyBaseUrl}/api/runs/run-effort`)
+		expect(withEffort.status).toBe(200)
+		expect((await withEffort.json()).effort).toBe(4)
+
+		const withoutEffort = await fetch(`${readOnlyBaseUrl}/api/runs/run-1`)
+		expect(withoutEffort.status).toBe(200)
+		expect((await withoutEffort.json()).effort).toBeNull()
 	})
 })
 
@@ -683,6 +757,73 @@ describe('createWebServer POST /api/runs', () => {
 			server.stop()
 		}
 	})
+
+	test('threads a valid effort override into the started run', async () => {
+		const { server, baseUrl, submission, lastEffort, resolveActive } = createSubmissionServer()
+		try {
+			const response = await fetch(`${baseUrl}/api/runs`, {
+				method: 'POST',
+				headers: { 'content-type': 'application/json' },
+				body: JSON.stringify({ task: 'careful task', effort: 5 }),
+			})
+			expect(response.status).toBe(201)
+			expect(lastEffort()).toBe(5)
+
+			resolveActive()(terminalMeta('test-run-0', 'careful task'))
+			await submission.awaitActive()
+		} finally {
+			server.stop()
+		}
+	})
+
+	test('applies the project default when effort is omitted', async () => {
+		const { server, baseUrl, submission, settings, lastEffort, resolveActive } = createSubmissionServer()
+		try {
+			settings.write({ effort: 2 })
+			const response = await fetch(`${baseUrl}/api/runs`, {
+				method: 'POST',
+				headers: { 'content-type': 'application/json' },
+				body: JSON.stringify({ task: 'defaulted task' }),
+			})
+			expect(response.status).toBe(201)
+			expect(lastEffort()).toBe(2)
+
+			resolveActive()(terminalMeta('test-run-0', 'defaulted task'))
+			await submission.awaitActive()
+		} finally {
+			server.stop()
+		}
+	})
+
+	test('rejects an out-of-range effort with 400 invalid_body', async () => {
+		const { server, baseUrl } = createSubmissionServer()
+		try {
+			const response = await fetch(`${baseUrl}/api/runs`, {
+				method: 'POST',
+				headers: { 'content-type': 'application/json' },
+				body: JSON.stringify({ task: 'x', effort: 6 }),
+			})
+			expect(response.status).toBe(400)
+			expect(await response.json()).toEqual({ ok: false, error: 'invalid_body' })
+		} finally {
+			server.stop()
+		}
+	})
+
+	test('rejects a non-integer effort with 400 invalid_body', async () => {
+		const { server, baseUrl } = createSubmissionServer()
+		try {
+			const response = await fetch(`${baseUrl}/api/runs`, {
+				method: 'POST',
+				headers: { 'content-type': 'application/json' },
+				body: JSON.stringify({ task: 'x', effort: 2.5 }),
+			})
+			expect(response.status).toBe(400)
+			expect(await response.json()).toEqual({ ok: false, error: 'invalid_body' })
+		} finally {
+			server.stop()
+		}
+	})
 })
 
 describe('createWebServer /api/questions and /api/answer', () => {
@@ -741,5 +882,173 @@ describe('createWebServer /api/questions and /api/answer', () => {
 		})
 		expect(response.status).toBe(400)
 		expect(await response.json()).toEqual({ ok: false, error: 'invalid_body' })
+	})
+})
+
+describe('createWebServer /api/settings', () => {
+	test('GET /api/settings returns effort null when no default is set', async () => {
+		const { server, baseUrl } = createSubmissionServer()
+		try {
+			const response = await fetch(`${baseUrl}/api/settings`)
+			expect(response.status).toBe(200)
+			expect(await response.json()).toEqual({ effort: null })
+		} finally {
+			server.stop()
+		}
+	})
+
+	test('GET /api/settings returns the stored default after a PUT', async () => {
+		const { server, baseUrl, settings } = createSubmissionServer()
+		try {
+			settings.write({ effort: 4 })
+			const response = await fetch(`${baseUrl}/api/settings`)
+			expect(response.status).toBe(200)
+			expect(await response.json()).toEqual({ effort: 4 })
+		} finally {
+			server.stop()
+		}
+	})
+
+	test('PUT /api/settings persists the effort and echoes it back', async () => {
+		const { server, baseUrl, settings } = createSubmissionServer()
+		try {
+			const response = await fetch(`${baseUrl}/api/settings`, {
+				method: 'PUT',
+				headers: { 'content-type': 'application/json' },
+				body: JSON.stringify({ effort: 3 }),
+			})
+			expect(response.status).toBe(200)
+			expect(await response.json()).toEqual({ effort: 3 })
+			expect(settings.snapshot()).toEqual({ effort: 3 })
+
+			const getResponse = await fetch(`${baseUrl}/api/settings`)
+			expect(await getResponse.json()).toEqual({ effort: 3 })
+		} finally {
+			server.stop()
+		}
+	})
+
+	test('PUT /api/settings rejects a missing effort with 400 invalid_body', async () => {
+		const { server, baseUrl, settings } = createSubmissionServer()
+		try {
+			const response = await fetch(`${baseUrl}/api/settings`, {
+				method: 'PUT',
+				headers: { 'content-type': 'application/json' },
+				body: JSON.stringify({ notEffort: 1 }),
+			})
+			expect(response.status).toBe(400)
+			expect(await response.json()).toEqual({ ok: false, error: 'invalid_body' })
+			expect(settings.snapshot()).toEqual({})
+		} finally {
+			server.stop()
+		}
+	})
+
+	test('PUT /api/settings rejects an out-of-range effort with 400 invalid_body', async () => {
+		const { server, baseUrl, settings } = createSubmissionServer()
+		try {
+			const response = await fetch(`${baseUrl}/api/settings`, {
+				method: 'PUT',
+				headers: { 'content-type': 'application/json' },
+				body: JSON.stringify({ effort: 7 }),
+			})
+			expect(response.status).toBe(400)
+			expect(await response.json()).toEqual({ ok: false, error: 'invalid_body' })
+			expect(settings.snapshot()).toEqual({})
+		} finally {
+			server.stop()
+		}
+	})
+
+	test('PUT /api/settings rejects malformed json with 400 invalid_body', async () => {
+		const { server, baseUrl } = createSubmissionServer()
+		try {
+			const response = await fetch(`${baseUrl}/api/settings`, {
+				method: 'PUT',
+				headers: { 'content-type': 'application/json' },
+				body: '{ not json',
+			})
+			expect(response.status).toBe(400)
+			expect(await response.json()).toEqual({ ok: false, error: 'invalid_body' })
+		} finally {
+			server.stop()
+		}
+	})
+})
+
+describe('project settings persistence leaves', () => {
+	test('a missing settings file yields the default (empty) settings', () => {
+		const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'orchestrator-settings-'))
+		try {
+			const read = createReadProjectSettings(tempDir)
+			expect(read()).toEqual({})
+		} finally {
+			fs.rmSync(tempDir, { recursive: true, force: true })
+		}
+	})
+
+	test('a malformed settings file is treated as absent rather than crashing', () => {
+		const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'orchestrator-settings-'))
+		try {
+			const orchestrationDir = path.resolve(tempDir, '.orchestration')
+			fs.mkdirSync(orchestrationDir, { recursive: true })
+			fs.writeFileSync(path.resolve(orchestrationDir, 'settings.json'), '{ not valid json')
+			const read = createReadProjectSettings(tempDir)
+			expect(read()).toEqual({})
+		} finally {
+			fs.rmSync(tempDir, { recursive: true, force: true })
+		}
+	})
+
+	test('a valid settings file is parsed and returned', () => {
+		const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'orchestrator-settings-'))
+		try {
+			const orchestrationDir = path.resolve(tempDir, '.orchestration')
+			fs.mkdirSync(orchestrationDir, { recursive: true })
+			fs.writeFileSync(path.resolve(orchestrationDir, 'settings.json'), JSON.stringify({ effort: 2 }))
+			const read = createReadProjectSettings(tempDir)
+			expect(read()).toEqual({ effort: 2 })
+		} finally {
+			fs.rmSync(tempDir, { recursive: true, force: true })
+		}
+	})
+
+	test('a settings file with an invalid effort is treated as absent', () => {
+		const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'orchestrator-settings-'))
+		try {
+			const orchestrationDir = path.resolve(tempDir, '.orchestration')
+			fs.mkdirSync(orchestrationDir, { recursive: true })
+			fs.writeFileSync(path.resolve(orchestrationDir, 'settings.json'), JSON.stringify({ effort: 99 }))
+			const read = createReadProjectSettings(tempDir)
+			expect(read()).toEqual({})
+		} finally {
+			fs.rmSync(tempDir, { recursive: true, force: true })
+		}
+	})
+
+	test('write persists atomically: the file ends up valid and no temp file is left behind', () => {
+		const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'orchestrator-settings-'))
+		try {
+			const orchestrationDir = path.resolve(tempDir, '.orchestration')
+			const write = createWriteProjectSettings(tempDir)
+			write({ effort: 3 })
+			// The temp file is renamed away, so only settings.json remains under .orchestration.
+			const entries = fs.readdirSync(orchestrationDir).sort()
+			expect(entries).toEqual(['settings.json'])
+			expect(createReadProjectSettings(tempDir)()).toEqual({ effort: 3 })
+		} finally {
+			fs.rmSync(tempDir, { recursive: true, force: true })
+		}
+	})
+
+	test('write creates the .orchestration directory when it does not yet exist', () => {
+		const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'orchestrator-settings-'))
+		try {
+			const write = createWriteProjectSettings(tempDir)
+			write({ effort: 1 })
+			expect(createReadProjectSettings(tempDir)()).toEqual({ effort: 1 })
+		} finally {
+			fs.rmSync(tempDir, { recursive: true, force: true })
+		}
 	})
 })

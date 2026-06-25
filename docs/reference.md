@@ -69,6 +69,7 @@ The executor maintains a single queue of pending LLM requests. At most one is in
 `log.jsonl` is append-only and carries one JSON object per line. Each event has `timestamp`, `type`, and a `payload` whose shape depends on the type. The role-tree and per-turn detail events are:
 
 - `role_start` — `{ role, depth, task, parent? }`. Emitted when a role begins, after its definition is confirmed to exist. `parent` is the calling role's name, omitted for the entry role at depth 0. A refused `agent` call (depth exceeded or unknown child) emits no `role_start` for the never-run child.
+- `effort_set` — `{ effort }`. Emitted once at run start, before the entry role begins, recording the run's chosen effort level (see "Effort channel").
 - `role_finished` — `{ role, depth, status, summary?, error?, parent? }`. Emitted when a role returns a final card. `status` is the `ResultCard` status; `summary` is the role's own explanation of its result (so a reviewer reading only the log can see why a role errored, rather than only that it did); `error` is the structured `{ kind, message?, details? }` when the card carried one; `parent` is omitted for the entry role. Every `role_start` is paired with exactly one `role_finished`.
 - `agent_call` — `{ parent, child, depth, budget? }`. Emitted when the `agent` tool is invoked, before the child runs, carrying the parent→child edge even for callers that do not read `role_start`.
 - `llm_call` — emitted only on success paths (a turn that returned content/tool calls or finished). Payload: `{ role, messageCount, sent, received, usage, finishReason? }`. `sent` is the message list sent for the turn (each message's `role` and `content`; reasoning omitted; `tool_calls` on assistant messages included). `received` is the assistant response actually received: `content`, `reasoning` (if any), and the parsed `toolCalls` (each call's `id`, `function.name`, and `function.arguments`). `usage` carries `promptTokens`, `completionTokens`, `totalTokens`, and `cachedPromptTokens` (when the endpoint reports a cached share). `finishReason` is the OpenAI `choices[0].finish_reason` (e.g. `stop`, `length`, `tool_calls`, `content_filter`), absent when the endpoint omits it so "absent" is distinguishable from "model stopped". The `llm_unavailable` and `context_budget_exceeded` paths log their own dedicated events and do not emit a misleading `llm_call`.
@@ -229,7 +230,15 @@ The web UI is the primary interface. The HTTP API exists for programmatic access
 
 ### `POST /api/runs`
 
-Starts a run. **Body:** `{ "task": "..." }`. **201:** `{ "runId": "..." }`. **409:** `{ "ok": false, "error": "run_in_progress" }`.
+Starts a run. **Body:** `{ "task": "...", "effort"?: 0|1|2|3|4|5 }`. `effort` is optional; when omitted the project default (see `GET|PUT /api/settings`) is applied, falling back to `3` when no default is set. An out-of-range or non-integer `effort` returns `400 invalid_body`. **201:** `{ "runId": "..." }`. **409:** `{ "ok": false, "error": "run_in_progress" }`.
+
+### `GET /api/settings`
+
+Returns the project-wide settings. **200:** `{ "effort": 0|1|2|3|4|5 | null }`. `effort` is `null` when no default has been set.
+
+### `PUT /api/settings`
+
+Updates the project-wide settings. **Body:** `{ "effort": 0|1|2|3|4|5 }` (required). The file is written atomically (write-temp + rename). **200:** `{ "effort": ... }`. **400:** `{ "ok": false, "error": "invalid_body" }` for a missing or invalid `effort`.
 
 ### `GET /api/runs`
 
@@ -314,9 +323,38 @@ A suite is a directory of benchmarks. The Foundry runs every benchmark against e
 Run bookkeeping lives alongside the project under `.orchestration/runs/`:
 
 ```
-<workspace>/.orchestration/runs/<run_id>/
-├── meta.json      # run id, guild path, start/end time, status, final result
-└── log.jsonl      # one JSON object per line: llm calls, tool calls, errors
+<workspace>/.orchestration/
+├── runs/<run_id>/
+│   ├── meta.json      # run id, guild path, start/end time, status, effort, final result
+│   └── log.jsonl      # one JSON object per line: effort_set, llm calls, tool calls, errors
+└── settings.json      # project-wide settings (currently the default effort)
 ```
 
 The workspace itself holds the final filesystem state (mutated in place). `log.jsonl` is append-only — the executor logs every role start/finish, the parent→child agent-call edges, every LLM turn (sent messages, received response, finish reason, per-call usage), and every tool call/result (raw arguments and the full un-truncated result) so a reviewer can reconstruct exactly what happened from the log alone.
+
+## Effort channel
+
+The effort channel is a per-run, project-wide speed-vs-quality setting: an integer `0`–`5` where `0` is fastest and `5` is highest quality. The executor provides the **channel only** — it accepts, persists, logs, and injects the value; it makes no decision about what each level *means*. The mapping from effort to concrete behavior (generation overrides, critic-skip rules, retry thresholds) lives entirely in the Guild prompts and is tunable by the Foundry, so hardcoding it in the executor would conflict with the Foundry's job.
+
+### Resolution
+
+Effort is resolved once at run submission and is not adjustable mid-run (a second submit while a run is active is rejected as `run_in_progress`):
+
+1. A per-run `effort` in `POST /api/runs` wins.
+2. Otherwise the project default from `.orchestration/settings.json` (set via `PUT /api/settings`) is used.
+3. Otherwise the default `3` is applied.
+
+### Injection
+
+The entry role (and only the entry role) receives the effort as a system message inserted between its system prompt and the task, so prompts can branch on it. Child roles do **not** receive a global effort directive — the parent decides how to translate effort into delegation instructions. The directive string is a stable contract the Guild prompts depend on:
+
+```
+Quality level: <N> of 5 (higher = more careful, slower, more thorough; lower = faster, more direct).
+```
+
+### Surfaces
+
+- `RunMeta.effort` and `GET /api/runs/:id` carry the run's effort.
+- An `effort_set` event `{ effort }` is logged once at run start.
+- `GET|PUT /api/settings` read/write `.orchestration/settings.json` atomically; a malformed file is treated as absent (a torn read mid-write must not crash submission).
+- The Foundry sets effort per benchmark and ignores the project setting, so benchmark runs are comparable.
