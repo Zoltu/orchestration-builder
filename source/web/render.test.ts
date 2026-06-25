@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import type { RunSnapshotRaw } from '../executor/persistence.js'
 import type { PendingQuestion } from '../executor/human-backend.js'
-import type { LogEvent, RunMeta } from '../executor/types.js'
+import type { LogEvent, RunMeta, GuildConfig } from '../executor/types.js'
 import {
 	deriveBudgets,
 	deriveQuestionHistory,
@@ -11,6 +11,7 @@ import {
 	paginateLogEvents,
 	parseLogEvents,
 	parseRunSnapshot,
+	renderConfig,
 	renderPendingQuestions,
 	renderRunSummary,
 	renderRunView,
@@ -140,25 +141,57 @@ describe('deriveRoleActivity', () => {
 		expect(planner.eventCount).toBe(3)
 		expect(planner.llmCalls).toBe(1)
 		expect(planner.toolCalls).toBe(1)
-		expect(planner.toolsCalled).toEqual(['agent'])
+		expect(planner.recentTools).toEqual(['agent'])
+		expect(planner.lastPromptTokens).toBeNull()
 
 		const coder = activity[1]!
 		expect(coder.role).toBe('coder')
 		expect(coder.llmCalls).toBe(1)
 		expect(coder.toolCalls).toBe(1)
-		expect(coder.toolsCalled).toEqual(['finish'])
+		expect(coder.recentTools).toEqual(['finish'])
+		expect(coder.lastPromptTokens).toBeNull()
 	})
 
-	test('records each distinct tool once, in first-use order', () => {
+	test('recentTools keeps the last 3 distinct tools, most-recent-last, moving a repeat to the end', () => {
 		const events: LogEvent[] = [
 			{ timestamp: 't1', type: 'tool_call', payload: { role: 'coder', tool: 'read_file' } },
 			{ timestamp: 't2', type: 'tool_call', payload: { role: 'coder', tool: 'write_file' } },
 			{ timestamp: 't3', type: 'tool_call', payload: { role: 'coder', tool: 'read_file' } },
+			{ timestamp: 't4', type: 'tool_call', payload: { role: 'coder', tool: 'search_text' } },
+			{ timestamp: 't5', type: 'tool_call', payload: { role: 'coder', tool: 'glob_files' } },
+			{ timestamp: 't6', type: 'tool_call', payload: { role: 'coder', tool: 'write_file' } },
 		]
 
 		const [coder] = deriveRoleActivity(events)
-		expect(coder!.toolsCalled).toEqual(['read_file', 'write_file'])
-		expect(coder!.toolCalls).toBe(3)
+		expect(coder!.recentTools).toEqual(['search_text', 'glob_files', 'write_file'])
+		expect(coder!.toolCalls).toBe(6)
+	})
+
+	test('recentTools is empty when the role made no tool calls', () => {
+		const events: LogEvent[] = [
+			{ timestamp: 't1', type: 'llm_call', payload: { role: 'planner' } },
+		]
+		const [planner] = deriveRoleActivity(events)
+		expect(planner!.recentTools).toEqual([])
+	})
+
+	test('lastPromptTokens tracks the most recent llm_call usage promptTokens for the role', () => {
+		const events: LogEvent[] = [
+			{ timestamp: 't1', type: 'llm_call', payload: { role: 'planner', usage: { promptTokens: 100, completionTokens: 20, totalTokens: 120, cachedPromptTokens: 40 } } },
+			{ timestamp: 't2', type: 'tool_call', payload: { role: 'planner', tool: 'read_file' } },
+			{ timestamp: 't3', type: 'llm_call', payload: { role: 'planner', usage: { promptTokens: 250, completionTokens: 30, totalTokens: 280 } } },
+		]
+		const [planner] = deriveRoleActivity(events)
+		// The last reported context window size is the full prompt bill (cached + uncached), not the uncached share.
+		expect(planner!.lastPromptTokens).toBe(250)
+	})
+
+	test('lastPromptTokens stays null when an llm_call carries no usage', () => {
+		const events: LogEvent[] = [
+			{ timestamp: 't1', type: 'llm_call', payload: { role: 'planner' } },
+		]
+		const [planner] = deriveRoleActivity(events)
+		expect(planner!.lastPromptTokens).toBeNull()
 	})
 
 	test('ignores events whose payload has no role', () => {
@@ -781,5 +814,106 @@ describe('formatLogAsText', () => {
 	test('does not throw on a malformed payload', () => {
 		const events: LogEvent[] = [{ timestamp: 't1', type: 'llm_call', payload: 'broken' }]
 		expect(formatLogAsText(events)).toBe('t1\tllm_call\tllm call')
+	})
+})
+
+function sampleGuildConfig(overrides: Partial<GuildConfig> = {}): GuildConfig {
+	return {
+		schemaVersion: 1,
+		model: {
+			name: 'qwen3.6:35b',
+			apiBase: 'http://llama-server:8080/v1',
+			apiKey: 'secret-key',
+			contextWindow: 262144,
+			reasoningField: 'reasoning',
+			generation: { temperature: 0.2, maxTokens: 32768 },
+		},
+		executor: {
+			maxAgentDepth: 8,
+			maxToolCallsPerRole: 50,
+			maxTokensPerRole: 262144,
+			maxRunTimeSeconds: 14400,
+			defaultToolTimeoutSeconds: 30,
+			maxRepeatedToolCalls: 3,
+			maxCompactionAttempts: 5,
+		},
+		contextPolicy: { maxToolOutputChars: 8000 },
+		entryRole: 'orchestrator',
+		roles: {
+			orchestrator: { systemPrompt: 'prompts/orchestrator.md', tools: ['agent', 'ask_human', 'finish'] },
+			coder: { systemPrompt: 'prompts/coder.md', tools: ['read_file', 'write_file', 'finish'] },
+		},
+		tools: ['tools/agent.json', 'tools/finish.json'],
+		...overrides,
+	}
+}
+
+describe('renderConfig', () => {
+	test('shapes the model name and context window, executor budgets, entry role, and role tool lists', () => {
+		const view = renderConfig(sampleGuildConfig())
+		expect(view.model).toEqual({ name: 'qwen3.6:35b', contextWindow: 262144 })
+		expect(view.executor).toEqual({
+			maxAgentDepth: 8,
+			maxToolCallsPerRole: 50,
+			maxTokensPerRole: 262144,
+			maxRunTimeSeconds: 14400,
+			defaultToolTimeoutSeconds: 30,
+			maxRepeatedToolCalls: 3,
+			maxCompactionAttempts: 5,
+		})
+		expect(view.entryRole).toBe('orchestrator')
+		expect(view.roles).toEqual({
+			orchestrator: { tools: ['agent', 'ask_human', 'finish'] },
+			coder: { tools: ['read_file', 'write_file', 'finish'] },
+		})
+	})
+
+	test('structurally omits apiKey and apiBase even when the loaded Guild carries them', () => {
+		const view = renderConfig(sampleGuildConfig())
+		expect(view.model).not.toHaveProperty('apiKey')
+		expect(view.model).not.toHaveProperty('apiBase')
+		const serialized = JSON.stringify(view)
+		expect(serialized).not.toContain('secret-key')
+		expect(serialized).not.toContain('llama-server')
+	})
+
+	test('omits apiKey and apiBase even when the loaded Guild defines an empty key', () => {
+		const view = renderConfig(sampleGuildConfig({ model: { ...sampleGuildConfig().model, apiKey: '' } }))
+		expect(view.model).not.toHaveProperty('apiKey')
+		expect(view.model).not.toHaveProperty('apiBase')
+	})
+
+	test('includes every role declared in the Guild with its full tool list', () => {
+		const config = sampleGuildConfig({
+			roles: {
+				orchestrator: { systemPrompt: 'p', tools: ['agent', 'finish'] },
+				planner: { systemPrompt: 'p', tools: ['read_file', 'glob_files', 'search_text', 'finish'] },
+				empty: { systemPrompt: 'p', tools: [] },
+			},
+		})
+		const view = renderConfig(config)
+		expect(Object.keys(view.roles).sort()).toEqual(['empty', 'orchestrator', 'planner'])
+		expect(view.roles.orchestrator!.tools).toEqual(['agent', 'finish'])
+		expect(view.roles.planner!.tools).toEqual(['read_file', 'glob_files', 'search_text', 'finish'])
+		expect(view.roles.empty!.tools).toEqual([])
+	})
+
+	test('drops role-only fields that are not part of the safe subset (systemPrompt, generation, budget)', () => {
+		const config = sampleGuildConfig({
+			roles: {
+				orchestrator: {
+					systemPrompt: 'prompts/orchestrator.md',
+					tools: ['finish'],
+					generation: { temperature: 0.3, maxTokens: 2048 },
+					includeReasoning: true,
+					budget: { maxToolCalls: 10, maxTokens: 5000 },
+				},
+			},
+		})
+		const view = renderConfig(config)
+		expect(view.roles.orchestrator).toEqual({ tools: ['finish'] })
+		expect(view.roles.orchestrator).not.toHaveProperty('systemPrompt')
+		expect(view.roles.orchestrator).not.toHaveProperty('generation')
+		expect(view.roles.orchestrator).not.toHaveProperty('budget')
 	})
 })

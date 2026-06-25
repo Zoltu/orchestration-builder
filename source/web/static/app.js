@@ -16,6 +16,16 @@ const STATUS_LABELS = {
 }
 const SERVER_UNAVAILABLE_MESSAGE = 'server unavailable — it may have shut down'
 
+// One shared NumberFormat so every rendered count, token total, and duration in the UI shares the user's locale and grouping; re-instantiating per render is wasteful and would let a locale change between renders drift the formatting.
+const numberFormatter = new Intl.NumberFormat(navigator.language)
+
+// Formats any numeric value with locale grouping, returning '—' for null/undefined/non-numbers so callers can pass optional fields (token totals absent on a run with no usage) without a separate guard.
+function formatNumber(value) {
+	if (value === null || value === undefined) return '—'
+	if (typeof value !== 'number' || !Number.isFinite(value)) return '—'
+	return numberFormatter.format(value)
+}
+
 // The AudioContext is created lazily on first user interaction (browsers start it suspended until a gesture) and reused for every beep; it is module state, not app state, because it is an opaque resource with no place in the view.
 let audioContext = null
 
@@ -33,13 +43,13 @@ function formatRelative(iso, now) {
 	if (Number.isNaN(then)) return iso
 	const seconds = Math.round((now - then) / 1000)
 	if (seconds < 1) return 'just now'
-	if (seconds < 60) return `${seconds}s ago`
+	if (seconds < 60) return `${formatNumber(seconds)}s ago`
 	const minutes = Math.floor(seconds / 60)
-	if (minutes < 60) return `${minutes}m ago`
+	if (minutes < 60) return `${formatNumber(minutes)}m ago`
 	const hours = Math.floor(minutes / 60)
-	if (hours < 24) return `${hours}h ago`
+	if (hours < 24) return `${formatNumber(hours)}h ago`
 	const days = Math.floor(hours / 24)
-	return `${days}d ago`
+	return `${formatNumber(days)}d ago`
 }
 
 function statusLabel(status) {
@@ -48,17 +58,15 @@ function statusLabel(status) {
 }
 
 function formatElapsed(seconds) {
-	if (typeof seconds !== 'number' || seconds < 0) return '—'
+	if (typeof seconds !== 'number' || seconds < 0 || !Number.isFinite(seconds)) return '—'
 	const minutes = Math.floor(seconds / 60)
 	const remaining = seconds % 60
-	if (minutes === 0) return `${remaining}s`
-	return `${minutes}m ${remaining}s`
+	if (minutes === 0) return `${formatNumber(remaining)}s`
+	return `${formatNumber(minutes)}m ${formatNumber(remaining)}s`
 }
 
 function formatTokens(tokens) {
-	if (tokens === null || tokens === undefined) return '—'
-	if (typeof tokens !== 'number') return '—'
-	return tokens.toLocaleString()
+	return formatNumber(tokens)
 }
 
 function isTerminalStatus(status) {
@@ -264,6 +272,14 @@ function FetchFailed(state) {
 	return { ...state, serverAvailable: false }
 }
 
+// The config panel is fetched exactly once on load and never polled, so this action runs a single time; later state transitions preserve the config via the spread.
+function GotConfig(state, payload) {
+	const ok = payload.ok
+	const body = payload.body
+	if (!ok || body === null || typeof body !== 'object') return state
+	return { ...state, config: body }
+}
+
 function SelectRun(state, runId) {
 	if (runId === state.selectedRunId) return state
 	return { ...state, selectedRunId: runId, selectedRunView: null, selectedRunStatus: null, expandedLogRows: {}, logPage: null }
@@ -381,6 +397,24 @@ function SubmitRun(state, event) {
 	]
 }
 
+// A re-run is a one-click resubmit of a past run's task; it reuses the create path (POST /api/runs → GotCreatedRun) so the new run is selected and the active-run guard applies identically.
+// stopPropagation keeps the click from also triggering the enclosing list entry's select handler; the task is read from the button's data-task attribute so the action stays a stable top-level function (hyperapp passes the DOM event as the payload to a bare-function handler).
+function RerunTask(state, event) {
+	event.stopPropagation()
+	if (state.justSubmittedRunId !== null || deriveActiveRunId(state.summaries) !== null) return state
+	const task = event.currentTarget.getAttribute('data-task')
+	if (typeof task !== 'string' || task === '') return state
+	return [
+		state,
+		Fetch({
+			url: 'api/runs',
+			init: { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ task }) },
+			ok: GotCreatedRun,
+			fail: FetchFailed,
+		}),
+	]
+}
+
 function GotCreatedRun(state, payload) {
 	const ok = payload.ok
 	const body = payload.body
@@ -457,6 +491,8 @@ function RunList(state) {
 	if (state.summaries.length === 0) {
 		return h('ul', { id: 'run-list' }, h('li', { class: 'empty' }, 'No runs yet.'))
 	}
+	// The re-run button shares the create form's disabled condition (a run is active or a submission is in flight) so the one-task-at-a-time contract holds identically for re-runs.
+	const rerunDisabled = state.justSubmittedRunId !== null || deriveActiveRunId(state.summaries) !== null
 	return h(
 		'ul',
 		{ id: 'run-list' },
@@ -465,6 +501,7 @@ function RunList(state) {
 				h('span', { class: 'run-id' }, summary.runId),
 				h('span', { class: `run-status run-status-${summary.status ?? 'unknown'}` }, statusLabel(summary.status)),
 				h('span', { class: 'run-task' }, summary.task ?? '—'),
+				h('button', { type: 'button', class: 'rerun-button', 'data-task': summary.task ?? '', disabled: rerunDisabled || typeof summary.task !== 'string' || summary.task === '', onclick: RerunTask }, 're-run'),
 			]),
 		),
 	)
@@ -529,7 +566,7 @@ function BudgetsLine(b) {
 	}
 	return h('div', { class: 'budgets' }, [
 		h('span', { class: 'budget-budget' }, `elapsed ${formatElapsed(b.elapsedSeconds)}`),
-		h('span', { class: 'budget-budget' }, `tool calls ${b.toolCalls}`),
+		h('span', { class: 'budget-budget' }, `tool calls ${formatNumber(b.toolCalls)}`),
 		...tokenSpans,
 	])
 }
@@ -545,12 +582,13 @@ function RolesPanel(state) {
 				return h('li', { key: role.role, class: { 'role-active': isActive } }, [
 					isActive ? h('span', { class: 'role-pulse' }) : null,
 					h('strong', {}, role.role),
-					h('span', {}, ` — ${role.eventCount} events · ${role.llmCalls} LLM calls · ${role.toolCalls} tool calls`),
+					h('span', {}, ` — ${formatNumber(role.eventCount)} events · ${formatNumber(role.llmCalls)} LLM calls · ${formatNumber(role.toolCalls)} tool calls`),
 					h('div', { class: 'role-times' }, [
 						h('span', { class: 'role-time' }, ['first seen ', h('time', { title: role.firstSeen ?? '' }, formatRelative(role.firstSeen, state.now))]),
 						h('span', { class: 'role-time' }, ['last seen ', h('time', { title: role.lastSeen ?? '' }, formatRelative(role.lastSeen, state.now))]),
 					]),
-					role.toolsCalled.length > 0 ? h('div', { class: 'role-tools' }, `tools: ${role.toolsCalled.join(', ')}`) : null,
+					role.recentTools.length > 0 ? h('div', { class: 'role-tools' }, `recent tools: ${role.recentTools.join(', ')}`) : null,
+					role.lastPromptTokens !== null && role.lastPromptTokens !== undefined ? h('div', { class: 'role-context' }, `last context: ${formatTokens(role.lastPromptTokens)} tokens`) : null,
 				])
 			})
 	return h('section', { id: 'roles-panel', class: 'panel' }, [h('h2', {}, 'Role activity'), h('ul', { id: 'roles' }, children)])
@@ -636,6 +674,43 @@ function QuestionsPanel(state) {
 	])
 }
 
+function ConfigPanel(state) {
+	const config = state.config
+	if (config === null) {
+		return h('section', { id: 'config-panel', class: 'panel' }, [h('h2', {}, 'Configuration'), h('p', { class: 'config-empty' }, 'Loading configuration…')])
+	}
+	const model = config.model
+	const executor = config.executor
+	const roles = config.roles
+	const roleNames = Object.keys(roles)
+	const budgetEntries = [
+		`agent depth ${formatNumber(executor.maxAgentDepth)}`,
+		`tool calls/role ${formatNumber(executor.maxToolCallsPerRole)}`,
+		`tokens/role ${formatNumber(executor.maxTokensPerRole)}`,
+		`run time ${formatNumber(executor.maxRunTimeSeconds)}s`,
+		`tool timeout ${formatNumber(executor.defaultToolTimeoutSeconds)}s`,
+		`repeated calls ${formatNumber(executor.maxRepeatedToolCalls)}`,
+		`compaction attempts ${formatNumber(executor.maxCompactionAttempts)}`,
+	]
+	return h('section', { id: 'config-panel', class: 'panel' }, [
+		h('h2', {}, 'Configuration'),
+		h('dl', { class: 'config-meta' }, [
+			h('dt', {}, 'Model'), h('dd', {}, model.name),
+			h('dt', {}, 'Context window'), h('dd', {}, formatNumber(model.contextWindow)),
+			h('dt', {}, 'Entry role'), h('dd', {}, config.entryRole),
+		]),
+		h('div', { class: 'config-budgets' }, budgetEntries.map((entry) => h('span', { class: 'config-budget' }, entry))),
+		h('ul', { class: 'config-roles' }, roleNames.map((name) => {
+			const tools = roles[name].tools
+			return h('li', { key: name, class: 'config-role' }, [
+				h('strong', {}, name),
+				name === config.entryRole ? h('span', { class: 'config-entry-marker' }, ' (entry)') : null,
+				h('div', { class: 'config-role-tools' }, tools.length > 0 ? `tools: ${tools.join(', ')}` : 'no tools'),
+			])
+		})),
+	])
+}
+
 function Main(state) {
 	return h('main', {}, [
 		RunsPanel(state),
@@ -643,6 +718,7 @@ function Main(state) {
 		RolesPanel(state),
 		QuestionsPanel(state),
 		LogPanel(state),
+		ConfigPanel(state),
 	])
 }
 
@@ -654,22 +730,27 @@ function view(state) {
 // The subscriptions array is fixed-size with stable positions: [0] always polls the run list + questions every second; [1] polls the selected run every second but only while one is selected and non-terminal (deactivating on terminal status replaces the manual clearInterval of the prior client); [2] primes the AudioContext on the first user interaction.
 
 app({
-	init: {
-		summaries: [],
-		selectedRunId: null,
-		selectedRunView: null,
-		selectedRunStatus: null,
-		pendingQuestions: [],
-		serverAvailable: true,
-		justSubmittedRunId: null,
-		muted: false,
-		expandedLogRows: {},
-		shownQuestionIds: {},
-		firstQuestionsPoll: true,
-		pendingAnswerId: null,
-		logPage: null,
-		now: Date.now(),
-	},
+	init: [
+		{
+			summaries: [],
+			selectedRunId: null,
+			selectedRunView: null,
+			selectedRunStatus: null,
+			pendingQuestions: [],
+			serverAvailable: true,
+			justSubmittedRunId: null,
+			muted: false,
+			expandedLogRows: {},
+			shownQuestionIds: {},
+			firstQuestionsPoll: true,
+			pendingAnswerId: null,
+			logPage: null,
+			config: null,
+			now: Date.now(),
+		},
+		// The config panel is loaded once and never polled, so its fetch is an init effect rather than a subscription.
+		Fetch({ url: 'api/config', ok: GotConfig, fail: FetchFailed }),
+	],
 	view,
 	subscriptions: (state) => [
 		onEvery(Tick, POLL_INTERVAL_MS),

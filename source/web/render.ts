@@ -3,7 +3,7 @@
 
 import type { PendingQuestion } from '../executor/human-backend.js'
 import { isRunMeta } from '../executor/validation.js'
-import type { LogEvent, ResultCard, RunMeta } from '../executor/types.js'
+import type { ExecutorConfig, GuildConfig, LogEvent, ResultCard, RunMeta } from '../executor/types.js'
 import type { RunSnapshotRaw } from '../executor/persistence.js'
 
 export interface RunSnapshot {
@@ -145,7 +145,10 @@ export interface RoleActivity {
 	eventCount: number
 	llmCalls: number
 	toolCalls: number
-	toolsCalled: string[]
+	// The last few distinct tools the role called, most-recent-last, capped at 3. Distinct because a tight loop on one tool would otherwise fill the list with repeats and hide what else the role touched.
+	recentTools: string[]
+	// The prompt-token count from the role's most recent llm_call that carried usage, i.e. the last context window size the endpoint billed for that role (cached + uncached prompt). Null until the role's first call reports usage.
+	lastPromptTokens: number | null
 }
 
 // Derives a per-role activity summary from the log event stream.
@@ -166,19 +169,29 @@ export function deriveRoleActivity(logEvents: LogEvent[]): RoleActivity[] {
 				eventCount: 0,
 				llmCalls: 0,
 				toolCalls: 0,
-				toolsCalled: [],
+				recentTools: [],
+				lastPromptTokens: null,
 			}
 			byRole.set(role, entry)
 			order.push(role)
 		}
 		entry.lastSeen = event.timestamp
 		entry.eventCount++
-		if (event.type === 'llm_call') entry.llmCalls++
+		if (event.type === 'llm_call') {
+			entry.llmCalls++
+			// Each llm_call with usage refreshes the role's last-seen context window size, so the panel reflects the live prompt footprint rather than a run total.
+			const usage = usageOf(event.payload)
+			if (usage !== null) entry.lastPromptTokens = usage.promptTokens
+		}
 		if (event.type === 'tool_call') {
 			entry.toolCalls++
 			const tool = toolOf(event.payload)
-			if (tool !== null && !entry.toolsCalled.includes(tool)) {
-				entry.toolsCalled.push(tool)
+			if (tool !== null) {
+				// Move the tool to the most-recent position (removing any earlier occurrence) and cap at the last 3 distinct, so the list reflects recency rather than first-use order.
+				const existing = entry.recentTools.indexOf(tool)
+				if (existing >= 0) entry.recentTools.splice(existing, 1)
+				entry.recentTools.push(tool)
+				if (entry.recentTools.length > 3) entry.recentTools.shift()
 			}
 		}
 	}
@@ -451,4 +464,27 @@ export function renderPendingQuestions(questions: PendingQuestion[]): ApiQuestio
 		if (question.context !== undefined) shaped.context = question.context
 		return shaped
 	})
+}
+
+export interface GuildConfigView {
+	model: { name: string; contextWindow: number }
+	executor: ExecutorConfig
+	entryRole: string
+	roles: Record<string, { tools: string[] }>
+}
+
+// Shapes a read-only, key-safe view of the loaded Guild for the /api/config endpoint.
+// Only the model's name and context window are carried; apiKey and apiBase are structurally omitted, so the endpoint can never leak the injected key or the endpoint URL regardless of what the loaded Guild contains.
+// The executor budgets are passed through verbatim because they are operator-facing limits, not secrets; every role contributes its tool list so the panel can show the full role/tool matrix.
+export function renderConfig(config: GuildConfig): GuildConfigView {
+	const roles: Record<string, { tools: string[] }> = {}
+	for (const [name, role] of Object.entries(config.roles)) {
+		roles[name] = { tools: role.tools }
+	}
+	return {
+		model: { name: config.model.name, contextWindow: config.model.contextWindow },
+		executor: config.executor,
+		entryRole: config.entryRole,
+		roles,
+	}
 }

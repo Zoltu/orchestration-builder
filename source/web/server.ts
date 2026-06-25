@@ -5,9 +5,10 @@
 import * as path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import type { ListRunIds, ReadRunSnapshotById } from '../executor/persistence.js'
+import type { GuildConfig } from '../executor/types.js'
 import type { RunState } from '../executor/run-state.js'
 import type { RunSubmission } from '../executor/run-submission.js'
-import { parseRunSnapshot, paginateLogEvents, renderPendingQuestions, renderRunSummary, renderRunView, formatLogAsText, toRecentLogEntry } from './render.js'
+import { parseRunSnapshot, paginateLogEvents, renderConfig, renderPendingQuestions, renderRunSummary, renderRunView, formatLogAsText, toRecentLogEntry } from './render.js'
 
 const STATIC_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), 'static')
 const MAX_LOG_LINES = 200
@@ -26,6 +27,7 @@ const STATIC_ASSETS: Record<string, StaticAsset> = {
 
 export interface WebServerConfig {
 	port: number
+	guildConfig: GuildConfig
 	runState: RunState
 	runSubmission: RunSubmission
 	readRunSnapshotById: ReadRunSnapshotById
@@ -144,6 +146,7 @@ function handleCreateRun(runSubmission: RunSubmission, body: unknown): Response 
 }
 
 export function createWebServer(config: WebServerConfig): WebServer {
+	const guildConfig = config.guildConfig
 	const runState = config.runState
 	const runSubmission = config.runSubmission
 	const readRunSnapshotById = config.readRunSnapshotById
@@ -155,8 +158,9 @@ export function createWebServer(config: WebServerConfig): WebServer {
 			const url = new URL(request.url)
 			const { pathname } = url
 
-			if (request.method === 'GET') {
-				if (pathname === '/api/run') return handleActiveRun(readRunSnapshotById, runSubmission)
+		if (request.method === 'GET') {
+			if (pathname === '/api/config') return json(renderConfig(guildConfig))
+			if (pathname === '/api/run') return handleActiveRun(readRunSnapshotById, runSubmission)
 				if (pathname === '/api/runs') return handleListRuns(readRunSnapshotById, listRunIds)
 				if (pathname.startsWith('/api/runs/')) {
 					const rest = decodeURIComponent(pathname.slice('/api/runs/'.length))

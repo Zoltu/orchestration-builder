@@ -3,7 +3,7 @@ import { createWebHumanBackend } from '../executor/human-backend.ts'
 import { createRunState } from '../executor/run-state.ts'
 import { createRunSubmission, type RunSubmission, type StartRun } from '../executor/run-submission.ts'
 import type { RunSnapshotRaw } from '../executor/persistence.ts'
-import type { RunMeta } from '../executor/types.js'
+import type { GuildConfig, RunMeta } from '../executor/types.js'
 import { createWebServer, type WebServer } from './server.ts'
 
 function snapshotFor(runId: string, status: RunMeta['status'] = 'success', overrides: Partial<RunMeta> = {}): RunSnapshotRaw {
@@ -51,6 +51,34 @@ const snapshots = new Map<string, RunSnapshotRaw>([
 ])
 
 const unknownRunIds = new Set(['never-started'])
+
+const sampleGuildConfig: GuildConfig = {
+	schemaVersion: 1,
+	model: {
+		name: 'qwen3.6:35b',
+		apiBase: 'http://llama-server:8080/v1',
+		apiKey: 'secret-key',
+		contextWindow: 262144,
+		reasoningField: 'reasoning',
+		generation: { temperature: 0.2, maxTokens: 32768 },
+	},
+	executor: {
+		maxAgentDepth: 8,
+		maxToolCallsPerRole: 50,
+		maxTokensPerRole: 262144,
+		maxRunTimeSeconds: 14400,
+		defaultToolTimeoutSeconds: 30,
+		maxRepeatedToolCalls: 3,
+		maxCompactionAttempts: 5,
+	},
+	contextPolicy: { maxToolOutputChars: 8000 },
+	entryRole: 'orchestrator',
+	roles: {
+		orchestrator: { systemPrompt: 'prompts/orchestrator.md', tools: ['agent', 'ask_human', 'finish'] },
+		coder: { systemPrompt: 'prompts/coder.md', tools: ['read_file', 'write_file', 'finish'] },
+	},
+	tools: ['tools/agent.json', 'tools/finish.json'],
+}
 
 function readRunSnapshotById(runId: string): RunSnapshotRaw {
 	if (unknownRunIds.has(runId)) return { metaText: null, logText: '' }
@@ -108,6 +136,7 @@ const humanBackend = createWebHumanBackend()
 const runState = createRunState({ humanBackend })
 const readOnlyServer: WebServer = createWebServer({
 	port: 0,
+	guildConfig: sampleGuildConfig,
 	runState,
 	runSubmission: createRunSubmission({
 		startRun: async () => ({ runId: 'unused', guildPath: 'g', benchmarkPath: 'b', task: 't', status: 'success', startTime: 's' }),
@@ -140,6 +169,7 @@ function createSubmissionServer(): SubmissionServer {
 	const submission = createRunSubmission({ startRun, generateRunId: () => `test-run-${nextId++}` })
 	const server = createWebServer({
 		port: 0,
+		guildConfig: sampleGuildConfig,
 		runState: createRunState({ humanBackend: createWebHumanBackend() }),
 		runSubmission: submission,
 		readRunSnapshotById,
@@ -203,6 +233,48 @@ describe('createWebServer static assets', () => {
 		expect(response.status).toBe(404)
 		const body = await response.json()
 		expect(body).toEqual({ ok: false, error: 'not_found' })
+	})
+})
+
+describe('createWebServer GET /api/config', () => {
+	test('returns the safe config subset derived from the loaded Guild', async () => {
+		const response = await fetch(`${readOnlyBaseUrl}/api/config`)
+		expect(response.status).toBe(200)
+		const config = await response.json()
+		expect(config.model).toEqual({ name: 'qwen3.6:35b', contextWindow: 262144 })
+		expect(config.executor).toEqual({
+			maxAgentDepth: 8,
+			maxToolCallsPerRole: 50,
+			maxTokensPerRole: 262144,
+			maxRunTimeSeconds: 14400,
+			defaultToolTimeoutSeconds: 30,
+			maxRepeatedToolCalls: 3,
+			maxCompactionAttempts: 5,
+		})
+		expect(config.entryRole).toBe('orchestrator')
+		expect(config.roles).toEqual({
+			orchestrator: { tools: ['agent', 'ask_human', 'finish'] },
+			coder: { tools: ['read_file', 'write_file', 'finish'] },
+		})
+	})
+
+	test('structurally omits apiKey and apiBase from the response', async () => {
+		const response = await fetch(`${readOnlyBaseUrl}/api/config`)
+		const config = await response.json()
+		expect(config.model).not.toHaveProperty('apiKey')
+		expect(config.model).not.toHaveProperty('apiBase')
+		const serialized = JSON.stringify(config)
+		expect(serialized).not.toContain('secret-key')
+		expect(serialized).not.toContain('llama-server')
+	})
+
+	test('includes the entry role and every role declared in the Guild', async () => {
+		const response = await fetch(`${readOnlyBaseUrl}/api/config`)
+		const config = await response.json()
+		expect(config.entryRole).toBe('orchestrator')
+		expect(Object.keys(config.roles).sort()).toEqual(['coder', 'orchestrator'])
+		expect(config.roles.orchestrator.tools).toEqual(['agent', 'ask_human', 'finish'])
+		expect(config.roles.coder.tools).toEqual(['read_file', 'write_file', 'finish'])
 	})
 })
 

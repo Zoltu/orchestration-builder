@@ -100,6 +100,12 @@ li:last-child {
 	color: #52606d;
 }
 
+.role-context {
+	margin-top: 0.15rem;
+	font-size: 0.8rem;
+	color: #52606d;
+}
+
 .question-context {
 	margin-top: 0.25rem;
 	font-size: 0.85rem;
@@ -137,7 +143,7 @@ li:last-child {
 #log {
 	font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
 	font-size: 0.8rem;
-	max-height: 24rem;
+	height: 24rem;
 	overflow: auto;
 }
 
@@ -244,6 +250,28 @@ li:last-child {
 	overflow-wrap: anywhere;
 }
 
+.rerun-button {
+	flex: 0 0 auto;
+	border: 1px solid #cbd2d9;
+	border-radius: 4px;
+	background: #f6f6f8;
+	color: #323f4b;
+	font-size: 0.75rem;
+	padding: 0.15rem 0.5rem;
+	cursor: pointer;
+}
+
+.rerun-button:hover:not(:disabled) {
+	background: #eef2ff;
+	border-color: #1f6feb;
+	color: #1f6feb;
+}
+
+.rerun-button:disabled {
+	opacity: 0.5;
+	cursor: default;
+}
+
 .log-empty {
 	color: #7b8794;
 	font-style: italic;
@@ -270,6 +298,12 @@ li:last-child {
 
 .budget-budget {
 	white-space: nowrap;
+}
+
+.budget-token-detail {
+	display: inline-flex;
+	flex-wrap: wrap;
+	gap: 0.3rem 0.75rem;
 }
 
 .role-times {
@@ -452,4 +486,57 @@ li:last-child {
 	background: #eef2ff;
 	border-color: #1f6feb;
 	color: #1f6feb;
+}
+
+#config-panel {
+	min-width: 0;
+}
+
+.config-empty {
+	color: #7b8794;
+	font-style: italic;
+}
+
+.config-meta {
+	margin-bottom: 0.5rem;
+}
+
+.config-budgets {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 0.3rem 1rem;
+	margin: 0 0 0.75rem;
+	font-size: 0.82rem;
+	color: #52606d;
+}
+
+.config-budget {
+	white-space: nowrap;
+}
+
+.config-roles {
+	margin: 0;
+	padding: 0;
+	list-style: none;
+}
+
+.config-role {
+	padding: 0.4rem 0;
+	border-bottom: 1px solid #f0f0f3;
+}
+
+.config-role:last-child {
+	border-bottom: none;
+}
+
+.config-entry-marker {
+	color: #1f6feb;
+	font-size: 0.8rem;
+}
+
+.config-role-tools {
+	margin-top: 0.15rem;
+	font-size: 0.82rem;
+	color: #52606d;
+	overflow-wrap: anywhere;
 }
