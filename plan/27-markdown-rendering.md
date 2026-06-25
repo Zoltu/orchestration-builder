@@ -1,4 +1,4 @@
-# Step 26 — Markdown rendering with syntax highlighting
+# Step 27 — Markdown rendering with syntax highlighting
 
 ## Goal
 

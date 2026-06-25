@@ -93,7 +93,7 @@ Decisions (authoritative):
 ## Known gaps carried into the forward plan
 
 - No `write_file` tool → smoke benchmark cannot materialize `output.txt` end-to-end. Addressed by step `01-write-file-tool`.
-- No `run_shell` tool → the agent cannot run tests or builds to iterate on real coding benchmarks. Addressed by step `29-run-shell-tool`; containment comes from the deployment environment, with per-run environment isolation addressed as part of the Foundry (step `33`) because it runs arbitrary model-chosen commands.
+- No `run_shell` tool → the agent cannot run tests or builds to iterate on real coding benchmarks. Addressed by step `30-run-shell-tool`; containment comes from the deployment environment, with per-run environment isolation addressed as part of the Foundry (step `33`) because it runs arbitrary model-chosen commands.
 - No checker tools → the agent cannot run a typechecker or test suite to verify its work. The safe, fixed-command `typecheck` (step `04`) and `test` (step `05`) tools ship first; they cover the coding-critical checkers without the arbitrary-shell surface that gates `run_shell`.
 - No per-run environment isolation → the suite is constrained to no-install, Bun-validatable tasks. Addressed as part of the Foundry (step `31`), where per-run environment isolation for benchmark evaluation is designed and implemented (an operator-collaboration step — the agent proposes approaches and works with the operator; it does not implement isolation unilaterally).
 - No CLI entry point (`source/main.ts`) yet → the executor cannot be invoked end-to-end. Addressed by step `02-cli-entry-point`.

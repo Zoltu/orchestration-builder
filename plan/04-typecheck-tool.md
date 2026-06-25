@@ -2,11 +2,11 @@
 
 ## Goal
 
-Add a `typecheck` native tool so the agent can run the workspace typechecker (`bun --bun tsc --noEmit`) and read its diagnostics to iterate. Together with the `test` tool (step 05), this gives the coding agent the two checkers it most needs to succeed on TypeScript coding tasks *without* opening the arbitrary-shell surface that `run_shell` (step 29) carries. `run_shell` is deferred until its containment is in place (the deployment environment; per-run isolation lands with the Foundry, step 33); `typecheck` and `test` are safe enough to ship now because they run a single fixed command with no model-chosen argv, no network, and no installs.
+Add a `typecheck` native tool so the agent can run the workspace typechecker (`bun --bun tsc --noEmit`) and read its diagnostics to iterate. Together with the `test` tool (step 05), this gives the coding agent the two checkers it most needs to succeed on TypeScript coding tasks *without* opening the arbitrary-shell surface that `run_shell` (step 30) carries. `run_shell` is deferred until its containment is in place (the deployment environment; per-run isolation lands with the Foundry, step 33); `typecheck` and `test` are safe enough to ship now because they run a single fixed command with no model-chosen argv, no network, and no installs.
 
 ## Context
 
-Read [`00-foundation-completed.md`](00-foundation-completed.md) (the v1 tool layer and the read-only native tools) and [`29-run-shell-tool.md`](29-run-shell-tool.md) (the deferred general shell tool and its containment dependency). The v1 tool layer is otherwise complete: native tools live as factories in `source/executor/tools/` and are assembled by `createToolHandlers` in `source/executor/tools.ts`; manifests live as `guild/tools/*.json` and are conformance-tested by `source/executor/tool-manifests.test.ts`.
+Read [`00-foundation-completed.md`](00-foundation-completed.md) (the v1 tool layer and the read-only native tools) and [`30-run-shell-tool.md`](30-run-shell-tool.md) (the deferred general shell tool and its containment dependency). The v1 tool layer is otherwise complete: native tools live as factories in `source/executor/tools/` and are assembled by `createToolHandlers` in `source/executor/tools.ts`; manifests live as `guild/tools/*.json` and are conformance-tested by `source/executor/tool-manifests.test.ts`.
 
 Why a dedicated tool instead of `run_shell`: `run_shell` runs arbitrary model-chosen commands — that is exactly why it is gated behind isolation. A `typecheck` tool that runs only `bun --bun tsc --noEmit` (cwd pinned to the workspace, no argv from the model) adds essentially no new attack surface over the existing read-only tools: `tsc --noEmit` performs no I/O writes and no network; `bun test` (step 05) only executes `.test.*` files already in the workspace. The residual risk (a malicious benchmark shipping a test file that spawns a destructive command) is a benchmark-trust problem identical to `run_shell`'s and is likewise deferred to the deployment environment and per-run isolation (step 33). Per `docs/executor.md`, a non-zero exit is a **normal tool result** the role reads, not an executor error.
 
@@ -51,7 +51,7 @@ Re-read `typecheck.ts` and the sibling tools (`read-file.ts`, `search-text.ts`, 
 
 ## Estimated effort
 
-Small to medium — a single fixed-command subprocess leaf with timeout/capture, plus tests. Smaller than `run_shell` (step 29) because there is no argv surface to design.
+Small to medium — a single fixed-command subprocess leaf with timeout/capture, plus tests. Smaller than `run_shell` (step 30) because there is no argv surface to design.
 
 ## Operator handoff
 

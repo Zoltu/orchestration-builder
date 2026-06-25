@@ -24,11 +24,11 @@ The slider is the operator's primary per-task knob. It must read the project def
 
 ## Acceptance criteria
 
-- [ ] `bun run typecheck` and `bun test source/` pass (no source-under-test changes; only static assets change).
-- [ ] The slider loads at the persisted project default (via `GET /api/settings`); changing it persists the new default (via `PUT /api/settings`).
-- [ ] A submission includes the current slider value as the run's `effort`; the created run's view reflects it.
-- [ ] The slider is disabled while a run is active and re-enabled on completion.
-- [ ] All rendering uses `createElement`/`textContent` (no `innerHTML`); no untrusted content reaches the DOM as markup.
+- [x] `bun run typecheck` and `bun test source/` pass (no source-under-test changes; only static assets change).
+- [x] The slider loads at the persisted project default (via `GET /api/settings`); changing it persists the new default (via `PUT /api/settings`).
+- [x] A submission includes the current slider value as the run's `effort`; the created run's view reflects it.
+- [x] The slider is disabled while a run is active and re-enabled on completion.
+- [x] All rendering uses `createElement`/`textContent` (no `innerHTML`); no untrusted content reaches the DOM as markup.
 
 ## End-of-step evaluation
 

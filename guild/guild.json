@@ -16,7 +16,7 @@
 	"executor": {
 		"maxAgentDepth": 8,
 		"maxToolCallsPerRole": 50,
-		"maxTokensPerRole": 262144,
+		"maxTokensPerRole": 196608,
 		"maxRunTimeSeconds": 14400,
 		"defaultToolTimeoutSeconds": 30,
 		"maxRepeatedToolCalls": 3,
@@ -24,7 +24,7 @@
 	},
 
 	"contextPolicy": {
-		"maxToolOutputChars": 8000
+		"maxToolOutputChars": 50000
 	},
 
 	"entryRole": "orchestrator",

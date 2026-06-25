@@ -6,7 +6,7 @@ Package the system as a single small Docker image that runs the long-running exe
 
 ## Context
 
-Read `docs/security.md` ("Container and network isolation", "Shell tool policy"), [`13-long-running-service-mode.md`](13-long-running-service-mode.md) (the service the image runs), and [`29-run-shell-tool.md`](29-run-shell-tool.md) (the general shell tool, whose containment comes from this container boundary; per-run environment isolation lands with the Foundry, step 33). The image uses the official Bun base image, copies the project, and runs the executor service — no `npm install` because there are no dependencies. Recommended container flags: no network egress for the executor (except the model endpoint), non-root user, read-only filesystem except the workspace volume.
+Read `docs/security.md` ("Container and network isolation", "Shell tool policy"), [`13-long-running-service-mode.md`](13-long-running-service-mode.md) (the service the image runs), and [`30-run-shell-tool.md`](30-run-shell-tool.md) (the general shell tool, whose containment comes from this container boundary; per-run environment isolation lands with the Foundry, step 33). The image uses the official Bun base image, copies the project, and runs the executor service — no `npm install` because there are no dependencies. Recommended container flags: no network egress for the executor (except the model endpoint), non-root user, read-only filesystem except the workspace volume.
 
 The deployment model (from the realignment): **one container = one project.** The project (git repository) is mounted into the container at the fixed `/workspace` path at run time; the executor service inside treats `/workspace` as its fixed workspace (step 13), so the `CMD` carries no `--task` and no `--workspace` — tasks are submitted at runtime via the service API (`POST /api/runs`) or the web UI.
 
@@ -19,9 +19,9 @@ The deployment model (from the realignment): **one container = one project.** Th
    - How to pass API keys via environment variables (never in the Guild or image).
    - How to mount the Guild (read-only) and the project (read-write at `/workspace`) as volumes.
    - How tasks are submitted (web UI at the exposed port, or `POST /api/runs { task }`) — no `--task` CLI flag in the service `CMD`.
-   - The explicit note that v1's `run_shell` (step 29) runs arbitrary commands inside the workspace; the container boundary (this step) is the outer isolation layer, with per-run environment isolation (Foundry, step 33) providing containment for benchmark evaluation inside it. Document an optional future in-tool allowlist as a deferred defense-in-depth enhancement (and, if concrete, insert a follow-up step).
+   - The explicit note that v1's `run_shell` (step 30) runs arbitrary commands inside the workspace; the container boundary (this step) is the outer isolation layer, with per-run environment isolation (Foundry, step 33) providing containment for benchmark evaluation inside it. Document an optional future in-tool allowlist as a deferred defense-in-depth enhancement (and, if concrete, insert a follow-up step).
 4. Update `docs/architecture.md`'s execution-model note ("Single Dockerfile for the final product") to reference the new `Dockerfile` and `docs/deployment.md`, and to describe the one-container-per-project deployment model.
-5. The `run_shell` containment debt is owned by step 29 (`run_shell`) and removed in step 33 (Foundry), not this step; do not remove a debt row here. Confirm the deployment docs are consistent with the Foundry's per-run isolation running inside this container.
+5. The `run_shell` containment debt is owned by step 30 (`run_shell`) and removed in step 33 (Foundry), not this step; do not remove a debt row here. Confirm the deployment docs are consistent with the Foundry's per-run isolation running inside this container.
 
 ## Module boundaries
 

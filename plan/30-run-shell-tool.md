@@ -1,4 +1,4 @@
-# Step 29 — `run_shell` tool
+# Step 30 — `run_shell` tool
 
 ## Goal
 
