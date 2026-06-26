@@ -14,22 +14,15 @@ import { createToolDispatch, dispatchToolCall, type ToolDispatch, type ToolHandl
 
 export interface RoleState {
 	history: Message[]
-	toolCalls: number
-	promptTokens: number
-	completionTokens: number
-	cachedPromptTokens: number
 	lastPromptTokens: number
-	recentToolCalls: Array<{ name: string; argsHash: string }>
 	recentCompactionPromptTokens: Array<number>
 }
 
 export interface EngineContext {
 	loadedGuild: LoadedGuild
 	depth: number
-	startMs: number
 	roleName: string
 	task: string
-	roleDefinitionOverride?: RoleDefinition
 	// The run's effort, set only on the entry-role context by runExecutor. The agent spawn spreads the context to children, but the directive is gated on depth 0 below, so children never receive a global effort directive — the parent decides how to translate effort into delegation instructions.
 	effort?: EffortLevel
 	// The calling role's name, omitted for the entry role at depth 0 so a reviewer can distinguish a root role from a child and render.ts can build the parent→child tree.
@@ -54,15 +47,6 @@ type LlmResultHandling =
 	| { kind: 'continue' }
 	| { kind: 'finished'; card: ResultCard }
 	| { kind: 'tool_calls'; toolCalls: ToolCall[] }
-
-function hashArgs(args: string): string {
-	let hash = 0
-	for (let i = 0; i < args.length; i++) {
-		const char = args.charCodeAt(i)
-		hash = ((hash << 5) - hash + char) | 0
-	}
-	return hash.toString(36)
-}
 
 function serializeToolResult(result: ToolResult, maxChars: number): string {
 	let text: string
@@ -150,28 +134,10 @@ function llmCallPayload(roleName: string, messages: Message[], llmResult: LlmCal
 	return { role: roleName, messageCount }
 }
 
-function cloneRoleDefinitionWithBudget(base: RoleDefinition, override: { maxToolCalls?: number; maxTokens?: number }): RoleDefinition {
-	const mergedBudget: { maxToolCalls?: number; maxTokens?: number } = {
-		...(base.budget?.maxToolCalls !== undefined ? { maxToolCalls: base.budget.maxToolCalls } : {}),
-		...(base.budget?.maxTokens !== undefined ? { maxTokens: base.budget.maxTokens } : {}),
-		...(override.maxToolCalls !== undefined ? { maxToolCalls: override.maxToolCalls } : {}),
-		...(override.maxTokens !== undefined ? { maxTokens: override.maxTokens } : {}),
-	}
-	const hasAnyBudget = mergedBudget.maxToolCalls !== undefined || mergedBudget.maxTokens !== undefined
-	return {
-		systemPrompt: base.systemPrompt,
-		tools: base.tools.slice(),
-		...(base.generation !== undefined ? { generation: { ...base.generation } } : {}),
-		...(base.includeReasoning !== undefined ? { includeReasoning: base.includeReasoning } : {}),
-		...(hasAnyBudget ? { budget: mergedBudget } : {}),
-	}
-}
-
 function handleLlmResult(
 	llmResult: LlmCallResult,
 	roleState: RoleState,
 	deps: EngineDependencies,
-	roleDefinition: RoleDefinition,
 	context: EngineContext,
 	config: ExecutorConfig,
 ): LlmResultHandling {
@@ -203,21 +169,12 @@ function handleLlmResult(
 		return { kind: 'continue' }
 	}
 
-	roleState.promptTokens += llmResult.usage.promptTokens
-	roleState.completionTokens += llmResult.usage.completionTokens
-	if (llmResult.usage.cachedPromptTokens !== undefined) {
-		roleState.cachedPromptTokens += llmResult.usage.cachedPromptTokens
-	}
 	roleState.lastPromptTokens = llmResult.usage.promptTokens
 
 	const postCallBudgetState: RoleBudgetState = {
-		toolCalls: roleState.toolCalls,
-		promptTokens: roleState.promptTokens,
-		completionTokens: roleState.completionTokens,
-		recentToolCalls: roleState.recentToolCalls,
 		recentCompactionPromptTokens: roleState.recentCompactionPromptTokens,
 	}
-	const postCallBudgetError = checkRoleBudgets(postCallBudgetState, config, roleDefinition.budget)
+	const postCallBudgetError = checkRoleBudgets(postCallBudgetState, config)
 	if (postCallBudgetError !== null) {
 		logEvent(deps.appendLog, 'role_budget_exceeded', { role: context.roleName, phase: 'post_llm', error: postCallBudgetError })
 		return {
@@ -254,9 +211,6 @@ interface DispatchAndRecordArgs {
 }
 
 async function dispatchAndRecord({ deps, roleState, roleName, dispatchCtx, toolCall }: DispatchAndRecordArgs): Promise<ResultCard | null> {
-	roleState.toolCalls++
-	const argsHash = hashArgs(toolCall.function.arguments)
-
 	const result = await dispatchToolCall(dispatchCtx, toolCall)
 
 	if (result.kind === 'unknown_tool') {
@@ -267,10 +221,6 @@ async function dispatchAndRecord({ deps, roleState, roleName, dispatchCtx, toolC
 		// tool_call carries the model's raw arguments string so the exact parameters are recoverable, and tool_result carries the full un-truncated ToolResult so a reviewer is not flying blind on what a tool actually returned. Truncation still applies only when the result is appended to the conversation below.
 		logEvent(deps.appendLog, 'tool_call', { role: roleName, tool: toolCall.function.name, arguments: toolCall.function.arguments })
 		logEvent(deps.appendLog, 'tool_result', { role: roleName, tool: toolCall.function.name, kind: result.kind, result })
-		roleState.recentToolCalls.push({ name: toolCall.function.name, argsHash })
-		if (roleState.recentToolCalls.length > 50) {
-			roleState.recentToolCalls.shift()
-		}
 	}
 
 	roleState.history.push({
@@ -298,7 +248,7 @@ function buildInitialHistory(systemPrompt: string, context: EngineContext): Mess
 
 export async function runRole(deps: EngineDependencies, context: EngineContext): Promise<ResultCard> {
 	const guild = context.loadedGuild
-	const roleDefinition = context.roleDefinitionOverride ?? guild.config.roles[context.roleName]
+	const roleDefinition = guild.config.roles[context.roleName]
 
 	if (roleDefinition === undefined) {
 		logEvent(deps.appendLog, 'role_not_found', { roleName: context.roleName })
@@ -328,19 +278,13 @@ export async function runRole(deps: EngineDependencies, context: EngineContext):
 
 	const roleState: RoleState = {
 		history: buildInitialHistory(systemPrompt, context),
-		toolCalls: 0,
-		promptTokens: 0,
-		completionTokens: 0,
-		cachedPromptTokens: 0,
 		lastPromptTokens: 0,
-		recentToolCalls: [],
 		recentCompactionPromptTokens: [],
 	}
 
 	const builtInHandlers = createBuiltInToolHandlers({
-		spawnAgent: async (childRoleName, childTask, budget) => {
+		spawnAgent: async (childRoleName, childTask) => {
 			const childGlobalState: GlobalBudgetState = {
-				startMs: context.startMs,
 				depth: context.depth + 1,
 			}
 			const depthCheck = checkGlobalBudgets(childGlobalState, guild.config.executor)
@@ -355,22 +299,14 @@ export async function runRole(deps: EngineDependencies, context: EngineContext):
 					error: createToolError('unknown_tool', `Unknown role: ${childRoleName}`),
 				})
 			}
-			// agent_call logs the parent→child edge with depth and the delegated budget before the child runs, so the parent→child linkage is recoverable even from a caller that does not read role_start.
-			const agentCallPayload: Record<string, unknown> = {
-				parent: context.roleName,
-				child: childRoleName,
-				depth: context.depth + 1,
-			}
-			if (budget !== undefined) agentCallPayload['budget'] = budget
-			logEvent(deps.appendLog, 'agent_call', agentCallPayload)
-			const override = budget !== undefined ? cloneRoleDefinitionWithBudget(childDefinition, budget) : undefined
+			// agent_call logs the parent→child edge with depth before the child runs, so the parent→child linkage is recoverable even from a caller that does not read role_start.
+			logEvent(deps.appendLog, 'agent_call', { parent: context.roleName, child: childRoleName, depth: context.depth + 1 })
 			return await runRole(deps, {
 				...context,
 				depth: context.depth + 1,
 				roleName: childRoleName,
 				task: childTask,
 				parent: context.roleName,
-				...(override !== undefined ? { roleDefinitionOverride: override } : {}),
 			})
 		},
 		roleState,
@@ -404,7 +340,6 @@ async function executeRoleLoop(
 ): Promise<ResultCard> {
 	while (true) {
 		const globalState: GlobalBudgetState = {
-			startMs: context.startMs,
 			depth: context.depth,
 		}
 		const globalError = checkGlobalBudgets(globalState, config)
@@ -414,13 +349,9 @@ async function executeRoleLoop(
 		}
 
 		const roleBudgetState: RoleBudgetState = {
-			toolCalls: roleState.toolCalls,
-			promptTokens: roleState.promptTokens,
-			completionTokens: roleState.completionTokens,
-			recentToolCalls: roleState.recentToolCalls,
 			recentCompactionPromptTokens: roleState.recentCompactionPromptTokens,
 		}
-		const roleError = checkRoleBudgets(roleBudgetState, config, roleDefinition.budget)
+		const roleError = checkRoleBudgets(roleBudgetState, config)
 		if (roleError !== null) {
 			logEvent(deps.appendLog, 'role_budget_exceeded', { role: context.roleName, error: roleError })
 			return createResultCard('error', 'Role budget exceeded', { error: roleError })
@@ -433,7 +364,7 @@ async function executeRoleLoop(
 			tools: allowedToolsManifests,
 		})
 
-		const handling = handleLlmResult(llmResult, roleState, deps, roleDefinition, context, config)
+		const handling = handleLlmResult(llmResult, roleState, deps, context, config)
 		// llm_call is emitted after handleLlmResult so the sent message list, the received assistant response, finishReason, and per-call usage all land in one event. It is emitted only on the success paths (continue/tool_calls and success-finished): the llm_unavailable and context_budget_exceeded paths log their own dedicated events inside handleLlmResult and must not also emit a misleading llm_call.
 		if (llmResult.kind === 'success') {
 			logEvent(deps.appendLog, 'llm_call', llmCallPayload(context.roleName, messages, llmResult))

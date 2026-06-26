@@ -6,7 +6,7 @@ Turn the executor from a one-run-per-process invocation into a long-running HTTP
 
 ## Context
 
-Read [`12-main-serve-wiring.md`](12-main-serve-wiring.md) (the transitional `--serve` shape this step supersedes — note its tracked debt), [`10-web-human-backend.md`](10-web-human-backend.md) and [`11-web-ui-server.md`](11-web-ui-server.md) (the per-run backend + server), and `docs/executor.md` ("Web UI", "Sequential scheduling").
+Read [`12-main-serve-wiring.md`](12-main-serve-wiring.md) (the transitional `--serve` shape this step supersedes — note its tracked debt), [`10-web-human-backend.md`](10-web-human-backend.md) and [`11-web-ui-server.md`](11-web-ui-server.md) (the per-run backend + server), and `docs/reference.md` ("HTTP API", "Executor runtime" → "Sequential scheduling").
 
 Product constraints (from the realignment):
 

@@ -20,7 +20,7 @@ The executor is the minimal runtime that runs the small target model against the
    - If the role calls `finish`, finalize and return the result card to the parent.
    - If the response has no tool calls, treat it as an implicit `finish`.
 
-3. **Completion.** The run ends when the entry role calls `finish`, a root-level error occurs that no parent can handle, or a hard global budget is exhausted. The executor writes `meta.json` and `log.jsonl`.
+3. **Completion.** The run ends when the entry role calls `finish` or a root-level error occurs that no parent can handle. The executor does not enforce a wall-clock or tool-call cap; run termination is the deployment container's job (see [`docs/architecture.md`](architecture.md) "Run termination"). The executor writes `meta.json` and `log.jsonl`.
 
 ### Messages and context
 
@@ -50,15 +50,16 @@ Every failure is translated into a structured result the current or parent role 
 | Unknown tool | Do not execute | `{kind: "unknown_tool"}` |
 | Invalid arguments | Do not execute | `{kind: "invalid_arguments"}` |
 | Tool timeout | Abort tool | `{kind: "timeout"}` |
-| Agent exceeds budget | Terminate child | Parent receives error result card |
-| Loop detected | Terminate role | `{kind: "loop_detected"}` |
+| Agent recursion depth exceeded | Terminate child | Parent receives error result card |
 | Compaction stuck | Terminate role | `{kind: "compaction_failed"}` |
 
 Recovery is implemented in the Guild, not the executor. A parent that receives an error may retry, call a different role, call a recovery role, or escalate with `finish`.
 
-### Loop detection
+### Run termination
 
-If the same tool is called with the same arguments more than `executor.maxRepeatedToolCalls` times, or a sequence of tool calls repeats exactly, the role is terminated.
+The executor does not enforce a wall-clock timeout or a per-role tool-call/token cap. Those caps were removed because a wall-clock limit is hardware-dependent (it fires on healthy slow-hardware runs or never fires on fast hardware) and cumulative token/tool-call budgets fired on healthy long-horizon work long before the context window filled. The real context-window guardrail is the endpoint's `context_budget_exceeded` path, which is unchanged.
+
+Run termination is the deployment container's responsibility: `docker stop` (or the orchestrator's own timeout) is the outer boundary that ends a stuck or runaway run. A proper in-band overseer — an interrupt/inspect platform with a loop-detector agent and an operator/API interrupt — is planned work; until it lands, a runaway role that does not overflow its context window runs until the container is stopped. See [`docs/architecture.md`](architecture.md) "Run termination".
 
 ### Sequential scheduling
 
@@ -71,7 +72,7 @@ The executor maintains a single queue of pending LLM requests. At most one is in
 - `role_start` — `{ role, depth, task, parent? }`. Emitted when a role begins, after its definition is confirmed to exist. `parent` is the calling role's name, omitted for the entry role at depth 0. A refused `agent` call (depth exceeded or unknown child) emits no `role_start` for the never-run child.
 - `effort_set` — `{ effort }`. Emitted once at run start, before the entry role begins, recording the run's chosen effort level (see "Effort channel").
 - `role_finished` — `{ role, depth, status, summary?, error?, parent? }`. Emitted when a role returns a final card. `status` is the `ResultCard` status; `summary` is the role's own explanation of its result (so a reviewer reading only the log can see why a role errored, rather than only that it did); `error` is the structured `{ kind, message?, details? }` when the card carried one; `parent` is omitted for the entry role. Every `role_start` is paired with exactly one `role_finished`.
-- `agent_call` — `{ parent, child, depth, budget? }`. Emitted when the `agent` tool is invoked, before the child runs, carrying the parent→child edge even for callers that do not read `role_start`.
+- `agent_call` — `{ parent, child, depth }`. Emitted when the `agent` tool is invoked, before the child runs, carrying the parent→child edge even for callers that do not read `role_start`.
 - `llm_call` — emitted only on success paths (a turn that returned content/tool calls or finished). Payload: `{ role, messageCount, sent, received, usage, finishReason? }`. `sent` is the message list sent for the turn (each message's `role` and `content`; reasoning omitted; `tool_calls` on assistant messages included). `received` is the assistant response actually received: `content`, `reasoning` (if any), and the parsed `toolCalls` (each call's `id`, `function.name`, and `function.arguments`). `usage` carries `promptTokens`, `completionTokens`, `totalTokens`, and `cachedPromptTokens` (when the endpoint reports a cached share). `finishReason` is the OpenAI `choices[0].finish_reason` (e.g. `stop`, `length`, `tool_calls`, `content_filter`), absent when the endpoint omits it so "absent" is distinguishable from "model stopped". The `llm_unavailable` and `context_budget_exceeded` paths log their own dedicated events and do not emit a misleading `llm_call`.
 - `tool_call` — `{ role, tool, arguments }`. `arguments` is the raw JSON-arguments string the model passed, so the exact parameters are recoverable.
 - `tool_result` — `{ role, tool, kind, result }`. `result` is the full un-truncated `ToolResult` (`{ kind: 'success', data }` or `{ kind, message, details }`). Truncation still applies only to what is appended to the conversation; the log records the un-truncated result so a reviewer is not flying blind on what a tool returned.
@@ -85,7 +86,7 @@ Built-in tools are listed in the Guild like any other tool but are implemented b
 
 ### `agent`
 
-Delegates to another role. Parameters: `role` (string, required), `task` (string, required), `budget` (object, optional). The child runs to completion; its `finish` result card is returned as the tool result. If the child fails due to a safety budget, an error result card is returned. This makes the system recursive: roles are invoked through the same tool-calling mechanism as file reads.
+Delegates to another role. Parameters: `role` (string, required), `task` (string, required). The child runs to completion; its `finish` result card is returned as the tool result. If the child fails due to a safety budget, an error result card is returned. This makes the system recursive: roles are invoked through the same tool-calling mechanism as file reads.
 
 ### `finish`
 
@@ -160,23 +161,19 @@ System prompts and tool manifests are plain files so the Foundry can rewrite the
 - `apiKey`: optional; usually injected from `ORCHESTRATOR_API_KEY` at runtime, not stored in the Guild.
 - `contextWindow`: context window size in tokens.
 - `reasoningField`: API response field containing reasoning content (e.g. `reasoning`, `reasoning_content`). Omit if the endpoint doesn't expose reasoning.
-- `generation`: default sampling parameters. Roles may override `temperature` and `maxTokens`.
+- `generation`: default sampling parameters (`temperature`, `maxTokens`) applied to every role. There is no per-role generation override.
 
 ### `executor`
 
 ```json
 {
   "maxAgentDepth": 8,
-  "maxToolCallsPerRole": 50,
-  "maxTokensPerRole": 60000,
-  "maxRunTimeSeconds": 300,
   "defaultToolTimeoutSeconds": 30,
-  "maxRepeatedToolCalls": 3,
   "maxCompactionAttempts": 5
 }
 ```
 
-Hard safety budgets enforced by the executor regardless of what a role tries to do.
+Safety budgets enforced by the executor. `maxAgentDepth` guards unbounded agent recursion; `defaultToolTimeoutSeconds` aborts a hung tool subprocess; `maxCompactionAttempts` terminates a `context_manager` that is not reducing tokens. The executor no longer enforces a wall-clock run timeout or per-role tool-call/token caps — run termination is the deployment container's job (see "Run termination" above and [`docs/architecture.md`](architecture.md) "Run termination").
 
 ### `contextPolicy`
 
@@ -198,9 +195,7 @@ A map from role name to definition:
 {
   "orchestrator": {
     "systemPrompt": "guild/prompts/orchestrator.md",
-    "tools": ["agent", "finish", "ask_human"],
-    "generation": { "temperature": 0.3, "maxTokens": 2048 },
-    "budget": { "maxToolCalls": 30 }
+    "tools": ["agent", "finish", "ask_human"]
   }
 }
 ```
@@ -208,9 +203,7 @@ A map from role name to definition:
 Role fields:
 - `systemPrompt` (string, required): path to a Markdown file.
 - `tools` (array, required): tool names this role may call.
-- `generation` (object, optional): overrides `model.generation`.
 - `includeReasoning` (boolean, optional): include reasoning from prior turns. Default `false`.
-- `budget` (object, optional): per-role overrides for `maxToolCalls` and `maxTokens`.
 
 ### `tools`
 

@@ -26,11 +26,7 @@ export interface GenerationConfig {
 
 export interface ExecutorConfig {
 	maxAgentDepth: number
-	maxToolCallsPerRole: number
-	maxTokensPerRole: number
-	maxRunTimeSeconds: number
 	defaultToolTimeoutSeconds: number
-	maxRepeatedToolCalls: number
 	maxCompactionAttempts: number
 }
 
@@ -41,14 +37,7 @@ export interface ContextPolicy {
 export interface RoleDefinition {
 	systemPrompt: string
 	tools: string[]
-	generation?: GenerationConfig
 	includeReasoning?: boolean
-	budget?: RoleBudget
-}
-
-export interface RoleBudget {
-	maxToolCalls?: number
-	maxTokens?: number
 }
 
 export interface ToolManifest {
@@ -98,7 +87,6 @@ export type ErrorKind =
 	| 'llm_unavailable'
 	| 'context_budget_exceeded'
 	| 'tool_budget_exceeded'
-	| 'token_budget_exceeded'
 	| 'loop_detected'
 	| 'compaction_failed'
 

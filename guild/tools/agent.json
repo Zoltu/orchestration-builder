@@ -1,6 +1,6 @@
 {
 	"name": "agent",
-	"description": "Delegate a sub-task to another role in the Guild. The child role runs to completion and returns its ResultCard. An optional budget tightens the child's tool-call or token limits.",
+	"description": "Delegate a sub-task to another role in the Guild. The child role runs to completion and returns its ResultCard.",
 	"parameters": {
 		"type": "object",
 		"required": ["role", "task"],
@@ -12,20 +12,6 @@
 			"task": {
 				"type": "string",
 				"description": "The task text to hand to the child role."
-			},
-			"budget": {
-				"type": "object",
-				"description": "Optional per-role budget override for the child.",
-				"properties": {
-					"maxToolCalls": {
-						"type": "number",
-						"description": "Maximum tool calls the child role may make."
-					},
-					"maxTokens": {
-						"type": "number",
-						"description": "Maximum total tokens the child role may consume."
-					}
-				}
 			}
 		}
 	}

@@ -15,11 +15,7 @@
 
 	"executor": {
 		"maxAgentDepth": 8,
-		"maxToolCallsPerRole": 50,
-		"maxTokensPerRole": 196608,
-		"maxRunTimeSeconds": 14400,
 		"defaultToolTimeoutSeconds": 30,
-		"maxRepeatedToolCalls": 3,
 		"maxCompactionAttempts": 5
 	},
 
@@ -32,8 +28,7 @@
 	"roles": {
 		"orchestrator": {
 			"systemPrompt": "prompts/orchestrator.md",
-			"tools": ["agent", "ask_human", "finish"],
-			"generation": { "temperature": 0.3, "maxTokens": 2048 }
+			"tools": ["agent", "ask_human", "finish"]
 		},
 		"planner": {
 			"systemPrompt": "prompts/planner.md",
@@ -49,13 +44,11 @@
 		},
 		"context_manager": {
 			"systemPrompt": "prompts/context_manager.md",
-			"tools": ["context_info", "edit_context", "finish"],
-			"generation": { "temperature": 0.1, "maxTokens": 2048 }
+			"tools": ["context_info", "edit_context", "finish"]
 		},
 		"recovery": {
 			"systemPrompt": "prompts/recovery.md",
-			"tools": ["agent", "ask_human", "finish"],
-			"generation": { "temperature": 0.2, "maxTokens": 2048 }
+			"tools": ["agent", "ask_human", "finish"]
 		}
 	},
 

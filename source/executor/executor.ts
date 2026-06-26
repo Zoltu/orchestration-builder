@@ -22,7 +22,6 @@ export async function runExecutor(deps: ExecutorDependencies, options: RunOption
 	const loadedGuild = deps.loadGuild(options.guildPath)
 
 	const startTime = new Date().toISOString()
-	const startMs = Date.now()
 	// effort_set is logged once at run start so the trace records the chosen level before the entry role begins.
 	deps.appendLog({ timestamp: new Date().toISOString(), type: 'effort_set', payload: { effort: options.effort } })
 	// Write a running meta before the entry role begins so the UI can show the task, run id, and start time while the run is in progress, rather than only after completion. It is overwritten with the terminal meta below.
@@ -45,7 +44,6 @@ export async function runExecutor(deps: ExecutorDependencies, options: RunOption
 		{
 			loadedGuild,
 			depth: 0,
-			startMs,
 			roleName: loadedGuild.config.entryRole,
 			task: options.task,
 			effort: options.effort,

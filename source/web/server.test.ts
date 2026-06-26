@@ -67,11 +67,7 @@ const sampleGuildConfig: GuildConfig = {
 	},
 	executor: {
 		maxAgentDepth: 8,
-		maxToolCallsPerRole: 50,
-		maxTokensPerRole: 262144,
-		maxRunTimeSeconds: 14400,
 		defaultToolTimeoutSeconds: 30,
-		maxRepeatedToolCalls: 3,
 		maxCompactionAttempts: 5,
 	},
 	contextPolicy: { maxToolOutputChars: 8000 },
@@ -342,11 +338,7 @@ describe('createWebServer GET /api/config', () => {
 		expect(config.model).toEqual({ name: 'qwen3.6:35b', contextWindow: 262144 })
 		expect(config.executor).toEqual({
 			maxAgentDepth: 8,
-			maxToolCallsPerRole: 50,
-			maxTokensPerRole: 262144,
-			maxRunTimeSeconds: 14400,
 			defaultToolTimeoutSeconds: 30,
-			maxRepeatedToolCalls: 3,
 			maxCompactionAttempts: 5,
 		})
 		expect(config.entryRole).toBe('orchestrator')

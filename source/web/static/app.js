@@ -801,11 +801,7 @@ function ConfigPanel(state) {
 	const roleNames = Object.keys(roles)
 	const budgetEntries = [
 		`agent depth ${formatNumber(executor.maxAgentDepth)}`,
-		`tool calls/role ${formatNumber(executor.maxToolCallsPerRole)}`,
-		`tokens/role ${formatNumber(executor.maxTokensPerRole)}`,
-		`run time ${formatNumber(executor.maxRunTimeSeconds)}s`,
 		`tool timeout ${formatNumber(executor.defaultToolTimeoutSeconds)}s`,
-		`repeated calls ${formatNumber(executor.maxRepeatedToolCalls)}`,
 		`compaction attempts ${formatNumber(executor.maxCompactionAttempts)}`,
 	]
 	return h('section', { id: 'config-panel', class: 'panel' }, [

@@ -454,7 +454,7 @@ describe('formatLogEvent', () => {
 	})
 
 	test('role_budget_exceeded → role · role budget exceeded', () => {
-		expect(formatLogEvent(event('role_budget_exceeded', { role: 'coder', phase: 'post_llm', error: { kind: 'token_budget_exceeded' } }))).toBe('coder · role budget exceeded')
+		expect(formatLogEvent(event('role_budget_exceeded', { role: 'coder', phase: 'post_llm', error: { kind: 'compaction_failed' } }))).toBe('coder · role budget exceeded')
 	})
 
 	test('global_budget_exceeded → role · global budget exceeded', () => {
@@ -1128,11 +1128,7 @@ function sampleGuildConfig(overrides: Partial<GuildConfig> = {}): GuildConfig {
 		},
 		executor: {
 			maxAgentDepth: 8,
-			maxToolCallsPerRole: 50,
-			maxTokensPerRole: 262144,
-			maxRunTimeSeconds: 14400,
 			defaultToolTimeoutSeconds: 30,
-			maxRepeatedToolCalls: 3,
 			maxCompactionAttempts: 5,
 		},
 		contextPolicy: { maxToolOutputChars: 8000 },
@@ -1152,11 +1148,7 @@ describe('renderConfig', () => {
 		expect(view.model).toEqual({ name: 'qwen3.6:35b', contextWindow: 262144 })
 		expect(view.executor).toEqual({
 			maxAgentDepth: 8,
-			maxToolCallsPerRole: 50,
-			maxTokensPerRole: 262144,
-			maxRunTimeSeconds: 14400,
 			defaultToolTimeoutSeconds: 30,
-			maxRepeatedToolCalls: 3,
 			maxCompactionAttempts: 5,
 		})
 		expect(view.entryRole).toBe('orchestrator')
@@ -1196,22 +1188,19 @@ describe('renderConfig', () => {
 		expect(view.roles.empty!.tools).toEqual([])
 	})
 
-	test('drops role-only fields that are not part of the safe subset (systemPrompt, generation, budget)', () => {
+	test('drops role-only fields that are not part of the safe subset (systemPrompt, includeReasoning)', () => {
 		const config = sampleGuildConfig({
 			roles: {
 				orchestrator: {
 					systemPrompt: 'prompts/orchestrator.md',
 					tools: ['finish'],
-					generation: { temperature: 0.3, maxTokens: 2048 },
 					includeReasoning: true,
-					budget: { maxToolCalls: 10, maxTokens: 5000 },
 				},
 			},
 		})
 		const view = renderConfig(config)
 		expect(view.roles.orchestrator).toEqual({ tools: ['finish'] })
 		expect(view.roles.orchestrator).not.toHaveProperty('systemPrompt')
-		expect(view.roles.orchestrator).not.toHaveProperty('generation')
-		expect(view.roles.orchestrator).not.toHaveProperty('budget')
+		expect(view.roles.orchestrator).not.toHaveProperty('includeReasoning')
 	})
 })

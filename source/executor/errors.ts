@@ -18,7 +18,6 @@ export const ERROR_KINDS: readonly ErrorKind[] = [
 	'llm_unavailable',
 	'context_budget_exceeded',
 	'tool_budget_exceeded',
-	'token_budget_exceeded',
 	'loop_detected',
 	'compaction_failed',
 ]

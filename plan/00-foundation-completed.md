@@ -73,7 +73,7 @@ The hand-written seed Guild: `guild/guild.json`, six `guild/prompts/*.md` (`orch
 
 Decisions (authoritative):
 
-- Paths in `guild.json` are relative to the **Guild directory** (e.g. `"prompts/orchestrator.md"`, `"tools/agent.json"`), because the loader resolves them with `path.join(guildDir, ...)`. `docs/guild.md`'s example uses the `guild/` prefix because it assumes the repo root as the guild dir.
+- Paths in `guild.json` are relative to the **Guild directory** (e.g. `"prompts/orchestrator.md"`, `"tools/agent.json"`), because the loader resolves them with `path.join(guildDir, ...)`. `docs/reference.md` "Guild format"'s example uses the `guild/` prefix because it assumes the repo root as the guild dir.
 - Tool assignments per role:
   - `orchestrator`: `agent`, `ask_human`, `finish`.
   - `planner`: read-only tools + `finish`.
@@ -81,7 +81,7 @@ Decisions (authoritative):
   - `critic`: read-only tools + `finish`.
   - `context_manager`: `context_info`, `edit_context`, `finish`.
   - `recovery`: `agent`, `ask_human`, `finish`.
-- `executor.maxRunTimeSeconds` is `14400` (4 hours); `maxAgentDepth` 8; `maxToolCallsPerRole` 50; `contextPolicy.maxToolOutputChars` 8000. Model defaults mirror `docs/guild.md`'s example; the real endpoint and key are supplied at runtime.
+- `executor.maxRunTimeSeconds` is `14400` (4 hours); `maxAgentDepth` 8; `maxToolCallsPerRole` 50; `contextPolicy.maxToolOutputChars` 8000. Model defaults mirror `docs/reference.md` "Guild format"'s example; the real endpoint and key are supplied at runtime.
 - Because v1 has no file-write tool, the `coder` prompt instructs the role to produce the exact, complete intended file contents in its `finish` summary rather than calling a nonexistent write tool. The orchestrator relays these to the user. This constraint is removed once `write_file` lands in step `01`.
 
 ## Current health

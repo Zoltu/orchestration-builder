@@ -61,11 +61,7 @@ function makeFakeAppendLog(): { appendLog: AppendLog; events: LogEvent[] } {
 
 const baseExecutor: ExecutorConfig = {
 	maxAgentDepth: 8,
-	maxToolCallsPerRole: 50,
-	maxTokensPerRole: 60000,
-	maxRunTimeSeconds: 300,
 	defaultToolTimeoutSeconds: 30,
-	maxRepeatedToolCalls: 3,
 	maxCompactionAttempts: 5,
 }
 
@@ -102,7 +98,6 @@ const agentManifest: ToolManifest = {
 		properties: {
 			role: { type: 'string' },
 			task: { type: 'string' },
-			budget: { type: 'object' },
 		},
 	},
 }
@@ -186,7 +181,6 @@ describe('runRole — acceptance criteria', () => {
 		const result = await runRole(deps, {
 			loadedGuild: guild,
 			depth: 0,
-			startMs: Date.now(),
 			roleName: 'main',
 			task: 'do it',
 		})
@@ -218,7 +212,6 @@ describe('runRole — acceptance criteria', () => {
 		const result = await runRole(deps, {
 			loadedGuild: guild,
 			depth: 0,
-			startMs: Date.now(),
 			roleName: 'parent',
 			task: 'delegate',
 		})
@@ -244,7 +237,6 @@ describe('runRole — acceptance criteria', () => {
 		const result = await runRole(deps, {
 			loadedGuild: guild,
 			depth: 0,
-			startMs: Date.now(),
 			roleName: 'main',
 			task: 'do it',
 		})
@@ -277,7 +269,6 @@ describe('runRole — acceptance criteria', () => {
 		const result = await runRole(deps, {
 			loadedGuild: guild,
 			depth: 0,
-			startMs: Date.now(),
 			roleName: 'main',
 			task: 'do it',
 		})
@@ -303,7 +294,6 @@ describe('runRole — acceptance criteria', () => {
 		const result = await runRole(deps, {
 			loadedGuild: guild,
 			depth: 0,
-			startMs: Date.now(),
 			roleName: 'main',
 			task: 'do it',
 		})
@@ -326,7 +316,6 @@ describe('runRole — acceptance criteria', () => {
 		const result = await runRole(deps, {
 			loadedGuild: guild,
 			depth: 0,
-			startMs: Date.now(),
 			roleName: 'main',
 			task: 'do it',
 		})
@@ -334,108 +323,6 @@ describe('runRole — acceptance criteria', () => {
 		expect(result).toEqual({ status: 'success', summary: 'all done' })
 		const implicitEvent = events.find((e) => e.type === 'implicit_finish')
 		expect(implicitEvent).toBeDefined()
-	})
-
-	test('repeated identical tool calls trip loop_detected', async () => {
-		const guild = withTool(
-			buildGuild(
-				{ main: { systemPrompt: 'p', tools: ['echo', 'finish'] } },
-				'main',
-			),
-			{
-				name: 'echo',
-				description: 'echo',
-				parameters: { type: 'object', properties: { x: { type: 'number' } } },
-			},
-		)
-		const llm = new FakeLlm()
-		const repeatCall: ToolCall = {
-			id: 'e1',
-			type: 'function',
-			function: { name: 'echo', arguments: '{"x":1}' },
-		}
-		llm.responses = [
-			success([repeatCall]),
-			success([repeatCall]),
-			success([repeatCall]),
-			success([repeatCall]),
-		]
-		const { appendLog, events } = makeFakeAppendLog()
-		const deps: EngineDependencies = {
-			llmCaller: llm,
-			appendLog,
-			additionalToolHandlers: {
-				echo: echoHandler,
-			},
-			humanBackend: stubHumanBackend,
-		}
-
-		const result = await runRole(deps, {
-			loadedGuild: guild,
-			depth: 0,
-			startMs: Date.now(),
-			roleName: 'main',
-			task: 'do it',
-		})
-
-		expect(result.status).toBe('error')
-		if (result.error) {
-			expect(result.error.kind).toBe('loop_detected')
-		}
-		const loopEvent = events.find((e) => e.type === 'role_budget_exceeded')
-		expect(loopEvent).toBeDefined()
-	})
-
-	test('per-role tool-call budget exceeded returns tool_budget_exceeded', async () => {
-		const tight: ExecutorConfig = { ...baseExecutor, maxToolCallsPerRole: 2 }
-		const guild = withTool(
-			buildGuild(
-				{ main: { systemPrompt: 'p', tools: ['echo', 'finish'] } },
-				'main',
-				{ executor: tight },
-			),
-			{
-				name: 'echo',
-				description: 'echo',
-				parameters: { type: 'object', properties: { x: { type: 'number' } } },
-			},
-		)
-		const llm = new FakeLlm()
-		const call: ToolCall = {
-			id: 'e1',
-			type: 'function',
-			function: { name: 'echo', arguments: '{"x":1}' },
-		}
-		llm.responses = [
-			success([call]),
-			success([call]),
-			success([call]),
-			success([call]),
-		]
-		const { appendLog, events } = makeFakeAppendLog()
-		const deps: EngineDependencies = {
-			llmCaller: llm,
-			appendLog,
-			additionalToolHandlers: {
-				echo: echoHandler,
-			},
-			humanBackend: stubHumanBackend,
-		}
-
-		const result = await runRole(deps, {
-			loadedGuild: guild,
-			depth: 0,
-			startMs: Date.now(),
-			roleName: 'main',
-			task: 'do it',
-		})
-
-		expect(result.status).toBe('error')
-		if (result.error) {
-			expect(result.error.kind).toBe('tool_budget_exceeded')
-		}
-		const budgetEvent = events.find((e) => e.type === 'role_budget_exceeded')
-		expect(budgetEvent).toBeDefined()
 	})
 
 	test('depth budget exceeded terminates agent child with tool_budget_exceeded', async () => {
@@ -461,7 +348,6 @@ describe('runRole — acceptance criteria', () => {
 		const result = await runRole(deps, {
 			loadedGuild: guild,
 			depth: 0,
-			startMs: Date.now(),
 			roleName: 'grandparent',
 			task: 'delegate',
 		})
@@ -488,7 +374,6 @@ describe('runRole — acceptance criteria', () => {
 		const result = await runRole(deps, {
 			loadedGuild: guild,
 			depth: 0,
-			startMs: Date.now(),
 			roleName: 'main',
 			task: 'do it',
 		})
@@ -510,7 +395,6 @@ describe('runRole — acceptance criteria', () => {
 		const result = await runRole(deps, {
 			loadedGuild: guild,
 			depth: 0,
-			startMs: Date.now(),
 			roleName: 'nonexistent',
 			task: 'do it',
 		})
@@ -532,7 +416,6 @@ describe('runRole — acceptance criteria', () => {
 		await runRole(deps, {
 			loadedGuild: guild,
 			depth: 0,
-			startMs: Date.now(),
 			roleName: 'main',
 			task: 'do it',
 		})
@@ -563,125 +446,12 @@ describe('runRole — acceptance criteria', () => {
 		const result = await runRole(deps, {
 			loadedGuild: guild,
 			depth: 0,
-			startMs: Date.now(),
 			roleName: 'parent',
 			task: 'delegate',
 		})
 
 		expect(result).toEqual({ status: 'success', summary: 'parent done' })
 		expect(llm.calls.length).toBe(3)
-	})
-
-	test('per-role token budget exceeded returns token_budget_exceeded', async () => {
-		const tight: ExecutorConfig = { ...baseExecutor, maxTokensPerRole: 100 }
-		const guild = buildGuild(
-			{ main: { systemPrompt: 'p', tools: ['finish'] } },
-			'main',
-			{ executor: tight },
-		)
-		const llm = new FakeLlm()
-		const finishArgs = { status: 'success' as const, summary: 'ok' }
-		llm.responses = [
-			success([finishCall(finishArgs)], { promptTokens: 80, completionTokens: 30 }),
-			success([finishCall(finishArgs)], { promptTokens: 80, completionTokens: 30 }),
-		]
-		const { deps, events } = makeDeps(llm)
-
-		const result = await runRole(deps, {
-			loadedGuild: guild,
-			depth: 0,
-			startMs: Date.now(),
-			roleName: 'main',
-			task: 'do it',
-		})
-
-		expect(result.status).toBe('error')
-		if (result.error) {
-			expect(result.error.kind).toBe('token_budget_exceeded')
-		}
-		const budgetEvent = events.find((e) => e.type === 'role_budget_exceeded')
-		expect(budgetEvent).toBeDefined()
-	})
-
-	test('wall-clock budget exceeded returns timeout', async () => {
-		const tight: ExecutorConfig = { ...baseExecutor, maxRunTimeSeconds: 0 }
-		const guild = buildGuild(
-			{ main: { systemPrompt: 'p', tools: ['finish'] } },
-			'main',
-			{ executor: tight },
-		)
-		const llm = new FakeLlm()
-		const finishArgs = { status: 'success' as const, summary: 'ok' }
-		llm.responses = [
-			success([finishCall(finishArgs)]),
-		]
-		const { deps, events } = makeDeps(llm)
-
-		const past = Date.now() - 60_000
-		const result = await runRole(deps, {
-			loadedGuild: guild,
-			depth: 0,
-			startMs: past,
-			roleName: 'main',
-			task: 'do it',
-		})
-
-		expect(result.status).toBe('error')
-		if (result.error) {
-			expect(result.error.kind).toBe('timeout')
-		}
-		const globalEvent = events.find((e) => e.type === 'global_budget_exceeded')
-		expect(globalEvent).toBeDefined()
-	})
-
-	test('token budget accumulates across iterations (regression for overwrite bug)', async () => {
-		const tight: ExecutorConfig = { ...baseExecutor, maxTokensPerRole: 60 }
-		const guild = withTool(
-			buildGuild(
-				{ main: { systemPrompt: 'p', tools: ['echo', 'finish'] } },
-				'main',
-				{ executor: tight },
-			),
-			{
-				name: 'echo',
-				description: 'echo',
-				parameters: { type: 'object', properties: { x: { type: 'number' } } },
-			},
-		)
-		const llm = new FakeLlm()
-		const echoCall: ToolCall = {
-			id: 'e1',
-			type: 'function',
-			function: { name: 'echo', arguments: '{"x":1}' },
-		}
-		llm.responses = [
-			success([echoCall], { promptTokens: 40, completionTokens: 10 }),
-			success([echoCall], { promptTokens: 40, completionTokens: 10 }),
-			success([finishCall({ status: 'success', summary: 'should not reach' })], { promptTokens: 5, completionTokens: 5 }),
-		]
-		const { deps, events } = makeDeps(llm)
-		const depsWithEcho: EngineDependencies = {
-			...deps,
-			additionalToolHandlers: {
-				echo: echoHandler,
-			},
-		}
-
-		const result = await runRole(depsWithEcho, {
-			loadedGuild: guild,
-			depth: 0,
-			startMs: Date.now(),
-			roleName: 'main',
-			task: 'do it',
-		})
-
-		expect(result.status).toBe('error')
-		if (result.error) {
-			expect(result.error.kind).toBe('token_budget_exceeded')
-		}
-		const budgetEvent = events.find((e) => e.type === 'role_budget_exceeded')
-		expect(budgetEvent).toBeDefined()
-		expect(llm.calls.length).toBe(2)
 	})
 
 	test('agent with a nonexistent role name returns an error ResultCard to the parent', async () => {
@@ -701,7 +471,6 @@ describe('runRole — acceptance criteria', () => {
 		const result = await runRole(deps, {
 			loadedGuild: guild,
 			depth: 0,
-			startMs: Date.now(),
 			roleName: 'parent',
 			task: 'delegate',
 		})
@@ -746,7 +515,6 @@ describe('runRole — acceptance criteria', () => {
 		const result = await runRole(depsWithEcho, {
 			loadedGuild: guild,
 			depth: 0,
-			startMs: Date.now(),
 			roleName: 'main',
 			task: 'do it',
 		})
@@ -791,7 +559,6 @@ describe('runRole — acceptance criteria', () => {
 		await runRole(depsWithBig, {
 			loadedGuild: guild,
 			depth: 0,
-			startMs: Date.now(),
 			roleName: 'main',
 			task: 'do it',
 		})
@@ -818,7 +585,6 @@ describe('runRole — role-tree log events', () => {
 		await runRole(deps, {
 			loadedGuild: guild,
 			depth: 0,
-			startMs: Date.now(),
 			roleName: 'main',
 			task: 'do it',
 		})
@@ -857,7 +623,6 @@ describe('runRole — role-tree log events', () => {
 		await runRole(deps, {
 			loadedGuild: guild,
 			depth: 0,
-			startMs: Date.now(),
 			roleName: 'parent',
 			task: 'delegate',
 		})
@@ -904,7 +669,6 @@ describe('runRole — role-tree log events', () => {
 		await runRole(deps, {
 			loadedGuild: guild,
 			depth: 0,
-			startMs: Date.now(),
 			roleName: 'parent',
 			task: 'delegate',
 		})
@@ -932,7 +696,6 @@ describe('runRole — rich LLM and tool payloads', () => {
 		await runRole(deps, {
 			loadedGuild: guild,
 			depth: 0,
-			startMs: Date.now(),
 			roleName: 'main',
 			task: 'do it',
 		})
@@ -974,7 +737,6 @@ describe('runRole — rich LLM and tool payloads', () => {
 		await runRole(deps, {
 			loadedGuild: guild,
 			depth: 0,
-			startMs: Date.now(),
 			roleName: 'main',
 			task: 'do it',
 		})
@@ -998,7 +760,6 @@ describe('runRole — rich LLM and tool payloads', () => {
 		await runRole(deps, {
 			loadedGuild: guild,
 			depth: 0,
-			startMs: Date.now(),
 			roleName: 'main',
 			task: 'do it',
 		})
@@ -1042,7 +803,6 @@ describe('runRole — rich LLM and tool payloads', () => {
 		await runRole(depsWithBig, {
 			loadedGuild: guild,
 			depth: 0,
-			startMs: Date.now(),
 			roleName: 'main',
 			task: 'do it',
 		})
@@ -1074,7 +834,6 @@ describe('runRole effort directive injection', () => {
 		await runRole(deps, {
 			loadedGuild: guild,
 			depth: 0,
-			startMs: Date.now(),
 			roleName: 'main',
 			task: 'do it',
 			effort: 2,
@@ -1100,7 +859,6 @@ describe('runRole effort directive injection', () => {
 		await runRole(deps, {
 			loadedGuild: guild,
 			depth: 0,
-			startMs: Date.now(),
 			roleName: 'main',
 			task: 'do it',
 		})
@@ -1130,7 +888,6 @@ describe('runRole effort directive injection', () => {
 		await runRole(deps, {
 			loadedGuild: guild,
 			depth: 0,
-			startMs: Date.now(),
 			roleName: 'parent',
 			task: 'delegate',
 			effort: 5,

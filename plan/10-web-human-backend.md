@@ -6,7 +6,7 @@ Add a `mode: 'web'` human backend that writes pending `ask_human` questions to t
 
 ## Context
 
-Read `docs/executor.md` ("`ask_human`", "Human-in-the-loop backend") and `source/executor/human-backend.ts` (the existing stub). The small model sees the same tool name/schema in every environment; only the backend changes. The web backend must allow the run to pause waiting for an answer and resume when one arrives. The executor is sequential, so a pending question blocks the single active role until answered.
+Read `docs/reference.md` ("Built-in tools" → `ask_human`, "Executor runtime") and `source/executor/human-backend.ts` (the existing stub). The small model sees the same tool name/schema in every environment; only the backend changes. The web backend must allow the run to pause waiting for an answer and resume when one arrives. The executor is sequential, so a pending question blocks the single active role until answered.
 
 ## Deliverables
 

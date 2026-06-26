@@ -6,7 +6,7 @@ Add a plain HTML/JS web UI served by `Bun.serve` that displays the active run, t
 
 ## Context
 
-Read `docs/executor.md` ("Web UI") and [`10-web-human-backend.md`](10-web-human-backend.md) (the backend state machine is in place). The server is a leaf factory `createWebServer(port)`; it reads run state to render the UI and posts answers back to the step-10 backend. Static assets are plain files under `source/web/static/`.
+Read `docs/reference.md` ("HTTP API") and [`10-web-human-backend.md`](10-web-human-backend.md) (the backend state machine is in place). The server is a leaf factory `createWebServer(port)`; it reads run state to render the UI and posts answers back to the step-10 backend. Static assets are plain files under `source/web/static/`.
 
 ## Deliverables
 

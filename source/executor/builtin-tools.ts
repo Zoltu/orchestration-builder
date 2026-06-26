@@ -1,12 +1,12 @@
 import { createToolError, isErrorKind } from './errors.js'
-import type { Message, ResultCard, RoleBudget, ToolResult } from './types.js'
+import type { Message, ResultCard, ToolResult } from './types.js'
 import { stripReasoning } from './context-policy.js'
 import type { ToolHandler } from './tool-dispatch.js'
 import type { HumanBackend } from './human-backend.js'
 import type { RoleState } from './engine.js'
 
 export interface BuiltInToolContext {
-	spawnAgent(roleName: string, task: string, budget?: RoleBudget): Promise<ResultCard>
+	spawnAgent(roleName: string, task: string): Promise<ResultCard>
 	roleState: RoleState
 	humanBackend: HumanBackend
 	contextWindow: number
@@ -75,7 +75,6 @@ interface AgentValidationSuccess {
 	kind: 'success'
 	roleName: string
 	task: string
-	budget: RoleBudget | undefined
 }
 
 function validateAgentArgs(args: Record<string, unknown>): AgentValidationSuccess | FinishValidationError {
@@ -89,23 +88,7 @@ function validateAgentArgs(args: Record<string, unknown>): AgentValidationSucces
 		return { kind: 'error', result: createToolError('invalid_arguments', 'task must be a string') }
 	}
 
-	let budgetValue: RoleBudget | undefined
-	const budgetRaw = args['budget']
-	if (budgetRaw !== undefined) {
-		if (!isObject(budgetRaw)) {
-			return { kind: 'error', result: createToolError('invalid_arguments', 'budget must be an object') }
-		}
-		const maxToolCallsValue = budgetRaw['maxToolCalls']
-		const maxTokensValue = budgetRaw['maxTokens']
-		const maxToolCalls = typeof maxToolCallsValue === 'number' ? maxToolCallsValue : undefined
-		const maxTokens = typeof maxTokensValue === 'number' ? maxTokensValue : undefined
-		budgetValue = {
-			...(maxToolCalls !== undefined ? { maxToolCalls } : {}),
-			...(maxTokens !== undefined ? { maxTokens } : {}),
-		}
-	}
-
-	return { kind: 'success', roleName: roleValue, task: taskValue, budget: budgetValue }
+	return { kind: 'success', roleName: roleValue, task: taskValue }
 }
 
 interface ContextInfoMessage {
@@ -300,7 +283,7 @@ export function createBuiltInToolHandlers(context: BuiltInToolContext): Record<s
 		agent: async (args) => {
 			const validation = validateAgentArgs(args)
 			if (validation.kind === 'error') return validation.result
-			const card = await context.spawnAgent(validation.roleName, validation.task, validation.budget)
+			const card = await context.spawnAgent(validation.roleName, validation.task)
 			return { kind: 'success', data: card }
 		},
 		context_info: createContextInfo(context),

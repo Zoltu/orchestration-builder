@@ -26,11 +26,7 @@ const validGuild = {
 	model: { name: 'm', apiBase: 'http://x', contextWindow: 1, generation: {} },
 	executor: {
 		maxAgentDepth: 1,
-		maxToolCallsPerRole: 1,
-		maxTokensPerRole: 1,
-		maxRunTimeSeconds: 1,
 		defaultToolTimeoutSeconds: 1,
-		maxRepeatedToolCalls: 1,
 		maxCompactionAttempts: 1,
 	},
 	contextPolicy: { maxToolOutputChars: 1 },

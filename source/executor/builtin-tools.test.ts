@@ -5,7 +5,7 @@ import type { HumanBackend } from './human-backend.ts'
 import type { LlmCallResult, LlmCaller } from './llm.ts'
 import type { LoadedGuild } from './loader.ts'
 import type { AppendLog } from './persistence.ts'
-import { recordingHumanBackend, withTool } from './test-fixtures.ts'
+import { recordingHumanBackend } from './test-fixtures.ts'
 
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -15,11 +15,6 @@ function parseToolContent(content: string | undefined): Record<string, unknown> 
 	const parsed: unknown = JSON.parse(content ?? '{}')
 	if (!isRecord(parsed)) throw new Error('tool result content is not a JSON object')
 	return parsed
-}
-
-function payloadField(event: LogEvent, field: string): unknown {
-	const payload = event.payload
-	return isRecord(payload) ? payload[field] : undefined
 }
 
 function success(toolCalls: ToolCall[], opts: { content?: string; promptTokens?: number } = {}): LlmCallResult {
@@ -56,11 +51,7 @@ function makeFakeAppendLog(): { appendLog: AppendLog; events: LogEvent[] } {
 
 const baseExecutor: ExecutorConfig = {
 	maxAgentDepth: 8,
-	maxToolCallsPerRole: 50,
-	maxTokensPerRole: 60000,
-	maxRunTimeSeconds: 300,
 	defaultToolTimeoutSeconds: 30,
-	maxRepeatedToolCalls: 3,
 	maxCompactionAttempts: 5,
 }
 
@@ -134,7 +125,6 @@ const agentManifest: ToolManifest = {
 		properties: {
 			role: { type: 'string' },
 			task: { type: 'string' },
-			budget: { type: 'object' },
 		},
 	},
 }
@@ -207,7 +197,6 @@ describe('context_info tool', () => {
 		const result = await runRole(deps, {
 			loadedGuild: guild,
 			depth: 0,
-			startMs: Date.now(),
 			roleName: 'main',
 			task: 'do it',
 		})
@@ -255,7 +244,6 @@ describe('edit_context tool', () => {
 		const result = await runRole(deps, {
 			loadedGuild: guild,
 			depth: 0,
-			startMs: Date.now(),
 			roleName: 'main',
 			task: 'do it',
 		})
@@ -281,7 +269,6 @@ describe('edit_context tool', () => {
 		const result = await runRole(deps, {
 			loadedGuild: guild,
 			depth: 0,
-			startMs: Date.now(),
 			roleName: 'main',
 			task: 'original task',
 		})
@@ -307,7 +294,6 @@ describe('edit_context tool', () => {
 		const result = await runRole(deps, {
 			loadedGuild: guild,
 			depth: 0,
-			startMs: Date.now(),
 			roleName: 'main',
 			task: 'do it',
 		})
@@ -330,7 +316,6 @@ describe('edit_context tool', () => {
 		const result = await runRole(deps, {
 			loadedGuild: guild,
 			depth: 0,
-			startMs: Date.now(),
 			roleName: 'main',
 			task: 'do it',
 		})
@@ -357,7 +342,6 @@ describe('edit_context tool', () => {
 		await runRole(deps, {
 			loadedGuild: guild,
 			depth: 0,
-			startMs: Date.now(),
 			roleName: 'main',
 			task: 'do it',
 		})
@@ -382,7 +366,6 @@ describe('edit_context tool', () => {
 		await runRole(deps, {
 			loadedGuild: guild,
 			depth: 0,
-			startMs: Date.now(),
 			roleName: 'main',
 			task: 'do it',
 		})
@@ -412,7 +395,6 @@ describe('ask_human tool', () => {
 		const result = await runRole(deps, {
 			loadedGuild: guild,
 			depth: 0,
-			startMs: Date.now(),
 			roleName: 'main',
 			task: 'do it',
 		})
@@ -440,7 +422,6 @@ describe('ask_human tool', () => {
 		await runRole(deps, {
 			loadedGuild: guild,
 			depth: 0,
-			startMs: Date.now(),
 			roleName: 'main',
 			task: 'do it',
 		})
@@ -463,7 +444,6 @@ describe('ask_human tool', () => {
 		await runRole(deps, {
 			loadedGuild: guild,
 			depth: 0,
-			startMs: Date.now(),
 			roleName: 'main',
 			task: 'do it',
 		})
@@ -471,89 +451,5 @@ describe('ask_human tool', () => {
 		const toolResultMessages = llm.calls[1]?.messages.filter((m) => m.role === 'tool') ?? []
 		const parsed = parseToolContent(toolResultMessages[0]?.content)
 		expect(parsed['kind']).toBe('invalid_arguments')
-	})
-})
-
-describe('agent tool budget override', () => {
-	test('agent tool call with budget parameter overrides the child role budget', async () => {
-		const guild = buildGuild(
-			{
-				parent: { systemPrompt: 'p', tools: ['agent', 'finish'] },
-				child: { systemPrompt: 'c', tools: ['finish'], budget: { maxToolCalls: 100 } },
-			},
-			'parent',
-		)
-		const llm = new FakeLlm()
-		llm.responses = [
-			success([{ id: 'a1', type: 'function', function: { name: 'agent', arguments: JSON.stringify({ role: 'child', task: 'do', budget: { maxToolCalls: 5 } }) } }]),
-			success([{ id: 'f1', type: 'function', function: { name: 'finish', arguments: JSON.stringify({ status: 'success', summary: 'child done' }) } }]),
-			success([{ id: 'f2', type: 'function', function: { name: 'finish', arguments: JSON.stringify({ status: 'success', summary: 'parent done' }) } }]),
-		]
-		const { deps } = makeDeps(llm, recordingHumanBackend())
-
-		const result = await runRole(deps, {
-			loadedGuild: guild,
-			depth: 0,
-			startMs: Date.now(),
-			roleName: 'parent',
-			task: 'delegate',
-		})
-
-		expect(result.status).toBe('success')
-		expect(result.summary).toBe('parent done')
-	})
-
-	test('agent tool budget override tightens child tool-call budget and returns tool_budget_exceeded', async () => {
-		const guild = withTool(
-			buildGuild(
-				{
-					parent: { systemPrompt: 'p', tools: ['agent', 'finish'] },
-					child: { systemPrompt: 'c', tools: ['echo', 'finish'], budget: { maxToolCalls: 100 } },
-				},
-				'parent',
-			),
-			{
-				name: 'echo',
-				description: 'echo',
-				parameters: { type: 'object', properties: { x: { type: 'number' } } },
-			},
-		)
-		const llm = new FakeLlm()
-		const echoCall: ToolCall = {
-			id: 'e1',
-			type: 'function',
-			function: { name: 'echo', arguments: '{"x":1}' },
-		}
-		const finishCallForParent: ToolCall = {
-			id: 'f1',
-			type: 'function',
-			function: { name: 'finish', arguments: JSON.stringify({ status: 'success', summary: 'parent handled child failure' }) },
-		}
-		llm.responses = [
-			success([{ id: 'a1', type: 'function', function: { name: 'agent', arguments: JSON.stringify({ role: 'child', task: 'do', budget: { maxToolCalls: 1 } }) } }]),
-			success([echoCall]),
-			success([echoCall]),
-			success([finishCallForParent]),
-		]
-		const { deps, events } = makeDeps(llm, recordingHumanBackend())
-
-		const result = await runRole(deps, {
-			loadedGuild: guild,
-			depth: 0,
-			startMs: Date.now(),
-			roleName: 'parent',
-			task: 'delegate',
-		})
-
-		expect(result.status).toBe('success')
-		expect(result.summary).toBe('parent handled child failure')
-		expect(llm.calls.length).toBe(4)
-		const roleBudgetEvents = events.filter((e) => e.type === 'role_budget_exceeded')
-		expect(roleBudgetEvents.length).toBeGreaterThanOrEqual(1)
-		const childBudgetEvent = roleBudgetEvents.find((e) => payloadField(e, 'role') === 'child')
-		expect(childBudgetEvent).toBeDefined()
-		const errorField = childBudgetEvent !== undefined ? payloadField(childBudgetEvent, 'error') : undefined
-		const errorKind = isRecord(errorField) ? errorField['kind'] : undefined
-		expect(errorKind).toBe('tool_budget_exceeded')
 	})
 })

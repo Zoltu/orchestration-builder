@@ -6,7 +6,7 @@ Build the harness that runs the executor over a suite of benchmarks, validates e
 
 ## Context
 
-Read `docs/benchmarks.md` (the `eval.json` schema and validation rules) and `docs/architecture.md` ("Benchmark isolation and environments"). Validation runs a shell command in the final workspace and checks expected files / exit code / stdout. Note the **unsolved isolation** caveat in `docs/architecture.md`: until per-benchmark isolation is solved, the suite is constrained to tasks Bun can validate directly with no external installs. The isolation problem is now addressed by its own step, step 16.
+Read `docs/reference.md` ("Benchmarks" — the `eval.json` schema and validation rules) and `docs/architecture.md` ("Isolation"). Validation runs a shell command in the final workspace and checks expected files / exit code / stdout. Note the **unsolved isolation** caveat in `docs/architecture.md`: until per-benchmark isolation is solved, the suite is constrained to tasks Bun can validate directly with no external installs. The isolation problem is now addressed by its own step, step 16.
 
 ## Deliverables
 
@@ -24,7 +24,7 @@ Read `docs/benchmarks.md` (the `eval.json` schema and validation rules) and `doc
    - Writes a `summary.json` to a configured output path.
    This is testable orchestration: it receives its dependencies (an executor runner and a validation runner) via a `dependencies` object with no defaults.
 5. `source/benchmarks/run-suite.test.ts` — in-memory test using a fake executor runner and a fake validation runner to assert the summary is assembled correctly (pass/fail/error aggregation, token/walltime passthrough).
-6. `benchmarks/README.md` — how to add a benchmark, the `eval.json` schema (reference `docs/benchmarks.md`), how to run a single benchmark via `bun source/main.ts`, and how to run the suite via `bun source/benchmarks/run-suite.ts`.
+6. `benchmarks/README.md` — how to add a benchmark, the `eval.json` schema (reference `docs/reference.md` "Benchmarks"), how to run a single benchmark via `bun source/main.ts`, and how to run the suite via `bun source/benchmarks/run-suite.ts`.
 
 ## Module boundaries
 
@@ -43,7 +43,7 @@ Read `docs/benchmarks.md` (the `eval.json` schema and validation rules) and `doc
 
 ## End-of-step evaluation
 
-Confirm the split between pure `validation.ts`, leaf `run-validation.ts`, and orchestration `run-suite.ts` is clean and matches the AGENTS.md three-tier pattern. Ensure `run-suite.ts` does not read `Bun.env` or `process.argv` (that belongs in a CLI wrapper). Re-read `docs/benchmarks.md` and confirm `parseEvalConfig` covers every documented field, including `humanResponses`.
+Confirm the split between pure `validation.ts`, leaf `run-validation.ts`, and orchestration `run-suite.ts` is clean and matches the AGENTS.md three-tier pattern. Ensure `run-suite.ts` does not read `Bun.env` or `process.argv` (that belongs in a CLI wrapper). Re-read `docs/reference.md` "Benchmarks" and confirm `parseEvalConfig` covers every documented field, including `humanResponses`.
 
 ## Estimated effort
 
@@ -62,7 +62,7 @@ Implemented in `source/benchmarks/`:
 - `run-validation.ts` — leaf factory `createRunValidation(defaultTimeoutSeconds)` spawning the validation command under a timeout via `Bun.spawn`, reporting `BenchmarkRunOutput`. Workspace existence is a guard clause; stream reads wrap genuine I/O errors only. Not unit-tested.
 - `run-suite.ts` — orchestration `runSuite(deps, options)` receiving five leaf dependencies explicitly (`listBenchmarkDirectories`, `readEvalConfig`, `runBenchmark`, `runValidation`, `writeSummary`) with no defaults. Writes `summary.json` with per-benchmark `pass`/`fail`/`error` status plus aggregate totals. Reads no `Bun.env`/`process.argv`.
 - `run-suite.test.ts` — 7 in-memory tests with fakes asserting aggregation, fail/error handling, validation skip on error runs, token/walltime passthrough, task/humanResponses forwarding, task override + run-id prefix, and the empty-suite case.
-- `benchmarks/README.md` — authoring guide, `eval.json` schema summary (references `docs/benchmarks.md`), the three-tier validation model, and running instructions.
+- `benchmarks/README.md` — authoring guide, `eval.json` schema summary (references `docs/reference.md` "Benchmarks"), the three-tier validation model, and running instructions.
 
 Health: `bun run typecheck` clean; `bun test source/` → 200 pass / 0 fail (32 new), full suite ~530ms.
 

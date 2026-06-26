@@ -6,7 +6,7 @@ Author 2–3 medium benchmarks (1–3 hour expected tasks) that require decompos
 
 ## Context
 
-Read [`07-quick-fix-benchmarks.md`](07-quick-fix-benchmarks.md) (quick-fix suite is green) and `docs/benchmarks.md`. Medium tasks should require the orchestrator to delegate more than once and the coder to run tests with the `test` tool and react to failures. Keep within the no-installs isolation constraint: use Bun/node stdlib or vendored files only.
+Read [`07-quick-fix-benchmarks.md`](07-quick-fix-benchmarks.md) (quick-fix suite is green) and `docs/reference.md` ("Benchmarks"). Medium tasks should require the orchestrator to delegate more than once and the coder to run tests with the `test` tool and react to failures. Keep within the no-installs isolation constraint: use Bun/node stdlib or vendored files only.
 
 ## Deliverables
 

@@ -80,11 +80,7 @@ function makeFakePersistence(): FakePersistenceFns {
 
 const baseExecutor: ExecutorConfig = {
 	maxAgentDepth: 8,
-	maxToolCallsPerRole: 50,
-	maxTokensPerRole: 60000,
-	maxRunTimeSeconds: 300,
 	defaultToolTimeoutSeconds: 30,
-	maxRepeatedToolCalls: 3,
 	maxCompactionAttempts: 5,
 }
 

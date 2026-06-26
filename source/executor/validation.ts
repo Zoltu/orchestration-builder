@@ -16,7 +16,6 @@ import {
 	MessageRole,
 	ModelConfig,
 	ResultCard,
-	RoleBudget,
 	RoleDefinition,
 	RunMeta,
 	RunOptions,
@@ -102,11 +101,7 @@ export function isModelConfig(value: unknown): value is ModelConfig {
 export function isExecutorConfig(value: unknown): value is ExecutorConfig {
 	if (!isObject(value)) return false
 	if (!isNumber(value.maxAgentDepth)) return false
-	if (!isNumber(value.maxToolCallsPerRole)) return false
-	if (!isNumber(value.maxTokensPerRole)) return false
-	if (!isNumber(value.maxRunTimeSeconds)) return false
 	if (!isNumber(value.defaultToolTimeoutSeconds)) return false
-	if (!isNumber(value.maxRepeatedToolCalls)) return false
 	if (!isNumber(value.maxCompactionAttempts)) return false
 	return true
 }
@@ -117,20 +112,11 @@ export function isContextPolicy(value: unknown): value is ContextPolicy {
 	return true
 }
 
-export function isRoleBudget(value: unknown): value is RoleBudget {
-	if (!isObject(value)) return false
-	if (!isOptionalNumber(value.maxToolCalls)) return false
-	if (!isOptionalNumber(value.maxTokens)) return false
-	return true
-}
-
 export function isRoleDefinition(value: unknown): value is RoleDefinition {
 	if (!isObject(value)) return false
 	if (!isString(value.systemPrompt)) return false
 	if (!isStringArray(value.tools)) return false
-	if (!isOptional(value.generation, isGenerationConfig)) return false
 	if (!isOptionalBoolean(value.includeReasoning)) return false
-	if (!isOptional(value.budget, isRoleBudget)) return false
 	return true
 }
 
@@ -303,11 +289,7 @@ function validateModelConfig(value: unknown, path: string): asserts value is Mod
 function validateExecutorConfig(value: unknown, path: string): asserts value is ExecutorConfig {
 	if (!isObject(value)) throw new ValidationError(path, 'expected an object')
 	ensure(isNumber, value.maxAgentDepth, `${path}.maxAgentDepth`, 'expected a number')
-	ensure(isNumber, value.maxToolCallsPerRole, `${path}.maxToolCallsPerRole`, 'expected a number')
-	ensure(isNumber, value.maxTokensPerRole, `${path}.maxTokensPerRole`, 'expected a number')
-	ensure(isNumber, value.maxRunTimeSeconds, `${path}.maxRunTimeSeconds`, 'expected a number')
 	ensure(isNumber, value.defaultToolTimeoutSeconds, `${path}.defaultToolTimeoutSeconds`, 'expected a number')
-	ensure(isNumber, value.maxRepeatedToolCalls, `${path}.maxRepeatedToolCalls`, 'expected a number')
 	ensure(isNumber, value.maxCompactionAttempts, `${path}.maxCompactionAttempts`, 'expected a number')
 }
 
@@ -316,19 +298,11 @@ function validateContextPolicy(value: unknown, path: string): asserts value is C
 	ensure(isNumber, value.maxToolOutputChars, `${path}.maxToolOutputChars`, 'expected a number')
 }
 
-function validateRoleBudget(value: unknown, path: string): asserts value is RoleBudget {
-	if (!isObject(value)) throw new ValidationError(path, 'expected an object')
-	ensure(isOptionalNumber, value.maxToolCalls, `${path}.maxToolCalls`, 'expected a number or undefined')
-	ensure(isOptionalNumber, value.maxTokens, `${path}.maxTokens`, 'expected a number or undefined')
-}
-
 function validateRoleDefinition(value: unknown, path: string): asserts value is RoleDefinition {
 	if (!isObject(value)) throw new ValidationError(path, 'expected an object')
 	ensure(isString, value.systemPrompt, `${path}.systemPrompt`, 'expected a string')
 	ensure(isStringArray, value.tools, `${path}.tools`, 'expected an array of strings')
-	if (value.generation !== undefined) validateGenerationConfig(value.generation, `${path}.generation`)
 	ensure(isOptionalBoolean, value.includeReasoning, `${path}.includeReasoning`, 'expected a boolean or undefined')
-	if (value.budget !== undefined) validateRoleBudget(value.budget, `${path}.budget`)
 }
 
 export function validateGuildConfig(value: unknown): asserts value is GuildConfig {

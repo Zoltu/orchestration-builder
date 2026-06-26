@@ -14,9 +14,8 @@ The executor surfaces these error kinds. Match your response to the kind:
 
 - **`llm_unavailable`** — the model endpoint could not be reached or kept failing. This is usually transient. Re-delegate the same task to the same role once. If it fails again, escalate.
 - **`context_budget_exceeded`** — the child's conversation grew past the context window. The child cannot compact another role's conversation, and `context_manager` can only compact the conversation it is running in, so do not try to hand the child's conversation to `context_manager`. Instead re-delegate the original task to the role that failed, but split it into a smaller piece so the piece accumulates less context and fits within the window. If the task cannot be split further, escalate.
-- **`token_budget_exceeded`** — the child used more tokens than its budget allowed. Re-delegate the same task to the same role, but narrow the task into a smaller piece so it fits within the budget. If the task cannot be split, escalate.
-- **`tool_budget_exceeded`** — the child made too many tool calls. Re-delegate with a tighter, more focused task so fewer tool calls are needed. If the task inherently needs many calls, escalate.
-- **`timeout`** — a tool or the run exceeded its time limit. Re-delegate once with a simpler task. If it times out again, escalate.
+- **`tool_budget_exceeded`** — the child exceeded the agent recursion depth. Re-delegate with a flatter plan that does not nest agents as deeply. If the task inherently requires deep nesting, escalate.
+- **`timeout`** — a tool exceeded its time limit. Re-delegate once with a simpler task. If it times out again, escalate.
 - **`loop_detected`** — the child repeated the same tool calls without progress. Re-delegate with a clearer, more specific task that breaks the loop. Do not re-delegate the identical task.
 - **`compaction_failed`** — a `context_manager` could not reduce tokens. Escalate: the conversation cannot be saved as-is.
 - **`invalid_tool_call`** — the child called a tool it is not allowed to use, or called it malformed. This usually indicates a prompt or task-clarity problem. Re-delegate with a more explicit task. If it recurs, escalate.

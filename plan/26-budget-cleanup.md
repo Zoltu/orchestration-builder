@@ -14,7 +14,7 @@ Read [`budgets.ts`](../source/executor/budgets.ts) (`checkRoleBudgets`/`checkGlo
 
 - **Delete the cumulative caps entirely** (not "optional, unlimited default"). `maxToolCallsPerRole`, `maxTokensPerRole`, `maxRunTimeSeconds` are removed from `ExecutorConfig`, the validators, and all fixtures. Cleaner end state; no dead optional fields. The context window and per-turn `maxTokens` are LLM-runtime-enforced limits and suffice.
 - **Delete `maxRepeatedToolCalls` and the deterministic loop check now.** Step 31's loop-detector agent (built on the interrupt/inspect platform) replaces it. Keeping a deterministic pre-filter alongside the agent was rejected as redundant and prone to double-flagging. Accepted gap until step 31.
-- **Delete `maxRunTimeSeconds`.** Wall-clock is hardware-dependent (1 tps vs 15 000 tps) — a fixed value either fires on healthy slow-hardware runs or never fires on fast hardware. Run termination is the deployment container's job; document this in `docs/reference.md` and `docs/deployment.md`. The accepted gap (no in-band runaway termination until step 31) is the same gap as the loop-detection removal.
+- **Delete `maxRunTimeSeconds`.** Wall-clock is hardware-dependent (1 tps vs 15 000 tps) — a fixed value either fires on healthy slow-hardware runs or never fires on fast hardware. Run termination is the deployment container's job; document this in `docs/reference.md` and `docs/architecture.md` ("Deployment" → "Run termination"). The accepted gap (no in-band runaway termination until step 31) is the same gap as the loop-detection removal.
 - **Remove the `agent` tool's `budget` parameter.** `RoleBudget` exists only to override the two deleted global caps, so it has no remaining purpose. Removing it drops `validateAgentArgs`'s budget validation, the `budget` field in `agent.json`, and `cloneRoleDefinitionWithBudget` in `engine.ts`.
 - **Remove all per-role `generation.maxTokens: 2048` overrides** in `guild.json` (orchestrator, context_manager, recovery) so every role inherits `model.generation.maxTokens`. The context manager self-limits via its own output (compacting 256k → 50k is a big win and well worth the tokens); defensively capping it loses that. Modern models do not loop enough to justify preemptive output caps.
 - **Keep `maxAgentDepth`, `maxCompactionAttempts`, `defaultToolTimeoutSeconds`.** Depth guards unbounded recursion (distinct from "stuck" looping). Compaction-progress guards a context_manager that cannot reduce tokens. Tool timeout guards a hung subprocess.
@@ -31,7 +31,7 @@ Read [`budgets.ts`](../source/executor/budgets.ts) (`checkRoleBudgets`/`checkGlo
 7. `guild/guild.json` — remove `maxToolCallsPerRole`, `maxTokensPerRole`, `maxRunTimeSeconds`, `maxRepeatedToolCalls` from `executor`. Remove the `generation` override on `orchestrator`, `context_manager`, and `recovery` (all roles inherit `model.generation`).
 8. `guild/prompts/recovery.md` — drop the `token_budget_exceeded` guidance. Keep `loop_detected` (still valid; step 31 emits it), `context_budget_exceeded`, `tool_budget_exceeded` (now depth-only), `timeout`, `llm_unavailable`, `compaction_failed`, `invalid_tool_call`, `invalid_arguments`, `unknown_tool`.
 9. `docs/reference.md` — update the executor-config field table (the four removed fields), the error-kind table (`token_budget_exceeded` removed), and add a note that run termination is the deployment container's responsibility (no executor wall-clock); a proper in-band overseer lands in step 31.
-10. `docs/deployment.md` — add/confirm the note that the container's own kill/timeout (`docker stop`, orchestrator `--timeout`) is the outer run-termination boundary, since the executor no longer enforces wall-clock.
+10. `docs/architecture.md` ("Deployment" → "Run termination") — add/confirm the note that the container's own kill/timeout (`docker stop`, orchestrator `--timeout`) is the outer run-termination boundary, since the executor no longer enforces wall-clock.
 11. Tests/fixtures — mechanically remove the deleted fields from every `ExecutorConfig` literal: `validation.test.ts`, `budgets.test.ts`, `engine.test.ts`, `executor.test.ts`, `builtin-tools.test.ts`, `server.test.ts`, `render.test.ts`. Update `seed-guild.test.ts` (drop the `maxToolCallsPerRole >= 50` and `maxRunTimeSeconds >= 3600` assertions; the fields no longer exist). Rewrite `budgets.test.ts` to cover depth-only (`checkGlobalBudgets`) and compaction-progress-only (`checkRoleBudgets`). Remove `budget` from the `agent`-tool tests in `builtin-tools.test.ts`. Remove the `token_budget_exceeded` and consecutive-dup `loop_detected` engine tests (the emitters are gone); keep the depth `tool_budget_exceeded` test.
 
 ## Module boundaries
@@ -39,14 +39,14 @@ Read [`budgets.ts`](../source/executor/budgets.ts) (`checkRoleBudgets`/`checkGlo
 - `budgets.ts` stays pure orchestration (testable in-memory); it just does less.
 - No new leaf functions. No new tools.
 - The Guild change (removing generation overrides) is a pure config edit; no prompt rewrite beyond the `recovery.md` `token_budget_exceeded` removal.
-- `docs/reference.md` and `docs/deployment.md` are the only docs touched.
+- `docs/reference.md` and `docs/architecture.md` ("Deployment" → "Run termination") are the only docs touched.
 
 ## Acceptance criteria
 
 - [ ] `bun run typecheck` and `bun test source/` pass with the removed fields and rewritten tests.
 - [ ] `guild.json` loads (loader validates); the seed-guild conformance test passes against the trimmed config.
 - [ ] No `token_budget_exceeded` emitter remains; no `as` casts introduced.
-- [ ] `docs/reference.md` no longer lists the four removed executor-config fields or `token_budget_exceeded`; it documents run termination as the deployment container's job.
+- [ ] `docs/reference.md` no longer lists the four removed executor-config fields or `token_budget_exceeded`; it documents run termination as the deployment container's job (`docs/architecture.md` "Run termination").
 - [ ] The `agent` tool accepts `{ role, task }` only (no `budget`); `agent.json`'s manifest has no `budget` property.
 
 ## End-of-step evaluation
@@ -64,3 +64,20 @@ Medium — the changes are mechanical (field removals across ~10 files) but the 
 ## Operator handoff
 
 None for the code — fully in-environment (typecheck + tests). After this step, runs no longer have an executor-enforced wall-clock or tool-call cap; rely on the deployment container's `docker stop`/timeout to terminate a stuck run until step 31 lands the in-band overseer. If a real run loops indefinitely before step 31, that is the accepted gap, not a regression.
+
+## Closeout (2026-06-25)
+
+✅ complete. `bun run typecheck` and `bun test source/` green (461 pass). The accepted stuck/runaway gap is recorded in the tracked-debt table (`plan/README.md`).
+
+### Deviations from the plan wording
+
+- **Removed `RoleDefinition.generation` entirely.** Removing the `maxTokens: 2048` caps left only dead `temperature` overrides on `orchestrator`/`context_manager`, and a follow-up review found those were never applied at all: `createLlmCaller` closes over `model` and reads only `model.generation`, and `runRole` never passes a role's `generation` to the caller. The per-role `generation` field was dead config — validated but never read. It was removed from `RoleDefinition`, the role validators, `guild.json`, `docs/reference.md`, and the `renderConfig` test, so the only sampling parameters that exist are the model-level ones. This is pre-existing dead code this step exposed, paid in-step per the "no dead state" principle.
+
+- **Removed additional dead state the plan did not name explicitly.** The plan only named `recentToolCalls`/`argsHash` for dead-state removal, but the same "only fed the deleted check" reasoning applied to the `RoleState.toolCalls`/`promptTokens`/`completionTokens` accumulators (each fed only the deleted tool-call-count / total-token check) and `EngineContext.startMs` / `GlobalBudgetState.startMs` (fed only the deleted wall-clock check). `cachedPromptTokens` was already dead before this step (accumulated, never read). All were removed to honor the "no dead state left feeding nothing" principle; `lastPromptTokens` and `recentCompactionPromptTokens` were retained (still read by `context_info` / `checkRoleBudgets`). `handleLlmResult` dropped its now-unused `roleDefinition` parameter.
+
+- **Folded the run-termination note into `docs/architecture.md`.** The plan's design-decision text referenced `docs/deployment.md`, a file that was removed in an earlier docs refactor (its content lives in `docs/architecture.md` "Deployment"). Rather than recreate it, the run-termination note was added as a "Run termination" subsection under `docs/architecture.md` "Deployment", and `docs/reference.md` cross-links there. One stale `docs/executor.md` reference in `source/executor/index.ts` (another removed-doc remnant) was repointed to `docs/reference.md` in the same pass.
+
+### End-of-step confirmation
+
+`maxTokensPerRole` is gone everywhere (it was the conceptual bug — a cumulative sum masquerading as a context-window cap). `recentToolCalls`/`argsHash`/`hashArgs` are fully removed. `checkRoleBudgets` retains exactly one check (compaction-progress); `checkGlobalBudgets` retains exactly one check (depth). `recovery.md` no longer references `token_budget_exceeded` and still covers every remaining `ErrorKind` (the seed-guild conformance test, which iterates `ERROR_KINDS`, passes). The `agent` tool accepts `{ role, task }` only; `agent.json` has no `budget` property. No `as` casts were introduced.
+

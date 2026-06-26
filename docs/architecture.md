@@ -69,6 +69,10 @@ guild/                              # bundled into the image at /app/guild/
 
 The executor ships as a Docker image that runs the long-running executor service as PID 1 via `ENTRYPOINT ["bun", "source/serve.ts"]`. The build runs `bun install`, typecheck, and tests as gates, then removes `node_modules`. All configuration is environment variables with production defaults. The deployment model is one container per project: the project is mounted at `/workspace` (read-write) and the executor modifies it in place. See [`Dockerfile`](../Dockerfile) and [`README.md`](../README.md).
 
+### Run termination
+
+The executor does not enforce a wall-clock run timeout or a per-role tool-call/token cap. A fixed wall-clock limit is hardware-dependent (it fires on healthy slow-hardware runs or never fires on fast hardware), and cumulative token/tool-call budgets fired on healthy long-horizon work long before the context window filled. The real context-window guardrail is the model endpoint's `context_budget_exceeded` path (see [`docs/reference.md`](reference.md) "Executor runtime"). Run termination is the deployment container's job: `docker stop` (or the orchestrator's own timeout) is the outer boundary that ends a stuck or runaway run. A proper in-band overseer — an interrupt/inspect platform with a loop-detector agent and an operator/API interrupt — is planned work; until it lands, a runaway role that does not overflow its context window runs until the container is stopped.
+
 ## Isolation
 
 The executor operates on the mounted workspace in place. File tools canonicalize paths and reject any that resolve outside the workspace. Runs are sequential, so there is no concurrent-run isolation concern. Per-run environment isolation (scoped `PATH`/`HOME`, no global pollution) is future work that unblocks the `run_shell` tool; until then, the suite is constrained to no-install tasks. Operators who want to protect a project from in-place modification give the executor a throwaway copy. See [`docs/security.md`](security.md).

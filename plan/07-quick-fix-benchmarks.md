@@ -6,7 +6,7 @@ Author the first batch of quick-fix benchmarks (5–30 minute expected tasks) an
 
 ## Context
 
-Read [`06-benchmark-harness.md`](06-benchmark-harness.md) (the harness is now in place) and `docs/benchmarks.md`. Each benchmark is `benchmarks/<name>/{eval.json, README.md, src|tests|...}`. `eval.json` is **not** copied into the run workspace. Keep tasks genuinely small so the seed Guild can pass them with light prompt iteration.
+Read [`06-benchmark-harness.md`](06-benchmark-harness.md) (the harness is now in place) and `docs/reference.md` ("Benchmarks"). Each benchmark is `benchmarks/<name>/{eval.json, README.md, src|tests|...}`. `eval.json` is **not** copied into the run workspace. Keep tasks genuinely small so the seed Guild can pass them with light prompt iteration.
 
 ## Deliverables
 
