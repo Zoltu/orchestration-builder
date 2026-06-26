@@ -10,14 +10,14 @@ Read [`PLAN.md`](PLAN.md) ("Sequence view (debug toggle)"), [`02-visual-foundati
 
 ## Deliverables
 
-1. **`source/web/render.ts`** — add `deriveSequenceDiagram(config, runView)`, a pure function producing a `SequenceDiagram`: columns (Human + each role + a tools column, ordered Human → entry → workers → side → tools, with friendly labels), and messages (one per log event, with from-column, to-column, vertical position by timestamp order, and the event's `LogDetailSection`s for step-10 inspection). Pure; covered by `render.test.ts` against the fixtures.
-2. **`source/web/render.test.ts`** — cover `deriveSequenceDiagram`: column set from config; message ordering by timestamp; `agent_call`/`role_start` → child column; `tool_call`/`tool_result` → tools column; `ask_human`/`human_answer` → Human column; completed vs in-progress.
+1. **`source/web/static/sequence-diagram.js`** (new, browser-pure) — `deriveSequenceDiagram(config, runView)`, a pure function producing a `SequenceDiagram`: columns (Human + each role + a tools column, ordered Human → entry → workers → side → tools, with friendly labels), and messages (one per log event, with from-column, to-column, vertical position by timestamp order, and the event's `LogDetailSection`s for step-10 inspection). Pure; covered by `source/web/sequence-diagram.test.ts` against the fixtures. Follows the browser-pure convention established by `flow-graph.js`/`pathfinding.js`/`fixtures.js` (no imports, so the static server can serve it and the test runner can import it from the filesystem).
+2. **`source/web/sequence-diagram.test.ts`** — cover `deriveSequenceDiagram`: column set from config; message ordering by timestamp; `agent_call`/`role_start` → child column; `tool_call`/`tool_result` → tools column; `ask_human`/`human_answer` → Human column; completed vs in-progress.
 3. **`source/web/static/app.js`** — a `SequenceView` component rendering the columns as vertical lifelines and messages as horizontal lines (with arrowheads for direction), inside an SVG with a `viewBox` sized to the diagram. A **view toggle** (Flow / Sequence) in the run-view header switches the centerpiece; Flow remains the default. Static render this step. Wired into the playback harness so the operator scrubs fixtures in both views.
 4. **`source/web/static/styles.css`** — sequence diagram styling: lifelines, message arrows, column headers, theme-aware. The toggle control is clearly a debug affordance (not the product surface).
 
 ## Module boundaries
 
-- Web-only, fixture-driven. `render.ts` gains a new pure derivation; `app.js` gains the view + toggle. No backend or endpoint changes.
+- Web-only, fixture-driven. `sequence-diagram.js` is a new browser-pure derivation; `app.js` gains the view + toggle. No backend or endpoint changes beyond the additive `/sequence-diagram.js` asset route.
 - The hover inspector and zoom/pan are deliberately deferred to step 10 so this step stays session-sized (sequence diagrams are fiddly to lay out; isolating the scaffold from the interaction is the right cut).
 
 ## Acceptance criteria

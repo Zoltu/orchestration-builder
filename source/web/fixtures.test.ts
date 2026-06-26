@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { fixtures, largeGuildConfig, mockConfig } from './fixtures.js'
+import { fixtures, largeGuildConfig, mockConfig } from './static/fixtures.js'
 import { isErrorKind } from '../executor/errors.js'
 import { isEffortLevel, isResultCard } from '../executor/validation.js'
 

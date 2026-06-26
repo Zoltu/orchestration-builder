@@ -249,7 +249,10 @@ function runView(p) {
 
 // A frame pins a stable config alongside the per-frame run view and a `now` the elapsed-time derivation consumes; `now` advances with the frame so the cost strip reads naturally during playback. The config defaults to the base mock guild; scenarios that need a different guild shape (the large-guild stress case) pass their own.
 function frame(runViewOverrides, nowSeconds, config) {
-	return { config: config ?? mockConfig, runView: runView(runViewOverrides), now: t(nowSeconds) }
+	// `config` may be passed either as the third argument or as a field on the overrides object (the large-guild scenario keeps its per-frame data together by inlining `config` alongside the run-view fields); pulling it out here keeps it from leaking into the run-view builder as an unknown field.
+	const { config: configInOverrides, ...runViewFields } = runViewOverrides
+	const configSnapshot = config ?? configInOverrides ?? mockConfig
+	return { config: configSnapshot, runView: runView(runViewFields), now: t(nowSeconds) }
 }
 
 // --- Scenarios --------------------------------------------------------------

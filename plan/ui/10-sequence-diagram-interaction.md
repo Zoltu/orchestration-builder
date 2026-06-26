@@ -16,7 +16,7 @@ Read [`PLAN.md`](PLAN.md) ("Sequence view", "zoomed out … nearly free"), [`09-
 
 ## Module boundaries
 
-- Web-only, fixture-driven. Reuses the step-08 tooltip and the step-09 scaffold. No `render.ts`, backend, or endpoint changes.
+- Web-only, fixture-driven. Reuses the step-08 tooltip and the step-09 scaffold. No `sequence-diagram.js`, backend, or endpoint changes.
 - No new dependencies. Zoom/pan is plain `viewBox` math.
 
 ## Acceptance criteria

@@ -2,7 +2,7 @@
 
 ## Goal
 
-Make nodes and edges in the flow graph inspectable: hovering/clicking shows a **friendly-formatted** detail view (labeled blocks, pretty-printed JSON for arguments/results, assistant prose as sanitized Markdown), with a **"copy raw"** button that copies the raw JSON for sharing when visual space allows. The formatted view is for reading; the copy is for paste-to-share. This builds the reusable tooltip module that the sequence diagram (steps 09–10) also uses. Iterated against fixtures.
+Make nodes and edges in the flow view inspectable: hovering/clicking a node or edge (in the main area or the top bar) shows a **friendly-formatted** detail view (labeled blocks, pretty-printed JSON for arguments/results, assistant prose as sanitized Markdown), with a **"copy raw"** button that copies the raw JSON for sharing when visual space allows. The formatted view is for reading; the copy is for paste-to-share. This builds the reusable tooltip module that the sequence diagram (steps 09–10) also uses. Iterated against fixtures.
 
 ## Context
 
@@ -12,7 +12,7 @@ Read [`PLAN.md`](PLAN.md) ("Tooltips"), [`02-visual-foundation-tokens-svg-primit
 
 1. **`source/web/static/tooltip.js`** (new module) — a `Tooltip` component built on the step-02 `TooltipShell` that takes a `LogDetailSection[]` (or a node's role/counter/cost summary) and renders each section: a labeled block, with the content formatted friendly — pretty-printed JSON (indent, no raw `\n` escapes) for object/array content, sanitized Markdown (step-27 `renderMarkdown`) for prose content (assistant responses, summaries, error messages, task text), and plain text for scalars. Includes a "copy raw" button (present when space allows) that copies the raw JSON of the section content via `navigator.clipboard`.
 2. **`source/web/static/tooltip.test.ts`** (new, in-memory) — assert the tooltip renders each content kind to the right vnode shape (pretty-printed JSON as a `<pre>` text node, prose as sanitized-Markdown vnodes, scalar as text) and that the copy-raw button is wired with the raw JSON. Use the fake-`h` pattern; no DOM, no real clipboard (assert the payload, not the side effect).
-3. **`source/web/static/app.js`** — wire hover/click on graph nodes and edges to open the tooltip with the relevant `LogDetailSection`s (for edges, the `llm_call`/`tool_call`/`tool_result`/`role_finished` detail; for nodes, the role's activity summary + counter + cost). Clicking a tooltip's copy-raw button copies; clicking elsewhere closes the tooltip. Text selection inside the tooltip still works (hence a button, not copy-on-any-click). Against fixtures, every detail-populated event type is reachable.
+3. **`source/web/static/app.js`** — wire hover/click on flow-view nodes and edges (both main-area and top-bar) to open the tooltip with the relevant `LogDetailSection`s (for edges, the `llm_call`/`tool_call`/`tool_result`/`role_finished` detail; for main-area nodes, the role's current-invocation activity summary + status; for top-bar nodes, the role's cumulative summary + counter + cost). Clicking a tooltip's copy-raw button copies; clicking elsewhere closes the tooltip. Text selection inside the tooltip still works (hence a button, not copy-on-any-click). Against fixtures, every detail-populated event type is reachable.
 4. **`source/web/static/styles.css`** — tooltip styling: a positioned card that doesn't overflow the viewport (flip/clip as needed), theme-aware, with readable pretty-printed JSON and Markdown. The "copy raw" button is compact.
 5. **`docs/security.md`** — note the tooltip renders prose via the sanitized Markdown path and pretty-printed JSON as text nodes; copy-raw copies JSON (no markup), so no untrusted content reaches the clipboard as anything but text.
 
@@ -24,7 +24,7 @@ Read [`PLAN.md`](PLAN.md) ("Tooltips"), [`02-visual-foundation-tokens-svg-primit
 ## Acceptance criteria
 
 - [ ] `bun run typecheck` and `bun test source/` pass.
-- [ ] Hovering/clicking a graph node or edge shows a friendly-formatted tooltip with the relevant detail sections.
+- [ ] Hovering/clicking a flow-view node or edge (main area or top bar) shows a friendly-formatted tooltip with the relevant detail sections.
 - [ ] JSON content is pretty-printed; prose content is sanitized Markdown; scalars are plain text.
 - [ ] A "copy raw" button copies the raw JSON (when space allows); text selection inside the tooltip still works.
 - [ ] The tooltip doesn't overflow the viewport and reads correctly in light and dark.

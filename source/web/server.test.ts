@@ -362,6 +362,14 @@ describe('createWebServer dev playback assets', () => {
 		const body = await response.text()
 		expect(body).toContain('GraphNode')
 	})
+
+	test('GET /pathfinding.js serves the edge-routing library', async () => {
+		const response = await fetch(`${readOnlyBaseUrl}/pathfinding.js`)
+		expect(response.status).toBe(200)
+		expect(response.headers.get('content-type')).toContain('text/javascript')
+		const body = await response.text()
+		expect(body).toContain('routeEdges')
+	})
 })
 
 describe('createWebServer GET /api/config', () => {
