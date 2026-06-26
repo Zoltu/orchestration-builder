@@ -28,6 +28,8 @@ The residual concern is not a malicious model but **prompt injection**: a malici
 
 Because strings only ever become text nodes or allowlisted attributes (never `innerHTML`), and because the sanitizer strips anything not on the allowlist before the vnode step, markup coerced into the model's output is defanged before it reaches the DOM even if an upstream injection defense fails. Machine fields (tool names, log payloads, raw-payload detail, timestamps, role names, run ids, the one-line current-activity summary, the operator's question answer, artifact paths) stay `textContent`.
 
+The UI's visual polish pass added only CSS and structural class hooks on trusted (non-agent) DOM — the active run's list item (`is-active`), the create-run form's busy state (`is-busy`), and layout wrappers. It introduced no new untrusted-content insertion paths: agent prose still flows only through the sanitized Markdown pipeline above, and every other field remains a text node. No class hook is applied to agent-authored content. The run-list task is now rendered through that same sanitized Markdown path (it is the same task field the per-run view renders), removing the prior compact-listing exception so the task is uniformly sanitized Markdown wherever it appears; the multiline task editor itself is trusted operator input that the server stores verbatim and the client renders only through the sanitizer.
+
 ### Sanitizer allowlist
 
 - **Allowed tags:** `p`, `br`, `hr`, `h1`–`h6`, `ul`, `ol`, `li`, `pre`, `code`, `blockquote`, `em`, `strong`, `del`, `s`, `a`, `span`, `table`, `thead`, `tbody`, `tr`, `th`, `td`. `span` is allowed because `highlight.js` wraps syntax tokens in `<span class="hljs-…">`. `img`, `script`, `iframe`, `object`, `embed`, `svg`, `form`, `input`, `link`, `meta`, and every other tag are not allowed.
@@ -36,7 +38,6 @@ Because strings only ever become text nodes or allowlisted attributes (never `in
 - **Allowed URL schemes:** `http`, `https`, `mailto`. `javascript:`, `data:`, `vbscript:`, and any other absolute scheme are rejected; relative, anchor, and protocol-relative URLs pass. The scheme is read after stripping leading and embedded control characters (tab, newline, NUL — the bytes browsers ignore before resolving a scheme), so `java\tscript:` cannot smuggle past.
 
 If `showdown` or `highlight.js` fails to load or throws, a prose field falls back to its raw text rendered as a single text node, so the UI stays readable instead of blank.
-
 
 ## Mitigations
 

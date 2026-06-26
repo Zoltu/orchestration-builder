@@ -540,15 +540,35 @@ function ExportLogFx(payload) {
 	return [runExportLog, payload]
 }
 
+// The task editor is a multiline textarea, not a single-line input: a task is free-form Markdown a user may draft at length. Enter inserts a newline (the browser default for a textarea) and Tab inserts a real tab character at the caret (handled below), so neither key submits; submission is the submit button, with Ctrl/Cmd+Enter as a keyboard shortcut that re-enters the form's submit path.
+function TaskTextareaKeydown(state, event) {
+	if (event.key === 'Tab') {
+		event.preventDefault()
+		const textarea = event.target
+		const start = textarea.selectionStart
+		const end = textarea.selectionEnd
+		textarea.value = textarea.value.slice(0, start) + '\t' + textarea.value.slice(end)
+		textarea.selectionStart = textarea.selectionEnd = start + 1
+		return state
+	}
+	if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) {
+		event.preventDefault()
+		const form = event.target.form
+		if (form !== null && typeof form.requestSubmit === 'function') form.requestSubmit()
+		return state
+	}
+	return state
+}
+
 function SubmitRun(state, event) {
 	event.preventDefault()
 	if (state.justSubmittedRunId !== null || deriveActiveRunId(state.summaries) !== null) return state
 	const form = event.target
-	const input = form.querySelector('input[type="text"]')
-	if (input === null) return state
-	const task = input.value.trim()
+	const textarea = form.querySelector('textarea')
+	if (textarea === null) return state
+	const task = textarea.value.trim()
 	if (task === '') return state
-	input.value = ''
+	textarea.value = ''
 	return [
 		state,
 		Fetch({
@@ -664,36 +684,54 @@ function RunList(state) {
 	}
 	// The re-run button shares the create form's disabled condition (a run is active or a submission is in flight) so the one-task-at-a-time contract holds identically for re-runs.
 	const rerunDisabled = state.justSubmittedRunId !== null || deriveActiveRunId(state.summaries) !== null
+	const activeRunId = deriveActiveRunId(state.summaries)
 	return h(
 		'ul',
 		{ id: 'run-list' },
-		state.summaries.map((summary) =>
-			h('li', { key: summary.runId, class: { selected: summary.runId === state.selectedRunId }, onclick: [SelectRun, summary.runId] }, [
-				h('span', { class: 'run-id' }, summary.runId),
-				h('span', { class: `run-status run-status-${summary.status ?? 'unknown'}` }, statusLabel(summary.status)),
-				summary.effort !== null && summary.effort !== undefined ? h('span', { class: 'run-effort-badge', title: `effort ${summary.effort} — ${effortLabel(summary.effort)}` }, `effort ${summary.effort}`) : null,
-				h('span', { class: 'run-task' }, summary.task ?? '—'),
-				h('button', { type: 'button', class: 'rerun-button', 'data-task': summary.task ?? '', disabled: rerunDisabled || typeof summary.task !== 'string' || summary.task === '', onclick: RerunTask }, 're-run'),
-			]),
-		),
+		state.summaries.map((summary) => {
+			// A run row is a vertical stack: a compact meta line (run id + status), the task on its own line rendered as the same sanitized Markdown the per-run view uses, and an actions line (effort badge + re-run). Splitting the task onto its own wrapped line is what makes a long task legible in the narrow sidebar instead of wrapping badly across a single cramped row.
+			const effortBadge = summary.effort !== null && summary.effort !== undefined
+				? h('span', { class: 'run-effort-badge', title: `effort ${summary.effort} — ${effortLabel(summary.effort)}` }, `effort ${summary.effort}`)
+				: null
+			return h('li', { key: summary.runId, class: { selected: summary.runId === state.selectedRunId, 'is-active': summary.runId === activeRunId }, onclick: [SelectRun, summary.runId] }, [
+				h('div', { class: 'run-meta-row' }, [
+					h('span', { class: 'run-id' }, summary.runId),
+					h('span', { class: `run-status run-status-${summary.status ?? 'unknown'}` }, statusLabel(summary.status)),
+				]),
+				h('div', { class: 'run-task markdown' }, renderMarkdown(summary.task ?? '—')),
+				h('div', { class: 'run-actions-row' }, [
+					effortBadge,
+					h('button', { type: 'button', class: 'rerun-button', 'data-task': summary.task ?? '', disabled: rerunDisabled || typeof summary.task !== 'string' || summary.task === '', onclick: RerunTask }, 're-run'),
+				]),
+			])
+		}),
 	)
 }
 
-function RunsPanel(state) {
+// The task editor lives in the main column, not the sidebar: a user may draft a long Markdown task and needs horizontal room plus a tall multiline field. The effort slider sits beside the submit button so the two run-shaping controls are together.
+function SubmitPanel(state) {
 	const disabled = state.justSubmittedRunId !== null || deriveActiveRunId(state.summaries) !== null
 	const runEffort = typeof state.runEffort === 'number' ? state.runEffort : DEFAULT_EFFORT
+	return h('section', { id: 'submit-panel', class: 'panel' }, [
+		h('h2', {}, 'New run'),
+		h('form', { class: { 'create-run-form': true, 'is-busy': disabled }, onsubmit: SubmitRun }, [
+			h('textarea', { name: 'task', placeholder: disabled ? 'a run is already in progress' : 'describe a task (Markdown supported) and start a run', autocomplete: 'off', rows: '4', disabled, onkeydown: TaskTextareaKeydown }),
+			h('div', { class: 'submit-controls' }, [
+				h('div', { class: 'effort-control run-effort-control' }, [
+					h('label', { class: 'effort-label', for: 'run-effort' }, 'Effort'),
+					h('input', { id: 'run-effort', type: 'range', min: '0', max: '5', step: '1', value: String(runEffort), disabled, oninput: ChangeRunEffort, onchange: SaveRunEffort }),
+					h('span', { class: 'effort-value' }, `${runEffort} — ${effortLabel(runEffort)}`),
+					state.savingEffort === true ? h('span', { class: 'effort-note' }, 'saving…') : null,
+				]),
+				h('button', { type: 'submit', disabled }, disabled ? 'Run in progress…' : 'Start run'),
+			]),
+		]),
+	])
+}
+
+function RunsPanel(state) {
 	return h('section', { id: 'runs-panel', class: 'panel' }, [
 		h('h2', {}, 'Runs'),
-		h('form', { class: 'create-run-form', onsubmit: SubmitRun }, [
-			h('input', { type: 'text', placeholder: disabled ? 'a run is already in progress' : 'describe a task and start a run', autocomplete: 'off' }),
-			h('button', { type: 'submit', disabled }, disabled ? 'Run in progress…' : 'Start run'),
-		]),
-		h('div', { class: 'effort-control run-effort-control' }, [
-			h('label', { class: 'effort-label', for: 'run-effort' }, 'Effort'),
-			h('input', { id: 'run-effort', type: 'range', min: '0', max: '5', step: '1', value: String(runEffort), disabled, oninput: ChangeRunEffort, onchange: SaveRunEffort }),
-			h('span', { class: 'effort-value' }, `${runEffort} — ${effortLabel(runEffort)}`),
-			state.savingEffort === true ? h('span', { class: 'effort-note' }, 'saving…') : null,
-		]),
 		RunList(state),
 	])
 }
@@ -929,6 +967,7 @@ function ConfigPanel(state) {
 
 function Main(state) {
 	return h('main', {}, [
+		SubmitPanel(state),
 		RunsPanel(state),
 		RunSummaryPanel(state),
 		RolesPanel(state),
