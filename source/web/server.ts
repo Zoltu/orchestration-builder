@@ -28,6 +28,10 @@ const STATIC_ASSETS: Record<string, StaticAsset> = {
 	'/vendor/showdown.js': { fileName: 'vendor/showdown.js', contentType: 'text/javascript; charset=utf-8' },
 	'/vendor/highlight.js': { fileName: 'vendor/highlight.js', contentType: 'text/javascript; charset=utf-8' },
 	'/vendor/highlight-github.css': { fileName: 'vendor/highlight-github.css', contentType: 'text/css; charset=utf-8' },
+	'/fixtures.js': { fileName: '../fixtures.js', contentType: 'text/javascript; charset=utf-8' },
+	'/playback.html': { fileName: 'playback.html', contentType: 'text/html; charset=utf-8' },
+	'/playback.js': { fileName: 'playback.js', contentType: 'text/javascript; charset=utf-8' },
+	'/svg-primitives.js': { fileName: 'svg-primitives.js', contentType: 'text/javascript; charset=utf-8' },
 }
 
 export interface WebServerConfig {

@@ -330,6 +330,40 @@ describe('createWebServer static assets', () => {
 	})
 })
 
+describe('createWebServer dev playback assets', () => {
+	test('GET /fixtures.js serves the fixture module', async () => {
+		const response = await fetch(`${readOnlyBaseUrl}/fixtures.js`)
+		expect(response.status).toBe(200)
+		expect(response.headers.get('content-type')).toContain('text/javascript')
+		const body = await response.text()
+		expect(body).toContain('export')
+	})
+
+	test('GET /playback.html serves the dev entry page', async () => {
+		const response = await fetch(`${readOnlyBaseUrl}/playback.html`)
+		expect(response.status).toBe(200)
+		expect(response.headers.get('content-type')).toContain('text/html')
+		const body = await response.text()
+		expect(body).toContain('playback.js')
+	})
+
+	test('GET /playback.js serves the dev harness script', async () => {
+		const response = await fetch(`${readOnlyBaseUrl}/playback.js`)
+		expect(response.status).toBe(200)
+		expect(response.headers.get('content-type')).toContain('text/javascript')
+		const body = await response.text()
+		expect(body).toContain('fixtures')
+	})
+
+	test('GET /svg-primitives.js serves the SVG primitives module', async () => {
+		const response = await fetch(`${readOnlyBaseUrl}/svg-primitives.js`)
+		expect(response.status).toBe(200)
+		expect(response.headers.get('content-type')).toContain('text/javascript')
+		const body = await response.text()
+		expect(body).toContain('GraphNode')
+	})
+})
+
 describe('createWebServer GET /api/config', () => {
 	test('returns the safe config subset derived from the loaded Guild', async () => {
 		const response = await fetch(`${readOnlyBaseUrl}/api/config`)

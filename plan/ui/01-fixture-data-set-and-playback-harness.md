@@ -34,12 +34,26 @@ The guild is loaded once at startup and never mutated (`source/serve.ts`), so th
 
 ## Acceptance criteria
 
-- [ ] `bun run typecheck` and `bun test source/` pass.
-- [ ] Every fixture frame matches the real `RunView`/config shape (including the future tiered label fields); a malformed fixture fails the test.
-- [ ] All nine scenarios are present with multi-frame timelines.
-- [ ] The playback harness loads a scenario and plays/steps/scrubs through its frames.
-- [ ] The harness is isolated so it can be removed without touching the real run view.
+- [x] `bun run typecheck` and `bun test source/` pass.
+- [x] Every fixture frame matches the real `RunView`/config shape (including the future tiered label fields); a malformed fixture fails the test.
+- [x] All thirteen scenarios are present with multi-frame timelines (the original nine plus four added after operator review: self-delegation, detected-loop, user-interrupt, and a ~15-role large-guild stress case).
+- [x] The playback harness loads a scenario and plays/steps/scrubs through its frames.
+- [x] The harness is isolated so it can be removed without touching the real run view.
 
 ## Operator handoff
 
 Open the playback harness in a browser, step through each fixture scenario, and confirm the scenarios cover the cases the visualization will need to present. Suggest any missing scenario or frame before the visualization steps build on this set.
+
+## Closeout (2026-06-26)
+
+In-environment complete: `bun run typecheck` and `bun test source/` green (505 tests). All thirteen scenarios ship with 2–3 hand-authored frames each, shaped exactly like the real `/api/config` (extended with the future tiered `label`/`description` on roles and `humanLabel`/`humanDescription` on tools) and `/api/runs/:id` `RunView`. `fixtures.test.ts` validates every frame against those shapes (reusing `isResultCard`, `isEffortLevel`, `isErrorKind` for the leaf guards) and pins the thirteen scenario ids and the monotonic-frame-`now`/stable-config invariants.
+
+The four scenarios added after operator review (self-delegation, detected-loop, user-interrupt, large-guild) exercise cases the original nine did not cover: a role delegating to itself (same-named nodes at increasing depth), the loop-detector agent firing an interrupt, an operator inquiry pausing a run, and a ~15-role guild with a deep, wide invocation tree. The detected-loop and user-interrupt scenarios are forward-looking: they model event shapes the interrupt/inspect platform will emit (`interrupt_triggered`, the `loop_detector` role, the `trigger_interrupt` tool) and a future `interrupted` terminal status, so the visualization is ready when that platform lands. The large-guild scenario uses a separate `largeGuildConfig` (15 roles) since the base `mockConfig` carries 7 roles; the `frame()` helper accepts an optional config override, and the stable-config test checks within-scenario identity rather than global `mockConfig` identity. The base `mockConfig` was also expanded to include the real `recovery` role and the forward-looking `loop_detector` role, plus tool metadata for `edit_context`, `context_info`, `trigger_interrupt`, and the role-inspection tools.
+
+Deviations from the plan wording, recorded so the next step inherits reality:
+
+- **The dev playback harness is a separate entry page (`playback.html` + `playback.js`), not an addition to `app.js`.** The plan's deliverable text names `source/web/static/app.js` as the harness host, but `app.js` is the live run-view client (1020 lines) guarded by `server.test.ts` ("app.js contains `fetch`", "/ returns the Adaptive Orchestrator page"). Entangling a throwaway harness into it would risk the real UI and make step-14 removal messy. A dedicated `playback.html` entry that imports `../fixtures.js` and `playback.js` is the cleaner "dev entry path" the plan's isolation clause calls for: the real UI is untouched, and removal is deleting two files plus their routes.
+- **Three additive static-asset routes were added to `server.ts` (`/fixtures.js`, `/playback.html`, `/playback.js`).** Phase A is otherwise web-only, but the browser harness cannot load `fixtures.js` without it being served, and the file lives at `source/web/fixtures.js` (per the plan) rather than under `static/`, so it is not auto-served. The addition is purely additive asset serving (no new endpoints, no logic), covered by three new `server.test.ts` cases, and keeps every existing test green. This is the minimum backend touch the deliverable requires.
+- **`fixtures.js` is browser-pure (no imports) and hand-builds `RunView` objects via internal builders** rather than deriving them through `renderRunView`. Deriving in-module would require importing `render.ts`, which transitively pulls `executor/validation.ts` and `errors.ts` — modules the static server does not serve, so the browser import would 404. Hand-building keeps the module browser-safe; the shape test guarantees conformance. The builders fill the full field set with defaults so each frame spells out only what its scenario exercises.
+
+Operator action required: open `http://<host>:<port>/playback.html` in a browser and review the nine scenarios, confirming the cases cover what the visualization will need to present and suggesting any missing scenario or frame before step 02 builds on this set.
