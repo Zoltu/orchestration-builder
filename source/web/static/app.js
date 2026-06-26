@@ -1,6 +1,7 @@
 // Hyperapp client for the long-running service.
-// The whole UI is one reactive view of a single state object; polling runs as subscriptions and every side effect (fetch, POST, audio, flash) runs as an effect. Untrusted run content (task text, log payloads, summaries, question text, answers) is interpolated only as children of h() or text-node arguments, which hyperapp places into text nodes and properties — never into markup — so it cannot break out of the DOM. There is no raw-HTML/unsafe API in hyperapp.
+// The whole UI is one reactive view of a single state object; polling runs as subscriptions and every side effect (fetch, POST, audio, flash) runs as an effect. The model is a trusted component; its prose fields (task, result summary, question text, question context, error message) are Markdown the UI renders as formatted text via `showdown` + `highlight.js`. The residual concern is not a malicious model but prompt injection — a malicious file in the workspace coercing the model's output — so the parsed HTML is walked through the allowlist in markdown.js before reaching the DOM; this is a defense-in-depth backstop, with the primary injection defense upstream (see docs/security.md "Web client rendering pipeline"). Machine fields (tool names, log payloads, timestamps, role names, run ids, the one-line current-activity summary) are interpolated only as children of h() or text-node arguments, which hyperapp places into text nodes and properties — never into markup.
 import { h, app } from './vendor/hyperapp.js'
+import { htmlNodesToVnodes, sanitizeNodes } from './markdown.js'
 
 const POLL_INTERVAL_MS = 1000
 const TERMINAL_STATUSES = new Set(['success', 'error', 'needs_clarification'])
@@ -80,6 +81,108 @@ function formatTokens(tokens) {
 
 function isTerminalStatus(status) {
 	return TERMINAL_STATUSES.has(status)
+}
+
+// --- Markdown rendering ----------------------------------------------------
+// Agent-authored prose is Markdown the UI renders as formatted text. `showdown` (window.showdown) turns it into HTML and `highlight.js` (window.hljs) highlights fenced code; the HTML is parsed into a neutral tree, walked through the allowlist in markdown.js, and turned back into hyperapp vnodes. The result is memoized by text so the per-second poll does not re-run showdown/highlight.js on unchanged content, and the cached vnodes are reference-stable so hyperapp's diff no-ops on a steady run view.
+
+const markdownCache = new Map()
+const MARKDOWN_CACHE_MAX = 256
+let markdownConverter = null
+
+function escapeHtmlForCode(value) {
+	return String(value).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
+}
+
+// highlight.js returns already-HTML-escaped token spans (the code text is escaped inside the spans), so its output is embedded into the code block verbatim rather than escaped again. Any failure falls back to a manually escaped plain-text code block so rendering never breaks on a malformed input.
+function highlightCode(code, language) {
+	const hljs = window.hljs
+	if (typeof hljs !== 'object' || hljs === null || typeof hljs.highlight !== 'function') return escapeHtmlForCode(code)
+	try {
+		if (language && typeof hljs.getLanguage === 'function' && hljs.getLanguage(language)) {
+			return hljs.highlight(code, { language }).value
+		}
+		return hljs.highlightAuto(code).value
+	} catch {
+		return escapeHtmlForCode(code)
+	}
+}
+
+// A single Converter is constructed once and reused for every render. GFM tables and strikethrough are enabled; noHeaderId suppresses showdown's auto-generated heading ids (anchor links the UI does not need and that would only add attributes for the sanitizer to strip).
+function ensureMarkdownConverter() {
+	if (markdownConverter !== null) return markdownConverter
+	const Showdown = window.showdown
+	if (typeof Showdown !== 'function' && typeof Showdown !== 'object') return null
+	const Converter = typeof Showdown === 'function' ? Showdown.Converter : Showdown.Converter
+	if (typeof Converter !== 'function') return null
+	markdownConverter = new Converter({ tables: true, strikethrough: true, noHeaderId: true })
+	return markdownConverter
+}
+
+// showdown emits fenced code as <pre><code class="ts language-ts">…escaped…</code></pre>; the code body is HTML-escaped, so it is unescaped before being fed to highlight.js (which re-escapes inside its token spans). The class is rewritten to `hljs language-X` so the vendored github theme and the sanitizer's allowlist key on it (class is permitted on pre/code/span).
+function highlightCodeBlocks(html) {
+	return html.replace(/<pre><code class="([^"]*)">([\s\S]*?)<\/code><\/pre>/g, (match, cls, escaped) => {
+		const langMatch = cls.match(/(?:^|\s)([a-zA-Z0-9+#-]+)/)
+		const language = langMatch ? langMatch[1] : ''
+		const code = escaped
+			.replace(/&amp;/g, '&')
+			.replace(/&lt;/g, '<')
+			.replace(/&gt;/g, '>')
+			.replace(/&quot;/g, '"')
+			.replace(/&#39;/g, "'")
+			.replace(/\n$/, '')
+		const highlighted = highlightCode(code, language)
+		const className = language !== '' ? `hljs language-${language}` : 'hljs'
+		return `<pre><code class="${className}">${highlighted}</code></pre>`
+	})
+}
+
+// DOMParser parses the showdown HTML without executing scripts (text/html parsing never runs script), producing a neutral tree the sanitizer walks. The DOM and the hyperapp vnode layer are kept out of markdown.js so its allowlist decisions stay pure and testable.
+function parseHtmlToNodes(html) {
+	const doc = new DOMParser().parseFromString(html, 'text/html')
+	return childNodesToNodes(doc.body.childNodes)
+}
+
+function childNodesToNodes(childNodes) {
+	const out = []
+	for (const node of childNodes) {
+		if (node.nodeType === 3) {
+			out.push({ type: 'text', value: node.nodeValue })
+		} else if (node.nodeType === 1) {
+			const tag = node.tagName.toLowerCase()
+			const attributes = {}
+			for (const attr of node.attributes) attributes[attr.name.toLowerCase()] = attr.value
+			out.push({ type: 'element', tag, attributes, children: childNodesToNodes(node.childNodes) })
+		}
+	}
+	return out
+}
+
+// Turns an agent prose string into an array of hyperapp vnodes (or a bare string fallback). Empty/absent input yields the em-dash placeholder the non-Markdown fields also use. If the vendored libraries are unavailable or showdown throws, the raw text is returned as a single text node so the field stays readable instead of blank.
+function renderMarkdown(text) {
+	if (typeof text !== 'string' || text === '') return ['—']
+	const cached = markdownCache.get(text)
+	if (cached !== undefined) return cached
+	const vnodes = markdownTextToVnodes(text)
+	if (markdownCache.size > MARKDOWN_CACHE_MAX) markdownCache.clear()
+	markdownCache.set(text, vnodes)
+	return vnodes
+}
+
+function markdownTextToVnodes(text) {
+	const converter = ensureMarkdownConverter()
+	if (converter === null || typeof converter.makeHtml !== 'function') return [text]
+	let html
+	try {
+		html = converter.makeHtml(text)
+	} catch {
+		return [text]
+	}
+	if (typeof html !== 'string') return [text]
+	html = highlightCodeBlocks(html)
+	const sanitized = sanitizeNodes(parseHtmlToNodes(html))
+	const vnodes = htmlNodesToVnodes(sanitized, h)
+	return vnodes.length > 0 ? vnodes : [text]
 }
 
 // The active run is the first non-terminal summary; derived in the view rather than stored, so it can never drift from the run list.
@@ -598,21 +701,21 @@ function RunsPanel(state) {
 function RunSummaryPanel(state) {
 	const view = state.selectedRunView
 	const runId = view ? view.runId : '—'
-	const task = view ? view.task ?? '—' : '—'
+	const task = view ? view.task : null
 	const status = view ? statusLabel(view.status) : '—'
 	const effort = view && typeof view.effort === 'number' ? view.effort : null
 	const startTime = view ? view.startTime ?? null : null
 	const endTime = view ? view.endTime ?? null : null
-	const resultValue = view && view.result && view.result.summary ? view.result.summary : '—'
+	const resultValue = view && view.result && view.result.summary ? view.result.summary : null
 
 	const entries = [
 		h('dt', {}, 'Run'), h('dd', {}, runId),
-		h('dt', {}, 'Task'), h('dd', { class: 'preformatted' }, task),
+		h('dt', {}, 'Task'), h('dd', { class: 'markdown' }, renderMarkdown(task)),
 		h('dt', {}, 'Status'), h('dd', {}, status),
 		h('dt', {}, 'Effort'), h('dd', {}, effort !== null ? `${effort} — ${effortLabel(effort)}` : '—'),
 		h('dt', {}, 'Started'), h('dd', {}, h('time', { title: startTime ?? '' }, formatRelative(startTime, state.now))),
 		h('dt', {}, 'Ended'), h('dd', {}, h('time', { title: endTime ?? '' }, formatRelative(endTime, state.now))),
-		h('dt', {}, 'Result'), h('dd', { class: 'preformatted' }, resultValue),
+		h('dt', {}, 'Result'), h('dd', { class: 'markdown' }, renderMarkdown(resultValue)),
 	]
 
 	const activity = view ? view.currentActivity : null
@@ -625,7 +728,8 @@ function RunSummaryPanel(state) {
 		h('p', { id: 'current-activity', class: 'current-activity' }, activity ? h('span', { class: 'current-activity-text' }, `now: ${activity.summary}`) : null),
 		h('dl', { id: 'run-meta' }, entries),
 		budgets ? BudgetsLine(budgets) : null,
-		h('div', { id: 'run-error', class: 'run-error' }, error ? h('div', { class: 'error-text' }, `${error.kind}: ${error.message}`) : null),
+		// The kind is a fixed machine label and stays a plain text node; the message is agent prose and renders as Markdown.
+		h('div', { id: 'run-error', class: 'run-error' }, error ? h('div', { class: 'error-text' }, [h('strong', {}, `${error.kind}: `), ...renderMarkdown(error.message)]) : null),
 		h('div', { id: 'run-artifacts', class: 'run-artifacts' }, artifacts && artifacts.length > 0 ? [h('div', { class: 'artifacts-heading' }, 'Artifacts'), h('ul', {}, artifacts.map((path) => h('li', { key: path, class: 'artifact' }, path)))] : null),
 	])
 }
@@ -760,8 +864,8 @@ function QuestionsPanel(state) {
 				h('li', { class: 'question-history-heading' }, 'Past questions'),
 				...history.map((entry) =>
 					h('li', { key: entry.id ?? entry.askedAt, class: 'question-history-entry' }, [
-						h('div', { class: 'question-history-question' }, entry.question),
-						entry.context !== undefined ? h('div', { class: 'question-context' }, entry.context) : null,
+						h('div', { class: 'question-history-question markdown' }, renderMarkdown(entry.question)),
+						entry.context !== undefined ? h('div', { class: 'question-context markdown' }, renderMarkdown(entry.context)) : null,
 						entry.answer !== undefined
 							? h('div', { class: 'question-history-answer' }, entry.answer)
 							: h('div', { class: 'question-history-unanswered' }, 'unanswered'),
@@ -774,8 +878,8 @@ function QuestionsPanel(state) {
 		? [h('li', {}, 'No pending questions.')]
 		: questions.map((question) =>
 				h('li', { key: question.id }, [
-					h('div', {}, question.question),
-					question.context !== undefined ? h('div', { class: 'question-context' }, question.context) : null,
+					h('div', { class: 'markdown' }, renderMarkdown(question.question)),
+					question.context !== undefined ? h('div', { class: 'question-context markdown' }, renderMarkdown(question.context)) : null,
 					h('form', { class: 'question-form', onsubmit: SubmitAnswer(question.id) }, [
 						h('input', { type: 'text', placeholder: 'your answer', disabled: state.pendingAnswerId === question.id }),
 						h('button', { type: 'submit', disabled: state.pendingAnswerId === question.id }, 'Answer'),
@@ -829,8 +933,8 @@ function Main(state) {
 		RunSummaryPanel(state),
 		RolesPanel(state),
 		QuestionsPanel(state),
-		LogPanel(state),
 		ConfigPanel(state),
+		LogPanel(state),
 	])
 }
 

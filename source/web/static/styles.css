@@ -73,11 +73,6 @@ dd {
 	overflow-wrap: anywhere;
 }
 
-dd.preformatted {
-	white-space: pre-wrap;
-	word-break: break-word;
-}
-
 ul,
 ol {
 	margin: 0;
@@ -143,8 +138,6 @@ li:last-child {
 #log {
 	font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
 	font-size: 0.8rem;
-	height: 24rem;
-	overflow: auto;
 }
 
 #log li {
@@ -637,4 +630,163 @@ li:last-child {
 	border-radius: 999px;
 	padding: 0 0.4rem;
 	background: #eef2ff;
+}
+
+/* Rendered agent Markdown (task, result, question text/context, error message). The container inherits its color from the panel it sits in (the error box stays red, the question context stays muted) while headings, links, and code carry their own colors. The global list reset above strips list-style and borders from every li; the rules below restore conventional document formatting inside a Markdown block only. */
+.markdown {
+	color: inherit;
+	line-height: 1.5;
+	overflow-wrap: anywhere;
+}
+
+.markdown > *:first-child {
+	margin-top: 0;
+}
+
+.markdown > *:last-child {
+	margin-bottom: 0;
+}
+
+.markdown p {
+	margin: 0.4rem 0;
+}
+
+.markdown h1,
+.markdown h2,
+.markdown h3,
+.markdown h4,
+.markdown h5,
+.markdown h6 {
+	margin: 0.6rem 0 0.3rem;
+	line-height: 1.25;
+	color: #1a1a1a;
+}
+
+.markdown h1 {
+	font-size: 1.15rem;
+}
+
+.markdown h2 {
+	font-size: 1.08rem;
+}
+
+.markdown h3 {
+	font-size: 1rem;
+}
+
+.markdown h4,
+.markdown h5,
+.markdown h6 {
+	font-size: 0.95rem;
+}
+
+.markdown ul,
+.markdown ol {
+	margin: 0.4rem 0;
+	padding-left: 1.4rem;
+}
+
+.markdown ul {
+	list-style: disc;
+}
+
+.markdown ol {
+	list-style: decimal;
+}
+
+.markdown li {
+	padding: 0.1rem 0;
+	border-bottom: none;
+	list-style: inherit;
+}
+
+.markdown li::marker {
+	color: #52606d;
+}
+
+/* Inline code uses a soft pill; fenced code blocks rely on the vendored github theme for token colors and get a framed scroll container here. */
+.markdown code {
+	font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+	font-size: 0.85em;
+	padding: 0.1rem 0.3rem;
+	border-radius: 4px;
+	background: #f0f0f3;
+	color: #24292e;
+}
+
+.markdown pre {
+	margin: 0.5rem 0;
+	padding: 0.6rem 0.75rem;
+	border: 1px solid #e2e2e7;
+	border-radius: 6px;
+	background: #f6f8fa;
+	overflow-x: auto;
+}
+
+.markdown pre code {
+	display: block;
+	padding: 0;
+	background: transparent;
+	border-radius: 0;
+	font-size: 0.82rem;
+	line-height: 1.4;
+	white-space: pre-wrap;
+	word-break: break-word;
+}
+
+.markdown blockquote {
+	margin: 0.5rem 0;
+	padding: 0.2rem 0.75rem;
+	border-left: 3px solid #cbd2d9;
+	color: #52606d;
+}
+
+.markdown blockquote > *:first-child {
+	margin-top: 0;
+}
+
+.markdown blockquote > *:last-child {
+	margin-bottom: 0;
+}
+
+.markdown a {
+	color: #1f6feb;
+	text-decoration: underline;
+}
+
+.markdown hr {
+	margin: 0.6rem 0;
+	border: none;
+	border-top: 1px solid #e2e2e7;
+}
+
+.markdown table {
+	margin: 0.5rem 0;
+	border-collapse: collapse;
+}
+
+.markdown th,
+.markdown td {
+	border: 1px solid #e2e2e7;
+	padding: 0.25rem 0.5rem;
+	text-align: left;
+}
+
+.markdown th {
+	background: #f6f8fa;
+	font-weight: 600;
+}
+
+/* The error message keeps the error block's red tint; nested Markdown (a code fence in an error, a heading) is framed so it still reads as a document. */
+.error-text .markdown {
+	font-size: 0.9rem;
+}
+
+/* Question context is a short, muted aside; tighten its Markdown spacing so a one-line context does not balloon. */
+.question-context.markdown {
+	font-size: 0.85rem;
+}
+
+.question-context.markdown p {
+	margin: 0.15rem 0;
 }

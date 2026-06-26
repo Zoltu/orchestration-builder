@@ -143,7 +143,7 @@ Reports are written to `data/foundry/reports/<timestamp>/`:
         └── results.json
 ```
 
-Reports include hypothesis summaries, a branch score table, accepted/rejected/merged status, the new-baseline diff, and run-id links. All untrusted content (diffs, summaries, file paths) is HTML-escaped.
+Reports include hypothesis summaries, a branch score table, accepted/rejected/merged status, the new-baseline diff, and run-id links. Workspace-derived content (diffs, file paths) is HTML-escaped as untrusted input; model-generated summaries are escaped as normal output.
 
 ## Data layout
 

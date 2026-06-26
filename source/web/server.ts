@@ -22,8 +22,12 @@ interface StaticAsset {
 const STATIC_ASSETS: Record<string, StaticAsset> = {
 	'/': { fileName: 'index.html', contentType: 'text/html; charset=utf-8' },
 	'/app.js': { fileName: 'app.js', contentType: 'text/javascript; charset=utf-8' },
-	'/vendor/hyperapp.js': { fileName: 'vendor/hyperapp.js', contentType: 'text/javascript; charset=utf-8' },
+	'/markdown.js': { fileName: 'markdown.js', contentType: 'text/javascript; charset=utf-8' },
 	'/styles.css': { fileName: 'styles.css', contentType: 'text/css; charset=utf-8' },
+	'/vendor/hyperapp.js': { fileName: 'vendor/hyperapp.js', contentType: 'text/javascript; charset=utf-8' },
+	'/vendor/showdown.js': { fileName: 'vendor/showdown.js', contentType: 'text/javascript; charset=utf-8' },
+	'/vendor/highlight.js': { fileName: 'vendor/highlight.js', contentType: 'text/javascript; charset=utf-8' },
+	'/vendor/highlight-github.css': { fileName: 'vendor/highlight-github.css', contentType: 'text/css; charset=utf-8' },
 }
 
 export interface WebServerConfig {

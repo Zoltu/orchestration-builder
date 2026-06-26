@@ -5,10 +5,14 @@
 		<meta name="viewport" content="width=device-width, initial-scale=1" />
 		<title>Adaptive Orchestrator</title>
 		<link rel="icon" href="data:," />
+		<link rel="stylesheet" href="vendor/highlight-github.css" />
 		<link rel="stylesheet" href="styles.css" />
 	</head>
 	<body>
 		<div id="app"></div>
+		<!-- The Markdown rendering libraries are vendored as static assets (no node_modules in the deployed image) and exposed as globals: `window.showdown` parses Markdown to HTML, `window.hljs` highlights fenced code. They are classic deferred scripts so they load in order before the deferred app module, which reads the globals. See docs/security.md "Web client rendering pipeline". -->
+		<script defer src="vendor/showdown.js"></script>
+		<script defer src="vendor/highlight.js"></script>
 		<script type="module" src="app.js"></script>
 	</body>
 </html>
