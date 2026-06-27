@@ -1330,3 +1330,72 @@ li:last-child {
 	user-select: none;
 }
 
+/* --- Flow view (dev playback harness) -------------------------------------- */
+/* The two-component flow view: a compact history strip (small nodes, one per role/tool/"You" that has ever run, cumulative stats) above a spacious active-flow main area laid out left-to-right by call depth. Both SVGs size themselves to their content and fit within the container via preserveAspectRatio, so the strip stays a thin header while the main area fills the remainder. Colors reuse the --svg-* tokens so the flow follows the light/dark theme with the rest of the page. */
+
+.flow-view {
+	flex: 1 1 auto;
+	min-height: 0;
+	display: flex;
+	flex-direction: column;
+	gap: var(--space-2);
+	overflow: hidden;
+}
+
+.flow-topbar-svg {
+	flex: 0 0 auto;
+	width: 100%;
+	overflow: visible;
+	display: block;
+}
+
+.flow-topbar-svg text {
+	font-family: var(--font-body);
+	user-select: none;
+}
+
+.flow-main-svg {
+	flex: 1 1 auto;
+	min-height: 0;
+	width: 100%;
+	padding: var(--space-3);
+	box-sizing: border-box;
+	overflow: visible;
+	display: block;
+}
+
+.flow-main-svg text {
+	font-family: var(--font-body);
+	user-select: none;
+}
+
+/* Small top-bar nodes: a compact square holding just the invocation count, so a long run's history stays a thin strip. The role/tool name and cumulative token/time details surface via the native SVG <title> hover tooltip, not in the strip. The status re-strokes the box via class hooks so a failed role's slot reads at a glance, mirroring the main-area node states. */
+.flow-small-node-box {
+	fill: var(--svg-node-fill);
+	stroke: var(--svg-node-border);
+	stroke-width: 1;
+}
+
+.flow-small-node-count {
+	fill: var(--svg-node-label);
+	font-size: 11px;
+	font-weight: 600;
+	font-variant-numeric: tabular-nums;
+}
+
+.flow-small-node--success .flow-small-node-box {
+	stroke: var(--svg-success);
+	stroke-width: 1.5;
+}
+
+.flow-small-node--error .flow-small-node-box {
+	stroke: var(--svg-error);
+	stroke-width: 1.5;
+}
+
+.flow-small-node--interrupted .flow-small-node-box {
+	stroke: var(--svg-active-pulse);
+	stroke-width: 1.5;
+	stroke-dasharray: 4 3;
+}
+

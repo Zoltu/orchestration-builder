@@ -3,6 +3,7 @@
 // No business logic lives here.
 
 import * as path from 'node:path'
+import { existsSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import type { ListRunIds, ReadProjectSettings, ReadRunSnapshotById, WriteProjectSettings } from '../executor/persistence.js'
 import type { EffortLevel, GuildConfig } from '../executor/types.js'
@@ -14,25 +15,14 @@ import { parseRunSnapshot, paginateLogEvents, renderConfig, renderProjectSetting
 const STATIC_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), 'static')
 const MAX_LOG_LINES = 200
 
-interface StaticAsset {
-	fileName: string
-	contentType: string
-}
-
-const STATIC_ASSETS: Record<string, StaticAsset> = {
-	'/': { fileName: 'index.html', contentType: 'text/html; charset=utf-8' },
-	'/app.js': { fileName: 'app.js', contentType: 'text/javascript; charset=utf-8' },
-	'/markdown.js': { fileName: 'markdown.js', contentType: 'text/javascript; charset=utf-8' },
-	'/styles.css': { fileName: 'styles.css', contentType: 'text/css; charset=utf-8' },
-	'/vendor/hyperapp.js': { fileName: 'vendor/hyperapp.js', contentType: 'text/javascript; charset=utf-8' },
-	'/vendor/showdown.js': { fileName: 'vendor/showdown.js', contentType: 'text/javascript; charset=utf-8' },
-	'/vendor/highlight.js': { fileName: 'vendor/highlight.js', contentType: 'text/javascript; charset=utf-8' },
-	'/vendor/highlight-github.css': { fileName: 'vendor/highlight-github.css', contentType: 'text/css; charset=utf-8' },
-	'/fixtures.js': { fileName: 'fixtures.js', contentType: 'text/javascript; charset=utf-8' },
-	'/pathfinding.js': { fileName: 'pathfinding.js', contentType: 'text/javascript; charset=utf-8' },
-	'/playback.html': { fileName: 'playback.html', contentType: 'text/html; charset=utf-8' },
-	'/playback.js': { fileName: 'playback.js', contentType: 'text/javascript; charset=utf-8' },
-	'/svg-primitives.js': { fileName: 'svg-primitives.js', contentType: 'text/javascript; charset=utf-8' },
+// Content-type by file extension. The static directory holds only these asset kinds, so a small map covers the surface; an unknown extension falls back to a generic binary type so the browser never receives a wrong MIME that would block a module load.
+const CONTENT_TYPES: Record<string, string> = {
+	'.js': 'text/javascript; charset=utf-8',
+	'.mjs': 'text/javascript; charset=utf-8',
+	'.css': 'text/css; charset=utf-8',
+	'.html': 'text/html; charset=utf-8',
+	'.svg': 'image/svg+xml',
+	'.json': 'application/json; charset=utf-8',
 }
 
 export interface WebServerConfig {
@@ -62,13 +52,21 @@ function json(data: unknown, status = 200): Response {
 	})
 }
 
-function serveStaticAsset(asset: StaticAsset): Response {
-	const filePath = path.resolve(STATIC_DIR, asset.fileName)
-	const file = Bun.file(filePath)
+// Serves any file under the static directory by resolving the request path against STATIC_DIR and verifying the resolved path stays inside it. A filesystem scan (rather than an explicit route map) means a new asset under static/ is served the moment it lands on disk — no server.ts edit and no process restart required — so a stale running server never 404s a freshly added file with a wrong-MIME JSON body. Path traversal is blocked by canonicalizing and checking the result starts with STATIC_DIR plus a separator.
+function serveStaticPath(requestPath: string): Response {
+	// The root path serves the app shell; every other path maps to its own filename. The leading slash is stripped so path.resolve joins against STATIC_DIR rather than treating the request path as an absolute filesystem path (which would resolve to /app.js, outside the static dir, and 404).
+	const relativePath = requestPath === '/' ? 'index.html' : requestPath.slice(1)
+	const resolvedPath = path.resolve(STATIC_DIR, relativePath)
+	// The separator check rejects `..` segments that resolve outside the static dir (e.g. `/../source/web/server.ts`), preserving the traversal safety the explicit route map gave for free.
+	if (!resolvedPath.startsWith(STATIC_DIR + path.sep)) return json({ ok: false, error: 'not_found' }, 404)
+	if (!existsSync(resolvedPath)) return json({ ok: false, error: 'not_found' }, 404)
+	const file = Bun.file(resolvedPath)
+	const extension = path.extname(resolvedPath)
+	const contentType = CONTENT_TYPES[extension] ?? 'application/octet-stream'
 	// no-store keeps the dev server from caching stale assets (or stale 404s) across restarts, so an edit to app.js is always picked up on the next page load.
 	return new Response(file, {
 		headers: {
-			'content-type': asset.contentType,
+			'content-type': contentType,
 			'cache-control': 'no-store',
 		},
 	})
@@ -203,11 +201,9 @@ export function createWebServer(config: WebServerConfig): WebServer {
 					return handleGetRunById(readRunSnapshotById, rest)
 				}
 			if (pathname === '/api/questions') return json(renderPendingQuestions(runState.pendingQuestions()))
-			// Browsers auto-request /favicon.ico on every page load; answer 204 so it does not pollute the console with a 404.
-			if (pathname === '/favicon.ico') return new Response(null, { status: 204 })
-			const asset = STATIC_ASSETS[pathname]
-			if (asset !== undefined) return serveStaticAsset(asset)
-			return json({ ok: false, error: 'not_found' }, 404)
+		// Browsers auto-request /favicon.ico on every page load; answer 204 so it does not pollute the console with a 404.
+		if (pathname === '/favicon.ico') return new Response(null, { status: 204 })
+		return serveStaticPath(pathname)
 			}
 
 		if (request.method === 'POST') {

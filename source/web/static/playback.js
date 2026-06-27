@@ -2,7 +2,7 @@
 // Loads the fixture scenarios and renders the current frame's visualization against the step-02 SVG primitives, with a slim scenario/playback bar at the top. This is throwaway iteration scaffolding, isolated behind its own entry page (playback.html) so it is removed cleanly when the visualization replaces it; it never touches the real run view in app.js. Scenario details live in the fixtures module and the plan, not on this page, so the rendered view is the only thing under analysis.
 import { h, app } from './vendor/hyperapp.js'
 import { fixtures } from './fixtures.js'
-import { GraphEdge, GraphNode, nodeAnchor } from './svg-primitives.js'
+import { renderFlowView, DEFAULT_MIN_COLUMNS } from './flow-view.js'
 
 const PLAY_INTERVAL_MS = 1200
 
@@ -109,49 +109,40 @@ function PlaybackControls(state) {
 	])
 }
 
-// --- Primitives demo --------------------------------------------------------
-// Composes the SVG primitives at fixed coordinates using the current fixture's friendly labels, so the operator can review the visual foundation (tokens + nodes + edges + tooltip shell) in both light and dark. This is throwaway iteration scaffolding for the visualization phase; the real flow graph arrives in a later step.
+// --- Flow view -------------------------------------------------------------
+// Renders the current frame's hand-authored FlowModel as the two-component flow view (history top bar + active-flow main area). The model is current-state, not history, so the main area stays calm as a run progresses; this is throwaway iteration scaffolding for the visualization phase, iterated against the fixtures until step 13 swaps the fixture model for the live /api/runs/:id/flow endpoint.
 
-function friendlyRoleLabel(config, role) {
-	const entry = config.roles[role]
-	if (entry === undefined) return role
-	const label = entry.label
-	if (label === undefined) return role
-	return label.friendly ?? label.detailed ?? role
-}
-
-function translate(x, y) {
-	return `translate(${x},${y})`
-}
-
-function PrimitivesDemo(state) {
-	const fixture = currentFixture(state)
-	const config = fixture.frames[0].config
-	// Nodes are rooted at the viewBox edges (0-based coordinates); the inset that keeps them off the screen lives as HTML padding on the container (.pb-demo-svg in styles.css), not hardcoded into each child's position. This keeps moving a node a one-number translate change and lets the graph code stay free of layout chrome.
-	const positions = {
-		you: { x: 0, y: 0 },
-		orchestrator: { x: 220, y: 0 },
-		planner: { x: 440, y: 0 },
-		coder: { x: 220, y: 130 },
-		errorCoder: { x: 440, y: 130 },
+// The number of call-depth columns a frame's main area occupies (its deepest node's column + 1). The "You" root always sits at column 0, so this is at least 1.
+function frameColumnCount(frame) {
+	const nodes = frame.flowModel.mainArea.nodes
+	let maxColumn = 0
+	for (const node of nodes) {
+		if (node.column > maxColumn) maxColumn = node.column
 	}
-	return h('svg', { class: 'pb-demo-svg', viewBox: '0 0 600 194', preserveAspectRatio: 'xMidYMid meet', xmlns: 'http://www.w3.org/2000/svg' }, [
-		GraphEdge(h, { fromAnchor: nodeAnchor(positions.you.x, positions.you.y, 'right'), toAnchor: nodeAnchor(positions.orchestrator.x, positions.orchestrator.y, 'left'), state: 'flowing' }),
-		GraphEdge(h, { fromAnchor: nodeAnchor(positions.orchestrator.x, positions.orchestrator.y, 'right'), toAnchor: nodeAnchor(positions.planner.x, positions.planner.y, 'left'), state: 'returning' }),
-		GraphEdge(h, { fromAnchor: nodeAnchor(positions.orchestrator.x, positions.orchestrator.y, 'bottom'), toAnchor: nodeAnchor(positions.coder.x, positions.coder.y, 'top'), state: 'static' }),
-		GraphEdge(h, { fromAnchor: nodeAnchor(positions.coder.x, positions.coder.y, 'right'), toAnchor: nodeAnchor(positions.errorCoder.x, positions.errorCoder.y, 'left'), state: 'error' }),
-		h('g', { transform: translate(positions.you.x, positions.you.y) }, [GraphNode(h, { label: 'You', sublabel: 'Human', active: true })]),
-		h('g', { transform: translate(positions.orchestrator.x, positions.orchestrator.y) }, [GraphNode(h, { label: friendlyRoleLabel(config, 'orchestrator'), sublabel: 'orchestrator', counter: 3, costTime: 12, costTokens: 5400 })]),
-		h('g', { transform: translate(positions.planner.x, positions.planner.y) }, [GraphNode(h, { label: friendlyRoleLabel(config, 'planner'), sublabel: 'planner', status: 'success' })]),
-		h('g', { transform: translate(positions.coder.x, positions.coder.y) }, [GraphNode(h, { label: friendlyRoleLabel(config, 'coder'), sublabel: 'coder', active: true, costTime: 8, costTokens: 640 })]),
-		h('g', { transform: translate(positions.errorCoder.x, positions.errorCoder.y) }, [GraphNode(h, { label: friendlyRoleLabel(config, 'coder'), sublabel: 'attempt 1', status: 'error', counter: 1 })]),
-	])
+	return maxColumn + 1
+}
+
+// The main-area canvas floor: the most columns the run has needed at any point from its start up to the current frame, never below the 5-column default. Because frameIndex only increases during forward playback, this only grows — a layer that appeared and then finished does not shrink the canvas back, so the scale factor stays stable and the last layer doesn't thrash. Selecting a different scenario recomputes from its frame 0, which resets the mark for the new run.
+function flowColumnHighWater(state) {
+	const fixture = currentFixture(state)
+	let highWater = DEFAULT_MIN_COLUMNS
+	for (let i = 0; i <= state.frameIndex; i++) {
+		const count = frameColumnCount(fixture.frames[i])
+		if (count > highWater) highWater = count
+	}
+	return highWater
+}
+
+function FlowView(state) {
+	const fixture = currentFixture(state)
+	const model = fixture.frames[state.frameIndex].flowModel
+	return renderFlowView(h, model, flowColumnHighWater(state))
 }
 
 function view(state) {
 	return h('div', { class: 'pb' }, [
 		PlaybackControls(state),
-		PrimitivesDemo(state),
+		FlowView(state),
 	])
 }
 

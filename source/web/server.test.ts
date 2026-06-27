@@ -322,13 +322,28 @@ describe('createWebServer static assets', () => {
 		expect(body).toContain('body')
 	})
 
-	test('GET /unknown returns a 404 json error', async () => {
-		const response = await fetch(`${readOnlyBaseUrl}/unknown`)
-		expect(response.status).toBe(404)
-		const body = await response.json()
-		expect(body).toEqual({ ok: false, error: 'not_found' })
-	})
-})
+ 	test('GET /unknown returns a 404 json error', async () => {
+ 		const response = await fetch(`${readOnlyBaseUrl}/unknown`)
+ 		expect(response.status).toBe(404)
+ 		const body = await response.json()
+ 		expect(body).toEqual({ ok: false, error: 'not_found' })
+ 	})
+
+ 	// The static resolver serves any file under static/ by resolving the request path and checking the result stays inside the directory. A `..` segment that would escape to a source file is rejected with the same 404 JSON, never serving the file — preserving the traversal safety the explicit route map used to give.
+ 	test('a path that escapes the static directory via `..` returns a 404, never the source file', async () => {
+ 		const response = await fetch(`${readOnlyBaseUrl}/../source/web/server.ts`)
+ 		expect(response.status).toBe(404)
+ 		const body = await response.json()
+ 		expect(body).toEqual({ ok: false, error: 'not_found' })
+ 	})
+
+ 	test('a URL-encoded traversal segment is also rejected', async () => {
+ 		const response = await fetch(`${readOnlyBaseUrl}/%2e%2e/source/web/server.ts`)
+ 		expect(response.status).toBe(404)
+ 		const body = await response.json()
+ 		expect(body).toEqual({ ok: false, error: 'not_found' })
+ 	})
+ })
 
 describe('createWebServer dev playback assets', () => {
 	test('GET /fixtures.js serves the fixture module', async () => {
@@ -369,6 +384,14 @@ describe('createWebServer dev playback assets', () => {
 		expect(response.headers.get('content-type')).toContain('text/javascript')
 		const body = await response.text()
 		expect(body).toContain('routeEdges')
+	})
+
+	test('GET /flow-view.js serves the flow-view renderer', async () => {
+		const response = await fetch(`${readOnlyBaseUrl}/flow-view.js`)
+		expect(response.status).toBe(200)
+		expect(response.headers.get('content-type')).toContain('text/javascript')
+		const body = await response.text()
+		expect(body).toContain('renderFlowView')
 	})
 })
 

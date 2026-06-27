@@ -162,6 +162,63 @@ const largeGuildConfig = {
 	},
 }
 
+// --- FlowModel builders -----------------------------------------------------
+// The flow view is a render-only client: each frame carries a hand-authored `flowModel` shaped exactly like the future /api/runs/:id/flow endpoint response. The model is current-state, not history: the main area holds the active call-stack chain plus lingering response legs (a finished child or in-flight tool whose caller has not yet acted), and the top bar holds one node per role-type/tool-type/"You" that has ever run with cumulative stats. "Backwards always means return": a repeated role is a new node at the next column (a forward call edge), and the only right-to-left movement is a return edge.
+// The friendly labels are resolved from the same config the frame carries, so the model's labels match the guild a real endpoint would read.
+
+function roleLabel(role, config) {
+	const entry = (config ?? mockConfig).roles[role]
+	if (entry === undefined) return role
+	return entry.label.friendly ?? entry.label.detailed ?? role
+}
+
+function toolLabel(tool, config) {
+	const entry = (config ?? mockConfig).tools[tool]
+	if (entry === undefined) return tool
+	return entry.humanLabel.friendly ?? entry.humanLabel.detailed ?? tool
+}
+
+// A main-area node: `kind` distinguishes the root/child human ("you"), a role invocation, or a tool invocation. `column` is call depth (You = 0) and `row` is 0 for the single root (interrupts add rows). Per-invocation cost fields are part of the future-API shape and populated with plausible values so the view exercises them; the backend derivation that produces them for real is a later step.
+function flowNode(p) {
+	const node = {
+		id: p.id,
+		kind: p.kind,
+		label: p.label,
+		column: p.column,
+		row: p.row ?? 0,
+	}
+	if (p.sublabel !== undefined) node.sublabel = p.sublabel
+	if (p.status !== undefined) node.status = p.status
+	if (p.active !== undefined) node.active = p.active
+	if (p.counter !== undefined) node.counter = p.counter
+	if (p.costTime !== undefined) node.costTime = p.costTime
+	if (p.costTokens !== undefined) node.costTokens = p.costTokens
+	return node
+}
+
+// A main-area edge. `kind` is 'call' (forward, left→right), 'return' (lingering response, right→left), or 'question' (an agent→You ask_human edge).
+function flowEdge(from, to, kind) {
+	return { from, to, kind }
+}
+
+// A top-bar history node: cumulative invocations plus optional cumulative cost and a terminal status so a failed role's slot reads at a glance.
+function topBarNode(p) {
+	const node = {
+		id: p.id,
+		kind: p.kind,
+		label: p.label,
+		invocations: p.invocations,
+	}
+	if (p.totalTime !== undefined) node.totalTime = p.totalTime
+	if (p.totalTokens !== undefined) node.totalTokens = p.totalTokens
+	if (p.status !== undefined) node.status = p.status
+	return node
+}
+
+function flowModel(mainArea, topBar) {
+	return { mainArea, topBar }
+}
+
 // --- RunView builders -------------------------------------------------------
 // Each builder fills the full field set with sensible defaults so a frame only spells out what the scenario exercises; the shape test confirms every frame still conforms to the real RunView/config shape.
 
@@ -249,10 +306,12 @@ function runView(p) {
 
 // A frame pins a stable config alongside the per-frame run view and a `now` the elapsed-time derivation consumes; `now` advances with the frame so the cost strip reads naturally during playback. The config defaults to the base mock guild; scenarios that need a different guild shape (the large-guild stress case) pass their own.
 function frame(runViewOverrides, nowSeconds, config) {
-	// `config` may be passed either as the third argument or as a field on the overrides object (the large-guild scenario keeps its per-frame data together by inlining `config` alongside the run-view fields); pulling it out here keeps it from leaking into the run-view builder as an unknown field.
-	const { config: configInOverrides, ...runViewFields } = runViewOverrides
+	// `config` and `flowModel` may be passed inline on the overrides object (the large-guild scenario keeps its per-frame data together this way); pulling them out here keeps them from leaking into the run-view builder as unknown fields.
+	const { config: configInOverrides, flowModel: flowModelInOverrides, ...runViewFields } = runViewOverrides
 	const configSnapshot = config ?? configInOverrides ?? mockConfig
-	return { config: configSnapshot, runView: runView(runViewFields), now: t(nowSeconds) }
+	const frameSnapshot = { config: configSnapshot, runView: runView(runViewFields), now: t(nowSeconds) }
+	if (flowModelInOverrides !== undefined) frameSnapshot.flowModel = flowModelInOverrides
+	return frameSnapshot
 }
 
 // --- Scenarios --------------------------------------------------------------
@@ -272,6 +331,10 @@ const singleRoleInProgress = {
 			roleTree: [treeNode({ role: 'planner', depth: 0, active: true })],
 			recentLog: [logEntry({ timestamp: t(1), type: 'role_start', summary: 'planner \u00b7 role start', payload: { role: 'planner', depth: 0, task: 'Plan how to add a dark mode toggle' } })],
 			budgets: budgets({ elapsedSeconds: 2 }),
+			flowModel: flowModel(
+				{ nodes: [flowNode({ id: 'you', kind: 'you', label: 'You', column: 0 }), flowNode({ id: 'planner', kind: 'role', label: roleLabel('planner'), sublabel: 'planner', column: 1, active: true, costTime: 2 })], edges: [flowEdge('you', 'planner', 'call')] },
+				{ nodes: [topBarNode({ id: 'you', kind: 'you', label: 'You', invocations: 1 }), topBarNode({ id: 'planner', kind: 'role', label: roleLabel('planner'), invocations: 1 })] },
+			),
 		}, 2),
 		frame({
 			status: 'unknown',
@@ -285,6 +348,10 @@ const singleRoleInProgress = {
 				logEntry({ timestamp: t(4), type: 'llm_call', summary: 'planner \u00b7 llm call', payload: { role: 'planner', usage: { promptTokens: 4200, completionTokens: 180, totalTokens: 4380 } }, detailSections: [{ label: 'usage', content: { promptTokens: 4200, completionTokens: 180, totalTokens: 4380 } }] }),
 			],
 			budgets: budgets({ elapsedSeconds: 5, tokensUsed: 4380, tokenBreakdown: tokenBreakdown(4200, 180) }),
+			flowModel: flowModel(
+				{ nodes: [flowNode({ id: 'you', kind: 'you', label: 'You', column: 0 }), flowNode({ id: 'planner', kind: 'role', label: roleLabel('planner'), sublabel: 'planner', column: 1, active: true, costTime: 5, costTokens: 4380 })], edges: [flowEdge('you', 'planner', 'call')] },
+				{ nodes: [topBarNode({ id: 'you', kind: 'you', label: 'You', invocations: 1 }), topBarNode({ id: 'planner', kind: 'role', label: roleLabel('planner'), invocations: 1, totalTime: 5, totalTokens: 4380 })] },
+			),
 		}, 5),
 		frame({
 			status: 'unknown',
@@ -299,6 +366,10 @@ const singleRoleInProgress = {
 				logEntry({ timestamp: t(8), type: 'tool_call', summary: 'planner \u00b7 glob_files', payload: { role: 'planner', tool: 'glob_files', arguments: '{"pattern":"**/settings*"}' }, detailSections: [{ label: 'arguments', content: '{"pattern":"**/settings*"}' }] }),
 			],
 			budgets: budgets({ elapsedSeconds: 9, toolCalls: 1, tokensUsed: 4380, tokenBreakdown: tokenBreakdown(4200, 180) }),
+			flowModel: flowModel(
+				{ nodes: [flowNode({ id: 'you', kind: 'you', label: 'You', column: 0 }), flowNode({ id: 'planner', kind: 'role', label: roleLabel('planner'), sublabel: 'planner', column: 1, active: true, costTime: 9, costTokens: 4380 }), flowNode({ id: 'glob_files', kind: 'tool', label: toolLabel('glob_files'), column: 2, costTime: 1 })], edges: [flowEdge('you', 'planner', 'call'), flowEdge('planner', 'glob_files', 'call')] },
+				{ nodes: [topBarNode({ id: 'you', kind: 'you', label: 'You', invocations: 1 }), topBarNode({ id: 'planner', kind: 'role', label: roleLabel('planner'), invocations: 1, totalTime: 9, totalTokens: 4380 }), topBarNode({ id: 'glob_files', kind: 'tool', label: toolLabel('glob_files'), invocations: 1 })] },
+			),
 		}, 9),
 	],
 }
@@ -320,6 +391,10 @@ const delegationInProgress = {
 				logEntry({ timestamp: t(3), type: 'llm_call', summary: 'orchestrator \u00b7 llm call', payload: { role: 'orchestrator' } }),
 			],
 			budgets: budgets({ elapsedSeconds: 4, tokensUsed: 3100, tokenBreakdown: tokenBreakdown(3100, 120) }),
+			flowModel: flowModel(
+				{ nodes: [flowNode({ id: 'you', kind: 'you', label: 'You', column: 0 }), flowNode({ id: 'orchestrator', kind: 'role', label: roleLabel('orchestrator'), sublabel: 'orchestrator', column: 1, active: true, costTime: 4, costTokens: 3220 })], edges: [flowEdge('you', 'orchestrator', 'call')] },
+				{ nodes: [topBarNode({ id: 'you', kind: 'you', label: 'You', invocations: 1 }), topBarNode({ id: 'orchestrator', kind: 'role', label: roleLabel('orchestrator'), invocations: 1, totalTime: 4, totalTokens: 3220 })] },
+			),
 		}, 4),
 		frame({
 			status: 'unknown',
@@ -335,6 +410,10 @@ const delegationInProgress = {
 				logEntry({ timestamp: t(7), type: 'agent_call', summary: 'orchestrator \u00b7 agent call \u2192 coder', payload: { parent: 'orchestrator', child: 'coder', depth: 1 } }),
 			],
 			budgets: budgets({ elapsedSeconds: 8, toolCalls: 1, tokensUsed: 3100, tokenBreakdown: tokenBreakdown(3100, 120) }),
+			flowModel: flowModel(
+				{ nodes: [flowNode({ id: 'you', kind: 'you', label: 'You', column: 0 }), flowNode({ id: 'orchestrator', kind: 'role', label: roleLabel('orchestrator'), sublabel: 'orchestrator', column: 1, costTime: 8, costTokens: 3220 }), flowNode({ id: 'coder', kind: 'role', label: roleLabel('coder'), sublabel: 'coder', column: 2, active: true, costTime: 1 })], edges: [flowEdge('you', 'orchestrator', 'call'), flowEdge('orchestrator', 'coder', 'call')] },
+				{ nodes: [topBarNode({ id: 'you', kind: 'you', label: 'You', invocations: 1 }), topBarNode({ id: 'orchestrator', kind: 'role', label: roleLabel('orchestrator'), invocations: 1, totalTime: 8, totalTokens: 3220 }), topBarNode({ id: 'coder', kind: 'role', label: roleLabel('coder'), invocations: 1, totalTime: 1 })] },
+			),
 		}, 8),
 		frame({
 			status: 'unknown',
@@ -352,6 +431,10 @@ const delegationInProgress = {
 				logEntry({ timestamp: t(8), type: 'role_start', summary: 'coder \u00b7 role start', payload: { role: 'coder', depth: 1, parent: 'orchestrator', task: 'add the export button' } }),
 			],
 			budgets: budgets({ elapsedSeconds: 9, toolCalls: 1, tokensUsed: 3100, tokenBreakdown: tokenBreakdown(3100, 120) }),
+			flowModel: flowModel(
+				{ nodes: [flowNode({ id: 'you', kind: 'you', label: 'You', column: 0 }), flowNode({ id: 'orchestrator', kind: 'role', label: roleLabel('orchestrator'), sublabel: 'orchestrator', column: 1, costTime: 9, costTokens: 3220 }), flowNode({ id: 'coder', kind: 'role', label: roleLabel('coder'), sublabel: 'coder', column: 2, active: true, costTime: 1 })], edges: [flowEdge('you', 'orchestrator', 'call'), flowEdge('orchestrator', 'coder', 'call')] },
+				{ nodes: [topBarNode({ id: 'you', kind: 'you', label: 'You', invocations: 1 }), topBarNode({ id: 'orchestrator', kind: 'role', label: roleLabel('orchestrator'), invocations: 1, totalTime: 9, totalTokens: 3220 }), topBarNode({ id: 'coder', kind: 'role', label: roleLabel('coder'), invocations: 1, totalTime: 1 })] },
+			),
 		}, 9),
 	],
 }
@@ -374,6 +457,10 @@ const toolCallInProgress = {
 				logEntry({ timestamp: t(6), type: 'tool_call', summary: 'coder \u00b7 write_file', payload: { role: 'coder', tool: 'write_file', arguments: '{"path":"README.md","content":"# Project\\n"}' }, detailSections: [{ label: 'arguments', content: '{"path":"README.md","content":"# Project\\n"}' }] }),
 			],
 			budgets: budgets({ elapsedSeconds: 7, toolCalls: 1, tokensUsed: 2600, tokenBreakdown: tokenBreakdown(2600, 220) }),
+			flowModel: flowModel(
+				{ nodes: [flowNode({ id: 'you', kind: 'you', label: 'You', column: 0 }), flowNode({ id: 'coder', kind: 'role', label: roleLabel('coder'), sublabel: 'coder', column: 1, active: true, costTime: 7, costTokens: 2820 }), flowNode({ id: 'write_file', kind: 'tool', label: toolLabel('write_file'), column: 2, costTime: 1 })], edges: [flowEdge('you', 'coder', 'call'), flowEdge('coder', 'write_file', 'call')] },
+				{ nodes: [topBarNode({ id: 'you', kind: 'you', label: 'You', invocations: 1 }), topBarNode({ id: 'coder', kind: 'role', label: roleLabel('coder'), invocations: 1, totalTime: 7, totalTokens: 2820 }), topBarNode({ id: 'write_file', kind: 'tool', label: toolLabel('write_file'), invocations: 1 })] },
+			),
 		}, 7),
 		frame({
 			status: 'unknown',
@@ -387,6 +474,10 @@ const toolCallInProgress = {
 				logEntry({ timestamp: t(6), type: 'tool_call', summary: 'coder \u00b7 write_file', payload: { role: 'coder', tool: 'write_file', arguments: '{"path":"README.md"}' } }),
 			],
 			budgets: budgets({ elapsedSeconds: 8, toolCalls: 1, tokensUsed: 2600, tokenBreakdown: tokenBreakdown(2600, 220) }),
+			flowModel: flowModel(
+				{ nodes: [flowNode({ id: 'you', kind: 'you', label: 'You', column: 0 }), flowNode({ id: 'coder', kind: 'role', label: roleLabel('coder'), sublabel: 'coder', column: 1, active: true, costTime: 8, costTokens: 2820 }), flowNode({ id: 'write_file', kind: 'tool', label: toolLabel('write_file'), column: 2, costTime: 2 })], edges: [flowEdge('you', 'coder', 'call'), flowEdge('coder', 'write_file', 'call')] },
+				{ nodes: [topBarNode({ id: 'you', kind: 'you', label: 'You', invocations: 1 }), topBarNode({ id: 'coder', kind: 'role', label: roleLabel('coder'), invocations: 1, totalTime: 8, totalTokens: 2820 }), topBarNode({ id: 'write_file', kind: 'tool', label: toolLabel('write_file'), invocations: 1 })] },
+			),
 		}, 8),
 	],
 }
@@ -412,6 +503,10 @@ const retry = {
 				logEntry({ timestamp: t(5), type: 'role_finished', summary: 'coder \u00b7 finished (error)', payload: { role: 'coder', depth: 1, status: 'error', summary: 'file not found', error: { kind: 'invalid_arguments', message: 'no such file' } }, detailSections: [{ label: 'summary', content: 'file not found' }, { label: 'error', content: { kind: 'invalid_arguments', message: 'no such file' } }] }),
 			],
 			budgets: budgets({ elapsedSeconds: 6, tokensUsed: 2900, tokenBreakdown: tokenBreakdown(2900, 90) }),
+			flowModel: flowModel(
+				{ nodes: [flowNode({ id: 'you', kind: 'you', label: 'You', column: 0 }), flowNode({ id: 'orchestrator', kind: 'role', label: roleLabel('orchestrator'), sublabel: 'orchestrator', column: 1, costTime: 6, costTokens: 2990 }), flowNode({ id: 'coder-1', kind: 'role', label: roleLabel('coder'), sublabel: 'attempt 1', column: 2, status: 'error', costTime: 2 })], edges: [flowEdge('you', 'orchestrator', 'call'), flowEdge('orchestrator', 'coder-1', 'call'), flowEdge('coder-1', 'orchestrator', 'return')] },
+				{ nodes: [topBarNode({ id: 'you', kind: 'you', label: 'You', invocations: 1 }), topBarNode({ id: 'orchestrator', kind: 'role', label: roleLabel('orchestrator'), invocations: 1, totalTime: 6, totalTokens: 2990 }), topBarNode({ id: 'coder', kind: 'role', label: roleLabel('coder'), invocations: 1, status: 'error', totalTime: 2 })] },
+			),
 		}, 6),
 		frame({
 			status: 'unknown',
@@ -432,6 +527,10 @@ const retry = {
 				logEntry({ timestamp: t(9), type: 'tool_call', summary: 'coder \u00b7 write_file', payload: { role: 'coder', tool: 'write_file', arguments: '{"path":"calculator.js"}' } }),
 			],
 			budgets: budgets({ elapsedSeconds: 10, toolCalls: 1, tokensUsed: 2900, tokenBreakdown: tokenBreakdown(2900, 90) }),
+			flowModel: flowModel(
+				{ nodes: [flowNode({ id: 'you', kind: 'you', label: 'You', column: 0 }), flowNode({ id: 'orchestrator', kind: 'role', label: roleLabel('orchestrator'), sublabel: 'orchestrator', column: 1, costTime: 10, costTokens: 2990 }), flowNode({ id: 'coder-2', kind: 'role', label: roleLabel('coder'), sublabel: 'attempt 2', column: 2, active: true, costTime: 3 }), flowNode({ id: 'write_file', kind: 'tool', label: toolLabel('write_file'), column: 3, costTime: 1 })], edges: [flowEdge('you', 'orchestrator', 'call'), flowEdge('orchestrator', 'coder-2', 'call'), flowEdge('coder-2', 'write_file', 'call')] },
+				{ nodes: [topBarNode({ id: 'you', kind: 'you', label: 'You', invocations: 1 }), topBarNode({ id: 'orchestrator', kind: 'role', label: roleLabel('orchestrator'), invocations: 1, totalTime: 10, totalTokens: 2990 }), topBarNode({ id: 'coder', kind: 'role', label: roleLabel('coder'), invocations: 2, totalTime: 5 }), topBarNode({ id: 'write_file', kind: 'tool', label: toolLabel('write_file'), invocations: 1 })] },
+			),
 		}, 10),
 		frame({
 			status: 'success',
@@ -455,6 +554,10 @@ const retry = {
 				logEntry({ timestamp: t(12), type: 'role_finished', summary: 'orchestrator \u00b7 finished (success)', payload: { role: 'orchestrator', status: 'success', summary: 'done after retry' } }),
 			],
 			budgets: budgets({ elapsedSeconds: 12, toolCalls: 1, tokensUsed: 2900, tokenBreakdown: tokenBreakdown(2900, 90) }),
+			flowModel: flowModel(
+				{ nodes: [flowNode({ id: 'you', kind: 'you', label: 'You', column: 0 }), flowNode({ id: 'orchestrator', kind: 'role', label: roleLabel('orchestrator'), sublabel: 'orchestrator', column: 1, status: 'success', costTime: 12, costTokens: 2990 })], edges: [flowEdge('orchestrator', 'you', 'return')] },
+				{ nodes: [topBarNode({ id: 'you', kind: 'you', label: 'You', invocations: 1 }), topBarNode({ id: 'orchestrator', kind: 'role', label: roleLabel('orchestrator'), invocations: 1, totalTime: 12, totalTokens: 2990, status: 'success' }), topBarNode({ id: 'coder', kind: 'role', label: roleLabel('coder'), invocations: 2, totalTime: 5 }), topBarNode({ id: 'write_file', kind: 'tool', label: toolLabel('write_file'), invocations: 1 })] },
+			),
 		}, 12),
 	],
 }
@@ -476,6 +579,10 @@ const pendingQuestion = {
 				logEntry({ timestamp: t(3), type: 'llm_call', summary: 'orchestrator \u00b7 llm call', payload: { role: 'orchestrator' } }),
 			],
 			budgets: budgets({ elapsedSeconds: 4, tokensUsed: 3500, tokenBreakdown: tokenBreakdown(3500, 140) }),
+			flowModel: flowModel(
+				{ nodes: [flowNode({ id: 'you', kind: 'you', label: 'You', column: 0 }), flowNode({ id: 'orchestrator', kind: 'role', label: roleLabel('orchestrator'), sublabel: 'orchestrator', column: 1, active: true, costTime: 4, costTokens: 3640 })], edges: [flowEdge('you', 'orchestrator', 'call')] },
+				{ nodes: [topBarNode({ id: 'you', kind: 'you', label: 'You', invocations: 1 }), topBarNode({ id: 'orchestrator', kind: 'role', label: roleLabel('orchestrator'), invocations: 1, totalTime: 4, totalTokens: 3640 })] },
+			),
 		}, 4),
 		frame({
 			status: 'unknown',
@@ -491,6 +598,10 @@ const pendingQuestion = {
 			],
 			questionHistory: [question({ id: 'q1', question: 'Which CI provider should I target?', context: '.github/workflows/', askedAt: t(6) })],
 			budgets: budgets({ elapsedSeconds: 20, toolCalls: 1, tokensUsed: 3500, tokenBreakdown: tokenBreakdown(3500, 140) }),
+			flowModel: flowModel(
+				{ nodes: [flowNode({ id: 'you', kind: 'you', label: 'You', column: 0, active: true }), flowNode({ id: 'orchestrator', kind: 'role', label: roleLabel('orchestrator'), sublabel: 'orchestrator', column: 1, active: true, costTime: 20, costTokens: 3640 }), flowNode({ id: 'ask_human', kind: 'tool', label: toolLabel('ask_human'), column: 2, costTime: 14 })], edges: [flowEdge('you', 'orchestrator', 'call'), flowEdge('orchestrator', 'ask_human', 'call'), flowEdge('ask_human', 'you', 'question')] },
+				{ nodes: [topBarNode({ id: 'you', kind: 'you', label: 'You', invocations: 1 }), topBarNode({ id: 'orchestrator', kind: 'role', label: roleLabel('orchestrator'), invocations: 1, totalTime: 20, totalTokens: 3640 }), topBarNode({ id: 'ask_human', kind: 'tool', label: toolLabel('ask_human'), invocations: 1 })] },
+			),
 		}, 20),
 	],
 }
@@ -517,6 +628,10 @@ const completedSuccess = {
 				logEntry({ timestamp: t(5), type: 'llm_call', summary: 'planner \u00b7 llm call', payload: { role: 'planner' } }),
 			],
 			budgets: budgets({ elapsedSeconds: 6, tokensUsed: 8200, tokenBreakdown: tokenBreakdown(8200, 260) }),
+			flowModel: flowModel(
+				{ nodes: [flowNode({ id: 'you', kind: 'you', label: 'You', column: 0 }), flowNode({ id: 'orchestrator', kind: 'role', label: roleLabel('orchestrator'), sublabel: 'orchestrator', column: 1, costTime: 6, costTokens: 3260 }), flowNode({ id: 'planner', kind: 'role', label: roleLabel('planner'), sublabel: 'planner', column: 2, active: true, costTime: 3, costTokens: 5460 })], edges: [flowEdge('you', 'orchestrator', 'call'), flowEdge('orchestrator', 'planner', 'call')] },
+				{ nodes: [topBarNode({ id: 'you', kind: 'you', label: 'You', invocations: 1 }), topBarNode({ id: 'orchestrator', kind: 'role', label: roleLabel('orchestrator'), invocations: 1, totalTime: 6, totalTokens: 3260 }), topBarNode({ id: 'planner', kind: 'role', label: roleLabel('planner'), invocations: 1, totalTime: 3, totalTokens: 5460 })] },
+			),
 		}, 6),
 		frame({
 			status: 'unknown',
@@ -538,6 +653,10 @@ const completedSuccess = {
 				logEntry({ timestamp: t(14), type: 'tool_call', summary: 'coder \u00b7 write_file', payload: { role: 'coder', tool: 'write_file', arguments: '{"path":"reports/csv.js"}' } }),
 			],
 			budgets: budgets({ elapsedSeconds: 15, toolCalls: 1, tokensUsed: 14300, tokenBreakdown: tokenBreakdown(14300, 520) }),
+			flowModel: flowModel(
+				{ nodes: [flowNode({ id: 'you', kind: 'you', label: 'You', column: 0 }), flowNode({ id: 'orchestrator', kind: 'role', label: roleLabel('orchestrator'), sublabel: 'orchestrator', column: 1, costTime: 15, costTokens: 3260 }), flowNode({ id: 'planner', kind: 'role', label: roleLabel('planner'), sublabel: 'planner', column: 2, status: 'success', costTime: 5, costTokens: 5460 }), flowNode({ id: 'coder', kind: 'role', label: roleLabel('coder'), sublabel: 'coder', column: 2, active: true, costTime: 5, costTokens: 6620 }), flowNode({ id: 'write_file', kind: 'tool', label: toolLabel('write_file'), column: 3, costTime: 1 })], edges: [flowEdge('you', 'orchestrator', 'call'), flowEdge('orchestrator', 'planner', 'call'), flowEdge('planner', 'orchestrator', 'return'), flowEdge('orchestrator', 'coder', 'call'), flowEdge('coder', 'write_file', 'call')] },
+				{ nodes: [topBarNode({ id: 'you', kind: 'you', label: 'You', invocations: 1 }), topBarNode({ id: 'orchestrator', kind: 'role', label: roleLabel('orchestrator'), invocations: 1, totalTime: 15, totalTokens: 3260 }), topBarNode({ id: 'planner', kind: 'role', label: roleLabel('planner'), invocations: 1, totalTime: 5, totalTokens: 5460, status: 'success' }), topBarNode({ id: 'coder', kind: 'role', label: roleLabel('coder'), invocations: 1, totalTime: 5, totalTokens: 6620 }), topBarNode({ id: 'write_file', kind: 'tool', label: toolLabel('write_file'), invocations: 1 })] },
+			),
 		}, 15),
 		frame({
 			status: 'success',
@@ -565,6 +684,10 @@ const completedSuccess = {
 				logEntry({ timestamp: t(22), type: 'role_finished', summary: 'orchestrator \u00b7 finished (success)', payload: { role: 'orchestrator', status: 'success', summary: 'shipped' } }),
 			],
 			budgets: budgets({ elapsedSeconds: 22, toolCalls: 2, tokensUsed: 18000, tokenBreakdown: tokenBreakdown(18000, 720) }),
+			flowModel: flowModel(
+				{ nodes: [flowNode({ id: 'you', kind: 'you', label: 'You', column: 0 }), flowNode({ id: 'orchestrator', kind: 'role', label: roleLabel('orchestrator'), sublabel: 'orchestrator', column: 1, status: 'success', costTime: 22, costTokens: 3260 })], edges: [flowEdge('orchestrator', 'you', 'return')] },
+				{ nodes: [topBarNode({ id: 'you', kind: 'you', label: 'You', invocations: 1 }), topBarNode({ id: 'orchestrator', kind: 'role', label: roleLabel('orchestrator'), invocations: 1, totalTime: 22, totalTokens: 3260, status: 'success' }), topBarNode({ id: 'planner', kind: 'role', label: roleLabel('planner'), invocations: 1, totalTime: 5, totalTokens: 5460, status: 'success' }), topBarNode({ id: 'coder', kind: 'role', label: roleLabel('coder'), invocations: 1, totalTime: 8, totalTokens: 6620, status: 'success' }), topBarNode({ id: 'critic', kind: 'role', label: roleLabel('critic'), invocations: 1, totalTime: 2, status: 'success' }), topBarNode({ id: 'write_file', kind: 'tool', label: toolLabel('write_file'), invocations: 2 })] },
+			),
 		}, 22),
 	],
 }
@@ -586,6 +709,10 @@ const failedRun = {
 				logEntry({ timestamp: t(4), type: 'llm_call', summary: 'coder \u00b7 llm call', payload: { role: 'coder' } }),
 			],
 			budgets: budgets({ elapsedSeconds: 5, tokensUsed: 4800, tokenBreakdown: tokenBreakdown(4800, 160) }),
+			flowModel: flowModel(
+				{ nodes: [flowNode({ id: 'you', kind: 'you', label: 'You', column: 0 }), flowNode({ id: 'coder', kind: 'role', label: roleLabel('coder'), sublabel: 'coder', column: 1, active: true, costTime: 5, costTokens: 4960 })], edges: [flowEdge('you', 'coder', 'call')] },
+				{ nodes: [topBarNode({ id: 'you', kind: 'you', label: 'You', invocations: 1 }), topBarNode({ id: 'coder', kind: 'role', label: roleLabel('coder'), invocations: 1, totalTime: 5, totalTokens: 4960 })] },
+			),
 		}, 5),
 		frame({
 			status: 'error',
@@ -604,6 +731,10 @@ const failedRun = {
 				logEntry({ timestamp: t(9), type: 'role_finished', summary: 'coder \u00b7 finished (error)', payload: { role: 'coder', status: 'error', summary: 'model endpoint unreachable', error: { kind: 'llm_unavailable', message: 'connection refused' } } }),
 			],
 			budgets: budgets({ elapsedSeconds: 9, tokensUsed: 4800, tokenBreakdown: tokenBreakdown(4800, 160) }),
+			flowModel: flowModel(
+				{ nodes: [flowNode({ id: 'you', kind: 'you', label: 'You', column: 0 }), flowNode({ id: 'coder', kind: 'role', label: roleLabel('coder'), sublabel: 'coder', column: 1, status: 'error', costTime: 9, costTokens: 4960 })], edges: [flowEdge('coder', 'you', 'return')] },
+				{ nodes: [topBarNode({ id: 'you', kind: 'you', label: 'You', invocations: 1 }), topBarNode({ id: 'coder', kind: 'role', label: roleLabel('coder'), invocations: 1, totalTime: 9, totalTokens: 4960, status: 'error' })] },
+			),
 		}, 9),
 	],
 }
@@ -626,6 +757,10 @@ const effortSet = {
 				logEntry({ timestamp: t(1), type: 'role_start', summary: 'planner \u00b7 role start', payload: { role: 'planner', depth: 0 } }),
 			],
 			budgets: budgets({ elapsedSeconds: 2 }),
+			flowModel: flowModel(
+				{ nodes: [flowNode({ id: 'you', kind: 'you', label: 'You', column: 0 }), flowNode({ id: 'planner', kind: 'role', label: roleLabel('planner'), sublabel: 'planner', column: 1, active: true, costTime: 2 })], edges: [flowEdge('you', 'planner', 'call')] },
+				{ nodes: [topBarNode({ id: 'you', kind: 'you', label: 'You', invocations: 1 }), topBarNode({ id: 'planner', kind: 'role', label: roleLabel('planner'), invocations: 1, totalTime: 2 })] },
+			),
 		}, 2),
 		frame({
 			status: 'unknown',
@@ -642,6 +777,10 @@ const effortSet = {
 				logEntry({ timestamp: t(6), type: 'tool_call', summary: 'planner \u00b7 read_file', payload: { role: 'planner', tool: 'read_file', arguments: '{"path":"migrations/schema.sql"}' } }),
 			],
 			budgets: budgets({ elapsedSeconds: 7, toolCalls: 1, tokensUsed: 7400, tokenBreakdown: tokenBreakdown(7400, 300, 1200) }),
+			flowModel: flowModel(
+				{ nodes: [flowNode({ id: 'you', kind: 'you', label: 'You', column: 0 }), flowNode({ id: 'planner', kind: 'role', label: roleLabel('planner'), sublabel: 'planner', column: 1, active: true, costTime: 7, costTokens: 7700 }), flowNode({ id: 'read_file', kind: 'tool', label: toolLabel('read_file'), column: 2, costTime: 1 })], edges: [flowEdge('you', 'planner', 'call'), flowEdge('planner', 'read_file', 'call')] },
+				{ nodes: [topBarNode({ id: 'you', kind: 'you', label: 'You', invocations: 1 }), topBarNode({ id: 'planner', kind: 'role', label: roleLabel('planner'), invocations: 1, totalTime: 7, totalTokens: 7700 }), topBarNode({ id: 'read_file', kind: 'tool', label: toolLabel('read_file'), invocations: 1 })] },
+			),
 		}, 7),
 	],
 }
@@ -667,6 +806,10 @@ const deepMultiRoleTree = {
 				logEntry({ timestamp: t(5), type: 'llm_call', summary: 'planner \u00b7 llm call', payload: { role: 'planner' } }),
 			],
 			budgets: budgets({ elapsedSeconds: 6, tokensUsed: 8900, tokenBreakdown: tokenBreakdown(8900, 280) }),
+			flowModel: flowModel(
+				{ nodes: [flowNode({ id: 'you', kind: 'you', label: 'You', column: 0 }), flowNode({ id: 'orchestrator', kind: 'role', label: roleLabel('orchestrator'), sublabel: 'orchestrator', column: 1, costTime: 6, costTokens: 3580 }), flowNode({ id: 'planner', kind: 'role', label: roleLabel('planner'), sublabel: 'planner', column: 2, active: true, costTime: 3, costTokens: 5880 })], edges: [flowEdge('you', 'orchestrator', 'call'), flowEdge('orchestrator', 'planner', 'call')] },
+				{ nodes: [topBarNode({ id: 'you', kind: 'you', label: 'You', invocations: 1 }), topBarNode({ id: 'orchestrator', kind: 'role', label: roleLabel('orchestrator'), invocations: 1, totalTime: 6, totalTokens: 3580 }), topBarNode({ id: 'planner', kind: 'role', label: roleLabel('planner'), invocations: 1, totalTime: 3, totalTokens: 5880 })] },
+			),
 		}, 6),
 		frame({
 			status: 'unknown',
@@ -689,6 +832,10 @@ const deepMultiRoleTree = {
 				logEntry({ timestamp: t(13), type: 'tool_call', summary: 'context_manager \u00b7 edit_context', payload: { role: 'context_manager', tool: 'edit_context', arguments: '{"action":"compact"}' } }),
 			],
 			budgets: budgets({ elapsedSeconds: 14, toolCalls: 1, tokensUsed: 36900, tokenBreakdown: tokenBreakdown(36900, 900) }),
+			flowModel: flowModel(
+				{ nodes: [flowNode({ id: 'you', kind: 'you', label: 'You', column: 0 }), flowNode({ id: 'orchestrator', kind: 'role', label: roleLabel('orchestrator'), sublabel: 'orchestrator', column: 1, costTime: 14, costTokens: 3580 }), flowNode({ id: 'planner', kind: 'role', label: roleLabel('planner'), sublabel: 'planner', column: 2, active: true, costTime: 11, costTokens: 37800 }), flowNode({ id: 'context_manager', kind: 'role', label: roleLabel('context_manager'), sublabel: 'context_manager', column: 3, active: true, costTime: 3 }), flowNode({ id: 'edit_context', kind: 'tool', label: toolLabel('edit_context'), column: 4, costTime: 1 })], edges: [flowEdge('you', 'orchestrator', 'call'), flowEdge('orchestrator', 'planner', 'call'), flowEdge('planner', 'context_manager', 'call'), flowEdge('context_manager', 'edit_context', 'call')] },
+				{ nodes: [topBarNode({ id: 'you', kind: 'you', label: 'You', invocations: 1 }), topBarNode({ id: 'orchestrator', kind: 'role', label: roleLabel('orchestrator'), invocations: 1, totalTime: 14, totalTokens: 3580 }), topBarNode({ id: 'planner', kind: 'role', label: roleLabel('planner'), invocations: 1, totalTime: 11, totalTokens: 37800 }), topBarNode({ id: 'context_manager', kind: 'role', label: roleLabel('context_manager'), invocations: 1, totalTime: 3 }), topBarNode({ id: 'edit_context', kind: 'tool', label: toolLabel('edit_context'), invocations: 1 })] },
+			),
 		}, 14),
 		frame({
 			status: 'success',
@@ -716,6 +863,10 @@ const deepMultiRoleTree = {
 				logEntry({ timestamp: t(40), type: 'role_finished', summary: 'orchestrator \u00b7 finished (success)', payload: { role: 'orchestrator', status: 'success', summary: 'shipped the API' } }),
 			],
 			budgets: budgets({ elapsedSeconds: 40, toolCalls: 4, tokensUsed: 64200, tokenBreakdown: tokenBreakdown(64200, 2100, 9000) }),
+			flowModel: flowModel(
+				{ nodes: [flowNode({ id: 'you', kind: 'you', label: 'You', column: 0 }), flowNode({ id: 'orchestrator', kind: 'role', label: roleLabel('orchestrator'), sublabel: 'orchestrator', column: 1, status: 'success', costTime: 40, costTokens: 3580 })], edges: [flowEdge('orchestrator', 'you', 'return')] },
+				{ nodes: [topBarNode({ id: 'you', kind: 'you', label: 'You', invocations: 1 }), topBarNode({ id: 'orchestrator', kind: 'role', label: roleLabel('orchestrator'), invocations: 1, totalTime: 40, totalTokens: 3580, status: 'success' }), topBarNode({ id: 'planner', kind: 'role', label: roleLabel('planner'), invocations: 1, totalTime: 17, status: 'success' }), topBarNode({ id: 'context_manager', kind: 'role', label: roleLabel('context_manager'), invocations: 1, totalTime: 4, status: 'success' }), topBarNode({ id: 'coder', kind: 'role', label: roleLabel('coder'), invocations: 1, totalTime: 16, status: 'success' }), topBarNode({ id: 'edit_context', kind: 'tool', label: toolLabel('edit_context'), invocations: 1 })] },
+			),
 		}, 40),
 	],
 }
@@ -737,6 +888,10 @@ const selfDelegation = {
 				logEntry({ timestamp: t(4), type: 'llm_call', summary: 'coder \u00b7 llm call', payload: { role: 'coder' } }),
 			],
 			budgets: budgets({ elapsedSeconds: 5, tokensUsed: 3800, tokenBreakdown: tokenBreakdown(3800, 150) }),
+			flowModel: flowModel(
+				{ nodes: [flowNode({ id: 'you', kind: 'you', label: 'You', column: 0 }), flowNode({ id: 'coder-1', kind: 'role', label: roleLabel('coder'), sublabel: 'coder', column: 1, active: true, costTime: 5, costTokens: 3950 })], edges: [flowEdge('you', 'coder-1', 'call')] },
+				{ nodes: [topBarNode({ id: 'you', kind: 'you', label: 'You', invocations: 1 }), topBarNode({ id: 'coder', kind: 'role', label: roleLabel('coder'), invocations: 1, totalTime: 5, totalTokens: 3950 })] },
+			),
 		}, 5),
 		frame({
 			status: 'unknown',
@@ -751,6 +906,10 @@ const selfDelegation = {
 				logEntry({ timestamp: t(8), type: 'agent_call', summary: 'coder \u00b7 agent call \u2192 coder', payload: { parent: 'coder', child: 'coder', depth: 1 } }),
 			],
 			budgets: budgets({ elapsedSeconds: 9, toolCalls: 1, tokensUsed: 3800, tokenBreakdown: tokenBreakdown(3800, 150) }),
+			flowModel: flowModel(
+				{ nodes: [flowNode({ id: 'you', kind: 'you', label: 'You', column: 0 }), flowNode({ id: 'coder-1', kind: 'role', label: roleLabel('coder'), sublabel: 'coder', column: 1, costTime: 9, costTokens: 3950 }), flowNode({ id: 'coder-2', kind: 'role', label: roleLabel('coder'), sublabel: 'sub-task', column: 2, active: true, costTime: 1 })], edges: [flowEdge('you', 'coder-1', 'call'), flowEdge('coder-1', 'coder-2', 'call')] },
+				{ nodes: [topBarNode({ id: 'you', kind: 'you', label: 'You', invocations: 1 }), topBarNode({ id: 'coder', kind: 'role', label: roleLabel('coder'), invocations: 2, totalTime: 10, totalTokens: 3950 })] },
+			),
 		}, 9),
 		frame({
 			status: 'success',
@@ -767,6 +926,10 @@ const selfDelegation = {
 				logEntry({ timestamp: t(16), type: 'role_finished', summary: 'coder \u00b7 finished (success)', payload: { role: 'coder', depth: 0, status: 'success', summary: 'refactored the parser' } }),
 			],
 			budgets: budgets({ elapsedSeconds: 16, toolCalls: 2, tokensUsed: 9100, tokenBreakdown: tokenBreakdown(9100, 400) }),
+			flowModel: flowModel(
+				{ nodes: [flowNode({ id: 'you', kind: 'you', label: 'You', column: 0 }), flowNode({ id: 'coder-1', kind: 'role', label: roleLabel('coder'), sublabel: 'coder', column: 1, status: 'success', costTime: 16, costTokens: 9500 })], edges: [flowEdge('coder-1', 'you', 'return')] },
+				{ nodes: [topBarNode({ id: 'you', kind: 'you', label: 'You', invocations: 1 }), topBarNode({ id: 'coder', kind: 'role', label: roleLabel('coder'), invocations: 2, totalTime: 16, totalTokens: 9500, status: 'success' })] },
+			),
 		}, 16),
 	],
 }
@@ -792,6 +955,10 @@ const detectedLoop = {
 				logEntry({ timestamp: t(12), type: 'tool_call', summary: 'coder \u00b7 read_file', payload: { role: 'coder', tool: 'read_file', arguments: '{"path":"payments/handler.js"}' } }),
 			],
 			budgets: budgets({ elapsedSeconds: 13, toolCalls: 3, tokensUsed: 4400, tokenBreakdown: tokenBreakdown(4400, 180) }),
+			flowModel: flowModel(
+				{ nodes: [flowNode({ id: 'you', kind: 'you', label: 'You', column: 0 }), flowNode({ id: 'coder', kind: 'role', label: roleLabel('coder'), sublabel: 'coder', column: 1, active: true, costTime: 13, costTokens: 4580, counter: 3 }), flowNode({ id: 'read_file', kind: 'tool', label: toolLabel('read_file'), column: 2, costTime: 6 })], edges: [flowEdge('you', 'coder', 'call'), flowEdge('coder', 'read_file', 'call')] },
+				{ nodes: [topBarNode({ id: 'you', kind: 'you', label: 'You', invocations: 1 }), topBarNode({ id: 'coder', kind: 'role', label: roleLabel('coder'), invocations: 1, totalTime: 13, totalTokens: 4580 }), topBarNode({ id: 'read_file', kind: 'tool', label: toolLabel('read_file'), invocations: 3 })] },
+			),
 		}, 13),
 		frame({
 			status: 'unknown',
@@ -810,6 +977,10 @@ const detectedLoop = {
 				logEntry({ timestamp: t(17), type: 'tool_call', summary: 'loop_detector \u00b7 recent_role_tool_calls', payload: { role: 'loop_detector', tool: 'recent_role_tool_calls', arguments: '{"role":"coder","count":10}' } }),
 			],
 			budgets: budgets({ elapsedSeconds: 18, toolCalls: 4, tokensUsed: 5200, tokenBreakdown: tokenBreakdown(5200, 210) }),
+			flowModel: flowModel(
+				{ nodes: [flowNode({ id: 'you', kind: 'you', label: 'You', column: 0 }), flowNode({ id: 'coder', kind: 'role', label: roleLabel('coder'), sublabel: 'coder', column: 1, costTime: 18, costTokens: 4580, counter: 3 }), flowNode({ id: 'loop_detector', kind: 'role', label: roleLabel('loop_detector'), sublabel: 'loop_detector', column: 2, active: true, costTime: 3 }), flowNode({ id: 'recent_role_tool_calls', kind: 'tool', label: toolLabel('recent_role_tool_calls'), column: 3, costTime: 1 })], edges: [flowEdge('you', 'coder', 'call'), flowEdge('coder', 'loop_detector', 'call'), flowEdge('loop_detector', 'recent_role_tool_calls', 'call')] },
+				{ nodes: [topBarNode({ id: 'you', kind: 'you', label: 'You', invocations: 1 }), topBarNode({ id: 'coder', kind: 'role', label: roleLabel('coder'), invocations: 1, totalTime: 18, totalTokens: 4580 }), topBarNode({ id: 'loop_detector', kind: 'role', label: roleLabel('loop_detector'), invocations: 1, totalTime: 3 }), topBarNode({ id: 'read_file', kind: 'tool', label: toolLabel('read_file'), invocations: 3 }), topBarNode({ id: 'recent_role_tool_calls', kind: 'tool', label: toolLabel('recent_role_tool_calls'), invocations: 1 })] },
+			),
 		}, 18),
 		frame({
 			status: 'interrupted',
@@ -829,6 +1000,10 @@ const detectedLoop = {
 				logEntry({ timestamp: t(20), type: 'interrupt_triggered', summary: 'interrupt triggered (loop_detected)', payload: { source: 'loop_detector', kind: 'loop_detected', message: 'coder repeated read_file 3 times' } }),
 			],
 			budgets: budgets({ elapsedSeconds: 20, toolCalls: 5, tokensUsed: 5200, tokenBreakdown: tokenBreakdown(5200, 210) }),
+			flowModel: flowModel(
+				{ nodes: [flowNode({ id: 'you', kind: 'you', label: 'You', column: 0, active: true }), flowNode({ id: 'coder', kind: 'role', label: roleLabel('coder'), sublabel: 'coder', column: 1, status: 'interrupted', costTime: 20, costTokens: 4580, counter: 3 }), flowNode({ id: 'loop_detector', kind: 'role', label: roleLabel('loop_detector'), sublabel: 'loop_detector', column: 2, status: 'success', costTime: 5 })], edges: [flowEdge('you', 'coder', 'call'), flowEdge('coder', 'loop_detector', 'call'), flowEdge('loop_detector', 'coder', 'return'), flowEdge('coder', 'you', 'return')] },
+				{ nodes: [topBarNode({ id: 'you', kind: 'you', label: 'You', invocations: 1 }), topBarNode({ id: 'coder', kind: 'role', label: roleLabel('coder'), invocations: 1, totalTime: 20, totalTokens: 4580, status: 'interrupted' }), topBarNode({ id: 'loop_detector', kind: 'role', label: roleLabel('loop_detector'), invocations: 1, totalTime: 5, status: 'success' }), topBarNode({ id: 'read_file', kind: 'tool', label: toolLabel('read_file'), invocations: 3 }), topBarNode({ id: 'recent_role_tool_calls', kind: 'tool', label: toolLabel('recent_role_tool_calls'), invocations: 1 }), topBarNode({ id: 'trigger_interrupt', kind: 'tool', label: toolLabel('trigger_interrupt'), invocations: 1 })] },
+			),
 		}, 20),
 	],
 }
@@ -852,6 +1027,10 @@ const userInterrupt = {
 				logEntry({ timestamp: t(8), type: 'tool_call', summary: 'planner \u00b7 search_text', payload: { role: 'planner', tool: 'search_text', arguments: '{"pattern":"module.exports"}' } }),
 			],
 			budgets: budgets({ elapsedSeconds: 9, toolCalls: 1, tokensUsed: 6800, tokenBreakdown: tokenBreakdown(6800, 260) }),
+			flowModel: flowModel(
+				{ nodes: [flowNode({ id: 'you', kind: 'you', label: 'You', column: 0 }), flowNode({ id: 'planner', kind: 'role', label: roleLabel('planner'), sublabel: 'planner', column: 1, active: true, costTime: 9, costTokens: 7060 }), flowNode({ id: 'search_text', kind: 'tool', label: toolLabel('search_text'), column: 2, costTime: 1 })], edges: [flowEdge('you', 'planner', 'call'), flowEdge('planner', 'search_text', 'call')] },
+				{ nodes: [topBarNode({ id: 'you', kind: 'you', label: 'You', invocations: 1 }), topBarNode({ id: 'planner', kind: 'role', label: roleLabel('planner'), invocations: 1, totalTime: 9, totalTokens: 7060 }), topBarNode({ id: 'search_text', kind: 'tool', label: toolLabel('search_text'), invocations: 1 })] },
+			),
 		}, 9),
 		frame({
 			status: 'interrupted',
@@ -867,6 +1046,10 @@ const userInterrupt = {
 				logEntry({ timestamp: t(15), type: 'interrupt_triggered', summary: 'interrupt triggered (operator_inquiry)', payload: { source: 'operator', kind: 'inquiry', message: 'Should we keep the legacy API endpoints for backward compatibility?' } }),
 			],
 			budgets: budgets({ elapsedSeconds: 15, toolCalls: 1, tokensUsed: 6800, tokenBreakdown: tokenBreakdown(6800, 260) }),
+			flowModel: flowModel(
+				{ nodes: [flowNode({ id: 'you', kind: 'you', label: 'You', column: 0, active: true }), flowNode({ id: 'planner', kind: 'role', label: roleLabel('planner'), sublabel: 'planner', column: 1, status: 'interrupted', costTime: 15, costTokens: 7060 })], edges: [flowEdge('you', 'planner', 'call'), flowEdge('planner', 'you', 'return')] },
+				{ nodes: [topBarNode({ id: 'you', kind: 'you', label: 'You', invocations: 1 }), topBarNode({ id: 'planner', kind: 'role', label: roleLabel('planner'), invocations: 1, totalTime: 15, totalTokens: 7060, status: 'interrupted' }), topBarNode({ id: 'search_text', kind: 'tool', label: toolLabel('search_text'), invocations: 1 })] },
+			),
 		}, 15),
 	],
 }
@@ -893,6 +1076,10 @@ const largeGuild = {
 				logEntry({ timestamp: t(6), type: 'llm_call', summary: 'architect \u00b7 llm call', payload: { role: 'architect' } }),
 			],
 			budgets: budgets({ elapsedSeconds: 7, tokensUsed: 10300, tokenBreakdown: tokenBreakdown(10300, 320) }),
+			flowModel: flowModel(
+				{ nodes: [flowNode({ id: 'you', kind: 'you', label: 'You', column: 0 }), flowNode({ id: 'orchestrator', kind: 'role', label: roleLabel('orchestrator', largeGuildConfig), sublabel: 'orchestrator', column: 1, costTime: 7, costTokens: 3520 }), flowNode({ id: 'architect', kind: 'role', label: roleLabel('architect', largeGuildConfig), sublabel: 'architect', column: 2, active: true, costTime: 4, costTokens: 7420 })], edges: [flowEdge('you', 'orchestrator', 'call'), flowEdge('orchestrator', 'architect', 'call')] },
+				{ nodes: [topBarNode({ id: 'you', kind: 'you', label: 'You', invocations: 1 }), topBarNode({ id: 'orchestrator', kind: 'role', label: roleLabel('orchestrator', largeGuildConfig), invocations: 1, totalTime: 7, totalTokens: 3520 }), topBarNode({ id: 'architect', kind: 'role', label: roleLabel('architect', largeGuildConfig), invocations: 1, totalTime: 4, totalTokens: 7420 })] },
+			),
 		}, 7),
 		frame({
 			status: 'unknown',
@@ -916,6 +1103,10 @@ const largeGuild = {
 				logEntry({ timestamp: t(16), type: 'tool_call', summary: 'coder \u00b7 write_file', payload: { role: 'coder', tool: 'write_file', arguments: '{"path":"src/bookings/routes.js"}' } }),
 			],
 			budgets: budgets({ elapsedSeconds: 17, toolCalls: 1, tokensUsed: 18700, tokenBreakdown: tokenBreakdown(18700, 640) }),
+			flowModel: flowModel(
+				{ nodes: [flowNode({ id: 'you', kind: 'you', label: 'You', column: 0 }), flowNode({ id: 'orchestrator', kind: 'role', label: roleLabel('orchestrator', largeGuildConfig), sublabel: 'orchestrator', column: 1, costTime: 17, costTokens: 3520 }), flowNode({ id: 'architect', kind: 'role', label: roleLabel('architect', largeGuildConfig), sublabel: 'architect', column: 2, status: 'success', costTime: 6, costTokens: 7420 }), flowNode({ id: 'coder', kind: 'role', label: roleLabel('coder', largeGuildConfig), sublabel: 'coder', column: 2, active: true, costTime: 6, costTokens: 9040 }), flowNode({ id: 'write_file', kind: 'tool', label: toolLabel('write_file', largeGuildConfig), column: 3, costTime: 1 })], edges: [flowEdge('you', 'orchestrator', 'call'), flowEdge('orchestrator', 'architect', 'call'), flowEdge('architect', 'orchestrator', 'return'), flowEdge('orchestrator', 'coder', 'call'), flowEdge('coder', 'write_file', 'call')] },
+				{ nodes: [topBarNode({ id: 'you', kind: 'you', label: 'You', invocations: 1 }), topBarNode({ id: 'orchestrator', kind: 'role', label: roleLabel('orchestrator', largeGuildConfig), invocations: 1, totalTime: 17, totalTokens: 3520 }), topBarNode({ id: 'architect', kind: 'role', label: roleLabel('architect', largeGuildConfig), invocations: 1, totalTime: 6, totalTokens: 7420, status: 'success' }), topBarNode({ id: 'coder', kind: 'role', label: roleLabel('coder', largeGuildConfig), invocations: 1, totalTime: 6, totalTokens: 9040 }), topBarNode({ id: 'write_file', kind: 'tool', label: toolLabel('write_file', largeGuildConfig), invocations: 1 })] },
+			),
 		}, 17),
 		frame({
 			status: 'success',
@@ -957,6 +1148,28 @@ const largeGuild = {
 				logEntry({ timestamp: t(60), type: 'role_finished', summary: 'orchestrator \u00b7 finished (success)', payload: { role: 'orchestrator', status: 'success', summary: 'shipped the booking system' } }),
 			],
 			budgets: budgets({ elapsedSeconds: 60, toolCalls: 9, tokensUsed: 84000, tokenBreakdown: tokenBreakdown(84000, 3200, 12000) }),
+			flowModel: flowModel(
+				{ nodes: [flowNode({ id: 'you', kind: 'you', label: 'You', column: 0 }), flowNode({ id: 'orchestrator', kind: 'role', label: roleLabel('orchestrator', largeGuildConfig), sublabel: 'orchestrator', column: 1, status: 'success', costTime: 60, costTokens: 3520 })], edges: [flowEdge('orchestrator', 'you', 'return')] },
+				{ nodes: [
+					topBarNode({ id: 'you', kind: 'you', label: 'You', invocations: 1 }),
+					topBarNode({ id: 'orchestrator', kind: 'role', label: roleLabel('orchestrator', largeGuildConfig), invocations: 1, totalTime: 60, totalTokens: 3520, status: 'success' }),
+					topBarNode({ id: 'architect', kind: 'role', label: roleLabel('architect', largeGuildConfig), invocations: 1, totalTime: 6, status: 'success' }),
+					topBarNode({ id: 'coder', kind: 'role', label: roleLabel('coder', largeGuildConfig), invocations: 1, totalTime: 19, status: 'success' }),
+					topBarNode({ id: 'researcher', kind: 'role', label: roleLabel('researcher', largeGuildConfig), invocations: 1, totalTime: 6, status: 'success' }),
+					topBarNode({ id: 'tester', kind: 'role', label: roleLabel('tester', largeGuildConfig), invocations: 1, totalTime: 6, status: 'success' }),
+					topBarNode({ id: 'context_manager', kind: 'role', label: roleLabel('context_manager', largeGuildConfig), invocations: 1, totalTime: 3, status: 'success' }),
+					topBarNode({ id: 'reviewer', kind: 'role', label: roleLabel('reviewer', largeGuildConfig), invocations: 1, totalTime: 4, status: 'success' }),
+					topBarNode({ id: 'documenter', kind: 'role', label: roleLabel('documenter', largeGuildConfig), invocations: 1, totalTime: 6, status: 'success' }),
+					topBarNode({ id: 'refactorer', kind: 'role', label: roleLabel('refactorer', largeGuildConfig), invocations: 1, totalTime: 6, status: 'success' }),
+					topBarNode({ id: 'security_auditor', kind: 'role', label: roleLabel('security_auditor', largeGuildConfig), invocations: 1, totalTime: 8, status: 'success' }),
+					topBarNode({ id: 'write_file', kind: 'tool', label: toolLabel('write_file', largeGuildConfig), invocations: 5 }),
+					topBarNode({ id: 'read_file', kind: 'tool', label: toolLabel('read_file', largeGuildConfig), invocations: 2 }),
+					topBarNode({ id: 'search_text', kind: 'tool', label: toolLabel('search_text', largeGuildConfig), invocations: 2 }),
+					topBarNode({ id: 'test', kind: 'tool', label: toolLabel('test', largeGuildConfig), invocations: 1 }),
+					topBarNode({ id: 'typecheck', kind: 'tool', label: toolLabel('typecheck', largeGuildConfig), invocations: 2 }),
+					topBarNode({ id: 'edit_context', kind: 'tool', label: toolLabel('edit_context', largeGuildConfig), invocations: 1 }),
+				] },
+			),
 		}, 60),
 	],
 }
