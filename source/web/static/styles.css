@@ -1390,7 +1390,7 @@ li:last-child {
 	text-align: center;
 }
 
-/* Small top-bar nodes: a compact square holding just the invocation count, so a long run's history stays a thin strip. The strip is cumulative/aggregate history (total invocations per type), so it carries no per-invocation status — a slot never turns red or green. The role/tool name and cumulative token/time details surface via the native SVG <title> hover tooltip, not in the strip. */
+/* Small top-bar nodes: a compact square holding just the invocation count, so a long run's history stays a thin strip. The strip is cumulative/aggregate history (total invocations per type), so it carries no per-invocation status except the terminal-failure exception below — a slot whose run ended in error turns red so the failing role reads at a glance against an otherwise neutral strip. The role/tool name and cumulative token/time details surface via the native SVG <title> hover tooltip, not in the strip. */
 .flow-small-node-box {
 	fill: var(--svg-node-fill);
 	stroke: var(--svg-node-border);
@@ -1402,6 +1402,16 @@ li:last-child {
 	font-size: 11px;
 	font-weight: 600;
 	font-variant-numeric: tabular-nums;
+}
+
+/* A slot whose run ended in failure: the box border and the count turn red so the failing role's top-bar node reads as errored at a glance. Only the terminal outcome is colored — a slot that errored mid-run but was retried to success stays neutral, because the strip carries the role's aggregate result, not each invocation's. The red is the calibrated --svg-error token (not pure #ff0000) so it reads correctly in both light and dark. */
+.flow-small-node--error .flow-small-node-box {
+	stroke: var(--svg-error);
+	stroke-width: 1.5;
+}
+
+.flow-small-node--error .flow-small-node-count {
+	fill: var(--svg-error);
 }
 
 /* --- Flow animation: node lifecycle + edge flow (step 04) ------------------ */
@@ -1606,6 +1616,259 @@ li:last-child {
 
 @media (prefers-reduced-motion: reduce) {
 	.question-modal-card {
+		animation: none;
+	}
+}
+
+/* --- Result modal ----------------------------------------------------------- */
+/* A per-run-view overlay that presents a run's terminal result (success/error/needs-clarification). It mirrors the question modal's run-view-scoped overlay (containing block is `.pb-flow`, so the backdrop covers the flow area and the centered card sits over it) so a future multi-run world can switch away and back. The card's accent border follows the outcome — accent blue for a successful or needs-clarification result, calibrated error red for a failure — and the result summary renders as sanitized Markdown while artifacts stay plain text paths. On error, the raw error message renders as sanitized Markdown under an honest framing line, with a copy-raw button that hands the full error object (including the hidden `kind`) to the operator as JSON. Colors read the visual tokens so the modal follows the light/dark theme; the red is the calibrated --color-error token (never pure #ff0000). */
+
+.result-modal-overlay {
+	position: absolute;
+	inset: 0;
+	z-index: 20;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+}
+
+.result-modal-backdrop {
+	position: absolute;
+	inset: 0;
+	background: rgba(13, 17, 23, 0.55);
+	backdrop-filter: blur(2px);
+	cursor: pointer;
+}
+
+.result-modal-card {
+	position: relative;
+	width: min(36rem, calc(100% - 2 * var(--space-5)));
+	max-height: calc(100% - 2 * var(--space-5));
+	overflow: auto;
+	padding: var(--space-5);
+	border-radius: var(--radius-lg);
+	background: var(--color-surface);
+	border: 1px solid var(--color-accent);
+	box-shadow: 0 12px 32px rgba(16, 24, 40, 0.28), 0 0 0 4px var(--color-accent-soft);
+}
+
+.result-modal-card--error {
+	border-color: var(--color-error);
+	box-shadow: 0 12px 32px rgba(16, 24, 40, 0.28), 0 0 0 4px var(--color-error-soft);
+}
+
+.result-modal-heading {
+	margin: 0 0 var(--space-1);
+	font-size: 0.8rem;
+	font-weight: 600;
+	text-transform: uppercase;
+	letter-spacing: 0.04em;
+	color: var(--color-text-subtle);
+	overflow-wrap: anywhere;
+}
+
+.result-modal-status {
+	margin: 0 0 var(--space-4);
+	font-size: 1.1rem;
+	font-weight: 600;
+	color: var(--color-accent);
+}
+
+.result-modal-status--success {
+	color: var(--color-success);
+}
+
+.result-modal-status--error {
+	color: var(--color-error);
+}
+
+.result-modal-status--needs_clarification {
+	color: var(--color-warn);
+}
+
+.result-modal-summary {
+	font-size: 1rem;
+	line-height: 1.5;
+	color: var(--color-text);
+}
+
+.result-modal-summary.markdown p {
+	margin: 0.3rem 0;
+}
+
+.result-modal-artifacts {
+	margin-top: var(--space-4);
+}
+
+.result-modal-artifacts-heading {
+	margin: 0 0 var(--space-1);
+	font-size: 0.75rem;
+	font-weight: 600;
+	text-transform: uppercase;
+	letter-spacing: 0.04em;
+	color: var(--color-text-subtle);
+}
+
+.result-modal-artifacts-list {
+	margin: 0;
+	padding: 0;
+	list-style: none;
+	display: flex;
+	flex-direction: column;
+	gap: var(--space-1);
+}
+
+.result-modal-artifact {
+	padding: var(--space-1) var(--space-2);
+	background: var(--color-surface-sunken);
+	border-radius: var(--radius-sm);
+	font-family: var(--font-mono);
+	font-size: 0.85rem;
+	color: var(--color-text);
+	overflow-wrap: anywhere;
+}
+
+.result-modal-error {
+	margin-top: var(--space-4);
+	padding: var(--space-3);
+	background: var(--color-error-soft);
+	border: 1px solid var(--color-error);
+	border-radius: var(--radius);
+}
+
+.result-modal-error-framing {
+	margin: 0 0 var(--space-2);
+	font-size: 0.85rem;
+	font-weight: 500;
+	color: var(--color-error);
+}
+
+.result-modal-error-message {
+	font-size: 0.95rem;
+	line-height: 1.5;
+	color: var(--color-text);
+}
+
+.result-modal-error-message.markdown p {
+	margin: 0.2rem 0;
+}
+
+.result-modal-error-actions {
+	margin-top: var(--space-3);
+}
+
+.result-modal-copy {
+	padding: var(--space-1) var(--space-3);
+	border: 1px solid var(--color-error);
+	border-radius: var(--radius-sm);
+	background: var(--color-surface);
+	color: var(--color-error);
+	font-size: 0.8rem;
+	font-weight: 500;
+	cursor: pointer;
+}
+
+.result-modal-copy:hover {
+	background: var(--color-error-soft);
+}
+
+.result-modal-actions {
+	margin-top: var(--space-5);
+	display: flex;
+	justify-content: flex-end;
+}
+
+.result-modal-close {
+	padding: var(--space-2) var(--space-4);
+	border: none;
+	border-radius: var(--radius-sm);
+	background: var(--color-accent);
+	color: #ffffff;
+	font-weight: 500;
+	cursor: pointer;
+}
+
+/* The terminal-result call-to-action node, rendered as a layered 3D "bezel + bevel + face" button modeled on a classic chrome-rimmed pushbutton. Three stacked SVG rects read as a raised, chrome-rimmed solid object: a grey-gradient bezel (the brushed-metal rim), a radial-gradient inner bevel (the beveled edge), and the accent- or error-gradient face (the colored surface). A cast drop-shadow lifts the whole button off the surface; hover lifts it further; press sinks it (the button depresses). All within the same NODE_WIDTH × NODE_HEIGHT box, so layout is unchanged. The inactive (modal-closed) and active (modal-open) states share the same 3D body — the active state adds a glowing inner ring (accent blue for success, error red for a failed run) + a stronger pulse so the open-modal connection reads. The gradients are declared inline in the vnode; the rules below carry the label/cast/motion styling. */
+.flow-cta {
+	cursor: pointer;
+}
+
+.flow-cta-button {
+	filter: drop-shadow(0 2px 1px rgba(0, 0, 0, 0.35)) drop-shadow(0 5px 7px rgba(31, 111, 235, 0.32));
+	transition: filter 0.12s ease;
+}
+
+.flow-cta:hover .flow-cta-button {
+	filter: drop-shadow(0 2px 1px rgba(0, 0, 0, 0.4)) drop-shadow(0 8px 13px rgba(31, 111, 235, 0.55));
+}
+
+.flow-cta:active .flow-cta-button {
+	filter: drop-shadow(0 1px 0 rgba(0, 0, 0, 0.45)) drop-shadow(0 1px 2px rgba(31, 111, 235, 0.2));
+}
+
+.flow-cta-label {
+	fill: #ffffff;
+	font-size: 15px;
+	font-weight: 700;
+	/* A faint dark text stroke so the white label stays legible over the gradient face. */
+	paint-order: stroke;
+	stroke: rgba(0, 0, 0, 0.3);
+	stroke-width: 0.6;
+	stroke-linejoin: round;
+}
+
+/* The active state's glowing inner ring: a brightened stroke over the face so the open-modal connection reads. It pulses. The tone attribute selects accent blue (success/needs-clarification) vs error red (a failed run) so the ring matches the face. */
+.flow-cta-active-ring {
+	fill: none;
+	stroke-width: 2.5;
+	animation: flow-cta-active-pulse 1.3s ease-in-out infinite;
+}
+
+.flow-cta-active-ring[data-tone='accent'] {
+	stroke: #8ec5ff;
+}
+
+.flow-cta-active-ring[data-tone='error'] {
+	stroke: #ffb3b3;
+}
+
+@keyframes flow-cta-active-pulse {
+	0%,
+	100% {
+		stroke-opacity: 1;
+	}
+	50% {
+		stroke-opacity: 0.4;
+	}
+}
+
+/* The lift/depress translate lives on the button's inner <g> so hover raises the button off the surface and press sinks it back down — the physical-button feel. transform-box/origin keep the motion centered on the button's bounding box; the host <g>'s translate (the column-1 position) is untouched. */
+.flow-cta:not(.flow-cta--active) .flow-cta-button {
+	transform-box: fill-box;
+	transform-origin: center;
+	transition: transform 0.1s ease, filter 0.12s ease;
+}
+
+.flow-cta:not(.flow-cta--active):hover .flow-cta-button {
+	transform: translateY(-2px);
+}
+
+.flow-cta:not(.flow-cta--active):active .flow-cta-button {
+	transform: translateY(2px);
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.flow-cta-button,
+	.flow-cta-active-ring,
+	.flow-cta:not(.flow-cta--active) .flow-cta-button {
+		animation: none;
+		transition: none;
+		transform: none;
+	}
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.result-modal-card {
 		animation: none;
 	}
 }

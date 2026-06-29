@@ -420,15 +420,40 @@ describe('renderFlowView', () => {
 		expect(plannerTitle).toContain('4,380 tokens')
 	})
 
-	test('a small node is neutral: the top bar carries no per-invocation status coloring', () => {
-		// The strip is cumulative/aggregate history, so a slot never turns red or green even when the role's last invocation errored.
-		const model = {
+	test('a small node is neutral except for terminal failure: a status of success/needs_clarification does not color the slot, but error turns it red', () => {
+		// The strip is cumulative/aggregate history, so a slot carries no per-invocation status coloring for success — but a slot whose run ended in failure turns red so the failing role reads at a glance against an otherwise neutral strip.
+		const successModel = {
+			mainArea: { nodes: [{ id: 'you', kind: 'you', label: 'You', column: 0, row: 0 }], edges: [] },
+			topBar: { nodes: [{ id: 'coder', kind: 'role', label: 'Coder', invocations: 1, status: 'success' }] },
+		}
+		const successView: Vnode = renderFlowView(fakeH, successModel)
+		const successGroup = allByTag(successView, 'g').find((g) => ((g.props.class as string) ?? '').includes('flow-small-node'))!
+		expect((successGroup.props.class as string) ?? '').toBe('flow-small-node')
+
+		const errorModel = {
 			mainArea: { nodes: [{ id: 'you', kind: 'you', label: 'You', column: 0, row: 0 }], edges: [] },
 			topBar: { nodes: [{ id: 'coder', kind: 'role', label: 'Coder', invocations: 1, status: 'error' }] },
 		}
+		const errorView: Vnode = renderFlowView(fakeH, errorModel)
+		const errorGroup = allByTag(errorView, 'g').find((g) => ((g.props.class as string) ?? '').includes('flow-small-node'))!
+		expect((errorGroup.props.class as string) ?? '').toBe('flow-small-node flow-small-node--error')
+		// The error slot's box stroke and count text both read the error token.
+		const box = byTag(errorGroup, 'rect').find((r) => r.props.class === 'flow-small-node-box')
+		expect(box).toBeDefined()
+		const count = byTag(errorGroup, 'text').find((t) => t.props.class === 'flow-small-node-count')
+		expect(count).toBeDefined()
+	})
+
+	test('the failed-run fixture surfaces the failing role\u2019s top-bar slot in error', () => {
+		// failed-run frame 4: the run settled to error with only the root You in the main area; the coder's top-bar slot carries status:error so it renders red.
+		const model = frameModel('failed-run', 4)
 		const view: Vnode = renderFlowView(fakeH, model)
-		const group = allByTag(view, 'g').find((g) => ((g.props.class as string) ?? '').includes('flow-small-node'))!
-		expect((group.props.class as string) ?? '').toBe('flow-small-node')
+		const smallNodes = allByTag(view, 'g').filter((g) => ((g.props.class as string) ?? '').includes('flow-small-node'))
+		const coderSlot = smallNodes.find((g) => (g.props.class as string).includes('flow-small-node--error'))
+		expect(coderSlot).toBeDefined()
+		const title = byTag(coderSlot!, 'title')[0]!.children.join('')
+		expect(title).toContain('The builder')
+		expect(title).toContain('errored')
 	})
 
 	test('top-bar nodes wrap into rows of TOP_BAR_PER_ROW', () => {
@@ -442,6 +467,118 @@ describe('renderFlowView', () => {
 		const rowTwo = smallNodes.slice(TOP_BAR_PER_ROW)
 		for (const g of rowOne) expect(g.props.transform).toContain(',0)')
 		for (const g of rowTwo) expect(g.props.transform).toContain(`,${SMALL_SIZE + SMALL_GAP})`)
+	})
+})
+
+describe('renderFlowView — terminal-result CTA node', () => {
+	const { NODE_WIDTH: NW, NODE_HEIGHT: NH, COL_GAP: CG } = FLOW_VIEW_CONSTANTS
+	const youOnlyModel = () => ({
+		mainArea: { nodes: [{ id: 'you', kind: 'you', label: 'You', column: 0, row: 0 }], edges: [] },
+		topBar: { nodes: [] },
+	})
+
+	test('renders no CTA node when no cta descriptor is passed', () => {
+		const view: Vnode = renderFlowView(fakeH, youOnlyModel())
+		expect(allByTag(view, 'g').some((g) => ((g.props.class as string) ?? '').includes('flow-cta'))).toBe(false)
+	})
+
+	test('renders the CTA as a layered 3D button at column 1, clickable, with the standard node size and three gradient layers (no gloss)', () => {
+		const cta = { label: 'View result', active: false, tone: 'accent', onclick: [() => ({})] }
+		const view: Vnode = renderFlowView(fakeH, youOnlyModel(), FLOW_VIEW_CONSTANTS.DEFAULT_MIN_COLUMNS, undefined, cta)
+		const ctaGroup = allByTag(view, 'g').find((g) => ((g.props.class as string) ?? '') === 'flow-node flow-cta')
+		expect(ctaGroup).toBeDefined()
+		expect(ctaGroup!.props.onclick).toBe(cta.onclick)
+		expect(ctaGroup!.props.transform).toBe(`translate(${NW + CG},0)`)
+		// The three stacked layers of the chrome-rimmed button: bezel (rim), bevel (beveled edge), face (accent surface).
+		const bezel = allByTag(ctaGroup!, 'rect').find((r) => r.props.class === 'flow-cta-bezel')
+		expect(bezel).toBeDefined()
+		expect(bezel!.props.width).toBe(NW)
+		expect(bezel!.props.height).toBe(NH)
+		expect(bezel!.props.fill).toBe('url(#flow-cta-bezel)')
+		expect(allByTag(ctaGroup!, 'rect').some((r) => r.props.class === 'flow-cta-bevel' && r.props.fill === 'url(#flow-cta-bevel)')).toBe(true)
+		expect(allByTag(ctaGroup!, 'rect').some((r) => r.props.class === 'flow-cta-face' && r.props.fill === 'url(#flow-cta-face-grad)')).toBe(true)
+		// The gloss layer was removed.
+		expect(allByTag(ctaGroup!, 'rect').some((r) => r.props.class === 'flow-cta-gloss')).toBe(false)
+		// The three gradients are declared inline as SVG <defs> so the button is self-contained.
+		expect(allByTag(ctaGroup!, 'linearGradient').filter((g) => g.props.id === 'flow-cta-bezel').length).toBe(1)
+		expect(allByTag(ctaGroup!, 'radialGradient').filter((g) => g.props.id === 'flow-cta-bevel').length).toBe(1)
+		expect(allByTag(ctaGroup!, 'linearGradient').filter((g) => g.props.id === 'flow-cta-face-grad').length).toBe(1)
+		// The label sits over the face.
+		const label = allByTag(ctaGroup!, 'text').find((t) => t.props.class === 'flow-cta-label')
+		expect(label).toBeDefined()
+		expect(label!.children.join('')).toBe('View result')
+		// Inactive: no active ring.
+		expect(allByTag(ctaGroup!, 'rect').some((r) => r.props.class === 'flow-cta-active-ring')).toBe(false)
+	})
+
+	test('an error-tone CTA uses the red face gradient', () => {
+		const cta = { label: 'View error', active: false, tone: 'error', onclick: [() => ({})] }
+		const view: Vnode = renderFlowView(fakeH, youOnlyModel(), FLOW_VIEW_CONSTANTS.DEFAULT_MIN_COLUMNS, undefined, cta)
+		const ctaGroup = allByTag(view, 'g').find((g) => {
+			const c = (g.props.class as string) ?? ''
+			return c.includes('flow-cta') && !c.includes('flow-cta-edge') && !c.includes('flow-cta-button')
+		})!
+		const face = allByTag(ctaGroup, 'rect').find((r) => r.props.class === 'flow-cta-face')
+		expect(face).toBeDefined()
+		expect(face!.props.fill).toBe('url(#flow-cta-face-error)')
+		expect(allByTag(ctaGroup, 'linearGradient').some((g) => g.props.id === 'flow-cta-face-error')).toBe(true)
+	})
+
+	test('an inactive CTA still renders the You→CTA edge as a settled grey line (the same line that flows when active)', () => {
+		const cta = { label: 'View result', active: false, tone: 'accent', onclick: [() => ({})] }
+		const view: Vnode = renderFlowView(fakeH, youOnlyModel(), FLOW_VIEW_CONSTANTS.DEFAULT_MIN_COLUMNS, undefined, cta)
+		const edgeWrapper = allByTag(view, 'g').find((g) => ((g.props.class as string) ?? '') === 'flow-cta-edge')
+		expect(edgeWrapper).toBeDefined()
+		const path = byTag(edgeWrapper!, 'path')[0]
+		expect(path).toBeDefined()
+		// Inactive: the edge is a settled static line, not flowing.
+		const pathClass = (path!.props.class as string) ?? ''
+		expect(pathClass).toContain('graph-edge')
+		expect(pathClass).not.toContain('graph-edge--flowing')
+	})
+
+	test('an active CTA turns blue (active ring) and its You→CTA edge becomes a flowing line', () => {
+		const cta = { label: 'View result', active: true, tone: 'accent', onclick: [() => ({})] }
+		const view: Vnode = renderFlowView(fakeH, youOnlyModel(), FLOW_VIEW_CONSTANTS.DEFAULT_MIN_COLUMNS, undefined, cta)
+		const ctaGroup = allByTag(view, 'g').find((g) => {
+			const c = (g.props.class as string) ?? ''
+			return c.includes('flow-cta') && !c.includes('flow-cta-edge') && !c.includes('flow-cta-button')
+		})!
+		// The active state adds a glowing ring rect over the face.
+		const ring = allByTag(ctaGroup, 'rect').find((r) => r.props.class === 'flow-cta-active-ring')
+		expect(ring).toBeDefined()
+		// The CTA edge is now a flowing call edge.
+		const edgeWrapper = allByTag(view, 'g').find((g) => ((g.props.class as string) ?? '') === 'flow-cta-edge')
+		expect(edgeWrapper).toBeDefined()
+		const path = byTag(edgeWrapper!, 'path')[0]
+		expect(path).toBeDefined()
+		expect((path!.props.class as string)).toContain('graph-edge--flowing')
+		// The edge is drawn You→CTA: from You's right face (x = NODE_WIDTH) to the CTA's left face.
+		const d = path!.props.d as string
+		expect(d.startsWith(`M ${NW} `)).toBe(true)
+	})
+
+	test('the CTA button and its edge are always present on a terminal frame whether active or inactive', () => {
+		// Both states render the button + the edge; only the edge's state and the active ring differ.
+		const inactive: Vnode = renderFlowView(fakeH, youOnlyModel(), FLOW_VIEW_CONSTANTS.DEFAULT_MIN_COLUMNS, undefined, { label: 'View result', active: false, tone: 'accent', onclick: [() => ({})] })
+		const active: Vnode = renderFlowView(fakeH, youOnlyModel(), FLOW_VIEW_CONSTANTS.DEFAULT_MIN_COLUMNS, undefined, { label: 'View result', active: true, tone: 'accent', onclick: [() => ({})] })
+		expect(allByTag(inactive, 'g').some((g) => ((g.props.class as string) ?? '').includes('flow-cta-button'))).toBe(true)
+		expect(allByTag(active, 'g').some((g) => ((g.props.class as string) ?? '').includes('flow-cta-button'))).toBe(true)
+		expect(allByTag(inactive, 'g').some((g) => ((g.props.class as string) ?? '') === 'flow-cta-edge')).toBe(true)
+		expect(allByTag(active, 'g').some((g) => ((g.props.class as string) ?? '') === 'flow-cta-edge')).toBe(true)
+	})
+
+	test('the error-status CTA carries the red face + an error-tone active ring when active', () => {
+		const cta = { label: 'View error', active: true, tone: 'error', onclick: [() => ({})] }
+		const view: Vnode = renderFlowView(fakeH, youOnlyModel(), FLOW_VIEW_CONSTANTS.DEFAULT_MIN_COLUMNS, undefined, cta)
+		const ctaGroup = allByTag(view, 'g').find((g) => {
+			const c = (g.props.class as string) ?? ''
+			return c.includes('flow-cta') && !c.includes('flow-cta-edge') && !c.includes('flow-cta-button')
+		})!
+		const label = allByTag(ctaGroup, 'text').find((t) => t.props.class === 'flow-cta-label')!
+		expect(label.children.join('')).toBe('View error')
+		const ring = allByTag(ctaGroup, 'rect').find((r) => r.props.class === 'flow-cta-active-ring')!
+		expect(ring.props['data-tone']).toBe('error')
 	})
 })
 

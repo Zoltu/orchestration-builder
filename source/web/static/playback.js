@@ -5,6 +5,7 @@ import { fixtures } from './fixtures.js'
 import { renderFlowView, deriveLifecycle, deriveNowCaption, DEFAULT_MIN_COLUMNS } from './flow-view.js'
 import { createMarkdownRenderer } from './markdown-render.js'
 import { QuestionModal, derivePendingQuestion } from './question-modal.js'
+import { ResultModal, deriveTerminalResult } from './result-modal.js'
 
 // The question modal renders agent-authored question text/context as sanitized Markdown, so the harness shares the product client's Markdown pipeline rather than a local copy. Constructed once against this module's `h` and reused for every modal render.
 const renderMarkdown = createMarkdownRenderer(h)
@@ -62,13 +63,13 @@ function Tick(state) {
 	const total = currentFixture(state).frames.length
 	const next = state.frameIndex + 1
 	if (next >= total) return { ...state, playing: false }
-	return { ...state, frameIndex: next }
+	return { ...state, frameIndex: next, resultModalOpen: computeResultModalOpen(state.scenarioIndex, state.frameIndex, next, state.resultModalOpen) }
 }
 
 function SelectScenario(state, event) {
 	const index = Number(event.target.value)
 	if (!Number.isInteger(index) || index < 0 || index >= fixtures.length) return state
-	return { ...state, scenarioIndex: index, frameIndex: 0, playing: false }
+	return { ...state, scenarioIndex: index, frameIndex: 0, playing: false, resultModalOpen: computeResultModalOpen(index, -1, 0, false) }
 }
 
 function TogglePlay(state) {
@@ -76,7 +77,7 @@ function TogglePlay(state) {
 	if (!state.playing) {
 		// Restart from the beginning when playback had reached the end.
 		const startIndex = state.frameIndex >= total - 1 ? 0 : state.frameIndex
-		return { ...state, frameIndex: startIndex, playing: true }
+		return { ...state, frameIndex: startIndex, playing: true, resultModalOpen: computeResultModalOpen(state.scenarioIndex, state.frameIndex, startIndex, state.resultModalOpen) }
 	}
 	return { ...state, playing: false }
 }
@@ -84,13 +85,13 @@ function TogglePlay(state) {
 function Step(state, delta) {
 	const total = currentFixture(state).frames.length
 	const next = Math.max(0, Math.min(total - 1, state.frameIndex + delta))
-	return { ...state, frameIndex: next, playing: false }
+	return { ...state, frameIndex: next, playing: false, resultModalOpen: computeResultModalOpen(state.scenarioIndex, state.frameIndex, next, state.resultModalOpen) }
 }
 
 function Scrub(state, event) {
 	const index = Number(event.target.value)
 	if (!Number.isInteger(index) || index < 0 || index >= currentFixture(state).frames.length) return state
-	return { ...state, frameIndex: index, playing: false }
+	return { ...state, frameIndex: index, playing: false, resultModalOpen: computeResultModalOpen(state.scenarioIndex, state.frameIndex, index, state.resultModalOpen) }
 }
 
 // The pending ask_human question for the current frame, or undefined when none is waiting. Derived from the frame's run-view question history (an entry without an answer is one the human has not yet answered) so the modal appears exactly on the frames that model a pending question.
@@ -103,7 +104,53 @@ function SubmitQuestionAnswer(state, event) {
 	event.preventDefault()
 	const total = currentFixture(state).frames.length
 	const next = Math.min(total - 1, state.frameIndex + 1)
-	return { ...state, frameIndex: next, playing: false }
+	return { ...state, frameIndex: next, playing: false, resultModalOpen: computeResultModalOpen(state.scenarioIndex, state.frameIndex, next, state.resultModalOpen) }
+}
+
+// --- Result modal ----------------------------------------------------------
+// The result modal fires once when the selected run transitions to a terminal status (success/error/needs_clarification), then dismisses; a "View result" CTA in the control bar re-opens it on demand. The harness is fixture-driven, so "transition" is the frame-to-frame status change: a frame that newly reaches a terminal status opens the modal, a move back to a non-terminal frame closes it, and a move within the terminal tail leaves the current open state alone (no re-fire on every render). There is no backend to record "already shown" across runs, so the transition derivation is pure from frameIndex.
+
+function isTerminalStatus(status) {
+	return status === 'success' || status === 'error' || status === 'needs_clarification'
+}
+
+// The run-view status of a scenario's frame, or null when the frame is absent (a negative index means "no previous frame in this scenario" — a fresh scenario switch).
+function frameStatusAt(scenarioIndex, frameIndex) {
+	if (frameIndex < 0) return null
+	const fixture = fixtures[scenarioIndex]
+	if (fixture === undefined) return null
+	const frame = fixture.frames[frameIndex]
+	return frame === undefined ? null : frame.runView.status
+}
+
+// Whether the result modal should be open after a frame transition into `newFrameIndex` (within one scenario). A fresh arrival (oldFrameIndex < 0) opens the modal iff the new frame is terminal; a transition from non-terminal to terminal opens it; a move within the terminal tail preserves the current open state so the modal does not re-flash on every frame; a move to a non-terminal frame closes it.
+function computeResultModalOpen(scenarioIndex, oldFrameIndex, newFrameIndex, currentlyOpen) {
+	const newStatus = frameStatusAt(scenarioIndex, newFrameIndex)
+	if (!isTerminalStatus(newStatus)) return false
+	const oldStatus = frameStatusAt(scenarioIndex, oldFrameIndex)
+	if (!isTerminalStatus(oldStatus)) return true
+	return currentlyOpen
+}
+
+// A label naming which run a modal belongs to, mirroring the question modal's convention: the run id when present, else the task text, else null. Extracted so the question and result modals share one derivation.
+function runLabelOf(runView) {
+	if (typeof runView.runId === 'string' && runView.runId !== '') return runView.runId
+	if (typeof runView.task === 'string' && runView.task !== '') return runView.task
+	return null
+}
+
+// Copies the raw error JSON to the clipboard when the clipboard API is available. A leaf side-effect in the harness (the product client will do the same against navigator.clipboard); the component receives the handler as an injection so its wiring is exercisable in tests with a fake.
+function copyRawError(rawJson) {
+	const clipboard = navigator?.clipboard
+	if (clipboard !== undefined && typeof clipboard.writeText === 'function') clipboard.writeText(rawJson)
+}
+
+function OpenResultModal(state) {
+	return { ...state, resultModalOpen: true }
+}
+
+function CloseResultModal(state) {
+	return { ...state, resultModalOpen: false }
 }
 
 // The theme toggle pins `data-theme` on the root element so the operator can review the visual foundation in both light and dark regardless of the OS setting. `auto` clears the attribute so the browser's prefers-color-scheme drives the tokens.
@@ -192,7 +239,17 @@ function flowLifecycle(state) {
 function FlowView(state) {
 	const fixture = currentFixture(state)
 	const model = fixture.frames[state.frameIndex].flowModel
-	return renderFlowView(h, model, flowColumnHighWater(state), flowLifecycle(state))
+	// The terminal-result CTA renders as a standard node at column 1 (to the right of You) on every terminal frame — always present, never removed. It is active (blue, with a flowing You→CTA edge) while the result modal is open, and inactive (grey edge, no pulse) when the modal is closed. Clicking it re-opens the modal. The `tone` colors the face — accent blue for success/needs-clarification, error red for a failed run.
+	const terminal = deriveTerminalResult(currentFrame(state).runView)
+	const cta = terminal !== undefined
+		? { label: ctaLabel(terminal.status), active: state.resultModalOpen, tone: terminal.status === 'error' ? 'error' : 'accent', onclick: [OpenResultModal, null] }
+		: undefined
+	return renderFlowView(h, model, flowColumnHighWater(state), flowLifecycle(state), cta)
+}
+
+function ctaLabel(status) {
+	if (status === 'error') return 'View error'
+	return 'View result'
 }
 
 // The current frame's config + runView + flowModel, used by the product surfaces that wrap the flow view. Derived from the same frame the FlowView renders so the surfaces never drift from the graph.
@@ -223,15 +280,19 @@ function NowCaption(state) {
 }
 
 function view(state) {
+	const frame = currentFrame(state)
+	const runView = frame.runView
+	const runLabel = runLabelOf(runView)
 	const flowChildren = [FlowView(state), NowCaption(state)]
 	// The question modal overlays the run view (the flow area), not the whole page, so a future multi-run world can switch away and back. It appears only on frames that model a pending ask_human question.
 	const pending = pendingQuestionOf(state)
 	if (pending !== undefined) {
-		const runView = currentFrame(state).runView
-		const runLabel = typeof runView.runId === 'string' && runView.runId !== ''
-			? runView.runId
-			: (typeof runView.task === 'string' && runView.task !== '' ? runView.task : null)
 		flowChildren.push(QuestionModal(h, { question: pending, runLabel, renderMarkdown, onSubmit: SubmitQuestionAnswer, answerPending: false }))
+	}
+	// The result modal overlays the run view on terminal completion: it auto-fires once when the run transitions to a terminal status (success/error/needs_clarification). The "View result" call-to-action is a standard node in the flow SVG (rendered by FlowView at column 1) that is always present on a terminal frame — blue with a flowing You→CTA edge while the modal is open, grey with no edge when the modal is closed — so the result details are always one click away.
+	const terminal = deriveTerminalResult(runView)
+	if (terminal !== undefined && state.resultModalOpen) {
+		flowChildren.push(ResultModal(h, { descriptor: terminal, runLabel, renderMarkdown, onCopyRaw: copyRawError, onClose: CloseResultModal }))
 	}
 	return h('div', { class: 'pb' }, [
 		CostStrip(state),
@@ -246,6 +307,7 @@ app({
 		frameIndex: 0,
 		playing: false,
 		theme: 'auto',
+		resultModalOpen: false,
 	},
 	view,
 	subscriptions: (state) => [state.playing && onEvery(Tick, PLAY_INTERVAL_MS)],

@@ -145,25 +145,29 @@ function edgeAnchors(kind, fromPos, toPos) {
 	return { fromAnchor: nodeAnchor(fromPos.x, fromPos.y, 'right'), toAnchor: nodeAnchor(toPos.x, toPos.y, 'left') }
 }
 
-// Builds the hover text for a top-bar node from its label and optional cumulative stats. The native SVG <title> element renders this as the browser's tooltip on hover, so the name and token/time detail are reachable without taking layout space in the strip. Each sentence stands on one line; the browser wraps the tooltip naturally.
-function smallNodeTitle(label, invocations, totalTime, totalTokens) {
+// Builds the hover text for a top-bar node from its label and optional cumulative stats. The native SVG <title> element renders this as the browser's tooltip on hover, so the name and token/time detail are reachable without taking layout space in the strip. A slot whose run ended in failure appends "errored" so the status is reachable on hover in addition to the red stroke. Each sentence stands on one line; the browser wraps the tooltip naturally.
+function smallNodeTitle(label, invocations, totalTime, totalTokens, status) {
 	const parts = [label, `${invocations} call${invocations === 1 ? '' : 's'}`]
 	if (totalTime !== undefined) parts.push(`${totalTime}s`)
 	if (totalTokens !== undefined) parts.push(`${totalTokens.toLocaleString()} tokens`)
+	if (status === 'error') parts.push('errored')
 	return parts.join(' \u00b7 ')
 }
 
-// A compact top-bar node: a small square holding just its invocation count, centered. The strip is cumulative/aggregate history (one slot per role/tool type, total invocations), so it carries no per-invocation status — a slot never turns red or green. The role/tool name and cumulative token/time details are carried by a <title> child so they surface on hover without claiming layout space. The group carries both the class and the translate so there is a single wrapping <g> per node.
+// A compact top-bar node: a small square holding just its invocation count, centered. The strip is cumulative/aggregate history (one slot per role/tool type, total invocations), so it carries no per-invocation status — except that a slot whose run ended in failure turns red so the failing role reads at a glance against an otherwise neutral strip. The role/tool name and cumulative token/time details are carried by a <title> child so they surface on hover without claiming layout space. The group carries both the class and the translate so there is a single wrapping <g> per node.
 function SmallNode(h, props) {
 	const label = props.label
 	const invocations = props.invocations
 	const totalTime = props.totalTime
 	const totalTokens = props.totalTokens
+	const status = props.status
 	const x = props.x
 	const y = props.y
 
-	return h('g', { class: 'flow-small-node', transform: translate(x, y) }, [
-		h('title', {}, [smallNodeTitle(label, invocations, totalTime, totalTokens)]),
+	const classes = ['flow-small-node']
+	if (status === 'error') classes.push('flow-small-node--error')
+	return h('g', { class: classes.join(' '), transform: translate(x, y) }, [
+		h('title', {}, [smallNodeTitle(label, invocations, totalTime, totalTokens, status)]),
 		h('rect', { class: 'flow-small-node-box', x: 0, y: 0, width: SMALL_SIZE, height: SMALL_SIZE, rx: 5 }, []),
 		h('text', { class: 'flow-small-node-count', x: SMALL_SIZE / 2, y: SMALL_SIZE / 2 + 1, 'text-anchor': 'middle', 'dominant-baseline': 'middle' }, [String(invocations)]),
 	])
@@ -171,6 +175,88 @@ function SmallNode(h, props) {
 
 function translate(x, y) {
 	return `translate(${x},${y})`
+}
+
+// The terminal-result call-to-action node and its call edge. The CTA is treated like any other main-area node: it is the same size as a graph node (NODE_WIDTH × NODE_HEIGHT), laid out at column 1 to the right of the root You (a space a terminal run always leaves empty, since it settles to only You), and it is always present on a terminal frame — it is not removed when inactive (unlike a finished role, which departs to the top bar). When active (the result modal is open) it turns blue and a flowing You→CTA call edge renders beside it; when inactive (the modal is closed) it is the neutral grey box with no edge. The onclick re-opens the modal. Unlike a settled role node, the CTA renders as a distinct 3D button (a vertical gradient fill + a top highlight + a bottom shadow band + a cast drop-shadow) so it reads as pressable at a glance; the inactive and active states share the same button body, with the active state adding the blue stroke and pulse.
+function CtaNode(h, props) {
+	const label = props.label
+	const active = props.active === true
+	const tone = props.tone === 'error' ? 'error' : 'accent'
+	const x = props.x
+	const y = props.y
+	const onclick = props.onclick
+	const classes = active ? 'flow-node flow-cta flow-cta--active' : 'flow-node flow-cta'
+	return h('g', { class: classes, transform: translate(x, y), onclick }, [
+		CtaButton(h, { label, active, tone }),
+	])
+}
+
+// The 3D button body, modeled on the classic layered "bezel + bevel + face" button. Three stacked rects read as a raised, chrome-rimmed solid object:
+//   1. Bezel — the full-size outer frame, a vertical grey gradient (light → dark → light) that reads as the brushed-metal rim around the button.
+//   2. Inner bevel — an inset rect with a radial grey gradient, the beveled edge between the rim and the colored face.
+//   3. Face — a further-inset rect with the accent (or error) vertical gradient (light top → dark bottom), the button's colored surface.
+// A cast drop-shadow (on the outer <g> via CSS) lifts the whole button off the surface. The gradients are declared inline (stable ids) so the button is self-contained. The greys and the accent/error are drawn from the project palette so the button reads as part of the interface even though it is the one obviously-3D element. The `tone` ('accent' for success/needs-clarification, 'error' for a failed run) selects the face gradient so a failed run's button is red, not blue.
+function CtaButton(h, props) {
+	const label = props.label
+	const active = props.active === true
+	const tone = props.tone === 'error' ? 'error' : 'accent'
+	const bezelId = 'flow-cta-bezel'
+	const bevelId = 'flow-cta-bevel'
+	const faceId = tone === 'error' ? 'flow-cta-face-error' : 'flow-cta-face-grad'
+	const insetBevel = 2
+	const insetFace = 5
+	const children = [
+		h('defs', {}, [
+			// Bezel: light → mid → dark → mid grey, mirroring the reference button's rim (a vertical metallic gradient that reads as a rounded chrome edge).
+			h('linearGradient', { id: bezelId, x1: '0', y1: '0', x2: '0', y2: '1' }, [
+				h('stop', { offset: '0%', 'stop-color': '#e2e2e7' }, []),
+				h('stop', { offset: '50%', 'stop-color': '#52606d' }, []),
+				h('stop', { offset: '90%', 'stop-color': '#7b8794' }, []),
+				h('stop', { offset: '100%', 'stop-color': '#cbd2d9' }, []),
+			]),
+			// Inner bevel: a radial grey gradient (bright center → darker edge) that reads as the beveled transition from rim to face.
+			h('radialGradient', { id: bevelId, cx: '0.5', cy: '0.38', r: '0.75' }, [
+				h('stop', { offset: '0%', 'stop-color': '#f0f0f3' }, []),
+				h('stop', { offset: '70%', 'stop-color': '#cbd2d9' }, []),
+				h('stop', { offset: '100%', 'stop-color': '#7b8794' }, []),
+			]),
+			tone === 'error'
+				// Error face: a red vertical gradient (light top → dark bottom), drawn from the project's error palette so a failed run's button reads as an error, not a success.
+				? h('linearGradient', { id: faceId, x1: '0', y1: '0', x2: '0', y2: '1' }, [
+					h('stop', { offset: '0%', 'stop-color': '#ff8a8a' }, []),
+					h('stop', { offset: '48%', 'stop-color': '#f05050' }, []),
+					h('stop', { offset: '52%', 'stop-color': '#cf222e' }, []),
+					h('stop', { offset: '100%', 'stop-color': '#a31515' }, []),
+				])
+				// Accent face: the accent vertical gradient (light top → dark bottom), the button's colored surface.
+				: h('linearGradient', { id: faceId, x1: '0', y1: '0', x2: '0', y2: '1' }, [
+					h('stop', { offset: '0%', 'stop-color': '#5aa9ff' }, []),
+					h('stop', { offset: '48%', 'stop-color': '#2b7de9' }, []),
+					h('stop', { offset: '52%', 'stop-color': '#1f6feb' }, []),
+					h('stop', { offset: '100%', 'stop-color': '#155abf' }, []),
+				]),
+		]),
+		// 1. Bezel: the full-size chrome rim.
+		h('rect', { class: 'flow-cta-bezel', x: 0, y: 0, width: NODE_WIDTH, height: NODE_HEIGHT, rx: 9, fill: `url(#${bezelId})` }, []),
+		// 2. Inner bevel: inset 2px, the beveled edge.
+		h('rect', { class: 'flow-cta-bevel', x: insetBevel, y: insetBevel, width: NODE_WIDTH - 2 * insetBevel, height: NODE_HEIGHT - 2 * insetBevel, rx: 7, fill: `url(#${bevelId})` }, []),
+		// 3. Face: inset 5px, the accent- or error-colored surface.
+		h('rect', { class: 'flow-cta-face', x: insetFace, y: insetFace, width: NODE_WIDTH - 2 * insetFace, height: NODE_HEIGHT - 2 * insetFace, rx: 5, fill: `url(#${faceId})` }, []),
+		h('text', { class: 'flow-cta-label', x: NODE_WIDTH / 2, y: NODE_HEIGHT / 2 + 6, 'text-anchor': 'middle' }, [label]),
+	]
+	if (active) children.push(h('rect', { class: 'flow-cta-active-ring', 'data-tone': tone, x: insetFace, y: insetFace, width: NODE_WIDTH - 2 * insetFace, height: NODE_HEIGHT - 2 * insetFace, rx: 5 }, []))
+	return h('g', { class: 'flow-cta-button' }, children)
+}
+
+// The You→CTA call edge, always rendered while the CTA is present. It uses the same GraphEdge primitive and 'call' routing as a real call edge (right face of You → left face of the CTA). When inactive (modal closed) it is a settled grey 'static' edge — the ordinary connection line between You and the node, no different from a settled call edge anywhere else in the graph. When active (modal open) it becomes a 'flowing' edge (blue marching ants) so it reads as the flow moving toward the result. So clicking the button turns the existing grey line into the flowing line; closing the modal turns it back to grey. The edge is never removed, only its state changes — it is the same connection in both states.
+function CtaEdge(h, props) {
+	const fromPos = props.fromPos
+	const toPos = props.toPos
+	const active = props.active === true
+	const { fromAnchor, toAnchor } = edgeAnchors('call', fromPos, toPos)
+	return h('g', { class: 'flow-cta-edge' }, [
+		GraphEdge(h, { fromAnchor, toAnchor, state: active ? 'flowing' : 'static', kind: 'call' }),
+	])
 }
 
 // Renders the main area as an SVG: edges first (so node boxes paint over any anchor overlap), then nodes translated to their call-depth positions. The viewBox is sized to the laid-out content so preserveAspectRatio can fit it to the page.
@@ -190,8 +276,8 @@ function topBarHeight(count) {
 	return rows * SMALL_SIZE + (rows - 1) * SMALL_GAP
 }
 
-// Renders the whole flow view as a single shared SVG containing the history top bar (small nodes at the top) and the active-flow main area (nodes/edges below, offset by the bar height plus a gap). Sharing one SVG is what makes the depart animation work: a node leaving the main area travels from its main-area position to its top-bar slot in the same coordinate space, so the travel lands on the slot and the counter increment reads as the node arriving. `minColumns` floors the main-area canvas width; `lifecycle` carries the frame-diff entering/departing descriptor (computed by `deriveLifecycle` from the previous and current frames' models); when omitted, no node enters or departs and every edge settles to the animation state derived from the model.
-export function renderFlowView(h, model, minColumns = DEFAULT_MIN_COLUMNS, lifecycle) {
+// Renders the whole flow view as a single shared SVG containing the history top bar (small nodes at the top) and the active-flow main area (nodes/edges below, offset by the bar height plus a gap). Sharing one SVG is what makes the depart animation work: a node leaving the main area travels from its main-area position to its top-bar slot in the same coordinate space, so the travel lands on the slot and the counter increment reads as the node arriving. `minColumns` floors the main-area canvas width; `lifecycle` carries the frame-diff entering/departing descriptor (computed by `deriveLifecycle` from the previous and current frames' models); `cta` (optional) carries the terminal-result call-to-action descriptor (`{ label, active, onclick }`) rendered as a standard-sized node at column 1 — always present on a terminal frame, blue with a flowing You→CTA edge when active (modal open), grey with no edge when inactive (modal closed).
+export function renderFlowView(h, model, minColumns = DEFAULT_MIN_COLUMNS, lifecycle, cta) {
 	const mainArea = model.mainArea
 	const topBar = model.topBar
 	const nodes = mainArea.nodes
@@ -219,9 +305,16 @@ export function renderFlowView(h, model, minColumns = DEFAULT_MIN_COLUMNS, lifec
 	const width = Math.max(topBarWidth(tbCount), mainWidth)
 	const height = tbHeight + (tbCount === 0 ? 0 : TOPBAR_GAP) + mainHeight
 
+	// The CTA node sits at column 1 (the standard main-area position to the right of the root You), same row and same size as a graph node, so no viewBox adjustment is needed — it falls within the 5-column floor and the You row's height. Computed here so the rendering below can build the edge + node vnodes.
+	let ctaLayout = null
+	if (cta !== undefined && cta !== null) {
+		const youPos = positions.get('you') ?? { x: 0, y: mainYOffset }
+		ctaLayout = { x: youPos.x + NODE_WIDTH + COL_GAP, y: youPos.y }
+	}
+
 	const topBarVnodes = topBar.nodes.map((node, index) => {
 		const pos = topBarPixel(index)
-		return SmallNode(h, { label: node.label, invocations: node.invocations, totalTime: node.totalTime, totalTokens: node.totalTokens, x: pos.x, y: pos.y })
+		return SmallNode(h, { label: node.label, invocations: node.invocations, totalTime: node.totalTime, totalTokens: node.totalTokens, status: node.status, x: pos.x, y: pos.y })
 	})
 
 	const edgeVnodes = edges.map((edge, index) => {
@@ -273,12 +366,16 @@ export function renderFlowView(h, model, minColumns = DEFAULT_MIN_COLUMNS, lifec
 		])
 	}) : []
 
-	return h('svg', { class: 'flow-view-svg', viewBox: `0 0 ${width} ${height}`, preserveAspectRatio: 'xMidYMid meet', xmlns: 'http://www.w3.org/2000/svg' }, [
-		...topBarVnodes,
-		...edgeVnodes,
-		...nodeVnodes,
-		...departingVnodes,
-	])
+	// The terminal-result CTA node and its You→CTA call edge are layered over the settled graph after the model nodes so they paint on top. The edge is always present on a terminal frame — settled grey when inactive (the ordinary connection line between You and the node), flowing blue when active (the modal is open) — so clicking the button turns the existing grey line into the flowing line and closing the modal turns it back. The node is always present too. Both are pushed onto the children array only when present so the SVG never carries a null child (the real renderer drops null children, but keeping the array clean avoids relying on that).
+	const svgChildren = [...topBarVnodes, ...edgeVnodes, ...nodeVnodes, ...departingVnodes]
+	if (ctaLayout !== null) {
+		const youPos = positions.get('you') ?? { x: 0, y: mainYOffset }
+		const isActive = cta.active === true
+		svgChildren.push(CtaEdge(h, { fromPos: youPos, toPos: ctaLayout, active: isActive }))
+		svgChildren.push(CtaNode(h, { label: cta.label, active: isActive, tone: cta.tone, x: ctaLayout.x, y: ctaLayout.y, onclick: cta.onclick }))
+	}
+
+	return h('svg', { class: 'flow-view-svg', viewBox: `0 0 ${width} ${height}`, preserveAspectRatio: 'xMidYMid meet', xmlns: 'http://www.w3.org/2000/svg' }, svgChildren)
 }
 
 // A reusable empty set so the no-lifecycle path avoids allocating a Set per render.
