@@ -1260,7 +1260,6 @@ li:last-child {
 .pb-theme-toggle {
 	display: inline-flex;
 	gap: 0.15rem;
-	margin-left: auto;
 }
 
 .pb-theme-toggle button {
@@ -1954,8 +1953,148 @@ li:last-child {
 	color: var(--color-text);
 }
 
+/* --- Flow/Sequence view toggle (dev playback harness) ------------------------ */
+/* A segmented control that switches the run-view centerpiece between the product surface (Flow, default) and the debug surface (Sequence). It mirrors the theme toggle's segmented control so the two debug affordances read as a pair; the active segment carries the accent so the current view is unambiguous. `margin-left: auto` pushes it (and the theme toggle beside it) to the right end of the controls row. */
+
+.pb-view-toggle {
+	display: inline-flex;
+	gap: 0.15rem;
+	margin-left: auto;
+}
+
+.pb-view-toggle button {
+	border: 1px solid var(--color-border);
+	border-radius: var(--radius-sm);
+	background: var(--color-surface);
+	color: var(--color-text-muted);
+	font-size: 0.75rem;
+	padding: 0.1rem var(--space-2);
+	cursor: pointer;
+}
+
+.pb-view-toggle button.is-active {
+	background: var(--color-accent-soft);
+	border-color: var(--color-accent);
+	color: var(--color-accent);
+}
+
+/* --- Sequence diagram view (dev playback harness) --------------------------- */
+/* The debug "Sequence" view: one column per role plus a Human and a "tools" column, with each log event drawn as a horizontal message on a vertical time axis. It is a debug surface, so it grows long down the page; the SVG sizes to its viewBox and fits the container via preserveAspectRatio (a future zoom/pan step is a viewBox tweak). Colors reuse the --svg-* tokens so the diagram follows the light/dark theme with the flow graph. */
+
+.sequence-view-svg {
+	flex: 1 1 auto;
+	min-height: 0;
+	width: 100%;
+	padding: var(--space-3);
+	box-sizing: border-box;
+	overflow: visible;
+	display: block;
+}
+
+.sequence-view-svg text {
+	font-family: var(--font-body);
+	user-select: none;
+}
+
+/* Column headers sit above their lifelines and are the friendly role/tool labels (or "You"/"Tools" for the special columns). The tools column reads as muted so the role chain stays focal. */
+.seq-column-label {
+	fill: var(--svg-node-label);
+	font-size: 12px;
+	font-weight: 600;
+}
+
+.seq-column--tools .seq-column-label,
+.seq-column--human .seq-column-label {
+	fill: var(--svg-node-sublabel);
+}
+
+/* Lifelines are dashed verticals dropped from each header to the bottom of the message area, the classic sequence-diagram convention for an object's existence over time. */
+.seq-lifeline {
+	stroke: var(--svg-edge);
+	stroke-width: 1;
+	stroke-dasharray: 3 4;
+}
+
+/* Messages are horizontal arrows between two columns, each landing on a terminal node on the target column's lifeline. Past (settled) calls are solid neutral; past returns are dashed neutral. The current operation — the last (bottom) message — mirrors the flow view's in-flight edge: a call in flight is blue and marching (seq-message--flowing), a successful return is green and marching (seq-message--returning), an error return is red and marching (seq-message--error). The colors and the marching-ants animation are the same tokens/keyframe the flow view's graph-edge--* uses, so the two views' active lines read identically. */
+.seq-message {
+	stroke: var(--svg-edge);
+	stroke-width: 1.4;
+	fill: none;
+}
+
+.seq-message--return {
+	stroke-dasharray: 5 4;
+}
+
+.seq-message--flowing {
+	stroke: var(--svg-flow-accent);
+	stroke-dasharray: 6 4;
+	animation: graph-edge-flow 0.8s linear infinite;
+}
+
+.seq-message--returning {
+	stroke: var(--svg-success);
+	stroke-dasharray: 6 4;
+	animation: graph-edge-flow 0.8s linear infinite;
+}
+
+.seq-message--error {
+	stroke: var(--svg-error);
+	stroke-dasharray: 6 4;
+	animation: graph-edge-flow 0.8s linear infinite;
+}
+
+/* The arrowheads: one marker per line color so the arrowhead fill matches its line. neutral serves every past message; flowing/returning/error match the active line's color. */
+.seq-arrowhead--neutral {
+	fill: var(--svg-edge);
+}
+
+.seq-arrowhead--flowing {
+	fill: var(--svg-flow-accent);
+}
+
+.seq-arrowhead--returning {
+	fill: var(--svg-success);
+}
+
+.seq-arrowhead--error {
+	fill: var(--svg-error);
+}
+
+/* Terminal nodes: a small rounded rect on the target column's lifeline where each arrow lands — an activation marker big enough to host a small label and the future hover inspector. Past messages' nodes are neutral; the current operation's node (and, for a return, the source node) mirrors the flow view's node highlighting — active (blue, pulsing), success (green), error (red) — via the same tokens and pulse keyframe as graph-node--*, so a highlighted node in the flow view reads the same color in the sequence diagram. */
+.seq-node-box {
+	fill: var(--svg-node-fill);
+	stroke: var(--svg-edge);
+	stroke-width: 1;
+}
+
+.seq-node--active .seq-node-box {
+	stroke: var(--svg-active-pulse);
+	stroke-width: 2;
+	animation: graph-node-pulse 1.4s ease-in-out infinite;
+}
+
+.seq-node--success .seq-node-box {
+	stroke: var(--svg-success);
+	stroke-width: 1.5;
+}
+
+.seq-node--error .seq-node-box {
+	stroke: var(--svg-error);
+	stroke-width: 1.5;
+}
+
 @media (prefers-reduced-motion: reduce) {
 	.tooltip-card {
+		animation: none;
+	}
+	.seq-message--flowing,
+	.seq-message--returning,
+	.seq-message--error {
+		animation: none;
+		stroke-dasharray: none;
+	}
+	.seq-node--active .seq-node-box {
 		animation: none;
 	}
 }

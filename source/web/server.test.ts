@@ -393,6 +393,14 @@ describe('createWebServer dev playback assets', () => {
 		const body = await response.text()
 		expect(body).toContain('renderFlowView')
 	})
+
+	test('GET /sequence-diagram.js serves the sequence-diagram renderer', async () => {
+		const response = await fetch(`${readOnlyBaseUrl}/sequence-diagram.js`)
+		expect(response.status).toBe(200)
+		expect(response.headers.get('content-type')).toContain('text/javascript')
+		const body = await response.text()
+		expect(body).toContain('renderSequenceDiagram')
+	})
 })
 
 describe('createWebServer GET /api/config', () => {

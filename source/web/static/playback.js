@@ -2,7 +2,8 @@
 // Loads the fixture scenarios and renders the current frame's visualization against the SVG primitives, with a slim scenario/playback bar at the top. This is throwaway iteration scaffolding, isolated behind its own entry page (playback.html) so it is removed cleanly when the visualization replaces it; it never touches the real run view in app.js. Scenario details live in the fixtures module, not on this page, so the rendered view is the only thing under analysis.
 import { h, app } from './vendor/hyperapp.js'
 import { fixtures } from './fixtures.js'
-import { renderFlowView, deriveLifecycle, deriveNowCaption, DEFAULT_MIN_COLUMNS } from './flow-view.js'
+import { renderFlowView, deriveFlowAnimation, deriveLifecycle, deriveNowCaption, DEFAULT_MIN_COLUMNS } from './flow-view.js'
+import { deriveSequenceDiagram, deriveSequenceActivity, renderSequenceDiagram, buildCallEdgeColumns, isRealDelegation, buildColumns, filterOrphanToolCalls } from './sequence-diagram.js'
 import { createMarkdownRenderer } from './markdown-render.js'
 import { QuestionModal, derivePendingQuestion } from './question-modal.js'
 import { ResultModal, deriveTerminalResult } from './result-modal.js'
@@ -224,6 +225,12 @@ function SetTheme(state, theme) {
 	return { ...state, theme }
 }
 
+// The Flow/Sequence toggle switches the run-view centerpiece. Flow is the product surface (default); Sequence is the debug surface behind the toggle. The selection is plain state so the view re-renders on switch with no side effects.
+function SetView(state, view) {
+	if (view !== 'flow' && view !== 'sequence') return state
+	return { ...state, view }
+}
+
 // --- View ------------------------------------------------------------------
 
 function ControlButton(text, onclick, disabled) {
@@ -242,6 +249,18 @@ function ThemeToggle(state) {
 	])
 }
 
+// The view toggle is a debug affordance, not the product surface: Flow stays the obvious default and Sequence reads as the secondary investigation view. It mirrors the theme toggle's segmented control so the two debug affordances sit together.
+function ViewButton(label, view, current) {
+	return h('button', { type: 'button', class: `pb-view-btn${view === current ? ' is-active' : ''}`, onclick: [SetView, view] }, label)
+}
+
+function ViewToggle(state) {
+	return h('div', { class: 'pb-view-toggle', role: 'group', 'aria-label': 'run view' }, [
+		ViewButton('Flow', 'flow', state.view),
+		ViewButton('Sequence', 'sequence', state.view),
+	])
+}
+
 function PlaybackControls(state) {
 	const fixture = currentFixture(state)
 	const total = fixture.frames.length
@@ -257,6 +276,7 @@ function PlaybackControls(state) {
 		ControlButton('\u23ed next', [Step, 1], false),
 		h('input', { class: 'pb-scrub', type: 'range', min: '0', max: String(total - 1), step: '1', value: String(index), oninput: Scrub }),
 		h('span', { class: 'pb-frame-counter' }, `frame ${index + 1} / ${total}`),
+		ViewToggle(state),
 		ThemeToggle(state),
 	])
 }
@@ -311,6 +331,67 @@ function ctaLabel(status) {
 	return 'View result'
 }
 
+// The Sequence view: the run rendered as a temporal sequence diagram (columns = Human + roles + tools; messages = horizontal lines ordered by timestamp). It is the debug/investigation surface behind the Flow/Sequence toggle, iterated against the fixtures through the playback harness. Static render this step; the hover inspector and zoom/pan are a later step.
+//
+// Unlike the flow view (which is current-state and consumes only the current frame), the sequence diagram is a *timeline* — it must grow as the run progresses, showing every operation from the run's start up to the current frame. A single fixture frame's `recentLog` is only a 2–3 event sliding window (the flow view needs just the current state), so deriving the diagram from it alone would collapse the timeline to the last couple of events. The harness therefore reconstructs the full log by accumulating each frame's `recentLog` window up to the current frameIndex: the windows overlap contiguously (each is the most-recent N events at that point in the run), so their union, deduplicated by timestamp+type+summary and taken in first-seen order, is the chronological full log. First-seen order is chronological because the window only slides forward — an event appearing for the first time in frame N is always newer than any event that appeared in a frame before N. When the live backend is wired in (step 13), the live run view's `recentLog` (capped server-side at a large page) is the full log already, so the accumulation is a fixture-harness concern that step 13 drops.
+function accumulateRecentLog(state) {
+	const fixture = currentFixture(state)
+	const seen = new Set()
+	const accumulated = []
+	for (let i = 0; i <= state.frameIndex; i++) {
+		const frameValue = fixture.frames[i]
+		const runView = frameValue.runView
+		const recentLog = runView !== null && runView !== undefined && Array.isArray(runView.recentLog) ? runView.recentLog : []
+		// The call-edge set for THIS frame: an agent_call whose parent→child pair doesn't appear as a call edge in the frame where it first appears is an overseer spawn (e.g. a loop_detector in its own row, not a child of the caller), not a real delegation — skip it. Checking the frame where the agent_call FIRST appears (not the current frame) keeps a past delegation in the timeline even after the child departs the main area.
+		const callEdgeColumns = buildCallEdgeColumns(frameValue.flowModel)
+		const columnIds = new Set(buildColumns(frameValue.config).map((column) => column.id))
+		for (const entry of recentLog) {
+			if (entry === null || typeof entry !== 'object') continue
+			const key = `${entry.timestamp}|${entry.type}|${entry.summary}`
+			if (seen.has(key)) continue
+			// Filter overseer agent_calls: a loop_detector spawned via agent_call but sitting in its own row (no call edge from the caller) is not a real delegation — skip it so the sequence diagram matches the flow view's structure.
+			if (entry.type === 'agent_call' && !isRealDelegation(entry.payload, callEdgeColumns, columnIds)) continue
+			seen.add(key)
+			accumulated.push(entry)
+		}
+	}
+	// Drop orphan tool_calls (calls without matching tool_results in the accumulated log) unless the tool is currently in-flight. The fixture's small recentLog windows don't always capture complete call+result pairs — an orphan call is half an interaction and would mislead. A tool_call whose tool is currently flowing in the flow view is kept (it's the in-flight operation whose result hasn't arrived yet).
+	const frame = currentFrame(state)
+	const flowAnimation = deriveFlowAnimation(frame.flowModel)
+	const flowingToolNames = flowingToolNamesOf(frame.flowModel, flowAnimation)
+	return filterOrphanToolCalls(accumulated, flowingToolNames)
+}
+
+// The set of tool names that are currently in-flight (the target of a flowing edge in the flow view). Used to keep an orphan tool_call whose tool is the current in-flight operation.
+function flowingToolNamesOf(flowModel, flowAnimation) {
+	const names = new Set()
+	const nodes = flowModel !== null && flowModel !== undefined && flowModel.mainArea !== null && flowModel.mainArea !== undefined && Array.isArray(flowModel.mainArea.nodes) ? flowModel.mainArea.nodes : []
+	const edges = flowModel !== null && flowModel !== undefined && flowModel.mainArea !== null && flowModel.mainArea !== undefined && Array.isArray(flowModel.mainArea.edges) ? flowModel.mainArea.edges : []
+	const edgeStates = flowAnimation !== null && flowAnimation !== undefined && Array.isArray(flowAnimation.edgeStates) ? flowAnimation.edgeStates : []
+	const nodeById = new Map()
+	for (const node of nodes) {
+		if (node !== null && typeof node === 'object' && typeof node.id === 'string') nodeById.set(node.id, node)
+	}
+	for (let i = 0; i < edges.length; i++) {
+		if (edgeStates[i] !== 'flowing') continue
+		const edge = edges[i]
+		if (edge === null || typeof edge !== 'object') continue
+		const target = nodeById.get(edge.to)
+		if (target === undefined) continue
+		if (target.kind === 'tool' && typeof target.id === 'string') names.add(target.id)
+	}
+	return names
+}
+
+function SequenceView(state) {
+	const frame = currentFrame(state)
+	const runView = { ...frame.runView, recentLog: accumulateRecentLog(state) }
+	const diagram = deriveSequenceDiagram(frame.config, runView)
+	const flowAnimation = deriveFlowAnimation(frame.flowModel)
+	const activity = deriveSequenceActivity(frame.flowModel, flowAnimation, diagram, frame.runView.status)
+	return renderSequenceDiagram(h, diagram, activity)
+}
+
 // The friendly detail card for the currently-open tooltip, or null when none is open. Positioned `fixed` at the pointer via the inline `style` resolved at hover time (flipped to stay on screen), so the card overlays the flow view without claiming layout. The card is `pointer-events: none` (styles.css) and carries no chrome — it is a read-only hover inspector that disappears when the pointer leaves the hovered node/edge.
 function TooltipOverlay(state) {
 	const tooltip = state.tooltip
@@ -354,7 +435,11 @@ function view(state) {
 	const frame = currentFrame(state)
 	const runView = frame.runView
 	const runLabel = runLabelOf(runView)
-	const flowChildren = [FlowView(state), NowCaption(state), TooltipOverlay(state)]
+	// The centerpiece switches on the Flow/Sequence toggle. The flow centerpiece carries its product surfaces (now caption, hover tooltip); the sequence centerpiece is the static debug diagram. The question and result modals overlay the run view regardless of which centerpiece is below, so a pending question or a terminal result is surfaced in either view.
+	const centerpiece = state.view === 'sequence'
+		? [SequenceView(state)]
+		: [FlowView(state), NowCaption(state), TooltipOverlay(state)]
+	const flowChildren = [...centerpiece]
 	// The question modal overlays the run view (the flow area), not the whole page, so a future multi-run world can switch away and back. It appears only on frames that model a pending ask_human question.
 	const pending = pendingQuestionOf(state)
 	if (pending !== undefined) {
@@ -378,6 +463,7 @@ app({
 		frameIndex: 0,
 		playing: false,
 		theme: 'auto',
+		view: 'flow',
 		resultModalOpen: false,
 		tooltip: null,
 	},
