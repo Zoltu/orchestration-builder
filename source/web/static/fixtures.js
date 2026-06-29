@@ -918,8 +918,8 @@ const retry = {
 
 const pendingQuestion = {
 	id: 'pending-question',
-	label: 'Pending ask_human question (no answer yet)',
-	description: 'The orchestrator has asked you a question and is waiting \u2014 exercises the question modal and the You node\u2019s incoming edge.',
+	label: 'ask_human question: pending, answered, then caller acts',
+	description: 'The orchestrator asks you a question and waits \u2014 then you answer, the child You lingers as a response edge, and the caller acts so the child You departs to the top bar. Exercises the question modal and the You node\u2019s enter/linger/depart lifecycle.',
 	frames: [
 		// Frame 0: you→orchestrator call flowing (orchestrator is the call's target, no costTokens yet).
 		frame({
@@ -992,6 +992,45 @@ const pendingQuestion = {
 				{ nodes: [topBarNode({ id: 'you', kind: 'you', label: 'You', invocations: 1 }), topBarNode({ id: 'orchestrator', kind: 'role', label: roleLabel('orchestrator'), invocations: 1, totalTime: 20, totalTokens: 3640 }), topBarNode({ id: 'ask_human', kind: 'tool', label: toolLabel('ask_human'), invocations: 1 })] },
 			),
 		}, 20),
+		// Frame 4: the user has answered. The question edge is gone; the child You (respondent) lingers with a return edge back to ask_human, and ask_human lingers with its own return edge to the orchestrator (the tool has its result and is handing it back). Both returns flow right→left; the orchestrator (the outermost return's target) is active (receiving the answer). The call edges settle. The answered question now carries its answer in the history.
+		frame({
+			status: 'unknown',
+			task: 'Set up a new CI workflow for the monorepo.',
+			startTime: t(0),
+			currentActivity: { role: 'orchestrator', summary: 'receiving your answer' },
+			roles: [roleActivity({ role: 'orchestrator', firstSeen: t(1), lastSeen: t(22), eventCount: 3, llmCalls: 1, toolCalls: 1, recentTools: ['ask_human'], lastPromptTokens: 3500 })],
+			roleTree: [treeNode({ role: 'orchestrator', depth: 0, active: true })],
+			recentLog: [
+				logEntry({ timestamp: t(8), type: 'ask_human', summary: 'ask_human', payload: { id: 'q1', question: 'Which CI provider should I target?', context: '.github/workflows/' } }),
+				logEntry({ timestamp: t(22), type: 'human_answer', summary: 'human_answer', payload: { id: 'q1', answer: 'GitHub Actions \u2014 we already use it for the monorepo.' } }),
+			],
+			questionHistory: [question({ id: 'q1', question: 'Which CI provider should I target?', context: '.github/workflows/', askedAt: t(8), answer: 'GitHub Actions \u2014 we already use it for the monorepo.', answeredAt: t(22) })],
+			budgets: budgets({ elapsedSeconds: 22, toolCalls: 1, tokensUsed: 3640, tokenBreakdown: tokenBreakdown(3500, 140) }),
+			flowModel: flowModel(
+				// The answer travels left along the same chain the question traveled right: you-ask → ask_human → orchestrator. Both the child You and ask_human linger as response edges (right→left) until the orchestrator emits a new action; the call edges settle because the returns now carry the motion.
+				{ nodes: [flowNode({ id: 'you', kind: 'you', label: 'You', column: 0 }), flowNode({ id: 'orchestrator', kind: 'role', label: roleLabel('orchestrator'), sublabel: 'orchestrator', column: 1, active: true, costTime: 22, costTokens: 3640 }), flowNode({ id: 'ask_human', kind: 'tool', label: toolLabel('ask_human'), column: 2, status: 'success', costTime: 16 }), flowNode({ id: 'you-ask', kind: 'you', label: 'You', column: 3, status: 'success' })], edges: [flowEdge('you', 'orchestrator', 'call'), flowEdge('orchestrator', 'ask_human', 'call'), flowEdge('you-ask', 'ask_human', 'return'), flowEdge('ask_human', 'orchestrator', 'return')] },
+				{ nodes: [topBarNode({ id: 'you', kind: 'you', label: 'You', invocations: 1 }), topBarNode({ id: 'orchestrator', kind: 'role', label: roleLabel('orchestrator'), invocations: 1, totalTime: 22, totalTokens: 3640 }), topBarNode({ id: 'ask_human', kind: 'tool', label: toolLabel('ask_human'), invocations: 1 })] },
+			),
+		}, 22),
+		// Frame 5: the caller has acted (a new llm_call on the answered question), so the lingering child You and ask_human depart the main area for their top-bar slots. The child You merges into the "You" slot, bumping its count to 2 (the root plus one completed Q&A); ask_human merges into its existing slot (one invocation — the same question). The main area settles back to the root You and the thinking orchestrator.
+		frame({
+			status: 'unknown',
+			task: 'Set up a new CI workflow for the monorepo.',
+			startTime: t(0),
+			currentActivity: { role: 'orchestrator', summary: 'orchestrator \u00b7 thinking' },
+			roles: [roleActivity({ role: 'orchestrator', firstSeen: t(1), lastSeen: t(25), eventCount: 4, llmCalls: 2, toolCalls: 1, recentTools: ['ask_human'], lastPromptTokens: 3500 })],
+			roleTree: [treeNode({ role: 'orchestrator', depth: 0, active: true })],
+			recentLog: [
+				logEntry({ timestamp: t(22), type: 'human_answer', summary: 'human_answer', payload: { id: 'q1', answer: 'GitHub Actions \u2014 we already use it for the monorepo.' } }),
+				logEntry({ timestamp: t(25), type: 'llm_call', summary: 'orchestrator \u00b7 llm call', payload: { role: 'orchestrator', usage: { promptTokens: 3900, completionTokens: 160, totalTokens: 4060 } }, detailSections: [{ label: 'usage', content: { promptTokens: 3900, completionTokens: 160, totalTokens: 4060 } }] }),
+			],
+			questionHistory: [question({ id: 'q1', question: 'Which CI provider should I target?', context: '.github/workflows/', askedAt: t(8), answer: 'GitHub Actions \u2014 we already use it for the monorepo.', answeredAt: t(22) })],
+			budgets: budgets({ elapsedSeconds: 25, toolCalls: 1, tokensUsed: 4060, tokenBreakdown: tokenBreakdown(3500, 560) }),
+			flowModel: flowModel(
+				{ nodes: [flowNode({ id: 'you', kind: 'you', label: 'You', column: 0 }), flowNode({ id: 'orchestrator', kind: 'role', label: roleLabel('orchestrator'), sublabel: 'orchestrator', column: 1, active: true, costTime: 25, costTokens: 4060 })], edges: [flowEdge('you', 'orchestrator', 'call')] },
+				{ nodes: [topBarNode({ id: 'you', kind: 'you', label: 'You', invocations: 2 }), topBarNode({ id: 'orchestrator', kind: 'role', label: roleLabel('orchestrator'), invocations: 1, totalTime: 25, totalTokens: 4060 }), topBarNode({ id: 'ask_human', kind: 'tool', label: toolLabel('ask_human'), invocations: 1 })] },
+			),
+		}, 25),
 	],
 }
 

@@ -541,6 +541,36 @@ describe('deriveFlowAnimation — return, question, and error edges', () => {
 		expect(edgeState(model, 'you', 'orchestrator')).toBe('static')
 	})
 
+	test('after the user answers, the child You and ask_human linger as return edges flowing right→left', () => {
+		// pending-question frame 4: the question edge is gone; the child You (you-ask) returns to ask_human, and ask_human returns to the orchestrator. Both returns flow; the call edges settle because the returns now carry the motion.
+		const model = frameModel('pending-question', 4)
+		expect(edgeState(model, 'you-ask', 'ask_human')).toBe('returning')
+		expect(edgeState(model, 'ask_human', 'orchestrator')).toBe('returning')
+		expect(edgeState(model, 'orchestrator', 'ask_human')).toBe('static')
+		expect(edgeState(model, 'you', 'orchestrator')).toBe('static')
+	})
+
+	test('after the answer, the orchestrator (the outermost return target) is active', () => {
+		// pending-question frame 4: the orchestrator is receiving the answer (the return target of ask_human→orchestrator), so it pulses.
+		const model = frameModel('pending-question', 4)
+		const { activeIds } = deriveFlowAnimation(model)
+		expect(activeIds.has('orchestrator')).toBe(true)
+	})
+
+	test('the child You departs to the top-bar "You" slot when the caller acts, bumping its count', () => {
+		// pending-question frame 4→5: the orchestrator emits a new action, so you-ask and ask_human leave the main area for their top-bar slots. you-ask merges into the existing "You" slot (incrementing its count to 2: the root plus one completed Q&A); ask_human merges into its existing slot.
+		const previous = frameModel('pending-question', 4)
+		const current = frameModel('pending-question', 5)
+		expect(current.mainArea.nodes.map((n) => n.id).sort()).toEqual(['orchestrator', 'you'])
+		const lifecycle = deriveLifecycle(previous, current)
+		const departingIds = lifecycle.departing.map((entry) => entry.node.id).sort()
+		expect(departingIds).toEqual(['ask_human', 'you-ask'])
+		for (const entry of lifecycle.departing) expect(entry.merged).toBe(true)
+		const youSlot = current.topBar.nodes.find((node) => node.id === 'you')
+		expect(youSlot).toBeDefined()
+		expect(youSlot!.invocations).toBe(2)
+	})
+
 	test('the active node set mirrors the model\u2019s active flags', () => {
 		// delegation-in-progress frame 1: orchestrator is thinking (active flag, no flowing edge).
 		const model = frameModel('delegation-in-progress', 1)

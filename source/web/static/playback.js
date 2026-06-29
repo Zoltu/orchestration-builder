@@ -3,6 +3,11 @@
 import { h, app } from './vendor/hyperapp.js'
 import { fixtures } from './fixtures.js'
 import { renderFlowView, deriveLifecycle, deriveNowCaption, DEFAULT_MIN_COLUMNS } from './flow-view.js'
+import { createMarkdownRenderer } from './markdown-render.js'
+import { QuestionModal, derivePendingQuestion } from './question-modal.js'
+
+// The question modal renders agent-authored question text/context as sanitized Markdown, so the harness shares the product client's Markdown pipeline rather than a local copy. Constructed once against this module's `h` and reused for every modal render.
+const renderMarkdown = createMarkdownRenderer(h)
 
 const PLAY_INTERVAL_MS = 1200
 
@@ -86,6 +91,19 @@ function Scrub(state, event) {
 	const index = Number(event.target.value)
 	if (!Number.isInteger(index) || index < 0 || index >= currentFixture(state).frames.length) return state
 	return { ...state, frameIndex: index, playing: false }
+}
+
+// The pending ask_human question for the current frame, or undefined when none is waiting. Derived from the frame's run-view question history (an entry without an answer is one the human has not yet answered) so the modal appears exactly on the frames that model a pending question.
+function pendingQuestionOf(state) {
+	return derivePendingQuestion(currentFrame(state).runView)
+}
+
+// Answering in the harness advances to the next frame, which models the answered state (the question history entry gains its answer and the flow graph shows the lingering return leg). There is no backend to POST to from the dev harness, so the frame advance IS the answer; the modal dismisses because the next frame has no pending question.
+function SubmitQuestionAnswer(state, event) {
+	event.preventDefault()
+	const total = currentFixture(state).frames.length
+	const next = Math.min(total - 1, state.frameIndex + 1)
+	return { ...state, frameIndex: next, playing: false }
 }
 
 // The theme toggle pins `data-theme` on the root element so the operator can review the visual foundation in both light and dark regardless of the OS setting. `auto` clears the attribute so the browser's prefers-color-scheme drives the tokens.
@@ -205,13 +223,20 @@ function NowCaption(state) {
 }
 
 function view(state) {
+	const flowChildren = [FlowView(state), NowCaption(state)]
+	// The question modal overlays the run view (the flow area), not the whole page, so a future multi-run world can switch away and back. It appears only on frames that model a pending ask_human question.
+	const pending = pendingQuestionOf(state)
+	if (pending !== undefined) {
+		const runView = currentFrame(state).runView
+		const runLabel = typeof runView.runId === 'string' && runView.runId !== ''
+			? runView.runId
+			: (typeof runView.task === 'string' && runView.task !== '' ? runView.task : null)
+		flowChildren.push(QuestionModal(h, { question: pending, runLabel, renderMarkdown, onSubmit: SubmitQuestionAnswer, answerPending: false }))
+	}
 	return h('div', { class: 'pb' }, [
 		CostStrip(state),
 		PlaybackControls(state),
-		h('div', { class: 'pb-flow' }, [
-			h('div', { class: 'flow-view' }, [FlowView(state)]),
-			NowCaption(state),
-		]),
+		h('div', { class: 'pb-flow' }, flowChildren),
 	])
 }
 
