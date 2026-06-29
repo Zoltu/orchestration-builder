@@ -79,7 +79,7 @@ function formatTokens(value) {
 	return String(value)
 }
 
-// A graph edge: a <path> between two anchors with a class hook per state. `static` is the calm resting edge; `flowing` and `returning` carry a marching-ants dash animation; `error` is a solid red stroke. The CSS reads the class to apply the animation, so the primitive carries no animation logic. `kind` ('call'|'return'|'question'|'inspect') selects the curve shape: calls and questions bow horizontally between the side faces; returns bow downward so the response leg sits below the request line rather than overlapping it; inspect edges (an observer tool reading another role's history) bow sideways so a vertical inspection line curves clear of the two nodes.
+// A graph edge: a <path> between two anchors with a class hook per state. `static` is the calm resting edge; `flowing` and `returning` carry a marching-ants dash animation; `error` is a solid red stroke. The CSS reads the class to apply the animation, so the primitive carries no animation logic. `kind` ('call'|'return'|'question'|'inspect') selects the curve shape: calls and questions bow horizontally between the side faces; returns bow downward so the response leg sits below the request line rather than overlapping it; inspect edges (an observer tool reading another role's history) bow sideways so a vertical inspection line curves clear of the two nodes. Optional `onmouseenter`/`onmouseleave` handlers are passed through so the caller can wire an edge hover to open an inspector without wrapping the path in an extra group (which would reorder the SVG children the layout relies on).
 export function GraphEdge(h, props) {
 	const fromAnchor = props.fromAnchor
 	const toAnchor = props.toAnchor
@@ -91,7 +91,10 @@ export function GraphEdge(h, props) {
 	else if (state === 'returning') classes.push('graph-edge--returning')
 	else if (state === 'error') classes.push('graph-edge--error')
 
-	return h('path', { class: classes.join(' '), d: edgePath(fromAnchor, toAnchor, kind) }, [])
+	const pathProps = { class: classes.join(' '), d: edgePath(fromAnchor, toAnchor, kind) }
+	if (props.onmouseenter !== undefined) pathProps.onmouseenter = props.onmouseenter
+	if (props.onmouseleave !== undefined) pathProps.onmouseleave = props.onmouseleave
+	return h('path', pathProps, [])
 }
 
 // A gentle cubic curve between the anchors so sibling edges separate rather than overlapping. Calls and questions bow horizontally (keeps horizontal edges readable, leaves vertical edges straight). Returns bow downward so the response leg curves below the nodes and never paints over the forward call line. Inspect edges bow sideways so a vertical inspection line curves clear of the two nodes.

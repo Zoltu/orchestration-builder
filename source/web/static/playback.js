@@ -6,6 +6,7 @@ import { renderFlowView, deriveLifecycle, deriveNowCaption, DEFAULT_MIN_COLUMNS 
 import { createMarkdownRenderer } from './markdown-render.js'
 import { QuestionModal, derivePendingQuestion } from './question-modal.js'
 import { ResultModal, deriveTerminalResult } from './result-modal.js'
+import { Tooltip, deriveTooltipForNode, deriveTooltipForEdge } from './tooltip.js'
 
 // The question modal renders agent-authored question text/context as sanitized Markdown, so the harness shares the product client's Markdown pipeline rather than a local copy. Constructed once against this module's `h` and reused for every modal render.
 const renderMarkdown = createMarkdownRenderer(h)
@@ -62,14 +63,14 @@ function Tick(state) {
 	if (!state.playing) return state
 	const total = currentFixture(state).frames.length
 	const next = state.frameIndex + 1
-	if (next >= total) return { ...state, playing: false }
-	return { ...state, frameIndex: next, resultModalOpen: computeResultModalOpen(state.scenarioIndex, state.frameIndex, next, state.resultModalOpen) }
+	if (next >= total) return { ...state, playing: false, tooltip: null }
+	return { ...state, frameIndex: next, tooltip: null, resultModalOpen: computeResultModalOpen(state.scenarioIndex, state.frameIndex, next, state.resultModalOpen) }
 }
 
 function SelectScenario(state, event) {
 	const index = Number(event.target.value)
 	if (!Number.isInteger(index) || index < 0 || index >= fixtures.length) return state
-	return { ...state, scenarioIndex: index, frameIndex: 0, playing: false, resultModalOpen: computeResultModalOpen(index, -1, 0, false) }
+	return { ...state, scenarioIndex: index, frameIndex: 0, playing: false, tooltip: null, resultModalOpen: computeResultModalOpen(index, -1, 0, false) }
 }
 
 function TogglePlay(state) {
@@ -77,7 +78,7 @@ function TogglePlay(state) {
 	if (!state.playing) {
 		// Restart from the beginning when playback had reached the end.
 		const startIndex = state.frameIndex >= total - 1 ? 0 : state.frameIndex
-		return { ...state, frameIndex: startIndex, playing: true, resultModalOpen: computeResultModalOpen(state.scenarioIndex, state.frameIndex, startIndex, state.resultModalOpen) }
+		return { ...state, frameIndex: startIndex, playing: true, tooltip: null, resultModalOpen: computeResultModalOpen(state.scenarioIndex, state.frameIndex, startIndex, state.resultModalOpen) }
 	}
 	return { ...state, playing: false }
 }
@@ -85,13 +86,13 @@ function TogglePlay(state) {
 function Step(state, delta) {
 	const total = currentFixture(state).frames.length
 	const next = Math.max(0, Math.min(total - 1, state.frameIndex + delta))
-	return { ...state, frameIndex: next, playing: false, resultModalOpen: computeResultModalOpen(state.scenarioIndex, state.frameIndex, next, state.resultModalOpen) }
+	return { ...state, frameIndex: next, playing: false, tooltip: null, resultModalOpen: computeResultModalOpen(state.scenarioIndex, state.frameIndex, next, state.resultModalOpen) }
 }
 
 function Scrub(state, event) {
 	const index = Number(event.target.value)
 	if (!Number.isInteger(index) || index < 0 || index >= currentFixture(state).frames.length) return state
-	return { ...state, frameIndex: index, playing: false, resultModalOpen: computeResultModalOpen(state.scenarioIndex, state.frameIndex, index, state.resultModalOpen) }
+	return { ...state, frameIndex: index, playing: false, tooltip: null, resultModalOpen: computeResultModalOpen(state.scenarioIndex, state.frameIndex, index, state.resultModalOpen) }
 }
 
 // The pending ask_human question for the current frame, or undefined when none is waiting. Derived from the frame's run-view question history (an entry without an answer is one the human has not yet answered) so the modal appears exactly on the frames that model a pending question.
@@ -104,7 +105,7 @@ function SubmitQuestionAnswer(state, event) {
 	event.preventDefault()
 	const total = currentFixture(state).frames.length
 	const next = Math.min(total - 1, state.frameIndex + 1)
-	return { ...state, frameIndex: next, playing: false, resultModalOpen: computeResultModalOpen(state.scenarioIndex, state.frameIndex, next, state.resultModalOpen) }
+	return { ...state, frameIndex: next, playing: false, tooltip: null, resultModalOpen: computeResultModalOpen(state.scenarioIndex, state.frameIndex, next, state.resultModalOpen) }
 }
 
 // --- Result modal ----------------------------------------------------------
@@ -146,12 +147,70 @@ function copyRawError(rawJson) {
 }
 
 function OpenResultModal(state) {
-	return { ...state, resultModalOpen: true }
+	return { ...state, resultModalOpen: true, tooltip: null }
 }
 
 function CloseResultModal(state) {
 	return { ...state, resultModalOpen: false }
 }
+
+// --- Tooltip (node/edge inspector) ------------------------------------------
+// Hovering a flow-view node or edge opens a friendly-formatted detail card; the pointer leaving the hovered element closes it. The card is an HTML overlay positioned at the pointer (the SVG cannot host the sanitized-Markdown vnodes or a wrapping <pre> the card renders), so it lives as a sibling of the flow SVG inside `.pb-flow`. The card is `pointer-events: none` (see styles.css) so it never becomes the hover target itself — leaving the node/edge geometry is what dismisses it, with no flicker and no need for a close-on-empty-click or a hover-bridge. The tooltip clears on every frame change so a card opened on a node that has since departed never lingers stale.
+
+function OpenTooltip(state, payload) {
+	return { ...state, tooltip: payload }
+}
+
+function CloseTooltip(state) {
+	if (state.tooltip === null) return state
+	return { ...state, tooltip: null }
+}
+
+// The pointer coordinates from a DOM event, with a 0 fallback for a synthetic event the tests/harness might pass. `clientX`/`clientY` are viewport-relative, which is what the `position: fixed` card positions against.
+function pointerX(event) {
+	return event !== null && event !== undefined && typeof event.clientX === 'number' ? event.clientX : 0
+}
+function pointerY(event) {
+	return event !== null && event !== undefined && typeof event.clientY === 'number' ? event.clientY : 0
+}
+
+// Resolves the card's inline positioning so it never overflows the viewport: when the pointer is near the right or bottom edge, the card flips to anchor its right/bottom edge to the pointer instead of its left/top. The estimates are upper bounds on the card's footprint; the CSS `max-width`/`max-height` clamp the real size, so an over-estimate only flips a little early (safe) rather than letting the card clip off-screen.
+function tooltipStyle(clientX, clientY) {
+	const viewportWidth = window.innerWidth
+	const viewportHeight = window.innerHeight
+	const margin = 12
+	const estimatedWidth = 380
+	const estimatedHeight = 280
+	const style = {}
+	if (clientX + estimatedWidth + margin > viewportWidth && clientX - estimatedWidth - margin > 0) {
+		style.right = `${Math.max(margin, viewportWidth - clientX)}px`
+	} else {
+		style.left = `${Math.max(margin, clientX + margin)}px`
+	}
+	if (clientY + estimatedHeight + margin > viewportHeight && clientY - estimatedHeight - margin > 0) {
+		style.bottom = `${Math.max(margin, viewportHeight - clientY)}px`
+	} else {
+		style.top = `${Math.max(margin, clientY + margin)}px`
+	}
+	return style
+}
+
+// Builds the onmouseenter handler for a main-area/top-bar node: derives the friendly detail from the node and the current frame at hover time and opens the card at the pointer. Returning a function (rather than a `[Action, payload]` tuple) lets the handler read the live state's frame and the event's coordinates at hover time. The matching onmouseleave is the shared `CloseTooltip` (the pointer leaving the node dismisses the card).
+function activateNodeTooltip(node) {
+	return (state, event) => {
+		const derived = deriveTooltipForNode(node, currentFrame(state))
+		return OpenTooltip(state, { ...derived, style: tooltipStyle(pointerX(event), pointerY(event)) })
+	}
+}
+
+function activateEdgeTooltip(edge) {
+	return (state, event) => {
+		const derived = deriveTooltipForEdge(edge, currentFrame(state))
+		return OpenTooltip(state, { ...derived, style: tooltipStyle(pointerX(event), pointerY(event)) })
+	}
+}
+
+const flowInteractions = { onNodeActivate: activateNodeTooltip, onEdgeActivate: activateEdgeTooltip, onLeave: CloseTooltip }
 
 // The theme toggle pins `data-theme` on the root element so the operator can review the visual foundation in both light and dark regardless of the OS setting. `auto` clears the attribute so the browser's prefers-color-scheme drives the tokens.
 function applyTheme(theme) {
@@ -244,12 +303,24 @@ function FlowView(state) {
 	const cta = terminal !== undefined
 		? { label: ctaLabel(terminal.status), active: state.resultModalOpen, tone: terminal.status === 'error' ? 'error' : 'accent', onclick: [OpenResultModal, null] }
 		: undefined
-	return renderFlowView(h, model, flowColumnHighWater(state), flowLifecycle(state), cta)
+	return renderFlowView(h, model, flowColumnHighWater(state), flowLifecycle(state), cta, flowInteractions)
 }
 
 function ctaLabel(status) {
 	if (status === 'error') return 'View error'
 	return 'View result'
+}
+
+// The friendly detail card for the currently-open tooltip, or null when none is open. Positioned `fixed` at the pointer via the inline `style` resolved at hover time (flipped to stay on screen), so the card overlays the flow view without claiming layout. The card is `pointer-events: none` (styles.css) and carries no chrome — it is a read-only hover inspector that disappears when the pointer leaves the hovered node/edge.
+function TooltipOverlay(state) {
+	const tooltip = state.tooltip
+	if (tooltip === null) return null
+	return Tooltip(h, {
+		title: tooltip.title,
+		sections: tooltip.sections,
+		renderMarkdown,
+		style: tooltip.style,
+	})
 }
 
 // The current frame's config + runView + flowModel, used by the product surfaces that wrap the flow view. Derived from the same frame the FlowView renders so the surfaces never drift from the graph.
@@ -283,7 +354,7 @@ function view(state) {
 	const frame = currentFrame(state)
 	const runView = frame.runView
 	const runLabel = runLabelOf(runView)
-	const flowChildren = [FlowView(state), NowCaption(state)]
+	const flowChildren = [FlowView(state), NowCaption(state), TooltipOverlay(state)]
 	// The question modal overlays the run view (the flow area), not the whole page, so a future multi-run world can switch away and back. It appears only on frames that model a pending ask_human question.
 	const pending = pendingQuestionOf(state)
 	if (pending !== undefined) {
@@ -308,6 +379,7 @@ app({
 		playing: false,
 		theme: 'auto',
 		resultModalOpen: false,
+		tooltip: null,
 	},
 	view,
 	subscriptions: (state) => [state.playing && onEvery(Tick, PLAY_INTERVAL_MS)],

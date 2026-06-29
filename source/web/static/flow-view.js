@@ -154,7 +154,7 @@ function smallNodeTitle(label, invocations, totalTime, totalTokens, status) {
 	return parts.join(' \u00b7 ')
 }
 
-// A compact top-bar node: a small square holding just its invocation count, centered. The strip is cumulative/aggregate history (one slot per role/tool type, total invocations), so it carries no per-invocation status — except that a slot whose run ended in failure turns red so the failing role reads at a glance against an otherwise neutral strip. The role/tool name and cumulative token/time details are carried by a <title> child so they surface on hover without claiming layout space. The group carries both the class and the translate so there is a single wrapping <g> per node.
+// A compact top-bar node: a small square holding just its invocation count, centered. The strip is cumulative/aggregate history (one slot per role/tool type, total invocations), so it carries no per-invocation status — except that a slot whose run ended in failure turns red so the failing role reads at a glance against an otherwise neutral strip. The role/tool name and cumulative token/time details are carried by a <title> child so they surface on hover without claiming layout space. The group carries both the class and the translate so there is a single wrapping <g> per node. Optional `onmouseenter`/`onmouseleave` handlers (supplied via the `interactions` parameter of `renderFlowView`) open and close the inspector tooltip on hover; the native <title> hover still works alongside it.
 function SmallNode(h, props) {
 	const label = props.label
 	const invocations = props.invocations
@@ -166,7 +166,10 @@ function SmallNode(h, props) {
 
 	const classes = ['flow-small-node']
 	if (status === 'error') classes.push('flow-small-node--error')
-	return h('g', { class: classes.join(' '), transform: translate(x, y) }, [
+	const groupProps = { class: classes.join(' '), transform: translate(x, y) }
+	if (props.onmouseenter !== undefined) groupProps.onmouseenter = props.onmouseenter
+	if (props.onmouseleave !== undefined) groupProps.onmouseleave = props.onmouseleave
+	return h('g', groupProps, [
 		h('title', {}, [smallNodeTitle(label, invocations, totalTime, totalTokens, status)]),
 		h('rect', { class: 'flow-small-node-box', x: 0, y: 0, width: SMALL_SIZE, height: SMALL_SIZE, rx: 5 }, []),
 		h('text', { class: 'flow-small-node-count', x: SMALL_SIZE / 2, y: SMALL_SIZE / 2 + 1, 'text-anchor': 'middle', 'dominant-baseline': 'middle' }, [String(invocations)]),
@@ -276,8 +279,8 @@ function topBarHeight(count) {
 	return rows * SMALL_SIZE + (rows - 1) * SMALL_GAP
 }
 
-// Renders the whole flow view as a single shared SVG containing the history top bar (small nodes at the top) and the active-flow main area (nodes/edges below, offset by the bar height plus a gap). Sharing one SVG is what makes the depart animation work: a node leaving the main area travels from its main-area position to its top-bar slot in the same coordinate space, so the travel lands on the slot and the counter increment reads as the node arriving. `minColumns` floors the main-area canvas width; `lifecycle` carries the frame-diff entering/departing descriptor (computed by `deriveLifecycle` from the previous and current frames' models); `cta` (optional) carries the terminal-result call-to-action descriptor (`{ label, active, onclick }`) rendered as a standard-sized node at column 1 — always present on a terminal frame, blue with a flowing You→CTA edge when active (modal open), grey with no edge when inactive (modal closed).
-export function renderFlowView(h, model, minColumns = DEFAULT_MIN_COLUMNS, lifecycle, cta) {
+// Renders the whole flow view as a single shared SVG containing the history top bar (small nodes at the top) and the active-flow main area (nodes/edges below, offset by the bar height plus a gap). Sharing one SVG is what makes the depart animation work: a node leaving the main area travels from its main-area position to its top-bar slot in the same coordinate space, so the travel lands on the slot and the counter increment reads as the node arriving. `minColumns` floors the main-area canvas width; `lifecycle` carries the frame-diff entering/departing descriptor (computed by `deriveLifecycle` from the previous and current frames' models); `cta` (optional) carries the terminal-result call-to-action descriptor (`{ label, active, onclick }`) rendered as a standard-sized node at column 1 — always present on a terminal frame, blue with a flowing You→CTA edge when active (modal open), grey with no edge when inactive (modal closed). `interactions` (optional) carries `{ onNodeActivate, onEdgeActivate, onLeave }`: `onNodeActivate(node)` and `onEdgeActivate(edge)` are called per element and the value each returns becomes that element's `onmouseenter` (opens the inspector); `onLeave` is attached to every element's `onmouseleave` (closes it). A departing node is mid-travel to its top-bar slot, so it carries no hover handlers — the slot it merges into is the live hover target.
+export function renderFlowView(h, model, minColumns = DEFAULT_MIN_COLUMNS, lifecycle, cta, interactions) {
 	const mainArea = model.mainArea
 	const topBar = model.topBar
 	const nodes = mainArea.nodes
@@ -312,9 +315,11 @@ export function renderFlowView(h, model, minColumns = DEFAULT_MIN_COLUMNS, lifec
 		ctaLayout = { x: youPos.x + NODE_WIDTH + COL_GAP, y: youPos.y }
 	}
 
+	const onLeave = interactions !== undefined && typeof interactions.onLeave === 'function' ? interactions.onLeave : undefined
 	const topBarVnodes = topBar.nodes.map((node, index) => {
 		const pos = topBarPixel(index)
-		return SmallNode(h, { label: node.label, invocations: node.invocations, totalTime: node.totalTime, totalTokens: node.totalTokens, status: node.status, x: pos.x, y: pos.y })
+		const onmouseenter = interactions !== undefined && typeof interactions.onNodeActivate === 'function' ? interactions.onNodeActivate(node) : undefined
+		return SmallNode(h, { label: node.label, invocations: node.invocations, totalTime: node.totalTime, totalTokens: node.totalTokens, status: node.status, x: pos.x, y: pos.y, onmouseenter, onmouseleave: onLeave })
 	})
 
 	const edgeVnodes = edges.map((edge, index) => {
@@ -322,7 +327,8 @@ export function renderFlowView(h, model, minColumns = DEFAULT_MIN_COLUMNS, lifec
 		const toPos = positions.get(edge.to)
 		if (fromPos === undefined || toPos === undefined) return null
 		const { fromAnchor, toAnchor } = edgeAnchors(edge.kind, fromPos, toPos)
-		return GraphEdge(h, { fromAnchor, toAnchor, state: edgeStates[index] ?? 'static', kind: edge.kind })
+		const onmouseenter = interactions !== undefined && typeof interactions.onEdgeActivate === 'function' ? interactions.onEdgeActivate(edge, index) : undefined
+		return GraphEdge(h, { fromAnchor, toAnchor, state: edgeStates[index] ?? 'static', kind: edge.kind, onmouseenter, onmouseleave: onLeave })
 	}).filter((vnode) => vnode !== null)
 
 	const enteringIds = lifecycle !== undefined ? lifecycle.enteringIds : EMPTY_SET
@@ -337,12 +343,13 @@ export function renderFlowView(h, model, minColumns = DEFAULT_MIN_COLUMNS, lifec
 			costTime: node.costTime,
 			costTokens: node.costTokens,
 		})
+		const onmouseenter = interactions !== undefined && typeof interactions.onNodeActivate === 'function' ? interactions.onNodeActivate(node) : undefined
 		if (enteringIds.has(node.id)) {
-			return h('g', { class: 'flow-node flow-node--entering-host', transform: translate(pos.x, pos.y) }, [
+			return h('g', { class: 'flow-node flow-node--entering-host', transform: translate(pos.x, pos.y), onmouseenter, onmouseleave: onLeave }, [
 				h('g', { class: 'flow-node--entering' }, [inner]),
 			])
 		}
-		return h('g', { class: 'flow-node', transform: translate(pos.x, pos.y) }, [inner])
+		return h('g', { class: 'flow-node', transform: translate(pos.x, pos.y), onmouseenter, onmouseleave: onLeave }, [inner])
 	})
 
 	// Departing overlay nodes render last so the travel paints on top of the settled graph. The outer <g> CSS-animates a translate from the node's previous main-area position to its top-bar slot plus a fade (the from/to coordinates are passed as a style object — hyperapp routes `-`-prefixed keys through `setProperty`); the inner <g> scales the body down toward the small-node size. Because both positions live in the same SVG coordinate space, the node visibly travels to its slot and the counter increment reads as the node arriving.

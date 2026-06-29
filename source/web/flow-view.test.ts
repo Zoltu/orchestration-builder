@@ -1012,3 +1012,110 @@ describe('deriveNowCaption', () => {
 		expect(deriveNowCaption(config, { status: 'unknown' }, model)).toBe('Coder · Write a file…')
 	})
 })
+
+// --- Interactions wiring (tooltip click targets) ---------------------------
+// renderFlowView accepts an optional `interactions` carrying `onNodeActivate`/`onEdgeActivate`; the value each returns becomes the `onclick` on the corresponding node group or edge path so the caller can open a tooltip without the renderer knowing what a click does. The wiring is asserted against the same fake `h` so the click target lands on the same elements the layout produces.
+
+describe('renderFlowView — interactions wiring', () => {
+	const { NODE_WIDTH, COL_GAP } = FLOW_VIEW_CONSTANTS
+
+	function simpleModel() {
+		return {
+			mainArea: {
+				nodes: [
+					{ id: 'you', kind: 'you', label: 'You', column: 0, row: 0 },
+					{ id: 'planner', kind: 'role', label: 'Planner', sublabel: 'planner', column: 1, row: 0, active: true },
+				],
+				edges: [{ from: 'you', to: 'planner', kind: 'call' }],
+			},
+			topBar: { nodes: [] },
+		}
+	}
+
+	function topBarModel() {
+		return {
+			mainArea: { nodes: [{ id: 'you', kind: 'you', label: 'You', column: 0, row: 0 }], edges: [] },
+			topBar: {
+				nodes: [
+					{ id: 'you', kind: 'you', label: 'You', invocations: 1 },
+					{ id: 'planner', kind: 'role', label: 'Planner', invocations: 1, totalTime: 5, totalTokens: 4380 },
+				],
+			},
+		}
+	}
+
+	test('a main-area node group carries onmouseenter from onNodeActivate and onmouseleave from onLeave', () => {
+		const model = simpleModel()
+		const plannerHandler = () => ({})
+		const youHandler = () => ({})
+		const leave = () => ({})
+		const view: Vnode = renderFlowView(fakeH, model, FLOW_VIEW_CONSTANTS.DEFAULT_MIN_COLUMNS, undefined, undefined, {
+			onNodeActivate: (node: { id: string }) => (node.id === 'planner' ? plannerHandler : youHandler),
+			onLeave: leave,
+		})
+		const plannerGroup = allByTag(view, 'g').find((g) => g.props.transform === `translate(${NODE_WIDTH + COL_GAP},0)`)!
+		expect(plannerGroup.props.onmouseenter).toBe(plannerHandler)
+		expect(plannerGroup.props.onmouseleave).toBe(leave)
+	})
+
+	test('an entering node carries the hover handlers on its host group so the whole entering node is hoverable', () => {
+		// simpleModel frame has no previous frame; passing a lifecycle that marks the planner as entering exercises the entering-host branch.
+		const model = simpleModel()
+		const entering = new Set(['planner'])
+		const handler = () => ({})
+		const leave = () => ({})
+		const view: Vnode = renderFlowView(fakeH, model, FLOW_VIEW_CONSTANTS.DEFAULT_MIN_COLUMNS, { enteringIds: entering, departing: [] }, undefined, {
+			onNodeActivate: () => handler,
+			onLeave: leave,
+		})
+		const host = allByTag(view, 'g').find((g) => typeof g.props.class === 'string' && (g.props.class as string).includes('flow-node--entering-host'))!
+		expect(host.props.onmouseenter).toBe(handler)
+		expect(host.props.onmouseleave).toBe(leave)
+	})
+
+	test('a top-bar small node carries onmouseenter from onNodeActivate and onmouseleave from onLeave', () => {
+		const model = topBarModel()
+		const youHandler = () => ({})
+		const plannerHandler = () => ({})
+		const leave = () => ({})
+		const view: Vnode = renderFlowView(fakeH, model, FLOW_VIEW_CONSTANTS.DEFAULT_MIN_COLUMNS, undefined, undefined, {
+			onNodeActivate: (node: { id: string }) => (node.id === 'planner' ? plannerHandler : youHandler),
+			onLeave: leave,
+		})
+		const smallNodes = allByTag(view, 'g').filter((g) => ((g.props.class as string) ?? '').includes('flow-small-node'))
+		expect(smallNodes.length).toBe(2)
+		const youNode = smallNodes.find((g) => g.props.transform === 'translate(0,0)')!
+		expect(youNode.props.onmouseenter).toBe(youHandler)
+		expect(youNode.props.onmouseleave).toBe(leave)
+		const plannerNode = smallNodes.find((g) => g.props.transform !== 'translate(0,0)')!
+		expect(plannerNode.props.onmouseenter).toBe(plannerHandler)
+		expect(plannerNode.props.onmouseleave).toBe(leave)
+	})
+
+	test('an edge path carries onmouseenter from onEdgeActivate and onmouseleave from onLeave', () => {
+		const model = simpleModel()
+		const edgeHandler = () => ({})
+		const leave = () => ({})
+		const view: Vnode = renderFlowView(fakeH, model, FLOW_VIEW_CONSTANTS.DEFAULT_MIN_COLUMNS, undefined, undefined, {
+			onEdgeActivate: () => edgeHandler,
+			onLeave: leave,
+		})
+		const path = allByTag(view, 'path').find((p) => typeof p.props.d === 'string')!
+		expect(path.props.onmouseenter).toBe(edgeHandler)
+		expect(path.props.onmouseleave).toBe(leave)
+	})
+
+	test('no interactions parameter leaves every element without hover handlers', () => {
+		const model = topBarModel()
+		const view: Vnode = renderFlowView(fakeH, model)
+		for (const group of allByTag(view, 'g')) {
+			expect(group.props.onmouseenter).toBeUndefined()
+			expect(group.props.onmouseleave).toBeUndefined()
+		}
+		for (const path of allByTag(view, 'path')) {
+			expect(path.props.onmouseenter).toBeUndefined()
+			expect(path.props.onmouseleave).toBeUndefined()
+		}
+	})
+})
+

@@ -1873,3 +1873,90 @@ li:last-child {
 	}
 }
 
+/* --- Tooltip (node/edge inspector) ------------------------------------------ */
+/* A friendly-formatted detail card that appears when an operator hovers a flow-view node or edge, and disappears when the pointer leaves it. It is an HTML overlay positioned `fixed` at the pointer (the SVG cannot host the sanitized-Markdown vnodes or a wrapping <pre> the card renders), so it lives as a sibling of the flow SVG inside `.pb-flow`. The inline `left/top` (or `right/bottom` near an edge) is resolved at hover time so the card never overflows the viewport; the CSS `max-width`/`max-height` clamp the real size and let long JSON or prose scroll inside the card. The card is `pointer-events: none` so it never intercepts the pointer — the hover target stays the node/edge beneath it, so leaving that geometry is what dismisses the card (no flicker, no hover-bridge needed). Colors read the visual tokens so the card follows the light/dark theme with the rest of the page. */
+
+/* Hovering a node or edge signals "more detail here"; `help` is the classic affordance for hover-to-inspect. The thin edge paths pick up the same cursor so hovering a line is discoverable. */
+.flow-node,
+.graph-edge,
+.flow-small-node {
+	cursor: help;
+}
+
+.tooltip-card {
+	position: fixed;
+	z-index: 30;
+	pointer-events: none;
+	max-width: min(24rem, calc(100vw - 1rem));
+	max-height: min(28rem, 60vh);
+	overflow: auto;
+	padding: var(--space-3);
+	border-radius: var(--radius-lg);
+	background: var(--color-surface);
+	border: 1px solid var(--color-border-strong);
+	box-shadow: 0 8px 24px rgba(16, 24, 40, 0.22);
+	font-size: 0.85rem;
+	line-height: 1.45;
+	color: var(--color-text);
+}
+
+.tooltip-heading {
+	margin: 0 0 var(--space-2);
+	font-size: 0.75rem;
+	font-weight: 600;
+	text-transform: uppercase;
+	letter-spacing: 0.04em;
+	color: var(--color-text-subtle);
+	overflow-wrap: anywhere;
+}
+
+.tooltip-section {
+	margin: 0 0 var(--space-2);
+	display: flex;
+	flex-direction: column;
+	gap: 2px;
+}
+
+.tooltip-section:last-of-type {
+	margin-bottom: 0;
+}
+
+.tooltip-label {
+	font-size: 0.68rem;
+	font-weight: 600;
+	text-transform: uppercase;
+	letter-spacing: 0.04em;
+	color: var(--color-text-subtle);
+}
+
+.tooltip-json {
+	margin: 0;
+	padding: var(--space-2);
+	background: var(--color-surface-sunken);
+	border-radius: var(--radius-sm);
+	font-family: var(--font-mono);
+	font-size: 0.78rem;
+	line-height: 1.4;
+	color: var(--color-code-text);
+	white-space: pre-wrap;
+	word-break: break-word;
+	max-height: 16rem;
+	overflow: auto;
+}
+
+/* Prose content reuses the shared .markdown rules; only the spacing is tightened for the compact card. */
+.tooltip-prose.markdown p {
+	margin: 0.25rem 0;
+}
+
+.tooltip-scalar {
+	font-variant-numeric: tabular-nums;
+	color: var(--color-text);
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.tooltip-card {
+		animation: none;
+	}
+}
+
