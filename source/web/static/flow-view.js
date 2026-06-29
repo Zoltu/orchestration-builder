@@ -286,3 +286,114 @@ const EMPTY_SET = new Set()
 
 // Exported for tests so the layout constants and wrapping rule are pinned alongside the renderer.
 export const FLOW_VIEW_CONSTANTS = { NODE_WIDTH, NODE_HEIGHT, COL_GAP, ROW_GAP, SMALL_SIZE, SMALL_GAP, TOP_BAR_PER_ROW, TOPBAR_GAP, DEFAULT_MIN_COLUMNS }
+
+// --- Product surfaces: "now" caption ----------------------------------------
+// The flow view conveys structure (who is active, what is in flight) but not meaning. The "now" caption is a one-line plain-language sentence derived from the active role/tool's friendly description so a non-developer can read what is happening. It is a pure derivation co-located with the flow-graph derivation because it consumes the same config + run-view + model shapes.
+
+// A one-line plain-language caption describing what the run is doing right now, derived from the active role/tool's friendly description. The active role/tool is read from the flow model (the visual source of truth, paired with the view), and the friendly tiers come from the guild config. A terminal run gets a completion caption regardless of a lingering return edge, since the run is already finished. The fallback chain is friendly → detailed → title-cased name, so a guild author who omits a friendly tier still gets a readable line.
+export function deriveNowCaption(config, runView, model) {
+	const status = runView?.status
+	if (status === 'success') return 'Done.'
+	if (status === 'error') return 'The run stopped with an error.'
+	if (status === 'interrupted') return 'The run was interrupted.'
+	if (status === 'needs_clarification') return 'Waiting for your input…'
+	if (model === undefined || model === null) return 'Working…'
+
+	const { edgeStates, activeIds } = deriveFlowAnimation(model)
+	const nodesById = new Map()
+	for (const node of model.mainArea.nodes) nodesById.set(node.id, node)
+	const edges = model.mainArea.edges
+
+	// A pending ask_human question: the question edge flows toward the "You" respondent. The ask_human tool's friendly description conveys "waiting for you" in plain language.
+	for (let i = 0; i < edges.length; i++) {
+		const edge = edges[i]
+		if (edge.kind !== 'question') continue
+		if (edgeStates[i] !== 'flowing') continue
+		const askHumanNode = nodesById.get(edge.from)
+		if (askHumanNode === undefined) continue
+		return withEllipsis(toolFriendlyDescription(askHumanNode, config))
+	}
+
+	// An in-flight tool call: the flowing call edge's target is a tool; its source is the calling role. The caption pairs the role's friendly label with the tool's friendly label so the line names both who and what.
+	for (let i = 0; i < edges.length; i++) {
+		const edge = edges[i]
+		if (edge.kind !== 'call') continue
+		if (edgeStates[i] !== 'flowing') continue
+		const target = nodesById.get(edge.to)
+		if (target === undefined || target.kind !== 'tool') continue
+		const source = nodesById.get(edge.from)
+		if (source === undefined) continue
+		const roleLabel = roleFriendlyLabel(source, config)
+		const toolLabel = toolFriendlyLabel(target, config)
+		return `${roleLabel} · ${toolLabel}…`
+	}
+
+	// An active role (thinking, or receiving a result it is about to process): its friendly description is the plain-language line for what it does.
+	for (const id of activeIds) {
+		const node = nodesById.get(id)
+		if (node === undefined) continue
+		if (node.kind !== 'role') continue
+		return withEllipsis(roleFriendlyDescription(node, config))
+	}
+
+	// A lingering return leg flowing back to the root "You": the run is unwinding to its caller.
+	for (let i = 0; i < edges.length; i++) {
+		const edge = edges[i]
+		if (edge.kind !== 'return') continue
+		const state = edgeStates[i]
+		if (state !== 'returning' && state !== 'error') continue
+		const target = nodesById.get(edge.to)
+		if (target !== undefined && target.kind === 'you') return 'Wrapping up…'
+	}
+
+	return 'Working…'
+}
+
+function roleFriendlyDescription(node, config) {
+	const key = node.sublabel ?? node.id
+	const entry = config?.roles?.[key]
+	if (entry !== undefined && entry.description !== undefined) {
+		const tier = entry.description.friendly ?? entry.description.detailed
+		if (tier !== undefined) return tier
+	}
+	return titleCase(key)
+}
+
+function roleFriendlyLabel(node, config) {
+	const key = node.sublabel ?? node.id
+	const entry = config?.roles?.[key]
+	if (entry !== undefined && entry.label !== undefined) {
+		const tier = entry.label.friendly ?? entry.label.detailed
+		if (tier !== undefined) return tier
+	}
+	return titleCase(key)
+}
+
+function toolFriendlyLabel(node, config) {
+	const key = node.id
+	const entry = config?.tools?.[key]
+	if (entry !== undefined && entry.humanLabel !== undefined) {
+		const tier = entry.humanLabel.friendly ?? entry.humanLabel.detailed
+		if (tier !== undefined) return tier
+	}
+	return node.label ?? titleCase(key)
+}
+
+function toolFriendlyDescription(node, config) {
+	const key = node.id
+	const entry = config?.tools?.[key]
+	if (entry !== undefined && entry.humanDescription !== undefined) {
+		const tier = entry.humanDescription.friendly ?? entry.humanDescription.detailed
+		if (tier !== undefined) return tier
+	}
+	return titleCase(key)
+}
+
+function titleCase(name) {
+	return String(name).split('_').map((word) => word.length === 0 ? word : word.charAt(0).toUpperCase() + word.slice(1)).join(' ')
+}
+
+// Strips a trailing period (so a description sentence does not end "...attack.…") and appends an ellipsis to convey an in-progress action.
+function withEllipsis(text) {
+	return `${text.replace(/[.。]+$/, '')}…`
+}

@@ -1349,6 +1349,47 @@ li:last-child {
 	user-select: none;
 }
 
+/* --- Product surfaces (dev playback harness) -------------------------------- */
+/* Two surfaces wrap the two-component flow view so the page conveys meaning the graph's structure alone cannot: a quiet ambient cost strip in the page border (elapsed · tokens · effort) and a one-line "now" caption under the main area. The "now" caption is the more prominent of the two; the cost strip is the more subdued. All read the visual tokens so they follow the light/dark theme with the rest of the page. */
+
+/* The flow area is a column that fills the remaining viewport: the flow view SVG (flexes to fill) and the now caption below. */
+.pb-flow {
+	flex: 1 1 auto;
+	min-height: 0;
+	display: flex;
+	flex-direction: column;
+	gap: var(--space-2);
+}
+
+/* Cost strip: a quiet, always-present bar in the page border. The more subdued of the two surfaces — small font, subtle color, sunken background — so it stays ambient and never competes with the main area. */
+.pb-cost-strip {
+	flex: 0 0 auto;
+	display: flex;
+	align-items: center;
+	gap: var(--space-1);
+	padding: 0.25rem var(--space-3);
+	background: var(--color-surface-sunken);
+	border-radius: var(--radius-sm);
+	font-size: 0.72rem;
+	font-variant-numeric: tabular-nums;
+	color: var(--color-text-subtle);
+}
+
+.pb-cost-sep {
+	opacity: 0.6;
+}
+
+/* "Now" caption: a single plain-language line under the main area. The more prominent of the two surfaces — the line a non-developer reads to know what is happening — so it carries a larger font and the accent color. */
+.pb-now-caption {
+	flex: 0 0 auto;
+	margin: 0;
+	padding: 0 var(--space-2);
+	font-size: 1rem;
+	font-weight: 500;
+	color: var(--color-accent);
+	text-align: center;
+}
+
 /* Small top-bar nodes: a compact square holding just the invocation count, so a long run's history stays a thin strip. The strip is cumulative/aggregate history (total invocations per type), so it carries no per-invocation status — a slot never turns red or green. The role/tool name and cumulative token/time details surface via the native SVG <title> hover tooltip, not in the strip. */
 .flow-small-node-box {
 	fill: var(--svg-node-fill);

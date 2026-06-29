@@ -1,10 +1,38 @@
 // Dev-only playback harness for the flow-graph visualization.
-// Loads the fixture scenarios and renders the current frame's visualization against the step-02 SVG primitives, with a slim scenario/playback bar at the top. This is throwaway iteration scaffolding, isolated behind its own entry page (playback.html) so it is removed cleanly when the visualization replaces it; it never touches the real run view in app.js. Scenario details live in the fixtures module and the plan, not on this page, so the rendered view is the only thing under analysis.
+// Loads the fixture scenarios and renders the current frame's visualization against the SVG primitives, with a slim scenario/playback bar at the top. This is throwaway iteration scaffolding, isolated behind its own entry page (playback.html) so it is removed cleanly when the visualization replaces it; it never touches the real run view in app.js. Scenario details live in the fixtures module, not on this page, so the rendered view is the only thing under analysis.
 import { h, app } from './vendor/hyperapp.js'
 import { fixtures } from './fixtures.js'
-import { renderFlowView, deriveLifecycle, DEFAULT_MIN_COLUMNS } from './flow-view.js'
+import { renderFlowView, deriveLifecycle, deriveNowCaption, DEFAULT_MIN_COLUMNS } from './flow-view.js'
 
 const PLAY_INTERVAL_MS = 1200
+
+// The effort channel's six stops, quality-graded. Duplicated from the product client because app.js pulls in runtime dependencies the static playback harness does not serve; the harness is throwaway iteration scaffolding, so a small local copy keeps it self-contained.
+const EFFORT_LABELS = ['fastest', 'quick', 'moderate', 'standard', 'thorough', 'highest quality']
+
+function effortLabel(effort) {
+	if (typeof effort !== 'number' || !Number.isInteger(effort) || effort < 0 || effort > 5) return '—'
+	return EFFORT_LABELS[effort] ?? '—'
+}
+
+// Compact elapsed/token formatters for the ambient surfaces. They mirror the product client's formatting intent (locale-independent, terse) without its Intl dependency so the harness stays browser-pure.
+function formatElapsedShort(seconds) {
+	if (typeof seconds !== 'number' || !Number.isFinite(seconds) || seconds < 0) return '—'
+	if (seconds < 60) return `${Math.round(seconds)}s`
+	if (seconds >= 3600) {
+		const hours = Math.floor(seconds / 3600)
+		const remainingMinutes = Math.round((seconds % 3600) / 60)
+		return remainingMinutes === 0 ? `${hours}h` : `${hours}h ${remainingMinutes}m`
+	}
+	const minutes = Math.floor(seconds / 60)
+	const remaining = Math.round(seconds % 60)
+	return remaining === 0 ? `${minutes}m` : `${minutes}m ${remaining}s`
+}
+
+function formatTokensShort(tokens) {
+	if (tokens === null || tokens === undefined || typeof tokens !== 'number' || !Number.isFinite(tokens)) return '—'
+	if (tokens >= 1000) return `${Math.round(tokens / 100) / 10}k`
+	return String(tokens)
+}
 
 // The active fixture is derived from scenarioIndex rather than stored, so the view can never drift from the selector: changing the dropdown only needs to update scenarioIndex, and every reader sees the new scenario on the next render.
 function currentFixture(state) {
@@ -149,10 +177,41 @@ function FlowView(state) {
 	return renderFlowView(h, model, flowColumnHighWater(state), flowLifecycle(state))
 }
 
+// The current frame's config + runView + flowModel, used by the product surfaces that wrap the flow view. Derived from the same frame the FlowView renders so the surfaces never drift from the graph.
+function currentFrame(state) {
+	return currentFixture(state).frames[state.frameIndex]
+}
+
+// A quiet, always-present strip in the page border showing elapsed · tokens · effort for the active run. It is the most subdued of the two product surfaces — ambient, not focal — so it carries a small font and the subtle text color.
+function CostStrip(state) {
+	const runView = currentFrame(state).runView
+	const budgets = runView.budgets
+	const effort = runView.effort
+	const effortText = effort !== null ? `${effort} ${effortLabel(effort)}` : '—'
+	return h('div', { class: 'pb-cost-strip' }, [
+		h('span', { class: 'pb-cost-item' }, `elapsed ${formatElapsedShort(budgets.elapsedSeconds)}`),
+		h('span', { class: 'pb-cost-sep' }, '·'),
+		h('span', { class: 'pb-cost-item' }, `tokens ${formatTokensShort(budgets.tokensUsed)}`),
+		h('span', { class: 'pb-cost-sep' }, '·'),
+		h('span', { class: 'pb-cost-item' }, `effort ${effortText}`),
+	])
+}
+
+// A single plain-language line directly under the main area, derived from the active role/tool's friendly description. It is the most prominent of the two surfaces — the one a non-developer reads to know what is happening — so it carries a larger font and the accent color.
+function NowCaption(state) {
+	const frame = currentFrame(state)
+	const caption = deriveNowCaption(frame.config, frame.runView, frame.flowModel)
+	return h('p', { class: 'pb-now-caption' }, caption)
+}
+
 function view(state) {
 	return h('div', { class: 'pb' }, [
+		CostStrip(state),
 		PlaybackControls(state),
-		FlowView(state),
+		h('div', { class: 'pb-flow' }, [
+			h('div', { class: 'flow-view' }, [FlowView(state)]),
+			NowCaption(state),
+		]),
 	])
 }
 

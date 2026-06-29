@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { renderFlowView, deriveFlowAnimation, deriveLifecycle, FLOW_VIEW_CONSTANTS } from './static/flow-view.js'
+import { renderFlowView, deriveFlowAnimation, deriveLifecycle, deriveNowCaption, FLOW_VIEW_CONSTANTS } from './static/flow-view.js'
 import { fixtures } from './static/fixtures.js'
 
 // The flow-view renderer is browser-pure JS, so its exports arrive with inferred JS types. The interfaces below carry the shape the tests assert against; results are annotated rather than cast so the structural checks flow through TypeScript, mirroring pathfinding.test.ts.
@@ -462,6 +462,14 @@ function frameModel(scenarioId: string, frameIndex: number): FlowModel {
 	return model
 }
 
+// Returns a scenario frame's config + runView + flowModel triple, narrowed through `unknown` since the JS fixtures do not advertise those fields on their inferred frame type. Used by the product-surface derivations that consume the same shapes the live API will return.
+function scenarioFrame(scenarioId: string, frameIndex: number): { config: unknown, runView: unknown, flowModel: unknown } {
+	const scenario = scenarioById(scenarioId)
+	const frameValue = scenario.frames[frameIndex]
+	if (!isObject(frameValue)) throw new Error(`${scenarioId}[frame ${frameIndex}]: frame is not an object`)
+	return { config: frameValue['config'], runView: frameValue['runView'], flowModel: flowModelOf(frameValue) }
+}
+
 // The animation state of a single edge identified by its endpoints, or undefined when no such edge exists.
 function edgeState(model: FlowModel, from: string, to: string): string | undefined {
 	const { edgeStates } = deriveFlowAnimation(model)
@@ -724,5 +732,116 @@ describe('deriveLifecycle', () => {
 		const departingIds = lifecycle.departing.map((entry) => entry.node.id).sort()
 		expect(departingIds).toEqual(['orchestrator'])
 		for (const entry of lifecycle.departing) expect(entry.merged).toBe(true)
+	})
+})
+
+// --- Product surfaces: "now" caption + budget bar -------------------------
+
+describe('deriveNowCaption', () => {
+	test('an active worker role yields its friendly description', () => {
+		// single-role-in-progress frame 1: the planner is thinking (active flag, no flowing edge), so the caption is the planner's friendly description.
+		const frame = scenarioFrame('single-role-in-progress', 1)
+		expect(deriveNowCaption(frame.config, frame.runView, frame.flowModel)).toBe('Looks around and figures out the plan of attack…')
+	})
+
+	test('an in-flight tool call pairs the calling role and the tool friendly labels', () => {
+		// single-role-in-progress frame 2: planner→glob_files call is in flight, so the caption names both the role and the tool.
+		const frame = scenarioFrame('single-role-in-progress', 2)
+		const caption = deriveNowCaption(frame.config, frame.runView, frame.flowModel)
+		expect(caption).toBe('The planner · Search for files…')
+		expect(caption).toContain('The planner')
+		expect(caption).toContain('Search for files')
+	})
+
+	test('a pending ask_human question yields the ask_human friendly description', () => {
+		// pending-question frame 3: the question edge flows toward the You respondent.
+		const frame = scenarioFrame('pending-question', 3)
+		expect(deriveNowCaption(frame.config, frame.runView, frame.flowModel)).toBe('Needs your input before continuing…')
+	})
+
+	test('a completed run yields a completion caption', () => {
+		const frame = scenarioFrame('completed-success', 13)
+		expect(deriveNowCaption(frame.config, frame.runView, frame.flowModel)).toBe('Done.')
+	})
+
+	test('a failed run yields an error caption', () => {
+		const frame = scenarioFrame('failed-run', 4)
+		expect(deriveNowCaption(frame.config, frame.runView, frame.flowModel)).toBe('The run stopped with an error.')
+	})
+
+	test('a lingering return to the root You reads as wrapping up', () => {
+		// completed-success frame 12: the orchestrator has finished and its return edge flows back to You; the run is unwinding.
+		const frame = scenarioFrame('completed-success', 12)
+		expect(deriveNowCaption(frame.config, frame.runView, frame.flowModel)).toBe('Wrapping up…')
+	})
+
+	test('the fallback chain uses detailed when the friendly tier is absent', () => {
+		const config = {
+			roles: {
+				customrole: {
+					tools: [],
+					label: { detailed: 'Custom Role' },
+					description: { detailed: 'Does the custom thing.' },
+				},
+			},
+			tools: {},
+		}
+		const model: FlowModel = {
+			mainArea: {
+				nodes: [
+					{ id: 'you', kind: 'you', label: 'You', column: 0, row: 0 },
+					{ id: 'customrole', kind: 'role', label: 'Custom Role', sublabel: 'customrole', column: 1, row: 0, active: true },
+				],
+				edges: [{ from: 'you', to: 'customrole', kind: 'call' }],
+			},
+			topBar: { nodes: [] },
+		}
+		expect(deriveNowCaption(config, { status: 'unknown' }, model)).toBe('Does the custom thing…')
+	})
+
+	test('the fallback chain falls to a title-cased name when no description tier is present', () => {
+		const config = {
+			roles: {
+				norole: { tools: [], label: { detailed: 'Norole' } },
+			},
+			tools: {},
+		}
+		const model: FlowModel = {
+			mainArea: {
+				nodes: [
+					{ id: 'you', kind: 'you', label: 'You', column: 0, row: 0 },
+					{ id: 'norole', kind: 'role', label: 'Norole', sublabel: 'norole', column: 1, row: 0, active: true },
+				],
+				edges: [{ from: 'you', to: 'norole', kind: 'call' }],
+			},
+			topBar: { nodes: [] },
+		}
+		expect(deriveNowCaption(config, { status: 'unknown' }, model)).toBe('Norole…')
+	})
+
+	test('a tool-in-flight caption falls back to the detailed tool label when friendly is absent', () => {
+		const config = {
+			roles: {
+				coder: { tools: ['write_file'], label: { detailed: 'Coder' }, description: { detailed: 'Writes code.' } },
+			},
+			tools: {
+				write_file: { humanLabel: { detailed: 'Write a file' }, humanDescription: { detailed: 'Writes a file.' } },
+			},
+		}
+		const model: FlowModel = {
+			mainArea: {
+				nodes: [
+					{ id: 'you', kind: 'you', label: 'You', column: 0, row: 0 },
+					{ id: 'coder', kind: 'role', label: 'Coder', sublabel: 'coder', column: 1, row: 0, costTokens: 100 },
+					{ id: 'write_file', kind: 'tool', label: 'Write a file', column: 2, row: 0 },
+				],
+				edges: [
+					{ from: 'you', to: 'coder', kind: 'call' },
+					{ from: 'coder', to: 'write_file', kind: 'call' },
+				],
+			},
+			topBar: { nodes: [] },
+		}
+		expect(deriveNowCaption(config, { status: 'unknown' }, model)).toBe('Coder · Write a file…')
 	})
 })
