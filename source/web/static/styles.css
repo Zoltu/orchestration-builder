@@ -1157,7 +1157,7 @@ li:last-child {
 	stroke-width: 1.5;
 }
 
-/* Flowing and returning edges use a marching-ants dash animation so motion reads along the active path; returning reverses the direction. */
+/* Forward flow (calls and questions) is always blue — it is the active operation in flight, headed toward the recipient. Response flow (returns) carries the outcome's color: a successful return is green, a failed return is red. This separates "where the flow is going" (blue, neutral) from "what came back" (green = success, red = failure), so the result of a step reads at a glance. The source node of a return carries the matching border via its `status` field (success → green, error → red), so the node and its outgoing response leg read as one colored unit. The dash animates toward the path's end (negative offset), so the direction is set entirely by which endpoint the path is drawn from: a call is drawn caller→callee (motion toward the callee) and a return is drawn tool/child→caller (motion toward the caller), giving return legs the correct right→left feel without a separate reversed keyframe. */
 .graph-edge--flowing {
 	stroke: var(--svg-flow-accent);
 	stroke-dasharray: 6 4;
@@ -1165,25 +1165,20 @@ li:last-child {
 }
 
 .graph-edge--returning {
-	stroke: var(--svg-flow-accent);
+	stroke: var(--svg-success);
 	stroke-dasharray: 6 4;
-	animation: graph-edge-flow-reverse 0.8s linear infinite;
+	animation: graph-edge-flow 0.8s linear infinite;
 }
 
 .graph-edge--error {
 	stroke: var(--svg-error);
-	stroke-width: 2;
+	stroke-dasharray: 6 4;
+	animation: graph-edge-flow 0.8s linear infinite;
 }
 
 @keyframes graph-edge-flow {
 	to {
 		stroke-dashoffset: -10;
-	}
-}
-
-@keyframes graph-edge-flow-reverse {
-	to {
-		stroke-dashoffset: 10;
 	}
 }
 
@@ -1331,30 +1326,15 @@ li:last-child {
 }
 
 /* --- Flow view (dev playback harness) -------------------------------------- */
-/* The two-component flow view: a compact history strip (small nodes, one per role/tool/"You" that has ever run, cumulative stats) above a spacious active-flow main area laid out left-to-right by call depth. Both SVGs size themselves to their content and fit within the container via preserveAspectRatio, so the strip stays a thin header while the main area fills the remainder. Colors reuse the --svg-* tokens so the flow follows the light/dark theme with the rest of the page. */
+/* The two-component flow view rendered as a single shared SVG: a compact history strip (small nodes, one per role/tool/"You" that has ever run, cumulative stats) at the top, and a spacious active-flow main area (nodes/edges laid out left-to-right by call depth) below it, separated by a gap. Sharing one SVG is what makes the depart animation work — a node leaving the main area travels to its top-bar slot in the shared coordinate space, so the travel lands on the slot and the counter increment reads as the node arriving. The SVG sizes to its viewBox and fits the container via preserveAspectRatio. Colors reuse the --svg-* tokens so the flow follows the light/dark theme with the rest of the page. */
 
 .flow-view {
 	flex: 1 1 auto;
 	min-height: 0;
 	display: flex;
-	flex-direction: column;
-	gap: var(--space-2);
-	overflow: hidden;
 }
 
-.flow-topbar-svg {
-	flex: 0 0 auto;
-	width: 100%;
-	overflow: visible;
-	display: block;
-}
-
-.flow-topbar-svg text {
-	font-family: var(--font-body);
-	user-select: none;
-}
-
-.flow-main-svg {
+.flow-view-svg {
 	flex: 1 1 auto;
 	min-height: 0;
 	width: 100%;
@@ -1364,12 +1344,12 @@ li:last-child {
 	display: block;
 }
 
-.flow-main-svg text {
+.flow-view-svg text {
 	font-family: var(--font-body);
 	user-select: none;
 }
 
-/* Small top-bar nodes: a compact square holding just the invocation count, so a long run's history stays a thin strip. The role/tool name and cumulative token/time details surface via the native SVG <title> hover tooltip, not in the strip. The status re-strokes the box via class hooks so a failed role's slot reads at a glance, mirroring the main-area node states. */
+/* Small top-bar nodes: a compact square holding just the invocation count, so a long run's history stays a thin strip. The strip is cumulative/aggregate history (total invocations per type), so it carries no per-invocation status — a slot never turns red or green. The role/tool name and cumulative token/time details surface via the native SVG <title> hover tooltip, not in the strip. */
 .flow-small-node-box {
 	fill: var(--svg-node-fill);
 	stroke: var(--svg-node-border);
@@ -1383,19 +1363,93 @@ li:last-child {
 	font-variant-numeric: tabular-nums;
 }
 
-.flow-small-node--success .flow-small-node-box {
-	stroke: var(--svg-success);
-	stroke-width: 1.5;
+/* --- Flow animation: node lifecycle + edge flow (step 04) ------------------ */
+/* The active path animates at turn granularity: forward call edges flow left→right (marching-ants), lingering return edges flow right→left, and the active node pulses. The edge and pulse keyframes live above (graph-edge--flowing/returning, graph-node-pulse); the rules below cover the node lifecycle transitions that frame-diffing drives — a node entering the main area scales/fades in, and a node that has left for the top bar travels to its slot while shrinking and fading. All motion is CSS-only and reads the --svg-* tokens so it follows the light/dark theme. */
+
+/* A newly-arrived main-area node. The host <g> carries the translate (position); the inner <g> animates scale + opacity against its own bounding box so the node grows from its center rather than the SVG origin. */
+.flow-node--entering {
+	transform-box: fill-box;
+	transform-origin: center;
+	animation: flow-node-enter 0.4s ease-out;
 }
 
-.flow-small-node--error .flow-small-node-box {
-	stroke: var(--svg-error);
-	stroke-width: 1.5;
+@keyframes flow-node-enter {
+	from {
+		opacity: 0;
+		transform: scale(0.7);
+	}
+	to {
+		opacity: 1;
+		transform: scale(1);
+	}
 }
 
-.flow-small-node--interrupted .flow-small-node-box {
-	stroke: var(--svg-active-pulse);
-	stroke-width: 1.5;
-	stroke-dasharray: 4 3;
+/* A node that has left the main area for a top-bar slot. The outer <g> travels from its previous main-area position to its top-bar slot (the from/to coordinates are passed as `--from-*`/`--to-*` custom properties; both live in the shared SVG coordinate space so the travel lands on the slot); the inner body scales down toward the small-node size. The fade is held off until after the node has arrived at its slot: the first 70% of the timeline is travel + shrink at full opacity (so the node stays visible and readable the whole way to its slot), and only the last 30% fades it out once it has merged into the slot. `forwards` holds the faded state so the node does not snap back before the next frame replaces it. */
+.flow-node--departing {
+	animation: flow-node-depart 0.6s ease-in forwards;
+}
+
+@keyframes flow-node-depart {
+	0% {
+		transform: translate(var(--from-x), var(--from-y));
+		opacity: 1;
+	}
+	70% {
+		transform: translate(var(--to-x), var(--to-y));
+		opacity: 1;
+	}
+	100% {
+		transform: translate(var(--to-x), var(--to-y));
+		opacity: 0;
+	}
+}
+
+.flow-node--departing-scale {
+	transform-box: fill-box;
+	transform-origin: center;
+	animation: flow-node-depart-scale 0.6s ease-in forwards;
+}
+
+@keyframes flow-node-depart-scale {
+	0% {
+		transform: scale(1);
+	}
+	70% {
+		transform: scale(0.2);
+	}
+	100% {
+		transform: scale(0.2);
+	}
+}
+
+/* The merging variant (the type's slot already existed) reuses the same travel/shrink/fade; the existing slot's counter increment conveys the merge. The hook is kept distinct so the motion can be refined independently if a clearer merge cue is wanted. */
+.flow-node--merging {
+	animation-duration: 0.55s;
+}
+
+.flow-node--merging .flow-node--departing-scale {
+	animation-duration: 0.55s;
+}
+
+/* Reduced motion: disable all flow, pulse, and lifecycle motion and fall back to static highlights. Flowing/returning/error edges keep their accent color but stop marching; the active node keeps its thicker stroke without pulsing; entering nodes simply appear; departing overlays are hidden (there is no animation to remove them, so a static render would leave a ghost at the SVG origin). */
+@media (prefers-reduced-motion: reduce) {
+	.graph-edge--flowing,
+	.graph-edge--returning,
+	.graph-edge--error {
+		animation: none;
+		stroke-dasharray: none;
+	}
+	.graph-node--active .graph-node-box,
+	.role-pulse {
+		animation: none;
+	}
+	.flow-node--entering,
+	.flow-node--departing,
+	.flow-node--departing-scale {
+		animation: none;
+	}
+	.flow-node--departing {
+		display: none;
+	}
 }
 

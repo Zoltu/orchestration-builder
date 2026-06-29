@@ -2,7 +2,7 @@
 // Loads the fixture scenarios and renders the current frame's visualization against the step-02 SVG primitives, with a slim scenario/playback bar at the top. This is throwaway iteration scaffolding, isolated behind its own entry page (playback.html) so it is removed cleanly when the visualization replaces it; it never touches the real run view in app.js. Scenario details live in the fixtures module and the plan, not on this page, so the rendered view is the only thing under analysis.
 import { h, app } from './vendor/hyperapp.js'
 import { fixtures } from './fixtures.js'
-import { renderFlowView, DEFAULT_MIN_COLUMNS } from './flow-view.js'
+import { renderFlowView, deriveLifecycle, DEFAULT_MIN_COLUMNS } from './flow-view.js'
 
 const PLAY_INTERVAL_MS = 1200
 
@@ -133,10 +133,20 @@ function flowColumnHighWater(state) {
 	return highWater
 }
 
+// The lifecycle descriptor is the diff between the previous and current frames' FlowModels: which main-area nodes are newly arrived (entering) and which left the main area for a top-bar slot (departing, merging into the slot if it already existed). The harness re-derives it each render from frameIndex-1 and frameIndex, so advancing/scrubbing a frame re-runs the entering and shrink-up animations deterministically. The first frame of a scenario has no previous frame, so nothing enters or departs.
+function flowLifecycle(state) {
+	const fixture = currentFixture(state)
+	const frames = fixture.frames
+	const current = frames[state.frameIndex].flowModel
+	if (state.frameIndex === 0) return deriveLifecycle(undefined, current)
+	const previous = frames[state.frameIndex - 1].flowModel
+	return deriveLifecycle(previous, current)
+}
+
 function FlowView(state) {
 	const fixture = currentFixture(state)
 	const model = fixture.frames[state.frameIndex].flowModel
-	return renderFlowView(h, model, flowColumnHighWater(state))
+	return renderFlowView(h, model, flowColumnHighWater(state), flowLifecycle(state))
 }
 
 function view(state) {
