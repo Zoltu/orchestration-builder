@@ -1,17 +1,28 @@
-// Reusable SVG primitives for the flow-graph run view.
+// SVG primitives for the new MVC views (flow + sequence), browser-pure.
 //
-// Each primitive is a self-contained vnode tree laid out against its own local origin (0,0): the graph layout assigns each node a translate, and the primitives never hardcode an absolute position or internal padding. Borders and padding live on the container (.graph in styles.css), not inside the SVG. Moving a composed node is therefore a one-number change to its translate and never touches the primitive's internals.
+// Parallel to the sibling svg-primitives.js but independent, so the previous
+// demo's primitives stay intact until these are promoted to canonical names.
+// Each primitive is a self-contained vnode laid out against
+// its own local origin (0,0); the caller applies the translate and the
+// primitive never hardcodes an absolute position, so moving a composed node is a
+// one-number change to its translate.
 //
-// `h` is passed in rather than imported so the module stays free of hyperapp coupling and the vnode shape is exercisable in tests with a fake `h` (mirroring markdown.js's htmlNodesToVnodes). The primitives take already-safe strings as props — machine fields (labels, counters, costs) become SVG <text> textContent, never markup — so the textContent security invariant holds. Agent-authored prose is not rendered by the primitives themselves; the tooltip body slot receives already-shaped children from the caller, and the friendly formatting of that body is a separate concern.
+// Colors reuse the project's --svg-* tokens via the existing graph-node and
+// graph-edge CSS classes declared in styles.css, so the new views follow the
+// light/dark theme without adding CSS in this layer. Machine fields (labels,
+// counters, costs) are SVG <text> textContent, never markup, so the textContent
+// security invariant holds. No motion classes are emitted here: call and return
+// edges render as settled strokes and the observe line is a distinct dashed
+// static style; the flowing/returning motion classes are layered on top of
+// these primitives by the animation layer, never by the primitives themselves.
 //
-// The module is plain browser JS (a sibling of app.js, served statically and imported by the playback harness) and is exercised in-memory by svg-primitives.test.ts. It imports nothing and touches no external system.
+// `h` is passed in rather than imported so the module stays free of hyperapp
+// coupling and the vnode shape is exercisable in tests with a fake `h`,
+// mirroring the sibling svg-primitives.js convention. The module is plain
+// browser JS, imports nothing, and touches no external system.
 
 export const NODE_WIDTH = 160
 export const NODE_HEIGHT = 64
-
-export const TOOLTIP_PADDING = 12
-export const TOOLTIP_DEFAULT_WIDTH = 240
-export const TOOLTIP_DEFAULT_HEIGHT = 120
 
 // Returns the anchor point of a node positioned at (x, y) on the requested side. Edges are a separate layer that reads these anchors, so a node and its connecting edge stay aligned through one source of truth.
 export function nodeAnchor(x, y, side) {
@@ -29,7 +40,7 @@ export function nodeAnchor(x, y, side) {
 	}
 }
 
-// A graph node: a <g> containing its box, a centered label, an optional sublabel, an optional invocation counter badge, an optional cost line, and active/success/error visual states expressed as class hooks the CSS animates. Internal layout only; the caller applies the translate.
+// A graph node: a <g> with its box, a centered label, an optional sublabel, an optional invocation counter badge, and an optional cost line. status ('success' | 'error') applies the existing static stroke classes so a settled node's outcome reads at a glance; active (the destination of the latest operation in the active stack) applies the pulsing stroke class so the eye lands on the current-flow recipient. A 'terminated' return outcome does NOT color the node — the node was killed externally (it did not succeed or fail), so the warn-toned rendering lives on the return line only, and the orange border comes exclusively from a terminate op targeting the node (flow-node--terminate-target). Internal layout only; the caller applies the translate.
 export function GraphNode(h, props) {
 	const label = props.label
 	const sublabel = props.sublabel
@@ -79,62 +90,52 @@ function formatTokens(value) {
 	return String(value)
 }
 
-// A graph edge: a <path> between two anchors with a class hook per state. `static` is the calm resting edge; `flowing` and `returning` carry a marching-ants dash animation; `error` is a solid red stroke. The CSS reads the class to apply the animation, so the primitive carries no animation logic. `kind` ('call'|'return'|'question'|'inspect') selects the curve shape: calls and questions bow horizontally between the side faces; returns bow downward so the response leg sits below the request line rather than overlapping it; inspect edges (an observer tool reading another role's history) bow sideways so a vertical inspection line curves clear of the two nodes. Optional `onmouseenter`/`onmouseleave` handlers are passed through so the caller can wire an edge hover to open an inspector without wrapping the path in an extra group (which would reorder the SVG children the layout relies on).
+// A graph edge: a <path> between two face anchors, shaped by kind. A call bows horizontally between the side faces (caller right → callee left); a return bows downward between the bottom faces so the response leg sits below the forward call line and never overlaps it; an observe is a vertical line drawn dashed so a cross-stack observation reads as a static reference rather than an in-flight call. A terminate shares the observe's sideways-bowed cross-stack geometry; its red dashed stroke is applied by the flow view's CSS (the wrapper carries flow-edge--terminate), so the primitive carries no terminate-specific styling of its own. The state prop ('flowing' | 'returning' | 'error' | 'static') layers the matching motion class onto the path so the CSS drives the marching-ants animation; the primitive carries no animation logic of its own.
 export function GraphEdge(h, props) {
 	const fromAnchor = props.fromAnchor
 	const toAnchor = props.toAnchor
-	const state = props.state
 	const kind = props.kind
+	const state = props.state
 
 	const classes = ['graph-edge']
 	if (state === 'flowing') classes.push('graph-edge--flowing')
 	else if (state === 'returning') classes.push('graph-edge--returning')
 	else if (state === 'error') classes.push('graph-edge--error')
+	else if (state === 'terminated') classes.push('graph-edge--terminated')
 
 	const pathProps = { class: classes.join(' '), d: edgePath(fromAnchor, toAnchor, kind) }
-	if (props.onmouseenter !== undefined) pathProps.onmouseenter = props.onmouseenter
-	if (props.onmouseleave !== undefined) pathProps.onmouseleave = props.onmouseleave
+	if (kind === 'observe') pathProps['stroke-dasharray'] = '3 3'
 	return h('path', pathProps, [])
 }
 
-// A gentle cubic curve between the anchors so sibling edges separate rather than overlapping. Calls and questions bow horizontally (keeps horizontal edges readable, leaves vertical edges straight). Returns bow downward so the response leg curves below the nodes and never paints over the forward call line. Inspect edges bow sideways so a vertical inspection line curves clear of the two nodes.
+// A gentle cubic curve between the anchors so sibling edges separate rather than overlap. Calls bow horizontally to keep the left-to-right chain readable; returns bow downward so the response leg curves below the nodes and never paints over the forward call line; observes and terminates bow slightly sideways so two stacked cross-stack lines don't sit on top of each other.
 function edgePath(from, to, kind) {
 	if (kind === 'return') {
 		const bow = 40
 		return `M ${from.x} ${from.y} C ${from.x} ${from.y + bow}, ${to.x} ${to.y + bow}, ${to.x} ${to.y}`
 	}
-	if (kind === 'inspect') {
-		const bow = 24
-		return `M ${from.x} ${from.y} C ${from.x - bow} ${from.y}, ${to.x - bow} ${to.y}, ${to.x} ${to.y}`
+	if (kind === 'observe' || kind === 'terminate') {
+		const bow = 16
+		return `M ${from.x} ${from.y} C ${from.x + bow} ${from.y}, ${to.x + bow} ${to.y}, ${to.x} ${to.y}`
 	}
 	const dx = to.x - from.x
 	const bow = dx * 0.2
 	return `M ${from.x} ${from.y} C ${from.x + bow} ${from.y}, ${to.x - bow} ${to.y}, ${to.x} ${to.y}`
 }
 
-// A tooltip shell: a <g> with a background rect, a title, a body slot (the caller's already-shaped children), and an optional "copy raw" button. Positioning is decided by the caller via a translate; the shell itself lays out against local 0,0. Friendly formatting of the body is a separate concern; this delivers only the shell and the copy-button wiring.
-export function TooltipShell(h, props) {
-	const title = props.title
-	const bodyChildren = Array.isArray(props.children) ? props.children : []
-	const onCopyRaw = props.onCopyRaw
-	const copyAvailable = props.copyAvailable === true
-	const width = props.width ?? TOOLTIP_DEFAULT_WIDTH
-	const height = props.height ?? TOOLTIP_DEFAULT_HEIGHT
-
-	const elements = [
-		h('rect', { class: 'graph-tooltip-rect', x: 0, y: 0, width, height, rx: 8 }, []),
-		h('text', { class: 'graph-tooltip-title', x: TOOLTIP_PADDING, y: 22 }, [title]),
-		h('g', { class: 'graph-tooltip-body', transform: `translate(${TOOLTIP_PADDING}, 36)` }, bodyChildren),
-	]
-
-	if (copyAvailable && onCopyRaw !== undefined) {
-		elements.push(
-			h('g', { class: 'graph-tooltip-copy', transform: `translate(${width - 88}, ${height - 28})`, onclick: onCopyRaw }, [
-				h('rect', { class: 'graph-tooltip-button-rect', x: 0, y: 0, width: 76, height: 20, rx: 4 }, []),
-				h('text', { class: 'graph-tooltip-button-text', x: 38, y: 14, 'text-anchor': 'middle' }, ['Copy raw']),
-			]),
-		)
-	}
-
-	return h('g', { class: 'graph-tooltip' }, elements)
+// A loopback edge for a same-column cross-instance call: two participants at the same call depth (a role re-invoked at its own column, or a self-delegation) connect via a U-turn on the right side rather than a straight line that would overlap the column's other edges. Shared with the sequence view, which lays same-column messages the same way.
+//
+// `markerEnd` and `extraClass` let the sequence view attach an arrowhead and its own message classes (seq-message, seq-message--return, …) onto the same shared path so the U-turn geometry stays defined in one place. Both are optional; the flow view omits them and the path renders as a plain graph-edge stroke.
+export function LoopbackEdge(h, props) {
+	const fromAnchor = props.fromAnchor
+	const toAnchor = props.toAnchor
+	const markerEnd = props.markerEnd
+	const extraClass = props.extraClass
+	const bow = 60
+	const x = Math.max(fromAnchor.x, toAnchor.x) + bow
+	const d = `M ${fromAnchor.x} ${fromAnchor.y} C ${x} ${fromAnchor.y}, ${x} ${toAnchor.y}, ${toAnchor.x} ${toAnchor.y}`
+	const classValue = extraClass !== undefined && extraClass !== '' ? `graph-edge ${extraClass}` : 'graph-edge'
+	const pathProps = { class: classValue, d }
+	if (markerEnd !== undefined && markerEnd !== null) pathProps['marker-end'] = markerEnd
+	return h('path', pathProps, [])
 }

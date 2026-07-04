@@ -1,9 +1,17 @@
 import { describe, expect, test } from 'bun:test'
-import { renderFlowView, deriveFlowAnimation, deriveLifecycle, deriveNowCaption, FLOW_VIEW_CONSTANTS } from './static/flow-view.js'
-import { fixtures } from './static/fixtures.js'
+import { deriveLifecycle, renderFlowView, deriveNowCaption, deriveCostStrip, COL_GAP } from './static/flow-view.js'
+import { activeParticipant, activeStack, observesOf, stacksOf } from './static/interaction-model.js'
+import * as labelsModule from './static/labels.js'
+import { scenarios } from './static/scenarios.js'
+import { NODE_WIDTH } from './static/svg-primitives.js'
 
-// The flow-view renderer is browser-pure JS, so its exports arrive with inferred JS types. The interfaces below carry the shape the tests assert against; results are annotated rather than cast so the structural checks flow through TypeScript, mirroring pathfinding.test.ts.
+// Pull the model type off the helper signatures so the inline fixtures are contextually checked against the JSDoc shape without a cast, mirroring the sibling interaction-model.test.ts convention.
+type InteractionModel = Parameters<typeof stacksOf>[0]
+type Participant = InteractionModel['participants'][number]
+type Operation = InteractionModel['operations'][number]
+type LabelTier = Parameters<typeof labelsModule.resolveParticipantLabel>[1]
 
+// A fake `h` capturing the tag, props, and children of every vnode so the layout assertions walk a plain object tree rather than real DOM, mirroring the flow-view.test.ts convention.
 interface Vnode {
 	tag: string
 	props: Record<string, unknown>
@@ -19,11 +27,6 @@ function isVnode(value: VnodeChild): value is Vnode {
 	return typeof value !== 'string'
 }
 
-function byTag(vnode: Vnode, tag: string): Vnode[] {
-	return vnode.children.filter((child): child is Vnode => isVnode(child) && child.tag === tag)
-}
-
-
 // Walks a vnode tree and collects every descendant matching a tag.
 function allByTag(vnode: Vnode, tag: string): Vnode[] {
 	const found: Vnode[] = []
@@ -35,1087 +38,676 @@ function allByTag(vnode: Vnode, tag: string): Vnode[] {
 	return found
 }
 
-// --- FlowModel shape guard --------------------------------------------------
-// Validates a fixture's flowModel against the future /api/runs/:id/flow contract so a malformed fixture fails loudly here rather than producing a confusing visual. Mirrors the RunView guards in fixtures.test.ts.
-
-const NODE_KINDS = new Set(['you', 'role', 'tool'])
-const EDGE_KINDS = new Set(['call', 'return', 'question', 'inspect'])
-
-interface FlowNode {
-	id: string
-	kind: string
-	label: string
-	column: number
-	row: number
-	sublabel?: string
-	status?: string
-	active?: boolean
-	counter?: number
-	costTime?: number
-	costTokens?: number
+function propString(props: Record<string, unknown>, key: string): string | undefined {
+	const value = props[key]
+	return typeof value === 'string' ? value : undefined
 }
 
-interface FlowEdge {
-	from: string
-	to: string
-	kind: string
+function propBoolean(props: Record<string, unknown>, key: string): boolean {
+	return propString(props, key) === 'true'
 }
 
-interface MainArea {
-	nodes: FlowNode[]
-	edges: FlowEdge[]
+// Finds every descendant <g> carrying a given class token.
+function groupsWithClass(vnode: Vnode, token: string): Vnode[] {
+	return allByTag(vnode, 'g').filter((group) => {
+		const classValue = propString(group.props, 'class') ?? ''
+		return classValue.split(' ').includes(token)
+	})
 }
 
-interface TopBarNode {
-	id: string
-	kind: string
-	label: string
-	invocations: number
-	totalTime?: number
-	totalTokens?: number
-	status?: string
+function scenarioFrame(scenarioId: string, frameIndex: number): InteractionModel {
+	const scenario = scenarios.find((item) => item.id === scenarioId)
+	if (scenario === undefined) throw new Error(`unknown scenario: ${scenarioId}`)
+	const frame = scenario.frames[frameIndex]
+	if (frame === undefined) throw new Error(`scenario ${scenarioId} has no frame ${frameIndex}`)
+	return frame
 }
 
-interface TopBar {
-	nodes: TopBarNode[]
+// A minimal participant/operation builder so inline fixtures read at the call site.
+function participant(id: string, role: string, kind: Participant['kind']): Participant {
+	return { id, role, kind }
 }
 
-interface FlowModel {
-	mainArea: MainArea
-	topBar: TopBar
+function callOperation(id: string, stack: string, source: string, destination: string): Operation {
+	return { id, kind: 'call', stack, source, destination, startedAt: 't0', settledAt: null, lifecycle: 'in_flight', outcome: null, details: null, metrics: null }
 }
 
-function isObject(value: unknown): value is Record<string, unknown> {
-	return typeof value === 'object' && value !== null && !Array.isArray(value)
+function render(model: InteractionModel, tier: LabelTier = 'detailed', lifecycle?: ReturnType<typeof deriveLifecycle>): Vnode {
+	return renderFlowView(fakeH, model, labelsModule, tier, lifecycle)
 }
 
-function isString(value: unknown): value is string {
-	return typeof value === 'string'
-}
-
-function isNumber(value: unknown): value is number {
-	return typeof value === 'number' && Number.isFinite(value)
-}
-
-function isNodeKind(value: unknown): boolean {
-	return isString(value) && NODE_KINDS.has(value)
-}
-
-function isEdgeKind(value: unknown): boolean {
-	return isString(value) && EDGE_KINDS.has(value)
-}
-
-function isFlowNode(value: unknown): value is FlowNode {
-	if (!isObject(value)) return false
-	if (!isString(value.id)) return false
-	if (!isNodeKind(value.kind)) return false
-	if (!isString(value.label)) return false
-	if (!isNumber(value.column)) return false
-	if (!isNumber(value.row)) return false
-	if (value.sublabel !== undefined && !isString(value.sublabel)) return false
-	if (value.status !== undefined && !isString(value.status)) return false
-	if (value.active !== undefined && typeof value.active !== 'boolean') return false
-	if (value.counter !== undefined && !isNumber(value.counter)) return false
-	if (value.costTime !== undefined && !isNumber(value.costTime)) return false
-	if (value.costTokens !== undefined && !isNumber(value.costTokens)) return false
-	return true
-}
-
-function isFlowEdge(value: unknown): value is FlowEdge {
-	if (!isObject(value)) return false
-	if (!isString(value.from)) return false
-	if (!isString(value.to)) return false
-	if (!isEdgeKind(value.kind)) return false
-	return true
-}
-
-function isMainArea(value: unknown): value is MainArea {
-	if (!isObject(value)) return false
-	if (!Array.isArray(value.nodes) || !value.nodes.every(isFlowNode)) return false
-	if (!Array.isArray(value.edges) || !value.edges.every(isFlowEdge)) return false
-	return true
-}
-
-function isTopBarNode(value: unknown): value is TopBarNode {
-	if (!isObject(value)) return false
-	if (!isString(value.id)) return false
-	if (!isNodeKind(value.kind)) return false
-	if (!isString(value.label)) return false
-	if (!isNumber(value.invocations)) return false
-	if (value.totalTime !== undefined && !isNumber(value.totalTime)) return false
-	if (value.totalTokens !== undefined && !isNumber(value.totalTokens)) return false
-	if (value.status !== undefined && !isString(value.status)) return false
-	return true
-}
-
-function isTopBar(value: unknown): value is TopBar {
-	if (!isObject(value)) return false
-	if (!Array.isArray(value.nodes) || !value.nodes.every(isTopBarNode)) return false
-	return true
-}
-
-function isFlowModel(value: unknown): value is FlowModel {
-	if (!isObject(value)) return false
-	if (!isMainArea(value.mainArea)) return false
-	if (!isTopBar(value.topBar)) return false
-	return true
-}
-
-// Extracts the flowModel from a frame value whose static type (inferred from the JS fixtures) does not advertise the field, so the access goes through `unknown` rather than the inferred shape.
-function flowModelOf(frameValue: unknown): unknown {
-	if (!isObject(frameValue)) return undefined
-	return frameValue['flowModel']
-}
-
-describe('flow-view fixtures', () => {
-	test('every frame carries a well-formed FlowModel conforming to the future endpoint contract', () => {
-		for (const scenario of fixtures) {
-			scenario.frames.forEach((frameValue, frameIndex) => {
-				const model = flowModelOf(frameValue)
-				if (!isFlowModel(model)) {
-					throw new Error(`${scenario.id}[frame ${frameIndex}].flowModel: does not match the FlowModel contract`)
+describe('renderFlowView — row projection', () => {
+	test('the row count matches stacksOf for every demo scenario frame', () => {
+		for (const scenario of scenarios) {
+			scenario.frames.forEach((frame, frameIndex) => {
+				const view = render(frame)
+				const rows = groupsWithClass(view, 'flow-row')
+				const expected = stacksOf(frame).length
+				if (rows.length !== expected) {
+					throw new Error(`${scenario.id} frame ${frameIndex}: expected ${expected} rows, got ${rows.length}`)
 				}
 			})
 		}
 	})
 
-	test('every edge references nodes that exist in the main area', () => {
-		for (const scenario of fixtures) {
-			scenario.frames.forEach((frameValue, frameIndex) => {
-				const model = flowModelOf(frameValue)
-				if (!isFlowModel(model)) return
-				const ids = new Set(model.mainArea.nodes.map((n) => n.id))
-				for (const edge of model.mainArea.edges) {
-					if (!ids.has(edge.from)) throw new Error(`${scenario.id}[frame ${frameIndex}]: edge.from "${edge.from}" has no node`)
-					if (!ids.has(edge.to)) throw new Error(`${scenario.id}[frame ${frameIndex}]: edge.to "${edge.to}" has no node`)
-				}
-			})
+	test('a frame with no open stacks and no lingering return renders no rows', () => {
+		// A terminal run whose final return has settled (the See Result acknowledgment) carries no open calls and no in_flight return leg, so its stack renders no row and only the top bar remains.
+		const model: InteractionModel = {
+			participants: [
+				participant('you', 'human', 'human'),
+				participant('coder', 'coder', 'role'),
+			],
+			operations: [
+				{ id: 'op1', kind: 'call', stack: 'root', source: 'you', destination: 'coder', startedAt: 't0', settledAt: 't1', lifecycle: 'settled', outcome: null, details: null, metrics: null },
+				{ id: 'op2', kind: 'return', stack: 'root', source: 'coder', destination: 'you', startedAt: 't2', settledAt: 't3', lifecycle: 'settled', outcome: 'success', details: null, metrics: null },
+			],
+			status: 'success',
 		}
+		const view = render(model)
+		expect(groupsWithClass(view, 'flow-row').length).toBe(0)
 	})
 
-	test('the root "You" node is always present', () => {
-		// The "You" node represents the user. It normally sits at column 0 as the run's root, but when the user is the respondent of a pending ask_human question it is placed at the question edge's target column (to the right of ask_human) so the question flows toward it; the column is therefore not pinned to 0, but a you node is always present.
-		for (const scenario of fixtures) {
-			scenario.frames.forEach((frameValue, frameIndex) => {
-				const model = flowModelOf(frameValue)
-				if (!isFlowModel(model)) return
-				const youNodes = model.mainArea.nodes.filter((n) => n.kind === 'you')
-				if (youNodes.length === 0) throw new Error(`${scenario.id}[frame ${frameIndex}]: no "you" node`)
-			})
-		}
+	test('the active stack is the bottom (last) row', () => {
+		// detected-loop-interrupt observe frame: the observe has just landed on the interrupt stack, so the interrupt stack is active and must sit below the paused root stack.
+		const frame = scenarioFrame('detected-loop-interrupt', 8)
+		const active = activeStack(frame)
+		expect(active).toBe('interrupt-stack')
+		const view = render(frame)
+		const rows = groupsWithClass(view, 'flow-row')
+		expect(rows.length).toBe(2)
+		const bottomRow = rows[rows.length - 1]
+		expect(bottomRow).toBeDefined()
+		expect(propString(bottomRow!.props, 'data-stack')).toBe('interrupt-stack')
+	})
+
+	test('each row renders its open call chain left-to-right by depth with the root at column 0', () => {
+		// delegation-chain op4 transit: the open chain is you → orchestrator → planner → coder → readFile, five nodes deep, all calls still open.
+		const frame = scenarioFrame('delegation-chain', 6)
+		const view = render(frame)
+		const row = groupsWithClass(view, 'flow-row')[0]
+		expect(row).toBeDefined()
+		const nodes = allByTag(row!, 'g').filter((group) => (propString(group.props, 'class') ?? '').split(' ').includes('flow-node'))
+		// The root "you" sits at column 0 (translate x = 0); readFile sits at column 4 (translate x = 4 * (NODE_WIDTH + COL_GAP)). The y offset is the top-bar height plus its gap, asserted only as nonzero so the test does not pin the strip height.
+		const youNode = nodes.find((node) => propString(node.props, 'data-participant') === 'you')
+		expect(youNode).toBeDefined()
+		expect(propString(youNode!.props, 'transform')).toMatch(/^translate\(0,\d+\)$/)
+		const readFileNode = nodes.find((node) => propString(node.props, 'data-participant') === 'readFile')
+		expect(readFileNode).toBeDefined()
+		const readFileX = 4 * (NODE_WIDTH + COL_GAP)
+		expect(propString(readFileNode!.props, 'transform')!.startsWith(`translate(${readFileX},`)).toBe(true)
 	})
 })
 
-describe('renderFlowView', () => {
-	const { NODE_WIDTH, NODE_HEIGHT, COL_GAP, ROW_GAP, SMALL_SIZE, SMALL_GAP, TOP_BAR_PER_ROW, DEFAULT_MIN_COLUMNS } = FLOW_VIEW_CONSTANTS
-
-	// A minimal two-node model (You calling a role) with no top bar, used across the main-area layout tests so positions are not offset by a history strip.
-	function simpleModel() {
-		return {
-			mainArea: {
-				nodes: [
-					{ id: 'you', kind: 'you', label: 'You', column: 0, row: 0 },
-					{ id: 'planner', kind: 'role', label: 'Planner', sublabel: 'planner', column: 1, row: 0, active: true },
-				],
-				edges: [{ from: 'you', to: 'planner', kind: 'call' }],
-			},
-			topBar: { nodes: [] },
+describe('renderFlowView — instance-per-invocation retries', () => {
+	test('two simultaneously-open instances of one role render as two distinct nodes, not a counter bump on one', () => {
+		// A coder delegating to a second coder instance of the same role exercises instance-per-invocation: the model carries two distinct participants sharing role 'coder', so the view renders two nodes rather than a single node with a counter.
+		const model: InteractionModel = {
+			participants: [
+				participant('you', 'human', 'human'),
+				participant('orchestrator', 'orchestrator', 'role'),
+				participant('coder-a', 'coder', 'role'),
+				participant('coder-b', 'coder', 'role'),
+			],
+			operations: [
+				callOperation('op1', 'root', 'you', 'orchestrator'),
+				callOperation('op2', 'root', 'orchestrator', 'coder-a'),
+				callOperation('op3', 'root', 'coder-a', 'coder-b'),
+			],
+			status: 'running',
 		}
-	}
-
-	// A model carrying a populated top bar (two history slots) for the top-bar rendering tests.
-	function topBarModel() {		return {
-			mainArea: { nodes: [{ id: 'you', kind: 'you', label: 'You', column: 0, row: 0 }], edges: [] },
-			topBar: {
-				nodes: [
-					{ id: 'you', kind: 'you', label: 'You', invocations: 1 },
-					{ id: 'planner', kind: 'role', label: 'Planner', invocations: 1, totalTime: 5, totalTokens: 4380 },
-				],
-			},
-		}
-	}
-
-	test('an empty top bar renders a main-area-only SVG (no top-bar children, no offset)', () => {
-		const model = { mainArea: { nodes: [{ id: 'you', kind: 'you', label: 'You', column: 0, row: 0 }], edges: [] }, topBar: { nodes: [] } }
-		const view: Vnode = renderFlowView(fakeH, model)
-		// No top-bar slots means the main area starts at y=0 (no offset) and the viewBox is the 5-column floor with one row of height.
-		const smallNodes = allByTag(view, 'g').filter((g) => ((g.props.class as string) ?? '').includes('flow-small-node'))
-		expect(smallNodes.length).toBe(0)
-		const expectedWidth = DEFAULT_MIN_COLUMNS * NODE_WIDTH + (DEFAULT_MIN_COLUMNS - 1) * COL_GAP
-		expect(view.props.viewBox).toBe(`0 0 ${expectedWidth} ${NODE_HEIGHT}`)
-	})
-
-	test('returns a single flow-view SVG containing the top-bar and main-area content', () => {
-		const view: Vnode = renderFlowView(fakeH, topBarModel())
-		expect(view.tag).toBe('svg')
-		expect(view.props.class).toBe('flow-view-svg')
-		// The small top-bar nodes and the main-area node groups are all children of the one shared SVG (a node can travel from the main area to its top-bar slot in this shared coordinate space).
-		const groups = allByTag(view, 'g')
-		expect(groups.filter((g) => ((g.props.class as string) ?? '').includes('flow-small-node')).length).toBe(2)
-		expect(groups.filter((g) => (g.props.class as string) === 'flow-node').length).toBe(1)
-	})
-
-	test('the main-area viewBox is floored at DEFAULT_MIN_COLUMNS even when content is narrower', () => {
-		const view: Vnode = renderFlowView(fakeH, simpleModel())
-		// The model has two columns (0 and 1), one row, but the canvas is pre-sized to the 5-column floor so a typical chain has stable scale as it grows. With no top bar the viewBox is just the main area.
-		const expectedWidth = DEFAULT_MIN_COLUMNS * NODE_WIDTH + (DEFAULT_MIN_COLUMNS - 1) * COL_GAP
-		const expectedHeight = 1 * NODE_HEIGHT + 0 * ROW_GAP
-		expect(view.props.viewBox).toBe(`0 0 ${expectedWidth} ${expectedHeight}`)
-	})
-
-	test('the main-area viewBox expands beyond the floor when content needs more columns', () => {
-		const model = {
-			mainArea: {
-				nodes: [
-					{ id: 'you', kind: 'you', label: 'You', column: 0, row: 0 },
-					{ id: 'a', kind: 'role', label: 'A', column: 1, row: 0 },
-					{ id: 'b', kind: 'role', label: 'B', column: 2, row: 0 },
-					{ id: 'c', kind: 'role', label: 'C', column: 3, row: 0 },
-					{ id: 'd', kind: 'role', label: 'D', column: 4, row: 0 },
-					{ id: 'e', kind: 'role', label: 'E', column: 5, row: 0 },
-				],
-				edges: [],
-			},
-			topBar: { nodes: [] },
-		}
-		const view: Vnode = renderFlowView(fakeH, model)
-		// Six columns of content (0..5) exceed the 5-column floor, so the canvas expands to 6.
-		const expectedWidth = 6 * NODE_WIDTH + 5 * COL_GAP
-		expect(view.props.viewBox).toBe(`0 0 ${expectedWidth} ${1 * NODE_HEIGHT}`)
-	})
-
-	test('a minColumns above the content count holds the canvas open (no shrink)', () => {
-		// Models a frame after a 6-column layer has finished: content is back to 2 columns, but the caller passes the high-water mark (6) so the canvas does not contract.
-		const model = simpleModel()
-		const view: Vnode = renderFlowView(fakeH, model, 6)
-		const expectedWidth = 6 * NODE_WIDTH + 5 * COL_GAP
-		expect(view.props.viewBox).toBe(`0 0 ${expectedWidth} ${1 * NODE_HEIGHT}`)
-	})
-
-	test('a minColumns below DEFAULT_MIN_COLUMNS still floors at the default', () => {
-		const model = simpleModel()
-		const view: Vnode = renderFlowView(fakeH, model, 2)
-		const expectedWidth = DEFAULT_MIN_COLUMNS * NODE_WIDTH + (DEFAULT_MIN_COLUMNS - 1) * COL_GAP
-		expect(view.props.viewBox).toBe(`0 0 ${expectedWidth} ${1 * NODE_HEIGHT}`)
-	})
-
-	test('a node at (column 1, row 0) is translated to the second column pixel position', () => {
-		const view: Vnode = renderFlowView(fakeH, simpleModel())
-		const groups = allByTag(view, 'g')
-		// The planner node group carries a translate of (NODE_WIDTH + COL_GAP, 0).
-		const plannerGroup = groups.find((g) => {
-			if (typeof g.props.transform !== 'string') return false
-			return g.props.transform === `translate(${NODE_WIDTH + COL_GAP},0)`
+		const view = render(model)
+		const coderNodes = allByTag(view, 'g').filter((group) => {
+			if (!(propString(group.props, 'class') ?? '').split(' ').includes('flow-node')) return false
+			return propString(group.props, 'data-role') === 'coder'
 		})
-		expect(plannerGroup).toBeDefined()
-	})
-
-	test('a row-1 node is translated below a row-0 node by NODE_HEIGHT + ROW_GAP', () => {
-		const model = {
-			mainArea: {
-				nodes: [
-					{ id: 'you', kind: 'you', label: 'You', column: 0, row: 0 },
-					{ id: 'other', kind: 'role', label: 'Other', column: 0, row: 1 },
-				],
-				edges: [],
-			},
-			topBar: { nodes: [] },
+		expect(coderNodes.length).toBe(2)
+		const ids = coderNodes.map((node) => propString(node.props, 'data-participant')).sort()
+		expect(ids).toEqual(['coder-a', 'coder-b'])
+		// No counter badge is emitted on either node: retries are separate instances, so the counter primitive is unused.
+		for (const node of coderNodes) {
+			const counters = allByTag(node, 'rect').filter((rect) => propString(rect.props, 'class') === 'graph-node-counter-rect')
+			expect(counters.length).toBe(0)
 		}
-		const view: Vnode = renderFlowView(fakeH, model)
-		const groups = allByTag(view, 'g')
-		const otherGroup = groups.find((g) => g.props.transform === `translate(0,${NODE_HEIGHT + ROW_GAP})`)
-		expect(otherGroup).toBeDefined()
 	})
 
-	test('a call edge uses the source right face and the target left face (left-to-right)', () => {
-		const model = simpleModel()
-		const view: Vnode = renderFlowView(fakeH, model)
-		const edges = allByTag(view, 'path').filter((p) => typeof p.props.d === 'string' && (p.props.d as string).startsWith('M '))
-		expect(edges.length).toBe(1)
-		const d = edges[0]!.props.d as string
-		// The path starts at the You node's right-face anchor (x = NODE_WIDTH, y = NODE_HEIGHT/2) and ends at the planner's left-face anchor (x = NODE_WIDTH + COL_GAP + ... , y = NODE_HEIGHT/2).
-		const youRightX = NODE_WIDTH
-		const halfHeight = NODE_HEIGHT / 2
-		expect(d.startsWith(`M ${youRightX} ${halfHeight}`)).toBe(true)
-		expect(d.includes(`${halfHeight}`)).toBe(true)
+	test('a retried role that has departed leaves a fresh instance as the live node', () => {
+		// retry-with-fresh-instance op4 transit: coder-1 has returned and departed for the top bar; coder-2 is the live coder node, a distinct instance from coder-1.
+		const frame = scenarioFrame('retry-with-fresh-instance', 6)
+		const view = render(frame)
+		const liveCoder = allByTag(view, 'g').find((group) => {
+			if (!(propString(group.props, 'class') ?? '').split(' ').includes('flow-node')) return false
+			return propString(group.props, 'data-participant') === 'coder-2'
+		})
+		expect(liveCoder).toBeDefined()
+		// coder-1 is not a live node (it departed); it surfaces in the top bar instead.
+		const coderOneLive = allByTag(view, 'g').some((group) => {
+			if (!(propString(group.props, 'class') ?? '').split(' ').includes('flow-node')) return false
+			return propString(group.props, 'data-participant') === 'coder-1'
+		})
+		expect(coderOneLive).toBe(false)
 	})
+})
 
-	test('a return edge routes along the bottom faces so the response leg sits below the call line', () => {
-		const model = {
-			mainArea: {
-				nodes: [
-					{ id: 'you', kind: 'you', label: 'You', column: 0, row: 0 },
-					{ id: 'planner', kind: 'role', label: 'Planner', column: 1, row: 0, status: 'success' },
-				],
-				edges: [{ from: 'planner', to: 'you', kind: 'return' }],
-			},
-			topBar: { nodes: [] },
+describe('renderFlowView — top-bar aggregation', () => {
+	test('a departed participant appears in the top bar aggregated by role', () => {
+		// A terminal run whose final return has settled (the See Result acknowledgment) leaves coder departed for the top bar; the strip aggregates every participant that has ever run by role, so coder's slot carries invocation count 1.
+		const model: InteractionModel = {
+			participants: [
+				participant('you', 'human', 'human'),
+				participant('coder', 'coder', 'role'),
+			],
+			operations: [
+				{ id: 'op1', kind: 'call', stack: 'root', source: 'you', destination: 'coder', startedAt: 't0', settledAt: 't1', lifecycle: 'settled', outcome: null, details: null, metrics: null },
+				{ id: 'op2', kind: 'return', stack: 'root', source: 'coder', destination: 'you', startedAt: 't2', settledAt: 't3', lifecycle: 'settled', outcome: 'success', details: null, metrics: null },
+			],
+			status: 'success',
 		}
-		const view: Vnode = renderFlowView(fakeH, model)
-		const edges = allByTag(view, 'path').filter((p) => typeof p.props.d === 'string')
-		expect(edges.length).toBe(1)
-		const d = edges[0]!.props.d as string
-		// The return path starts at the planner's bottom-face anchor (x = NODE_WIDTH + COL_GAP + NODE_WIDTH/2, y = NODE_HEIGHT) and ends at the You node's bottom-face anchor (x = NODE_WIDTH/2, y = NODE_HEIGHT), bowing below so it never overlaps a forward call line at the vertical center.
-		const plannerBottomX = NODE_WIDTH + COL_GAP + NODE_WIDTH / 2
-		const youBottomX = NODE_WIDTH / 2
-		expect(d.startsWith(`M ${plannerBottomX} ${NODE_HEIGHT}`)).toBe(true)
-		expect(d.includes(`${youBottomX} ${NODE_HEIGHT}`)).toBe(true)
-		// The control points bow downward (y > NODE_HEIGHT), never at the center half-height.
-		const halfHeight = NODE_HEIGHT / 2
-		expect(d.includes(`${halfHeight}`)).toBe(false)
-	})
-
-	test('edges are rendered before nodes so node boxes paint over anchor overlap', () => {
-		const view: Vnode = renderFlowView(fakeH, simpleModel())
-		const childTags = view.children.filter(isVnode).map((c) => c.tag)
-		const firstPathIndex = childTags.indexOf('path')
-		const firstGroupIndex = childTags.indexOf('g')
-		expect(firstPathIndex).toBeGreaterThanOrEqual(0)
-		expect(firstGroupIndex).toBeGreaterThan(firstPathIndex)
-	})
-
-	test('an edge referencing an unknown node is dropped rather than crashing', () => {
-		const model = {
-			mainArea: {
-				nodes: [{ id: 'you', kind: 'you', label: 'You', column: 0, row: 0 }],
-				edges: [{ from: 'you', to: 'ghost', kind: 'call' }],
-			},
-			topBar: { nodes: [] },
-		}
-		const view: Vnode = renderFlowView(fakeH, model)
-		expect(allByTag(view, 'path').length).toBe(0)
-	})
-
-	test('the top bar renders one small node per history entry', () => {
-		const view: Vnode = renderFlowView(fakeH, topBarModel())
-		const smallNodes = allByTag(view, 'g').filter((g) => ((g.props.class as string) ?? '').includes('flow-small-node'))
-		expect(smallNodes.length).toBe(2)
-	})
-
-	test('a small node carries a box, a centered count, and a hover <title> with the label and stats', () => {
-		const view: Vnode = renderFlowView(fakeH, topBarModel())
-		const smallNodes = allByTag(view, 'g').filter((g) => ((g.props.class as string) ?? '').includes('flow-small-node'))
-		// The first slot is "You" (no cumulative stats); the second is "Planner" with time + tokens.
-		const youGroup = smallNodes[0]!
-		const plannerGroup = smallNodes[1]!
-
-		// Both carry the small-node class, a box, and a single centered count.
-		expect((youGroup.props.class as string) ?? '').toContain('flow-small-node')
-		expect(byTag(plannerGroup, 'rect').find((r) => r.props.class === 'flow-small-node-box')).toBeDefined()
-		const counts = byTag(plannerGroup, 'text').filter((t) => t.props.class === 'flow-small-node-count')
+		const view = render(model)
+		const slots = groupsWithClass(view, 'flow-small-node')
+		const coderSlot = slots.find((slot) => propString(slot.props, 'data-role') === 'coder')
+		expect(coderSlot).toBeDefined()
+		const counts = allByTag(coderSlot!, 'text').filter((text) => propString(text.props, 'class') === 'flow-small-node-count')
 		expect(counts.length).toBe(1)
-		expect(counts[0]!.props['text-anchor']).toBe('middle')
-
-		// The You slot's title carries just the label and call count (no stats).
-		const youTitle = byTag(youGroup, 'title')[0]!.children.join('')
-		expect(youTitle).toContain('You')
-		expect(youTitle).toContain('1 call')
-		expect(youTitle).not.toContain('tokens')
-
-		// The Planner slot's title carries the label, call count, and cumulative time + tokens.
-		const plannerTitle = byTag(plannerGroup, 'title')[0]!.children.join('')
-		expect(plannerTitle).toContain('Planner')
-		expect(plannerTitle).toContain('1 call')
-		expect(plannerTitle).toContain('5s')
-		expect(plannerTitle).toContain('4,380 tokens')
+		expect(counts[0]!.children.join('')).toBe('1')
 	})
 
-	test('a small node is neutral except for terminal failure: a status of success/needs_clarification does not color the slot, but error turns it red', () => {
-		// The strip is cumulative/aggregate history, so a slot carries no per-invocation status coloring for success — but a slot whose run ended in failure turns red so the failing role reads at a glance against an otherwise neutral strip.
-		const successModel = {
-			mainArea: { nodes: [{ id: 'you', kind: 'you', label: 'You', column: 0, row: 0 }], edges: [] },
-			topBar: { nodes: [{ id: 'coder', kind: 'role', label: 'Coder', invocations: 1, status: 'success' }] },
-		}
-		const successView: Vnode = renderFlowView(fakeH, successModel)
-		const successGroup = allByTag(successView, 'g').find((g) => ((g.props.class as string) ?? '').includes('flow-small-node'))!
-		expect((successGroup.props.class as string) ?? '').toBe('flow-small-node')
-
-		const errorModel = {
-			mainArea: { nodes: [{ id: 'you', kind: 'you', label: 'You', column: 0, row: 0 }], edges: [] },
-			topBar: { nodes: [{ id: 'coder', kind: 'role', label: 'Coder', invocations: 1, status: 'error' }] },
-		}
-		const errorView: Vnode = renderFlowView(fakeH, errorModel)
-		const errorGroup = allByTag(errorView, 'g').find((g) => ((g.props.class as string) ?? '').includes('flow-small-node'))!
-		expect((errorGroup.props.class as string) ?? '').toBe('flow-small-node flow-small-node--error')
-		// The error slot's box stroke and count text both read the error token.
-		const box = byTag(errorGroup, 'rect').find((r) => r.props.class === 'flow-small-node-box')
-		expect(box).toBeDefined()
-		const count = byTag(errorGroup, 'text').find((t) => t.props.class === 'flow-small-node-count')
-		expect(count).toBeDefined()
-	})
-
-	test('the failed-run fixture surfaces the failing role\u2019s top-bar slot in error', () => {
-		// failed-run frame 4: the run settled to error with only the root You in the main area; the coder's top-bar slot carries status:error so it renders red.
-		const model = frameModel('failed-run', 4)
-		const view: Vnode = renderFlowView(fakeH, model)
-		const smallNodes = allByTag(view, 'g').filter((g) => ((g.props.class as string) ?? '').includes('flow-small-node'))
-		const coderSlot = smallNodes.find((g) => (g.props.class as string).includes('flow-small-node--error'))
-		expect(coderSlot).toBeDefined()
-		const title = byTag(coderSlot!, 'title')[0]!.children.join('')
-		expect(title).toContain('The builder')
-		expect(title).toContain('errored')
-	})
-
-	test('top-bar nodes wrap into rows of TOP_BAR_PER_ROW', () => {
-		const nodes = Array.from({ length: TOP_BAR_PER_ROW + 2 }, (_, i) => ({ id: `n${i}`, kind: 'role', label: `N${i}`, invocations: 1 }))
-		const model = { mainArea: { nodes: [], edges: [] }, topBar: { nodes } }
-		const view: Vnode = renderFlowView(fakeH, model)
-		const smallNodes = allByTag(view, 'g').filter((g) => ((g.props.class as string) ?? '').includes('flow-small-node'))
-		// The first TOP_BAR_PER_ROW nodes sit at row 0 (y = 0); the overflow sits at row 1 (y = SMALL_SIZE + SMALL_GAP).
-		expect(smallNodes.length).toBe(TOP_BAR_PER_ROW + 2)
-		const rowOne = smallNodes.slice(0, TOP_BAR_PER_ROW)
-		const rowTwo = smallNodes.slice(TOP_BAR_PER_ROW)
-		for (const g of rowOne) expect(g.props.transform).toContain(',0)')
-		for (const g of rowTwo) expect(g.props.transform).toContain(`,${SMALL_SIZE + SMALL_GAP})`)
+	test('the top bar carries one slot per role/tool type that has ever run', () => {
+		// deep-call-tree terminal transit frame: every role/tool that appeared lingers or has departed, so the strip carries one slot per type. The human is the eternal root, never a role that "ran", so it never occupies a top-bar slot.
+		const frame = scenarioFrame('deep-call-tree', 18)
+		const view = render(frame)
+		const roles = groupsWithClass(view, 'flow-small-node').map((slot) => propString(slot.props, 'data-role'))
+		expect(roles).toEqual(expect.arrayContaining(['orchestrator', 'planner', 'coder', 'critic', 'read_file']))
+		expect(roles).not.toContain('human')
 	})
 })
 
-describe('renderFlowView — terminal-result CTA node', () => {
-	const { NODE_WIDTH: NW, NODE_HEIGHT: NH, COL_GAP: CG } = FLOW_VIEW_CONSTANTS
-	const youOnlyModel = () => ({
-		mainArea: { nodes: [{ id: 'you', kind: 'you', label: 'You', column: 0, row: 0 }], edges: [] },
-		topBar: { nodes: [] },
-	})
-
-	test('renders no CTA node when no cta descriptor is passed', () => {
-		const view: Vnode = renderFlowView(fakeH, youOnlyModel())
-		expect(allByTag(view, 'g').some((g) => ((g.props.class as string) ?? '').includes('flow-cta'))).toBe(false)
-	})
-
-	test('renders the CTA as a layered 3D button at column 1, clickable, with the standard node size and three gradient layers (no gloss)', () => {
-		const cta = { label: 'View result', active: false, tone: 'accent', onclick: [() => ({})] }
-		const view: Vnode = renderFlowView(fakeH, youOnlyModel(), FLOW_VIEW_CONSTANTS.DEFAULT_MIN_COLUMNS, undefined, cta)
-		const ctaGroup = allByTag(view, 'g').find((g) => ((g.props.class as string) ?? '') === 'flow-node flow-cta')
-		expect(ctaGroup).toBeDefined()
-		expect(ctaGroup!.props.onclick).toBe(cta.onclick)
-		expect(ctaGroup!.props.transform).toBe(`translate(${NW + CG},0)`)
-		// The three stacked layers of the chrome-rimmed button: bezel (rim), bevel (beveled edge), face (accent surface).
-		const bezel = allByTag(ctaGroup!, 'rect').find((r) => r.props.class === 'flow-cta-bezel')
-		expect(bezel).toBeDefined()
-		expect(bezel!.props.width).toBe(NW)
-		expect(bezel!.props.height).toBe(NH)
-		expect(bezel!.props.fill).toBe('url(#flow-cta-bezel)')
-		expect(allByTag(ctaGroup!, 'rect').some((r) => r.props.class === 'flow-cta-bevel' && r.props.fill === 'url(#flow-cta-bevel)')).toBe(true)
-		expect(allByTag(ctaGroup!, 'rect').some((r) => r.props.class === 'flow-cta-face' && r.props.fill === 'url(#flow-cta-face-grad)')).toBe(true)
-		// The gloss layer was removed.
-		expect(allByTag(ctaGroup!, 'rect').some((r) => r.props.class === 'flow-cta-gloss')).toBe(false)
-		// The three gradients are declared inline as SVG <defs> so the button is self-contained.
-		expect(allByTag(ctaGroup!, 'linearGradient').filter((g) => g.props.id === 'flow-cta-bezel').length).toBe(1)
-		expect(allByTag(ctaGroup!, 'radialGradient').filter((g) => g.props.id === 'flow-cta-bevel').length).toBe(1)
-		expect(allByTag(ctaGroup!, 'linearGradient').filter((g) => g.props.id === 'flow-cta-face-grad').length).toBe(1)
-		// The label sits over the face.
-		const label = allByTag(ctaGroup!, 'text').find((t) => t.props.class === 'flow-cta-label')
-		expect(label).toBeDefined()
-		expect(label!.children.join('')).toBe('View result')
-		// Inactive: no active ring.
-		expect(allByTag(ctaGroup!, 'rect').some((r) => r.props.class === 'flow-cta-active-ring')).toBe(false)
-	})
-
-	test('an error-tone CTA uses the red face gradient', () => {
-		const cta = { label: 'View error', active: false, tone: 'error', onclick: [() => ({})] }
-		const view: Vnode = renderFlowView(fakeH, youOnlyModel(), FLOW_VIEW_CONSTANTS.DEFAULT_MIN_COLUMNS, undefined, cta)
-		const ctaGroup = allByTag(view, 'g').find((g) => {
-			const c = (g.props.class as string) ?? ''
-			return c.includes('flow-cta') && !c.includes('flow-cta-edge') && !c.includes('flow-cta-button')
-		})!
-		const face = allByTag(ctaGroup, 'rect').find((r) => r.props.class === 'flow-cta-face')
-		expect(face).toBeDefined()
-		expect(face!.props.fill).toBe('url(#flow-cta-face-error)')
-		expect(allByTag(ctaGroup, 'linearGradient').some((g) => g.props.id === 'flow-cta-face-error')).toBe(true)
-	})
-
-	test('an inactive CTA still renders the You→CTA edge as a settled grey line (the same line that flows when active)', () => {
-		const cta = { label: 'View result', active: false, tone: 'accent', onclick: [() => ({})] }
-		const view: Vnode = renderFlowView(fakeH, youOnlyModel(), FLOW_VIEW_CONSTANTS.DEFAULT_MIN_COLUMNS, undefined, cta)
-		const edgeWrapper = allByTag(view, 'g').find((g) => ((g.props.class as string) ?? '') === 'flow-cta-edge')
-		expect(edgeWrapper).toBeDefined()
-		const path = byTag(edgeWrapper!, 'path')[0]
-		expect(path).toBeDefined()
-		// Inactive: the edge is a settled static line, not flowing.
-		const pathClass = (path!.props.class as string) ?? ''
-		expect(pathClass).toContain('graph-edge')
-		expect(pathClass).not.toContain('graph-edge--flowing')
-	})
-
-	test('an active CTA turns blue (active ring) and its You→CTA edge becomes a flowing line', () => {
-		const cta = { label: 'View result', active: true, tone: 'accent', onclick: [() => ({})] }
-		const view: Vnode = renderFlowView(fakeH, youOnlyModel(), FLOW_VIEW_CONSTANTS.DEFAULT_MIN_COLUMNS, undefined, cta)
-		const ctaGroup = allByTag(view, 'g').find((g) => {
-			const c = (g.props.class as string) ?? ''
-			return c.includes('flow-cta') && !c.includes('flow-cta-edge') && !c.includes('flow-cta-button')
-		})!
-		// The active state adds a glowing ring rect over the face.
-		const ring = allByTag(ctaGroup, 'rect').find((r) => r.props.class === 'flow-cta-active-ring')
-		expect(ring).toBeDefined()
-		// The CTA edge is now a flowing call edge.
-		const edgeWrapper = allByTag(view, 'g').find((g) => ((g.props.class as string) ?? '') === 'flow-cta-edge')
-		expect(edgeWrapper).toBeDefined()
-		const path = byTag(edgeWrapper!, 'path')[0]
-		expect(path).toBeDefined()
-		expect((path!.props.class as string)).toContain('graph-edge--flowing')
-		// The edge is drawn You→CTA: from You's right face (x = NODE_WIDTH) to the CTA's left face.
-		const d = path!.props.d as string
-		expect(d.startsWith(`M ${NW} `)).toBe(true)
-	})
-
-	test('the CTA button and its edge are always present on a terminal frame whether active or inactive', () => {
-		// Both states render the button + the edge; only the edge's state and the active ring differ.
-		const inactive: Vnode = renderFlowView(fakeH, youOnlyModel(), FLOW_VIEW_CONSTANTS.DEFAULT_MIN_COLUMNS, undefined, { label: 'View result', active: false, tone: 'accent', onclick: [() => ({})] })
-		const active: Vnode = renderFlowView(fakeH, youOnlyModel(), FLOW_VIEW_CONSTANTS.DEFAULT_MIN_COLUMNS, undefined, { label: 'View result', active: true, tone: 'accent', onclick: [() => ({})] })
-		expect(allByTag(inactive, 'g').some((g) => ((g.props.class as string) ?? '').includes('flow-cta-button'))).toBe(true)
-		expect(allByTag(active, 'g').some((g) => ((g.props.class as string) ?? '').includes('flow-cta-button'))).toBe(true)
-		expect(allByTag(inactive, 'g').some((g) => ((g.props.class as string) ?? '') === 'flow-cta-edge')).toBe(true)
-		expect(allByTag(active, 'g').some((g) => ((g.props.class as string) ?? '') === 'flow-cta-edge')).toBe(true)
-	})
-
-	test('the error-status CTA carries the red face + an error-tone active ring when active', () => {
-		const cta = { label: 'View error', active: true, tone: 'error', onclick: [() => ({})] }
-		const view: Vnode = renderFlowView(fakeH, youOnlyModel(), FLOW_VIEW_CONSTANTS.DEFAULT_MIN_COLUMNS, undefined, cta)
-		const ctaGroup = allByTag(view, 'g').find((g) => {
-			const c = (g.props.class as string) ?? ''
-			return c.includes('flow-cta') && !c.includes('flow-cta-edge') && !c.includes('flow-cta-button')
-		})!
-		const label = allByTag(ctaGroup, 'text').find((t) => t.props.class === 'flow-cta-label')!
-		expect(label.children.join('')).toBe('View error')
-		const ring = allByTag(ctaGroup, 'rect').find((r) => r.props.class === 'flow-cta-active-ring')!
-		expect(ring.props['data-tone']).toBe('error')
-	})
-})
-
-// --- Animation derivation ---------------------------------------------------
-
-// Locates a scenario by id (the fixture order is not guaranteed to be stable across edits).
-function scenarioById(id: string): { frames: unknown[] } {
-	const scenario = fixtures.find((item) => item.id === id)
-	if (scenario === undefined) throw new Error(`unknown fixture scenario: ${id}`)
-	return scenario
-}
-
-// Returns the FlowModel of a scenario's frame, narrowed through `unknown` since the JS fixtures do not advertise the field on their inferred type.
-function frameModel(scenarioId: string, frameIndex: number): FlowModel {
-	const scenario = scenarioById(scenarioId)
-	const model = flowModelOf(scenario.frames[frameIndex])
-	if (!isFlowModel(model)) throw new Error(`${scenarioId}[frame ${frameIndex}]: flowModel missing or malformed`)
-	return model
-}
-
-// Returns a scenario frame's config + runView + flowModel triple, narrowed through `unknown` since the JS fixtures do not advertise those fields on their inferred frame type. Used by the product-surface derivations that consume the same shapes the live API will return.
-function scenarioFrame(scenarioId: string, frameIndex: number): { config: unknown, runView: unknown, flowModel: unknown } {
-	const scenario = scenarioById(scenarioId)
-	const frameValue = scenario.frames[frameIndex]
-	if (!isObject(frameValue)) throw new Error(`${scenarioId}[frame ${frameIndex}]: frame is not an object`)
-	return { config: frameValue['config'], runView: frameValue['runView'], flowModel: flowModelOf(frameValue) }
-}
-
-// The animation state of a single edge identified by its endpoints, or undefined when no such edge exists.
-function edgeState(model: FlowModel, from: string, to: string): string | undefined {
-	const { edgeStates } = deriveFlowAnimation(model)
-	const index = model.mainArea.edges.findIndex((edge) => edge.from === from && edge.to === to)
-	if (index === -1) return undefined
-	return edgeStates[index]
-}
-
-describe('deriveFlowAnimation — agent→agent delegation', () => {
-	test('the call edge to the entry role is static once the entry role has produced its first turn (costTokens set)', () => {
-		// delegation-in-progress frame 1: the orchestrator has already emitted an llm_call (costTokens populated), so the you→orchestrator call has settled and the orchestrator is thinking.
-		const model = frameModel('delegation-in-progress', 1)
-		expect(edgeState(model, 'you', 'orchestrator')).toBe('static')
-	})
-
-	test('the call edge to a child that has not produced its first turn flows left→right', () => {
-		// frame 2: the orchestrator delegates to coder; coder has started (role_start) but has no llm_call yet (no costTokens), so orchestrator→coder is in flight.
-		const model = frameModel('delegation-in-progress', 2)
-		expect(edgeState(model, 'orchestrator', 'coder')).toBe('flowing')
-		expect(edgeState(model, 'you', 'orchestrator')).toBe('static')
-	})
-
-	test('the flow moves to the child\u2019s outgoing edge once the child produces its first turn', () => {
-		// single-role-in-progress walks the full arc: frame 0 the you→planner call flows (planner, no llm yet); frame 1 planner has had its llm_call (costTokens set) so you→planner settles; frame 2 the flow reappears on planner→glob_files (the outgoing tool call in flight).
-		const flowing = frameModel('single-role-in-progress', 0)
-		expect(edgeState(flowing, 'you', 'planner')).toBe('flowing')
-		const settled = frameModel('single-role-in-progress', 1)
-		expect(edgeState(settled, 'you', 'planner')).toBe('static')
-		const moved = frameModel('single-role-in-progress', 2)
-		expect(edgeState(moved, 'you', 'planner')).toBe('static')
-		expect(edgeState(moved, 'planner', 'glob_files')).toBe('flowing')
-	})
-})
-
-describe('deriveFlowAnimation — agent→tool call and tool return', () => {
-	test('an in-flight tool call (no result yet) flows', () => {
-		// tool-call-in-progress frame 2: coder→write_file call is in flight.
-		const model = frameModel('tool-call-in-progress', 2)
-		expect(edgeState(model, 'coder', 'write_file')).toBe('flowing')
-	})
-
-	test('a tool_result triggers the returning flow right→left and settles the call edge', () => {
-		// frame 3: write_file has returned; a return edge write_file→coder lingers, so the coder→write_file call settles and the write_file→coder leg returns.
-		const model = frameModel('tool-call-in-progress', 3)
-		expect(edgeState(model, 'coder', 'write_file')).toBe('static')
-		expect(edgeState(model, 'write_file', 'coder')).toBe('returning')
-	})
-})
-
-describe('deriveFlowAnimation — return, question, and error edges', () => {
-	test('a lingering return edge from a successfully-finished node returns right→left', () => {
-		// tool-call-in-progress frame 3: write_file has returned and lingers with a return edge to coder.
-		const model = frameModel('tool-call-in-progress', 3)
-		expect(edgeState(model, 'write_file', 'coder')).toBe('returning')
-	})
-
-	test('a return edge from an errored node is an error edge (red, flowing)', () => {
-		// retry frame 0: the builder (coder-1) errored and lingers with a return edge to the orchestrator; the return leg reads as an error edge (red, marching). The call edge into the builder is settled grey (the call itself completed; only the return leg carries the failure).
-		const model = frameModel('retry', 0)
-		expect(edgeState(model, 'coder-1', 'orchestrator')).toBe('error')
-		expect(edgeState(model, 'orchestrator', 'coder-1')).toBe('static')
-	})
-
-	test('a pending ask_human question edge flows toward the You respondent; the call edges settle', () => {
-		// pending-question frame 3: the question travels ask_human → you-ask (the respondent You); the call edges (you→orchestrator, orchestrator→ask_human) have settled because orchestrator has its first turn and ask_human has emitted its question and is waiting for the answer.
-		const model = frameModel('pending-question', 3)
-		expect(edgeState(model, 'ask_human', 'you-ask')).toBe('flowing')
-		expect(edgeState(model, 'orchestrator', 'ask_human')).toBe('static')
-		expect(edgeState(model, 'you', 'orchestrator')).toBe('static')
-	})
-
-	test('after the user answers, the child You and ask_human linger as return edges flowing right→left', () => {
-		// pending-question frame 4: the question edge is gone; the child You (you-ask) returns to ask_human, and ask_human returns to the orchestrator. Both returns flow; the call edges settle because the returns now carry the motion.
-		const model = frameModel('pending-question', 4)
-		expect(edgeState(model, 'you-ask', 'ask_human')).toBe('returning')
-		expect(edgeState(model, 'ask_human', 'orchestrator')).toBe('returning')
-		expect(edgeState(model, 'orchestrator', 'ask_human')).toBe('static')
-		expect(edgeState(model, 'you', 'orchestrator')).toBe('static')
-	})
-
-	test('after the answer, the orchestrator (the outermost return target) is active', () => {
-		// pending-question frame 4: the orchestrator is receiving the answer (the return target of ask_human→orchestrator), so it pulses.
-		const model = frameModel('pending-question', 4)
-		const { activeIds } = deriveFlowAnimation(model)
-		expect(activeIds.has('orchestrator')).toBe(true)
-	})
-
-	test('the child You departs to the top-bar "You" slot when the caller acts, bumping its count', () => {
-		// pending-question frame 4→5: the orchestrator emits a new action, so you-ask and ask_human leave the main area for their top-bar slots. you-ask merges into the existing "You" slot (incrementing its count to 2: the root plus one completed Q&A); ask_human merges into its existing slot.
-		const previous = frameModel('pending-question', 4)
-		const current = frameModel('pending-question', 5)
-		expect(current.mainArea.nodes.map((n) => n.id).sort()).toEqual(['orchestrator', 'you'])
-		const lifecycle = deriveLifecycle(previous, current)
-		const departingIds = lifecycle.departing.map((entry) => entry.node.id).sort()
-		expect(departingIds).toEqual(['ask_human', 'you-ask'])
-		for (const entry of lifecycle.departing) expect(entry.merged).toBe(true)
-		const youSlot = current.topBar.nodes.find((node) => node.id === 'you')
-		expect(youSlot).toBeDefined()
-		expect(youSlot!.invocations).toBe(2)
-	})
-
-	test('the active node set mirrors the model\u2019s active flags', () => {
-		// delegation-in-progress frame 1: orchestrator is thinking (active flag, no flowing edge).
-		const model = frameModel('delegation-in-progress', 1)
-		const { activeIds } = deriveFlowAnimation(model)
-		expect(activeIds.has('orchestrator')).toBe(true)
-	})
-
-	test('during an in-flight tool call the tool (the recipient) is active, not the calling agent', () => {
-		// single-role-in-progress frame 2: planner has called glob_files; the tool is the current focus, so glob_files pulses and planner does not.
-		const model = frameModel('single-role-in-progress', 2)
-		const { activeIds } = deriveFlowAnimation(model)
-		expect(activeIds.has('glob_files')).toBe(true)
-		expect(activeIds.has('planner')).toBe(false)
-	})
-
-	test('the renderer applies the derived active set, not just the model\u2019s active flag', () => {
-		// retry frame 0: the error return edge coder-1→orchestrator is flowing; the conductor is the return's target so it should pulse. The conductor has no `active` flag in the model (its active state is purely edge-derived), so the renderer MUST use deriveFlowAnimation's activeIds — passing the raw model flag would leave it non-pulsing.
-		const model = frameModel('retry', 0)
-		const view: Vnode = renderFlowView(fakeH, model)
-		// Find the orchestrator node group and check it carries the graph-node--active class.
-		const activeNodes = allByTag(view, 'g').filter((g) => {
-			const cls = (g.props.class as string) ?? ''
-			return cls.includes('graph-node--active')
+describe('renderFlowView — lingering return legs', () => {
+	test('a return whose caller has not yet acted lingers as a node plus a return edge', () => {
+		// delegation-chain op5 transit: readFile has returned to coder, but coder has not produced its next action, so readFile lingers at its call-depth column with a return edge back to coder.
+		const frame = scenarioFrame('delegation-chain', 8)
+		const view = render(frame)
+		const row = groupsWithClass(view, 'flow-row')[0]
+		expect(row).toBeDefined()
+		const readFileNode = allByTag(row!, 'g').find((group) => {
+			if (!(propString(group.props, 'class') ?? '').split(' ').includes('flow-node')) return false
+			return propString(group.props, 'data-participant') === 'readFile'
 		})
-		expect(activeNodes.length).toBeGreaterThan(0)
-		// The orchestrator (the error return's target) should be among the active nodes, not the builder.
-		const { activeIds } = deriveFlowAnimation(model)
-		expect(activeIds.has('orchestrator')).toBe(true)
-		expect(activeIds.has('coder-1')).toBe(false)
+		expect(readFileNode).toBeDefined()
+		expect(propBoolean(readFileNode!.props, 'data-lingering')).toBe(true)
+		const returnEdges = allByTag(row!, 'g').filter((group) => (propString(group.props, 'class') ?? '').split(' ').includes('flow-edge--return'))
+		expect(returnEdges.length).toBe(1)
+	})
+
+	test('once the caller acts the lingering source departs and no return edge remains in the row', () => {
+		// delegation-chain op6 transit: coder has now returned to planner, so readFile's lingering ended and it left for the top bar; the new lingering return is coder → planner.
+		const frame = scenarioFrame('delegation-chain', 10)
+		const view = render(frame)
+		const row = groupsWithClass(view, 'flow-row')[0]
+		expect(row).toBeDefined()
+		const readFileStillLingering = allByTag(row!, 'g').some((group) => {
+			if (!(propString(group.props, 'class') ?? '').split(' ').includes('flow-node')) return false
+			return propString(group.props, 'data-participant') === 'readFile'
+		})
+		expect(readFileStillLingering).toBe(false)
+		const coderNode = allByTag(row!, 'g').find((group) => {
+			if (!(propString(group.props, 'class') ?? '').split(' ').includes('flow-node')) return false
+			return propString(group.props, 'data-participant') === 'coder'
+		})
+		expect(coderNode).toBeDefined()
+		expect(propBoolean(coderNode!.props, 'data-lingering')).toBe(true)
+	})
+
+	test('the terminal return lingers on its single transit frame with an animated return edge and You active', () => {
+		// single-role-completion terminal transit (the terminal op's only frame): the call chain is empty (op1 closed by op2), but op2 is an in_flight return, so the row still renders with You as the root and the coder as a lingering node one column past it. The return edge animates 'returning' (green for the success outcome) because the return is in_flight on the active stack, and You — the return's destination — is the active participant. The CTA renders alongside because the frame carries the terminal status.
+		const frame = scenarioFrame('single-role-completion', 2)
+		expect(frame.status).toBe('success')
+		const view = render(frame)
+		const row = groupsWithClass(view, 'flow-row')[0]
+		expect(row).toBeDefined()
+		const coderNode = allByTag(row!, 'g').find((group) => {
+			if (!(propString(group.props, 'class') ?? '').split(' ').includes('flow-node')) return false
+			return propString(group.props, 'data-participant') === 'coder'
+		})
+		expect(coderNode).toBeDefined()
+		expect(propBoolean(coderNode!.props, 'data-lingering')).toBe(true)
+		expect(pathHasClass(pathForOperation(view, 'op2'), 'graph-edge--returning')).toBe(true)
+		expect(activeParticipant(frame)).toBe('you')
+		const youNode = allByTag(row!, 'g').find((group) => {
+			if (!(propString(group.props, 'class') ?? '').split(' ').includes('flow-node')) return false
+			return propString(group.props, 'data-participant') === 'you'
+		})
+		expect(youNode).toBeDefined()
+		const youActive = allByTag(youNode!, 'g').some((group) => (propString(group.props, 'class') ?? '').split(' ').includes('graph-node--active'))
+		expect(youActive).toBe(true)
+		expect(allByTag(view, 'g').filter((group) => (propString(group.props, 'class') ?? '').split(' ').includes('flow-cta')).length).toBe(1)
 	})
 })
 
-describe('deriveFlowAnimation — inspect edges', () => {
-	test('an inspect edge is static (an observation reference, not an in-flight call)', () => {
-		// detected-loop frame 2: the watchdog's recent_role_tool_calls tool reads coder's history via an inspect edge; the inspection line never flows.
-		const model = frameModel('detected-loop', 2)
-		expect(edgeState(model, 'recent_role_tool_calls', 'coder')).toBe('static')
+describe('renderFlowView — observe lines', () => {
+	test('an observe operation renders a static dashed line crossing from the active stack into a paused row', () => {
+		// detected-loop-interrupt observe frame: the tool (readMessageWindow) observes the looping coder; the observe's source sits in the active interrupt stack and its destination in the paused root stack.
+		const frame = scenarioFrame('detected-loop-interrupt', 8)
+		const observes = observesOf(frame)
+		expect(observes.length).toBe(1)
+		const view = render(frame)
+		const observeEdges = allByTag(view, 'g').filter((group) => (propString(group.props, 'class') ?? '').split(' ').includes('flow-edge--observe'))
+		expect(observeEdges.length).toBe(1)
+		const observeEdge = observeEdges[0]!
+		expect(propString(observeEdge.props, 'data-source')).toBe('readMessageWindow')
+		expect(propString(observeEdge.props, 'data-destination')).toBe('coder')
+		// The path itself is dashed so the observe reads as a static reference, not an in-flight call.
+		const path = allByTag(observeEdge, 'path')[0]
+		expect(path).toBeDefined()
+		expect(propString(path!.props, 'stroke-dasharray')).toBe('3 3')
 	})
 
-	test('the watchdog\u2019s tool call flows while the inspect reference to the builder stays static', () => {
-		const model = frameModel('detected-loop', 2)
-		expect(edgeState(model, 'loop_detector', 'recent_role_tool_calls')).toBe('flowing')
-		expect(edgeState(model, 'recent_role_tool_calls', 'coder')).toBe('static')
-	})
-})
-
-describe('deriveFlowAnimation — completed run', () => {
-	test('a completed run has an empty main area (only the root You) and a full top bar', () => {
-		const model = frameModel('completed-success', 13)
-		const mainNodes = model.mainArea.nodes
-		expect(mainNodes.length).toBe(1)
-		expect(mainNodes[0]!.kind).toBe('you')
-		expect(model.mainArea.edges.length).toBe(0)
-		// The top bar carries every role/tool that ever ran, with terminal statuses.
-		const topBarIds = model.topBar.nodes.map((node) => node.id)
-		expect(topBarIds).toContain('orchestrator')
-		expect(topBarIds).toContain('planner')
-		expect(topBarIds).toContain('coder')
-		expect(topBarIds).toContain('write_file')
-	})
-
-	test('a failed run settles to only the root You with the failing role\u2019s top-bar slot in error', () => {
-		const model = frameModel('failed-run', 4)
-		expect(model.mainArea.nodes.length).toBe(1)
-		expect(model.mainArea.nodes[0]!.kind).toBe('you')
-		const coderSlot = model.topBar.nodes.find((node) => node.id === 'coder')
-		expect(coderSlot).toBeDefined()
-		expect(coderSlot!.status).toBe('error')
+	test('an observe never carries a flowing or returning motion class', () => {
+		const frame = scenarioFrame('detected-loop-interrupt', 8)
+		const view = render(frame)
+		const observeEdges = allByTag(view, 'g').filter((group) => (propString(group.props, 'class') ?? '').split(' ').includes('flow-edge--observe'))
+		const observeEdge = observeEdges[0]!
+		const classValue = propString(observeEdge.props, 'class') ?? ''
+		expect(classValue).not.toContain('graph-edge--flowing')
+		expect(classValue).not.toContain('graph-edge--returning')
 	})
 })
 
-describe('renderFlowView — edge and lifecycle classes', () => {
-	function edgeClasses(view: Vnode): string[] {
-		return allByTag(view, 'path')
-			.filter((path) => typeof path.props.class === 'string')
-			.map((path) => path.props.class as string)
-	}
-
-	test('a flowing call edge renders with the graph-edge--flowing class', () => {
-		// delegation-in-progress frame 2: orchestrator→coder call is in flight.
-		const model = frameModel('delegation-in-progress', 2)
-		const view: Vnode = renderFlowView(fakeH, model)
-		expect(edgeClasses(view).some((classes) => classes.includes('graph-edge--flowing'))).toBe(true)
-	})
-
-	test('a returning edge renders with the graph-edge--returning class', () => {
-		// tool-call-in-progress frame 3: write_file→coder return edge lingers.
-		const model = frameModel('tool-call-in-progress', 3)
-		const view: Vnode = renderFlowView(fakeH, model)
-		expect(edgeClasses(view).some((classes) => classes.includes('graph-edge--returning'))).toBe(true)
-	})
-
-	test('an error edge renders with the graph-edge--error class', () => {
-		const model = frameModel('retry', 0)
-		const view: Vnode = renderFlowView(fakeH, model)
-		expect(edgeClasses(view).some((classes) => classes.includes('graph-edge--error'))).toBe(true)
-	})
-
-	test('an entering node carries the flow-node--entering class on an inner group', () => {
-		// delegation frame 1→2: coder is newly arrived in frame 2.
-		const previous = frameModel('delegation-in-progress', 1)
-		const current = frameModel('delegation-in-progress', 2)
-		const lifecycle = deriveLifecycle(previous, current)
-		const view: Vnode = renderFlowView(fakeH, current, FLOW_VIEW_CONSTANTS.DEFAULT_MIN_COLUMNS, lifecycle)
-		const enteringGroups = allByTag(view, 'g').filter((group) => typeof group.props.class === 'string' && (group.props.class as string).includes('flow-node--entering'))
-		expect(enteringGroups.length).toBeGreaterThan(0)
-	})
-
-	test('a departing node renders an overlay carrying flow-node--departing with from/to travel coordinates', () => {
-		// completed-success frame 4→5: planner leaves the main area for its existing top-bar slot (a merge).
-		const previous = frameModel('completed-success', 4)
-		const current = frameModel('completed-success', 5)
-		const lifecycle = deriveLifecycle(previous, current)
-		const plannerDepart = lifecycle.departing.find((entry) => entry.node.id === 'planner')
-		expect(plannerDepart).toBeDefined()
-		expect(plannerDepart!.merged).toBe(true)
-		const view: Vnode = renderFlowView(fakeH, current, FLOW_VIEW_CONSTANTS.DEFAULT_MIN_COLUMNS, lifecycle)
-		const overlay = allByTag(view, 'g').find((group) => typeof group.props.class === 'string' && (group.props.class as string).includes('flow-node--departing'))
-		expect(overlay).toBeDefined()
-		// The overlay travels from its previous main-area position to its top-bar slot; both coordinates are passed as `--from-*`/`--to-*` custom properties (a style object, since hyperapp routes `-`-prefixed keys through setProperty) so the single CSS keyframe serves every departing node. The travel is what makes the counter increment read as the node arriving.
-		const style = overlay!.props.style as Record<string, string>
-		expect(typeof style).toBe('object')
-		expect(style['--from-x']).toBeDefined()
-		expect(style['--to-x']).toBeDefined()
+describe('renderFlowView — call-chain structure sanity', () => {
+	test('every call edge in a row connects adjacent call-depth columns', () => {
+		// deep-call-tree op5 transit: the open chain is five calls deep; each call edge must run from column N to column N+1.
+		const frame = scenarioFrame('deep-call-tree', 8)
+		const view = render(frame)
+		const row = groupsWithClass(view, 'flow-row')[0]
+		expect(row).toBeDefined()
+		const callEdges = allByTag(row!, 'g').filter((group) => (propString(group.props, 'class') ?? '').split(' ').includes('flow-edge--call'))
+		expect(callEdges.length).toBe(5)
 	})
 })
 
-describe('deriveLifecycle', () => {
-	test('the first frame of a scenario has no entering or departing nodes', () => {
-		const current = frameModel('delegation-in-progress', 0)
-		const lifecycle = deriveLifecycle(undefined, current)
+// Finds the <path> rendered inside a flow-edge <g> carrying a given data-operation attribute, so an edge's motion class is asserted on the path the CSS actually animates.
+function pathForOperation(view: Vnode, operationId: string): Vnode | undefined {
+	const edgeGroups = allByTag(view, 'g').filter((group) => {
+		if (!(propString(group.props, 'class') ?? '').split(' ').includes('flow-edge')) return false
+		return propString(group.props, 'data-operation') === operationId
+	})
+	const edgeGroup = edgeGroups[0]
+	if (edgeGroup === undefined) return undefined
+	return allByTag(edgeGroup, 'path')[0]
+}
+
+function pathHasClass(path: Vnode | undefined, token: string): boolean {
+	if (path === undefined) return false
+	return (propString(path.props, 'class') ?? '').split(' ').includes(token)
+}
+
+describe('renderFlowView — edge animation (single invariant)', () => {
+	test('a call in the active stack carries flowing while in_flight and goes solid on settled', () => {
+		// delegation-chain op1 transit: op1 (you→orchestrator) is in_flight on the active root stack, so its call edge marches. op2 transit: op2 (orchestrator→planner) appears, settling op1 by delegation; op1's edge goes solid while op2's edge now marches.
+		const flowing = render(scenarioFrame('delegation-chain', 0))
+		expect(pathHasClass(pathForOperation(flowing, 'op1'), 'graph-edge--flowing')).toBe(true)
+		const settled = render(scenarioFrame('delegation-chain', 2))
+		expect(pathHasClass(pathForOperation(settled, 'op1'), 'graph-edge--flowing')).toBe(false)
+		expect(pathHasClass(pathForOperation(settled, 'op2'), 'graph-edge--flowing')).toBe(true)
+	})
+
+	test('a return with outcome error in the active stack carries the error class', () => {
+		// error-return op3 transit: op3 (coder→orchestrator, outcome error) is the lingering return on the active root stack, so its return edge is red and marching.
+		const frame = scenarioFrame('error-return', 4)
+		expect(activeStack(frame)).toBe('root')
+		const view = render(frame)
+		expect(pathHasClass(pathForOperation(view, 'op3'), 'graph-edge--error')).toBe(true)
+		expect(pathHasClass(pathForOperation(view, 'op3'), 'graph-edge--returning')).toBe(false)
+	})
+
+	test('an in_flight call in a paused stack renders static (frozen)', () => {
+		// detected-loop-interrupt op4 transit: op2 (orchestrator→coder) is in_flight on the root stack, but the active stack is the interrupt stack, so the root stack is paused and op2's edge is frozen solid.
+		const frame = scenarioFrame('detected-loop-interrupt', 6)
+		expect(activeStack(frame)).toBe('interrupt-stack')
+		const op2 = frame.operations.find((operation) => operation.id === 'op2')
+		expect(op2?.lifecycle).toBe('in_flight')
+		const view = render(frame)
+		const path = pathForOperation(view, 'op2')
+		expect(path).toBeDefined()
+		const classValue = propString(path!.props, 'class') ?? ''
+		expect(classValue.split(' ').includes('graph-edge--flowing')).toBe(false)
+		expect(classValue.split(' ').includes('graph-edge--returning')).toBe(false)
+		expect(classValue.split(' ').includes('graph-edge--error')).toBe(false)
+	})
+
+	test('an observe line never carries a motion class even when its stack is the active stack', () => {
+		// detected-loop-interrupt observe frame: the observe is logged on the active interrupt stack but its line is always static.
+		const frame = scenarioFrame('detected-loop-interrupt', 8)
+		expect(activeStack(frame)).toBe('interrupt-stack')
+		const view = render(frame)
+		const observeGroups = allByTag(view, 'g').filter((group) => (propString(group.props, 'class') ?? '').split(' ').includes('flow-edge--observe'))
+		expect(observeGroups.length).toBe(1)
+		const path = allByTag(observeGroups[0]!, 'path')[0]
+		expect(path).toBeDefined()
+		const classValue = propString(path!.props, 'class') ?? ''
+		expect(classValue.split(' ').includes('graph-edge--flowing')).toBe(false)
+		expect(classValue.split(' ').includes('graph-edge--returning')).toBe(false)
+	})
+})
+
+describe('renderFlowView — active participant highlight', () => {
+	test('the active participant node carries the active class and a paused-stack participant does not', () => {
+		// delegation-chain op2 transit: op2 (orchestrator→planner) is the latest call in the active root stack, so planner is the active participant and its node pulses; orchestrator (the caller, not the destination) does not.
+		const frame = scenarioFrame('delegation-chain', 2)
+		expect(activeParticipant(frame)).toBe('planner')
+		const view = render(frame)
+		const flowNodes = allByTag(view, 'g').filter((group) => (propString(group.props, 'class') ?? '').split(' ').includes('flow-node'))
+		const plannerNode = flowNodes.find((group) => propString(group.props, 'data-participant') === 'planner')
+		expect(plannerNode).toBeDefined()
+		const plannerActive = allByTag(plannerNode!, 'g').some((group) => (propString(group.props, 'class') ?? '').split(' ').includes('graph-node--active'))
+		expect(plannerActive).toBe(true)
+		const orchestratorNode = flowNodes.find((group) => propString(group.props, 'data-participant') === 'orchestrator')
+		expect(orchestratorNode).toBeDefined()
+		const orchestratorActive = allByTag(orchestratorNode!, 'g').some((group) => (propString(group.props, 'class') ?? '').split(' ').includes('graph-node--active'))
+		expect(orchestratorActive).toBe(false)
+	})
+
+	test('no node in a paused stack carries the active class', () => {
+		// detected-loop-interrupt op4 transit: the root stack is paused; the active participant lives in the active interrupt stack, so none of the root row's participants pulse.
+		const frame = scenarioFrame('detected-loop-interrupt', 6)
+		expect(activeParticipant(frame)).toBe('readMessageWindow')
+		const view = render(frame)
+		const rows = groupsWithClass(view, 'flow-row')
+		const rootRow = rows.find((row) => propString(row.props, 'data-stack') === 'root')
+		expect(rootRow).toBeDefined()
+		const rootActive = allByTag(rootRow!, 'g').some((group) => (propString(group.props, 'class') ?? '').split(' ').includes('graph-node--active'))
+		expect(rootActive).toBe(false)
+	})
+})
+
+describe('deriveLifecycle — frame-diff node lifecycle', () => {
+	test('a null previous model animates nothing (first frame of a scenario)', () => {
+		const current = scenarioFrame('delegation-chain', 0)
+		const lifecycle = deriveLifecycle(null, current)
 		expect(lifecycle.enteringIds.size).toBe(0)
 		expect(lifecycle.departing.length).toBe(0)
 	})
 
-	test('a node present this frame but not last frame is entering', () => {
-		// delegation frame 1→2: coder is newly arrived in frame 2.
-		const previous = frameModel('delegation-in-progress', 1)
-		const current = frameModel('delegation-in-progress', 2)
+	test('departing covers a participant that left for the top bar when its return settles', () => {
+		// retry-with-fresh-instance op3 transit → op3 working: coder-1's return settles, so the returner departs for the existing 'coder' top-bar slot (merged). Under the single invariant the returner is present only while its return is in_flight (transit), so the departure lands on the settling transition rather than on the next call; no participant enters on a settling transition. coder-2 enters later on op4's transit, covered by the row-projection test.
+		const previous = scenarioFrame('retry-with-fresh-instance', 4)
+		const current = scenarioFrame('retry-with-fresh-instance', 5)
 		const lifecycle = deriveLifecycle(previous, current)
-		expect(lifecycle.enteringIds.has('coder')).toBe(true)
-		expect(lifecycle.enteringIds.has('orchestrator')).toBe(false)
-		expect(lifecycle.departing.length).toBe(0)
+		expect(lifecycle.enteringIds.size).toBe(0)
+		expect(lifecycle.enteringIds.has('coder-2')).toBe(false)
+		expect(lifecycle.enteringIds.has('coder-1')).toBe(false)
+		const departed = lifecycle.departing.find((entry) => entry.participantId === 'coder-1')
+		expect(departed).toBeDefined()
+		expect(departed!.previousRowIndex).toBe(0)
+		// coder-1 lingered one column past the open chain's innermost node while its return was in transit, so its previous column is the chain length plus one (chain length 1 → column 2).
+		expect(departed!.previousColumn).toBe(2)
+		expect(departed!.merged).toBe(true)
+		// The 'coder' slot is the second slot in first-appearance order (orchestrator, coder); the human is the eternal root and never occupies a top-bar slot.
+		expect(departed!.slotIndex).toBe(1)
 	})
 
-	test('a node that left the main area for an existing top-bar slot departs and merges', () => {
-		// completed-success frame 4→5: planner leaves the main area for the existing planner top-bar slot (a merge).
-		const previous = frameModel('completed-success', 4)
-		const current = frameModel('completed-success', 5)
-		const lifecycle = deriveLifecycle(previous, current)
-		const plannerDepart = lifecycle.departing.find((entry) => entry.node.id === 'planner')
-		expect(plannerDepart).toBeDefined()
-		expect(plannerDepart!.merged).toBe(true)
-	})
-
-	test('a node that departs to a brand-new slot is not a merge', () => {
-		// Synthetic pair: a lone role finishes and leaves for a top-bar slot that did not exist last frame.
-		const previous: FlowModel = {
-			mainArea: {
-				nodes: [
-					{ id: 'you', kind: 'you', label: 'You', column: 0, row: 0 },
-					{ id: 'planner', kind: 'role', label: 'Planner', column: 1, row: 0, status: 'success' },
-				],
-				edges: [{ from: 'planner', to: 'you', kind: 'return' }],
-			},
-			topBar: { nodes: [{ id: 'you', kind: 'you', label: 'You', invocations: 1 }] },
-		}
-		const current: FlowModel = {
-			mainArea: { nodes: [{ id: 'you', kind: 'you', label: 'You', column: 0, row: 0 }], edges: [] },
-			topBar: {
-				nodes: [
-					{ id: 'you', kind: 'you', label: 'You', invocations: 1 },
-					{ id: 'planner', kind: 'role', label: 'Planner', invocations: 1, status: 'success' },
-				],
-			},
+	test('settling the terminal return (the See Result acknowledgment) departs the lingering returner; the human root never departs', () => {
+		// single-role-completion terminal transit (frame 2) lingers coder at column 1 while its return is in_flight; settling that return — the See Result click's view-side acknowledgment — empties the row, so the lingering coder departs for its already-existing top-bar slot. The human is the eternal root and never enters the top-bar departure set, so it neither departs nor gains a slot; under the single invariant the returner is present only while its return is in_flight, so the departure lands on the settling transition rather than a fresh call, and no participant enters.
+		const previous = scenarioFrame('single-role-completion', 2)
+		const current: InteractionModel = {
+			...previous,
+			operations: previous.operations.map((operation) =>
+				operation.id === 'op2'
+					? { ...operation, lifecycle: 'settled', settledAt: operation.settledAt ?? operation.startedAt }
+					: operation,
+			),
 		}
 		const lifecycle = deriveLifecycle(previous, current)
-		expect(lifecycle.departing.length).toBe(1)
-		expect(lifecycle.departing[0]!.node.id).toBe('planner')
-		expect(lifecycle.departing[0]!.merged).toBe(false)
+		expect(lifecycle.enteringIds.size).toBe(0)
+		const departedIds = lifecycle.departing.map((entry) => entry.participantId).sort()
+		expect(departedIds).toEqual(['coder'])
+		expect(lifecycle.departing.some((entry) => entry.participantId === 'you')).toBe(false)
+		for (const entry of lifecycle.departing) {
+			expect(entry.merged).toBe(true)
+			expect(entry.previousRowIndex).toBe(0)
+		}
+		// coder lingered one column past the row root (the open chain is empty, so the lingering column is chain length plus one = 1).
+		const coderDeparted = lifecycle.departing.find((entry) => entry.participantId === 'coder')
+		expect(coderDeparted).toBeDefined()
+		expect(coderDeparted!.previousColumn).toBe(1)
 	})
 
-	test('a completed run settles: every non-root node departs and merges into its existing slot', () => {
-		// completed-success frame 12→13: orchestrator leaves the main area for its existing top-bar slot.
-		const previous = frameModel('completed-success', 12)
-		const current = frameModel('completed-success', 13)
+	test('an entering participant is rendered with the entering class on the next frame', () => {
+		// delegation-chain op1 working → op2 transit: planner enters; the rendered current frame wraps planner's node in the entering host so it scales/fades in.
+		const previous = scenarioFrame('delegation-chain', 1)
+		const current = scenarioFrame('delegation-chain', 2)
 		const lifecycle = deriveLifecycle(previous, current)
-		// Frame 12 main area has you + orchestrator; frame 13 has only you.
-		const departingIds = lifecycle.departing.map((entry) => entry.node.id).sort()
-		expect(departingIds).toEqual(['orchestrator'])
-		for (const entry of lifecycle.departing) expect(entry.merged).toBe(true)
+		expect(lifecycle.enteringIds.has('planner')).toBe(true)
+		const view = render(current, 'detailed', lifecycle)
+		const flowNodes = allByTag(view, 'g').filter((group) => (propString(group.props, 'class') ?? '').split(' ').includes('flow-node--entering-host'))
+		const plannerEntering = flowNodes.some((group) => propString(group.props, 'data-participant') === 'planner')
+		expect(plannerEntering).toBe(true)
 	})
 })
 
-// --- Product surfaces: "now" caption + budget bar -------------------------
-
-describe('deriveNowCaption', () => {
-	test('an active worker role yields its friendly description', () => {
-		// single-role-in-progress frame 1: the planner is thinking (active flag, no flowing edge), so the caption is the planner's friendly description.
-		const frame = scenarioFrame('single-role-in-progress', 1)
-		expect(deriveNowCaption(frame.config, frame.runView, frame.flowModel)).toBe('Looks around and figures out the plan of attack…')
+describe('renderFlowView — nested interrupts under stress', () => {
+	test('three coexisting stacks render as three rows with the active stack on the bottom', () => {
+		// nested-interrupt-deep op5 transit: root, interrupt-1-stack, and interrupt-2-stack all carry open calls; the active stack (interrupt-2-stack, the latest operation) sits on the bottom row so the cascade reads top-to-bottom oldest-to-newest.
+		const frame = scenarioFrame('nested-interrupt-deep', 8)
+		expect(stacksOf(frame)).toEqual(['root', 'interrupt-1-stack', 'interrupt-2-stack'])
+		expect(activeStack(frame)).toBe('interrupt-2-stack')
+		const view = render(frame)
+		const rows = groupsWithClass(view, 'flow-row')
+		expect(rows.length).toBe(3)
+		const bottomRow = rows[rows.length - 1]
+		expect(bottomRow).toBeDefined()
+		expect(propString(bottomRow!.props, 'data-stack')).toBe('interrupt-2-stack')
+		expect(propString(bottomRow!.props, 'data-row-index')).toBe('2')
 	})
 
-	test('an in-flight tool call pairs the calling role and the tool friendly labels', () => {
-		// single-role-in-progress frame 2: planner→glob_files call is in flight, so the caption names both the role and the tool.
-		const frame = scenarioFrame('single-role-in-progress', 2)
-		const caption = deriveNowCaption(frame.config, frame.runView, frame.flowModel)
-		expect(caption).toBe('The planner · Search for files…')
-		expect(caption).toContain('The planner')
-		expect(caption).toContain('Search for files')
+	test('resolving the inner stack resumes the outer stack as the new bottom row', () => {
+		// nested-interrupt-deep op10 transit: interrupt-2-stack has closed (op8 returned the tool, op9 returned the detector), so interrupt-1-stack is active again and must sit on the bottom row — the active-stack row reorders inward as a stack resolves.
+		const frame = scenarioFrame('nested-interrupt-deep', 17)
+		expect(activeStack(frame)).toBe('interrupt-1-stack')
+		expect(stacksOf(frame)).toEqual(['root', 'interrupt-1-stack'])
+		const view = render(frame)
+		const rows = groupsWithClass(view, 'flow-row')
+		expect(rows.length).toBe(2)
+		expect(propString(rows[rows.length - 1]!.props, 'data-stack')).toBe('interrupt-1-stack')
 	})
 
-	test('a pending ask_human question yields the ask_human friendly description', () => {
-		// pending-question frame 3: the question edge flows toward the You respondent.
-		const frame = scenarioFrame('pending-question', 3)
-		expect(deriveNowCaption(frame.config, frame.runView, frame.flowModel)).toBe('Needs your input before continuing…')
-	})
-
-	test('a completed run yields a completion caption', () => {
-		const frame = scenarioFrame('completed-success', 13)
-		expect(deriveNowCaption(frame.config, frame.runView, frame.flowModel)).toBe('Done.')
-	})
-
-	test('a failed run yields an error caption', () => {
-		const frame = scenarioFrame('failed-run', 4)
-		expect(deriveNowCaption(frame.config, frame.runView, frame.flowModel)).toBe('The run stopped with an error.')
-	})
-
-	test('a lingering return to the root You reads as wrapping up', () => {
-		// completed-success frame 12: the orchestrator has finished and its return edge flows back to You; the run is unwinding.
-		const frame = scenarioFrame('completed-success', 12)
-		expect(deriveNowCaption(frame.config, frame.runView, frame.flowModel)).toBe('Wrapping up…')
-	})
-
-	test('the fallback chain uses detailed when the friendly tier is absent', () => {
-		const config = {
-			roles: {
-				customrole: {
-					tools: [],
-					label: { detailed: 'Custom Role' },
-					description: { detailed: 'Does the custom thing.' },
-				},
-			},
-			tools: {},
+	test("a paused stack's in_flight call renders frozen while the active stack's in_flight call marches", () => {
+		// nested-interrupt-deep op5 transit: op2 (root) and op4 (interrupt-1-stack) are in_flight on paused stacks, so their call edges stay solid; op5 (interrupt-2-stack) is the active in_flight call and its edge marches. The model keeps the paused legs in_flight (the model never flips lifecycle on pause), so this asserts the view freezes them rather than the model settling them.
+		const frame = scenarioFrame('nested-interrupt-deep', 8)
+		const op2 = frame.operations.find((operation) => operation.id === 'op2')
+		const op4 = frame.operations.find((operation) => operation.id === 'op4')
+		expect(op2?.lifecycle).toBe('in_flight')
+		expect(op4?.lifecycle).toBe('in_flight')
+		const view = render(frame)
+		for (const operationId of ['op2', 'op4']) {
+			const path = pathForOperation(view, operationId)
+			expect(path).toBeDefined()
+			const tokens = (propString(path!.props, 'class') ?? '').split(' ')
+			expect(tokens).not.toContain('graph-edge--flowing')
+			expect(tokens).not.toContain('graph-edge--returning')
+			expect(tokens).not.toContain('graph-edge--error')
+			expect(tokens).not.toContain('graph-edge--terminated')
 		}
-		const model: FlowModel = {
-			mainArea: {
-				nodes: [
-					{ id: 'you', kind: 'you', label: 'You', column: 0, row: 0 },
-					{ id: 'customrole', kind: 'role', label: 'Custom Role', sublabel: 'customrole', column: 1, row: 0, active: true },
-				],
-				edges: [{ from: 'you', to: 'customrole', kind: 'call' }],
-			},
-			topBar: { nodes: [] },
-		}
-		expect(deriveNowCaption(config, { status: 'unknown' }, model)).toBe('Does the custom thing…')
+		expect(pathHasClass(pathForOperation(view, 'op5'), 'graph-edge--flowing')).toBe(true)
 	})
 
-	test('the fallback chain falls to a title-cased name when no description tier is present', () => {
-		const config = {
-			roles: {
-				norole: { tools: [], label: { detailed: 'Norole' } },
-			},
-			tools: {},
-		}
-		const model: FlowModel = {
-			mainArea: {
-				nodes: [
-					{ id: 'you', kind: 'you', label: 'You', column: 0, row: 0 },
-					{ id: 'norole', kind: 'role', label: 'Norole', sublabel: 'norole', column: 1, row: 0, active: true },
-				],
-				edges: [{ from: 'you', to: 'norole', kind: 'call' }],
-			},
-			topBar: { nodes: [] },
-		}
-		expect(deriveNowCaption(config, { status: 'unknown' }, model)).toBe('Norole…')
+	test('an observe line crosses from the active stack into a non-adjacent paused row', () => {
+		// nested-interrupt-deep observe frame: the observe's source is the tool readMessageWindow-2 — the loop_detector agent calls the tool, and the tool reads the coder's history. The source sits in the active interrupt-2-stack (row 2) and its destination (coder) in the paused root stack (row 0), skipping the middle interrupt-1 row. The observe must route across that gap as a static dashed line.
+		const frame = scenarioFrame('nested-interrupt-deep', 12)
+		const observe = observesOf(frame)[0]
+		expect(observe).toBeDefined()
+		expect(observe!.source).toBe('readMessageWindow-2')
+		expect(observe!.destination).toBe('coder')
+		const view = render(frame)
+		const observeEdges = allByTag(view, 'g').filter((group) => (propString(group.props, 'class') ?? '').split(' ').includes('flow-edge--observe'))
+		expect(observeEdges.length).toBe(1)
+		expect(propString(observeEdges[0]!.props, 'data-source')).toBe('readMessageWindow-2')
+		expect(propString(observeEdges[0]!.props, 'data-destination')).toBe('coder')
+		// The source and destination land in rows 2 and 0 respectively (non-adjacent), confirmed by locating the row each participant renders in.
+		const rows = groupsWithClass(view, 'flow-row')
+		const sourceRow = rows.find((row) => allByTag(row, 'g').some((group) => propString(group.props, 'data-participant') === 'readMessageWindow-2'))
+		const destinationRow = rows.find((row) => allByTag(row, 'g').some((group) => propString(group.props, 'data-participant') === 'coder'))
+		expect(sourceRow).toBeDefined()
+		expect(destinationRow).toBeDefined()
+		const sourceIndex = Number(propString(sourceRow!.props, 'data-row-index'))
+		const destinationIndex = Number(propString(destinationRow!.props, 'data-row-index'))
+		expect(Math.abs(sourceIndex - destinationIndex)).toBeGreaterThan(1)
 	})
 
-	test('a tool-in-flight caption falls back to the detailed tool label when friendly is absent', () => {
-		const config = {
-			roles: {
-				coder: { tools: ['write_file'], label: { detailed: 'Coder' }, description: { detailed: 'Writes code.' } },
-			},
-			tools: {
-				write_file: { humanLabel: { detailed: 'Write a file' }, humanDescription: { detailed: 'Writes a file.' } },
-			},
+	test('a terminated return renders distinctly from success and error on the active stack, and departs once settled', () => {
+		// An in-flight terminated return (coder→orchestrator) is the lingering return on the active root stack, so its return edge marches in the warn tone (graph-edge--terminated), distinct from a green success march and a red error march. The coder node carries the terminated stroke too.
+		const activeFrame: InteractionModel = {
+			participants: [
+				participant('you', 'human', 'human'),
+				participant('orchestrator', 'orchestrator', 'role'),
+				participant('coder', 'coder', 'role'),
+			],
+			operations: [
+				{ id: 'op1', kind: 'call', stack: 'root', source: 'you', destination: 'orchestrator', startedAt: 't0', settledAt: 't1', lifecycle: 'settled', outcome: null, details: null, metrics: null },
+				{ id: 'op2', kind: 'call', stack: 'root', source: 'orchestrator', destination: 'coder', startedAt: 't1', settledAt: 't2', lifecycle: 'settled', outcome: null, details: null, metrics: null },
+				{ id: 'op5', kind: 'return', stack: 'root', source: 'coder', destination: 'orchestrator', startedAt: 't5', settledAt: null, lifecycle: 'in_flight', outcome: 'terminated', details: null, metrics: null },
+			],
+			status: 'running',
 		}
-		const model: FlowModel = {
-			mainArea: {
-				nodes: [
-					{ id: 'you', kind: 'you', label: 'You', column: 0, row: 0 },
-					{ id: 'coder', kind: 'role', label: 'Coder', sublabel: 'coder', column: 1, row: 0, costTokens: 100 },
-					{ id: 'write_file', kind: 'tool', label: 'Write a file', column: 2, row: 0 },
-				],
-				edges: [
-					{ from: 'you', to: 'coder', kind: 'call' },
-					{ from: 'coder', to: 'write_file', kind: 'call' },
-				],
-			},
-			topBar: { nodes: [] },
+		expect(activeStack(activeFrame)).toBe('root')
+		const activeView = render(activeFrame)
+		const activePath = pathForOperation(activeView, 'op5')
+		expect(activePath).toBeDefined()
+		expect(pathHasClass(activePath, 'graph-edge--terminated')).toBe(true)
+		expect(pathHasClass(activePath, 'graph-edge--returning')).toBe(false)
+		expect(pathHasClass(activePath, 'graph-edge--error')).toBe(false)
+		const activeCoderWrap = allByTag(activeView, 'g').find((group) => {
+			if (!(propString(group.props, 'class') ?? '').split(' ').includes('flow-node')) return false
+			return propString(group.props, 'data-participant') === 'coder'
+		})
+		expect(activeCoderWrap).toBeDefined()
+		// A 'terminated' return outcome colors the return line (warn-toned) but not the node — the node was killed externally and did not succeed or fail, so the orange border comes only from a terminate op targeting the node, not from the return outcome.
+		const activeCoderInner = allByTag(activeCoderWrap!, 'g').find((group) => (propString(group.props, 'class') ?? '').split(' ').includes('graph-node--terminated'))
+		expect(activeCoderInner).toBeUndefined()
+
+		// Once the return settles (working phase), the returner has already departed — neither the coder node nor the op5 return edge is drawn on the root row.
+		const settledFrame: InteractionModel = {
+			participants: [
+				participant('you', 'human', 'human'),
+				participant('orchestrator', 'orchestrator', 'role'),
+				participant('coder', 'coder', 'role'),
+			],
+			operations: [
+				{ id: 'op1', kind: 'call', stack: 'root', source: 'you', destination: 'orchestrator', startedAt: 't0', settledAt: 't1', lifecycle: 'settled', outcome: null, details: null, metrics: null },
+				{ id: 'op2', kind: 'call', stack: 'root', source: 'orchestrator', destination: 'coder', startedAt: 't1', settledAt: 't2', lifecycle: 'settled', outcome: null, details: null, metrics: null },
+				{ id: 'op5', kind: 'return', stack: 'root', source: 'coder', destination: 'orchestrator', startedAt: 't5', settledAt: 't6', lifecycle: 'settled', outcome: 'terminated', details: null, metrics: null },
+			],
+			status: 'running',
 		}
-		expect(deriveNowCaption(config, { status: 'unknown' }, model)).toBe('Coder · Write a file…')
+		const settledView = render(settledFrame)
+		const settledCoderWrap = allByTag(settledView, 'g').find((group) => {
+			if (!(propString(group.props, 'class') ?? '').split(' ').includes('flow-node')) return false
+			return propString(group.props, 'data-participant') === 'coder'
+		})
+		expect(settledCoderWrap).toBeUndefined()
+		expect(pathForOperation(settledView, 'op5')).toBeUndefined()
 	})
 })
 
-// --- Interactions wiring (tooltip click targets) ---------------------------
-// renderFlowView accepts an optional `interactions` carrying `onNodeActivate`/`onEdgeActivate`; the value each returns becomes the `onclick` on the corresponding node group or edge path so the caller can open a tooltip without the renderer knowing what a click does. The wiring is asserted against the same fake `h` so the click target lands on the same elements the layout produces.
+describe('renderFlowView — terminal CTA', () => {
+	test('the CTA appears on the terminal transit frame (the terminal op has no working frame) but not on the preceding running frame', () => {
+		// single-role-completion op1 working (frame 1) carries status 'running', so no CTA renders; the terminal op (op2) emits a single transit frame (frame 2) carrying status 'success', so the CTA node renders on that lingering-return frame. The terminal op has no working frame because You never emits an operation to advance the return — the See Result click stands in as that acknowledgment. The CTA is a terminal action button with no connecting edge, so only the button node is present.
+		const runningView = render(scenarioFrame('single-role-completion', 1))
+		expect(allByTag(runningView, 'g').filter((group) => (propString(group.props, 'class') ?? '').split(' ').includes('flow-cta')).length).toBe(0)
+		const terminalView = render(scenarioFrame('single-role-completion', 2))
+		const ctaNodes = allByTag(terminalView, 'g').filter((group) => (propString(group.props, 'class') ?? '').split(' ').includes('flow-cta'))
+		expect(ctaNodes.length).toBe(1)
+		// The CTA carries no connecting edge — it is a standalone button, not a graph node with a relationship.
+		expect(allByTag(terminalView, 'g').filter((group) => (propString(group.props, 'class') ?? '').split(' ').includes('flow-cta-edge')).length).toBe(0)
+	})
+})
 
-describe('renderFlowView — interactions wiring', () => {
-	const { NODE_WIDTH, COL_GAP } = FLOW_VIEW_CONSTANTS
+describe('deriveNowCaption — active participant + in-flight operation', () => {
+	test('a terminal success short-circuits to a fixed completion line', () => {
+		const frame = scenarioFrame('single-role-completion', 2)
+		expect(deriveNowCaption(frame, labelsModule, 'detailed')).toBe('Done.')
+	})
 
-	function simpleModel() {
-		return {
-			mainArea: {
-				nodes: [
-					{ id: 'you', kind: 'you', label: 'You', column: 0, row: 0 },
-					{ id: 'planner', kind: 'role', label: 'Planner', sublabel: 'planner', column: 1, row: 0, active: true },
-				],
-				edges: [{ from: 'you', to: 'planner', kind: 'call' }],
-			},
-			topBar: { nodes: [] },
-		}
+	test('an in-flight call names the source and destination via the operation label at the chosen tier with a trailing ellipsis', () => {
+		// delegation-chain op2 transit: op2 (orchestrator→planner) is the in-flight call on the active root stack, so the caption resolves its label at the chosen tier and appends an ellipsis. The detailed tier interpolates the role identifiers; the fun tier interpolates the playful participant labels.
+		const frame = scenarioFrame('delegation-chain', 2)
+		expect(deriveNowCaption(frame, labelsModule, 'detailed')).toBe('call orchestrator → planner…')
+		expect(deriveNowCaption(frame, labelsModule, 'fun')).toBe('The Conductor pass the baton to The Mapmaker…')
+	})
+
+	test('a settled return (the lingering response leg) carries no ellipsis because the leg is the current state', () => {
+		// delegation-chain op5 working: readFile has returned to coder; the return is the latest non-observe operation on the active root stack, so the caption reads its return label without an ellipsis.
+		const frame = scenarioFrame('delegation-chain', 9)
+		expect(deriveNowCaption(frame, labelsModule, 'detailed')).toBe('tool read_file (tool) returned to coder')
+	})
+
+	test('the tier toggle swaps the caption voice without touching the model', () => {
+		// delegation-chain op1 transit: op1 (you→orchestrator) is the in-flight call; the three tiers resolve to three distinct voices.
+		const frame = scenarioFrame('delegation-chain', 0)
+		expect(deriveNowCaption(frame, labelsModule, 'fun')).toBe('You hand the quest to The Conductor…')
+		expect(deriveNowCaption(frame, labelsModule, 'helpful')).toBe('You ask Orchestrator to start…')
+		expect(deriveNowCaption(frame, labelsModule, 'detailed')).toBe('call You (human) → orchestrator…')
+	})
+
+	test('an empty model with a running status falls back to the working placeholder', () => {
+		const empty: InteractionModel = { participants: [], operations: [], status: 'running' }
+		expect(deriveNowCaption(empty, labelsModule, 'detailed')).toBe('Working…')
+	})
+
+	test('a needs_clarification status surfaces the waiting line regardless of the active operation', () => {
+		// Author a frame whose status is needs_clarification even though the latest operation is an in-flight call; the terminal status wins over the operation label.
+		const frame = scenarioFrame('delegation-chain', 0)
+		const needsClarification: InteractionModel = { ...frame, status: 'needs_clarification' }
+		expect(deriveNowCaption(needsClarification, labelsModule, 'detailed')).toBe('Waiting for your input…')
+	})
+})
+
+describe('deriveCostStrip — per-operation metric aggregation', () => {
+	function callWithMetrics(id: string, stack: string, source: string, destination: string, metrics: Operation['metrics']): Operation {
+		return { id, kind: 'call', stack, source, destination, startedAt: 't0', settledAt: null, lifecycle: 'in_flight', outcome: null, details: null, metrics }
 	}
 
-	function topBarModel() {
-		return {
-			mainArea: { nodes: [{ id: 'you', kind: 'you', label: 'You', column: 0, row: 0 }], edges: [] },
-			topBar: {
-				nodes: [
-					{ id: 'you', kind: 'you', label: 'You', invocations: 1 },
-					{ id: 'planner', kind: 'role', label: 'Planner', invocations: 1, totalTime: 5, totalTokens: 4380 },
-				],
-			},
-		}
+	function returnWithMetrics(id: string, stack: string, source: string, destination: string, elapsedSeconds: number, tokens: number): Operation {
+		return { id, kind: 'return', stack, source, destination, startedAt: 't0', settledAt: 't1', lifecycle: 'settled', outcome: 'success', details: null, metrics: { tokens, cachedPromptTokens: null, elapsedSeconds } }
 	}
 
-	test('a main-area node group carries onmouseenter from onNodeActivate and onmouseleave from onLeave', () => {
-		const model = simpleModel()
-		const plannerHandler = () => ({})
-		const youHandler = () => ({})
-		const leave = () => ({})
-		const view: Vnode = renderFlowView(fakeH, model, FLOW_VIEW_CONSTANTS.DEFAULT_MIN_COLUMNS, undefined, undefined, {
-			onNodeActivate: (node: { id: string }) => (node.id === 'planner' ? plannerHandler : youHandler),
-			onLeave: leave,
-		})
-		const plannerGroup = allByTag(view, 'g').find((g) => g.props.transform === `translate(${NODE_WIDTH + COL_GAP},0)`)!
-		expect(plannerGroup.props.onmouseenter).toBe(plannerHandler)
-		expect(plannerGroup.props.onmouseleave).toBe(leave)
-	})
-
-	test('an entering node carries the hover handlers on its host group so the whole entering node is hoverable', () => {
-		// simpleModel frame has no previous frame; passing a lifecycle that marks the planner as entering exercises the entering-host branch.
-		const model = simpleModel()
-		const entering = new Set(['planner'])
-		const handler = () => ({})
-		const leave = () => ({})
-		const view: Vnode = renderFlowView(fakeH, model, FLOW_VIEW_CONSTANTS.DEFAULT_MIN_COLUMNS, { enteringIds: entering, departing: [] }, undefined, {
-			onNodeActivate: () => handler,
-			onLeave: leave,
-		})
-		const host = allByTag(view, 'g').find((g) => typeof g.props.class === 'string' && (g.props.class as string).includes('flow-node--entering-host'))!
-		expect(host.props.onmouseenter).toBe(handler)
-		expect(host.props.onmouseleave).toBe(leave)
-	})
-
-	test('a top-bar small node carries onmouseenter from onNodeActivate and onmouseleave from onLeave', () => {
-		const model = topBarModel()
-		const youHandler = () => ({})
-		const plannerHandler = () => ({})
-		const leave = () => ({})
-		const view: Vnode = renderFlowView(fakeH, model, FLOW_VIEW_CONSTANTS.DEFAULT_MIN_COLUMNS, undefined, undefined, {
-			onNodeActivate: (node: { id: string }) => (node.id === 'planner' ? plannerHandler : youHandler),
-			onLeave: leave,
-		})
-		const smallNodes = allByTag(view, 'g').filter((g) => ((g.props.class as string) ?? '').includes('flow-small-node'))
-		expect(smallNodes.length).toBe(2)
-		const youNode = smallNodes.find((g) => g.props.transform === 'translate(0,0)')!
-		expect(youNode.props.onmouseenter).toBe(youHandler)
-		expect(youNode.props.onmouseleave).toBe(leave)
-		const plannerNode = smallNodes.find((g) => g.props.transform !== 'translate(0,0)')!
-		expect(plannerNode.props.onmouseenter).toBe(plannerHandler)
-		expect(plannerNode.props.onmouseleave).toBe(leave)
-	})
-
-	test('an edge path carries onmouseenter from onEdgeActivate and onmouseleave from onLeave', () => {
-		const model = simpleModel()
-		const edgeHandler = () => ({})
-		const leave = () => ({})
-		const view: Vnode = renderFlowView(fakeH, model, FLOW_VIEW_CONSTANTS.DEFAULT_MIN_COLUMNS, undefined, undefined, {
-			onEdgeActivate: () => edgeHandler,
-			onLeave: leave,
-		})
-		const path = allByTag(view, 'path').find((p) => typeof p.props.d === 'string')!
-		expect(path.props.onmouseenter).toBe(edgeHandler)
-		expect(path.props.onmouseleave).toBe(leave)
-	})
-
-	test('no interactions parameter leaves every element without hover handlers', () => {
-		const model = topBarModel()
-		const view: Vnode = renderFlowView(fakeH, model)
-		for (const group of allByTag(view, 'g')) {
-			expect(group.props.onmouseenter).toBeUndefined()
-			expect(group.props.onmouseleave).toBeUndefined()
+	test('tokens are summed across every operation that carries them and null metrics contribute nothing', () => {
+		const model: InteractionModel = {
+			participants: [
+				participant('you', 'human', 'human'),
+				participant('orchestrator', 'orchestrator', 'role'),
+				participant('coder', 'coder', 'role'),
+			],
+			operations: [
+				callWithMetrics('op1', 'root', 'you', 'orchestrator', { tokens: 120, cachedPromptTokens: null, elapsedSeconds: 1.5 }),
+				returnWithMetrics('op2', 'root', 'orchestrator', 'you', 1.5, 120),
+				callWithMetrics('op3', 'root', 'you', 'coder', null),
+				returnWithMetrics('op4', 'root', 'coder', 'you', 2.0, 80),
+			],
+			status: 'running',
 		}
-		for (const path of allByTag(view, 'path')) {
-			expect(path.props.onmouseenter).toBeUndefined()
-			expect(path.props.onmouseleave).toBeUndefined()
+		expect(deriveCostStrip(model)).toEqual({ elapsedSeconds: 2.0, tokens: 320 })
+	})
+
+	test('elapsed reads the latest non-null elapsedSeconds, falling back to the previous operation when the latest has none', () => {
+		const model: InteractionModel = {
+			participants: [participant('you', 'human', 'human'), participant('coder', 'coder', 'role')],
+			operations: [
+				returnWithMetrics('op1', 'root', 'coder', 'you', 3.0, 50),
+				callWithMetrics('op2', 'root', 'you', 'coder', { tokens: null, cachedPromptTokens: null, elapsedSeconds: null }),
+			],
+			status: 'running',
 		}
+		// op2 is the latest operation; its elapsedSeconds is null, so the strip falls back to op1's 3.0. op2 carries no tokens either, so the sum stays at op1's 50.
+		expect(deriveCostStrip(model)).toEqual({ elapsedSeconds: 3.0, tokens: 50 })
+	})
+
+	test('a model whose operations carry no metrics reads as zero elapsed and zero tokens', () => {
+		const frame = scenarioFrame('delegation-chain', 2)
+		expect(deriveCostStrip(frame)).toEqual({ elapsedSeconds: 0, tokens: 0 })
+	})
+
+	test('an empty model reads as zero elapsed and zero tokens', () => {
+		const empty: InteractionModel = { participants: [], operations: [], status: 'running' }
+		expect(deriveCostStrip(empty)).toEqual({ elapsedSeconds: 0, tokens: 0 })
 	})
 })
-

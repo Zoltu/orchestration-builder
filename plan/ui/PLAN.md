@@ -2,6 +2,10 @@
 
 This is a sub-plan for a radical redesign of the web run view, produced by the step-29 brainstorm session. It lives under `plan/ui/` so the main `plan/` sequence stays focused on the executor/Foundry track; the steps here are numbered independently and sequenced among themselves. A short pointer is added to `plan/README.md`; the main plan is not renumbered.
 
+## Design revisions
+
+- **2026-07-01 — MVC sub-plan superseded the `FlowModel` contract.** The MVC refactor (steps 01–10 of `plan/ui/mvc/`) replaced the original `FlowModel` type, the fixture-window reconstruction machinery, and the `flow-view.js`/`sequence-diagram.js`/`playback.js` harness with a single canonical model (`InteractionModel` in `source/web/static/interaction-model.js`) and canonical view modules (`source/web/static/flow-view.js`, `source/web/static/sequence-diagram.js`). Consequently the parent steps that targeted the old contract are re-scoped to the new surface: step 13 (live hookup) now wires these view modules to live data instead of the deleted `FlowModel` consumer; step 14 (retire legacy) targets the legacy panels only (the dev `playback` harness is already gone); step 16 (backend flow model) is replaced by a backend adapter that derives an `InteractionModel` from the run event stream — the successor to the original `deriveFlowModel`. `source/web/flow-model.ts` is no longer produced; the adapter lives wherever the event→model derivation lands in step 16's re-scope.
+
 ## The problem
 
 The current run view (steps 14–21, 27, 28) is a flat list of debug-oriented panels: role-activity table, raw log rows, config dump. It is a good **development iteration** UI but wrong for the product audience — a **non-developer** left with the page open 24/7. It shows metrics and debugging data, not *what is happening*. A long run looks like an undifferentiated scrolling wall of `planner · llm call` rows.

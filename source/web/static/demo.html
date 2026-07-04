@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="en">
+	<head>
+		<meta charset="utf-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1" />
+		<title>Adaptive Orchestrator — demo harness (dev)</title>
+		<link rel="icon" href="data:," />
+		<link rel="stylesheet" href="styles.css" />
+		<style>
+			.demo-body {
+				font-family: system-ui, -apple-system, sans-serif;
+				margin: 0;
+				padding: 1rem 1.5rem;
+				color: var(--color-text);
+				background: var(--color-bg);
+				display: flex;
+				flex-direction: column;
+				height: 100vh;
+				overflow: hidden;
+			}
+			.demo-bar {
+				flex: 0 0 auto;
+				display: flex;
+				flex-wrap: wrap;
+				gap: 0.75rem 1rem;
+				align-items: center;
+				padding-bottom: 1rem;
+				border-bottom: 1px solid var(--color-border);
+			}
+			.demo-bar label {
+				display: flex;
+				flex-direction: column;
+				gap: 0.25rem;
+				font-size: 0.8rem;
+				text-transform: uppercase;
+				letter-spacing: 0.04em;
+			}
+			.demo-bar select,
+			.demo-bar input[type='range'],
+			.demo-bar button {
+				font: inherit;
+				color: inherit;
+				background: transparent;
+				border: 1px solid var(--color-border-strong);
+				padding: 0.2rem 0.5rem;
+			}
+			.demo-bar .demo-spacer {
+				flex: 1 1 auto;
+			}
+			.demo-frame-meta {
+				font-size: 0.85rem;
+				opacity: 0.75;
+				margin-top: 0.25rem;
+			}
+			#demo-text-view {
+				flex: 0 0 auto;
+				max-height: 30vh;
+				overflow: auto;
+				white-space: pre;
+				font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+				font-size: 0.85rem;
+				line-height: 1.5;
+				margin-top: 1rem;
+			}
+			#demo-flow-view {
+				flex: 1 1 auto;
+				min-height: 0;
+				display: flex;
+				flex-direction: column;
+			}
+		</style>
+	</head>
+	<body class="demo-body">
+		<div class="demo-bar">
+			<label>
+				Scenario
+				<select id="demo-scenario-select"></select>
+			</label>
+			<label>
+				Frame
+				<input id="demo-frame-scrubber" type="range" min="0" max="0" value="0" />
+				<span class="demo-frame-meta" id="demo-frame-meta"></span>
+			</label>
+			<button id="demo-play-button" type="button">Play</button>
+			<button id="demo-prev-button" type="button">Previous</button>
+			<button id="demo-next-button" type="button">Next</button>
+			<div class="demo-spacer"></div>
+			<label>
+				Theme
+				<button id="demo-theme-button" type="button">Light</button>
+			</label>
+			<label>
+				Label tier
+				<select id="demo-tier-select">
+					<option value="fun">Fun</option>
+					<option value="helpful">Helpful</option>
+					<option value="detailed" selected>Detailed</option>
+				</select>
+			</label>
+		</div>
+		<pre id="demo-text-view"></pre>
+		<noscript>
+			<p style="font-family: system-ui, sans-serif; padding: 1.5rem; margin: 0;">The demo harness requires JavaScript to run.</p>
+		</noscript>
+		<script type="module" src="demo.js"></script>
+	</body>
+</html>

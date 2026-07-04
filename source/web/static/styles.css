@@ -1141,6 +1141,13 @@ li:last-child {
 	stroke-width: 1.5;
 }
 
+/* A terminated node is neither a success nor a failure: the leg was abandoned mid-rewind. The warn-toned dashed stroke reads as a distinct third outcome so a killed callee does not masquerade as a settled result, mirroring the sequence view's seq-node--terminated treatment. */
+.graph-node--terminated .graph-node-box {
+	stroke: var(--color-warn);
+	stroke-width: 1.5;
+	stroke-dasharray: 4 3;
+}
+
 @keyframes graph-node-pulse {
 	0%,
 	100% {
@@ -1176,10 +1183,23 @@ li:last-child {
 	animation: graph-edge-flow 0.8s linear infinite;
 }
 
+/* A terminated return leg in flight on the active stack marches in the warn tone, distinct from a green success march and a red error march, so a kill reads as a kill while it is the current response leg. */
+.graph-edge--terminated {
+	stroke: var(--color-warn);
+	stroke-dasharray: 6 4;
+	animation: graph-edge-flow 0.8s linear infinite;
+}
+
 @keyframes graph-edge-flow {
 	to {
 		stroke-dashoffset: -10;
 	}
+}
+
+/* A terminate (destructive revert) cross-stack line is a static red dashed stroke, distinct from an observe's neutral dashed reference: red reads as destructive, the dash reads as a reference rather than an in-flight call, and the line never animates. The rule targets the path inside the wrapper <g> the flow view emits (flow-edge--terminate), overriding the default graph-edge stroke so only terminate lines pick up the red. */
+.flow-edge--terminate .graph-edge {
+	stroke: var(--color-error);
+	stroke-dasharray: 3 3;
 }
 
 .graph-tooltip-rect {
@@ -1210,121 +1230,7 @@ li:last-child {
 	font-size: 11px;
 }
 
-/* --- Dev playback harness -------------------------------------------------- */
-/* Throwaway iteration scaffolding for the visualization phase. It is isolated behind its own entry page (playback.html) and removed in step 14, so it carries its own layout rules here rather than reusing the product panels. The page is just a slim control bar at the top and the rendered view filling the rest; no title, no scenario details, no card chrome around the view, and no scroll unless the viewport is too short to fit. */
-
-.playback-body {
-	background: var(--color-bg);
-	color: var(--color-text);
-	min-height: 100vh;
-}
-
-/* The harness fills the viewport: no max-width, no auto margins. A small edge padding keeps the view off the window frame without adding chrome; height:100vh (not min-height) plus overflow:hidden pins the page to one screen so it does not scroll unless a min-height floor below cannot fit. */
-.pb {
-	height: 100vh;
-	padding: var(--space-2);
-	display: flex;
-	flex-direction: column;
-	gap: var(--space-2);
-	overflow: hidden;
-}
-
-/* The control bar is a slim strip with a distinct (sunken) background so it reads as chrome separate from the view, with a few pixels of padding and no heavy border. flex:0 keeps it at its natural height so the view below takes the remainder. */
-.pb-controls {
-	flex: 0 0 auto;
-	display: flex;
-	flex-wrap: wrap;
-	align-items: center;
-	gap: var(--space-2);
-	padding: 0.4rem var(--space-2);
-	background: var(--color-surface-sunken);
-	border-radius: var(--radius-sm);
-}
-
-.pb-scenario-select {
-	display: inline-flex;
-	align-items: center;
-	gap: var(--space-1);
-	font-size: 0.8rem;
-}
-
-.pb-scenario-select select {
-	padding: 0.1rem var(--space-1);
-	border: 1px solid var(--color-border);
-	border-radius: var(--radius-sm);
-	background: var(--color-surface);
-	color: var(--color-text);
-	font-size: 0.8rem;
-}
-
-.pb-theme-toggle {
-	display: inline-flex;
-	gap: 0.15rem;
-}
-
-.pb-theme-toggle button {
-	border: 1px solid var(--color-border);
-	border-radius: var(--radius-sm);
-	background: var(--color-surface);
-	color: var(--color-text-muted);
-	font-size: 0.75rem;
-	padding: 0.1rem var(--space-2);
-	cursor: pointer;
-}
-
-.pb-theme-toggle button.is-active {
-	background: var(--color-accent-soft);
-	border-color: var(--color-accent);
-	color: var(--color-accent);
-}
-
-.pb-btn {
-	padding: 0.1rem var(--space-2);
-	border: 1px solid var(--color-border);
-	border-radius: var(--radius-sm);
-	background: var(--color-surface);
-	color: var(--color-text);
-	font-size: 0.8rem;
-	cursor: pointer;
-}
-
-.pb-btn:disabled {
-	opacity: 0.5;
-	cursor: default;
-}
-
-.pb-scrub {
-	flex: 1 1 auto;
-	min-width: 8rem;
-	cursor: pointer;
-}
-
-.pb-frame-counter {
-	font-variant-numeric: tabular-nums;
-	font-size: 0.75rem;
-	color: var(--color-text-muted);
-}
-
-/* The rendered view fills the remaining viewport. It carries no card chrome (no border, no background) — only the inset padding that keeps the graph off the screen edge. The inset lives here on the container, not inside the SVG coordinate space, so nodes are rooted at the viewBox edges (0,0) and moving a node is a one-number translate change with no layout chrome baked into each child.
-   - box-sizing: border-box so width:100% accounts for the padding (content-box would add padding on top of 100% and overflow the right edge).
-   - overflow: visible so a node rooted at the viewBox edge isn't clipped: an SVG stroke is centered on the path, so a node at x:0 paints half its 1px stroke at coordinate -0.5, which the default overflow:hidden would cut. Letting the drawing overflow its box paints the full stroke without nudging every edge node by 1px.
-   min-height:0 lets it shrink below its content on short viewports so the page stays one screen; preserveAspectRatio on the SVG does the fit-to-page. */
-.pb-demo-svg {
-	flex: 1 1 auto;
-	min-height: 0;
-	width: 100%;
-	padding: var(--space-3);
-	box-sizing: border-box;
-	overflow: visible;
-	display: block;
-}
-
-.pb-demo-svg text {
-	font-family: var(--font-body);
-	user-select: none;
-}
-
-/* --- Flow view (dev playback harness) -------------------------------------- */
+/* --- Flow view (demo harness) --------------------------------------------- */
 /* The two-component flow view rendered as a single shared SVG: a compact history strip (small nodes, one per role/tool/"You" that has ever run, cumulative stats) at the top, and a spacious active-flow main area (nodes/edges laid out left-to-right by call depth) below it, separated by a gap. Sharing one SVG is what makes the depart animation work — a node leaving the main area travels to its top-bar slot in the shared coordinate space, so the travel lands on the slot and the counter increment reads as the node arriving. The SVG sizes to its viewBox and fits the container via preserveAspectRatio. Colors reuse the --svg-* tokens so the flow follows the light/dark theme with the rest of the page. */
 
 .flow-view {
@@ -1348,24 +1254,21 @@ li:last-child {
 	user-select: none;
 }
 
-/* --- Product surfaces (dev playback harness) -------------------------------- */
-/* Two surfaces wrap the two-component flow view so the page conveys meaning the graph's structure alone cannot: a quiet ambient cost strip in the page border (elapsed · tokens · effort) and a one-line "now" caption under the main area. The "now" caption is the more prominent of the two; the cost strip is the more subdued. All read the visual tokens so they follow the light/dark theme with the rest of the page. */
+/* --- Product surfaces (demo harness) --------------------------------------- */
+/* Two surfaces wrap the flow view so the page conveys meaning the graph's structure alone cannot: a quiet ambient cost strip in the harness chrome and a one-line "now" caption under the flow view. The "now" caption is the more prominent of the two; the cost strip is the more subdued. Both read the visual tokens so they follow the light/dark theme with the rest of the page. */
 
-/* The flow area is a column that fills the remaining viewport: the flow view SVG (flexes to fill) and the now caption below. */
-.pb-flow {
-	flex: 1 1 auto;
-	min-height: 0;
-	display: flex;
-	flex-direction: column;
-	gap: var(--space-2);
+/* The demo harness mounts the flow view and the now caption in a plain block column under #demo-flow-view, so the now caption sits a half-step below the SVG and the focal hierarchy reads flow view primary, caption secondary. */
+#demo-flow-view .pb-now-caption {
+	margin-top: var(--space-2);
 }
 
-/* Cost strip: a quiet, always-present bar in the page border. The more subdued of the two surfaces — small font, subtle color, sunken background — so it stays ambient and never competes with the main area. */
+/* Cost strip: a quiet, always-present bar in the harness chrome. The more subdued of the two surfaces — small font, subtle color, sunken background — so it stays ambient and never competes with the main area. The small vertical margin separates it from the control bar above and the flow view below. */
 .pb-cost-strip {
 	flex: 0 0 auto;
 	display: flex;
 	align-items: center;
 	gap: var(--space-1);
+	margin: var(--space-1) 0;
 	padding: 0.25rem var(--space-3);
 	background: var(--color-surface-sunken);
 	border-radius: var(--radius-sm);
@@ -1485,7 +1388,8 @@ li:last-child {
 @media (prefers-reduced-motion: reduce) {
 	.graph-edge--flowing,
 	.graph-edge--returning,
-	.graph-edge--error {
+	.graph-edge--error,
+	.graph-edge--terminated {
 		animation: none;
 		stroke-dasharray: none;
 	}
@@ -1866,6 +1770,44 @@ li:last-child {
 	}
 }
 
+/* --- Question button (pending ask_human affordance) ------------------------- */
+/* The Question button overlays the answerer node while an ask_human call is pending, mirroring the CTA's button-like treatment so it reads as a pressable affordance the operator clicks to (re-)open the question modal. The layered bezel + gradient face + 3-line label give it the same 3D pressable feel as the See Result CTA; hover lifts and active depresses so the interaction is obvious even after the modal is dismissed. */
+
+.flow-question-button {
+	cursor: pointer;
+}
+
+.flow-question-button-bezel {
+	fill: var(--color-accent-strong, #b35e0a);
+}
+
+.flow-question-button-face {
+	transition: transform 0.1s ease;
+}
+
+.flow-question-button:hover .flow-question-button-face {
+	transform: translateY(-1px);
+}
+
+.flow-question-button:active .flow-question-button-face {
+	transform: translateY(1px);
+}
+
+.flow-question-button-label {
+	fill: #fff;
+	font-weight: 700;
+	font-size: 12px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.flow-question-button-face,
+	.flow-question-button:hover .flow-question-button-face,
+	.flow-question-button:active .flow-question-button-face {
+		transform: none;
+		transition: none;
+	}
+}
+
 @media (prefers-reduced-motion: reduce) {
 	.result-modal-card {
 		animation: none;
@@ -1873,7 +1815,7 @@ li:last-child {
 }
 
 /* --- Tooltip (node/edge inspector) ------------------------------------------ */
-/* A friendly-formatted detail card that appears when an operator hovers a flow-view node or edge, and disappears when the pointer leaves it. It is an HTML overlay positioned `fixed` at the pointer (the SVG cannot host the sanitized-Markdown vnodes or a wrapping <pre> the card renders), so it lives as a sibling of the flow SVG inside `.pb-flow`. The inline `left/top` (or `right/bottom` near an edge) is resolved at hover time so the card never overflows the viewport; the CSS `max-width`/`max-height` clamp the real size and let long JSON or prose scroll inside the card. The card is `pointer-events: none` so it never intercepts the pointer — the hover target stays the node/edge beneath it, so leaving that geometry is what dismisses the card (no flicker, no hover-bridge needed). Colors read the visual tokens so the card follows the light/dark theme with the rest of the page. */
+/* A friendly-formatted detail card that appears when an operator hovers a flow-view node or edge, and disappears when the pointer leaves it. It is an HTML overlay positioned `fixed` at the pointer (the SVG cannot host the sanitized-Markdown vnodes or a wrapping <pre> the card renders), so it lives as a sibling of the flow SVG inside the flow view container. The inline `left/top` (or `right/bottom` near an edge) is resolved at hover time so the card never overflows the viewport; the CSS `max-width`/`max-height` clamp the real size and let long JSON or prose scroll inside the card. The card is `pointer-events: none` so it never intercepts the pointer — the hover target stays the node/edge beneath it, so leaving that geometry is what dismisses the card (no flicker, no hover-bridge needed). Colors read the visual tokens so the card follows the light/dark theme with the rest of the page. */
 
 /* Hovering a node or edge signals "more detail here"; `help` is the classic affordance for hover-to-inspect. The thin edge paths pick up the same cursor so hovering a line is discoverable. */
 .flow-node,
@@ -1953,7 +1895,7 @@ li:last-child {
 	color: var(--color-text);
 }
 
-/* --- Flow/Sequence view toggle (dev playback harness) ------------------------ */
+/* --- Flow/Sequence view toggle (demo harness) ------------------------------- */
 /* A segmented control that switches the run-view centerpiece between the product surface (Flow, default) and the debug surface (Sequence). It mirrors the theme toggle's segmented control so the two debug affordances read as a pair; the active segment carries the accent so the current view is unambiguous. `margin-left: auto` pushes it (and the theme toggle beside it) to the right end of the controls row. */
 
 .pb-view-toggle {
@@ -1978,13 +1920,12 @@ li:last-child {
 	color: var(--color-accent);
 }
 
-/* --- Sequence diagram view (dev playback harness) --------------------------- */
-/* The debug "Sequence" view: one column per role plus a Human and a "tools" column, with each log event drawn as a horizontal message on a vertical time axis. It is a debug surface, so it grows long down the page; the SVG sizes to its viewBox and fits the container via preserveAspectRatio (a future zoom/pan step is a viewBox tweak). Colors reuse the --svg-* tokens so the diagram follows the light/dark theme with the flow graph. */
+/* --- Sequence diagram view (demo harness) ------------------------------------ */
+/* The debug "Sequence" view: one column per role plus a Human and a single shared "tools" column, with each log event drawn as a horizontal message on a vertical time axis. It is a debug surface, so it grows long down the page; the SVG sizes to its viewBox and scales to the container width, and the host scroll container scrolls vertically for long timelines. Colors reuse the --svg-* tokens so the diagram follows the light/dark theme with the flow graph. */
 
 .sequence-view-svg {
-	flex: 1 1 auto;
-	min-height: 0;
 	width: 100%;
+	height: auto;
 	padding: var(--space-3);
 	box-sizing: border-box;
 	overflow: visible;
@@ -2084,13 +2025,48 @@ li:last-child {
 	stroke-width: 1.5;
 }
 
+/* A terminated return is neither a success nor a failure: the leg was abandoned mid-rewind. The warn-toned stroke and dashed box read as a distinct third outcome so a terminated node does not masquerade as a settled result. The treatment mirrors the seq-message--terminated line below so the node and its incoming arrow read as one colored unit. */
+.seq-node--terminated .seq-node-box {
+	stroke: var(--color-warn);
+	stroke-width: 1.5;
+	stroke-dasharray: 4 3;
+}
+
+/* A terminated return's incoming arrow carries the same warn tone as its terminal node, so the abandoned leg reads distinctly from a successful (green) or failed (red) return. */
+.seq-message--terminated {
+	stroke: var(--color-warn);
+	stroke-dasharray: 5 4;
+}
+
+.seq-arrowhead--terminated {
+	fill: var(--color-warn);
+}
+
+/* A terminated return that is the active operation marches in the warn tone, distinct from a green success march and a red error march, so a kill reads as a kill while the response leg is in flight. It mirrors the static seq-message--terminated color so the active and settled treatments read as one outcome. */
+.seq-message--terminated-flowing {
+	stroke: var(--color-warn);
+	stroke-dasharray: 6 4;
+	animation: graph-edge-flow 0.8s linear infinite;
+}
+
+.seq-arrowhead--terminated-flowing {
+	fill: var(--color-warn);
+}
+
+/* observe is a static cross-stack reference line — never an in-flight call. A tight dashed stroke and no arrowhead distinguish it from a call (solid) and a return (looser dash), so it reads as an observation between two columns rather than a directed interaction that activates a lifeline. */
+.seq-message--observe {
+	stroke: var(--svg-edge);
+	stroke-dasharray: 2 3;
+}
+
 @media (prefers-reduced-motion: reduce) {
 	.tooltip-card {
 		animation: none;
 	}
 	.seq-message--flowing,
 	.seq-message--returning,
-	.seq-message--error {
+	.seq-message--error,
+	.seq-message--terminated-flowing {
 		animation: none;
 		stroke-dasharray: none;
 	}

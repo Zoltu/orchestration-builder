@@ -1,4 +1,4 @@
-// Markdown → sanitized hyperapp vnode pipeline, shared by the product client (`app.js`) and the dev playback harness.
+// Markdown → sanitized hyperapp vnode pipeline, shared by the product client (`app.js`) and the demo harness.
 //
 // Agent-authored prose (task, result summary, ask_human question text/context, error message) is Markdown the UI renders as formatted text rather than literal punctuation. `showdown` (window.showdown) turns it into HTML, `highlight.js` (window.hljs) highlights fenced code, that HTML is parsed into a neutral tree by `DOMParser`, walked through the allowlist in `markdown.js`, and turned back into hyperapp vnodes. The result is memoized by text so a per-second poll does not re-run showdown/highlight.js on unchanged content, and the cached vnodes are reference-stable so the renderer's diff no-ops on a steady view.
 //

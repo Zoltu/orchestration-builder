@@ -84,7 +84,7 @@ function isTerminalStatus(status) {
 }
 
 // --- Markdown rendering ----------------------------------------------------
-// Agent-authored prose is Markdown rendered as formatted text via the shared pipeline in `markdown-render.js` (showdown → highlight.js → sanitized vnodes). The renderer is constructed once against this module's `h` and reused everywhere prose appears; the implementation and its memoization live in the shared module so the dev playback harness renders Markdown through the identical sanitized path.
+// Agent-authored prose is Markdown rendered as formatted text via the shared pipeline in `markdown-render.js` (showdown → highlight.js → sanitized vnodes). The renderer is constructed once against this module's `h` and reused everywhere prose appears; the implementation and its memoization live in the shared module so the demo harness renders Markdown through the identical sanitized path.
 
 const renderMarkdown = createMarkdownRenderer(h)
 

@@ -345,29 +345,37 @@ describe('createWebServer static assets', () => {
  	})
  })
 
-describe('createWebServer dev playback assets', () => {
-	test('GET /fixtures.js serves the fixture module', async () => {
-		const response = await fetch(`${readOnlyBaseUrl}/fixtures.js`)
-		expect(response.status).toBe(200)
-		expect(response.headers.get('content-type')).toContain('text/javascript')
-		const body = await response.text()
-		expect(body).toContain('export')
-	})
-
-	test('GET /playback.html serves the dev entry page', async () => {
-		const response = await fetch(`${readOnlyBaseUrl}/playback.html`)
+describe('createWebServer dev demo assets', () => {
+	test('GET /demo.html serves the dev entry page', async () => {
+		const response = await fetch(`${readOnlyBaseUrl}/demo.html`)
 		expect(response.status).toBe(200)
 		expect(response.headers.get('content-type')).toContain('text/html')
 		const body = await response.text()
-		expect(body).toContain('playback.js')
+		expect(body).toContain('demo.js')
 	})
 
-	test('GET /playback.js serves the dev harness script', async () => {
-		const response = await fetch(`${readOnlyBaseUrl}/playback.js`)
+	test('GET /demo.js serves the dev harness script', async () => {
+		const response = await fetch(`${readOnlyBaseUrl}/demo.js`)
 		expect(response.status).toBe(200)
 		expect(response.headers.get('content-type')).toContain('text/javascript')
 		const body = await response.text()
-		expect(body).toContain('fixtures')
+		expect(body).toContain('scenarios')
+	})
+
+	test('GET /interaction-model.js serves the shared model module', async () => {
+		const response = await fetch(`${readOnlyBaseUrl}/interaction-model.js`)
+		expect(response.status).toBe(200)
+		expect(response.headers.get('content-type')).toContain('text/javascript')
+		const body = await response.text()
+		expect(body).toContain('activeStack')
+	})
+
+	test('GET /labels.js serves the localization registry module', async () => {
+		const response = await fetch(`${readOnlyBaseUrl}/labels.js`)
+		expect(response.status).toBe(200)
+		expect(response.headers.get('content-type')).toContain('text/javascript')
+		const body = await response.text()
+		expect(body).toContain('resolveOperationLabel')
 	})
 
 	test('GET /svg-primitives.js serves the SVG primitives module', async () => {
@@ -378,14 +386,6 @@ describe('createWebServer dev playback assets', () => {
 		expect(body).toContain('GraphNode')
 	})
 
-	test('GET /pathfinding.js serves the edge-routing library', async () => {
-		const response = await fetch(`${readOnlyBaseUrl}/pathfinding.js`)
-		expect(response.status).toBe(200)
-		expect(response.headers.get('content-type')).toContain('text/javascript')
-		const body = await response.text()
-		expect(body).toContain('routeEdges')
-	})
-
 	test('GET /flow-view.js serves the flow-view renderer', async () => {
 		const response = await fetch(`${readOnlyBaseUrl}/flow-view.js`)
 		expect(response.status).toBe(200)
@@ -394,12 +394,20 @@ describe('createWebServer dev playback assets', () => {
 		expect(body).toContain('renderFlowView')
 	})
 
-	test('GET /sequence-diagram.js serves the sequence-diagram renderer', async () => {
+	test('GET /sequence-diagram.js serves the sequence-view renderer', async () => {
 		const response = await fetch(`${readOnlyBaseUrl}/sequence-diagram.js`)
 		expect(response.status).toBe(200)
 		expect(response.headers.get('content-type')).toContain('text/javascript')
 		const body = await response.text()
-		expect(body).toContain('renderSequenceDiagram')
+		expect(body).toContain('renderSequenceView')
+	})
+
+	test('GET /scenarios.js serves the dev scenario module', async () => {
+		const response = await fetch(`${readOnlyBaseUrl}/scenarios.js`)
+		expect(response.status).toBe(200)
+		expect(response.headers.get('content-type')).toContain('text/javascript')
+		const body = await response.text()
+		expect(body).toContain('scenarios')
 	})
 })
 

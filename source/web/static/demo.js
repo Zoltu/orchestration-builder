@@ -1,0 +1,735 @@
+// Demo harness for the InteractionModel scenarios.
+//
+// Renders the current frame two ways: the flow view SVG (the product surface) and a debug text view (the model's raw projection). The text view stays available behind a toggle so the SVG structure can be cross-checked against the model's helpers during development. Both read the same helpers the product views will read, so a discrepancy between them surfaces a view bug rather than a model ambiguity.
+//
+// The harness imports only its sibling static modules; it touches nothing in the product client (app.js). The label-tier control re-renders both views through the localization resolver so participant and operation prose swap with the selected tier while the underlying model is untouched.
+import { scenarios, GUILD_PARTICIPANTS } from './scenarios.js'
+import { activeOperation, activeParticipant, activeStack, callChainOf, fateOf, isPaused, observesOf, stacksOf } from './interaction-model.js'
+import { resolveOperationLabel, resolveParticipantLabel } from './labels.js'
+import * as labelsModule from './labels.js'
+import { deriveLifecycle, renderFlowView, deriveNowCaption, deriveCostStrip } from './flow-view.js'
+import { renderSequenceView, HEADER_HEIGHT, ROW_HEIGHT, BOTTOM_MARGIN } from './sequence-diagram.js'
+import { createMarkdownRenderer } from './markdown-render.js'
+import { Tooltip } from './tooltip.js'
+import { ResultModal } from './result-modal.js'
+import { QuestionModal } from './question-modal.js'
+import { activeAskHumanCall } from './flow-view.js'
+
+const PLAY_INTERVAL_MS = 1000
+const SVG_NAMESPACE = 'http://www.w3.org/2000/svg'
+
+const TIER_VALUES = ['fun', 'helpful', 'detailed']
+
+function isLabelTier(value) {
+	for (const candidate of TIER_VALUES) {
+		if (value === candidate) return true
+	}
+	return false
+}
+
+function requireElement(id, constructorFunction) {
+	const element = document.getElementById(id)
+	if (element === null) throw new Error(`demo harness chrome is missing element "${id}"`)
+	if (!(element instanceof constructorFunction)) throw new Error(`element "${id}" is not a ${constructorFunction.name}`)
+	return element
+}
+
+const scenarioSelect = requireElement('demo-scenario-select', HTMLSelectElement)
+const frameScrubber = requireElement('demo-frame-scrubber', HTMLInputElement)
+const frameMeta = requireElement('demo-frame-meta', HTMLSpanElement)
+const playButton = requireElement('demo-play-button', HTMLButtonElement)
+const previousButton = requireElement('demo-prev-button', HTMLButtonElement)
+const nextButton = requireElement('demo-next-button', HTMLButtonElement)
+const themeButton = requireElement('demo-theme-button', HTMLButtonElement)
+const tierSelect = requireElement('demo-tier-select', HTMLSelectElement)
+const textView = requireElement('demo-text-view', HTMLPreElement)
+
+// The flow view SVG renders above the debug text view; the text view stays available behind a toggle so the SVG structure can be cross-checked against the model's raw projection during development. The container also carries the `pb-flow` class so it is the positioning context for the result-modal overlay (an HTML sibling of the SVG), mirroring the product client's run-view scoping.
+const flowContainer = document.createElement('div')
+flowContainer.id = 'demo-flow-view'
+flowContainer.className = 'pb-flow'
+flowContainer.style.marginTop = '1rem'
+textView.parentElement?.insertBefore(flowContainer, textView)
+
+// The sequence view renders inside a scroll container rather than the page itself so a long timeline scrolls vertically (wheel reaches the container) without zooming; the SVG keeps its natural full-content viewBox and the container scrolls it. The flow view mounts directly in the flow container because it never overflows.
+const sequenceScrollContainer = document.createElement('div')
+sequenceScrollContainer.className = 'pb-sequence-scroll'
+sequenceScrollContainer.style.overflow = 'auto'
+sequenceScrollContainer.style.maxHeight = '70vh'
+
+// The "now" caption sits directly under the flow view, naming the active participant and the in-flight operation in the selected tier. It updates per frame alongside the SVG.
+const nowCaption = document.createElement('p')
+nowCaption.className = 'pb-now-caption'
+flowContainer.append(nowCaption)
+
+// The ambient cost strip lives in the harness chrome (not the flow area) so it stays visible as a quiet border read while the centerpiece changes. It carries elapsed and tokens aggregated off OperationMetrics, formatted as textContent. Effort is not carried by InteractionModel (it is a run-level slider value, not per-operation data), so the ported strip reads elapsed and tokens only.
+const costStrip = document.createElement('div')
+costStrip.className = 'pb-cost-strip'
+const costElapsed = document.createElement('span')
+costElapsed.className = 'pb-cost-item'
+const costSep = document.createElement('span')
+costSep.className = 'pb-cost-sep'
+costSep.textContent = '·'
+const costTokens = document.createElement('span')
+costTokens.className = 'pb-cost-item'
+costStrip.append(costElapsed, costSep, costTokens)
+const demoBar = document.querySelector('.demo-bar')
+if (demoBar !== null) {
+	demoBar.insertAdjacentElement('afterend', costStrip)
+} else {
+	flowContainer.parentElement?.insertBefore(costStrip, flowContainer)
+}
+
+const showTextToggle = document.createElement('input')
+showTextToggle.type = 'checkbox'
+showTextToggle.id = 'demo-show-text'
+const showTextLabel = document.createElement('label')
+showTextLabel.style.display = 'inline-flex'
+showTextLabel.style.gap = '0.25rem'
+showTextLabel.style.alignItems = 'center'
+showTextLabel.style.fontSize = '0.8rem'
+showTextLabel.style.textTransform = 'uppercase'
+showTextLabel.style.letterSpacing = '0.04em'
+showTextLabel.append('Debug text', showTextToggle)
+const spacer = document.querySelector('.demo-bar .demo-spacer')
+if (spacer !== null) {
+	spacer.insertAdjacentElement('afterend', showTextLabel)
+} else {
+	scenarioSelect.parentElement?.append(showTextLabel)
+}
+textView.style.display = 'none'
+
+// A Flow/Sequence segmented toggle swaps the run-view centerpiece between the product surface (Flow) and the temporal debug surface (Sequence). Both read the same InteractionModel frame, so the toggle is pure view state and a switch re-renders with no model mutation.
+const viewToggle = document.createElement('div')
+viewToggle.className = 'pb-view-toggle'
+viewToggle.setAttribute('role', 'group')
+viewToggle.setAttribute('aria-label', 'run view')
+const flowButton = document.createElement('button')
+flowButton.type = 'button'
+flowButton.textContent = 'Flow'
+flowButton.className = 'is-active'
+const sequenceButton = document.createElement('button')
+sequenceButton.type = 'button'
+sequenceButton.textContent = 'Sequence'
+viewToggle.append(flowButton, sequenceButton)
+const viewToggleSpacer = document.querySelector('.demo-bar .demo-spacer')
+if (viewToggleSpacer !== null) {
+	viewToggleSpacer.insertAdjacentElement('afterend', viewToggle)
+} else {
+	scenarioSelect.parentElement?.append(viewToggle)
+}
+
+function applyViewToggle() {
+	flowButton.classList.toggle('is-active', viewMode === 'flow')
+	sequenceButton.classList.toggle('is-active', viewMode === 'sequence')
+	// The jump-to-active affordance is meaningful only on the sequence view (the flow view has no scrollable time axis), so it shows and hides with the sequence segment.
+	jumpToActiveButton.style.display = viewMode === 'sequence' ? '' : 'none'
+}
+
+// The jump-to-active button scrolls the sequence container so the latest message row lands in view, so an in-progress run's current operation is one click away after navigating or scrolling drifts it out of sight.
+const jumpToActiveButton = document.createElement('button')
+jumpToActiveButton.type = 'button'
+jumpToActiveButton.textContent = 'Jump to active'
+jumpToActiveButton.style.display = 'none'
+const jumpSpacer = document.querySelector('.demo-bar .demo-spacer')
+if (jumpSpacer !== null) {
+	jumpSpacer.insertAdjacentElement('afterend', jumpToActiveButton)
+} else {
+	scenarioSelect.parentElement?.append(jumpToActiveButton)
+}
+jumpToActiveButton.addEventListener('click', () => {
+	if (activeSequenceContainer === null) return
+	jumpSequenceViewToActive(activeSequenceContainer)
+})
+
+flowButton.addEventListener('click', () => {
+	viewMode = 'flow'
+	applyViewToggle()
+	render()
+})
+
+sequenceButton.addEventListener('click', () => {
+	viewMode = 'sequence'
+	applyViewToggle()
+	render()
+})
+
+function applyShowTextToggle() {
+	textView.style.display = showTextToggle.checked ? 'block' : 'none'
+}
+showTextToggle.addEventListener('change', applyShowTextToggle)
+
+// A DOM-producing `h` so the flow view's vnode tree mounts as a real SVG without a separate render step. The flow view passes only string-valued attributes (class, transform, data-*, geometry, text-anchor) plus the departing overlay's `style` object (CSS custom properties the depart keyframe reads as var(--from-*)/var(--to-*)); string-valued props become SVG attributes, the `style` object is applied via CSSStyleDeclaration so the custom properties land on the element rather than being stringified to "[object Object]", and `on*` props are wired as event listeners so the terminal CTA's onclick toggles its modal state. String children become text nodes and vnode children are appended in order.
+function isEventListener(value) {
+	return typeof value === 'function'
+}
+
+function isStyleObject(value) {
+	if (typeof value !== 'object' || value === null) return false
+	if (Array.isArray(value)) return false
+	return true
+}
+
+function domH(tag, props, children = []) {
+	const element = document.createElementNS(SVG_NAMESPACE, tag)
+	for (const [key, value] of Object.entries(props)) {
+		// Boolean HTML/SVG attributes are present=true/absent=false, so a `false` value must skip the attribute rather than stringify it: setAttribute('disabled', 'false') still disables the element because the attribute exists. Skipping the false value leaves the attribute absent, which is the false state; a true value still stringifies to 'true', whose presence is the true state.
+		if (value === undefined || value === null || value === false) continue
+		if (key.startsWith('on') && isEventListener(value)) {
+			element.addEventListener(key.slice(2), value)
+			continue
+		}
+		if (key === 'style' && isStyleObject(value)) {
+			for (const [prop, propValue] of Object.entries(value)) {
+				if (propValue === undefined || propValue === null) continue
+				element.style.setProperty(prop, String(propValue))
+			}
+			continue
+		}
+		element.setAttribute(key, String(value))
+	}
+	for (const child of children) {
+		if (child === null || child === undefined) continue
+		if (typeof child === 'string') {
+			element.appendChild(document.createTextNode(child))
+		} else if (child instanceof Node) {
+			element.appendChild(child)
+		}
+	}
+	return element
+}
+
+// An HTML-producing `h` for the inspector card and the sanitized-Markdown vnodes it renders. The sequence view SVG cannot host HTML (the tooltip card is a positioned `<div>` carrying `<p>`/`<ul>`/`<pre>` from the markdown pipeline), so the inspector reuses tooltip.js with an HTML `h` rather than the SVG `domH` the views use. `on*` props wire event listeners and the `style` object is applied via CSSStyleDeclaration so positioning lands as real CSS rather than a stringified object, mirroring domH's handling.
+function htmlH(tag, props, children = []) {
+	const element = document.createElement(tag)
+	for (const [key, value] of Object.entries(props)) {
+		// Boolean HTML attributes are present=true/absent=false, so a `false` value must skip the attribute rather than stringify it: setAttribute('disabled', 'false') still disables the element because the attribute exists. Skipping the false value leaves the attribute absent (the false state); a true value still stringifies to 'true' (its presence is the true state).
+		if (value === undefined || value === null || value === false) continue
+		if (key.startsWith('on') && isEventListener(value)) {
+			element.addEventListener(key.slice(2), value)
+			continue
+		}
+		if (key === 'style' && isStyleObject(value)) {
+			for (const [prop, propValue] of Object.entries(value)) {
+				if (propValue === undefined || propValue === null) continue
+				element.style.setProperty(prop, String(propValue))
+			}
+			continue
+		}
+		element.setAttribute(key, String(value))
+	}
+	for (const child of children) {
+		if (child === null || child === undefined) continue
+		if (typeof child === 'string') {
+			element.appendChild(document.createTextNode(child))
+		} else if (child instanceof Node) {
+			element.appendChild(child)
+		}
+	}
+	return element
+}
+
+const renderMarkdown = createMarkdownRenderer(htmlH)
+
+// The inspector overlay: one positioned card mounted under body, rebuilt on each hover. The card is `pointer-events: none` (styles.css) so it never becomes the hover target itself — leaving the hovered message or node geometry is what dismisses it, matching the demo harness convention.
+let currentTooltipNode = null
+let currentTooltipOperationId = null
+
+function closeTooltip() {
+	if (currentTooltipNode === null) return
+	currentTooltipNode.remove()
+	currentTooltipNode = null
+	currentTooltipOperationId = null
+}
+
+// Resolves the card's inline positioning so it never overflows the viewport: when the pointer is near the right or bottom edge, the card flips to anchor its right/bottom edge to the pointer. The estimates are upper bounds clamped by the CSS max-width/max-height, so an over-estimate only flips a little early (safe) rather than letting the card clip off-screen.
+function tooltipStyle(clientX, clientY) {
+	const viewportWidth = window.innerWidth
+	const viewportHeight = window.innerHeight
+	const margin = 12
+	const estimatedWidth = 380
+	const estimatedHeight = 280
+	const style = {}
+	if (clientX + estimatedWidth + margin > viewportWidth && clientX - estimatedWidth - margin > 0) {
+		style.right = `${Math.max(margin, viewportWidth - clientX)}px`
+	} else {
+		style.left = `${Math.max(margin, clientX + margin)}px`
+	}
+	if (clientY + estimatedHeight + margin > viewportHeight && clientY - estimatedHeight - margin > 0) {
+		style.bottom = `${Math.max(margin, viewportHeight - clientY)}px`
+	} else {
+		style.top = `${Math.max(margin, clientY + margin)}px`
+	}
+	return style
+}
+
+// Builds the inspector card for an operation: the resolved label as the heading and a single 'details' section carrying the operation's adapter-formatted markdown, routed through the sanitized pipeline by tooltip.js's formatTooltipContent. The details live on the model and are looked up by the hovered element's data-operation at hover time, so the view never embeds markdown in SVG attributes.
+function openOperationTooltip(target, clientX, clientY) {
+	const operationId = target.getAttribute('data-operation')
+	if (operationId === null) return
+	const scenario = scenarios[scenarioIndex]
+	if (scenario === undefined) return
+	const frame = scenario.frames[frameIndex]
+	if (frame === undefined) return
+	const operation = frame.operations.find((entry) => entry.id === operationId)
+	if (operation === undefined) return
+	// Reuse the open card when the pointer moves within the same operation (path → terminal node) so the card does not flicker on every mouseover.
+	if (currentTooltipOperationId === operationId && currentTooltipNode !== null) {
+		const card = currentTooltipNode
+		const style = tooltipStyle(clientX, clientY)
+		for (const prop of ['left', 'right', 'top', 'bottom']) {
+			card.style.removeProperty(prop)
+		}
+		for (const [prop, value] of Object.entries(style)) card.style.setProperty(prop, value)
+		return
+	}
+	const label = resolveOperationLabel(operation, frame.participants, tier)
+	const sections = operation.details !== null && operation.details !== ''
+		? [{ label: 'details', content: operation.details }]
+		: []
+	closeTooltip()
+	const card = Tooltip(htmlH, { title: label, sections, renderMarkdown, style: tooltipStyle(clientX, clientY) })
+	document.body.appendChild(card)
+	currentTooltipNode = card
+	currentTooltipOperationId = operationId
+}
+
+// Sequence-view scroll state. The SVG renders at its natural full-content viewBox and lives inside a scroll container, so a long timeline scrolls vertically (the page wheel) rather than zooming; the container is the single piece of state the jump-to-active affordance needs.
+let activeSequenceContainer = null
+
+// Centers the latest (active) message row in the sequence scroll container, so an in-progress run's current operation scrolls into view without a relayout. The SVG scales to the container width, so the row's fractional position in the natural viewBox maps to a pixel offset inside the container's scroll range.
+function jumpSequenceViewToActive(container) {
+	const scenario = scenarios[scenarioIndex]
+	if (scenario === undefined) return
+	const frame = scenario.frames[frameIndex]
+	if (frame === undefined) return
+	if (frame.operations.length === 0) return
+	const svg = container.firstElementChild
+	if (!(svg instanceof SVGSVGElement)) return
+	const rect = svg.getBoundingClientRect()
+	if (rect.height === 0) return
+	const lastIndex = frame.operations.length - 1
+	const naturalHeight = HEADER_HEIGHT + frame.operations.length * ROW_HEIGHT + BOTTOM_MARGIN
+	const rowY = HEADER_HEIGHT + lastIndex * ROW_HEIGHT + ROW_HEIGHT / 2
+	const target = (rowY / naturalHeight) * rect.height
+	container.scrollTop = Math.max(0, target - container.clientHeight / 2)
+}
+
+// Wires the inspector (hover/click) to a freshly mounted sequence SVG. The view auto-fits all role columns and scrolls vertically for long timelines, so no zoom or drag-pan is wired; the mouse wheel reaches the page (or the container) and scrolls naturally.
+function wireSequenceInteractions(container) {
+	const svg = container.firstElementChild
+	if (!(svg instanceof SVGSVGElement)) return
+	activeSequenceContainer = container
+	const openAt = (event) => {
+		const target = (event.target instanceof Element) ? event.target.closest('[data-operation]') : null
+		if (target === null) return
+		const pointerEvent = event instanceof MouseEvent ? event : null
+		const clientX = pointerEvent !== null ? pointerEvent.clientX : 0
+		const clientY = pointerEvent !== null ? pointerEvent.clientY : 0
+		openOperationTooltip(target, clientX, clientY)
+	}
+	svg.addEventListener('mouseover', openAt)
+	svg.addEventListener('click', (event) => {
+		// Clicking an ask_human message row re-opens the question modal (the sequence view has no Question button overlay like the flow view, so the message row itself is the re-entry affordance after a dismiss).
+		const target = (event.target instanceof Element) ? event.target.closest('[data-operation]') : null
+		if (target !== null) {
+			const operationId = target.getAttribute('data-operation')
+			const scenario = scenarios[scenarioIndex]
+			const frame = scenario !== undefined ? scenario.frames[frameIndex] : undefined
+			if (frame !== undefined && operationId !== null) {
+				const operation = frame.operations.find((op) => op.id === operationId)
+				if (operation !== undefined && operation.kind === 'call' && operation.lifecycle === 'in_flight') {
+					const destination = frame.participants.find((p) => p.id === operation.destination)
+					if (destination !== undefined && destination.kind === 'human') {
+						openQuestionModal()
+						return
+					}
+				}
+			}
+		}
+		openAt(event)
+	})
+	// mouseleave (not mouseout) fires only when the pointer leaves the SVG entirely, so moving between a message's path and its terminal node does not dismiss the card.
+	svg.addEventListener('mouseleave', closeTooltip)
+}
+
+let scenarioIndex = 0
+let frameIndex = 0
+let tier = 'detailed'
+let viewMode = 'flow'
+let playTimer = null
+// The result-modal mount, or null when no modal is open. The modal is a view concern layered on a terminal frame (the run's status, not model state): opening it mounts an HTML overlay sibling to the SVG without rebuilding the SVG, so the enter animation and marching-ants do not replay on a modal toggle.
+let resultModalNode = null
+// Set by the See Result click so the next flow-area repaint materializes the terminal return as settled (the working-phase equivalent), departing the returner and its response line. The flag is view-side state, not model state: the scenario's terminal frame is unchanged, so navigating away and back restores the lingering leg. The See Result click stands in for the operation You would emit to settle the terminal return, since You is the run's root and never emits a real operation.
+let resultAcknowledged = false
+// The question-modal mount, or null when no modal is open. The modal is a view concern layered on an ask_human transit frame (a pending question, not model state): opening it mounts an HTML overlay sibling to the SVG without rebuilding the SVG, so the enter animation and marching-ants do not replay on a modal toggle.
+let questionModalNode = null
+// Set by loadScenario/render so the next render knows the scenario (not just the frame) changed and the sequence scroll position resets to the top rather than preserving a scrollTop that mapped onto a different scenario's content.
+let scenarioChanged = true
+// Set to 'forward' by Next and Play so the next render auto-scrolls the sequence view to the latest row; every other navigation (Previous, arbitrary scrub, tier swap, view toggle) leaves it 'preserve' so the user's scroll position is kept rather than yanked to the bottom on a non-advancing step.
+let pendingScrollIntent = 'preserve'
+
+function roleLabelOf(participantId) {
+	const scenario = scenarios[scenarioIndex]
+	if (scenario === undefined) return participantId
+	const frame = scenario.frames[frameIndex]
+	if (frame === undefined) return participantId
+	const found = frame.participants.find((participant) => participant.id === participantId)
+	if (found === undefined) return participantId
+	// The resolver collapses participants that share a role (instance-per-invocation retries), so the instance id is appended to keep the debug view able to tell coder-1 from coder-2 apart.
+	return `${resolveParticipantLabel(found, tier)} (${found.id})`
+}
+
+function formatOperation(operation, participants) {
+	const outcome = operation.outcome === null ? '' : ` → ${operation.outcome}`
+	const label = resolveOperationLabel(operation, participants, tier)
+	return `${label} [${operation.lifecycle}${outcome}]`
+}
+
+function renderTextView() {
+	const scenario = scenarios[scenarioIndex]
+	if (scenario === undefined) return ''
+	const frame = scenario.frames[frameIndex]
+	if (frame === undefined) return ''
+	const stack = activeStack(frame)
+	const participant = activeParticipant(frame)
+	const openStacks = stacksOf(frame)
+	const observes = observesOf(frame)
+	const lines = []
+	lines.push(`scenario: ${scenario.label} (${scenario.id})`)
+	lines.push(`frame:    ${frameIndex + 1} / ${scenario.frames.length}`)
+	lines.push(`status:   ${frame.status}`)
+	lines.push(``)
+	lines.push(`active stack:       ${stack ?? '—'}`)
+	lines.push(`active participant: ${participant === null ? '—' : roleLabelOf(participant)}`)
+	lines.push(``)
+	lines.push(`open call chains:`)
+	if (openStacks.length === 0) {
+		lines.push(`  (none)`)
+	} else {
+		for (const stackId of openStacks) {
+			const chain = callChainOf(frame, stackId)
+			const paused = isPaused(frame, stackId)
+			const fate = fateOf(frame, stackId)
+			const tag = paused ? ` (paused, fate: ${fate})` : ` (active, fate: ${fate})`
+			lines.push(`  ${stackId}${tag}`)
+			for (const call of chain) {
+				lines.push(`    ${formatOperation(call, frame.participants)}`)
+			}
+		}
+	}
+	lines.push(``)
+	lines.push(`observes:`)
+	if (observes.length === 0) {
+		lines.push(`  (none)`)
+	} else {
+		for (const observe of observes) {
+			lines.push(`  ${formatOperation(observe, frame.participants)}  [stack: ${observe.stack}]`)
+		}
+	}
+	return lines.join('\n')
+}
+
+function isTerminalStatus(status) {
+	return status === 'success' || status === 'error' || status === 'needs_clarification'
+}
+
+// The See Result click stands in for the operation You would emit to settle the terminal return. Settling the active in_flight return departs the returner (the lingering leg renders only while in_flight), so the next render shows the returner and its response line leaving for the top bar — the working-phase equivalent reached by user acknowledgment rather than a modeled operation. Only the active in_flight return is touched; every earlier operation keeps the lifecycle the frame already carries.
+function acknowledgeFrame(frame) {
+	const active = activeOperation(frame)
+	if (active === null || active.kind !== 'return' || active.lifecycle !== 'in_flight') return frame
+	const operations = frame.operations.map((operation) => {
+		if (operation === active) {
+			return { ...operation, lifecycle: 'settled', settledAt: operation.settledAt ?? operation.startedAt }
+		}
+		return operation
+	})
+	return { ...frame, operations }
+}
+
+function resolveActiveFrame() {
+	const scenario = scenarios[scenarioIndex]
+	if (scenario === undefined) return undefined
+	const frame = scenario.frames[frameIndex]
+	if (frame === undefined) return undefined
+	return resultAcknowledged ? acknowledgeFrame(frame) : frame
+}
+
+function renderFlowViewSvg() {
+	const scenario = scenarios[scenarioIndex]
+	if (scenario === undefined) return null
+	const baseFrame = scenario.frames[frameIndex]
+	if (baseFrame === undefined) return null
+	const frame = resultAcknowledged ? acknowledgeFrame(baseFrame) : baseFrame
+	// On acknowledge, diff against the un-acknowledged transit frame so the returner's departure animates rather than the whole graph re-entering; otherwise diff against the previous frame as usual.
+	const previousFrame = resultAcknowledged ? baseFrame : (frameIndex > 0 ? scenario.frames[frameIndex - 1] : null)
+	const lifecycle = previousFrame !== null ? deriveLifecycle(previousFrame, frame) : undefined
+	const cta = { onclick: openResultModal }
+	const question = { onclick: openQuestionModal }
+	return renderFlowView(domH, frame, labelsModule, tier, lifecycle, cta, question)
+}
+
+function renderSequenceViewSvg() {
+	const scenario = scenarios[scenarioIndex]
+	if (scenario === undefined) return null
+	const frame = scenario.frames[frameIndex]
+	if (frame === undefined) return null
+	// The guild defines its roles statically, so the column set is the static guild role list — not derived from any scenario frame (peeking at a future frame to know which roles will be called would defeat the model's "the run reveals what happens" contract). Every guild role column and the tools column therefore appear from frame 0 even when no operation touches them yet.
+	return renderSequenceView(domH, frame, labelsModule, tier, GUILD_PARTICIPANTS)
+}
+
+// Derives the terminal-result descriptor the modal renders. The demo scenarios carry no result/error text (the InteractionModel has no result field), so the summary is a fixed honest line keyed off the run's terminal status and the error block surfaces only on an error status — enough for the modal to read as a real result affordance without inventing scenario-specific prose.
+function deriveDemoResultDescriptor(scenario) {
+	const finalFrame = scenario.frames[scenario.frames.length - 1]
+	const status = finalFrame.status
+	if (status === 'error') {
+		return { status, summary: null, artifacts: [], error: { message: 'The run stopped with an error.', raw: null } }
+	}
+	if (status === 'needs_clarification') {
+		return { status, summary: 'The run is waiting for your input.', artifacts: [], error: null }
+	}
+	return { status, summary: 'The run completed.', artifacts: [], error: null }
+}
+
+function openResultModal() {
+	if (resultModalNode !== null) return
+	const scenario = scenarios[scenarioIndex]
+	if (scenario === undefined) return
+	const baseFrame = scenario.frames[frameIndex]
+	if (baseFrame === undefined) return
+	if (!isTerminalStatus(baseFrame.status)) return
+	// The click is You's acknowledgment: it settles the terminal return (departing the returner) and opens the result modal. The depart is a view-side flag the render path reads, not model state — the scenario's terminal frame is unchanged, so navigating away and back restores the lingering leg.
+	resultAcknowledged = true
+	const descriptor = deriveDemoResultDescriptor(scenario)
+	const modal = ResultModal(htmlH, {
+		descriptor,
+		runLabel: scenario.label,
+		renderMarkdown,
+		onCopyRaw: copyRawToClipboard,
+		onClose: closeResultModal,
+	})
+	flowContainer.appendChild(modal)
+	resultModalNode = modal
+	// Repaint the flow area so the returner departs immediately; the modal (appended after the now caption) survives the repaint, which only swaps the SVG that sits before the now caption.
+	paintFlowArea()
+}
+
+// Rebuilds the flow SVG (and the caption/cost surfaces derived from the same frame) without touching the result modal or the acknowledge flag. The acknowledge path calls this so the returner departs while the modal stays mounted; the navigation path uses render() instead, which additionally closes the modal and resets the flag.
+function paintFlowArea() {
+	const frame = resolveActiveFrame()
+	if (frame === undefined) return
+	while (flowContainer.firstChild !== null) {
+		if (flowContainer.firstChild === nowCaption) break
+		flowContainer.removeChild(flowContainer.firstChild)
+	}
+	const svg = renderFlowViewSvg()
+	if (svg !== null) flowContainer.insertBefore(svg, nowCaption)
+	nowCaption.textContent = deriveNowCaption(frame, labelsModule, tier)
+	const cost = deriveCostStrip(frame)
+	costElapsed.textContent = `elapsed ${cost.elapsedSeconds}s`
+	costTokens.textContent = `${cost.tokens.toLocaleString()} tokens`
+}
+
+function closeResultModal() {
+	if (resultModalNode === null) return
+	resultModalNode.remove()
+	resultModalNode = null
+}
+
+// The question modal opens on an ask_human transit frame and stays open until the user answers or dismisses it. Like the result modal it is an HTML overlay sibling to the SVG, mounted without rebuilding the SVG so the marching-ants and enter animations do not replay. The Question affordance stays on the answerer node while the modal is dismissed, so the operator can re-open it by clicking the button again.
+function openQuestionModal() {
+	if (questionModalNode !== null) return
+	const scenario = scenarios[scenarioIndex]
+	if (scenario === undefined) return
+	const frame = resolveActiveFrame()
+	if (frame === undefined) return
+	const askHumanCall = activeAskHumanCall(frame)
+	if (askHumanCall === undefined) return
+	const question = { question: askHumanCall.details ?? 'The run is waiting for your input.' }
+	const modal = QuestionModal(htmlH, {
+		question,
+		runLabel: scenario.label,
+		renderMarkdown,
+		onSubmit: submitQuestion,
+		onClose: closeQuestionModal,
+	})
+	flowContainer.appendChild(modal)
+	questionModalNode = modal
+}
+
+function closeQuestionModal() {
+	if (questionModalNode === null) return
+	questionModalNode.remove()
+	questionModalNode = null
+}
+
+// Submitting the answer advances to the next frame (the human_answer return), which turns the answerer green and closes the call. The answer text is not stored in the demo (the InteractionModel carries no answer field), so advancing the frame is the whole of the response; the product client would POST the answer and the backend would emit the return.
+function submitQuestion(event) {
+	event.preventDefault()
+	closeQuestionModal()
+	if (frameIndex < scenarios[scenarioIndex].frames.length - 1) {
+		pendingScrollIntent = 'forward'
+		frameIndex += 1
+	}
+	render()
+}
+
+function copyRawToClipboard(rawJson) {
+	if (navigator.clipboard === undefined) return
+	navigator.clipboard.writeText(rawJson)
+}
+
+function render() {
+	const scenario = scenarios[scenarioIndex]
+	if (scenario === undefined) return
+	const frame = scenario.frames[frameIndex]
+	if (frame === undefined) return
+	const totalFrames = scenario.frames.length
+	frameScrubber.max = String(Math.max(0, totalFrames - 1))
+	frameScrubber.value = String(frameIndex)
+	frameMeta.textContent = `${frameIndex + 1} / ${totalFrames}`
+	textView.textContent = renderTextView()
+	nowCaption.textContent = deriveNowCaption(frame, labelsModule, tier)
+	const cost = deriveCostStrip(frame)
+	costElapsed.textContent = `elapsed ${cost.elapsedSeconds}s`
+	costTokens.textContent = `${cost.tokens.toLocaleString()} tokens`
+	// A tooltip opened on a previous frame's operation is stale once the frame advances, so it is dismissed with the rest of the stale DOM. The result modal and the acknowledge flag are frame/view-scoped too: a frame/view/tier change unmounts the modal and restores the lingering terminal leg, so reopening is a fresh click on the new frame's CTA. The acknowledge path (paintFlowArea) bypasses this so the modal survives the depart repaint.
+	closeTooltip()
+	resultAcknowledged = false
+	closeResultModal()
+	closeQuestionModal()
+	// Capture the sequence scroll position before the DOM rebuild so a backward step, an arbitrary scrub, a tier swap, or a view toggle can restore it; replaceChildren resets scrollTop to 0, so without this every frame change would yank the view to the top.
+	const preservedScrollTop = sequenceScrollContainer.scrollTop
+	const isForwardAdvance = pendingScrollIntent === 'forward'
+	while (flowContainer.firstChild !== null) {
+		if (flowContainer.firstChild === nowCaption) break
+		flowContainer.removeChild(flowContainer.firstChild)
+	}
+	if (viewMode === 'flow') {
+		const svg = renderFlowViewSvg()
+		if (svg !== null) flowContainer.insertBefore(svg, nowCaption)
+		// Auto-open the question modal when landing on an ask_human transit frame so the operator can answer immediately; dismissing it leaves the Question affordance on the answerer node for re-entry.
+		openQuestionModal()
+		scenarioChanged = false
+		pendingScrollIntent = 'preserve'
+		return
+	}
+	const svg = renderSequenceViewSvg()
+	if (svg === null) {
+		scenarioChanged = false
+		pendingScrollIntent = 'preserve'
+		return
+	}
+	sequenceScrollContainer.replaceChildren(svg)
+	flowContainer.insertBefore(sequenceScrollContainer, nowCaption)
+	wireSequenceInteractions(sequenceScrollContainer)
+	// Auto-open the question modal in the sequence view too, so a pending ask_human prompts the operator regardless of which view is active; re-opening after dismissal is via clicking the ask_human message row (wired in wireSequenceInteractions).
+	openQuestionModal()
+	// scenarioChanged must be cleared before applySequenceScroll so a scenario switch still resets to top (scenarioChanged catches it first), but a normal frame advance does not hit the reset-to-top branch.
+	scenarioChanged = false
+	applySequenceScroll(preservedScrollTop, isForwardAdvance)
+	pendingScrollIntent = 'preserve'
+}
+
+// On a forward frame advance (Next or Play), scroll the sequence container so the latest (active) message row lands in view — the same affordance the "Jump to active" button offers, but automatic, so an in-progress run's current operation never drifts off-screen as Play or Next advances. On a backward step, an arbitrary scrub, a tier swap, or a view toggle, restore the pixel scrollTop captured before the rebuild so the user's scroll position is preserved rather than yanked. A scenario switch resets to the top because the preserved scrollTop mapped onto a different scenario's content.
+function applySequenceScroll(preservedScrollTop, isForwardAdvance) {
+	if (scenarioChanged) {
+		sequenceScrollContainer.scrollTop = 0
+		return
+	}
+	if (isForwardAdvance) {
+		jumpSequenceViewToActive(sequenceScrollContainer)
+		return
+	}
+	sequenceScrollContainer.scrollTop = preservedScrollTop
+}
+
+function loadScenario(newScenarioIndex) {
+	scenarioIndex = newScenarioIndex
+	frameIndex = 0
+	scenarioChanged = true
+	render()
+}
+
+function stopPlaying() {
+	if (playTimer === null) return
+	clearInterval(playTimer)
+	playTimer = null
+	playButton.textContent = 'Play'
+}
+
+function togglePlaying() {
+	if (playTimer !== null) {
+		stopPlaying()
+		return
+	}
+	playButton.textContent = 'Pause'
+	playTimer = setInterval(() => {
+		const scenario = scenarios[scenarioIndex]
+		if (scenario === undefined) return
+		frameIndex = (frameIndex + 1) % scenario.frames.length
+		pendingScrollIntent = 'forward'
+		render()
+	}, PLAY_INTERVAL_MS)
+}
+
+function applyTheme(theme) {
+	document.documentElement.setAttribute('data-theme', theme)
+	themeButton.textContent = theme === 'dark' ? 'Light' : 'Dark'
+}
+
+for (const [index, scenario] of scenarios.entries()) {
+	const option = document.createElement('option')
+	option.value = String(index)
+	option.textContent = scenario.label
+	scenarioSelect.appendChild(option)
+}
+
+scenarioSelect.addEventListener('change', () => {
+	stopPlaying()
+	loadScenario(Number(scenarioSelect.value))
+})
+
+frameScrubber.addEventListener('input', () => {
+	stopPlaying()
+	frameIndex = Number(frameScrubber.value)
+	render()
+})
+
+playButton.addEventListener('click', togglePlaying)
+
+previousButton.addEventListener('click', () => {
+	stopPlaying()
+	const scenario = scenarios[scenarioIndex]
+	if (scenario === undefined) return
+	frameIndex = (frameIndex - 1 + scenario.frames.length) % scenario.frames.length
+	render()
+})
+
+nextButton.addEventListener('click', () => {
+	stopPlaying()
+	const scenario = scenarios[scenarioIndex]
+	if (scenario === undefined) return
+	frameIndex = (frameIndex + 1) % scenario.frames.length
+	pendingScrollIntent = 'forward'
+	render()
+})
+
+themeButton.addEventListener('click', () => {
+	const current = document.documentElement.getAttribute('data-theme') ?? 'light'
+	applyTheme(current === 'dark' ? 'light' : 'dark')
+})
+
+tierSelect.addEventListener('change', () => {
+	const value = tierSelect.value
+	if (isLabelTier(value)) {
+		tier = value
+		render()
+	}
+})
+
+// The initial theme follows the browser's color-scheme preference so a user who runs dark sees dark on first load rather than a flash of light; the toggle still flips it manually afterward.
+const prefersDarkColorScheme = window.matchMedia('(prefers-color-scheme: dark)').matches
+applyTheme(prefersDarkColorScheme ? 'dark' : 'light')
+applyViewToggle()
+loadScenario(0)
