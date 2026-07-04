@@ -2059,6 +2059,21 @@ li:last-child {
 	stroke-dasharray: 2 3;
 }
 
+/* The sequence view lives in a vertical scroll container (long timelines scroll rather than zoom): the container is the navigation surface, and each message row and terminal node is an inspector target, so they carry a help cursor to signal hover-for-detail before the tooltip card materializes. */
+.pb-sequence-scroll {
+	cursor: default;
+}
+
+.seq-message-group,
+.seq-node {
+	cursor: help;
+}
+
+/* Hover highlights a message's line in the theme accent so the operator can see which row the pointer rests on before the tooltip card opens. The highlight is token-driven so it reads identically in light and dark; it layers over the line's settled/active stroke only while the pointer is over that row. */
+.seq-message-group:hover .seq-message {
+	stroke: var(--svg-flow-accent);
+}
+
 @media (prefers-reduced-motion: reduce) {
 	.tooltip-card {
 		animation: none;

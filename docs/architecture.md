@@ -76,3 +76,7 @@ The executor does not enforce a wall-clock run timeout or a per-role tool-call/t
 ## Isolation
 
 The executor operates on the mounted workspace in place. File tools canonicalize paths and reject any that resolve outside the workspace. Runs are sequential, so there is no concurrent-run isolation concern. Per-run environment isolation (scoped `PATH`/`HOME`, no global pollution) is future work that unblocks the `run_shell` tool; until then, the suite is constrained to no-install tasks. Operators who want to protect a project from in-place modification give the executor a throwaway copy. See [`docs/security.md`](security.md).
+
+## Run visualization
+
+The web client renders a run two ways — a flow-graph product surface and a sequence-diagram debug surface — both reading a single shared `InteractionModel`. The model is a timeline of operations over participants; one set of pure helpers answers every "what is happening right now" question so the two views cannot drift. The design (the model contract, the single invariant both views read, interrupts and their fates, label localization) is in [`docs/visualization.md`](visualization.md); the rendering security invariant is in [`docs/security.md`](security.md) "Web client rendering pipeline".
