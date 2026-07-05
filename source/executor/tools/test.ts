@@ -5,13 +5,11 @@ import type { ToolHandler } from '../tool-dispatch.js'
 import type { SubprocessOutcome, SubprocessRunner } from './typecheck.js'
 
 // The command is fixed in the leaf, not in the manifest, so the model cannot influence it.
-// Naming and prompt wording stay generic ("test", "the workspace test suite") so the guild
-// does not over-fit to a specific toolchain.
+// Naming and prompt wording stay generic ("test", "the workspace test suite") so the guild does not over-fit to a specific toolchain.
 const TEST_COMMAND: readonly string[] = ['bun', 'test']
 
-// Caps captured output so a noisy test run cannot blow up the tool result or the run log. The
-// engine applies its own maxToolOutputChars truncation after serialization; this cap keeps the
-// in-process string bounded before that point and reuses the same truncation helper + marker.
+// Caps captured output so a noisy test run cannot blow up the tool result or the run log.
+// The engine applies its own maxToolOutputChars truncation after serialization; this cap keeps the in-process string bounded before that point and reuses the same truncation helper + marker.
 const MAX_OUTPUT_CHARS = 8192
 
 export interface TestData {

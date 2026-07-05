@@ -1,4 +1,3 @@
-// These types describe external JSON objects loaded at runtime, which is why they are paired with the type guards and validators in source/executor/validation.ts.
 
 export interface GuildConfig {
 	schemaVersion: number
@@ -46,7 +45,6 @@ export interface ToolManifest {
 	parameters: ToolParameter
 }
 
-// JSON-Schema-like parameter object for a tool manifest.
 export interface ToolParameter {
 	type: string
 	required?: string[]

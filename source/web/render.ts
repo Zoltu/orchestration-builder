@@ -1,5 +1,3 @@
-// Pure helpers that turn raw run artifacts and pending questions into the JSON shapes returned by the web API.
-// All parsing, validation, truncation, and role-activity derivation lives here so it is exercisable in-memory; the server module is a thin HTTP leaf that delegates to these helpers.
 
 import type { PendingQuestion } from '../executor/human-backend.js'
 import { isRunMeta } from '../executor/validation.js'
@@ -15,8 +13,6 @@ function isObject(value: unknown): value is Record<string, unknown> {
 	return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
-// Parses meta.json text into a validated RunMeta, or null when absent.
-// A present but malformed meta is treated as absent: meta.json is written atomically at run completion, so a malformed read is most likely a torn read mid-write, and the UI should fall back to "in progress" rather than crash.
 function parseMeta(metaText: string | null): RunMeta | null {
 	if (metaText === null) return null
 	let parsed: unknown
@@ -28,9 +24,6 @@ function parseMeta(metaText: string | null): RunMeta | null {
 	return isRunMeta(parsed) ? parsed : null
 }
 
-// Parses log.jsonl text into a list of validated log events.
-// Each non-empty line is parsed independently; lines that fail to parse or do not satisfy the LogEvent shape are skipped.
-// The log is append-only and read concurrently with writes, so a partial final line is the expected failure mode and must not abort the whole tail.
 export function parseLogEvents(logText: string): LogEvent[] {
 	const events: LogEvent[] = []
 	for (const line of logText.split('\n')) {
@@ -84,8 +77,6 @@ function withRole(role: string | null, action: string): string {
 	return role === null ? action : `${role} · ${action}`
 }
 
-// Turns a single log event into a one-line human-readable summary derived from its type and well-known payload fields.
-// The log is append-only and read concurrently with writes, so every payload access is guarded and the function never throws on a partial or unexpected shape.
 export function formatLogEvent(event: LogEvent): string {
 	const payload = event.payload
 	const role = roleOf(payload)
@@ -160,13 +151,9 @@ export interface RoleActivity {
 	toolCalls: number
 	// The last few distinct tools the role called, most-recent-last, capped at 3. Distinct because a tight loop on one tool would otherwise fill the list with repeats and hide what else the role touched.
 	recentTools: string[]
-	// The prompt-token count from the role's most recent llm_call that carried usage, i.e. the last context window size the endpoint billed for that role (cached + uncached prompt). Null until the role's first call reports usage.
 	lastPromptTokens: number | null
 }
 
-// Derives a per-role activity summary from the log event stream.
-// The executor does not persist a live role tree, so the UI renders the roles that appear in the log with their observed activity.
-// A strict parent-child tree would require the executor to log agent-spawn events with parent, child, and depth.
 export function deriveRoleActivity(logEvents: LogEvent[]): RoleActivity[] {
 	const order: string[] = []
 	const byRole = new Map<string, RoleActivity>()
@@ -217,16 +204,11 @@ export interface RoleTreeNode {
 	parent: string | null
 	// Terminal status from the matching role_finished event, or null when the role is still in progress or its finish event is absent.
 	status: string | null
-	// The role's own summary from role_finished (its explanation of the result), surfaced so the tree shows why an invocation errored. Null until/unless the finish event carries one.
 	summary: string | null
-	// True only for the single invocation currently executing (the deepest in-flight role_start with no matching finish yet). The executor is strictly sequential and depth-first, so at most one role runs at a time; marking only this node active prevents every invocation of a repeated role from appearing to run in parallel.
 	active: boolean
 	children: RoleTreeNode[]
 }
 
-// Builds a parent→children tree from role_start/role_finished events, returning the root nodes (the entry role and any orphan starts) or null when those events are absent so the view falls back to the role-activity summary.
-// The executor is strictly sequential and depth-first, so the events nest like balanced parentheses: role_start pushes a node onto the active path, role_finished pops the matching node and records its status. This pairs each invocation with its own finish (not a per-role last-writer-wins status), so a role delegated to many times appears as one node per invocation, each with its own status.
-// The active invocation is the top of the stack once all events are processed — the one role currently executing. Parents waiting for a child are in-flight but not active, so only the executing role pulses in the UI.
 export function deriveRoleTree(logEvents: LogEvent[]): RoleTreeNode[] | null {
 	let sawTreeEvent = false
 	for (const event of logEvents) {
@@ -304,12 +286,9 @@ export interface RecentLogEntry {
 	type: string
 	summary: string
 	payload: unknown
-	// Paired sections derived from the payload so the UI's raw toggle can present an llm_call as "sent" / "received" / "finish reason" / "usage" and a tool_call/tool_result pair as "arguments" / "result" rather than a single opaque blob. Null when the event type carries no paired detail (the UI then falls back to the raw payload).
 	detailSections: LogDetailSection[] | null
 }
 
-// Builds the readable-view entry for a single log event: the raw payload is carried alongside a one-line summary so the UI can render the summary by default and expose the payload on demand.
-// Centralized here so both the recent-log view and the paginated log endpoint derive entries the same way.
 export function toRecentLogEntry(event: LogEvent): RecentLogEntry {
 	return {
 		timestamp: event.timestamp,
@@ -320,9 +299,6 @@ export function toRecentLogEntry(event: LogEvent): RecentLogEntry {
 	}
 }
 
-// Derives paired detail sections from a log event's payload so the UI's raw toggle can present the rich llm_call/tool_call/tool_result payloads as labeled sections rather than a single blob.
-// Returns null when the event type carries no paired detail, so the caller falls back to rendering the raw payload.
-// Every payload access is guarded and the function never throws on a partial or unexpected shape, matching the log's append-only, read-concurrent-with-write nature.
 export function formatLogDetailSections(event: LogEvent): LogDetailSection[] | null {
 	const payload = event.payload
 	if (!isObject(payload)) return null
@@ -385,27 +361,20 @@ export interface CurrentActivity {
 	summary: string
 }
 
-export interface TokenUsage {
-	// Full prompt bill: uncached + cached prompt tokens. This is what the endpoint charged against the prompt side of any per-role token budget.
-	promptTokens: number
-	// Subset of promptTokens the endpoint served from its prompt cache. Tracked separately because cached tokens are billed at a different (usually much lower) rate than uncached prompt tokens.
-	cachedPromptTokens: number
-	completionTokens: number
-	totalTokens: number
-}
+	export interface TokenUsage {
+		promptTokens: number
+		cachedPromptTokens: number
+		completionTokens: number
+		totalTokens: number
+	}
 
-export interface Budgets {
-	elapsedSeconds: number
-	toolCalls: number
-	// Overall token total across the run, or null when no llm_call event carries usage (a run whose calls all failed before reporting usage, or a log written before usage was logged).
-	tokensUsed: number | null
-	// Per-bucket breakdown backing tokensUsed, or null for the same reason. Each bucket is 0 (not null) when usage is present but a given call reported no tokens for that bucket.
-	tokenBreakdown: TokenUsage | null
-}
+	export interface Budgets {
+		elapsedSeconds: number
+		toolCalls: number
+		tokensUsed: number | null
+		tokenBreakdown: TokenUsage | null
+	}
 
-// Reads the per-call usage from an llm_call payload, or null when the payload carries no usage object.
-// totalTokens is preferred (it is what the executor logs); prompt+completion is summed as a fallback for events logged before that field existed or by older log writers, so a partial log still contributes its real cost.
-// cachedPromptTokens is read from usage.cachedPromptTokens when present (already counted inside promptTokens); when absent it contributes 0 to the cached bucket, since the endpoint simply did not report a cached share for that call.
 function usageOf(payload: unknown): { promptTokens: number; completionTokens: number; cachedPromptTokens: number; totalTokens: number } | null {
 	if (!isObject(payload)) return null
 	const usage = payload['usage']
@@ -426,11 +395,6 @@ function usageOf(payload: unknown): { promptTokens: number; completionTokens: nu
 	return { promptTokens, completionTokens, cachedPromptTokens, totalTokens }
 }
 
-// Derives the run's progress against its hard safety budgets from the log stream and meta.
-// `now` is passed in (the server supplies `new Date().toISOString()`) so elapsed-time tests are deterministic; the helper never reads the clock itself.
-// Elapsed time uses meta.endTime for a completed run and `now` for an in-progress run; when meta is absent (run in progress, meta.json not yet written) the first log event's timestamp stands in for the start, so elapsed is recoverable even before meta exists.
-// Clock skew that would make `now` precede the start is clamped to 0.
-// Token totals are null when no llm_call event carries usage; otherwise each bucket is summed across all calls that reported usage, and tokensUsed is the sum of the per-call totals.
 export function deriveBudgets(logEvents: LogEvent[], meta: RunMeta | null, now: string): Budgets {
 	const startTime = meta !== null ? meta.startTime : (logEvents.length > 0 ? logEvents[0]!.timestamp : null)
 	const endTime = meta !== null && meta.endTime !== undefined ? meta.endTime : now
@@ -481,9 +445,6 @@ export interface QuestionHistoryEntry {
 	answeredAt?: string
 }
 
-// Pairs ask_human log events with their resolved human_answer events to reconstruct a run's Q&A history in log order.
-// Pairing is by question id (both events carry it); an ask_human whose id never receives a human_answer stays unanswered.
-// The log is append-only and read concurrently with writes, so every payload access is guarded and the function never throws on a partial or unexpected shape.
 export function deriveQuestionHistory(logEvents: LogEvent[]): QuestionHistoryEntry[] {
 	const entries: QuestionHistoryEntry[] = []
 	const indexById = new Map<string, number>()
@@ -525,14 +486,12 @@ export interface RunView {
 	status: RunMeta['status'] | 'unknown'
 	runId: string | null
 	task: string | null
-	// The run's effort level, or null when meta is absent (run in progress before meta exists) or the run predates the effort channel.
 	effort: EffortLevel | null
 	startTime: string | null
 	endTime: string | null
 	result: ResultCard | null
 	error: NonNullable<RunMeta['error']> | null
 	roles: RoleActivity[]
-	// The parent→children role tree recovered from role_start/role_finished/agent_call events, or null when those events are absent (a pre-enhancement log or a partial tail) so the UI falls back to the roles activity summary.
 	roleTree: RoleTreeNode[] | null
 	recentLog: RecentLogEntry[]
 	currentActivity: CurrentActivity | null
@@ -575,14 +534,11 @@ export interface RunSummary {
 	runId: string
 	status: RunMeta['status'] | 'unknown'
 	task: string | null
-	// Null when meta is absent (run in progress) or predates the effort channel.
 	effort: EffortLevel | null
 	startTime: string | null
 	endTime: string | null
 }
 
-// A lightweight per-run summary for the run-list endpoint: it carries the identity and lifecycle fields a listing needs without the role activity or recent log a per-run view carries.
-// `runId` comes from the directory name rather than the meta because meta is null while a run is in progress.
 export function renderRunSummary(runId: string, snapshot: RunSnapshot): RunSummary {
 	const meta = snapshot.meta
 	return {
@@ -595,13 +551,10 @@ export function renderRunSummary(runId: string, snapshot: RunSnapshot): RunSumma
 	}
 }
 
-export interface ProjectSettingsView {
-	// The project-wide default effort, or null when no default has been set (a run with no per-run override then falls back to DEFAULT_EFFORT at submission).
-	effort: EffortLevel | null
-}
+	export interface ProjectSettingsView {
+		effort: EffortLevel | null
+	}
 
-// Shapes the project settings for the /api/settings endpoint, carrying only the safe settings fields.
-// Currently only `effort` exists; any future secret-bearing setting must be explicitly excluded here rather than passed through.
 export function renderProjectSettings(settings: ProjectSettings): ProjectSettingsView {
 	return { effort: settings.effort ?? null }
 }
@@ -613,8 +566,6 @@ export interface ApiQuestion {
 	askedAt: string
 }
 
-// Shapes pending questions into the stable API form.
-// `context` is included only when defined so the JSON omits it for contextless questions; order is preserved.
 export function renderPendingQuestions(questions: PendingQuestion[]): ApiQuestion[] {
 	return questions.map((question) => {
 		const shaped: ApiQuestion = {
@@ -634,9 +585,6 @@ export interface GuildConfigView {
 	roles: Record<string, { tools: string[] }>
 }
 
-// Shapes a read-only, key-safe view of the loaded Guild for the /api/config endpoint.
-// Only the model's name and context window are carried; apiKey and apiBase are structurally omitted, so the endpoint can never leak the injected key or the endpoint URL regardless of what the loaded Guild contains.
-// The executor budgets are passed through verbatim because they are operator-facing limits, not secrets; every role contributes its tool list so the panel can show the full role/tool matrix.
 export function renderConfig(config: GuildConfig): GuildConfigView {
 	const roles: Record<string, { tools: string[] }> = {}
 	for (const [name, role] of Object.entries(config.roles)) {

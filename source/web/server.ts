@@ -1,6 +1,4 @@
-// Web UI server for the long-running service backend.
-// A thin HTTP leaf built on Bun.serve: it routes requests, serves the plain static assets, delegates JSON shaping to render.ts, question/answer handling to the RunState façade from source/executor/run-state.ts, and run submission to the RunSubmission orchestration from source/executor/run-submission.ts.
-// No business logic lives here.
+
 
 import * as path from 'node:path'
 import { existsSync } from 'node:fs'
@@ -52,10 +50,8 @@ function json(data: unknown, status = 200): Response {
 	})
 }
 
-// Serves any file under the static directory by resolving the request path against STATIC_DIR and verifying the resolved path stays inside it. A filesystem scan (rather than an explicit route map) means a new asset under static/ is served the moment it lands on disk — no server.ts edit and no process restart required — so a stale running server never 404s a freshly added file with a wrong-MIME JSON body. Path traversal is blocked by canonicalizing and checking the result starts with STATIC_DIR plus a separator.
-function serveStaticPath(requestPath: string): Response {
-	// The root path serves the app shell; every other path maps to its own filename. The leading slash is stripped so path.resolve joins against STATIC_DIR rather than treating the request path as an absolute filesystem path (which would resolve to /app.js, outside the static dir, and 404).
-	const relativePath = requestPath === '/' ? 'index.html' : requestPath.slice(1)
+	function serveStaticPath(requestPath: string): Response {
+		const relativePath = requestPath === '/' ? 'index.html' : requestPath.slice(1)
 	const resolvedPath = path.resolve(STATIC_DIR, relativePath)
 	// The separator check rejects `..` segments that resolve outside the static dir (e.g. `/../source/web/server.ts`), preserving the traversal safety the explicit route map gave for free.
 	if (!resolvedPath.startsWith(STATIC_DIR + path.sep)) return json({ ok: false, error: 'not_found' }, 404)
@@ -107,7 +103,6 @@ function runLogPage(readRunSnapshotById: ReadRunSnapshotById, runId: string, que
 	return json({ runId, total: page.total, offset: page.offset, limit: page.limit, events: page.events.map(toRecentLogEntry) })
 }
 
-// Parses a query parameter as a non-negative integer, falling back to the default for absent, non-numeric, or negative values — invalid params are treated as defaults per the log endpoint's contract.
 function parseNonNegativeInt(value: string | null, defaultValue: number): number {
 	if (value === null) return defaultValue
 	const parsed = Number(value)
@@ -121,7 +116,6 @@ function runViewFor(readRunSnapshotById: ReadRunSnapshotById, runId: string): Re
 	return renderRunView(snapshot, { maxLogLines: MAX_LOG_LINES, now: new Date().toISOString() })
 }
 
-// A run id is "known" if a directory exists for it under the runs base; readRunSnapshotById returns empty artifacts for a missing dir, so the existence check distinguishes a never-started id from an in-progress run.
 function isKnownRun(readRunSnapshotById: ReadRunSnapshotById, runId: string): boolean {
 	const raw = readRunSnapshotById(runId)
 	return raw.metaText !== null || raw.logText !== ''

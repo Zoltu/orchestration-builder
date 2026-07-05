@@ -3,14 +3,8 @@ import { truncateToolOutput } from '../context-policy.js'
 import { createToolError } from '../errors.js'
 import type { ToolHandler } from '../tool-dispatch.js'
 
-// The command is fixed in the leaf, not in the manifest, so the model cannot influence it.
-// Naming and prompt wording stay generic ("typecheck", "the workspace typechecker") so the guild
-// does not over-fit to a specific toolchain.
 const TYPECHECK_COMMAND: readonly string[] = ['bun', '--bun', 'tsc', '--noEmit']
 
-// Caps captured output so a noisy typecheck cannot blow up the tool result or the run log. The
-// engine applies its own maxToolOutputChars truncation after serialization; this cap keeps the
-// in-process string bounded before that point and reuses the same truncation helper + marker.
 const MAX_OUTPUT_CHARS = 8192
 
 export interface TypecheckData {
@@ -62,8 +56,8 @@ export function createTypecheck(
 		if (outcome.timedOut) {
 			return createToolError('timeout', `typecheck timed out after ${timeoutSeconds}s`, { afterSeconds: timeoutSeconds })
 		}
-		// A non-zero exit is a normal result the role reads and iterates on; only spawn/IO failure
-		// and timeout surface as error kinds.
+		// A non-zero exit is a normal result the role reads and iterates on.
+		// Only spawn/IO failure and timeout surface as error kinds.
 		const data: TypecheckData = {
 			exitCode: outcome.exitCode,
 			stdout: truncateToolOutput(outcome.stdout, MAX_OUTPUT_CHARS).text,

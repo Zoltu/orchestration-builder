@@ -375,11 +375,35 @@ function parseMeta(metaText: string | null): RunMeta | null {
 export function parseEvalConfig(value: unknown): EvalConfig {
 ```
 
+### Comment Necessity Test
+
+Before adding or keeping a comment, ask: **"Would a reader who has read the entire codebase (including related files and documentation) still need this information?"** If the answer is **no**, the comment is redundant and should be removed.
+
+**Specific checks:**
+
+1. **Is the behavior evident from the code?**  
+   If the comment describes what the code does (e.g., `// sets background color`), it's redundant. The code itself shows this.
+
+2. **Is the information duplicated elsewhere?**  
+   If the same fact is already documented in another file (e.g., a comment explaining when a constant is used, but that logic appears in `run-submission.ts`), don't repeat it. Reference the existing documentation instead.
+
+3. **Does it explain a non-obvious design choice?**  
+   Keep comments that reveal:
+   - Why an approach was chosen over alternatives
+   - Constraints the code must satisfy
+   - Invariants that aren't enforced by types
+   - Reasons for architectural decisions (e.g., why something is centralized)
+   - Hazards or edge cases not obvious from the implementation
+
+4. **Is it a design rationale or a behavior description?**  
+   Good: "This uses a mutex because the operation isn't atomic."  
+   Bad: "This increments the counter." (The `counter++` already shows this.)
+
+**When in doubt, err on the side of fewer comments.** Code should be self-documenting through clear names and structure. Comments exist only to explain what code cannot.
+
 ### Enforcement
 
 Comment and newline quality is a review judgment, not a build-gate failure. No automated check is wired into `bun test`: mechanically detecting "reiterative comments" or "arbitrary wraps" produces false positives that make a lint a burden rather than a safety net, and a bare-`TODO` gate was rejected because this project has no issue tracker for such notes to reference (real work is tracked in `plan/README.md`'s debt table instead). Re-check comment and newline hygiene against this section and "Formatting" before declaring any change done — reiterative comments and mid-sentence wraps accumulate silently.
-
-A one-time cleanup pass established this baseline: reiterative comments were deleted, future-author notes and plan/step references ("a future step", "later steps", "Steps 12–14") were removed from `source/`, and every multi-line comment was reflowed to one sentence per line. Benchmark fixture sources (`benchmarks/**/src`, `benchmarks/**/tests`, `eval.json`) were left untouched as test inputs; their README/eval spec docs already use single-line prose.
 
 ---
 

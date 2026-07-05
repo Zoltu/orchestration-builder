@@ -46,9 +46,6 @@ export function createWriteMeta(runId: string, baseDir: string = 'data/runs'): W
 	}
 }
 
-// Raw run artifacts read from disk for the web UI.
-// `metaText` is null while a run is in progress (meta.json is written only at completion).
-// `logText` is the full append-only log.jsonl contents (empty string when no events have been logged).
 export interface RunSnapshotRaw {
 	metaText: string | null
 	logText: string
@@ -70,8 +67,6 @@ export function createReadRunSnapshotById(baseDir: string = 'data/runs'): ReadRu
 
 export type ListRunIds = () => string[]
 
-// Lists the run directory names under the runs base dir, so the server can enumerate known runs for the multi-run API.
-// Returns an empty array when the base dir does not exist yet (no runs have ever been started).
 export function createListRunIds(baseDir: string = 'data/runs'): ListRunIds {
 	return () => {
 		if (!fs.existsSync(baseDir)) return []
@@ -79,8 +74,6 @@ export function createListRunIds(baseDir: string = 'data/runs'): ListRunIds {
 	}
 }
 
-// Project-wide settings persisted under <workspaceRoot>/.orchestration/settings.json.
-// `effort` is absent until the operator first sets it; a run with no per-run override and no stored effort falls back to DEFAULT_EFFORT at submission.
 export interface ProjectSettings {
 	effort?: EffortLevel
 }
@@ -94,8 +87,6 @@ function settingsFilePath(workspaceRoot: string): string {
 	return path.resolve(workspaceRoot, '.orchestration', SETTINGS_FILE_NAME)
 }
 
-// Reads the project settings file, returning a default when it is absent or malformed.
-// A malformed read is treated as absent, matching meta.json's torn-read handling: settings.json is written atomically, so a malformed read is most likely a torn read mid-write, and submission must not crash on it.
 export function createReadProjectSettings(workspaceRoot: string): ReadProjectSettings {
 	const filePath = settingsFilePath(workspaceRoot)
 	return () => {

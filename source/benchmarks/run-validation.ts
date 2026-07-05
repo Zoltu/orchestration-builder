@@ -1,5 +1,4 @@
-// Leaf: runs a benchmark's validation command inside the final run workspace under a timeout and reports the raw outputs the pure evaluateValidation logic needs.
-// This is a leaf (it spawns a subprocess and touches the filesystem), so it is exported as a factory and is not unit-tested; it is exercised through the suite runner against real benchmarks by the operator.
+
 
 import * as fs from 'node:fs'
 import * as path from 'node:path'

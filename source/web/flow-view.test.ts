@@ -27,7 +27,6 @@ function isVnode(value: VnodeChild): value is Vnode {
 	return typeof value !== 'string'
 }
 
-// Walks a vnode tree and collects every descendant matching a tag.
 function allByTag(vnode: Vnode, tag: string): Vnode[] {
 	const found: Vnode[] = []
 	for (const child of vnode.children) {
@@ -47,7 +46,6 @@ function propBoolean(props: Record<string, unknown>, key: string): boolean {
 	return propString(props, key) === 'true'
 }
 
-// Finds every descendant <g> carrying a given class token.
 function groupsWithClass(vnode: Vnode, token: string): Vnode[] {
 	return allByTag(vnode, 'g').filter((group) => {
 		const classValue = propString(group.props, 'class') ?? ''

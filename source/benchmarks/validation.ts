@@ -1,6 +1,3 @@
-// Pure validation helpers for benchmark eval configs and run outputs.
-// This module is the testable surface: parseEvalConfig validates an eval.json object with type guards (no typecasts) and evaluateValidation decides pass/fail from a parsed validation spec and a run output.
-// No shell execution or filesystem access happens here.
 
 import { ValidationError } from '../executor/errors.js'
 
@@ -96,8 +93,6 @@ function normalizeStdoutContains(value: string | string[] | undefined): string[]
 	return value
 }
 
-// Pure decision logic: given a parsed validation spec and a run output (expected-file existence booleans, exit code, stdout), return pass/fail with a list of human-readable reasons.
-// No shell execution or I/O happens here.
 export function evaluateValidation(spec: ValidationSpec, runOutput: BenchmarkRunOutput): ValidationResult {
 	const reasons: string[] = []
 

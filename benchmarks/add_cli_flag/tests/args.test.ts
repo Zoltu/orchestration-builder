@@ -18,5 +18,10 @@ test('parseArgs sets reverse to true when --reverse is present', () => {
 })
 
 test('parseArgs supports --reverse together with --count', () => {
-	expect(parseArgs(['--count', '2', '--reverse'])).toEqual({ count: 2, reverse: true })
-})
+ 	expect(parseArgs(['--count', '2', '--reverse'])).toEqual({ count: 2, reverse: true })
+	})
+
+	test('parseArgs throws on unknown arguments', () => {
+ 	expect(() => parseArgs(['--unknown'])).toThrow('Unknown argument: --unknown')
+	})
+

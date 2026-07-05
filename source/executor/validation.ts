@@ -1,6 +1,3 @@
-// Runtime type guards and validators for external JSON objects.
-// No typecasts are used; every check is expressed as a type predicate or assertion.
-// Boolean guards (is*) narrow types; validate* functions throw a ValidationError with a precise path-based message on failure.
 
 import { isErrorKind, ValidationError } from './errors.js'
 import { EFFORT_MAX, EFFORT_MIN } from './effort.js'

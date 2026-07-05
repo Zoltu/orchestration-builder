@@ -1,10 +1,3 @@
-// Server entry point for the Adaptive Orchestrator.
-// This is the integration shell: the only module that reads `Bun.env`, and the only place that assembles real leaf factories and hands them to `runExecutor`.
-// It holds no business logic of its own — run submission lives in `source/executor/run-submission.ts` (unit-tested), and the run itself is the already-tested executor orchestration.
-// Per the testing policy this file is not unit-tested.
-//
-// The executor modifies the mounted project in place at WORKSPACE_ROOT; orchestration bookkeeping (run meta/log) lands under WORKSPACE_ROOT/.orchestration/runs/<run-id>/, so the operator mounts a single writable volume at /workspace.
-// Configuration is environment-only; there are no CLI flags. Every option has a production default, so the deployment image runs with an empty environment and the operator overrides only what differs (typically just ORCHESTRATOR_API_KEY at `docker run -e`).
 
 import * as path from 'node:path'
 
@@ -104,8 +97,11 @@ function waitForShutdownSignal(): Promise<void> {
 
 // Long-running service: the server outlives every run, one task at a time, submitted via the JSON API.
 // SIGINT and SIGTERM both trigger shutdown: stop accepting new requests, stop the server, then exit (130 if a run was interrupted mid-flight, 0 if idle).
-// An active run is abandoned where it stands rather than awaited: the run-interrupt channel that would let the service ask a run to stop at a safe point does not exist yet, so awaiting a run could block for up to the run's full budget (hours). The run's append-only log is already durable; the missing meta.json leaves it reading as "in progress" on restart, which is the accepted graceful-degradation. When the interrupt channel lands, this can switch to a bounded graceful drain.
+// An active run is abandoned where it stands rather than awaited: the run-interrupt channel that would let the service ask a run to stop at a safe point does not exist yet, so awaiting a run could block for up to the run's full budget (hours).
+// The run's append-only log is already durable; the missing meta.json leaves it reading as "in progress" on restart, which is the accepted graceful-degradation.
+// When the interrupt channel lands, this can switch to a bounded graceful drain.
 // A fatal run error tears down the service and exits non-zero.
+
 async function serve(): Promise<void> {
 	const port = parsePort(Bun.env[PORT_ENV_VAR], DEFAULT_PORT)
 	const workspaceRootPath = Bun.env[WORKSPACE_ROOT_ENV_VAR] || DEFAULT_WORKSPACE_ROOT
