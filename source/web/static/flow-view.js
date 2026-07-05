@@ -37,8 +37,7 @@
 //
 // The terminal-result CTA is a view concern layered on model.status, not model
 // state: when the run reaches a terminal status the view renders a CTA node
-// (ported from the sibling flow-view.js) whose tone follows the status and whose
-// active/modal state is harness-managed.
+// whose tone follows the status and whose active/modal state is harness-managed.
 //
 // `h` is passed in rather than imported so the module stays free of hyperapp
 // coupling and the vnode shape is exercisable in tests with a fake `h`,
@@ -401,7 +400,7 @@ export function deriveLifecycle(previousModel, currentModel) {
 	return { enteringIds, departing }
 }
 
-// The terminal-result call-to-action node, ported from the sibling flow-view.js so a terminal frame offers a result affordance. The CTA is a view concern layered on model.status (never model state): the tone follows the status, and the active/modal state plus onclick are harness-managed. A layered "bezel + bevel + face" 3D button reads as pressable at a glance; the active state adds a glowing inner ring and a flowing You→CTA edge so the open-modal connection reads. The gradients are declared inline (stable ids) so the button is self-contained.
+// The terminal-result call-to-action node renders on a terminal frame so the run offers a result affordance. The CTA is a view concern layered on model.status (never model state): the tone follows the status, and the active/modal state plus onclick are harness-managed. A layered "bezel + bevel + face" 3D button reads as pressable at a glance; the active state adds a glowing inner ring and a flowing You→CTA edge so the open-modal connection reads. The gradients are declared inline (stable ids) so the button is self-contained.
 function CtaNode(h, props) {
 	const label = props.label
 	const active = props.active === true
