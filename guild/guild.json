@@ -28,27 +28,117 @@
 	"roles": {
 		"orchestrator": {
 			"systemPrompt": "prompts/orchestrator.md",
-			"tools": ["agent", "ask_human", "finish"]
+			"tools": ["agent", "ask_human", "finish"],
+			"label": {
+				"detailed": "Orchestrator",
+				"friendly": "Orchestrator",
+				"playful": "Conductor"
+			},
+			"description": {
+				"detailed": "Coordinates the overall task, delegates to other roles, and ensures progress toward completion.",
+				"friendly": "Coordinates the task and delegates work to other roles.",
+				"playful": "The maestro keeping all the instruments in sync."
+			},
+			"workingLabel": {
+				"detailed": "Receiving tokens from {participant}",
+				"friendly": "{participant} is orchestrating",
+				"playful": "{participant} is conducting the symphony"
+			}
 		},
 		"planner": {
 			"systemPrompt": "prompts/planner.md",
-			"tools": ["list_directory", "glob_files", "read_file", "read_file_partial", "search_text", "finish"]
+			"tools": ["list_directory", "glob_files", "read_file", "read_file_partial", "search_text", "finish"],
+			"label": {
+				"detailed": "Planner",
+				"friendly": "Planner",
+				"playful": "Strategist"
+			},
+			"description": {
+				"detailed": "Breaks down complex tasks into manageable steps and creates detailed plans.",
+				"friendly": "Breaks down tasks and creates step-by-step plans.",
+				"playful": "Maps out the treasure hunt before you dive in."
+			},
+			"workingLabel": {
+				"detailed": "Receiving tokens from {participant}",
+				"friendly": "{participant} is planning the approach",
+				"playful": "{participant} is charting the course"
+			}
 		},
 		"coder": {
 			"systemPrompt": "prompts/coder.md",
-			"tools": ["list_directory", "glob_files", "read_file", "read_file_partial", "search_text", "write_file", "fetch_url", "typecheck", "test", "finish"]
+			"tools": ["list_directory", "glob_files", "read_file", "read_file_partial", "search_text", "write_file", "fetch_url", "typecheck", "test", "finish"],
+			"label": {
+				"detailed": "Coder",
+				"friendly": "Coder",
+				"playful": "Builder"
+			},
+			"description": {
+				"detailed": "Writes, modifies, and tests code according to the specifications.",
+				"friendly": "Writes and tests code to implement the plan.",
+				"playful": "Builds the actual stuff from the blueprint."
+			},
+			"workingLabel": {
+				"detailed": "Receiving tokens from {participant}",
+				"friendly": "{participant} is thinking about what code to write",
+				"playful": "{participant} is hammering nails"
+			}
 		},
 		"critic": {
 			"systemPrompt": "prompts/critic.md",
-			"tools": ["list_directory", "glob_files", "read_file", "read_file_partial", "search_text", "finish"]
+			"tools": ["list_directory", "glob_files", "read_file", "read_file_partial", "search_text", "finish"],
+			"label": {
+				"detailed": "Critic",
+				"friendly": "Reviewer",
+				"playful": "Quality Guard"
+			},
+			"description": {
+				"detailed": "Reviews code and plans for errors, improvements, and adherence to requirements.",
+				"friendly": "Reviews work for quality and catches issues.",
+				"playful": "The sharp-eyed inspector making sure nothing slips through."
+			},
+			"workingLabel": {
+				"detailed": "Receiving tokens from {participant}",
+				"friendly": "{participant} is reviewing the work",
+				"playful": "{participant} is polishing every rivet"
+			}
 		},
 		"context_manager": {
 			"systemPrompt": "prompts/context_manager.md",
-			"tools": ["context_info", "edit_context", "finish"]
+			"tools": ["context_info", "edit_context", "finish"],
+			"label": {
+				"detailed": "Context Manager",
+				"friendly": "Context Manager",
+				"playful": "Memory Keeper"
+			},
+			"description": {
+				"detailed": "Manages conversation context and compresses history to stay within token limits.",
+				"friendly": "Manages conversation history and keeps things concise.",
+				"playful": "Summarizes the story so you never forget the plot."
+			},
+			"workingLabel": {
+				"detailed": "Receiving tokens from {participant}",
+				"friendly": "{participant} is managing context",
+				"playful": "{participant} is tidying the shelves"
+			}
 		},
 		"recovery": {
 			"systemPrompt": "prompts/recovery.md",
-			"tools": ["agent", "ask_human", "finish"]
+			"tools": ["agent", "ask_human", "finish"],
+			"label": {
+				"detailed": "Recovery",
+				"friendly": "Recovery",
+				"playful": "Fix-it Fairy"
+			},
+			"description": {
+				"detailed": "Handles errors and recovers from failed operations by delegating or asking for clarification.",
+				"friendly": "Recovers from errors and keeps things moving.",
+				"playful": "Cleans up the mess and gets us back on track."
+			},
+			"workingLabel": {
+				"detailed": "Receiving tokens from {participant}",
+				"friendly": "{participant} is diagnosing the problem",
+				"playful": "{participant} is patching things up"
+			}
 		}
 	},
 
@@ -67,5 +157,46 @@
 		"tools/fetch_url.json",
 		"tools/typecheck.json",
 		"tools/test.json"
-	]
+	],
+
+	"visualization": {
+		"pseudoRoleLabels": {
+			"human": { "detailed": "The human", "friendly": "The human", "playful": "Hooman" },
+			"interrupt": { "detailed": "interrupt (pseudo-role)", "playful": "The Doorbell" },
+			"tools": { "detailed": "tools", "friendly": "Tools", "playful": "The Toolbelt" }
+		},
+		"operationTemplates": {
+			"call": {
+				"human->role": { "detailed": "{source} is calling {destination}", "friendly": "{source} is asking {destination} to start", "playful": "{source} is handing the quest off to {destination}" },
+				"role->role": { "detailed": "{source} is calling {destination}", "friendly": "{source} is delegating to {destination}", "playful": "{source} is passing the baton to {destination}" },
+				"role->tool": { "detailed": "{source} is invoking tool {destination}", "friendly": "{source} is using {destination}", "playful": "{source} is grabbing the {destination} gadget" },
+				"role->human": { "detailed": "{source} is requesting input from {destination}", "friendly": "{source} is asking {destination} for input", "playful": "{source} is tugging {destination}'s sleeve with a question" },
+				"interrupt->role": { "detailed": "{source} is preempting {destination}", "friendly": "{source} is interrupting {destination}", "playful": "{source} is butting in on {destination}" },
+				"interrupt->tool": { "detailed": "{source} is invoking tool {destination}", "friendly": "{source} is using {destination}", "playful": "{source} is grabbing the {destination} gadget" }
+			},
+			"return": {
+				"role->role": { "detailed": "{source} is returning to {destination}", "friendly": "{source} is returning to {destination}", "playful": "{source} is giving {destination} a thumbs-up" },
+				"tool->role": { "detailed": "tool {source} is returning to {destination}", "friendly": "{source} is returning result to {destination}", "playful": "{source} is reporting back to {destination}" },
+				"role->human": { "detailed": "{source} is returning to {destination}", "friendly": "{source} is returning to {destination}", "playful": "{source} is reporting the answer to {destination}" },
+				"role->interrupt": { "detailed": "{source} is returning to {destination}", "friendly": "{source} is returning to {destination}", "playful": "{source} is wrapping up for {destination}" },
+				"tool->interrupt": { "detailed": "tool {source} is returning to {destination}", "friendly": "{source} is returning result to {destination}", "playful": "{source} is reporting back to {destination}" }
+			},
+			"observe": {
+				"role->role": { "detailed": "{source} is observing {destination}", "friendly": "{source} is observing {destination}", "playful": "{source} is peeking at {destination}" }
+			},
+			"terminate": {
+				"tool->role": { "detailed": "{source} is terminating {destination}", "friendly": "{source} is rewinding {destination}", "playful": "{source} is zapping {destination}" }
+			}
+		},
+		"genericOperationTemplates": {
+			"call": { "detailed": "{source} is calling {destination}", "friendly": "{source} is calling {destination}", "playful": "{source} is ringing up {destination}" },
+			"return": { "detailed": "{source} is returning to {destination}", "friendly": "{source} is returning to {destination}", "playful": "{source} is reporting back to {destination}" },
+			"observe": { "detailed": "{source} is observing {destination}", "friendly": "{source} is observing {destination}", "playful": "{source} is peeking at {destination}" },
+			"terminate": { "detailed": "{source} is terminating {destination}", "friendly": "{source} is rewinding {destination}", "playful": "{source} is zapping {destination}" }
+		},
+		"workingTemplates": {
+			"role": { "detailed": "Receiving tokens from {participant}", "friendly": "{participant} is thinking", "playful": "{participant} is on the case" },
+			"tool": { "detailed": "Executing {participant}", "friendly": "{participant} is running", "playful": "{participant} is on the job" }
+		}
+	}
 }

@@ -1,6 +1,26 @@
 {
 	"name": "list_directory",
 	"description": "List files and subdirectories inside a workspace-relative path. Returns entries sorted with directories first, then files alphabetically. Call with path \".\" or omit path to list the workspace root.",
+	"humanLabel": {
+		"detailed": "List Directory",
+		"friendly": "List Files",
+		"playful": "Directory Scout"
+	},
+	"humanDescription": {
+		"detailed": "Lists files and subdirectories in a workspace path.",
+		"friendly": "See what's in a folder.",
+		"playful": "Take a peek inside the folder."
+	},
+	"humanCallLabel": {
+		"detailed": "{source} is invoking tool {destination}",
+		"friendly": "{source} is listing files",
+		"playful": "{source} is peeking into a folder"
+	},
+	"humanWorkingLabel": {
+		"detailed": "Listing directory",
+		"friendly": "Listing files",
+		"playful": "Peeking into a folder"
+	},
 	"parameters": {
 		"type": "object",
 		"properties": {

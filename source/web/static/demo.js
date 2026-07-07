@@ -5,8 +5,7 @@
 // The harness imports only its sibling static modules; it touches nothing in the product client (app.js). The label-tier control re-renders both views through the localization resolver so participant and operation prose swap with the selected tier while the underlying model is untouched.
 import { scenarios, GUILD_PARTICIPANTS } from './scenarios.js'
 import { activeOperation, activeParticipant, activeStack, callChainOf, fateOf, isPaused, observesOf, stacksOf } from './interaction-model.js'
-import { resolveOperationLabel, resolveParticipantLabel } from './labels.js'
-import * as labelsModule from './labels.js'
+import { createLabelResolver } from './labels.js'
 import { deriveLifecycle, renderFlowView, deriveNowCaption, deriveCostStrip } from './flow-view.js'
 import { renderSequenceView, HEADER_HEIGHT, ROW_HEIGHT, BOTTOM_MARGIN } from './sequence-diagram.js'
 import { createMarkdownRenderer } from './markdown-render.js'
@@ -18,7 +17,7 @@ import { activeAskHumanCall } from './flow-view.js'
 const PLAY_INTERVAL_MS = 1000
 const SVG_NAMESPACE = 'http://www.w3.org/2000/svg'
 
-const TIER_VALUES = ['fun', 'helpful', 'detailed']
+const TIER_VALUES = ['playful', 'friendly', 'detailed']
 
 function isLabelTier(value) {
 	for (const candidate of TIER_VALUES) {
@@ -26,6 +25,10 @@ function isLabelTier(value) {
 	}
 	return false
 }
+
+// The demo harness loads its labels from the same /api/config the product client loads, so a swapped guild re-flavors the harness the same way it re-flavors the run view. The harness is served by the same web server (see server.ts serveStaticPath), so the endpoint is reachable at the page origin.
+let labels = null
+let tier = 'detailed'
 
 function requireElement(id, constructorFunction) {
 	const element = document.getElementById(id)
@@ -283,7 +286,7 @@ function openOperationTooltip(target, clientX, clientY) {
 		for (const [prop, value] of Object.entries(style)) card.style.setProperty(prop, value)
 		return
 	}
-	const label = resolveOperationLabel(operation, frame.participants, tier)
+	const label = labels.resolveOperationLabel(operation, frame.participants, tier)
 	const sections = operation.details !== null && operation.details !== ''
 		? [{ label: 'details', content: operation.details }]
 		: []
@@ -355,7 +358,6 @@ function wireSequenceInteractions(container) {
 
 let scenarioIndex = 0
 let frameIndex = 0
-let tier = 'detailed'
 let viewMode = 'flow'
 let playTimer = null
 // The result-modal mount, or null when no modal is open. The modal is a view concern layered on a terminal frame (the run's status, not model state): opening it mounts an HTML overlay sibling to the SVG without rebuilding the SVG, so the enter animation and marching-ants do not replay on a modal toggle.
@@ -377,12 +379,12 @@ function roleLabelOf(participantId) {
 	const found = frame.participants.find((participant) => participant.id === participantId)
 	if (found === undefined) return participantId
 	// The resolver collapses participants that share a role (instance-per-invocation retries), so the instance id is appended to keep the debug view able to tell coder-1 from coder-2 apart.
-	return `${resolveParticipantLabel(found, tier)} (${found.id})`
+	return `${labels.resolveParticipantLabel(found, tier)} (${found.id})`
 }
 
 function formatOperation(operation, participants) {
 	const outcome = operation.outcome === null ? '' : ` → ${operation.outcome}`
-	const label = resolveOperationLabel(operation, participants, tier)
+	const label = labels.resolveOperationLabel(operation, participants, tier)
 	return `${label} [${operation.lifecycle}${outcome}]`
 }
 
@@ -456,6 +458,7 @@ function resolveActiveFrame() {
 }
 
 function renderFlowViewSvg() {
+	if (labels === null) return null
 	const scenario = scenarios[scenarioIndex]
 	if (scenario === undefined) return null
 	const baseFrame = scenario.frames[frameIndex]
@@ -466,16 +469,17 @@ function renderFlowViewSvg() {
 	const lifecycle = previousFrame !== null ? deriveLifecycle(previousFrame, frame) : undefined
 	const cta = { onclick: openResultModal }
 	const question = { onclick: openQuestionModal }
-	return renderFlowView(domH, frame, labelsModule, tier, lifecycle, cta, question)
+	return renderFlowView(domH, frame, labels, tier, lifecycle, cta, question)
 }
 
 function renderSequenceViewSvg() {
+	if (labels === null) return null
 	const scenario = scenarios[scenarioIndex]
 	if (scenario === undefined) return null
 	const frame = scenario.frames[frameIndex]
 	if (frame === undefined) return null
 	// The guild defines its roles statically, so the column set is the static guild role list — not derived from any scenario frame (peeking at a future frame to know which roles will be called would defeat the model's "the run reveals what happens" contract). Every guild role column and the tools column therefore appear from frame 0 even when no operation touches them yet.
-	return renderSequenceView(domH, frame, labelsModule, tier, GUILD_PARTICIPANTS)
+	return renderSequenceView(domH, frame, labels, tier, GUILD_PARTICIPANTS)
 }
 
 // Derives the terminal-result descriptor the modal renders. The demo scenarios carry no result/error text (the InteractionModel has no result field), so the summary is a fixed honest line keyed off the run's terminal status and the error block surfaces only on an error status — enough for the modal to read as a real result affordance without inventing scenario-specific prose.
@@ -524,7 +528,7 @@ function paintFlowArea() {
 	}
 	const svg = renderFlowViewSvg()
 	if (svg !== null) flowContainer.insertBefore(svg, nowCaption)
-	nowCaption.textContent = deriveNowCaption(frame, labelsModule, tier)
+	if (labels !== null) nowCaption.textContent = deriveNowCaption(frame, labels, tier)
 	const cost = deriveCostStrip(frame)
 	costElapsed.textContent = `elapsed ${cost.elapsedSeconds}s`
 	costTokens.textContent = `${cost.tokens.toLocaleString()} tokens`
@@ -589,7 +593,11 @@ function render() {
 	frameScrubber.value = String(frameIndex)
 	frameMeta.textContent = `${frameIndex + 1} / ${totalFrames}`
 	textView.textContent = renderTextView()
-	nowCaption.textContent = deriveNowCaption(frame, labelsModule, tier)
+	if (labels !== null) {
+		nowCaption.textContent = deriveNowCaption(frame, labels, tier)
+	} else {
+		nowCaption.textContent = ''
+	}
 	const cost = deriveCostStrip(frame)
 	costElapsed.textContent = `elapsed ${cost.elapsedSeconds}s`
 	costTokens.textContent = `${cost.tokens.toLocaleString()} tokens`
@@ -732,4 +740,14 @@ tierSelect.addEventListener('change', () => {
 const prefersDarkColorScheme = window.matchMedia('(prefers-color-scheme: dark)').matches
 applyTheme(prefersDarkColorScheme ? 'dark' : 'light')
 applyViewToggle()
-loadScenario(0)
+
+// Load the guild config from /api/config and build the label resolver over it before rendering. The harness renders nothing until the resolver is ready so the views never reach for a resolver that does not exist; once the config loads the first frame renders. A fetch failure leaves the harness in its pre-load state with no rendering, surfacing the missing-config state rather than crashing on a null resolver.
+fetch('api/config')
+	.then((response) => response.json())
+	.then((config) => {
+		labels = createLabelResolver(config)
+		loadScenario(0)
+	})
+	.catch((error) => {
+		console.error('failed to load /api/config for the demo harness label resolver', error)
+	})

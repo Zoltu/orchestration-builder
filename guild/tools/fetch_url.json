@@ -1,9 +1,31 @@
 {
 	"name": "fetch_url",
 	"description": "Fetch a document over HTTP or HTTPS and return its text content. The only tool that performs external network egress. Subject to a timeout and a maximum response size.",
+	"humanLabel": {
+		"detailed": "Fetch URL",
+		"friendly": "Fetch Web",
+		"playful": "Web Grabber"
+	},
+	"humanDescription": {
+		"detailed": "Fetches a document from a URL and returns its text content.",
+		"friendly": "Get content from a web address.",
+		"playful": "Reach out and fetch something."
+	},
+	"humanCallLabel": {
+		"detailed": "{source} is invoking tool {destination}",
+		"friendly": "{source} is fetching a web page",
+		"playful": "{source} is wandering the web"
+	},
+	"humanWorkingLabel": {
+		"detailed": "Fetching URL",
+		"friendly": "Fetching a web page",
+		"playful": "Wandering the web"
+	},
 	"parameters": {
 		"type": "object",
-		"required": ["url"],
+		"required": [
+			"url"
+		],
 		"properties": {
 			"url": {
 				"type": "string",

@@ -1,16 +1,16 @@
-// Label localization registry + tier resolver.
+// Label localization resolver over a guild config.
 //
-// The InteractionModel carries only role/kind identifiers — no prose. This module is the single source of short display prose for the views: a participant-label table keyed by role/kind, an operation-label table keyed by kind plus a source-kind→destination-kind discriminator, and a resolver that interpolates source/destination participant labels into the chosen operation template.
+// The InteractionModel carries only role/kind identifiers — no prose. This module resolves short display prose for the views from a config shaped like the one `GET /api/config` returns: participant labels (read from the guild's role.label / tool.humanLabel, plus the visualization section's pseudoRoleLabels for the human/interrupt/tools pseudo-roles), and operation templates (read from the visualization section's operationTemplates and genericOperationTemplates).
 //
-// Three tiers serve different audiences: 'fun' is playful (children/playful users) and may sacrifice precision, 'helpful' is informative-but-imprecise for non-technical users, 'detailed' is precise for technical users. A tier toggle in the harness swaps which tier the views render without touching the model — a view concern, like locale switching. The per-call 'details' markdown on each Operation is runtime data the adapter formats, not localization, so it is untouched here.
+// Three tiers serve different audiences: 'playful' is playful (children/playful users) and may sacrifice precision, 'friendly' is informative-but-imprecise for non-technical users, 'detailed' is precise for technical users. A tier toggle in the harness swaps which tier the views render without touching the model — a view concern, like locale switching. The per-call 'details' markdown on each Operation is runtime data the adapter formats, not localization, so it is untouched here.
 //
-// The fallback chain is detailed → helpful → fun: when a guild author omits the requested tier, the resolver walks toward less-precise tiers rather than producing empty prose, and a participant with no entry at all falls back to the title-cased role name. The registry is a data literal; the resolver is a small pure function over it.
+// The fallback chain is detailed → friendly → playful: when a guild author omits the requested tier, the resolver walks toward less-precise tiers rather than producing empty prose, and a participant with no entry at all falls back to the title-cased role name. The factory closes over the config; the resolvers are pure functions over it.
 //
 // The module is browser-pure JS (served statically and imported by the view modules) and imports nothing. JSDoc typedefs carry the shapes the TS tests assert against, mirroring the sibling interaction-model.js convention.
 
 /**
- * @typedef {'fun' | 'helpful' | 'detailed'} LabelTier
- *   'fun' is playful and may sacrifice precision; 'helpful' is informative for non-technical users; 'detailed' is precise for technical users.
+ * @typedef {'playful' | 'friendly' | 'detailed'} LabelTier
+ *   'playful' is playful and may sacrifice precision; 'friendly' is informative for non-technical users; 'detailed' is precise for technical users.
  */
 
 /**
@@ -37,101 +37,32 @@
 
 /**
  * @typedef {Object} TieredLabel
- * @property {string} [fun]
- * @property {string} [helpful]
+ * @property {string} [playful]
+ * @property {string} [friendly]
  * @property {string} [detailed]
- *   A label entry may omit any tier; the resolver falls back detailed → helpful → fun when the requested tier is absent.
+ *   A label entry may omit any tier; the resolver falls back detailed → friendly → playful when the requested tier is absent.
  */
 
-// Ordered from most-precise to least-precise so the fallback walk goes toward less-precise tiers: a missing 'detailed' falls to 'helpful', a missing 'helpful' falls to 'fun', and a missing 'fun' has nothing less-precise to fall to (the caller supplies an ultimate fallback).
-const TIER_FALLBACK_ORDER = ['detailed', 'helpful', 'fun']
+/**
+ * @typedef {Object} LabelConfig
+ *   The shape produced by `GET /api/config`: role and tool labels the frontend already loads, plus the visualization section the guild owns for pseudo-role and operation-template localization.
+ * @property {Record<string, { label?: TieredLabel, workingLabel?: TieredLabel }>} roles
+ *   Role definitions keyed by name; `label` is the participant label and `workingLabel` is the active/working-state text (with a `{participant}` placeholder) read by `resolveWorkingLabel`.
+ * @property {Record<string, { humanLabel?: TieredLabel, humanCallLabel?: TieredLabel, humanWorkingLabel?: TieredLabel }>} tools
+ *   Tool manifests keyed by name; `humanLabel` is the participant label, `humanCallLabel` is the per-tool call-operation template (with `{source}` and optionally `{destination}`) overriding the generic role->tool / interrupt->tool template, and `humanWorkingLabel` is the per-tool working-state template (with `{participant}` optionally) overriding the generic tool working template.
+ * @property {{ pseudoRoleLabels: Record<string, TieredLabel>, operationTemplates: Record<'call' | 'return' | 'observe' | 'terminate', Record<string, TieredLabel>>, genericOperationTemplates: Record<'call' | 'return' | 'observe' | 'terminate', TieredLabel>, workingTemplates?: Record<string, TieredLabel> }} [visualization]
+ *   `workingTemplates` is a generic per-participant-kind fallback (keyed by kind: 'role', 'tool') used when a role/tool has no per-entry working label.
+ */
+
+// Ordered from most-precise to least-precise so the fallback walk goes toward less-precise tiers: a missing 'detailed' falls to 'friendly', a missing 'friendly' falls to 'playful', and a missing 'playful' has nothing less-precise to fall to (the caller supplies an ultimate fallback).
+const TIER_FALLBACK_ORDER = ['detailed', 'friendly', 'playful']
 
 // Operation templates interpolate the resolved participant labels of their source and destination via these placeholders, keeping the registry pure data and the interpolation a single replace in the resolver.
 const SOURCE_PLACEHOLDER = '{source}'
 const DESTINATION_PLACEHOLDER = '{destination}'
 
-/**
- * Participant labels keyed by role. The demo guild's roles (orchestrator, planner, coder, critic, context_manager, recovery) and tools plus the loop_detector role used by the demo scenarios are all seeded here, alongside the 'human' and 'interrupt' pseudo-roles. 'fun' entries are deliberately playful (chef/baker-style for playful users); 'detailed' entries are precise identifiers for technical users.
- *
- * Roles and the 'human' pseudo-role carry all three tiers. Tools and the 'interrupt' pseudo-role ship only {fun, detailed}: a tool or pseudo-role name has no informative-but-imprecise middle voice distinct from the playful one, so the 'helpful' tier falls back to 'fun' for them, while a role like 'orchestrator' does have a plain informative name worth its own 'helpful' value.
- *
- * @type {Record<string, TieredLabel>}
- */
-const participantLabels = {
-	human: { fun: 'You', helpful: 'You', detailed: 'You (human)' },
-	interrupt: { fun: 'The Doorbell', detailed: 'interrupt (pseudo-role)' },
-	// The shared "tools" column collapses every tool participant into one lifeline, so it has no single participant to resolve against; this entry gives the column a localized header the same registry every other column reads.
-	tools: { fun: 'The Toolbelt', helpful: 'Tools', detailed: 'tools' },
-
-	orchestrator: { fun: 'The Conductor', helpful: 'Orchestrator', detailed: 'orchestrator' },
-	planner: { fun: 'The Mapmaker', helpful: 'Planner', detailed: 'planner' },
-	coder: { fun: 'The Builder', helpful: 'Coder', detailed: 'coder' },
-	critic: { fun: 'The Nitpicker', helpful: 'Critic', detailed: 'critic' },
-	context_manager: { fun: 'The Librarian', helpful: 'Context Manager', detailed: 'context_manager' },
-	// 'detailed' is deliberately omitted to document the detailed → helpful fallback: a guild author who ships only the playful and informative tiers still gets a readable line at the technical tier.
-	recovery: { fun: 'The Fixer', helpful: 'Recovery' },
-	// 'detailed' is omitted on top of the tool-default 'helpful' omission, so requesting 'detailed' walks the full chain detailed → helpful → fun and lands on 'fun', proving the resolver walks past every absent tier rather than stopping at the first gap.
-	edit_context: { fun: 'The Memory Editor' },
-	loop_detector: { fun: 'The Loop Sniffer', helpful: 'Loop Detector', detailed: 'loop_detector' },
-
-	agent: { fun: 'The Errand Runner', detailed: 'agent (tool)' },
-	finish: { fun: 'The Finish Line', detailed: 'finish (tool)' },
-	ask_human: { fun: 'The Question Box', detailed: 'ask_human (tool)' },
-	list_directory: { fun: 'The Folder Peek', detailed: 'list_directory (tool)' },
-	glob_files: { fun: 'The File Hunt', detailed: 'glob_files (tool)' },
-	read_file: { fun: 'The Page Turner', detailed: 'read_file (tool)' },
-	read_file_partial: { fun: 'The Snippet Grabber', detailed: 'read_file_partial (tool)' },
-	search_text: { fun: 'The Word Hound', detailed: 'search_text (tool)' },
-	write_file: { fun: 'The Scribe', detailed: 'write_file (tool)' },
-	fetch_url: { fun: 'The Web Wanderer', detailed: 'fetch_url (tool)' },
-	typecheck: { fun: 'The Grammar Grader', detailed: 'typecheck (tool)' },
-	test: { fun: 'The Prover', detailed: 'test (tool)' },
-	read_message_window: { fun: 'The Message Snoop', detailed: 'read_message_window (tool)' },
-	context_info: { fun: 'The Memory Peek', detailed: 'context_info (tool)' },
-	// The rewind tool the loop_detector invokes to revert looping rows; ships only {fun, detailed} like every tool, so the helpful tier falls back to the playful one.
-	rewind_stack: { fun: 'The Rewinder', detailed: 'rewind_stack (tool)' },
-	terminate_task: { fun: 'The Eraser', detailed: 'terminate_task (tool)' },
-}
-
-// Operation templates keyed by kind, then by a `${sourceKind}->${destinationKind}` discriminator built from the participants the operation spans. Each entry interpolates {source} and {destination} with the resolved participant labels at the chosen tier, so the model never carries display prose. Discriminators cover every combination the demo scenarios produce; an unmatched discriminator falls back to the per-kind generic entry below.
-/**
- * @type {Record<'call' | 'return' | 'observe' | 'terminate', Record<string, TieredLabel>>}
- */
-const operationLabels = {
-	call: {
-		'human->role': { fun: '{source} hand the quest to {destination}', helpful: '{source} ask {destination} to start', detailed: 'call {source} → {destination}' },
-		'role->role': { fun: '{source} pass the baton to {destination}', helpful: '{source} delegate to {destination}', detailed: 'call {source} → {destination}' },
-		'role->tool': { fun: '{source} grab the {destination} gadget', helpful: '{source} use {destination}', detailed: '{source} invoked tool {destination}' },
-		'role->human': { fun: '{source} tug {destination}\'s sleeve with a question', helpful: '{source} ask {destination} for input', detailed: '{source} requested human input from {destination}' },
-		'interrupt->role': { fun: '{source} butt in on {destination}', helpful: '{source} interrupt {destination}', detailed: '{source} preempted {destination}' },
-		'interrupt->tool': { fun: '{source} grab the {destination} gadget', helpful: '{source} use {destination}', detailed: '{source} invoked tool {destination}' },
-	},
-	return: {
-		'role->role': { fun: '{source} give {destination} a thumbs-up', helpful: '{source} return to {destination}', detailed: 'return {source} → {destination}' },
-		'tool->role': { fun: '{source} report back to {destination}', helpful: '{source} return result to {destination}', detailed: 'tool {source} returned to {destination}' },
-		'role->human': { fun: '{source} report the answer to {destination}', helpful: '{source} return to {destination}', detailed: 'return {source} → {destination}' },
-		'role->interrupt': { fun: '{source} wrap up for {destination}', helpful: '{source} return to {destination}', detailed: 'return {source} → {destination}' },
-		'tool->interrupt': { fun: '{source} report back to {destination}', helpful: '{source} return result to {destination}', detailed: 'tool {source} returned to {destination}' },
-	},
-	observe: {
-		'role->role': { fun: '{source} peek at {destination}', helpful: '{source} observe {destination}', detailed: 'observe {source} → {destination}' },
-	},
-	terminate: {
-		// A rewind tool reverts a target node in a paused stack; the source is the tool and the destination is the target role, so 'tool->role' is the only discriminator the demo scenarios produce.
-		'tool->role': { fun: '{source} zap {destination}', helpful: '{source} rewind {destination}', detailed: 'terminate {source} → {destination}' },
-	},
-}
-
-// Per-kind generic entries used when no discriminator matches, so an authored scenario that introduces an unseeded participant-kind pair still renders a readable line rather than empty prose.
-/**
- * @type {Record<'call' | 'return' | 'observe' | 'terminate', TieredLabel>}
- */
-const genericOperationLabels = {
-	call: { fun: '{source} ring up {destination}', helpful: '{source} call {destination}', detailed: 'call {source} → {destination}' },
-	return: { fun: '{source} report back to {destination}', helpful: '{source} return to {destination}', detailed: 'return {source} → {destination}' },
-	observe: { fun: '{source} peek at {destination}', helpful: '{source} observe {destination}', detailed: 'observe {source} → {destination}' },
-	terminate: { fun: '{source} zap {destination}', helpful: '{source} rewind {destination}', detailed: 'terminate {source} → {destination}' },
-}
+// Working-state templates interpolate the resolved label of the working participant (the destination of a settled call) via this placeholder, so the per-role working text reads "{participant} is planning" / "Receiving tokens from {participant}" without the resolver knowing the frame.
+const PARTICIPANT_PLACEHOLDER = '{participant}'
 
 // Walks the fallback chain from the requested tier toward less-precise tiers and returns the first present value, or null when none of the three tiers is present. The caller supplies the ultimate fallback so participant and operation resolution can each choose their own (title-cased role name vs. the generic per-kind template).
 function pickTier(entry, tier) {
@@ -155,47 +86,93 @@ function titleCaseRole(role) {
 }
 
 /**
- * Resolves the short display label for a participant at the chosen tier. Falls back detailed → helpful → fun when the requested tier is absent, and returns the title-cased role name when no entry exists at all, so a guild author who omits a tier or role still gets a readable line.
+ * Builds a label resolver over the given config. Real roles read their tiered labels from `roles[name].label`, real tools from `tools[name].humanLabel`, and the human/interrupt/tools pseudo-roles read from `visualization.pseudoRoleLabels`. A participant whose role has no entry at all falls back to the title-cased role name; a tool with no humanLabel falls back to its raw name (already what the participant carries). The visualization section is optional so a minimal guild without operation templates still resolves participant labels — the operation resolver then throws on a missing template, surfacing the misconfiguration rather than rendering empty prose.
  *
- * @param {Participant} participant
- * @param {LabelTier} tier
- * @returns {string}
+ * @param {LabelConfig} config
+ * @returns {{ resolveParticipantLabel: (participant: Participant, tier: LabelTier) => string, resolveOperationLabel: (operation: Operation, participants: Participant[], tier: LabelTier) => string, resolveWorkingLabel: (participant: Participant, tier: LabelTier) => string | null }}
  */
-export function resolveParticipantLabel(participant, tier) {
-	const entry = participantLabels[participant.role]
-	const resolved = pickTier(entry, tier)
-	if (resolved !== null) return resolved
-	return titleCaseRole(participant.role)
-}
+export function createLabelResolver(config) {
+	const roles = config.roles ?? {}
+	const tools = config.tools ?? {}
+	const visualization = config.visualization
+	const pseudoRoleLabels = visualization?.pseudoRoleLabels ?? {}
+	const operationTemplates = visualization?.operationTemplates
+	const genericOperationTemplates = visualization?.genericOperationTemplates
+	const workingTemplates = visualization?.workingTemplates
 
-// Looks up a participant by id in the frame's participant list. A missing id is a model contract violation (every operation endpoint must reference a known participant); failing fast surfaces it rather than rendering a label against undefined.
-function findParticipant(participants, participantId) {
-	const found = participants.find((participant) => participant.id === participantId)
-	if (found === undefined) throw new Error(`operation references unknown participant id "${participantId}"`)
-	return found
-}
+	// Looks up a participant by id in the frame's participant list. A missing id is a model contract violation (every operation endpoint must reference a known participant); failing fast surfaces it rather than rendering a label against undefined.
+	function findParticipant(participants, participantId) {
+		const found = participants.find((participant) => participant.id === participantId)
+		if (found === undefined) throw new Error(`operation references unknown participant id "${participantId}"`)
+		return found
+	}
 
-function interpolate(template, sourceLabel, destinationLabel) {
-	return template.split(SOURCE_PLACEHOLDER).join(sourceLabel).split(DESTINATION_PLACEHOLDER).join(destinationLabel)
-}
+	// Resolves a single participant's tiered label entry, consulting the guild's role/tool label and the pseudo-role table in turn. A role participant resolves against roles[role].label; a tool participant against tools[role].humanLabel; the human/interrupt/tools pseudo-roles against visualization.pseudoRoleLabels. A role/tool with no entry returns undefined so the resolver can fall back through the chain and ultimately to the title-cased name (participant) or the raw identifier (the technical tier's natural form).
+	function entryForParticipant(participant) {
+		if (participant.kind === 'role') {
+			const role = roles[participant.role]
+			return role !== undefined ? role.label : undefined
+		}
+		if (participant.kind === 'tool') {
+			const tool = tools[participant.role]
+			return tool !== undefined ? tool.humanLabel : undefined
+		}
+		return pseudoRoleLabels[participant.role]
+	}
 
-/**
- * Resolves the short display label for an operation at the chosen tier, interpolating the source and destination participant labels (resolved at the same tier) into the operation template. Falls back detailed → helpful → fun when the requested tier is absent, and falls back to the per-kind generic template when no discriminator matches, so an unseeded participant-kind combination still renders a readable line.
- *
- * @param {Operation} operation
- * @param {Participant[]} participants
- * @param {LabelTier} tier
- * @returns {string}
- */
-export function resolveOperationLabel(operation, participants, tier) {
-	const source = findParticipant(participants, operation.source)
-	const destination = findParticipant(participants, operation.destination)
-	const sourceLabel = resolveParticipantLabel(source, tier)
-	const destinationLabel = resolveParticipantLabel(destination, tier)
-	const byDiscriminator = operationLabels[operation.kind]
-	const specific = byDiscriminator[`${source.kind}->${destination.kind}`]
-	const resolved = pickTier(specific, tier)
-	const template = resolved ?? pickTier(genericOperationLabels[operation.kind], tier)
-	if (template === null) throw new Error(`no operation template for kind "${operation.kind}" at tier "${tier}"`)
-	return interpolate(template, sourceLabel, destinationLabel)
+	function interpolate(template, sourceLabel, destinationLabel) {
+		return template.split(SOURCE_PLACEHOLDER).join(sourceLabel).split(DESTINATION_PLACEHOLDER).join(destinationLabel)
+	}
+
+	function resolveParticipantLabel(participant, tier) {
+		const entry = entryForParticipant(participant)
+		const resolved = pickTier(entry, tier)
+		if (resolved !== null) return resolved
+		return titleCaseRole(participant.role)
+	}
+
+	function resolveOperationLabel(operation, participants, tier) {
+		const source = findParticipant(participants, operation.source)
+		const destination = findParticipant(participants, operation.destination)
+		const sourceLabel = resolveParticipantLabel(source, tier)
+		const destinationLabel = resolveParticipantLabel(destination, tier)
+		if (operationTemplates === undefined || genericOperationTemplates === undefined) {
+			throw new Error(`no operation template for kind "${operation.kind}" at tier "${tier}" (visualization section missing)`)
+		}
+		// A call to a tool may carry a per-tool call template (humanCallLabel) that overrides the generic role->tool / interrupt->tool template, so each tool can phrase its own invocation ("getting a book off the shelf" for read_file vs "picking up the pen" for write_file) rather than sharing one "grabbing the {destination} gadget" template. The per-tool template uses {source} (and optionally {destination}); when absent the discriminator → generic chain applies.
+		if (operation.kind === 'call' && destination.kind === 'tool') {
+			const tool = tools[destination.role]
+			const toolCallTemplate = tool !== undefined ? pickTier(tool.humanCallLabel, tier) : null
+			if (toolCallTemplate !== null) {
+				return interpolate(toolCallTemplate, sourceLabel, destinationLabel)
+			}
+		}
+		const byDiscriminator = operationTemplates[operation.kind]
+		const specific = byDiscriminator[`${source.kind}->${destination.kind}`]
+		const resolved = pickTier(specific, tier)
+		const template = resolved ?? pickTier(genericOperationTemplates[operation.kind], tier)
+		if (template === null) throw new Error(`no operation template for kind "${operation.kind}" at tier "${tier}"`)
+		return interpolate(template, sourceLabel, destinationLabel)
+	}
+
+	// Resolves the active/working-state text for a participant — the destination of a settled call, who is now doing its own work rather than being called. A per-role workingLabel (or a per-tool humanWorkingLabel) is consulted first; when absent the generic per-kind fallback in visualization.workingTemplates is used; when that too is absent the resolver returns null so the caller (deriveNowCaption) can fall back to the operation label. The {participant} placeholder interpolates to the participant's own label at the chosen tier, so "Receiving tokens from {participant}" reads "Receiving tokens from Coder" at the detailed tier and "{participant} is planning" reads "Planner is planning" at the friendly tier.
+	function resolveWorkingLabel(participant, tier) {
+		let entry
+		if (participant.kind === 'role') {
+			const role = roles[participant.role]
+			entry = role !== undefined ? role.workingLabel : undefined
+		} else if (participant.kind === 'tool') {
+			const tool = tools[participant.role]
+			entry = tool !== undefined ? tool.humanWorkingLabel : undefined
+		}
+		if (entry === undefined && workingTemplates !== undefined) {
+			entry = workingTemplates[participant.kind]
+		}
+		const template = pickTier(entry, tier)
+		if (template === null) return null
+		const participantLabel = resolveParticipantLabel(participant, tier)
+		return template.split(PARTICIPANT_PLACEHOLDER).join(participantLabel)
+	}
+
+	return { resolveParticipantLabel, resolveOperationLabel, resolveWorkingLabel }
 }

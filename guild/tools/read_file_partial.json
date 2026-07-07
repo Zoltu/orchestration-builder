@@ -1,9 +1,33 @@
 {
 	"name": "read_file_partial",
 	"description": "Read a contiguous slice of lines from a file inside the workspace. Useful for large files. Returns the requested lines plus offset, returned line count, and total line count.",
+	"humanLabel": {
+		"detailed": "Read File (Partial)",
+		"friendly": "Read Pages",
+		"playful": "Snip a Page"
+	},
+	"humanDescription": {
+		"detailed": "Reads a slice of lines from a file.",
+		"friendly": "Read part of a file.",
+		"playful": "Take just the pages you need."
+	},
+	"humanCallLabel": {
+		"detailed": "{source} is invoking tool {destination}",
+		"friendly": "{source} is reading part of a file",
+		"playful": "{source} is flipping to a page"
+	},
+	"humanWorkingLabel": {
+		"detailed": "Reading partial file contents",
+		"friendly": "Reading part of a file",
+		"playful": "Flipping through pages"
+	},
 	"parameters": {
 		"type": "object",
-		"required": ["path", "offset", "limit"],
+		"required": [
+			"path",
+			"offset",
+			"limit"
+		],
 		"properties": {
 			"path": {
 				"type": "string",

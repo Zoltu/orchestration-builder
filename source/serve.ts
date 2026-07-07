@@ -131,6 +131,7 @@ async function serve(): Promise<void> {
 	const webServer = createWebServer({
 		port,
 		guildConfig: loadedGuild.config,
+		tools: loadedGuild.tools,
 		runState,
 		runSubmission,
 		readRunSnapshotById,

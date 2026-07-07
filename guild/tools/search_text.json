@@ -1,9 +1,31 @@
 {
 	"name": "search_text",
 	"description": "Search the contents of text files in the workspace for lines matching a regular expression. Returns matching lines with their file path and 1-based line number. Searches all searchable files unless paths are given.",
+	"humanLabel": {
+		"detailed": "Search Text",
+		"friendly": "Find Text",
+		"playful": "Text Treasure Hunt"
+	},
+	"humanDescription": {
+		"detailed": "Searches text files for lines matching a regular expression.",
+		"friendly": "Find text across files.",
+		"playful": "Dig up the words you seek."
+	},
+	"humanCallLabel": {
+		"detailed": "{source} is invoking tool {destination}",
+		"friendly": "{source} is searching for text",
+		"playful": "{source} is hunting for words"
+	},
+	"humanWorkingLabel": {
+		"detailed": "Searching text",
+		"friendly": "Searching for text",
+		"playful": "Hunting for words"
+	},
 	"parameters": {
 		"type": "object",
-		"required": ["pattern"],
+		"required": [
+			"pattern"
+		],
 		"properties": {
 			"pattern": {
 				"type": "string",

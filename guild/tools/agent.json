@@ -1,9 +1,32 @@
 {
 	"name": "agent",
 	"description": "Delegate a sub-task to another role in the Guild. The child role runs to completion and returns its ResultCard.",
+	"humanLabel": {
+		"detailed": "Agent",
+		"friendly": "Delegate",
+		"playful": "Send Off"
+	},
+	"humanDescription": {
+		"detailed": "Delegates a sub-task to another role. The child role runs to completion and returns its result.",
+		"friendly": "Hand off work to another role.",
+		"playful": "Pass the baton to a specialist."
+	},
+	"humanCallLabel": {
+		"detailed": "{source} is invoking tool {destination}",
+		"friendly": "{source} is delegating to another agent",
+		"playful": "{source} is sending a helper on a quest"
+	},
+	"humanWorkingLabel": {
+		"detailed": "Delegating to another agent",
+		"friendly": "Delegating to another agent",
+		"playful": "Sending a helper on a quest"
+	},
 	"parameters": {
 		"type": "object",
-		"required": ["role", "task"],
+		"required": [
+			"role",
+			"task"
+		],
 		"properties": {
 			"role": {
 				"type": "string",

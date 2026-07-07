@@ -625,11 +625,13 @@ const EMPTY_SET = new Set()
 // The two ambient surfaces that wrap the flow view so the page conveys meaning the graph's structure alone cannot. Both are pure derivations off the InteractionModel (the same frame the flow view renders), so they never drift from the graph and never reach for a separate run-view shape. The caption localizes through the label resolver so the tier toggle swaps its voice; the cost strip reads only OperationMetrics, so it carries no prose.
 
 /**
- * A one-line plain-language caption describing what the run is doing right now, derived from the active operation's resolved label at the chosen tier. The active operation (the latest non-observe operation on the active stack, via activeOperation) names both the active participant (its destination) and the in-flight operation; resolving its label through the tier resolver localizes the line and lets the tier toggle swap its voice without touching the model. A terminal run status short-circuits to a fixed completion line so a finished run reads as finished regardless of a lingering return leg. An in-flight call appends an ellipsis to convey an action in progress; a settled return (the lingering response leg) carries no ellipsis because the leg is the current state, not a pending action.
+ * A one-line plain-language caption describing what the run is doing right now, derived from the active operation's resolved label at the chosen tier. The active operation (the latest non-observe operation on the active stack, via activeOperation) names both the active participant (its destination) and the in-flight operation; resolving its label through the tier resolver localizes the line and lets the tier toggle swap its voice without touching the model. A terminal run status short-circuits to a fixed completion line so a finished run reads as finished regardless of a lingering return leg.
+ *
+ * A call has two phases the caption distinguishes: the transit phase (lifecycle in_flight, the line animates) reads "A is calling B…" via the operation label; the working phase (lifecycle settled, the line goes solid because B has started producing) reads "B is planning…" via the working label of the destination — the relationship is no longer the story, B's own work is. When no working label is configured for the destination, the working phase falls back to the operation label so a minimal guild never crashes. An in-flight call appends an ellipsis to convey an action in progress; a settled return (the lingering response leg) carries no ellipsis because the leg is the current state, not a pending action.
  *
  * @param {InteractionModel} model
- * @param {{ resolveOperationLabel: (operation: Operation, participants: Participant[], tier: 'fun' | 'helpful' | 'detailed') => string }} labels
- * @param {'fun' | 'helpful' | 'detailed'} tier
+ * @param {{ resolveOperationLabel: (operation: Operation, participants: Participant[], tier: 'playful' | 'friendly' | 'detailed') => string, resolveWorkingLabel?: (participant: Participant, tier: 'playful' | 'friendly' | 'detailed') => string | null }} labels
+ * @param {'playful' | 'friendly' | 'detailed'} tier
  * @returns {string}
  */
 export function deriveNowCaption(model, labels, tier) {
@@ -639,6 +641,14 @@ export function deriveNowCaption(model, labels, tier) {
 	if (status === 'needs_clarification') return 'Waiting for your input…'
 	const operation = activeOperation(model)
 	if (operation === null) return 'Working…'
+	// A settled call is the working phase: the destination has started its own work, so the caption names what the destination is doing (e.g. "Planner is planning…") rather than the call relationship ("Orchestrator is calling Planner"). The working label is optional per participant; when absent the caption falls back to the operation label so a guild without working labels keeps the prior behavior.
+	if (operation.kind === 'call' && operation.lifecycle === 'settled' && typeof labels.resolveWorkingLabel === 'function') {
+		const destination = model.participants.find((participant) => participant.id === operation.destination)
+		if (destination !== undefined) {
+			const working = labels.resolveWorkingLabel(destination, tier)
+			if (working !== null) return `${working}…`
+		}
+	}
 	const label = labels.resolveOperationLabel(operation, model.participants, tier)
 	if (operation.lifecycle === 'in_flight') return `${label}…`
 	return label

@@ -1,6 +1,26 @@
 {
 	"name": "typecheck",
 	"description": "Run the workspace typechecker (currently Bun/TSC) and return its diagnostics. Runs a single fixed command with no model-chosen arguments, no network, and no installs. A non-zero exit code is a normal result to read and iterate on, not an error.",
+	"humanLabel": {
+		"detailed": "Type Check",
+		"friendly": "Check Types",
+		"playful": "Spellchecker for Code"
+	},
+	"humanDescription": {
+		"detailed": "Runs type checking on the workspace.",
+		"friendly": "Check code for type errors.",
+		"playful": "Check for typos."
+	},
+	"humanCallLabel": {
+		"detailed": "{source} is invoking tool {destination}",
+		"friendly": "{source} is running typecheck",
+		"playful": "{source} is calling the grammar grader"
+	},
+	"humanWorkingLabel": {
+		"detailed": "Running typecheck",
+		"friendly": "Checking types",
+		"playful": "Grading the grammar"
+	},
 	"parameters": {
 		"type": "object",
 		"properties": {

@@ -1,9 +1,31 @@
 {
 	"name": "edit_context",
 	"description": "Mutate the current role's message list to reduce token usage. Supports three operations applied in order: drop (remove a range of messages), strip_reasoning (clear reasoning blocks on a range), and replace (overwrite one message's content). Returns the new estimated prompt tokens and message count.",
+	"humanLabel": {
+		"detailed": "Edit Context",
+		"friendly": "Edit Memory",
+		"playful": "Trim the Fat"
+	},
+	"humanDescription": {
+		"detailed": "Mutates the conversation to reduce token usage.",
+		"friendly": "Compress or modify conversation history.",
+		"playful": "Squeeze more into less."
+	},
+	"humanCallLabel": {
+		"detailed": "{source} is invoking tool {destination}",
+		"friendly": "{source} is editing context",
+		"playful": "{source} is trimming the fat"
+	},
+	"humanWorkingLabel": {
+		"detailed": "Editing context",
+		"friendly": "Editing context",
+		"playful": "Trimming the fat"
+	},
 	"parameters": {
 		"type": "object",
-		"required": ["operations"],
+		"required": [
+			"operations"
+		],
 		"properties": {
 			"operations": {
 				"type": "array",

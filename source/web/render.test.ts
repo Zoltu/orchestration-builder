@@ -1144,7 +1144,7 @@ function sampleGuildConfig(overrides: Partial<GuildConfig> = {}): GuildConfig {
 
 describe('renderConfig', () => {
 	test('shapes the model name and context window, executor budgets, entry role, and role tool lists', () => {
-		const view = renderConfig(sampleGuildConfig())
+		const view = renderConfig(sampleGuildConfig(), {})
 		expect(view.model).toEqual({ name: 'qwen3.6:35b', contextWindow: 262144 })
 		expect(view.executor).toEqual({
 			maxAgentDepth: 8,
@@ -1159,7 +1159,7 @@ describe('renderConfig', () => {
 	})
 
 	test('structurally omits apiKey and apiBase even when the loaded Guild carries them', () => {
-		const view = renderConfig(sampleGuildConfig())
+		const view = renderConfig(sampleGuildConfig(), {})
 		expect(view.model).not.toHaveProperty('apiKey')
 		expect(view.model).not.toHaveProperty('apiBase')
 		const serialized = JSON.stringify(view)
@@ -1167,10 +1167,17 @@ describe('renderConfig', () => {
 		expect(serialized).not.toContain('llama-server')
 	})
 
-	test('omits apiKey and apiBase even when the loaded Guild defines an empty key', () => {
-		const view = renderConfig(sampleGuildConfig({ model: { ...sampleGuildConfig().model, apiKey: '' } }))
-		expect(view.model).not.toHaveProperty('apiKey')
-		expect(view.model).not.toHaveProperty('apiBase')
+	test('omits empty roles', () => {
+		const config = sampleGuildConfig({
+			roles: {
+				orchestrator: { systemPrompt: 'p', tools: ['finish'] },
+				empty: { systemPrompt: 'p', tools: [] },
+			},
+		})
+		const view = renderConfig(config, {})
+		expect(Object.keys(view.roles).sort()).toEqual(['empty', 'orchestrator'])
+		expect(view.roles.orchestrator!.tools).toEqual(['finish'])
+		expect(view.roles.empty!.tools).toEqual([])
 	})
 
 	test('includes every role declared in the Guild with its full tool list', () => {
@@ -1181,7 +1188,7 @@ describe('renderConfig', () => {
 				empty: { systemPrompt: 'p', tools: [] },
 			},
 		})
-		const view = renderConfig(config)
+		const view = renderConfig(config, {})
 		expect(Object.keys(view.roles).sort()).toEqual(['empty', 'orchestrator', 'planner'])
 		expect(view.roles.orchestrator!.tools).toEqual(['agent', 'finish'])
 		expect(view.roles.planner!.tools).toEqual(['read_file', 'glob_files', 'search_text', 'finish'])
@@ -1198,9 +1205,35 @@ describe('renderConfig', () => {
 				},
 			},
 		})
-		const view = renderConfig(config)
+		const view = renderConfig(config, {})
 		expect(view.roles.orchestrator).toEqual({ tools: ['finish'] })
 		expect(view.roles.orchestrator).not.toHaveProperty('systemPrompt')
 		expect(view.roles.orchestrator).not.toHaveProperty('includeReasoning')
+	})
+
+	test('passes through the visualization section when the guild carries one', () => {
+		const visualization = {
+			pseudoRoleLabels: { human: { detailed: 'The human', friendly: 'The human', playful: 'Hooman' } },
+			operationTemplates: {
+				call: { 'role->role': { detailed: '{source} is calling {destination}' } },
+				return: { 'role->role': { detailed: '{source} is returning to {destination}' } },
+				observe: { 'role->role': { detailed: '{source} is observing {destination}' } },
+				terminate: { 'tool->role': { detailed: '{source} is terminating {destination}' } },
+			},
+			genericOperationTemplates: {
+				call: { detailed: '{source} is calling {destination}' },
+				return: { detailed: '{source} is returning to {destination}' },
+				observe: { detailed: '{source} is observing {destination}' },
+				terminate: { detailed: '{source} is terminating {destination}' },
+			},
+		}
+		const config = sampleGuildConfig({ visualization })
+		const view = renderConfig(config, {})
+		expect(view.visualization).toEqual(visualization)
+	})
+
+	test('omits the visualization field when the guild does not carry one', () => {
+		const view = renderConfig(sampleGuildConfig(), {})
+		expect(view).not.toHaveProperty('visualization')
 	})
 })

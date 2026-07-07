@@ -45,3 +45,8 @@ Re-read the validation guards and `renderConfig` against `AGENTS.md` (type safet
 ## Operator handoff
 
 Confirm `/api/config` now carries the friendly labels and the seed guild's labels read well. (The UI does not yet consume live data — that is step 13.)
+
+## Closeout (2026-07-05)
+
+Closed. `bun run typecheck` and `bun test source/` (672 tests) green. The tiered-text validator is a single reusable predicate (`isHumanFacingText`) used by both role and tool validation — no duplicated shape logic. No `as` casts introduced. The seed guild now carries all three tiers on every role and tool; `/api/config` surfaces them. Phase B proceeds to step 13 (live hookup).
+

@@ -1,9 +1,31 @@
 {
 	"name": "ask_human",
 	"description": "Ask the human user a clarifying question when a reasonable guess cannot be made. Returns the user's answer. Use sparingly; prefer reasonable defaults and explain them.",
+	"humanLabel": {
+		"detailed": "Ask Human",
+		"friendly": "Question",
+		"playful": "Punt"
+	},
+	"humanDescription": {
+		"detailed": "Asks the human user a clarifying question when a reasonable guess cannot be made.",
+		"friendly": "Ask the user for clarification.",
+		"playful": "Get the inside scoop from the expert."
+	},
+	"humanCallLabel": {
+		"detailed": "{source} is invoking tool {destination}",
+		"friendly": "{source} is asking you a question",
+		"playful": "{source} is tugging your sleeve"
+	},
+	"humanWorkingLabel": {
+		"detailed": "Awaiting human input",
+		"friendly": "Waiting for your answer",
+		"playful": "Waiting for you to answer"
+	},
 	"parameters": {
 		"type": "object",
-		"required": ["question"],
+		"required": [
+			"question"
+		],
 		"properties": {
 			"question": {
 				"type": "string",

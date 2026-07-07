@@ -1,9 +1,32 @@
 {
 	"name": "write_file",
 	"description": "Write text contents to a file inside the workspace, creating parent directories as needed. Overwrites an existing file. Returns the workspace-relative path and the number of bytes written.",
+	"humanLabel": {
+		"detailed": "Write File",
+		"friendly": "Write",
+		"playful": "Pen It Down"
+	},
+	"humanDescription": {
+		"detailed": "Writes text contents to a file, creating parent directories if needed.",
+		"friendly": "Write or overwrite a file.",
+		"playful": "Put your mark on the file."
+	},
+	"humanCallLabel": {
+		"detailed": "{source} is invoking tool {destination}",
+		"friendly": "{source} is writing a file",
+		"playful": "{source} is picking up the pen"
+	},
+	"humanWorkingLabel": {
+		"detailed": "Writing file contents",
+		"friendly": "Writing a file",
+		"playful": "Penning a new chapter"
+	},
 	"parameters": {
 		"type": "object",
-		"required": ["path", "content"],
+		"required": [
+			"path",
+			"content"
+		],
 		"properties": {
 			"path": {
 				"type": "string",

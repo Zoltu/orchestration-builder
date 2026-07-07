@@ -8,10 +8,12 @@ import {
 	ExecutorConfig,
 	GenerationConfig,
 	GuildConfig,
+	HumanFacingText,
 	LogEvent,
 	Message,
 	MessageRole,
 	ModelConfig,
+	OperationKind,
 	ResultCard,
 	RoleDefinition,
 	RunMeta,
@@ -20,6 +22,7 @@ import {
 	ToolManifest,
 	ToolParameter,
 	ToolResult,
+	VisualizationConfig,
 } from './types.js'
 import type { ProjectSettings } from './persistence.js'
 
@@ -67,11 +70,58 @@ function isOptional<T>(value: unknown, predicate: (value: unknown) => value is T
 	return predicate(value)
 }
 
+function isHumanFacingText(value: unknown): value is HumanFacingText {
+	if (!isObject(value)) return false
+	if (!isString(value.detailed) || value.detailed === '') return false
+	if (!isOptionalString(value.playful)) return false
+	if (!isOptionalString(value.friendly)) return false
+	return true
+}
+
 const messageRoles: readonly MessageRole[] = ['system', 'user', 'assistant', 'tool']
 
 const resultCardStatuses: readonly ResultCard['status'][] = ['success', 'error', 'needs_clarification']
 
 const runMetaStatuses: readonly RunMeta['status'][] = ['running', 'success', 'error', 'needs_clarification']
+
+const operationKinds: readonly OperationKind[] = ['call', 'return', 'observe', 'terminate']
+
+function isRecordOfHumanFacingText(value: unknown): value is Record<string, HumanFacingText> {
+	if (!isObject(value)) return false
+	for (const key of Object.keys(value)) {
+		if (!isHumanFacingText(value[key])) return false
+	}
+	return true
+}
+
+function isOperationTemplates(value: unknown): value is Record<OperationKind, Record<string, HumanFacingText>> {
+	if (!isObject(value)) return false
+	for (const kind of operationKinds) {
+		const entry = value[kind]
+		if (entry === undefined) return false
+		if (!isRecordOfHumanFacingText(entry)) return false
+	}
+	return true
+}
+
+function isGenericOperationTemplates(value: unknown): value is Record<OperationKind, HumanFacingText> {
+	if (!isObject(value)) return false
+	for (const kind of operationKinds) {
+		const entry = value[kind]
+		if (entry === undefined) return false
+		if (!isHumanFacingText(entry)) return false
+	}
+	return true
+}
+
+export function isVisualizationConfig(value: unknown): value is VisualizationConfig {
+	if (!isObject(value)) return false
+	if (!isRecordOfHumanFacingText(value.pseudoRoleLabels)) return false
+	if (!isOperationTemplates(value.operationTemplates)) return false
+	if (!isGenericOperationTemplates(value.genericOperationTemplates)) return false
+	if (!isOptional(value.workingTemplates, isRecordOfHumanFacingText)) return false
+	return true
+}
 
 export function isMessageRole(value: unknown): value is MessageRole {
 	return typeof value === 'string' && messageRoles.some((r) => r === value)
@@ -114,6 +164,9 @@ export function isRoleDefinition(value: unknown): value is RoleDefinition {
 	if (!isString(value.systemPrompt)) return false
 	if (!isStringArray(value.tools)) return false
 	if (!isOptionalBoolean(value.includeReasoning)) return false
+	if (!isOptional(value.label, isHumanFacingText)) return false
+	if (!isOptional(value.description, isHumanFacingText)) return false
+	if (!isOptional(value.workingLabel, isHumanFacingText)) return false
 	return true
 }
 
@@ -126,6 +179,7 @@ export function isGuildConfig(value: unknown): value is GuildConfig {
 	if (!isString(value.entryRole)) return false
 	if (!isObject(value.roles) || !isRecordOf(value.roles, isRoleDefinition)) return false
 	if (!isStringArray(value.tools)) return false
+	if (!isOptional(value.visualization, isVisualizationConfig)) return false
 	return true
 }
 
@@ -151,6 +205,10 @@ export function isToolManifest(value: unknown): value is ToolManifest {
 	if (!isString(value.description)) return false
 	if (!isToolParameter(value.parameters)) return false
 	if (value.parameters.type !== 'object') return false
+	if (!isOptional(value.humanLabel, isHumanFacingText)) return false
+	if (!isOptional(value.humanDescription, isHumanFacingText)) return false
+	if (!isOptional(value.humanCallLabel, isHumanFacingText)) return false
+	if (!isOptional(value.humanWorkingLabel, isHumanFacingText)) return false
 	return true
 }
 
@@ -300,6 +358,15 @@ function validateRoleDefinition(value: unknown, path: string): asserts value is 
 	ensure(isString, value.systemPrompt, `${path}.systemPrompt`, 'expected a string')
 	ensure(isStringArray, value.tools, `${path}.tools`, 'expected an array of strings')
 	ensure(isOptionalBoolean, value.includeReasoning, `${path}.includeReasoning`, 'expected a boolean or undefined')
+	if (value.label !== undefined && !isHumanFacingText(value.label)) {
+		throw new ValidationError(`${path}.label`, 'expected an object with detailed, optional playful and friendly')
+	}
+	if (value.description !== undefined && !isHumanFacingText(value.description)) {
+		throw new ValidationError(`${path}.description`, 'expected an object with detailed, optional playful and friendly')
+	}
+	if (value.workingLabel !== undefined && !isHumanFacingText(value.workingLabel)) {
+		throw new ValidationError(`${path}.workingLabel`, 'expected an object with detailed, optional playful and friendly')
+	}
 }
 
 export function validateGuildConfig(value: unknown): asserts value is GuildConfig {
@@ -314,6 +381,23 @@ export function validateGuildConfig(value: unknown): asserts value is GuildConfi
 		validateRoleDefinition(role, `roles.${name}`)
 	}
 	ensure(isStringArray, value.tools, 'tools', 'expected an array of strings')
+	if (value.visualization !== undefined) validateVisualizationConfig(value.visualization, 'visualization')
+}
+
+export function validateVisualizationConfig(value: unknown, path: string): asserts value is VisualizationConfig {
+	if (!isObject(value)) throw new ValidationError(path, 'expected an object')
+	if (!isRecordOfHumanFacingText(value.pseudoRoleLabels)) {
+		throw new ValidationError(`${path}.pseudoRoleLabels`, 'expected an object of HumanFacingText entries')
+	}
+	if (!isOperationTemplates(value.operationTemplates)) {
+		throw new ValidationError(`${path}.operationTemplates`, 'expected an object keyed by call/return/observe/terminate, each a record of HumanFacingText entries')
+	}
+	if (!isGenericOperationTemplates(value.genericOperationTemplates)) {
+		throw new ValidationError(`${path}.genericOperationTemplates`, 'expected an object keyed by call/return/observe/terminate, each a HumanFacingText entry')
+	}
+	if (value.workingTemplates !== undefined && !isRecordOfHumanFacingText(value.workingTemplates)) {
+		throw new ValidationError(`${path}.workingTemplates`, 'expected an object of HumanFacingText entries keyed by participant kind')
+	}
 }
 
 export function validateToolParameter(value: unknown, path: string): asserts value is ToolParameter {
@@ -335,6 +419,18 @@ export function validateToolManifest(value: unknown): asserts value is ToolManif
 	ensure(isString, value.description, 'description', 'expected a string')
 	validateToolParameter(value.parameters, 'parameters')
 	if (value.parameters.type !== 'object') throw new ValidationError('parameters.type', 'expected "object"')
+	if (value.humanLabel !== undefined && !isHumanFacingText(value.humanLabel)) {
+		throw new ValidationError('humanLabel', 'expected an object with detailed, optional playful and friendly')
+	}
+	if (value.humanDescription !== undefined && !isHumanFacingText(value.humanDescription)) {
+		throw new ValidationError('humanDescription', 'expected an object with detailed, optional playful and friendly')
+	}
+	if (value.humanCallLabel !== undefined && !isHumanFacingText(value.humanCallLabel)) {
+		throw new ValidationError('humanCallLabel', 'expected an object with detailed, optional playful and friendly')
+	}
+	if (value.humanWorkingLabel !== undefined && !isHumanFacingText(value.humanWorkingLabel)) {
+		throw new ValidationError('humanWorkingLabel', 'expected an object with detailed, optional playful and friendly')
+	}
 }
 
 export function validateMessage(value: unknown): asserts value is Message {

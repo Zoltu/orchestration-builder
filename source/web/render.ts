@@ -1,7 +1,7 @@
 
 import type { PendingQuestion } from '../executor/human-backend.js'
 import { isRunMeta } from '../executor/validation.js'
-import type { EffortLevel, ExecutorConfig, GuildConfig, LogEvent, ResultCard, RunMeta } from '../executor/types.js'
+import type { EffortLevel, ExecutorConfig, GuildConfig, LogEvent, ResultCard, RunMeta, ToolManifest, HumanFacingText, VisualizationConfig } from '../executor/types.js'
 import type { ProjectSettings, RunSnapshotRaw } from '../executor/persistence.js'
 
 export interface RunSnapshot {
@@ -582,18 +582,37 @@ export interface GuildConfigView {
 	model: { name: string; contextWindow: number }
 	executor: ExecutorConfig
 	entryRole: string
-	roles: Record<string, { tools: string[] }>
+	roles: Record<string, { tools: string[]; label?: HumanFacingText; description?: HumanFacingText; workingLabel?: HumanFacingText }>
+	tools: Record<string, { humanLabel?: HumanFacingText; humanDescription?: HumanFacingText; humanCallLabel?: HumanFacingText; humanWorkingLabel?: HumanFacingText }>
+	visualization?: VisualizationConfig
 }
 
-export function renderConfig(config: GuildConfig): GuildConfigView {
-	const roles: Record<string, { tools: string[] }> = {}
+export function renderConfig(config: GuildConfig, tools: Record<string, ToolManifest>): GuildConfigView {
+	const roles: Record<string, { tools: string[]; label?: HumanFacingText; description?: HumanFacingText; workingLabel?: HumanFacingText }> = {}
 	for (const [name, role] of Object.entries(config.roles)) {
-		roles[name] = { tools: role.tools }
+		roles[name] = {
+			tools: role.tools,
+			label: role.label,
+			description: role.description,
+			workingLabel: role.workingLabel,
+		}
 	}
-	return {
+	const toolsView: Record<string, { humanLabel?: HumanFacingText; humanDescription?: HumanFacingText; humanCallLabel?: HumanFacingText; humanWorkingLabel?: HumanFacingText }> = {}
+	for (const [name, tool] of Object.entries(tools)) {
+		toolsView[name] = {
+			humanLabel: tool.humanLabel,
+			humanDescription: tool.humanDescription,
+			humanCallLabel: tool.humanCallLabel,
+			humanWorkingLabel: tool.humanWorkingLabel,
+		}
+	}
+	const view: GuildConfigView = {
 		model: { name: config.model.name, contextWindow: config.model.contextWindow },
 		executor: config.executor,
 		entryRole: config.entryRole,
 		roles,
+		tools: toolsView,
 	}
+	if (config.visualization !== undefined) view.visualization = config.visualization
+	return view
 }

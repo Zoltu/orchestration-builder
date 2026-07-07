@@ -60,19 +60,27 @@ An interrupt spawns a **new call stack** rooted at a fresh `Interrupt` pseudo-pa
 
 - **Occur at any time, including mid-flight.** A paused stack may carry an `in_flight` operation; the view freezes its animation while the model keeps its `lifecycle` as `in_flight`.
 - **Unbounded and nest.** An interrupt can interrupt an interrupt. Each gets a unique `stack` id; the active stack is the latest; fates cascade when stacks resolve inward.
-- **The flow view renders each non-terminated stack as a row**: the main run (rooted at `You`) at the top, each preempting interrupt stack (rooted at an Interrupt instance) below it, active stack at the bottom. `observe` and `terminate` lines cross from the active stack up into a paused row.
+- **The flow view renders each non-terminated stack as a row**: the main run (rooted at the human) at the top, each preempting interrupt stack (rooted at an Interrupt instance) below it, active stack at the bottom. `observe` and `terminate` lines cross from the active stack up into a paused row.
 - **A paused stack's fate is read off its own operations after the preemption point, not stored as a field** (`fateOf`): **resume** (the next op lands back on the old stack id), **rewind** (a run of `terminated` returns followed by a fresh `call` from an ancestor — backing out a leg and restarting it), or **terminate** (`terminated` returns all the way to the root). A stack with no open calls left is **terminated**; the active stack is **active**.
-- **The `interrupt` column/root appears only on first use.** A normal run with no interrupts is not cluttered with an interrupt lifeline. `human`/`You` is always present — every run starts with a human-submitted task.
+- **The `interrupt` column/root appears only on first use.** A normal run with no interrupts is not cluttered with an interrupt lifeline. `human` is always present — every run starts with a human-submitted task.
 
 ## Labels
 
-Labels are **localization, a view concern** (`source/web/static/labels.js`). The model carries no prose. A localization registry maps participant `role`/`kind` and operation `kind` to three tiers:
+Labels are **localization**, and the localization data lives in the **Guild** so a swapped Guild re-flavors the views without a frontend change. The model carries no prose; the resolver (`source/web/static/labels.js`, a `createLabelResolver(config)` factory) reads three data sources the frontend already loads via `GET /api/config`:
 
-- **fun** — playful, targeted at children/playful users. Fun wins strongly over precise.
-- **helpful** — informative and mildly accurate for non-technical users.
+- **Real role labels** — `role.label` on each role definition; `role.workingLabel` carries the active/working-state text (with a `{participant}` placeholder) used when a settled call's destination is doing its own work.
+- **Real tool labels** — `tool.humanLabel` on each tool manifest; `tool.humanCallLabel` is a per-tool call-operation template (with `{source}` and optionally `{destination}`) that overrides the generic `role->tool` / `interrupt->tool` operation template; `tool.humanWorkingLabel` is the per-tool working-state text (optionally with `{participant}`) that overrides the generic tool working template.
+- **The `visualization` section** (`guild.json`) — `pseudoRoleLabels` for the `human`/`interrupt`/`tools` pseudo-roles the views invent, `operationTemplates` and `genericOperationTemplates` keyed by operation kind and a `sourceKind->destinationKind` discriminator, and `workingTemplates` (generic per-participant-kind fallback for the working state when a role/tool has no per-entry `workingLabel`/`humanWorkingLabel`).
+
+Three tiers serve different audiences:
+
+- **playful** — playful, targeted at children/playful users. Playful wins strongly over precise.
+- **friendly** — informative and mildly accurate for non-technical users.
 - **detailed** — extremely precise for technical users.
 
-Operation labels are templated entries that interpolate the source and destination participant labels (resolved at the same tier). A UI **tier toggle** swaps which tier the views render without touching the model — like locale switching. The fallback chain walks `detailed → helpful → fun` (then the title-cased role name), so a guild author who omits a tier still gets a readable line. The `details` markdown field on each operation is the rich per-call runtime content (arguments/results/summaries); that is data, not localization, so it lives on the model and the adapter formats it.
+Operation labels are templated entries that interpolate the source and destination participant labels (resolved at the same tier). A UI **tier toggle** swaps which tier the views render without touching the model — like locale switching. The fallback chain walks `detailed → friendly → playful` (then the title-cased role name), so a guild author who omits a tier still gets a readable line. The `details` markdown field on each operation is the rich per-call runtime content (arguments/results/summaries); that is data, not localization, so it lives on the model and the adapter formats it.
+
+The "now" caption distinguishes a call's two phases: the **transit** phase (the line animates, `lifecycle === 'in_flight'`) reads the operation label ("A is calling B…"); the **working** phase (the line goes solid, `lifecycle === 'settled'` — the destination has started producing) switches to the destination's **working label** ("B is planning…" / "Receiving tokens from B"). The working label is per-role (`role.workingLabel`, a `{participant}` template interpolated with the role's own label at the chosen tier); a role without one falls back to `visualization.workingTemplates[kind]` (generic per participant kind); a guild without either falls back to the operation label, so a minimal guild keeps the prior behavior.
 
 ## The two views
 

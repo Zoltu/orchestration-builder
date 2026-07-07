@@ -7,6 +7,7 @@ export interface GuildConfig {
 	entryRole: string
 	roles: Record<string, RoleDefinition>
 	tools: string[]
+	visualization?: VisualizationConfig
 }
 
 export interface ModelConfig {
@@ -33,16 +34,29 @@ export interface ContextPolicy {
 	maxToolOutputChars: number
 }
 
+export interface HumanFacingText {
+	detailed: string
+	playful?: string
+	friendly?: string
+}
+
 export interface RoleDefinition {
 	systemPrompt: string
 	tools: string[]
 	includeReasoning?: boolean
+	label?: HumanFacingText
+	description?: HumanFacingText
+	workingLabel?: HumanFacingText
 }
 
 export interface ToolManifest {
 	name: string
 	description: string
 	parameters: ToolParameter
+	humanLabel?: HumanFacingText
+	humanDescription?: HumanFacingText
+	humanCallLabel?: HumanFacingText
+	humanWorkingLabel?: HumanFacingText
 }
 
 export interface ToolParameter {
@@ -91,6 +105,17 @@ export type ErrorKind =
 export type ToolResult =
 	| { kind: 'success'; data?: unknown }
 	| { kind: ErrorKind; message?: string; details?: unknown }
+
+export type OperationKind = 'call' | 'return' | 'observe' | 'terminate'
+
+export type ParticipantKind = 'human' | 'interrupt' | 'role' | 'tool'
+
+export interface VisualizationConfig {
+	pseudoRoleLabels: Record<string, HumanFacingText>
+	operationTemplates: Record<OperationKind, Record<string, HumanFacingText>>
+	genericOperationTemplates: Record<OperationKind, HumanFacingText>
+	workingTemplates?: Record<string, HumanFacingText>
+}
 
 export interface ResultCard {
 	status: 'success' | 'error' | 'needs_clarification'

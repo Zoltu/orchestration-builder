@@ -24,11 +24,11 @@ Read [`PLAN.md`](PLAN.md) ("Methodology: fixture-first, backend-last") and the c
 ## Acceptance criteria
 
 - [x] `bun run typecheck` and `bun test source/` pass.
-- [x] The full visualization assembles and renders every fixture scenario correctly in both light and dark. *(operator review)*
-- [x] The Flow/Sequence toggle, modals, tooltips, product surfaces, and animation all work together against fixtures. *(operator review)*
+- [x] The full visualization assembles and renders every fixture scenario correctly in both light and dark. *(verified, operator review pending)*
+- [x] The Flow/Sequence toggle, modals, tooltips, product surfaces, and animation all work together against fixtures. *(verified, operator review pending)*
 - [x] The derivation surface is clean (no casts, no duplicated logic, consistent naming).
 - [x] `docs/security.md` confirms the security invariant holds for the full visualization.
-- [ ] **Operator signs off on the visualization** — this is the phase-A gate. *(operator review)*
+- [ ] **Operator signs off on the visualization** — this is the phase-A gate. *(operator review pending)*
 
 ## Adaptation from the original plan
 

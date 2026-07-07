@@ -1,6 +1,26 @@
 {
 	"name": "context_info",
 	"description": "Return metadata about the current role's conversation: context window size, estimated current prompt tokens, last reported prompt tokens, remaining budget, and a per-message snapshot (index, role, content length, reasoning length).",
+	"humanLabel": {
+		"detailed": "Context Info",
+		"friendly": "Context",
+		"playful": "Memory Check"
+	},
+	"humanDescription": {
+		"detailed": "Returns metadata about the current conversation context.",
+		"friendly": "Check conversation memory usage.",
+		"playful": "Peek at the memory bank."
+	},
+	"humanCallLabel": {
+		"detailed": "{source} is invoking tool {destination}",
+		"friendly": "{source} is checking context",
+		"playful": "{source} is peeking at the memory"
+	},
+	"humanWorkingLabel": {
+		"detailed": "Reading context info",
+		"friendly": "Checking context",
+		"playful": "Peeking at the memory"
+	},
 	"parameters": {
 		"type": "object"
 	}

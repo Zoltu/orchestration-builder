@@ -1,14 +1,15 @@
 import { describe, expect, test } from 'bun:test'
 import { renderSequenceView, COLUMN_WIDTH, HEADER_HEIGHT, ROW_HEIGHT, LEFT_MARGIN } from './static/sequence-diagram.js'
 import { activeOperation, activeStack, observesOf } from './static/interaction-model.js'
-import * as labelsModule from './static/labels.js'
+import { createLabelResolver } from './static/labels.js'
+import { labelsModule } from './label-resolver-fixture.js'
 import { scenarios, GUILD_PARTICIPANTS } from './static/scenarios.js'
 
 // Pull the model type off a helper signature so the inline fixtures are contextually checked against the JSDoc shape without a cast, mirroring the sibling mvc-flow-view.test.ts convention.
 type InteractionModel = Parameters<typeof observesOf>[0]
 type Participant = InteractionModel['participants'][number]
 type Operation = InteractionModel['operations'][number]
-type LabelTier = Parameters<typeof labelsModule.resolveParticipantLabel>[1]
+type LabelTier = Parameters<ReturnType<typeof createLabelResolver>['resolveParticipantLabel']>[1]
 
 // A fake `h` capturing the tag, props, and children of every vnode so the layout assertions walk a plain object tree rather than real DOM, mirroring the sibling test convention.
 interface Vnode {

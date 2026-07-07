@@ -216,6 +216,7 @@ const readOnlySettings = createInMemorySettings()
 const readOnlyServer: WebServer = createWebServer({
 	port: 0,
 	guildConfig: sampleGuildConfig,
+	tools: {},
 	runState,
 	runSubmission: createRunSubmission({
 		startRun: async () => ({ runId: 'unused', guildPath: 'g', benchmarkPath: 'b', task: 't', status: 'success', startTime: 's' }),
@@ -260,6 +261,7 @@ function createSubmissionServer(): SubmissionServer {
 	const server = createWebServer({
 		port: 0,
 		guildConfig: sampleGuildConfig,
+		tools: {},
 		runState: createRunState({ humanBackend: createWebHumanBackend() }),
 		runSubmission: submission,
 		readRunSnapshotById,

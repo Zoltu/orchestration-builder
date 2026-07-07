@@ -1,15 +1,16 @@
 import { describe, expect, test } from 'bun:test'
 import { deriveLifecycle, renderFlowView, deriveNowCaption, deriveCostStrip, COL_GAP } from './static/flow-view.js'
 import { activeParticipant, activeStack, observesOf, stacksOf } from './static/interaction-model.js'
-import * as labelsModule from './static/labels.js'
+import { createLabelResolver } from './static/labels.js'
+import { labelsModule } from './label-resolver-fixture.js'
 import { scenarios } from './static/scenarios.js'
 import { NODE_WIDTH } from './static/svg-primitives.js'
 
-// Pull the model type off the helper signatures so the inline fixtures are contextually checked against the JSDoc shape without a cast, mirroring the sibling interaction-model.test.ts convention.
+// Pull the model type off a helper signature so the inline fixtures are contextually checked against the JSDoc shape without a cast, mirroring the sibling interaction-model.test.ts convention.
 type InteractionModel = Parameters<typeof stacksOf>[0]
 type Participant = InteractionModel['participants'][number]
 type Operation = InteractionModel['operations'][number]
-type LabelTier = Parameters<typeof labelsModule.resolveParticipantLabel>[1]
+type LabelTier = Parameters<ReturnType<typeof createLabelResolver>['resolveParticipantLabel']>[1]
 
 // A fake `h` capturing the tag, props, and children of every vnode so the layout assertions walk a plain object tree rather than real DOM, mirroring the flow-view.test.ts convention.
 interface Vnode {
@@ -626,24 +627,46 @@ describe('deriveNowCaption — active participant + in-flight operation', () => 
 	})
 
 	test('an in-flight call names the source and destination via the operation label at the chosen tier with a trailing ellipsis', () => {
-		// delegation-chain op2 transit: op2 (orchestrator→planner) is the in-flight call on the active root stack, so the caption resolves its label at the chosen tier and appends an ellipsis. The detailed tier interpolates the role identifiers; the fun tier interpolates the playful participant labels.
+		// delegation-chain op2 transit: op2 (orchestrator→planner) is the in-flight call on the active root stack, so the caption resolves its label at the chosen tier and appends an ellipsis. The detailed tier interpolates the role identifiers; the playful tier interpolates the playful participant labels.
 		const frame = scenarioFrame('delegation-chain', 2)
-		expect(deriveNowCaption(frame, labelsModule, 'detailed')).toBe('call orchestrator → planner…')
-		expect(deriveNowCaption(frame, labelsModule, 'fun')).toBe('The Conductor pass the baton to The Mapmaker…')
+		expect(deriveNowCaption(frame, labelsModule, 'detailed')).toBe('Orchestrator is calling Planner…')
+		expect(deriveNowCaption(frame, labelsModule, 'playful')).toBe('Conductor is passing the baton to Strategist…')
+	})
+
+	test('a settled call (the working phase) names what the destination is doing via its working label at the chosen tier with a trailing ellipsis', () => {
+		// delegation-chain op2 working: op2 (orchestrator→planner) has settled, so the call line is solid and the caption switches from the call relationship to what the destination (planner) is doing — the working label of the destination, not the operation label of the call. The three tiers resolve to three distinct voices; the detailed tier names the technical event (receiving tokens), the friendly tier names the role's activity, the playful tier names the playful persona's action.
+		const frame = scenarioFrame('delegation-chain', 3)
+		expect(deriveNowCaption(frame, labelsModule, 'detailed')).toBe('Receiving tokens from Planner…')
+		expect(deriveNowCaption(frame, labelsModule, 'friendly')).toBe('Planner is planning the approach…')
+		expect(deriveNowCaption(frame, labelsModule, 'playful')).toBe('Strategist is charting the course…')
+	})
+
+	test('a settled call to a tool uses the per-tool working template at the chosen tier', () => {
+		// delegation-chain op4 working: op4 (coder→readFile) has settled, so the caption resolves the working label of the tool destination. read_file carries a per-tool humanWorkingLabel, so the caption reads "Reading file contents…" (detailed) / "Reading a book…" (playful) rather than the generic tool fallback.
+		const frame = scenarioFrame('delegation-chain', 7)
+		expect(deriveNowCaption(frame, labelsModule, 'detailed')).toBe('Reading file contents…')
+		expect(deriveNowCaption(frame, labelsModule, 'playful')).toBe('Reading a book…')
+	})
+
+	test('an in-flight call to a tool uses the per-tool call template at the chosen tier', () => {
+		// delegation-chain op4 transit: op4 (coder→readFile) is in flight, so the caption resolves the call operation label. read_file carries a per-tool humanCallLabel, so the caption reads "Coder is getting a book off the shelf…" (playful) rather than the generic "grabbing the {destination} gadget" template.
+		const frame = scenarioFrame('delegation-chain', 6)
+		expect(deriveNowCaption(frame, labelsModule, 'detailed')).toBe('Coder is invoking tool Read File…')
+		expect(deriveNowCaption(frame, labelsModule, 'playful')).toBe('Builder is getting a book off the shelf…')
 	})
 
 	test('a settled return (the lingering response leg) carries no ellipsis because the leg is the current state', () => {
 		// delegation-chain op5 working: readFile has returned to coder; the return is the latest non-observe operation on the active root stack, so the caption reads its return label without an ellipsis.
 		const frame = scenarioFrame('delegation-chain', 9)
-		expect(deriveNowCaption(frame, labelsModule, 'detailed')).toBe('tool read_file (tool) returned to coder')
+		expect(deriveNowCaption(frame, labelsModule, 'detailed')).toBe('tool Read File is returning to Coder')
 	})
 
 	test('the tier toggle swaps the caption voice without touching the model', () => {
 		// delegation-chain op1 transit: op1 (you→orchestrator) is the in-flight call; the three tiers resolve to three distinct voices.
 		const frame = scenarioFrame('delegation-chain', 0)
-		expect(deriveNowCaption(frame, labelsModule, 'fun')).toBe('You hand the quest to The Conductor…')
-		expect(deriveNowCaption(frame, labelsModule, 'helpful')).toBe('You ask Orchestrator to start…')
-		expect(deriveNowCaption(frame, labelsModule, 'detailed')).toBe('call You (human) → orchestrator…')
+		expect(deriveNowCaption(frame, labelsModule, 'playful')).toBe('Hooman is handing the quest off to Conductor…')
+		expect(deriveNowCaption(frame, labelsModule, 'friendly')).toBe('The human is asking Orchestrator to start…')
+		expect(deriveNowCaption(frame, labelsModule, 'detailed')).toBe('The human is calling Orchestrator…')
 	})
 
 	test('an empty model with a running status falls back to the working placeholder', () => {

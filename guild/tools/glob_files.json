@@ -1,9 +1,31 @@
 {
 	"name": "glob_files",
 	"description": "Find files in the workspace whose relative paths match a glob pattern. Supports * (single segment), ** (any depth), ? (single char), and {a,b} alternation. Returns matching paths sorted alphabetically.",
+	"humanLabel": {
+		"detailed": "Glob Files",
+		"friendly": "Search Files",
+		"playful": "File Hunter"
+	},
+	"humanDescription": {
+		"detailed": "Finds files matching a glob pattern in the workspace.",
+		"friendly": "Find files by name pattern.",
+		"playful": "Go fishing for files."
+	},
+	"humanCallLabel": {
+		"detailed": "{source} is invoking tool {destination}",
+		"friendly": "{source} is searching for files",
+		"playful": "{source} is hunting for files"
+	},
+	"humanWorkingLabel": {
+		"detailed": "Globbing files",
+		"friendly": "Searching for files",
+		"playful": "Hunting for files"
+	},
 	"parameters": {
 		"type": "object",
-		"required": ["pattern"],
+		"required": [
+			"pattern"
+		],
 		"properties": {
 			"pattern": {
 				"type": "string",

@@ -4,7 +4,7 @@ import * as path from 'node:path'
 import { existsSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import type { ListRunIds, ReadProjectSettings, ReadRunSnapshotById, WriteProjectSettings } from '../executor/persistence.js'
-import type { EffortLevel, GuildConfig } from '../executor/types.js'
+import type { EffortLevel, GuildConfig, ToolManifest } from '../executor/types.js'
 import { isEffortLevel } from '../executor/validation.js'
 import type { RunState } from '../executor/run-state.js'
 import type { RunSubmission } from '../executor/run-submission.js'
@@ -26,6 +26,7 @@ const CONTENT_TYPES: Record<string, string> = {
 export interface WebServerConfig {
 	port: number
 	guildConfig: GuildConfig
+	tools: Record<string, ToolManifest>
 	runState: RunState
 	runSubmission: RunSubmission
 	readRunSnapshotById: ReadRunSnapshotById
@@ -180,7 +181,7 @@ export function createWebServer(config: WebServerConfig): WebServer {
 			const { pathname } = url
 
 		if (request.method === 'GET') {
-			if (pathname === '/api/config') return json(renderConfig(guildConfig))
+			if (pathname === '/api/config') return json(renderConfig(guildConfig, config.tools))
 			if (pathname === '/api/settings') return handleGetSettings(readProjectSettings)
 			if (pathname === '/api/run') return handleActiveRun(readRunSnapshotById, runSubmission)
 				if (pathname === '/api/runs') return handleListRuns(readRunSnapshotById, listRunIds)

@@ -1937,7 +1937,7 @@ li:last-child {
 	user-select: none;
 }
 
-/* Column headers sit above their lifelines and are the friendly role/tool labels (or "You"/"Tools" for the special columns). The tools column reads as muted so the role chain stays focal. */
+/* Column headers sit above their lifelines and are the friendly role/tool labels (or "The human"/"Tools" for the special columns). The tools column reads as muted so the role chain stays focal. */
 .seq-column-label {
 	fill: var(--svg-node-label);
 	font-size: 12px;

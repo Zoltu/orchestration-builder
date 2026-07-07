@@ -140,9 +140,12 @@ System prompts and tool manifests are plain files so the Foundry can rewrite the
   "contextPolicy": { ... },
   "entryRole": "orchestrator",
   "roles": { ... },
-  "tools": [ ... ]
+  "tools": [ ... ],
+  "visualization": { ... }
 }
 ```
+
+The optional `visualization` section carries display-only localization the web client reads through `GET /api/config`: `pseudoRoleLabels` (labels for the `human`/`interrupt`/`tools` pseudo-roles the views invent), `operationTemplates` (per-kind, per-source-kind→destination-kind tiered templates that interpolate `{source}` and `{destination}`), `genericOperationTemplates` (per-kind fallbacks), and `workingTemplates` (generic per-participant-kind fallback for the working-state caption when a role/tool has no per-entry `workingLabel`). The executor ignores it; it exists so a swapped Guild re-flavors the diagram without a frontend change. See [`docs/visualization.md`](visualization.md) "Labels".
 
 ### `model`
 
@@ -204,10 +207,13 @@ Role fields:
 - `systemPrompt` (string, required): path to a Markdown file.
 - `tools` (array, required): tool names this role may call.
 - `includeReasoning` (boolean, optional): include reasoning from prior turns. Default `false`.
+- `label` (object, optional): tiered display name (`{ detailed, friendly, playful }`) the web client renders.
+- `description` (object, optional): tiered one-line description of the role.
+- `workingLabel` (object, optional): tiered text for the "now" caption when this role is the destination of a settled call (its working phase). A `{participant}` placeholder interpolates to the role's own label at the chosen tier — e.g. `"{participant} is planning the approach"` → "Planner is planning the approach". See [`docs/visualization.md`](visualization.md) "Labels".
 
 ### `tools`
 
-A list of tool-manifest file paths. Each manifest declares `name`, `description`, and `parameters` (JSON Schema). The executor validates calls against the schema and exposes the tools to the model in the chat/completions request.
+A list of tool-manifest file paths. Each manifest declares `name`, `description`, and `parameters` (JSON Schema). The executor validates calls against the schema and exposes the tools to the model in the chat/completions request. Each manifest also carries optional display fields the web client reads through `GET /api/config`: `humanLabel` (tiered display name), `humanDescription` (tiered one-line description), `humanCallLabel` (tiered template for the operation label when an agent calls this tool — interpolates `{source}` and optionally `{destination}`), and `humanWorkingLabel` (tiered text for the "now" caption when this tool is the active/working node — optionally interpolates `{participant}`). See [`docs/visualization.md`](visualization.md) "Labels".
 
 ### Tool availability
 
