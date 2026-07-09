@@ -4,7 +4,7 @@
 
 Build the two-component flow view as a **render-only client**: a **history top bar** (small nodes, cumulative stats, one per role-type and per tool-type and "You" that has ever run) and a **main area** (left-to-right, only active + lingering nodes, call-depth columns, straight anchor edges). The view consumes a hand-authored `FlowModel` carried on each fixture frame — the exact shape the future `/api/runs/:id/flow` endpoint will return — so the visualization is iterated against the step-01 fixture timelines without any backend work this step. The view is static this step (animation, lifecycle transitions, and flow direction are step 04).
 
-This step **does not** build a client-side derivation (`deriveFlowGraph`) and **does not** wire the pathfinding library into the flow view. The decision to move the model derivation to the backend (so the frontend never reconstructs active-path/lingering/in-flight state from a truncated log) is recorded in [`16-flow-model-backend.md`](16-flow-model-backend.md); this step builds the renderer that step 13 will point at the live endpoint.
+This step **does not** build a client-side derivation (`deriveFlowGraph`) and **does not** wire the pathfinding library into the flow view. The decision to move the model derivation to the backend (so the frontend never reconstructs active-path/lingering/in-flight state from a truncated log) is recorded in [`13-backend-interaction-model-adapter.md`](13-backend-interaction-model-adapter.md); this step builds the renderer that step 14 will point at the live endpoint.
 
 ## Context
 
