@@ -6,12 +6,12 @@ Build the localization layer that keeps prose out of the model. A registry mappi
 
 ## Context
 
-Read [`PLAN.md`](PLAN.md) ("Labels (settled design)"). The three tiers serve different audiences: **fun** is playful (children/playful users), **helpful** is informative-but-imprecise (non-technical), **detailed** is precise (technical). The tier toggle swaps the registry without touching the model — a view concern, like locale switching. Operation labels are templated off `kind` + the referenced roles so the model never carries display prose; the per-call `details` markdown (arguments/results/summaries) is runtime data the adapter formats, not localization, so it lives on the model and is untouched by the toggle.
+Read [`PLAN.md`](PLAN.md) ("Labels (settled design)"). The three tiers serve different audiences: **fun** is whimsical (children/whimsical users), **helpful** is informative-but-imprecise (non-technical), **detailed** is precise (technical). The tier toggle swaps the registry without touching the model — a view concern, like locale switching. Operation labels are templated off `kind` + the referenced roles so the model never carries display prose; the per-call `details` markdown (arguments/results/summaries) is runtime data the adapter formats, not localization, so it lives on the model and is untouched by the toggle.
 
 ## Deliverables
 
 1. **`source/web/static/mvc/labels.js`** — the registry + resolver, browser-pure:
-   - A participant-label table keyed by `role`/`kind` → `{ fun, helpful, detailed }`, seeded with the demo guild's roles and tools plus the `human` ("You" across tiers, or playful variants) and `interrupt` pseudo-roles. `fun` entries are deliberately playful and may sacrifice precision; `detailed` entries are precise.
+   - A participant-label table keyed by `role`/`kind` → `{ fun, helpful, detailed }`, seeded with the demo guild's roles and tools plus the `human` ("You" across tiers, or whimsical variants) and `interrupt` pseudo-roles. `fun` entries are deliberately whimsical and may sacrifice precision; `detailed` entries are precise.
    - An operation-label table keyed by `kind` (`call`, `return`, `observe`) and a discriminator (e.g. role→role, role→tool, role→human) → templated entries per tier that interpolate the source/destination role labels.
    - `resolveParticipantLabel(participant, tier)` and `resolveOperationLabel(operation, participants, tier)` — return the chosen tier, falling back `detailed → helpful → fun` (or the title-cased role name) when a tier is absent, so a guild author who omits a tier still gets a readable line.
    - The registry is data (an object literal); the resolver is a small pure function over it.
@@ -28,6 +28,6 @@ Read [`PLAN.md`](PLAN.md) ("Labels (settled design)"). The three tiers serve dif
 
 - [ ] `bun run typecheck` and `bun test source/` pass.
 - [ ] All three tiers render for every demo-scenario participant and operation; the fallback chain works when a tier is omitted.
-- [ ] Operation labels interpolate source/destination role labels per tier (a `call` from chef to baker reads playfully in `fun`, precisely in `detailed`).
+- [ ] Operation labels interpolate source/destination role labels per tier (a `call` from chef to baker reads whimsically in `fun`, precisely in `detailed`).
 - [ ] The demo tier toggle re-renders the debug view without touching the underlying model.
 - [ ] No prose strings hardcoded in the model or (eventually) the views; the registry is the only label source. No plan/step references in source.

@@ -70,11 +70,19 @@ function isOptional<T>(value: unknown, predicate: (value: unknown) => value is T
 	return predicate(value)
 }
 
+function isNonEmptyStringArray(value: unknown): value is string[] {
+	return Array.isArray(value) && value.length > 0 && value.every(isString)
+}
+
+function isOptionalNonEmptyStringArray(value: unknown): boolean {
+	return value === undefined || isNonEmptyStringArray(value)
+}
+
 function isHumanFacingText(value: unknown): value is HumanFacingText {
 	if (!isObject(value)) return false
-	if (!isString(value.detailed) || value.detailed === '') return false
-	if (!isOptionalString(value.playful)) return false
-	if (!isOptionalString(value.friendly)) return false
+	if (!isNonEmptyStringArray(value.detailed)) return false
+	if (!isOptionalNonEmptyStringArray(value.whimsical)) return false
+	if (!isOptionalNonEmptyStringArray(value.friendly)) return false
 	return true
 }
 
@@ -359,13 +367,13 @@ function validateRoleDefinition(value: unknown, path: string): asserts value is 
 	ensure(isStringArray, value.tools, `${path}.tools`, 'expected an array of strings')
 	ensure(isOptionalBoolean, value.includeReasoning, `${path}.includeReasoning`, 'expected a boolean or undefined')
 	if (value.label !== undefined && !isHumanFacingText(value.label)) {
-		throw new ValidationError(`${path}.label`, 'expected an object with detailed, optional playful and friendly')
+		throw new ValidationError(`${path}.label`, 'expected an object with detailed (a non-empty string array), optional whimsical and friendly (non-empty string arrays)')
 	}
 	if (value.description !== undefined && !isHumanFacingText(value.description)) {
-		throw new ValidationError(`${path}.description`, 'expected an object with detailed, optional playful and friendly')
+		throw new ValidationError(`${path}.description`, 'expected an object with detailed (a non-empty string array), optional whimsical and friendly (non-empty string arrays)')
 	}
 	if (value.workingLabel !== undefined && !isHumanFacingText(value.workingLabel)) {
-		throw new ValidationError(`${path}.workingLabel`, 'expected an object with detailed, optional playful and friendly')
+		throw new ValidationError(`${path}.workingLabel`, 'expected an object with detailed (a non-empty string array), optional whimsical and friendly (non-empty string arrays)')
 	}
 }
 
@@ -420,16 +428,16 @@ export function validateToolManifest(value: unknown): asserts value is ToolManif
 	validateToolParameter(value.parameters, 'parameters')
 	if (value.parameters.type !== 'object') throw new ValidationError('parameters.type', 'expected "object"')
 	if (value.humanLabel !== undefined && !isHumanFacingText(value.humanLabel)) {
-		throw new ValidationError('humanLabel', 'expected an object with detailed, optional playful and friendly')
+		throw new ValidationError('humanLabel', 'expected an object with detailed (a non-empty string array), optional whimsical and friendly (non-empty string arrays)')
 	}
 	if (value.humanDescription !== undefined && !isHumanFacingText(value.humanDescription)) {
-		throw new ValidationError('humanDescription', 'expected an object with detailed, optional playful and friendly')
+		throw new ValidationError('humanDescription', 'expected an object with detailed (a non-empty string array), optional whimsical and friendly (non-empty string arrays)')
 	}
 	if (value.humanCallLabel !== undefined && !isHumanFacingText(value.humanCallLabel)) {
-		throw new ValidationError('humanCallLabel', 'expected an object with detailed, optional playful and friendly')
+		throw new ValidationError('humanCallLabel', 'expected an object with detailed (a non-empty string array), optional whimsical and friendly (non-empty string arrays)')
 	}
 	if (value.humanWorkingLabel !== undefined && !isHumanFacingText(value.humanWorkingLabel)) {
-		throw new ValidationError('humanWorkingLabel', 'expected an object with detailed, optional playful and friendly')
+		throw new ValidationError('humanWorkingLabel', 'expected an object with detailed (a non-empty string array), optional whimsical and friendly (non-empty string arrays)')
 	}
 }
 

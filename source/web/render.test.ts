@@ -1213,18 +1213,18 @@ describe('renderConfig', () => {
 
 	test('passes through the visualization section when the guild carries one', () => {
 		const visualization = {
-			pseudoRoleLabels: { human: { detailed: 'The human', friendly: 'The human', playful: 'Hooman' } },
+			pseudoRoleLabels: { human: { detailed: ['The human'], friendly: ['The human'], whimsical: ['The Dreamer'] } },
 			operationTemplates: {
-				call: { 'role->role': { detailed: '{source} is calling {destination}' } },
-				return: { 'role->role': { detailed: '{source} is returning to {destination}' } },
-				observe: { 'role->role': { detailed: '{source} is observing {destination}' } },
-				terminate: { 'tool->role': { detailed: '{source} is terminating {destination}' } },
+				call: { 'role->role': { detailed: ['{source} is calling {destination}'] } },
+				return: { 'role->role': { detailed: ['{source} is returning to {destination}'] } },
+				observe: { 'role->role': { detailed: ['{source} is observing {destination}'] } },
+				terminate: { 'tool->role': { detailed: ['{source} is terminating {destination}'] } },
 			},
 			genericOperationTemplates: {
-				call: { detailed: '{source} is calling {destination}' },
-				return: { detailed: '{source} is returning to {destination}' },
-				observe: { detailed: '{source} is observing {destination}' },
-				terminate: { detailed: '{source} is terminating {destination}' },
+				call: { detailed: ['{source} is calling {destination}'] },
+				return: { detailed: ['{source} is returning to {destination}'] },
+				observe: { detailed: ['{source} is observing {destination}'] },
+				terminate: { detailed: ['{source} is terminating {destination}'] },
 			},
 		}
 		const config = sampleGuildConfig({ visualization })

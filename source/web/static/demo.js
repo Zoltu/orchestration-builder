@@ -17,7 +17,7 @@ import { activeAskHumanCall } from './flow-view.js'
 const PLAY_INTERVAL_MS = 1000
 const SVG_NAMESPACE = 'http://www.w3.org/2000/svg'
 
-const TIER_VALUES = ['playful', 'friendly', 'detailed']
+const TIER_VALUES = ['whimsical', 'friendly', 'detailed']
 
 function isLabelTier(value) {
 	for (const candidate of TIER_VALUES) {
@@ -286,7 +286,7 @@ function openOperationTooltip(target, clientX, clientY) {
 		for (const [prop, value] of Object.entries(style)) card.style.setProperty(prop, value)
 		return
 	}
-	const label = labels.resolveOperationLabel(operation, frame.participants, tier)
+	const label = labels.resolveOperationLabel(operation, frame.participants, tier, labels.hashString(operation.id))
 	const sections = operation.details !== null && operation.details !== ''
 		? [{ label: 'details', content: operation.details }]
 		: []
@@ -384,7 +384,7 @@ function roleLabelOf(participantId) {
 
 function formatOperation(operation, participants) {
 	const outcome = operation.outcome === null ? '' : ` → ${operation.outcome}`
-	const label = labels.resolveOperationLabel(operation, participants, tier)
+	const label = labels.resolveOperationLabel(operation, participants, tier, labels.hashString(operation.id))
 	return `${label} [${operation.lifecycle}${outcome}]`
 }
 

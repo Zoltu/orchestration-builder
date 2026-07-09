@@ -12,6 +12,10 @@ const expectedToolNames = new Set([
 	'list_directory', 'glob_files', 'read_file', 'read_file_partial', 'search_text', 'write_file', 'fetch_url', 'typecheck', 'test',
 ])
 
+function isNonEmptyStringArray(value: unknown): value is string[] {
+	return Array.isArray(value) && value.length > 0 && value.every((entry) => typeof entry === 'string')
+}
+
 describe('seed guild', () => {
 	test('loads cleanly through createGuildLoader', () => {
 		const loadGuild = createGuildLoader()
@@ -84,69 +88,74 @@ describe('seed guild', () => {
 		expect(loaded.config.contextPolicy.maxToolOutputChars).toBeGreaterThan(0)
 	})
 
-	test('every role has tiered label and description', () => {
+	test('every role has tiered label and description as non-empty string arrays', () => {
 		const loadGuild = createGuildLoader()
 		const loaded = loadGuild(guildDir)
 		for (const [_name, role] of Object.entries(loaded.config.roles)) {
 			expect(role.label).toBeDefined()
-			expect(role.label!.detailed).toBeTruthy()
-			if (role.label!.playful) expect(typeof role.label!.playful).toBe('string')
-			if (role.label!.friendly) expect(typeof role.label!.friendly).toBe('string')
+			expect(isNonEmptyStringArray(role.label!.detailed)).toBe(true)
+			if (role.label!.whimsical !== undefined) expect(isNonEmptyStringArray(role.label!.whimsical)).toBe(true)
+			if (role.label!.friendly !== undefined) expect(isNonEmptyStringArray(role.label!.friendly)).toBe(true)
 			expect(role.description).toBeDefined()
-			expect(role.description!.detailed).toBeTruthy()
-			if (role.description!.playful) expect(typeof role.description!.playful).toBe('string')
-			if (role.description!.friendly) expect(typeof role.description!.friendly).toBe('string')
+			expect(isNonEmptyStringArray(role.description!.detailed)).toBe(true)
+			if (role.description!.whimsical !== undefined) expect(isNonEmptyStringArray(role.description!.whimsical)).toBe(true)
+			if (role.description!.friendly !== undefined) expect(isNonEmptyStringArray(role.description!.friendly)).toBe(true)
 		}
 	})
 
-	test('every role has a tiered workingLabel with the {participant} placeholder in each tier', () => {
+	test('every role has a tiered workingLabel as non-empty string arrays', () => {
 		const loadGuild = createGuildLoader()
 		const loaded = loadGuild(guildDir)
 		for (const [_name, role] of Object.entries(loaded.config.roles)) {
 			expect(role.workingLabel).toBeDefined()
-			expect(role.workingLabel!.detailed).toContain('{participant}')
-			expect(role.workingLabel!.friendly).toContain('{participant}')
-			expect(role.workingLabel!.playful).toContain('{participant}')
+			expect(isNonEmptyStringArray(role.workingLabel!.detailed)).toBe(true)
+			expect(isNonEmptyStringArray(role.workingLabel!.friendly)).toBe(true)
+			expect(isNonEmptyStringArray(role.workingLabel!.whimsical)).toBe(true)
+			// The whimsical working list has more than one phrase so the caption rotates between operations rather than repeating.
+			expect(role.workingLabel!.whimsical!.length).toBeGreaterThan(1)
 		}
 	})
 
-	test('the visualization section carries generic working templates for roles and tools', () => {
+	test('the visualization section carries generic working templates for roles and tools as non-empty string arrays', () => {
 		const loadGuild = createGuildLoader()
 		const loaded = loadGuild(guildDir)
 		expect(loaded.config.visualization).toBeDefined()
 		const working = loaded.config.visualization!.workingTemplates
 		expect(working).toBeDefined()
-		expect(working!.role!.detailed).toContain('{participant}')
-		expect(working!.tool!.detailed).toContain('{participant}')
+		expect(isNonEmptyStringArray(working!.role!.detailed)).toBe(true)
+		expect(isNonEmptyStringArray(working!.tool!.detailed)).toBe(true)
 	})
 
-	test('every tool has tiered humanLabel and humanDescription', () => {
+	test('every tool has tiered humanLabel and humanDescription as non-empty string arrays', () => {
 		const loadGuild = createGuildLoader()
 		const loaded = loadGuild(guildDir)
 		for (const [_name, tool] of Object.entries(loaded.tools)) {
 			expect(tool.humanLabel).toBeDefined()
-			expect(tool.humanLabel!.detailed).toBeTruthy()
-			if (tool.humanLabel!.playful) expect(typeof tool.humanLabel!.playful).toBe('string')
-			if (tool.humanLabel!.friendly) expect(typeof tool.humanLabel!.friendly).toBe('string')
+			expect(isNonEmptyStringArray(tool.humanLabel!.detailed)).toBe(true)
+			if (tool.humanLabel!.whimsical !== undefined) expect(isNonEmptyStringArray(tool.humanLabel!.whimsical)).toBe(true)
+			if (tool.humanLabel!.friendly !== undefined) expect(isNonEmptyStringArray(tool.humanLabel!.friendly)).toBe(true)
 			expect(tool.humanDescription).toBeDefined()
-			expect(tool.humanDescription!.detailed).toBeTruthy()
-			if (tool.humanDescription!.playful) expect(typeof tool.humanDescription!.playful).toBe('string')
-			if (tool.humanDescription!.friendly) expect(typeof tool.humanDescription!.friendly).toBe('string')
+			expect(isNonEmptyStringArray(tool.humanDescription!.detailed)).toBe(true)
+			if (tool.humanDescription!.whimsical !== undefined) expect(isNonEmptyStringArray(tool.humanDescription!.whimsical)).toBe(true)
+			if (tool.humanDescription!.friendly !== undefined) expect(isNonEmptyStringArray(tool.humanDescription!.friendly)).toBe(true)
 		}
 	})
 
-	test('every tool has tiered humanCallLabel with {source} and humanWorkingLabel', () => {
+	test('every tool has tiered humanCallLabel and humanWorkingLabel as non-empty string arrays', () => {
 		const loadGuild = createGuildLoader()
 		const loaded = loadGuild(guildDir)
 		for (const [_name, tool] of Object.entries(loaded.tools)) {
 			expect(tool.humanCallLabel).toBeDefined()
-			expect(tool.humanCallLabel!.detailed).toContain('{source}')
-			expect(tool.humanCallLabel!.friendly).toContain('{source}')
-			expect(tool.humanCallLabel!.playful).toContain('{source}')
+			expect(isNonEmptyStringArray(tool.humanCallLabel!.detailed)).toBe(true)
+			expect(isNonEmptyStringArray(tool.humanCallLabel!.friendly)).toBe(true)
+			expect(isNonEmptyStringArray(tool.humanCallLabel!.whimsical)).toBe(true)
+			// The whimsical call list has more than one phrase so a tool invoked repeatedly varies in the caption.
+			expect(tool.humanCallLabel!.whimsical!.length).toBeGreaterThan(1)
 			expect(tool.humanWorkingLabel).toBeDefined()
-			expect(tool.humanWorkingLabel!.detailed).toBeTruthy()
-			expect(tool.humanWorkingLabel!.friendly).toBeTruthy()
-			expect(tool.humanWorkingLabel!.playful).toBeTruthy()
+			expect(isNonEmptyStringArray(tool.humanWorkingLabel!.detailed)).toBe(true)
+			expect(isNonEmptyStringArray(tool.humanWorkingLabel!.friendly)).toBe(true)
+			expect(isNonEmptyStringArray(tool.humanWorkingLabel!.whimsical)).toBe(true)
+			expect(tool.humanWorkingLabel!.whimsical!.length).toBeGreaterThan(1)
 		}
 	})
 })

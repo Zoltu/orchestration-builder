@@ -2,24 +2,24 @@
 	"name": "agent",
 	"description": "Delegate a sub-task to another role in the Guild. The child role runs to completion and returns its ResultCard.",
 	"humanLabel": {
-		"detailed": "Agent",
-		"friendly": "Delegate",
-		"playful": "Send Off"
+		"detailed": ["Agent"],
+		"friendly": ["Delegate"],
+		"whimsical": ["Send Off"]
 	},
 	"humanDescription": {
-		"detailed": "Delegates a sub-task to another role. The child role runs to completion and returns its result.",
-		"friendly": "Hand off work to another role.",
-		"playful": "Pass the baton to a specialist."
+		"detailed": ["Delegates a sub-task to another role. The child role runs to completion and returns its result."],
+		"friendly": ["Hand off work to another role."],
+		"whimsical": ["Pass the baton to a specialist."]
 	},
 	"humanCallLabel": {
-		"detailed": "{source} is invoking tool {destination}",
-		"friendly": "{source} is delegating to another agent",
-		"playful": "{source} is sending a helper on a quest"
+		"detailed": ["role {sourceRole} is invoking tool {destinationRole} (stack {stack})"],
+		"friendly": ["{source} is delegating to another agent"],
+		"whimsical": ["{source} is sending a helper on a quest", "{source} is dispatching a specialist", "{source} is calling in a favor"]
 	},
 	"humanWorkingLabel": {
-		"detailed": "Delegating to another agent",
-		"friendly": "Delegating to another agent",
-		"playful": "Sending a helper on a quest"
+		"detailed": ["tool {participantRole} is delegating to a child role"],
+		"friendly": ["Delegating to another agent"],
+		"whimsical": ["Sending a helper on a quest", "Dispatching a specialist", "Calling in a favor", "Sending a hireling forth"]
 	},
 	"parameters": {
 		"type": "object",

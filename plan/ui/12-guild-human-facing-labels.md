@@ -2,7 +2,7 @@
 
 ## Goal
 
-Make the backend change the nailed-down visualization needs: add tiered human-facing `label` and `description` fields to every role and tool in the guild, so the live `/api/config` carries the friendly labels the UI already renders against fixture placeholders. `detailed` is required; `playful` and `friendly` are optional. This is the first phase-B step and the only backend/schema change in the sub-plan; it is done after the visualization is signed off (step 11) so we build exactly what the UI needs.
+Make the backend change the nailed-down visualization needs: add tiered human-facing `label` and `description` fields to every role and tool in the guild, so the live `/api/config` carries the friendly labels the UI already renders against fixture placeholders. `detailed` is required; `whimsical` and `friendly` are optional. This is the first phase-B step and the only backend/schema change in the sub-plan; it is done after the visualization is signed off (step 11) so we build exactly what the UI needs.
 
 ## Context
 
@@ -14,12 +14,12 @@ Read [`PLAN.md`](PLAN.md) ("Human-friendly node labels"), [`11-visualization-sig
    ```ts
    export interface HumanFacingText {
    	datadetailed: string
-   	playful?: string
+   	whimsical?: string
    	friendly?: string
    }
    ```
    Add `label?: HumanFacingText` and `description?: HumanFacingText` to `RoleDefinition`. Add `humanLabel?: HumanFacingText` and `humanDescription?: HumanFacingText` to `ToolManifest` (named distinctly from the existing model-facing `description` string to avoid collision). Optional on the type so a minimal guild still validates; `detailed` is required *when the object is present* (enforced by validation).
-2. **`source/executor/validation.ts`** — extend `validateGuildConfig` and `validateToolManifest` to validate the tiered-text shape when present: must be an object, `detailed` must be a non-empty string, `playful`/`friendly` when present must be strings. Surface a `ValidationError` with a path-based message on violation. Do **not** require the fields to be present (minimal guilds stay valid); only require `detailed` *inside* a present `HumanFacingText`.
+2. **`source/executor/validation.ts`** — extend `validateGuildConfig` and `validateToolManifest` to validate the tiered-text shape when present: must be an object, `detailed` must be a non-empty string, `whimsical`/`friendly` when present must be strings. Surface a `ValidationError` with a path-based message on violation. Do **not** require the fields to be present (minimal guilds stay valid); only require `detailed` *inside* a present `HumanFacingText`.
 3. **`source/executor/loader.ts`** — confirm the new fields ride along on `LoadedGuild` with no extra plumbing (the loader passes the validated config through). No behavior change.
 4. **`source/web/render.ts`** — extend `renderConfig`'s safe subset to include each role's `label`/`description` and each tool's `humanLabel`/`humanDescription` (the full tiered objects, so the UI tier toggle switches client-side without a round-trip). These are not secrets. Update `renderConfig` tests in `source/web/render.test.ts` and the `/api/config` assertions in `source/web/server.test.ts` to cover the new fields (present, omitted, and the structural-omission-of-secrets still holds).
 5. **Seed guild** — add `label` and `description` (all three tiers) to every role in `guild/guild.json` and `humanLabel`/`humanDescription` to every tool manifest in `guild/tools/*.json`. The `friendly` tier is what the UI shows by default; write it as a plain one-liner a non-developer understands (the phase-A placeholder labels are a starting point). Update `source/executor/seed-guild.test.ts` conformance assertions to require the tiered fields on every role and tool.
@@ -33,7 +33,7 @@ Read [`PLAN.md`](PLAN.md) ("Human-friendly node labels"), [`11-visualization-sig
 ## Acceptance criteria
 
 - [ ] `bun run typecheck` and `bun test source/` pass.
-- [ ] A role/tool may carry tiered `label`/`description`; `detailed` is required when the object is present; `playful`/`friendly` are optional.
+- [ ] A role/tool may carry tiered `label`/`description`; `detailed` is required when the object is present; `whimsical`/`friendly` are optional.
 - [ ] A guild with no tiered fields still validates (backward compatible).
 - [ ] `/api/config` surfaces the tiered fields for every role and tool; the existing secrets-omission (`apiKey`/`apiBase`) still holds.
 - [ ] The seed guild carries all three tiers on every role and tool; `seed-guild.test.ts` enforces it.

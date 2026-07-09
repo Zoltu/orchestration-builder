@@ -2,24 +2,24 @@
 	"name": "search_text",
 	"description": "Search the contents of text files in the workspace for lines matching a regular expression. Returns matching lines with their file path and 1-based line number. Searches all searchable files unless paths are given.",
 	"humanLabel": {
-		"detailed": "Search Text",
-		"friendly": "Find Text",
-		"playful": "Text Treasure Hunt"
+		"detailed": ["Search Text"],
+		"friendly": ["Find Text"],
+		"whimsical": ["Text Treasure Hunt"]
 	},
 	"humanDescription": {
-		"detailed": "Searches text files for lines matching a regular expression.",
-		"friendly": "Find text across files.",
-		"playful": "Dig up the words you seek."
+		"detailed": ["Searches text files for lines matching a regular expression."],
+		"friendly": ["Find text across files."],
+		"whimsical": ["Dig up the words you seek."]
 	},
 	"humanCallLabel": {
-		"detailed": "{source} is invoking tool {destination}",
-		"friendly": "{source} is searching for text",
-		"playful": "{source} is hunting for words"
+		"detailed": ["role {sourceRole} is invoking tool {destinationRole} (stack {stack})"],
+		"friendly": ["{source} is searching for text"],
+		"whimsical": ["{source} is hunting for words", "{source} is digging for treasure", "{source} is sifting for a phrase"]
 	},
 	"humanWorkingLabel": {
-		"detailed": "Searching text",
-		"friendly": "Searching for text",
-		"playful": "Hunting for words"
+		"detailed": ["tool {participantRole} is searching file contents for a pattern"],
+		"friendly": ["Searching for text"],
+		"whimsical": ["Hunting for words", "Digging for treasure", "Sifting through the text", "Panning for a phrase"]
 	},
 	"parameters": {
 		"type": "object",

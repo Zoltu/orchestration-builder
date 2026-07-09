@@ -57,7 +57,7 @@ interface InteractionModel {
 
 Labels are **localization, a view concern**. The model carries no prose — only `role`/`kind` identifiers. A localization registry maps participant `role`/`kind` and operation `kind` → three tiers `{ fun, helpful, detailed }`:
 
-- **fun** — playful, targeted at children/playful users ("chef", "baking a cake"). Fun wins strongly over precise.
+- **fun** — whimsical, targeted at children/whimsical users ("chef", "baking a cake"). Fun wins strongly over precise.
 - **helpful** — informative and mildly accurate for non-technical users.
 - **detailed** — extremely precise for technical users.
 

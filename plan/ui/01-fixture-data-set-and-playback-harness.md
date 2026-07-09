@@ -12,7 +12,7 @@ The guild is loaded once at startup and never mutated (`source/serve.ts`), so th
 
 ## Deliverables
 
-1. **`source/web/static/fixtures.js`** (new, hand-editable) — a set of mock scenarios, each a sequence of frames where every frame is a full `{ config, runView, now }` snapshot. Config matches `renderConfig` output **plus** the future tiered `label`/`description` on each role and `humanLabel`/`humanDescription` on each tool (all three tiers: `detailed`/`playful`/`friendly`), so the UI tier toggle works against fixtures. Scenarios must cover every case the visualization must present:
+1. **`source/web/static/fixtures.js`** (new, hand-editable) — a set of mock scenarios, each a sequence of frames where every frame is a full `{ config, runView, now }` snapshot. Config matches `renderConfig` output **plus** the future tiered `label`/`description` on each role and `humanLabel`/`humanDescription` on each tool (all three tiers: `detailed`/`whimsical`/`friendly`), so the UI tier toggle works against fixtures. Scenarios must cover every case the visualization must present:
    - single role in progress (planner thinking)
    - orchestrator → coder delegation in progress (agent→agent flow mid-flight)
    - a tool call in progress (agent→tool flow, no `tool_result` yet)

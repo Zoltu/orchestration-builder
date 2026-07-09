@@ -207,7 +207,7 @@ Role fields:
 - `systemPrompt` (string, required): path to a Markdown file.
 - `tools` (array, required): tool names this role may call.
 - `includeReasoning` (boolean, optional): include reasoning from prior turns. Default `false`.
-- `label` (object, optional): tiered display name (`{ detailed, friendly, playful }`) the web client renders.
+- `label` (object, optional): tiered display name (`{ detailed, friendly, whimsical }`) the web client renders.
 - `description` (object, optional): tiered one-line description of the role.
 - `workingLabel` (object, optional): tiered text for the "now" caption when this role is the destination of a settled call (its working phase). A `{participant}` placeholder interpolates to the role's own label at the chosen tier — e.g. `"{participant} is planning the approach"` → "Planner is planning the approach". See [`docs/visualization.md`](visualization.md) "Labels".
 

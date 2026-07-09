@@ -2,24 +2,24 @@
 	"name": "test",
 	"description": "Run the workspace test suite (currently `bun test`) and return its output. Runs a single fixed command with no model-chosen arguments, no network, and no installs. A non-zero exit code (failing tests) is a normal result to read and iterate on, not an error.",
 	"humanLabel": {
-		"detailed": "Run Tests",
-		"friendly": "Tests",
-		"playful": "Test Drive"
+		"detailed": ["Run Tests"],
+		"friendly": ["Tests"],
+		"whimsical": ["Test Drive"]
 	},
 	"humanDescription": {
-		"detailed": "Runs the workspace test suite and returns output.",
-		"friendly": "Run all tests.",
-		"playful": "Put it through its paces."
+		"detailed": ["Runs the workspace test suite and returns output."],
+		"friendly": ["Run all tests."],
+		"whimsical": ["Put it through its paces."]
 	},
 	"humanCallLabel": {
-		"detailed": "{source} is invoking tool {destination}",
-		"friendly": "{source} is running tests",
-		"playful": "{source} is calling the prover"
+		"detailed": ["role {sourceRole} is invoking tool {destinationRole} (stack {stack})"],
+		"friendly": ["{source} is running tests"],
+		"whimsical": ["{source} is calling the prover", "{source} is summoning the examiners", "{source} is firing up the test track"]
 	},
 	"humanWorkingLabel": {
-		"detailed": "Running tests",
-		"friendly": "Running tests",
-		"playful": "Proving it works"
+		"detailed": ["tool {participantRole} is running the test suite"],
+		"friendly": ["Running tests"],
+		"whimsical": ["Proving it works", "Bribing the lab mice", "Putting it through its paces", "Running the obstacle course"]
 	},
 	"parameters": {
 		"type": "object",

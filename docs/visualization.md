@@ -74,11 +74,11 @@ Labels are **localization**, and the localization data lives in the **Guild** so
 
 Three tiers serve different audiences:
 
-- **playful** — playful, targeted at children/playful users. Playful wins strongly over precise.
+- **whimsical** — fanciful and reality-disconnected, used to show lively progress rather than report state. Whimsical wins strongly over precise.
 - **friendly** — informative and mildly accurate for non-technical users.
 - **detailed** — extremely precise for technical users.
 
-Operation labels are templated entries that interpolate the source and destination participant labels (resolved at the same tier). A UI **tier toggle** swaps which tier the views render without touching the model — like locale switching. The fallback chain walks `detailed → friendly → playful` (then the title-cased role name), so a guild author who omits a tier still gets a readable line. The `details` markdown field on each operation is the rich per-call runtime content (arguments/results/summaries); that is data, not localization, so it lives on the model and the adapter formats it.
+Operation labels are templated entries that interpolate the source and destination participant labels (resolved at the same tier). A UI **tier toggle** swaps which tier the views render without touching the model — like locale switching. The fallback chain walks `detailed → friendly → whimsical` (then the title-cased role name), so a guild author who omits a tier still gets a readable line. The `details` markdown field on each operation is the rich per-call runtime content (arguments/results/summaries); that is data, not localization, so it lives on the model and the adapter formats it.
 
 The "now" caption distinguishes a call's two phases: the **transit** phase (the line animates, `lifecycle === 'in_flight'`) reads the operation label ("A is calling B…"); the **working** phase (the line goes solid, `lifecycle === 'settled'` — the destination has started producing) switches to the destination's **working label** ("B is planning…" / "Receiving tokens from B"). The working label is per-role (`role.workingLabel`, a `{participant}` template interpolated with the role's own label at the chosen tier); a role without one falls back to `visualization.workingTemplates[kind]` (generic per participant kind); a guild without either falls back to the operation label, so a minimal guild keeps the prior behavior.
 

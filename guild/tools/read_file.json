@@ -2,24 +2,24 @@
 	"name": "read_file",
 	"description": "Read the full text contents of a file inside the workspace. Returns the file content as a string.",
 	"humanLabel": {
-		"detailed": "Read File",
-		"friendly": "Read",
-		"playful": "Open Book"
+		"detailed": ["Read File"],
+		"friendly": ["Read"],
+		"whimsical": ["Open Book"]
 	},
 	"humanDescription": {
-		"detailed": "Reads the full text contents of a file.",
-		"friendly": "Read a file's contents.",
-		"playful": "Read all about it."
+		"detailed": ["Reads the full text contents of a file."],
+		"friendly": ["Read a file's contents."],
+		"whimsical": ["Read all about it."]
 	},
 	"humanCallLabel": {
-		"detailed": "{source} is invoking tool {destination}",
-		"friendly": "{source} is reading a file",
-		"playful": "{source} is getting a book off the shelf"
+		"detailed": ["role {sourceRole} is invoking tool {destinationRole} (stack {stack})"],
+		"friendly": ["{source} is reading a file"],
+		"whimsical": ["{source} is getting a book off the shelf", "{source} is pulling a tome down", "{source} is cracking a book open"]
 	},
 	"humanWorkingLabel": {
-		"detailed": "Reading file contents",
-		"friendly": "Reading a file",
-		"playful": "Reading a book"
+		"detailed": ["tool {participantRole} is reading file contents"],
+		"friendly": ["Reading a file"],
+		"whimsical": ["Cracking open a tome", "Poring over ancient scrolls", "Flipping through the pages", "Consulting the library"]
 	},
 	"parameters": {
 		"type": "object",

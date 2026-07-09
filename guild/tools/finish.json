@@ -2,24 +2,24 @@
 	"name": "finish",
 	"description": "End the current role and return a ResultCard to the caller. Always use status \"success\" when the task is complete, \"error\" when it cannot be completed, or \"needs_clarification\" when essential information is missing.",
 	"humanLabel": {
-		"detailed": "Finish",
-		"friendly": "Done",
-		"playful": "Wrap Up"
+		"detailed": ["Finish"],
+		"friendly": ["Done"],
+		"whimsical": ["Wrap Up"]
 	},
 	"humanDescription": {
-		"detailed": "Ends the current role and returns a result to the caller.",
-		"friendly": "Mark this role as complete.",
-		"playful": "Cross the finish line."
+		"detailed": ["Ends the current role and returns a result to the caller."],
+		"friendly": ["Mark this role as complete."],
+		"whimsical": ["Cross the finish line."]
 	},
 	"humanCallLabel": {
-		"detailed": "{source} is invoking tool {destination}",
-		"friendly": "{source} is wrapping up",
-		"playful": "{source} is calling it a day"
+		"detailed": ["role {sourceRole} is invoking tool {destinationRole} (stack {stack})"],
+		"friendly": ["{source} is wrapping up"],
+		"whimsical": ["{source} is calling it a day", "{source} is packing up the tent", "{source} is rolling up the map"]
 	},
 	"humanWorkingLabel": {
-		"detailed": "Finishing the role",
-		"friendly": "Wrapping up",
-		"playful": "Calling it a day"
+		"detailed": ["tool {participantRole} is finishing the role"],
+		"friendly": ["Wrapping up"],
+		"whimsical": ["Calling it a day", "Packing up the tent", "Rolling up the map", "Crossing the finish line"]
 	},
 	"parameters": {
 		"type": "object",

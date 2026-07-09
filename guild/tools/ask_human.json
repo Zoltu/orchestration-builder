@@ -2,24 +2,24 @@
 	"name": "ask_human",
 	"description": "Ask the human user a clarifying question when a reasonable guess cannot be made. Returns the user's answer. Use sparingly; prefer reasonable defaults and explain them.",
 	"humanLabel": {
-		"detailed": "Ask Human",
-		"friendly": "Question",
-		"playful": "Punt"
+		"detailed": ["Ask Human"],
+		"friendly": ["Question"],
+		"whimsical": ["Punt"]
 	},
 	"humanDescription": {
-		"detailed": "Asks the human user a clarifying question when a reasonable guess cannot be made.",
-		"friendly": "Ask the user for clarification.",
-		"playful": "Get the inside scoop from the expert."
+		"detailed": ["Asks the human user a clarifying question when a reasonable guess cannot be made."],
+		"friendly": ["Ask the user for clarification."],
+		"whimsical": ["Get the inside scoop from the expert."]
 	},
 	"humanCallLabel": {
-		"detailed": "{source} is invoking tool {destination}",
-		"friendly": "{source} is asking you a question",
-		"playful": "{source} is tugging your sleeve"
+		"detailed": ["role {sourceRole} is invoking tool {destinationRole} (stack {stack})"],
+		"friendly": ["{source} is asking you a question"],
+		"whimsical": ["{source} is tugging your sleeve", "{source} is waving for attention", "{source} is raising a tentative hand"]
 	},
 	"humanWorkingLabel": {
-		"detailed": "Awaiting human input",
-		"friendly": "Waiting for your answer",
-		"playful": "Waiting for you to answer"
+		"detailed": ["tool {participantRole} is awaiting human input"],
+		"friendly": ["Waiting for your answer"],
+		"whimsical": ["Waiting for you to answer", "Tapping a foot expectantly", "Holding up a question mark", "Blinking patiently"]
 	},
 	"parameters": {
 		"type": "object",

@@ -2,24 +2,24 @@
 	"name": "typecheck",
 	"description": "Run the workspace typechecker (currently Bun/TSC) and return its diagnostics. Runs a single fixed command with no model-chosen arguments, no network, and no installs. A non-zero exit code is a normal result to read and iterate on, not an error.",
 	"humanLabel": {
-		"detailed": "Type Check",
-		"friendly": "Check Types",
-		"playful": "Spellchecker for Code"
+		"detailed": ["Type Check"],
+		"friendly": ["Check Types"],
+		"whimsical": ["Spellchecker for Code"]
 	},
 	"humanDescription": {
-		"detailed": "Runs type checking on the workspace.",
-		"friendly": "Check code for type errors.",
-		"playful": "Check for typos."
+		"detailed": ["Runs type checking on the workspace."],
+		"friendly": ["Check code for type errors."],
+		"whimsical": ["Check for typos."]
 	},
 	"humanCallLabel": {
-		"detailed": "{source} is invoking tool {destination}",
-		"friendly": "{source} is running typecheck",
-		"playful": "{source} is calling the grammar grader"
+		"detailed": ["role {sourceRole} is invoking tool {destinationRole} (stack {stack})"],
+		"friendly": ["{source} is running typecheck"],
+		"whimsical": ["{source} is calling the grammar grader", "{source} is summoning the spelling police", "{source} is ringing up the oracle"]
 	},
 	"humanWorkingLabel": {
-		"detailed": "Running typecheck",
-		"friendly": "Checking types",
-		"playful": "Grading the grammar"
+		"detailed": ["tool {participantRole} is running the typechecker"],
+		"friendly": ["Checking types"],
+		"whimsical": ["Consulting the grammar oracle", "Grading the spelling bee", "Polishing the grammar", "Squinting at every type"]
 	},
 	"parameters": {
 		"type": "object",

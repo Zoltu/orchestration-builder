@@ -2,24 +2,24 @@
 	"name": "write_file",
 	"description": "Write text contents to a file inside the workspace, creating parent directories as needed. Overwrites an existing file. Returns the workspace-relative path and the number of bytes written.",
 	"humanLabel": {
-		"detailed": "Write File",
-		"friendly": "Write",
-		"playful": "Pen It Down"
+		"detailed": ["Write File"],
+		"friendly": ["Write"],
+		"whimsical": ["Pen It Down"]
 	},
 	"humanDescription": {
-		"detailed": "Writes text contents to a file, creating parent directories if needed.",
-		"friendly": "Write or overwrite a file.",
-		"playful": "Put your mark on the file."
+		"detailed": ["Writes text contents to a file, creating parent directories if needed."],
+		"friendly": ["Write or overwrite a file."],
+		"whimsical": ["Put your mark on the file."]
 	},
 	"humanCallLabel": {
-		"detailed": "{source} is invoking tool {destination}",
-		"friendly": "{source} is writing a file",
-		"playful": "{source} is picking up the pen"
+		"detailed": ["role {sourceRole} is invoking tool {destinationRole} (stack {stack})"],
+		"friendly": ["{source} is writing a file"],
+		"whimsical": ["{source} is picking up the pen", "{source} is inking the page", "{source} is setting quill to parchment"]
 	},
 	"humanWorkingLabel": {
-		"detailed": "Writing file contents",
-		"friendly": "Writing a file",
-		"playful": "Penning a new chapter"
+		"detailed": ["tool {participantRole} is writing file contents"],
+		"friendly": ["Writing a file"],
+		"whimsical": ["Penning a new chapter", "Inking the page", "Committing words to paper", "Scratching away with the quill"]
 	},
 	"parameters": {
 		"type": "object",

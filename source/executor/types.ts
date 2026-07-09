@@ -35,9 +35,9 @@ export interface ContextPolicy {
 }
 
 export interface HumanFacingText {
-	detailed: string
-	playful?: string
-	friendly?: string
+	detailed: string[]
+	whimsical?: string[]
+	friendly?: string[]
 }
 
 export interface RoleDefinition {

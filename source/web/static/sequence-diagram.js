@@ -217,7 +217,7 @@ export function renderSequenceView(h, model, labels, tier, guildParticipants) {
 		const sourceX = columnXForIndex(sourceColumnIndex)
 		const destinationX = columnXForIndex(destinationColumnIndex)
 		const sameColumn = sourceColumnIndex === destinationColumnIndex
-		const label = labels.resolveOperationLabel(operation, model.participants, tier)
+		const label = labels.resolveOperationLabel(operation, model.participants, tier, labels.hashString(operation.id))
 		const animationState = messageAnimationState(operation, model, activeOperationId)
 
 		// observe renders as a static cross-column line — no arrowhead, no terminal node — so it reads as a reference rather than an in-flight call and never activates a lifeline.

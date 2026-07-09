@@ -2,24 +2,24 @@
 	"name": "glob_files",
 	"description": "Find files in the workspace whose relative paths match a glob pattern. Supports * (single segment), ** (any depth), ? (single char), and {a,b} alternation. Returns matching paths sorted alphabetically.",
 	"humanLabel": {
-		"detailed": "Glob Files",
-		"friendly": "Search Files",
-		"playful": "File Hunter"
+		"detailed": ["Glob Files"],
+		"friendly": ["Search Files"],
+		"whimsical": ["File Hunter"]
 	},
 	"humanDescription": {
-		"detailed": "Finds files matching a glob pattern in the workspace.",
-		"friendly": "Find files by name pattern.",
-		"playful": "Go fishing for files."
+		"detailed": ["Finds files matching a glob pattern in the workspace."],
+		"friendly": ["Find files by name pattern."],
+		"whimsical": ["Go fishing for files."]
 	},
 	"humanCallLabel": {
-		"detailed": "{source} is invoking tool {destination}",
-		"friendly": "{source} is searching for files",
-		"playful": "{source} is hunting for files"
+		"detailed": ["role {sourceRole} is invoking tool {destinationRole} (stack {stack})"],
+		"friendly": ["{source} is searching for files"],
+		"whimsical": ["{source} is hunting for files", "{source} is casting a net for files", "{source} is trawling for matching names"]
 	},
 	"humanWorkingLabel": {
-		"detailed": "Globbing files",
-		"friendly": "Searching for files",
-		"playful": "Hunting for files"
+		"detailed": ["tool {participantRole} is matching files against a glob pattern"],
+		"friendly": ["Searching for files"],
+		"whimsical": ["Hunting for files", "Casting a net for names", "Trawling the workspace", "Fishing for matches"]
 	},
 	"parameters": {
 		"type": "object",

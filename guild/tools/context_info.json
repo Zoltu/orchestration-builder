@@ -2,24 +2,24 @@
 	"name": "context_info",
 	"description": "Return metadata about the current role's conversation: context window size, estimated current prompt tokens, last reported prompt tokens, remaining budget, and a per-message snapshot (index, role, content length, reasoning length).",
 	"humanLabel": {
-		"detailed": "Context Info",
-		"friendly": "Context",
-		"playful": "Memory Check"
+		"detailed": ["Context Info"],
+		"friendly": ["Context"],
+		"whimsical": ["Memory Check"]
 	},
 	"humanDescription": {
-		"detailed": "Returns metadata about the current conversation context.",
-		"friendly": "Check conversation memory usage.",
-		"playful": "Peek at the memory bank."
+		"detailed": ["Returns metadata about the current conversation context."],
+		"friendly": ["Check conversation memory usage."],
+		"whimsical": ["Peek at the memory bank."]
 	},
 	"humanCallLabel": {
-		"detailed": "{source} is invoking tool {destination}",
-		"friendly": "{source} is checking context",
-		"playful": "{source} is peeking at the memory"
+		"detailed": ["role {sourceRole} is invoking tool {destinationRole} (stack {stack})"],
+		"friendly": ["{source} is checking context"],
+		"whimsical": ["{source} is peeking at the memory", "{source} is sizing up the backlog", "{source} is taking a memory census"]
 	},
 	"humanWorkingLabel": {
-		"detailed": "Reading context info",
-		"friendly": "Checking context",
-		"playful": "Peeking at the memory"
+		"detailed": ["tool {participantRole} is reading context metadata"],
+		"friendly": ["Checking context"],
+		"whimsical": ["Peeking at the memory", "Sizing up the backlog", "Taking a memory census", "Counting the pages"]
 	},
 	"parameters": {
 		"type": "object"

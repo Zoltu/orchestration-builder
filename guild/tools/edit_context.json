@@ -2,24 +2,24 @@
 	"name": "edit_context",
 	"description": "Mutate the current role's message list to reduce token usage. Supports three operations applied in order: drop (remove a range of messages), strip_reasoning (clear reasoning blocks on a range), and replace (overwrite one message's content). Returns the new estimated prompt tokens and message count.",
 	"humanLabel": {
-		"detailed": "Edit Context",
-		"friendly": "Edit Memory",
-		"playful": "Trim the Fat"
+		"detailed": ["Edit Context"],
+		"friendly": ["Edit Memory"],
+		"whimsical": ["Trim the Fat"]
 	},
 	"humanDescription": {
-		"detailed": "Mutates the conversation to reduce token usage.",
-		"friendly": "Compress or modify conversation history.",
-		"playful": "Squeeze more into less."
+		"detailed": ["Mutates the conversation to reduce token usage."],
+		"friendly": ["Compress or modify conversation history."],
+		"whimsical": ["Squeeze more into less."]
 	},
 	"humanCallLabel": {
-		"detailed": "{source} is invoking tool {destination}",
-		"friendly": "{source} is editing context",
-		"playful": "{source} is trimming the fat"
+		"detailed": ["role {sourceRole} is invoking tool {destinationRole} (stack {stack})"],
+		"friendly": ["{source} is editing context"],
+		"whimsical": ["{source} is trimming the fat", "{source} is pruning the hedges", "{source} is taking shears to the backlog"]
 	},
 	"humanWorkingLabel": {
-		"detailed": "Editing context",
-		"friendly": "Editing context",
-		"playful": "Trimming the fat"
+		"detailed": ["tool {participantRole} is editing the conversation"],
+		"friendly": ["Editing context"],
+		"whimsical": ["Trimming the fat", "Pruning the hedges", "Taking shears to the backlog", "Squeezing more into less"]
 	},
 	"parameters": {
 		"type": "object",

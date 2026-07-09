@@ -2,24 +2,24 @@
 	"name": "list_directory",
 	"description": "List files and subdirectories inside a workspace-relative path. Returns entries sorted with directories first, then files alphabetically. Call with path \".\" or omit path to list the workspace root.",
 	"humanLabel": {
-		"detailed": "List Directory",
-		"friendly": "List Files",
-		"playful": "Directory Scout"
+		"detailed": ["List Directory"],
+		"friendly": ["List Files"],
+		"whimsical": ["Directory Scout"]
 	},
 	"humanDescription": {
-		"detailed": "Lists files and subdirectories in a workspace path.",
-		"friendly": "See what's in a folder.",
-		"playful": "Take a peek inside the folder."
+		"detailed": ["Lists files and subdirectories in a workspace path."],
+		"friendly": ["See what's in a folder."],
+		"whimsical": ["Take a peek inside the folder."]
 	},
 	"humanCallLabel": {
-		"detailed": "{source} is invoking tool {destination}",
-		"friendly": "{source} is listing files",
-		"playful": "{source} is peeking into a folder"
+		"detailed": ["role {sourceRole} is invoking tool {destinationRole} (stack {stack})"],
+		"friendly": ["{source} is listing files"],
+		"whimsical": ["{source} is peeking into a folder", "{source} is scouting the directory", "{source} is taking stock of the shelves"]
 	},
 	"humanWorkingLabel": {
-		"detailed": "Listing directory",
-		"friendly": "Listing files",
-		"playful": "Peeking into a folder"
+		"detailed": ["tool {participantRole} is listing directory contents"],
+		"friendly": ["Listing files"],
+		"whimsical": ["Peeking into a folder", "Scouting the shelves", "Taking stock of the drawers", "Cataloguing the contents"]
 	},
 	"parameters": {
 		"type": "object",

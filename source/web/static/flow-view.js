@@ -630,8 +630,9 @@ const EMPTY_SET = new Set()
  * A call has two phases the caption distinguishes: the transit phase (lifecycle in_flight, the line animates) reads "A is calling B…" via the operation label; the working phase (lifecycle settled, the line goes solid because B has started producing) reads "B is planning…" via the working label of the destination — the relationship is no longer the story, B's own work is. When no working label is configured for the destination, the working phase falls back to the operation label so a minimal guild never crashes. An in-flight call appends an ellipsis to convey an action in progress; a settled return (the lingering response leg) carries no ellipsis because the leg is the current state, not a pending action.
  *
  * @param {InteractionModel} model
- * @param {{ resolveOperationLabel: (operation: Operation, participants: Participant[], tier: 'playful' | 'friendly' | 'detailed') => string, resolveWorkingLabel?: (participant: Participant, tier: 'playful' | 'friendly' | 'detailed') => string | null }} labels
- * @param {'playful' | 'friendly' | 'detailed'} tier
+ * @param {InteractionModel} model
+ * @param {{ resolveOperationLabel: (operation: Operation, participants: Participant[], tier: 'whimsical' | 'friendly' | 'detailed', seed: number) => string, resolveWorkingLabel?: (participant: Participant, tier: 'whimsical' | 'friendly' | 'detailed', seed: number) => string | null, hashString: (value: string) => number }} labels
+ * @param {'whimsical' | 'friendly' | 'detailed'} tier
  * @returns {string}
  */
 export function deriveNowCaption(model, labels, tier) {
@@ -641,15 +642,16 @@ export function deriveNowCaption(model, labels, tier) {
 	if (status === 'needs_clarification') return 'Waiting for your input…'
 	const operation = activeOperation(model)
 	if (operation === null) return 'Working…'
-	// A settled call is the working phase: the destination has started its own work, so the caption names what the destination is doing (e.g. "Planner is planning…") rather than the call relationship ("Orchestrator is calling Planner"). The working label is optional per participant; when absent the caption falls back to the operation label so a guild without working labels keeps the prior behavior.
+	// A settled call is the working phase: the destination has started its own work, so the caption names what the destination is doing (e.g. "Planning the approach…") rather than the call relationship ("Orchestrator is calling Planner"). The working label is optional per participant; when absent the caption falls back to the operation label so a guild without working labels keeps the prior behavior. The seed is the operation id's hash so the whimsical tier rotates between operations while staying fixed within one, and the working phase reuses the call's seed so transit and working of the same call land on the same whimsical phrase.
+	const seed = labels.hashString(operation.id)
 	if (operation.kind === 'call' && operation.lifecycle === 'settled' && typeof labels.resolveWorkingLabel === 'function') {
 		const destination = model.participants.find((participant) => participant.id === operation.destination)
 		if (destination !== undefined) {
-			const working = labels.resolveWorkingLabel(destination, tier)
+			const working = labels.resolveWorkingLabel(destination, tier, seed)
 			if (working !== null) return `${working}…`
 		}
 	}
-	const label = labels.resolveOperationLabel(operation, model.participants, tier)
+	const label = labels.resolveOperationLabel(operation, model.participants, tier, seed)
 	if (operation.lifecycle === 'in_flight') return `${label}…`
 	return label
 }

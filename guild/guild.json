@@ -30,114 +30,114 @@
 			"systemPrompt": "prompts/orchestrator.md",
 			"tools": ["agent", "ask_human", "finish"],
 			"label": {
-				"detailed": "Orchestrator",
-				"friendly": "Orchestrator",
-				"playful": "Conductor"
+				"detailed": ["Orchestrator"],
+				"friendly": ["Orchestrator"],
+				"whimsical": ["Conductor"]
 			},
 			"description": {
-				"detailed": "Coordinates the overall task, delegates to other roles, and ensures progress toward completion.",
-				"friendly": "Coordinates the task and delegates work to other roles.",
-				"playful": "The maestro keeping all the instruments in sync."
+				"detailed": ["Coordinates the overall task, delegates to other roles, and ensures progress toward completion."],
+				"friendly": ["Coordinates the task and delegates work to other roles."],
+				"whimsical": ["The maestro keeping all the instruments in sync."]
 			},
 			"workingLabel": {
-				"detailed": "Receiving tokens from {participant}",
-				"friendly": "{participant} is orchestrating",
-				"playful": "{participant} is conducting the symphony"
+				"detailed": ["role {participantRole} is orchestrating the next delegation (streaming tokens)"],
+				"friendly": ["Orchestrating the next delegation"],
+				"whimsical": ["Conducting an invisible orchestra", "Juggling one too many balls", "Herding cats into formation", "Tuning the violins"]
 			}
 		},
 		"planner": {
 			"systemPrompt": "prompts/planner.md",
 			"tools": ["list_directory", "glob_files", "read_file", "read_file_partial", "search_text", "finish"],
 			"label": {
-				"detailed": "Planner",
-				"friendly": "Planner",
-				"playful": "Strategist"
+				"detailed": ["Planner"],
+				"friendly": ["Planner"],
+				"whimsical": ["Strategist"]
 			},
 			"description": {
-				"detailed": "Breaks down complex tasks into manageable steps and creates detailed plans.",
-				"friendly": "Breaks down tasks and creates step-by-step plans.",
-				"playful": "Maps out the treasure hunt before you dive in."
+				"detailed": ["Breaks down complex tasks into manageable steps and creates detailed plans."],
+				"friendly": ["Breaks down tasks and creates step-by-step plans."],
+				"whimsical": ["Maps out the treasure hunt before you dive in."]
 			},
 			"workingLabel": {
-				"detailed": "Receiving tokens from {participant}",
-				"friendly": "{participant} is planning the approach",
-				"playful": "{participant} is charting the course"
+				"detailed": ["role {participantRole} is composing the plan (streaming tokens)"],
+				"friendly": ["Planning the approach"],
+				"whimsical": ["Charting the course", "Mapping the route", "Noodling on the map", "Surveying the terrain"]
 			}
 		},
 		"coder": {
 			"systemPrompt": "prompts/coder.md",
 			"tools": ["list_directory", "glob_files", "read_file", "read_file_partial", "search_text", "write_file", "fetch_url", "typecheck", "test", "finish"],
 			"label": {
-				"detailed": "Coder",
-				"friendly": "Coder",
-				"playful": "Builder"
+				"detailed": ["Coder"],
+				"friendly": ["Coder"],
+				"whimsical": ["Builder"]
 			},
 			"description": {
-				"detailed": "Writes, modifies, and tests code according to the specifications.",
-				"friendly": "Writes and tests code to implement the plan.",
-				"playful": "Builds the actual stuff from the blueprint."
+				"detailed": ["Writes, modifies, and tests code according to the specifications."],
+				"friendly": ["Writes and tests code to implement the plan."],
+				"whimsical": ["Builds the actual stuff from the blueprint."]
 			},
 			"workingLabel": {
-				"detailed": "Receiving tokens from {participant}",
-				"friendly": "{participant} is thinking about what code to write",
-				"playful": "{participant} is hammering nails"
+				"detailed": ["role {participantRole} is generating the next code change (streaming tokens)"],
+				"friendly": ["Writing code"],
+				"whimsical": ["Hamster wheels are spinning", "Sharpening all the pencils", "Consulting the rubber duck", "Aligning the widget flanges", "Reticulating splines"]
 			}
 		},
 		"critic": {
 			"systemPrompt": "prompts/critic.md",
 			"tools": ["list_directory", "glob_files", "read_file", "read_file_partial", "search_text", "finish"],
 			"label": {
-				"detailed": "Critic",
-				"friendly": "Reviewer",
-				"playful": "Quality Guard"
+				"detailed": ["Critic"],
+				"friendly": ["Reviewer"],
+				"whimsical": ["Quality Guard"]
 			},
 			"description": {
-				"detailed": "Reviews code and plans for errors, improvements, and adherence to requirements.",
-				"friendly": "Reviews work for quality and catches issues.",
-				"playful": "The sharp-eyed inspector making sure nothing slips through."
+				"detailed": ["Reviews code and plans for errors, improvements, and adherence to requirements."],
+				"friendly": ["Reviews work for quality and catches issues."],
+				"whimsical": ["The sharp-eyed inspector making sure nothing slips through."]
 			},
 			"workingLabel": {
-				"detailed": "Receiving tokens from {participant}",
-				"friendly": "{participant} is reviewing the work",
-				"playful": "{participant} is polishing every rivet"
+				"detailed": ["role {participantRole} is reviewing the work (streaming tokens)"],
+				"friendly": ["Reviewing the work"],
+				"whimsical": ["Polishing every rivet", "Squinting very carefully", "Hunting for the loose thread", "Tutting disapprovingly"]
 			}
 		},
 		"context_manager": {
 			"systemPrompt": "prompts/context_manager.md",
 			"tools": ["context_info", "edit_context", "finish"],
 			"label": {
-				"detailed": "Context Manager",
-				"friendly": "Context Manager",
-				"playful": "Memory Keeper"
+				"detailed": ["Context Manager"],
+				"friendly": ["Context Manager"],
+				"whimsical": ["Memory Keeper"]
 			},
 			"description": {
-				"detailed": "Manages conversation context and compresses history to stay within token limits.",
-				"friendly": "Manages conversation history and keeps things concise.",
-				"playful": "Summarizes the story so you never forget the plot."
+				"detailed": ["Manages conversation context and compresses history to stay within token limits."],
+				"friendly": ["Manages conversation history and keeps things concise."],
+				"whimsical": ["Summarizes the story so you never forget the plot."]
 			},
 			"workingLabel": {
-				"detailed": "Receiving tokens from {participant}",
-				"friendly": "{participant} is managing context",
-				"playful": "{participant} is tidying the shelves"
+				"detailed": ["role {participantRole} is compacting the conversation (streaming tokens)"],
+				"friendly": ["Compacting the conversation"],
+				"whimsical": ["Tidying the shelves", "Sweeping up the loose pages", "Filing things away", "Pruning the hedges"]
 			}
 		},
 		"recovery": {
 			"systemPrompt": "prompts/recovery.md",
 			"tools": ["agent", "ask_human", "finish"],
 			"label": {
-				"detailed": "Recovery",
-				"friendly": "Recovery",
-				"playful": "Fix-it Fairy"
+				"detailed": ["Recovery"],
+				"friendly": ["Recovery"],
+				"whimsical": ["Fix-it Fairy"]
 			},
 			"description": {
-				"detailed": "Handles errors and recovers from failed operations by delegating or asking for clarification.",
-				"friendly": "Recovers from errors and keeps things moving.",
-				"playful": "Cleans up the mess and gets us back on track."
+				"detailed": ["Handles errors and recovers from failed operations by delegating or asking for clarification."],
+				"friendly": ["Recovers from errors and keeps things moving."],
+				"whimsical": ["Cleans up the mess and gets us back on track."]
 			},
 			"workingLabel": {
-				"detailed": "Receiving tokens from {participant}",
-				"friendly": "{participant} is diagnosing the problem",
-				"playful": "{participant} is patching things up"
+				"detailed": ["role {participantRole} is deciding how to recover (streaming tokens)"],
+				"friendly": ["Deciding how to recover"],
+				"whimsical": ["Patching things up", "Picking up the pieces", "Diagnosing the ailment", "Brewing a fix"]
 			}
 		}
 	},
@@ -161,42 +161,42 @@
 
 	"visualization": {
 		"pseudoRoleLabels": {
-			"human": { "detailed": "The human", "friendly": "The human", "playful": "Hooman" },
-			"interrupt": { "detailed": "interrupt (pseudo-role)", "playful": "The Doorbell" },
-			"tools": { "detailed": "tools", "friendly": "Tools", "playful": "The Toolbelt" }
+			"human": { "detailed": ["The human"], "friendly": ["The human"], "whimsical": ["The Dreamer"] },
+			"interrupt": { "detailed": ["interrupt"], "friendly": ["Interrupt"], "whimsical": ["The Doorbell"] },
+			"tools": { "detailed": ["tools"], "friendly": ["Tools"], "whimsical": ["The Toolbelt"] }
 		},
 		"operationTemplates": {
 			"call": {
-				"human->role": { "detailed": "{source} is calling {destination}", "friendly": "{source} is asking {destination} to start", "playful": "{source} is handing the quest off to {destination}" },
-				"role->role": { "detailed": "{source} is calling {destination}", "friendly": "{source} is delegating to {destination}", "playful": "{source} is passing the baton to {destination}" },
-				"role->tool": { "detailed": "{source} is invoking tool {destination}", "friendly": "{source} is using {destination}", "playful": "{source} is grabbing the {destination} gadget" },
-				"role->human": { "detailed": "{source} is requesting input from {destination}", "friendly": "{source} is asking {destination} for input", "playful": "{source} is tugging {destination}'s sleeve with a question" },
-				"interrupt->role": { "detailed": "{source} is preempting {destination}", "friendly": "{source} is interrupting {destination}", "playful": "{source} is butting in on {destination}" },
-				"interrupt->tool": { "detailed": "{source} is invoking tool {destination}", "friendly": "{source} is using {destination}", "playful": "{source} is grabbing the {destination} gadget" }
+				"human->role": { "detailed": ["human is calling role {destinationRole} (stack {stack})"], "friendly": ["{source} is asking {destination} to start"], "whimsical": ["{source} is handing the quest off to {destination}", "{source} is knocking on {destination}'s door", "{source} is sending a carrier pigeon to {destination}"] },
+				"role->role": { "detailed": ["role {sourceRole} is calling role {destinationRole} (stack {stack})"], "friendly": ["{source} is delegating to {destination}"], "whimsical": ["{source} is passing the baton to {destination}", "{source} is tossing the ball to {destination}", "{source} is handing the reins to {destination}"] },
+				"role->tool": { "detailed": ["role {sourceRole} is invoking tool {destinationRole} (stack {stack})"], "friendly": ["{source} is using {destination}"], "whimsical": ["{source} is grabbing the {destination} gadget", "{source} is reaching for the {destination} tool", "{source} is pulling {destination} from the belt"] },
+				"role->human": { "detailed": ["role {sourceRole} is requesting input from {destinationRole} (stack {stack})"], "friendly": ["{source} is asking {destination} for input"], "whimsical": ["{source} is tugging {destination}'s sleeve", "{source} is raising a hand", "{source} is tapping {destination} on the shoulder"] },
+				"interrupt->role": { "detailed": ["interrupt is preempting role {destinationRole} (stack {stack})"], "friendly": ["{source} is interrupting {destination}"], "whimsical": ["{source} is butting in on {destination}", "{source} is crashing {destination}'s party", "{source} is cutting in line ahead of {destination}"] },
+				"interrupt->tool": { "detailed": ["interrupt is invoking tool {destinationRole} (stack {stack})"], "friendly": ["{source} is using {destination}"], "whimsical": ["{source} is grabbing the {destination} gadget", "{source} is reaching for the {destination} tool", "{source} is pulling {destination} from the belt"] }
 			},
 			"return": {
-				"role->role": { "detailed": "{source} is returning to {destination}", "friendly": "{source} is returning to {destination}", "playful": "{source} is giving {destination} a thumbs-up" },
-				"tool->role": { "detailed": "tool {source} is returning to {destination}", "friendly": "{source} is returning result to {destination}", "playful": "{source} is reporting back to {destination}" },
-				"role->human": { "detailed": "{source} is returning to {destination}", "friendly": "{source} is returning to {destination}", "playful": "{source} is reporting the answer to {destination}" },
-				"role->interrupt": { "detailed": "{source} is returning to {destination}", "friendly": "{source} is returning to {destination}", "playful": "{source} is wrapping up for {destination}" },
-				"tool->interrupt": { "detailed": "tool {source} is returning to {destination}", "friendly": "{source} is returning result to {destination}", "playful": "{source} is reporting back to {destination}" }
+				"role->role": { "detailed": ["role {sourceRole} is returning {outcome} to role {destinationRole} (stack {stack})"], "friendly": ["{source} is returning to {destination}"], "whimsical": ["{source} is giving {destination} a thumbs-up", "{source} is bowing out to {destination}", "{source} is passing the mic back to {destination}"] },
+				"tool->role": { "detailed": ["tool {sourceRole} is returning {outcome} to role {destinationRole} (stack {stack})"], "friendly": ["Returning to {destination}"], "whimsical": ["{source} is reporting back to {destination}", "{source} is handing the answer to {destination}", "{source} is sliding the result across the table to {destination}"] },
+				"role->human": { "detailed": ["role {sourceRole} is returning {outcome} to {destinationRole} (stack {stack})"], "friendly": ["{source} is returning to {destination}"], "whimsical": ["{source} is reporting the answer to {destination}", "{source} is whispering the answer to {destination}", "{source} is passing the answer back to {destination}"] },
+				"role->interrupt": { "detailed": ["role {sourceRole} is returning {outcome} to interrupt (stack {stack})"], "friendly": ["{source} is returning to {destination}"], "whimsical": ["{source} is wrapping up for {destination}", "{source} is handing back to {destination}", "{source} is signing off to {destination}"] },
+				"tool->interrupt": { "detailed": ["tool {sourceRole} is returning {outcome} to interrupt (stack {stack})"], "friendly": ["Returning to {destination}"], "whimsical": ["{source} is reporting back to {destination}", "{source} is handing the answer to {destination}", "{source} is sliding the result across the table to {destination}"] }
 			},
 			"observe": {
-				"role->role": { "detailed": "{source} is observing {destination}", "friendly": "{source} is observing {destination}", "playful": "{source} is peeking at {destination}" }
+				"role->role": { "detailed": ["role {sourceRole} is observing role {destinationRole} (cross-stack reference, stack {stack})"], "friendly": ["{source} is observing {destination}"], "whimsical": ["{source} is peeking at {destination}", "{source} is glancing over {destination}'s shoulder", "{source} is eavesdropping on {destination}"] }
 			},
 			"terminate": {
-				"tool->role": { "detailed": "{source} is terminating {destination}", "friendly": "{source} is rewinding {destination}", "playful": "{source} is zapping {destination}" }
+				"tool->role": { "detailed": ["tool {sourceRole} is reverting role {destinationRole} (terminate, stack {stack})"], "friendly": ["{source} is rewinding {destination}"], "whimsical": ["{source} is zapping {destination}", "{source} is vaporizing {destination}", "{source} is hitting {destination} with the undo ray"] }
 			}
 		},
 		"genericOperationTemplates": {
-			"call": { "detailed": "{source} is calling {destination}", "friendly": "{source} is calling {destination}", "playful": "{source} is ringing up {destination}" },
-			"return": { "detailed": "{source} is returning to {destination}", "friendly": "{source} is returning to {destination}", "playful": "{source} is reporting back to {destination}" },
-			"observe": { "detailed": "{source} is observing {destination}", "friendly": "{source} is observing {destination}", "playful": "{source} is peeking at {destination}" },
-			"terminate": { "detailed": "{source} is terminating {destination}", "friendly": "{source} is rewinding {destination}", "playful": "{source} is zapping {destination}" }
+			"call": { "detailed": ["{sourceKind} {sourceRole} is calling {destinationKind} {destinationRole} (stack {stack})"], "friendly": ["{source} is calling {destination}"], "whimsical": ["{source} is ringing up {destination}"] },
+			"return": { "detailed": ["{sourceKind} {sourceRole} is returning {outcome} to {destinationKind} {destinationRole} (stack {stack})"], "friendly": ["{source} is returning to {destination}"], "whimsical": ["{source} is reporting back to {destination}"] },
+			"observe": { "detailed": ["{sourceKind} {sourceRole} is observing {destinationKind} {destinationRole} (stack {stack})"], "friendly": ["{source} is observing {destination}"], "whimsical": ["{source} is peeking at {destination}"] },
+			"terminate": { "detailed": ["{sourceKind} {sourceRole} is reverting {destinationKind} {destinationRole} (terminate, stack {stack})"], "friendly": ["{source} is rewinding {destination}"], "whimsical": ["{source} is zapping {destination}"] }
 		},
 		"workingTemplates": {
-			"role": { "detailed": "Receiving tokens from {participant}", "friendly": "{participant} is thinking", "playful": "{participant} is on the case" },
-			"tool": { "detailed": "Executing {participant}", "friendly": "{participant} is running", "playful": "{participant} is on the job" }
+			"role": { "detailed": ["role {participantRole} is generating a response (streaming tokens)"], "friendly": ["{participant} is thinking"], "whimsical": ["{participant} is on the case", "{participant} is noodling on it", "{participant} is chewing it over"] },
+			"tool": { "detailed": ["tool {participantRole} is executing"], "friendly": ["{participant} is running"], "whimsical": ["{participant} is on the job", "{participant} is hard at work", "{participant} is grinding away"] }
 		}
 	}
 }
