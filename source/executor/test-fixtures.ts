@@ -66,8 +66,15 @@ export function resolveRoleBySystemPrompt(loadedGuild: LoadedGuild): (request: L
 	return (request) => {
 		const firstMessage = request.messages[0]
 		if (firstMessage !== undefined && firstMessage.role === 'system') {
-			const roleName = promptToRole.get(firstMessage.content)
-			if (roleName !== undefined) return roleName
+			const content = firstMessage.content
+			// Exact match first (a non-entry role's system message is the prompt verbatim); then a
+			// prefix match, because the entry role's system message is the prompt with the effort
+			// directive merged onto it rather than a second system message.
+			const exact = promptToRole.get(content)
+			if (exact !== undefined) return exact
+			for (const [prompt, roleName] of promptToRole) {
+				if (content.startsWith(prompt)) return roleName
+			}
 		}
 		throw new Error('ScriptedLlm could not resolve role from the request system prompt')
 	}

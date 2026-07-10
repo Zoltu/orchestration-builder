@@ -236,12 +236,13 @@ async function dispatchAndRecord({ deps, roleState, roleName, dispatchCtx, toolC
 }
 
 // Assembles a role's first messages: the system prompt, then the user task.
-// The entry role (depth 0) additionally receives the effort directive as a system message between its prompt and the task, so prompts can branch on the run's quality level. Child roles never receive the directive — the depth-0 gate ensures it even though the agent spawn copies the context — leaving the parent to translate effort into delegation instructions.
+// The entry role (depth 0) additionally receives the effort directive appended to the system prompt, so prompts can branch on the run's quality level. The directive is merged into the single system message rather than emitted as a second one: many model chat templates (Gemma-family and others) reject a `system` message that is not the first message, so two consecutive system messages would break those endpoints. Child roles never receive the directive — the depth-0 gate ensures it even though the agent spawn copies the context — leaving the parent to translate effort into delegation instructions.
 function buildInitialHistory(systemPrompt: string, context: EngineContext): Message[] {
-	const history: Message[] = [{ role: 'system', content: systemPrompt }]
+	let systemContent = systemPrompt
 	if (context.depth === 0 && context.effort !== undefined) {
-		history.push({ role: 'system', content: effortDirective(context.effort) })
+		systemContent = `${systemPrompt}\n\n${effortDirective(context.effort)}`
 	}
+	const history: Message[] = [{ role: 'system', content: systemContent }]
 	history.push({ role: 'user', content: context.task })
 	return history
 }

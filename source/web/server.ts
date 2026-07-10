@@ -9,6 +9,7 @@ import { isEffortLevel } from '../executor/validation.js'
 import type { RunState } from '../executor/run-state.js'
 import type { RunSubmission } from '../executor/run-submission.js'
 import { parseRunSnapshot, paginateLogEvents, renderConfig, renderProjectSettings, renderPendingQuestions, renderRunSummary, renderRunView, formatLogAsText, toRecentLogEntry } from './render.js'
+import { deriveInteractionModel } from './interaction-model-adapter.js'
 
 const STATIC_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), 'static')
 const MAX_LOG_LINES = 200
@@ -77,6 +78,12 @@ function handleActiveRun(readRunSnapshotById: ReadRunSnapshotById, runSubmission
 	return json(view)
 }
 
+function handleActiveRunFlow(readRunSnapshotById: ReadRunSnapshotById, runSubmission: RunSubmission): Response {
+	const runId = runSubmission.lastRunId()
+	if (runId === undefined) return json({ ok: false, error: 'no_run' }, 404)
+	return runFlowPage(readRunSnapshotById, runId)
+}
+
 function handleGetRunById(readRunSnapshotById: ReadRunSnapshotById, runId: string): Response {
 	const view = runViewFor(readRunSnapshotById, runId)
 	if (view === null) return json({ ok: false, error: 'not_found' }, 404)
@@ -109,6 +116,16 @@ function parseNonNegativeInt(value: string | null, defaultValue: number): number
 	const parsed = Number(value)
 	if (!Number.isInteger(parsed) || parsed < 0) return defaultValue
 	return parsed
+}
+
+// Serves the structured InteractionModel derived from a run's full snapshot. The model is JSON
+// (identifiers, counters, costs as values; agent prose as markdown strings in `details`); the
+// client renders `details` only through the sanitized Markdown pipeline, so the server does not
+// sanitize — it must not serve pre-rendered HTML that would bypass the client's sanitization.
+function runFlowPage(readRunSnapshotById: ReadRunSnapshotById, runId: string): Response {
+	if (!isKnownRun(readRunSnapshotById, runId)) return json({ ok: false, error: 'not_found' }, 404)
+	const snapshot = parseRunSnapshot(readRunSnapshotById(runId))
+	return json(deriveInteractionModel(snapshot, new Date().toISOString()))
 }
 
 function runViewFor(readRunSnapshotById: ReadRunSnapshotById, runId: string): ReturnType<typeof renderRunView> | null {
@@ -181,20 +198,27 @@ export function createWebServer(config: WebServerConfig): WebServer {
 			const { pathname } = url
 
 		if (request.method === 'GET') {
-			if (pathname === '/api/config') return json(renderConfig(guildConfig, config.tools))
+		if (pathname === '/api/config') return json(renderConfig(guildConfig, config.tools))
 			if (pathname === '/api/settings') return handleGetSettings(readProjectSettings)
+			if (pathname === '/api/run/flow') return handleActiveRunFlow(readRunSnapshotById, runSubmission)
 			if (pathname === '/api/run') return handleActiveRun(readRunSnapshotById, runSubmission)
-				if (pathname === '/api/runs') return handleListRuns(readRunSnapshotById, listRunIds)
-				if (pathname.startsWith('/api/runs/')) {
-					const rest = decodeURIComponent(pathname.slice('/api/runs/'.length))
-					// Match the /log suffix before the bare :id route so /api/runs/<id>/log reaches the log endpoint rather than being swallowed as a run id of "<id>/log".
-					const slashIndex = rest.lastIndexOf('/')
-					if (slashIndex >= 0 && rest.slice(slashIndex + 1) === 'log') {
-						const runId = rest.slice(0, slashIndex)
-						if (runId !== '') return runLogPage(readRunSnapshotById, runId, url.searchParams)
+			if (pathname === '/api/runs') return handleListRuns(readRunSnapshotById, listRunIds)
+			if (pathname.startsWith('/api/runs/')) {
+				const rest = decodeURIComponent(pathname.slice('/api/runs/'.length))
+				// Match a /log or /flow suffix before the bare :id route so /api/runs/<id>/log and
+				// /api/runs/<id>/flow reach their endpoints rather than being swallowed as a run id of
+				// "<id>/log" or "<id>/flow".
+				const slashIndex = rest.lastIndexOf('/')
+				if (slashIndex >= 0) {
+					const suffix = rest.slice(slashIndex + 1)
+					const runId = rest.slice(0, slashIndex)
+					if (runId !== '') {
+						if (suffix === 'log') return runLogPage(readRunSnapshotById, runId, url.searchParams)
+						if (suffix === 'flow') return runFlowPage(readRunSnapshotById, runId)
 					}
-					return handleGetRunById(readRunSnapshotById, rest)
 				}
+				return handleGetRunById(readRunSnapshotById, rest)
+			}
 			if (pathname === '/api/questions') return json(renderPendingQuestions(runState.pendingQuestions()))
 		// Browsers auto-request /favicon.ico on every page load; answer 204 so it does not pollute the console with a 404.
 		if (pathname === '/favicon.ico') return new Response(null, { status: 204 })

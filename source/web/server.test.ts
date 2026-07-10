@@ -763,6 +763,70 @@ describe('createWebServer GET /api/runs/:id/log', () => {
 	})
 })
 
+describe('createWebServer GET /api/runs/:id/flow', () => {
+	test('returns the InteractionModel for a known run with the root human and entry role', async () => {
+		const response = await fetch(`${readOnlyBaseUrl}/api/runs/run-tree/flow`)
+		expect(response.status).toBe(200)
+		expect(response.headers.get('content-type')).toContain('application/json')
+		const model = await response.json()
+		expect(model.status).toBe('success')
+		expect(model.participants.map((p: { role: string }) => p.role)).toEqual(['human', 'orchestrator', 'coder'])
+		expect(model.participants[0]).toEqual({ id: 'human:root', role: 'human', kind: 'human' })
+		// run-tree delegates orchestrator → coder then unwinds: two calls and two returns.
+		expect(model.operations.map((o: { kind: string }) => o.kind)).toEqual(['call', 'call', 'return', 'return'])
+		expect(model.operations[0].source).toBe('human:root')
+		expect(model.operations[1].destination).toBe(model.participants[2].id)
+		// A terminal run has nothing in flight.
+		expect(model.operations.every((o: { lifecycle: string }) => o.lifecycle === 'settled')).toBe(true)
+	})
+
+	test('returns 404 for an unknown run id', async () => {
+		const response = await fetch(`${readOnlyBaseUrl}/api/runs/never-started/flow`)
+		expect(response.status).toBe(404)
+		expect(await response.json()).toEqual({ ok: false, error: 'not_found' })
+	})
+
+	test('does not swallow the bare :id route (the /flow suffix is not consumed as part of the id)', async () => {
+		const response = await fetch(`${readOnlyBaseUrl}/api/runs/run-tree`)
+		expect(response.status).toBe(200)
+		const view = await response.json()
+		expect(view.runId).toBe('run-tree')
+	})
+})
+
+describe('createWebServer /api/run/flow alias', () => {
+	test('matches /api/runs/:id/flow for the active run', async () => {
+		const { server, baseUrl, submission, resolveActive } = createSubmissionServer()
+		try {
+			submission.submit('bootstrap task')
+			const activeId = submission.activeRunId()
+			expect(activeId).toBe('test-run-0')
+
+			const aliasResponse = await fetch(`${baseUrl}/api/run/flow`)
+			expect(aliasResponse.status).toBe(200)
+			const byIdResponse = await fetch(`${baseUrl}/api/runs/${activeId}/flow`)
+			expect(byIdResponse.status).toBe(200)
+			expect(await aliasResponse.json()).toEqual(await byIdResponse.json())
+
+			resolveActive()(terminalMeta('test-run-0', 'bootstrap task'))
+			await submission.awaitActive()
+		} finally {
+			server.stop()
+		}
+	})
+
+	test('returns 404 no_run when no run has ever been started', async () => {
+		const { server, baseUrl } = createSubmissionServer()
+		try {
+			const response = await fetch(`${baseUrl}/api/run/flow`)
+			expect(response.status).toBe(404)
+			expect(await response.json()).toEqual({ ok: false, error: 'no_run' })
+		} finally {
+			server.stop()
+		}
+	})
+})
+
 describe('createWebServer POST /api/runs', () => {
 	test('accepts a task when no run is active and returns 201 with the run id', async () => {
 		const { server, baseUrl, submission, resolveActive } = createSubmissionServer()

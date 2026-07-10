@@ -822,7 +822,7 @@ describe('runRole — rich LLM and tool payloads', () => {
 })
 
 describe('runRole effort directive injection', () => {
-	test('the entry role receives the effort directive between its system prompt and the task', async () => {
+	test('the entry role receives the effort directive merged into its single system message', async () => {
 		const guild = buildGuild(
 			{ main: { systemPrompt: 'p', tools: ['finish'] } },
 			'main',
@@ -841,10 +841,11 @@ describe('runRole effort directive injection', () => {
 
 		expect(llm.calls.length).toBe(1)
 		const messages = llm.calls[0]!.messages
-		expect(messages[0]).toEqual({ role: 'system', content: 'prompt for main' })
-		expect(messages[1]).toEqual({ role: 'system', content: effortDirective(2) })
-		expect(messages[1]!.content).toContain('Quality level: 2 of 5')
-		expect(messages[2]).toEqual({ role: 'user', content: 'do it' })
+		// The directive is merged into the single system message, not emitted as a second one — many chat templates reject a system message that is not the first message.
+		expect(messages).toHaveLength(2)
+		expect(messages[0]).toEqual({ role: 'system', content: `prompt for main\n\n${effortDirective(2)}` })
+		expect(messages[0]!.content).toContain('Quality level: 2 of 5')
+		expect(messages[1]).toEqual({ role: 'user', content: 'do it' })
 	})
 
 	test('the entry role receives no directive when effort is absent on the context', async () => {
