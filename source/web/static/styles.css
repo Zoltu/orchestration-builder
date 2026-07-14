@@ -1034,6 +1034,7 @@ li:last-child {
 		grid-template-columns: 24rem minmax(0, 1fr);
 		grid-template-areas:
 			'runs   submit'
+			'runs   flow'
 			'runs   summary'
 			'runs   roles'
 			'runs   questions'
@@ -1057,9 +1058,13 @@ li:last-child {
 	#submit-panel {
 		grid-area: submit;
 	}
+	/* The flow-graph run view is the focal centerpiece; it takes the focal ring that the summary panel used to carry alone (the summary panel stays as a supporting read below it). */
+	#flow-panel {
+		grid-area: flow;
+		box-shadow: var(--shadow-focal);
+	}
 	#run-summary {
 		grid-area: summary;
-		box-shadow: var(--shadow-focal);
 	}
 	#roles-panel {
 		grid-area: roles;
@@ -1290,6 +1295,55 @@ li:last-child {
 	font-weight: 500;
 	color: var(--color-accent);
 	text-align: center;
+}
+
+/* --- Product run-view layout (flow-graph centerpiece) ----------------------- */
+/* The product client mounts the same flow/sequence views the demo harness iterates against, so the stage and controls reuse the demo's `.pb-*` classes (the cost strip, now caption, view toggle, and `.pb-flow` overlay context) plus a focal panel wrapper. */
+
+/* The flow area is a flex column with a minimum height so the centerpiece reads as a stage even on a one-node frame; the SVG fills it (`.flow-view-svg` is `flex: 1 1 auto`) and the per-run-view modals overlay it (`.pb-flow` is `position: relative`). */
+#flow-panel .flow-stage {
+	display: flex;
+	flex-direction: column;
+	min-height: 18rem;
+}
+
+/* The controls row above the stage: the Flow/Sequence segmented toggle and the label-tier select. The toggle's demo-only `margin-left: auto` is neutralized here so the two controls sit at the row's start rather than the toggle pushing the tier control to the far edge. */
+.flow-controls {
+	display: flex;
+	align-items: center;
+	gap: var(--space-3);
+	margin-bottom: var(--space-2);
+}
+#flow-panel .pb-view-toggle {
+	margin-left: 0;
+}
+.flow-tier-control {
+	display: inline-flex;
+	align-items: center;
+	gap: var(--space-1);
+	font-size: 0.8rem;
+	color: var(--color-text-muted);
+}
+.flow-tier-control select {
+	font: inherit;
+	color: var(--color-text);
+	background: var(--color-surface);
+	border: 1px solid var(--color-border);
+	border-radius: var(--radius-sm);
+	padding: 0.1rem var(--space-1);
+}
+
+/* The sequence view lives in a vertical scroll container inside the stage so a long timeline scrolls within the panel rather than growing the page; the flow view mounts directly because it never overflows. */
+#flow-panel .pb-sequence-scroll {
+	overflow: auto;
+	flex: 1 1 auto;
+	min-height: 0;
+}
+
+/* The placeholder shown before the guild config or the first flow frame lands, centered in the stage so the empty state reads as a stage awaiting content rather than a collapsed panel. */
+.flow-empty {
+	margin: auto;
+	color: var(--color-text-muted);
 }
 
 /* Small top-bar nodes: a compact square holding just the invocation count, so a long run's history stays a thin strip. The strip is cumulative/aggregate history (total invocations per type), so it carries no per-invocation status except the terminal-failure exception below — a slot whose run ended in error turns red so the failing role reads at a glance against an otherwise neutral strip. The role/tool name and cumulative token/time details surface via the native SVG <title> hover tooltip, not in the strip. */
@@ -1815,7 +1869,7 @@ li:last-child {
 }
 
 /* --- Tooltip (node/edge inspector) ------------------------------------------ */
-/* A friendly-formatted detail card that appears when an operator hovers a flow-view node or edge, and disappears when the pointer leaves it. It is an HTML overlay positioned `fixed` at the pointer (the SVG cannot host the sanitized-Markdown vnodes or a wrapping <pre> the card renders), so it lives as a sibling of the flow SVG inside the flow view container. The inline `left/top` (or `right/bottom` near an edge) is resolved at hover time so the card never overflows the viewport; the CSS `max-width`/`max-height` clamp the real size and let long JSON or prose scroll inside the card. The card is `pointer-events: none` so it never intercepts the pointer — the hover target stays the node/edge beneath it, so leaving that geometry is what dismisses the card (no flicker, no hover-bridge needed). Colors read the visual tokens so the card follows the light/dark theme with the rest of the page. */
+/* A friendly-formatted detail card that appears when an operator hovers a run-view node or edge, and disappears when the pointer leaves both the node and the card. It is an HTML overlay positioned `fixed` and anchored flush against the hovered node's bounding rect (the SVG cannot host the sanitized-Markdown vnodes or a wrapping <pre> the card renders), so it lives as a sibling of the run-view SVG inside the flow view container; the inline `left/top` (or `right/bottom` near a viewport edge) is resolved at hover time against the node's rect so the card never overflows, and the CSS `max-width`/`max-height` clamp the real size and let long JSON or prose scroll inside the card. The card is `pointer-events: auto` and `user-select: text` so the operator can move the pointer from the node into the card to select and copy its contents; a short grace period on leaving the node (or the card) keeps the card open while the pointer travels between them, and the card dismisses once the pointer is over neither. The card sits below the per-run-view modals (`z-index: 15` vs the modals' `20`) so an open modal covers it. Colors read the visual tokens so the card follows the light/dark theme with the rest of the page. */
 
 /* Hovering a node or edge signals "more detail here"; `help` is the classic affordance for hover-to-inspect. The thin edge paths pick up the same cursor so hovering a line is discoverable. */
 .flow-node,
@@ -1826,8 +1880,9 @@ li:last-child {
 
 .tooltip-card {
 	position: fixed;
-	z-index: 30;
-	pointer-events: none;
+	z-index: 15;
+	pointer-events: auto;
+	user-select: text;
 	max-width: min(24rem, calc(100vw - 1rem));
 	max-height: min(28rem, 60vh);
 	overflow: auto;

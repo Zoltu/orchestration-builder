@@ -1,4 +1,4 @@
-# UI step 16 (deferred, executor-dependent) — `llm_call_start` / streaming for token-level flow
+# UI step 17 (deferred, executor-dependent) — `llm_call_start` / streaming for token-level flow
 
 ## Goal
 
@@ -22,7 +22,7 @@ The executor is frozen for main-plan steps 25–29. Step 30 (`run_shell`) unfree
 ## Module boundaries
 
 - This is the **only** step in the UI sub-plan that touches the executor runtime. It is gated on the main-plan executor unfreeze (step 30) and is sequenced after it.
-- The web-only phase-B steps (12–15) do not depend on this step and ship without it.
+- The web-only phase-B steps (12–16) do not depend on this step and ship without it.
 
 ## Acceptance criteria (when sequenced)
 
@@ -37,4 +37,4 @@ Watch a streaming run and confirm the flow tracks the first byte, the node state
 
 ## Status
 
-**Deferred.** Not started until the executor unfreezes (main-plan step 30). Recorded here so the design's streaming-awareness is not lost; the web-only phase-B sub-plan (steps 12–15) is complete without it.
+**Deferred.** Not started until the executor unfreezes (main-plan step 30). Recorded here so the design's streaming-awareness is not lost; the web-only phase-B sub-plan (steps 12–16) is complete without it.

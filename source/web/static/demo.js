@@ -9,7 +9,7 @@ import { createLabelResolver } from './labels.js'
 import { deriveLifecycle, renderFlowView, deriveNowCaption, deriveCostStrip } from './flow-view.js'
 import { renderSequenceView, HEADER_HEIGHT, ROW_HEIGHT, BOTTOM_MARGIN } from './sequence-diagram.js'
 import { createMarkdownRenderer } from './markdown-render.js'
-import { Tooltip } from './tooltip.js'
+import { Tooltip, tooltipStyle, deriveOperationTooltip, deriveParticipantTooltip, deriveRoleTooltip } from './tooltip.js'
 import { ResultModal } from './result-modal.js'
 import { QuestionModal } from './question-modal.js'
 import { activeAskHumanCall } from './flow-view.js'
@@ -234,67 +234,110 @@ function htmlH(tag, props, children = []) {
 
 const renderMarkdown = createMarkdownRenderer(htmlH)
 
-// The inspector overlay: one positioned card mounted under body, rebuilt on each hover. The card is `pointer-events: none` (styles.css) so it never becomes the hover target itself — leaving the hovered message or node geometry is what dismisses it, matching the demo harness convention.
+// The inspector overlay: one positioned card mounted inside the run-view container (`flowContainer`),
+// rebuilt per hover and anchored flush against the hovered node's rect. The card is `pointer-events:
+// auto` and `user-select: text` (styles.css) so the operator can move the pointer from the node into
+// the card to select and copy its contents; a short grace period on leaving the node (or the card)
+// keeps the card open while the pointer travels between them, and the card dismisses once the pointer
+// is over neither. The dedup key is `${kind}:${id}` so the card is reused (not flickered) as the
+// pointer moves within the same operation (a sequence message → its terminal node) or the same
+// participant (a node's box → its cost figures).
 let currentTooltipNode = null
-let currentTooltipOperationId = null
+let currentTooltipKey = null
+// A pending dismiss timer, bridging the pointer's travel between a node and the card. Held at module
+// scope because it is an opaque resource, not view state.
+let tooltipDismissTimer = null
+const TOOLTIP_GRACE_MS = 150
+
+function cancelTooltipDismiss() {
+	if (tooltipDismissTimer !== null) {
+		clearTimeout(tooltipDismissTimer)
+		tooltipDismissTimer = null
+	}
+}
+
+function scheduleTooltipDismiss() {
+	cancelTooltipDismiss()
+	tooltipDismissTimer = setTimeout(() => {
+		tooltipDismissTimer = null
+		closeTooltip()
+	}, TOOLTIP_GRACE_MS)
+}
 
 function closeTooltip() {
+	cancelTooltipDismiss()
 	if (currentTooltipNode === null) return
 	currentTooltipNode.remove()
 	currentTooltipNode = null
-	currentTooltipOperationId = null
+	currentTooltipKey = null
 }
 
-// Resolves the card's inline positioning so it never overflows the viewport: when the pointer is near the right or bottom edge, the card flips to anchor its right/bottom edge to the pointer. The estimates are upper bounds clamped by the CSS max-width/max-height, so an over-estimate only flips a little early (safe) rather than letting the card clip off-screen.
-function tooltipStyle(clientX, clientY) {
-	const viewportWidth = window.innerWidth
-	const viewportHeight = window.innerHeight
-	const margin = 12
-	const estimatedWidth = 380
-	const estimatedHeight = 280
-	const style = {}
-	if (clientX + estimatedWidth + margin > viewportWidth && clientX - estimatedWidth - margin > 0) {
-		style.right = `${Math.max(margin, viewportWidth - clientX)}px`
-	} else {
-		style.left = `${Math.max(margin, clientX + margin)}px`
-	}
-	if (clientY + estimatedHeight + margin > viewportHeight && clientY - estimatedHeight - margin > 0) {
-		style.bottom = `${Math.max(margin, viewportHeight - clientY)}px`
-	} else {
-		style.top = `${Math.max(margin, clientY + margin)}px`
-	}
-	return style
+// Resolves the hovered DOM element to an inspector target by walking the data attributes the view
+// modules stamp onto nodes and edges, and snapshots the element's viewport rect so the card can be
+// anchored to the node (not the pointer). Sequence messages and terminal nodes carry `data-operation`;
+// flow call/return edges carry `data-operation`; flow main-area nodes carry `data-participant`; flow
+// top-bar slots carry `data-role` (and lack `data-participant`, so the participant check does not catch
+// them). The order matters: operation first, then participant, then role.
+function snapshotRect(element) {
+	const rect = element.getBoundingClientRect()
+	return { left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom }
 }
 
-// Builds the inspector card for an operation: the resolved label as the heading and a single 'details' section carrying the operation's adapter-formatted markdown, routed through the sanitized pipeline by tooltip.js's formatTooltipContent. The details live on the model and are looked up by the hovered element's data-operation at hover time, so the view never embeds markdown in SVG attributes.
-function openOperationTooltip(target, clientX, clientY) {
-	const operationId = target.getAttribute('data-operation')
-	if (operationId === null) return
+function resolveTooltipTarget(event) {
+	if (!(event.target instanceof Element)) return null
+	const operationElement = event.target.closest('[data-operation]')
+	if (operationElement !== null) {
+		const operationId = operationElement.getAttribute('data-operation')
+		if (operationId !== null) return { kind: 'operation', id: operationId, rect: snapshotRect(operationElement) }
+	}
+	const participantElement = event.target.closest('[data-participant]')
+	if (participantElement !== null) {
+		const participantId = participantElement.getAttribute('data-participant')
+		if (participantId !== null) return { kind: 'participant', id: participantId, rect: snapshotRect(participantElement) }
+	}
+	const roleElement = event.target.closest('.flow-small-node[data-role]')
+	if (roleElement !== null) {
+		const role = roleElement.getAttribute('data-role')
+		if (role !== null) return { kind: 'role', id: role, rect: snapshotRect(roleElement) }
+	}
+	return null
+}
+
+// Builds the inspector card from the live InteractionModel via the shared derivations in `tooltip.js`
+// (the same ones the product client uses), so the dev harness and the live view consume one inspector
+// derivation. The card is anchored to the target's snapshot rect (flush against it) and appended to
+// the run-view container so a `mouseleave` on the container covers both the SVG and the card — moving
+// from a node into the card keeps the card open.
+function openTooltip(target) {
 	const scenario = scenarios[scenarioIndex]
 	if (scenario === undefined) return
 	const frame = scenario.frames[frameIndex]
 	if (frame === undefined) return
-	const operation = frame.operations.find((entry) => entry.id === operationId)
-	if (operation === undefined) return
-	// Reuse the open card when the pointer moves within the same operation (path → terminal node) so the card does not flicker on every mouseover.
-	if (currentTooltipOperationId === operationId && currentTooltipNode !== null) {
-		const card = currentTooltipNode
-		const style = tooltipStyle(clientX, clientY)
-		for (const prop of ['left', 'right', 'top', 'bottom']) {
-			card.style.removeProperty(prop)
-		}
-		for (const [prop, value] of Object.entries(style)) card.style.setProperty(prop, value)
+	let descriptor
+	if (target.kind === 'operation') {
+		const operation = frame.operations.find((entry) => entry.id === target.id)
+		if (operation === undefined) return
+		descriptor = deriveOperationTooltip(frame, labels, tier, target.id)
+	} else if (target.kind === 'participant') {
+		const participant = frame.participants.find((entry) => entry.id === target.id)
+		if (participant === undefined) return
+		descriptor = deriveParticipantTooltip(frame, labels, tier, target.id)
+	} else {
+		const representative = frame.participants.find((entry) => entry.role === target.id)
+		if (representative === undefined) return
+		descriptor = deriveRoleTooltip(frame, labels, tier, target.id)
+	}
+	if (descriptor.title === '') return
+	// Reuse the open card when the pointer moves within the same target (a message path → its terminal node, or a node box → its cost figures) so the card does not flicker on every mouseover. The rect is unchanged for the same target, so the card stays put.
+	const key = `${target.kind}:${target.id}`
+	if (currentTooltipKey === key && currentTooltipNode !== null) {
 		return
 	}
-	const label = labels.resolveOperationLabel(operation, frame.participants, tier, labels.hashString(operation.id))
-	const sections = operation.details !== null && operation.details !== ''
-		? [{ label: 'details', content: operation.details }]
-		: []
 	closeTooltip()
-	const card = Tooltip(htmlH, { title: label, sections, renderMarkdown, style: tooltipStyle(clientX, clientY) })
-	document.body.appendChild(card)
+	const card = Tooltip(htmlH, { title: descriptor.title, sections: descriptor.sections, renderMarkdown, style: tooltipStyle(target.rect) })
+	flowContainer.appendChild(card)
 	currentTooltipNode = card
-	currentTooltipOperationId = operationId
+	currentTooltipKey = key
 }
 
 // Sequence-view scroll state. The SVG renders at its natural full-content viewBox and lives inside a scroll container, so a long timeline scrolls vertically (the page wheel) rather than zooming; the container is the single piece of state the jump-to-active affordance needs.
@@ -318,29 +361,44 @@ function jumpSequenceViewToActive(container) {
 	container.scrollTop = Math.max(0, target - container.clientHeight / 2)
 }
 
-// Wires the inspector (hover/click) to a freshly mounted sequence SVG. The view auto-fits all role columns and scrolls vertically for long timelines, so no zoom or drag-pan is wired; the mouse wheel reaches the page (or the container) and scrolls naturally.
-function wireSequenceInteractions(container) {
-	const svg = container.firstElementChild
-	if (!(svg instanceof SVGSVGElement)) return
-	activeSequenceContainer = container
+// Wires the inspector (hover/click) to the run-view container once. The container (`flowContainer`)
+// holds the flow SVG, the sequence scroll container, the modals, and the inspector card, so a single
+// set of `mouseover`/`mouseleave`/`click` listeners covers both views and the card itself:
+//  - `mouseover` over the card: keep it open (cancel any pending dismiss) — the pointer entered the
+//    card to select/copy.
+//  - `mouseover` over a node/edge: open/switch the card to it (anchored to its rect), canceling any
+//    pending dismiss.
+//  - `mouseover` over empty run-view area: schedule a grace-period dismiss — if the pointer reaches
+//    the card (or a new node) before it fires, the dismiss is canceled; otherwise the card dismisses
+//    once the pointer is over neither.
+//  - `mouseleave` on the container: schedule a grace-period dismiss (the pointer left the run view).
+//  - `click` on an in-flight `ask_human` row: re-open the question modal (the sequence view's re-entry
+//    affordance); every other click falls through to the hover path.
+function wireRunViewInteractions() {
 	const openAt = (event) => {
-		const target = (event.target instanceof Element) ? event.target.closest('[data-operation]') : null
-		if (target === null) return
-		const pointerEvent = event instanceof MouseEvent ? event : null
-		const clientX = pointerEvent !== null ? pointerEvent.clientX : 0
-		const clientY = pointerEvent !== null ? pointerEvent.clientY : 0
-		openOperationTooltip(target, clientX, clientY)
+		if (event.target instanceof Element && event.target.closest('.tooltip-card') !== null) {
+			cancelTooltipDismiss()
+			return
+		}
+		const target = resolveTooltipTarget(event)
+		if (target === null) {
+			if (currentTooltipNode !== null) scheduleTooltipDismiss()
+			return
+		}
+		cancelTooltipDismiss()
+		openTooltip(target)
 	}
-	svg.addEventListener('mouseover', openAt)
-	svg.addEventListener('click', (event) => {
-		// Clicking an ask_human message row re-opens the question modal (the sequence view has no Question button overlay like the flow view, so the message row itself is the re-entry affordance after a dismiss).
-		const target = (event.target instanceof Element) ? event.target.closest('[data-operation]') : null
-		if (target !== null) {
-			const operationId = target.getAttribute('data-operation')
+	flowContainer.addEventListener('mouseover', openAt)
+	flowContainer.addEventListener('click', (event) => {
+		if (event.target instanceof Element && event.target.closest('.tooltip-card') !== null) {
+			return
+		}
+		const target = resolveTooltipTarget(event)
+		if (target !== null && target.kind === 'operation') {
 			const scenario = scenarios[scenarioIndex]
 			const frame = scenario !== undefined ? scenario.frames[frameIndex] : undefined
-			if (frame !== undefined && operationId !== null) {
-				const operation = frame.operations.find((op) => op.id === operationId)
+			if (frame !== undefined) {
+				const operation = frame.operations.find((op) => op.id === target.id)
 				if (operation !== undefined && operation.kind === 'call' && operation.lifecycle === 'in_flight') {
 					const destination = frame.participants.find((p) => p.id === operation.destination)
 					if (destination !== undefined && destination.kind === 'human') {
@@ -352,8 +410,16 @@ function wireSequenceInteractions(container) {
 		}
 		openAt(event)
 	})
-	// mouseleave (not mouseout) fires only when the pointer leaves the SVG entirely, so moving between a message's path and its terminal node does not dismiss the card.
-	svg.addEventListener('mouseleave', closeTooltip)
+	flowContainer.addEventListener('mouseleave', () => {
+		if (currentTooltipNode !== null) scheduleTooltipDismiss()
+	})
+}
+
+// Records the active sequence scroll container so the jump-to-active affordance can center the latest
+// message row. The hover listeners live on `flowContainer` (wired once by `wireRunViewInteractions`),
+// so this only updates the scroll-state reference.
+function wireSequenceInteractions(container) {
+	activeSequenceContainer = container
 }
 
 let scenarioIndex = 0
@@ -527,7 +593,9 @@ function paintFlowArea() {
 		flowContainer.removeChild(flowContainer.firstChild)
 	}
 	const svg = renderFlowViewSvg()
-	if (svg !== null) flowContainer.insertBefore(svg, nowCaption)
+	if (svg !== null) {
+		flowContainer.insertBefore(svg, nowCaption)
+	}
 	if (labels !== null) nowCaption.textContent = deriveNowCaption(frame, labels, tier)
 	const cost = deriveCostStrip(frame)
 	costElapsed.textContent = `elapsed ${cost.elapsedSeconds}s`
@@ -615,7 +683,9 @@ function render() {
 	}
 	if (viewMode === 'flow') {
 		const svg = renderFlowViewSvg()
-		if (svg !== null) flowContainer.insertBefore(svg, nowCaption)
+		if (svg !== null) {
+			flowContainer.insertBefore(svg, nowCaption)
+		}
 		// Auto-open the question modal when landing on an ask_human transit frame so the operator can answer immediately; dismissing it leaves the Question affordance on the answerer node for re-entry.
 		openQuestionModal()
 		scenarioChanged = false
@@ -740,6 +810,11 @@ tierSelect.addEventListener('change', () => {
 const prefersDarkColorScheme = window.matchMedia('(prefers-color-scheme: dark)').matches
 applyTheme(prefersDarkColorScheme ? 'dark' : 'light')
 applyViewToggle()
+
+// Wire the run-view inspector once: the listeners live on `flowContainer`, which persists across SVG
+// swaps, so they cover both the flow and sequence views (and the inspector card itself) without
+// re-attaching per render.
+wireRunViewInteractions()
 
 // Load the guild config from /api/config and build the label resolver over it before rendering. The harness renders nothing until the resolver is ready so the views never reach for a resolver that does not exist; once the config loads the first frame renders. A fetch failure leaves the harness in its pre-load state with no rendering, surfacing the missing-config state rather than crashing on a null resolver.
 fetch('api/config')

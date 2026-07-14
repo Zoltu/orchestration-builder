@@ -1,5 +1,7 @@
 import { describe, expect, test } from 'bun:test'
-import { Tooltip, formatTooltipContent, deriveTooltipForNode, deriveTooltipForEdge, isTooltipSection } from './static/tooltip.js'
+import { Tooltip, formatTooltipContent, deriveOperationTooltip, deriveParticipantTooltip, deriveRoleTooltip, isTooltipSection } from './static/tooltip.js'
+import { stacksOf } from './static/interaction-model.js'
+import { labelsModule } from './label-resolver-fixture.js'
 
 // The tooltip component is browser-pure JS, so its exports arrive with inferred JS types. The interfaces and fake `h`/`renderMarkdown` below carry the shape the tests assert against, mirroring result-modal.test.ts.
 
@@ -9,19 +11,6 @@ interface Vnode {
 	children: VnodeChild[]
 }
 type VnodeChild = Vnode | string
-
-// A detail section as the derivations produce it: a machine label, the raw content (formatted by kind), and an optional `scalar` flag a derivation sets when the content should render as plain text rather than prose/JSON.
-interface TooltipSection {
-	label: string
-	content: unknown
-	scalar?: boolean
-}
-
-// The derivations' return shape, narrowed through an interface so the section-element type is concrete (the JS-inferred return widens the element to `any`, which would force `any` onto every callback parameter).
-interface TooltipResult {
-	title: string
-	sections: TooltipSection[]
-}
 
 function fakeH(tag: string, props: Record<string, unknown>, children: unknown): Vnode {
 	return { tag, props, children: normalizeChildren(children) }
@@ -207,167 +196,232 @@ describe('Tooltip', () => {
 })
 
 // --- Section derivation -----------------------------------------------------
-// The derivations are exercised against synthetic frames that mirror the fixture/runView shape (recentLog entries carry the paired detailSections `formatLogDetailSections` produces), so the tests pin the node/edge → sections mapping without depending on the fixture module.
+// The derivations are pure functions of (InteractionModel, label resolver, id). The fixtures
+// mirror the InteractionModel shape the backend adapter and the demo scenarios produce, so the
+// tests pin the id → sections mapping without depending on the fixture module. The label resolver
+// is the real seed-guild resolver (label-resolver-fixture.ts) so the resolved titles match what the
+// live `/api/config` produces, mirroring flow-view.test.ts. The model type is pulled off the
+// `stacksOf` helper's JSDoc so the inline fixtures are contextually checked against the contract.
 
-function frameWith(runView: Record<string, unknown>): Record<string, unknown> {
-	return { config: {}, runView, flowModel: { mainArea: { nodes: [], edges: [] }, topBar: { nodes: [] } } }
+type InteractionModel = Parameters<typeof stacksOf>[0]
+type Participant = InteractionModel['participants'][number]
+type Operation = InteractionModel['operations'][number]
+type LabelTier = Parameters<typeof labelsModule.resolveParticipantLabel>[1]
+
+const TIER: LabelTier = 'detailed'
+
+function participant(id: string, role: string, kind: Participant['kind']): Participant {
+	return { id, role, kind }
 }
 
-function logEntry(p: Record<string, unknown>): Record<string, unknown> {
-	return { timestamp: p.timestamp ?? 't', type: p.type, summary: p.summary ?? '', payload: p.payload, detailSections: p.detailSections ?? null }
+function callOperation(id: string, source: string, destination: string, details: string | null): Operation {
+	return { id, kind: 'call', stack: 'root', source, destination, startedAt: 't0', settledAt: null, lifecycle: 'in_flight', outcome: null, details, metrics: null }
 }
 
-describe('deriveTooltipForNode', () => {
-	test('a main-area role node carries status, current activity, and the role_finished detail', () => {
-		const runView = {
-			task: 'Fix the failing import.',
-			currentActivity: { role: 'coder', summary: 'coder · write_file' },
-			recentLog: [
-				logEntry({ type: 'role_start', payload: { role: 'coder', task: 'second attempt' } }),
-				logEntry({ type: 'tool_call', payload: { role: 'coder', tool: 'write_file' } }),
-				logEntry({ type: 'role_finished', payload: { role: 'coder', status: 'error', summary: 'file not found', error: { kind: 'invalid_arguments', message: 'no such file' } }, detailSections: [{ label: 'summary', content: 'file not found' }, { label: 'error', content: { kind: 'invalid_arguments', message: 'no such file' } }] }),
-			],
+function returnOperation(id: string, source: string, destination: string, outcome: Operation['outcome'], details: string | null, metrics: Operation['metrics']): Operation {
+	return { id, kind: 'return', stack: 'root', source, destination, startedAt: 't0', settledAt: null, lifecycle: 'settled', outcome, details, metrics }
+}
+
+// A delegation chain model used by several derivation tests: the human delegates to the orchestrator,
+// which delegates to a coder, which calls a read_file tool; the returns unwind with summaries and a
+// result. Each call/return carries the adapter-formatted `details` markdown the inspector surfaces.
+function delegationModel(): InteractionModel {
+	return {
+		participants: [
+			participant('human:root', 'human', 'human'),
+			participant('role:orchestrator:1', 'orchestrator', 'role'),
+			participant('role:coder:1', 'coder', 'role'),
+			participant('tool:read_file:1', 'read_file', 'tool'),
+		],
+		operations: [
+			callOperation('op1', 'human:root', 'role:orchestrator:1', 'Plan and delegate the task.'),
+			callOperation('op2', 'role:orchestrator:1', 'role:coder:1', 'Implement the feature.'),
+			callOperation('op3', 'role:coder:1', 'tool:read_file:1', '```json\n{"path":"README.md"}\n```'),
+			returnOperation('op4', 'tool:read_file:1', 'role:coder:1', 'success', '```json\n{"content":"# Project"}\n```', { tokens: 120, cachedPromptTokens: 0, elapsedSeconds: 1 }),
+			returnOperation('op5', 'role:coder:1', 'role:orchestrator:1', 'success', 'Done implementing.', { tokens: 800, cachedPromptTokens: 0, elapsedSeconds: 9 }),
+			returnOperation('op6', 'role:orchestrator:1', 'human:root', 'success', 'Completed the task.', { tokens: 1500, cachedPromptTokens: 0, elapsedSeconds: 15 }),
+		],
+		status: 'success',
+	}
+}
+
+// An ask_human model: the orchestrator asks a distinct human answerer (instance-per-invocation, like
+// coder-1/coder-2), the answer is returned, and the run completes. The answerer's incoming call
+// carries the question text; its return carries the answer text.
+function askHumanModel(answered: boolean): InteractionModel {
+	const operations: Operation[] = [
+		callOperation('op1', 'human:root', 'role:orchestrator:1', 'Plan and delegate the task.'),
+		callOperation('op2', 'role:orchestrator:1', 'human:answerer:1', 'Which testing framework should I use?\n\n*Context: vitest is already installed.*'),
+	]
+	if (answered) {
+		operations.push(returnOperation('op3', 'human:answerer:1', 'role:orchestrator:1', 'success', 'Use vitest.', null))
+		operations.push(returnOperation('op4', 'role:orchestrator:1', 'human:root', 'success', 'Completed the task.', null))
+	}
+	return {
+		participants: [
+			participant('human:root', 'human', 'human'),
+			participant('role:orchestrator:1', 'orchestrator', 'role'),
+			participant('human:answerer:1', 'human', 'human'),
+		],
+		operations,
+		status: answered ? 'success' : 'needs_clarification',
+	}
+}
+
+function labelOf(model: InteractionModel, operation: Operation): string {
+	return labelsModule.resolveOperationLabel(operation, model.participants, TIER, labelsModule.hashString(operation.id))
+}
+
+describe('deriveOperationTooltip', () => {
+	test('an operation id resolves to its label and a single details section carrying its markdown', () => {
+		const model = delegationModel()
+		const result = deriveOperationTooltip(model, labelsModule, TIER, 'op2')
+		expect(result.title).toBe(labelOf(model, model.operations[1]!))
+		expect(result.sections).toEqual([{ label: 'details', content: 'Implement the feature.' }])
+	})
+
+	test('a tool call surfaces the pretty-printed arguments details', () => {
+		const model = delegationModel()
+		const result = deriveOperationTooltip(model, labelsModule, TIER, 'op3')
+		expect(result.sections).toEqual([{ label: 'details', content: '```json\n{"path":"README.md"}\n```' }])
+	})
+
+	test('a return surfaces its result/summary details', () => {
+		const model = delegationModel()
+		const result = deriveOperationTooltip(model, labelsModule, TIER, 'op4')
+		expect(result.sections).toEqual([{ label: 'details', content: '```json\n{"content":"# Project"}\n```' }])
+	})
+
+	test('an operation with null details yields a title-only card', () => {
+		const model: InteractionModel = {
+			participants: [participant('human:root', 'human', 'human'), participant('role:coder:1', 'coder', 'role')],
+			operations: [callOperation('op1', 'human:root', 'role:coder:1', null)],
+			status: 'running',
 		}
-		const node = { id: 'coder-1', kind: 'role', label: 'The builder', sublabel: 'coder', column: 2, status: 'error' }
-		const result: TooltipResult = deriveTooltipForNode(node, frameWith(runView))
-		expect(result.title).toBe('The builder')
-		const labels = result.sections.map((s) => s.label)
-		expect(labels).toEqual(['status', 'activity', 'summary', 'error'])
+		const result = deriveOperationTooltip(model, labelsModule, TIER, 'op1')
+		expect(result.sections).toEqual([])
+		expect(result.title).not.toBe('')
 	})
 
-	test('a main-area role node with no finish event omits the summary', () => {
-		const runView = {
-			currentActivity: { role: 'planner', summary: 'planner · llm call' },
-			recentLog: [logEntry({ type: 'llm_call', payload: { role: 'planner' } })],
-		}
-		const node = { id: 'planner', kind: 'role', label: 'The planner', sublabel: 'planner', column: 1, active: true }
-		const result: TooltipResult = deriveTooltipForNode(node, frameWith(runView))
-		expect(result.sections.map((s) => s.label)).toEqual(['activity'])
-	})
-
-	test('a main-area tool node prefers the most recent tool_result and falls back to the tool_call', () => {
-		const runView = {
-			recentLog: [
-				logEntry({ type: 'tool_call', payload: { role: 'coder', tool: 'write_file', arguments: '{"path":"README.md"}' }, detailSections: [{ label: 'arguments', content: '{"path":"README.md"}' }] }),
-				logEntry({ type: 'tool_result', payload: { role: 'coder', tool: 'write_file', result: 'wrote README.md' }, detailSections: [{ label: 'result', content: 'wrote README.md' }] }),
-			],
-		}
-		const node = { id: 'write_file', kind: 'tool', label: 'Save a file', column: 3, status: 'success' }
-		const result: TooltipResult = deriveTooltipForNode(node, frameWith(runView))
-		expect(result.sections.map((s) => s.label)).toEqual(['status', 'result'])
-
-		// No result yet: the in-flight call's arguments surface instead.
-		const inFlight = deriveTooltipForNode(node, frameWith({ recentLog: [runView.recentLog[0]] }))
-		expect(inFlight.sections.map((s) => s.label)).toEqual(['status', 'arguments'])
-	})
-
-	test('the root You node carries the task as prose', () => {
-		const runView = { task: 'Set up a CI workflow.' }
-		const node = { id: 'you', kind: 'you', label: 'You', column: 0 }
-		const result: TooltipResult = deriveTooltipForNode(node, frameWith(runView))
-		expect(result.title).toBe('You')
-		expect(result.sections).toEqual([{ label: 'task', content: 'Set up a CI workflow.' }])
-	})
-
-	test('a top-bar node carries its cumulative summary as scalars', () => {
-		const node = { id: 'coder', kind: 'role', label: 'The builder', invocations: 2, totalTime: 11, totalTokens: 2820, status: 'success' }
-		const result: TooltipResult = deriveTooltipForNode(node, frameWith({}))
-		expect(result.sections.map((s) => s.label)).toEqual(['invocations', 'total time', 'total tokens', 'status'])
-		expect(result.sections.find((s) => s.label === 'invocations')!.content).toBe(2)
-		expect(result.sections.find((s) => s.label === 'total time')!.content).toBe('11s')
-	})
-
-	test('a malformed node or frame yields a minimal title-only result', () => {
-		expect(deriveTooltipForNode(null, frameWith({}))).toEqual({ title: '', sections: [] })
-		expect(deriveTooltipForNode({ id: 'x' }, null)).toEqual({ title: '', sections: [] })
+	test('an unknown operation id yields an empty title-only result', () => {
+		const model = delegationModel()
+		expect(deriveOperationTooltip(model, labelsModule, TIER, 'nope')).toEqual({ title: '', sections: [] })
 	})
 })
 
-describe('deriveTooltipForEdge', () => {
-	// A shared flowModel whose main-area nodes carry the labels and kinds the edge derivations look up.
-	function frameWithFlow(runView: Record<string, unknown>, nodes: unknown[], edges: unknown[]): Record<string, unknown> {
-		return { config: {}, runView, flowModel: { mainArea: { nodes, edges }, topBar: { nodes: [] } } }
-	}
+describe('deriveParticipantTooltip', () => {
+	test('a completed role shows kind, status, and the finish summary (return details preferred over the call task)', () => {
+		const model = delegationModel()
+		const result = deriveParticipantTooltip(model, labelsModule, TIER, 'role:coder:1')
+		const labels = result.sections.map((s) => s.label)
+		expect(labels).toEqual(['kind', 'status', 'summary'])
+		expect(result.sections.find((s) => s.label === 'kind')!.content).toBe('role')
+		expect(result.sections.find((s) => s.label === 'status')!.content).toBe('success')
+		expect(result.sections.find((s) => s.label === 'summary')!.content).toBe('Done implementing.')
+	})
 
-	const nodes = [
-		{ id: 'you', kind: 'you', label: 'You', column: 0 },
-		{ id: 'orchestrator', kind: 'role', label: 'The conductor', sublabel: 'orchestrator', column: 1 },
-		{ id: 'coder', kind: 'role', label: 'The builder', sublabel: 'coder', column: 2 },
-		{ id: 'write_file', kind: 'tool', label: 'Save a file', column: 3 },
-		{ id: 'ask_human', kind: 'tool', label: 'Check with you', column: 2 },
-		{ id: 'you-ask', kind: 'you', label: 'You', column: 3 },
-	]
-
-	test('a call edge to a tool surfaces the tool_call arguments detail', () => {
-		const runView = {
-			recentLog: [
-				logEntry({ type: 'tool_call', payload: { role: 'coder', tool: 'write_file', arguments: '{"path":"calculator.js"}' }, detailSections: [{ label: 'arguments', content: '{"path":"calculator.js"}' }] }),
-			],
+	test('an in-flight role with no completing return shows the delegation task and no status', () => {
+		const model: InteractionModel = {
+			participants: [participant('human:root', 'human', 'human'), participant('role:coder:1', 'coder', 'role')],
+			operations: [callOperation('op1', 'human:root', 'role:coder:1', 'Implement the feature.')],
+			status: 'running',
 		}
-		const edge = { from: 'coder', to: 'write_file', kind: 'call' }
-		const result: TooltipResult = deriveTooltipForEdge(edge, frameWithFlow(runView, nodes, [edge]))
-		expect(result.title).toBe('The builder \u2192 Save a file')
-		expect(result.sections.map((s) => s.label)).toEqual(['arguments'])
+		const result = deriveParticipantTooltip(model, labelsModule, TIER, 'role:coder:1')
+		expect(result.sections.map((s) => s.label)).toEqual(['kind', 'task'])
+		expect(result.sections.find((s) => s.label === 'task')!.content).toBe('Implement the feature.')
 	})
 
-	test('a return edge from a tool surfaces the tool_result detail', () => {
-		const runView = {
-			recentLog: [
-				logEntry({ type: 'tool_result', payload: { role: 'coder', tool: 'write_file', result: 'wrote calculator.js' }, detailSections: [{ label: 'result', content: 'wrote calculator.js' }] }),
+	test('a completed tool shows kind, status, and the result details', () => {
+		const model = delegationModel()
+		const result = deriveParticipantTooltip(model, labelsModule, TIER, 'tool:read_file:1')
+		expect(result.sections.map((s) => s.label)).toEqual(['kind', 'status', 'result'])
+		expect(result.sections.find((s) => s.label === 'kind')!.content).toBe('tool')
+		expect(result.sections.find((s) => s.label === 'status')!.content).toBe('success')
+		expect(result.sections.find((s) => s.label === 'result')!.content).toBe('```json\n{"content":"# Project"}\n```')
+	})
+
+	test('an in-flight tool with no result yet shows the arguments details', () => {
+		const model: InteractionModel = {
+			participants: [participant('human:root', 'human', 'human'), participant('role:coder:1', 'coder', 'role'), participant('tool:read_file:1', 'read_file', 'tool')],
+			operations: [
+				callOperation('op1', 'human:root', 'role:coder:1', 'Implement.'),
+				callOperation('op2', 'role:coder:1', 'tool:read_file:1', '```json\n{"path":"README.md"}\n```'),
 			],
+			status: 'running',
 		}
-		const edge = { from: 'write_file', to: 'coder', kind: 'return' }
-		const result: TooltipResult = deriveTooltipForEdge(edge, frameWithFlow(runView, nodes, [edge]))
-		expect(result.title).toBe('Save a file \u2192 The builder')
-		expect(result.sections.map((s) => s.label)).toEqual(['result'])
+		const result = deriveParticipantTooltip(model, labelsModule, TIER, 'tool:read_file:1')
+		expect(result.sections.map((s) => s.label)).toEqual(['kind', 'arguments'])
 	})
 
-	test('a return edge from a role surfaces the role_finished summary and error detail', () => {
-		const runView = {
-			recentLog: [
-				logEntry({ type: 'role_finished', payload: { role: 'coder', status: 'error', summary: 'file not found', error: { kind: 'invalid_arguments', message: 'no such file' } }, detailSections: [{ label: 'summary', content: 'file not found' }, { label: 'error', content: { kind: 'invalid_arguments', message: 'no such file' } }] }),
+	test('a human answerer shows the question (its incoming call), never the answer (its return)', () => {
+		const answered = askHumanModel(true)
+		const result = deriveParticipantTooltip(answered, labelsModule, TIER, 'human:answerer:1')
+		const labels = result.sections.map((s) => s.label)
+		// kind + status (the answered return) + question (the call details, not the answer).
+		expect(labels).toEqual(['kind', 'status', 'question'])
+		expect(result.sections.find((s) => s.label === 'question')!.content).toBe('Which testing framework should I use?\n\n*Context: vitest is already installed.*')
+	})
+
+	test('a pending human answerer (no answer yet) shows kind and the question, no status', () => {
+		const pending = askHumanModel(false)
+		const result = deriveParticipantTooltip(pending, labelsModule, TIER, 'human:answerer:1')
+		expect(result.sections.map((s) => s.label)).toEqual(['kind', 'question'])
+	})
+
+	test('an unknown participant id yields an empty title-only result', () => {
+		const model = delegationModel()
+		expect(deriveParticipantTooltip(model, labelsModule, TIER, 'nope')).toEqual({ title: '', sections: [] })
+	})
+})
+
+describe('deriveRoleTooltip', () => {
+	test('a role aggregates invocations, total time, total tokens across every instance, and surfaces an error', () => {
+		// Two coder instances: the first errored, the second succeeded. The cumulative summary counts
+		// both invocations, sums their time and tokens, and flags errored because one errored.
+		const model: InteractionModel = {
+			participants: [
+				participant('human:root', 'human', 'human'),
+				participant('role:orchestrator:1', 'orchestrator', 'role'),
+				participant('role:coder:1', 'coder', 'role'),
+				participant('role:coder:2', 'coder', 'role'),
 			],
-		}
-		const edge = { from: 'coder', to: 'orchestrator', kind: 'return' }
-		const result: TooltipResult = deriveTooltipForEdge(edge, frameWithFlow(runView, nodes, [edge]))
-		expect(result.title).toBe('The builder \u2192 The conductor')
-		expect(result.sections.map((s) => s.label)).toEqual(['summary', 'error'])
-	})
-
-	test('a question edge surfaces the ask_human question and context', () => {
-		const runView = {
-			recentLog: [
-				logEntry({ type: 'ask_human', payload: { id: 'q1', question: 'Which CI provider?', context: '.github/workflows/' } }),
+			operations: [
+				callOperation('op1', 'human:root', 'role:orchestrator:1', 'Plan.'),
+				callOperation('op2', 'role:orchestrator:1', 'role:coder:1', 'First attempt.'),
+				returnOperation('op3', 'role:coder:1', 'role:orchestrator:1', 'error', 'Failed.', { tokens: 300, cachedPromptTokens: 0, elapsedSeconds: 4 }),
+				callOperation('op4', 'role:orchestrator:1', 'role:coder:2', 'Second attempt.'),
+				returnOperation('op5', 'role:coder:2', 'role:orchestrator:1', 'success', 'Done.', { tokens: 900, cachedPromptTokens: 0, elapsedSeconds: 6 }),
+				returnOperation('op6', 'role:orchestrator:1', 'human:root', 'success', 'Completed.', { tokens: 1000, cachedPromptTokens: 0, elapsedSeconds: 12 }),
 			],
+			status: 'success',
 		}
-		const edge = { from: 'ask_human', to: 'you-ask', kind: 'question' }
-		const result: TooltipResult = deriveTooltipForEdge(edge, frameWithFlow(runView, nodes, [edge]))
-		expect(result.title).toBe('Check with you \u2192 You')
-		expect(result.sections.map((s) => s.label)).toEqual(['question', 'context'])
+		const result = deriveRoleTooltip(model, labelsModule, TIER, 'coder')
+		expect(result.sections.map((s) => s.label)).toEqual(['invocations', 'total time', 'total tokens', 'status'])
+		expect(result.sections.find((s) => s.label === 'invocations')!.content).toBe(2)
+		expect(result.sections.find((s) => s.label === 'total time')!.content).toBe('10s')
+		expect(result.sections.find((s) => s.label === 'total tokens')!.content).toBe(1200)
+		expect(result.sections.find((s) => s.label === 'status')!.content).toBe('errored')
 	})
 
-	test('a call edge to a role surfaces the child role_start task', () => {
-		const runView = {
-			recentLog: [
-				logEntry({ type: 'role_start', payload: { role: 'coder', task: 'second attempt' } }),
-			],
+	test('a role still in flight (no completing returns) shows invocations only — no measured-zero time/tokens', () => {
+		const model: InteractionModel = {
+			participants: [participant('human:root', 'human', 'human'), participant('role:coder:1', 'coder', 'role')],
+			operations: [callOperation('op1', 'human:root', 'role:coder:1', 'Implement.')],
+			status: 'running',
 		}
-		const edge = { from: 'orchestrator', to: 'coder', kind: 'call' }
-		const result: TooltipResult = deriveTooltipForEdge(edge, frameWithFlow(runView, nodes, [edge]))
-		expect(result.title).toBe('The conductor \u2192 The builder')
-		expect(result.sections).toEqual([{ label: 'task', content: 'second attempt' }])
+		const result = deriveRoleTooltip(model, labelsModule, TIER, 'coder')
+		expect(result.sections).toEqual([{ label: 'invocations', content: 1, scalar: true }])
 	})
 
-	test('an edge with no matching log event yields a title-only card', () => {
-		const edge = { from: 'orchestrator', to: 'coder', kind: 'call' }
-		const result: TooltipResult = deriveTooltipForEdge(edge, frameWithFlow({ recentLog: [] }, nodes, [edge]))
-		expect(result.title).toBe('The conductor \u2192 The builder')
-		expect(result.sections).toEqual([])
+	test('a role whose invocations all succeeded omits the errored status', () => {
+		const model = delegationModel()
+		const result = deriveRoleTooltip(model, labelsModule, TIER, 'coder')
+		expect(result.sections.map((s) => s.label)).toEqual(['invocations', 'total time', 'total tokens'])
+		expect(result.sections.find((s) => s.label === 'invocations')!.content).toBe(1)
 	})
 
-	test('an inspect edge yields a title-only card', () => {
-		const edge = { from: 'recent_role_tool_calls', to: 'coder', kind: 'inspect' }
-		const result: TooltipResult = deriveTooltipForEdge(edge, frameWithFlow({ recentLog: [] }, nodes, [edge]))
-		expect(result.sections).toEqual([])
+	test('an unknown role yields an empty title-only result', () => {
+		const model = delegationModel()
+		expect(deriveRoleTooltip(model, labelsModule, TIER, 'nope')).toEqual({ title: '', sections: [] })
 	})
 })

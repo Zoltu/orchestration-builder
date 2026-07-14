@@ -2,6 +2,12 @@
 // The whole UI is one reactive view of a single state object; polling runs as subscriptions and every side effect (fetch, POST, audio, flash) runs as an effect. The model is a trusted component; its prose fields (task, result summary, question text, question context, error message) are Markdown the UI renders as formatted text via `showdown` + `highlight.js`. The residual concern is not a malicious model but prompt injection — a malicious file in the workspace coercing the model's output — so the parsed HTML is walked through the allowlist in markdown.js before reaching the DOM; this is a defense-in-depth backstop, with the primary injection defense upstream (see docs/security.md "Web client rendering pipeline"). Machine fields (tool names, log payloads, timestamps, role names, run ids, the one-line current-activity summary) are interpolated only as children of h() or text-node arguments, which hyperapp places into text nodes and properties — never into markup.
 import { h, app } from './vendor/hyperapp.js'
 import { createMarkdownRenderer } from './markdown-render.js'
+import { renderFlowView, deriveLifecycle, deriveNowCaption, deriveCostStrip } from './flow-view.js'
+import { renderSequenceView } from './sequence-diagram.js'
+import { createLabelResolver } from './labels.js'
+import { QuestionModal } from './question-modal.js'
+import { ResultModal, deriveTerminalResult } from './result-modal.js'
+import { Tooltip, tooltipStyle, deriveOperationTooltip, deriveParticipantTooltip, deriveRoleTooltip } from './tooltip.js'
 
 const POLL_INTERVAL_MS = 1000
 const TERMINAL_STATUSES = new Set(['success', 'error', 'needs_clarification'])
@@ -24,6 +30,32 @@ const DEFAULT_EFFORT = 3
 function effortLabel(effort) {
 	if (typeof effort !== 'number' || !Number.isInteger(effort) || effort < 0 || effort > 5) return '—'
 	return EFFORT_LABELS[effort] ?? '—'
+}
+
+// The label tier the flow/sequence views localize through. 'detailed' is the default so a fresh load reads precisely; the toggle in the run-view controls swaps it for a non-technical voice. The values are the three tiers `createLabelResolver` resolves (see labels.js), so a swap re-renders the views through the same resolver without touching the model.
+const FLOW_TIER_VALUES = ['whimsical', 'friendly', 'detailed']
+const DEFAULT_FLOW_TIER = 'detailed'
+
+function isFlowTier(value) {
+	for (const candidate of FLOW_TIER_VALUES) {
+		if (value === candidate) return true
+	}
+	return false
+}
+
+// Derives the guild's static role/tool inventory from the live `/api/config` so the sequence view can lay out every guild role as a column from the first frame (peeking at future participants would defeat the model's "the run reveals what happens" contract). The flow view does not need this — it projects only active participants — but passing it is harmless and keeps the two views' column sets aligned. The 'human' and 'tools' columns are added by the view itself, so this carries only the real roles and tools.
+function guildParticipantsFromConfig(config) {
+	if (config === null || typeof config !== 'object') return []
+	const participants = []
+	const roles = config.roles
+	if (roles !== null && typeof roles === 'object') {
+		for (const name of Object.keys(roles)) participants.push({ id: `guild:${name}`, role: name, kind: 'role' })
+	}
+	const tools = config.tools
+	if (tools !== null && typeof tools === 'object') {
+		for (const name of Object.keys(tools)) participants.push({ id: `guild:${name}`, role: name, kind: 'tool' })
+	}
+	return participants
 }
 
 // One shared NumberFormat so every rendered count, token total, and duration in the UI shares the user's locale and grouping; re-instantiating per render is wasteful and would let a locale change between renders drift the formatting.
@@ -211,10 +243,26 @@ function Tick(state) {
 function PollSelectedRun(state) {
 	// Bail on a non-string id rather than fetching `/api/runs/undefined`; `selectedRunId` is null until a run is selected and can briefly be undefined across a state transition, so the guard keeps the poll from firing on an invalid id.
 	if (typeof state.selectedRunId !== 'string' || state.selectedRunId === '') return state
+	const runId = encodeURIComponent(state.selectedRunId)
 	return [
 		state,
-		Fetch({ url: `api/runs/${encodeURIComponent(state.selectedRunId)}`, ok: GotSelectedRun, fail: FetchFailed }),
+		Fetch({ url: `api/runs/${runId}`, ok: GotSelectedRun, fail: FetchFailed }),
+		// The flow model is derived server-side from the full log (the truncated recentLog the run view carries is not enough to reconstruct the active path, lingering legs, or per-invocation costs); the centerpiece reads it off this endpoint rather than re-deriving client-side.
+		Fetch({ url: `api/runs/${runId}/flow`, ok: GotFlowModel, fail: FetchFailed }),
 	]
+}
+
+// The live InteractionModel the flow/sequence views render. The previous frame is kept so `deriveLifecycle` can diff entering/departing nodes; a 404 (the run directory exists but is not yet readable in the instant after submit) clears the model so the centerpiece shows its placeholder until the first readable frame lands.
+function GotFlowModel(state, payload) {
+	const status = payload.status
+	const ok = payload.ok
+	const body = payload.body
+	if (status === 404) return { ...state, flowModel: null, previousFlowModel: null, serverAvailable: ok }
+	if (!ok || body === null || typeof body !== 'object') return { ...state, serverAvailable: ok }
+	if (!Array.isArray(body.participants) || !Array.isArray(body.operations) || typeof body.status !== 'string') {
+		return { ...state, serverAvailable: true }
+	}
+	return { ...state, previousFlowModel: state.flowModel, flowModel: body, serverAvailable: true }
 }
 
 function GotRunList(state, payload) {
@@ -249,7 +297,18 @@ function GotSelectedRun(state, payload) {
 	const logPage = state.logPage !== null && state.logPage.offset !== null
 		? state.logPage
 		: { offset: null, total: null, entries: Array.isArray(body.recentLog) ? body.recentLog : [] }
-	return { ...state, selectedRunView: body, selectedRunStatus: body.status, logPage, serverAvailable: true }
+	// The result modal fires once when a run the operator is watching completes (a transition out of a non-terminal status into success/error). Selecting an already-terminal historical run does not auto-open it — the flow view's CTA re-opens it on demand — so `previousStatus === null` (the first read of a selected run) is excluded along with the terminal statuses.
+	const previousStatus = state.selectedRunStatus
+	const completedStatus = body.status === 'success' || body.status === 'error' ? body.status : null
+	const isCompletionTransition = completedStatus !== null
+		&& previousStatus !== null
+		&& previousStatus !== 'success'
+		&& previousStatus !== 'error'
+		&& previousStatus !== 'needs_clarification'
+	const runId = typeof body.runId === 'string' ? body.runId : state.selectedRunId
+	const resultModalOpen = isCompletionTransition && state.resultShownForRun !== runId ? true : state.resultModalOpen
+	const resultShownForRun = isCompletionTransition ? runId : state.resultShownForRun
+	return { ...state, selectedRunView: body, selectedRunStatus: body.status, logPage, resultModalOpen, resultShownForRun, serverAvailable: true }
 }
 
 function GotQuestions(state, payload) {
@@ -275,6 +334,8 @@ function GotQuestions(state, payload) {
 		shownQuestionIds: currentIds,
 		firstQuestionsPoll: false,
 		serverAvailable: ok,
+		// A genuinely new question opens the per-run-view modal so it is unmissable; dismissing it leaves the flow view's Question affordance on the answerer node for re-entry. The modal is view-side state, not model state: the live model's ask_human call is what the flow view renders, this only gates the overlay.
+		questionModalOpen: hasNew ? true : state.questionModalOpen,
 	}
 	// Flash always on a genuinely new question; beep only when not muted. Falsy effects are ignored by hyperapp, so the conditionals inline cleanly.
 	if (hasNew) {
@@ -287,12 +348,17 @@ function FetchFailed(state) {
 	return { ...state, serverAvailable: false }
 }
 
-// The config panel is fetched exactly once on load and never polled, so this action runs a single time; later state transitions preserve the config via the spread.
+// The config panel is fetched exactly once on load and never polled, so this action runs a single time; later state transitions preserve the config via the spread. The same body builds the label resolver the flow/sequence views localize through and the guild participant inventory the sequence view lays out columns from, so a swapped guild re-flavors the run view the same way it re-flavors the config panel.
 function GotConfig(state, payload) {
 	const ok = payload.ok
 	const body = payload.body
 	if (!ok || body === null || typeof body !== 'object') return state
-	return { ...state, config: body }
+	return {
+		...state,
+		config: body,
+		labelResolver: createLabelResolver(body),
+		guildParticipants: guildParticipantsFromConfig(body),
+	}
 }
 
 // The saved effort position is fetched once on load so the slider starts where the operator last left it; later settings fetches (none today) would not override a position the operator has since moved.
@@ -347,7 +413,21 @@ function EffortSaveFailed(state) {
 
 function SelectRun(state, runId) {
 	if (runId === state.selectedRunId) return state
-	return { ...state, selectedRunId: runId, selectedRunView: null, selectedRunStatus: null, expandedLogRows: {}, logPage: null }
+	// The flow model, its previous-frame diff, and the per-run modal state belong to the previously-selected run; a switch clears them so the centerpiece shows the new run's first frame without a stale lifecycle diff or a leftover modal.
+	return {
+		...state,
+		selectedRunId: runId,
+		selectedRunView: null,
+		selectedRunStatus: null,
+		expandedLogRows: {},
+		logPage: null,
+		flowModel: null,
+		previousFlowModel: null,
+		questionModalOpen: false,
+		resultModalOpen: false,
+		resultShownForRun: null,
+		tooltip: null,
+	}
 }
 
 function ToggleMute(state, event) {
@@ -514,9 +594,9 @@ function GotCreatedRun(state, payload) {
 	const body = payload.body
 	if (!ok || body === null || typeof body !== 'object' || !('runId' in body)) return state
 	const createdRunId = body.runId
-	// Selecting the new run activates its per-run subscription; an immediate run-list fetch clears justSubmittedRunId as soon as the run appears.
+	// Selecting the new run activates its per-run subscription; an immediate run-list fetch clears justSubmittedRunId as soon as the run appears. The per-run modal/flow state is reset for the same reason SelectRun resets it.
 	return [
-		{ ...state, justSubmittedRunId: createdRunId, selectedRunId: createdRunId, selectedRunView: null, selectedRunStatus: null, expandedLogRows: {}, logPage: null, serverAvailable: true },
+		{ ...state, justSubmittedRunId: createdRunId, selectedRunId: createdRunId, selectedRunView: null, selectedRunStatus: null, expandedLogRows: {}, logPage: null, flowModel: null, previousFlowModel: null, questionModalOpen: false, resultModalOpen: false, resultShownForRun: null, tooltip: null, serverAvailable: true },
 		Fetch({ url: 'api/runs', ok: GotRunList, fail: FetchFailed }),
 	]
 }
@@ -541,8 +621,9 @@ function SubmitAnswer(questionId) {
 }
 
 function AnswerSent(state) {
-	// Refresh the pending list immediately so the answered question disappears without waiting for the next tick.
-	return [{ ...state, pendingAnswerId: null, serverAvailable: true }, Fetch({ url: 'api/questions', ok: GotQuestions, fail: FetchFailed })]
+	// Refresh the pending list immediately so the answered question disappears without waiting for the next tick. An answered question ends a `needs_clarification` wait, which is a terminal status that deactivated the per-run poll; resetting the status to the non-terminal 'unknown' reactivates that poll so the run view and flow model resume as the run continues, and completion can later fire the result modal. The next poll repopulates the real status from the run's meta.
+	const reactivated = { ...state, pendingAnswerId: null, selectedRunStatus: 'unknown', serverAvailable: true }
+	return [reactivated, Fetch({ url: 'api/questions', ok: GotQuestions, fail: FetchFailed })]
 }
 
 function AnswerFailed(state) {
@@ -551,6 +632,182 @@ function AnswerFailed(state) {
 
 function PrimeAudio(state) {
 	return [state, PrimeAudioFx()]
+}
+
+// --- Flow / Sequence view controls ----------------------------------------
+// The centerpiece's view-mode (Flow vs Sequence) and label tier are pure view state; a swap re-renders the views through the same resolver and model without fetching. The modals are view-side state layered on the live model: the result modal opens on completion (GotSelectedRun) or the flow view's CTA, the question modal opens on a new pending question (GotQuestions) or the flow view's Question affordance.
+
+function SetFlowViewMode(state, mode) {
+	if (mode !== 'flow' && mode !== 'sequence') return state
+	return { ...state, flowViewMode: mode }
+}
+
+function ChangeFlowTier(state, event) {
+	const value = event.target.value
+	if (!isFlowTier(value)) return state
+	return { ...state, flowTier: value }
+}
+
+function OpenResultModal(state) {
+	// A modal opening covers the run view; clear the inspector so the card does not linger beneath it.
+	return [{ ...state, resultModalOpen: true, tooltip: null }, CancelTooltipDismiss()]
+}
+
+function CloseResultModal(state) {
+	return { ...state, resultModalOpen: false }
+}
+
+function OpenQuestionModal(state) {
+	return [{ ...state, questionModalOpen: true, tooltip: null }, CancelTooltipDismiss()]
+}
+
+function CloseQuestionModal(state) {
+	return { ...state, questionModalOpen: false }
+}
+
+// --- Run-view inspector (hover) --------------------------------------------
+// The inspector card over the flow and sequence SVGs is a hyperapp-managed overlay (the same pattern
+// the question/result modals follow), not an imperative DOM append: hovering a node or edge stores a
+// tooltip descriptor in state (the target kind+id plus a snapshot of the node's viewport rect), the
+// FlowPanel renders the `Tooltip` card vnode anchored to that rect by `tooltipStyle`, and dismissal
+// runs on a short grace timer so the operator can move the pointer from the node into the card to
+// select or copy its contents (the card is `pointer-events: auto`, `user-select: text`). The card
+// stays open while the pointer is over the node or the card; it dismisses once the pointer is over
+// neither. The handlers read the hovered element's `data-operation` / `data-participant` /
+// `data-role` off the live `state.flowModel` and `state.labelResolver` (resolved at render time), so
+// the inspector never re-fetches and never invents content the model does not carry.
+
+// The grace period that bridges the pointer's travel between a node and the card. Long enough to
+// cross the flush edge (and any sub-pixel/shadow gap) without a premature dismiss; short enough that
+// moving away from both reads as an immediate dismiss.
+const TOOLTIP_GRACE_MS = 150
+// A pending dismiss timer, shared across the hover handlers. Held at module scope because it is an
+// opaque resource with no place in the view state; the schedule/cancel effects below read and clear it.
+let tooltipDismissTimer = null
+
+function runScheduleTooltipDismiss(dispatch) {
+	if (tooltipDismissTimer !== null) clearTimeout(tooltipDismissTimer)
+	tooltipDismissTimer = setTimeout(() => {
+		tooltipDismissTimer = null
+		dispatch(ClearTooltip)
+	}, TOOLTIP_GRACE_MS)
+}
+
+function ScheduleTooltipDismiss() {
+	return [runScheduleTooltipDismiss, null]
+}
+
+function runCancelTooltipDismiss() {
+	if (tooltipDismissTimer !== null) {
+		clearTimeout(tooltipDismissTimer)
+		tooltipDismissTimer = null
+	}
+}
+
+function CancelTooltipDismiss() {
+	return [runCancelTooltipDismiss, null]
+}
+
+// Dispatched by the grace timer. A no-op when the tooltip is already cleared (e.g. the pointer moved
+// to another node and switched, or a modal open cleared it) so a stale timer firing causes no harm.
+function ClearTooltip(state) {
+	return state.tooltip === null ? state : { ...state, tooltip: null }
+}
+
+// Resolves the hovered DOM element to an inspector target by walking the data attributes the view
+// modules stamp onto nodes and edges, and snapshots the element's viewport rect so the card can be
+// anchored to the node (not the pointer). Sequence messages and terminal nodes carry `data-operation`;
+// flow call/return edges carry `data-operation`; flow main-area nodes carry `data-participant`; flow
+// top-bar slots carry `data-role` (and lack `data-participant`, so the participant check does not catch
+// them). The order matters: operation first, then participant, then role. The rect is a plain object
+// snapshot (not the live DOMRect) so a later re-render that detaches the element does not read zeros.
+function snapshotRect(element) {
+	const rect = element.getBoundingClientRect()
+	return { left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom }
+}
+
+function resolveTooltipTarget(event) {
+	if (!(event.target instanceof Element)) return null
+	const operationElement = event.target.closest('[data-operation]')
+	if (operationElement !== null) {
+		const operationId = operationElement.getAttribute('data-operation')
+		if (operationId !== null) return { kind: 'operation', id: operationId, rect: snapshotRect(operationElement) }
+	}
+	const participantElement = event.target.closest('[data-participant]')
+	if (participantElement !== null) {
+		const participantId = participantElement.getAttribute('data-participant')
+		if (participantId !== null) return { kind: 'participant', id: participantId, rect: snapshotRect(participantElement) }
+	}
+	const roleElement = event.target.closest('.flow-small-node[data-role]')
+	if (roleElement !== null) {
+		const role = roleElement.getAttribute('data-role')
+		if (role !== null) return { kind: 'role', id: role, rect: snapshotRect(roleElement) }
+	}
+	return null
+}
+
+// `mouseover` bubbles from every SVG child the pointer enters, so this fires on each element
+// crossing. Three cases:
+//  - over the card itself: keep it open and cancel any pending dismiss (the pointer entered the card
+//    to select/copy).
+//  - over a node/edge target: switch the card to it (canceling any pending dismiss), snapshotting its
+//    rect so the card anchors to the node. Returning the same state when the target is unchanged lets
+//    hyperapp bail without a re-render.
+//  - over empty run-view area: schedule a grace-period dismiss — if the pointer reaches the card (or a
+//    new node) before it fires, the dismiss is canceled; otherwise the card dismisses once the pointer
+//    is over neither.
+function HoverRunView(state, event) {
+	if (event.target instanceof Element && event.target.closest('.tooltip-card') !== null) {
+		return [state, CancelTooltipDismiss()]
+	}
+	const target = resolveTooltipTarget(event)
+	if (target === null) {
+		if (state.tooltip === null) return [state, CancelTooltipDismiss()]
+		return [state, ScheduleTooltipDismiss()]
+	}
+	const current = state.tooltip
+	if (current !== null && current.kind === target.kind && current.id === target.id) {
+		return [state, CancelTooltipDismiss()]
+	}
+	return [{ ...state, tooltip: { kind: target.kind, id: target.id, rect: target.rect } }, CancelTooltipDismiss()]
+}
+
+// `mouseleave` on the run-view stage fires when the pointer leaves the stage entirely (the SVG and
+// the card are both descendants of the stage, so moving between them does not fire it). A grace period
+// lets the pointer re-enter quickly without a dismiss+reopen flicker; otherwise it clears the card.
+function LeaveRunView(state) {
+	if (state.tooltip === null) return [state, CancelTooltipDismiss()]
+	return [state, ScheduleTooltipDismiss()]
+}
+
+// Clicking an in-flight `ask_human` row re-opens the question modal: the sequence view has no
+// Question-button overlay like the flow view, so the message row itself is the re-entry affordance
+// after a dismiss. Every other click falls through to the hover path so a click also opens the
+// inspector at the clicked node, mirroring the dev harness. Clicking inside the card (to select text
+// or press a copy affordance) falls through to the hover path's "over the card" branch, which keeps
+// the card open.
+function ClickRunView(state, event) {
+	if (event.target instanceof Element && event.target.closest('.tooltip-card') !== null) {
+		return HoverRunView(state, event)
+	}
+	const target = resolveTooltipTarget(event)
+	if (target !== null && target.kind === 'operation' && state.flowModel !== null) {
+		const operation = state.flowModel.operations.find((op) => op.id === target.id)
+		if (operation !== undefined && operation.kind === 'call' && operation.lifecycle === 'in_flight') {
+			const destination = state.flowModel.participants.find((p) => p.id === operation.destination)
+			if (destination !== undefined && destination.kind === 'human') {
+				// Open the modal and dismiss the inspector so the card does not linger over the modal.
+				return [{ ...state, questionModalOpen: true, tooltip: null }, CancelTooltipDismiss()]
+			}
+		}
+	}
+	return HoverRunView(state, event)
+}
+
+// Hands the full error object to the operator as a JSON string on the clipboard (trusted operator output, never rendered as Markdown). A missing clipboard API is a no-op rather than a thrown error in a non-secure context.
+function copyRawToClipboard(rawJson) {
+	if (navigator.clipboard === undefined) return
+	navigator.clipboard.writeText(rawJson)
 }
 
 // --- View ------------------------------------------------------------------
@@ -671,7 +928,7 @@ function RunSummaryPanel(state) {
 		budgets ? BudgetsLine(budgets) : null,
 		// The kind is a fixed machine label and stays a plain text node; the message is agent prose and renders as Markdown.
 		h('div', { id: 'run-error', class: 'run-error' }, error ? h('div', { class: 'error-text' }, [h('strong', {}, `${error.kind}: `), ...renderMarkdown(error.message)]) : null),
-		h('div', { id: 'run-artifacts', class: 'run-artifacts' }, artifacts && artifacts.length > 0 ? [h('div', { class: 'artifacts-heading' }, 'Artifacts'), h('ul', {}, artifacts.map((path) => h('li', { key: path, class: 'artifact' }, path)))] : null),
+		h('div', { id: 'run-artifacts', class: 'run-artifacts' }, artifacts && artifacts.length > 0 ? [h('div', { class: 'artifacts-heading' }, 'Artifacts'), h('ul', {}, artifacts.map((path, index) => h('li', { key: `${path}-${index}`, class: 'artifact' }, path)))] : null),
 	])
 }
 
@@ -708,12 +965,12 @@ function RoleActivityItem(role, isActive, now) {
 	])
 }
 
-// Renders a role tree node and its descendants indented by depth so the parent→child structure the executor logged is visible at a glance. Only the status is shown beside the name — the role's full summary can be long model prose and would inflate the row; it is reachable via the role_finished log row's detail sections. Only the single invocation the executor marked active pulses, so repeated sequential delegations to the same role are not mistaken for parallel runs.
-function RoleTreeNodeItem(node, level) {
+// Renders a role tree node and its descendants indented by depth so the parent→child structure the executor logged is visible at a glance. Only the status is shown beside the name — the role's full summary can be long model prose and would inflate the row; it is reachable via the role_finished log row's detail sections. Only the single invocation the executor marked active pulses, so repeated sequential delegations to the same role are not mistaken for parallel runs. The key includes the sibling index so two invocations of the same role at the same depth (a retry) — which produce two tree siblings with an otherwise-identical role+level+depth triple — get distinct keys; a colliding key would corrupt hyperapp's keyed reconciliation.
+function RoleTreeNodeItem(node, level, indexAmongSiblings) {
 	const isActive = node.active === true
 	const status = node.status !== null && node.status !== undefined ? ` (${node.status})` : ''
-	const childItems = node.children.map((child) => RoleTreeNodeItem(child, level + 1))
-	return h('li', { key: `${node.role}-${level}-${node.depth}`, class: { 'role-active': isActive, 'role-tree-node': true, 'role-tree-root': level === 0 } }, [
+	const childItems = node.children.map((child, childIndex) => RoleTreeNodeItem(child, level + 1, childIndex))
+	return h('li', { key: `${node.role}-${level}-${node.depth}-${indexAmongSiblings}`, class: { 'role-active': isActive, 'role-tree-node': true, 'role-tree-root': level === 0 } }, [
 		isActive ? h('span', { class: 'role-pulse' }) : null,
 		h('strong', {}, node.role),
 		h('span', { class: 'role-tree-status' }, status),
@@ -729,7 +986,7 @@ function RolesPanel(state) {
 	let children
 	if (Array.isArray(tree) && tree.length > 0) {
 		heading = 'Role tree'
-		children = tree.map((node) => RoleTreeNodeItem(node, 0))
+		children = tree.map((node, nodeIndex) => RoleTreeNodeItem(node, 0, nodeIndex))
 	} else {
 		heading = 'Role activity'
 		const roles = view ? view.roles : []
@@ -803,8 +1060,8 @@ function QuestionsPanel(state) {
 		? null
 		: [
 				h('li', { class: 'question-history-heading' }, 'Past questions'),
-				...history.map((entry) =>
-					h('li', { key: entry.id ?? entry.askedAt, class: 'question-history-entry' }, [
+			...history.map((entry, index) =>
+				h('li', { key: `${entry.id ?? entry.askedAt}-${index}`, class: 'question-history-entry' }, [
 						h('div', { class: 'question-history-question markdown' }, renderMarkdown(entry.question)),
 						entry.context !== undefined ? h('div', { class: 'question-context markdown' }, renderMarkdown(entry.context)) : null,
 						entry.answer !== undefined
@@ -868,10 +1125,127 @@ function ConfigPanel(state) {
 	])
 }
 
+function FlowPanel(state) {
+	const labels = state.labelResolver
+	const model = state.flowModel
+	// Before the guild config or the first readable flow frame lands, the centerpiece shows a placeholder rather than a half-built graph; both arrive within the first poll, so the placeholder is transient.
+	if (labels === null || model === null) {
+		const message = state.selectedRunId === null
+			? 'Select a run to see its flow.'
+			: labels === null
+				? 'Loading run view…'
+				: 'Waiting for run activity…'
+		return h('section', { id: 'flow-panel', class: 'panel' }, [
+			h('h2', {}, 'Run view'),
+			h('div', { class: 'pb-flow flow-stage' }, h('p', { class: 'flow-empty' }, message)),
+		])
+	}
+
+	const tier = state.flowTier
+	const lifecycle = state.previousFlowModel !== null ? deriveLifecycle(state.previousFlowModel, model) : undefined
+	const cta = { onclick: OpenResultModal }
+	const question = { onclick: OpenQuestionModal }
+	// The flow view and sequence view are independent leaves over the same model; the view toggle swaps which renders without a fetch. The sequence view takes the guild's static participant set so every role column appears from the first frame.
+	const svg = state.flowViewMode === 'sequence'
+		? renderSequenceView(h, model, labels, tier, state.guildParticipants)
+		: renderFlowView(h, model, labels, tier, lifecycle, cta, question)
+
+	const cost = deriveCostStrip(model)
+	const nowCaption = deriveNowCaption(model, labels, tier)
+
+	return h('section', { id: 'flow-panel', class: 'panel' }, [
+		h('h2', {}, 'Run view'),
+		h('div', { class: 'flow-controls' }, [
+			h('div', { class: 'pb-view-toggle', role: 'group', 'aria-label': 'run view' }, [
+				h('button', { type: 'button', class: state.flowViewMode === 'flow' ? 'is-active' : '', onclick: [SetFlowViewMode, 'flow'] }, 'Flow'),
+				h('button', { type: 'button', class: state.flowViewMode === 'sequence' ? 'is-active' : '', onclick: [SetFlowViewMode, 'sequence'] }, 'Sequence'),
+			]),
+			h('label', { class: 'flow-tier-control' }, [
+				h('span', {}, 'Label tier'),
+				h('select', { value: tier, onchange: ChangeFlowTier }, FLOW_TIER_VALUES.map((value) => h('option', { value, selected: value === tier }, value))),
+			]),
+		]),
+		h('div', { class: 'pb-cost-strip' }, [
+			h('span', { class: 'pb-cost-item' }, `elapsed ${formatElapsed(cost.elapsedSeconds)}`),
+			h('span', { class: 'pb-cost-sep' }, '·'),
+			h('span', { class: 'pb-cost-item' }, `${formatTokens(cost.tokens)} tokens`),
+		]),
+		// `.pb-flow` is the positioning context for the per-run-view modals (the question and result overlays are absolute inset 0 within it), so the modals cover the run view rather than the whole page. It is also the hover stage for the inspector: `mouseover`/`mouseleave`/`click` bubble here from every SVG child, so the inspector is wired once for both the flow and sequence views.
+		h('div', { class: 'pb-flow flow-stage', onmouseover: HoverRunView, onmouseleave: LeaveRunView, onclick: ClickRunView }, [
+			svg,
+			QuestionModalForRun(state),
+			ResultModalForRun(state),
+			TooltipCardForRun(state),
+		]),
+		h('p', { class: 'pb-now-caption' }, nowCaption),
+	])
+}
+
+// The inspector card over the run view. The descriptor in state is resolved against the live model
+// and label resolver at render time, so the card reads the same model the SVG renders and never
+// re-fetches. A descriptor whose id no longer resolves (an operation from a frame the poll has since
+// replaced, or a participant/role the model no longer carries) yields an empty title and is treated as
+// "no card" so a stale hover state dismisses rather than rendering a heading-less card. The card is
+// `position: fixed` (styles.css), anchored to the snapshot rect taken at hover time, so it sits at a
+// fixed position relative to the node (not the pointer) and stays put while the pointer is over it;
+// its only prose-carrying section is the operation `details` markdown, routed through the sanitized
+// pipeline by `formatTooltipContent`.
+function TooltipCardForRun(state) {
+	const tooltip = state.tooltip
+	if (tooltip === null) return null
+	const model = state.flowModel
+	const labels = state.labelResolver
+	if (model === null || labels === null) return null
+	const tier = state.flowTier
+	let descriptor
+	if (tooltip.kind === 'operation') {
+		descriptor = deriveOperationTooltip(model, labels, tier, tooltip.id)
+	} else if (tooltip.kind === 'participant') {
+		descriptor = deriveParticipantTooltip(model, labels, tier, tooltip.id)
+	} else {
+		descriptor = deriveRoleTooltip(model, labels, tier, tooltip.id)
+	}
+	if (descriptor.title === '') return null
+	return Tooltip(h, { title: descriptor.title, sections: descriptor.sections, renderMarkdown, style: tooltipStyle(tooltip.rect) })
+}
+
+// The pending question the modal renders. The live `/api/questions` poll is the source — the same poll the inline QuestionsPanel reads — so the modal is driven by live data, and the answer form posts to `/api/answer` via the existing SubmitAnswer path. The first pending question is the active one; the modal opens when one arrives (GotQuestions) and re-opens via the flow view's Question affordance.
+function QuestionModalForRun(state) {
+	if (!state.questionModalOpen) return null
+	const question = state.pendingQuestions[0]
+	if (question === undefined) return null
+	const runLabel = state.selectedRunView !== null && typeof state.selectedRunView.runId === 'string' ? state.selectedRunView.runId : null
+	return QuestionModal(h, {
+		question: { question: question.question, context: question.context },
+		runLabel,
+		renderMarkdown,
+		onSubmit: SubmitAnswer(question.id),
+		onClose: CloseQuestionModal,
+		answerPending: state.pendingAnswerId === question.id,
+	})
+}
+
+// The terminal result the modal renders, derived from the live run view the per-run poll already fetches (the flow endpoint carries no result/error fields). The modal opens on a watched run's completion (GotSelectedRun) and re-opens via the flow view's CTA; the descriptor is undefined for a non-terminal run so the modal renders nothing then.
+function ResultModalForRun(state) {
+	if (!state.resultModalOpen) return null
+	const view = state.selectedRunView
+	if (view === null) return null
+	const descriptor = deriveTerminalResult(view)
+	if (descriptor === undefined) return null
+	return ResultModal(h, {
+		descriptor,
+		runLabel: typeof view.runId === 'string' ? view.runId : null,
+		renderMarkdown,
+		onCopyRaw: copyRawToClipboard,
+		onClose: CloseResultModal,
+	})
+}
+
 function Main(state) {
 	return h('main', {}, [
 		SubmitPanel(state),
 		RunsPanel(state),
+		FlowPanel(state),
 		RunSummaryPanel(state),
 		RolesPanel(state),
 		QuestionsPanel(state),
@@ -885,7 +1259,7 @@ function view(state) {
 }
 
 // --- App -------------------------------------------------------------------
-// The subscriptions array is fixed-size with stable positions: [0] always polls the run list + questions every second; [1] polls the selected run every second but only while one is selected and non-terminal (deactivating on terminal status replaces the manual clearInterval of the prior client); [2] primes the AudioContext on the first user interaction.
+// The subscriptions array is fixed-size with stable positions: [0] always polls the run list + questions every second; [1] polls the selected run's run view and flow model every second but only while one is selected and non-terminal (deactivating on terminal status replaces the manual clearInterval of the prior client); [2] primes the AudioContext on the first user interaction.
 
 app({
 	init: [
@@ -907,8 +1281,23 @@ app({
 			// null until the saved effort loads; the slider initializes from the persisted position on first load.
 			runEffort: null,
 			savingEffort: false,
-			now: Date.now(),
-		},
+			// The live InteractionModel the centerpiece renders, plus its previous frame for `deriveLifecycle`'s enter/depart diff. Both null until the first readable flow frame lands.
+			flowModel: null,
+			previousFlowModel: null,
+			// The label resolver and guild participant inventory are built once from `/api/config` (GotConfig); null/empty until that single load completes.
+			labelResolver: null,
+			guildParticipants: [],
+			flowTier: DEFAULT_FLOW_TIER,
+			flowViewMode: 'flow',
+			// Per-run-view modal state. The question modal opens on a new pending question; the result modal opens on a watched run's completion. `resultShownForRun` dedups the auto-open across the polls that follow a completion.
+		questionModalOpen: false,
+		resultModalOpen: false,
+		resultShownForRun: null,
+		// The inspector descriptor over the run view: null when nothing is hovered. Cleared on
+		// `mouseleave` of the stage and on run switch; a stale id self-dismisses at render time.
+		tooltip: null,
+		now: Date.now(),
+	},
 		// The config panel is loaded once and never polled, so its fetch is an init effect rather than a subscription.
 		Fetch({ url: 'api/config', ok: GotConfig, fail: FetchFailed }),
 		Fetch({ url: 'api/settings', ok: GotSettings, fail: SettingsFetchFailed }),

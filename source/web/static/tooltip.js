@@ -2,7 +2,7 @@
 //
 // Each section is a labeled block whose content is rendered by kind — pretty-printed JSON for object/array content (indented, no raw `\n` escapes), sanitized Markdown for prose content (assistant summaries, error messages, task text, question text), and plain text for scalars. The card is read-only (no buttons): the formatted view is for reading while the pointer rests on the node/edge. It is the reusable inspector the future sequence diagram also uses.
 //
-// The card is an HTML overlay (a positioned `<div>`), not the SVG `TooltipShell` primitive: SVG cannot host the sanitized-Markdown vnodes (HTML `<p>`/`<ul>`/… produced by the `markdown-render` pipeline) or a wrapping `<pre>`, so the tooltip follows the question/result modal pattern (an HTML card scoped to the run view) rather than the SVG shell. `TooltipShell` stays on disk for any future SVG-text-only tooltip; this card is what the flow view and the sequence diagram reuse. The card is `pointer-events: none` (see styles.css) so it never intercepts the pointer — the hover target stays the node/edge beneath it, so leaving that geometry is what dismisses the card (no flicker, no need for a hover-bridge). See docs/security.md "Web client rendering pipeline".
+// The card is an HTML overlay (a positioned `<div>`), not the SVG `TooltipShell` primitive: SVG cannot host the sanitized-Markdown vnodes (HTML `<p>`/`<ul>`/… produced by the `markdown-render` pipeline) or a wrapping `<pre>`, so the tooltip follows the question/result modal pattern (an HTML card scoped to the run view) rather than the SVG shell. `TooltipShell` stays on disk for any future SVG-text-only tooltip; this card is what the flow view and the sequence diagram reuse. The card is `pointer-events: auto` with `user-select: text` (styles.css) so the operator can move the pointer from the hovered node into the card to select and copy its contents; the wiring in `app.js` / `demo.js` keeps it open while the pointer is over the node or the card and dismisses it — after a short grace timer — once the pointer is over neither. See docs/security.md "Web client rendering pipeline".
 //
 // `h` and `renderMarkdown` are passed in rather than imported so the component stays free of hyperapp and showdown coupling and is exercisable in tests with fakes (mirroring question-modal.js / result-modal.js).
 
@@ -58,7 +58,7 @@ function tryParseJsonObject(text) {
 	return value
 }
 
-// The tooltip card: a heading and one labeled block per section. `style` carries the caller-chosen positioning (left/top or right/bottom near a viewport edge) applied inline so the card can be placed at the pointer without a layout pass. The card carries no interactive chrome: it is a read-only hover inspector, so there is no close button and no copy-raw — the pointer leaving the hovered node/edge dismisses it (the card is `pointer-events: none`, so it never becomes the hover target itself).
+// The tooltip card: a heading and one labeled block per section. `style` carries the caller-chosen positioning (left/top or right/bottom near a viewport edge) applied inline so the card can be placed against the hovered node without a layout pass. The card carries no interactive chrome: it is a read-only hover inspector with no close button and no copy-raw button. Dismissal is the wiring's concern, not the component's — the card is `pointer-events: auto` with `user-select: text` (styles.css) so the operator can move the pointer into it to select text, and the wiring in `app.js` / `demo.js` dismisses it (after a short grace timer) once the pointer is over neither the node/edge nor the card.
 export function Tooltip(h, props) {
 	const title = props.title
 	const sections = Array.isArray(props.sections) ? props.sections.filter(isTooltipSection) : []
@@ -77,186 +77,224 @@ export function Tooltip(h, props) {
 	return h('div', { class: 'tooltip-card', style }, children)
 }
 
+// --- Inline positioning ----------------------------------------------------
+// Anchors the card to the hovered node/edge's bounding rect so the card sits at a fixed position
+// relative to the node (not the pointer): flush against the node's right edge by default, flipping
+// to anchor its left edge when the node is near the right viewport margin, and the same vertically
+// (below by default, flipping above near the bottom margin). Flush placement means the pointer can
+// travel directly from the node into the card without crossing empty space, so the card stays open
+// while the operator moves into it to select or copy text (the card is `pointer-events: auto`).
+// Shared by the product client (`app.js`) and the dev harness (`demo.js`) so the two surfaces place
+// the card identically. `rect` is a DOMRect (or a plain `{ left, top, right, bottom }` snapshot).
+export function tooltipStyle(rect) {
+	const viewportWidth = window.innerWidth
+	const viewportHeight = window.innerHeight
+	const margin = 8
+	const estimatedWidth = 380
+	const estimatedHeight = 280
+	const style = {}
+	if (rect.right + estimatedWidth + margin > viewportWidth) {
+		style.right = `${Math.max(margin, viewportWidth - rect.left)}px`
+	} else {
+		style.left = `${rect.right}px`
+	}
+	if (rect.bottom + estimatedHeight + margin > viewportHeight) {
+		style.bottom = `${Math.max(margin, viewportHeight - rect.top)}px`
+	} else {
+		style.top = `${rect.bottom}px`
+	}
+	return style
+}
+
 // --- Section derivation -----------------------------------------------------
-// Pure mappings from a flow node or edge plus the current frame (`{ config, runView, flowModel }`) to the `{ title, sections }` a tooltip renders. The frame's `runView.recentLog` already carries each event's paired `detailSections` (the shaping `formatLogDetailSections` produces), so the derivations locate the matching log entry and reuse its sections rather than re-deriving from the payload. Returning `{ title, sections: [] }` (rather than null) lets the wiring always open a card with at least a title.
+// Pure mappings from a hovered element's identifier (an operation id, a participant id, or a role
+// name) plus the live InteractionModel and the label resolver to the `{ title, sections }` a
+// tooltip renders. The derivations read the same model the flow and sequence views render, so the
+// inspector never drifts from the graph and never invents content the model does not carry: the
+// title is a resolved label (a `textContent`-bound string the card places as a heading), and the
+// only prose a section carries is an operation's `details` markdown, which `formatTooltipContent`
+// routes through the sanitized Markdown pipeline. Counts, statuses, and timings are scalars. A
+// derivation returns `{ title: '', sections: [] }` when its id does not resolve, which the wiring
+// treats as "no card" so a stale hover state (e.g. an operation id from a frame the poll has since
+// replaced) dismisses rather than rendering a heading-less card.
 
 function isObject(value) {
 	return typeof value === 'object' && value !== null
-}
-
-function bareRoleName(node) {
-	if (typeof node?.sublabel === 'string' && node.sublabel !== '') return node.sublabel
-	if (typeof node?.id === 'string') return node.id
-	return ''
-}
-
-function nodeById(flowModel) {
-	const map = {}
-	if (!isObject(flowModel)) return map
-	const mainArea = flowModel.mainArea
-	if (!isObject(mainArea) || !Array.isArray(mainArea.nodes)) return map
-	for (const node of mainArea.nodes) {
-		if (isObject(node) && typeof node.id === 'string') map[node.id] = node
-	}
-	return map
-}
-
-// The last recentLog entry satisfying a predicate, or undefined. The log is append-only and ordered oldest→newest, so the last match is the most recent — the one the active flow reflects.
-function findLastRecentEntry(runView, predicate) {
-	if (!isObject(runView) || !Array.isArray(runView.recentLog)) return undefined
-	for (let i = runView.recentLog.length - 1; i >= 0; i--) {
-		const entry = runView.recentLog[i]
-		if (isObject(entry) && predicate(entry)) return entry
-	}
-	return undefined
-}
-
-function sectionsOf(entry) {
-	if (!isObject(entry)) return null
-	if (Array.isArray(entry.detailSections) && entry.detailSections.length > 0) return entry.detailSections
-	return null
-}
-
-function payloadOf(entry) {
-	if (!isObject(entry)) return null
-	return isObject(entry.payload) ? entry.payload : null
 }
 
 function scalarSection(label, content) {
 	return { label, content, scalar: true }
 }
 
-// Derives the tooltip content for a flow node. A main-area node (carries `column`) gets per-invocation detail — a role's status + current activity + finish summary, a tool's most recent call/result detail, the root You's task. A top-bar node (carries `invocations`) gets its cumulative summary — invocation count, total time, total tokens, terminal status.
-export function deriveTooltipForNode(node, frame) {
-	if (!isObject(node) || !isObject(frame)) return { title: '', sections: [] }
-	const runView = isObject(frame.runView) ? frame.runView : {}
-	const flowModel = isObject(frame.flowModel) ? frame.flowModel : {}
-	const label = typeof node.label === 'string' && node.label !== '' ? node.label : (typeof node.id === 'string' ? node.id : '')
-
-	if (node.invocations !== undefined) {
-		return deriveTopBarNode(node, label)
-	}
-
-	// Main-area node.
-	if (node.kind === 'you') {
-		const task = typeof runView.task === 'string' ? runView.task : null
-		const sections = task !== null ? [{ label: 'task', content: task }] : []
-		return { title: label, sections }
-	}
-
-	if (node.kind === 'role') {
-		return deriveRoleNode(node, label, runView)
-	}
-
-	if (node.kind === 'tool') {
-		return deriveToolNode(node, label, runView, flowModel)
-	}
-
-	return { title: label, sections: [] }
+// The operation's `details` markdown when it is a non-empty string, else null. `null` means "no
+// details section" — an operation whose adapter produced no markdown (e.g. a call whose task text
+// was absent) yields a title-only card rather than a section with an em-dash placeholder.
+function detailsOf(operation) {
+	if (!isObject(operation)) return null
+	if (typeof operation.details !== 'string' || operation.details === '') return null
+	return operation.details
 }
 
-function deriveTopBarNode(node, label) {
-	const sections = []
-	sections.push(scalarSection('invocations', node.invocations))
-	if (node.totalTime !== undefined) sections.push(scalarSection('total time', `${node.totalTime}s`))
-	if (node.totalTokens !== undefined) sections.push(scalarSection('total tokens', node.totalTokens))
-	if (typeof node.status === 'string') sections.push(scalarSection('status', node.status))
-	return { title: label, sections }
+function findOperation(model, operationId) {
+	for (const operation of model.operations) {
+		if (operation.id === operationId) return operation
+	}
+	return undefined
 }
 
-function deriveRoleNode(node, label, runView) {
-	const sections = []
-	const role = bareRoleName(node)
-	if (typeof node.status === 'string') sections.push(scalarSection('status', node.status))
-	const activity = isObject(runView.currentActivity) && runView.currentActivity.role === role && typeof runView.currentActivity.summary === 'string'
-		? runView.currentActivity.summary
-		: null
-	if (activity !== null) sections.push({ label: 'activity', content: activity })
-	const finished = findLastRecentEntry(runView, (entry) => entry.type === 'role_finished' && payloadOf(entry)?.role === role)
-	if (finished !== undefined) {
-		const detail = sectionsOf(finished)
-		if (detail !== null) {
-			for (const section of detail) sections.push(section)
-		}
+function findParticipant(model, participantId) {
+	for (const participant of model.participants) {
+		if (participant.id === participantId) return participant
 	}
-	return { title: label, sections }
+	return undefined
 }
 
-function deriveToolNode(node, label, runView, flowModel) {
-	const tool = typeof node.id === 'string' ? node.id : ''
-	const sections = []
-	if (typeof node.status === 'string') sections.push(scalarSection('status', node.status))
-	// A tool node in the main area is either in flight (a call edge points at it) or lingering on its result (a return edge leaves it). Prefer the most recent result, then the most recent call, so the card shows the outcome when one has arrived and the in-flight arguments otherwise.
-	const result = findLastRecentEntry(runView, (entry) => entry.type === 'tool_result' && payloadOf(entry)?.tool === tool)
-	const call = findLastRecentEntry(runView, (entry) => entry.type === 'tool_call' && payloadOf(entry)?.tool === tool)
-	const source = result !== undefined ? result : call
-	if (source !== undefined) {
-		const detail = sectionsOf(source)
-		if (detail !== null) {
-			for (const section of detail) sections.push(section)
-		}
+// The most recent call whose destination is the participant — the request that brought the
+// participant into the active path (a role delegation, a tool invocation, or an ask_human question).
+function findLastCallTo(model, participantId) {
+	for (let index = model.operations.length - 1; index >= 0; index -= 1) {
+		const operation = model.operations[index]
+		if (operation.kind === 'call' && operation.destination === participantId) return operation
 	}
-	return { title: label, sections }
+	return undefined
 }
 
-// Derives the tooltip content for a flow edge by mapping its kind to the matching log event: a call to a tool → the tool_call arguments; a return from a tool → the tool_result; a return from a role → the role_finished summary/error; a question → the ask_human question + context; a call to a role → the child's role_start task. Inspect edges carry no in-flight detail and yield a title-only card.
-export function deriveTooltipForEdge(edge, frame) {
-	if (!isObject(edge) || !isObject(frame)) return { title: '', sections: [] }
-	const runView = isObject(frame.runView) ? frame.runView : {}
-	const flowModel = isObject(frame.flowModel) ? frame.flowModel : {}
-	const byId = nodeById(flowModel)
-	const fromNode = byId[edge.from]
-	const toNode = byId[edge.to]
-	const fromLabel = typeof fromNode?.label === 'string' ? fromNode.label : edge.from
-	const toLabel = typeof toNode?.label === 'string' ? toNode.label : edge.to
-
-	if (edge.kind === 'question') {
-		const asked = findLastRecentEntry(runView, (entry) => entry.type === 'ask_human')
-		const sections = []
-		if (asked !== undefined) {
-			const payload = payloadOf(asked) ?? {}
-			if (typeof payload.question === 'string') sections.push({ label: 'question', content: payload.question })
-			if (typeof payload.context === 'string') sections.push({ label: 'context', content: payload.context })
-		}
-		return { title: `${fromLabel} \u2192 ${toLabel}`, sections }
+// The return whose source is the participant — the participant's completing return, carrying its
+// outcome and result/summary markdown. A participant with no completing return is still in flight.
+function findReturnFrom(model, participantId) {
+	for (const operation of model.operations) {
+		if (operation.kind === 'return' && operation.source === participantId) return operation
 	}
-
-	if (edge.kind === 'return') {
-		// A return edge leaves a node that has finished. A tool return carries the tool_result; a role return carries the role_finished summary/error.
-		if (fromNode?.kind === 'tool') {
-			const tool = typeof fromNode.id === 'string' ? fromNode.id : ''
-			const result = findLastRecentEntry(runView, (entry) => entry.type === 'tool_result' && payloadOf(entry)?.tool === tool)
-			return edgeSectionsFromEntry(result, `${fromLabel} \u2192 ${toLabel}`)
-		}
-		const role = bareRoleName(fromNode)
-		const finished = findLastRecentEntry(runView, (entry) => entry.type === 'role_finished' && payloadOf(entry)?.role === role)
-		return edgeSectionsFromEntry(finished, `${fromLabel} \u2192 ${toLabel}`)
-	}
-
-	if (edge.kind === 'call') {
-		// A call edge points at a tool (in-flight tool_call arguments) or a role/you (the delegation's role_start task).
-		if (toNode?.kind === 'tool') {
-			const tool = typeof toNode.id === 'string' ? toNode.id : ''
-			const call = findLastRecentEntry(runView, (entry) => entry.type === 'tool_call' && payloadOf(entry)?.tool === tool)
-			return edgeSectionsFromEntry(call, `${fromLabel} \u2192 ${toLabel}`)
-		}
-		const role = bareRoleName(toNode)
-		const start = findLastRecentEntry(runView, (entry) => entry.type === 'role_start' && payloadOf(entry)?.role === role)
-		const sections = []
-		if (start !== undefined) {
-			const payload = payloadOf(start) ?? {}
-			if (typeof payload.task === 'string') sections.push({ label: 'task', content: payload.task })
-		}
-		return { title: `${fromLabel} \u2192 ${toLabel}`, sections }
-	}
-
-	// inspect, or an unknown kind: no in-flight detail to show.
-	return { title: `${fromLabel} \u2192 ${toLabel}`, sections: [] }
+	return undefined
 }
 
-function edgeSectionsFromEntry(entry, title) {
-	if (entry === undefined) return { title, sections: [] }
-	const detail = sectionsOf(entry)
-	const sections = detail !== null ? detail : []
+// Edge (flow or sequence, by `data-operation`): the operation's resolved label as the title and a
+// single `details` section carrying the operation's adapter-formatted markdown — the delegation
+// task text for a role call, the pretty-printed arguments/result for a tool, the question (and
+// context) for an ask_human call, the summary for a return. This generalizes the dev harness's
+// `openOperationTooltip` path so the product client and the harness consume one derivation.
+export function deriveOperationTooltip(model, labels, tier, operationId) {
+	if (!isObject(model) || typeof operationId !== 'string') return { title: '', sections: [] }
+	const operation = findOperation(model, operationId)
+	if (operation === undefined) return { title: '', sections: [] }
+	const title = labels.resolveOperationLabel(operation, model.participants, tier, labels.hashString(operation.id))
+	const details = detailsOf(operation)
+	const sections = details !== null ? [{ label: 'details', content: details }] : []
+	return { title, sections }
+}
+
+// The label for the single details section a participant card carries. A human answerer's relevant
+// detail is the question (its incoming call); a role's is its delegation task (call) or finish
+// summary (return); a tool's is its arguments (call) or result (return). The label reflects which
+// operation the shown details came from so the card reads accurately in both the in-flight and the
+// completed phases.
+function detailsLabelFor(participant, usedReturn) {
+	if (participant.kind === 'human') return 'question'
+	if (participant.kind === 'tool') return usedReturn ? 'result' : 'arguments'
+	return usedReturn ? 'summary' : 'task'
+}
+
+// Main-area node (flow, by `data-participant`): the participant's resolved label, its kind, the
+// completing return's outcome, and the relevant call/return `details` — the delegation task text
+// for a role, the arguments/result for a tool, the question for a human answerer. The completing
+// return's details (the outcome) are preferred over the incoming call's (the request) so the card
+// shows the result once it has arrived and the in-flight request otherwise.
+export function deriveParticipantTooltip(model, labels, tier, participantId) {
+	if (!isObject(model) || typeof participantId !== 'string') return { title: '', sections: [] }
+	const participant = findParticipant(model, participantId)
+	if (participant === undefined) return { title: '', sections: [] }
+	const title = labels.resolveParticipantLabel(participant, tier)
+	const sections = [scalarSection('kind', participant.kind)]
+	const incomingCall = findLastCallTo(model, participantId)
+	const completionReturn = findReturnFrom(model, participantId)
+	if (completionReturn !== undefined && completionReturn.outcome !== null) {
+		sections.push(scalarSection('status', completionReturn.outcome))
+	}
+	const returnDetails = completionReturn !== undefined ? detailsOf(completionReturn) : null
+	const callDetails = incomingCall !== undefined ? detailsOf(incomingCall) : null
+	// A human answerer's relevant detail is the question (its incoming ask_human call), not the
+	// answer (its return) — the operator re-reads the question on hover, and the answer is already
+	// the live question history. For every other kind the completing return's details (the result
+	// or summary) are preferred over the incoming call's (the request) so the card shows the
+	// outcome once it has arrived and the in-flight request otherwise.
+	let sourceDetails = null
+	let usedReturn = false
+	if (participant.kind === 'human') {
+		sourceDetails = callDetails
+	} else if (returnDetails !== null) {
+		sourceDetails = returnDetails
+		usedReturn = true
+	} else {
+		sourceDetails = callDetails
+	}
+	if (sourceDetails !== null) {
+		sections.push({ label: detailsLabelFor(participant, usedReturn), content: sourceDetails })
+	}
+	return { title, sections }
+}
+
+// A representative participant of a role — the first one in chronological first-appearance order —
+// so the label resolver can resolve the role's localized label against a real participant (a role
+// column in the sequence view and a top-bar slot in the flow view both derive their header/label
+// this way). Every role that has a top-bar slot has at least one participant, so this is defined for
+// every role the wiring asks about.
+function representativeParticipantOfRole(model, role) {
+	for (const participant of model.participants) {
+		if (participant.role === role) return participant
+	}
+	return undefined
+}
+
+// Aggregates every participant instance of a role into a cumulative summary, mirroring the
+// `projectTopBar` aggregation the flow view's top-bar strip already computes: the invocation count
+// (every participant instance of the role, current and departed), the total time and total tokens
+// drawn from the returns whose source is a participant of the role, and whether any invocation
+// errored. `hasMetrics` distinguishes "no metrics yet" from "zero metrics" so the card omits the
+// time/tokens rows while a role is still in flight rather than reading as a measured zero.
+function aggregateRole(model, role) {
+	let invocations = 0
+	let totalTime = 0
+	let totalTokens = 0
+	let errored = false
+	let hasMetrics = false
+	const returnsBySource = new Map()
+	for (const operation of model.operations) {
+		if (operation.kind === 'return') returnsBySource.set(operation.source, operation)
+	}
+	for (const participant of model.participants) {
+		if (participant.role !== role) continue
+		invocations += 1
+		const completion = returnsBySource.get(participant.id)
+		if (completion === undefined) continue
+		if (completion.outcome === 'error') errored = true
+		if (completion.metrics === null) continue
+		if (completion.metrics.elapsedSeconds !== null) {
+			totalTime += completion.metrics.elapsedSeconds
+			hasMetrics = true
+		}
+		if (completion.metrics.tokens !== null) {
+			totalTokens += completion.metrics.tokens
+			hasMetrics = true
+		}
+	}
+	return { invocations, totalTime, totalTokens, errored, hasMetrics }
+}
+
+// Top-bar node (flow, by `data-role`): the role's cumulative summary across every participant
+// instance of that role — invocation count, total time, total tokens, and whether any invocation
+// errored. The figures match the count the top-bar slot displays and the <title> the strip carries,
+// so hovering a slot reads the same aggregation the strip renders.
+export function deriveRoleTooltip(model, labels, tier, role) {
+	if (!isObject(model) || typeof role !== 'string') return { title: '', sections: [] }
+	const representative = representativeParticipantOfRole(model, role)
+	if (representative === undefined) return { title: '', sections: [] }
+	const title = labels.resolveParticipantLabel(representative, tier)
+	const aggregate = aggregateRole(model, role)
+	const sections = [scalarSection('invocations', aggregate.invocations)]
+	if (aggregate.hasMetrics) {
+		sections.push(scalarSection('total time', `${aggregate.totalTime}s`))
+		sections.push(scalarSection('total tokens', aggregate.totalTokens))
+	}
+	if (aggregate.errored) sections.push(scalarSection('status', 'errored'))
 	return { title, sections }
 }
