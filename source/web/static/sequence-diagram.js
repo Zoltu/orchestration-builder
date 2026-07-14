@@ -16,12 +16,12 @@ export const COLUMN_WIDTH = 150
 export const ROW_HEIGHT = 30
 export const HEADER_HEIGHT = 44
 export const LEFT_MARGIN = 24
-export const RIGHT_MARGIN = 24
+const RIGHT_MARGIN = 24
 export const BOTTOM_MARGIN = 24
 
 // Terminal-node geometry. Each call/return arrow lands on a small node on the destination column's lifeline — an activation marker big enough to host the hover inspector. It is centered on the column at the message's row.
-export const TERMINAL_NODE_WIDTH = 18
-export const TERMINAL_NODE_HEIGHT = 12
+const TERMINAL_NODE_WIDTH = 18
+const TERMINAL_NODE_HEIGHT = 12
 
 // The vertical span of a same-column loopback. A flat U-turn at a single y would read as a zero-length arrow, so the out leg leaves from above the row center and the return leg lands at the row center on a separate line.
 const LOOPBACK_HEIGHT = 14

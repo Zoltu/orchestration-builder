@@ -1,5 +1,5 @@
 // Hyperapp client for the long-running service.
-// The whole UI is one reactive view of a single state object; polling runs as subscriptions and every side effect (fetch, POST, audio, flash) runs as an effect. The model is a trusted component; its prose fields (task, result summary, question text, question context, error message) are Markdown the UI renders as formatted text via `showdown` + `highlight.js`. The residual concern is not a malicious model but prompt injection — a malicious file in the workspace coercing the model's output — so the parsed HTML is walked through the allowlist in markdown.js before reaching the DOM; this is a defense-in-depth backstop, with the primary injection defense upstream (see docs/security.md "Web client rendering pipeline"). Machine fields (tool names, log payloads, timestamps, role names, run ids, the one-line current-activity summary) are interpolated only as children of h() or text-node arguments, which hyperapp places into text nodes and properties — never into markup.
+// The whole UI is one reactive view of a single state object; polling runs as subscriptions and every side effect (fetch, POST, audio, flash) runs as an effect. The model is a trusted component; its prose fields (task, result summary, question text, question context, error message) are Markdown the UI renders as formatted text via `showdown` + `highlight.js`. The residual concern is not a malicious model but prompt injection — a malicious file in the workspace coercing the model's output — so the parsed HTML is walked through the allowlist in markdown.js before reaching the DOM; this is a defense-in-depth backstop, with the primary injection defense upstream (see docs/security.md "Web client rendering pipeline"). Machine fields (tool names, operation arguments/results, timestamps, role names, run ids, the one-line current-activity summary) are interpolated only as children of h() or text-node arguments, which hyperapp places into text nodes and properties — never into markup.
 import { h, app } from './vendor/hyperapp.js'
 import { createMarkdownRenderer } from './markdown-render.js'
 import { renderFlowView, deriveLifecycle, deriveNowCaption, deriveCostStrip } from './flow-view.js'
@@ -11,9 +11,6 @@ import { Tooltip, tooltipStyle, deriveOperationTooltip, deriveParticipantTooltip
 
 const POLL_INTERVAL_MS = 1000
 const TERMINAL_STATUSES = new Set(['success', 'error', 'needs_clarification'])
-const LOG_PAGE_SIZE = 200
-// Large enough to mean "the whole log" for the export fetch; the server caps a single page at this limit.
-const LOG_EXPORT_LIMIT = 1000000
 const STATUS_LABELS = {
 	unknown: 'in progress',
 	running: 'running',
@@ -124,10 +121,6 @@ const renderMarkdown = createMarkdownRenderer(h)
 function deriveActiveRunId(summaries) {
 	const active = summaries.find((summary) => !isTerminalStatus(summary.status))
 	return active === undefined ? null : active.runId
-}
-
-function logRowKey(entry) {
-	return `${entry.timestamp}|${entry.type}|${entry.summary}`
 }
 
 // --- Custom subscriptions --------------------------------------------------
@@ -278,8 +271,6 @@ function GotRunList(state, payload) {
 		nextState.selectedRunId = summaries[0].runId
 		nextState.selectedRunView = null
 		nextState.selectedRunStatus = null
-		nextState.expandedLogRows = {}
-		nextState.logPage = null
 	}
 	return nextState
 }
@@ -293,10 +284,6 @@ function GotSelectedRun(state, payload) {
 		return { ...state, selectedRunStatus: 'unknown', serverAvailable: ok }
 	}
 	if (!ok || body === null) return state
-	// In tail mode the log panel mirrors the run view's recent log; once the operator pages back, the panel holds its loaded range and the tail stops auto-refreshing so a frozen view is not silently jumped forward.
-	const logPage = state.logPage !== null && state.logPage.offset !== null
-		? state.logPage
-		: { offset: null, total: null, entries: Array.isArray(body.recentLog) ? body.recentLog : [] }
 	// The result modal fires once when a run the operator is watching completes (a transition out of a non-terminal status into success/error). Selecting an already-terminal historical run does not auto-open it — the flow view's CTA re-opens it on demand — so `previousStatus === null` (the first read of a selected run) is excluded along with the terminal statuses.
 	const previousStatus = state.selectedRunStatus
 	const completedStatus = body.status === 'success' || body.status === 'error' ? body.status : null
@@ -308,7 +295,7 @@ function GotSelectedRun(state, payload) {
 	const runId = typeof body.runId === 'string' ? body.runId : state.selectedRunId
 	const resultModalOpen = isCompletionTransition && state.resultShownForRun !== runId ? true : state.resultModalOpen
 	const resultShownForRun = isCompletionTransition ? runId : state.resultShownForRun
-	return { ...state, selectedRunView: body, selectedRunStatus: body.status, logPage, resultModalOpen, resultShownForRun, serverAvailable: true }
+	return { ...state, selectedRunView: body, selectedRunStatus: body.status, resultModalOpen, resultShownForRun, serverAvailable: true }
 }
 
 function GotQuestions(state, payload) {
@@ -348,14 +335,13 @@ function FetchFailed(state) {
 	return { ...state, serverAvailable: false }
 }
 
-// The config panel is fetched exactly once on load and never polled, so this action runs a single time; later state transitions preserve the config via the spread. The same body builds the label resolver the flow/sequence views localize through and the guild participant inventory the sequence view lays out columns from, so a swapped guild re-flavors the run view the same way it re-flavors the config panel.
+// The guild config is fetched exactly once on load and never polled, so this action runs a single time. The body is not retained in state; only the two derived values the flow/sequence views need are kept — the label resolver they localize through and the guild participant inventory the sequence view lays out columns from — so a swapped guild re-flavors the run view on the next load.
 function GotConfig(state, payload) {
 	const ok = payload.ok
 	const body = payload.body
 	if (!ok || body === null || typeof body !== 'object') return state
 	return {
 		...state,
-		config: body,
 		labelResolver: createLabelResolver(body),
 		guildParticipants: guildParticipantsFromConfig(body),
 	}
@@ -419,8 +405,6 @@ function SelectRun(state, runId) {
 		selectedRunId: runId,
 		selectedRunView: null,
 		selectedRunStatus: null,
-		expandedLogRows: {},
-		logPage: null,
 		flowModel: null,
 		previousFlowModel: null,
 		questionModalOpen: false,
@@ -432,95 +416,6 @@ function SelectRun(state, runId) {
 
 function ToggleMute(state, event) {
 	return { ...state, muted: event.target.checked }
-}
-
-function ToggleLogRow(state, key) {
-	const expandedLogRows = { ...state.expandedLogRows }
-	if (expandedLogRows[key]) delete expandedLogRows[key]
-	else expandedLogRows[key] = true
-	return { ...state, expandedLogRows }
-}
-
-// --- Log pagination --------------------------------------------------------
-// The log panel shows the most-recent page (drawn from the run view's recentLog) and pages backward on demand.
-// `logPage.offset` is the oldest index currently loaded; it stays null in tail mode (only the recent page is shown) until the operator pages back, at which point the panel freezes the tail and prepends older events.
-// A probe fetch on the first "Load earlier" learns the true total so the backward page is contiguous with the tail (no overlap, no gap).
-
-function LoadEarlierLog(state) {
-	if (typeof state.selectedRunId !== 'string' || state.selectedRunId === '' || state.logPage === null) return state
-	const offset = state.logPage.offset
-	if (offset !== null) {
-		if (offset <= 0) return state
-		return fetchEarlierPage(state, offset)
-	}
-	// Tail mode: probe the total first so the first backward page lines up exactly with the tail's oldest index.
-	return [
-		state,
-		Fetch({
-			url: `api/runs/${encodeURIComponent(state.selectedRunId)}/log?offset=0&limit=1`,
-			ok: GotLogTotal,
-			fail: FetchFailed,
-		}),
-	]
-}
-
-function GotLogTotal(state, payload) {
-	const ok = payload.ok
-	const body = payload.body
-	if (!ok || body === null || typeof body !== 'object' || state.logPage === null) return state
-	const total = typeof body.total === 'number' ? body.total : 0
-	const tailLength = state.logPage.entries.length
-	const realOffset = Math.max(0, total - tailLength)
-	if (realOffset <= 0) {
-		// The tail already holds the whole log; nothing earlier to load.
-		return { ...state, logPage: { ...state.logPage, offset: 0, total } }
-	}
-	return fetchEarlierPage({ ...state, logPage: { ...state.logPage, offset: realOffset, total } }, realOffset)
-}
-
-function fetchEarlierPage(state, offset) {
-	const nextOffset = Math.max(0, offset - LOG_PAGE_SIZE)
-	// limit is exactly the span up to the current oldest index, so the fetched page is contiguous with what is already loaded.
-	const limit = offset - nextOffset
-	if (limit <= 0) return state
-	return [
-		state,
-		Fetch({
-			url: `api/runs/${encodeURIComponent(state.selectedRunId)}/log?offset=${nextOffset}&limit=${limit}`,
-			ok: GotEarlierLogPage,
-			fail: FetchFailed,
-		}),
-	]
-}
-
-function GotEarlierLogPage(state, payload) {
-	const ok = payload.ok
-	const body = payload.body
-	if (!ok || body === null || typeof body !== 'object' || !Array.isArray(body.events) || state.logPage === null) return state
-	const offset = typeof body.offset === 'number' ? body.offset : 0
-	const total = typeof body.total === 'number' ? body.total : state.logPage.total
-	const older = body.events
-	const entries = [...older, ...state.logPage.entries]
-	return { ...state, logPage: { ...state.logPage, entries, offset, total: total ?? null }, serverAvailable: true }
-}
-
-function ExportLog(state) {
-	if (typeof state.selectedRunId !== 'string' || state.selectedRunId === '') return state
-	const runId = state.selectedRunId
-	return [
-		state,
-		ExportLogFx({ url: `api/runs/${encodeURIComponent(runId)}/log?format=text&offset=0&limit=${LOG_EXPORT_LIMIT}` }),
-	]
-}
-
-// A top-level navigation to the text endpoint is turned by the browser into a file download because the server sets `Content-Disposition: attachment; filename="<runId>.log"`.
-// This is preferred over fetching the body and synthesizing a `blob:` anchor click: that pattern trips content blockers (uBlock Origin filters programmatic `blob:`/`data:` downloads that lack a direct user-gesture link), whereas a plain navigated URL is indistinguishable from any other link the operator follows and is not filtered.
-function runExportLog(_dispatch, payload) {
-	window.location.href = payload.url
-}
-
-function ExportLogFx(payload) {
-	return [runExportLog, payload]
 }
 
 // The task editor is a multiline textarea, not a single-line input: a task is free-form Markdown a user may draft at length. Enter inserts a newline (the browser default for a textarea) and Tab inserts a real tab character at the caret (handled below), so neither key submits; submission is the submit button, with Ctrl/Cmd+Enter as a keyboard shortcut that re-enters the form's submit path.
@@ -596,7 +491,7 @@ function GotCreatedRun(state, payload) {
 	const createdRunId = body.runId
 	// Selecting the new run activates its per-run subscription; an immediate run-list fetch clears justSubmittedRunId as soon as the run appears. The per-run modal/flow state is reset for the same reason SelectRun resets it.
 	return [
-		{ ...state, justSubmittedRunId: createdRunId, selectedRunId: createdRunId, selectedRunView: null, selectedRunStatus: null, expandedLogRows: {}, logPage: null, flowModel: null, previousFlowModel: null, questionModalOpen: false, resultModalOpen: false, resultShownForRun: null, tooltip: null, serverAvailable: true },
+		{ ...state, justSubmittedRunId: createdRunId, selectedRunId: createdRunId, selectedRunView: null, selectedRunStatus: null, flowModel: null, previousFlowModel: null, questionModalOpen: false, resultModalOpen: false, resultShownForRun: null, tooltip: null, serverAvailable: true },
 		Fetch({ url: 'api/runs', ok: GotRunList, fail: FetchFailed }),
 	]
 }
@@ -951,180 +846,6 @@ function BudgetsLine(b) {
 	])
 }
 
-function RoleActivityItem(role, isActive, now) {
-	return h('li', { key: role.role, class: { 'role-active': isActive } }, [
-		isActive ? h('span', { class: 'role-pulse' }) : null,
-		h('strong', {}, role.role),
-		h('span', {}, ` — ${formatNumber(role.eventCount)} events · ${formatNumber(role.llmCalls)} LLM calls · ${formatNumber(role.toolCalls)} tool calls`),
-		h('div', { class: 'role-times' }, [
-			h('span', { class: 'role-time' }, ['first seen ', h('time', { title: role.firstSeen ?? '' }, formatRelative(role.firstSeen, now))]),
-			h('span', { class: 'role-time' }, ['last seen ', h('time', { title: role.lastSeen ?? '' }, formatRelative(role.lastSeen, now))]),
-		]),
-		role.recentTools.length > 0 ? h('div', { class: 'role-tools' }, `recent tools: ${role.recentTools.join(', ')}`) : null,
-		role.lastPromptTokens !== null && role.lastPromptTokens !== undefined ? h('div', { class: 'role-context' }, `last context: ${formatTokens(role.lastPromptTokens)} tokens`) : null,
-	])
-}
-
-// Renders a role tree node and its descendants indented by depth so the parent→child structure the executor logged is visible at a glance. Only the status is shown beside the name — the role's full summary can be long model prose and would inflate the row; it is reachable via the role_finished log row's detail sections. Only the single invocation the executor marked active pulses, so repeated sequential delegations to the same role are not mistaken for parallel runs. The key includes the sibling index so two invocations of the same role at the same depth (a retry) — which produce two tree siblings with an otherwise-identical role+level+depth triple — get distinct keys; a colliding key would corrupt hyperapp's keyed reconciliation.
-function RoleTreeNodeItem(node, level, indexAmongSiblings) {
-	const isActive = node.active === true
-	const status = node.status !== null && node.status !== undefined ? ` (${node.status})` : ''
-	const childItems = node.children.map((child, childIndex) => RoleTreeNodeItem(child, level + 1, childIndex))
-	return h('li', { key: `${node.role}-${level}-${node.depth}-${indexAmongSiblings}`, class: { 'role-active': isActive, 'role-tree-node': true, 'role-tree-root': level === 0 } }, [
-		isActive ? h('span', { class: 'role-pulse' }) : null,
-		h('strong', {}, node.role),
-		h('span', { class: 'role-tree-status' }, status),
-		childItems.length > 0 ? h('ul', { class: 'role-tree-children' }, childItems) : null,
-	])
-}
-
-function RolesPanel(state) {
-	const view = state.selectedRunView
-	const activeRole = view && !isTerminalStatus(view.status) && view.currentActivity ? view.currentActivity.role : null
-	const tree = view ? view.roleTree : null
-	let heading
-	let children
-	if (Array.isArray(tree) && tree.length > 0) {
-		heading = 'Role tree'
-		children = tree.map((node, nodeIndex) => RoleTreeNodeItem(node, 0, nodeIndex))
-	} else {
-		heading = 'Role activity'
-		const roles = view ? view.roles : []
-		children = roles.length === 0
-			? [h('li', {}, 'No role activity yet.')]
-			: roles.map((role) => RoleActivityItem(role, activeRole !== null && role.role === activeRole, state.now))
-	}
-	return h('section', { id: 'roles-panel', class: 'panel' }, [h('h2', {}, heading), h('ul', { id: 'roles' }, children)])
-}
-
-function canLoadEarlier(logPage) {
-	if (logPage === null) return false
-	// In extended mode the oldest loaded index must be above 0; in tail mode the recent page must be full (a full page means there may be older events beyond it).
-	if (logPage.offset !== null) return logPage.offset > 0
-	return logPage.entries.length >= LOG_PAGE_SIZE
-}
-
-function LogDetail(entry, expanded) {
-	if (expanded !== true) {
-		return h('pre', { class: 'log-detail', hidden: true }, JSON.stringify(entry.payload, null, 2))
-	}
-	const sections = entry.detailSections
-	if (!Array.isArray(sections) || sections.length === 0) {
-		return h('pre', { class: 'log-detail' }, JSON.stringify(entry.payload, null, 2))
-	}
-	// Paired sections: each label sits beside its content so an llm_call shows sent/received/finish reason/usage and a tool_call/tool_result shows arguments/result, rather than a single opaque blob. A string-valued section (e.g. a role_finished summary) is placed into the <pre> as a raw text node so its embedded newlines render as real line breaks under white-space: pre-wrap — JSON.stringify would escape them to literal "\n". Object/array content is JSON.stringify-ed for legibility. Both paths keep untrusted content as text nodes (never markup), preserving the security invariant.
-	return h('div', { class: 'log-detail log-detail-sections' }, sections.map((section) => h('div', { class: 'log-detail-section' }, [
-		h('span', { class: 'log-detail-label' }, section.label),
-		h('pre', { class: 'log-detail-content' }, typeof section.content === 'string' ? section.content : JSON.stringify(section.content, null, 2)),
-	])))
-}
-
-function LogPanel(state) {
-	const logPage = state.logPage
-	const entries = logPage !== null ? logPage.entries : []
-	const showLoadEarlier = canLoadEarlier(logPage)
-	let children
-	if (entries.length === 0) {
-		children = [h('li', { class: 'log-empty' }, 'No events logged yet.')]
-	} else {
-		// Newest first so the latest activity is visible without scrolling.
-		// The render key is the positional index, not the event content: many log events share identical (type, role, tool) and the millisecond timestamps can collide within a rapid burst, so a content-derived key is not unique and the vendored hyperapp's keyed reconciliation then misplaces DOM nodes (insertBefore on a colliding key), which surfaces as out-of-order timestamps in the panel. A positional key is unique per render and makes the diff patch in place, so the DOM order always matches the array order.
-		children = []
-		let renderIndex = 0
-		for (let i = entries.length - 1; i >= 0; i--) {
-			const entry = entries[i]
-			const toggleKey = logRowKey(entry)
-			const expanded = Boolean(state.expandedLogRows[toggleKey])
-			children.push(
-				h('li', { key: String(renderIndex), class: 'log-row' }, [
-					h('time', { class: 'log-timestamp', title: entry.timestamp ?? '' }, formatRelative(entry.timestamp, state.now)),
-					h('span', { class: 'log-type' }, entry.type),
-					h('span', { class: 'log-summary' }, entry.summary),
-					h('button', { type: 'button', class: 'log-toggle', onclick: [ToggleLogRow, toggleKey] }, expanded ? 'hide' : 'raw'),
-					LogDetail(entry, expanded),
-				]),
-			)
-			renderIndex++
-		}
-	}
-	// Export sits at the top (a persistent action on the whole log); "Load earlier" sits at the bottom (it extends the list downward). Keeping them separate avoids a crowded controls row and matches their scope.
-	const exportButton = state.selectedRunId !== null ? h('button', { type: 'button', class: 'log-export', onclick: [ExportLog, null] }, 'Export') : null
-	const loadEarlierButton = showLoadEarlier ? h('button', { type: 'button', class: 'log-load-earlier', onclick: [LoadEarlierLog, null] }, 'Load earlier') : null
-	return h('section', { id: 'log-panel', class: 'panel' }, [h('h2', {}, 'Log'), exportButton, h('ol', { id: 'log' }, children), loadEarlierButton])
-}
-
-function QuestionsPanel(state) {
-	const view = state.selectedRunView
-	const history = view ? view.questionHistory : []
-	const historyChildren = history.length === 0
-		? null
-		: [
-				h('li', { class: 'question-history-heading' }, 'Past questions'),
-			...history.map((entry, index) =>
-				h('li', { key: `${entry.id ?? entry.askedAt}-${index}`, class: 'question-history-entry' }, [
-						h('div', { class: 'question-history-question markdown' }, renderMarkdown(entry.question)),
-						entry.context !== undefined ? h('div', { class: 'question-context markdown' }, renderMarkdown(entry.context)) : null,
-						entry.answer !== undefined
-							? h('div', { class: 'question-history-answer' }, entry.answer)
-							: h('div', { class: 'question-history-unanswered' }, 'unanswered'),
-					]),
-				),
-			]
-
-	const questions = state.pendingQuestions
-	const pendingChildren = questions.length === 0
-		? [h('li', {}, 'No pending questions.')]
-		: questions.map((question) =>
-				h('li', { key: question.id }, [
-					h('div', { class: 'markdown' }, renderMarkdown(question.question)),
-					question.context !== undefined ? h('div', { class: 'question-context markdown' }, renderMarkdown(question.context)) : null,
-					h('form', { class: 'question-form', onsubmit: SubmitAnswer(question.id) }, [
-						h('input', { type: 'text', placeholder: 'your answer', disabled: state.pendingAnswerId === question.id }),
-						h('button', { type: 'submit', disabled: state.pendingAnswerId === question.id }, 'Answer'),
-					]),
-				]),
-			)
-
-	return h('section', { id: 'questions-panel', class: 'panel' }, [
-		h('h2', {}, 'Questions'),
-		h('ul', { class: 'question-history' }, historyChildren),
-		h('ul', { class: 'pending-questions' }, pendingChildren),
-	])
-}
-
-function ConfigPanel(state) {
-	const config = state.config
-	if (config === null) {
-		return h('section', { id: 'config-panel', class: 'panel' }, [h('h2', {}, 'Configuration'), h('p', { class: 'config-empty' }, 'Loading configuration…')])
-	}
-	const model = config.model
-	const executor = config.executor
-	const roles = config.roles
-	const roleNames = Object.keys(roles)
-	const budgetEntries = [
-		`agent depth ${formatNumber(executor.maxAgentDepth)}`,
-		`tool timeout ${formatNumber(executor.defaultToolTimeoutSeconds)}s`,
-		`compaction attempts ${formatNumber(executor.maxCompactionAttempts)}`,
-	]
-	return h('section', { id: 'config-panel', class: 'panel' }, [
-		h('h2', {}, 'Configuration'),
-		h('dl', { class: 'config-meta' }, [
-			h('dt', {}, 'Model'), h('dd', {}, model.name),
-			h('dt', {}, 'Context window'), h('dd', {}, formatNumber(model.contextWindow)),
-			h('dt', {}, 'Entry role'), h('dd', {}, config.entryRole),
-		]),
-		h('div', { class: 'config-budgets' }, budgetEntries.map((entry) => h('span', { class: 'config-budget' }, entry))),
-		h('ul', { class: 'config-roles' }, roleNames.map((name) => {
-			const tools = roles[name].tools
-			return h('li', { key: name, class: 'config-role' }, [
-				h('strong', {}, name),
-				name === config.entryRole ? h('span', { class: 'config-entry-marker' }, ' (entry)') : null,
-				h('div', { class: 'config-role-tools' }, tools.length > 0 ? `tools: ${tools.join(', ')}` : 'no tools'),
-			])
-		})),
-	])
-}
-
 function FlowPanel(state) {
 	const labels = state.labelResolver
 	const model = state.flowModel
@@ -1209,7 +930,7 @@ function TooltipCardForRun(state) {
 	return Tooltip(h, { title: descriptor.title, sections: descriptor.sections, renderMarkdown, style: tooltipStyle(tooltip.rect) })
 }
 
-// The pending question the modal renders. The live `/api/questions` poll is the source — the same poll the inline QuestionsPanel reads — so the modal is driven by live data, and the answer form posts to `/api/answer` via the existing SubmitAnswer path. The first pending question is the active one; the modal opens when one arrives (GotQuestions) and re-opens via the flow view's Question affordance.
+// The pending question the modal renders. The live `/api/questions` poll is the source, so the modal is driven by live data, and the answer form posts to `/api/answer` via the existing SubmitAnswer path. The first pending question is the active one; the modal opens when one arrives (GotQuestions) and re-opens via the flow view's Question affordance.
 function QuestionModalForRun(state) {
 	if (!state.questionModalOpen) return null
 	const question = state.pendingQuestions[0]
@@ -1247,10 +968,6 @@ function Main(state) {
 		RunsPanel(state),
 		FlowPanel(state),
 		RunSummaryPanel(state),
-		RolesPanel(state),
-		QuestionsPanel(state),
-		ConfigPanel(state),
-		LogPanel(state),
 	])
 }
 
@@ -1272,12 +989,9 @@ app({
 			serverAvailable: true,
 			justSubmittedRunId: null,
 			muted: false,
-			expandedLogRows: {},
 			shownQuestionIds: {},
 			firstQuestionsPoll: true,
 			pendingAnswerId: null,
-			logPage: null,
-			config: null,
 			// null until the saved effort loads; the slider initializes from the persisted position on first load.
 			runEffort: null,
 			savingEffort: false,
@@ -1298,9 +1012,9 @@ app({
 		tooltip: null,
 		now: Date.now(),
 	},
-		// The config panel is loaded once and never polled, so its fetch is an init effect rather than a subscription.
-		Fetch({ url: 'api/config', ok: GotConfig, fail: FetchFailed }),
-		Fetch({ url: 'api/settings', ok: GotSettings, fail: SettingsFetchFailed }),
+	// The guild config and the saved effort position are each loaded once on load and never polled, so their fetches are init effects rather than subscriptions.
+	Fetch({ url: 'api/config', ok: GotConfig, fail: FetchFailed }),
+	Fetch({ url: 'api/settings', ok: GotSettings, fail: SettingsFetchFailed }),
 	],
 	view,
 	subscriptions: (state) => [

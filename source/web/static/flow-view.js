@@ -52,7 +52,7 @@ import { GraphEdge, GraphNode, NODE_HEIGHT, NODE_WIDTH, nodeAnchor } from './svg
 
 // Horizontal gap between call-depth columns and vertical gap between rows. Generous horizontal spacing keeps the left-to-right call chain legible; the vertical gap separates the main run from each preempting interrupt stack.
 export const COL_GAP = 96
-export const ROW_GAP = 104
+const ROW_GAP = 104
 
 // Top-bar small-node dimensions and wrapping. Each history slot is a small square holding just its invocation count; the role/tool name and cumulative token/time details surface via the native SVG <title> hover so a long run's history stays a compact strip. They wrap into rows so a large guild's many role/tool types never overflow horizontally.
 const SMALL_SIZE = 28

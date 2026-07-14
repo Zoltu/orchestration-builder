@@ -1,6 +1,6 @@
 // Demo harness for the InteractionModel scenarios.
 //
-// Renders the current frame two ways: the flow view SVG (the product surface) and a debug text view (the model's raw projection). The text view stays available behind a toggle so the SVG structure can be cross-checked against the model's helpers during development. Both read the same helpers the product views will read, so a discrepancy between them surfaces a view bug rather than a model ambiguity.
+// Renders the current frame two ways: the flow view SVG (the product surface) and a debug text view (the model's raw projection). The text view stays available behind a toggle so the SVG structure can be cross-checked against the model's helpers during development. Both read the same helpers the product views read, so a discrepancy between them surfaces a view bug rather than a model ambiguity.
 //
 // The harness imports only its sibling static modules; it touches nothing in the product client (app.js). The label-tier control re-renders both views through the localization resolver so participant and operation prose swap with the selected tier while the underlying model is untouched.
 import { scenarios, GUILD_PARTICIPANTS } from './scenarios.js'

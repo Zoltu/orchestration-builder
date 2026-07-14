@@ -404,7 +404,7 @@ describe('createWebServer dev demo assets', () => {
 		expect(body).toContain('renderSequenceView')
 	})
 
-	test('GET /scenarios.js serves the dev scenario module', async () => {
+	test('GET /scenarios.js serves the scenario fixture module', async () => {
 		const response = await fetch(`${readOnlyBaseUrl}/scenarios.js`)
 		expect(response.status).toBe(200)
 		expect(response.headers.get('content-type')).toContain('text/javascript')

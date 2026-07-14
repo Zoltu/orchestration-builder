@@ -32,10 +32,6 @@
 	--svg-success: var(--color-success);
 	--svg-counter-fill: var(--color-accent);
 	--svg-counter-text: #ffffff;
-	--svg-tooltip-fill: var(--color-surface);
-	--svg-tooltip-border: var(--color-border-strong);
-	--svg-tooltip-title: var(--color-text);
-	--svg-tooltip-text: var(--color-text-muted);
 	--space-1: 0.25rem;
 	--space-2: 0.5rem;
 	--space-3: 0.75rem;
@@ -84,10 +80,6 @@
 		--svg-success: var(--color-success);
 		--svg-counter-fill: var(--color-accent);
 		--svg-counter-text: #0d1117;
-		--svg-tooltip-fill: var(--color-surface);
-		--svg-tooltip-border: var(--color-border-strong);
-		--svg-tooltip-title: var(--color-text);
-		--svg-tooltip-text: var(--color-text-muted);
 	}
 }
 
@@ -123,10 +115,6 @@
 	--svg-success: var(--color-success);
 	--svg-counter-fill: var(--color-accent);
 	--svg-counter-text: #0d1117;
-	--svg-tooltip-fill: var(--color-surface);
-	--svg-tooltip-border: var(--color-border-strong);
-	--svg-tooltip-title: var(--color-text);
-	--svg-tooltip-text: var(--color-text-muted);
 }
 
 :root[data-theme='light'] {
@@ -206,14 +194,6 @@ main {
 	font-weight: 600;
 }
 
-/* Secondary panels (role activity, log, config) read as subordinate to the focal run summary: their headers are muted and their surfaces are flat. */
-#roles-panel h2,
-#log-panel h2,
-#config-panel h2 {
-	color: var(--color-text-muted);
-	font-weight: 600;
-}
-
 dl {
 	margin: 0;
 	display: grid;
@@ -247,77 +227,12 @@ li:last-child {
 	border-bottom: none;
 }
 
-.role-tools {
-	margin-top: var(--space-1);
-	font-size: 0.85rem;
-	color: var(--color-text-muted);
-}
-
-.role-context {
-	margin-top: 0.15rem;
-	font-size: 0.8rem;
-	color: var(--color-text-muted);
-}
-
+/* The question modal renders its context block with `question-modal-context question-context markdown`; the base rule carries the muted aside spacing, and the `.question-context.markdown` rule below tightens its Markdown. */
 .question-context {
 	margin-top: var(--space-1);
 	font-size: 0.85rem;
 	color: var(--color-text-muted);
 	white-space: pre-wrap;
-}
-
-.question-form {
-	display: flex;
-	gap: var(--space-2);
-	margin-top: var(--space-2);
-}
-
-.question-form input[type='text'] {
-	flex: 1;
-	padding: var(--space-2) var(--space-2);
-	border: 1px solid var(--color-border-strong);
-	border-radius: var(--radius-sm);
-	background: var(--color-surface);
-	color: var(--color-text);
-}
-
-.question-form input[type='text']:focus-visible {
-	outline: 2px solid var(--color-accent);
-	outline-offset: 0;
-	border-color: var(--color-accent);
-}
-
-.question-form button {
-	padding: var(--space-2) var(--space-3);
-	border: none;
-	border-radius: var(--radius-sm);
-	background: var(--color-accent);
-	color: #ffffff;
-	font-weight: 500;
-	cursor: pointer;
-}
-
-.question-form button:disabled {
-	opacity: 0.5;
-	cursor: default;
-}
-
-#log {
-	font-family: var(--font-mono);
-	font-size: 0.8rem;
-}
-
-#log li {
-	white-space: pre-wrap;
-	word-break: break-word;
-}
-
-.log-timestamp {
-	color: var(--color-text-subtle);
-}
-
-.log-type {
-	color: var(--color-accent);
 }
 
 .status-unavailable {
@@ -502,11 +417,6 @@ li:last-child {
 	cursor: default;
 }
 
-.log-empty {
-	color: var(--color-text-subtle);
-	font-style: italic;
-}
-
 .current-activity {
 	margin: 0 0 var(--space-3);
 	font-size: 0.9rem;
@@ -534,38 +444,6 @@ li:last-child {
 	display: inline-flex;
 	flex-wrap: wrap;
 	gap: 0.3rem var(--space-3);
-}
-
-.role-times {
-	margin-top: 0.15rem;
-	font-size: 0.75rem;
-	color: var(--color-text-subtle);
-	display: flex;
-	flex-wrap: wrap;
-	gap: var(--space-2);
-}
-
-.role-pulse {
-	display: inline-block;
-	width: 0.4rem;
-	height: 0.4rem;
-	margin-right: var(--space-1);
-	border-radius: 50%;
-	background: var(--color-accent);
-	vertical-align: middle;
-	animation: role-pulse 1.4s ease-in-out infinite;
-}
-
-@keyframes role-pulse {
-	0%,
-	100% {
-		opacity: 1;
-		transform: scale(1);
-	}
-	50% {
-		opacity: 0.4;
-		transform: scale(0.7);
-	}
 }
 
 .status-clickable {
@@ -613,215 +491,6 @@ li:last-child {
 	font-family: var(--font-mono);
 	font-size: 0.82rem;
 	color: var(--color-text-muted);
-}
-
-.log-row {
-	display: flex;
-	flex-wrap: wrap;
-	align-items: baseline;
-	gap: var(--space-2);
-}
-
-.log-summary {
-	color: var(--color-text);
-}
-
-.log-toggle {
-	border: 1px solid var(--color-border-strong);
-	border-radius: var(--radius-sm);
-	background: var(--color-bg);
-	color: var(--color-text-muted);
-	font-size: 0.75rem;
-	padding: 0.1rem var(--space-2);
-	cursor: pointer;
-}
-
-.log-detail {
-	flex-basis: 100%;
-	margin: var(--space-1) 0 0;
-	padding: var(--space-2);
-	background: var(--color-surface-sunken);
-	border-radius: var(--radius-sm);
-	font-size: 0.78rem;
-	white-space: pre-wrap;
-	word-break: break-word;
-}
-
-.log-detail-sections {
-	display: flex;
-	flex-direction: column;
-	gap: var(--space-2);
-}
-
-.log-detail-section {
-	display: flex;
-	flex-direction: column;
-	gap: 0.15rem;
-}
-
-.log-detail-label {
-	font-size: 0.7rem;
-	color: var(--color-text-muted);
-	text-transform: uppercase;
-	letter-spacing: 0.04em;
-}
-
-.log-detail-content {
-	margin: 0;
-	padding: 0.35rem;
-	background: var(--color-surface);
-	border: 1px solid var(--color-border);
-	border-radius: var(--radius-sm);
-	font-size: 0.76rem;
-	white-space: pre-wrap;
-	word-break: break-word;
-}
-
-.role-tree-node {
-	padding: 0.1rem 0;
-	line-height: 1.25;
-	border-bottom: none;
-}
-
-.role-tree-children {
-	margin: 0.05rem 0 0 var(--space-2);
-	padding-left: var(--space-2);
-	list-style: none;
-	border-left: 2px solid var(--color-border);
-}
-
-.role-tree-status {
-	color: var(--color-text-muted);
-	font-size: 0.75rem;
-	margin-left: 0.2rem;
-}
-
-.role-tree-root {
-	font-weight: 600;
-}
-
-.question-history:empty {
-	display: none;
-}
-
-.question-history-heading {
-	font-weight: 600;
-	font-size: 0.8rem;
-	color: var(--color-text-muted);
-	text-transform: uppercase;
-	letter-spacing: 0.04em;
-	border-bottom: 1px solid var(--color-surface-sunken);
-}
-
-.question-history-question {
-	font-weight: 500;
-}
-
-.question-history-answer {
-	margin-top: 0.2rem;
-	font-size: 0.9rem;
-	color: var(--color-success);
-	white-space: pre-wrap;
-	word-break: break-word;
-}
-
-.question-history-unanswered {
-	margin-top: 0.2rem;
-	font-size: 0.85rem;
-	color: var(--color-error);
-	font-style: italic;
-}
-
-.pending-questions {
-	margin-top: var(--space-2);
-}
-
-.log-export {
-	margin-bottom: var(--space-2);
-	border: 1px solid var(--color-border-strong);
-	border-radius: var(--radius-sm);
-	background: var(--color-bg);
-	color: var(--color-text-muted);
-	font-size: 0.8rem;
-	padding: var(--space-1) 0.6rem;
-	cursor: pointer;
-}
-
-.log-export:hover {
-	background: var(--color-accent-soft);
-	border-color: var(--color-accent);
-	color: var(--color-accent);
-}
-
-.log-load-earlier {
-	margin-top: var(--space-2);
-	border: 1px solid var(--color-border-strong);
-	border-radius: var(--radius-sm);
-	background: var(--color-bg);
-	color: var(--color-text-muted);
-	font-size: 0.8rem;
-	padding: var(--space-1) 0.6rem;
-	cursor: pointer;
-	width: 100%;
-}
-
-.log-load-earlier:hover {
-	background: var(--color-accent-soft);
-	border-color: var(--color-accent);
-	color: var(--color-accent);
-}
-
-#config-panel {
-	min-width: 0;
-}
-
-.config-empty {
-	color: var(--color-text-subtle);
-	font-style: italic;
-}
-
-.config-meta {
-	margin-bottom: var(--space-2);
-}
-
-.config-budgets {
-	display: flex;
-	flex-wrap: wrap;
-	gap: 0.3rem var(--space-4);
-	margin: 0 0 var(--space-3);
-	font-size: 0.82rem;
-	color: var(--color-text-muted);
-}
-
-.config-budget {
-	white-space: nowrap;
-}
-
-.config-roles {
-	margin: 0;
-	padding: 0;
-	list-style: none;
-}
-
-.config-role {
-	padding: var(--space-2) 0;
-	border-bottom: 1px solid var(--color-surface-sunken);
-}
-
-.config-role:last-child {
-	border-bottom: none;
-}
-
-.config-entry-marker {
-	color: var(--color-accent);
-	font-size: 0.8rem;
-}
-
-.config-role-tools {
-	margin-top: 0.15rem;
-	font-size: 0.82rem;
-	color: var(--color-text-muted);
-	overflow-wrap: anywhere;
 }
 
 .effort-control {
@@ -1028,18 +697,14 @@ li:last-child {
 	margin: 0.15rem 0;
 }
 
-/* Wide-viewport layout: the run list becomes a sticky sidebar and the run view panels flow in a focal column to its right, led by the new-run editor. The active run's summary carries a subtle accent ring (shadow-focal) so it reads as the focal point of the page. Below this breakpoint everything stacks in source order (new-run editor, run list, run view), which never produces a horizontal scrollbar because every column is minmax(0, …) and every text surface wraps. */
+/* Wide-viewport layout: the run list becomes a sticky sidebar and the run view panels flow in a focal column to its right, led by the new-run editor. The flow-graph run view is the focal centerpiece (it carries the accent focal ring); the run summary sits below it as a supporting read. Below this breakpoint everything stacks in source order (new-run editor, run list, run view), which never produces a horizontal scrollbar because every column is minmax(0, …) and every text surface wraps. */
 @media (min-width: 64rem) {
 	main {
 		grid-template-columns: 24rem minmax(0, 1fr);
 		grid-template-areas:
 			'runs   submit'
 			'runs   flow'
-			'runs   summary'
-			'runs   roles'
-			'runs   questions'
-			'runs   config'
-			'runs   log';
+			'runs   summary';
 	}
 	#runs-panel {
 		grid-area: runs;
@@ -1058,25 +723,13 @@ li:last-child {
 	#submit-panel {
 		grid-area: submit;
 	}
-	/* The flow-graph run view is the focal centerpiece; it takes the focal ring that the summary panel used to carry alone (the summary panel stays as a supporting read below it). */
+	/* The flow-graph run view is the focal centerpiece; it carries the accent focal ring, and the summary panel below it is a supporting read. */
 	#flow-panel {
 		grid-area: flow;
 		box-shadow: var(--shadow-focal);
 	}
 	#run-summary {
 		grid-area: summary;
-	}
-	#roles-panel {
-		grid-area: roles;
-	}
-	#questions-panel {
-		grid-area: questions;
-	}
-	#config-panel {
-		grid-area: config;
-	}
-	#log-panel {
-		grid-area: log;
 	}
 }
 
@@ -1207,35 +860,7 @@ li:last-child {
 	stroke-dasharray: 3 3;
 }
 
-.graph-tooltip-rect {
-	fill: var(--svg-tooltip-fill);
-	stroke: var(--svg-tooltip-border);
-	stroke-width: 1;
-}
-
-.graph-tooltip-title {
-	fill: var(--svg-tooltip-title);
-	font-size: 12px;
-	font-weight: 600;
-}
-
-.graph-tooltip-text {
-	fill: var(--svg-tooltip-text);
-	font-size: 11px;
-}
-
-.graph-tooltip-button-rect {
-	fill: var(--color-bg);
-	stroke: var(--svg-tooltip-border);
-	stroke-width: 1;
-}
-
-.graph-tooltip-button-text {
-	fill: var(--svg-tooltip-text);
-	font-size: 11px;
-}
-
-/* --- Flow view (demo harness) --------------------------------------------- */
+/* --- Flow view ------------------------------------------------------------- */
 /* The two-component flow view rendered as a single shared SVG: a compact history strip (small nodes, one per role/tool/"You" that has ever run, cumulative stats) at the top, and a spacious active-flow main area (nodes/edges laid out left-to-right by call depth) below it, separated by a gap. Sharing one SVG is what makes the depart animation work — a node leaving the main area travels to its top-bar slot in the shared coordinate space, so the travel lands on the slot and the counter increment reads as the node arriving. The SVG sizes to its viewBox and fits the container via preserveAspectRatio. Colors reuse the --svg-* tokens so the flow follows the light/dark theme with the rest of the page. */
 
 .flow-view {
@@ -1259,15 +884,15 @@ li:last-child {
 	user-select: none;
 }
 
-/* --- Product surfaces (demo harness) --------------------------------------- */
-/* Two surfaces wrap the flow view so the page conveys meaning the graph's structure alone cannot: a quiet ambient cost strip in the harness chrome and a one-line "now" caption under the flow view. The "now" caption is the more prominent of the two; the cost strip is the more subdued. Both read the visual tokens so they follow the light/dark theme with the rest of the page. */
+/* --- Product surfaces ------------------------------------------------------- */
+/* Two surfaces wrap the flow view so the page conveys meaning the graph's structure alone cannot: a quiet ambient cost strip in the run-view chrome and a one-line "now" caption under the flow view. The "now" caption is the more prominent of the two; the cost strip is the more subdued. Both read the visual tokens so they follow the light/dark theme with the rest of the page. The dev harness mounts the same two surfaces, so these rules cover both the product client and the demo. */
 
 /* The demo harness mounts the flow view and the now caption in a plain block column under #demo-flow-view, so the now caption sits a half-step below the SVG and the focal hierarchy reads flow view primary, caption secondary. */
 #demo-flow-view .pb-now-caption {
 	margin-top: var(--space-2);
 }
 
-/* Cost strip: a quiet, always-present bar in the harness chrome. The more subdued of the two surfaces — small font, subtle color, sunken background — so it stays ambient and never competes with the main area. The small vertical margin separates it from the control bar above and the flow view below. */
+/* Cost strip: a quiet, always-present bar in the run-view chrome. The more subdued of the two surfaces — small font, subtle color, sunken background — so it stays ambient and never competes with the main area. The small vertical margin separates it from the control bar above and the flow view below. */
 .pb-cost-strip {
 	flex: 0 0 auto;
 	display: flex;
@@ -1298,7 +923,7 @@ li:last-child {
 }
 
 /* --- Product run-view layout (flow-graph centerpiece) ----------------------- */
-/* The product client mounts the same flow/sequence views the demo harness iterates against, so the stage and controls reuse the demo's `.pb-*` classes (the cost strip, now caption, view toggle, and `.pb-flow` overlay context) plus a focal panel wrapper. */
+/* The product client mounts the flow/sequence views in a focal panel; the stage and controls use the shared `.pb-*` classes (the cost strip, now caption, view toggle, and `.pb-flow` overlay context). */
 
 /* The flow area is a flex column with a minimum height so the centerpiece reads as a stage even on a one-node frame; the SVG fills it (`.flow-view-svg` is `flex: 1 1 auto`) and the per-run-view modals overlay it (`.pb-flow` is `position: relative`). */
 #flow-panel .flow-stage {
@@ -1307,7 +932,7 @@ li:last-child {
 	min-height: 18rem;
 }
 
-/* The controls row above the stage: the Flow/Sequence segmented toggle and the label-tier select. The toggle's demo-only `margin-left: auto` is neutralized here so the two controls sit at the row's start rather than the toggle pushing the tier control to the far edge. */
+/* The controls row above the stage: the Flow/Sequence segmented toggle and the label-tier select. The dev harness's `margin-left: auto` (on `.pb-view-toggle` above) is neutralized here so the two controls sit at the row's start rather than the toggle pushing the tier control to the far edge. */
 .flow-controls {
 	display: flex;
 	align-items: center;
@@ -1447,8 +1072,7 @@ li:last-child {
 		animation: none;
 		stroke-dasharray: none;
 	}
-	.graph-node--active .graph-node-box,
-	.role-pulse {
+	.graph-node--active .graph-node-box {
 		animation: none;
 	}
 	.flow-node--entering,
@@ -1832,7 +1456,7 @@ li:last-child {
 }
 
 .flow-question-button-bezel {
-	fill: var(--color-accent-strong, #b35e0a);
+	fill: #b35e0a;
 }
 
 .flow-question-button-face {
@@ -1950,8 +1574,8 @@ li:last-child {
 	color: var(--color-text);
 }
 
-/* --- Flow/Sequence view toggle (demo harness) ------------------------------- */
-/* A segmented control that switches the run-view centerpiece between the product surface (Flow, default) and the debug surface (Sequence). It mirrors the theme toggle's segmented control so the two debug affordances read as a pair; the active segment carries the accent so the current view is unambiguous. `margin-left: auto` pushes it (and the theme toggle beside it) to the right end of the controls row. */
+/* --- Flow/Sequence view toggle --------------------------------------------- */
+/* A segmented control that switches the run-view centerpiece between the product surface (Flow, default) and the debug surface (Sequence). The active segment carries the accent so the current view is unambiguous. In the dev harness `margin-left: auto` pushes it (and the theme toggle beside it) to the right end of the controls row; the product client neutralizes that below so its toggle sits at the row's start next to the label-tier control. */
 
 .pb-view-toggle {
 	display: inline-flex;
@@ -1975,7 +1599,7 @@ li:last-child {
 	color: var(--color-accent);
 }
 
-/* --- Sequence diagram view (demo harness) ------------------------------------ */
+/* --- Sequence diagram view ------------------------------------------------- */
 /* The debug "Sequence" view: one column per role plus a Human and a single shared "tools" column, with each log event drawn as a horizontal message on a vertical time axis. It is a debug surface, so it grows long down the page; the SVG sizes to its viewBox and scales to the container width, and the host scroll container scrolls vertically for long timelines. Colors reuse the --svg-* tokens so the diagram follows the light/dark theme with the flow graph. */
 
 .sequence-view-svg {
