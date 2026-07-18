@@ -10,6 +10,7 @@ import type { RunState } from '../executor/run-state.js'
 import type { RunSubmission } from '../executor/run-submission.js'
 import { parseRunSnapshot, paginateLogEvents, renderConfig, renderProjectSettings, renderPendingQuestions, renderRunSummary, renderRunView, formatLogAsText, toRecentLogEntry } from './render.js'
 import { deriveInteractionModel } from './interaction-model-adapter.js'
+import { DEMO_SCENARIOS, demoScenarioMeta, findDemoScenario } from './demo-fixtures.js'
 
 const STATIC_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), 'static')
 const MAX_LOG_LINES = 200
@@ -118,10 +119,8 @@ function parseNonNegativeInt(value: string | null, defaultValue: number): number
 	return parsed
 }
 
-// Serves the structured InteractionModel derived from a run's full snapshot. The model is JSON
-// (identifiers, counters, costs as values; agent prose as markdown strings in `details`); the
-// client renders `details` only through the sanitized Markdown pipeline, so the server does not
-// sanitize — it must not serve pre-rendered HTML that would bypass the client's sanitization.
+// Serves the structured InteractionModel derived from a run's full snapshot.
+// The model is JSON (identifiers, counters, costs as values; agent prose as markdown strings in `details`); the client renders `details` only through the sanitized Markdown pipeline, so the server does not sanitize — it must not serve pre-rendered HTML that would bypass the client's sanitization.
 function runFlowPage(readRunSnapshotById: ReadRunSnapshotById, runId: string): Response {
 	if (!isKnownRun(readRunSnapshotById, runId)) return json({ ok: false, error: 'not_found' }, 404)
 	const snapshot = parseRunSnapshot(readRunSnapshotById(runId))
@@ -132,6 +131,32 @@ function runViewFor(readRunSnapshotById: ReadRunSnapshotById, runId: string): Re
 	if (!isKnownRun(readRunSnapshotById, runId)) return null
 	const snapshot = parseRunSnapshot(readRunSnapshotById(runId))
 	return renderRunView(snapshot, { maxLogLines: MAX_LOG_LINES, now: new Date().toISOString() })
+}
+
+// Feeds the scenario's first `frameIndex + 1` events through the real adapter — the same derivation the product's `/api/runs/:id/flow` runs — so the demo harness exercises the product's `LogEvent → InteractionModel` path rather than authored model frames.
+function demoFrameModel(scenarioId: string, frameIndex: number): Response {
+	const scenario = findDemoScenario(scenarioId)
+	if (scenario === undefined) return json({ ok: false, error: 'not_found' }, 404)
+	if (!Number.isInteger(frameIndex) || frameIndex < 0 || frameIndex >= scenario.events.length) {
+		return json({ ok: false, error: 'not_found' }, 404)
+	}
+	const events = scenario.events.slice(0, frameIndex + 1)
+	const meta = demoScenarioMeta(scenario, frameIndex)
+	const now = scenario.events[frameIndex]!.timestamp
+	return json(deriveInteractionModel({ meta, logEvents: events }, now))
+}
+
+// The manifest includes the scenario's full participant set (taken from the final frame's model) so the sequence view can lay out every column from the first frame, the same role the product's static guild participant inventory plays for a live run.
+function handleDemoScenarios(): Response {
+	const manifests = DEMO_SCENARIOS.map((scenario) => {
+		const lastIndex = scenario.events.length - 1
+		const lastFrame = deriveInteractionModel(
+			{ meta: demoScenarioMeta(scenario, lastIndex), logEvents: scenario.events },
+			scenario.events[lastIndex]!.timestamp,
+		)
+		return { id: scenario.id, label: scenario.label, frameCount: scenario.events.length, participants: lastFrame.participants }
+	})
+	return json(manifests)
 }
 
 function isKnownRun(readRunSnapshotById: ReadRunSnapshotById, runId: string): boolean {
@@ -205,9 +230,7 @@ export function createWebServer(config: WebServerConfig): WebServer {
 			if (pathname === '/api/runs') return handleListRuns(readRunSnapshotById, listRunIds)
 			if (pathname.startsWith('/api/runs/')) {
 				const rest = decodeURIComponent(pathname.slice('/api/runs/'.length))
-				// Match a /log or /flow suffix before the bare :id route so /api/runs/<id>/log and
-				// /api/runs/<id>/flow reach their endpoints rather than being swallowed as a run id of
-				// "<id>/log" or "<id>/flow".
+				// Match a /log or /flow suffix before the bare :id route so /api/runs/<id>/log and /api/runs/<id>/flow reach their endpoints rather than being swallowed as a run id of "<id>/log" or "<id>/flow".
 				const slashIndex = rest.lastIndexOf('/')
 				if (slashIndex >= 0) {
 					const suffix = rest.slice(slashIndex + 1)
@@ -220,6 +243,18 @@ export function createWebServer(config: WebServerConfig): WebServer {
 				return handleGetRunById(readRunSnapshotById, rest)
 			}
 			if (pathname === '/api/questions') return json(renderPendingQuestions(runState.pendingQuestions()))
+			if (pathname === '/api/demo/scenarios') return handleDemoScenarios()
+			if (pathname.startsWith('/api/demo/flow/')) {
+				const rest = decodeURIComponent(pathname.slice('/api/demo/flow/'.length))
+				const slashIndex = rest.lastIndexOf('/')
+				if (slashIndex >= 0) {
+					const scenarioId = rest.slice(0, slashIndex)
+					const frameRaw = rest.slice(slashIndex + 1)
+					const frameIndex = Number(frameRaw)
+					if (scenarioId !== '' && Number.isInteger(frameIndex)) return demoFrameModel(scenarioId, frameIndex)
+				}
+				return json({ ok: false, error: 'not_found' }, 404)
+			}
 		// Browsers auto-request /favicon.ico on every page load; answer 204 so it does not pollute the console with a 404.
 		if (pathname === '/favicon.ico') return new Response(null, { status: 204 })
 		return serveStaticPath(pathname)

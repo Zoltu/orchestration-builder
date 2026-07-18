@@ -19,16 +19,18 @@ export const LEFT_MARGIN = 24
 const RIGHT_MARGIN = 24
 export const BOTTOM_MARGIN = 24
 
+// The minimum number of columns the canvas is sized for, so a run with few participants does not zoom the diagram in to fill the container width (the same high-water mark the flow view applies to its columns).
+const MIN_COLUMNS = 5
+
+// Approximate average character width at the 12px column-label size, used only to size the side margins so the first and last column labels stay on the canvas while remaining centered on their lifelines.
+const LABEL_CHAR_WIDTH = 7
+
 // Terminal-node geometry. Each call/return arrow lands on a small node on the destination column's lifeline — an activation marker big enough to host the hover inspector. It is centered on the column at the message's row.
 const TERMINAL_NODE_WIDTH = 18
 const TERMINAL_NODE_HEIGHT = 12
 
 // The vertical span of a same-column loopback. A flat U-turn at a single y would read as a zero-length arrow, so the out leg leaves from above the row center and the return leg lands at the row center on a separate line.
 const LOOPBACK_HEIGHT = 14
-
-function columnXForIndex(index) {
-	return LEFT_MARGIN + index * COLUMN_WIDTH
-}
 
 // Looks up a participant by id in the model. A missing id is a model contract violation (every operation endpoint must reference a known participant); failing fast surfaces it rather than rendering a message against undefined.
 function requireParticipant(participantsById, participantId) {
@@ -186,8 +188,18 @@ export function renderSequenceView(h, model, labels, tier, guildParticipants) {
 	const operations = model.operations
 	const messageAreaHeight = operations.length * ROW_HEIGHT
 	const lifelineBottom = HEADER_HEIGHT + messageAreaHeight
-	const lastColumnX = columns.length > 0 ? columnXForIndex(columns.length - 1) : LEFT_MARGIN
-	const width = lastColumnX + RIGHT_MARGIN
+	// Resolve the edge column labels up front so the side margins fit them: a label centered on the first or last column would otherwise overflow the viewBox. Middle columns never need this because their labels are bracketed by neighbours.
+	const firstColumn = columns.length > 0 ? columns[0] : undefined
+	const lastColumn = columns.length > 0 ? columns[columns.length - 1] : undefined
+	const firstLabel = firstColumn !== undefined ? resolveColumnLabel(model, firstColumn, labels, tier) : ''
+	const lastLabel = lastColumn !== undefined ? resolveColumnLabel(model, lastColumn, labels, tier) : ''
+	const leftMargin = Math.max(LEFT_MARGIN, Math.ceil((firstLabel.length * LABEL_CHAR_WIDTH) / 2) + 6)
+	const rightMargin = Math.max(RIGHT_MARGIN, Math.ceil((lastLabel.length * LABEL_CHAR_WIDTH) / 2) + 6)
+	const columnX = (index) => leftMargin + index * COLUMN_WIDTH
+	const lastColumnX = columns.length > 0 ? columnX(columns.length - 1) : leftMargin
+	const naturalWidth = lastColumnX + rightMargin
+	const minWidth = LEFT_MARGIN + (MIN_COLUMNS - 1) * COLUMN_WIDTH + RIGHT_MARGIN
+	const width = Math.max(naturalWidth, minWidth)
 	const height = HEADER_HEIGHT + messageAreaHeight + BOTTOM_MARGIN
 
 	const defs = h('defs', {}, [
@@ -200,7 +212,7 @@ export function renderSequenceView(h, model, labels, tier, guildParticipants) {
 	])
 
 	const columnGroups = columns.map((column, index) => {
-		const x = columnXForIndex(index)
+		const x = columnX(index)
 		const label = resolveColumnLabel(model, column, labels, tier)
 		return h('g', { class: `seq-column seq-column--${column.kind}`, 'data-role': column.role, 'data-kind': column.kind }, [
 			h('text', { class: 'seq-column-label', x, y: HEADER_HEIGHT - 14, 'text-anchor': 'middle' }, [label]),
@@ -214,8 +226,8 @@ export function renderSequenceView(h, model, labels, tier, guildParticipants) {
 		const destinationParticipant = requireParticipant(participantsById, operation.destination)
 		const sourceColumnIndex = columnIndexForParticipant(sourceParticipant, columnIndexByRole)
 		const destinationColumnIndex = columnIndexForParticipant(destinationParticipant, columnIndexByRole)
-		const sourceX = columnXForIndex(sourceColumnIndex)
-		const destinationX = columnXForIndex(destinationColumnIndex)
+		const sourceX = columnX(sourceColumnIndex)
+		const destinationX = columnX(destinationColumnIndex)
 		const sameColumn = sourceColumnIndex === destinationColumnIndex
 		const label = labels.resolveOperationLabel(operation, model.participants, tier, labels.hashString(operation.id))
 		const animationState = messageAnimationState(operation, model, activeOperationId)

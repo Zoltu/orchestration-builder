@@ -827,6 +827,64 @@ describe('createWebServer /api/run/flow alias', () => {
 	})
 })
 
+describe('createWebServer /api/demo/scenarios', () => {
+	test('lists every demo fixture with id, label, frame count, and participants', async () => {
+		const response = await fetch(`${readOnlyBaseUrl}/api/demo/scenarios`)
+		expect(response.status).toBe(200)
+		const list = await response.json()
+		expect(Array.isArray(list)).toBe(true)
+		expect(list.length).toBeGreaterThan(0)
+		const sample = list[0]
+		expect(typeof sample.id).toBe('string')
+		expect(typeof sample.label).toBe('string')
+		expect(typeof sample.frameCount).toBe('number')
+		expect(Array.isArray(sample.participants)).toBe(true)
+		expect(sample.participants[0]).toEqual({ id: 'human:root', role: 'human', kind: 'human' })
+		expect(list.some((entry: { id: string }) => entry.id === 'delegation-chain')).toBe(true)
+	})
+})
+
+describe('createWebServer /api/demo/flow/:scenario/:frame', () => {
+	test('returns the adapter-derived InteractionModel for a frame (root human + the entry role)', async () => {
+		const response = await fetch(`${readOnlyBaseUrl}/api/demo/flow/single-role-completion/0`)
+		expect(response.status).toBe(200)
+		expect(response.headers.get('content-type')).toContain('application/json')
+		const model = await response.json()
+		expect(model.status).toBe('running')
+		expect(model.participants.map((p: { role: string }) => p.role)).toEqual(['human', 'coder'])
+		expect(model.participants[0]).toEqual({ id: 'human:root', role: 'human', kind: 'human' })
+		const call = model.operations[0]
+		expect(call.kind).toBe('call')
+		expect(call.source).toBe('human:root')
+		expect(call.lifecycle).toBe('in_flight')
+	})
+
+	test('a later frame reflects adapter lifecycle (the lingering tool return at the tool_result frame)', async () => {
+		// tool_result is the 8th event (index 7) of the delegation-chain fixture.
+		const response = await fetch(`${readOnlyBaseUrl}/api/demo/flow/delegation-chain/7`)
+		const model = await response.json()
+		const inFlightReturns = model.operations.filter((o: { kind: string; lifecycle: string }) => o.kind === 'return' && o.lifecycle === 'in_flight')
+		expect(inFlightReturns.length).toBe(1)
+	})
+
+	test('returns 404 for an unknown scenario', async () => {
+		const response = await fetch(`${readOnlyBaseUrl}/api/demo/flow/no-such-scenario/0`)
+		expect(response.status).toBe(404)
+		expect(await response.json()).toEqual({ ok: false, error: 'not_found' })
+	})
+
+	test('returns 404 for an out-of-range frame', async () => {
+		const response = await fetch(`${readOnlyBaseUrl}/api/demo/flow/single-role-completion/999`)
+		expect(response.status).toBe(404)
+		expect(await response.json()).toEqual({ ok: false, error: 'not_found' })
+	})
+
+	test('a malformed frame index is a 404, not a crash', async () => {
+		const response = await fetch(`${readOnlyBaseUrl}/api/demo/flow/single-role-completion/abc`)
+		expect(response.status).toBe(404)
+	})
+})
+
 describe('createWebServer POST /api/runs', () => {
 	test('accepts a task when no run is active and returns 201 with the run id', async () => {
 		const { server, baseUrl, submission, resolveActive } = createSubmissionServer()

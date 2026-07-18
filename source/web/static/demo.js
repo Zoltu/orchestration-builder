@@ -1,9 +1,7 @@
 // Demo harness for the InteractionModel scenarios.
-//
-// Renders the current frame two ways: the flow view SVG (the product surface) and a debug text view (the model's raw projection). The text view stays available behind a toggle so the SVG structure can be cross-checked against the model's helpers during development. Both read the same helpers the product views read, so a discrepancy between them surfaces a view bug rather than a model ambiguity.
-//
-// The harness imports only its sibling static modules; it touches nothing in the product client (app.js). The label-tier control re-renders both views through the localization resolver so participant and operation prose swap with the selected tier while the underlying model is untouched.
-import { scenarios, GUILD_PARTICIPANTS } from './scenarios.js'
+// Renders the current frame two ways: the flow view SVG (the product surface) and a debug text view (the model's raw projection) that stays behind a toggle so the SVG can be cross-checked against the model's helpers during development.
+// Each frame is the output of the real `deriveInteractionModel` adapter run server-side over the first `N` events of a fixture event stream (see `GET /api/demo/flow/:scenario/:frame`), fetched here over HTTP. The harness therefore exercises the identical `LogEvent → InteractionModel` path the product polls against a live run, so a behavior the demo shows is the behavior the product renders — the harness is a faithful poll simulator, not a hand-curated showcase. `scenarios.js` stays as the in-memory renderer test bed (its model-frame fixtures are consumed by `flow-view.test.ts` / `sequence-diagram.test.ts`); this harness consumes adapter output instead, so the adapter is exercised in the browser too.
+// The harness imports only its sibling static modules; it touches nothing in the product client (app.js).
 import { activeOperation, activeParticipant, activeStack, callChainOf, fateOf, isPaused, observesOf, stacksOf } from './interaction-model.js'
 import { createLabelResolver } from './labels.js'
 import { deriveLifecycle, renderFlowView, deriveNowCaption, deriveCostStrip } from './flow-view.js'
@@ -29,6 +27,16 @@ function isLabelTier(value) {
 // The demo harness loads its labels from the same /api/config the product client loads, so a swapped guild re-flavors the harness the same way it re-flavors the run view. The harness is served by the same web server (see server.ts serveStaticPath), so the endpoint is reachable at the page origin.
 let labels = null
 let tier = 'detailed'
+
+// The scenario manifest fetched once from /api/demo/scenarios: each entry carries the id, label, frame count, and the full participant set (the sequence view's static column source).
+// Frames themselves are not held locally — each is the adapter's output for an event-prefix, fetched on demand from /api/demo/flow/:scenario/:frame so the harness always renders adapter-derived models.
+let scenarios = []
+// The adapter-derived InteractionModel for the current scenario+frame, or null before the first frame loads (or while a fetch is in flight).
+// Every renderer reads this in place of the prior hand-authored `scenario.frames[frameIndex]`.
+let currentFrame = null
+// The frame rendered before `currentFrame`, kept so `deriveLifecycle` can diff entering/departing participants across consecutive frames — the same role the product client's `previousFlowModel` plays.
+// Reset to null on a scenario switch (the first frame of a scenario animates nothing).
+let previousFrame = null
 
 function requireElement(id, constructorFunction) {
 	const element = document.getElementById(id)
@@ -60,7 +68,7 @@ sequenceScrollContainer.className = 'pb-sequence-scroll'
 sequenceScrollContainer.style.overflow = 'auto'
 sequenceScrollContainer.style.maxHeight = '70vh'
 
-// The "now" caption sits directly under the flow view, naming the active participant and the in-flight operation in the selected tier. It updates per frame alongside the SVG.
+// The "now" caption updates per frame alongside the SVG.
 const nowCaption = document.createElement('p')
 nowCaption.className = 'pb-now-caption'
 flowContainer.append(nowCaption)
@@ -129,7 +137,7 @@ function applyViewToggle() {
 	jumpToActiveButton.style.display = viewMode === 'sequence' ? '' : 'none'
 }
 
-// The jump-to-active button scrolls the sequence container so the latest message row lands in view, so an in-progress run's current operation is one click away after navigating or scrolling drifts it out of sight.
+// The jump-to-active button is shown for the sequence view (which has a scrollable time axis); the flow view has no scrollable axis.
 const jumpToActiveButton = document.createElement('button')
 jumpToActiveButton.type = 'button'
 jumpToActiveButton.textContent = 'Jump to active'
@@ -234,18 +242,12 @@ function htmlH(tag, props, children = []) {
 
 const renderMarkdown = createMarkdownRenderer(htmlH)
 
-// The inspector overlay: one positioned card mounted inside the run-view container (`flowContainer`),
-// rebuilt per hover and anchored flush against the hovered node's rect. The card is `pointer-events:
-// auto` and `user-select: text` (styles.css) so the operator can move the pointer from the node into
-// the card to select and copy its contents; a short grace period on leaving the node (or the card)
-// keeps the card open while the pointer travels between them, and the card dismisses once the pointer
-// is over neither. The dedup key is `${kind}:${id}` so the card is reused (not flickered) as the
-// pointer moves within the same operation (a sequence message → its terminal node) or the same
-// participant (a node's box → its cost figures).
+// The inspector overlay: one positioned card mounted inside the run-view container (`flowContainer`), rebuilt per hover and anchored flush against the hovered node's rect.
+// The card is `pointer-events: auto` and `user-select: text` (styles.css) so the operator can move the pointer from the node into the card to select and copy its contents; a short grace period on leaving the node (or the card) keeps the card open while the pointer travels between them, and the card dismisses once the pointer is over neither.
+// The dedup key is `${kind}:${id}` so the card is reused (not flickered) as the pointer moves within the same operation (a sequence message → its terminal node) or the same participant (a node's box → its cost figures).
 let currentTooltipNode = null
 let currentTooltipKey = null
-// A pending dismiss timer, bridging the pointer's travel between a node and the card. Held at module
-// scope because it is an opaque resource, not view state.
+// A pending dismiss timer, bridging the pointer's travel between a node and the card. Held at module scope because it is an opaque resource, not view state.
 let tooltipDismissTimer = null
 const TOOLTIP_GRACE_MS = 150
 
@@ -272,12 +274,8 @@ function closeTooltip() {
 	currentTooltipKey = null
 }
 
-// Resolves the hovered DOM element to an inspector target by walking the data attributes the view
-// modules stamp onto nodes and edges, and snapshots the element's viewport rect so the card can be
-// anchored to the node (not the pointer). Sequence messages and terminal nodes carry `data-operation`;
-// flow call/return edges carry `data-operation`; flow main-area nodes carry `data-participant`; flow
-// top-bar slots carry `data-role` (and lack `data-participant`, so the participant check does not catch
-// them). The order matters: operation first, then participant, then role.
+// Resolves the hovered DOM element to an inspector target by walking the data attributes the view modules stamp onto nodes and edges, and snapshots the element's viewport rect so the card can be anchored to the node (not the pointer).
+// Sequence messages and terminal nodes carry `data-operation`; flow call/return edges carry `data-operation`; flow main-area nodes carry `data-participant`; flow top-bar slots carry `data-role` (and lack `data-participant`, so the participant check does not catch them). The order matters: operation first, then participant, then role.
 function snapshotRect(element) {
 	const rect = element.getBoundingClientRect()
 	return { left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom }
@@ -303,16 +301,11 @@ function resolveTooltipTarget(event) {
 	return null
 }
 
-// Builds the inspector card from the live InteractionModel via the shared derivations in `tooltip.js`
-// (the same ones the product client uses), so the dev harness and the live view consume one inspector
-// derivation. The card is anchored to the target's snapshot rect (flush against it) and appended to
-// the run-view container so a `mouseleave` on the container covers both the SVG and the card — moving
-// from a node into the card keeps the card open.
+// Builds the inspector card from the live InteractionModel via the shared derivations in `tooltip.js` (the same ones the product client uses), so the dev harness and the live view consume one inspector derivation.
+// The card is anchored to the target's snapshot rect (flush against it) and appended to the run-view container so a `mouseleave` on the container covers both the SVG and the card — moving from a node into the card keeps the card open.
 function openTooltip(target) {
-	const scenario = scenarios[scenarioIndex]
-	if (scenario === undefined) return
-	const frame = scenario.frames[frameIndex]
-	if (frame === undefined) return
+	if (labels === null || currentFrame === null) return
+	const frame = currentFrame
 	let descriptor
 	if (target.kind === 'operation') {
 		const operation = frame.operations.find((entry) => entry.id === target.id)
@@ -343,12 +336,10 @@ function openTooltip(target) {
 // Sequence-view scroll state. The SVG renders at its natural full-content viewBox and lives inside a scroll container, so a long timeline scrolls vertically (the page wheel) rather than zooming; the container is the single piece of state the jump-to-active affordance needs.
 let activeSequenceContainer = null
 
-// Centers the latest (active) message row in the sequence scroll container, so an in-progress run's current operation scrolls into view without a relayout. The SVG scales to the container width, so the row's fractional position in the natural viewBox maps to a pixel offset inside the container's scroll range.
+// The SVG scales to the container width, so the row's fractional position in the natural viewBox maps to a pixel offset inside the container's scroll range.
 function jumpSequenceViewToActive(container) {
-	const scenario = scenarios[scenarioIndex]
-	if (scenario === undefined) return
-	const frame = scenario.frames[frameIndex]
-	if (frame === undefined) return
+	if (currentFrame === null) return
+	const frame = currentFrame
 	if (frame.operations.length === 0) return
 	const svg = container.firstElementChild
 	if (!(svg instanceof SVGSVGElement)) return
@@ -361,19 +352,13 @@ function jumpSequenceViewToActive(container) {
 	container.scrollTop = Math.max(0, target - container.clientHeight / 2)
 }
 
-// Wires the inspector (hover/click) to the run-view container once. The container (`flowContainer`)
-// holds the flow SVG, the sequence scroll container, the modals, and the inspector card, so a single
-// set of `mouseover`/`mouseleave`/`click` listeners covers both views and the card itself:
-//  - `mouseover` over the card: keep it open (cancel any pending dismiss) — the pointer entered the
-//    card to select/copy.
-//  - `mouseover` over a node/edge: open/switch the card to it (anchored to its rect), canceling any
-//    pending dismiss.
-//  - `mouseover` over empty run-view area: schedule a grace-period dismiss — if the pointer reaches
-//    the card (or a new node) before it fires, the dismiss is canceled; otherwise the card dismisses
-//    once the pointer is over neither.
+// Wires the inspector (hover/click) to the run-view container once.
+// The container (`flowContainer`) holds the flow SVG, the sequence scroll container, the modals, and the inspector card, so a single set of `mouseover`/`mouseleave`/`click` listeners covers both views and the card itself:
+//  - `mouseover` over the card: keep it open (cancel any pending dismiss) — the pointer entered the card to select/copy.
+//  - `mouseover` over a node/edge: open/switch the card to it (anchored to its rect), canceling any pending dismiss.
+//  - `mouseover` over empty run-view area: schedule a grace-period dismiss — if the pointer reaches the card (or a new node) before it fires, the dismiss is canceled; otherwise the card dismisses once the pointer is over neither.
 //  - `mouseleave` on the container: schedule a grace-period dismiss (the pointer left the run view).
-//  - `click` on an in-flight `ask_human` row: re-open the question modal (the sequence view's re-entry
-//    affordance); every other click falls through to the hover path.
+//  - `click` on an in-flight `ask_human` row: re-open the question modal (the sequence view's re-entry affordance); every other click falls through to the hover path.
 function wireRunViewInteractions() {
 	const openAt = (event) => {
 		if (event.target instanceof Element && event.target.closest('.tooltip-card') !== null) {
@@ -394,17 +379,14 @@ function wireRunViewInteractions() {
 			return
 		}
 		const target = resolveTooltipTarget(event)
-		if (target !== null && target.kind === 'operation') {
-			const scenario = scenarios[scenarioIndex]
-			const frame = scenario !== undefined ? scenario.frames[frameIndex] : undefined
-			if (frame !== undefined) {
-				const operation = frame.operations.find((op) => op.id === target.id)
-				if (operation !== undefined && operation.kind === 'call' && operation.lifecycle === 'in_flight') {
-					const destination = frame.participants.find((p) => p.id === operation.destination)
-					if (destination !== undefined && destination.kind === 'human') {
-						openQuestionModal()
-						return
-					}
+		if (target !== null && target.kind === 'operation' && currentFrame !== null) {
+			const frame = currentFrame
+			const operation = frame.operations.find((op) => op.id === target.id)
+			if (operation !== undefined && operation.kind === 'call' && operation.lifecycle === 'in_flight') {
+				const destination = frame.participants.find((p) => p.id === operation.destination)
+				if (destination !== undefined && destination.kind === 'human') {
+					openQuestionModal()
+					return
 				}
 			}
 		}
@@ -415,9 +397,8 @@ function wireRunViewInteractions() {
 	})
 }
 
-// Records the active sequence scroll container so the jump-to-active affordance can center the latest
-// message row. The hover listeners live on `flowContainer` (wired once by `wireRunViewInteractions`),
-// so this only updates the scroll-state reference.
+// Records the active sequence scroll container so the jump-to-active affordance can center the latest message row.
+// The hover listeners live on `flowContainer` (wired once by `wireRunViewInteractions`), so this only updates the scroll-state reference.
 function wireSequenceInteractions(container) {
 	activeSequenceContainer = container
 }
@@ -438,11 +419,8 @@ let scenarioChanged = true
 let pendingScrollIntent = 'preserve'
 
 function roleLabelOf(participantId) {
-	const scenario = scenarios[scenarioIndex]
-	if (scenario === undefined) return participantId
-	const frame = scenario.frames[frameIndex]
-	if (frame === undefined) return participantId
-	const found = frame.participants.find((participant) => participant.id === participantId)
+	if (currentFrame === null) return participantId
+	const found = currentFrame.participants.find((participant) => participant.id === participantId)
 	if (found === undefined) return participantId
 	// The resolver collapses participants that share a role (instance-per-invocation retries), so the instance id is appended to keep the debug view able to tell coder-1 from coder-2 apart.
 	return `${labels.resolveParticipantLabel(found, tier)} (${found.id})`
@@ -455,17 +433,16 @@ function formatOperation(operation, participants) {
 }
 
 function renderTextView() {
-	const scenario = scenarios[scenarioIndex]
-	if (scenario === undefined) return ''
-	const frame = scenario.frames[frameIndex]
-	if (frame === undefined) return ''
+	const manifest = scenarios[scenarioIndex]
+	if (manifest === undefined || currentFrame === null) return ''
+	const frame = currentFrame
 	const stack = activeStack(frame)
 	const participant = activeParticipant(frame)
 	const openStacks = stacksOf(frame)
 	const observes = observesOf(frame)
 	const lines = []
-	lines.push(`scenario: ${scenario.label} (${scenario.id})`)
-	lines.push(`frame:    ${frameIndex + 1} / ${scenario.frames.length}`)
+	lines.push(`scenario: ${manifest.label} (${manifest.id})`)
+	lines.push(`frame:    ${frameIndex + 1} / ${manifest.frameCount}`)
 	lines.push(`status:   ${frame.status}`)
 	lines.push(``)
 	lines.push(`active stack:       ${stack ?? '—'}`)
@@ -516,42 +493,32 @@ function acknowledgeFrame(frame) {
 }
 
 function resolveActiveFrame() {
-	const scenario = scenarios[scenarioIndex]
-	if (scenario === undefined) return undefined
-	const frame = scenario.frames[frameIndex]
-	if (frame === undefined) return undefined
-	return resultAcknowledged ? acknowledgeFrame(frame) : frame
+	if (currentFrame === null) return undefined
+	return resultAcknowledged ? acknowledgeFrame(currentFrame) : currentFrame
 }
 
 function renderFlowViewSvg() {
-	if (labels === null) return null
-	const scenario = scenarios[scenarioIndex]
-	if (scenario === undefined) return null
-	const baseFrame = scenario.frames[frameIndex]
-	if (baseFrame === undefined) return null
+	if (labels === null || currentFrame === null) return null
+	const baseFrame = currentFrame
 	const frame = resultAcknowledged ? acknowledgeFrame(baseFrame) : baseFrame
-	// On acknowledge, diff against the un-acknowledged transit frame so the returner's departure animates rather than the whole graph re-entering; otherwise diff against the previous frame as usual.
-	const previousFrame = resultAcknowledged ? baseFrame : (frameIndex > 0 ? scenario.frames[frameIndex - 1] : null)
-	const lifecycle = previousFrame !== null ? deriveLifecycle(previousFrame, frame) : undefined
+	// On acknowledge, diff against the un-acknowledged frame so the returner's departure animates rather than the whole graph re-entering; otherwise diff against the last rendered frame so enter/depart animates across consecutive fetched frames.
+	const diffBase = resultAcknowledged ? baseFrame : previousFrame
+	const lifecycle = diffBase !== null ? deriveLifecycle(diffBase, frame) : undefined
 	const cta = { onclick: openResultModal }
 	const question = { onclick: openQuestionModal }
 	return renderFlowView(domH, frame, labels, tier, lifecycle, cta, question)
 }
 
 function renderSequenceViewSvg() {
-	if (labels === null) return null
-	const scenario = scenarios[scenarioIndex]
-	if (scenario === undefined) return null
-	const frame = scenario.frames[frameIndex]
-	if (frame === undefined) return null
-	// The guild defines its roles statically, so the column set is the static guild role list — not derived from any scenario frame (peeking at a future frame to know which roles will be called would defeat the model's "the run reveals what happens" contract). Every guild role column and the tools column therefore appear from frame 0 even when no operation touches them yet.
-	return renderSequenceView(domH, frame, labels, tier, GUILD_PARTICIPANTS)
+	if (labels === null || currentFrame === null) return null
+	const manifest = scenarios[scenarioIndex]
+	if (manifest === undefined) return null
+	// The sequence view lays out a column per guild role plus the special human/tools columns from the first frame; the manifest carries the scenario's full participant set (every participant the run ever produces) so columns appear from frame 0 without peeking at a future frame.
+	return renderSequenceView(domH, currentFrame, labels, tier, manifest.participants)
 }
 
-// Derives the terminal-result descriptor the modal renders. The demo scenarios carry no result/error text (the InteractionModel has no result field), so the summary is a fixed honest line keyed off the run's terminal status and the error block surfaces only on an error status — enough for the modal to read as a real result affordance without inventing scenario-specific prose.
-function deriveDemoResultDescriptor(scenario) {
-	const finalFrame = scenario.frames[scenario.frames.length - 1]
-	const status = finalFrame.status
+// Derives the terminal-result descriptor the modal renders. The demo frames carry no result/error text (the InteractionModel has no result field), so the summary is a fixed honest line keyed off the current frame's terminal status and the error block surfaces only on an error status — enough for the modal to read as a real result affordance without inventing scenario-specific prose. The current frame is terminal whenever the modal opens (openResultModal gates on isTerminalStatus), so its status is the run's terminal status.
+function deriveDemoResultDescriptor(status) {
 	if (status === 'error') {
 		return { status, summary: null, artifacts: [], error: { message: 'The run stopped with an error.', raw: null } }
 	}
@@ -563,17 +530,16 @@ function deriveDemoResultDescriptor(scenario) {
 
 function openResultModal() {
 	if (resultModalNode !== null) return
-	const scenario = scenarios[scenarioIndex]
-	if (scenario === undefined) return
-	const baseFrame = scenario.frames[frameIndex]
-	if (baseFrame === undefined) return
-	if (!isTerminalStatus(baseFrame.status)) return
-	// The click is You's acknowledgment: it settles the terminal return (departing the returner) and opens the result modal. The depart is a view-side flag the render path reads, not model state — the scenario's terminal frame is unchanged, so navigating away and back restores the lingering leg.
+	if (currentFrame === null) return
+	if (!isTerminalStatus(currentFrame.status)) return
+	const manifest = scenarios[scenarioIndex]
+	const runLabel = manifest !== undefined ? manifest.label : ''
+	// The click is You's acknowledgment: it settles the terminal return (departing the returner) and opens the result modal. The depart is a view-side flag the render path reads, not model state — the fetched frame is unchanged, so navigating away and back restores the lingering leg.
 	resultAcknowledged = true
-	const descriptor = deriveDemoResultDescriptor(scenario)
+	const descriptor = deriveDemoResultDescriptor(currentFrame.status)
 	const modal = ResultModal(htmlH, {
 		descriptor,
-		runLabel: scenario.label,
+		runLabel,
 		renderMarkdown,
 		onCopyRaw: copyRawToClipboard,
 		onClose: closeResultModal,
@@ -611,8 +577,8 @@ function closeResultModal() {
 // The question modal opens on an ask_human transit frame and stays open until the user answers or dismisses it. Like the result modal it is an HTML overlay sibling to the SVG, mounted without rebuilding the SVG so the marching-ants and enter animations do not replay. The Question affordance stays on the answerer node while the modal is dismissed, so the operator can re-open it by clicking the button again.
 function openQuestionModal() {
 	if (questionModalNode !== null) return
-	const scenario = scenarios[scenarioIndex]
-	if (scenario === undefined) return
+	const manifest = scenarios[scenarioIndex]
+	if (manifest === undefined) return
 	const frame = resolveActiveFrame()
 	if (frame === undefined) return
 	const askHumanCall = activeAskHumanCall(frame)
@@ -620,7 +586,7 @@ function openQuestionModal() {
 	const question = { question: askHumanCall.details ?? 'The run is waiting for your input.' }
 	const modal = QuestionModal(htmlH, {
 		question,
-		runLabel: scenario.label,
+		runLabel: manifest.label,
 		renderMarkdown,
 		onSubmit: submitQuestion,
 		onClose: closeQuestionModal,
@@ -639,11 +605,12 @@ function closeQuestionModal() {
 function submitQuestion(event) {
 	event.preventDefault()
 	closeQuestionModal()
-	if (frameIndex < scenarios[scenarioIndex].frames.length - 1) {
+	const manifest = scenarios[scenarioIndex]
+	if (manifest !== undefined && frameIndex < manifest.frameCount - 1) {
 		pendingScrollIntent = 'forward'
 		frameIndex += 1
 	}
-	render()
+	loadFrame()
 }
 
 function copyRawToClipboard(rawJson) {
@@ -652,11 +619,11 @@ function copyRawToClipboard(rawJson) {
 }
 
 function render() {
-	const scenario = scenarios[scenarioIndex]
-	if (scenario === undefined) return
-	const frame = scenario.frames[frameIndex]
-	if (frame === undefined) return
-	const totalFrames = scenario.frames.length
+	const manifest = scenarios[scenarioIndex]
+	if (manifest === undefined) return
+	if (currentFrame === null) return
+	const frame = currentFrame
+	const totalFrames = manifest.frameCount
 	frameScrubber.max = String(Math.max(0, totalFrames - 1))
 	frameScrubber.value = String(frameIndex)
 	frameMeta.textContent = `${frameIndex + 1} / ${totalFrames}`
@@ -726,6 +693,29 @@ function loadScenario(newScenarioIndex) {
 	scenarioIndex = newScenarioIndex
 	frameIndex = 0
 	scenarioChanged = true
+	previousFrame = null
+	loadFrame()
+}
+
+// The frame is the adapter's output for the scenario's first `frameIndex + 1` events — the model a product poll would see the moment that event landed.
+// `previousFrame` carries the previously-rendered frame so the flow view's enter/depart lifecycle animates across consecutive frames.
+// A fetch failure leaves the harness showing the last good frame (or empty before the first load) rather than crashing.
+// A generation guard drops stale responses so rapid scrubbing cannot land an older frame after a newer one (the last fetch requested always wins).
+let loadGeneration = 0
+async function loadFrame() {
+	const manifest = scenarios[scenarioIndex]
+	if (manifest === undefined) return
+	const generation = ++loadGeneration
+	const response = await fetch(`api/demo/flow/${encodeURIComponent(manifest.id)}/${frameIndex}`)
+	if (generation !== loadGeneration) return
+	if (!response.ok) {
+		if (currentFrame === null) render()
+		return
+	}
+	const frame = await response.json()
+	if (generation !== loadGeneration) return
+	previousFrame = currentFrame
+	currentFrame = frame
 	render()
 }
 
@@ -743,24 +733,21 @@ function togglePlaying() {
 	}
 	playButton.textContent = 'Pause'
 	playTimer = setInterval(() => {
-		const scenario = scenarios[scenarioIndex]
-		if (scenario === undefined) return
-		frameIndex = (frameIndex + 1) % scenario.frames.length
+		const manifest = scenarios[scenarioIndex]
+		if (manifest === undefined) return
+		if (frameIndex + 1 >= manifest.frameCount) {
+			stopPlaying()
+			return
+		}
+		frameIndex = (frameIndex + 1) % manifest.frameCount
 		pendingScrollIntent = 'forward'
-		render()
+		loadFrame()
 	}, PLAY_INTERVAL_MS)
 }
 
 function applyTheme(theme) {
 	document.documentElement.setAttribute('data-theme', theme)
 	themeButton.textContent = theme === 'dark' ? 'Light' : 'Dark'
-}
-
-for (const [index, scenario] of scenarios.entries()) {
-	const option = document.createElement('option')
-	option.value = String(index)
-	option.textContent = scenario.label
-	scenarioSelect.appendChild(option)
 }
 
 scenarioSelect.addEventListener('change', () => {
@@ -771,26 +758,26 @@ scenarioSelect.addEventListener('change', () => {
 frameScrubber.addEventListener('input', () => {
 	stopPlaying()
 	frameIndex = Number(frameScrubber.value)
-	render()
+	loadFrame()
 })
 
 playButton.addEventListener('click', togglePlaying)
 
 previousButton.addEventListener('click', () => {
 	stopPlaying()
-	const scenario = scenarios[scenarioIndex]
-	if (scenario === undefined) return
-	frameIndex = (frameIndex - 1 + scenario.frames.length) % scenario.frames.length
-	render()
+	const manifest = scenarios[scenarioIndex]
+	if (manifest === undefined) return
+	frameIndex = (frameIndex - 1 + manifest.frameCount) % manifest.frameCount
+	loadFrame()
 })
 
 nextButton.addEventListener('click', () => {
 	stopPlaying()
-	const scenario = scenarios[scenarioIndex]
-	if (scenario === undefined) return
-	frameIndex = (frameIndex + 1) % scenario.frames.length
+	const manifest = scenarios[scenarioIndex]
+	if (manifest === undefined) return
+	frameIndex = (frameIndex + 1) % manifest.frameCount
 	pendingScrollIntent = 'forward'
-	render()
+	loadFrame()
 })
 
 themeButton.addEventListener('click', () => {
@@ -811,18 +798,26 @@ const prefersDarkColorScheme = window.matchMedia('(prefers-color-scheme: dark)')
 applyTheme(prefersDarkColorScheme ? 'dark' : 'light')
 applyViewToggle()
 
-// Wire the run-view inspector once: the listeners live on `flowContainer`, which persists across SVG
-// swaps, so they cover both the flow and sequence views (and the inspector card itself) without
-// re-attaching per render.
+// Wire the run-view inspector once: the listeners live on `flowContainer`, which persists across SVG swaps, so they cover both the flow and sequence views (and the inspector card itself) without re-attaching per render.
 wireRunViewInteractions()
 
-// Load the guild config from /api/config and build the label resolver over it before rendering. The harness renders nothing until the resolver is ready so the views never reach for a resolver that does not exist; once the config loads the first frame renders. A fetch failure leaves the harness in its pre-load state with no rendering, surfacing the missing-config state rather than crashing on a null resolver.
-fetch('api/config')
-	.then((response) => response.json())
-	.then((config) => {
+// Load the guild config (for the label resolver) and the demo scenario manifest in parallel, then populate the scenario dropdown and load the first frame.
+// The harness renders nothing until both arrive so the views never reach for a resolver or a frame that does not exist; a failure of either leaves the harness in its pre-load state with no rendering, surfacing the missing-config state rather than crashing on a null resolver or an empty scenario list.
+Promise.all([
+	fetch('api/config').then((response) => response.json()),
+	fetch('api/demo/scenarios').then((response) => response.json()),
+])
+	.then(([config, manifestList]) => {
 		labels = createLabelResolver(config)
+		scenarios = manifestList
+		for (const [index, manifest] of scenarios.entries()) {
+			const option = document.createElement('option')
+			option.value = String(index)
+			option.textContent = manifest.label
+			scenarioSelect.appendChild(option)
+		}
 		loadScenario(0)
 	})
 	.catch((error) => {
-		console.error('failed to load /api/config for the demo harness label resolver', error)
+		console.error('failed to load the demo harness config or scenarios', error)
 	})

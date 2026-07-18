@@ -360,6 +360,11 @@ async function executeRoleLoop(
 
 		const messages = buildMessages(roleDefinition, roleState.history)
 
+		// llm_call_start marks the turn in flight the moment the request is dispatched, so the flow view can end the call's transit phase (flowing edge → solid) when the callee begins working rather than when the response completes.
+		// It fires on every turn, including the paths that later fail (llm_unavailable / context_budget_exceeded): the turn started even if it never completed.
+		// Only the role is carried; the full turn lands in llm_call once the response arrives.
+		logEvent(deps.appendLog, 'llm_call_start', { role: context.roleName })
+
 		const llmResult = await deps.llmCaller.call({
 			messages,
 			tools: allowedToolsManifests,

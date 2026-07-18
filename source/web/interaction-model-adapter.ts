@@ -65,12 +65,6 @@ function stringField(payload: unknown, field: string): string | null {
 	return typeof value === 'string' ? value : null
 }
 
-function numberField(payload: unknown, field: string): number | null {
-	if (!isObject(payload)) return null
-	const value = payload[field]
-	return typeof value === 'number' ? value : null
-}
-
 // Extracts only the two counters the model carries: the total token bill and the cached-prompt
 // subset. The full breakdown the run view shows is a run-wide concern (render.ts deriveBudgets);
 // per-invocation metrics need only the totals the flow nodes display.
@@ -141,9 +135,11 @@ interface OpenCallRecord {
 	// The ask_human question id, so a human_answer event can close the matching call.
 	questionId: string | null
 	returnTimestamp: string | null
-	// Set when a nested call lands on the same stack (the callee delegated), which ends this
-	// call's transit phase even though the invocation is still open.
+	// Set when a nested call lands on the same stack (the callee delegated), which ends this call's transit phase even though the invocation is still open.
 	delegatedAt: string | null
+	// Set when the callee's turn began (an llm_call_start for this call's destination role), the precise transit→working boundary — the callee began working the instant the request was dispatched.
+	// Precedes delegatedAt in the finalization below; null on logs predating llm_call_start, where delegatedAt carries the turn-level boundary instead.
+	turnStartedAt: string | null
 	tokens: number
 	cachedPromptTokens: number
 }
@@ -158,6 +154,16 @@ interface ReturnRecord {
 	supersededAt: string | null
 }
 
+// One call stack in the run. The main run is the bottom frame (rooted at the human); each interrupt pushes a fresh frame rooted at its own interrupt participant and pauses the frame below until it resolves.
+// Only the top frame is active at any time, matching the executor's sequential model: every event after an `interrupt` belongs to the top frame until its root call closes, at which point the frame is popped and control returns to the frame below.
+interface StackFrame {
+	stackId: string
+	// The participant the stack's first call originates from — the human root for the main stack, the interrupt instance for an interrupt stack.
+	rootId: string
+	openCalls: OpenCallRecord[]
+	lingeringReturn: ReturnRecord | null
+}
+
 export function deriveInteractionModel(snapshot: RunSnapshot, now: string): InteractionModel {
 	const status = runStatusOf(snapshot.meta)
 	// A run that is running, waiting on a question (needs_clarification), or has no readable meta
@@ -170,8 +176,8 @@ export function deriveInteractionModel(snapshot: RunSnapshot, now: string): Inte
 	const operations: Operation[] = []
 	const allCallRecords: OpenCallRecord[] = []
 	const allReturnRecords: ReturnRecord[] = []
-	const openCalls: OpenCallRecord[] = []
-	let lingeringReturn: ReturnRecord | null = null
+	// The stack of call stacks. Only the top frame is active; with a single frame (no interrupts) this behaves exactly like a single open-call chain.
+	const stackStack: StackFrame[] = [{ stackId: MAIN_STACK, rootId: ROOT_HUMAN_ID, openCalls: [], lingeringReturn: null }]
 
 	const idCounters = new Map<string, number>()
 	function nextId(key: string): number {
@@ -193,9 +199,14 @@ export function deriveInteractionModel(snapshot: RunSnapshot, now: string): Inte
 		return id
 	}
 
+	function currentFrame(): StackFrame {
+		return stackStack[stackStack.length - 1]!
+	}
+
 	function activeRoleParticipantId(): string {
-		const top = openCalls[openCalls.length - 1]
-		return top === undefined ? ROOT_HUMAN_ID : top.destinationId
+		const frame = currentFrame()
+		const top = frame.openCalls[frame.openCalls.length - 1]
+		return top === undefined ? frame.rootId : top.destinationId
 	}
 
 	// Any new activity-affecting operation on the active stack settles a lingering return leg: a
@@ -203,9 +214,10 @@ export function deriveInteractionModel(snapshot: RunSnapshot, now: string): Inte
 	// caller. recordCall and recordReturn both call this, so a torn read that leaves a prior return
 	// un-superseded cannot leak an in_flight return that is not actually the latest operation.
 	function settleLingering(timestamp: string): void {
-		if (lingeringReturn !== null) {
-			lingeringReturn.supersededAt = timestamp
-			lingeringReturn = null
+		const frame = currentFrame()
+		if (frame.lingeringReturn !== null) {
+			frame.lingeringReturn.supersededAt = timestamp
+			frame.lingeringReturn = null
 		}
 	}
 
@@ -213,14 +225,15 @@ export function deriveInteractionModel(snapshot: RunSnapshot, now: string): Inte
 	// is addressed to (the caller resumed thinking); an llm_call from a different role is not the
 	// caller acting and must not settle it.
 	function settleLingeringIfCaller(role: string, timestamp: string): void {
-		if (lingeringReturn !== null && lingeringReturn.callerRole === role) {
-			lingeringReturn.supersededAt = timestamp
-			lingeringReturn = null
+		const frame = currentFrame()
+		if (frame.lingeringReturn !== null && frame.lingeringReturn.callerRole === role) {
+			frame.lingeringReturn.supersededAt = timestamp
+			frame.lingeringReturn = null
 		}
 	}
 
 	function settlePreviousByDelegation(timestamp: string): void {
-		const top = openCalls[openCalls.length - 1]
+		const top = currentFrame().openCalls[currentFrame().openCalls.length - 1]
 		if (top === undefined) return
 		// The first delegation ends the call's transit phase; a later delegation after the child
 		// returned does not move that boundary.
@@ -229,10 +242,11 @@ export function deriveInteractionModel(snapshot: RunSnapshot, now: string): Inte
 
 	function recordCall(event: LogEvent, source: string, destinationId: string, destinationRole: string, destinationKind: ParticipantKind, questionId: string | null, details: string | null): void {
 		settleLingering(event.timestamp)
+		const frame = currentFrame()
 		const callOperation: Operation = {
 			id: opId(),
 			kind: 'call',
-			stack: MAIN_STACK,
+			stack: frame.stackId,
 			source,
 			destination: destinationId,
 			startedAt: event.timestamp,
@@ -251,22 +265,24 @@ export function deriveInteractionModel(snapshot: RunSnapshot, now: string): Inte
 			questionId,
 			returnTimestamp: null,
 			delegatedAt: null,
+			turnStartedAt: null,
 			tokens: 0,
 			cachedPromptTokens: 0,
 		}
-		openCalls.push(record)
+		frame.openCalls.push(record)
 		allCallRecords.push(record)
 	}
 
 	function recordReturn(event: LogEvent, matched: OpenCallRecord, outcome: OperationOutcome, details: string | null): void {
 		settleLingering(event.timestamp)
+		const frame = currentFrame()
 		const callerId = matched.operation.source
 		const callerParticipant = registry.get(callerId)
 		const callerRole = callerParticipant === undefined ? null : callerParticipant.role
 		const returnOperation: Operation = {
 			id: opId(),
 			kind: 'return',
-			stack: MAIN_STACK,
+			stack: frame.stackId,
 			source: matched.destinationId,
 			destination: callerId,
 			startedAt: event.timestamp,
@@ -280,15 +296,16 @@ export function deriveInteractionModel(snapshot: RunSnapshot, now: string): Inte
 		matched.returnTimestamp = event.timestamp
 		const returnRecord: ReturnRecord = { operation: returnOperation, callerRole, supersededAt: null }
 		allReturnRecords.push(returnRecord)
-		lingeringReturn = returnRecord
+		frame.lingeringReturn = returnRecord
 	}
 
 	// Pops the open call at matchIndex plus any deeper calls left open by a torn read (a child
 	// whose finish event was missed). The abandoned deeper calls close without a return operation;
 	// their call operations remain but settle at this timestamp so they do not read as in flight.
 	function popMatch(matchIndex: number, timestamp: string): OpenCallRecord | null {
-		if (matchIndex < 0 || matchIndex >= openCalls.length) return null
-		const popped = openCalls.splice(matchIndex)
+		const frame = currentFrame()
+		if (matchIndex < 0 || matchIndex >= frame.openCalls.length) return null
+		const popped = frame.openCalls.splice(matchIndex)
 		const matched = popped[0]
 		if (matched === undefined) return null
 		for (let i = 1; i < popped.length; i += 1) {
@@ -298,18 +315,82 @@ export function deriveInteractionModel(snapshot: RunSnapshot, now: string): Inte
 		return matched
 	}
 
+	// Finds the open call whose destination role matches, searching only paused (non-active) stacks — the target of an observe or terminate, which by definition reads or reverts a node in a paused stack from the active one.
+	// Returns null when no paused stack carries a matching open call (e.g. the target already returned), so the caller skips a reference to a node that no longer exists.
+	function findOpenCallInPausedStack(role: string): { frame: StackFrame; record: OpenCallRecord } | null {
+		for (let i = stackStack.length - 2; i >= 0; i -= 1) {
+			const frame = stackStack[i]!
+			for (let j = frame.openCalls.length - 1; j >= 0; j -= 1) {
+				const record = frame.openCalls[j]!
+				if (record.destinationRole === role) return { frame, record }
+			}
+		}
+		return null
+	}
+
 	for (const event of snapshot.logEvents) {
 		switch (event.type) {
 			case 'role_start': {
 				const role = stringField(event.payload, 'role')
 				if (role === null) break
-				const depth = numberField(event.payload, 'depth') ?? 0
 				const task = stringField(event.payload, 'task')
 				const roleId = `role:${role}:${nextId('role:' + role)}`
 				addParticipant(roleId, role, 'role')
 				settlePreviousByDelegation(event.timestamp)
-				const source = depth === 0 ? ROOT_HUMAN_ID : activeRoleParticipantId()
-				recordCall(event, source, roleId, role, 'role', null, task)
+				// The source is the active frame's innermost open call, or the frame's root (the human for the main stack, the interrupt instance for an interrupt stack) when the stack is empty.
+				recordCall(event, activeRoleParticipantId(), roleId, role, 'role', null, task)
+				break
+			}
+			case 'interrupt': {
+				// A fresh interrupt instance preempts the active stack: it becomes its own participant and the root of a new stack, and every subsequent event belongs to that stack until its root call closes (see role_finished).
+				const interruptNumber = nextId('interrupt')
+				const interruptId = `interrupt:${interruptNumber}`
+				addParticipant(interruptId, 'interrupt', 'interrupt')
+				stackStack.push({ stackId: `interrupt-${interruptNumber}-stack`, rootId: interruptId, openCalls: [], lingeringReturn: null })
+				break
+			}
+			case 'observe': {
+				const role = stringField(event.payload, 'role')
+				if (role === null) break
+				const target = findOpenCallInPausedStack(role)
+				if (target === null) break
+				operations.push({
+					id: opId(),
+					kind: 'observe',
+					stack: currentFrame().stackId,
+					source: activeRoleParticipantId(),
+					destination: target.record.destinationId,
+					startedAt: event.timestamp,
+					settledAt: event.timestamp,
+					lifecycle: 'settled',
+					outcome: null,
+					details: stringField(event.payload, 'details'),
+					metrics: null,
+				})
+				break
+			}
+			case 'terminate': {
+				const role = stringField(event.payload, 'role')
+				if (role === null) break
+				const target = findOpenCallInPausedStack(role)
+				if (target === null) break
+				operations.push({
+					id: opId(),
+					kind: 'terminate',
+					stack: currentFrame().stackId,
+					source: activeRoleParticipantId(),
+					destination: target.record.destinationId,
+					startedAt: event.timestamp,
+					settledAt: event.timestamp,
+					lifecycle: 'settled',
+					outcome: null,
+					details: stringField(event.payload, 'details'),
+					metrics: null,
+				})
+				// The terminate closes the targeted call immediately: it settles without a return operation and is removed from its (paused) stack's open chain, so the node is removed right away.
+				target.record.returnTimestamp = event.timestamp
+				const targetIndex = target.frame.openCalls.indexOf(target.record)
+				if (targetIndex >= 0) target.frame.openCalls.splice(targetIndex, 1)
 				break
 			}
 			case 'role_finished': {
@@ -318,8 +399,8 @@ export function deriveInteractionModel(snapshot: RunSnapshot, now: string): Inte
 				const finishStatus = stringField(event.payload, 'status')
 				const summary = stringField(event.payload, 'summary')
 				let matchIndex = -1
-				for (let i = openCalls.length - 1; i >= 0; i -= 1) {
-					const candidate = openCalls[i]
+				for (let i = currentFrame().openCalls.length - 1; i >= 0; i -= 1) {
+					const candidate = currentFrame().openCalls[i]
 					if (candidate === undefined) continue
 					if (candidate.destinationRole === role && candidate.destinationKind === 'role') {
 						matchIndex = i
@@ -332,6 +413,11 @@ export function deriveInteractionModel(snapshot: RunSnapshot, now: string): Inte
 				// not the operation outcome.
 				const outcome: OperationOutcome = finishStatus === 'error' ? 'error' : 'success'
 				recordReturn(event, matched, outcome, summary)
+				// A closed non-main stack resumes the stack it preempted: once its root call returns, the interrupt frame is done, so pop it and settle its final return (the interrupt resolved, so its row collapses) before control returns to the previous stack.
+				if (stackStack.length > 1 && currentFrame().openCalls.length === 0) {
+					const closed = stackStack.pop()!
+					if (closed.lingeringReturn !== null) closed.lingeringReturn.supersededAt = event.timestamp
+				}
 				break
 			}
 			case 'llm_call': {
@@ -341,14 +427,28 @@ export function deriveInteractionModel(snapshot: RunSnapshot, now: string): Inte
 				// An llm_call from the caller settles a lingering return leg (the caller resumed).
 				settleLingeringIfCaller(role, event.timestamp)
 				if (usage === null) break
-				// The call's metrics accumulate the callee's work: the innermost open call whose
-				// destination is the role that produced this llm_call.
-				for (let i = openCalls.length - 1; i >= 0; i -= 1) {
-					const candidate = openCalls[i]
+				// The call's metrics accumulate the callee's work: the innermost open call whose destination is the role that produced this llm_call.
+				for (let i = currentFrame().openCalls.length - 1; i >= 0; i -= 1) {
+					const candidate = currentFrame().openCalls[i]
 					if (candidate === undefined) continue
 					if (candidate.destinationRole === role) {
 						candidate.tokens += usage.totalTokens
 						candidate.cachedPromptTokens += usage.cachedPromptTokens
+						break
+					}
+				}
+				break
+			}
+			case 'llm_call_start': {
+				const role = stringField(event.payload, 'role')
+				if (role === null) break
+				// llm_call_start settles the callee's call transit phase (the callee began working) but NOT the lingering return leg — the return settles only on the caller's llm_call completion, which keeps the return visible across the 1s product poll.
+				// Settling the lingering return here would collapse the window between a tool_result and the caller's next dispatch to sub-second, making completed tool calls vanish from the flow view.
+				for (let i = currentFrame().openCalls.length - 1; i >= 0; i -= 1) {
+					const candidate = currentFrame().openCalls[i]
+					if (candidate === undefined) continue
+					if (candidate.destinationRole === role) {
+						if (candidate.turnStartedAt === null) candidate.turnStartedAt = event.timestamp
 						break
 					}
 				}
@@ -359,7 +459,7 @@ export function deriveInteractionModel(snapshot: RunSnapshot, now: string): Inte
 				const tool = stringField(event.payload, 'tool')
 				if (role === null || tool === null) break
 				if (CONTROL_TOOLS.has(tool)) break
-				if (openCalls.length === 0) break
+				if (currentFrame().openCalls.length === 0) break
 				const toolId = `tool:${tool}:${nextId('tool:' + tool)}`
 				addParticipant(toolId, tool, 'tool')
 				settlePreviousByDelegation(event.timestamp)
@@ -372,8 +472,8 @@ export function deriveInteractionModel(snapshot: RunSnapshot, now: string): Inte
 				if (role === null || tool === null) break
 				if (CONTROL_TOOLS.has(tool)) break
 				let matchIndex = -1
-				for (let i = openCalls.length - 1; i >= 0; i -= 1) {
-					const candidate = openCalls[i]
+				for (let i = currentFrame().openCalls.length - 1; i >= 0; i -= 1) {
+					const candidate = currentFrame().openCalls[i]
 					if (candidate === undefined) continue
 					if (candidate.destinationRole === tool && candidate.destinationKind === 'tool') {
 						matchIndex = i
@@ -391,7 +491,7 @@ export function deriveInteractionModel(snapshot: RunSnapshot, now: string): Inte
 				const id = stringField(event.payload, 'id')
 				const question = stringField(event.payload, 'question')
 				if (id === null || question === null) break
-				if (openCalls.length === 0) break
+				if (currentFrame().openCalls.length === 0) break
 				const context = stringField(event.payload, 'context')
 				const answererId = `human:answerer:${nextId('answerer')}`
 				addParticipant(answererId, 'human', 'human')
@@ -405,8 +505,8 @@ export function deriveInteractionModel(snapshot: RunSnapshot, now: string): Inte
 				const answer = stringField(event.payload, 'answer')
 				if (id === null || answer === null) break
 				let matchIndex = -1
-				for (let i = openCalls.length - 1; i >= 0; i -= 1) {
-					const candidate = openCalls[i]
+				for (let i = currentFrame().openCalls.length - 1; i >= 0; i -= 1) {
+					const candidate = currentFrame().openCalls[i]
 					if (candidate === undefined) continue
 					if (candidate.questionId === id) {
 						matchIndex = i
@@ -428,6 +528,11 @@ export function deriveInteractionModel(snapshot: RunSnapshot, now: string): Inte
 		if (record.returnTimestamp !== null) {
 			op.settledAt = record.returnTimestamp
 			op.lifecycle = 'settled'
+		} else if (record.turnStartedAt !== null) {
+			// The callee began its turn (llm_call_start) before delegating: that is the precise transit→working boundary.
+			// When no llm_call_start was logged, delegatedAt carries the turn-level boundary instead, so pre-llm_call_start logs keep their existing behavior.
+			op.settledAt = record.turnStartedAt
+			op.lifecycle = 'settled'
 		} else if (record.delegatedAt !== null) {
 			op.settledAt = record.delegatedAt
 			op.lifecycle = 'settled'
@@ -439,8 +544,7 @@ export function deriveInteractionModel(snapshot: RunSnapshot, now: string): Inte
 			op.settledAt = now
 			op.lifecycle = 'settled'
 		}
-		// The per-invocation span runs to the matching return, or to `now` while the invocation is
-		// still open (even when its transit phase was ended by a delegation).
+		// The per-invocation span runs to the matching return, or to `now` while the invocation is still open (the transit boundary marks the working phase, not the invocation's end).
 		const elapsed = record.returnTimestamp !== null
 			? secondsBetween(op.startedAt, record.returnTimestamp)
 			: secondsBetween(op.startedAt, now)

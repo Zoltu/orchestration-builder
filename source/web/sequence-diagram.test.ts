@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { renderSequenceView, COLUMN_WIDTH, HEADER_HEIGHT, ROW_HEIGHT, LEFT_MARGIN } from './static/sequence-diagram.js'
+import { renderSequenceView, HEADER_HEIGHT, ROW_HEIGHT } from './static/sequence-diagram.js'
 import { activeOperation, activeStack, observesOf } from './static/interaction-model.js'
 import { createLabelResolver } from './static/labels.js'
 import { labelsModule } from './label-resolver-fixture.js'
@@ -128,6 +128,15 @@ describe('renderSequenceView — columns', () => {
 		const frame = scenarioFrame('deep-call-tree', 18)
 		const view = render(frame)
 		expect(columnRoles(view)).toEqual(['human', 'orchestrator', 'planner', 'coder', 'critic', 'tools'])
+	})
+
+	test('the canvas is at least 5 columns wide so few-participant frames do not zoom in', () => {
+		// single-role-completion frame 0: only human + coder (2 columns), far under the 5-column minimum.
+		const view = render(scenarioFrame('single-role-completion', 0))
+		const viewBox = propString(view.props, 'viewBox') ?? ''
+		const width = Number(viewBox.split(' ')[2])
+		// MIN_COLUMNS * COLUMN_WIDTH + the base side margins: 5 columns' worth of canvas.
+		expect(width).toBeGreaterThanOrEqual(24 + 4 * 150 + 24)
 	})
 
 	test('the interrupt column appears only when an Interrupt participant exists', () => {
@@ -265,10 +274,14 @@ describe('renderSequenceView — same-role cross-instance loopback', () => {
 		expect(path).toBeDefined()
 		const d = propString(path!.props, 'd') ?? ''
 		expect(d.includes('C')).toBe(true)
-		// The coder column sits at LEFT_MARGIN + 1 * COLUMN_WIDTH (human at 0, orchestrator at... coder is the second role column). The loopback's control points bow to x = coder column x + 60.
-		const coderColumnX = LEFT_MARGIN + 2 * COLUMN_WIDTH
-		const bowX = coderColumnX + 60
-		expect(d.includes(String(bowX))).toBe(true)
+		// Both instances resolve to the one coder column, so the loopback starts and ends on that column's center and bows to the right of it. The absolute x depends on the first column's label width (the canvas widens to fit edge labels), so this asserts the loopback's shape relative to its own start rather than an absolute coordinate.
+		const coords = (d.match(/-?\d+(?:\.\d+)?/g) ?? []).map(Number)
+		expect(coords.length).toBeGreaterThanOrEqual(4)
+		const startX = coords[0]!
+		const endX = coords[coords.length - 2]!
+		expect(endX).toBe(startX)
+		const xCoords = coords.filter((_, i) => i % 2 === 0)
+		expect(Math.max(...xCoords)).toBeGreaterThan(startX)
 	})
 
 	test('a cross-column call renders as a straight arrow, not a loopback', () => {

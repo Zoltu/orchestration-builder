@@ -278,3 +278,199 @@ describe('deriveInteractionModel — root human and graceful absence', () => {
 		assertHelpersSensible(model)
 	})
 })
+
+describe('deriveInteractionModel — llm_call_start transit/working distinction', () => {
+	test('the call transit phase settles on llm_call_start — the callee began working', () => {
+		const events = [
+			event('t0', 'role_start', { role: 'coder', depth: 0, task: 'work' }),
+			event('t1', 'llm_call_start', { role: 'coder' }),
+			event('t2', 'llm_call', { role: 'coder', usage: { promptTokens: 10, completionTokens: 5, totalTokens: 15 } }),
+		]
+		const frame0 = deriveInteractionModel(snapshot(events.slice(0, 1), meta('running')), NOW)
+		const frame1 = deriveInteractionModel(snapshot(events.slice(0, 2), meta('running')), NOW)
+		expect(frame0.operations[0]!.lifecycle).toBe('in_flight')
+		expect(frame1.operations[0]!.lifecycle).toBe('settled')
+		expect(frame1.operations[0]!.settledAt).toBe('t1')
+	})
+
+	test('the lingering tool return survives the callee llm_call_start (regression guard)', () => {
+		const events = [
+			event('t0', 'role_start', { role: 'orchestrator', depth: 0, task: 'write' }),
+			event('t1', 'llm_call_start', { role: 'orchestrator' }),
+			event('t2', 'llm_call', { role: 'orchestrator', usage: { promptTokens: 10, completionTokens: 5, totalTokens: 15 } }),
+			event('t3', 'role_start', { role: 'coder', depth: 1, parent: 'orchestrator', task: 'write file' }),
+			event('t4', 'llm_call_start', { role: 'coder' }),
+			event('t5', 'llm_call', { role: 'coder', usage: { promptTokens: 20, completionTokens: 10, totalTokens: 30 } }),
+			event('t6', 'tool_call', { role: 'coder', tool: 'write_file', arguments: '{}' }),
+			event('t7', 'tool_result', { role: 'coder', tool: 'write_file', kind: 'success', result: { kind: 'success', data: {} } }),
+			event('t8', 'llm_call_start', { role: 'coder' }),
+		]
+		const frame7 = deriveInteractionModel(snapshot(events.slice(0, 8), meta('running')), NOW)
+		expect(frame7.operations.filter((o) => o.kind === 'return' && o.lifecycle === 'in_flight').length).toBe(1)
+		// Frame 8 (coder llm_call_start): the coder's call transit settles, but the write_file return must still linger — llm_call_start settles only the call transit, not the lingering return.
+		const frame8 = deriveInteractionModel(snapshot(events.slice(0, 9), meta('running')), NOW)
+		expect(frame8.operations.filter((o) => o.kind === 'return' && o.lifecycle === 'in_flight').length).toBe(1)
+	})
+
+	test('the lingering return settles on llm_call completion (the caller resumed), not on llm_call_start', () => {
+		const events = [
+			event('t0', 'role_start', { role: 'orchestrator', depth: 0, task: 'write' }),
+			event('t1', 'llm_call_start', { role: 'orchestrator' }),
+			event('t2', 'llm_call', { role: 'orchestrator', usage: { promptTokens: 10, completionTokens: 5, totalTokens: 15 } }),
+			event('t3', 'role_start', { role: 'coder', depth: 1, parent: 'orchestrator', task: 'write file' }),
+			event('t4', 'llm_call_start', { role: 'coder' }),
+			event('t5', 'llm_call', { role: 'coder', usage: { promptTokens: 20, completionTokens: 10, totalTokens: 30 } }),
+			event('t6', 'tool_call', { role: 'coder', tool: 'write_file', arguments: '{}' }),
+			event('t7', 'tool_result', { role: 'coder', tool: 'write_file', kind: 'success', result: { kind: 'success', data: {} } }),
+			event('t8', 'llm_call_start', { role: 'coder' }),
+			event('t9', 'llm_call', { role: 'coder', usage: { promptTokens: 15, completionTokens: 8, totalTokens: 23 } }),
+		]
+		const frame9 = deriveInteractionModel(snapshot(events.slice(0, 10), meta('running')), NOW)
+		expect(frame9.operations.filter((o) => o.kind === 'return' && o.lifecycle === 'in_flight').length).toBe(0)
+	})
+
+	test('backward compatible: a call with only role_start + llm_call (no llm_call_start) stays in transit', () => {
+		const events = [
+			event('t0', 'role_start', { role: 'coder', depth: 0, task: 'work' }),
+			event('t1', 'llm_call', { role: 'coder', usage: { promptTokens: 10, completionTokens: 5, totalTokens: 15 } }),
+		]
+		const model = deriveInteractionModel(snapshot(events, meta('running')), NOW)
+		expect(model.operations[0]!.lifecycle).toBe('in_flight')
+	})
+})
+
+describe('deriveInteractionModel — interrupts, observes, and terminates', () => {
+	test('an interrupt spawns its own stack rooted at an interrupt participant, then resolves back to main', () => {
+		const events = [
+			event('t0', 'role_start', { role: 'orchestrator', depth: 0, task: 'the task' }),
+			event('t1', 'llm_call', { role: 'orchestrator', usage: { promptTokens: 10, completionTokens: 5, totalTokens: 15 } }),
+			event('t2', 'interrupt', {}),
+			event('t3', 'role_start', { role: 'loop_detector', depth: 1, task: 'detect the loop' }),
+			event('t4', 'llm_call', { role: 'loop_detector', usage: { promptTokens: 5, completionTokens: 5, totalTokens: 10 } }),
+			event('t5', 'role_finished', { role: 'loop_detector', status: 'success', summary: 'no loop' }),
+			event('t6', 'role_finished', { role: 'orchestrator', status: 'success', summary: 'done' }),
+		]
+		const model = deriveInteractionModel(snapshot(events, meta('success')), NOW)
+		// An interrupt participant exists and the loop_detector call is on the interrupt stack, not main.
+		const interrupt = model.participants.find((p) => p.kind === 'interrupt')
+		expect(interrupt).toBeDefined()
+		const detectorCall = model.operations.find((o) => o.kind === 'call' && o.destination === model.participants.find((p) => p.role === 'loop_detector')!.id)
+		expect(detectorCall).toBeDefined()
+		expect(detectorCall!.stack).not.toBe('main')
+		expect(detectorCall!.source).toBe(interrupt!.id)
+		// After the interrupt resolves, the orchestrator's return is on the main stack.
+		const orchestratorReturn = model.operations.find((o) => o.kind === 'return' && o.source === model.participants.find((p) => p.role === 'orchestrator')!.id)
+		expect(orchestratorReturn).toBeDefined()
+		expect(orchestratorReturn!.stack).toBe('main')
+		// No stack is left paused once everything resolved.
+		expect(stacksOf(model)).toEqual([])
+		assertHelpersSensible(model)
+	})
+
+	test('an interrupt stack runs role/llm/tool calls on its own stack, leaving the main stack paused and frozen', () => {
+		const events = [
+			event('t0', 'role_start', { role: 'orchestrator', depth: 0, task: 'the task' }),
+			event('t1', 'role_start', { role: 'coder', depth: 1, parent: 'orchestrator', task: 'code' }),
+			event('t2', 'interrupt', {}),
+			event('t3', 'role_start', { role: 'loop_detector', depth: 1, task: 'detect' }),
+			event('t4', 'tool_call', { role: 'loop_detector', tool: 'read_message_window', arguments: '{}' }),
+		]
+		const model = deriveInteractionModel(snapshot(events, meta('running')), NOW)
+		// The interrupt stack is active (the latest operations are on it); the main stack is paused with the coder call still open.
+		expect(activeStack(model)).not.toBe('main')
+		const mainChain = callChainOf(model, 'main')
+		expect(mainChain.map((o) => o.kind)).toEqual(['call', 'call'])
+		// The paused coder call stays in flight (its lines freeze) while the interrupt runs.
+		const coderCall = model.operations.find((o) => o.kind === 'call' && o.destination === model.participants.find((p) => p.role === 'coder')!.id)
+		expect(coderCall!.lifecycle).toBe('in_flight')
+		assertHelpersSensible(model)
+	})
+
+	test('an observe references a paused-stack node from the active tool, without affecting activity', () => {
+		const events = [
+			event('t0', 'role_start', { role: 'orchestrator', depth: 0, task: 'the task' }),
+			event('t1', 'role_start', { role: 'coder', depth: 1, parent: 'orchestrator', task: 'code' }),
+			event('t2', 'interrupt', {}),
+			event('t3', 'role_start', { role: 'loop_detector', depth: 1, task: 'detect' }),
+			event('t4', 'tool_call', { role: 'loop_detector', tool: 'read_message_window', arguments: '{}' }),
+			event('t5', 'observe', { role: 'coder', details: 'peek at the looping coder' }),
+		]
+		const model = deriveInteractionModel(snapshot(events, meta('running')), NOW)
+		const observe = observesOf(model)[0]
+		expect(observe).toBeDefined()
+		const readTool = model.participants.find((p) => p.role === 'read_message_window')!
+		const coder = model.participants.find((p) => p.role === 'coder')!
+		expect(observe!.source).toBe(readTool.id)
+		expect(observe!.destination).toBe(coder.id)
+		expect(observe!.lifecycle).toBe('settled')
+		expect(observe!.details).toBe('peek at the looping coder')
+		// The observe did not change the open call chains on either stack.
+		expect(callChainOf(model, 'main').length).toBe(2)
+		assertHelpersSensible(model)
+	})
+
+	test('a terminate closes the targeted paused-stack call immediately and emits a terminate op', () => {
+		const events = [
+			event('t0', 'role_start', { role: 'orchestrator', depth: 0, task: 'the task' }),
+			event('t1', 'role_start', { role: 'coder', depth: 1, parent: 'orchestrator', task: 'code' }),
+			event('t2', 'interrupt', {}),
+			event('t3', 'role_start', { role: 'loop_detector', depth: 1, task: 'detect' }),
+			event('t4', 'tool_call', { role: 'loop_detector', tool: 'rewind_stack', arguments: '{}' }),
+			event('t5', 'terminate', { role: 'coder', details: 'revert the looping coder' }),
+		]
+		const model = deriveInteractionModel(snapshot(events, meta('running')), NOW)
+		const terminate = terminatesOf(model)[0]
+		expect(terminate).toBeDefined()
+		const rewindTool = model.participants.find((p) => p.role === 'rewind_stack')!
+		const coder = model.participants.find((p) => p.role === 'coder')!
+		expect(terminate!.source).toBe(rewindTool.id)
+		expect(terminate!.destination).toBe(coder.id)
+		// The terminated coder call is closed and removed from the main stack's open chain.
+		expect(callChainOf(model, 'main').length).toBe(1)
+		expect(callChainOf(model, 'main').map((o) => o.destination)).not.toContain(coder.id)
+		const coderCall = model.operations.find((o) => o.kind === 'call' && o.destination === coder.id)
+		expect(coderCall!.lifecycle).toBe('settled')
+		assertHelpersSensible(model)
+	})
+
+	test('a nested interrupt preempts an interrupt: three stacks coexist, then resolve innermost-first', () => {
+		const events = [
+			event('t0', 'role_start', { role: 'orchestrator', depth: 0, task: 'the task' }),
+			event('t1', 'role_start', { role: 'coder', depth: 1, parent: 'orchestrator', task: 'code' }),
+			event('t2', 'interrupt', {}),
+			event('t3', 'role_start', { role: 'loop_detector', depth: 1, task: 'detect outer' }),
+			event('t4', 'interrupt', {}),
+			event('t5', 'role_start', { role: 'loop_detector', depth: 2, task: 'detect inner' }),
+		]
+		const model = deriveInteractionModel(snapshot(events, meta('running')), NOW)
+		// Three stacks render rows: main (root), interrupt-1, interrupt-2.
+		expect(stacksOf(model).length).toBe(3)
+		const interrupts = model.participants.filter((p) => p.kind === 'interrupt')
+		expect(interrupts.length).toBe(2)
+		expect(interrupts[0]!.id).not.toBe(interrupts[1]!.id)
+		// Each interrupt's loop_detector is on its own stack with its own participant.
+		const detectors = model.participants.filter((p) => p.role === 'loop_detector')
+		expect(detectors.length).toBe(2)
+		assertHelpersSensible(model)
+	})
+
+	test('the main stack resumes after the interrupt resolves, keeping the interrupted call open', () => {
+		const events = [
+			event('t0', 'role_start', { role: 'orchestrator', depth: 0, task: 'the task' }),
+			event('t1', 'role_start', { role: 'coder', depth: 1, parent: 'orchestrator', task: 'code' }),
+			event('t2', 'interrupt', {}),
+			event('t3', 'role_start', { role: 'loop_detector', depth: 1, task: 'detect' }),
+			event('t4', 'role_finished', { role: 'loop_detector', status: 'success', summary: 'no loop' }),
+			event('t5', 'tool_call', { role: 'coder', tool: 'read_file', arguments: '{}' }),
+		]
+		const model = deriveInteractionModel(snapshot(events, meta('running')), NOW)
+		// The interrupt resolved; the coder's tool call is back on the active main stack.
+		expect(activeStack(model)).toBe('main')
+		const readFile = model.participants.find((p) => p.role === 'read_file')
+		expect(readFile).toBeDefined()
+		const toolCall = model.operations.find((o) => o.kind === 'call' && o.destination === readFile!.id)
+		expect(toolCall!.stack).toBe('main')
+		expect(toolCall!.lifecycle).toBe('in_flight')
+		assertHelpersSensible(model)
+	})
+})
