@@ -433,6 +433,57 @@ describe('deriveInteractionModel — interrupts, observes, and terminates', () =
 		assertHelpersSensible(model)
 	})
 
+	test('a freshly preempted stack is active on arrival with its root as the active participant', () => {
+		const events = [
+			event('t0', 'role_start', { role: 'orchestrator', depth: 0, task: 'the task' }),
+			event('t1', 'role_start', { role: 'coder', depth: 1, parent: 'orchestrator', task: 'code' }),
+			event('t2', 'interrupt', {}),
+		]
+		const model = deriveInteractionModel(snapshot(events, meta('running')), NOW)
+		// The interrupt has landed but its first call has not: the fresh stack is active and its root is the current worker, while the main stack pauses with the coder call still open.
+		expect(activeStack(model)).not.toBe('main')
+		const interrupt = model.participants.find((p) => p.kind === 'interrupt')
+		expect(interrupt).toBeDefined()
+		expect(activeParticipant(model)).toBe(interrupt!.id)
+		expect(stacksOf(model)).toEqual(['main', 'interrupt-1-stack'])
+		expect(callChainOf(model, 'main')).toHaveLength(2)
+		// The stack records name the fresh stack and its root before any operation lands on it.
+		expect(model.stacks).toEqual([
+			{ id: 'main', root: 'human:root' },
+			{ id: 'interrupt-1-stack', root: interrupt!.id },
+		])
+		assertHelpersSensible(model)
+	})
+
+	test('a resolved stack yields activity to the preempted stack while its final return lingers until the next operation', () => {
+		const events = [
+			event('t0', 'role_start', { role: 'orchestrator', depth: 0, task: 'the task' }),
+			event('t1', 'role_start', { role: 'coder', depth: 1, parent: 'orchestrator', task: 'code' }),
+			event('t2', 'interrupt', {}),
+			event('t3', 'role_start', { role: 'loop_detector', depth: 1, task: 'detect' }),
+			event('t4', 'role_finished', { role: 'loop_detector', status: 'success', summary: 'no loop' }),
+		]
+		const resolved = deriveInteractionModel(snapshot(events, meta('running')), NOW)
+		const interrupt = resolved.participants.find((p) => p.kind === 'interrupt')!
+		const loopDetector = resolved.participants.find((p) => p.role === 'loop_detector')!
+		const coder = resolved.participants.find((p) => p.role === 'coder')!
+		// The loop detector's return closed the interrupt stack's root call: the coder is the current worker again, and the resolved stack's return leg stays in flight (visible) rather than vanishing at once.
+		expect(activeStack(resolved)).toBe('main')
+		expect(activeParticipant(resolved)).toBe(coder.id)
+		const leg = resolved.operations.filter((o) => o.lifecycle === 'in_flight' && o.kind === 'return')
+		expect(leg.length).toBe(1)
+		expect(leg[0]!.kind).toBe('return')
+		expect(leg[0]!.source).toBe(loopDetector.id)
+		expect(leg[0]!.destination).toBe(interrupt.id)
+		expect(stacksOf(resolved)).toEqual(['main', 'interrupt-1-stack'])
+
+		// The preempted stack's next operation confirms the leg: it settles and the interrupt stack closes out.
+		const resumed = deriveInteractionModel(snapshot([...events, event('t5', 'tool_call', { role: 'coder', tool: 'read_file', arguments: '{}' })], meta('running')), NOW)
+		expect(resumed.operations.filter((o) => o.lifecycle === 'in_flight' && o.kind === 'return').length).toBe(0)
+		expect(stacksOf(resumed)).toEqual(['main'])
+		assertHelpersSensible(resumed)
+	})
+
 	test('a nested interrupt preempts an interrupt: three stacks coexist, then resolve innermost-first', () => {
 		const events = [
 			event('t0', 'role_start', { role: 'orchestrator', depth: 0, task: 'the task' }),

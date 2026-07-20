@@ -10,7 +10,7 @@ import type { RunState } from '../executor/run-state.js'
 import type { RunSubmission } from '../executor/run-submission.js'
 import { parseRunSnapshot, paginateLogEvents, renderConfig, renderProjectSettings, renderPendingQuestions, renderRunSummary, renderRunView, formatLogAsText, toRecentLogEntry } from './render.js'
 import { deriveInteractionModel } from './interaction-model-adapter.js'
-import { DEMO_SCENARIOS, demoScenarioMeta, findDemoScenario } from './demo-fixtures.js'
+import { DEMO_SCENARIOS, deriveDemoFrameModel, findDemoScenario } from './demo-fixtures.js'
 
 const STATIC_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), 'static')
 const MAX_LOG_LINES = 200
@@ -140,20 +140,13 @@ function demoFrameModel(scenarioId: string, frameIndex: number): Response {
 	if (!Number.isInteger(frameIndex) || frameIndex < 0 || frameIndex >= scenario.events.length) {
 		return json({ ok: false, error: 'not_found' }, 404)
 	}
-	const events = scenario.events.slice(0, frameIndex + 1)
-	const meta = demoScenarioMeta(scenario, frameIndex)
-	const now = scenario.events[frameIndex]!.timestamp
-	return json(deriveInteractionModel({ meta, logEvents: events }, now))
+	return json(deriveDemoFrameModel(scenario, frameIndex))
 }
 
 // The manifest includes the scenario's full participant set (taken from the final frame's model) so the sequence view can lay out every column from the first frame, the same role the product's static guild participant inventory plays for a live run.
 function handleDemoScenarios(): Response {
 	const manifests = DEMO_SCENARIOS.map((scenario) => {
-		const lastIndex = scenario.events.length - 1
-		const lastFrame = deriveInteractionModel(
-			{ meta: demoScenarioMeta(scenario, lastIndex), logEvents: scenario.events },
-			scenario.events[lastIndex]!.timestamp,
-		)
+		const lastFrame = deriveDemoFrameModel(scenario, scenario.events.length - 1)
 		return { id: scenario.id, label: scenario.label, frameCount: scenario.events.length, participants: lastFrame.participants }
 	})
 	return json(manifests)

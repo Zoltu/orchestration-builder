@@ -1,15 +1,17 @@
 import { describe, expect, test } from 'bun:test'
-import type { RunSnapshot } from './render.js'
-import { deriveInteractionModel } from './interaction-model-adapter.js'
-import { DEMO_SCENARIOS, demoScenarioMeta, findDemoScenario } from './demo-fixtures.js'
+import type { LogEvent } from '../executor/types.js'
+import { activeParticipant, activeStack, stacksOf } from './static/interaction-model.js'
+import { deriveDemoFrameModel, DEMO_SCENARIOS, findDemoScenario } from './demo-fixtures.js'
 
-function frameModel(scenarioId: string, frameIndex: number): ReturnType<typeof deriveInteractionModel> {
-	const scenario = findDemoScenario(scenarioId)!
-	const events = scenario.events.slice(0, frameIndex + 1)
-	const meta = demoScenarioMeta(scenario, frameIndex)
-	const now = scenario.events[frameIndex]!.timestamp
-	const snapshot: RunSnapshot = { meta, logEvents: events }
-	return deriveInteractionModel(snapshot, now)
+function frameModel(scenarioId: string, frameIndex: number): ReturnType<typeof deriveDemoFrameModel> {
+	return deriveDemoFrameModel(findDemoScenario(scenarioId)!, frameIndex)
+}
+
+function payloadRole(event: LogEvent): string | null {
+	const payload = event.payload
+	if (typeof payload !== 'object' || payload === null) return null
+	if (!('role' in payload)) return null
+	return typeof payload.role === 'string' ? payload.role : null
 }
 
 describe('demo fixtures — adapter behavior over event streams', () => {
@@ -43,11 +45,40 @@ describe('demo fixtures — adapter behavior over event streams', () => {
 		expect(afterCall.operations.filter((o) => o.kind === 'return' && o.lifecycle === 'in_flight').length).toBe(0)
 	})
 
-	test('delegation-chain: the terminal frame has nothing in flight', () => {
+	test('delegation-chain: the terminal frame keeps only the final return in flight under the terminal status', () => {
 		const scenario = findDemoScenario('delegation-chain')!
 		const last = frameModel(scenario.id, scenario.events.length - 1)
 		expect(last.status).toBe('success')
-		expect(last.operations.every((o) => o.lifecycle === 'settled')).toBe(true)
+		// A finished run's last observable state carries the final return still in flight: the lingering leg to You renders until the See Result click settles it. Everything earlier has settled.
+		const inFlight = last.operations.filter((o) => o.lifecycle === 'in_flight')
+		expect(inFlight.length).toBe(1)
+		expect(inFlight[0]!.kind).toBe('return')
+		expect(inFlight[0]!.destination).toBe('human:root')
+	})
+
+	test('deep-call-tree: the unwind closes one role per step — planner, then the orchestrator thinks, then the terminal leg to You', () => {
+		const scenario = findDemoScenario('deep-call-tree')!
+		const orchestrator = frameModel(scenario.id, scenario.events.length - 1).participants.find((p) => p.role === 'orchestrator')!
+		const plannerFinishIndex = scenario.events.findIndex((event) => event.type === 'role_finished' && payloadRole(event) === 'planner')
+		// The planner's close-out lands its return leg to the orchestrator and nothing else: the orchestrator has not acted yet, so only that leg is in flight.
+		const plannerFinish = frameModel(scenario.id, plannerFinishIndex)
+		const plannerLeg = plannerFinish.operations.filter((o) => o.lifecycle === 'in_flight')
+		expect(plannerLeg.length).toBe(1)
+		expect(plannerLeg[0]!.kind).toBe('return')
+		expect(plannerLeg[0]!.destination).toBe(orchestrator.id)
+		// The orchestrator resuming (its llm_call) settles the planner's leg, so the planner closes out alone and the orchestrator becomes the active thinker with nothing in flight.
+		const orchestratorThinking = frameModel(scenario.id, plannerFinishIndex + 1)
+		expect(orchestratorThinking.operations.filter((o) => o.lifecycle === 'in_flight').length).toBe(0)
+		const activeOperation = orchestratorThinking.operations[orchestratorThinking.operations.length - 1]!
+		expect(activeOperation.destination).toBe(orchestrator.id)
+		// The terminal step keeps only the orchestrator's return to You in flight (the green return line) under the terminal status, so the CTA and result pop-up render while the leg lingers.
+		const last = frameModel(scenario.id, scenario.events.length - 1)
+		expect(last.status).toBe('success')
+		const finalLeg = last.operations.filter((o) => o.lifecycle === 'in_flight')
+		expect(finalLeg.length).toBe(1)
+		expect(finalLeg[0]!.kind).toBe('return')
+		expect(finalLeg[0]!.destination).toBe('human:root')
+		expect(finalLeg[0]!.source).toBe(orchestrator.id)
 	})
 
 	test('retry-with-fresh-instance: two distinct coder participants share the role name', () => {
@@ -62,13 +93,24 @@ describe('demo fixtures — adapter behavior over event streams', () => {
 		expect(coderReturns[1]!.outcome).toBe('success')
 	})
 
-	test('pending-question: the final frame is needs_clarification with the ask_human call in flight', () => {
+	test('pending-question: the needs_clarification frame holds the ask_human call in flight, and the answer returns to the orchestrator', () => {
 		const scenario = findDemoScenario('pending-question')!
-		const last = frameModel(scenario.id, scenario.events.length - 1)
-		expect(last.status).toBe('needs_clarification')
-		const askCall = last.operations.find((o) => o.kind === 'call' && o.destination.startsWith('human:answerer'))
+		const askIndex = scenario.events.findIndex((event) => event.type === 'ask_human')
+		const asked = frameModel(scenario.id, askIndex)
+		expect(asked.status).toBe('needs_clarification')
+		const askCall = asked.operations.find((o) => o.kind === 'call' && o.destination.startsWith('human:answerer'))
 		expect(askCall).toBeDefined()
 		expect(askCall!.lifecycle).toBe('in_flight')
+		// The answer's frame: a green return leg from the answerer back to the orchestrator, with the orchestrator active.
+		const answered = frameModel(scenario.id, askIndex + 1)
+		expect(answered.status).toBe('running')
+		const leg = answered.operations.filter((o) => o.lifecycle === 'in_flight' && o.kind === 'return')
+		expect(leg.length).toBe(1)
+		expect(leg[0]!.source).toBe(askCall!.destination)
+		expect(activeParticipant(answered)).toBe(answered.participants.find((p) => p.role === 'orchestrator')!.id)
+		// The orchestrator's next llm_call settles the leg: the answerer closes out.
+		const resumed = frameModel(scenario.id, askIndex + 2)
+		expect(resumed.operations.filter((o) => o.lifecycle === 'in_flight' && o.kind === 'return').length).toBe(0)
 	})
 
 	test('error-return: the terminal frame carries the error status and an error return', () => {
@@ -91,6 +133,40 @@ describe('demo fixtures — adapter behavior over event streams', () => {
 		expect(transitCall!.lifecycle).toBe('in_flight')
 		// At llm_call_start: the callee began working — the edge goes solid while the node stays highlighted.
 		expect(workingCall!.lifecycle).toBe('settled')
+	})
+
+	test('detected-loop-interrupt: the interrupt node is active from its preemption frame', () => {
+		const scenario = findDemoScenario('detected-loop-interrupt')!
+		// The interrupt event's own frame: the interrupt instance shows in the view (not just the history strip) as the active worker, before its first call lands on the next frame.
+		const preempted = frameModel(scenario.id, 4)
+		expect(activeStack(preempted)).toBe('interrupt-1-stack')
+		expect(activeParticipant(preempted)).toBe('interrupt:1')
+		expect(stacksOf(preempted)).toEqual(['main', 'interrupt-1-stack'])
+		// The loop detector's call lands on the next frame: the interrupt's child appears, active.
+		const called = frameModel(scenario.id, 5)
+		const loopDetector = called.participants.find((p) => p.role === 'loop_detector')!
+		expect(activeParticipant(called)).toBe(loopDetector.id)
+	})
+
+	test('detected-loop-interrupt: resolution keeps the return leg visible with the coder active, and the next action closes the interrupt out', () => {
+		const scenario = findDemoScenario('detected-loop-interrupt')!
+		// The loop detector's role_finished frame: the coder is the current worker again, and the loop detector → interrupt return leg stays visible (in flight) rather than vanishing at once.
+		const resolved = frameModel(scenario.id, 11)
+		const coder = resolved.participants.find((p) => p.role === 'coder')!
+		expect(activeStack(resolved)).toBe('main')
+		expect(activeParticipant(resolved)).toBe(coder.id)
+		const leg = resolved.operations.filter((o) => o.lifecycle === 'in_flight')
+		expect(leg.length).toBe(1)
+		expect(leg[0]!.kind).toBe('return')
+		expect(leg[0]!.destination).toBe('interrupt:1')
+		expect(stacksOf(resolved)).toEqual(['main', 'interrupt-1-stack'])
+		// The coder's tool call on the next frame confirms the leg: the interrupt and the loop detector close out, and the new call is in flight.
+		const resumed = frameModel(scenario.id, 12)
+		expect(resumed.operations.filter((o) => o.lifecycle === 'in_flight' && o.kind === 'return').length).toBe(0)
+		expect(stacksOf(resumed)).toEqual(['main'])
+		const toolCall = resumed.operations[resumed.operations.length - 1]!
+		expect(toolCall.kind).toBe('call')
+		expect(toolCall.lifecycle).toBe('in_flight')
 	})
 
 	test('detected-loop-interrupt: the observe references the paused main stack from the interrupt tool', () => {

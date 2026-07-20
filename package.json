@@ -7,6 +7,7 @@
 		"setup": "bun install --frozen-lockfile",
 		"typecheck": "bun --bun tsc --noEmit",
 		"test": "bun test --randomize --concurrent source/",
+		"map": "bun source/tools/repo-map.ts",
 		"bench:smoke": "cd benchmarks/hello_001 && bun test tests/",
 		"start": "bun source/serve.ts"
 	},

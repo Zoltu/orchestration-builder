@@ -1,4 +1,6 @@
 import type { LogEvent, RunMeta } from '../executor/types.js'
+import { deriveInteractionModel } from './interaction-model-adapter.js'
+import type { InteractionModel } from './interaction-model-adapter.js'
 
 // Event-stream fixtures the demo harness feeds through the real `deriveInteractionModel` adapter (the same derivation `/api/runs/:id/flow` runs), so the harness exercises the product's `LogEvent → InteractionModel` path rather than authored model frames like `scenarios.js`.
 // Each frame is the adapter's output for `events[0..N]` — the model a product poll would see the moment that event had landed.
@@ -83,10 +85,12 @@ const deepCallTree: DemoScenario = {
 		event(8, 'role_finished', { role: 'critic', depth: 3, status: 'success', summary: 'Reviewed.', parent: 'coder' }),
 		event(9, 'llm_call', { role: 'coder', usage: buildUsage(60, 15) }),
 		event(10, 'role_finished', { role: 'coder', depth: 2, status: 'success', summary: 'Coded.', parent: 'planner' }),
-		event(11, 'role_finished', { role: 'planner', depth: 1, status: 'success', summary: 'Planned.', parent: 'orchestrator' }),
-		event(12, 'role_finished', { role: 'orchestrator', depth: 0, status: 'success', summary: 'Done.' }),
+		event(11, 'llm_call', { role: 'planner', usage: buildUsage(140, 25) }),
+		event(12, 'role_finished', { role: 'planner', depth: 1, status: 'success', summary: 'Planned.', parent: 'orchestrator' }),
+		event(13, 'llm_call', { role: 'orchestrator', usage: buildUsage(210, 30) }),
+		event(14, 'role_finished', { role: 'orchestrator', depth: 0, status: 'success', summary: 'Done.' }),
 	],
-	statuses: runningThenTerminal(13, 'success'),
+	statuses: runningThenTerminal(15, 'success'),
 }
 
 const retryWithFreshInstance: DemoScenario = {
@@ -99,13 +103,14 @@ const retryWithFreshInstance: DemoScenario = {
 		event(2, 'role_start', { role: 'coder', depth: 1, parent: 'orchestrator', task: 'First attempt.' }),
 		event(3, 'llm_call_start', { role: 'coder' }),
 		event(4, 'role_finished', { role: 'coder', depth: 1, status: 'error', summary: 'Still failing.', parent: 'orchestrator' }),
-		event(5, 'role_start', { role: 'coder', depth: 1, parent: 'orchestrator', task: 'Second attempt.' }),
-		event(6, 'llm_call_start', { role: 'coder' }),
-		event(7, 'role_finished', { role: 'coder', depth: 1, status: 'success', summary: 'Fixed.', parent: 'orchestrator' }),
-		event(8, 'llm_call', { role: 'orchestrator', usage: buildUsage(210, 20) }),
-		event(9, 'role_finished', { role: 'orchestrator', depth: 0, status: 'success', summary: 'Done.' }),
+		event(5, 'llm_call', { role: 'orchestrator', usage: buildUsage(150, 15) }),
+		event(6, 'role_start', { role: 'coder', depth: 1, parent: 'orchestrator', task: 'Second attempt.' }),
+		event(7, 'llm_call_start', { role: 'coder' }),
+		event(8, 'role_finished', { role: 'coder', depth: 1, status: 'success', summary: 'Fixed.', parent: 'orchestrator' }),
+		event(9, 'llm_call', { role: 'orchestrator', usage: buildUsage(210, 20) }),
+		event(10, 'role_finished', { role: 'orchestrator', depth: 0, status: 'success', summary: 'Done.' }),
 	],
-	statuses: runningThenTerminal(10, 'success'),
+	statuses: runningThenTerminal(11, 'success'),
 }
 
 const pendingQuestion: DemoScenario = {
@@ -116,8 +121,11 @@ const pendingQuestion: DemoScenario = {
 		event(0, 'role_start', { role: 'orchestrator', depth: 0, task: 'Pick a framework.' }),
 		event(1, 'llm_call_start', { role: 'orchestrator' }),
 		event(2, 'ask_human', { id: 'q1', question: 'Which framework should I use?', context: 'src/index.ts' }),
+		event(3, 'human_answer', { id: 'q1', answer: 'Use the one already in the repo.' }),
+		event(4, 'llm_call', { role: 'orchestrator', usage: buildUsage(160, 20) }),
+		event(5, 'role_finished', { role: 'orchestrator', depth: 0, status: 'success', summary: 'Picked the existing framework.' }),
 	],
-	statuses: ['running', 'running', 'needs_clarification'],
+	statuses: ['running', 'running', 'needs_clarification', 'running', 'running', 'success'],
 }
 
 const errorReturn: DemoScenario = {
@@ -178,9 +186,10 @@ const nestedInterrupt: DemoScenario = {
 		event(10, 'role_finished', { role: 'loop_detector', depth: 2, status: 'success', summary: 'Inner done.' }),
 		event(11, 'role_finished', { role: 'loop_detector', depth: 1, status: 'success', summary: 'Outer done.' }),
 		event(12, 'role_finished', { role: 'coder', depth: 1, status: 'success', summary: 'Coded.', parent: 'orchestrator' }),
-		event(13, 'role_finished', { role: 'orchestrator', depth: 0, status: 'success', summary: 'Done.' }),
+		event(13, 'llm_call', { role: 'orchestrator', usage: buildUsage(210, 25) }),
+		event(14, 'role_finished', { role: 'orchestrator', depth: 0, status: 'success', summary: 'Done.' }),
 	],
-	statuses: runningThenTerminal(14, 'success'),
+	statuses: runningThenTerminal(15, 'success'),
 }
 
 const rewindFate: DemoScenario = {
@@ -207,9 +216,10 @@ const rewindFate: DemoScenario = {
 		event(16, 'llm_call_start', { role: 'loop_detector' }),
 		event(17, 'role_finished', { role: 'loop_detector', depth: 1, status: 'success', summary: 'Fine now.' }),
 		event(18, 'role_finished', { role: 'coder', depth: 1, status: 'success', summary: 'Coded.', parent: 'orchestrator' }),
-		event(19, 'role_finished', { role: 'orchestrator', depth: 0, status: 'success', summary: 'Done.' }),
+		event(19, 'llm_call', { role: 'orchestrator', usage: buildUsage(210, 25) }),
+		event(20, 'role_finished', { role: 'orchestrator', depth: 0, status: 'success', summary: 'Done.' }),
 	],
-	statuses: runningThenTerminal(20, 'success'),
+	statuses: runningThenTerminal(21, 'success'),
 }
 
 const nestedInterruptDeep: DemoScenario = {
@@ -240,9 +250,10 @@ const nestedInterruptDeep: DemoScenario = {
 		event(20, 'tool_result', { role: 'coder', tool: 'read_file', kind: 'success', result: { kind: 'success', data: { content: 'ok' } } }),
 		event(21, 'llm_call', { role: 'coder', usage: buildUsage(120, 25) }),
 		event(22, 'role_finished', { role: 'coder', depth: 1, status: 'success', summary: 'Coded.', parent: 'orchestrator' }),
-		event(23, 'role_finished', { role: 'orchestrator', depth: 0, status: 'success', summary: 'Done.' }),
+		event(23, 'llm_call', { role: 'orchestrator', usage: buildUsage(210, 25) }),
+		event(24, 'role_finished', { role: 'orchestrator', depth: 0, status: 'success', summary: 'Done.' }),
 	],
-	statuses: runningThenTerminal(24, 'success'),
+	statuses: runningThenTerminal(25, 'success'),
 }
 
 const rewindMultiTerminate: DemoScenario = {
@@ -279,9 +290,10 @@ const rewindMultiTerminate: DemoScenario = {
 		event(26, 'tool_result', { role: 'coder', tool: 'read_file', kind: 'success', result: { kind: 'success', data: { content: 'ok' } } }),
 		event(27, 'llm_call', { role: 'coder', usage: buildUsage(120, 25) }),
 		event(28, 'role_finished', { role: 'coder', depth: 1, status: 'success', summary: 'Coded.', parent: 'orchestrator' }),
-		event(29, 'role_finished', { role: 'orchestrator', depth: 0, status: 'success', summary: 'Done.' }),
+		event(29, 'llm_call', { role: 'orchestrator', usage: buildUsage(210, 25) }),
+		event(30, 'role_finished', { role: 'orchestrator', depth: 0, status: 'success', summary: 'Done.' }),
 	],
-	statuses: runningThenTerminal(30, 'success'),
+	statuses: runningThenTerminal(31, 'success'),
 }
 
 const terminateFate: DemoScenario = {
@@ -329,7 +341,7 @@ export function findDemoScenario(scenarioId: string): DemoScenario | undefined {
 }
 
 // The adapter consumes only a DemoScenario's `status`, so a minimal meta keyed off the frame's per-event status is enough; the synthetic ids keep the RunMeta shape valid without inventing run-bookkeeping the demo does not model.
-export function demoScenarioMeta(scenario: DemoScenario, frameIndex: number): RunMeta {
+function demoScenarioMeta(scenario: DemoScenario, frameIndex: number): RunMeta {
 	const status = scenario.statuses[frameIndex] ?? 'running'
 	return {
 		runId: `demo-${scenario.id}`,
@@ -339,4 +351,17 @@ export function demoScenarioMeta(scenario: DemoScenario, frameIndex: number): Ru
 		status,
 		startTime: scenario.events[0]!.timestamp,
 	}
+}
+
+// One demo frame: the adapter's output over the scenario's first `frameIndex + 1` events — the model a product poll would see the moment that event landed.
+// The terminal frame is derived as if the run were still active and then stamped with the fixture's terminal status: a real run writes its terminal meta only after the final role_finished lands in the log (docs/reference.md "Run lifecycle"), so the last observable state of a finished run carries the final return still in flight — its lingering leg to You renders until the See Result click stands in as You's acknowledgment and settles it (docs/visualization.md "The two views").
+export function deriveDemoFrameModel(scenario: DemoScenario, frameIndex: number): InteractionModel {
+	const events = scenario.events.slice(0, frameIndex + 1)
+	const meta = demoScenarioMeta(scenario, frameIndex)
+	const now = scenario.events[frameIndex]!.timestamp
+	if (frameIndex !== scenario.events.length - 1) {
+		return deriveInteractionModel({ meta, logEvents: events }, now)
+	}
+	const model = deriveInteractionModel({ meta: { ...meta, status: 'running' }, logEvents: events }, now)
+	return { ...model, status: meta.status }
 }

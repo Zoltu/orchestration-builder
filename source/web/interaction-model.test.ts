@@ -242,6 +242,94 @@ describe('InteractionModel helpers', () => {
 		expect(fateOf(model, 'root')).toBe('resuming')
 	})
 
+	test('a freshly preempted stack is active on arrival and its root is the active participant', () => {
+		// The interrupt has landed but its first call has not: the fresh stack carries no operations yet, so only the stack records name it. It is the active stack (the preemption is the latest activity), its root is the current worker, and the preempted root stack is paused with its in-flight call frozen.
+		const model: InteractionModel = {
+			participants: [
+				{ id: 'you', role: 'human', kind: 'human' },
+				{ id: 'orch', role: 'orchestrator', kind: 'role' },
+				{ id: 'coder', role: 'coder', kind: 'role' },
+				{ id: 'int', role: 'interrupt', kind: 'interrupt' },
+			],
+			operations: [
+				{ id: 'op1', kind: 'call', stack: 'root', source: 'you', destination: 'orch', startedAt: 't0', settledAt: 't1', lifecycle: 'settled', outcome: null, details: null, metrics: null },
+				{ id: 'op2', kind: 'call', stack: 'root', source: 'orch', destination: 'coder', startedAt: 't1', settledAt: null, lifecycle: 'in_flight', outcome: null, details: null, metrics: null },
+			],
+			status: 'running',
+			stacks: [
+				{ id: 'root', root: 'you' },
+				{ id: 'int-stack', root: 'int' },
+			],
+		}
+		expect(activeStack(model)).toBe('int-stack')
+		expect(activeParticipant(model)).toBe('int')
+		expect(stacksOf(model)).toEqual(['root', 'int-stack'])
+		expect(isPaused(model, 'root')).toBe(true)
+		expect(isPaused(model, 'int-stack')).toBe(false)
+		expect(fateOf(model, 'int-stack')).toBe('active')
+		expect(fateOf(model, 'root')).toBe('resuming')
+	})
+
+	test('a resolved stack yields activity to the preempted stack with open work while its final return lingers', () => {
+		// The loop detector's return closes the interrupt stack's root call: the interrupt stack is resolved, so activity falls back to the root stack whose innermost open call (the coder) is the current worker. The resolved stack's final return stays in flight (its leg keeps rendering) until the next operation settles it, but its stack no longer holds activity.
+		const model: InteractionModel = {
+			participants: [
+				{ id: 'you', role: 'human', kind: 'human' },
+				{ id: 'orch', role: 'orchestrator', kind: 'role' },
+				{ id: 'coder', role: 'coder', kind: 'role' },
+				{ id: 'int', role: 'interrupt', kind: 'interrupt' },
+				{ id: 'det', role: 'loop_detector', kind: 'role' },
+			],
+			operations: [
+				{ id: 'op1', kind: 'call', stack: 'root', source: 'you', destination: 'orch', startedAt: 't0', settledAt: 't1', lifecycle: 'settled', outcome: null, details: null, metrics: null },
+				{ id: 'op2', kind: 'call', stack: 'root', source: 'orch', destination: 'coder', startedAt: 't1', settledAt: null, lifecycle: 'in_flight', outcome: null, details: null, metrics: null },
+				{ id: 'op3', kind: 'call', stack: 'int-stack', source: 'int', destination: 'det', startedAt: 't2', settledAt: 't3', lifecycle: 'settled', outcome: null, details: null, metrics: null },
+				{ id: 'op4', kind: 'return', stack: 'int-stack', source: 'det', destination: 'int', startedAt: 't3', settledAt: null, lifecycle: 'in_flight', outcome: 'success', details: null, metrics: null },
+			],
+			status: 'running',
+			stacks: [
+				{ id: 'root', root: 'you' },
+				{ id: 'int-stack', root: 'int' },
+			],
+		}
+		expect(activeStack(model)).toBe('root')
+		expect(activeParticipant(model)).toBe('coder')
+		// The resolved stack still renders a row (its final return is in flight), staying below the root stack — rows never reorder as activity moves.
+		expect(stacksOf(model)).toEqual(['root', 'int-stack'])
+		expect(isPaused(model, 'int-stack')).toBe(false)
+		expect(fateOf(model, 'int-stack')).toBe('terminated')
+		expect(callChainOf(model, 'root')).toHaveLength(2)
+	})
+
+	test('the resolution fallback reads the innermost open call, not a terminate-killed latest call', () => {
+		// The root stack's latest operation is the coder call that a terminate killed; the live open call is the orchestrator's. When the interrupt stack resolves, the orchestrator (not the terminated coder) is the active participant.
+		const model: InteractionModel = {
+			participants: [
+				{ id: 'you', role: 'human', kind: 'human' },
+				{ id: 'orch', role: 'orchestrator', kind: 'role' },
+				{ id: 'coder', role: 'coder', kind: 'role' },
+				{ id: 'int', role: 'interrupt', kind: 'interrupt' },
+				{ id: 'det', role: 'loop_detector', kind: 'role' },
+				{ id: 'rewind', role: 'rewind_stack', kind: 'tool' },
+			],
+			operations: [
+				{ id: 'op1', kind: 'call', stack: 'root', source: 'you', destination: 'orch', startedAt: 't0', settledAt: 't1', lifecycle: 'settled', outcome: null, details: null, metrics: null },
+				{ id: 'op2', kind: 'call', stack: 'root', source: 'orch', destination: 'coder', startedAt: 't1', settledAt: 't4', lifecycle: 'settled', outcome: null, details: null, metrics: null },
+				{ id: 'op3', kind: 'call', stack: 'int-stack', source: 'int', destination: 'det', startedAt: 't2', settledAt: 't3', lifecycle: 'settled', outcome: null, details: null, metrics: null },
+				{ id: 'op4', kind: 'terminate', stack: 'int-stack', source: 'rewind', destination: 'coder', startedAt: 't4', settledAt: 't4', lifecycle: 'settled', outcome: null, details: null, metrics: null },
+				{ id: 'op5', kind: 'return', stack: 'int-stack', source: 'det', destination: 'int', startedAt: 't5', settledAt: null, lifecycle: 'in_flight', outcome: 'success', details: null, metrics: null },
+			],
+			status: 'running',
+			stacks: [
+				{ id: 'root', root: 'you' },
+				{ id: 'int-stack', root: 'int' },
+			],
+		}
+		expect(activeStack(model)).toBe('root')
+		expect(activeParticipant(model)).toBe('orch')
+		expect(stacksOf(model)).toEqual(['root', 'int-stack'])
+	})
+
 	test('an observe crosses from the active stack into a paused stack and never enters a call chain', () => {
 		const model: InteractionModel = {
 			participants: [

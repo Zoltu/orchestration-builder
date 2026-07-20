@@ -256,6 +256,40 @@ describe('renderFlowView — lingering return legs', () => {
 		expect(propBoolean(coderNode!.props, 'data-lingering')).toBe(true)
 	})
 
+	test('a lingering return after a terminate maps to the surviving call, not the terminated one', () => {
+		// The rewind shape: the coder call was killed by a terminate, and the orchestrator's return to You lands later. The lingering returner is the orchestrator — the terminated coder must not render in its place.
+		const model: InteractionModel = {
+			participants: [
+				participant('you', 'human', 'human'),
+				participant('orchestrator', 'orchestrator', 'role'),
+				participant('coder', 'coder', 'role'),
+				participant('int', 'interrupt', 'interrupt'),
+				participant('rewind', 'rewind_stack', 'tool'),
+			],
+			operations: [
+				{ id: 'op1', kind: 'call', stack: 'root', source: 'you', destination: 'orchestrator', startedAt: 't0', settledAt: 't1', lifecycle: 'settled', outcome: null, details: null, metrics: null },
+				{ id: 'op2', kind: 'call', stack: 'root', source: 'orchestrator', destination: 'coder', startedAt: 't1', settledAt: 't4', lifecycle: 'settled', outcome: null, details: null, metrics: null },
+				{ id: 'op3', kind: 'call', stack: 'int-stack', source: 'int', destination: 'rewind', startedAt: 't2', settledAt: 't3', lifecycle: 'settled', outcome: null, details: null, metrics: null },
+				{ id: 'op4', kind: 'terminate', stack: 'int-stack', source: 'rewind', destination: 'coder', startedAt: 't4', settledAt: 't4', lifecycle: 'settled', outcome: null, details: null, metrics: null },
+				{ id: 'op5', kind: 'return', stack: 'int-stack', source: 'rewind', destination: 'int', startedAt: 't5', settledAt: 't6', lifecycle: 'settled', outcome: 'success', details: null, metrics: null },
+				{ id: 'op6', kind: 'return', stack: 'root', source: 'orchestrator', destination: 'you', startedAt: 't7', settledAt: null, lifecycle: 'in_flight', outcome: 'success', details: null, metrics: null },
+			],
+			status: 'running',
+		}
+		const view = render(model)
+		const rows = groupsWithClass(view, 'flow-row')
+		expect(rows.length).toBe(1)
+		const lingering = allByTag(rows[0]!, 'g').find((group) => {
+			if (!(propString(group.props, 'class') ?? '').split(' ').includes('flow-node')) return false
+			return propBoolean(group.props, 'data-lingering')
+		})
+		expect(lingering).toBeDefined()
+		expect(propString(lingering!.props, 'data-participant')).toBe('orchestrator')
+		const returnEdges = allByTag(rows[0]!, 'g').filter((group) => (propString(group.props, 'class') ?? '').split(' ').includes('flow-edge--return'))
+		expect(returnEdges.length).toBe(1)
+		expect(propString(returnEdges[0]!.props, 'data-operation')).toBe('op6')
+	})
+
 	test('the terminal return lingers on its single transit frame with an animated return edge and You active', () => {
 		// single-role-completion terminal transit (the terminal op's only frame): the call chain is empty (op1 closed by op2), but op2 is an in_flight return, so the row still renders with You as the root and the coder as a lingering node one column past it. The return edge animates 'returning' (green for the success outcome) because the return is in_flight on the active stack, and You — the return's destination — is the active participant. The CTA renders alongside because the frame carries the terminal status.
 		const frame = scenarioFrame('single-role-completion', 2)
@@ -385,6 +419,34 @@ describe('renderFlowView — edge animation (single invariant)', () => {
 		const classValue = propString(path!.props, 'class') ?? ''
 		expect(classValue.split(' ').includes('graph-edge--flowing')).toBe(false)
 		expect(classValue.split(' ').includes('graph-edge--returning')).toBe(false)
+	})
+
+	test("a resolved stack's in-flight return marches in its outcome color even though another stack is active", () => {
+		// The loop detector's return closed the interrupt stack's root call: the root stack (whose coder call is still open) is active, and the resolved stack is not paused (its chain is empty), so its final return leg keeps marching green while it travels — the green return arrow that stays visible until the next operation settles it.
+		const model: InteractionModel = {
+			participants: [
+				participant('you', 'human', 'human'),
+				participant('orchestrator', 'orchestrator', 'role'),
+				participant('coder', 'coder', 'role'),
+				participant('int', 'interrupt', 'interrupt'),
+				participant('det', 'loop_detector', 'role'),
+			],
+			operations: [
+				{ id: 'op1', kind: 'call', stack: 'root', source: 'you', destination: 'orchestrator', startedAt: 't0', settledAt: 't1', lifecycle: 'settled', outcome: null, details: null, metrics: null },
+				{ id: 'op2', kind: 'call', stack: 'root', source: 'orchestrator', destination: 'coder', startedAt: 't1', settledAt: null, lifecycle: 'in_flight', outcome: null, details: null, metrics: null },
+				{ id: 'op3', kind: 'call', stack: 'int-stack', source: 'int', destination: 'det', startedAt: 't2', settledAt: 't3', lifecycle: 'settled', outcome: null, details: null, metrics: null },
+				{ id: 'op4', kind: 'return', stack: 'int-stack', source: 'det', destination: 'int', startedAt: 't3', settledAt: null, lifecycle: 'in_flight', outcome: 'success', details: null, metrics: null },
+			],
+			status: 'running',
+			stacks: [
+				{ id: 'root', root: 'you' },
+				{ id: 'int-stack', root: 'int' },
+			],
+		}
+		expect(activeStack(model)).toBe('root')
+		const view = render(model)
+		expect(pathHasClass(pathForOperation(view, 'op4'), 'graph-edge--returning')).toBe(true)
+		expect(pathHasClass(pathForOperation(view, 'op2'), 'graph-edge--flowing')).toBe(true)
 	})
 })
 

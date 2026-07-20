@@ -8,6 +8,7 @@ Development setup and conventions for the Adaptive Orchestrator. For running the
 bun install        # install dev dependencies (frozen lockfile)
 bun run typecheck  # bun --bun tsc --noEmit
 bun test           # unit tests under source/**/*.test.ts (in-memory, no network)
+bun run map        # symbol-level map of source/ (one line per top-level declaration)
 ```
 
 There are no runtime dependencies — the executor and all tooling use only Bun built-ins and web-standard APIs. The dev dependencies are `@types/bun` and `typescript` only.

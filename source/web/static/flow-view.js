@@ -1,8 +1,10 @@
 // Flow-graph view renderer over an InteractionModel.
 //
 // The view projects the model to a stack-of-rows layout: one row per
-// non-terminated call stack (stacksOf), oldest at the top and the active stack
-// at the bottom. Each row lays its open call chain (callChainOf) left-to-right
+// non-terminated call stack (stacksOf) in push order, the main run at the top
+// and each preempting interrupt below it — rows never reorder as activity
+// moves; the active stack is conveyed by the pulsing node and marching lines,
+// not by row position. Each row lays its open call chain (callChainOf) left-to-right
 // by call depth, with the stack's root participant (the You root or an Interrupt
 // instance) at the leftmost column. A return whose source has departed the open
 // chain lingers as a node plus a return edge back to its caller until the
@@ -17,14 +19,15 @@
 // Animation is layered on top of the settled structure via class hooks the
 // existing CSS keyframes drive; the model carries no animation state. The
 // single invariant governs every motion class: a call/return edge animates iff
-// it is in_flight and its stack is the active stack — paused stacks' lines are
-// frozen solid, and observe and terminate never animate. A call edge in the
-// active stack carries 'flowing' only while its lifecycle is in_flight
-// (settling to a solid static stroke once the callee delegates or returns); a
-// lingering return edge in the active stack carries 'returning' (or 'error'
-// on a failed outcome), because a return edge exists only while it is the
-// current response leg in flight. The active participant (the destination of
-// the latest non-observe, non-terminate operation in the active stack, via
+// it is in_flight and its stack is not paused — paused stacks' lines are
+// frozen solid, and observe and terminate never animate. A call edge carries
+// 'flowing' only while its lifecycle is in_flight (settling to a solid static
+// stroke once the callee delegates or returns); a lingering return edge carries
+// 'returning' (or 'error' on a failed outcome) while in_flight, because a
+// return edge exists only while it is the current response leg in flight — and
+// a resolved stack is not paused (its chain is empty), so its final return leg
+// keeps marching in its outcome color until the next operation settles it. The
+// active participant (the destination of the active stack's current focus, via
 // activeParticipant) pulses; participants in paused stacks do not.
 //
 // Frame-to-frame node lifecycle (entering/departing) is computed by
@@ -47,7 +50,7 @@
 // localization, a view concern, and the model carries no prose. The module is
 // plain browser JS, imports only its siblings, and touches no external system.
 
-import { activeOperation, activeParticipant, activeStack, callChainOf, observesOf, stacksOf, terminatesOf } from './interaction-model.js'
+import { activeOperation, activeParticipant, callChainOf, isPaused, observesOf, stacksOf, terminatesOf } from './interaction-model.js'
 import { GraphEdge, GraphNode, NODE_HEIGHT, NODE_WIDTH, nodeAnchor } from './svg-primitives.js'
 
 // Horizontal gap between call-depth columns and vertical gap between rows. Generous horizontal spacing keeps the left-to-right call chain legible; the vertical gap separates the main run from each preempting interrupt stack.
@@ -94,10 +97,10 @@ function topBarHeight(count) {
 	return rows * SMALL_SIZE + (rows - 1) * SMALL_GAP
 }
 
-// The motion state a call/return edge carries under the single invariant: a line animates iff it is in_flight and its stack is the active stack. A call animates 'flowing' only while its lifecycle is in_flight (the transit phase); once it settles (the working phase, or delegation, or its return) it goes solid. A return edge exists only while it is the lingering response leg, so it animates 'returning' (or 'error'/'terminated' for the matching outcome) only while in_flight (its transit phase) and goes solid once settled (its working phase). Any edge whose stack is not the active stack is frozen 'static', and observe and terminate never reach here (both render their own static dashed lines).
+// The motion state a call/return edge carries under the single invariant: a line animates iff it is in_flight and its stack is not paused — the active stack is never paused, and a resolved stack (its chain is empty) is not paused either, so a resolved stack's final return leg keeps marching in its outcome color while it travels, exactly like the active stack's own in-flight lines. A call animates 'flowing' only while its lifecycle is in_flight (the transit phase); once it settles (the working phase, or delegation, or its return) it goes solid. A return edge exists only while it is the lingering response leg, so it animates 'returning' (or 'error'/'terminated' for the matching outcome) only while in_flight (its transit phase) and goes solid once settled (its working phase). Any edge on a paused stack is frozen 'static', and observe and terminate never reach here (both render their own static dashed lines).
 function edgeAnimationState(operation, model) {
 	if (operation.kind === 'observe' || operation.kind === 'terminate') return 'static'
-	if (operation.stack !== activeStack(model)) return 'static'
+	if (isPaused(model, operation.stack)) return 'static'
 	if (operation.lifecycle === 'settled') return 'static'
 	if (operation.kind === 'call') return 'flowing'
 	if (operation.outcome === 'error') return 'error'
@@ -121,8 +124,16 @@ function projectRow(model, stackId) {
 		? lastCallOrReturn
 		: undefined
 
-	// No open calls and no in_flight return leg to linger: the stack has nothing to render.
-	if (chain.length === 0 && lingeringReturn === undefined) return null
+	if (chain.length === 0 && lingeringReturn === undefined) {
+		// A freshly preempted stack has no operations yet: it renders a row holding just its root, the current worker while the preempting party readies its first act. Operations alone cannot name such a stack, so the row exists only when the model carries stack records (the adapter emits them; hand-authored models render nothing here). The first stack with no operations is an empty run and renders nothing instead.
+		if (model.stacks === undefined) return null
+		const firstStack = model.stacks[0]
+		if (firstStack !== undefined && stackId === firstStack.id) return null
+		const record = model.stacks.find((entry) => entry.id === stackId)
+		if (record === undefined) return null
+		if (model.operations.some((operation) => operation.stack === stackId)) return null
+		return { stackId, rootId: record.root, participants: [{ id: record.root, column: 0, lingering: false }], callEdges: [], returnEdges: [] }
+	}
 
 	// The row root is the open chain's first call source, or — when the chain is empty — the lingering return's caller (its destination), who is the stack's effective root while the last return leg is still in flight.
 	const rootId = chain.length > 0 ? chain[0].source : lingeringReturn.destination
@@ -143,12 +154,22 @@ function projectRow(model, stackId) {
 
 	const closedCallByReturn = new Map()
 	const open = []
-	for (const operation of operationsOnStack) {
-		if (operation.kind === 'call') {
+	for (const operation of model.operations) {
+		if (operation.kind === 'call' && operation.stack === stackId) {
 			open.push(operation)
-		} else if (operation.kind === 'return') {
+		} else if (operation.kind === 'return' && operation.stack === stackId) {
 			const closed = open.pop()
 			if (closed !== undefined) closedCallByReturn.set(operation.id, closed)
+		} else if (operation.kind === 'terminate') {
+			// A terminate closes the open call whose destination it targets, wherever that call's stack lives (the terminate itself is logged on the active stack while its target sits in a paused one) — matching by destination across the whole timeline, mirroring openCallsByStack. Skipping a terminate here would let a later outer return pop the killed call by mistake and render the terminated node in the returner's place.
+			for (let index = open.length - 1; index >= 0; index -= 1) {
+				const candidate = open[index]
+				if (candidate === undefined) continue
+				if (candidate.destination === operation.destination) {
+					open.splice(index, 1)
+					break
+				}
+			}
 		}
 	}
 

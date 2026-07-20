@@ -1,22 +1,16 @@
 import { describe, expect, test } from 'bun:test'
-import type { RunSnapshot } from './render.js'
-import { deriveInteractionModel } from './interaction-model-adapter.js'
-import { DEMO_SCENARIOS, demoScenarioMeta } from './demo-fixtures.js'
+import { deriveDemoFrameModel, DEMO_SCENARIOS } from './demo-fixtures.js'
 
-function frameModel(scenarioId: string, frameIndex: number): ReturnType<typeof deriveInteractionModel> {
+function frameModel(scenarioId: string, frameIndex: number): ReturnType<typeof deriveDemoFrameModel> {
 	const scenario = DEMO_SCENARIOS.find((s) => s.id === scenarioId)!
-	const events = scenario.events.slice(0, frameIndex + 1)
-	const meta = demoScenarioMeta(scenario, frameIndex)
-	const now = scenario.events[frameIndex]!.timestamp
-	const snapshot: RunSnapshot = { meta, logEvents: events }
-	return deriveInteractionModel(snapshot, now)
+	return deriveDemoFrameModel(scenario, frameIndex)
 }
 
 // Two frames are structurally identical when every participant and every operation's kind,
 // lifecycle, settledAt, and outcome match — the flow/sequence views render the same structure,
 // ignoring only the per-invocation metric numbers (tokens, elapsed). A structurally identical
 // consecutive frame is a "duplicated step" the scrubber steps through without any visual change.
-function structuralKey(model: ReturnType<typeof deriveInteractionModel>): string {
+function structuralKey(model: ReturnType<typeof deriveDemoFrameModel>): string {
 	const parts = model.participants.map((p) => `${p.id}:${p.role}:${p.kind}`)
 	for (const op of model.operations) {
 		parts.push(`${op.id}|${op.kind}|${op.lifecycle}|${op.settledAt}|${op.outcome}|${op.source}>${op.destination}|${op.stack}`)

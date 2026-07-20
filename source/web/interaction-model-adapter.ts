@@ -38,10 +38,17 @@ interface Operation {
 	metrics: OperationMetrics | null
 }
 
+interface StackRecord {
+	id: string
+	root: string
+}
+
 export interface InteractionModel {
 	participants: Participant[]
 	operations: Operation[]
 	status: RunStatus
+	// Stack roots in push order (oldest first). A freshly preempted stack has no operations yet, so operations alone cannot name it; the records carry every stack the run has pushed, resolved or not.
+	stacks: StackRecord[]
 }
 
 const ROOT_HUMAN_ID = 'human:root'
@@ -176,8 +183,11 @@ export function deriveInteractionModel(snapshot: RunSnapshot, now: string): Inte
 	const operations: Operation[] = []
 	const allCallRecords: OpenCallRecord[] = []
 	const allReturnRecords: ReturnRecord[] = []
+	// The final returns of resolved (popped) stacks, still awaiting confirmation: each lingers until the next activity-affecting operation lands, at which point it settles.
+	const pendingResolvedReturns: ReturnRecord[] = []
 	// The stack of call stacks. Only the top frame is active; with a single frame (no interrupts) this behaves exactly like a single open-call chain.
 	const stackStack: StackFrame[] = [{ stackId: MAIN_STACK, rootId: ROOT_HUMAN_ID, openCalls: [], lingeringReturn: null }]
+	const stackRecords: StackRecord[] = [{ id: MAIN_STACK, root: ROOT_HUMAN_ID }]
 
 	const idCounters = new Map<string, number>()
 	function nextId(key: string): number {
@@ -221,6 +231,14 @@ export function deriveInteractionModel(snapshot: RunSnapshot, now: string): Inte
 		}
 	}
 
+	// A new activity-affecting operation also confirms every resolved stack's lingering final return: the preempted stack resuming (or a fresh preemption landing) is the next action that settles them.
+	function settleResolvedLingering(timestamp: string): void {
+		for (const record of pendingResolvedReturns) {
+			record.supersededAt = timestamp
+		}
+		pendingResolvedReturns.length = 0
+	}
+
 	// An llm_call settles a lingering leg only when the role that produced it is the caller the leg
 	// is addressed to (the caller resumed thinking); an llm_call from a different role is not the
 	// caller acting and must not settle it.
@@ -242,6 +260,7 @@ export function deriveInteractionModel(snapshot: RunSnapshot, now: string): Inte
 
 	function recordCall(event: LogEvent, source: string, destinationId: string, destinationRole: string, destinationKind: ParticipantKind, questionId: string | null, details: string | null): void {
 		settleLingering(event.timestamp)
+		settleResolvedLingering(event.timestamp)
 		const frame = currentFrame()
 		const callOperation: Operation = {
 			id: opId(),
@@ -275,6 +294,7 @@ export function deriveInteractionModel(snapshot: RunSnapshot, now: string): Inte
 
 	function recordReturn(event: LogEvent, matched: OpenCallRecord, outcome: OperationOutcome, details: string | null): void {
 		settleLingering(event.timestamp)
+		settleResolvedLingering(event.timestamp)
 		const frame = currentFrame()
 		const callerId = matched.operation.source
 		const callerParticipant = registry.get(callerId)
@@ -342,11 +362,12 @@ export function deriveInteractionModel(snapshot: RunSnapshot, now: string): Inte
 				break
 			}
 			case 'interrupt': {
-				// A fresh interrupt instance preempts the active stack: it becomes its own participant and the root of a new stack, and every subsequent event belongs to that stack until its root call closes (see role_finished).
+				// A fresh interrupt instance preempts the active stack: it becomes its own participant and the root of a new stack, and every subsequent event belongs to that stack until its root call closes (see role_finished). The stack record is registered at the push so the model can show the fresh stack (and its root) before its first operation lands.
 				const interruptNumber = nextId('interrupt')
 				const interruptId = `interrupt:${interruptNumber}`
 				addParticipant(interruptId, 'interrupt', 'interrupt')
 				stackStack.push({ stackId: `interrupt-${interruptNumber}-stack`, rootId: interruptId, openCalls: [], lingeringReturn: null })
+				stackRecords.push({ id: `interrupt-${interruptNumber}-stack`, root: interruptId })
 				break
 			}
 			case 'observe': {
@@ -413,10 +434,10 @@ export function deriveInteractionModel(snapshot: RunSnapshot, now: string): Inte
 				// not the operation outcome.
 				const outcome: OperationOutcome = finishStatus === 'error' ? 'error' : 'success'
 				recordReturn(event, matched, outcome, summary)
-				// A closed non-main stack resumes the stack it preempted: once its root call returns, the interrupt frame is done, so pop it and settle its final return (the interrupt resolved, so its row collapses) before control returns to the previous stack.
+				// A closed non-main stack resumes the stack it preempted: once its root call returns, the interrupt frame is done and popped. Its final return is not settled here — it lingers (the row keeps rendering the returner and its response leg) until the next activity-affecting operation confirms it, the same "keep the prior leg visible until the next action" rule the active stack's lingering returns follow.
 				if (stackStack.length > 1 && currentFrame().openCalls.length === 0) {
 					const closed = stackStack.pop()!
-					if (closed.lingeringReturn !== null) closed.lingeringReturn.supersededAt = event.timestamp
+					if (closed.lingeringReturn !== null) pendingResolvedReturns.push(closed.lingeringReturn)
 				}
 				break
 			}
@@ -567,5 +588,5 @@ export function deriveInteractionModel(snapshot: RunSnapshot, now: string): Inte
 		}
 	}
 
-	return { participants, operations, status }
+	return { participants, operations, status, stacks: stackRecords }
 }

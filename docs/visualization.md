@@ -37,8 +37,16 @@ interface InteractionModel {
 	participants: Participant[]   // chronological first-appearance order
 	operations: Operation[]       // chronological; the index is the sequence-view row
 	status: RunStatus
+	stacks?: StackRecord[]        // stack roots in push order (oldest first); emitted by producers that track stack pushes
+}
+
+interface StackRecord {
+	id: string
+	root: string                  // the stack's root participant id (the You root or an Interrupt instance)
 }
 ```
+
+A freshly preempted stack (an interrupt has landed but its first call has not) carries no operations yet, so operations alone cannot name it; the optional `stacks` records carry every pushed stack's id and root so the views can show the fresh stack and its root before its first operation lands. When `stacks` is absent (hand-authored models), the helpers derive stack structure from operations and a zero-operation stack renders nothing.
 
 The model carries no display prose — only `role`/`kind` identifiers, counters, costs, timestamps, and a run `status`. Localization is a view concern (see "Labels" below). The one piece of per-call runtime content is each operation's `details` markdown field, which the adapter formats and which reaches the DOM only through the sanitized Markdown pipeline.
 
@@ -50,7 +58,7 @@ The model carries no display prose — only `role`/`kind` identifiers, counters,
 
 ## The single invariant both views read
 
-> The active stack is the stack of the latest operation. The active participant is the destination of the latest `call`/`return` in the active stack. `observe` and `terminate` never affect activity. A line animates iff it is `in_flight` **and** its stack is the active stack. Every other stack with open calls is *paused*; its lines are static and its participants are not active.
+> The active stack is the stack of the latest operation, with two refinements: a freshly preempted stack (pushed by an interrupt, carrying no operations yet — the preemption itself is the latest activity) is active on arrival, and a *resolved* stack (its root call has returned) yields activity to the innermost stack still carrying open work, staying active only when no stack carries open work. The active participant is the destination of the active stack's current focus: an in-flight return's destination while its response leg travels, else the innermost open call's destination, else the stack's root when the stack has no operations yet. `observe` and `terminate` never affect activity. A line animates iff it is `in_flight` **and** its stack is the active stack. Every other stack with open calls is *paused*; its lines are static and its participants are not active.
 
 This is the whole rule. Both views read it off the same helpers (`activeStack`, `activeOperation`, `activeParticipant`, `isPaused` in `interaction-model.js`), so a change to the rule changes both views at once and they cannot drift. The model never flips `lifecycle` on pause — a paused stack's `in_flight` operation stays genuinely `in_flight`; the view freezes its animation, the model does not settle it.
 
@@ -59,8 +67,8 @@ This is the whole rule. Both views read it off the same helpers (`activeStack`, 
 An interrupt spawns a **new call stack** rooted at a fresh `Interrupt` pseudo-participant instance (instance-per-interrupt, like every role). The stack begins with a `call` from the Interrupt instance to the role that handles the interrupt (typically a loop detector).
 
 - **Occur at any time, including mid-flight.** A paused stack may carry an `in_flight` operation; the view freezes its animation while the model keeps its `lifecycle` as `in_flight`.
-- **Unbounded and nest.** An interrupt can interrupt an interrupt. Each gets a unique `stack` id; the active stack is the latest; fates cascade when stacks resolve inward.
-- **The flow view renders each non-terminated stack as a row**: the main run (rooted at the human) at the top, each preempting interrupt stack (rooted at an Interrupt instance) below it, active stack at the bottom. `observe` and `terminate` lines cross from the active stack up into a paused row.
+- **Unbounded and nest.** An interrupt can interrupt an interrupt. Each gets a unique `stack` id; activity follows the single invariant above (a fresh preemption is active on arrival; a resolved stack yields to the innermost stack with open work), and fates cascade when stacks resolve inward.
+- **The flow view renders each non-terminated stack as a row**: the main run (rooted at the human) is always the top row, and each preempting interrupt stack (rooted at an Interrupt instance) sits below it in preemption order. Rows never reorder as activity moves — the active stack is conveyed by the pulsing node and marching lines, not by row position. `observe` and `terminate` lines cross from the active stack up into a paused row.
 - **A paused stack's fate is read off its own operations after the preemption point, not stored as a field** (`fateOf`): **resume** (the next op lands back on the old stack id), **rewind** (a run of `terminated` returns followed by a fresh `call` from an ancestor — backing out a leg and restarting it), or **terminate** (`terminated` returns all the way to the root). A stack with no open calls left is **terminated**; the active stack is **active**.
 - **The `interrupt` column/root appears only on first use.** A normal run with no interrupts is not cluttered with an interrupt lifeline. `human` is always present — every run starts with a human-submitted task.
 
@@ -89,7 +97,7 @@ Both views are **independent leaves** over the `InteractionModel`: each imports 
 - **Flow view** (`source/web/static/flow-view.js`) — projects the model to a stack-of-rows layout. Each row lays its open call chain left-to-right by call depth, with the stack's root participant (`You` or an Interrupt instance) at the leftmost column. A return whose source has departed the open chain lingers as a node plus a return edge until the caller's next action. A top-bar strip aggregates every role/tool type that has ever run, with invocation counts and cumulative metrics. Node enter/depart lifecycle is computed by diffing two consecutive model frames (`deriveLifecycle`); a departing node travels from its previous row position to its top-bar slot in the shared SVG coordinate space. The "now" caption (`deriveNowCaption`) and ambient cost strip (`deriveCostStrip`) are pure derivations over the same model frame.
 - **Sequence view** (`source/web/static/sequence-diagram.js`) — projects the model to a UML-style lifeline diagram: one column per guild role plus a shared `tools` column, one row per operation in chronological order. Routing is a pure function of the source and destination columns: distinct columns render a straight arrow; the same column (a same-role cross-instance call) renders a loopback U-turn. The inspector (the shared `tooltip.js` card) opens on hover/click and renders an operation's `details` through the sanitized Markdown pipeline.
 
-Animation is layered on top of the settled structure via CSS class hooks the model carries no animation state for. The single invariant governs every motion class: a call/return edge animates iff it is `in_flight` and its stack is the active stack; paused stacks' lines are frozen solid; `observe` and `terminate` never animate. The active participant's node pulses; participants in paused stacks do not.
+Animation is layered on top of the settled structure via CSS class hooks the model carries no animation state for. The single invariant governs every motion class: a call/return edge animates iff it is `in_flight` and its stack is not paused — the active stack is never paused, and a resolved stack (its chain is empty) is not paused either, so a resolved stack's final return leg keeps marching in its outcome color while it travels; paused stacks' lines are frozen solid; `observe` and `terminate` never animate. The active participant's node pulses; participants in paused stacks do not.
 
 ## Dev harness
 
