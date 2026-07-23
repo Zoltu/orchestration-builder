@@ -4,11 +4,14 @@
 //
 // `h` and `renderMarkdown` are passed in rather than imported so the component stays free of hyperapp and showdown coupling and is exercisable in tests with fakes (mirroring question-modal.js and flow-view.js). The close and copy-raw handlers are supplied by the caller: in the demo harness `onClose` clears the modal-open flag and `onCopyRaw` writes the JSON to the clipboard; in the product client `onClose` will clear the flag and `onCopyRaw` will POST or clipboard the raw object.
 
+import { isTerminalStatus } from './interaction-model.js'
+import { isObject } from './guards.js'
+
 // The terminal-status descriptor for a run, or undefined when the run is not yet terminal. A run is terminal when its status is `success`, `error`, or `needs_clarification`. The summary and artifacts come from the run's `result` card (the executor's summary of what it did and what it produced); the error block is derived only on `error` status, from the run-level `error` first (the executor's surfaced failure) and falling back to the result card's nested error. The error `kind` is carried on the descriptor's `error.raw` for the copy-raw button but is never rendered as text — only the human `message` is shown, as sanitized Markdown.
 export function deriveTerminalResult(runView) {
 	if (typeof runView !== 'object' || runView === null) return undefined
 	const status = runView.status
-	if (status !== 'success' && status !== 'error' && status !== 'needs_clarification') return undefined
+	if (typeof status !== 'string' || !isTerminalStatus(status)) return undefined
 
 	const result = isObject(runView.result) ? runView.result : null
 	const runError = isObject(runView.error) ? runView.error : null
@@ -31,10 +34,6 @@ export function deriveTerminalResult(runView) {
 		error = { message, raw: rawError }
 	}
 	return { status, summary, artifacts, error }
-}
-
-function isObject(value) {
-	return typeof value === 'object' && value !== null
 }
 
 // The honest framing line shown above the raw error message. Fixed trusted text (not agent prose, so it never flows through Markdown): it tells the operator the system reported a failure and the copy-raw button exists for sharing, without translating the failure into reassurance.

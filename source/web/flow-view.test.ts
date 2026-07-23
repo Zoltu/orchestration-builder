@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { deriveLifecycle, renderFlowView, deriveNowCaption, deriveCostStrip, COL_GAP } from './static/flow-view.js'
+import { deriveLifecycle, renderFlowView, deriveNowCaption, deriveCostStrip, createColumnTracker, COL_GAP } from './static/flow-view.js'
 import { activeOperation, activeParticipant, activeStack, observesOf, stacksOf } from './static/interaction-model.js'
 import { createLabelResolver } from './static/labels.js'
 import { labelsModule } from './label-resolver-fixture.js'
@@ -71,8 +71,9 @@ function callOperation(id: string, stack: string, source: string, destination: s
 	return { id, kind: 'call', stack, source, destination, startedAt: 't0', settledAt: null, lifecycle: 'in_flight', outcome: null, details: null, metrics: null }
 }
 
+// A fresh column tracker per render keeps every test order-independent: the high-water mark is caller-held state, so tests construct their own rather than sharing a module-level one.
 function render(model: InteractionModel, tier: LabelTier = 'detailed', lifecycle?: ReturnType<typeof deriveLifecycle>): Vnode {
-	return renderFlowView(fakeH, model, labelsModule, tier, lifecycle)
+	return renderFlowView(fakeH, model, labelsModule, tier, lifecycle, undefined, undefined, createColumnTracker())
 }
 
 describe('renderFlowView — row projection', () => {

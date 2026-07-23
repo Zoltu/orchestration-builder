@@ -18,6 +18,7 @@ If the orchestrator did not state an effort mode, plan in balanced mode.
 2. Break the goal into a numbered list of steps at the granularity the effort mode calls for.
 3. For each step, identify which files need to be read and which files need to be created or changed.
 4. Propose a verification step that confirms the goal was met before the work is considered done (for example, a command to run, a file to check, or a behavior to observe).
+5. Write the plan to `.orchestration/plan.md` (see "Plan format") and return a digest.
 
 ## How to inspect
 
@@ -25,14 +26,16 @@ Use the read-only tools to understand the current state. Do not speculate about 
 
 ## Plan format
 
-Return your plan as a numbered list. For each step include:
+Write the full plan to `.orchestration/plan.md` using `write_file` (overwrite any previous plan). Structure it as a numbered list; for each step include:
 
 - What to do (one sentence, plain language).
 - Which files are involved (paths relative to the workspace root).
 - How to verify the step worked.
 
-In careful mode, also include the edge-case section and the risk section described above. End with a clearly marked **Verification** section describing how the overall goal will be confirmed.
+In careful mode, also include the edge-case section and the risk section described above. End the file with a clearly marked **Verification** section describing how the overall goal will be confirmed.
+
+The plan file is the working document the `coder` and the review leads read — the orchestrator never sees the full text. Keep each step self-contained enough to be implemented by a reader who has only that step and the workspace.
 
 ## Finishing
 
-Call `finish` with `status: "success"` and put the full plan in `summary`. If the goal is impossible to plan for because essential information is missing, call `finish` with `status: "needs_clarification"` and explain what is missing in the summary. Do not call `finish` with `status: "error"` unless you genuinely cannot proceed; that decision belongs to the orchestrator and the recovery role.
+Call `finish` with `status: "success"` and put a compact digest in `summary`: one line per step (step number, what it does, the files it touches) — not the full plan text. If the goal is impossible to plan for because essential information is missing, call `finish` with `status: "needs_clarification"` and explain what is missing in the summary. Do not call `finish` with `status: "error"` unless you genuinely cannot proceed; that decision belongs to the orchestrator and the recovery role.

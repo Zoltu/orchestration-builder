@@ -8,7 +8,7 @@ Add a `run_shell` native tool so the agent can execute arbitrary shell commands 
 
 Read `docs/security.md` ("Attack surface", "Mitigations") and `docs/architecture.md` ("Isolation"). The v1 tool layer is sandboxed to the run workspace. `run_shell` runs a command with the workspace as its working directory, under a timeout, and returns stdout/stderr/exit code. Per `docs/reference.md` the failure mode is "Native tool non-zero exit or I/O error → complete the tool call" (the result JSON carries `status: "error"` plus output), so a non-zero exit is **not** an executor error — it is a normal tool result the role can read.
 
-Containment for `run_shell` is expected to come from the deployment environment (non-root user, restricted egress, read-only filesystem, confined writes to `/workspace`). Per-run environment isolation (scoped `PATH`/`HOME`, no global pollution) is part of the Foundry's evaluation setup and will be addressed when the Foundry is built (step 33). This step implements the tool itself; it does not re-solve isolation.
+Containment for `run_shell` is expected to come from the deployment environment (non-root user, restricted egress, read-only filesystem, confined writes to `/workspace`). Per-run environment isolation (scoped `PATH`/`HOME`, no global pollution) is part of the Foundry's evaluation setup and will be addressed when the Foundry is built (step 35). This step implements the tool itself; it does not re-solve isolation.
 
 ## Deliverables
 
@@ -21,7 +21,7 @@ Containment for `run_shell` is expected to come from the deployment environment 
 3. `source/executor/tools/run-shell.test.ts` — in-memory tests using a temp dir. Cover: a successful command returns exit code 0 and captured stdout; a failing command returns its non-zero exit code as a **success** result; a command that exceeds the timeout returns `kind: 'timeout'`; stdout truncation kicks in past the cap. Use portable commands (`echo`, `printf`, `false`) so tests are environment-robust; guard with `test.skipIf` where a platform difference is unavoidable.
 4. Wire `run_shell` into `createToolHandlers` (`source/executor/tools.ts`).
 5. Update `source/executor/tool-manifests.test.ts` (`expectedSignatures`, native-names set) and `source/executor/seed-guild.test.ts` (`expectedToolNames`).
-6. Update `guild/guild.json`: add the manifest path and give the `coder` role `run_shell` (so it can run builds/tools the dedicated checkers do not cover). Consider whether `critic` needs it (probably not for v1).
+6. Update `guild/guild.json`: add the manifest path and give the `coder` role `run_shell` (so it can run builds/tools the dedicated checkers do not cover). Consider whether the review roles need it (probably not for v1).
 7. Update `guild/prompts/coder.md`: instruct the coder that `run_shell` is for commands the dedicated `test`/`typecheck` tools do not cover (builds, ad-hoc inspection), and to prefer the dedicated checker tools for test/typecheck runs. Read failing output rather than guessing.
 
 ## Module boundaries

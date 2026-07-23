@@ -337,7 +337,7 @@ The workspace itself holds the final filesystem state (mutated in place). `log.j
 
 ## Effort channel
 
-The effort channel is a per-run, project-wide speed-vs-quality setting: an integer `0`–`5` where `0` is fastest and `5` is highest quality. The executor provides the **channel only** — it accepts, persists, logs, and injects the value; it makes no decision about what each level *means*. The mapping from effort to concrete behavior (generation overrides, critic-skip rules, retry thresholds) lives entirely in the Guild prompts and is tunable by the Foundry, so hardcoding it in the executor would conflict with the Foundry's job.
+The effort channel is a per-run, project-wide speed-vs-quality setting: an integer `0`–`5` where `0` is fastest and `5` is highest quality. The executor provides the **channel only** — it accepts, persists, logs, and injects the value; it makes no decision about what each level *means*. The mapping from effort to concrete behavior (generation overrides, review-loop round caps, retry thresholds) lives entirely in the Guild prompts and is tunable by the Foundry, so hardcoding it in the executor would conflict with the Foundry's job.
 
 ### Resolution
 

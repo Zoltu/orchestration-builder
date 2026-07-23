@@ -1223,9 +1223,11 @@ li:last-child {
 
 .result-modal-card {
 	position: relative;
-	width: min(36rem, calc(100% - 2 * var(--space-5)));
-	max-height: calc(100% - 2 * var(--space-5));
+	width: calc(100% - 2 * var(--space-5));
+	height: calc(100% - 2 * var(--space-5));
 	overflow: auto;
+	display: flex;
+	flex-direction: column;
 	padding: var(--space-5);
 	border-radius: var(--radius-lg);
 	background: var(--color-surface);
@@ -1354,9 +1356,10 @@ li:last-child {
 }
 
 .result-modal-actions {
-	margin-top: var(--space-5);
+	margin-top: auto;
+	padding-top: var(--space-5);
 	display: flex;
-	justify-content: flex-end;
+	justify-content: center;
 }
 
 .result-modal-close {

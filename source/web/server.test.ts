@@ -5,8 +5,9 @@ import * as path from 'node:path'
 import { createWebHumanBackend } from '../executor/human-backend.ts'
 import { createRunState } from '../executor/run-state.ts'
 import { createRunSubmission, type RunSubmission, type StartRun } from '../executor/run-submission.ts'
-import { createReadProjectSettings, createWriteProjectSettings, type ProjectSettings, type ReadProjectSettings, type WriteProjectSettings, type RunSnapshotRaw } from '../executor/persistence.ts'
+import { createReadProjectSettings, createWriteProjectSettings, type ProjectSettings, type ReadProjectSettings, type WriteProjectSettings, type RunSnapshotRaw, type RunSnapshotStats } from '../executor/persistence.ts'
 import type { GuildConfig, RunMeta } from '../executor/types.js'
+import { parseRunSnapshot, type RunSnapshot } from './render.ts'
 import { createWebServer, type WebServer } from './server.ts'
 
 function snapshotFor(runId: string, status: RunMeta['status'] = 'success', overrides: Partial<RunMeta> = {}): RunSnapshotRaw {
@@ -79,9 +80,25 @@ const sampleGuildConfig: GuildConfig = {
 	tools: ['tools/agent.json', 'tools/finish.json'],
 }
 
-function readRunSnapshotById(runId: string): RunSnapshotRaw {
+function rawSnapshotById(runId: string): RunSnapshotRaw {
 	if (unknownRunIds.has(runId)) return { metaText: null, logText: '' }
 	return snapshots.get(runId) ?? snapshotFor(runId)
+}
+
+function readRunSnapshot(runId: string): RunSnapshot {
+	return parseRunSnapshot(rawSnapshotById(runId))
+}
+
+function readRunMetaById(runId: string): string | null {
+	return rawSnapshotById(runId).metaText
+}
+
+function readRunSnapshotStats(runId: string): RunSnapshotStats {
+	const raw = rawSnapshotById(runId)
+	return {
+		meta: raw.metaText === null ? null : { size: raw.metaText.length, mtimeMs: 1 },
+		log: raw.logText === '' ? null : { size: raw.logText.length, mtimeMs: 1 },
+	}
 }
 
 function listRunIds(): string[] {
@@ -223,7 +240,9 @@ const readOnlyServer: WebServer = createWebServer({
 		generateRunId: () => 'unused',
 		readProjectSettings: readOnlySettings.read,
 	}),
-	readRunSnapshotById,
+	readRunSnapshot,
+	readRunMetaById,
+	readRunSnapshotStats,
 	listRunIds,
 	readProjectSettings: readOnlySettings.read,
 	writeProjectSettings: readOnlySettings.write,
@@ -264,7 +283,9 @@ function createSubmissionServer(): SubmissionServer {
 		tools: {},
 		runState: createRunState({ humanBackend: createWebHumanBackend() }),
 		runSubmission: submission,
-		readRunSnapshotById,
+		readRunSnapshot,
+		readRunMetaById,
+		readRunSnapshotStats,
 		listRunIds,
 		readProjectSettings: settings.read,
 		writeProjectSettings: settings.write,

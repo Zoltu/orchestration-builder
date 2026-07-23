@@ -90,6 +90,28 @@ if (!isValidConfiguration(configuration)) throw new Error('Invalid configuration
 const TRIGGER_COMMAND = '/review' as const; // Type is literal '/review', not string
 ```
 
+### No Non-Null Assertions
+
+**Never use the non-null assertion operator (`value!`) to silence the type checker.** It is a typecast in disguise: it declares a value present without proving it, and when the assumption breaks it fails as an opaque `undefined is not an object` far from the cause. Treat `!` exactly like `as` — if the type says a value can be absent, handle the absent case.
+
+**Wrong:**
+```typescript
+const frame = stack[stack.length - 1]! // Crashes opaquely when the stack is empty
+entry.usage = byRole.get(role)!.usage // Asserts the map holds every key
+```
+
+**Right:**
+```typescript
+// Restructure so absence is handled explicitly
+const frame = stack[stack.length - 1]
+if (frame === undefined) continue
+
+// Or iterate the container so presence holds by construction
+for (const entry of byRole.values()) { ... }
+```
+
+When a value is present by an invariant the types cannot express, check it and throw with a useful message (fail fast with debugging information — see "General Principles"); do not assert silently. Optional chaining (`?.`) and nullish coalescing (`??`) are not assertions and remain fine.
+
 ---
 
 ## Error Handling Rules
@@ -228,7 +250,7 @@ Leaf functions directly touch external systems: network, filesystem, subprocess,
 
 Leaf functions are exported as **factories** that return configured functions. All configuration that does not vary per call is closed over at construction time.
 
-Examples: TBD (fill in once we have some good illustrative examples in the repository).
+Examples: `source/executor/persistence.ts` (`createAppendLog`, `createReadRunSnapshotById` — close over the runs base directory), `source/executor/llm.ts` (`createLlmFetch`, `createSleep` — the thin wire/timer leaves the caller composes), `source/executor/loader.ts` (`createGuildLoader`), `source/executor/tools/*.ts` (each per-tool factory closes over `workspaceRoot`).
 
 ### Orchestration Functions
 
@@ -236,13 +258,13 @@ Orchestration functions sequence calls, make decisions, handle errors, and branc
 
 Each orchestration function declares its own type containing **only** the configured leaf functions it **directly** uses. Do not use type unions (`&`) to compose dependency types from callees. Because TypeScript uses structural typing, a superset object is assignable to a subset type automatically.
 
-Examples: TBD (fill in once we have some good illustrative examples in the repository).
+Examples: `source/executor/engine.ts` (`runRole`), `source/executor/executor.ts` (`runExecutor`), `source/executor/llm.ts` (`createLlmCaller` — request shaping, response parsing, and the retry loop composed over the injected `llmFetch`/`sleep` leaves), `source/executor/run-submission.ts` (`createRunSubmission`), `source/web/snapshot-cache.ts` (`createSnapshotCache`).
 
 ### Pure Helper Functions
 
 Pure helper functions contain parsing, validation, formatting, transformation, and decision-making logic. They are directly imported wherever needed and never injected.
 
-Examples: TBD (fill in once we have some good illustrative examples in the repository).
+Examples: `source/executor/validation.ts` (`isRunMeta`, `validateGuildConfig`, and the shared `isObject` record guard), `source/executor/effort.ts` (`effortDirective`), `source/executor/context-policy.ts` (`truncateToolOutput`), `source/web/render.ts` (`formatLogEvent`, `deriveBudgets`).
 
 ### Important Rules
 
@@ -281,7 +303,7 @@ Tool dispatch is the mechanism by which the executor invokes tools in response t
 Guild loading is a leaf factory defined in `source/executor/loader.ts`.
 
 - `createGuildLoader()` returns a `LoadGuild` function whose `loadGuild(guildDir)` reads `guild.json`, resolves every role's `systemPrompt` Markdown file, and validates every referenced tool-manifest JSON file. The return value is a `LoadedGuild` containing the validated `GuildConfig`, the resolved prompt text per role, and the parsed tool manifests keyed by name.
-- The loader uses the shared `validateGuildConfig` and `validateToolManifest` functions and surfaces validation errors as `ValidationError` (see `source/shared/errors.ts`).
+- The loader uses the shared `validateGuildConfig` and `validateToolManifest` functions and surfaces validation errors as `ValidationError` (see `source/executor/errors.ts`).
 - The loader is a leaf and is not unit-tested; it is exercised through integration in phase 2/5.
 
 ---

@@ -22,14 +22,8 @@ export const ERROR_KINDS: readonly ErrorKind[] = [
 	'compaction_failed',
 ]
 
-export { ErrorKind, ResultCard, ToolResult }
-
 export function isErrorKind(value: unknown): value is ErrorKind {
 	return typeof value === 'string' && ERROR_KINDS.some((kind) => kind === value)
-}
-
-export function createSuccessResult(data?: unknown): ToolResult {
-	return { kind: 'success', data }
 }
 
 export function createToolError(kind: ErrorKind, message?: string, details?: unknown): ToolResult {

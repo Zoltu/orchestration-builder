@@ -2,15 +2,17 @@
 // The whole UI is one reactive view of a single state object; polling runs as subscriptions and every side effect (fetch, POST, audio, flash) runs as an effect. The model is a trusted component; its prose fields (task, result summary, question text, question context, error message) are Markdown the UI renders as formatted text via `showdown` + `highlight.js`. The residual concern is not a malicious model but prompt injection — a malicious file in the workspace coercing the model's output — so the parsed HTML is walked through the allowlist in markdown.js before reaching the DOM; this is a defense-in-depth backstop, with the primary injection defense upstream (see docs/security.md "Web client rendering pipeline"). Machine fields (tool names, operation arguments/results, timestamps, role names, run ids, the one-line current-activity summary) are interpolated only as children of h() or text-node arguments, which hyperapp places into text nodes and properties — never into markup.
 import { h, app } from './vendor/hyperapp.js'
 import { createMarkdownRenderer } from './markdown-render.js'
-import { renderFlowView, deriveLifecycle, deriveNowCaption, deriveCostStrip } from './flow-view.js'
+import { renderFlowView, deriveLifecycle, deriveNowCaption, deriveCostStrip, createColumnTracker } from './flow-view.js'
 import { renderSequenceView } from './sequence-diagram.js'
-import { createLabelResolver } from './labels.js'
+import { createLabelResolver, TIER_VALUES, isLabelTier } from './labels.js'
+import { isTerminalStatus } from './interaction-model.js'
+import { createTooltipDismiss, deriveTooltipDescriptor, isInFlightAskHuman, resolveTooltipTarget } from './inspector.js'
+import { copyRawToClipboard } from './clipboard.js'
 import { QuestionModal } from './question-modal.js'
 import { ResultModal, deriveTerminalResult } from './result-modal.js'
-import { Tooltip, tooltipStyle, deriveOperationTooltip, deriveParticipantTooltip, deriveRoleTooltip } from './tooltip.js'
+import { Tooltip, tooltipStyle } from './tooltip.js'
 
 const POLL_INTERVAL_MS = 1000
-const TERMINAL_STATUSES = new Set(['success', 'error', 'needs_clarification'])
 const STATUS_LABELS = {
 	unknown: 'in progress',
 	running: 'running',
@@ -29,16 +31,8 @@ function effortLabel(effort) {
 	return EFFORT_LABELS[effort] ?? '—'
 }
 
-// The label tier the flow/sequence views localize through. 'detailed' is the default so a fresh load reads precisely; the toggle in the run-view controls swaps it for a non-technical voice. The values are the three tiers `createLabelResolver` resolves (see labels.js), so a swap re-renders the views through the same resolver without touching the model.
-const FLOW_TIER_VALUES = ['whimsical', 'friendly', 'detailed']
+// The label tier the flow/sequence views localize through. 'detailed' is the default so a fresh load reads precisely; the toggle in the run-view controls swaps it for a non-technical voice. The values come from labels.js (TIER_VALUES), so a swap re-renders the views through the same resolver without touching the model.
 const DEFAULT_FLOW_TIER = 'detailed'
-
-function isFlowTier(value) {
-	for (const candidate of FLOW_TIER_VALUES) {
-		if (value === candidate) return true
-	}
-	return false
-}
 
 // Derives the guild's static role/tool inventory from the live `/api/config` so the sequence view can lay out every guild role as a column from the first frame (peeking at future participants would defeat the model's "the run reveals what happens" contract). The flow view does not need this — it projects only active participants — but passing it is harmless and keeps the two views' column sets aligned. The 'human' and 'tools' columns are added by the view itself, so this carries only the real roles and tools.
 function guildParticipantsFromConfig(config) {
@@ -67,6 +61,9 @@ function formatNumber(value) {
 
 // The AudioContext is created lazily on first user interaction (browsers start it suspended until a gesture) and reused for every beep; it is module state, not app state, because it is an opaque resource with no place in the view.
 let audioContext = null
+
+// The caller-held column high-water mark for the flow view (see createColumnTracker): one per page load so the centerpiece's width stays stable as runs deepen and unwind. Held at module scope like audioContext — it is view-render memory, not app state, and retention across run switches is harmless (the stage simply stays as wide as the deepest run seen this page load).
+const flowColumnTracker = createColumnTracker()
 
 function ensureAudioContext() {
 	if (audioContext === null) {
@@ -106,10 +103,6 @@ function formatElapsed(seconds) {
 
 function formatTokens(tokens) {
 	return formatNumber(tokens)
-}
-
-function isTerminalStatus(status) {
-	return TERMINAL_STATUSES.has(status)
 }
 
 // --- Markdown rendering ----------------------------------------------------
@@ -539,7 +532,7 @@ function SetFlowViewMode(state, mode) {
 
 function ChangeFlowTier(state, event) {
 	const value = event.target.value
-	if (!isFlowTier(value)) return state
+	if (!isLabelTier(value)) return state
 	return { ...state, flowTier: value }
 }
 
@@ -572,20 +565,11 @@ function CloseQuestionModal(state) {
 // `data-role` off the live `state.flowModel` and `state.labelResolver` (resolved at render time), so
 // the inspector never re-fetches and never invents content the model does not carry.
 
-// The grace period that bridges the pointer's travel between a node and the card. Long enough to
-// cross the flush edge (and any sub-pixel/shadow gap) without a premature dismiss; short enough that
-// moving away from both reads as an immediate dismiss.
-const TOOLTIP_GRACE_MS = 150
-// A pending dismiss timer, shared across the hover handlers. Held at module scope because it is an
-// opaque resource with no place in the view state; the schedule/cancel effects below read and clear it.
-let tooltipDismissTimer = null
+// The grace-period dismiss timer, shared with the dev harness via inspector.js. Expiry dispatches the ClearTooltip action; the factory closes over the raw timer, which is an opaque resource with no place in the view state.
+const tooltipDismiss = createTooltipDismiss()
 
 function runScheduleTooltipDismiss(dispatch) {
-	if (tooltipDismissTimer !== null) clearTimeout(tooltipDismissTimer)
-	tooltipDismissTimer = setTimeout(() => {
-		tooltipDismissTimer = null
-		dispatch(ClearTooltip)
-	}, TOOLTIP_GRACE_MS)
+	tooltipDismiss.schedule(() => dispatch(ClearTooltip))
 }
 
 function ScheduleTooltipDismiss() {
@@ -593,10 +577,7 @@ function ScheduleTooltipDismiss() {
 }
 
 function runCancelTooltipDismiss() {
-	if (tooltipDismissTimer !== null) {
-		clearTimeout(tooltipDismissTimer)
-		tooltipDismissTimer = null
-	}
+	tooltipDismiss.cancel()
 }
 
 function CancelTooltipDismiss() {
@@ -607,38 +588,6 @@ function CancelTooltipDismiss() {
 // to another node and switched, or a modal open cleared it) so a stale timer firing causes no harm.
 function ClearTooltip(state) {
 	return state.tooltip === null ? state : { ...state, tooltip: null }
-}
-
-// Resolves the hovered DOM element to an inspector target by walking the data attributes the view
-// modules stamp onto nodes and edges, and snapshots the element's viewport rect so the card can be
-// anchored to the node (not the pointer). Sequence messages and terminal nodes carry `data-operation`;
-// flow call/return edges carry `data-operation`; flow main-area nodes carry `data-participant`; flow
-// top-bar slots carry `data-role` (and lack `data-participant`, so the participant check does not catch
-// them). The order matters: operation first, then participant, then role. The rect is a plain object
-// snapshot (not the live DOMRect) so a later re-render that detaches the element does not read zeros.
-function snapshotRect(element) {
-	const rect = element.getBoundingClientRect()
-	return { left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom }
-}
-
-function resolveTooltipTarget(event) {
-	if (!(event.target instanceof Element)) return null
-	const operationElement = event.target.closest('[data-operation]')
-	if (operationElement !== null) {
-		const operationId = operationElement.getAttribute('data-operation')
-		if (operationId !== null) return { kind: 'operation', id: operationId, rect: snapshotRect(operationElement) }
-	}
-	const participantElement = event.target.closest('[data-participant]')
-	if (participantElement !== null) {
-		const participantId = participantElement.getAttribute('data-participant')
-		if (participantId !== null) return { kind: 'participant', id: participantId, rect: snapshotRect(participantElement) }
-	}
-	const roleElement = event.target.closest('.flow-small-node[data-role]')
-	if (roleElement !== null) {
-		const role = roleElement.getAttribute('data-role')
-		if (role !== null) return { kind: 'role', id: role, rect: snapshotRect(roleElement) }
-	}
-	return null
 }
 
 // `mouseover` bubbles from every SVG child the pointer enters, so this fires on each element
@@ -686,23 +635,11 @@ function ClickRunView(state, event) {
 		return HoverRunView(state, event)
 	}
 	const target = resolveTooltipTarget(event)
-	if (target !== null && target.kind === 'operation' && state.flowModel !== null) {
-		const operation = state.flowModel.operations.find((op) => op.id === target.id)
-		if (operation !== undefined && operation.kind === 'call' && operation.lifecycle === 'in_flight') {
-			const destination = state.flowModel.participants.find((p) => p.id === operation.destination)
-			if (destination !== undefined && destination.kind === 'human') {
-				// Open the modal and dismiss the inspector so the card does not linger over the modal.
-				return [{ ...state, questionModalOpen: true, tooltip: null }, CancelTooltipDismiss()]
-			}
-		}
+	if (target !== null && target.kind === 'operation' && state.flowModel !== null && isInFlightAskHuman(state.flowModel, target.id)) {
+		// Open the modal and dismiss the inspector so the card does not linger over the modal.
+		return [{ ...state, questionModalOpen: true, tooltip: null }, CancelTooltipDismiss()]
 	}
 	return HoverRunView(state, event)
-}
-
-// Hands the full error object to the operator as a JSON string on the clipboard (trusted operator output, never rendered as Markdown). A missing clipboard API is a no-op rather than a thrown error in a non-secure context.
-function copyRawToClipboard(rawJson) {
-	if (navigator.clipboard === undefined) return
-	navigator.clipboard.writeText(rawJson)
 }
 
 // --- View ------------------------------------------------------------------
@@ -869,7 +806,7 @@ function FlowPanel(state) {
 	// The flow view and sequence view are independent leaves over the same model; the view toggle swaps which renders without a fetch. The sequence view takes the guild's static participant set so every role column appears from the first frame.
 	const svg = state.flowViewMode === 'sequence'
 		? renderSequenceView(h, model, labels, tier, state.guildParticipants)
-		: renderFlowView(h, model, labels, tier, lifecycle, cta, question)
+		: renderFlowView(h, model, labels, tier, lifecycle, cta, question, flowColumnTracker)
 
 	const cost = deriveCostStrip(model)
 	const nowCaption = deriveNowCaption(model, labels, tier)
@@ -883,7 +820,7 @@ function FlowPanel(state) {
 			]),
 			h('label', { class: 'flow-tier-control' }, [
 				h('span', {}, 'Label tier'),
-				h('select', { value: tier, onchange: ChangeFlowTier }, FLOW_TIER_VALUES.map((value) => h('option', { value, selected: value === tier }, value))),
+				h('select', { value: tier, onchange: ChangeFlowTier }, TIER_VALUES.map((value) => h('option', { value, selected: value === tier }, value))),
 			]),
 		]),
 		h('div', { class: 'pb-cost-strip' }, [
@@ -917,15 +854,7 @@ function TooltipCardForRun(state) {
 	const model = state.flowModel
 	const labels = state.labelResolver
 	if (model === null || labels === null) return null
-	const tier = state.flowTier
-	let descriptor
-	if (tooltip.kind === 'operation') {
-		descriptor = deriveOperationTooltip(model, labels, tier, tooltip.id)
-	} else if (tooltip.kind === 'participant') {
-		descriptor = deriveParticipantTooltip(model, labels, tier, tooltip.id)
-	} else {
-		descriptor = deriveRoleTooltip(model, labels, tier, tooltip.id)
-	}
+	const descriptor = deriveTooltipDescriptor(model, labels, state.flowTier, tooltip)
 	if (descriptor.title === '') return null
 	return Tooltip(h, { title: descriptor.title, sections: descriptor.sections, renderMarkdown, style: tooltipStyle(tooltip.rect) })
 }
@@ -1003,7 +932,7 @@ app({
 			guildParticipants: [],
 			flowTier: DEFAULT_FLOW_TIER,
 			flowViewMode: 'flow',
-			// Per-run-view modal state. The question modal opens on a new pending question; the result modal opens on a watched run's completion. `resultShownForRun` dedups the auto-open across the polls that follow a completion.
+		// Per-run-view modal state. The question modal opens on a new pending question; the result modal opens on a watched run's completion. `resultShownForRun` dedups the auto-open across the polls that follow a completion.
 		questionModalOpen: false,
 		resultModalOpen: false,
 		resultShownForRun: null,

@@ -1,4 +1,5 @@
 import type { LogEvent, RunMeta } from '../executor/types.js'
+import { isObject } from '../executor/validation.js'
 import type { RunSnapshot } from './render.js'
 
 // The InteractionModel shape this adapter produces is the contract the browser view modules
@@ -62,10 +63,6 @@ const CONTROL_TOOLS = new Set(['agent', 'ask_human', 'finish'])
 
 // Narrowing helpers mirror render.ts so the adapter reads LogEvent payloads the same way the
 // legacy run view does — every external payload is validated before use, never cast.
-function isObject(value: unknown): value is Record<string, unknown> {
-	return typeof value === 'object' && value !== null && !Array.isArray(value)
-}
-
 function stringField(payload: unknown, field: string): string | null {
 	if (!isObject(payload)) return null
 	const value = payload[field]
@@ -210,7 +207,10 @@ export function deriveInteractionModel(snapshot: RunSnapshot, now: string): Inte
 	}
 
 	function currentFrame(): StackFrame {
-		return stackStack[stackStack.length - 1]!
+		// The stack of stacks is never empty: it starts with the main frame and is popped only while more than one frame remains.
+		const frame = stackStack[stackStack.length - 1]
+		if (frame === undefined) throw new Error('interaction model invariant violated: the stack of stacks is empty')
+		return frame
 	}
 
 	function activeRoleParticipantId(): string {
@@ -339,9 +339,11 @@ export function deriveInteractionModel(snapshot: RunSnapshot, now: string): Inte
 	// Returns null when no paused stack carries a matching open call (e.g. the target already returned), so the caller skips a reference to a node that no longer exists.
 	function findOpenCallInPausedStack(role: string): { frame: StackFrame; record: OpenCallRecord } | null {
 		for (let i = stackStack.length - 2; i >= 0; i -= 1) {
-			const frame = stackStack[i]!
+			const frame = stackStack[i]
+			if (frame === undefined) continue
 			for (let j = frame.openCalls.length - 1; j >= 0; j -= 1) {
-				const record = frame.openCalls[j]!
+				const record = frame.openCalls[j]
+				if (record === undefined) continue
 				if (record.destinationRole === role) return { frame, record }
 			}
 		}
@@ -436,8 +438,8 @@ export function deriveInteractionModel(snapshot: RunSnapshot, now: string): Inte
 				recordReturn(event, matched, outcome, summary)
 				// A closed non-main stack resumes the stack it preempted: once its root call returns, the interrupt frame is done and popped. Its final return is not settled here — it lingers (the row keeps rendering the returner and its response leg) until the next activity-affecting operation confirms it, the same "keep the prior leg visible until the next action" rule the active stack's lingering returns follow.
 				if (stackStack.length > 1 && currentFrame().openCalls.length === 0) {
-					const closed = stackStack.pop()!
-					if (closed.lingeringReturn !== null) pendingResolvedReturns.push(closed.lingeringReturn)
+					const closed = stackStack.pop()
+					if (closed !== undefined && closed.lingeringReturn !== null) pendingResolvedReturns.push(closed.lingeringReturn)
 				}
 				break
 			}

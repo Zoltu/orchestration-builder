@@ -87,6 +87,18 @@
  *   Stack roots in push order (oldest first), emitted by producers that track stack pushes (the backend adapter). A freshly preempted stack has no operations yet, so operations alone cannot name it. When absent (hand-authored models), the helpers derive stack structure from operations and a zero-operation stack renders nothing.
  */
 
+const TERMINAL_STATUSES = new Set(['success', 'error', 'needs_clarification'])
+
+/**
+ * Returns whether a run status is terminal — the run will produce no more activity, so clients stop polling it and the result affordance may open. Shared by every client surface (product client, dev harness, view modules) so the terminal set is defined once, next to the RunStatus typedef it reads.
+ *
+ * @param {string} status
+ * @returns {boolean}
+ */
+export function isTerminalStatus(status) {
+	return TERMINAL_STATUSES.has(status)
+}
+
 // The stack records the helpers read: the model's own records when present, else a derivation from operations (first-appearance order; the root is the stack's first operation's source, which for any well-formed model is its root call's source). A zero-operation stack exists only in the model's own records — operations cannot name it.
 function stackRecordsOf(model) {
 	if (model.stacks !== undefined) return model.stacks

@@ -2,7 +2,7 @@
 
 The Foundry is an offline meta-optimizer that improves the Guild by proposing, testing, and merging changes. It is a separate program from the executor — it never imports from the executor codebase and talks to the executor exclusively over its HTTP API. It uses a large language model (commercial API or large local model) for hypothesis generation and merging; the executor itself never does.
 
-The Foundry is future work. Its design is documented here so executor and Guild decisions can account for it. Implementation is step 23 of the development plan.
+The Foundry is future work. Its design is documented here so executor and Guild decisions can account for it. Implementation is the final step of the development plan.
 
 ## Architecture
 
@@ -170,4 +170,4 @@ data/foundry/
 
 ## Seed Guild
 
-The Foundry needs an initial Guild to optimize. The seed Guild is hand-written with basic roles (`orchestrator`, `planner`, `coder`, `critic`, `context_manager`, `recovery`), built-in tools, a small number of native tools, and conservative budgets. It does not need to be good — it only needs to be runnable.
+The Foundry needs an initial Guild to optimize. The seed Guild is hand-written with basic roles (`orchestrator`, `planner`, `coder`, `recovery`, `context_manager`, plus lead/reviewer pairs for architecture, style, security, and acceptance review), built-in tools, a small number of native tools, and conservative budgets. It does not need to be good — it only needs to be runnable.

@@ -1,4 +1,5 @@
 import { createToolError } from './errors.js'
+import { isObject } from './validation.js'
 import type { ToolCall, ToolResult } from './types.js'
 
 export type ToolHandler = (args: Record<string, unknown>) => ToolResult | Promise<ToolResult>
@@ -11,10 +12,6 @@ export interface DispatchToolCallConfig {
 	allowedTools: string[]
 	manifestNames: string[]
 	dispatch: ToolDispatch
-}
-
-function isObject(value: unknown): value is Record<string, unknown> {
-	return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
 function safeJsonParse(text: string): { ok: true; value: unknown } | { ok: false } {

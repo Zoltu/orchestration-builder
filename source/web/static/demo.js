@@ -2,27 +2,20 @@
 // Renders the current frame two ways: the flow view SVG (the product surface) and a debug text view (the model's raw projection) that stays behind a toggle so the SVG can be cross-checked against the model's helpers during development.
 // Each frame is the output of the real `deriveInteractionModel` adapter run server-side over the first `N` events of a fixture event stream (see `GET /api/demo/flow/:scenario/:frame`), fetched here over HTTP. The harness therefore exercises the identical `LogEvent → InteractionModel` path the product polls against a live run, so a behavior the demo shows is the behavior the product renders — the harness is a faithful poll simulator, not a hand-curated showcase. `scenarios.js` stays as the in-memory renderer test bed (its model-frame fixtures are consumed by `flow-view.test.ts` / `sequence-diagram.test.ts`); this harness consumes adapter output instead, so the adapter is exercised in the browser too.
 // The harness imports only its sibling static modules; it touches nothing in the product client (app.js).
-import { activeOperation, activeParticipant, activeStack, callChainOf, fateOf, isPaused, observesOf, stacksOf } from './interaction-model.js'
-import { createLabelResolver } from './labels.js'
-import { deriveLifecycle, renderFlowView, deriveNowCaption, deriveCostStrip } from './flow-view.js'
+import { activeOperation, activeParticipant, activeStack, callChainOf, fateOf, isPaused, isTerminalStatus, observesOf, stacksOf } from './interaction-model.js'
+import { createLabelResolver, isLabelTier } from './labels.js'
+import { deriveLifecycle, renderFlowView, deriveNowCaption, deriveCostStrip, createColumnTracker } from './flow-view.js'
 import { renderSequenceView, HEADER_HEIGHT, ROW_HEIGHT, BOTTOM_MARGIN } from './sequence-diagram.js'
 import { createMarkdownRenderer } from './markdown-render.js'
-import { Tooltip, tooltipStyle, deriveOperationTooltip, deriveParticipantTooltip, deriveRoleTooltip } from './tooltip.js'
+import { createTooltipDismiss, deriveTooltipDescriptor, isInFlightAskHuman, resolveTooltipTarget } from './inspector.js'
+import { copyRawToClipboard } from './clipboard.js'
+import { Tooltip, tooltipStyle } from './tooltip.js'
 import { ResultModal } from './result-modal.js'
 import { QuestionModal } from './question-modal.js'
 import { activeAskHumanCall } from './flow-view.js'
 
 const PLAY_INTERVAL_MS = 1000
 const SVG_NAMESPACE = 'http://www.w3.org/2000/svg'
-
-const TIER_VALUES = ['whimsical', 'friendly', 'detailed']
-
-function isLabelTier(value) {
-	for (const candidate of TIER_VALUES) {
-		if (value === candidate) return true
-	}
-	return false
-}
 
 // The demo harness loads its labels from the same /api/config the product client loads, so a swapped guild re-flavors the harness the same way it re-flavors the run view. The harness is served by the same web server (see server.ts serveStaticPath), so the endpoint is reachable at the page origin.
 let labels = null
@@ -37,6 +30,8 @@ let currentFrame = null
 // The frame rendered before `currentFrame`, kept so `deriveLifecycle` can diff entering/departing participants across consecutive frames — the same role the product client's `previousFlowModel` plays.
 // Reset to null on a scenario switch (the first frame of a scenario animates nothing).
 let previousFrame = null
+// The caller-held column high-water mark for the flow view (see createColumnTracker): one per page load, so the stage width stays stable as scenarios deepen and unwind.
+const flowColumnTracker = createColumnTracker()
 
 function requireElement(id, constructorFunction) {
 	const element = document.getElementById(id)
@@ -247,79 +242,22 @@ const renderMarkdown = createMarkdownRenderer(htmlH)
 // The dedup key is `${kind}:${id}` so the card is reused (not flickered) as the pointer moves within the same operation (a sequence message → its terminal node) or the same participant (a node's box → its cost figures).
 let currentTooltipNode = null
 let currentTooltipKey = null
-// A pending dismiss timer, bridging the pointer's travel between a node and the card. Held at module scope because it is an opaque resource, not view state.
-let tooltipDismissTimer = null
-const TOOLTIP_GRACE_MS = 150
-
-function cancelTooltipDismiss() {
-	if (tooltipDismissTimer !== null) {
-		clearTimeout(tooltipDismissTimer)
-		tooltipDismissTimer = null
-	}
-}
-
-function scheduleTooltipDismiss() {
-	cancelTooltipDismiss()
-	tooltipDismissTimer = setTimeout(() => {
-		tooltipDismissTimer = null
-		closeTooltip()
-	}, TOOLTIP_GRACE_MS)
-}
+// The grace-period dismiss timer, shared with the product client via inspector.js; expiry tears the card down directly (the harness has no dispatch loop).
+const tooltipDismiss = createTooltipDismiss()
 
 function closeTooltip() {
-	cancelTooltipDismiss()
+	tooltipDismiss.cancel()
 	if (currentTooltipNode === null) return
 	currentTooltipNode.remove()
 	currentTooltipNode = null
 	currentTooltipKey = null
 }
 
-// Resolves the hovered DOM element to an inspector target by walking the data attributes the view modules stamp onto nodes and edges, and snapshots the element's viewport rect so the card can be anchored to the node (not the pointer).
-// Sequence messages and terminal nodes carry `data-operation`; flow call/return edges carry `data-operation`; flow main-area nodes carry `data-participant`; flow top-bar slots carry `data-role` (and lack `data-participant`, so the participant check does not catch them). The order matters: operation first, then participant, then role.
-function snapshotRect(element) {
-	const rect = element.getBoundingClientRect()
-	return { left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom }
-}
-
-function resolveTooltipTarget(event) {
-	if (!(event.target instanceof Element)) return null
-	const operationElement = event.target.closest('[data-operation]')
-	if (operationElement !== null) {
-		const operationId = operationElement.getAttribute('data-operation')
-		if (operationId !== null) return { kind: 'operation', id: operationId, rect: snapshotRect(operationElement) }
-	}
-	const participantElement = event.target.closest('[data-participant]')
-	if (participantElement !== null) {
-		const participantId = participantElement.getAttribute('data-participant')
-		if (participantId !== null) return { kind: 'participant', id: participantId, rect: snapshotRect(participantElement) }
-	}
-	const roleElement = event.target.closest('.flow-small-node[data-role]')
-	if (roleElement !== null) {
-		const role = roleElement.getAttribute('data-role')
-		if (role !== null) return { kind: 'role', id: role, rect: snapshotRect(roleElement) }
-	}
-	return null
-}
-
-// Builds the inspector card from the live InteractionModel via the shared derivations in `tooltip.js` (the same ones the product client uses), so the dev harness and the live view consume one inspector derivation.
+// Builds the inspector card from the live InteractionModel via the shared descriptor dispatch in `inspector.js` (the same one the product client uses), so the dev harness and the live view consume one inspector derivation.
 // The card is anchored to the target's snapshot rect (flush against it) and appended to the run-view container so a `mouseleave` on the container covers both the SVG and the card — moving from a node into the card keeps the card open.
 function openTooltip(target) {
 	if (labels === null || currentFrame === null) return
-	const frame = currentFrame
-	let descriptor
-	if (target.kind === 'operation') {
-		const operation = frame.operations.find((entry) => entry.id === target.id)
-		if (operation === undefined) return
-		descriptor = deriveOperationTooltip(frame, labels, tier, target.id)
-	} else if (target.kind === 'participant') {
-		const participant = frame.participants.find((entry) => entry.id === target.id)
-		if (participant === undefined) return
-		descriptor = deriveParticipantTooltip(frame, labels, tier, target.id)
-	} else {
-		const representative = frame.participants.find((entry) => entry.role === target.id)
-		if (representative === undefined) return
-		descriptor = deriveRoleTooltip(frame, labels, tier, target.id)
-	}
+	const descriptor = deriveTooltipDescriptor(currentFrame, labels, tier, target)
 	if (descriptor.title === '') return
 	// Reuse the open card when the pointer moves within the same target (a message path → its terminal node, or a node box → its cost figures) so the card does not flicker on every mouseover. The rect is unchanged for the same target, so the card stays put.
 	const key = `${target.kind}:${target.id}`
@@ -362,15 +300,15 @@ function jumpSequenceViewToActive(container) {
 function wireRunViewInteractions() {
 	const openAt = (event) => {
 		if (event.target instanceof Element && event.target.closest('.tooltip-card') !== null) {
-			cancelTooltipDismiss()
+			tooltipDismiss.cancel()
 			return
 		}
 		const target = resolveTooltipTarget(event)
 		if (target === null) {
-			if (currentTooltipNode !== null) scheduleTooltipDismiss()
+			if (currentTooltipNode !== null) tooltipDismiss.schedule(closeTooltip)
 			return
 		}
-		cancelTooltipDismiss()
+		tooltipDismiss.cancel()
 		openTooltip(target)
 	}
 	flowContainer.addEventListener('mouseover', openAt)
@@ -379,21 +317,14 @@ function wireRunViewInteractions() {
 			return
 		}
 		const target = resolveTooltipTarget(event)
-		if (target !== null && target.kind === 'operation' && currentFrame !== null) {
-			const frame = currentFrame
-			const operation = frame.operations.find((op) => op.id === target.id)
-			if (operation !== undefined && operation.kind === 'call' && operation.lifecycle === 'in_flight') {
-				const destination = frame.participants.find((p) => p.id === operation.destination)
-				if (destination !== undefined && destination.kind === 'human') {
-					openQuestionModal()
-					return
-				}
-			}
+		if (target !== null && target.kind === 'operation' && currentFrame !== null && isInFlightAskHuman(currentFrame, target.id)) {
+			openQuestionModal()
+			return
 		}
 		openAt(event)
 	})
 	flowContainer.addEventListener('mouseleave', () => {
-		if (currentTooltipNode !== null) scheduleTooltipDismiss()
+		if (currentTooltipNode !== null) tooltipDismiss.schedule(closeTooltip)
 	})
 }
 
@@ -475,10 +406,6 @@ function renderTextView() {
 	return lines.join('\n')
 }
 
-function isTerminalStatus(status) {
-	return status === 'success' || status === 'error' || status === 'needs_clarification'
-}
-
 // The See Result click stands in for the operation You would emit to settle the terminal return. Settling the active in_flight return departs the returner (the lingering leg renders only while in_flight), so the next render shows the returner and its response line leaving for the top bar — the working-phase equivalent reached by user acknowledgment rather than a modeled operation. Only the active in_flight return is touched; every earlier operation keeps the lifecycle the frame already carries.
 function acknowledgeFrame(frame) {
 	const active = activeOperation(frame)
@@ -506,7 +433,7 @@ function renderFlowViewSvg() {
 	const lifecycle = diffBase !== null ? deriveLifecycle(diffBase, frame) : undefined
 	const cta = { onclick: openResultModal }
 	const question = { onclick: openQuestionModal }
-	return renderFlowView(domH, frame, labels, tier, lifecycle, cta, question)
+	return renderFlowView(domH, frame, labels, tier, lifecycle, cta, question, flowColumnTracker)
 }
 
 function renderSequenceViewSvg() {
@@ -611,11 +538,6 @@ function submitQuestion(event) {
 		frameIndex += 1
 	}
 	loadFrame()
-}
-
-function copyRawToClipboard(rawJson) {
-	if (navigator.clipboard === undefined) return
-	navigator.clipboard.writeText(rawJson)
 }
 
 function render() {

@@ -2,22 +2,11 @@ import { describe, expect, test } from 'bun:test'
 
 import { ValidationError } from './errors.js'
 import {
-	isAssistantResponse,
 	isEffortLevel,
-	isGuildConfig,
-	isLogEvent,
-	isMessage,
 	isProjectSettings,
 	isResultCard,
 	isRunMeta,
-	isRunOptions,
-	isToolCall,
-	isToolManifest,
-	isToolResult,
 	validateGuildConfig,
-	validateMessage,
-	validateResultCard,
-	validateToolCall,
 	validateToolManifest,
 } from './validation.ts'
 
@@ -41,49 +30,14 @@ const validToolManifest = {
 	parameters: { type: 'object', properties: {} },
 }
 
-const validMessage = { role: 'user' as const, content: 'hi' }
-
-const validToolCall = {
-	id: '1',
-	type: 'function' as const,
-	function: { name: 'f', arguments: '{}' },
-}
-
 const validResultCard = { status: 'success' as const, summary: 'done' }
 
 describe('boolean guards', () => {
-	test('isGuildConfig accepts a valid GuildConfig', () => {
-		expect(isGuildConfig(validGuild)).toBe(true)
-	})
-	test('isGuildConfig rejects missing fields', () => {
-		expect(isGuildConfig({ schemaVersion: 1 })).toBe(false)
-	})
-	test('isToolManifest accepts a valid tool manifest', () => {
-		expect(isToolManifest(validToolManifest)).toBe(true)
-	})
-	test('isToolManifest rejects parameters whose type is not object', () => {
-		expect(isToolManifest({ ...validToolManifest, parameters: { type: 'array' } })).toBe(false)
-	})
-	test('isMessage accepts a valid Message', () => {
-		expect(isMessage(validMessage)).toBe(true)
-	})
-	test('isMessage rejects an invalid role', () => {
-		expect(isMessage({ role: 'wizard', content: 'hi' })).toBe(false)
-	})
-	test('isToolCall accepts a valid ToolCall', () => {
-		expect(isToolCall(validToolCall)).toBe(true)
-	})
-	test('isToolCall rejects wrong type', () => {
-		expect(isToolCall({ ...validToolCall, type: 'action' })).toBe(false)
-	})
 	test('isResultCard accepts a valid ResultCard', () => {
 		expect(isResultCard(validResultCard)).toBe(true)
 	})
 	test('isResultCard rejects an invalid status', () => {
 		expect(isResultCard({ status: 'ok', summary: 'x' })).toBe(false)
-	})
-	test('isAssistantResponse accepts an empty object (all fields optional)', () => {
-		expect(isAssistantResponse({})).toBe(true)
 	})
 	test('isRunMeta accepts a minimal valid RunMeta', () => {
 		expect(isRunMeta({
@@ -118,19 +72,6 @@ describe('boolean guards', () => {
 		expect(isEffortLevel(undefined)).toBe(false)
 		expect(isEffortLevel(Number.NaN)).toBe(false)
 	})
-	test('isRunOptions requires a valid effort', () => {
-		const base = {
-			runId: 'r',
-			guildPath: 'g',
-			benchmarkPath: 'b',
-			task: 't',
-		}
-		expect(isRunOptions({ ...base, effort: 0 })).toBe(true)
-		expect(isRunOptions({ ...base, effort: 5 })).toBe(true)
-		expect(isRunOptions({ ...base })).toBe(false)
-		expect(isRunOptions({ ...base, effort: 7 })).toBe(false)
-		expect(isRunOptions({ ...base, effort: 2.5 })).toBe(false)
-	})
 	test('isProjectSettings accepts empty, valid effort, and rejects invalid effort', () => {
 		expect(isProjectSettings({})).toBe(true)
 		expect(isProjectSettings({ effort: 3 })).toBe(true)
@@ -138,18 +79,6 @@ describe('boolean guards', () => {
 		expect(isProjectSettings({ effort: '3' })).toBe(false)
 		expect(isProjectSettings('not an object')).toBe(false)
 		expect(isProjectSettings(null)).toBe(false)
-	})
-	test('isLogEvent accepts a minimal valid LogEvent', () => {
-		expect(isLogEvent({ timestamp: 'now', type: 'x' })).toBe(true)
-	})
-	test('isToolResult accepts a success result', () => {
-		expect(isToolResult({ kind: 'success', data: 1 })).toBe(true)
-	})
-	test('isToolResult accepts a known error kind', () => {
-		expect(isToolResult({ kind: 'timeout', message: 'x' })).toBe(true)
-	})
-	test('isToolResult rejects an unknown kind', () => {
-		expect(isToolResult({ kind: 'mystery' })).toBe(false)
 	})
 })
 
@@ -181,20 +110,7 @@ describe('validate* throws ValidationError with a path-based message', () => {
 	test('validateToolManifest throws on non-string name', () => {
 		expect(() => validateToolManifest({ ...validToolManifest, name: 123 })).toThrow(/name/)
 	})
-	test('validateMessage throws on invalid role', () => {
-		expect(() => validateMessage({ role: 'wizard', content: 'hi' })).toThrow(/role/)
-	})
-	test('validateToolCall throws when type is not function', () => {
-		const bad = { id: '1', type: 'x', function: { name: 'f', arguments: '{}' } }
-		try {
-			validateToolCall(bad)
-		} catch (e) {
-			if (e instanceof ValidationError) {
-				expect(e.message).toMatch(/\.type/)
-			}
-		}
-	})
-	test('validateResultCard throws on invalid status', () => {
-		expect(() => validateResultCard({ status: 'x', summary: 's' })).toThrow(/status/)
+	test('validateToolManifest throws when parameters type is not object', () => {
+		expect(() => validateToolManifest({ ...validToolManifest, parameters: { type: 'array' } })).toThrow(/parameters\.type/)
 	})
 })

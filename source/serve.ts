@@ -2,7 +2,8 @@
 import * as path from 'node:path'
 
 import { createWebServer } from './web/server.js'
-import { createAppendLog, createGuildLoader, createLlmCaller, createListRunIds, createReadProjectSettings, createReadRunSnapshotById, createRunDirectory, createRunState, createRunSubmission, createToolHandlers, createWebHumanBackend, createWriteMeta, createWriteProjectSettings, runExecutor, type ExecutorDependencies, type LoadedGuild, type LlmCaller, type ModelConfig, type StartRun, type WebHumanBackend } from './executor/index.js'
+import { createSnapshotCache } from './web/snapshot-cache.js'
+import { createAppendLog, createGuildLoader, createLlmCaller, createLlmFetch, createListRunIds, createReadProjectSettings, createReadRunMetaById, createReadRunSnapshotById, createReadRunSnapshotStats, createRunDirectory, createRunState, createRunSubmission, createSleep, createToolHandlers, createWebHumanBackend, createWriteMeta, createWriteProjectSettings, runExecutor, type ExecutorDependencies, type LoadedGuild, type LlmCaller, type ModelConfig, type StartRun, type WebHumanBackend } from './executor/index.js'
 
 const API_KEY_ENV_VAR = 'ORCHESTRATOR_API_KEY'
 const PORT_ENV_VAR = 'PORT'
@@ -17,6 +18,8 @@ const ORCHESTRATION_DIR = '.orchestration'
 const MIN_PORT = 1
 const MAX_PORT = 65535
 const INTERRUPT_EXIT_CODE = 130
+// The snapshot cache needs to hold only the run the operator is viewing (plus the one they may switch back to); the run list bypasses it entirely.
+const SNAPSHOT_CACHE_MAX_ENTRIES = 4
 
 function generateRunId(now: Date): string {
 	const pad = (n: number) => n.toString().padStart(2, '0')
@@ -109,11 +112,13 @@ async function serve(): Promise<void> {
 
 	const loadGuild = createGuildLoader()
 	const loadedGuild = loadGuild(GUILD_PATH)
-	const llmCaller = createLlmCaller(buildModel(loadedGuild, Bun.env[API_KEY_ENV_VAR]))
+	const llmCaller = createLlmCaller(buildModel(loadedGuild, Bun.env[API_KEY_ENV_VAR]), { llmFetch: createLlmFetch(), sleep: createSleep() })
 
 	const webHumanBackend = createWebHumanBackend()
 	const runState = createRunState({ humanBackend: webHumanBackend })
-	const readRunSnapshotById = createReadRunSnapshotById(runsBaseDir)
+	const readRunSnapshotStats = createReadRunSnapshotStats(runsBaseDir)
+	const readRunSnapshot = createSnapshotCache({ readStats: readRunSnapshotStats, readRaw: createReadRunSnapshotById(runsBaseDir) }, SNAPSHOT_CACHE_MAX_ENTRIES)
+	const readRunMetaById = createReadRunMetaById(runsBaseDir)
 	const listRunIds = createListRunIds(runsBaseDir)
 	const readProjectSettings = createReadProjectSettings(workspaceRootPath)
 	const writeProjectSettings = createWriteProjectSettings(workspaceRootPath)
@@ -134,7 +139,9 @@ async function serve(): Promise<void> {
 		tools: loadedGuild.tools,
 		runState,
 		runSubmission,
-		readRunSnapshotById,
+		readRunSnapshot,
+		readRunMetaById,
+		readRunSnapshotStats,
 		listRunIds,
 		readProjectSettings,
 		writeProjectSettings,

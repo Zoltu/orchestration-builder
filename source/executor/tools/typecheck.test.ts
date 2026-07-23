@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
-import { createBunSubprocessRunner, createTypecheck, type SubprocessOutcome, type SubprocessRunner } from './typecheck.ts'
-import type { TypecheckData } from './typecheck.ts'
+import { createBunSubprocessRunner, type SubprocessOutcome, type SubprocessRunner } from './subprocess-tool.ts'
+import { createTypecheck, type TypecheckData } from './typecheck.ts'
 
 interface RunnerCall {
 	command: readonly string[]

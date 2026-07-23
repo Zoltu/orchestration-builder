@@ -4,7 +4,9 @@
 //
 // Authoring against the model contract (operations and participants as first-class data, no event vocabulary and no window reconstruction) is what lets the scenarios exercise the cases the previous fixture set covered plus the cases only the new model can express honestly: instance-per-invocation retries, cross-stack observes, and the three interrupt fates (resume / rewind / terminate) read off operation sequences rather than a fate field.
 //
-// The scenarios are browser-pure JS (no imports) so the static server serves them and the test runner imports them from the filesystem, mirroring the sibling interaction-model.js convention.
+// The scenarios are browser-pure JS (imports only the sibling interaction-model.js) so the static server serves them and the test runner imports them from the filesystem, mirroring the sibling interaction-model.js convention.
+
+import { isTerminalStatus } from './interaction-model.js'
 
 /**
  * @typedef {'human' | 'interrupt' | 'role' | 'tool'} ParticipantKind
@@ -218,10 +220,6 @@ function participantsInOrder(operations, registry) {
 		}
 	}
 	return ordered
-}
-
-function isTerminalStatus(status) {
-	return status === 'success' || status === 'error' || status === 'needs_clarification'
 }
 
 // Returns the index of the latest activity-affecting operation on the active stack (the model's "active operation"), or -1 when the active stack carries only observes/terminates. This is the single operation whose lifecycle a transit/working frame overrides; every earlier operation keeps the lifecycle the normal materialization derived, so paused stacks keep their genuinely in_flight operations and the model's single invariant holds.

@@ -50,7 +50,8 @@
 // localization, a view concern, and the model carries no prose. The module is
 // plain browser JS, imports only its siblings, and touches no external system.
 
-import { activeOperation, activeParticipant, callChainOf, isPaused, observesOf, stacksOf, terminatesOf } from './interaction-model.js'
+import { activeOperation, activeParticipant, callChainOf, isPaused, isTerminalStatus, observesOf, stacksOf, terminatesOf } from './interaction-model.js'
+import { ATTR_OPERATION, ATTR_PARTICIPANT, ATTR_ROLE } from './inspector.js'
 import { GraphEdge, GraphNode, NODE_HEIGHT, NODE_WIDTH, nodeAnchor } from './svg-primitives.js'
 
 // Horizontal gap between call-depth columns and vertical gap between rows. Generous horizontal spacing keeps the left-to-right call chain legible; the vertical gap separates the main run from each preempting interrupt stack.
@@ -62,11 +63,13 @@ const SMALL_SIZE = 28
 const SMALL_GAP = 8
 const TOP_BAR_PER_ROW = 14
 
-// The minimum column count the flow view reserves horizontally. A run with a single active role still consumes this many columns of width so the centerpiece does not snap narrow on a one-column frame and then snap wide as delegation deepens; the high-water mark below only grows past it.
+// The minimum column count the flow view reserves horizontally. A run with a single active role still consumes this many columns of width so the centerpiece does not snap narrow on a one-column frame and then snap wide as delegation deepens; the tracker's high-water mark only grows past it.
 const DEFAULT_MIN_COLUMNS = 5
 
-// Session-level high-water mark of the column count the flow view has rendered. A frame whose call chain is shallower than a previous frame still sizes to this width so nodes do not slide leftward when a deep delegation unwinds — a stable stage reads better than one that resizes per frame. It grows when a deeper frame appears and never shrinks back, persisting across frame navigation and scenario switches for the page-load lifetime (a fresh page load resets it because the module re-evaluates).
-let columnHighWaterMark = DEFAULT_MIN_COLUMNS
+// A caller-held high-water mark of the column count the flow view has rendered. A frame whose call chain is shallower than a previous frame still sizes to this width so nodes do not slide leftward when a deep delegation unwinds — a stable stage reads better than one that resizes per frame. The mark lives in an explicit tracker the caller creates and hands in (rather than module scope) so the view stays a pure function of its inputs: each client holds one tracker for the page-load lifetime, and each test constructs a fresh one, keeping renders order-independent.
+export function createColumnTracker() {
+	return { minColumns: DEFAULT_MIN_COLUMNS }
+}
 
 // Vertical gap between the history top bar and the row stack. The two live in one shared SVG coordinate space so a node leaving a row for its top-bar slot travels in the same space (the counter increment is the point of the depart animation).
 const TOPBAR_GAP = 24
@@ -245,7 +248,7 @@ function renderSmallNode(h, slot, label, index) {
 		if (slot.totalTokens > 0) titleParts.push(`${slot.totalTokens.toLocaleString()} tokens`)
 	}
 	if (runErrored) titleParts.push('errored')
-	return h('g', { class: classes.join(' '), transform: translate(pos.x, pos.y), 'data-role': slot.role, 'data-kind': slot.kind }, [
+	return h('g', { class: classes.join(' '), transform: translate(pos.x, pos.y), [ATTR_ROLE]: slot.role, 'data-kind': slot.kind }, [
 		h('title', {}, [titleParts.join(' \u00b7 ')]),
 		h('rect', { class: 'flow-small-node-box', x: 0, y: 0, width: SMALL_SIZE, height: SMALL_SIZE, rx: 5 }, []),
 		h('text', { class: 'flow-small-node-count', x: SMALL_SIZE / 2, y: SMALL_SIZE / 2 + 1, 'text-anchor': 'middle', 'dominant-baseline': 'middle' }, [String(slot.invocations)]),
@@ -260,7 +263,7 @@ function renderRow(h, row, rowIndex, yOffset, model, labels, tier, participantBy
 		const toPos = rowPixel(callEdge.toColumn, rowIndex, yOffset)
 		const fromAnchor = nodeAnchor(fromPos.x, fromPos.y, 'right')
 		const toAnchor = nodeAnchor(toPos.x, toPos.y, 'left')
-		edgeVnodes.push(h('g', { class: 'flow-edge flow-edge--call', 'data-stack': row.stackId, 'data-kind': 'call', 'data-operation': callEdge.operation.id }, [
+		edgeVnodes.push(h('g', { class: 'flow-edge flow-edge--call', 'data-stack': row.stackId, 'data-kind': 'call', [ATTR_OPERATION]: callEdge.operation.id }, [
 			GraphEdge(h, { fromAnchor, toAnchor, kind: 'call', state: edgeAnimationState(callEdge.operation, model) }),
 		]))
 	}
@@ -269,7 +272,7 @@ function renderRow(h, row, rowIndex, yOffset, model, labels, tier, participantBy
 		const toPos = rowPixel(returnEdge.toColumn, rowIndex, yOffset)
 		const fromAnchor = nodeAnchor(fromPos.x, fromPos.y, 'bottom')
 		const toAnchor = nodeAnchor(toPos.x, toPos.y, 'bottom')
-		edgeVnodes.push(h('g', { class: 'flow-edge flow-edge--return', 'data-stack': row.stackId, 'data-kind': 'return', 'data-operation': returnEdge.operation.id }, [
+		edgeVnodes.push(h('g', { class: 'flow-edge flow-edge--return', 'data-stack': row.stackId, 'data-kind': 'return', [ATTR_OPERATION]: returnEdge.operation.id }, [
 			GraphEdge(h, { fromAnchor, toAnchor, kind: 'return', state: edgeAnimationState(returnEdge.operation, model) }),
 		]))
 	}
@@ -292,11 +295,11 @@ function renderRow(h, row, rowIndex, yOffset, model, labels, tier, participantBy
 			costTokens: metrics !== null ? metrics.tokens : undefined,
 		})
 		if (enteringIds.has(entry.id)) {
-			return h('g', { class: ['flow-node', 'flow-node--entering-host', isTerminateTarget ? 'flow-node--terminate-target' : null].filter((token) => token !== null).join(' '), transform: translate(pos.x, pos.y), 'data-participant': entry.id, 'data-role': participant !== undefined ? participant.role : '', 'data-kind': participant !== undefined ? participant.kind : '', 'data-lingering': entry.lingering ? 'true' : 'false' }, [
+			return h('g', { class: ['flow-node', 'flow-node--entering-host', isTerminateTarget ? 'flow-node--terminate-target' : null].filter((token) => token !== null).join(' '), transform: translate(pos.x, pos.y), [ATTR_PARTICIPANT]: entry.id, [ATTR_ROLE]: participant !== undefined ? participant.role : '', 'data-kind': participant !== undefined ? participant.kind : '', 'data-lingering': entry.lingering ? 'true' : 'false' }, [
 				h('g', { class: 'flow-node--entering' }, [inner]),
 			])
 		}
-		return h('g', { class: ['flow-node', isTerminateTarget ? 'flow-node--terminate-target' : null].filter((token) => token !== null).join(' '), transform: translate(pos.x, pos.y), 'data-participant': entry.id, 'data-role': participant !== undefined ? participant.role : '', 'data-kind': participant !== undefined ? participant.kind : '', 'data-lingering': entry.lingering ? 'true' : 'false' }, [inner])
+		return h('g', { class: ['flow-node', isTerminateTarget ? 'flow-node--terminate-target' : null].filter((token) => token !== null).join(' '), transform: translate(pos.x, pos.y), [ATTR_PARTICIPANT]: entry.id, [ATTR_ROLE]: participant !== undefined ? participant.role : '', 'data-kind': participant !== undefined ? participant.kind : '', 'data-lingering': entry.lingering ? 'true' : 'false' }, [inner])
 	})
 
 	return h('g', { class: 'flow-row', 'data-stack': row.stackId, 'data-row-index': String(rowIndex) }, [...edgeVnodes, ...nodeVnodes])
@@ -487,10 +490,6 @@ function ctaDescriptorForStatus(status) {
 	return { label: 'See result', tone: 'accent' }
 }
 
-function isTerminalStatus(status) {
-	return status === 'success' || status === 'error' || status === 'needs_clarification'
-}
-
 // The ask_human call, when its question is pending: the active operation is an in_flight call whose destination is a human participant (the answerer). A human never emits an operation that would advance the call to its working phase, so the call stays in transit until the user answers — the same single-transit-frame rule the terminal op follows, but the run is not terminal here. The Question affordance overlays the answerer node for the duration of this frame.
 export function activeAskHumanCall(model) {
 	const operation = activeOperation(model)
@@ -525,8 +524,8 @@ function QuestionButton(h, props) {
 	])
 }
 
-// Renders the flow view as a single SVG containing the history top bar, the observe cross-stack lines, the terminate cross-stack lines, the row stack, the departing overlay, the (on a terminal frame) result CTA, and (while an ask_human call is pending) the Question button overlay on the answerer node. Edges paint before nodes within each row so node boxes cover anchor overlap; observes and terminates sit behind the rows so node boxes cover their endpoints; the departing overlay paints last so the travel reads on top of the settled graph; the CTA and Question button paint after the rows so they sit above the graph. `lifecycle` (optional) carries the frame-diff entering/departing descriptor from deriveLifecycle; `cta` (optional) carries `{ active, onclick }` harness state for the terminal CTA — the view itself decides whether to render a CTA by reading model.status; `question` (optional) carries `{ onclick }` harness state for the Question button — the view itself decides whether to render the button by reading the active ask_human call.
-export function renderFlowView(h, model, labels, tier, lifecycle, cta, question) {
+// Renders the flow view as a single SVG containing the history top bar, the observe cross-stack lines, the terminate cross-stack lines, the row stack, the departing overlay, the (on a terminal frame) result CTA, and (while an ask_human call is pending) the Question button overlay on the answerer node. Edges paint before nodes within each row so node boxes cover anchor overlap; observes and terminates sit behind the rows so node boxes cover their endpoints; the departing overlay paints last so the travel reads on top of the settled graph; the CTA and Question button paint after the rows so they sit above the graph. `lifecycle` (optional) carries the frame-diff entering/departing descriptor from deriveLifecycle; `cta` (optional) carries `{ active, onclick }` harness state for the terminal CTA — the view itself decides whether to render a CTA by reading model.status; `question` (optional) carries `{ onclick }` harness state for the Question button — the view itself decides whether to render the button by reading the active ask_human call. `columns` is the caller-held high-water-mark tracker from createColumnTracker.
+export function renderFlowView(h, model, labels, tier, lifecycle, cta, question, columns) {
 	const stackIds = stacksOf(model)
 	const rows = []
 	for (const stackId of stackIds) {
@@ -580,7 +579,7 @@ export function renderFlowView(h, model, labels, tier, lifecycle, cta, question)
 		const status = completion !== undefined ? completion.outcome : undefined
 		const style = { '--from-x': `${fromPos.x}px`, '--from-y': `${fromPos.y}px`, '--to-x': `${toPos.x}px`, '--to-y': `${toPos.y}px` }
 		const classes = entry.merged ? 'flow-node flow-node--departing flow-node--merging' : 'flow-node flow-node--departing'
-		return h('g', { class: classes, style, 'data-participant': entry.participantId }, [
+		return h('g', { class: classes, style, [ATTR_PARTICIPANT]: entry.participantId }, [
 			h('g', { class: 'flow-node--departing-scale' }, [
 				GraphNode(h, {
 					label: resolvedLabel,
@@ -605,9 +604,9 @@ export function renderFlowView(h, model, labels, tier, lifecycle, cta, question)
 		const rowMax = row.participants.reduce((innerMax, entry) => Math.max(innerMax, entry.column), 0)
 		return Math.max(max, rowMax + 1)
 	}, 0)
-	// The high-water mark grows to fit the deepest frame seen this session and never shrinks back, so the centerpiece's horizontal scale stays stable as the call chain deepens and unwinds.
-	columnHighWaterMark = Math.max(columnHighWaterMark, currentColumnCount)
-	const mainWidth = columnHighWaterMark * NODE_WIDTH + (columnHighWaterMark - 1) * COL_GAP
+	// The high-water mark grows to fit the deepest frame the caller has rendered and never shrinks back, so the centerpiece's horizontal scale stays stable as the call chain deepens and unwinds.
+	columns.minColumns = Math.max(columns.minColumns, currentColumnCount)
+	const mainWidth = columns.minColumns * NODE_WIDTH + (columns.minColumns - 1) * COL_GAP
 	const mainHeight = rows.length > 0 ? rows.length * NODE_HEIGHT + (rows.length - 1) * ROW_GAP : 0
 	const ctaHeight = showCta ? NODE_HEIGHT : 0
 	const width = Math.max(topBarWidth(slots.length), mainWidth, showCta ? NODE_WIDTH : 0)

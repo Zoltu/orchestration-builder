@@ -47,7 +47,7 @@
 		},
 		"planner": {
 			"systemPrompt": "prompts/planner.md",
-			"tools": ["list_directory", "glob_files", "read_file", "read_file_partial", "search_text", "finish"],
+			"tools": ["list_directory", "glob_files", "read_file", "read_file_partial", "search_text", "write_file", "finish"],
 			"label": {
 				"detailed": ["Planner"],
 				"friendly": ["Planner"],
@@ -83,23 +83,156 @@
 				"whimsical": ["Hamster wheels are spinning", "Sharpening all the pencils", "Consulting the rubber duck", "Aligning the widget flanges", "Reticulating splines"]
 			}
 		},
-		"critic": {
-			"systemPrompt": "prompts/critic.md",
-			"tools": ["list_directory", "glob_files", "read_file", "read_file_partial", "search_text", "finish"],
+		"architecture_lead": {
+			"systemPrompt": "prompts/architecture_lead.md",
+			"tools": ["agent", "finish"],
 			"label": {
-				"detailed": ["Critic"],
-				"friendly": ["Reviewer"],
-				"whimsical": ["Quality Guard"]
+				"detailed": ["Architecture Lead"],
+				"friendly": ["Architecture Lead"],
+				"whimsical": ["Chief Architect"]
 			},
 			"description": {
-				"detailed": ["Reviews code and plans for errors, improvements, and adherence to requirements."],
-				"friendly": ["Reviews work for quality and catches issues."],
-				"whimsical": ["The sharp-eyed inspector making sure nothing slips through."]
+				"detailed": ["Runs the architecture review loop on completed work, directing reviewers and fixes until the structure is sound."],
+				"friendly": ["Directs architecture reviews and fixes for each piece of work."],
+				"whimsical": ["The keeper of the blueprint, making sure every beam belongs."]
 			},
 			"workingLabel": {
-				"detailed": ["role {participantRole} is reviewing the work (streaming tokens)"],
-				"friendly": ["Reviewing the work"],
-				"whimsical": ["Polishing every rivet", "Squinting very carefully", "Hunting for the loose thread", "Tutting disapprovingly"]
+				"detailed": ["role {participantRole} is directing the architecture review loop (streaming tokens)"],
+				"friendly": ["Directing the architecture review"],
+				"whimsical": ["Shuffling the blueprints", "Squinting at the load-bearing walls", "Rearranging the floor plan"]
+			}
+		},
+		"architecture_reviewer": {
+			"systemPrompt": "prompts/architecture_reviewer.md",
+			"tools": ["list_directory", "glob_files", "read_file", "read_file_partial", "search_text", "finish"],
+			"label": {
+				"detailed": ["Architecture Reviewer"],
+				"friendly": ["Architecture Reviewer"],
+				"whimsical": ["Blueprint Inspector"]
+			},
+			"description": {
+				"detailed": ["Reviews the structure of completed work — boundaries, coupling, data flow — and reports findings without changing anything."],
+				"friendly": ["Checks the structure of the work and reports problems."],
+				"whimsical": ["Taps every wall to find the hollow one."]
+			},
+			"workingLabel": {
+				"detailed": ["role {participantRole} is reviewing the architecture (streaming tokens)"],
+				"friendly": ["Reviewing the architecture"],
+				"whimsical": ["Measuring the hallways", "Checking the foundation", "Reading the blueprints upside down"]
+			}
+		},
+		"style_lead": {
+			"systemPrompt": "prompts/style_lead.md",
+			"tools": ["agent", "finish"],
+			"label": {
+				"detailed": ["Style Lead"],
+				"friendly": ["Style Lead"],
+				"whimsical": ["Style Maven"]
+			},
+			"description": {
+				"detailed": ["Runs the style review loop on completed work, directing reviewers and fixes until the work matches the project's conventions."],
+				"friendly": ["Directs style reviews and fixes for each piece of work."],
+				"whimsical": ["The tastemaker keeping everything matching."]
+			},
+			"workingLabel": {
+				"detailed": ["role {participantRole} is directing the style review loop (streaming tokens)"],
+				"friendly": ["Directing the style review"],
+				"whimsical": ["Coordinating the wardrobe", "Matching the curtains to the carpet", "Enforcing the dress code"]
+			}
+		},
+		"style_reviewer": {
+			"systemPrompt": "prompts/style_reviewer.md",
+			"tools": ["list_directory", "glob_files", "read_file", "read_file_partial", "search_text", "finish"],
+			"label": {
+				"detailed": ["Style Reviewer"],
+				"friendly": ["Style Reviewer"],
+				"whimsical": ["Style Sleuth"]
+			},
+			"description": {
+				"detailed": ["Checks completed work against the project's own style docs, editor configs, and code conventions, and reports findings without changing anything."],
+				"friendly": ["Checks the work matches the project's conventions."],
+				"whimsical": ["Sniffs out the one misnamed variable."]
+			},
+			"workingLabel": {
+				"detailed": ["role {participantRole} is reviewing the style (streaming tokens)"],
+				"friendly": ["Reviewing the style"],
+				"whimsical": ["Combing the code for cowlicks", "Checking the dress rehearsal", "Hunting the rogue semicolon"]
+			}
+		},
+		"security_lead": {
+			"systemPrompt": "prompts/security_lead.md",
+			"tools": ["agent", "finish"],
+			"label": {
+				"detailed": ["Security Lead"],
+				"friendly": ["Security Lead"],
+				"whimsical": ["Guard Captain"]
+			},
+			"description": {
+				"detailed": ["Runs the security review loop on completed work, directing reviewers and fixes until the work is safe."],
+				"friendly": ["Directs security reviews and fixes for each piece of work."],
+				"whimsical": ["The watch captain who double-checks the locks."]
+			},
+			"workingLabel": {
+				"detailed": ["role {participantRole} is directing the security review loop (streaming tokens)"],
+				"friendly": ["Directing the security review"],
+				"whimsical": ["Rattling the doorknobs", "Posting the night watch", "Counting the keys"]
+			}
+		},
+		"security_reviewer": {
+			"systemPrompt": "prompts/security_reviewer.md",
+			"tools": ["list_directory", "glob_files", "read_file", "read_file_partial", "search_text", "finish"],
+			"label": {
+				"detailed": ["Security Reviewer"],
+				"friendly": ["Security Reviewer"],
+				"whimsical": ["Watchdog"]
+			},
+			"description": {
+				"detailed": ["Reviews completed work for security risks — injection, secrets, unsafe file handling — and reports findings without changing anything."],
+				"friendly": ["Checks the work for security problems."],
+				"whimsical": ["Growls at unlocked doors."]
+			},
+			"workingLabel": {
+				"detailed": ["role {participantRole} is reviewing security (streaming tokens)"],
+				"friendly": ["Reviewing security"],
+				"whimsical": ["Sniffing the perimeter", "Testing the window latches", "Patrolling the code"]
+			}
+		},
+		"acceptance_lead": {
+			"systemPrompt": "prompts/acceptance_lead.md",
+			"tools": ["agent", "finish"],
+			"label": {
+				"detailed": ["Acceptance Lead"],
+				"friendly": ["Acceptance Lead"],
+				"whimsical": ["Final Judge"]
+			},
+			"description": {
+				"detailed": ["Runs the final acceptance loop: checks the whole workspace against the user's original task and directs fixes for any gaps."],
+				"friendly": ["Makes sure the finished work matches what was asked for."],
+				"whimsical": ["Bangs the gavel when the work is truly done."]
+			},
+			"workingLabel": {
+				"detailed": ["role {participantRole} is directing the final acceptance review (streaming tokens)"],
+				"friendly": ["Directing the final acceptance review"],
+				"whimsical": ["Preparing the verdict", "Calling the court to order", "Reviewing the evidence"]
+			}
+		},
+		"acceptance_reviewer": {
+			"systemPrompt": "prompts/acceptance_reviewer.md",
+			"tools": ["list_directory", "glob_files", "read_file", "read_file_partial", "search_text", "finish"],
+			"label": {
+				"detailed": ["Acceptance Reviewer"],
+				"friendly": ["Acceptance Reviewer"],
+				"whimsical": ["White Glove"]
+			},
+			"description": {
+				"detailed": ["Compares the finished workspace against the user's original task and reports any gaps, without changing anything."],
+				"friendly": ["Checks everything against the original request."],
+				"whimsical": ["Runs a white glove over the finished work."]
+			},
+			"workingLabel": {
+				"detailed": ["role {participantRole} is checking the work against the original task (streaming tokens)"],
+				"friendly": ["Checking the work against the original task"],
+				"whimsical": ["Running the white-glove test", "Checking the list twice", "Reading the fine print"]
 			}
 		},
 		"context_manager": {

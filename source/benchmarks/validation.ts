@@ -1,5 +1,6 @@
 
 import { ValidationError } from '../executor/errors.js'
+import { isObject } from '../executor/validation.js'
 
 export interface ValidationSpec {
 	command: string
@@ -27,10 +28,6 @@ export interface BenchmarkRunOutput {
 export interface ValidationResult {
 	status: 'pass' | 'fail'
 	reasons: string[]
-}
-
-function isObject(value: unknown): value is Record<string, unknown> {
-	return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
 function isString(value: unknown): value is string {

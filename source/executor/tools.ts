@@ -6,7 +6,8 @@ import { createReadFile } from './tools/read-file.js'
 import { createReadFilePartial } from './tools/read-file-partial.js'
 import { createSearchText } from './tools/search-text.js'
 import { createTest } from './tools/test.js'
-import { createBunSubprocessRunner, createTypecheck } from './tools/typecheck.js'
+import { createBunSubprocessRunner } from './tools/subprocess-tool.js'
+import { createTypecheck } from './tools/typecheck.js'
 import { createWriteFile } from './tools/write-file.js'
 
 export interface NativeToolsConfig {

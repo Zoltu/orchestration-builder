@@ -5,7 +5,14 @@ import { ERROR_KINDS } from './errors.ts'
 
 const guildDir = path.resolve(import.meta.dir, '..', '..', 'guild')
 
-const expectedRoles = ['orchestrator', 'planner', 'coder', 'critic', 'context_manager', 'recovery'] as const
+const expectedRoles = [
+	'orchestrator', 'planner', 'coder',
+	'architecture_lead', 'architecture_reviewer',
+	'style_lead', 'style_reviewer',
+	'security_lead', 'security_reviewer',
+	'acceptance_lead', 'acceptance_reviewer',
+	'context_manager', 'recovery',
+] as const
 
 const expectedToolNames = new Set([
 	'agent', 'finish', 'context_info', 'edit_context', 'ask_human',
@@ -76,6 +83,39 @@ describe('seed guild', () => {
 		const lower = prompt.toLowerCase()
 		for (const kind of ERROR_KINDS) {
 			expect(lower).toContain(kind)
+		}
+	})
+
+	test('review leads delegate and hold no workspace tools', () => {
+		const loadGuild = createGuildLoader()
+		const loaded = loadGuild(guildDir)
+		for (const role of expectedRoles) {
+			if (!role.endsWith('_lead')) continue
+			const lead = loaded.config.roles[role]
+			if (lead === undefined) continue
+			expect(lead.tools).toContain('agent')
+			expect(lead.tools).toContain('finish')
+			expect(lead.tools).not.toContain('write_file')
+			expect(lead.tools).not.toContain('read_file')
+		}
+	})
+
+	test('reviewers are read-only leaves that cannot delegate', () => {
+		const loadGuild = createGuildLoader()
+		const loaded = loadGuild(guildDir)
+		for (const role of expectedRoles) {
+			if (!role.endsWith('_reviewer')) continue
+			const reviewer = loaded.config.roles[role]
+			if (reviewer === undefined) continue
+			expect(reviewer.tools).not.toContain('agent')
+			expect(reviewer.tools).not.toContain('write_file')
+			expect(reviewer.tools).toContain('read_file')
+			const prompt = loaded.prompts[role]
+			expect(prompt).toBeTruthy()
+			if (prompt === undefined) continue
+			// The shared reviewer contract: severity tags and the compact-digest return.
+			expect(prompt.toLowerCase()).toContain('blocking')
+			expect(prompt.toLowerCase()).toContain('suggestion')
 		}
 	})
 

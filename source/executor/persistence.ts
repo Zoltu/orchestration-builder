@@ -65,6 +65,43 @@ export function createReadRunSnapshotById(baseDir: string = 'data/runs'): ReadRu
 	}
 }
 
+export type ReadRunMetaById = (runId: string) => string | null
+
+// Reads only a run's meta.json. The run list renders one summary per run and never touches log events, so it reads the small meta file rather than every run's full (and ever-growing) log on every poll.
+export function createReadRunMetaById(baseDir: string = 'data/runs'): ReadRunMetaById {
+	return (runId: string) => {
+		const metaPath = path.resolve(baseDir, runId, 'meta.json')
+		return fs.existsSync(metaPath) ? fs.readFileSync(metaPath, 'utf8') : null
+	}
+}
+
+export interface RunSnapshotFileStat {
+	size: number
+	mtimeMs: number
+}
+
+export interface RunSnapshotStats {
+	meta: RunSnapshotFileStat | null
+	log: RunSnapshotFileStat | null
+}
+
+export type ReadRunSnapshotStats = (runId: string) => RunSnapshotStats
+
+function statOrNull(filePath: string): RunSnapshotFileStat | null {
+	if (!fs.existsSync(filePath)) return null
+	const stat = fs.statSync(filePath)
+	return { size: stat.size, mtimeMs: stat.mtimeMs }
+}
+
+// Stats a run's files without reading them. Size+mtime is the freshness key a snapshot cache validates against (the log is append-only, so every event changes its size), and a run with neither file is unknown — the cheap existence check the per-request handlers need before serving a snapshot.
+export function createReadRunSnapshotStats(baseDir: string = 'data/runs'): ReadRunSnapshotStats {
+	return (runId: string) => {
+		const metaPath = path.resolve(baseDir, runId, 'meta.json')
+		const logPath = path.resolve(baseDir, runId, 'log.jsonl')
+		return { meta: statOrNull(metaPath), log: statOrNull(logPath) }
+	}
+}
+
 export type ListRunIds = () => string[]
 
 export function createListRunIds(baseDir: string = 'data/runs'): ListRunIds {

@@ -343,13 +343,15 @@ export function findDemoScenario(scenarioId: string): DemoScenario | undefined {
 // The adapter consumes only a DemoScenario's `status`, so a minimal meta keyed off the frame's per-event status is enough; the synthetic ids keep the RunMeta shape valid without inventing run-bookkeeping the demo does not model.
 function demoScenarioMeta(scenario: DemoScenario, frameIndex: number): RunMeta {
 	const status = scenario.statuses[frameIndex] ?? 'running'
+	const firstEvent = scenario.events[0]
+	if (firstEvent === undefined) throw new Error(`demo scenario "${scenario.id}" has no events`)
 	return {
 		runId: `demo-${scenario.id}`,
 		guildPath: 'demo',
 		benchmarkPath: 'demo',
 		task: scenario.task,
 		status,
-		startTime: scenario.events[0]!.timestamp,
+		startTime: firstEvent.timestamp,
 	}
 }
 
@@ -358,7 +360,9 @@ function demoScenarioMeta(scenario: DemoScenario, frameIndex: number): RunMeta {
 export function deriveDemoFrameModel(scenario: DemoScenario, frameIndex: number): InteractionModel {
 	const events = scenario.events.slice(0, frameIndex + 1)
 	const meta = demoScenarioMeta(scenario, frameIndex)
-	const now = scenario.events[frameIndex]!.timestamp
+	const frameEvent = scenario.events[frameIndex]
+	if (frameEvent === undefined) throw new Error(`demo scenario "${scenario.id}" has no frame ${frameIndex}`)
+	const now = frameEvent.timestamp
 	if (frameIndex !== scenario.events.length - 1) {
 		return deriveInteractionModel({ meta, logEvents: events }, now)
 	}

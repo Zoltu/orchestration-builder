@@ -59,6 +59,16 @@
 // Ordered from most-precise to least-precise so the fallback walk goes toward less-precise tiers: a missing 'detailed' falls to 'friendly', a missing 'friendly' falls to 'whimsical', and a missing 'whimsical' has nothing less-precise to fall to (the caller supplies an ultimate fallback).
 const TIER_FALLBACK_ORDER = ['detailed', 'friendly', 'whimsical']
 
+// The tier values the label-tier toggle offers, in toggle order. The resolver treats a tier as opaque (it falls back through TIER_FALLBACK_ORDER); this list exists so both clients validate and render the same set rather than each declaring its own copy.
+export const TIER_VALUES = ['whimsical', 'friendly', 'detailed']
+
+export function isLabelTier(value) {
+	for (const candidate of TIER_VALUES) {
+		if (value === candidate) return true
+	}
+	return false
+}
+
 /**
  * A deterministic 32-bit hash of a string, used as the rotation seed for activity labels so the whimsical tier picks a stable phrase per operation (the same operation resolves the same phrase across re-renders) while different operations pick different phrases. Pure and stateless: tests pass a fixed seed and are deterministic, and re-running a scenario shows the same sequence.
  *

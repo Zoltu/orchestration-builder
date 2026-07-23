@@ -1,6 +1,6 @@
 
 import type { PendingQuestion } from '../executor/human-backend.js'
-import { isRunMeta } from '../executor/validation.js'
+import { isObject, isRunMeta } from '../executor/validation.js'
 import type { EffortLevel, ExecutorConfig, GuildConfig, LogEvent, ResultCard, RunMeta, ToolManifest, HumanFacingText, VisualizationConfig } from '../executor/types.js'
 import type { ProjectSettings, RunSnapshotRaw } from '../executor/persistence.js'
 
@@ -9,11 +9,7 @@ export interface RunSnapshot {
 	logEvents: LogEvent[]
 }
 
-function isObject(value: unknown): value is Record<string, unknown> {
-	return typeof value === 'object' && value !== null && !Array.isArray(value)
-}
-
-function parseMeta(metaText: string | null): RunMeta | null {
+export function parseRunMeta(metaText: string | null): RunMeta | null {
 	if (metaText === null) return null
 	let parsed: unknown
 	try {
@@ -44,7 +40,7 @@ export function parseLogEvents(logText: string): LogEvent[] {
 
 export function parseRunSnapshot(raw: RunSnapshotRaw): RunSnapshot {
 	return {
-		meta: parseMeta(raw.metaText),
+		meta: parseRunMeta(raw.metaText),
 		logEvents: parseLogEvents(raw.logText),
 	}
 }
@@ -75,6 +71,11 @@ function numberField(payload: unknown, field: string): number | null {
 
 function withRole(role: string | null, action: string): string {
 	return role === null ? action : `${role} · ${action}`
+}
+
+// The top frame of a stack, or undefined when the stack is empty. Keeps stack-walking code honest about the empty case without a non-null assertion.
+function topOf<T>(stack: T[]): T | undefined {
+	return stack.length > 0 ? stack[stack.length - 1] : undefined
 }
 
 export function formatLogEvent(event: LogEvent): string {
@@ -155,7 +156,7 @@ export interface RoleActivity {
 }
 
 export function deriveRoleActivity(logEvents: LogEvent[]): RoleActivity[] {
-	const order: string[] = []
+	// A Map preserves first-seen insertion order, so the activity list comes out in the order roles first appeared with no separate ordering bookkeeping.
 	const byRole = new Map<string, RoleActivity>()
 	for (const event of logEvents) {
 		const role = roleOf(event.payload)
@@ -173,7 +174,6 @@ export function deriveRoleActivity(logEvents: LogEvent[]): RoleActivity[] {
 				lastPromptTokens: null,
 			}
 			byRole.set(role, entry)
-			order.push(role)
 		}
 		entry.lastSeen = event.timestamp
 		entry.eventCount++
@@ -195,7 +195,7 @@ export function deriveRoleActivity(logEvents: LogEvent[]): RoleActivity[] {
 			}
 		}
 	}
-	return order.map((role) => byRole.get(role)!)
+	return Array.from(byRole.values())
 }
 
 export interface RoleTreeNode {
@@ -231,7 +231,7 @@ export function deriveRoleTree(logEvents: LogEvent[]): RoleTreeNode[] | null {
 			if (typeof roleValue !== 'string') continue
 			const depthValue = payload['depth']
 			const depth = typeof depthValue === 'number' ? depthValue : 0
-			const parentRole = stack.length > 0 ? stack[stack.length - 1]!.role : null
+			const parentRole = topOf(stack)?.role ?? null
 			const node: RoleTreeNode = {
 				role: roleValue,
 				depth,
@@ -241,8 +241,9 @@ export function deriveRoleTree(logEvents: LogEvent[]): RoleTreeNode[] | null {
 				active: false,
 				children: [],
 			}
-			if (stack.length > 0) {
-				stack[stack.length - 1]!.children.push(node)
+			const parentNode = topOf(stack)
+			if (parentNode !== undefined) {
+				parentNode.children.push(node)
 			} else {
 				roots.push(node)
 			}
@@ -259,20 +260,22 @@ export function deriveRoleTree(logEvents: LogEvent[]): RoleTreeNode[] | null {
 			// Find the topmost in-flight entry for this role. In a well-formed depth-first log the top of the stack matches; a partial log (torn read mid-write) may have skipped a child's finish, so we search down and pop the abandoned children too rather than crash.
 			let matchIndex = -1
 			for (let i = stack.length - 1; i >= 0; i--) {
-				if (stack[i]!.role === roleValue) {
+				if (stack[i]?.role === roleValue) {
 					matchIndex = i
 					break
 				}
 			}
-			if (matchIndex === -1) continue
-			stack[matchIndex]!.status = status
-			stack[matchIndex]!.summary = summary
+			const matched = matchIndex >= 0 ? stack[matchIndex] : undefined
+			if (matched === undefined) continue
+			matched.status = status
+			matched.summary = summary
 			stack.length = matchIndex
 		}
 	}
 
 	// The active invocation is the deepest in-flight role (the stack top): the one currently executing. A waiting parent is in-flight but suspended, so it must not pulse.
-	if (stack.length > 0) stack[stack.length - 1]!.active = true
+	const activeNode = topOf(stack)
+	if (activeNode !== undefined) activeNode.active = true
 	return roots
 }
 
@@ -361,19 +364,19 @@ export interface CurrentActivity {
 	summary: string
 }
 
-	export interface TokenUsage {
-		promptTokens: number
-		cachedPromptTokens: number
-		completionTokens: number
-		totalTokens: number
-	}
+export interface TokenUsage {
+	promptTokens: number
+	cachedPromptTokens: number
+	completionTokens: number
+	totalTokens: number
+}
 
-	export interface Budgets {
-		elapsedSeconds: number
-		toolCalls: number
-		tokensUsed: number | null
-		tokenBreakdown: TokenUsage | null
-	}
+export interface Budgets {
+	elapsedSeconds: number
+	toolCalls: number
+	tokensUsed: number | null
+	tokenBreakdown: TokenUsage | null
+}
 
 function usageOf(payload: unknown): { promptTokens: number; completionTokens: number; cachedPromptTokens: number; totalTokens: number } | null {
 	if (!isObject(payload)) return null
@@ -384,19 +387,18 @@ function usageOf(payload: unknown): { promptTokens: number; completionTokens: nu
 	const completion = usage['completionTokens']
 	const cached = usage['cachedPromptTokens']
 
-	const hasTotal = typeof total === 'number'
 	const hasPromptCompletion = typeof prompt === 'number' && typeof completion === 'number'
-	if (!hasTotal && !hasPromptCompletion) return null
+	if (typeof total !== 'number' && !hasPromptCompletion) return null
 
 	const promptTokens = typeof prompt === 'number' ? prompt : 0
 	const completionTokens = typeof completion === 'number' ? completion : 0
 	const cachedPromptTokens = typeof cached === 'number' ? cached : 0
-	const totalTokens = hasTotal ? total! : promptTokens + completionTokens
+	const totalTokens = typeof total === 'number' ? total : promptTokens + completionTokens
 	return { promptTokens, completionTokens, cachedPromptTokens, totalTokens }
 }
 
 export function deriveBudgets(logEvents: LogEvent[], meta: RunMeta | null, now: string): Budgets {
-	const startTime = meta !== null ? meta.startTime : (logEvents.length > 0 ? logEvents[0]!.timestamp : null)
+	const startTime = meta !== null ? meta.startTime : (logEvents[0]?.timestamp ?? null)
 	const endTime = meta !== null && meta.endTime !== undefined ? meta.endTime : now
 
 	let elapsedSeconds = 0
@@ -474,7 +476,8 @@ export function deriveQuestionHistory(logEvents: LogEvent[]): QuestionHistoryEnt
 			if (answer === null) continue
 			const index = indexById.get(id)
 			if (index === undefined) continue
-			const entry = entries[index]!
+			const entry = entries[index]
+			if (entry === undefined) continue
 			entry.answer = answer
 			entry.answeredAt = event.timestamp
 		}
@@ -539,8 +542,7 @@ export interface RunSummary {
 	endTime: string | null
 }
 
-export function renderRunSummary(runId: string, snapshot: RunSnapshot): RunSummary {
-	const meta = snapshot.meta
+export function renderRunSummary(runId: string, meta: RunMeta | null): RunSummary {
 	return {
 		runId,
 		status: meta === null ? 'unknown' : meta.status,
@@ -551,9 +553,9 @@ export function renderRunSummary(runId: string, snapshot: RunSnapshot): RunSumma
 	}
 }
 
-	export interface ProjectSettingsView {
-		effort: EffortLevel | null
-	}
+export interface ProjectSettingsView {
+	effort: EffortLevel | null
+}
 
 export function renderProjectSettings(settings: ProjectSettings): ProjectSettingsView {
 	return { effort: settings.effort ?? null }

@@ -40,7 +40,7 @@ export function createFetchUrl(timeoutMs: number, fetcher?: Fetcher): ToolHandle
 	}
 }
 
-export function defaultFetcher(url: string, timeoutMs: number): Promise<string> {
+function defaultFetcher(url: string, timeoutMs: number): Promise<string> {
 	return createDefaultFetcher()(url, timeoutMs)
 }
 

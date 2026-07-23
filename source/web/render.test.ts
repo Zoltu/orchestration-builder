@@ -12,6 +12,7 @@ import {
 	formatLogEvent,
 	paginateLogEvents,
 	parseLogEvents,
+	parseRunMeta,
 	parseRunSnapshot,
 	renderConfig,
 	renderProjectSettings,
@@ -935,12 +936,9 @@ describe('deriveBudgets', () => {
 
 describe('renderRunSummary', () => {
 	test('shapes a completed run from its meta, taking runId from the directory name', () => {
-		const snapshot = parseRunSnapshot({
-			metaText: JSON.stringify(sampleRunMeta({ runId: 'on-disk-id' })),
-			logText: '',
-		})
+		const meta = parseRunMeta(JSON.stringify(sampleRunMeta({ runId: 'on-disk-id' })))
 
-		const summary = renderRunSummary('dir-name', snapshot)
+		const summary = renderRunSummary('dir-name', meta)
 		expect(summary).toEqual({
 			runId: 'dir-name',
 			status: 'success',
@@ -952,9 +950,7 @@ describe('renderRunSummary', () => {
 	})
 
 	test('reports unknown status and null fields when meta is absent (run in progress)', () => {
-		const snapshot = parseRunSnapshot({ metaText: null, logText: '' })
-
-		const summary = renderRunSummary('run-in-progress', snapshot)
+		const summary = renderRunSummary('run-in-progress', parseRunMeta(null))
 		expect(summary).toEqual({
 			runId: 'run-in-progress',
 			status: 'unknown',
@@ -966,21 +962,15 @@ describe('renderRunSummary', () => {
 	})
 
 	test('endTime is null when the meta omits it', () => {
-		const snapshot = parseRunSnapshot({
-			metaText: JSON.stringify(sampleRunMeta({ endTime: undefined })),
-			logText: '',
-		})
+		const meta = parseRunMeta(JSON.stringify(sampleRunMeta({ endTime: undefined })))
 
-		const summary = renderRunSummary('r', snapshot)
+		const summary = renderRunSummary('r', meta)
 		expect(summary.endTime).toBeNull()
 	})
 
 	test('carries the run effort from meta.effort', () => {
-		const snapshot = parseRunSnapshot({
-			metaText: JSON.stringify(sampleRunMeta({ effort: 4 })),
-			logText: '',
-		})
-		expect(renderRunSummary('r', snapshot).effort).toBe(4)
+		const meta = parseRunMeta(JSON.stringify(sampleRunMeta({ effort: 4 })))
+		expect(renderRunSummary('r', meta).effort).toBe(4)
 	})
 })
 

@@ -6,8 +6,8 @@
 export { runExecutor } from './executor.js'
 export type { ExecutorDependencies } from './executor.js'
 
-export { createLlmCaller } from './llm.js'
-export type { LlmCaller, LlmCallResult, LlmRequest } from './llm.js'
+export { createLlmCaller, createLlmFetch, createSleep } from './llm.js'
+export type { LlmCaller, LlmCallResult, LlmCallerDependencies, LlmFetch, LlmRequest, Sleep } from './llm.js'
 
 export { createGuildLoader } from './loader.js'
 export type { LoadGuild, LoadedGuild } from './loader.js'
@@ -33,6 +33,8 @@ export {
 	createAppendLog,
 	createWriteMeta,
 	createReadRunSnapshotById,
+	createReadRunMetaById,
+	createReadRunSnapshotStats,
 	createListRunIds,
 	createReadProjectSettings,
 	createWriteProjectSettings,
@@ -42,6 +44,10 @@ export type {
 	AppendLog,
 	WriteMeta,
 	ReadRunSnapshotById,
+	ReadRunMetaById,
+	ReadRunSnapshotStats,
+	RunSnapshotStats,
+	RunSnapshotFileStat,
 	ListRunIds,
 	RunSnapshotRaw,
 	ProjectSettings,

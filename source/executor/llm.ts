@@ -1,4 +1,5 @@
 import type { Message, ModelConfig, ToolCall, ToolManifest } from './types.js'
+import { isObject } from './validation.js'
 
 export interface LlmRequest {
 	messages: Message[]
@@ -29,8 +30,40 @@ export interface LlmCaller {
 	call(request: LlmRequest): Promise<LlmCallResult>
 }
 
-function isObject(value: unknown): value is Record<string, unknown> {
-	return typeof value === 'object' && value !== null && !Array.isArray(value)
+// The wire-level leaf the caller composes against: one HTTP round-trip that returns the status and raw body text and never converts an HTTP error status into a throw (network failures still reject, as fetch does). Everything above it — request shaping, response parsing, context-budget detection, the retry loop — is orchestration exercised in tests through createLlmCaller with a fake LlmFetch.
+export interface LlmFetchRequest {
+	method: string
+	headers: Record<string, string>
+	body: string
+}
+
+export interface LlmFetchResponse {
+	status: number
+	body: string
+}
+
+export type LlmFetch = (url: string, request: LlmFetchRequest) => Promise<LlmFetchResponse>
+
+export function createLlmFetch(): LlmFetch {
+	return async (url, request) => {
+		const response = await fetch(url, {
+			method: request.method,
+			headers: request.headers,
+			body: request.body,
+		})
+		return { status: response.status, body: await response.text() }
+	}
+}
+
+export type Sleep = (ms: number) => Promise<void>
+
+export function createSleep(): Sleep {
+	return (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+export interface LlmCallerDependencies {
+	llmFetch: LlmFetch
+	sleep: Sleep
 }
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {
@@ -178,11 +211,7 @@ function detectContextBudgetExceeded(status: number, errorBody: string, data: un
 	return { kind: 'context_budget_exceeded', promptTokens, contextWindow }
 }
 
-function sleep(ms: number): Promise<void> {
-	return new Promise((resolve) => setTimeout(resolve, ms))
-}
-
-export function createLlmCaller(model: ModelConfig): LlmCaller {
+export function createLlmCaller(model: ModelConfig, dependencies: LlmCallerDependencies): LlmCaller {
 	const url = `${model.apiBase}/chat/completions`
 
 	async function call(request: LlmRequest): Promise<LlmCallResult> {
@@ -221,9 +250,9 @@ export function createLlmCaller(model: ModelConfig): LlmCaller {
 		while (attempt < maxAttempts) {
 			attempt++
 
-			let response: Response
+			let response: LlmFetchResponse
 			try {
-				response = await fetch(url, {
+				response = await dependencies.llmFetch(url, {
 					method: 'POST',
 					headers,
 					body: JSON.stringify(body),
@@ -233,14 +262,14 @@ export function createLlmCaller(model: ModelConfig): LlmCaller {
 				if (attempt >= maxAttempts) {
 					return { kind: 'llm_unavailable', message: `Network error after ${attempt} attempts: ${lastError}` }
 				}
-				await sleep(Math.pow(2, attempt) * 100)
+				await dependencies.sleep(Math.pow(2, attempt) * 100)
 				continue
 			}
 
-			if (response.ok) {
+			if (response.status >= 200 && response.status < 300) {
 				let data: unknown
 				try {
-					data = await response.json()
+					data = JSON.parse(response.body)
 				} catch {
 					return { kind: 'llm_unavailable', message: 'Failed to parse JSON response' }
 				}
@@ -251,17 +280,11 @@ export function createLlmCaller(model: ModelConfig): LlmCaller {
 				return parsed
 			}
 
+			const errorBodyText = response.body
 			let parsedErrorBody: unknown
-			let errorBodyText: string
 			try {
-				errorBodyText = await response.text()
-				try {
-					parsedErrorBody = JSON.parse(errorBodyText)
-				} catch {
-					parsedErrorBody = undefined
-				}
+				parsedErrorBody = JSON.parse(errorBodyText)
 			} catch {
-				errorBodyText = ''
 				parsedErrorBody = undefined
 			}
 
@@ -275,7 +298,7 @@ export function createLlmCaller(model: ModelConfig): LlmCaller {
 				if (attempt >= maxAttempts) {
 					return { kind: 'llm_unavailable', message: lastError }
 				}
-				await sleep(Math.pow(2, attempt) * 100)
+				await dependencies.sleep(Math.pow(2, attempt) * 100)
 				continue
 			}
 

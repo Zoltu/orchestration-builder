@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { type SubprocessOutcome, type SubprocessRunner } from './typecheck.ts'
+import { type SubprocessOutcome, type SubprocessRunner } from './subprocess-tool.ts'
 import { createTest } from './test.ts'
 import type { TestData } from './test.ts'
 

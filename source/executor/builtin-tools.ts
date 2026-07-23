@@ -1,6 +1,7 @@
 import { createToolError, isErrorKind } from './errors.js'
 import type { Message, ResultCard, ToolResult } from './types.js'
 import { stripReasoning } from './context-policy.js'
+import { isObject } from './validation.js'
 import type { ToolHandler } from './tool-dispatch.js'
 import type { HumanBackend } from './human-backend.js'
 import type { RoleState } from './engine.js'
@@ -10,10 +11,6 @@ export interface BuiltInToolContext {
 	roleState: RoleState
 	humanBackend: HumanBackend
 	contextWindow: number
-}
-
-function isObject(value: unknown): value is Record<string, unknown> {
-	return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
 interface FinishValidationSuccess {
@@ -196,10 +193,11 @@ function applyEditOperations(history: Message[], operations: ContextEditOperatio
 			if (typeof op.content !== 'string') {
 				return { ok: false, error: createToolError('invalid_arguments', 'replace.content must be a string') }
 			}
-			if (op.index >= next.length) {
+			const existing = next[op.index]
+			if (existing === undefined) {
 				return { ok: false, error: createToolError('invalid_arguments', `replace.index ${op.index} is out of range`) }
 			}
-			next[op.index] = { ...next[op.index]!, content: op.content }
+			next[op.index] = { ...existing, content: op.content }
 		}
 	}
 	return { ok: true, history: next }

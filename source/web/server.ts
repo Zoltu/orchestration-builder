@@ -3,14 +3,15 @@
 import * as path from 'node:path'
 import { existsSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
-import type { ListRunIds, ReadProjectSettings, ReadRunSnapshotById, WriteProjectSettings } from '../executor/persistence.js'
+import type { ListRunIds, ReadProjectSettings, ReadRunMetaById, ReadRunSnapshotStats, WriteProjectSettings } from '../executor/persistence.js'
 import type { EffortLevel, GuildConfig, ToolManifest } from '../executor/types.js'
-import { isEffortLevel } from '../executor/validation.js'
+import { isEffortLevel, isObject } from '../executor/validation.js'
 import type { RunState } from '../executor/run-state.js'
 import type { RunSubmission } from '../executor/run-submission.js'
-import { parseRunSnapshot, paginateLogEvents, renderConfig, renderProjectSettings, renderPendingQuestions, renderRunSummary, renderRunView, formatLogAsText, toRecentLogEntry } from './render.js'
+import { paginateLogEvents, parseRunMeta, renderConfig, renderProjectSettings, renderPendingQuestions, renderRunSummary, renderRunView, formatLogAsText, toRecentLogEntry } from './render.js'
 import { deriveInteractionModel } from './interaction-model-adapter.js'
 import { DEMO_SCENARIOS, deriveDemoFrameModel, findDemoScenario } from './demo-fixtures.js'
+import type { ReadRunSnapshot } from './snapshot-cache.js'
 
 const STATIC_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), 'static')
 const MAX_LOG_LINES = 200
@@ -31,7 +32,9 @@ export interface WebServerConfig {
 	tools: Record<string, ToolManifest>
 	runState: RunState
 	runSubmission: RunSubmission
-	readRunSnapshotById: ReadRunSnapshotById
+	readRunSnapshot: ReadRunSnapshot
+	readRunMetaById: ReadRunMetaById
+	readRunSnapshotStats: ReadRunSnapshotStats
 	listRunIds: ListRunIds
 	readProjectSettings: ReadProjectSettings
 	writeProjectSettings: WriteProjectSettings
@@ -42,10 +45,6 @@ export interface WebServer {
 	stop(): void
 }
 
-function isObject(value: unknown): value is Record<string, unknown> {
-	return typeof value === 'object' && value !== null && !Array.isArray(value)
-}
-
 function json(data: unknown, status = 200): Response {
 	return new Response(JSON.stringify(data), {
 		status,
@@ -53,7 +52,7 @@ function json(data: unknown, status = 200): Response {
 	})
 }
 
-	function serveStaticPath(requestPath: string): Response {
+function serveStaticPath(requestPath: string): Response {
 		const relativePath = requestPath === '/' ? 'index.html' : requestPath.slice(1)
 	const resolvedPath = path.resolve(STATIC_DIR, relativePath)
 	// The separator check rejects `..` segments that resolve outside the static dir (e.g. `/../source/web/server.ts`), preserving the traversal safety the explicit route map gave for free.
@@ -71,29 +70,29 @@ function json(data: unknown, status = 200): Response {
 	})
 }
 
-function handleActiveRun(readRunSnapshotById: ReadRunSnapshotById, runSubmission: RunSubmission): Response {
+function handleActiveRun(readRunSnapshot: ReadRunSnapshot, readRunSnapshotStats: ReadRunSnapshotStats, runSubmission: RunSubmission): Response {
 	const runId = runSubmission.lastRunId()
 	if (runId === undefined) return json({ ok: false, error: 'no_run' }, 404)
-	const view = runViewFor(readRunSnapshotById, runId)
+	const view = runViewFor(readRunSnapshot, readRunSnapshotStats, runId)
 	if (view === null) return json({ ok: false, error: 'not_found' }, 404)
 	return json(view)
 }
 
-function handleActiveRunFlow(readRunSnapshotById: ReadRunSnapshotById, runSubmission: RunSubmission): Response {
+function handleActiveRunFlow(readRunSnapshot: ReadRunSnapshot, readRunSnapshotStats: ReadRunSnapshotStats, runSubmission: RunSubmission): Response {
 	const runId = runSubmission.lastRunId()
 	if (runId === undefined) return json({ ok: false, error: 'no_run' }, 404)
-	return runFlowPage(readRunSnapshotById, runId)
+	return runFlowPage(readRunSnapshot, readRunSnapshotStats, runId)
 }
 
-function handleGetRunById(readRunSnapshotById: ReadRunSnapshotById, runId: string): Response {
-	const view = runViewFor(readRunSnapshotById, runId)
+function handleGetRunById(readRunSnapshot: ReadRunSnapshot, readRunSnapshotStats: ReadRunSnapshotStats, runId: string): Response {
+	const view = runViewFor(readRunSnapshot, readRunSnapshotStats, runId)
 	if (view === null) return json({ ok: false, error: 'not_found' }, 404)
 	return json(view)
 }
 
-function runLogPage(readRunSnapshotById: ReadRunSnapshotById, runId: string, query: URLSearchParams): Response {
-	if (!isKnownRun(readRunSnapshotById, runId)) return json({ ok: false, error: 'not_found' }, 404)
-	const snapshot = parseRunSnapshot(readRunSnapshotById(runId))
+function runLogPage(readRunSnapshot: ReadRunSnapshot, readRunSnapshotStats: ReadRunSnapshotStats, runId: string, query: URLSearchParams): Response {
+	if (!isKnownRun(readRunSnapshotStats, runId)) return json({ ok: false, error: 'not_found' }, 404)
+	const snapshot = readRunSnapshot(runId)
 	const events = snapshot.logEvents
 	const offset = parseNonNegativeInt(query.get('offset'), 0)
 	const limit = parseNonNegativeInt(query.get('limit'), MAX_LOG_LINES)
@@ -121,15 +120,15 @@ function parseNonNegativeInt(value: string | null, defaultValue: number): number
 
 // Serves the structured InteractionModel derived from a run's full snapshot.
 // The model is JSON (identifiers, counters, costs as values; agent prose as markdown strings in `details`); the client renders `details` only through the sanitized Markdown pipeline, so the server does not sanitize — it must not serve pre-rendered HTML that would bypass the client's sanitization.
-function runFlowPage(readRunSnapshotById: ReadRunSnapshotById, runId: string): Response {
-	if (!isKnownRun(readRunSnapshotById, runId)) return json({ ok: false, error: 'not_found' }, 404)
-	const snapshot = parseRunSnapshot(readRunSnapshotById(runId))
+function runFlowPage(readRunSnapshot: ReadRunSnapshot, readRunSnapshotStats: ReadRunSnapshotStats, runId: string): Response {
+	if (!isKnownRun(readRunSnapshotStats, runId)) return json({ ok: false, error: 'not_found' }, 404)
+	const snapshot = readRunSnapshot(runId)
 	return json(deriveInteractionModel(snapshot, new Date().toISOString()))
 }
 
-function runViewFor(readRunSnapshotById: ReadRunSnapshotById, runId: string): ReturnType<typeof renderRunView> | null {
-	if (!isKnownRun(readRunSnapshotById, runId)) return null
-	const snapshot = parseRunSnapshot(readRunSnapshotById(runId))
+function runViewFor(readRunSnapshot: ReadRunSnapshot, readRunSnapshotStats: ReadRunSnapshotStats, runId: string): ReturnType<typeof renderRunView> | null {
+	if (!isKnownRun(readRunSnapshotStats, runId)) return null
+	const snapshot = readRunSnapshot(runId)
 	return renderRunView(snapshot, { maxLogLines: MAX_LOG_LINES, now: new Date().toISOString() })
 }
 
@@ -152,16 +151,16 @@ function handleDemoScenarios(): Response {
 	return json(manifests)
 }
 
-function isKnownRun(readRunSnapshotById: ReadRunSnapshotById, runId: string): boolean {
-	const raw = readRunSnapshotById(runId)
-	return raw.metaText !== null || raw.logText !== ''
+function isKnownRun(readRunSnapshotStats: ReadRunSnapshotStats, runId: string): boolean {
+	const stats = readRunSnapshotStats(runId)
+	return stats.meta !== null || stats.log !== null
 }
 
-function handleListRuns(readRunSnapshotById: ReadRunSnapshotById, listRunIds: ListRunIds): Response {
+function handleListRuns(readRunMetaById: ReadRunMetaById, listRunIds: ListRunIds): Response {
 	const summaries = listRunIds()
 		.slice()
 		.sort((a, b) => (a < b ? 1 : a > b ? -1 : 0))
-		.map((runId) => renderRunSummary(runId, parseRunSnapshot(readRunSnapshotById(runId))))
+		.map((runId) => renderRunSummary(runId, parseRunMeta(readRunMetaById(runId))))
 	return json(summaries)
 }
 
@@ -204,7 +203,9 @@ export function createWebServer(config: WebServerConfig): WebServer {
 	const guildConfig = config.guildConfig
 	const runState = config.runState
 	const runSubmission = config.runSubmission
-	const readRunSnapshotById = config.readRunSnapshotById
+	const readRunSnapshot = config.readRunSnapshot
+	const readRunMetaById = config.readRunMetaById
+	const readRunSnapshotStats = config.readRunSnapshotStats
 	const listRunIds = config.listRunIds
 	const readProjectSettings = config.readProjectSettings
 	const writeProjectSettings = config.writeProjectSettings
@@ -215,64 +216,64 @@ export function createWebServer(config: WebServerConfig): WebServer {
 			const url = new URL(request.url)
 			const { pathname } = url
 
-		if (request.method === 'GET') {
-		if (pathname === '/api/config') return json(renderConfig(guildConfig, config.tools))
-			if (pathname === '/api/settings') return handleGetSettings(readProjectSettings)
-			if (pathname === '/api/run/flow') return handleActiveRunFlow(readRunSnapshotById, runSubmission)
-			if (pathname === '/api/run') return handleActiveRun(readRunSnapshotById, runSubmission)
-			if (pathname === '/api/runs') return handleListRuns(readRunSnapshotById, listRunIds)
-			if (pathname.startsWith('/api/runs/')) {
-				const rest = decodeURIComponent(pathname.slice('/api/runs/'.length))
-				// Match a /log or /flow suffix before the bare :id route so /api/runs/<id>/log and /api/runs/<id>/flow reach their endpoints rather than being swallowed as a run id of "<id>/log" or "<id>/flow".
-				const slashIndex = rest.lastIndexOf('/')
-				if (slashIndex >= 0) {
-					const suffix = rest.slice(slashIndex + 1)
-					const runId = rest.slice(0, slashIndex)
-					if (runId !== '') {
-						if (suffix === 'log') return runLogPage(readRunSnapshotById, runId, url.searchParams)
-						if (suffix === 'flow') return runFlowPage(readRunSnapshotById, runId)
+			if (request.method === 'GET') {
+				if (pathname === '/api/config') return json(renderConfig(guildConfig, config.tools))
+				if (pathname === '/api/settings') return handleGetSettings(readProjectSettings)
+				if (pathname === '/api/run/flow') return handleActiveRunFlow(readRunSnapshot, readRunSnapshotStats, runSubmission)
+				if (pathname === '/api/run') return handleActiveRun(readRunSnapshot, readRunSnapshotStats, runSubmission)
+				if (pathname === '/api/runs') return handleListRuns(readRunMetaById, listRunIds)
+				if (pathname.startsWith('/api/runs/')) {
+					const rest = decodeURIComponent(pathname.slice('/api/runs/'.length))
+					// Match a /log or /flow suffix before the bare :id route so /api/runs/<id>/log and /api/runs/<id>/flow reach their endpoints rather than being swallowed as a run id of "<id>/log" or "<id>/flow".
+					const slashIndex = rest.lastIndexOf('/')
+					if (slashIndex >= 0) {
+						const suffix = rest.slice(slashIndex + 1)
+						const runId = rest.slice(0, slashIndex)
+						if (runId !== '') {
+							if (suffix === 'log') return runLogPage(readRunSnapshot, readRunSnapshotStats, runId, url.searchParams)
+							if (suffix === 'flow') return runFlowPage(readRunSnapshot, readRunSnapshotStats, runId)
+						}
 					}
+					return handleGetRunById(readRunSnapshot, readRunSnapshotStats, rest)
 				}
-				return handleGetRunById(readRunSnapshotById, rest)
-			}
-			if (pathname === '/api/questions') return json(renderPendingQuestions(runState.pendingQuestions()))
-			if (pathname === '/api/demo/scenarios') return handleDemoScenarios()
-			if (pathname.startsWith('/api/demo/flow/')) {
-				const rest = decodeURIComponent(pathname.slice('/api/demo/flow/'.length))
-				const slashIndex = rest.lastIndexOf('/')
-				if (slashIndex >= 0) {
-					const scenarioId = rest.slice(0, slashIndex)
-					const frameRaw = rest.slice(slashIndex + 1)
-					const frameIndex = Number(frameRaw)
-					if (scenarioId !== '' && Number.isInteger(frameIndex)) return demoFrameModel(scenarioId, frameIndex)
+				if (pathname === '/api/questions') return json(renderPendingQuestions(runState.pendingQuestions()))
+				if (pathname === '/api/demo/scenarios') return handleDemoScenarios()
+				if (pathname.startsWith('/api/demo/flow/')) {
+					const rest = decodeURIComponent(pathname.slice('/api/demo/flow/'.length))
+					const slashIndex = rest.lastIndexOf('/')
+					if (slashIndex >= 0) {
+						const scenarioId = rest.slice(0, slashIndex)
+						const frameRaw = rest.slice(slashIndex + 1)
+						const frameIndex = Number(frameRaw)
+						if (scenarioId !== '' && Number.isInteger(frameIndex)) return demoFrameModel(scenarioId, frameIndex)
+					}
+					return json({ ok: false, error: 'not_found' }, 404)
 				}
-				return json({ ok: false, error: 'not_found' }, 404)
-			}
-		// Browsers auto-request /favicon.ico on every page load; answer 204 so it does not pollute the console with a 404.
-		if (pathname === '/favicon.ico') return new Response(null, { status: 204 })
-		return serveStaticPath(pathname)
+				// Browsers auto-request /favicon.ico on every page load; answer 204 so it does not pollute the console with a 404.
+				if (pathname === '/favicon.ico') return new Response(null, { status: 204 })
+				return serveStaticPath(pathname)
 			}
 
-		if (request.method === 'POST') {
-			if (pathname === '/api/runs') {
-				const body = await readJsonBody(request)
-				if (body === undefined) return json({ ok: false, error: 'invalid_body' }, 400)
-				return handleCreateRun(runSubmission, body)
+			if (request.method === 'POST') {
+				if (pathname === '/api/runs') {
+					const body = await readJsonBody(request)
+					if (body === undefined) return json({ ok: false, error: 'invalid_body' }, 400)
+					return handleCreateRun(runSubmission, body)
+				}
+				if (pathname === '/api/answer') {
+					const body = await readJsonBody(request)
+					if (body === undefined) return json({ ok: false, error: 'invalid_body' }, 400)
+					return handleAnswer(runState, body)
+				}
 			}
-			if (pathname === '/api/answer') {
-				const body = await readJsonBody(request)
-				if (body === undefined) return json({ ok: false, error: 'invalid_body' }, 400)
-				return handleAnswer(runState, body)
-			}
-		}
 
-		if (request.method === 'PUT') {
-			if (pathname === '/api/settings') {
-				const body = await readJsonBody(request)
-				if (body === undefined) return json({ ok: false, error: 'invalid_body' }, 400)
-				return handlePutSettings(writeProjectSettings, body)
+			if (request.method === 'PUT') {
+				if (pathname === '/api/settings') {
+					const body = await readJsonBody(request)
+					if (body === undefined) return json({ ok: false, error: 'invalid_body' }, 400)
+					return handlePutSettings(writeProjectSettings, body)
+				}
 			}
-		}
 
 			return json({ ok: false, error: 'not_found' }, 404)
 		},

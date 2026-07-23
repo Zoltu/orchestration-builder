@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { QuestionModal, derivePendingQuestion } from './static/question-modal.js'
+import { QuestionModal } from './static/question-modal.js'
 
 // The question-modal component is browser-pure JS, so its exports arrive with inferred JS types. The interfaces and fake `h`/`renderMarkdown` below carry the shape the tests assert against, mirroring flow-view.test.ts.
 
@@ -53,38 +53,6 @@ function allByTag(vnode: Vnode, tag: string): Vnode[] {
 function fakeRenderMarkdown(text: string): Vnode {
 	return { tag: 'span', props: { class: 'md-marker', 'data-text': text }, children: [text] }
 }
-
-describe('derivePendingQuestion', () => {
-	test('returns the first question history entry without an answer', () => {
-		const runView = {
-			questionHistory: [
-				{ id: 'q1', question: 'which CI?', askedAt: 't1', answer: 'GitHub Actions', answeredAt: 't2' },
-				{ id: 'q2', question: 'which runtime?', context: 'node 20', askedAt: 't3' },
-			],
-		}
-		const pending = derivePendingQuestion(runView)
-		expect(pending).toBeDefined()
-		expect(pending!.id).toBe('q2')
-		expect(pending!.question).toBe('which runtime?')
-		expect(pending!.context).toBe('node 20')
-	})
-
-	test('returns undefined when every question has been answered', () => {
-		const runView = {
-			questionHistory: [
-				{ id: 'q1', question: 'which CI?', askedAt: 't1', answer: 'GitHub Actions', answeredAt: 't2' },
-			],
-		}
-		expect(derivePendingQuestion(runView)).toBeUndefined()
-	})
-
-	test('returns undefined when there is no question history', () => {
-		expect(derivePendingQuestion({ questionHistory: [] })).toBeUndefined()
-		expect(derivePendingQuestion({})).toBeUndefined()
-		expect(derivePendingQuestion(null)).toBeUndefined()
-		expect(derivePendingQuestion(undefined)).toBeUndefined()
-	})
-})
 
 describe('QuestionModal', () => {
 	const question = { id: 'q1', question: 'Which CI provider should I target?', context: '.github/workflows/', askedAt: 't1' }

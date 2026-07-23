@@ -7,6 +7,8 @@
 // `h` and `renderMarkdown` are passed in rather than imported so the component stays free of hyperapp and showdown coupling and is exercisable in tests with fakes (mirroring question-modal.js / result-modal.js).
 
 // A labeled detail block, mirroring the `LogDetailSection` shape `formatLogDetailSections` (source/web/render.ts) produces: a machine label (`'arguments'`, `'result'`, `'summary'`, `'error'`, `'usage'`, …) and the raw content the tooltip then formats by kind.
+
+import { isObject } from './guards.js'
 export function isTooltipSection(value) {
 	if (typeof value !== 'object' || value === null) return false
 	if (typeof value.label !== 'string') return false
@@ -117,10 +119,6 @@ export function tooltipStyle(rect) {
 // derivation returns `{ title: '', sections: [] }` when its id does not resolve, which the wiring
 // treats as "no card" so a stale hover state (e.g. an operation id from a frame the poll has since
 // replaced) dismisses rather than rendering a heading-less card.
-
-function isObject(value) {
-	return typeof value === 'object' && value !== null
-}
 
 function scalarSection(label, content) {
 	return { label, content, scalar: true }

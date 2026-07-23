@@ -9,6 +9,7 @@
 // `h` is passed in rather than imported so the module stays free of hyperapp coupling and the vnode shape is exercisable in tests with a fake `h`, mirroring the sibling flow-view.js convention. The label resolver is passed in alongside the selected tier so a caller can swap the resolver or tier without the view reaching for globals; node prose is localization, a view concern, and the model carries no prose.
 
 import { activeOperation, activeStack } from './interaction-model.js'
+import { ATTR_OPERATION, ATTR_ROLE } from './inspector.js'
 import { LoopbackEdge } from './svg-primitives.js'
 
 // Layout constants. Columns are evenly spaced on COLUMN_WIDTH centers; messages stack on ROW_HEIGHT centers below the header. The viewBox is sized to the laid-out content so the host container can scale it to fit its width and scroll vertically for long timelines.
@@ -154,7 +155,7 @@ function renderTerminalNode(h, x, y, state, operation, columnRole, end) {
 	const rectX = x - TERMINAL_NODE_WIDTH / 2
 	const classes = ['seq-node']
 	if (state !== null) classes.push(`seq-node--${state}`)
-	return h('g', { class: classes.join(' '), 'data-operation': operation.id, 'data-node-end': end, 'data-column-role': columnRole, 'data-state': state === null ? 'neutral' : state }, [
+	return h('g', { class: classes.join(' '), [ATTR_OPERATION]: operation.id, 'data-node-end': end, 'data-column-role': columnRole, 'data-state': state === null ? 'neutral' : state }, [
 		h('rect', { class: 'seq-node-box', x: rectX, y: y - TERMINAL_NODE_HEIGHT / 2, width: TERMINAL_NODE_WIDTH, height: TERMINAL_NODE_HEIGHT, rx: 3 }, []),
 	])
 }
@@ -214,7 +215,7 @@ export function renderSequenceView(h, model, labels, tier, guildParticipants) {
 	const columnGroups = columns.map((column, index) => {
 		const x = columnX(index)
 		const label = resolveColumnLabel(model, column, labels, tier)
-		return h('g', { class: `seq-column seq-column--${column.kind}`, 'data-role': column.role, 'data-kind': column.kind }, [
+		return h('g', { class: `seq-column seq-column--${column.kind}`, [ATTR_ROLE]: column.role, 'data-kind': column.kind }, [
 			h('text', { class: 'seq-column-label', x, y: HEADER_HEIGHT - 14, 'text-anchor': 'middle' }, [label]),
 			h('line', { class: 'seq-lifeline', x1: x, y1: HEADER_HEIGHT, x2: x, y2: lifelineBottom }, []),
 		])
@@ -236,7 +237,7 @@ export function renderSequenceView(h, model, labels, tier, guildParticipants) {
 		if (operation.kind === 'observe') {
 			const d = `M ${sourceX} ${rowY} L ${destinationX} ${rowY}`
 			const path = h('path', { class: messageLineClass(operation, animationState), d, 'data-source-role': sourceParticipant.role, 'data-destination-role': destinationParticipant.role }, [])
-			return h('g', { class: 'seq-message-group', 'data-operation': operation.id, 'data-kind': 'observe', 'data-routing': 'observe', 'data-source-role': sourceParticipant.role, 'data-destination-role': destinationParticipant.role, 'data-animation': animationState }, [
+			return h('g', { class: 'seq-message-group', [ATTR_OPERATION]: operation.id, 'data-kind': 'observe', 'data-routing': 'observe', 'data-source-role': sourceParticipant.role, 'data-destination-role': destinationParticipant.role, 'data-animation': animationState }, [
 				h('title', {}, [label]),
 				path,
 			])
@@ -247,7 +248,7 @@ export function renderSequenceView(h, model, labels, tier, guildParticipants) {
 			const d = `M ${sourceX} ${rowY} L ${destinationX} ${rowY}`
 			const path = h('path', { class: messageLineClass(operation, animationState), d, 'data-source-role': sourceParticipant.role, 'data-destination-role': destinationParticipant.role }, [])
 			const targetNode = renderTerminalNode(h, destinationX, rowY, 'terminate-target', operation, destinationParticipant.role, 'destination')
-			return h('g', { class: 'seq-message-group', 'data-operation': operation.id, 'data-kind': 'terminate', 'data-routing': 'terminate', 'data-source-role': sourceParticipant.role, 'data-destination-role': destinationParticipant.role, 'data-animation': animationState }, [
+			return h('g', { class: 'seq-message-group', [ATTR_OPERATION]: operation.id, 'data-kind': 'terminate', 'data-routing': 'terminate', 'data-source-role': sourceParticipant.role, 'data-destination-role': destinationParticipant.role, 'data-animation': animationState }, [
 				h('title', {}, [label]),
 				path,
 				targetNode,
@@ -277,7 +278,7 @@ export function renderSequenceView(h, model, labels, tier, guildParticipants) {
 
 		return h('g', {
 			class: 'seq-message-group',
-			'data-operation': operation.id,
+			[ATTR_OPERATION]: operation.id,
 			'data-kind': operation.kind,
 			'data-routing': sameColumn ? 'loopback' : 'cross-column',
 			'data-source-role': sourceParticipant.role,
