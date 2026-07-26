@@ -32,11 +32,11 @@ Containment for `run_shell` is expected to come from the deployment environment 
 
 ## Acceptance criteria
 
-- [ ] `bun run typecheck` passes.
-- [ ] `bun test source/` passes, including `run-shell.test.ts` and the updated conformance/seed-guild tests.
-- [ ] A non-zero exit code is returned as `{ kind: 'success', data: { exitCode, ... } }`, not as an error.
-- [ ] A timed-out command returns `{ kind: 'timeout', details: { afterSeconds } }`.
-- [ ] The conformance test asserts the new manifest count.
+- [x] `bun run typecheck` passes.
+- [x] `bun test source/` passes, including `run-shell.test.ts` and the updated conformance/seed-guild tests.
+- [x] A non-zero exit code is returned as `{ kind: 'success', data: { exitCode, ... } }`, not as an error.
+- [x] A timed-out command returns `{ kind: 'timeout', details: { afterSeconds } }`.
+- [x] The conformance test asserts the new manifest count.
 
 ## End-of-step evaluation
 
@@ -53,3 +53,19 @@ None for the tool code — fully in-memory (tests use portable commands). The re
 ## ⚠️ Testing caution
 
 `run_shell` executes arbitrary shell commands. When testing against a real LLM, the model may generate destructive commands (e.g. `rm -rf`, process spawning, network calls). Test only in an isolated environment (a throwaway container or VM) with the workspace mounted as a throwaway copy. Do not test in the development environment — a confused model can wreck it.
+
+## Closeout (2026-07-23)
+
+✅ complete (in-environment). `bun run typecheck` and `bun test source/` green (779 pass). No real-LLM smoke run was done: the testing caution above forbids exercising `run_shell` against a real model in the development environment, and the step's gate is the in-memory suite (which includes real-`sh` temp-dir tests through `createBunSubprocessRunner`).
+
+### Deviations from the plan wording
+
+- **`run-shell.ts` reuses the shared subprocess machinery instead of duplicating it.** The deliverable text implied a standalone leaf; instead `SubprocessToolConfig.command` became a `CommandSource` union — a fixed argv for the checkers (pinned in the leaf, as before) or a resolver for `run_shell` that validates the `command` argument and builds `['sh', '-c', command]`, returning an error result rather than throwing. `createRunShell` is then as thin as `createTypecheck`/`createTest`, and there is exactly one timeout-clamp / truncation / result-shaping path (`createSubprocessTool` → `truncateToolOutput`), as the end-of-step evaluation requires. `sh -c` gives real shell semantics (pipes, redirects, `&&`), covered by a real-runner test.
+- **The runner's timeout path was fixed for shell grandchildren.** `createBunSubprocessRunner` previously awaited pipe end after killing the child; a killed shell's orphaned grandchildren keep the pipes open, so a timed-out `sh -c 'sleep 10'` hung the tool result for the full 10s (reproduced in-environment). Streams are now drained through an explicit reader (`drainStream`) whose `cancel` the timeout path awaits, settling promptly with the partial output captured before the kill. Without this fix the acceptance criterion "a timed-out command returns `kind: 'timeout'`" fails through the real shell path. The checkers are unaffected (their direct child holds the pipes). A killed command's grandchildren are still not reaped (no portable process-group kill through `Bun.spawn`); they run to completion in the background — reaping is the deployment environment's job, per this step's containment stance.
+- **Three stale doc lines updated.** `docs/reference.md` ("lands after per-run environment isolation"), `docs/security.md` ("ships only after per-run environment isolation lands"), and `docs/architecture.md` ("future work that unblocks the `run_shell` tool") all described `run_shell` as not-yet-landed; they now state the step-29 containment stance (containment from the deployment environment; per-run isolation is Foundry work; no in-tool allowlist). The `run_shell` allowlist debt row in `plan/README.md` (owned by step 29, removed in step 35) is intentionally left in place.
+- **Review roles were not given `run_shell`** (the step's "probably not for v1" consideration): the step-29 brainstorm pinned reviewers as read-only leaves, so only the `coder` received it.
+- **`tools.test.ts`'s handler-key list was updated** alongside the conformance tests the deliverables named; it pins the same native tool set.
+
+### End-of-step confirmation
+
+The timeout path kills the child and returns promptly (the real-runner `sleep 10` test returns `kind: 'timeout'` with `details.afterSeconds` in ~0.2s; the full suite runs in under 3s). stdout/stderr caps use the single shared truncation helper. The coder prompt's "Running other commands" section positions `run_shell` strictly as the fallback for commands the dedicated checkers do not cover and defers to `typecheck`/`test` for test/typecheck runs — no contradiction with the "Verifying changes" section. No `as` casts, no non-null assertions, no control-flow try/catch introduced (the runner's spawn try/catch is the pre-existing exceptional-case boundary).

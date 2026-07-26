@@ -104,6 +104,8 @@ export function formatLogEvent(event: LogEvent): string {
 			return withRole(role, 'llm unavailable')
 		case 'context_budget_exceeded':
 			return withRole(role, 'context budget exceeded')
+		case 'context_compacted':
+			return withRole(role, 'context compacted by platform')
 		case 'role_budget_exceeded':
 			return withRole(role, 'role budget exceeded')
 		case 'global_budget_exceeded':
@@ -138,6 +140,20 @@ export function formatLogEvent(event: LogEvent): string {
 			const child = stringField(payload, 'child')
 			return withRole(parent ?? role, `agent call${child !== null ? ` → ${child}` : ''}`)
 		}
+		case 'interrupt': {
+			const handler = stringField(payload, 'handler')
+			const target = stringField(payload, 'target')
+			return handler !== null && target !== null ? `interrupt (${handler} on ${target})` : 'interrupt'
+		}
+		case 'interrupt_resolved': {
+			const action = stringField(payload, 'action')
+			const target = stringField(payload, 'target')
+			return action !== null && target !== null ? `interrupt resolved (${action} on ${target})` : 'interrupt resolved'
+		}
+		case 'operator_inquiry':
+			return withRole(role, 'operator inquiry')
+		case 'plan_modification':
+			return withRole(role, 'operator plan modification')
 		default:
 			return role === null ? event.type : `${event.type} · ${role}`
 	}
@@ -485,6 +501,84 @@ export function deriveQuestionHistory(logEvents: LogEvent[]): QuestionHistoryEnt
 	return entries
 }
 
+export interface InterruptInquiryEntry {
+	kind: 'inquiry'
+	askedAt: string
+	role: string | null
+	message: string
+	answer: string | null
+	answeredAt: string | null
+	// Set when the role that received the inquiry finished without ever producing a content-bearing response to pair with it, so the UI stops offering "waiting".
+	ended: boolean
+}
+
+export interface InterruptPlanModEntry {
+	kind: 'plan_modification'
+	askedAt: string
+	message: string
+	target: string | null
+	targetRole: string | null
+	aborted: string[]
+}
+
+export type InterruptHistoryEntry = InterruptInquiryEntry | InterruptPlanModEntry
+
+// Pairs each operator inquiry with the answer the recipient role produced: the marker is injected as a user message, so the role's first content-bearing llm_call after the injection is its reply. Pairing is per role name and in order (the oldest unanswered inquiry for a role takes that role's next content response); an inquiry whose role finishes without one is marked ended rather than left "waiting" forever. Plan modifications have no reply to pair — their delivery and abort outcome are on the event itself.
+export function deriveInterruptHistory(logEvents: LogEvent[]): InterruptHistoryEntry[] {
+	const entries: InterruptHistoryEntry[] = []
+	const unansweredByRole = new Map<string, InterruptInquiryEntry[]>()
+
+	for (const event of logEvents) {
+		const payload = event.payload
+		if (!isObject(payload)) continue
+
+		if (event.type === 'operator_inquiry') {
+			const message = stringField(payload, 'message')
+			if (message === null) continue
+			const role = stringField(payload, 'role')
+			const entry: InterruptInquiryEntry = { kind: 'inquiry', askedAt: event.timestamp, role, message, answer: null, answeredAt: null, ended: false }
+			entries.push(entry)
+			if (role !== null) {
+				const queue = unansweredByRole.get(role) ?? []
+				queue.push(entry)
+				unansweredByRole.set(role, queue)
+			}
+			continue
+		}
+		if (event.type === 'plan_modification') {
+			const message = stringField(payload, 'message')
+			if (message === null) continue
+			const abortedRaw = payload['aborted']
+			const aborted = Array.isArray(abortedRaw) ? abortedRaw.filter((item): item is string => typeof item === 'string') : []
+			entries.push({ kind: 'plan_modification', askedAt: event.timestamp, message, target: stringField(payload, 'target'), targetRole: stringField(payload, 'targetRole'), aborted })
+			continue
+		}
+		if (event.type === 'llm_call') {
+			const role = stringField(payload, 'role')
+			if (role === null) continue
+			const queue = unansweredByRole.get(role)
+			if (queue === undefined || queue.length === 0) continue
+			const received = payload['received']
+			const content = isObject(received) && typeof received['content'] === 'string' ? received['content'] : null
+			if (content === null || content === '') continue
+			const entry = queue.shift()
+			if (entry === undefined) continue
+			entry.answer = content
+			entry.answeredAt = event.timestamp
+			continue
+		}
+		if (event.type === 'role_finished') {
+			const role = stringField(payload, 'role')
+			if (role === null) continue
+			const queue = unansweredByRole.get(role)
+			if (queue === undefined) continue
+			for (const entry of queue) entry.ended = true
+			unansweredByRole.delete(role)
+		}
+	}
+	return entries
+}
+
 export interface RunView {
 	status: RunMeta['status'] | 'unknown'
 	runId: string | null
@@ -499,6 +593,7 @@ export interface RunView {
 	recentLog: RecentLogEntry[]
 	currentActivity: CurrentActivity | null
 	questionHistory: QuestionHistoryEntry[]
+	interrupts: InterruptHistoryEntry[]
 	budgets: Budgets
 }
 
@@ -529,6 +624,7 @@ export function renderRunView(snapshot: RunSnapshot, options: RenderRunViewOptio
 		recentLog,
 		currentActivity,
 		questionHistory: deriveQuestionHistory(snapshot.logEvents),
+		interrupts: deriveInterruptHistory(snapshot.logEvents),
 		budgets: deriveBudgets(snapshot.logEvents, meta, options.now),
 	}
 }

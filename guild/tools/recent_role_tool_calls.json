@@ -1,0 +1,38 @@
+{
+	"name": "recent_role_tool_calls",
+	"description": "Return a structured trace of another role instance's most recent tool calls: tool name, an argument hash, and the result kind. Read-only. Consecutive entries with the same tool and argument hash are identical calls — the loop signature.",
+	"humanLabel": {
+		"detailed": ["Recent Role Tool Calls"],
+		"friendly": ["Tool Call Trace"],
+		"whimsical": ["Footprints"]
+	},
+	"humanDescription": {
+		"detailed": ["Returns the role's recent tool calls as compact name/hash/result entries."],
+		"friendly": ["See what a role has been doing lately."],
+		"whimsical": ["Follows the footprints in the snow."]
+	},
+	"humanCallLabel": {
+		"detailed": ["role {sourceRole} is invoking tool {destinationRole} (stack {stack})"],
+		"friendly": ["{source} is reading a role's tool trace"],
+		"whimsical": ["{source} is following the footprints", "{source} is checking the tire tracks", "{source} is retracing the steps"]
+	},
+	"humanWorkingLabel": {
+		"detailed": ["tool {participantRole} is reading the role's tool trace"],
+		"friendly": ["Reading the role's tool trace"],
+		"whimsical": ["Following the footprints", "Checking the tire tracks", "Retracing the steps"]
+	},
+	"parameters": {
+		"type": "object",
+		"properties": {
+			"targetRole": {
+				"type": "string",
+				"description": "The role-instance id to inspect."
+			},
+			"limit": {
+				"type": "number",
+				"description": "Optional maximum number of recent calls to return (default 20; the trace itself is bounded)."
+			}
+		},
+		"required": ["targetRole"]
+	}
+}

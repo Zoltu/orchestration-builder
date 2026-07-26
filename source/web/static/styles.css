@@ -493,6 +493,163 @@ li:last-child {
 	color: var(--color-text-muted);
 }
 
+/* The interrupt form lives inside the run summary as the action surface for the run in flight. It reuses the create-run form's control language (textarea, accent button) at a smaller scale; the plan-modification warning reads in the error tone because that mode aborts active work. */
+.interrupt-form-wrap {
+	display: flex;
+	flex-direction: column;
+	gap: var(--space-2);
+	margin-top: var(--space-3);
+	padding-top: var(--space-3);
+	border-top: 1px solid var(--color-border);
+}
+
+.interrupt-form-wrap h3 {
+	margin: 0;
+	font-size: 0.9rem;
+}
+
+.interrupt-mode {
+	display: flex;
+	gap: var(--space-4);
+	font-size: 0.85rem;
+}
+
+.interrupt-mode label {
+	display: inline-flex;
+	align-items: center;
+	gap: var(--space-1);
+	cursor: pointer;
+	color: var(--color-text-muted);
+}
+
+.interrupt-mode label.is-active {
+	color: var(--color-text);
+	font-weight: 600;
+}
+
+.interrupt-warning {
+	margin: 0;
+	padding: var(--space-2) var(--space-3);
+	border: 1px solid var(--color-error);
+	border-radius: var(--radius-sm);
+	background: var(--color-error-soft);
+	color: var(--color-error);
+	font-size: 0.85rem;
+}
+
+.interrupt-form {
+	display: flex;
+	flex-direction: column;
+	gap: var(--space-2);
+}
+
+.interrupt-form textarea {
+	width: 100%;
+	resize: vertical;
+	padding: var(--space-2);
+	border: 1px solid var(--color-border-strong);
+	border-radius: var(--radius-sm);
+	background: var(--color-surface);
+	color: var(--color-text);
+	font-family: var(--font-body);
+	font-size: 0.9rem;
+	line-height: 1.4;
+}
+
+.interrupt-form textarea:focus-visible {
+	outline: 2px solid var(--color-accent);
+	outline-offset: 0;
+	border-color: var(--color-accent);
+}
+
+.interrupt-form button {
+	align-self: flex-start;
+	padding: 0.4rem var(--space-4);
+	border: none;
+	border-radius: var(--radius-sm);
+	background: var(--color-accent);
+	color: #ffffff;
+	font-weight: 500;
+	cursor: pointer;
+}
+
+.interrupt-form button:disabled {
+	opacity: 0.5;
+	cursor: default;
+}
+
+.interrupt-note {
+	margin: 0;
+	font-size: 0.82rem;
+	color: var(--color-text-muted);
+}
+
+/* The interrupt history lists what the operator sent (questions and plan changes) and what the run did with each. It sits above the interrupt form in the run summary so the answer to a question appears right where the question was sent. */
+.interrupt-history {
+	margin-top: var(--space-3);
+	padding-top: var(--space-3);
+	border-top: 1px solid var(--color-border);
+}
+
+.interrupt-history h3 {
+	margin: 0 0 var(--space-2);
+	font-size: 0.9rem;
+}
+
+.interrupt-history ul {
+	list-style: none;
+	margin: 0;
+	padding: 0;
+	display: flex;
+	flex-direction: column;
+	gap: var(--space-3);
+}
+
+.interrupt-history li {
+	display: flex;
+	flex-direction: column;
+	gap: var(--space-1);
+}
+
+.interrupt-meta-row {
+	display: flex;
+	align-items: baseline;
+	gap: var(--space-3);
+	font-size: 0.78rem;
+	color: var(--color-text-muted);
+}
+
+.interrupt-kind {
+	font-weight: 600;
+	color: var(--color-accent);
+}
+
+.interrupt-kind-plan {
+	color: var(--color-error);
+}
+
+.interrupt-text {
+	margin: 0;
+	font-size: 0.88rem;
+}
+
+.interrupt-answer {
+	margin: 0;
+	padding: var(--space-2) var(--space-3);
+	border-left: 3px solid var(--color-accent);
+	background: var(--color-surface-sunken);
+	border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+	font-size: 0.88rem;
+}
+
+.interrupt-waiting,
+.interrupt-outcome {
+	margin: 0;
+	font-size: 0.82rem;
+	color: var(--color-text-muted);
+	font-style: italic;
+}
+
 .effort-control {
 	display: flex;
 	flex-wrap: wrap;
@@ -857,6 +1014,12 @@ li:last-child {
 /* A terminate (destructive revert) cross-stack line is a static red dashed stroke, distinct from an observe's neutral dashed reference: red reads as destructive, the dash reads as a reference rather than an in-flight call, and the line never animates. The rule targets the path inside the wrapper <g> the flow view emits (flow-edge--terminate), overriding the default graph-edge stroke so only terminate lines pick up the red. */
 .flow-edge--terminate .graph-edge {
 	stroke: var(--color-error);
+	stroke-dasharray: 3 3;
+}
+
+/* An inquiry (operator question or its answer) is a blue dashed reference line between the human and the run's root role: blue because it travels toward the recipient like any forward flow, dashed because it is a message, not an in-flight call. A question still waiting for its answer overrides this with the marching flow class (graph-edge--flowing, which carries the same accent and animates). */
+.flow-edge--inquiry .graph-edge {
+	stroke: var(--svg-flow-accent);
 	stroke-dasharray: 3 3;
 }
 
@@ -1657,6 +1820,18 @@ li:last-child {
 
 .seq-message--returning {
 	stroke: var(--svg-success);
+	stroke-dasharray: 6 4;
+	animation: graph-edge-flow 0.8s linear infinite;
+}
+
+/* An inquiry (operator question or its answer) is a blue dashed reference line, like the flow view's inquiry edge: a message, not an in-flight call. A question still waiting for its answer marches in the same accent with the shared flow keyframe. */
+.seq-message--inquiry {
+	stroke: var(--svg-flow-accent);
+	stroke-dasharray: 3 3;
+}
+
+.seq-message--inquiry-flowing {
+	stroke: var(--svg-flow-accent);
 	stroke-dasharray: 6 4;
 	animation: graph-edge-flow 0.8s linear infinite;
 }

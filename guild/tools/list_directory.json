@@ -4,7 +4,7 @@
 	"humanLabel": {
 		"detailed": ["List Directory"],
 		"friendly": ["List Files"],
-		"whimsical": ["Directory Scout"]
+		"whimsical": ["Scout"]
 	},
 	"humanDescription": {
 		"detailed": ["Lists files and subdirectories in a workspace path."],
@@ -14,7 +14,7 @@
 	"humanCallLabel": {
 		"detailed": ["role {sourceRole} is invoking tool {destinationRole} (stack {stack})"],
 		"friendly": ["{source} is listing files"],
-		"whimsical": ["{source} is peeking into a folder", "{source} is scouting the directory", "{source} is taking stock of the shelves"]
+		"whimsical": ["{source} is peeking into a drawer", "{source} is scouting the forest", "{source} is taking stock of the shelves"]
 	},
 	"humanWorkingLabel": {
 		"detailed": ["tool {participantRole} is listing directory contents"],

@@ -5,7 +5,7 @@ import type { InteractionModel } from './interaction-model-adapter.js'
 // Event-stream fixtures the demo harness feeds through the real `deriveInteractionModel` adapter (the same derivation `/api/runs/:id/flow` runs), so the harness exercises the product's `LogEvent → InteractionModel` path rather than authored model frames like `scenarios.js`.
 // Each frame is the adapter's output for `events[0..N]` — the model a product poll would see the moment that event had landed.
 // Role and tool names match the bundled guild so the label resolver resolves them through `/api/config`.
-// Interrupt/terminate/observe scenarios author events the executor emits only when the interrupt feature lands; until then the fixtures drive the adapter's multi-stack handling directly.
+// The interrupt scenarios author `interrupt` events exactly as the engine emits them for a loop-check handler invocation; the operator-inquiry scenario authors the `operator_inquiry` event the engine emits when an operator question routes to the chain root. Terminate/observe remain adapter-only event kinds (no current executor tool emits them).
 //
 // Scrub granularity: every role invocation emits one `llm_call_start` (the "started working" marker that ends the call's transit phase) and emits `llm_call` only after a `tool_result` or a child `role_finished` (where the completion settles the lingering return — a real structural change).
 // A plain-turn `llm_call` (dispatch → completion with no return between) or a second `llm_call_start` (the call's transit is already settled) would produce a frame structurally identical to the previous one, so they are omitted to keep each scrub step visually distinct.
@@ -318,12 +318,35 @@ const terminateFate: DemoScenario = {
 	statuses: runningThenTerminal(13, 'success'),
 }
 
+const operatorInquiry: DemoScenario = {
+	id: 'operator-inquiry',
+	label: 'Operator inquiry',
+	task: 'Build the care-guide website.',
+	events: [
+		event(0, 'role_start', { role: 'orchestrator', depth: 0, task: 'Build the care-guide website.' }),
+		event(1, 'llm_call_start', { role: 'orchestrator' }),
+		event(2, 'role_start', { role: 'coder', depth: 1, parent: 'orchestrator', task: 'Write the care-guide page.' }),
+		event(3, 'llm_call_start', { role: 'coder' }),
+		event(4, 'tool_call', { role: 'coder', tool: 'write_file', arguments: '{"path":"care-guide.html","content":"..."}' }),
+		event(5, 'tool_result', { role: 'coder', tool: 'write_file', kind: 'success', result: { kind: 'success', data: { path: 'care-guide.html', bytes: 512 } } }),
+		// The question routes to the chain root (the orchestrator) and waits there while the coder keeps working undisturbed.
+		event(6, 'operator_inquiry', { role: 'orchestrator', roleId: 'orchestrator-0-1', message: 'What is the coder working on?' }),
+		event(7, 'llm_call', { role: 'coder', usage: buildUsage(160, 35) }),
+		event(8, 'role_finished', { role: 'coder', depth: 1, status: 'success', summary: 'Wrote care-guide.html.', parent: 'orchestrator' }),
+		// The orchestrator's first content-bearing response after the injection is the answer: the question op settles and the answer op lands.
+		event(9, 'llm_call', { role: 'orchestrator', received: { content: 'The coder is writing the care-guide page; it just saved the file and is verifying it now.' }, usage: buildUsage(210, 30) }),
+		event(10, 'role_finished', { role: 'orchestrator', depth: 0, status: 'success', summary: 'Done — answered your question on the way.' }),
+	],
+	statuses: runningThenTerminal(11, 'success'),
+}
+
 export const DEMO_SCENARIOS: DemoScenario[] = [
 	singleRoleCompletion,
 	delegationChain,
 	deepCallTree,
 	retryWithFreshInstance,
 	pendingQuestion,
+	operatorInquiry,
 	detectedLoopInterrupt,
 	nestedInterrupt,
 	rewindFate,

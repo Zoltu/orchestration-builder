@@ -1,0 +1,34 @@
+{
+	"name": "list_role_messages",
+	"description": "List a compact index of another role instance's conversation: per-message index, role, content and reasoning character counts, and tool-call count. Read-only. Use it to see the shape of the conversation before deciding what to inspect in detail.",
+	"humanLabel": {
+		"detailed": ["List Role Messages"],
+		"friendly": ["Message Index"],
+		"whimsical": ["Table of Contents"]
+	},
+	"humanDescription": {
+		"detailed": ["Lists a compact index of another role's conversation without the message text."],
+		"friendly": ["See the shape of a role's conversation."],
+		"whimsical": ["Reads the spines, not the pages."]
+	},
+	"humanCallLabel": {
+		"detailed": ["role {sourceRole} is invoking tool {destinationRole} (stack {stack})"],
+		"friendly": ["{source} is listing a role's messages"],
+		"whimsical": ["{source} is counting the pages", "{source} is reading the table of contents", "{source} is sizing up the shelf"]
+	},
+	"humanWorkingLabel": {
+		"detailed": ["tool {participantRole} is indexing the role's messages"],
+		"friendly": ["Indexing the role's messages"],
+		"whimsical": ["Counting pages", "Reading the spines", "Taking the shelf's measure"]
+	},
+	"parameters": {
+		"type": "object",
+		"properties": {
+			"targetRole": {
+				"type": "string",
+				"description": "The role-instance id to inspect."
+			}
+		},
+		"required": ["targetRole"]
+	}
+}

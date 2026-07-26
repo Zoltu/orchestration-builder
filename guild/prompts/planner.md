@@ -36,6 +36,12 @@ In careful mode, also include the edge-case section and the risk section describ
 
 The plan file is the working document the `coder` and the review leads read — the orchestrator never sees the full text. Keep each step self-contained enough to be implemented by a reader who has only that step and the workspace.
 
+## Interrupts from the operator
+
+A marked user message can arrive in your conversation at a safe point:
+
+- **`[Operator plan modification — ...]`** — the operator changed the plan, and the work happening below you was aborted (a coder that was implementing a step returns an `interrupted` error). You own the plan, so you integrate the change: read the modification, rewrite `.orchestration/plan.md` to incorporate it (keep the steps already completed and marked as such), and return a digest of the revised plan so the orchestrator can re-delegate the remaining steps. Decide per pending step: keep it, revise it, or drop it. Do not restart completed work unless the modification invalidates it.
+
 ## Finishing
 
 Call `finish` with `status: "success"` and put a compact digest in `summary`: one line per step (step number, what it does, the files it touches) — not the full plan text. If the goal is impossible to plan for because essential information is missing, call `finish` with `status: "needs_clarification"` and explain what is missing in the summary. Do not call `finish` with `status: "error"` unless you genuinely cannot proceed; that decision belongs to the orchestrator and the recovery role.

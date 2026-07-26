@@ -1,0 +1,50 @@
+{
+	"name": "search_role_blocks",
+	"description": "Search another role instance's content and reasoning for a substring or regex pattern and return match offsets with short surrounding windows. Read-only. Match count is capped. Use it to find candidate repetition before window-reading to confirm.",
+	"humanLabel": {
+		"detailed": ["Search Role Blocks"],
+		"friendly": ["Search Conversation"],
+		"whimsical": ["Metal Detector"]
+	},
+	"humanDescription": {
+		"detailed": ["Searches a role's content and reasoning and returns capped match windows."],
+		"friendly": ["Search a role's conversation."],
+		"whimsical": ["Sniffs out the repeated lines."]
+	},
+	"humanCallLabel": {
+		"detailed": ["role {sourceRole} is invoking tool {destinationRole} (stack {stack})"],
+		"friendly": ["{source} is searching a role's conversation"],
+		"whimsical": ["{source} is sweeping the pages", "{source} is sniffing for repeats", "{source} is dusting for fingerprints"]
+	},
+	"humanWorkingLabel": {
+		"detailed": ["tool {participantRole} is searching the role's conversation"],
+		"friendly": ["Searching the role's conversation"],
+		"whimsical": ["Sweeping the pages", "Sniffing for repeats", "Dusting for fingerprints"]
+	},
+	"parameters": {
+		"type": "object",
+		"properties": {
+			"targetRole": {
+				"type": "string",
+				"description": "The role-instance id to inspect."
+			},
+			"pattern": {
+				"type": "string",
+				"description": "The text or regex to search for."
+			},
+			"kind": {
+				"type": "string",
+				"description": "How to interpret pattern: 'substring' (default) or 'regex'."
+			},
+			"field": {
+				"type": "string",
+				"description": "Optional: restrict the search to 'content' or 'reasoning'. Searches both when omitted."
+			},
+			"maxMatches": {
+				"type": "number",
+				"description": "Optional cap on returned matches (default 10; hard-capped)."
+			}
+		},
+		"required": ["targetRole", "pattern"]
+	}
+}

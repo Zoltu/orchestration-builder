@@ -2,9 +2,11 @@ import { describe, expect, test } from 'bun:test'
 import type { ContextPolicy, ExecutorConfig, GuildConfig, LogEvent, Message, ModelConfig, RoleDefinition, ToolCall, ToolManifest } from './types.js'
 import { runRole, type EngineDependencies } from './engine.ts'
 import type { HumanBackend } from './human-backend.ts'
+import { createInterruptQueue } from './interrupts.ts'
 import type { LlmCallResult, LlmCaller } from './llm.ts'
 import type { LoadedGuild } from './loader.ts'
 import type { AppendLog } from './persistence.ts'
+import { createRoleRegistry } from './role-registry.ts'
 import { recordingHumanBackend } from './test-fixtures.ts'
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -177,6 +179,8 @@ function makeDeps(llm: FakeLlm, humanBackend: HumanBackend): { deps: EngineDepen
 		appendLog,
 		additionalToolHandlers: {},
 		humanBackend,
+		roleRegistry: createRoleRegistry(),
+		interruptQueue: createInterruptQueue(),
 	}
 	return { deps, events }
 }

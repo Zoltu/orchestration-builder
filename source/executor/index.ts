@@ -18,6 +18,9 @@ export type { HumanBackend, WebHumanBackend } from './human-backend.js'
 export { createRunState } from './run-state.js'
 export type { RunState } from './run-state.js'
 
+export { createInterruptChannel, createInterruptQueue } from './interrupts.js'
+export type { InterruptChannel, InterruptQueue, InterruptRequest, InterruptSubmitResult } from './interrupts.js'
+
 export { createRunSubmission } from './run-submission.js'
 export type { RunSubmission, RunSubmissionDependencies, StartRun, SubmitResult } from './run-submission.js'
 

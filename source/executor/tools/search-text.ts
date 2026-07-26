@@ -2,7 +2,7 @@ import * as fs from 'node:fs'
 import * as path from 'node:path'
 import { createToolError } from '../errors.js'
 import type { ToolHandler } from '../tool-dispatch.js'
-import { resolveWithinWorkspace, wrapIoError } from './shared.js'
+import { nodePathFilesystem, resolveWithinWorkspace, wrapIoError } from './shared.js'
 
 export interface SearchMatch {
 	path: string
@@ -53,7 +53,7 @@ export function createSearchText(workspaceRoot: string): ToolHandler {
 			}
 			targets = []
 			for (const p of pathsValue) {
-				const resolution = resolveWithinWorkspace(p, resolvedRoot)
+				const resolution = resolveWithinWorkspace(p, resolvedRoot, nodePathFilesystem)
 				if (!resolution.ok) return resolution.error
 				let stat: fs.Stats
 				try {

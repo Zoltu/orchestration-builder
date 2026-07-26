@@ -19,6 +19,7 @@ export const ERROR_KINDS: readonly ErrorKind[] = [
 	'context_budget_exceeded',
 	'tool_budget_exceeded',
 	'loop_detected',
+	'interrupted',
 	'compaction_failed',
 ]
 

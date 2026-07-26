@@ -3,6 +3,7 @@ import { describe, expect, test } from 'bun:test'
 import type { ContextPolicy, ExecutorConfig, GuildConfig, LogEvent, ModelConfig, RoleDefinition, RunMeta, ToolCall, ToolManifest } from './types.js'
 import { ValidationError } from './errors.js'
 import { runExecutor, type ExecutorDependencies } from './executor.ts'
+import { createInterruptQueue } from './interrupts.ts'
 import type { LlmCallResult, LlmCaller } from './llm.ts'
 import type { LoadGuild, LoadedGuild } from './loader.ts'
 import type { AppendLog, RunDirectory, WriteMeta } from './persistence.ts'
@@ -141,6 +142,7 @@ function makeDeps(llm: FakeLlm, persistence: FakePersistenceFns, loadGuild: Load
 		additionalToolHandlers: {},
 		humanBackend: stubHumanBackend,
 		loadGuild,
+		interruptQueue: createInterruptQueue(),
 	}
 }
 

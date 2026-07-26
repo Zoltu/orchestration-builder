@@ -1,0 +1,42 @@
+{
+	"name": "trigger_interrupt",
+	"description": "Apply an interrupt decision to a suspended role instance. 'continue' resumes it unchanged; 'redirect' injects your reason as a user message into its conversation, then resumes it; 'abort' finishes it with a loop_detected error. Use after investigating with the inspection tools.",
+	"humanLabel": {
+		"detailed": ["Trigger Interrupt"],
+		"friendly": ["Interrupt"],
+		"whimsical": ["Red Button"]
+	},
+	"humanDescription": {
+		"detailed": ["Applies an interrupt decision (continue, redirect, or abort) to a suspended role."],
+		"friendly": ["Decide what happens to an interrupted role."],
+		"whimsical": ["Bang the gavel on a paused worker."]
+	},
+	"humanCallLabel": {
+		"detailed": ["role {sourceRole} is invoking tool {destinationRole} (stack {stack})"],
+		"friendly": ["{source} is triggering an interrupt"],
+		"whimsical": ["{source} is banging the gavel", "{source} is reaching for the red button", "{source} is calling the play"]
+	},
+	"humanWorkingLabel": {
+		"detailed": ["tool {participantRole} is applying the interrupt decision"],
+		"friendly": ["Applying the interrupt decision"],
+		"whimsical": ["Banging the gavel", "Cutting in line", "Blowing the whistle"]
+	},
+	"parameters": {
+		"type": "object",
+		"properties": {
+			"targetRole": {
+				"type": "string",
+				"description": "The role-instance id of the suspended role to act on (given in your task)."
+			},
+			"action": {
+				"type": "string",
+				"description": "The interrupt decision: 'continue' (resume unchanged), 'redirect' (inject reason as guidance, then resume), or 'abort' (finish the target with a loop_detected error)."
+			},
+			"reason": {
+				"type": "string",
+				"description": "For 'redirect', the guidance message injected into the target's conversation. For 'abort', the explanation recorded on the error. May be empty for 'continue'."
+			}
+		},
+		"required": ["targetRole", "action", "reason"]
+	}
+}

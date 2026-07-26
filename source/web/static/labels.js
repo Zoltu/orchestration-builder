@@ -25,7 +25,7 @@
 /**
  * @typedef {Object} Operation
  * @property {string} id
- * @property {'call' | 'return' | 'observe' | 'terminate'} kind
+ * @property {'call' | 'return' | 'observe' | 'terminate' | 'inquiry'} kind
  * @property {string} stack
  * @property {string} source
  * @property {string} destination
@@ -52,7 +52,7 @@
  *   Role definitions keyed by name; `label` is the participant label and `workingLabel` is the active/working-state text read by `resolveWorkingLabel`, interpolating `{participant}`, `{participantRole}`, `{participantKind}`, and `{participantId}`.
  * @property {Record<string, { humanLabel?: TieredLabel, humanCallLabel?: TieredLabel, humanWorkingLabel?: TieredLabel }>} tools
  *   Tool manifests keyed by name; `humanLabel` is the participant label, `humanCallLabel` is the per-tool call-operation template interpolating `{source}`/`{destination}`/`{sourceRole}`/`{destinationRole}`/`{sourceKind}`/`{destinationKind}`/`{stack}`/`{outcome}` (overriding the generic role->tool / interrupt->tool template), and `humanWorkingLabel` is the per-tool working-state template interpolating `{participant}`/`{participantRole}`/`{participantKind}`/`{participantId}` (overriding the generic tool working template).
- * @property {{ pseudoRoleLabels: Record<string, TieredLabel>, operationTemplates: Record<'call' | 'return' | 'observe' | 'terminate', Record<string, TieredLabel>>, genericOperationTemplates: Record<'call' | 'return' | 'observe' | 'terminate', TieredLabel>, workingTemplates?: Record<string, TieredLabel> }} [visualization]
+ * @property {{ pseudoRoleLabels: Record<string, TieredLabel>, operationTemplates: Record<'call' | 'return' | 'observe' | 'terminate' | 'inquiry', Record<string, TieredLabel>>, genericOperationTemplates: Record<'call' | 'return' | 'observe' | 'terminate' | 'inquiry', TieredLabel>, workingTemplates?: Record<string, TieredLabel> }} [visualization]
  *   `workingTemplates` is a generic per-participant-kind fallback (keyed by kind: 'role', 'tool') used when a role/tool has no per-entry working label.
  */
 

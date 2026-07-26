@@ -2,7 +2,7 @@ import * as fs from 'node:fs'
 import * as path from 'node:path'
 import { createToolError } from '../errors.js'
 import type { ToolHandler } from '../tool-dispatch.js'
-import { resolveWithinWorkspace, wrapIoError } from './shared.js'
+import { nodePathFilesystem, resolveWithinWorkspace, wrapIoError } from './shared.js'
 
 function splitLines(text: string): string[] {
 	const lines: string[] = []
@@ -33,7 +33,7 @@ export function createReadFilePartial(workspaceRoot: string): ToolHandler {
 		if (typeof limitValue !== 'number' || !Number.isFinite(limitValue) || limitValue <= 0) {
 			return createToolError('invalid_arguments', 'limit must be a positive number')
 		}
-		const resolution = resolveWithinWorkspace(pathValue, resolvedRoot)
+		const resolution = resolveWithinWorkspace(pathValue, resolvedRoot, nodePathFilesystem)
 		if (!resolution.ok) return resolution.error
 		let content: string
 		try {

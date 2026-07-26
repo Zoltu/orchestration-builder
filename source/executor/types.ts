@@ -28,6 +28,15 @@ export interface ExecutorConfig {
 	maxAgentDepth: number
 	defaultToolTimeoutSeconds: number
 	maxCompactionAttempts: number
+	interruptTriggers?: InterruptTriggersConfig
+}
+
+// The interrupt platform's cadence configuration. everyToolCalls/everyTokens are the base thresholds (applied at effort 0); the engine scales them linearly with the run's effort (threshold × (effort + 1)), so high-effort runs are checked less often. handlerRole is the guild role the engine invokes on a cadence trigger; planOwnerRole names the role that receives plan modifications (the active chain's rootmost instance of it), falling back to the chain root when absent or not in the chain.
+export interface InterruptTriggersConfig {
+	handlerRole: string
+	everyToolCalls: number
+	everyTokens: number
+	planOwnerRole?: string
 }
 
 export interface ContextPolicy {
@@ -100,13 +109,14 @@ export type ErrorKind =
 	| 'context_budget_exceeded'
 	| 'tool_budget_exceeded'
 	| 'loop_detected'
+	| 'interrupted'
 	| 'compaction_failed'
 
 export type ToolResult =
 	| { kind: 'success'; data?: unknown }
 	| { kind: ErrorKind; message?: string; details?: unknown }
 
-export type OperationKind = 'call' | 'return' | 'observe' | 'terminate'
+export type OperationKind = 'call' | 'return' | 'observe' | 'terminate' | 'inquiry'
 
 export type ParticipantKind = 'human' | 'interrupt' | 'role' | 'tool'
 

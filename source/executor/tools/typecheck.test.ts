@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { createBunSubprocessRunner, type SubprocessOutcome, type SubprocessRunner } from './subprocess-tool.ts'
+import { type SubprocessOutcome, type SubprocessRunner } from './subprocess-tool.ts'
 import { createTypecheck, type TypecheckData } from './typecheck.ts'
 
 interface RunnerCall {
@@ -146,17 +146,5 @@ describe('createTypecheck', () => {
 		if (result.kind === 'invalid_arguments') {
 			expect(result.message).toContain('ENOENT bun')
 		}
-	})
-})
-
-describe('createBunSubprocessRunner', () => {
-	test('kills the child and reports a timeout when a command runs longer than the timeout', async () => {
-		const runner = createBunSubprocessRunner()
-		const outcome = await runner({
-			command: ['bun', '-e', 'await new Promise((r) => setTimeout(r, 10000))'],
-			cwd: process.cwd(),
-			timeoutMs: 200,
-		})
-		expect(outcome.timedOut).toBe(true)
 	})
 })

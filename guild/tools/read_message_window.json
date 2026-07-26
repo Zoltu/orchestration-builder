@@ -1,0 +1,50 @@
+{
+	"name": "read_message_window",
+	"description": "Read a bounded character window of one message's content or reasoning from another role instance's conversation. Read-only. The window is capped, so read incrementally rather than asking for a whole message at once.",
+	"humanLabel": {
+		"detailed": ["Read Message Window"],
+		"friendly": ["Message Window"],
+		"whimsical": ["Peephole"]
+	},
+	"humanDescription": {
+		"detailed": ["Reads a bounded slice of one message's content or reasoning."],
+		"friendly": ["Peek at part of a message."],
+		"whimsical": ["Peeks through the keyhole at one spot on the page."]
+	},
+	"humanCallLabel": {
+		"detailed": ["role {sourceRole} is invoking tool {destinationRole} (stack {stack})"],
+		"friendly": ["{source} is reading a message window"],
+		"whimsical": ["{source} is peeking at a page", "{source} is squinting at a paragraph", "{source} is reading over a shoulder"]
+	},
+	"humanWorkingLabel": {
+		"detailed": ["tool {participantRole} is reading a message window"],
+		"friendly": ["Reading a message window"],
+		"whimsical": ["Peeking at a page", "Squinting at a paragraph", "Reading one line at a time"]
+	},
+	"parameters": {
+		"type": "object",
+		"properties": {
+			"targetRole": {
+				"type": "string",
+				"description": "The role-instance id to inspect."
+			},
+			"index": {
+				"type": "number",
+				"description": "The message index (from list_role_messages)."
+			},
+			"field": {
+				"type": "string",
+				"description": "Which field to read: 'content' or 'reasoning'."
+			},
+			"start": {
+				"type": "number",
+				"description": "The character offset to start reading from (0-based)."
+			},
+			"end": {
+				"type": "number",
+				"description": "The character offset to stop reading at (exclusive). The window is capped, so a large range reads only the first cap-many characters."
+			}
+		},
+		"required": ["targetRole", "index", "field", "start", "end"]
+	}
+}

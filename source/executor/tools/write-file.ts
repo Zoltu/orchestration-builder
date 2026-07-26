@@ -2,7 +2,7 @@ import * as fs from 'node:fs'
 import * as path from 'node:path'
 import { createToolError } from '../errors.js'
 import type { ToolHandler } from '../tool-dispatch.js'
-import { resolveWithinWorkspace, wrapIoError } from './shared.js'
+import { nodePathFilesystem, resolveWithinWorkspace, wrapIoError } from './shared.js'
 
 export interface WriteFileResult {
 	path: string
@@ -20,7 +20,7 @@ export function createWriteFile(workspaceRoot: string): ToolHandler {
 		if (typeof contentValue !== 'string') {
 			return createToolError('invalid_arguments', 'content must be a string')
 		}
-		const resolution = resolveWithinWorkspace(pathValue, resolvedRoot)
+		const resolution = resolveWithinWorkspace(pathValue, resolvedRoot, nodePathFilesystem)
 		if (!resolution.ok) return resolution.error
 		const targetPath = resolution.path.absolute
 		const parentDir = path.dirname(targetPath)

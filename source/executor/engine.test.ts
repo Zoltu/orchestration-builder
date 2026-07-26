@@ -3,9 +3,11 @@ import { describe, expect, test } from 'bun:test'
 import type { ContextPolicy, ExecutorConfig, GuildConfig, LogEvent, Message, ModelConfig, RoleDefinition, ToolCall, ToolManifest } from './types.js'
 import { effortDirective } from './effort.ts'
 import { runRole, type EngineDependencies } from './engine.ts'
+import { createInterruptQueue } from './interrupts.ts'
 import type { LlmCallResult, LlmCaller } from './llm.ts'
 import type { LoadedGuild } from './loader.ts'
 import type { AppendLog } from './persistence.ts'
+import { createRoleRegistry } from './role-registry.ts'
 import { stubHumanBackend, withTool } from './test-fixtures.ts'
 import type { ToolHandler } from './tool-dispatch.ts'
 
@@ -153,6 +155,8 @@ function makeDeps(llm: FakeLlm): { deps: EngineDependencies; events: LogEvent[] 
 		appendLog,
 		additionalToolHandlers: {},
 		humanBackend: stubHumanBackend,
+		roleRegistry: createRoleRegistry(),
+		interruptQueue: createInterruptQueue(),
 	}
 	return { deps, events }
 }
@@ -222,14 +226,14 @@ describe('runRole — acceptance criteria', () => {
 		expect(events.some((e) => e.type === 'role_finished' && payloadField(e, 'role') === 'parent')).toBe(true)
 	})
 
-	test('context_budget_exceeded surfaces a synthetic tool result and continues', async () => {
+	test('context_budget_exceeded continues with a platform notice as a user message', async () => {
 		const guild = buildGuild(
 			{ main: { systemPrompt: 'p', tools: ['finish'] } },
 			'main',
 		)
 		const llm = new FakeLlm()
 		llm.responses = [
-			contextExceeded(35000, 32768),
+			contextExceeded(0, 32768),
 			success([finishCall({ status: 'success', summary: 'recovered' })]),
 		]
 		const { deps, events } = makeDeps(llm)
@@ -245,6 +249,152 @@ describe('runRole — acceptance criteria', () => {
 		expect(llm.calls.length).toBe(2)
 		const contextEvent = events.find((e) => e.type === 'context_budget_exceeded')
 		expect(contextEvent).toBeDefined()
+		const recoveryMessages = llm.calls[1]?.messages ?? []
+		const notice = recoveryMessages[recoveryMessages.length - 1]
+		expect(notice?.role).toBe('user')
+		expect(notice?.content.includes('[Platform notice — context window exceeded]')).toBe(true)
+		// A tool message answering no assistant tool_call is a malformed request on OpenAI-compatible endpoints, so the notice must never be one.
+		expect(recoveryMessages.some((m) => m.tool_call_id === 'context_budget_exceeded')).toBe(false)
+	})
+
+	test('context_budget_exceeded compacts the history so the recovery request fits', async () => {
+		const guild = withTool(
+			buildGuild(
+				{ main: { systemPrompt: 'p', tools: ['big', 'finish'] } },
+				'main',
+			),
+			{
+				name: 'big',
+				description: 'returns a large payload',
+				parameters: { type: 'object', properties: {} },
+			},
+		)
+		const bigCall = (id: string): ToolCall => ({ id, type: 'function', function: { name: 'big', arguments: '{}' } })
+		const bigHandler: ToolHandler = () => ({ kind: 'success', data: { text: 'x'.repeat(2000) } })
+		const llm = new FakeLlm()
+		llm.responses = [
+			success([bigCall('b1')]),
+			success([bigCall('b2')]),
+			success([bigCall('b3')]),
+			contextExceeded(0, 1000),
+			success([finishCall({ status: 'success', summary: 'recovered' })]),
+		]
+		const { deps, events } = makeDeps(llm)
+		const depsWithBig: EngineDependencies = { ...deps, additionalToolHandlers: { big: bigHandler } }
+
+		const result = await runRole(depsWithBig, {
+			loadedGuild: guild,
+			depth: 0,
+			roleName: 'main',
+			task: 'do it',
+		})
+
+		expect(result).toEqual({ status: 'success', summary: 'recovered' })
+		expect(llm.calls.length).toBe(5)
+		const rejectedMessages = llm.calls[3]?.messages ?? []
+		const recoveryMessages = llm.calls[4]?.messages ?? []
+		expect(rejectedMessages.length).toBe(8)
+		expect(recoveryMessages.length).toBeLessThan(rejectedMessages.length)
+		// The two oldest turns were dropped; system, task, and the most recent turn survive.
+		expect(recoveryMessages[0]?.role).toBe('system')
+		expect(recoveryMessages[1]?.role).toBe('user')
+		expect(recoveryMessages[2]?.tool_calls?.[0]?.id).toBe('b3')
+		expect(recoveryMessages[3]?.tool_call_id).toBe('b3')
+		const compactedEvent = events.find((e) => e.type === 'context_compacted')
+		if (compactedEvent === undefined) throw new Error('expected a context_compacted event')
+		expect(payloadField(compactedEvent, 'droppedMessages')).toBe(4)
+	})
+
+	test('repeated context_budget_exceeded rejections finish the role with an error instead of looping', async () => {
+		const guild = buildGuild(
+			{ main: { systemPrompt: 'p', tools: ['finish'] } },
+			'main',
+		)
+		const llm = new FakeLlm()
+		llm.responses = [
+			contextExceeded(0, 32768),
+			contextExceeded(0, 32768),
+			contextExceeded(0, 32768),
+			contextExceeded(0, 32768),
+		]
+		const { deps, events } = makeDeps(llm)
+
+		const result = await runRole(deps, {
+			loadedGuild: guild,
+			depth: 0,
+			roleName: 'main',
+			task: 'do it',
+		})
+
+		expect(result.status).toBe('error')
+		expect(result.error?.kind).toBe('context_budget_exceeded')
+		expect(llm.calls.length).toBe(4)
+		expect(events.filter((e) => e.type === 'context_budget_exceeded').length).toBe(4)
+	})
+
+	test('a context rejection that cannot be compacted away finishes immediately', async () => {
+		const guild = buildGuild(
+			{ main: { systemPrompt: 'p', tools: ['finish'] } },
+			'main',
+		)
+		const llm = new FakeLlm()
+		// The endpoint reports a million prompt tokens for a tiny conversation: nothing can be dropped or truncated to make it fit.
+		llm.responses = [contextExceeded(1_000_000, 100)]
+		const { deps } = makeDeps(llm)
+
+		const result = await runRole(deps, {
+			loadedGuild: guild,
+			depth: 0,
+			roleName: 'main',
+			task: 'do it',
+		})
+
+		expect(result.status).toBe('error')
+		expect(result.error?.kind).toBe('context_budget_exceeded')
+		expect(llm.calls.length).toBe(1)
+	})
+
+	test('a successful call resets the context recovery attempt counter', async () => {
+		const guild = withTool(
+			buildGuild(
+				{ main: { systemPrompt: 'p', tools: ['echo', 'finish'] } },
+				'main',
+			),
+			{
+				name: 'echo',
+				description: 'echo',
+				parameters: { type: 'object', properties: { x: { type: 'number' } } },
+			},
+		)
+		const echoCall: ToolCall = {
+			id: 'e1',
+			type: 'function',
+			function: { name: 'echo', arguments: '{"x":1}' },
+		}
+		const llm = new FakeLlm()
+		// Three rejections, a successful turn, then three more rejections: without a reset the seventh rejection would finish the role.
+		llm.responses = [
+			contextExceeded(0, 32768),
+			contextExceeded(0, 32768),
+			contextExceeded(0, 32768),
+			success([echoCall]),
+			contextExceeded(0, 32768),
+			contextExceeded(0, 32768),
+			contextExceeded(0, 32768),
+			success([finishCall({ status: 'success', summary: 'recovered' })]),
+		]
+		const { deps } = makeDeps(llm)
+		const depsWithEcho: EngineDependencies = { ...deps, additionalToolHandlers: { echo: echoHandler } }
+
+		const result = await runRole(depsWithEcho, {
+			loadedGuild: guild,
+			depth: 0,
+			roleName: 'main',
+			task: 'do it',
+		})
+
+		expect(result).toEqual({ status: 'success', summary: 'recovered' })
+		expect(llm.calls.length).toBe(8)
 	})
 
 	test('tool not in role allowed list returns invalid_tool_call and continues', async () => {
@@ -752,7 +902,7 @@ describe('runRole — rich LLM and tool payloads', () => {
 		)
 		const llm = new FakeLlm()
 		llm.responses = [
-			contextExceeded(35000, 32768),
+			contextExceeded(0, 32768),
 			success([finishCall({ status: 'success', summary: 'recovered' })]),
 		]
 		const { deps, events } = makeDeps(llm)
@@ -818,6 +968,344 @@ describe('runRole — rich LLM and tool payloads', () => {
 		const result = payloadField(toolResult!, 'result') as { kind: string; data: { text: string } }
 		expect(result.kind).toBe('success')
 		expect(result.data.text.length).toBe(200)
+	})
+})
+
+const triggerInterruptManifest: ToolManifest = {
+	name: 'trigger_interrupt',
+	description: 'Apply an interrupt decision.',
+	parameters: {
+		type: 'object',
+		required: ['targetRole', 'action', 'reason'],
+		properties: {
+			targetRole: { type: 'string' },
+			action: { type: 'string' },
+			reason: { type: 'string' },
+		},
+	},
+}
+
+const recentRoleToolCallsManifest: ToolManifest = {
+	name: 'recent_role_tool_calls',
+	description: 'Trace recent tool calls.',
+	parameters: { type: 'object', required: ['targetRole'], properties: { targetRole: { type: 'string' }, limit: { type: 'number' } } },
+}
+
+const searchRoleBlocksManifest: ToolManifest = {
+	name: 'search_role_blocks',
+	description: 'Search content and reasoning.',
+	parameters: { type: 'object', required: ['targetRole', 'pattern'], properties: { targetRole: { type: 'string' }, pattern: { type: 'string' } } },
+}
+
+function namedCall(id: string, name: string, args: unknown): ToolCall {
+	return { id, type: 'function', function: { name, arguments: JSON.stringify(args) } }
+}
+
+function buildInterruptGuild(roles: Record<string, RoleDefinition>, entryRole: string, triggers: { everyToolCalls?: number; everyTokens?: number; planOwnerRole?: string } = {}): LoadedGuild {
+	const guild = buildGuild(roles, entryRole, {
+		executor: {
+			...baseExecutor,
+			interruptTriggers: {
+				handlerRole: 'loop_detector',
+				everyToolCalls: triggers.everyToolCalls ?? 2,
+				everyTokens: triggers.everyTokens ?? 1_000_000,
+				...(triggers.planOwnerRole !== undefined ? { planOwnerRole: triggers.planOwnerRole } : {}),
+			},
+		},
+	})
+	let withManifests = withTool(guild, { name: 'echo', description: 'echo', parameters: { type: 'object', properties: {} } })
+	withManifests = withTool(withManifests, recentRoleToolCallsManifest)
+	withManifests = withTool(withManifests, searchRoleBlocksManifest)
+	withManifests = withTool(withManifests, triggerInterruptManifest)
+	return withManifests
+}
+
+describe('runRole — interrupt platform', () => {
+	const mainAndDetector = {
+		main: { systemPrompt: 'p', tools: ['echo', 'finish'] },
+		loop_detector: { systemPrompt: 'ld', tools: ['recent_role_tool_calls', 'search_role_blocks', 'trigger_interrupt', 'finish'] },
+	}
+
+	test('(a) consecutive identical tool calls trigger the handler, which aborts the target with loop_detected', async () => {
+		const guild = buildInterruptGuild(mainAndDetector, 'main')
+		const llm = new FakeLlm()
+		llm.responses = [
+			success([namedCall('c1', 'echo', { x: 1 })]),
+			success([namedCall('c2', 'echo', { x: 1 })]),
+			// The cadence fires at the third turn top; the detector investigates and aborts.
+			success([namedCall('d1', 'recent_role_tool_calls', { targetRole: 'main-0-1' })]),
+			success([namedCall('d2', 'trigger_interrupt', { targetRole: 'main-0-1', action: 'abort', reason: 'stuck repeating the same call' })]),
+			success([finishCall({ status: 'success', summary: 'aborted the looper' })]),
+		]
+		const { deps, events } = makeDeps(llm)
+
+		const result = await runRole(deps, {
+			loadedGuild: guild,
+			depth: 0,
+			roleName: 'main',
+			task: 'do it',
+		})
+
+		expect(result.status).toBe('error')
+		expect(result.error?.kind).toBe('loop_detected')
+		expect(result.error?.message).toBe('stuck repeating the same call')
+		expect(llm.calls.length).toBe(5)
+		const interrupt = events.find((e) => e.type === 'interrupt')
+		expect(interrupt).toBeDefined()
+		expect(payloadField(interrupt!, 'trigger')).toBe('loop_check')
+		expect(payloadField(interrupt!, 'handler')).toBe('loop_detector')
+		expect(payloadField(interrupt!, 'target')).toBe('main-0-1')
+		const resolved = events.find((e) => e.type === 'interrupt_resolved')
+		expect(payloadField(resolved!, 'action')).toBe('abort')
+		// The detector ran as a role nested under the target and finished before the target's role_finished.
+		const detectorStart = events.find((e) => e.type === 'role_start' && payloadField(e, 'role') === 'loop_detector')
+		expect(detectorStart).toBeDefined()
+		expect(payloadField(detectorStart!, 'parent')).toBe('main')
+		const finishOrder = events.filter((e) => e.type === 'role_finished').map((e) => payloadField(e, 'role'))
+		expect(finishOrder).toEqual(['loop_detector', 'main'])
+	})
+
+	test('(b) the handler redirects: the reason is injected as a user message and the target resumes', async () => {
+		const guild = buildInterruptGuild(mainAndDetector, 'main')
+		const llm = new FakeLlm()
+		llm.responses = [
+			success([namedCall('c1', 'echo', { x: 1 })]),
+			success([namedCall('c2', 'echo', { x: 1 })]),
+			success([namedCall('d1', 'search_role_blocks', { targetRole: 'main-0-1', pattern: 'echo' })]),
+			success([namedCall('d2', 'trigger_interrupt', { targetRole: 'main-0-1', action: 'redirect', reason: 'stop repeating; call finish now' })]),
+			success([finishCall({ status: 'success', summary: 'redirected the looper' })]),
+			success([finishCall({ status: 'success', summary: 'main done' })]),
+		]
+		const { deps, events } = makeDeps(llm)
+
+		const result = await runRole(deps, {
+			loadedGuild: guild,
+			depth: 0,
+			roleName: 'main',
+			task: 'do it',
+		})
+
+		expect(result).toEqual({ status: 'success', summary: 'main done' })
+		// The target's first post-handler call carries the injected guidance as the latest user message.
+		const resumedCall = llm.calls[5]
+		expect(resumedCall).toBeDefined()
+		const lastMessage = resumedCall!.messages[resumedCall!.messages.length - 1]
+		expect(lastMessage).toEqual({ role: 'user', content: 'stop repeating; call finish now' })
+		expect(payloadField(events.find((e) => e.type === 'interrupt_resolved')!, 'action')).toBe('redirect')
+	})
+
+	test('a handler that finishes without trigger_interrupt resumes the target unchanged', async () => {
+		const guild = buildInterruptGuild(mainAndDetector, 'main')
+		const llm = new FakeLlm()
+		llm.responses = [
+			success([namedCall('c1', 'echo', { x: 1 })]),
+			success([namedCall('c2', 'echo', { x: 1 })]),
+			success([finishCall({ status: 'success', summary: 'no action taken' })]),
+			success([finishCall({ status: 'success', summary: 'main done' })]),
+		]
+		const { deps, events } = makeDeps(llm)
+
+		const result = await runRole(deps, {
+			loadedGuild: guild,
+			depth: 0,
+			roleName: 'main',
+			task: 'do it',
+		})
+
+		expect(result).toEqual({ status: 'success', summary: 'main done' })
+		const resolved = events.find((e) => e.type === 'interrupt_resolved')
+		expect(payloadField(resolved!, 'action')).toBe('continue')
+	})
+
+	test('(c) an operator inquiry injects a marked user message at the next safe point and the run resumes', async () => {
+		const guild = buildInterruptGuild(mainAndDetector, 'main')
+		const llm = new FakeLlm()
+		llm.responses = [success([finishCall({ status: 'success', summary: 'answered and done' })])]
+		const { deps, events } = makeDeps(llm)
+		deps.interruptQueue.submit({ kind: 'inquiry', message: 'what are you working on?' })
+
+		const result = await runRole(deps, {
+			loadedGuild: guild,
+			depth: 0,
+			roleName: 'main',
+			task: 'do it',
+		})
+
+		expect(result).toEqual({ status: 'success', summary: 'answered and done' })
+		const callMessages = llm.calls[0]!.messages
+		const injected = callMessages[callMessages.length - 1]
+		expect(injected?.role).toBe('user')
+		expect(injected?.content).toContain('[Operator inquiry')
+		expect(injected?.content).toContain('what are you working on?')
+		const inquiryEvent = events.find((e) => e.type === 'operator_inquiry')
+		expect(inquiryEvent).toBeDefined()
+		expect(payloadField(inquiryEvent!, 'roleId')).toBe('main-0-1')
+	})
+
+	test('(d) a plan modification aborts the leaf and intermediates and delivers the change to the top-level planner', async () => {
+		const guild = buildInterruptGuild(
+			{
+				planner: { systemPrompt: 'p', tools: ['agent', 'finish'] },
+				coder: { systemPrompt: 'c', tools: ['agent', 'finish'] },
+				'sub-coder': { systemPrompt: 'sc', tools: ['echo', 'finish'] },
+			},
+			'planner',
+			{ planOwnerRole: 'planner' },
+		)
+		const llm = new FakeLlm()
+		llm.responses = [
+			success([agentCall('coder', 'implement the plan')]),
+			success([agentCall('sub-coder', 'do the work')]),
+			success([namedCall('sc1', 'echo', {})]),
+			success([finishCall({ status: 'success', summary: 'revised plan done' })]),
+		]
+		const { deps, events } = makeDeps(llm)
+		const depsWithEcho: EngineDependencies = {
+			...deps,
+			additionalToolHandlers: {
+				// The sub-coder's first tool call is where the operator's modification lands; the sub-coder's next turn top routes it.
+				echo: () => {
+					deps.interruptQueue.submit({ kind: 'plan_modification', message: 'use Postgres instead of SQLite' })
+					return { kind: 'success', data: {} }
+				},
+			},
+		}
+
+		const result = await runRole(depsWithEcho, {
+			loadedGuild: guild,
+			depth: 0,
+			roleName: 'planner',
+			task: 'build an app',
+		})
+
+		expect(result).toEqual({ status: 'success', summary: 'revised plan done' })
+		// The leaf and the intermediate aborted with interrupted; the planner received the modification and finished the run.
+		const finishes = events.filter((e) => e.type === 'role_finished')
+		const errored = finishes.filter((e) => payloadField(e, 'status') === 'error').map((e) => payloadField(e, 'role'))
+		expect(errored).toEqual(['sub-coder', 'coder'])
+		for (const event of finishes.filter((e) => payloadField(e, 'status') === 'error')) {
+			const errorPayload = payloadField(event, 'error')
+			expect(isRecord(errorPayload) && errorPayload['kind'] === 'interrupted').toBe(true)
+		}
+		const planMod = events.find((e) => e.type === 'plan_modification')
+		expect(planMod).toBeDefined()
+		expect(payloadField(planMod!, 'target')).toBe('planner-0-1')
+		expect(payloadField(planMod!, 'aborted')).toEqual(['sub-coder-2-3', 'coder-1-2'])
+		const plannerResumed = llm.calls[3]!
+		const lastMessage = plannerResumed.messages[plannerResumed.messages.length - 1]
+		expect(lastMessage?.role).toBe('user')
+		expect(lastMessage?.content).toContain('[Operator plan modification')
+		expect(lastMessage?.content).toContain('use Postgres instead of SQLite')
+	})
+
+	test('an inquiry during a delegation lands in the chain root\u2019s history, not the active child\u2019s', async () => {
+		const guild = buildInterruptGuild(
+			{
+				parent: { systemPrompt: 'p', tools: ['agent', 'finish'] },
+				child: { systemPrompt: 'c', tools: ['echo', 'finish'] },
+			},
+			'parent',
+		)
+		const llm = new FakeLlm()
+		llm.responses = [
+			success([agentCall('child', 'do the work')]),
+			success([namedCall('k1', 'echo', {})]),
+			success([finishCall({ status: 'success', summary: 'child done' })]),
+			success([finishCall({ status: 'success', summary: 'parent done' })]),
+		]
+		const { deps } = makeDeps(llm)
+		const depsWithEcho: EngineDependencies = {
+			...deps,
+			additionalToolHandlers: {
+				// The child's tool call is where the operator's question lands; the child's next turn top routes it to the root.
+				echo: () => {
+					deps.interruptQueue.submit({ kind: 'inquiry', message: 'how is the run going?' })
+					return { kind: 'success', data: {} }
+				},
+			},
+		}
+
+		const result = await runRole(depsWithEcho, {
+			loadedGuild: guild,
+			depth: 0,
+			roleName: 'parent',
+			task: 'delegate',
+		})
+
+		expect(result).toEqual({ status: 'success', summary: 'parent done' })
+		// The child never saw it: its finish call (call index 2) carries no inquiry marker.
+		const childSecondCall = llm.calls[2]!
+		expect(childSecondCall.messages.some((m) => m.content.includes('[Operator inquiry'))).toBe(false)
+		// The root's next request after the child returned carries the marked message as a user message (injected at the child's safe point, so it sits just before the agent tool result that landed after it).
+		const parentResumed = llm.calls[3]!
+		const injected = parentResumed.messages.find((m) => typeof m.content === 'string' && m.content.includes('[Operator inquiry'))
+		expect(injected?.role).toBe('user')
+		expect(injected?.content).toContain('how is the run going?')
+	})
+
+	test('(e) the drain does not interrupt an in-flight LLM call: an inquiry submitted mid-call lands at the next safe point', async () => {
+		const guild = buildInterruptGuild(mainAndDetector, 'main')
+		const llm = new FakeLlm()
+		const { deps } = makeDeps(llm)
+		// Submits the inquiry while the first call is in flight, proving the drain waits for the turn boundary.
+		const submittingLlm: LlmCaller = {
+			async call(request) {
+				llm.calls.push(request)
+				if (llm.calls.length === 1) {
+					deps.interruptQueue.submit({ kind: 'inquiry', message: 'mid-call question' })
+				}
+				const next = llm.responses.shift()
+				if (next === undefined) throw new Error('FakeLlm ran out of responses')
+				return next
+			},
+		}
+		llm.responses = [
+			success([namedCall('c1', 'echo', {})]),
+			success([finishCall({ status: 'success', summary: 'done' })]),
+		]
+		const depsWithSubmittingLlm: EngineDependencies = { ...deps, llmCaller: submittingLlm }
+
+		const result = await runRole(depsWithSubmittingLlm, {
+			loadedGuild: guild,
+			depth: 0,
+			roleName: 'main',
+			task: 'do it',
+		})
+
+		expect(result).toEqual({ status: 'success', summary: 'done' })
+		// The first call's messages predate the submission; the injection appears only in the next call's messages.
+		const firstCallMessages = llm.calls[0]!.messages
+		expect(firstCallMessages.some((m) => typeof m.content === 'string' && m.content.includes('mid-call question'))).toBe(false)
+		const secondCallMessages = llm.calls[1]!.messages
+		expect(secondCallMessages.some((m) => m.role === 'user' && m.content.includes('[Operator inquiry') && m.content.includes('mid-call question'))).toBe(true)
+	})
+
+	test('the handler role itself is never interrupted by the cadence trigger', async () => {
+		const guild = buildInterruptGuild(mainAndDetector, 'main')
+		const llm = new FakeLlm()
+		// everyToolCalls is 2: the detector's own two inspect calls would retrigger if it were not exempt.
+		llm.responses = [
+			success([namedCall('c1', 'echo', { x: 1 })]),
+			success([namedCall('c2', 'echo', { x: 1 })]),
+			success([namedCall('d1', 'recent_role_tool_calls', { targetRole: 'main-0-1' })]),
+			success([namedCall('d2', 'search_role_blocks', { targetRole: 'main-0-1', pattern: 'x' })]),
+			success([namedCall('d3', 'trigger_interrupt', { targetRole: 'main-0-1', action: 'continue', reason: '' })]),
+			success([finishCall({ status: 'success', summary: 'clean' })]),
+			success([finishCall({ status: 'success', summary: 'main done' })]),
+		]
+		const { deps, events } = makeDeps(llm)
+
+		const result = await runRole(deps, {
+			loadedGuild: guild,
+			depth: 0,
+			roleName: 'main',
+			task: 'do it',
+		})
+
+		expect(result).toEqual({ status: 'success', summary: 'main done' })
+		// Exactly one interrupt stack: the detector was invoked once and never re-invoked against itself.
+		expect(events.filter((e) => e.type === 'interrupt').length).toBe(1)
+		expect(events.filter((e) => e.type === 'role_start' && payloadField(e, 'role') === 'loop_detector').length).toBe(1)
 	})
 })
 

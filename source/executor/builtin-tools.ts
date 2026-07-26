@@ -1,6 +1,8 @@
 import { createToolError, isErrorKind } from './errors.js'
 import type { Message, ResultCard, ToolResult } from './types.js'
 import { stripReasoning } from './context-policy.js'
+import { indexRoleMessages, readMessageWindow, searchRoleBlocks, MAX_SEARCH_MATCHES, RECENT_TOOL_CALLS_LIMIT, type InspectionField, type RecentToolCall } from './role-inspection.js'
+import type { InterruptActionKind, RoleRegistry, RoleRegistryEntry } from './role-registry.js'
 import { isObject } from './validation.js'
 import type { ToolHandler } from './tool-dispatch.js'
 import type { HumanBackend } from './human-backend.js'
@@ -11,6 +13,7 @@ export interface BuiltInToolContext {
 	roleState: RoleState
 	humanBackend: HumanBackend
 	contextWindow: number
+	roleRegistry: RoleRegistry
 }
 
 interface FinishValidationSuccess {
@@ -271,6 +274,141 @@ function createAskHuman(context: BuiltInToolContext): ToolHandler {
 	}
 }
 
+const INTERRUPT_ACTIONS: readonly InterruptActionKind[] = ['continue', 'redirect', 'abort']
+
+function isInterruptActionKind(value: unknown): value is InterruptActionKind {
+	return typeof value === 'string' && INTERRUPT_ACTIONS.some((action) => action === value)
+}
+
+// The handler's decision lands on the target's registry entry; the target's drain applies it once the handler finishes. redirect's message is injected immediately — the target is suspended mid-drain, so its history is stable — and the drain only has to resume it.
+function createTriggerInterrupt(context: BuiltInToolContext): ToolHandler {
+	return (args) => {
+		const target = lookupTarget(context.roleRegistry, args)
+		if (!target.ok) return target.error
+		const actionValue = args['action']
+		if (!isInterruptActionKind(actionValue)) {
+			return createToolError('invalid_arguments', 'action must be one of: continue, redirect, abort')
+		}
+		const reasonValue = args['reason']
+		if (typeof reasonValue !== 'string') {
+			return createToolError('invalid_arguments', 'reason must be a string')
+		}
+		if (actionValue === 'redirect') {
+			target.entry.roleState.history.push({ role: 'user', content: reasonValue })
+		}
+		target.entry.interruptAction = { action: actionValue, reason: reasonValue }
+		return { kind: 'success', data: { targetRole: target.entry.roleId, action: actionValue } }
+	}
+}
+
+function lookupTarget(registry: RoleRegistry, args: Record<string, unknown>): { ok: true; entry: RoleRegistryEntry } | { ok: false; error: ToolResult } {
+	const targetValue = args['targetRole']
+	if (typeof targetValue !== 'string' || targetValue === '') {
+		return { ok: false, error: createToolError('invalid_arguments', 'targetRole must be a non-empty string') }
+	}
+	const entry = registry.lookup(targetValue)
+	if (entry === undefined) {
+		return { ok: false, error: createToolError('invalid_arguments', `unknown role instance: ${targetValue}`) }
+	}
+	return { ok: true, entry }
+}
+
+function isInspectionField(value: unknown): value is InspectionField {
+	return value === 'content' || value === 'reasoning'
+}
+
+function optionalPositiveInt(value: unknown, fallback: number): number | null {
+	if (value === undefined) return fallback
+	if (typeof value !== 'number' || !Number.isInteger(value) || value <= 0) return null
+	return value
+}
+
+function createListRoleMessages(context: BuiltInToolContext): ToolHandler {
+	return (args) => {
+		const target = lookupTarget(context.roleRegistry, args)
+		if (!target.ok) return target.error
+		return { kind: 'success', data: { targetRole: target.entry.roleId, messages: indexRoleMessages(target.entry.roleState.history) } }
+	}
+}
+
+function createReadMessageWindow(context: BuiltInToolContext): ToolHandler {
+	return (args) => {
+		const target = lookupTarget(context.roleRegistry, args)
+		if (!target.ok) return target.error
+		const indexValue = args['index']
+		if (typeof indexValue !== 'number' || !Number.isInteger(indexValue) || indexValue < 0) {
+			return createToolError('invalid_arguments', 'index must be a non-negative integer')
+		}
+		const fieldValue = args['field']
+		if (!isInspectionField(fieldValue)) {
+			return createToolError('invalid_arguments', 'field must be one of: content, reasoning')
+		}
+		const startValue = args['start']
+		const endValue = args['end']
+		if (typeof startValue !== 'number' || !Number.isInteger(startValue) || startValue < 0) {
+			return createToolError('invalid_arguments', 'start must be a non-negative integer')
+		}
+		if (typeof endValue !== 'number' || !Number.isInteger(endValue) || endValue <= startValue) {
+			return createToolError('invalid_arguments', 'end must be an integer greater than start')
+		}
+		const result = readMessageWindow(target.entry.roleState.history, indexValue, fieldValue, startValue, endValue)
+		if (!result.ok) return createToolError('invalid_arguments', result.error)
+		return { kind: 'success', data: result.window }
+	}
+}
+
+function createSearchRoleBlocks(context: BuiltInToolContext): ToolHandler {
+	return (args) => {
+		const target = lookupTarget(context.roleRegistry, args)
+		if (!target.ok) return target.error
+		const patternValue = args['pattern']
+		if (typeof patternValue !== 'string' || patternValue === '') {
+			return createToolError('invalid_arguments', 'pattern must be a non-empty string')
+		}
+		const kindValue = args['kind']
+		if (kindValue !== undefined && kindValue !== 'substring' && kindValue !== 'regex') {
+			return createToolError('invalid_arguments', 'kind must be one of: substring, regex')
+		}
+		const fieldValue = args['field']
+		if (fieldValue !== undefined && !isInspectionField(fieldValue)) {
+			return createToolError('invalid_arguments', 'field must be one of: content, reasoning')
+		}
+		const maxMatches = optionalPositiveInt(args['maxMatches'], 10)
+		if (maxMatches === null) {
+			return createToolError('invalid_arguments', 'maxMatches must be a positive integer')
+		}
+		const result = searchRoleBlocks(target.entry.roleState.history, {
+			...(fieldValue !== undefined ? { field: fieldValue } : {}),
+			pattern: patternValue,
+			kind: kindValue ?? 'substring',
+			maxMatches,
+		})
+		if (!result.ok) return createToolError('invalid_arguments', result.error)
+		return { kind: 'success', data: { targetRole: target.entry.roleId, matches: result.matches, matchesCappedAt: MAX_SEARCH_MATCHES } }
+	}
+}
+
+function createRecentRoleToolCalls(context: BuiltInToolContext): ToolHandler {
+	return (args) => {
+		const target = lookupTarget(context.roleRegistry, args)
+		if (!target.ok) return target.error
+		const limit = optionalPositiveInt(args['limit'], 20)
+		if (limit === null) {
+			return createToolError('invalid_arguments', 'limit must be a positive integer')
+		}
+		const trace: RecentToolCall[] = target.entry.roleState.recentToolCalls
+		return {
+			kind: 'success',
+			data: {
+				targetRole: target.entry.roleId,
+				toolCalls: trace.slice(-Math.min(limit, RECENT_TOOL_CALLS_LIMIT)),
+				totalToolCalls: target.entry.roleState.toolCallCount,
+				traceCappedAt: RECENT_TOOL_CALLS_LIMIT,
+			},
+		}
+	}
+}
+
 export function createBuiltInToolHandlers(context: BuiltInToolContext): Record<string, ToolHandler> {
 	return {
 		finish: (args) => {
@@ -287,5 +425,10 @@ export function createBuiltInToolHandlers(context: BuiltInToolContext): Record<s
 		context_info: createContextInfo(context),
 		edit_context: createEditContext(context),
 		ask_human: createAskHuman(context),
+		trigger_interrupt: createTriggerInterrupt(context),
+		list_role_messages: createListRoleMessages(context),
+		read_message_window: createReadMessageWindow(context),
+		search_role_blocks: createSearchRoleBlocks(context),
+		recent_role_tool_calls: createRecentRoleToolCalls(context),
 	}
 }

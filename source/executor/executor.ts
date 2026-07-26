@@ -1,9 +1,11 @@
 import type { RunMeta, RunOptions } from './types.js'
 import { runRole } from './engine.js'
 import type { HumanBackend } from './human-backend.js'
+import type { InterruptQueue } from './interrupts.js'
 import type { LlmCaller } from './llm.js'
 import type { LoadGuild } from './loader.js'
 import type { AppendLog, RunDirectory, WriteMeta } from './persistence.js'
+import { createRoleRegistry } from './role-registry.js'
 import type { ToolHandler } from './tool-dispatch.js'
 
 export interface ExecutorDependencies {
@@ -14,6 +16,8 @@ export interface ExecutorDependencies {
 	loadGuild: LoadGuild
 	createRunDirectory: RunDirectory
 	writeMeta: WriteMeta
+	// The run's interrupt queue, created by the caller so the service API can submit operator interrupts while the run is in flight; the engine drains it at turn boundaries. The role registry is run-internal and created here.
+	interruptQueue: InterruptQueue
 }
 
 export async function runExecutor(deps: ExecutorDependencies, options: RunOptions): Promise<RunMeta> {
@@ -40,6 +44,8 @@ export async function runExecutor(deps: ExecutorDependencies, options: RunOption
 			appendLog: deps.appendLog,
 			additionalToolHandlers: deps.additionalToolHandlers,
 			humanBackend: deps.humanBackend,
+			roleRegistry: createRoleRegistry(),
+			interruptQueue: deps.interruptQueue,
 		},
 		{
 			loadedGuild,

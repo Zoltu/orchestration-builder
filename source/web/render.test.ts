@@ -4,6 +4,7 @@ import type { PendingQuestion } from '../executor/human-backend.js'
 import type { LogEvent, RunMeta, GuildConfig } from '../executor/types.js'
 import {
 	deriveBudgets,
+	deriveInterruptHistory,
 	deriveQuestionHistory,
 	deriveRoleActivity,
 	deriveRoleTree,
@@ -454,6 +455,10 @@ describe('formatLogEvent', () => {
 		expect(formatLogEvent(event('context_budget_exceeded', { role: 'coder', promptTokens: 100, contextWindow: 50 }))).toBe('coder · context budget exceeded')
 	})
 
+	test('context_compacted → role · context compacted by platform', () => {
+		expect(formatLogEvent(event('context_compacted', { role: 'coder', droppedMessages: 4, truncatedToolMessages: 0, strippedReasoningMessages: 1, estimatedPromptTokens: 400, contextWindow: 1000 }))).toBe('coder · context compacted by platform')
+	})
+
 	test('role_budget_exceeded → role · role budget exceeded', () => {
 		expect(formatLogEvent(event('role_budget_exceeded', { role: 'coder', phase: 'post_llm', error: { kind: 'compaction_failed' } }))).toBe('coder · role budget exceeded')
 	})
@@ -824,6 +829,101 @@ describe('deriveQuestionHistory', () => {
 
 	test('returns an empty list for an empty log', () => {
 		expect(deriveQuestionHistory([])).toEqual([])
+	})
+})
+
+describe('deriveInterruptHistory', () => {
+	test('pairs an inquiry with the recipient role\u2019s next content-bearing llm_call', () => {
+		const events: LogEvent[] = [
+			{ timestamp: 't1', type: 'operator_inquiry', payload: { role: 'coder', roleId: 'coder-1-2', message: 'what are you doing?' } },
+			{ timestamp: 't2', type: 'llm_call', payload: { role: 'coder', received: { toolCalls: [] } } },
+			{ timestamp: 't3', type: 'llm_call', payload: { role: 'coder', received: { content: 'I am writing the parser.' } } },
+		]
+
+		expect(deriveInterruptHistory(events)).toEqual([
+			{ kind: 'inquiry', askedAt: 't1', role: 'coder', message: 'what are you doing?', answer: 'I am writing the parser.', answeredAt: 't3', ended: false },
+		])
+	})
+
+	test('a tool-call-only response does not count as the answer', () => {
+		const events: LogEvent[] = [
+			{ timestamp: 't1', type: 'operator_inquiry', payload: { role: 'coder', message: 'status?' } },
+			{ timestamp: 't2', type: 'llm_call', payload: { role: 'coder', received: { content: '', toolCalls: [{ id: 'x' }] } } },
+		]
+
+		const history = deriveInterruptHistory(events)
+		expect(history.length).toBe(1)
+		const entry = history[0]!
+		expect(entry.kind).toBe('inquiry')
+		if (entry.kind !== 'inquiry') return
+		expect(entry.answer).toBeNull()
+		expect(entry.ended).toBe(false)
+	})
+
+	test('an llm_call from another role does not answer the inquiry', () => {
+		const events: LogEvent[] = [
+			{ timestamp: 't1', type: 'operator_inquiry', payload: { role: 'coder', message: 'status?' } },
+			{ timestamp: 't2', type: 'llm_call', payload: { role: 'planner', received: { content: 'not the addressee' } } },
+		]
+
+		const entry = deriveInterruptHistory(events)[0]!
+		if (entry.kind !== 'inquiry') throw new Error('expected inquiry')
+		expect(entry.answer).toBeNull()
+	})
+
+	test('two inquiries to the same role pair oldest-first', () => {
+		const events: LogEvent[] = [
+			{ timestamp: 't1', type: 'operator_inquiry', payload: { role: 'coder', message: 'first?' } },
+			{ timestamp: 't2', type: 'operator_inquiry', payload: { role: 'coder', message: 'second?' } },
+			{ timestamp: 't3', type: 'llm_call', payload: { role: 'coder', received: { content: 'answer one' } } },
+			{ timestamp: 't4', type: 'llm_call', payload: { role: 'coder', received: { content: 'answer two' } } },
+		]
+
+		const history = deriveInterruptHistory(events)
+		expect(history.length).toBe(2)
+		const first = history[0]!
+		const second = history[1]!
+		if (first.kind !== 'inquiry' || second.kind !== 'inquiry') throw new Error('expected inquiries')
+		expect(first.answer).toBe('answer one')
+		expect(second.answer).toBe('answer two')
+	})
+
+	test('a role finishing without a content response marks the inquiry ended', () => {
+		const events: LogEvent[] = [
+			{ timestamp: 't1', type: 'operator_inquiry', payload: { role: 'coder', message: 'status?' } },
+			{ timestamp: 't2', type: 'role_finished', payload: { role: 'coder', status: 'success' } },
+		]
+
+		const entry = deriveInterruptHistory(events)[0]!
+		if (entry.kind !== 'inquiry') throw new Error('expected inquiry')
+		expect(entry.answer).toBeNull()
+		expect(entry.ended).toBe(true)
+	})
+
+	test('records a plan modification with its target and aborted list', () => {
+		const events: LogEvent[] = [
+			{ timestamp: 't1', type: 'plan_modification', payload: { target: 'planner-0-1', targetRole: 'planner', message: 'use Postgres', aborted: ['coder-1-2', 'sub-coder-2-3'] } },
+		]
+
+		expect(deriveInterruptHistory(events)).toEqual([
+			{ kind: 'plan_modification', askedAt: 't1', message: 'use Postgres', target: 'planner-0-1', targetRole: 'planner', aborted: ['coder-1-2', 'sub-coder-2-3'] },
+		])
+	})
+
+	test('does not throw on malformed payloads', () => {
+		const events: LogEvent[] = [
+			{ timestamp: 't1', type: 'operator_inquiry', payload: null },
+			{ timestamp: 't2', type: 'plan_modification', payload: { message: 42 } },
+			{ timestamp: 't3', type: 'operator_inquiry', payload: { role: 'coder', message: 'ok?' } },
+		]
+
+		expect(deriveInterruptHistory(events)).toEqual([
+			{ kind: 'inquiry', askedAt: 't3', role: 'coder', message: 'ok?', answer: null, answeredAt: null, ended: false },
+		])
+	})
+
+	test('returns an empty list for a log without interrupt events', () => {
+		expect(deriveInterruptHistory([])).toEqual([])
 	})
 })
 
@@ -1209,12 +1309,14 @@ describe('renderConfig', () => {
 				return: { 'role->role': { detailed: ['{source} is returning to {destination}'] } },
 				observe: { 'role->role': { detailed: ['{source} is observing {destination}'] } },
 				terminate: { 'tool->role': { detailed: ['{source} is terminating {destination}'] } },
+				inquiry: { 'human->role': { detailed: ['{source} is asking {destination}'] } },
 			},
 			genericOperationTemplates: {
 				call: { detailed: ['{source} is calling {destination}'] },
 				return: { detailed: ['{source} is returning to {destination}'] },
 				observe: { detailed: ['{source} is observing {destination}'] },
 				terminate: { detailed: ['{source} is terminating {destination}'] },
+				inquiry: { detailed: ['{source} is asking {destination}'] },
 			},
 		}
 		const config = sampleGuildConfig({ visualization })

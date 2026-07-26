@@ -1,3 +1,7 @@
 [install]
 exact = true
 frozenLockfile = true
+
+# Benchmark fixture projects ship their own *.test.ts files as task data (they fail by design against the fixture's incomplete starting code); they are validation harnesses, not unit tests, so test discovery is rooted at source/.
+[test]
+root = "source"

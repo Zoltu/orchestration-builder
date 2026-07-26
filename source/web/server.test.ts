@@ -1,14 +1,13 @@
-import { afterAll, describe, expect, test } from 'bun:test'
-import * as fs from 'node:fs'
-import * as os from 'node:os'
-import * as path from 'node:path'
-import { createWebHumanBackend } from '../executor/human-backend.ts'
+import { describe, expect, test } from 'bun:test'
+import { createWebHumanBackend, type WebHumanBackend } from '../executor/human-backend.ts'
+import { createInterruptChannel, createInterruptQueue, type InterruptChannel } from '../executor/interrupts.ts'
 import { createRunState } from '../executor/run-state.ts'
 import { createRunSubmission, type RunSubmission, type StartRun } from '../executor/run-submission.ts'
-import { createReadProjectSettings, createWriteProjectSettings, type ProjectSettings, type ReadProjectSettings, type WriteProjectSettings, type RunSnapshotRaw, type RunSnapshotStats } from '../executor/persistence.ts'
+import type { ProjectSettings, ReadProjectSettings, WriteProjectSettings, RunSnapshotRaw, RunSnapshotStats } from '../executor/persistence.ts'
 import type { GuildConfig, RunMeta } from '../executor/types.js'
 import { parseRunSnapshot, type RunSnapshot } from './render.ts'
-import { createWebServer, type WebServer } from './server.ts'
+import { createRequestHandler, type RequestHandler } from './request-handler.ts'
+import { resolveStaticAsset } from './server.ts'
 
 function snapshotFor(runId: string, status: RunMeta['status'] = 'success', overrides: Partial<RunMeta> = {}): RunSnapshotRaw {
 	return {
@@ -225,47 +224,19 @@ snapshots.set('run-effort', {
 	].join('\n'),
 })
 
-// Shared server for the read-only routes (static assets, list, get-by-id, questions, answer, settings read).
-// The submission-mutating routes get their own fresh server per test to avoid cross-test ordering coupling.
-const humanBackend = createWebHumanBackend()
-const runState = createRunState({ humanBackend })
-const readOnlySettings = createInMemorySettings()
-const readOnlyServer: WebServer = createWebServer({
-	port: 0,
-	guildConfig: sampleGuildConfig,
-	tools: {},
-	runState,
-	runSubmission: createRunSubmission({
-		startRun: async () => ({ runId: 'unused', guildPath: 'g', benchmarkPath: 'b', task: 't', status: 'success', startTime: 's' }),
-		generateRunId: () => 'unused',
-		readProjectSettings: readOnlySettings.read,
-	}),
-	readRunSnapshot,
-	readRunMetaById,
-	readRunSnapshotStats,
-	listRunIds,
-	readProjectSettings: readOnlySettings.read,
-	writeProjectSettings: readOnlySettings.write,
-})
-
-afterAll(() => {
-	readOnlyServer.stop()
-})
-
-const readOnlyBaseUrl = `http://localhost:${readOnlyServer.port}`
-
-interface SubmissionServer {
-	server: WebServer
-	baseUrl: string
+interface HandlerHarness {
+	handler: RequestHandler
 	submission: RunSubmission
 	settings: InMemorySettings
-	// The effort most recently passed to startRun, so a test can assert the API-threaded effort reached the run.
+	interruptChannel: InterruptChannel
+	humanBackend: WebHumanBackend
+	staticCalls: string[]
 	lastEffort: () => number | undefined
-	resolveActive: () => ((meta: RunMeta) => void)
+	resolveActive: () => (meta: RunMeta) => void
 }
 
-// Builds a fresh server + submission whose startRun parks on a caller-controlled resolver, so each test drives its own run lifecycle without touching shared state.
-function createSubmissionServer(): SubmissionServer {
+// Builds a fresh handler whose startRun parks on a caller-controlled resolver, so each test drives its own run lifecycle without touching shared state. The static leaf is a recording fake; every dependency is in-memory.
+function createHandlerHarness(): HandlerHarness {
 	let resolveActive: (meta: RunMeta) => void = () => {}
 	let capturedEffort: number | undefined
 	const startRun: StartRun = (_runId, _task, effort) => {
@@ -277,24 +248,34 @@ function createSubmissionServer(): SubmissionServer {
 	let nextId = 0
 	const settings = createInMemorySettings()
 	const submission = createRunSubmission({ startRun, generateRunId: () => `test-run-${nextId++}`, readProjectSettings: settings.read })
-	const server = createWebServer({
-		port: 0,
-		guildConfig: sampleGuildConfig,
-		tools: {},
-		runState: createRunState({ humanBackend: createWebHumanBackend() }),
-		runSubmission: submission,
-		readRunSnapshot,
-		readRunMetaById,
-		readRunSnapshotStats,
-		listRunIds,
-		readProjectSettings: settings.read,
-		writeProjectSettings: settings.write,
-	})
+	const interruptChannel = createInterruptChannel()
+	const humanBackend = createWebHumanBackend()
+	const staticCalls: string[] = []
+	const handler = createRequestHandler(
+		{
+			guildConfig: sampleGuildConfig,
+			tools: {},
+			runState: createRunState({ humanBackend, interruptChannel }),
+			runSubmission: submission,
+			readRunSnapshot,
+			readRunMetaById,
+			readRunSnapshotStats,
+			listRunIds,
+			readProjectSettings: settings.read,
+			writeProjectSettings: settings.write,
+		},
+		(requestPath) => {
+			staticCalls.push(requestPath)
+			return new Response('static body', { headers: { 'content-type': 'text/javascript; charset=utf-8' } })
+		},
+	)
 	return {
-		server,
-		baseUrl: `http://localhost:${server.port}`,
+		handler,
 		submission,
 		settings,
+		interruptChannel,
+		humanBackend,
+		staticCalls,
 		lastEffort: () => capturedEffort,
 		resolveActive: () => resolveActive,
 	}
@@ -312,131 +293,65 @@ function terminalMeta(runId: string, task: string): RunMeta {
 	}
 }
 
-describe('createWebServer static assets', () => {
-	test('GET / returns the HTML page', async () => {
-		const response = await fetch(`${readOnlyBaseUrl}/`)
-		expect(response.status).toBe(200)
-		expect(response.headers.get('content-type')).toContain('text/html')
-		const body = await response.text()
-		expect(body).toContain('Adaptive Orchestrator')
+function get(path: string): Request {
+	return new Request(`http://handler.test${path}`)
+}
+
+function post(path: string, body: string): Request {
+	return new Request(`http://handler.test${path}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body })
+}
+
+function put(path: string, body: string): Request {
+	return new Request(`http://handler.test${path}`, { method: 'PUT', headers: { 'content-type': 'application/json' }, body })
+}
+
+describe('static asset resolution', () => {
+	test('maps / to index.html', () => {
+		expect(resolveStaticAsset('/static', '/')).toEqual({ resolvedPath: '/static/index.html', contentType: 'text/html; charset=utf-8' })
 	})
 
-	test('GET /app.js returns the client script', async () => {
-		const response = await fetch(`${readOnlyBaseUrl}/app.js`)
-		expect(response.status).toBe(200)
-		expect(response.headers.get('content-type')).toContain('text/javascript')
-		const body = await response.text()
-		expect(body).toContain('fetch')
+	test('resolves a nested asset with its content type', () => {
+		expect(resolveStaticAsset('/static', '/vendor/hyperapp.js')).toEqual({ resolvedPath: '/static/vendor/hyperapp.js', contentType: 'text/javascript; charset=utf-8' })
 	})
 
-	test('GET /vendor/hyperapp.js returns the vendored library', async () => {
-		const response = await fetch(`${readOnlyBaseUrl}/vendor/hyperapp.js`)
-		expect(response.status).toBe(200)
-		expect(response.headers.get('content-type')).toContain('text/javascript')
-		const body = await response.text()
-		expect(body).toContain('export var app')
+	test('rejects a path that escapes the static directory via ..', () => {
+		expect(resolveStaticAsset('/static', '/../source/web/server.ts')).toBeNull()
 	})
 
-	test('GET /styles.css returns the stylesheet', async () => {
-		const response = await fetch(`${readOnlyBaseUrl}/styles.css`)
-		expect(response.status).toBe(200)
-		expect(response.headers.get('content-type')).toContain('text/css')
-		const body = await response.text()
-		expect(body).toContain('body')
-	})
-
- 	test('GET /unknown returns a 404 json error', async () => {
- 		const response = await fetch(`${readOnlyBaseUrl}/unknown`)
- 		expect(response.status).toBe(404)
- 		const body = await response.json()
- 		expect(body).toEqual({ ok: false, error: 'not_found' })
- 	})
-
- 	// The static resolver serves any file under static/ by resolving the request path and checking the result stays inside the directory. A `..` segment that would escape to a source file is rejected with the same 404 JSON, never serving the file — preserving the traversal safety the explicit route map used to give.
- 	test('a path that escapes the static directory via `..` returns a 404, never the source file', async () => {
- 		const response = await fetch(`${readOnlyBaseUrl}/../source/web/server.ts`)
- 		expect(response.status).toBe(404)
- 		const body = await response.json()
- 		expect(body).toEqual({ ok: false, error: 'not_found' })
- 	})
-
- 	test('a URL-encoded traversal segment is also rejected', async () => {
- 		const response = await fetch(`${readOnlyBaseUrl}/%2e%2e/source/web/server.ts`)
- 		expect(response.status).toBe(404)
- 		const body = await response.json()
- 		expect(body).toEqual({ ok: false, error: 'not_found' })
- 	})
- })
-
-describe('createWebServer dev demo assets', () => {
-	test('GET /demo.html serves the dev entry page', async () => {
-		const response = await fetch(`${readOnlyBaseUrl}/demo.html`)
-		expect(response.status).toBe(200)
-		expect(response.headers.get('content-type')).toContain('text/html')
-		const body = await response.text()
-		expect(body).toContain('demo.js')
-	})
-
-	test('GET /demo.js serves the dev harness script', async () => {
-		const response = await fetch(`${readOnlyBaseUrl}/demo.js`)
-		expect(response.status).toBe(200)
-		expect(response.headers.get('content-type')).toContain('text/javascript')
-		const body = await response.text()
-		expect(body).toContain('scenarios')
-	})
-
-	test('GET /interaction-model.js serves the shared model module', async () => {
-		const response = await fetch(`${readOnlyBaseUrl}/interaction-model.js`)
-		expect(response.status).toBe(200)
-		expect(response.headers.get('content-type')).toContain('text/javascript')
-		const body = await response.text()
-		expect(body).toContain('activeStack')
-	})
-
-	test('GET /labels.js serves the localization registry module', async () => {
-		const response = await fetch(`${readOnlyBaseUrl}/labels.js`)
-		expect(response.status).toBe(200)
-		expect(response.headers.get('content-type')).toContain('text/javascript')
-		const body = await response.text()
-		expect(body).toContain('resolveOperationLabel')
-	})
-
-	test('GET /svg-primitives.js serves the SVG primitives module', async () => {
-		const response = await fetch(`${readOnlyBaseUrl}/svg-primitives.js`)
-		expect(response.status).toBe(200)
-		expect(response.headers.get('content-type')).toContain('text/javascript')
-		const body = await response.text()
-		expect(body).toContain('GraphNode')
-	})
-
-	test('GET /flow-view.js serves the flow-view renderer', async () => {
-		const response = await fetch(`${readOnlyBaseUrl}/flow-view.js`)
-		expect(response.status).toBe(200)
-		expect(response.headers.get('content-type')).toContain('text/javascript')
-		const body = await response.text()
-		expect(body).toContain('renderFlowView')
-	})
-
-	test('GET /sequence-diagram.js serves the sequence-view renderer', async () => {
-		const response = await fetch(`${readOnlyBaseUrl}/sequence-diagram.js`)
-		expect(response.status).toBe(200)
-		expect(response.headers.get('content-type')).toContain('text/javascript')
-		const body = await response.text()
-		expect(body).toContain('renderSequenceView')
-	})
-
-	test('GET /scenarios.js serves the scenario fixture module', async () => {
-		const response = await fetch(`${readOnlyBaseUrl}/scenarios.js`)
-		expect(response.status).toBe(200)
-		expect(response.headers.get('content-type')).toContain('text/javascript')
-		const body = await response.text()
-		expect(body).toContain('scenarios')
+	test('falls back to a binary content type for unknown extensions', () => {
+		expect(resolveStaticAsset('/static', '/data.bin')).toEqual({ resolvedPath: '/static/data.bin', contentType: 'application/octet-stream' })
 	})
 })
 
-describe('createWebServer GET /api/config', () => {
+describe('request handler static fallback', () => {
+	test('GET /favicon.ico returns 204 without consulting the static leaf', async () => {
+		const { handler, staticCalls } = createHandlerHarness()
+		const response = await handler(get('/favicon.ico'))
+		expect(response.status).toBe(204)
+		expect(staticCalls).toEqual([])
+	})
+
+	test('an unmatched GET path is delegated to the static leaf with the raw path', async () => {
+		const { handler, staticCalls } = createHandlerHarness()
+		const response = await handler(get('/app.js'))
+		expect(response.status).toBe(200)
+		expect(await response.text()).toBe('static body')
+		expect(staticCalls).toEqual(['/app.js'])
+	})
+
+	test('an unmatched method and path returns the JSON 404 without consulting the static leaf', async () => {
+		const { handler, staticCalls } = createHandlerHarness()
+		const response = await handler(post('/nope', '{}'))
+		expect(response.status).toBe(404)
+		expect(await response.json()).toEqual({ ok: false, error: 'not_found' })
+		expect(staticCalls).toEqual([])
+	})
+})
+
+describe('GET /api/config', () => {
 	test('returns the safe config subset derived from the loaded Guild', async () => {
-		const response = await fetch(`${readOnlyBaseUrl}/api/config`)
+		const { handler } = createHandlerHarness()
+		const response = await handler(get('/api/config'))
 		expect(response.status).toBe(200)
 		const config = await response.json()
 		expect(config.model).toEqual({ name: 'qwen3.6:35b', contextWindow: 262144 })
@@ -453,7 +368,8 @@ describe('createWebServer GET /api/config', () => {
 	})
 
 	test('structurally omits apiKey and apiBase from the response', async () => {
-		const response = await fetch(`${readOnlyBaseUrl}/api/config`)
+		const { handler } = createHandlerHarness()
+		const response = await handler(get('/api/config'))
 		const config = await response.json()
 		expect(config.model).not.toHaveProperty('apiKey')
 		expect(config.model).not.toHaveProperty('apiBase')
@@ -463,7 +379,8 @@ describe('createWebServer GET /api/config', () => {
 	})
 
 	test('includes the entry role and every role declared in the Guild', async () => {
-		const response = await fetch(`${readOnlyBaseUrl}/api/config`)
+		const { handler } = createHandlerHarness()
+		const response = await handler(get('/api/config'))
 		const config = await response.json()
 		expect(config.entryRole).toBe('orchestrator')
 		expect(Object.keys(config.roles).sort()).toEqual(['coder', 'orchestrator'])
@@ -472,55 +389,44 @@ describe('createWebServer GET /api/config', () => {
 	})
 })
 
-describe('createWebServer /api/run alias', () => {
+describe('GET /api/run alias', () => {
 	test('returns the active (most recent) run view', async () => {
-		const { server, baseUrl, submission, resolveActive } = createSubmissionServer()
-		try {
-			submission.submit('bootstrap task')
-			const response = await fetch(`${baseUrl}/api/run`)
-			expect(response.status).toBe(200)
-			const view = await response.json()
-			expect(view.runId).toBe('test-run-0')
-			expect(view.task).toBe('task for test-run-0')
+		const { handler, submission, resolveActive } = createHandlerHarness()
+		submission.submit('bootstrap task')
+		const response = await handler(get('/api/run'))
+		expect(response.status).toBe(200)
+		const view = await response.json()
+		expect(view.runId).toBe('test-run-0')
+		expect(view.task).toBe('task for test-run-0')
 
-			resolveActive()(terminalMeta('test-run-0', 'bootstrap task'))
-			await submission.awaitActive()
-		} finally {
-			server.stop()
-		}
+		resolveActive()(terminalMeta('test-run-0', 'bootstrap task'))
+		await submission.awaitActive()
 	})
 
 	test('returns 404 no_run when no run has ever been started', async () => {
-		const { server, baseUrl } = createSubmissionServer()
-		try {
-			const response = await fetch(`${baseUrl}/api/run`)
-			expect(response.status).toBe(404)
-			expect(await response.json()).toEqual({ ok: false, error: 'no_run' })
-		} finally {
-			server.stop()
-		}
+		const { handler } = createHandlerHarness()
+		const response = await handler(get('/api/run'))
+		expect(response.status).toBe(404)
+		expect(await response.json()).toEqual({ ok: false, error: 'no_run' })
 	})
 
 	test('keeps surfacing the most recent run after it completes', async () => {
-		const { server, baseUrl, submission, resolveActive } = createSubmissionServer()
-		try {
-			submission.submit('bootstrap task')
-			resolveActive()(terminalMeta('test-run-0', 'bootstrap task'))
-			await submission.awaitActive()
+		const { handler, submission, resolveActive } = createHandlerHarness()
+		submission.submit('bootstrap task')
+		resolveActive()(terminalMeta('test-run-0', 'bootstrap task'))
+		await submission.awaitActive()
 
-			const response = await fetch(`${baseUrl}/api/run`)
-			expect(response.status).toBe(200)
-			const view = await response.json()
-			expect(view.runId).toBe('test-run-0')
-		} finally {
-			server.stop()
-		}
+		const response = await handler(get('/api/run'))
+		expect(response.status).toBe(200)
+		const view = await response.json()
+		expect(view.runId).toBe('test-run-0')
 	})
 })
 
-describe('createWebServer /api/runs (list)', () => {
+describe('GET /api/runs (list)', () => {
 	test('returns the known runs as summaries, newest first by id', async () => {
-		const response = await fetch(`${readOnlyBaseUrl}/api/runs`)
+		const { handler } = createHandlerHarness()
+		const response = await handler(get('/api/runs'))
 		expect(response.status).toBe(200)
 		const list = await response.json()
 		expect(Array.isArray(list)).toBe(true)
@@ -552,9 +458,10 @@ describe('createWebServer /api/runs (list)', () => {
 	})
 })
 
-describe('createWebServer /api/runs/:id', () => {
+describe('GET /api/runs/:id', () => {
 	test('returns the full run view for a known run id', async () => {
-		const response = await fetch(`${readOnlyBaseUrl}/api/runs/run-1`)
+		const { handler } = createHandlerHarness()
+		const response = await handler(get('/api/runs/run-1'))
 		expect(response.status).toBe(200)
 		const view = await response.json()
 		expect(view.runId).toBe('run-1')
@@ -570,7 +477,8 @@ describe('createWebServer /api/runs/:id', () => {
 	})
 
 	test('returns budgets derived from the log and meta', async () => {
-		const response = await fetch(`${readOnlyBaseUrl}/api/runs/run-1`)
+		const { handler } = createHandlerHarness()
+		const response = await handler(get('/api/runs/run-1'))
 		expect(response.status).toBe(200)
 		const view = await response.json()
 		expect(view.budgets).toEqual({
@@ -582,7 +490,8 @@ describe('createWebServer /api/runs/:id', () => {
 	})
 
 	test('returns budgets that split cached from uncached prompt tokens', async () => {
-		const response = await fetch(`${readOnlyBaseUrl}/api/runs/run-cached`)
+		const { handler } = createHandlerHarness()
+		const response = await handler(get('/api/runs/run-cached'))
 		expect(response.status).toBe(200)
 		const view = await response.json()
 		expect(view.budgets.toolCalls).toBe(1)
@@ -596,7 +505,8 @@ describe('createWebServer /api/runs/:id', () => {
 	})
 
 	test('surfaces error, artifacts, currentActivity, and readable recentLog for a failed run', async () => {
-		const response = await fetch(`${readOnlyBaseUrl}/api/runs/run-2`)
+		const { handler } = createHandlerHarness()
+		const response = await handler(get('/api/runs/run-2'))
 		expect(response.status).toBe(200)
 		const view = await response.json()
 		expect(view.error).toEqual({ kind: 'llm_unavailable', message: 'connection refused' })
@@ -607,13 +517,15 @@ describe('createWebServer /api/runs/:id', () => {
 	})
 
 	test('returns 404 for an unknown run id', async () => {
-		const response = await fetch(`${readOnlyBaseUrl}/api/runs/never-started`)
+		const { handler } = createHandlerHarness()
+		const response = await handler(get('/api/runs/never-started'))
 		expect(response.status).toBe(404)
 		expect(await response.json()).toEqual({ ok: false, error: 'not_found' })
 	})
 
 	test('returns questionHistory pairing ask_human with human_answer events', async () => {
-		const response = await fetch(`${readOnlyBaseUrl}/api/runs/run-3`)
+		const { handler } = createHandlerHarness()
+		const response = await handler(get('/api/runs/run-3'))
 		expect(response.status).toBe(200)
 		const view = await response.json()
 		expect(view.questionHistory.length).toBe(2)
@@ -633,7 +545,8 @@ describe('createWebServer /api/runs/:id', () => {
 	})
 
 	test('exposes the role tree and paired raw-payload detail sections for a tree-bearing run', async () => {
-		const response = await fetch(`${readOnlyBaseUrl}/api/runs/run-tree`)
+		const { handler } = createHandlerHarness()
+		const response = await handler(get('/api/runs/run-tree'))
 		expect(response.status).toBe(200)
 		const view = await response.json()
 		expect(view.roleTree).not.toBeNull()
@@ -659,7 +572,8 @@ describe('createWebServer /api/runs/:id', () => {
 	})
 
 	test('a retry run shows two distinct coder invocations with their own statuses and surfaces the error summary inline', async () => {
-		const response = await fetch(`${readOnlyBaseUrl}/api/runs/run-retry`)
+		const { handler } = createHandlerHarness()
+		const response = await handler(get('/api/runs/run-retry'))
 		expect(response.status).toBe(200)
 		const view = await response.json()
 		// The tree has two coder invocations under one orchestrator, each with its own status — not one merged node.
@@ -687,19 +601,21 @@ describe('createWebServer /api/runs/:id', () => {
 	})
 
 	test('includes the run effort from meta.effort, or null when the run predates the channel', async () => {
-		const withEffort = await fetch(`${readOnlyBaseUrl}/api/runs/run-effort`)
+		const { handler } = createHandlerHarness()
+		const withEffort = await handler(get('/api/runs/run-effort'))
 		expect(withEffort.status).toBe(200)
 		expect((await withEffort.json()).effort).toBe(4)
 
-		const withoutEffort = await fetch(`${readOnlyBaseUrl}/api/runs/run-1`)
+		const withoutEffort = await handler(get('/api/runs/run-1'))
 		expect(withoutEffort.status).toBe(200)
 		expect((await withoutEffort.json()).effort).toBeNull()
 	})
 })
 
-describe('createWebServer GET /api/runs/:id/log', () => {
+describe('GET /api/runs/:id/log', () => {
 	test('returns the default first page with total, offset, and limit', async () => {
-		const response = await fetch(`${readOnlyBaseUrl}/api/runs/run-long/log`)
+		const { handler } = createHandlerHarness()
+		const response = await handler(get('/api/runs/run-long/log'))
 		expect(response.status).toBe(200)
 		const body = await response.json()
 		expect(body.runId).toBe('run-long')
@@ -714,7 +630,8 @@ describe('createWebServer GET /api/runs/:id/log', () => {
 	})
 
 	test('returns a later page with explicit offset and limit', async () => {
-		const response = await fetch(`${readOnlyBaseUrl}/api/runs/run-long/log?offset=240&limit=20`)
+		const { handler } = createHandlerHarness()
+		const response = await handler(get('/api/runs/run-long/log?offset=240&limit=20'))
 		expect(response.status).toBe(200)
 		const body = await response.json()
 		expect(body.total).toBe(250)
@@ -726,7 +643,8 @@ describe('createWebServer GET /api/runs/:id/log', () => {
 	})
 
 	test('returns an empty page with the correct total when offset is past the end', async () => {
-		const response = await fetch(`${readOnlyBaseUrl}/api/runs/run-long/log?offset=300&limit=10`)
+		const { handler } = createHandlerHarness()
+		const response = await handler(get('/api/runs/run-long/log?offset=300&limit=10'))
 		expect(response.status).toBe(200)
 		const body = await response.json()
 		expect(body.total).toBe(250)
@@ -735,7 +653,8 @@ describe('createWebServer GET /api/runs/:id/log', () => {
 	})
 
 	test('treats invalid query params as defaults', async () => {
-		const response = await fetch(`${readOnlyBaseUrl}/api/runs/run-long/log?offset=abc&limit=-5`)
+		const { handler } = createHandlerHarness()
+		const response = await handler(get('/api/runs/run-long/log?offset=abc&limit=-5'))
 		expect(response.status).toBe(200)
 		const body = await response.json()
 		expect(body.offset).toBe(0)
@@ -744,20 +663,15 @@ describe('createWebServer GET /api/runs/:id/log', () => {
 	})
 
 	test('returns 404 for an unknown run id', async () => {
-		const response = await fetch(`${readOnlyBaseUrl}/api/runs/never-started/log`)
+		const { handler } = createHandlerHarness()
+		const response = await handler(get('/api/runs/never-started/log'))
 		expect(response.status).toBe(404)
 		expect(await response.json()).toEqual({ ok: false, error: 'not_found' })
 	})
 
-	test('does not regress the bare :id route (the /log suffix is not swallowed)', async () => {
-		const response = await fetch(`${readOnlyBaseUrl}/api/runs/run-1`)
-		expect(response.status).toBe(200)
-		const view = await response.json()
-		expect(view.runId).toBe('run-1')
-	})
-
 	test('format=text returns the page as a downloadable plain-text log', async () => {
-		const response = await fetch(`${readOnlyBaseUrl}/api/runs/run-1/log?format=text`)
+		const { handler } = createHandlerHarness()
+		const response = await handler(get('/api/runs/run-1/log?format=text'))
 		expect(response.status).toBe(200)
 		expect(response.headers.get('content-type')).toContain('text/plain')
 		expect(response.headers.get('content-disposition')).toBe('attachment; filename="run-1.log"')
@@ -769,7 +683,8 @@ describe('createWebServer GET /api/runs/:id/log', () => {
 	})
 
 	test('format=text honors offset and limit', async () => {
-		const response = await fetch(`${readOnlyBaseUrl}/api/runs/run-long/log?format=text&offset=0&limit=3`)
+		const { handler } = createHandlerHarness()
+		const response = await handler(get('/api/runs/run-long/log?format=text&offset=0&limit=3'))
 		expect(response.status).toBe(200)
 		const lines = (await response.text()).split('\n')
 		expect(lines.length).toBe(3)
@@ -778,15 +693,17 @@ describe('createWebServer GET /api/runs/:id/log', () => {
 	})
 
 	test('format=text returns 404 for an unknown run id', async () => {
-		const response = await fetch(`${readOnlyBaseUrl}/api/runs/never-started/log?format=text`)
+		const { handler } = createHandlerHarness()
+		const response = await handler(get('/api/runs/never-started/log?format=text'))
 		expect(response.status).toBe(404)
 		expect(await response.json()).toEqual({ ok: false, error: 'not_found' })
 	})
 })
 
-describe('createWebServer GET /api/runs/:id/flow', () => {
+describe('GET /api/runs/:id/flow', () => {
 	test('returns the InteractionModel for a known run with the root human and entry role', async () => {
-		const response = await fetch(`${readOnlyBaseUrl}/api/runs/run-tree/flow`)
+		const { handler } = createHandlerHarness()
+		const response = await handler(get('/api/runs/run-tree/flow'))
 		expect(response.status).toBe(200)
 		expect(response.headers.get('content-type')).toContain('application/json')
 		const model = await response.json()
@@ -802,55 +719,42 @@ describe('createWebServer GET /api/runs/:id/flow', () => {
 	})
 
 	test('returns 404 for an unknown run id', async () => {
-		const response = await fetch(`${readOnlyBaseUrl}/api/runs/never-started/flow`)
+		const { handler } = createHandlerHarness()
+		const response = await handler(get('/api/runs/never-started/flow'))
 		expect(response.status).toBe(404)
 		expect(await response.json()).toEqual({ ok: false, error: 'not_found' })
 	})
-
-	test('does not swallow the bare :id route (the /flow suffix is not consumed as part of the id)', async () => {
-		const response = await fetch(`${readOnlyBaseUrl}/api/runs/run-tree`)
-		expect(response.status).toBe(200)
-		const view = await response.json()
-		expect(view.runId).toBe('run-tree')
-	})
 })
 
-describe('createWebServer /api/run/flow alias', () => {
+describe('GET /api/run/flow alias', () => {
 	test('matches /api/runs/:id/flow for the active run', async () => {
-		const { server, baseUrl, submission, resolveActive } = createSubmissionServer()
-		try {
-			submission.submit('bootstrap task')
-			const activeId = submission.activeRunId()
-			expect(activeId).toBe('test-run-0')
+		const { handler, submission, resolveActive } = createHandlerHarness()
+		submission.submit('bootstrap task')
+		const activeId = submission.activeRunId()
+		expect(activeId).toBe('test-run-0')
 
-			const aliasResponse = await fetch(`${baseUrl}/api/run/flow`)
-			expect(aliasResponse.status).toBe(200)
-			const byIdResponse = await fetch(`${baseUrl}/api/runs/${activeId}/flow`)
-			expect(byIdResponse.status).toBe(200)
-			expect(await aliasResponse.json()).toEqual(await byIdResponse.json())
+		const aliasResponse = await handler(get('/api/run/flow'))
+		expect(aliasResponse.status).toBe(200)
+		const byIdResponse = await handler(get(`/api/runs/${activeId}/flow`))
+		expect(byIdResponse.status).toBe(200)
+		expect(await aliasResponse.json()).toEqual(await byIdResponse.json())
 
-			resolveActive()(terminalMeta('test-run-0', 'bootstrap task'))
-			await submission.awaitActive()
-		} finally {
-			server.stop()
-		}
+		resolveActive()(terminalMeta('test-run-0', 'bootstrap task'))
+		await submission.awaitActive()
 	})
 
 	test('returns 404 no_run when no run has ever been started', async () => {
-		const { server, baseUrl } = createSubmissionServer()
-		try {
-			const response = await fetch(`${baseUrl}/api/run/flow`)
-			expect(response.status).toBe(404)
-			expect(await response.json()).toEqual({ ok: false, error: 'no_run' })
-		} finally {
-			server.stop()
-		}
+		const { handler } = createHandlerHarness()
+		const response = await handler(get('/api/run/flow'))
+		expect(response.status).toBe(404)
+		expect(await response.json()).toEqual({ ok: false, error: 'no_run' })
 	})
 })
 
-describe('createWebServer /api/demo/scenarios', () => {
+describe('GET /api/demo/scenarios', () => {
 	test('lists every demo fixture with id, label, frame count, and participants', async () => {
-		const response = await fetch(`${readOnlyBaseUrl}/api/demo/scenarios`)
+		const { handler } = createHandlerHarness()
+		const response = await handler(get('/api/demo/scenarios'))
 		expect(response.status).toBe(200)
 		const list = await response.json()
 		expect(Array.isArray(list)).toBe(true)
@@ -865,9 +769,10 @@ describe('createWebServer /api/demo/scenarios', () => {
 	})
 })
 
-describe('createWebServer /api/demo/flow/:scenario/:frame', () => {
+describe('GET /api/demo/flow/:scenario/:frame', () => {
 	test('returns the adapter-derived InteractionModel for a frame (root human + the entry role)', async () => {
-		const response = await fetch(`${readOnlyBaseUrl}/api/demo/flow/single-role-completion/0`)
+		const { handler } = createHandlerHarness()
+		const response = await handler(get('/api/demo/flow/single-role-completion/0'))
 		expect(response.status).toBe(200)
 		expect(response.headers.get('content-type')).toContain('application/json')
 		const model = await response.json()
@@ -882,173 +787,114 @@ describe('createWebServer /api/demo/flow/:scenario/:frame', () => {
 
 	test('a later frame reflects adapter lifecycle (the lingering tool return at the tool_result frame)', async () => {
 		// tool_result is the 8th event (index 7) of the delegation-chain fixture.
-		const response = await fetch(`${readOnlyBaseUrl}/api/demo/flow/delegation-chain/7`)
+		const { handler } = createHandlerHarness()
+		const response = await handler(get('/api/demo/flow/delegation-chain/7'))
 		const model = await response.json()
 		const inFlightReturns = model.operations.filter((o: { kind: string; lifecycle: string }) => o.kind === 'return' && o.lifecycle === 'in_flight')
 		expect(inFlightReturns.length).toBe(1)
 	})
 
 	test('returns 404 for an unknown scenario', async () => {
-		const response = await fetch(`${readOnlyBaseUrl}/api/demo/flow/no-such-scenario/0`)
+		const { handler } = createHandlerHarness()
+		const response = await handler(get('/api/demo/flow/no-such-scenario/0'))
 		expect(response.status).toBe(404)
 		expect(await response.json()).toEqual({ ok: false, error: 'not_found' })
 	})
 
 	test('returns 404 for an out-of-range frame', async () => {
-		const response = await fetch(`${readOnlyBaseUrl}/api/demo/flow/single-role-completion/999`)
+		const { handler } = createHandlerHarness()
+		const response = await handler(get('/api/demo/flow/single-role-completion/999'))
 		expect(response.status).toBe(404)
 		expect(await response.json()).toEqual({ ok: false, error: 'not_found' })
 	})
 
 	test('a malformed frame index is a 404, not a crash', async () => {
-		const response = await fetch(`${readOnlyBaseUrl}/api/demo/flow/single-role-completion/abc`)
+		const { handler } = createHandlerHarness()
+		const response = await handler(get('/api/demo/flow/single-role-completion/abc'))
 		expect(response.status).toBe(404)
 	})
 })
 
-describe('createWebServer POST /api/runs', () => {
+describe('POST /api/runs', () => {
 	test('accepts a task when no run is active and returns 201 with the run id', async () => {
-		const { server, baseUrl, submission, resolveActive } = createSubmissionServer()
-		try {
-			const response = await fetch(`${baseUrl}/api/runs`, {
-				method: 'POST',
-				headers: { 'content-type': 'application/json' },
-				body: JSON.stringify({ task: 'a new task' }),
-			})
-			expect(response.status).toBe(201)
-			const body = await response.json()
-			expect(body.runId).toBe('test-run-0')
-			expect(submission.activeRunId()).toBe('test-run-0')
+		const { handler, submission, resolveActive } = createHandlerHarness()
+		const response = await handler(post('/api/runs', JSON.stringify({ task: 'a new task' })))
+		expect(response.status).toBe(201)
+		const body = await response.json()
+		expect(body.runId).toBe('test-run-0')
+		expect(submission.activeRunId()).toBe('test-run-0')
 
-			resolveActive()(terminalMeta('test-run-0', 'a new task'))
-			await submission.awaitActive()
-		} finally {
-			server.stop()
-		}
+		resolveActive()(terminalMeta('test-run-0', 'a new task'))
+		await submission.awaitActive()
 	})
 
 	test('rejects a second submit while a run is active with 409 run_in_progress', async () => {
-		const { server, baseUrl, submission, resolveActive } = createSubmissionServer()
-		try {
-			submission.submit('first')
-			const response = await fetch(`${baseUrl}/api/runs`, {
-				method: 'POST',
-				headers: { 'content-type': 'application/json' },
-				body: JSON.stringify({ task: 'second' }),
-			})
-			expect(response.status).toBe(409)
-			expect(await response.json()).toEqual({ ok: false, error: 'run_in_progress' })
+		const { handler, submission, resolveActive } = createHandlerHarness()
+		submission.submit('first')
+		const response = await handler(post('/api/runs', JSON.stringify({ task: 'second' })))
+		expect(response.status).toBe(409)
+		expect(await response.json()).toEqual({ ok: false, error: 'run_in_progress' })
 
-			resolveActive()(terminalMeta('test-run-0', 'first'))
-			await submission.awaitActive()
-		} finally {
-			server.stop()
-		}
+		resolveActive()(terminalMeta('test-run-0', 'first'))
+		await submission.awaitActive()
 	})
 
 	test('rejects a body missing the task field with 400 invalid_body', async () => {
-		const { server, baseUrl } = createSubmissionServer()
-		try {
-			const response = await fetch(`${baseUrl}/api/runs`, {
-				method: 'POST',
-				headers: { 'content-type': 'application/json' },
-				body: JSON.stringify({ notTask: 'x' }),
-			})
-			expect(response.status).toBe(400)
-			expect(await response.json()).toEqual({ ok: false, error: 'invalid_body' })
-		} finally {
-			server.stop()
-		}
+		const { handler } = createHandlerHarness()
+		const response = await handler(post('/api/runs', JSON.stringify({ notTask: 'x' })))
+		expect(response.status).toBe(400)
+		expect(await response.json()).toEqual({ ok: false, error: 'invalid_body' })
 	})
 
 	test('rejects malformed json with 400 invalid_body', async () => {
-		const { server, baseUrl } = createSubmissionServer()
-		try {
-			const response = await fetch(`${baseUrl}/api/runs`, {
-				method: 'POST',
-				headers: { 'content-type': 'application/json' },
-				body: '{ not json',
-			})
-			expect(response.status).toBe(400)
-			expect(await response.json()).toEqual({ ok: false, error: 'invalid_body' })
-		} finally {
-			server.stop()
-		}
+		const { handler } = createHandlerHarness()
+		const response = await handler(post('/api/runs', '{ not json'))
+		expect(response.status).toBe(400)
+		expect(await response.json()).toEqual({ ok: false, error: 'invalid_body' })
 	})
 
 	test('threads a valid effort override into the started run', async () => {
-		const { server, baseUrl, submission, lastEffort, resolveActive } = createSubmissionServer()
-		try {
-			const response = await fetch(`${baseUrl}/api/runs`, {
-				method: 'POST',
-				headers: { 'content-type': 'application/json' },
-				body: JSON.stringify({ task: 'careful task', effort: 5 }),
-			})
-			expect(response.status).toBe(201)
-			expect(lastEffort()).toBe(5)
+		const { handler, submission, lastEffort, resolveActive } = createHandlerHarness()
+		const response = await handler(post('/api/runs', JSON.stringify({ task: 'careful task', effort: 5 })))
+		expect(response.status).toBe(201)
+		expect(lastEffort()).toBe(5)
 
-			resolveActive()(terminalMeta('test-run-0', 'careful task'))
-			await submission.awaitActive()
-		} finally {
-			server.stop()
-		}
+		resolveActive()(terminalMeta('test-run-0', 'careful task'))
+		await submission.awaitActive()
 	})
 
 	test('applies the project default when effort is omitted', async () => {
-		const { server, baseUrl, submission, settings, lastEffort, resolveActive } = createSubmissionServer()
-		try {
-			settings.write({ effort: 2 })
-			const response = await fetch(`${baseUrl}/api/runs`, {
-				method: 'POST',
-				headers: { 'content-type': 'application/json' },
-				body: JSON.stringify({ task: 'defaulted task' }),
-			})
-			expect(response.status).toBe(201)
-			expect(lastEffort()).toBe(2)
+		const { handler, submission, settings, lastEffort, resolveActive } = createHandlerHarness()
+		settings.write({ effort: 2 })
+		const response = await handler(post('/api/runs', JSON.stringify({ task: 'defaulted task' })))
+		expect(response.status).toBe(201)
+		expect(lastEffort()).toBe(2)
 
-			resolveActive()(terminalMeta('test-run-0', 'defaulted task'))
-			await submission.awaitActive()
-		} finally {
-			server.stop()
-		}
+		resolveActive()(terminalMeta('test-run-0', 'defaulted task'))
+		await submission.awaitActive()
 	})
 
 	test('rejects an out-of-range effort with 400 invalid_body', async () => {
-		const { server, baseUrl } = createSubmissionServer()
-		try {
-			const response = await fetch(`${baseUrl}/api/runs`, {
-				method: 'POST',
-				headers: { 'content-type': 'application/json' },
-				body: JSON.stringify({ task: 'x', effort: 6 }),
-			})
-			expect(response.status).toBe(400)
-			expect(await response.json()).toEqual({ ok: false, error: 'invalid_body' })
-		} finally {
-			server.stop()
-		}
+		const { handler } = createHandlerHarness()
+		const response = await handler(post('/api/runs', JSON.stringify({ task: 'x', effort: 6 })))
+		expect(response.status).toBe(400)
+		expect(await response.json()).toEqual({ ok: false, error: 'invalid_body' })
 	})
 
 	test('rejects a non-integer effort with 400 invalid_body', async () => {
-		const { server, baseUrl } = createSubmissionServer()
-		try {
-			const response = await fetch(`${baseUrl}/api/runs`, {
-				method: 'POST',
-				headers: { 'content-type': 'application/json' },
-				body: JSON.stringify({ task: 'x', effort: 2.5 }),
-			})
-			expect(response.status).toBe(400)
-			expect(await response.json()).toEqual({ ok: false, error: 'invalid_body' })
-		} finally {
-			server.stop()
-		}
+		const { handler } = createHandlerHarness()
+		const response = await handler(post('/api/runs', JSON.stringify({ task: 'x', effort: 2.5 })))
+		expect(response.status).toBe(400)
+		expect(await response.json()).toEqual({ ok: false, error: 'invalid_body' })
 	})
 })
 
-describe('createWebServer /api/questions and /api/answer', () => {
-	test('GET /api/questions returns the pending list from the run state', async () => {
+describe('/api/questions and /api/answer', () => {
+	test('GET /api/questions returns the pending list and POST /api/answer resolves the ask', async () => {
+		const { handler, humanBackend } = createHandlerHarness()
 		const askPromise = humanBackend.ask('Which framework?', 'src/index.ts')
 
-		const response = await fetch(`${readOnlyBaseUrl}/api/questions`)
+		const response = await handler(get('/api/questions'))
 		expect(response.status).toBe(200)
 		const questions = await response.json()
 		expect(questions.length).toBe(1)
@@ -1057,216 +903,146 @@ describe('createWebServer /api/questions and /api/answer', () => {
 		expect(typeof questions[0].id).toBe('string')
 
 		const id = questions[0].id
-		const answerResponse = await fetch(`${readOnlyBaseUrl}/api/answer`, {
-			method: 'POST',
-			headers: { 'content-type': 'application/json' },
-			body: JSON.stringify({ id, answer: 'react' }),
-		})
+		const answerResponse = await handler(post('/api/answer', JSON.stringify({ id, answer: 'react' })))
 		expect(answerResponse.status).toBe(200)
 		expect(await answerResponse.json()).toEqual({ ok: true })
 
 		expect(await askPromise).toBe('react')
 
-		const afterResponse = await fetch(`${readOnlyBaseUrl}/api/questions`)
+		const afterResponse = await handler(get('/api/questions'))
 		const afterQuestions = await afterResponse.json()
 		expect(afterQuestions).toEqual([])
 	})
 
 	test('POST /api/answer for an unknown id returns 404 not_found', async () => {
-		const response = await fetch(`${readOnlyBaseUrl}/api/answer`, {
-			method: 'POST',
-			headers: { 'content-type': 'application/json' },
-			body: JSON.stringify({ id: 'does-not-exist', answer: 'whatever' }),
-		})
+		const { handler } = createHandlerHarness()
+		const response = await handler(post('/api/answer', JSON.stringify({ id: 'does-not-exist', answer: 'whatever' })))
 		expect(response.status).toBe(404)
 		expect(await response.json()).toEqual({ ok: false, error: 'not_found' })
 	})
 
 	test('POST /api/answer with malformed json returns 400 invalid_body', async () => {
-		const response = await fetch(`${readOnlyBaseUrl}/api/answer`, {
-			method: 'POST',
-			headers: { 'content-type': 'application/json' },
-			body: '{ not json',
-		})
+		const { handler } = createHandlerHarness()
+		const response = await handler(post('/api/answer', '{ not json'))
 		expect(response.status).toBe(400)
 		expect(await response.json()).toEqual({ ok: false, error: 'invalid_body' })
 	})
 
 	test('POST /api/answer with a missing id returns 400 invalid_body', async () => {
-		const response = await fetch(`${readOnlyBaseUrl}/api/answer`, {
-			method: 'POST',
-			headers: { 'content-type': 'application/json' },
-			body: JSON.stringify({ answer: 'no id' }),
-		})
+		const { handler } = createHandlerHarness()
+		const response = await handler(post('/api/answer', JSON.stringify({ answer: 'no id' })))
 		expect(response.status).toBe(400)
 		expect(await response.json()).toEqual({ ok: false, error: 'invalid_body' })
 	})
 })
 
-describe('createWebServer /api/settings', () => {
-	test('GET /api/settings returns effort null when no default is set', async () => {
-		const { server, baseUrl } = createSubmissionServer()
-		try {
-			const response = await fetch(`${baseUrl}/api/settings`)
-			expect(response.status).toBe(200)
-			expect(await response.json()).toEqual({ effort: null })
-		} finally {
-			server.stop()
-		}
+describe('POST /api/runs/:id/interrupt', () => {
+	test('an inquiry for the active run is accepted with 202 and queued for the engine', async () => {
+		const { handler, submission, interruptChannel } = createHandlerHarness()
+		const queue = createInterruptQueue()
+		interruptChannel.bindQueue(queue)
+		const submitted = submission.submit('a task')
+		if (!submitted.ok) throw new Error('submit failed')
+
+		const response = await handler(post(`/api/runs/${submitted.runId}/interrupt`, JSON.stringify({ kind: 'inquiry', message: 'how is it going?' })))
+		expect(response.status).toBe(202)
+		expect(await response.json()).toEqual({ ok: true })
+		expect(queue.drain()).toEqual({ kind: 'inquiry', message: 'how is it going?' })
 	})
 
-	test('GET /api/settings returns the stored default after a PUT', async () => {
-		const { server, baseUrl, settings } = createSubmissionServer()
-		try {
-			settings.write({ effort: 4 })
-			const response = await fetch(`${baseUrl}/api/settings`)
-			expect(response.status).toBe(200)
-			expect(await response.json()).toEqual({ effort: 4 })
-		} finally {
-			server.stop()
-		}
+	test('an interrupt for a non-active or unknown run is rejected with 409', async () => {
+		const { handler, submission, interruptChannel } = createHandlerHarness()
+		interruptChannel.bindQueue(createInterruptQueue())
+		const submitted = submission.submit('a task')
+		if (!submitted.ok) throw new Error('submit failed')
+
+		const stale = await handler(post('/api/runs/some-other-run/interrupt', JSON.stringify({ kind: 'inquiry', message: 'hello?' })))
+		expect(stale.status).toBe(409)
+		expect(await stale.json()).toEqual({ ok: false, error: 'run_not_active' })
 	})
 
-	test('PUT /api/settings persists the effort and echoes it back', async () => {
-		const { server, baseUrl, settings } = createSubmissionServer()
-		try {
-			const response = await fetch(`${baseUrl}/api/settings`, {
-				method: 'PUT',
-				headers: { 'content-type': 'application/json' },
-				body: JSON.stringify({ effort: 3 }),
-			})
-			expect(response.status).toBe(200)
-			expect(await response.json()).toEqual({ effort: 3 })
-			expect(settings.snapshot()).toEqual({ effort: 3 })
-
-			const getResponse = await fetch(`${baseUrl}/api/settings`)
-			expect(await getResponse.json()).toEqual({ effort: 3 })
-		} finally {
-			server.stop()
-		}
+	test('an interrupt with no active run at all is rejected with 409', async () => {
+		const { handler } = createHandlerHarness()
+		const response = await handler(post('/api/runs/anything/interrupt', JSON.stringify({ kind: 'plan_modification', message: 'change course' })))
+		expect(response.status).toBe(409)
+		expect(await response.json()).toEqual({ ok: false, error: 'run_not_active' })
 	})
 
-	test('PUT /api/settings rejects a missing effort with 400 invalid_body', async () => {
-		const { server, baseUrl, settings } = createSubmissionServer()
-		try {
-			const response = await fetch(`${baseUrl}/api/settings`, {
-				method: 'PUT',
-				headers: { 'content-type': 'application/json' },
-				body: JSON.stringify({ notEffort: 1 }),
-			})
-			expect(response.status).toBe(400)
-			expect(await response.json()).toEqual({ ok: false, error: 'invalid_body' })
-			expect(settings.snapshot()).toEqual({})
-		} finally {
-			server.stop()
-		}
+	test('an interrupt with a bad kind or empty message is rejected with 400', async () => {
+		const { handler, submission, interruptChannel } = createHandlerHarness()
+		interruptChannel.bindQueue(createInterruptQueue())
+		const submitted = submission.submit('a task')
+		if (!submitted.ok) throw new Error('submit failed')
+
+		const badKind = await handler(post(`/api/runs/${submitted.runId}/interrupt`, JSON.stringify({ kind: 'explode', message: 'boom' })))
+		expect(badKind.status).toBe(400)
+		const emptyMessage = await handler(post(`/api/runs/${submitted.runId}/interrupt`, JSON.stringify({ kind: 'inquiry', message: '' })))
+		expect(emptyMessage.status).toBe(400)
 	})
 
-	test('PUT /api/settings rejects an out-of-range effort with 400 invalid_body', async () => {
-		const { server, baseUrl, settings } = createSubmissionServer()
-		try {
-			const response = await fetch(`${baseUrl}/api/settings`, {
-				method: 'PUT',
-				headers: { 'content-type': 'application/json' },
-				body: JSON.stringify({ effort: 7 }),
-			})
-			expect(response.status).toBe(400)
-			expect(await response.json()).toEqual({ ok: false, error: 'invalid_body' })
-			expect(settings.snapshot()).toEqual({})
-		} finally {
-			server.stop()
-		}
-	})
+	test('GET /api/runs/:id exposes whether an interrupt is pending', async () => {
+		const { handler, interruptChannel } = createHandlerHarness()
+		const knownRunId = 'run-a'
+		interruptChannel.bindQueue(createInterruptQueue())
 
-	test('PUT /api/settings rejects malformed json with 400 invalid_body', async () => {
-		const { server, baseUrl } = createSubmissionServer()
-		try {
-			const response = await fetch(`${baseUrl}/api/settings`, {
-				method: 'PUT',
-				headers: { 'content-type': 'application/json' },
-				body: '{ not json',
-			})
-			expect(response.status).toBe(400)
-			expect(await response.json()).toEqual({ ok: false, error: 'invalid_body' })
-		} finally {
-			server.stop()
-		}
+		const before = await handler(get(`/api/runs/${knownRunId}`))
+		expect(before.status).toBe(200)
+		expect((await before.json()).interruptPending).toBe(false)
+
+		interruptChannel.submit({ kind: 'inquiry', message: 'ping' })
+		const after = await handler(get(`/api/runs/${knownRunId}`))
+		expect(after.status).toBe(200)
+		expect((await after.json()).interruptPending).toBe(true)
 	})
 })
 
-describe('project settings persistence leaves', () => {
-	test('a missing settings file yields the default (empty) settings', () => {
-		const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'orchestrator-settings-'))
-		try {
-			const read = createReadProjectSettings(tempDir)
-			expect(read()).toEqual({})
-		} finally {
-			fs.rmSync(tempDir, { recursive: true, force: true })
-		}
+describe('/api/settings', () => {
+	test('GET /api/settings returns effort null when no default is set', async () => {
+		const { handler } = createHandlerHarness()
+		const response = await handler(get('/api/settings'))
+		expect(response.status).toBe(200)
+		expect(await response.json()).toEqual({ effort: null })
 	})
 
-	test('a malformed settings file is treated as absent rather than crashing', () => {
-		const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'orchestrator-settings-'))
-		try {
-			const orchestrationDir = path.resolve(tempDir, '.orchestration')
-			fs.mkdirSync(orchestrationDir, { recursive: true })
-			fs.writeFileSync(path.resolve(orchestrationDir, 'settings.json'), '{ not valid json')
-			const read = createReadProjectSettings(tempDir)
-			expect(read()).toEqual({})
-		} finally {
-			fs.rmSync(tempDir, { recursive: true, force: true })
-		}
+	test('GET /api/settings returns the stored default after a write', async () => {
+		const { handler, settings } = createHandlerHarness()
+		settings.write({ effort: 4 })
+		const response = await handler(get('/api/settings'))
+		expect(response.status).toBe(200)
+		expect(await response.json()).toEqual({ effort: 4 })
 	})
 
-	test('a valid settings file is parsed and returned', () => {
-		const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'orchestrator-settings-'))
-		try {
-			const orchestrationDir = path.resolve(tempDir, '.orchestration')
-			fs.mkdirSync(orchestrationDir, { recursive: true })
-			fs.writeFileSync(path.resolve(orchestrationDir, 'settings.json'), JSON.stringify({ effort: 2 }))
-			const read = createReadProjectSettings(tempDir)
-			expect(read()).toEqual({ effort: 2 })
-		} finally {
-			fs.rmSync(tempDir, { recursive: true, force: true })
-		}
+	test('PUT /api/settings persists the effort and echoes it back', async () => {
+		const { handler, settings } = createHandlerHarness()
+		const response = await handler(put('/api/settings', JSON.stringify({ effort: 3 })))
+		expect(response.status).toBe(200)
+		expect(await response.json()).toEqual({ effort: 3 })
+		expect(settings.snapshot()).toEqual({ effort: 3 })
+
+		const getResponse = await handler(get('/api/settings'))
+		expect(await getResponse.json()).toEqual({ effort: 3 })
 	})
 
-	test('a settings file with an invalid effort is treated as absent', () => {
-		const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'orchestrator-settings-'))
-		try {
-			const orchestrationDir = path.resolve(tempDir, '.orchestration')
-			fs.mkdirSync(orchestrationDir, { recursive: true })
-			fs.writeFileSync(path.resolve(orchestrationDir, 'settings.json'), JSON.stringify({ effort: 99 }))
-			const read = createReadProjectSettings(tempDir)
-			expect(read()).toEqual({})
-		} finally {
-			fs.rmSync(tempDir, { recursive: true, force: true })
-		}
+	test('PUT /api/settings rejects a missing effort with 400 invalid_body', async () => {
+		const { handler, settings } = createHandlerHarness()
+		const response = await handler(put('/api/settings', JSON.stringify({ notEffort: 1 })))
+		expect(response.status).toBe(400)
+		expect(await response.json()).toEqual({ ok: false, error: 'invalid_body' })
+		expect(settings.snapshot()).toEqual({})
 	})
 
-	test('write persists atomically: the file ends up valid and no temp file is left behind', () => {
-		const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'orchestrator-settings-'))
-		try {
-			const orchestrationDir = path.resolve(tempDir, '.orchestration')
-			const write = createWriteProjectSettings(tempDir)
-			write({ effort: 3 })
-			// The temp file is renamed away, so only settings.json remains under .orchestration.
-			const entries = fs.readdirSync(orchestrationDir).sort()
-			expect(entries).toEqual(['settings.json'])
-			expect(createReadProjectSettings(tempDir)()).toEqual({ effort: 3 })
-		} finally {
-			fs.rmSync(tempDir, { recursive: true, force: true })
-		}
+	test('PUT /api/settings rejects an out-of-range effort with 400 invalid_body', async () => {
+		const { handler, settings } = createHandlerHarness()
+		const response = await handler(put('/api/settings', JSON.stringify({ effort: 7 })))
+		expect(response.status).toBe(400)
+		expect(await response.json()).toEqual({ ok: false, error: 'invalid_body' })
+		expect(settings.snapshot()).toEqual({})
 	})
 
-	test('write creates the .orchestration directory when it does not yet exist', () => {
-		const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'orchestrator-settings-'))
-		try {
-			const write = createWriteProjectSettings(tempDir)
-			write({ effort: 1 })
-			expect(createReadProjectSettings(tempDir)()).toEqual({ effort: 1 })
-		} finally {
-			fs.rmSync(tempDir, { recursive: true, force: true })
-		}
+	test('PUT /api/settings rejects malformed json with 400 invalid_body', async () => {
+		const { handler } = createHandlerHarness()
+		const response = await handler(put('/api/settings', '{ not json'))
+		expect(response.status).toBe(400)
+		expect(await response.json()).toEqual({ ok: false, error: 'invalid_body' })
 	})
 })

@@ -14,8 +14,8 @@
  */
 
 /**
- * @typedef {'call' | 'return' | 'observe' | 'terminate'} OperationKind
- *   'call'/'return' hand off activity between participants; 'observe' is a read-only cross-stack reference; 'terminate' is a destructive close where a tool reverts a target node — it pops the targeted open call (so the node is removed immediately and no separate 'terminated' return is needed for that call) but never hands off activity, so the active operation stays the interrupt's own call rather than the terminate. observe never affects activity and never enters a call chain; terminate affects call-chain structure but not activity.
+ * @typedef {'call' | 'return' | 'observe' | 'terminate' | 'inquiry'} OperationKind
+ *   'call'/'return' hand off activity between participants; 'observe' is a read-only cross-stack reference; 'terminate' is a destructive close where a tool reverts a target node — it pops the targeted open call (so the node is removed immediately and no separate 'terminated' return is needed for that call) but never hands off activity, so the active operation stays the interrupt's own call rather than the terminate; 'inquiry' is an operator message between the human and the run's root role (a question human→role and, when answered, the answer role→human). observe never affects activity and never enters a call chain; terminate affects call-chain structure but not activity; inquiry neither affects activity nor enters a call chain.
  */
 
 /**
@@ -24,7 +24,7 @@
 
 /**
  * @typedef {'success' | 'error' | 'terminated'} OperationOutcome
- *   Only 'return' operations carry an outcome; a 'call' is null until it settles, and 'observe' and 'terminate' are always null.
+ *   Only 'return' operations carry an outcome; a 'call' is null until it settles, and 'observe' and 'terminate' are always null. An answered question inquiry settles with outcome 'success'; every other inquiry is null.
  */
 
 /**
@@ -156,7 +156,7 @@ export function activeOperation(model) {
 	for (let index = model.operations.length - 1; index >= 0; index -= 1) {
 		const operation = model.operations[index]
 		if (operation.stack !== stack) continue
-		if (operation.kind === 'observe' || operation.kind === 'terminate') continue
+		if (operation.kind === 'observe' || operation.kind === 'terminate' || operation.kind === 'inquiry') continue
 		if (operation.kind === 'return') return operation
 		const chain = callChainOf(model, stack)
 		for (const call of chain) {
@@ -215,12 +215,12 @@ function openCallsByStack(model) {
 	return chains
 }
 
-// The latest activity-affecting operation on a stack (a 'call' or 'return'), or undefined when the stack carries only observes/terminates (or nothing). stacksOf uses this to detect a lingering in_flight return leg on an otherwise-empty stack, and the flow view's row projection uses the same rule to decide whether the stack still renders a row. observe and terminate are skipped because neither affects activity, so a terminate logged after an in_flight return must not hide the lingering return leg (a terminate closes its own targeted call but does not settle the active stack's in_flight return).
+// The latest activity-affecting operation on a stack (a 'call' or 'return'), or undefined when the stack carries only observes/terminates/inquiries (or nothing). stacksOf uses this to detect a lingering in_flight return leg on an otherwise-empty stack, and the flow view's row projection uses the same rule to decide whether the stack still renders a row. observe, terminate, and inquiry are skipped because none affects activity, so an operation of theirs logged after an in_flight return must not hide the lingering return leg (a terminate closes its own targeted call but does not settle the active stack's in_flight return; an inquiry is a message, never an activation).
 function latestActivityOperationOnStack(model, stackId) {
 	for (let index = model.operations.length - 1; index >= 0; index -= 1) {
 		const operation = model.operations[index]
 		if (operation.stack !== stackId) continue
-		if (operation.kind === 'observe' || operation.kind === 'terminate') continue
+		if (operation.kind === 'observe' || operation.kind === 'terminate' || operation.kind === 'inquiry') continue
 		return operation
 	}
 	return undefined
@@ -355,6 +355,16 @@ export function fateOf(model, stackId) {
  */
 export function observesOf(model) {
 	return model.operations.filter((operation) => operation.kind === 'observe')
+}
+
+/**
+ * Returns every inquiry operation (operator questions and their answers), used by the flow view to draw the human's question-and-answer edges with the run's root role.
+ *
+ * @param {InteractionModel} model
+ * @returns {Operation[]}
+ */
+export function inquiriesOf(model) {
+	return model.operations.filter((operation) => operation.kind === 'inquiry')
 }
 
 /**

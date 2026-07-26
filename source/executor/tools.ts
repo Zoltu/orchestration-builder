@@ -4,6 +4,7 @@ import { createGlobFiles } from './tools/glob-files.js'
 import { createListDirectory } from './tools/list-directory.js'
 import { createReadFile } from './tools/read-file.js'
 import { createReadFilePartial } from './tools/read-file-partial.js'
+import { createRunShell } from './tools/run-shell.js'
 import { createSearchText } from './tools/search-text.js'
 import { createTest } from './tools/test.js'
 import { createBunSubprocessRunner } from './tools/subprocess-tool.js'
@@ -25,6 +26,7 @@ export function createToolHandlers(config: NativeToolsConfig): Record<string, To
 	const write = createWriteFile(config.workspaceRoot)
 	const fetch = createFetchUrl(config.defaultToolTimeoutSeconds * 1000, config.fetcher)
 	const subprocessRunner = createBunSubprocessRunner()
+	const runShell = createRunShell(config.workspaceRoot, config.defaultToolTimeoutSeconds, subprocessRunner)
 	const test = createTest(config.workspaceRoot, config.defaultToolTimeoutSeconds, subprocessRunner)
 	const typecheck = createTypecheck(config.workspaceRoot, config.defaultToolTimeoutSeconds, subprocessRunner)
 	return {
@@ -35,6 +37,7 @@ export function createToolHandlers(config: NativeToolsConfig): Record<string, To
 		search_text: search,
 		write_file: write,
 		fetch_url: fetch,
+		run_shell: runShell,
 		test,
 		typecheck,
 	}

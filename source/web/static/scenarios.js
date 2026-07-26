@@ -22,7 +22,7 @@ import { isTerminalStatus } from './interaction-model.js'
  */
 
 /**
- * @typedef {'call' | 'return' | 'observe' | 'terminate'} OperationKind
+ * @typedef {'call' | 'return' | 'observe' | 'terminate' | 'inquiry'} OperationKind
  */
 
 /**

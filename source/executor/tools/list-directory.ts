@@ -1,7 +1,7 @@
 import * as fs from 'node:fs'
 import * as path from 'node:path'
 import type { ToolHandler } from '../tool-dispatch.js'
-import { resolveWithinWorkspace, wrapIoError } from './shared.js'
+import { nodePathFilesystem, resolveWithinWorkspace, wrapIoError } from './shared.js'
 
 export interface ListDirectoryEntry {
 	name: string
@@ -13,7 +13,7 @@ export function createListDirectory(workspaceRoot: string): ToolHandler {
 	return (args) => {
 		const targetRaw = args['path']
 		const target = typeof targetRaw === 'string' && targetRaw !== '' ? targetRaw : '.'
-		const resolution = resolveWithinWorkspace(target, resolvedRoot)
+		const resolution = resolveWithinWorkspace(target, resolvedRoot, nodePathFilesystem)
 		if (!resolution.ok) return resolution.error
 		let entries: string[]
 		try {

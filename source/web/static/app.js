@@ -404,6 +404,7 @@ function SelectRun(state, runId) {
 		resultModalOpen: false,
 		resultShownForRun: null,
 		tooltip: null,
+		interruptNotice: null,
 	}
 }
 
@@ -516,6 +517,48 @@ function AnswerSent(state) {
 
 function AnswerFailed(state) {
 	return { ...state, pendingAnswerId: null, serverAvailable: false }
+}
+
+// --- Interrupt form ----------------------------------------------------------
+// The operator can speak into the active run at its next safe point: an inquiry asks the run a direct question; a plan modification aborts the active sub-work and re-plans from the top-level planner. The form targets the selected run only while it is the active one, mirroring the server-side 409 contract.
+
+function SetInterruptMode(state, mode) {
+	if (mode !== 'inquiry' && mode !== 'plan_modification') return state
+	return { ...state, interruptMode: mode }
+}
+
+function SubmitInterrupt(state, event) {
+	event.preventDefault()
+	const runId = state.selectedRunId
+	if (typeof runId !== 'string' || runId === '') return state
+	const textarea = event.target.querySelector('textarea')
+	if (textarea === null) return state
+	const message = textarea.value.trim()
+	if (message === '') return state
+	textarea.value = ''
+	return [
+		{ ...state, interruptSending: true, interruptNotice: null },
+		Fetch({
+			url: `api/runs/${encodeURIComponent(runId)}/interrupt`,
+			init: { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ kind: state.interruptMode, message }) },
+			ok: InterruptResponded,
+			fail: InterruptFailed,
+		}),
+	]
+}
+
+function InterruptResponded(state, payload) {
+	if (payload.status === 202) {
+		return { ...state, interruptSending: false, interruptNotice: 'Interrupt sent — it lands at the run\u2019s next safe point; the response appears in the Interrupts list.' }
+	}
+	if (payload.status === 409) {
+		return { ...state, interruptSending: false, interruptNotice: 'The run is no longer active — the interrupt was not sent.' }
+	}
+	return { ...state, interruptSending: false, interruptNotice: 'The interrupt was rejected.' }
+}
+
+function InterruptFailed(state) {
+	return { ...state, interruptSending: false, interruptNotice: 'The server could not be reached.', serverAvailable: false }
 }
 
 function PrimeAudio(state) {
@@ -728,6 +771,73 @@ function RunsPanel(state) {
 	])
 }
 
+// The interrupt history is the visible record of what the operator sent and what the run did with it: each inquiry pairs with the role's answer (or a waiting/ended note), each plan modification lists its delivery target and abort count. The question/outcome lines are machine fields or the operator's own text (textContent); the answer is agent prose and renders only through the sanitized Markdown pipeline.
+function InterruptHistory(state) {
+	const view = state.selectedRunView
+	if (view === null || !Array.isArray(view.interrupts) || view.interrupts.length === 0) return null
+	return h('div', { class: 'interrupt-history' }, [
+		h('h3', {}, 'Interrupts'),
+		h('ul', {}, view.interrupts.map((entry, index) => {
+			if (entry.kind === 'inquiry') {
+				const answerState = entry.answer !== null
+					? h('div', { class: 'interrupt-answer markdown' }, renderMarkdown(entry.answer))
+					: h('p', { class: 'interrupt-waiting' }, entry.ended ? 'The role finished without answering.' : 'Waiting for the run to answer…')
+				return h('li', { key: `interrupt-${index}` }, [
+					h('div', { class: 'interrupt-meta-row' }, [
+						h('span', { class: 'interrupt-kind' }, 'Question'),
+						entry.role !== null ? h('span', { class: 'interrupt-target' }, `to ${entry.role}`) : null,
+						h('time', { title: entry.askedAt }, formatRelative(entry.askedAt, state.now)),
+					]),
+					h('p', { class: 'interrupt-text' }, entry.message),
+					answerState,
+				])
+			}
+			return h('li', { key: `interrupt-${index}` }, [
+				h('div', { class: 'interrupt-meta-row' }, [
+					h('span', { class: 'interrupt-kind interrupt-kind-plan' }, 'Plan change'),
+					h('time', { title: entry.askedAt }, formatRelative(entry.askedAt, state.now)),
+				]),
+				h('p', { class: 'interrupt-text' }, entry.message),
+				h('p', { class: 'interrupt-outcome' }, `Delivered to ${entry.targetRole ?? entry.target ?? 'the run'}${entry.aborted.length > 0 ? ` — ${entry.aborted.length} role${entry.aborted.length === 1 ? '' : 's'} aborted` : ''}.`),
+			])
+		})),
+	])
+}
+
+// The interrupt form addresses the selected run only while it is the one in flight; a historical selection or an idle service renders nothing. The plan-modification mode carries an upfront warning because it aborts the work currently happening. Every string here is trusted UI copy or the operator's own input (posted, never rendered back), so the form introduces no untrusted-content path.
+function InterruptForm(state) {
+	const activeRunId = deriveActiveRunId(state.summaries)
+	if (activeRunId === null || state.selectedRunId !== activeRunId) return null
+	const mode = state.interruptMode
+	const queued = state.selectedRunView !== null && state.selectedRunView.interruptPending === true
+	return h('div', { class: 'interrupt-form-wrap' }, [
+		h('h3', {}, 'Interrupt this run'),
+		h('div', { class: 'interrupt-mode', role: 'group', 'aria-label': 'interrupt kind' }, [
+			h('label', { class: mode === 'inquiry' ? 'is-active' : '' }, [
+				h('input', { type: 'radio', name: 'interrupt-kind', checked: mode === 'inquiry', onchange: [SetInterruptMode, 'inquiry'] }),
+				'Ask a question',
+			]),
+			h('label', { class: mode === 'plan_modification' ? 'is-active' : '' }, [
+				h('input', { type: 'radio', name: 'interrupt-kind', checked: mode === 'plan_modification', onchange: [SetInterruptMode, 'plan_modification'] }),
+				'Change the plan',
+			]),
+		]),
+		mode === 'plan_modification'
+			? h('p', { class: 'interrupt-warning' }, 'Changing the plan aborts the work happening right now and re-plans from the top-level planner.')
+			: null,
+		h('form', { class: 'interrupt-form', onsubmit: SubmitInterrupt }, [
+			h('textarea', {
+				name: 'interrupt-message',
+				rows: '3',
+				placeholder: mode === 'inquiry' ? 'ask the run something (e.g. “what are you working on?”)' : 'describe the change to make (e.g. “use Postgres instead of SQLite”)',
+			}),
+			h('button', { type: 'submit', disabled: state.interruptSending }, state.interruptSending ? 'Sending…' : 'Send interrupt'),
+		]),
+		queued ? h('p', { class: 'interrupt-note' }, 'An interrupt is queued and will land at the run\u2019s next safe point.') : null,
+		state.interruptNotice !== null ? h('p', { class: 'interrupt-note' }, state.interruptNotice) : null,
+	])
+}
+
 function RunSummaryPanel(state) {
 	const view = state.selectedRunView
 	const runId = view ? view.runId : '—'
@@ -761,6 +871,8 @@ function RunSummaryPanel(state) {
 		// The kind is a fixed machine label and stays a plain text node; the message is agent prose and renders as Markdown.
 		h('div', { id: 'run-error', class: 'run-error' }, error ? h('div', { class: 'error-text' }, [h('strong', {}, `${error.kind}: `), ...renderMarkdown(error.message)]) : null),
 		h('div', { id: 'run-artifacts', class: 'run-artifacts' }, artifacts && artifacts.length > 0 ? [h('div', { class: 'artifacts-heading' }, 'Artifacts'), h('ul', {}, artifacts.map((path, index) => h('li', { key: `${path}-${index}`, class: 'artifact' }, path)))] : null),
+		InterruptHistory(state),
+		InterruptForm(state),
 	])
 }
 
@@ -939,6 +1051,10 @@ app({
 		// The inspector descriptor over the run view: null when nothing is hovered. Cleared on
 		// `mouseleave` of the stage and on run switch; a stale id self-dismisses at render time.
 		tooltip: null,
+		// Interrupt form state: the kind toggle, an in-flight send flag, and a one-line outcome notice.
+		interruptMode: 'inquiry',
+		interruptSending: false,
+		interruptNotice: null,
 		now: Date.now(),
 	},
 	// The guild config and the saved effort position are each loaded once on load and never polled, so their fetches are init effects rather than subscriptions.

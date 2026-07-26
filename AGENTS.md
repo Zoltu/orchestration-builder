@@ -16,7 +16,7 @@ Code quality is of the utmost importance. Take the time to do things well rather
 
 ### In-memory, fast tests
 
-Tests must run purely in-memory, must not hit the network or real LLM endpoints, and must not depend on external services. Filesystem-touching tests may use a temporary directory under `os.tmpdir()` and must clean up after themselves. Every test should run in milliseconds so the full suite is never a burden to run frequently. See "Testing Policy" below for the full rules.
+Tests must run purely in-memory, must not hit the network or real LLM endpoints, and must not depend on external services. Every test should run in milliseconds so the full suite is never a burden to run frequently. See "Testing Policy" below for the full rules.
 
 ### Testable business logic
 
@@ -234,7 +234,9 @@ export function runAnalysis(dependencies: { parseConfiguration: () => Configurat
 
 ### In-memory tests only
 
-Tests must run purely in-memory. Do not make network requests, hit real LLM endpoints, or depend on external services. Use fakes for the LLM caller, tool handlers, and any other external dependency. File-system tests may use temporary directories under `os.tmpdir()` but must clean up after themselves. The goal is fast iteration: every test should run in milliseconds.
+Tests must run purely in-memory. Do not make network requests, hit real LLM endpoints, touch the filesystem (including temporary directories), spawn subprocesses, or depend on external services. Use fakes for the LLM caller, tool handlers, and any other external dependency. The goal is fast iteration: every test should run in milliseconds.
+
+Data-validity checks for the shipped Guild and benchmark suite live in `source/tools/validate-data.ts` (`bun run validate-data`), not in `bun test`, because they read the repo's data files by design.
 
 The LLM caller (`source/executor/llm.ts`, phase 2) is exercised in tests exclusively through a fake; integration against a real endpoint is a separate concern handled at deployment time, not in `bun test`.
 
@@ -304,7 +306,7 @@ Guild loading is a leaf factory defined in `source/executor/loader.ts`.
 
 - `createGuildLoader()` returns a `LoadGuild` function whose `loadGuild(guildDir)` reads `guild.json`, resolves every role's `systemPrompt` Markdown file, and validates every referenced tool-manifest JSON file. The return value is a `LoadedGuild` containing the validated `GuildConfig`, the resolved prompt text per role, and the parsed tool manifests keyed by name.
 - The loader uses the shared `validateGuildConfig` and `validateToolManifest` functions and surfaces validation errors as `ValidationError` (see `source/executor/errors.ts`).
-- The loader is a leaf and is not unit-tested; it is exercised through integration in phase 2/5.
+- The loader is a leaf and is not unit-tested; the shipped Guild data is validated by `bun run validate-data` (see `source/tools/validate-data.ts`).
 
 ---
 
@@ -403,13 +405,13 @@ Before adding or keeping a comment, ask: **"Would a reader who has read the enti
 
 **Specific checks:**
 
-1. **Is the behavior evident from the code?**  
+1. **Is the behavior evident from the code?**
    If the comment describes what the code does (e.g., `// sets background color`), it's redundant. The code itself shows this.
 
-2. **Is the information duplicated elsewhere?**  
+2. **Is the information duplicated elsewhere?**
    If the same fact is already documented in another file (e.g., a comment explaining when a constant is used, but that logic appears in `run-submission.ts`), don't repeat it. Reference the existing documentation instead.
 
-3. **Does it explain a non-obvious design choice?**  
+3. **Does it explain a non-obvious design choice?**
    Keep comments that reveal:
    - Why an approach was chosen over alternatives
    - Constraints the code must satisfy
@@ -417,8 +419,8 @@ Before adding or keeping a comment, ask: **"Would a reader who has read the enti
    - Reasons for architectural decisions (e.g., why something is centralized)
    - Hazards or edge cases not obvious from the implementation
 
-4. **Is it a design rationale or a behavior description?**  
-   Good: "This uses a mutex because the operation isn't atomic."  
+4. **Is it a design rationale or a behavior description?**
+   Good: "This uses a mutex because the operation isn't atomic."
    Bad: "This increments the counter." (The `counter++` already shows this.)
 
 **When in doubt, err on the side of fewer comments.** Code should be self-documenting through clear names and structure. Comments exist only to explain what code cannot.

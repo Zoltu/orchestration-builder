@@ -1,78 +1,84 @@
-import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
-import * as fs from 'node:fs'
-import * as os from 'node:os'
+import { describe, expect, test } from 'bun:test'
 import * as path from 'node:path'
-import { resolveWithinWorkspace } from './shared.ts'
+import { resolveWithinWorkspace, wrapIoError, type PathFilesystem } from './shared.ts'
 
-let workspaceRoot: string
-let outsideRoot: string
+const ROOT = '/workspace'
 
-beforeEach(() => {
-	workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'orchestrator-shared-workspace-'))
-	outsideRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'orchestrator-shared-outside-'))
-})
-
-afterEach(() => {
-	fs.rmSync(workspaceRoot, { recursive: true, force: true })
-	fs.rmSync(outsideRoot, { recursive: true, force: true })
-})
+// A scripted filesystem: `existing` lists the paths that exist, `symlinks` maps a link path to its target. Existence follows links (as existsSync does), and realpath collapses link prefixes lexically, mirroring how the real realpath resolves links along the way.
+function makeFilesystem(existing: string[], symlinks: Record<string, string> = {}): PathFilesystem {
+	const existingSet = new Set(existing.map((entry) => path.resolve(entry)))
+	const linkMap = new Map(Object.entries(symlinks).map(([link, target]) => [path.resolve(link), path.resolve(target)]))
+	const realpath = (candidate: string): string => {
+		let resolved = path.resolve(candidate)
+		for (;;) {
+			let matched: [string, string] | undefined
+			for (const [link, target] of linkMap) {
+				const applies = resolved === link || resolved.startsWith(link + path.sep)
+				if (applies && (matched === undefined || link.length > matched[0].length)) matched = [link, target]
+			}
+			if (matched === undefined) return resolved
+			resolved = path.join(matched[1], path.relative(matched[0], resolved))
+		}
+	}
+	return { exists: (candidate) => existingSet.has(realpath(candidate)), realpath }
+}
 
 describe('resolveWithinWorkspace', () => {
 	test('resolves an ordinary relative path inside the workspace', () => {
-		fs.writeFileSync(path.join(workspaceRoot, 'hello.txt'), 'hello')
-		const resolution = resolveWithinWorkspace('hello.txt', workspaceRoot)
-		expect(resolution.ok).toBe(true)
-		if (resolution.ok) expect(resolution.path.relative).toBe('hello.txt')
+		const filesystem = makeFilesystem([ROOT, `${ROOT}/hello.txt`])
+		const resolution = resolveWithinWorkspace('hello.txt', ROOT, filesystem)
+		expect(resolution).toEqual({ ok: true, path: { absolute: `${ROOT}/hello.txt`, relative: 'hello.txt' } })
 	})
 
 	test('resolves a not-yet-existing nested path inside the workspace', () => {
-		const resolution = resolveWithinWorkspace('nested/deep/file.txt', workspaceRoot)
-		expect(resolution.ok).toBe(true)
-		if (resolution.ok) expect(resolution.path.relative).toBe(path.join('nested', 'deep', 'file.txt'))
+		const filesystem = makeFilesystem([ROOT])
+		const resolution = resolveWithinWorkspace('nested/deep/file.txt', ROOT, filesystem)
+		expect(resolution).toEqual({ ok: true, path: { absolute: `${ROOT}/nested/deep/file.txt`, relative: path.join('nested', 'deep', 'file.txt') } })
 	})
 
 	test('rejects a .. escape', () => {
-		const resolution = resolveWithinWorkspace('../escape.txt', workspaceRoot)
-		expect(resolution.ok).toBe(false)
+		const filesystem = makeFilesystem([ROOT])
+		const resolution = resolveWithinWorkspace('../escape.txt', ROOT, filesystem)
+		expect(resolution).toEqual({ ok: false, error: { kind: 'invalid_arguments', message: 'Path escapes the workspace: ../escape.txt' } })
 	})
 
 	test('rejects an absolute path outside the workspace', () => {
-		const resolution = resolveWithinWorkspace(path.join(outsideRoot, 'escape.txt'), workspaceRoot)
+		const filesystem = makeFilesystem([ROOT, '/outside', '/outside/secret.txt'])
+		const resolution = resolveWithinWorkspace('/outside/secret.txt', ROOT, filesystem)
 		expect(resolution.ok).toBe(false)
 	})
 
 	test('rejects an existing symlink that points outside the workspace', () => {
-		fs.writeFileSync(path.join(outsideRoot, 'secret.txt'), 'secret')
-		fs.symlinkSync(path.join(outsideRoot, 'secret.txt'), path.join(workspaceRoot, 'link.txt'))
-		const resolution = resolveWithinWorkspace('link.txt', workspaceRoot)
+		const filesystem = makeFilesystem([ROOT, '/outside', '/outside/secret.txt'], { [`${ROOT}/link.txt`]: '/outside/secret.txt' })
+		const resolution = resolveWithinWorkspace('link.txt', ROOT, filesystem)
 		expect(resolution.ok).toBe(false)
 	})
 
 	test('rejects a new file under a symlinked directory that points outside the workspace', () => {
-		fs.symlinkSync(outsideRoot, path.join(workspaceRoot, 'linked-dir'))
-		const resolution = resolveWithinWorkspace(path.join('linked-dir', 'new-file.txt'), workspaceRoot)
+		const filesystem = makeFilesystem([ROOT, '/outside'], { [`${ROOT}/linked-dir`]: '/outside' })
+		const resolution = resolveWithinWorkspace(path.join('linked-dir', 'new-file.txt'), ROOT, filesystem)
 		expect(resolution.ok).toBe(false)
 	})
 
 	test('allows a symlink that stays inside the workspace', () => {
-		fs.mkdirSync(path.join(workspaceRoot, 'real-dir'))
-		fs.writeFileSync(path.join(workspaceRoot, 'real-dir', 'file.txt'), 'inside')
-		fs.symlinkSync(path.join(workspaceRoot, 'real-dir'), path.join(workspaceRoot, 'alias-dir'))
-		const resolution = resolveWithinWorkspace(path.join('alias-dir', 'file.txt'), workspaceRoot)
-		expect(resolution.ok).toBe(true)
+		const filesystem = makeFilesystem([ROOT, `${ROOT}/real-dir`, `${ROOT}/real-dir/file.txt`], { [`${ROOT}/alias-dir`]: `${ROOT}/real-dir` })
+		const resolution = resolveWithinWorkspace(path.join('alias-dir', 'file.txt'), ROOT, filesystem)
+		expect(resolution).toEqual({ ok: true, path: { absolute: `${ROOT}/real-dir/file.txt`, relative: path.join('real-dir', 'file.txt') } })
 	})
 
 	test('resolves legitimate files when the workspace root is reached through a symlink', () => {
-		fs.writeFileSync(path.join(workspaceRoot, 'hello.txt'), 'hello')
-		const aliasRoot = path.join(os.tmpdir(), `orchestrator-shared-root-alias-${process.pid}`)
-		fs.rmSync(aliasRoot, { recursive: true, force: true })
-		fs.symlinkSync(workspaceRoot, aliasRoot)
-		try {
-			const resolution = resolveWithinWorkspace('hello.txt', aliasRoot)
-			expect(resolution.ok).toBe(true)
-			if (resolution.ok) expect(resolution.path.relative).toBe('hello.txt')
-		} finally {
-			fs.rmSync(aliasRoot, { recursive: true, force: true })
-		}
+		const filesystem = makeFilesystem([ROOT, `${ROOT}/hello.txt`], { '/alias': ROOT })
+		const resolution = resolveWithinWorkspace('hello.txt', '/alias', filesystem)
+		expect(resolution).toEqual({ ok: true, path: { absolute: `${ROOT}/hello.txt`, relative: 'hello.txt' } })
+	})
+})
+
+describe('wrapIoError', () => {
+	test('uses the error message when given an Error', () => {
+		expect(wrapIoError(new Error('ENOENT: no such file'), 'fallback')).toEqual({ kind: 'invalid_arguments', message: 'ENOENT: no such file' })
+	})
+
+	test('uses the fallback message when given a non-Error', () => {
+		expect(wrapIoError('string failure', 'Cannot read file: x.txt')).toEqual({ kind: 'invalid_arguments', message: 'Cannot read file: x.txt' })
 	})
 })

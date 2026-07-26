@@ -1,23 +1,29 @@
 import { describe, expect, test } from 'bun:test'
 import { createWebHumanBackend } from './human-backend.ts'
+import { createInterruptChannel, createInterruptQueue } from './interrupts.ts'
 import { createRunState, type RunState } from './run-state.ts'
+
+function makeRunState() {
+	const humanBackend = createWebHumanBackend()
+	const interruptChannel = createInterruptChannel()
+	const runState = createRunState({ humanBackend, interruptChannel })
+	return { humanBackend, interruptChannel, runState }
+}
 
 describe('createRunState', () => {
 	test('pendingQuestions delegates to the web human backend', () => {
-		const backend = createWebHumanBackend()
-		backend.ask('hello?', 'context')
+		const { humanBackend, runState } = makeRunState()
+		humanBackend.ask('hello?', 'context')
 
-		const runState = createRunState({ humanBackend: backend })
 		const pending = runState.pendingQuestions()
 		expect(pending.length).toBe(1)
 		expect(pending[0]!.question).toBe('hello?')
 	})
 
 	test('submitAnswer delegates to the web human backend and resolves the parked promise', async () => {
-		const backend = createWebHumanBackend()
-		const runState = createRunState({ humanBackend: backend })
+		const { humanBackend, runState } = makeRunState()
 
-		const promise = backend.ask('which?')
+		const promise = humanBackend.ask('which?')
 		const [question] = runState.pendingQuestions()
 
 		const result = runState.submitAnswer(question!.id, 'this one')
@@ -27,16 +33,14 @@ describe('createRunState', () => {
 	})
 
 	test('submitAnswer for an unknown id surfaces not_found from the backend', () => {
-		const backend = createWebHumanBackend()
-		const runState = createRunState({ humanBackend: backend })
+		const { runState } = makeRunState()
 
 		expect(runState.submitAnswer('missing', 'nope')).toEqual({ kind: 'not_found' })
 	})
 
 	test('pendingQuestions returns isolated copies that cannot mutate backend state', () => {
-		const backend = createWebHumanBackend()
-		backend.ask('original?')
-		const runState = createRunState({ humanBackend: backend })
+		const { humanBackend, runState } = makeRunState()
+		humanBackend.ask('original?')
 
 		const snapshot = runState.pendingQuestions()
 		snapshot[0]!.question = 'tampered'
@@ -48,9 +52,40 @@ describe('createRunState', () => {
 		const fake: RunState = {
 			pendingQuestions: () => [],
 			submitAnswer: () => ({ kind: 'not_found' }),
+			submitInterrupt: () => 'no_active_run',
+			interruptPending: () => false,
 		}
 
 		expect(fake.pendingQuestions()).toEqual([])
 		expect(fake.submitAnswer('any', 'any')).toEqual({ kind: 'not_found' })
+	})
+})
+
+describe('createRunState — interrupt channel', () => {
+	test('submitInterrupt reports no_active_run when no queue is bound', () => {
+		const { runState } = makeRunState()
+
+		expect(runState.submitInterrupt({ kind: 'inquiry', message: 'hello' })).toBe('no_active_run')
+		expect(runState.interruptPending()).toBe(false)
+	})
+
+	test('submitInterrupt queues the request on the bound run queue and pending reflects it', () => {
+		const { interruptChannel, runState } = makeRunState()
+		const queue = createInterruptQueue()
+		interruptChannel.bindQueue(queue)
+
+		expect(runState.submitInterrupt({ kind: 'plan_modification', message: 'change course' })).toBe('accepted')
+		expect(runState.interruptPending()).toBe(true)
+		expect(queue.drain()).toEqual({ kind: 'plan_modification', message: 'change course' })
+		expect(runState.interruptPending()).toBe(false)
+	})
+
+	test('unbinding the queue restores no_active_run', () => {
+		const { interruptChannel, runState } = makeRunState()
+		interruptChannel.bindQueue(createInterruptQueue())
+		interruptChannel.bindQueue(null)
+
+		expect(runState.submitInterrupt({ kind: 'inquiry', message: 'hello' })).toBe('no_active_run')
+		expect(runState.interruptPending()).toBe(false)
 	})
 })

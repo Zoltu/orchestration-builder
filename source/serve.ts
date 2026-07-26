@@ -3,7 +3,7 @@ import * as path from 'node:path'
 
 import { createWebServer } from './web/server.js'
 import { createSnapshotCache } from './web/snapshot-cache.js'
-import { createAppendLog, createGuildLoader, createLlmCaller, createLlmFetch, createListRunIds, createReadProjectSettings, createReadRunMetaById, createReadRunSnapshotById, createReadRunSnapshotStats, createRunDirectory, createRunState, createRunSubmission, createSleep, createToolHandlers, createWebHumanBackend, createWriteMeta, createWriteProjectSettings, runExecutor, type ExecutorDependencies, type LoadedGuild, type LlmCaller, type ModelConfig, type StartRun, type WebHumanBackend } from './executor/index.js'
+import { createAppendLog, createGuildLoader, createInterruptChannel, createInterruptQueue, createLlmCaller, createLlmFetch, createListRunIds, createReadProjectSettings, createReadRunMetaById, createReadRunSnapshotById, createReadRunSnapshotStats, createRunDirectory, createRunState, createRunSubmission, createSleep, createToolHandlers, createWebHumanBackend, createWriteMeta, createWriteProjectSettings, runExecutor, type ExecutorDependencies, type InterruptChannel, type LoadedGuild, type LlmCaller, type ModelConfig, type StartRun, type WebHumanBackend } from './executor/index.js'
 
 const API_KEY_ENV_VAR = 'ORCHESTRATOR_API_KEY'
 const PORT_ENV_VAR = 'PORT'
@@ -55,6 +55,7 @@ function createStartRun(config: {
 	loadedGuild: LoadedGuild
 	llmCaller: LlmCaller
 	humanBackend: WebHumanBackend
+	interruptChannel: InterruptChannel
 	guildPath: string
 	workspaceRootPath: string
 	runsBaseDir: string
@@ -67,6 +68,9 @@ function createStartRun(config: {
 		const appendLog = createAppendLog(runId, config.runsBaseDir)
 		// The human backend is shared with the web API; bind the active run's log so ask_human and human_answer events land in this run's log.jsonl for the question-history view.
 		config.humanBackend.bindRunLog(appendLog)
+		// The interrupt channel is likewise shared; bind the run's fresh queue so operator interrupts submitted mid-run reach the engine's drain.
+		const interruptQueue = createInterruptQueue()
+		config.interruptChannel.bindQueue(interruptQueue)
 		const dependencies: ExecutorDependencies = {
 			llmCaller: config.llmCaller,
 			loadGuild: () => config.loadedGuild,
@@ -75,6 +79,7 @@ function createStartRun(config: {
 			writeMeta: createWriteMeta(runId, config.runsBaseDir),
 			additionalToolHandlers,
 			humanBackend: config.humanBackend,
+			interruptQueue,
 		}
 		try {
 			return await runExecutor(dependencies, {
@@ -86,6 +91,7 @@ function createStartRun(config: {
 			})
 		} finally {
 			config.humanBackend.bindRunLog(null)
+			config.interruptChannel.bindQueue(null)
 		}
 	}
 }
@@ -99,11 +105,12 @@ function waitForShutdownSignal(): Promise<void> {
 }
 
 // Long-running service: the server outlives every run, one task at a time, submitted via the JSON API.
-// SIGINT and SIGTERM both trigger shutdown: stop accepting new requests, stop the server, then exit (130 if a run was interrupted mid-flight, 0 if idle).
-// An active run is abandoned where it stands rather than awaited: the run-interrupt channel that would let the service ask a run to stop at a safe point does not exist yet, so awaiting a run could block for up to the run's full budget (hours).
-// The run's append-only log is already durable; the missing meta.json leaves it reading as "in progress" on restart, which is the accepted graceful-degradation.
-// When the interrupt channel lands, this can switch to a bounded graceful drain.
+// SIGINT and SIGTERM both trigger shutdown: with an active run, the service submits a wind-down inquiry through the interrupt channel and waits for the run under a bounded drain timeout — the run can finish gracefully at a safe point, but a run that does not finish in time is abandoned where it stands (its append-only log is durable; the missing meta.json reads as "in progress" on restart until checkpoint resume lands).
+// Then stop accepting new requests, stop the server, and exit (130 if a run was still active, 0 if idle).
 // A fatal run error tears down the service and exits non-zero.
+
+const SHUTDOWN_DRAIN_MS = 30_000
+const SHUTDOWN_INQUIRY_MESSAGE = 'The service is shutting down. Please wind down: finish your current step, then call finish with whatever state you have.'
 
 async function serve(): Promise<void> {
 	const port = parsePort(Bun.env[PORT_ENV_VAR], DEFAULT_PORT)
@@ -115,7 +122,8 @@ async function serve(): Promise<void> {
 	const llmCaller = createLlmCaller(buildModel(loadedGuild, Bun.env[API_KEY_ENV_VAR]), { llmFetch: createLlmFetch(), sleep: createSleep() })
 
 	const webHumanBackend = createWebHumanBackend()
-	const runState = createRunState({ humanBackend: webHumanBackend })
+	const interruptChannel = createInterruptChannel()
+	const runState = createRunState({ humanBackend: webHumanBackend, interruptChannel })
 	const readRunSnapshotStats = createReadRunSnapshotStats(runsBaseDir)
 	const readRunSnapshot = createSnapshotCache({ readStats: readRunSnapshotStats, readRaw: createReadRunSnapshotById(runsBaseDir) }, SNAPSHOT_CACHE_MAX_ENTRIES)
 	const readRunMetaById = createReadRunMetaById(runsBaseDir)
@@ -127,6 +135,7 @@ async function serve(): Promise<void> {
 		loadedGuild,
 		llmCaller,
 		humanBackend: webHumanBackend,
+		interruptChannel,
 		guildPath: GUILD_PATH,
 		workspaceRootPath,
 		runsBaseDir,
@@ -158,6 +167,12 @@ async function serve(): Promise<void> {
 		webServer.stop()
 		console.error(`Fatal run error: ${reason.error.message}`)
 		process.exit(1)
+	}
+
+	if (runSubmission.activeRunId() !== undefined) {
+		runState.submitInterrupt({ kind: 'inquiry', message: SHUTDOWN_INQUIRY_MESSAGE })
+		const sleep = createSleep()
+		await Promise.race([runSubmission.awaitActive(), sleep(SHUTDOWN_DRAIN_MS)])
 	}
 
 	const interrupted = runSubmission.activeRunId() !== undefined

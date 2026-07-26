@@ -90,12 +90,25 @@ const sampleConfig = {
 					whimsical: ['{source} is zapping {destination}', '{source} is vaporizing {destination}', '{source} is hitting {destination} with the undo ray'],
 				},
 			},
+			inquiry: {
+				'human->role': {
+					detailed: ['human is asking role {destinationRole} (stack {stack})'],
+					friendly: ['{source} is asking {destination}'],
+					whimsical: ['{source} is posing a riddle to {destination}', '{source} is ringing {destination}\'s bell', '{source} is tapping {destination} on the shoulder'],
+				},
+				'role->human': {
+					detailed: ['role {sourceRole} is answering human (stack {stack})'],
+					friendly: ['{source} is answering {destination}'],
+					whimsical: ['{source} is whispering the answer to {destination}', '{source} is solving {destination}\'s riddle', '{source} is passing the answer back to {destination}'],
+				},
+			},
 		},
 		genericOperationTemplates: {
 			call: { detailed: ['{sourceKind} {sourceRole} is calling {destinationKind} {destinationRole} (stack {stack})'], friendly: ['{source} is calling {destination}'], whimsical: ['{source} is ringing up {destination}'] },
 			return: { detailed: ['{sourceKind} {sourceRole} is returning {outcome} to {destinationKind} {destinationRole} (stack {stack})'], friendly: ['{source} is returning to {destination}'], whimsical: ['{source} is reporting back to {destination}'] },
 			observe: { detailed: ['{sourceKind} {sourceRole} is observing {destinationKind} {destinationRole} (stack {stack})'], friendly: ['{source} is observing {destination}'], whimsical: ['{source} is peeking at {destination}'] },
 			terminate: { detailed: ['{sourceKind} {sourceRole} is reverting {destinationKind} {destinationRole} (terminate, stack {stack})'], friendly: ['{source} is rewinding {destination}'], whimsical: ['{source} is zapping {destination}'] },
+			inquiry: { detailed: ['{sourceKind} {sourceRole} is asking {destinationKind} {destinationRole} (stack {stack})'], friendly: ['{source} is asking {destination}'], whimsical: ['{source} is posing a riddle to {destination}'] },
 		},
 		workingTemplates: {
 			role: { detailed: ['role {participantRole} is generating a response (streaming tokens)'], friendly: ['{participant} is thinking'], whimsical: ['{participant} is on the case', '{participant} is noodling on it', '{participant} is chewing it over'] },

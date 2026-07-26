@@ -8,6 +8,7 @@
 		"typecheck": "bun --bun tsc --noEmit",
 		"test": "bun test --randomize --concurrent source/",
 		"map": "bun source/tools/repo-map.ts",
+		"validate-data": "bun source/tools/validate-data.ts",
 		"bench:smoke": "cd benchmarks/hello_001 && bun test tests/",
 		"start": "bun source/serve.ts"
 	},

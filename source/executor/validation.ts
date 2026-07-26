@@ -7,6 +7,7 @@ import type {
 	GenerationConfig,
 	GuildConfig,
 	HumanFacingText,
+	InterruptTriggersConfig,
 	ModelConfig,
 	OperationKind,
 	ResultCard,
@@ -71,7 +72,7 @@ const resultCardStatuses: readonly ResultCard['status'][] = ['success', 'error',
 
 const runMetaStatuses: readonly RunMeta['status'][] = ['running', 'success', 'error', 'needs_clarification']
 
-const operationKinds: readonly OperationKind[] = ['call', 'return', 'observe', 'terminate']
+const operationKinds: readonly OperationKind[] = ['call', 'return', 'observe', 'terminate', 'inquiry']
 
 function isRecordOfHumanFacingText(value: unknown): value is Record<string, HumanFacingText> {
 	if (!isObject(value)) return false
@@ -165,11 +166,22 @@ function validateModelConfig(value: unknown, path: string): asserts value is Mod
 	validateGenerationConfig(value.generation, `${path}.generation`)
 }
 
+function validateInterruptTriggersConfig(value: unknown, path: string): asserts value is InterruptTriggersConfig {
+	if (!isObject(value)) throw new ValidationError(path, 'expected an object')
+	if (typeof value.handlerRole !== 'string' || value.handlerRole === '') throw new ValidationError(`${path}.handlerRole`, 'expected a non-empty string')
+	if (!isNumber(value.everyToolCalls) || value.everyToolCalls <= 0) throw new ValidationError(`${path}.everyToolCalls`, 'expected a positive number')
+	if (!isNumber(value.everyTokens) || value.everyTokens <= 0) throw new ValidationError(`${path}.everyTokens`, 'expected a positive number')
+	if (value.planOwnerRole !== undefined && (typeof value.planOwnerRole !== 'string' || value.planOwnerRole === '')) {
+		throw new ValidationError(`${path}.planOwnerRole`, 'expected a non-empty string or undefined')
+	}
+}
+
 function validateExecutorConfig(value: unknown, path: string): asserts value is ExecutorConfig {
 	if (!isObject(value)) throw new ValidationError(path, 'expected an object')
 	ensure(isNumber, value.maxAgentDepth, `${path}.maxAgentDepth`, 'expected a number')
 	ensure(isNumber, value.defaultToolTimeoutSeconds, `${path}.defaultToolTimeoutSeconds`, 'expected a number')
 	ensure(isNumber, value.maxCompactionAttempts, `${path}.maxCompactionAttempts`, 'expected a number')
+	if (value.interruptTriggers !== undefined) validateInterruptTriggersConfig(value.interruptTriggers, `${path}.interruptTriggers`)
 }
 
 function validateContextPolicy(value: unknown, path: string): asserts value is ContextPolicy {
@@ -214,10 +226,10 @@ function validateVisualizationConfig(value: unknown, path: string): asserts valu
 		throw new ValidationError(`${path}.pseudoRoleLabels`, 'expected an object of HumanFacingText entries')
 	}
 	if (!isOperationTemplates(value.operationTemplates)) {
-		throw new ValidationError(`${path}.operationTemplates`, 'expected an object keyed by call/return/observe/terminate, each a record of HumanFacingText entries')
+		throw new ValidationError(`${path}.operationTemplates`, 'expected an object keyed by call/return/observe/terminate/inquiry, each a record of HumanFacingText entries')
 	}
 	if (!isGenericOperationTemplates(value.genericOperationTemplates)) {
-		throw new ValidationError(`${path}.genericOperationTemplates`, 'expected an object keyed by call/return/observe/terminate, each a HumanFacingText entry')
+		throw new ValidationError(`${path}.genericOperationTemplates`, 'expected an object keyed by call/return/observe/terminate/inquiry, each a HumanFacingText entry')
 	}
 	if (value.workingTemplates !== undefined && !isRecordOfHumanFacingText(value.workingTemplates)) {
 		throw new ValidationError(`${path}.workingTemplates`, 'expected an object of HumanFacingText entries keyed by participant kind')
