@@ -3,8 +3,14 @@
 // Internal helpers (the engine loop, context builder, budget checks, and the built-in tool handlers that are assembled mid-run with live role state) stay private to their own modules.
 // See docs/reference.md "Executor runtime" and "Persistence".
 
-export { runExecutor } from './executor.js'
-export type { ExecutorDependencies } from './executor.js'
+export { runExecutor, resumeExecutor } from './executor.js'
+export type { ExecutorDependencies, ResumeRunOptions } from './executor.js'
+
+export { createCheckpointRecorder, isRunCheckpoint } from './checkpoint.js'
+export type { CheckpointFrame, CheckpointRecorder, CheckpointRecorderDependencies, PendingAgentSuspension, RunCheckpoint } from './checkpoint.js'
+
+export { reconcileRunsOnStartup } from './startup-reconciliation.js'
+export type { ReconciliationReport, StartupReconciliationDependencies } from './startup-reconciliation.js'
 
 export { createLlmCaller, createLlmFetch, createSleep } from './llm.js'
 export type { LlmCaller, LlmCallResult, LlmCallerDependencies, LlmFetch, LlmRequest, Sleep } from './llm.js'
@@ -22,7 +28,7 @@ export { createInterruptChannel, createInterruptQueue } from './interrupts.js'
 export type { InterruptChannel, InterruptQueue, InterruptRequest, InterruptSubmitResult } from './interrupts.js'
 
 export { createRunSubmission } from './run-submission.js'
-export type { RunSubmission, RunSubmissionDependencies, StartRun, SubmitResult } from './run-submission.js'
+export type { ResumeRun, RunSubmission, RunSubmissionDependencies, StartRun, SubmitResult } from './run-submission.js'
 
 export { EFFORT_MIN, EFFORT_MAX, DEFAULT_EFFORT, effortDirective } from './effort.js'
 
@@ -35,6 +41,9 @@ export {
 	createRunDirectory,
 	createAppendLog,
 	createWriteMeta,
+	createWriteCheckpoint,
+	createDeleteCheckpoint,
+	createReadRunCheckpointById,
 	createReadRunSnapshotById,
 	createReadRunMetaById,
 	createReadRunSnapshotStats,
@@ -46,6 +55,9 @@ export type {
 	RunDirectory,
 	AppendLog,
 	WriteMeta,
+	WriteCheckpoint,
+	DeleteCheckpoint,
+	ReadRunCheckpointById,
 	ReadRunSnapshotById,
 	ReadRunMetaById,
 	ReadRunSnapshotStats,

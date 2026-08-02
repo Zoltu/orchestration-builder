@@ -28,7 +28,7 @@
  */
 
 /**
- * @typedef {'running' | 'success' | 'error' | 'needs_clarification' | 'unknown'} RunStatus
+ * @typedef {'running' | 'success' | 'error' | 'needs_clarification' | 'interrupted' | 'unknown'} RunStatus
  *   Mirrors the executor RunMeta status with an 'unknown' fallback for a malformed or absent meta read.
  */
 
@@ -87,7 +87,7 @@
  *   Stack roots in push order (oldest first), emitted by producers that track stack pushes (the backend adapter). A freshly preempted stack has no operations yet, so operations alone cannot name it. When absent (hand-authored models), the helpers derive stack structure from operations and a zero-operation stack renders nothing.
  */
 
-const TERMINAL_STATUSES = new Set(['success', 'error', 'needs_clarification'])
+const TERMINAL_STATUSES = new Set(['success', 'error', 'needs_clarification', 'interrupted'])
 
 /**
  * Returns whether a run status is terminal — the run will produce no more activity, so clients stop polling it and the result affordance may open. Shared by every client surface (product client, dev harness, view modules) so the terminal set is defined once, next to the RunStatus typedef it reads.

@@ -70,7 +70,7 @@ function isHumanFacingText(value: unknown): value is HumanFacingText {
 
 const resultCardStatuses: readonly ResultCard['status'][] = ['success', 'error', 'needs_clarification']
 
-const runMetaStatuses: readonly RunMeta['status'][] = ['running', 'success', 'error', 'needs_clarification']
+const runMetaStatuses: readonly RunMeta['status'][] = ['running', 'success', 'error', 'needs_clarification', 'interrupted']
 
 const operationKinds: readonly OperationKind[] = ['call', 'return', 'observe', 'terminate', 'inquiry']
 

@@ -2,11 +2,12 @@ import { describe, expect, test } from 'bun:test'
 
 import type { ContextPolicy, ExecutorConfig, GuildConfig, LogEvent, ModelConfig, RoleDefinition, RunMeta, ToolCall, ToolManifest } from './types.js'
 import { ValidationError } from './errors.js'
-import { runExecutor, type ExecutorDependencies } from './executor.ts'
+import { isRunCheckpoint, type RunCheckpoint } from './checkpoint.ts'
+import { resumeExecutor, runExecutor, type ExecutorDependencies } from './executor.ts'
 import { createInterruptQueue } from './interrupts.ts'
 import type { LlmCallResult, LlmCaller } from './llm.ts'
 import type { LoadGuild, LoadedGuild } from './loader.ts'
-import type { AppendLog, RunDirectory, WriteMeta } from './persistence.ts'
+import type { AppendLog, DeleteCheckpoint, RunDirectory, WriteCheckpoint, WriteMeta } from './persistence.ts'
 import { stubHumanBackend } from './test-fixtures.ts'
 
 function success(toolCalls: ToolCall[], opts: { content?: string } = {}): LlmCallResult {
@@ -37,10 +38,14 @@ interface FakePersistenceFns {
 	appendLog: AppendLog
 	createRunDirectory: RunDirectory
 	writeMeta: WriteMeta
+	writeCheckpoint: WriteCheckpoint
+	deleteCheckpoint: DeleteCheckpoint
 	state: {
 		events: LogEvent[]
 		meta: RunMeta | null
 		metas: RunMeta[]
+		checkpoints: RunCheckpoint[]
+		deleteCheckpointCalls: number
 		createRunDirectoryCalls: number
 	}
 }
@@ -48,8 +53,10 @@ interface FakePersistenceFns {
 function makeFakePersistence(): FakePersistenceFns {
 	const events: LogEvent[] = []
 	const metas: RunMeta[] = []
+	const checkpoints: RunCheckpoint[] = []
 	let meta: RunMeta | null = null
 	let createRunDirectoryCalls = 0
+	let deleteCheckpointCalls = 0
 	return {
 		appendLog: (event) => {
 			events.push(event)
@@ -62,6 +69,14 @@ function makeFakePersistence(): FakePersistenceFns {
 			meta = written
 			metas.push(written)
 		},
+		writeCheckpoint: (checkpoint) => {
+			const copy: unknown = JSON.parse(JSON.stringify(checkpoint))
+			if (!isRunCheckpoint(copy)) throw new Error('runExecutor wrote a checkpoint the guard rejects')
+			checkpoints.push(copy)
+		},
+		deleteCheckpoint: () => {
+			deleteCheckpointCalls++
+		},
 		state: {
 			get events() {
 				return events
@@ -71,6 +86,12 @@ function makeFakePersistence(): FakePersistenceFns {
 			},
 			get metas() {
 				return metas
+			},
+			get checkpoints() {
+				return checkpoints
+			},
+			get deleteCheckpointCalls() {
+				return deleteCheckpointCalls
 			},
 			get createRunDirectoryCalls() {
 				return createRunDirectoryCalls
@@ -139,6 +160,8 @@ function makeDeps(llm: FakeLlm, persistence: FakePersistenceFns, loadGuild: Load
 		appendLog: persistence.appendLog,
 		createRunDirectory: persistence.createRunDirectory,
 		writeMeta: persistence.writeMeta,
+		writeCheckpoint: persistence.writeCheckpoint,
+		deleteCheckpoint: persistence.deleteCheckpoint,
 		additionalToolHandlers: {},
 		humanBackend: stubHumanBackend,
 		loadGuild,
@@ -365,5 +388,141 @@ describe('runExecutor', () => {
 		expect(persistence.state.events[0]!.type).toBe('effort_set')
 		expect(meta.effort).toBe(4)
 		expect(persistence.state.meta?.effort).toBe(4)
+	})
+})
+
+describe('resumeExecutor', () => {
+	const agentManifest: ToolManifest = {
+		name: 'agent',
+		description: 'Invoke another role.',
+		parameters: {
+			type: 'object',
+			required: ['role', 'task'],
+			properties: {
+				role: { type: 'string' },
+				task: { type: 'string' },
+			},
+		},
+	}
+
+	function buildDelegationGuild(): LoadedGuild {
+		const guild = buildLoadedGuild(
+			{
+				orchestrator: { systemPrompt: 'p', tools: ['agent', 'finish'] },
+				coder: { systemPrompt: 'c', tools: ['finish'] },
+			},
+			'orchestrator',
+		)
+		const config: GuildConfig = { ...guild.config, tools: ['guild/tools/finish.json', 'guild/tools/agent.json'] }
+		return { config, prompts: guild.prompts, tools: { ...guild.tools, agent: agentManifest } }
+	}
+
+	function finishToolCall(id: string, summary: string): ToolCall {
+		return {
+			id,
+			type: 'function',
+			function: { name: 'finish', arguments: JSON.stringify({ status: 'success', summary }) },
+		}
+	}
+
+	function agentToolCall(id: string, role: string, task: string): ToolCall {
+		return {
+			id,
+			type: 'function',
+			function: { name: 'agent', arguments: JSON.stringify({ role, task }) },
+		}
+	}
+
+	const resumeOptions = { guildPath: '/guild', benchmarkPath: '/bench' }
+
+	// Drives a full orchestrator→coder run and returns the captured checkpoints; the resumed-run tests then re-enter from the checkpoint taken while the coder was active.
+	async function driveUninterruptedRun(): Promise<{ meta: RunMeta; checkpoints: RunCheckpoint[] }> {
+		const guild = buildDelegationGuild()
+		const llm = new FakeLlm()
+		llm.responses = [
+			success([agentToolCall('a1', 'coder', 'subtask')]),
+			success([finishToolCall('f1', 'child done')]),
+			success([finishToolCall('f2', 'parent done')]),
+		]
+		const persistence = makeFakePersistence()
+		const deps = makeDeps(llm, persistence, makeLoader(guild))
+
+		const meta = await runExecutor(deps, { runId: 'r-resume', ...resumeOptions, task: 'do it', effort: 2 })
+		return { meta, checkpoints: persistence.state.checkpoints }
+	}
+
+	test('a resumed run completes with the uninterrupted result, preserving run identity and start time', async () => {
+		const uninterrupted = await driveUninterruptedRun()
+		// Writes: [orchestrator], [orchestrator+coder], [orchestrator with child card], [orchestrator]. Index 1 is the checkpoint taken while the coder was active.
+		const checkpoint = uninterrupted.checkpoints[1]
+		if (checkpoint === undefined) throw new Error('expected the mid-descent checkpoint')
+
+		const guild = buildDelegationGuild()
+		const llm = new FakeLlm()
+		llm.responses = [
+			success([finishToolCall('f1', 'child done')]),
+			success([finishToolCall('f2', 'parent done')]),
+		]
+		const persistence = makeFakePersistence()
+		const deps = makeDeps(llm, persistence, makeLoader(guild))
+
+		const meta = await resumeExecutor(deps, checkpoint, resumeOptions)
+
+		expect(meta.status).toBe(uninterrupted.meta.status)
+		expect(meta.result).toEqual(uninterrupted.meta.result)
+		expect(meta.runId).toBe('r-resume')
+		expect(meta.task).toBe('do it')
+		expect(meta.effort).toBe(2)
+		expect(meta.startTime).toBe(uninterrupted.meta.startTime)
+		expect(meta.endTime).toBeDefined()
+		expect(llm.calls).toBe(2)
+		// The running meta is re-asserted with the original start time before the terminal meta lands, and the checkpoint is deleted once the run is terminal.
+		expect(persistence.state.metas.length).toBe(2)
+		expect(persistence.state.metas[0]?.status).toBe('running')
+		expect(persistence.state.metas[0]?.startTime).toBe(uninterrupted.meta.startTime)
+		expect(persistence.state.deleteCheckpointCalls).toBe(1)
+		// run_resumed marks the restart boundary ahead of every resumed-role event.
+		expect(persistence.state.events[0]?.type).toBe('run_resumed')
+		expect(persistence.state.events.some((e) => e.type === 'role_start')).toBe(false)
+		expect(persistence.state.events.some((e) => e.type === 'role_finished')).toBe(true)
+	})
+
+	test('the resumed registry is seeded past pre-restart ids so post-resume spawns cannot collide', async () => {
+		const uninterrupted = await driveUninterruptedRun()
+		const checkpoint = uninterrupted.checkpoints[1]
+		if (checkpoint === undefined) throw new Error('expected the mid-descent checkpoint')
+
+		const guild = buildDelegationGuild()
+		const llm = new FakeLlm()
+		llm.responses = [
+			success([finishToolCall('f1', 'child done')]),
+			success([agentToolCall('a2', 'coder', 'again')]),
+			success([finishToolCall('f3', 'second child done')]),
+			success([finishToolCall('f4', 'parent done')]),
+		]
+		const persistence = makeFakePersistence()
+		const deps = makeDeps(llm, persistence, makeLoader(guild))
+
+		const meta = await resumeExecutor(deps, checkpoint, resumeOptions)
+
+		expect(meta.status).toBe('success')
+		// The pre-restart run minted two instances, so the coder spawned after the resume mints counter value 3.
+		const starts = persistence.state.events.filter((e) => e.type === 'role_start').map((e) => (isRecord(e.payload) ? e.payload['roleId'] : undefined))
+		expect(starts).toEqual(['coder-1-3'])
+	})
+
+	test('a completed run deletes its checkpoint so a restart never resumes it', async () => {
+		const guild = buildLoadedGuild(
+			{ main: { systemPrompt: 'p', tools: ['finish'] } },
+			'main',
+		)
+		const llm = new FakeLlm()
+		llm.responses = [success([finishToolCall('f1', 'done')])]
+		const persistence = makeFakePersistence()
+		const deps = makeDeps(llm, persistence, makeLoader(guild))
+
+		await runExecutor(deps, { runId: 'r-clean', ...resumeOptions, task: 'do it', effort: 3 })
+
+		expect(persistence.state.deleteCheckpointCalls).toBe(1)
 	})
 })

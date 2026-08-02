@@ -1,15 +1,16 @@
 import { describe, expect, test } from 'bun:test'
 
-import type { ContextPolicy, ExecutorConfig, GuildConfig, LogEvent, Message, ModelConfig, RoleDefinition, ToolCall, ToolManifest } from './types.js'
+import type { ContextPolicy, ExecutorConfig, GuildConfig, LogEvent, Message, ModelConfig, ResultCard, RoleDefinition, ToolCall, ToolManifest } from './types.js'
 import { effortDirective } from './effort.ts'
 import { createContextPressureTracker } from './context-pressure.ts'
-import { runRole, type EngineDependencies } from './engine.ts'
+import { resumeRoleStack, runRole, type EngineDependencies } from './engine.ts'
 import { createInterruptQueue } from './interrupts.ts'
 import type { LlmCallResult, LlmCaller } from './llm.ts'
 import type { LoadedGuild } from './loader.ts'
 import type { AppendLog } from './persistence.ts'
 import { createRoleRegistry } from './role-registry.ts'
-import { stubHumanBackend, withTool } from './test-fixtures.ts'
+import type { RunCheckpoint } from './checkpoint.ts'
+import { createFakeCheckpointRecorder, stubHumanBackend, withTool } from './test-fixtures.ts'
 import type { ToolHandler } from './tool-dispatch.ts'
 
 function success(toolCalls: ToolCall[], opts: { content?: string; promptTokens?: number; completionTokens?: number; finishReason?: string } = {}): LlmCallResult {
@@ -149,18 +150,22 @@ function agentCall(role: string, task: string): ToolCall {
 	}
 }
 
-function makeDeps(llm: FakeLlm): { deps: EngineDependencies; events: LogEvent[] } {
+function makeDeps(llm: FakeLlm): { deps: EngineDependencies; events: LogEvent[]; checkpoints: RunCheckpoint[] } {
 	const { appendLog, events } = makeFakeAppendLog()
+	const roleRegistry = createRoleRegistry()
+	const contextPressureTracker = createContextPressureTracker()
+	const sink = createFakeCheckpointRecorder(roleRegistry, contextPressureTracker)
 	const deps: EngineDependencies = {
 		llmCaller: llm,
 		appendLog,
 		additionalToolHandlers: {},
 		humanBackend: stubHumanBackend,
-		roleRegistry: createRoleRegistry(),
+		roleRegistry,
 		interruptQueue: createInterruptQueue(),
-		contextPressureTracker: createContextPressureTracker(),
+		contextPressureTracker,
+		checkpointRecorder: sink.recorder,
 	}
-	return { deps, events }
+	return { deps, events, checkpoints: sink.checkpoints }
 }
 
 const echoHandler: ToolHandler = (args) => ({ kind: 'success', data: args })
@@ -1731,5 +1736,151 @@ describe('runRole effort directive injection', () => {
 		expect(childMessages[1]).toEqual({ role: 'user', content: 'subtask' })
 		expect(childMessages.length).toBe(2)
 		expect(childMessages.some((m) => m.content.includes('Quality level'))).toBe(false)
+	})
+})
+
+describe('run persistence and resumption', () => {
+	const echoManifest: ToolManifest = {
+		name: 'echo',
+		description: 'Echoes its arguments.',
+		parameters: { type: 'object', properties: {} },
+	}
+
+	function echoCall(id: string): ToolCall {
+		return { id, type: 'function', function: { name: 'echo', arguments: '{}' } }
+	}
+
+	function buildDelegationGuild(): LoadedGuild {
+		return withTool(
+			buildGuild(
+				{
+					orchestrator: { systemPrompt: 'p', tools: ['agent', 'finish'] },
+					coder: { systemPrompt: 'c', tools: ['echo', 'finish'] },
+				},
+				'orchestrator',
+			),
+			echoManifest,
+		)
+	}
+
+	// Drives a full orchestrator→coder descent against a scripted LLM: orchestrator delegates, coder makes one echo tool call (so its accumulators are non-trivial at the checkpoint), coder finishes, orchestrator finishes. Returns the final card plus every checkpoint the recorder wrote — the sink deep-freezes each write, so later writes never mutate earlier ones.
+	async function driveUninterruptedRun(): Promise<{ card: ResultCard; checkpoints: RunCheckpoint[] }> {
+		const guild = buildDelegationGuild()
+		const llm = new FakeLlm()
+		llm.responses = [
+			success([agentCall('coder', 'subtask')]),
+			success([echoCall('e1')]),
+			success([finishCall({ status: 'success', summary: 'child done' })]),
+			success([finishCall({ status: 'success', summary: 'parent done' })]),
+		]
+		const { deps, checkpoints } = makeDeps(llm)
+		const depsWithEcho: EngineDependencies = { ...deps, additionalToolHandlers: { echo: echoHandler } }
+		const card = await runRole(depsWithEcho, { loadedGuild: guild, depth: 0, roleName: 'orchestrator', task: 'do it' })
+		return { card, checkpoints }
+	}
+
+	function requireCheckpoint(checkpoints: RunCheckpoint[], index: number): RunCheckpoint {
+		const checkpoint = checkpoints[index]
+		if (checkpoint === undefined) throw new Error(`expected checkpoint ${index} among ${checkpoints.length} writes`)
+		return checkpoint
+	}
+
+	test('a checkpoint taken while the child runs captures the suspended parent chain and the leaf state', async () => {
+		const { checkpoints } = await driveUninterruptedRun()
+		// Writes: [orchestrator], [orchestrator+coder], [orchestrator+coder after echo], [orchestrator with child card], [orchestrator].
+		const checkpoint = requireCheckpoint(checkpoints, 2)
+
+		expect(checkpoint.frames.length).toBe(2)
+		const parent = checkpoint.frames[0]
+		const leaf = checkpoint.frames[1]
+		expect(parent?.roleName).toBe('orchestrator')
+		expect(parent?.pending?.toolCalls[parent.pending.agentIndex]?.function.name).toBe('agent')
+		expect(parent?.pending?.childCard).toBeUndefined()
+		expect(leaf?.roleName).toBe('coder')
+		expect(leaf?.parentRoleId).toBe(parent?.roleId)
+		expect(leaf?.pending).toBeUndefined()
+		// The leaf's accumulators reflect the echo call it already made.
+		expect(leaf?.roleState.toolCallCount).toBe(1)
+		expect(leaf?.roleState.history.length).toBe(4)
+	})
+
+	test('a run resumed at the suspended leaf continues the descent and produces the uninterrupted result', async () => {
+		const uninterrupted = await driveUninterruptedRun()
+		const checkpoint = requireCheckpoint(uninterrupted.checkpoints, 2)
+		const parentRoleId = checkpoint.frames[0]?.roleId
+		const leafRoleId = checkpoint.frames[1]?.roleId
+
+		const guild = buildDelegationGuild()
+		const llm = new FakeLlm()
+		llm.responses = [
+			success([finishCall({ status: 'success', summary: 'child done' })]),
+			success([finishCall({ status: 'success', summary: 'parent done' })]),
+		]
+		const { deps, events, checkpoints: resumedWrites } = makeDeps(llm)
+		const depsWithEcho: EngineDependencies = { ...deps, additionalToolHandlers: { echo: echoHandler } }
+
+		const card = await resumeRoleStack(depsWithEcho, guild, checkpoint)
+
+		expect(card).toEqual(uninterrupted.card)
+		// Exactly two turns happen after the resume: the coder's finish and the orchestrator's follow-up — no earlier turn is replayed.
+		expect(llm.calls.length).toBe(2)
+		// The resumed coder's first LLM call carries its preserved conversation (system, task, the pre-crash echo exchange).
+		const coderMessages = llm.calls[0]?.messages ?? []
+		expect(coderMessages[0]?.role).toBe('system')
+		expect(coderMessages.length).toBe(4)
+		// Resumed roles keep their pre-crash instance ids and do not re-emit role_start; role_finished pairs with the pre-crash role_start.
+		expect(events.some((event) => event.type === 'role_start')).toBe(false)
+		const finishedIds = events.filter((event) => event.type === 'role_finished').map((event) => payloadField(event, 'roleId'))
+		expect(finishedIds).toEqual([leafRoleId, parentRoleId])
+		// The parent receives the child's card as the agent call's tool result.
+		const agentResult = events.find((event) => event.type === 'tool_result' && payloadField(event, 'tool') === 'agent')
+		expect(agentResult).toBeDefined()
+		// Budget accumulators survive the resume: the first post-resume write still shows the pre-crash tool-call count, not a reset to zero.
+		const firstWrite = resumedWrites[0]
+		expect(firstWrite?.frames[1]?.roleState.toolCallCount).toBe(1)
+	})
+
+	test('a checkpoint with a recorded child card resumes without re-running the child', async () => {
+		const { checkpoints } = await driveUninterruptedRun()
+		const checkpoint = requireCheckpoint(checkpoints, 3)
+		expect(checkpoint.frames.length).toBe(1)
+		expect(checkpoint.frames[0]?.pending?.childCard).toEqual({ status: 'success', summary: 'child done' })
+
+		const guild = buildDelegationGuild()
+		const llm = new FakeLlm()
+		llm.responses = [success([finishCall({ status: 'success', summary: 'parent done' })])]
+		const { deps, events } = makeDeps(llm)
+		const depsWithEcho: EngineDependencies = { ...deps, additionalToolHandlers: { echo: echoHandler } }
+
+		const card = await resumeRoleStack(depsWithEcho, guild, checkpoint)
+
+		expect(card).toEqual({ status: 'success', summary: 'parent done' })
+		// One turn only: the orchestrator's follow-up. The finished child is not re-run.
+		expect(llm.calls.length).toBe(1)
+		const agentResult = events.find((event) => event.type === 'tool_result' && payloadField(event, 'tool') === 'agent')
+		expect(agentResult).toBeDefined()
+	})
+
+	test('roles spawned after a resume mint fresh ids that cannot collide with preserved ones', async () => {
+		const { checkpoints } = await driveUninterruptedRun()
+		const checkpoint = requireCheckpoint(checkpoints, 2)
+
+		const guild = buildDelegationGuild()
+		const llm = new FakeLlm()
+		llm.responses = [
+			success([finishCall({ status: 'success', summary: 'child done' })]),
+			success([agentCall('coder', 'again')]),
+			success([finishCall({ status: 'success', summary: 'second child done' })]),
+			success([finishCall({ status: 'success', summary: 'parent done' })]),
+		]
+		const { deps, events } = makeDeps(llm)
+		const depsWithEcho: EngineDependencies = { ...deps, additionalToolHandlers: { echo: echoHandler } }
+
+		const card = await resumeRoleStack(depsWithEcho, guild, checkpoint)
+
+		expect(card.status).toBe('success')
+		// The coder spawned after the resume is a fresh instance, so it mints a new id (the test registry starts at 0 and restored registrations do not advance it) and emits role_start — resumed roles do not.
+		const starts = events.filter((event) => event.type === 'role_start').map((event) => payloadField(event, 'roleId'))
+		expect(starts).toEqual(['coder-1-1'])
 	})
 })

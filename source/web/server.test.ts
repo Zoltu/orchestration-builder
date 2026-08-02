@@ -2,7 +2,8 @@ import { describe, expect, test } from 'bun:test'
 import { createWebHumanBackend, type WebHumanBackend } from '../executor/human-backend.ts'
 import { createInterruptChannel, createInterruptQueue, type InterruptChannel } from '../executor/interrupts.ts'
 import { createRunState } from '../executor/run-state.ts'
-import { createRunSubmission, type RunSubmission, type StartRun } from '../executor/run-submission.ts'
+import { createRunSubmission, type ResumeRun, type RunSubmission, type StartRun } from '../executor/run-submission.ts'
+import type { RunCheckpoint } from '../executor/checkpoint.ts'
 import type { ProjectSettings, ReadProjectSettings, WriteProjectSettings, RunSnapshotRaw, RunSnapshotStats } from '../executor/persistence.ts'
 import type { GuildConfig, RunMeta } from '../executor/types.js'
 import { parseRunSnapshot, type RunSnapshot } from './render.ts'
@@ -49,6 +50,23 @@ const snapshots = new Map<string, RunSnapshotRaw>([
 			JSON.stringify({ timestamp: '2026-01-01T00:00:02.000Z', type: 'ask_human', payload: { id: 'q1', question: 'Which framework?', context: 'src/index.ts' } }),
 			JSON.stringify({ timestamp: '2026-01-01T00:00:30.000Z', type: 'human_answer', payload: { id: 'q1', answer: 'react' } }),
 			JSON.stringify({ timestamp: '2026-01-01T00:00:31.000Z', type: 'ask_human', payload: { id: 'q2', question: 'Still unsure?' } }),
+		].join('\n'),
+	}],
+	// A run startup reconciliation could not resume: terminal 'interrupted' meta with the reconciliation's error record.
+	['run-interrupted', {
+		metaText: JSON.stringify({
+			runId: 'run-interrupted',
+			guildPath: 'guild',
+			benchmarkPath: 'bench',
+			task: 'task for run-interrupted',
+			status: 'interrupted',
+			startTime: '2026-01-01T00:00:00.000Z',
+			endTime: '2026-01-01T00:02:00.000Z',
+			error: { kind: 'interrupted', message: 'The service stopped while this run was in progress and it could not be resumed (no valid checkpoint).' },
+		}),
+		logText: [
+			JSON.stringify({ timestamp: '2026-01-01T00:00:01.000Z', type: 'role_start', payload: { role: 'planner', roleId: 'planner-0-1', depth: 0, task: 'task for run-interrupted' } }),
+			JSON.stringify({ timestamp: '2026-01-01T00:00:02.000Z', type: 'llm_call', payload: { role: 'planner', usage: { promptTokens: 50, completionTokens: 10, totalTokens: 60 } } }),
 		].join('\n'),
 	}],
 ])
@@ -233,21 +251,31 @@ interface HandlerHarness {
 	staticCalls: string[]
 	lastEffort: () => number | undefined
 	resolveActive: () => (meta: RunMeta) => void
+	resolveResumed: () => (meta: RunMeta) => void
+	resumedCheckpoints: () => RunCheckpoint[]
 }
 
-// Builds a fresh handler whose startRun parks on a caller-controlled resolver, so each test drives its own run lifecycle without touching shared state. The static leaf is a recording fake; every dependency is in-memory.
+// Builds a fresh handler whose startRun and resumeRun park on caller-controlled resolvers, so each test drives its own run lifecycle without touching shared state. The static leaf is a recording fake; every dependency is in-memory.
 function createHandlerHarness(): HandlerHarness {
 	let resolveActive: (meta: RunMeta) => void = () => {}
+	let resolveResumed: (meta: RunMeta) => void = () => {}
 	let capturedEffort: number | undefined
+	const resumed: RunCheckpoint[] = []
 	const startRun: StartRun = (_runId, _task, effort) => {
 		capturedEffort = effort
 		return new Promise<RunMeta>((resolve) => {
 			resolveActive = resolve
 		})
 	}
+	const resumeRun: ResumeRun = (checkpoint) => {
+		resumed.push(checkpoint)
+		return new Promise<RunMeta>((resolve) => {
+			resolveResumed = resolve
+		})
+	}
 	let nextId = 0
 	const settings = createInMemorySettings()
-	const submission = createRunSubmission({ startRun, generateRunId: () => `test-run-${nextId++}`, readProjectSettings: settings.read })
+	const submission = createRunSubmission({ startRun, resumeRun, generateRunId: () => `test-run-${nextId++}`, readProjectSettings: settings.read })
 	const interruptChannel = createInterruptChannel()
 	const humanBackend = createWebHumanBackend()
 	const staticCalls: string[] = []
@@ -278,6 +306,8 @@ function createHandlerHarness(): HandlerHarness {
 		staticCalls,
 		lastEffort: () => capturedEffort,
 		resolveActive: () => resolveActive,
+		resolveResumed: () => resolveResumed,
+		resumedCheckpoints: () => resumed,
 	}
 }
 
@@ -290,6 +320,38 @@ function terminalMeta(runId: string, task: string): RunMeta {
 		status: 'success',
 		startTime: '2026-01-01T00:00:00.000Z',
 		endTime: '2026-01-01T00:01:00.000Z',
+	}
+}
+
+// A minimal valid checkpoint for the resume tests: a single depth-0 frame (an active entry role).
+function resumeCheckpoint(runId: string): RunCheckpoint {
+	return {
+		version: 1,
+		runId,
+		startTime: '2026-01-01T00:00:00.000Z',
+		registryCounter: 1,
+		frames: [
+			{
+				roleId: 'orchestrator-0-1',
+				roleName: 'orchestrator',
+				depth: 0,
+				task: `task for ${runId}`,
+				roleState: {
+					history: [
+						{ role: 'system', content: 'prompt' },
+						{ role: 'user', content: 'task' },
+					],
+					lastPromptTokens: 10,
+					recentCompactionPromptTokens: [],
+					recentToolCalls: [],
+					toolCallCount: 1,
+					generatedTokens: 5,
+					contextExceededAttempts: 0,
+					loopCheckToolCallWatermark: 0,
+					loopCheckTokenWatermark: 0,
+				},
+			},
+		],
 	}
 }
 
@@ -430,16 +492,25 @@ describe('GET /api/runs (list)', () => {
 		expect(response.status).toBe(200)
 		const list = await response.json()
 		expect(Array.isArray(list)).toBe(true)
-		expect(list.length).toBe(8)
+		expect(list.length).toBe(9)
 		expect(list[0].runId).toBe('run-tree')
 		expect(list[1].runId).toBe('run-retry')
 		expect(list[2].runId).toBe('run-long')
-		expect(list[3].runId).toBe('run-effort')
-		expect(list[4].runId).toBe('run-cached')
-		expect(list[5].runId).toBe('run-3')
-		expect(list[6].runId).toBe('run-2')
-		expect(list[7].runId).toBe('run-1')
+		expect(list[3].runId).toBe('run-interrupted')
+		expect(list[4].runId).toBe('run-effort')
+		expect(list[5].runId).toBe('run-cached')
+		expect(list[6].runId).toBe('run-3')
+		expect(list[7].runId).toBe('run-2')
+		expect(list[8].runId).toBe('run-1')
 		expect(list[3]).toEqual({
+			runId: 'run-interrupted',
+			status: 'interrupted',
+			task: 'task for run-interrupted',
+			effort: null,
+			startTime: '2026-01-01T00:00:00.000Z',
+			endTime: '2026-01-01T00:02:00.000Z',
+		})
+		expect(list[4]).toEqual({
 			runId: 'run-effort',
 			status: 'success',
 			task: 'task for run-effort',
@@ -447,7 +518,7 @@ describe('GET /api/runs (list)', () => {
 			startTime: '2026-01-01T00:00:00.000Z',
 			endTime: '2026-01-01T00:01:00.000Z',
 		})
-		expect(list[6]).toEqual({
+		expect(list[7]).toEqual({
 			runId: 'run-2',
 			status: 'error',
 			task: 'task for run-2',
@@ -514,6 +585,16 @@ describe('GET /api/runs/:id', () => {
 		expect(view.currentActivity.summary).toBe('planner · finished (success)')
 		expect(view.recentLog[0].summary).toBe('planner · llm call')
 		expect(view.recentLog[1].summary).toBe('planner · finished (success)')
+	})
+
+	test('an interrupted run renders as a terminal state with the reconciliation error, not as in progress', async () => {
+		const { handler } = createHandlerHarness()
+		const response = await handler(get('/api/runs/run-interrupted'))
+		expect(response.status).toBe(200)
+		const view = await response.json()
+		expect(view.status).toBe('interrupted')
+		expect(view.error).toEqual({ kind: 'interrupted', message: 'The service stopped while this run was in progress and it could not be resumed (no valid checkpoint).' })
+		expect(view.endTime).toBe('2026-01-01T00:02:00.000Z')
 	})
 
 	test('returns 404 for an unknown run id', async () => {
@@ -724,6 +805,14 @@ describe('GET /api/runs/:id/flow', () => {
 		expect(response.status).toBe(404)
 		expect(await response.json()).toEqual({ ok: false, error: 'not_found' })
 	})
+
+	test('an interrupted run carries the terminal interrupted status into the flow model', async () => {
+		const { handler } = createHandlerHarness()
+		const response = await handler(get('/api/runs/run-interrupted/flow'))
+		expect(response.status).toBe(200)
+		const model = await response.json()
+		expect(model.status).toBe('interrupted')
+	})
 })
 
 describe('GET /api/run/flow alias', () => {
@@ -839,6 +928,20 @@ describe('POST /api/runs', () => {
 		await submission.awaitActive()
 	})
 
+	test('rejects a submit while a resumed run is still active, then accepts after it settles', async () => {
+		const { handler, submission, resolveResumed } = createHandlerHarness()
+		submission.resume(resumeCheckpoint('run-restored'))
+
+		const response = await handler(post('/api/runs', JSON.stringify({ task: 'second' })))
+		expect(response.status).toBe(409)
+		expect(await response.json()).toEqual({ ok: false, error: 'run_in_progress' })
+
+		resolveResumed()(terminalMeta('run-restored', 'restored task'))
+		await submission.awaitActive()
+		const accepted = await handler(post('/api/runs', JSON.stringify({ task: 'second' })))
+		expect(accepted.status).toBe(201)
+	})
+
 	test('rejects a body missing the task field with 400 invalid_body', async () => {
 		const { handler } = createHandlerHarness()
 		const response = await handler(post('/api/runs', JSON.stringify({ notTask: 'x' })))
@@ -933,6 +1036,25 @@ describe('/api/questions and /api/answer', () => {
 		const response = await handler(post('/api/answer', JSON.stringify({ answer: 'no id' })))
 		expect(response.status).toBe(400)
 		expect(await response.json()).toEqual({ ok: false, error: 'invalid_body' })
+	})
+})
+
+describe('startup resume', () => {
+	test('a resumed run takes the active slot under its original run id and is served by the alias', async () => {
+		const { handler, submission, resolveResumed, resumedCheckpoints } = createHandlerHarness()
+		const checkpoint = resumeCheckpoint('run-restored')
+		submission.resume(checkpoint)
+
+		expect(submission.activeRunId()).toBe('run-restored')
+		expect(resumedCheckpoints()).toEqual([checkpoint])
+		const response = await handler(get('/api/run'))
+		expect(response.status).toBe(200)
+		const view = await response.json()
+		expect(view.runId).toBe('run-restored')
+
+		resolveResumed()(terminalMeta('run-restored', 'restored task'))
+		await submission.awaitActive()
+		expect(submission.activeRunId()).toBeUndefined()
 	})
 })
 

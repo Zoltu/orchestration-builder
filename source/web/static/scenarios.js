@@ -52,7 +52,7 @@ import { isTerminalStatus } from './interaction-model.js'
  */
 
 /**
- * @typedef {'running' | 'success' | 'error' | 'needs_clarification' | 'unknown'} RunStatus
+ * @typedef {'running' | 'success' | 'error' | 'needs_clarification' | 'interrupted' | 'unknown'} RunStatus
  */
 
 /**

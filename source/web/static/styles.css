@@ -379,6 +379,7 @@ li:last-child {
 }
 
 .run-status-error,
+.run-status-interrupted,
 .run-status-needs_clarification {
 	color: var(--color-error);
 }
@@ -1424,7 +1425,8 @@ li:last-child {
 	color: var(--color-success);
 }
 
-.result-modal-status--error {
+.result-modal-status--error,
+.result-modal-status--interrupted {
 	color: var(--color-error);
 }
 

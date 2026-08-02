@@ -8,8 +8,9 @@ export interface ContextPressureTracker {
 	learnedCeiling?: number
 }
 
-export function createContextPressureTracker(): ContextPressureTracker {
-	return {}
+// The optional initial ceiling is the resume path: a restarted run re-seeds the tracker from its checkpoint so the tightened threshold learned before the restart still applies.
+export function createContextPressureTracker(initialCeiling?: number): ContextPressureTracker {
+	return initialCeiling !== undefined ? { learnedCeiling: initialCeiling } : {}
 }
 
 // A rejection carrying a reported promptTokens > 0 is ground truth that the effective budget lies below that number; the ceiling moves down to the lowest such report. A rejection without a reported count carries no information and is ignored.

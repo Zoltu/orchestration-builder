@@ -449,6 +449,9 @@ function deriveDemoResultDescriptor(status) {
 	if (status === 'error') {
 		return { status, summary: null, artifacts: [], error: { message: 'The run stopped with an error.', raw: null } }
 	}
+	if (status === 'interrupted') {
+		return { status, summary: null, artifacts: [], error: { message: 'The run was interrupted before it could be resumed.', raw: null } }
+	}
 	if (status === 'needs_clarification') {
 		return { status, summary: 'The run is waiting for your input.', artifacts: [], error: null }
 	}

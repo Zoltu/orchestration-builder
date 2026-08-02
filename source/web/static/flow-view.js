@@ -501,9 +501,9 @@ function CtaButton(h, props) {
 	return h('g', { class: 'flow-cta-button' }, children)
 }
 
-// Maps a terminal run status to the CTA's label and tone. A needs_clarification run is waiting on the human, so it reads as an accent (not an error); a failed run is error-toned; success is accent.
+// Maps a terminal run status to the CTA's label and tone. A needs_clarification run is waiting on the human, so it reads as an accent (not an error); a failed or interrupted run is error-toned; success is accent.
 function ctaDescriptorForStatus(status) {
-	if (status === 'error') return { label: 'See error', tone: 'error' }
+	if (status === 'error' || status === 'interrupted') return { label: 'See error', tone: 'error' }
 	if (status === 'needs_clarification') return { label: 'Respond', tone: 'accent' }
 	return { label: 'See result', tone: 'accent' }
 }
@@ -679,6 +679,7 @@ export function deriveNowCaption(model, labels, tier) {
 	const status = model.status
 	if (status === 'success') return 'Done.'
 	if (status === 'error') return 'The run stopped with an error.'
+	if (status === 'interrupted') return 'The run was interrupted.'
 	if (status === 'needs_clarification') return 'Waiting for your input…'
 	const operation = activeOperation(model)
 	if (operation === null) return 'Working…'

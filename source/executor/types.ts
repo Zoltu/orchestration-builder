@@ -154,7 +154,8 @@ export interface RunMeta {
 	task: string
 	// Absent on runs written before the effort channel existed; present on every run started since. Optional so a torn or legacy meta read still parses.
 	effort?: EffortLevel
-	status: 'running' | 'success' | 'error' | 'needs_clarification'
+	// 'interrupted' is terminal: the service stopped mid-run and the run could not (or was not chosen to) resume on restart — written by startup reconciliation so the UI stops showing the run as "in progress".
+	status: 'running' | 'success' | 'error' | 'needs_clarification' | 'interrupted'
 	startTime: string
 	endTime?: string
 	result?: ResultCard

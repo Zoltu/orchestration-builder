@@ -3,7 +3,7 @@ import * as path from 'node:path'
 
 import { createWebServer } from './web/server.js'
 import { createSnapshotCache } from './web/snapshot-cache.js'
-import { createAppendLog, createGuildLoader, createInterruptChannel, createInterruptQueue, createLlmCaller, createLlmFetch, createListRunIds, createReadProjectSettings, createReadRunMetaById, createReadRunSnapshotById, createReadRunSnapshotStats, createRunDirectory, createRunState, createRunSubmission, createSleep, createToolHandlers, createWebHumanBackend, createWriteMeta, createWriteProjectSettings, runExecutor, type ExecutorDependencies, type InterruptChannel, type LoadedGuild, type LlmCaller, type ModelConfig, type StartRun, type WebHumanBackend } from './executor/index.js'
+import { createAppendLog, createDeleteCheckpoint, createGuildLoader, createInterruptChannel, createInterruptQueue, createLlmCaller, createLlmFetch, createListRunIds, createReadProjectSettings, createReadRunCheckpointById, createReadRunMetaById, createReadRunSnapshotById, createReadRunSnapshotStats, createRunDirectory, createRunState, createRunSubmission, createSleep, createToolHandlers, createWebHumanBackend, createWriteCheckpoint, createWriteMeta, createWriteProjectSettings, reconcileRunsOnStartup, resumeExecutor, runExecutor, type ExecutorDependencies, type InterruptChannel, type LoadedGuild, type LlmCaller, type ModelConfig, type ResumeRun, type RunCheckpoint, type StartRun, type WebHumanBackend } from './executor/index.js'
 
 const API_KEY_ENV_VAR = 'ORCHESTRATOR_API_KEY'
 const PORT_ENV_VAR = 'PORT'
@@ -48,9 +48,48 @@ function parsePort(value: string | undefined, fallback: number): number {
 	return port
 }
 
-// Builds the per-run leaf wrapper the submission calls for each task.
-// The guild, model, and shared human backend are bound once at service startup; only the persistence leaves and tool handlers are re-derived per run id.
+// Builds the per-run executor dependencies and binds the shared backends (human backend, interrupt channel) to the run's log and queue for the duration of `invoke`. The guild, model, and shared human backend are bound once at service startup; only the persistence leaves and tool handlers are re-derived per run id.
 // Tools operate on the live workspace root in place — the executor modifies the mounted project directly, not a per-run copy.
+async function withRunBindings<T>(config: {
+	loadedGuild: LoadedGuild
+	llmCaller: LlmCaller
+	humanBackend: WebHumanBackend
+	interruptChannel: InterruptChannel
+	guildPath: string
+	workspaceRootPath: string
+	runsBaseDir: string
+}, runId: string, invoke: (dependencies: ExecutorDependencies) => Promise<T>): Promise<T> {
+	const additionalToolHandlers = createToolHandlers({
+		workspaceRoot: config.workspaceRootPath,
+		defaultToolTimeoutSeconds: config.loadedGuild.config.executor.defaultToolTimeoutSeconds,
+	})
+	const appendLog = createAppendLog(runId, config.runsBaseDir)
+	// The human backend is shared with the web API; bind the active run's log so ask_human and human_answer events land in this run's log.jsonl for the question-history view.
+	config.humanBackend.bindRunLog(appendLog)
+	// The interrupt channel is likewise shared; bind the run's fresh queue so operator interrupts submitted mid-run reach the engine's drain.
+	const interruptQueue = createInterruptQueue()
+	config.interruptChannel.bindQueue(interruptQueue)
+	const dependencies: ExecutorDependencies = {
+		llmCaller: config.llmCaller,
+		loadGuild: () => config.loadedGuild,
+		appendLog,
+		createRunDirectory: createRunDirectory(runId, config.runsBaseDir),
+		writeMeta: createWriteMeta(runId, config.runsBaseDir),
+		writeCheckpoint: createWriteCheckpoint(runId, config.runsBaseDir),
+		deleteCheckpoint: createDeleteCheckpoint(runId, config.runsBaseDir),
+		additionalToolHandlers,
+		humanBackend: config.humanBackend,
+		interruptQueue,
+	}
+	try {
+		return await invoke(dependencies)
+	} finally {
+		config.humanBackend.bindRunLog(null)
+		config.interruptChannel.bindQueue(null)
+	}
+}
+
+// The per-run leaf wrappers the submission calls for each task (a fresh run) and for startup reconciliation (a run resumed from its checkpoint under its original run id).
 function createStartRun(config: {
 	loadedGuild: LoadedGuild
 	llmCaller: LlmCaller
@@ -60,40 +99,28 @@ function createStartRun(config: {
 	workspaceRootPath: string
 	runsBaseDir: string
 }): StartRun {
-	return async (runId, task, effort) => {
-		const additionalToolHandlers = createToolHandlers({
-			workspaceRoot: config.workspaceRootPath,
-			defaultToolTimeoutSeconds: config.loadedGuild.config.executor.defaultToolTimeoutSeconds,
-		})
-		const appendLog = createAppendLog(runId, config.runsBaseDir)
-		// The human backend is shared with the web API; bind the active run's log so ask_human and human_answer events land in this run's log.jsonl for the question-history view.
-		config.humanBackend.bindRunLog(appendLog)
-		// The interrupt channel is likewise shared; bind the run's fresh queue so operator interrupts submitted mid-run reach the engine's drain.
-		const interruptQueue = createInterruptQueue()
-		config.interruptChannel.bindQueue(interruptQueue)
-		const dependencies: ExecutorDependencies = {
-			llmCaller: config.llmCaller,
-			loadGuild: () => config.loadedGuild,
-			appendLog,
-			createRunDirectory: createRunDirectory(runId, config.runsBaseDir),
-			writeMeta: createWriteMeta(runId, config.runsBaseDir),
-			additionalToolHandlers,
-			humanBackend: config.humanBackend,
-			interruptQueue,
-		}
-		try {
-			return await runExecutor(dependencies, {
-				runId,
-				guildPath: config.guildPath,
-				benchmarkPath: config.workspaceRootPath,
-				task,
-				effort,
-			})
-		} finally {
-			config.humanBackend.bindRunLog(null)
-			config.interruptChannel.bindQueue(null)
-		}
-	}
+	return (runId, task, effort) => withRunBindings(config, runId, (dependencies) => runExecutor(dependencies, {
+		runId,
+		guildPath: config.guildPath,
+		benchmarkPath: config.workspaceRootPath,
+		task,
+		effort,
+	}))
+}
+
+function createResumeRun(config: {
+	loadedGuild: LoadedGuild
+	llmCaller: LlmCaller
+	humanBackend: WebHumanBackend
+	interruptChannel: InterruptChannel
+	guildPath: string
+	workspaceRootPath: string
+	runsBaseDir: string
+}): ResumeRun {
+	return (checkpoint) => withRunBindings(config, checkpoint.runId, (dependencies) => resumeExecutor(dependencies, checkpoint, {
+		guildPath: config.guildPath,
+		benchmarkPath: config.workspaceRootPath,
+	}))
 }
 
 function waitForShutdownSignal(): Promise<void> {
@@ -105,7 +132,7 @@ function waitForShutdownSignal(): Promise<void> {
 }
 
 // Long-running service: the server outlives every run, one task at a time, submitted via the JSON API.
-// SIGINT and SIGTERM both trigger shutdown: with an active run, the service submits a wind-down inquiry through the interrupt channel and waits for the run under a bounded drain timeout — the run can finish gracefully at a safe point, but a run that does not finish in time is abandoned where it stands (its append-only log is durable; the missing meta.json reads as "in progress" on restart until checkpoint resume lands).
+// SIGINT and SIGTERM both trigger shutdown: with an active run, the service submits a wind-down inquiry through the interrupt channel and waits for the run under a bounded drain timeout — the run can finish gracefully at a safe point. A run still active when the timeout elapses is NOT abandoned: the engine checkpoints the role stack at every safe point, so the next startup resumes the run from its last checkpoint (see docs/reference.md "Run persistence and resumption").
 // Then stop accepting new requests, stop the server, and exit (130 if a run was still active, 0 if idle).
 // A fatal run error tears down the service and exits non-zero.
 
@@ -131,7 +158,7 @@ async function serve(): Promise<void> {
 	const readProjectSettings = createReadProjectSettings(workspaceRootPath)
 	const writeProjectSettings = createWriteProjectSettings(workspaceRootPath)
 
-	const startRun = createStartRun({
+	const runConfig = {
 		loadedGuild,
 		llmCaller,
 		humanBackend: webHumanBackend,
@@ -139,8 +166,25 @@ async function serve(): Promise<void> {
 		guildPath: GUILD_PATH,
 		workspaceRootPath,
 		runsBaseDir,
+	}
+	const startRun = createStartRun(runConfig)
+	const resumeRun = createResumeRun(runConfig)
+	const runSubmission = createRunSubmission({ startRun, resumeRun, generateRunId: () => generateRunId(new Date()), readProjectSettings })
+
+	// Startup reconciliation runs before the server accepts submissions: a run left mid-flight by the previous process resumes from its checkpoint (under its original run id, through the same single-active-run slot), and every run that cannot be resumed is marked interrupted so the UI shows it as terminal rather than perpetually "in progress".
+	const reconciliation = reconcileRunsOnStartup({
+		listRunIds,
+		readRunMetaById,
+		readCheckpointById: createReadRunCheckpointById(runsBaseDir),
+		writeMetaFor: (runId) => createWriteMeta(runId, runsBaseDir),
+		resume: (checkpoint: RunCheckpoint) => runSubmission.resume(checkpoint),
 	})
-	const runSubmission = createRunSubmission({ startRun, generateRunId: () => generateRunId(new Date()), readProjectSettings })
+	if (reconciliation.resumedRunId !== undefined) {
+		console.log(`Resumed run ${reconciliation.resumedRunId} from its checkpoint`)
+	}
+	for (const runId of reconciliation.interruptedRunIds) {
+		console.log(`Marked run ${runId} as interrupted (could not be resumed)`)
+	}
 
 	const webServer = createWebServer({
 		port,

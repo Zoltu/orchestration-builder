@@ -7,7 +7,7 @@
 import { isTerminalStatus } from './interaction-model.js'
 import { isObject } from './guards.js'
 
-// The terminal-status descriptor for a run, or undefined when the run is not yet terminal. A run is terminal when its status is `success`, `error`, or `needs_clarification`. The summary and artifacts come from the run's `result` card (the executor's summary of what it did and what it produced); the error block is derived only on `error` status, from the run-level `error` first (the executor's surfaced failure) and falling back to the result card's nested error. The error `kind` is carried on the descriptor's `error.raw` for the copy-raw button but is never rendered as text — only the human `message` is shown, as sanitized Markdown.
+// The terminal-status descriptor for a run, or undefined when the run is not yet terminal. A run is terminal when its status is `success`, `error`, `needs_clarification`, or `interrupted`. The summary and artifacts come from the run's `result` card (the executor's summary of what it did and what it produced); the error block is derived on `error` and `interrupted` statuses, from the run-level `error` first (the executor's surfaced failure — for `interrupted`, the reconciliation's record of why the run could not resume) and falling back to the result card's nested error. The error `kind` is carried on the descriptor's `error.raw` for the copy-raw button but is never rendered as text — only the human `message` is shown, as sanitized Markdown.
 export function deriveTerminalResult(runView) {
 	if (typeof runView !== 'object' || runView === null) return undefined
 	const status = runView.status
@@ -24,9 +24,9 @@ export function deriveTerminalResult(runView) {
 		? result.artifacts.filter((path) => typeof path === 'string' && path !== '')
 		: []
 
-	// The error block is derived only on error status. Built as a standalone value and assigned in the descriptor literal so the inferred property type is the union (object | null) rather than collapsing to null.
+	// The error block is derived only on error and interrupted statuses. Built as a standalone value and assigned in the descriptor literal so the inferred property type is the union (object | null) rather than collapsing to null.
 	let error = null
-	if (status === 'error') {
+	if (status === 'error' || status === 'interrupted') {
 		const rawError = runError ?? (isObject(result?.error) ? result.error : null)
 		const message = typeof rawError?.message === 'string' && rawError.message !== ''
 			? rawError.message
@@ -52,7 +52,7 @@ export function ResultModal(h, props) {
 	const artifacts = descriptor.artifacts
 	const error = descriptor.error
 
-	const cardClass = status === 'error' ? 'result-modal-card result-modal-card--error' : 'result-modal-card'
+	const cardClass = status === 'error' || status === 'interrupted' ? 'result-modal-card result-modal-card--error' : 'result-modal-card'
 
 	const children = [
 		h('p', { class: 'result-modal-heading' }, runLabel !== null && runLabel !== undefined && runLabel !== ''
@@ -106,6 +106,7 @@ export function ResultModal(h, props) {
 function statusLabel(status) {
 	if (status === 'success') return 'Completed successfully'
 	if (status === 'error') return 'Completed with an error'
+	if (status === 'interrupted') return 'Interrupted'
 	return 'Needs clarification'
 }
 

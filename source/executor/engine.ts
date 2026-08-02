@@ -2,6 +2,7 @@ import { createResultCard, createToolError } from './errors.js'
 import { effortDirective } from './effort.js'
 import type { EffortLevel, ExecutorConfig, LogEvent, Message, ResultCard, RoleDefinition, ToolCall, ToolManifest, ToolResult } from './types.js'
 import { isResultCard } from './validation.js'
+import type { CheckpointRecorder, RunCheckpoint } from './checkpoint.js'
 import { checkGlobalBudgets, checkRoleBudgets, type GlobalBudgetState, type RoleBudgetState } from './budgets.js'
 import { createBuiltInToolHandlers } from './builtin-tools.js'
 import { buildMessages } from './context-builder.js'
@@ -58,6 +59,8 @@ export interface EngineDependencies {
 	interruptQueue: InterruptQueue
 	// The run's learned context ceiling, shared across roles so one role's wall-hit tightens every role's pressure threshold. Created per run by runExecutor.
 	contextPressureTracker: ContextPressureTracker
+	// The run's checkpoint recorder, created per run by runExecutor; every frame registers on start and the leaf writes the role stack at each safe point so a service restart can resume the run.
+	checkpointRecorder: CheckpointRecorder
 }
 
 interface DispatchContext {
@@ -329,7 +332,11 @@ interface DispatchAndRecordArgs {
 
 async function dispatchAndRecord({ deps, roleState, roleName, dispatchCtx, toolCall }: DispatchAndRecordArgs): Promise<ResultCard | null> {
 	const result = await dispatchToolCall(dispatchCtx, toolCall)
+	return recordToolResult(deps, roleState, roleName, dispatchCtx.maxToolOutputChars, toolCall, result)
+}
 
+// Records a settled tool call: logs the call/result pair, appends the (truncated) tool message, and updates the counters. Shared by the live dispatch path and the resume path, which re-records a suspended agent call's result from the checkpoint without re-dispatching it — so both paths apply exactly the same bookkeeping.
+function recordToolResult(deps: EngineDependencies, roleState: RoleState, roleName: string, maxToolOutputChars: number, toolCall: ToolCall, result: ToolResult): ResultCard | null {
 	if (result.kind === 'unknown_tool') {
 		logEvent(deps.appendLog, 'unknown_tool', { role: roleName, tool: toolCall.function.name })
 	} else if (result.kind === 'invalid_tool_call') {
@@ -342,7 +349,7 @@ async function dispatchAndRecord({ deps, roleState, roleName, dispatchCtx, toolC
 
 	roleState.history.push({
 		role: 'tool',
-		content: serializeToolResult(result, dispatchCtx.maxToolOutputChars),
+		content: serializeToolResult(result, maxToolOutputChars),
 		tool_call_id: toolCall.id,
 	})
 
@@ -558,7 +565,23 @@ async function drainInterrupts(
 	return null
 }
 
-export async function runRole(deps: EngineDependencies, context: EngineContext): Promise<ResultCard> {
+// The turn a resumed role was suspended in: the full tool-call list, the index of the agent call it was waiting on, and a resolver for the child card. The resolver either returns the checkpoint's recorded card or re-enters the child frame's own resume — invoked from inside the parent's suspended turn so parents register root-first exactly as in live execution.
+export interface SuspendedTurn {
+	toolCalls: ToolCall[]
+	agentIndex: number
+	resolveChildCard: () => Promise<ResultCard>
+}
+
+// The checkpoint-preserved identity and state of a role being resumed. The role keeps its pre-restart instance id (and does not re-emit role_start), so the log's role_start/role_finished pairing and every id reference inside persisted histories survive the restart.
+export interface ResumedRole {
+	roleId: string
+	roleState: RoleState
+	planAbort?: boolean
+	planInjection?: string
+	suspendedTurn?: SuspendedTurn
+}
+
+export async function runRole(deps: EngineDependencies, context: EngineContext, resumed?: ResumedRole): Promise<ResultCard> {
 	const guild = context.loadedGuild
 	const roleDefinition = guild.config.roles[context.roleName]
 
@@ -571,7 +594,7 @@ export async function runRole(deps: EngineDependencies, context: EngineContext):
 
 	const systemPrompt = guild.prompts[context.roleName] ?? ''
 
-	const roleState: RoleState = {
+	const roleState: RoleState = resumed?.roleState ?? {
 		history: buildInitialHistory(systemPrompt, context),
 		lastPromptTokens: 0,
 		recentCompactionPromptTokens: [],
@@ -583,17 +606,26 @@ export async function runRole(deps: EngineDependencies, context: EngineContext):
 		loopCheckTokenWatermark: 0,
 	}
 
-	const registryEntry = deps.roleRegistry.register(context.roleName, context.depth, context.parentRoleId, roleState)
-
-	// role_start is emitted after the role definition is confirmed to exist and the instance is registered, so an unknown entry role still fires role_not_found without leaving an orphan role_start, and the event can carry the instance id the interrupt platform targets. The depth and optional parent let render.ts reconstruct the parent→child tree.
-	const roleStartPayload: Record<string, unknown> = {
-		role: context.roleName,
-		roleId: registryEntry.roleId,
-		depth: context.depth,
-		task: context.task,
+	const registryEntry = deps.roleRegistry.register(context.roleName, context.depth, context.parentRoleId, roleState, resumed?.roleId)
+	if (resumed?.planAbort === true) registryEntry.planAbort = true
+	if (resumed?.planInjection !== undefined) registryEntry.planInjection = resumed.planInjection
+	deps.checkpointRecorder.registerFrame(context, registryEntry)
+	// A role resumed mid-suspension restores its pending marker so checkpoints taken while the resumed child runs capture the suspension exactly as the live dispatch path does.
+	if (resumed?.suspendedTurn !== undefined) {
+		deps.checkpointRecorder.setPending(registryEntry.roleId, { toolCalls: resumed.suspendedTurn.toolCalls, agentIndex: resumed.suspendedTurn.agentIndex })
 	}
-	if (context.parent !== undefined) roleStartPayload['parent'] = context.parent
-	logEvent(deps.appendLog, 'role_start', roleStartPayload)
+
+	// role_start is emitted after the role definition is confirmed to exist and the instance is registered, so an unknown entry role still fires role_not_found without leaving an orphan role_start, and the event can carry the instance id the interrupt platform targets. The depth and optional parent let render.ts reconstruct the parent→child tree. A resumed role skips the event: its role_start is already in the log from before the restart.
+	if (resumed === undefined) {
+		const roleStartPayload: Record<string, unknown> = {
+			role: context.roleName,
+			roleId: registryEntry.roleId,
+			depth: context.depth,
+			task: context.task,
+		}
+		if (context.parent !== undefined) roleStartPayload['parent'] = context.parent
+		logEvent(deps.appendLog, 'role_start', roleStartPayload)
+	}
 
 	const allowedToolsManifests: ToolManifest[] = []
 	for (const toolName of roleDefinition.tools) {
@@ -622,7 +654,7 @@ export async function runRole(deps: EngineDependencies, context: EngineContext):
 			}
 			// agent_call logs the parent→child edge with depth before the child runs, so the parent→child linkage is recoverable even from a caller that does not read role_start.
 			logEvent(deps.appendLog, 'agent_call', { parent: context.roleName, child: childRoleName, depth: context.depth + 1 })
-			return await runRole(deps, {
+			const childCard = await runRole(deps, {
 				...context,
 				depth: context.depth + 1,
 				roleName: childRoleName,
@@ -630,6 +662,10 @@ export async function runRole(deps: EngineDependencies, context: EngineContext):
 				parent: context.roleName,
 				parentRoleId: registryEntry.roleId,
 			})
+			// The child is done: record its card on this frame's pending suspension and checkpoint, so a restart here resumes by delivering the recorded card instead of re-running the child. The card is delivered to the conversation by recordToolResult after this handler returns.
+			deps.checkpointRecorder.setPendingChildCard(registryEntry.roleId, childCard)
+			deps.checkpointRecorder.write()
+			return childCard
 		},
 		roleState,
 		humanBackend: deps.humanBackend,
@@ -647,10 +683,83 @@ export async function runRole(deps: EngineDependencies, context: EngineContext):
 		maxToolOutputChars: guild.config.contextPolicy.maxToolOutputChars,
 	}
 
-	const finalCard = await executeRoleLoop(deps, context, roleDefinition, roleState, registryEntry, allowedToolsManifests, dispatchCtx, guild.config.executor)
+	const finalCard = await executeRoleLoop(deps, context, roleDefinition, roleState, registryEntry, allowedToolsManifests, dispatchCtx, guild.config.executor, resumed?.suspendedTurn)
 	deps.roleRegistry.unregister(registryEntry.roleId)
+	deps.checkpointRecorder.unregisterFrame(registryEntry.roleId)
 	logEvent(deps.appendLog, 'role_finished', roleFinishedPayload(context.roleName, context.depth, finalCard, context.parent, registryEntry.roleId))
 	return finalCard
+}
+
+// The resume driver: re-enters the checkpoint's role stack, letting the depth-first traversal continue. A frame with a pending suspension resolves its child card lazily from inside the suspended turn — either the recorded card, or the next frame's own resume — so the stack re-forms in the same root-first order the live recursion produces. The leaf frame re-enters at its loop top with its persisted state.
+export async function resumeRoleStack(deps: EngineDependencies, loadedGuild: LoadedGuild, checkpoint: RunCheckpoint): Promise<ResultCard> {
+	const resumeAt = async (index: number): Promise<ResultCard> => {
+		const frame = checkpoint.frames[index]
+		if (frame === undefined) throw new Error(`resumeRoleStack: frame ${index} missing from a checkpoint with ${checkpoint.frames.length} frames`)
+		let suspendedTurn: SuspendedTurn | undefined
+		if (frame.pending !== undefined) {
+			const recorded = frame.pending.childCard
+			suspendedTurn = {
+				toolCalls: frame.pending.toolCalls,
+				agentIndex: frame.pending.agentIndex,
+				resolveChildCard: recorded !== undefined ? () => Promise.resolve(recorded) : () => resumeAt(index + 1),
+			}
+		}
+		const context: EngineContext = {
+			loadedGuild,
+			depth: frame.depth,
+			roleName: frame.roleName,
+			task: frame.task,
+			...(frame.parent !== undefined ? { parent: frame.parent } : {}),
+			...(frame.parentRoleId !== undefined ? { parentRoleId: frame.parentRoleId } : {}),
+			...(frame.effort !== undefined ? { effort: frame.effort } : {}),
+		}
+		return await runRole(deps, context, {
+			roleId: frame.roleId,
+			roleState: frame.roleState,
+			...(frame.planAbort === true ? { planAbort: true } : {}),
+			...(frame.planInjection !== undefined ? { planInjection: frame.planInjection } : {}),
+			...(suspendedTurn !== undefined ? { suspendedTurn } : {}),
+		})
+	}
+	return resumeAt(0)
+}
+
+// Dispatches a turn's tool calls in order, tracking agent suspensions on the checkpoint recorder so a checkpoint taken while a child runs captures where this role resumes. Shared by the live turn path (starting at 0) and the resumed-suspension path (starting after the agent call, whose result the resume already recorded).
+async function dispatchToolCallSequence(
+	deps: EngineDependencies,
+	context: EngineContext,
+	roleState: RoleState,
+	registryEntry: RoleRegistryEntry,
+	dispatchCtx: DispatchContext,
+	toolCalls: ToolCall[],
+	startIndex: number,
+): Promise<ResultCard | null> {
+	for (let index = startIndex; index < toolCalls.length; index++) {
+		const toolCall = toolCalls[index]
+		if (toolCall === undefined) continue
+		// An agent dispatch suspends this role mid-turn until the child returns; record the suspension so a checkpoint taken while the child runs captures where this role resumes. Cleared once the dispatch settles.
+		if (toolCall.function.name === 'agent') {
+			deps.checkpointRecorder.setPending(registryEntry.roleId, { toolCalls, agentIndex: index })
+		}
+		const finalCard = await dispatchAndRecord({ deps, roleState, roleName: context.roleName, dispatchCtx, toolCall })
+		if (toolCall.function.name === 'agent') {
+			deps.checkpointRecorder.setPending(registryEntry.roleId, undefined)
+		}
+		if (finalCard !== null) return finalCard
+	}
+	return null
+}
+
+// Completes a resumed role's suspended turn: the child card is resolved (re-running the child frame's resume when the checkpoint has no recorded card), checkpointed onto the pending suspension exactly as the live role_finished path does, and recorded as the agent call's tool result — the agent_call event and the child's events are already in the log from the live dispatch. The turn's remaining tool calls then dispatch normally.
+async function completeSuspendedTurn(deps: EngineDependencies, context: EngineContext, roleState: RoleState, registryEntry: RoleRegistryEntry, dispatchCtx: DispatchContext, suspendedTurn: SuspendedTurn): Promise<ResultCard | null> {
+	const agentCall = suspendedTurn.toolCalls[suspendedTurn.agentIndex]
+	if (agentCall === undefined) throw new Error(`completeSuspendedTurn: agentIndex ${suspendedTurn.agentIndex} out of range in a validated checkpoint`)
+	const childCard = await suspendedTurn.resolveChildCard()
+	deps.checkpointRecorder.setPendingChildCard(registryEntry.roleId, childCard)
+	deps.checkpointRecorder.write()
+	recordToolResult(deps, roleState, context.roleName, dispatchCtx.maxToolOutputChars, agentCall, { kind: 'success', data: childCard })
+	deps.checkpointRecorder.setPending(registryEntry.roleId, undefined)
+	return dispatchToolCallSequence(deps, context, roleState, registryEntry, dispatchCtx, suspendedTurn.toolCalls, suspendedTurn.agentIndex + 1)
 }
 
 // The role's turn loop, extracted from runRole so every exit emits exactly one role_finished at the runRole call site, guaranteeing the role_start/role_finished pairing regardless of which budget or finish path terminates the role.
@@ -663,7 +772,12 @@ async function executeRoleLoop(
 	allowedToolsManifests: ToolManifest[],
 	dispatchCtx: DispatchContext,
 	config: ExecutorConfig,
+	suspendedTurn?: SuspendedTurn,
 ): Promise<ResultCard> {
+	if (suspendedTurn !== undefined) {
+		const completedCard = await completeSuspendedTurn(deps, context, roleState, registryEntry, dispatchCtx, suspendedTurn)
+		if (completedCard !== null) return completedCard
+	}
 	while (true) {
 		const interruptCard = await drainInterrupts(deps, context, roleState, registryEntry, config)
 		if (interruptCard !== null) return interruptCard
@@ -695,6 +809,9 @@ async function executeRoleLoop(
 				roleState.history.push({ role: 'user', content: contextPressureNotice(roleState.lastPromptTokens, currentEffectiveBudget(context, deps)) })
 			}
 		}
+
+		// The safe point: no LLM call is in flight and every queued platform mutation (drain, compaction, pressure notice) has been applied, so the checkpoint written here is the state a restart resumes from. Only the active leaf reaches this — suspended ancestors are captured through their registered frames.
+		deps.checkpointRecorder.write()
 
 		const globalState: GlobalBudgetState = {
 			depth: context.depth,
@@ -734,9 +851,7 @@ async function executeRoleLoop(
 		if (handling.kind === 'continue') continue
 		if (handling.kind === 'finished') return handling.card
 
-		for (const toolCall of handling.toolCalls) {
-			const finalCard = await dispatchAndRecord({ deps, roleState, roleName: context.roleName, dispatchCtx, toolCall })
-			if (finalCard !== null) return finalCard
-		}
+		const finalCard = await dispatchToolCallSequence(deps, context, roleState, registryEntry, dispatchCtx, handling.toolCalls, 0)
+		if (finalCard !== null) return finalCard
 	}
 }

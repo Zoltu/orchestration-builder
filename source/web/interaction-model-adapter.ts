@@ -11,7 +11,7 @@ type ParticipantKind = 'human' | 'interrupt' | 'role' | 'tool'
 type OperationKind = 'call' | 'return' | 'observe' | 'terminate' | 'inquiry'
 type OperationLifecycle = 'in_flight' | 'settled'
 type OperationOutcome = 'success' | 'error' | 'terminated'
-type RunStatus = 'running' | 'success' | 'error' | 'needs_clarification' | 'unknown'
+type RunStatus = 'running' | 'success' | 'error' | 'needs_clarification' | 'interrupted' | 'unknown'
 
 interface Participant {
 	id: string
@@ -93,7 +93,7 @@ function usageOf(payload: unknown): { totalTokens: number; cachedPromptTokens: n
 
 function runStatusOf(meta: RunMeta | null): RunStatus {
 	if (meta === null) return 'unknown'
-	if (meta.status === 'running' || meta.status === 'success' || meta.status === 'error' || meta.status === 'needs_clarification') {
+	if (meta.status === 'running' || meta.status === 'success' || meta.status === 'error' || meta.status === 'needs_clarification' || meta.status === 'interrupted') {
 		return meta.status
 	}
 	return 'unknown'

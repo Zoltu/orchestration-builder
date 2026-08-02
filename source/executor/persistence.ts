@@ -1,5 +1,6 @@
 import * as fs from 'node:fs'
 import * as path from 'node:path'
+import type { RunCheckpoint } from './checkpoint.js'
 import { isProjectSettings } from './validation.js'
 import type { EffortLevel, LogEvent, RunMeta } from './types.js'
 
@@ -43,6 +44,38 @@ export function createWriteMeta(runId: string, baseDir: string = 'data/runs'): W
 	return (meta: RunMeta) => {
 		const metaPath = path.resolve(runDir, 'meta.json')
 		fs.writeFileSync(metaPath, JSON.stringify(meta, null, 2))
+	}
+}
+
+export type WriteCheckpoint = (checkpoint: RunCheckpoint) => void
+export type DeleteCheckpoint = () => void
+export type ReadRunCheckpointById = (runId: string) => string | null
+
+const CHECKPOINT_FILE_NAME = 'state.json'
+
+// The checkpoint is rewritten on every safe point, so it must never be torn: write-temp + rename guarantees the on-disk file is always a complete JSON document (the same pattern settings.json uses). A crash mid-write leaves the previous checkpoint, never a half-written one.
+export function createWriteCheckpoint(runId: string, baseDir: string = 'data/runs'): WriteCheckpoint {
+	const runDir = path.resolve(baseDir, runId)
+	return (checkpoint: RunCheckpoint) => {
+		const checkpointPath = path.resolve(runDir, CHECKPOINT_FILE_NAME)
+		const tempPath = `${checkpointPath}.${process.pid}.tmp`
+		fs.writeFileSync(tempPath, JSON.stringify(checkpoint))
+		fs.renameSync(tempPath, checkpointPath)
+	}
+}
+
+export function createDeleteCheckpoint(runId: string, baseDir: string = 'data/runs'): DeleteCheckpoint {
+	const runDir = path.resolve(baseDir, runId)
+	return () => {
+		const checkpointPath = path.resolve(runDir, CHECKPOINT_FILE_NAME)
+		if (fs.existsSync(checkpointPath)) fs.unlinkSync(checkpointPath)
+	}
+}
+
+export function createReadRunCheckpointById(baseDir: string = 'data/runs'): ReadRunCheckpointById {
+	return (runId: string) => {
+		const checkpointPath = path.resolve(baseDir, runId, CHECKPOINT_FILE_NAME)
+		return fs.existsSync(checkpointPath) ? fs.readFileSync(checkpointPath, 'utf8') : null
 	}
 }
 

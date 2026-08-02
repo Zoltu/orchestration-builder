@@ -1,11 +1,13 @@
-import type { RunMeta, RunOptions } from './types.js'
+import { DEFAULT_EFFORT } from './effort.js'
+import type { ResultCard, RunMeta, RunOptions } from './types.js'
+import { createCheckpointRecorder, type RunCheckpoint } from './checkpoint.js'
 import { createContextPressureTracker } from './context-pressure.js'
-import { runRole } from './engine.js'
+import { resumeRoleStack, runRole, type EngineDependencies } from './engine.js'
 import type { HumanBackend } from './human-backend.js'
 import type { InterruptQueue } from './interrupts.js'
 import type { LlmCaller } from './llm.js'
 import type { LoadGuild } from './loader.js'
-import type { AppendLog, RunDirectory, WriteMeta } from './persistence.js'
+import type { AppendLog, DeleteCheckpoint, RunDirectory, WriteCheckpoint, WriteMeta } from './persistence.js'
 import { createRoleRegistry } from './role-registry.js'
 import type { ToolHandler } from './tool-dispatch.js'
 
@@ -17,8 +19,39 @@ export interface ExecutorDependencies {
 	loadGuild: LoadGuild
 	createRunDirectory: RunDirectory
 	writeMeta: WriteMeta
+	writeCheckpoint: WriteCheckpoint
+	deleteCheckpoint: DeleteCheckpoint
 	// The run's interrupt queue, created by the caller so the service API can submit operator interrupts while the run is in flight; the engine drains it at turn boundaries. The role registry is run-internal and created here.
 	interruptQueue: InterruptQueue
+}
+
+function buildEngineDependencies(deps: ExecutorDependencies, runId: string, startTime: string, registryCounter: number, learnedContextCeiling: number | undefined): EngineDependencies {
+	const roleRegistry = createRoleRegistry(registryCounter)
+	const contextPressureTracker = createContextPressureTracker(learnedContextCeiling)
+	return {
+		llmCaller: deps.llmCaller,
+		appendLog: deps.appendLog,
+		additionalToolHandlers: deps.additionalToolHandlers,
+		humanBackend: deps.humanBackend,
+		roleRegistry,
+		interruptQueue: deps.interruptQueue,
+		contextPressureTracker,
+		checkpointRecorder: createCheckpointRecorder({ writeCheckpoint: deps.writeCheckpoint, runId, startTime, roleRegistry, contextPressureTracker }),
+	}
+}
+
+function terminalMeta(options: RunOptions, startTime: string, result: ResultCard): RunMeta {
+	return {
+		runId: options.runId,
+		guildPath: options.guildPath,
+		benchmarkPath: options.benchmarkPath,
+		task: options.task,
+		effort: options.effort,
+		status: result.status,
+		startTime,
+		endTime: new Date().toISOString(),
+		result,
+	}
 }
 
 export async function runExecutor(deps: ExecutorDependencies, options: RunOptions): Promise<RunMeta> {
@@ -40,15 +73,7 @@ export async function runExecutor(deps: ExecutorDependencies, options: RunOption
 		startTime,
 	})
 	const result = await runRole(
-		{
-			llmCaller: deps.llmCaller,
-			appendLog: deps.appendLog,
-			additionalToolHandlers: deps.additionalToolHandlers,
-			humanBackend: deps.humanBackend,
-			roleRegistry: createRoleRegistry(),
-			interruptQueue: deps.interruptQueue,
-			contextPressureTracker: createContextPressureTracker(),
-		},
+		buildEngineDependencies(deps, options.runId, startTime, 0, undefined),
 		{
 			loadedGuild,
 			depth: 0,
@@ -58,20 +83,61 @@ export async function runExecutor(deps: ExecutorDependencies, options: RunOption
 		},
 	)
 
-	const endTime = new Date().toISOString()
-	const meta: RunMeta = {
-		runId: options.runId,
-		guildPath: options.guildPath,
-		benchmarkPath: options.benchmarkPath,
-		task: options.task,
-		effort: options.effort,
-		status: result.status,
-		startTime,
-		endTime,
-		result,
-	}
+	const meta = terminalMeta(options, startTime, result)
 
 	deps.writeMeta(meta)
+	// The terminal meta is the authoritative record; the checkpoint is removed so a restart never considers resuming a finished run.
+	deps.deleteCheckpoint()
+
+	return meta
+}
+
+export interface ResumeRunOptions {
+	guildPath: string
+	benchmarkPath: string
+}
+
+// Resumes a run from its checkpoint after a service restart. The run's identity (run id, task, effort, start time) comes from the checkpoint — the meta keeps the original startTime so elapsed-time accounting survives the restart. The stack is reconstructed by resumeRoleStack and the run continues from the suspended leaf.
+export async function resumeExecutor(deps: ExecutorDependencies, checkpoint: RunCheckpoint, options: ResumeRunOptions): Promise<RunMeta> {
+	const entryFrame = checkpoint.frames[0]
+	if (entryFrame === undefined) throw new Error(`resumeExecutor: checkpoint for run ${checkpoint.runId} has no frames`)
+	const task = entryFrame.task
+	const effort = entryFrame.effort ?? DEFAULT_EFFORT
+	const runOptions: RunOptions = {
+		runId: checkpoint.runId,
+		guildPath: options.guildPath,
+		benchmarkPath: options.benchmarkPath,
+		task,
+		effort,
+	}
+
+	deps.createRunDirectory()
+
+	const loadedGuild = deps.loadGuild(options.guildPath)
+
+	const startTime = checkpoint.startTime
+	// run_resumed marks the restart boundary in the log: events before it belong to the pre-restart process, events after it to the resumed run. Resumed roles do not re-emit role_start, so a reviewer can tell why.
+	deps.appendLog({ timestamp: new Date().toISOString(), type: 'run_resumed', payload: { runId: checkpoint.runId, resumedFrames: checkpoint.frames.length } })
+	// Re-assert the running meta: the pre-restart write may never have landed, and the terminal meta overwrites it below either way.
+	deps.writeMeta({
+		runId: checkpoint.runId,
+		guildPath: options.guildPath,
+		benchmarkPath: options.benchmarkPath,
+		task,
+		effort,
+		status: 'running',
+		startTime,
+	})
+	const result = await resumeRoleStack(
+		buildEngineDependencies(deps, checkpoint.runId, startTime, checkpoint.registryCounter, checkpoint.learnedContextCeiling),
+		loadedGuild,
+		checkpoint,
+	)
+
+	const meta = terminalMeta(runOptions, startTime, result)
+
+	deps.writeMeta(meta)
+	deps.deleteCheckpoint()
 
 	return meta
 }

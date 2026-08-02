@@ -19,6 +19,7 @@ const STATUS_LABELS = {
 	success: 'success',
 	error: 'error',
 	needs_clarification: 'needs clarification',
+	interrupted: 'interrupted',
 }
 const SERVER_UNAVAILABLE_MESSAGE = 'server unavailable — it may have shut down'
 

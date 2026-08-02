@@ -76,6 +76,7 @@ Every failure is translated into a structured result the current or parent role 
 | Compaction stuck | Terminate role | `{kind: "compaction_failed"}` |
 | Loop-check handler aborts a role | Finish role with error | `{kind: "loop_detected"}` |
 | Operator plan modification | Abort chain below the plan owner | `{kind: "interrupted"}` |
+| Service restart mid-run | Resume from checkpoint on startup; if unresumable, mark the run terminal | `status: "interrupted"` meta with `{kind: "interrupted"}` (see "Run persistence and resumption") |
 
 Recovery is implemented in the Guild, not the executor. A parent that receives an error may retry, call a different role, call a recovery role, or escalate with `finish`.
 
@@ -101,7 +102,21 @@ The interrupt platform lets the Guild define agents that interrupt running work 
 
 **Operator interrupts.** `POST /api/runs/:id/interrupt` queues a request. `kind: "inquiry"` injects a marked user message (`[Operator inquiry …]`) into the **chain root's** (the entry role's) history at the next safe point, so the answer comes from the role that owns the run-wide picture — the active leaf keeps working undisturbed, and the entry role answers when control next returns to it, delegating to a fresh sub-agent first if the answer needs detail from in-flight work. The run view pairs each inquiry with that answer (the entry role's first content-bearing response after the injection) and both views draw the question and answer as `inquiry` operations. `kind: "plan_modification"` marks every live chain member below the plan owner (the rootmost chain instance of `executor.interruptTriggers.planOwnerRole`, else the chain root) to abort with an `interrupted` error card, and the owner to receive the modification as a marked user message (`[Operator plan modification …]`). The abort then unwinds one safe point at a time through the existing `agent`-call result-card propagation — no separate control-flow mechanism — and the plan owner resumes and re-plans.
 
-**Graceful shutdown.** On `SIGINT`/`SIGTERM` with an active run, the service submits a wind-down inquiry through the same queue and waits under a bounded timeout (`30s`) before exiting, so a run can finish at a safe point instead of being abandoned mid-turn.
+**Graceful shutdown.** On `SIGINT`/`SIGTERM` with an active run, the service submits a wind-down inquiry through the same queue and waits under a bounded timeout (`30s`) before exiting, so a run can finish at a safe point instead of being abandoned mid-turn. A run still active when the timeout elapses is not lost: the next startup resumes it from its last checkpoint (see "Run persistence and resumption").
+
+### Run persistence and resumption
+
+The executor keeps every role's conversation and budget state in memory, so a service restart (crash, host reboot, `docker stop`, operator Ctrl-C) would otherwise lose the active run. To survive it, the executor checkpoints the runnable role stack to `<run>/state.json`, and the service reconciles runs on startup.
+
+**Checkpoint contents.** `state.json` holds the full depth-first stack, root first: for each live role, its context (role, depth, task, parent, effort on the entry role), its instance id, its complete `RoleState` (history, tool-call count, token accumulators, loop-check watermarks, context-pressure/compaction state), and — for each suspended ancestor — the pending turn it is paused in (the turn's tool calls and the index of the `agent` call it awaits, plus the child's result card once the child has finished). It also carries the run id, the original start time, the registry id counter, and the learned context ceiling, so the resumed run mints non-colliding instance ids, keeps the tightened pressure threshold, and preserves budget accumulators and elapsed-time accounting — a resumed run cannot exceed its budget by forgetting prior usage.
+
+**When it is written.** At every leaf safe point (the same drain point the interrupt platform uses, once per turn) and on every `role_finished`. Writes are atomic (temp file + rename), so the on-disk checkpoint is never torn — a crash mid-write leaves the previous, complete checkpoint. Writes are suppressed while a handler invocation (loop-check or context handler) is on the stack: a handler interlude is atomic with respect to the checkpoint, so a restart either sees its fully-applied effects or re-runs the drain. The checkpoint is deleted when the run reaches a terminal meta.
+
+**Resume.** On startup, the service scans the runs directory. A run with no terminal meta (none, or one still `running`) and a valid checkpoint resumes under its original run id: the stack is reconstructed — suspended parents re-register with their preserved ids and pending turns, the leaf re-enters at its loop top — and the depth-first traversal continues. A child that was mid-flight is re-entered; a child that had already finished is not re-run — its recorded card is delivered to the parent as the suspended `agent` call's tool result. Resumed roles do not re-emit `role_start` (their start events are already in the log); a `run_resumed` event marks the restart boundary. Only one run resumes (one task at a time): the most recent resumable run.
+
+**Reconciliation.** A run that cannot be resumed — missing or corrupt checkpoint, or superseded by a newer resumable run — is marked `interrupted`: a terminal `meta.json` with `status: "interrupted"`, an `error: { kind: "interrupted", message }` recording why, and its original fields preserved. `interrupted` is a terminal status everywhere (run list, run view, flow model), rendered error-toned, so the UI never shows an abandoned run as perpetually "in progress". Because the write is atomic, even a hard kill (`docker kill`, `kill -9`) mid-checkpoint-write still resumes — the on-disk file is always a complete checkpoint — so in practice `interrupted` is expected only when no valid checkpoint ever existed (a crash before the run's first safe point, a run predating checkpoints, or genuine disk corruption). A kill mid-write may leave a `state.json.<pid>.tmp` artifact in the run directory; it is ignored and overwritten by later checkpoint writes.
+
+**Caveats.** Checkpoint granularity is the turn: mid-turn work (an in-flight LLM call, a tool executing, a pending `ask_human` answer) is replayed from the last checkpoint — tool side effects already applied to the workspace are not rolled back, and a few log events may duplicate straddling a restart boundary (`log.jsonl` is append-only and is never rewritten). Pending operator interrupts and pending human questions are in-memory and lost on restart; the operator can resubmit. Resuming against a changed Guild is not a supported migration — a role that no longer exists finishes with an error card that unwinds the run.
 
 ### Log events
 
@@ -125,6 +140,7 @@ The interrupt platform lets the Guild define agents that interrupt running work 
 - `terminate` — `{ role, details? }`. A rewind reference in the interaction model: `role` names the open call being reverted on a paused stack; the terminate closes that call immediately (no separate return) so the node is removed right away. *(Adapter-supported; no current executor tool emits this.)*
 - `context_compacted` — `{ role, droppedMessages, truncatedToolMessages, strippedReasoningMessages, estimatedPromptTokens, contextWindow }`. The executor compacted the role's conversation after a context-window rejection (see "Context budget exceeded" above).
 - `context_pressure` — `{ role, promptTokens, effectiveBudget }`. The role's reported prompt size crossed the pressure threshold; the one-shot handoff notice is appended at the next turn boundary (see "Context pressure and handoff" above).
+- `run_resumed` — `{ runId, resumedFrames }`. Emitted once when a run resumes from its checkpoint after a service restart, ahead of any resumed-role events; it marks the boundary between the pre-restart and post-restart portions of the log (see "Run persistence and resumption"). Resumed roles do not re-emit `role_start`, and a few events immediately straddling the boundary may duplicate.
 - `role_budget_exceeded`, `global_budget_exceeded`, `llm_unavailable`, `context_budget_exceeded`, `implicit_finish`, `unknown_tool`, `invalid_tool_call` — failure and lifecycle events carrying the role and the relevant detail.
 
 ## Built-in tools
@@ -335,7 +351,7 @@ Submits an answer. **Body:** `{ "id": "...", "answer": "..." }`.
 
 ### Lifecycle
 
-The server outlives every run. `SIGINT`/`SIGTERM` trigger graceful shutdown: with an active run, the service submits a wind-down inquiry through the interrupt channel and waits under a bounded timeout (30s) for the run to finish at a safe point; a run still active after the timeout is abandoned (its log is durable; it reads as "in progress" on restart). The server then stops and the process exits (`130` if a run was still active, `0` if idle).
+The server outlives every run. On startup, the service reconciles the runs directory: a run left mid-flight by the previous process resumes from its checkpoint under its original run id (at most one), and every run that cannot be resumed is marked `interrupted` (see "Run persistence and resumption"). `SIGINT`/`SIGTERM` trigger graceful shutdown: with an active run, the service submits a wind-down inquiry through the interrupt channel and waits under a bounded timeout (30s) for the run to finish at a safe point; a run still active after the timeout resumes on the next startup from its last checkpoint. The server then stops and the process exits (`130` if a run was still active, `0` if idle).
 
 ## Benchmarks
 
@@ -398,12 +414,13 @@ Run bookkeeping lives alongside the project under `.orchestration/runs/`:
 ```
 <workspace>/.orchestration/
 ├── runs/<run_id>/
-│   ├── meta.json      # run id, guild path, start/end time, status, effort, final result
-│   └── log.jsonl      # one JSON object per line: effort_set, llm calls, tool calls, errors
+│   ├── meta.json      # run id, guild path, start/end time, status (incl. interrupted), effort, final result
+│   ├── state.json     # checkpoint: the runnable role stack, written atomically at every safe point; deleted on terminal meta
+│   └── log.jsonl      # one JSON object per line: effort_set, run_resumed, llm calls, tool calls, errors
 └── settings.json      # project-wide settings (currently the default effort)
 ```
 
-The workspace itself holds the final filesystem state (mutated in place). `log.jsonl` is append-only — the executor logs every role start/finish, the parent→child agent-call edges, every LLM turn (sent messages, received response, finish reason, per-call usage), and every tool call/result (raw arguments and the full un-truncated result) so a reviewer can reconstruct exactly what happened from the log alone.
+The workspace itself holds the final filesystem state (mutated in place). `log.jsonl` is append-only — the executor logs every role start/finish, the parent→child agent-call edges, every LLM turn (sent messages, received response, finish reason, per-call usage), and every tool call/result (raw arguments and the full un-truncated result) so a reviewer can reconstruct exactly what happened from the log alone. `state.json` is the run's resumable state (see "Run persistence and resumption"): present only while a run is live, rewritten at every safe point and on every `role_finished`, and validated on startup before any of it is trusted.
 
 ## Effort channel
 

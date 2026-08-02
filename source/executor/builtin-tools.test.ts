@@ -8,7 +8,7 @@ import type { LlmCallResult, LlmCaller } from './llm.ts'
 import type { LoadedGuild } from './loader.ts'
 import type { AppendLog } from './persistence.ts'
 import { createRoleRegistry } from './role-registry.ts'
-import { recordingHumanBackend } from './test-fixtures.ts'
+import { createFakeCheckpointRecorder, recordingHumanBackend } from './test-fixtures.ts'
 
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -175,14 +175,18 @@ function makeCall(name: string, args: Record<string, unknown>): ToolCall {
 
 function makeDeps(llm: FakeLlm, humanBackend: HumanBackend): { deps: EngineDependencies; events: LogEvent[] } {
 	const { appendLog, events } = makeFakeAppendLog()
+	const roleRegistry = createRoleRegistry()
+	const contextPressureTracker = createContextPressureTracker()
+	const sink = createFakeCheckpointRecorder(roleRegistry, contextPressureTracker)
 	const deps: EngineDependencies = {
 		llmCaller: llm,
 		appendLog,
 		additionalToolHandlers: {},
 		humanBackend,
-		roleRegistry: createRoleRegistry(),
+		roleRegistry,
 		interruptQueue: createInterruptQueue(),
-		contextPressureTracker: createContextPressureTracker(),
+		contextPressureTracker,
+		checkpointRecorder: sink.recorder,
 	}
 	return { deps, events }
 }

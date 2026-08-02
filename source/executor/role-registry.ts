@@ -21,20 +21,33 @@ export interface RoleRegistryEntry {
 }
 
 export interface RoleRegistry {
-	register(roleName: string, depth: number, parentRoleId: string | undefined, roleState: RoleState): RoleRegistryEntry
+	// restoredId is the resume path: the entry re-registers under its checkpoint-preserved id so histories, log events, and handler tasks that reference it stay valid across a restart. A collision with a live id is a bug (or a corrupt seed) and fails fast.
+	register(roleName: string, depth: number, parentRoleId: string | undefined, roleState: RoleState, restoredId?: string): RoleRegistryEntry
 	lookup(roleId: string): RoleRegistryEntry | undefined
 	unregister(roleId: string): void
+	// The id counter, persisted in the run checkpoint so a resumed run seeds the registry past every id minted before the restart and fresh ids can never collide with preserved ones.
+	counter(): number
 }
 
-// The per-run registry of live role instances. Instance ids distinguish multiple instances of the same role (two coders in one run) so a handler can target one exactly; parentRoleId links let the engine walk the active delegation chain (plan-modification routing). Not persisted — run-scoped in-memory state.
-export function createRoleRegistry(): RoleRegistry {
+// The per-run registry of live role instances. Instance ids distinguish multiple instances of the same role (two coders in one run) so a handler can target one exactly; parentRoleId links let the engine walk the active delegation chain (plan-modification routing). Run-scoped in-memory state; a resumed run rebuilds it from the checkpoint (restored ids, seeded counter).
+export function createRoleRegistry(initialCounter: number = 0): RoleRegistry {
 	const entries = new Map<string, RoleRegistryEntry>()
-	let counter = 0
+	let counter = initialCounter
 	return {
-		register(roleName, depth, parentRoleId, roleState) {
-			counter += 1
+		register(roleName, depth, parentRoleId, roleState, restoredId) {
+			if (restoredId !== undefined && entries.has(restoredId)) {
+				throw new Error(`role registry: restored id "${restoredId}" collides with a live entry`)
+			}
+			// Restored registrations do not advance the counter: it was seeded past every id minted before the restart, so only freshly minted ids consume new values.
+			let roleId: string
+			if (restoredId !== undefined) {
+				roleId = restoredId
+			} else {
+				counter += 1
+				roleId = `${roleName}-${depth}-${counter}`
+			}
 			const entry: RoleRegistryEntry = {
-				roleId: `${roleName}-${depth}-${counter}`,
+				roleId,
 				roleName,
 				depth,
 				...(parentRoleId !== undefined ? { parentRoleId } : {}),
@@ -48,6 +61,9 @@ export function createRoleRegistry(): RoleRegistry {
 		},
 		unregister(roleId) {
 			entries.delete(roleId)
+		},
+		counter() {
+			return counter
 		},
 	}
 }
