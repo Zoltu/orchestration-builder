@@ -17,6 +17,7 @@ export const ERROR_KINDS: readonly ErrorKind[] = [
 	'timeout',
 	'llm_unavailable',
 	'context_budget_exceeded',
+	'context_handoff',
 	'tool_budget_exceeded',
 	'loop_detected',
 	'interrupted',

@@ -106,6 +106,8 @@ export function formatLogEvent(event: LogEvent): string {
 			return withRole(role, 'context budget exceeded')
 		case 'context_compacted':
 			return withRole(role, 'context compacted by platform')
+		case 'context_pressure':
+			return withRole(role, 'context pressure — handoff notice sent')
 		case 'role_budget_exceeded':
 			return withRole(role, 'role budget exceeded')
 		case 'global_budget_exceeded':

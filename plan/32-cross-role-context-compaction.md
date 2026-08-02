@@ -57,11 +57,11 @@ Two design points were recommended in the review and are recorded here as the wo
 
 ## Acceptance criteria
 
-- [ ] `bun run typecheck` and `bun test source/` pass, including the new engine, validation, and render tests; `bun run validate-data` passes for the guild changes.
-- [ ] A role crossing the pressure threshold receives exactly one notice, in valid wire order, and a scripted `context_handoff` finish reaches its parent intact.
-- [ ] A wall-hit with endpoint-reported tokens measurably tightens `effectiveBudget` for subsequent pressure checks in the same run.
-- [ ] No estimator in the proactive path; no mid-history edits in Phase A; the reactive backstop is byte-for-byte unchanged.
-- [ ] (Phase B) `edit_context`/`context_info` without `targetRole` behave exactly as before; a finished role cannot be targeted; the debt row is removed.
+- [x] `bun run typecheck` and `bun test source/` pass, including the new engine, validation, and render tests; `bun run validate-data` passes for the guild changes.
+- [x] A role crossing the pressure threshold receives exactly one notice, in valid wire order, and a scripted `context_handoff` finish reaches its parent intact.
+- [x] A wall-hit with endpoint-reported tokens measurably tightens `effectiveBudget` for subsequent pressure checks in the same run.
+- [x] No estimator in the proactive path; no mid-history edits in Phase A; the reactive backstop is byte-for-byte unchanged.
+- [x] `edit_context`/`context_info` without `targetRole` behave exactly as before; a finished role cannot be targeted; the debt row is removed.
 
 ## End-of-step evaluation
 
@@ -74,3 +74,66 @@ Phase A: medium — one config knob, a shared learned-ceiling record, the flag/n
 ## Operator handoff
 
 Run a long-horizon task against the local model with a deliberately low `contextPressureThreshold` and confirm: `context_pressure` events appear in the run log, the role finishes with a coherent handoff brief, the parent re-spawns a fresh instance with the brief, and the chain completes — with no `context_budget_exceeded` and no emergency compaction in the log. Judge the brief quality (could you pick the work up from it?). Then run at the production threshold and confirm no premature handoffs. For Phase B, additionally run with the pressure trigger routed to `context_manager` and confirm the suspend-compact-resume interlude is legible in the flow view and the compaction choices are sound (did it drop something the role later needed?).
+
+The in-environment portion of the Phase A handoff was exercised before closeout (see below): brief quality, verbatim re-delegation, chain completion, and the depth-0 checkpoint path all validated live. What remains for the operator is judgment over real tasks at the production threshold (0.8): do handoffs fire at sensible moments on a real workload, and is the brief quality good enough to resume from? For Phase B, the full handoff above still applies.
+
+## Closeout (2026-07-26 — step complete)
+
+✅ Step complete (in-environment). The phase split in this file was a drafting artifact; the step closes as a single unit. `bun run typecheck`, `bun test source/` (761 pass across 38 files), and `bun run validate-data` green. The "Cross-role context compaction" debt row is removed from `README.md`.
+
+### Routing decision (operator, 2026-07-26)
+
+The deliverable-3 design pass was taken with the operator: `context_manager` is invoked (a) when the **entry role** crosses the pressure threshold (it has no parent to hand off to), and (b) as the **fallback when a request is rejected for context size** despite the avoidance mechanisms — the naive in-place backstop demotes to last resort (handler absent or failed). Child roles keep the Phase-A handoff as the primary mechanism (KV-cache cheapest).
+
+### What landed (second half)
+
+- **Cross-role `edit_context`/`context_info`.** Both take an optional `targetRole` resolved through the registry: the target must be registered (a finished role is unregistered and cannot be compacted) and must not be the caller (new `BuiltInToolContext.ownRoleId`). Absent `targetRole` is byte-for-byte the old behavior. The compaction guard (`maxCompactionAttempts`) accounts the edited size on the *caller's* list, so the guard still bounds the role doing the compacting.
+- **Index 0/1 protection is now code-enforced** in the shared operation validator for both paths (the step's parenthetical assumed it existed; it was prompt-taught only). A batch touching the system prompt or original task rejects atomically; all valid self-edits are unchanged.
+- **Engine routing.** `executor.contextHandlerRole` (optional; the seed Guild sets `context_manager`). Depth-0 pressure and context rejections both suspend the role and invoke the handler at the single existing safe point, logged as an `interrupt`/`interrupt_resolved` pair with triggers `context_pressure`/`context_budget_exceeded` and actions `compacted`/`failed` — the flow view roots the handler on a fresh interrupt stack for free. Rejections detected mid-turn park on `RoleState.contextCompactionPending` until the loop top. The naive backstop is extracted unchanged (`applyContextBackstop`) and runs when no handler is configured or the handler fails; depth-0 falls back to the Phase-A handoff notice on handler failure. Re-arm rule: one handler invocation per role instance (the one-shot flag is terminal), so the trigger cannot storm; the wall deferral is separately bounded by the existing 3-rejection cap.
+- **Guild.** `context_manager` gains the Family 2 inspection tools and its prompt is rewritten for the cross-role world (inspect via overview + bounded windows, prune with cross-role `edit_context`, confirm with cross-role `context_info`, preserve 0/1 and the most recent turn, never split a tool-call pair, write the finish summary for the target's resume notice). Stale "can only compact its own conversation" claims removed from `orchestrator.md` and `recovery.md`; the orchestrator's depth-0 teaching now expects the compaction interlude (checkpoint wrap demoted to handler-failure fallback). `edit_context.json`'s range description corrected to end-exclusive `[start, end)` — it wrongly said "inclusive" while the code has always been end-exclusive, a direct hazard to a role choosing drop ranges. `validate-data` checks the new wiring.
+- **Tests.** Five cross-role tool tests (target applies, 0/1 protection + atomicity, unknown/self target, self path unchanged, guard accounting) and seven engine handler-flow tests (depth-0 interlude, child still gets the notice, no storm, handler-failure fallbacks at both triggers, naive-backstop fallback, rejection-cap bounding).
+
+### Live validation (local llama-server, throwaway workspace)
+
+A bakery-site run at a small declared budget (effective 5808, threshold 0.65) exercised the full interlude: the orchestrator crossed the threshold with two child cards in its history; at its next turn boundary the engine logged `interrupt {trigger: 'context_pressure', target: 'orchestrator-0-1'}` and invoked `context_manager`, which inspected through the bounded tools (`list_role_messages`, four `read_message_window`s, `search_role_blocks`), pruned the superseded handoff-cycle pair via cross-role `edit_context`, and finished; `interrupt_resolved {action: 'compacted'}` followed and the orchestrator resumed with the `[Platform notice — context compacted]` message in valid wire order, system prompt/task/recent delegation intact. The run completed successfully; the flow model shows the interlude as a dedicated interrupt stack with the handler's inspect-and-prune operations legible. Child handoffs fired and re-spawned exactly as in Phase A. Two blemishes recorded for prompt tuning (not mechanism): the `context_manager` finished with an empty summary (the prompt's "the target sees this summary" teaching needs strengthening), and the resumed orchestrator skipped its acceptance loop. The wall-path routing is covered by engine tests (deferral, naive fallback, rejection cap); a live wall exercise needs a genuine endpoint rejection, which a declared small window cannot force against the endpoint's real 262144 — left to the operator handoff below.
+
+### Remaining operator handoff (Phase B)
+
+Run a long-horizon task at production settings and confirm: when the orchestrator's own conversation crosses the threshold, the suspend-compact-resume interlude appears in the flow view as it did in the smoke, and the compaction choices are sound on a real history (did it drop something the role later needed?). A genuine wall rejection (a run that actually fills the 262144 window) should show `context_budget_exceeded`-triggered compaction with the naive backstop nowhere in the log unless the handler fails.
+
+### End-of-step confirmation
+
+The cross-role primitive lives in the existing built-in tool factory closing over the registry; history mutation stays pure (`applyEditOperations`); trigger evaluation happens only at the single existing safe point — no second queue, no new safe points. `edit_context`/`context_info` without `targetRole` are byte-for-byte the old behavior (existing tests untouched and green). A finished role cannot be targeted (`runRole` unregisters on finish; `lookupTarget` only sees live instances). The learned ceiling still tightens only on endpoint-reported rejections; the proactive path still reads reported usage only. `coder.md`/`orchestrator.md`/`recovery.md` agree: `context_handoff` → fresh instance with the brief; `context_budget_exceeded` → `recovery` splits smaller; depth-0 pressure → `context_manager` compaction, checkpoint wrap only on handler failure.
+
+## Closeout (2026-07-26, Phase A)
+
+✅ Phase A complete (in-environment). `bun run typecheck`, `bun test source/` (748 pass across 38 files), and `bun run validate-data` green. Phase B remains open as this step's retained second half; the debt row in `README.md` now describes Phase A as landed.
+
+### What landed
+
+- `source/executor/context-pressure.ts` (new, pure): the per-run `ContextPressureTracker` (learned ceiling), `recordContextRejection` (tightens only on endpoint-reported counts), `effectiveContextBudget` (`min(contextWindow − maxTokens, learnedCeiling)`), and `DEFAULT_CONTEXT_PRESSURE_THRESHOLD = 0.8`.
+- Engine: `RoleState.contextPressureNotice`, `EngineDependencies.contextPressureTracker` (created per run in `runExecutor`), ceiling recording in the rejection path, the success-path pressure check logging `context_pressure { role, promptTokens, effectiveBudget }`, and the one-shot `[Platform notice — context pressure]` appended at the next turn top.
+- New `ErrorKind` `context_handoff` (types + `ERROR_KINDS`; all `isErrorKind` consumers accept it automatically).
+- `executor.contextPressureThreshold` (optional, in (0, 1)) in types, validation, and `guild.json` (0.8).
+- Guild: `coder.md` (handoff protocol + picking up a handoff task), `orchestrator.md` (child `context_handoff` → re-delegate fresh with the brief verbatim, never `recovery`, never smaller; own depth-0 notice → wrap toward a checkpoint finish), `recovery.md` (the `context_handoff` row), `finish.json` (error.kind list).
+- `docs/reference.md`: "Context pressure and handoff" section, lifecycle bullet, error-table row, `context_pressure` event entry, executor config field. `render.ts` formats `context_pressure`.
+- Tests: `context-pressure.test.ts` (budget math, rejection recording), validation tests (threshold range, `context_handoff` result cards), five engine tests (fires on cross / not below, once per instance, wire order after the turn's tool results, ceiling tightening across roles, `context_handoff` card propagation child → parent, default-threshold application), one render test.
+
+### Live validation (local llama-server, throwaway workspace)
+
+Real service sessions against "Agents A1" (34B) with a small declared budget to reach credible percentages:
+
+- **Full protocol, end to end.** Bakery-site task, effective budget 8192, threshold 0.75: `context_pressure` fired on the coder at 76%; the notice landed as the last message of the next request (after the turn's tool results); the coder finished with `error.kind: "context_handoff"` and a high-quality brief (done: style.css + index.html with the design decisions; remaining: three pages; next step). The orchestrator re-delegated a **fresh** coder with the brief labeled in the task; the fresh instance completed the remaining pages; acceptance passed; the run finished **success**. No `context_budget_exceeded`, no `context_compacted` in the log. One-shot held for every role (each fired exactly once, including roles that kept working past the threshold).
+- **Depth-0 path.** A separate run (threshold 0.5) pushed the orchestrator itself over the threshold; it wrapped and finished the run with `status: "error"`, `error.kind: "context_handoff"`, and a checkpoint brief, exactly as its prompt teaches.
+- **Credible percentages matter.** At toy-low thresholds (notice reads "2% of the effective context budget") the model quite rationally ignored the notice and finished the work — the warning is not credible when it says 2%. Pressure must sit near real task sizes for the protocol to engage; this is a tuning fact for the Guild (and later the Foundry), not a mechanism defect. Similarly, a role whose notice arrives *after* its last piece of work often finishes `success` instead of handing off — the sensible outcome.
+- **Untaught parents.** The acceptance reviewer fired pressure in one run and finished `success`; lead prompts were deliberately out of scope (the plan names only coder/orchestrator/recovery). If real runs show leads mishandling a child's `context_handoff`, that is a prompt-only follow-up.
+
+### Deviations from the plan wording
+
+- **The one-shot is modeled as `contextPressureNotice?: 'pending' | 'sent'`** rather than a `contextPressureNoticePending` boolean plus a guard: the two-state field makes the never-delivered-twice invariant unrepresentable to violate.
+- **`finish.json`'s error.kind description had drifted** from `ERROR_KINDS` (it listed the removed `token_budget_exceeded` and lacked step 31's `interrupted`); it now names the full current list including `context_handoff`.
+- **The depth-0 checkpoint finish uses `status: "error"` + `context_handoff`** — the plan said "finish the run with a checkpoint summary" without naming status/kind; reusing the same kind keeps one machine-readable signal for "context pressure ended this role or run".
+
+### End-of-step confirmation
+
+The pressure check reads `roleState.lastPromptTokens` (endpoint-reported usage) only; the char estimator never left the post-rejection backstop. The notice is appended only at the turn top, after the previous turn's tool results — the wire-order engine test asserts assistant `tool_calls` → `tool` results → user notice. The learned ceiling is shared per-run and `recordContextRejection` only ever tightens on reported counts (unit-tested). The reactive backstop is byte-for-byte unchanged. Seed-Guild headroom: effective budget 229376, threshold 0.8 fires at ~183.5k, leaving ~46k tokens plus the 32768 completion reservation for the notice and a wrap-up turn. `coder.md`/`orchestrator.md`/`recovery.md` agree on who re-spawns whom (parent, fresh instance, brief verbatim) and which kind routes where (`context_handoff` → re-delegate fresh; `context_budget_exceeded` → `recovery`, split smaller; depth-0 → checkpoint finish).

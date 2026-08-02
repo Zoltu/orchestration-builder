@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test'
 
 import type { ContextPolicy, ExecutorConfig, GuildConfig, LogEvent, Message, ModelConfig, RoleDefinition, ToolCall, ToolManifest } from './types.js'
 import { effortDirective } from './effort.ts'
+import { createContextPressureTracker } from './context-pressure.ts'
 import { runRole, type EngineDependencies } from './engine.ts'
 import { createInterruptQueue } from './interrupts.ts'
 import type { LlmCallResult, LlmCaller } from './llm.ts'
@@ -157,6 +158,7 @@ function makeDeps(llm: FakeLlm): { deps: EngineDependencies; events: LogEvent[] 
 		humanBackend: stubHumanBackend,
 		roleRegistry: createRoleRegistry(),
 		interruptQueue: createInterruptQueue(),
+		contextPressureTracker: createContextPressureTracker(),
 	}
 	return { deps, events }
 }
@@ -1306,6 +1308,347 @@ describe('runRole — interrupt platform', () => {
 		// Exactly one interrupt stack: the detector was invoked once and never re-invoked against itself.
 		expect(events.filter((e) => e.type === 'interrupt').length).toBe(1)
 		expect(events.filter((e) => e.type === 'role_start' && payloadField(e, 'role') === 'loop_detector').length).toBe(1)
+	})
+})
+
+describe('runRole — context pressure handoff', () => {
+	// Static budget for every test here: window 1000 minus the 100-token completion reservation = 900, so the 0.8 threshold fires at 720 reported prompt tokens.
+	function buildPressureGuild(roles: Record<string, RoleDefinition> = { main: { systemPrompt: 'p', tools: ['echo', 'finish'] } }, threshold?: number): LoadedGuild {
+		const guild = buildGuild(roles, 'main', {
+			model: { ...baseModel, contextWindow: 1000, generation: { maxTokens: 100 } },
+			executor: threshold === undefined ? baseExecutor : { ...baseExecutor, contextPressureThreshold: threshold },
+		})
+		return withTool(guild, { name: 'echo', description: 'echo', parameters: { type: 'object', properties: {} } })
+	}
+
+	function noticeCount(messages: Message[]): number {
+		return messages.filter((m) => m.role === 'user' && m.content.includes('[Platform notice — context pressure]')).length
+	}
+
+	test('fires once usage crosses the threshold — not below — and the notice lands after the turn\u2019s tool results in valid wire order', async () => {
+		const guild = buildPressureGuild()
+		const llm = new FakeLlm()
+		llm.responses = [
+			success([namedCall('e1', 'echo', { x: 1 })], { promptTokens: 700 }),
+			success([namedCall('e2', 'echo', { x: 2 })], { promptTokens: 800 }),
+			success([finishCall({ status: 'success', summary: 'done' })], { promptTokens: 810 }),
+		]
+		const { deps, events } = makeDeps(llm)
+
+		const result = await runRole(deps, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'do it' })
+
+		expect(result.status).toBe('success')
+		const pressureEvents = events.filter((e) => e.type === 'context_pressure')
+		expect(pressureEvents.length).toBe(1)
+		expect(payloadField(pressureEvents[0]!, 'role')).toBe('main')
+		expect(payloadField(pressureEvents[0]!, 'promptTokens')).toBe(800)
+		expect(payloadField(pressureEvents[0]!, 'effectiveBudget')).toBe(900)
+
+		// The turn below the threshold carried no notice; the crossing turn's notice rides the next request.
+		expect(noticeCount(llm.calls[1]?.messages ?? [])).toBe(0)
+		const notified = llm.calls[2]?.messages ?? []
+		expect(noticeCount(notified)).toBe(1)
+		// Wire order: assistant tool_calls, then its tool result, then the user notice — never a notice stranded between a call and its result.
+		const assistantTurn = notified[notified.length - 3]
+		const toolResult = notified[notified.length - 2]
+		const notice = notified[notified.length - 1]
+		expect(assistantTurn?.role).toBe('assistant')
+		expect(assistantTurn?.tool_calls?.[0]?.id).toBe('e2')
+		expect(toolResult?.role).toBe('tool')
+		expect(toolResult?.tool_call_id).toBe('e2')
+		expect(notice?.role).toBe('user')
+		expect(notice?.content).toContain('[Platform notice — context pressure]')
+		expect(notice?.content).toContain('89%')
+		expect(notice?.content).toContain('context_handoff')
+	})
+
+	test('fires once per role instance even while usage stays above the threshold', async () => {
+		const guild = buildPressureGuild()
+		const llm = new FakeLlm()
+		llm.responses = [
+			success([namedCall('e1', 'echo', { x: 1 })], { promptTokens: 800 }),
+			success([namedCall('e2', 'echo', { x: 2 })], { promptTokens: 810 }),
+			success([namedCall('e3', 'echo', { x: 3 })], { promptTokens: 820 }),
+			success([finishCall({ status: 'success', summary: 'done' })], { promptTokens: 830 }),
+		]
+		const { deps, events } = makeDeps(llm)
+
+		const result = await runRole(deps, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'do it' })
+
+		expect(result.status).toBe('success')
+		expect(events.filter((e) => e.type === 'context_pressure').length).toBe(1)
+		// The notice is appended exactly once; later turns inherit it as ordinary history without a fresh copy.
+		expect(noticeCount(llm.calls[3]?.messages ?? [])).toBe(1)
+	})
+
+	test('applies the 0.8 default when contextPressureThreshold is unset', async () => {
+		const guild = buildPressureGuild()
+		const llm = new FakeLlm()
+		llm.responses = [
+			success([namedCall('e1', 'echo', { x: 1 })], { promptTokens: 750 }),
+			success([finishCall({ status: 'success', summary: 'done' })]),
+		]
+		const { deps, events } = makeDeps(llm)
+
+		await runRole(deps, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'do it' })
+
+		const pressureEvents = events.filter((e) => e.type === 'context_pressure')
+		expect(pressureEvents.length).toBe(1)
+		expect(payloadField(pressureEvents[0]!, 'effectiveBudget')).toBe(900)
+	})
+
+	test('a reported wall rejection tightens the effective budget for every later role in the run', async () => {
+		const guild = buildPressureGuild({
+			main: { systemPrompt: 'p', tools: ['agent', 'finish'] },
+			child_a: { systemPrompt: 'a', tools: ['finish'] },
+			child_b: { systemPrompt: 'b', tools: ['echo', 'finish'] },
+		})
+		const llm = new FakeLlm()
+		llm.responses = [
+			success([agentCall('child_a', 'task a')]),
+			// child_a hits the wall with a reported count of 500: the run's learned ceiling becomes 500, so the threshold drops from 720 to 400.
+			contextExceeded(500, 1000),
+			success([finishCall({ status: 'success', summary: 'a done' })], { promptTokens: 20 }),
+			success([agentCall('child_b', 'task b')]),
+			// 450 is below the static threshold (720) but above the learned one (400): the notice fires only because of the shared ceiling.
+			success([namedCall('b1', 'echo', { x: 1 })], { promptTokens: 450 }),
+			success([finishCall({ status: 'success', summary: 'b done' })], { promptTokens: 460 }),
+			success([finishCall({ status: 'success', summary: 'main done' })]),
+		]
+		const { deps, events } = makeDeps(llm)
+
+		const result = await runRole(deps, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'delegate' })
+
+		expect(result.status).toBe('success')
+		const pressureEvents = events.filter((e) => e.type === 'context_pressure')
+		expect(pressureEvents.length).toBe(1)
+		expect(payloadField(pressureEvents[0]!, 'role')).toBe('child_b')
+		expect(payloadField(pressureEvents[0]!, 'promptTokens')).toBe(450)
+		expect(payloadField(pressureEvents[0]!, 'effectiveBudget')).toBe(500)
+		const notified = llm.calls[5]?.messages ?? []
+		const notice = notified[notified.length - 1]
+		expect(notice?.role).toBe('user')
+		expect(notice?.content).toContain('90%')
+	})
+
+	test('a context_handoff finish card reaches the parent unchanged', async () => {
+		const guild = buildPressureGuild({
+			main: { systemPrompt: 'p', tools: ['agent', 'finish'] },
+			child: { systemPrompt: 'c', tools: ['finish'] },
+		})
+		const brief = 'HANDOFF BRIEF — done: wrote src/a.ts; remaining: wire the CLI; next: read src/index.ts'
+		const llm = new FakeLlm()
+		llm.responses = [
+			success([agentCall('child', 'do the work')]),
+			success([namedCall('f1', 'finish', { status: 'error', summary: brief, error: { kind: 'context_handoff', message: 'handing off at 85% of the context budget' } })], { promptTokens: 800 }),
+			success([finishCall({ status: 'success', summary: 're-spawned and done' })]),
+		]
+		const { deps, events } = makeDeps(llm)
+
+		const result = await runRole(deps, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'delegate' })
+
+		expect(result).toEqual({ status: 'success', summary: 're-spawned and done' })
+		const agentResult = events.find((e) => e.type === 'tool_result' && payloadField(e, 'tool') === 'agent')
+		if (agentResult === undefined) throw new Error('expected an agent tool_result')
+		expect(payloadField(agentResult, 'result')).toEqual({
+			kind: 'success',
+			data: {
+				status: 'error',
+				summary: brief,
+				error: { kind: 'context_handoff', message: 'handing off at 85% of the context budget' },
+			},
+		})
+		// The child's own context_pressure event fired on the way out (800 ≥ 720): the scripted handoff follows the notice, as the protocol prescribes.
+		expect(events.some((e) => e.type === 'context_pressure' && payloadField(e, 'role') === 'child')).toBe(true)
+	})
+})
+
+describe('runRole — context manager routing', () => {
+	const mainAndManager = {
+		main: { systemPrompt: 'p', tools: ['echo', 'finish'] },
+		context_manager: { systemPrompt: 'cm', tools: ['list_role_messages', 'edit_context', 'context_info', 'finish'] },
+	}
+
+	// Static budget 900 (window 1000 minus 100 reserved), so the default 0.8 threshold fires at 720 reported prompt tokens.
+	function buildCompactionGuild(roles: Record<string, RoleDefinition> = mainAndManager): LoadedGuild {
+		const guild = buildGuild(roles, 'main', {
+			model: { ...baseModel, contextWindow: 1000, generation: { maxTokens: 100 } },
+			executor: { ...baseExecutor, contextHandlerRole: 'context_manager' },
+		})
+		let withManifests = withTool(guild, { name: 'echo', description: 'echo', parameters: { type: 'object', properties: {} } })
+		withManifests = withTool(withManifests, { name: 'edit_context', description: 'Edit context.', parameters: { type: 'object', required: ['operations'], properties: { operations: { type: 'array' } } } })
+		withManifests = withTool(withManifests, { name: 'context_info', description: 'Context info.', parameters: { type: 'object', properties: {} } })
+		withManifests = withTool(withManifests, { name: 'list_role_messages', description: 'List messages.', parameters: { type: 'object', required: ['targetRole'], properties: { targetRole: { type: 'string' } } } })
+		return withManifests
+	}
+
+	test('depth-0 pressure suspends the role, the handler compacts it, and it resumes with the managed notice', async () => {
+		const guild = buildCompactionGuild()
+		const llm = new FakeLlm()
+		llm.responses = [
+			success([namedCall('e1', 'echo', { x: 1 })], { promptTokens: 800 }),
+			// The flag set by that turn fires at the next turn top: the handler investigates the suspended main instance and prunes the stale turn.
+			success([namedCall('l1', 'list_role_messages', { targetRole: 'main-0-1' })]),
+			success([namedCall('ec1', 'edit_context', { targetRole: 'main-0-1', operations: [{ op: 'drop', range: [2, 4] }] })]),
+			success([namedCall('ci1', 'context_info', { targetRole: 'main-0-1' })]),
+			success([finishCall({ status: 'success', summary: 'compacted 4 messages to 2' })]),
+			success([finishCall({ status: 'success', summary: 'main done' })], { promptTokens: 100 }),
+		]
+		const { deps, events } = makeDeps(llm)
+
+		const result = await runRole(deps, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'do it' })
+
+		expect(result).toEqual({ status: 'success', summary: 'main done' })
+		expect(events.some((e) => e.type === 'context_pressure')).toBe(true)
+		const interrupt = events.find((e) => e.type === 'interrupt')
+		if (interrupt === undefined) throw new Error('expected an interrupt event')
+		expect(payloadField(interrupt, 'trigger')).toBe('context_pressure')
+		expect(payloadField(interrupt, 'handler')).toBe('context_manager')
+		expect(payloadField(interrupt, 'target')).toBe('main-0-1')
+		const resolved = events.find((e) => e.type === 'interrupt_resolved')
+		if (resolved === undefined) throw new Error('expected an interrupt_resolved event')
+		expect(payloadField(resolved, 'action')).toBe('compacted')
+		// The handler's edit applied before the resume: the next request is system, task, and the managed notice — the dropped turn is gone.
+		const resumed = llm.calls[5]?.messages ?? []
+		expect(resumed.length).toBe(3)
+		const notice = resumed[resumed.length - 1]
+		expect(notice?.role).toBe('user')
+		expect(notice?.content).toContain('[Platform notice — context compacted]')
+		expect(notice?.content).toContain('compacted 4 messages to 2')
+		// With a handler configured, a depth-0 role never receives the handoff notice.
+		expect(resumed.some((m) => m.content.includes('[Platform notice — context pressure]'))).toBe(false)
+	})
+
+	test('a child role under pressure still gets the handoff notice, not the handler', async () => {
+		const guild = buildCompactionGuild({
+			main: { systemPrompt: 'p', tools: ['agent', 'finish'] },
+			child: { systemPrompt: 'c', tools: ['echo', 'finish'] },
+			context_manager: { systemPrompt: 'cm', tools: ['list_role_messages', 'edit_context', 'context_info', 'finish'] },
+		})
+		const llm = new FakeLlm()
+		llm.responses = [
+			success([agentCall('child', 'work')]),
+			success([namedCall('e1', 'echo', { x: 1 })], { promptTokens: 800 }),
+			success([finishCall({ status: 'success', summary: 'child done' })], { promptTokens: 810 }),
+			success([finishCall({ status: 'success', summary: 'main done' })]),
+		]
+		const { deps, events } = makeDeps(llm)
+
+		const result = await runRole(deps, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'delegate' })
+
+		expect(result.status).toBe('success')
+		expect(events.some((e) => e.type === 'role_start' && payloadField(e, 'role') === 'context_manager')).toBe(false)
+		const notified = llm.calls[2]?.messages ?? []
+		const last = notified[notified.length - 1]
+		expect(last?.role).toBe('user')
+		expect(last?.content).toContain('[Platform notice — context pressure]')
+	})
+
+	test('the depth-0 handler runs once per role instance even while usage stays above the threshold', async () => {
+		const guild = buildCompactionGuild()
+		const llm = new FakeLlm()
+		llm.responses = [
+			success([namedCall('e1', 'echo', { x: 1 })], { promptTokens: 800 }),
+			success([finishCall({ status: 'success', summary: 'nothing worth removing' })]),
+			success([namedCall('e2', 'echo', { x: 2 })], { promptTokens: 850 }),
+			success([namedCall('e3', 'echo', { x: 3 })], { promptTokens: 860 }),
+			success([finishCall({ status: 'success', summary: 'done' })], { promptTokens: 870 }),
+		]
+		const { deps, events } = makeDeps(llm)
+
+		const result = await runRole(deps, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'do it' })
+
+		expect(result.status).toBe('success')
+		expect(events.filter((e) => e.type === 'interrupt').length).toBe(1)
+		expect(events.filter((e) => e.type === 'role_start' && payloadField(e, 'role') === 'context_manager').length).toBe(1)
+	})
+
+	test('a failed depth-0 handler falls back to the handoff notice', async () => {
+		const guild = buildCompactionGuild()
+		const llm = new FakeLlm()
+		llm.responses = [
+			success([namedCall('e1', 'echo', { x: 1 })], { promptTokens: 800 }),
+			success([namedCall('f1', 'finish', { status: 'error', summary: 'cannot compact without losing the plot', error: { kind: 'compaction_failed' } })]),
+			success([finishCall({ status: 'success', summary: 'done' })], { promptTokens: 100 }),
+		]
+		const { deps, events } = makeDeps(llm)
+
+		const result = await runRole(deps, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'do it' })
+
+		expect(result.status).toBe('success')
+		const resolved = events.find((e) => e.type === 'interrupt_resolved')
+		if (resolved === undefined) throw new Error('expected an interrupt_resolved event')
+		expect(payloadField(resolved, 'action')).toBe('failed')
+		const notified = llm.calls[2]?.messages ?? []
+		expect(notified[notified.length - 1]?.content).toContain('[Platform notice — context pressure]')
+	})
+
+	test('a wall rejection suspends the role for the handler instead of running the naive backstop', async () => {
+		const guild = buildCompactionGuild()
+		const llm = new FakeLlm()
+		llm.responses = [
+			success([namedCall('e1', 'echo', { x: 1 })]),
+			contextExceeded(950, 1000),
+			success([namedCall('ec1', 'edit_context', { targetRole: 'main-0-1', operations: [{ op: 'drop', range: [2, 4] }] })]),
+			success([finishCall({ status: 'success', summary: 'dropped the stale turn' })]),
+			success([finishCall({ status: 'success', summary: 'recovered' })], { promptTokens: 100 }),
+		]
+		const { deps, events } = makeDeps(llm)
+
+		const result = await runRole(deps, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'do it' })
+
+		expect(result).toEqual({ status: 'success', summary: 'recovered' })
+		expect(events.some((e) => e.type === 'context_compacted')).toBe(false)
+		const interrupt = events.find((e) => e.type === 'interrupt')
+		if (interrupt === undefined) throw new Error('expected an interrupt event')
+		expect(payloadField(interrupt, 'trigger')).toBe('context_budget_exceeded')
+		const resolved = events.find((e) => e.type === 'interrupt_resolved')
+		if (resolved === undefined) throw new Error('expected an interrupt_resolved event')
+		expect(payloadField(resolved, 'action')).toBe('compacted')
+		const resumed = llm.calls[4]?.messages ?? []
+		expect(resumed.length).toBe(3)
+		expect(resumed[resumed.length - 1]?.content).toContain('[Platform notice — context compacted]')
+	})
+
+	test('a failed wall handler falls back to the naive backstop', async () => {
+		const guild = buildCompactionGuild()
+		const llm = new FakeLlm()
+		llm.responses = [
+			success([namedCall('e1', 'echo', { x: 1 })]),
+			contextExceeded(0, 1000),
+			success([namedCall('f1', 'finish', { status: 'error', summary: 'cannot do it', error: { kind: 'compaction_failed' } })]),
+			success([finishCall({ status: 'success', summary: 'recovered' })], { promptTokens: 100 }),
+		]
+		const { deps, events } = makeDeps(llm)
+
+		const result = await runRole(deps, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'do it' })
+
+		expect(result).toEqual({ status: 'success', summary: 'recovered' })
+		expect(events.some((e) => e.type === 'context_compacted')).toBe(true)
+		const resumed = llm.calls[3]?.messages ?? []
+		expect(resumed[resumed.length - 1]?.content).toContain('[Platform notice — context window exceeded]')
+	})
+
+	test('the rejection cap still bounds the deferral loop when the handler cannot shrink the history', async () => {
+		const guild = buildCompactionGuild()
+		const llm = new FakeLlm()
+		llm.responses = [
+			contextExceeded(0, 1000),
+			success([finishCall({ status: 'success', summary: 'nothing to drop' })]),
+			contextExceeded(0, 1000),
+			success([finishCall({ status: 'success', summary: 'nothing to drop' })]),
+			contextExceeded(0, 1000),
+			success([finishCall({ status: 'success', summary: 'nothing to drop' })]),
+			contextExceeded(0, 1000),
+		]
+		const { deps, events } = makeDeps(llm)
+
+		const result = await runRole(deps, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'do it' })
+
+		expect(result.status).toBe('error')
+		expect(result.error?.kind).toBe('context_budget_exceeded')
+		expect(llm.calls.length).toBe(7)
+		expect(events.filter((e) => e.type === 'interrupt').length).toBe(3)
 	})
 })
 

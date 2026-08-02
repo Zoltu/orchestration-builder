@@ -103,8 +103,8 @@ const expectedSignatures: ExpectedSignature[] = [
 	{ file: 'recent_role_tool_calls.json', required: ['targetRole'], properties: ['targetRole', 'limit'] },
 	{ file: 'agent.json', required: ['role', 'task'], properties: ['role', 'task'] },
 	{ file: 'finish.json', required: ['status', 'summary'], properties: ['status', 'summary', 'artifacts', 'error'] },
-	{ file: 'context_info.json', required: [], properties: [] },
-	{ file: 'edit_context.json', required: ['operations'], properties: ['operations'] },
+	{ file: 'context_info.json', required: [], properties: ['targetRole'] },
+	{ file: 'edit_context.json', required: ['operations'], properties: ['operations', 'targetRole'] },
 	{ file: 'ask_human.json', required: ['question'], properties: ['question', 'context'] },
 ]
 
@@ -183,6 +183,17 @@ function checkGuild(loaded: LoadedGuild): void {
 		}
 		check(!detector.tools.includes('agent') && !detector.tools.includes('write_file'), 'guild: loop_detector must not delegate or touch the workspace')
 	}
+	const contextManager = config.roles['context_manager']
+	if (contextManager === undefined) {
+		failures.push('guild: missing role "context_manager"')
+	} else {
+		// The compaction handler inspects the suspended target (read-only), prunes it (context tools), and finishes — it cannot delegate or touch the workspace.
+		for (const tool of ['context_info', 'edit_context', 'list_role_messages', 'read_message_window', 'search_role_blocks', 'recent_role_tool_calls', 'finish']) {
+			check(contextManager.tools.includes(tool), `guild: context_manager must hold "${tool}"`)
+		}
+		check(!contextManager.tools.includes('agent') && !contextManager.tools.includes('write_file'), 'guild: context_manager must not delegate or touch the workspace')
+	}
+	check(config.executor.contextHandlerRole === 'context_manager', `guild: executor.contextHandlerRole must be "context_manager" (got "${config.executor.contextHandlerRole ?? 'undefined'}")`)
 	const triggers = config.executor.interruptTriggers
 	if (triggers === undefined) {
 		failures.push('guild: executor.interruptTriggers missing')
@@ -280,6 +291,7 @@ function checkManifests(): void {
 		humanBackend: { ask: async () => '' },
 		contextWindow: 1000,
 		roleRegistry: createRoleRegistry(),
+		ownRoleId: 'fixture-0-0',
 	})
 	checkSameSet('built-in tool handler table', new Set(Object.keys(builtInHandlers)), builtInToolNames)
 	for (const manifest of manifests) {

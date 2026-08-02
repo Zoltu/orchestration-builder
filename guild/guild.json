@@ -17,6 +17,8 @@
 		"maxAgentDepth": 8,
 		"defaultToolTimeoutSeconds": 30,
 		"maxCompactionAttempts": 5,
+		"contextPressureThreshold": 0.8,
+		"contextHandlerRole": "context_manager",
 		"interruptTriggers": {
 			"handlerRole": "loop_detector",
 			"everyToolCalls": 12,
@@ -262,7 +264,7 @@
 		},
 		"context_manager": {
 			"systemPrompt": "prompts/context_manager.md",
-			"tools": ["context_info", "edit_context", "finish"],
+			"tools": ["context_info", "edit_context", "list_role_messages", "read_message_window", "search_role_blocks", "recent_role_tool_calls", "finish"],
 			"label": {
 				"detailed": ["Context Manager"],
 				"friendly": ["Context Manager"],

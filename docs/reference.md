@@ -13,6 +13,7 @@ The executor is the minimal runtime that runs the small target model against the
 2. **Role execution loop.** For the active role, the executor repeats:
    - Assemble context: system prompt, user task, prior assistant/tool messages, child result cards.
    - Call the model endpoint (`POST /v1/chat/completions`).
+   - If reported usage crosses the context-pressure threshold, append a one-shot handoff notice at the next turn boundary (see "Context pressure and handoff" below).
    - If the prompt exceeds the context window, compact the conversation in place (bounded attempts; see "Context budget exceeded" below) and resume with a platform notice; if it cannot be made to fit, finish the role with `context_budget_exceeded`.
    - Parse content, reasoning, and tool calls.
    - Log the request/response to `log.jsonl`.
@@ -26,11 +27,27 @@ The executor is the minimal runtime that runs the small target model against the
 
 Each role invocation has its own message list. A role does not automatically see its ancestors' conversations — parents may include summaries or result cards when delegating via `agent`. Messages have `role` (`system`/`user`/`assistant`/`tool`), `content`, optional `reasoning`, and tool-call fields. Reasoning is stored separately and excluded from the prompt by default; a role opts in with `includeReasoning: true`.
 
-The executor does not estimate token counts before sending. It trusts only the `usage` fields returned by the API, exposed via `context_info`. There is no pre-send token estimator and no proactive compaction threshold — compaction strategy belongs to the Guild. (The post-rejection compaction described below is a safety backstop calibrated from the endpoint's own rejection report, not a pre-send estimate.)
+The executor does not estimate token counts before sending. It trusts only the `usage` fields returned by the API, exposed via `context_info`; there is no char-based token estimator in the proactive path. Reported usage drives the context-pressure trigger (see "Context pressure and handoff" below), which asks the role to hand off before the wall — self-managed compaction strategy still belongs to the Guild. (The post-rejection compaction described below is a safety backstop calibrated from the endpoint's own rejection report, not a pre-send estimate.)
+
+### Context pressure and handoff
+
+The primary defense against context-window overflow is proactive: a role under pressure hands its work off to a fresh instance *while requests still succeed*, so the common path never prunes history and never busts the endpoint's prefix cache with a mid-history edit.
+
+**The trigger reads real reported usage only.** Every successful LLM call stores the endpoint-reported `usage.promptTokens`. When it reaches `executor.contextPressureThreshold` (a fraction in (0, 1), default `0.8`) of the *effective budget*, the engine logs a `context_pressure` event and sets a one-shot flag on the role. The response fires once per role instance, at the top of the next turn — after the turn's tool results, never between an assistant `tool_calls` message and its results, which would be a malformed request on strict endpoints.
+
+**The response depends on depth.** A *child* role gets an append-only `[Platform notice — context pressure]` user message asking it to hand off (below). The *entry role* has no parent to hand off to, so when `executor.contextHandlerRole` is set the platform instead suspends it and invokes the context handler (the seed Guild's `context_manager`) against its frozen, registered state — the same preempt-and-resume interlude as the interrupt platform's loop-check handler, logged with the same `interrupt`/`interrupt_resolved` pair (trigger `context_pressure`). The handler prunes the suspended role's history from the outside with the cross-role `edit_context`/`context_info` (see "Built-in tools"), the role resumes with a `[Platform notice — context compacted]` message, and the run continues. If the handler fails, the role falls back to the handoff notice; without a configured handler, depth 0 always gets the notice.
+
+**Effective budget.** `effectiveBudget = min(contextWindow − generation.maxTokens, learnedCeiling)`. The static term reserves the completion budget up front (llama-server rejects a prompt when `prompt ≥ n_ctx − n_predict`). The learned ceiling is a per-run record of the minimum endpoint-reported `promptTokens` across the run's `context_budget_exceeded` rejections (only rejections that report a count teach anything): one role's wall-hit is ground truth that tightens every role's threshold for the rest of the run.
+
+**The handoff protocol.** The notice asks the role to stop starting new work and call `finish` with `status: "error"` and `error.kind: "context_handoff"`, writing the summary as a handoff brief for the fresh agent that will replace it — what is done, what remains, key file paths, decisions made, and the immediate next step. The working agent is the best-qualified summarizer of its own work, and it summarizes best while it still has its full context. The `context_handoff` kind routes differently from `context_budget_exceeded`: the parent re-delegates a fresh instance of the same role with the brief verbatim, rather than splitting the work smaller (splitting is the wall path's response). The executor treats the card like any other finish — the routing convention lives in the Guild prompts. An entry role that receives the notice (no configured handler, or a failed compaction) wraps the run toward a resumable checkpoint and finishes with a checkpoint summary the operator can resume from.
+
+The reactive backstop below is unchanged: by the time it fires, the proactive protocol has already given the model its chance to hand off cleanly.
 
 ### Context budget exceeded
 
-If the endpoint rejects a request because the prompt is too long, the role cannot recover on its own: any notification appended to the conversation would ride along on the next, equally oversized request, so the model would never see it and the executor would retry forever. The executor therefore compacts the conversation itself before retrying:
+If the endpoint rejects a request because the prompt is too long, the role cannot recover on its own: any notification appended to the conversation would ride along on the next, equally oversized request, so the model would never see it and the executor would retry forever. With `executor.contextHandlerRole` configured, the executor therefore defers the answer to the next turn boundary (the rejection details park on the role's state): the role is suspended and the context handler (the seed Guild's `context_manager`) is invoked against its frozen, registered state — logged as an `interrupt`/`interrupt_resolved` pair with trigger `context_budget_exceeded`. The handler runs on a fresh, small conversation of its own, so it can work even while the target is over the limit: it reads the target's history through the bounded inspection tools, prunes it surgically with cross-role `edit_context`, and the target resumes with a `[Platform notice — context compacted]` message carrying the handler's own summary of what was removed.
+
+When no handler is configured — or the handler fails — the executor falls back to compacting the conversation itself before retrying:
 
 1. Reasoning is stripped from all messages.
 2. The oldest turns are dropped (the system prompt, the original task, and the most recent turn are always kept), never splitting an assistant tool call from its tool-result messages — an unmatched pair is a malformed request on OpenAI-compatible endpoints.
@@ -38,7 +55,7 @@ If the endpoint rejects a request because the prompt is too long, the role canno
 
 The token estimate is calibrated with the prompt-token count the endpoint reported in its rejection (falling back to ~4 chars/token when it reports none) and the compaction target is 70% of the context window, leaving headroom for estimator error and the completion reservation. The compaction is logged as a `context_compacted` event, and the role resumes with a `[Platform notice — context window exceeded]` user message describing what was removed, so it can re-read what it needs or finish honestly.
 
-Recovery is bounded: after 3 consecutive rejections — or immediately, when even the undeletable remainder cannot fit — the role finishes with `{status: "error", error: {kind: "context_budget_exceeded"}}` and the parent recovers (the seed Guild re-delegates the work in smaller pieces via `recovery`). A successful call resets the counter.
+Recovery is bounded either way: after 3 consecutive rejections — or immediately, when even the undeletable remainder cannot fit — the role finishes with `{status: "error", error: {kind: "context_budget_exceeded"}}` and the parent recovers (the seed Guild re-delegates the work in smaller pieces via `recovery`). A successful call resets the counter.
 
 Separately, a role may manage its own context ahead of the limit with `context_info` and `edit_context`. If a role calls `edit_context` repeatedly without reducing tokens, the executor terminates it after `executor.maxCompactionAttempts`.
 
@@ -49,7 +66,8 @@ Every failure is translated into a structured result the current or parent role 
 | Failure | Behavior | Surface |
 |---|---|---|
 | LLM HTTP error | Retry with backoff | If retries fail: `{status: "error", error: {kind: "llm_unavailable"}}` |
-| Context budget exceeded | Platform compacts the conversation, bounded retries | Role resumes with a platform notice, or finishes `{kind: "context_budget_exceeded"}` |
+| Context budget exceeded | Context handler compacts the conversation (naive in-place backstop as fallback), bounded retries | Role resumes with a platform notice, or finishes `{kind: "context_budget_exceeded"}` |
+| Context pressure threshold crossed | Child roles: one-shot handoff notice at the next turn boundary; the role writes a handoff brief and finishes. Entry role (with a configured context handler): suspended and compacted by the handler, then resumed | Child: `{kind: "context_handoff"}`; the parent re-delegates a fresh instance with the brief |
 | Malformed tool call | Do not execute | `{kind: "invalid_tool_call"}` |
 | Unknown tool | Do not execute | `{kind: "unknown_tool"}` |
 | Invalid arguments | Do not execute | `{kind: "invalid_arguments"}` |
@@ -99,13 +117,14 @@ The interrupt platform lets the Guild define agents that interrupt running work 
 - `tool_result` — `{ role, tool, kind, result }`. `result` is the full un-truncated `ToolResult` (`{ kind: 'success', data }` or `{ kind, message, details }`). Truncation still applies only to what is appended to the conversation; the log records the un-truncated result so a reviewer is not flying blind on what a tool returned.
 - `depth_exceeded` — `{ parent, child, depth, error }` when an `agent` call is refused for exceeding `maxAgentDepth`.
 - `role_not_found` — `{ roleName }` for an unknown entry role, or `{ parent, roleName }` when a child role name is invalid.
-- `interrupt` — `{ trigger, handler, target }`. Emitted when the engine suspends the active role to invoke the interrupt handler: `trigger` is the source (e.g. `loop_check`), `handler` the handler role name, `target` the suspended role-instance id. A fresh interrupt instance preempts the active call stack in the interaction model: it becomes its own participant and the root of a new stack, pausing the previous stack. Subsequent `role_start`/`role_finished`/`llm_call`/`tool_call`/`tool_result` events (the handler's) belong to the interrupt stack until its root call closes, at which point control returns to the preempted stack.
-- `interrupt_resolved` — `{ trigger, handler, target, action }`. Emitted after the handler finishes, recording the applied `trigger_interrupt` action (`continue`, `redirect`, or `abort`; `continue` also when the handler finished without deciding).
+- `interrupt` — `{ trigger, handler, target }`. Emitted when the engine suspends the active role to invoke a handler role: `trigger` is the source (`loop_check` for the cadence, `context_pressure` when the entry role is compacted at the threshold, `context_budget_exceeded` when a rejection is answered by the context handler), `handler` the handler role name, `target` the suspended role-instance id. A fresh interrupt instance preempts the active call stack in the interaction model: it becomes its own participant and the root of a new stack, pausing the previous stack. Subsequent `role_start`/`role_finished`/`llm_call`/`tool_call`/`tool_result` events (the handler's) belong to the interrupt stack until its root call closes, at which point control returns to the preempted stack.
+- `interrupt_resolved` — `{ trigger, handler, target, action }`. Emitted after the handler finishes. For `loop_check`, `action` is the applied `trigger_interrupt` decision (`continue`, `redirect`, or `abort`; `continue` also when the handler finished without deciding). For the context-compaction triggers, `action` is `compacted` when the handler succeeded and `failed` otherwise (the role then falls back to the handoff notice or the naive backstop).
 - `operator_inquiry` — `{ role, roleId, message }`. An operator inquiry was injected as a marked user message into the history of the named role (always the chain root — the entry role).
 - `plan_modification` — `{ target, targetRole, message, aborted }`. An operator plan modification was routed: `target`/`targetRole` are the instance id and role name of the plan owner that received the modification, `aborted` the instance ids unwound below it (each finishes with an `interrupted` error card).
 - `observe` — `{ role, details? }`. A read-only cross-stack reference in the interaction model: `role` names the open call being read on a paused stack; the adapter sources the observe at the tool emitting it and points it at the matched paused node. It never affects activity. *(Adapter-supported; no current executor tool emits this — the inspection tools read the registry directly rather than logging an observe.)*
 - `terminate` — `{ role, details? }`. A rewind reference in the interaction model: `role` names the open call being reverted on a paused stack; the terminate closes that call immediately (no separate return) so the node is removed right away. *(Adapter-supported; no current executor tool emits this.)*
 - `context_compacted` — `{ role, droppedMessages, truncatedToolMessages, strippedReasoningMessages, estimatedPromptTokens, contextWindow }`. The executor compacted the role's conversation after a context-window rejection (see "Context budget exceeded" above).
+- `context_pressure` — `{ role, promptTokens, effectiveBudget }`. The role's reported prompt size crossed the pressure threshold; the one-shot handoff notice is appended at the next turn boundary (see "Context pressure and handoff" above).
 - `role_budget_exceeded`, `global_budget_exceeded`, `llm_unavailable`, `context_budget_exceeded`, `implicit_finish`, `unknown_tool`, `invalid_tool_call` — failure and lifecycle events carrying the role and the relevant detail.
 
 ## Built-in tools
@@ -122,11 +141,11 @@ Ends the current role and returns a result card. Parameters: `status` (`"success
 
 ### `context_info`
 
-Returns metadata about the current role's conversation: context window, current prompt tokens, budget remaining, per-message token counts.
+Returns metadata about a conversation: context window, current prompt tokens, budget remaining, per-message token counts. Optional `targetRole` (a role-instance id): when present, the metadata describes that suspended instance's conversation instead of the caller's own.
 
 ### `edit_context`
 
-Mutates the current role's conversation. Operations: `drop` (range), `strip_reasoning` (range), `replace` (index + content). Returns the updated `context_info`.
+Mutates a conversation. Operations: `drop` (range `[start, end)`), `strip_reasoning` (range), `replace` (index + content). Returns the updated `context_info`. Optional `targetRole` (a role-instance id): when present, the operations apply to that instance's history instead of the caller's own. A cross-role target must be registered (hence suspended — a finished role is unregistered and cannot be compacted) and must not be the caller itself, which is active rather than suspended. In every operation, message index 0 (system prompt) and index 1 (original task) are protected — a batch that touches them is rejected without applying anything. This is the write half of the cross-role compaction primitive: the context handler (see "Context budget exceeded" and "Context pressure and handoff") combines it with the read-only inspection tools to prune a suspended role's history from the outside.
 
 ### `ask_human`
 
@@ -214,6 +233,8 @@ The optional `visualization` section carries display-only localization the web c
   "maxAgentDepth": 8,
   "defaultToolTimeoutSeconds": 30,
   "maxCompactionAttempts": 5,
+  "contextPressureThreshold": 0.8,
+  "contextHandlerRole": "context_manager",
   "interruptTriggers": {
     "handlerRole": "loop_detector",
     "everyToolCalls": 12,
@@ -223,7 +244,7 @@ The optional `visualization` section carries display-only localization the web c
 }
 ```
 
-Safety budgets enforced by the executor. `maxAgentDepth` guards unbounded agent recursion; `defaultToolTimeoutSeconds` aborts a hung tool subprocess; `maxCompactionAttempts` terminates a `context_manager` that is not reducing tokens. The executor no longer enforces a wall-clock run timeout or per-role tool-call/token caps — run termination is the deployment container's job (see "Run termination" above and [`docs/architecture.md`](architecture.md) "Run termination").
+Safety budgets enforced by the executor. `maxAgentDepth` guards unbounded agent recursion; `defaultToolTimeoutSeconds` aborts a hung tool subprocess; `maxCompactionAttempts` terminates a `context_manager` that is not reducing tokens. `contextPressureThreshold` (optional, default `0.8`) is the fraction of the effective context budget at which the one-shot pressure response fires (see "Context pressure and handoff"). `contextHandlerRole` (optional) names the guild role the engine invokes to compact a suspended role's conversation — at depth 0 when the entry role crosses the pressure threshold, and at any depth when a request is rejected for context size; when unset, depth-0 pressure falls back to the handoff notice and rejections fall back to the naive in-place backstop. The executor no longer enforces a wall-clock run timeout or per-role tool-call/token caps — run termination is the deployment container's job (see "Run termination" above and [`docs/architecture.md`](architecture.md) "Run termination").
 
 `interruptTriggers` (optional) configures the interrupt platform's loop-check cadence (see "Interrupt platform"): `handlerRole` is the guild role invoked on a trigger (must exist in `roles`); `everyToolCalls`/`everyTokens` are the base thresholds, scaled by effort (`threshold × (effort + 1)`); `planOwnerRole` (optional) names the role that receives plan modifications — the rootmost live chain instance of it, falling back to the chain root when unset or absent from the chain. When the section is absent, cadence checks never fire; operator interrupts work regardless.
 

@@ -181,6 +181,12 @@ function validateExecutorConfig(value: unknown, path: string): asserts value is 
 	ensure(isNumber, value.maxAgentDepth, `${path}.maxAgentDepth`, 'expected a number')
 	ensure(isNumber, value.defaultToolTimeoutSeconds, `${path}.defaultToolTimeoutSeconds`, 'expected a number')
 	ensure(isNumber, value.maxCompactionAttempts, `${path}.maxCompactionAttempts`, 'expected a number')
+	if (value.contextPressureThreshold !== undefined && (!isNumber(value.contextPressureThreshold) || value.contextPressureThreshold <= 0 || value.contextPressureThreshold >= 1)) {
+		throw new ValidationError(`${path}.contextPressureThreshold`, 'expected a number in (0, 1)')
+	}
+	if (value.contextHandlerRole !== undefined && (typeof value.contextHandlerRole !== 'string' || value.contextHandlerRole === '')) {
+		throw new ValidationError(`${path}.contextHandlerRole`, 'expected a non-empty string or undefined')
+	}
 	if (value.interruptTriggers !== undefined) validateInterruptTriggersConfig(value.interruptTriggers, `${path}.interruptTriggers`)
 }
 

@@ -1,4 +1,5 @@
 import type { RunMeta, RunOptions } from './types.js'
+import { createContextPressureTracker } from './context-pressure.js'
 import { runRole } from './engine.js'
 import type { HumanBackend } from './human-backend.js'
 import type { InterruptQueue } from './interrupts.js'
@@ -46,6 +47,7 @@ export async function runExecutor(deps: ExecutorDependencies, options: RunOption
 			humanBackend: deps.humanBackend,
 			roleRegistry: createRoleRegistry(),
 			interruptQueue: deps.interruptQueue,
+			contextPressureTracker: createContextPressureTracker(),
 		},
 		{
 			loadedGuild,

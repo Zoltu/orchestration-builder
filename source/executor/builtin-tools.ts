@@ -14,6 +14,8 @@ export interface BuiltInToolContext {
 	humanBackend: HumanBackend
 	contextWindow: number
 	roleRegistry: RoleRegistry
+	// The instance id of the role these handlers belong to. Cross-role tools reject a caller that targets itself: a caller is active, and cross-role targets must be suspended — self-edits go through the target-free self path.
+	ownRoleId: string
 }
 
 interface FinishValidationSuccess {
@@ -114,8 +116,10 @@ function snapshotMessages(history: Message[]): ContextInfoMessage[] {
 }
 
 function createContextInfo(context: BuiltInToolContext): ToolHandler {
-	return () => {
-		const state = context.roleState
+	return (args) => {
+		const target = resolveContextTarget(context, args)
+		if (!target.ok) return target.error
+		const state = target.state
 		const messages = snapshotMessages(state.history)
 		const totalContentChars = messages.reduce((sum, m) => sum + m.contentChars + m.reasoningChars, 0)
 		const estimatedPromptTokens = Math.ceil(totalContentChars / 4)
@@ -129,6 +133,7 @@ function createContextInfo(context: BuiltInToolContext): ToolHandler {
 				budgetRemaining,
 				messages,
 				recentCompactionPromptTokens: state.recentCompactionPromptTokens.slice(),
+				...(target.roleId !== context.ownRoleId ? { targetRole: target.roleId } : {}),
 			},
 		}
 	}
@@ -151,6 +156,10 @@ interface ReplaceOperation {
 }
 
 type ContextEditOperation = DropOperation | StripReasoningOperation | ReplaceOperation
+
+// Message indices 0 (system prompt) and 1 (original task) are untouchable in every edit operation — the contract the context-manager prompt has always taught, enforced here so a bad range cannot amputate the target's identity. Validation rejects the whole call atomically, before any operation applies.
+const PROTECTED_MESSAGE_COUNT = 2
+const PROTECTED_MESSAGES_MESSAGE = 'operations must not touch message index 0 (system prompt) or index 1 (original task)'
 
 function validateRange(range: unknown): [number, number] | null {
 	if (!Array.isArray(range) || range.length !== 2) return null
@@ -180,6 +189,9 @@ function applyEditOperations(history: Message[], operations: ContextEditOperatio
 			if (range === null) {
 				return { ok: false, error: createToolError('invalid_arguments', 'drop.range must be [start, end] with non-negative integers') }
 			}
+			if (range[0] < PROTECTED_MESSAGE_COUNT) {
+				return { ok: false, error: createToolError('invalid_arguments', PROTECTED_MESSAGES_MESSAGE) }
+			}
 			const [start, end] = range
 			if (start >= next.length) continue
 			next.splice(start, Math.min(end - start, next.length - start))
@@ -188,10 +200,16 @@ function applyEditOperations(history: Message[], operations: ContextEditOperatio
 			if (range === null) {
 				return { ok: false, error: createToolError('invalid_arguments', 'strip_reasoning.range must be [start, end] with non-negative integers') }
 			}
+			if (range[0] < PROTECTED_MESSAGE_COUNT) {
+				return { ok: false, error: createToolError('invalid_arguments', PROTECTED_MESSAGES_MESSAGE) }
+			}
 			next = stripReasoning(next, range[0], range[1])
 		} else if (op.op === 'replace') {
 			if (typeof op.index !== 'number' || !Number.isFinite(op.index) || op.index < 0) {
 				return { ok: false, error: createToolError('invalid_arguments', 'replace.index must be a non-negative number') }
+			}
+			if (op.index < PROTECTED_MESSAGE_COUNT) {
+				return { ok: false, error: createToolError('invalid_arguments', PROTECTED_MESSAGES_MESSAGE) }
 			}
 			if (typeof op.content !== 'string') {
 				return { ok: false, error: createToolError('invalid_arguments', 'replace.content must be a string') }
@@ -208,6 +226,8 @@ function applyEditOperations(history: Message[], operations: ContextEditOperatio
 
 function createEditContext(context: BuiltInToolContext): ToolHandler {
 	return (args) => {
+		const target = resolveContextTarget(context, args)
+		if (!target.ok) return target.error
 		const opsValue = args['operations']
 		if (!Array.isArray(opsValue)) {
 			return createToolError('invalid_arguments', 'operations must be an array')
@@ -241,21 +261,23 @@ function createEditContext(context: BuiltInToolContext): ToolHandler {
 				return createToolError('invalid_arguments', `Unknown operation: ${String(opValue)}`)
 			}
 		}
-		const applied = applyEditOperations(context.roleState.history, operations)
+		const applied = applyEditOperations(target.state.history, operations)
 		if (!applied.ok) return applied.error
-		context.roleState.history = applied.history
-		const estimatedTokens = estimateHistoryTokens(context.roleState.history)
+		target.state.history = applied.history
+		const estimatedTokens = estimateHistoryTokens(target.state.history)
+		// The compaction guard (executor.maxCompactionAttempts) bounds the role doing the compacting, so the edited size lands on the caller's list even for a cross-role edit: the guard measures whether this role's edits keep shrinking something, whichever conversation they touched.
 		context.roleState.recentCompactionPromptTokens.push(estimatedTokens)
-		const messages = snapshotMessages(context.roleState.history)
+		const messages = snapshotMessages(target.state.history)
 		const totalContentChars = messages.reduce((sum, m) => sum + m.contentChars + m.reasoningChars, 0)
 		const currentPromptTokens = Math.ceil(totalContentChars / 4)
 		return {
 			kind: 'success',
 			data: {
 				currentPromptTokens,
-				messageCount: context.roleState.history.length,
+				messageCount: target.state.history.length,
 				recentCompactionPromptTokens: context.roleState.recentCompactionPromptTokens.slice(),
 				messages,
+				...(target.roleId !== context.ownRoleId ? { targetRole: target.roleId } : {}),
 			},
 		}
 	}
@@ -311,6 +333,19 @@ function lookupTarget(registry: RoleRegistry, args: Record<string, unknown>): { 
 		return { ok: false, error: createToolError('invalid_arguments', `unknown role instance: ${targetValue}`) }
 	}
 	return { ok: true, entry }
+}
+
+// Resolves whose conversation a context_info/edit_context call operates on: the caller's own state when targetRole is absent (byte-for-byte the original behavior), else the named registry entry. A cross-role target must be registered — a finished role is unregistered and can no longer be compacted — and must not be the caller, which is active rather than suspended.
+function resolveContextTarget(context: BuiltInToolContext, args: Record<string, unknown>): { ok: true; state: RoleState; roleId: string } | { ok: false; error: ToolResult } {
+	if (args['targetRole'] === undefined) {
+		return { ok: true, state: context.roleState, roleId: context.ownRoleId }
+	}
+	const target = lookupTarget(context.roleRegistry, args)
+	if (!target.ok) return target
+	if (target.entry.roleId === context.ownRoleId) {
+		return { ok: false, error: createToolError('invalid_arguments', 'targetRole must name a suspended role instance other than the caller; omit it to inspect or edit your own conversation') }
+	}
+	return { ok: true, state: target.entry.roleState, roleId: target.entry.roleId }
 }
 
 function isInspectionField(value: unknown): value is InspectionField {

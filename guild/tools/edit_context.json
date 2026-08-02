@@ -1,6 +1,6 @@
 {
 	"name": "edit_context",
-	"description": "Mutate the current role's message list to reduce token usage. Supports three operations applied in order: drop (remove a range of messages), strip_reasoning (clear reasoning blocks on a range), and replace (overwrite one message's content). Returns the new estimated prompt tokens and message count.",
+	"description": "Mutate a role's message list to reduce token usage. Supports three operations applied in order: drop (remove a range of messages), strip_reasoning (clear reasoning blocks on a range), and replace (overwrite one message's content). Without targetRole the operations apply to your own conversation; with targetRole they apply to that suspended role instance's conversation. Message indices 0 (system prompt) and 1 (original task) are protected in every operation. Returns the new estimated prompt tokens and message count.",
 	"humanLabel": {
 		"detailed": ["Edit Context"],
 		"friendly": ["Edit Memory"],
@@ -27,6 +27,10 @@
 			"operations"
 		],
 		"properties": {
+			"targetRole": {
+				"type": "string",
+				"description": "Optional role-instance id (for example \"coder-1-4\") of a suspended role whose conversation should be edited. Must name a live instance other than your own. Omit to edit your own conversation."
+			},
 			"operations": {
 				"type": "array",
 				"description": "Ordered list of operations to apply.",
@@ -39,7 +43,7 @@
 						},
 						"range": {
 							"type": "array",
-							"description": "For drop/strip_reasoning: a two-element [start, end] inclusive range of message indices. Ignored for replace.",
+							"description": "For drop/strip_reasoning: a two-element [start, end) range of message indices — from start up to but not including end. Ignored for replace.",
 							"items": {
 								"type": "number"
 							}

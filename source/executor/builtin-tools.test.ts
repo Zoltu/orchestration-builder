@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import type { ContextPolicy, ExecutorConfig, GuildConfig, LogEvent, Message, ModelConfig, RoleDefinition, ToolCall, ToolManifest } from './types.js'
 import { runRole, type EngineDependencies } from './engine.ts'
+import { createContextPressureTracker } from './context-pressure.ts'
 import type { HumanBackend } from './human-backend.ts'
 import { createInterruptQueue } from './interrupts.ts'
 import type { LlmCallResult, LlmCaller } from './llm.ts'
@@ -181,6 +182,7 @@ function makeDeps(llm: FakeLlm, humanBackend: HumanBackend): { deps: EngineDepen
 		humanBackend,
 		roleRegistry: createRoleRegistry(),
 		interruptQueue: createInterruptQueue(),
+		contextPressureTracker: createContextPressureTracker(),
 	}
 	return { deps, events }
 }

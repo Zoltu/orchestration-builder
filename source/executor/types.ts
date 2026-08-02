@@ -28,6 +28,10 @@ export interface ExecutorConfig {
 	maxAgentDepth: number
 	defaultToolTimeoutSeconds: number
 	maxCompactionAttempts: number
+	// Fraction of the effective context budget (see context-pressure.ts) at which a role receives the one-shot pressure notice asking it to write a handoff brief and finish with context_handoff. Optional; the engine applies a default when unset.
+	contextPressureThreshold?: number
+	// The guild role the engine invokes to compact a suspended role's conversation: at depth 0 when the entry role crosses the pressure threshold (it has no parent to hand off to), and at any depth when a request is rejected for context size. Optional; when unset, depth-0 pressure falls back to the handoff notice and rejections fall back to the naive in-place backstop.
+	contextHandlerRole?: string
 	interruptTriggers?: InterruptTriggersConfig
 }
 
@@ -107,6 +111,7 @@ export type ErrorKind =
 	| 'timeout'
 	| 'llm_unavailable'
 	| 'context_budget_exceeded'
+	| 'context_handoff'
 	| 'tool_budget_exceeded'
 	| 'loop_detected'
 	| 'interrupted'

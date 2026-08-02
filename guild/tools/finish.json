@@ -49,7 +49,7 @@
 				"properties": {
 					"kind": {
 						"type": "string",
-						"description": "One of the executor error kinds: invalid_tool_call, unknown_tool, invalid_arguments, timeout, llm_unavailable, context_budget_exceeded, tool_budget_exceeded, token_budget_exceeded, loop_detected, compaction_failed."
+						"description": "One of the executor error kinds: invalid_tool_call, unknown_tool, invalid_arguments, timeout, llm_unavailable, context_budget_exceeded, context_handoff, tool_budget_exceeded, loop_detected, interrupted, compaction_failed."
 					},
 					"message": {
 						"type": "string",

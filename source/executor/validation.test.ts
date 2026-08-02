@@ -39,6 +39,10 @@ describe('boolean guards', () => {
 	test('isResultCard rejects an invalid status', () => {
 		expect(isResultCard({ status: 'ok', summary: 'x' })).toBe(false)
 	})
+	test('isResultCard accepts every declared error kind, including context_handoff', () => {
+		expect(isResultCard({ status: 'error', summary: 'x', error: { kind: 'context_handoff' } })).toBe(true)
+		expect(isResultCard({ status: 'error', summary: 'x', error: { kind: 'not_a_kind' } })).toBe(false)
+	})
 	test('isRunMeta accepts a minimal valid RunMeta', () => {
 		expect(isRunMeta({
 			runId: 'r',
@@ -106,6 +110,27 @@ describe('validate* throws ValidationError with a path-based message', () => {
 				expect(e.message).toMatch(/model\.apiBase/)
 			}
 		}
+	})
+	test('validateGuildConfig accepts a contextPressureThreshold in (0, 1) and rejects values outside it', () => {
+		const withThreshold = (contextPressureThreshold: unknown) => ({
+			...validGuild,
+			executor: { ...validGuild.executor, contextPressureThreshold },
+		})
+		expect(() => validateGuildConfig(withThreshold(0.8))).not.toThrow()
+		expect(() => validateGuildConfig(withThreshold(0.01))).not.toThrow()
+		expect(() => validateGuildConfig(withThreshold(0))).toThrow(/executor\.contextPressureThreshold/)
+		expect(() => validateGuildConfig(withThreshold(1))).toThrow(/executor\.contextPressureThreshold/)
+		expect(() => validateGuildConfig(withThreshold(1.5))).toThrow(/executor\.contextPressureThreshold/)
+		expect(() => validateGuildConfig(withThreshold('high'))).toThrow(/executor\.contextPressureThreshold/)
+	})
+	test('validateGuildConfig accepts a contextHandlerRole string and rejects empty or non-string values', () => {
+		const withHandler = (contextHandlerRole: unknown) => ({
+			...validGuild,
+			executor: { ...validGuild.executor, contextHandlerRole },
+		})
+		expect(() => validateGuildConfig(withHandler('context_manager'))).not.toThrow()
+		expect(() => validateGuildConfig(withHandler(''))).toThrow(/executor\.contextHandlerRole/)
+		expect(() => validateGuildConfig(withHandler(42))).toThrow(/executor\.contextHandlerRole/)
 	})
 	test('validateToolManifest throws on non-string name', () => {
 		expect(() => validateToolManifest({ ...validToolManifest, name: 123 })).toThrow(/name/)

@@ -3,7 +3,9 @@ import { createBuiltInToolHandlers, type BuiltInToolContext } from './builtin-to
 import { createRoleRegistry, type RoleRegistry } from './role-registry.ts'
 import type { RoleState } from './engine.ts'
 import { stubHumanBackend } from './test-fixtures.ts'
-import type { Message } from './types.js'
+import type { ToolHandler } from './tool-dispatch.ts'
+import type { Message, ToolResult } from './types.js'
+import { isObject } from './validation.ts'
 
 function fixtureHistory(): Message[] {
 	return [
@@ -32,18 +34,27 @@ function fixtureRoleState(): RoleState {
 	}
 }
 
-function makeContext(): { context: BuiltInToolContext; registry: RoleRegistry; target: RoleState } {
+function makeContext(): { context: BuiltInToolContext; registry: RoleRegistry; target: RoleState; callerState: RoleState } {
 	const registry = createRoleRegistry()
 	const target = fixtureRoleState()
 	registry.register('coder', 1, undefined, target)
+	const callerState = fixtureRoleState()
+	registry.register('context_manager', 2, undefined, callerState)
 	const context: BuiltInToolContext = {
 		spawnAgent: async () => ({ status: 'success', summary: '' }),
-		roleState: fixtureRoleState(),
+		roleState: callerState,
 		humanBackend: stubHumanBackend,
 		contextWindow: 1000,
 		roleRegistry: registry,
+		ownRoleId: 'context_manager-2-2',
 	}
-	return { context, registry, target }
+	return { context, registry, target, callerState }
+}
+
+function handlerFor(handlers: Record<string, ToolHandler>, name: string): ToolHandler {
+	const handler = handlers[name]
+	if (handler === undefined) throw new Error(`missing built-in handler: ${name}`)
+	return handler
 }
 
 describe('trigger_interrupt', () => {
@@ -148,5 +159,75 @@ describe('inspection tools', () => {
 		expect((await handlers.read_message_window!({ targetRole: 'ghost-0-7', index: 0, field: 'content', start: 0, end: 1 })).kind).toBe('invalid_arguments')
 		expect((await handlers.search_role_blocks!({ targetRole: 'ghost-0-7', pattern: 'x' })).kind).toBe('invalid_arguments')
 		expect((await handlers.recent_role_tool_calls!({ targetRole: 'ghost-0-7' })).kind).toBe('invalid_arguments')
+	})
+})
+
+function dataRecord(result: ToolResult): Record<string, unknown> {
+	if (result.kind !== 'success') throw new Error(`expected a success result, got ${result.kind}`)
+	if (!isObject(result.data)) throw new Error('expected the result data to be an object')
+	return result.data
+}
+
+describe('cross-role context tools', () => {
+	test('edit_context with targetRole applies the operations to the target history and accounts the guard on the caller', async () => {
+		const { context, target, callerState } = makeContext()
+		const handlers = createBuiltInToolHandlers(context)
+		const result = await handlerFor(handlers, 'edit_context')({ targetRole: 'coder-1-1', operations: [{ op: 'drop', range: [2, 4] }] })
+		const data = dataRecord(result)
+		expect(data['targetRole']).toBe('coder-1-1')
+		expect(data['messageCount']).toBe(2)
+		expect(target.history.length).toBe(2)
+		expect(target.history[0]?.role).toBe('system')
+		expect(target.history[1]?.role).toBe('user')
+		// The edited size lands on the caller's compaction-guard list, not the target's.
+		expect(callerState.recentCompactionPromptTokens.length).toBe(1)
+		expect(target.recentCompactionPromptTokens.length).toBe(0)
+	})
+
+	test('context_info with targetRole returns the target conversation; without it returns the caller\u2019s own', async () => {
+		const { context } = makeContext()
+		const handlers = createBuiltInToolHandlers(context)
+		const cross = dataRecord(await handlerFor(handlers, 'context_info')({ targetRole: 'coder-1-1' }))
+		expect(cross['targetRole']).toBe('coder-1-1')
+		const crossMessages = cross['messages']
+		expect(Array.isArray(crossMessages) && crossMessages.length === 4).toBe(true)
+		const self = dataRecord(await handlerFor(handlers, 'context_info')({}))
+		expect('targetRole' in self).toBe(false)
+	})
+
+	test('edit_context and context_info reject an unknown target instance and a self target', async () => {
+		const { context } = makeContext()
+		const handlers = createBuiltInToolHandlers(context)
+		expect((await handlerFor(handlers, 'edit_context')({ targetRole: 'ghost-0-7', operations: [] })).kind).toBe('invalid_arguments')
+		expect((await handlerFor(handlers, 'context_info')({ targetRole: 'ghost-0-7' })).kind).toBe('invalid_arguments')
+		expect((await handlerFor(handlers, 'edit_context')({ targetRole: 'context_manager-2-2', operations: [] })).kind).toBe('invalid_arguments')
+		expect((await handlerFor(handlers, 'context_info')({ targetRole: 'context_manager-2-2' })).kind).toBe('invalid_arguments')
+	})
+
+	test('edit operations must not touch message indices 0 and 1, and a mixed batch rejects atomically', async () => {
+		const { context, target, callerState } = makeContext()
+		const handlers = createBuiltInToolHandlers(context)
+		const edit = handlerFor(handlers, 'edit_context')
+		expect((await edit({ targetRole: 'coder-1-1', operations: [{ op: 'drop', range: [0, 2] }] })).kind).toBe('invalid_arguments')
+		expect((await edit({ targetRole: 'coder-1-1', operations: [{ op: 'drop', range: [1, 3] }] })).kind).toBe('invalid_arguments')
+		expect((await edit({ targetRole: 'coder-1-1', operations: [{ op: 'replace', index: 0, content: 'x' }] })).kind).toBe('invalid_arguments')
+		expect((await edit({ targetRole: 'coder-1-1', operations: [{ op: 'replace', index: 1, content: 'x' }] })).kind).toBe('invalid_arguments')
+		expect((await edit({ targetRole: 'coder-1-1', operations: [{ op: 'strip_reasoning', range: [0, 3] }] })).kind).toBe('invalid_arguments')
+		// The self path is protected the same way.
+		expect((await edit({ operations: [{ op: 'drop', range: [0, 2] }] })).kind).toBe('invalid_arguments')
+		// A batch that mixes a valid operation with a protected one rejects entirely: nothing is applied on either history.
+		expect((await edit({ targetRole: 'coder-1-1', operations: [{ op: 'drop', range: [2, 3] }, { op: 'replace', index: 1, content: 'x' }] })).kind).toBe('invalid_arguments')
+		expect(target.history.length).toBe(4)
+		expect(callerState.history.length).toBe(4)
+	})
+
+	test('edit_context without targetRole edits the caller\u2019s own conversation and carries no targetRole field', async () => {
+		const { context, callerState } = makeContext()
+		const handlers = createBuiltInToolHandlers(context)
+		const result = await handlerFor(handlers, 'edit_context')({ operations: [{ op: 'drop', range: [2, 4] }] })
+		const data = dataRecord(result)
+		expect('targetRole' in data).toBe(false)
+		expect(data['messageCount']).toBe(2)
+		expect(callerState.history.length).toBe(2)
 	})
 })

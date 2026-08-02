@@ -459,6 +459,10 @@ describe('formatLogEvent', () => {
 		expect(formatLogEvent(event('context_compacted', { role: 'coder', droppedMessages: 4, truncatedToolMessages: 0, strippedReasoningMessages: 1, estimatedPromptTokens: 400, contextWindow: 1000 }))).toBe('coder · context compacted by platform')
 	})
 
+	test('context_pressure → role · context pressure — handoff notice sent', () => {
+		expect(formatLogEvent(event('context_pressure', { role: 'coder', promptTokens: 800, effectiveBudget: 900 }))).toBe('coder · context pressure — handoff notice sent')
+	})
+
 	test('role_budget_exceeded → role · role budget exceeded', () => {
 		expect(formatLogEvent(event('role_budget_exceeded', { role: 'coder', phase: 'post_llm', error: { kind: 'compaction_failed' } }))).toBe('coder · role budget exceeded')
 	})
