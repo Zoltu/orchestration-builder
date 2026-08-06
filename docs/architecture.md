@@ -57,7 +57,9 @@ workspace/                          # the user's project (mounted at /workspace)
 │   └── runs/
 │       └── <run_id>/
 │           ├── meta.json           # run metadata, status, final result
-│           └── log.jsonl           # event stream: llm calls, tool calls, errors
+│           ├── log.jsonl           # event stream: llm calls, tool calls, errors
+│           ├── state.json          # checkpoint for restart resumption (deleted on completion)
+│           └── summary.txt         # LLM-generated one-line run summary (UI label; best-effort)
 ├── (project files)
 guild/                              # bundled into the image at /app/guild/
 ├── guild.json                      # current baseline Guild
@@ -71,7 +73,7 @@ The executor ships as a Docker image that runs the long-running executor service
 
 ### Run termination
 
-The executor does not enforce a wall-clock run timeout or a per-role tool-call/token cap. A fixed wall-clock limit is hardware-dependent (it fires on healthy slow-hardware runs or never fires on fast hardware), and cumulative token/tool-call budgets fired on healthy long-horizon work long before the context window filled. The real context-window guardrail is the model endpoint's `context_budget_exceeded` path (see [`docs/reference.md`](reference.md) "Executor runtime"). Run termination is the deployment container's job: `docker stop` (or the orchestrator's own timeout) is the outer boundary that ends a stuck or runaway run. The in-band layer is the interrupt platform (see [`docs/reference.md`](reference.md) "Interrupt platform"): a loop-check cadence invokes a guild handler role (the seed Guild's `loop_detector`) that can redirect or abort a stuck role, and the operator/API interrupt lets the operator inject an inquiry or a plan modification that unwinds to the plan owner.
+The executor does not enforce a wall-clock run timeout or a per-role tool-call/token cap. A fixed wall-clock limit is hardware-dependent (it fires on healthy slow-hardware runs or never fires on fast hardware), and cumulative token/tool-call budgets fired on healthy long-horizon work long before the context window filled. The real context-window guardrail is the model endpoint's `context_budget_exceeded` path (see [`docs/reference.md`](reference.md) "Executor runtime"). Run termination is the deployment container's job: `docker stop` (or the orchestrator's own timeout) is the outer boundary that ends a stuck or runaway run. The in-band layer is the interrupt platform (see [`docs/reference.md`](reference.md) "Interrupt platform"): a loop-check cadence invokes a guild handler role (the seed Guild's `loop_detector`) that can redirect or abort a stuck role, and the operator/API interrupt lets the operator ask a question (answered by a fresh handler role — the seed Guild's `inquiry_responder` — while the run pauses at a safe point) or submit a plan modification that unwinds to the plan owner.
 
 ## Isolation
 

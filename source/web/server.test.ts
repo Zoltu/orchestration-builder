@@ -110,6 +110,11 @@ function readRunMetaById(runId: string): string | null {
 	return rawSnapshotById(runId).metaText
 }
 
+// No fixture run carries a generated summary; a real read would miss the file and return null, so the harness reads null for every run.
+function readRunSummaryById(_runId: string): string | null {
+	return null
+}
+
 function readRunSnapshotStats(runId: string): RunSnapshotStats {
 	const raw = rawSnapshotById(runId)
 	return {
@@ -287,6 +292,7 @@ function createHandlerHarness(): HandlerHarness {
 			runSubmission: submission,
 			readRunSnapshot,
 			readRunMetaById,
+			readRunSummaryById,
 			readRunSnapshotStats,
 			listRunIds,
 			readProjectSettings: settings.read,
@@ -509,6 +515,9 @@ describe('GET /api/runs (list)', () => {
 			effort: null,
 			startTime: '2026-01-01T00:00:00.000Z',
 			endTime: '2026-01-01T00:02:00.000Z',
+			result: null,
+			error: { kind: 'interrupted', message: 'The service stopped while this run was in progress and it could not be resumed (no valid checkpoint).' },
+			summary: null,
 		})
 		expect(list[4]).toEqual({
 			runId: 'run-effort',
@@ -517,6 +526,9 @@ describe('GET /api/runs (list)', () => {
 			effort: 4,
 			startTime: '2026-01-01T00:00:00.000Z',
 			endTime: '2026-01-01T00:01:00.000Z',
+			result: null,
+			error: null,
+			summary: null,
 		})
 		expect(list[7]).toEqual({
 			runId: 'run-2',
@@ -525,6 +537,9 @@ describe('GET /api/runs (list)', () => {
 			effort: null,
 			startTime: '2026-01-01T00:00:00.000Z',
 			endTime: '2026-01-01T00:01:00.000Z',
+			result: { status: 'error', summary: 'failed', artifacts: ['output.txt', 'logs/run.txt'] },
+			error: { kind: 'llm_unavailable', message: 'connection refused' },
+			summary: null,
 		})
 	})
 })

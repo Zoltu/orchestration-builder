@@ -65,7 +65,7 @@ const expectedRoles = [
 	'style_lead', 'style_reviewer',
 	'security_lead', 'security_reviewer',
 	'acceptance_lead', 'acceptance_reviewer',
-	'context_manager', 'recovery', 'loop_detector',
+	'context_manager', 'recovery', 'loop_detector', 'inquiry_responder',
 ] as const
 
 const expectedToolNames = new Set([

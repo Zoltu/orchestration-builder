@@ -1,4 +1,4 @@
-/* Visual system for the web client. Design tokens (color palette, spacing scale, radii, shadows, fonts) are declared once on :root and referenced uniformly so the panels read as one interface rather than a flat list of boxes. The layout is a single stacked column on narrow viewports and a sticky run-list sidebar plus a focal run-view column on wide ones; the active run's summary panel carries a subtle accent ring so it reads as the focal point. */
+/* Visual system for the web client. Design tokens (color palette, spacing scale, radii, shadows, fonts) are declared once on :root and referenced uniformly so the screens read as one interface. The layout is a single-screen console: a slim top bar above one full-viewport screen — Watch (the flow/sequence stage), History (the run browser), or Compose (the new-task hero) — and the page itself never scrolls. */
 
 :root {
 	--color-bg: #f6f6f8;
@@ -41,8 +41,6 @@
 	--radius-sm: 4px;
 	--radius: 6px;
 	--radius-lg: 8px;
-	--shadow-panel: 0 1px 2px rgba(16, 24, 40, 0.04);
-	--shadow-focal: 0 1px 3px rgba(31, 111, 235, 0.08), 0 0 0 1px var(--color-accent-border);
 	--font-mono: ui-monospace, SFMono-Regular, Menlo, monospace;
 	--font-body: system-ui, -apple-system, sans-serif;
 }
@@ -138,77 +136,155 @@ body {
 	outline-offset: 1px;
 }
 
-header {
-	padding: var(--space-4) var(--space-5);
-	background: var(--color-header-bg);
-	color: var(--color-header-text);
+/* The app shell is a full-viewport flex column: the slim top bar on top and one screen (watch / history / compose) filling the rest. The page itself never scrolls; scrolling lives inside the screens that need it (the history list, the sequence view's timeline). */
+.app-shell {
+	display: flex;
+	flex-direction: column;
+	height: 100vh;
+	height: 100dvh;
 }
 
-header h1 {
-	margin: 0;
-	font-size: 1.25rem;
+/* The top bar is a single slim dark band carrying everything ambient: the wordmark, the live status pill(s), the viewed run's identity, and the nav (New task / History / mute). It is dark in both themes, so its status pill colors are the dark-palette signal values regardless of the theme tokens. */
+.topbar {
+	flex: 0 0 auto;
+	display: flex;
+	align-items: center;
+	flex-wrap: wrap;
+	gap: var(--space-2) var(--space-4);
+	padding: var(--space-2) var(--space-4);
+	background: var(--color-header-bg);
+	color: var(--color-header-text);
+	font-size: 0.85rem;
+}
+
+.topbar-wordmark {
 	font-weight: 600;
+	font-size: 0.95rem;
+	white-space: nowrap;
+}
+
+.status-pill {
+	display: inline-flex;
+	align-items: center;
+	padding: 0.05rem var(--space-2);
+	border: 1px solid rgba(240, 244, 248, 0.35);
+	border-radius: 999px;
+	font-size: 0.75rem;
+	white-space: nowrap;
+	opacity: 0.9;
+}
+
+.status-pill-running,
+.status-pill-unknown,
+.status-pill-live {
+	color: #79b8ff;
+	border-color: #79b8ff;
+}
+
+.status-pill-success {
+	color: #3fb950;
+	border-color: #3fb950;
+}
+
+.status-pill-error,
+.status-pill-interrupted,
+.status-pill-needs_clarification {
+	color: #f85149;
+	border-color: #f85149;
+}
+
+.status-pill-warn {
+	color: var(--color-warn);
+	border-color: var(--color-warn);
+	opacity: 1;
+}
+
+.status-pill-clickable {
+	cursor: pointer;
+}
+
+.status-pill-clickable:hover {
+	text-decoration: underline;
+}
+
+/* The viewed run's identity: a primary line (the task's first line) and microcopy (run id, effort, relative start). It shrinks before the nav does so a long first line ellipsizes rather than wrapping the bar. */
+.topbar-run {
+	display: flex;
+	flex-direction: column;
+	min-width: 0;
+	flex: 1 1 auto;
+	line-height: 1.3;
+}
+
+.topbar-run-primary {
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	font-weight: 500;
+}
+
+.topbar-run-meta {
+	font-size: 0.72rem;
+	opacity: 0.65;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.topbar-nav {
+	display: flex;
+	align-items: center;
+	gap: var(--space-2);
+	margin-left: auto;
+	flex: 0 0 auto;
+}
+
+.nav-button {
+	padding: 0.25rem var(--space-3);
+	border: 1px solid rgba(240, 244, 248, 0.35);
+	border-radius: var(--radius-sm);
+	background: transparent;
+	color: var(--color-header-text);
+	font-size: 0.8rem;
+	font-weight: 500;
+	cursor: pointer;
+	white-space: nowrap;
+}
+
+.nav-button:hover:not(:disabled) {
+	background: rgba(240, 244, 248, 0.12);
+}
+
+.nav-button.is-active {
+	background: rgba(240, 244, 248, 0.2);
+	border-color: var(--color-header-text);
+}
+
+.nav-button:disabled {
+	opacity: 0.45;
+	cursor: default;
 }
 
 .mute-toggle {
 	display: inline-flex;
 	align-items: center;
-	gap: var(--space-2);
-	margin: var(--space-3) 0 0;
+	gap: var(--space-1);
 	font-size: 0.8rem;
 	opacity: 0.85;
 	cursor: pointer;
 	user-select: none;
+	white-space: nowrap;
 }
 
 .mute-toggle input {
 	cursor: pointer;
 }
 
-.status {
-	margin: var(--space-1) 0 0;
-	font-size: 0.9rem;
-	opacity: 0.85;
-}
-
 main {
-	padding: var(--space-5);
-	display: grid;
-	gap: var(--space-5);
-	grid-template-columns: minmax(0, 1fr);
-	align-items: start;
-}
-
-.panel {
-	background: var(--color-surface);
-	border: 1px solid var(--color-border);
-	border-radius: var(--radius);
-	padding: var(--space-4) var(--space-5);
-	min-width: 0;
-	box-shadow: var(--shadow-panel);
-}
-
-.panel h2 {
-	margin: 0 0 var(--space-3);
-	font-size: 1rem;
-	font-weight: 600;
-}
-
-dl {
-	margin: 0;
-	display: grid;
-	grid-template-columns: max-content 1fr;
-	gap: var(--space-1) var(--space-4);
-}
-
-dt {
-	font-weight: 600;
-}
-
-dd {
-	margin: 0;
-	min-width: 0;
-	overflow-wrap: anywhere;
+	flex: 1 1 auto;
+	min-height: 0;
+	display: flex;
+	flex-direction: column;
 }
 
 ul,
@@ -235,21 +311,50 @@ li:last-child {
 	white-space: pre-wrap;
 }
 
-.status-unavailable {
-	color: var(--color-warn);
+/* The compose screen is the hero when the service is idle: drafting a task is the primary activity when nothing runs, so the editor gets a centered column and a tall field. The form itself is a vertical stack: a large multiline task editor, then a controls row pairing the effort slider with the submit button. Enter inserts a newline and Tab inserts a tab character (handled in app.js), so submission is the button or Ctrl/Cmd+Enter — the task is free-form Markdown a user may draft at length. */
+#compose-screen {
+	flex: 1 1 auto;
+	min-height: 0;
+	overflow-y: auto;
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	padding: var(--space-6) var(--space-5);
 }
 
-/* The create-run form is a vertical stack: a large multiline task editor, then a controls row pairing the effort slider with the submit button. Enter inserts a newline and Tab inserts a tab character (handled in app.js), so submission is the button or Ctrl/Cmd+Enter — the task is free-form Markdown a user may draft at length. */
+.compose-hero {
+	width: min(52rem, 100%);
+	display: flex;
+	flex-direction: column;
+	flex: 1 1 auto;
+	min-height: 0;
+}
+
+.compose-heading {
+	margin: 0 0 var(--space-2);
+	font-size: 1.5rem;
+	font-weight: 600;
+}
+
+.compose-sub {
+	margin: 0 0 var(--space-5);
+	color: var(--color-text-muted);
+	font-size: 0.95rem;
+}
+
 .create-run-form {
 	display: flex;
 	flex-direction: column;
 	gap: var(--space-3);
+	flex: 1 1 auto;
+	min-height: 0;
 }
 
 .create-run-form textarea {
 	width: 100%;
-	min-height: 8rem;
-	resize: vertical;
+	flex: 1 1 auto;
+	min-height: 12rem;
+	resize: none;
 	padding: var(--space-3);
 	border: 1px solid var(--color-border-strong);
 	border-radius: var(--radius-sm);
@@ -303,70 +408,137 @@ li:last-child {
 	opacity: 0.7;
 }
 
-#run-list {
-	margin: 0;
-	padding: 0;
-	list-style: none;
-	min-width: 0;
-}
-
-/* A run row is a vertical stack (meta line, task, actions line) rather than one cramped flex row, so a long task can wrap on its own line instead of fighting the run id, status, effort badge, and re-run button for horizontal space in the narrow sidebar. */
-#run-list li {
+/* The History screen is the full-screen run browser. Rows stay one line tall regardless of how large the underlying prompt or result is — the primary line ellipsizes — and the full content lives in the per-row expanded details. The list scrolls inside the screen; the page does not. */
+#history-screen {
+	flex: 1 1 auto;
+	min-height: 0;
 	display: flex;
 	flex-direction: column;
-	gap: var(--space-1);
-	cursor: pointer;
-	min-width: 0;
-	padding: var(--space-3);
-	border-radius: var(--radius-sm);
-	border-bottom: 1px solid var(--color-surface-sunken);
 }
 
-#run-list li.selected {
-	background: var(--color-accent-soft);
+.history-scroll {
+	flex: 1 1 auto;
+	min-height: 0;
+	overflow-y: auto;
+	padding: var(--space-4) var(--space-5);
 }
 
-/* The active (in-progress) run is the focal point of the list: a calm accent bar on the leading edge marks it without competing with the selected-row tint. The two states compose when the active run is also the selected one. */
-#run-list li.is-active {
-	box-shadow: inset 3px 0 0 var(--color-accent);
-	padding-left: calc(var(--space-3) + 3px);
+#history-list {
+	margin: 0 auto;
+	padding: 0;
+	list-style: none;
+	max-width: 64rem;
 }
 
-#run-list .empty {
-	cursor: default;
+.history-empty {
+	margin: var(--space-6) auto;
+	max-width: 64rem;
 	color: var(--color-text-subtle);
 	font-style: italic;
 }
 
-.run-meta-row {
+.history-row {
 	display: flex;
-	align-items: baseline;
-	gap: var(--space-2);
 	flex-wrap: wrap;
-}
-
-.run-actions-row {
-	display: flex;
 	align-items: center;
 	gap: var(--space-2);
-	margin-top: var(--space-1);
+	padding: var(--space-2) var(--space-3);
+	border-bottom: 1px solid var(--color-surface-sunken);
+	border-radius: var(--radius-sm);
 }
 
-.run-actions-row .rerun-button {
-	margin-left: auto;
+.history-row.is-selected {
+	background: var(--color-accent-soft);
 }
 
-.run-id {
-	font-family: var(--font-mono);
-	font-size: 0.8rem;
-	color: var(--color-text-muted);
-	flex: 0 0 auto;
+.history-row-main {
+	flex: 1 1 auto;
+	display: flex;
+	align-items: center;
+	gap: var(--space-3);
 	min-width: 0;
+	cursor: pointer;
+	padding: var(--space-1) 0;
+}
+
+.history-primary {
+	flex: 1 1 auto;
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	font-size: 0.9rem;
+}
+
+.history-when {
+	flex: 0 0 auto;
+	font-size: 0.78rem;
+	color: var(--color-text-subtle);
+	white-space: nowrap;
+}
+
+.history-expand {
+	flex: 0 0 auto;
+	border: 1px solid var(--color-border);
+	border-radius: var(--radius-sm);
+	background: var(--color-surface);
+	color: var(--color-text-muted);
+	font-size: 0.75rem;
+	padding: 0.15rem var(--space-2);
+	cursor: pointer;
+	white-space: nowrap;
+}
+
+.history-expand:hover {
+	background: var(--color-accent-soft);
+	border-color: var(--color-accent);
+	color: var(--color-accent);
+}
+
+/* The expanded details give large prompts and results their room: exact run meta as muted microcopy, then labeled full-length sections. Agent prose (task, result, error) renders through the sanitized Markdown pipeline. */
+.history-details {
+	flex: 1 1 100%;
+	padding: var(--space-2) var(--space-3) var(--space-3);
+	border-top: 1px dashed var(--color-border);
+	display: flex;
+	flex-direction: column;
+	gap: var(--space-2);
+}
+
+.history-details-meta {
+	margin: 0;
+	font-family: var(--font-mono);
+	font-size: 0.75rem;
+	color: var(--color-text-subtle);
+	overflow-wrap: anywhere;
+}
+
+.history-details-heading {
+	margin: var(--space-1) 0 0;
+	font-size: 0.72rem;
+	font-weight: 600;
+	text-transform: uppercase;
+	letter-spacing: 0.04em;
+	color: var(--color-text-subtle);
+}
+
+.history-details-text {
+	font-size: 0.9rem;
+}
+
+.history-details-error {
+	padding: var(--space-2) var(--space-3);
+	border: 1px solid var(--color-error);
+	border-radius: var(--radius-sm);
+	background: var(--color-error-soft);
+	color: var(--color-error);
+	font-size: 0.9rem;
 }
 
 .run-status {
 	flex: 0 0 auto;
 	font-size: 0.8rem;
+	white-space: nowrap;
 }
 
 .run-status-unknown,
@@ -382,18 +554,6 @@ li:last-child {
 .run-status-interrupted,
 .run-status-needs_clarification {
 	color: var(--color-error);
-}
-
-/* The task is the run-list's primary content: it sits on its own line, rendered as sanitized Markdown (the same task field the per-run view renders) and wrapped so a long task reads in full rather than truncating or wrapping badly across a single cramped row. */
-#run-list .run-task {
-	margin: var(--space-1) 0;
-	font-size: 0.88rem;
-	color: var(--color-text-muted);
-	overflow-wrap: anywhere;
-}
-
-#run-list .run-task.markdown p {
-	margin: 0.15rem 0;
 }
 
 .rerun-button {
@@ -418,83 +578,7 @@ li:last-child {
 	cursor: default;
 }
 
-.current-activity {
-	margin: 0 0 var(--space-3);
-	font-size: 0.9rem;
-	color: var(--color-accent);
-}
-
-.current-activity:empty {
-	display: none;
-}
-
-.budgets {
-	display: flex;
-	flex-wrap: wrap;
-	gap: var(--space-2) var(--space-5);
-	margin: 0 0 var(--space-3);
-	font-size: 0.85rem;
-	color: var(--color-text-muted);
-}
-
-.budget-budget {
-	white-space: nowrap;
-}
-
-.budget-token-detail {
-	display: inline-flex;
-	flex-wrap: wrap;
-	gap: 0.3rem var(--space-3);
-}
-
-.status-clickable {
-	cursor: pointer;
-}
-
-.status-clickable:hover {
-	text-decoration: underline;
-}
-
-.run-error {
-	margin-bottom: var(--space-3);
-}
-
-.run-error:empty {
-	display: none;
-}
-
-.error-text {
-	padding: var(--space-2) var(--space-3);
-	border: 1px solid var(--color-error);
-	border-radius: var(--radius-sm);
-	background: var(--color-error-soft);
-	color: var(--color-error);
-	font-size: 0.9rem;
-}
-
-.run-artifacts {
-	margin-bottom: var(--space-3);
-}
-
-.run-artifacts:empty {
-	display: none;
-}
-
-.artifacts-heading {
-	font-weight: 600;
-	font-size: 0.85rem;
-	color: var(--color-text-muted);
-	padding: 0.2rem 0;
-	border-bottom: none;
-}
-
-.artifact {
-	font-family: var(--font-mono);
-	font-size: 0.82rem;
-	color: var(--color-text-muted);
-}
-
-/* The interrupt form lives inside the run summary as the action surface for the run in flight. It reuses the create-run form's control language (textarea, accent button) at a smaller scale; the plan-modification warning reads in the error tone because that mode aborts active work. */
+/* The interrupt form lives in the stage-scoped interrupt modal as the action surface for the run in flight. It reuses the create-run form's control language (textarea, accent button) at a smaller scale; the plan-modification warning reads in the error tone because that mode aborts active work. */
 .interrupt-form-wrap {
 	display: flex;
 	flex-direction: column;
@@ -502,11 +586,6 @@ li:last-child {
 	margin-top: var(--space-3);
 	padding-top: var(--space-3);
 	border-top: 1px solid var(--color-border);
-}
-
-.interrupt-form-wrap h3 {
-	margin: 0;
-	font-size: 0.9rem;
 }
 
 .interrupt-mode {
@@ -585,11 +664,9 @@ li:last-child {
 	color: var(--color-text-muted);
 }
 
-/* The interrupt history lists what the operator sent (questions and plan changes) and what the run did with each. It sits above the interrupt form in the run summary so the answer to a question appears right where the question was sent. */
+/* The interrupt history lists what the operator sent (questions and plan changes) and what the run did with each. It sits above the interrupt form in the modal so the answer to a question appears right where the question was sent. */
 .interrupt-history {
 	margin-top: var(--space-3);
-	padding-top: var(--space-3);
-	border-top: 1px solid var(--color-border);
 }
 
 .interrupt-history h3 {
@@ -841,11 +918,6 @@ li:last-child {
 	font-weight: 600;
 }
 
-/* The error message keeps the error block's red tint; nested Markdown (a code fence in an error, a heading) is framed so it still reads as a document. */
-.error-text .markdown {
-	font-size: 0.9rem;
-}
-
 /* Question context is a short, muted aside; tighten its Markdown spacing so a one-line context does not balloon. */
 .question-context.markdown {
 	font-size: 0.85rem;
@@ -855,40 +927,84 @@ li:last-child {
 	margin: 0.15rem 0;
 }
 
-/* Wide-viewport layout: the run list becomes a sticky sidebar and the run view panels flow in a focal column to its right, led by the new-run editor. The flow-graph run view is the focal centerpiece (it carries the accent focal ring); the run summary sits below it as a supporting read. Below this breakpoint everything stacks in source order (new-run editor, run list, run view), which never produces a horizontal scrollbar because every column is minmax(0, …) and every text surface wraps. */
-@media (min-width: 64rem) {
-	main {
-		grid-template-columns: 24rem minmax(0, 1fr);
-		grid-template-areas:
-			'runs   submit'
-			'runs   flow'
-			'runs   summary';
-	}
-	#runs-panel {
-		grid-area: runs;
-		position: sticky;
-		top: var(--space-5);
-		align-self: start;
-		max-height: calc(100vh - 2 * var(--space-5));
-		display: flex;
-		flex-direction: column;
-	}
-	#run-list {
-		overflow-y: auto;
-		flex: 1 1 auto;
-		min-height: 0;
-	}
-	#submit-panel {
-		grid-area: submit;
-	}
-	/* The flow-graph run view is the focal centerpiece; it carries the accent focal ring, and the summary panel below it is a supporting read. */
-	#flow-panel {
-		grid-area: flow;
-		box-shadow: var(--shadow-focal);
-	}
-	#run-summary {
-		grid-area: summary;
-	}
+/* The watch screen fills the viewport below the top bar: a compact controls row, the flex-filling stage canvas, and the now-caption. The stage is the focal surface — it carries the sunken canvas background and grows to whatever space is available, so the flow or sequence view is what the screen is about. The page never scrolls; the sequence view's timeline scrolls inside the stage. */
+#watch-screen {
+	flex: 1 1 auto;
+	min-height: 0;
+	display: flex;
+	flex-direction: column;
+	gap: var(--space-2);
+	padding: var(--space-3) var(--space-4);
+}
+
+.stage-controls {
+	display: flex;
+	align-items: center;
+	flex-wrap: wrap;
+	gap: var(--space-2) var(--space-3);
+}
+
+/* The dev harness's `margin-left: auto` (on `.pb-view-toggle` below) is neutralized here so the two controls sit at the row's start rather than the toggle pushing the tier control to the far edge. */
+#watch-screen .pb-view-toggle {
+	margin-left: 0;
+}
+
+#watch-screen .pb-cost-strip {
+	margin: 0;
+}
+
+.interrupt-open-button {
+	margin-left: auto;
+	padding: 0.25rem var(--space-3);
+	border: 1px solid var(--color-border-strong);
+	border-radius: var(--radius-sm);
+	background: var(--color-surface);
+	color: var(--color-text);
+	font-size: 0.8rem;
+	font-weight: 500;
+	cursor: pointer;
+	white-space: nowrap;
+}
+
+.interrupt-open-button:hover {
+	background: var(--color-accent-soft);
+	border-color: var(--color-accent);
+	color: var(--color-accent);
+}
+
+/* The stage canvas: the flow SVG scales to fill it (viewBox + preserveAspectRatio), the sequence view's scroll container scrolls within it, and the per-run-view modals overlay it (`.pb-flow` is `position: relative`). */
+#watch-screen .flow-stage {
+	flex: 1 1 auto;
+	min-height: 0;
+	display: flex;
+	flex-direction: column;
+	background: var(--color-surface-sunken);
+	border: 1px solid var(--color-border);
+	border-radius: var(--radius);
+	overflow: hidden;
+}
+
+#watch-screen .pb-sequence-scroll {
+	overflow: auto;
+	flex: 1 1 auto;
+	min-height: 0;
+}
+
+.flow-tier-control {
+	display: inline-flex;
+	align-items: center;
+	gap: var(--space-1);
+	font-size: 0.8rem;
+	color: var(--color-text-muted);
+}
+
+.flow-tier-control select {
+	font: inherit;
+	color: var(--color-text);
+	background: var(--color-surface);
+	border: 1px solid var(--color-border);
+	border-radius: var(--radius-sm);
+	padding: 0.1rem var(--space-1);
 }
 
 /* --- Flow-graph SVG primitives --------------------------------------------- */
@@ -1018,12 +1134,6 @@ li:last-child {
 	stroke-dasharray: 3 3;
 }
 
-/* An inquiry (operator question or its answer) is a blue dashed reference line between the human and the run's root role: blue because it travels toward the recipient like any forward flow, dashed because it is a message, not an in-flight call. A question still waiting for its answer overrides this with the marching flow class (graph-edge--flowing, which carries the same accent and animates). */
-.flow-edge--inquiry .graph-edge {
-	stroke: var(--svg-flow-accent);
-	stroke-dasharray: 3 3;
-}
-
 /* --- Flow view ------------------------------------------------------------- */
 /* The two-component flow view rendered as a single shared SVG: a compact history strip (small nodes, one per role/tool/"You" that has ever run, cumulative stats) at the top, and a spacious active-flow main area (nodes/edges laid out left-to-right by call depth) below it, separated by a gap. Sharing one SVG is what makes the depart animation work — a node leaving the main area travels to its top-bar slot in the shared coordinate space, so the travel lands on the slot and the counter increment reads as the node arriving. The SVG sizes to its viewBox and fits the container via preserveAspectRatio. Colors reuse the --svg-* tokens so the flow follows the light/dark theme with the rest of the page. */
 
@@ -1084,49 +1194,6 @@ li:last-child {
 	font-weight: 500;
 	color: var(--color-accent);
 	text-align: center;
-}
-
-/* --- Product run-view layout (flow-graph centerpiece) ----------------------- */
-/* The product client mounts the flow/sequence views in a focal panel; the stage and controls use the shared `.pb-*` classes (the cost strip, now caption, view toggle, and `.pb-flow` overlay context). */
-
-/* The flow area is a flex column with a minimum height so the centerpiece reads as a stage even on a one-node frame; the SVG fills it (`.flow-view-svg` is `flex: 1 1 auto`) and the per-run-view modals overlay it (`.pb-flow` is `position: relative`). */
-#flow-panel .flow-stage {
-	display: flex;
-	flex-direction: column;
-	min-height: 18rem;
-}
-
-/* The controls row above the stage: the Flow/Sequence segmented toggle and the label-tier select. The dev harness's `margin-left: auto` (on `.pb-view-toggle` above) is neutralized here so the two controls sit at the row's start rather than the toggle pushing the tier control to the far edge. */
-.flow-controls {
-	display: flex;
-	align-items: center;
-	gap: var(--space-3);
-	margin-bottom: var(--space-2);
-}
-#flow-panel .pb-view-toggle {
-	margin-left: 0;
-}
-.flow-tier-control {
-	display: inline-flex;
-	align-items: center;
-	gap: var(--space-1);
-	font-size: 0.8rem;
-	color: var(--color-text-muted);
-}
-.flow-tier-control select {
-	font: inherit;
-	color: var(--color-text);
-	background: var(--color-surface);
-	border: 1px solid var(--color-border);
-	border-radius: var(--radius-sm);
-	padding: 0.1rem var(--space-1);
-}
-
-/* The sequence view lives in a vertical scroll container inside the stage so a long timeline scrolls within the panel rather than growing the page; the flow view mounts directly because it never overflows. */
-#flow-panel .pb-sequence-scroll {
-	overflow: auto;
-	flex: 1 1 auto;
-	min-height: 0;
 }
 
 /* The placeholder shown before the guild config or the first flow frame lands, centered in the stage so the empty state reads as a stage awaiting content rather than a collapsed panel. */
@@ -1365,6 +1432,118 @@ li:last-child {
 	}
 }
 
+/* --- Interrupt modal -------------------------------------------------------- */
+/* A stage-scoped overlay (the question/result modal pattern: containing block is `.pb-flow`) pairing the interrupt history with the interrupt form, so the operator reviews earlier exchanges in the same place they send a new one. Reachable only while viewing the active run. */
+
+.interrupt-modal-overlay {
+	position: absolute;
+	inset: 0;
+	z-index: 20;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+}
+
+.interrupt-modal-backdrop {
+	position: absolute;
+	inset: 0;
+	background: rgba(13, 17, 23, 0.55);
+	backdrop-filter: blur(2px);
+	cursor: pointer;
+}
+
+.interrupt-modal-card {
+	position: relative;
+	width: min(38rem, calc(100% - 2 * var(--space-5)));
+	max-height: calc(100% - 2 * var(--space-5));
+	overflow: auto;
+	padding: var(--space-5);
+	border-radius: var(--radius-lg);
+	background: var(--color-surface);
+	border: 1px solid var(--color-accent);
+	box-shadow: 0 12px 32px rgba(16, 24, 40, 0.28), 0 0 0 4px var(--color-accent-soft);
+	display: flex;
+	flex-direction: column;
+}
+
+.interrupt-modal-heading {
+	margin: 0;
+	font-size: 0.8rem;
+	font-weight: 600;
+	text-transform: uppercase;
+	letter-spacing: 0.04em;
+	color: var(--color-accent);
+}
+
+.interrupt-modal-actions {
+	margin-top: var(--space-4);
+	display: flex;
+	justify-content: center;
+}
+
+.interrupt-modal-close {
+	padding: var(--space-2) var(--space-4);
+	border: none;
+	border-radius: var(--radius-sm);
+	background: var(--color-accent);
+	color: #ffffff;
+	font-weight: 500;
+	cursor: pointer;
+}
+
+/* --- Interrupt answer card --------------------------------------------------- */
+/* The just-arrived answer to an interrupt question, pinned over the stage's top-right corner: unmissable on arrival, but not a modal — the run view stays visible and interactive beneath it. It sits above the inspector card (z-index 15) and below the modals (20). */
+
+.interrupt-answer-card {
+	position: absolute;
+	top: var(--space-3);
+	right: var(--space-3);
+	z-index: 18;
+	width: min(26rem, calc(100% - 2 * var(--space-5)));
+	max-height: calc(100% - 2 * var(--space-5));
+	overflow: auto;
+	padding: var(--space-4);
+	border-radius: var(--radius-lg);
+	background: var(--color-surface);
+	border: 1px solid var(--color-accent);
+	box-shadow: 0 8px 24px rgba(16, 24, 40, 0.22), 0 0 0 4px var(--color-accent-soft);
+	display: flex;
+	flex-direction: column;
+	gap: var(--space-2);
+}
+
+.interrupt-answer-card-heading {
+	margin: 0;
+	font-size: 0.75rem;
+	font-weight: 600;
+	text-transform: uppercase;
+	letter-spacing: 0.04em;
+	color: var(--color-accent);
+}
+
+.interrupt-answer-card-question {
+	margin: 0;
+	font-size: 0.85rem;
+	color: var(--color-text-muted);
+	font-style: italic;
+}
+
+.interrupt-answer-card-answer {
+	font-size: 0.92rem;
+}
+
+.interrupt-answer-card-close {
+	align-self: flex-end;
+	padding: var(--space-1) var(--space-3);
+	border: none;
+	border-radius: var(--radius-sm);
+	background: var(--color-accent);
+	color: #ffffff;
+	font-size: 0.8rem;
+	font-weight: 500;
+	cursor: pointer;
+}
+
 /* --- Result modal ----------------------------------------------------------- */
 /* A per-run-view overlay that presents a run's terminal result (success/error/needs-clarification). It mirrors the question modal's run-view-scoped overlay (containing block is `.pb-flow`, so the backdrop covers the flow area and the centered card sits over it) so a future multi-run world can switch away and back. The card's accent border follows the outcome — accent blue for a successful or needs-clarification result, calibrated error red for a failure — and the result summary renders as sanitized Markdown while artifacts stay plain text paths. On error, the raw error message renders as sanitized Markdown under an honest framing line, with a copy-raw button that hands the full error object (including the hidden `kind`) to the operator as JSON. Colors read the visual tokens so the modal follows the light/dark theme; the red is the calibrated --color-error token (never pure #ff0000). */
 
@@ -1432,6 +1611,15 @@ li:last-child {
 
 .result-modal-status--needs_clarification {
 	color: var(--color-warn);
+}
+
+/* The technical meta line (run id, effort, duration, tool calls; exact timestamps on the hover title): muted microcopy for advanced users, below the status headline so the result summary stays the primary read. */
+.result-modal-meta {
+	margin: calc(-1 * var(--space-3)) 0 var(--space-4);
+	font-size: 0.78rem;
+	font-variant-numeric: tabular-nums;
+	color: var(--color-text-subtle);
+	overflow-wrap: anywhere;
 }
 
 .result-modal-summary {
@@ -1826,18 +2014,6 @@ li:last-child {
 	animation: graph-edge-flow 0.8s linear infinite;
 }
 
-/* An inquiry (operator question or its answer) is a blue dashed reference line, like the flow view's inquiry edge: a message, not an in-flight call. A question still waiting for its answer marches in the same accent with the shared flow keyframe. */
-.seq-message--inquiry {
-	stroke: var(--svg-flow-accent);
-	stroke-dasharray: 3 3;
-}
-
-.seq-message--inquiry-flowing {
-	stroke: var(--svg-flow-accent);
-	stroke-dasharray: 6 4;
-	animation: graph-edge-flow 0.8s linear infinite;
-}
-
 .seq-message--error {
 	stroke: var(--svg-error);
 	stroke-dasharray: 6 4;
@@ -1926,6 +2102,12 @@ li:last-child {
 .seq-message-group,
 .seq-node {
 	cursor: help;
+}
+
+/* The invisible hover band behind each message row: unpainted but hit-active, so the inspector opens from anywhere on the row instead of only on the 1.4px line. */
+.seq-hit-area {
+	fill: none;
+	pointer-events: all;
 }
 
 /* Hover highlights a message's line in the theme accent so the operator can see which row the pointer rests on before the tooltip card opens. The highlight is token-driven so it reads identically in light and dark; it layers over the line's settled/active stroke only while the pointer is over that row. */

@@ -171,23 +171,6 @@ function Fetch(payload) {
 	return [runFetch, payload]
 }
 
-function runFlash(_dispatch, _payload) {
-	const panel = document.getElementById('questions-panel')
-	if (panel === null) return
-	// Web Animations API replays cleanly on every call, so a second question arriving mid-flash re-triggers it without class-list juggling.
-	panel.animate(
-		[
-			{ background: '#fff1f0', borderColor: '#cf222e', boxShadow: '0 0 0 4px rgba(207, 34, 46, 0.35)' },
-			{ background: '#ffffff', borderColor: '#e2e2e7', boxShadow: '0 0 0 0 rgba(207, 34, 46, 0)' },
-		],
-		{ duration: 1000, easing: 'ease-out' },
-	)
-}
-
-function Flash() {
-	return [runFlash, null]
-}
-
 function runBeep(_dispatch, _payload) {
 	const ctx = audioContext
 	if (ctx === null || ctx.state !== 'running') return
@@ -269,6 +252,26 @@ function GotRunList(state, payload) {
 	return nextState
 }
 
+// The newest interrupt-question answer the operator has not been shown yet, or null. Keys are run-scoped (`runId|askedAt`) so one map serves every run without per-run resets; a run's first read baselines its already-answered inquiries so opening an old run never pops stale answers.
+function latestUnshownAnswer(interrupts, runId, shownInterruptAnswerKeys) {
+	let latest = null
+	for (const entry of interrupts) {
+		if (entry.kind !== 'inquiry' || entry.answer === null) continue
+		if (shownInterruptAnswerKeys[`${runId}|${entry.askedAt}`] === true) continue
+		latest = entry
+	}
+	return latest
+}
+
+function answeredInquiryKeys(interrupts, runId) {
+	const keys = []
+	for (const entry of interrupts) {
+		if (entry.kind !== 'inquiry' || entry.answer === null) continue
+		keys.push(`${runId}|${entry.askedAt}`)
+	}
+	return keys
+}
+
 function GotSelectedRun(state, payload) {
 	const status = payload.status
 	const ok = payload.ok
@@ -289,7 +292,21 @@ function GotSelectedRun(state, payload) {
 	const runId = typeof body.runId === 'string' ? body.runId : state.selectedRunId
 	const resultModalOpen = isCompletionTransition && state.resultShownForRun !== runId ? true : state.resultModalOpen
 	const resultShownForRun = isCompletionTransition ? runId : state.resultShownForRun
-	return { ...state, selectedRunView: body, selectedRunStatus: body.status, resultModalOpen, resultShownForRun, serverAvailable: true }
+
+	const interrupts = Array.isArray(body.interrupts) ? body.interrupts : []
+	const shownInterruptAnswerKeys = { ...state.shownInterruptAnswerKeys }
+	let interruptAnswerCard = state.interruptAnswerCard
+	if (previousStatus === null) {
+		for (const key of answeredInquiryKeys(interrupts, runId)) shownInterruptAnswerKeys[key] = true
+	} else {
+		const newAnswer = latestUnshownAnswer(interrupts, runId, shownInterruptAnswerKeys)
+		if (newAnswer !== null) {
+			for (const key of answeredInquiryKeys(interrupts, runId)) shownInterruptAnswerKeys[key] = true
+			interruptAnswerCard = { question: newAnswer.message, answer: newAnswer.answer, role: newAnswer.role }
+		}
+	}
+
+	return { ...state, selectedRunView: body, selectedRunStatus: body.status, resultModalOpen, resultShownForRun, interruptAnswerCard, shownInterruptAnswerKeys, serverAvailable: true }
 }
 
 function GotQuestions(state, payload) {
@@ -318,9 +335,9 @@ function GotQuestions(state, payload) {
 		// A genuinely new question opens the per-run-view modal so it is unmissable; dismissing it leaves the flow view's Question affordance on the answerer node for re-entry. The modal is view-side state, not model state: the live model's ask_human call is what the flow view renders, this only gates the overlay.
 		questionModalOpen: hasNew ? true : state.questionModalOpen,
 	}
-	// Flash always on a genuinely new question; beep only when not muted. Falsy effects are ignored by hyperapp, so the conditionals inline cleanly.
+	// Beep on a genuinely new question unless muted; the modal itself opens via questionModalOpen above. Falsy effects are ignored by hyperapp, so the conditional inlines cleanly.
 	if (hasNew) {
-		return [nextState, Flash(), state.muted ? null : PlayBeep()]
+		return [nextState, state.muted ? null : PlayBeep()]
 	}
 	return nextState
 }
@@ -392,10 +409,11 @@ function EffortSaveFailed(state) {
 }
 
 function SelectRun(state, runId) {
-	if (runId === state.selectedRunId) return state
-	// The flow model, its previous-frame diff, and the per-run modal state belong to the previously-selected run; a switch clears them so the centerpiece shows the new run's first frame without a stale lifecycle diff or a leftover modal.
+	if (runId === state.selectedRunId) return { ...state, screen: 'watch' }
+	// The flow model, its previous-frame diff, and the per-run modal state belong to the previously-selected run; a switch clears them so the centerpiece shows the new run's first frame without a stale lifecycle diff or a leftover modal. Selecting a run always lands on the watch screen (history rows and the in-progress pill both go through here).
 	return {
 		...state,
+		screen: 'watch',
 		selectedRunId: runId,
 		selectedRunView: null,
 		selectedRunStatus: null,
@@ -406,6 +424,8 @@ function SelectRun(state, runId) {
 		resultShownForRun: null,
 		tooltip: null,
 		interruptNotice: null,
+		interruptModalOpen: false,
+		interruptAnswerCard: null,
 	}
 }
 
@@ -486,7 +506,7 @@ function GotCreatedRun(state, payload) {
 	const createdRunId = body.runId
 	// Selecting the new run activates its per-run subscription; an immediate run-list fetch clears justSubmittedRunId as soon as the run appears. The per-run modal/flow state is reset for the same reason SelectRun resets it.
 	return [
-		{ ...state, justSubmittedRunId: createdRunId, selectedRunId: createdRunId, selectedRunView: null, selectedRunStatus: null, flowModel: null, previousFlowModel: null, questionModalOpen: false, resultModalOpen: false, resultShownForRun: null, tooltip: null, serverAvailable: true },
+		{ ...state, screen: 'watch', justSubmittedRunId: createdRunId, selectedRunId: createdRunId, selectedRunView: null, selectedRunStatus: null, flowModel: null, previousFlowModel: null, questionModalOpen: false, resultModalOpen: false, resultShownForRun: null, tooltip: null, serverAvailable: true },
 		Fetch({ url: 'api/runs', ok: GotRunList, fail: FetchFailed }),
 	]
 }
@@ -580,6 +600,31 @@ function ChangeFlowTier(state, event) {
 	return { ...state, flowTier: value }
 }
 
+// --- Screen navigation ------------------------------------------------------
+// The page is a single-screen console: one of three screens (watch / history / compose) fills the viewport below the top bar. The screen is stored view state; nothing here fetches.
+
+function SetScreen(state, screen) {
+	if (screen !== 'watch' && screen !== 'history' && screen !== 'compose') return state
+	return { ...state, screen }
+}
+
+function ToggleHistoryExpanded(state, runId) {
+	if (typeof runId !== 'string' || runId === '') return state
+	return { ...state, historyExpanded: { ...state.historyExpanded, [runId]: state.historyExpanded[runId] !== true } }
+}
+
+function OpenInterruptModal(state) {
+	return [{ ...state, interruptModalOpen: true, tooltip: null }, CancelTooltipDismiss()]
+}
+
+function CloseInterruptModal(state) {
+	return { ...state, interruptModalOpen: false }
+}
+
+function DismissInterruptAnswer(state) {
+	return { ...state, interruptAnswerCard: null }
+}
+
 function OpenResultModal(state) {
 	// A modal opening covers the run view; clear the inspector so the card does not linger beneath it.
 	return [{ ...state, resultModalOpen: true, tooltip: null }, CancelTooltipDismiss()]
@@ -601,7 +646,7 @@ function CloseQuestionModal(state) {
 // The inspector card over the flow and sequence SVGs is a hyperapp-managed overlay (the same pattern
 // the question/result modals follow), not an imperative DOM append: hovering a node or edge stores a
 // tooltip descriptor in state (the target kind+id plus a snapshot of the node's viewport rect), the
-// FlowPanel renders the `Tooltip` card vnode anchored to that rect by `tooltipStyle`, and dismissal
+// watch stage renders the `Tooltip` card vnode anchored to that rect by `tooltipStyle`, and dismissal
 // runs on a short grace timer so the operator can move the pointer from the node into the card to
 // select or copy its contents (the card is `pointer-events: auto`, `user-select: text`). The card
 // stays open while the pointer is over the node or the card; it dismisses once the pointer is over
@@ -688,87 +733,148 @@ function ClickRunView(state, event) {
 
 // --- View ------------------------------------------------------------------
 
-function StatusLine(state) {
+// The primary label for a run where space is tight: the task's first line, capped at a word boundary so a long first line cannot stretch the top bar. History rows and the top bar both use it; the full task is one click away in the row's expanded details.
+function firstLineOfTask(task) {
+	const firstLine = task.split('\n', 1)[0].trim()
+	if (firstLine.length <= 100) return firstLine
+	const capped = firstLine.slice(0, 100)
+	const lastSpace = capped.lastIndexOf(' ')
+	return `${lastSpace > 60 ? capped.slice(0, lastSpace) : capped}…`
+}
+
+// The primary label for a run: the LLM-generated one-line summary when the summarizer has produced one, otherwise the task's first line, otherwise the run id. History rows and the top bar share it.
+function runPrimaryLabel(summary) {
+	if (typeof summary.summary === 'string' && summary.summary !== '') return summary.summary
+	if (typeof summary.task === 'string' && summary.task !== '') return firstLineOfTask(summary.task)
+	return summary.runId
+}
+
+// The top bar's live status read: a server-unavailable warning, a clickable "a run is in progress" jump when nothing is selected, the viewed run's status, and a secondary jump pill when the user is browsing a historical run while another is live.
+function StatusPills(state) {
 	const activeRunId = deriveActiveRunId(state.summaries)
 	if (!state.serverAvailable) {
-		return h('p', { id: 'status', class: 'status status-unavailable' }, SERVER_UNAVAILABLE_MESSAGE)
+		return [h('span', { class: 'status-pill status-pill-warn' }, SERVER_UNAVAILABLE_MESSAGE)]
 	}
 	if (state.selectedRunId === null) {
 		if (activeRunId !== null) {
-			return h('p', { id: 'status', class: 'status status-clickable', onclick: [SelectRun, activeRunId] }, 'a run is in progress — click to view')
+			return [h('span', { class: 'status-pill status-pill-live status-pill-clickable', onclick: [SelectRun, activeRunId] }, 'a run is in progress — view')]
 		}
-		const message = state.summaries.length === 0 ? 'no runs yet — submit a task to start one' : 'no run selected'
-		return h('p', { id: 'status', class: 'status' }, message)
+		const message = state.summaries.length === 0 ? 'idle' : 'no run selected'
+		return [h('span', { class: 'status-pill' }, message)]
 	}
-	return h('p', { id: 'status', class: 'status' }, statusLabel(state.selectedRunStatus))
+	const pills = [h('span', { class: `status-pill status-pill-${state.selectedRunStatus ?? 'unknown'}` }, statusLabel(state.selectedRunStatus))]
+	if (activeRunId !== null && activeRunId !== state.selectedRunId) {
+		pills.push(h('span', { class: 'status-pill status-pill-live status-pill-clickable', onclick: [SelectRun, activeRunId] }, 'a run is in progress — view'))
+	}
+	return pills
 }
 
-function Header(state) {
-	return h('header', {}, [
-		h('h1', {}, 'Adaptive Orchestrator'),
-		StatusLine(state),
-		h('label', { class: 'mute-toggle' }, [
-			h('input', { type: 'checkbox', checked: state.muted, onchange: ToggleMute }),
-			'mute alert sound',
-		]),
+// The viewed run's identity in the top bar: its task's first line as the primary read, with the run id, effort, and relative start as microcopy. Everything here is a machine field or the operator's own task text rendered as textContent.
+function ViewedRunLabel(state) {
+	const summary = state.summaries.find((entry) => entry.runId === state.selectedRunId)
+	if (summary === undefined) return null
+	const metaParts = [summary.runId]
+	if (typeof summary.effort === 'number') metaParts.push(`effort ${summary.effort} — ${effortLabel(summary.effort)}`)
+	metaParts.push(`started ${formatRelative(summary.startTime, state.now)}`)
+	return h('span', { class: 'topbar-run' }, [
+		h('span', { class: 'topbar-run-primary' }, runPrimaryLabel(summary)),
+		h('span', { class: 'topbar-run-meta' }, metaParts.join(' · ')),
 	])
 }
 
-function RunList(state) {
-	if (state.summaries.length === 0) {
-		return h('ul', { id: 'run-list' }, h('li', { class: 'empty' }, 'No runs yet.'))
-	}
-	// The re-run button shares the create form's disabled condition (a run is active or a submission is in flight) so the one-task-at-a-time contract holds identically for re-runs.
-	const rerunDisabled = state.justSubmittedRunId !== null || deriveActiveRunId(state.summaries) !== null
+function TopBar(state) {
 	const activeRunId = deriveActiveRunId(state.summaries)
-	return h(
-		'ul',
-		{ id: 'run-list' },
-		state.summaries.map((summary) => {
-			// A run row is a vertical stack: a compact meta line (run id + status), the task on its own line rendered as the same sanitized Markdown the per-run view uses, and an actions line (effort badge + re-run). Splitting the task onto its own wrapped line is what makes a long task legible in the narrow sidebar instead of wrapping badly across a single cramped row.
-			const effortBadge = summary.effort !== null && summary.effort !== undefined
-				? h('span', { class: 'run-effort-badge', title: `effort ${summary.effort} — ${effortLabel(summary.effort)}` }, `effort ${summary.effort}`)
-				: null
-			return h('li', { key: summary.runId, class: { selected: summary.runId === state.selectedRunId, 'is-active': summary.runId === activeRunId }, onclick: [SelectRun, summary.runId] }, [
-				h('div', { class: 'run-meta-row' }, [
-					h('span', { class: 'run-id' }, summary.runId),
-					h('span', { class: `run-status run-status-${summary.status ?? 'unknown'}` }, statusLabel(summary.status)),
-				]),
-				h('div', { class: 'run-task markdown' }, renderMarkdown(summary.task ?? '—')),
-				h('div', { class: 'run-actions-row' }, [
-					effortBadge,
-					h('button', { type: 'button', class: 'rerun-button', 'data-task': summary.task ?? '', disabled: rerunDisabled || typeof summary.task !== 'string' || summary.task === '', onclick: RerunTask }, 're-run'),
-				]),
-			])
-		}),
-	)
-}
-
-// The task editor lives in the main column, not the sidebar: a user may draft a long Markdown task and needs horizontal room plus a tall multiline field. The effort slider sits beside the submit button so the two run-shaping controls are together.
-function SubmitPanel(state) {
-	const disabled = state.justSubmittedRunId !== null || deriveActiveRunId(state.summaries) !== null
-	const runEffort = typeof state.runEffort === 'number' ? state.runEffort : DEFAULT_EFFORT
-	return h('section', { id: 'submit-panel', class: 'panel' }, [
-		h('h2', {}, 'New run'),
-		h('form', { class: { 'create-run-form': true, 'is-busy': disabled }, onsubmit: SubmitRun }, [
-			h('textarea', { name: 'task', placeholder: disabled ? 'a run is already in progress' : 'describe a task (Markdown supported) and start a run', autocomplete: 'off', rows: '4', disabled, onkeydown: TaskTextareaKeydown }),
-			h('div', { class: 'submit-controls' }, [
-				h('div', { class: 'effort-control run-effort-control' }, [
-					h('label', { class: 'effort-label', for: 'run-effort' }, 'Effort'),
-					h('input', { id: 'run-effort', type: 'range', min: '0', max: '5', step: '1', value: String(runEffort), disabled, oninput: ChangeRunEffort, onchange: SaveRunEffort }),
-					h('span', { class: 'effort-value' }, `${runEffort} — ${effortLabel(runEffort)}`),
-					state.savingEffort === true ? h('span', { class: 'effort-note' }, 'saving…') : null,
-				]),
-				h('button', { type: 'submit', disabled }, disabled ? 'Run in progress…' : 'Start run'),
+	const composeDisabled = state.justSubmittedRunId !== null || activeRunId !== null
+	return h('header', { class: 'topbar' }, [
+		h('span', { class: 'topbar-wordmark' }, 'Adaptive Orchestrator'),
+		...StatusPills(state),
+		ViewedRunLabel(state),
+		h('nav', { class: 'topbar-nav' }, [
+			h('button', { type: 'button', class: { 'nav-button': true, 'is-active': state.screen === 'compose' }, disabled: composeDisabled, title: composeDisabled ? 'A run is in progress — a new task can start when it finishes' : 'Start a new task', onclick: [SetScreen, 'compose'] }, 'New task'),
+			h('button', { type: 'button', class: { 'nav-button': true, 'is-active': state.screen === 'history' }, title: 'Browse past runs', onclick: [SetScreen, 'history'] }, `History (${state.summaries.length})`),
+			h('label', { class: 'mute-toggle', title: 'Mute the alert sound for incoming questions' }, [
+				h('input', { type: 'checkbox', checked: state.muted, onchange: ToggleMute }),
+				'mute',
 			]),
 		]),
 	])
 }
 
-function RunsPanel(state) {
-	return h('section', { id: 'runs-panel', class: 'panel' }, [
-		h('h2', {}, 'Runs'),
-		RunList(state),
+// The History screen is the full-screen run browser: compact one-line rows that stay legible no matter how large the underlying prompts and results are, with the full content one expand away. The row's primary line is the run's generated summary (or its task's first line when none exists yet); the expanded details carry the full task and, for terminal runs, the result summary or error — all agent prose through the sanitized Markdown pipeline except the primary line, which is textContent.
+function HistoryRow(state, summary, rerunDisabled) {
+	const expanded = state.historyExpanded[summary.runId] === true
+	return h('li', { key: summary.runId, class: { 'history-row': true, 'is-expanded': expanded, 'is-selected': summary.runId === state.selectedRunId } }, [
+		h('div', { class: 'history-row-main', onclick: [SelectRun, summary.runId], title: 'Watch this run' }, [
+			h('span', { class: `run-status run-status-${summary.status ?? 'unknown'}` }, statusLabel(summary.status)),
+			h('span', { class: 'history-primary' }, runPrimaryLabel(summary)),
+			summary.effort !== null && summary.effort !== undefined
+				? h('span', { class: 'run-effort-badge', title: `effort ${summary.effort} — ${effortLabel(summary.effort)}` }, `effort ${summary.effort}`)
+				: null,
+			h('time', { class: 'history-when', title: summary.startTime ?? '' }, formatRelative(summary.startTime, state.now)),
+			// The re-run button shares the create form's disabled condition (a run is active or a submission is in flight) so the one-task-at-a-time contract holds identically for re-runs.
+			h('button', { type: 'button', class: 'rerun-button', 'data-task': summary.task ?? '', disabled: rerunDisabled || typeof summary.task !== 'string' || summary.task === '', onclick: RerunTask }, 're-run'),
+		]),
+		h('button', { type: 'button', class: 'history-expand', 'aria-expanded': expanded, title: expanded ? 'Hide details' : 'Show the full task and result', onclick: [ToggleHistoryExpanded, summary.runId] }, expanded ? 'less ▴' : 'details ▾'),
+		expanded ? HistoryRowDetails(summary) : null,
+	])
+}
+
+// The expanded details are where large prompts and results get their room: the exact run meta, the full task, and the terminal result or error, all rendered at full length inside the scrollable history view.
+function HistoryRowDetails(summary) {
+	const metaParts = [summary.runId]
+	if (typeof summary.effort === 'number') metaParts.push(`effort ${summary.effort} — ${effortLabel(summary.effort)}`)
+	if (typeof summary.startTime === 'string') metaParts.push(`started ${summary.startTime}`)
+	if (typeof summary.endTime === 'string') metaParts.push(`ended ${summary.endTime}`)
+	const children = [h('p', { class: 'history-details-meta' }, metaParts.join(' · '))]
+	if (typeof summary.task === 'string' && summary.task !== '') {
+		children.push(h('p', { class: 'history-details-heading' }, 'Task'))
+		children.push(h('div', { class: 'markdown history-details-text' }, renderMarkdown(summary.task)))
+	}
+	const resultSummary = summary.result !== null && summary.result !== undefined && typeof summary.result.summary === 'string' && summary.result.summary !== '' ? summary.result.summary : null
+	if (resultSummary !== null) {
+		children.push(h('p', { class: 'history-details-heading' }, 'Result'))
+		children.push(h('div', { class: 'markdown history-details-text' }, renderMarkdown(resultSummary)))
+	}
+	const errorMessage = summary.error !== null && summary.error !== undefined && typeof summary.error.message === 'string' && summary.error.message !== '' ? summary.error.message : null
+	if (errorMessage !== null) {
+		children.push(h('p', { class: 'history-details-heading' }, 'Error'))
+		children.push(h('div', { class: 'markdown history-details-error' }, renderMarkdown(errorMessage)))
+	}
+	return h('div', { class: 'history-details' }, children)
+}
+
+function HistoryScreen(state) {
+	const rerunDisabled = state.justSubmittedRunId !== null || deriveActiveRunId(state.summaries) !== null
+	return h('section', { id: 'history-screen' }, [
+		h('div', { class: 'history-scroll' }, [
+			state.summaries.length === 0
+				? h('p', { class: 'history-empty' }, 'No runs yet — start a new task and it will appear here.')
+				: h('ul', { id: 'history-list' }, state.summaries.map((summary) => HistoryRow(state, summary, rerunDisabled))),
+		]),
+	])
+}
+
+// The compose screen is the hero when the service is idle — drafting a task is the primary activity when nothing is running, so the editor gets the whole stage. The submit path and the one-task-at-a-time busy contract are unchanged.
+function ComposeScreen(state) {
+	const disabled = state.justSubmittedRunId !== null || deriveActiveRunId(state.summaries) !== null
+	const runEffort = typeof state.runEffort === 'number' ? state.runEffort : DEFAULT_EFFORT
+	return h('section', { id: 'compose-screen' }, [
+		h('div', { class: 'compose-hero' }, [
+			h('h1', { class: 'compose-heading' }, state.summaries.length === 0 ? 'What should the orchestrator do?' : 'New task'),
+			h('p', { class: 'compose-sub' }, 'Describe the task in plain language — Markdown works too. The orchestrator runs one task at a time.'),
+			h('form', { class: { 'create-run-form': true, 'is-busy': disabled }, onsubmit: SubmitRun }, [
+				h('textarea', { name: 'task', placeholder: disabled ? 'a run is already in progress — a new task can start when it finishes' : 'describe a task (Markdown supported) and start a run', autocomplete: 'off', disabled, onkeydown: TaskTextareaKeydown }),
+				h('div', { class: 'submit-controls' }, [
+					h('div', { class: 'effort-control run-effort-control' }, [
+						h('label', { class: 'effort-label', for: 'run-effort' }, 'Effort'),
+						h('input', { id: 'run-effort', type: 'range', min: '0', max: '5', step: '1', value: String(runEffort), disabled, oninput: ChangeRunEffort, onchange: SaveRunEffort }),
+						h('span', { class: 'effort-value' }, `${runEffort} — ${effortLabel(runEffort)}`),
+						state.savingEffort === true ? h('span', { class: 'effort-note' }, 'saving…') : null,
+					]),
+					h('button', { type: 'submit', disabled }, disabled ? 'Run in progress…' : 'Start run'),
+				]),
+			]),
+		]),
 	])
 }
 
@@ -777,7 +883,7 @@ function InterruptHistory(state) {
 	const view = state.selectedRunView
 	if (view === null || !Array.isArray(view.interrupts) || view.interrupts.length === 0) return null
 	return h('div', { class: 'interrupt-history' }, [
-		h('h3', {}, 'Interrupts'),
+		h('h3', {}, 'Earlier interrupts'),
 		h('ul', {}, view.interrupts.map((entry, index) => {
 			if (entry.kind === 'inquiry') {
 				const answerState = entry.answer !== null
@@ -812,7 +918,6 @@ function InterruptForm(state) {
 	const mode = state.interruptMode
 	const queued = state.selectedRunView !== null && state.selectedRunView.interruptPending === true
 	return h('div', { class: 'interrupt-form-wrap' }, [
-		h('h3', {}, 'Interrupt this run'),
 		h('div', { class: 'interrupt-mode', role: 'group', 'aria-label': 'interrupt kind' }, [
 			h('label', { class: mode === 'inquiry' ? 'is-active' : '' }, [
 				h('input', { type: 'radio', name: 'interrupt-kind', checked: mode === 'inquiry', onchange: [SetInterruptMode, 'inquiry'] }),
@@ -839,75 +944,78 @@ function InterruptForm(state) {
 	])
 }
 
-function RunSummaryPanel(state) {
-	const view = state.selectedRunView
-	const runId = view ? view.runId : '—'
-	const task = view ? view.task : null
-	const status = view ? statusLabel(view.status) : '—'
-	const effort = view && typeof view.effort === 'number' ? view.effort : null
-	const startTime = view ? view.startTime ?? null : null
-	const endTime = view ? view.endTime ?? null : null
-	const resultValue = view && view.result && view.result.summary ? view.result.summary : null
-
-	const entries = [
-		h('dt', {}, 'Run'), h('dd', {}, runId),
-		h('dt', {}, 'Task'), h('dd', { class: 'markdown' }, renderMarkdown(task)),
-		h('dt', {}, 'Status'), h('dd', {}, status),
-		h('dt', {}, 'Effort'), h('dd', {}, effort !== null ? `${effort} — ${effortLabel(effort)}` : '—'),
-		h('dt', {}, 'Started'), h('dd', {}, h('time', { title: startTime ?? '' }, formatRelative(startTime, state.now))),
-		h('dt', {}, 'Ended'), h('dd', {}, h('time', { title: endTime ?? '' }, formatRelative(endTime, state.now))),
-		h('dt', {}, 'Result'), h('dd', { class: 'markdown' }, renderMarkdown(resultValue)),
-	]
-
-	const activity = view ? view.currentActivity : null
-	const error = view ? view.error : null
-	const artifacts = view && view.result ? view.result.artifacts : undefined
-	const budgets = view ? view.budgets : null
-
-	return h('section', { id: 'run-summary', class: 'panel' }, [
-		h('h2', {}, 'Run'),
-		h('p', { id: 'current-activity', class: 'current-activity' }, activity ? h('span', { class: 'current-activity-text' }, `now: ${activity.summary}`) : null),
-		h('dl', { id: 'run-meta' }, entries),
-		budgets ? BudgetsLine(budgets) : null,
-		// The kind is a fixed machine label and stays a plain text node; the message is agent prose and renders as Markdown.
-		h('div', { id: 'run-error', class: 'run-error' }, error ? h('div', { class: 'error-text' }, [h('strong', {}, `${error.kind}: `), ...renderMarkdown(error.message)]) : null),
-		h('div', { id: 'run-artifacts', class: 'run-artifacts' }, artifacts && artifacts.length > 0 ? [h('div', { class: 'artifacts-heading' }, 'Artifacts'), h('ul', {}, artifacts.map((path, index) => h('li', { key: `${path}-${index}`, class: 'artifact' }, path)))] : null),
-		InterruptHistory(state),
-		InterruptForm(state),
+// The stage-scoped interrupt modal pairs the history of what the operator already sent with the form to send more, so an answer appears in the same place the question was asked. It is reachable only while viewing the active run (the controls-row button is the single entry point and renders only then); the form itself re-checks the condition in case the run completes while the modal is open.
+function InterruptModalForRun(state) {
+	if (!state.interruptModalOpen) return null
+	return h('div', { class: 'interrupt-modal-overlay' }, [
+		h('div', { class: 'interrupt-modal-backdrop', onclick: CloseInterruptModal }),
+		h('div', { class: 'interrupt-modal-card' }, [
+			h('p', { class: 'interrupt-modal-heading' }, 'Interrupt this run'),
+			InterruptHistory(state),
+			InterruptForm(state),
+			h('div', { class: 'interrupt-modal-actions' }, [
+				h('button', { type: 'button', class: 'interrupt-modal-close', onclick: CloseInterruptModal }, 'Close'),
+			]),
+		]),
 	])
 }
 
-// Prompt tokens are split into uncached and cached because they are billed at different rates: cachedPromptTokens is the subset of promptTokens served from the endpoint's prompt cache, so the uncached prompt bill is promptTokens - cachedPromptTokens.
-function BudgetsLine(b) {
-	const breakdown = b.tokenBreakdown
-	const tokenSpans = [h('span', { class: 'budget-token-budget' }, `tokens ${formatTokens(b.tokensUsed)}`)]
-	if (breakdown !== null && breakdown !== undefined) {
-		const uncachedPrompt = breakdown.promptTokens - breakdown.cachedPromptTokens
-		tokenSpans.push(h('span', { class: 'budget-token-detail' }, [
-			h('span', { class: 'budget-token-prompt' }, `prompt ${formatTokens(uncachedPrompt)}`),
-			breakdown.cachedPromptTokens > 0 ? h('span', { class: 'budget-token-cached' }, `cached ${formatTokens(breakdown.cachedPromptTokens)}`) : null,
-			h('span', { class: 'budget-token-completion' }, `completion ${formatTokens(breakdown.completionTokens)}`),
-		]))
-	}
-	return h('div', { class: 'budgets' }, [
-		h('span', { class: 'budget-budget' }, `elapsed ${formatElapsed(b.elapsedSeconds)}`),
-		h('span', { class: 'budget-budget' }, `tool calls ${formatNumber(b.toolCalls)}`),
-		...tokenSpans,
+// A newly-arrived answer to the operator's interrupt question, presented as a dismissible card pinned over the stage's corner: unmissable on arrival but never blocking the run view the way a modal would. The question and the answering role's name are textContent (the operator's own words and a machine field); the answer is agent prose through the sanitized Markdown pipeline. The full exchange also lives in the interrupt modal's history.
+function InterruptAnswerCardForRun(state) {
+	const card = state.interruptAnswerCard
+	if (card === null) return null
+	return h('div', { class: 'interrupt-answer-card' }, [
+		h('p', { class: 'interrupt-answer-card-heading' }, card.role !== null && typeof card.role === 'string' ? `Answer from ${card.role}` : 'The run answered'),
+		h('p', { class: 'interrupt-answer-card-question' }, card.question),
+		h('div', { class: 'interrupt-answer-card-answer markdown' }, renderMarkdown(card.answer)),
+		h('button', { type: 'button', class: 'interrupt-answer-card-close', onclick: DismissInterruptAnswer }, 'Dismiss'),
 	])
 }
 
-function FlowPanel(state) {
+function CostStrip(model) {
+	const cost = deriveCostStrip(model)
+	return h('div', { class: 'pb-cost-strip' }, [
+		h('span', { class: 'pb-cost-item' }, `elapsed ${formatElapsed(cost.elapsedSeconds)}`),
+		h('span', { class: 'pb-cost-sep' }, '·'),
+		h('span', { class: 'pb-cost-item' }, `${formatTokens(cost.tokens)} tokens`),
+	])
+}
+
+// The interrupt modal's single entry point, visible only while the viewed run is the one in flight; a historical selection or an idle service renders nothing, mirroring the server-side 409 contract.
+function InterruptButton(state) {
+	const activeRunId = deriveActiveRunId(state.summaries)
+	if (activeRunId === null || state.selectedRunId !== activeRunId) return null
+	return h('button', { type: 'button', class: 'interrupt-open-button', title: 'Ask the run a question or change its plan', onclick: OpenInterruptModal }, 'Interrupt')
+}
+
+function StageControls(state, model) {
+	return h('div', { class: 'stage-controls' }, [
+		h('div', { class: 'pb-view-toggle', role: 'group', 'aria-label': 'run view' }, [
+			h('button', { type: 'button', class: state.flowViewMode === 'flow' ? 'is-active' : '', onclick: [SetFlowViewMode, 'flow'] }, 'Flow'),
+			h('button', { type: 'button', class: state.flowViewMode === 'sequence' ? 'is-active' : '', onclick: [SetFlowViewMode, 'sequence'] }, 'Sequence'),
+		]),
+		h('label', { class: 'flow-tier-control' }, [
+			h('span', {}, 'Label tier'),
+			h('select', { value: state.flowTier, onchange: ChangeFlowTier }, TIER_VALUES.map((value) => h('option', { value, selected: value === state.flowTier }, value))),
+		]),
+		model !== null ? CostStrip(model) : null,
+		InterruptButton(state),
+	])
+}
+
+// The watch screen fills the viewport below the top bar: a controls row, the flex-filling stage, and the now-caption. The Flow view (product surface) and the Sequence view (debug surface) are independent leaves over the same model; the toggle swaps which renders without a fetch. The sequence view mounts inside a vertical scroll container because its timeline grows long, while the flow view scales to the stage.
+function WatchScreen(state) {
 	const labels = state.labelResolver
 	const model = state.flowModel
-	// Before the guild config or the first readable flow frame lands, the centerpiece shows a placeholder rather than a half-built graph; both arrive within the first poll, so the placeholder is transient.
+	// Before the guild config or the first readable flow frame lands, the stage shows a placeholder rather than a half-built graph; both arrive within the first poll, so the placeholder is transient.
 	if (labels === null || model === null) {
 		const message = state.selectedRunId === null
 			? 'Select a run to see its flow.'
 			: labels === null
 				? 'Loading run view…'
 				: 'Waiting for run activity…'
-		return h('section', { id: 'flow-panel', class: 'panel' }, [
-			h('h2', {}, 'Run view'),
+		return h('section', { id: 'watch-screen' }, [
+			StageControls(state, null),
 			h('div', { class: 'pb-flow flow-stage' }, h('p', { class: 'flow-empty' }, message)),
 		])
 	}
@@ -916,36 +1024,22 @@ function FlowPanel(state) {
 	const lifecycle = state.previousFlowModel !== null ? deriveLifecycle(state.previousFlowModel, model) : undefined
 	const cta = { onclick: OpenResultModal }
 	const question = { onclick: OpenQuestionModal }
-	// The flow view and sequence view are independent leaves over the same model; the view toggle swaps which renders without a fetch. The sequence view takes the guild's static participant set so every role column appears from the first frame.
-	const svg = state.flowViewMode === 'sequence'
-		? renderSequenceView(h, model, labels, tier, state.guildParticipants)
+	// The sequence view takes the guild's static participant set so every role column appears from the first frame.
+	const stageContent = state.flowViewMode === 'sequence'
+		? h('div', { class: 'pb-sequence-scroll' }, [renderSequenceView(h, model, labels, tier, state.guildParticipants)])
 		: renderFlowView(h, model, labels, tier, lifecycle, cta, question, flowColumnTracker)
 
-	const cost = deriveCostStrip(model)
 	const nowCaption = deriveNowCaption(model, labels, tier)
 
-	return h('section', { id: 'flow-panel', class: 'panel' }, [
-		h('h2', {}, 'Run view'),
-		h('div', { class: 'flow-controls' }, [
-			h('div', { class: 'pb-view-toggle', role: 'group', 'aria-label': 'run view' }, [
-				h('button', { type: 'button', class: state.flowViewMode === 'flow' ? 'is-active' : '', onclick: [SetFlowViewMode, 'flow'] }, 'Flow'),
-				h('button', { type: 'button', class: state.flowViewMode === 'sequence' ? 'is-active' : '', onclick: [SetFlowViewMode, 'sequence'] }, 'Sequence'),
-			]),
-			h('label', { class: 'flow-tier-control' }, [
-				h('span', {}, 'Label tier'),
-				h('select', { value: tier, onchange: ChangeFlowTier }, TIER_VALUES.map((value) => h('option', { value, selected: value === tier }, value))),
-			]),
-		]),
-		h('div', { class: 'pb-cost-strip' }, [
-			h('span', { class: 'pb-cost-item' }, `elapsed ${formatElapsed(cost.elapsedSeconds)}`),
-			h('span', { class: 'pb-cost-sep' }, '·'),
-			h('span', { class: 'pb-cost-item' }, `${formatTokens(cost.tokens)} tokens`),
-		]),
-		// `.pb-flow` is the positioning context for the per-run-view modals (the question and result overlays are absolute inset 0 within it), so the modals cover the run view rather than the whole page. It is also the hover stage for the inspector: `mouseover`/`mouseleave`/`click` bubble here from every SVG child, so the inspector is wired once for both the flow and sequence views.
+	return h('section', { id: 'watch-screen' }, [
+		StageControls(state, model),
+		// `.pb-flow` is the positioning context for the per-run-view modals (the question, result, and interrupt overlays are absolute inset 0 within it), so the modals cover the run view rather than the whole page. It is also the hover stage for the inspector: `mouseover`/`mouseleave`/`click` bubble here from every SVG child, so the inspector is wired once for both the flow and sequence views.
 		h('div', { class: 'pb-flow flow-stage', onmouseover: HoverRunView, onmouseleave: LeaveRunView, onclick: ClickRunView }, [
-			svg,
+			stageContent,
 			QuestionModalForRun(state),
 			ResultModalForRun(state),
+			InterruptModalForRun(state),
+			InterruptAnswerCardForRun(state),
 			TooltipCardForRun(state),
 		]),
 		h('p', { class: 'pb-now-caption' }, nowCaption),
@@ -988,6 +1082,17 @@ function QuestionModalForRun(state) {
 	})
 }
 
+// The technical meta line the result modal carries for advanced users: run id, effort, duration, and tool-call count in the text, with the exact start/end timestamps on the hover title. Derived from the run view the per-run poll already fetches, so the modal re-opens with no extra request.
+function resultMetaLine(view) {
+	if (typeof view.runId !== 'string' || view.budgets === null || view.budgets === undefined) return null
+	const parts = [view.runId]
+	if (typeof view.effort === 'number') parts.push(`effort ${view.effort} — ${effortLabel(view.effort)}`)
+	parts.push(formatElapsed(view.budgets.elapsedSeconds))
+	parts.push(`${formatNumber(view.budgets.toolCalls)} tool calls`)
+	const title = `started ${view.startTime ?? '—'} → ended ${view.endTime ?? '—'}`
+	return { text: parts.join(' · '), title }
+}
+
 // The terminal result the modal renders, derived from the live run view the per-run poll already fetches (the flow endpoint carries no result/error fields). The modal opens on a watched run's completion (GotSelectedRun) and re-opens via the flow view's CTA; the descriptor is undefined for a non-terminal run so the modal renders nothing then.
 function ResultModalForRun(state) {
 	if (!state.resultModalOpen) return null
@@ -995,26 +1100,27 @@ function ResultModalForRun(state) {
 	if (view === null) return null
 	const descriptor = deriveTerminalResult(view)
 	if (descriptor === undefined) return null
+	const metaLine = resultMetaLine(view)
 	return ResultModal(h, {
 		descriptor,
 		runLabel: typeof view.runId === 'string' ? view.runId : null,
+		metaLine,
 		renderMarkdown,
 		onCopyRaw: copyRawToClipboard,
 		onClose: CloseResultModal,
 	})
 }
 
+// The screen switch. A zero-state service (no runs, nothing selected) shows the compose hero regardless of the stored screen — drafting the first task is the only meaningful activity then.
 function Main(state) {
-	return h('main', {}, [
-		SubmitPanel(state),
-		RunsPanel(state),
-		FlowPanel(state),
-		RunSummaryPanel(state),
-	])
+	if (state.screen === 'history') return h('main', {}, [HistoryScreen(state)])
+	if (state.screen === 'compose') return h('main', {}, [ComposeScreen(state)])
+	if (state.summaries.length === 0 && state.selectedRunId === null) return h('main', {}, [ComposeScreen(state)])
+	return h('main', {}, [WatchScreen(state)])
 }
 
 function view(state) {
-	return h('div', {}, [Header(state), Main(state)])
+	return h('div', { class: 'app-shell' }, [TopBar(state), Main(state)])
 }
 
 // --- App -------------------------------------------------------------------
@@ -1045,17 +1151,24 @@ app({
 			guildParticipants: [],
 			flowTier: DEFAULT_FLOW_TIER,
 			flowViewMode: 'flow',
-		// Per-run-view modal state. The question modal opens on a new pending question; the result modal opens on a watched run's completion. `resultShownForRun` dedups the auto-open across the polls that follow a completion.
-		questionModalOpen: false,
-		resultModalOpen: false,
-		resultShownForRun: null,
-		// The inspector descriptor over the run view: null when nothing is hovered. Cleared on
-		// `mouseleave` of the stage and on run switch; a stale id self-dismisses at render time.
-		tooltip: null,
-		// Interrupt form state: the kind toggle, an in-flight send flag, and a one-line outcome notice.
+			// The visible screen: 'watch' (the flow/sequence stage), 'history' (the run browser), or 'compose' (the new-task hero). A zero-state service shows compose regardless (see Main).
+			screen: 'watch',
+			// Per-history-row expansion, keyed by run id, so the full task/result of several runs can be open at once.
+			historyExpanded: {},
+			// Per-run-view modal state. The question modal opens on a new pending question; the result modal opens on a watched run's completion. `resultShownForRun` dedups the auto-open across the polls that follow a completion. The interrupt modal opens only from the stage controls.
+			questionModalOpen: false,
+			resultModalOpen: false,
+			resultShownForRun: null,
+			interruptModalOpen: false,
+			// The inspector descriptor over the run view: null when nothing is hovered. Cleared on
+			// `mouseleave` of the stage and on run switch; a stale id self-dismisses at render time.
+			tooltip: null,
+		// Interrupt form state: the kind toggle, an in-flight send flag, and a one-line outcome notice. The answer card presents each newly-arrived interrupt answer once (keys run-scoped in shownInterruptAnswerKeys); a run's first read baselines its answered history so old runs never pop stale cards.
 		interruptMode: 'inquiry',
 		interruptSending: false,
 		interruptNotice: null,
+		interruptAnswerCard: null,
+		shownInterruptAnswerKeys: {},
 		now: Date.now(),
 	},
 	// The guild config and the saved effort position are each loaded once on load and never polled, so their fetches are init effects rather than subscriptions.

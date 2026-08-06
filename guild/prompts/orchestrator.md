@@ -78,9 +78,8 @@ Use the `agent` tool to hand a sub-task to another role. Give the child a clear,
 
 ## Interrupts from the operator
 
-The operator can speak into the run at a safe point. Two marked user messages can arrive in your conversation at any time, even mid-task:
+The operator can speak into the run at a safe point. A marked user message can arrive in your conversation at any time, even mid-task:
 
-- **`[Operator inquiry — ...]`** — the operator is asking a direct question about the run, and **every inquiry comes to you**: you own the run-wide picture. Answer promptly in plain language. If you already know (what is happening, what has been done, what comes next), answer from your own knowledge in your next response. If the answer needs detail from in-flight work (what a sub-agent found in a file, why a check failed), delegate a **fresh** sub-agent to gather it — you cannot ask a child that is still running, but a new instance can read the same workspace — then give the answer. Never skip the answer; once you have given it, continue coordinating the run. An inquiry never changes the plan by itself.
 - **`[Operator plan modification — ...]`** — the operator changed the plan, and any active sub-work below the plan owner was aborted to get here. You receive this when you are the top of the live delegation chain (no `planner` is active below you). Integrate the modification: acknowledge it in plain language, then re-plan around it — delegate a fresh `planner` pass incorporating the change, or adjust your remaining delegations directly for a small change. Do not blindly restart work the modification makes unnecessary, and do not ignore it.
 
 A child that returns `status: "error"` with `error.kind: "interrupted"` was aborted by a plan modification, not by a real failure — hand its unfinished piece to the plan owner (yourself or a fresh `planner`) rather than to `recovery`.

@@ -50,7 +50,7 @@
 // localization, a view concern, and the model carries no prose. The module is
 // plain browser JS, imports only its siblings, and touches no external system.
 
-import { activeOperation, activeParticipant, callChainOf, inquiriesOf, isPaused, isTerminalStatus, observesOf, stacksOf, terminatesOf } from './interaction-model.js'
+import { activeOperation, activeParticipant, callChainOf, isPaused, isTerminalStatus, observesOf, stacksOf, terminatesOf } from './interaction-model.js'
 import { ATTR_OPERATION, ATTR_PARTICIPANT, ATTR_ROLE } from './inspector.js'
 import { GraphEdge, GraphNode, NODE_HEIGHT, NODE_WIDTH, nodeAnchor } from './svg-primitives.js'
 
@@ -322,24 +322,6 @@ function renderObserves(h, model, rowLayout) {
 	return vnodes
 }
 
-// Renders every inquiry operation as a question/answer edge between the human and the run's root role: a waiting (in_flight) question marches toward the role like any in-flight line, settled questions and answers sit solid. Inquiry edges never enter any call chain and never activate a row; they carry `data-operation` so the inspector can resolve the question or answer text from the model.
-function renderInquiries(h, model, rowLayout) {
-	if (rowLayout.size === 0) return []
-	const vnodes = []
-	for (const inquiry of inquiriesOf(model)) {
-		const sourceLayout = rowLayout.get(inquiry.source)
-		const destinationLayout = rowLayout.get(inquiry.destination)
-		if (sourceLayout === undefined || destinationLayout === undefined) continue
-		const fromAnchor = nodeAnchor(sourceLayout.x, sourceLayout.y, 'top')
-		const toAnchor = nodeAnchor(destinationLayout.x, destinationLayout.y, 'bottom')
-		const state = inquiry.lifecycle === 'in_flight' ? 'flowing' : 'static'
-		vnodes.push(h('g', { class: 'flow-edge flow-edge--inquiry', 'data-kind': 'inquiry', [ATTR_OPERATION]: inquiry.id }, [
-			GraphEdge(h, { fromAnchor, toAnchor, kind: 'inquiry', state }),
-		]))
-	}
-	return vnodes
-}
-
 // Renders every terminate operation as a static red dashed line from the rewind tool (in the active stack's row) to its target (in a paused row), so a cross-stack revert reads as a destructive reference rather than an in-flight call. The line never animates and never enters any call chain; the target's orange dashed border is applied separately by the row renderer via the terminate-target id set. A terminate whose source or destination has departed the rows is skipped, so the line disappears once the tool returns or the reverted target's call closes.
 function renderTerminates(h, model, rowLayout) {
 	if (rowLayout.size === 0) return []
@@ -584,7 +566,6 @@ export function renderFlowView(h, model, labels, tier, lifecycle, cta, question,
 
 	const observeVnodes = renderObserves(h, model, rowLayout)
 	const terminateVnodes = renderTerminates(h, model, rowLayout)
-	const inquiryVnodes = renderInquiries(h, model, rowLayout)
 
 	// The departing overlay paints a node mid-travel from its previous row position to its top-bar slot, both in the current frame's shared SVG coordinate space (the same mainYOffset the rows use) so the travel lands on the slot the counter increment reads against.
 	const departingVnodes = lifecycle !== undefined ? lifecycle.departing.map((entry) => {
@@ -635,7 +616,6 @@ export function renderFlowView(h, model, labels, tier, lifecycle, cta, question,
 		h('g', { class: 'flow-topbar' }, topBarVnodes),
 		h('g', { class: 'flow-observes' }, observeVnodes),
 		h('g', { class: 'flow-terminates' }, terminateVnodes),
-		h('g', { class: 'flow-inquiries' }, inquiryVnodes),
 		h('g', { class: 'flow-rows' }, rowVnodes),
 		...departingVnodes,
 	]

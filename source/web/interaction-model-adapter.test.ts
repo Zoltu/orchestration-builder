@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import type { LogEvent, RunMeta } from '../executor/types.js'
 import type { RunSnapshot } from './render.js'
 import { deriveInteractionModel } from './interaction-model-adapter.js'
-import { activeParticipant, activeStack, callChainOf, fateOf, inquiriesOf, observesOf, stacksOf, terminatesOf } from './static/interaction-model.js'
+import { activeParticipant, activeStack, callChainOf, fateOf, observesOf, stacksOf, terminatesOf } from './static/interaction-model.js'
 
 // The helpers arrive typed from the module's JSDoc; the adapter's InteractionModel is
 // structurally the same shape, so its output is directly callable as a helper argument.
@@ -526,82 +526,96 @@ describe('deriveInteractionModel — interrupts, observes, and terminates', () =
 	})
 })
 
-describe('deriveInteractionModel — operator inquiry', () => {
+describe('deriveInteractionModel — operator inquiry interrupt', () => {
 	function inquiryRunEvents(): LogEvent[] {
 		return [
-			event('2026-01-01T00:00:00.000Z', 'role_start', { role: 'orchestrator', depth: 0, task: 'build the site' }),
-			event('2026-01-01T00:00:01.000Z', 'role_start', { role: 'coder', depth: 1, parent: 'orchestrator', task: 'write the page' }),
-			event('2026-01-01T00:00:02.000Z', 'operator_inquiry', { role: 'orchestrator', roleId: 'orchestrator-0-1', message: 'what is happening?' }),
+			event('t0', 'role_start', { role: 'orchestrator', depth: 0, task: 'build the site' }),
+			event('t1', 'role_start', { role: 'coder', depth: 1, parent: 'orchestrator', task: 'write the page' }),
+			event('t2', 'interrupt', { trigger: 'inquiry', handler: 'inquiry_responder', target: 'coder-1-2', message: 'what is happening?' }),
 		]
 	}
 
-	test('a waiting question is an in-flight inquiry op from the human to the root role', () => {
+	test('an inquiry interrupt pushes a new stack rooted at a fresh human asker', () => {
 		const model = deriveInteractionModel(snapshot(inquiryRunEvents(), meta('running')), NOW)
-		const inquiries = inquiriesOf(model)
-		expect(inquiries).toHaveLength(1)
-		const question = inquiries[0]!
-		expect(question.source).toBe('human:root')
-		const orchestrator = model.participants.find((p) => p.role === 'orchestrator')
-		expect(orchestrator).toBeDefined()
-		expect(question.destination).toBe(orchestrator!.id)
-		expect(question.lifecycle).toBe('in_flight')
-		expect(question.details).toBe('what is happening?')
-		// The question never enters the call chain: the delegation chain is untouched.
+		const asker = model.participants.find((p) => p.kind === 'human' && p.id !== 'human:root')
+		expect(asker).toBeDefined()
+		expect(asker!.id).toBe('human:asker:1')
+		expect(asker!.role).toBe('human')
+		expect(model.participants.every((p) => p.kind !== 'interrupt')).toBe(true)
+		expect(model.stacks).toEqual([
+			{ id: 'main', root: 'human:root' },
+			{ id: 'interrupt-1-stack', root: asker!.id },
+		])
+		// The fresh stack is active on arrival; the main stack pauses with both calls still open.
+		expect(activeStack(model)).toBe('interrupt-1-stack')
+		expect(activeParticipant(model)).toBe(asker!.id)
 		expect(callChainOf(model, 'main')).toHaveLength(2)
+		expect(stacksOf(model)).toEqual(['main', 'interrupt-1-stack'])
 		assertHelpersSensible(model)
 	})
 
-	test('the root role\u2019s first content-bearing llm_call settles the question and emits the answer op', () => {
+	test('the handler role_start records a call from the asker carrying the question as details', () => {
 		const events = [
 			...inquiryRunEvents(),
-			event('2026-01-01T00:00:03.000Z', 'llm_call', { role: 'coder', received: { content: 'not the addressee' } }),
-			event('2026-01-01T00:00:04.000Z', 'llm_call', { role: 'orchestrator', received: { content: 'the coder is writing the page' } }),
+			event('t3', 'role_start', { role: 'inquiry_responder', depth: 2, parent: 'coder', task: 'the generated briefing' }),
 		]
 		const model = deriveInteractionModel(snapshot(events, meta('running')), NOW)
-		const inquiries = inquiriesOf(model)
-		expect(inquiries).toHaveLength(2)
-		const [question, answer] = inquiries
-		expect(question!.lifecycle).toBe('settled')
-		expect(question!.outcome).toBe('success')
-		expect(answer!.source).toBe(question!.destination)
-		expect(answer!.destination).toBe('human:root')
-		expect(answer!.lifecycle).toBe('settled')
-		expect(answer!.details).toBe('the coder is writing the page')
+		const responder = model.participants.find((p) => p.role === 'inquiry_responder')
+		expect(responder).toBeDefined()
+		const call = model.operations.find((o) => o.kind === 'call' && o.destination === responder!.id)
+		expect(call).toBeDefined()
+		expect(call!.stack).toBe('interrupt-1-stack')
+		expect(call!.source).toBe('human:asker:1')
+		// The tooltip on the You→responder call shows the question, not the generated briefing.
+		expect(call!.details).toBe('what is happening?')
 		assertHelpersSensible(model)
 	})
 
-	test('a tool-call-only llm_call from the recipient does not answer the question', () => {
+	test('an inquiry interrupt without a message falls back to the task text for the call details', () => {
 		const events = [
-			...inquiryRunEvents(),
-			event('2026-01-01T00:00:03.000Z', 'llm_call', { role: 'orchestrator', received: { toolCalls: [{ id: 'x' }] } }),
+			event('t0', 'role_start', { role: 'orchestrator', depth: 0, task: 'build the site' }),
+			event('t1', 'interrupt', { trigger: 'inquiry', handler: 'inquiry_responder', target: 'orchestrator-0-1' }),
+			event('t2', 'role_start', { role: 'inquiry_responder', depth: 1, parent: 'orchestrator', task: 'the generated briefing' }),
 		]
 		const model = deriveInteractionModel(snapshot(events, meta('running')), NOW)
-		expect(inquiriesOf(model)[0]!.lifecycle).toBe('in_flight')
-	})
-
-	test('the recipient finishing without a content response settles the question unanswered', () => {
-		const events = [
-			...inquiryRunEvents(),
-			event('2026-01-01T00:00:03.000Z', 'role_finished', { role: 'orchestrator', depth: 0, status: 'success', summary: 'done' }),
-		]
-		const model = deriveInteractionModel(snapshot(events, meta('success')), NOW)
-		const question = inquiriesOf(model)[0]!
-		expect(question.lifecycle).toBe('settled')
-		expect(question.outcome).toBeNull()
-		expect(inquiriesOf(model)).toHaveLength(1)
+		const responder = model.participants.find((p) => p.role === 'inquiry_responder')
+		const call = model.operations.find((o) => o.kind === 'call' && o.destination === responder!.id)
+		expect(call!.details).toBe('the generated briefing')
 		assertHelpersSensible(model)
 	})
 
-	test('a still-waiting question on a terminal run settles at now', () => {
+	test('the inquiry stack pauses the main stack and pops when the handler finishes', () => {
 		const events = [
-			event('2026-01-01T00:00:00.000Z', 'role_start', { role: 'orchestrator', depth: 0, task: 'build the site' }),
-			event('2026-01-01T00:00:01.000Z', 'operator_inquiry', { role: 'orchestrator', roleId: 'orchestrator-0-1', message: 'ping?' }),
-			event('2026-01-01T00:00:02.000Z', 'role_finished', { role: 'orchestrator', depth: 0, status: 'error', summary: 'failed' }),
+			...inquiryRunEvents(),
+			event('t3', 'role_start', { role: 'inquiry_responder', depth: 2, parent: 'coder', task: 'the generated briefing' }),
+			event('t4', 'role_finished', { role: 'inquiry_responder', depth: 2, status: 'success', summary: 'the coder is writing the page', parent: 'coder' }),
 		]
-		const model = deriveInteractionModel(snapshot(events, meta('error')), NOW)
-		const question = inquiriesOf(model)[0]!
-		expect(question.lifecycle).toBe('settled')
-		expect(question.settledAt).toBe('2026-01-01T00:00:02.000Z')
+		const model = deriveInteractionModel(snapshot(events, meta('running')), NOW)
+		// The handler's return closed the inquiry stack's root call: the main stack is active again with the coder still open, and the resolved stack's final return lingers (visible) until the next operation confirms it.
+		expect(activeStack(model)).toBe('main')
+		expect(callChainOf(model, 'main')).toHaveLength(2)
+		const leg = model.operations.filter((o) => o.lifecycle === 'in_flight' && o.kind === 'return')
+		expect(leg).toHaveLength(1)
+		expect(leg[0]!.source).toBe(model.participants.find((p) => p.role === 'inquiry_responder')!.id)
+		expect(leg[0]!.destination).toBe('human:asker:1')
+		expect(stacksOf(model)).toEqual(['main', 'interrupt-1-stack'])
+		assertHelpersSensible(model)
+	})
+
+	test('a non-inquiry trigger still roots the new stack at a synthetic interrupt participant', () => {
+		const events = [
+			event('t0', 'role_start', { role: 'orchestrator', depth: 0, task: 'build the site' }),
+			event('t1', 'interrupt', { trigger: 'loop_check', handler: 'loop_detector', target: 'orchestrator-0-1' }),
+		]
+		const model = deriveInteractionModel(snapshot(events, meta('running')), NOW)
+		const interrupt = model.participants.find((p) => p.kind === 'interrupt')
+		expect(interrupt).toBeDefined()
+		expect(interrupt!.id).toBe('interrupt:1')
+		expect(model.participants.filter((p) => p.kind === 'human')).toHaveLength(1)
+		expect(model.stacks).toEqual([
+			{ id: 'main', root: 'human:root' },
+			{ id: 'interrupt-1-stack', root: interrupt!.id },
+		])
 		assertHelpersSensible(model)
 	})
 })

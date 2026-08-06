@@ -103,8 +103,6 @@ function terminalState(operation) {
 // The motion state a message line carries under the single invariant. This mirrors the sibling flow-view.js `edgeAnimationState`: a line animates iff it is in_flight and its stack is the active stack — a call animates 'flowing' while in_flight (the transit phase) and goes solid once settled (the working phase); a return animates 'returning' (or 'error'/'terminated' for the matching outcome) only while in_flight (its transit phase) and goes solid once settled (its working phase, a leg abandoned mid-rewind still reading distinctly from both success and failure via its settled terminated class). The flow view encodes the same rule per-edge; the sequence view renders every operation as a row, so the guard here additionally requires the operation to be the active operation (the latest non-observe operation in the active stack) — earlier messages in the active stack are settled and stay solid. observe never reaches here (it renders its own static line). The two views therefore agree on "what is in flight right now" because both read it off the same activeOperation helper.
 function messageAnimationState(operation, model, activeOperationId) {
 	if (operation.kind === 'observe' || operation.kind === 'terminate') return 'static'
-	// An inquiry is ambient (never the run's active operation), so it reads the animation rule alone: a question still waiting for its answer marches; settled questions and answers sit solid.
-	if (operation.kind === 'inquiry') return operation.lifecycle === 'in_flight' ? 'flowing' : 'static'
 	if (operation.id !== activeOperationId) return 'static'
 	if (operation.stack !== activeStack(model)) return 'static'
 	if (operation.lifecycle === 'settled') return 'static'
@@ -121,8 +119,6 @@ function messageLineClass(operation, animationState) {
 		classes.push('seq-message--observe')
 	} else if (operation.kind === 'terminate') {
 		classes.push('seq-message--terminate')
-	} else if (operation.kind === 'inquiry') {
-		classes.push(animationState === 'flowing' ? 'seq-message--inquiry-flowing' : 'seq-message--inquiry')
 	} else if (animationState === 'flowing') {
 		classes.push('seq-message--flowing')
 	} else if (animationState === 'returning') {
@@ -177,6 +173,16 @@ function sourceNodeState(operation) {
 	if (operation.outcome === 'error') return 'error'
 	if (operation.outcome === 'terminated') return 'terminated'
 	return null
+}
+
+// An invisible hit band covering a message row's full height between the two columns the message connects, painted beneath the visible line and nodes. The 1.4px line alone is a needlessly precise hover target for the inspector; the band makes the whole row hoverable without changing anything visible. Adjacent rows tile exactly, so a band never steals a neighbouring row's hover.
+function messageHitArea(h, sourceX, destinationX, rowY) {
+	return h('rect', { class: 'seq-hit-area', x: Math.min(sourceX, destinationX), y: rowY - ROW_HEIGHT / 2, width: Math.abs(destinationX - sourceX), height: ROW_HEIGHT }, [])
+}
+
+// The loopback U-turn leaves its column to the right and returns on the same row, so its hit band covers the out-and-back area beside the column rather than a span between two columns.
+function loopbackHitArea(h, columnX, rowY) {
+	return h('rect', { class: 'seq-hit-area', x: columnX, y: rowY - LOOPBACK_HEIGHT - ROW_HEIGHT / 2, width: 60 + TERMINAL_NODE_WIDTH, height: LOOPBACK_HEIGHT + ROW_HEIGHT }, [])
 }
 
 // Renders the sequence view as a single SVG sized to its laid-out content. Columns render as headers plus dashed vertical lifelines spanning the message area; operations render top-to-bottom by index, each as a horizontal arrow (or a loopback U-turn for a same-role cross-instance call, or a static dashed line for observe) landing on a terminal node on the destination's lifeline. The active operation's line carries the flowing/returning/error animation class and its destination node pulses; a return additionally carries a source node on the callee's lifeline with its outcome color. Every message group carries `data-operation` so the inspector resolves the operation's details markdown and label from the model without the view re-deriving or embedding them. `guildParticipants` (optional) supplies the full participant set the guild defines so every role column and the tools column appear from frame 0 rather than growing as participants first appear; when absent the column set falls back to the participants present in the current frame.
@@ -237,12 +243,13 @@ export function renderSequenceView(h, model, labels, tier, guildParticipants) {
 		const label = labels.resolveOperationLabel(operation, model.participants, tier, labels.hashString(operation.id))
 		const animationState = messageAnimationState(operation, model, activeOperationId)
 
-		// observe renders as a static cross-column line — no arrowhead, no terminal node — so it reads as a reference rather than an in-flight call and never activates a lifeline. An inquiry (an operator question or its answer) renders the same way with its own class: a message line, never an activation.
-		if (operation.kind === 'observe' || operation.kind === 'inquiry') {
+		// observe renders as a static cross-column line — no arrowhead, no terminal node — so it reads as a reference rather than an in-flight call and never activates a lifeline.
+		if (operation.kind === 'observe') {
 			const d = `M ${sourceX} ${rowY} L ${destinationX} ${rowY}`
 			const path = h('path', { class: messageLineClass(operation, animationState), d, 'data-source-role': sourceParticipant.role, 'data-destination-role': destinationParticipant.role }, [])
 			return h('g', { class: 'seq-message-group', [ATTR_OPERATION]: operation.id, 'data-kind': operation.kind, 'data-routing': operation.kind, 'data-source-role': sourceParticipant.role, 'data-destination-role': destinationParticipant.role, 'data-animation': animationState }, [
 				h('title', {}, [label]),
+				messageHitArea(h, sourceX, destinationX, rowY),
 				path,
 			])
 		}
@@ -254,6 +261,7 @@ export function renderSequenceView(h, model, labels, tier, guildParticipants) {
 			const targetNode = renderTerminalNode(h, destinationX, rowY, 'terminate-target', operation, destinationParticipant.role, 'destination')
 			return h('g', { class: 'seq-message-group', [ATTR_OPERATION]: operation.id, 'data-kind': 'terminate', 'data-routing': 'terminate', 'data-source-role': sourceParticipant.role, 'data-destination-role': destinationParticipant.role, 'data-animation': animationState }, [
 				h('title', {}, [label]),
+				messageHitArea(h, sourceX, destinationX, rowY),
 				path,
 				targetNode,
 			])
@@ -290,6 +298,7 @@ export function renderSequenceView(h, model, labels, tier, guildParticipants) {
 			'data-animation': animationState,
 		}, [
 			h('title', {}, [label]),
+			sameColumn ? loopbackHitArea(h, sourceX, rowY) : messageHitArea(h, sourceX, destinationX, rowY),
 			path,
 			...nodes,
 		])

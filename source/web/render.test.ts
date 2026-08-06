@@ -511,6 +511,42 @@ describe('formatLogEvent', () => {
 		expect(formatLogEvent(event('agent_call', { role: 'orchestrator', child: 'coder' }))).toBe('orchestrator · agent call → coder')
 	})
 
+	test('interrupt → interrupt (handler on target)', () => {
+		expect(formatLogEvent(event('interrupt', { trigger: 'loop_check', handler: 'loop_detector', target: 'coder-1-2' }))).toBe('interrupt (loop_detector on coder-1-2)')
+	})
+
+	test('interrupt without handler and target renders the bare type', () => {
+		expect(formatLogEvent(event('interrupt', { trigger: 'context_pressure' }))).toBe('interrupt')
+	})
+
+	test('interrupt_resolved → interrupt resolved (action on target)', () => {
+		expect(formatLogEvent(event('interrupt_resolved', { trigger: 'inquiry', action: 'answered', target: 'coder-1-2' }))).toBe('interrupt resolved (answered on coder-1-2)')
+	})
+
+	test('observe → role · observe (details)', () => {
+		expect(formatLogEvent(event('observe', { role: 'coder', roleId: 'coder-1-2', details: 'read_message_window' }))).toBe('coder · observe (read_message_window)')
+	})
+
+	test('observe without details renders the bare action', () => {
+		expect(formatLogEvent(event('observe', { role: 'coder' }))).toBe('coder · observe')
+	})
+
+	test('operator_notice → role · operator notice', () => {
+		expect(formatLogEvent(event('operator_notice', { role: 'orchestrator', roleId: 'orchestrator-0-1', message: 'winding down' }))).toBe('orchestrator · operator notice')
+	})
+
+	test('inquiry_dropped → inquiry dropped (reason)', () => {
+		expect(formatLogEvent(event('inquiry_dropped', { message: 'hello?', reason: 'no handler role configured' }))).toBe('inquiry dropped (no handler role configured)')
+	})
+
+	test('inquiry_dropped without a reason renders the bare action', () => {
+		expect(formatLogEvent(event('inquiry_dropped', { message: 'hello?' }))).toBe('inquiry dropped')
+	})
+
+	test('the retired operator_inquiry still reads sensibly in historical logs', () => {
+		expect(formatLogEvent(event('operator_inquiry', { role: 'orchestrator', roleId: 'orchestrator-0-1', message: 'status?' }))).toBe('orchestrator · operator inquiry')
+	})
+
 	test('an unknown event type with a role falls back to type · role', () => {
 		expect(formatLogEvent(event('something_new', { role: 'coder' }))).toBe('something_new · coder')
 	})
@@ -837,50 +873,58 @@ describe('deriveQuestionHistory', () => {
 })
 
 describe('deriveInterruptHistory', () => {
-	test('pairs an inquiry with the recipient role\u2019s next content-bearing llm_call', () => {
+	test('pairs an inquiry with the handler’s answered resolution', () => {
 		const events: LogEvent[] = [
-			{ timestamp: 't1', type: 'operator_inquiry', payload: { role: 'coder', roleId: 'coder-1-2', message: 'what are you doing?' } },
-			{ timestamp: 't2', type: 'llm_call', payload: { role: 'coder', received: { toolCalls: [] } } },
-			{ timestamp: 't3', type: 'llm_call', payload: { role: 'coder', received: { content: 'I am writing the parser.' } } },
+			{ timestamp: 't1', type: 'interrupt', payload: { trigger: 'inquiry', handler: 'inquiry_responder', target: 'coder-1-2', message: 'what are you doing?' } },
+			{ timestamp: 't2', type: 'interrupt_resolved', payload: { trigger: 'inquiry', handler: 'inquiry_responder', target: 'coder-1-2', action: 'answered', summary: 'I am writing the parser.' } },
 		]
 
 		expect(deriveInterruptHistory(events)).toEqual([
-			{ kind: 'inquiry', askedAt: 't1', role: 'coder', message: 'what are you doing?', answer: 'I am writing the parser.', answeredAt: 't3', ended: false },
+			{ kind: 'inquiry', askedAt: 't1', role: 'inquiry_responder', message: 'what are you doing?', answer: 'I am writing the parser.', answeredAt: 't2', ended: false },
 		])
 	})
 
-	test('a tool-call-only response does not count as the answer', () => {
+	test('an unanswered inquiry stays waiting', () => {
 		const events: LogEvent[] = [
-			{ timestamp: 't1', type: 'operator_inquiry', payload: { role: 'coder', message: 'status?' } },
-			{ timestamp: 't2', type: 'llm_call', payload: { role: 'coder', received: { content: '', toolCalls: [{ id: 'x' }] } } },
+			{ timestamp: 't1', type: 'interrupt', payload: { trigger: 'inquiry', handler: 'inquiry_responder', target: 'coder-1-2', message: 'status?' } },
 		]
 
-		const history = deriveInterruptHistory(events)
-		expect(history.length).toBe(1)
-		const entry = history[0]!
-		expect(entry.kind).toBe('inquiry')
-		if (entry.kind !== 'inquiry') return
-		expect(entry.answer).toBeNull()
-		expect(entry.ended).toBe(false)
+		expect(deriveInterruptHistory(events)).toEqual([
+			{ kind: 'inquiry', askedAt: 't1', role: 'inquiry_responder', message: 'status?', answer: null, answeredAt: null, ended: false },
+		])
 	})
 
-	test('an llm_call from another role does not answer the inquiry', () => {
+	test('a failed resolution marks the inquiry ended', () => {
 		const events: LogEvent[] = [
-			{ timestamp: 't1', type: 'operator_inquiry', payload: { role: 'coder', message: 'status?' } },
-			{ timestamp: 't2', type: 'llm_call', payload: { role: 'planner', received: { content: 'not the addressee' } } },
+			{ timestamp: 't1', type: 'interrupt', payload: { trigger: 'inquiry', handler: 'inquiry_responder', target: 'coder-1-2', message: 'status?' } },
+			{ timestamp: 't2', type: 'interrupt_resolved', payload: { trigger: 'inquiry', handler: 'inquiry_responder', target: 'coder-1-2', action: 'failed', handlerStatus: 'error', summary: 'the handler failed' } },
 		]
 
 		const entry = deriveInterruptHistory(events)[0]!
 		if (entry.kind !== 'inquiry') throw new Error('expected inquiry')
 		expect(entry.answer).toBeNull()
+		expect(entry.answeredAt).toBeNull()
+		expect(entry.ended).toBe(true)
 	})
 
-	test('two inquiries to the same role pair oldest-first', () => {
+	test('an answered action with an empty summary marks the inquiry ended rather than answered', () => {
 		const events: LogEvent[] = [
-			{ timestamp: 't1', type: 'operator_inquiry', payload: { role: 'coder', message: 'first?' } },
-			{ timestamp: 't2', type: 'operator_inquiry', payload: { role: 'coder', message: 'second?' } },
-			{ timestamp: 't3', type: 'llm_call', payload: { role: 'coder', received: { content: 'answer one' } } },
-			{ timestamp: 't4', type: 'llm_call', payload: { role: 'coder', received: { content: 'answer two' } } },
+			{ timestamp: 't1', type: 'interrupt', payload: { trigger: 'inquiry', handler: 'inquiry_responder', target: 'coder-1-2', message: 'status?' } },
+			{ timestamp: 't2', type: 'interrupt_resolved', payload: { trigger: 'inquiry', handler: 'inquiry_responder', target: 'coder-1-2', action: 'answered', summary: '' } },
+		]
+
+		const entry = deriveInterruptHistory(events)[0]!
+		if (entry.kind !== 'inquiry') throw new Error('expected inquiry')
+		expect(entry.answer).toBeNull()
+		expect(entry.ended).toBe(true)
+	})
+
+	test('two inquiries pair with their resolutions oldest-first', () => {
+		const events: LogEvent[] = [
+			{ timestamp: 't1', type: 'interrupt', payload: { trigger: 'inquiry', handler: 'inquiry_responder', target: 'coder-1-2', message: 'first?' } },
+			{ timestamp: 't2', type: 'interrupt', payload: { trigger: 'inquiry', handler: 'inquiry_responder', target: 'coder-1-2', message: 'second?' } },
+			{ timestamp: 't3', type: 'interrupt_resolved', payload: { trigger: 'inquiry', action: 'answered', summary: 'answer one' } },
+			{ timestamp: 't4', type: 'interrupt_resolved', payload: { trigger: 'inquiry', action: 'answered', summary: 'answer two' } },
 		]
 
 		const history = deriveInterruptHistory(events)
@@ -890,18 +934,6 @@ describe('deriveInterruptHistory', () => {
 		if (first.kind !== 'inquiry' || second.kind !== 'inquiry') throw new Error('expected inquiries')
 		expect(first.answer).toBe('answer one')
 		expect(second.answer).toBe('answer two')
-	})
-
-	test('a role finishing without a content response marks the inquiry ended', () => {
-		const events: LogEvent[] = [
-			{ timestamp: 't1', type: 'operator_inquiry', payload: { role: 'coder', message: 'status?' } },
-			{ timestamp: 't2', type: 'role_finished', payload: { role: 'coder', status: 'success' } },
-		]
-
-		const entry = deriveInterruptHistory(events)[0]!
-		if (entry.kind !== 'inquiry') throw new Error('expected inquiry')
-		expect(entry.answer).toBeNull()
-		expect(entry.ended).toBe(true)
 	})
 
 	test('records a plan modification with its target and aborted list', () => {
@@ -914,15 +946,19 @@ describe('deriveInterruptHistory', () => {
 		])
 	})
 
-	test('does not throw on malformed payloads', () => {
+	test('ignores retired operator_inquiry events, non-inquiry triggers, and malformed payloads', () => {
 		const events: LogEvent[] = [
-			{ timestamp: 't1', type: 'operator_inquiry', payload: null },
-			{ timestamp: 't2', type: 'plan_modification', payload: { message: 42 } },
-			{ timestamp: 't3', type: 'operator_inquiry', payload: { role: 'coder', message: 'ok?' } },
+			{ timestamp: 't1', type: 'operator_inquiry', payload: { role: 'coder', message: 'legacy?' } },
+			{ timestamp: 't2', type: 'interrupt', payload: null },
+			{ timestamp: 't3', type: 'interrupt', payload: { trigger: 'loop_check', handler: 'loop_detector', target: 'coder-1-2' } },
+			{ timestamp: 't4', type: 'interrupt', payload: { trigger: 'inquiry', handler: 'inquiry_responder', target: 'coder-1-2' } },
+			{ timestamp: 't5', type: 'interrupt_resolved', payload: { trigger: 'inquiry', action: 'answered', summary: 'orphaned resolution' } },
+			{ timestamp: 't6', type: 'plan_modification', payload: { message: 42 } },
+			{ timestamp: 't7', type: 'interrupt', payload: { trigger: 'inquiry', handler: 'inquiry_responder', target: 'coder-1-2', message: 'ok?' } },
 		]
 
 		expect(deriveInterruptHistory(events)).toEqual([
-			{ kind: 'inquiry', askedAt: 't3', role: 'coder', message: 'ok?', answer: null, answeredAt: null, ended: false },
+			{ kind: 'inquiry', askedAt: 't7', role: 'inquiry_responder', message: 'ok?', answer: null, answeredAt: null, ended: false },
 		])
 	})
 
@@ -1042,7 +1078,7 @@ describe('renderRunSummary', () => {
 	test('shapes a completed run from its meta, taking runId from the directory name', () => {
 		const meta = parseRunMeta(JSON.stringify(sampleRunMeta({ runId: 'on-disk-id' })))
 
-		const summary = renderRunSummary('dir-name', meta)
+		const summary = renderRunSummary('dir-name', meta, null)
 		expect(summary).toEqual({
 			runId: 'dir-name',
 			status: 'success',
@@ -1050,11 +1086,14 @@ describe('renderRunSummary', () => {
 			effort: null,
 			startTime: '2026-01-01T00:00:00.000Z',
 			endTime: '2026-01-01T00:01:00.000Z',
+			result: null,
+			error: null,
+			summary: null,
 		})
 	})
 
 	test('reports unknown status and null fields when meta is absent (run in progress)', () => {
-		const summary = renderRunSummary('run-in-progress', parseRunMeta(null))
+		const summary = renderRunSummary('run-in-progress', parseRunMeta(null), null)
 		expect(summary).toEqual({
 			runId: 'run-in-progress',
 			status: 'unknown',
@@ -1062,19 +1101,38 @@ describe('renderRunSummary', () => {
 			effort: null,
 			startTime: null,
 			endTime: null,
+			result: null,
+			error: null,
+			summary: null,
 		})
 	})
 
 	test('endTime is null when the meta omits it', () => {
 		const meta = parseRunMeta(JSON.stringify(sampleRunMeta({ endTime: undefined })))
 
-		const summary = renderRunSummary('r', meta)
+		const summary = renderRunSummary('r', meta, null)
 		expect(summary.endTime).toBeNull()
 	})
 
 	test('carries the run effort from meta.effort', () => {
 		const meta = parseRunMeta(JSON.stringify(sampleRunMeta({ effort: 4 })))
-		expect(renderRunSummary('r', meta).effort).toBe(4)
+		expect(renderRunSummary('r', meta, null).effort).toBe(4)
+	})
+
+	test('passes the result card and run-level error through so the history view can browse outcomes', () => {
+		const meta = parseRunMeta(JSON.stringify(sampleRunMeta({
+			result: { status: 'success', summary: 'fixed it', artifacts: ['a.ts'] },
+			error: { kind: 'llm_unavailable', message: 'endpoint down' },
+		})))
+		const summary = renderRunSummary('r', meta, null)
+		expect(summary.result).toEqual({ status: 'success', summary: 'fixed it', artifacts: ['a.ts'] })
+		expect(summary.error).toEqual({ kind: 'llm_unavailable', message: 'endpoint down' })
+	})
+
+	test('carries the generated one-line summary through to the client', () => {
+		const meta = parseRunMeta(JSON.stringify(sampleRunMeta()))
+		expect(renderRunSummary('r', meta, 'Fixed the login bug').summary).toBe('Fixed the login bug')
+		expect(renderRunSummary('r', meta, null).summary).toBeNull()
 	})
 })
 
@@ -1313,14 +1371,12 @@ describe('renderConfig', () => {
 				return: { 'role->role': { detailed: ['{source} is returning to {destination}'] } },
 				observe: { 'role->role': { detailed: ['{source} is observing {destination}'] } },
 				terminate: { 'tool->role': { detailed: ['{source} is terminating {destination}'] } },
-				inquiry: { 'human->role': { detailed: ['{source} is asking {destination}'] } },
 			},
 			genericOperationTemplates: {
 				call: { detailed: ['{source} is calling {destination}'] },
 				return: { detailed: ['{source} is returning to {destination}'] },
 				observe: { detailed: ['{source} is observing {destination}'] },
 				terminate: { detailed: ['{source} is terminating {destination}'] },
-				inquiry: { detailed: ['{source} is asking {destination}'] },
 			},
 		}
 		const config = sampleGuildConfig({ visualization })

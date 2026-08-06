@@ -812,3 +812,4 @@ describe('deriveCostStrip — per-operation metric aggregation', () => {
 		expect(deriveCostStrip(empty)).toEqual({ elapsedSeconds: 0, tokens: 0 })
 	})
 })
+

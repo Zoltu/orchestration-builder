@@ -108,6 +108,29 @@ export function createReadRunMetaById(baseDir: string = 'data/runs'): ReadRunMet
 	}
 }
 
+export type WriteRunSummary = (summary: string) => void
+export type ReadRunSummaryById = (runId: string) => string | null
+
+const SUMMARY_FILE_NAME = 'summary.txt'
+
+// The one-line run summary is plain text, not JSON: there is no schema to validate, and absence (or a whitespace-only file) simply means "no summary", so the UI falls back to the task text. The run directory is created if missing because a start-of-run summary write can land before the executor has created it.
+export function createWriteRunSummary(runId: string, baseDir: string = 'data/runs'): WriteRunSummary {
+	const runDir = path.resolve(baseDir, runId)
+	return (summary: string) => {
+		fs.mkdirSync(runDir, { recursive: true })
+		fs.writeFileSync(path.resolve(runDir, SUMMARY_FILE_NAME), summary)
+	}
+}
+
+export function createReadRunSummaryById(baseDir: string = 'data/runs'): ReadRunSummaryById {
+	return (runId: string) => {
+		const summaryPath = path.resolve(baseDir, runId, SUMMARY_FILE_NAME)
+		if (!fs.existsSync(summaryPath)) return null
+		const text = fs.readFileSync(summaryPath, 'utf8').trim()
+		return text === '' ? null : text
+	}
+}
+
 export interface RunSnapshotFileStat {
 	size: number
 	mtimeMs: number

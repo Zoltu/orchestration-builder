@@ -19,6 +19,7 @@
 		"maxCompactionAttempts": 5,
 		"contextPressureThreshold": 0.8,
 		"contextHandlerRole": "context_manager",
+		"inquiryHandlerRole": "inquiry_responder",
 		"interruptTriggers": {
 			"handlerRole": "loop_detector",
 			"everyToolCalls": 12,
@@ -281,6 +282,25 @@
 				"whimsical": ["Tidying the shelves", "Sweeping up the loose pages", "Filing things away", "Pruning the hedges"]
 			}
 		},
+		"inquiry_responder": {
+			"systemPrompt": "prompts/inquiry_responder.md",
+			"tools": ["list_role_messages", "read_message_window", "search_role_blocks", "recent_role_tool_calls", "context_info", "list_directory", "glob_files", "read_file", "read_file_partial", "search_text", "finish"],
+			"label": {
+				"detailed": ["Inquiry Responder"],
+				"friendly": ["Inquiry Responder"],
+				"whimsical": ["Question Wrangler"]
+			},
+			"description": {
+				"detailed": ["Answers the operator's questions about the run while it is paused, by inspecting the live agents' conversations and the workspace — read-only, it never changes anything."],
+				"friendly": ["Answers your questions about what the run is doing."],
+				"whimsical": ["Reads the run's diary so you don't have to."]
+			},
+			"workingLabel": {
+				"detailed": ["role {participantRole} is investigating the operator's question (streaming tokens)"],
+				"friendly": ["Investigating your question"],
+				"whimsical": ["Digging for answers", "Snooping through the transcripts", "Consulting the crystal ball", "Chasing down the answer"]
+			}
+		},
 		"recovery": {
 			"systemPrompt": "prompts/recovery.md",
 			"tools": ["agent", "ask_human", "finish"],
@@ -352,18 +372,13 @@
 			},
 			"terminate": {
 				"tool->role": { "detailed": ["tool {sourceRole} is reverting role {destinationRole} (terminate, stack {stack})"], "friendly": ["{source} is rewinding {destination}"], "whimsical": ["{source} is zapping {destination}", "{source} is vaporizing {destination}", "{source} is hitting {destination} with the undo ray"] }
-			},
-			"inquiry": {
-				"human->role": { "detailed": ["human is asking role {destinationRole} (stack {stack})"], "friendly": ["{source} is asking {destination}"], "whimsical": ["{source} is posing a riddle to {destination}", "{source} is ringing {destination}'s bell", "{source} is tapping {destination} on the shoulder"] },
-				"role->human": { "detailed": ["role {sourceRole} is answering human (stack {stack})"], "friendly": ["{source} is answering {destination}"], "whimsical": ["{source} is whispering the answer to {destination}", "{source} is solving {destination}'s riddle", "{source} is passing the answer back to {destination}"] }
 			}
 		},
 		"genericOperationTemplates": {
 			"call": { "detailed": ["{sourceKind} {sourceRole} is calling {destinationKind} {destinationRole} (stack {stack})"], "friendly": ["{source} is calling {destination}"], "whimsical": ["{source} is ringing up {destination}"] },
 			"return": { "detailed": ["{sourceKind} {sourceRole} is returning {outcome} to {destinationKind} {destinationRole} (stack {stack})"], "friendly": ["{source} is returning to {destination}"], "whimsical": ["{source} is reporting back to {destination}"] },
 			"observe": { "detailed": ["{sourceKind} {sourceRole} is observing {destinationKind} {destinationRole} (stack {stack})"], "friendly": ["{source} is observing {destination}"], "whimsical": ["{source} is peeking at {destination}"] },
-			"terminate": { "detailed": ["{sourceKind} {sourceRole} is reverting {destinationKind} {destinationRole} (terminate, stack {stack})"], "friendly": ["{source} is rewinding {destination}"], "whimsical": ["{source} is zapping {destination}"] },
-			"inquiry": { "detailed": ["{sourceKind} {sourceRole} is asking {destinationKind} {destinationRole} (stack {stack})"], "friendly": ["{source} is asking {destination}"], "whimsical": ["{source} is posing a riddle to {destination}"] }
+			"terminate": { "detailed": ["{sourceKind} {sourceRole} is reverting {destinationKind} {destinationRole} (terminate, stack {stack})"], "friendly": ["{source} is rewinding {destination}"], "whimsical": ["{source} is zapping {destination}"] }
 		},
 		"workingTemplates": {
 			"role": { "detailed": ["role {participantRole} is generating a response (streaming tokens)"], "friendly": ["{participant} is thinking"], "whimsical": ["{participant} is on the case", "{participant} is noodling on it", "{participant} is chewing it over"] },

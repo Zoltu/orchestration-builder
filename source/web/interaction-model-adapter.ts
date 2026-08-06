@@ -8,7 +8,7 @@ import type { RunSnapshot } from './render.js'
 // mirror that shape so the server typechecks against the same contract the client consumes.
 
 type ParticipantKind = 'human' | 'interrupt' | 'role' | 'tool'
-type OperationKind = 'call' | 'return' | 'observe' | 'terminate' | 'inquiry'
+type OperationKind = 'call' | 'return' | 'observe' | 'terminate'
 type OperationLifecycle = 'in_flight' | 'settled'
 type OperationOutcome = 'success' | 'error' | 'terminated'
 type RunStatus = 'running' | 'success' | 'error' | 'needs_clarification' | 'interrupted' | 'unknown'
@@ -158,11 +158,11 @@ interface ReturnRecord {
 	supersededAt: string | null
 }
 
-// One call stack in the run. The main run is the bottom frame (rooted at the human); each interrupt pushes a fresh frame rooted at its own interrupt participant and pauses the frame below until it resolves.
+// One call stack in the run. The main run is the bottom frame (rooted at the human); each interrupt pushes a fresh frame rooted at its own root participant — a synthetic interrupt instance, or the human asker for an operator inquiry — and pauses the frame below until it resolves.
 // Only the top frame is active at any time, matching the executor's sequential model: every event after an `interrupt` belongs to the top frame until its root call closes, at which point the frame is popped and control returns to the frame below.
 interface StackFrame {
 	stackId: string
-	// The participant the stack's first call originates from — the human root for the main stack, the interrupt instance for an interrupt stack.
+	// The participant the stack's first call originates from — the human root for the main stack, the interrupt instance or human asker for an interrupt stack.
 	rootId: string
 	openCalls: OpenCallRecord[]
 	lingeringReturn: ReturnRecord | null
@@ -185,8 +185,8 @@ export function deriveInteractionModel(snapshot: RunSnapshot, now: string): Inte
 	// The stack of call stacks. Only the top frame is active; with a single frame (no interrupts) this behaves exactly like a single open-call chain.
 	const stackStack: StackFrame[] = [{ stackId: MAIN_STACK, rootId: ROOT_HUMAN_ID, openCalls: [], lingeringReturn: null }]
 	const stackRecords: StackRecord[] = [{ id: MAIN_STACK, root: ROOT_HUMAN_ID }]
-	// Operator inquiries awaiting their answer, oldest first per role name. The question op stays in flight until the recipient role's first content-bearing llm_call settles it and emits the answer op; a role that finishes first settles the question with no answer.
-	const pendingInquiries: Array<{ operation: Operation; role: string }> = []
+	// The question text of the inquiry interrupt whose stack was just pushed, stashed so the handler's role_start shows the question as its call details rather than the generated briefing. Cleared by the next role_start or non-inquiry interrupt; null when the inquiry carried no message (the call details fall back to the task text).
+	let pendingInquiryMessage: string | null = null
 
 	const idCounters = new Map<string, number>()
 	function nextId(key: string): number {
@@ -352,36 +352,40 @@ export function deriveInteractionModel(snapshot: RunSnapshot, now: string): Inte
 		return null
 	}
 
-	// Finds the rootmost participant of a role on the main stack — the recipient of an operator inquiry, which always routes to the chain root (the entry role). Returns null when the role has no open call there (e.g. the event names a role that already returned), so the caller skips the marker.
-	function findMainStackParticipantByRole(role: string): string | null {
-		const mainFrame = stackStack[0]
-		if (mainFrame === undefined) return null
-		for (const record of mainFrame.openCalls) {
-			if (record.destinationRole === role) return record.destinationId
-		}
-		return null
-	}
-
 	for (const event of snapshot.logEvents) {
 		switch (event.type) {
 			case 'role_start': {
 				const role = stringField(event.payload, 'role')
 				if (role === null) break
 				const task = stringField(event.payload, 'task')
+				const details = pendingInquiryMessage ?? task
+				pendingInquiryMessage = null
 				const roleId = `role:${role}:${nextId('role:' + role)}`
 				addParticipant(roleId, role, 'role')
 				settlePreviousByDelegation(event.timestamp)
-				// The source is the active frame's innermost open call, or the frame's root (the human for the main stack, the interrupt instance for an interrupt stack) when the stack is empty.
-				recordCall(event, activeRoleParticipantId(), roleId, role, 'role', null, task)
+				// The source is the active frame's innermost open call, or the frame's root (the human for the main stack, the interrupt instance or human asker for an interrupt stack) when the stack is empty.
+				recordCall(event, activeRoleParticipantId(), roleId, role, 'role', null, details)
 				break
 			}
 			case 'interrupt': {
-				// A fresh interrupt instance preempts the active stack: it becomes its own participant and the root of a new stack, and every subsequent event belongs to that stack until its root call closes (see role_finished). The stack record is registered at the push so the model can show the fresh stack (and its root) before its first operation lands.
+				// A preemption pushes a fresh stack: every subsequent event belongs to that stack until its root call closes (see role_finished), and the stack record is registered at the push so the model can show the fresh stack (and its root) before its first operation lands. An operator inquiry (trigger 'inquiry') roots its stack at a fresh human asker — instance-per-invocation, like the ask_human answerer — because the person asking is the stack's caller; any other trigger roots at a synthetic interrupt instance. Both draw the stack id from the shared interrupt counter so ids stay unique across triggers.
 				const interruptNumber = nextId('interrupt')
+				const stackId = `interrupt-${interruptNumber}-stack`
+				const trigger = stringField(event.payload, 'trigger')
+				if (trigger === 'inquiry') {
+					const askerId = `human:asker:${nextId('asker')}`
+					addParticipant(askerId, 'human', 'human')
+					stackStack.push({ stackId, rootId: askerId, openCalls: [], lingeringReturn: null })
+					stackRecords.push({ id: stackId, root: askerId })
+					// The question stashes until the handler's role_start, whose call details show it rather than the generated briefing.
+					pendingInquiryMessage = stringField(event.payload, 'message')
+					break
+				}
+				pendingInquiryMessage = null
 				const interruptId = `interrupt:${interruptNumber}`
 				addParticipant(interruptId, 'interrupt', 'interrupt')
-				stackStack.push({ stackId: `interrupt-${interruptNumber}-stack`, rootId: interruptId, openCalls: [], lingeringReturn: null })
-				stackRecords.push({ id: `interrupt-${interruptNumber}-stack`, root: interruptId })
+				stackStack.push({ stackId, rootId: interruptId, openCalls: [], lingeringReturn: null })
+				stackRecords.push({ id: stackId, root: interruptId })
 				break
 			}
 			case 'observe': {
@@ -453,38 +457,6 @@ export function deriveInteractionModel(snapshot: RunSnapshot, now: string): Inte
 					const closed = stackStack.pop()
 					if (closed !== undefined && closed.lingeringReturn !== null) pendingResolvedReturns.push(closed.lingeringReturn)
 				}
-				// A role that finishes with questions still waiting settles them unanswered (outcome null); the run view's interrupt history marks the same inquiries ended.
-				for (let i = pendingInquiries.length - 1; i >= 0; i -= 1) {
-					const pending = pendingInquiries[i]
-					if (pending === undefined || pending.role !== role) continue
-					pending.operation.settledAt = event.timestamp
-					pending.operation.lifecycle = 'settled'
-					pendingInquiries.splice(i, 1)
-				}
-				break
-			}
-			case 'operator_inquiry': {
-				// The human asks the run's root role a question. The question op stays in flight (a waiting, flowing line) until the role's first content-bearing llm_call settles it and emits the answer op — the same question/answer pairing the run view's interrupt history derives independently.
-				const role = stringField(event.payload, 'role')
-				const message = stringField(event.payload, 'message')
-				if (role === null || message === null) break
-				const destinationId = findMainStackParticipantByRole(role)
-				if (destinationId === null) break
-				const operation: Operation = {
-					id: opId(),
-					kind: 'inquiry',
-					stack: MAIN_STACK,
-					source: ROOT_HUMAN_ID,
-					destination: destinationId,
-					startedAt: event.timestamp,
-					settledAt: null,
-					lifecycle: 'in_flight',
-					outcome: null,
-					details: message,
-					metrics: null,
-				}
-				operations.push(operation)
-				pendingInquiries.push({ operation, role })
 				break
 			}
 			case 'llm_call': {
@@ -493,33 +465,6 @@ export function deriveInteractionModel(snapshot: RunSnapshot, now: string): Inte
 				const usage = usageOf(event.payload)
 				// An llm_call from the caller settles a lingering return leg (the caller resumed).
 				settleLingeringIfCaller(role, event.timestamp)
-				// A content-bearing llm_call from a role with a pending inquiry is its answer: settle the oldest waiting question and emit the answer op back to the human.
-				const pendingIndex = pendingInquiries.findIndex((pending) => pending.role === role)
-				if (pendingIndex >= 0) {
-					const received = isObject(event.payload) ? event.payload['received'] : null
-					const content = isObject(received) && typeof received['content'] === 'string' && received['content'] !== '' ? received['content'] : null
-					if (content !== null) {
-						const pending = pendingInquiries.splice(pendingIndex, 1)[0]
-						if (pending !== undefined) {
-							pending.operation.settledAt = event.timestamp
-							pending.operation.lifecycle = 'settled'
-							pending.operation.outcome = 'success'
-							operations.push({
-								id: opId(),
-								kind: 'inquiry',
-								stack: MAIN_STACK,
-								source: pending.operation.destination,
-								destination: ROOT_HUMAN_ID,
-								startedAt: event.timestamp,
-								settledAt: event.timestamp,
-								lifecycle: 'settled',
-								outcome: null,
-								details: content,
-								metrics: null,
-							})
-						}
-					}
-				}
 				if (usage === null) break
 				// The call's metrics accumulate the callee's work: the innermost open call whose destination is the role that produced this llm_call.
 				for (let i = currentFrame().openCalls.length - 1; i >= 0; i -= 1) {
@@ -659,13 +604,6 @@ export function deriveInteractionModel(snapshot: RunSnapshot, now: string): Inte
 			op.settledAt = op.startedAt
 			op.lifecycle = 'settled'
 		}
-	}
-
-	// A terminal run leaves no question hanging: settle any inquiry still waiting (a live run keeps it in flight, flowing, until the answer or the recipient's finish lands).
-	for (const pending of pendingInquiries) {
-		if (runActive) break
-		pending.operation.settledAt = now
-		pending.operation.lifecycle = 'settled'
 	}
 
 	return { participants, operations, status, stacks: stackRecords }

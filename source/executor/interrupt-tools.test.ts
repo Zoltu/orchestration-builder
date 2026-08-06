@@ -108,13 +108,14 @@ describe('inspection tools', () => {
 		expect(data.messages[2]).toEqual({ index: 2, role: 'assistant', contentChars: 13, reasoningChars: 25, toolCallCount: 0 })
 	})
 
-	test('read_message_window returns a bounded slice and rejects bad arguments', async () => {
+	test('read_message_window returns a bounded slice with the target instance id and rejects bad arguments', async () => {
 		const { context } = makeContext()
 		const handlers = createBuiltInToolHandlers(context)
 		const result = await handlers.read_message_window!({ targetRole: 'coder-1-1', index: 1, field: 'content', start: 0, end: 5 })
 		expect(result.kind).toBe('success')
 		if (result.kind === 'success') {
-			const data = result.data as { text: string; totalChars: number }
+			const data = result.data as { targetRole: string; text: string; totalChars: number }
+			expect(data.targetRole).toBe('coder-1-1')
 			expect(data.text).toBe('build')
 			expect(data.totalChars).toBe(15)
 		}

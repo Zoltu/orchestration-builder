@@ -1027,6 +1027,21 @@ function buildInterruptGuild(roles: Record<string, RoleDefinition>, entryRole: s
 	return withManifests
 }
 
+// The inquiry-handler fixture mirrors the loop-detector one: the guild names an inquiry handler role via executor.inquiryHandlerRole, and the handler investigates with the read-only inspection tools before finishing with the answer as its summary.
+const mainAndInquirer = {
+	main: { systemPrompt: 'p', tools: ['echo', 'finish'] },
+	inquirer: { systemPrompt: 'inq', tools: ['recent_role_tool_calls', 'finish'] },
+}
+
+function buildInquiryGuild(roles: Record<string, RoleDefinition> = mainAndInquirer, entryRole = 'main'): LoadedGuild {
+	const guild = buildGuild(roles, entryRole, {
+		executor: { ...baseExecutor, inquiryHandlerRole: 'inquirer' },
+	})
+	let withManifests = withTool(guild, { name: 'echo', description: 'echo', parameters: { type: 'object', properties: {} } })
+	withManifests = withTool(withManifests, recentRoleToolCallsManifest)
+	return withManifests
+}
+
 describe('runRole — interrupt platform', () => {
 	const mainAndDetector = {
 		main: { systemPrompt: 'p', tools: ['echo', 'finish'] },
@@ -1124,10 +1139,16 @@ describe('runRole — interrupt platform', () => {
 		expect(payloadField(resolved!, 'action')).toBe('continue')
 	})
 
-	test('(c) an operator inquiry injects a marked user message at the next safe point and the run resumes', async () => {
-		const guild = buildInterruptGuild(mainAndDetector, 'main')
+	test('(c) an operator inquiry is answered by a fresh handler role at the next safe point and the run resumes', async () => {
+		const guild = buildInquiryGuild()
 		const llm = new FakeLlm()
-		llm.responses = [success([finishCall({ status: 'success', summary: 'answered and done' })])]
+		llm.responses = [
+			// The drain fires before main's first LLM call, so the handler's turns come first.
+			success([namedCall('i1', 'recent_role_tool_calls', { targetRole: 'main-0-1' })]),
+			success([finishCall({ status: 'success', summary: 'the run is building the parser' })]),
+			// main's own first turn happens only after the handler finished.
+			success([finishCall({ status: 'success', summary: 'main done' })]),
+		]
 		const { deps, events } = makeDeps(llm)
 		deps.interruptQueue.submit({ kind: 'inquiry', message: 'what are you working on?' })
 
@@ -1136,17 +1157,92 @@ describe('runRole — interrupt platform', () => {
 			depth: 0,
 			roleName: 'main',
 			task: 'do it',
+			runLogPath: 'runs/test/log.jsonl',
 		})
 
-		expect(result).toEqual({ status: 'success', summary: 'answered and done' })
+		expect(result).toEqual({ status: 'success', summary: 'main done' })
+		// The interrupt event carries the question verbatim and lands before the handler's role_start.
+		const interrupt = events.find((e) => e.type === 'interrupt')
+		if (interrupt === undefined) throw new Error('expected an interrupt event')
+		expect(payloadField(interrupt, 'trigger')).toBe('inquiry')
+		expect(payloadField(interrupt, 'handler')).toBe('inquirer')
+		expect(payloadField(interrupt, 'target')).toBe('main-0-1')
+		expect(payloadField(interrupt, 'message')).toBe('what are you working on?')
+		const handlerStart = events.find((e) => e.type === 'role_start' && payloadField(e, 'role') === 'inquirer')
+		if (handlerStart === undefined) throw new Error('expected the handler role_start')
+		expect(events.indexOf(interrupt)).toBeLessThan(events.indexOf(handlerStart))
+		expect(payloadField(handlerStart, 'parent')).toBe('main')
+		// The handler's briefing carries the question, the live-instance list root first, and the log pointer.
+		const briefing = llm.calls[0]!.messages[1]
+		expect(briefing?.role).toBe('user')
+		expect(briefing?.content).toContain('[Operator inquiry]')
+		expect(briefing?.content).toContain('what are you working on?')
+		expect(briefing?.content).toContain('- main-0-1 (main, depth 0)')
+		expect(briefing?.content).toContain('runs/test/log.jsonl')
+		// The handler's finish summary is the answer on interrupt_resolved.
+		const resolved = events.find((e) => e.type === 'interrupt_resolved')
+		if (resolved === undefined) throw new Error('expected an interrupt_resolved event')
+		expect(payloadField(resolved, 'trigger')).toBe('inquiry')
+		expect(payloadField(resolved, 'action')).toBe('answered')
+		expect(payloadField(resolved, 'summary')).toBe('the run is building the parser')
+		// The question never enters the suspended role's history, and the retired event is gone.
+		expect(llm.calls[2]!.messages.some((m) => m.content.includes('what are you working on?'))).toBe(false)
+		expect(events.some((e) => e.type === 'operator_inquiry')).toBe(false)
+		// The suspended role resumes its turn loop once the handler finishes.
+		const finishOrder = events.filter((e) => e.type === 'role_finished').map((e) => payloadField(e, 'role'))
+		expect(finishOrder).toEqual(['inquirer', 'main'])
+	})
+
+	test('an inquiry with no inquiryHandlerRole configured is dropped, not answered, and the run continues', async () => {
+		const guild = buildInterruptGuild(mainAndDetector, 'main')
+		const llm = new FakeLlm()
+		llm.responses = [success([finishCall({ status: 'success', summary: 'undisturbed' })])]
+		const { deps, events } = makeDeps(llm)
+		deps.interruptQueue.submit({ kind: 'inquiry', message: 'anyone there?' })
+
+		const result = await runRole(deps, {
+			loadedGuild: guild,
+			depth: 0,
+			roleName: 'main',
+			task: 'do it',
+		})
+
+		expect(result).toEqual({ status: 'success', summary: 'undisturbed' })
+		expect(llm.calls.length).toBe(1)
+		const dropped = events.find((e) => e.type === 'inquiry_dropped')
+		if (dropped === undefined) throw new Error('expected an inquiry_dropped event')
+		expect(payloadField(dropped, 'message')).toBe('anyone there?')
+		expect(payloadField(dropped, 'reason')).toBe('executor.inquiryHandlerRole is not configured')
+		expect(events.some((e) => e.type === 'interrupt')).toBe(false)
+		// A dropped inquiry touches nothing: the question never enters main's history.
+		expect(llm.calls[0]!.messages.some((m) => m.content.includes('anyone there?'))).toBe(false)
+	})
+
+	test('a notice injects a marked user message into the chain root and logs operator_notice', async () => {
+		const guild = buildInterruptGuild(mainAndDetector, 'main')
+		const llm = new FakeLlm()
+		llm.responses = [success([finishCall({ status: 'success', summary: 'noticed and done' })])]
+		const { deps, events } = makeDeps(llm)
+		deps.interruptQueue.submit({ kind: 'notice', message: 'wrap up soon' })
+
+		const result = await runRole(deps, {
+			loadedGuild: guild,
+			depth: 0,
+			roleName: 'main',
+			task: 'do it',
+		})
+
+		expect(result).toEqual({ status: 'success', summary: 'noticed and done' })
 		const callMessages = llm.calls[0]!.messages
 		const injected = callMessages[callMessages.length - 1]
 		expect(injected?.role).toBe('user')
-		expect(injected?.content).toContain('[Operator inquiry')
-		expect(injected?.content).toContain('what are you working on?')
-		const inquiryEvent = events.find((e) => e.type === 'operator_inquiry')
-		expect(inquiryEvent).toBeDefined()
-		expect(payloadField(inquiryEvent!, 'roleId')).toBe('main-0-1')
+		expect(injected?.content).toContain('[Operator notice')
+		expect(injected?.content).toContain('wrap up soon')
+		const noticeEvent = events.find((e) => e.type === 'operator_notice')
+		if (noticeEvent === undefined) throw new Error('expected an operator_notice event')
+		expect(payloadField(noticeEvent, 'role')).toBe('main')
+		expect(payloadField(noticeEvent, 'roleId')).toBe('main-0-1')
+		expect(payloadField(noticeEvent, 'message')).toBe('wrap up soon')
 	})
 
 	test('(d) a plan modification aborts the leaf and intermediates and delivers the change to the top-level planner', async () => {
@@ -1205,11 +1301,12 @@ describe('runRole — interrupt platform', () => {
 		expect(lastMessage?.content).toContain('use Postgres instead of SQLite')
 	})
 
-	test('an inquiry during a delegation lands in the chain root\u2019s history, not the active child\u2019s', async () => {
-		const guild = buildInterruptGuild(
+	test('an inquiry during a delegation is answered by the handler against the suspended chain, never touching a running role\\u2019s history', async () => {
+		const guild = buildInquiryGuild(
 			{
 				parent: { systemPrompt: 'p', tools: ['agent', 'finish'] },
 				child: { systemPrompt: 'c', tools: ['echo', 'finish'] },
+				inquirer: { systemPrompt: 'inq', tools: ['recent_role_tool_calls', 'finish'] },
 			},
 			'parent',
 		)
@@ -1217,14 +1314,16 @@ describe('runRole — interrupt platform', () => {
 		llm.responses = [
 			success([agentCall('child', 'do the work')]),
 			success([namedCall('k1', 'echo', {})]),
+			// The child's next turn top drains the inquiry: the handler runs against the suspended child.
+			success([finishCall({ status: 'success', summary: 'the child is doing the work' })]),
 			success([finishCall({ status: 'success', summary: 'child done' })]),
 			success([finishCall({ status: 'success', summary: 'parent done' })]),
 		]
-		const { deps } = makeDeps(llm)
+		const { deps, events } = makeDeps(llm)
 		const depsWithEcho: EngineDependencies = {
 			...deps,
 			additionalToolHandlers: {
-				// The child's tool call is where the operator's question lands; the child's next turn top routes it to the root.
+				// The child's tool call is where the operator's question lands; the child's next turn top hands it to the handler.
 				echo: () => {
 					deps.interruptQueue.submit({ kind: 'inquiry', message: 'how is the run going?' })
 					return { kind: 'success', data: {} }
@@ -1240,20 +1339,32 @@ describe('runRole — interrupt platform', () => {
 		})
 
 		expect(result).toEqual({ status: 'success', summary: 'parent done' })
-		// The child never saw it: its finish call (call index 2) carries no inquiry marker.
-		const childSecondCall = llm.calls[2]!
-		expect(childSecondCall.messages.some((m) => m.content.includes('[Operator inquiry'))).toBe(false)
-		// The root's next request after the child returned carries the marked message as a user message (injected at the child's safe point, so it sits just before the agent tool result that landed after it).
-		const parentResumed = llm.calls[3]!
-		const injected = parentResumed.messages.find((m) => typeof m.content === 'string' && m.content.includes('[Operator inquiry'))
-		expect(injected?.role).toBe('user')
-		expect(injected?.content).toContain('how is the run going?')
+		// The handler targeted the draining leaf (the child), and its briefing lists the whole live chain root first.
+		const interrupt = events.find((e) => e.type === 'interrupt')
+		if (interrupt === undefined) throw new Error('expected an interrupt event')
+		expect(payloadField(interrupt, 'trigger')).toBe('inquiry')
+		expect(payloadField(interrupt, 'target')).toBe('child-1-2')
+		expect(payloadField(interrupt, 'message')).toBe('how is the run going?')
+		const briefing = llm.calls[2]!.messages[1]
+		expect(briefing?.content).toContain('how is the run going?')
+		expect(briefing?.content).toContain('- parent-0-1 (parent, depth 0)')
+		expect(briefing?.content).toContain('- child-1-2 (child, depth 1), child of parent-0-1')
+		// No runLogPath was supplied on this context, so the briefing falls back to the workspace-only pointer and never interpolates 'undefined'.
+		expect(briefing?.content).toContain('recorded in the workspace itself')
+		expect(briefing?.content).not.toContain('undefined')
+		// Neither the child nor the parent ever receives the question in its history.
+		expect(llm.calls[3]!.messages.some((m) => m.content.includes('how is the run going?'))).toBe(false)
+		expect(llm.calls[4]!.messages.some((m) => m.content.includes('how is the run going?'))).toBe(false)
+		const resolved = events.find((e) => e.type === 'interrupt_resolved')
+		if (resolved === undefined) throw new Error('expected an interrupt_resolved event')
+		expect(payloadField(resolved, 'action')).toBe('answered')
+		expect(payloadField(resolved, 'summary')).toBe('the child is doing the work')
 	})
 
-	test('(e) the drain does not interrupt an in-flight LLM call: an inquiry submitted mid-call lands at the next safe point', async () => {
-		const guild = buildInterruptGuild(mainAndDetector, 'main')
+	test('(e) the drain does not interrupt an in-flight LLM call: an inquiry submitted mid-call reaches the handler at the next safe point', async () => {
+		const guild = buildInquiryGuild()
 		const llm = new FakeLlm()
-		const { deps } = makeDeps(llm)
+		const { deps, events } = makeDeps(llm)
 		// Submits the inquiry while the first call is in flight, proving the drain waits for the turn boundary.
 		const submittingLlm: LlmCaller = {
 			async call(request) {
@@ -1268,6 +1379,8 @@ describe('runRole — interrupt platform', () => {
 		}
 		llm.responses = [
 			success([namedCall('c1', 'echo', {})]),
+			// The handler's turn runs at the next safe point, ahead of main's second call.
+			success([finishCall({ status: 'success', summary: 'answered mid-call' })]),
 			success([finishCall({ status: 'success', summary: 'done' })]),
 		]
 		const depsWithSubmittingLlm: EngineDependencies = { ...deps, llmCaller: submittingLlm }
@@ -1280,11 +1393,14 @@ describe('runRole — interrupt platform', () => {
 		})
 
 		expect(result).toEqual({ status: 'success', summary: 'done' })
-		// The first call's messages predate the submission; the injection appears only in the next call's messages.
-		const firstCallMessages = llm.calls[0]!.messages
-		expect(firstCallMessages.some((m) => typeof m.content === 'string' && m.content.includes('mid-call question'))).toBe(false)
-		const secondCallMessages = llm.calls[1]!.messages
-		expect(secondCallMessages.some((m) => m.role === 'user' && m.content.includes('[Operator inquiry') && m.content.includes('mid-call question'))).toBe(true)
+		// The first call's messages predate the submission, and the interrupt event lands only after that call's llm_call event: the drain waited for the turn boundary.
+		expect(llm.calls[0]!.messages.some((m) => m.content.includes('mid-call question'))).toBe(false)
+		const firstLlmCallIndex = events.findIndex((e) => e.type === 'llm_call')
+		const interruptIndex = events.findIndex((e) => e.type === 'interrupt')
+		expect(interruptIndex).toBeGreaterThan(firstLlmCallIndex)
+		// The question lands in the handler's briefing, not in any running role's history.
+		expect(llm.calls[1]!.messages.some((m) => m.content.includes('mid-call question'))).toBe(true)
+		expect(llm.calls[2]!.messages.some((m) => m.content.includes('mid-call question'))).toBe(false)
 	})
 
 	test('the handler role itself is never interrupted by the cadence trigger', async () => {
@@ -1313,6 +1429,112 @@ describe('runRole — interrupt platform', () => {
 		// Exactly one interrupt stack: the detector was invoked once and never re-invoked against itself.
 		expect(events.filter((e) => e.type === 'interrupt').length).toBe(1)
 		expect(events.filter((e) => e.type === 'role_start' && payloadField(e, 'role') === 'loop_detector').length).toBe(1)
+	})
+})
+
+describe('runRole — observe emission', () => {
+	const listRoleMessagesManifest: ToolManifest = {
+		name: 'list_role_messages',
+		description: 'List messages.',
+		parameters: { type: 'object', required: ['targetRole'], properties: { targetRole: { type: 'string' } } },
+	}
+
+	function buildObserverGuild(): LoadedGuild {
+		const guild = buildGuild(
+			{
+				parent: { systemPrompt: 'p', tools: ['agent', 'finish'] },
+				child: { systemPrompt: 'c', tools: ['list_role_messages', 'context_info', 'echo', 'finish'] },
+			},
+			'parent',
+		)
+		let withManifests = withTool(guild, listRoleMessagesManifest)
+		withManifests = withTool(withManifests, { name: 'context_info', description: 'Context info.', parameters: { type: 'object', properties: {} } })
+		withManifests = withTool(withManifests, { name: 'echo', description: 'echo', parameters: { type: 'object', properties: {} } })
+		return withManifests
+	}
+
+	test('a cross-role inspection success logs tool_call, observe, tool_result in that order', async () => {
+		const guild = buildObserverGuild()
+		const llm = new FakeLlm()
+		llm.responses = [
+			success([agentCall('child', 'inspect me')]),
+			success([namedCall('l1', 'list_role_messages', { targetRole: 'parent-0-1' })]),
+			success([finishCall({ status: 'success', summary: 'child done' })]),
+			success([finishCall({ status: 'success', summary: 'parent done' })]),
+		]
+		const { deps, events } = makeDeps(llm)
+
+		await runRole(deps, { loadedGuild: guild, depth: 0, roleName: 'parent', task: 'delegate' })
+
+		const callIndex = events.findIndex((e) => e.type === 'tool_call' && payloadField(e, 'tool') === 'list_role_messages')
+		const observeIndex = events.findIndex((e) => e.type === 'observe')
+		const resultIndex = events.findIndex((e) => e.type === 'tool_result' && payloadField(e, 'tool') === 'list_role_messages')
+		expect(callIndex).toBeGreaterThanOrEqual(0)
+		expect(observeIndex).toBe(callIndex + 1)
+		expect(resultIndex).toBe(observeIndex + 1)
+		const observe = events[observeIndex]
+		expect(payloadField(observe!, 'role')).toBe('parent')
+		expect(payloadField(observe!, 'roleId')).toBe('parent-0-1')
+		expect(payloadField(observe!, 'details')).toBe('list_role_messages')
+	})
+
+	test('a self-targeted or target-free inspection emits no observe', async () => {
+		const guild = buildObserverGuild()
+		const llm = new FakeLlm()
+		llm.responses = [
+			success([agentCall('child', 'inspect yourself')]),
+			// list_role_messages names the caller's own instance id; context_info omits targetRole, so its data carries none. Both succeed without an observe.
+			success([namedCall('l1', 'list_role_messages', { targetRole: 'child-1-2' }), namedCall('ci1', 'context_info', {})]),
+			success([finishCall({ status: 'success', summary: 'child done' })]),
+			success([finishCall({ status: 'success', summary: 'parent done' })]),
+		]
+		const { deps, events } = makeDeps(llm)
+
+		await runRole(deps, { loadedGuild: guild, depth: 0, roleName: 'parent', task: 'delegate' })
+
+		expect(events.some((e) => e.type === 'observe')).toBe(false)
+		const selfListing = events.find((e) => e.type === 'tool_result' && payloadField(e, 'tool') === 'list_role_messages')
+		expect(payloadField(selfListing!, 'kind')).toBe('success')
+	})
+
+	test('a non-inspection tool emits no observe even when its result data carries a targetRole string', async () => {
+		const guild = buildObserverGuild()
+		const llm = new FakeLlm()
+		llm.responses = [
+			success([agentCall('child', 'echo something')]),
+			success([namedCall('e1', 'echo', { targetRole: 'parent-0-1' })]),
+			success([finishCall({ status: 'success', summary: 'child done' })]),
+			success([finishCall({ status: 'success', summary: 'parent done' })]),
+		]
+		const { deps, events } = makeDeps(llm)
+		const depsWithEcho: EngineDependencies = { ...deps, additionalToolHandlers: { echo: echoHandler } }
+
+		await runRole(depsWithEcho, { loadedGuild: guild, depth: 0, roleName: 'parent', task: 'delegate' })
+
+		expect(events.some((e) => e.type === 'observe')).toBe(false)
+	})
+
+	test('an inspection whose target is no longer registered emits no observe', async () => {
+		const guild = buildObserverGuild()
+		const llm = new FakeLlm()
+		llm.responses = [
+			success([agentCall('child', 'inspect a ghost')]),
+			success([namedCall('l1', 'list_role_messages', { targetRole: 'ghost-0-9' })]),
+			success([finishCall({ status: 'success', summary: 'child done' })]),
+			success([finishCall({ status: 'success', summary: 'parent done' })]),
+		]
+		const { deps, events } = makeDeps(llm)
+		// The real built-in rejects an unknown instance; this override answers success for a stale id so the engine's registration gate is what stays silent.
+		const ghostListing: EngineDependencies = {
+			...deps,
+			additionalToolHandlers: { list_role_messages: () => ({ kind: 'success', data: { targetRole: 'ghost-0-9', messages: [] } }) },
+		}
+
+		await runRole(ghostListing, { loadedGuild: guild, depth: 0, roleName: 'parent', task: 'delegate' })
+
+		expect(events.some((e) => e.type === 'observe')).toBe(false)
+		const toolResult = events.find((e) => e.type === 'tool_result' && payloadField(e, 'tool') === 'list_role_messages')
+		expect(payloadField(toolResult!, 'kind')).toBe('success')
 	})
 })
 
@@ -1819,7 +2041,7 @@ describe('run persistence and resumption', () => {
 		const { deps, events, checkpoints: resumedWrites } = makeDeps(llm)
 		const depsWithEcho: EngineDependencies = { ...deps, additionalToolHandlers: { echo: echoHandler } }
 
-		const card = await resumeRoleStack(depsWithEcho, guild, checkpoint)
+		const card = await resumeRoleStack(depsWithEcho, guild, checkpoint, 'runs/test/log.jsonl')
 
 		expect(card).toEqual(uninterrupted.card)
 		// Exactly two turns happen after the resume: the coder's finish and the orchestrator's follow-up — no earlier turn is replayed.
@@ -1852,7 +2074,7 @@ describe('run persistence and resumption', () => {
 		const { deps, events } = makeDeps(llm)
 		const depsWithEcho: EngineDependencies = { ...deps, additionalToolHandlers: { echo: echoHandler } }
 
-		const card = await resumeRoleStack(depsWithEcho, guild, checkpoint)
+		const card = await resumeRoleStack(depsWithEcho, guild, checkpoint, 'runs/test/log.jsonl')
 
 		expect(card).toEqual({ status: 'success', summary: 'parent done' })
 		// One turn only: the orchestrator's follow-up. The finished child is not re-run.
@@ -1876,7 +2098,7 @@ describe('run persistence and resumption', () => {
 		const { deps, events } = makeDeps(llm)
 		const depsWithEcho: EngineDependencies = { ...deps, additionalToolHandlers: { echo: echoHandler } }
 
-		const card = await resumeRoleStack(depsWithEcho, guild, checkpoint)
+		const card = await resumeRoleStack(depsWithEcho, guild, checkpoint, 'runs/test/log.jsonl')
 
 		expect(card.status).toBe('success')
 		// The coder spawned after the resume is a fresh instance, so it mints a new id (the test registry starts at 0 and restored registrations do not advance it) and emits role_start — resumed roles do not.

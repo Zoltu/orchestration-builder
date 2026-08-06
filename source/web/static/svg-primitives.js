@@ -89,17 +89,17 @@ export function GraphEdge(h, props) {
 	else if (state === 'terminated') classes.push('graph-edge--terminated')
 
 	const pathProps = { class: classes.join(' '), d: edgePath(fromAnchor, toAnchor, kind) }
-	if (kind === 'observe' || kind === 'inquiry') pathProps['stroke-dasharray'] = '3 3'
+	if (kind === 'observe') pathProps['stroke-dasharray'] = '3 3'
 	return h('path', pathProps, [])
 }
 
-// A gentle cubic curve between the anchors so sibling edges separate rather than overlap. Calls bow horizontally to keep the left-to-right chain readable; returns bow downward so the response leg curves below the nodes and never paints over the forward call line; observes, terminates, and inquiries bow slightly sideways so two stacked cross-stack lines don't sit on top of each other.
+// A gentle cubic curve between the anchors so sibling edges separate rather than overlap. Calls bow horizontally to keep the left-to-right chain readable; returns bow downward so the response leg curves below the nodes and never paints over the forward call line; observes and terminates bow slightly sideways so two stacked cross-stack lines don't sit on top of each other.
 function edgePath(from, to, kind) {
 	if (kind === 'return') {
 		const bow = 40
 		return `M ${from.x} ${from.y} C ${from.x} ${from.y + bow}, ${to.x} ${to.y + bow}, ${to.x} ${to.y}`
 	}
-	if (kind === 'observe' || kind === 'terminate' || kind === 'inquiry') {
+	if (kind === 'observe' || kind === 'terminate') {
 		const bow = 16
 		return `M ${from.x} ${from.y} C ${from.x + bow} ${from.y}, ${to.x + bow} ${to.y}, ${to.x} ${to.y}`
 	}

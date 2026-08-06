@@ -1,7 +1,7 @@
 // The interrupt platform's cross-boundary state. The queue is per-run: external trigger sources (the operator API, the shutdown path) submit requests, and the engine drains them at the safe point (the top of a role's turn loop — never mid-LLM-call). Loop-check cadence triggers are not queued here; the engine evaluates them in the draining role's own loop so they never go stale behind operator requests.
 // The channel is the service-level singleton that binds the active run's queue, mirroring the human backend's bindRunLog pattern: one run at a time, so a single slot suffices.
 
-export type InterruptKind = 'inquiry' | 'plan_modification'
+export type InterruptKind = 'inquiry' | 'plan_modification' | 'notice'
 
 export interface InterruptRequest {
 	kind: InterruptKind

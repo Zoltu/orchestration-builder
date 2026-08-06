@@ -1,7 +1,7 @@
 import { createResultCard, createToolError } from './errors.js'
 import { effortDirective } from './effort.js'
 import type { EffortLevel, ExecutorConfig, LogEvent, Message, ResultCard, RoleDefinition, ToolCall, ToolManifest, ToolResult } from './types.js'
-import { isResultCard } from './validation.js'
+import { isObject, isResultCard } from './validation.js'
 import type { CheckpointRecorder, RunCheckpoint } from './checkpoint.js'
 import { checkGlobalBudgets, checkRoleBudgets, type GlobalBudgetState, type RoleBudgetState } from './budgets.js'
 import { createBuiltInToolHandlers } from './builtin-tools.js'
@@ -48,6 +48,8 @@ export interface EngineContext {
 	parentRoleId?: string
 	// Set when this invocation is an interrupt handler serving the named target instance: the drain point skips the handler so a handler can never interrupt itself or consume operator requests meant for real work roles.
 	handlerOf?: string
+	// The workspace-relative path to the run's log.jsonl, interpolated into the inquiry handler's briefing so finished roles — which have no live conversation to inspect — remain researchable from the log and the workspace. Spreads to every child and handler context with the rest of the run-scoped fields.
+	runLogPath?: string
 }
 
 export interface EngineDependencies {
@@ -326,17 +328,34 @@ interface DispatchAndRecordArgs {
 	deps: EngineDependencies
 	roleState: RoleState
 	roleName: string
+	ownRoleId: string
 	dispatchCtx: DispatchContext
 	toolCall: ToolCall
 }
 
-async function dispatchAndRecord({ deps, roleState, roleName, dispatchCtx, toolCall }: DispatchAndRecordArgs): Promise<ResultCard | null> {
+async function dispatchAndRecord({ deps, roleState, roleName, ownRoleId, dispatchCtx, toolCall }: DispatchAndRecordArgs): Promise<ResultCard | null> {
 	const result = await dispatchToolCall(dispatchCtx, toolCall)
-	return recordToolResult(deps, roleState, roleName, dispatchCtx.maxToolOutputChars, toolCall, result)
+	return recordToolResult(deps, roleState, roleName, ownRoleId, dispatchCtx.maxToolOutputChars, toolCall, result)
+}
+
+// Only the read-only inspection tools count as observations for the observe event; edit_context mutates its target and never emits one.
+const OBSERVATION_TOOL_NAMES: ReadonlySet<string> = new Set(['list_role_messages', 'read_message_window', 'search_role_blocks', 'recent_role_tool_calls', 'context_info'])
+
+// Emits the observe event for a successful cross-role inspection, so the interaction model can draw the reference from the inspecting role to the suspended target it read. Self-inspection (targetRole absent or the caller's own id) is not an observation, and a target that is no longer registered cannot be drawn, so both are skipped.
+function maybeLogObservation(deps: EngineDependencies, ownRoleId: string, toolName: string, result: ToolResult): void {
+	if (result.kind !== 'success') return
+	if (!OBSERVATION_TOOL_NAMES.has(toolName)) return
+	if (!isObject(result.data)) return
+	const targetRole = result.data['targetRole']
+	if (typeof targetRole !== 'string') return
+	if (targetRole === ownRoleId) return
+	const target = deps.roleRegistry.lookup(targetRole)
+	if (target === undefined) return
+	logEvent(deps.appendLog, 'observe', { role: target.roleName, roleId: targetRole, details: toolName })
 }
 
 // Records a settled tool call: logs the call/result pair, appends the (truncated) tool message, and updates the counters. Shared by the live dispatch path and the resume path, which re-records a suspended agent call's result from the checkpoint without re-dispatching it — so both paths apply exactly the same bookkeeping.
-function recordToolResult(deps: EngineDependencies, roleState: RoleState, roleName: string, maxToolOutputChars: number, toolCall: ToolCall, result: ToolResult): ResultCard | null {
+function recordToolResult(deps: EngineDependencies, roleState: RoleState, roleName: string, ownRoleId: string, maxToolOutputChars: number, toolCall: ToolCall, result: ToolResult): ResultCard | null {
 	if (result.kind === 'unknown_tool') {
 		logEvent(deps.appendLog, 'unknown_tool', { role: roleName, tool: toolCall.function.name })
 	} else if (result.kind === 'invalid_tool_call') {
@@ -344,6 +363,7 @@ function recordToolResult(deps: EngineDependencies, roleState: RoleState, roleNa
 	} else {
 		// tool_call carries the model's raw arguments string so the exact parameters are recoverable, and tool_result carries the full un-truncated ToolResult so a reviewer is not flying blind on what a tool actually returned. Truncation still applies only when the result is appended to the conversation below.
 		logEvent(deps.appendLog, 'tool_call', { role: roleName, tool: toolCall.function.name, arguments: toolCall.function.arguments })
+		maybeLogObservation(deps, ownRoleId, toolCall.function.name, result)
 		logEvent(deps.appendLog, 'tool_result', { role: roleName, tool: toolCall.function.name, kind: result.kind, result })
 	}
 
@@ -375,9 +395,9 @@ function buildInitialHistory(systemPrompt: string, context: EngineContext): Mess
 	return history
 }
 
-// The marker prefixes the orchestrator/planner prompts teach roles to recognize. An inquiry goes to the run's entry role (the chain root), which answers from its run-wide knowledge — delegating to a fresh sub-agent when the answer needs detail from in-flight work; a plan modification arrives only after active sub-work beneath the plan owner was aborted and asks the owner to re-plan around the change.
-function inquiryMessage(message: string): string {
-	return `[Operator inquiry — the operator is asking you a direct question about the run. Answer it promptly in plain language: if you already know, answer in your immediate next response; if the answer needs detail from a sub-agent's in-flight work, first delegate a fresh sub-agent to gather it, then give the answer. Do not skip the answer; when you have given it, continue coordinating the run.]\n\n${message}`
+// The marker prefix the orchestrator/planner prompts teach roles to recognize. A notice goes to the run's entry role (the chain root) as run-wide information to act on directly; a plan modification arrives only after active sub-work beneath the plan owner was aborted and asks the owner to re-plan around the change. An operator inquiry is never injected — it is answered by a fresh handler role (runInquiryHandler).
+function operatorNoticeMessage(message: string): string {
+	return `[Operator notice — a message from the operator or the platform for the run as a whole. Act on it directly, then continue your work.]\n\n${message}`
 }
 
 function planModificationMessage(message: string): string {
@@ -401,7 +421,7 @@ function chainFromEntry(registry: RoleRegistry, entry: RoleRegistryEntry): RoleR
 	return chain
 }
 
-// Applies a queued operator request. An inquiry is injected into the chain root's (the entry role's) history as a marked user message, so the answer comes from the role that owns the run-wide picture — it lands in the root's frozen history immediately but is read when control next returns to the root (the active leaf keeps working undisturbed). A plan modification marks every chain member below the plan owner (the rootmost chain instance of the configured planOwnerRole, else the chain root) for abort and the owner for injection; the marked roles then unwind one safe point at a time as the agent-call result-card propagation reaches them — the same unwind a child error card already drives, triggered here by an external request.
+// Applies a queued operator request that mutates a live role's conversation (an inquiry never reaches here — the drain answers it with a fresh handler role). A notice is injected into the chain root's (the entry role's) history as a marked user message: it lands in the root's frozen history immediately but is read when control next returns to the root (the active leaf keeps working undisturbed). A plan modification marks every chain member below the plan owner (the rootmost chain instance of the configured planOwnerRole, else the chain root) for abort and the owner for injection; the marked roles then unwind one safe point at a time as the agent-call result-card propagation reaches them — the same unwind a child error card already drives, triggered here by an external request.
 function routeOperatorInterrupt(
 	deps: EngineDependencies,
 	roleState: RoleState,
@@ -409,15 +429,14 @@ function routeOperatorInterrupt(
 	config: ExecutorConfig,
 	request: InterruptRequest,
 ): ResultCard | null {
-	if (request.kind === 'inquiry') {
-		const chain = chainFromEntry(deps.roleRegistry, entry)
+	const chain = chainFromEntry(deps.roleRegistry, entry)
+	if (request.kind === 'notice') {
 		const root = chain[chain.length - 1]
 		if (root === undefined) return null
-		root.roleState.history.push({ role: 'user', content: inquiryMessage(request.message) })
-		logEvent(deps.appendLog, 'operator_inquiry', { role: root.roleName, roleId: root.roleId, message: request.message })
+		root.roleState.history.push({ role: 'user', content: operatorNoticeMessage(request.message) })
+		logEvent(deps.appendLog, 'operator_notice', { role: root.roleName, roleId: root.roleId, message: request.message })
 		return null
 	}
-	const chain = chainFromEntry(deps.roleRegistry, entry)
 	const planOwnerRole = config.interruptTriggers?.planOwnerRole
 	let target = chain[chain.length - 1]
 	if (target === undefined) return null
@@ -522,6 +541,58 @@ async function runContextManagerHandler(
 	return handlerCard
 }
 
+// Suspends the active role and invokes the configured inquiry handler role to answer the operator's question — the same preempt-and-resume interlude as the loop-check and context handlers, so it logs the same interrupt/interrupt_resolved pair and the interaction model roots the handler on a fresh interrupt stack. The handler is a fresh agent that was never given the run's conversations: the briefing lists the live (suspended) instances root first and points at the run log and the workspace for roles that already finished. Its finish-card summary is the answer shown to the operator. The target always resumes afterwards, whatever the handler did — a question never finishes a run.
+async function runInquiryHandler(
+	deps: EngineDependencies,
+	context: EngineContext,
+	entry: RoleRegistryEntry,
+	config: ExecutorConfig,
+	request: InterruptRequest,
+): Promise<void> {
+	const handlerRole = config.inquiryHandlerRole
+	if (handlerRole === undefined) {
+		// A run without an inquiry handler drops the question rather than dying over it: the operator gets no answer, but the work continues.
+		logEvent(deps.appendLog, 'inquiry_dropped', { message: request.message, reason: 'executor.inquiryHandlerRole is not configured' })
+		return
+	}
+	// The chain from the draining leaf IS the entire live role set in this sequential engine; chainFromEntry is leaf-first, so reverse it for the root-first briefing list.
+	const liveInstances = chainFromEntry(deps.roleRegistry, entry).reverse()
+	const instanceLines = liveInstances.map((member) => `- ${member.roleId} (${member.roleName}, depth ${member.depth})${member.parentRoleId !== undefined ? `, child of ${member.parentRoleId}` : ''}`)
+	// The log pointer is a separate sentence so an absent runLogPath never interpolates the string 'undefined' into the briefing.
+	const finishedRolesNote = context.runLogPath !== undefined
+		? `Roles that already finished have no live conversation; their work is recorded in the run log at ${context.runLogPath} (its llm_call events carry the full sent and received messages) and in the workspace itself, which you can read with the file tools.`
+		: 'Roles that already finished have no live conversation; their work is recorded in the workspace itself, which you can read with the file tools.'
+	const task = [
+		"[Operator inquiry] The operator interrupted the run to ask a question. Answer it on the run's behalf.",
+		'',
+		'Question:',
+		request.message,
+		'',
+		'You are a fresh agent and were not given the run\'s conversations — investigate with your tools before answering.',
+		'Live role instances (suspended while you work), root first:',
+		...instanceLines,
+		'',
+		'Read a live instance\'s conversation with list_role_messages, read_message_window, search_role_blocks, recent_role_tool_calls, or context_info (targetRole is the instance id).',
+		finishedRolesNote,
+		'When you know the answer, call finish with status "success" and put the answer, in plain language, in the summary — the summary is shown to the operator as your answer. Do not modify the workspace or any role\'s conversation.',
+	].join('\n')
+	logEvent(deps.appendLog, 'interrupt', { trigger: 'inquiry', handler: handlerRole, target: entry.roleId, message: request.message })
+	const handlerCard = await runRole(deps, {
+		...context,
+		depth: Math.min(context.depth + 1, config.maxAgentDepth),
+		roleName: handlerRole,
+		task,
+		parent: context.roleName,
+		parentRoleId: entry.roleId,
+		handlerOf: entry.roleId,
+	})
+	if (handlerCard.status === 'success') {
+		logEvent(deps.appendLog, 'interrupt_resolved', { trigger: 'inquiry', handler: handlerRole, target: entry.roleId, action: 'answered', summary: handlerCard.summary })
+	} else {
+		logEvent(deps.appendLog, 'interrupt_resolved', { trigger: 'inquiry', handler: handlerRole, target: entry.roleId, action: 'failed', handlerStatus: handlerCard.status, summary: handlerCard.summary })
+	}
+}
+
 // The platform's single safe point, run at the top of every turn: no LLM call is in flight here, so suspending or unwinding the role cannot tear a turn. Returns a ResultCard when the role must finish, or null to continue the turn.
 // Order: marks set by an earlier routing first, then (for non-handler roles only) the loop-check cadence, then one queued operator request.
 async function drainInterrupts(
@@ -559,6 +630,11 @@ async function drainInterrupts(
 
 	const request = deps.interruptQueue.drain()
 	if (request !== undefined) {
+		// An inquiry is answered by a fresh handler role against the suspended chain, never injected into a working role's history; the run continues whatever the handler did.
+		if (request.kind === 'inquiry') {
+			await runInquiryHandler(deps, context, entry, config, request)
+			return null
+		}
 		const routedCard = routeOperatorInterrupt(deps, roleState, entry, config, request)
 		if (routedCard !== null) return routedCard
 	}
@@ -690,8 +766,8 @@ export async function runRole(deps: EngineDependencies, context: EngineContext, 
 	return finalCard
 }
 
-// The resume driver: re-enters the checkpoint's role stack, letting the depth-first traversal continue. A frame with a pending suspension resolves its child card lazily from inside the suspended turn — either the recorded card, or the next frame's own resume — so the stack re-forms in the same root-first order the live recursion produces. The leaf frame re-enters at its loop top with its persisted state.
-export async function resumeRoleStack(deps: EngineDependencies, loadedGuild: LoadedGuild, checkpoint: RunCheckpoint): Promise<ResultCard> {
+// The resume driver: re-enters the checkpoint's role stack, letting the depth-first traversal continue. A frame with a pending suspension resolves its child card lazily from inside the suspended turn — either the recorded card, or the next frame's own resume — so the stack re-forms in the same root-first order the live recursion produces. The leaf frame re-enters at its loop top with its persisted state. runLogPath is run-scoped but not checkpointed (the log's location is a deployment fact, not run state), so the caller re-supplies it for every reconstructed context.
+export async function resumeRoleStack(deps: EngineDependencies, loadedGuild: LoadedGuild, checkpoint: RunCheckpoint, runLogPath: string): Promise<ResultCard> {
 	const resumeAt = async (index: number): Promise<ResultCard> => {
 		const frame = checkpoint.frames[index]
 		if (frame === undefined) throw new Error(`resumeRoleStack: frame ${index} missing from a checkpoint with ${checkpoint.frames.length} frames`)
@@ -709,6 +785,7 @@ export async function resumeRoleStack(deps: EngineDependencies, loadedGuild: Loa
 			depth: frame.depth,
 			roleName: frame.roleName,
 			task: frame.task,
+			runLogPath,
 			...(frame.parent !== undefined ? { parent: frame.parent } : {}),
 			...(frame.parentRoleId !== undefined ? { parentRoleId: frame.parentRoleId } : {}),
 			...(frame.effort !== undefined ? { effort: frame.effort } : {}),
@@ -741,7 +818,7 @@ async function dispatchToolCallSequence(
 		if (toolCall.function.name === 'agent') {
 			deps.checkpointRecorder.setPending(registryEntry.roleId, { toolCalls, agentIndex: index })
 		}
-		const finalCard = await dispatchAndRecord({ deps, roleState, roleName: context.roleName, dispatchCtx, toolCall })
+		const finalCard = await dispatchAndRecord({ deps, roleState, roleName: context.roleName, ownRoleId: registryEntry.roleId, dispatchCtx, toolCall })
 		if (toolCall.function.name === 'agent') {
 			deps.checkpointRecorder.setPending(registryEntry.roleId, undefined)
 		}
@@ -757,7 +834,7 @@ async function completeSuspendedTurn(deps: EngineDependencies, context: EngineCo
 	const childCard = await suspendedTurn.resolveChildCard()
 	deps.checkpointRecorder.setPendingChildCard(registryEntry.roleId, childCard)
 	deps.checkpointRecorder.write()
-	recordToolResult(deps, roleState, context.roleName, dispatchCtx.maxToolOutputChars, agentCall, { kind: 'success', data: childCard })
+	recordToolResult(deps, roleState, context.roleName, registryEntry.roleId, dispatchCtx.maxToolOutputChars, agentCall, { kind: 'success', data: childCard })
 	deps.checkpointRecorder.setPending(registryEntry.roleId, undefined)
 	return dispatchToolCallSequence(deps, context, roleState, registryEntry, dispatchCtx, suspendedTurn.toolCalls, suspendedTurn.agentIndex + 1)
 }

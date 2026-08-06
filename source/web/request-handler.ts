@@ -1,5 +1,4 @@
-import type { ListRunIds, ReadProjectSettings, ReadRunMetaById, ReadRunSnapshotStats, WriteProjectSettings } from '../executor/persistence.js'
-import type { InterruptKind } from '../executor/interrupts.js'
+import type { ListRunIds, ReadProjectSettings, ReadRunMetaById, ReadRunSnapshotStats, ReadRunSummaryById, WriteProjectSettings } from '../executor/persistence.js'
 import type { EffortLevel, GuildConfig, ToolManifest } from '../executor/types.js'
 import { isEffortLevel, isObject } from '../executor/validation.js'
 import type { RunState } from '../executor/run-state.js'
@@ -18,6 +17,7 @@ export interface RequestHandlerConfig {
 	runSubmission: RunSubmission
 	readRunSnapshot: ReadRunSnapshot
 	readRunMetaById: ReadRunMetaById
+	readRunSummaryById: ReadRunSummaryById
 	readRunSnapshotStats: ReadRunSnapshotStats
 	listRunIds: ListRunIds
 	readProjectSettings: ReadProjectSettings
@@ -122,11 +122,11 @@ function isKnownRun(readRunSnapshotStats: ReadRunSnapshotStats, runId: string): 
 	return stats.meta !== null || stats.log !== null
 }
 
-function handleListRuns(readRunMetaById: ReadRunMetaById, listRunIds: ListRunIds): Response {
+function handleListRuns(readRunMetaById: ReadRunMetaById, readRunSummaryById: ReadRunSummaryById, listRunIds: ListRunIds): Response {
 	const summaries = listRunIds()
 		.slice()
 		.sort((a, b) => (a < b ? 1 : a > b ? -1 : 0))
-		.map((runId) => renderRunSummary(runId, parseRunMeta(readRunMetaById(runId))))
+		.map((runId) => renderRunSummary(runId, parseRunMeta(readRunMetaById(runId)), readRunSummaryById(runId)))
 	return json(summaries)
 }
 
@@ -141,7 +141,8 @@ function handleAnswer(runState: RunState, body: unknown): Response {
 	return json({ ok: false, error: 'not_found' }, 404)
 }
 
-function isInterruptKind(value: unknown): value is InterruptKind {
+// The public API accepts only these two kinds; the engine's internal InterruptKind union is wider ('notice' is service-internal, e.g. the shutdown wind-down), so the guard narrows to the public subset rather than the engine's type.
+function isInterruptKind(value: unknown): value is 'inquiry' | 'plan_modification' {
 	return value === 'inquiry' || value === 'plan_modification'
 }
 
@@ -188,6 +189,7 @@ export function createRequestHandler(config: RequestHandlerConfig, serveStatic: 
 	const runSubmission = config.runSubmission
 	const readRunSnapshot = config.readRunSnapshot
 	const readRunMetaById = config.readRunMetaById
+	const readRunSummaryById = config.readRunSummaryById
 	const readRunSnapshotStats = config.readRunSnapshotStats
 	const listRunIds = config.listRunIds
 	const readProjectSettings = config.readProjectSettings
@@ -202,7 +204,7 @@ export function createRequestHandler(config: RequestHandlerConfig, serveStatic: 
 			if (pathname === '/api/settings') return handleGetSettings(readProjectSettings)
 			if (pathname === '/api/run/flow') return handleActiveRunFlow(readRunSnapshot, readRunSnapshotStats, runSubmission)
 			if (pathname === '/api/run') return handleActiveRun(readRunSnapshot, readRunSnapshotStats, runSubmission, runState)
-			if (pathname === '/api/runs') return handleListRuns(readRunMetaById, listRunIds)
+			if (pathname === '/api/runs') return handleListRuns(readRunMetaById, readRunSummaryById, listRunIds)
 			if (pathname.startsWith('/api/runs/')) {
 				const rest = decodeURIComponent(pathname.slice('/api/runs/'.length))
 				// Match a /log or /flow suffix before the bare :id route so /api/runs/<id>/log and /api/runs/<id>/flow reach their endpoints rather than being swallowed as a run id of "<id>/log" or "<id>/flow".

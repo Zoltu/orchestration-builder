@@ -132,6 +132,15 @@ describe('validate* throws ValidationError with a path-based message', () => {
 		expect(() => validateGuildConfig(withHandler(''))).toThrow(/executor\.contextHandlerRole/)
 		expect(() => validateGuildConfig(withHandler(42))).toThrow(/executor\.contextHandlerRole/)
 	})
+	test('validateGuildConfig accepts an inquiryHandlerRole string and rejects empty or non-string values', () => {
+		const withHandler = (inquiryHandlerRole: unknown) => ({
+			...validGuild,
+			executor: { ...validGuild.executor, inquiryHandlerRole },
+		})
+		expect(() => validateGuildConfig(withHandler('inquirer'))).not.toThrow()
+		expect(() => validateGuildConfig(withHandler(''))).toThrow(/executor\.inquiryHandlerRole/)
+		expect(() => validateGuildConfig(withHandler(42))).toThrow(/executor\.inquiryHandlerRole/)
+	})
 	test('validateToolManifest throws on non-string name', () => {
 		expect(() => validateToolManifest({ ...validToolManifest, name: 123 })).toThrow(/name/)
 	})

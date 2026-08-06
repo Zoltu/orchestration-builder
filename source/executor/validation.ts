@@ -72,7 +72,7 @@ const resultCardStatuses: readonly ResultCard['status'][] = ['success', 'error',
 
 const runMetaStatuses: readonly RunMeta['status'][] = ['running', 'success', 'error', 'needs_clarification', 'interrupted']
 
-const operationKinds: readonly OperationKind[] = ['call', 'return', 'observe', 'terminate', 'inquiry']
+const operationKinds: readonly OperationKind[] = ['call', 'return', 'observe', 'terminate']
 
 function isRecordOfHumanFacingText(value: unknown): value is Record<string, HumanFacingText> {
 	if (!isObject(value)) return false
@@ -187,6 +187,9 @@ function validateExecutorConfig(value: unknown, path: string): asserts value is 
 	if (value.contextHandlerRole !== undefined && (typeof value.contextHandlerRole !== 'string' || value.contextHandlerRole === '')) {
 		throw new ValidationError(`${path}.contextHandlerRole`, 'expected a non-empty string or undefined')
 	}
+	if (value.inquiryHandlerRole !== undefined && (typeof value.inquiryHandlerRole !== 'string' || value.inquiryHandlerRole === '')) {
+		throw new ValidationError(`${path}.inquiryHandlerRole`, 'expected a non-empty string or undefined')
+	}
 	if (value.interruptTriggers !== undefined) validateInterruptTriggersConfig(value.interruptTriggers, `${path}.interruptTriggers`)
 }
 
@@ -232,10 +235,10 @@ function validateVisualizationConfig(value: unknown, path: string): asserts valu
 		throw new ValidationError(`${path}.pseudoRoleLabels`, 'expected an object of HumanFacingText entries')
 	}
 	if (!isOperationTemplates(value.operationTemplates)) {
-		throw new ValidationError(`${path}.operationTemplates`, 'expected an object keyed by call/return/observe/terminate/inquiry, each a record of HumanFacingText entries')
+		throw new ValidationError(`${path}.operationTemplates`, 'expected an object keyed by call/return/observe/terminate, each a record of HumanFacingText entries')
 	}
 	if (!isGenericOperationTemplates(value.genericOperationTemplates)) {
-		throw new ValidationError(`${path}.genericOperationTemplates`, 'expected an object keyed by call/return/observe/terminate/inquiry, each a HumanFacingText entry')
+		throw new ValidationError(`${path}.genericOperationTemplates`, 'expected an object keyed by call/return/observe/terminate, each a HumanFacingText entry')
 	}
 	if (value.workingTemplates !== undefined && !isRecordOfHumanFacingText(value.workingTemplates)) {
 		throw new ValidationError(`${path}.workingTemplates`, 'expected an object of HumanFacingText entries keyed by participant kind')

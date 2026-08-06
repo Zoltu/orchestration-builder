@@ -550,3 +550,75 @@ describe('renderSequenceView — nested interrupts under stress', () => {
 		expect(propString(terminalNodeForOperationEnd(view, 'op11', 'destination')!.props, 'data-state')).toBe('neutral')
 	})
 })
+
+describe('sequence view — hover hit areas', () => {
+	function hitAreas(group: Vnode | undefined): Vnode[] {
+		if (group === undefined) return []
+		return allByTag(group, 'rect').filter((rect) => (propString(rect.props, 'class') ?? '').split(' ').includes('seq-hit-area'))
+	}
+
+	function propNumber(props: Record<string, unknown>, key: string): number {
+		const value = props[key]
+		if (typeof value !== 'number') throw new Error(`expected numeric prop ${key}, got ${String(value)}`)
+		return value
+	}
+
+	test('a cross-column message row carries an invisible band spanning its two columns at full row height', () => {
+		const model: InteractionModel = {
+			participants: [participant('you', 'human', 'human'), participant('coder', 'coder', 'role')],
+			operations: [callOperation('op1', 'root', 'you', 'coder')],
+			status: 'running',
+		}
+		const view = render(model)
+		const group = messageGroupForOperation(view, 'op1')
+		const areas = hitAreas(group)
+		expect(areas.length).toBe(1)
+		const area = areas[0]!
+		// The band spans the two columns' lifelines (read off the rendered columns so the assertion does not duplicate the margin math) and tiles exactly one row height centered on the message row.
+		const lifelines = groupsWithClass(view, 'seq-column').map((column) => {
+			const line = allByTag(column, 'line')[0]
+			if (line === undefined) throw new Error('column has no lifeline')
+			return propNumber(line.props, 'x1')
+		})
+		expect(propNumber(area.props, 'x')).toBe(Math.min(...lifelines))
+		expect(propNumber(area.props, 'width')).toBe(Math.max(...lifelines) - Math.min(...lifelines))
+		const rowY = HEADER_HEIGHT + ROW_HEIGHT / 2
+		expect(propNumber(area.props, 'y')).toBe(rowY - ROW_HEIGHT / 2)
+		expect(propNumber(area.props, 'height')).toBe(ROW_HEIGHT)
+	})
+
+	test('observe and terminate rows carry the same full-height band', () => {
+		const model: InteractionModel = {
+			participants: [participant('you', 'human', 'human'), participant('coder', 'coder', 'role')],
+			operations: [
+				{ id: 'op-observe', kind: 'observe', stack: 'root', source: 'coder', destination: 'you', startedAt: 't0', settledAt: null, lifecycle: 'settled', outcome: null, details: null, metrics: null },
+				{ id: 'op-terminate', kind: 'terminate', stack: 'root', source: 'coder', destination: 'you', startedAt: 't2', settledAt: null, lifecycle: 'settled', outcome: null, details: null, metrics: null },
+			],
+			status: 'running',
+		}
+		const view = render(model)
+		for (const operationId of ['op-observe', 'op-terminate']) {
+			const areas = hitAreas(messageGroupForOperation(view, operationId))
+			expect(areas.length).toBe(1)
+			expect(propNumber(areas[0]!.props, 'height')).toBe(ROW_HEIGHT)
+		}
+	})
+
+	test('a loopback row’s band covers the out-and-back area beside its column', () => {
+		const model: InteractionModel = {
+			participants: [participant('you', 'human', 'human'), participant('coder-1', 'coder', 'role'), participant('coder-2', 'coder', 'role')],
+			operations: [
+				callOperation('op1', 'root', 'you', 'coder-1'),
+				{ id: 'op-loop', kind: 'call', stack: 'root', source: 'coder-1', destination: 'coder-2', startedAt: 't1', settledAt: null, lifecycle: 'in_flight', outcome: null, details: null, metrics: null },
+			],
+			status: 'running',
+		}
+		const view = render(model)
+		const area = hitAreas(messageGroupForOperation(view, 'op-loop'))[0]
+		expect(area).toBeDefined()
+		// The U-turn leaves the column to the right and returns on the same row, so the band extends above the row band a plain message gets (covering the out leg) instead of spanning between columns.
+		const rowY = HEADER_HEIGHT + ROW_HEIGHT + ROW_HEIGHT / 2
+		expect(propNumber(area!.props, 'y')).toBeLessThan(rowY - ROW_HEIGHT / 2)
+		expect(propNumber(area!.props, 'height')).toBeGreaterThan(ROW_HEIGHT)
+	})
+})

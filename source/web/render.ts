@@ -152,6 +152,17 @@ export function formatLogEvent(event: LogEvent): string {
 			const target = stringField(payload, 'target')
 			return action !== null && target !== null ? `interrupt resolved (${action} on ${target})` : 'interrupt resolved'
 		}
+		case 'observe': {
+			const details = stringField(payload, 'details')
+			return withRole(role, `observe${details !== null ? ` (${details})` : ''}`)
+		}
+		case 'operator_notice':
+			return withRole(role, 'operator notice')
+		case 'inquiry_dropped': {
+			const reason = stringField(payload, 'reason')
+			return reason !== null ? `inquiry dropped (${reason})` : 'inquiry dropped'
+		}
+		// Never emitted anymore; kept so historical logs still read sensibly.
 		case 'operator_inquiry':
 			return withRole(role, 'operator inquiry')
 		case 'plan_modification':
@@ -510,7 +521,7 @@ export interface InterruptInquiryEntry {
 	message: string
 	answer: string | null
 	answeredAt: string | null
-	// Set when the role that received the inquiry finished without ever producing a content-bearing response to pair with it, so the UI stops offering "waiting".
+	// Set when the handler's resolution was not a clean answer (a failure or an empty summary), so the UI stops offering "waiting".
 	ended: boolean
 }
 
@@ -525,25 +536,32 @@ export interface InterruptPlanModEntry {
 
 export type InterruptHistoryEntry = InterruptInquiryEntry | InterruptPlanModEntry
 
-// Pairs each operator inquiry with the answer the recipient role produced: the marker is injected as a user message, so the role's first content-bearing llm_call after the injection is its reply. Pairing is per role name and in order (the oldest unanswered inquiry for a role takes that role's next content response); an inquiry whose role finishes without one is marked ended rather than left "waiting" forever. Plan modifications have no reply to pair — their delivery and abort outcome are on the event itself.
+// Pairs each operator inquiry with the handler's resolution: an inquiry-triggered interrupt opens an entry against the handler role, and the matching interrupt_resolved closes it — an 'answered' action with a non-empty summary sets the answer, anything else (a failure or an empty summary) marks the entry ended so the UI stops offering "waiting". Inquiries resolve strictly in arrival order (the executor handles them sequentially, never concurrently), so a single FIFO queue pairs each resolution with the oldest unanswered entry; a resolution with none waiting is skipped. Plan modifications have no reply to pair — their delivery and abort outcome are on the event itself.
 export function deriveInterruptHistory(logEvents: LogEvent[]): InterruptHistoryEntry[] {
 	const entries: InterruptHistoryEntry[] = []
-	const unansweredByRole = new Map<string, InterruptInquiryEntry[]>()
+	const unanswered: InterruptInquiryEntry[] = []
 
 	for (const event of logEvents) {
 		const payload = event.payload
 		if (!isObject(payload)) continue
 
-		if (event.type === 'operator_inquiry') {
+		if (event.type === 'interrupt' && stringField(payload, 'trigger') === 'inquiry') {
 			const message = stringField(payload, 'message')
 			if (message === null) continue
-			const role = stringField(payload, 'role')
-			const entry: InterruptInquiryEntry = { kind: 'inquiry', askedAt: event.timestamp, role, message, answer: null, answeredAt: null, ended: false }
+			const entry: InterruptInquiryEntry = { kind: 'inquiry', askedAt: event.timestamp, role: stringField(payload, 'handler'), message, answer: null, answeredAt: null, ended: false }
 			entries.push(entry)
-			if (role !== null) {
-				const queue = unansweredByRole.get(role) ?? []
-				queue.push(entry)
-				unansweredByRole.set(role, queue)
+			unanswered.push(entry)
+			continue
+		}
+		if (event.type === 'interrupt_resolved' && stringField(payload, 'trigger') === 'inquiry') {
+			const entry = unanswered.shift()
+			if (entry === undefined) continue
+			const summary = stringField(payload, 'summary')
+			if (stringField(payload, 'action') === 'answered' && summary !== null && summary !== '') {
+				entry.answer = summary
+				entry.answeredAt = event.timestamp
+			} else {
+				entry.ended = true
 			}
 			continue
 		}
@@ -554,28 +572,6 @@ export function deriveInterruptHistory(logEvents: LogEvent[]): InterruptHistoryE
 			const aborted = Array.isArray(abortedRaw) ? abortedRaw.filter((item): item is string => typeof item === 'string') : []
 			entries.push({ kind: 'plan_modification', askedAt: event.timestamp, message, target: stringField(payload, 'target'), targetRole: stringField(payload, 'targetRole'), aborted })
 			continue
-		}
-		if (event.type === 'llm_call') {
-			const role = stringField(payload, 'role')
-			if (role === null) continue
-			const queue = unansweredByRole.get(role)
-			if (queue === undefined || queue.length === 0) continue
-			const received = payload['received']
-			const content = isObject(received) && typeof received['content'] === 'string' ? received['content'] : null
-			if (content === null || content === '') continue
-			const entry = queue.shift()
-			if (entry === undefined) continue
-			entry.answer = content
-			entry.answeredAt = event.timestamp
-			continue
-		}
-		if (event.type === 'role_finished') {
-			const role = stringField(payload, 'role')
-			if (role === null) continue
-			const queue = unansweredByRole.get(role)
-			if (queue === undefined) continue
-			for (const entry of queue) entry.ended = true
-			unansweredByRole.delete(role)
 		}
 	}
 	return entries
@@ -638,9 +634,14 @@ export interface RunSummary {
 	effort: EffortLevel | null
 	startTime: string | null
 	endTime: string | null
+	// The result card and run-level error ride along so the history view's expanded rows can browse outcomes without a per-run fetch; both already live in meta.json, so this is a passthrough, not a derivation.
+	result: ResultCard | null
+	error: NonNullable<RunMeta['error']> | null
+	// The LLM-generated one-line summary (summary.txt), when the summarizer has produced one; the client prefers it over the task first line and falls back when absent.
+	summary: string | null
 }
 
-export function renderRunSummary(runId: string, meta: RunMeta | null): RunSummary {
+export function renderRunSummary(runId: string, meta: RunMeta | null, summary: string | null): RunSummary {
 	return {
 		runId,
 		status: meta === null ? 'unknown' : meta.status,
@@ -648,6 +649,9 @@ export function renderRunSummary(runId: string, meta: RunMeta | null): RunSummar
 		effort: meta === null ? null : (meta.effort ?? null),
 		startTime: meta === null ? null : meta.startTime,
 		endTime: meta === null ? null : (meta.endTime ?? null),
+		result: meta === null ? null : (meta.result ?? null),
+		error: meta === null ? null : (meta.error ?? null),
+		summary,
 	}
 }
 

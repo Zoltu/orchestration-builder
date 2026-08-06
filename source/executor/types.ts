@@ -32,6 +32,8 @@ export interface ExecutorConfig {
 	contextPressureThreshold?: number
 	// The guild role the engine invokes to compact a suspended role's conversation: at depth 0 when the entry role crosses the pressure threshold (it has no parent to hand off to), and at any depth when a request is rejected for context size. Optional; when unset, depth-0 pressure falls back to the handoff notice and rejections fall back to the naive in-place backstop.
 	contextHandlerRole?: string
+	// The guild role the engine invokes to answer an operator inquiry: the run suspends at the safe point and a fresh instance of this role investigates with its tools; its finish-card summary is the answer. Optional; when unset, an inquiry is dropped (logged) rather than answered — a question never kills a run.
+	inquiryHandlerRole?: string
 	interruptTriggers?: InterruptTriggersConfig
 }
 
@@ -121,7 +123,7 @@ export type ToolResult =
 	| { kind: 'success'; data?: unknown }
 	| { kind: ErrorKind; message?: string; details?: unknown }
 
-export type OperationKind = 'call' | 'return' | 'observe' | 'terminate' | 'inquiry'
+export type OperationKind = 'call' | 'return' | 'observe' | 'terminate'
 
 export type ParticipantKind = 'human' | 'interrupt' | 'role' | 'tool'
 
@@ -145,6 +147,8 @@ export interface RunOptions {
 	benchmarkPath: string
 	task: string
 	effort: EffortLevel
+	// The run's log.jsonl as a workspace-relative path, interpolated into the inquiry handler's briefing so finished roles remain researchable from the log and the workspace.
+	runLogPath: string
 }
 
 export interface RunMeta {

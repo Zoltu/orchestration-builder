@@ -3,7 +3,8 @@ import * as path from 'node:path'
 
 import { createWebServer } from './web/server.js'
 import { createSnapshotCache } from './web/snapshot-cache.js'
-import { createAppendLog, createDeleteCheckpoint, createGuildLoader, createInterruptChannel, createInterruptQueue, createLlmCaller, createLlmFetch, createListRunIds, createReadProjectSettings, createReadRunCheckpointById, createReadRunMetaById, createReadRunSnapshotById, createReadRunSnapshotStats, createRunDirectory, createRunState, createRunSubmission, createSleep, createToolHandlers, createWebHumanBackend, createWriteCheckpoint, createWriteMeta, createWriteProjectSettings, reconcileRunsOnStartup, resumeExecutor, runExecutor, type ExecutorDependencies, type InterruptChannel, type LoadedGuild, type LlmCaller, type ModelConfig, type ResumeRun, type RunCheckpoint, type StartRun, type WebHumanBackend } from './executor/index.js'
+import { createTaskSummarizer, type TaskSummarizer } from './web/summarize.js'
+import { createAppendLog, createDeleteCheckpoint, createGuildLoader, createInterruptChannel, createInterruptQueue, createLlmCaller, createLlmFetch, createListRunIds, createReadProjectSettings, createReadRunCheckpointById, createReadRunMetaById, createReadRunSnapshotById, createReadRunSnapshotStats, createReadRunSummaryById, createRunDirectory, createRunState, createRunSubmission, createSleep, createToolHandlers, createWebHumanBackend, createWriteCheckpoint, createWriteMeta, createWriteProjectSettings, createWriteRunSummary, reconcileRunsOnStartup, resumeExecutor, runExecutor, type ExecutorDependencies, type InterruptChannel, type LoadedGuild, type LlmCaller, type ModelConfig, type ResumeRun, type RunCheckpoint, type StartRun, type WebHumanBackend } from './executor/index.js'
 
 const API_KEY_ENV_VAR = 'ORCHESTRATOR_API_KEY'
 const PORT_ENV_VAR = 'PORT'
@@ -89,23 +90,42 @@ async function withRunBindings<T>(config: {
 	}
 }
 
-// The per-run leaf wrappers the submission calls for each task (a fresh run) and for startup reconciliation (a run resumed from its checkpoint under its original run id).
+// Summary generation is best-effort and always off the run's own path: a failure (the endpoint being briefly down, a disk error on the summary file) surfaces on the service log but never delays the submission response, alters the run, or crashes the service over a UI label.
+function fireAndForgetSummary(promise: Promise<void>, runId: string): void {
+	promise.catch((error: unknown) => {
+		console.error(`Run summary generation failed for ${runId}: ${error instanceof Error ? error.message : String(error)}`)
+	})
+}
+
+// The per-run leaf wrappers the submission calls for each task (a fresh run) and for startup reconciliation (a run resumed from its checkpoint under its original run id). Each also kicks the summary hooks: the task summary at start, and the richer completion summary (task + interrupts + result) when the run settles — the rejection branch is empty because the run promise's failure is owned by runSubmission's fatal-error path, not by the summary chain.
+// The run log path rides in the options workspace-relative: the inquiry handler's briefing interpolates it so finished roles stay researchable from the mounted workspace.
 function createStartRun(config: {
 	loadedGuild: LoadedGuild
 	llmCaller: LlmCaller
 	humanBackend: WebHumanBackend
 	interruptChannel: InterruptChannel
+	summarizer: TaskSummarizer
 	guildPath: string
 	workspaceRootPath: string
 	runsBaseDir: string
 }): StartRun {
-	return (runId, task, effort) => withRunBindings(config, runId, (dependencies) => runExecutor(dependencies, {
-		runId,
-		guildPath: config.guildPath,
-		benchmarkPath: config.workspaceRootPath,
-		task,
-		effort,
-	}))
+	return (runId, task, effort) => {
+		const runLogPath = path.relative(config.workspaceRootPath, path.join(config.runsBaseDir, runId, 'log.jsonl'))
+		const runPromise = withRunBindings(config, runId, (dependencies) => runExecutor(dependencies, {
+			runId,
+			guildPath: config.guildPath,
+			benchmarkPath: config.workspaceRootPath,
+			task,
+			effort,
+			runLogPath,
+		}))
+		fireAndForgetSummary(config.summarizer.summarizeTaskStart(runId, task), runId)
+		runPromise.then(
+			(meta) => fireAndForgetSummary(config.summarizer.summarizeRunCompletion(meta), runId),
+			() => {},
+		)
+		return runPromise
+	}
 }
 
 function createResumeRun(config: {
@@ -113,14 +133,24 @@ function createResumeRun(config: {
 	llmCaller: LlmCaller
 	humanBackend: WebHumanBackend
 	interruptChannel: InterruptChannel
+	summarizer: TaskSummarizer
 	guildPath: string
 	workspaceRootPath: string
 	runsBaseDir: string
 }): ResumeRun {
-	return (checkpoint) => withRunBindings(config, checkpoint.runId, (dependencies) => resumeExecutor(dependencies, checkpoint, {
-		guildPath: config.guildPath,
-		benchmarkPath: config.workspaceRootPath,
-	}))
+	return (checkpoint) => {
+		const runLogPath = path.relative(config.workspaceRootPath, path.join(config.runsBaseDir, checkpoint.runId, 'log.jsonl'))
+		const runPromise = withRunBindings(config, checkpoint.runId, (dependencies) => resumeExecutor(dependencies, checkpoint, {
+			guildPath: config.guildPath,
+			benchmarkPath: config.workspaceRootPath,
+			runLogPath,
+		}))
+		runPromise.then(
+			(meta) => fireAndForgetSummary(config.summarizer.summarizeRunCompletion(meta), checkpoint.runId),
+			() => {},
+		)
+		return runPromise
+	}
 }
 
 function waitForShutdownSignal(): Promise<void> {
@@ -132,12 +162,12 @@ function waitForShutdownSignal(): Promise<void> {
 }
 
 // Long-running service: the server outlives every run, one task at a time, submitted via the JSON API.
-// SIGINT and SIGTERM both trigger shutdown: with an active run, the service submits a wind-down inquiry through the interrupt channel and waits for the run under a bounded drain timeout — the run can finish gracefully at a safe point. A run still active when the timeout elapses is NOT abandoned: the engine checkpoints the role stack at every safe point, so the next startup resumes the run from its last checkpoint (see docs/reference.md "Run persistence and resumption").
+// SIGINT and SIGTERM both trigger shutdown: with an active run, the service submits a wind-down notice through the interrupt channel and waits for the run under a bounded drain timeout — the run can finish gracefully at a safe point. A run still active when the timeout elapses is NOT abandoned: the engine checkpoints the role stack at every safe point, so the next startup resumes the run from its last checkpoint (see docs/reference.md "Run persistence and resumption").
 // Then stop accepting new requests, stop the server, and exit (130 if a run was still active, 0 if idle).
 // A fatal run error tears down the service and exits non-zero.
 
 const SHUTDOWN_DRAIN_MS = 30_000
-const SHUTDOWN_INQUIRY_MESSAGE = 'The service is shutting down. Please wind down: finish your current step, then call finish with whatever state you have.'
+const SHUTDOWN_NOTICE_MESSAGE = 'The service is shutting down. Please wind down: finish your current step, then call finish with whatever state you have.'
 
 async function serve(): Promise<void> {
 	const port = parsePort(Bun.env[PORT_ENV_VAR], DEFAULT_PORT)
@@ -152,17 +182,25 @@ async function serve(): Promise<void> {
 	const interruptChannel = createInterruptChannel()
 	const runState = createRunState({ humanBackend: webHumanBackend, interruptChannel })
 	const readRunSnapshotStats = createReadRunSnapshotStats(runsBaseDir)
-	const readRunSnapshot = createSnapshotCache({ readStats: readRunSnapshotStats, readRaw: createReadRunSnapshotById(runsBaseDir) }, SNAPSHOT_CACHE_MAX_ENTRIES)
+	const readRawSnapshot = createReadRunSnapshotById(runsBaseDir)
+	const readRunSnapshot = createSnapshotCache({ readStats: readRunSnapshotStats, readRaw: readRawSnapshot }, SNAPSHOT_CACHE_MAX_ENTRIES)
 	const readRunMetaById = createReadRunMetaById(runsBaseDir)
+	const readRunSummaryById = createReadRunSummaryById(runsBaseDir)
 	const listRunIds = createListRunIds(runsBaseDir)
 	const readProjectSettings = createReadProjectSettings(workspaceRootPath)
 	const writeProjectSettings = createWriteProjectSettings(workspaceRootPath)
+	const summarizer = createTaskSummarizer({
+		callLlm: (request) => llmCaller.call(request),
+		readRunLogText: (runId) => readRawSnapshot(runId).logText,
+		writeRunSummaryText: (runId, summary) => createWriteRunSummary(runId, runsBaseDir)(summary),
+	})
 
 	const runConfig = {
 		loadedGuild,
 		llmCaller,
 		humanBackend: webHumanBackend,
 		interruptChannel,
+		summarizer,
 		guildPath: GUILD_PATH,
 		workspaceRootPath,
 		runsBaseDir,
@@ -194,6 +232,7 @@ async function serve(): Promise<void> {
 		runSubmission,
 		readRunSnapshot,
 		readRunMetaById,
+		readRunSummaryById,
 		readRunSnapshotStats,
 		listRunIds,
 		readProjectSettings,
@@ -214,7 +253,7 @@ async function serve(): Promise<void> {
 	}
 
 	if (runSubmission.activeRunId() !== undefined) {
-		runState.submitInterrupt({ kind: 'inquiry', message: SHUTDOWN_INQUIRY_MESSAGE })
+		runState.submitInterrupt({ kind: 'notice', message: SHUTDOWN_NOTICE_MESSAGE })
 		const sleep = createSleep()
 		await Promise.race([runSubmission.awaitActive(), sleep(SHUTDOWN_DRAIN_MS)])
 	}

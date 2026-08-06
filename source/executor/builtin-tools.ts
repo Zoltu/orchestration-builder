@@ -388,7 +388,8 @@ function createReadMessageWindow(context: BuiltInToolContext): ToolHandler {
 		}
 		const result = readMessageWindow(target.entry.roleState.history, indexValue, fieldValue, startValue, endValue)
 		if (!result.ok) return createToolError('invalid_arguments', result.error)
-		return { kind: 'success', data: result.window }
+		// targetRole rides along as on the other cross-role inspection tools: the engine's observe detection reads it to link the inspection to the observed instance.
+		return { kind: 'success', data: { targetRole: target.entry.roleId, ...result.window } }
 	}
 }
 

@@ -46,6 +46,8 @@ export function ResultModal(h, props) {
 	const renderMarkdown = props.renderMarkdown
 	const onCopyRaw = props.onCopyRaw
 	const onClose = props.onClose
+	// Optional technical meta line ({ text, title }) for advanced users — the product client derives it from the run view; the demo harness passes none. Rendered as muted microcopy, all textContent.
+	const metaLine = props.metaLine
 
 	const status = descriptor.status
 	const summary = descriptor.summary
@@ -60,6 +62,10 @@ export function ResultModal(h, props) {
 			: 'Result'),
 		h('p', { class: `result-modal-status result-modal-status--${status}` }, statusLabel(status)),
 	]
+
+	if (metaLine !== null && metaLine !== undefined && typeof metaLine.text === 'string') {
+		children.push(h('p', { class: 'result-modal-meta', title: typeof metaLine.title === 'string' ? metaLine.title : '' }, metaLine.text))
+	}
 
 	if (summary !== null) {
 		children.push(h('div', { class: 'result-modal-summary markdown' }, renderMarkdown(summary)))

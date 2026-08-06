@@ -80,6 +80,7 @@ export async function runExecutor(deps: ExecutorDependencies, options: RunOption
 			roleName: loadedGuild.config.entryRole,
 			task: options.task,
 			effort: options.effort,
+			runLogPath: options.runLogPath,
 		},
 	)
 
@@ -95,6 +96,8 @@ export async function runExecutor(deps: ExecutorDependencies, options: RunOption
 export interface ResumeRunOptions {
 	guildPath: string
 	benchmarkPath: string
+	// Same workspace-relative log path as the original run's RunOptions carried: it is not checkpointed, so the resume re-supplies it for the reconstructed contexts.
+	runLogPath: string
 }
 
 // Resumes a run from its checkpoint after a service restart. The run's identity (run id, task, effort, start time) comes from the checkpoint — the meta keeps the original startTime so elapsed-time accounting survives the restart. The stack is reconstructed by resumeRoleStack and the run continues from the suspended leaf.
@@ -109,6 +112,7 @@ export async function resumeExecutor(deps: ExecutorDependencies, checkpoint: Run
 		benchmarkPath: options.benchmarkPath,
 		task,
 		effort,
+		runLogPath: options.runLogPath,
 	}
 
 	deps.createRunDirectory()
@@ -132,6 +136,7 @@ export async function resumeExecutor(deps: ExecutorDependencies, checkpoint: Run
 		buildEngineDependencies(deps, checkpoint.runId, startTime, checkpoint.registryCounter, checkpoint.learnedContextCeiling),
 		loadedGuild,
 		checkpoint,
+		options.runLogPath,
 	)
 
 	const meta = terminalMeta(runOptions, startTime, result)
