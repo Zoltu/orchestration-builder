@@ -67,7 +67,7 @@ After step 12 (guild label tiers — the model's friendly labels resolve from th
 
 ## Operator handoff
 
-Confirm `/api/run/flow` returns a structured `InteractionModel` for a run: `curl` against a local-Ollama run (see `AGENTS.md` "Local test model" — `qwen3.5:9b` for a basic multi-role smoke test) or a fixture run, and confirm the participants / operations match the run's `role_start` / `tool_call` / `ask_human` events and the per-invocation token totals match the `llm_call` usage. Confirm `labels.js` resolves the friendly tiers from the live `/api/config`. (The product UI does not yet consume this endpoint — that is step 14.)
+Confirm `/api/run/flow` returns a structured `InteractionModel` for a run: `curl` against a real run (see `AGENTS.md` "Local test model" — run the executor as shipped, against the Guild's configured model) or a fixture run, and confirm the participants / operations match the run's `role_start` / `tool_call` / `ask_human` events and the per-invocation token totals match the `llm_call` usage. Confirm `labels.js` resolves the friendly tiers from the live `/api/config`. (The product UI does not yet consume this endpoint — that is step 14.)
 
 ## Closeout (2026-07-09)
 

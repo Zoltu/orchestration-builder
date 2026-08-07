@@ -4,11 +4,13 @@ import * as path from 'node:path'
 import { createWebServer } from './web/server.js'
 import { createSnapshotCache } from './web/snapshot-cache.js'
 import { createTaskSummarizer, type TaskSummarizer } from './web/summarize.js'
-import { createAppendLog, createDeleteCheckpoint, createGuildLoader, createInterruptChannel, createInterruptQueue, createLlmCaller, createLlmFetch, createListRunIds, createReadProjectSettings, createReadRunCheckpointById, createReadRunMetaById, createReadRunSnapshotById, createReadRunSnapshotStats, createReadRunSummaryById, createRunDirectory, createRunState, createRunSubmission, createSleep, createToolHandlers, createWebHumanBackend, createWriteCheckpoint, createWriteMeta, createWriteProjectSettings, createWriteRunSummary, reconcileRunsOnStartup, resumeExecutor, runExecutor, type ExecutorDependencies, type InterruptChannel, type LoadedGuild, type LlmCaller, type ModelConfig, type ResumeRun, type RunCheckpoint, type StartRun, type WebHumanBackend } from './executor/index.js'
+import { createAppendLog, createDeleteCheckpoint, createDockerSecretReader, createGuildLoader, createInterruptChannel, createInterruptQueue, createLlmCaller, createLlmFetch, createListRunIds, createReadProjectSettings, createReadRunCheckpointById, createReadRunMetaById, createReadRunSnapshotById, createReadRunSnapshotStats, createReadRunSummaryById, createRunDirectory, createRunState, createRunSubmission, createSleep, createToolHandlers, createWebHumanBackend, createWriteCheckpoint, createWriteMeta, createWriteProjectSettings, createWriteRunSummary, reconcileRunsOnStartup, resolveKagiApiKey, resumeExecutor, runExecutor, type ExecutorDependencies, type InterruptChannel, type LoadedGuild, type LlmCaller, type ModelConfig, type ResumeRun, type RunCheckpoint, type StartRun, type WebHumanBackend } from './executor/index.js'
 
 const API_KEY_ENV_VAR = 'ORCHESTRATOR_API_KEY'
 const PORT_ENV_VAR = 'PORT'
 const WORKSPACE_ROOT_ENV_VAR = 'WORKSPACE_ROOT'
+// Docker secrets mount at /run/secrets; the Kagi key can also arrive as a plain environment variable (see resolveKagiApiKey).
+const DOCKER_SECRETS_DIR = '/run/secrets'
 
 // The guild directory is bundled into the image (and lives at the repo root in development); its location is an implementation detail, not a deployment variable, so it is hardcoded rather than configurable.
 // Resolved relative to this module so the guild is found regardless of the process working directory: in the image the app lives at /app/source and the guild at /app/guild, but the container's WORKDIR is /workspace.
@@ -56,6 +58,7 @@ async function withRunBindings<T>(config: {
 	llmCaller: LlmCaller
 	humanBackend: WebHumanBackend
 	interruptChannel: InterruptChannel
+	kagiApiKey: string | undefined
 	guildPath: string
 	workspaceRootPath: string
 	runsBaseDir: string
@@ -63,6 +66,7 @@ async function withRunBindings<T>(config: {
 	const additionalToolHandlers = createToolHandlers({
 		workspaceRoot: config.workspaceRootPath,
 		defaultToolTimeoutSeconds: config.loadedGuild.config.executor.defaultToolTimeoutSeconds,
+		kagiApiKey: config.kagiApiKey,
 	})
 	const appendLog = createAppendLog(runId, config.runsBaseDir)
 	// The human backend is shared with the web API; bind the active run's log so ask_human and human_answer events land in this run's log.jsonl for the question-history view.
@@ -105,6 +109,7 @@ function createStartRun(config: {
 	humanBackend: WebHumanBackend
 	interruptChannel: InterruptChannel
 	summarizer: TaskSummarizer
+	kagiApiKey: string | undefined
 	guildPath: string
 	workspaceRootPath: string
 	runsBaseDir: string
@@ -134,6 +139,7 @@ function createResumeRun(config: {
 	humanBackend: WebHumanBackend
 	interruptChannel: InterruptChannel
 	summarizer: TaskSummarizer
+	kagiApiKey: string | undefined
 	guildPath: string
 	workspaceRootPath: string
 	runsBaseDir: string
@@ -177,6 +183,10 @@ async function serve(): Promise<void> {
 	const loadGuild = createGuildLoader()
 	const loadedGuild = loadGuild(GUILD_PATH)
 	const llmCaller = createLlmCaller(buildModel(loadedGuild, Bun.env[API_KEY_ENV_VAR]), { llmFetch: createLlmFetch(), sleep: createSleep() })
+	const kagiApiKey = resolveKagiApiKey(Bun.env, createDockerSecretReader(DOCKER_SECRETS_DIR))
+	if (kagiApiKey === undefined) {
+		console.log('KAGI_API_KEY not set: web_search and the kagi fetch backend will report themselves unavailable')
+	}
 
 	const webHumanBackend = createWebHumanBackend()
 	const interruptChannel = createInterruptChannel()
@@ -201,6 +211,7 @@ async function serve(): Promise<void> {
 		humanBackend: webHumanBackend,
 		interruptChannel,
 		summarizer,
+		kagiApiKey,
 		guildPath: GUILD_PATH,
 		workspaceRootPath,
 		runsBaseDir,

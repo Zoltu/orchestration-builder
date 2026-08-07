@@ -56,7 +56,7 @@
 		},
 		"planner": {
 			"systemPrompt": "prompts/planner.md",
-			"tools": ["list_directory", "glob_files", "read_file", "read_file_partial", "search_text", "write_file", "finish"],
+			"tools": ["list_directory", "glob_files", "read_file", "read_file_partial", "search_text", "repo_map", "write_file", "finish"],
 			"label": {
 				"detailed": ["Planner"],
 				"friendly": ["Planner"],
@@ -75,7 +75,7 @@
 		},
 		"coder": {
 			"systemPrompt": "prompts/coder.md",
-			"tools": ["list_directory", "glob_files", "read_file", "read_file_partial", "search_text", "write_file", "fetch_url", "typecheck", "test", "run_shell", "finish"],
+			"tools": ["list_directory", "glob_files", "read_file", "read_file_partial", "search_text", "repo_map", "write_file", "fetch_url", "typecheck", "test", "run_shell", "finish"],
 			"label": {
 				"detailed": ["Coder"],
 				"friendly": ["Coder"],
@@ -94,7 +94,7 @@
 		},
 		"researcher": {
 			"systemPrompt": "prompts/researcher.md",
-			"tools": ["list_directory", "glob_files", "read_file", "read_file_partial", "search_text", "fetch_url", "finish"],
+			"tools": ["list_directory", "glob_files", "read_file", "read_file_partial", "search_text", "repo_map", "web_search", "fetch_url", "finish"],
 			"label": {
 				"detailed": ["Researcher"],
 				"friendly": ["Researcher"],
@@ -132,7 +132,7 @@
 		},
 		"architecture_reviewer": {
 			"systemPrompt": "prompts/architecture_reviewer.md",
-			"tools": ["list_directory", "glob_files", "read_file", "read_file_partial", "search_text", "finish"],
+			"tools": ["list_directory", "glob_files", "read_file", "read_file_partial", "search_text", "repo_map", "finish"],
 			"label": {
 				"detailed": ["Architecture Reviewer"],
 				"friendly": ["Architecture Reviewer"],
@@ -170,7 +170,7 @@
 		},
 		"style_reviewer": {
 			"systemPrompt": "prompts/style_reviewer.md",
-			"tools": ["list_directory", "glob_files", "read_file", "read_file_partial", "search_text", "finish"],
+			"tools": ["list_directory", "glob_files", "read_file", "read_file_partial", "search_text", "repo_map", "finish"],
 			"label": {
 				"detailed": ["Style Reviewer"],
 				"friendly": ["Style Reviewer"],
@@ -208,7 +208,7 @@
 		},
 		"security_reviewer": {
 			"systemPrompt": "prompts/security_reviewer.md",
-			"tools": ["list_directory", "glob_files", "read_file", "read_file_partial", "search_text", "finish"],
+			"tools": ["list_directory", "glob_files", "read_file", "read_file_partial", "search_text", "repo_map", "finish"],
 			"label": {
 				"detailed": ["Security Reviewer"],
 				"friendly": ["Security Reviewer"],
@@ -246,7 +246,7 @@
 		},
 		"acceptance_reviewer": {
 			"systemPrompt": "prompts/acceptance_reviewer.md",
-			"tools": ["list_directory", "glob_files", "read_file", "read_file_partial", "search_text", "finish"],
+			"tools": ["list_directory", "glob_files", "read_file", "read_file_partial", "search_text", "repo_map", "finish"],
 			"label": {
 				"detailed": ["Acceptance Reviewer"],
 				"friendly": ["Acceptance Reviewer"],
@@ -303,7 +303,7 @@
 		},
 		"inquiry_responder": {
 			"systemPrompt": "prompts/inquiry_responder.md",
-			"tools": ["list_role_messages", "read_message_window", "search_role_blocks", "recent_role_tool_calls", "context_info", "list_directory", "glob_files", "read_file", "read_file_partial", "search_text", "finish"],
+			"tools": ["list_role_messages", "read_message_window", "search_role_blocks", "recent_role_tool_calls", "context_info", "list_directory", "glob_files", "read_file", "read_file_partial", "search_text", "repo_map", "finish"],
 			"label": {
 				"detailed": ["Inquiry Responder"],
 				"friendly": ["Inquiry Responder"],
@@ -352,8 +352,10 @@
 		"tools/read_file.json",
 		"tools/read_file_partial.json",
 		"tools/search_text.json",
+		"tools/repo_map.json",
 		"tools/write_file.json",
 		"tools/fetch_url.json",
+		"tools/web_search.json",
 		"tools/typecheck.json",
 		"tools/test.json",
 		"tools/run_shell.json",

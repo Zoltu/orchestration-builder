@@ -37,6 +37,8 @@ export { isEffortLevel, isProjectSettings } from './validation.js'
 export { createToolHandlers } from './tools.js'
 export type { NativeToolsConfig } from './tools.js'
 
+export { createDockerSecretReader, resolveKagiApiKey } from './tools/kagi.js'
+
 export {
 	createRunDirectory,
 	createAppendLog,

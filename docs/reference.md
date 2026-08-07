@@ -72,6 +72,7 @@ Every failure is translated into a structured result the current or parent role 
 | Unknown tool | Do not execute | `{kind: "unknown_tool"}` |
 | Invalid arguments | Do not execute | `{kind: "invalid_arguments"}` |
 | Tool timeout | Abort tool | `{kind: "timeout"}` |
+| Tool's external service unavailable (not configured, rate-limited, HTTP error) | Return error to the caller | `{kind: "unavailable"}` |
 | Agent recursion depth exceeded | Terminate child | Parent receives error result card |
 | Compaction stuck | Terminate role | `{kind: "compaction_failed"}` |
 | Loop-check handler aborts a role | Finish role with error | `{kind: "loop_detected"}` |
@@ -188,7 +189,12 @@ Native tools are implemented in the executor and operate against the mounted wor
 - `read_file` — read file contents (supports partial reads)
 - `write_file` — write or overwrite a file
 - `list_directory` — list directory entries
+- `repo_map` — symbol-level map of the workspace's TypeScript/JavaScript sources: one line per top-level declaration, grouped by file (tests, declaration files, vendored code, hidden directories, and build output excluded)
 - `run_shell` — run a shell command (via `sh -c`, with the workspace as the working directory)
+- `fetch_url` — fetch a document over HTTP/HTTPS. The `method` parameter selects the backend: `auto` (default) converts the page to markdown through Kagi Extract when `KAGI_API_KEY` is configured, then markdown.new, falling back to a direct fetch of the raw document; `direct` skips conversion (the right choice for API/JSON endpoints); `kagi` and `markdown_new` force a specific backend
+- `web_search` — search the web through Kagi, returning ranked results (title, url, snippet, time)
+
+`web_search` and the `kagi` fetch backend are optional capabilities keyed on `KAGI_API_KEY` (environment variable, or a Docker secret at `/run/secrets/kagi_api_key`). The Guild's tool set is static (see "Tool availability"), so without the key the tools stay visible to roles and report an `unavailable` error when called; prompts should treat that as a signal to work from known URLs with `fetch_url`.
 
 Each tool manifest in the Guild declares the name, description, and parameter schema. The executor validates calls against that schema.
 

@@ -1,0 +1,40 @@
+{
+	"name": "web_search",
+	"description": "Search the web through Kagi and return ranked results as structured data: title, url, snippet, and time for each hit. Requires KAGI_API_KEY in the executor's environment; when it is not configured the tool reports itself unavailable, so fall back to fetch_url against URLs you already know. Pair it with fetch_url: search to find the pages, then fetch the ones that matter.",
+	"humanLabel": {
+		"detailed": ["Web Search"],
+		"friendly": ["Search Web"],
+		"whimsical": ["Bloodhound"]
+	},
+	"humanDescription": {
+		"detailed": ["Searches the web via Kagi and returns ranked results."],
+		"friendly": ["Search the web for answers."],
+		"whimsical": ["Send the bloodhound across the web."]
+	},
+	"humanCallLabel": {
+		"detailed": ["role {sourceRole} is invoking tool {destinationRole} (stack {stack})"],
+		"friendly": ["{source} is searching the web"],
+		"whimsical": ["{source} is releasing the hounds", "{source} is consulting the oracle", "{source} is casting a wide net"]
+	},
+	"humanWorkingLabel": {
+		"detailed": ["tool {participantRole} is searching the web via Kagi"],
+		"friendly": ["Searching the web"],
+		"whimsical": ["Releasing the hounds", "Consulting the oracle", "Casting a wide net", "Asking around the internet"]
+	},
+	"parameters": {
+		"type": "object",
+		"required": [
+			"query"
+		],
+		"properties": {
+			"query": {
+				"type": "string",
+				"description": "The search query."
+			},
+			"limit": {
+				"type": "number",
+				"description": "Maximum number of results to return. Defaults to 5; values above 10 are clamped to 10."
+			}
+		}
+	}
+}

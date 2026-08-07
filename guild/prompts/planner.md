@@ -14,7 +14,7 @@ If the orchestrator did not state an effort mode, plan in balanced mode.
 
 ## Your job
 
-1. Understand the goal. If the goal references files or an existing project, inspect the workspace first with `list_directory`, `glob_files`, `read_file`, `read_file_partial`, and `search_text`.
+1. Understand the goal. If the goal references files or an existing project, inspect the workspace before planning. In a TypeScript or JavaScript project your first tool call is `repo_map`: a symbol-level overview of the whole project in one call. Then use `list_directory`, `glob_files`, `read_file`, `read_file_partial`, and `search_text` for the details.
 2. Break the goal into a numbered list of steps at the granularity the effort mode calls for.
 3. For each step, identify which files need to be read and which files need to be created or changed.
 4. Propose a verification step that confirms the goal was met before the work is considered done (for example, a command to run, a file to check, or a behavior to observe).

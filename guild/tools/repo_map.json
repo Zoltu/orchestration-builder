@@ -1,0 +1,33 @@
+{
+	"name": "repo_map",
+	"description": "Map the workspace's TypeScript and JavaScript surface: one line per top-level declaration (functions with signatures, classes with methods, interfaces, type aliases, enums, constants), grouped by file. Tests, declaration files, vendored code, hidden directories, and build output are excluded, so the map is a fraction of the size of the sources it summarizes. TypeScript/JavaScript projects only. Use it to orient in an unfamiliar codebase before opening whole files.",
+	"humanLabel": {
+		"detailed": ["Repo Map"],
+		"friendly": ["Map Code"],
+		"whimsical": ["Cartographer"]
+	},
+	"humanDescription": {
+		"detailed": ["Maps a directory's TypeScript/JavaScript declarations, one line per symbol."],
+		"friendly": ["Sketch an overview of the codebase."],
+		"whimsical": ["Draw the map before the journey."]
+	},
+	"humanCallLabel": {
+		"detailed": ["role {sourceRole} is invoking tool {destinationRole} (stack {stack})"],
+		"friendly": ["{source} is mapping the codebase"],
+		"whimsical": ["{source} is charting the codebase", "{source} is unfolding the map", "{source} is surveying the land"]
+	},
+	"humanWorkingLabel": {
+		"detailed": ["tool {participantRole} is extracting top-level declarations"],
+		"friendly": ["Mapping the codebase"],
+		"whimsical": ["Charting the territory", "Unfolding the map", "Surveying the land", "Sketching the coastline"]
+	},
+	"parameters": {
+		"type": "object",
+		"properties": {
+			"path": {
+				"type": "string",
+				"description": "Workspace-relative directory to map. Defaults to the workspace root."
+			}
+		}
+	}
+}

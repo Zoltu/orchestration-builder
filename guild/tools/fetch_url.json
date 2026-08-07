@@ -1,6 +1,6 @@
 {
 	"name": "fetch_url",
-	"description": "Fetch a document over HTTP or HTTPS and return its text content. The only tool that performs external network egress. Subject to a timeout and a maximum response size.",
+	"description": "Fetch a document over HTTP or HTTPS and return its text content. The default method, \"auto\", converts the page to markdown through the best available backend — Kagi Extract when KAGI_API_KEY is configured, then markdown.new — and falls back to a direct fetch of the raw document when every converter fails. Use method \"direct\" to skip conversion and fetch the raw response (the right choice for API and JSON endpoints), or \"kagi\"/\"markdown_new\" to force a specific backend. Subject to a timeout and a maximum response size.",
 	"humanLabel": {
 		"detailed": ["Fetch URL"],
 		"friendly": ["Fetch Web"],
@@ -30,6 +30,11 @@
 			"url": {
 				"type": "string",
 				"description": "Absolute http: or https: URL to fetch."
+			},
+			"method": {
+				"type": "string",
+				"enum": ["auto", "direct", "kagi", "markdown_new"],
+				"description": "Fetch backend. \"auto\" (default) tries Kagi Extract when configured, then markdown.new, then a direct fetch. \"direct\" fetches the raw document with no conversion; prefer it for API and JSON endpoints."
 			}
 		}
 	}

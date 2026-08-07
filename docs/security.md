@@ -67,7 +67,7 @@ If `showdown` or `highlight.js` fails to load or throws, a prose field falls bac
 - **Tool exposure is a Guild decision.** The executor only exposes tools to a role if the role explicitly lists them. A Guild author can remove `run_shell` if it is not needed.
 - **Inspection tools are read-only and bounded.** The agent-activity inspection tools (`list_role_messages`, `read_message_window`, `search_role_blocks`, `recent_role_tool_calls`) never mutate the target role's state, and they never return a full message's content or reasoning — only a compact index, hard-capped windows, capped search matches, and a hash-based tool-call trace. A handler (e.g. the loop detector) therefore cannot have its own context window flooded by the target's 256k conversation, and a compromised handler role has no write path into another role's history (the only write is `trigger_interrupt`'s single marked `redirect` message or abort decision, which is the platform's intended effect).
 - **`run_shell` containment.** Containment comes from the deployment environment (non-root user, restricted egress, read-only filesystem outside the workspace mount), not from an in-tool command allowlist. Per-run environment isolation (scoped `PATH`/`HOME`) is Foundry work that hardens benchmark evaluation; an in-tool allowlist remains a deferred enhancement, not the v1 path.
-- **Secrets.** API keys are passed through environment variables, not stored in the Guild or workspace.
+- **Secrets.** API keys are passed through environment variables or Docker secrets (`/run/secrets`), never stored in the Guild or workspace.
 
 ## What the design does not prevent
 

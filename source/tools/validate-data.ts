@@ -71,11 +71,11 @@ const expectedRoles = [
 const expectedToolNames = new Set([
 	'agent', 'finish', 'context_info', 'edit_context', 'ask_human',
 	'list_directory', 'glob_files', 'read_file', 'read_file_partial', 'search_text', 'write_file', 'fetch_url', 'typecheck', 'test',
-	'run_shell',
+	'run_shell', 'repo_map', 'web_search',
 	'trigger_interrupt', 'list_role_messages', 'read_message_window', 'search_role_blocks', 'recent_role_tool_calls',
 ])
 
-const nativeToolNames = new Set(['list_directory', 'glob_files', 'read_file', 'read_file_partial', 'search_text', 'write_file', 'fetch_url', 'typecheck', 'test', 'run_shell'])
+const nativeToolNames = new Set(['list_directory', 'glob_files', 'read_file', 'read_file_partial', 'search_text', 'write_file', 'fetch_url', 'typecheck', 'test', 'run_shell', 'repo_map', 'web_search'])
 
 const builtInToolNames = new Set(['agent', 'finish', 'context_info', 'edit_context', 'ask_human', 'trigger_interrupt', 'list_role_messages', 'read_message_window', 'search_role_blocks', 'recent_role_tool_calls'])
 
@@ -92,7 +92,9 @@ const expectedSignatures: ExpectedSignature[] = [
 	{ file: 'read_file_partial.json', required: ['path', 'offset', 'limit'], properties: ['path', 'offset', 'limit'] },
 	{ file: 'search_text.json', required: ['pattern'], properties: ['pattern', 'paths'] },
 	{ file: 'write_file.json', required: ['path', 'content'], properties: ['path', 'content'] },
-	{ file: 'fetch_url.json', required: ['url'], properties: ['url'] },
+	{ file: 'fetch_url.json', required: ['url'], properties: ['url', 'method'] },
+	{ file: 'web_search.json', required: ['query'], properties: ['query', 'limit'] },
+	{ file: 'repo_map.json', required: [], properties: ['path'] },
 	{ file: 'typecheck.json', required: [], properties: ['timeoutSeconds'] },
 	{ file: 'test.json', required: [], properties: ['timeoutSeconds'] },
 	{ file: 'run_shell.json', required: ['command'], properties: ['command', 'timeoutSeconds'] },
@@ -198,7 +200,7 @@ function checkGuild(loaded: LoadedGuild): void {
 		failures.push('guild: missing role "researcher"')
 	} else {
 		// The researcher is a read-only leaf: it digests broad exploration into compact briefs and cannot delegate, mutate, or run checkers.
-		checkSameSet('guild: researcher tools', new Set(researcher.tools), new Set(['list_directory', 'glob_files', 'read_file', 'read_file_partial', 'search_text', 'fetch_url', 'finish']))
+		checkSameSet('guild: researcher tools', new Set(researcher.tools), new Set(['list_directory', 'glob_files', 'read_file', 'read_file_partial', 'search_text', 'repo_map', 'web_search', 'fetch_url', 'finish']))
 		const prompt = (loaded.prompts['researcher'] ?? '').toLowerCase()
 		check(prompt.includes('brief'), 'guild: researcher prompt lacks the compact-brief contract')
 		check(prompt.includes('cite'), 'guild: researcher prompt lacks the cite-your-sources guidance')

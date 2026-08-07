@@ -35,7 +35,7 @@ Read [`PLAN.md`](PLAN.md) (the complete design) and the closeouts of steps 12–
 
 ## Operator handoff
 
-Final end-to-end review in a browser in both themes against a real multi-role run (local Ollama): submit a task, watch the two-component flow view animate (nodes enter the main area, linger on return, depart to the top bar and merge), hover nodes and edges to confirm the inspector (step 15) still reads after the retire, answer a question via the modal, reach completion, re-open the result via the CTA, toggle to Sequence and investigate, trigger an error and confirm honest failure surfacing. Sign-off closes the sub-plan (minus deferred step 17); remaining adjustments become follow-up steps if any.
+Final end-to-end review in a browser in both themes against a real multi-role run (the Guild's configured model): submit a task, watch the two-component flow view animate (nodes enter the main area, linger on return, depart to the top bar and merge), hover nodes and edges to confirm the inspector (step 15) still reads after the retire, answer a question via the modal, reach completion, re-open the result via the CTA, toggle to Sequence and investigate, trigger an error and confirm honest failure surfacing. Sign-off closes the sub-plan (minus deferred step 17); remaining adjustments become follow-up steps if any.
 
 ## Closeout (2026-07-14)
 

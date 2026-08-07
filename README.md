@@ -28,6 +28,7 @@ All configuration is environment variables passed via `docker run -e`:
 | Variable | Default | Purpose |
 |---|---|---|
 | `ORCHESTRATOR_API_KEY` | _(none)_ | Model API key, injected into the model configuration at startup and never stored in the Guild. Omit for a local endpoint that needs no key. |
+| `KAGI_API_KEY` | _(none)_ | Kagi API key enabling the `web_search` tool and `fetch_url`'s Kagi Extract backend. May also be provided as a Docker secret at `/run/secrets/kagi_api_key`. Without it those tools report themselves unavailable and `fetch_url` falls back to markdown.new and direct fetching. |
 | `PORT` | `80` | Port the HTTP service listens on inside the container. |
 | `WORKSPACE_ROOT` | `/workspace` | The path inside the container that the project the executor operates on. Run artifacts are written to `<WORKSPACE_ROOT>/.orchestration/runs/`. |
 

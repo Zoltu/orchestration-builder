@@ -42,7 +42,7 @@ After step 14 (live hookup — the views render from live data, so the inspector
 
 ## Operator handoff
 
-Hover every kind of element in both views against a real multi-role run (local Ollama) and confirm the card reads correctly: a delegation edge shows the task text; a tool edge shows arguments then the result; a role node shows its status and finish summary; a top-bar slot shows cumulative counts; a sequence message shows its `details`. Confirm the card does not leak markup (no `innerHTML` path), repositions at viewport edges, and dismisses cleanly. Sign-off unblocks the step-16 retire-and-polish pass.
+Hover every kind of element in both views against a real multi-role run (the Guild's configured model) and confirm the card reads correctly: a delegation edge shows the task text; a tool edge shows arguments then the result; a role node shows its status and finish summary; a top-bar slot shows cumulative counts; a sequence message shows its `details`. Confirm the card does not leak markup (no `innerHTML` path), repositions at viewport edges, and dismisses cleanly. Sign-off unblocks the step-16 retire-and-polish pass.
 
 ## Closeout (2026-07-12)
 
@@ -52,4 +52,4 @@ The product client (`app.js`) wires the inspector as a hyperapp-managed overlay 
 
 The dev harness (`demo.js`) now consumes the same `deriveOperationTooltip` and `tooltipStyle`, so there is one inspector derivation, not two. Its flow view still carries no hover wiring (the harness is removed in step 16, so wiring it was out of scope). `docs/security.md` records that the live inspector preserves the invariant: the resolved label, kind, invocation counts, total time/tokens, and status words are `textContent`, and the only prose a section carries is the operation `details` markdown routed through the shared sanitized pipeline; no `details` string is interpolated into an SVG attribute or `innerHTML`.
 
-Operator visual sign-off (hovering every element kind in both views against a real multi-role local-Ollama run) is the remaining gate.
+Operator visual sign-off (hovering every element kind in both views against a real multi-role run on the Guild's configured model) is the remaining gate.

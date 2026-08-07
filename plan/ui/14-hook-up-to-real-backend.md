@@ -31,4 +31,4 @@ Read [`PLAN.md`](PLAN.md) ("Methodology", "Around the views"), [`13-backend-inte
 
 ## Operator handoff
 
-Run a real task against a local Ollama model (see `AGENTS.md` "Local test model" — `qwen3.5:9b` for a basic multi-role smoke test) and watch the live Flow view: confirm the two-component view animates (nodes enter, linger, depart to the top bar), a real `ask_human` opens the modal, completion fires the result modal, and the live view matches the fixture-driven behavior. Compare against the dev harness for parity. Report any live-data edge case the fixtures (and step 13's adapter) missed.
+Run a real task against the Guild's configured model (see `AGENTS.md` "Local test model" — run the executor as shipped, no `guild.json` changes) and watch the live Flow view: confirm the two-component view animates (nodes enter, linger, depart to the top bar), a real `ask_human` opens the modal, completion fires the result modal, and the live view matches the fixture-driven behavior. Compare against the dev harness for parity. Report any live-data edge case the fixtures (and step 13's adapter) missed.

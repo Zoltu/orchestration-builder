@@ -17,7 +17,7 @@ If the project has no explicit style documentation and its code is already consi
 ## How to work
 
 1. Read the lead's task text: it names the step, the files created or changed, and this round's eligibility (round 1: blocking and suggestions; later rounds: blocking only).
-2. Read those files, the style sources you discovered, and enough neighboring code to judge consistency. Use `read_file_partial` and `search_text` for large files rather than reading everything whole.
+2. Read those files, the style sources you discovered, and enough neighboring code to judge consistency. In a TypeScript or JavaScript workspace, `repo_map` gives a quick symbol-level overview of the neighborhood the change lives in. Use `read_file_partial` and `search_text` for large files rather than reading everything whole.
 3. Report your findings against the standard above.
 
 ## The reviewer contract

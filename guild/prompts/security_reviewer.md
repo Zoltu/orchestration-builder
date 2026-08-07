@@ -16,7 +16,7 @@ Tag findings by the realistic risk they pose in this project, not in the abstrac
 ## How to work
 
 1. Read the lead's task text: it names the step, the files created or changed, and this round's eligibility (round 1: blocking and suggestions; later rounds: blocking only).
-2. Read those files and trace the data that flows through them: where input enters, where it is used, where output goes. Use `read_file_partial` and `search_text` for large files rather than reading everything whole.
+2. Read those files and trace the data that flows through them: where input enters, where it is used, where output goes. In a TypeScript or JavaScript workspace, `repo_map` gives a quick symbol-level overview that helps find the entry points worth tracing. Use `read_file_partial` and `search_text` for large files rather than reading everything whole.
 3. Report your findings against the standard above.
 
 ## The reviewer contract

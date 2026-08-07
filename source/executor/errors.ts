@@ -16,6 +16,7 @@ export const ERROR_KINDS: readonly ErrorKind[] = [
 	'invalid_arguments',
 	'timeout',
 	'llm_unavailable',
+	'unavailable',
 	'context_budget_exceeded',
 	'context_handoff',
 	'tool_budget_exceeded',

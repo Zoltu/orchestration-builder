@@ -452,9 +452,9 @@ High-quality code and a well-factored end state are more important than rigid ad
 
 ## Local test model
 
-A local Ollama endpoint is available in the agent environment at `http://ollama:11434` (OpenAI-compatible API at `/v1`). Models installed there as of this writing include `qwen3:1.7b`, `qwen3.5:9b`, `qwen3.6:35b-a3b-q4_K_M`, and `glm-4.7-flash:q4_K_M`; confirm what is currently available with `curl http://ollama:11434/api/tags` before relying on a name, since installed models change over time (see "Knowledge Freshness" below).
+The Guild's own configured model endpoint is reachable from the agent environment: the bundled `guild/guild.json` targets `llama-server` (`http://llama-server:8080/v1`) with the model "Agents A1", and that endpoint is up with that model loaded.
 
-A real end-to-end run against one of these models is **not** operator-only work. Steps that call for a real-LLM smoke test (an "Operator handoff" for real-LLM runs) can usually be exercised in-environment first by pointing the Guild's `model` at a small installed model — `qwen3.5:9b` is the default choice for basic smoke tests, `qwen3:1.7b` for the fastest possible loop, `qwen3.6:35b-a3b-q4_K_M` when a larger model is needed to produce meaningful tool calls. Verify the model name and endpoint are reachable before running, and prefer the smallest model that exercises the code path. Anything the local model cannot exercise (multi-container Docker builds, real network egress, hardware the sandbox lacks) still requires operator handoff.
+A real end-to-end run is **not** operator-only work. Steps that call for a real-LLM smoke test (an "Operator handoff" for real-LLM runs) can usually be exercised in-environment first: run the executor exactly as shipped, against the Guild's configured model, with no changes to `guild.json`. Do **not** repoint the Guild at any other endpoint or model — the configured one is the supported path and the only one guaranteed to behave (strict chat template, single leading system message). Anything a local run cannot exercise (multi-container Docker builds, hardware the sandbox lacks) still requires operator handoff.
 
 ---
 

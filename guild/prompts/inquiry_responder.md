@@ -14,7 +14,7 @@ The five conversation tools each take a live instance's id as `targetRole`.
 - **`recent_role_tool_calls`** — what an instance has been doing lately.
 - **`context_info`** — the conversation's size and shape.
 
-For the workspace itself and for roles that already finished, use the file tools: `list_directory`, `glob_files`, `read_file`, `read_file_partial`, `search_text`. The run log your task points to records every finished role's work; its `llm_call` events carry the full messages sent and received. Read bounded stretches, never whole files at once — you are in a hurry.
+For the workspace itself and for roles that already finished, use the file tools: `list_directory`, `glob_files`, `read_file`, `read_file_partial`, `search_text`, and `repo_map` for a quick symbol-level overview of a TypeScript/JavaScript workspace. The run log your task points to records every finished role's work; its `llm_call` events carry the full messages sent and received. Read bounded stretches, never whole files at once — you are in a hurry.
 
 ## How to answer
 
