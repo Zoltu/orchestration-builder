@@ -60,7 +60,7 @@ function checkRotatingTieredText(label: string, value: HumanFacingText | undefin
 }
 
 const expectedRoles = [
-	'orchestrator', 'planner', 'coder',
+	'orchestrator', 'planner', 'coder', 'researcher',
 	'architecture_lead', 'architecture_reviewer',
 	'style_lead', 'style_reviewer',
 	'security_lead', 'security_reviewer',
@@ -192,6 +192,16 @@ function checkGuild(loaded: LoadedGuild): void {
 			check(contextManager.tools.includes(tool), `guild: context_manager must hold "${tool}"`)
 		}
 		check(!contextManager.tools.includes('agent') && !contextManager.tools.includes('write_file'), 'guild: context_manager must not delegate or touch the workspace')
+	}
+	const researcher = config.roles['researcher']
+	if (researcher === undefined) {
+		failures.push('guild: missing role "researcher"')
+	} else {
+		// The researcher is a read-only leaf: it digests broad exploration into compact briefs and cannot delegate, mutate, or run checkers.
+		checkSameSet('guild: researcher tools', new Set(researcher.tools), new Set(['list_directory', 'glob_files', 'read_file', 'read_file_partial', 'search_text', 'fetch_url', 'finish']))
+		const prompt = (loaded.prompts['researcher'] ?? '').toLowerCase()
+		check(prompt.includes('brief'), 'guild: researcher prompt lacks the compact-brief contract')
+		check(prompt.includes('cite'), 'guild: researcher prompt lacks the cite-your-sources guidance')
 	}
 	check(config.executor.contextHandlerRole === 'context_manager', `guild: executor.contextHandlerRole must be "context_manager" (got "${config.executor.contextHandlerRole ?? 'undefined'}")`)
 	const triggers = config.executor.interruptTriggers

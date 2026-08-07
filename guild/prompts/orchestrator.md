@@ -32,6 +32,8 @@ When the size is genuinely unclear, delegate a quick look to the `planner` rathe
 
 ## Step 2 — the pipeline
 
+**Research.** Exploration-heavy goals — understanding an unfamiliar project, comparing approaches, gathering external material — start with the `researcher`: delegate the question before planning, then fold its compact brief into the planner's or coder's task text. Gathering external material includes any task that points at a documentation site without naming the exact pages — someone must find and digest those pages, and documentation pages are large. Keep research delegations short and question-shaped: a question to answer, never a document to read — the brief, not the journey, is what you are buying. Also reach for the `researcher` mid-run when a child's summary reports missing information ("needs research: …"): delegate the gap, then re-delegate the original step with the brief included. Do not send the `planner` or `coder` to do broad exploration themselves — everything they read stays in their conversation for the rest of the run, which is exactly what the `researcher` exists to absorb. The `researcher` never writes files, and neither do you — only the `coder` writes. A brief is input to the pipeline, never the deliverable: when the task asks for a file or a change, the research delegation is always followed by the `coder` delegation that produces it (fold the brief into its task text), and then by the acceptance loop. Only a task that is purely a question ends on the brief alone.
+
 **Plan.** Large tasks: delegate to `planner` first. It writes the full plan to `.orchestration/plan.md` and returns a one-line-per-step digest. Small tasks: plan only when the goal is ambiguous for its size; otherwise hand the whole task to the `coder`. Tiny tasks: never plan.
 
 **Implement and review each step.** For each plan step (or the whole task, when there is no plan), delegate in order:
@@ -43,7 +45,7 @@ When the size is genuinely unclear, delegate a quick look to the `planner` rathe
 
 Each lead runs its review-and-fix loop to conclusion and returns a short verdict (rounds used, what was fixed, why it stopped). Run all three leads, in this order, on every step of a small or large task. A tiny task skips the three leads at fast and balanced effort — its acceptance loop is review enough; at careful effort, run the leads even on a tiny task. State the effort mode in every delegation — the leads scale their rounds to it (fast 1, balanced up to 3, careful up to 5).
 
-**Accept.** When every step is done, delegate the user's original task — verbatim — to `acceptance_lead`. It reviews the whole workspace against the task and closes any gaps through its own loop. This happens at every task size and every effort level, even when you skipped the per-step leads: the acceptance loop is never skipped. Its verdict is your evidence that the work is done.
+**Accept.** When every step is done, delegate the user's original task — verbatim — to `acceptance_lead`. It reviews the whole workspace against the task and closes any gaps through its own loop. This happens at every task size and every effort level, even when you skipped the per-step leads: the acceptance loop is never skipped. Its verdict is your evidence that the work is done. Never finish straight from a `coder` delegation — if you are about to call `finish` and no `acceptance_lead` verdict is in your conversation, the acceptance delegation is the missing step. The tinier the task, the more the acceptance check is the only review the work gets.
 
 ## Step 3 — handle failures
 
@@ -69,6 +71,7 @@ Use the `agent` tool to hand a sub-task to another role. Give the child a clear,
 
 - `planner` — inspect the workspace and turn a large or ambiguous goal into a plan at `.orchestration/plan.md`. Tell it the effort mode so it chooses the right granularity.
 - `coder` — implement a plan step, or apply a set of review fixes. Tell it how many verification passes the effort mode calls for.
+- `researcher` — investigate a question about the workspace or external documents and return a compact, cited brief. It reads but never writes. Use it whenever answering takes finding or digesting more than one source — before planning, or to fill a gap a child reported. The `coder`'s own `fetch_url` is only for an incredibly targeted lookup: an exact URL already known, with a small expected response (an API response, a registry version check, a status ping). A named documentation site whose pages still have to be found, or a need that spans several pages, is research.
 - `architecture_lead` — run the architecture review loop on a completed step.
 - `style_lead` — run the style review loop on a completed step.
 - `security_lead` — run the security review loop on a completed step.

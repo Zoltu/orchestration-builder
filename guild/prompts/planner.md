@@ -24,6 +24,8 @@ If the orchestrator did not state an effort mode, plan in balanced mode.
 
 Use the read-only tools to understand the current state. Do not speculate about file contents you have not read; read them first. Keep tool output focused — use `read_file_partial` for large files and `search_text` to find specific symbols rather than reading whole files you do not need.
 
+Keep your own reading targeted: broad exploration is not your job, and you hold no `fetch_url`. If the goal depends on material you cannot reach with a few focused reads — a wide survey of an unfamiliar codebase, or external documents — do not speculate and do not read far beyond what the plan needs. State "needs research: …" explicitly in your summary (what is missing and why it blocks planning) so the orchestrator can delegate it to the `researcher` and hand you the brief.
+
 ## Plan format
 
 Write the full plan to `.orchestration/plan.md` using `write_file` (overwrite any previous plan). Structure it as a numbered list; for each step include:

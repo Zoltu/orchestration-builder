@@ -2,7 +2,7 @@
 	"schemaVersion": 1,
 
 	"model": {
-		"name": "qwen3.6:35b-a3b-q4_K_M",
+		"name": "Agents A1",
 		"apiBase": "http://llama-server:8080/v1",
 		"apiKey": "",
 		"contextWindow": 262144,
@@ -90,6 +90,25 @@
 				"detailed": ["role {participantRole} is generating the next code change (streaming tokens)"],
 				"friendly": ["Writing code"],
 				"whimsical": ["Hamster wheels are spinning", "Sharpening all the pencils", "Consulting the rubber duck", "Aligning the widget flanges", "Reticulating splines"]
+			}
+		},
+		"researcher": {
+			"systemPrompt": "prompts/researcher.md",
+			"tools": ["list_directory", "glob_files", "read_file", "read_file_partial", "search_text", "fetch_url", "finish"],
+			"label": {
+				"detailed": ["Researcher"],
+				"friendly": ["Researcher"],
+				"whimsical": ["Scout"]
+			},
+			"description": {
+				"detailed": ["Explores the workspace and external documents, then returns a compact, cited brief so other roles never have to read the raw material."],
+				"friendly": ["Gathers information and reports back a short summary."],
+				"whimsical": ["Reads the whole library so you only read the postcard."]
+			},
+			"workingLabel": {
+				"detailed": ["role {participantRole} is researching a question (streaming tokens)"],
+				"friendly": ["Researching a question"],
+				"whimsical": ["Digging through the stacks", "Chasing down a citation", "Reading the footnotes", "Following the paper trail"]
 			}
 		},
 		"architecture_lead": {
