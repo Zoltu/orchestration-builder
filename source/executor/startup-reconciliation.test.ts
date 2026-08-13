@@ -11,7 +11,7 @@ function runningMeta(runId: string, startTime: string): RunMeta {
 		guildPath: 'guild',
 		benchmarkPath: 'bench',
 		task: `task for ${runId}`,
-		effort: 3,
+		effort: 'standard',
 		status: 'running',
 		startTime,
 	}
@@ -41,7 +41,7 @@ function checkpointFor(runId: string, startTime: string): RunCheckpoint {
 				roleName: 'main',
 				depth: 0,
 				task: `task for ${runId}`,
-				effort: 3,
+				effort: 'standard',
 				roleState: {
 					history: [
 						{ role: 'system', content: 'prompt' },
@@ -136,7 +136,7 @@ describe('reconcileRunsOnStartup', () => {
 		const meta = written?.[0]
 		expect(meta?.status).toBe('interrupted')
 		expect(meta?.task).toBe('task for run-1')
-		expect(meta?.effort).toBe(3)
+		expect(meta?.effort).toBe('standard')
 		expect(meta?.guildPath).toBe('guild')
 		expect(meta?.startTime).toBe('2026-01-01T00:00:00.000Z')
 		expect(meta?.endTime).toBeDefined()

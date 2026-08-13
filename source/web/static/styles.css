@@ -311,7 +311,7 @@ li:last-child {
 	white-space: pre-wrap;
 }
 
-/* The compose screen is the hero when the service is idle: drafting a task is the primary activity when nothing runs, so the editor gets a centered column and a tall field. The form itself is a vertical stack: a large multiline task editor, then a controls row pairing the effort slider with the submit button. Enter inserts a newline and Tab inserts a tab character (handled in app.js), so submission is the button or Ctrl/Cmd+Enter — the task is free-form Markdown a user may draft at length. */
+/* The compose screen is the hero when the service is idle: drafting a task is the primary activity when nothing runs, so the editor gets a centered column and a tall field. The form itself is a vertical stack: a large multiline task editor, the effort-level radio cards, then a controls row with the submit button. Enter inserts a newline and Tab inserts a tab character (handled in app.js), so submission is the button or Ctrl/Cmd+Enter — the task is free-form Markdown a user may draft at length. */
 #compose-screen {
 	flex: 1 1 auto;
 	min-height: 0;
@@ -380,11 +380,6 @@ li:last-child {
 	flex-wrap: wrap;
 	align-items: center;
 	gap: var(--space-3);
-}
-
-.submit-controls .effort-control {
-	margin: 0;
-	flex: 1 1 auto;
 }
 
 .create-run-form button {
@@ -728,36 +723,98 @@ li:last-child {
 	font-style: italic;
 }
 
+/* The effort selector is a fieldset of radio cards: large clickable options backed by real radio inputs, so the group stays keyboard- and screen-reader-accessible while the card styling carries the selected state. The cards share the row equally and wrap onto fewer columns when the compose column narrows. */
 .effort-control {
-	display: flex;
-	flex-wrap: wrap;
-	align-items: center;
-	gap: var(--space-2);
-	margin: 0 0 var(--space-3);
+	margin: 0;
+	padding: 0;
+	border: none;
+	min-width: 0;
 	font-size: 0.85rem;
 	color: var(--color-text-muted);
 }
 
 .effort-label {
+	padding: 0;
 	font-weight: 600;
 	color: var(--color-text);
 }
 
-.effort-control input[type='range'] {
+.effort-options {
+	display: grid;
+	grid-template-columns: repeat(auto-fit, minmax(12rem, 1fr));
+	gap: var(--space-2);
+	margin-top: var(--space-2);
+}
+
+.effort-option {
+	display: flex;
+	flex-direction: column;
+	gap: var(--space-1);
+	padding: var(--space-3);
+	border: 1px solid var(--color-border-strong);
+	border-radius: var(--radius);
+	background: var(--color-surface);
 	cursor: pointer;
 }
 
-.effort-control input[type='range']:disabled {
-	opacity: 0.5;
+.effort-option:hover {
+	border-color: var(--color-accent);
+}
+
+/* The ring is a box-shadow rather than a wider border so selecting a card never shifts its layout. */
+.effort-option.is-selected {
+	border-color: var(--color-accent);
+	background: var(--color-accent-soft);
+	box-shadow: 0 0 0 1px var(--color-accent);
+}
+
+.effort-option:focus-within {
+	outline: 2px solid var(--color-accent);
+	outline-offset: 1px;
+}
+
+.effort-control:disabled .effort-option {
+	opacity: 0.6;
 	cursor: default;
 }
 
-.effort-value {
-	font-variant-numeric: tabular-nums;
-	white-space: nowrap;
+.effort-option input[type='radio'] {
+	margin: 0;
+	accent-color: var(--color-accent);
+}
+
+.effort-option-name {
+	display: flex;
+	align-items: center;
+	gap: var(--space-2);
+	font-weight: 600;
+	color: var(--color-text);
+}
+
+.effort-recommended {
+	flex: 0 0 auto;
+	font-size: 0.72rem;
+	font-weight: 500;
+	color: var(--color-accent);
+	border: 1px solid var(--color-accent-border);
+	border-radius: 999px;
+	padding: 0 var(--space-2);
+	background: var(--color-accent-soft);
+}
+
+.effort-option-description {
+	font-size: 0.8rem;
+	line-height: 1.4;
+}
+
+.effort-tip {
+	margin: var(--space-2) 0 0;
+	font-size: 0.8rem;
+	color: var(--color-text-subtle);
 }
 
 .effort-note {
+	margin: var(--space-1) 0 0;
 	font-size: 0.78rem;
 	color: var(--color-text-subtle);
 	font-style: italic;

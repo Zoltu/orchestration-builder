@@ -124,6 +124,10 @@ describe('parseRunSnapshot', () => {
 		const snapshot = parseRunSnapshot({ metaText: JSON.stringify({ runId: 123 }), logText: '' })
 		expect(snapshot.meta).toBeNull()
 	})
+
+	test('returns null meta when the effort is not a tier string', () => {
+		expect(parseRunMeta(JSON.stringify({ ...sampleRunMeta(), effort: 4 }))).toBeNull()
+	})
 })
 
 describe('deriveRoleActivity', () => {
@@ -496,7 +500,7 @@ describe('formatLogEvent', () => {
 	})
 
 	test('effort_set renders the chosen level', () => {
-		expect(formatLogEvent(event('effort_set', { effort: 3 }))).toBe('effort set (3)')
+		expect(formatLogEvent(event('effort_set', { effort: 'standard' }))).toBe('effort set (standard)')
 	})
 
 	test('effort_set without an effort value renders the bare action', () => {
@@ -599,10 +603,10 @@ describe('renderRunView', () => {
 
 	test('surfaces the run effort from meta.effort, or null when meta is absent or predates the channel', () => {
 		const withEffort = parseRunSnapshot({
-			metaText: JSON.stringify(sampleRunMeta({ effort: 5 })),
+			metaText: JSON.stringify(sampleRunMeta({ effort: 'thorough' })),
 			logText: '',
 		})
-		expect(renderRunView(withEffort, { maxLogLines: 200, now: NOW }).effort).toBe(5)
+		expect(renderRunView(withEffort, { maxLogLines: 200, now: NOW }).effort).toBe('thorough')
 
 		const withoutEffort = parseRunSnapshot({ metaText: JSON.stringify(sampleRunMeta()), logText: '' })
 		expect(renderRunView(withoutEffort, { maxLogLines: 200, now: NOW }).effort).toBeNull()
@@ -1115,8 +1119,8 @@ describe('renderRunSummary', () => {
 	})
 
 	test('carries the run effort from meta.effort', () => {
-		const meta = parseRunMeta(JSON.stringify(sampleRunMeta({ effort: 4 })))
-		expect(renderRunSummary('r', meta, null).effort).toBe(4)
+		const meta = parseRunMeta(JSON.stringify(sampleRunMeta({ effort: 'thorough' })))
+		expect(renderRunSummary('r', meta, null).effort).toBe('thorough')
 	})
 
 	test('passes the result card and run-level error through so the history view can browse outcomes', () => {
@@ -1142,11 +1146,11 @@ describe('renderProjectSettings', () => {
 	})
 
 	test('returns the stored effort when set', () => {
-		expect(renderProjectSettings({ effort: 5 })).toEqual({ effort: 5 })
+		expect(renderProjectSettings({ effort: 'thorough' })).toEqual({ effort: 'thorough' })
 	})
 
 	test('returns only the effort field in its output shape', () => {
-		expect(Object.keys(renderProjectSettings({ effort: 2 }))).toEqual(['effort'])
+		expect(Object.keys(renderProjectSettings({ effort: 'quick' }))).toEqual(['effort'])
 	})
 })
 

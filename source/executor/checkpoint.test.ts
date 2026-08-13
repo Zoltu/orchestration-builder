@@ -45,7 +45,7 @@ function sampleCheckpoint(): RunCheckpoint {
 				roleName: 'main',
 				depth: 0,
 				task: 'do it',
-				effort: 3,
+				effort: 'standard',
 				roleState: sampleRoleState({
 					history: [
 						{ role: 'system', content: 'prompt' },
@@ -206,7 +206,7 @@ describe('createCheckpointRecorder', () => {
 	}
 
 	function registerRoot(recorder: CheckpointRecorder, registry: RoleRegistry): RoleRegistryEntry {
-		const context = frameContext('main', 0, { effort: 3 })
+		const context = frameContext('main', 0, { effort: 'standard' })
 		const entry = registry.register('main', 0, undefined, sampleRoleState())
 		recorder.registerFrame(context, entry)
 		return entry
@@ -317,7 +317,7 @@ describe('createCheckpointRecorder', () => {
 		const leafEntry = registry.register('coder', 1, 'main-0-1', sampleRoleState(), 'coder-1-2')
 		recorder.registerFrame(frameContext('coder', 1, { parent: 'main', parentRoleId: 'main-0-1' }), leafEntry)
 		const rootEntry = registry.register('main', 0, undefined, sampleRoleState(), 'main-0-1')
-		recorder.registerFrame(frameContext('main', 0, { effort: 3 }), rootEntry)
+		recorder.registerFrame(frameContext('main', 0, { effort: 'standard' }), rootEntry)
 		recorder.write()
 
 		expect(written[0]?.frames.map((frame: CheckpointFrame) => frame.roleId)).toEqual(['main-0-1', 'coder-1-2'])

@@ -1,5 +1,4 @@
 import { isErrorKind, ValidationError } from './errors.js'
-import { EFFORT_MAX, EFFORT_MIN } from './effort.js'
 import type {
 	ContextPolicy,
 	EffortLevel,
@@ -116,9 +115,7 @@ export function isResultCard(value: unknown): value is ResultCard {
 }
 
 export function isEffortLevel(value: unknown): value is EffortLevel {
-	if (typeof value !== 'number') return false
-	if (!Number.isInteger(value)) return false
-	return value >= EFFORT_MIN && value <= EFFORT_MAX
+	return value === 'quick' || value === 'standard' || value === 'thorough'
 }
 
 export function isProjectSettings(value: unknown): value is ProjectSettings {

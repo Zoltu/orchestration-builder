@@ -290,29 +290,29 @@ describe('createRunSubmission effort resolution', () => {
 		const { startRun, captured } = captureEffort()
 		const submission = createRunSubmission({ startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings })
 
-		submission.submit('do it', 2)
+		submission.submit('do it', 'thorough')
 		await submission.awaitActive()
-		expect(captured).toEqual([2])
+		expect(captured).toEqual(['thorough'])
 	})
 
 	test('the project default is applied when no override is given', async () => {
 		const { startRun, captured } = captureEffort()
-		const projectSettings: ReadProjectSettings = () => ({ effort: 4 })
+		const projectSettings: ReadProjectSettings = () => ({ effort: 'thorough' })
 		const submission = createRunSubmission({ startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: projectSettings })
 
 		submission.submit('do it')
 		await submission.awaitActive()
-		expect(captured).toEqual([4])
+		expect(captured).toEqual(['thorough'])
 	})
 
 	test('a per-run override wins over the project default', async () => {
 		const { startRun, captured } = captureEffort()
-		const projectSettings: ReadProjectSettings = () => ({ effort: 4 })
+		const projectSettings: ReadProjectSettings = () => ({ effort: 'thorough' })
 		const submission = createRunSubmission({ startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: projectSettings })
 
-		submission.submit('do it', 1)
+		submission.submit('do it', 'quick')
 		await submission.awaitActive()
-		expect(captured).toEqual([1])
+		expect(captured).toEqual(['quick'])
 	})
 
 	test('DEFAULT_EFFORT applies when neither override nor project setting fixes the effort', async () => {

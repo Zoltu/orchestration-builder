@@ -149,6 +149,14 @@ function checkGuild(loaded: LoadedGuild): void {
 	check(orchestratorPrompt.includes('clarifying'), 'guild: orchestrator prompt lacks clarifying-question guidance')
 	check(orchestratorPrompt.includes('ask_human'), 'guild: orchestrator prompt does not mention ask_human')
 
+	// These roles scale their behavior to the run's effort tier, so each prompt must name all three tier modes.
+	for (const role of ['orchestrator', 'planner', 'coder', 'researcher', 'architecture_lead', 'style_lead', 'security_lead', 'acceptance_lead']) {
+		const prompt = (loaded.prompts[role] ?? '').toLowerCase()
+		for (const tier of ['quick mode', 'standard mode', 'thorough mode']) {
+			check(prompt.includes(tier), `guild: role "${role}" prompt lacks the "${tier}" tier`)
+		}
+	}
+
 	const recoveryPrompt = (loaded.prompts['recovery'] ?? '').toLowerCase()
 	for (const kind of ERROR_KINDS) {
 		check(recoveryPrompt.includes(kind), `guild: recovery prompt does not cover error kind "${kind}"`)

@@ -185,7 +185,7 @@ describe('runExecutor', () => {
 			guildPath: '/guild',
 			benchmarkPath: '/bench',
 			task: 'do it',
-			effort: 3,
+			effort: 'standard',
 			runLogPath: 'runs/r-fail/log.jsonl',
 		})
 		} catch (error) {
@@ -222,7 +222,7 @@ describe('runExecutor', () => {
 			guildPath: '/guild',
 			benchmarkPath: '/bench',
 			task: 'do it',
-			effort: 3,
+			effort: 'standard',
 			runLogPath: 'runs/r1/log.jsonl',
 		})
 
@@ -272,7 +272,7 @@ describe('runExecutor', () => {
 			guildPath: '/guild',
 			benchmarkPath: '/bench',
 			task: 'do it',
-			effort: 3,
+			effort: 'standard',
 			runLogPath: 'runs/r2/log.jsonl',
 		})
 
@@ -303,7 +303,7 @@ describe('runExecutor', () => {
 			guildPath: '/guild',
 			benchmarkPath: '/bench',
 			task: 'implicit',
-			effort: 3,
+			effort: 'standard',
 			runLogPath: 'runs/r3/log.jsonl',
 		})
 
@@ -341,7 +341,7 @@ describe('runExecutor', () => {
 			guildPath: '/guild',
 			benchmarkPath: '/bench',
 			task: 'do it',
-			effort: 3,
+			effort: 'standard',
 			runLogPath: 'runs/r4/log.jsonl',
 		})
 
@@ -382,18 +382,18 @@ describe('runExecutor', () => {
 			guildPath: '/guild',
 			benchmarkPath: '/bench',
 			task: 'do it',
-			effort: 4,
+			effort: 'thorough',
 			runLogPath: 'runs/r-effort/log.jsonl',
 		})
 
 		const effortSetEvents = persistence.state.events.filter((e) => e.type === 'effort_set')
 		expect(effortSetEvents.length).toBe(1)
 		expect(isRecord(effortSetEvents[0]!.payload)).toBe(true)
-		if (isRecord(effortSetEvents[0]!.payload)) expect(effortSetEvents[0]!.payload['effort']).toBe(4)
+		if (isRecord(effortSetEvents[0]!.payload)) expect(effortSetEvents[0]!.payload['effort']).toBe('thorough')
 		// effort_set is the first event, ahead of the entry role's role_start.
 		expect(persistence.state.events[0]!.type).toBe('effort_set')
-		expect(meta.effort).toBe(4)
-		expect(persistence.state.meta?.effort).toBe(4)
+		expect(meta.effort).toBe('thorough')
+		expect(persistence.state.meta?.effort).toBe('thorough')
 	})
 })
 
@@ -453,7 +453,7 @@ describe('resumeExecutor', () => {
 		const persistence = makeFakePersistence()
 		const deps = makeDeps(llm, persistence, makeLoader(guild))
 
-		const meta = await runExecutor(deps, { runId: 'r-resume', ...resumeOptions, task: 'do it', effort: 2 })
+		const meta = await runExecutor(deps, { runId: 'r-resume', ...resumeOptions, task: 'do it', effort: 'quick' })
 		return { meta, checkpoints: persistence.state.checkpoints }
 	}
 
@@ -478,7 +478,7 @@ describe('resumeExecutor', () => {
 		expect(meta.result).toEqual(uninterrupted.meta.result)
 		expect(meta.runId).toBe('r-resume')
 		expect(meta.task).toBe('do it')
-		expect(meta.effort).toBe(2)
+		expect(meta.effort).toBe('quick')
 		expect(meta.startTime).toBe(uninterrupted.meta.startTime)
 		expect(meta.endTime).toBeDefined()
 		expect(llm.calls).toBe(2)
@@ -527,7 +527,7 @@ describe('resumeExecutor', () => {
 		const persistence = makeFakePersistence()
 		const deps = makeDeps(llm, persistence, makeLoader(guild))
 
-		await runExecutor(deps, { runId: 'r-clean', ...resumeOptions, task: 'do it', effort: 3 })
+		await runExecutor(deps, { runId: 'r-clean', ...resumeOptions, task: 'do it', effort: 'standard' })
 
 		expect(persistence.state.deleteCheckpointCalls).toBe(1)
 	})

@@ -37,7 +37,7 @@ export interface ExecutorConfig {
 	interruptTriggers?: InterruptTriggersConfig
 }
 
-// The interrupt platform's cadence configuration. everyToolCalls/everyTokens are the base thresholds (applied at effort 0); the engine scales them linearly with the run's effort (threshold × (effort + 1)), so high-effort runs are checked less often. handlerRole is the guild role the engine invokes on a cadence trigger; planOwnerRole names the role that receives plan modifications (the active chain's rootmost instance of it), falling back to the chain root when absent or not in the chain.
+// The interrupt platform's cadence configuration. everyToolCalls/everyTokens are the base thresholds; the engine scales them by the run's effort tier (threshold × the tier's factor), so higher-effort runs are checked less often. handlerRole is the guild role the engine invokes on a cadence trigger; planOwnerRole names the role that receives plan modifications (the active chain's rootmost instance of it), falling back to the chain root when absent or not in the chain.
 export interface InterruptTriggersConfig {
 	handlerRole: string
 	everyToolCalls: number
@@ -167,8 +167,8 @@ export interface RunMeta {
 	error?: { kind: ErrorKind; message: string }
 }
 
-// Per-run speed-vs-quality setting. The integer is the contract; the executor carries and logs it but makes no decision about what each level means — that mapping is Guild-defined.
-export type EffortLevel = 0 | 1 | 2 | 3 | 4 | 5
+// Per-run speed-vs-quality setting. The three tier names are the contract on every wire (API bodies, settings.json, meta.json, checkpoints, the effort_set event); the executor carries and logs the tier but makes no decision about what each tier means — that mapping is Guild-defined.
+export type EffortLevel = 'quick' | 'standard' | 'thorough'
 
 export interface LogEvent {
 	timestamp: string

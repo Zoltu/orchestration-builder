@@ -99,7 +99,7 @@ The interrupt platform lets the Guild define agents that interrupt running work 
 
 **The safe point.** The engine is synchronous: an interrupt can only be applied by the role currently executing, between turns. At the top of every `executeRoleLoop` iteration — never during an in-flight LLM call — the role drains the interrupt state in a fixed order: marks set by an earlier routing, then the loop-check cadence, then one queued operator request.
 
-**Triggers.** Three sources: (1) every N tool calls, (2) every N generated (completion) tokens — both configured in `executor.interruptTriggers` and scaled by effort (`threshold × (effort + 1)`, so high-effort runs are checked less often), and (3) the operator/API interrupt. A cadence crossing suspends the active role (its registered state stays frozen) and invokes the configured `handlerRole` with a generated task naming the target instance id. The handler investigates with the inspection tools, decides via `trigger_interrupt`, and finishes like any role. The engine then applies the recorded action: `continue` resumes unchanged, `redirect` resumes with the handler's message already injected into the target's history, `abort` finishes the target with a `loop_detected` error card. The handler role is itself exempt from the cadence and never consumes operator requests.
+**Triggers.** Three sources: (1) every N tool calls, (2) every N generated (completion) tokens — both configured in `executor.interruptTriggers` and scaled by the run's effort tier (`threshold ×` the tier's factor: `quick` ×2, `standard` ×4, `thorough` ×6, so higher-effort runs are checked less often), and (3) the operator/API interrupt. A cadence crossing suspends the active role (its registered state stays frozen) and invokes the configured `handlerRole` with a generated task naming the target instance id. The handler investigates with the inspection tools, decides via `trigger_interrupt`, and finishes like any role. The engine then applies the recorded action: `continue` resumes unchanged, `redirect` resumes with the handler's message already injected into the target's history, `abort` finishes the target with a `loop_detected` error card. The handler role is itself exempt from the cadence and never consumes operator requests.
 
 **Operator interrupts.** `POST /api/runs/:id/interrupt` queues a request (the public kinds are `inquiry` and `plan_modification`; a third kind, `notice`, is internal-only — see "Graceful shutdown"). `kind: "inquiry"` is answered by a fresh agent rather than injected into a working role: at the next safe point the active role suspends and the configured `executor.inquiryHandlerRole` (the seed Guild's `inquiry_responder`) runs as a fresh instance against the frozen registry state — the same preempt-and-resume interlude as the loop-check and context handlers, logged with the same `interrupt`/`interrupt_resolved` pair (trigger `inquiry`). The handler's task briefing carries the operator's verbatim question, a root-first map of the live role instances (ids, names, depths, parents), and the workspace-relative path of the run's `log.jsonl` for researching roles that already finished; its toolbox is read-only (the inspection tools, cross-role `context_info`, and read-only filesystem tools). The handler answers by calling `finish` — the card's summary IS the answer shown to the operator — and the suspended role resumes whatever the handler did: a run is never killed over a question, and with no handler configured the inquiry is dropped and logged (`inquiry_dropped`). In the interaction model the interlude pushes a new call stack rooted at a fresh human-asker participant (the person asking is that stack's caller), so the views draw it as its own preempting stack like any interrupt, with `observe` lines crossing into the paused stack when the handler inspects a suspended role. The run view pairs each inquiry's `interrupt` with its `interrupt_resolved`: an `answered` resolution's summary is the answer; anything else ends the inquiry unanswered. `kind: "plan_modification"` marks every live chain member below the plan owner (the rootmost chain instance of `executor.interruptTriggers.planOwnerRole`, else the chain root) to abort with an `interrupted` error card, and the owner to receive the modification as a marked user message (`[Operator plan modification …]`). The abort then unwinds one safe point at a time through the existing `agent`-call result-card propagation — no separate control-flow mechanism — and the plan owner resumes and re-plans. The internal `notice` kind keeps the inject-into-chain-root path: a marked user message (`[Operator notice …]`) lands in the **chain root's** (the entry role's) history as a directive to act on, not a question to answer.
 
@@ -124,7 +124,7 @@ The executor keeps every role's conversation and budget state in memory, so a se
 `log.jsonl` is append-only and carries one JSON object per line. Each event has `timestamp`, `type`, and a `payload` whose shape depends on the type. The role-tree and per-turn detail events are:
 
 - `role_start` — `{ role, roleId, depth, task, parent? }`. Emitted when a role begins, after its definition is confirmed to exist and the instance is registered. `roleId` is the role-instance id (see "Interrupt platform"); `parent` is the calling role's name, omitted for the entry role at depth 0. A refused `agent` call (depth exceeded or unknown child) emits no `role_start` for the never-run child.
-- `effort_set` — `{ effort }`. Emitted once at run start, before the entry role begins, recording the run's chosen effort level (see "Effort channel").
+- `effort_set` — `{ effort }`. Emitted once at run start, before the entry role begins, recording the run's chosen effort tier (`quick`, `standard`, or `thorough`; see "Effort channel").
 - `role_finished` — `{ role, roleId, depth, status, summary?, error?, parent? }`. Emitted when a role returns a final card. `status` is the `ResultCard` status; `summary` is the role's own explanation of its result (so a reviewer reading only the log can see why a role errored, rather than only that it did); `error` is the structured `{ kind, message?, details? }` when the card carried one; `parent` is omitted for the entry role. Every `role_start` is paired with exactly one `role_finished`.
 - `agent_call` — `{ parent, child, depth }`. Emitted when the `agent` tool is invoked, before the child runs, carrying the parent→child edge even for callers that do not read `role_start`.
 - `llm_call_start` — `{ role }`. Emitted immediately before the LLM request is dispatched, on every turn (including the paths that later fail: `llm_unavailable` and `context_budget_exceeded`). It marks the turn in flight the moment the request is sent, so the flow view can end the call's transit phase (flowing edge → solid) when the callee begins working rather than when the response completes. Only the role is carried; the full turn (message list, response, usage) lands in the succeeding `llm_call`.
@@ -270,7 +270,7 @@ The optional `visualization` section carries display-only localization the web c
 
 Safety budgets enforced by the executor. `maxAgentDepth` guards unbounded agent recursion; `defaultToolTimeoutSeconds` aborts a hung tool subprocess; `maxCompactionAttempts` terminates a `context_manager` that is not reducing tokens. `contextPressureThreshold` (optional, default `0.8`) is the fraction of the effective context budget at which the one-shot pressure response fires (see "Context pressure and handoff"). `contextHandlerRole` (optional) names the guild role the engine invokes to compact a suspended role's conversation — at depth 0 when the entry role crosses the pressure threshold, and at any depth when a request is rejected for context size; when unset, depth-0 pressure falls back to the handoff notice and rejections fall back to the naive in-place backstop. `inquiryHandlerRole` (optional) names the guild role the engine invokes to answer an operator inquiry (see "Interrupt platform"); when unset, the inquiry is dropped and logged (`inquiry_dropped`) and the run continues. The executor no longer enforces a wall-clock run timeout or per-role tool-call/token caps — run termination is the deployment container's job (see "Run termination" above and [`docs/architecture.md`](architecture.md) "Run termination").
 
-`interruptTriggers` (optional) configures the interrupt platform's loop-check cadence (see "Interrupt platform"): `handlerRole` is the guild role invoked on a trigger (must exist in `roles`); `everyToolCalls`/`everyTokens` are the base thresholds, scaled by effort (`threshold × (effort + 1)`); `planOwnerRole` (optional) names the role that receives plan modifications — the rootmost live chain instance of it, falling back to the chain root when unset or absent from the chain. When the section is absent, cadence checks never fire; operator interrupts work regardless.
+`interruptTriggers` (optional) configures the interrupt platform's loop-check cadence (see "Interrupt platform"): `handlerRole` is the guild role invoked on a trigger (must exist in `roles`); `everyToolCalls`/`everyTokens` are the base thresholds, scaled by the effort tier's factor (`quick` ×2, `standard` ×4, `thorough` ×6); `planOwnerRole` (optional) names the role that receives plan modifications — the rootmost live chain instance of it, falling back to the chain root when unset or absent from the chain. When the section is absent, cadence checks never fire; operator interrupts work regardless.
 
 ### `contextPolicy`
 
@@ -323,15 +323,15 @@ The web UI is the primary interface. The HTTP API exists for programmatic access
 
 ### `POST /api/runs`
 
-Starts a run. **Body:** `{ "task": "...", "effort"?: 0|1|2|3|4|5 }`. `effort` is optional; when omitted the project default (see `GET|PUT /api/settings`) is applied, falling back to `3` when no default is set. An out-of-range or non-integer `effort` returns `400 invalid_body`. **201:** `{ "runId": "..." }`. **409:** `{ "ok": false, "error": "run_in_progress" }`.
+Starts a run. **Body:** `{ "task": "...", "effort"?: "quick"|"standard"|"thorough" }`. `effort` is optional; when omitted the project default (see `GET|PUT /api/settings`) is applied, falling back to `"standard"` when no default is set. Anything but the three tier strings returns `400 invalid_body`. **201:** `{ "runId": "..." }`. **409:** `{ "ok": false, "error": "run_in_progress" }`.
 
 ### `GET /api/settings`
 
-Returns the project-wide settings. **200:** `{ "effort": 0|1|2|3|4|5 | null }`. `effort` is `null` when no default has been set.
+Returns the project-wide settings. **200:** `{ "effort": "quick"|"standard"|"thorough" | null }`. `effort` is `null` when no default has been set.
 
 ### `PUT /api/settings`
 
-Updates the project-wide settings. **Body:** `{ "effort": 0|1|2|3|4|5 }` (required). The file is written atomically (write-temp + rename). **200:** `{ "effort": ... }`. **400:** `{ "ok": false, "error": "invalid_body" }` for a missing or invalid `effort`.
+Updates the project-wide settings. **Body:** `{ "effort": "quick"|"standard"|"thorough" }` (required, strict). The file is written atomically (write-temp + rename). **200:** `{ "effort": ... }`. **400:** `{ "ok": false, "error": "invalid_body" }` for a missing or invalid `effort`.
 
 ### `GET /api/runs`
 
@@ -432,7 +432,7 @@ The workspace itself holds the final filesystem state (mutated in place). `log.j
 
 ## Effort channel
 
-The effort channel is a per-run, project-wide speed-vs-quality setting: an integer `0`–`5` where `0` is fastest and `5` is highest quality. The executor provides the **channel only** — it accepts, persists, logs, and injects the value; it makes no decision about what each level *means*. The mapping from effort to concrete behavior (generation overrides, review-loop round caps, retry thresholds) lives entirely in the Guild prompts and is tunable by the Foundry, so hardcoding it in the executor would conflict with the Foundry's job.
+The effort channel is a per-run, project-wide speed-vs-quality setting with three named tiers: `quick` (fastest and most direct), `standard`, and `thorough` (slowest and most careful). The three lowercase strings are the wire format everywhere: the HTTP API, `settings.json`, `meta.json`, checkpoints, and the `effort_set` log event all carry them verbatim. The executor provides the **channel only** — it accepts, persists, logs, and injects the tier; it makes no decision about what each tier *means*. The mapping from effort to concrete behavior (generation overrides, review-loop round caps, retry thresholds) lives entirely in the Guild prompts and is tunable by the Foundry, so hardcoding it in the executor would conflict with the Foundry's job.
 
 ### Resolution
 
@@ -440,19 +440,19 @@ Effort is resolved once at run submission and is not adjustable mid-run (a secon
 
 1. A per-run `effort` in `POST /api/runs` wins.
 2. Otherwise the project default from `.orchestration/settings.json` (set via `PUT /api/settings`) is used.
-3. Otherwise the default `3` is applied.
+3. Otherwise the default `"standard"` is applied.
 
 ### Injection
 
 The entry role (and only the entry role) receives the effort as a system message inserted between its system prompt and the task, so prompts can branch on it. Child roles do **not** receive a global effort directive — the parent decides how to translate effort into delegation instructions. The directive string is a stable contract the Guild prompts depend on:
 
 ```
-Quality level: <N> of 5 (higher = more careful, slower, more thorough; lower = faster, more direct).
+Quality level: <tier> (one of quick, standard, thorough — quick is fastest and most direct; thorough is slowest and most careful).
 ```
 
 ### Surfaces
 
-- `RunMeta.effort` and `GET /api/runs/:id` carry the run's effort.
-- An `effort_set` event `{ effort }` is logged once at run start.
+- `RunMeta.effort` and `GET /api/runs/:id` carry the run's effort tier.
+- An `effort_set` event `{ effort }` is logged once at run start, with the tier string as the payload value.
 - `GET|PUT /api/settings` read/write `.orchestration/settings.json` atomically; a malformed file is treated as absent (a torn read mid-write must not crash submission).
 - The Foundry sets effort per benchmark and ignores the project setting, so benchmark runs are comparable.

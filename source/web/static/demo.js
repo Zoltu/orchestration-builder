@@ -68,7 +68,7 @@ const nowCaption = document.createElement('p')
 nowCaption.className = 'pb-now-caption'
 flowContainer.append(nowCaption)
 
-// The ambient cost strip lives in the harness chrome (not the flow area) so it stays visible as a quiet border read while the centerpiece changes. It carries elapsed and tokens aggregated off OperationMetrics, formatted as textContent. Effort is not carried by InteractionModel (it is a run-level slider value, not per-operation data), so the ported strip reads elapsed and tokens only.
+// The ambient cost strip lives in the harness chrome (not the flow area) so it stays visible as a quiet border read while the centerpiece changes. It carries elapsed and tokens aggregated off OperationMetrics, formatted as textContent. Effort is not carried by InteractionModel (it is a run-level setting, not per-operation data), so the ported strip reads elapsed and tokens only.
 const costStrip = document.createElement('div')
 costStrip.className = 'pb-cost-strip'
 const costElapsed = document.createElement('span')

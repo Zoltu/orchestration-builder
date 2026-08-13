@@ -615,7 +615,9 @@ async function drainInterrupts(
 
 	const triggers = config.interruptTriggers
 	if (triggers !== undefined && context.roleName !== triggers.handlerRole) {
-		const scale = (context.effort ?? 0) + 1
+		// The per-tier cadence scale is a tuning table preserving the old threshold × (effort + 1) spread of 2×–6×; a context without effort (a pre-effort checkpoint's frames) gets the most frequent checking.
+		const scaleByEffort: Record<EffortLevel, number> = { quick: 2, standard: 4, thorough: 6 }
+		const scale = scaleByEffort[context.effort ?? 'quick']
 		const toolCallThreshold = triggers.everyToolCalls * scale
 		const tokenThreshold = triggers.everyTokens * scale
 		const fireOnToolCalls = roleState.toolCallCount >= roleState.loopCheckToolCallWatermark + toolCallThreshold

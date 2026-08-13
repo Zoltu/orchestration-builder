@@ -1014,7 +1014,8 @@ function buildInterruptGuild(roles: Record<string, RoleDefinition>, entryRole: s
 			...baseExecutor,
 			interruptTriggers: {
 				handlerRole: 'loop_detector',
-				everyToolCalls: triggers.everyToolCalls ?? 2,
+				// Base 1 with no effort on the test contexts (the engine's effort-less fallback scales by the quick tier's 2×): the effective cadence is two tool calls, so the fixtures below stay sequenced around a trigger at the third turn top.
+				everyToolCalls: triggers.everyToolCalls ?? 1,
 				everyTokens: triggers.everyTokens ?? 1_000_000,
 				...(triggers.planOwnerRole !== undefined ? { planOwnerRole: triggers.planOwnerRole } : {}),
 			},
@@ -1406,7 +1407,7 @@ describe('runRole — interrupt platform', () => {
 	test('the handler role itself is never interrupted by the cadence trigger', async () => {
 		const guild = buildInterruptGuild(mainAndDetector, 'main')
 		const llm = new FakeLlm()
-		// everyToolCalls is 2: the detector's own two inspect calls would retrigger if it were not exempt.
+		// The effective cadence is two tool calls: the detector's own inspect calls would retrigger if it were not exempt.
 		llm.responses = [
 			success([namedCall('c1', 'echo', { x: 1 })]),
 			success([namedCall('c2', 'echo', { x: 1 })]),
@@ -1894,15 +1895,15 @@ describe('runRole effort directive injection', () => {
 			depth: 0,
 			roleName: 'main',
 			task: 'do it',
-			effort: 2,
+			effort: 'standard',
 		})
 
 		expect(llm.calls.length).toBe(1)
 		const messages = llm.calls[0]!.messages
 		// The directive is merged into the single system message, not emitted as a second one — many chat templates reject a system message that is not the first message.
 		expect(messages).toHaveLength(2)
-		expect(messages[0]).toEqual({ role: 'system', content: `prompt for main\n\n${effortDirective(2)}` })
-		expect(messages[0]!.content).toContain('Quality level: 2 of 5')
+		expect(messages[0]).toEqual({ role: 'system', content: `prompt for main\n\n${effortDirective('standard')}` })
+		expect(messages[0]!.content).toContain('Quality level: standard')
 		expect(messages[1]).toEqual({ role: 'user', content: 'do it' })
 	})
 
@@ -1949,7 +1950,7 @@ describe('runRole effort directive injection', () => {
 			depth: 0,
 			roleName: 'parent',
 			task: 'delegate',
-			effort: 5,
+			effort: 'thorough',
 		})
 
 		// calls[0] = parent (entry, has directive); calls[1] = child (depth 1, no directive); calls[2] = parent follow-up.

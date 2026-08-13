@@ -30,7 +30,7 @@ export type { InterruptChannel, InterruptQueue, InterruptRequest, InterruptSubmi
 export { createRunSubmission } from './run-submission.js'
 export type { ResumeRun, RunSubmission, RunSubmissionDependencies, StartRun, SubmitResult } from './run-submission.js'
 
-export { EFFORT_MIN, EFFORT_MAX, DEFAULT_EFFORT, effortDirective } from './effort.js'
+export { DEFAULT_EFFORT, effortDirective } from './effort.js'
 
 export { isEffortLevel, isProjectSettings } from './validation.js'
 

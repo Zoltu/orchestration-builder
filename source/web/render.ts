@@ -134,7 +134,7 @@ export function formatLogEvent(event: LogEvent): string {
 		case 'role_start':
 			return withRole(role, 'role start')
 		case 'effort_set': {
-			const effort = numberField(payload, 'effort')
+			const effort = stringField(payload, 'effort')
 			return effort === null ? 'effort set' : `effort set (${effort})`
 		}
 		case 'agent_call': {

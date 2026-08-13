@@ -23,13 +23,26 @@ const STATUS_LABELS = {
 }
 const SERVER_UNAVAILABLE_MESSAGE = 'server unavailable — it may have shut down'
 
-// The effort channel's six stops, quality-graded. The integer is the contract (see docs/reference.md "Effort channel"); these labels are a UI concern only and the executor never reads them.
-const EFFORT_LABELS = ['fastest', 'quick', 'moderate', 'standard', 'thorough', 'highest quality']
-const DEFAULT_EFFORT = 3
+// The effort channel's three levels. The wire strings are the contract (see docs/reference.md "Effort channel"): state, API bodies, and run metadata carry them verbatim, so there is no mapping table — display capitalization is a UI concern only and the executor never reads it. The per-option descriptions are the single copy of what each level means; the compose screen's selector (EffortLevelSelector) and the history badge's hover title both render from this list.
+const DEFAULT_EFFORT = 'standard'
+const EFFORT_OPTIONS = [
+	{ value: 'quick', description: 'The fastest, lightest pass. Good for small fixes and simple tasks.' },
+	{ value: 'standard', description: 'Careful work at a reasonable pace. The right choice for most tasks.', recommended: true },
+	{ value: 'thorough', description: 'The slowest, most meticulous pass. Best for large or important projects.' },
+]
+
+function isEffort(value) {
+	return EFFORT_OPTIONS.some((option) => option.value === value)
+}
 
 function effortLabel(effort) {
-	if (typeof effort !== 'number' || !Number.isInteger(effort) || effort < 0 || effort > 5) return '—'
-	return EFFORT_LABELS[effort] ?? '—'
+	if (!isEffort(effort)) return '—'
+	return effort.charAt(0).toUpperCase() + effort.slice(1)
+}
+
+function effortDescription(effort) {
+	const option = EFFORT_OPTIONS.find((entry) => entry.value === effort)
+	return option !== undefined ? option.description : ''
 }
 
 // The label tier the flow/sequence views localize through. 'detailed' is the default so a fresh load reads precisely; the toggle in the run-view controls swaps it for a non-technical voice. The values come from labels.js (TIER_VALUES), so a swap re-renders the views through the same resolver without touching the model.
@@ -358,32 +371,25 @@ function GotConfig(state, payload) {
 	}
 }
 
-// The saved effort position is fetched once on load so the slider starts where the operator last left it; later settings fetches (none today) would not override a position the operator has since moved.
+// The saved effort level is fetched once on load so the selector starts where the operator last left it; later settings fetches (none today) would not override a level the operator has since picked.
 function GotSettings(state, payload) {
 	const ok = payload.ok
 	const body = payload.body
 	if (state.runEffort !== null) return { ...state, serverAvailable: ok }
-	const effort = ok && body !== null && typeof body === 'object' && typeof body.effort === 'number' ? body.effort : null
+	const effort = ok && body !== null && typeof body === 'object' && isEffort(body.effort) ? body.effort : null
 	return { ...state, runEffort: effort !== null ? effort : DEFAULT_EFFORT, serverAvailable: ok }
 }
 
 function SettingsFetchFailed(state) {
-	// The slider still needs a concrete value to render, so fall back to the default rather than sitting at null forever.
+	// The selector still needs a concrete value to render, so fall back to the default rather than sitting at null forever.
 	if (state.runEffort !== null) return { ...state, serverAvailable: false }
 	return { ...state, runEffort: DEFAULT_EFFORT, serverAvailable: false }
 }
 
-// oninput updates the readout live as the slider is dragged; the state change is pure and fires no request.
-function ChangeRunEffort(state, event) {
-	const value = Number(event.target.value)
-	if (!Number.isInteger(value) || value < 0 || value > 5) return state
-	return { ...state, runEffort: value }
-}
-
-// onchange fires once on slider release and persists the chosen position as the default for the next run, so the slider stays where the operator last left it across page reloads and restarts. One PUT per adjustment, not a stream of in-flight requests.
+// A radio pick is one deliberate gesture (unlike a slider drag), so a single change handler both updates state and persists the level as the default for the next run — the selector stays where the operator last left it across page reloads and restarts, with one PUT per pick.
 function SaveRunEffort(state, event) {
-	const value = Number(event.target.value)
-	if (!Number.isInteger(value) || value < 0 || value > 5) return state
+	const value = event.target.value
+	if (!isEffort(value)) return state
 	return [
 		{ ...state, runEffort: value, savingEffort: true },
 		Fetch({
@@ -398,7 +404,7 @@ function SaveRunEffort(state, event) {
 function EffortSaved(state, payload) {
 	const ok = payload.ok
 	const body = payload.body
-	if (!ok || body === null || typeof body !== 'object' || typeof body.effort !== 'number') {
+	if (!ok || body === null || typeof body !== 'object' || !isEffort(body.effort)) {
 		return { ...state, savingEffort: false, serverAvailable: true }
 	}
 	return { ...state, savingEffort: false, runEffort: body.effort, serverAvailable: true }
@@ -473,11 +479,9 @@ function SubmitRun(state, event) {
 	]
 }
 
-// effort is omitted when the slider has not yet initialized (settings still loading), so the server applies the project default rather than receiving a null.
+// effort is omitted when the selector has not yet initialized (settings still loading), so the server applies the project default rather than receiving a null.
 function buildRunBody(task, runEffort) {
-	if (typeof runEffort === 'number' && Number.isInteger(runEffort) && runEffort >= 0 && runEffort <= 5) {
-		return { task, effort: runEffort }
-	}
+	if (isEffort(runEffort)) return { task, effort: runEffort }
 	return { task }
 }
 
@@ -774,7 +778,7 @@ function ViewedRunLabel(state) {
 	const summary = state.summaries.find((entry) => entry.runId === state.selectedRunId)
 	if (summary === undefined) return null
 	const metaParts = [summary.runId]
-	if (typeof summary.effort === 'number') metaParts.push(`effort ${summary.effort} — ${effortLabel(summary.effort)}`)
+	if (isEffort(summary.effort)) metaParts.push(`effort ${effortLabel(summary.effort)}`)
 	metaParts.push(`started ${formatRelative(summary.startTime, state.now)}`)
 	return h('span', { class: 'topbar-run' }, [
 		h('span', { class: 'topbar-run-primary' }, runPrimaryLabel(summary)),
@@ -807,8 +811,8 @@ function HistoryRow(state, summary, rerunDisabled) {
 		h('div', { class: 'history-row-main', onclick: [SelectRun, summary.runId], title: 'Watch this run' }, [
 			h('span', { class: `run-status run-status-${summary.status ?? 'unknown'}` }, statusLabel(summary.status)),
 			h('span', { class: 'history-primary' }, runPrimaryLabel(summary)),
-			summary.effort !== null && summary.effort !== undefined
-				? h('span', { class: 'run-effort-badge', title: `effort ${summary.effort} — ${effortLabel(summary.effort)}` }, `effort ${summary.effort}`)
+			isEffort(summary.effort)
+				? h('span', { class: 'run-effort-badge', title: effortDescription(summary.effort) }, `effort ${effortLabel(summary.effort)}`)
 				: null,
 			h('time', { class: 'history-when', title: summary.startTime ?? '' }, formatRelative(summary.startTime, state.now)),
 			// The re-run button shares the create form's disabled condition (a run is active or a submission is in flight) so the one-task-at-a-time contract holds identically for re-runs.
@@ -822,7 +826,7 @@ function HistoryRow(state, summary, rerunDisabled) {
 // The expanded details are where large prompts and results get their room: the exact run meta, the full task, and the terminal result or error, all rendered at full length inside the scrollable history view.
 function HistoryRowDetails(summary) {
 	const metaParts = [summary.runId]
-	if (typeof summary.effort === 'number') metaParts.push(`effort ${summary.effort} — ${effortLabel(summary.effort)}`)
+	if (isEffort(summary.effort)) metaParts.push(`effort ${effortLabel(summary.effort)}`)
 	if (typeof summary.startTime === 'string') metaParts.push(`started ${summary.startTime}`)
 	if (typeof summary.endTime === 'string') metaParts.push(`ended ${summary.endTime}`)
 	const children = [h('p', { class: 'history-details-meta' }, metaParts.join(' · '))]
@@ -854,23 +858,37 @@ function HistoryScreen(state) {
 	])
 }
 
+// The effort selector is one radio group (shared `name`, real inputs) so arrow keys and screen readers work natively, with each whole card clickable via its wrapping label. The option values are the wire strings verbatim — picking a card fires SaveRunEffort, so the choice applies to the next run and persists as the project default at once. The names, descriptions, and recommended badge all render from EFFORT_OPTIONS, the single home of the per-level copy.
+function EffortLevelSelector(value, disabled, saving) {
+	return h('fieldset', { class: 'effort-control', disabled }, [
+		h('legend', { class: 'effort-label' }, 'Effort level'),
+		h('div', { class: 'effort-options' }, EFFORT_OPTIONS.map((option) =>
+			h('label', { class: { 'effort-option': true, 'is-selected': option.value === value } }, [
+				h('input', { type: 'radio', name: 'run-effort', value: option.value, checked: option.value === value, onchange: SaveRunEffort }),
+				h('span', { class: 'effort-option-name' }, [
+					effortLabel(option.value),
+					option.recommended === true ? h('span', { class: 'effort-recommended' }, 'Recommended') : null,
+				]),
+				h('span', { class: 'effort-option-description' }, option.description),
+			]),
+		)),
+		h('p', { class: 'effort-tip' }, 'Not sure? Leave it on Standard — it fits most tasks. You can always run the task again with a different level.'),
+		saving ? h('p', { class: 'effort-note' }, 'saving…') : null,
+	])
+}
+
 // The compose screen is the hero when the service is idle — drafting a task is the primary activity when nothing is running, so the editor gets the whole stage. The submit path and the one-task-at-a-time busy contract are unchanged.
 function ComposeScreen(state) {
 	const disabled = state.justSubmittedRunId !== null || deriveActiveRunId(state.summaries) !== null
-	const runEffort = typeof state.runEffort === 'number' ? state.runEffort : DEFAULT_EFFORT
+	const runEffort = isEffort(state.runEffort) ? state.runEffort : DEFAULT_EFFORT
 	return h('section', { id: 'compose-screen' }, [
 		h('div', { class: 'compose-hero' }, [
 			h('h1', { class: 'compose-heading' }, state.summaries.length === 0 ? 'What should the orchestrator do?' : 'New task'),
 			h('p', { class: 'compose-sub' }, 'Describe the task in plain language — Markdown works too. The orchestrator runs one task at a time.'),
 			h('form', { class: { 'create-run-form': true, 'is-busy': disabled }, onsubmit: SubmitRun }, [
 				h('textarea', { name: 'task', placeholder: disabled ? 'a run is already in progress — a new task can start when it finishes' : 'describe a task (Markdown supported) and start a run', autocomplete: 'off', disabled, onkeydown: TaskTextareaKeydown }),
+				EffortLevelSelector(runEffort, disabled, state.savingEffort === true),
 				h('div', { class: 'submit-controls' }, [
-					h('div', { class: 'effort-control run-effort-control' }, [
-						h('label', { class: 'effort-label', for: 'run-effort' }, 'Effort'),
-						h('input', { id: 'run-effort', type: 'range', min: '0', max: '5', step: '1', value: String(runEffort), disabled, oninput: ChangeRunEffort, onchange: SaveRunEffort }),
-						h('span', { class: 'effort-value' }, `${runEffort} — ${effortLabel(runEffort)}`),
-						state.savingEffort === true ? h('span', { class: 'effort-note' }, 'saving…') : null,
-					]),
 					h('button', { type: 'submit', disabled }, disabled ? 'Run in progress…' : 'Start run'),
 				]),
 			]),
@@ -1086,7 +1104,7 @@ function QuestionModalForRun(state) {
 function resultMetaLine(view) {
 	if (typeof view.runId !== 'string' || view.budgets === null || view.budgets === undefined) return null
 	const parts = [view.runId]
-	if (typeof view.effort === 'number') parts.push(`effort ${view.effort} — ${effortLabel(view.effort)}`)
+	if (isEffort(view.effort)) parts.push(`effort ${effortLabel(view.effort)}`)
 	parts.push(formatElapsed(view.budgets.elapsedSeconds))
 	parts.push(`${formatNumber(view.budgets.toolCalls)} tool calls`)
 	const title = `started ${view.startTime ?? '—'} → ended ${view.endTime ?? '—'}`
@@ -1140,7 +1158,7 @@ app({
 			shownQuestionIds: {},
 			firstQuestionsPoll: true,
 			pendingAnswerId: null,
-			// null until the saved effort loads; the slider initializes from the persisted position on first load.
+			// null until the saved effort loads; the selector initializes from the persisted level on first load.
 			runEffort: null,
 			savingEffort: false,
 			// The live InteractionModel the centerpiece renders, plus its previous frame for `deriveLifecycle`'s enter/depart diff. Both null until the first readable flow frame lands.
@@ -1171,7 +1189,7 @@ app({
 		shownInterruptAnswerKeys: {},
 		now: Date.now(),
 	},
-	// The guild config and the saved effort position are each loaded once on load and never polled, so their fetches are init effects rather than subscriptions.
+	// The guild config and the saved effort level are each loaded once on load and never polled, so their fetches are init effects rather than subscriptions.
 	Fetch({ url: 'api/config', ok: GotConfig, fail: FetchFailed }),
 	Fetch({ url: 'api/settings', ok: GotSettings, fail: SettingsFetchFailed }),
 	],

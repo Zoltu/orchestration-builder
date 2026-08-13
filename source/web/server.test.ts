@@ -5,7 +5,7 @@ import { createRunState } from '../executor/run-state.ts'
 import { createRunSubmission, type ResumeRun, type RunSubmission, type StartRun } from '../executor/run-submission.ts'
 import type { RunCheckpoint } from '../executor/checkpoint.ts'
 import type { ProjectSettings, ReadProjectSettings, WriteProjectSettings, RunSnapshotRaw, RunSnapshotStats } from '../executor/persistence.ts'
-import type { GuildConfig, RunMeta } from '../executor/types.js'
+import type { EffortLevel, GuildConfig, RunMeta } from '../executor/types.js'
 import { parseRunSnapshot, type RunSnapshot } from './render.ts'
 import { createRequestHandler, type RequestHandler } from './request-handler.ts'
 import { resolveStaticAsset } from './server.ts'
@@ -236,13 +236,13 @@ snapshots.set('run-effort', {
 		guildPath: 'guild',
 		benchmarkPath: 'bench',
 		task: 'task for run-effort',
-		effort: 4,
+		effort: 'thorough',
 		status: 'success',
 		startTime: '2026-01-01T00:00:00.000Z',
 		endTime: '2026-01-01T00:01:00.000Z',
 	}),
 	logText: [
-		JSON.stringify({ timestamp: '2026-01-01T00:00:00.000Z', type: 'effort_set', payload: { effort: 4 } }),
+		JSON.stringify({ timestamp: '2026-01-01T00:00:00.000Z', type: 'effort_set', payload: { effort: 'thorough' } }),
 		JSON.stringify({ timestamp: '2026-01-01T00:00:01.000Z', type: 'role_finished', payload: { role: 'planner', status: 'success' } }),
 	].join('\n'),
 })
@@ -254,7 +254,7 @@ interface HandlerHarness {
 	interruptChannel: InterruptChannel
 	humanBackend: WebHumanBackend
 	staticCalls: string[]
-	lastEffort: () => number | undefined
+	lastEffort: () => EffortLevel | undefined
 	resolveActive: () => (meta: RunMeta) => void
 	resolveResumed: () => (meta: RunMeta) => void
 	resumedCheckpoints: () => RunCheckpoint[]
@@ -264,7 +264,7 @@ interface HandlerHarness {
 function createHandlerHarness(): HandlerHarness {
 	let resolveActive: (meta: RunMeta) => void = () => {}
 	let resolveResumed: (meta: RunMeta) => void = () => {}
-	let capturedEffort: number | undefined
+	let capturedEffort: EffortLevel | undefined
 	const resumed: RunCheckpoint[] = []
 	const startRun: StartRun = (_runId, _task, effort) => {
 		capturedEffort = effort
@@ -523,7 +523,7 @@ describe('GET /api/runs (list)', () => {
 			runId: 'run-effort',
 			status: 'success',
 			task: 'task for run-effort',
-			effort: 4,
+			effort: 'thorough',
 			startTime: '2026-01-01T00:00:00.000Z',
 			endTime: '2026-01-01T00:01:00.000Z',
 			result: null,
@@ -700,7 +700,7 @@ describe('GET /api/runs/:id', () => {
 		const { handler } = createHandlerHarness()
 		const withEffort = await handler(get('/api/runs/run-effort'))
 		expect(withEffort.status).toBe(200)
-		expect((await withEffort.json()).effort).toBe(4)
+		expect((await withEffort.json()).effort).toBe('thorough')
 
 		const withoutEffort = await handler(get('/api/runs/run-1'))
 		expect(withoutEffort.status).toBe(200)
@@ -973,9 +973,9 @@ describe('POST /api/runs', () => {
 
 	test('threads a valid effort override into the started run', async () => {
 		const { handler, submission, lastEffort, resolveActive } = createHandlerHarness()
-		const response = await handler(post('/api/runs', JSON.stringify({ task: 'careful task', effort: 5 })))
+		const response = await handler(post('/api/runs', JSON.stringify({ task: 'careful task', effort: 'thorough' })))
 		expect(response.status).toBe(201)
-		expect(lastEffort()).toBe(5)
+		expect(lastEffort()).toBe('thorough')
 
 		resolveActive()(terminalMeta('test-run-0', 'careful task'))
 		await submission.awaitActive()
@@ -983,25 +983,25 @@ describe('POST /api/runs', () => {
 
 	test('applies the project default when effort is omitted', async () => {
 		const { handler, submission, settings, lastEffort, resolveActive } = createHandlerHarness()
-		settings.write({ effort: 2 })
+		settings.write({ effort: 'quick' })
 		const response = await handler(post('/api/runs', JSON.stringify({ task: 'defaulted task' })))
 		expect(response.status).toBe(201)
-		expect(lastEffort()).toBe(2)
+		expect(lastEffort()).toBe('quick')
 
 		resolveActive()(terminalMeta('test-run-0', 'defaulted task'))
 		await submission.awaitActive()
 	})
 
-	test('rejects an out-of-range effort with 400 invalid_body', async () => {
+	test('rejects an unknown effort tier with 400 invalid_body', async () => {
 		const { handler } = createHandlerHarness()
-		const response = await handler(post('/api/runs', JSON.stringify({ task: 'x', effort: 6 })))
+		const response = await handler(post('/api/runs', JSON.stringify({ task: 'x', effort: 'copious' })))
 		expect(response.status).toBe(400)
 		expect(await response.json()).toEqual({ ok: false, error: 'invalid_body' })
 	})
 
-	test('rejects a non-integer effort with 400 invalid_body', async () => {
+	test('rejects a numeric effort with 400 invalid_body', async () => {
 		const { handler } = createHandlerHarness()
-		const response = await handler(post('/api/runs', JSON.stringify({ task: 'x', effort: 2.5 })))
+		const response = await handler(post('/api/runs', JSON.stringify({ task: 'x', effort: 2 })))
 		expect(response.status).toBe(400)
 		expect(await response.json()).toEqual({ ok: false, error: 'invalid_body' })
 	})
@@ -1143,21 +1143,21 @@ describe('/api/settings', () => {
 
 	test('GET /api/settings returns the stored default after a write', async () => {
 		const { handler, settings } = createHandlerHarness()
-		settings.write({ effort: 4 })
+		settings.write({ effort: 'thorough' })
 		const response = await handler(get('/api/settings'))
 		expect(response.status).toBe(200)
-		expect(await response.json()).toEqual({ effort: 4 })
+		expect(await response.json()).toEqual({ effort: 'thorough' })
 	})
 
 	test('PUT /api/settings persists the effort and echoes it back', async () => {
 		const { handler, settings } = createHandlerHarness()
-		const response = await handler(put('/api/settings', JSON.stringify({ effort: 3 })))
+		const response = await handler(put('/api/settings', JSON.stringify({ effort: 'standard' })))
 		expect(response.status).toBe(200)
-		expect(await response.json()).toEqual({ effort: 3 })
-		expect(settings.snapshot()).toEqual({ effort: 3 })
+		expect(await response.json()).toEqual({ effort: 'standard' })
+		expect(settings.snapshot()).toEqual({ effort: 'standard' })
 
 		const getResponse = await handler(get('/api/settings'))
-		expect(await getResponse.json()).toEqual({ effort: 3 })
+		expect(await getResponse.json()).toEqual({ effort: 'standard' })
 	})
 
 	test('PUT /api/settings rejects a missing effort with 400 invalid_body', async () => {
@@ -1168,9 +1168,9 @@ describe('/api/settings', () => {
 		expect(settings.snapshot()).toEqual({})
 	})
 
-	test('PUT /api/settings rejects an out-of-range effort with 400 invalid_body', async () => {
+	test('PUT /api/settings rejects a numeric effort with 400 invalid_body', async () => {
 		const { handler, settings } = createHandlerHarness()
-		const response = await handler(put('/api/settings', JSON.stringify({ effort: 7 })))
+		const response = await handler(put('/api/settings', JSON.stringify({ effort: 3 })))
 		expect(response.status).toBe(400)
 		expect(await response.json()).toEqual({ ok: false, error: 'invalid_body' })
 		expect(settings.snapshot()).toEqual({})
