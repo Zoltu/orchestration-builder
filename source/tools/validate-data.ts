@@ -10,7 +10,7 @@ import { createGuildLoader, type LoadedGuild } from '../executor/loader.js'
 import { createRoleRegistry } from '../executor/role-registry.js'
 import { createToolHandlers } from '../executor/tools.js'
 import type { HumanFacingText, ToolManifest } from '../executor/types.js'
-import { validateToolManifest } from '../executor/validation.js'
+import { isNonEmptyStringArray, validateToolManifest } from '../executor/validation.js'
 
 const repoRoot = path.resolve(import.meta.dir, '..', '..')
 const guildDir = path.join(repoRoot, 'guild')
@@ -25,10 +25,6 @@ function check(condition: boolean, message: string): void {
 
 function errorMessage(error: unknown): string {
 	return error instanceof Error ? error.message : String(error)
-}
-
-function isNonEmptyStringArray(value: unknown): value is string[] {
-	return Array.isArray(value) && value.length > 0 && value.every((entry) => typeof entry === 'string')
 }
 
 function checkSameSet(label: string, actual: ReadonlySet<string>, expected: ReadonlySet<string>): void {

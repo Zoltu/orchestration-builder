@@ -1,3 +1,4 @@
+// Benchmark eval-config validation, shared by the benchmark harness and the Foundry.
 
 import { ValidationError } from '../executor/errors.js'
 import { isObject } from '../executor/validation.js'

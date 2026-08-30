@@ -46,7 +46,7 @@ function terminalMeta(options: RunOptions, startTime: string, result: ResultCard
 	return {
 		runId: options.runId,
 		guildPath: options.guildPath,
-		benchmarkPath: options.benchmarkPath,
+		...(options.benchmarkPath !== undefined ? { benchmarkPath: options.benchmarkPath } : {}),
 		task: options.task,
 		effort: options.effort,
 		status: result.status,
@@ -68,7 +68,7 @@ export async function runExecutor(deps: ExecutorDependencies, options: RunOption
 	deps.writeMeta({
 		runId: options.runId,
 		guildPath: options.guildPath,
-		benchmarkPath: options.benchmarkPath,
+		...(options.benchmarkPath !== undefined ? { benchmarkPath: options.benchmarkPath } : {}),
 		task: options.task,
 		effort: options.effort,
 		status: 'running',
@@ -97,7 +97,7 @@ export async function runExecutor(deps: ExecutorDependencies, options: RunOption
 
 export interface ResumeRunOptions {
 	guildPath: string
-	benchmarkPath: string
+	benchmarkPath?: string
 	// Same workspace-relative log path as the original run's RunOptions carried: it is not checkpointed, so the resume re-supplies it for the reconstructed contexts.
 	runLogPath: string
 }
@@ -111,7 +111,7 @@ export async function resumeExecutor(deps: ExecutorDependencies, checkpoint: Run
 	const runOptions: RunOptions = {
 		runId: checkpoint.runId,
 		guildPath: options.guildPath,
-		benchmarkPath: options.benchmarkPath,
+		...(options.benchmarkPath !== undefined ? { benchmarkPath: options.benchmarkPath } : {}),
 		task,
 		effort,
 		runLogPath: options.runLogPath,
@@ -128,7 +128,7 @@ export async function resumeExecutor(deps: ExecutorDependencies, checkpoint: Run
 	deps.writeMeta({
 		runId: checkpoint.runId,
 		guildPath: options.guildPath,
-		benchmarkPath: options.benchmarkPath,
+		...(options.benchmarkPath !== undefined ? { benchmarkPath: options.benchmarkPath } : {}),
 		task,
 		effort,
 		status: 'running',

@@ -145,7 +145,7 @@ export interface ResultCard {
 export interface RunOptions {
 	runId: string
 	guildPath: string
-	benchmarkPath: string
+	benchmarkPath?: string
 	task: string
 	effort: EffortLevel
 	// The run's log.jsonl as a workspace-relative path, interpolated into the inquiry handler's briefing so finished roles remain researchable from the log and the workspace.
@@ -155,7 +155,7 @@ export interface RunOptions {
 export interface RunMeta {
 	runId: string
 	guildPath: string
-	benchmarkPath: string
+	benchmarkPath?: string
 	task: string
 	// Absent on runs written before the effort channel existed; present on every run started since. Optional so a torn or legacy meta read still parses.
 	effort?: EffortLevel

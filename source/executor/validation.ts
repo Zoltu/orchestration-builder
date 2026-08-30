@@ -23,12 +23,20 @@ export function isObject(value: unknown): value is Record<string, unknown> {
 	return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
-function isString(value: unknown): value is string {
+export function isString(value: unknown): value is string {
 	return typeof value === 'string'
 }
 
 function isNumber(value: unknown): value is number {
 	return typeof value === 'number' && Number.isFinite(value)
+}
+
+export function isNonNegativeNumber(value: unknown): value is number {
+	return typeof value === 'number' && Number.isFinite(value) && value >= 0
+}
+
+export function isNonNegativeInteger(value: unknown): value is number {
+	return isNonNegativeNumber(value) && Number.isInteger(value)
 }
 
 function isBoolean(value: unknown): value is boolean {
@@ -51,7 +59,7 @@ function isStringArray(value: unknown): value is string[] {
 	return Array.isArray(value) && value.every(isString)
 }
 
-function isNonEmptyStringArray(value: unknown): value is string[] {
+export function isNonEmptyStringArray(value: unknown): value is string[] {
 	return Array.isArray(value) && value.length > 0 && value.every(isString)
 }
 
@@ -128,7 +136,7 @@ export function isRunMeta(value: unknown): value is RunMeta {
 	if (!isObject(value)) return false
 	if (!isString(value.runId)) return false
 	if (!isString(value.guildPath)) return false
-	if (!isString(value.benchmarkPath)) return false
+	if (!isOptionalString(value.benchmarkPath)) return false
 	if (!isString(value.task)) return false
 	if (value.effort !== undefined && !isEffortLevel(value.effort)) return false
 	if (!isString(value.status) || !runMetaStatuses.some((s) => s === value.status)) return false

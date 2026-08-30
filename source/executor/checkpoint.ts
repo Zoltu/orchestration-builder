@@ -4,7 +4,7 @@ import type { EngineContext, RoleState } from './engine-state.js'
 import type { WriteCheckpoint } from './persistence.js'
 import type { RoleRegistry, RoleRegistryEntry } from './role-registry.js'
 import type { EffortLevel, Message, MessageRole, ResultCard, ToolCall } from './types.js'
-import { isEffortLevel, isObject, isResultCard } from './validation.js'
+import { isEffortLevel, isNonNegativeInteger, isNonNegativeNumber, isObject, isResultCard, isString } from './validation.js'
 
 // The suspension point of a role paused mid-turn inside its `agent` tool dispatch: the turn's full tool-call list and the index of the agent call it is waiting on. Once the child returns, its card is recorded here so a resume delivers the recorded card instead of re-running the child. Tool calls before agentIndex are already recorded in the role's persisted history; calls after it are dispatched on resume.
 export interface PendingAgentSuspension {
@@ -36,18 +36,6 @@ export interface RunCheckpoint {
 	registryCounter: number
 	learnedContextCeiling?: number
 	frames: CheckpointFrame[]
-}
-
-function isString(value: unknown): value is string {
-	return typeof value === 'string'
-}
-
-function isNonNegativeNumber(value: unknown): value is number {
-	return typeof value === 'number' && Number.isFinite(value) && value >= 0
-}
-
-function isNonNegativeInteger(value: unknown): value is number {
-	return isNonNegativeNumber(value) && Number.isInteger(value)
 }
 
 const messageRoles: readonly MessageRole[] = ['system', 'user', 'assistant', 'tool']

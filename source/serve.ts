@@ -103,7 +103,7 @@ function fireAndForgetSummary(promise: Promise<void>, runId: string): void {
 
 // The per-run leaf wrappers the submission calls for each task (a fresh run) and for startup reconciliation (a run resumed from its checkpoint under its original run id). Each also kicks the summary hooks: the task summary at start, and the richer completion summary (task + interrupts + result) when the run settles — the rejection branch is empty because the run promise's failure is owned by runSubmission's fatal-error path, not by the summary chain.
 // The run log path rides in the options workspace-relative: the inquiry handler's briefing interpolates it so finished roles stay researchable from the mounted workspace.
-function createStartRun(config: {
+interface RunServiceConfig {
 	loadedGuild: LoadedGuild
 	llmCaller: LlmCaller
 	humanBackend: WebHumanBackend
@@ -113,13 +113,14 @@ function createStartRun(config: {
 	guildPath: string
 	workspaceRootPath: string
 	runsBaseDir: string
-}): StartRun {
+}
+
+function createStartRun(config: RunServiceConfig): StartRun {
 	return (runId, task, effort) => {
 		const runLogPath = path.relative(config.workspaceRootPath, path.join(config.runsBaseDir, runId, 'log.jsonl'))
 		const runPromise = withRunBindings(config, runId, (dependencies) => runExecutor(dependencies, {
 			runId,
 			guildPath: config.guildPath,
-			benchmarkPath: config.workspaceRootPath,
 			task,
 			effort,
 			runLogPath,
@@ -133,22 +134,11 @@ function createStartRun(config: {
 	}
 }
 
-function createResumeRun(config: {
-	loadedGuild: LoadedGuild
-	llmCaller: LlmCaller
-	humanBackend: WebHumanBackend
-	interruptChannel: InterruptChannel
-	summarizer: TaskSummarizer
-	kagiApiKey: string | undefined
-	guildPath: string
-	workspaceRootPath: string
-	runsBaseDir: string
-}): ResumeRun {
+function createResumeRun(config: RunServiceConfig): ResumeRun {
 	return (checkpoint) => {
 		const runLogPath = path.relative(config.workspaceRootPath, path.join(config.runsBaseDir, checkpoint.runId, 'log.jsonl'))
 		const runPromise = withRunBindings(config, checkpoint.runId, (dependencies) => resumeExecutor(dependencies, checkpoint, {
 			guildPath: config.guildPath,
-			benchmarkPath: config.workspaceRootPath,
 			runLogPath,
 		}))
 		runPromise.then(
