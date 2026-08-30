@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import type { Message } from './types.js'
 import { hashArguments, indexRoleMessages, MAX_SEARCH_MATCHES, MAX_WINDOW_CHARS, readMessageWindow, searchRoleBlocks } from './role-inspection.ts'
+import { defined } from './test-fixtures.ts'
 
 function fixtureHistory(): Message[] {
 	return [
@@ -81,7 +82,7 @@ describe('searchRoleBlocks', () => {
 		expect(result.ok).toBe(true)
 		if (!result.ok) return
 		expect(result.matches.length).toBe(2)
-		const first = result.matches[0]!
+		const first = defined(result.matches[0], 'first match')
 		expect(first.messageIndex).toBe(5)
 		expect(first.field).toBe('content')
 		expect(first.offset).toBe(0)
@@ -106,7 +107,7 @@ describe('searchRoleBlocks', () => {
 		expect(result.ok).toBe(true)
 		if (!result.ok) return
 		expect(result.matches.length).toBe(3)
-		expect(result.matches[0]!.offset).toBe(0)
+		expect(defined(result.matches[0], 'first match').offset).toBe(0)
 	})
 
 	test('an invalid regex returns an error, not a throw', () => {

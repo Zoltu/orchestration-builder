@@ -1,6 +1,8 @@
 import { describe, expect, test } from 'bun:test'
 import { type SubprocessOutcome, type SubprocessRunner } from './subprocess-tool.ts'
 import { createRunShell, type RunShellData } from './run-shell.ts'
+import { toolData } from '../test-fixtures.ts'
+import { isObject } from '../validation.ts'
 
 interface RunnerCall {
 	command: readonly string[]
@@ -29,17 +31,19 @@ function makeRunner(
 
 const WORKSPACE = '/fake/workspace'
 
+function isSubprocessData(value: unknown): value is RunShellData {
+	return isObject(value) && (typeof value['exitCode'] === 'number' || value['exitCode'] === null) && typeof value['stdout'] === 'string' && typeof value['stderr'] === 'string'
+}
+
 describe('createRunShell', () => {
 	test('wraps the command in sh -c and runs it with the workspace as cwd', async () => {
 		const runner = makeRunner({ exitCode: 0, stdout: 'ok\n' })
 		const handler = createRunShell(WORKSPACE, 30, runner)
 		const result = await handler({ command: 'echo ok' })
 		expect(result.kind).toBe('success')
-		if (result.kind === 'success') {
-			const data = result.data as RunShellData
-			expect(data.exitCode).toBe(0)
-			expect(data.stdout).toBe('ok\n')
-		}
+		const data = toolData(result, isSubprocessData)
+		expect(data.exitCode).toBe(0)
+		expect(data.stdout).toBe('ok\n')
 		expect(runner.calls).toHaveLength(1)
 		expect(runner.calls[0]?.command).toEqual(['sh', '-c', 'echo ok'])
 		expect(runner.calls[0]?.cwd).toBe(WORKSPACE)

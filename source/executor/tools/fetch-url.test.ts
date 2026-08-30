@@ -29,6 +29,11 @@ function makeKagiExtract(body: unknown, opts: { error?: Error } = {}): KagiExtra
 	return extract
 }
 
+// Bun's fetch type carries a preconnect member, so a bare call signature only satisfies it once a no-op stub is attached.
+function fakeFetch(call: (input: string | URL | Request, init?: RequestInit) => Promise<Response>): typeof fetch {
+	return Object.assign(call, { preconnect: () => undefined })
+}
+
 describe('createFetchUrl', () => {
 	test('returns the body string when fetcher succeeds', async () => {
 		const fetcher = makeFetcher('hello world')
@@ -290,13 +295,13 @@ describe('createFetchUrl', () => {
 describe('createDefaultFetcher', () => {
 	test('aborts the request when the injected timer fires', async () => {
 		let abortListener: (() => void) | undefined
-		const hangingFetch = ((_url: string, init?: RequestInit) => {
+		const hangingFetch = fakeFetch((_url, init) => {
 			return new Promise<Response>((_resolve, reject) => {
 				const onAbort = () => reject(new Error('aborted'))
 				abortListener = onAbort
 				init?.signal?.addEventListener('abort', onAbort)
 			})
-		}) as typeof fetch
+		})
 		let scheduledCallback: (() => void) | undefined
 		const fakeSetTimeout = (callback: () => void, _ms: number): number => {
 			scheduledCallback = callback
@@ -320,7 +325,7 @@ describe('createDefaultFetcher', () => {
 
 	test('clears the timer when the request completes before the timeout', async () => {
 		const okResponse = new Response('hello', { status: 200 })
-		const fetchImpl = (() => Promise.resolve(okResponse)) as unknown as typeof fetch
+		const fetchImpl = fakeFetch(() => Promise.resolve(okResponse))
 		let cleared = false
 		const fakeClearTimeout = (_id: number): void => {
 			cleared = true
@@ -339,7 +344,7 @@ describe('createDefaultFetcher', () => {
 
 	test('propagates non-OK HTTP responses as errors', async () => {
 		const badResponse = new Response('nope', { status: 500 })
-		const fetchImpl = (() => Promise.resolve(badResponse)) as unknown as typeof fetch
+		const fetchImpl = fakeFetch(() => Promise.resolve(badResponse))
 		const fetcher = createDefaultFetcher({
 			fetchImpl,
 			setTimeoutImpl: (_cb, _ms) => 0,

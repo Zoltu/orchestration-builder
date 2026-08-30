@@ -8,7 +8,7 @@ import { createInterruptQueue } from './interrupts.ts'
 import type { LlmCallResult, LlmCaller } from './llm.ts'
 import type { LoadGuild, LoadedGuild } from './loader.ts'
 import type { AppendLog, DeleteCheckpoint, RunDirectory, WriteCheckpoint, WriteMeta } from './persistence.ts'
-import { stubHumanBackend } from './test-fixtures.ts'
+import { stubHumanBackend, defined } from './test-fixtures.ts'
 
 function success(toolCalls: ToolCall[], opts: { content?: string } = {}): LlmCallResult {
 	return {
@@ -238,10 +238,11 @@ describe('runExecutor', () => {
 		expect(meta.endTime).toBeDefined()
 		// A running meta is written before the entry role runs and overwritten by the terminal meta on completion, so the UI can show task/start time while the run is in progress.
 		expect(persistence.state.metas.length).toBe(2)
-		expect(persistence.state.metas[0]!.status).toBe('running')
-		expect(persistence.state.metas[0]!.runId).toBe('r1')
-		expect(persistence.state.metas[0]!.task).toBe('do it')
-		expect(persistence.state.metas[0]!.endTime).toBeUndefined()
+		const runningMeta = defined(persistence.state.metas[0], 'first written meta')
+		expect(runningMeta.status).toBe('running')
+		expect(runningMeta.runId).toBe('r1')
+		expect(runningMeta.task).toBe('do it')
+		expect(runningMeta.endTime).toBeUndefined()
 	})
 
 	test('error path: entry role returns error → meta.status is error', async () => {
@@ -310,11 +311,12 @@ describe('runExecutor', () => {
 		expect(persistence.state.meta).not.toBeNull()
 		const written = persistence.state.meta
 		expect(written).not.toBeNull()
-		expect(written!.runId).toBe('r3')
-		expect(written!.guildPath).toBe('/guild')
-		expect(written!.status).toBe('success')
-		expect(written!.result).toBeDefined()
-		expect(meta.result).toEqual(written!.result)
+		if (written === null) throw new Error('expected the terminal meta write')
+		expect(written.runId).toBe('r3')
+		expect(written.guildPath).toBe('/guild')
+		expect(written.status).toBe('success')
+		expect(written.result).toBeDefined()
+		expect(meta.result).toEqual(written.result)
 	})
 
 	test('persists every LLM call and tool call via appendLog', async () => {
@@ -353,7 +355,7 @@ describe('runExecutor', () => {
 		expect(eventTypes).toContain('role_finished')
 		const finished = persistence.state.events.find((e) => e.type === 'role_finished')
 		expect(finished).toBeDefined()
-		const finishedPayload = finished!.payload
+		const finishedPayload = defined(finished, 'role_finished event').payload
 		expect(isRecord(finishedPayload)).toBe(true)
 		if (isRecord(finishedPayload)) {
 			expect(finishedPayload['role']).toBe('main')
@@ -388,10 +390,12 @@ describe('runExecutor', () => {
 
 		const effortSetEvents = persistence.state.events.filter((e) => e.type === 'effort_set')
 		expect(effortSetEvents.length).toBe(1)
-		expect(isRecord(effortSetEvents[0]!.payload)).toBe(true)
-		if (isRecord(effortSetEvents[0]!.payload)) expect(effortSetEvents[0]!.payload['effort']).toBe('thorough')
+		const effortEvent = defined(effortSetEvents[0], 'effort_set event')
+		const effortPayload = effortEvent.payload
+		expect(isRecord(effortPayload)).toBe(true)
+		if (isRecord(effortPayload)) expect(effortPayload['effort']).toBe('thorough')
 		// effort_set is the first event, ahead of the entry role's role_start.
-		expect(persistence.state.events[0]!.type).toBe('effort_set')
+		expect(defined(persistence.state.events[0], 'first logged event').type).toBe('effort_set')
 		expect(meta.effort).toBe('thorough')
 		expect(persistence.state.meta?.effort).toBe('thorough')
 	})

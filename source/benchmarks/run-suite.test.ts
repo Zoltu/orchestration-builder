@@ -114,8 +114,10 @@ describe('runSuite', () => {
 		expect(summary.totals).toEqual({ pass: 2, fail: 0, error: 0, total: 2 })
 		expect(summary.results.map((r) => r.status)).toEqual(['pass', 'pass'])
 		expect(state.written).not.toBeNull()
-		expect(state.written!.path).toBe('/out/summary.json')
-		expect(state.written!.summary).toBe(summary)
+		const written = state.written
+		if (written === null) throw new Error('expected the suite summary to be written')
+		expect(written.path).toBe('/out/summary.json')
+		expect(written.summary).toBe(summary)
 	})
 
 	test('marks a validation failure as fail with reasons, without affecting other benchmarks', async () => {

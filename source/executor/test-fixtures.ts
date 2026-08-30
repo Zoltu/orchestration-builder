@@ -3,7 +3,18 @@ import type { ContextPressureTracker } from './context-pressure.js'
 import type { HumanBackend } from './human-backend.js'
 import type { LoadedGuild } from './loader.js'
 import type { RoleRegistry } from './role-registry.js'
-import type { GuildConfig, ToolManifest } from './types.js'
+import type { GuildConfig, ToolManifest, ToolResult } from './types.js'
+
+export function defined<T>(value: T | undefined, label: string): T {
+	if (value === undefined) throw new Error(`${label} is missing`)
+	return value
+}
+
+export function toolData<T>(result: ToolResult, guard: (value: unknown) => value is T): T {
+	if (result.kind !== 'success') throw new Error(`expected a success tool result, got ${result.kind}`)
+	if (!guard(result.data)) throw new Error('tool result data did not match the expected shape')
+	return result.data
+}
 
 export const stubHumanBackend: HumanBackend = {
 	ask: async () => 'use your best judgement',

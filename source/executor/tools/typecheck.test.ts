@@ -1,6 +1,8 @@
 import { describe, expect, test } from 'bun:test'
 import { type SubprocessOutcome, type SubprocessRunner } from './subprocess-tool.ts'
 import { createTypecheck, type TypecheckData } from './typecheck.ts'
+import { toolData } from '../test-fixtures.ts'
+import { isObject } from '../validation.ts'
 
 interface RunnerCall {
 	command: readonly string[]
@@ -29,18 +31,20 @@ function makeRunner(
 
 const WORKSPACE = '/fake/workspace'
 
+function isSubprocessData(value: unknown): value is TypecheckData {
+	return isObject(value) && (typeof value['exitCode'] === 'number' || value['exitCode'] === null) && typeof value['stdout'] === 'string' && typeof value['stderr'] === 'string'
+}
+
 describe('createTypecheck', () => {
 	test('returns success with exit code 0 and captured streams for a clean project', async () => {
 		const runner = makeRunner({ exitCode: 0, stdout: '', stderr: '' })
 		const handler = createTypecheck(WORKSPACE, 30, runner)
 		const result = await handler({})
 		expect(result.kind).toBe('success')
-		if (result.kind === 'success') {
-			const data = result.data as TypecheckData
-			expect(data.exitCode).toBe(0)
-			expect(data.stdout).toBe('')
-			expect(data.stderr).toBe('')
-		}
+		const data = toolData(result, isSubprocessData)
+		expect(data.exitCode).toBe(0)
+		expect(data.stdout).toBe('')
+		expect(data.stderr).toBe('')
 		expect(runner.calls).toHaveLength(1)
 		expect(runner.calls[0]?.command).toEqual(['bun', '--bun', 'tsc', '--noEmit'])
 		expect(runner.calls[0]?.cwd).toBe(WORKSPACE)
@@ -53,11 +57,9 @@ describe('createTypecheck', () => {
 		const handler = createTypecheck(WORKSPACE, 30, runner)
 		const result = await handler({})
 		expect(result.kind).toBe('success')
-		if (result.kind === 'success') {
-			const data = result.data as TypecheckData
-			expect(data.exitCode).toBe(1)
-			expect(data.stdout).toContain('error TS2322')
-		}
+		const data = toolData(result, isSubprocessData)
+		expect(data.exitCode).toBe(1)
+		expect(data.stdout).toContain('error TS2322')
 	})
 
 	test('returns a timeout result when the runner reports a timeout', async () => {
@@ -101,11 +103,9 @@ describe('createTypecheck', () => {
 		const handler = createTypecheck(WORKSPACE, 30, runner)
 		const result = await handler({})
 		expect(result.kind).toBe('success')
-		if (result.kind === 'success') {
-			const data = result.data as TypecheckData
-			expect(data.stdout.length).toBeLessThan(big.length)
-			expect(data.stdout).toContain('[truncated:')
-		}
+		const data = toolData(result, isSubprocessData)
+		expect(data.stdout.length).toBeLessThan(big.length)
+		expect(data.stdout).toContain('[truncated:')
 	})
 
 	test('truncates stderr past the cap with a clear marker', async () => {
@@ -114,11 +114,9 @@ describe('createTypecheck', () => {
 		const handler = createTypecheck(WORKSPACE, 30, runner)
 		const result = await handler({})
 		expect(result.kind).toBe('success')
-		if (result.kind === 'success') {
-			const data = result.data as TypecheckData
-			expect(data.stderr.length).toBeLessThan(big.length)
-			expect(data.stderr).toContain('[truncated:')
-		}
+		const data = toolData(result, isSubprocessData)
+		expect(data.stderr.length).toBeLessThan(big.length)
+		expect(data.stderr).toContain('[truncated:')
 	})
 
 	test('rejects a non-number timeoutSeconds', async () => {

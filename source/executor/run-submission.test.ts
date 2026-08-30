@@ -4,6 +4,7 @@ import type { EffortLevel, RunMeta } from './types.js'
 import type { ReadProjectSettings } from './persistence.ts'
 import { DEFAULT_EFFORT } from './effort.ts'
 import { createRunSubmission, type ResumeRun, type RunSubmission, type StartRun } from './run-submission.ts'
+import { defined } from './test-fixtures.ts'
 
 function sampleMeta(runId: string): RunMeta {
 	return {
@@ -43,13 +44,13 @@ describe('createRunSubmission', () => {
 	})
 
 	test('submit rejects a second task while a run is active', async () => {
-		let resolveFirst: (meta: RunMeta) => void
+		let resolveFirst: (meta: RunMeta) => void = () => {}
 		const startRun: StartRun = () => new Promise<RunMeta>((resolve) => {
 			resolveFirst = resolve
 		})
 		const ids = ['run-1', 'run-2']
 		let next = 0
-		const submission = createRunSubmission({ startRun, resumeRun: unusedResumeRun, generateRunId: () => ids[next++]!, readProjectSettings: emptySettings })
+		const submission = createRunSubmission({ startRun, resumeRun: unusedResumeRun, generateRunId: () => defined(ids[next++], 'run id'), readProjectSettings: emptySettings })
 
 		const first = submission.submit('first')
 		expect(first).toEqual({ ok: true, runId: 'run-1' })
@@ -58,43 +59,43 @@ describe('createRunSubmission', () => {
 		expect(second).toEqual({ ok: false, error: 'run_in_progress' })
 		expect(submission.activeRunId()).toBe('run-1')
 
-		resolveFirst!(sampleMeta('run-1'))
+		resolveFirst(sampleMeta('run-1'))
 		await submission.awaitActive()
 	})
 
 	test('activeRunId clears when the run completes, allowing a new submit', async () => {
-		let resolveRun: (meta: RunMeta) => void
+		let resolveRun: (meta: RunMeta) => void = () => {}
 		const startRun: StartRun = () => new Promise<RunMeta>((resolve) => {
 			resolveRun = resolve
 		})
 		const ids = ['run-1', 'run-2']
 		let next = 0
-		const submission = createRunSubmission({ startRun, resumeRun: unusedResumeRun, generateRunId: () => ids[next++]!, readProjectSettings: emptySettings })
+		const submission = createRunSubmission({ startRun, resumeRun: unusedResumeRun, generateRunId: () => defined(ids[next++], 'run id'), readProjectSettings: emptySettings })
 
 		submission.submit('first')
 		expect(submission.activeRunId()).toBe('run-1')
 
-		resolveRun!(sampleMeta('run-1'))
+		resolveRun(sampleMeta('run-1'))
 		await submission.awaitActive()
 		expect(submission.activeRunId()).toBeUndefined()
 
 		const second = submission.submit('second')
 		expect(second).toEqual({ ok: true, runId: 'run-2' })
-		resolveRun!(sampleMeta('run-2'))
+		resolveRun(sampleMeta('run-2'))
 		await submission.awaitActive()
 	})
 
 	test('lastRunId survives completion so the alias API can keep surfacing the most recent run', async () => {
-		let resolveRun: (meta: RunMeta) => void
+		let resolveRun: (meta: RunMeta) => void = () => {}
 		const startRun: StartRun = () => new Promise<RunMeta>((resolve) => {
 			resolveRun = resolve
 		})
 		const ids = ['run-1', 'run-2']
 		let next = 0
-		const submission = createRunSubmission({ startRun, resumeRun: unusedResumeRun, generateRunId: () => ids[next++]!, readProjectSettings: emptySettings })
+		const submission = createRunSubmission({ startRun, resumeRun: unusedResumeRun, generateRunId: () => defined(ids[next++], 'run id'), readProjectSettings: emptySettings })
 
 		submission.submit('first')
-		resolveRun!(sampleMeta('run-1'))
+		resolveRun(sampleMeta('run-1'))
 		await submission.awaitActive()
 
 		expect(submission.activeRunId()).toBeUndefined()
@@ -102,7 +103,7 @@ describe('createRunSubmission', () => {
 
 		submission.submit('second')
 		expect(submission.lastRunId()).toBe('run-2')
-		resolveRun!(sampleMeta('run-2'))
+		resolveRun(sampleMeta('run-2'))
 		await submission.awaitActive()
 	})
 

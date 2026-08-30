@@ -12,7 +12,7 @@ import type { LoadedGuild } from './loader.ts'
 import type { AppendLog } from './persistence.ts'
 import { createRoleRegistry } from './role-registry.ts'
 import type { RunCheckpoint } from './checkpoint.ts'
-import { createFakeCheckpointRecorder, stubHumanBackend, withTool } from './test-fixtures.ts'
+import { createFakeCheckpointRecorder, stubHumanBackend, withTool, defined } from './test-fixtures.ts'
 import type { ToolHandler } from './tool-dispatch.ts'
 
 function success(toolCalls: ToolCall[], opts: { content?: string; promptTokens?: number; completionTokens?: number; finishReason?: string } = {}): LlmCallResult {
@@ -179,6 +179,34 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 function payloadField(event: LogEvent, field: string): unknown {
 	const payload = event.payload
 	return isRecord(payload) ? payload[field] : undefined
+}
+
+function isRoleList(value: unknown): value is Array<{ role: string }> {
+	return Array.isArray(value) && value.every((entry) => isRecord(entry) && typeof entry['role'] === 'string')
+}
+
+interface ReceivedLlmResponse {
+	content?: string
+	toolCalls: Array<{ id: string; function: { name: string; arguments: string } }>
+}
+
+function isReceivedLlmResponse(value: unknown): value is ReceivedLlmResponse {
+	if (!isRecord(value) || !Array.isArray(value['toolCalls'])) return false
+	return value['toolCalls'].every((call) => {
+		if (!isRecord(call)) return false
+		const fn = call['function']
+		return typeof call['id'] === 'string' && isRecord(fn) && typeof fn['name'] === 'string' && typeof fn['arguments'] === 'string'
+	})
+}
+
+function isUsageTotals(value: unknown): value is { promptTokens: number; completionTokens: number; totalTokens: number } {
+	return isRecord(value) && typeof value['promptTokens'] === 'number' && typeof value['completionTokens'] === 'number' && typeof value['totalTokens'] === 'number'
+}
+
+function isLoggedToolResult(value: unknown): value is { kind: string; data: { text: string } } {
+	if (!isRecord(value) || typeof value['kind'] !== 'string') return false
+	const data = value['data']
+	return isRecord(data) && typeof data['text'] === 'string'
 }
 
 describe('runRole — acceptance criteria', () => {
@@ -750,17 +778,19 @@ describe('runRole — role-tree log events', () => {
 
 		const starts = events.filter((e) => e.type === 'role_start')
 		expect(starts.length).toBe(1)
-		expect(payloadField(starts[0]!, 'role')).toBe('main')
-		expect(payloadField(starts[0]!, 'depth')).toBe(0)
-		expect(payloadField(starts[0]!, 'task')).toBe('do it')
-		expect(payloadField(starts[0]!, 'parent')).toBeUndefined()
+		const startEvent = defined(starts[0], 'role_start event')
+		expect(payloadField(startEvent, 'role')).toBe('main')
+		expect(payloadField(startEvent, 'depth')).toBe(0)
+		expect(payloadField(startEvent, 'task')).toBe('do it')
+		expect(payloadField(startEvent, 'parent')).toBeUndefined()
 
 		const finishes = events.filter((e) => e.type === 'role_finished')
 		expect(finishes.length).toBe(1)
-		expect(payloadField(finishes[0]!, 'role')).toBe('main')
-		expect(payloadField(finishes[0]!, 'depth')).toBe(0)
-		expect(payloadField(finishes[0]!, 'status')).toBe('success')
-		expect(payloadField(finishes[0]!, 'parent')).toBeUndefined()
+		const finishEvent = defined(finishes[0], 'role_finished event')
+		expect(payloadField(finishEvent, 'role')).toBe('main')
+		expect(payloadField(finishEvent, 'depth')).toBe(0)
+		expect(payloadField(finishEvent, 'status')).toBe('success')
+		expect(payloadField(finishEvent, 'parent')).toBeUndefined()
 	})
 
 	test('a parent→child run logs role_start and agent_call linking parent, child, and depth', async () => {
@@ -789,23 +819,24 @@ describe('runRole — role-tree log events', () => {
 		const starts = events.filter((e) => e.type === 'role_start')
 		// Exactly two role_start events: one for the entry parent, one for the child.
 		expect(starts.length).toBe(2)
-		const childStart = starts.find((e) => payloadField(e, 'role') === 'child')
+		const childStart = defined(starts.find((e) => payloadField(e, 'role') === 'child'), 'child role_start event')
 		expect(childStart).toBeDefined()
-		expect(payloadField(childStart!, 'parent')).toBe('parent')
-		expect(payloadField(childStart!, 'depth')).toBe(1)
-		expect(payloadField(childStart!, 'task')).toBe('subtask')
+		expect(payloadField(childStart, 'parent')).toBe('parent')
+		expect(payloadField(childStart, 'depth')).toBe(1)
+		expect(payloadField(childStart, 'task')).toBe('subtask')
 
 		const agentCalls = events.filter((e) => e.type === 'agent_call')
 		expect(agentCalls.length).toBe(1)
-		expect(payloadField(agentCalls[0]!, 'parent')).toBe('parent')
-		expect(payloadField(agentCalls[0]!, 'child')).toBe('child')
-		expect(payloadField(agentCalls[0]!, 'depth')).toBe(1)
+		const agentCallEvent = defined(agentCalls[0], 'agent_call event')
+		expect(payloadField(agentCallEvent, 'parent')).toBe('parent')
+		expect(payloadField(agentCallEvent, 'child')).toBe('child')
+		expect(payloadField(agentCallEvent, 'depth')).toBe(1)
 
 		const finishes = events.filter((e) => e.type === 'role_finished')
 		expect(finishes.length).toBe(2)
-		const childFinish = finishes.find((e) => payloadField(e, 'role') === 'child')
-		expect(payloadField(childFinish!, 'parent')).toBe('parent')
-		expect(payloadField(childFinish!, 'depth')).toBe(1)
+		const childFinish = defined(finishes.find((e) => payloadField(e, 'role') === 'child'), 'child role_finished event')
+		expect(payloadField(childFinish, 'parent')).toBe('parent')
+		expect(payloadField(childFinish, 'depth')).toBe(1)
 	})
 
 	test('a refused agent call (depth exceeded) emits no role_start for the never-run child', async () => {
@@ -835,7 +866,7 @@ describe('runRole — role-tree log events', () => {
 		const starts = events.filter((e) => e.type === 'role_start')
 		// Only the parent's role_start; the refused child never runs.
 		expect(starts.length).toBe(1)
-		expect(payloadField(starts[0]!, 'role')).toBe('parent')
+		expect(payloadField(defined(starts[0], 'role_start event'), 'role')).toBe('parent')
 		expect(events.some((e) => e.type === 'depth_exceeded')).toBe(true)
 		expect(events.some((e) => e.type === 'agent_call')).toBe(false)
 	})
@@ -861,24 +892,28 @@ describe('runRole — rich LLM and tool payloads', () => {
 
 		const llmCall = events.find((e) => e.type === 'llm_call')
 		expect(llmCall).toBeDefined()
-		const payload = llmCall!.payload
+		const payload = defined(llmCall, 'llm_call event').payload
 		expect(isRecord(payload)).toBe(true)
 		if (!isRecord(payload)) throw new Error('llm_call payload is not a record')
 		expect(payload['messageCount']).toBe(2)
 		// The sent message list carries role and content for each message, with tool_calls on assistant messages included.
 		const sent = payload['sent']
 		expect(Array.isArray(sent)).toBe(true)
-		expect((sent as unknown[]).length).toBe(2)
-		expect((sent as { role: string }[])[0]!.role).toBe('system')
-		expect((sent as { role: string }[])[1]!.role).toBe('user')
+		if (!isRoleList(sent)) throw new Error('expected the sent message list')
+		expect(sent.length).toBe(2)
+		expect(defined(sent[0], 'first sent message').role).toBe('system')
+		expect(defined(sent[1], 'second sent message').role).toBe('user')
 		// The received response carries the assistant content and the parsed tool calls with name and arguments.
-		const received = payload['received'] as { content?: string; toolCalls: Array<{ id: string; function: { name: string; arguments: string } }> }
+		const received = payload['received']
+		if (!isReceivedLlmResponse(received)) throw new Error('expected the received LLM response')
 		expect(received.content).toBe('the answer')
 		expect(received.toolCalls.length).toBe(1)
-		expect(received.toolCalls[0]!.function.name).toBe('finish')
-		expect(received.toolCalls[0]!.function.arguments).toBe(finish.function.arguments)
+		const receivedToolCall = defined(received.toolCalls[0], 'first received tool call')
+		expect(receivedToolCall.function.name).toBe('finish')
+		expect(receivedToolCall.function.arguments).toBe(finish.function.arguments)
 		expect(payload['finishReason']).toBe('tool_calls')
-		const usage = payload['usage'] as { promptTokens: number; completionTokens: number; totalTokens: number }
+		const usage = payload['usage']
+		if (!isUsageTotals(usage)) throw new Error('expected the per-call usage totals')
 		expect(usage.promptTokens).toBe(42)
 		expect(usage.completionTokens).toBe(7)
 		expect(usage.totalTokens).toBe(49)
@@ -968,15 +1003,17 @@ describe('runRole — rich LLM and tool payloads', () => {
 
 		const toolCall = events.find((e) => e.type === 'tool_call' && payloadField(e, 'tool') === 'big')
 		expect(toolCall).toBeDefined()
-		expect(payloadField(toolCall!, 'arguments')).toBe('{"path":"x.txt"}')
+		expect(payloadField(defined(toolCall, 'big tool_call event'), 'arguments')).toBe('{"path":"x.txt"}')
 
 		const toolResult = events.find((e) => e.type === 'tool_result' && payloadField(e, 'tool') === 'big')
 		expect(toolResult).toBeDefined()
-		expect(payloadField(toolResult!, 'kind')).toBe('success')
+		const toolResultEvent = defined(toolResult, 'big tool_result event')
+		expect(payloadField(toolResultEvent, 'kind')).toBe('success')
 		// The logged result is the full un-truncated ToolResult, so its data retains the full 200-char string even though truncation applies to what is appended to the conversation.
-		const result = payloadField(toolResult!, 'result') as { kind: string; data: { text: string } }
-		expect(result.kind).toBe('success')
-		expect(result.data.text.length).toBe(200)
+		const loggedResult = payloadField(toolResultEvent, 'result')
+		if (!isLoggedToolResult(loggedResult)) throw new Error('expected the logged tool result')
+		expect(loggedResult.kind).toBe('success')
+		expect(loggedResult.data.text.length).toBe(200)
 	})
 })
 
@@ -1077,15 +1114,16 @@ describe('runRole — interrupt platform', () => {
 		expect(llm.calls.length).toBe(5)
 		const interrupt = events.find((e) => e.type === 'interrupt')
 		expect(interrupt).toBeDefined()
-		expect(payloadField(interrupt!, 'trigger')).toBe('loop_check')
-		expect(payloadField(interrupt!, 'handler')).toBe('loop_detector')
-		expect(payloadField(interrupt!, 'target')).toBe('main-0-1')
+		const interruptEvent = defined(interrupt, 'interrupt event')
+		expect(payloadField(interruptEvent, 'trigger')).toBe('loop_check')
+		expect(payloadField(interruptEvent, 'handler')).toBe('loop_detector')
+		expect(payloadField(interruptEvent, 'target')).toBe('main-0-1')
 		const resolved = events.find((e) => e.type === 'interrupt_resolved')
-		expect(payloadField(resolved!, 'action')).toBe('abort')
+		expect(payloadField(defined(resolved, 'interrupt_resolved event'), 'action')).toBe('abort')
 		// The detector ran as a role nested under the target and finished before the target's role_finished.
 		const detectorStart = events.find((e) => e.type === 'role_start' && payloadField(e, 'role') === 'loop_detector')
 		expect(detectorStart).toBeDefined()
-		expect(payloadField(detectorStart!, 'parent')).toBe('main')
+		expect(payloadField(defined(detectorStart, 'loop_detector role_start event'), 'parent')).toBe('main')
 		const finishOrder = events.filter((e) => e.type === 'role_finished').map((e) => payloadField(e, 'role'))
 		expect(finishOrder).toEqual(['loop_detector', 'main'])
 	})
@@ -1112,11 +1150,11 @@ describe('runRole — interrupt platform', () => {
 
 		expect(result).toEqual({ status: 'success', summary: 'main done' })
 		// The target's first post-handler call carries the injected guidance as the latest user message.
-		const resumedCall = llm.calls[5]
+		const resumedCall = defined(llm.calls[5], 'resumed main call')
 		expect(resumedCall).toBeDefined()
-		const lastMessage = resumedCall!.messages[resumedCall!.messages.length - 1]
+		const lastMessage = resumedCall.messages[resumedCall.messages.length - 1]
 		expect(lastMessage).toEqual({ role: 'user', content: 'stop repeating; call finish now' })
-		expect(payloadField(events.find((e) => e.type === 'interrupt_resolved')!, 'action')).toBe('redirect')
+		expect(payloadField(defined(events.find((e) => e.type === 'interrupt_resolved'), 'interrupt_resolved event'), 'action')).toBe('redirect')
 	})
 
 	test('a handler that finishes without trigger_interrupt resumes the target unchanged', async () => {
@@ -1138,8 +1176,8 @@ describe('runRole — interrupt platform', () => {
 		})
 
 		expect(result).toEqual({ status: 'success', summary: 'main done' })
-		const resolved = events.find((e) => e.type === 'interrupt_resolved')
-		expect(payloadField(resolved!, 'action')).toBe('continue')
+		const resolved = defined(events.find((e) => e.type === 'interrupt_resolved'), 'interrupt_resolved event')
+		expect(payloadField(resolved, 'action')).toBe('continue')
 	})
 
 	test('(c) an operator inquiry is answered by a fresh handler role at the next safe point and the run resumes', async () => {
@@ -1176,7 +1214,7 @@ describe('runRole — interrupt platform', () => {
 		expect(events.indexOf(interrupt)).toBeLessThan(events.indexOf(handlerStart))
 		expect(payloadField(handlerStart, 'parent')).toBe('main')
 		// The handler's briefing carries the question, the live-instance list root first, and the log pointer.
-		const briefing = llm.calls[0]!.messages[1]
+		const briefing = defined(llm.calls[0], 'handler briefing call').messages[1]
 		expect(briefing?.role).toBe('user')
 		expect(briefing?.content).toContain('[Operator inquiry]')
 		expect(briefing?.content).toContain('what are you working on?')
@@ -1189,7 +1227,7 @@ describe('runRole — interrupt platform', () => {
 		expect(payloadField(resolved, 'action')).toBe('answered')
 		expect(payloadField(resolved, 'summary')).toBe('the run is building the parser')
 		// The question never enters the suspended role's history, and the retired event is gone.
-		expect(llm.calls[2]!.messages.some((m) => m.content.includes('what are you working on?'))).toBe(false)
+		expect(defined(llm.calls[2], 'resumed main call').messages.some((m) => m.content.includes('what are you working on?'))).toBe(false)
 		expect(events.some((e) => e.type === 'operator_inquiry')).toBe(false)
 		// The suspended role resumes its turn loop once the handler finishes.
 		const finishOrder = events.filter((e) => e.type === 'role_finished').map((e) => payloadField(e, 'role'))
@@ -1218,7 +1256,7 @@ describe('runRole — interrupt platform', () => {
 		expect(payloadField(dropped, 'reason')).toBe('executor.inquiryHandlerRole is not configured')
 		expect(events.some((e) => e.type === 'interrupt')).toBe(false)
 		// A dropped inquiry touches nothing: the question never enters main's history.
-		expect(llm.calls[0]!.messages.some((m) => m.content.includes('anyone there?'))).toBe(false)
+		expect(defined(llm.calls[0], 'first call').messages.some((m) => m.content.includes('anyone there?'))).toBe(false)
 	})
 
 	test('a notice injects a marked user message into the chain root and logs operator_notice', async () => {
@@ -1236,7 +1274,7 @@ describe('runRole — interrupt platform', () => {
 		})
 
 		expect(result).toEqual({ status: 'success', summary: 'noticed and done' })
-		const callMessages = llm.calls[0]!.messages
+		const callMessages = defined(llm.calls[0], 'first call').messages
 		const injected = callMessages[callMessages.length - 1]
 		expect(injected?.role).toBe('user')
 		expect(injected?.content).toContain('[Operator notice')
@@ -1295,9 +1333,10 @@ describe('runRole — interrupt platform', () => {
 		}
 		const planMod = events.find((e) => e.type === 'plan_modification')
 		expect(planMod).toBeDefined()
-		expect(payloadField(planMod!, 'target')).toBe('planner-0-1')
-		expect(payloadField(planMod!, 'aborted')).toEqual(['sub-coder-2-3', 'coder-1-2'])
-		const plannerResumed = llm.calls[3]!
+		const planModEvent = defined(planMod, 'plan_modification event')
+		expect(payloadField(planModEvent, 'target')).toBe('planner-0-1')
+		expect(payloadField(planModEvent, 'aborted')).toEqual(['sub-coder-2-3', 'coder-1-2'])
+		const plannerResumed = defined(llm.calls[3], 'planner resume call')
 		const lastMessage = plannerResumed.messages[plannerResumed.messages.length - 1]
 		expect(lastMessage?.role).toBe('user')
 		expect(lastMessage?.content).toContain('[Operator plan modification')
@@ -1348,7 +1387,7 @@ describe('runRole — interrupt platform', () => {
 		expect(payloadField(interrupt, 'trigger')).toBe('inquiry')
 		expect(payloadField(interrupt, 'target')).toBe('child-1-2')
 		expect(payloadField(interrupt, 'message')).toBe('how is the run going?')
-		const briefing = llm.calls[2]!.messages[1]
+		const briefing = defined(llm.calls[2], 'handler briefing call').messages[1]
 		expect(briefing?.content).toContain('how is the run going?')
 		expect(briefing?.content).toContain('- parent-0-1 (parent, depth 0)')
 		expect(briefing?.content).toContain('- child-1-2 (child, depth 1), child of parent-0-1')
@@ -1356,8 +1395,8 @@ describe('runRole — interrupt platform', () => {
 		expect(briefing?.content).toContain('recorded in the workspace itself')
 		expect(briefing?.content).not.toContain('undefined')
 		// Neither the child nor the parent ever receives the question in its history.
-		expect(llm.calls[3]!.messages.some((m) => m.content.includes('how is the run going?'))).toBe(false)
-		expect(llm.calls[4]!.messages.some((m) => m.content.includes('how is the run going?'))).toBe(false)
+		expect(defined(llm.calls[3], 'child resume call').messages.some((m) => m.content.includes('how is the run going?'))).toBe(false)
+		expect(defined(llm.calls[4], 'parent resume call').messages.some((m) => m.content.includes('how is the run going?'))).toBe(false)
 		const resolved = events.find((e) => e.type === 'interrupt_resolved')
 		if (resolved === undefined) throw new Error('expected an interrupt_resolved event')
 		expect(payloadField(resolved, 'action')).toBe('answered')
@@ -1397,13 +1436,13 @@ describe('runRole — interrupt platform', () => {
 
 		expect(result).toEqual({ status: 'success', summary: 'done' })
 		// The first call's messages predate the submission, and the interrupt event lands only after that call's llm_call event: the drain waited for the turn boundary.
-		expect(llm.calls[0]!.messages.some((m) => m.content.includes('mid-call question'))).toBe(false)
+		expect(defined(llm.calls[0], 'first call').messages.some((m) => m.content.includes('mid-call question'))).toBe(false)
 		const firstLlmCallIndex = events.findIndex((e) => e.type === 'llm_call')
 		const interruptIndex = events.findIndex((e) => e.type === 'interrupt')
 		expect(interruptIndex).toBeGreaterThan(firstLlmCallIndex)
 		// The question lands in the handler's briefing, not in any running role's history.
-		expect(llm.calls[1]!.messages.some((m) => m.content.includes('mid-call question'))).toBe(true)
-		expect(llm.calls[2]!.messages.some((m) => m.content.includes('mid-call question'))).toBe(false)
+		expect(defined(llm.calls[1], 'handler briefing call').messages.some((m) => m.content.includes('mid-call question'))).toBe(true)
+		expect(defined(llm.calls[2], 'resumed main call').messages.some((m) => m.content.includes('mid-call question'))).toBe(false)
 	})
 
 	test('the handler role itself is never interrupted by the cadence trigger', async () => {
@@ -1476,9 +1515,10 @@ describe('runRole — observe emission', () => {
 		expect(observeIndex).toBe(callIndex + 1)
 		expect(resultIndex).toBe(observeIndex + 1)
 		const observe = events[observeIndex]
-		expect(payloadField(observe!, 'role')).toBe('parent')
-		expect(payloadField(observe!, 'roleId')).toBe('parent-0-1')
-		expect(payloadField(observe!, 'details')).toBe('list_role_messages')
+		const observeEvent = defined(observe, 'observe event')
+		expect(payloadField(observeEvent, 'role')).toBe('parent')
+		expect(payloadField(observeEvent, 'roleId')).toBe('parent-0-1')
+		expect(payloadField(observeEvent, 'details')).toBe('list_role_messages')
 	})
 
 	test('a self-targeted or target-free inspection emits no observe', async () => {
@@ -1497,7 +1537,7 @@ describe('runRole — observe emission', () => {
 
 		expect(events.some((e) => e.type === 'observe')).toBe(false)
 		const selfListing = events.find((e) => e.type === 'tool_result' && payloadField(e, 'tool') === 'list_role_messages')
-		expect(payloadField(selfListing!, 'kind')).toBe('success')
+		expect(payloadField(defined(selfListing, 'self listing tool_result event'), 'kind')).toBe('success')
 	})
 
 	test('a non-inspection tool emits no observe even when its result data carries a targetRole string', async () => {
@@ -1537,7 +1577,7 @@ describe('runRole — observe emission', () => {
 
 		expect(events.some((e) => e.type === 'observe')).toBe(false)
 		const toolResult = events.find((e) => e.type === 'tool_result' && payloadField(e, 'tool') === 'list_role_messages')
-		expect(payloadField(toolResult!, 'kind')).toBe('success')
+		expect(payloadField(defined(toolResult, 'ghost listing tool_result event'), 'kind')).toBe('success')
 	})
 })
 
@@ -1570,9 +1610,10 @@ describe('runRole — context pressure handoff', () => {
 		expect(result.status).toBe('success')
 		const pressureEvents = events.filter((e) => e.type === 'context_pressure')
 		expect(pressureEvents.length).toBe(1)
-		expect(payloadField(pressureEvents[0]!, 'role')).toBe('main')
-		expect(payloadField(pressureEvents[0]!, 'promptTokens')).toBe(800)
-		expect(payloadField(pressureEvents[0]!, 'effectiveBudget')).toBe(900)
+		const pressureEvent = defined(pressureEvents[0], 'context_pressure event')
+		expect(payloadField(pressureEvent, 'role')).toBe('main')
+		expect(payloadField(pressureEvent, 'promptTokens')).toBe(800)
+		expect(payloadField(pressureEvent, 'effectiveBudget')).toBe(900)
 
 		// The turn below the threshold carried no notice; the crossing turn's notice rides the next request.
 		expect(noticeCount(llm.calls[1]?.messages ?? [])).toBe(0)
@@ -1624,7 +1665,7 @@ describe('runRole — context pressure handoff', () => {
 
 		const pressureEvents = events.filter((e) => e.type === 'context_pressure')
 		expect(pressureEvents.length).toBe(1)
-		expect(payloadField(pressureEvents[0]!, 'effectiveBudget')).toBe(900)
+		expect(payloadField(defined(pressureEvents[0], 'context_pressure event'), 'effectiveBudget')).toBe(900)
 	})
 
 	test('a reported wall rejection tightens the effective budget for every later role in the run', async () => {
@@ -1652,9 +1693,10 @@ describe('runRole — context pressure handoff', () => {
 		expect(result.status).toBe('success')
 		const pressureEvents = events.filter((e) => e.type === 'context_pressure')
 		expect(pressureEvents.length).toBe(1)
-		expect(payloadField(pressureEvents[0]!, 'role')).toBe('child_b')
-		expect(payloadField(pressureEvents[0]!, 'promptTokens')).toBe(450)
-		expect(payloadField(pressureEvents[0]!, 'effectiveBudget')).toBe(500)
+		const pressureEvent = defined(pressureEvents[0], 'context_pressure event')
+		expect(payloadField(pressureEvent, 'role')).toBe('child_b')
+		expect(payloadField(pressureEvent, 'promptTokens')).toBe(450)
+		expect(payloadField(pressureEvent, 'effectiveBudget')).toBe(500)
 		const notified = llm.calls[5]?.messages ?? []
 		const notice = notified[notified.length - 1]
 		expect(notice?.role).toBe('user')
@@ -1901,11 +1943,11 @@ describe('runRole effort directive injection', () => {
 		})
 
 		expect(llm.calls.length).toBe(1)
-		const messages = llm.calls[0]!.messages
+		const messages = defined(llm.calls[0], 'entry call').messages
 		// The directive is merged into the single system message, not emitted as a second one — many chat templates reject a system message that is not the first message.
 		expect(messages).toHaveLength(2)
 		expect(messages[0]).toEqual({ role: 'system', content: `prompt for main\n\n${effortDirective('standard')}` })
-		expect(messages[0]!.content).toContain('Quality level: standard')
+		expect(defined(messages[0], 'system message').content).toContain('Quality level: standard')
 		expect(messages[1]).toEqual({ role: 'user', content: 'do it' })
 	})
 
@@ -1925,7 +1967,7 @@ describe('runRole effort directive injection', () => {
 			task: 'do it',
 		})
 
-		const messages = llm.calls[0]!.messages
+		const messages = defined(llm.calls[0], 'entry call').messages
 		expect(messages.length).toBe(2)
 		expect(messages[0]).toEqual({ role: 'system', content: 'prompt for main' })
 		expect(messages[1]).toEqual({ role: 'user', content: 'do it' })
@@ -1956,7 +1998,7 @@ describe('runRole effort directive injection', () => {
 		})
 
 		// calls[0] = parent (entry, has directive); calls[1] = child (depth 1, no directive); calls[2] = parent follow-up.
-		const childMessages = llm.calls[1]!.messages
+		const childMessages = defined(llm.calls[1], 'child call').messages
 		expect(childMessages[0]).toEqual({ role: 'system', content: 'prompt for child' })
 		expect(childMessages[1]).toEqual({ role: 'user', content: 'subtask' })
 		expect(childMessages.length).toBe(2)

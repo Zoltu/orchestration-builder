@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import { createWebHumanBackend } from './human-backend.ts'
 import { createInterruptChannel, createInterruptQueue } from './interrupts.ts'
 import { createRunState, type RunState } from './run-state.ts'
+import { defined } from './test-fixtures.ts'
 
 function makeRunState() {
 	const humanBackend = createWebHumanBackend()
@@ -17,7 +18,7 @@ describe('createRunState', () => {
 
 		const pending = runState.pendingQuestions()
 		expect(pending.length).toBe(1)
-		expect(pending[0]!.question).toBe('hello?')
+		expect(defined(pending[0], 'first pending question').question).toBe('hello?')
 	})
 
 	test('submitAnswer delegates to the web human backend and resolves the parked promise', async () => {
@@ -26,7 +27,7 @@ describe('createRunState', () => {
 		const promise = humanBackend.ask('which?')
 		const [question] = runState.pendingQuestions()
 
-		const result = runState.submitAnswer(question!.id, 'this one')
+		const result = runState.submitAnswer(defined(question, 'pending question').id, 'this one')
 		expect(result.kind).toBe('resolved')
 		expect(await promise).toBe('this one')
 		expect(runState.pendingQuestions().length).toBe(0)
@@ -43,9 +44,9 @@ describe('createRunState', () => {
 		humanBackend.ask('original?')
 
 		const snapshot = runState.pendingQuestions()
-		snapshot[0]!.question = 'tampered'
+		defined(snapshot[0], 'snapshot question').question = 'tampered'
 
-		expect(runState.pendingQuestions()[0]!.question).toBe('original?')
+		expect(defined(runState.pendingQuestions()[0], 'first pending question').question).toBe('original?')
 	})
 
 	test('a hand-written fake can satisfy the RunState contract', () => {

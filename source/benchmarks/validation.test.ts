@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 
 import { ValidationError } from '../executor/errors.ts'
+import { defined } from '../executor/test-fixtures.ts'
 import {
 	evaluateValidation,
 	parseEvalConfig,
@@ -128,7 +129,7 @@ describe('parseEvalConfig', () => {
 			if (error instanceof ValidationError) caught = error
 		}
 		expect(caught).toBeDefined()
-		expect(caught!.path).toBe('validation.command')
+		expect(defined(caught, 'caught error').path).toBe('validation.command')
 	})
 })
 
