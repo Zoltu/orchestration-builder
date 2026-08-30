@@ -68,7 +68,8 @@ export function extractKagiErrorMessage(body: unknown): string | undefined {
 
 // The client returns the body as unknown on purpose: shape validation is the caller's job via the
 // guards above, keeping this leaf a thin wire wrapper. HTTP failures throw Errors whose messages
-// contain "HTTP <status>" — web-search.ts and fetch-url.ts rely on that marker to classify failures.
+// contain "HTTP <status>" — web-search.ts relies on that marker to classify failures — and timeout
+// aborts propagate as the fetch's own AbortError, which fetch-url.ts matches by name.
 export function createKagiClient(apiKey: string, dependencies: KagiClientDependencies = {}): KagiClient {
 	const fetchImpl = dependencies.fetchImpl ?? globalThis.fetch
 	async function post(operation: string, url: string, payload: unknown, timeoutMs: number): Promise<unknown> {

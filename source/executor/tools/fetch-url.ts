@@ -25,6 +25,15 @@ interface FetchBackend {
 	run: Fetcher
 }
 
+// The only failure a fetch backend reports as "timeout": its own timer aborted the request. Every
+// other backend throw classifies as "unavailable".
+export class FetchTimeoutError extends Error {
+	constructor(message: string) {
+		super(message)
+		this.name = 'FetchTimeoutError'
+	}
+}
+
 export const DEFAULT_MAX_BYTES = 1024 * 1024
 
 const FETCH_METHODS: readonly FetchMethod[] = ['auto', 'direct', 'kagi', 'markdown_new']
@@ -73,6 +82,7 @@ export function createFetchUrl(timeoutMs: number, options: FetchUrlOptions = {})
 			backends.push({ name: 'direct', run: directFetcher })
 		}
 		const failures: Array<{ name: string; message: string }> = []
+		let timedOut = false
 		for (const backend of backends) {
 			try {
 				const text = await backend.run(urlValue, timeoutMs)
@@ -83,10 +93,12 @@ export function createFetchUrl(timeoutMs: number, options: FetchUrlOptions = {})
 			} catch (error) {
 				const message = error instanceof Error ? error.message : String(error)
 				failures.push({ name: backend.name, message })
+				// kagi rethrows its client's raw fetch AbortError on timeout, so it is matched by name alongside FetchTimeoutError.
+				if (error instanceof FetchTimeoutError || (error instanceof Error && error.name === 'AbortError')) timedOut = true
 			}
 		}
 		const detail = failures.map((failure) => `via ${failure.name} (${failure.message})`).join('; ')
-		const kind = failures.some((failure) => isHttpStatusFailure(failure.message)) ? 'unavailable' : 'timeout'
+		const kind = timedOut ? 'timeout' : 'unavailable'
 		return createToolError(kind, `Fetch failed ${detail}`)
 	}
 }
@@ -100,12 +112,6 @@ function wrapKagiExtract(kagiExtract: KagiExtract): Fetcher {
 		}
 		return markdown
 	}
-}
-
-// Backends report HTTP-status failures as Error messages containing "HTTP <status>" (see kagi.ts
-// and createMarkdownNewFetcher); any other throw is a network failure or abort and maps to "timeout".
-function isHttpStatusFailure(message: string): boolean {
-	return message.includes('HTTP ')
 }
 
 export function createMarkdownNewFetcher(dependencies: { fetchImpl?: typeof globalThis.fetch } = {}): Fetcher {
@@ -124,6 +130,9 @@ export function createMarkdownNewFetcher(dependencies: { fetchImpl?: typeof glob
 				throw new Error(`markdown.new failed: HTTP ${response.status}`)
 			}
 			return await response.text()
+		} catch (error) {
+			if (controller.signal.aborted) throw new FetchTimeoutError(`fetch timed out after ${timeoutMs}ms`)
+			throw error
 		} finally {
 			clearTimeout(timer)
 		}
@@ -143,6 +152,9 @@ export function createDefaultFetcher(deps: DefaultFetcherDependencies = {}): Fet
 				throw new Error(`HTTP ${response.status}`)
 			}
 			return await response.text()
+		} catch (error) {
+			if (controller.signal.aborted) throw new FetchTimeoutError(`fetch timed out after ${timeoutMs}ms`)
+			throw error
 		} finally {
 			clearTimeoutImpl(timer)
 		}

@@ -145,8 +145,8 @@ describe('createTest', () => {
 		const runner = makeRunner({}, { throwMessage: 'ENOENT bun' })
 		const handler = createTest(WORKSPACE, 30, runner)
 		const result = await handler({})
-		expect(result.kind).toBe('invalid_arguments')
-		if (result.kind === 'invalid_arguments') {
+		expect(result.kind).toBe('unavailable')
+		if (result.kind === 'unavailable') {
 			expect(result.message).toContain('ENOENT bun')
 		}
 	})

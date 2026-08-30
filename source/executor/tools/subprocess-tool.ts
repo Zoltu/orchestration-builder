@@ -69,7 +69,7 @@ export function createSubprocessTool(
 			})
 		} catch (error) {
 			const message = error instanceof Error ? error.message : 'spawn failed'
-			return createToolError('invalid_arguments', `${toolConfig.noun} failed to run: ${message}`)
+			return createToolError('unavailable', `${toolConfig.noun} failed to run: ${message}`)
 		}
 		if (outcome.timedOut) {
 			return createToolError('timeout', `${toolConfig.noun} timed out after ${timeoutSeconds}s`, { afterSeconds: timeoutSeconds })

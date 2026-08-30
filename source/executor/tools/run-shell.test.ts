@@ -88,8 +88,8 @@ describe('createRunShell', () => {
 		const runner = makeRunner({}, { throwMessage: 'ENOENT sh' })
 		const handler = createRunShell(WORKSPACE, 30, runner)
 		const result = await handler({ command: 'echo ok' })
-		expect(result.kind).toBe('invalid_arguments')
-		if (result.kind === 'invalid_arguments') {
+		expect(result.kind).toBe('unavailable')
+		if (result.kind === 'unavailable') {
 			expect(result.message).toContain('ENOENT sh')
 		}
 	})

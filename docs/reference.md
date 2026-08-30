@@ -72,7 +72,7 @@ Every failure is translated into a structured result the current or parent role 
 | Unknown tool | Do not execute | `{kind: "unknown_tool"}` |
 | Invalid arguments | Do not execute | `{kind: "invalid_arguments"}` |
 | Tool timeout | Abort tool | `{kind: "timeout"}` |
-| Tool's external service unavailable (not configured, rate-limited, HTTP error) | Return error to the caller | `{kind: "unavailable"}` |
+| Tool's external service unavailable (not configured, rate-limited, HTTP error, network failure, failed-to-start command) | Return error to the caller | `{kind: "unavailable"}` |
 | Agent recursion depth exceeded | Terminate child | Parent receives error result card |
 | Compaction stuck | Terminate role | `{kind: "compaction_failed"}` |
 | Loop-check handler aborts a role | Finish role with error | `{kind: "loop_detected"}` |

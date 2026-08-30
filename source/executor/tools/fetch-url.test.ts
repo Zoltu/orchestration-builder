@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import type { Fetcher, KagiExtract } from './fetch-url.ts'
-import { createDefaultFetcher, createFetchUrl } from './fetch-url.ts'
+import { createDefaultFetcher, createFetchUrl, FetchTimeoutError } from './fetch-url.ts'
 
 interface FetcherCall {
 	url: string
@@ -76,11 +76,11 @@ describe('createFetchUrl', () => {
 		expect(result.kind).toBe('invalid_arguments')
 	})
 
-	test('wraps a fetcher network exception as a timeout error', async () => {
+	test('maps a network failure to unavailable', async () => {
 		const fetcher = makeFetcher('', { error: new Error('network down') })
 		const handler = createFetchUrl(5000, { fetcher })
 		const result = await handler({ url: 'https://example.com', method: 'direct' })
-		expect(result.kind).toBe('timeout')
+		expect(result.kind).toBe('unavailable')
 		if (result.kind !== 'success') {
 			expect(result.message).toBe('Fetch failed via direct (network down)')
 		}
@@ -96,13 +96,35 @@ describe('createFetchUrl', () => {
 		}
 	})
 
+	test('maps a backend timeout to timeout', async () => {
+		const fetcher = makeFetcher('', { error: new FetchTimeoutError('fetch timed out after 5000ms') })
+		const handler = createFetchUrl(5000, { fetcher })
+		const result = await handler({ url: 'https://example.com', method: 'direct' })
+		expect(result.kind).toBe('timeout')
+		if (result.kind !== 'success') {
+			expect(result.message).toBe('Fetch failed via direct (fetch timed out after 5000ms)')
+		}
+	})
+
+	test('maps a kagi abort to timeout', async () => {
+		const abort = new Error('This operation was aborted')
+		abort.name = 'AbortError'
+		const kagiExtract = makeKagiExtract(null, { error: abort })
+		const handler = createFetchUrl(5000, { kagiExtract })
+		const result = await handler({ url: 'https://example.com', method: 'kagi' })
+		expect(result.kind).toBe('timeout')
+		if (result.kind !== 'success') {
+			expect(result.message).toBe('Fetch failed via kagi (This operation was aborted)')
+		}
+	})
+
 	test('stringifies a non-Error throw', async () => {
 		const fetcher: Fetcher = async () => {
 			throw 'boom'
 		}
 		const handler = createFetchUrl(5000, { fetcher })
 		const result = await handler({ url: 'https://example.com', method: 'direct' })
-		expect(result.kind).toBe('timeout')
+		expect(result.kind).toBe('unavailable')
 		if (result.kind !== 'success') {
 			expect(result.message).toBe('Fetch failed via direct (boom)')
 		}
@@ -241,13 +263,13 @@ describe('createFetchUrl', () => {
 		}
 	})
 
-	test('maps all-network failures to timeout', async () => {
+	test('maps all-network failures to unavailable', async () => {
 		const kagiExtract = makeKagiExtract(null, { error: new Error('socket reset') })
 		const markdownNewFetcher = makeFetcher('', { error: new Error('network down') })
 		const fetcher = makeFetcher('', { error: new Error('aborted') })
 		const handler = createFetchUrl(5000, { fetcher, kagiExtract, markdownNewFetcher })
 		const result = await handler({ url: 'https://example.com' })
-		expect(result.kind).toBe('timeout')
+		expect(result.kind).toBe('unavailable')
 		if (result.kind !== 'success') {
 			expect(result.message).toBe('Fetch failed via kagi (socket reset); via markdown_new (network down); via direct (aborted)')
 		}
@@ -293,7 +315,7 @@ describe('createDefaultFetcher', () => {
 		expect(scheduledCallback).toBeDefined()
 		expect(abortListener).toBeDefined()
 		scheduledCallback?.()
-		await expect(promise).rejects.toThrow('aborted')
+		await expect(promise).rejects.toBeInstanceOf(FetchTimeoutError)
 	})
 
 	test('clears the timer when the request completes before the timeout', async () => {
