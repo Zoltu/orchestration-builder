@@ -3,7 +3,9 @@ import { describe, expect, test } from 'bun:test'
 import type { ContextPolicy, ExecutorConfig, GuildConfig, LogEvent, Message, ModelConfig, ResultCard, RoleDefinition, ToolCall, ToolManifest } from './types.js'
 import { effortDirective } from './effort.ts'
 import { createContextPressureTracker } from './context-pressure.ts'
-import { resumeRoleStack, runRole, type EngineDependencies } from './engine.ts'
+import { runRole } from './engine.ts'
+import type { EngineDependencies } from './engine-state.ts'
+import { resumeRoleStack } from './resume.ts'
 import { createInterruptQueue } from './interrupts.ts'
 import type { LlmCallResult, LlmCaller } from './llm.ts'
 import type { LoadedGuild } from './loader.ts'
@@ -2042,7 +2044,7 @@ describe('run persistence and resumption', () => {
 		const { deps, events, checkpoints: resumedWrites } = makeDeps(llm)
 		const depsWithEcho: EngineDependencies = { ...deps, additionalToolHandlers: { echo: echoHandler } }
 
-		const card = await resumeRoleStack(depsWithEcho, guild, checkpoint, 'runs/test/log.jsonl')
+		const card = await resumeRoleStack(runRole, depsWithEcho, guild, checkpoint, 'runs/test/log.jsonl')
 
 		expect(card).toEqual(uninterrupted.card)
 		// Exactly two turns happen after the resume: the coder's finish and the orchestrator's follow-up — no earlier turn is replayed.
@@ -2075,7 +2077,7 @@ describe('run persistence and resumption', () => {
 		const { deps, events } = makeDeps(llm)
 		const depsWithEcho: EngineDependencies = { ...deps, additionalToolHandlers: { echo: echoHandler } }
 
-		const card = await resumeRoleStack(depsWithEcho, guild, checkpoint, 'runs/test/log.jsonl')
+		const card = await resumeRoleStack(runRole, depsWithEcho, guild, checkpoint, 'runs/test/log.jsonl')
 
 		expect(card).toEqual({ status: 'success', summary: 'parent done' })
 		// One turn only: the orchestrator's follow-up. The finished child is not re-run.
@@ -2099,7 +2101,7 @@ describe('run persistence and resumption', () => {
 		const { deps, events } = makeDeps(llm)
 		const depsWithEcho: EngineDependencies = { ...deps, additionalToolHandlers: { echo: echoHandler } }
 
-		const card = await resumeRoleStack(depsWithEcho, guild, checkpoint, 'runs/test/log.jsonl')
+		const card = await resumeRoleStack(runRole, depsWithEcho, guild, checkpoint, 'runs/test/log.jsonl')
 
 		expect(card.status).toBe('success')
 		// The coder spawned after the resume is a fresh instance, so it mints a new id (the test registry starts at 0 and restored registrations do not advance it) and emits role_start — resumed roles do not.

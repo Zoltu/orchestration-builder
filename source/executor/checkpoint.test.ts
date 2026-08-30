@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test'
 
 import { createCheckpointRecorder, isRunCheckpoint, type CheckpointFrame, type CheckpointRecorder, type RunCheckpoint } from './checkpoint.ts'
 import { createContextPressureTracker } from './context-pressure.ts'
-import type { EngineContext, RoleState } from './engine.ts'
+import type { EngineContext, RoleState } from './engine-state.ts'
 import type { LoadedGuild } from './loader.ts'
 import { createRoleRegistry, type RoleRegistry, type RoleRegistryEntry } from './role-registry.ts'
 import type { ToolCall } from './types.ts'

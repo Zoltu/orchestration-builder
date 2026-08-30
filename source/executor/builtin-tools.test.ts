@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import type { ContextPolicy, ExecutorConfig, GuildConfig, LogEvent, Message, ModelConfig, RoleDefinition, ToolCall, ToolManifest } from './types.js'
-import { runRole, type EngineDependencies } from './engine.ts'
+import { runRole } from './engine.ts'
+import type { EngineDependencies } from './engine-state.ts'
 import { createContextPressureTracker } from './context-pressure.ts'
 import type { HumanBackend } from './human-backend.ts'
 import { createInterruptQueue } from './interrupts.ts'

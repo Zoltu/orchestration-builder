@@ -6,7 +6,7 @@ import type { InterruptActionKind, RoleRegistry, RoleRegistryEntry } from './rol
 import { isObject } from './validation.js'
 import type { ToolHandler } from './tool-dispatch.js'
 import type { HumanBackend } from './human-backend.js'
-import type { RoleState } from './engine.js'
+import type { RoleState } from './engine-state.js'
 
 export interface BuiltInToolContext {
 	spawnAgent(roleName: string, task: string): Promise<ResultCard>

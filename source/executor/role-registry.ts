@@ -1,4 +1,4 @@
-import type { RoleState } from './engine.js'
+import type { RoleState } from './engine-state.js'
 
 export type InterruptActionKind = 'continue' | 'redirect' | 'abort'
 

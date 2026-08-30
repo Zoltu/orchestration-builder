@@ -1,69 +1,19 @@
 import { createResultCard, createToolError } from './errors.js'
 import { effortDirective } from './effort.js'
-import type { EffortLevel, ExecutorConfig, LogEvent, Message, ResultCard, RoleDefinition, ToolCall, ToolManifest, ToolResult } from './types.js'
+import type { ExecutorConfig, Message, ResultCard, RoleDefinition, ToolCall, ToolManifest, ToolResult } from './types.js'
 import { isObject, isResultCard } from './validation.js'
-import type { CheckpointRecorder, RunCheckpoint } from './checkpoint.js'
 import { checkGlobalBudgets, checkRoleBudgets, type GlobalBudgetState, type RoleBudgetState } from './budgets.js'
 import { createBuiltInToolHandlers } from './builtin-tools.js'
 import { buildMessages } from './context-builder.js'
-import { compactHistoryForContextBudget, truncateToolOutput, type ContextCompactionReport } from './context-policy.js'
-import { DEFAULT_CONTEXT_PRESSURE_THRESHOLD, effectiveContextBudget, recordContextRejection, type ContextPressureTracker } from './context-pressure.js'
-import type { HumanBackend } from './human-backend.js'
-import type { InterruptQueue, InterruptRequest } from './interrupts.js'
-import type { LlmCaller, LlmCallResult } from './llm.js'
-import type { LoadedGuild } from './loader.js'
-import type { AppendLog } from './persistence.js'
-import { hashArguments, RECENT_TOOL_CALLS_LIMIT, type RecentToolCall } from './role-inspection.js'
-import type { RoleRegistry, RoleRegistryEntry } from './role-registry.js'
+import { applyContextBackstop, contextExceededCard, contextManagedNotice, contextPressureNotice, currentEffectiveBudget, MAX_CONTEXT_RECOVERY_ATTEMPTS, runContextManagerHandler } from './context-handoff.js'
+import { truncateToolOutput } from './context-policy.js'
+import { DEFAULT_CONTEXT_PRESSURE_THRESHOLD, recordContextRejection } from './context-pressure.js'
+import { logEvent, type EngineContext, type EngineDependencies, type RoleState } from './engine-state.js'
+import { drainInterrupts } from './interrupt-engine.js'
+import type { LlmCallResult } from './llm.js'
+import { hashArguments, RECENT_TOOL_CALLS_LIMIT } from './role-inspection.js'
+import type { RoleRegistryEntry } from './role-registry.js'
 import { createToolDispatch, dispatchToolCall, type ToolDispatch, type ToolHandler } from './tool-dispatch.js'
-
-export interface RoleState {
-	history: Message[]
-	lastPromptTokens: number
-	recentCompactionPromptTokens: Array<number>
-	recentToolCalls: RecentToolCall[]
-	toolCallCount: number
-	generatedTokens: number
-	// Consecutive endpoint rejections for context size, reset on the first successful call. Bounds the compact-and-retry loop so a role whose request cannot be made to fit finishes with an error instead of retrying forever.
-	contextExceededAttempts: number
-	// The counts at which the last loop check fired; the next check fires when a count passes its watermark plus the (effort-scaled) threshold.
-	loopCheckToolCallWatermark: number
-	loopCheckTokenWatermark: number
-	// Context-pressure handoff state, one-shot per role instance: set to 'pending' when reported usage crosses the threshold, flipped to 'sent' when the notice is appended at the next turn boundary, and never re-armed after that — the notice asks the role to write its handoff brief and finish.
-	contextPressureNotice?: 'pending' | 'sent'
-	// Set when a context-window rejection must be answered by the context handler: the rejection is detected mid-turn (in handleLlmResult), but a handler can only run at the safe point, so the rejection details park here until the next loop top. Cleared once the handler (or the naive fallback) has run.
-	contextCompactionPending?: { promptTokens: number; contextWindow: number }
-}
-
-export interface EngineContext {
-	loadedGuild: LoadedGuild
-	depth: number
-	roleName: string
-	task: string
-	// The run's effort, set only on the entry-role context by runExecutor. The agent spawn spreads the context to children, but the directive is gated on depth 0 below, so children never receive a global effort directive — the parent decides how to translate effort into delegation instructions.
-	effort?: EffortLevel
-	// The calling role's name, omitted for the entry role at depth 0 so a reviewer can distinguish a root role from a child and render.ts can build the parent→child tree.
-	parent?: string
-	// The calling role's instance id, omitted for the entry role. Lets the interrupt platform walk the live delegation chain (plan-modification routing).
-	parentRoleId?: string
-	// Set when this invocation is an interrupt handler serving the named target instance: the drain point skips the handler so a handler can never interrupt itself or consume operator requests meant for real work roles.
-	handlerOf?: string
-	// The workspace-relative path to the run's log.jsonl, interpolated into the inquiry handler's briefing so finished roles — which have no live conversation to inspect — remain researchable from the log and the workspace. Spreads to every child and handler context with the rest of the run-scoped fields.
-	runLogPath?: string
-}
-
-export interface EngineDependencies {
-	llmCaller: LlmCaller
-	appendLog: AppendLog
-	additionalToolHandlers: Record<string, ToolHandler>
-	humanBackend: HumanBackend
-	roleRegistry: RoleRegistry
-	interruptQueue: InterruptQueue
-	// The run's learned context ceiling, shared across roles so one role's wall-hit tightens every role's pressure threshold. Created per run by runExecutor.
-	contextPressureTracker: ContextPressureTracker
-	// The run's checkpoint recorder, created per run by runExecutor; every frame registers on start and the leaf writes the role stack at each safe point so a service restart can resume the run.
-	checkpointRecorder: CheckpointRecorder
-}
 
 interface DispatchContext {
 	dispatch: ToolDispatch
@@ -85,15 +35,6 @@ function serializeToolResult(result: ToolResult, maxChars: number): string {
 		text = JSON.stringify({ kind: result.kind, message: result.message, details: result.details })
 	}
 	return truncateToolOutput(text, maxChars).text
-}
-
-function logEvent(appendLog: AppendLog, type: string, payload: unknown): void {
-	const event: LogEvent = {
-		timestamp: new Date().toISOString(),
-		type,
-		payload,
-	}
-	appendLog(event)
 }
 
 // Builds the role_finished payload, extending the legacy {role, status} with the instance id, depth, an optional parent, and the result-card summary/error so render.ts can build the parent→child tree and a reviewer reading only log.jsonl can see why a role finished (especially why it errored — without this, an erroring role's explanation lives only on the returned ResultCard / meta.json, never in the log stream).
@@ -161,84 +102,6 @@ function llmCallPayload(roleName: string, messages: Message[], llmResult: LlmCal
 		return payload
 	}
 	return { role: roleName, messageCount }
-}
-
-// The recovery loop for a context-window rejection: each rejection compacts with a fresh endpoint-reported token count, so the estimate recalibrates on every attempt. Three attempts give the estimate room to converge without letting a hopeless request spin.
-const MAX_CONTEXT_RECOVERY_ATTEMPTS = 3
-// Compact to this fraction of the window, leaving headroom for estimator error and the completion reservation.
-const CONTEXT_RECOVERY_TARGET_FRACTION = 0.7
-
-// The platform notice a role receives after the executor compacted its conversation following a context-window rejection. It is a user message, not a synthetic tool result: on OpenAI-compatible endpoints a tool message must answer an assistant tool_call, so an orphan tool message would make the recovery request itself a malformed 400.
-function contextRecoveryNotice(llmResult: { promptTokens: number; contextWindow: number }, report: ContextCompactionReport): string {
-	const sizePart = llmResult.promptTokens > 0 ? ` (~${llmResult.promptTokens} prompt tokens vs window ${llmResult.contextWindow})` : ` (window ${llmResult.contextWindow} tokens)`
-	return [
-		`[Platform notice — context window exceeded] Your last request to the model was rejected because this conversation had grown past the model's context window${sizePart}.`,
-		`The platform compacted this conversation so work can continue: it dropped ${report.droppedMessages} older messages, truncated ${report.truncatedToolMessages} oversized tool results, and cleared reasoning on ${report.strippedReasoningMessages} messages; the estimated prompt size is now ~${report.estimatedPromptTokens} tokens.`,
-		'Your system prompt, your original task, and your most recent messages are intact.',
-		'Continue from your most recent state; re-read files or re-run commands if you need information that was removed.',
-		'If the task cannot be completed without the removed context, call finish with status "error" and error.kind "context_budget_exceeded" so the work can be re-delegated in smaller pieces.',
-	].join(' ')
-}
-
-// The notice a role receives after the context handler compacted its conversation. Unlike the naive backstop's notice there are no drop counts to report — the handler chose what to remove, and its own summary says what.
-function contextManagedNotice(trigger: 'context_pressure' | 'context_budget_exceeded', summary: string): string {
-	const reason = trigger === 'context_pressure'
-		? 'your conversation crossed the platform\'s context-pressure threshold'
-		: 'your last request to the model was rejected because this conversation had grown past the context window'
-	return [
-		`[Platform notice — context compacted] The platform paused you and the context manager compacted this conversation because ${reason}.`,
-		`The context manager reports: ${summary}`,
-		'Your system prompt, your original task, and your most recent messages should be intact.',
-		'Continue from your most recent state; re-read files or re-run commands if you need information that was removed.',
-	].join(' ')
-}
-
-function contextExceededCard(reason: string): { kind: 'finished'; card: ResultCard } {
-	return {
-		kind: 'finished',
-		card: createResultCard('error', reason, { error: createToolError('context_budget_exceeded', reason) }),
-	}
-}
-
-// The naive in-place backstop for a context-window rejection: strip reasoning, drop the oldest turns, truncate oversized surviving tool results, then resume with a platform notice. Returns the terminal card when even the undeletable remainder cannot fit, null when the compacted role may continue. Used directly when no context handler is configured, and as the fallback when the handler cannot do better.
-function applyContextBackstop(roleState: RoleState, deps: EngineDependencies, context: EngineContext, rejection: { promptTokens: number; contextWindow: number }): ResultCard | null {
-	const report = compactHistoryForContextBudget(roleState.history, {
-		contextWindow: rejection.contextWindow,
-		promptTokens: rejection.promptTokens,
-		targetFraction: CONTEXT_RECOVERY_TARGET_FRACTION,
-	})
-	roleState.history = report.history
-	if (!report.fits) {
-		return createResultCard('error', 'Context window exceeded and the conversation cannot be compacted enough to continue', {
-			error: createToolError('context_budget_exceeded', 'Context window exceeded and the conversation cannot be compacted enough to continue'),
-		})
-	}
-	logEvent(deps.appendLog, 'context_compacted', {
-		role: context.roleName,
-		droppedMessages: report.droppedMessages,
-		truncatedToolMessages: report.truncatedToolMessages,
-		strippedReasoningMessages: report.strippedReasoningMessages,
-		estimatedPromptTokens: report.estimatedPromptTokens,
-		contextWindow: rejection.contextWindow,
-	})
-	roleState.history.push({ role: 'user', content: contextRecoveryNotice(rejection, report) })
-	return null
-}
-
-// The effective budget a role's reported prompt size is measured against: the static math (window minus the reserved completion budget) tightened by whatever the run has learned from endpoint rejections.
-function currentEffectiveBudget(context: EngineContext, deps: EngineDependencies): number {
-	const modelConfig = context.loadedGuild.config.model
-	return effectiveContextBudget(modelConfig.contextWindow, modelConfig.generation.maxTokens ?? 0, deps.contextPressureTracker.learnedCeiling)
-}
-
-// The one-shot notice a role receives when its reported prompt size crosses the pressure threshold, asking it to hand off while it still has its full context — the working agent is the best-qualified summarizer of its own work, and a fresh small conversation is the cache-cheapest continuation. The entry role's own prompt teaches it to read the notice as "wrap the run toward a resumable checkpoint" instead, since no parent can re-spawn it.
-function contextPressureNotice(promptTokens: number, effectiveBudget: number): string {
-	const percent = effectiveBudget > 0 ? Math.round((100 * promptTokens) / effectiveBudget) : 100
-	return [
-		`[Platform notice — context pressure] Your conversation has reached ${percent}% of the effective context budget (~${promptTokens} prompt tokens of ~${effectiveBudget}).`,
-		'Do not start new major work.',
-		'At the next safe point, call finish with status "error" and error.kind "context_handoff", and write the summary as a handoff brief for the fresh agent that will replace you: what is done, what remains, key file paths, decisions made, and the immediate next step.',
-	].join(' ')
 }
 
 function handleLlmResult(
@@ -395,254 +258,6 @@ function buildInitialHistory(systemPrompt: string, context: EngineContext): Mess
 	return history
 }
 
-// The marker prefix the orchestrator/planner prompts teach roles to recognize. A notice goes to the run's entry role (the chain root) as run-wide information to act on directly; a plan modification arrives only after active sub-work beneath the plan owner was aborted and asks the owner to re-plan around the change. An operator inquiry is never injected — it is answered by a fresh handler role (runInquiryHandler).
-function operatorNoticeMessage(message: string): string {
-	return `[Operator notice — a message from the operator or the platform for the run as a whole. Act on it directly, then continue your work.]\n\n${message}`
-}
-
-function planModificationMessage(message: string): string {
-	return `[Operator plan modification — active sub-work below you was aborted; integrate this change into your plan and re-delegate, continue, or finish]\n\n${message}`
-}
-
-function interruptedCard(summary: string): ResultCard {
-	return createResultCard('error', summary, { error: createToolError('interrupted', summary) })
-}
-
-// Walks the live delegation chain from the given entry up to the run's root, self first. Every ancestor is still registered because each is suspended in its `agent` tool call awaiting the descendant beneath it.
-function chainFromEntry(registry: RoleRegistry, entry: RoleRegistryEntry): RoleRegistryEntry[] {
-	const chain: RoleRegistryEntry[] = [entry]
-	let current = entry
-	while (current.parentRoleId !== undefined) {
-		const parent = registry.lookup(current.parentRoleId)
-		if (parent === undefined) break
-		chain.push(parent)
-		current = parent
-	}
-	return chain
-}
-
-// Applies a queued operator request that mutates a live role's conversation (an inquiry never reaches here — the drain answers it with a fresh handler role). A notice is injected into the chain root's (the entry role's) history as a marked user message: it lands in the root's frozen history immediately but is read when control next returns to the root (the active leaf keeps working undisturbed). A plan modification marks every chain member below the plan owner (the rootmost chain instance of the configured planOwnerRole, else the chain root) for abort and the owner for injection; the marked roles then unwind one safe point at a time as the agent-call result-card propagation reaches them — the same unwind a child error card already drives, triggered here by an external request.
-function routeOperatorInterrupt(
-	deps: EngineDependencies,
-	roleState: RoleState,
-	entry: RoleRegistryEntry,
-	config: ExecutorConfig,
-	request: InterruptRequest,
-): ResultCard | null {
-	const chain = chainFromEntry(deps.roleRegistry, entry)
-	if (request.kind === 'notice') {
-		const root = chain[chain.length - 1]
-		if (root === undefined) return null
-		root.roleState.history.push({ role: 'user', content: operatorNoticeMessage(request.message) })
-		logEvent(deps.appendLog, 'operator_notice', { role: root.roleName, roleId: root.roleId, message: request.message })
-		return null
-	}
-	const planOwnerRole = config.interruptTriggers?.planOwnerRole
-	let target = chain[chain.length - 1]
-	if (target === undefined) return null
-	if (planOwnerRole !== undefined) {
-		for (const candidate of chain) {
-			if (candidate.roleName === planOwnerRole) target = candidate
-		}
-	}
-	const aborted: string[] = []
-	for (const member of chain) {
-		if (member.roleId === target.roleId) break
-		member.planAbort = true
-		aborted.push(member.roleId)
-	}
-	target.planInjection = request.message
-	logEvent(deps.appendLog, 'plan_modification', { target: target.roleId, targetRole: target.roleName, message: request.message, aborted })
-	if (entry.planAbort === true) {
-		return interruptedCard('Aborted by an operator plan modification')
-	}
-	if (entry.planInjection !== undefined) {
-		entry.planInjection = undefined
-		roleState.history.push({ role: 'user', content: planModificationMessage(request.message) })
-	}
-	return null
-}
-
-// Suspends the active role and invokes the guild-configured handler role against its frozen (registered) state, then applies the handler's trigger_interrupt action: continue resumes unchanged, redirect resumes with the handler's message already injected (by the tool) into the target's history, abort finishes the target with a loop_detected card. The interrupt event lands immediately before the handler's role_start so the interaction model roots the handler under a fresh interrupt participant.
-async function runInterruptHandler(
-	deps: EngineDependencies,
-	context: EngineContext,
-	entry: RoleRegistryEntry,
-	handlerRole: string,
-	config: ExecutorConfig,
-): Promise<ResultCard | null> {
-	const task = [
-		`The platform flagged role instance "${entry.roleId}" (role "${context.roleName}") for a loop check.`,
-		`It has made ${entry.roleState.toolCallCount} tool calls and generated ${entry.roleState.generatedTokens} tokens so far.`,
-		'Investigate whether it is stuck in a loop, then call trigger_interrupt with that role-instance id and your decision.',
-	].join(' ')
-	logEvent(deps.appendLog, 'interrupt', { trigger: 'loop_check', handler: handlerRole, target: entry.roleId })
-	const handlerCard = await runRole(deps, {
-		...context,
-		depth: Math.min(context.depth + 1, config.maxAgentDepth),
-		roleName: handlerRole,
-		task,
-		parent: context.roleName,
-		parentRoleId: entry.roleId,
-		handlerOf: entry.roleId,
-	})
-	const action = entry.interruptAction
-	entry.interruptAction = undefined
-	if (action === undefined) {
-		// A handler that finishes without calling trigger_interrupt decides nothing; the target resumes unchanged. The handler's own outcome is logged for the reviewer.
-		logEvent(deps.appendLog, 'interrupt_resolved', { trigger: 'loop_check', handler: handlerRole, target: entry.roleId, action: 'continue', handlerStatus: handlerCard.status })
-		return null
-	}
-	logEvent(deps.appendLog, 'interrupt_resolved', { trigger: 'loop_check', handler: handlerRole, target: entry.roleId, action: action.action })
-	if (action.action === 'abort') {
-		const summary = action.reason !== '' ? action.reason : 'Aborted by the loop-check handler'
-		return createResultCard('error', summary, { error: createToolError('loop_detected', action.reason) })
-	}
-	return null
-}
-
-// Suspends the role and invokes the configured context handler against its frozen (registered) state — the same preempt-and-resume interlude as the loop-check handler, so it logs the same interrupt/interrupt_resolved pair and the interaction model roots the handler on a fresh interrupt stack. The target always resumes afterwards: a successful handler leaves a compacted history; a failed one leaves the history untouched and the caller falls back (the handoff notice at depth 0, the naive backstop at the wall).
-async function runContextManagerHandler(
-	deps: EngineDependencies,
-	context: EngineContext,
-	entry: RoleRegistryEntry,
-	config: ExecutorConfig,
-	trigger: 'context_pressure' | 'context_budget_exceeded',
-	reported: { promptTokens: number; budgetTokens: number },
-): Promise<ResultCard> {
-	const handlerRole = config.contextHandlerRole
-	if (handlerRole === undefined) throw new Error('runContextManagerHandler called without executor.contextHandlerRole configured')
-	const task = trigger === 'context_pressure'
-		? [
-			`The platform flagged role instance "${entry.roleId}" (role "${context.roleName}"): its conversation crossed the context-pressure threshold (${reported.promptTokens} reported prompt tokens against an effective budget of ${reported.budgetTokens}).`,
-			`Compact its conversation now: inspect it with list_role_messages, read_message_window, and search_role_blocks, prune it with edit_context (targetRole "${entry.roleId}"), confirm the reduction with context_info (targetRole "${entry.roleId}"), then call finish.`,
-			'It resumes its work when you finish, so preserve what it needs to continue.',
-		].join(' ')
-		: [
-			`Role instance "${entry.roleId}" (role "${context.roleName}") had a request rejected by the model endpoint for exceeding the context window (${reported.promptTokens} reported prompt tokens against a window of ${reported.budgetTokens}). Its next request fails again unless the conversation shrinks decisively.`,
-			`Compact its conversation now: inspect it with list_role_messages, read_message_window, and search_role_blocks, prune it with edit_context (targetRole "${entry.roleId}"), confirm the reduction with context_info (targetRole "${entry.roleId}"), then call finish.`,
-			'It resumes its work when you finish, so preserve what it needs to continue.',
-		].join(' ')
-	logEvent(deps.appendLog, 'interrupt', { trigger, handler: handlerRole, target: entry.roleId })
-	const handlerCard = await runRole(deps, {
-		...context,
-		depth: Math.min(context.depth + 1, config.maxAgentDepth),
-		roleName: handlerRole,
-		task,
-		parent: context.roleName,
-		parentRoleId: entry.roleId,
-		handlerOf: entry.roleId,
-	})
-	if (handlerCard.status === 'success') {
-		logEvent(deps.appendLog, 'interrupt_resolved', { trigger, handler: handlerRole, target: entry.roleId, action: 'compacted' })
-	} else {
-		logEvent(deps.appendLog, 'interrupt_resolved', { trigger, handler: handlerRole, target: entry.roleId, action: 'failed', handlerStatus: handlerCard.status })
-	}
-	return handlerCard
-}
-
-// Suspends the active role and invokes the configured inquiry handler role to answer the operator's question — the same preempt-and-resume interlude as the loop-check and context handlers, so it logs the same interrupt/interrupt_resolved pair and the interaction model roots the handler on a fresh interrupt stack. The handler is a fresh agent that was never given the run's conversations: the briefing lists the live (suspended) instances root first and points at the run log and the workspace for roles that already finished. Its finish-card summary is the answer shown to the operator. The target always resumes afterwards, whatever the handler did — a question never finishes a run.
-async function runInquiryHandler(
-	deps: EngineDependencies,
-	context: EngineContext,
-	entry: RoleRegistryEntry,
-	config: ExecutorConfig,
-	request: InterruptRequest,
-): Promise<void> {
-	const handlerRole = config.inquiryHandlerRole
-	if (handlerRole === undefined) {
-		// A run without an inquiry handler drops the question rather than dying over it: the operator gets no answer, but the work continues.
-		logEvent(deps.appendLog, 'inquiry_dropped', { message: request.message, reason: 'executor.inquiryHandlerRole is not configured' })
-		return
-	}
-	// The chain from the draining leaf IS the entire live role set in this sequential engine; chainFromEntry is leaf-first, so reverse it for the root-first briefing list.
-	const liveInstances = chainFromEntry(deps.roleRegistry, entry).reverse()
-	const instanceLines = liveInstances.map((member) => `- ${member.roleId} (${member.roleName}, depth ${member.depth})${member.parentRoleId !== undefined ? `, child of ${member.parentRoleId}` : ''}`)
-	// The log pointer is a separate sentence so an absent runLogPath never interpolates the string 'undefined' into the briefing.
-	const finishedRolesNote = context.runLogPath !== undefined
-		? `Roles that already finished have no live conversation; their work is recorded in the run log at ${context.runLogPath} (its llm_call events carry the full sent and received messages) and in the workspace itself, which you can read with the file tools.`
-		: 'Roles that already finished have no live conversation; their work is recorded in the workspace itself, which you can read with the file tools.'
-	const task = [
-		"[Operator inquiry] The operator interrupted the run to ask a question. Answer it on the run's behalf.",
-		'',
-		'Question:',
-		request.message,
-		'',
-		'You are a fresh agent and were not given the run\'s conversations — investigate with your tools before answering.',
-		'Live role instances (suspended while you work), root first:',
-		...instanceLines,
-		'',
-		'Read a live instance\'s conversation with list_role_messages, read_message_window, search_role_blocks, recent_role_tool_calls, or context_info (targetRole is the instance id).',
-		finishedRolesNote,
-		'When you know the answer, call finish with status "success" and put the answer, in plain language, in the summary — the summary is shown to the operator as your answer. Do not modify the workspace or any role\'s conversation.',
-	].join('\n')
-	logEvent(deps.appendLog, 'interrupt', { trigger: 'inquiry', handler: handlerRole, target: entry.roleId, message: request.message })
-	const handlerCard = await runRole(deps, {
-		...context,
-		depth: Math.min(context.depth + 1, config.maxAgentDepth),
-		roleName: handlerRole,
-		task,
-		parent: context.roleName,
-		parentRoleId: entry.roleId,
-		handlerOf: entry.roleId,
-	})
-	if (handlerCard.status === 'success') {
-		logEvent(deps.appendLog, 'interrupt_resolved', { trigger: 'inquiry', handler: handlerRole, target: entry.roleId, action: 'answered', summary: handlerCard.summary })
-	} else {
-		logEvent(deps.appendLog, 'interrupt_resolved', { trigger: 'inquiry', handler: handlerRole, target: entry.roleId, action: 'failed', handlerStatus: handlerCard.status, summary: handlerCard.summary })
-	}
-}
-
-// The platform's single safe point, run at the top of every turn: no LLM call is in flight here, so suspending or unwinding the role cannot tear a turn. Returns a ResultCard when the role must finish, or null to continue the turn.
-// Order: marks set by an earlier routing first, then (for non-handler roles only) the loop-check cadence, then one queued operator request.
-async function drainInterrupts(
-	deps: EngineDependencies,
-	context: EngineContext,
-	roleState: RoleState,
-	entry: RoleRegistryEntry,
-	config: ExecutorConfig,
-): Promise<ResultCard | null> {
-	if (entry.planAbort === true) {
-		return interruptedCard('Aborted by an operator plan modification')
-	}
-	if (entry.planInjection !== undefined) {
-		const message = entry.planInjection
-		entry.planInjection = undefined
-		roleState.history.push({ role: 'user', content: planModificationMessage(message) })
-	}
-
-	if (context.handlerOf !== undefined) return null
-
-	const triggers = config.interruptTriggers
-	if (triggers !== undefined && context.roleName !== triggers.handlerRole) {
-		// The per-tier cadence scale is a tuning table preserving the old threshold × (effort + 1) spread of 2×–6×; a context without effort (a pre-effort checkpoint's frames) gets the most frequent checking.
-		const scaleByEffort: Record<EffortLevel, number> = { quick: 2, standard: 4, thorough: 6 }
-		const scale = scaleByEffort[context.effort ?? 'quick']
-		const toolCallThreshold = triggers.everyToolCalls * scale
-		const tokenThreshold = triggers.everyTokens * scale
-		const fireOnToolCalls = roleState.toolCallCount >= roleState.loopCheckToolCallWatermark + toolCallThreshold
-		const fireOnTokens = roleState.generatedTokens >= roleState.loopCheckTokenWatermark + tokenThreshold
-		if (fireOnToolCalls || fireOnTokens) {
-			roleState.loopCheckToolCallWatermark = roleState.toolCallCount
-			roleState.loopCheckTokenWatermark = roleState.generatedTokens
-			const abortCard = await runInterruptHandler(deps, context, entry, triggers.handlerRole, config)
-			if (abortCard !== null) return abortCard
-		}
-	}
-
-	const request = deps.interruptQueue.drain()
-	if (request !== undefined) {
-		// An inquiry is answered by a fresh handler role against the suspended chain, never injected into a working role's history; the run continues whatever the handler did.
-		if (request.kind === 'inquiry') {
-			await runInquiryHandler(deps, context, entry, config, request)
-			return null
-		}
-		const routedCard = routeOperatorInterrupt(deps, roleState, entry, config, request)
-		if (routedCard !== null) return routedCard
-	}
-	return null
-}
-
 // The turn a resumed role was suspended in: the full tool-call list, the index of the agent call it was waiting on, and a resolver for the child card. The resolver either returns the checkpoint's recorded card or re-enters the child frame's own resume — invoked from inside the parent's suspended turn so parents register root-first exactly as in live execution.
 export interface SuspendedTurn {
 	toolCalls: ToolCall[]
@@ -768,41 +383,6 @@ export async function runRole(deps: EngineDependencies, context: EngineContext, 
 	return finalCard
 }
 
-// The resume driver: re-enters the checkpoint's role stack, letting the depth-first traversal continue. A frame with a pending suspension resolves its child card lazily from inside the suspended turn — either the recorded card, or the next frame's own resume — so the stack re-forms in the same root-first order the live recursion produces. The leaf frame re-enters at its loop top with its persisted state. runLogPath is run-scoped but not checkpointed (the log's location is a deployment fact, not run state), so the caller re-supplies it for every reconstructed context.
-export async function resumeRoleStack(deps: EngineDependencies, loadedGuild: LoadedGuild, checkpoint: RunCheckpoint, runLogPath: string): Promise<ResultCard> {
-	const resumeAt = async (index: number): Promise<ResultCard> => {
-		const frame = checkpoint.frames[index]
-		if (frame === undefined) throw new Error(`resumeRoleStack: frame ${index} missing from a checkpoint with ${checkpoint.frames.length} frames`)
-		let suspendedTurn: SuspendedTurn | undefined
-		if (frame.pending !== undefined) {
-			const recorded = frame.pending.childCard
-			suspendedTurn = {
-				toolCalls: frame.pending.toolCalls,
-				agentIndex: frame.pending.agentIndex,
-				resolveChildCard: recorded !== undefined ? () => Promise.resolve(recorded) : () => resumeAt(index + 1),
-			}
-		}
-		const context: EngineContext = {
-			loadedGuild,
-			depth: frame.depth,
-			roleName: frame.roleName,
-			task: frame.task,
-			runLogPath,
-			...(frame.parent !== undefined ? { parent: frame.parent } : {}),
-			...(frame.parentRoleId !== undefined ? { parentRoleId: frame.parentRoleId } : {}),
-			...(frame.effort !== undefined ? { effort: frame.effort } : {}),
-		}
-		return await runRole(deps, context, {
-			roleId: frame.roleId,
-			roleState: frame.roleState,
-			...(frame.planAbort === true ? { planAbort: true } : {}),
-			...(frame.planInjection !== undefined ? { planInjection: frame.planInjection } : {}),
-			...(suspendedTurn !== undefined ? { suspendedTurn } : {}),
-		})
-	}
-	return resumeAt(0)
-}
-
 // Dispatches a turn's tool calls in order, tracking agent suspensions on the checkpoint recorder so a checkpoint taken while a child runs captures where this role resumes. Shared by the live turn path (starting at 0) and the resumed-suspension path (starting after the agent call, whose result the resume already recorded).
 async function dispatchToolCallSequence(
 	deps: EngineDependencies,
@@ -858,14 +438,14 @@ async function executeRoleLoop(
 		if (completedCard !== null) return completedCard
 	}
 	while (true) {
-		const interruptCard = await drainInterrupts(deps, context, roleState, registryEntry, config)
+		const interruptCard = await drainInterrupts(runRole, deps, context, roleState, registryEntry, config)
 		if (interruptCard !== null) return interruptCard
 
 		// A queued overflow compaction runs first: the role's last request was rejected for context size and cannot succeed until the handler shrinks the history (or the naive backstop does when the handler fails).
 		if (roleState.contextCompactionPending !== undefined) {
 			const pending = roleState.contextCompactionPending
 			roleState.contextCompactionPending = undefined
-			const handlerCard = await runContextManagerHandler(deps, context, registryEntry, config, 'context_budget_exceeded', { promptTokens: pending.promptTokens, budgetTokens: pending.contextWindow })
+			const handlerCard = await runContextManagerHandler(runRole, deps, context, registryEntry, config, 'context_budget_exceeded', { promptTokens: pending.promptTokens, budgetTokens: pending.contextWindow })
 			if (handlerCard.status === 'success') {
 				roleState.history.push({ role: 'user', content: contextManagedNotice('context_budget_exceeded', handlerCard.summary) })
 			} else {
@@ -878,7 +458,7 @@ async function executeRoleLoop(
 		if (roleState.contextPressureNotice === 'pending') {
 			roleState.contextPressureNotice = 'sent'
 			if (context.depth === 0 && config.contextHandlerRole !== undefined) {
-				const handlerCard = await runContextManagerHandler(deps, context, registryEntry, config, 'context_pressure', { promptTokens: roleState.lastPromptTokens, budgetTokens: currentEffectiveBudget(context, deps) })
+				const handlerCard = await runContextManagerHandler(runRole, deps, context, registryEntry, config, 'context_pressure', { promptTokens: roleState.lastPromptTokens, budgetTokens: currentEffectiveBudget(context, deps) })
 				if (handlerCard.status === 'success') {
 					roleState.history.push({ role: 'user', content: contextManagedNotice('context_pressure', handlerCard.summary) })
 				} else {

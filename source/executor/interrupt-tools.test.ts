@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import { createBuiltInToolHandlers, type BuiltInToolContext } from './builtin-tools.ts'
 import { createRoleRegistry, type RoleRegistry } from './role-registry.ts'
-import type { RoleState } from './engine.ts'
+import type { RoleState } from './engine-state.ts'
 import { stubHumanBackend } from './test-fixtures.ts'
 import type { ToolHandler } from './tool-dispatch.ts'
 import type { Message, ToolResult } from './types.js'

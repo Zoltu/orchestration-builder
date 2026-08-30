@@ -1,6 +1,6 @@
 import { isErrorKind } from './errors.js'
 import type { ContextPressureTracker } from './context-pressure.js'
-import type { EngineContext, RoleState } from './engine.js'
+import type { EngineContext, RoleState } from './engine-state.js'
 import type { WriteCheckpoint } from './persistence.js'
 import type { RoleRegistry, RoleRegistryEntry } from './role-registry.js'
 import type { EffortLevel, Message, MessageRole, ResultCard, ToolCall } from './types.js'

@@ -2,12 +2,14 @@ import { DEFAULT_EFFORT } from './effort.js'
 import type { ResultCard, RunMeta, RunOptions } from './types.js'
 import { createCheckpointRecorder, type RunCheckpoint } from './checkpoint.js'
 import { createContextPressureTracker } from './context-pressure.js'
-import { resumeRoleStack, runRole, type EngineDependencies } from './engine.js'
+import { runRole } from './engine.js'
+import type { EngineDependencies } from './engine-state.js'
 import type { HumanBackend } from './human-backend.js'
 import type { InterruptQueue } from './interrupts.js'
 import type { LlmCaller } from './llm.js'
 import type { LoadGuild } from './loader.js'
 import type { AppendLog, DeleteCheckpoint, RunDirectory, WriteCheckpoint, WriteMeta } from './persistence.js'
+import { resumeRoleStack } from './resume.js'
 import { createRoleRegistry } from './role-registry.js'
 import type { ToolHandler } from './tool-dispatch.js'
 
@@ -133,6 +135,7 @@ export async function resumeExecutor(deps: ExecutorDependencies, checkpoint: Run
 		startTime,
 	})
 	const result = await resumeRoleStack(
+		runRole,
 		buildEngineDependencies(deps, checkpoint.runId, startTime, checkpoint.registryCounter, checkpoint.learnedContextCeiling),
 		loadedGuild,
 		checkpoint,
