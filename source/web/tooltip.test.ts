@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import { Tooltip, formatTooltipContent, deriveOperationTooltip, deriveParticipantTooltip, deriveRoleTooltip, isTooltipSection } from './static/tooltip.js'
 import { stacksOf } from './static/interaction-model.js'
 import { labelsModule } from './label-resolver-fixture.js'
+import { defined } from './test-fixtures.js'
 
 // The tooltip component is browser-pure JS, so its exports arrive with inferred JS types. The interfaces and fake `h`/`renderMarkdown` below carry the shape the tests assert against, mirroring result-modal.test.ts.
 
@@ -11,25 +12,26 @@ interface Vnode {
 	children: VnodeChild[]
 }
 type VnodeChild = Vnode | string
+type VnodeChildInput = VnodeChild | VnodeChildInput[] | null | undefined | boolean
 
-function fakeH(tag: string, props: Record<string, unknown>, children: unknown): Vnode {
+function fakeH(tag: string, props: Record<string, unknown>, children: VnodeChildInput): Vnode {
 	return { tag, props, children: normalizeChildren(children) }
 }
 
 // hyperapp flattens nested arrays and drops null/boolean children; the fake mirrors that so the component can pass loose children the same way it does against the real renderer.
-function normalizeChildren(children: unknown): VnodeChild[] {
+function normalizeChildren(children: VnodeChildInput): VnodeChild[] {
 	const out: VnodeChild[] = []
 	pushChildren(out, children)
 	return out
 }
 
-function pushChildren(out: VnodeChild[], children: unknown): void {
+function pushChildren(out: VnodeChild[], children: VnodeChildInput): void {
 	if (children === null || children === undefined || typeof children === 'boolean') return
 	if (Array.isArray(children)) {
 		for (const child of children) pushChildren(out, child)
 		return
 	}
-	out.push(children as VnodeChild)
+	out.push(children)
 }
 
 function isVnode(value: VnodeChild): value is Vnode {
@@ -102,9 +104,9 @@ describe('formatTooltipContent', () => {
 		const vnode: Vnode = formatTooltipContent(fakeH, fakeRenderMarkdown, 'added the export button')
 		expect(vnode.tag).toBe('div')
 		expect(vnode.props.class).toBe('tooltip-prose markdown')
-		const marker = byTag(vnode, 'span')[0]
+		const marker = defined(byTag(vnode, 'span')[0], 'marker')
 		expect(marker).toBeDefined()
-		expect(marker!.props['data-text']).toBe('added the export button')
+		expect(marker.props['data-text']).toBe('added the export button')
 	})
 
 	test('a string that parses to a scalar (number/boolean) is treated as prose, not pretty JSON', () => {
@@ -162,20 +164,20 @@ describe('Tooltip', () => {
 		expect(card.props.class).toBe('tooltip-card')
 		const heading = byTag(card, 'p').find((p) => p.props.class === 'tooltip-heading')
 		expect(heading).toBeDefined()
-		expect(textOf(heading!)).toBe('write_file')
+		expect(textOf(defined(heading, 'heading'))).toBe('write_file')
 
 		const blocks = byTag(card, 'div').filter((d) => d.props.class === 'tooltip-section')
 		expect(blocks.length).toBe(4)
 		// arguments → pretty JSON <pre>
-		const argumentsBlock = blocks[0]!
-		expect(byTag(argumentsBlock, 'span').find((s) => s.props.class === 'tooltip-label')!.children).toContain('arguments')
+		const argumentsBlock = defined(blocks[0], 'blocks[0]')
+		expect(defined(byTag(argumentsBlock, 'span').find((s) => s.props.class === 'tooltip-label'), 'tooltip-label').children).toContain('arguments')
 		expect(byTag(argumentsBlock, 'pre').find((p) => p.props.class === 'tooltip-json')).toBeDefined()
 		// result → prose
-		expect(byTag(blocks[1]!, 'div').find((d) => d.props.class === 'tooltip-prose markdown')).toBeDefined()
+		expect(byTag(defined(blocks[1], 'blocks[1]'), 'div').find((d) => d.props.class === 'tooltip-prose markdown')).toBeDefined()
 		// status → scalar text
-		expect(byTag(blocks[2]!, 'span').find((s) => s.props.class === 'tooltip-scalar')).toBeDefined()
+		expect(byTag(defined(blocks[2], 'blocks[2]'), 'span').find((s) => s.props.class === 'tooltip-scalar')).toBeDefined()
 		// usage → pretty JSON
-		expect(byTag(blocks[3]!, 'pre').find((p) => p.props.class === 'tooltip-json')).toBeDefined()
+		expect(byTag(defined(blocks[3], 'blocks[3]'), 'pre').find((p) => p.props.class === 'tooltip-json')).toBeDefined()
 	})
 
 	test('renders no buttons (the card is a read-only hover inspector)', () => {
@@ -276,7 +278,7 @@ describe('deriveOperationTooltip', () => {
 	test('an operation id resolves to its label and a single details section carrying its markdown', () => {
 		const model = delegationModel()
 		const result = deriveOperationTooltip(model, labelsModule, TIER, 'op2')
-		expect(result.title).toBe(labelOf(model, model.operations[1]!))
+		expect(result.title).toBe(labelOf(model, defined(model.operations[1], 'model.operations[1]')))
 		expect(result.sections).toEqual([{ label: 'details', content: 'Implement the feature.' }])
 	})
 
@@ -315,9 +317,9 @@ describe('deriveParticipantTooltip', () => {
 		const result = deriveParticipantTooltip(model, labelsModule, TIER, 'role:coder:1')
 		const labels = result.sections.map((s) => s.label)
 		expect(labels).toEqual(['kind', 'status', 'summary'])
-		expect(result.sections.find((s) => s.label === 'kind')!.content).toBe('role')
-		expect(result.sections.find((s) => s.label === 'status')!.content).toBe('success')
-		expect(result.sections.find((s) => s.label === 'summary')!.content).toBe('Done implementing.')
+		expect(defined(result.sections.find((s) => s.label === 'kind'), 'kind section').content).toBe('role')
+		expect(defined(result.sections.find((s) => s.label === 'status'), 'status section').content).toBe('success')
+		expect(defined(result.sections.find((s) => s.label === 'summary'), 'summary section').content).toBe('Done implementing.')
 	})
 
 	test('an in-flight role with no completing return shows the delegation task and no status', () => {
@@ -328,16 +330,16 @@ describe('deriveParticipantTooltip', () => {
 		}
 		const result = deriveParticipantTooltip(model, labelsModule, TIER, 'role:coder:1')
 		expect(result.sections.map((s) => s.label)).toEqual(['kind', 'task'])
-		expect(result.sections.find((s) => s.label === 'task')!.content).toBe('Implement the feature.')
+		expect(defined(result.sections.find((s) => s.label === 'task'), 'task section').content).toBe('Implement the feature.')
 	})
 
 	test('a completed tool shows kind, status, and the result details', () => {
 		const model = delegationModel()
 		const result = deriveParticipantTooltip(model, labelsModule, TIER, 'tool:read_file:1')
 		expect(result.sections.map((s) => s.label)).toEqual(['kind', 'status', 'result'])
-		expect(result.sections.find((s) => s.label === 'kind')!.content).toBe('tool')
-		expect(result.sections.find((s) => s.label === 'status')!.content).toBe('success')
-		expect(result.sections.find((s) => s.label === 'result')!.content).toBe('```json\n{"content":"# Project"}\n```')
+		expect(defined(result.sections.find((s) => s.label === 'kind'), 'kind section').content).toBe('tool')
+		expect(defined(result.sections.find((s) => s.label === 'status'), 'status section').content).toBe('success')
+		expect(defined(result.sections.find((s) => s.label === 'result'), 'result section').content).toBe('```json\n{"content":"# Project"}\n```')
 	})
 
 	test('an in-flight tool with no result yet shows the arguments details', () => {
@@ -359,7 +361,7 @@ describe('deriveParticipantTooltip', () => {
 		const labels = result.sections.map((s) => s.label)
 		// kind + status (the answered return) + question (the call details, not the answer).
 		expect(labels).toEqual(['kind', 'status', 'question'])
-		expect(result.sections.find((s) => s.label === 'question')!.content).toBe('Which testing framework should I use?\n\n*Context: vitest is already installed.*')
+		expect(defined(result.sections.find((s) => s.label === 'question'), 'question section').content).toBe('Which testing framework should I use?\n\n*Context: vitest is already installed.*')
 	})
 
 	test('a pending human answerer (no answer yet) shows kind and the question, no status', () => {
@@ -397,10 +399,10 @@ describe('deriveRoleTooltip', () => {
 		}
 		const result = deriveRoleTooltip(model, labelsModule, TIER, 'coder')
 		expect(result.sections.map((s) => s.label)).toEqual(['invocations', 'total time', 'total tokens', 'status'])
-		expect(result.sections.find((s) => s.label === 'invocations')!.content).toBe(2)
-		expect(result.sections.find((s) => s.label === 'total time')!.content).toBe('10s')
-		expect(result.sections.find((s) => s.label === 'total tokens')!.content).toBe(1200)
-		expect(result.sections.find((s) => s.label === 'status')!.content).toBe('errored')
+		expect(defined(result.sections.find((s) => s.label === 'invocations'), 'invocations section').content).toBe(2)
+		expect(defined(result.sections.find((s) => s.label === 'total time'), 'total time section').content).toBe('10s')
+		expect(defined(result.sections.find((s) => s.label === 'total tokens'), 'total tokens section').content).toBe(1200)
+		expect(defined(result.sections.find((s) => s.label === 'status'), 'status section').content).toBe('errored')
 	})
 
 	test('a role still in flight (no completing returns) shows invocations only — no measured-zero time/tokens', () => {
@@ -417,7 +419,7 @@ describe('deriveRoleTooltip', () => {
 		const model = delegationModel()
 		const result = deriveRoleTooltip(model, labelsModule, TIER, 'coder')
 		expect(result.sections.map((s) => s.label)).toEqual(['invocations', 'total time', 'total tokens'])
-		expect(result.sections.find((s) => s.label === 'invocations')!.content).toBe(1)
+		expect(defined(result.sections.find((s) => s.label === 'invocations'), 'invocations section').content).toBe(1)
 	})
 
 	test('an unknown role yields an empty title-only result', () => {

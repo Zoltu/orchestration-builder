@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import { scenarios } from './static/scenarios.js'
 import { activeStack, observesOf } from './static/interaction-model.js'
+import { defined } from './test-fixtures.js'
 
 // Pull the model type off the helper signature so the validator's parameter is contextually checked against the JSDoc shape without a cast, mirroring how the model's own test derives its type.
 type InteractionModel = Parameters<typeof activeStack>[0]
@@ -132,22 +133,22 @@ describe('demo scenarios', () => {
 	})
 
 	test('retry exposes two distinct coder participant instances with the same role', () => {
-		const retry = scenarios.find((scenario) => scenario.id === 'retry-with-fresh-instance')
+		const retry = defined(scenarios.find((scenario) => scenario.id === 'retry-with-fresh-instance'), 'retry')
 		expect(retry).toBeDefined()
-		const finalFrame = retry!.frames[retry!.frames.length - 1]
+		const finalFrame = defined(retry.frames[retry.frames.length - 1], 'finalFrame')
 		expect(finalFrame).toBeDefined()
-		const coders = finalFrame!.participants.filter((participant) => participant.role === 'coder')
+		const coders = finalFrame.participants.filter((participant) => participant.role === 'coder')
 		expect(coders.length).toBe(2)
 		expect(coders[0]?.id).not.toBe(coders[1]?.id)
 	})
 
 	test('the detected-loop interrupt carries an observe whose source and destination sit in different stacks', () => {
-		const interrupt = scenarios.find((scenario) => scenario.id === 'detected-loop-interrupt')
+		const interrupt = defined(scenarios.find((scenario) => scenario.id === 'detected-loop-interrupt'), 'interrupt')
 		expect(interrupt).toBeDefined()
-		const framesWithObserve = interrupt!.frames.filter((frame) => observesOf(frame).length > 0)
+		const framesWithObserve = interrupt.frames.filter((frame) => observesOf(frame).length > 0)
 		expect(framesWithObserve.length).toBeGreaterThan(0)
-		const frame = framesWithObserve[0]!
-		const observe = observesOf(frame)[0]!
+		const frame = defined(framesWithObserve[0], 'framesWithObserve[0]')
+		const observe = defined(observesOf(frame)[0], 'observe')
 		const sourceStack = frame.operations.find((operation) => operation.destination === observe.source || operation.source === observe.source)?.stack
 		const destinationStack = frame.operations.find((operation) => operation.destination === observe.destination || operation.source === observe.destination)?.stack
 		expect(sourceStack).toBe(observe.stack)

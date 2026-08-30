@@ -4,6 +4,7 @@ import { activeOperation, activeStack, observesOf } from './static/interaction-m
 import { createLabelResolver } from './static/labels.js'
 import { labelsModule } from './label-resolver-fixture.js'
 import { scenarios, GUILD_PARTICIPANTS } from './static/scenarios.js'
+import { defined } from './test-fixtures.js'
 
 // Pull the model type off a helper signature so the inline fixtures are contextually checked against the JSDoc shape without a cast, mirroring the sibling mvc-flow-view.test.ts convention.
 type InteractionModel = Parameters<typeof observesOf>[0]
@@ -198,28 +199,28 @@ describe('renderSequenceView — message rows', () => {
 		// single-role-completion op2 transit: op2 is the coder→you return; its destination (caller) node must sit on the human column. The return's outcome color lives on the source (callee) node, so the destination node is what lands on the human column.
 		const frame = scenarioFrame('single-role-completion', 2)
 		const view = render(frame)
-		const group = messageGroupForOperation(view, 'op2')
+		const group = defined(messageGroupForOperation(view, 'op2'), 'group')
 		expect(group).toBeDefined()
-		expect(propString(group!.props, 'data-destination-role')).toBe('human')
-		const node = terminalNodeForOperationEnd(view, 'op2', 'destination')
+		expect(propString(group.props, 'data-destination-role')).toBe('human')
+		const node = defined(terminalNodeForOperationEnd(view, 'op2', 'destination'), 'node')
 		expect(node).toBeDefined()
-		expect(propString(node!.props, 'data-column-role')).toBe('human')
+		expect(propString(node.props, 'data-column-role')).toBe('human')
 	})
 
 	test('a success return source node carries the success state and an error return source node carries the error state', () => {
 		// error-return op3 transit: op3 (coder→orchestrator, outcome error) carries the error color on its source (coder) node — the callee's outcome reads on the callee's lifeline, mirroring the flow view's returning node.
 		const errorView = render(scenarioFrame('error-return', 4))
-		const errorNode = terminalNodeForOperationEnd(errorView, 'op3', 'source')
+		const errorNode = defined(terminalNodeForOperationEnd(errorView, 'op3', 'source'), 'errorNode')
 		expect(errorNode).toBeDefined()
-		expect(propString(errorNode!.props, 'data-state')).toBe('error')
-		expect((propString(errorNode!.props, 'class') ?? '').split(' ')).toContain('seq-node--error')
+		expect(propString(errorNode.props, 'data-state')).toBe('error')
+		expect((propString(errorNode.props, 'class') ?? '').split(' ')).toContain('seq-node--error')
 
 		// single-role-completion op2 transit: op2 (coder→you, outcome success) carries the success color on its source (coder) node.
 		const successView = render(scenarioFrame('single-role-completion', 2))
-		const successNode = terminalNodeForOperationEnd(successView, 'op2', 'source')
+		const successNode = defined(terminalNodeForOperationEnd(successView, 'op2', 'source'), 'successNode')
 		expect(successNode).toBeDefined()
-		expect(propString(successNode!.props, 'data-state')).toBe('success')
-		expect((propString(successNode!.props, 'class') ?? '').split(' ')).toContain('seq-node--success')
+		expect(propString(successNode.props, 'data-state')).toBe('success')
+		expect((propString(successNode.props, 'class') ?? '').split(' ')).toContain('seq-node--success')
 	})
 
 	test('a terminated return source node carries the distinct terminated treatment', () => {
@@ -238,10 +239,10 @@ describe('renderSequenceView — message rows', () => {
 			status: 'running',
 		}
 		const view = render(model)
-		const node = terminalNodeForOperationEnd(view, 'op5', 'source')
+		const node = defined(terminalNodeForOperationEnd(view, 'op5', 'source'), 'node')
 		expect(node).toBeDefined()
-		expect(propString(node!.props, 'data-state')).toBe('terminated')
-		const classValue = propString(node!.props, 'class') ?? ''
+		expect(propString(node.props, 'data-state')).toBe('terminated')
+		const classValue = propString(node.props, 'class') ?? ''
 		expect(classValue.split(' ')).toContain('seq-node--terminated')
 	})
 })
@@ -264,21 +265,21 @@ describe('renderSequenceView — same-role cross-instance loopback', () => {
 			status: 'running',
 		}
 		const view = render(model)
-		const group = messageGroupForOperation(view, 'op3')
+		const group = defined(messageGroupForOperation(view, 'op3'), 'group')
 		expect(group).toBeDefined()
-		expect(propString(group!.props, 'data-routing')).toBe('loopback')
-		expect(propString(group!.props, 'data-source-role')).toBe('coder')
-		expect(propString(group!.props, 'data-destination-role')).toBe('coder')
+		expect(propString(group.props, 'data-routing')).toBe('loopback')
+		expect(propString(group.props, 'data-source-role')).toBe('coder')
+		expect(propString(group.props, 'data-destination-role')).toBe('coder')
 		// The loopback path is a cubic curve that bows to the right of the single coder column (a straight cross-column arrow would be a single `L` command with no control points).
-		const path = allByTag(group!, 'path')[0]
+		const path = allByTag(group, 'path')[0]
 		expect(path).toBeDefined()
-		const d = propString(path!.props, 'd') ?? ''
+		const d = propString(defined(path, 'path').props, 'd') ?? ''
 		expect(d.includes('C')).toBe(true)
 		// Both instances resolve to the one coder column, so the loopback starts and ends on that column's center and bows to the right of it. The absolute x depends on the first column's label width (the canvas widens to fit edge labels), so this asserts the loopback's shape relative to its own start rather than an absolute coordinate.
 		const coords = (d.match(/-?\d+(?:\.\d+)?/g) ?? []).map(Number)
 		expect(coords.length).toBeGreaterThanOrEqual(4)
-		const startX = coords[0]!
-		const endX = coords[coords.length - 2]!
+		const startX = defined(coords[0], 'coords[0]')
+		const endX = defined(coords[coords.length - 2], 'coords[last x]')
 		expect(endX).toBe(startX)
 		const xCoords = coords.filter((_, i) => i % 2 === 0)
 		expect(Math.max(...xCoords)).toBeGreaterThan(startX)
@@ -287,10 +288,10 @@ describe('renderSequenceView — same-role cross-instance loopback', () => {
 	test('a cross-column call renders as a straight arrow, not a loopback', () => {
 		// delegation-chain op2 transit: op2 (orchestrator→planner) spans two distinct columns.
 		const view = render(scenarioFrame('delegation-chain', 2))
-		const group = messageGroupForOperation(view, 'op2')
-		expect(propString(group!.props, 'data-routing')).toBe('cross-column')
-		const path = allByTag(group!, 'path')[0]
-		const d = propString(path!.props, 'd') ?? ''
+		const group = defined(messageGroupForOperation(view, 'op2'), 'group')
+		expect(propString(group.props, 'data-routing')).toBe('cross-column')
+		const path = allByTag(group, 'path')[0]
+		const d = propString(defined(path, 'path').props, 'd') ?? ''
 		expect(d.startsWith('M')).toBe(true)
 		expect(d.includes('L')).toBe(true)
 		expect(d.includes('C')).toBe(false)
@@ -303,18 +304,18 @@ describe('renderSequenceView — observe', () => {
 		const frame = scenarioFrame('detected-loop-interrupt', 8)
 		expect(observesOf(frame).length).toBe(1)
 		const view = render(frame)
-		const group = messageGroupForOperation(view, 'op5')
+		const group = defined(messageGroupForOperation(view, 'op5'), 'group')
 		expect(group).toBeDefined()
-		expect(propString(group!.props, 'data-routing')).toBe('observe')
-		expect(propString(group!.props, 'data-kind')).toBe('observe')
-		const path = allByTag(group!, 'path')[0]
+		expect(propString(group.props, 'data-routing')).toBe('observe')
+		expect(propString(group.props, 'data-kind')).toBe('observe')
+		const path = allByTag(group, 'path')[0]
 		expect(path).toBeDefined()
 		// The line carries the static observe class and no marching/flowing class.
-		const lineClass = propString(path!.props, 'class') ?? ''
+		const lineClass = propString(defined(path, 'path').props, 'class') ?? ''
 		expect(lineClass.split(' ')).toContain('seq-message--observe')
 		expect(lineClass.split(' ')).not.toContain('seq-message--flowing')
 		// No arrowhead marker is attached: observe is a reference, not a directed call.
-		expect(propString(path!.props, 'marker-end')).toBeUndefined()
+		expect(propString(defined(path, 'path').props, 'marker-end')).toBeUndefined()
 		// No terminal node activates the destination lifeline for an observe.
 		const node = terminalNodeForOperation(view, 'op5')
 		expect(node).toBeUndefined()
@@ -325,8 +326,8 @@ describe('renderSequenceView — observe', () => {
 		const observe = observesOf(frame)[0]
 		if (observe === undefined) throw new Error('expected one observe operation')
 		const view = render(frame)
-		const path = allByTag(messageGroupForOperation(view, observe.id)!, 'path')[0]
-		const d = propString(path!.props, 'd') ?? ''
+		const path = allByTag(defined(messageGroupForOperation(view, observe.id), 'message group'), 'path')[0]
+		const d = propString(defined(path, 'path').props, 'd') ?? ''
 		// The observe is the 5th operation (index 4); its row center sits at HEADER_HEIGHT + 4 * ROW_HEIGHT + ROW_HEIGHT / 2. A static observe line is `M <sourceX> <rowY> L <destinationX> <rowY>` — both endpoints share the row y, never an arrowhead.
 		const expectedRowY = HEADER_HEIGHT + 4 * ROW_HEIGHT + ROW_HEIGHT / 2
 		const observePathPattern = new RegExp(`^M -?\\d+ ${expectedRowY} L -?\\d+ ${expectedRowY}$`)
@@ -336,25 +337,25 @@ describe('renderSequenceView — observe', () => {
 	test('an observe from the active stack into a non-adjacent paused stack still renders as a static cross-column line', () => {
 		// nested-interrupt-deep observe frame: the observe's source is the tool readMessageWindow-2 (role read_message_window, on the active interrupt-2 stack) and its destination is the coder (paused root stack) — two distinct columns with the middle interrupt-1 column between them in the flow view's row layout. The sequence view flattens to columns, so the observe renders as the same static cross-column line regardless of how many stacks sit between source and destination.
 		const frame = scenarioFrame('nested-interrupt-deep', 12)
-		const observe = observesOf(frame)[0]
+		const observe = defined(observesOf(frame)[0], 'observe')
 		expect(observe).toBeDefined()
-		expect(observe!.source).toBe('readMessageWindow-2')
-		expect(observe!.destination).toBe('coder')
+		expect(observe.source).toBe('readMessageWindow-2')
+		expect(observe.destination).toBe('coder')
 		const view = render(frame)
-		const group = messageGroupForOperation(view, observe!.id)
+		const group = defined(messageGroupForOperation(view, observe.id), 'group')
 		expect(group).toBeDefined()
-		expect(propString(group!.props, 'data-routing')).toBe('observe')
-		expect(propString(group!.props, 'data-source-role')).toBe('read_message_window')
-		expect(propString(group!.props, 'data-destination-role')).toBe('coder')
-		const path = allByTag(group!, 'path')[0]
+		expect(propString(group.props, 'data-routing')).toBe('observe')
+		expect(propString(group.props, 'data-source-role')).toBe('read_message_window')
+		expect(propString(group.props, 'data-destination-role')).toBe('coder')
+		const path = allByTag(group, 'path')[0]
 		expect(path).toBeDefined()
-		const lineClass = propString(path!.props, 'class') ?? ''
+		const lineClass = propString(defined(path, 'path').props, 'class') ?? ''
 		expect(lineClass.split(' ')).toContain('seq-message--observe')
 		for (const token of ANIMATION_CLASS_TOKENS) {
 			expect(lineClass.split(' ')).not.toContain(token)
 		}
-		expect(propString(path!.props, 'marker-end')).toBeUndefined()
-		expect(terminalNodeForOperation(view, observe!.id)).toBeUndefined()
+		expect(propString(defined(path, 'path').props, 'marker-end')).toBeUndefined()
+		expect(terminalNodeForOperation(view, observe.id)).toBeUndefined()
 	})
 })
 
@@ -399,32 +400,32 @@ describe('renderSequenceView — animation (the single invariant)', () => {
 	test("the active participant's destination node carries the active class", () => {
 		// delegation-chain op2 transit: the active operation is op2 (call orchestrator→planner), so the active participant is the destination (planner) and its destination node pulses.
 		const view = render(scenarioFrame('delegation-chain', 2))
-		const node = terminalNodeForOperationEnd(view, 'op2', 'destination')
+		const node = defined(terminalNodeForOperationEnd(view, 'op2', 'destination'), 'node')
 		expect(node).toBeDefined()
-		expect(propString(node!.props, 'data-state')).toBe('active')
-		expect((propString(node!.props, 'class') ?? '').split(' ')).toContain('seq-node--active')
+		expect(propString(node.props, 'data-state')).toBe('active')
+		expect((propString(node.props, 'class') ?? '').split(' ')).toContain('seq-node--active')
 	})
 
 	test("a paused stack's participant node does not carry the active class", () => {
 		// detected-loop-interrupt op4 transit: the coder is in_flight on the paused root stack, so its node stays neutral (no active pulse) — only the active stack's destination pulses.
 		const view = render(scenarioFrame('detected-loop-interrupt', 6))
-		const node = terminalNodeForOperationEnd(view, 'op2', 'destination')
+		const node = defined(terminalNodeForOperationEnd(view, 'op2', 'destination'), 'node')
 		expect(node).toBeDefined()
-		expect(propString(node!.props, 'data-state')).toBe('neutral')
-		expect((propString(node!.props, 'class') ?? '').split(' ')).not.toContain('seq-node--active')
+		expect(propString(node.props, 'data-state')).toBe('neutral')
+		expect((propString(node.props, 'class') ?? '').split(' ')).not.toContain('seq-node--active')
 	})
 
 	test("a return's source node carries the outcome color", () => {
 		// A return's outcome is a settled fact about the callee, so it reads on the source (callee) node regardless of whether the return is the active operation. error-return op3 transit carries error; single-role-completion op2 transit carries success.
 		const errorView = render(scenarioFrame('error-return', 4))
-		const errorSource = terminalNodeForOperationEnd(errorView, 'op3', 'source')
+		const errorSource = defined(terminalNodeForOperationEnd(errorView, 'op3', 'source'), 'errorSource')
 		expect(errorSource).toBeDefined()
-		expect(propString(errorSource!.props, 'data-state')).toBe('error')
+		expect(propString(errorSource.props, 'data-state')).toBe('error')
 
 		const successView = render(scenarioFrame('single-role-completion', 2))
-		const successSource = terminalNodeForOperationEnd(successView, 'op2', 'source')
+		const successSource = defined(terminalNodeForOperationEnd(successView, 'op2', 'source'), 'successSource')
 		expect(successSource).toBeDefined()
-		expect(propString(successSource!.props, 'data-state')).toBe('success')
+		expect(propString(successSource.props, 'data-state')).toBe('success')
 	})
 
 	test('observe never animates and carries no animation class', () => {
@@ -451,10 +452,10 @@ describe('renderSequenceView — animation (the single invariant)', () => {
 		for (const token of ANIMATION_CLASS_TOKENS) {
 			expect(op2Classes).not.toContain(token)
 		}
-		const destination = terminalNodeForOperationEnd(view, 'op2', 'destination')
+		const destination = defined(terminalNodeForOperationEnd(view, 'op2', 'destination'), 'destination')
 		expect(destination).toBeDefined()
-		expect(propString(destination!.props, 'data-state')).toBe('active')
-		expect((propString(destination!.props, 'class') ?? '').split(' ')).toContain('seq-node--active')
+		expect(propString(destination.props, 'data-state')).toBe('active')
+		expect((propString(destination.props, 'class') ?? '').split(' ')).toContain('seq-node--active')
 	})
 })
 
@@ -477,9 +478,9 @@ describe('renderSequenceView — nested interrupts under stress', () => {
 			}
 		}
 		// The two paused stacks' in_flight destinations do not pulse — only the active stack's destination does.
-		expect(propString(terminalNodeForOperationEnd(view, 'op5', 'destination')!.props, 'data-state')).toBe('active')
-		expect(propString(terminalNodeForOperationEnd(view, 'op2', 'destination')!.props, 'data-state')).toBe('neutral')
-		expect(propString(terminalNodeForOperationEnd(view, 'op4', 'destination')!.props, 'data-state')).toBe('neutral')
+		expect(propString(defined(terminalNodeForOperationEnd(view, 'op5', 'destination'), 'op5 destination node').props, 'data-state')).toBe('active')
+		expect(propString(defined(terminalNodeForOperationEnd(view, 'op2', 'destination'), 'op2 destination node').props, 'data-state')).toBe('neutral')
+		expect(propString(defined(terminalNodeForOperationEnd(view, 'op4', 'destination'), 'op4 destination node').props, 'data-state')).toBe('neutral')
 	})
 
 	test('a terminated return renders distinctly when active (marching warn) and when settled (static warn)', () => {
@@ -503,10 +504,10 @@ describe('renderSequenceView — nested interrupts under stress', () => {
 		expect(activeClasses).toContain('seq-message--terminated-flowing')
 		expect(activeClasses).not.toContain('seq-message--returning')
 		expect(activeClasses).not.toContain('seq-message--error')
-		const activeGroup = messageGroupForOperation(activeView, 'op5')!
-		const activePath = allByTag(activeGroup, 'path')[0]!
+		const activeGroup = defined(messageGroupForOperation(activeView, 'op5'), 'activeGroup')
+		const activePath = defined(allByTag(activeGroup, 'path')[0], 'activePath')
 		expect(propString(activePath.props, 'marker-end')).toBe('url(#seq-arrow-terminated-flowing)')
-		const activeSourceNode = terminalNodeForOperationEnd(activeView, 'op5', 'source')!
+		const activeSourceNode = defined(terminalNodeForOperationEnd(activeView, 'op5', 'source'), 'activeSourceNode')
 		expect(propString(activeSourceNode.props, 'data-state')).toBe('terminated')
 		expect((propString(activeSourceNode.props, 'class') ?? '').split(' ')).toContain('seq-node--terminated')
 
@@ -530,7 +531,7 @@ describe('renderSequenceView — nested interrupts under stress', () => {
 		for (const token of ANIMATION_CLASS_TOKENS) {
 			expect(settledClasses).not.toContain(token)
 		}
-		const settledSourceNode = terminalNodeForOperationEnd(settledView, 'op5', 'source')!
+		const settledSourceNode = defined(terminalNodeForOperationEnd(settledView, 'op5', 'source'), 'settledSourceNode')
 		expect(propString(settledSourceNode.props, 'data-state')).toBe('terminated')
 	})
 
@@ -547,7 +548,7 @@ describe('renderSequenceView — nested interrupts under stress', () => {
 		for (const token of ANIMATION_CLASS_TOKENS) {
 			expect(op13Classes).not.toContain(token)
 		}
-		expect(propString(terminalNodeForOperationEnd(view, 'op11', 'destination')!.props, 'data-state')).toBe('neutral')
+		expect(propString(defined(terminalNodeForOperationEnd(view, 'op11', 'destination'), 'op11 destination node').props, 'data-state')).toBe('neutral')
 	})
 })
 
@@ -573,7 +574,7 @@ describe('sequence view — hover hit areas', () => {
 		const group = messageGroupForOperation(view, 'op1')
 		const areas = hitAreas(group)
 		expect(areas.length).toBe(1)
-		const area = areas[0]!
+		const area = defined(areas[0], 'areas[0]')
 		// The band spans the two columns' lifelines (read off the rendered columns so the assertion does not duplicate the margin math) and tiles exactly one row height centered on the message row.
 		const lifelines = groupsWithClass(view, 'seq-column').map((column) => {
 			const line = allByTag(column, 'line')[0]
@@ -600,7 +601,7 @@ describe('sequence view — hover hit areas', () => {
 		for (const operationId of ['op-observe', 'op-terminate']) {
 			const areas = hitAreas(messageGroupForOperation(view, operationId))
 			expect(areas.length).toBe(1)
-			expect(propNumber(areas[0]!.props, 'height')).toBe(ROW_HEIGHT)
+			expect(propNumber(defined(areas[0], 'areas[0]').props, 'height')).toBe(ROW_HEIGHT)
 		}
 	})
 
@@ -614,11 +615,11 @@ describe('sequence view — hover hit areas', () => {
 			status: 'running',
 		}
 		const view = render(model)
-		const area = hitAreas(messageGroupForOperation(view, 'op-loop'))[0]
+		const area = defined(hitAreas(messageGroupForOperation(view, 'op-loop'))[0], 'area')
 		expect(area).toBeDefined()
 		// The U-turn leaves the column to the right and returns on the same row, so the band extends above the row band a plain message gets (covering the out leg) instead of spanning between columns.
 		const rowY = HEADER_HEIGHT + ROW_HEIGHT + ROW_HEIGHT / 2
-		expect(propNumber(area!.props, 'y')).toBeLessThan(rowY - ROW_HEIGHT / 2)
-		expect(propNumber(area!.props, 'height')).toBeGreaterThan(ROW_HEIGHT)
+		expect(propNumber(area.props, 'y')).toBeLessThan(rowY - ROW_HEIGHT / 2)
+		expect(propNumber(area.props, 'height')).toBeGreaterThan(ROW_HEIGHT)
 	})
 })

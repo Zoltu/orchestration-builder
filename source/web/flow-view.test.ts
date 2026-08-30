@@ -5,6 +5,7 @@ import { createLabelResolver } from './static/labels.js'
 import { labelsModule } from './label-resolver-fixture.js'
 import { scenarios } from './static/scenarios.js'
 import { NODE_WIDTH } from './static/svg-primitives.js'
+import { defined } from './test-fixtures.js'
 
 // Pull the model type off a helper signature so the inline fixtures are contextually checked against the JSDoc shape without a cast, mirroring the sibling interaction-model.test.ts convention.
 type InteractionModel = Parameters<typeof stacksOf>[0]
@@ -115,26 +116,27 @@ describe('renderFlowView — row projection', () => {
 		const view = render(frame)
 		const rows = groupsWithClass(view, 'flow-row')
 		expect(rows.length).toBe(2)
-		const bottomRow = rows[rows.length - 1]
+		const bottomRow = defined(rows[rows.length - 1], 'bottomRow')
 		expect(bottomRow).toBeDefined()
-		expect(propString(bottomRow!.props, 'data-stack')).toBe('interrupt-stack')
+		expect(propString(bottomRow.props, 'data-stack')).toBe('interrupt-stack')
 	})
 
 	test('each row renders its open call chain left-to-right by depth with the root at column 0', () => {
 		// delegation-chain op4 transit: the open chain is you → orchestrator → planner → coder → readFile, five nodes deep, all calls still open.
 		const frame = scenarioFrame('delegation-chain', 6)
 		const view = render(frame)
-		const row = groupsWithClass(view, 'flow-row')[0]
+		const row = defined(groupsWithClass(view, 'flow-row')[0], 'row')
 		expect(row).toBeDefined()
-		const nodes = allByTag(row!, 'g').filter((group) => (propString(group.props, 'class') ?? '').split(' ').includes('flow-node'))
+		const nodes = allByTag(row, 'g').filter((group) => (propString(group.props, 'class') ?? '').split(' ').includes('flow-node'))
 		// The root "you" sits at column 0 (translate x = 0); readFile sits at column 4 (translate x = 4 * (NODE_WIDTH + COL_GAP)). The y offset is the top-bar height plus its gap, asserted only as nonzero so the test does not pin the strip height.
 		const youNode = nodes.find((node) => propString(node.props, 'data-participant') === 'you')
 		expect(youNode).toBeDefined()
-		expect(propString(youNode!.props, 'transform')).toMatch(/^translate\(0,\d+\)$/)
+		expect(propString(defined(youNode, 'youNode').props, 'transform')).toMatch(/^translate\(0,\d+\)$/)
 		const readFileNode = nodes.find((node) => propString(node.props, 'data-participant') === 'readFile')
 		expect(readFileNode).toBeDefined()
 		const readFileX = 4 * (NODE_WIDTH + COL_GAP)
-		expect(propString(readFileNode!.props, 'transform')!.startsWith(`translate(${readFileX},`)).toBe(true)
+		const transform = defined(propString(defined(readFileNode, 'readFileNode').props, 'transform'), 'transform')
+		expect(transform.startsWith(`translate(${readFileX},`)).toBe(true)
 	})
 })
 
@@ -204,11 +206,11 @@ describe('renderFlowView — top-bar aggregation', () => {
 		}
 		const view = render(model)
 		const slots = groupsWithClass(view, 'flow-small-node')
-		const coderSlot = slots.find((slot) => propString(slot.props, 'data-role') === 'coder')
+		const coderSlot = defined(slots.find((slot) => propString(slot.props, 'data-role') === 'coder'), 'coderSlot')
 		expect(coderSlot).toBeDefined()
-		const counts = allByTag(coderSlot!, 'text').filter((text) => propString(text.props, 'class') === 'flow-small-node-count')
+		const counts = allByTag(coderSlot, 'text').filter((text) => propString(text.props, 'class') === 'flow-small-node-count')
 		expect(counts.length).toBe(1)
-		expect(counts[0]!.children.join('')).toBe('1')
+		expect(defined(counts[0], 'counts[0]').children.join('')).toBe('1')
 	})
 
 	test('the top bar carries one slot per role/tool type that has ever run', () => {
@@ -226,15 +228,15 @@ describe('renderFlowView — lingering return legs', () => {
 		// delegation-chain op5 transit: readFile has returned to coder, but coder has not produced its next action, so readFile lingers at its call-depth column with a return edge back to coder.
 		const frame = scenarioFrame('delegation-chain', 8)
 		const view = render(frame)
-		const row = groupsWithClass(view, 'flow-row')[0]
+		const row = defined(groupsWithClass(view, 'flow-row')[0], 'row')
 		expect(row).toBeDefined()
-		const readFileNode = allByTag(row!, 'g').find((group) => {
+		const readFileNode = allByTag(row, 'g').find((group) => {
 			if (!(propString(group.props, 'class') ?? '').split(' ').includes('flow-node')) return false
 			return propString(group.props, 'data-participant') === 'readFile'
 		})
 		expect(readFileNode).toBeDefined()
-		expect(propBoolean(readFileNode!.props, 'data-lingering')).toBe(true)
-		const returnEdges = allByTag(row!, 'g').filter((group) => (propString(group.props, 'class') ?? '').split(' ').includes('flow-edge--return'))
+		expect(propBoolean(defined(readFileNode, 'readFileNode').props, 'data-lingering')).toBe(true)
+		const returnEdges = allByTag(row, 'g').filter((group) => (propString(group.props, 'class') ?? '').split(' ').includes('flow-edge--return'))
 		expect(returnEdges.length).toBe(1)
 	})
 
@@ -242,19 +244,19 @@ describe('renderFlowView — lingering return legs', () => {
 		// delegation-chain op6 transit: coder has now returned to planner, so readFile's lingering ended and it left for the top bar; the new lingering return is coder → planner.
 		const frame = scenarioFrame('delegation-chain', 10)
 		const view = render(frame)
-		const row = groupsWithClass(view, 'flow-row')[0]
+		const row = defined(groupsWithClass(view, 'flow-row')[0], 'row')
 		expect(row).toBeDefined()
-		const readFileStillLingering = allByTag(row!, 'g').some((group) => {
+		const readFileStillLingering = allByTag(row, 'g').some((group) => {
 			if (!(propString(group.props, 'class') ?? '').split(' ').includes('flow-node')) return false
 			return propString(group.props, 'data-participant') === 'readFile'
 		})
 		expect(readFileStillLingering).toBe(false)
-		const coderNode = allByTag(row!, 'g').find((group) => {
+		const coderNode = allByTag(row, 'g').find((group) => {
 			if (!(propString(group.props, 'class') ?? '').split(' ').includes('flow-node')) return false
 			return propString(group.props, 'data-participant') === 'coder'
 		})
 		expect(coderNode).toBeDefined()
-		expect(propBoolean(coderNode!.props, 'data-lingering')).toBe(true)
+		expect(propBoolean(defined(coderNode, 'coderNode').props, 'data-lingering')).toBe(true)
 	})
 
 	test('a lingering return after a terminate maps to the surviving call, not the terminated one', () => {
@@ -280,15 +282,15 @@ describe('renderFlowView — lingering return legs', () => {
 		const view = render(model)
 		const rows = groupsWithClass(view, 'flow-row')
 		expect(rows.length).toBe(1)
-		const lingering = allByTag(rows[0]!, 'g').find((group) => {
+		const lingering = allByTag(defined(rows[0], 'rows[0]'), 'g').find((group) => {
 			if (!(propString(group.props, 'class') ?? '').split(' ').includes('flow-node')) return false
 			return propBoolean(group.props, 'data-lingering')
 		})
 		expect(lingering).toBeDefined()
-		expect(propString(lingering!.props, 'data-participant')).toBe('orchestrator')
-		const returnEdges = allByTag(rows[0]!, 'g').filter((group) => (propString(group.props, 'class') ?? '').split(' ').includes('flow-edge--return'))
+		expect(propString(defined(lingering, 'lingering').props, 'data-participant')).toBe('orchestrator')
+		const returnEdges = allByTag(defined(rows[0], 'rows[0]'), 'g').filter((group) => (propString(group.props, 'class') ?? '').split(' ').includes('flow-edge--return'))
 		expect(returnEdges.length).toBe(1)
-		expect(propString(returnEdges[0]!.props, 'data-operation')).toBe('op6')
+		expect(propString(defined(returnEdges[0], 'returnEdges[0]').props, 'data-operation')).toBe('op6')
 	})
 
 	test('the terminal return lingers on its single transit frame with an animated return edge and You active', () => {
@@ -296,22 +298,22 @@ describe('renderFlowView — lingering return legs', () => {
 		const frame = scenarioFrame('single-role-completion', 2)
 		expect(frame.status).toBe('success')
 		const view = render(frame)
-		const row = groupsWithClass(view, 'flow-row')[0]
+		const row = defined(groupsWithClass(view, 'flow-row')[0], 'row')
 		expect(row).toBeDefined()
-		const coderNode = allByTag(row!, 'g').find((group) => {
+		const coderNode = allByTag(row, 'g').find((group) => {
 			if (!(propString(group.props, 'class') ?? '').split(' ').includes('flow-node')) return false
 			return propString(group.props, 'data-participant') === 'coder'
 		})
 		expect(coderNode).toBeDefined()
-		expect(propBoolean(coderNode!.props, 'data-lingering')).toBe(true)
+		expect(propBoolean(defined(coderNode, 'coderNode').props, 'data-lingering')).toBe(true)
 		expect(pathHasClass(pathForOperation(view, 'op2'), 'graph-edge--returning')).toBe(true)
 		expect(activeParticipant(frame)).toBe('you')
-		const youNode = allByTag(row!, 'g').find((group) => {
+		const youNode = allByTag(row, 'g').find((group) => {
 			if (!(propString(group.props, 'class') ?? '').split(' ').includes('flow-node')) return false
 			return propString(group.props, 'data-participant') === 'you'
 		})
 		expect(youNode).toBeDefined()
-		const youActive = allByTag(youNode!, 'g').some((group) => (propString(group.props, 'class') ?? '').split(' ').includes('graph-node--active'))
+		const youActive = allByTag(defined(youNode, 'youNode'), 'g').some((group) => (propString(group.props, 'class') ?? '').split(' ').includes('graph-node--active'))
 		expect(youActive).toBe(true)
 		expect(allByTag(view, 'g').filter((group) => (propString(group.props, 'class') ?? '').split(' ').includes('flow-cta')).length).toBe(1)
 	})
@@ -326,20 +328,20 @@ describe('renderFlowView — observe lines', () => {
 		const view = render(frame)
 		const observeEdges = allByTag(view, 'g').filter((group) => (propString(group.props, 'class') ?? '').split(' ').includes('flow-edge--observe'))
 		expect(observeEdges.length).toBe(1)
-		const observeEdge = observeEdges[0]!
+		const observeEdge = defined(observeEdges[0], 'observeEdge')
 		expect(propString(observeEdge.props, 'data-source')).toBe('readMessageWindow')
 		expect(propString(observeEdge.props, 'data-destination')).toBe('coder')
 		// The path itself is dashed so the observe reads as a static reference, not an in-flight call.
 		const path = allByTag(observeEdge, 'path')[0]
 		expect(path).toBeDefined()
-		expect(propString(path!.props, 'stroke-dasharray')).toBe('3 3')
+		expect(propString(defined(path, 'path').props, 'stroke-dasharray')).toBe('3 3')
 	})
 
 	test('an observe never carries a flowing or returning motion class', () => {
 		const frame = scenarioFrame('detected-loop-interrupt', 8)
 		const view = render(frame)
 		const observeEdges = allByTag(view, 'g').filter((group) => (propString(group.props, 'class') ?? '').split(' ').includes('flow-edge--observe'))
-		const observeEdge = observeEdges[0]!
+		const observeEdge = defined(observeEdges[0], 'observeEdge')
 		const classValue = propString(observeEdge.props, 'class') ?? ''
 		expect(classValue).not.toContain('graph-edge--flowing')
 		expect(classValue).not.toContain('graph-edge--returning')
@@ -351,9 +353,9 @@ describe('renderFlowView — call-chain structure sanity', () => {
 		// deep-call-tree op5 transit: the open chain is five calls deep; each call edge must run from column N to column N+1.
 		const frame = scenarioFrame('deep-call-tree', 8)
 		const view = render(frame)
-		const row = groupsWithClass(view, 'flow-row')[0]
+		const row = defined(groupsWithClass(view, 'flow-row')[0], 'row')
 		expect(row).toBeDefined()
-		const callEdges = allByTag(row!, 'g').filter((group) => (propString(group.props, 'class') ?? '').split(' ').includes('flow-edge--call'))
+		const callEdges = allByTag(row, 'g').filter((group) => (propString(group.props, 'class') ?? '').split(' ').includes('flow-edge--call'))
 		expect(callEdges.length).toBe(5)
 	})
 })
@@ -402,7 +404,7 @@ describe('renderFlowView — edge animation (single invariant)', () => {
 		const view = render(frame)
 		const path = pathForOperation(view, 'op2')
 		expect(path).toBeDefined()
-		const classValue = propString(path!.props, 'class') ?? ''
+		const classValue = propString(defined(path, 'path').props, 'class') ?? ''
 		expect(classValue.split(' ').includes('graph-edge--flowing')).toBe(false)
 		expect(classValue.split(' ').includes('graph-edge--returning')).toBe(false)
 		expect(classValue.split(' ').includes('graph-edge--error')).toBe(false)
@@ -415,9 +417,9 @@ describe('renderFlowView — edge animation (single invariant)', () => {
 		const view = render(frame)
 		const observeGroups = allByTag(view, 'g').filter((group) => (propString(group.props, 'class') ?? '').split(' ').includes('flow-edge--observe'))
 		expect(observeGroups.length).toBe(1)
-		const path = allByTag(observeGroups[0]!, 'path')[0]
+		const path = allByTag(defined(observeGroups[0], 'observeGroups[0]'), 'path')[0]
 		expect(path).toBeDefined()
-		const classValue = propString(path!.props, 'class') ?? ''
+		const classValue = propString(defined(path, 'path').props, 'class') ?? ''
 		expect(classValue.split(' ').includes('graph-edge--flowing')).toBe(false)
 		expect(classValue.split(' ').includes('graph-edge--returning')).toBe(false)
 	})
@@ -460,11 +462,11 @@ describe('renderFlowView — active participant highlight', () => {
 		const flowNodes = allByTag(view, 'g').filter((group) => (propString(group.props, 'class') ?? '').split(' ').includes('flow-node'))
 		const plannerNode = flowNodes.find((group) => propString(group.props, 'data-participant') === 'planner')
 		expect(plannerNode).toBeDefined()
-		const plannerActive = allByTag(plannerNode!, 'g').some((group) => (propString(group.props, 'class') ?? '').split(' ').includes('graph-node--active'))
+		const plannerActive = allByTag(defined(plannerNode, 'plannerNode'), 'g').some((group) => (propString(group.props, 'class') ?? '').split(' ').includes('graph-node--active'))
 		expect(plannerActive).toBe(true)
 		const orchestratorNode = flowNodes.find((group) => propString(group.props, 'data-participant') === 'orchestrator')
 		expect(orchestratorNode).toBeDefined()
-		const orchestratorActive = allByTag(orchestratorNode!, 'g').some((group) => (propString(group.props, 'class') ?? '').split(' ').includes('graph-node--active'))
+		const orchestratorActive = allByTag(defined(orchestratorNode, 'orchestratorNode'), 'g').some((group) => (propString(group.props, 'class') ?? '').split(' ').includes('graph-node--active'))
 		expect(orchestratorActive).toBe(false)
 	})
 
@@ -474,9 +476,9 @@ describe('renderFlowView — active participant highlight', () => {
 		expect(activeParticipant(frame)).toBe('readMessageWindow')
 		const view = render(frame)
 		const rows = groupsWithClass(view, 'flow-row')
-		const rootRow = rows.find((row) => propString(row.props, 'data-stack') === 'root')
+		const rootRow = defined(rows.find((row) => propString(row.props, 'data-stack') === 'root'), 'rootRow')
 		expect(rootRow).toBeDefined()
-		const rootActive = allByTag(rootRow!, 'g').some((group) => (propString(group.props, 'class') ?? '').split(' ').includes('graph-node--active'))
+		const rootActive = allByTag(rootRow, 'g').some((group) => (propString(group.props, 'class') ?? '').split(' ').includes('graph-node--active'))
 		expect(rootActive).toBe(false)
 	})
 })
@@ -497,14 +499,14 @@ describe('deriveLifecycle — frame-diff node lifecycle', () => {
 		expect(lifecycle.enteringIds.size).toBe(0)
 		expect(lifecycle.enteringIds.has('coder-2')).toBe(false)
 		expect(lifecycle.enteringIds.has('coder-1')).toBe(false)
-		const departed = lifecycle.departing.find((entry) => entry.participantId === 'coder-1')
+		const departed = defined(lifecycle.departing.find((entry) => entry.participantId === 'coder-1'), 'departed')
 		expect(departed).toBeDefined()
-		expect(departed!.previousRowIndex).toBe(0)
+		expect(departed.previousRowIndex).toBe(0)
 		// coder-1 lingered one column past the open chain's innermost node while its return was in transit, so its previous column is the chain length plus one (chain length 1 → column 2).
-		expect(departed!.previousColumn).toBe(2)
-		expect(departed!.merged).toBe(true)
+		expect(departed.previousColumn).toBe(2)
+		expect(departed.merged).toBe(true)
 		// The 'coder' slot is the second slot in first-appearance order (orchestrator, coder); the human is the eternal root and never occupies a top-bar slot.
-		expect(departed!.slotIndex).toBe(1)
+		expect(departed.slotIndex).toBe(1)
 	})
 
 	test('settling the terminal return (the See Result acknowledgment) departs the lingering returner; the human root never departs', () => {
@@ -528,9 +530,9 @@ describe('deriveLifecycle — frame-diff node lifecycle', () => {
 			expect(entry.previousRowIndex).toBe(0)
 		}
 		// coder lingered one column past the row root (the open chain is empty, so the lingering column is chain length plus one = 1).
-		const coderDeparted = lifecycle.departing.find((entry) => entry.participantId === 'coder')
+		const coderDeparted = defined(lifecycle.departing.find((entry) => entry.participantId === 'coder'), 'coderDeparted')
 		expect(coderDeparted).toBeDefined()
-		expect(coderDeparted!.previousColumn).toBe(1)
+		expect(coderDeparted.previousColumn).toBe(1)
 	})
 
 	test('an entering participant is rendered with the entering class on the next frame', () => {
@@ -555,10 +557,10 @@ describe('renderFlowView — nested interrupts under stress', () => {
 		const view = render(frame)
 		const rows = groupsWithClass(view, 'flow-row')
 		expect(rows.length).toBe(3)
-		const bottomRow = rows[rows.length - 1]
+		const bottomRow = defined(rows[rows.length - 1], 'bottomRow')
 		expect(bottomRow).toBeDefined()
-		expect(propString(bottomRow!.props, 'data-stack')).toBe('interrupt-2-stack')
-		expect(propString(bottomRow!.props, 'data-row-index')).toBe('2')
+		expect(propString(bottomRow.props, 'data-stack')).toBe('interrupt-2-stack')
+		expect(propString(bottomRow.props, 'data-row-index')).toBe('2')
 	})
 
 	test('resolving the inner stack resumes the outer stack as the new bottom row', () => {
@@ -569,7 +571,7 @@ describe('renderFlowView — nested interrupts under stress', () => {
 		const view = render(frame)
 		const rows = groupsWithClass(view, 'flow-row')
 		expect(rows.length).toBe(2)
-		expect(propString(rows[rows.length - 1]!.props, 'data-stack')).toBe('interrupt-1-stack')
+		expect(propString(defined(rows[rows.length - 1], 'rows[last]').props, 'data-stack')).toBe('interrupt-1-stack')
 	})
 
 	test("a paused stack's in_flight call renders frozen while the active stack's in_flight call marches", () => {
@@ -583,7 +585,7 @@ describe('renderFlowView — nested interrupts under stress', () => {
 		for (const operationId of ['op2', 'op4']) {
 			const path = pathForOperation(view, operationId)
 			expect(path).toBeDefined()
-			const tokens = (propString(path!.props, 'class') ?? '').split(' ')
+			const tokens = (propString(defined(path, 'path').props, 'class') ?? '').split(' ')
 			expect(tokens).not.toContain('graph-edge--flowing')
 			expect(tokens).not.toContain('graph-edge--returning')
 			expect(tokens).not.toContain('graph-edge--error')
@@ -595,23 +597,23 @@ describe('renderFlowView — nested interrupts under stress', () => {
 	test('an observe line crosses from the active stack into a non-adjacent paused row', () => {
 		// nested-interrupt-deep observe frame: the observe's source is the tool readMessageWindow-2 — the loop_detector agent calls the tool, and the tool reads the coder's history. The source sits in the active interrupt-2-stack (row 2) and its destination (coder) in the paused root stack (row 0), skipping the middle interrupt-1 row. The observe must route across that gap as a static dashed line.
 		const frame = scenarioFrame('nested-interrupt-deep', 12)
-		const observe = observesOf(frame)[0]
+		const observe = defined(observesOf(frame)[0], 'observe')
 		expect(observe).toBeDefined()
-		expect(observe!.source).toBe('readMessageWindow-2')
-		expect(observe!.destination).toBe('coder')
+		expect(observe.source).toBe('readMessageWindow-2')
+		expect(observe.destination).toBe('coder')
 		const view = render(frame)
 		const observeEdges = allByTag(view, 'g').filter((group) => (propString(group.props, 'class') ?? '').split(' ').includes('flow-edge--observe'))
 		expect(observeEdges.length).toBe(1)
-		expect(propString(observeEdges[0]!.props, 'data-source')).toBe('readMessageWindow-2')
-		expect(propString(observeEdges[0]!.props, 'data-destination')).toBe('coder')
+		expect(propString(defined(observeEdges[0], 'observeEdges[0]').props, 'data-source')).toBe('readMessageWindow-2')
+		expect(propString(defined(observeEdges[0], 'observeEdges[0]').props, 'data-destination')).toBe('coder')
 		// The source and destination land in rows 2 and 0 respectively (non-adjacent), confirmed by locating the row each participant renders in.
 		const rows = groupsWithClass(view, 'flow-row')
 		const sourceRow = rows.find((row) => allByTag(row, 'g').some((group) => propString(group.props, 'data-participant') === 'readMessageWindow-2'))
 		const destinationRow = rows.find((row) => allByTag(row, 'g').some((group) => propString(group.props, 'data-participant') === 'coder'))
 		expect(sourceRow).toBeDefined()
 		expect(destinationRow).toBeDefined()
-		const sourceIndex = Number(propString(sourceRow!.props, 'data-row-index'))
-		const destinationIndex = Number(propString(destinationRow!.props, 'data-row-index'))
+		const sourceIndex = Number(propString(defined(sourceRow, 'sourceRow').props, 'data-row-index'))
+		const destinationIndex = Number(propString(defined(destinationRow, 'destinationRow').props, 'data-row-index'))
 		expect(Math.abs(sourceIndex - destinationIndex)).toBeGreaterThan(1)
 	})
 
@@ -643,7 +645,7 @@ describe('renderFlowView — nested interrupts under stress', () => {
 		})
 		expect(activeCoderWrap).toBeDefined()
 		// A 'terminated' return outcome colors the return line (warn-toned) but not the node — the node was killed externally and did not succeed or fail, so the orange border comes only from a terminate op targeting the node, not from the return outcome.
-		const activeCoderInner = allByTag(activeCoderWrap!, 'g').find((group) => (propString(group.props, 'class') ?? '').split(' ').includes('graph-node--terminated'))
+		const activeCoderInner = allByTag(defined(activeCoderWrap, 'activeCoderWrap'), 'g').find((group) => (propString(group.props, 'class') ?? '').split(' ').includes('graph-node--terminated'))
 		expect(activeCoderInner).toBeUndefined()
 
 		// Once the return settles (working phase), the returner has already departed — neither the coder node nor the op5 return edge is drawn on the root row.

@@ -1,8 +1,9 @@
 import { describe, expect, test } from 'bun:test'
 import { deriveDemoFrameModel, DEMO_SCENARIOS } from './demo-fixtures.js'
+import { defined } from './test-fixtures.js'
 
 function frameModel(scenarioId: string, frameIndex: number): ReturnType<typeof deriveDemoFrameModel> {
-	const scenario = DEMO_SCENARIOS.find((s) => s.id === scenarioId)!
+	const scenario = defined(DEMO_SCENARIOS.find((s) => s.id === scenarioId), 'scenario')
 	return deriveDemoFrameModel(scenario, frameIndex)
 }
 
@@ -25,7 +26,7 @@ describe('demo fixtures — no structurally duplicated consecutive frames', () =
 			for (let frame = 1; frame < scenario.events.length; frame += 1) {
 				const prev = structuralKey(frameModel(scenario.id, frame - 1))
 				const curr = structuralKey(frameModel(scenario.id, frame))
-				if (curr === prev) duplicates.push(`${scenario.id} frame ${frame} (${scenario.events[frame]!.type})`)
+				if (curr === prev) duplicates.push(`${scenario.id} frame ${frame} (${defined(scenario.events[frame], `events[${frame}]`).type})`)
 			}
 		}
 		expect(duplicates).toEqual([])

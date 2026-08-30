@@ -22,6 +22,7 @@ import {
 	renderRunView,
 	toRecentLogEntry,
 } from './render.ts'
+import { defined, present } from './test-fixtures.js'
 
 // A fixed "now" so renderRunView's elapsed-time output is deterministic; completed runs use meta.endTime regardless, but in-progress views use this value.
 const NOW = '2026-01-01T00:02:00.000Z'
@@ -64,9 +65,9 @@ describe('parseLogEvents', () => {
 
 		const events = parseLogEvents(text)
 		expect(events.length).toBe(3)
-		expect(events[0]!.type).toBe('llm_call')
-		expect(events[1]!.type).toBe('tool_call')
-		expect(events[2]!.type).toBe('role_finished')
+		expect(defined(events[0], 'events[0]').type).toBe('llm_call')
+		expect(defined(events[1], 'events[1]').type).toBe('tool_call')
+		expect(defined(events[2], 'events[2]').type).toBe('role_finished')
 	})
 
 	test('skips a malformed line without aborting the rest of the tail', () => {
@@ -78,8 +79,8 @@ describe('parseLogEvents', () => {
 
 		const events = parseLogEvents(text)
 		expect(events.length).toBe(2)
-		expect(events[0]!.type).toBe('llm_call')
-		expect(events[1]!.type).toBe('tool_call')
+		expect(defined(events[0], 'events[0]').type).toBe('llm_call')
+		expect(defined(events[1], 'events[1]').type).toBe('tool_call')
 	})
 
 	test('skips a line that is not a valid log event shape', () => {
@@ -143,7 +144,7 @@ describe('deriveRoleActivity', () => {
 		const activity = deriveRoleActivity(events)
 		expect(activity.length).toBe(2)
 
-		const planner = activity[0]!
+		const planner = defined(activity[0], 'activity[0]')
 		expect(planner.role).toBe('planner')
 		expect(planner.firstSeen).toBe('t1')
 		expect(planner.lastSeen).toBe('t5')
@@ -153,7 +154,7 @@ describe('deriveRoleActivity', () => {
 		expect(planner.recentTools).toEqual(['agent'])
 		expect(planner.lastPromptTokens).toBeNull()
 
-		const coder = activity[1]!
+		const coder = defined(activity[1], 'activity[1]')
 		expect(coder.role).toBe('coder')
 		expect(coder.llmCalls).toBe(1)
 		expect(coder.toolCalls).toBe(1)
@@ -172,8 +173,8 @@ describe('deriveRoleActivity', () => {
 		]
 
 		const [coder] = deriveRoleActivity(events)
-		expect(coder!.recentTools).toEqual(['search_text', 'glob_files', 'write_file'])
-		expect(coder!.toolCalls).toBe(6)
+		expect(defined(coder, 'coder').recentTools).toEqual(['search_text', 'glob_files', 'write_file'])
+		expect(defined(coder, 'coder').toolCalls).toBe(6)
 	})
 
 	test('recentTools is empty when the role made no tool calls', () => {
@@ -181,7 +182,7 @@ describe('deriveRoleActivity', () => {
 			{ timestamp: 't1', type: 'llm_call', payload: { role: 'planner' } },
 		]
 		const [planner] = deriveRoleActivity(events)
-		expect(planner!.recentTools).toEqual([])
+		expect(defined(planner, 'planner').recentTools).toEqual([])
 	})
 
 	test('lastPromptTokens tracks the most recent llm_call usage promptTokens for the role', () => {
@@ -192,7 +193,7 @@ describe('deriveRoleActivity', () => {
 		]
 		const [planner] = deriveRoleActivity(events)
 		// The last reported context window size is the full prompt bill (cached + uncached), not the uncached share.
-		expect(planner!.lastPromptTokens).toBe(250)
+		expect(defined(planner, 'planner').lastPromptTokens).toBe(250)
 	})
 
 	test('lastPromptTokens stays null when an llm_call carries no usage', () => {
@@ -200,7 +201,7 @@ describe('deriveRoleActivity', () => {
 			{ timestamp: 't1', type: 'llm_call', payload: { role: 'planner' } },
 		]
 		const [planner] = deriveRoleActivity(events)
-		expect(planner!.lastPromptTokens).toBeNull()
+		expect(defined(planner, 'planner').lastPromptTokens).toBeNull()
 	})
 
 	test('ignores events whose payload has no role', () => {
@@ -211,7 +212,7 @@ describe('deriveRoleActivity', () => {
 
 		const activity = deriveRoleActivity(events)
 		expect(activity.length).toBe(1)
-		expect(activity[0]!.role).toBe('planner')
+		expect(defined(activity[0], 'activity[0]').role).toBe('planner')
 	})
 
 	test('returns an empty list when no roles appear in the log', () => {
@@ -237,10 +238,10 @@ describe('deriveRoleTree', () => {
 			event('role_start', { role: 'orchestrator', depth: 0, task: 'do it' }),
 			event('role_finished', { role: 'orchestrator', depth: 0, status: 'success' }),
 		]
-		const tree = deriveRoleTree(events)
+		const tree = present(deriveRoleTree(events), 'tree')
 		expect(tree).not.toBeNull()
-		expect(tree!.length).toBe(1)
-		expect(tree![0]).toEqual({
+		expect(tree.length).toBe(1)
+		expect(tree[0]).toEqual({
 			role: 'orchestrator',
 			depth: 0,
 			parent: null,
@@ -261,18 +262,18 @@ describe('deriveRoleTree', () => {
 			event('role_start', { role: 'critic', depth: 1, parent: 'orchestrator', task: 'review' }),
 			event('role_finished', { role: 'orchestrator', depth: 0, status: 'success' }),
 		]
-		const tree = deriveRoleTree(events)
+		const tree = present(deriveRoleTree(events), 'tree')
 		expect(tree).not.toBeNull()
-		expect(tree!.length).toBe(1)
-		const root = tree![0]!
+		expect(tree.length).toBe(1)
+		const root = defined(tree[0], 'tree[0]')
 		expect(root.role).toBe('orchestrator')
 		expect(root.children.length).toBe(2)
-		expect(root.children[0]!.role).toBe('coder')
-		expect(root.children[1]!.role).toBe('critic')
-		expect(root.children[0]!.parent).toBe('orchestrator')
-		expect(root.children[0]!.depth).toBe(1)
-		expect(root.children[0]!.status).toBe('success')
-		expect(root.children[1]!.status).toBeNull()
+		expect(defined(root.children[0], 'root.children[0]').role).toBe('coder')
+		expect(defined(root.children[1], 'root.children[1]').role).toBe('critic')
+		expect(defined(root.children[0], 'root.children[0]').parent).toBe('orchestrator')
+		expect(defined(root.children[0], 'root.children[0]').depth).toBe(1)
+		expect(defined(root.children[0], 'root.children[0]').status).toBe('success')
+		expect(defined(root.children[1], 'root.children[1]').status).toBeNull()
 	})
 
 	test('repeated sequential delegations to the same role are distinct nodes, each with its own status, not one merged node', () => {
@@ -284,16 +285,16 @@ describe('deriveRoleTree', () => {
 			event('role_finished', { role: 'coder', depth: 1, status: 'error', summary: 'second failed', parent: 'orchestrator' }),
 			event('role_finished', { role: 'orchestrator', depth: 0, status: 'success' }),
 		]
-		const tree = deriveRoleTree(events)
+		const tree = present(deriveRoleTree(events), 'tree')
 		expect(tree).not.toBeNull()
-		const root = tree![0]!
+		const root = defined(tree[0], 'tree[0]')
 		expect(root.children.length).toBe(2)
-		expect(root.children[0]!.role).toBe('coder')
-		expect(root.children[0]!.status).toBe('success')
-		expect(root.children[0]!.summary).toBe('first done')
-		expect(root.children[1]!.role).toBe('coder')
-		expect(root.children[1]!.status).toBe('error')
-		expect(root.children[1]!.summary).toBe('second failed')
+		expect(defined(root.children[0], 'root.children[0]').role).toBe('coder')
+		expect(defined(root.children[0], 'root.children[0]').status).toBe('success')
+		expect(defined(root.children[0], 'root.children[0]').summary).toBe('first done')
+		expect(defined(root.children[1], 'root.children[1]').role).toBe('coder')
+		expect(defined(root.children[1], 'root.children[1]').status).toBe('error')
+		expect(defined(root.children[1], 'root.children[1]').summary).toBe('second failed')
 	})
 
 	test('only the single currently-running invocation is active, even when the same role name recurs', () => {
@@ -303,23 +304,23 @@ describe('deriveRoleTree', () => {
 			event('role_finished', { role: 'coder', depth: 1, status: 'success', parent: 'orchestrator' }),
 			event('role_start', { role: 'coder', depth: 1, parent: 'orchestrator', task: 'second' }),
 		]
-		const tree = deriveRoleTree(events)
+		const tree = present(deriveRoleTree(events), 'tree')
 		expect(tree).not.toBeNull()
-		const root = tree![0]!
+		const root = defined(tree[0], 'tree[0]')
 		expect(root.active).toBe(false)
-		expect(root.children[0]!.active).toBe(false)
-		expect(root.children[1]!.active).toBe(true)
+		expect(defined(root.children[0], 'root.children[0]').active).toBe(false)
+		expect(defined(root.children[1], 'root.children[1]').active).toBe(true)
 	})
 
 	test('a child whose parent node never started becomes a root rather than being dropped', () => {
 		const events: LogEvent[] = [
 			event('role_start', { role: 'orphan', depth: 1, parent: 'missing-parent', task: 't' }),
 		]
-		const tree = deriveRoleTree(events)
+		const tree = present(deriveRoleTree(events), 'tree')
 		expect(tree).not.toBeNull()
-		expect(tree!.length).toBe(1)
-		expect(tree![0]!.role).toBe('orphan')
-		expect(tree![0]!.active).toBe(true)
+		expect(tree.length).toBe(1)
+		expect(defined(tree[0], 'tree[0]').role).toBe('orphan')
+		expect(defined(tree[0], 'tree[0]').active).toBe(true)
 	})
 
 	test('falls back to agent_call edges for a role_start that omitted parent (pre-enhancement log)', () => {
@@ -330,12 +331,13 @@ describe('deriveRoleTree', () => {
 			event('role_finished', { role: 'coder', depth: 1, status: 'success' }),
 			event('role_finished', { role: 'orchestrator', depth: 0, status: 'success' }),
 		]
-		const tree = deriveRoleTree(events)
+		const tree = present(deriveRoleTree(events), 'tree')
 		expect(tree).not.toBeNull()
-		expect(tree!.length).toBe(1)
-		expect(tree![0]!.children.length).toBe(1)
-		expect(tree![0]!.children[0]!.role).toBe('coder')
-		expect(tree![0]!.children[0]!.parent).toBe('orchestrator')
+		expect(tree.length).toBe(1)
+		const root = defined(tree[0], 'tree[0]')
+		expect(root.children.length).toBe(1)
+		expect(defined(root.children[0], 'root.children[0]').role).toBe('coder')
+		expect(defined(root.children[0], 'root.children[0]').parent).toBe('orchestrator')
 	})
 
 	test('does not throw on malformed payloads', () => {
@@ -355,51 +357,51 @@ describe('formatLogDetailSections', () => {
 	}
 
 	test('an llm_call with sent/received/finishReason/usage yields four paired sections', () => {
-		const sections = formatLogDetailSections(event('llm_call', {
+		const sections = present(formatLogDetailSections(event('llm_call', {
 			role: 'coder',
 			messageCount: 2,
 			sent: [{ role: 'system', content: 'p' }, { role: 'user', content: 't' }],
 			received: { content: 'ok', toolCalls: [] },
 			finishReason: 'stop',
 			usage: { promptTokens: 10, completionTokens: 5, totalTokens: 15 },
-		}))
+		})), 'sections')
 		expect(sections).not.toBeNull()
-		expect(sections!.map((s) => s.label)).toEqual(['sent', 'received', 'finish reason', 'usage'])
-		expect(sections![0]!.content).toEqual([{ role: 'system', content: 'p' }, { role: 'user', content: 't' }])
-		expect(sections![2]!.content).toBe('stop')
+		expect(sections.map((s) => s.label)).toEqual(['sent', 'received', 'finish reason', 'usage'])
+		expect(defined(sections[0], 'sections[0]').content).toEqual([{ role: 'system', content: 'p' }, { role: 'user', content: 't' }])
+		expect(defined(sections[2], 'sections[2]').content).toBe('stop')
 	})
 
 	test('an llm_call omitting finishReason omits the finish reason section', () => {
-		const sections = formatLogDetailSections(event('llm_call', {
+		const sections = present(formatLogDetailSections(event('llm_call', {
 			role: 'coder',
 			sent: [{ role: 'user', content: 't' }],
 			received: { toolCalls: [] },
 			usage: { promptTokens: 10, completionTokens: 5, totalTokens: 15 },
-		}))
-		expect(sections!.map((s) => s.label)).toEqual(['sent', 'received', 'usage'])
+		})), 'sections')
+		expect(sections.map((s) => s.label)).toEqual(['sent', 'received', 'usage'])
 	})
 
 	test('a tool_call arguments and a tool_result full result each shape their paired fields', () => {
-		const callSections = formatLogDetailSections(event('tool_call', { role: 'coder', tool: 'write_file', arguments: '{"path":"x"}' }))
-		expect(callSections!.map((s) => s.label)).toEqual(['arguments'])
-		expect(callSections![0]!.content).toBe('{"path":"x"}')
+		const callSections = present(formatLogDetailSections(event('tool_call', { role: 'coder', tool: 'write_file', arguments: '{"path":"x"}' })), 'callSections')
+		expect(callSections.map((s) => s.label)).toEqual(['arguments'])
+		expect(defined(callSections[0], 'callSections[0]').content).toBe('{"path":"x"}')
 
-		const resultSections = formatLogDetailSections(event('tool_result', { role: 'coder', tool: 'write_file', kind: 'success', result: { kind: 'success', data: { path: 'x', bytes: 4 } } }))
-		expect(resultSections!.map((s) => s.label)).toEqual(['result'])
-		expect(resultSections![0]!.content).toEqual({ kind: 'success', data: { path: 'x', bytes: 4 } })
+		const resultSections = present(formatLogDetailSections(event('tool_result', { role: 'coder', tool: 'write_file', kind: 'success', result: { kind: 'success', data: { path: 'x', bytes: 4 } } })), 'resultSections')
+		expect(resultSections.map((s) => s.label)).toEqual(['result'])
+		expect(defined(resultSections[0], 'resultSections[0]').content).toEqual({ kind: 'success', data: { path: 'x', bytes: 4 } })
 	})
 
 	test('a tool_call carrying both arguments and a paired result yields both sections', () => {
-		const sections = formatLogDetailSections(event('tool_result', { role: 'coder', tool: 'write_file', kind: 'success', arguments: '{"path":"y"}', result: { kind: 'success', data: { path: 'y' } } }))
-		expect(sections!.map((s) => s.label)).toEqual(['arguments', 'result'])
+		const sections = present(formatLogDetailSections(event('tool_result', { role: 'coder', tool: 'write_file', kind: 'success', arguments: '{"path":"y"}', result: { kind: 'success', data: { path: 'y' } } })), 'sections')
+		expect(sections.map((s) => s.label)).toEqual(['arguments', 'result'])
 	})
 
 	test('a role_finished with summary and error yields paired sections', () => {
-		const sections = formatLogDetailSections(event('role_finished', { role: 'coder', status: 'error', summary: 'could not parse', error: { kind: 'invalid_arguments', message: 'bad json' } }))
+		const sections = present(formatLogDetailSections(event('role_finished', { role: 'coder', status: 'error', summary: 'could not parse', error: { kind: 'invalid_arguments', message: 'bad json' } })), 'sections')
 		expect(sections).not.toBeNull()
-		expect(sections!.map((s) => s.label)).toEqual(['summary', 'error'])
-		expect(sections![0]!.content).toBe('could not parse')
-		expect(sections![1]!.content).toEqual({ kind: 'invalid_arguments', message: 'bad json' })
+		expect(sections.map((s) => s.label)).toEqual(['summary', 'error'])
+		expect(defined(sections[0], 'sections[0]').content).toBe('could not parse')
+		expect(defined(sections[1], 'sections[1]').content).toEqual({ kind: 'invalid_arguments', message: 'bad json' })
 	})
 
 	test('returns null for an event type with no paired detail', () => {
@@ -586,7 +588,7 @@ describe('renderRunView', () => {
 		expect(view.startTime).toBe('2026-01-01T00:00:00.000Z')
 		expect(view.endTime).toBe('2026-01-01T00:01:00.000Z')
 		expect(view.roles.length).toBe(1)
-		expect(view.roles[0]!.role).toBe('planner')
+		expect(defined(view.roles[0], 'view.roles[0]').role).toBe('planner')
 		expect(view.recentLog.length).toBe(2)
 		expect(view.budgets).toEqual({ elapsedSeconds: 60, toolCalls: 0, tokensUsed: null, tokenBreakdown: null })
 	})
@@ -624,8 +626,8 @@ describe('renderRunView', () => {
 
 		const view = renderRunView(snapshot, { maxLogLines: 3, now: NOW })
 		expect(view.recentLog.length).toBe(3)
-		expect(view.recentLog[0]!.timestamp).toBe('t7')
-		expect(view.recentLog[2]!.timestamp).toBe('t9')
+		expect(defined(view.recentLog[0], 'view.recentLog[0]').timestamp).toBe('t7')
+		expect(defined(view.recentLog[2], 'view.recentLog[2]').timestamp).toBe('t9')
 	})
 
 	test('uses the full log when fewer than maxLogLines events exist', () => {
@@ -664,8 +666,8 @@ describe('renderRunView', () => {
 			payload: { role: 'planner' },
 			detailSections: null,
 		})
-		expect(view.recentLog[1]!.summary).toBe('planner · agent')
-		expect(view.recentLog[1]!.payload).toEqual({ role: 'planner', tool: 'agent' })
+		expect(defined(view.recentLog[1], 'view.recentLog[1]').summary).toBe('planner · agent')
+		expect(defined(view.recentLog[1], 'view.recentLog[1]').payload).toEqual({ role: 'planner', tool: 'agent' })
 	})
 
 	test('error is null while a run is in progress', () => {
@@ -738,10 +740,12 @@ describe('renderRunView', () => {
 		})
 		const view = renderRunView(snapshot, { maxLogLines: 200, now: NOW })
 		expect(view.roleTree).not.toBeNull()
-		expect(view.roleTree!.length).toBe(1)
-		expect(view.roleTree![0]!.role).toBe('orchestrator')
-		expect(view.roleTree![0]!.children.length).toBe(1)
-		expect(view.roleTree![0]!.children[0]!.role).toBe('coder')
+		const roleTree = present(view.roleTree, 'view.roleTree')
+		expect(roleTree.length).toBe(1)
+		const rootNode = defined(roleTree[0], 'roleTree[0]')
+		expect(rootNode.role).toBe('orchestrator')
+		expect(rootNode.children.length).toBe(1)
+		expect(defined(rootNode.children[0], 'rootNode.children[0]').role).toBe('coder')
 	})
 
 	test('questionHistory pairs ask_human events with their human_answer events', () => {
@@ -820,10 +824,10 @@ describe('deriveQuestionHistory', () => {
 
 		const history = deriveQuestionHistory(events)
 		expect(history.length).toBe(2)
-		expect(history[0]!.answer).toBe('yes')
-		expect(history[0]!.answeredAt).toBe('t3')
-		expect(history[1]!.answer).toBeUndefined()
-		expect(history[1]!.answeredAt).toBeUndefined()
+		expect(defined(history[0], 'history[0]').answer).toBe('yes')
+		expect(defined(history[0], 'history[0]').answeredAt).toBe('t3')
+		expect(defined(history[1], 'history[1]').answer).toBeUndefined()
+		expect(defined(history[1], 'history[1]').answeredAt).toBeUndefined()
 	})
 
 	test('preserves the context field when present', () => {
@@ -904,7 +908,7 @@ describe('deriveInterruptHistory', () => {
 			{ timestamp: 't2', type: 'interrupt_resolved', payload: { trigger: 'inquiry', handler: 'inquiry_responder', target: 'coder-1-2', action: 'failed', handlerStatus: 'error', summary: 'the handler failed' } },
 		]
 
-		const entry = deriveInterruptHistory(events)[0]!
+		const entry = defined(deriveInterruptHistory(events)[0], 'entry')
 		if (entry.kind !== 'inquiry') throw new Error('expected inquiry')
 		expect(entry.answer).toBeNull()
 		expect(entry.answeredAt).toBeNull()
@@ -917,7 +921,7 @@ describe('deriveInterruptHistory', () => {
 			{ timestamp: 't2', type: 'interrupt_resolved', payload: { trigger: 'inquiry', handler: 'inquiry_responder', target: 'coder-1-2', action: 'answered', summary: '' } },
 		]
 
-		const entry = deriveInterruptHistory(events)[0]!
+		const entry = defined(deriveInterruptHistory(events)[0], 'entry')
 		if (entry.kind !== 'inquiry') throw new Error('expected inquiry')
 		expect(entry.answer).toBeNull()
 		expect(entry.ended).toBe(true)
@@ -933,8 +937,8 @@ describe('deriveInterruptHistory', () => {
 
 		const history = deriveInterruptHistory(events)
 		expect(history.length).toBe(2)
-		const first = history[0]!
-		const second = history[1]!
+		const first = defined(history[0], 'history[0]')
+		const second = defined(history[1], 'history[1]')
 		if (first.kind !== 'inquiry' || second.kind !== 'inquiry') throw new Error('expected inquiries')
 		expect(first.answer).toBe('answer one')
 		expect(second.answer).toBe('answer two')
@@ -1072,7 +1076,7 @@ describe('deriveBudgets', () => {
 		const logEvents: LogEvent[] = [
 			llmCallEvent('planner', 't1', { promptTokens: 100, completionTokens: 20, totalTokens: 120 }),
 		]
-		const breakdown = deriveBudgets(logEvents, meta, NOW).tokenBreakdown!
+		const breakdown = present(deriveBudgets(logEvents, meta, NOW).tokenBreakdown, 'tokenBreakdown')
 		expect(breakdown.cachedPromptTokens).toBe(0)
 		expect(breakdown.promptTokens).toBe(100)
 	})
@@ -1211,8 +1215,8 @@ describe('paginateLogEvents', () => {
 		expect(page.offset).toBe(0)
 		expect(page.limit).toBe(3)
 		expect(page.events.length).toBe(3)
-		expect(page.events[0]!.timestamp).toBe('t0')
-		expect(page.events[2]!.timestamp).toBe('t2')
+		expect(defined(page.events[0], 'page.events[0]').timestamp).toBe('t0')
+		expect(defined(page.events[2], 'page.events[2]').timestamp).toBe('t2')
 	})
 
 	test('returns a later page starting at offset', () => {
@@ -1220,16 +1224,16 @@ describe('paginateLogEvents', () => {
 		expect(page.total).toBe(10)
 		expect(page.offset).toBe(5)
 		expect(page.events.length).toBe(3)
-		expect(page.events[0]!.timestamp).toBe('t5')
-		expect(page.events[2]!.timestamp).toBe('t7')
+		expect(defined(page.events[0], 'page.events[0]').timestamp).toBe('t5')
+		expect(defined(page.events[2], 'page.events[2]').timestamp).toBe('t7')
 	})
 
 	test('returns the partial final page when fewer than limit remain', () => {
 		const page = paginateLogEvents(events(10), { offset: 8, limit: 5 })
 		expect(page.total).toBe(10)
 		expect(page.events.length).toBe(2)
-		expect(page.events[0]!.timestamp).toBe('t8')
-		expect(page.events[1]!.timestamp).toBe('t9')
+		expect(defined(page.events[0], 'page.events[0]').timestamp).toBe('t8')
+		expect(defined(page.events[1], 'page.events[1]').timestamp).toBe('t9')
 	})
 
 	test('returns an empty page with the correct total when offset is past the end', () => {
@@ -1332,8 +1336,8 @@ describe('renderConfig', () => {
 		})
 		const view = renderConfig(config, {})
 		expect(Object.keys(view.roles).sort()).toEqual(['empty', 'orchestrator'])
-		expect(view.roles.orchestrator!.tools).toEqual(['finish'])
-		expect(view.roles.empty!.tools).toEqual([])
+		expect(defined(view.roles.orchestrator, 'view.roles.orchestrator').tools).toEqual(['finish'])
+		expect(defined(view.roles.empty, 'view.roles.empty').tools).toEqual([])
 	})
 
 	test('includes every role declared in the Guild with its full tool list', () => {
@@ -1346,9 +1350,9 @@ describe('renderConfig', () => {
 		})
 		const view = renderConfig(config, {})
 		expect(Object.keys(view.roles).sort()).toEqual(['empty', 'orchestrator', 'planner'])
-		expect(view.roles.orchestrator!.tools).toEqual(['agent', 'finish'])
-		expect(view.roles.planner!.tools).toEqual(['read_file', 'glob_files', 'search_text', 'finish'])
-		expect(view.roles.empty!.tools).toEqual([])
+		expect(defined(view.roles.orchestrator, 'view.roles.orchestrator').tools).toEqual(['agent', 'finish'])
+		expect(defined(view.roles.planner, 'view.roles.planner').tools).toEqual(['read_file', 'glob_files', 'search_text', 'finish'])
+		expect(defined(view.roles.empty, 'view.roles.empty').tools).toEqual([])
 	})
 
 	test('drops role-only fields that are not part of the safe subset (systemPrompt, includeReasoning)', () => {

@@ -3,6 +3,7 @@ import type { LogEvent, RunMeta } from '../executor/types.js'
 import type { RunSnapshot } from './render.js'
 import { deriveInteractionModel } from './interaction-model-adapter.js'
 import { activeParticipant, activeStack, callChainOf, fateOf, observesOf, stacksOf, terminatesOf } from './static/interaction-model.js'
+import { defined } from './test-fixtures.js'
 
 // The helpers arrive typed from the module's JSDoc; the adapter's InteractionModel is
 // structurally the same shape, so its output is directly callable as a helper argument.
@@ -48,14 +49,14 @@ describe('deriveInteractionModel — single-role completion', () => {
 		expect(model.participants.map((p) => p.role)).toEqual(['human', 'orchestrator'])
 		expect(model.participants.map((p) => p.kind)).toEqual(['human', 'role'])
 		expect(model.operations).toHaveLength(2)
-		const call = model.operations[0]!
-		const ret = model.operations[1]!
+		const call = defined(model.operations[0], 'model.operations[0]')
+		const ret = defined(model.operations[1], 'model.operations[1]')
 		expect(call.kind).toBe('call')
 		expect(call.source).toBe('human:root')
-		expect(call.destination).toBe(model.participants[1]!.id)
+		expect(call.destination).toBe(defined(model.participants[1], 'model.participants[1]').id)
 		expect(call.details).toBe('do the thing')
 		expect(ret.kind).toBe('return')
-		expect(ret.source).toBe(model.participants[1]!.id)
+		expect(ret.source).toBe(defined(model.participants[1], 'model.participants[1]').id)
 		expect(ret.destination).toBe('human:root')
 		expect(ret.outcome).toBe('success')
 		expect(ret.details).toBe('done')
@@ -83,18 +84,18 @@ describe('deriveInteractionModel — delegation chain', () => {
 		const model = deriveInteractionModel(snapshot(events, meta('success')), NOW)
 		expect(model.participants.map((p) => `${p.role}:${p.kind}`)).toEqual(['human:human', 'orchestrator:role', 'coder:role'])
 		expect(model.operations).toHaveLength(4)
-		const callYou = model.operations[0]!
-		const callCoder = model.operations[1]!
-		const retCoder = model.operations[2]!
-		const retYou = model.operations[3]!
+		const callYou = defined(model.operations[0], 'model.operations[0]')
+		const callCoder = defined(model.operations[1], 'model.operations[1]')
+		const retCoder = defined(model.operations[2], 'model.operations[2]')
+		const retYou = defined(model.operations[3], 'model.operations[3]')
 		expect(callYou.kind).toBe('call')
 		expect(callYou.source).toBe('human:root')
-		expect(callYou.destination).toBe(model.participants[1]!.id)
-		expect(callCoder.source).toBe(model.participants[1]!.id)
-		expect(callCoder.destination).toBe(model.participants[2]!.id)
+		expect(callYou.destination).toBe(defined(model.participants[1], 'model.participants[1]').id)
+		expect(callCoder.source).toBe(defined(model.participants[1], 'model.participants[1]').id)
+		expect(callCoder.destination).toBe(defined(model.participants[2], 'model.participants[2]').id)
 		expect(callCoder.details).toBe('code it')
-		expect(retCoder.source).toBe(model.participants[2]!.id)
-		expect(retCoder.destination).toBe(model.participants[1]!.id)
+		expect(retCoder.source).toBe(defined(model.participants[2], 'model.participants[2]').id)
+		expect(retCoder.destination).toBe(defined(model.participants[1], 'model.participants[1]').id)
 		expect(retYou.destination).toBe('human:root')
 		// The parent call accumulated both orchestrator llm_calls (60 + 90); the coder call only its own (120).
 		expect(callYou.metrics?.tokens).toBe(150)
@@ -116,12 +117,12 @@ describe('deriveInteractionModel — instance-per-invocation retry', () => {
 		const model = deriveInteractionModel(snapshot(events, meta('success')), NOW)
 		const coders = model.participants.filter((p) => p.role === 'coder')
 		expect(coders).toHaveLength(2)
-		expect(coders[0]!.id).not.toBe(coders[1]!.id)
+		expect(defined(coders[0], 'coders[0]').id).not.toBe(defined(coders[1], 'coders[1]').id)
 		// The first coder return carries the error outcome; the second carries success.
 		const returns = model.operations.filter((o) => o.kind === 'return' && o.source.startsWith('role:coder:'))
 		expect(returns).toHaveLength(2)
-		expect(returns[0]!.outcome).toBe('error')
-		expect(returns[1]!.outcome).toBe('success')
+		expect(defined(returns[0], 'returns[0]').outcome).toBe('error')
+		expect(defined(returns[1], 'returns[1]').outcome).toBe('success')
 		assertHelpersSensible(model)
 	})
 })
@@ -135,8 +136,8 @@ describe('deriveInteractionModel — in-flight tool node', () => {
 		const model = deriveInteractionModel(snapshot(events, meta('running')), NOW)
 		expect(model.participants.map((p) => `${p.role}:${p.kind}`)).toEqual(['human:human', 'coder:role', 'read_file:tool'])
 		expect(model.operations).toHaveLength(2)
-		const roleCall = model.operations[0]!
-		const toolCall = model.operations[1]!
+		const roleCall = defined(model.operations[0], 'model.operations[0]')
+		const toolCall = defined(model.operations[1], 'model.operations[1]')
 		// The role call settled by delegation when the tool call landed; the tool call is the active in-flight node.
 		expect(roleCall.lifecycle).toBe('settled')
 		expect(toolCall.lifecycle).toBe('in_flight')
@@ -156,7 +157,7 @@ describe('deriveInteractionModel — lingering return leg', () => {
 		]
 		const model = deriveInteractionModel(snapshot(events, meta('running')), NOW)
 		expect(model.operations).toHaveLength(3)
-		const coderReturn = model.operations[2]!
+		const coderReturn = defined(model.operations[2], 'model.operations[2]')
 		expect(coderReturn.kind).toBe('return')
 		// No caller action followed: the return lingers in flight, the orchestrator is the active participant.
 		expect(coderReturn.lifecycle).toBe('in_flight')
@@ -176,11 +177,11 @@ describe('deriveInteractionModel — lingering return leg', () => {
 			event('t3', 'llm_call', { role: 'orchestrator', usage: { promptTokens: 10, completionTokens: 5, totalTokens: 15 } }),
 		]
 		const model = deriveInteractionModel(snapshot(events, meta('running')), NOW)
-		const coderReturn = model.operations[2]!
+		const coderReturn = defined(model.operations[2], 'model.operations[2]')
 		expect(coderReturn.lifecycle).toBe('settled')
 		expect(coderReturn.settledAt).toBe('t3')
 		// The orchestrator resumed thinking: the active participant is the orchestrator, not a lingering return.
-		expect(activeParticipant(model)).toBe(model.participants[1]!.id)
+		expect(activeParticipant(model)).toBe(defined(model.participants[1], 'model.participants[1]').id)
 		assertHelpersSensible(model)
 	})
 })
@@ -196,17 +197,17 @@ describe('deriveInteractionModel — ask_human question', () => {
 		const model = deriveInteractionModel(snapshot(events, meta('success')), NOW)
 		const humans = model.participants.filter((p) => p.kind === 'human')
 		expect(humans).toHaveLength(2)
-		expect(humans[0]!.id).toBe('human:root')
-		expect(humans[1]!.id).not.toBe('human:root')
+		expect(defined(humans[0], 'humans[0]').id).toBe('human:root')
+		expect(defined(humans[1], 'humans[1]').id).not.toBe('human:root')
 		expect(model.operations).toHaveLength(4)
-		const callAsk = model.operations[1]!
-		const retAnswer = model.operations[2]!
+		const callAsk = defined(model.operations[1], 'model.operations[1]')
+		const retAnswer = defined(model.operations[2], 'model.operations[2]')
 		expect(callAsk.kind).toBe('call')
-		expect(callAsk.source).toBe(model.participants[1]!.id)
-		expect(callAsk.destination).toBe(humans[1]!.id)
+		expect(callAsk.source).toBe(defined(model.participants[1], 'model.participants[1]').id)
+		expect(callAsk.destination).toBe(defined(humans[1], 'humans[1]').id)
 		expect(callAsk.details).toBe('Which framework?\n\n*Context: src/index.ts*')
 		expect(retAnswer.kind).toBe('return')
-		expect(retAnswer.source).toBe(humans[1]!.id)
+		expect(retAnswer.source).toBe(defined(humans[1], 'humans[1]').id)
 		expect(retAnswer.details).toBe('react')
 		assertHelpersSensible(model)
 	})
@@ -218,7 +219,7 @@ describe('deriveInteractionModel — ask_human question', () => {
 		]
 		const model = deriveInteractionModel(snapshot(events, meta('needs_clarification')), NOW)
 		expect(model.status).toBe('needs_clarification')
-		const callAsk = model.operations[1]!
+		const callAsk = defined(model.operations[1], 'model.operations[1]')
 		expect(callAsk.lifecycle).toBe('in_flight')
 		expect(activeParticipant(model)).toBe(callAsk.destination)
 		assertHelpersSensible(model)
@@ -233,7 +234,7 @@ describe('deriveInteractionModel — per-invocation metrics', () => {
 			event('2026-01-01T00:00:06.000Z', 'role_finished', { role: 'coder', depth: 0, status: 'success' }),
 		]
 		const model = deriveInteractionModel(snapshot(events, meta('success')), NOW)
-		const call = model.operations[0]!
+		const call = defined(model.operations[0], 'model.operations[0]')
 		expect(call.metrics?.tokens).toBe(120)
 		expect(call.metrics?.cachedPromptTokens).toBe(40)
 		expect(call.metrics?.elapsedSeconds).toBe(6)
@@ -246,7 +247,7 @@ describe('deriveInteractionModel — per-invocation metrics', () => {
 			event('2026-01-01T00:00:01.000Z', 'llm_call', { role: 'coder', usage: { promptTokens: 10, completionTokens: 5, totalTokens: 15 } }),
 		]
 		const model = deriveInteractionModel(snapshot(events, meta('running')), '2026-01-01T00:00:31.000Z')
-		const call = model.operations[0]!
+		const call = defined(model.operations[0], 'model.operations[0]')
 		expect(call.lifecycle).toBe('in_flight')
 		expect(call.metrics?.tokens).toBe(15)
 		expect(call.metrics?.elapsedSeconds).toBe(31)
@@ -288,9 +289,9 @@ describe('deriveInteractionModel — llm_call_start transit/working distinction'
 		]
 		const frame0 = deriveInteractionModel(snapshot(events.slice(0, 1), meta('running')), NOW)
 		const frame1 = deriveInteractionModel(snapshot(events.slice(0, 2), meta('running')), NOW)
-		expect(frame0.operations[0]!.lifecycle).toBe('in_flight')
-		expect(frame1.operations[0]!.lifecycle).toBe('settled')
-		expect(frame1.operations[0]!.settledAt).toBe('t1')
+		expect(defined(frame0.operations[0], 'frame0.operations[0]').lifecycle).toBe('in_flight')
+		expect(defined(frame1.operations[0], 'frame1.operations[0]').lifecycle).toBe('settled')
+		expect(defined(frame1.operations[0], 'frame1.operations[0]').settledAt).toBe('t1')
 	})
 
 	test('the lingering tool return survives the callee llm_call_start (regression guard)', () => {
@@ -335,7 +336,7 @@ describe('deriveInteractionModel — llm_call_start transit/working distinction'
 			event('t1', 'llm_call', { role: 'coder', usage: { promptTokens: 10, completionTokens: 5, totalTokens: 15 } }),
 		]
 		const model = deriveInteractionModel(snapshot(events, meta('running')), NOW)
-		expect(model.operations[0]!.lifecycle).toBe('in_flight')
+		expect(defined(model.operations[0], 'model.operations[0]').lifecycle).toBe('in_flight')
 	})
 })
 
@@ -352,16 +353,16 @@ describe('deriveInteractionModel — interrupts, observes, and terminates', () =
 		]
 		const model = deriveInteractionModel(snapshot(events, meta('success')), NOW)
 		// An interrupt participant exists and the loop_detector call is on the interrupt stack, not main.
-		const interrupt = model.participants.find((p) => p.kind === 'interrupt')
+		const interrupt = defined(model.participants.find((p) => p.kind === 'interrupt'), 'interrupt')
 		expect(interrupt).toBeDefined()
-		const detectorCall = model.operations.find((o) => o.kind === 'call' && o.destination === model.participants.find((p) => p.role === 'loop_detector')!.id)
+		const detectorCall = defined(model.operations.find((o) => o.kind === 'call' && o.destination === defined(model.participants.find((p) => p.role === 'loop_detector'), 'loop_detector participant').id), 'detectorCall')
 		expect(detectorCall).toBeDefined()
-		expect(detectorCall!.stack).not.toBe('main')
-		expect(detectorCall!.source).toBe(interrupt!.id)
+		expect(detectorCall.stack).not.toBe('main')
+		expect(detectorCall.source).toBe(interrupt.id)
 		// After the interrupt resolves, the orchestrator's return is on the main stack.
-		const orchestratorReturn = model.operations.find((o) => o.kind === 'return' && o.source === model.participants.find((p) => p.role === 'orchestrator')!.id)
+		const orchestratorReturn = defined(model.operations.find((o) => o.kind === 'return' && o.source === defined(model.participants.find((p) => p.role === 'orchestrator'), 'orchestrator participant').id), 'orchestratorReturn')
 		expect(orchestratorReturn).toBeDefined()
-		expect(orchestratorReturn!.stack).toBe('main')
+		expect(orchestratorReturn.stack).toBe('main')
 		// No stack is left paused once everything resolved.
 		expect(stacksOf(model)).toEqual([])
 		assertHelpersSensible(model)
@@ -381,8 +382,8 @@ describe('deriveInteractionModel — interrupts, observes, and terminates', () =
 		const mainChain = callChainOf(model, 'main')
 		expect(mainChain.map((o) => o.kind)).toEqual(['call', 'call'])
 		// The paused coder call stays in flight (its lines freeze) while the interrupt runs.
-		const coderCall = model.operations.find((o) => o.kind === 'call' && o.destination === model.participants.find((p) => p.role === 'coder')!.id)
-		expect(coderCall!.lifecycle).toBe('in_flight')
+		const coderCall = defined(model.operations.find((o) => o.kind === 'call' && o.destination === defined(model.participants.find((p) => p.role === 'coder'), 'coder participant').id), 'coderCall')
+		expect(coderCall.lifecycle).toBe('in_flight')
 		assertHelpersSensible(model)
 	})
 
@@ -396,14 +397,14 @@ describe('deriveInteractionModel — interrupts, observes, and terminates', () =
 			event('t5', 'observe', { role: 'coder', details: 'peek at the looping coder' }),
 		]
 		const model = deriveInteractionModel(snapshot(events, meta('running')), NOW)
-		const observe = observesOf(model)[0]
+		const observe = defined(observesOf(model)[0], 'observe')
 		expect(observe).toBeDefined()
-		const readTool = model.participants.find((p) => p.role === 'read_message_window')!
-		const coder = model.participants.find((p) => p.role === 'coder')!
-		expect(observe!.source).toBe(readTool.id)
-		expect(observe!.destination).toBe(coder.id)
-		expect(observe!.lifecycle).toBe('settled')
-		expect(observe!.details).toBe('peek at the looping coder')
+		const readTool = defined(model.participants.find((p) => p.role === 'read_message_window'), 'read_message_window participant')
+		const coder = defined(model.participants.find((p) => p.role === 'coder'), 'coder participant')
+		expect(observe.source).toBe(readTool.id)
+		expect(observe.destination).toBe(coder.id)
+		expect(observe.lifecycle).toBe('settled')
+		expect(observe.details).toBe('peek at the looping coder')
 		// The observe did not change the open call chains on either stack.
 		expect(callChainOf(model, 'main').length).toBe(2)
 		assertHelpersSensible(model)
@@ -419,17 +420,17 @@ describe('deriveInteractionModel — interrupts, observes, and terminates', () =
 			event('t5', 'terminate', { role: 'coder', details: 'revert the looping coder' }),
 		]
 		const model = deriveInteractionModel(snapshot(events, meta('running')), NOW)
-		const terminate = terminatesOf(model)[0]
+		const terminate = defined(terminatesOf(model)[0], 'terminate')
 		expect(terminate).toBeDefined()
-		const rewindTool = model.participants.find((p) => p.role === 'rewind_stack')!
-		const coder = model.participants.find((p) => p.role === 'coder')!
-		expect(terminate!.source).toBe(rewindTool.id)
-		expect(terminate!.destination).toBe(coder.id)
+		const rewindTool = defined(model.participants.find((p) => p.role === 'rewind_stack'), 'rewind_stack participant')
+		const coder = defined(model.participants.find((p) => p.role === 'coder'), 'coder participant')
+		expect(terminate.source).toBe(rewindTool.id)
+		expect(terminate.destination).toBe(coder.id)
 		// The terminated coder call is closed and removed from the main stack's open chain.
 		expect(callChainOf(model, 'main').length).toBe(1)
 		expect(callChainOf(model, 'main').map((o) => o.destination)).not.toContain(coder.id)
 		const coderCall = model.operations.find((o) => o.kind === 'call' && o.destination === coder.id)
-		expect(coderCall!.lifecycle).toBe('settled')
+		expect(defined(coderCall, 'coderCall').lifecycle).toBe('settled')
 		assertHelpersSensible(model)
 	})
 
@@ -442,15 +443,15 @@ describe('deriveInteractionModel — interrupts, observes, and terminates', () =
 		const model = deriveInteractionModel(snapshot(events, meta('running')), NOW)
 		// The interrupt has landed but its first call has not: the fresh stack is active and its root is the current worker, while the main stack pauses with the coder call still open.
 		expect(activeStack(model)).not.toBe('main')
-		const interrupt = model.participants.find((p) => p.kind === 'interrupt')
+		const interrupt = defined(model.participants.find((p) => p.kind === 'interrupt'), 'interrupt')
 		expect(interrupt).toBeDefined()
-		expect(activeParticipant(model)).toBe(interrupt!.id)
+		expect(activeParticipant(model)).toBe(interrupt.id)
 		expect(stacksOf(model)).toEqual(['main', 'interrupt-1-stack'])
 		expect(callChainOf(model, 'main')).toHaveLength(2)
 		// The stack records name the fresh stack and its root before any operation lands on it.
 		expect(model.stacks).toEqual([
 			{ id: 'main', root: 'human:root' },
-			{ id: 'interrupt-1-stack', root: interrupt!.id },
+			{ id: 'interrupt-1-stack', root: interrupt.id },
 		])
 		assertHelpersSensible(model)
 	})
@@ -464,17 +465,17 @@ describe('deriveInteractionModel — interrupts, observes, and terminates', () =
 			event('t4', 'role_finished', { role: 'loop_detector', status: 'success', summary: 'no loop' }),
 		]
 		const resolved = deriveInteractionModel(snapshot(events, meta('running')), NOW)
-		const interrupt = resolved.participants.find((p) => p.kind === 'interrupt')!
-		const loopDetector = resolved.participants.find((p) => p.role === 'loop_detector')!
-		const coder = resolved.participants.find((p) => p.role === 'coder')!
+		const interrupt = defined(resolved.participants.find((p) => p.kind === 'interrupt'), 'interrupt')
+		const loopDetector = defined(resolved.participants.find((p) => p.role === 'loop_detector'), 'loop_detector participant')
+		const coder = defined(resolved.participants.find((p) => p.role === 'coder'), 'coder participant')
 		// The loop detector's return closed the interrupt stack's root call: the coder is the current worker again, and the resolved stack's return leg stays in flight (visible) rather than vanishing at once.
 		expect(activeStack(resolved)).toBe('main')
 		expect(activeParticipant(resolved)).toBe(coder.id)
 		const leg = resolved.operations.filter((o) => o.lifecycle === 'in_flight' && o.kind === 'return')
 		expect(leg.length).toBe(1)
-		expect(leg[0]!.kind).toBe('return')
-		expect(leg[0]!.source).toBe(loopDetector.id)
-		expect(leg[0]!.destination).toBe(interrupt.id)
+		expect(defined(leg[0], 'leg[0]').kind).toBe('return')
+		expect(defined(leg[0], 'leg[0]').source).toBe(loopDetector.id)
+		expect(defined(leg[0], 'leg[0]').destination).toBe(interrupt.id)
 		expect(stacksOf(resolved)).toEqual(['main', 'interrupt-1-stack'])
 
 		// The preempted stack's next operation confirms the leg: it settles and the interrupt stack closes out.
@@ -498,7 +499,7 @@ describe('deriveInteractionModel — interrupts, observes, and terminates', () =
 		expect(stacksOf(model).length).toBe(3)
 		const interrupts = model.participants.filter((p) => p.kind === 'interrupt')
 		expect(interrupts.length).toBe(2)
-		expect(interrupts[0]!.id).not.toBe(interrupts[1]!.id)
+		expect(defined(interrupts[0], 'interrupts[0]').id).not.toBe(defined(interrupts[1], 'interrupts[1]').id)
 		// Each interrupt's loop_detector is on its own stack with its own participant.
 		const detectors = model.participants.filter((p) => p.role === 'loop_detector')
 		expect(detectors.length).toBe(2)
@@ -517,11 +518,11 @@ describe('deriveInteractionModel — interrupts, observes, and terminates', () =
 		const model = deriveInteractionModel(snapshot(events, meta('running')), NOW)
 		// The interrupt resolved; the coder's tool call is back on the active main stack.
 		expect(activeStack(model)).toBe('main')
-		const readFile = model.participants.find((p) => p.role === 'read_file')
+		const readFile = defined(model.participants.find((p) => p.role === 'read_file'), 'read_file participant')
 		expect(readFile).toBeDefined()
-		const toolCall = model.operations.find((o) => o.kind === 'call' && o.destination === readFile!.id)
-		expect(toolCall!.stack).toBe('main')
-		expect(toolCall!.lifecycle).toBe('in_flight')
+		const toolCall = model.operations.find((o) => o.kind === 'call' && o.destination === readFile.id)
+		expect(defined(toolCall, 'toolCall').stack).toBe('main')
+		expect(defined(toolCall, 'toolCall').lifecycle).toBe('in_flight')
 		assertHelpersSensible(model)
 	})
 })
@@ -537,18 +538,18 @@ describe('deriveInteractionModel — operator inquiry interrupt', () => {
 
 	test('an inquiry interrupt pushes a new stack rooted at a fresh human asker', () => {
 		const model = deriveInteractionModel(snapshot(inquiryRunEvents(), meta('running')), NOW)
-		const asker = model.participants.find((p) => p.kind === 'human' && p.id !== 'human:root')
+		const asker = defined(model.participants.find((p) => p.kind === 'human' && p.id !== 'human:root'), 'asker')
 		expect(asker).toBeDefined()
-		expect(asker!.id).toBe('human:asker:1')
-		expect(asker!.role).toBe('human')
+		expect(asker.id).toBe('human:asker:1')
+		expect(asker.role).toBe('human')
 		expect(model.participants.every((p) => p.kind !== 'interrupt')).toBe(true)
 		expect(model.stacks).toEqual([
 			{ id: 'main', root: 'human:root' },
-			{ id: 'interrupt-1-stack', root: asker!.id },
+			{ id: 'interrupt-1-stack', root: asker.id },
 		])
 		// The fresh stack is active on arrival; the main stack pauses with both calls still open.
 		expect(activeStack(model)).toBe('interrupt-1-stack')
-		expect(activeParticipant(model)).toBe(asker!.id)
+		expect(activeParticipant(model)).toBe(asker.id)
 		expect(callChainOf(model, 'main')).toHaveLength(2)
 		expect(stacksOf(model)).toEqual(['main', 'interrupt-1-stack'])
 		assertHelpersSensible(model)
@@ -560,14 +561,14 @@ describe('deriveInteractionModel — operator inquiry interrupt', () => {
 			event('t3', 'role_start', { role: 'inquiry_responder', depth: 2, parent: 'coder', task: 'the generated briefing' }),
 		]
 		const model = deriveInteractionModel(snapshot(events, meta('running')), NOW)
-		const responder = model.participants.find((p) => p.role === 'inquiry_responder')
+		const responder = defined(model.participants.find((p) => p.role === 'inquiry_responder'), 'inquiry_responder participant')
 		expect(responder).toBeDefined()
-		const call = model.operations.find((o) => o.kind === 'call' && o.destination === responder!.id)
+		const call = defined(model.operations.find((o) => o.kind === 'call' && o.destination === responder.id), 'call')
 		expect(call).toBeDefined()
-		expect(call!.stack).toBe('interrupt-1-stack')
-		expect(call!.source).toBe('human:asker:1')
+		expect(call.stack).toBe('interrupt-1-stack')
+		expect(call.source).toBe('human:asker:1')
 		// The tooltip on the You→responder call shows the question, not the generated briefing.
-		expect(call!.details).toBe('what is happening?')
+		expect(call.details).toBe('what is happening?')
 		assertHelpersSensible(model)
 	})
 
@@ -578,9 +579,9 @@ describe('deriveInteractionModel — operator inquiry interrupt', () => {
 			event('t2', 'role_start', { role: 'inquiry_responder', depth: 1, parent: 'orchestrator', task: 'the generated briefing' }),
 		]
 		const model = deriveInteractionModel(snapshot(events, meta('running')), NOW)
-		const responder = model.participants.find((p) => p.role === 'inquiry_responder')
-		const call = model.operations.find((o) => o.kind === 'call' && o.destination === responder!.id)
-		expect(call!.details).toBe('the generated briefing')
+		const responder = defined(model.participants.find((p) => p.role === 'inquiry_responder'), 'inquiry_responder participant')
+		const call = defined(model.operations.find((o) => o.kind === 'call' && o.destination === responder.id), 'call')
+		expect(call.details).toBe('the generated briefing')
 		assertHelpersSensible(model)
 	})
 
@@ -596,8 +597,8 @@ describe('deriveInteractionModel — operator inquiry interrupt', () => {
 		expect(callChainOf(model, 'main')).toHaveLength(2)
 		const leg = model.operations.filter((o) => o.lifecycle === 'in_flight' && o.kind === 'return')
 		expect(leg).toHaveLength(1)
-		expect(leg[0]!.source).toBe(model.participants.find((p) => p.role === 'inquiry_responder')!.id)
-		expect(leg[0]!.destination).toBe('human:asker:1')
+		expect(defined(leg[0], 'leg[0]').source).toBe(defined(model.participants.find((p) => p.role === 'inquiry_responder'), 'inquiry_responder participant').id)
+		expect(defined(leg[0], 'leg[0]').destination).toBe('human:asker:1')
 		expect(stacksOf(model)).toEqual(['main', 'interrupt-1-stack'])
 		assertHelpersSensible(model)
 	})
@@ -608,13 +609,13 @@ describe('deriveInteractionModel — operator inquiry interrupt', () => {
 			event('t1', 'interrupt', { trigger: 'loop_check', handler: 'loop_detector', target: 'orchestrator-0-1' }),
 		]
 		const model = deriveInteractionModel(snapshot(events, meta('running')), NOW)
-		const interrupt = model.participants.find((p) => p.kind === 'interrupt')
+		const interrupt = defined(model.participants.find((p) => p.kind === 'interrupt'), 'interrupt')
 		expect(interrupt).toBeDefined()
-		expect(interrupt!.id).toBe('interrupt:1')
+		expect(interrupt.id).toBe('interrupt:1')
 		expect(model.participants.filter((p) => p.kind === 'human')).toHaveLength(1)
 		expect(model.stacks).toEqual([
 			{ id: 'main', root: 'human:root' },
-			{ id: 'interrupt-1-stack', root: interrupt!.id },
+			{ id: 'interrupt-1-stack', root: interrupt.id },
 		])
 		assertHelpersSensible(model)
 	})
