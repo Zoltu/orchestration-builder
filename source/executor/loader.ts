@@ -4,7 +4,7 @@ import { ValidationError } from './errors.js'
 import type { DeploymentConfig, DeploymentFileConfig, GuildConfig, ToolManifest } from './types.js'
 import { validateDeploymentFileConfig, validateDeploymentRoleReferences, validateGuildConfig, validateToolManifest } from './validation.js'
 
-// What the loader reads straight from the files: the deployment is still file-shaped, so model.name and model.contextWindow may be absent and the consumer completes them (resolveModelConfig) into a LoadedGuild before the executor sees them.
+// What the loader reads straight from the files: the deployment is still file-shaped, so model.name and model.contextWindow may be absent and the consumer completes them (resolveDeploymentConfig) into a LoadedGuild before the executor sees them.
 export interface LoadedGuildFiles {
 	config: GuildConfig
 	deployment: DeploymentFileConfig
@@ -45,7 +45,7 @@ function readJsonFile(filePath: string, errorPath: string): unknown {
 	}
 }
 
-// The deployment file path is fixed per service (it lives beside the guild in the bundle and is not per-run), so the factory closes over it and the returned LoadGuild keeps the guild-dir-only signature. The LoadedGuildFiles it yields is file-shaped; completing the model into the LoadedGuild the executor consumes is the startup path's job (resolveModelConfig in serve.ts).
+// The deployment file path is fixed per service (it lives beside the guild in the bundle and is not per-run), so the factory closes over it and the returned LoadGuild keeps the guild-dir-only signature. The LoadedGuildFiles it yields is file-shaped; completing the model into the LoadedGuild the executor consumes is the startup path's job (resolveDeploymentConfig in serve.ts).
 export function createGuildLoader(deploymentFilePath: string): LoadGuild {
 	return (guildDir: string): LoadedGuildFiles => {
 		const config = readJsonFile(path.join(guildDir, 'guild.json'), 'guild.json')

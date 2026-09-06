@@ -37,9 +37,9 @@ Deployment field overrides — each variable defaults to the deployment file's v
 
 | Variable | Deployment field | Constraint |
 |---|---|---|
-| `ORCHESTRATOR_MODEL` | `model.name` | non-empty string |
+| `ORCHESTRATOR_MODEL` | `model.name` | non-empty string; discovered from the API when unset |
 | `ORCHESTRATOR_API_BASE` | `model.apiBase` | non-empty string |
-| `ORCHESTRATOR_MODEL_CONTEXT_WINDOW` | `model.contextWindow` | positive integer |
+| `ORCHESTRATOR_MODEL_CONTEXT_WINDOW` | `model.contextWindow` | positive integer; the API-reported value wins |
 | `ORCHESTRATOR_REASONING_FIELD` | `model.reasoningField` | non-empty string |
 | `ORCHESTRATOR_TEMPERATURE` | `model.generation.temperature` | finite number |
 | `ORCHESTRATOR_MAX_TOKENS` | `model.generation.maxTokens` | positive integer |
@@ -55,7 +55,7 @@ Deployment field overrides — each variable defaults to the deployment file's v
 | `ORCHESTRATOR_INTERRUPT_PLAN_OWNER_ROLE` | `executor.interruptTriggers.planOwnerRole` | non-empty string |
 | `ORCHESTRATOR_MAX_TOOL_OUTPUT_CHARS` | `contextPolicy.maxToolOutputChars` | positive integer |
 
-The deployment file's `model.name` and `model.contextWindow` are optional: when either is absent from the file, startup requires it and fails with an error explaining where to set it — the deployment file or its environment variable (`ORCHESTRATOR_MODEL` / `ORCHESTRATOR_MODEL_CONTEXT_WINDOW`).
+The deployment file's `model.name` and `model.contextWindow` are optional because the service probes the model API's model list (`GET {apiBase}/models`) at startup. An API-reported context window (llama.cpp's `meta.n_ctx`) is the server's ground truth and always wins over the configured value — the startup log states the override. `model.name` is only discovered from the API when it is unset in both the file and the environment and the server serves exactly one model; if the server lists several models and no name is configured, startup fails with an error listing the served ids. When the probe fails (unreachable endpoint, timeout, HTTP error), the service boots on the configured values and logs the probe outcome; if a needed field is then still missing, startup fails with an error saying the API did not provide it and where to set it — the deployment file field or its environment variable (`ORCHESTRATOR_MODEL` / `ORCHESTRATOR_MODEL_CONTEXT_WINDOW`).
 
 If the service cannot start because of invalid configuration — an invalid or missing deployment file or Guild, or an invalid `ORCHESTRATOR_*` variable — it binds the port anyway and serves an error page describing the problem instead of exiting, so opening the UI in a browser shows what to fix; the process still exits non-zero once stopped.
 

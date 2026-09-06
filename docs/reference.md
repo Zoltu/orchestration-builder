@@ -271,7 +271,7 @@ The deployment file `deployment/deployment.json` holds the knobs an operator set
 
 The model credential is deliberately absent from the file: an `apiKey` key is rejected with a pointer to the `ORCHESTRATOR_API_KEY` environment variable, which injects the key at runtime (see [`README.md`](../README.md) "Configuration"). Like the Kagi key, it may also arrive as a Docker secret at `/run/secrets/orchestrator_api_key` (or `/run/secrets/ORCHESTRATOR_API_KEY`).
 
-`model.name` and `model.contextWindow` are optional in the file: when either is absent, startup requires it and fails with an error explaining where to set it — the deployment file field or its environment variable (`ORCHESTRATOR_MODEL` / `ORCHESTRATOR_MODEL_CONTEXT_WINDOW`).
+`model.name` and `model.contextWindow` are optional in the file because the service probes the model API's model list (`GET {apiBase}/models`, the OpenAI-compatible listing) once at startup. An API-reported context window (llama.cpp's `meta.n_ctx`) is the server's ground truth and always replaces the configured value — the server's own number is what the executor must plan against, and a stale operator copy is the duplication this eliminates; the startup log states the override. `model.name` is only discovered from the API when it is unset in both the file and the environment and the server serves exactly one model; if the server lists several models and no name is configured, startup fails with an error listing the served ids so the operator can choose. When the probe fails (unreachable endpoint, timeout, HTTP error, unparseable body) the service boots on the configured values and logs the probe outcome — the endpoint being down is a runtime concern that runs surface as `llm_unavailable` on their own. If a needed field is then still missing, startup fails with an error that says the API did not provide it (distinguishing "could not be probed" from "did not report it") and names where to set it — the deployment file field or its environment variable (`ORCHESTRATOR_MODEL` / `ORCHESTRATOR_MODEL_CONTEXT_WINDOW`).
 
 ### Environment overrides
 
@@ -279,9 +279,9 @@ Individual deployment fields can be overridden at runtime with `ORCHESTRATOR_*` 
 
 | Variable | Deployment field |
 |---|---|
-| `ORCHESTRATOR_MODEL` | `model.name` |
+| `ORCHESTRATOR_MODEL` | `model.name` (discovered from the API when unset) |
 | `ORCHESTRATOR_API_BASE` | `model.apiBase` |
-| `ORCHESTRATOR_MODEL_CONTEXT_WINDOW` | `model.contextWindow` |
+| `ORCHESTRATOR_MODEL_CONTEXT_WINDOW` | `model.contextWindow` (the API-reported value wins) |
 | `ORCHESTRATOR_REASONING_FIELD` | `model.reasoningField` |
 | `ORCHESTRATOR_TEMPERATURE` | `model.generation.temperature` |
 | `ORCHESTRATOR_MAX_TOKENS` | `model.generation.maxTokens` |
@@ -311,9 +311,9 @@ The constraints mirror the file's semantics with the error pointing at the varia
 }
 ```
 
-- `name` (optional): arbitrary label for logs. When absent it must be supplied via `ORCHESTRATOR_MODEL` — startup fails with an error naming both places otherwise.
+- `name` (optional): the model id sent in chat/completions requests. Set it here or via `ORCHESTRATOR_MODEL`; when unset it is discovered from the model API at startup if exactly one model is served, and startup fails listing the served ids otherwise.
 - `apiBase`: OpenAI-compatible chat/completions endpoint.
-- `contextWindow` (optional): context window size in tokens. When absent it must be supplied via `ORCHESTRATOR_MODEL_CONTEXT_WINDOW` — startup fails with an error naming both places otherwise.
+- `contextWindow` (optional): context window size in tokens. Set it here or via `ORCHESTRATOR_MODEL_CONTEXT_WINDOW`; an API-reported value (llama.cpp's `meta.n_ctx`) always wins over the configured one, and a value the API also does not report fails startup.
 - `reasoningField`: API response field containing reasoning content (e.g. `reasoning`, `reasoning_content`). Omit if the endpoint doesn't expose reasoning.
 - `generation`: default sampling parameters (`temperature`, `maxTokens`) applied to every role. There is no per-role generation override.
 

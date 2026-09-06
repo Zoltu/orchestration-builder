@@ -1,7 +1,6 @@
 import { isErrorKind, ValidationError } from './errors.js'
 import type {
 	ContextPolicy,
-	DeploymentConfig,
 	DeploymentFileConfig,
 	EffortLevel,
 	ExecutorConfig,
@@ -272,8 +271,8 @@ export function validateDeploymentFileConfig(value: unknown): asserts value is D
 	validateContextPolicy(value.contextPolicy, 'contextPolicy')
 }
 
-// Cross-checks the deployment's role references against the guild's declared roles (the two files are validated independently, so this is the one place the pair is consistent). Accepts either deployment shape because only the executor section is read. The loader runs it after both files validate; each failure names the deployment path of the offending reference.
-export function validateDeploymentRoleReferences(deployment: DeploymentFileConfig | DeploymentConfig, roleNames: ReadonlySet<string>): void {
+// Cross-checks the deployment's role references against the guild's declared roles (the two files are validated independently, so this is the one place the pair is consistent). Runs on the file-shaped deployment — at load time in the loader and again after the env merge; only the executor section is read. Each failure names the deployment path of the offending reference.
+export function validateDeploymentRoleReferences(deployment: DeploymentFileConfig, roleNames: ReadonlySet<string>): void {
 	const executor = deployment.executor
 	if (executor.contextHandlerRole !== undefined && !roleNames.has(executor.contextHandlerRole)) {
 		throw new ValidationError('executor.contextHandlerRole', `references unknown role "${executor.contextHandlerRole}" (not declared in guild.json "roles")`)

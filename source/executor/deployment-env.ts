@@ -159,7 +159,7 @@ function mergeInterruptTriggers(baseTriggers: InterruptTriggersConfig | undefine
 	}
 }
 
-// Pure per-field merge over the file-shaped deployment: a present override field replaces the base field, an absent one keeps the base value, and the nested generation and interruptTriggers objects merge per-field rather than wholesale. The result stays file-shaped (name and contextWindow may be absent); completing the model is resolveModelConfig's job. The result is fresh data — the base (the loader's cached deployment) is never handed out or mutated.
+// Pure per-field merge over the file-shaped deployment: a present override field replaces the base field, an absent one keeps the base value, and the nested generation and interruptTriggers objects merge per-field rather than wholesale. The result stays file-shaped (name and contextWindow may be absent); completing the model is resolveDeploymentConfig's job. The result is fresh data — the base (the loader's cached deployment) is never handed out or mutated.
 export function applyDeploymentOverride(base: DeploymentFileConfig, override: DeploymentOverride): DeploymentFileConfig {
 	const model: ModelConfig = {
 		name: override.model?.name ?? base.model.name,

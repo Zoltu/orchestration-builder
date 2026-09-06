@@ -20,7 +20,12 @@ export type { LlmCaller, LlmCallResult, LlmCallerDependencies, LlmFetch, LlmRequ
 export { createGuildLoader } from './loader.js'
 export type { LoadGuild, LoadedGuild, LoadedGuildFiles } from './loader.js'
 
-export { resolveModelConfig } from './model-resolution.js'
+export { createModelInfoProbe, MODEL_PROBE_TIMEOUT_MS } from './model-probe.js'
+export type { ModelProbeResult } from './model-probe.js'
+
+// resolveModelConfig is deliberately not re-exported here: its callers all go through resolveDeploymentConfig, and the model-level entry point is exercised directly against model-resolution.ts by its tests.
+export { parseModelInfo, resolveDeploymentConfig } from './model-resolution.js'
+export type { DeploymentResolution, ModelApiInfo, ModelApiProbe, ModelValueSource } from './model-resolution.js'
 
 export { applyDeploymentOverride, resolveDeploymentOverride } from './deployment-env.js'
 export type { ContextPolicyOverride, DeploymentOverride, ExecutorOverride, GenerationOverride, InterruptTriggersOverride, ModelOverride } from './deployment-env.js'

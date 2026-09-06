@@ -5,7 +5,7 @@ import { createWebServer } from './web/server.js'
 import { createBootstrapFailureHandler } from './web/bootstrap-failure.js'
 import { createSnapshotCache } from './web/snapshot-cache.js'
 import { createTaskSummarizer, type TaskSummarizer } from './web/summarize.js'
-import { applyDeploymentOverride, createAppendLog, createDeleteCheckpoint, createDockerSecretReader, createGuildLoader, createInterruptChannel, createInterruptQueue, createLlmCaller, createLlmFetch, createListRunIds, createReadProjectSettings, createReadRunCheckpointById, createReadRunMetaById, createReadRunSnapshotById, createReadRunSnapshotStats, createReadRunSummaryById, createRunDirectory, createRunState, createRunSubmission, createSleep, createToolHandlers, createWebHumanBackend, createWriteCheckpoint, createWriteMeta, createWriteProjectSettings, createWriteRunSummary, reconcileRunsOnStartup, resolveDeploymentOverride, resolveKagiApiKey, resolveModelConfig, resolveSecret, resumeExecutor, runExecutor, validateDeploymentFileConfig, validateDeploymentRoleReferences, ConfigurationError, ValidationError, type ExecutorDependencies, type DeploymentConfig, type InterruptChannel, type LoadedGuild, type LlmCaller, type ResumeRun, type RunCheckpoint, type StartRun, type WebHumanBackend } from './executor/index.js'
+import { applyDeploymentOverride, createAppendLog, createDeleteCheckpoint, createDockerSecretReader, createGuildLoader, createInterruptChannel, createInterruptQueue, createLlmCaller, createLlmFetch, createListRunIds, createModelInfoProbe, createReadProjectSettings, createReadRunCheckpointById, createReadRunMetaById, createReadRunSnapshotById, createReadRunSnapshotStats, createReadRunSummaryById, createRunDirectory, createRunState, createRunSubmission, createSleep, createToolHandlers, createWebHumanBackend, createWriteCheckpoint, createWriteMeta, createWriteProjectSettings, createWriteRunSummary, MODEL_PROBE_TIMEOUT_MS, parseModelInfo, reconcileRunsOnStartup, resolveDeploymentConfig, resolveDeploymentOverride, resolveKagiApiKey, resolveSecret, resumeExecutor, runExecutor, validateDeploymentFileConfig, validateDeploymentRoleReferences, ConfigurationError, ValidationError, type ExecutorDependencies, type InterruptChannel, type LoadedGuild, type LlmCaller, type ModelApiProbe, type ResumeRun, type RunCheckpoint, type StartRun, type WebHumanBackend } from './executor/index.js'
 
 const DEPLOYMENT_FILE_ENV_VAR = 'ORCHESTRATOR_DEPLOYMENT_FILE'
 const PORT_ENV_VAR = 'PORT'
@@ -193,15 +193,31 @@ async function serve(): Promise<void> {
 		const mergedDeployment = applyDeploymentOverride(loadedGuildFiles.deployment, resolveDeploymentOverride(Bun.env))
 		validateDeploymentFileConfig(mergedDeployment)
 		validateDeploymentRoleReferences(mergedDeployment, roleNames)
-		const deployment: DeploymentConfig = { model: resolveModelConfig(mergedDeployment.model), executor: mergedDeployment.executor, contextPolicy: mergedDeployment.contextPolicy }
-		guild = { ...loadedGuildFiles, deployment }
 
-		// The orchestrator credential comes from the shared secret channels: the ORCHESTRATOR_API_KEY environment variable first, then a docker secret mounted at /run/secrets/orchestrator_api_key (or ORCHESTRATOR_API_KEY). resolveSecret trims and normalizes empty values to undefined so the caller omits the Authorization header entirely.
+		// The orchestrator credential comes from the shared secret channels: the ORCHESTRATOR_API_KEY environment variable first, then a docker secret mounted at /run/secrets/orchestrator_api_key (or ORCHESTRATOR_API_KEY). resolveSecret trims and normalizes empty values to undefined so the caller omits the Authorization header entirely. Resolved before the probe so the probe can authenticate against endpoints that require a key.
 		apiKey = resolveSecret('orchestrator_api_key', { environment: Bun.env, readDockerSecret: createDockerSecretReader(DOCKER_SECRETS_DIR) })
 		kagiApiKey = resolveKagiApiKey(Bun.env, createDockerSecretReader(DOCKER_SECRETS_DIR))
 		if (kagiApiKey === undefined) {
 			console.log('KAGI_API_KEY not set: web_search and the kagi fetch backend will report themselves unavailable')
 		}
+
+		// One startup probe of the model API, before the resolved composition: the server's own values are ground truth, so an API-reported context window always replaces the configured one, and a missing name is discovered when the API serves exactly one model. The probe reports failure as a value instead of throwing, and the resolver turns that into a fallback to configuration — a failed probe only fails startup when a needed field is then still missing, so a down endpoint never blocks boot with a complete configuration on file.
+		const apiBase = mergedDeployment.model.apiBase
+		const probeModelInfo = createModelInfoProbe(apiBase, apiKey, MODEL_PROBE_TIMEOUT_MS)
+		const probe = await probeModelInfo()
+		const models = probe.ok ? parseModelInfo(probe.body) : undefined
+		const failureReason = probe.ok ? undefined : probe.reason
+		if (!probe.ok) {
+			console.log(`Model API probe failed (${probe.reason}); continuing with the configured model values`)
+		}
+		const apiProbe: ModelApiProbe = { apiBase, models, failureReason }
+		const resolution = resolveDeploymentConfig(mergedDeployment, apiProbe)
+		console.log(`Model name: ${resolution.deployment.model.name} (from ${resolution.nameSource})`)
+		console.log(`Context window: ${resolution.deployment.model.contextWindow} (from ${resolution.contextWindowSource})`)
+		if (resolution.apiContextWindow !== undefined && mergedDeployment.model.contextWindow !== undefined && resolution.apiContextWindow !== mergedDeployment.model.contextWindow) {
+			console.log(`Context window override: the model API reports ${resolution.apiContextWindow}, replacing the configured ${mergedDeployment.model.contextWindow}`)
+		}
+		guild = { ...loadedGuildFiles, deployment: resolution.deployment }
 	} catch (error) {
 		// A ValidationError raised in this block can only come from loading or re-validating the guild and deployment data, which is by definition a configuration failure, so both classes present through the failure page (normalized to ConfigurationError, whose message is fit to show the operator). Anything else is unexpected and rethrows to the plain-exit catch.
 		if (error instanceof ConfigurationError || error instanceof ValidationError) {
