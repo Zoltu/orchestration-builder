@@ -18,6 +18,12 @@ export type { LlmCaller, LlmCallResult, LlmCallerDependencies, LlmFetch, LlmRequ
 export { createGuildLoader } from './loader.js'
 export type { LoadGuild, LoadedGuild } from './loader.js'
 
+export { applyDeploymentOverride, resolveDeploymentOverride } from './deployment-env.js'
+export type { ContextPolicyOverride, DeploymentOverride, ExecutorOverride, GenerationOverride, InterruptTriggersOverride, ModelOverride } from './deployment-env.js'
+
+export { resolveSecret } from './secrets.js'
+export type { SecretChannels } from './secrets.js'
+
 export { createWebHumanBackend } from './human-backend.js'
 export type { HumanBackend, WebHumanBackend } from './human-backend.js'
 
@@ -32,7 +38,7 @@ export type { ResumeRun, RunSubmission, RunSubmissionDependencies, StartRun, Sub
 
 export { DEFAULT_EFFORT, effortDirective } from './effort.js'
 
-export { isEffortLevel, isProjectSettings } from './validation.js'
+export { isEffortLevel, isProjectSettings, validateDeploymentConfig, validateDeploymentRoleReferences } from './validation.js'
 
 export { createToolHandlers } from './tools.js'
 export type { NativeToolsConfig } from './tools.js'

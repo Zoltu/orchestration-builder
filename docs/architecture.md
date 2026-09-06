@@ -69,7 +69,7 @@ guild/                              # bundled into the image at /app/guild/
 
 ## Deployment
 
-The executor ships as a Docker image that runs the long-running executor service as PID 1 via `ENTRYPOINT ["bun", "source/serve.ts"]`. The build runs `bun install`, typecheck, and tests as gates, then removes `node_modules`. All configuration is environment variables with production defaults. The deployment model is one container per project: the project is mounted at `/workspace` (read-write) and the executor modifies it in place. See [`Dockerfile`](../Dockerfile) and [`README.md`](../README.md).
+The executor ships as a Docker image that runs the long-running executor service as PID 1 via `ENTRYPOINT ["bun", "source/serve.ts"]`. The build runs `bun install`, typecheck, and tests as gates, then removes `node_modules`. Configuration is a bundled deployment file (model endpoint, budgets, context policy) with production defaults; environment variables select the file (`ORCHESTRATOR_DEPLOYMENT_FILE`) and layer per-field overrides on top of it. The deployment model is one container per project: the project is mounted at `/workspace` (read-write) and the executor modifies it in place. See [`Dockerfile`](../Dockerfile) and [`README.md`](../README.md).
 
 ### Run termination
 

@@ -1,5 +1,6 @@
 import * as fs from 'node:fs'
 import * as path from 'node:path'
+import { resolveSecret } from '../secrets.js'
 import { isObject } from '../validation.js'
 
 export interface KagiSearchResult {
@@ -119,14 +120,6 @@ export function createDockerSecretReader(secretsDir: string): (name: string) => 
 	}
 }
 
-// Docker secrets are conventionally named in lowercase; the uppercase variant covers deployments
-// that mount the secret under the environment variable's name.
 export function resolveKagiApiKey(environment: Record<string, string | undefined>, readSecret: (name: string) => string | undefined): string | undefined {
-	const fromEnvironment = environment.KAGI_API_KEY?.trim()
-	if (fromEnvironment !== undefined && fromEnvironment !== '') return fromEnvironment
-	const fromLowercaseSecret = readSecret('kagi_api_key')
-	if (fromLowercaseSecret !== undefined && fromLowercaseSecret !== '') return fromLowercaseSecret
-	const fromUppercaseSecret = readSecret('KAGI_API_KEY')
-	if (fromUppercaseSecret !== undefined && fromUppercaseSecret !== '') return fromUppercaseSecret
-	return undefined
+	return resolveSecret('kagi_api_key', { environment, readDockerSecret: readSecret })
 }

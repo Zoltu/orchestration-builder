@@ -23,15 +23,38 @@ curl -X POST http://localhost:12345/api/runs -H 'content-type: application/json'
 
 ### Configuration
 
-All configuration is environment variables passed via `docker run -e`:
+Configuration is a bundled deployment file (model endpoint, budgets, context policy) with environment variables layered on top, passed via `docker run -e`. Precedence is deployment file first, environment variables second: an override variable replaces only its own field, and unset variables keep the file's value.
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `ORCHESTRATOR_API_KEY` | _(none)_ | Model API key, injected into the model configuration at startup and never stored in the Guild. Omit for a local endpoint that needs no key. |
+| `ORCHESTRATOR_API_KEY` | _(none)_ | Model API key, injected into the model configuration at startup and never stored in the Guild. May also be provided as a Docker secret at `/run/secrets/orchestrator_api_key`. Omit for a local endpoint that needs no key. |
+| `ORCHESTRATOR_DEPLOYMENT_FILE` | Bundled `deployment/deployment.json` | Path to the deployment configuration file. Point it at a docker config, docker secret, or bind mount to change the deployment without rebuilding the image. |
 | `KAGI_API_KEY` | _(none)_ | Kagi API key enabling the `web_search` tool and `fetch_url`'s Kagi Extract backend. May also be provided as a Docker secret at `/run/secrets/kagi_api_key`. Without it those tools report themselves unavailable and `fetch_url` falls back to markdown.new and direct fetching. |
 | `PORT` | `80` | Port the HTTP service listens on inside the container. |
 | `WORKSPACE_ROOT` | `/workspace` | The path inside the container that the project the executor operates on. Run artifacts are written to `<WORKSPACE_ROOT>/.orchestration/runs/`. |
 
-The Guild is bundled into the image at `/app/guild/`, with its deployment configuration (model endpoint, budgets, context policy) at `/app/deployment/deployment.json`. To override either without rebuilding, mount a different guild read-only at `/app/guild` or a different deployment file at `/app/deployment/deployment.json`.
+Deployment field overrides — each variable defaults to the deployment file's value for that field, and setting it replaces just that field:
+
+| Variable | Deployment field | Constraint |
+|---|---|---|
+| `ORCHESTRATOR_MODEL` | `model.name` | non-empty string |
+| `ORCHESTRATOR_API_BASE` | `model.apiBase` | non-empty string |
+| `ORCHESTRATOR_MODEL_CONTEXT_WINDOW` | `model.contextWindow` | positive integer |
+| `ORCHESTRATOR_REASONING_FIELD` | `model.reasoningField` | non-empty string |
+| `ORCHESTRATOR_TEMPERATURE` | `model.generation.temperature` | finite number |
+| `ORCHESTRATOR_MAX_TOKENS` | `model.generation.maxTokens` | positive integer |
+| `ORCHESTRATOR_MAX_AGENT_DEPTH` | `executor.maxAgentDepth` | positive integer |
+| `ORCHESTRATOR_TOOL_TIMEOUT_SECONDS` | `executor.defaultToolTimeoutSeconds` | positive integer |
+| `ORCHESTRATOR_MAX_COMPACTION_ATTEMPTS` | `executor.maxCompactionAttempts` | positive integer |
+| `ORCHESTRATOR_CONTEXT_PRESSURE_THRESHOLD` | `executor.contextPressureThreshold` | number in (0, 1) |
+| `ORCHESTRATOR_CONTEXT_HANDLER_ROLE` | `executor.contextHandlerRole` | non-empty string |
+| `ORCHESTRATOR_INQUIRY_HANDLER_ROLE` | `executor.inquiryHandlerRole` | non-empty string |
+| `ORCHESTRATOR_INTERRUPT_HANDLER_ROLE` | `executor.interruptTriggers.handlerRole` | non-empty string |
+| `ORCHESTRATOR_INTERRUPT_EVERY_TOOL_CALLS` | `executor.interruptTriggers.everyToolCalls` | positive integer |
+| `ORCHESTRATOR_INTERRUPT_EVERY_TOKENS` | `executor.interruptTriggers.everyTokens` | positive integer |
+| `ORCHESTRATOR_INTERRUPT_PLAN_OWNER_ROLE` | `executor.interruptTriggers.planOwnerRole` | non-empty string |
+| `ORCHESTRATOR_MAX_TOOL_OUTPUT_CHARS` | `contextPolicy.maxToolOutputChars` | positive integer |
+
+The Guild is bundled into the image at `/app/guild/`, with its deployment configuration (model endpoint, budgets, context policy) at `/app/deployment/deployment.json`. To override either without rebuilding, mount a different guild read-only at `/app/guild`, or point `ORCHESTRATOR_DEPLOYMENT_FILE` at a different deployment file (a docker config, docker secret, or bind mount).
 
 For programmatic access, there is an [HTTP API](docs/reference.md) for submitting tasks and reading run state.

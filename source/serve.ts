@@ -4,16 +4,16 @@ import * as path from 'node:path'
 import { createWebServer } from './web/server.js'
 import { createSnapshotCache } from './web/snapshot-cache.js'
 import { createTaskSummarizer, type TaskSummarizer } from './web/summarize.js'
-import { createAppendLog, createDeleteCheckpoint, createDockerSecretReader, createGuildLoader, createInterruptChannel, createInterruptQueue, createLlmCaller, createLlmFetch, createListRunIds, createReadProjectSettings, createReadRunCheckpointById, createReadRunMetaById, createReadRunSnapshotById, createReadRunSnapshotStats, createReadRunSummaryById, createRunDirectory, createRunState, createRunSubmission, createSleep, createToolHandlers, createWebHumanBackend, createWriteCheckpoint, createWriteMeta, createWriteProjectSettings, createWriteRunSummary, reconcileRunsOnStartup, resolveKagiApiKey, resumeExecutor, runExecutor, type ExecutorDependencies, type InterruptChannel, type LoadedGuild, type LlmCaller, type ModelConfig, type ResumeRun, type RunCheckpoint, type StartRun, type WebHumanBackend } from './executor/index.js'
+import { applyDeploymentOverride, createAppendLog, createDeleteCheckpoint, createDockerSecretReader, createGuildLoader, createInterruptChannel, createInterruptQueue, createLlmCaller, createLlmFetch, createListRunIds, createReadProjectSettings, createReadRunCheckpointById, createReadRunMetaById, createReadRunSnapshotById, createReadRunSnapshotStats, createReadRunSummaryById, createRunDirectory, createRunState, createRunSubmission, createSleep, createToolHandlers, createWebHumanBackend, createWriteCheckpoint, createWriteMeta, createWriteProjectSettings, createWriteRunSummary, reconcileRunsOnStartup, resolveDeploymentOverride, resolveKagiApiKey, resolveSecret, resumeExecutor, runExecutor, validateDeploymentConfig, validateDeploymentRoleReferences, type ExecutorDependencies, type InterruptChannel, type LoadedGuild, type LlmCaller, type ResumeRun, type RunCheckpoint, type StartRun, type WebHumanBackend } from './executor/index.js'
 
-const API_KEY_ENV_VAR = 'ORCHESTRATOR_API_KEY'
+const DEPLOYMENT_FILE_ENV_VAR = 'ORCHESTRATOR_DEPLOYMENT_FILE'
 const PORT_ENV_VAR = 'PORT'
 const WORKSPACE_ROOT_ENV_VAR = 'WORKSPACE_ROOT'
-// Docker secrets mount at /run/secrets; the Kagi key can also arrive as a plain environment variable (see resolveKagiApiKey).
+// Docker secrets mount at /run/secrets; the orchestrator and Kagi keys can also arrive as plain environment variables (see resolveSecret).
 const DOCKER_SECRETS_DIR = '/run/secrets'
 
-// The guild directory and the deployment file are bundled into the image (and live at the repo root in development); their locations are implementation details, not deployment variables, so they are hardcoded rather than configurable.
-// Resolved relative to this module so both are found regardless of the process working directory: in the image the app lives at /app/source with the guild at /app/guild and the deployment at /app/deployment, but the container's WORKDIR is /workspace.
+// The guild directory and the deployment file are bundled into the image (and live at the repo root in development); resolved relative to this module so both are found regardless of the process working directory: in the image the app lives at /app/source with the guild at /app/guild and the deployment at /app/deployment, but the container's WORKDIR is /workspace.
+// The guild's location is an implementation detail. The deployment file's path alone is a deployment variable: ORCHESTRATOR_DEPLOYMENT_FILE repoints it at a mounted file, docker config, or docker secret without rebuilding the image.
 const GUILD_PATH = path.resolve(import.meta.dir, '..', 'guild')
 const DEPLOYMENT_PATH = path.resolve(import.meta.dir, '..', 'deployment', 'deployment.json')
 const DEFAULT_PORT = 80
@@ -30,14 +30,6 @@ function generateRunId(now: Date): string {
 	const date = `${now.getUTCFullYear()}${pad(now.getUTCMonth() + 1)}${pad(now.getUTCDate())}`
 	const time = `${pad(now.getUTCHours())}${pad(now.getUTCMinutes())}${pad(now.getUTCSeconds())}`
 	return `run-${date}-${time}`
-}
-
-// Resolves the LLM caller's two model inputs from their distinct sources: the model configuration comes from the deployment file (via the loaded guild) and the API key credential from the environment (see API_KEY_ENV_VAR), normalized to undefined when empty so the caller omits the Authorization header entirely.
-function resolveModelCredential(loadedGuild: LoadedGuild, apiKey: string | undefined): { model: ModelConfig; apiKey: string | undefined } {
-	return {
-		model: loadedGuild.deployment.model,
-		apiKey: apiKey !== undefined && apiKey !== '' ? apiKey : undefined,
-	}
 }
 
 // Accepts only plain decimal digit strings so forms like `0x1a`, `1e3`, `8080.0`, or ` 8080 ` are rejected rather than silently coerced by Number().
@@ -172,10 +164,19 @@ async function serve(): Promise<void> {
 	const workspaceRootPath = Bun.env[WORKSPACE_ROOT_ENV_VAR] || DEFAULT_WORKSPACE_ROOT
 	const runsBaseDir = path.resolve(workspaceRootPath, ORCHESTRATION_DIR, 'runs')
 
-	const loadGuild = createGuildLoader(DEPLOYMENT_PATH)
+	const deploymentFilePath = Bun.env[DEPLOYMENT_FILE_ENV_VAR] || DEPLOYMENT_PATH
+	const loadGuild = createGuildLoader(deploymentFilePath)
 	const loadedGuild = loadGuild(GUILD_PATH)
-	const { model, apiKey } = resolveModelCredential(loadedGuild, Bun.env[API_KEY_ENV_VAR])
-	const llmCaller = createLlmCaller(model, apiKey, { llmFetch: createLlmFetch(), sleep: createSleep() })
+	// Environment variables override individual fields on top of the deployment file (file first, environment second). The merged result is re-validated here because an override can point a handler role at a name the guild does not declare, and the failure must surface at startup before any run accepts it — role names are configuration, not credentials, so echoing them in the error is safe.
+	const roleNames = new Set(Object.keys(loadedGuild.config.roles))
+	const deployment = applyDeploymentOverride(loadedGuild.deployment, resolveDeploymentOverride(Bun.env))
+	validateDeploymentConfig(deployment)
+	validateDeploymentRoleReferences(deployment, roleNames)
+	const guild: LoadedGuild = { ...loadedGuild, deployment }
+
+	// The orchestrator credential comes from the shared secret channels: the ORCHESTRATOR_API_KEY environment variable first, then a docker secret mounted at /run/secrets/orchestrator_api_key (or ORCHESTRATOR_API_KEY). resolveSecret trims and normalizes empty values to undefined so the caller omits the Authorization header entirely.
+	const apiKey = resolveSecret('orchestrator_api_key', { environment: Bun.env, readDockerSecret: createDockerSecretReader(DOCKER_SECRETS_DIR) })
+	const llmCaller = createLlmCaller(guild.deployment.model, apiKey, { llmFetch: createLlmFetch(), sleep: createSleep() })
 	const kagiApiKey = resolveKagiApiKey(Bun.env, createDockerSecretReader(DOCKER_SECRETS_DIR))
 	if (kagiApiKey === undefined) {
 		console.log('KAGI_API_KEY not set: web_search and the kagi fetch backend will report themselves unavailable')
@@ -199,7 +200,7 @@ async function serve(): Promise<void> {
 	})
 
 	const runConfig = {
-		loadedGuild,
+		loadedGuild: guild,
 		llmCaller,
 		humanBackend: webHumanBackend,
 		interruptChannel,
@@ -230,9 +231,9 @@ async function serve(): Promise<void> {
 
 	const webServer = createWebServer({
 		port,
-		guildConfig: loadedGuild.config,
-		deployment: loadedGuild.deployment,
-		tools: loadedGuild.tools,
+		guildConfig: guild.config,
+		deployment: guild.deployment,
+		tools: guild.tools,
 		runState,
 		runSubmission,
 		readRunSnapshot,

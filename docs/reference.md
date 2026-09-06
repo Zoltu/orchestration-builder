@@ -267,9 +267,35 @@ There is no separate graph or playbook file. A workflow is a role calling `agent
 
 ## Deployment configuration
 
-The deployment file `deployment/deployment.json` holds the knobs an operator sets once per deployment: the model endpoint, the executor budgets, and the context policy. It is bundled into the image at `/app/deployment/` alongside the Guild and loaded at service startup. Like the Guild it has full-replacement semantics — to change it, mount a different file — and it is validated strictly: unknown keys are rejected at every level, including nested objects like `generation` and `interruptTriggers` (the file is small and fully known, so a typo must fail loudly), and handler-role fields (`executor.contextHandlerRole`, `executor.inquiryHandlerRole`, `executor.interruptTriggers.handlerRole`, `executor.interruptTriggers.planOwnerRole`) must name roles declared in the Guild. There is no schema versioning; a deployment file that does not match this document fails the load.
+The deployment file `deployment/deployment.json` holds the knobs an operator sets once per deployment: the model endpoint, the executor budgets, and the context policy. It is bundled into the image at `/app/deployment/` alongside the Guild and loaded at service startup. Like the Guild it has full-replacement semantics — to change it, mount a different file and point `ORCHESTRATOR_DEPLOYMENT_FILE` at it — and individual fields can also be overridden with environment variables on top of it (see "Environment overrides" below). It is validated strictly: unknown keys are rejected at every level, including nested objects like `generation` and `interruptTriggers` (the file is small and fully known, so a typo must fail loudly), and handler-role fields (`executor.contextHandlerRole`, `executor.inquiryHandlerRole`, `executor.interruptTriggers.handlerRole`, `executor.interruptTriggers.planOwnerRole`) must name roles declared in the Guild. There is no schema versioning; a deployment file that does not match this document fails the load.
 
-The model credential is deliberately absent from the file: an `apiKey` key is rejected with a pointer to the `ORCHESTRATOR_API_KEY` environment variable, which injects the key at runtime (see [`README.md`](../README.md) "Configuration").
+The model credential is deliberately absent from the file: an `apiKey` key is rejected with a pointer to the `ORCHESTRATOR_API_KEY` environment variable, which injects the key at runtime (see [`README.md`](../README.md) "Configuration"). Like the Kagi key, it may also arrive as a Docker secret at `/run/secrets/orchestrator_api_key` (or `/run/secrets/ORCHESTRATOR_API_KEY`).
+
+### Environment overrides
+
+Individual deployment fields can be overridden at runtime with `ORCHESTRATOR_*` environment variables. Precedence is deployment file first, environment variables second: the file is loaded and validated as usual, then each set variable replaces exactly one field of the result — the nested `generation` and `interruptTriggers` objects merge per-field, never wholesale — and the merged deployment is validated again, including the handler-role cross-checks against the Guild, so a bad override fails at startup with the offending variable named. An unset or empty variable means "not set": an override can replace a field's value but never clear it.
+
+| Variable | Deployment field |
+|---|---|
+| `ORCHESTRATOR_MODEL` | `model.name` |
+| `ORCHESTRATOR_API_BASE` | `model.apiBase` |
+| `ORCHESTRATOR_MODEL_CONTEXT_WINDOW` | `model.contextWindow` |
+| `ORCHESTRATOR_REASONING_FIELD` | `model.reasoningField` |
+| `ORCHESTRATOR_TEMPERATURE` | `model.generation.temperature` |
+| `ORCHESTRATOR_MAX_TOKENS` | `model.generation.maxTokens` |
+| `ORCHESTRATOR_MAX_AGENT_DEPTH` | `executor.maxAgentDepth` |
+| `ORCHESTRATOR_TOOL_TIMEOUT_SECONDS` | `executor.defaultToolTimeoutSeconds` |
+| `ORCHESTRATOR_MAX_COMPACTION_ATTEMPTS` | `executor.maxCompactionAttempts` |
+| `ORCHESTRATOR_CONTEXT_PRESSURE_THRESHOLD` | `executor.contextPressureThreshold` |
+| `ORCHESTRATOR_CONTEXT_HANDLER_ROLE` | `executor.contextHandlerRole` |
+| `ORCHESTRATOR_INQUIRY_HANDLER_ROLE` | `executor.inquiryHandlerRole` |
+| `ORCHESTRATOR_INTERRUPT_HANDLER_ROLE` | `executor.interruptTriggers.handlerRole` |
+| `ORCHESTRATOR_INTERRUPT_EVERY_TOOL_CALLS` | `executor.interruptTriggers.everyToolCalls` |
+| `ORCHESTRATOR_INTERRUPT_EVERY_TOKENS` | `executor.interruptTriggers.everyTokens` |
+| `ORCHESTRATOR_INTERRUPT_PLAN_OWNER_ROLE` | `executor.interruptTriggers.planOwnerRole` |
+| `ORCHESTRATOR_MAX_TOOL_OUTPUT_CHARS` | `contextPolicy.maxToolOutputChars` |
+
+The constraints mirror the file's semantics with the error pointing at the variable: integer-valued fields are positive integers parsed strictly (plain digit strings only — `0x1a`, `1e3`, `8080.0`, and padded values are rejected), `ORCHESTRATOR_TEMPERATURE` must be a finite number, and `ORCHESTRATOR_CONTEXT_PRESSURE_THRESHOLD` must be a number in (0, 1). When the deployment file has no `interruptTriggers` section, introducing one from the environment requires `ORCHESTRATOR_INTERRUPT_HANDLER_ROLE`, `ORCHESTRATOR_INTERRUPT_EVERY_TOOL_CALLS`, and `ORCHESTRATOR_INTERRUPT_EVERY_TOKENS` together, since the section's required fields must all come from the override.
 
 ### `model`
 
