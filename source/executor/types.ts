@@ -6,14 +6,31 @@ export interface GuildConfig {
 	visualization?: VisualizationConfig
 }
 
-// The deployment knobs the executor reads at startup, kept apart from the Guild so a swapped Guild (the Foundry's artifact) never carries the model endpoint, budgets, or context policy. The API key is deliberately absent: it is a runtime credential supplied via the ORCHESTRATOR_API_KEY environment variable, never stored in a file or type.
-export interface DeploymentConfig {
+// The deployment file's schema, what deployment/deployment.json (plus the ORCHESTRATOR_* overrides merged on top) is validated against. The API key is deliberately absent: it is a runtime credential supplied via the ORCHESTRATOR_API_KEY environment variable, never stored in a file or type.
+export interface DeploymentFileConfig {
 	model: ModelConfig
 	executor: ExecutorConfig
 	contextPolicy: ContextPolicy
 }
 
+// The deployment knobs the executor reads at startup, kept apart from the Guild so a swapped Guild (the Foundry's artifact) never carries the model endpoint, budgets, or context policy. This is the resolved shape LoadedGuild carries: the model is completed at startup (see model-resolution.ts), so engine and web consumers read every model field as a required value.
+export interface DeploymentConfig {
+	model: ResolvedModelConfig
+	executor: ExecutorConfig
+	contextPolicy: ContextPolicy
+}
+
+// The model section of the deployment file. name and contextWindow are optional here because the model API can also report them; the deployed value is completed at startup from configuration or the model API into ResolvedModelConfig.
 export interface ModelConfig {
+	name?: string
+	apiBase: string
+	contextWindow?: number
+	reasoningField?: string
+	generation: GenerationConfig
+}
+
+// The complete model the executor consumes: every deployment-sourced field is guaranteed present, so a missing value fails at startup instead of surfacing as undefined deep in a run.
+export interface ResolvedModelConfig {
 	name: string
 	apiBase: string
 	contextWindow: number

@@ -6,12 +6,12 @@ import {
 	isProjectSettings,
 	isResultCard,
 	isRunMeta,
-	validateDeploymentConfig,
+	validateDeploymentFileConfig,
 	validateDeploymentRoleReferences,
 	validateGuildConfig,
 	validateToolManifest,
 } from './validation.ts'
-import type { DeploymentConfig } from './types.js'
+import type { DeploymentFileConfig } from './types.js'
 
 const validGuild = {
 	entryRole: 'orchestrator',
@@ -27,7 +27,7 @@ const validToolManifest = {
 
 const validResultCard = { status: 'success' as const, summary: 'done' }
 
-const validDeployment: DeploymentConfig = {
+const validDeployment: DeploymentFileConfig = {
 	model: { name: 'm', apiBase: 'http://x', contextWindow: 1, generation: {} },
 	executor: {
 		maxAgentDepth: 1,
@@ -141,9 +141,9 @@ describe('validateGuildConfig throws ValidationError with a path-based message',
 	})
 })
 
-describe('validateDeploymentConfig throws ValidationError with a path-based message', () => {
-	test('passes on a valid DeploymentConfig', () => {
-		expect(() => validateDeploymentConfig(validDeployment)).not.toThrow()
+describe('validateDeploymentFileConfig throws ValidationError with a path-based message', () => {
+	test('passes on a valid DeploymentFileConfig', () => {
+		expect(() => validateDeploymentFileConfig(validDeployment)).not.toThrow()
 	})
 	test('tolerates every optional field', () => {
 		const full: unknown = {
@@ -159,17 +159,29 @@ describe('validateDeploymentConfig throws ValidationError with a path-based mess
 			},
 			contextPolicy: { maxToolOutputChars: 1 },
 		}
-		expect(() => validateDeploymentConfig(full)).not.toThrow()
+		expect(() => validateDeploymentFileConfig(full)).not.toThrow()
+	})
+	test('accepts a model without name and contextWindow (the fields the model API can also report)', () => {
+		const incomplete: unknown = { ...validDeployment, model: { apiBase: 'http://x', generation: {} } }
+		expect(() => validateDeploymentFileConfig(incomplete)).not.toThrow()
+	})
+	test('rejects a present-but-empty model.name and non-positive model.contextWindow', () => {
+		const emptyName = { ...validDeployment, model: { ...validDeployment.model, name: '' } }
+		expect(() => validateDeploymentFileConfig(emptyName)).toThrow(/model\.name/)
+		for (const window of [0, -1]) {
+			const nonPositive = { ...validDeployment, model: { ...validDeployment.model, contextWindow: window } }
+			expect(() => validateDeploymentFileConfig(nonPositive)).toThrow(/model\.contextWindow/)
+		}
 	})
 	test('rejects a non-object', () => {
-		expect(() => validateDeploymentConfig('nope')).toThrow(ValidationError)
-		expect(() => validateDeploymentConfig(null)).toThrow(ValidationError)
-		expect(() => validateDeploymentConfig([])).toThrow(ValidationError)
+		expect(() => validateDeploymentFileConfig('nope')).toThrow(ValidationError)
+		expect(() => validateDeploymentFileConfig(null)).toThrow(ValidationError)
+		expect(() => validateDeploymentFileConfig([])).toThrow(ValidationError)
 	})
 	test.each(['model', 'executor', 'contextPolicy'])('rejects a missing or malformed %s', (section) => {
 		const bad: Record<string, unknown> = { ...validDeployment }
 		bad[section] = 42
-		expect(() => validateDeploymentConfig(bad)).toThrow(new RegExp(`${section}`))
+		expect(() => validateDeploymentFileConfig(bad)).toThrow(new RegExp(`${section}`))
 	})
 	test.each([
 		['name', 42],
@@ -179,7 +191,7 @@ describe('validateDeploymentConfig throws ValidationError with a path-based mess
 		['reasoningField', 42],
 	])('rejects a malformed model.%s', (field, value) => {
 		const bad = { ...validDeployment, model: { ...validDeployment.model, [field]: value } }
-		expect(() => validateDeploymentConfig(bad)).toThrow(new RegExp(`model\\.${field}`))
+		expect(() => validateDeploymentFileConfig(bad)).toThrow(new RegExp(`model\\.${field}`))
 	})
 	test.each([
 		['maxAgentDepth', 'deep'],
@@ -187,91 +199,91 @@ describe('validateDeploymentConfig throws ValidationError with a path-based mess
 		['maxCompactionAttempts', 'many'],
 	])('rejects a malformed executor.%s', (field, value) => {
 		const bad = { ...validDeployment, executor: { ...validDeployment.executor, [field]: value } }
-		expect(() => validateDeploymentConfig(bad)).toThrow(new RegExp(`executor\\.${field}`))
+		expect(() => validateDeploymentFileConfig(bad)).toThrow(new RegExp(`executor\\.${field}`))
 	})
 	test('rejects a malformed generation.temperature and maxTokens', () => {
 		const hot = { ...validDeployment, model: { ...validDeployment.model, generation: { temperature: 'hot' } } }
-		expect(() => validateDeploymentConfig(hot)).toThrow(/model\.generation\.temperature/)
+		expect(() => validateDeploymentFileConfig(hot)).toThrow(/model\.generation\.temperature/)
 		const big = { ...validDeployment, model: { ...validDeployment.model, generation: { maxTokens: 'big' } } }
-		expect(() => validateDeploymentConfig(big)).toThrow(/model\.generation\.maxTokens/)
+		expect(() => validateDeploymentFileConfig(big)).toThrow(/model\.generation\.maxTokens/)
 	})
 	test('rejects an unknown key inside model.generation (near-miss maxtokens)', () => {
 		const bad = { ...validDeployment, model: { ...validDeployment.model, generation: { maxtokens: 512 } } }
 		try {
-			validateDeploymentConfig(bad)
+			validateDeploymentFileConfig(bad)
 		} catch (e) {
 			if (e instanceof ValidationError) {
 				expect(e.path).toBe('model.generation.maxtokens')
 			}
 		}
-		expect(() => validateDeploymentConfig(bad)).toThrow(/model\.generation\.maxtokens.*unknown key "maxtokens"/)
+		expect(() => validateDeploymentFileConfig(bad)).toThrow(/model\.generation\.maxtokens.*unknown key "maxtokens"/)
 	})
 	test('rejects a contextPressureThreshold outside (0, 1)', () => {
 		const withThreshold = (contextPressureThreshold: unknown) => ({
 			...validDeployment,
 			executor: { ...validDeployment.executor, contextPressureThreshold },
 		})
-		expect(() => validateDeploymentConfig(withThreshold(0.8))).not.toThrow()
-		expect(() => validateDeploymentConfig(withThreshold(0.01))).not.toThrow()
-		expect(() => validateDeploymentConfig(withThreshold(0))).toThrow(/executor\.contextPressureThreshold/)
-		expect(() => validateDeploymentConfig(withThreshold(1))).toThrow(/executor\.contextPressureThreshold/)
-		expect(() => validateDeploymentConfig(withThreshold(1.5))).toThrow(/executor\.contextPressureThreshold/)
-		expect(() => validateDeploymentConfig(withThreshold('high'))).toThrow(/executor\.contextPressureThreshold/)
+		expect(() => validateDeploymentFileConfig(withThreshold(0.8))).not.toThrow()
+		expect(() => validateDeploymentFileConfig(withThreshold(0.01))).not.toThrow()
+		expect(() => validateDeploymentFileConfig(withThreshold(0))).toThrow(/executor\.contextPressureThreshold/)
+		expect(() => validateDeploymentFileConfig(withThreshold(1))).toThrow(/executor\.contextPressureThreshold/)
+		expect(() => validateDeploymentFileConfig(withThreshold(1.5))).toThrow(/executor\.contextPressureThreshold/)
+		expect(() => validateDeploymentFileConfig(withThreshold('high'))).toThrow(/executor\.contextPressureThreshold/)
 	})
 	test('accepts a contextHandlerRole string and rejects empty or non-string values', () => {
 		const withHandler = (contextHandlerRole: unknown) => ({
 			...validDeployment,
 			executor: { ...validDeployment.executor, contextHandlerRole },
 		})
-		expect(() => validateDeploymentConfig(withHandler('context_manager'))).not.toThrow()
-		expect(() => validateDeploymentConfig(withHandler(''))).toThrow(/executor\.contextHandlerRole/)
-		expect(() => validateDeploymentConfig(withHandler(42))).toThrow(/executor\.contextHandlerRole/)
+		expect(() => validateDeploymentFileConfig(withHandler('context_manager'))).not.toThrow()
+		expect(() => validateDeploymentFileConfig(withHandler(''))).toThrow(/executor\.contextHandlerRole/)
+		expect(() => validateDeploymentFileConfig(withHandler(42))).toThrow(/executor\.contextHandlerRole/)
 	})
 	test('accepts an inquiryHandlerRole string and rejects empty or non-string values', () => {
 		const withHandler = (inquiryHandlerRole: unknown) => ({
 			...validDeployment,
 			executor: { ...validDeployment.executor, inquiryHandlerRole },
 		})
-		expect(() => validateDeploymentConfig(withHandler('inquirer'))).not.toThrow()
-		expect(() => validateDeploymentConfig(withHandler(''))).toThrow(/executor\.inquiryHandlerRole/)
-		expect(() => validateDeploymentConfig(withHandler(42))).toThrow(/executor\.inquiryHandlerRole/)
+		expect(() => validateDeploymentFileConfig(withHandler('inquirer'))).not.toThrow()
+		expect(() => validateDeploymentFileConfig(withHandler(''))).toThrow(/executor\.inquiryHandlerRole/)
+		expect(() => validateDeploymentFileConfig(withHandler(42))).toThrow(/executor\.inquiryHandlerRole/)
 	})
 	test('rejects unknown top-level keys', () => {
 		const bad = { ...validDeployment, budgest: {} }
 		try {
-			validateDeploymentConfig(bad)
+			validateDeploymentFileConfig(bad)
 		} catch (e) {
 			if (e instanceof ValidationError) {
 				expect(e.path).toBe('budgest')
 			}
 		}
-		expect(() => validateDeploymentConfig(bad)).toThrow(/unknown key "budgest"/)
+		expect(() => validateDeploymentFileConfig(bad)).toThrow(/unknown key "budgest"/)
 	})
 	test('rejects unknown keys inside model', () => {
 		const bad = { ...validDeployment, model: { ...validDeployment.model, contextwindow: 1 } }
 		try {
-			validateDeploymentConfig(bad)
+			validateDeploymentFileConfig(bad)
 		} catch (e) {
 			if (e instanceof ValidationError) {
 				expect(e.path).toBe('model.contextwindow')
 			}
 		}
-		expect(() => validateDeploymentConfig(bad)).toThrow(/unknown key "contextwindow"/)
+		expect(() => validateDeploymentFileConfig(bad)).toThrow(/unknown key "contextwindow"/)
 	})
 	test('rejects unknown keys inside executor', () => {
 		const bad = { ...validDeployment, executor: { ...validDeployment.executor, maxAgentDepht: 8 } }
 		try {
-			validateDeploymentConfig(bad)
+			validateDeploymentFileConfig(bad)
 		} catch (e) {
 			if (e instanceof ValidationError) {
 				expect(e.path).toBe('executor.maxAgentDepht')
 			}
 		}
-		expect(() => validateDeploymentConfig(bad)).toThrow(/unknown key "maxAgentDepht"/)
+		expect(() => validateDeploymentFileConfig(bad)).toThrow(/unknown key "maxAgentDepht"/)
 	})
 	test('rejects unknown keys inside contextPolicy', () => {
 		const bad = { ...validDeployment, contextPolicy: { maxToolOutputChars: 1, maxOutpuChars: 1 } }
-		expect(() => validateDeploymentConfig(bad)).toThrow(/contextPolicy\.maxOutpuChars.*unknown key "maxOutpuChars"/)
+		expect(() => validateDeploymentFileConfig(bad)).toThrow(/contextPolicy\.maxOutpuChars.*unknown key "maxOutpuChars"/)
 	})
 	test('rejects unknown keys inside executor.interruptTriggers (near-miss planOwnerRol)', () => {
 		const bad = {
@@ -282,31 +294,31 @@ describe('validateDeploymentConfig throws ValidationError with a path-based mess
 			},
 		}
 		try {
-			validateDeploymentConfig(bad)
+			validateDeploymentFileConfig(bad)
 		} catch (e) {
 			if (e instanceof ValidationError) {
 				expect(e.path).toBe('executor.interruptTriggers.planOwnerRol')
 			}
 		}
-		expect(() => validateDeploymentConfig(bad)).toThrow(/executor\.interruptTriggers\.planOwnerRol.*unknown key "planOwnerRol"/)
+		expect(() => validateDeploymentFileConfig(bad)).toThrow(/executor\.interruptTriggers\.planOwnerRol.*unknown key "planOwnerRol"/)
 	})
 	test('rejects model.apiKey with a pointer to the ORCHESTRATOR_API_KEY environment variable', () => {
 		const bad = { ...validDeployment, model: { ...validDeployment.model, apiKey: 'secret' } }
 		try {
-			validateDeploymentConfig(bad)
+			validateDeploymentFileConfig(bad)
 		} catch (e) {
 			if (e instanceof ValidationError) {
 				expect(e.path).toBe('model.apiKey')
 				expect(e.message).toMatch(/ORCHESTRATOR_API_KEY/)
 			}
 		}
-		expect(() => validateDeploymentConfig(bad)).toThrow(ValidationError)
+		expect(() => validateDeploymentFileConfig(bad)).toThrow(ValidationError)
 	})
 })
 
 describe('validateDeploymentRoleReferences', () => {
 	const roleNames = new Set(['orchestrator', 'context_manager', 'inquiry_responder', 'loop_detector', 'planner'])
-	const validDeploymentFor: (executor: Partial<DeploymentConfig['executor']>) => DeploymentConfig = (executor) => ({
+	const validDeploymentFor: (executor: Partial<DeploymentFileConfig['executor']>) => DeploymentFileConfig = (executor) => ({
 		...validDeployment,
 		executor: { ...validDeployment.executor, ...executor },
 	})

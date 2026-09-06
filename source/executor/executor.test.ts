@@ -1,12 +1,12 @@
 import { describe, expect, test } from 'bun:test'
 
-import type { ContextPolicy, DeploymentConfig, ExecutorConfig, GuildConfig, LogEvent, ModelConfig, RoleDefinition, RunMeta, ToolCall, ToolManifest } from './types.js'
+import type { ContextPolicy, DeploymentConfig, ExecutorConfig, GuildConfig, LogEvent, ResolvedModelConfig, RoleDefinition, RunMeta, ToolCall, ToolManifest } from './types.js'
 import { ValidationError } from './errors.js'
 import { isRunCheckpoint, type RunCheckpoint } from './checkpoint.ts'
 import { resumeExecutor, runExecutor, type ExecutorDependencies } from './executor.ts'
 import { createInterruptQueue } from './interrupts.ts'
 import type { LlmCallResult, LlmCaller } from './llm.ts'
-import type { LoadGuild, LoadedGuild } from './loader.ts'
+import type { LoadedGuild } from './loader.ts'
 import type { AppendLog, DeleteCheckpoint, RunDirectory, WriteCheckpoint, WriteMeta } from './persistence.ts'
 import { stubHumanBackend, defined } from './test-fixtures.ts'
 
@@ -106,7 +106,7 @@ const baseExecutor: ExecutorConfig = {
 	maxCompactionAttempts: 5,
 }
 
-const baseModel: ModelConfig = {
+const baseModel: ResolvedModelConfig = {
 	name: 'm',
 	apiBase: 'http://x',
 	contextWindow: 32768,
@@ -147,15 +147,15 @@ function buildLoadedGuild(roles: Record<string, RoleDefinition>, entryRole: stri
 	return { config, deployment, prompts, tools }
 }
 
-function makeLoader(guild: LoadedGuild): LoadGuild {
-	return (_guildDir: string) => guild
+function makeLoader(guild: LoadedGuild): () => LoadedGuild {
+	return () => guild
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
-function makeDeps(llm: FakeLlm, persistence: FakePersistenceFns, loadGuild: LoadGuild): ExecutorDependencies {
+function makeDeps(llm: FakeLlm, persistence: FakePersistenceFns, loadGuild: () => LoadedGuild): ExecutorDependencies {
 	return {
 		llmCaller: llm,
 		appendLog: persistence.appendLog,
@@ -174,7 +174,7 @@ describe('runExecutor', () => {
 	test('Guild-load failure propagates as a thrown ValidationError before runRole runs', async () => {
 		const llm = new FakeLlm()
 		const persistence = makeFakePersistence()
-		const failingLoadGuild: LoadGuild = () => {
+		const failingLoadGuild: () => LoadedGuild = () => {
 			throw new ValidationError('', 'guild.json is not a valid GuildConfig')
 		}
 		const deps = makeDeps(llm, persistence, failingLoadGuild)

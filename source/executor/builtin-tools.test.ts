@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import type { ContextPolicy, DeploymentConfig, ExecutorConfig, GuildConfig, LogEvent, Message, ModelConfig, RoleDefinition, ToolCall, ToolManifest } from './types.js'
+import type { ContextPolicy, DeploymentConfig, ExecutorConfig, GuildConfig, LogEvent, Message, ResolvedModelConfig, RoleDefinition, ToolCall, ToolManifest } from './types.js'
 import { runRole } from './engine.ts'
 import type { EngineDependencies } from './engine-state.ts'
 import { createContextPressureTracker } from './context-pressure.ts'
@@ -59,7 +59,7 @@ const baseExecutor: ExecutorConfig = {
 	maxCompactionAttempts: 5,
 }
 
-const baseModel: ModelConfig = {
+const baseModel: ResolvedModelConfig = {
 	name: 'm',
 	apiBase: 'http://x',
 	contextWindow: 32000,

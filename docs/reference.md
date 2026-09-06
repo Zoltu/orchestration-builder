@@ -271,6 +271,8 @@ The deployment file `deployment/deployment.json` holds the knobs an operator set
 
 The model credential is deliberately absent from the file: an `apiKey` key is rejected with a pointer to the `ORCHESTRATOR_API_KEY` environment variable, which injects the key at runtime (see [`README.md`](../README.md) "Configuration"). Like the Kagi key, it may also arrive as a Docker secret at `/run/secrets/orchestrator_api_key` (or `/run/secrets/ORCHESTRATOR_API_KEY`).
 
+`model.name` and `model.contextWindow` are optional in the file: when either is absent, startup requires it and fails with an error explaining where to set it — the deployment file field or its environment variable (`ORCHESTRATOR_MODEL` / `ORCHESTRATOR_MODEL_CONTEXT_WINDOW`).
+
 ### Environment overrides
 
 Individual deployment fields can be overridden at runtime with `ORCHESTRATOR_*` environment variables. Precedence is deployment file first, environment variables second: the file is loaded and validated as usual, then each set variable replaces exactly one field of the result — the nested `generation` and `interruptTriggers` objects merge per-field, never wholesale — and the merged deployment is validated again, including the handler-role cross-checks against the Guild, so a bad override fails at startup with the offending variable named. An unset or empty variable means "not set": an override can replace a field's value but never clear it.
@@ -309,9 +311,9 @@ The constraints mirror the file's semantics with the error pointing at the varia
 }
 ```
 
-- `name`: arbitrary label for logs.
+- `name` (optional): arbitrary label for logs. When absent it must be supplied via `ORCHESTRATOR_MODEL` — startup fails with an error naming both places otherwise.
 - `apiBase`: OpenAI-compatible chat/completions endpoint.
-- `contextWindow`: context window size in tokens.
+- `contextWindow` (optional): context window size in tokens. When absent it must be supplied via `ORCHESTRATOR_MODEL_CONTEXT_WINDOW` — startup fails with an error naming both places otherwise.
 - `reasoningField`: API response field containing reasoning content (e.g. `reasoning`, `reasoning_content`). Omit if the endpoint doesn't expose reasoning.
 - `generation`: default sampling parameters (`temperature`, `maxTokens`) applied to every role. There is no per-role generation override.
 

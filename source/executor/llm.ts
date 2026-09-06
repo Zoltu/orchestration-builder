@@ -1,4 +1,4 @@
-import type { Message, ModelConfig, ToolCall, ToolManifest } from './types.js'
+import type { Message, ResolvedModelConfig, ToolCall, ToolManifest } from './types.js'
 import { isObject } from './validation.js'
 
 export interface LlmRequest {
@@ -211,8 +211,8 @@ function detectContextBudgetExceeded(status: number, errorBody: string, data: un
 	return { kind: 'context_budget_exceeded', promptTokens, contextWindow }
 }
 
-// The API key is a runtime credential (ORCHESTRATOR_API_KEY), so it rides as its own argument rather than a field on ModelConfig — the deployment config file must never carry it.
-export function createLlmCaller(model: ModelConfig, apiKey: string | undefined, dependencies: LlmCallerDependencies): LlmCaller {
+// The API key is a runtime credential (ORCHESTRATOR_API_KEY), so it rides as its own argument rather than a field on the model config — the deployment config file must never carry it. The caller takes the resolved model: the executor only ever runs with a complete model.
+export function createLlmCaller(model: ResolvedModelConfig, apiKey: string | undefined, dependencies: LlmCallerDependencies): LlmCaller {
 	const url = `${model.apiBase}/chat/completions`
 
 	async function call(request: LlmRequest): Promise<LlmCallResult> {

@@ -5,7 +5,7 @@ import { createWebServer } from './web/server.js'
 import { createBootstrapFailureHandler } from './web/bootstrap-failure.js'
 import { createSnapshotCache } from './web/snapshot-cache.js'
 import { createTaskSummarizer, type TaskSummarizer } from './web/summarize.js'
-import { applyDeploymentOverride, createAppendLog, createDeleteCheckpoint, createDockerSecretReader, createGuildLoader, createInterruptChannel, createInterruptQueue, createLlmCaller, createLlmFetch, createListRunIds, createReadProjectSettings, createReadRunCheckpointById, createReadRunMetaById, createReadRunSnapshotById, createReadRunSnapshotStats, createReadRunSummaryById, createRunDirectory, createRunState, createRunSubmission, createSleep, createToolHandlers, createWebHumanBackend, createWriteCheckpoint, createWriteMeta, createWriteProjectSettings, createWriteRunSummary, reconcileRunsOnStartup, resolveDeploymentOverride, resolveKagiApiKey, resolveSecret, resumeExecutor, runExecutor, validateDeploymentConfig, validateDeploymentRoleReferences, ConfigurationError, ValidationError, type ExecutorDependencies, type InterruptChannel, type LoadedGuild, type LlmCaller, type ResumeRun, type RunCheckpoint, type StartRun, type WebHumanBackend } from './executor/index.js'
+import { applyDeploymentOverride, createAppendLog, createDeleteCheckpoint, createDockerSecretReader, createGuildLoader, createInterruptChannel, createInterruptQueue, createLlmCaller, createLlmFetch, createListRunIds, createReadProjectSettings, createReadRunCheckpointById, createReadRunMetaById, createReadRunSnapshotById, createReadRunSnapshotStats, createReadRunSummaryById, createRunDirectory, createRunState, createRunSubmission, createSleep, createToolHandlers, createWebHumanBackend, createWriteCheckpoint, createWriteMeta, createWriteProjectSettings, createWriteRunSummary, reconcileRunsOnStartup, resolveDeploymentOverride, resolveKagiApiKey, resolveModelConfig, resolveSecret, resumeExecutor, runExecutor, validateDeploymentFileConfig, validateDeploymentRoleReferences, ConfigurationError, ValidationError, type ExecutorDependencies, type DeploymentConfig, type InterruptChannel, type LoadedGuild, type LlmCaller, type ResumeRun, type RunCheckpoint, type StartRun, type WebHumanBackend } from './executor/index.js'
 
 const DEPLOYMENT_FILE_ENV_VAR = 'ORCHESTRATOR_DEPLOYMENT_FILE'
 const PORT_ENV_VAR = 'PORT'
@@ -187,13 +187,14 @@ async function serve(): Promise<void> {
 	try {
 		const deploymentFilePath = Bun.env[DEPLOYMENT_FILE_ENV_VAR] || DEPLOYMENT_PATH
 		const loadGuild = createGuildLoader(deploymentFilePath)
-		const loadedGuild = loadGuild(GUILD_PATH)
-		// Environment variables override individual fields on top of the deployment file (file first, environment second). The merged result is re-validated here because an override can point a handler role at a name the guild does not declare, and the failure must surface at startup before any run accepts it — role names are configuration, not credentials, so echoing them in the error is safe.
-		const roleNames = new Set(Object.keys(loadedGuild.config.roles))
-		const deployment = applyDeploymentOverride(loadedGuild.deployment, resolveDeploymentOverride(Bun.env))
-		validateDeploymentConfig(deployment)
-		validateDeploymentRoleReferences(deployment, roleNames)
-		guild = { ...loadedGuild, deployment }
+		const loadedGuildFiles = loadGuild(GUILD_PATH)
+		// Environment variables override individual fields on top of the deployment file (file first, environment second). The merged result is re-validated here because an override can point a handler role at a name the guild does not declare, and the failure must surface at startup before any run accepts it — role names are configuration, not credentials, so echoing them in the error is safe. The merged value is still file-shaped (the model's optional fields may be absent), so the file validator applies; the model is then completed into the resolved shape the executor consumes.
+		const roleNames = new Set(Object.keys(loadedGuildFiles.config.roles))
+		const mergedDeployment = applyDeploymentOverride(loadedGuildFiles.deployment, resolveDeploymentOverride(Bun.env))
+		validateDeploymentFileConfig(mergedDeployment)
+		validateDeploymentRoleReferences(mergedDeployment, roleNames)
+		const deployment: DeploymentConfig = { model: resolveModelConfig(mergedDeployment.model), executor: mergedDeployment.executor, contextPolicy: mergedDeployment.contextPolicy }
+		guild = { ...loadedGuildFiles, deployment }
 
 		// The orchestrator credential comes from the shared secret channels: the ORCHESTRATOR_API_KEY environment variable first, then a docker secret mounted at /run/secrets/orchestrator_api_key (or ORCHESTRATOR_API_KEY). resolveSecret trims and normalizes empty values to undefined so the caller omits the Authorization header entirely.
 		apiKey = resolveSecret('orchestrator_api_key', { environment: Bun.env, readDockerSecret: createDockerSecretReader(DOCKER_SECRETS_DIR) })

@@ -2,6 +2,7 @@ import { isErrorKind, ValidationError } from './errors.js'
 import type {
 	ContextPolicy,
 	DeploymentConfig,
+	DeploymentFileConfig,
 	EffortLevel,
 	ExecutorConfig,
 	GenerationConfig,
@@ -180,9 +181,9 @@ function validateModelConfig(value: unknown, path: string): asserts value is Mod
 	// A deployment file carrying a credential is almost always an operator copying an old guild.json: fail with the env-var pointer instead of silently ignoring the key (the deployment file is strict, so a near-miss like this must not pass as an unknown key with a generic message).
 	if ('apiKey' in value) throw new ValidationError(`${path}.apiKey`, 'model credentials are runtime configuration: set the ORCHESTRATOR_API_KEY environment variable instead of writing them into the deployment file')
 	rejectUnknownKeys(value, modelKeys, path)
-	ensure(isString, value.name, `${path}.name`, 'expected a string')
+	if (value.name !== undefined && (typeof value.name !== 'string' || value.name === '')) throw new ValidationError(`${path}.name`, 'expected a non-empty string')
 	ensure(isString, value.apiBase, `${path}.apiBase`, 'expected a string')
-	ensure(isNumber, value.contextWindow, `${path}.contextWindow`, 'expected a number')
+	if (value.contextWindow !== undefined && (!isNumber(value.contextWindow) || value.contextWindow <= 0)) throw new ValidationError(`${path}.contextWindow`, 'expected a positive number')
 	ensure(isOptionalString, value.reasoningField, `${path}.reasoningField`, 'expected a string or undefined')
 	validateGenerationConfig(value.generation, `${path}.generation`)
 }
@@ -263,7 +264,7 @@ export function validateGuildConfig(value: unknown): asserts value is GuildConfi
 
 const deploymentKeys: readonly string[] = ['model', 'executor', 'contextPolicy']
 
-export function validateDeploymentConfig(value: unknown): asserts value is DeploymentConfig {
+export function validateDeploymentFileConfig(value: unknown): asserts value is DeploymentFileConfig {
 	if (!isObject(value)) throw new ValidationError('', 'expected an object')
 	rejectUnknownKeys(value, deploymentKeys, '')
 	validateModelConfig(value.model, 'model')
@@ -271,8 +272,8 @@ export function validateDeploymentConfig(value: unknown): asserts value is Deplo
 	validateContextPolicy(value.contextPolicy, 'contextPolicy')
 }
 
-// Cross-checks the deployment's role references against the guild's declared roles (the two files are validated independently, so this is the one place the pair is consistent). The loader runs it after both files validate; each failure names the deployment path of the offending reference.
-export function validateDeploymentRoleReferences(deployment: DeploymentConfig, roleNames: ReadonlySet<string>): void {
+// Cross-checks the deployment's role references against the guild's declared roles (the two files are validated independently, so this is the one place the pair is consistent). Accepts either deployment shape because only the executor section is read. The loader runs it after both files validate; each failure names the deployment path of the offending reference.
+export function validateDeploymentRoleReferences(deployment: DeploymentFileConfig | DeploymentConfig, roleNames: ReadonlySet<string>): void {
 	const executor = deployment.executor
 	if (executor.contextHandlerRole !== undefined && !roleNames.has(executor.contextHandlerRole)) {
 		throw new ValidationError('executor.contextHandlerRole', `references unknown role "${executor.contextHandlerRole}" (not declared in guild.json "roles")`)

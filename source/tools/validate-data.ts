@@ -6,7 +6,7 @@ import * as path from 'node:path'
 import { parseEvalConfig, type EvalConfig } from '../benchmarks/validation.js'
 import { createBuiltInToolHandlers } from '../executor/builtin-tools.js'
 import { ERROR_KINDS } from '../executor/errors.js'
-import { createGuildLoader, type LoadedGuild } from '../executor/loader.js'
+import { createGuildLoader, type LoadedGuildFiles } from '../executor/loader.js'
 import { createRoleRegistry } from '../executor/role-registry.js'
 import { createToolHandlers } from '../executor/tools.js'
 import type { HumanFacingText, ToolManifest } from '../executor/types.js'
@@ -107,7 +107,7 @@ const expectedSignatures: ExpectedSignature[] = [
 	{ file: 'ask_human.json', required: ['question'], properties: ['question', 'context'] },
 ]
 
-function loadGuildData(): LoadedGuild | null {
+function loadGuildData(): LoadedGuildFiles | null {
 	try {
 		return createGuildLoader(deploymentPath)(guildDir)
 	} catch (error) {
@@ -116,7 +116,7 @@ function loadGuildData(): LoadedGuild | null {
 	}
 }
 
-function checkGuild(loaded: LoadedGuild): void {
+function checkGuild(loaded: LoadedGuildFiles): void {
 	const config = loaded.config
 	const deployment = loaded.deployment
 	check(config.entryRole === 'orchestrator', `guild: entryRole must be "orchestrator" (got "${config.entryRole}")`)

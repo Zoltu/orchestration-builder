@@ -18,7 +18,9 @@ export { createLlmCaller, createLlmFetch, createSleep } from './llm.js'
 export type { LlmCaller, LlmCallResult, LlmCallerDependencies, LlmFetch, LlmRequest, Sleep } from './llm.js'
 
 export { createGuildLoader } from './loader.js'
-export type { LoadGuild, LoadedGuild } from './loader.js'
+export type { LoadGuild, LoadedGuild, LoadedGuildFiles } from './loader.js'
+
+export { resolveModelConfig } from './model-resolution.js'
 
 export { applyDeploymentOverride, resolveDeploymentOverride } from './deployment-env.js'
 export type { ContextPolicyOverride, DeploymentOverride, ExecutorOverride, GenerationOverride, InterruptTriggersOverride, ModelOverride } from './deployment-env.js'
@@ -40,7 +42,7 @@ export type { ResumeRun, RunSubmission, RunSubmissionDependencies, StartRun, Sub
 
 export { DEFAULT_EFFORT, effortDirective } from './effort.js'
 
-export { isEffortLevel, isProjectSettings, validateDeploymentConfig, validateDeploymentRoleReferences } from './validation.js'
+export { isEffortLevel, isProjectSettings, validateDeploymentFileConfig, validateDeploymentRoleReferences } from './validation.js'
 
 export { createToolHandlers } from './tools.js'
 export type { NativeToolsConfig } from './tools.js'
@@ -84,4 +86,4 @@ export type {
 	WriteProjectSettings,
 } from './persistence.js'
 
-export type { DeploymentConfig, ModelConfig, RunOptions, RunMeta, ResultCard, EffortLevel } from './types.js'
+export type { DeploymentConfig, DeploymentFileConfig, ModelConfig, ResolvedModelConfig, RunOptions, RunMeta, ResultCard, EffortLevel } from './types.js'

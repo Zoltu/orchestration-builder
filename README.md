@@ -55,6 +55,8 @@ Deployment field overrides — each variable defaults to the deployment file's v
 | `ORCHESTRATOR_INTERRUPT_PLAN_OWNER_ROLE` | `executor.interruptTriggers.planOwnerRole` | non-empty string |
 | `ORCHESTRATOR_MAX_TOOL_OUTPUT_CHARS` | `contextPolicy.maxToolOutputChars` | positive integer |
 
+The deployment file's `model.name` and `model.contextWindow` are optional: when either is absent from the file, startup requires it and fails with an error explaining where to set it — the deployment file or its environment variable (`ORCHESTRATOR_MODEL` / `ORCHESTRATOR_MODEL_CONTEXT_WINDOW`).
+
 If the service cannot start because of invalid configuration — an invalid or missing deployment file or Guild, or an invalid `ORCHESTRATOR_*` variable — it binds the port anyway and serves an error page describing the problem instead of exiting, so opening the UI in a browser shows what to fix; the process still exits non-zero once stopped.
 
 The Guild is bundled into the image at `/app/guild/`, with its deployment configuration (model endpoint, budgets, context policy) at `/app/deployment/deployment.json`. To override either without rebuilding, mount a different guild read-only at `/app/guild`, or point `ORCHESTRATOR_DEPLOYMENT_FILE` at a different deployment file (a docker config, docker secret, or bind mount).

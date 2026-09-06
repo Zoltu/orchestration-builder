@@ -7,7 +7,7 @@ import type { EngineDependencies } from './engine-state.js'
 import type { HumanBackend } from './human-backend.js'
 import type { InterruptQueue } from './interrupts.js'
 import type { LlmCaller } from './llm.js'
-import type { LoadGuild } from './loader.js'
+import type { LoadedGuild } from './loader.js'
 import type { AppendLog, DeleteCheckpoint, RunDirectory, WriteCheckpoint, WriteMeta } from './persistence.js'
 import { resumeRoleStack } from './resume.js'
 import { createRoleRegistry } from './role-registry.js'
@@ -18,7 +18,8 @@ export interface ExecutorDependencies {
 	appendLog: AppendLog
 	additionalToolHandlers: Record<string, ToolHandler>
 	humanBackend: HumanBackend
-	loadGuild: LoadGuild
+	// Supplies the service-bound, resolved guild (the LoadedGuild constructed at startup, deployment included); not the loader's file-shaped LoadGuild, which the startup path completes first.
+	loadGuild: () => LoadedGuild
 	createRunDirectory: RunDirectory
 	writeMeta: WriteMeta
 	writeCheckpoint: WriteCheckpoint
@@ -59,7 +60,7 @@ function terminalMeta(options: RunOptions, startTime: string, result: ResultCard
 export async function runExecutor(deps: ExecutorDependencies, options: RunOptions): Promise<RunMeta> {
 	deps.createRunDirectory()
 
-	const loadedGuild = deps.loadGuild(options.guildPath)
+	const loadedGuild = deps.loadGuild()
 
 	const startTime = new Date().toISOString()
 	// effort_set is logged once at run start so the trace records the chosen level before the entry role begins.
@@ -119,7 +120,7 @@ export async function resumeExecutor(deps: ExecutorDependencies, checkpoint: Run
 
 	deps.createRunDirectory()
 
-	const loadedGuild = deps.loadGuild(options.guildPath)
+	const loadedGuild = deps.loadGuild()
 
 	const startTime = checkpoint.startTime
 	// run_resumed marks the restart boundary in the log: events before it belong to the pre-restart process, events after it to the resumed run. Resumed roles do not re-emit role_start, so a reviewer can tell why.

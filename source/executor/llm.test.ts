@@ -1,8 +1,8 @@
 import { describe, expect, test } from 'bun:test'
 import { createLlmCaller, type LlmFetch, type LlmFetchRequest, type LlmFetchResponse, type Sleep } from './llm.ts'
-import type { ModelConfig } from './types.js'
+import type { ResolvedModelConfig } from './types.js'
 
-const MODEL: ModelConfig = {
+const MODEL: ResolvedModelConfig = {
 	name: 'test-model',
 	apiBase: 'http://llm.test/v1',
 	contextWindow: 1000,

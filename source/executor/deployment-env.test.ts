@@ -1,10 +1,10 @@
 import { describe, expect, test } from 'bun:test'
 
 import { applyDeploymentOverride, resolveDeploymentOverride } from './deployment-env.ts'
-import { validateDeploymentConfig } from './validation.ts'
-import type { DeploymentConfig } from './types.ts'
+import { validateDeploymentFileConfig } from './validation.ts'
+import type { DeploymentFileConfig } from './types.ts'
 
-function makeBase(): DeploymentConfig {
+function makeBase(): DeploymentFileConfig {
 	return {
 		model: {
 			name: 'base-model',
@@ -132,7 +132,7 @@ describe('applyDeploymentOverride', () => {
 		const base = makeBase()
 		const merged = applyDeploymentOverride(base, resolveDeploymentOverride({}))
 		expect(merged).toEqual(base)
-		validateDeploymentConfig(merged)
+		validateDeploymentFileConfig(merged)
 	})
 
 	test('the full mapping replaces every field and stays a valid deployment', () => {
@@ -161,7 +161,7 @@ describe('applyDeploymentOverride', () => {
 			},
 			contextPolicy: { maxToolOutputChars: 100000 },
 		})
-		validateDeploymentConfig(merged)
+		validateDeploymentFileConfig(merged)
 	})
 
 	test('overrides merge nested generation fields per field', () => {
@@ -184,6 +184,16 @@ describe('applyDeploymentOverride', () => {
 		expect(merged.model.apiBase).toBe(base.model.apiBase)
 		expect(merged.model.contextWindow).toBe(base.model.contextWindow)
 		expect(merged.model.reasoningField).toBe(base.model.reasoningField)
+	})
+
+	test('the merge operates on the file shape, so an optional model field absent from the base stays absent', () => {
+		const base = makeBase()
+		delete base.model.name
+		delete base.model.contextWindow
+		const merged = applyDeploymentOverride(base, resolveDeploymentOverride({}))
+		expect(merged.model.name).toBeUndefined()
+		expect(merged.model.contextWindow).toBeUndefined()
+		validateDeploymentFileConfig(merged)
 	})
 
 	test('does not mutate the base deployment', () => {

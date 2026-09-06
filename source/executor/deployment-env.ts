@@ -1,6 +1,6 @@
 // Environment layer over the deployment file: the file is the base (replaced wholesale at load time), and each ORCHESTRATOR_* variable set in the environment overrides exactly one of its fields on top. Absent and empty-string variables mean "not set", so an override can only replace a field's value, never clear it. Every parse or semantic failure names the offending variable, mirroring the deployment file's strictness so a typo fails loudly at startup instead of silently keeping the file's value. Failures throw ConfigurationError so the service can present them on the bootstrap error page (see source/web/bootstrap-failure.ts).
 import { ConfigurationError } from './errors.js'
-import type { ContextPolicy, DeploymentConfig, InterruptTriggersConfig, ModelConfig } from './types.js'
+import type { ContextPolicy, DeploymentFileConfig, InterruptTriggersConfig, ModelConfig } from './types.js'
 
 export interface GenerationOverride {
 	temperature?: number
@@ -42,9 +42,10 @@ export interface DeploymentOverride {
 	contextPolicy?: ContextPolicyOverride
 }
 
-const MODEL_ENV_VAR = 'ORCHESTRATOR_MODEL'
+// Named by the model-completion error too (see model-resolution.ts), so the variable and the file field stay one contract spelled once.
+export const MODEL_ENV_VAR = 'ORCHESTRATOR_MODEL'
 const API_BASE_ENV_VAR = 'ORCHESTRATOR_API_BASE'
-const MODEL_CONTEXT_WINDOW_ENV_VAR = 'ORCHESTRATOR_MODEL_CONTEXT_WINDOW'
+export const MODEL_CONTEXT_WINDOW_ENV_VAR = 'ORCHESTRATOR_MODEL_CONTEXT_WINDOW'
 const REASONING_FIELD_ENV_VAR = 'ORCHESTRATOR_REASONING_FIELD'
 const TEMPERATURE_ENV_VAR = 'ORCHESTRATOR_TEMPERATURE'
 const MAX_TOKENS_ENV_VAR = 'ORCHESTRATOR_MAX_TOKENS'
@@ -158,8 +159,8 @@ function mergeInterruptTriggers(baseTriggers: InterruptTriggersConfig | undefine
 	}
 }
 
-// Pure per-field merge: a present override field replaces the base field, an absent one keeps the base value, and the nested generation and interruptTriggers objects merge per-field rather than wholesale. The result is fresh data — the base (the loader's cached deployment) is never handed out or mutated.
-export function applyDeploymentOverride(base: DeploymentConfig, override: DeploymentOverride): DeploymentConfig {
+// Pure per-field merge over the file-shaped deployment: a present override field replaces the base field, an absent one keeps the base value, and the nested generation and interruptTriggers objects merge per-field rather than wholesale. The result stays file-shaped (name and contextWindow may be absent); completing the model is resolveModelConfig's job. The result is fresh data — the base (the loader's cached deployment) is never handed out or mutated.
+export function applyDeploymentOverride(base: DeploymentFileConfig, override: DeploymentOverride): DeploymentFileConfig {
 	const model: ModelConfig = {
 		name: override.model?.name ?? base.model.name,
 		apiBase: override.model?.apiBase ?? base.model.apiBase,
