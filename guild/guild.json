@@ -1,37 +1,4 @@
 {
-	"schemaVersion": 1,
-
-	"model": {
-		"name": "Agents A1",
-		"apiBase": "http://llama-server:8080/v1",
-		"apiKey": "",
-		"contextWindow": 262144,
-		"reasoningField": "reasoning",
-		"generation": {
-			"temperature": 0.2,
-			"maxTokens": 32768
-		}
-	},
-
-	"executor": {
-		"maxAgentDepth": 8,
-		"defaultToolTimeoutSeconds": 30,
-		"maxCompactionAttempts": 5,
-		"contextPressureThreshold": 0.8,
-		"contextHandlerRole": "context_manager",
-		"inquiryHandlerRole": "inquiry_responder",
-		"interruptTriggers": {
-			"handlerRole": "loop_detector",
-			"everyToolCalls": 12,
-			"everyTokens": 30000,
-			"planOwnerRole": "planner"
-		}
-	},
-
-	"contextPolicy": {
-		"maxToolOutputChars": 50000
-	},
-
 	"entryRole": "orchestrator",
 
 	"roles": {

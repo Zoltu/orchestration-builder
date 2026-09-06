@@ -1,5 +1,5 @@
-// Data-validity gate for the shipped Guild (guild/) and the benchmark suite (benchmarks/): loads every role prompt, tool manifest, and eval file and checks structural and cross-referential consistency, including that the manifest signatures match the handler tables they dispatch to.
-// This reads the repo's data files by design, so it lives outside `bun test` (which runs purely in-memory). Run it via `bun run validate-data` after editing the Guild or the suite; it is also the data gate for image builds.
+// Data-validity gate for the shipped Guild (guild/), the deployment file (deployment/), and the benchmark suite (benchmarks/): loads every role prompt, tool manifest, and eval file and checks structural and cross-referential consistency, including that the manifest signatures match the handler tables they dispatch to.
+// This reads the repo's data files by design, so it lives outside `bun test` (which runs purely in-memory). Run it via `bun run validate-data` after editing the Guild, the deployment, or the suite; it is also the data gate for image builds.
 
 import * as fs from 'node:fs'
 import * as path from 'node:path'
@@ -14,6 +14,7 @@ import { isNonEmptyStringArray, validateToolManifest } from '../executor/validat
 
 const repoRoot = path.resolve(import.meta.dir, '..', '..')
 const guildDir = path.join(repoRoot, 'guild')
+const deploymentPath = path.join(repoRoot, 'deployment', 'deployment.json')
 const manifestDir = path.join(guildDir, 'tools')
 const benchmarksDir = path.join(repoRoot, 'benchmarks')
 
@@ -108,7 +109,7 @@ const expectedSignatures: ExpectedSignature[] = [
 
 function loadGuildData(): LoadedGuild | null {
 	try {
-		return createGuildLoader()(guildDir)
+		return createGuildLoader(deploymentPath)(guildDir)
 	} catch (error) {
 		failures.push(`guild: ${errorMessage(error)}`)
 		return null
@@ -117,7 +118,7 @@ function loadGuildData(): LoadedGuild | null {
 
 function checkGuild(loaded: LoadedGuild): void {
 	const config = loaded.config
-	check(config.schemaVersion === 1, 'guild: schemaVersion must be 1')
+	const deployment = loaded.deployment
 	check(config.entryRole === 'orchestrator', `guild: entryRole must be "orchestrator" (got "${config.entryRole}")`)
 	for (const role of expectedRoles) {
 		check(config.roles[role] !== undefined, `guild: missing role "${role}"`)
@@ -209,24 +210,21 @@ function checkGuild(loaded: LoadedGuild): void {
 		check(prompt.includes('brief'), 'guild: researcher prompt lacks the compact-brief contract')
 		check(prompt.includes('cite'), 'guild: researcher prompt lacks the cite-your-sources guidance')
 	}
-	check(config.executor.contextHandlerRole === 'context_manager', `guild: executor.contextHandlerRole must be "context_manager" (got "${config.executor.contextHandlerRole ?? 'undefined'}")`)
-	const triggers = config.executor.interruptTriggers
+	check(deployment.executor.contextHandlerRole === 'context_manager', `deployment: executor.contextHandlerRole must be "context_manager" (got "${deployment.executor.contextHandlerRole ?? 'undefined'}")`)
+	const triggers = deployment.executor.interruptTriggers
 	if (triggers === undefined) {
-		failures.push('guild: executor.interruptTriggers missing')
+		failures.push('deployment: executor.interruptTriggers missing')
 	} else {
-		check(triggers.handlerRole === 'loop_detector', `guild: interrupt handler must be "loop_detector" (got "${triggers.handlerRole}")`)
-		check(triggers.everyToolCalls > 0, 'guild: interruptTriggers.everyToolCalls must be positive')
-		check(triggers.everyTokens > 0, 'guild: interruptTriggers.everyTokens must be positive')
-		check(config.roles[triggers.handlerRole] !== undefined, `guild: interrupt handler role "${triggers.handlerRole}" is not declared`)
-		if (triggers.planOwnerRole !== undefined) {
-			check(config.roles[triggers.planOwnerRole] !== undefined, `guild: plan owner role "${triggers.planOwnerRole}" is not declared`)
-		}
+		check(triggers.handlerRole === 'loop_detector', `deployment: interrupt handler must be "loop_detector" (got "${triggers.handlerRole}")`)
+		check(triggers.everyToolCalls > 0, 'deployment: interruptTriggers.everyToolCalls must be positive')
+		check(triggers.everyTokens > 0, 'deployment: interruptTriggers.everyTokens must be positive')
 	}
+	check(deployment.model.apiBase.length > 0, 'deployment: model.apiBase must not be empty')
 
-	check(config.executor.maxAgentDepth >= 8, 'guild: maxAgentDepth must be at least 8 for long-horizon runs')
-	check(config.executor.defaultToolTimeoutSeconds > 0, 'guild: defaultToolTimeoutSeconds must be positive')
-	check(config.executor.maxCompactionAttempts > 0, 'guild: maxCompactionAttempts must be positive')
-	check(config.contextPolicy.maxToolOutputChars > 0, 'guild: contextPolicy.maxToolOutputChars must be positive')
+	check(deployment.executor.maxAgentDepth >= 8, 'deployment: maxAgentDepth must be at least 8 for long-horizon runs')
+	check(deployment.executor.defaultToolTimeoutSeconds > 0, 'deployment: defaultToolTimeoutSeconds must be positive')
+	check(deployment.executor.maxCompactionAttempts > 0, 'deployment: maxCompactionAttempts must be positive')
+	check(deployment.contextPolicy.maxToolOutputChars > 0, 'deployment: contextPolicy.maxToolOutputChars must be positive')
 
 	for (const [name, role] of Object.entries(config.roles)) {
 		checkTieredText(`guild: role "${name}" label`, role.label)
@@ -374,5 +372,5 @@ if (failures.length > 0) {
 	console.error(`validate-data: ${failures.length} failure(s)`)
 	process.exitCode = 1
 } else {
-	console.log(`validate-data: OK (guild: ${expectedRoles.length} roles, ${expectedSignatures.length} tool manifests; benchmarks: suite valid)`)
+	console.log(`validate-data: OK (guild: ${expectedRoles.length} roles, ${expectedSignatures.length} tool manifests; deployment: valid; benchmarks: suite valid)`)
 }

@@ -12,9 +12,10 @@ const WORKSPACE_ROOT_ENV_VAR = 'WORKSPACE_ROOT'
 // Docker secrets mount at /run/secrets; the Kagi key can also arrive as a plain environment variable (see resolveKagiApiKey).
 const DOCKER_SECRETS_DIR = '/run/secrets'
 
-// The guild directory is bundled into the image (and lives at the repo root in development); its location is an implementation detail, not a deployment variable, so it is hardcoded rather than configurable.
-// Resolved relative to this module so the guild is found regardless of the process working directory: in the image the app lives at /app/source and the guild at /app/guild, but the container's WORKDIR is /workspace.
+// The guild directory and the deployment file are bundled into the image (and live at the repo root in development); their locations are implementation details, not deployment variables, so they are hardcoded rather than configurable.
+// Resolved relative to this module so both are found regardless of the process working directory: in the image the app lives at /app/source with the guild at /app/guild and the deployment at /app/deployment, but the container's WORKDIR is /workspace.
 const GUILD_PATH = path.resolve(import.meta.dir, '..', 'guild')
+const DEPLOYMENT_PATH = path.resolve(import.meta.dir, '..', 'deployment', 'deployment.json')
 const DEFAULT_PORT = 80
 const DEFAULT_WORKSPACE_ROOT = '/workspace'
 const ORCHESTRATION_DIR = '.orchestration'
@@ -31,10 +32,11 @@ function generateRunId(now: Date): string {
 	return `run-${date}-${time}`
 }
 
-function buildModel(loadedGuild: LoadedGuild, apiKey: string | undefined): ModelConfig {
+// Resolves the LLM caller's two model inputs from their distinct sources: the model configuration comes from the deployment file (via the loaded guild) and the API key credential from the environment (see API_KEY_ENV_VAR), normalized to undefined when empty so the caller omits the Authorization header entirely.
+function resolveModelCredential(loadedGuild: LoadedGuild, apiKey: string | undefined): { model: ModelConfig; apiKey: string | undefined } {
 	return {
-		...loadedGuild.config.model,
-		...(apiKey !== undefined && apiKey !== '' ? { apiKey } : {}),
+		model: loadedGuild.deployment.model,
+		apiKey: apiKey !== undefined && apiKey !== '' ? apiKey : undefined,
 	}
 }
 
@@ -65,7 +67,7 @@ async function withRunBindings<T>(config: {
 }, runId: string, invoke: (dependencies: ExecutorDependencies) => Promise<T>): Promise<T> {
 	const additionalToolHandlers = createToolHandlers({
 		workspaceRoot: config.workspaceRootPath,
-		defaultToolTimeoutSeconds: config.loadedGuild.config.executor.defaultToolTimeoutSeconds,
+		defaultToolTimeoutSeconds: config.loadedGuild.deployment.executor.defaultToolTimeoutSeconds,
 		kagiApiKey: config.kagiApiKey,
 	})
 	const appendLog = createAppendLog(runId, config.runsBaseDir)
@@ -170,9 +172,10 @@ async function serve(): Promise<void> {
 	const workspaceRootPath = Bun.env[WORKSPACE_ROOT_ENV_VAR] || DEFAULT_WORKSPACE_ROOT
 	const runsBaseDir = path.resolve(workspaceRootPath, ORCHESTRATION_DIR, 'runs')
 
-	const loadGuild = createGuildLoader()
+	const loadGuild = createGuildLoader(DEPLOYMENT_PATH)
 	const loadedGuild = loadGuild(GUILD_PATH)
-	const llmCaller = createLlmCaller(buildModel(loadedGuild, Bun.env[API_KEY_ENV_VAR]), { llmFetch: createLlmFetch(), sleep: createSleep() })
+	const { model, apiKey } = resolveModelCredential(loadedGuild, Bun.env[API_KEY_ENV_VAR])
+	const llmCaller = createLlmCaller(model, apiKey, { llmFetch: createLlmFetch(), sleep: createSleep() })
 	const kagiApiKey = resolveKagiApiKey(Bun.env, createDockerSecretReader(DOCKER_SECRETS_DIR))
 	if (kagiApiKey === undefined) {
 		console.log('KAGI_API_KEY not set: web_search and the kagi fetch backend will report themselves unavailable')
@@ -228,6 +231,7 @@ async function serve(): Promise<void> {
 	const webServer = createWebServer({
 		port,
 		guildConfig: loadedGuild.config,
+		deployment: loadedGuild.deployment,
 		tools: loadedGuild.tools,
 		runState,
 		runSubmission,

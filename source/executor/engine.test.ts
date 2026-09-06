@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 
-import type { ContextPolicy, ExecutorConfig, GuildConfig, LogEvent, Message, ModelConfig, ResultCard, RoleDefinition, ToolCall, ToolManifest } from './types.js'
+import type { ContextPolicy, DeploymentConfig, ExecutorConfig, GuildConfig, LogEvent, Message, ModelConfig, ResultCard, RoleDefinition, ToolCall, ToolManifest } from './types.js'
 import { effortDirective } from './effort.ts'
 import { createContextPressureTracker } from './context-pressure.ts'
 import { runRole } from './engine.ts'
@@ -108,15 +108,16 @@ const agentManifest: ToolManifest = {
 	},
 }
 
-function buildGuild(roles: Record<string, RoleDefinition>, entryRole: string, extras: Partial<GuildConfig> = {}): LoadedGuild {
+function buildGuild(roles: Record<string, RoleDefinition>, entryRole: string, extras: Partial<DeploymentConfig> = {}): LoadedGuild {
 	const config: GuildConfig = {
-		schemaVersion: 1,
-		model: baseModel,
-		executor: baseExecutor,
-		contextPolicy: baseContextPolicy,
 		entryRole,
 		roles,
 		tools: ['guild/tools/finish.json', 'guild/tools/agent.json'],
+	}
+	const deployment: DeploymentConfig = {
+		model: baseModel,
+		executor: baseExecutor,
+		contextPolicy: baseContextPolicy,
 		...extras,
 	}
 	const prompts: Record<string, string> = {}
@@ -127,7 +128,7 @@ function buildGuild(roles: Record<string, RoleDefinition>, entryRole: string, ex
 		finish: finishManifest,
 		agent: agentManifest,
 	}
-	return { config, prompts, tools }
+	return { config, deployment, prompts, tools }
 }
 
 function finishCall(args: { status: 'success' | 'error' | 'needs_clarification'; summary: string; artifacts?: string[] }): ToolCall {

@@ -11,6 +11,7 @@ EOF
 
 COPY --chown=bun:bun ./source/ /app/source/
 COPY --chown=bun:bun ./guild/ /app/guild/
+COPY --chown=bun:bun ./deployment/ /app/deployment/
 # The benchmark suite is Foundry data, validated by `bun run validate-data` below.
 COPY --chown=bun:bun ./benchmarks/ /app/benchmarks/
 COPY --chown=bun:bun ./tsconfig.json /app/

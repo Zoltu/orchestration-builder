@@ -1,6 +1,6 @@
 # Reference
 
-Detailed reference for the executor runtime, Guild format, HTTP API, and benchmark workspaces. For the high-level architecture, see [`docs/architecture.md`](architecture.md).
+Detailed reference for the executor runtime, Guild format, deployment configuration, HTTP API, and benchmark workspaces. For the high-level architecture, see [`docs/architecture.md`](architecture.md).
 
 ## Executor runtime
 
@@ -200,15 +200,17 @@ Each tool manifest in the Guild declares the name, description, and parameter sc
 
 ## Guild format
 
-The Guild is the entire behavior of the orchestrator described as JSON. It contains the model endpoint, budgets, context policy, role definitions, tool manifests, and the entry role name. There is no workflow graph — workflows emerge from roles calling `agent` to invoke other roles.
+The Guild is the entire behavior of the orchestrator described as JSON: role definitions, tool manifests, the entry role name, and the optional visualization section. There is no workflow graph — workflows emerge from roles calling `agent` to invoke other roles. The deployment knobs (model endpoint, executor budgets, context policy) live in a separate deployment file, described under [Deployment configuration](#deployment-configuration); a guild file carrying them (or the old `schemaVersion` key) is rejected with a pointer to that file.
 
 ### Files
 
 ```
+deployment/
+└── deployment.json        # deployment configuration (model endpoint, budgets, context policy)
 guild/
-├── guild.json           # top-level configuration
-├── prompts/             # role system prompts (Markdown)
-└── tools/               # tool manifests (JSON)
+├── guild.json             # top-level configuration
+├── prompts/               # role system prompts (Markdown)
+└── tools/                 # tool manifests (JSON)
 ```
 
 System prompts and tool manifests are plain files so the Foundry can rewrite them independently.
@@ -217,10 +219,6 @@ System prompts and tool manifests are plain files so the Foundry can rewrite the
 
 ```json
 {
-  "schemaVersion": 1,
-  "model": { ... },
-  "executor": { ... },
-  "contextPolicy": { ... },
   "entryRole": "orchestrator",
   "roles": { ... },
   "tools": [ ... ],
@@ -229,56 +227,6 @@ System prompts and tool manifests are plain files so the Foundry can rewrite the
 ```
 
 The optional `visualization` section carries display-only localization the web client reads through `GET /api/config`: `pseudoRoleLabels` (labels for the `human`/`interrupt`/`tools` pseudo-roles the views invent), `operationTemplates` (per-kind, per-source-kind→destination-kind tiered templates that interpolate `{source}` and `{destination}`), `genericOperationTemplates` (per-kind fallbacks), and `workingTemplates` (generic per-participant-kind fallback for the working-state caption when a role/tool has no per-entry `workingLabel`). The executor ignores it; it exists so a swapped Guild re-flavors the diagram without a frontend change. See [`docs/visualization.md`](visualization.md) "Labels".
-
-### `model`
-
-```json
-{
-  "name": "qwen2.5-coder:32b",
-  "apiBase": "http://localhost:11434/v1",
-  "contextWindow": 32768,
-  "reasoningField": "reasoning",
-  "generation": { "temperature": 0.2, "maxTokens": 4096 }
-}
-```
-
-- `name`: arbitrary label for logs.
-- `apiBase`: OpenAI-compatible chat/completions endpoint.
-- `apiKey`: optional; usually injected from `ORCHESTRATOR_API_KEY` at runtime, not stored in the Guild.
-- `contextWindow`: context window size in tokens.
-- `reasoningField`: API response field containing reasoning content (e.g. `reasoning`, `reasoning_content`). Omit if the endpoint doesn't expose reasoning.
-- `generation`: default sampling parameters (`temperature`, `maxTokens`) applied to every role. There is no per-role generation override.
-
-### `executor`
-
-```json
-{
-  "maxAgentDepth": 8,
-  "defaultToolTimeoutSeconds": 30,
-  "maxCompactionAttempts": 5,
-  "contextPressureThreshold": 0.8,
-  "contextHandlerRole": "context_manager",
-  "inquiryHandlerRole": "inquiry_responder",
-  "interruptTriggers": {
-    "handlerRole": "loop_detector",
-    "everyToolCalls": 12,
-    "everyTokens": 30000,
-    "planOwnerRole": "planner"
-  }
-}
-```
-
-Safety budgets enforced by the executor. `maxAgentDepth` guards unbounded agent recursion; `defaultToolTimeoutSeconds` aborts a hung tool subprocess; `maxCompactionAttempts` terminates a `context_manager` that is not reducing tokens. `contextPressureThreshold` (optional, default `0.8`) is the fraction of the effective context budget at which the one-shot pressure response fires (see "Context pressure and handoff"). `contextHandlerRole` (optional) names the guild role the engine invokes to compact a suspended role's conversation — at depth 0 when the entry role crosses the pressure threshold, and at any depth when a request is rejected for context size; when unset, depth-0 pressure falls back to the handoff notice and rejections fall back to the naive in-place backstop. `inquiryHandlerRole` (optional) names the guild role the engine invokes to answer an operator inquiry (see "Interrupt platform"); when unset, the inquiry is dropped and logged (`inquiry_dropped`) and the run continues. The executor no longer enforces a wall-clock run timeout or per-role tool-call/token caps — run termination is the deployment container's job (see "Run termination" above and [`docs/architecture.md`](architecture.md) "Run termination").
-
-`interruptTriggers` (optional) configures the interrupt platform's loop-check cadence (see "Interrupt platform"): `handlerRole` is the guild role invoked on a trigger (must exist in `roles`); `everyToolCalls`/`everyTokens` are the base thresholds, scaled by the effort tier's factor (`quick` ×2, `standard` ×4, `thorough` ×6); `planOwnerRole` (optional) names the role that receives plan modifications — the rootmost live chain instance of it, falling back to the chain root when unset or absent from the chain. When the section is absent, cadence checks never fire; operator interrupts work regardless.
-
-### `contextPolicy`
-
-```json
-{ "maxToolOutputChars": 4000 }
-```
-
-Tool results longer than this are truncated inline. There is no automatic compaction threshold — roles use `context_info` and `edit_context` to manage context.
 
 ### `entryRole`
 
@@ -316,6 +264,61 @@ The set of tools a role may call is part of the Guild. The executor does not hid
 ### Workflows
 
 There is no separate graph or playbook file. A workflow is a role calling `agent` multiple times and combining results before calling `finish`. If the Foundry wants a different workflow, it rewrites the orchestrator prompt or adds/removes roles.
+
+## Deployment configuration
+
+The deployment file `deployment/deployment.json` holds the knobs an operator sets once per deployment: the model endpoint, the executor budgets, and the context policy. It is bundled into the image at `/app/deployment/` alongside the Guild and loaded at service startup. Like the Guild it has full-replacement semantics — to change it, mount a different file — and it is validated strictly: unknown keys are rejected at every level, including nested objects like `generation` and `interruptTriggers` (the file is small and fully known, so a typo must fail loudly), and handler-role fields (`executor.contextHandlerRole`, `executor.inquiryHandlerRole`, `executor.interruptTriggers.handlerRole`, `executor.interruptTriggers.planOwnerRole`) must name roles declared in the Guild. There is no schema versioning; a deployment file that does not match this document fails the load.
+
+The model credential is deliberately absent from the file: an `apiKey` key is rejected with a pointer to the `ORCHESTRATOR_API_KEY` environment variable, which injects the key at runtime (see [`README.md`](../README.md) "Configuration").
+
+### `model`
+
+```json
+{
+  "name": "qwen2.5-coder:32b",
+  "apiBase": "http://localhost:11434/v1",
+  "contextWindow": 32768,
+  "reasoningField": "reasoning",
+  "generation": { "temperature": 0.2, "maxTokens": 4096 }
+}
+```
+
+- `name`: arbitrary label for logs.
+- `apiBase`: OpenAI-compatible chat/completions endpoint.
+- `contextWindow`: context window size in tokens.
+- `reasoningField`: API response field containing reasoning content (e.g. `reasoning`, `reasoning_content`). Omit if the endpoint doesn't expose reasoning.
+- `generation`: default sampling parameters (`temperature`, `maxTokens`) applied to every role. There is no per-role generation override.
+
+### `executor`
+
+```json
+{
+  "maxAgentDepth": 8,
+  "defaultToolTimeoutSeconds": 30,
+  "maxCompactionAttempts": 5,
+  "contextPressureThreshold": 0.8,
+  "contextHandlerRole": "context_manager",
+  "inquiryHandlerRole": "inquiry_responder",
+  "interruptTriggers": {
+    "handlerRole": "loop_detector",
+    "everyToolCalls": 12,
+    "everyTokens": 30000,
+    "planOwnerRole": "planner"
+  }
+}
+```
+
+Safety budgets enforced by the executor. `maxAgentDepth` guards unbounded agent recursion; `defaultToolTimeoutSeconds` aborts a hung tool subprocess; `maxCompactionAttempts` terminates a `context_manager` that is not reducing tokens. `contextPressureThreshold` (optional, default `0.8`) is the fraction of the effective context budget at which the one-shot pressure response fires (see "Context pressure and handoff"). `contextHandlerRole` (optional) names the guild role the engine invokes to compact a suspended role's conversation — at depth 0 when the entry role crosses the pressure threshold, and at any depth when a request is rejected for context size; when unset, depth-0 pressure falls back to the handoff notice and rejections fall back to the naive in-place backstop. `inquiryHandlerRole` (optional) names the guild role the engine invokes to answer an operator inquiry (see "Interrupt platform"); when unset, the inquiry is dropped and logged (`inquiry_dropped`) and the run continues. The executor no longer enforces a wall-clock run timeout or per-role tool-call/token caps — run termination is the deployment container's job (see "Run termination" above and [`docs/architecture.md`](architecture.md) "Run termination").
+
+`interruptTriggers` (optional) configures the interrupt platform's loop-check cadence (see "Interrupt platform"): `handlerRole` is the guild role invoked on a trigger (must exist in `roles`); `everyToolCalls`/`everyTokens` are the base thresholds, scaled by the effort tier's factor (`quick` ×2, `standard` ×4, `thorough` ×6); `planOwnerRole` (optional) names the role that receives plan modifications — the rootmost live chain instance of it, falling back to the chain root when unset or absent from the chain. When the section is absent, cadence checks never fire; operator interrupts work regardless.
+
+### `contextPolicy`
+
+```json
+{ "maxToolOutputChars": 4000 }
+```
+
+Tool results longer than this are truncated inline. There is no automatic compaction threshold — roles use `context_info` and `edit_context` to manage context.
 
 ## HTTP API
 

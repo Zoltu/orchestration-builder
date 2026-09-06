@@ -1,5 +1,5 @@
 import type { ListRunIds, ReadProjectSettings, ReadRunMetaById, ReadRunSnapshotStats, ReadRunSummaryById, WriteProjectSettings } from '../executor/persistence.js'
-import type { EffortLevel, GuildConfig, ToolManifest } from '../executor/types.js'
+import type { DeploymentConfig, EffortLevel, GuildConfig, ToolManifest } from '../executor/types.js'
 import { isEffortLevel, isObject } from '../executor/validation.js'
 import type { RunState } from '../executor/run-state.js'
 import type { RunSubmission } from '../executor/run-submission.js'
@@ -12,6 +12,7 @@ const MAX_LOG_LINES = 200
 
 export interface RequestHandlerConfig {
 	guildConfig: GuildConfig
+	deployment: DeploymentConfig
 	tools: Record<string, ToolManifest>
 	runState: RunState
 	runSubmission: RunSubmission
@@ -185,6 +186,7 @@ function handlePutSettings(writeProjectSettings: WriteProjectSettings, body: unk
 
 export function createRequestHandler(config: RequestHandlerConfig, serveStatic: ServeStatic): RequestHandler {
 	const guildConfig = config.guildConfig
+	const deployment = config.deployment
 	const runState = config.runState
 	const runSubmission = config.runSubmission
 	const readRunSnapshot = config.readRunSnapshot
@@ -200,7 +202,7 @@ export function createRequestHandler(config: RequestHandlerConfig, serveStatic: 
 		const { pathname } = url
 
 		if (request.method === 'GET') {
-			if (pathname === '/api/config') return json(renderConfig(guildConfig, config.tools))
+			if (pathname === '/api/config') return json(renderConfig(guildConfig, deployment, config.tools))
 			if (pathname === '/api/settings') return handleGetSettings(readProjectSettings)
 			if (pathname === '/api/run/flow') return handleActiveRunFlow(readRunSnapshot, readRunSnapshotStats, runSubmission)
 			if (pathname === '/api/run') return handleActiveRun(readRunSnapshot, readRunSnapshotStats, runSubmission, runState)

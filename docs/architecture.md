@@ -6,7 +6,7 @@ The Adaptive Orchestrator enables a small, consumer-grade language model to solv
 
 **Executor** — the runtime that runs the small model. It loads the Guild, starts the entry role, dispatches tool calls, enforces safety budgets, and persists results. It is small, sequential, and makes no domain decisions. See [`docs/reference.md`](reference.md) for the full runtime reference.
 
-**Guild** — a JSON configuration plus referenced prompt and tool-manifest files. It describes the model endpoint, roles, tools, context policy, and budgets. The Guild is the artifact being optimized. See [`docs/reference.md`](reference.md) for the format specification.
+**Guild** — a JSON configuration plus referenced prompt and tool-manifest files. It describes the roles, tools, and entry role; the deployment settings (model endpoint, budgets, context policy) live in a separate deployment file so the Foundry's artifact stays purely behavioral. The Guild is the artifact being optimized. See [`docs/reference.md`](reference.md) for the format specification.
 
 **Foundry** — an offline optimization process that uses a large model to propose Guild changes, test them against a benchmark suite, and merge successful improvements. It is a separate program that talks to the executor over HTTP. See [`docs/foundry.md`](foundry.md).
 

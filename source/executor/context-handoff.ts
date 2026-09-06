@@ -70,7 +70,7 @@ export function applyContextBackstop(roleState: RoleState, deps: EngineDependenc
 
 // The effective budget a role's reported prompt size is measured against: the static math (window minus the reserved completion budget) tightened by whatever the run has learned from endpoint rejections.
 export function currentEffectiveBudget(context: EngineContext, deps: EngineDependencies): number {
-	const modelConfig = context.loadedGuild.config.model
+	const modelConfig = context.loadedGuild.deployment.model
 	return effectiveContextBudget(modelConfig.contextWindow, modelConfig.generation.maxTokens ?? 0, deps.contextPressureTracker.learnedCeiling)
 }
 

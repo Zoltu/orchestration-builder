@@ -32,6 +32,6 @@ All configuration is environment variables passed via `docker run -e`:
 | `PORT` | `80` | Port the HTTP service listens on inside the container. |
 | `WORKSPACE_ROOT` | `/workspace` | The path inside the container that the project the executor operates on. Run artifacts are written to `<WORKSPACE_ROOT>/.orchestration/runs/`. |
 
-The Guild is bundled into the image at `/app/guild/`. To override it without rebuilding, mount a different guild read-only at `/app/guild`.
+The Guild is bundled into the image at `/app/guild/`, with its deployment configuration (model endpoint, budgets, context policy) at `/app/deployment/deployment.json`. To override either without rebuilding, mount a different guild read-only at `/app/guild` or a different deployment file at `/app/deployment/deployment.json`.
 
 For programmatic access, there is an [HTTP API](docs/reference.md) for submitting tasks and reading run state.

@@ -1,7 +1,7 @@
 
 import type { PendingQuestion } from '../executor/human-backend.js'
 import { isObject, isRunMeta } from '../executor/validation.js'
-import type { EffortLevel, ExecutorConfig, GuildConfig, LogEvent, ResultCard, RunMeta, ToolManifest, HumanFacingText, VisualizationConfig } from '../executor/types.js'
+import type { DeploymentConfig, EffortLevel, ExecutorConfig, GuildConfig, LogEvent, ResultCard, RunMeta, ToolManifest, HumanFacingText, VisualizationConfig } from '../executor/types.js'
 import type { ProjectSettings, RunSnapshotRaw } from '../executor/persistence.js'
 
 export interface RunSnapshot {
@@ -691,7 +691,7 @@ export interface GuildConfigView {
 	visualization?: VisualizationConfig
 }
 
-export function renderConfig(config: GuildConfig, tools: Record<string, ToolManifest>): GuildConfigView {
+export function renderConfig(config: GuildConfig, deployment: DeploymentConfig, tools: Record<string, ToolManifest>): GuildConfigView {
 	const roles: Record<string, { tools: string[]; label?: HumanFacingText; description?: HumanFacingText; workingLabel?: HumanFacingText }> = {}
 	for (const [name, role] of Object.entries(config.roles)) {
 		roles[name] = {
@@ -711,8 +711,8 @@ export function renderConfig(config: GuildConfig, tools: Record<string, ToolMani
 		}
 	}
 	const view: GuildConfigView = {
-		model: { name: config.model.name, contextWindow: config.model.contextWindow },
-		executor: config.executor,
+		model: { name: deployment.model.name, contextWindow: deployment.model.contextWindow },
+		executor: deployment.executor,
 		entryRole: config.entryRole,
 		roles,
 		tools: toolsView,

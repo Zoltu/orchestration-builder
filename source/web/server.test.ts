@@ -5,7 +5,7 @@ import { createRunState } from '../executor/run-state.ts'
 import { createRunSubmission, type ResumeRun, type RunSubmission, type StartRun } from '../executor/run-submission.ts'
 import type { RunCheckpoint } from '../executor/checkpoint.ts'
 import type { ProjectSettings, ReadProjectSettings, WriteProjectSettings, RunSnapshotRaw, RunSnapshotStats } from '../executor/persistence.ts'
-import type { EffortLevel, GuildConfig, RunMeta } from '../executor/types.js'
+import type { DeploymentConfig, EffortLevel, GuildConfig, RunMeta } from '../executor/types.js'
 import { parseRunSnapshot, type RunSnapshot } from './render.ts'
 import { createRequestHandler, type RequestHandler } from './request-handler.ts'
 import { resolveStaticAsset } from './server.ts'
@@ -74,11 +74,18 @@ const snapshots = new Map<string, RunSnapshotRaw>([
 const unknownRunIds = new Set(['never-started'])
 
 const sampleGuildConfig: GuildConfig = {
-	schemaVersion: 1,
+	entryRole: 'orchestrator',
+	roles: {
+		orchestrator: { systemPrompt: 'prompts/orchestrator.md', tools: ['agent', 'ask_human', 'finish'] },
+		coder: { systemPrompt: 'prompts/coder.md', tools: ['read_file', 'write_file', 'finish'] },
+	},
+	tools: ['tools/agent.json', 'tools/finish.json'],
+}
+
+const sampleDeployment: DeploymentConfig = {
 	model: {
 		name: 'qwen3.6:35b',
 		apiBase: 'http://llama-server:8080/v1',
-		apiKey: 'secret-key',
 		contextWindow: 262144,
 		reasoningField: 'reasoning',
 		generation: { temperature: 0.2, maxTokens: 32768 },
@@ -89,12 +96,6 @@ const sampleGuildConfig: GuildConfig = {
 		maxCompactionAttempts: 5,
 	},
 	contextPolicy: { maxToolOutputChars: 8000 },
-	entryRole: 'orchestrator',
-	roles: {
-		orchestrator: { systemPrompt: 'prompts/orchestrator.md', tools: ['agent', 'ask_human', 'finish'] },
-		coder: { systemPrompt: 'prompts/coder.md', tools: ['read_file', 'write_file', 'finish'] },
-	},
-	tools: ['tools/agent.json', 'tools/finish.json'],
 }
 
 function rawSnapshotById(runId: string): RunSnapshotRaw {
@@ -287,6 +288,7 @@ function createHandlerHarness(): HandlerHarness {
 	const handler = createRequestHandler(
 		{
 			guildConfig: sampleGuildConfig,
+			deployment: sampleDeployment,
 			tools: {},
 			runState: createRunState({ humanBackend, interruptChannel }),
 			runSubmission: submission,

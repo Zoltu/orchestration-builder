@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import type { RunSnapshotRaw } from '../executor/persistence.js'
 import type { PendingQuestion } from '../executor/human-backend.js'
-import type { LogEvent, RunMeta, GuildConfig } from '../executor/types.js'
+import type { DeploymentConfig, LogEvent, RunMeta, GuildConfig } from '../executor/types.js'
 import {
 	deriveBudgets,
 	deriveInterruptHistory,
@@ -1277,21 +1277,6 @@ describe('formatLogAsText', () => {
 
 function sampleGuildConfig(overrides: Partial<GuildConfig> = {}): GuildConfig {
 	return {
-		schemaVersion: 1,
-		model: {
-			name: 'qwen3.6:35b',
-			apiBase: 'http://llama-server:8080/v1',
-			apiKey: 'secret-key',
-			contextWindow: 262144,
-			reasoningField: 'reasoning',
-			generation: { temperature: 0.2, maxTokens: 32768 },
-		},
-		executor: {
-			maxAgentDepth: 8,
-			defaultToolTimeoutSeconds: 30,
-			maxCompactionAttempts: 5,
-		},
-		contextPolicy: { maxToolOutputChars: 8000 },
 		entryRole: 'orchestrator',
 		roles: {
 			orchestrator: { systemPrompt: 'prompts/orchestrator.md', tools: ['agent', 'ask_human', 'finish'] },
@@ -1302,9 +1287,28 @@ function sampleGuildConfig(overrides: Partial<GuildConfig> = {}): GuildConfig {
 	}
 }
 
+function sampleDeployment(overrides: Partial<DeploymentConfig> = {}): DeploymentConfig {
+	return {
+		model: {
+			name: 'qwen3.6:35b',
+			apiBase: 'http://llama-server:8080/v1',
+			contextWindow: 262144,
+			reasoningField: 'reasoning',
+			generation: { temperature: 0.2, maxTokens: 32768 },
+		},
+		executor: {
+			maxAgentDepth: 8,
+			defaultToolTimeoutSeconds: 30,
+			maxCompactionAttempts: 5,
+		},
+		contextPolicy: { maxToolOutputChars: 8000 },
+		...overrides,
+	}
+}
+
 describe('renderConfig', () => {
 	test('shapes the model name and context window, executor budgets, entry role, and role tool lists', () => {
-		const view = renderConfig(sampleGuildConfig(), {})
+		const view = renderConfig(sampleGuildConfig(), sampleDeployment(), {})
 		expect(view.model).toEqual({ name: 'qwen3.6:35b', contextWindow: 262144 })
 		expect(view.executor).toEqual({
 			maxAgentDepth: 8,
@@ -1318,8 +1322,8 @@ describe('renderConfig', () => {
 		})
 	})
 
-	test('structurally omits apiKey and apiBase even when the loaded Guild carries them', () => {
-		const view = renderConfig(sampleGuildConfig(), {})
+	test('structurally omits apiKey and apiBase from the view', () => {
+		const view = renderConfig(sampleGuildConfig(), sampleDeployment(), {})
 		expect(view.model).not.toHaveProperty('apiKey')
 		expect(view.model).not.toHaveProperty('apiBase')
 		const serialized = JSON.stringify(view)
@@ -1334,7 +1338,7 @@ describe('renderConfig', () => {
 				empty: { systemPrompt: 'p', tools: [] },
 			},
 		})
-		const view = renderConfig(config, {})
+		const view = renderConfig(config, sampleDeployment(), {})
 		expect(Object.keys(view.roles).sort()).toEqual(['empty', 'orchestrator'])
 		expect(defined(view.roles.orchestrator, 'view.roles.orchestrator').tools).toEqual(['finish'])
 		expect(defined(view.roles.empty, 'view.roles.empty').tools).toEqual([])
@@ -1348,7 +1352,7 @@ describe('renderConfig', () => {
 				empty: { systemPrompt: 'p', tools: [] },
 			},
 		})
-		const view = renderConfig(config, {})
+		const view = renderConfig(config, sampleDeployment(), {})
 		expect(Object.keys(view.roles).sort()).toEqual(['empty', 'orchestrator', 'planner'])
 		expect(defined(view.roles.orchestrator, 'view.roles.orchestrator').tools).toEqual(['agent', 'finish'])
 		expect(defined(view.roles.planner, 'view.roles.planner').tools).toEqual(['read_file', 'glob_files', 'search_text', 'finish'])
@@ -1365,7 +1369,7 @@ describe('renderConfig', () => {
 				},
 			},
 		})
-		const view = renderConfig(config, {})
+		const view = renderConfig(config, sampleDeployment(), {})
 		expect(view.roles.orchestrator).toEqual({ tools: ['finish'] })
 		expect(view.roles.orchestrator).not.toHaveProperty('systemPrompt')
 		expect(view.roles.orchestrator).not.toHaveProperty('includeReasoning')
@@ -1388,12 +1392,12 @@ describe('renderConfig', () => {
 			},
 		}
 		const config = sampleGuildConfig({ visualization })
-		const view = renderConfig(config, {})
+		const view = renderConfig(config, sampleDeployment(), {})
 		expect(view.visualization).toEqual(visualization)
 	})
 
 	test('omits the visualization field when the guild does not carry one', () => {
-		const view = renderConfig(sampleGuildConfig(), {})
+		const view = renderConfig(sampleGuildConfig(), sampleDeployment(), {})
 		expect(view).not.toHaveProperty('visualization')
 	})
 })

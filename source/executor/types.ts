@@ -1,19 +1,21 @@
 
 export interface GuildConfig {
-	schemaVersion: number
-	model: ModelConfig
-	executor: ExecutorConfig
-	contextPolicy: ContextPolicy
 	entryRole: string
 	roles: Record<string, RoleDefinition>
 	tools: string[]
 	visualization?: VisualizationConfig
 }
 
+// The deployment knobs the executor reads at startup, kept apart from the Guild so a swapped Guild (the Foundry's artifact) never carries the model endpoint, budgets, or context policy. The API key is deliberately absent: it is a runtime credential supplied via the ORCHESTRATOR_API_KEY environment variable, never stored in a file or type.
+export interface DeploymentConfig {
+	model: ModelConfig
+	executor: ExecutorConfig
+	contextPolicy: ContextPolicy
+}
+
 export interface ModelConfig {
 	name: string
 	apiBase: string
-	apiKey?: string
 	contextWindow: number
 	reasoningField?: string
 	generation: GenerationConfig

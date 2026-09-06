@@ -333,7 +333,7 @@ export async function runRole(deps: EngineDependencies, context: EngineContext, 
 			const childGlobalState: GlobalBudgetState = {
 				depth: context.depth + 1,
 			}
-			const depthCheck = checkGlobalBudgets(childGlobalState, guild.config.executor)
+			const depthCheck = checkGlobalBudgets(childGlobalState, guild.deployment.executor)
 			if (depthCheck !== null) {
 				logEvent(deps.appendLog, 'depth_exceeded', { parent: context.roleName, child: childRoleName, depth: context.depth + 1, error: depthCheck })
 				return createResultCard('error', 'Depth budget exceeded', { error: depthCheck })
@@ -362,7 +362,7 @@ export async function runRole(deps: EngineDependencies, context: EngineContext, 
 		},
 		roleState,
 		humanBackend: deps.humanBackend,
-		contextWindow: guild.config.model.contextWindow,
+		contextWindow: guild.deployment.model.contextWindow,
 		roleRegistry: deps.roleRegistry,
 		ownRoleId: registryEntry.roleId,
 	})
@@ -373,10 +373,10 @@ export async function runRole(deps: EngineDependencies, context: EngineContext, 
 		dispatch,
 		allowedTools: roleDefinition.tools,
 		manifestNames: Object.keys(guild.tools),
-		maxToolOutputChars: guild.config.contextPolicy.maxToolOutputChars,
+		maxToolOutputChars: guild.deployment.contextPolicy.maxToolOutputChars,
 	}
 
-	const finalCard = await executeRoleLoop(deps, context, roleDefinition, roleState, registryEntry, allowedToolsManifests, dispatchCtx, guild.config.executor, resumed?.suspendedTurn)
+	const finalCard = await executeRoleLoop(deps, context, roleDefinition, roleState, registryEntry, allowedToolsManifests, dispatchCtx, guild.deployment.executor, resumed?.suspendedTurn)
 	deps.roleRegistry.unregister(registryEntry.roleId)
 	deps.checkpointRecorder.unregisterFrame(registryEntry.roleId)
 	logEvent(deps.appendLog, 'role_finished', roleFinishedPayload(context.roleName, context.depth, finalCard, context.parent, registryEntry.roleId))

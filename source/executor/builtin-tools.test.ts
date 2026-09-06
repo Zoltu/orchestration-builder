@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import type { ContextPolicy, ExecutorConfig, GuildConfig, LogEvent, Message, ModelConfig, RoleDefinition, ToolCall, ToolManifest } from './types.js'
+import type { ContextPolicy, DeploymentConfig, ExecutorConfig, GuildConfig, LogEvent, Message, ModelConfig, RoleDefinition, ToolCall, ToolManifest } from './types.js'
 import { runRole } from './engine.ts'
 import type { EngineDependencies } from './engine-state.ts'
 import { createContextPressureTracker } from './context-pressure.ts'
@@ -135,10 +135,6 @@ const agentManifest: ToolManifest = {
 
 function buildGuild(roles: Record<string, RoleDefinition>, entryRole: string): LoadedGuild {
 	const config: GuildConfig = {
-		schemaVersion: 1,
-		model: baseModel,
-		executor: baseExecutor,
-		contextPolicy: baseContextPolicy,
 		entryRole,
 		roles,
 		tools: [
@@ -148,6 +144,11 @@ function buildGuild(roles: Record<string, RoleDefinition>, entryRole: string): L
 			'guild/tools/edit_context.json',
 			'guild/tools/ask_human.json',
 		],
+	}
+	const deployment: DeploymentConfig = {
+		model: baseModel,
+		executor: baseExecutor,
+		contextPolicy: baseContextPolicy,
 	}
 	const prompts: Record<string, string> = {}
 	for (const name of Object.keys(roles)) {
@@ -160,7 +161,7 @@ function buildGuild(roles: Record<string, RoleDefinition>, entryRole: string): L
 		edit_context: editContextManifest,
 		ask_human: askHumanManifest,
 	}
-	return { config, prompts, tools }
+	return { config, deployment, prompts, tools }
 }
 
 function makeCall(name: string, args: Record<string, unknown>): ToolCall {

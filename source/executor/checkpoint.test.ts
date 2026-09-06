@@ -189,13 +189,14 @@ describe('isRunCheckpoint', () => {
 describe('createCheckpointRecorder', () => {
 	const guild: LoadedGuild = {
 		config: {
-			schemaVersion: 1,
-			model: { name: 'm', apiBase: 'http://x', contextWindow: 32768, generation: {} },
-			executor: { maxAgentDepth: 8, defaultToolTimeoutSeconds: 30, maxCompactionAttempts: 5 },
-			contextPolicy: { maxToolOutputChars: 4000 },
 			entryRole: 'main',
 			roles: {},
 			tools: [],
+		},
+		deployment: {
+			model: { name: 'm', apiBase: 'http://x', contextWindow: 32768, generation: {} },
+			executor: { maxAgentDepth: 8, defaultToolTimeoutSeconds: 30, maxCompactionAttempts: 5 },
+			contextPolicy: { maxToolOutputChars: 4000 },
 		},
 		prompts: {},
 		tools: {},

@@ -41,7 +41,7 @@ export function withTool(guild: LoadedGuild, manifest: ToolManifest, manifestPat
 		...guild.config,
 		tools: manifestPath !== undefined ? [...guild.config.tools, manifestPath] : guild.config.tools,
 	}
-	return { config, prompts: guild.prompts, tools }
+	return { config, deployment: guild.deployment, prompts: guild.prompts, tools }
 }
 
 export interface FakeCheckpointSink {

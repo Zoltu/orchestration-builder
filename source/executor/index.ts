@@ -76,4 +76,4 @@ export type {
 	WriteProjectSettings,
 } from './persistence.js'
 
-export type { ModelConfig, RunOptions, RunMeta, ResultCard, EffortLevel } from './types.js'
+export type { DeploymentConfig, ModelConfig, RunOptions, RunMeta, ResultCard, EffortLevel } from './types.js'

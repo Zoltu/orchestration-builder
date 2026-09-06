@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 
-import type { ContextPolicy, ExecutorConfig, GuildConfig, LogEvent, ModelConfig, RoleDefinition, RunMeta, ToolCall, ToolManifest } from './types.js'
+import type { ContextPolicy, DeploymentConfig, ExecutorConfig, GuildConfig, LogEvent, ModelConfig, RoleDefinition, RunMeta, ToolCall, ToolManifest } from './types.js'
 import { ValidationError } from './errors.js'
 import { isRunCheckpoint, type RunCheckpoint } from './checkpoint.ts'
 import { resumeExecutor, runExecutor, type ExecutorDependencies } from './executor.ts'
@@ -130,20 +130,21 @@ const finishManifest: ToolManifest = {
 
 function buildLoadedGuild(roles: Record<string, RoleDefinition>, entryRole: string): LoadedGuild {
 	const config: GuildConfig = {
-		schemaVersion: 1,
-		model: baseModel,
-		executor: baseExecutor,
-		contextPolicy: baseContextPolicy,
 		entryRole,
 		roles,
 		tools: ['guild/tools/finish.json'],
+	}
+	const deployment: DeploymentConfig = {
+		model: baseModel,
+		executor: baseExecutor,
+		contextPolicy: baseContextPolicy,
 	}
 	const prompts: Record<string, string> = {}
 	for (const name of Object.keys(roles)) {
 		prompts[name] = `prompt for ${name}`
 	}
 	const tools: Record<string, ToolManifest> = { finish: finishManifest }
-	return { config, prompts, tools }
+	return { config, deployment, prompts, tools }
 }
 
 function makeLoader(guild: LoadedGuild): LoadGuild {
@@ -424,7 +425,7 @@ describe('resumeExecutor', () => {
 			'orchestrator',
 		)
 		const config: GuildConfig = { ...guild.config, tools: ['guild/tools/finish.json', 'guild/tools/agent.json'] }
-		return { config, prompts: guild.prompts, tools: { ...guild.tools, agent: agentManifest } }
+		return { config, deployment: guild.deployment, prompts: guild.prompts, tools: { ...guild.tools, agent: agentManifest } }
 	}
 
 	function finishToolCall(id: string, summary: string): ToolCall {

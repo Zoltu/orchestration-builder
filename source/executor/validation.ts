@@ -1,6 +1,7 @@
 import { isErrorKind, ValidationError } from './errors.js'
 import type {
 	ContextPolicy,
+	DeploymentConfig,
 	EffortLevel,
 	ExecutorConfig,
 	GenerationConfig,
@@ -155,24 +156,42 @@ function ensure(guard: (value: unknown) => boolean, value: unknown, path: string
 	if (!guard(value)) throw new ValidationError(path, message)
 }
 
+function rejectUnknownKeys(value: Record<string, unknown>, allowedKeys: readonly string[], path: string): void {
+	for (const key of Object.keys(value)) {
+		if (allowedKeys.includes(key)) continue
+		const keyPath = path === '' ? key : `${path}.${key}`
+		throw new ValidationError(keyPath, `unknown key "${key}" (expected one of: ${allowedKeys.join(', ')})`)
+	}
+}
+
+const generationKeys: readonly string[] = ['temperature', 'maxTokens']
+
 function validateGenerationConfig(value: unknown, path: string): asserts value is GenerationConfig {
 	if (!isObject(value)) throw new ValidationError(path, 'expected an object')
+	rejectUnknownKeys(value, generationKeys, path)
 	ensure(isOptionalNumber, value.temperature, `${path}.temperature`, 'expected a number or undefined')
 	ensure(isOptionalNumber, value.maxTokens, `${path}.maxTokens`, 'expected a number or undefined')
 }
 
+const modelKeys: readonly string[] = ['name', 'apiBase', 'contextWindow', 'reasoningField', 'generation']
+
 function validateModelConfig(value: unknown, path: string): asserts value is ModelConfig {
 	if (!isObject(value)) throw new ValidationError(path, 'expected an object')
+	// A deployment file carrying a credential is almost always an operator copying an old guild.json: fail with the env-var pointer instead of silently ignoring the key (the deployment file is strict, so a near-miss like this must not pass as an unknown key with a generic message).
+	if ('apiKey' in value) throw new ValidationError(`${path}.apiKey`, 'model credentials are runtime configuration: set the ORCHESTRATOR_API_KEY environment variable instead of writing them into the deployment file')
+	rejectUnknownKeys(value, modelKeys, path)
 	ensure(isString, value.name, `${path}.name`, 'expected a string')
 	ensure(isString, value.apiBase, `${path}.apiBase`, 'expected a string')
-	ensure(isOptionalString, value.apiKey, `${path}.apiKey`, 'expected a string or undefined')
 	ensure(isNumber, value.contextWindow, `${path}.contextWindow`, 'expected a number')
 	ensure(isOptionalString, value.reasoningField, `${path}.reasoningField`, 'expected a string or undefined')
 	validateGenerationConfig(value.generation, `${path}.generation`)
 }
 
+const interruptTriggersKeys: readonly string[] = ['handlerRole', 'everyToolCalls', 'everyTokens', 'planOwnerRole']
+
 function validateInterruptTriggersConfig(value: unknown, path: string): asserts value is InterruptTriggersConfig {
 	if (!isObject(value)) throw new ValidationError(path, 'expected an object')
+	rejectUnknownKeys(value, interruptTriggersKeys, path)
 	if (typeof value.handlerRole !== 'string' || value.handlerRole === '') throw new ValidationError(`${path}.handlerRole`, 'expected a non-empty string')
 	if (!isNumber(value.everyToolCalls) || value.everyToolCalls <= 0) throw new ValidationError(`${path}.everyToolCalls`, 'expected a positive number')
 	if (!isNumber(value.everyTokens) || value.everyTokens <= 0) throw new ValidationError(`${path}.everyTokens`, 'expected a positive number')
@@ -181,8 +200,11 @@ function validateInterruptTriggersConfig(value: unknown, path: string): asserts 
 	}
 }
 
+const executorKeys: readonly string[] = ['maxAgentDepth', 'defaultToolTimeoutSeconds', 'maxCompactionAttempts', 'contextPressureThreshold', 'contextHandlerRole', 'inquiryHandlerRole', 'interruptTriggers']
+
 function validateExecutorConfig(value: unknown, path: string): asserts value is ExecutorConfig {
 	if (!isObject(value)) throw new ValidationError(path, 'expected an object')
+	rejectUnknownKeys(value, executorKeys, path)
 	ensure(isNumber, value.maxAgentDepth, `${path}.maxAgentDepth`, 'expected a number')
 	ensure(isNumber, value.defaultToolTimeoutSeconds, `${path}.defaultToolTimeoutSeconds`, 'expected a number')
 	ensure(isNumber, value.maxCompactionAttempts, `${path}.maxCompactionAttempts`, 'expected a number')
@@ -198,8 +220,11 @@ function validateExecutorConfig(value: unknown, path: string): asserts value is 
 	if (value.interruptTriggers !== undefined) validateInterruptTriggersConfig(value.interruptTriggers, `${path}.interruptTriggers`)
 }
 
+const contextPolicyKeys: readonly string[] = ['maxToolOutputChars']
+
 function validateContextPolicy(value: unknown, path: string): asserts value is ContextPolicy {
 	if (!isObject(value)) throw new ValidationError(path, 'expected an object')
+	rejectUnknownKeys(value, contextPolicyKeys, path)
 	ensure(isNumber, value.maxToolOutputChars, `${path}.maxToolOutputChars`, 'expected a number')
 }
 
@@ -219,12 +244,14 @@ function validateRoleDefinition(value: unknown, path: string): asserts value is 
 	}
 }
 
+// Keys of the old combined guild format that now live in the deployment file; their presence in a guild file means a stale or hand-merged file, so the validator names the right home instead of silently ignoring the sections.
+const guildDeploymentKeys: readonly string[] = ['schemaVersion', 'model', 'executor', 'contextPolicy']
+
 export function validateGuildConfig(value: unknown): asserts value is GuildConfig {
 	if (!isObject(value)) throw new ValidationError('', 'expected an object')
-	ensure(isNumber, value.schemaVersion, 'schemaVersion', 'expected a number')
-	validateModelConfig(value.model, 'model')
-	validateExecutorConfig(value.executor, 'executor')
-	validateContextPolicy(value.contextPolicy, 'contextPolicy')
+	for (const key of guildDeploymentKeys) {
+		if (key in value) throw new ValidationError(key, `"${key}" is deployment configuration: move it to deployment.json (the guild file describes only orchestrator behavior)`)
+	}
 	ensure(isString, value.entryRole, 'entryRole', 'expected a string')
 	if (!isObject(value.roles)) throw new ValidationError('roles', 'expected an object')
 	for (const [name, role] of Object.entries(value.roles)) {
@@ -232,6 +259,35 @@ export function validateGuildConfig(value: unknown): asserts value is GuildConfi
 	}
 	ensure(isStringArray, value.tools, 'tools', 'expected an array of strings')
 	if (value.visualization !== undefined) validateVisualizationConfig(value.visualization, 'visualization')
+}
+
+const deploymentKeys: readonly string[] = ['model', 'executor', 'contextPolicy']
+
+export function validateDeploymentConfig(value: unknown): asserts value is DeploymentConfig {
+	if (!isObject(value)) throw new ValidationError('', 'expected an object')
+	rejectUnknownKeys(value, deploymentKeys, '')
+	validateModelConfig(value.model, 'model')
+	validateExecutorConfig(value.executor, 'executor')
+	validateContextPolicy(value.contextPolicy, 'contextPolicy')
+}
+
+// Cross-checks the deployment's role references against the guild's declared roles (the two files are validated independently, so this is the one place the pair is consistent). The loader runs it after both files validate; each failure names the deployment path of the offending reference.
+export function validateDeploymentRoleReferences(deployment: DeploymentConfig, roleNames: ReadonlySet<string>): void {
+	const executor = deployment.executor
+	if (executor.contextHandlerRole !== undefined && !roleNames.has(executor.contextHandlerRole)) {
+		throw new ValidationError('executor.contextHandlerRole', `references unknown role "${executor.contextHandlerRole}" (not declared in guild.json "roles")`)
+	}
+	if (executor.inquiryHandlerRole !== undefined && !roleNames.has(executor.inquiryHandlerRole)) {
+		throw new ValidationError('executor.inquiryHandlerRole', `references unknown role "${executor.inquiryHandlerRole}" (not declared in guild.json "roles")`)
+	}
+	const triggers = executor.interruptTriggers
+	if (triggers === undefined) return
+	if (!roleNames.has(triggers.handlerRole)) {
+		throw new ValidationError('executor.interruptTriggers.handlerRole', `references unknown role "${triggers.handlerRole}" (not declared in guild.json "roles")`)
+	}
+	if (triggers.planOwnerRole !== undefined && !roleNames.has(triggers.planOwnerRole)) {
+		throw new ValidationError('executor.interruptTriggers.planOwnerRole', `references unknown role "${triggers.planOwnerRole}" (not declared in guild.json "roles")`)
+	}
 }
 
 function validateVisualizationConfig(value: unknown, path: string): asserts value is VisualizationConfig {
