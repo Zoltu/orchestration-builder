@@ -873,7 +873,7 @@ function EffortLevelSelector(value, disabled, saving) {
 			]),
 		)),
 		h('p', { class: 'effort-tip' }, 'Not sure? Leave it on Standard — it fits most tasks. You can always run the task again with a different level.'),
-		saving ? h('p', { class: 'effort-note' }, 'saving…') : null,
+		h('p', { class: 'effort-note' }, saving ? 'saving…' : ''),
 	])
 }
 

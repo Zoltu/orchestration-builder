@@ -441,14 +441,6 @@ Comment and newline quality is a review judgment, not a build-gate failure. No a
 5. **Use type guards, not typecasts, for narrowing**
 6. **Fail fast on invalid input, unexpected results, or any other failure — do not suppress, compensate for, or guess around problems. Throw with useful debugging information instead.**
 
-## Adapting the Plan
-
-The detailed, bite-sized development plan lives in [`plan/README.md`](plan/README.md), with one step per session-sized chunk of work. That document defines the step process: leaving the repository in a clean state at the end of every step, paying technical debt before a step closes (or tracking it explicitly against a follow-up step), and inserting/renumbering steps when discoveries demand it.
-
-Plans are written before implementation begins and reflect the design at that point. No plan survives contact with reality unchanged. When implementation reveals that a plan's assumptions are wrong, or that a different approach is clearly better, update the plan (or this document) to match reality rather than forcing the code to match an obsolete plan.
-
-High-quality code and a well-factored end state are more important than rigid adherence to a plan written before the code existed.
-
 ---
 
 ## Local test model

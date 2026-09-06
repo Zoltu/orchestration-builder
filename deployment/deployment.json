@@ -1,12 +1,12 @@
 {
 	"model": {
-		"name": "Agents A1",
-		"apiBase": "http://llama-server:8080/v1",
+		"name": "Qwen 3.8 27b",
+		"apiBase": "http://llama-server/v1",
 		"contextWindow": 262144,
 		"reasoningField": "reasoning",
 		"generation": {
-			"temperature": 0.2,
-			"maxTokens": 32768
+			"temperature": 1.0,
+			"maxTokens": 65536
 		}
 	},
 

@@ -10,7 +10,7 @@ import { applyDeploymentOverride, createAppendLog, createDeleteCheckpoint, creat
 const DEPLOYMENT_FILE_ENV_VAR = 'ORCHESTRATOR_DEPLOYMENT_FILE'
 const PORT_ENV_VAR = 'PORT'
 const WORKSPACE_ROOT_ENV_VAR = 'WORKSPACE_ROOT'
-// Docker secrets mount at /run/secrets; the orchestrator and Kagi keys can also arrive as plain environment variables (see resolveSecret).
+// Docker secrets mount at /run/secrets; the orchestrator and tool keys can also arrive as plain environment variables (see resolveSecret).
 const DOCKER_SECRETS_DIR = '/run/secrets'
 
 // The guild directory and the deployment file are bundled into the image (and live at the repo root in development); resolved relative to this module so both are found regardless of the process working directory: in the image the app lives at /app/source with the guild at /app/guild and the deployment at /app/deployment, but the container's WORKDIR is /workspace.
@@ -46,7 +46,8 @@ function parsePort(value: string | undefined, fallback: number): number {
 	return port
 }
 
-// Builds the per-run executor dependencies and binds the shared backends (human backend, interrupt channel) to the run's log and queue for the duration of `invoke`. The guild, model, and shared human backend are bound once at service startup; only the persistence leaves and tool handlers are re-derived per run id.
+// Builds the per-run executor dependencies and binds the shared backends (human backend, interrupt channel) to the run's log and queue for the duration of `invoke`.
+// The guild, model, and shared human backend are bound once at service startup; only the persistence leaves and tool handlers are re-derived per run id.
 // Tools operate on the live workspace root in place — the executor modifies the mounted project directly, not a per-run copy.
 async function withRunBindings<T>(config: {
 	loadedGuild: LoadedGuild
@@ -96,7 +97,8 @@ function fireAndForgetSummary(promise: Promise<void>, runId: string): void {
 	})
 }
 
-// The per-run leaf wrappers the submission calls for each task (a fresh run) and for startup reconciliation (a run resumed from its checkpoint under its original run id). Each also kicks the summary hooks: the task summary at start, and the richer completion summary (task + interrupts + result) when the run settles — the rejection branch is empty because the run promise's failure is owned by runSubmission's fatal-error path, not by the summary chain.
+// The per-run leaf wrappers the submission calls for each task (a fresh run) and for startup reconciliation (a run resumed from its checkpoint under its original run id).
+// Each also kicks the summary hooks: the task summary at start, and the richer completion summary (task + interrupts + result) when the run settles — the rejection branch is empty because the run promise's failure is owned by runSubmission's fatal-error path, not by the summary chain.
 // The run log path rides in the options workspace-relative: the inquiry handler's briefing interpolates it so finished roles stay researchable from the mounted workspace.
 interface RunServiceConfig {
 	loadedGuild: LoadedGuild
@@ -152,7 +154,8 @@ function waitForShutdownSignal(): Promise<void> {
 	})
 }
 
-// Degraded startup for invalid configuration: the port binds anyway so the operator's browser shows what to fix, while the error still reaches stderr for docker logs. The service cannot accept runs in this state, so it exits non-zero once stopped; a failed bind here has nothing to fall back to and propagates to serve's catch.
+// Degraded startup for invalid configuration: the port binds anyway so the operator's browser shows what to fix, while the error still reaches stderr for docker logs.
+// The service cannot accept runs in this state, so it exits non-zero once stopped; a failed bind here has nothing to fall back to and propagates to serve's catch.
 async function serveBootstrapFailure(config: { port: number, error: ConfigurationError }): Promise<never> {
 	console.error(config.error.message)
 	const handleRequest = createBootstrapFailureHandler(config.error)
@@ -169,7 +172,8 @@ async function serveBootstrapFailure(config: { port: number, error: Configuratio
 }
 
 // Long-running service: the server outlives every run, one task at a time, submitted via the JSON API.
-// SIGINT and SIGTERM both trigger shutdown: with an active run, the service submits a wind-down notice through the interrupt channel and waits for the run under a bounded drain timeout — the run can finish gracefully at a safe point. A run still active when the timeout elapses is NOT abandoned: the engine checkpoints the role stack at every safe point, so the next startup resumes the run from its last checkpoint (see docs/reference.md "Run persistence and resumption").
+// SIGINT and SIGTERM both trigger shutdown: with an active run, the service submits a wind-down notice through the interrupt channel and waits for the run under a bounded drain timeout — the run can finish gracefully at a safe point.
+// A run still active when the timeout elapses is NOT abandoned: the engine checkpoints the role stack at every safe point, so the next startup resumes the run from its last checkpoint (see docs/reference.md "Run persistence and resumption").
 // Then stop accepting new requests, stop the server, and exit (130 if a run was still active, 0 if idle).
 // A fatal run error tears down the service and exits non-zero.
 
@@ -188,20 +192,24 @@ async function serve(): Promise<void> {
 		const deploymentFilePath = Bun.env[DEPLOYMENT_FILE_ENV_VAR] || DEPLOYMENT_PATH
 		const loadGuild = createGuildLoader(deploymentFilePath)
 		const loadedGuildFiles = loadGuild(GUILD_PATH)
-		// Environment variables override individual fields on top of the deployment file (file first, environment second). The merged result is re-validated here because an override can point a handler role at a name the guild does not declare, and the failure must surface at startup before any run accepts it — role names are configuration, not credentials, so echoing them in the error is safe. The merged value is still file-shaped (the model's optional fields may be absent), so the file validator applies; the model is then completed into the resolved shape the executor consumes.
+		// Environment variables override individual fields on top of the deployment file (file first, environment second).
+		// The merged result is re-validated here because an override can point a handler role at a name the guild does not declare, and the failure must surface at startup before any run accepts it — role names are configuration, not credentials, so echoing them in the error is safe. The merged value is still file-shaped (the model's optional fields may be absent), so the file validator applies; the model is then completed into the resolved shape the executor consumes.
 		const roleNames = new Set(Object.keys(loadedGuildFiles.config.roles))
 		const mergedDeployment = applyDeploymentOverride(loadedGuildFiles.deployment, resolveDeploymentOverride(Bun.env))
 		validateDeploymentFileConfig(mergedDeployment)
 		validateDeploymentRoleReferences(mergedDeployment, roleNames)
 
-		// The orchestrator credential comes from the shared secret channels: the ORCHESTRATOR_API_KEY environment variable first, then a docker secret mounted at /run/secrets/orchestrator_api_key (or ORCHESTRATOR_API_KEY). resolveSecret trims and normalizes empty values to undefined so the caller omits the Authorization header entirely. Resolved before the probe so the probe can authenticate against endpoints that require a key.
+		// The orchestrator credential comes from the shared secret channels: the ORCHESTRATOR_API_KEY environment variable first, then a docker secret mounted at /run/secrets/orchestrator_api_key (or ORCHESTRATOR_API_KEY).
+		// resolveSecret trims and normalizes empty values to undefined so the caller omits the Authorization header entirely.
+		// Resolved before the probe so the probe can authenticate against endpoints that require a key.
 		apiKey = resolveSecret('orchestrator_api_key', { environment: Bun.env, readDockerSecret: createDockerSecretReader(DOCKER_SECRETS_DIR) })
 		kagiApiKey = resolveKagiApiKey(Bun.env, createDockerSecretReader(DOCKER_SECRETS_DIR))
 		if (kagiApiKey === undefined) {
 			console.log('KAGI_API_KEY not set: web_search and the kagi fetch backend will report themselves unavailable')
 		}
 
-		// One startup probe of the model API, before the resolved composition: the server's own values are ground truth, so an API-reported context window always replaces the configured one, and a missing name is discovered when the API serves exactly one model. The probe reports failure as a value instead of throwing, and the resolver turns that into a fallback to configuration — a failed probe only fails startup when a needed field is then still missing, so a down endpoint never blocks boot with a complete configuration on file.
+		// One startup probe of the model API, before the resolved composition: the server's own values are ground truth, so an API-reported context window always replaces the configured one, and a missing name is discovered when the API serves exactly one model.
+		// The probe reports failure as a value instead of throwing, and the resolver turns that into a fallback to configuration — a failed probe only fails startup when a needed field is then still missing, so a down endpoint never blocks boot with a complete configuration on file.
 		const apiBase = mergedDeployment.model.apiBase
 		const probeModelInfo = createModelInfoProbe(apiBase, apiKey, MODEL_PROBE_TIMEOUT_MS)
 		const probe = await probeModelInfo()
@@ -219,7 +227,8 @@ async function serve(): Promise<void> {
 		}
 		guild = { ...loadedGuildFiles, deployment: resolution.deployment }
 	} catch (error) {
-		// A ValidationError raised in this block can only come from loading or re-validating the guild and deployment data, which is by definition a configuration failure, so both classes present through the failure page (normalized to ConfigurationError, whose message is fit to show the operator). Anything else is unexpected and rethrows to the plain-exit catch.
+		// A ValidationError raised in this block can only come from loading or re-validating the guild and deployment data, which is by definition a configuration failure, so both classes present through the failure page (normalized to ConfigurationError, whose message is fit to show the operator).
+		// Anything else is unexpected and rethrows to the plain-exit catch.
 		if (error instanceof ConfigurationError || error instanceof ValidationError) {
 			await serveBootstrapFailure({ port, error: new ConfigurationError(error.message) })
 		}
