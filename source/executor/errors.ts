@@ -10,6 +10,14 @@ export class ValidationError extends Error {
 	}
 }
 
+// Startup-configuration failure: the service cannot boot correctly with this guild, deployment file, or ORCHESTRATOR_* override, and the message is fit to show the operator verbatim on the bootstrap error page (see source/web/bootstrap-failure.ts). Port problems are deliberately not this class: with an unusable port there is nothing to serve.
+export class ConfigurationError extends Error {
+	constructor(message: string) {
+		super(message)
+		this.name = 'ConfigurationError'
+	}
+}
+
 export const ERROR_KINDS: readonly ErrorKind[] = [
 	'invalid_tool_call',
 	'unknown_tool',

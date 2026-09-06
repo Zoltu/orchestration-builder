@@ -25,8 +25,15 @@ function readRequiredFile(filePath: string, errorPath: string): string {
 	}
 }
 
+// Malformed JSON is undetectable before parsing, so the parse failure is a truly exceptional case: it is converted to the loader's ValidationError (the reason is the parse position) so it reaches the startup error page instead of escaping as a bare SyntaxError.
 function readJsonFile(filePath: string, errorPath: string): unknown {
-	return JSON.parse(readRequiredFile(filePath, errorPath))
+	const contents = readRequiredFile(filePath, errorPath)
+	try {
+		return JSON.parse(contents)
+	} catch (error) {
+		const reason = error instanceof Error ? error.message : String(error)
+		throw new ValidationError(errorPath, `invalid JSON: ${reason}`)
+	}
 }
 
 // The deployment file path is fixed per service (it lives beside the guild in the bundle and is not per-run), so the factory closes over it and the returned LoadGuild keeps the guild-dir-only signature the executor's dependencies are built on.

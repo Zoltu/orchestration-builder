@@ -6,6 +6,8 @@
 export { runExecutor, resumeExecutor } from './executor.js'
 export type { ExecutorDependencies, ResumeRunOptions } from './executor.js'
 
+export { ConfigurationError, ValidationError } from './errors.js'
+
 export { createCheckpointRecorder, isRunCheckpoint } from './checkpoint.js'
 export type { CheckpointFrame, CheckpointRecorder, CheckpointRecorderDependencies, PendingAgentSuspension, RunCheckpoint } from './checkpoint.js'
 

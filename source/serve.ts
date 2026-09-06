@@ -2,9 +2,10 @@
 import * as path from 'node:path'
 
 import { createWebServer } from './web/server.js'
+import { createBootstrapFailureHandler } from './web/bootstrap-failure.js'
 import { createSnapshotCache } from './web/snapshot-cache.js'
 import { createTaskSummarizer, type TaskSummarizer } from './web/summarize.js'
-import { applyDeploymentOverride, createAppendLog, createDeleteCheckpoint, createDockerSecretReader, createGuildLoader, createInterruptChannel, createInterruptQueue, createLlmCaller, createLlmFetch, createListRunIds, createReadProjectSettings, createReadRunCheckpointById, createReadRunMetaById, createReadRunSnapshotById, createReadRunSnapshotStats, createReadRunSummaryById, createRunDirectory, createRunState, createRunSubmission, createSleep, createToolHandlers, createWebHumanBackend, createWriteCheckpoint, createWriteMeta, createWriteProjectSettings, createWriteRunSummary, reconcileRunsOnStartup, resolveDeploymentOverride, resolveKagiApiKey, resolveSecret, resumeExecutor, runExecutor, validateDeploymentConfig, validateDeploymentRoleReferences, type ExecutorDependencies, type InterruptChannel, type LoadedGuild, type LlmCaller, type ResumeRun, type RunCheckpoint, type StartRun, type WebHumanBackend } from './executor/index.js'
+import { applyDeploymentOverride, createAppendLog, createDeleteCheckpoint, createDockerSecretReader, createGuildLoader, createInterruptChannel, createInterruptQueue, createLlmCaller, createLlmFetch, createListRunIds, createReadProjectSettings, createReadRunCheckpointById, createReadRunMetaById, createReadRunSnapshotById, createReadRunSnapshotStats, createReadRunSummaryById, createRunDirectory, createRunState, createRunSubmission, createSleep, createToolHandlers, createWebHumanBackend, createWriteCheckpoint, createWriteMeta, createWriteProjectSettings, createWriteRunSummary, reconcileRunsOnStartup, resolveDeploymentOverride, resolveKagiApiKey, resolveSecret, resumeExecutor, runExecutor, validateDeploymentConfig, validateDeploymentRoleReferences, ConfigurationError, ValidationError, type ExecutorDependencies, type InterruptChannel, type LoadedGuild, type LlmCaller, type ResumeRun, type RunCheckpoint, type StartRun, type WebHumanBackend } from './executor/index.js'
 
 const DEPLOYMENT_FILE_ENV_VAR = 'ORCHESTRATOR_DEPLOYMENT_FILE'
 const PORT_ENV_VAR = 'PORT'
@@ -151,6 +152,22 @@ function waitForShutdownSignal(): Promise<void> {
 	})
 }
 
+// Degraded startup for invalid configuration: the port binds anyway so the operator's browser shows what to fix, while the error still reaches stderr for docker logs. The service cannot accept runs in this state, so it exits non-zero once stopped; a failed bind here has nothing to fall back to and propagates to serve's catch.
+async function serveBootstrapFailure(config: { port: number, error: ConfigurationError }): Promise<never> {
+	console.error(config.error.message)
+	const handleRequest = createBootstrapFailureHandler(config.error)
+	const server = Bun.serve({ port: config.port, fetch: (request) => handleRequest(request) })
+	const port = server.port
+	if (port === undefined) {
+		server.stop()
+		throw new Error(`Failed to bind web server on port ${config.port}`)
+	}
+	console.log(`The service is misconfigured; open http://localhost:${port} to see what to fix`)
+	await waitForShutdownSignal()
+	server.stop()
+	process.exit(1)
+}
+
 // Long-running service: the server outlives every run, one task at a time, submitted via the JSON API.
 // SIGINT and SIGTERM both trigger shutdown: with an active run, the service submits a wind-down notice through the interrupt channel and waits for the run under a bounded drain timeout — the run can finish gracefully at a safe point. A run still active when the timeout elapses is NOT abandoned: the engine checkpoints the role stack at every safe point, so the next startup resumes the run from its last checkpoint (see docs/reference.md "Run persistence and resumption").
 // Then stop accepting new requests, stop the server, and exit (130 if a run was still active, 0 if idle).
@@ -164,23 +181,35 @@ async function serve(): Promise<void> {
 	const workspaceRootPath = Bun.env[WORKSPACE_ROOT_ENV_VAR] || DEFAULT_WORKSPACE_ROOT
 	const runsBaseDir = path.resolve(workspaceRootPath, ORCHESTRATION_DIR, 'runs')
 
-	const deploymentFilePath = Bun.env[DEPLOYMENT_FILE_ENV_VAR] || DEPLOYMENT_PATH
-	const loadGuild = createGuildLoader(deploymentFilePath)
-	const loadedGuild = loadGuild(GUILD_PATH)
-	// Environment variables override individual fields on top of the deployment file (file first, environment second). The merged result is re-validated here because an override can point a handler role at a name the guild does not declare, and the failure must surface at startup before any run accepts it — role names are configuration, not credentials, so echoing them in the error is safe.
-	const roleNames = new Set(Object.keys(loadedGuild.config.roles))
-	const deployment = applyDeploymentOverride(loadedGuild.deployment, resolveDeploymentOverride(Bun.env))
-	validateDeploymentConfig(deployment)
-	validateDeploymentRoleReferences(deployment, roleNames)
-	const guild: LoadedGuild = { ...loadedGuild, deployment }
+	let guild: LoadedGuild
+	let apiKey: string | undefined
+	let kagiApiKey: string | undefined
+	try {
+		const deploymentFilePath = Bun.env[DEPLOYMENT_FILE_ENV_VAR] || DEPLOYMENT_PATH
+		const loadGuild = createGuildLoader(deploymentFilePath)
+		const loadedGuild = loadGuild(GUILD_PATH)
+		// Environment variables override individual fields on top of the deployment file (file first, environment second). The merged result is re-validated here because an override can point a handler role at a name the guild does not declare, and the failure must surface at startup before any run accepts it — role names are configuration, not credentials, so echoing them in the error is safe.
+		const roleNames = new Set(Object.keys(loadedGuild.config.roles))
+		const deployment = applyDeploymentOverride(loadedGuild.deployment, resolveDeploymentOverride(Bun.env))
+		validateDeploymentConfig(deployment)
+		validateDeploymentRoleReferences(deployment, roleNames)
+		guild = { ...loadedGuild, deployment }
 
-	// The orchestrator credential comes from the shared secret channels: the ORCHESTRATOR_API_KEY environment variable first, then a docker secret mounted at /run/secrets/orchestrator_api_key (or ORCHESTRATOR_API_KEY). resolveSecret trims and normalizes empty values to undefined so the caller omits the Authorization header entirely.
-	const apiKey = resolveSecret('orchestrator_api_key', { environment: Bun.env, readDockerSecret: createDockerSecretReader(DOCKER_SECRETS_DIR) })
-	const llmCaller = createLlmCaller(guild.deployment.model, apiKey, { llmFetch: createLlmFetch(), sleep: createSleep() })
-	const kagiApiKey = resolveKagiApiKey(Bun.env, createDockerSecretReader(DOCKER_SECRETS_DIR))
-	if (kagiApiKey === undefined) {
-		console.log('KAGI_API_KEY not set: web_search and the kagi fetch backend will report themselves unavailable')
+		// The orchestrator credential comes from the shared secret channels: the ORCHESTRATOR_API_KEY environment variable first, then a docker secret mounted at /run/secrets/orchestrator_api_key (or ORCHESTRATOR_API_KEY). resolveSecret trims and normalizes empty values to undefined so the caller omits the Authorization header entirely.
+		apiKey = resolveSecret('orchestrator_api_key', { environment: Bun.env, readDockerSecret: createDockerSecretReader(DOCKER_SECRETS_DIR) })
+		kagiApiKey = resolveKagiApiKey(Bun.env, createDockerSecretReader(DOCKER_SECRETS_DIR))
+		if (kagiApiKey === undefined) {
+			console.log('KAGI_API_KEY not set: web_search and the kagi fetch backend will report themselves unavailable')
+		}
+	} catch (error) {
+		// A ValidationError raised in this block can only come from loading or re-validating the guild and deployment data, which is by definition a configuration failure, so both classes present through the failure page (normalized to ConfigurationError, whose message is fit to show the operator). Anything else is unexpected and rethrows to the plain-exit catch.
+		if (error instanceof ConfigurationError || error instanceof ValidationError) {
+			await serveBootstrapFailure({ port, error: new ConfigurationError(error.message) })
+		}
+		throw error
 	}
+
+	const llmCaller = createLlmCaller(guild.deployment.model, apiKey, { llmFetch: createLlmFetch(), sleep: createSleep() })
 
 	const webHumanBackend = createWebHumanBackend()
 	const interruptChannel = createInterruptChannel()

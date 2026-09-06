@@ -1,4 +1,5 @@
-// Environment layer over the deployment file: the file is the base (replaced wholesale at load time), and each ORCHESTRATOR_* variable set in the environment overrides exactly one of its fields on top. Absent and empty-string variables mean "not set", so an override can only replace a field's value, never clear it. Every parse or semantic failure names the offending variable, mirroring the deployment file's strictness so a typo fails loudly at startup instead of silently keeping the file's value.
+// Environment layer over the deployment file: the file is the base (replaced wholesale at load time), and each ORCHESTRATOR_* variable set in the environment overrides exactly one of its fields on top. Absent and empty-string variables mean "not set", so an override can only replace a field's value, never clear it. Every parse or semantic failure names the offending variable, mirroring the deployment file's strictness so a typo fails loudly at startup instead of silently keeping the file's value. Failures throw ConfigurationError so the service can present them on the bootstrap error page (see source/web/bootstrap-failure.ts).
+import { ConfigurationError } from './errors.js'
 import type { ContextPolicy, DeploymentConfig, InterruptTriggersConfig, ModelConfig } from './types.js'
 
 export interface GenerationOverride {
@@ -67,25 +68,25 @@ function readString(value: string | undefined): string | undefined {
 // Accepts only plain decimal digit strings so forms like `0x1a`, `1e3`, `8080.0`, or ` 8080 ` are rejected rather than silently coerced by Number() (the same discipline as parsePort in source/serve.ts).
 function readPositiveInteger(name: string, value: string | undefined): number | undefined {
 	if (value === undefined || value === '') return undefined
-	if (!/^\d+$/.test(value)) throw new Error(`${name} must be a positive integer (got "${value}")`)
+	if (!/^\d+$/.test(value)) throw new ConfigurationError(`${name} must be a positive integer (got "${value}")`)
 	const parsed = Number(value)
-	if (parsed <= 0) throw new Error(`${name} must be a positive integer (got "${value}")`)
+	if (parsed <= 0) throw new ConfigurationError(`${name} must be a positive integer (got "${value}")`)
 	return parsed
 }
 
 function readFiniteNumber(name: string, value: string | undefined): number | undefined {
 	if (value === undefined || value === '') return undefined
 	// Number() coerces a whitespace-only string to 0, which would silently turn a mistyped value into a valid number.
-	if (value.trim() === '') throw new Error(`${name} must be a finite number (got "${value}")`)
+	if (value.trim() === '') throw new ConfigurationError(`${name} must be a finite number (got "${value}")`)
 	const parsed = Number(value)
-	if (!Number.isFinite(parsed)) throw new Error(`${name} must be a finite number (got "${value}")`)
+	if (!Number.isFinite(parsed)) throw new ConfigurationError(`${name} must be a finite number (got "${value}")`)
 	return parsed
 }
 
 function readPressureThreshold(name: string, value: string | undefined): number | undefined {
 	const parsed = readFiniteNumber(name, value)
 	if (parsed === undefined) return undefined
-	if (parsed <= 0 || parsed >= 1) throw new Error(`${name} must be a number between 0 and 1, exclusive (got "${value}")`)
+	if (parsed <= 0 || parsed >= 1) throw new ConfigurationError(`${name} must be a number between 0 and 1, exclusive (got "${value}")`)
 	return parsed
 }
 
@@ -140,7 +141,7 @@ function mergeInterruptTriggers(baseTriggers: InterruptTriggersConfig | undefine
 	if (baseTriggers === undefined && overrideTriggers === undefined) return undefined
 	if (baseTriggers === undefined) {
 		if (overrideTriggers === undefined || overrideTriggers.handlerRole === undefined || overrideTriggers.everyToolCalls === undefined || overrideTriggers.everyTokens === undefined) {
-			throw new Error(`${INTERRUPT_HANDLER_ROLE_ENV_VAR}, ${INTERRUPT_EVERY_TOOL_CALLS_ENV_VAR}, and ${INTERRUPT_EVERY_TOKENS_ENV_VAR} must all be set to introduce executor.interruptTriggers when the deployment file has no interruptTriggers section`)
+			throw new ConfigurationError(`${INTERRUPT_HANDLER_ROLE_ENV_VAR}, ${INTERRUPT_EVERY_TOOL_CALLS_ENV_VAR}, and ${INTERRUPT_EVERY_TOKENS_ENV_VAR} must all be set to introduce executor.interruptTriggers when the deployment file has no interruptTriggers section`)
 		}
 		return {
 			handlerRole: overrideTriggers.handlerRole,
