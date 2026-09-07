@@ -1199,7 +1199,6 @@ describe('runRole — interrupt platform', () => {
 			depth: 0,
 			roleName: 'main',
 			task: 'do it',
-			runLogPath: 'runs/test/log.jsonl',
 		})
 
 		expect(result).toEqual({ status: 'success', summary: 'main done' })
@@ -1214,13 +1213,14 @@ describe('runRole — interrupt platform', () => {
 		if (handlerStart === undefined) throw new Error('expected the handler role_start')
 		expect(events.indexOf(interrupt)).toBeLessThan(events.indexOf(handlerStart))
 		expect(payloadField(handlerStart, 'parent')).toBe('main')
-		// The handler's briefing carries the question, the live-instance list root first, and the log pointer.
+		// The handler's briefing carries the question, the live-instance list root first, and the run-log tool pointer for finished roles.
 		const briefing = defined(llm.calls[0], 'handler briefing call').messages[1]
 		expect(briefing?.role).toBe('user')
 		expect(briefing?.content).toContain('[Operator inquiry]')
 		expect(briefing?.content).toContain('what are you working on?')
 		expect(briefing?.content).toContain('- main-0-1 (main, depth 0)')
-		expect(briefing?.content).toContain('runs/test/log.jsonl')
+		expect(briefing?.content).toContain('read_run_log')
+		expect(briefing?.content).toContain('search_run_log')
 		// The handler's finish summary is the answer on interrupt_resolved.
 		const resolved = events.find((e) => e.type === 'interrupt_resolved')
 		if (resolved === undefined) throw new Error('expected an interrupt_resolved event')
@@ -1392,9 +1392,9 @@ describe('runRole — interrupt platform', () => {
 		expect(briefing?.content).toContain('how is the run going?')
 		expect(briefing?.content).toContain('- parent-0-1 (parent, depth 0)')
 		expect(briefing?.content).toContain('- child-1-2 (child, depth 1), child of parent-0-1')
-		// No runLogPath was supplied on this context, so the briefing falls back to the workspace-only pointer and never interpolates 'undefined'.
-		expect(briefing?.content).toContain('recorded in the workspace itself')
-		expect(briefing?.content).not.toContain('undefined')
+		// The finished-roles note is unconditional now: it points at the run-log tools, never at a path.
+		expect(briefing?.content).toContain('their work is recorded in the run log')
+		expect(briefing?.content).toContain('read_run_log')
 		// Neither the child nor the parent ever receives the question in its history.
 		expect(defined(llm.calls[3], 'child resume call').messages.some((m) => m.content.includes('how is the run going?'))).toBe(false)
 		expect(defined(llm.calls[4], 'parent resume call').messages.some((m) => m.content.includes('how is the run going?'))).toBe(false)
@@ -2087,7 +2087,7 @@ describe('run persistence and resumption', () => {
 		const { deps, events, checkpoints: resumedWrites } = makeDeps(llm)
 		const depsWithEcho: EngineDependencies = { ...deps, additionalToolHandlers: { echo: echoHandler } }
 
-		const card = await resumeRoleStack(runRole, depsWithEcho, guild, checkpoint, 'runs/test/log.jsonl')
+		const card = await resumeRoleStack(runRole, depsWithEcho, guild, checkpoint)
 
 		expect(card).toEqual(uninterrupted.card)
 		// Exactly two turns happen after the resume: the coder's finish and the orchestrator's follow-up — no earlier turn is replayed.
@@ -2120,7 +2120,7 @@ describe('run persistence and resumption', () => {
 		const { deps, events } = makeDeps(llm)
 		const depsWithEcho: EngineDependencies = { ...deps, additionalToolHandlers: { echo: echoHandler } }
 
-		const card = await resumeRoleStack(runRole, depsWithEcho, guild, checkpoint, 'runs/test/log.jsonl')
+		const card = await resumeRoleStack(runRole, depsWithEcho, guild, checkpoint)
 
 		expect(card).toEqual({ status: 'success', summary: 'parent done' })
 		// One turn only: the orchestrator's follow-up. The finished child is not re-run.
@@ -2144,7 +2144,7 @@ describe('run persistence and resumption', () => {
 		const { deps, events } = makeDeps(llm)
 		const depsWithEcho: EngineDependencies = { ...deps, additionalToolHandlers: { echo: echoHandler } }
 
-		const card = await resumeRoleStack(runRole, depsWithEcho, guild, checkpoint, 'runs/test/log.jsonl')
+		const card = await resumeRoleStack(runRole, depsWithEcho, guild, checkpoint)
 
 		expect(card.status).toBe('success')
 		// The coder spawned after the resume is a fresh instance, so it mints a new id (the test registry starts at 0 and restored registrations do not advance it) and emits role_start — resumed roles do not.

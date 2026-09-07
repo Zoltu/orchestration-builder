@@ -10,6 +10,7 @@ import { createGuildLoader, type LoadedGuildFiles } from '../executor/loader.js'
 import { createRoleRegistry } from '../executor/role-registry.js'
 import { createToolHandlers } from '../executor/tools.js'
 import { createPlanToolHandlers } from '../executor/tools/plan.js'
+import { createRunLogToolHandlers } from '../executor/tools/run-log.js'
 import type { HumanFacingText, ToolManifest } from '../executor/types.js'
 import { isNonEmptyStringArray, validateToolManifest } from '../executor/validation.js'
 
@@ -70,10 +71,11 @@ const expectedToolNames = new Set([
 	'agent', 'finish', 'context_info', 'edit_context', 'ask_human',
 	'list_directory', 'glob_files', 'read_file', 'read_file_partial', 'search_text', 'write_file', 'read_plan', 'write_plan', 'fetch_url', 'typecheck', 'test',
 	'run_shell', 'repo_map', 'web_search',
+	'read_run_log', 'search_run_log',
 	'trigger_interrupt', 'list_role_messages', 'read_message_window', 'search_role_blocks', 'recent_role_tool_calls',
 ])
 
-const nativeToolNames = new Set(['list_directory', 'glob_files', 'read_file', 'read_file_partial', 'search_text', 'write_file', 'read_plan', 'write_plan', 'fetch_url', 'typecheck', 'test', 'run_shell', 'repo_map', 'web_search'])
+const nativeToolNames = new Set(['list_directory', 'glob_files', 'read_file', 'read_file_partial', 'search_text', 'write_file', 'read_plan', 'write_plan', 'read_run_log', 'search_run_log', 'fetch_url', 'typecheck', 'test', 'run_shell', 'repo_map', 'web_search'])
 
 const builtInToolNames = new Set(['agent', 'finish', 'context_info', 'edit_context', 'ask_human', 'trigger_interrupt', 'list_role_messages', 'read_message_window', 'search_role_blocks', 'recent_role_tool_calls'])
 
@@ -92,6 +94,8 @@ const expectedSignatures: ExpectedSignature[] = [
 	{ file: 'write_file.json', required: ['path', 'content'], properties: ['path', 'content'] },
 	{ file: 'read_plan.json', required: [], properties: ['runId'] },
 	{ file: 'write_plan.json', required: ['content'], properties: ['content'] },
+	{ file: 'read_run_log.json', required: [], properties: ['offset', 'limit'] },
+	{ file: 'search_run_log.json', required: ['query'], properties: ['query', 'type', 'limit'] },
 	{ file: 'fetch_url.json', required: ['url'], properties: ['url', 'method'] },
 	{ file: 'web_search.json', required: ['query'], properties: ['query', 'limit'] },
 	{ file: 'repo_map.json', required: [], properties: ['path'] },
@@ -213,6 +217,12 @@ function checkGuild(loaded: LoadedGuildFiles): void {
 		check(prompt.includes('brief'), 'guild: researcher prompt lacks the compact-brief contract')
 		check(prompt.includes('cite'), 'guild: researcher prompt lacks the cite-your-sources guidance')
 	}
+	// The run-log tools expose every role's full conversations, so they must stay exclusive to the inquiry handler — the one read-only, handler-only role the platform invokes for operator questions.
+	for (const [name, role] of Object.entries(config.roles)) {
+		for (const runLogTool of ['read_run_log', 'search_run_log']) {
+			check(role.tools.includes(runLogTool) === (name === 'inquiry_responder'), `guild: run-log tool "${runLogTool}" must be held only by "inquiry_responder" (found on "${name}")`)
+		}
+	}
 	check(deployment.executor.contextHandlerRole === 'context_manager', `deployment: executor.contextHandlerRole must be "context_manager" (got "${deployment.executor.contextHandlerRole ?? 'undefined'}")`)
 	const triggers = deployment.executor.interruptTriggers
 	if (triggers === undefined) {
@@ -290,10 +300,11 @@ function checkManifests(): void {
 	const duplicateNames = manifestNames.filter((name, index) => manifestNames.indexOf(name) !== index)
 	check(new Set(manifestNames).size === manifestNames.length, `guild/tools: duplicate manifest names: ${[...new Set(duplicateNames)].join(', ')}`)
 
-	// Plan handlers close over their run's directory (they are bound per run in the server), so the gate constructs them over fixture bindings it never invokes, solely to compare the full native handler table.
+	// Plan and run-log handlers close over their run's directory (they are bound per run in the server), so the gate constructs them over fixture bindings it never invokes, solely to compare the full native handler table.
 	const nativeHandlers = {
 		...createToolHandlers({ workspaceRoot: manifestDir, defaultToolTimeoutSeconds: 30 }),
 		...createPlanToolHandlers({ runsBaseDir: manifestDir, runId: 'run-19700101-000000', workspaceRoot: repoRoot }),
+		...createRunLogToolHandlers({ logPath: path.join(manifestDir, 'log.jsonl') }),
 	}
 	checkSameSet('native tool handler table', new Set(Object.keys(nativeHandlers)), nativeToolNames)
 	const builtInHandlers = createBuiltInToolHandlers({

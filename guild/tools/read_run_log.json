@@ -1,0 +1,37 @@
+{
+	"name": "read_run_log",
+	"description": "Read this run's event log, which records every role's start and finish, the full conversations sent to and received from the model (llm_call events), and every tool call and result. Events are returned in log order and paginated: pass offset and limit to walk forward. Finished roles have no live conversation — their work lives here. The inquiry task names what to look for. A run with no log yet returns an unavailable result.",
+	"humanLabel": {
+		"detailed": ["Read Run Log"],
+		"friendly": ["Read Run Log"],
+		"whimsical": ["Open the Logbook"]
+	},
+	"humanDescription": {
+		"detailed": ["Reads pages of the run's event log."],
+		"friendly": ["Read the run's log."],
+		"whimsical": ["Open the logbook."]
+	},
+	"humanCallLabel": {
+		"detailed": ["role {sourceRole} is invoking tool {destinationRole} (stack {stack})"],
+		"friendly": ["{source} is reading the run's log"],
+		"whimsical": ["{source} is opening the logbook", "{source} is reading the ship's log", "{source} is unrolling the transcript"]
+	},
+	"humanWorkingLabel": {
+		"detailed": ["tool {participantRole} is reading the run's log"],
+		"friendly": ["Reading the run's log"],
+		"whimsical": ["Opening the logbook", "Reading the ship's log", "Unrolling the transcript", "Skimming the records"]
+	},
+	"parameters": {
+		"type": "object",
+		"properties": {
+			"offset": {
+				"type": "number",
+				"description": "Optional index of the first event to return (default 0). Event indexes are stable across pages."
+			},
+			"limit": {
+				"type": "number",
+				"description": "Optional maximum number of events to return (default 50; hard-capped)."
+			}
+		}
+	}
+}

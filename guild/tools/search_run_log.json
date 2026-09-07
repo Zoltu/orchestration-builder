@@ -1,0 +1,42 @@
+{
+	"name": "search_run_log",
+	"description": "Search this run's event log — role conversations, tool calls, and results — for a case-insensitive substring and return a short excerpt of each matching event's raw log line. An optional type filter (for example llm_call) narrows the search to one event type before matching. Use it to locate where a finished role discussed something, then read around it. The inquiry task names what to look for. A run with no log yet returns an unavailable result.",
+	"humanLabel": {
+		"detailed": ["Search Run Log"],
+		"friendly": ["Search Run Log"],
+		"whimsical": ["Comb the Logbook"]
+	},
+	"humanDescription": {
+		"detailed": ["Searches the run's event log and returns capped match excerpts."],
+		"friendly": ["Search the run's log."],
+		"whimsical": ["Comb the logbook."]
+	},
+	"humanCallLabel": {
+		"detailed": ["role {sourceRole} is invoking tool {destinationRole} (stack {stack})"],
+		"friendly": ["{source} is searching the run's log"],
+		"whimsical": ["{source} is combing the logbook", "{source} is dusting the ship's log for fingerprints", "{source} is skimming for a name"]
+	},
+	"humanWorkingLabel": {
+		"detailed": ["tool {participantRole} is searching the run's log"],
+		"friendly": ["Searching the run's log"],
+		"whimsical": ["Combing the logbook", "Sleuthing through the records", "Tracing the paper trail", "Following the ink"]
+	},
+	"parameters": {
+		"type": "object",
+		"required": ["query"],
+		"properties": {
+			"query": {
+				"type": "string",
+				"description": "The text to search for, matched case-insensitively anywhere in the event's raw log line."
+			},
+			"type": {
+				"type": "string",
+				"description": "Optional: only search events whose type equals this value, such as llm_call or tool_result."
+			},
+			"limit": {
+				"type": "number",
+				"description": "Optional maximum number of matches to return (default 20; hard-capped)."
+			}
+		}
+	}
+}

@@ -187,7 +187,6 @@ describe('runExecutor', () => {
 			benchmarkPath: '/bench',
 			task: 'do it',
 			effort: 'standard',
-			runLogPath: 'runs/r-fail/log.jsonl',
 		})
 		} catch (error) {
 			caught = error
@@ -224,7 +223,6 @@ describe('runExecutor', () => {
 			benchmarkPath: '/bench',
 			task: 'do it',
 			effort: 'standard',
-			runLogPath: 'runs/r1/log.jsonl',
 		})
 
 		expect(persistence.state.createRunDirectoryCalls).toBe(1)
@@ -275,7 +273,6 @@ describe('runExecutor', () => {
 			benchmarkPath: '/bench',
 			task: 'do it',
 			effort: 'standard',
-			runLogPath: 'runs/r2/log.jsonl',
 		})
 
 		expect(meta.status).toBe('error')
@@ -306,7 +303,6 @@ describe('runExecutor', () => {
 			benchmarkPath: '/bench',
 			task: 'implicit',
 			effort: 'standard',
-			runLogPath: 'runs/r3/log.jsonl',
 		})
 
 		expect(persistence.state.meta).not.toBeNull()
@@ -345,7 +341,6 @@ describe('runExecutor', () => {
 			benchmarkPath: '/bench',
 			task: 'do it',
 			effort: 'standard',
-			runLogPath: 'runs/r4/log.jsonl',
 		})
 
 		const eventTypes = persistence.state.events.map((e) => e.type)
@@ -386,7 +381,6 @@ describe('runExecutor', () => {
 			benchmarkPath: '/bench',
 			task: 'do it',
 			effort: 'thorough',
-			runLogPath: 'runs/r-effort/log.jsonl',
 		})
 
 		const effortSetEvents = persistence.state.events.filter((e) => e.type === 'effort_set')
@@ -444,7 +438,7 @@ describe('resumeExecutor', () => {
 		}
 	}
 
-	const resumeOptions = { guildPath: '/guild', benchmarkPath: '/bench', runLogPath: 'runs/r-resume/log.jsonl' }
+	const resumeOptions = { guildPath: '/guild', benchmarkPath: '/bench' }
 
 	// Drives a full orchestrator→coder run and returns the captured checkpoints; the resumed-run tests then re-enter from the checkpoint taken while the coder was active.
 	async function driveUninterruptedRun(): Promise<{ meta: RunMeta; checkpoints: RunCheckpoint[] }> {

@@ -5,7 +5,7 @@ import { createWebServer } from './web/server.js'
 import { createBootstrapFailureHandler } from './web/bootstrap-failure.js'
 import { createSnapshotCache } from './web/snapshot-cache.js'
 import { createTaskSummarizer, type TaskSummarizer } from './web/summarize.js'
-import { applyDeploymentOverride, createAppendLog, createDeleteCheckpoint, createDockerSecretReader, createGuildLoader, createInterruptChannel, createInterruptQueue, createLlmCaller, createLlmFetch, createListRunIds, createModelInfoProbe, createPlanToolHandlers, createReadProjectSettings, createReadRunCheckpointById, createReadRunMetaById, createReadRunSnapshotById, createReadRunSnapshotStats, createReadRunSummaryById, createRunDirectory, createRunState, createRunSubmission, createSleep, createToolHandlers, createWebHumanBackend, createWriteCheckpoint, createWriteMeta, createWriteProjectSettings, createWriteRunSummary, generateRunId, MODEL_PROBE_TIMEOUT_MS, parseModelInfo, reconcileRunsOnStartup, resolveDeploymentConfig, resolveDeploymentOverride, resolveKagiApiKey, resolveSecret, resumeExecutor, runExecutor, validateDeploymentFileConfig, validateDeploymentRoleReferences, ConfigurationError, ValidationError, type ExecutorDependencies, type InterruptChannel, type LoadedGuild, type LlmCaller, type ModelApiProbe, type ResumeRun, type RunCheckpoint, type StartRun, type WebHumanBackend } from './executor/index.js'
+import { applyDeploymentOverride, createAppendLog, createDeleteCheckpoint, createDockerSecretReader, createGuildLoader, createInterruptChannel, createInterruptQueue, createLlmCaller, createLlmFetch, createListRunIds, createModelInfoProbe, createPlanToolHandlers, createReadProjectSettings, createReadRunCheckpointById, createReadRunMetaById, createReadRunSnapshotById, createReadRunSnapshotStats, createReadRunSummaryById, createRunDirectory, createRunLogToolHandlers, createRunState, createRunSubmission, createSleep, createToolHandlers, createWebHumanBackend, createWriteCheckpoint, createWriteMeta, createWriteProjectSettings, createWriteRunSummary, generateRunId, MODEL_PROBE_TIMEOUT_MS, parseModelInfo, reconcileRunsOnStartup, resolveDeploymentConfig, resolveDeploymentOverride, resolveKagiApiKey, resolveSecret, resumeExecutor, runExecutor, validateDeploymentFileConfig, validateDeploymentRoleReferences, ConfigurationError, ValidationError, type ExecutorDependencies, type InterruptChannel, type LoadedGuild, type LlmCaller, type ModelApiProbe, type ResumeRun, type RunCheckpoint, type StartRun, type WebHumanBackend } from './executor/index.js'
 
 const DEPLOYMENT_FILE_ENV_VAR = 'ORCHESTRATOR_DEPLOYMENT_FILE'
 const PORT_ENV_VAR = 'PORT'
@@ -58,8 +58,9 @@ async function withRunBindings<T>(config: {
 			defaultToolTimeoutSeconds: config.loadedGuild.deployment.executor.defaultToolTimeoutSeconds,
 			kagiApiKey: config.kagiApiKey,
 		}),
-		// Plan handlers are bound per run because the plan document lives at a fixed location under this run's directory.
+		// Plan and run-log handlers are bound per run because both live at fixed locations under this run's directory.
 		...createPlanToolHandlers({ runsBaseDir: config.runsBaseDir, runId, workspaceRoot: config.workspaceRootPath }),
+		...createRunLogToolHandlers({ logPath: path.join(config.runsBaseDir, runId, 'log.jsonl') }),
 	}
 	const appendLog = createAppendLog(runId, config.runsBaseDir)
 	// The human backend is shared with the web API; bind the active run's log so ask_human and human_answer events land in this run's log.jsonl for the question-history view.
@@ -96,7 +97,6 @@ function fireAndForgetSummary(promise: Promise<void>, runId: string): void {
 
 // The per-run leaf wrappers the submission calls for each task (a fresh run) and for startup reconciliation (a run resumed from its checkpoint under its original run id).
 // Each also kicks the summary hooks: the task summary at start, and the richer completion summary (task + interrupts + result) when the run settles — the rejection branch is empty because the run promise's failure is owned by runSubmission's fatal-error path, not by the summary chain.
-// The run log path rides in the options workspace-relative: the inquiry handler's briefing interpolates it so finished roles stay researchable from the mounted workspace.
 interface RunServiceConfig {
 	loadedGuild: LoadedGuild
 	llmCaller: LlmCaller
@@ -111,13 +111,11 @@ interface RunServiceConfig {
 
 function createStartRun(config: RunServiceConfig): StartRun {
 	return (runId, task, effort) => {
-		const runLogPath = path.relative(config.workspaceRootPath, path.join(config.runsBaseDir, runId, 'log.jsonl'))
 		const runPromise = withRunBindings(config, runId, (dependencies) => runExecutor(dependencies, {
 			runId,
 			guildPath: config.guildPath,
 			task,
 			effort,
-			runLogPath,
 		}))
 		fireAndForgetSummary(config.summarizer.summarizeTaskStart(runId, task), runId)
 		runPromise.then(
@@ -130,10 +128,8 @@ function createStartRun(config: RunServiceConfig): StartRun {
 
 function createResumeRun(config: RunServiceConfig): ResumeRun {
 	return (checkpoint) => {
-		const runLogPath = path.relative(config.workspaceRootPath, path.join(config.runsBaseDir, checkpoint.runId, 'log.jsonl'))
 		const runPromise = withRunBindings(config, checkpoint.runId, (dependencies) => resumeExecutor(dependencies, checkpoint, {
 			guildPath: config.guildPath,
-			runLogPath,
 		}))
 		runPromise.then(
 			(meta) => fireAndForgetSummary(config.summarizer.summarizeRunCompletion(meta), checkpoint.runId),

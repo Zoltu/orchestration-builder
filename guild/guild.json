@@ -270,14 +270,14 @@
 		},
 		"inquiry_responder": {
 			"systemPrompt": "prompts/inquiry_responder.md",
-			"tools": ["list_role_messages", "read_message_window", "search_role_blocks", "recent_role_tool_calls", "context_info", "list_directory", "glob_files", "read_file", "read_file_partial", "search_text", "repo_map", "finish"],
+			"tools": ["list_role_messages", "read_message_window", "search_role_blocks", "recent_role_tool_calls", "context_info", "read_run_log", "search_run_log", "list_directory", "glob_files", "read_file", "read_file_partial", "search_text", "repo_map", "finish"],
 			"label": {
 				"detailed": ["Inquiry Responder"],
 				"friendly": ["Inquiry Responder"],
 				"whimsical": ["Question Wrangler"]
 			},
 			"description": {
-				"detailed": ["Answers the operator's questions about the run while it is paused, by inspecting the live agents' conversations and the workspace — read-only, it never changes anything."],
+				"detailed": ["Answers the operator's questions about the run while it is paused, by inspecting the live agents' conversations, the run log, and the workspace — read-only, it never changes anything."],
 				"friendly": ["Answers your questions about what the run is doing."],
 				"whimsical": ["Reads the run's diary so you don't have to."]
 			},
@@ -323,6 +323,8 @@
 		"tools/write_file.json",
 		"tools/read_plan.json",
 		"tools/write_plan.json",
+		"tools/read_run_log.json",
+		"tools/search_run_log.json",
 		"tools/fetch_url.json",
 		"tools/web_search.json",
 		"tools/typecheck.json",

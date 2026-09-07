@@ -41,8 +41,6 @@ export interface EngineContext {
 	parentRoleId?: string
 	// Set when this invocation is an interrupt handler serving the named target instance: the drain point skips the handler so a handler can never interrupt itself or consume operator requests meant for real work roles.
 	handlerOf?: string
-	// The workspace-relative path to the run's log.jsonl, interpolated into the inquiry handler's briefing so finished roles — which have no live conversation to inspect — remain researchable from the log and the workspace. Spreads to every child and handler context with the rest of the run-scoped fields.
-	runLogPath?: string
 }
 
 export interface EngineDependencies {

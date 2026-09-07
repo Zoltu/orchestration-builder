@@ -54,6 +54,8 @@ export type { NativeToolsConfig } from './tools.js'
 
 export { createPlanToolHandlers } from './tools/plan.js'
 
+export { createRunLogToolHandlers } from './tools/run-log.js'
+
 export { generateRunId } from './run-id.js'
 
 export { createDockerSecretReader, resolveKagiApiKey } from './tools/kagi.js'

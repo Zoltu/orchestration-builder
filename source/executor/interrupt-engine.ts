@@ -113,7 +113,7 @@ async function runInterruptHandler(
 	return null
 }
 
-// Suspends the active role and invokes the configured inquiry handler role to answer the operator's question — the same preempt-and-resume interlude as the loop-check and context handlers, so it logs the same interrupt/interrupt_resolved pair and the interaction model roots the handler on a fresh interrupt stack. The handler is a fresh agent that was never given the run's conversations: the briefing lists the live (suspended) instances root first and points at the run log and the workspace for roles that already finished. Its finish-card summary is the answer shown to the operator. The target always resumes afterwards, whatever the handler did — a question never finishes a run.
+// Suspends the active role and invokes the configured inquiry handler role to answer the operator's question — the same preempt-and-resume interlude as the loop-check and context handlers, so it logs the same interrupt/interrupt_resolved pair and the interaction model roots the handler on a fresh interrupt stack. The handler is a fresh agent that was never given the run's conversations: the briefing lists the live (suspended) instances root first and points at the run-log tools and the workspace for researching roles that already finished. Its finish-card summary is the answer shown to the operator. The target always resumes afterwards, whatever the handler did — a question never finishes a run.
 async function runInquiryHandler(
 	runRole: (deps: EngineDependencies, context: EngineContext, resumed?: ResumedRole) => Promise<ResultCard>,
 	deps: EngineDependencies,
@@ -131,10 +131,7 @@ async function runInquiryHandler(
 	// The chain from the draining leaf IS the entire live role set in this sequential engine; chainFromEntry is leaf-first, so reverse it for the root-first briefing list.
 	const liveInstances = chainFromEntry(deps.roleRegistry, entry).reverse()
 	const instanceLines = liveInstances.map((member) => `- ${member.roleId} (${member.roleName}, depth ${member.depth})${member.parentRoleId !== undefined ? `, child of ${member.parentRoleId}` : ''}`)
-	// The log pointer is a separate sentence so an absent runLogPath never interpolates the string 'undefined' into the briefing.
-	const finishedRolesNote = context.runLogPath !== undefined
-		? `Roles that already finished have no live conversation; their work is recorded in the run log at ${context.runLogPath} (its llm_call events carry the full sent and received messages) and in the workspace itself, which you can read with the file tools.`
-		: 'Roles that already finished have no live conversation; their work is recorded in the workspace itself, which you can read with the file tools.'
+	const finishedRolesNote = 'Roles that already finished have no live conversation; their work is recorded in the run log and in the workspace itself. Read the run log with read_run_log (its llm_call events carry the full sent and received messages) and search_run_log, and the workspace with the file tools.'
 	const task = [
 		"[Operator inquiry] The operator interrupted the run to ask a question. Answer it on the run's behalf.",
 		'',

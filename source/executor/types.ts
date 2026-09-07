@@ -167,8 +167,6 @@ export interface RunOptions {
 	benchmarkPath?: string
 	task: string
 	effort: EffortLevel
-	// The run's log.jsonl as a workspace-relative path, interpolated into the inquiry handler's briefing so finished roles remain researchable from the log and the workspace.
-	runLogPath: string
 }
 
 export interface RunMeta {
