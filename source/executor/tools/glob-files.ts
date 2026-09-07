@@ -3,21 +3,41 @@ import * as path from 'node:path'
 import { createToolError } from '../errors.js'
 import type { ToolHandler } from '../tool-dispatch.js'
 
+// Only the dirent surface the walk consumes: fs.Dirent satisfies it structurally, and tests script it in memory.
+export interface WalkEntry {
+	name: string
+	isDirectory(): boolean
+	isFile(): boolean
+}
+
+// Injected so the recursive walk is exercisable against a scripted filesystem rather than a real one, mirroring the PathFilesystem precedent in shared.ts.
+export interface GlobFilesystem {
+	listEntries(directory: string): WalkEntry[]
+}
+
+export const nodeGlobFilesystem: GlobFilesystem = {
+	listEntries: (directory) => fs.readdirSync(directory, { withFileTypes: true }),
+}
+
 function globToRegex(pattern: string): RegExp {
 	let regex = ''
 	let i = 0
 	while (i < pattern.length) {
 		const char = pattern[i]
-		if (char === '*') {
-			if (pattern[i + 1] === '*') {
-				regex += '.*'
-				i += 2
-				if (pattern[i] === '/') {
-					regex += '(?:/|$)'
-					i++
-				}
+		if (char === '*' && pattern[i + 1] === '*') {
+			const atSegmentStart = i === 0 || pattern[i - 1] === '/'
+			if (atSegmentStart && pattern[i + 2] === '/') {
+				// A whole-segment `**/` spans zero or more complete segments, so `**/*.ts` must also match a root-level `a.ts`.
+				regex += '(?:[^/]+/)*'
+				i += 3
 				continue
 			}
+			// A trailing whole-segment `**` and a `**` inside a segment keep the historical `.*`: after the literal `dir/` prefix a zero-segment match would leave a dangling slash no walked path has, so `dir/**` cannot match `dir` itself.
+			regex += '.*'
+			i += 2
+			continue
+		}
+		if (char === '*') {
 			regex += '[^/]*'
 			i++
 			continue
@@ -62,21 +82,20 @@ function globToRegex(pattern: string): RegExp {
 	return new RegExp('^' + regex + '$')
 }
 
-function walkFiles(root: string, baseDir: string): string[] {
+function walkFiles(root: string, baseDir: string, filesystem: GlobFilesystem): string[] {
 	const results: string[] = []
-	const entries = fs.readdirSync(baseDir, { withFileTypes: true })
-	for (const entry of entries) {
+	for (const entry of filesystem.listEntries(baseDir)) {
 		const full = path.join(baseDir, entry.name)
 		if (entry.isDirectory()) {
-			results.push(...walkFiles(root, full))
+			results.push(...walkFiles(root, full, filesystem))
 		} else if (entry.isFile()) {
-			results.push(path.relative(root, full))
+			results.push(path.relative(root, full).split(path.sep).join('/'))
 		}
 	}
 	return results
 }
 
-export function createGlobFiles(workspaceRoot: string): ToolHandler {
+export function createGlobFiles(workspaceRoot: string, filesystem: GlobFilesystem): ToolHandler {
 	const resolvedRoot = path.resolve(workspaceRoot)
 	return (args) => {
 		const patternValue = args['pattern']
@@ -87,12 +106,12 @@ export function createGlobFiles(workspaceRoot: string): ToolHandler {
 			const regex = globToRegex(patternValue)
 			let files: string[]
 			try {
-				files = walkFiles(resolvedRoot, resolvedRoot)
+				files = walkFiles(resolvedRoot, resolvedRoot, filesystem)
 			} catch (error) {
 				const message = error instanceof Error ? error.message : 'cannot walk workspace'
 				return createToolError('invalid_arguments', `Cannot glob files: ${message}`)
 			}
-			const matched = files.filter((f) => regex.test(f))
+			const matched = files.filter((file) => regex.test(file))
 			matched.sort()
 			return { kind: 'success', data: matched }
 		} catch (error) {

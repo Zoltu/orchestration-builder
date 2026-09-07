@@ -1,6 +1,6 @@
 import type { ToolHandler } from './tool-dispatch.js'
 import { createFetchUrl, type Fetcher } from './tools/fetch-url.js'
-import { createGlobFiles } from './tools/glob-files.js'
+import { createGlobFiles, nodeGlobFilesystem } from './tools/glob-files.js'
 import { createKagiClient } from './tools/kagi.js'
 import { createListDirectory } from './tools/list-directory.js'
 import { createReadFile } from './tools/read-file.js'
@@ -23,7 +23,7 @@ export interface NativeToolsConfig {
 
 export function createToolHandlers(config: NativeToolsConfig): Record<string, ToolHandler> {
 	const list = createListDirectory(config.workspaceRoot)
-	const glob = createGlobFiles(config.workspaceRoot)
+	const glob = createGlobFiles(config.workspaceRoot, nodeGlobFilesystem)
 	const read = createReadFile(config.workspaceRoot)
 	const readPartial = createReadFilePartial(config.workspaceRoot)
 	const search = createSearchText(config.workspaceRoot)
