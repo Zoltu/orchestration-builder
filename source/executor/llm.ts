@@ -211,6 +211,27 @@ function detectContextBudgetExceeded(status: number, errorBody: string, data: un
 	return { kind: 'context_budget_exceeded', promptTokens, contextWindow }
 }
 
+type ParsedClassification =
+	| { kind: 'accept' }
+	| { kind: 'fail_immediately'; message: string }
+	| { kind: 'fail_retryable'; message: string }
+
+// A 200 response can still carry a failed or degenerate completion: llama.cpp reports finish_reason "error" inside a 200 body, and a thinking model can burn the entire completion budget on reasoning before any content is emitted.
+// Classifying after parse routes these to the retry loop or an immediate failure instead of a silent empty turn.
+// "length" with no content fails without retrying because a retry would exhaust the same budget again — the operator's lever is the maxTokens deployment setting.
+// Non-empty content under "length" is a truncated-but-real response, and empty content with tool calls still drives the turn, so both remain successes.
+function classifyParsedResponse(parsed: ParsedSuccess): ParsedClassification {
+	if (parsed.finishReason === 'error') {
+		return { kind: 'fail_retryable', message: 'endpoint reported finish_reason: error' }
+	}
+	const hasContent = parsed.content !== undefined && parsed.content.trim() !== ''
+	if (hasContent || parsed.toolCalls.length > 0) return { kind: 'accept' }
+	if (parsed.finishReason === 'length') {
+		return { kind: 'fail_immediately', message: 'completion budget exhausted before any content was produced (finish_reason: length)' }
+	}
+	return { kind: 'fail_retryable', message: 'empty response (no content, no tool calls)' }
+}
+
 // The API key is a runtime credential (ORCHESTRATOR_API_KEY), so it rides as its own argument rather than a field on the model config — the deployment config file must never carry it. The caller takes the resolved model: the executor only ever runs with a complete model.
 export function createLlmCaller(model: ResolvedModelConfig, apiKey: string | undefined, dependencies: LlmCallerDependencies): LlmCaller {
 	const url = `${model.apiBase}/chat/completions`
@@ -277,6 +298,18 @@ export function createLlmCaller(model: ResolvedModelConfig, apiKey: string | und
 				const parsed = parseOpenAiResponse(data, model.reasoningField)
 				if (parsed.kind === 'parse_error') {
 					return { kind: 'llm_unavailable', message: parsed.message }
+				}
+				const classification = classifyParsedResponse(parsed)
+				if (classification.kind === 'fail_immediately') {
+					return { kind: 'llm_unavailable', message: classification.message }
+				}
+				if (classification.kind === 'fail_retryable') {
+					lastError = classification.message
+					if (attempt >= maxAttempts) {
+						return { kind: 'llm_unavailable', message: lastError }
+					}
+					await dependencies.sleep(Math.pow(2, attempt) * 100)
+					continue
 				}
 				return parsed
 			}

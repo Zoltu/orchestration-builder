@@ -21,6 +21,17 @@ function parseToolContent(content: string | undefined): Record<string, unknown> 
 	return parsed
 }
 
+function toolResultEvents(events: LogEvent[], tool: string): Array<Record<string, unknown>> {
+	const out: Array<Record<string, unknown>> = []
+	for (const event of events) {
+		if (event.type !== 'tool_result') continue
+		if (!isRecord(event.payload)) continue
+		if (event.payload['tool'] !== tool) continue
+		out.push(event.payload)
+	}
+	return out
+}
+
 function success(toolCalls: ToolCall[], opts: { content?: string; promptTokens?: number } = {}): LlmCallResult {
 	return {
 		kind: 'success',
@@ -463,5 +474,85 @@ describe('ask_human tool', () => {
 		const toolResultMessages = llm.calls[1]?.messages.filter((m) => m.role === 'tool') ?? []
 		const parsed = parseToolContent(toolResultMessages[0]?.content)
 		expect(parsed['kind']).toBe('invalid_arguments')
+	})
+})
+
+describe('finish tool', () => {
+	test('rejects an empty summary with invalid_arguments naming summary', async () => {
+		const guild = buildGuild(
+			{ main: { systemPrompt: 'sys', tools: ['finish'] } },
+			'main',
+		)
+		const llm = new FakeLlm()
+		llm.responses = [
+			success([makeCall('finish', { status: 'success', summary: '' })]),
+			success([{ id: 'f1', type: 'function', function: { name: 'finish', arguments: JSON.stringify({ status: 'success', summary: 'done' }) } }]),
+		]
+		const { deps, events } = makeDeps(llm, recordingHumanBackend())
+
+		const result = await runRole(deps, {
+			loadedGuild: guild,
+			depth: 0,
+			roleName: 'main',
+			task: 'do it',
+		})
+
+		expect(result.status).toBe('success')
+		const results = toolResultEvents(events, 'finish')
+		const rejected = results[0]
+		expect(rejected?.['kind']).toBe('invalid_arguments')
+		const rejectedPayload = rejected?.['result']
+		if (!isRecord(rejectedPayload)) throw new Error('tool result payload is not an object')
+		expect(rejectedPayload['message']).toBe('summary must be a non-empty string')
+	})
+
+	test('rejects a whitespace-only summary with invalid_arguments naming summary', async () => {
+		const guild = buildGuild(
+			{ main: { systemPrompt: 'sys', tools: ['finish'] } },
+			'main',
+		)
+		const llm = new FakeLlm()
+		llm.responses = [
+			success([makeCall('finish', { status: 'success', summary: '   ' })]),
+			success([{ id: 'f1', type: 'function', function: { name: 'finish', arguments: JSON.stringify({ status: 'success', summary: 'done' }) } }]),
+		]
+		const { deps, events } = makeDeps(llm, recordingHumanBackend())
+
+		const result = await runRole(deps, {
+			loadedGuild: guild,
+			depth: 0,
+			roleName: 'main',
+			task: 'do it',
+		})
+
+		expect(result.status).toBe('success')
+		const results = toolResultEvents(events, 'finish')
+		const rejected = results[0]
+		expect(rejected?.['kind']).toBe('invalid_arguments')
+		const rejectedPayload = rejected?.['result']
+		if (!isRecord(rejectedPayload)) throw new Error('tool result payload is not an object')
+		expect(rejectedPayload['message']).toBe('summary must be a non-empty string')
+	})
+
+	test('a valid summary still finalizes the role with its card', async () => {
+		const guild = buildGuild(
+			{ main: { systemPrompt: 'sys', tools: ['finish'] } },
+			'main',
+		)
+		const llm = new FakeLlm()
+		llm.responses = [
+			success([{ id: 'f1', type: 'function', function: { name: 'finish', arguments: JSON.stringify({ status: 'success', summary: 'all done' }) } }]),
+		]
+		const { deps } = makeDeps(llm, recordingHumanBackend())
+
+		const result = await runRole(deps, {
+			loadedGuild: guild,
+			depth: 0,
+			roleName: 'main',
+			task: 'do it',
+		})
+
+		expect(result.status).toBe('success')
+		expect(result.summary).toBe('all done')
 	})
 })

@@ -50,6 +50,13 @@ function successBody(overrides: Record<string, unknown> = {}): string {
 	})
 }
 
+// Builds a 200 chat/completions body from a raw assistant message; the finish_reason field is omitted entirely when undefined, mirroring endpoints that leave it out.
+function completionBody(message: Record<string, unknown>, finishReason?: string): string {
+	const choice: Record<string, unknown> = { message }
+	if (finishReason !== undefined) choice['finish_reason'] = finishReason
+	return JSON.stringify({ choices: [choice], usage: { prompt_tokens: 10, completion_tokens: 5 } })
+}
+
 describe('createLlmCaller request shaping', () => {
 	test('posts the model, messages, tools, and sampling parameters with the auth header', async () => {
 		const wire = createFakeWire([{ status: 200, body: successBody() }])
@@ -224,6 +231,88 @@ describe('createLlmCaller retry loop', () => {
 		const caller = createLlmCaller(MODEL, API_KEY, { llmFetch: wire.llmFetch, sleep: wire.sleep })
 		const result = await caller.call({ messages: [] })
 		expect(result).toEqual({ kind: 'llm_unavailable', message: 'Network error after 3 attempts: connection refused' })
+		expect(wire.sleeps).toEqual([200, 400])
+	})
+})
+
+describe('createLlmCaller degenerate 200 responses', () => {
+	test('finish_reason error is retried with backoff and fails naming the finish reason', async () => {
+		const body = completionBody({ content: '', reasoning: 'long thinking' }, 'error')
+		const wire = createFakeWire([{ status: 200, body }, { status: 200, body }, { status: 200, body }])
+		const caller = createLlmCaller(MODEL, API_KEY, { llmFetch: wire.llmFetch, sleep: wire.sleep })
+		const result = await caller.call({ messages: [] })
+		expect(result).toEqual({ kind: 'llm_unavailable', message: 'endpoint reported finish_reason: error' })
+		expect(wire.requests).toHaveLength(3)
+		expect(wire.sleeps).toEqual([200, 400])
+	})
+
+	test('a good response after finish_reason error succeeds on retry', async () => {
+		const wire = createFakeWire([
+			{ status: 200, body: completionBody({ content: '', reasoning: 'long thinking' }, 'error') },
+			{ status: 200, body: successBody() },
+		])
+		const caller = createLlmCaller(MODEL, API_KEY, { llmFetch: wire.llmFetch, sleep: wire.sleep })
+		const result = await caller.call({ messages: [] })
+		expect(result.kind).toBe('success')
+		expect(wire.requests).toHaveLength(2)
+		expect(wire.sleeps).toEqual([200])
+	})
+
+	test('finish_reason length with no content fails immediately without retrying', async () => {
+		const wire = createFakeWire([{ status: 200, body: completionBody({ content: '', reasoning: 'all of the budget' }, 'length') }])
+		const caller = createLlmCaller(MODEL, API_KEY, { llmFetch: wire.llmFetch, sleep: wire.sleep })
+		const result = await caller.call({ messages: [] })
+		expect(result).toEqual({ kind: 'llm_unavailable', message: 'completion budget exhausted before any content was produced (finish_reason: length)' })
+		expect(wire.requests).toHaveLength(1)
+		expect(wire.sleeps).toHaveLength(0)
+	})
+
+	test('whitespace-only content counts as empty', async () => {
+		const wire = createFakeWire([{ status: 200, body: completionBody({ content: '   ' }, 'length') }])
+		const caller = createLlmCaller(MODEL, API_KEY, { llmFetch: wire.llmFetch, sleep: wire.sleep })
+		const result = await caller.call({ messages: [] })
+		expect(result).toEqual({ kind: 'llm_unavailable', message: 'completion budget exhausted before any content was produced (finish_reason: length)' })
+		expect(wire.requests).toHaveLength(1)
+	})
+
+	test('absent finish_reason with empty content is retried and then fails', async () => {
+		const body = completionBody({ content: '' })
+		const wire = createFakeWire([{ status: 200, body }, { status: 200, body }, { status: 200, body }])
+		const caller = createLlmCaller(MODEL, API_KEY, { llmFetch: wire.llmFetch, sleep: wire.sleep })
+		const result = await caller.call({ messages: [] })
+		expect(result).toEqual({ kind: 'llm_unavailable', message: 'empty response (no content, no tool calls)' })
+		expect(wire.requests).toHaveLength(3)
+		expect(wire.sleeps).toEqual([200, 400])
+	})
+
+	test('non-empty content under finish_reason length stays a success', async () => {
+		const wire = createFakeWire([{ status: 200, body: completionBody({ content: 'partial answer' }, 'length') }])
+		const caller = createLlmCaller(MODEL, API_KEY, { llmFetch: wire.llmFetch, sleep: wire.sleep })
+		const result = await caller.call({ messages: [] })
+		if (result.kind !== 'success') throw new Error(`expected success, got ${result.kind}`)
+		expect(result.content).toBe('partial answer')
+		expect(result.finishReason).toBe('length')
+		expect(wire.requests).toHaveLength(1)
+	})
+
+	test('empty content with tool calls stays a success', async () => {
+		const body = completionBody({ content: '', tool_calls: [{ id: 'call_1', function: { name: 'read_file', arguments: '{"path":"a.ts"}' } }] }, 'tool_calls')
+		const wire = createFakeWire([{ status: 200, body }])
+		const caller = createLlmCaller(MODEL, API_KEY, { llmFetch: wire.llmFetch, sleep: wire.sleep })
+		const result = await caller.call({ messages: [] })
+		if (result.kind !== 'success') throw new Error(`expected success, got ${result.kind}`)
+		expect(result.toolCalls).toHaveLength(1)
+		expect(result.toolCalls[0]?.function.name).toBe('read_file')
+		expect(wire.requests).toHaveLength(1)
+	})
+
+	test('non-empty content with finish_reason error is still a retryable failure', async () => {
+		const body = completionBody({ content: 'something' }, 'error')
+		const wire = createFakeWire([{ status: 200, body }, { status: 200, body }, { status: 200, body }])
+		const caller = createLlmCaller(MODEL, API_KEY, { llmFetch: wire.llmFetch, sleep: wire.sleep })
+		const result = await caller.call({ messages: [] })
+		expect(result).toEqual({ kind: 'llm_unavailable', message: 'endpoint reported finish_reason: error' })
+		expect(wire.requests).toHaveLength(3)
 		expect(wire.sleeps).toEqual([200, 400])
 	})
 })

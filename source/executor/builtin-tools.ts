@@ -38,6 +38,10 @@ function validateFinishArgs(args: Record<string, unknown>): FinishValidationSucc
 	if (typeof summaryValue !== 'string') {
 		return { kind: 'error', result: createToolError('invalid_arguments', 'summary must be a string') }
 	}
+	// A whitespace-only summary would finalize the role with a success card that says nothing, so it is rejected like a missing one.
+	if (summaryValue.trim() === '') {
+		return { kind: 'error', result: createToolError('invalid_arguments', 'summary must be a non-empty string') }
+	}
 
 	let artifactsValue: string[] | undefined
 	const artifactsRaw = args['artifacts']

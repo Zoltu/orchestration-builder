@@ -66,6 +66,7 @@ Every failure is translated into a structured result the current or parent role 
 | Failure | Behavior | Surface |
 |---|---|---|
 | LLM HTTP error | Retry with backoff | If retries fail: `{status: "error", error: {kind: "llm_unavailable"}}` |
+| LLM endpoint failure or empty completion (`finish_reason: "error"`, or a response with no content and no tool calls) | Retried with backoff like an HTTP error; `finish_reason: "length"` with no content fails immediately (the completion budget was consumed before any content — raise `generation.maxTokens`) | `{status: "error", error: {kind: "llm_unavailable"}}` |
 | Context budget exceeded | Context handler compacts the conversation (naive in-place backstop as fallback), bounded retries | Role resumes with a platform notice, or finishes `{kind: "context_budget_exceeded"}` |
 | Context pressure threshold crossed | Child roles: one-shot handoff notice at the next turn boundary; the role writes a handoff brief and finishes. Entry role (with a configured context handler): suspended and compacted by the handler, then resumed | Child: `{kind: "context_handoff"}`; the parent re-delegates a fresh instance with the brief |
 | Malformed tool call | Do not execute | `{kind: "invalid_tool_call"}` |
@@ -155,7 +156,7 @@ Delegates to another role. Parameters: `role` (string, required), `task` (string
 
 ### `finish`
 
-Ends the current role and returns a result card. Parameters: `status` (`"success"`/`"error"`/`"needs_clarification"`), `summary` (string), `artifacts` (array, optional), `error` (object, optional). The entry role's `finish` ends the run.
+Ends the current role and returns a result card. Parameters: `status` (`"success"`/`"error"`/`"needs_clarification"`), `summary` (non-empty string), `artifacts` (array, optional), `error` (object, optional). The entry role's `finish` ends the run.
 
 ### `context_info`
 
