@@ -50,8 +50,8 @@ function makeFilesystem(files: string[]): GlobFilesystem {
 	}
 }
 
-async function runGlob(files: string[], pattern: string): Promise<ToolResult> {
-	return await createGlobFiles(ROOT, makeFilesystem(files))({ pattern })
+async function runGlob(files: string[], pattern: string, exclude?: string[]): Promise<ToolResult> {
+	return await createGlobFiles(ROOT, makeFilesystem(files))({ pattern, exclude })
 }
 
 describe('createGlobFiles ** semantics', () => {
@@ -149,5 +149,107 @@ describe('createGlobFiles argument validation', () => {
 	test('reports walk failures as a tool error', async () => {
 		const handler = createGlobFiles(ROOT, { listEntries: () => { throw new Error('EACCES: permission denied') } })
 		expect(await handler({ pattern: '*.ts' })).toEqual({ kind: 'invalid_arguments', message: 'Cannot glob files: EACCES: permission denied' })
+	})
+})
+
+describe('createGlobFiles exclude segment matchers', () => {
+	test('a segment matcher without / excludes matching files at every depth', async () => {
+		expect(await runGlob(['node_modules/x.ts', 'a/node_modules/b/y.ts', 'src/z.ts'], '**', ['node_modules'])).toEqual({ kind: 'success', data: ['src/z.ts'] })
+	})
+
+	test('a segment matcher is case-sensitive, so a differently cased directory name survives', async () => {
+		expect(await runGlob(['node_modules/x.ts', 'Node_Modules/y.ts'], '**', ['node_modules'])).toEqual({ kind: 'success', data: ['Node_Modules/y.ts'] })
+	})
+
+	test('a segment matcher excludes any file whose own name matches at any depth', async () => {
+		expect(await runGlob(['a.test.ts', 'src/b.test.ts', 'src/c.ts', 'src/deep/d.test.ts'], '**', ['*.test.ts'])).toEqual({ kind: 'success', data: ['src/c.ts'] })
+	})
+
+	test('an exclude with ** on both sides removes the folder at every depth', async () => {
+		expect(await runGlob(['node_modules/x.ts', 'a/node_modules/b/y.ts', 'z.ts'], '**', ['**/node_modules/**'])).toEqual({ kind: 'success', data: ['z.ts'] })
+	})
+
+	test('a segment matcher prunes the walk so an excluded directory is never listed', async () => {
+		const base = makeFilesystem(['node_modules/x.ts', 'src/a.ts'])
+		const listed: string[] = []
+		const filesystem: GlobFilesystem = {
+			listEntries: (directory) => {
+				listed.push(directory)
+				return base.listEntries(directory)
+			},
+		}
+		const handler = createGlobFiles(ROOT, filesystem)
+		expect(await handler({ pattern: '**', exclude: ['node_modules'] })).toEqual({ kind: 'success', data: ['src/a.ts'] })
+		expect(listed.some((directory) => directory.includes('node_modules'))).toBe(false)
+	})
+
+	test('a segment matcher prunes nested directories at any depth', async () => {
+		expect(await runGlob(['a/node_modules/b/y.ts', 'a/keep.ts', 'node_modules/x.ts'], '**/*.ts', ['node_modules'])).toEqual({ kind: 'success', data: ['a/keep.ts'] })
+	})
+})
+
+describe('createGlobFiles exclude path matchers', () => {
+	test('a path matcher with / excludes the whole workspace-relative path', async () => {
+		expect(await runGlob(['src/fixtures/a.ts', 'src/a.ts', 'fixtures/b.ts'], '**', ['src/fixtures/**'])).toEqual({ kind: 'success', data: ['fixtures/b.ts', 'src/a.ts'] })
+	})
+
+	test('a path matcher with ** spans zero or more segments in excludes', async () => {
+		expect(await runGlob(['README.md', 'docs/x.md', 'src/a.ts'], '**', ['**/*.md'])).toEqual({ kind: 'success', data: ['src/a.ts'] })
+	})
+
+	test('a path matcher filters results only and still lists inside matching directories', async () => {
+		const base = makeFilesystem(['src/fixtures/a.ts', 'src/a.ts'])
+		const listed: string[] = []
+		const filesystem: GlobFilesystem = {
+			listEntries: (directory) => {
+				listed.push(directory)
+				return base.listEntries(directory)
+			},
+		}
+		const handler = createGlobFiles(ROOT, filesystem)
+		expect(await handler({ pattern: '**', exclude: ['src/fixtures/**'] })).toEqual({ kind: 'success', data: ['src/a.ts'] })
+		expect(listed.some((directory) => directory.startsWith(`${ROOT}/src/fixtures`))).toBe(true)
+	})
+
+	test('a trailing ** in a path matcher never matches the directory itself', async () => {
+		expect(await runGlob(['src/a.ts', 'src.txt'], '**', ['src/**'])).toEqual({ kind: 'success', data: ['src.txt'] })
+	})
+})
+
+describe('createGlobFiles exclude validation and combination', () => {
+	test('an absent exclude behaves like no exclusions', async () => {
+		expect(await runGlob(['a.ts', 'src/b.ts'], '**/*.ts')).toEqual({ kind: 'success', data: ['a.ts', 'src/b.ts'] })
+	})
+
+	test('an empty exclude array behaves like no exclusions', async () => {
+		expect(await runGlob(['a.ts', 'src/b.ts'], '**/*.ts', [])).toEqual({ kind: 'success', data: ['a.ts', 'src/b.ts'] })
+	})
+
+	test('exclude combines with the include pattern', async () => {
+		expect(await runGlob(['src/a.ts', 'src/a.test.ts', 'docs/readme.md'], '**/*.ts', ['*.test.ts'])).toEqual({ kind: 'success', data: ['src/a.ts'] })
+	})
+
+	test('rejects a non-array exclude', async () => {
+		const handler = createGlobFiles(ROOT, makeFilesystem(['a.ts']))
+		expect(await handler({ pattern: '**', exclude: 'node_modules' })).toEqual({ kind: 'invalid_arguments', message: 'exclude must be an array of non-empty strings' })
+	})
+
+	test('rejects a non-string element in exclude', async () => {
+		const handler = createGlobFiles(ROOT, makeFilesystem(['a.ts']))
+		expect(await handler({ pattern: '**', exclude: ['node_modules', 42] })).toEqual({ kind: 'invalid_arguments', message: 'exclude must be an array of non-empty strings' })
+	})
+
+	test('rejects an empty string element in exclude', async () => {
+		const handler = createGlobFiles(ROOT, makeFilesystem(['a.ts']))
+		expect(await handler({ pattern: '**', exclude: [''] })).toEqual({ kind: 'invalid_arguments', message: 'exclude must be an array of non-empty strings' })
+	})
+
+	test('reports an invalid exclude glob as a tool error', async () => {
+		const handler = createGlobFiles(ROOT, makeFilesystem(['a.ts']))
+		const result = await handler({ pattern: '**', exclude: ['[z-a]'] })
+		expect(result.kind).toBe('invalid_arguments')
+		if (result.kind === 'invalid_arguments') {
+			expect(result.message).toMatch(/^Invalid exclude pattern/)
+		}
 	})
 })
