@@ -138,6 +138,7 @@ export type ErrorKind =
 	| 'loop_detected'
 	| 'interrupted'
 	| 'compaction_failed'
+	| 'permission_denied'
 
 export type ToolResult =
 	| { kind: 'success'; data?: unknown }

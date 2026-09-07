@@ -2,7 +2,7 @@ import * as fs from 'node:fs'
 import * as path from 'node:path'
 import { createToolError } from '../errors.js'
 import type { ToolHandler } from '../tool-dispatch.js'
-import { nodePathFilesystem, resolveWithinWorkspace, wrapIoError } from './shared.js'
+import { isOrchestrationPath, nodePathFilesystem, resolveWithinWorkspace, wrapIoError } from './shared.js'
 
 export interface SearchMatch {
 	path: string
@@ -22,6 +22,8 @@ function collectFiles(root: string, baseDir: string, results: string[]): void {
 	for (const entry of entries) {
 		const full = path.join(baseDir, entry.name)
 		if (entry.isDirectory()) {
+			// The executor's bookkeeping directory is invisible to the walk the same way it is to the path-resolution chokepoint; a nested project/.orchestration/ has a different relative path and stays searchable.
+			if (isOrchestrationPath(path.relative(root, full).split(path.sep).join('/'))) continue
 			collectFiles(root, full, results)
 		} else if (entry.isFile() && isSearchable(full)) {
 			results.push(full)
@@ -61,9 +63,10 @@ export function createSearchText(workspaceRoot: string): ToolHandler {
 				} catch {
 					continue
 				}
-				if (stat.isDirectory()) {
-					collectFiles(resolution.path.absolute, resolution.path.absolute, targets)
-				} else if (stat.isFile()) {
+			if (stat.isDirectory()) {
+				// The walk anchor is always the workspace root, not the target, so the bookkeeping skip stays top-level-only for scoped searches too: a target inside a project must still see that project's own .orchestration.
+				collectFiles(resolvedRoot, resolution.path.absolute, targets)
+			} else if (stat.isFile()) {
 					targets.push(resolution.path.absolute)
 				}
 			}

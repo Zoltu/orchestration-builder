@@ -2,6 +2,7 @@ import * as fs from 'node:fs'
 import * as path from 'node:path'
 import { createToolError } from '../errors.js'
 import type { ToolHandler } from '../tool-dispatch.js'
+import { isOrchestrationPath } from './shared.js'
 
 // Only the dirent surface the walk consumes: fs.Dirent satisfies it structurally, and tests script it in memory.
 export interface WalkEntry {
@@ -127,6 +128,8 @@ function walkFiles(root: string, baseDir: string, filesystem: GlobFilesystem, ma
 		const full = path.join(baseDir, entry.name)
 		if (entry.isDirectory()) {
 			if (prunesWalk(entry.name, matchers)) continue
+			// The executor's bookkeeping directory is invisible to the walk the same way it is to the path-resolution chokepoint; a nested project/.orchestration/ has a different relative path and stays walkable.
+			if (isOrchestrationPath(path.relative(root, full).split(path.sep).join('/'))) continue
 			results.push(...walkFiles(root, full, filesystem, matchers))
 		} else if (entry.isFile()) {
 			results.push(path.relative(root, full).split(path.sep).join('/'))

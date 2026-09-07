@@ -45,6 +45,9 @@ export type { InterruptChannel, InterruptQueue, InterruptRequest, InterruptSubmi
 export { createRunSubmission } from './run-submission.js'
 export type { ResumeRun, RunSubmission, RunSubmissionDependencies, StartRun, SubmitResult } from './run-submission.js'
 
+export { ensureOrchestrationGitExcluded, nodeGitExcludeFilesystem } from './git-exclude.js'
+export type { GitExcludeFilesystem, GitExcludeResult } from './git-exclude.js'
+
 export { DEFAULT_EFFORT, effortDirective } from './effort.js'
 
 export { isEffortLevel, isProjectSettings, validateDeploymentFileConfig, validateDeploymentRoleReferences } from './validation.js'

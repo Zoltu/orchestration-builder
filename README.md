@@ -6,7 +6,7 @@ For contributors and development setup, see [`CONTRIBUTING.md`](CONTRIBUTING.md)
 
 ## Running the executor
 
-The executor ships as a Docker image that serves a webpage. The deployment model is **one container = one project**: the project (e.g., a git repository, a research project, etc.) is mounted into the container and the executor works on it, exactly as a developer would. Orchestration bookkeeping is written under `<root>/.orchestration/` and can generally be ignored.
+The executor ships as a Docker image that serves a webpage. The deployment model is **one container = one project**: the project (e.g., a git repository, a research project, etc.) is mounted into the container and the executor works on it, exactly as a developer would. Orchestration bookkeeping is written under `<root>/.orchestration/`, is inaccessible to the agent's file tools, and is automatically excluded from git when the workspace is a git repository.
 
 ### Run
 

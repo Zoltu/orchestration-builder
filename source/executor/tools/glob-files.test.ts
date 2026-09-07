@@ -135,6 +135,16 @@ describe('createGlobFiles pinned edge cases', () => {
 	})
 })
 
+describe('createGlobFiles and the executor bookkeeping directory', () => {
+	test('the walk never descends into the top-level .orchestration', async () => {
+		expect(await runGlob(['.orchestration/runs/x/log.jsonl', '.orchestration/settings.json', 'src/a.ts'], '**')).toEqual({ kind: 'success', data: ['src/a.ts'] })
+	})
+
+	test('an .orchestration directory nested inside a project is ordinary project content and stays walkable', async () => {
+		expect(await runGlob(['project/.orchestration/notes.txt', 'project/a.ts'], '**')).toEqual({ kind: 'success', data: ['project/.orchestration/notes.txt', 'project/a.ts'] })
+	})
+})
+
 describe('createGlobFiles argument validation', () => {
 	test('rejects a missing or non-string pattern', async () => {
 		const handler = createGlobFiles(ROOT, makeFilesystem(['a.ts']))

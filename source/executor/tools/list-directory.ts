@@ -1,7 +1,7 @@
 import * as fs from 'node:fs'
 import * as path from 'node:path'
 import type { ToolHandler } from '../tool-dispatch.js'
-import { nodePathFilesystem, resolveWithinWorkspace, wrapIoError } from './shared.js'
+import { isOrchestrationPath, nodePathFilesystem, resolveWithinWorkspace, wrapIoError } from './shared.js'
 
 export interface ListDirectoryEntry {
 	name: string
@@ -15,6 +15,8 @@ export function createListDirectory(workspaceRoot: string): ToolHandler {
 		const target = typeof targetRaw === 'string' && targetRaw !== '' ? targetRaw : '.'
 		const resolution = resolveWithinWorkspace(target, resolvedRoot, nodePathFilesystem)
 		if (!resolution.ok) return resolution.error
+		// The bookkeeping directory itself is refused by the resolution above, but a listing of the workspace root would still reveal its presence (and invite paths the tools then refuse), so the root listing omits it. The root resolves to the empty relative path, not '.'.
+		const isWorkspaceRoot = resolution.path.relative === ''
 		let entries: string[]
 		try {
 			entries = fs.readdirSync(resolution.path.absolute)
@@ -23,6 +25,7 @@ export function createListDirectory(workspaceRoot: string): ToolHandler {
 		}
 		const result: ListDirectoryEntry[] = []
 		for (const entry of entries) {
+			if (isWorkspaceRoot && isOrchestrationPath(entry)) continue
 			const entryPath = path.join(resolution.path.absolute, entry)
 			try {
 				const stat = fs.statSync(entryPath)

@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import * as path from 'node:path'
-import { resolveWithinWorkspace, wrapIoError, type PathFilesystem } from './shared.ts'
+import { isOrchestrationPath, resolveWithinWorkspace, wrapIoError, type PathFilesystem } from './shared.ts'
 
 const ROOT = '/workspace'
 
@@ -22,6 +22,26 @@ function makeFilesystem(existing: string[], symlinks: Record<string, string> = {
 	}
 	return { exists: (candidate) => existingSet.has(realpath(candidate)), realpath }
 }
+
+describe('isOrchestrationPath', () => {
+	test('matches the top-level bookkeeping directory and everything under it', () => {
+		expect(isOrchestrationPath('.orchestration')).toBe(true)
+		expect(isOrchestrationPath('.orchestration/runs/run-19700101-000000/meta.json')).toBe(true)
+	})
+
+	test('matches path.separator-normalized forms', () => {
+		expect(isOrchestrationPath(`.orchestration${path.sep}runs`)).toBe(true)
+	})
+
+	test('leaves everything else alone, including nested projects and lookalike names', () => {
+		expect(isOrchestrationPath('')).toBe(false)
+		expect(isOrchestrationPath('project/.orchestration')).toBe(false)
+		expect(isOrchestrationPath('project/.orchestration/meta.json')).toBe(false)
+		expect(isOrchestrationPath('.orchestration-notes/x')).toBe(false)
+		expect(isOrchestrationPath('orchestration')).toBe(false)
+		expect(isOrchestrationPath('src/main.ts')).toBe(false)
+	})
+})
 
 describe('resolveWithinWorkspace', () => {
 	test('resolves an ordinary relative path inside the workspace', () => {
@@ -46,6 +66,31 @@ describe('resolveWithinWorkspace', () => {
 		const filesystem = makeFilesystem([ROOT, '/outside', '/outside/secret.txt'])
 		const resolution = resolveWithinWorkspace('/outside/secret.txt', ROOT, filesystem)
 		expect(resolution.ok).toBe(false)
+	})
+
+	test('refuses the executor bookkeeping directory with permission_denied, whether or not it exists yet', () => {
+		const filesystem = makeFilesystem([ROOT])
+		const absent = resolveWithinWorkspace('.orchestration/runs/x/meta.json', ROOT, filesystem)
+		expect(absent).toEqual({ ok: false, error: { kind: 'permission_denied', message: '.orchestration/runs/x/meta.json is inside .orchestration, the executor\'s bookkeeping directory, which cannot be accessed or modified' } })
+		const filesystemWithBookkeeping = makeFilesystem([ROOT, `${ROOT}/.orchestration`, `${ROOT}/.orchestration/settings.json`])
+		const existing = resolveWithinWorkspace('.orchestration/settings.json', ROOT, filesystemWithBookkeeping)
+		expect(existing).toEqual({ ok: false, error: { kind: 'permission_denied', message: '.orchestration/settings.json is inside .orchestration, the executor\'s bookkeeping directory, which cannot be accessed or modified' } })
+	})
+
+	test('refuses an existing symlink that resolves into the executor bookkeeping directory', () => {
+		const filesystem = makeFilesystem(
+			[ROOT, `${ROOT}/.orchestration`, `${ROOT}/.orchestration/runs`, `${ROOT}/.orchestration/runs/x`, `${ROOT}/.orchestration/runs/x/meta.json`],
+			{ [`${ROOT}/peek.json`]: `${ROOT}/.orchestration/runs/x/meta.json` },
+		)
+		const resolution = resolveWithinWorkspace('peek.json', ROOT, filesystem)
+		expect(resolution.ok).toBe(false)
+		expect(resolution.ok ? null : resolution.error.kind).toBe('permission_denied')
+	})
+
+	test('allows the executor bookkeeping directory nested inside a project, which is project content', () => {
+		const filesystem = makeFilesystem([ROOT, `${ROOT}/project`, `${ROOT}/project/.orchestration`, `${ROOT}/project/.orchestration/settings.json`])
+		const resolution = resolveWithinWorkspace('project/.orchestration/settings.json', ROOT, filesystem)
+		expect(resolution).toEqual({ ok: true, path: { absolute: `${ROOT}/project/.orchestration/settings.json`, relative: 'project/.orchestration/settings.json' } })
 	})
 
 	test('rejects an existing symlink that points outside the workspace', () => {

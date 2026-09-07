@@ -8,6 +8,15 @@ export interface ResolvedPath {
 	relative: string
 }
 
+// The run-bookkeeping directory at the workspace top level. Only the top-level entry is reserved: a nested project/.orchestration/ is ordinary project content.
+const ORCHESTRATION_DIR_NAME = '.orchestration'
+
+// True only for the executor's own bookkeeping directory at the workspace top level. Relative paths come from path.relative and so carry the platform separator, which is normalized here the same way the walk tools normalize their output (nested .orchestration directories deliberately stay accessible).
+export function isOrchestrationPath(relativePath: string): boolean {
+	const normalized = relativePath.split(path.sep).join('/')
+	return normalized === ORCHESTRATION_DIR_NAME || normalized.startsWith(`${ORCHESTRATION_DIR_NAME}/`)
+}
+
 export type PathResolution = { ok: true; path: ResolvedPath } | { ok: false; error: ToolResult }
 
 // The existence/realpath pair resolveWithinWorkspace canonicalizes against. Injected so the escape logic is exercisable against a scripted filesystem rather than a real one.
@@ -49,6 +58,10 @@ export function resolveWithinWorkspace(targetPath: string, workspaceRoot: string
 	const relative = path.relative(realRoot, realCandidate)
 	if (relative.startsWith('..') || path.isAbsolute(relative)) {
 		return { ok: false, error: createToolError('invalid_arguments', `Path escapes the workspace: ${targetPath}`) }
+	}
+	// Checked after canonicalization so a symlink resolving into .orchestration is caught by the same refusal. The message is terminal on purpose: the directory is the executor's, so no phrasing may invite a retry.
+	if (isOrchestrationPath(relative)) {
+		return { ok: false, error: createToolError('permission_denied', `${targetPath} is inside .orchestration, the executor's bookkeeping directory, which cannot be accessed or modified`) }
 	}
 	return { ok: true, path: { absolute: realCandidate, relative } }
 }

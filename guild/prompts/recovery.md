@@ -23,6 +23,7 @@ The executor surfaces these error kinds. Match your response to the kind:
 - **`compaction_failed`** — a `context_manager` could not reduce tokens. Escalate: the conversation cannot be saved as-is.
 - **`invalid_tool_call`** — the child called a tool it is not allowed to use, or called it malformed. This usually indicates a prompt or task-clarity problem. Re-delegate with a more explicit task. If it recurs, escalate.
 - **`invalid_arguments`** — the child passed bad arguments to a tool. Same response as `invalid_tool_call`: re-delegate with a clearer task.
+- **`permission_denied`** — the child targeted a path the executor reserves for its own bookkeeping (`.orchestration`). This is permanent, not transient: do not retry the same path. Re-delegate with the work moved elsewhere in the workspace, or with the mediated tools (`read_plan`, `read_run_log`, `search_run_log`) when the bookkeeping itself is what the task needs.
 - **`unknown_tool`** — the child referenced a tool name that does not exist. This indicates a Guild configuration problem, not a task problem. Escalate.
 
 ## When to escalate

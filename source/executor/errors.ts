@@ -31,6 +31,7 @@ export const ERROR_KINDS: readonly ErrorKind[] = [
 	'loop_detected',
 	'interrupted',
 	'compaction_failed',
+	'permission_denied',
 ]
 
 export function isErrorKind(value: unknown): value is ErrorKind {
