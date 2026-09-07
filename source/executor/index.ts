@@ -102,4 +102,4 @@ export type {
 	WriteProjectSettings,
 } from './persistence.js'
 
-export type { DeploymentConfig, DeploymentFileConfig, ModelConfig, ResolvedModelConfig, RunOptions, RunMeta, ResultCard, EffortLevel } from './types.js'
+export type { DeploymentConfig, DeploymentFileConfig, ModelConfig, ResolvedModelConfig, RunContinuation, RunOptions, RunMeta, ResultCard, EffortLevel } from './types.js'

@@ -71,6 +71,19 @@ describe('boolean guards', () => {
 		expect(isRunMeta({ ...base, effort: 3 })).toBe(false)
 		expect(isRunMeta({ ...base, effort: 'copious' })).toBe(false)
 	})
+	test('isRunMeta accepts a run-id-shaped continuesFrom and rejects a malformed one', () => {
+		const base = {
+			runId: 'r',
+			guildPath: 'g',
+			benchmarkPath: 'b',
+			task: 't',
+			status: 'running' as const,
+			startTime: 'now',
+		}
+		expect(isRunMeta({ ...base, continuesFrom: 'run-20260101-000000' })).toBe(true)
+		expect(isRunMeta({ ...base, continuesFrom: 'not-a-run-id' })).toBe(false)
+		expect(isRunMeta({ ...base, continuesFrom: 7 })).toBe(false)
+	})
 	test('isEffortLevel accepts the three tier strings and rejects everything else', () => {
 		expect(isEffortLevel('quick')).toBe(true)
 		expect(isEffortLevel('standard')).toBe(true)

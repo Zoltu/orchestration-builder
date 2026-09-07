@@ -1,5 +1,5 @@
 import { DEFAULT_EFFORT } from './effort.js'
-import type { ResultCard, RunMeta, RunOptions } from './types.js'
+import type { ResultCard, RunContinuation, RunMeta, RunOptions } from './types.js'
 import { createCheckpointRecorder, type RunCheckpoint } from './checkpoint.js'
 import { createContextPressureTracker } from './context-pressure.js'
 import { runRole } from './engine.js'
@@ -28,7 +28,7 @@ export interface ExecutorDependencies {
 	interruptQueue: InterruptQueue
 }
 
-function buildEngineDependencies(deps: ExecutorDependencies, runId: string, startTime: string, registryCounter: number, learnedContextCeiling: number | undefined): EngineDependencies {
+function buildEngineDependencies(deps: ExecutorDependencies, runId: string, startTime: string, registryCounter: number, learnedContextCeiling: number | undefined, continuesFrom: string | undefined): EngineDependencies {
 	const roleRegistry = createRoleRegistry(registryCounter)
 	const contextPressureTracker = createContextPressureTracker(learnedContextCeiling)
 	return {
@@ -39,7 +39,8 @@ function buildEngineDependencies(deps: ExecutorDependencies, runId: string, star
 		roleRegistry,
 		interruptQueue: deps.interruptQueue,
 		contextPressureTracker,
-		checkpointRecorder: createCheckpointRecorder({ writeCheckpoint: deps.writeCheckpoint, runId, startTime, roleRegistry, contextPressureTracker }),
+		// The run's lineage rides the recorder so checkpoints written after a resume keep stamping continuesFrom onto the entry frame — the live context does not carry it on the resume path.
+		checkpointRecorder: createCheckpointRecorder({ writeCheckpoint: deps.writeCheckpoint, runId, startTime, roleRegistry, contextPressureTracker, continuesFrom }),
 	}
 }
 
@@ -50,6 +51,7 @@ function terminalMeta(options: RunOptions, startTime: string, result: ResultCard
 		...(options.benchmarkPath !== undefined ? { benchmarkPath: options.benchmarkPath } : {}),
 		task: options.task,
 		effort: options.effort,
+		...(options.continuation !== undefined ? { continuesFrom: options.continuation.runId } : {}),
 		status: result.status,
 		startTime,
 		endTime: new Date().toISOString(),
@@ -72,17 +74,19 @@ export async function runExecutor(deps: ExecutorDependencies, options: RunOption
 		...(options.benchmarkPath !== undefined ? { benchmarkPath: options.benchmarkPath } : {}),
 		task: options.task,
 		effort: options.effort,
+		...(options.continuation !== undefined ? { continuesFrom: options.continuation.runId } : {}),
 		status: 'running',
 		startTime,
 	})
 	const result = await runRole(
-		buildEngineDependencies(deps, options.runId, startTime, 0, undefined),
+		buildEngineDependencies(deps, options.runId, startTime, 0, undefined, options.continuation?.runId),
 		{
 			loadedGuild,
 			depth: 0,
 			roleName: loadedGuild.config.entryRole,
 			task: options.task,
 			effort: options.effort,
+			...(options.continuation !== undefined ? { continuation: options.continuation } : {}),
 		},
 	)
 
@@ -106,12 +110,15 @@ export async function resumeExecutor(deps: ExecutorDependencies, checkpoint: Run
 	if (entryFrame === undefined) throw new Error(`resumeExecutor: checkpoint for run ${checkpoint.runId} has no frames`)
 	const task = entryFrame.task
 	const effort = entryFrame.effort ?? DEFAULT_EFFORT
+	// The checkpoint carries the lineage id only (not the prior task/summary): on resume the entry role's history — the briefing included — is restored from the checkpoint verbatim, so the full continuation object is never recomposed and the empty task/summary here exist only so the metas keep the continuesFrom field.
+	const continuation: RunContinuation | undefined = entryFrame.continuesFrom !== undefined ? { runId: entryFrame.continuesFrom, task: '', summary: '' } : undefined
 	const runOptions: RunOptions = {
 		runId: checkpoint.runId,
 		guildPath: options.guildPath,
 		...(options.benchmarkPath !== undefined ? { benchmarkPath: options.benchmarkPath } : {}),
 		task,
 		effort,
+		...(continuation !== undefined ? { continuation } : {}),
 	}
 
 	deps.createRunDirectory()
@@ -128,12 +135,13 @@ export async function resumeExecutor(deps: ExecutorDependencies, checkpoint: Run
 		...(options.benchmarkPath !== undefined ? { benchmarkPath: options.benchmarkPath } : {}),
 		task,
 		effort,
+		...(continuation !== undefined ? { continuesFrom: continuation.runId } : {}),
 		status: 'running',
 		startTime,
 	})
 	const result = await resumeRoleStack(
 		runRole,
-		buildEngineDependencies(deps, checkpoint.runId, startTime, checkpoint.registryCounter, checkpoint.learnedContextCeiling),
+		buildEngineDependencies(deps, checkpoint.runId, startTime, checkpoint.registryCounter, checkpoint.learnedContextCeiling, entryFrame.continuesFrom),
 		loadedGuild,
 		checkpoint,
 	)

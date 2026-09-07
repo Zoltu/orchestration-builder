@@ -117,12 +117,13 @@ interface RunServiceConfig {
 }
 
 function createStartRun(config: RunServiceConfig): StartRun {
-	return (runId, task, effort) => {
+	return (runId, task, effort, continuation) => {
 		const runPromise = withRunBindings(config, runId, (dependencies) => runExecutor(dependencies, {
 			runId,
 			guildPath: config.guildPath,
 			task,
 			effort,
+			...(continuation !== undefined ? { continuation } : {}),
 		}))
 		fireAndForgetSummary(config.summarizer.summarizeTaskStart(runId, task), runId)
 		runPromise.then(

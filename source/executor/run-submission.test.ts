@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import type { RunCheckpoint } from './checkpoint.ts'
-import type { EffortLevel, RunMeta } from './types.js'
+import type { EffortLevel, RunContinuation, RunMeta } from './types.js'
 import type { ReadProjectSettings } from './persistence.ts'
 import { DEFAULT_EFFORT } from './effort.ts'
 import { createRunSubmission, type ResumeRun, type RunSubmission, type StartRun } from './run-submission.ts'
@@ -323,5 +323,35 @@ describe('createRunSubmission effort resolution', () => {
 		submission.submit('do it')
 		await submission.awaitActive()
 		expect(captured).toEqual([DEFAULT_EFFORT])
+	})
+})
+
+describe('createRunSubmission continuation passthrough', () => {
+	function captureContinuation(): { startRun: StartRun; captured: Array<RunContinuation | undefined> } {
+		const captured: Array<RunContinuation | undefined> = []
+		const startRun: StartRun = async (_runId, _task, _effort, continuation) => {
+			captured.push(continuation)
+			return sampleMeta('run-1')
+		}
+		return { startRun, captured }
+	}
+
+	test('submit threads the continuation through to startRun', async () => {
+		const { startRun, captured } = captureContinuation()
+		const submission = createRunSubmission({ startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings })
+		const continuation = { runId: 'run-20260101-000000', task: 'prior task', summary: 'prior summary' }
+
+		submission.submit('do it', undefined, continuation)
+		await submission.awaitActive()
+		expect(captured).toEqual([continuation])
+	})
+
+	test('submit threads no continuation when none is given', async () => {
+		const { startRun, captured } = captureContinuation()
+		const submission = createRunSubmission({ startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings })
+
+		submission.submit('do it')
+		await submission.awaitActive()
+		expect(captured).toEqual([undefined])
 	})
 })

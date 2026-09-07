@@ -363,7 +363,7 @@ The web UI is the primary interface. The HTTP API exists for programmatic access
 
 ### `POST /api/runs`
 
-Starts a run. **Body:** `{ "task": "...", "effort"?: "quick"|"standard"|"thorough" }`. `effort` is optional; when omitted the project default (see `GET|PUT /api/settings`) is applied, falling back to `"standard"` when no default is set. Anything but the three tier strings returns `400 invalid_body`. **201:** `{ "runId": "..." }`. **409:** `{ "ok": false, "error": "run_in_progress" }`.
+Starts a run. **Body:** `{ "task": "...", "effort"?: "quick"|"standard"|"thorough", "continuesFrom"?: "<run_id>" }`. `effort` is optional; when omitted the project default (see `GET|PUT /api/settings`) is applied, falling back to `"standard"` when no default is set. Anything but the three tier strings returns `400 invalid_body`. `continuesFrom` starts a new run that continues a prior one; when present it must be a well-formed run id (`run-YYYYMMDD-HHMMSS`) naming a known run whose status is terminal (`success`, `error`, `needs_clarification`, or `interrupted` — a `running` run has no outcome to continue from), and anything else returns `400 invalid_body`. A continuation run records the lineage as `continuesFrom` in its `meta.json` (see "Persistence"), and the executor injects a clearly-marked briefing block into the entry role's initial user message — below the operator's new task text, quoting the prior run's task, its result summary, and the `read_plan` handle for the prior run's plan document — so the Guild can pick up where the prior run left off (the planner reads the prior plan with `read_plan(runId)`); the executor provides the channel only, and the Guild decides what to do with the continuation. **201:** `{ "runId": "..." }`. **409:** `{ "ok": false, "error": "run_in_progress" }`.
 
 ### `GET /api/settings`
 
@@ -462,7 +462,7 @@ Run bookkeeping lives alongside the project under `.orchestration/runs/`:
 ```
 <workspace>/.orchestration/
 ├── runs/<run_id>/
-│   ├── meta.json      # run id, guild path, start/end time, status (incl. interrupted), effort, final result
+│   ├── meta.json      # run id, guild path, start/end time, status (incl. interrupted), effort, final result, continuesFrom (the prior run's id when this run continues one)
 │   ├── state.json     # checkpoint: the runnable role stack, written atomically at every safe point; deleted on terminal meta
 │   ├── log.jsonl      # one JSON object per line: effort_set, run_resumed, llm calls, tool calls, errors
 │   └── plan.md        # the run's plan document (write_plan/read_plan)

@@ -1,5 +1,6 @@
 import type { ListRunIds, ReadProjectSettings, ReadRunMetaById, ReadRunPlanById, ReadRunSnapshotStats, ReadRunSummaryById, WriteProjectSettings } from '../executor/persistence.js'
-import type { DeploymentConfig, EffortLevel, GuildConfig, ToolManifest } from '../executor/types.js'
+import { isRunIdShape } from '../executor/run-id.js'
+import type { DeploymentConfig, EffortLevel, GuildConfig, RunMeta, ToolManifest } from '../executor/types.js'
 import { isEffortLevel, isObject } from '../executor/validation.js'
 import type { RunState } from '../executor/run-state.js'
 import type { RunSubmission } from '../executor/run-submission.js'
@@ -162,14 +163,30 @@ function handleInterrupt(runState: RunState, runSubmission: RunSubmission, runId
 	return json({ ok: false, error: 'run_not_active' }, 409)
 }
 
-function handleCreateRun(runSubmission: RunSubmission, body: unknown): Response {
+// A continuation must anchor to a settled prior run: 'running' means the prior run is still in flight (or the service died mid-run without reconciliation), and continuing it would brief the new run from an outcome that does not exist yet.
+const TERMINAL_RUN_STATUSES: readonly RunMeta['status'][] = ['success', 'error', 'needs_clarification', 'interrupted']
+
+function isTerminalRunStatus(status: RunMeta['status']): boolean {
+	return TERMINAL_RUN_STATUSES.some((terminal) => terminal === status)
+}
+
+function handleCreateRun(runSubmission: RunSubmission, readRunMetaById: ReadRunMetaById, body: unknown): Response {
 	if (!isObject(body)) return json({ ok: false, error: 'invalid_body' }, 400)
 	const taskValue = body['task']
 	if (typeof taskValue !== 'string' || taskValue === '') return json({ ok: false, error: 'invalid_body' }, 400)
 	const effortValue = body['effort']
 	if (effortValue !== undefined && !isEffortLevel(effortValue)) return json({ ok: false, error: 'invalid_body' }, 400)
 	const effortOverride: EffortLevel | undefined = effortValue
-	const result = runSubmission.submit(taskValue, effortOverride)
+	const continuesFromValue = body['continuesFrom']
+	if (continuesFromValue !== undefined && !isRunIdShape(continuesFromValue)) return json({ ok: false, error: 'invalid_body' }, 400)
+	const priorMeta = continuesFromValue === undefined ? null : parseRunMeta(readRunMetaById(continuesFromValue))
+	if (continuesFromValue !== undefined && (priorMeta === null || !isTerminalRunStatus(priorMeta.status))) return json({ ok: false, error: 'invalid_body' }, 400)
+	const continuation = continuesFromValue !== undefined && priorMeta !== null ? {
+		runId: continuesFromValue,
+		task: priorMeta.task,
+		summary: priorMeta.result?.summary ?? '',
+	} : undefined
+	const result = runSubmission.submit(taskValue, effortOverride, continuation)
 	if (result.ok) return json({ runId: result.runId }, 201)
 	return json({ ok: false, error: result.error }, 409)
 }
@@ -246,7 +263,7 @@ export function createRequestHandler(config: RequestHandlerConfig, serveStatic: 
 			if (pathname === '/api/runs') {
 				const body = await readJsonBody(request)
 				if (body === undefined) return json({ ok: false, error: 'invalid_body' }, 400)
-				return handleCreateRun(runSubmission, body)
+				return handleCreateRun(runSubmission, readRunMetaById, body)
 			}
 			if (pathname.startsWith('/api/runs/') && pathname.endsWith('/interrupt')) {
 				const runId = decodeURIComponent(pathname.slice('/api/runs/'.length, pathname.length - '/interrupt'.length))

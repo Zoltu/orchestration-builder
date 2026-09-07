@@ -184,6 +184,24 @@ describe('isRunCheckpoint', () => {
 		}
 		expect(isRunCheckpoint(checkpoint)).toBe(true)
 	})
+
+	test('accepts a continuesFrom lineage on the entry frame and round-trips it through JSON', () => {
+		const checkpoint = sampleCheckpoint()
+		const root = checkpoint.frames[0]
+		if (root === undefined) throw new Error('missing root')
+		root.continuesFrom = 'run-20260101-000000'
+		expect(isRunCheckpoint(checkpoint)).toBe(true)
+		const copy: unknown = JSON.parse(JSON.stringify(checkpoint))
+		expect(isRunCheckpoint(copy)).toBe(true)
+	})
+
+	test('rejects a malformed continuesFrom', () => {
+		const checkpoint = sampleCheckpoint()
+		const root = checkpoint.frames[0]
+		if (root === undefined) throw new Error('missing root')
+		root.continuesFrom = 'not-a-run-id'
+		expect(isRunCheckpoint(checkpoint)).toBe(false)
+	})
 })
 
 describe('createCheckpointRecorder', () => {
@@ -322,5 +340,50 @@ describe('createCheckpointRecorder', () => {
 		recorder.write()
 
 		expect(written[0]?.frames.map((frame: CheckpointFrame) => frame.roleId)).toEqual(['main-0-1', 'coder-1-2'])
+	})
+
+	test('the entry frame alone carries the continuation lineage, even when child contexts inherited it', () => {
+		const written: RunCheckpoint[] = []
+		const registry = createRoleRegistry()
+		const recorder = createCheckpointRecorder({ writeCheckpoint: (c) => written.push(c), runId: 'run-1', startTime: '2026-01-01T00:00:00.000Z', roleRegistry: registry, contextPressureTracker: createContextPressureTracker() })
+		const continuation = { runId: 'run-20260101-000000', task: 'prior task', summary: 'prior summary' }
+
+		// The agent spawn spreads the entry context into children, so the child context carries the same continuation; only the depth-0 frame serializes it.
+		const rootEntry = registry.register('main', 0, undefined, sampleRoleState())
+		recorder.registerFrame(frameContext('main', 0, { continuation }), rootEntry)
+		const childEntry = registry.register('coder', 1, 'main-0-1', sampleRoleState())
+		recorder.registerFrame(frameContext('coder', 1, { parent: 'main', parentRoleId: 'main-0-1', continuation }), childEntry)
+		recorder.write()
+
+		expect(written[0]?.frames[0]?.continuesFrom).toBe('run-20260101-000000')
+		expect(written[0]?.frames[1]?.continuesFrom).toBeUndefined()
+	})
+
+	test('the recorder stamps its resume lineage onto the entry frame when the context carries no live continuation', () => {
+		const written: RunCheckpoint[] = []
+		const registry = createRoleRegistry()
+		const recorder = createCheckpointRecorder({ writeCheckpoint: (c) => written.push(c), runId: 'run-1', startTime: '2026-01-01T00:00:00.000Z', roleRegistry: registry, contextPressureTracker: createContextPressureTracker(), continuesFrom: 'run-20260101-000000' })
+
+		// The resume path re-registers contexts without a continuation (the briefing is already in the checkpointed history), so the entry frame's lineage comes from the recorder's stamp.
+		const rootEntry = registry.register('main', 0, undefined, sampleRoleState())
+		recorder.registerFrame(frameContext('main', 0, { effort: 'quick' }), rootEntry)
+		const childEntry = registry.register('coder', 1, 'main-0-1', sampleRoleState())
+		recorder.registerFrame(frameContext('coder', 1, { parent: 'main', parentRoleId: 'main-0-1' }), childEntry)
+		recorder.write()
+
+		expect(written[0]?.frames[0]?.continuesFrom).toBe('run-20260101-000000')
+		expect(written[0]?.frames[1]?.continuesFrom).toBeUndefined()
+	})
+
+	test('a recorder without a resume lineage stamps nothing when the context carries no continuation', () => {
+		const written: RunCheckpoint[] = []
+		const registry = createRoleRegistry()
+		const recorder = createCheckpointRecorder({ writeCheckpoint: (c) => written.push(c), runId: 'run-1', startTime: '2026-01-01T00:00:00.000Z', roleRegistry: registry, contextPressureTracker: createContextPressureTracker() })
+
+		const rootEntry = registry.register('main', 0, undefined, sampleRoleState())
+		recorder.registerFrame(frameContext('main', 0), rootEntry)
+		recorder.write()
+
+		expect(written[0]?.frames[0]?.continuesFrom).toBeUndefined()
 	})
 })

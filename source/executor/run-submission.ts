@@ -1,9 +1,9 @@
 import type { RunCheckpoint } from './checkpoint.js'
 import { DEFAULT_EFFORT } from './effort.js'
-import type { EffortLevel, RunMeta } from './types.js'
+import type { EffortLevel, RunContinuation, RunMeta } from './types.js'
 import type { ReadProjectSettings } from './persistence.js'
 
-export type StartRun = (runId: string, task: string, effort: EffortLevel) => Promise<RunMeta>
+export type StartRun = (runId: string, task: string, effort: EffortLevel, continuation?: RunContinuation) => Promise<RunMeta>
 export type ResumeRun = (checkpoint: RunCheckpoint) => Promise<RunMeta>
 
 export interface RunSubmissionDependencies {
@@ -18,7 +18,7 @@ export type SubmitResult =
 	| { ok: false; error: 'run_in_progress' }
 
 export interface RunSubmission {
-	submit(task: string, effortOverride?: EffortLevel): SubmitResult
+	submit(task: string, effortOverride?: EffortLevel, continuation?: RunContinuation): SubmitResult
 	// The startup-reconciliation path: re-enters a checkpointed run under its original run id. The caller (startup, before the server accepts submissions) guarantees no run is active; a resume while active is a bug and fails fast.
 	resume(checkpoint: RunCheckpoint): void
 	activeRunId(): string | undefined
@@ -64,11 +64,11 @@ export function createRunSubmission(dependencies: RunSubmissionDependencies): Ru
 	}
 
 	return {
-		submit(task, effortOverride) {
+		submit(task, effortOverride, continuation) {
 			if (activeRunId !== undefined) return { ok: false, error: 'run_in_progress' }
 			const runId = dependencies.generateRunId()
 			const effort = resolveEffort(effortOverride)
-			track(runId, dependencies.startRun(runId, task, effort))
+			track(runId, dependencies.startRun(runId, task, effort, continuation))
 			return { ok: true, runId }
 		},
 		resume(checkpoint) {

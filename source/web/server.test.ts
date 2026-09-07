@@ -5,7 +5,7 @@ import { createRunState } from '../executor/run-state.ts'
 import { createRunSubmission, type ResumeRun, type RunSubmission, type StartRun } from '../executor/run-submission.ts'
 import type { RunCheckpoint } from '../executor/checkpoint.ts'
 import type { ProjectSettings, ReadProjectSettings, WriteProjectSettings, RunSnapshotRaw, RunSnapshotStats } from '../executor/persistence.ts'
-import type { DeploymentConfig, EffortLevel, GuildConfig, RunMeta } from '../executor/types.js'
+import type { DeploymentConfig, EffortLevel, GuildConfig, RunContinuation, RunMeta } from '../executor/types.js'
 import { parseRunSnapshot, type RunSnapshot } from './render.ts'
 import { createRequestHandler, type RequestHandler } from './request-handler.ts'
 import { resolveStaticAsset } from './server.ts'
@@ -69,9 +69,27 @@ const snapshots = new Map<string, RunSnapshotRaw>([
 			JSON.stringify({ timestamp: '2026-01-01T00:00:02.000Z', type: 'llm_call', payload: { role: 'planner', usage: { promptTokens: 50, completionTokens: 10, totalTokens: 60 } } }),
 		].join('\n'),
 	}],
+	// A run still marked running, so the continuation API can exercise the "prior run must be terminal" rejection.
+	['run-active', snapshotFor('run-active', 'running')],
 ])
 
-const unknownRunIds = new Set(['never-started'])
+// A terminal prior run with a shape-valid run id and a result summary, so the continuation API's happy path can resolve a real briefing from its meta.
+snapshots.set('run-20260101-000000', {
+	metaText: JSON.stringify({
+		runId: 'run-20260101-000000',
+		guildPath: 'guild',
+		benchmarkPath: 'bench',
+		task: 'prior run task',
+		status: 'success',
+		startTime: '2026-01-01T00:00:00.000Z',
+		endTime: '2026-01-01T00:01:00.000Z',
+		result: { status: 'success', summary: 'prior run finished cleanly' },
+	}),
+	logText: '',
+})
+
+// 'run-19990101-000000' is run-id shaped but has no run directory, so the continuation validation's known-run check is exercisable (the default fabrication would otherwise invent a meta for any id).
+const unknownRunIds = new Set(['never-started', 'run-19990101-000000'])
 
 const sampleGuildConfig: GuildConfig = {
 	entryRole: 'orchestrator',
@@ -265,6 +283,7 @@ interface HandlerHarness {
 	humanBackend: WebHumanBackend
 	staticCalls: string[]
 	lastEffort: () => EffortLevel | undefined
+	lastContinuation: () => RunContinuation | undefined
 	resolveActive: () => (meta: RunMeta) => void
 	resolveResumed: () => (meta: RunMeta) => void
 	resumedCheckpoints: () => RunCheckpoint[]
@@ -275,9 +294,11 @@ function createHandlerHarness(): HandlerHarness {
 	let resolveActive: (meta: RunMeta) => void = () => {}
 	let resolveResumed: (meta: RunMeta) => void = () => {}
 	let capturedEffort: EffortLevel | undefined
+	let capturedContinuation: RunContinuation | undefined
 	const resumed: RunCheckpoint[] = []
-	const startRun: StartRun = (_runId, _task, effort) => {
+	const startRun: StartRun = (_runId, _task, effort, continuation) => {
 		capturedEffort = effort
+		capturedContinuation = continuation
 		return new Promise<RunMeta>((resolve) => {
 			resolveActive = resolve
 		})
@@ -323,6 +344,7 @@ function createHandlerHarness(): HandlerHarness {
 		humanBackend,
 		staticCalls,
 		lastEffort: () => capturedEffort,
+		lastContinuation: () => capturedContinuation,
 		resolveActive: () => resolveActive,
 		resolveResumed: () => resolveResumed,
 		resumedCheckpoints: () => resumed,
@@ -510,16 +532,18 @@ describe('GET /api/runs (list)', () => {
 		expect(response.status).toBe(200)
 		const list = await response.json()
 		expect(Array.isArray(list)).toBe(true)
-		expect(list.length).toBe(9)
+		expect(list.length).toBe(11)
 		expect(list[0].runId).toBe('run-tree')
 		expect(list[1].runId).toBe('run-retry')
 		expect(list[2].runId).toBe('run-long')
 		expect(list[3].runId).toBe('run-interrupted')
 		expect(list[4].runId).toBe('run-effort')
 		expect(list[5].runId).toBe('run-cached')
-		expect(list[6].runId).toBe('run-3')
-		expect(list[7].runId).toBe('run-2')
-		expect(list[8].runId).toBe('run-1')
+		expect(list[6].runId).toBe('run-active')
+		expect(list[7].runId).toBe('run-3')
+		expect(list[8].runId).toBe('run-20260101-000000')
+		expect(list[9].runId).toBe('run-2')
+		expect(list[10].runId).toBe('run-1')
 		expect(list[3]).toEqual({
 			runId: 'run-interrupted',
 			status: 'interrupted',
@@ -542,7 +566,7 @@ describe('GET /api/runs (list)', () => {
 			error: null,
 			summary: null,
 		})
-		expect(list[7]).toEqual({
+		expect(list[9]).toEqual({
 			runId: 'run-2',
 			status: 'error',
 			task: 'task for run-2',
@@ -1030,6 +1054,47 @@ describe('POST /api/runs', () => {
 	test('rejects a numeric effort with 400 invalid_body', async () => {
 		const { handler } = createHandlerHarness()
 		const response = await handler(post('/api/runs', JSON.stringify({ task: 'x', effort: 2 })))
+		expect(response.status).toBe(400)
+		expect(await response.json()).toEqual({ ok: false, error: 'invalid_body' })
+	})
+
+	test('accepts a valid continuesFrom and threads the resolved continuation into the started run', async () => {
+		const { handler, submission, lastContinuation, resolveActive } = createHandlerHarness()
+		const response = await handler(post('/api/runs', JSON.stringify({ task: 'pick up where that left off', continuesFrom: 'run-20260101-000000' })))
+		expect(response.status).toBe(201)
+		expect(lastContinuation()).toEqual({ runId: 'run-20260101-000000', task: 'prior run task', summary: 'prior run finished cleanly' })
+
+		resolveActive()(terminalMeta('test-run-0', 'pick up where that left off'))
+		await submission.awaitActive()
+	})
+
+	test('threads no continuation when continuesFrom is absent', async () => {
+		const { handler, submission, lastContinuation, resolveActive } = createHandlerHarness()
+		const response = await handler(post('/api/runs', JSON.stringify({ task: 'a fresh task' })))
+		expect(response.status).toBe(201)
+		expect(lastContinuation()).toBeUndefined()
+
+		resolveActive()(terminalMeta('test-run-0', 'a fresh task'))
+		await submission.awaitActive()
+	})
+
+	test('rejects an unknown continuesFrom run id with 400 invalid_body', async () => {
+		const { handler } = createHandlerHarness()
+		const response = await handler(post('/api/runs', JSON.stringify({ task: 'x', continuesFrom: 'run-19990101-000000' })))
+		expect(response.status).toBe(400)
+		expect(await response.json()).toEqual({ ok: false, error: 'invalid_body' })
+	})
+
+	test('rejects continuing a run whose meta still says running with 400 invalid_body', async () => {
+		const { handler } = createHandlerHarness()
+		const response = await handler(post('/api/runs', JSON.stringify({ task: 'x', continuesFrom: 'run-active' })))
+		expect(response.status).toBe(400)
+		expect(await response.json()).toEqual({ ok: false, error: 'invalid_body' })
+	})
+
+	test('rejects a malformed continuesFrom with 400 invalid_body', async () => {
+		const { handler } = createHandlerHarness()
+		const response = await handler(post('/api/runs', JSON.stringify({ task: 'x', continuesFrom: 'not-a-run-id' })))
 		expect(response.status).toBe(400)
 		expect(await response.json()).toEqual({ ok: false, error: 'invalid_body' })
 	})

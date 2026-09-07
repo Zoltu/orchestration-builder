@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 
-import type { ContextPolicy, DeploymentConfig, ExecutorConfig, GuildConfig, LogEvent, ResolvedModelConfig, RoleDefinition, RunMeta, ToolCall, ToolManifest } from './types.js'
+import type { ContextPolicy, DeploymentConfig, ExecutorConfig, GuildConfig, LogEvent, ResolvedModelConfig, RoleDefinition, RunContinuation, RunMeta, ToolCall, ToolManifest } from './types.js'
 import { ValidationError } from './errors.js'
 import { isRunCheckpoint, type RunCheckpoint } from './checkpoint.ts'
 import { resumeExecutor, runExecutor, type ExecutorDependencies } from './executor.ts'
@@ -394,6 +394,79 @@ describe('runExecutor', () => {
 		expect(meta.effort).toBe('thorough')
 		expect(persistence.state.meta?.effort).toBe('thorough')
 	})
+
+	test('a continuation run writes continuesFrom into both metas and briefs the entry role once', async () => {
+		const guild = buildLoadedGuild(
+			{ main: { systemPrompt: 'p', tools: ['finish'] } },
+			'main',
+		)
+		const llm = new FakeLlm()
+		llm.responses = [success([{
+			id: 'f1',
+			type: 'function',
+			function: { name: 'finish', arguments: JSON.stringify({ status: 'success', summary: 'ok' }) },
+		}])]
+		const persistence = makeFakePersistence()
+		const deps = makeDeps(llm, persistence, makeLoader(guild))
+		const continuation = { runId: 'run-20260101-000000', task: 'prior task', summary: 'prior summary' }
+
+		const meta = await runExecutor(deps, {
+			runId: 'r-cont',
+			guildPath: '/guild',
+			benchmarkPath: '/bench',
+			task: 'do it again',
+			effort: 'standard',
+			continuation,
+		})
+
+		expect(meta.continuesFrom).toBe('run-20260101-000000')
+		expect(persistence.state.meta?.continuesFrom).toBe('run-20260101-000000')
+		expect(persistence.state.metas.length).toBe(2)
+		expect(persistence.state.metas[0]?.continuesFrom).toBe('run-20260101-000000')
+		// The briefing is baked into the entry role's initial user message: the task stays the first line and the block follows after a blank line.
+		const llmCall = defined(persistence.state.events.find((e) => e.type === 'llm_call'), 'llm_call event')
+		const llmPayload = llmCall.payload
+		expect(isRecord(llmPayload)).toBe(true)
+		if (isRecord(llmPayload)) {
+			const sent = llmPayload['sent']
+			expect(Array.isArray(sent)).toBe(true)
+			if (Array.isArray(sent)) {
+				const userMessage = sent[1]
+				expect(isRecord(userMessage)).toBe(true)
+				if (isRecord(userMessage)) {
+					expect(userMessage['role']).toBe('user')
+					expect(userMessage['content']).toBe('do it again\n\n[This run continues run run-20260101-000000.] Prior task: prior task\nPrior outcome: prior summary\nThe prior run\'s plan document is available with the read_plan tool (runId: "run-20260101-000000").')
+				}
+			}
+		}
+	})
+
+	test('a run without a continuation writes no continuesFrom field', async () => {
+		const guild = buildLoadedGuild(
+			{ main: { systemPrompt: 'p', tools: ['finish'] } },
+			'main',
+		)
+		const llm = new FakeLlm()
+		llm.responses = [success([{
+			id: 'f1',
+			type: 'function',
+			function: { name: 'finish', arguments: JSON.stringify({ status: 'success', summary: 'done' }) },
+		}])]
+		const persistence = makeFakePersistence()
+		const deps = makeDeps(llm, persistence, makeLoader(guild))
+
+		const meta = await runExecutor(deps, {
+			runId: 'r-plain',
+			guildPath: '/guild',
+			benchmarkPath: '/bench',
+			task: 'do it',
+			effort: 'standard',
+		})
+
+		expect('continuesFrom' in meta).toBe(false)
+		expect(persistence.state.meta).not.toBeNull()
+		if (persistence.state.meta !== null) expect('continuesFrom' in persistence.state.meta).toBe(false)
+	})
 })
 
 describe('resumeExecutor', () => {
@@ -438,10 +511,17 @@ describe('resumeExecutor', () => {
 		}
 	}
 
+	// Whether a sent llm_call message carries the continuation briefing: the sent list is unknown-shaped, so the content narrows through a local string check.
+	function sentCarriesBriefing(message: unknown): boolean {
+		if (!isRecord(message)) return false
+		const content = message['content']
+		return typeof content === 'string' && content.includes('[This run continues run run-20260101-000000.]')
+	}
+
 	const resumeOptions = { guildPath: '/guild', benchmarkPath: '/bench' }
 
-	// Drives a full orchestrator→coder run and returns the captured checkpoints; the resumed-run tests then re-enter from the checkpoint taken while the coder was active.
-	async function driveUninterruptedRun(): Promise<{ meta: RunMeta; checkpoints: RunCheckpoint[] }> {
+	// Drives a full orchestrator→coder run and returns the captured checkpoints; the resumed-run tests then re-enter from the checkpoint taken while the coder was active. Pass a continuation to drive a continuation run (the entry frame then carries the lineage and its history the briefing).
+	async function driveUninterruptedRun(continuation?: RunContinuation): Promise<{ meta: RunMeta; checkpoints: RunCheckpoint[] }> {
 		const guild = buildDelegationGuild()
 		const llm = new FakeLlm()
 		llm.responses = [
@@ -452,7 +532,7 @@ describe('resumeExecutor', () => {
 		const persistence = makeFakePersistence()
 		const deps = makeDeps(llm, persistence, makeLoader(guild))
 
-		const meta = await runExecutor(deps, { runId: 'r-resume', ...resumeOptions, task: 'do it', effort: 'quick' })
+		const meta = await runExecutor(deps, { runId: 'r-resume', ...resumeOptions, task: 'do it', effort: 'quick', ...(continuation !== undefined ? { continuation } : {}) })
 		return { meta, checkpoints: persistence.state.checkpoints }
 	}
 
@@ -490,6 +570,73 @@ describe('resumeExecutor', () => {
 		expect(persistence.state.events[0]?.type).toBe('run_resumed')
 		expect(persistence.state.events.some((e) => e.type === 'role_start')).toBe(false)
 		expect(persistence.state.events.some((e) => e.type === 'role_finished')).toBe(true)
+	})
+
+	test('a resumed continuation run keeps continuesFrom in its metas without re-briefing the history', async () => {
+		const continuation = { runId: 'run-20260101-000000', task: 'prior task', summary: 'prior summary' }
+		const uninterrupted = await driveUninterruptedRun(continuation)
+		const checkpoint = uninterrupted.checkpoints[1]
+		if (checkpoint === undefined) throw new Error('expected the mid-descent checkpoint')
+		// The pre-restart recorder wrote the lineage onto the entry frame from the entry context.
+		expect(checkpoint.frames[0]?.continuesFrom).toBe('run-20260101-000000')
+
+		const guild = buildDelegationGuild()
+		const llm = new FakeLlm()
+		llm.responses = [
+			success([finishToolCall('f1', 'child done')]),
+			success([finishToolCall('f2', 'parent done')]),
+		]
+		const persistence = makeFakePersistence()
+		const deps = makeDeps(llm, persistence, makeLoader(guild))
+
+		const meta = await resumeExecutor(deps, checkpoint, resumeOptions)
+
+		expect(meta.continuesFrom).toBe('run-20260101-000000')
+		expect(persistence.state.metas.length).toBe(2)
+		expect(persistence.state.metas[0]?.continuesFrom).toBe('run-20260101-000000')
+		expect(persistence.state.meta?.continuesFrom).toBe('run-20260101-000000')
+		// The briefing lives only in the checkpointed history: no resumed turn's sent message list ever shows it twice (a re-derived briefing would double it in the entry role's history), and the entry role's own turns still carry it once.
+		const briefingCounts = persistence.state.events
+			.filter((e) => e.type === 'llm_call')
+			.map((e) => (isRecord(e.payload) && Array.isArray(e.payload['sent']) ? e.payload['sent'] : []))
+			.map((sent) => sent.filter(sentCarriesBriefing).length)
+		expect(briefingCounts.length).toBeGreaterThan(0)
+		expect(briefingCounts.every((count) => count <= 1)).toBe(true)
+		expect(briefingCounts.some((count) => count === 1)).toBe(true)
+	})
+
+	test('lineage survives a second restart: post-resume checkpoints keep continuesFrom on the entry frame', async () => {
+		const continuation = { runId: 'run-20260101-000000', task: 'prior task', summary: 'prior summary' }
+		const firstRun = await driveUninterruptedRun(continuation)
+		const firstCheckpoint = firstRun.checkpoints[1]
+		if (firstCheckpoint === undefined) throw new Error('expected the mid-descent checkpoint')
+
+		// First restart: the resumed run's own checkpoints must re-stamp the lineage — their contexts carry no live continuation anymore.
+		const firstResumeLlm = new FakeLlm()
+		firstResumeLlm.responses = [
+			success([finishToolCall('f1', 'child done')]),
+			success([finishToolCall('f2', 'parent done')]),
+		]
+		const firstResumePersistence = makeFakePersistence()
+		await resumeExecutor(makeDeps(firstResumeLlm, firstResumePersistence, makeLoader(buildDelegationGuild())), firstCheckpoint, resumeOptions)
+		// The first write of the resumed run is the re-entered coder's first safe point: the same mid-descent shape, now produced by the resume path.
+		const postResumeCheckpoint = firstResumePersistence.state.checkpoints[0]
+		if (postResumeCheckpoint === undefined) throw new Error('expected a post-resume checkpoint')
+		expect(postResumeCheckpoint.frames[0]?.continuesFrom).toBe('run-20260101-000000')
+
+		// Second restart: resuming the post-resume checkpoint still writes continuesFrom into the metas.
+		const secondResumeLlm = new FakeLlm()
+		secondResumeLlm.responses = [
+			success([finishToolCall('f1', 'child done')]),
+			success([finishToolCall('f2', 'parent done')]),
+		]
+		const secondResumePersistence = makeFakePersistence()
+		const meta = await resumeExecutor(makeDeps(secondResumeLlm, secondResumePersistence, makeLoader(buildDelegationGuild())), postResumeCheckpoint, resumeOptions)
+
+		expect(meta.continuesFrom).toBe('run-20260101-000000')
+		expect(secondResumePersistence.state.metas.length).toBe(2)
+		expect(secondResumePersistence.state.metas[0]?.continuesFrom).toBe('run-20260101-000000')
+		expect(secondResumePersistence.state.meta?.continuesFrom).toBe('run-20260101-000000')
 	})
 
 	test('the resumed registry is seeded past pre-restart ids so post-resume spawns cannot collide', async () => {

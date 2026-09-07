@@ -1,4 +1,5 @@
 import { isErrorKind, ValidationError } from './errors.js'
+import { isRunIdShape } from './run-id.js'
 import type {
 	ContextPolicy,
 	DeploymentFileConfig,
@@ -140,6 +141,7 @@ export function isRunMeta(value: unknown): value is RunMeta {
 	if (!isOptionalString(value.benchmarkPath)) return false
 	if (!isString(value.task)) return false
 	if (value.effort !== undefined && !isEffortLevel(value.effort)) return false
+	if (value.continuesFrom !== undefined && !isRunIdShape(value.continuesFrom)) return false
 	if (!isString(value.status) || !runMetaStatuses.some((s) => s === value.status)) return false
 	if (!isString(value.startTime)) return false
 	if (!isOptionalString(value.endTime)) return false

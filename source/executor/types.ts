@@ -162,12 +162,20 @@ export interface ResultCard {
 	error?: { kind: ErrorKind; message?: string; details?: unknown }
 }
 
+// The resolved prior-run lineage for a task-continuation run: the prior run's id, its operator task, and its result summary (empty when the prior run finished without a result card). The executor treats it as an opaque channel — it validates, persists the lineage in meta, and injects the briefing into the entry context; the Guild decides what the continuation means.
+export interface RunContinuation {
+	runId: string
+	task: string
+	summary: string
+}
+
 export interface RunOptions {
 	runId: string
 	guildPath: string
 	benchmarkPath?: string
 	task: string
 	effort: EffortLevel
+	continuation?: RunContinuation
 }
 
 export interface RunMeta {
@@ -177,6 +185,8 @@ export interface RunMeta {
 	task: string
 	// Absent on runs written before the effort channel existed; present on every run started since. Optional so a torn or legacy meta read still parses.
 	effort?: EffortLevel
+	// Set when this run continues a prior finished run: the prior run's id. Optional so legacy metas still parse; the lineage is what a follow-on run uses to find the prior run's artifacts.
+	continuesFrom?: string
 	// 'interrupted' is terminal: the service stopped mid-run and the run could not (or was not chosen to) resume on restart — written by startup reconciliation so the UI stops showing the run as "in progress".
 	status: 'running' | 'success' | 'error' | 'needs_clarification' | 'interrupted'
 	startTime: string

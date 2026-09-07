@@ -1,10 +1,9 @@
 import { createResultCard, createToolError } from './errors.js'
-import { effortDirective } from './effort.js'
 import type { ExecutorConfig, Message, ResultCard, RoleDefinition, ToolCall, ToolManifest, ToolResult } from './types.js'
 import { isObject, isResultCard } from './validation.js'
 import { checkGlobalBudgets, checkRoleBudgets, type GlobalBudgetState, type RoleBudgetState } from './budgets.js'
 import { createBuiltInToolHandlers } from './builtin-tools.js'
-import { buildMessages } from './context-builder.js'
+import { buildInitialHistory, buildMessages } from './context-builder.js'
 import { applyContextBackstop, contextExceededCard, contextManagedNotice, contextPressureNotice, currentEffectiveBudget, MAX_CONTEXT_RECOVERY_ATTEMPTS, runContextManagerHandler } from './context-handoff.js'
 import { truncateToolOutput } from './context-policy.js'
 import { DEFAULT_CONTEXT_PRESSURE_THRESHOLD, recordContextRejection } from './context-pressure.js'
@@ -244,18 +243,6 @@ function recordToolResult(deps: EngineDependencies, roleState: RoleState, roleNa
 		return result.data
 	}
 	return null
-}
-
-// Assembles a role's first messages: the system prompt, then the user task.
-// The entry role (depth 0) additionally receives the effort directive appended to the system prompt, so prompts can branch on the run's quality level. The directive is merged into the single system message rather than emitted as a second one: many model chat templates (Gemma-family and others) reject a `system` message that is not the first message, so two consecutive system messages would break those endpoints. Child roles never receive the directive — the depth-0 gate ensures it even though the agent spawn copies the context — leaving the parent to translate effort into delegation instructions.
-function buildInitialHistory(systemPrompt: string, context: EngineContext): Message[] {
-	let systemContent = systemPrompt
-	if (context.depth === 0 && context.effort !== undefined) {
-		systemContent = `${systemPrompt}\n\n${effortDirective(context.effort)}`
-	}
-	const history: Message[] = [{ role: 'system', content: systemContent }]
-	history.push({ role: 'user', content: context.task })
-	return history
 }
 
 // The turn a resumed role was suspended in: the full tool-call list, the index of the agent call it was waiting on, and a resolver for the child card. The resolver either returns the checkpoint's recorded card or re-enters the child frame's own resume — invoked from inside the parent's suspended turn so parents register root-first exactly as in live execution.
