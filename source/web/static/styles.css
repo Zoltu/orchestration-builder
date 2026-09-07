@@ -403,6 +403,40 @@ li:last-child {
 	opacity: 0.7;
 }
 
+/* The continuation chip rides above the compose textarea when the operator clicked Continue on a finished history row: it names the prior run and echoes its task and outcome so the follow-up is drafted against the right context. The accent border and tint mark it as attached context rather than form chrome, and the Cancel button stands apart on the right so returning to a plain new task is one obvious click. */
+.continuation-chip {
+	display: flex;
+	align-items: flex-start;
+	gap: var(--space-3);
+	padding: var(--space-2) var(--space-3);
+	border: 1px solid var(--color-accent-border);
+	border-radius: var(--radius-sm);
+	background: var(--color-accent-soft);
+}
+
+.continuation-chip-text {
+	min-width: 0;
+}
+
+.continuation-chip-text p {
+	margin: 0;
+}
+
+.continuation-chip-title {
+	font-weight: 600;
+	font-size: 0.85rem;
+	color: var(--color-accent);
+}
+
+.continuation-chip-task,
+.continuation-chip-outcome {
+	font-size: 0.8rem;
+	color: var(--color-text-muted);
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
 /* The History screen is the full-screen run browser. Rows stay one line tall regardless of how large the underlying prompt or result is — the primary line ellipsizes — and the full content lives in the per-row expanded details. The list scrolls inside the screen; the page does not. */
 #history-screen {
 	flex: 1 1 auto;
@@ -551,7 +585,10 @@ li:last-child {
 	color: var(--color-error);
 }
 
-.rerun-button {
+/* The small quiet action buttons of the run browser and the compose form: the row's re-run, the terminal row's Continue, and the continuation chip's Cancel all wear the same bordered-neutral look so the row stays legible at a glance. */
+.rerun-button,
+.continue-button,
+.continuation-chip-dismiss {
 	flex: 0 0 auto;
 	border: 1px solid var(--color-border-strong);
 	border-radius: var(--radius-sm);
@@ -562,13 +599,17 @@ li:last-child {
 	cursor: pointer;
 }
 
-.rerun-button:hover:not(:disabled) {
+.rerun-button:hover:not(:disabled),
+.continue-button:hover:not(:disabled),
+.continuation-chip-dismiss:hover:not(:disabled) {
 	background: var(--color-accent-soft);
 	border-color: var(--color-accent);
 	color: var(--color-accent);
 }
 
-.rerun-button:disabled {
+.rerun-button:disabled,
+.continue-button:disabled,
+.continuation-chip-dismiss:disabled {
 	opacity: 0.5;
 	cursor: default;
 }
@@ -999,6 +1040,23 @@ li:last-child {
 	align-items: center;
 	flex-wrap: wrap;
 	gap: var(--space-2) var(--space-3);
+}
+
+/* The lineage line at the top of the run view: a quiet text button that jumps to the run this run continued. It reads as navigation rather than a run control, so it wears the muted text style and only gains the accent on hover. */
+.run-lineage {
+	flex: 0 0 auto;
+	border: none;
+	background: none;
+	padding: 0;
+	font-family: var(--font-body);
+	font-size: 0.8rem;
+	color: var(--color-text-muted);
+	cursor: pointer;
+	text-align: left;
+}
+
+.run-lineage:hover {
+	color: var(--color-accent);
 }
 
 /* The dev harness's `margin-left: auto` (on `.pb-view-toggle` below) is neutralized here so the two controls sit at the row's start rather than the toggle pushing the tier control to the far edge. */

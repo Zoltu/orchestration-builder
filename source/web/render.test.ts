@@ -617,6 +617,20 @@ describe('renderRunView', () => {
 		expect(renderRunView(inProgress, { maxLogLines: 200, now: NOW }).effort).toBeNull()
 	})
 
+	test('surfaces the run lineage from meta.continuesFrom, or null when absent or meta is missing', () => {
+		const continuation = parseRunSnapshot({
+			metaText: JSON.stringify(sampleRunMeta({ continuesFrom: 'run-20260101-000000' })),
+			logText: '',
+		})
+		expect(renderRunView(continuation, { maxLogLines: 200, now: NOW }).continuesFrom).toBe('run-20260101-000000')
+
+		const standalone = parseRunSnapshot({ metaText: JSON.stringify(sampleRunMeta()), logText: '' })
+		expect(renderRunView(standalone, { maxLogLines: 200, now: NOW }).continuesFrom).toBeNull()
+
+		const inProgress = parseRunSnapshot({ metaText: null, logText: '' })
+		expect(renderRunView(inProgress, { maxLogLines: 200, now: NOW }).continuesFrom).toBeNull()
+	})
+
 	test('carries the raw plan markdown through to the view, or null when the caller read none', () => {
 		const snapshot = parseRunSnapshot({ metaText: JSON.stringify(sampleRunMeta()), logText: '' })
 		expect(renderRunView(snapshot, { maxLogLines: 200, now: NOW, plan: '# Plan\n\nstep one' }).plan).toBe('# Plan\n\nstep one')

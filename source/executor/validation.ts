@@ -81,6 +81,13 @@ const resultCardStatuses: readonly ResultCard['status'][] = ['success', 'error',
 
 const runMetaStatuses: readonly RunMeta['status'][] = ['running', 'success', 'error', 'needs_clarification', 'interrupted']
 
+// A continuation must anchor to a settled prior run: 'running' means the prior run is still in flight (or the service died mid-run without reconciliation), and continuing it would brief the new run from an outcome that does not exist yet.
+export const TERMINAL_RUN_STATUSES: readonly RunMeta['status'][] = ['success', 'error', 'needs_clarification', 'interrupted']
+
+export function isTerminalRunStatus(status: RunMeta['status']): boolean {
+	return TERMINAL_RUN_STATUSES.some((terminal) => terminal === status)
+}
+
 const operationKinds: readonly OperationKind[] = ['call', 'return', 'observe', 'terminate']
 
 function isRecordOfHumanFacingText(value: unknown): value is Record<string, HumanFacingText> {

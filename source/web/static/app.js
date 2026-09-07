@@ -473,17 +473,18 @@ function SubmitRun(state, event) {
 		state,
 		Fetch({
 			url: 'api/runs',
-			init: { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(buildRunBody(task, state.runEffort)) },
+			init: { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(buildRunBody(task, state.runEffort, state.continuation)) },
 			ok: GotCreatedRun,
 			fail: FetchFailed,
 		}),
 	]
 }
 
-// effort is omitted when the selector has not yet initialized (settings still loading), so the server applies the project default rather than receiving a null.
-function buildRunBody(task, runEffort) {
-	if (isEffort(runEffort)) return { task, effort: runEffort }
-	return { task }
+// effort is omitted when the selector has not yet initialized (settings still loading), so the server applies the project default rather than receiving a null. continuesFrom rides only when the compose screen is in continuation mode; a re-run passes null and submits a plain task.
+function buildRunBody(task, runEffort, continuation) {
+	const body = isEffort(runEffort) ? { task, effort: runEffort } : { task }
+	if (continuation !== null && typeof continuation.runId === 'string' && continuation.runId !== '') body.continuesFrom = continuation.runId
+	return body
 }
 
 // A re-run is a one-click resubmit of a past run's task; it reuses the create path (POST /api/runs → GotCreatedRun) so the new run is selected and the active-run guard applies identically.
@@ -497,11 +498,37 @@ function RerunTask(state, event) {
 		state,
 		Fetch({
 			url: 'api/runs',
-			init: { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(buildRunBody(task, state.runEffort)) },
+			init: { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(buildRunBody(task, state.runEffort, null)) },
 			ok: GotCreatedRun,
 			fail: FetchFailed,
 		}),
 	]
+}
+
+// The prior run's outcome summary for the continuation chip, or null when the prior run has no result card to quote — the chip then omits the outcome line entirely (the server-side briefing handles the empty case on its own).
+function priorOutcomeOf(summary) {
+	if (summary.result === null || summary.result === undefined) return null
+	if (typeof summary.result.summary !== 'string' || summary.result.summary === '') return null
+	return summary.result.summary
+}
+
+// Continue switches the compose screen into continuation mode: a new run will anchor to the finished run's outcome via continuesFrom. Like RerunTask it reads the run id off the button (stopPropagation keeps the row's select handler out of the way), and it shares the re-run button's disabled condition so the one-task-at-a-time contract holds for continuations too. The prior task and outcome for the chip are read from the already-polled run list rather than data attributes, so nothing large rides the DOM.
+function ContinueRun(state, event) {
+	event.stopPropagation()
+	if (state.justSubmittedRunId !== null || deriveActiveRunId(state.summaries) !== null) return state
+	const runId = event.currentTarget.getAttribute('data-run-id')
+	if (typeof runId !== 'string' || runId === '') return state
+	const summary = state.summaries.find((entry) => entry.runId === runId)
+	if (summary === undefined) return state
+	return {
+		...state,
+		screen: 'compose',
+		continuation: { runId, task: typeof summary.task === 'string' ? summary.task : '', summary: priorOutcomeOf(summary) },
+	}
+}
+
+function CancelContinuation(state) {
+	return { ...state, continuation: null }
 }
 
 function GotCreatedRun(state, payload) {
@@ -509,9 +536,9 @@ function GotCreatedRun(state, payload) {
 	const body = payload.body
 	if (!ok || body === null || typeof body !== 'object' || !('runId' in body)) return state
 	const createdRunId = body.runId
-	// Selecting the new run activates its per-run subscription; an immediate run-list fetch clears justSubmittedRunId as soon as the run appears. The per-run modal/flow state is reset for the same reason SelectRun resets it.
+	// Selecting the new run activates its per-run subscription; an immediate run-list fetch clears justSubmittedRunId as soon as the run appears. The continuation and the per-run modal/flow state are reset for the same reason SelectRun resets it — the composed run is on the server now, and a leftover chip would brief a stale lineage into the next task.
 	return [
-		{ ...state, screen: 'watch', justSubmittedRunId: createdRunId, selectedRunId: createdRunId, selectedRunView: null, selectedRunStatus: null, flowModel: null, previousFlowModel: null, questionModalOpen: false, resultModalOpen: false, resultShownForRun: null, tooltip: null, planExpanded: false, serverAvailable: true },
+		{ ...state, screen: 'watch', continuation: null, justSubmittedRunId: createdRunId, selectedRunId: createdRunId, selectedRunView: null, selectedRunStatus: null, flowModel: null, previousFlowModel: null, questionModalOpen: false, resultModalOpen: false, resultShownForRun: null, tooltip: null, planExpanded: false, serverAvailable: true },
 		Fetch({ url: 'api/runs', ok: GotRunList, fail: FetchFailed }),
 	]
 }
@@ -823,6 +850,10 @@ function HistoryRow(state, summary, rerunDisabled) {
 			h('time', { class: 'history-when', title: summary.startTime ?? '' }, formatRelative(summary.startTime, state.now)),
 			// The re-run button shares the create form's disabled condition (a run is active or a submission is in flight) so the one-task-at-a-time contract holds identically for re-runs.
 			h('button', { type: 'button', class: 'rerun-button', 'data-task': summary.task ?? '', disabled: rerunDisabled || typeof summary.task !== 'string' || summary.task === '', onclick: RerunTask }, 're-run'),
+			// The Continue affordance exists only where it is valid: a terminal run has a settled outcome the new run can anchor to, while continuing a running one would be rejected by the create-run API anyway.
+			isTerminalStatus(summary.status)
+				? h('button', { type: 'button', class: 'continue-button', 'data-run-id': summary.runId, disabled: rerunDisabled, title: 'Start a new run continuing this one', onclick: ContinueRun }, 'Continue')
+				: null,
 		]),
 		h('button', { type: 'button', class: 'history-expand', 'aria-expanded': expanded, title: expanded ? 'Hide details' : 'Show the full task and result', onclick: [ToggleHistoryExpanded, summary.runId] }, expanded ? 'less ▴' : 'details ▾'),
 		expanded ? HistoryRowDetails(summary) : null,
@@ -883,7 +914,21 @@ function EffortLevelSelector(value, disabled, saving) {
 	])
 }
 
-// The compose screen is the hero when the service is idle — drafting a task is the primary activity when nothing is running, so the editor gets the whole stage. The submit path and the one-task-at-a-time busy contract are unchanged.
+// The continuation banner above the compose textarea: names the run being continued and echoes its task (and its outcome, when one exists) so the follow-up is drafted against the right context. Every dynamic string is a machine field rendered as text — never markup. Dismissing returns the form to a plain new task.
+function ContinuationChip(state) {
+	const continuation = state.continuation
+	if (continuation === null) return null
+	return h('div', { class: 'continuation-chip', 'aria-label': `Continuing run ${continuation.runId}` }, [
+		h('div', { class: 'continuation-chip-text' }, [
+			h('p', { class: 'continuation-chip-title' }, `Continuing run ${continuation.runId}`),
+			typeof continuation.task === 'string' && continuation.task !== '' ? h('p', { class: 'continuation-chip-task' }, firstLineOfTask(continuation.task)) : null,
+			continuation.summary !== null ? h('p', { class: 'continuation-chip-outcome' }, `Prior outcome: ${continuation.summary}`) : null,
+		]),
+		h('button', { type: 'button', class: 'continuation-chip-dismiss', title: 'Discard the continuation and write a fresh task', onclick: CancelContinuation }, 'Cancel'),
+	])
+}
+
+// The compose screen is the hero when the service is idle — drafting a task is the primary activity when nothing is running, so the editor gets the whole stage. The submit path and the one-task-at-a-time busy contract are unchanged; in continuation mode the chip rides above the task field and the submit body carries continuesFrom.
 function ComposeScreen(state) {
 	const disabled = state.justSubmittedRunId !== null || deriveActiveRunId(state.summaries) !== null
 	const runEffort = isEffort(state.runEffort) ? state.runEffort : DEFAULT_EFFORT
@@ -892,6 +937,7 @@ function ComposeScreen(state) {
 			h('h1', { class: 'compose-heading' }, state.summaries.length === 0 ? 'What should the orchestrator do?' : 'New task'),
 			h('p', { class: 'compose-sub' }, 'Describe the task in plain language — Markdown works too. The orchestrator runs one task at a time.'),
 			h('form', { class: { 'create-run-form': true, 'is-busy': disabled }, onsubmit: SubmitRun }, [
+				ContinuationChip(state),
 				h('textarea', { name: 'task', placeholder: disabled ? 'a run is already in progress — a new task can start when it finishes' : 'describe a task (Markdown supported) and start a run', autocomplete: 'off', disabled, onkeydown: TaskTextareaKeydown }),
 				EffortLevelSelector(runEffort, disabled, state.savingEffort === true),
 				h('div', { class: 'submit-controls' }, [
@@ -1039,6 +1085,14 @@ function PlanSection(state) {
 	])
 }
 
+// The run's lineage: a run that continued a prior finished run names it here, and clicking jumps to the prior run's view through the same SelectRun path the history rows and status pills use. The id is a machine field rendered as text; a run without lineage renders nothing.
+function LineageLine(state) {
+	const view = state.selectedRunView
+	if (view === null) return null
+	if (typeof view.continuesFrom !== 'string' || view.continuesFrom === '') return null
+	return h('button', { type: 'button', class: 'run-lineage', title: 'View the run this run continues', onclick: [SelectRun, view.continuesFrom] }, `Continues run ${view.continuesFrom}`)
+}
+
 // The watch screen fills the viewport below the top bar: a controls row, the flex-filling stage, and the now-caption. The Flow view (product surface) and the Sequence view (debug surface) are independent leaves over the same model; the toggle swaps which renders without a fetch. The sequence view mounts inside a vertical scroll container because its timeline grows long, while the flow view scales to the stage.
 function WatchScreen(state) {
 	const labels = state.labelResolver
@@ -1051,6 +1105,7 @@ function WatchScreen(state) {
 				? 'Loading run view…'
 				: 'Waiting for run activity…'
 		return h('section', { id: 'watch-screen' }, [
+			LineageLine(state),
 			StageControls(state, null),
 			h('div', { class: 'pb-flow flow-stage' }, h('p', { class: 'flow-empty' }, message)),
 		])
@@ -1068,6 +1123,7 @@ function WatchScreen(state) {
 	const nowCaption = deriveNowCaption(model, labels, tier)
 
 	return h('section', { id: 'watch-screen' }, [
+		LineageLine(state),
 		StageControls(state, model),
 		// `.pb-flow` is the positioning context for the per-run-view modals (the question, result, and interrupt overlays are absolute inset 0 within it), so the modals cover the run view rather than the whole page. It is also the hover stage for the inspector: `mouseover`/`mouseleave`/`click` bubble here from every SVG child, so the inspector is wired once for both the flow and sequence views.
 		h('div', { class: 'pb-flow flow-stage', onmouseover: HoverRunView, onmouseleave: LeaveRunView, onclick: ClickRunView }, [
@@ -1192,6 +1248,8 @@ app({
 			screen: 'watch',
 			// Per-history-row expansion, keyed by run id, so the full task/result of several runs can be open at once.
 			historyExpanded: {},
+			// The continuation pending on the compose screen: the prior run's id (submitted as continuesFrom) plus the task and outcome summary the chip echoes, or null for a plain new task. Set by the History row's Continue button; cleared by the chip's Cancel and after a successful submit.
+			continuation: null,
 			// Per-run-view modal state. The question modal opens on a new pending question; the result modal opens on a watched run's completion. `resultShownForRun` dedups the auto-open across the polls that follow a completion. The interrupt modal opens only from the stage controls.
 			questionModalOpen: false,
 			resultModalOpen: false,

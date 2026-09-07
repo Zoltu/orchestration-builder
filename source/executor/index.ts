@@ -50,7 +50,7 @@ export type { GitExcludeFilesystem, GitExcludeResult } from './git-exclude.js'
 
 export { DEFAULT_EFFORT, effortDirective } from './effort.js'
 
-export { isEffortLevel, isProjectSettings, validateDeploymentFileConfig, validateDeploymentRoleReferences } from './validation.js'
+export { isEffortLevel, isProjectSettings, isTerminalRunStatus, validateDeploymentFileConfig, validateDeploymentRoleReferences } from './validation.js'
 
 export { createToolHandlers } from './tools.js'
 export type { NativeToolsConfig } from './tools.js'

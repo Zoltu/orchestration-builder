@@ -6,6 +6,7 @@ import {
 	isProjectSettings,
 	isResultCard,
 	isRunMeta,
+	isTerminalRunStatus,
 	validateDeploymentFileConfig,
 	validateDeploymentRoleReferences,
 	validateGuildConfig,
@@ -94,6 +95,13 @@ describe('boolean guards', () => {
 		expect(isEffortLevel(0)).toBe(false)
 		expect(isEffortLevel(null)).toBe(false)
 		expect(isEffortLevel(undefined)).toBe(false)
+	})
+	test('isTerminalRunStatus accepts every settled status and rejects running', () => {
+		expect(isTerminalRunStatus('success')).toBe(true)
+		expect(isTerminalRunStatus('error')).toBe(true)
+		expect(isTerminalRunStatus('needs_clarification')).toBe(true)
+		expect(isTerminalRunStatus('interrupted')).toBe(true)
+		expect(isTerminalRunStatus('running')).toBe(false)
 	})
 	test('isProjectSettings accepts empty, valid effort, and rejects invalid effort', () => {
 		expect(isProjectSettings({})).toBe(true)

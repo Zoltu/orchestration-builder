@@ -586,6 +586,8 @@ export interface RunView {
 	endTime: string | null
 	result: ResultCard | null
 	error: NonNullable<RunMeta['error']> | null
+	// The prior run's id when this run continues one (meta.continuesFrom), else null; the client renders the run view's lineage line from it.
+	continuesFrom: string | null
 	// The run's raw plan Markdown (plan.md), read per request by the caller; never derived from the cached snapshot, which carries only meta and log text.
 	plan: string | null
 	roles: RoleActivity[]
@@ -621,6 +623,7 @@ export function renderRunView(snapshot: RunSnapshot, options: RenderRunViewOptio
 		endTime: meta === null ? null : (meta.endTime ?? null),
 		result: meta === null ? null : (meta.result ?? null),
 		error: meta === null ? null : (meta.error ?? null),
+		continuesFrom: meta === null ? null : (meta.continuesFrom ?? null),
 		plan: options.plan ?? null,
 		roles: deriveRoleActivity(snapshot.logEvents),
 		roleTree: deriveRoleTree(snapshot.logEvents),

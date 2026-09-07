@@ -1,7 +1,7 @@
 import type { ListRunIds, ReadProjectSettings, ReadRunMetaById, ReadRunPlanById, ReadRunSnapshotStats, ReadRunSummaryById, WriteProjectSettings } from '../executor/persistence.js'
 import { isRunIdShape } from '../executor/run-id.js'
-import type { DeploymentConfig, EffortLevel, GuildConfig, RunMeta, ToolManifest } from '../executor/types.js'
-import { isEffortLevel, isObject } from '../executor/validation.js'
+import type { DeploymentConfig, EffortLevel, GuildConfig, ToolManifest } from '../executor/types.js'
+import { isEffortLevel, isObject, isTerminalRunStatus } from '../executor/validation.js'
 import type { RunState } from '../executor/run-state.js'
 import type { RunSubmission } from '../executor/run-submission.js'
 import { paginateLogEvents, parseRunMeta, renderConfig, renderProjectSettings, renderPendingQuestions, renderRunSummary, renderRunView, formatLogAsText, toRecentLogEntry } from './render.js'
@@ -161,13 +161,6 @@ function handleInterrupt(runState: RunState, runSubmission: RunSubmission, runId
 	const result = runState.submitInterrupt({ kind: kindValue, message: messageValue })
 	if (result === 'accepted') return json({ ok: true }, 202)
 	return json({ ok: false, error: 'run_not_active' }, 409)
-}
-
-// A continuation must anchor to a settled prior run: 'running' means the prior run is still in flight (or the service died mid-run without reconciliation), and continuing it would brief the new run from an outcome that does not exist yet.
-const TERMINAL_RUN_STATUSES: readonly RunMeta['status'][] = ['success', 'error', 'needs_clarification', 'interrupted']
-
-function isTerminalRunStatus(status: RunMeta['status']): boolean {
-	return TERMINAL_RUN_STATUSES.some((terminal) => terminal === status)
 }
 
 function handleCreateRun(runSubmission: RunSubmission, readRunMetaById: ReadRunMetaById, body: unknown): Response {
