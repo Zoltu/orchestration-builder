@@ -432,6 +432,7 @@ function SelectRun(state, runId) {
 		interruptNotice: null,
 		interruptModalOpen: false,
 		interruptAnswerCard: null,
+		planExpanded: false,
 	}
 }
 
@@ -510,7 +511,7 @@ function GotCreatedRun(state, payload) {
 	const createdRunId = body.runId
 	// Selecting the new run activates its per-run subscription; an immediate run-list fetch clears justSubmittedRunId as soon as the run appears. The per-run modal/flow state is reset for the same reason SelectRun resets it.
 	return [
-		{ ...state, screen: 'watch', justSubmittedRunId: createdRunId, selectedRunId: createdRunId, selectedRunView: null, selectedRunStatus: null, flowModel: null, previousFlowModel: null, questionModalOpen: false, resultModalOpen: false, resultShownForRun: null, tooltip: null, serverAvailable: true },
+		{ ...state, screen: 'watch', justSubmittedRunId: createdRunId, selectedRunId: createdRunId, selectedRunView: null, selectedRunStatus: null, flowModel: null, previousFlowModel: null, questionModalOpen: false, resultModalOpen: false, resultShownForRun: null, tooltip: null, planExpanded: false, serverAvailable: true },
 		Fetch({ url: 'api/runs', ok: GotRunList, fail: FetchFailed }),
 	]
 }
@@ -615,6 +616,11 @@ function SetScreen(state, screen) {
 function ToggleHistoryExpanded(state, runId) {
 	if (typeof runId !== 'string' || runId === '') return state
 	return { ...state, historyExpanded: { ...state.historyExpanded, [runId]: state.historyExpanded[runId] !== true } }
+}
+
+// The plan disclosure is per-view state (only the selected run's plan is rendered), so a single boolean reset on run switch is enough; the poll replacing the run view must not collapse it.
+function TogglePlanExpanded(state) {
+	return { ...state, planExpanded: state.planExpanded !== true }
 }
 
 function OpenInterruptModal(state) {
@@ -1021,6 +1027,18 @@ function StageControls(state, model) {
 	])
 }
 
+// The run's plan document (the Markdown the planner writes through write_plan), shown as a collapsed disclosure between the stage and the now-caption so the plan is one click away without competing with the live graph. The plan is agent-authored prose like any other the run produces, so its body renders only through the shared sanitized Markdown pipeline; a run without a plan renders nothing at all.
+function PlanSection(state) {
+	const view = state.selectedRunView
+	const plan = view !== null && typeof view.plan === 'string' ? view.plan : ''
+	if (plan === '') return null
+	const expanded = state.planExpanded === true
+	return h('div', { class: 'run-plan' }, [
+		h('button', { type: 'button', class: 'run-plan-toggle', 'aria-expanded': expanded, title: expanded ? 'Hide the plan' : 'Show the plan the run is following', onclick: TogglePlanExpanded }, expanded ? 'Plan ▴' : 'Plan ▾'),
+		expanded ? h('div', { class: 'run-plan-body markdown' }, renderMarkdown(plan)) : null,
+	])
+}
+
 // The watch screen fills the viewport below the top bar: a controls row, the flex-filling stage, and the now-caption. The Flow view (product surface) and the Sequence view (debug surface) are independent leaves over the same model; the toggle swaps which renders without a fetch. The sequence view mounts inside a vertical scroll container because its timeline grows long, while the flow view scales to the stage.
 function WatchScreen(state) {
 	const labels = state.labelResolver
@@ -1060,6 +1078,7 @@ function WatchScreen(state) {
 			InterruptAnswerCardForRun(state),
 			TooltipCardForRun(state),
 		]),
+		PlanSection(state),
 		h('p', { class: 'pb-now-caption' }, nowCaption),
 	])
 }
@@ -1178,6 +1197,8 @@ app({
 			resultModalOpen: false,
 			resultShownForRun: null,
 			interruptModalOpen: false,
+			// The plan disclosure under the stage: collapsed by default, reset with the other per-run view state on a run switch.
+			planExpanded: false,
 			// The inspector descriptor over the run view: null when nothing is hovered. Cleared on
 			// `mouseleave` of the stage and on run switch; a stale id self-dismisses at render time.
 			tooltip: null,

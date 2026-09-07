@@ -131,6 +131,27 @@ export function createReadRunSummaryById(baseDir: string = 'data/runs'): ReadRun
 	}
 }
 
+export type ReadRunPlanById = (runId: string) => string | null
+
+// Written only by the write_plan tool (source/executor/tools/plan.ts), which writes atomically (write-temp + rename), so a reader never sees a torn document.
+export const PLAN_FILE_NAME = 'plan.md'
+
+// Reads the run's plan document per request for the run view. Absence is normal (the planner may not have written one yet), and a read failure after the existence check (e.g. a permission or io error) degrades to "no plan" rather than failing the run view that serves it — a plan the UI cannot show must never 500 the view.
+export function createReadRunPlanById(baseDir: string = 'data/runs'): ReadRunPlanById {
+	return (runId: string) => {
+		const planPath = path.resolve(baseDir, runId, PLAN_FILE_NAME)
+		if (!fs.existsSync(planPath)) return null
+		let text: string
+		try {
+			text = fs.readFileSync(planPath, 'utf8')
+		} catch {
+			return null
+		}
+		const trimmed = text.trim()
+		return trimmed === '' ? null : trimmed
+	}
+}
+
 export interface RunSnapshotFileStat {
 	size: number
 	mtimeMs: number

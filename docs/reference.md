@@ -379,7 +379,7 @@ Lists known runs (read from `<workspace>/.orchestration/runs/`), newest first. E
 
 ### `GET /api/runs/:id`
 
-Full run view: status, role activity, recent log. Includes `interruptPending` — whether an operator interrupt is queued for the run's next safe point — and `interrupts`, the history of operator interrupts: each inquiry (an `inquiry`-triggered `interrupt` event) paired with its `interrupt_resolved` — an `answered` resolution with a non-empty summary sets the answer, anything else marks it ended, and no resolution yet leaves it waiting — and each plan modification with its delivery target and aborted list.
+Full run view: status, role activity, recent log. Includes `plan` — the run's plan document, the raw Markdown written through `write_plan` and read per request from `<run>/plan.md` (`null` when the run has no plan document) — plus `interruptPending` — whether an operator interrupt is queued for the run's next safe point — and `interrupts`, the history of operator interrupts: each inquiry (an `inquiry`-triggered `interrupt` event) paired with its `interrupt_resolved` — an `answered` resolution with a non-empty summary sets the answer, anything else marks it ended, and no resolution yet leaves it waiting — and each plan modification with its delivery target and aborted list.
 
 ### `POST /api/runs/:id/interrupt`
 

@@ -586,6 +586,8 @@ export interface RunView {
 	endTime: string | null
 	result: ResultCard | null
 	error: NonNullable<RunMeta['error']> | null
+	// The run's raw plan Markdown (plan.md), read per request by the caller; never derived from the cached snapshot, which carries only meta and log text.
+	plan: string | null
 	roles: RoleActivity[]
 	roleTree: RoleTreeNode[] | null
 	recentLog: RecentLogEntry[]
@@ -598,6 +600,8 @@ export interface RunView {
 export interface RenderRunViewOptions {
 	maxLogLines: number
 	now: string
+	// The raw plan Markdown the caller read for this run; omitted (absent document) and null both mean "no plan".
+	plan?: string | null
 }
 
 export function renderRunView(snapshot: RunSnapshot, options: RenderRunViewOptions): RunView {
@@ -617,6 +621,7 @@ export function renderRunView(snapshot: RunSnapshot, options: RenderRunViewOptio
 		endTime: meta === null ? null : (meta.endTime ?? null),
 		result: meta === null ? null : (meta.result ?? null),
 		error: meta === null ? null : (meta.error ?? null),
+		plan: options.plan ?? null,
 		roles: deriveRoleActivity(snapshot.logEvents),
 		roleTree: deriveRoleTree(snapshot.logEvents),
 		recentLog,

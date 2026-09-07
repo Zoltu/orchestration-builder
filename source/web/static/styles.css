@@ -1047,6 +1047,41 @@ li:last-child {
 	min-height: 0;
 }
 
+/* The collapsible plan document between the stage and the now-caption: collapsed it is a single quiet header row, expanded the plan Markdown gets its own scrollable room so a long plan cannot stretch the never-scrolling watch screen. The toggle mirrors the History row's disclosure language; the body renders agent prose through the sanitized Markdown pipeline. */
+.run-plan {
+	flex: 0 0 auto;
+	display: flex;
+	flex-direction: column;
+	gap: var(--space-2);
+	padding: var(--space-2) var(--space-3);
+	border: 1px solid var(--color-border);
+	border-radius: var(--radius-sm);
+	background: var(--color-surface);
+}
+
+.run-plan-toggle {
+	border: none;
+	background: none;
+	padding: 0;
+	color: var(--color-text-subtle);
+	font-size: 0.72rem;
+	font-weight: 600;
+	text-transform: uppercase;
+	letter-spacing: 0.04em;
+	text-align: left;
+	cursor: pointer;
+}
+
+.run-plan-toggle:hover {
+	color: var(--color-accent);
+}
+
+.run-plan-body {
+	max-height: 40vh;
+	overflow: auto;
+	font-size: 0.9rem;
+}
+
 .flow-tier-control {
 	display: inline-flex;
 	align-items: center;

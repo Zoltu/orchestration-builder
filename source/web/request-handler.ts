@@ -1,4 +1,4 @@
-import type { ListRunIds, ReadProjectSettings, ReadRunMetaById, ReadRunSnapshotStats, ReadRunSummaryById, WriteProjectSettings } from '../executor/persistence.js'
+import type { ListRunIds, ReadProjectSettings, ReadRunMetaById, ReadRunPlanById, ReadRunSnapshotStats, ReadRunSummaryById, WriteProjectSettings } from '../executor/persistence.js'
 import type { DeploymentConfig, EffortLevel, GuildConfig, ToolManifest } from '../executor/types.js'
 import { isEffortLevel, isObject } from '../executor/validation.js'
 import type { RunState } from '../executor/run-state.js'
@@ -19,6 +19,7 @@ export interface RequestHandlerConfig {
 	readRunSnapshot: ReadRunSnapshot
 	readRunMetaById: ReadRunMetaById
 	readRunSummaryById: ReadRunSummaryById
+	readRunPlanById: ReadRunPlanById
 	readRunSnapshotStats: ReadRunSnapshotStats
 	listRunIds: ListRunIds
 	readProjectSettings: ReadProjectSettings
@@ -37,10 +38,10 @@ function json(data: unknown, status = 200): Response {
 	})
 }
 
-function handleActiveRun(readRunSnapshot: ReadRunSnapshot, readRunSnapshotStats: ReadRunSnapshotStats, runSubmission: RunSubmission, runState: RunState): Response {
+function handleActiveRun(readRunSnapshot: ReadRunSnapshot, readRunSnapshotStats: ReadRunSnapshotStats, readRunPlanById: ReadRunPlanById, runSubmission: RunSubmission, runState: RunState): Response {
 	const runId = runSubmission.lastRunId()
 	if (runId === undefined) return json({ ok: false, error: 'no_run' }, 404)
-	const view = runViewFor(readRunSnapshot, readRunSnapshotStats, runId)
+	const view = runViewFor(readRunSnapshot, readRunSnapshotStats, readRunPlanById, runId)
 	if (view === null) return json({ ok: false, error: 'not_found' }, 404)
 	return json({ ...view, interruptPending: runState.interruptPending() })
 }
@@ -51,8 +52,8 @@ function handleActiveRunFlow(readRunSnapshot: ReadRunSnapshot, readRunSnapshotSt
 	return runFlowPage(readRunSnapshot, readRunSnapshotStats, runId)
 }
 
-function handleGetRunById(readRunSnapshot: ReadRunSnapshot, readRunSnapshotStats: ReadRunSnapshotStats, runState: RunState, runId: string): Response {
-	const view = runViewFor(readRunSnapshot, readRunSnapshotStats, runId)
+function handleGetRunById(readRunSnapshot: ReadRunSnapshot, readRunSnapshotStats: ReadRunSnapshotStats, readRunPlanById: ReadRunPlanById, runState: RunState, runId: string): Response {
+	const view = runViewFor(readRunSnapshot, readRunSnapshotStats, readRunPlanById, runId)
 	if (view === null) return json({ ok: false, error: 'not_found' }, 404)
 	return json({ ...view, interruptPending: runState.interruptPending() })
 }
@@ -93,10 +94,11 @@ function runFlowPage(readRunSnapshot: ReadRunSnapshot, readRunSnapshotStats: Rea
 	return json(deriveInteractionModel(snapshot, new Date().toISOString()))
 }
 
-function runViewFor(readRunSnapshot: ReadRunSnapshot, readRunSnapshotStats: ReadRunSnapshotStats, runId: string): ReturnType<typeof renderRunView> | null {
+function runViewFor(readRunSnapshot: ReadRunSnapshot, readRunSnapshotStats: ReadRunSnapshotStats, readRunPlanById: ReadRunPlanById, runId: string): ReturnType<typeof renderRunView> | null {
 	if (!isKnownRun(readRunSnapshotStats, runId)) return null
 	const snapshot = readRunSnapshot(runId)
-	return renderRunView(snapshot, { maxLogLines: MAX_LOG_LINES, now: new Date().toISOString() })
+	// The plan is read per request rather than riding the snapshot cache: it is a separate document the run may gain mid-flight, and the file is small enough that re-reading is free.
+	return renderRunView(snapshot, { maxLogLines: MAX_LOG_LINES, now: new Date().toISOString(), plan: readRunPlanById(runId) })
 }
 
 // Feeds the scenario's first `frameIndex + 1` events through the real adapter — the same derivation the product's `/api/runs/:id/flow` runs — so the demo harness exercises the product's `LogEvent → InteractionModel` path rather than authored model frames.
@@ -192,6 +194,7 @@ export function createRequestHandler(config: RequestHandlerConfig, serveStatic: 
 	const readRunSnapshot = config.readRunSnapshot
 	const readRunMetaById = config.readRunMetaById
 	const readRunSummaryById = config.readRunSummaryById
+	const readRunPlanById = config.readRunPlanById
 	const readRunSnapshotStats = config.readRunSnapshotStats
 	const listRunIds = config.listRunIds
 	const readProjectSettings = config.readProjectSettings
@@ -205,7 +208,7 @@ export function createRequestHandler(config: RequestHandlerConfig, serveStatic: 
 			if (pathname === '/api/config') return json(renderConfig(guildConfig, deployment, config.tools))
 			if (pathname === '/api/settings') return handleGetSettings(readProjectSettings)
 			if (pathname === '/api/run/flow') return handleActiveRunFlow(readRunSnapshot, readRunSnapshotStats, runSubmission)
-			if (pathname === '/api/run') return handleActiveRun(readRunSnapshot, readRunSnapshotStats, runSubmission, runState)
+			if (pathname === '/api/run') return handleActiveRun(readRunSnapshot, readRunSnapshotStats, readRunPlanById, runSubmission, runState)
 			if (pathname === '/api/runs') return handleListRuns(readRunMetaById, readRunSummaryById, listRunIds)
 			if (pathname.startsWith('/api/runs/')) {
 				const rest = decodeURIComponent(pathname.slice('/api/runs/'.length))
@@ -219,7 +222,7 @@ export function createRequestHandler(config: RequestHandlerConfig, serveStatic: 
 						if (suffix === 'flow') return runFlowPage(readRunSnapshot, readRunSnapshotStats, runId)
 					}
 				}
-				return handleGetRunById(readRunSnapshot, readRunSnapshotStats, runState, rest)
+				return handleGetRunById(readRunSnapshot, readRunSnapshotStats, readRunPlanById, runState, rest)
 			}
 			if (pathname === '/api/questions') return json(renderPendingQuestions(runState.pendingQuestions()))
 			if (pathname === '/api/demo/scenarios') return handleDemoScenarios()

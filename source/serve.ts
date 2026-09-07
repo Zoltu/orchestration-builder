@@ -5,7 +5,7 @@ import { createWebServer } from './web/server.js'
 import { createBootstrapFailureHandler } from './web/bootstrap-failure.js'
 import { createSnapshotCache } from './web/snapshot-cache.js'
 import { createTaskSummarizer, type TaskSummarizer } from './web/summarize.js'
-import { applyDeploymentOverride, createAppendLog, createDeleteCheckpoint, createDockerSecretReader, createGuildLoader, createInterruptChannel, createInterruptQueue, createLlmCaller, createLlmFetch, createListRunIds, createModelInfoProbe, createPlanToolHandlers, createReadProjectSettings, createReadRunCheckpointById, createReadRunMetaById, createReadRunSnapshotById, createReadRunSnapshotStats, createReadRunSummaryById, createRunDirectory, createRunLogToolHandlers, createRunState, createRunSubmission, createSleep, createToolHandlers, createWebHumanBackend, createWriteCheckpoint, createWriteMeta, createWriteProjectSettings, createWriteRunSummary, ensureOrchestrationGitExcluded, generateRunId, MODEL_PROBE_TIMEOUT_MS, nodeGitExcludeFilesystem, parseModelInfo, reconcileRunsOnStartup, resolveDeploymentConfig, resolveDeploymentOverride, resolveKagiApiKey, resolveSecret, resumeExecutor, runExecutor, validateDeploymentFileConfig, validateDeploymentRoleReferences, ConfigurationError, ValidationError, type ExecutorDependencies, type InterruptChannel, type LoadedGuild, type LlmCaller, type ModelApiProbe, type ResumeRun, type RunCheckpoint, type StartRun, type WebHumanBackend } from './executor/index.js'
+import { applyDeploymentOverride, createAppendLog, createDeleteCheckpoint, createDockerSecretReader, createGuildLoader, createInterruptChannel, createInterruptQueue, createLlmCaller, createLlmFetch, createListRunIds, createModelInfoProbe, createPlanToolHandlers, createReadProjectSettings, createReadRunCheckpointById, createReadRunMetaById, createReadRunPlanById, createReadRunSnapshotById, createReadRunSnapshotStats, createReadRunSummaryById, createRunDirectory, createRunLogToolHandlers, createRunState, createRunSubmission, createSleep, createToolHandlers, createWebHumanBackend, createWriteCheckpoint, createWriteMeta, createWriteProjectSettings, createWriteRunSummary, ensureOrchestrationGitExcluded, generateRunId, MODEL_PROBE_TIMEOUT_MS, nodeGitExcludeFilesystem, parseModelInfo, reconcileRunsOnStartup, resolveDeploymentConfig, resolveDeploymentOverride, resolveKagiApiKey, resolveSecret, resumeExecutor, runExecutor, validateDeploymentFileConfig, validateDeploymentRoleReferences, ConfigurationError, ValidationError, type ExecutorDependencies, type InterruptChannel, type LoadedGuild, type LlmCaller, type ModelApiProbe, type ResumeRun, type RunCheckpoint, type StartRun, type WebHumanBackend } from './executor/index.js'
 
 const DEPLOYMENT_FILE_ENV_VAR = 'ORCHESTRATOR_DEPLOYMENT_FILE'
 const PORT_ENV_VAR = 'PORT'
@@ -246,6 +246,7 @@ async function serve(): Promise<void> {
 	const readRunSnapshot = createSnapshotCache({ readStats: readRunSnapshotStats, readRaw: readRawSnapshot }, SNAPSHOT_CACHE_MAX_ENTRIES)
 	const readRunMetaById = createReadRunMetaById(runsBaseDir)
 	const readRunSummaryById = createReadRunSummaryById(runsBaseDir)
+	const readRunPlanById = createReadRunPlanById(runsBaseDir)
 	const listRunIds = createListRunIds(runsBaseDir)
 	const readProjectSettings = createReadProjectSettings(workspaceRootPath)
 	const writeProjectSettings = createWriteProjectSettings(workspaceRootPath)
@@ -295,6 +296,7 @@ async function serve(): Promise<void> {
 		readRunSnapshot,
 		readRunMetaById,
 		readRunSummaryById,
+		readRunPlanById,
 		readRunSnapshotStats,
 		listRunIds,
 		readProjectSettings,

@@ -116,6 +116,15 @@ function readRunSummaryById(_runId: string): string | null {
 	return null
 }
 
+// In-memory plan documents keyed by run id: run-1 carries a plan so the run view's plan surfacing is exercised end to end, and every other run reads null (no plan document written).
+const plans = new Map<string, string>([
+	['run-1', '# Plan\n\n1. read the code\n2. fix the bug'],
+])
+
+function readRunPlanById(runId: string): string | null {
+	return plans.get(runId) ?? null
+}
+
 function readRunSnapshotStats(runId: string): RunSnapshotStats {
 	const raw = rawSnapshotById(runId)
 	return {
@@ -295,6 +304,7 @@ function createHandlerHarness(): HandlerHarness {
 			readRunSnapshot,
 			readRunMetaById,
 			readRunSummaryById,
+			readRunPlanById,
 			readRunSnapshotStats,
 			listRunIds,
 			readProjectSettings: settings.read,
@@ -562,6 +572,22 @@ describe('GET /api/runs/:id', () => {
 		expect(view.error).toBeNull()
 		expect(view.currentActivity.role).toBe('planner')
 		expect(view.currentActivity.summary).toBe('planner · finished (success)')
+	})
+
+	test('returns the run plan markdown when the run has a plan document', async () => {
+		const { handler } = createHandlerHarness()
+		const response = await handler(get('/api/runs/run-1'))
+		expect(response.status).toBe(200)
+		const view = await response.json()
+		expect(view.plan).toBe('# Plan\n\n1. read the code\n2. fix the bug')
+	})
+
+	test('returns plan null when the run has no plan document', async () => {
+		const { handler } = createHandlerHarness()
+		const response = await handler(get('/api/runs/run-2'))
+		expect(response.status).toBe(200)
+		const view = await response.json()
+		expect(view.plan).toBeNull()
 	})
 
 	test('returns budgets derived from the log and meta', async () => {

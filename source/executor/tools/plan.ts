@@ -2,6 +2,7 @@ import * as fs from 'node:fs'
 import * as path from 'node:path'
 import { truncateToolOutput } from '../context-policy.js'
 import { createToolError } from '../errors.js'
+import { PLAN_FILE_NAME } from '../persistence.js'
 import { isRunIdShape } from '../run-id.js'
 import type { ToolHandler } from '../tool-dispatch.js'
 import { wrapIoError } from './shared.js'
@@ -14,8 +15,6 @@ export interface PlanToolConfig {
 
 // No existing cap fits: role-inspection bounds message windows and compaction keeps only slivers, while a plan read should still deliver a usable document. Past this cap the read returns the head plus a truncation marker and the total size, so one plan read cannot refill the reader's context.
 export const MAX_PLAN_CHARS = 20_000
-
-const PLAN_FILE_NAME = 'plan.md'
 
 export interface BoundedPlan {
 	content: string

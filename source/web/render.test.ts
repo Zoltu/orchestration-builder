@@ -617,6 +617,13 @@ describe('renderRunView', () => {
 		expect(renderRunView(inProgress, { maxLogLines: 200, now: NOW }).effort).toBeNull()
 	})
 
+	test('carries the raw plan markdown through to the view, or null when the caller read none', () => {
+		const snapshot = parseRunSnapshot({ metaText: JSON.stringify(sampleRunMeta()), logText: '' })
+		expect(renderRunView(snapshot, { maxLogLines: 200, now: NOW, plan: '# Plan\n\nstep one' }).plan).toBe('# Plan\n\nstep one')
+		expect(renderRunView(snapshot, { maxLogLines: 200, now: NOW, plan: null }).plan).toBeNull()
+		expect(renderRunView(snapshot, { maxLogLines: 200, now: NOW }).plan).toBeNull()
+	})
+
 	test('truncates the recent log to the last maxLogLines events', () => {
 		const lines: string[] = []
 		for (let i = 0; i < 10; i++) {
