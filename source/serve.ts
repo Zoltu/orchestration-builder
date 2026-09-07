@@ -5,7 +5,7 @@ import { createWebServer } from './web/server.js'
 import { createBootstrapFailureHandler } from './web/bootstrap-failure.js'
 import { createSnapshotCache } from './web/snapshot-cache.js'
 import { createTaskSummarizer, type TaskSummarizer } from './web/summarize.js'
-import { applyDeploymentOverride, createAppendLog, createDeleteCheckpoint, createDockerSecretReader, createGuildLoader, createInterruptChannel, createInterruptQueue, createLlmCaller, createLlmFetch, createListRunIds, createModelInfoProbe, createReadProjectSettings, createReadRunCheckpointById, createReadRunMetaById, createReadRunSnapshotById, createReadRunSnapshotStats, createReadRunSummaryById, createRunDirectory, createRunState, createRunSubmission, createSleep, createToolHandlers, createWebHumanBackend, createWriteCheckpoint, createWriteMeta, createWriteProjectSettings, createWriteRunSummary, MODEL_PROBE_TIMEOUT_MS, parseModelInfo, reconcileRunsOnStartup, resolveDeploymentConfig, resolveDeploymentOverride, resolveKagiApiKey, resolveSecret, resumeExecutor, runExecutor, validateDeploymentFileConfig, validateDeploymentRoleReferences, ConfigurationError, ValidationError, type ExecutorDependencies, type InterruptChannel, type LoadedGuild, type LlmCaller, type ModelApiProbe, type ResumeRun, type RunCheckpoint, type StartRun, type WebHumanBackend } from './executor/index.js'
+import { applyDeploymentOverride, createAppendLog, createDeleteCheckpoint, createDockerSecretReader, createGuildLoader, createInterruptChannel, createInterruptQueue, createLlmCaller, createLlmFetch, createListRunIds, createModelInfoProbe, createPlanToolHandlers, createReadProjectSettings, createReadRunCheckpointById, createReadRunMetaById, createReadRunSnapshotById, createReadRunSnapshotStats, createReadRunSummaryById, createRunDirectory, createRunState, createRunSubmission, createSleep, createToolHandlers, createWebHumanBackend, createWriteCheckpoint, createWriteMeta, createWriteProjectSettings, createWriteRunSummary, generateRunId, MODEL_PROBE_TIMEOUT_MS, parseModelInfo, reconcileRunsOnStartup, resolveDeploymentConfig, resolveDeploymentOverride, resolveKagiApiKey, resolveSecret, resumeExecutor, runExecutor, validateDeploymentFileConfig, validateDeploymentRoleReferences, ConfigurationError, ValidationError, type ExecutorDependencies, type InterruptChannel, type LoadedGuild, type LlmCaller, type ModelApiProbe, type ResumeRun, type RunCheckpoint, type StartRun, type WebHumanBackend } from './executor/index.js'
 
 const DEPLOYMENT_FILE_ENV_VAR = 'ORCHESTRATOR_DEPLOYMENT_FILE'
 const PORT_ENV_VAR = 'PORT'
@@ -25,13 +25,6 @@ const MAX_PORT = 65535
 const INTERRUPT_EXIT_CODE = 130
 // The snapshot cache needs to hold only the run the operator is viewing (plus the one they may switch back to); the run list bypasses it entirely.
 const SNAPSHOT_CACHE_MAX_ENTRIES = 4
-
-function generateRunId(now: Date): string {
-	const pad = (n: number) => n.toString().padStart(2, '0')
-	const date = `${now.getUTCFullYear()}${pad(now.getUTCMonth() + 1)}${pad(now.getUTCDate())}`
-	const time = `${pad(now.getUTCHours())}${pad(now.getUTCMinutes())}${pad(now.getUTCSeconds())}`
-	return `run-${date}-${time}`
-}
 
 // Accepts only plain decimal digit strings so forms like `0x1a`, `1e3`, `8080.0`, or ` 8080 ` are rejected rather than silently coerced by Number().
 function parsePort(value: string | undefined, fallback: number): number {
@@ -59,11 +52,15 @@ async function withRunBindings<T>(config: {
 	workspaceRootPath: string
 	runsBaseDir: string
 }, runId: string, invoke: (dependencies: ExecutorDependencies) => Promise<T>): Promise<T> {
-	const additionalToolHandlers = createToolHandlers({
-		workspaceRoot: config.workspaceRootPath,
-		defaultToolTimeoutSeconds: config.loadedGuild.deployment.executor.defaultToolTimeoutSeconds,
-		kagiApiKey: config.kagiApiKey,
-	})
+	const additionalToolHandlers = {
+		...createToolHandlers({
+			workspaceRoot: config.workspaceRootPath,
+			defaultToolTimeoutSeconds: config.loadedGuild.deployment.executor.defaultToolTimeoutSeconds,
+			kagiApiKey: config.kagiApiKey,
+		}),
+		// Plan handlers are bound per run because the plan document lives at a fixed location under this run's directory.
+		...createPlanToolHandlers({ runsBaseDir: config.runsBaseDir, runId, workspaceRoot: config.workspaceRootPath }),
+	}
 	const appendLog = createAppendLog(runId, config.runsBaseDir)
 	// The human backend is shared with the web API; bind the active run's log so ask_human and human_answer events land in this run's log.jsonl for the question-history view.
 	config.humanBackend.bindRunLog(appendLog)

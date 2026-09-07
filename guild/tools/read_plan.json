@@ -1,0 +1,33 @@
+{
+	"name": "read_plan",
+	"description": "Read the plan document for a run. Returns the plan content plus a truncated flag and the total character count; content past the size cap is cut off with a truncation marker. By default reads the current run's plan; pass runId to read another run's plan. A run that has not written a plan returns an unavailable result.",
+	"humanLabel": {
+		"detailed": ["Read Plan"],
+		"friendly": ["Read Plan"],
+		"whimsical": ["Open the Map"]
+	},
+	"humanDescription": {
+		"detailed": ["Reads a run's plan document."],
+		"friendly": ["Read the plan."],
+		"whimsical": ["Unroll the plan."]
+	},
+	"humanCallLabel": {
+		"detailed": ["role {sourceRole} is invoking tool {destinationRole} (stack {stack})"],
+		"friendly": ["{source} is reading the plan"],
+		"whimsical": ["{source} is unrolling the plan", "{source} is opening the map", "{source} is checking the route"]
+	},
+	"humanWorkingLabel": {
+		"detailed": ["tool {participantRole} is reading the plan"],
+		"friendly": ["Reading the plan"],
+		"whimsical": ["Unrolling the plan", "Opening the map", "Checking the route", "Reading the signs"]
+	},
+	"parameters": {
+		"type": "object",
+		"properties": {
+			"runId": {
+				"type": "string",
+				"description": "Optional run id (run-YYYYMMDD-HHMMSS) whose plan to read. Omit it to read the current run's plan."
+			}
+		}
+	}
+}

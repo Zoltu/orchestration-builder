@@ -1,0 +1,36 @@
+{
+	"name": "write_plan",
+	"description": "Replace the current run's plan document with the given content. The write is a full overwrite: the previous plan is discarded, so always pass the complete document rather than a patch. The plan location is fixed by the run; there is no path parameter.",
+	"humanLabel": {
+		"detailed": ["Write Plan"],
+		"friendly": ["Write Plan"],
+		"whimsical": ["Draw the Map"]
+	},
+	"humanDescription": {
+		"detailed": ["Writes a run's plan document."],
+		"friendly": ["Write the plan."],
+		"whimsical": ["Draw the map."]
+	},
+	"humanCallLabel": {
+		"detailed": ["role {sourceRole} is invoking tool {destinationRole} (stack {stack})"],
+		"friendly": ["{source} is writing the plan"],
+		"whimsical": ["{source} is drawing the map", "{source} is charting the course", "{source} is drafting the route"]
+	},
+	"humanWorkingLabel": {
+		"detailed": ["tool {participantRole} is writing the plan"],
+		"friendly": ["Writing the plan"],
+		"whimsical": ["Drawing the map", "Charting the course", "Drafting the route", "Marking the trail"]
+	},
+	"parameters": {
+		"type": "object",
+		"required": [
+			"content"
+		],
+		"properties": {
+			"content": {
+				"type": "string",
+				"description": "The complete plan document. It replaces the previous plan in full."
+			}
+		}
+	}
+}

@@ -9,6 +9,7 @@ import { ERROR_KINDS } from '../executor/errors.js'
 import { createGuildLoader, type LoadedGuildFiles } from '../executor/loader.js'
 import { createRoleRegistry } from '../executor/role-registry.js'
 import { createToolHandlers } from '../executor/tools.js'
+import { createPlanToolHandlers } from '../executor/tools/plan.js'
 import type { HumanFacingText, ToolManifest } from '../executor/types.js'
 import { isNonEmptyStringArray, validateToolManifest } from '../executor/validation.js'
 
@@ -67,12 +68,12 @@ const expectedRoles = [
 
 const expectedToolNames = new Set([
 	'agent', 'finish', 'context_info', 'edit_context', 'ask_human',
-	'list_directory', 'glob_files', 'read_file', 'read_file_partial', 'search_text', 'write_file', 'fetch_url', 'typecheck', 'test',
+	'list_directory', 'glob_files', 'read_file', 'read_file_partial', 'search_text', 'write_file', 'read_plan', 'write_plan', 'fetch_url', 'typecheck', 'test',
 	'run_shell', 'repo_map', 'web_search',
 	'trigger_interrupt', 'list_role_messages', 'read_message_window', 'search_role_blocks', 'recent_role_tool_calls',
 ])
 
-const nativeToolNames = new Set(['list_directory', 'glob_files', 'read_file', 'read_file_partial', 'search_text', 'write_file', 'fetch_url', 'typecheck', 'test', 'run_shell', 'repo_map', 'web_search'])
+const nativeToolNames = new Set(['list_directory', 'glob_files', 'read_file', 'read_file_partial', 'search_text', 'write_file', 'read_plan', 'write_plan', 'fetch_url', 'typecheck', 'test', 'run_shell', 'repo_map', 'web_search'])
 
 const builtInToolNames = new Set(['agent', 'finish', 'context_info', 'edit_context', 'ask_human', 'trigger_interrupt', 'list_role_messages', 'read_message_window', 'search_role_blocks', 'recent_role_tool_calls'])
 
@@ -89,6 +90,8 @@ const expectedSignatures: ExpectedSignature[] = [
 	{ file: 'read_file_partial.json', required: ['path', 'offset', 'limit'], properties: ['path', 'offset', 'limit'] },
 	{ file: 'search_text.json', required: ['pattern'], properties: ['pattern', 'paths'] },
 	{ file: 'write_file.json', required: ['path', 'content'], properties: ['path', 'content'] },
+	{ file: 'read_plan.json', required: [], properties: ['runId'] },
+	{ file: 'write_plan.json', required: ['content'], properties: ['content'] },
 	{ file: 'fetch_url.json', required: ['url'], properties: ['url', 'method'] },
 	{ file: 'web_search.json', required: ['query'], properties: ['query', 'limit'] },
 	{ file: 'repo_map.json', required: [], properties: ['path'] },
@@ -287,7 +290,11 @@ function checkManifests(): void {
 	const duplicateNames = manifestNames.filter((name, index) => manifestNames.indexOf(name) !== index)
 	check(new Set(manifestNames).size === manifestNames.length, `guild/tools: duplicate manifest names: ${[...new Set(duplicateNames)].join(', ')}`)
 
-	const nativeHandlers = createToolHandlers({ workspaceRoot: manifestDir, defaultToolTimeoutSeconds: 30 })
+	// Plan handlers close over their run's directory (they are bound per run in the server), so the gate constructs them over fixture bindings it never invokes, solely to compare the full native handler table.
+	const nativeHandlers = {
+		...createToolHandlers({ workspaceRoot: manifestDir, defaultToolTimeoutSeconds: 30 }),
+		...createPlanToolHandlers({ runsBaseDir: manifestDir, runId: 'run-19700101-000000', workspaceRoot: repoRoot }),
+	}
 	checkSameSet('native tool handler table', new Set(Object.keys(nativeHandlers)), nativeToolNames)
 	const builtInHandlers = createBuiltInToolHandlers({
 		spawnAgent: async () => ({ status: 'success', summary: '' }),

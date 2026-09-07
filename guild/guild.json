@@ -23,7 +23,7 @@
 		},
 		"planner": {
 			"systemPrompt": "prompts/planner.md",
-			"tools": ["list_directory", "glob_files", "read_file", "read_file_partial", "search_text", "repo_map", "write_file", "finish"],
+			"tools": ["list_directory", "glob_files", "read_file", "read_file_partial", "search_text", "repo_map", "read_plan", "write_plan", "finish"],
 			"label": {
 				"detailed": ["Planner"],
 				"friendly": ["Planner"],
@@ -42,7 +42,7 @@
 		},
 		"coder": {
 			"systemPrompt": "prompts/coder.md",
-			"tools": ["list_directory", "glob_files", "read_file", "read_file_partial", "search_text", "repo_map", "write_file", "fetch_url", "typecheck", "test", "run_shell", "finish"],
+			"tools": ["list_directory", "glob_files", "read_file", "read_file_partial", "read_plan", "search_text", "repo_map", "write_file", "fetch_url", "typecheck", "test", "run_shell", "finish"],
 			"label": {
 				"detailed": ["Coder"],
 				"friendly": ["Coder"],
@@ -213,7 +213,7 @@
 		},
 		"acceptance_reviewer": {
 			"systemPrompt": "prompts/acceptance_reviewer.md",
-			"tools": ["list_directory", "glob_files", "read_file", "read_file_partial", "search_text", "repo_map", "finish"],
+			"tools": ["list_directory", "glob_files", "read_file", "read_file_partial", "read_plan", "search_text", "repo_map", "finish"],
 			"label": {
 				"detailed": ["Acceptance Reviewer"],
 				"friendly": ["Acceptance Reviewer"],
@@ -321,6 +321,8 @@
 		"tools/search_text.json",
 		"tools/repo_map.json",
 		"tools/write_file.json",
+		"tools/read_plan.json",
+		"tools/write_plan.json",
 		"tools/fetch_url.json",
 		"tools/web_search.json",
 		"tools/typecheck.json",

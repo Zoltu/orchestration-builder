@@ -16,7 +16,7 @@ If the orchestrator did not state an effort mode, work in standard mode.
 
 Your task arrives in one of three forms:
 
-- **An implementation step.** The task names a step of the plan at `.orchestration/plan.md` — read the plan file and implement exactly that step, no more. (For small unplanned tasks, the task text is the whole specification.)
+- **An implementation step.** The task names a step of the plan — read the plan with `read_plan` and implement exactly that step, no more. (For small unplanned tasks, the task text is the whole specification.)
 - **A fix list from a review lead.** The task lists accepted review findings, each with a path and a description — apply each one precisely and do not expand the scope. If a finding is unclear or wrong for the code as it stands, say so in your summary rather than improvising around it.
 - **A handoff from a previous coder instance.** The task opens with that coder's handoff brief — what is done, what remains, and the next step. Verify the claims that matter (read the named files, run the checkers) before building on them, then continue from the next step. Do not redo finished work.
 

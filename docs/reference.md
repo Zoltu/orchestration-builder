@@ -188,6 +188,8 @@ Native tools are implemented in the executor and operate against the mounted wor
 
 - `read_file` — read file contents (supports partial reads)
 - `write_file` — write or overwrite a file
+- `read_plan` — read a run's plan document, capped with a truncation flag (the current run by default, or another run by `runId`)
+- `write_plan` — replace the current run's plan document in full (the location is fixed per run; no path parameter)
 - `list_directory` — list directory entries
 - `repo_map` — symbol-level map of the workspace's TypeScript/JavaScript sources: one line per top-level declaration, grouped by file (tests, declaration files, vendored code, hidden directories, and build output excluded)
 - `run_shell` — run a shell command (via `sh -c`, with the workspace as the working directory)
@@ -455,7 +457,8 @@ Run bookkeeping lives alongside the project under `.orchestration/runs/`:
 ├── runs/<run_id>/
 │   ├── meta.json      # run id, guild path, start/end time, status (incl. interrupted), effort, final result
 │   ├── state.json     # checkpoint: the runnable role stack, written atomically at every safe point; deleted on terminal meta
-│   └── log.jsonl      # one JSON object per line: effort_set, run_resumed, llm calls, tool calls, errors
+│   ├── log.jsonl      # one JSON object per line: effort_set, run_resumed, llm calls, tool calls, errors
+│   └── plan.md        # the run's plan document (write_plan/read_plan)
 └── settings.json      # project-wide settings (currently the default effort)
 ```
 
