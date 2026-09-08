@@ -4,7 +4,7 @@ import type { DeploymentConfig, EffortLevel, GuildConfig, LogLevel, ToolManifest
 import { isEffortLevel, isLogLevel, isObject, isTerminalRunStatus } from '../executor/validation.js'
 import type { RunState } from '../executor/run-state.js'
 import type { RunSubmission } from '../executor/run-submission.js'
-import { paginateLogEvents, parseRunMeta, renderConfig, renderProjectSettings, renderPendingQuestions, renderRunView, formatLogAsText, formatLogDetailSections } from './render.js'
+import { paginateLogEvents, parseRunMeta, renderConfig, renderProjectSettings, renderPendingQuestions, renderRunView, formatLogAsText, formatLogDetailSections, foldLlmCallSent } from './render.js'
 import { createRunListCache, type ReadRunListSummary } from './run-list-cache.js'
 import { deriveInteractionModel, deriveInteractionOperationDetail } from './interaction-model-adapter.js'
 import { DEMO_SCENARIOS, deriveDemoFrameModel, deriveDemoFrameOperationDetail, findDemoScenario } from './demo-fixtures.js'
@@ -76,13 +76,14 @@ function runLogPage(readRunSnapshot: ReadRunSnapshot, readRunSnapshotStats: Read
 	const events = snapshot.logEvents
 	const offset = parseNonNegativeInt(query.get('offset'), 0)
 	const limit = Math.min(parseNonNegativeInt(query.get('limit'), LOG_WINDOW_DEFAULT_LIMIT), LOG_WINDOW_MAX_LIMIT)
-	// ?detail=<index> serves one event's paired detail sections (the sent/received/arguments/result bodies) on demand, so a client renders a row's raw view without the window shipping every body. The index is the event's log-wide position — the same identity the window rows and the run view's recentLog carry.
+	// ?detail=<index> serves one event's paired detail sections (the sent/received/arguments/result bodies) on demand, so a client renders a row's raw view without the window shipping every body. The index is the event's log-wide position — the same identity the window rows and the run view's recentLog carry. An llm_call event carries only its conversation slice (the delta protocol), so the fold reconstructs the full conversation server-side and the raw-detail view is identical for delta and full-snapshot logs.
 	const detailParam = query.get('detail')
 	if (detailParam !== null) {
 		const detailIndex = parseStrictNonNegativeInt(detailParam)
-		const event = detailIndex !== undefined ? events[detailIndex] : undefined
+		if (detailIndex === undefined) return json({ ok: false, error: 'not_found' }, 404)
+		const event = events[detailIndex]
 		if (event === undefined) return json({ ok: false, error: 'not_found' }, 404)
-		return json({ index: detailIndex, detailSections: formatLogDetailSections(event) })
+		return json({ index: detailIndex, detailSections: formatLogDetailSections(foldLlmCallSent(events, detailIndex)) })
 	}
 	// ?format=text renders the requested page as plain text with a download disposition, so export reuses the server-side formatter rather than duplicating it in the client.
 	if (query.get('format') === 'text') {

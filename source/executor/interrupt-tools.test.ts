@@ -216,6 +216,40 @@ describe('cross-role context tools', () => {
 		expect((await handlerFor(handlers, 'context_info')({ targetRole: 'context_manager-2-2' })).kind).toBe('invalid_arguments')
 	})
 
+	test('every edit operation invalidates the target llm_call delta baseline so its next emission is a full snapshot', async () => {
+		for (const operations of [
+			[{ op: 'drop', range: [2, 4] }],
+			[{ op: 'strip_reasoning', range: [2, 3] }],
+			[{ op: 'replace', index: 2, content: 'rewritten' }],
+		]) {
+			const { context, target } = makeContext()
+			target.logSentBaseline = 4
+			const result = await handlerFor(createBuiltInToolHandlers(context), 'edit_context')({ targetRole: 'coder-1-1', operations })
+			expect(result.kind).toBe('success')
+			expect(target.logSentBaseline).toBeUndefined()
+		}
+	})
+
+	test('a self edit invalidates the caller\u2019s own llm_call delta baseline', async () => {
+		const { context, callerState } = makeContext()
+		callerState.logSentBaseline = 4
+		const handlers = createBuiltInToolHandlers(context)
+		const result = await handlerFor(handlers, 'edit_context')({ operations: [{ op: 'replace', index: 2, content: 'rewritten' }] })
+		expect(result.kind).toBe('success')
+		expect(callerState.logSentBaseline).toBeUndefined()
+	})
+
+	test('a rejected edit batch leaves the target history and llm_call delta baseline intact', async () => {
+		const { context, target } = makeContext()
+		target.logSentBaseline = 4
+		const handlers = createBuiltInToolHandlers(context)
+		// A batch that fails partway (the replace index is out of range) is rejected without applying anything: the history keeps all four messages and the baseline still reads 4, so the target's next emission remains a delta off its last logged request.
+		const result = await handlerFor(handlers, 'edit_context')({ targetRole: 'coder-1-1', operations: [{ op: 'drop', range: [2, 4] }, { op: 'replace', index: 99, content: 'nope' }] })
+		expect(result.kind).toBe('invalid_arguments')
+		expect(target.history.length).toBe(4)
+		expect(target.logSentBaseline).toBe(4)
+	})
+
 	test('edit operations must not touch message indices 0 and 1, and a mixed batch rejects atomically', async () => {
 		const { context, target, callerState } = makeContext()
 		const handlers = createBuiltInToolHandlers(context)

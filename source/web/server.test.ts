@@ -245,6 +245,26 @@ snapshots.set('run-tree', {
 	].join('\n'),
 })
 
+// A run whose llm_call events carry the delta protocol (docs/reference.md "Log events"): turn 1 is a full snapshot, turn 2 a delta slice, and a third event is the full-snapshot twin of turn 2 — what a pre-delta logger would have written for the same conversation — so the detail endpoint's server-side fold can be compared against it byte for byte.
+snapshots.set('run-delta', {
+	metaText: JSON.stringify({
+		runId: 'run-delta',
+		guildPath: 'guild',
+		benchmarkPath: 'bench',
+		task: 'task for run-delta',
+		status: 'success',
+		startTime: '2026-01-01T00:00:00.000Z',
+		endTime: '2026-01-01T00:01:00.000Z',
+	}),
+	logText: [
+		JSON.stringify({ timestamp: '2026-01-01T00:00:01.000Z', type: 'role_start', payload: { role: 'coder', depth: 0, task: 'task for run-delta' } }),
+		JSON.stringify({ timestamp: '2026-01-01T00:00:02.000Z', type: 'llm_call', payload: { role: 'coder', messageCount: 2, sentFrom: 0, sent: [{ role: 'system', content: 'p' }, { role: 'user', content: 'task for run-delta' }], received: { content: 'working', toolCalls: [] }, usage: { promptTokens: 10, completionTokens: 5, totalTokens: 15 } } }),
+		JSON.stringify({ timestamp: '2026-01-01T00:00:03.000Z', type: 'llm_call', payload: { role: 'coder', messageCount: 4, sentFrom: 2, sent: [{ role: 'assistant', content: 'working', tool_calls: [{ id: 'c1', type: 'function', function: { name: 'write_file', arguments: '{"path":"x"}' } }] }, { role: 'tool', content: 'ok' }], received: { content: 'done', toolCalls: [] }, finishReason: 'stop', usage: { promptTokens: 30, completionTokens: 5, totalTokens: 35 } } }),
+		JSON.stringify({ timestamp: '2026-01-01T00:00:04.000Z', type: 'llm_call', payload: { role: 'coder', messageCount: 4, sentFrom: 0, sent: [{ role: 'system', content: 'p' }, { role: 'user', content: 'task for run-delta' }, { role: 'assistant', content: 'working', tool_calls: [{ id: 'c1', type: 'function', function: { name: 'write_file', arguments: '{"path":"x"}' } }] }, { role: 'tool', content: 'ok' }], received: { content: 'done', toolCalls: [] }, finishReason: 'stop', usage: { promptTokens: 30, completionTokens: 5, totalTokens: 35 } } }),
+		JSON.stringify({ timestamp: '2026-01-01T00:00:05.000Z', type: 'role_finished', payload: { role: 'coder', depth: 0, status: 'success' } }),
+	].join('\n'),
+})
+
 // A run with a real (non-control) tool call and result carrying raw arguments and a full result, plus role task and summary text — the detail material the flow endpoint's ?operation= variant resolves on demand.
 snapshots.set('run-flow-details', {
 	metaText: JSON.stringify({
@@ -565,19 +585,20 @@ describe('GET /api/runs (list)', () => {
 		expect(response.status).toBe(200)
 		const list = await response.json()
 		expect(Array.isArray(list)).toBe(true)
-		expect(list.length).toBe(12)
+		expect(list.length).toBe(13)
 		expect(list[0].runId).toBe('run-tree')
 		expect(list[1].runId).toBe('run-retry')
 		expect(list[2].runId).toBe('run-long')
 		expect(list[3].runId).toBe('run-interrupted')
 		expect(list[4].runId).toBe('run-flow-details')
 		expect(list[5].runId).toBe('run-effort')
-		expect(list[6].runId).toBe('run-cached')
-		expect(list[7].runId).toBe('run-active')
-		expect(list[8].runId).toBe('run-3')
-		expect(list[9].runId).toBe('run-20260101-000000')
-		expect(list[10].runId).toBe('run-2')
-		expect(list[11].runId).toBe('run-1')
+		expect(list[6].runId).toBe('run-delta')
+		expect(list[7].runId).toBe('run-cached')
+		expect(list[8].runId).toBe('run-active')
+		expect(list[9].runId).toBe('run-3')
+		expect(list[10].runId).toBe('run-20260101-000000')
+		expect(list[11].runId).toBe('run-2')
+		expect(list[12].runId).toBe('run-1')
 		expect(list[3]).toEqual({
 			runId: 'run-interrupted',
 			status: 'interrupted',
@@ -600,7 +621,7 @@ describe('GET /api/runs (list)', () => {
 			error: null,
 			summary: null,
 		})
-		expect(list[10]).toEqual({
+		expect(list[11]).toEqual({
 			runId: 'run-2',
 			status: 'error',
 			task: 'task for run-2',
@@ -860,6 +881,31 @@ describe('GET /api/runs/:id/log', () => {
 		expect(body.index).toBe(1)
 		expect(body.detailSections.map((s: { label: string }) => s.label)).toEqual(['sent', 'received', 'finish reason', 'usage'])
 		expect(body.detailSections[2].content).toBe('tool_calls')
+	})
+
+	test('detail=<index> folds an llm_call delta into the full conversation, identical to a full-snapshot twin', async () => {
+		const { handler } = createHandlerHarness()
+		// run-delta's event 2 is the delta turn; event 3 is the same conversation logged as a full snapshot.
+		const deltaResponse = await handler(get('/api/runs/run-delta/log?detail=2'))
+		expect(deltaResponse.status).toBe(200)
+		const delta = await deltaResponse.json()
+		expect(delta.index).toBe(2)
+		expect(delta.detailSections.map((s: { label: string }) => s.label)).toEqual(['sent', 'received', 'finish reason', 'usage'])
+		const twinResponse = await handler(get('/api/runs/run-delta/log?detail=3'))
+		const twin = await twinResponse.json()
+		expect(delta.detailSections).toEqual(twin.detailSections)
+		// The folded sent section carries the whole 4-message conversation, not just the delta slice.
+		const sentSection = delta.detailSections.find((s: { label: string }) => s.label === 'sent')
+		expect(sentSection.content).toHaveLength(4)
+		expect(sentSection.content[1]).toEqual({ role: 'user', content: 'task for run-delta' })
+	})
+
+	test('detail=<index> on the full-snapshot turn serves it unchanged', async () => {
+		const { handler } = createHandlerHarness()
+		const response = await handler(get('/api/runs/run-delta/log?detail=1'))
+		const body = await response.json()
+		const sentSection = body.detailSections.find((s: { label: string }) => s.label === 'sent')
+		expect(sentSection.content).toEqual([{ role: 'system', content: 'p' }, { role: 'user', content: 'task for run-delta' }])
 	})
 
 	test('detail=<index> serves the raw tool arguments and the full un-truncated result', async () => {

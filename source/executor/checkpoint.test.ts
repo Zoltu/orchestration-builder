@@ -185,6 +185,22 @@ describe('isRunCheckpoint', () => {
 		expect(isRunCheckpoint(checkpoint)).toBe(true)
 	})
 
+	test('accepts a well-formed llm_call delta baseline on a role state and rejects a malformed one', () => {
+		const withLeafBaseline = (logSentBaseline: unknown) => {
+			const checkpoint = sampleCheckpoint()
+			return {
+				...checkpoint,
+				frames: checkpoint.frames.map((frame, index) => (index === 1 ? { ...frame, roleState: { ...frame.roleState, logSentBaseline } } : frame)),
+			}
+		}
+		const wellFormed = withLeafBaseline(4)
+		expect(isRunCheckpoint(wellFormed)).toBe(true)
+		const copy: unknown = JSON.parse(JSON.stringify(wellFormed))
+		expect(isRunCheckpoint(copy)).toBe(true)
+		expect(isRunCheckpoint(withLeafBaseline('two'))).toBe(false)
+		expect(isRunCheckpoint(withLeafBaseline(-1))).toBe(false)
+	})
+
 	test('accepts a continuesFrom lineage on the entry frame and round-trips it through JSON', () => {
 		const checkpoint = sampleCheckpoint()
 		const root = checkpoint.frames[0]

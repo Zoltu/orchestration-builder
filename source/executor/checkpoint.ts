@@ -84,6 +84,7 @@ function isRoleState(value: unknown): value is RoleState {
 	if (!isNonNegativeNumber(value.contextExceededAttempts)) return false
 	if (!isNonNegativeNumber(value.loopCheckToolCallWatermark)) return false
 	if (!isNonNegativeNumber(value.loopCheckTokenWatermark)) return false
+	if (value.logSentBaseline !== undefined && !isNonNegativeInteger(value.logSentBaseline)) return false
 	if (value.contextPressureNotice !== undefined && value.contextPressureNotice !== 'pending' && value.contextPressureNotice !== 'sent') return false
 	if (value.contextCompactionPending !== undefined) {
 		if (!isObject(value.contextCompactionPending)) return false

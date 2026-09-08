@@ -2176,3 +2176,220 @@ describe('run persistence and resumption', () => {
 		expect(starts).toEqual(['coder-1-1'])
 	})
 })
+
+describe('runRole — llm_call delta protocol', () => {
+	const echoManifest: ToolManifest = {
+		name: 'echo',
+		description: 'Echoes its arguments.',
+		parameters: { type: 'object', properties: {} },
+	}
+
+	function echoCall(id: string): ToolCall {
+		return { id, type: 'function', function: { name: 'echo', arguments: '{}' } }
+	}
+
+	function bigCall(id: string): ToolCall {
+		return { id, type: 'function', function: { name: 'big', arguments: '{}' } }
+	}
+
+	function buildEchoGuild(roles: Record<string, RoleDefinition>, extras: Partial<DeploymentConfig> = {}): LoadedGuild {
+		let guild = withTool(buildGuild(roles, 'main', extras), echoManifest)
+		guild = withTool(guild, { name: 'edit_context', description: 'Edit context.', parameters: { type: 'object', required: ['operations'], properties: { operations: { type: 'array' } } } })
+		return guild
+	}
+
+	function llmCallsOf(events: LogEvent[], role: string): LogEvent[] {
+		return events.filter((e) => e.type === 'llm_call' && payloadField(e, 'role') === role)
+	}
+
+	function numberOf(event: LogEvent, field: string): number {
+		const value = payloadField(event, field)
+		if (typeof value !== 'number') throw new Error(`expected ${field} to be a number`)
+		return value
+	}
+
+	function sentOf(event: LogEvent): Array<{ role: string; content: string }> {
+		const sent = payloadField(event, 'sent')
+		if (!Array.isArray(sent) || !sent.every((entry) => isRecord(entry) && typeof entry['role'] === 'string' && typeof entry['content'] === 'string')) throw new Error('expected the shaped sent message list')
+		return sent
+	}
+
+	// Mirrors the payload's message shaping so a fold can be compared against the request the model actually received.
+	function shapedRequest(messages: Message[]): Array<{ role: string; content: string; tool_calls?: Array<{ id: string; type: string; function: { name: string; arguments: string } }> }> {
+		return messages.map((m) => {
+			if (m.tool_calls !== undefined && m.tool_calls.length > 0) {
+				return {
+					role: m.role,
+					content: m.content,
+					tool_calls: m.tool_calls.map((c) => ({ id: c.id, type: c.type, function: { name: c.function.name, arguments: c.function.arguments } })),
+				}
+			}
+			return { role: m.role, content: m.content }
+		})
+	}
+
+	test('the first llm_call is a full snapshot and later turns are deltas that chain off it', async () => {
+		const guild = buildEchoGuild({ main: { systemPrompt: 'p', tools: ['echo', 'finish'] } })
+		const llm = new FakeLlm()
+		llm.responses = [
+			success([echoCall('e1')]),
+			success([echoCall('e2')]),
+			success([finishCall({ status: 'success', summary: 'done' })]),
+		]
+		const { deps, events } = makeDeps(llm)
+		const depsWithEcho: EngineDependencies = { ...deps, additionalToolHandlers: { echo: echoHandler } }
+
+		await runRole(depsWithEcho, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'do it' })
+
+		const llmCalls = llmCallsOf(events, 'main')
+		expect(llmCalls.length).toBe(3)
+		// Turn 1 logs the whole request: sentFrom 0 with sent covering every message.
+		const first = defined(llmCalls[0], 'first llm_call')
+		expect(numberOf(first, 'sentFrom')).toBe(0)
+		expect(numberOf(first, 'messageCount')).toBe(2)
+		expect(sentOf(first).length).toBe(2)
+		// The payload carries the role-instance id (the same one role_start carries), so a role's turns stay groupable per instance even when a same-named child's events interleave.
+		expect(payloadField(first, 'roleId')).toBe('main-0-1')
+		// Later turns log only the messages added since the previous logged request: each delta starts exactly where that request ended, and its length is the difference from its size.
+		const second = defined(llmCalls[1], 'second llm_call')
+		expect(numberOf(second, 'sentFrom')).toBe(2)
+		expect(numberOf(second, 'messageCount')).toBe(4)
+		expect(sentOf(second).length).toBe(2)
+		const third = defined(llmCalls[2], 'third llm_call')
+		expect(numberOf(third, 'sentFrom')).toBe(4)
+		expect(numberOf(third, 'messageCount')).toBe(6)
+		expect(sentOf(third).length).toBe(2)
+		// The deltas concatenate to exactly the requests the model received, so log growth stays linear in the turns (2+2+2 instead of 2+4+6).
+		const foldedSecond = [...sentOf(first), ...sentOf(second)]
+		expect(foldedSecond).toEqual(shapedRequest(defined(llm.calls[1], 'second request').messages))
+		expect([...foldedSecond, ...sentOf(third)]).toEqual(shapedRequest(defined(llm.calls[2], 'third request').messages))
+	})
+
+	test('a cross-role edit_context invalidates the suspended role’s baseline: its next llm_call is a full snapshot', async () => {
+		// Static budget 900 (window 1000 minus 100 reserved), so the default 0.8 threshold fires at 720 reported prompt tokens.
+		const guild = buildEchoGuild(
+			{
+				main: { systemPrompt: 'p', tools: ['echo', 'finish'] },
+				context_manager: { systemPrompt: 'cm', tools: ['edit_context', 'finish'] },
+			},
+			{
+				model: { ...baseModel, contextWindow: 1000, generation: { maxTokens: 100 } },
+				executor: { ...baseExecutor, contextHandlerRole: 'context_manager' },
+			},
+		)
+		const llm = new FakeLlm()
+		llm.responses = [
+			success([echoCall('e1')], { promptTokens: 800 }),
+			success([namedCall('ec1', 'edit_context', { targetRole: 'main-0-1', operations: [{ op: 'drop', range: [2, 4] }] })]),
+			success([finishCall({ status: 'success', summary: 'compacted' })]),
+			success([finishCall({ status: 'success', summary: 'main done' })], { promptTokens: 100 }),
+		]
+		const { deps, events } = makeDeps(llm)
+		const depsWithEcho: EngineDependencies = { ...deps, additionalToolHandlers: { echo: echoHandler } }
+
+		await runRole(depsWithEcho, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'do it' })
+
+		const mainCalls = llmCallsOf(events, 'main')
+		expect(mainCalls.length).toBe(2)
+		// Turn 1 was a full snapshot with a valid baseline of 2; the context manager's cross-role drop rewrote the suspended role's history, so the resumed turn must re-log everything it now sends.
+		expect(numberOf(defined(mainCalls[0], 'first main llm_call'), 'sentFrom')).toBe(0)
+		const resumed = defined(mainCalls[1], 'resumed main llm_call')
+		expect(numberOf(resumed, 'sentFrom')).toBe(0)
+		expect(numberOf(resumed, 'messageCount')).toBe(3)
+		expect(sentOf(resumed).length).toBe(3)
+		expect(sentOf(resumed)[2]?.content).toContain('[Platform notice — context compacted]')
+	})
+
+	test('a self edit_context invalidates the caller’s baseline: a replaced message is visible in the next full snapshot', async () => {
+		const guild = buildEchoGuild({ main: { systemPrompt: 'p', tools: ['echo', 'edit_context', 'finish'] } })
+		const llm = new FakeLlm()
+		llm.responses = [
+			success([echoCall('e1')]),
+			success([namedCall('ec1', 'edit_context', { operations: [{ op: 'replace', index: 2, content: 'rewritten' }] })]),
+			success([finishCall({ status: 'success', summary: 'done' })]),
+		]
+		const { deps, events } = makeDeps(llm)
+		const depsWithEcho: EngineDependencies = { ...deps, additionalToolHandlers: { echo: echoHandler } }
+
+		await runRole(depsWithEcho, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'do it' })
+
+		const llmCalls = llmCallsOf(events, 'main')
+		expect(llmCalls.length).toBe(3)
+		// Turn 2 was a plain delta; the replace then rewrote the history out from under the baseline.
+		expect(numberOf(defined(llmCalls[1], 'second llm_call'), 'sentFrom')).toBe(2)
+		const after = defined(llmCalls[2], 'third llm_call')
+		expect(numberOf(after, 'sentFrom')).toBe(0)
+		expect(numberOf(after, 'messageCount')).toBe(6)
+		expect(sentOf(after).length).toBe(6)
+		expect(sentOf(after)[2]?.content).toBe('rewritten')
+	})
+
+	test('a platform compaction (the naive backstop) forces the recovery turn back to a full snapshot', async () => {
+		const guild = buildEchoGuild(
+			{ main: { systemPrompt: 'p', tools: ['big', 'finish'] } },
+			{ contextPolicy: { maxToolOutputChars: 4000 } },
+		)
+		guild.tools['big'] = { name: 'big', description: 'returns a large payload', parameters: { type: 'object', properties: {} } }
+		const bigHandler: ToolHandler = () => ({ kind: 'success', data: { text: 'x'.repeat(2000) } })
+		const llm = new FakeLlm()
+		llm.responses = [
+			success([bigCall('b1')]),
+			success([bigCall('b2')]),
+			success([bigCall('b3')]),
+			contextExceeded(0, 1000),
+			success([finishCall({ status: 'success', summary: 'recovered' })]),
+		]
+		const { deps, events } = makeDeps(llm)
+		const depsWithBig: EngineDependencies = { ...deps, additionalToolHandlers: { big: bigHandler } }
+
+		await runRole(depsWithBig, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'do it' })
+
+		const llmCalls = llmCallsOf(events, 'main')
+		expect(llmCalls.length).toBe(4)
+		// Turns 1–3 chain as deltas; the backstop's truncation changes content without changing length, so the recovery turn must not trust the baseline.
+		expect(numberOf(defined(llmCalls[2], 'third llm_call'), 'sentFrom')).toBe(4)
+		const recovery = defined(llmCalls[3], 'recovery llm_call')
+		expect(numberOf(recovery, 'sentFrom')).toBe(0)
+		expect(numberOf(recovery, 'messageCount')).toBe(5)
+		expect(sentOf(recovery).length).toBe(5)
+		expect(sentOf(recovery)[4]?.content).toContain('[Platform notice — context window exceeded]')
+	})
+
+	test('a resumed role continues delta-ing from the checkpointed baseline instead of re-logging its conversation', async () => {
+		const guild = buildEchoGuild({
+			orchestrator: { systemPrompt: 'p', tools: ['agent', 'finish'] },
+			coder: { systemPrompt: 'c', tools: ['echo', 'finish'] },
+		})
+		// Drives orchestrator→coder with the coder making one echo call, so the checkpoint taken at the coder's next loop top carries its baseline from the turn it just logged.
+		const uninterruptedLlm = new FakeLlm()
+		uninterruptedLlm.responses = [
+			success([agentCall('coder', 'subtask')]),
+			success([echoCall('e1')]),
+			success([finishCall({ status: 'success', summary: 'child done' })]),
+			success([finishCall({ status: 'success', summary: 'parent done' })]),
+		]
+		const uninterruptedDeps = makeDeps(uninterruptedLlm)
+		await runRole({ ...uninterruptedDeps.deps, additionalToolHandlers: { echo: echoHandler } }, { loadedGuild: guild, depth: 0, roleName: 'orchestrator', task: 'do it' })
+		const checkpoint = defined(uninterruptedDeps.checkpoints[2], 'checkpoint at the coder\u2019s second loop top')
+		expect(checkpoint.frames[1]?.roleName).toBe('coder')
+		// The coder's turn-1 request was [system, task], so its baseline is 2 — and the fake sink's JSON copy proves the field survives the checkpoint round-trip validation.
+		expect(checkpoint.frames[1]?.roleState.logSentBaseline).toBe(2)
+
+		const resumedLlm = new FakeLlm()
+		resumedLlm.responses = [
+			success([finishCall({ status: 'success', summary: 'child done' })]),
+			success([finishCall({ status: 'success', summary: 'parent done' })]),
+		]
+		const { deps, events } = makeDeps(resumedLlm)
+
+		await resumeRoleStack(runRole, { ...deps, additionalToolHandlers: { echo: echoHandler } }, guild, checkpoint)
+
+		// The resumed coder's next request is its preserved 4-message conversation, logged as a delta from the preserved baseline — not a re-logged full snapshot.
+		const coderCalls = llmCallsOf(events, 'coder')
+		expect(coderCalls.length).toBe(1)
+		const resumedCall = defined(coderCalls[0], 'resumed coder llm_call')
+		expect(numberOf(resumedCall, 'sentFrom')).toBe(2)
+		expect(numberOf(resumedCall, 'messageCount')).toBe(4)
+		expect(sentOf(resumedCall).length).toBe(2)
+	})
+})

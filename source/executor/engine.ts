@@ -75,11 +75,12 @@ function shapeAssistantResponse(llmResult: { content?: string; reasoning?: strin
 	return shaped
 }
 
-// Builds the llm_call payload for a successful turn, carrying the sent message list, the received assistant response, the finishReason, and the per-call usage in one event so a reviewer can reconstruct the full turn from a single log entry.
+// Builds the llm_call payload for a successful turn, carrying the sent message slice, the received assistant response, the finishReason, and the per-call usage in one event so a reviewer can reconstruct the full turn from the log.
+// sentMessages is the slice of the role's conversation this request added: sentFrom is the slice's conversation index and messageCount the request's total size, so a full snapshot is sentFrom 0 with sent.length === messageCount. Logging only the slice keeps the log's growth O(turns) instead of O(turns²); docs/reference.md "Log events" documents the protocol and the fold that reconstructs a full conversation from the deltas.
+// roleId is the instance id role_start already carries: a role may spawn a same-named child (the depth guard is the only limit), so identity in the log is the instance, not the name — the fold matches on it.
 // This is emitted only on the success paths (continue/tool_calls and success-finished); the llm_unavailable and context_budget_exceeded paths log their own dedicated events and must not emit a misleading llm_call.
 // promptTokens is the full prompt bill (cached + uncached); cachedPromptTokens is the subset the endpoint served from its prompt cache, so the uncached prompt bill is promptTokens - cachedPromptTokens. The two are tracked separately because they are billed at different rates.
-function llmCallPayload(roleName: string, messages: Message[], llmResult: LlmCallResult): unknown {
-	const messageCount = messages.length
+function llmCallPayload(roleName: string, roleId: string, sentMessages: Message[], sentFrom: number, messageCount: number, llmResult: LlmCallResult): unknown {
 	if (llmResult.kind === 'success') {
 		const promptTokens = llmResult.usage.promptTokens
 		const completionTokens = llmResult.usage.completionTokens
@@ -92,8 +93,10 @@ function llmCallPayload(roleName: string, messages: Message[], llmResult: LlmCal
 		if (cachedPromptTokens !== undefined) usage['cachedPromptTokens'] = cachedPromptTokens
 		const payload: Record<string, unknown> = {
 			role: roleName,
+			roleId,
 			messageCount,
-			sent: messages.map(shapeSentMessage),
+			sentFrom,
+			sent: sentMessages.map(shapeSentMessage),
 			received: shapeAssistantResponse(llmResult),
 			usage,
 		}
@@ -490,9 +493,13 @@ async function executeRoleLoop(
 		})
 
 		const handling = handleLlmResult(llmResult, roleState, deps, context, config)
-		// llm_call is emitted after handleLlmResult so the sent message list, the received assistant response, finishReason, and per-call usage all land in one event. It is emitted only on the success paths (continue/tool_calls and success-finished): the llm_unavailable and context_budget_exceeded paths log their own dedicated events inside handleLlmResult and must not also emit a misleading llm_call.
+		// llm_call is emitted after handleLlmResult so the received assistant response, finishReason, and per-call usage all land in one event. It is emitted only on the success paths (continue/tool_calls and success-finished): the llm_unavailable and context_budget_exceeded paths log their own dedicated events inside handleLlmResult and must not also emit a misleading llm_call.
 		if (llmResult.kind === 'success') {
-			logEvent(deps.appendLog, 'llm_call', llmCallPayload(context.roleName, messages, llmResult))
+			// Delta protocol: a valid baseline (the request count of the role's last logged llm_call) slices the sent list down to the messages added since that call; an absent or out-of-range baseline — first turn, or a context edit or compaction that rewrote the history — falls back to the full snapshot. The baseline then advances to this request's size so the next event slices from here. The baseline indexes the request, which buildMessages derives one-to-one from the history.
+			const baseline = roleState.logSentBaseline
+			const sentFrom = baseline !== undefined && baseline <= messages.length ? baseline : 0
+			logEvent(deps.appendLog, 'llm_call', llmCallPayload(context.roleName, registryEntry.roleId, messages.slice(sentFrom), sentFrom, messages.length, llmResult))
+			roleState.logSentBaseline = messages.length
 		}
 		if (handling.kind === 'continue') continue
 		if (handling.kind === 'finished') return handling.card

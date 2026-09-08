@@ -51,6 +51,8 @@ export function applyContextBackstop(roleState: RoleState, deps: EngineDependenc
 		targetFraction: CONTEXT_RECOVERY_TARGET_FRACTION,
 	})
 	roleState.history = report.history
+	// The compaction rewrote the history out from under the llm_call delta baseline — truncation changes content without changing length, so the emission's length check cannot see it — forcing the role's next llm_call to log a full snapshot.
+	roleState.logSentBaseline = undefined
 	if (!report.fits) {
 		return createResultCard('error', 'Context window exceeded and the conversation cannot be compacted enough to continue', {
 			error: createToolError('context_budget_exceeded', 'Context window exceeded and the conversation cannot be compacted enough to continue'),

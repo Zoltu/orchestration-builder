@@ -657,14 +657,16 @@ describe('resumeExecutor', () => {
 		expect(persistence.state.metas.length).toBe(2)
 		expect(persistence.state.metas[0]?.continuesFrom).toBe('run-20260101-000000')
 		expect(persistence.state.meta?.continuesFrom).toBe('run-20260101-000000')
-		// The briefing lives only in the checkpointed history: no resumed turn's sent message list ever shows it twice (a re-derived briefing would double it in the entry role's history), and the entry role's own turns still carry it once.
+		// The briefing lives only in the checkpointed history. The resumed turns log their sent lists as deltas against the role's previous request, so the briefing no longer rides along in every event; what must hold is that no sent list ever shows it twice, and the entry role's preserved history — captured in the resumed run's own checkpoints — still carries it exactly once (a resume that re-derived the briefing would double it there).
 		const briefingCounts = persistence.state.events
 			.filter((e) => e.type === 'llm_call')
 			.map((e) => (isRecord(e.payload) && Array.isArray(e.payload['sent']) ? e.payload['sent'] : []))
 			.map((sent) => sent.filter(sentCarriesBriefing).length)
 		expect(briefingCounts.length).toBeGreaterThan(0)
 		expect(briefingCounts.every((count) => count <= 1)).toBe(true)
-		expect(briefingCounts.some((count) => count === 1)).toBe(true)
+		const resumedCheckpoint = persistence.state.checkpoints[0]
+		if (resumedCheckpoint === undefined) throw new Error('expected a post-resume checkpoint')
+		expect(resumedCheckpoint.frames[0]?.roleState.history.filter(sentCarriesBriefing).length).toBe(1)
 	})
 
 	test('lineage survives a second restart: post-resume checkpoints keep continuesFrom on the entry frame', async () => {

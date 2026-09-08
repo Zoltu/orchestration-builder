@@ -373,6 +373,54 @@ export function formatLogDetailSections(event: LogEvent): LogDetailSection[] | n
 	return null
 }
 
+// Folds an llm_call event's delta back into the full sent conversation (docs/reference.md "Log events" documents the wire protocol): the event's sent list starts at conversation index sentFrom, and the messages below it live on the role instance's earlier llm_call events. The walk goes backward over same-instance llm_call events — matched on roleId, falling back to the role name for events that predate it, since a role may spawn a same-named child whose interleaved events would corrupt a name-based walk — each contributing the head of its sent list down to the still-uncovered index; absent sentFrom reads as 0, so a legacy full-snapshot event both contributes and ends the walk. The walk stops once the covered range reaches index 0. Each request is its predecessor's plus appended messages, so the concatenated slices are element-identical to the request a full-snapshot event would have carried. Returns the event unchanged for anything that is not a delta-carrying llm_call (a full snapshot with sentFrom 0, or the standard level's body-less event), and never mutates the input events.
+export function foldLlmCallSent(events: LogEvent[], index: number): LogEvent {
+	const event = events[index]
+	if (event === undefined) throw new Error(`foldLlmCallSent: no event at log index ${index}`)
+	if (event.type !== 'llm_call') return event
+	if (!isObject(event.payload)) return event
+	const payload = event.payload
+	const sent = payload['sent']
+	if (!Array.isArray(sent)) return event
+	const sentFromValue = payload['sentFrom']
+	if (typeof sentFromValue !== 'number' || !Number.isInteger(sentFromValue) || sentFromValue <= 0) return event
+	const role = payload['role']
+	if (typeof role !== 'string') return event
+	const roleIdValue = payload['roleId']
+	const instanceId = typeof roleIdValue === 'string' ? roleIdValue : null
+
+	// Parts are collected backward (each covering the range below the previous one) and flattened in forward order at the end.
+	const parts: Array<Array<unknown>> = [sent]
+	let uncoveredFrom = sentFromValue
+	for (let prior = index - 1; prior >= 0 && uncoveredFrom > 0; prior--) {
+		const priorEvent = events[prior]
+		if (priorEvent === undefined || priorEvent.type !== 'llm_call') continue
+		if (!isObject(priorEvent.payload)) continue
+		const priorRole = priorEvent.payload['role']
+		const priorRoleIdValue = priorEvent.payload['roleId']
+		// Instance identity when both events carry an id; the role name when either predates it.
+		const sameInstance = typeof priorRoleIdValue === 'string' && instanceId !== null ? priorRoleIdValue === instanceId : priorRole === role
+		if (!sameInstance) continue
+		const priorSent = priorEvent.payload['sent']
+		if (!Array.isArray(priorSent)) continue
+		// A replayed turn after a restart re-emits its llm_call with the same sentFrom, so a prior event can start at or above the uncovered index; it then contributes nothing and the walk continues past it.
+		const priorFromValue = priorEvent.payload['sentFrom']
+		const priorFrom = typeof priorFromValue === 'number' && Number.isInteger(priorFromValue) && priorFromValue > 0 ? priorFromValue : 0
+		const takeCount = Math.max(0, Math.min(uncoveredFrom - priorFrom, priorSent.length))
+		if (takeCount > 0) {
+			parts.push(priorSent.slice(0, takeCount))
+			uncoveredFrom = priorFrom
+		}
+	}
+	const folded: Array<unknown> = []
+	for (let part = parts.length - 1; part >= 0; part--) {
+		const slice = parts[part]
+		if (slice === undefined) continue
+		folded.push(...slice)
+	}
+	return { timestamp: event.timestamp, type: event.type, payload: { ...payload, sent: folded } }
+}
+
 export interface PaginatedLog {
 	events: LogEvent[]
 	total: number

@@ -268,6 +268,8 @@ function createEditContext(context: BuiltInToolContext): ToolHandler {
 		const applied = applyEditOperations(target.state.history, operations)
 		if (!applied.ok) return applied.error
 		target.state.history = applied.history
+		// The edit rewrote the target's history out from under its llm_call delta baseline — a replace would be invisible in a slice-based delta — so the target's next llm_call logs a full snapshot.
+		target.state.logSentBaseline = undefined
 		const estimatedTokens = estimateHistoryTokens(target.state.history)
 		// The compaction guard (executor.maxCompactionAttempts) bounds the role doing the compacting, so the edited size lands on the caller's list even for a cross-role edit: the guard measures whether this role's edits keep shrinking something, whichever conversation they touched.
 		context.roleState.recentCompactionPromptTokens.push(estimatedTokens)
