@@ -467,6 +467,68 @@ describe('runExecutor', () => {
 		expect(persistence.state.meta).not.toBeNull()
 		if (persistence.state.meta !== null) expect('continuesFrom' in persistence.state.meta).toBe(false)
 	})
+
+	test('a run with a logging level carries it into both metas and the checkpoint entry frame', async () => {
+		const guild = buildLoadedGuild(
+			{ main: { systemPrompt: 'p', tools: ['finish'] } },
+			'main',
+		)
+		const llm = new FakeLlm()
+		llm.responses = [success([{
+			id: 'f1',
+			type: 'function',
+			function: { name: 'finish', arguments: JSON.stringify({ status: 'success', summary: 'ok' }) },
+		}])]
+		const persistence = makeFakePersistence()
+		const deps = makeDeps(llm, persistence, makeLoader(guild))
+
+		const meta = await runExecutor(deps, {
+			runId: 'r-log-level',
+			guildPath: '/guild',
+			benchmarkPath: '/bench',
+			task: 'do it',
+			effort: 'standard',
+			logLevel: 'standard',
+		})
+
+		expect(meta.logLevel).toBe('standard')
+		expect(persistence.state.meta?.logLevel).toBe('standard')
+		expect(persistence.state.metas.length).toBe(2)
+		expect(persistence.state.metas[0]?.logLevel).toBe('standard')
+		for (const checkpoint of persistence.state.checkpoints) {
+			expect(checkpoint.frames[0]?.logLevel).toBe('standard')
+		}
+	})
+
+	test('a run without a logging level writes no logLevel field and stamps none on checkpoints', async () => {
+		const guild = buildLoadedGuild(
+			{ main: { systemPrompt: 'p', tools: ['finish'] } },
+			'main',
+		)
+		const llm = new FakeLlm()
+		llm.responses = [success([{
+			id: 'f1',
+			type: 'function',
+			function: { name: 'finish', arguments: JSON.stringify({ status: 'success', summary: 'ok' }) },
+		}])]
+		const persistence = makeFakePersistence()
+		const deps = makeDeps(llm, persistence, makeLoader(guild))
+
+		const meta = await runExecutor(deps, {
+			runId: 'r-no-log-level',
+			guildPath: '/guild',
+			benchmarkPath: '/bench',
+			task: 'do it',
+			effort: 'standard',
+		})
+
+		expect('logLevel' in meta).toBe(false)
+		expect(persistence.state.meta).not.toBeNull()
+		if (persistence.state.meta !== null) expect('logLevel' in persistence.state.meta).toBe(false)
+		for (const checkpoint of persistence.state.checkpoints) {
+			expect(checkpoint.frames[0]?.logLevel).toBeUndefined()
+		}
+	})
 })
 
 describe('resumeExecutor', () => {
@@ -676,5 +738,53 @@ describe('resumeExecutor', () => {
 		await runExecutor(deps, { runId: 'r-clean', ...resumeOptions, task: 'do it', effort: 'standard' })
 
 		expect(persistence.state.deleteCheckpointCalls).toBe(1)
+	})
+
+	test('a resumed run keeps the logging level recorded on its checkpoint entry frame', async () => {
+		const uninterrupted = await driveUninterruptedRun()
+		const checkpoint = uninterrupted.checkpoints[1]
+		if (checkpoint === undefined) throw new Error('expected the mid-descent checkpoint')
+		const entryFrame = checkpoint.frames[0]
+		if (entryFrame === undefined) throw new Error('expected an entry frame')
+		entryFrame.logLevel = 'standard'
+
+		const guild = buildDelegationGuild()
+		const llm = new FakeLlm()
+		llm.responses = [
+			success([finishToolCall('f1', 'child done')]),
+			success([finishToolCall('f2', 'parent done')]),
+		]
+		const persistence = makeFakePersistence()
+		const deps = makeDeps(llm, persistence, makeLoader(guild))
+
+		const meta = await resumeExecutor(deps, checkpoint, resumeOptions)
+
+		expect(meta.logLevel).toBe('standard')
+		expect(persistence.state.metas.length).toBe(2)
+		expect(persistence.state.metas[0]?.logLevel).toBe('standard')
+		expect(persistence.state.meta?.logLevel).toBe('standard')
+	})
+
+	test('a checkpoint from before the logging channel existed resumes at full detail', async () => {
+		const uninterrupted = await driveUninterruptedRun()
+		const checkpoint = uninterrupted.checkpoints[1]
+		if (checkpoint === undefined) throw new Error('expected the mid-descent checkpoint')
+		const entryFrame = checkpoint.frames[0]
+		if (entryFrame === undefined) throw new Error('expected an entry frame')
+		expect(entryFrame.logLevel).toBeUndefined()
+
+		const guild = buildDelegationGuild()
+		const llm = new FakeLlm()
+		llm.responses = [
+			success([finishToolCall('f1', 'child done')]),
+			success([finishToolCall('f2', 'parent done')]),
+		]
+		const persistence = makeFakePersistence()
+		const deps = makeDeps(llm, persistence, makeLoader(guild))
+
+		const meta = await resumeExecutor(deps, checkpoint, resumeOptions)
+
+		expect(meta.logLevel).toBe('full')
+		expect(persistence.state.meta?.logLevel).toBe('full')
 	})
 })

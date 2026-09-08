@@ -8,7 +8,7 @@ import type { AppendLog } from './persistence.js'
 import type { RecentToolCall } from './role-inspection.js'
 import type { RoleRegistry } from './role-registry.js'
 import type { ToolHandler } from './tool-dispatch.js'
-import type { EffortLevel, LogEvent, Message, RunContinuation } from './types.js'
+import type { EffortLevel, LogLevel, LogEvent, Message, RunContinuation } from './types.js'
 
 export interface RoleState {
 	history: Message[]
@@ -35,6 +35,8 @@ export interface EngineContext {
 	task: string
 	// The run's effort, set only on the entry-role context by runExecutor. The agent spawn spreads the context to children, but the directive is gated on depth 0 below, so children never receive a global effort directive — the parent decides how to translate effort into delegation instructions.
 	effort?: EffortLevel
+	// The run's logging level (docs/reference.md "Logging level"), set on the entry-role context by runExecutor and inherited by children through the context spread. The engine reads it (the inquiry briefing's run-log note qualifies what the log carries); roles never see it. Absent on runs that predate the channel, which read as full detail — the only mode those runs ever logged at.
+	logLevel?: LogLevel
 	// The prior run this run continues, set only on the entry-role context by runExecutor. Like effort, it rides the context spread to children but the briefing is gated on depth 0 in buildInitialHistory, so the continuation block appears only in the entry role's initial history — exactly once per run. Never set on resume: the composed history is already checkpointed, so re-deriving the briefing would duplicate it.
 	continuation?: RunContinuation
 	// The calling role's name, omitted for the entry role at depth 0 so a reviewer can distinguish a root role from a child and render.ts can build the parent→child tree.

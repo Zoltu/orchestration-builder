@@ -5,7 +5,7 @@ import { createRunState } from '../executor/run-state.ts'
 import { createRunSubmission, type ResumeRun, type RunSubmission, type StartRun } from '../executor/run-submission.ts'
 import type { RunCheckpoint } from '../executor/checkpoint.ts'
 import type { ProjectSettings, ReadProjectSettings, WriteProjectSettings, RunSnapshotRaw, RunSnapshotStats, RunSummaryStats } from '../executor/persistence.ts'
-import type { DeploymentConfig, EffortLevel, GuildConfig, RunContinuation, RunMeta } from '../executor/types.js'
+import type { DeploymentConfig, EffortLevel, GuildConfig, LogLevel, RunContinuation, RunMeta } from '../executor/types.js'
 import { parseRunSnapshot, type RunSnapshot } from './render.ts'
 import { createRequestHandler, type RequestHandler } from './request-handler.ts'
 import { resolveStaticAsset } from './server.ts'
@@ -311,6 +311,7 @@ interface HandlerHarness {
 	humanBackend: WebHumanBackend
 	staticCalls: string[]
 	lastEffort: () => EffortLevel | undefined
+	lastLogLevel: () => LogLevel | undefined
 	lastContinuation: () => RunContinuation | undefined
 	resolveActive: () => (meta: RunMeta) => void
 	resolveResumed: () => (meta: RunMeta) => void
@@ -322,10 +323,12 @@ function createHandlerHarness(): HandlerHarness {
 	let resolveActive: (meta: RunMeta) => void = () => {}
 	let resolveResumed: (meta: RunMeta) => void = () => {}
 	let capturedEffort: EffortLevel | undefined
+	let capturedLogLevel: LogLevel | undefined
 	let capturedContinuation: RunContinuation | undefined
 	const resumed: RunCheckpoint[] = []
-	const startRun: StartRun = (_runId, _task, effort, continuation) => {
+	const startRun: StartRun = (_runId, _task, effort, logLevel, continuation) => {
 		capturedEffort = effort
+		capturedLogLevel = logLevel
 		capturedContinuation = continuation
 		return new Promise<RunMeta>((resolve) => {
 			resolveActive = resolve
@@ -373,6 +376,7 @@ function createHandlerHarness(): HandlerHarness {
 		humanBackend,
 		staticCalls,
 		lastEffort: () => capturedEffort,
+		lastLogLevel: () => capturedLogLevel,
 		lastContinuation: () => capturedContinuation,
 		resolveActive: () => resolveActive,
 		resolveResumed: () => resolveResumed,
@@ -1221,6 +1225,41 @@ describe('POST /api/runs', () => {
 		expect(await response.json()).toEqual({ ok: false, error: 'invalid_body' })
 	})
 
+	test('threads a valid logLevel override into the started run', async () => {
+		const { handler, submission, lastLogLevel, resolveActive } = createHandlerHarness()
+		const response = await handler(post('/api/runs', JSON.stringify({ task: 'quiet task', logLevel: 'standard' })))
+		expect(response.status).toBe(201)
+		expect(lastLogLevel()).toBe('standard')
+
+		resolveActive()(terminalMeta('test-run-0', 'quiet task'))
+		await submission.awaitActive()
+	})
+
+	test('applies the project log-level default when logLevel is omitted', async () => {
+		const { handler, submission, settings, lastLogLevel, resolveActive } = createHandlerHarness()
+		settings.write({ effort: 'quick', logLevel: 'standard' })
+		const response = await handler(post('/api/runs', JSON.stringify({ task: 'defaulted task' })))
+		expect(response.status).toBe(201)
+		expect(lastLogLevel()).toBe('standard')
+
+		resolveActive()(terminalMeta('test-run-0', 'defaulted task'))
+		await submission.awaitActive()
+	})
+
+	test('rejects an unknown logLevel with 400 invalid_body', async () => {
+		const { handler } = createHandlerHarness()
+		const response = await handler(post('/api/runs', JSON.stringify({ task: 'x', logLevel: 'quiet' })))
+		expect(response.status).toBe(400)
+		expect(await response.json()).toEqual({ ok: false, error: 'invalid_body' })
+	})
+
+	test('rejects a numeric logLevel with 400 invalid_body', async () => {
+		const { handler } = createHandlerHarness()
+		const response = await handler(post('/api/runs', JSON.stringify({ task: 'x', logLevel: 1 })))
+		expect(response.status).toBe(400)
+		expect(await response.json()).toEqual({ ok: false, error: 'invalid_body' })
+	})
+
 	test('accepts a valid continuesFrom and threads the resolved continuation into the started run', async () => {
 		const { handler, submission, lastContinuation, resolveActive } = createHandlerHarness()
 		const response = await handler(post('/api/runs', JSON.stringify({ task: 'pick up where that left off', continuesFrom: 'run-20260101-000000' })))
@@ -1390,30 +1429,51 @@ describe('POST /api/runs/:id/interrupt', () => {
 })
 
 describe('/api/settings', () => {
-	test('GET /api/settings returns effort null when no default is set', async () => {
+	test('GET /api/settings returns null defaults when nothing is set', async () => {
 		const { handler } = createHandlerHarness()
 		const response = await handler(get('/api/settings'))
 		expect(response.status).toBe(200)
-		expect(await response.json()).toEqual({ effort: null })
+		expect(await response.json()).toEqual({ effort: null, logLevel: null })
 	})
 
-	test('GET /api/settings returns the stored default after a write', async () => {
+	test('GET /api/settings returns the stored defaults after a write', async () => {
 		const { handler, settings } = createHandlerHarness()
-		settings.write({ effort: 'thorough' })
+		settings.write({ effort: 'thorough', logLevel: 'standard' })
 		const response = await handler(get('/api/settings'))
 		expect(response.status).toBe(200)
-		expect(await response.json()).toEqual({ effort: 'thorough' })
+		expect(await response.json()).toEqual({ effort: 'thorough', logLevel: 'standard' })
 	})
 
 	test('PUT /api/settings persists the effort and echoes it back', async () => {
 		const { handler, settings } = createHandlerHarness()
 		const response = await handler(put('/api/settings', JSON.stringify({ effort: 'standard' })))
 		expect(response.status).toBe(200)
-		expect(await response.json()).toEqual({ effort: 'standard' })
+		expect(await response.json()).toEqual({ effort: 'standard', logLevel: null })
 		expect(settings.snapshot()).toEqual({ effort: 'standard' })
 
 		const getResponse = await handler(get('/api/settings'))
-		expect(await getResponse.json()).toEqual({ effort: 'standard' })
+		expect(await getResponse.json()).toEqual({ effort: 'standard', logLevel: null })
+	})
+
+	test('PUT /api/settings persists an optional logLevel and echoes it back', async () => {
+		const { handler, settings } = createHandlerHarness()
+		const response = await handler(put('/api/settings', JSON.stringify({ effort: 'standard', logLevel: 'standard' })))
+		expect(response.status).toBe(200)
+		expect(await response.json()).toEqual({ effort: 'standard', logLevel: 'standard' })
+		expect(settings.snapshot()).toEqual({ effort: 'standard', logLevel: 'standard' })
+
+		const getResponse = await handler(get('/api/settings'))
+		expect(await getResponse.json()).toEqual({ effort: 'standard', logLevel: 'standard' })
+	})
+
+	test('PUT /api/settings without logLevel clears a previously persisted one', async () => {
+		const { handler, settings } = createHandlerHarness()
+		settings.write({ effort: 'quick', logLevel: 'standard' })
+
+		const response = await handler(put('/api/settings', JSON.stringify({ effort: 'quick' })))
+		expect(response.status).toBe(200)
+		expect(await response.json()).toEqual({ effort: 'quick', logLevel: null })
+		expect(settings.snapshot()).toEqual({ effort: 'quick' })
 	})
 
 	test('PUT /api/settings rejects a missing effort with 400 invalid_body', async () => {
@@ -1427,6 +1487,14 @@ describe('/api/settings', () => {
 	test('PUT /api/settings rejects a numeric effort with 400 invalid_body', async () => {
 		const { handler, settings } = createHandlerHarness()
 		const response = await handler(put('/api/settings', JSON.stringify({ effort: 3 })))
+		expect(response.status).toBe(400)
+		expect(await response.json()).toEqual({ ok: false, error: 'invalid_body' })
+		expect(settings.snapshot()).toEqual({})
+	})
+
+	test('PUT /api/settings rejects an invalid logLevel with 400 invalid_body', async () => {
+		const { handler, settings } = createHandlerHarness()
+		const response = await handler(put('/api/settings', JSON.stringify({ effort: 'quick', logLevel: 'tiny' })))
 		expect(response.status).toBe(400)
 		expect(await response.json()).toEqual({ ok: false, error: 'invalid_body' })
 		expect(settings.snapshot()).toEqual({})

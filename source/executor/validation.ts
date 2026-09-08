@@ -1,4 +1,5 @@
 import { isErrorKind, ValidationError } from './errors.js'
+import { isLogLevel } from './log-level.js'
 import { isRunIdShape } from './run-id.js'
 import type {
 	ContextPolicy,
@@ -8,6 +9,7 @@ import type {
 	GenerationConfig,
 	GuildConfig,
 	HumanFacingText,
+	LoggingConfig,
 	InterruptTriggersConfig,
 	ModelConfig,
 	OperationKind,
@@ -19,6 +21,9 @@ import type {
 	VisualizationConfig,
 } from './types.js'
 import type { ProjectSettings } from './persistence.js'
+
+// The logging level's guard lives in log-level.ts next to the type and the event filter; re-exported here so validation.ts stays the one import home for the wire guards (isEffortLevel and friends).
+export { isLogLevel }
 
 // The shared record guard: a plain object (not null, not an array). Exported so every module validating external input reads one definition rather than re-declaring its own copy.
 export function isObject(value: unknown): value is Record<string, unknown> {
@@ -138,6 +143,7 @@ export function isEffortLevel(value: unknown): value is EffortLevel {
 export function isProjectSettings(value: unknown): value is ProjectSettings {
 	if (!isObject(value)) return false
 	if (value.effort !== undefined && !isEffortLevel(value.effort)) return false
+	if (value.logLevel !== undefined && !isLogLevel(value.logLevel)) return false
 	return true
 }
 
@@ -148,6 +154,7 @@ export function isRunMeta(value: unknown): value is RunMeta {
 	if (!isOptionalString(value.benchmarkPath)) return false
 	if (!isString(value.task)) return false
 	if (value.effort !== undefined && !isEffortLevel(value.effort)) return false
+	if (value.logLevel !== undefined && !isLogLevel(value.logLevel)) return false
 	if (value.continuesFrom !== undefined && !isRunIdShape(value.continuesFrom)) return false
 	if (!isString(value.status) || !runMetaStatuses.some((s) => s === value.status)) return false
 	if (!isString(value.startTime)) return false
@@ -237,6 +244,14 @@ function validateContextPolicy(value: unknown, path: string): asserts value is C
 	ensure(isNumber, value.maxToolOutputChars, `${path}.maxToolOutputChars`, 'expected a number')
 }
 
+const loggingKeys: readonly string[] = ['level']
+
+function validateLoggingConfig(value: unknown, path: string): asserts value is LoggingConfig {
+	if (!isObject(value)) throw new ValidationError(path, 'expected an object')
+	rejectUnknownKeys(value, loggingKeys, path)
+	if (value.level !== undefined && !isLogLevel(value.level)) throw new ValidationError(`${path}.level`, 'expected "full" or "standard"')
+}
+
 function validateRoleDefinition(value: unknown, path: string): asserts value is RoleDefinition {
 	if (!isObject(value)) throw new ValidationError(path, 'expected an object')
 	ensure(isString, value.systemPrompt, `${path}.systemPrompt`, 'expected a string')
@@ -270,7 +285,7 @@ export function validateGuildConfig(value: unknown): asserts value is GuildConfi
 	if (value.visualization !== undefined) validateVisualizationConfig(value.visualization, 'visualization')
 }
 
-const deploymentKeys: readonly string[] = ['model', 'executor', 'contextPolicy']
+const deploymentKeys: readonly string[] = ['model', 'executor', 'contextPolicy', 'logging']
 
 export function validateDeploymentFileConfig(value: unknown): asserts value is DeploymentFileConfig {
 	if (!isObject(value)) throw new ValidationError('', 'expected an object')
@@ -278,6 +293,7 @@ export function validateDeploymentFileConfig(value: unknown): asserts value is D
 	validateModelConfig(value.model, 'model')
 	validateExecutorConfig(value.executor, 'executor')
 	validateContextPolicy(value.contextPolicy, 'contextPolicy')
+	if (value.logging !== undefined) validateLoggingConfig(value.logging, 'logging')
 }
 
 // Cross-checks the deployment's role references against the guild's declared roles (the two files are validated independently, so this is the one place the pair is consistent). Runs on the file-shaped deployment — at load time in the loader and again after the env merge; only the executor section is read. Each failure names the deployment path of the offending reference.

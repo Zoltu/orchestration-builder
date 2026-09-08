@@ -1176,16 +1176,16 @@ describe('renderRunSummary', () => {
 })
 
 describe('renderProjectSettings', () => {
-	test('returns effort null when no default has been set', () => {
-		expect(renderProjectSettings({})).toEqual({ effort: null })
+	test('returns both fields null when no default has been set', () => {
+		expect(renderProjectSettings({})).toEqual({ effort: null, logLevel: null })
 	})
 
-	test('returns the stored effort when set', () => {
-		expect(renderProjectSettings({ effort: 'thorough' })).toEqual({ effort: 'thorough' })
+	test('returns the stored values when set', () => {
+		expect(renderProjectSettings({ effort: 'thorough', logLevel: 'standard' })).toEqual({ effort: 'thorough', logLevel: 'standard' })
 	})
 
-	test('returns only the effort field in its output shape', () => {
-		expect(Object.keys(renderProjectSettings({ effort: 'quick' }))).toEqual(['effort'])
+	test('returns exactly the effort and logLevel fields in its output shape', () => {
+		expect(Object.keys(renderProjectSettings({ effort: 'quick', logLevel: 'full' }))).toEqual(['effort', 'logLevel'])
 	})
 })
 

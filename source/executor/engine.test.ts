@@ -1235,6 +1235,30 @@ describe('runRole — interrupt platform', () => {
 		expect(finishOrder).toEqual(['inquirer', 'main'])
 	})
 
+	test('an inquiry briefing on a standard-detail run does not promise llm_call message bodies', async () => {
+		const guild = buildInquiryGuild()
+		const llm = new FakeLlm()
+		llm.responses = [
+			success([finishCall({ status: 'success', summary: 'answered from the workspace' })]),
+			success([finishCall({ status: 'success', summary: 'main done' })]),
+		]
+		const { deps } = makeDeps(llm)
+		deps.interruptQueue.submit({ kind: 'inquiry', message: 'what files changed?' })
+
+		await runRole(deps, {
+			loadedGuild: guild,
+			depth: 0,
+			roleName: 'main',
+			task: 'do it',
+			logLevel: 'standard',
+		})
+
+		const briefing = defined(llm.calls[0], 'handler briefing call').messages[1]
+		expect(briefing?.content).toContain('read_run_log')
+		expect(briefing?.content).toContain('carry no message bodies')
+		expect(briefing?.content).not.toContain('carry the full sent and received messages')
+	})
+
 	test('an inquiry with no inquiryHandlerRole configured is dropped, not answered, and the run continues', async () => {
 		const guild = buildInterruptGuild(mainAndDetector, 'main')
 		const llm = new FakeLlm()

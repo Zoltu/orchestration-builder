@@ -50,6 +50,9 @@ export type { GitExcludeFilesystem, GitExcludeResult } from './git-exclude.js'
 
 export { DEFAULT_EFFORT, effortDirective } from './effort.js'
 
+export { DEFAULT_LOG_LEVEL, applyLogLevel, isLogLevel } from './log-level.js'
+export type { LogLevel } from './log-level.js'
+
 export { isEffortLevel, isProjectSettings, isTerminalRunStatus, validateDeploymentFileConfig, validateDeploymentRoleReferences } from './validation.js'
 
 export { createToolHandlers } from './tools.js'
@@ -107,4 +110,4 @@ export type {
 	WriteProjectSettings,
 } from './persistence.js'
 
-export type { DeploymentConfig, DeploymentFileConfig, ModelConfig, ResolvedModelConfig, RunContinuation, RunOptions, RunMeta, ResultCard, EffortLevel } from './types.js'
+export type { DeploymentConfig, DeploymentFileConfig, LoggingConfig, ModelConfig, ResolvedModelConfig, RunContinuation, RunOptions, RunMeta, ResultCard, EffortLevel } from './types.js'

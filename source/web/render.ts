@@ -1,7 +1,7 @@
 
 import type { PendingQuestion } from '../executor/human-backend.js'
 import { isObject, isRunMeta } from '../executor/validation.js'
-import type { DeploymentConfig, EffortLevel, ExecutorConfig, GuildConfig, LogEvent, ResultCard, RunMeta, ToolManifest, HumanFacingText, VisualizationConfig } from '../executor/types.js'
+import type { DeploymentConfig, EffortLevel, ExecutorConfig, GuildConfig, LogEvent, LogLevel, ResultCard, RunMeta, ToolManifest, HumanFacingText, VisualizationConfig } from '../executor/types.js'
 import type { ProjectSettings, RunSnapshotRaw } from '../executor/persistence.js'
 
 export interface RunSnapshot {
@@ -675,10 +675,11 @@ export function renderRunSummary(runId: string, meta: RunMeta | null, summary: s
 
 export interface ProjectSettingsView {
 	effort: EffortLevel | null
+	logLevel: LogLevel | null
 }
 
 export function renderProjectSettings(settings: ProjectSettings): ProjectSettingsView {
-	return { effort: settings.effort ?? null }
+	return { effort: settings.effort ?? null, logLevel: settings.logLevel ?? null }
 }
 
 export interface ApiQuestion {

@@ -202,6 +202,24 @@ describe('isRunCheckpoint', () => {
 		root.continuesFrom = 'not-a-run-id'
 		expect(isRunCheckpoint(checkpoint)).toBe(false)
 	})
+
+	test('accepts a logging level on the entry frame and round-trips it through JSON', () => {
+		const checkpoint = sampleCheckpoint()
+		const root = checkpoint.frames[0]
+		if (root === undefined) throw new Error('missing root')
+		root.logLevel = 'standard'
+		expect(isRunCheckpoint(checkpoint)).toBe(true)
+		const copy: unknown = JSON.parse(JSON.stringify(checkpoint))
+		expect(isRunCheckpoint(copy)).toBe(true)
+	})
+
+	test('rejects a malformed logging level', () => {
+		const checkpoint = sampleCheckpoint()
+		const root = checkpoint.frames[0]
+		if (root === undefined) throw new Error('missing root')
+		const malformed: unknown = { ...checkpoint, frames: [{ ...root, logLevel: 'quiet' }, ...checkpoint.frames.slice(1)] }
+		expect(isRunCheckpoint(malformed)).toBe(false)
+	})
 })
 
 describe('createCheckpointRecorder', () => {
@@ -385,5 +403,33 @@ describe('createCheckpointRecorder', () => {
 		recorder.write()
 
 		expect(written[0]?.frames[0]?.continuesFrom).toBeUndefined()
+	})
+
+	test('the entry frame alone carries the context logging level (the resume path re-threads it from frames[0])', () => {
+		const written: RunCheckpoint[] = []
+		const registry = createRoleRegistry()
+		const recorder = createCheckpointRecorder({ writeCheckpoint: (c) => written.push(c), runId: 'run-1', startTime: '2026-01-01T00:00:00.000Z', roleRegistry: registry, contextPressureTracker: createContextPressureTracker() })
+
+		// The entry context gets the run's level from runExecutor and children inherit it through the spread; a frame without it in the test means its context had none.
+		const rootEntry = registry.register('main', 0, undefined, sampleRoleState())
+		recorder.registerFrame(frameContext('main', 0, { effort: 'standard', logLevel: 'standard' }), rootEntry)
+		const childEntry = registry.register('coder', 1, 'main-0-1', sampleRoleState())
+		recorder.registerFrame(frameContext('coder', 1, { parent: 'main', parentRoleId: 'main-0-1' }), childEntry)
+		recorder.write()
+
+		expect(written[0]?.frames[0]?.logLevel).toBe('standard')
+		expect(written[0]?.frames[1]?.logLevel).toBeUndefined()
+	})
+
+	test('a context without a logging level stamps none', () => {
+		const written: RunCheckpoint[] = []
+		const registry = createRoleRegistry()
+		const recorder = createCheckpointRecorder({ writeCheckpoint: (c) => written.push(c), runId: 'run-1', startTime: '2026-01-01T00:00:00.000Z', roleRegistry: registry, contextPressureTracker: createContextPressureTracker() })
+
+		const rootEntry = registry.register('main', 0, undefined, sampleRoleState())
+		recorder.registerFrame(frameContext('main', 0), rootEntry)
+		recorder.write()
+
+		expect(written[0]?.frames[0]?.logLevel).toBeUndefined()
 	})
 })

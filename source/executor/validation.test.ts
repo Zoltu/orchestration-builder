@@ -72,6 +72,21 @@ describe('boolean guards', () => {
 		expect(isRunMeta({ ...base, effort: 3 })).toBe(false)
 		expect(isRunMeta({ ...base, effort: 'copious' })).toBe(false)
 	})
+	test('isRunMeta accepts an optional logLevel and rejects an invalid one', () => {
+		const base = {
+			runId: 'r',
+			guildPath: 'g',
+			benchmarkPath: 'b',
+			task: 't',
+			status: 'running' as const,
+			startTime: 'now',
+		}
+		expect(isRunMeta(base)).toBe(true)
+		expect(isRunMeta({ ...base, logLevel: 'standard' })).toBe(true)
+		expect(isRunMeta({ ...base, logLevel: 'full' })).toBe(true)
+		expect(isRunMeta({ ...base, logLevel: 'copious' })).toBe(false)
+		expect(isRunMeta({ ...base, logLevel: 3 })).toBe(false)
+	})
 	test('isRunMeta accepts a run-id-shaped continuesFrom and rejects a malformed one', () => {
 		const base = {
 			runId: 'r',
@@ -110,6 +125,12 @@ describe('boolean guards', () => {
 		expect(isProjectSettings({ effort: 3 })).toBe(false)
 		expect(isProjectSettings('not an object')).toBe(false)
 		expect(isProjectSettings(null)).toBe(false)
+	})
+	test('isProjectSettings accepts a valid logLevel and rejects an invalid one', () => {
+		expect(isProjectSettings({ logLevel: 'standard' })).toBe(true)
+		expect(isProjectSettings({ effort: 'quick', logLevel: 'full' })).toBe(true)
+		expect(isProjectSettings({ logLevel: 'copious' })).toBe(false)
+		expect(isProjectSettings({ logLevel: 1 })).toBe(false)
 	})
 })
 
@@ -305,6 +326,21 @@ describe('validateDeploymentFileConfig throws ValidationError with a path-based 
 	test('rejects unknown keys inside contextPolicy', () => {
 		const bad = { ...validDeployment, contextPolicy: { maxToolOutputChars: 1, maxOutpuChars: 1 } }
 		expect(() => validateDeploymentFileConfig(bad)).toThrow(/contextPolicy\.maxOutpuChars.*unknown key "maxOutpuChars"/)
+	})
+	test('accepts an optional logging section with a valid level', () => {
+		expect(() => validateDeploymentFileConfig({ ...validDeployment, logging: {} })).not.toThrow()
+		expect(() => validateDeploymentFileConfig({ ...validDeployment, logging: { level: 'full' } })).not.toThrow()
+		expect(() => validateDeploymentFileConfig({ ...validDeployment, logging: { level: 'standard' } })).not.toThrow()
+	})
+	test('rejects a malformed logging.level', () => {
+		const bad = { ...validDeployment, logging: { level: 'quiet' } }
+		expect(() => validateDeploymentFileConfig(bad)).toThrow(/logging\.level/)
+		const numeric = { ...validDeployment, logging: { level: 3 } }
+		expect(() => validateDeploymentFileConfig(numeric)).toThrow(/logging\.level/)
+	})
+	test('rejects unknown keys inside logging (near-miss levels)', () => {
+		const bad = { ...validDeployment, logging: { levels: 'full' } }
+		expect(() => validateDeploymentFileConfig(bad)).toThrow(/logging\.levels.*unknown key "levels"/)
 	})
 	test('rejects unknown keys inside executor.interruptTriggers (near-miss planOwnerRol)', () => {
 		const bad = {

@@ -1,7 +1,7 @@
-import type { ListRunIds, ReadProjectSettings, ReadRunMetaById, ReadRunPlanById, ReadRunSnapshotStats, ReadRunSummaryById, ReadRunSummaryStats, WriteProjectSettings } from '../executor/persistence.js'
+import type { ListRunIds, ProjectSettings, ReadProjectSettings, ReadRunMetaById, ReadRunPlanById, ReadRunSnapshotStats, ReadRunSummaryById, ReadRunSummaryStats, WriteProjectSettings } from '../executor/persistence.js'
 import { isRunIdShape } from '../executor/run-id.js'
-import type { DeploymentConfig, EffortLevel, GuildConfig, ToolManifest } from '../executor/types.js'
-import { isEffortLevel, isObject, isTerminalRunStatus } from '../executor/validation.js'
+import type { DeploymentConfig, EffortLevel, GuildConfig, LogLevel, ToolManifest } from '../executor/types.js'
+import { isEffortLevel, isLogLevel, isObject, isTerminalRunStatus } from '../executor/validation.js'
 import type { RunState } from '../executor/run-state.js'
 import type { RunSubmission } from '../executor/run-submission.js'
 import { paginateLogEvents, parseRunMeta, renderConfig, renderProjectSettings, renderPendingQuestions, renderRunView, formatLogAsText, formatLogDetailSections } from './render.js'
@@ -213,6 +213,9 @@ function handleCreateRun(runSubmission: RunSubmission, readRunMetaById: ReadRunM
 	const effortValue = body['effort']
 	if (effortValue !== undefined && !isEffortLevel(effortValue)) return json({ ok: false, error: 'invalid_body' }, 400)
 	const effortOverride: EffortLevel | undefined = effortValue
+	const logLevelValue = body['logLevel']
+	if (logLevelValue !== undefined && !isLogLevel(logLevelValue)) return json({ ok: false, error: 'invalid_body' }, 400)
+	const logLevelOverride: LogLevel | undefined = logLevelValue
 	const continuesFromValue = body['continuesFrom']
 	if (continuesFromValue !== undefined && !isRunIdShape(continuesFromValue)) return json({ ok: false, error: 'invalid_body' }, 400)
 	const priorMeta = continuesFromValue === undefined ? null : parseRunMeta(readRunMetaById(continuesFromValue))
@@ -222,7 +225,7 @@ function handleCreateRun(runSubmission: RunSubmission, readRunMetaById: ReadRunM
 		task: priorMeta.task,
 		summary: priorMeta.result?.summary ?? '',
 	} : undefined
-	const result = runSubmission.submit(taskValue, effortOverride, continuation)
+	const result = runSubmission.submit(taskValue, effortOverride, logLevelOverride, continuation)
 	if (result.ok) return json({ runId: result.runId }, 201)
 	return json({ ok: false, error: result.error }, 409)
 }
@@ -231,12 +234,16 @@ function handleGetSettings(readProjectSettings: ReadProjectSettings): Response {
 	return json(renderProjectSettings(readProjectSettings()))
 }
 
+// The write replaces settings.json wholesale, so the body is the complete new settings: effort is required (the field the compose screen always has a value for), and the optional logLevel is cleared when absent — the client always sends both so saving one never clears the other.
 function handlePutSettings(writeProjectSettings: WriteProjectSettings, body: unknown): Response {
 	if (!isObject(body)) return json({ ok: false, error: 'invalid_body' }, 400)
 	const effortValue = body['effort']
 	if (!isEffortLevel(effortValue)) return json({ ok: false, error: 'invalid_body' }, 400)
-	writeProjectSettings({ effort: effortValue })
-	return json(renderProjectSettings({ effort: effortValue }))
+	const logLevelValue = body['logLevel']
+	if (logLevelValue !== undefined && !isLogLevel(logLevelValue)) return json({ ok: false, error: 'invalid_body' }, 400)
+	const settings: ProjectSettings = { effort: effortValue, ...(logLevelValue !== undefined ? { logLevel: logLevelValue } : {}) }
+	writeProjectSettings(settings)
+	return json(renderProjectSettings(settings))
 }
 
 export function createRequestHandler(config: RequestHandlerConfig, serveStatic: ServeStatic): RequestHandler {

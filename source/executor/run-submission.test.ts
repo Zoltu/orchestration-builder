@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import type { RunCheckpoint } from './checkpoint.ts'
-import type { EffortLevel, RunContinuation, RunMeta } from './types.js'
+import { DEFAULT_LOG_LEVEL } from './log-level.ts'
+import type { EffortLevel, LogLevel, RunContinuation, RunMeta } from './types.js'
 import type { ReadProjectSettings } from './persistence.ts'
 import { DEFAULT_EFFORT } from './effort.ts'
 import { createRunSubmission, type ResumeRun, type RunSubmission, type StartRun } from './run-submission.ts'
@@ -329,7 +330,7 @@ describe('createRunSubmission effort resolution', () => {
 describe('createRunSubmission continuation passthrough', () => {
 	function captureContinuation(): { startRun: StartRun; captured: Array<RunContinuation | undefined> } {
 		const captured: Array<RunContinuation | undefined> = []
-		const startRun: StartRun = async (_runId, _task, _effort, continuation) => {
+		const startRun: StartRun = async (_runId, _task, _effort, _logLevel, continuation) => {
 			captured.push(continuation)
 			return sampleMeta('run-1')
 		}
@@ -341,7 +342,7 @@ describe('createRunSubmission continuation passthrough', () => {
 		const submission = createRunSubmission({ startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings })
 		const continuation = { runId: 'run-20260101-000000', task: 'prior task', summary: 'prior summary' }
 
-		submission.submit('do it', undefined, continuation)
+		submission.submit('do it', undefined, undefined, continuation)
 		await submission.awaitActive()
 		expect(captured).toEqual([continuation])
 	})
@@ -353,5 +354,82 @@ describe('createRunSubmission continuation passthrough', () => {
 		submission.submit('do it')
 		await submission.awaitActive()
 		expect(captured).toEqual([undefined])
+	})
+})
+
+describe('createRunSubmission log level resolution', () => {
+	function captureLogLevel(): { startRun: StartRun; captured: LogLevel[] } {
+		const captured: LogLevel[] = []
+		const startRun: StartRun = async (_runId, _task, _effort, logLevel) => {
+			captured.push(logLevel)
+			return sampleMeta('run-1')
+		}
+		return { startRun, captured }
+	}
+
+	test('a per-run override is threaded into startRun', async () => {
+		const { startRun, captured } = captureLogLevel()
+		const submission = createRunSubmission({ startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings })
+
+		submission.submit('do it', undefined, 'standard')
+		await submission.awaitActive()
+		expect(captured).toEqual(['standard'])
+	})
+
+	test('the project default is applied when no override is given', async () => {
+		const { startRun, captured } = captureLogLevel()
+		const projectSettings: ReadProjectSettings = () => ({ logLevel: 'standard' })
+		const submission = createRunSubmission({ startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: projectSettings })
+
+		submission.submit('do it')
+		await submission.awaitActive()
+		expect(captured).toEqual(['standard'])
+	})
+
+	test('a per-run override wins over the project default', async () => {
+		const { startRun, captured } = captureLogLevel()
+		const projectSettings: ReadProjectSettings = () => ({ logLevel: 'standard' })
+		const submission = createRunSubmission({ startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: projectSettings })
+
+		submission.submit('do it', undefined, 'full')
+		await submission.awaitActive()
+		expect(captured).toEqual(['full'])
+	})
+
+	test('the deployment default applies when neither override nor project setting fixes the level', async () => {
+		const { startRun, captured } = captureLogLevel()
+		const submission = createRunSubmission({ startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings, deploymentLogLevel: 'standard' })
+
+		submission.submit('do it')
+		await submission.awaitActive()
+		expect(captured).toEqual(['standard'])
+	})
+
+	test('the project setting wins over the deployment default', async () => {
+		const { startRun, captured } = captureLogLevel()
+		const projectSettings: ReadProjectSettings = () => ({ logLevel: 'full' })
+		const submission = createRunSubmission({ startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: projectSettings, deploymentLogLevel: 'standard' })
+
+		submission.submit('do it')
+		await submission.awaitActive()
+		expect(captured).toEqual(['full'])
+	})
+
+	test('a per-run override wins over the deployment default', async () => {
+		const { startRun, captured } = captureLogLevel()
+		const submission = createRunSubmission({ startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings, deploymentLogLevel: 'standard' })
+
+		submission.submit('do it', undefined, 'full')
+		await submission.awaitActive()
+		expect(captured).toEqual(['full'])
+	})
+
+	test('DEFAULT_LOG_LEVEL applies when nothing in the chain fixes the level', async () => {
+		const { startRun, captured } = captureLogLevel()
+		const submission = createRunSubmission({ startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings })
+
+		submission.submit('do it')
+		await submission.awaitActive()
+		expect(captured).toEqual([DEFAULT_LOG_LEVEL])
 	})
 })

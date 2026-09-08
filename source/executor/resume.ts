@@ -7,6 +7,8 @@ import type { ResultCard } from './types.js'
 // The resume driver: re-enters the checkpoint's role stack, letting the depth-first traversal continue. A frame with a pending suspension resolves its child card lazily from inside the suspended turn — either the recorded card, or the next frame's own resume — so the stack re-forms in the same root-first order the live recursion produces. The leaf frame re-enters at its loop top with its persisted state.
 // runRole is threaded in by the engine so this module can drive role turns without importing the turn loop at runtime (the executor composes the two).
 export async function resumeRoleStack(runRole: (deps: EngineDependencies, context: EngineContext, resumed?: ResumedRole) => Promise<ResultCard>, deps: EngineDependencies, loadedGuild: LoadedGuild, checkpoint: RunCheckpoint): Promise<ResultCard> {
+	// The run's logging level is run-scoped and rides the entry frame alone (see checkpoint.ts serializeFrame); every resumed context re-threads it so engine-side readers — the inquiry briefing's run-log note — see the level no matter which frame re-enters.
+	const runLogLevel = checkpoint.frames[0]?.logLevel
 	const resumeAt = async (index: number): Promise<ResultCard> => {
 		const frame = checkpoint.frames[index]
 		if (frame === undefined) throw new Error(`resumeRoleStack: frame ${index} missing from a checkpoint with ${checkpoint.frames.length} frames`)
@@ -27,6 +29,7 @@ export async function resumeRoleStack(runRole: (deps: EngineDependencies, contex
 			...(frame.parent !== undefined ? { parent: frame.parent } : {}),
 			...(frame.parentRoleId !== undefined ? { parentRoleId: frame.parentRoleId } : {}),
 			...(frame.effort !== undefined ? { effort: frame.effort } : {}),
+			...(runLogLevel !== undefined ? { logLevel: runLogLevel } : {}),
 		}
 		return await runRole(deps, context, {
 			roleId: frame.roleId,

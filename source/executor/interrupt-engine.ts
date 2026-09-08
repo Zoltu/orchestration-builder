@@ -131,7 +131,10 @@ async function runInquiryHandler(
 	// The chain from the draining leaf IS the entire live role set in this sequential engine; chainFromEntry is leaf-first, so reverse it for the root-first briefing list.
 	const liveInstances = chainFromEntry(deps.roleRegistry, entry).reverse()
 	const instanceLines = liveInstances.map((member) => `- ${member.roleId} (${member.roleName}, depth ${member.depth})${member.parentRoleId !== undefined ? `, child of ${member.parentRoleId}` : ''}`)
-	const finishedRolesNote = 'Roles that already finished have no live conversation; their work is recorded in the run log and in the workspace itself. Read the run log with read_run_log (its llm_call events carry the full sent and received messages) and search_run_log, and the workspace with the file tools.'
+	// The note must not promise message bodies the log does not carry: under the run's standard logging level (docs/reference.md "Logging level") llm_call events keep their structure, kinds, and usage but no sent/received bodies. A context without a level (a run that predates the channel) reads as full detail — the only mode those runs ever logged at.
+	const finishedRolesNote = context.logLevel === 'standard'
+		? 'Roles that already finished have no live conversation; their work is recorded in the run log and in the workspace itself. Read the run log with read_run_log and search_run_log (the run logs at standard detail, so its llm_call events carry no message bodies) and the workspace with the file tools.'
+		: 'Roles that already finished have no live conversation; their work is recorded in the run log and in the workspace itself. Read the run log with read_run_log (its llm_call events carry the full sent and received messages) and search_run_log, and the workspace with the file tools.'
 	const task = [
 		"[Operator inquiry] The operator interrupted the run to ask a question. Answer it on the run's behalf.",
 		'',

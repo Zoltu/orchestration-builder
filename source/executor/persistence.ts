@@ -2,7 +2,7 @@ import * as fs from 'node:fs'
 import * as path from 'node:path'
 import type { RunCheckpoint } from './checkpoint.js'
 import { isProjectSettings } from './validation.js'
-import type { EffortLevel, LogEvent, RunMeta } from './types.js'
+import type { EffortLevel, LogLevel, LogEvent, RunMeta } from './types.js'
 
 export type RunDirectory = () => string
 export type AppendLog = (event: LogEvent) => void
@@ -232,6 +232,8 @@ export function createListRunIds(baseDir: string = 'data/runs'): ListRunIds {
 
 export interface ProjectSettings {
 	effort?: EffortLevel
+	// The project-wide default logging level (docs/reference.md "Logging level"); absent means the deployment default applies.
+	logLevel?: LogLevel
 }
 
 export type ReadProjectSettings = () => ProjectSettings

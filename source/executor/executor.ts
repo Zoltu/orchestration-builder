@@ -1,4 +1,5 @@
 import { DEFAULT_EFFORT } from './effort.js'
+import { DEFAULT_LOG_LEVEL } from './log-level.js'
 import type { ResultCard, RunContinuation, RunMeta, RunOptions } from './types.js'
 import { createCheckpointRecorder, type RunCheckpoint } from './checkpoint.js'
 import { createContextPressureTracker } from './context-pressure.js'
@@ -39,7 +40,7 @@ function buildEngineDependencies(deps: ExecutorDependencies, runId: string, star
 		roleRegistry,
 		interruptQueue: deps.interruptQueue,
 		contextPressureTracker,
-		// The run's lineage rides the recorder so checkpoints written after a resume keep stamping continuesFrom onto the entry frame — the live context does not carry it on the resume path.
+		// The run's lineage rides the recorder so checkpoints written after a resume keep stamping continuesFrom onto the entry frame — the live context does not carry it on the resume path. The logging level needs no such stamp: the entry context carries it and the recorder serializes from there.
 		checkpointRecorder: createCheckpointRecorder({ writeCheckpoint: deps.writeCheckpoint, runId, startTime, roleRegistry, contextPressureTracker, continuesFrom }),
 	}
 }
@@ -51,6 +52,7 @@ function terminalMeta(options: RunOptions, startTime: string, result: ResultCard
 		...(options.benchmarkPath !== undefined ? { benchmarkPath: options.benchmarkPath } : {}),
 		task: options.task,
 		effort: options.effort,
+		...(options.logLevel !== undefined ? { logLevel: options.logLevel } : {}),
 		...(options.continuation !== undefined ? { continuesFrom: options.continuation.runId } : {}),
 		status: result.status,
 		startTime,
@@ -74,6 +76,7 @@ export async function runExecutor(deps: ExecutorDependencies, options: RunOption
 		...(options.benchmarkPath !== undefined ? { benchmarkPath: options.benchmarkPath } : {}),
 		task: options.task,
 		effort: options.effort,
+		...(options.logLevel !== undefined ? { logLevel: options.logLevel } : {}),
 		...(options.continuation !== undefined ? { continuesFrom: options.continuation.runId } : {}),
 		status: 'running',
 		startTime,
@@ -86,6 +89,7 @@ export async function runExecutor(deps: ExecutorDependencies, options: RunOption
 			roleName: loadedGuild.config.entryRole,
 			task: options.task,
 			effort: options.effort,
+			...(options.logLevel !== undefined ? { logLevel: options.logLevel } : {}),
 			...(options.continuation !== undefined ? { continuation: options.continuation } : {}),
 		},
 	)
@@ -110,6 +114,8 @@ export async function resumeExecutor(deps: ExecutorDependencies, checkpoint: Run
 	if (entryFrame === undefined) throw new Error(`resumeExecutor: checkpoint for run ${checkpoint.runId} has no frames`)
 	const task = entryFrame.task
 	const effort = entryFrame.effort ?? DEFAULT_EFFORT
+	// The logging level survives the restart the same way the effort does: the entry frame carries the run's resolved level, and a checkpoint written before the channel existed falls back to full detail — the only mode those runs ever logged at. Must stay in sync with createResumeRun in serve.ts, which applies the same fallback to the log-filtering wrapper around this run (the metas and the wrapper must record and filter at the same level).
+	const logLevel = entryFrame.logLevel ?? DEFAULT_LOG_LEVEL
 	// The checkpoint carries the lineage id only (not the prior task/summary): on resume the entry role's history — the briefing included — is restored from the checkpoint verbatim, so the full continuation object is never recomposed and the empty task/summary here exist only so the metas keep the continuesFrom field.
 	const continuation: RunContinuation | undefined = entryFrame.continuesFrom !== undefined ? { runId: entryFrame.continuesFrom, task: '', summary: '' } : undefined
 	const runOptions: RunOptions = {
@@ -118,6 +124,7 @@ export async function resumeExecutor(deps: ExecutorDependencies, checkpoint: Run
 		...(options.benchmarkPath !== undefined ? { benchmarkPath: options.benchmarkPath } : {}),
 		task,
 		effort,
+		logLevel,
 		...(continuation !== undefined ? { continuation } : {}),
 	}
 
@@ -135,6 +142,7 @@ export async function resumeExecutor(deps: ExecutorDependencies, checkpoint: Run
 		...(options.benchmarkPath !== undefined ? { benchmarkPath: options.benchmarkPath } : {}),
 		task,
 		effort,
+		logLevel,
 		...(continuation !== undefined ? { continuesFrom: continuation.runId } : {}),
 		status: 'running',
 		startTime,

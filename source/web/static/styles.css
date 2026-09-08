@@ -861,6 +861,78 @@ li:last-child {
 	font-style: italic;
 }
 
+/* The logging-level selector mirrors the effort selector's radio-card group at a smaller size: only two short labels, so the options sit inline on one row instead of sharing the effort cards' grid. */
+.logging-level-control {
+	margin: var(--space-3) 0 0;
+	padding: 0;
+	border: none;
+	min-width: 0;
+	font-size: 0.85rem;
+	color: var(--color-text-muted);
+}
+
+.logging-level-label {
+	padding: 0;
+	font-weight: 600;
+	color: var(--color-text);
+}
+
+.logging-level-options {
+	display: flex;
+	flex-wrap: wrap;
+	gap: var(--space-2);
+	margin-top: var(--space-2);
+}
+
+.logging-level-option {
+	display: flex;
+	align-items: center;
+	gap: var(--space-2);
+	padding: var(--space-2) var(--space-3);
+	border: 1px solid var(--color-border-strong);
+	border-radius: var(--radius);
+	background: var(--color-surface);
+	cursor: pointer;
+}
+
+.logging-level-option:hover {
+	border-color: var(--color-accent);
+}
+
+/* The ring is a box-shadow rather than a wider border so selecting an option never shifts its layout (the same trick the effort cards use). */
+.logging-level-option.is-selected {
+	border-color: var(--color-accent);
+	background: var(--color-accent-soft);
+	box-shadow: 0 0 0 1px var(--color-accent);
+}
+
+.logging-level-option:focus-within {
+	outline: 2px solid var(--color-accent);
+	outline-offset: 1px;
+}
+
+.logging-level-control:disabled .logging-level-option {
+	opacity: 0.6;
+	cursor: default;
+}
+
+.logging-level-option input[type='radio'] {
+	margin: 0;
+	accent-color: var(--color-accent);
+}
+
+.logging-level-option-name {
+	font-weight: 600;
+	color: var(--color-text);
+}
+
+.logging-level-note {
+	margin: var(--space-1) 0 0;
+	font-size: 0.78rem;
+	color: var(--color-text-subtle);
+	font-style: italic;
+}
+
 .run-effort-badge {
 	flex: 0 0 auto;
 	font-size: 0.72rem;

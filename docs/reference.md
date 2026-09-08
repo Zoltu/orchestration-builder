@@ -110,7 +110,7 @@ The interrupt platform lets the Guild define agents that interrupt running work 
 
 The executor keeps every role's conversation and budget state in memory, so a service restart (crash, host reboot, `docker stop`, operator Ctrl-C) would otherwise lose the active run. To survive it, the executor checkpoints the runnable role stack to `<run>/state.json`, and the service reconciles runs on startup.
 
-**Checkpoint contents.** `state.json` holds the full depth-first stack, root first: for each live role, its context (role, depth, task, parent, effort on the entry role), its instance id, its complete `RoleState` (history, tool-call count, token accumulators, loop-check watermarks, context-pressure/compaction state), and — for each suspended ancestor — the pending turn it is paused in (the turn's tool calls and the index of the `agent` call it awaits, plus the child's result card once the child has finished). It also carries the run id, the original start time, the registry id counter, and the learned context ceiling, so the resumed run mints non-colliding instance ids, keeps the tightened pressure threshold, and preserves budget accumulators and elapsed-time accounting — a resumed run cannot exceed its budget by forgetting prior usage.
+**Checkpoint contents.** `state.json` holds the full depth-first stack, root first: for each live role, its context (role, depth, task, parent, effort on the entry role), its instance id, its complete `RoleState` (history, tool-call count, token accumulators, loop-check watermarks, context-pressure/compaction state), and — for each suspended ancestor — the pending turn it is paused in (the turn's tool calls and the index of the `agent` call it awaits, plus the child's result card once the child has finished). The entry frame also carries the run's logging level (see "Logging level"), so a resumed run keeps filtering its log at the same level. It also carries the run id, the original start time, the registry id counter, and the learned context ceiling, so the resumed run mints non-colliding instance ids, keeps the tightened pressure threshold, and preserves budget accumulators and elapsed-time accounting — a resumed run cannot exceed its budget by forgetting prior usage.
 
 **When it is written.** At every leaf safe point (the same drain point the interrupt platform uses, once per turn) and on every `role_finished`. Writes are atomic (temp file + rename), so the on-disk checkpoint is never torn — a crash mid-write leaves the previous, complete checkpoint. Writes are suppressed while a handler invocation (loop-check, context, or inquiry handler) is on the stack: a handler interlude is atomic with respect to the checkpoint, so a restart either sees its fully-applied effects or re-runs the drain. The checkpoint is deleted when the run reaches a terminal meta.
 
@@ -129,9 +129,9 @@ The executor keeps every role's conversation and budget state in memory, so a se
 - `role_finished` — `{ role, roleId, depth, status, summary?, error?, parent? }`. Emitted when a role returns a final card. `status` is the `ResultCard` status; `summary` is the role's own explanation of its result (so a reviewer reading only the log can see why a role errored, rather than only that it did); `error` is the structured `{ kind, message?, details? }` when the card carried one; `parent` is omitted for the entry role. Every `role_start` is paired with exactly one `role_finished`.
 - `agent_call` — `{ parent, child, depth }`. Emitted when the `agent` tool is invoked, before the child runs, carrying the parent→child edge even for callers that do not read `role_start`.
 - `llm_call_start` — `{ role }`. Emitted immediately before the LLM request is dispatched, on every turn (including the paths that later fail: `llm_unavailable` and `context_budget_exceeded`). It marks the turn in flight the moment the request is sent, so the flow view can end the call's transit phase (flowing edge → solid) when the callee begins working rather than when the response completes. Only the role is carried; the full turn (message list, response, usage) lands in the succeeding `llm_call`.
-- `llm_call` — emitted only on success paths (a turn that returned content/tool calls or finished). Payload: `{ role, messageCount, sent, received, usage, finishReason? }`. `sent` is the message list sent for the turn (each message's `role` and `content`; reasoning omitted; `tool_calls` on assistant messages included). `received` is the assistant response actually received: `content`, `reasoning` (if any), and the parsed `toolCalls` (each call's `id`, `function.name`, and `function.arguments`). `usage` carries `promptTokens`, `completionTokens`, `totalTokens`, and `cachedPromptTokens` (when the endpoint reports a cached share). `finishReason` is the OpenAI `choices[0].finish_reason` (e.g. `stop`, `length`, `tool_calls`, `content_filter`), absent when the endpoint omits it so "absent" is distinguishable from "model stopped". The `llm_unavailable` and `context_budget_exceeded` paths log their own dedicated events and do not emit a misleading `llm_call`.
+- `llm_call` — emitted only on success paths (a turn that returned content/tool calls or finished). Payload: `{ role, messageCount, sent, received, usage, finishReason? }`. `sent` is the message list sent for the turn (each message's `role` and `content`; reasoning omitted; `tool_calls` on assistant messages included). `received` is the assistant response actually received: `content`, `reasoning` (if any), and the parsed `toolCalls` (each call's `id`, `function.name`, and `function.arguments`). `usage` carries `promptTokens`, `completionTokens`, `totalTokens`, and `cachedPromptTokens` (when the endpoint reports a cached share). `finishReason` is the OpenAI `choices[0].finish_reason` (e.g. `stop`, `length`, `tool_calls`, `content_filter`), absent when the endpoint omits it so "absent" is distinguishable from "model stopped". Under the `standard` logging level the `sent` and `received` bodies are omitted from the payload (see "Logging level"). The `llm_unavailable` and `context_budget_exceeded` paths log their own dedicated events and do not emit a misleading `llm_call`.
 - `tool_call` — `{ role, tool, arguments }`. `arguments` is the raw JSON-arguments string the model passed, so the exact parameters are recoverable.
-- `tool_result` — `{ role, tool, kind, result }`. `result` is the full un-truncated `ToolResult` (`{ kind: 'success', data }` or `{ kind, message, details }`). Truncation still applies only to what is appended to the conversation; the log records the un-truncated result so a reviewer is not flying blind on what a tool returned.
+- `tool_result` — `{ role, tool, kind, result }`. `result` is the full un-truncated `ToolResult` (`{ kind: 'success', data }` or `{ kind, message, details }`). Truncation still applies only to what is appended to the conversation; the log records the un-truncated result so a reviewer is not flying blind on what a tool returned. Under the `standard` logging level the `result` body is omitted from the payload (see "Logging level").
 - `depth_exceeded` — `{ parent, child, depth, error }` when an `agent` call is refused for exceeding `maxAgentDepth`.
 - `role_not_found` — `{ roleName }` for an unknown entry role, or `{ parent, roleName }` when a child role name is invalid.
 - `interrupt` — `{ trigger, handler, target, message? }`. Emitted when the engine suspends the active role to invoke a handler role: `trigger` is the source (`loop_check` for the cadence, `context_pressure` when the entry role is compacted at the threshold, `context_budget_exceeded` when a rejection is answered by the context handler, `inquiry` for an operator question), `handler` the handler role name, `target` the suspended role-instance id; the `inquiry` trigger additionally carries `message`, the operator's verbatim question. The interrupt preempts the active call stack in the interaction model: a new stack pauses the previous one, rooted at a fresh participant — a synthetic interrupt instance, or a fresh human asker for an inquiry (the person asking is that stack's caller). Subsequent `role_start`/`role_finished`/`llm_call`/`tool_call`/`tool_result` events (the handler's) belong to the interrupt stack until its root call closes, at which point control returns to the preempted stack.
@@ -183,7 +183,7 @@ Four read-only tools give a handler bounded, windowed access to another role ins
 - `search_role_blocks` — substring/regex search across a role's `content` and/or `reasoning`, returning match offsets with short surrounding windows, capped at `maxMatches`.
 - `recent_role_tool_calls` — a structured trace of the last N tool calls (tool name, argument hash, result kind); consecutive identical entries are the loop signature.
 
-Two further bounded tools research the run itself rather than a live conversation. They are assigned only to the inquiry handler, whose task names what to look for: roles that already finished have no live conversation to inspect — their work is recorded in the run's `log.jsonl` (see "Persistence"), whose `llm_call` events carry the full conversations.
+Two further bounded tools research the run itself rather than a live conversation. They are assigned only to the inquiry handler, whose task names what to look for: roles that already finished have no live conversation to inspect — their work is recorded in the run's `log.jsonl` (see "Persistence"), whose `llm_call` events carry the full conversations (unless the run logged at the `standard` level, which omits those bodies — see "Logging level").
 
 - `read_run_log` — pages over the run's parsed log events in order (`offset`, `limit`, hard-capped); each event carries its log-wide `index`, `timestamp`, `type`, and raw `payload`, plus `totalEvents` and whether more exist after the window.
 - `search_run_log` — case-insensitive plain-substring search over each event's raw serialized line (so payload text matches), returning per match the event's `index`/`timestamp`/`type` and a bounded excerpt of the line around the first occurrence; an optional `type` filter narrows the search before matching, matches are hard-capped, and `totalMatches` reports the uncapped count.
@@ -277,7 +277,7 @@ There is no separate graph or playbook file. A workflow is a role calling `agent
 
 ## Deployment configuration
 
-The deployment file `deployment/deployment.json` holds the knobs an operator sets once per deployment: the model endpoint, the executor budgets, and the context policy. It is bundled into the image at `/app/deployment/` alongside the Guild and loaded at service startup. Like the Guild it has full-replacement semantics — to change it, mount a different file and point `ORCHESTRATOR_DEPLOYMENT_FILE` at it — and individual fields can also be overridden with environment variables on top of it (see "Environment overrides" below). It is validated strictly: unknown keys are rejected at every level, including nested objects like `generation` and `interruptTriggers` (the file is small and fully known, so a typo must fail loudly), and handler-role fields (`executor.contextHandlerRole`, `executor.inquiryHandlerRole`, `executor.interruptTriggers.handlerRole`, `executor.interruptTriggers.planOwnerRole`) must name roles declared in the Guild. There is no schema versioning; a deployment file that does not match this document fails the load.
+The deployment file `deployment/deployment.json` holds the knobs an operator sets once per deployment: the model endpoint, the executor budgets, the context policy, and the logging default. It is bundled into the image at `/app/deployment/` alongside the Guild and loaded at service startup. Like the Guild it has full-replacement semantics — to change it, mount a different file and point `ORCHESTRATOR_DEPLOYMENT_FILE` at it — and individual fields can also be overridden with environment variables on top of it (see "Environment overrides" below). It is validated strictly: unknown keys are rejected at every level, including nested objects like `generation`, `interruptTriggers`, and `logging` (the file is small and fully known, so a typo must fail loudly), and handler-role fields (`executor.contextHandlerRole`, `executor.inquiryHandlerRole`, `executor.interruptTriggers.handlerRole`, `executor.interruptTriggers.planOwnerRole`) must name roles declared in the Guild. There is no schema versioning; a deployment file that does not match this document fails the load.
 
 The model credential is deliberately absent from the file: an `apiKey` key is rejected with a pointer to the `ORCHESTRATOR_API_KEY` environment variable, which injects the key at runtime (see [`README.md`](../README.md) "Configuration"). Like the Kagi key, it may also arrive as a Docker secret at `/run/secrets/orchestrator_api_key` (or `/run/secrets/ORCHESTRATOR_API_KEY`).
 
@@ -358,21 +358,29 @@ Safety budgets enforced by the executor. `maxAgentDepth` guards unbounded agent 
 
 Tool results longer than this are truncated inline. There is no automatic compaction threshold — roles use `context_info` and `edit_context` to manage context.
 
+### `logging`
+
+```json
+{ "level": "standard" }
+```
+
+Optional section setting the deployment-wide default logging level for run logs (see "Logging level" below): `level` is `"full"` or `"standard"`, and the whole section may be omitted. A per-run choice or the project setting (see `GET|PUT /api/settings`) still overrides it. The section is validated strictly like the rest of the file — an unknown key such as `levels`, or a value that is not one of the two wire strings, fails the load.
+
 ## HTTP API
 
 The web UI is the primary interface. The HTTP API exists for programmatic access (e.g. the Foundry). All endpoints return JSON. The server runs one task at a time; there is no queue.
 
 ### `POST /api/runs`
 
-Starts a run. **Body:** `{ "task": "...", "effort"?: "quick"|"standard"|"thorough", "continuesFrom"?: "<run_id>" }`. `effort` is optional; when omitted the project default (see `GET|PUT /api/settings`) is applied, falling back to `"standard"` when no default is set. Anything but the three tier strings returns `400 invalid_body`. `continuesFrom` starts a new run that continues a prior one; when present it must be a well-formed run id (`run-YYYYMMDD-HHMMSS`) naming a known run whose status is terminal (`success`, `error`, `needs_clarification`, or `interrupted` — a `running` run has no outcome to continue from), and anything else returns `400 invalid_body`. A continuation run records the lineage as `continuesFrom` in its `meta.json` (see "Persistence"), and the executor injects a clearly-marked briefing block into the entry role's initial user message — below the operator's new task text, quoting the prior run's task, its result summary, and the `read_plan` handle for the prior run's plan document — so the Guild can pick up where the prior run left off (the planner reads the prior plan with `read_plan(runId)`); the executor provides the channel only, and the Guild decides what to do with the continuation. **201:** `{ "runId": "..." }`. **409:** `{ "ok": false, "error": "run_in_progress" }`.
+Starts a run. **Body:** `{ "task": "...", "effort"?: "quick"|"standard"|"thorough", "logLevel"?: "full"|"standard", "continuesFrom"?: "<run_id>" }`. `effort` is optional; when omitted the project default (see `GET|PUT /api/settings`) is applied, falling back to `"standard"` when no default is set. Anything but the three tier strings returns `400 invalid_body`. `logLevel` is optional and picks the run's logging level (see "Logging level"); when omitted it resolves through the same chain — project default, then the deployment file's `logging.level`, then `"full"` — and anything but the two level strings returns `400 invalid_body`. `continuesFrom` starts a new run that continues a prior one; when present it must be a well-formed run id (`run-YYYYMMDD-HHMMSS`) naming a known run whose status is terminal (`success`, `error`, `needs_clarification`, or `interrupted` — a `running` run has no outcome to continue from), and anything else returns `400 invalid_body`. A continuation run records the lineage as `continuesFrom` in its `meta.json` (see "Persistence"), and the executor injects a clearly-marked briefing block into the entry role's initial user message — below the operator's new task text, quoting the prior run's task, its result summary, and the `read_plan` handle for the prior run's plan document — so the Guild can pick up where the prior run left off (the planner reads the prior plan with `read_plan(runId)`); the executor provides the channel only, and the Guild decides what to do with the continuation. **201:** `{ "runId": "..." }`. **409:** `{ "ok": false, "error": "run_in_progress" }`.
 
 ### `GET /api/settings`
 
-Returns the project-wide settings. **200:** `{ "effort": "quick"|"standard"|"thorough" | null }`. `effort` is `null` when no default has been set.
+Returns the project-wide settings. **200:** `{ "effort": "quick"|"standard"|"thorough" | null, "logLevel": "full"|"standard" | null }`. Each field is `null` when no default has been set.
 
 ### `PUT /api/settings`
 
-Updates the project-wide settings. **Body:** `{ "effort": "quick"|"standard"|"thorough" }` (required, strict). The file is written atomically (write-temp + rename). **200:** `{ "effort": ... }`. **400:** `{ "ok": false, "error": "invalid_body" }` for a missing or invalid `effort`.
+Updates the project-wide settings. **Body:** `{ "effort": "quick"|"standard"|"thorough", "logLevel"?: "full"|"standard" }` — `effort` is required and strict; the optional `logLevel` sets the project-wide default logging level (see "Logging level") and, being absent, clears it (the write replaces the file wholesale). The file is written atomically (write-temp + rename). **200:** the settings as stored. **400:** `{ "ok": false, "error": "invalid_body" }` for a missing or invalid `effort`, or an invalid `logLevel`.
 
 ### `GET /api/runs`
 
@@ -479,11 +487,11 @@ Run bookkeeping lives alongside the project under `.orchestration/runs/`:
 ```
 <workspace>/.orchestration/
 ├── runs/<run_id>/
-│   ├── meta.json      # run id, guild path, start/end time, status (incl. interrupted), effort, final result, continuesFrom (the prior run's id when this run continues one)
+│   ├── meta.json      # run id, guild path, start/end time, status (incl. interrupted), effort, logLevel, final result, continuesFrom (the prior run's id when this run continues one)
 │   ├── state.json     # checkpoint: the runnable role stack, written atomically at every safe point; deleted on terminal meta
-│   ├── log.jsonl      # one JSON object per line: effort_set, run_resumed, llm calls, tool calls, errors
+│   ├── log.jsonl      # one JSON object per line: effort_set, run_resumed, llm calls, tool calls, errors (payload detail per the run's logging level)
 │   └── plan.md        # the run's plan document (write_plan/read_plan)
-└── settings.json      # project-wide settings (currently the default effort)
+└── settings.json      # project-wide settings (the default effort and logging level)
 ```
 
 The workspace itself holds the final filesystem state (mutated in place). `log.jsonl` is append-only — the executor logs every role start/finish, the parent→child agent-call edges, every LLM turn (sent messages, received response, finish reason, per-call usage), and every tool call/result (raw arguments and the full un-truncated result) so a reviewer can reconstruct exactly what happened from the log alone. `state.json` is the run's resumable state (see "Run persistence and resumption"): present only while a run is live, rewritten at every safe point and on every `role_finished`, and validated on startup before any of it is trusted.
@@ -516,3 +524,32 @@ Quality level: <tier> (one of quick, standard, thorough — quick is fastest and
 - An `effort_set` event `{ effort }` is logged once at run start, with the tier string as the payload value.
 - `GET|PUT /api/settings` read/write `.orchestration/settings.json` atomically; a malformed file is treated as absent (a torn read mid-write must not crash submission).
 - The Foundry sets effort per benchmark and ignores the project setting, so benchmark runs are comparable.
+
+## Logging level
+
+The logging level is a per-run choice controlling how much payload detail `log.jsonl` carries. Two levels exist, and the lowercase strings are the wire format everywhere (`POST /api/runs`, `settings.json`, `deployment.json`, `meta.json`, and the checkpoint's entry frame):
+
+- `full` — the default and today's unchanged behavior: every event carries its full payload, including each `llm_call`'s complete sent conversation and received response and each `tool_result`'s full un-truncated result.
+- `standard` — exactly two slimming rules applied where the event is written; nothing else changes (every event type is still emitted, with identical counts and order):
+  - `llm_call`: `payload.sent` and `payload.received` are dropped; `role`, `messageCount`, `usage`, and `finishReason` are kept.
+  - `tool_result`: `payload.result` is dropped; `role`, `tool`, and `kind` are kept.
+
+The kept fields are the ones the UI's derivations read: the flow model and the token budgets consume only identities and `usage`, and the raw-detail toggle simply shows fewer or empty sections for the slimmed events. The trade-off: under `standard` the conversation bodies of finished roles are never written, so the inquiry handler cannot research what a finished role said or received through `read_run_log`/`search_run_log` (both tools still work for the log's structure — event types, kinds, tool names, and usage).
+
+### Resolution
+
+The level is resolved once at run submission and is not adjustable mid-run (a second submit while a run is active is rejected as `run_in_progress`):
+
+1. A per-run `logLevel` in `POST /api/runs` wins.
+2. Otherwise the project default from `.orchestration/settings.json` (set via `PUT /api/settings`) is used.
+3. Otherwise the deployment default from `deployment.json` (`"logging"."level"`, see [Deployment configuration](#deployment-configuration)) is used.
+4. Otherwise the default `"full"` is applied.
+
+The web UI runs this chain once on load to initialize its selector and then pins the resolved level into its per-run submissions, so the deployment tier is honored for API submissions and as the selector's default.
+
+### Surfaces
+
+- `RunMeta.logLevel` carries the run's resolved level (absent on metas written before the channel existed; a legacy checkpoint without one resumes at `full`).
+- The checkpoint's entry frame carries the level, so a restart-resumed run keeps filtering at the same level.
+- The filtering wraps the run's `appendLog` leaf once, in the service's per-run bindings — every event the executor and the human backend emit funnels through it, and no event emitter knows the level.
+- `GET|PUT /api/settings` read/write the project default alongside `effort`.

@@ -46,6 +46,17 @@ function effortDescription(effort) {
 	return option !== undefined ? option.description : ''
 }
 
+// The logging-level channel's two levels (see docs/reference.md "Logging level"). The wire strings are the contract — API bodies and settings carry them verbatim. Under `standard` the run log still receives every event, but the heavy bodies (each llm_call's sent conversation and received response, each tool_result's full result) are dropped, which keeps long runs' log files small at the cost of the raw-detail toggle showing fewer bodies.
+const DEFAULT_LOG_LEVEL = 'full'
+const LOG_LEVEL_OPTIONS = [
+	{ value: 'full', label: 'Full logging' },
+	{ value: 'standard', label: 'Standard (smaller logs)' },
+]
+
+function isLogLevel(value) {
+	return LOG_LEVEL_OPTIONS.some((option) => option.value === value)
+}
+
 // The label tier the flow/sequence views localize through. 'detailed' is the default so a fresh load reads precisely; the toggle in the run-view controls swaps it for a non-technical voice. The values come from labels.js (TIER_VALUES), so a swap re-renders the views through the same resolver without touching the model.
 const DEFAULT_FLOW_TIER = 'detailed'
 
@@ -375,30 +386,44 @@ function GotConfig(state, payload) {
 	}
 }
 
-// The saved effort level is fetched once on load so the selector starts where the operator last left it; later settings fetches (none today) would not override a level the operator has since picked.
+// The saved settings are fetched once on load so the selectors start where the operator last left them; later settings fetches (none today) would not override levels the operator has since picked.
 function GotSettings(state, payload) {
 	const ok = payload.ok
 	const body = payload.body
-	if (state.runEffort !== null) return { ...state, serverAvailable: ok }
-	const effort = ok && body !== null && typeof body === 'object' && isEffort(body.effort) ? body.effort : null
-	return { ...state, runEffort: effort !== null ? effort : DEFAULT_EFFORT, serverAvailable: ok }
+	if (state.runEffort !== null && state.runLogLevel !== null) return { ...state, serverAvailable: ok }
+	const readable = ok && body !== null && typeof body === 'object'
+	const effort = readable && isEffort(body.effort) ? body.effort : null
+	const logLevel = readable && isLogLevel(body.logLevel) ? body.logLevel : null
+	return {
+		...state,
+		runEffort: state.runEffort !== null ? state.runEffort : (effort !== null ? effort : DEFAULT_EFFORT),
+		runLogLevel: state.runLogLevel !== null ? state.runLogLevel : (logLevel !== null ? logLevel : DEFAULT_LOG_LEVEL),
+		serverAvailable: ok,
+	}
 }
 
 function SettingsFetchFailed(state) {
-	// The selector still needs a concrete value to render, so fall back to the default rather than sitting at null forever.
-	if (state.runEffort !== null) return { ...state, serverAvailable: false }
-	return { ...state, runEffort: DEFAULT_EFFORT, serverAvailable: false }
+	// The selectors still need concrete values to render, so fall back to the defaults rather than sitting at null forever.
+	return { ...state, runEffort: state.runEffort ?? DEFAULT_EFFORT, runLogLevel: state.runLogLevel ?? DEFAULT_LOG_LEVEL, serverAvailable: false }
+}
+
+// The settings write replaces the file wholesale, so a save carries both persisted fields. The selectors' values are null until the initial GET /api/settings resolves — before that they would only contribute the defaults the selectors show, silently clobbering the operator's persisted choices, so buildSettingsBody refuses to build a body (and the save actions skip the PUT) until both are initialized; the pick still applies locally and persists on the next save.
+function buildSettingsBody(runEffort, runLogLevel) {
+	if (!isEffort(runEffort) || !isLogLevel(runLogLevel)) return null
+	return { effort: runEffort, logLevel: runLogLevel }
 }
 
 // A radio pick is one deliberate gesture (unlike a slider drag), so a single change handler both updates state and persists the level as the default for the next run — the selector stays where the operator last left it across page reloads and restarts, with one PUT per pick.
 function SaveRunEffort(state, event) {
 	const value = event.target.value
 	if (!isEffort(value)) return state
+	const body = buildSettingsBody(value, state.runLogLevel)
+	if (body === null) return { ...state, runEffort: value }
 	return [
 		{ ...state, runEffort: value, savingEffort: true },
 		Fetch({
 			url: 'api/settings',
-			init: { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ effort: value }) },
+			init: { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) },
 			ok: EffortSaved,
 			fail: EffortSaveFailed,
 		}),
@@ -411,11 +436,41 @@ function EffortSaved(state, payload) {
 	if (!ok || body === null || typeof body !== 'object' || !isEffort(body.effort)) {
 		return { ...state, savingEffort: false, serverAvailable: true }
 	}
-	return { ...state, savingEffort: false, runEffort: body.effort, serverAvailable: true }
+	return { ...state, savingEffort: false, runEffort: body.effort, runLogLevel: isLogLevel(body.logLevel) ? body.logLevel : state.runLogLevel, serverAvailable: true }
 }
 
 function EffortSaveFailed(state) {
 	return { ...state, savingEffort: false, serverAvailable: false }
+}
+
+// The logging-level picker follows the effort picker exactly: one change both updates state and persists the choice as the project default for the next run.
+function SaveRunLogLevel(state, event) {
+	const value = event.target.value
+	if (!isLogLevel(value)) return state
+	const body = buildSettingsBody(state.runEffort, value)
+	if (body === null) return { ...state, runLogLevel: value }
+	return [
+		{ ...state, runLogLevel: value, savingLogLevel: true },
+		Fetch({
+			url: 'api/settings',
+			init: { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) },
+			ok: LogLevelSaved,
+			fail: LogLevelSaveFailed,
+		}),
+	]
+}
+
+function LogLevelSaved(state, payload) {
+	const ok = payload.ok
+	const body = payload.body
+	if (!ok || body === null || typeof body !== 'object' || !isLogLevel(body.logLevel)) {
+		return { ...state, savingLogLevel: false, serverAvailable: true }
+	}
+	return { ...state, savingLogLevel: false, runLogLevel: body.logLevel, runEffort: isEffort(body.effort) ? body.effort : state.runEffort, serverAvailable: true }
+}
+
+function LogLevelSaveFailed(state) {
+	return { ...state, savingLogLevel: false, serverAvailable: false }
 }
 
 function SelectRun(state, runId) {
@@ -477,16 +532,17 @@ function SubmitRun(state, event) {
 		state,
 		Fetch({
 			url: 'api/runs',
-			init: { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(buildRunBody(task, state.runEffort, state.continuation)) },
+			init: { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(buildRunBody(task, state.runEffort, state.runLogLevel, state.continuation)) },
 			ok: GotCreatedRun,
 			fail: FetchFailed,
 		}),
 	]
 }
 
-// effort is omitted when the selector has not yet initialized (settings still loading), so the server applies the project default rather than receiving a null. continuesFrom rides only when the compose screen is in continuation mode; a re-run passes null and submits a plain task.
-function buildRunBody(task, runEffort, continuation) {
+// effort and logLevel are omitted when their selectors have not yet initialized (settings still loading), so the server applies its resolution chain rather than receiving a null. continuesFrom rides only when the compose screen is in continuation mode; a re-run passes null and submits a plain task.
+function buildRunBody(task, runEffort, runLogLevel, continuation) {
 	const body = isEffort(runEffort) ? { task, effort: runEffort } : { task }
+	if (isLogLevel(runLogLevel)) body.logLevel = runLogLevel
 	if (continuation !== null && typeof continuation.runId === 'string' && continuation.runId !== '') body.continuesFrom = continuation.runId
 	return body
 }
@@ -502,7 +558,7 @@ function RerunTask(state, event) {
 		state,
 		Fetch({
 			url: 'api/runs',
-			init: { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(buildRunBody(task, state.runEffort, null)) },
+			init: { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(buildRunBody(task, state.runEffort, state.runLogLevel, null)) },
 			ok: GotCreatedRun,
 			fail: FetchFailed,
 		}),
@@ -955,6 +1011,20 @@ function EffortLevelSelector(value, disabled, saving) {
 	])
 }
 
+// The logging-level selector mirrors the effort selector's radio group at a smaller size — two options whose labels come from LOG_LEVEL_OPTIONS, the single home of the copy. Picking one fires SaveRunLogLevel, so the choice applies to the next run and persists as the project default at once.
+function LoggingLevelSelector(value, disabled, saving) {
+	return h('fieldset', { class: 'logging-level-control', disabled }, [
+		h('legend', { class: 'logging-level-label' }, 'Logging level'),
+		h('div', { class: 'logging-level-options' }, LOG_LEVEL_OPTIONS.map((option) =>
+			h('label', { class: { 'logging-level-option': true, 'is-selected': option.value === value } }, [
+				h('input', { type: 'radio', name: 'run-log-level', value: option.value, checked: option.value === value, onchange: SaveRunLogLevel }),
+				h('span', { class: 'logging-level-option-name' }, option.label),
+			]),
+		)),
+		h('p', { class: 'logging-level-note' }, saving ? 'saving…' : ''),
+	])
+}
+
 // The continuation banner above the compose textarea: names the run being continued and echoes its task (and its outcome, when one exists) so the follow-up is drafted against the right context. Every dynamic string is a machine field rendered as text — never markup. Dismissing returns the form to a plain new task.
 function ContinuationChip(state) {
 	const continuation = state.continuation
@@ -973,6 +1043,7 @@ function ContinuationChip(state) {
 function ComposeScreen(state) {
 	const disabled = state.justSubmittedRunId !== null || deriveActiveRunId(state.summaries) !== null
 	const runEffort = isEffort(state.runEffort) ? state.runEffort : DEFAULT_EFFORT
+	const runLogLevel = isLogLevel(state.runLogLevel) ? state.runLogLevel : DEFAULT_LOG_LEVEL
 	return h('section', { id: 'compose-screen' }, [
 		h('div', { class: 'compose-hero' }, [
 			h('h1', { class: 'compose-heading' }, state.summaries.length === 0 ? 'What should the orchestrator do?' : 'New task'),
@@ -981,6 +1052,7 @@ function ComposeScreen(state) {
 				ContinuationChip(state),
 				h('textarea', { name: 'task', placeholder: disabled ? 'a run is already in progress — a new task can start when it finishes' : 'describe a task (Markdown supported) and start a run', autocomplete: 'off', disabled, onkeydown: TaskTextareaKeydown }),
 				EffortLevelSelector(runEffort, disabled, state.savingEffort === true),
+				LoggingLevelSelector(runLogLevel, disabled, state.savingLogLevel === true),
 				h('div', { class: 'submit-controls' }, [
 					h('button', { type: 'submit', disabled }, disabled ? 'Run in progress…' : 'Start run'),
 				]),
@@ -1285,9 +1357,11 @@ app({
 			shownQuestionIds: {},
 			firstQuestionsPoll: true,
 			pendingAnswerId: null,
-			// null until the saved effort loads; the selector initializes from the persisted level on first load.
+			// null until the saved settings load; the selectors initialize from the persisted levels on first load.
 			runEffort: null,
 			savingEffort: false,
+			runLogLevel: null,
+			savingLogLevel: false,
 			// The live InteractionModel the centerpiece renders, plus its previous frame for `deriveLifecycle`'s enter/depart diff. Both null until the first readable flow frame lands.
 			flowModel: null,
 			previousFlowModel: null,
@@ -1320,7 +1394,7 @@ app({
 		shownInterruptAnswerKeys: {},
 		now: Date.now(),
 	},
-	// The guild config and the saved effort level are each loaded once on load and never polled, so their fetches are init effects rather than subscriptions.
+	// The guild config and the saved settings (effort and logging level) are each loaded once on load and never polled, so their fetches are init effects rather than subscriptions.
 	Fetch({ url: 'api/config', ok: GotConfig, fail: FetchFailed }),
 	Fetch({ url: 'api/settings', ok: GotSettings, fail: SettingsFetchFailed }),
 	],

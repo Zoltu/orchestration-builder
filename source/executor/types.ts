@@ -1,4 +1,9 @@
 
+import type { LogLevel } from './log-level.js'
+
+// The logging level is defined in log-level.ts (with its guard and the event filter); re-exported here so types.ts stays the one import home for the wire types.
+export type { LogLevel }
+
 export interface GuildConfig {
 	entryRole: string
 	roles: Record<string, RoleDefinition>
@@ -11,6 +16,13 @@ export interface DeploymentFileConfig {
 	model: ModelConfig
 	executor: ExecutorConfig
 	contextPolicy: ContextPolicy
+	// Optional deployment-wide default for the run logs' payload detail (docs/reference.md "Logging level"); absent means the built-in default applies.
+	logging?: LoggingConfig
+}
+
+// The deployment file's optional logging section: the deployment-wide default of the log-level resolution chain, below the per-run choice and the project setting.
+export interface LoggingConfig {
+	level?: LogLevel
 }
 
 // The deployment knobs the executor reads at startup, kept apart from the Guild so a swapped Guild (the Foundry's artifact) never carries the model endpoint, budgets, or context policy. This is the resolved shape LoadedGuild carries: the model is completed at startup (see model-resolution.ts), so engine and web consumers read every model field as a required value.
@@ -175,6 +187,8 @@ export interface RunOptions {
 	benchmarkPath?: string
 	task: string
 	effort: EffortLevel
+	// The run's logging level (see docs/reference.md "Logging level"), resolved at submission; the run's appendLog writes are filtered at this level.
+	logLevel?: LogLevel
 	continuation?: RunContinuation
 }
 
@@ -185,6 +199,8 @@ export interface RunMeta {
 	task: string
 	// Absent on runs written before the effort channel existed; present on every run started since. Optional so a torn or legacy meta read still parses.
 	effort?: EffortLevel
+	// The run's logging level (see docs/reference.md "Logging level"). Absent on runs written before the channel existed; optional so a torn or legacy meta read still parses.
+	logLevel?: LogLevel
 	// Set when this run continues a prior finished run: the prior run's id. Optional so legacy metas still parse; the lineage is what a follow-on run uses to find the prior run's artifacts.
 	continuesFrom?: string
 	// 'interrupted' is terminal: the service stopped mid-run and the run could not (or was not chosen to) resume on restart — written by startup reconciliation so the UI stops showing the run as "in progress".

@@ -5,7 +5,7 @@ import { createWebServer } from './web/server.js'
 import { createBootstrapFailureHandler } from './web/bootstrap-failure.js'
 import { createSnapshotCache } from './web/snapshot-cache.js'
 import { createTaskSummarizer, type TaskSummarizer } from './web/summarize.js'
-import { applyDeploymentOverride, createAppendLog, createDeleteCheckpoint, createDockerSecretReader, createGuildLoader, createInterruptChannel, createInterruptQueue, createLlmCaller, createLlmFetch, createListRunIds, createModelInfoProbe, createPlanToolHandlers, createReadProjectSettings, createReadRunCheckpointById, createReadRunLogTextFrom, createReadRunMetaById, createReadRunPlanById, createReadRunSnapshotById, createReadRunSnapshotStats, createReadRunSummaryById, createReadRunSummaryStats, createRunDirectory, createRunLogToolHandlers, createRunState, createRunSubmission, createSleep, createToolHandlers, createWebHumanBackend, createWriteCheckpoint, createWriteMeta, createWriteProjectSettings, createWriteRunSummary, ensureOrchestrationGitExcluded, generateRunId, MODEL_PROBE_TIMEOUT_MS, nodeGitExcludeFilesystem, parseModelInfo, reconcileRunsOnStartup, resolveDeploymentConfig, resolveDeploymentOverride, resolveKagiApiKey, resolveSecret, resumeExecutor, runExecutor, validateDeploymentFileConfig, validateDeploymentRoleReferences, ConfigurationError, ValidationError, type ExecutorDependencies, type InterruptChannel, type LoadedGuild, type LlmCaller, type ModelApiProbe, type ResumeRun, type RunCheckpoint, type StartRun, type WebHumanBackend } from './executor/index.js'
+import { applyDeploymentOverride, applyLogLevel, createAppendLog, createDeleteCheckpoint, createDockerSecretReader, createGuildLoader, createInterruptChannel, createInterruptQueue, createLlmCaller, createLlmFetch, createListRunIds, createModelInfoProbe, createPlanToolHandlers, createReadProjectSettings, createReadRunCheckpointById, createReadRunLogTextFrom, createReadRunMetaById, createReadRunPlanById, createReadRunSnapshotById, createReadRunSnapshotStats, createReadRunSummaryById, createReadRunSummaryStats, createRunDirectory, createRunLogToolHandlers, createRunState, createRunSubmission, createSleep, createToolHandlers, createWebHumanBackend, createWriteCheckpoint, createWriteMeta, createWriteProjectSettings, createWriteRunSummary, DEFAULT_LOG_LEVEL, ensureOrchestrationGitExcluded, generateRunId, MODEL_PROBE_TIMEOUT_MS, nodeGitExcludeFilesystem, parseModelInfo, reconcileRunsOnStartup, resolveDeploymentConfig, resolveDeploymentOverride, resolveKagiApiKey, resolveSecret, resumeExecutor, runExecutor, validateDeploymentFileConfig, validateDeploymentRoleReferences, ConfigurationError, ValidationError, type AppendLog, type ExecutorDependencies, type InterruptChannel, type LoadedGuild, type LlmCaller, type LogLevel, type ModelApiProbe, type ResumeRun, type RunCheckpoint, type StartRun, type WebHumanBackend } from './executor/index.js'
 
 const DEPLOYMENT_FILE_ENV_VAR = 'ORCHESTRATOR_DEPLOYMENT_FILE'
 const PORT_ENV_VAR = 'PORT'
@@ -57,7 +57,7 @@ async function withRunBindings<T>(config: {
 	guildPath: string
 	workspaceRootPath: string
 	runsBaseDir: string
-}, runId: string, invoke: (dependencies: ExecutorDependencies) => Promise<T>): Promise<T> {
+}, runId: string, logLevel: LogLevel, invoke: (dependencies: ExecutorDependencies) => Promise<T>): Promise<T> {
 	const additionalToolHandlers = {
 		...createToolHandlers({
 			workspaceRoot: config.workspaceRootPath,
@@ -70,15 +70,17 @@ async function withRunBindings<T>(config: {
 	}
 	excludeOrchestrationFromGit(config.workspaceRootPath)
 	const appendLog = createAppendLog(runId, config.runsBaseDir)
+	// The run's logging level applies at the single write chokepoint: every event the executor and the human backend emit funnels through this wrapper, so the heavy bodies are dropped once here and no emitter needs to know the level (see docs/reference.md "Logging level").
+	const filteredAppendLog: AppendLog = (event) => appendLog(applyLogLevel(event, logLevel))
 	// The human backend is shared with the web API; bind the active run's log so ask_human and human_answer events land in this run's log.jsonl for the question-history view.
-	config.humanBackend.bindRunLog(appendLog)
+	config.humanBackend.bindRunLog(filteredAppendLog)
 	// The interrupt channel is likewise shared; bind the run's fresh queue so operator interrupts submitted mid-run reach the engine's drain.
 	const interruptQueue = createInterruptQueue()
 	config.interruptChannel.bindQueue(interruptQueue)
 	const dependencies: ExecutorDependencies = {
 		llmCaller: config.llmCaller,
 		loadGuild: () => config.loadedGuild,
-		appendLog,
+		appendLog: filteredAppendLog,
 		createRunDirectory: createRunDirectory(runId, config.runsBaseDir),
 		writeMeta: createWriteMeta(runId, config.runsBaseDir),
 		writeCheckpoint: createWriteCheckpoint(runId, config.runsBaseDir),
@@ -117,12 +119,13 @@ interface RunServiceConfig {
 }
 
 function createStartRun(config: RunServiceConfig): StartRun {
-	return (runId, task, effort, continuation) => {
-		const runPromise = withRunBindings(config, runId, (dependencies) => runExecutor(dependencies, {
+	return (runId, task, effort, logLevel, continuation) => {
+		const runPromise = withRunBindings(config, runId, logLevel, (dependencies) => runExecutor(dependencies, {
 			runId,
 			guildPath: config.guildPath,
 			task,
 			effort,
+			logLevel,
 			...(continuation !== undefined ? { continuation } : {}),
 		}))
 		fireAndForgetSummary(config.summarizer.summarizeTaskStart(runId, task), runId)
@@ -136,7 +139,10 @@ function createStartRun(config: RunServiceConfig): StartRun {
 
 function createResumeRun(config: RunServiceConfig): ResumeRun {
 	return (checkpoint) => {
-		const runPromise = withRunBindings(config, checkpoint.runId, (dependencies) => resumeExecutor(dependencies, checkpoint, {
+		// The entry frame carries the run's resolved level (docs/reference.md "Logging level"); a checkpoint written before the channel existed falls back to full detail — the only mode those runs ever logged at. Must stay in sync with resumeExecutor's identical fallback (the metas it writes and the wrapper filtering this run's log must carry the same level).
+		const entryFrame = checkpoint.frames[0]
+		const logLevel = entryFrame?.logLevel ?? DEFAULT_LOG_LEVEL
+		const runPromise = withRunBindings(config, checkpoint.runId, logLevel, (dependencies) => resumeExecutor(dependencies, checkpoint, {
 			guildPath: config.guildPath,
 		}))
 		runPromise.then(
@@ -190,6 +196,8 @@ async function serve(): Promise<void> {
 	let guild: LoadedGuild
 	let apiKey: string | undefined
 	let kagiApiKey: string | undefined
+	// The deployment file's logging default (docs/reference.md "Logging level"), captured at startup and handed to the run submission as the chain's lowest-priority input.
+	let deploymentLogLevel: LogLevel | undefined
 	try {
 		const deploymentFilePath = Bun.env[DEPLOYMENT_FILE_ENV_VAR] || DEPLOYMENT_PATH
 		const loadGuild = createGuildLoader(deploymentFilePath)
@@ -200,6 +208,7 @@ async function serve(): Promise<void> {
 		const mergedDeployment = applyDeploymentOverride(loadedGuildFiles.deployment, resolveDeploymentOverride(Bun.env))
 		validateDeploymentFileConfig(mergedDeployment)
 		validateDeploymentRoleReferences(mergedDeployment, roleNames)
+		deploymentLogLevel = mergedDeployment.logging?.level
 
 		// The orchestrator credential comes from the shared secret channels: the ORCHESTRATOR_API_KEY environment variable first, then a docker secret mounted at /run/secrets/orchestrator_api_key (or ORCHESTRATOR_API_KEY).
 		// resolveSecret trims and normalizes empty values to undefined so the caller omits the Authorization header entirely.
@@ -272,7 +281,7 @@ async function serve(): Promise<void> {
 	}
 	const startRun = createStartRun(runConfig)
 	const resumeRun = createResumeRun(runConfig)
-	const runSubmission = createRunSubmission({ startRun, resumeRun, generateRunId: () => generateRunId(new Date()), readProjectSettings })
+	const runSubmission = createRunSubmission({ startRun, resumeRun, generateRunId: () => generateRunId(new Date()), readProjectSettings, deploymentLogLevel })
 
 	// Startup reconciliation runs before the server accepts submissions: a run left mid-flight by the previous process resumes from its checkpoint (under its original run id, through the same single-active-run slot), and every run that cannot be resumed is marked interrupted so the UI shows it as terminal rather than perpetually "in progress".
 	const reconciliation = reconcileRunsOnStartup({
