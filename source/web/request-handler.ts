@@ -1,15 +1,19 @@
-import type { ListRunIds, ReadProjectSettings, ReadRunMetaById, ReadRunPlanById, ReadRunSnapshotStats, ReadRunSummaryById, WriteProjectSettings } from '../executor/persistence.js'
+import type { ListRunIds, ReadProjectSettings, ReadRunMetaById, ReadRunPlanById, ReadRunSnapshotStats, ReadRunSummaryById, ReadRunSummaryStats, WriteProjectSettings } from '../executor/persistence.js'
 import { isRunIdShape } from '../executor/run-id.js'
 import type { DeploymentConfig, EffortLevel, GuildConfig, ToolManifest } from '../executor/types.js'
 import { isEffortLevel, isObject, isTerminalRunStatus } from '../executor/validation.js'
 import type { RunState } from '../executor/run-state.js'
 import type { RunSubmission } from '../executor/run-submission.js'
-import { paginateLogEvents, parseRunMeta, renderConfig, renderProjectSettings, renderPendingQuestions, renderRunSummary, renderRunView, formatLogAsText, toRecentLogEntry } from './render.js'
+import { paginateLogEvents, parseRunMeta, renderConfig, renderProjectSettings, renderPendingQuestions, renderRunView, formatLogAsText, toRecentLogEntry } from './render.js'
+import { createRunListCache, type ReadRunListSummary } from './run-list-cache.js'
 import { deriveInteractionModel } from './interaction-model-adapter.js'
 import { DEMO_SCENARIOS, deriveDemoFrameModel, findDemoScenario } from './demo-fixtures.js'
 import type { ReadRunSnapshot } from './snapshot-cache.js'
 
 const MAX_LOG_LINES = 200
+
+// The run list is polled every second alongside the selected run's endpoints; 64 cached summaries covers every history a browser realistically browses while bounding memory on a long-lived service.
+const RUN_LIST_CACHE_MAX_ENTRIES = 64
 
 export interface RequestHandlerConfig {
 	guildConfig: GuildConfig
@@ -20,6 +24,7 @@ export interface RequestHandlerConfig {
 	readRunSnapshot: ReadRunSnapshot
 	readRunMetaById: ReadRunMetaById
 	readRunSummaryById: ReadRunSummaryById
+	readRunSummaryStats: ReadRunSummaryStats
 	readRunPlanById: ReadRunPlanById
 	readRunSnapshotStats: ReadRunSnapshotStats
 	listRunIds: ListRunIds
@@ -126,11 +131,11 @@ function isKnownRun(readRunSnapshotStats: ReadRunSnapshotStats, runId: string): 
 	return stats.meta !== null || stats.log !== null
 }
 
-function handleListRuns(readRunMetaById: ReadRunMetaById, readRunSummaryById: ReadRunSummaryById, listRunIds: ListRunIds): Response {
+function handleListRuns(readRunListSummary: ReadRunListSummary, listRunIds: ListRunIds): Response {
 	const summaries = listRunIds()
 		.slice()
 		.sort((a, b) => (a < b ? 1 : a > b ? -1 : 0))
-		.map((runId) => renderRunSummary(runId, parseRunMeta(readRunMetaById(runId)), readRunSummaryById(runId)))
+		.map((runId) => readRunListSummary(runId))
 	return json(summaries)
 }
 
@@ -204,6 +209,7 @@ export function createRequestHandler(config: RequestHandlerConfig, serveStatic: 
 	const readRunSnapshot = config.readRunSnapshot
 	const readRunMetaById = config.readRunMetaById
 	const readRunSummaryById = config.readRunSummaryById
+	const readRunListSummary = createRunListCache({ readRunSummaryStats: config.readRunSummaryStats, readRunMetaById, readRunSummaryById }, RUN_LIST_CACHE_MAX_ENTRIES)
 	const readRunPlanById = config.readRunPlanById
 	const readRunSnapshotStats = config.readRunSnapshotStats
 	const listRunIds = config.listRunIds
@@ -219,7 +225,7 @@ export function createRequestHandler(config: RequestHandlerConfig, serveStatic: 
 			if (pathname === '/api/settings') return handleGetSettings(readProjectSettings)
 			if (pathname === '/api/run/flow') return handleActiveRunFlow(readRunSnapshot, readRunSnapshotStats, runSubmission)
 			if (pathname === '/api/run') return handleActiveRun(readRunSnapshot, readRunSnapshotStats, readRunPlanById, runSubmission, runState)
-			if (pathname === '/api/runs') return handleListRuns(readRunMetaById, readRunSummaryById, listRunIds)
+			if (pathname === '/api/runs') return handleListRuns(readRunListSummary, listRunIds)
 			if (pathname.startsWith('/api/runs/')) {
 				const rest = decodeURIComponent(pathname.slice('/api/runs/'.length))
 				// Match a /log or /flow suffix before the bare :id route so /api/runs/<id>/log and /api/runs/<id>/flow reach their endpoints rather than being swallowed as a run id of "<id>/log" or "<id>/flow".

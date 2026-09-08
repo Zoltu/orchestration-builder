@@ -131,6 +131,22 @@ export function createReadRunSummaryById(baseDir: string = 'data/runs'): ReadRun
 	}
 }
 
+export interface RunSummaryStats {
+	meta: RunSnapshotFileStat | null
+	summary: RunSnapshotFileStat | null
+}
+
+export type ReadRunSummaryStats = (runId: string) => RunSummaryStats
+
+// Stats the two files a run-list summary is derived from without reading them, so the run-list cache revalidates each run per poll with two stat calls instead of two file reads plus a meta parse. summary.txt rides in the freshness key because the completion summary replaces the start one at a moment when meta.json does not change.
+export function createReadRunSummaryStats(baseDir: string = 'data/runs'): ReadRunSummaryStats {
+	return (runId: string) => {
+		const metaPath = path.resolve(baseDir, runId, 'meta.json')
+		const summaryPath = path.resolve(baseDir, runId, SUMMARY_FILE_NAME)
+		return { meta: statOrNull(metaPath), summary: statOrNull(summaryPath) }
+	}
+}
+
 export type ReadRunPlanById = (runId: string) => string | null
 
 // Written only by the write_plan tool (source/executor/tools/plan.ts), which writes atomically (write-temp + rename), so a reader never sees a torn document.
@@ -164,6 +180,12 @@ export interface RunSnapshotStats {
 
 export type ReadRunSnapshotStats = (runId: string) => RunSnapshotStats
 
+// The freshness comparison the web caches run per request: same size and mtime means the file is unchanged, and null (the file is absent) only matches null.
+export function isSameFileStat(a: RunSnapshotFileStat | null, b: RunSnapshotFileStat | null): boolean {
+	if (a === null || b === null) return a === b
+	return a.size === b.size && a.mtimeMs === b.mtimeMs
+}
+
 function statOrNull(filePath: string): RunSnapshotFileStat | null {
 	if (!fs.existsSync(filePath)) return null
 	const stat = fs.statSync(filePath)
@@ -176,6 +198,26 @@ export function createReadRunSnapshotStats(baseDir: string = 'data/runs'): ReadR
 		const metaPath = path.resolve(baseDir, runId, 'meta.json')
 		const logPath = path.resolve(baseDir, runId, 'log.jsonl')
 		return { meta: statOrNull(metaPath), log: statOrNull(logPath) }
+	}
+}
+
+export type ReadRunLogTextFrom = (runId: string, byteOffset: number) => string
+
+// Reads a run's log.jsonl from a byte offset to the end of the file (offset 0 reads the whole log), so the snapshot cache re-reads only an active run's appended tail per poll instead of the whole ever-growing file. Stored offsets always fall just after a newline byte, which is never part of a multi-byte UTF-8 sequence, so reading from an offset cannot split a character.
+export function createReadRunLogTextFrom(baseDir: string = 'data/runs'): ReadRunLogTextFrom {
+	return (runId: string, byteOffset: number) => {
+		const logPath = path.resolve(baseDir, runId, 'log.jsonl')
+		if (!fs.existsSync(logPath)) return ''
+		const descriptor = fs.openSync(logPath, 'r')
+		try {
+			const size = fs.fstatSync(descriptor).size
+			if (byteOffset >= size) return ''
+			const buffer = Buffer.alloc(size - byteOffset)
+			const bytesRead = fs.readSync(descriptor, buffer, 0, buffer.length, byteOffset)
+			return buffer.toString('utf8', 0, bytesRead)
+		} finally {
+			fs.closeSync(descriptor)
+		}
 	}
 }
 

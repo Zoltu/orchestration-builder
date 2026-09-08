@@ -99,10 +99,19 @@ export function createMarkdownRenderer(h) {
 	return function renderMarkdown(text) {
 		if (typeof text !== 'string' || text === '') return ['—']
 		const cached = cache.get(text)
-		if (cached !== undefined) return cached
+		if (cached !== undefined) {
+			// Re-insert on hit so the Map's insertion order tracks recency and eviction removes the least-recently-used entry, not the least-recently-inserted one.
+			cache.delete(text)
+			cache.set(text, cached)
+			return cached
+		}
 		const vnodes = textToVnodes(text)
-		if (cache.size > MARKDOWN_CACHE_MAX) cache.clear()
 		cache.set(text, vnodes)
+		while (cache.size > MARKDOWN_CACHE_MAX) {
+			const eldest = cache.keys().next()
+			if (eldest.done) break
+			cache.delete(eldest.value)
+		}
 		return vnodes
 	}
 }

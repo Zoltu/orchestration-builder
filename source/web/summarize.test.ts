@@ -134,6 +134,20 @@ describe('summarizeRunCompletion', () => {
 		expect(defined(request.messages[1], 'request.messages[1]').content).toContain('Error: connection refused')
 	})
 
+	test('a log line whose payload merely contains an interrupt marker contributes no interrupt history', async () => {
+		const harness = createHarness(successResult('Done'))
+		harness.log.text = [
+			JSON.stringify({ timestamp: '2026-01-01T00:00:10.000Z', type: 'llm_call', payload: { role: 'planner', sent: [{ role: 'user', content: 'the log line marker is "type":"interrupt' }] } }),
+			JSON.stringify({ timestamp: '2026-01-01T00:00:11.000Z', type: 'interrupt', payload: { trigger: 'inquiry', handler: 'inquiry_responder', target: 'coder-1-2', message: 'how is it going?' } }),
+		].join('\n')
+		const meta = sampleMeta()
+		await createTaskSummarizer(harness.dependencies).summarizeRunCompletion(meta)
+		const request = defined(harness.requests[0], 'harness.requests[0]')
+		const briefing = defined(request.messages[1], 'request.messages[1]').content
+		expect(briefing).toContain('The operator asked: how is it going?')
+		expect(briefing).not.toContain('the log line marker')
+	})
+
 	test('writes nothing when the endpoint is unavailable, leaving any start summary in place', async () => {
 		const harness = createHarness({ kind: 'llm_unavailable', message: 'connection refused' })
 		await createTaskSummarizer(harness.dependencies).summarizeRunCompletion(sampleMeta())

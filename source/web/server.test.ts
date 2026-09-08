@@ -4,7 +4,7 @@ import { createInterruptChannel, createInterruptQueue, type InterruptChannel } f
 import { createRunState } from '../executor/run-state.ts'
 import { createRunSubmission, type ResumeRun, type RunSubmission, type StartRun } from '../executor/run-submission.ts'
 import type { RunCheckpoint } from '../executor/checkpoint.ts'
-import type { ProjectSettings, ReadProjectSettings, WriteProjectSettings, RunSnapshotRaw, RunSnapshotStats } from '../executor/persistence.ts'
+import type { ProjectSettings, ReadProjectSettings, WriteProjectSettings, RunSnapshotRaw, RunSnapshotStats, RunSummaryStats } from '../executor/persistence.ts'
 import type { DeploymentConfig, EffortLevel, GuildConfig, RunContinuation, RunMeta } from '../executor/types.js'
 import { parseRunSnapshot, type RunSnapshot } from './render.ts'
 import { createRequestHandler, type RequestHandler } from './request-handler.ts'
@@ -148,6 +148,15 @@ function readRunSnapshotStats(runId: string): RunSnapshotStats {
 	return {
 		meta: raw.metaText === null ? null : { size: raw.metaText.length, mtimeMs: 1 },
 		log: raw.logText === '' ? null : { size: raw.logText.length, mtimeMs: 1 },
+	}
+}
+
+// No fixture run carries a generated summary; the run-list cache's freshness key sees a permanently absent summary.txt, which the summary reader below mirrors.
+function readRunSummaryStats(runId: string): RunSummaryStats {
+	const raw = rawSnapshotById(runId)
+	return {
+		meta: raw.metaText === null ? null : { size: raw.metaText.length, mtimeMs: 1 },
+		summary: null,
 	}
 }
 
@@ -325,6 +334,7 @@ function createHandlerHarness(): HandlerHarness {
 			readRunSnapshot,
 			readRunMetaById,
 			readRunSummaryById,
+			readRunSummaryStats,
 			readRunPlanById,
 			readRunSnapshotStats,
 			listRunIds,

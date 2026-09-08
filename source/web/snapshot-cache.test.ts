@@ -1,110 +1,221 @@
 import { describe, expect, test } from 'bun:test'
-import type { RunSnapshotRaw, RunSnapshotStats } from '../executor/persistence.ts'
+import type { RunSnapshotStats } from '../executor/persistence.ts'
+import { formatLogEvent } from './render.ts'
 import { createSnapshotCache } from './snapshot-cache.ts'
+import { defined } from './test-fixtures.js'
 
-// An in-memory fake behind the two leaves the cache composes: raw content by run id plus a monotonic clock so tests bump freshness explicitly (mtime) rather than sleeping.
+// An in-memory fake behind the three leaves the cache composes: meta text, an append-only log simulated as a string (ASCII-only, so string length equals byte length and stat sizes line up with offsets), and a monotonic clock so tests bump freshness explicitly (mtime) rather than sleeping. The read leaves count calls and bytes so a test can assert a poll only touched the log's tail.
 function createFakeBackend() {
-	const raws = new Map<string, RunSnapshotRaw>()
-	const mtimes = new Map<string, number>()
-	let rawReads = 0
+	const metaFiles = new Map<string, string | null>()
+	const logs = new Map<string, string>()
+	const metaMtimes = new Map<string, number>()
+	const logMtimes = new Map<string, number>()
+	let metaReads = 0
+	let logReads = 0
+	let logBytesRead = 0
 	let clock = 1
 	return {
-		write(runId: string, raw: RunSnapshotRaw) {
-			raws.set(runId, raw)
-			mtimes.set(runId, clock)
+		writeMeta(runId: string, metaText: string) {
+			metaFiles.set(runId, metaText)
+			metaMtimes.set(runId, clock)
 			clock += 1
 		},
-		rawReads: () => rawReads,
+		writeLog(runId: string, logText: string) {
+			logs.set(runId, logText)
+			logMtimes.set(runId, clock)
+			clock += 1
+		},
+		appendLog(runId: string, appendedText: string) {
+			logs.set(runId, (logs.get(runId) ?? '') + appendedText)
+			logMtimes.set(runId, clock)
+			clock += 1
+		},
+		metaReads: () => metaReads,
+		logReads: () => logReads,
+		logBytesRead: () => logBytesRead,
 		readStats(runId: string): RunSnapshotStats {
-			const raw = raws.get(runId)
-			if (raw === undefined) return { meta: null, log: null }
-			const mtimeMs = mtimes.get(runId) ?? 0
+			const metaText = metaFiles.get(runId)
+			const logText = logs.get(runId)
 			return {
-				meta: raw.metaText === null ? null : { size: raw.metaText.length, mtimeMs },
-				log: raw.logText === '' ? null : { size: raw.logText.length, mtimeMs },
+				meta: metaText === undefined || metaText === null ? null : { size: metaText.length, mtimeMs: metaMtimes.get(runId) ?? 0 },
+				log: logText === undefined || logText === '' ? null : { size: logText.length, mtimeMs: logMtimes.get(runId) ?? 0 },
 			}
 		},
-		readRaw(runId: string): RunSnapshotRaw {
-			rawReads += 1
-			return raws.get(runId) ?? { metaText: null, logText: '' }
+		readMetaText(runId: string): string | null {
+			metaReads += 1
+			return metaFiles.get(runId) ?? null
+		},
+		readLogTextFrom(runId: string, byteOffset: number): string {
+			logReads += 1
+			const tail = (logs.get(runId) ?? '').slice(byteOffset)
+			logBytesRead += tail.length
+			return tail
 		},
 	}
 }
 
-function rawFor(runId: string, extraLogLines: string[] = []): RunSnapshotRaw {
-	return {
-		metaText: JSON.stringify({
-			runId,
-			guildPath: 'guild',
-			benchmarkPath: 'bench',
-			task: `task for ${runId}`,
-			status: 'success',
-			startTime: '2026-01-01T00:00:00.000Z',
-			endTime: '2026-01-01T00:01:00.000Z',
-		}),
-		logText: [
-			JSON.stringify({ timestamp: 't1', type: 'role_start', payload: { role: 'planner' } }),
-			...extraLogLines,
-		].join('\n'),
-	}
+function metaFor(runId: string): string {
+	return JSON.stringify({
+		runId,
+		guildPath: 'guild',
+		benchmarkPath: 'bench',
+		task: `task for ${runId}`,
+		status: 'success',
+		startTime: '2026-01-01T00:00:00.000Z',
+		endTime: '2026-01-01T00:01:00.000Z',
+	})
+}
+
+function logLine(timestamp: string, type: string, extra: Record<string, unknown> = {}): string {
+	return JSON.stringify({ timestamp, type, payload: { role: 'planner', ...extra } })
+}
+
+function readOf(backend: ReturnType<typeof createFakeBackend>) {
+	return createSnapshotCache({ readStats: backend.readStats, readMetaText: backend.readMetaText, readLogTextFrom: backend.readLogTextFrom }, 8)
 }
 
 describe('createSnapshotCache', () => {
-	test('parses the raw snapshot into meta and log events', () => {
+	test('parses the raw files into meta and log events', () => {
 		const backend = createFakeBackend()
-		backend.write('run-1', rawFor('run-1'))
-		const read = createSnapshotCache({ readStats: backend.readStats, readRaw: backend.readRaw }, 8)
+		backend.writeMeta('run-1', metaFor('run-1'))
+		backend.writeLog('run-1', `${logLine('t1', 'role_start')}\n`)
+		const read = readOf(backend)
 		const snapshot = read('run-1')
 		expect(snapshot.meta?.runId).toBe('run-1')
 		expect(snapshot.logEvents).toHaveLength(1)
 		expect(snapshot.logEvents[0]?.type).toBe('role_start')
 	})
 
-	test('an unchanged run is served from the cache without re-reading the raw snapshot', () => {
+	test('an unchanged run is served from the cache without re-reading any file', () => {
 		const backend = createFakeBackend()
-		backend.write('run-1', rawFor('run-1'))
-		const read = createSnapshotCache({ readStats: backend.readStats, readRaw: backend.readRaw }, 8)
+		backend.writeMeta('run-1', metaFor('run-1'))
+		backend.writeLog('run-1', `${logLine('t1', 'role_start')}\n`)
+		const read = readOf(backend)
 		const first = read('run-1')
 		const second = read('run-1')
 		expect(second).toBe(first)
-		expect(backend.rawReads()).toBe(1)
+		expect(backend.metaReads()).toBe(1)
+		expect(backend.logReads()).toBe(1)
 	})
 
-	test('a freshness change re-reads and re-parses the run', () => {
+	test('a growing log is parsed only from the appended tail and returns every event in order', () => {
 		const backend = createFakeBackend()
-		backend.write('run-1', rawFor('run-1'))
-		const read = createSnapshotCache({ readStats: backend.readStats, readRaw: backend.readRaw }, 8)
+		backend.writeMeta('run-1', metaFor('run-1'))
+		backend.writeLog('run-1', [logLine('t1', 'role_start'), logLine('t2', 'llm_call')].join('\n') + '\n')
+		const read = readOf(backend)
 		read('run-1')
-		backend.write('run-1', rawFor('run-1', [JSON.stringify({ timestamp: 't2', type: 'role_finished', payload: { role: 'planner', status: 'success' } })]))
+		const bytesBefore = backend.logBytesRead()
+		const appended = [logLine('t3', 'tool_call', { tool: 'agent' }), logLine('t4', 'role_finished', { status: 'success' })].map((line) => line + '\n').join('')
+		backend.appendLog('run-1', appended)
 		const snapshot = read('run-1')
-		expect(snapshot.logEvents).toHaveLength(2)
-		expect(backend.rawReads()).toBe(2)
+		expect(snapshot.logEvents.map((event) => event.type)).toEqual(['role_start', 'llm_call', 'tool_call', 'role_finished'])
+		expect(backend.logReads()).toBe(2)
+		expect(backend.logBytesRead() - bytesBefore).toBe(appended.length)
+		expect(backend.metaReads()).toBe(1)
+	})
+
+	test('a torn final line is left unparsed and parses exactly once once the append completes it', () => {
+		const backend = createFakeBackend()
+		backend.writeMeta('run-1', metaFor('run-1'))
+		const tornLine = logLine('t2', 'role_finished', { status: 'success' })
+		const splitIndex = Math.floor(tornLine.length / 2)
+		backend.writeLog('run-1', `${logLine('t1', 'role_start')}\n${tornLine.slice(0, splitIndex)}`)
+		const read = readOf(backend)
+		const first = read('run-1')
+		expect(first.logEvents.map((event) => event.timestamp)).toEqual(['t1'])
+		backend.appendLog('run-1', `${tornLine.slice(splitIndex)}\n`)
+		const second = read('run-1')
+		expect(second.logEvents.map((event) => event.timestamp)).toEqual(['t1', 't2'])
+	})
+
+	test('a trailing fragment that is already a complete event is consumed immediately and its later newline arrives as a skipped empty line', () => {
+		const backend = createFakeBackend()
+		backend.writeMeta('run-1', metaFor('run-1'))
+		const fragmentLine = logLine('t2', 'role_finished', { status: 'success' })
+		const initialLog = `${logLine('t1', 'role_start')}\n${fragmentLine}`
+		backend.writeLog('run-1', initialLog)
+		const read = readOf(backend)
+		const first = read('run-1')
+		expect(first.logEvents.map((event) => event.timestamp)).toEqual(['t1', 't2'])
+		expect(backend.logBytesRead()).toBe(initialLog.length)
+		backend.appendLog('run-1', `\n${logLine('t3', 'llm_call')}\n`)
+		const second = read('run-1')
+		expect(second.logEvents.map((event) => event.timestamp)).toEqual(['t1', 't2', 't3'])
+	})
+
+	test('a meta-only change re-reads the meta without touching the log', () => {
+		const backend = createFakeBackend()
+		backend.writeMeta('run-1', metaFor('run-1'))
+		backend.writeLog('run-1', `${logLine('t1', 'role_start')}\n`)
+		const read = readOf(backend)
+		read('run-1')
+		backend.writeMeta('run-1', metaFor('run-1').replace('success', 'running'))
+		const snapshot = read('run-1')
+		expect(snapshot.meta?.status).toBe('running')
+		expect(backend.metaReads()).toBe(2)
+		expect(backend.logReads()).toBe(1)
+	})
+
+	test('a shrunk log falls back to a full re-read and re-parse', () => {
+		const backend = createFakeBackend()
+		backend.writeMeta('run-1', metaFor('run-1'))
+		backend.writeLog('run-1', [logLine('t1', 'role_start'), logLine('t2', 'llm_call'), logLine('t3', 'tool_call')].join('\n') + '\n')
+		const read = readOf(backend)
+		read('run-1')
+		const rewritten = `${logLine('x1', 'role_start')}\n`
+		backend.writeLog('run-1', rewritten)
+		const bytesBefore = backend.logBytesRead()
+		const snapshot = read('run-1')
+		expect(snapshot.logEvents.map((event) => event.timestamp)).toEqual(['x1'])
+		expect(backend.logReads()).toBe(2)
+		expect(backend.logBytesRead() - bytesBefore).toBe(rewritten.length)
+	})
+
+	test('a same-size rewrite with a changed mtime falls back to a full re-read, not a tail parse', () => {
+		const backend = createFakeBackend()
+		backend.writeMeta('run-1', metaFor('run-1'))
+		// The rewrite has exactly the same byte length as the original (only the payload role differs), so size alone cannot reveal it — the mtime change must.
+		const original = `${logLine('t1', 'role_start')}\n`
+		const rewritten = `${logLine('t1', 'role_start', { role: 'painter' })}\n`
+		expect(rewritten.length).toBe(original.length)
+		backend.writeLog('run-1', original)
+		const read = readOf(backend)
+		read('run-1')
+		backend.writeLog('run-1', rewritten)
+		const bytesBefore = backend.logBytesRead()
+		const snapshot = read('run-1')
+		const event = defined(snapshot.logEvents[0], 'snapshot.logEvents[0]')
+		expect(formatLogEvent(event)).toBe('painter · role start')
+		expect(backend.logReads()).toBe(2)
+		expect(backend.logBytesRead() - bytesBefore).toBe(rewritten.length)
 	})
 
 	test('an unknown run reads as an empty snapshot and its absence is still cached', () => {
 		const backend = createFakeBackend()
-		const read = createSnapshotCache({ readStats: backend.readStats, readRaw: backend.readRaw }, 8)
+		const read = readOf(backend)
 		const snapshot = read('never-started')
 		expect(snapshot.meta).toBeNull()
 		expect(snapshot.logEvents).toHaveLength(0)
 		read('never-started')
-		expect(backend.rawReads()).toBe(1)
+		expect(backend.metaReads()).toBe(1)
+		expect(backend.logReads()).toBe(1)
 	})
 
 	test('the cache evicts the least-recently-used entry beyond maxEntries', () => {
 		const backend = createFakeBackend()
-		backend.write('run-a', rawFor('run-a'))
-		backend.write('run-b', rawFor('run-b'))
-		backend.write('run-c', rawFor('run-c'))
-		const read = createSnapshotCache({ readStats: backend.readStats, readRaw: backend.readRaw }, 2)
+		for (const runId of ['run-a', 'run-b', 'run-c']) {
+			backend.writeMeta(runId, metaFor(runId))
+			backend.writeLog(runId, `${logLine('t1', 'role_start')}\n`)
+		}
+		const read = createSnapshotCache({ readStats: backend.readStats, readMetaText: backend.readMetaText, readLogTextFrom: backend.readLogTextFrom }, 2)
 		read('run-a')
 		read('run-b')
 		read('run-a') // a hit refreshes recency, so b is now the eldest
 		read('run-c') // evicts b, keeps a and c
-		expect(backend.rawReads()).toBe(3)
+		expect(backend.logReads()).toBe(3)
 		read('run-a') // still cached
-		expect(backend.rawReads()).toBe(3)
+		expect(backend.logReads()).toBe(3)
 		read('run-b') // evicted, so re-read
-		expect(backend.rawReads()).toBe(4)
+		expect(backend.logReads()).toBe(4)
 	})
 })
