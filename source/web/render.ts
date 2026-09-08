@@ -319,21 +319,23 @@ export interface LogDetailSection {
 	content: unknown
 }
 
+// The poll-path log row: identities plus the one-line rendering only. The raw payload and the
+// paired detail sections can both carry multi-megabyte llm_call bodies, and shipping them here put
+// every body in the run-view response twice; the window endpoint (`GET /api/runs/:id/log`) serves
+// payloads and detail sections on demand instead.
 export interface RecentLogEntry {
+	index: number
 	timestamp: string
 	type: string
-	summary: string
-	payload: unknown
-	detailSections: LogDetailSection[] | null
+	text: string
 }
 
-export function toRecentLogEntry(event: LogEvent): RecentLogEntry {
+export function toRecentLogEntry(event: LogEvent, index: number): RecentLogEntry {
 	return {
+		index,
 		timestamp: event.timestamp,
 		type: event.type,
-		summary: formatLogEvent(event),
-		payload: event.payload,
-		detailSections: formatLogDetailSections(event),
+		text: formatLogEvent(event),
 	}
 }
 
@@ -614,8 +616,10 @@ export interface RenderRunViewOptions {
 
 export function renderRunView(snapshot: RunSnapshot, options: RenderRunViewOptions): RunView {
 	const meta = snapshot.meta
-	const recentEvents = snapshot.logEvents.slice(-options.maxLogLines)
-	const recentLog: RecentLogEntry[] = recentEvents.map(toRecentLogEntry)
+	// recentLog is the last maxLogLines events carrying their log-wide indices, so a client can
+	// page back or fetch a row's detail through the window endpoint without recomputing offsets.
+	const recentStart = Math.max(0, snapshot.logEvents.length - options.maxLogLines)
+	const recentLog: RecentLogEntry[] = snapshot.logEvents.slice(recentStart).map((event, position) => toRecentLogEntry(event, recentStart + position))
 	const lastEvent = snapshot.logEvents.length > 0 ? snapshot.logEvents[snapshot.logEvents.length - 1] : null
 	const currentActivity: CurrentActivity | null = lastEvent === null || lastEvent === undefined
 		? null

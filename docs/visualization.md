@@ -29,7 +29,6 @@ interface Operation {
 	settledAt: string | null  // null while in_flight; equals startedAt for observe and terminate (both instantaneous)
 	lifecycle: 'in_flight' | 'settled'
 	outcome: 'success' | 'error' | 'terminated' | null   // returns only; observe and terminate are always null
-	details: string | null    // adapter-formatted markdown body for tooltip/detail surfaces (data, not localization)
 	metrics: OperationMetrics | null
 }
 
@@ -48,7 +47,7 @@ interface StackRecord {
 
 A freshly preempted stack (an interrupt has landed but its first call has not) carries no operations yet, so operations alone cannot name it; the optional `stacks` records carry every pushed stack's id and root so the views can show the fresh stack and its root before its first operation lands. When `stacks` is absent (hand-authored models), the helpers derive stack structure from operations and a zero-operation stack renders nothing.
 
-The model carries no display prose — only `role`/`kind` identifiers, counters, costs, timestamps, and a run `status`. Localization is a view concern (see "Labels" below). The one piece of per-call runtime content is each operation's `details` markdown field, which the adapter formats and which reaches the DOM only through the sanitized Markdown pipeline.
+The model carries no display prose — only `role`/`kind` identifiers, counters, costs, timestamps, and a run `status`. Localization is a view concern (see "Labels" below). It also carries no per-call detail bodies: an operation's detail markdown (task text, tool arguments/results, summaries) is fetched on demand from the run's flow endpoint (`GET /api/runs/:id/flow?operation=<id>`; see [`docs/reference.md`](reference.md)) when the inspector opens, because those bodies can be large and would otherwise ride every polled frame. The fetched markdown reaches the DOM only through the sanitized Markdown pipeline.
 
 ### Operation kinds
 
@@ -64,7 +63,7 @@ This is the whole rule. Both views read it off the same helpers (`activeStack`, 
 
 ## Interrupts
 
-An interrupt spawns a **new call stack** rooted at a fresh `Interrupt` pseudo-participant instance (instance-per-interrupt, like every role) — with one exception: an operator inquiry roots its stack at a fresh human-asker participant (instance-per-invocation, like the `ask_human` answerer), because the person asking is that stack's caller. The stack begins with a `call` from the stack's root to the role that handles the interrupt (a loop detector, context manager, or inquiry responder), carrying the operator's question as its `details` for an inquiry.
+An interrupt spawns a **new call stack** rooted at a fresh `Interrupt` pseudo-participant instance (instance-per-interrupt, like every role) — with one exception: an operator inquiry roots its stack at a fresh human-asker participant (instance-per-invocation, like the `ask_human` answerer), because the person asking is that stack's caller. The stack begins with a `call` from the stack's root to the role that handles the interrupt (a loop detector, context manager, or inquiry responder); for an inquiry the call's on-demand details carry the operator's question.
 
 - **Occur at any time, including mid-flight.** A paused stack may carry an `in_flight` operation; the view freezes its animation while the model keeps its `lifecycle` as `in_flight`.
 - **Unbounded and nest.** An interrupt can interrupt an interrupt. Each gets a unique `stack` id; activity follows the single invariant above (a fresh preemption is active on arrival; a resolved stack yields to the innermost stack with open work), and fates cascade when stacks resolve inward.
@@ -87,7 +86,7 @@ Three tiers serve different audiences:
 - **friendly** — informative and mildly accurate for non-technical users.
 - **detailed** — extremely precise for technical users.
 
-Operation labels are templated entries that interpolate the source and destination participant labels (resolved at the same tier). A UI **tier toggle** swaps which tier the views render without touching the model — like locale switching. The fallback chain walks `detailed → friendly → whimsical` (then the title-cased role name), so a guild author who omits a tier still gets a readable line. The `details` markdown field on each operation is the rich per-call runtime content (arguments/results/summaries); that is data, not localization, so it lives on the model and the adapter formats it.
+Operation labels are templated entries that interpolate the source and destination participant labels (resolved at the same tier). A UI **tier toggle** swaps which tier the views render without touching the model — like locale switching. The fallback chain walks `detailed → friendly → whimsical` (then the title-cased role name), so a guild author who omits a tier still gets a readable line. The per-operation detail markdown (arguments/results/summaries) is not model data at all: it is fetched on demand by the inspector (see "The model" above), so localization never touches it.
 
 The "now" caption distinguishes a call's two phases: the **transit** phase (the line animates, `lifecycle === 'in_flight'`) reads the operation label ("A is calling B…"); the **working** phase (the line goes solid, `lifecycle === 'settled'` — the destination has started producing) switches to the destination's **working label** ("B is planning…" / "Receiving tokens from B"). The working label is per-role (`role.workingLabel`, a `{participant}` template interpolated with the role's own label at the chosen tier); a role without one falls back to `visualization.workingTemplates[kind]` (generic per participant kind); a guild without either falls back to the operation label, so a minimal guild keeps the prior behavior.
 
@@ -96,7 +95,7 @@ The "now" caption distinguishes a call's two phases: the **transit** phase (the 
 Both views are **independent leaves** over the `InteractionModel`: each imports `interaction-model.js` and the SVG primitives, and neither imports the other. They share the single invariant but project it differently.
 
 - **Flow view** (`source/web/static/flow-view.js`) — projects the model to a stack-of-rows layout. Each row lays its open call chain left-to-right by call depth, with the stack's root participant (`You`, an Interrupt instance, or a human asker) at the leftmost column. A return whose source has departed the open chain lingers as a node plus a return edge until the caller's next action. A top-bar strip aggregates every role/tool type that has ever run, with invocation counts and cumulative metrics. Node enter/depart lifecycle is computed by diffing two consecutive model frames (`deriveLifecycle`); a departing node travels from its previous row position to its top-bar slot in the shared SVG coordinate space. The "now" caption (`deriveNowCaption`) and ambient cost strip (`deriveCostStrip`) are pure derivations over the same model frame.
-- **Sequence view** (`source/web/static/sequence-diagram.js`) — projects the model to a UML-style lifeline diagram: one column per guild role plus a shared `tools` column, one row per operation in chronological order. Routing is a pure function of the source and destination columns: distinct columns render a straight arrow; the same column (a same-role cross-instance call) renders a loopback U-turn. The inspector (the shared `tooltip.js` card) opens on hover/click and renders an operation's `details` through the sanitized Markdown pipeline.
+- **Sequence view** (`source/web/static/sequence-diagram.js`) — projects the model to a UML-style lifeline diagram: one column per guild role plus a shared `tools` column, one row per operation in chronological order. Routing is a pure function of the source and destination columns: distinct columns render a straight arrow; the same column (a same-role cross-instance call) renders a loopback U-turn. The inspector (the shared `tooltip.js` card) opens on hover/click and renders an operation's on-demand details through the sanitized Markdown pipeline.
 
 Animation is layered on top of the settled structure via CSS class hooks the model carries no animation state for. The single invariant governs every motion class: a call/return edge animates iff it is `in_flight` and its stack is not paused — the active stack is never paused, and a resolved stack (its chain is empty) is not paused either, so a resolved stack's final return leg keeps marching in its outcome color while it travels; paused stacks' lines are frozen solid; `observe` and `terminate` never animate. The active participant's node pulses; participants in paused stacks do not.
 

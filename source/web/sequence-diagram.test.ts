@@ -64,7 +64,7 @@ function participant(id: string, role: string, kind: Participant['kind']): Parti
 }
 
 function callOperation(id: string, stack: string, source: string, destination: string): Operation {
-	return { id, kind: 'call', stack, source, destination, startedAt: 't0', settledAt: null, lifecycle: 'in_flight', outcome: null, details: null, metrics: null }
+	return { id, kind: 'call', stack, source, destination, startedAt: 't0', settledAt: null, lifecycle: 'in_flight', outcome: null, metrics: null }
 }
 
 function render(model: InteractionModel, tier: LabelTier = 'detailed'): Vnode {
@@ -232,9 +232,9 @@ describe('renderSequenceView — message rows', () => {
 				participant('coder', 'coder', 'role'),
 			],
 			operations: [
-				{ id: 'op1', kind: 'call', stack: 'root', source: 'you', destination: 'orchestrator', startedAt: 't0', settledAt: 't1', lifecycle: 'settled', outcome: null, details: null, metrics: null },
-				{ id: 'op2', kind: 'call', stack: 'root', source: 'orchestrator', destination: 'coder', startedAt: 't1', settledAt: 't2', lifecycle: 'settled', outcome: null, details: null, metrics: null },
-				{ id: 'op5', kind: 'return', stack: 'root', source: 'coder', destination: 'orchestrator', startedAt: 't5', settledAt: null, lifecycle: 'in_flight', outcome: 'terminated', details: null, metrics: null },
+				{ id: 'op1', kind: 'call', stack: 'root', source: 'you', destination: 'orchestrator', startedAt: 't0', settledAt: 't1', lifecycle: 'settled', outcome: null, metrics: null },
+				{ id: 'op2', kind: 'call', stack: 'root', source: 'orchestrator', destination: 'coder', startedAt: 't1', settledAt: 't2', lifecycle: 'settled', outcome: null, metrics: null },
+				{ id: 'op5', kind: 'return', stack: 'root', source: 'coder', destination: 'orchestrator', startedAt: 't5', settledAt: null, lifecycle: 'in_flight', outcome: 'terminated', metrics: null },
 			],
 			status: 'running',
 		}
@@ -492,9 +492,9 @@ describe('renderSequenceView — nested interrupts under stress', () => {
 				participant('coder', 'coder', 'role'),
 			],
 			operations: [
-				{ id: 'op1', kind: 'call', stack: 'root', source: 'you', destination: 'orchestrator', startedAt: 't0', settledAt: 't1', lifecycle: 'settled', outcome: null, details: null, metrics: null },
-				{ id: 'op2', kind: 'call', stack: 'root', source: 'orchestrator', destination: 'coder', startedAt: 't1', settledAt: 't2', lifecycle: 'settled', outcome: null, details: null, metrics: null },
-				{ id: 'op5', kind: 'return', stack: 'root', source: 'coder', destination: 'orchestrator', startedAt: 't5', settledAt: null, lifecycle: 'in_flight', outcome: 'terminated', details: null, metrics: null },
+				{ id: 'op1', kind: 'call', stack: 'root', source: 'you', destination: 'orchestrator', startedAt: 't0', settledAt: 't1', lifecycle: 'settled', outcome: null, metrics: null },
+				{ id: 'op2', kind: 'call', stack: 'root', source: 'orchestrator', destination: 'coder', startedAt: 't1', settledAt: 't2', lifecycle: 'settled', outcome: null, metrics: null },
+				{ id: 'op5', kind: 'return', stack: 'root', source: 'coder', destination: 'orchestrator', startedAt: 't5', settledAt: null, lifecycle: 'in_flight', outcome: 'terminated', metrics: null },
 			],
 			status: 'running',
 		}
@@ -519,9 +519,9 @@ describe('renderSequenceView — nested interrupts under stress', () => {
 				participant('coder', 'coder', 'role'),
 			],
 			operations: [
-				{ id: 'op1', kind: 'call', stack: 'root', source: 'you', destination: 'orchestrator', startedAt: 't0', settledAt: 't1', lifecycle: 'settled', outcome: null, details: null, metrics: null },
-				{ id: 'op2', kind: 'call', stack: 'root', source: 'orchestrator', destination: 'coder', startedAt: 't1', settledAt: 't2', lifecycle: 'settled', outcome: null, details: null, metrics: null },
-				{ id: 'op5', kind: 'return', stack: 'root', source: 'coder', destination: 'orchestrator', startedAt: 't5', settledAt: 't6', lifecycle: 'settled', outcome: 'terminated', details: null, metrics: null },
+				{ id: 'op1', kind: 'call', stack: 'root', source: 'you', destination: 'orchestrator', startedAt: 't0', settledAt: 't1', lifecycle: 'settled', outcome: null, metrics: null },
+				{ id: 'op2', kind: 'call', stack: 'root', source: 'orchestrator', destination: 'coder', startedAt: 't1', settledAt: 't2', lifecycle: 'settled', outcome: null, metrics: null },
+				{ id: 'op5', kind: 'return', stack: 'root', source: 'coder', destination: 'orchestrator', startedAt: 't5', settledAt: 't6', lifecycle: 'settled', outcome: 'terminated', metrics: null },
 			],
 			status: 'running',
 		}
@@ -592,8 +592,8 @@ describe('sequence view — hover hit areas', () => {
 		const model: InteractionModel = {
 			participants: [participant('you', 'human', 'human'), participant('coder', 'coder', 'role')],
 			operations: [
-				{ id: 'op-observe', kind: 'observe', stack: 'root', source: 'coder', destination: 'you', startedAt: 't0', settledAt: null, lifecycle: 'settled', outcome: null, details: null, metrics: null },
-				{ id: 'op-terminate', kind: 'terminate', stack: 'root', source: 'coder', destination: 'you', startedAt: 't2', settledAt: null, lifecycle: 'settled', outcome: null, details: null, metrics: null },
+				{ id: 'op-observe', kind: 'observe', stack: 'root', source: 'coder', destination: 'you', startedAt: 't0', settledAt: null, lifecycle: 'settled', outcome: null, metrics: null },
+				{ id: 'op-terminate', kind: 'terminate', stack: 'root', source: 'coder', destination: 'you', startedAt: 't2', settledAt: null, lifecycle: 'settled', outcome: null, metrics: null },
 			],
 			status: 'running',
 		}
@@ -610,7 +610,7 @@ describe('sequence view — hover hit areas', () => {
 			participants: [participant('you', 'human', 'human'), participant('coder-1', 'coder', 'role'), participant('coder-2', 'coder', 'role')],
 			operations: [
 				callOperation('op1', 'root', 'you', 'coder-1'),
-				{ id: 'op-loop', kind: 'call', stack: 'root', source: 'coder-1', destination: 'coder-2', startedAt: 't1', settledAt: null, lifecycle: 'in_flight', outcome: null, details: null, metrics: null },
+				{ id: 'op-loop', kind: 'call', stack: 'root', source: 'coder-1', destination: 'coder-2', startedAt: 't1', settledAt: null, lifecycle: 'in_flight', outcome: null, metrics: null },
 			],
 			status: 'running',
 		}

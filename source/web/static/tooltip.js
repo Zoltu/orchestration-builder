@@ -124,13 +124,34 @@ function scalarSection(label, content) {
 	return { label, content, scalar: true }
 }
 
-// The operation's `details` markdown when it is a non-empty string, else null. `null` means "no
-// details section" — an operation whose adapter produced no markdown (e.g. a call whose task text
-// was absent) yields a title-only card rather than a section with an em-dash placeholder.
-function detailsOf(operation) {
-	if (!isObject(operation)) return null
-	if (typeof operation.details !== 'string' || operation.details === '') return null
-	return operation.details
+// --- On-demand operation details --------------------------------------------
+// The model no longer carries per-operation detail bodies (they can be multi-megabyte tool
+// arguments/results and would ride every polled frame); the derivations receive a lookup the
+// wiring provides — a function from operation id to the session cache's state for that id:
+//   { status: 'loading' }                        the details fetch is in flight
+//   { status: 'failed' }                         the fetch failed — the card renders section-less
+//   { status: 'ready', details: string | null }  the server's answer; null when the operation
+//                                                carries no detail material at all
+// Any other shape (an absent lookup, an unknown id) yields no section, so a card never blocks or
+// fabricates content on a cache that has not answered yet.
+
+function detailsStateOf(operationDetails, operationId) {
+	if (typeof operationDetails !== 'function') return undefined
+	const state = operationDetails(operationId)
+	if (typeof state !== 'object' || state === null) return undefined
+	return state
+}
+
+// The details section an operation contributes, or null when it contributes none: a pending or
+// failed fetch reads as "no details" (the loading state renders a scalar placeholder so an open
+// card visibly fills in rather than flickering).
+function detailsSectionOf(operationDetails, operationId) {
+	const state = detailsStateOf(operationDetails, operationId)
+	if (state === undefined) return null
+	if (state.status === 'loading') return { label: 'details', content: 'loading details…', scalar: true }
+	if (state.status !== 'ready') return null
+	if (typeof state.details !== 'string' || state.details === '') return null
+	return { label: 'details', content: state.details }
 }
 
 function findOperation(model, operationId) {
@@ -167,18 +188,16 @@ function findReturnFrom(model, participantId) {
 }
 
 // Edge (flow or sequence, by `data-operation`): the operation's resolved label as the title and a
-// single `details` section carrying the operation's adapter-formatted markdown — the delegation
-// task text for a role call, the pretty-printed arguments/result for a tool, the question (and
-// context) for an ask_human call, the summary for a return. This generalizes the dev harness's
-// `openOperationTooltip` path so the product client and the harness consume one derivation.
-export function deriveOperationTooltip(model, labels, tier, operationId) {
+// single `details` section carrying its on-demand markdown — the delegation task text for a role
+// call, the pretty-printed arguments/result for a tool, the question (and context) for an
+// ask_human call, the summary for a return.
+export function deriveOperationTooltip(model, labels, tier, operationId, operationDetails) {
 	if (!isObject(model) || typeof operationId !== 'string') return { title: '', sections: [] }
 	const operation = findOperation(model, operationId)
 	if (operation === undefined) return { title: '', sections: [] }
 	const title = labels.resolveOperationLabel(operation, model.participants, tier, labels.hashString(operation.id))
-	const details = detailsOf(operation)
-	const sections = details !== null ? [{ label: 'details', content: details }] : []
-	return { title, sections }
+	const section = detailsSectionOf(operationDetails, operationId)
+	return { title, sections: section !== null ? [section] : [] }
 }
 
 // The label for the single details section a participant card carries. A human answerer's relevant
@@ -196,8 +215,9 @@ function detailsLabelFor(participant, usedReturn) {
 // completing return's outcome, and the relevant call/return `details` — the delegation task text
 // for a role, the arguments/result for a tool, the question for a human answerer. The completing
 // return's details (the outcome) are preferred over the incoming call's (the request) so the card
-// shows the result once it has arrived and the in-flight request otherwise.
-export function deriveParticipantTooltip(model, labels, tier, participantId) {
+// shows the result once it has arrived and the in-flight request otherwise; a return whose details
+// have no content (none on the server, or the fetch failed) falls back to the call's.
+export function deriveParticipantTooltip(model, labels, tier, participantId, operationDetails) {
 	if (!isObject(model) || typeof participantId !== 'string') return { title: '', sections: [] }
 	const participant = findParticipant(model, participantId)
 	if (participant === undefined) return { title: '', sections: [] }
@@ -208,25 +228,32 @@ export function deriveParticipantTooltip(model, labels, tier, participantId) {
 	if (completionReturn !== undefined && completionReturn.outcome !== null) {
 		sections.push(scalarSection('status', completionReturn.outcome))
 	}
-	const returnDetails = completionReturn !== undefined ? detailsOf(completionReturn) : null
-	const callDetails = incomingCall !== undefined ? detailsOf(incomingCall) : null
 	// A human answerer's relevant detail is the question (its incoming ask_human call), not the
 	// answer (its return) — the operator re-reads the question on hover, and the answer is already
 	// the live question history. For every other kind the completing return's details (the result
 	// or summary) are preferred over the incoming call's (the request) so the card shows the
-	// outcome once it has arrived and the in-flight request otherwise.
-	let sourceDetails = null
+	// outcome once it has arrived and the in-flight request otherwise. A return with no content
+	// (ready-null or failed) falls back to the call, matching the old null-details fallback; a
+	// return still loading keeps the card on the return rather than flashing the request first.
+	let sourceId = null
 	let usedReturn = false
 	if (participant.kind === 'human') {
-		sourceDetails = callDetails
-	} else if (returnDetails !== null) {
-		sourceDetails = returnDetails
-		usedReturn = true
+		sourceId = incomingCall !== undefined ? incomingCall.id : null
+	} else if (completionReturn !== undefined) {
+		const returnState = detailsStateOf(operationDetails, completionReturn.id)
+		const returnHasContent = returnState !== undefined && (returnState.status === 'loading' || (returnState.status === 'ready' && typeof returnState.details === 'string' && returnState.details !== ''))
+		if (returnHasContent) {
+			sourceId = completionReturn.id
+			usedReturn = true
+		} else {
+			sourceId = incomingCall !== undefined ? incomingCall.id : null
+		}
 	} else {
-		sourceDetails = callDetails
+		sourceId = incomingCall !== undefined ? incomingCall.id : null
 	}
-	if (sourceDetails !== null) {
-		sections.push({ label: detailsLabelFor(participant, usedReturn), content: sourceDetails })
+	const section = sourceId !== null ? detailsSectionOf(operationDetails, sourceId) : null
+	if (section !== null) {
+		sections.push({ label: detailsLabelFor(participant, usedReturn), content: section.content, scalar: section.scalar === true })
 	}
 	return { title, sections }
 }
@@ -295,4 +322,23 @@ export function deriveRoleTooltip(model, labels, tier, role) {
 	}
 	if (aggregate.errored) sections.push(scalarSection('status', 'errored'))
 	return { title, sections }
+}
+
+// The operation ids whose details a hovered target's card may show — the ids the wiring must have
+// fetched (or have in flight) before the card renders. An operation target shows its own details;
+// a participant target shows its incoming call's and/or completing return's; a role card carries
+// no details. The wiring calls this when the hover lands so the fetches start before the first
+// render asks the lookup for those ids.
+export function operationIdsForTooltipDetails(model, target) {
+	if (!isObject(model) || typeof target !== 'object' || target === null || typeof target.id !== 'string') return []
+	if (target.kind === 'operation') return [target.id]
+	if (target.kind === 'participant') {
+		const ids = []
+		const incomingCall = findLastCallTo(model, target.id)
+		const completionReturn = findReturnFrom(model, target.id)
+		if (incomingCall !== undefined) ids.push(incomingCall.id)
+		if (completionReturn !== undefined) ids.push(completionReturn.id)
+		return ids
+	}
+	return []
 }

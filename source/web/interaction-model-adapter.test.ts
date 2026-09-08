@@ -1,9 +1,9 @@
 import { describe, expect, test } from 'bun:test'
 import type { LogEvent, RunMeta } from '../executor/types.js'
 import type { RunSnapshot } from './render.js'
-import { deriveInteractionModel } from './interaction-model-adapter.js'
+import { deriveInteractionModel, deriveInteractionOperationDetail } from './interaction-model-adapter.js'
 import { activeParticipant, activeStack, callChainOf, fateOf, observesOf, stacksOf, terminatesOf } from './static/interaction-model.js'
-import { defined } from './test-fixtures.js'
+import { defined, present } from './test-fixtures.js'
 
 // The helpers arrive typed from the module's JSDoc; the adapter's InteractionModel is
 // structurally the same shape, so its output is directly callable as a helper argument.
@@ -38,6 +38,13 @@ function assertHelpersSensible(model: InteractionModel): void {
 
 const NOW = '2026-01-01T00:01:00.000Z'
 
+// Resolves one operation's on-demand details, failing the test when the id names no operation.
+function detailOf(events: LogEvent[], runMeta: RunMeta | null, operationId: string): string | null {
+	const detail = deriveInteractionOperationDetail(snapshot(events, runMeta), NOW, operationId)
+	expect(detail).not.toBeNull()
+	return detail === null ? null : detail.details
+}
+
 describe('deriveInteractionModel — single-role completion', () => {
 	test('produces a human→role call and a role→human return, terminal and settled', () => {
 		const events = [
@@ -54,12 +61,10 @@ describe('deriveInteractionModel — single-role completion', () => {
 		expect(call.kind).toBe('call')
 		expect(call.source).toBe('human:root')
 		expect(call.destination).toBe(defined(model.participants[1], 'model.participants[1]').id)
-		expect(call.details).toBe('do the thing')
 		expect(ret.kind).toBe('return')
 		expect(ret.source).toBe(defined(model.participants[1], 'model.participants[1]').id)
 		expect(ret.destination).toBe('human:root')
 		expect(ret.outcome).toBe('success')
-		expect(ret.details).toBe('done')
 		// A terminal run has nothing in flight; the human is the active participant and no row renders.
 		expect(call.lifecycle).toBe('settled')
 		expect(ret.lifecycle).toBe('settled')
@@ -67,6 +72,19 @@ describe('deriveInteractionModel — single-role completion', () => {
 		expect(activeParticipant(model)).toBe('human:root')
 		expect(stacksOf(model)).toEqual([])
 		assertHelpersSensible(model)
+	})
+
+	test('the polled model carries no details; the on-demand path resolves the call task and the finish summary', () => {
+		const events = [
+			event('2026-01-01T00:00:00.000Z', 'role_start', { role: 'orchestrator', depth: 0, task: 'do the thing' }),
+			event('2026-01-01T00:00:05.000Z', 'role_finished', { role: 'orchestrator', depth: 0, status: 'success', summary: 'done' }),
+		]
+		const model = deriveInteractionModel(snapshot(events, meta('success')), NOW)
+		for (const operation of model.operations) {
+			expect(operation).not.toHaveProperty('details')
+		}
+		expect(detailOf(events, meta('success'), 'op-1')).toBe('do the thing')
+		expect(detailOf(events, meta('success'), 'op-2')).toBe('done')
 	})
 })
 
@@ -93,7 +111,6 @@ describe('deriveInteractionModel — delegation chain', () => {
 		expect(callYou.destination).toBe(defined(model.participants[1], 'model.participants[1]').id)
 		expect(callCoder.source).toBe(defined(model.participants[1], 'model.participants[1]').id)
 		expect(callCoder.destination).toBe(defined(model.participants[2], 'model.participants[2]').id)
-		expect(callCoder.details).toBe('code it')
 		expect(retCoder.source).toBe(defined(model.participants[2], 'model.participants[2]').id)
 		expect(retCoder.destination).toBe(defined(model.participants[1], 'model.participants[1]').id)
 		expect(retYou.destination).toBe('human:root')
@@ -141,7 +158,8 @@ describe('deriveInteractionModel — in-flight tool node', () => {
 		// The role call settled by delegation when the tool call landed; the tool call is the active in-flight node.
 		expect(roleCall.lifecycle).toBe('settled')
 		expect(toolCall.lifecycle).toBe('in_flight')
-		expect(toolCall.details).toContain('"path": "README.md"')
+		// The tool call's on-demand details pretty-print the raw arguments string.
+		expect(detailOf(events, meta('running'), 'op-2')).toContain('"path": "README.md"')
 		expect(activeParticipant(model)).toBe(toolCall.destination)
 		expect(callChainOf(model, 'main').map((o) => o.kind)).toEqual(['call', 'call'])
 		assertHelpersSensible(model)
@@ -205,10 +223,10 @@ describe('deriveInteractionModel — ask_human question', () => {
 		expect(callAsk.kind).toBe('call')
 		expect(callAsk.source).toBe(defined(model.participants[1], 'model.participants[1]').id)
 		expect(callAsk.destination).toBe(defined(humans[1], 'humans[1]').id)
-		expect(callAsk.details).toBe('Which framework?\n\n*Context: src/index.ts*')
 		expect(retAnswer.kind).toBe('return')
 		expect(retAnswer.source).toBe(defined(humans[1], 'humans[1]').id)
-		expect(retAnswer.details).toBe('react')
+		expect(detailOf(events, meta('success'), 'op-2')).toBe('Which framework?\n\n*Context: src/index.ts*')
+		expect(detailOf(events, meta('success'), 'op-3')).toBe('react')
 		assertHelpersSensible(model)
 	})
 
@@ -404,7 +422,7 @@ describe('deriveInteractionModel — interrupts, observes, and terminates', () =
 		expect(observe.source).toBe(readTool.id)
 		expect(observe.destination).toBe(coder.id)
 		expect(observe.lifecycle).toBe('settled')
-		expect(observe.details).toBe('peek at the looping coder')
+		expect(detailOf(events, meta('running'), 'op-5')).toBe('peek at the looping coder')
 		// The observe did not change the open call chains on either stack.
 		expect(callChainOf(model, 'main').length).toBe(2)
 		assertHelpersSensible(model)
@@ -568,7 +586,7 @@ describe('deriveInteractionModel — operator inquiry interrupt', () => {
 		expect(call.stack).toBe('interrupt-1-stack')
 		expect(call.source).toBe('human:asker:1')
 		// The tooltip on the You→responder call shows the question, not the generated briefing.
-		expect(call.details).toBe('what is happening?')
+		expect(detailOf(events, meta('running'), 'op-3')).toBe('what is happening?')
 		assertHelpersSensible(model)
 	})
 
@@ -581,7 +599,7 @@ describe('deriveInteractionModel — operator inquiry interrupt', () => {
 		const model = deriveInteractionModel(snapshot(events, meta('running')), NOW)
 		const responder = defined(model.participants.find((p) => p.role === 'inquiry_responder'), 'inquiry_responder participant')
 		const call = defined(model.operations.find((o) => o.kind === 'call' && o.destination === responder.id), 'call')
-		expect(call.details).toBe('the generated briefing')
+		expect(detailOf(events, meta('running'), call.id)).toBe('the generated briefing')
 		assertHelpersSensible(model)
 	})
 
@@ -618,5 +636,59 @@ describe('deriveInteractionModel — operator inquiry interrupt', () => {
 			{ id: 'interrupt-1-stack', root: interrupt.id },
 		])
 		assertHelpersSensible(model)
+	})
+})
+
+describe('deriveInteractionOperationDetail', () => {
+	test('returns null for an unknown operation id', () => {
+		const events = [
+			event('t0', 'role_start', { role: 'coder', depth: 0, task: 'work' }),
+		]
+		expect(deriveInteractionOperationDetail(snapshot(events, meta('running')), NOW, 'op-9')).toBeNull()
+	})
+
+	test('an operation without detail material resolves to details null, not an error', () => {
+		const events = [
+			event('t0', 'role_start', { role: 'coder', depth: 0 }),
+		]
+		const detail = deriveInteractionOperationDetail(snapshot(events, meta('running')), NOW, 'op-1')
+		expect(detail).not.toBeNull()
+		expect(present(detail, 'detail').details).toBeNull()
+	})
+
+	test('a tool result details pretty-print the full result payload', () => {
+		const events = [
+			event('t0', 'role_start', { role: 'coder', depth: 0, task: 'work' }),
+			event('t1', 'tool_call', { role: 'coder', tool: 'read_file', arguments: '{"path":"README.md"}' }),
+			event('t2', 'tool_result', { role: 'coder', tool: 'read_file', kind: 'success', result: { kind: 'success', data: { content: '# Project' } } }),
+		]
+		expect(detailOf(events, meta('running'), 'op-3')).toBe('```json\n{\n  "kind": "success",\n  "data": {\n    "content": "# Project"\n  }\n}\n```')
+	})
+
+	test('a terminate resolves its details text on demand', () => {
+		const events = [
+			event('t0', 'role_start', { role: 'orchestrator', depth: 0, task: 'the task' }),
+			event('t1', 'role_start', { role: 'coder', depth: 1, parent: 'orchestrator', task: 'code' }),
+			event('t2', 'interrupt', {}),
+			event('t3', 'role_start', { role: 'loop_detector', depth: 1, task: 'detect' }),
+			event('t4', 'tool_call', { role: 'loop_detector', tool: 'rewind_stack', arguments: '{}' }),
+			event('t5', 'terminate', { role: 'coder', details: 'revert the looping coder' }),
+		]
+		expect(detailOf(events, meta('running'), 'op-5')).toBe('revert the looping coder')
+	})
+
+	test('a details request for one operation never depends on the poll path', () => {
+		// The detail walk is the same derivation the flow endpoint runs; resolving one operation's
+		// details must not disturb what the poll-path model reports (no details anywhere).
+		const events = [
+			event('t0', 'role_start', { role: 'coder', depth: 0, task: 'work' }),
+			event('t1', 'tool_call', { role: 'coder', tool: 'read_file', arguments: '{"path":"README.md"}' }),
+		]
+		const detail = deriveInteractionOperationDetail(snapshot(events, meta('running')), NOW, 'op-2')
+		expect(present(detail, 'detail').details).toContain('"path": "README.md"')
+		const model = deriveInteractionModel(snapshot(events, meta('running')), NOW)
+		for (const operation of model.operations) {
+			expect(operation).not.toHaveProperty('details')
+		}
 	})
 })

@@ -59,10 +59,10 @@ export function createTooltipDismiss() {
 	}
 }
 
-// The descriptor dispatch both clients share: resolves an inspector target against the model and label resolver through the derivations in tooltip.js. A target whose id no longer resolves (an operation from a frame the poll has since replaced, or a participant/role the model no longer carries) yields a title-less descriptor, which both clients treat as "no card" so a stale hover state dismisses rather than rendering a heading-less card.
-export function deriveTooltipDescriptor(model, labels, tier, target) {
-	if (target.kind === 'operation') return deriveOperationTooltip(model, labels, tier, target.id)
-	if (target.kind === 'participant') return deriveParticipantTooltip(model, labels, tier, target.id)
+// The descriptor dispatch both clients share: resolves an inspector target against the model and label resolver through the derivations in tooltip.js. A target whose id no longer resolves (an operation from a frame the poll has since replaced, or a participant/role the model no longer carries) yields a title-less descriptor, which both clients treat as "no card" so a stale hover state dismisses rather than rendering a heading-less card. `operationDetails` is the wiring's session lookup (see tooltip.js "On-demand operation details") the operation/participant cards read their details through; the model itself carries no detail bodies.
+export function deriveTooltipDescriptor(model, labels, tier, target, operationDetails) {
+	if (target.kind === 'operation') return deriveOperationTooltip(model, labels, tier, target.id, operationDetails)
+	if (target.kind === 'participant') return deriveParticipantTooltip(model, labels, tier, target.id, operationDetails)
 	return deriveRoleTooltip(model, labels, tier, target.id)
 }
 

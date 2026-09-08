@@ -7,6 +7,7 @@ import { renderSequenceView } from './sequence-diagram.js'
 import { createLabelResolver, TIER_VALUES, isLabelTier } from './labels.js'
 import { isTerminalStatus } from './interaction-model.js'
 import { createTooltipDismiss, deriveTooltipDescriptor, isInFlightAskHuman, resolveTooltipTarget } from './inspector.js'
+import { operationIdsForTooltipDetails } from './tooltip.js'
 import { copyRawToClipboard } from './clipboard.js'
 import { QuestionModal } from './question-modal.js'
 import { ResultModal, deriveTerminalResult } from './result-modal.js'
@@ -78,6 +79,9 @@ let audioContext = null
 
 // The caller-held column high-water mark for the flow view (see createColumnTracker): one per page load so the centerpiece's width stays stable as runs deepen and unwind. Held at module scope like audioContext — it is view-render memory, not app state, and retention across run switches is harmless (the stage simply stays as wide as the deepest run seen this page load).
 const flowColumnTracker = createColumnTracker()
+
+// The inspector's operation-details session cache: key `<runId>|<operationId>` → 'loading' | 'failed' | { details }. The polled flow model ships no detail bodies (they can carry multi-megabyte tool arguments/results), so opening an inspector card fetches the ids its derivation may show from `api/runs/:id/flow?operation=<id>` exactly once per session and caches them here. Operation ids are stable within a run (events only append), so an entry never goes stale; the run id in the key keeps a previous run's entries from answering for another run's same-numbered operation. Module scope like flowColumnTracker — cache memory, not app state.
+const operationDetailsCache = new Map()
 
 function ensureAudioContext() {
 	if (audioContext === null) {
@@ -716,13 +720,50 @@ function ClearTooltip(state) {
 	return state.tooltip === null ? state : { ...state, tooltip: null }
 }
 
+// The details fetches a hovered target's card may show: mark each uncached id 'loading'
+// synchronously so the first render reads a defined state, and return the fetch effects (empty
+// when every id is already cached or there is no selected run to fetch against).
+function fetchOperationDetails(state, target) {
+	const runId = state.selectedRunId
+	if (typeof runId !== 'string' || runId === '' || state.flowModel === null) return []
+	const effects = []
+	for (const operationId of operationIdsForTooltipDetails(state.flowModel, target)) {
+		const key = `${runId}|${operationId}`
+		if (operationDetailsCache.has(key)) continue
+		operationDetailsCache.set(key, 'loading')
+		effects.push(Fetch({ url: `api/runs/${encodeURIComponent(runId)}/flow?operation=${encodeURIComponent(operationId)}`, ok: GotOperationDetails(runId, operationId), fail: OperationDetailsFailed(runId, operationId) }))
+	}
+	return effects
+}
+
+// The details fetch for one operation resolved: cache the server's answer and return a fresh state
+// so an open card fills in. A ready body caches the details string (or null when the operation
+// carries none); anything else — a 404 for an id the model no longer resolves, a malformed body, a
+// network failure — caches 'failed', which renders the card section-less.
+function GotOperationDetails(runId, operationId) {
+	return function GotOperationDetailsForOperation(state, payload) {
+		const body = payload.ok && payload.body !== null && typeof payload.body === 'object' ? payload.body : null
+		const details = body !== null && typeof body.details === 'string' ? { details: body.details } : body !== null && body.details === null ? { details: null } : 'failed'
+		operationDetailsCache.set(`${runId}|${operationId}`, details)
+		return { ...state }
+	}
+}
+
+function OperationDetailsFailed(runId, operationId) {
+	return function OperationDetailsFailedForRun(state) {
+		operationDetailsCache.set(`${runId}|${operationId}`, 'failed')
+		return { ...state }
+	}
+}
+
 // `mouseover` bubbles from every SVG child the pointer enters, so this fires on each element
 // crossing. Three cases:
 //  - over the card itself: keep it open and cancel any pending dismiss (the pointer entered the card
 //    to select/copy).
 //  - over a node/edge target: switch the card to it (canceling any pending dismiss), snapshotting its
 //    rect so the card anchors to the node. Returning the same state when the target is unchanged lets
-//    hyperapp bail without a re-render.
+//    hyperapp bail without a re-render. The target's details are fetched here if not cached (the
+//    derivation reads them through the session cache once they land).
 //  - over empty run-view area: schedule a grace-period dismiss — if the pointer reaches the card (or a
 //    new node) before it fires, the dismiss is canceled; otherwise the card dismisses once the pointer
 //    is over neither.
@@ -739,7 +780,7 @@ function HoverRunView(state, event) {
 	if (current !== null && current.kind === target.kind && current.id === target.id) {
 		return [state, CancelTooltipDismiss()]
 	}
-	return [{ ...state, tooltip: { kind: target.kind, id: target.id, rect: target.rect } }, CancelTooltipDismiss()]
+	return [{ ...state, tooltip: { kind: target.kind, id: target.id, rect: target.rect } }, CancelTooltipDismiss(), ...fetchOperationDetails(state, target)]
 }
 
 // `mouseleave` on the run-view stage fires when the pointer leaves the stage entirely (the SVG and
@@ -1141,22 +1182,33 @@ function WatchScreen(state) {
 
 // The inspector card over the run view. The descriptor in state is resolved against the live model
 // and label resolver at render time, so the card reads the same model the SVG renders and never
-// re-fetches. A descriptor whose id no longer resolves (an operation from a frame the poll has since
-// replaced, or a participant/role the model no longer carries) yields an empty title and is treated as
-// "no card" so a stale hover state dismisses rather than rendering a heading-less card. The card is
-// `position: fixed` (styles.css), anchored to the snapshot rect taken at hover time, so it sits at a
-// fixed position relative to the node (not the pointer) and stays put while the pointer is over it;
-// its only prose-carrying section is the operation `details` markdown, routed through the sanitized
-// pipeline by `formatTooltipContent`.
+// re-derives its labels. A descriptor whose id no longer resolves (an operation from a frame the
+// poll has since replaced, or a participant/role the model no longer carries) yields an empty title
+// and is treated as "no card" so a stale hover state dismisses rather than rendering a heading-less
+// card. The card is `position: fixed` (styles.css), anchored to the snapshot rect taken at hover
+// time, so it sits at a fixed position relative to the node (not the pointer) and stays put while
+// the pointer is over it; its only prose-carrying section is the operation details markdown, which
+// the hover wiring fetches on demand and which `formatTooltipContent` routes through the sanitized
+// pipeline.
 function TooltipCardForRun(state) {
 	const tooltip = state.tooltip
 	if (tooltip === null) return null
 	const model = state.flowModel
 	const labels = state.labelResolver
 	if (model === null || labels === null) return null
-	const descriptor = deriveTooltipDescriptor(model, labels, state.flowTier, tooltip)
+	const descriptor = deriveTooltipDescriptor(model, labels, state.flowTier, tooltip, operationDetailsLookup(state.selectedRunId))
 	if (descriptor.title === '') return null
 	return Tooltip(h, { title: descriptor.title, sections: descriptor.sections, renderMarkdown, style: tooltipStyle(tooltip.rect) })
+}
+
+// The lookup the tooltip derivations read: the session cache's state for one operation id. A miss
+// (a card rendering before its fetch was scheduled, or no selected run) reads as failed, which the
+// derivations render as "no details section" — never as invented content.
+function operationDetailsLookup(runId) {
+	return (operationId) => {
+		const entry = operationDetailsCache.get(`${runId}|${operationId}`)
+		return entry === undefined ? { status: 'failed' } : entry
+	}
 }
 
 // The pending question the modal renders. The live `/api/questions` poll is the source, so the modal is driven by live data, and the answer form posts to `/api/answer` via the existing SubmitAnswer path. The first pending question is the active one; the modal opens when one arrives (GotQuestions) and re-opens via the flow view's Question affordance.

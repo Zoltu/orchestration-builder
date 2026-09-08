@@ -159,7 +159,7 @@ describe('demo scenarios', () => {
 		const malformed: InteractionModel = {
 			participants: [{ id: 'you', role: 'human', kind: 'human' }],
 			operations: [
-				{ id: 'op1', kind: 'call', stack: 'root', source: 'you', destination: 'ghost', startedAt: 't0', settledAt: null, lifecycle: 'in_flight', outcome: null, details: null, metrics: null },
+				{ id: 'op1', kind: 'call', stack: 'root', source: 'you', destination: 'ghost', startedAt: 't0', settledAt: null, lifecycle: 'in_flight', outcome: null, metrics: null },
 			],
 			status: 'running',
 		}
@@ -170,7 +170,7 @@ describe('demo scenarios', () => {
 		const malformed: InteractionModel = {
 			participants: [{ id: 'you', role: 'human', kind: 'human' }],
 			operations: [
-				{ id: 'op1', kind: 'call', stack: 'root', source: 'you', destination: 'you', startedAt: 't0', settledAt: null, lifecycle: 'in_flight', outcome: null, details: null, metrics: null },
+				{ id: 'op1', kind: 'call', stack: 'root', source: 'you', destination: 'you', startedAt: 't0', settledAt: null, lifecycle: 'in_flight', outcome: null, metrics: null },
 			],
 			status: 'running',
 		}
@@ -185,8 +185,8 @@ describe('demo scenarios', () => {
 				{ id: 'coder', role: 'coder', kind: 'role' },
 			],
 			operations: [
-				{ id: 'op1', kind: 'call', stack: 'root', source: 'you', destination: 'orch', startedAt: 't0', settledAt: null, lifecycle: 'in_flight', outcome: null, details: null, metrics: null },
-				{ id: 'op2', kind: 'call', stack: 'root', source: 'orch', destination: 'coder', startedAt: 't1', settledAt: null, lifecycle: 'in_flight', outcome: null, details: null, metrics: null },
+				{ id: 'op1', kind: 'call', stack: 'root', source: 'you', destination: 'orch', startedAt: 't0', settledAt: null, lifecycle: 'in_flight', outcome: null, metrics: null },
+				{ id: 'op2', kind: 'call', stack: 'root', source: 'orch', destination: 'coder', startedAt: 't1', settledAt: null, lifecycle: 'in_flight', outcome: null, metrics: null },
 			],
 			status: 'running',
 		}
@@ -201,9 +201,9 @@ describe('demo scenarios', () => {
 				{ id: 'coder', role: 'coder', kind: 'role' },
 			],
 			operations: [
-				{ id: 'op1', kind: 'call', stack: 'root', source: 'you', destination: 'orch', startedAt: 't0', settledAt: null, lifecycle: 'in_flight', outcome: null, details: null, metrics: null },
+				{ id: 'op1', kind: 'call', stack: 'root', source: 'you', destination: 'orch', startedAt: 't0', settledAt: null, lifecycle: 'in_flight', outcome: null, metrics: null },
 				// The return claims to come from coder, but the open call was to orch — a stack-id or endpoint mismatch.
-				{ id: 'op2', kind: 'return', stack: 'root', source: 'coder', destination: 'orch', startedAt: 't1', settledAt: 't2', lifecycle: 'settled', outcome: 'success', details: null, metrics: null },
+				{ id: 'op2', kind: 'return', stack: 'root', source: 'coder', destination: 'orch', startedAt: 't1', settledAt: 't2', lifecycle: 'settled', outcome: 'success', metrics: null },
 			],
 			status: 'running',
 		}

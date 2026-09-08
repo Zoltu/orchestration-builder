@@ -216,17 +216,25 @@ function participant(id: string, role: string, kind: Participant['kind']): Parti
 	return { id, role, kind }
 }
 
-function callOperation(id: string, source: string, destination: string, details: string | null): Operation {
-	return { id, kind: 'call', stack: 'root', source, destination, startedAt: 't0', settledAt: null, lifecycle: 'in_flight', outcome: null, details, metrics: null }
+function callOperation(id: string, source: string, destination: string): Operation {
+	return { id, kind: 'call', stack: 'root', source, destination, startedAt: 't0', settledAt: null, lifecycle: 'in_flight', outcome: null, metrics: null }
 }
 
-function returnOperation(id: string, source: string, destination: string, outcome: Operation['outcome'], details: string | null, metrics: Operation['metrics']): Operation {
-	return { id, kind: 'return', stack: 'root', source, destination, startedAt: 't0', settledAt: null, lifecycle: 'settled', outcome, details, metrics }
+function returnOperation(id: string, source: string, destination: string, outcome: Operation['outcome'], metrics: Operation['metrics']): Operation {
+	return { id, kind: 'return', stack: 'root', source, destination, startedAt: 't0', settledAt: null, lifecycle: 'settled', outcome, metrics }
+}
+
+// The operation-details lookup state the derivations read (see tooltip.js "On-demand operation
+// details"): the wiring's session cache answers with one of these per operation id.
+type DetailsState = { status: 'loading' } | { status: 'failed' } | { status: 'ready'; details: string | null }
+
+function readyDetails(map: Record<string, string | null>): (operationId: string) => DetailsState {
+	return (operationId) => (operationId in map ? { status: 'ready', details: map[operationId] ?? null } : { status: 'failed' })
 }
 
 // A delegation chain model used by several derivation tests: the human delegates to the orchestrator,
 // which delegates to a coder, which calls a read_file tool; the returns unwind with summaries and a
-// result. Each call/return carries the adapter-formatted `details` markdown the inspector surfaces.
+// result. The detail markdown each call/return surfaces comes from the lookup the wiring passes.
 function delegationModel(): InteractionModel {
 	return {
 		participants: [
@@ -236,12 +244,12 @@ function delegationModel(): InteractionModel {
 			participant('tool:read_file:1', 'read_file', 'tool'),
 		],
 		operations: [
-			callOperation('op1', 'human:root', 'role:orchestrator:1', 'Plan and delegate the task.'),
-			callOperation('op2', 'role:orchestrator:1', 'role:coder:1', 'Implement the feature.'),
-			callOperation('op3', 'role:coder:1', 'tool:read_file:1', '```json\n{"path":"README.md"}\n```'),
-			returnOperation('op4', 'tool:read_file:1', 'role:coder:1', 'success', '```json\n{"content":"# Project"}\n```', { tokens: 120, cachedPromptTokens: 0, elapsedSeconds: 1 }),
-			returnOperation('op5', 'role:coder:1', 'role:orchestrator:1', 'success', 'Done implementing.', { tokens: 800, cachedPromptTokens: 0, elapsedSeconds: 9 }),
-			returnOperation('op6', 'role:orchestrator:1', 'human:root', 'success', 'Completed the task.', { tokens: 1500, cachedPromptTokens: 0, elapsedSeconds: 15 }),
+			callOperation('op1', 'human:root', 'role:orchestrator:1'),
+			callOperation('op2', 'role:orchestrator:1', 'role:coder:1'),
+			callOperation('op3', 'role:coder:1', 'tool:read_file:1'),
+			returnOperation('op4', 'tool:read_file:1', 'role:coder:1', 'success', { tokens: 120, cachedPromptTokens: 0, elapsedSeconds: 1 }),
+			returnOperation('op5', 'role:coder:1', 'role:orchestrator:1', 'success', { tokens: 800, cachedPromptTokens: 0, elapsedSeconds: 9 }),
+			returnOperation('op6', 'role:orchestrator:1', 'human:root', 'success', { tokens: 1500, cachedPromptTokens: 0, elapsedSeconds: 15 }),
 		],
 		status: 'success',
 	}
@@ -252,12 +260,12 @@ function delegationModel(): InteractionModel {
 // carries the question text; its return carries the answer text.
 function askHumanModel(answered: boolean): InteractionModel {
 	const operations: Operation[] = [
-		callOperation('op1', 'human:root', 'role:orchestrator:1', 'Plan and delegate the task.'),
-		callOperation('op2', 'role:orchestrator:1', 'human:answerer:1', 'Which testing framework should I use?\n\n*Context: vitest is already installed.*'),
+		callOperation('op1', 'human:root', 'role:orchestrator:1'),
+		callOperation('op2', 'role:orchestrator:1', 'human:answerer:1'),
 	]
 	if (answered) {
-		operations.push(returnOperation('op3', 'human:answerer:1', 'role:orchestrator:1', 'success', 'Use vitest.', null))
-		operations.push(returnOperation('op4', 'role:orchestrator:1', 'human:root', 'success', 'Completed the task.', null))
+		operations.push(returnOperation('op3', 'human:answerer:1', 'role:orchestrator:1', 'success', null))
+		operations.push(returnOperation('op4', 'role:orchestrator:1', 'human:root', 'success', null))
 	}
 	return {
 		participants: [
@@ -277,44 +285,51 @@ function labelOf(model: InteractionModel, operation: Operation): string {
 describe('deriveOperationTooltip', () => {
 	test('an operation id resolves to its label and a single details section carrying its markdown', () => {
 		const model = delegationModel()
-		const result = deriveOperationTooltip(model, labelsModule, TIER, 'op2')
+		const result = deriveOperationTooltip(model, labelsModule, TIER, 'op2', readyDetails({ op2: 'Implement the feature.' }))
 		expect(result.title).toBe(labelOf(model, defined(model.operations[1], 'model.operations[1]')))
 		expect(result.sections).toEqual([{ label: 'details', content: 'Implement the feature.' }])
 	})
 
 	test('a tool call surfaces the pretty-printed arguments details', () => {
 		const model = delegationModel()
-		const result = deriveOperationTooltip(model, labelsModule, TIER, 'op3')
+		const result = deriveOperationTooltip(model, labelsModule, TIER, 'op3', readyDetails({ op3: '```json\n{"path":"README.md"}\n```' }))
 		expect(result.sections).toEqual([{ label: 'details', content: '```json\n{"path":"README.md"}\n```' }])
 	})
 
 	test('a return surfaces its result/summary details', () => {
 		const model = delegationModel()
-		const result = deriveOperationTooltip(model, labelsModule, TIER, 'op4')
+		const result = deriveOperationTooltip(model, labelsModule, TIER, 'op4', readyDetails({ op4: '```json\n{"content":"# Project"}\n```' }))
 		expect(result.sections).toEqual([{ label: 'details', content: '```json\n{"content":"# Project"}\n```' }])
 	})
 
-	test('an operation with null details yields a title-only card', () => {
-		const model: InteractionModel = {
-			participants: [participant('human:root', 'human', 'human'), participant('role:coder:1', 'coder', 'role')],
-			operations: [callOperation('op1', 'human:root', 'role:coder:1', null)],
-			status: 'running',
-		}
-		const result = deriveOperationTooltip(model, labelsModule, TIER, 'op1')
+	test('a loading lookup renders a scalar placeholder section; a failed or ready-null lookup yields a title-only card', () => {
+		const model = delegationModel()
+		const loading = deriveOperationTooltip(model, labelsModule, TIER, 'op2', () => ({ status: 'loading' }))
+		expect(loading.sections).toEqual([{ label: 'details', content: 'loading details…', scalar: true }])
+		const failed = deriveOperationTooltip(model, labelsModule, TIER, 'op2', () => ({ status: 'failed' }))
+		expect(failed.sections).toEqual([])
+		const empty = deriveOperationTooltip(model, labelsModule, TIER, 'op2', readyDetails({ op2: null }))
+		expect(empty.sections).toEqual([])
+		expect(empty.title).not.toBe('')
+	})
+
+	test('an operation with no lookup at all yields a title-only card (no details wired)', () => {
+		const model = delegationModel()
+		const result = deriveOperationTooltip(model, labelsModule, TIER, 'op2')
 		expect(result.sections).toEqual([])
 		expect(result.title).not.toBe('')
 	})
 
 	test('an unknown operation id yields an empty title-only result', () => {
 		const model = delegationModel()
-		expect(deriveOperationTooltip(model, labelsModule, TIER, 'nope')).toEqual({ title: '', sections: [] })
+		expect(deriveOperationTooltip(model, labelsModule, TIER, 'nope', readyDetails({ op2: 'Implement the feature.' }))).toEqual({ title: '', sections: [] })
 	})
 })
 
 describe('deriveParticipantTooltip', () => {
 	test('a completed role shows kind, status, and the finish summary (return details preferred over the call task)', () => {
 		const model = delegationModel()
-		const result = deriveParticipantTooltip(model, labelsModule, TIER, 'role:coder:1')
+		const result = deriveParticipantTooltip(model, labelsModule, TIER, 'role:coder:1', readyDetails({ op2: 'Implement the feature.', op5: 'Done implementing.' }))
 		const labels = result.sections.map((s) => s.label)
 		expect(labels).toEqual(['kind', 'status', 'summary'])
 		expect(defined(result.sections.find((s) => s.label === 'kind'), 'kind section').content).toBe('role')
@@ -325,17 +340,17 @@ describe('deriveParticipantTooltip', () => {
 	test('an in-flight role with no completing return shows the delegation task and no status', () => {
 		const model: InteractionModel = {
 			participants: [participant('human:root', 'human', 'human'), participant('role:coder:1', 'coder', 'role')],
-			operations: [callOperation('op1', 'human:root', 'role:coder:1', 'Implement the feature.')],
+			operations: [callOperation('op1', 'human:root', 'role:coder:1')],
 			status: 'running',
 		}
-		const result = deriveParticipantTooltip(model, labelsModule, TIER, 'role:coder:1')
+		const result = deriveParticipantTooltip(model, labelsModule, TIER, 'role:coder:1', readyDetails({ op1: 'Implement the feature.' }))
 		expect(result.sections.map((s) => s.label)).toEqual(['kind', 'task'])
 		expect(defined(result.sections.find((s) => s.label === 'task'), 'task section').content).toBe('Implement the feature.')
 	})
 
 	test('a completed tool shows kind, status, and the result details', () => {
 		const model = delegationModel()
-		const result = deriveParticipantTooltip(model, labelsModule, TIER, 'tool:read_file:1')
+		const result = deriveParticipantTooltip(model, labelsModule, TIER, 'tool:read_file:1', readyDetails({ op3: '```json\n{"path":"README.md"}\n```', op4: '```json\n{"content":"# Project"}\n```' }))
 		expect(result.sections.map((s) => s.label)).toEqual(['kind', 'status', 'result'])
 		expect(defined(result.sections.find((s) => s.label === 'kind'), 'kind section').content).toBe('tool')
 		expect(defined(result.sections.find((s) => s.label === 'status'), 'status section').content).toBe('success')
@@ -346,18 +361,25 @@ describe('deriveParticipantTooltip', () => {
 		const model: InteractionModel = {
 			participants: [participant('human:root', 'human', 'human'), participant('role:coder:1', 'coder', 'role'), participant('tool:read_file:1', 'read_file', 'tool')],
 			operations: [
-				callOperation('op1', 'human:root', 'role:coder:1', 'Implement.'),
-				callOperation('op2', 'role:coder:1', 'tool:read_file:1', '```json\n{"path":"README.md"}\n```'),
+				callOperation('op1', 'human:root', 'role:coder:1'),
+				callOperation('op2', 'role:coder:1', 'tool:read_file:1'),
 			],
 			status: 'running',
 		}
-		const result = deriveParticipantTooltip(model, labelsModule, TIER, 'tool:read_file:1')
+		const result = deriveParticipantTooltip(model, labelsModule, TIER, 'tool:read_file:1', readyDetails({ op2: '```json\n{"path":"README.md"}\n```' }))
 		expect(result.sections.map((s) => s.label)).toEqual(['kind', 'arguments'])
+	})
+
+	test('a return whose details failed or are absent falls back to the call task', () => {
+		const model = delegationModel()
+		const failedReturn = deriveParticipantTooltip(model, labelsModule, TIER, 'role:coder:1', readyDetails({ op2: 'Implement the feature.', op5: null }))
+		expect(failedReturn.sections.map((s) => s.label)).toEqual(['kind', 'status', 'task'])
+		expect(defined(failedReturn.sections.find((s) => s.label === 'task'), 'task section').content).toBe('Implement the feature.')
 	})
 
 	test('a human answerer shows the question (its incoming call), never the answer (its return)', () => {
 		const answered = askHumanModel(true)
-		const result = deriveParticipantTooltip(answered, labelsModule, TIER, 'human:answerer:1')
+		const result = deriveParticipantTooltip(answered, labelsModule, TIER, 'human:answerer:1', readyDetails({ op2: 'Which testing framework should I use?\n\n*Context: vitest is already installed.*', op3: 'Use vitest.' }))
 		const labels = result.sections.map((s) => s.label)
 		// kind + status (the answered return) + question (the call details, not the answer).
 		expect(labels).toEqual(['kind', 'status', 'question'])
@@ -366,13 +388,22 @@ describe('deriveParticipantTooltip', () => {
 
 	test('a pending human answerer (no answer yet) shows kind and the question, no status', () => {
 		const pending = askHumanModel(false)
-		const result = deriveParticipantTooltip(pending, labelsModule, TIER, 'human:answerer:1')
+		const result = deriveParticipantTooltip(pending, labelsModule, TIER, 'human:answerer:1', readyDetails({ op2: 'Which testing framework should I use?' }))
 		expect(result.sections.map((s) => s.label)).toEqual(['kind', 'question'])
+	})
+
+	test('a loading return keeps the card on the return rather than flashing the request first', () => {
+		const model = delegationModel()
+		// The return (op5) is in flight in the lookup, the call (op2) failed: the preferred return
+		// source renders its loading placeholder instead of falling back to the call.
+		const loading = deriveParticipantTooltip(model, labelsModule, TIER, 'role:coder:1', (operationId: string): DetailsState => operationId === 'op5' ? { status: 'loading' } : { status: 'failed' })
+		expect(loading.sections.map((s) => s.label)).toEqual(['kind', 'status', 'summary'])
+		expect(defined(loading.sections.find((s) => s.label === 'summary'), 'summary section').content).toBe('loading details…')
 	})
 
 	test('an unknown participant id yields an empty title-only result', () => {
 		const model = delegationModel()
-		expect(deriveParticipantTooltip(model, labelsModule, TIER, 'nope')).toEqual({ title: '', sections: [] })
+		expect(deriveParticipantTooltip(model, labelsModule, TIER, 'nope', readyDetails({ op2: 'x' }))).toEqual({ title: '', sections: [] })
 	})
 })
 
@@ -388,12 +419,12 @@ describe('deriveRoleTooltip', () => {
 				participant('role:coder:2', 'coder', 'role'),
 			],
 			operations: [
-				callOperation('op1', 'human:root', 'role:orchestrator:1', 'Plan.'),
-				callOperation('op2', 'role:orchestrator:1', 'role:coder:1', 'First attempt.'),
-				returnOperation('op3', 'role:coder:1', 'role:orchestrator:1', 'error', 'Failed.', { tokens: 300, cachedPromptTokens: 0, elapsedSeconds: 4 }),
-				callOperation('op4', 'role:orchestrator:1', 'role:coder:2', 'Second attempt.'),
-				returnOperation('op5', 'role:coder:2', 'role:orchestrator:1', 'success', 'Done.', { tokens: 900, cachedPromptTokens: 0, elapsedSeconds: 6 }),
-				returnOperation('op6', 'role:orchestrator:1', 'human:root', 'success', 'Completed.', { tokens: 1000, cachedPromptTokens: 0, elapsedSeconds: 12 }),
+				callOperation('op1', 'human:root', 'role:orchestrator:1'),
+				callOperation('op2', 'role:orchestrator:1', 'role:coder:1'),
+				returnOperation('op3', 'role:coder:1', 'role:orchestrator:1', 'error', { tokens: 300, cachedPromptTokens: 0, elapsedSeconds: 4 }),
+				callOperation('op4', 'role:orchestrator:1', 'role:coder:2'),
+				returnOperation('op5', 'role:coder:2', 'role:orchestrator:1', 'success', { tokens: 900, cachedPromptTokens: 0, elapsedSeconds: 6 }),
+				returnOperation('op6', 'role:orchestrator:1', 'human:root', 'success', { tokens: 1000, cachedPromptTokens: 0, elapsedSeconds: 12 }),
 			],
 			status: 'success',
 		}
@@ -408,7 +439,7 @@ describe('deriveRoleTooltip', () => {
 	test('a role still in flight (no completing returns) shows invocations only — no measured-zero time/tokens', () => {
 		const model: InteractionModel = {
 			participants: [participant('human:root', 'human', 'human'), participant('role:coder:1', 'coder', 'role')],
-			operations: [callOperation('op1', 'human:root', 'role:coder:1', 'Implement.')],
+			operations: [callOperation('op1', 'human:root', 'role:coder:1')],
 			status: 'running',
 		}
 		const result = deriveRoleTooltip(model, labelsModule, TIER, 'coder')

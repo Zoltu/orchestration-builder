@@ -669,7 +669,7 @@ describe('renderRunView', () => {
 		expect(view.result).toBeNull()
 	})
 
-	test('recentLog entries carry a readable summary alongside the raw payload', () => {
+	test('recentLog entries carry the log-wide index and the one-line text, with no payload or detail sections', () => {
 		const snapshot = parseRunSnapshot({
 			metaText: null,
 			logText: [
@@ -681,14 +681,24 @@ describe('renderRunView', () => {
 		const view = renderRunView(snapshot, { maxLogLines: 200, now: NOW })
 		expect(view.recentLog.length).toBe(2)
 		expect(view.recentLog[0]).toEqual({
+			index: 0,
 			timestamp: 't1',
 			type: 'llm_call',
-			summary: 'planner · llm call',
-			payload: { role: 'planner' },
-			detailSections: null,
+			text: 'planner · llm call',
 		})
-		expect(defined(view.recentLog[1], 'view.recentLog[1]').summary).toBe('planner · agent')
-		expect(defined(view.recentLog[1], 'view.recentLog[1]').payload).toEqual({ role: 'planner', tool: 'agent' })
+		expect(defined(view.recentLog[1], 'view.recentLog[1]').text).toBe('planner · agent')
+		expect(defined(view.recentLog[1], 'view.recentLog[1]').index).toBe(1)
+	})
+
+	test('recentLog indices are log-wide: a truncated window starts above zero', () => {
+		const lines: string[] = []
+		for (let i = 0; i < 10; i++) {
+			lines.push(logEvent('llm_call', 'planner', `t${i}`))
+		}
+		const snapshot = parseRunSnapshot({ metaText: null, logText: lines.join('\n') })
+
+		const view = renderRunView(snapshot, { maxLogLines: 3, now: NOW })
+		expect(view.recentLog.map((entry) => entry.index)).toEqual([7, 8, 9])
 	})
 
 	test('error is null while a run is in progress', () => {
@@ -1204,22 +1214,27 @@ describe('renderPendingQuestions', () => {
 })
 
 describe('toRecentLogEntry', () => {
-	test('pairs the readable summary with the raw payload', () => {
+	test('pairs the log-wide index with the one-line rendering', () => {
 		const event: LogEvent = { timestamp: 't1', type: 'tool_call', payload: { role: 'coder', tool: 'write_file' } }
-		expect(toRecentLogEntry(event)).toEqual({
+		expect(toRecentLogEntry(event, 7)).toEqual({
+			index: 7,
 			timestamp: 't1',
 			type: 'tool_call',
-			summary: 'coder · write_file',
-			payload: { role: 'coder', tool: 'write_file' },
-			detailSections: null,
+			text: 'coder · write_file',
 		})
 	})
 
-	test('carries the payload unchanged for a malformed payload', () => {
+	test('carries no payload or detail sections — the poll path ships identities only', () => {
+		const event: LogEvent = { timestamp: 't1', type: 'tool_call', payload: { role: 'coder', tool: 'write_file', arguments: '{"path":"README.md"}' } }
+		const entry = toRecentLogEntry(event, 0)
+		expect(entry).not.toHaveProperty('payload')
+		expect(entry).not.toHaveProperty('detailSections')
+	})
+
+	test('renders the one-line text for a malformed payload', () => {
 		const event: LogEvent = { timestamp: 't1', type: 'llm_call', payload: 'broken' }
-		const entry = toRecentLogEntry(event)
-		expect(entry.payload).toBe('broken')
-		expect(entry.summary).toBe('llm call')
+		const entry = toRecentLogEntry(event, 3)
+		expect(entry.text).toBe('llm call')
 	})
 })
 

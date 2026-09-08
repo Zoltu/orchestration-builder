@@ -69,7 +69,7 @@ function participant(id: string, role: string, kind: Participant['kind']): Parti
 }
 
 function callOperation(id: string, stack: string, source: string, destination: string): Operation {
-	return { id, kind: 'call', stack, source, destination, startedAt: 't0', settledAt: null, lifecycle: 'in_flight', outcome: null, details: null, metrics: null }
+	return { id, kind: 'call', stack, source, destination, startedAt: 't0', settledAt: null, lifecycle: 'in_flight', outcome: null, metrics: null }
 }
 
 // A fresh column tracker per render keeps every test order-independent: the high-water mark is caller-held state, so tests construct their own rather than sharing a module-level one.
@@ -99,8 +99,8 @@ describe('renderFlowView — row projection', () => {
 				participant('coder', 'coder', 'role'),
 			],
 			operations: [
-				{ id: 'op1', kind: 'call', stack: 'root', source: 'you', destination: 'coder', startedAt: 't0', settledAt: 't1', lifecycle: 'settled', outcome: null, details: null, metrics: null },
-				{ id: 'op2', kind: 'return', stack: 'root', source: 'coder', destination: 'you', startedAt: 't2', settledAt: 't3', lifecycle: 'settled', outcome: 'success', details: null, metrics: null },
+				{ id: 'op1', kind: 'call', stack: 'root', source: 'you', destination: 'coder', startedAt: 't0', settledAt: 't1', lifecycle: 'settled', outcome: null, metrics: null },
+				{ id: 'op2', kind: 'return', stack: 'root', source: 'coder', destination: 'you', startedAt: 't2', settledAt: 't3', lifecycle: 'settled', outcome: 'success', metrics: null },
 			],
 			status: 'success',
 		}
@@ -199,8 +199,8 @@ describe('renderFlowView — top-bar aggregation', () => {
 				participant('coder', 'coder', 'role'),
 			],
 			operations: [
-				{ id: 'op1', kind: 'call', stack: 'root', source: 'you', destination: 'coder', startedAt: 't0', settledAt: 't1', lifecycle: 'settled', outcome: null, details: null, metrics: null },
-				{ id: 'op2', kind: 'return', stack: 'root', source: 'coder', destination: 'you', startedAt: 't2', settledAt: 't3', lifecycle: 'settled', outcome: 'success', details: null, metrics: null },
+				{ id: 'op1', kind: 'call', stack: 'root', source: 'you', destination: 'coder', startedAt: 't0', settledAt: 't1', lifecycle: 'settled', outcome: null, metrics: null },
+				{ id: 'op2', kind: 'return', stack: 'root', source: 'coder', destination: 'you', startedAt: 't2', settledAt: 't3', lifecycle: 'settled', outcome: 'success', metrics: null },
 			],
 			status: 'success',
 		}
@@ -270,12 +270,12 @@ describe('renderFlowView — lingering return legs', () => {
 				participant('rewind', 'rewind_stack', 'tool'),
 			],
 			operations: [
-				{ id: 'op1', kind: 'call', stack: 'root', source: 'you', destination: 'orchestrator', startedAt: 't0', settledAt: 't1', lifecycle: 'settled', outcome: null, details: null, metrics: null },
-				{ id: 'op2', kind: 'call', stack: 'root', source: 'orchestrator', destination: 'coder', startedAt: 't1', settledAt: 't4', lifecycle: 'settled', outcome: null, details: null, metrics: null },
-				{ id: 'op3', kind: 'call', stack: 'int-stack', source: 'int', destination: 'rewind', startedAt: 't2', settledAt: 't3', lifecycle: 'settled', outcome: null, details: null, metrics: null },
-				{ id: 'op4', kind: 'terminate', stack: 'int-stack', source: 'rewind', destination: 'coder', startedAt: 't4', settledAt: 't4', lifecycle: 'settled', outcome: null, details: null, metrics: null },
-				{ id: 'op5', kind: 'return', stack: 'int-stack', source: 'rewind', destination: 'int', startedAt: 't5', settledAt: 't6', lifecycle: 'settled', outcome: 'success', details: null, metrics: null },
-				{ id: 'op6', kind: 'return', stack: 'root', source: 'orchestrator', destination: 'you', startedAt: 't7', settledAt: null, lifecycle: 'in_flight', outcome: 'success', details: null, metrics: null },
+				{ id: 'op1', kind: 'call', stack: 'root', source: 'you', destination: 'orchestrator', startedAt: 't0', settledAt: 't1', lifecycle: 'settled', outcome: null, metrics: null },
+				{ id: 'op2', kind: 'call', stack: 'root', source: 'orchestrator', destination: 'coder', startedAt: 't1', settledAt: 't4', lifecycle: 'settled', outcome: null, metrics: null },
+				{ id: 'op3', kind: 'call', stack: 'int-stack', source: 'int', destination: 'rewind', startedAt: 't2', settledAt: 't3', lifecycle: 'settled', outcome: null, metrics: null },
+				{ id: 'op4', kind: 'terminate', stack: 'int-stack', source: 'rewind', destination: 'coder', startedAt: 't4', settledAt: 't4', lifecycle: 'settled', outcome: null, metrics: null },
+				{ id: 'op5', kind: 'return', stack: 'int-stack', source: 'rewind', destination: 'int', startedAt: 't5', settledAt: 't6', lifecycle: 'settled', outcome: 'success', metrics: null },
+				{ id: 'op6', kind: 'return', stack: 'root', source: 'orchestrator', destination: 'you', startedAt: 't7', settledAt: null, lifecycle: 'in_flight', outcome: 'success', metrics: null },
 			],
 			status: 'running',
 		}
@@ -435,10 +435,10 @@ describe('renderFlowView — edge animation (single invariant)', () => {
 				participant('det', 'loop_detector', 'role'),
 			],
 			operations: [
-				{ id: 'op1', kind: 'call', stack: 'root', source: 'you', destination: 'orchestrator', startedAt: 't0', settledAt: 't1', lifecycle: 'settled', outcome: null, details: null, metrics: null },
-				{ id: 'op2', kind: 'call', stack: 'root', source: 'orchestrator', destination: 'coder', startedAt: 't1', settledAt: null, lifecycle: 'in_flight', outcome: null, details: null, metrics: null },
-				{ id: 'op3', kind: 'call', stack: 'int-stack', source: 'int', destination: 'det', startedAt: 't2', settledAt: 't3', lifecycle: 'settled', outcome: null, details: null, metrics: null },
-				{ id: 'op4', kind: 'return', stack: 'int-stack', source: 'det', destination: 'int', startedAt: 't3', settledAt: null, lifecycle: 'in_flight', outcome: 'success', details: null, metrics: null },
+				{ id: 'op1', kind: 'call', stack: 'root', source: 'you', destination: 'orchestrator', startedAt: 't0', settledAt: 't1', lifecycle: 'settled', outcome: null, metrics: null },
+				{ id: 'op2', kind: 'call', stack: 'root', source: 'orchestrator', destination: 'coder', startedAt: 't1', settledAt: null, lifecycle: 'in_flight', outcome: null, metrics: null },
+				{ id: 'op3', kind: 'call', stack: 'int-stack', source: 'int', destination: 'det', startedAt: 't2', settledAt: 't3', lifecycle: 'settled', outcome: null, metrics: null },
+				{ id: 'op4', kind: 'return', stack: 'int-stack', source: 'det', destination: 'int', startedAt: 't3', settledAt: null, lifecycle: 'in_flight', outcome: 'success', metrics: null },
 			],
 			status: 'running',
 			stacks: [
@@ -626,9 +626,9 @@ describe('renderFlowView — nested interrupts under stress', () => {
 				participant('coder', 'coder', 'role'),
 			],
 			operations: [
-				{ id: 'op1', kind: 'call', stack: 'root', source: 'you', destination: 'orchestrator', startedAt: 't0', settledAt: 't1', lifecycle: 'settled', outcome: null, details: null, metrics: null },
-				{ id: 'op2', kind: 'call', stack: 'root', source: 'orchestrator', destination: 'coder', startedAt: 't1', settledAt: 't2', lifecycle: 'settled', outcome: null, details: null, metrics: null },
-				{ id: 'op5', kind: 'return', stack: 'root', source: 'coder', destination: 'orchestrator', startedAt: 't5', settledAt: null, lifecycle: 'in_flight', outcome: 'terminated', details: null, metrics: null },
+				{ id: 'op1', kind: 'call', stack: 'root', source: 'you', destination: 'orchestrator', startedAt: 't0', settledAt: 't1', lifecycle: 'settled', outcome: null, metrics: null },
+				{ id: 'op2', kind: 'call', stack: 'root', source: 'orchestrator', destination: 'coder', startedAt: 't1', settledAt: 't2', lifecycle: 'settled', outcome: null, metrics: null },
+				{ id: 'op5', kind: 'return', stack: 'root', source: 'coder', destination: 'orchestrator', startedAt: 't5', settledAt: null, lifecycle: 'in_flight', outcome: 'terminated', metrics: null },
 			],
 			status: 'running',
 		}
@@ -656,9 +656,9 @@ describe('renderFlowView — nested interrupts under stress', () => {
 				participant('coder', 'coder', 'role'),
 			],
 			operations: [
-				{ id: 'op1', kind: 'call', stack: 'root', source: 'you', destination: 'orchestrator', startedAt: 't0', settledAt: 't1', lifecycle: 'settled', outcome: null, details: null, metrics: null },
-				{ id: 'op2', kind: 'call', stack: 'root', source: 'orchestrator', destination: 'coder', startedAt: 't1', settledAt: 't2', lifecycle: 'settled', outcome: null, details: null, metrics: null },
-				{ id: 'op5', kind: 'return', stack: 'root', source: 'coder', destination: 'orchestrator', startedAt: 't5', settledAt: 't6', lifecycle: 'settled', outcome: 'terminated', details: null, metrics: null },
+				{ id: 'op1', kind: 'call', stack: 'root', source: 'you', destination: 'orchestrator', startedAt: 't0', settledAt: 't1', lifecycle: 'settled', outcome: null, metrics: null },
+				{ id: 'op2', kind: 'call', stack: 'root', source: 'orchestrator', destination: 'coder', startedAt: 't1', settledAt: 't2', lifecycle: 'settled', outcome: null, metrics: null },
+				{ id: 'op5', kind: 'return', stack: 'root', source: 'coder', destination: 'orchestrator', startedAt: 't5', settledAt: 't6', lifecycle: 'settled', outcome: 'terminated', metrics: null },
 			],
 			status: 'running',
 		}
@@ -766,11 +766,11 @@ describe('deriveNowCaption — active participant + in-flight operation', () => 
 
 describe('deriveCostStrip — per-operation metric aggregation', () => {
 	function callWithMetrics(id: string, stack: string, source: string, destination: string, metrics: Operation['metrics']): Operation {
-		return { id, kind: 'call', stack, source, destination, startedAt: 't0', settledAt: null, lifecycle: 'in_flight', outcome: null, details: null, metrics }
+		return { id, kind: 'call', stack, source, destination, startedAt: 't0', settledAt: null, lifecycle: 'in_flight', outcome: null, metrics }
 	}
 
 	function returnWithMetrics(id: string, stack: string, source: string, destination: string, elapsedSeconds: number, tokens: number): Operation {
-		return { id, kind: 'return', stack, source, destination, startedAt: 't0', settledAt: 't1', lifecycle: 'settled', outcome: 'success', details: null, metrics: { tokens, cachedPromptTokens: null, elapsedSeconds } }
+		return { id, kind: 'return', stack, source, destination, startedAt: 't0', settledAt: 't1', lifecycle: 'settled', outcome: 'success', metrics: { tokens, cachedPromptTokens: null, elapsedSeconds } }
 	}
 
 	test('tokens are summed across every operation that carries them and null metrics contribute nothing', () => {

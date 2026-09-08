@@ -8,6 +8,7 @@ import { deriveLifecycle, renderFlowView, deriveNowCaption, deriveCostStrip, cre
 import { renderSequenceView, HEADER_HEIGHT, ROW_HEIGHT, BOTTOM_MARGIN } from './sequence-diagram.js'
 import { createMarkdownRenderer } from './markdown-render.js'
 import { createTooltipDismiss, deriveTooltipDescriptor, isInFlightAskHuman, resolveTooltipTarget } from './inspector.js'
+import { operationIdsForTooltipDetails } from './tooltip.js'
 import { copyRawToClipboard } from './clipboard.js'
 import { Tooltip, tooltipStyle } from './tooltip.js'
 import { ResultModal } from './result-modal.js'
@@ -245,19 +246,102 @@ let currentTooltipKey = null
 // The grace-period dismiss timer, shared with the product client via inspector.js; expiry tears the card down directly (the harness has no dispatch loop).
 const tooltipDismiss = createTooltipDismiss()
 
+// The operation-details session cache, mirroring the product client's: the frame models ship no
+// detail bodies, so opening a card fetches the ids its derivation may show from the demo frame
+// endpoint's ?operation= variant, once per scenario+operation per session. Operation ids are stable
+// across a scenario's frames (events only append), so an entry never goes stale.
+const operationDetailsCache = new Map()
+
+// The target the open card was built from, so a late details response can rebuild it in place.
+let currentTooltipTarget = null
+
+function detailsCacheKey(operationId) {
+	const manifest = scenarios[scenarioIndex]
+	return `${manifest !== undefined ? manifest.id : ''}|${operationId}`
+}
+
+function operationDetailsLookup() {
+	return (operationId) => {
+		const entry = operationDetailsCache.get(detailsCacheKey(operationId))
+		return entry === undefined ? { status: 'failed' } : entry
+	}
+}
+
+// Marks each uncached id 'loading' and fetches it from the demo frame endpoint. Every landing —
+// response or failure — goes through operationDetailsLanded, so both surfaces waiting on the id
+// (the open inspector card and the question modal) fill in from one path. A 404 (an id the frame
+// no longer resolves) and a network failure both record 'failed', which renders section-less.
+function fetchOperationDetails(target) {
+	const manifest = scenarios[scenarioIndex]
+	if (manifest === undefined || currentFrame === null) return
+	for (const operationId of operationIdsForTooltipDetails(currentFrame, target)) {
+		const key = detailsCacheKey(operationId)
+		if (operationDetailsCache.has(key)) continue
+		operationDetailsCache.set(key, 'loading')
+		fetch(`api/demo/flow/${encodeURIComponent(manifest.id)}/${frameIndex}?operation=${encodeURIComponent(operationId)}`).then(
+			(response) => {
+				const ok = response.ok
+				response.json().then(
+					(body) => {
+						operationDetailsCache.set(key, detailsStateFrom(ok, body))
+						operationDetailsLanded(operationId)
+					},
+					() => {
+						operationDetailsCache.set(key, 'failed')
+						operationDetailsLanded(operationId)
+					},
+				)
+			},
+			() => {
+				operationDetailsCache.set(key, 'failed')
+				operationDetailsLanded(operationId)
+			},
+		)
+	}
+}
+
+function detailsStateFrom(ok, body) {
+	if (ok && body !== null && typeof body === 'object' && typeof body.details === 'string') return { details: body.details }
+	if (ok && body !== null && typeof body === 'object' && body.details === null) return { details: null }
+	return 'failed'
+}
+
+// Re-opens the current card when a late details response lands for an id it derives from, so the
+// card fills in; the dedup in openTooltip is bypassed by closing first, and a card the pointer has
+// since left stays closed.
+function refillTooltip(operationId) {
+	if (currentTooltipNode === null || currentTooltipTarget === null || currentFrame === null) return
+	if (!operationIdsForTooltipDetails(currentFrame, currentTooltipTarget).includes(operationId)) return
+	const target = currentTooltipTarget
+	closeTooltip()
+	openTooltip(target)
+}
+
+// The shared landing for a details response or failure: refill the open inspector card, and fill
+// the question modal when it is waiting on this operation's details. Routing both surfaces through
+// one path is what closes the hover-then-open-modal race — a modal opened while a hover fetch is
+// still in flight would otherwise never see the response.
+function operationDetailsLanded(operationId) {
+	refillTooltip(operationId)
+	if (questionModalOperationId !== operationId) return
+	const state = operationDetailsCache.get(detailsCacheKey(operationId))
+	if (state !== undefined && state.status === 'ready') applyQuestionModalDetails(state.details)
+}
+
 function closeTooltip() {
 	tooltipDismiss.cancel()
 	if (currentTooltipNode === null) return
 	currentTooltipNode.remove()
 	currentTooltipNode = null
 	currentTooltipKey = null
+	currentTooltipTarget = null
 }
 
 // Builds the inspector card from the live InteractionModel via the shared descriptor dispatch in `inspector.js` (the same one the product client uses), so the dev harness and the live view consume one inspector derivation.
-// The card is anchored to the target's snapshot rect (flush against it) and appended to the run-view container so a `mouseleave` on the container covers both the SVG and the card — moving from a node into the card keeps the card open.
+// The card is anchored to the target's snapshot rect (flush against it) and appended to the run-view container so a `mouseleave` on the container covers both the SVG and the card — moving from a node into the card keeps the card open. The target's details are fetched on demand if not cached; the first render shows the loading placeholder and the refill fills it in.
 function openTooltip(target) {
 	if (labels === null || currentFrame === null) return
-	const descriptor = deriveTooltipDescriptor(currentFrame, labels, tier, target)
+	const descriptor = deriveTooltipDescriptor(currentFrame, labels, tier, target, operationDetailsLookup())
 	if (descriptor.title === '') return
 	// Reuse the open card when the pointer moves within the same target (a message path → its terminal node, or a node box → its cost figures) so the card does not flicker on every mouseover. The rect is unchanged for the same target, so the card stays put.
 	const key = `${target.kind}:${target.id}`
@@ -265,10 +349,12 @@ function openTooltip(target) {
 		return
 	}
 	closeTooltip()
+	fetchOperationDetails(target)
 	const card = Tooltip(htmlH, { title: descriptor.title, sections: descriptor.sections, renderMarkdown, style: tooltipStyle(target.rect) })
 	flowContainer.appendChild(card)
 	currentTooltipNode = card
 	currentTooltipKey = key
+	currentTooltipTarget = target
 }
 
 // Sequence-view scroll state. The SVG renders at its natural full-content viewBox and lives inside a scroll container, so a long timeline scrolls vertically (the page wheel) rather than zooming; the container is the single piece of state the jump-to-active affordance needs.
@@ -344,6 +430,8 @@ let resultModalNode = null
 let resultAcknowledged = false
 // The question-modal mount, or null when no modal is open. The modal is a view concern layered on an ask_human transit frame (a pending question, not model state): opening it mounts an HTML overlay sibling to the SVG without rebuilding the SVG, so the enter animation and marching-ants do not replay on a modal toggle.
 let questionModalNode = null
+// The ask_human call operation the open modal's question text derives from, or null when no modal is open. The shared details-landing path checks it so a response for an in-flight fetch fills the modal even when the fetch was started by a hover rather than the modal itself.
+let questionModalOperationId = null
 // Set by loadScenario/render so the next render knows the scenario (not just the frame) changed and the sequence scroll position resets to the top rather than preserving a scrollTop that mapped onto a different scenario's content.
 let scenarioChanged = true
 // Set to 'forward' by Next and Play so the next render auto-scrolls the sequence view to the latest row; every other navigation (Previous, arbitrary scrub, tier swap, view toggle) leaves it 'preserve' so the user's scroll position is kept rather than yanked to the bottom on a non-advancing step.
@@ -505,6 +593,7 @@ function closeResultModal() {
 }
 
 // The question modal opens on an ask_human transit frame and stays open until the user answers or dismisses it. Like the result modal it is an HTML overlay sibling to the SVG, mounted without rebuilding the SVG so the marching-ants and enter animations do not replay. The Question affordance stays on the answerer node while the modal is dismissed, so the operator can re-open it by clicking the button again.
+// The question text is the ask call's details, which the models no longer carry: the modal opens with the waiting fallback and the details fetch fills the question block in when it lands (a failure leaves the fallback — graceful, like the inspector card).
 function openQuestionModal() {
 	if (questionModalNode !== null) return
 	const manifest = scenarios[scenarioIndex]
@@ -513,9 +602,8 @@ function openQuestionModal() {
 	if (frame === undefined) return
 	const askHumanCall = activeAskHumanCall(frame)
 	if (askHumanCall === undefined) return
-	const question = { question: askHumanCall.details ?? 'The run is waiting for your input.' }
 	const modal = QuestionModal(htmlH, {
-		question,
+		question: { question: 'The run is waiting for your input.' },
 		runLabel: manifest.label,
 		renderMarkdown,
 		onSubmit: submitQuestion,
@@ -523,12 +611,62 @@ function openQuestionModal() {
 	})
 	flowContainer.appendChild(modal)
 	questionModalNode = modal
+	questionModalOperationId = askHumanCall.id
+	fillQuestionModalWithDetails(manifest, askHumanCall.id)
+}
+
+// Fills the modal's question block from the ask call's details cache, fetching on a miss. A
+// 'loading' entry needs no work here: the in-flight fetch's landing (operationDetailsLanded) sees
+// the modal's registered operation id and applies the details when it resolves. A failure lands the
+// same way and applies nothing, so the waiting fallback stays — graceful, like the inspector card.
+function fillQuestionModalWithDetails(manifest, operationId) {
+	const key = detailsCacheKey(operationId)
+	const cached = operationDetailsCache.get(key)
+	if (cached !== undefined && cached.status === 'ready') {
+		applyQuestionModalDetails(cached.details)
+		return
+	}
+	if (cached !== undefined) return
+	operationDetailsCache.set(key, 'loading')
+	fetch(`api/demo/flow/${encodeURIComponent(manifest.id)}/${frameIndex}?operation=${encodeURIComponent(operationId)}`).then(
+		(response) => {
+			const ok = response.ok
+			response.json().then(
+				(body) => {
+					operationDetailsCache.set(key, detailsStateFrom(ok, body))
+					operationDetailsLanded(operationId)
+				},
+				() => {
+					operationDetailsCache.set(key, 'failed')
+					operationDetailsLanded(operationId)
+				},
+			)
+		},
+		() => {
+			operationDetailsCache.set(key, 'failed')
+			operationDetailsLanded(operationId)
+		},
+	)
+}
+
+// Swaps the open modal's question text for the fetched details markdown; nothing to do when the
+// operation carried no details or the modal has since closed.
+function applyQuestionModalDetails(details) {
+	if (questionModalNode === null) return
+	if (typeof details !== 'string' || details === '') return
+	const block = questionModalNode.querySelector('.question-modal-question')
+	if (block === null) return
+	while (block.firstChild !== null) block.removeChild(block.firstChild)
+	for (const child of renderMarkdown(details)) {
+		block.appendChild(typeof child === 'string' ? document.createTextNode(child) : child)
+	}
 }
 
 function closeQuestionModal() {
 	if (questionModalNode === null) return
 	questionModalNode.remove()
 	questionModalNode = null
+	questionModalOperationId = null
 }
 
 // Submitting the answer advances to the next frame (the human_answer return), which turns the answerer green and closes the call. The answer text is not stored in the demo (the InteractionModel carries no answer field), so advancing the frame is the whole of the response; the product client would POST the answer and the backend would emit the return.

@@ -35,9 +35,14 @@ interface Operation {
 	settledAt: string | null
 	lifecycle: OperationLifecycle
 	outcome: OperationOutcome | null
-	details: string | null
 	metrics: OperationMetrics | null
 }
+
+// The unformatted detail material an operation carries, recorded during the walk and formatted only when a details request names the operation (deriveInteractionOperationDetail). Tool arguments/results can be multi-megabyte, so formatting them per poll for every operation would dominate the flow endpoint's cost; the raw source is a reference the poll never serializes.
+type OperationDetailSource =
+	| { kind: 'text'; text: string }
+	| { kind: 'arguments'; arguments: string }
+	| { kind: 'result'; result: unknown }
 
 interface StackRecord {
 	id: string
@@ -110,8 +115,7 @@ function secondsBetween(start: string, end: string): number | null {
 // shows legible parameters rather than a one-line blob; a non-JSON arguments string falls back
 // to a plain fenced block. This is data, not prose: it reaches the DOM only through the client's
 // sanitized Markdown pipeline.
-function formatArguments(raw: string | null): string | null {
-	if (raw === null) return null
+function formatArguments(raw: string): string {
 	try {
 		const parsed: unknown = JSON.parse(raw)
 		return '```json\n' + JSON.stringify(parsed, null, 2) + '\n```'
@@ -120,15 +124,18 @@ function formatArguments(raw: string | null): string | null {
 	}
 }
 
-function formatResult(payload: unknown): string | null {
-	if (!isObject(payload)) return null
-	const result = payload['result']
-	if (result === null || result === undefined) return null
+function formatResultValue(result: unknown): string {
 	try {
 		return '```json\n' + JSON.stringify(result, null, 2) + '\n```'
 	} catch {
-		return null
+		return '```\n' + String(result) + '\n```'
 	}
+}
+
+function formatOperationDetail(source: OperationDetailSource): string {
+	if (source.kind === 'arguments') return formatArguments(source.arguments)
+	if (source.kind === 'result') return formatResultValue(source.result)
+	return source.text
 }
 
 interface OpenCallRecord {
@@ -168,7 +175,15 @@ interface StackFrame {
 	lingeringReturn: ReturnRecord | null
 }
 
-export function deriveInteractionModel(snapshot: RunSnapshot, now: string): InteractionModel {
+// The full walk over the run's events: the poll-path model (operations carry identities, lifecycle,
+// and metrics — never detail bodies) plus the raw detail sources keyed by operation id, which only
+// the on-demand detail path (deriveInteractionOperationDetail) formats and serializes.
+interface DerivedModel {
+	model: InteractionModel
+	detailSources: Map<string, OperationDetailSource>
+}
+
+function deriveModel(snapshot: RunSnapshot, now: string): DerivedModel {
 	const status = runStatusOf(snapshot.meta)
 	// A run that is running, waiting on a question (needs_clarification), or has no readable meta
 	// (unknown) still has something in flight at `now`; a finished run (success/error) has settled.
@@ -178,6 +193,7 @@ export function deriveInteractionModel(snapshot: RunSnapshot, now: string): Inte
 	const participants: Participant[] = [rootParticipant]
 	const registry = new Map<string, Participant>([[ROOT_HUMAN_ID, rootParticipant]])
 	const operations: Operation[] = []
+	const detailSources = new Map<string, OperationDetailSource>()
 	const allCallRecords: OpenCallRecord[] = []
 	const allReturnRecords: ReturnRecord[] = []
 	// The final returns of resolved (popped) stacks, still awaiting confirmation: each lingers until the next activity-affecting operation lands, at which point it settles.
@@ -260,7 +276,7 @@ export function deriveInteractionModel(snapshot: RunSnapshot, now: string): Inte
 		if (top.returnTimestamp === null && top.delegatedAt === null) top.delegatedAt = timestamp
 	}
 
-	function recordCall(event: LogEvent, source: string, destinationId: string, destinationRole: string, destinationKind: ParticipantKind, questionId: string | null, details: string | null): void {
+	function recordCall(event: LogEvent, source: string, destinationId: string, destinationRole: string, destinationKind: ParticipantKind, questionId: string | null, detailSource: OperationDetailSource | null): void {
 		settleLingering(event.timestamp)
 		settleResolvedLingering(event.timestamp)
 		const frame = currentFrame()
@@ -274,10 +290,10 @@ export function deriveInteractionModel(snapshot: RunSnapshot, now: string): Inte
 			settledAt: null,
 			lifecycle: 'in_flight',
 			outcome: null,
-			details,
 			metrics: null,
 		}
 		operations.push(callOperation)
+		if (detailSource !== null) detailSources.set(callOperation.id, detailSource)
 		const record: OpenCallRecord = {
 			operation: callOperation,
 			destinationId,
@@ -294,7 +310,7 @@ export function deriveInteractionModel(snapshot: RunSnapshot, now: string): Inte
 		allCallRecords.push(record)
 	}
 
-	function recordReturn(event: LogEvent, matched: OpenCallRecord, outcome: OperationOutcome, details: string | null): void {
+	function recordReturn(event: LogEvent, matched: OpenCallRecord, outcome: OperationOutcome, detailSource: OperationDetailSource | null): void {
 		settleLingering(event.timestamp)
 		settleResolvedLingering(event.timestamp)
 		const frame = currentFrame()
@@ -311,10 +327,10 @@ export function deriveInteractionModel(snapshot: RunSnapshot, now: string): Inte
 			settledAt: null,
 			lifecycle: 'in_flight',
 			outcome,
-			details,
 			metrics: null,
 		}
 		operations.push(returnOperation)
+		if (detailSource !== null) detailSources.set(returnOperation.id, detailSource)
 		matched.returnTimestamp = event.timestamp
 		const returnRecord: ReturnRecord = { operation: returnOperation, callerRole, supersededAt: null }
 		allReturnRecords.push(returnRecord)
@@ -358,13 +374,13 @@ export function deriveInteractionModel(snapshot: RunSnapshot, now: string): Inte
 				const role = stringField(event.payload, 'role')
 				if (role === null) break
 				const task = stringField(event.payload, 'task')
-				const details = pendingInquiryMessage ?? task
+				const detailText = pendingInquiryMessage ?? task
 				pendingInquiryMessage = null
 				const roleId = `role:${role}:${nextId('role:' + role)}`
 				addParticipant(roleId, role, 'role')
 				settlePreviousByDelegation(event.timestamp)
 				// The source is the active frame's innermost open call, or the frame's root (the human for the main stack, the interrupt instance or human asker for an interrupt stack) when the stack is empty.
-				recordCall(event, activeRoleParticipantId(), roleId, role, 'role', null, details)
+				recordCall(event, activeRoleParticipantId(), roleId, role, 'role', null, detailText === null ? null : { kind: 'text', text: detailText })
 				break
 			}
 			case 'interrupt': {
@@ -393,7 +409,8 @@ export function deriveInteractionModel(snapshot: RunSnapshot, now: string): Inte
 				if (role === null) break
 				const target = findOpenCallInPausedStack(role)
 				if (target === null) break
-				operations.push({
+				const observeDetails = stringField(event.payload, 'details')
+				const observeOperation: Operation = {
 					id: opId(),
 					kind: 'observe',
 					stack: currentFrame().stackId,
@@ -403,9 +420,10 @@ export function deriveInteractionModel(snapshot: RunSnapshot, now: string): Inte
 					settledAt: event.timestamp,
 					lifecycle: 'settled',
 					outcome: null,
-					details: stringField(event.payload, 'details'),
 					metrics: null,
-				})
+				}
+				operations.push(observeOperation)
+				if (observeDetails !== null) detailSources.set(observeOperation.id, { kind: 'text', text: observeDetails })
 				break
 			}
 			case 'terminate': {
@@ -413,7 +431,8 @@ export function deriveInteractionModel(snapshot: RunSnapshot, now: string): Inte
 				if (role === null) break
 				const target = findOpenCallInPausedStack(role)
 				if (target === null) break
-				operations.push({
+				const terminateDetails = stringField(event.payload, 'details')
+				const terminateOperation: Operation = {
 					id: opId(),
 					kind: 'terminate',
 					stack: currentFrame().stackId,
@@ -423,9 +442,10 @@ export function deriveInteractionModel(snapshot: RunSnapshot, now: string): Inte
 					settledAt: event.timestamp,
 					lifecycle: 'settled',
 					outcome: null,
-					details: stringField(event.payload, 'details'),
 					metrics: null,
-				})
+				}
+				operations.push(terminateOperation)
+				if (terminateDetails !== null) detailSources.set(terminateOperation.id, { kind: 'text', text: terminateDetails })
 				// The terminate closes the targeted call immediately: it settles without a return operation and is removed from its (paused) stack's open chain, so the node is removed right away.
 				target.record.returnTimestamp = event.timestamp
 				const targetIndex = target.frame.openCalls.indexOf(target.record)
@@ -451,7 +471,7 @@ export function deriveInteractionModel(snapshot: RunSnapshot, now: string): Inte
 				// needs_clarification is a clean finish that asked; the run-level status carries it,
 				// not the operation outcome.
 				const outcome: OperationOutcome = finishStatus === 'error' ? 'error' : 'success'
-				recordReturn(event, matched, outcome, summary)
+				recordReturn(event, matched, outcome, summary === null ? null : { kind: 'text', text: summary })
 				// A closed non-main stack resumes the stack it preempted: once its root call returns, the interrupt frame is done and popped. Its final return is not settled here — it lingers (the row keeps rendering the returner and its response leg) until the next activity-affecting operation confirms it, the same "keep the prior leg visible until the next action" rule the active stack's lingering returns follow.
 				if (stackStack.length > 1 && currentFrame().openCalls.length === 0) {
 					const closed = stackStack.pop()
@@ -502,7 +522,8 @@ export function deriveInteractionModel(snapshot: RunSnapshot, now: string): Inte
 				const toolId = `tool:${tool}:${nextId('tool:' + tool)}`
 				addParticipant(toolId, tool, 'tool')
 				settlePreviousByDelegation(event.timestamp)
-				recordCall(event, activeRoleParticipantId(), toolId, tool, 'tool', null, formatArguments(stringField(event.payload, 'arguments')))
+				const argumentsValue = stringField(event.payload, 'arguments')
+				recordCall(event, activeRoleParticipantId(), toolId, tool, 'tool', null, argumentsValue === null ? null : { kind: 'arguments', arguments: argumentsValue })
 				break
 			}
 			case 'tool_result': {
@@ -523,7 +544,8 @@ export function deriveInteractionModel(snapshot: RunSnapshot, now: string): Inte
 				if (matched === null) break
 				const kind = stringField(event.payload, 'kind')
 				const outcome: OperationOutcome = kind === 'success' ? 'success' : 'error'
-				recordReturn(event, matched, outcome, formatResult(event.payload))
+				const resultValue = isObject(event.payload) ? event.payload['result'] : undefined
+				recordReturn(event, matched, outcome, resultValue === null || resultValue === undefined ? null : { kind: 'result', result: resultValue })
 				break
 			}
 			case 'ask_human': {
@@ -535,8 +557,8 @@ export function deriveInteractionModel(snapshot: RunSnapshot, now: string): Inte
 				const answererId = `human:answerer:${nextId('answerer')}`
 				addParticipant(answererId, 'human', 'human')
 				settlePreviousByDelegation(event.timestamp)
-				const details = context === null ? question : `${question}\n\n*Context: ${context}*`
-				recordCall(event, activeRoleParticipantId(), answererId, 'human', 'human', id, details)
+				const detailText = context === null ? question : `${question}\n\n*Context: ${context}*`
+				recordCall(event, activeRoleParticipantId(), answererId, 'human', 'human', id, { kind: 'text', text: detailText })
 				break
 			}
 			case 'human_answer': {
@@ -554,7 +576,7 @@ export function deriveInteractionModel(snapshot: RunSnapshot, now: string): Inte
 				}
 				const matched = popMatch(matchIndex, event.timestamp)
 				if (matched === null) break
-				recordReturn(event, matched, 'success', answer)
+				recordReturn(event, matched, 'success', { kind: 'text', text: answer })
 				break
 			}
 			default:
@@ -606,5 +628,28 @@ export function deriveInteractionModel(snapshot: RunSnapshot, now: string): Inte
 		}
 	}
 
-	return { participants, operations, status, stacks: stackRecords }
+	return { model: { participants, operations, status, stacks: stackRecords }, detailSources }
+}
+
+export function deriveInteractionModel(snapshot: RunSnapshot, now: string): InteractionModel {
+	return deriveModel(snapshot, now).model
+}
+
+export interface InteractionOperationDetail {
+	operationId: string
+	details: string | null
+}
+
+// Resolves one operation's details markdown on demand: the walk is re-run (the same O(N) derive the
+// flow endpoint performs) but only the named operation's detail source is formatted, so the response
+// carries one string instead of every operation's bodies. Returns null when the id names no
+// operation in the model — a stale id from a frame the poll has since replaced — which the endpoint
+// surfaces as a 404; an operation that exists but carries no detail material resolves to
+// `details: null`.
+export function deriveInteractionOperationDetail(snapshot: RunSnapshot, now: string, operationId: string): InteractionOperationDetail | null {
+	const { model, detailSources } = deriveModel(snapshot, now)
+	const operation = model.operations.find((candidate) => candidate.id === operationId)
+	if (operation === undefined) return null
+	const source = detailSources.get(operationId)
+	return { operationId, details: source === undefined ? null : formatOperationDetail(source) }
 }

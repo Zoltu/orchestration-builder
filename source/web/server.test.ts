@@ -245,6 +245,25 @@ snapshots.set('run-tree', {
 	].join('\n'),
 })
 
+// A run with a real (non-control) tool call and result carrying raw arguments and a full result, plus role task and summary text — the detail material the flow endpoint's ?operation= variant resolves on demand.
+snapshots.set('run-flow-details', {
+	metaText: JSON.stringify({
+		runId: 'run-flow-details',
+		guildPath: 'guild',
+		benchmarkPath: 'bench',
+		task: 'task for run-flow-details',
+		status: 'success',
+		startTime: '2026-01-01T00:00:00.000Z',
+		endTime: '2026-01-01T00:01:00.000Z',
+	}),
+	logText: [
+		JSON.stringify({ timestamp: '2026-01-01T00:00:01.000Z', type: 'role_start', payload: { role: 'coder', depth: 0, task: 'do the work' } }),
+		JSON.stringify({ timestamp: '2026-01-01T00:00:02.000Z', type: 'tool_call', payload: { role: 'coder', tool: 'read_file', arguments: '{"path":"README.md"}' } }),
+		JSON.stringify({ timestamp: '2026-01-01T00:00:03.000Z', type: 'tool_result', payload: { role: 'coder', tool: 'read_file', kind: 'success', result: { kind: 'success', data: { content: '# Project' } } } }),
+		JSON.stringify({ timestamp: '2026-01-01T00:00:04.000Z', type: 'role_finished', payload: { role: 'coder', depth: 0, status: 'success', summary: 'done' } }),
+	].join('\n'),
+})
+
 // A run whose orchestrator delegates to coder twice (first errors, second succeeds) — mirrors a retry — so the per-invocation tree, the per-invocation status, and the inline error surfacing are all exercised end to end. Pre-fix this would have shown one merged coder pulsing while reading "error" despite the run succeeding.
 snapshots.set('run-retry', {
 	metaText: JSON.stringify({
@@ -542,18 +561,19 @@ describe('GET /api/runs (list)', () => {
 		expect(response.status).toBe(200)
 		const list = await response.json()
 		expect(Array.isArray(list)).toBe(true)
-		expect(list.length).toBe(11)
+		expect(list.length).toBe(12)
 		expect(list[0].runId).toBe('run-tree')
 		expect(list[1].runId).toBe('run-retry')
 		expect(list[2].runId).toBe('run-long')
 		expect(list[3].runId).toBe('run-interrupted')
-		expect(list[4].runId).toBe('run-effort')
-		expect(list[5].runId).toBe('run-cached')
-		expect(list[6].runId).toBe('run-active')
-		expect(list[7].runId).toBe('run-3')
-		expect(list[8].runId).toBe('run-20260101-000000')
-		expect(list[9].runId).toBe('run-2')
-		expect(list[10].runId).toBe('run-1')
+		expect(list[4].runId).toBe('run-flow-details')
+		expect(list[5].runId).toBe('run-effort')
+		expect(list[6].runId).toBe('run-cached')
+		expect(list[7].runId).toBe('run-active')
+		expect(list[8].runId).toBe('run-3')
+		expect(list[9].runId).toBe('run-20260101-000000')
+		expect(list[10].runId).toBe('run-2')
+		expect(list[11].runId).toBe('run-1')
 		expect(list[3]).toEqual({
 			runId: 'run-interrupted',
 			status: 'interrupted',
@@ -565,7 +585,7 @@ describe('GET /api/runs (list)', () => {
 			error: { kind: 'interrupted', message: 'The service stopped while this run was in progress and it could not be resumed (no valid checkpoint).' },
 			summary: null,
 		})
-		expect(list[4]).toEqual({
+		expect(list[5]).toEqual({
 			runId: 'run-effort',
 			status: 'success',
 			task: 'task for run-effort',
@@ -576,7 +596,7 @@ describe('GET /api/runs (list)', () => {
 			error: null,
 			summary: null,
 		})
-		expect(list[9]).toEqual({
+		expect(list[10]).toEqual({
 			runId: 'run-2',
 			status: 'error',
 			task: 'task for run-2',
@@ -601,11 +621,26 @@ describe('GET /api/runs/:id', () => {
 		expect(view.roles.length).toBe(1)
 		expect(view.roles[0].role).toBe('planner')
 		expect(view.recentLog.length).toBe(2)
-		expect(view.recentLog[0].summary).toBe('planner · llm call')
-		expect(view.recentLog[0].payload).toEqual({ role: 'planner', usage: { promptTokens: 100, completionTokens: 20, totalTokens: 120 } })
+		expect(view.recentLog[0].text).toBe('planner · llm call')
+		expect(view.recentLog[0].index).toBe(0)
 		expect(view.error).toBeNull()
 		expect(view.currentActivity.role).toBe('planner')
 		expect(view.currentActivity.summary).toBe('planner · finished (success)')
+	})
+
+	test('recentLog entries carry no payload or detail sections — heavy bodies live on the window endpoint', async () => {
+		const { handler } = createHandlerHarness()
+		const response = await handler(get('/api/runs/run-tree'))
+		expect(response.status).toBe(200)
+		const view = await response.json()
+		expect(view.recentLog.length).toBeGreaterThan(0)
+		for (const entry of view.recentLog) {
+			expect(entry).toEqual({ index: entry.index, timestamp: entry.timestamp, type: entry.type, text: entry.text })
+		}
+		// The raw llm_call sent/received bodies must not appear anywhere in the polled run view.
+		const serialized = JSON.stringify(view)
+		expect(serialized).not.toContain('"sent"')
+		expect(serialized).not.toContain('"received"')
 	})
 
 	test('returns the run plan markdown when the run has a plan document', async () => {
@@ -660,8 +695,8 @@ describe('GET /api/runs/:id', () => {
 		expect(view.error).toEqual({ kind: 'llm_unavailable', message: 'connection refused' })
 		expect(view.result.artifacts).toEqual(['output.txt', 'logs/run.txt'])
 		expect(view.currentActivity.summary).toBe('planner · finished (success)')
-		expect(view.recentLog[0].summary).toBe('planner · llm call')
-		expect(view.recentLog[1].summary).toBe('planner · finished (success)')
+		expect(view.recentLog[0].text).toBe('planner · llm call')
+		expect(view.recentLog[1].text).toBe('planner · finished (success)')
 	})
 
 	test('an interrupted run renders as a terminal state with the reconciliation error, not as in progress', async () => {
@@ -702,7 +737,7 @@ describe('GET /api/runs/:id', () => {
 		})
 	})
 
-	test('exposes the role tree and paired raw-payload detail sections for a tree-bearing run', async () => {
+	test('exposes the role tree for a tree-bearing run', async () => {
 		const { handler } = createHandlerHarness()
 		const response = await handler(get('/api/runs/run-tree'))
 		expect(response.status).toBe(200)
@@ -713,20 +748,6 @@ describe('GET /api/runs/:id', () => {
 		expect(view.roleTree[0].children.length).toBe(1)
 		expect(view.roleTree[0].children[0].role).toBe('coder')
 		expect(view.roleTree[0].children[0].parent).toBe('orchestrator')
-
-		// The llm_call entry carries paired detail sections: sent messages, received response, finish reason, and usage.
-		const llmEntry = view.recentLog.find((entry: { type: string }) => entry.type === 'llm_call')
-		expect(llmEntry.detailSections).not.toBeNull()
-		expect(llmEntry.detailSections.map((s: { label: string }) => s.label)).toEqual(['sent', 'received', 'finish reason', 'usage'])
-		expect(llmEntry.detailSections[2].content).toBe('tool_calls')
-
-		// The tool_call entry carries the raw arguments; the tool_result entry carries the full un-truncated result.
-		const toolCallEntry = view.recentLog.find((entry: { type: string }) => entry.type === 'tool_call')
-		expect(toolCallEntry.detailSections.map((s: { label: string }) => s.label)).toEqual(['arguments'])
-		expect(toolCallEntry.detailSections[0].content).toBe('{"role":"coder","task":"code"}')
-		const toolResultEntry = view.recentLog.find((entry: { type: string }) => entry.type === 'tool_result')
-		expect(toolResultEntry.detailSections.map((s: { label: string }) => s.label)).toEqual(['result'])
-		expect(toolResultEntry.detailSections[0].content).toEqual({ kind: 'success', data: { status: 'success', summary: 'coded' } })
 	})
 
 	test('a retry run shows two distinct coder invocations with their own statuses and surfaces the error summary inline', async () => {
@@ -750,12 +771,9 @@ describe('GET /api/runs/:id', () => {
 		expect(root.children[0].active).toBe(false)
 		expect(root.children[1].active).toBe(false)
 
-		// The erroring coder's role_finished shows status only in the one-line summary (the model's full prose is kept out of the row), with the summary text and structured error reachable as paired detail sections.
-		const errorFinish = view.recentLog.find((entry: { type: string; summary: string }) => entry.type === 'role_finished' && entry.summary === 'coder · finished (error)')
+		// The erroring coder's role_finished shows status only in the one-line text (the model's full prose is kept out of the row); its summary is reachable through the window endpoint's detail variant.
+		const errorFinish = view.recentLog.find((entry: { type: string; text: string }) => entry.type === 'role_finished' && entry.text === 'coder · finished (error)')
 		expect(errorFinish).toBeDefined()
-		expect(errorFinish.detailSections.map((s: { label: string }) => s.label)).toEqual(['summary', 'error'])
-		expect(errorFinish.detailSections[0].content).toBe('file not found')
-		expect(errorFinish.detailSections[1].content).toEqual({ kind: 'invalid_arguments', message: 'no such file' })
 	})
 
 	test('includes the run effort from meta.effort, or null when the run predates the channel', async () => {
@@ -779,15 +797,15 @@ describe('GET /api/runs/:id/log', () => {
 		expect(body.runId).toBe('run-long')
 		expect(body.total).toBe(250)
 		expect(body.offset).toBe(0)
-		expect(body.limit).toBe(200)
-		expect(body.events.length).toBe(200)
-		expect(body.events[0].timestamp).toBe('t000')
-		expect(body.events[199].timestamp).toBe('t199')
-		expect(body.events[0].summary).toBe('planner · llm call')
-		expect(body.events[0].payload).toEqual({ role: 'planner' })
+		expect(body.limit).toBe(50)
+		expect(body.events.length).toBe(50)
+		// Each event is a raw window row: its log-wide index plus the identity fields and payload.
+		expect(body.events[0]).toEqual({ index: 0, timestamp: 't000', type: 'llm_call', payload: { role: 'planner' } })
+		expect(body.events[49].index).toBe(49)
+		expect(body.events[49].timestamp).toBe('t049')
 	})
 
-	test('returns a later page with explicit offset and limit', async () => {
+	test('returns a later page with explicit offset and limit, indices log-wide', async () => {
 		const { handler } = createHandlerHarness()
 		const response = await handler(get('/api/runs/run-long/log?offset=240&limit=20'))
 		expect(response.status).toBe(200)
@@ -796,8 +814,17 @@ describe('GET /api/runs/:id/log', () => {
 		expect(body.offset).toBe(240)
 		expect(body.limit).toBe(20)
 		expect(body.events.length).toBe(10)
-		expect(body.events[0].timestamp).toBe('t240')
+		expect(body.events[0]).toEqual({ index: 240, timestamp: 't240', type: 'llm_call', payload: { role: 'planner' } })
 		expect(body.events[9].timestamp).toBe('t249')
+	})
+
+	test('caps the limit at the window maximum', async () => {
+		const { handler } = createHandlerHarness()
+		const response = await handler(get('/api/runs/run-long/log?limit=100000'))
+		expect(response.status).toBe(200)
+		const body = await response.json()
+		expect(body.limit).toBe(500)
+		expect(body.events.length).toBe(250)
 	})
 
 	test('returns an empty page with the correct total when offset is past the end', async () => {
@@ -816,8 +843,56 @@ describe('GET /api/runs/:id/log', () => {
 		expect(response.status).toBe(200)
 		const body = await response.json()
 		expect(body.offset).toBe(0)
-		expect(body.limit).toBe(200)
-		expect(body.events.length).toBe(200)
+		expect(body.limit).toBe(50)
+		expect(body.events.length).toBe(50)
+	})
+
+	test('detail=<index> serves one event\'s paired detail sections', async () => {
+		const { handler } = createHandlerHarness()
+		// run-tree's event 1 is the llm_call whose sent/received bodies the run view no longer ships.
+		const response = await handler(get('/api/runs/run-tree/log?detail=1'))
+		expect(response.status).toBe(200)
+		const body = await response.json()
+		expect(body.index).toBe(1)
+		expect(body.detailSections.map((s: { label: string }) => s.label)).toEqual(['sent', 'received', 'finish reason', 'usage'])
+		expect(body.detailSections[2].content).toBe('tool_calls')
+	})
+
+	test('detail=<index> serves the raw tool arguments and the full un-truncated result', async () => {
+		const { handler } = createHandlerHarness()
+		const toolCallResponse = await handler(get('/api/runs/run-tree/log?detail=2'))
+		const toolCall = await toolCallResponse.json()
+		expect(toolCall.detailSections.map((s: { label: string }) => s.label)).toEqual(['arguments'])
+		expect(toolCall.detailSections[0].content).toBe('{"role":"coder","task":"code"}')
+
+		const toolResultResponse = await handler(get('/api/runs/run-tree/log?detail=5'))
+		const toolResult = await toolResultResponse.json()
+		expect(toolResult.detailSections.map((s: { label: string }) => s.label)).toEqual(['result'])
+		expect(toolResult.detailSections[0].content).toEqual({ kind: 'success', data: { status: 'success', summary: 'coded' } })
+	})
+
+	test('detail=<index> returns detailSections null for an event without sections', async () => {
+		const { handler } = createHandlerHarness()
+		const response = await handler(get('/api/runs/run-tree/log?detail=0'))
+		expect(response.status).toBe(200)
+		const body = await response.json()
+		expect(body.index).toBe(0)
+		expect(body.detailSections).toBeNull()
+	})
+
+	test('detail=<index> returns 404 for an out-of-range or malformed index', async () => {
+		const { handler } = createHandlerHarness()
+		const outOfRange = await handler(get('/api/runs/run-tree/log?detail=999'))
+		expect(outOfRange.status).toBe(404)
+		expect(await outOfRange.json()).toEqual({ ok: false, error: 'not_found' })
+		const malformed = await handler(get('/api/runs/run-tree/log?detail=abc'))
+		expect(malformed.status).toBe(404)
+		const negative = await handler(get('/api/runs/run-tree/log?detail=-1'))
+		expect(negative.status).toBe(404)
+		// An empty value must not collapse to event 0 (Number('') is 0): it is malformed, not an identity.
+		const empty = await handler(get('/api/runs/run-tree/log?detail='))
+		expect(empty.status).toBe(404)
+		expect(await empty.json()).toEqual({ ok: false, error: 'not_found' })
 	})
 
 	test('returns 404 for an unknown run id', async () => {
@@ -889,6 +964,66 @@ describe('GET /api/runs/:id/flow', () => {
 		expect(response.status).toBe(200)
 		const model = await response.json()
 		expect(model.status).toBe('interrupted')
+	})
+
+	test('operations carry no details — the polled model ships identities only', async () => {
+		const { handler } = createHandlerHarness()
+		const response = await handler(get('/api/runs/run-flow-details/flow'))
+		expect(response.status).toBe(200)
+		const model = await response.json()
+		expect(model.operations.length).toBeGreaterThan(0)
+		for (const operation of model.operations) {
+			expect(operation).not.toHaveProperty('details')
+		}
+		// The heavy task/arguments/result bodies must not appear anywhere in the polled flow model.
+		const serialized = JSON.stringify(model)
+		expect(serialized).not.toContain('do the work')
+		expect(serialized).not.toContain('README.md')
+		expect(serialized).not.toContain('details')
+	})
+
+	test('?operation=<id> serves that single operation\'s details', async () => {
+		const { handler } = createHandlerHarness()
+		// run-flow-details: op-1 is the role call (task text), op-2 the tool call (arguments), op-3 the tool return (result), op-4 the finish return (summary).
+		const callResponse = await handler(get('/api/runs/run-flow-details/flow?operation=op-1'))
+		expect(callResponse.status).toBe(200)
+		expect(await callResponse.json()).toEqual({ operationId: 'op-1', details: 'do the work' })
+		const finishResponse = await handler(get('/api/runs/run-flow-details/flow?operation=op-4'))
+		expect(await finishResponse.json()).toEqual({ operationId: 'op-4', details: 'done' })
+	})
+
+	test('?operation=<id> for an operation with no detail material resolves to details null, not a 404', async () => {
+		const { handler } = createHandlerHarness()
+		// run-tree's op-3 is the coder's return: a real operation whose role_finished carried no summary, so there is no detail material to format.
+		const response = await handler(get('/api/runs/run-tree/flow?operation=op-3'))
+		expect(response.status).toBe(200)
+		expect(await response.json()).toEqual({ operationId: 'op-3', details: null })
+	})
+
+	test('?operation=<id> pretty-prints a tool call\'s raw arguments and serves the full result', async () => {
+		const { handler } = createHandlerHarness()
+		const argumentsResponse = await handler(get('/api/runs/run-flow-details/flow?operation=op-2'))
+		const argumentsBody = await argumentsResponse.json()
+		expect(argumentsBody.operationId).toBe('op-2')
+		expect(JSON.parse(argumentsBody.details.replace(/^```json\n|\n```$/g, ''))).toEqual({ path: 'README.md' })
+
+		const resultResponse = await handler(get('/api/runs/run-flow-details/flow?operation=op-3'))
+		const resultBody = await resultResponse.json()
+		expect(JSON.parse(resultBody.details.replace(/^```json\n|\n```$/g, ''))).toEqual({ kind: 'success', data: { content: '# Project' } })
+	})
+
+	test('?operation=<unknown id> returns 404', async () => {
+		const { handler } = createHandlerHarness()
+		const response = await handler(get('/api/runs/run-flow-details/flow?operation=op-999'))
+		expect(response.status).toBe(404)
+		expect(await response.json()).toEqual({ ok: false, error: 'not_found' })
+	})
+
+	test('?operation=<id> returns 404 for an unknown run id', async () => {
+		const { handler } = createHandlerHarness()
+		const response = await handler(get('/api/runs/never-started/flow?operation=op-1'))
+		expect(response.status).toBe(404)
+		expect(await response.json()).toEqual({ ok: false, error: 'not_found' })
 	})
 })
 
@@ -978,6 +1113,24 @@ describe('GET /api/demo/flow/:scenario/:frame', () => {
 		const { handler } = createHandlerHarness()
 		const response = await handler(get('/api/demo/flow/single-role-completion/abc'))
 		expect(response.status).toBe(404)
+	})
+
+	test('?operation=<id> resolves one frame operation\'s details (the delegation task text)', async () => {
+		const { handler } = createHandlerHarness()
+		// delegation-chain frame 2: the planner role_start just landed, so op-2 is its call.
+		const response = await handler(get('/api/demo/flow/delegation-chain/2?operation=op-2'))
+		expect(response.status).toBe(200)
+		expect(await response.json()).toEqual({ operationId: 'op-2', details: 'Plan the approach.' })
+	})
+
+	test('?operation=<id> returns 404 for an unknown operation or scenario', async () => {
+		const { handler } = createHandlerHarness()
+		const unknownOperation = await handler(get('/api/demo/flow/single-role-completion/0?operation=op-9'))
+		expect(unknownOperation.status).toBe(404)
+		const unknownScenario = await handler(get('/api/demo/flow/no-such-scenario/0?operation=op-1'))
+		expect(unknownScenario.status).toBe(404)
+		const outOfRangeFrame = await handler(get('/api/demo/flow/single-role-completion/999?operation=op-1'))
+		expect(outOfRangeFrame.status).toBe(404)
 	})
 })
 

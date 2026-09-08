@@ -4,13 +4,19 @@ import type { DeploymentConfig, EffortLevel, GuildConfig, ToolManifest } from '.
 import { isEffortLevel, isObject, isTerminalRunStatus } from '../executor/validation.js'
 import type { RunState } from '../executor/run-state.js'
 import type { RunSubmission } from '../executor/run-submission.js'
-import { paginateLogEvents, parseRunMeta, renderConfig, renderProjectSettings, renderPendingQuestions, renderRunView, formatLogAsText, toRecentLogEntry } from './render.js'
+import { paginateLogEvents, parseRunMeta, renderConfig, renderProjectSettings, renderPendingQuestions, renderRunView, formatLogAsText, formatLogDetailSections } from './render.js'
 import { createRunListCache, type ReadRunListSummary } from './run-list-cache.js'
-import { deriveInteractionModel } from './interaction-model-adapter.js'
-import { DEMO_SCENARIOS, deriveDemoFrameModel, findDemoScenario } from './demo-fixtures.js'
+import { deriveInteractionModel, deriveInteractionOperationDetail } from './interaction-model-adapter.js'
+import { DEMO_SCENARIOS, deriveDemoFrameModel, deriveDemoFrameOperationDetail, findDemoScenario } from './demo-fixtures.js'
 import type { ReadRunSnapshot } from './snapshot-cache.js'
 
 const MAX_LOG_LINES = 200
+
+// The log window endpoint's paging defaults and cap: a 1s poll that wants a compact identity view
+// fetches 50 rows, and no single request may be tricked (or misconfigured) into serializing the
+// whole run — the payloads alone can be multi-megabyte, which is exactly what the cap bounds.
+const LOG_WINDOW_DEFAULT_LIMIT = 50
+const LOG_WINDOW_MAX_LIMIT = 500
 
 // The run list is polled every second alongside the selected run's endpoints; 64 cached summaries covers every history a browser realistically browses while bounding memory on a long-lived service.
 const RUN_LIST_CACHE_MAX_ENTRIES = 64
@@ -52,10 +58,10 @@ function handleActiveRun(readRunSnapshot: ReadRunSnapshot, readRunSnapshotStats:
 	return json({ ...view, interruptPending: runState.interruptPending() })
 }
 
-function handleActiveRunFlow(readRunSnapshot: ReadRunSnapshot, readRunSnapshotStats: ReadRunSnapshotStats, runSubmission: RunSubmission): Response {
+function handleActiveRunFlow(readRunSnapshot: ReadRunSnapshot, readRunSnapshotStats: ReadRunSnapshotStats, runSubmission: RunSubmission, query: URLSearchParams): Response {
 	const runId = runSubmission.lastRunId()
 	if (runId === undefined) return json({ ok: false, error: 'no_run' }, 404)
-	return runFlowPage(readRunSnapshot, readRunSnapshotStats, runId)
+	return runFlowPage(readRunSnapshot, readRunSnapshotStats, runId, query)
 }
 
 function handleGetRunById(readRunSnapshot: ReadRunSnapshot, readRunSnapshotStats: ReadRunSnapshotStats, readRunPlanById: ReadRunPlanById, runState: RunState, runId: string): Response {
@@ -69,7 +75,15 @@ function runLogPage(readRunSnapshot: ReadRunSnapshot, readRunSnapshotStats: Read
 	const snapshot = readRunSnapshot(runId)
 	const events = snapshot.logEvents
 	const offset = parseNonNegativeInt(query.get('offset'), 0)
-	const limit = parseNonNegativeInt(query.get('limit'), MAX_LOG_LINES)
+	const limit = Math.min(parseNonNegativeInt(query.get('limit'), LOG_WINDOW_DEFAULT_LIMIT), LOG_WINDOW_MAX_LIMIT)
+	// ?detail=<index> serves one event's paired detail sections (the sent/received/arguments/result bodies) on demand, so a client renders a row's raw view without the window shipping every body. The index is the event's log-wide position — the same identity the window rows and the run view's recentLog carry.
+	const detailParam = query.get('detail')
+	if (detailParam !== null) {
+		const detailIndex = parseStrictNonNegativeInt(detailParam)
+		const event = detailIndex !== undefined ? events[detailIndex] : undefined
+		if (event === undefined) return json({ ok: false, error: 'not_found' }, 404)
+		return json({ index: detailIndex, detailSections: formatLogDetailSections(event) })
+	}
 	// ?format=text renders the requested page as plain text with a download disposition, so export reuses the server-side formatter rather than duplicating it in the client.
 	if (query.get('format') === 'text') {
 		const page = paginateLogEvents(events, { offset, limit })
@@ -82,7 +96,7 @@ function runLogPage(readRunSnapshot: ReadRunSnapshot, readRunSnapshotStats: Read
 		})
 	}
 	const page = paginateLogEvents(events, { offset, limit })
-	return json({ runId, total: page.total, offset: page.offset, limit: page.limit, events: page.events.map(toRecentLogEntry) })
+	return json({ runId, total: page.total, offset: page.offset, limit: page.limit, events: page.events.map((event, position) => ({ index: offset + position, timestamp: event.timestamp, type: event.type, payload: event.payload })) })
 }
 
 function parseNonNegativeInt(value: string | null, defaultValue: number): number {
@@ -92,11 +106,29 @@ function parseNonNegativeInt(value: string | null, defaultValue: number): number
 	return parsed
 }
 
+// Strict variant for identities: unlike the paging params (where a bad value falls back to the
+// default page), a bad detail index names an event that cannot exist, so the caller gets a 404
+// rather than a silently different event. The empty string is rejected like any other malformed
+// value — Number('') is 0, which would otherwise silently address the first event.
+function parseStrictNonNegativeInt(value: string): number | undefined {
+	if (value === '') return undefined
+	const parsed = Number(value)
+	if (!Number.isInteger(parsed) || parsed < 0) return undefined
+	return parsed
+}
+
 // Serves the structured InteractionModel derived from a run's full snapshot.
-// The model is JSON (identifiers, counters, costs as values; agent prose as markdown strings in `details`); the client renders `details` only through the sanitized Markdown pipeline, so the server does not sanitize — it must not serve pre-rendered HTML that would bypass the client's sanitization.
-function runFlowPage(readRunSnapshot: ReadRunSnapshot, readRunSnapshotStats: ReadRunSnapshotStats, runId: string): Response {
+// The model is JSON (identifiers, counters, costs as values; no detail bodies); the client renders operation details only through the on-demand variant below and its sanitized Markdown pipeline, so the server does not sanitize — it must not serve pre-rendered HTML that would bypass the client's sanitization.
+// ?operation=<id> serves that single operation's details markdown instead of the whole model: the derive is the same O(N) walk, but only one detail string is formatted and shipped, so a hover costs a tiny response while the polled model carries none.
+function runFlowPage(readRunSnapshot: ReadRunSnapshot, readRunSnapshotStats: ReadRunSnapshotStats, runId: string, query: URLSearchParams): Response {
 	if (!isKnownRun(readRunSnapshotStats, runId)) return json({ ok: false, error: 'not_found' }, 404)
 	const snapshot = readRunSnapshot(runId)
+	const operationId = query.get('operation')
+	if (operationId !== null) {
+		const detail = deriveInteractionOperationDetail(snapshot, new Date().toISOString(), operationId)
+		if (detail === null) return json({ ok: false, error: 'not_found' }, 404)
+		return json(detail)
+	}
 	return json(deriveInteractionModel(snapshot, new Date().toISOString()))
 }
 
@@ -107,12 +139,18 @@ function runViewFor(readRunSnapshot: ReadRunSnapshot, readRunSnapshotStats: Read
 	return renderRunView(snapshot, { maxLogLines: MAX_LOG_LINES, now: new Date().toISOString(), plan: readRunPlanById(runId) })
 }
 
-// Feeds the scenario's first `frameIndex + 1` events through the real adapter — the same derivation the product's `/api/runs/:id/flow` runs — so the demo harness exercises the product's `LogEvent → InteractionModel` path rather than authored model frames.
-function demoFrameModel(scenarioId: string, frameIndex: number): Response {
+// Feeds the scenario's first `frameIndex + 1` events through the real adapter — the same derivation the product's `/api/runs/:id/flow` runs — so the demo harness exercises the product's `LogEvent → InteractionModel` path rather than authored model frames. `?operation=<id>` resolves one operation's details the same way the product's flow endpoint does, so the harness's inspector fetches on demand like the product client.
+function demoFrameResponse(scenarioId: string, frameIndex: number, query: URLSearchParams): Response {
 	const scenario = findDemoScenario(scenarioId)
 	if (scenario === undefined) return json({ ok: false, error: 'not_found' }, 404)
 	if (!Number.isInteger(frameIndex) || frameIndex < 0 || frameIndex >= scenario.events.length) {
 		return json({ ok: false, error: 'not_found' }, 404)
+	}
+	const operationId = query.get('operation')
+	if (operationId !== null) {
+		const detail = deriveDemoFrameOperationDetail(scenario, frameIndex, operationId)
+		if (detail === null) return json({ ok: false, error: 'not_found' }, 404)
+		return json(detail)
 	}
 	return json(deriveDemoFrameModel(scenario, frameIndex))
 }
@@ -223,7 +261,7 @@ export function createRequestHandler(config: RequestHandlerConfig, serveStatic: 
 		if (request.method === 'GET') {
 			if (pathname === '/api/config') return json(renderConfig(guildConfig, deployment, config.tools))
 			if (pathname === '/api/settings') return handleGetSettings(readProjectSettings)
-			if (pathname === '/api/run/flow') return handleActiveRunFlow(readRunSnapshot, readRunSnapshotStats, runSubmission)
+			if (pathname === '/api/run/flow') return handleActiveRunFlow(readRunSnapshot, readRunSnapshotStats, runSubmission, url.searchParams)
 			if (pathname === '/api/run') return handleActiveRun(readRunSnapshot, readRunSnapshotStats, readRunPlanById, runSubmission, runState)
 			if (pathname === '/api/runs') return handleListRuns(readRunListSummary, listRunIds)
 			if (pathname.startsWith('/api/runs/')) {
@@ -235,7 +273,7 @@ export function createRequestHandler(config: RequestHandlerConfig, serveStatic: 
 					const runId = rest.slice(0, slashIndex)
 					if (runId !== '') {
 						if (suffix === 'log') return runLogPage(readRunSnapshot, readRunSnapshotStats, runId, url.searchParams)
-						if (suffix === 'flow') return runFlowPage(readRunSnapshot, readRunSnapshotStats, runId)
+						if (suffix === 'flow') return runFlowPage(readRunSnapshot, readRunSnapshotStats, runId, url.searchParams)
 					}
 				}
 				return handleGetRunById(readRunSnapshot, readRunSnapshotStats, readRunPlanById, runState, rest)
@@ -249,7 +287,7 @@ export function createRequestHandler(config: RequestHandlerConfig, serveStatic: 
 					const scenarioId = rest.slice(0, slashIndex)
 					const frameRaw = rest.slice(slashIndex + 1)
 					const frameIndex = Number(frameRaw)
-					if (scenarioId !== '' && Number.isInteger(frameIndex)) return demoFrameModel(scenarioId, frameIndex)
+					if (scenarioId !== '' && Number.isInteger(frameIndex)) return demoFrameResponse(scenarioId, frameIndex, url.searchParams)
 				}
 				return json({ ok: false, error: 'not_found' }, 404)
 			}

@@ -2,7 +2,7 @@
 //
 // The InteractionModel carries only role/kind identifiers — no prose. This module resolves short display prose for the views from a config shaped like the one `GET /api/config` returns: participant labels (read from the guild's role.label / tool.humanLabel, plus the visualization section's pseudoRoleLabels for the human/interrupt/tools pseudo-roles), and operation templates (read from the visualization section's operationTemplates and genericOperationTemplates).
 //
-// Three tiers serve different audiences: 'whimsical' is whimsical and may sacrifice precision, 'friendly' is informative-but-imprecise for non-technical users, 'detailed' is precise for technical users and troubleshooters, naming raw role/tool ids, participant kinds, the call stack, and return outcomes. A tier toggle in the harness swaps which tier the views render without touching the model — a view concern, like locale switching. The per-call 'details' markdown on each Operation is runtime data the adapter formats, not localization, so it is untouched here.
+// Three tiers serve different audiences: 'whimsical' is whimsical and may sacrifice precision, 'friendly' is informative-but-imprecise for non-technical users, 'detailed' is precise for technical users and troubleshooters, naming raw role/tool ids, participant kinds, the call stack, and return outcomes. A tier toggle in the harness swaps which tier the views render without touching the model — a view concern, like locale switching. Per-call detail markdown is not model data at all: it is fetched on demand by the inspector, so localization never touches it.
 //
 // Every tiered field is a list of strings. Identity surfaces (node boxes, top-bar slots, sequence-diagram column headers) read index 0 so a participant's name stays stable for its whole lifetime; activity surfaces (the now-caption's operation and working labels) pick `list[seed % list.length]` so the whimsical tier rotates between operations while staying fixed within one. detailed and friendly lists usually hold a single phrase; whimsical lists hold several. The seed is a deterministic hash of the operation id (hashString), so the same operation resolves the same phrase across re-renders and re-runs while different operations pick different phrases. The resolver is a pure function of (config, participant/operation, tier, seed); it holds no state, so tests pass a fixed seed and are deterministic.
 //
@@ -33,7 +33,6 @@
  * @property {string | null} settledAt
  * @property {'in_flight' | 'settled'} lifecycle
  * @property {'success' | 'error' | 'terminated' | null} outcome
- * @property {string | null} details
  * @property {Object | null} metrics
  */
 

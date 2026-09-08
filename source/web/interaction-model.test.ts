@@ -20,7 +20,7 @@ describe('InteractionModel helpers', () => {
 				{ id: 'orch', role: 'orchestrator', kind: 'role' },
 			],
 			operations: [
-				{ id: 'op1', kind: 'call', stack: 'root', source: 'you', destination: 'orch', startedAt: 't0', settledAt: null, lifecycle: 'in_flight', outcome: null, details: null, metrics: null },
+				{ id: 'op1', kind: 'call', stack: 'root', source: 'you', destination: 'orch', startedAt: 't0', settledAt: null, lifecycle: 'in_flight', outcome: null, metrics: null },
 			],
 			status: 'running',
 		}
@@ -36,8 +36,8 @@ describe('InteractionModel helpers', () => {
 				{ id: 'tool', role: 'read_file', kind: 'tool' },
 			],
 			operations: [
-				{ id: 'op1', kind: 'call', stack: 'root', source: 'you', destination: 'orch', startedAt: 't0', settledAt: 't1', lifecycle: 'settled', outcome: 'success', details: null, metrics: null },
-				{ id: 'op2', kind: 'observe', stack: 'root', source: 'orch', destination: 'tool', startedAt: 't2', settledAt: 't2', lifecycle: 'settled', outcome: null, details: null, metrics: null },
+				{ id: 'op1', kind: 'call', stack: 'root', source: 'you', destination: 'orch', startedAt: 't0', settledAt: 't1', lifecycle: 'settled', outcome: 'success', metrics: null },
+				{ id: 'op2', kind: 'observe', stack: 'root', source: 'orch', destination: 'tool', startedAt: 't2', settledAt: 't2', lifecycle: 'settled', outcome: null, metrics: null },
 			],
 			status: 'running',
 		}
@@ -56,8 +56,8 @@ describe('InteractionModel helpers', () => {
 				{ id: 'int', role: 'interrupt', kind: 'interrupt' },
 			],
 			operations: [
-				{ id: 'op1', kind: 'call', stack: 'root', source: 'you', destination: 'orch', startedAt: 't0', settledAt: null, lifecycle: 'in_flight', outcome: null, details: null, metrics: null },
-				{ id: 'op2', kind: 'call', stack: 'int-stack', source: 'int', destination: 'orch', startedAt: 't1', settledAt: null, lifecycle: 'in_flight', outcome: null, details: null, metrics: null },
+				{ id: 'op1', kind: 'call', stack: 'root', source: 'you', destination: 'orch', startedAt: 't0', settledAt: null, lifecycle: 'in_flight', outcome: null, metrics: null },
+				{ id: 'op2', kind: 'call', stack: 'int-stack', source: 'int', destination: 'orch', startedAt: 't1', settledAt: null, lifecycle: 'in_flight', outcome: null, metrics: null },
 			],
 			status: 'running',
 		}
@@ -81,9 +81,9 @@ describe('InteractionModel helpers', () => {
 				{ id: 'int', role: 'interrupt', kind: 'interrupt' },
 			],
 			operations: [
-				{ id: 'op1', kind: 'call', stack: 'root', source: 'you', destination: 'orch', startedAt: 't0', settledAt: 't1', lifecycle: 'settled', outcome: 'success', details: null, metrics: null },
-				{ id: 'op2', kind: 'call', stack: 'root', source: 'orch', destination: 'coder', startedAt: 't2', settledAt: null, lifecycle: 'in_flight', outcome: null, details: null, metrics: null },
-				{ id: 'op3', kind: 'call', stack: 'int-stack', source: 'int', destination: 'orch', startedAt: 't3', settledAt: null, lifecycle: 'in_flight', outcome: null, details: null, metrics: null },
+				{ id: 'op1', kind: 'call', stack: 'root', source: 'you', destination: 'orch', startedAt: 't0', settledAt: 't1', lifecycle: 'settled', outcome: 'success', metrics: null },
+				{ id: 'op2', kind: 'call', stack: 'root', source: 'orch', destination: 'coder', startedAt: 't2', settledAt: null, lifecycle: 'in_flight', outcome: null, metrics: null },
+				{ id: 'op3', kind: 'call', stack: 'int-stack', source: 'int', destination: 'orch', startedAt: 't3', settledAt: null, lifecycle: 'in_flight', outcome: null, metrics: null },
 			],
 			status: 'running',
 		}
@@ -106,8 +106,8 @@ describe('InteractionModel helpers', () => {
 				{ id: 'int', role: 'interrupt', kind: 'interrupt' },
 			],
 			operations: [
-				{ id: 'op1', kind: 'call', stack: 'root', source: 'you', destination: 'orch', startedAt: 't0', settledAt: null, lifecycle: 'in_flight', outcome: null, details: null, metrics: null },
-				{ id: 'op2', kind: 'call', stack: 'int-stack', source: 'int', destination: 'orch', startedAt: 't1', settledAt: null, lifecycle: 'in_flight', outcome: null, details: null, metrics: null },
+				{ id: 'op1', kind: 'call', stack: 'root', source: 'you', destination: 'orch', startedAt: 't0', settledAt: null, lifecycle: 'in_flight', outcome: null, metrics: null },
+				{ id: 'op2', kind: 'call', stack: 'int-stack', source: 'int', destination: 'orch', startedAt: 't1', settledAt: null, lifecycle: 'in_flight', outcome: null, metrics: null },
 			],
 			status: 'running',
 		}
@@ -124,10 +124,10 @@ describe('InteractionModel helpers', () => {
 				{ id: 'int', role: 'interrupt', kind: 'interrupt' },
 			],
 			operations: [
-				{ id: 'op1', kind: 'call', stack: 'root', source: 'you', destination: 'orch', startedAt: 't0', settledAt: null, lifecycle: 'in_flight', outcome: null, details: null, metrics: null },
-				{ id: 'op2', kind: 'call', stack: 'int-stack', source: 'int', destination: 'orch', startedAt: 't1', settledAt: null, lifecycle: 'in_flight', outcome: null, details: null, metrics: null },
-				{ id: 'op3', kind: 'return', stack: 'int-stack', source: 'orch', destination: 'int', startedAt: 't2', settledAt: 't3', lifecycle: 'settled', outcome: 'success', details: null, metrics: null },
-				{ id: 'op4', kind: 'call', stack: 'root', source: 'orch', destination: 'coder', startedAt: 't4', settledAt: null, lifecycle: 'in_flight', outcome: null, details: null, metrics: null },
+				{ id: 'op1', kind: 'call', stack: 'root', source: 'you', destination: 'orch', startedAt: 't0', settledAt: null, lifecycle: 'in_flight', outcome: null, metrics: null },
+				{ id: 'op2', kind: 'call', stack: 'int-stack', source: 'int', destination: 'orch', startedAt: 't1', settledAt: null, lifecycle: 'in_flight', outcome: null, metrics: null },
+				{ id: 'op3', kind: 'return', stack: 'int-stack', source: 'orch', destination: 'int', startedAt: 't2', settledAt: 't3', lifecycle: 'settled', outcome: 'success', metrics: null },
+				{ id: 'op4', kind: 'call', stack: 'root', source: 'orch', destination: 'coder', startedAt: 't4', settledAt: null, lifecycle: 'in_flight', outcome: null, metrics: null },
 			],
 			status: 'running',
 		}
@@ -144,8 +144,8 @@ describe('InteractionModel helpers', () => {
 				{ id: 'orch', role: 'orchestrator', kind: 'role' },
 			],
 			operations: [
-				{ id: 'op1', kind: 'call', stack: 'root', source: 'you', destination: 'orch', startedAt: 't0', settledAt: 't1', lifecycle: 'settled', outcome: 'success', details: null, metrics: null },
-				{ id: 'op2', kind: 'return', stack: 'root', source: 'orch', destination: 'you', startedAt: 't2', settledAt: 't3', lifecycle: 'settled', outcome: 'success', details: null, metrics: null },
+				{ id: 'op1', kind: 'call', stack: 'root', source: 'you', destination: 'orch', startedAt: 't0', settledAt: 't1', lifecycle: 'settled', outcome: 'success', metrics: null },
+				{ id: 'op2', kind: 'return', stack: 'root', source: 'orch', destination: 'you', startedAt: 't2', settledAt: 't3', lifecycle: 'settled', outcome: 'success', metrics: null },
 			],
 			status: 'success',
 		}
@@ -166,15 +166,15 @@ describe('InteractionModel helpers', () => {
 				{ id: 'int2', role: 'interrupt', kind: 'interrupt' },
 			],
 			operations: [
-				{ id: 'op1', kind: 'call', stack: 'root', source: 'you', destination: 'orch', startedAt: 't0', settledAt: null, lifecycle: 'in_flight', outcome: null, details: null, metrics: null },
-				{ id: 'op2', kind: 'call', stack: 'root', source: 'orch', destination: 'coder', startedAt: 't1', settledAt: null, lifecycle: 'in_flight', outcome: null, details: null, metrics: null },
-				{ id: 'op3', kind: 'call', stack: 'root', source: 'coder', destination: 'tool', startedAt: 't2', settledAt: null, lifecycle: 'in_flight', outcome: null, details: null, metrics: null },
-				{ id: 'op4', kind: 'call', stack: 'int-stack', source: 'int', destination: 'orch', startedAt: 't3', settledAt: null, lifecycle: 'in_flight', outcome: null, details: null, metrics: null },
+				{ id: 'op1', kind: 'call', stack: 'root', source: 'you', destination: 'orch', startedAt: 't0', settledAt: null, lifecycle: 'in_flight', outcome: null, metrics: null },
+				{ id: 'op2', kind: 'call', stack: 'root', source: 'orch', destination: 'coder', startedAt: 't1', settledAt: null, lifecycle: 'in_flight', outcome: null, metrics: null },
+				{ id: 'op3', kind: 'call', stack: 'root', source: 'coder', destination: 'tool', startedAt: 't2', settledAt: null, lifecycle: 'in_flight', outcome: null, metrics: null },
+				{ id: 'op4', kind: 'call', stack: 'int-stack', source: 'int', destination: 'orch', startedAt: 't3', settledAt: null, lifecycle: 'in_flight', outcome: null, metrics: null },
 				// The interrupt resolves; the root becomes active again and tears down its innermost call with a terminated return.
-				{ id: 'op5', kind: 'return', stack: 'int-stack', source: 'orch', destination: 'int', startedAt: 't4', settledAt: 't5', lifecycle: 'settled', outcome: 'success', details: null, metrics: null },
-				{ id: 'op6', kind: 'return', stack: 'root', source: 'tool', destination: 'coder', startedAt: 't6', settledAt: 't7', lifecycle: 'settled', outcome: 'terminated', details: null, metrics: null },
+				{ id: 'op5', kind: 'return', stack: 'int-stack', source: 'orch', destination: 'int', startedAt: 't4', settledAt: 't5', lifecycle: 'settled', outcome: 'success', metrics: null },
+				{ id: 'op6', kind: 'return', stack: 'root', source: 'tool', destination: 'coder', startedAt: 't6', settledAt: 't7', lifecycle: 'settled', outcome: 'terminated', metrics: null },
 				// A second interrupt preempts mid-teardown, leaving the root paused with a terminated return (but no fresh call) in its current phase.
-				{ id: 'op7', kind: 'call', stack: 'int2-stack', source: 'int2', destination: 'orch', startedAt: 't8', settledAt: null, lifecycle: 'in_flight', outcome: null, details: null, metrics: null },
+				{ id: 'op7', kind: 'call', stack: 'int2-stack', source: 'int2', destination: 'orch', startedAt: 't8', settledAt: null, lifecycle: 'in_flight', outcome: null, metrics: null },
 			],
 			status: 'running',
 		}
@@ -193,15 +193,15 @@ describe('InteractionModel helpers', () => {
 				{ id: 'int2', role: 'interrupt', kind: 'interrupt' },
 			],
 			operations: [
-				{ id: 'op1', kind: 'call', stack: 'root', source: 'you', destination: 'orch', startedAt: 't0', settledAt: null, lifecycle: 'in_flight', outcome: null, details: null, metrics: null },
-				{ id: 'op2', kind: 'call', stack: 'root', source: 'orch', destination: 'coder', startedAt: 't1', settledAt: null, lifecycle: 'in_flight', outcome: null, details: null, metrics: null },
-				{ id: 'op3', kind: 'call', stack: 'int-stack', source: 'int', destination: 'orch', startedAt: 't2', settledAt: null, lifecycle: 'in_flight', outcome: null, details: null, metrics: null },
+				{ id: 'op1', kind: 'call', stack: 'root', source: 'you', destination: 'orch', startedAt: 't0', settledAt: null, lifecycle: 'in_flight', outcome: null, metrics: null },
+				{ id: 'op2', kind: 'call', stack: 'root', source: 'orch', destination: 'coder', startedAt: 't1', settledAt: null, lifecycle: 'in_flight', outcome: null, metrics: null },
+				{ id: 'op3', kind: 'call', stack: 'int-stack', source: 'int', destination: 'orch', startedAt: 't2', settledAt: null, lifecycle: 'in_flight', outcome: null, metrics: null },
 				// The interrupt resolves; the root tears down the coder call with a terminated return, then restarts orchestrator from the You ancestor — a rewind.
-				{ id: 'op4', kind: 'return', stack: 'int-stack', source: 'orch', destination: 'int', startedAt: 't3', settledAt: 't4', lifecycle: 'settled', outcome: 'success', details: null, metrics: null },
-				{ id: 'op5', kind: 'return', stack: 'root', source: 'coder', destination: 'orch', startedAt: 't5', settledAt: 't6', lifecycle: 'settled', outcome: 'terminated', details: null, metrics: null },
-				{ id: 'op6', kind: 'call', stack: 'root', source: 'you', destination: 'orch', startedAt: 't7', settledAt: null, lifecycle: 'in_flight', outcome: null, details: null, metrics: null },
+				{ id: 'op4', kind: 'return', stack: 'int-stack', source: 'orch', destination: 'int', startedAt: 't3', settledAt: 't4', lifecycle: 'settled', outcome: 'success', metrics: null },
+				{ id: 'op5', kind: 'return', stack: 'root', source: 'coder', destination: 'orch', startedAt: 't5', settledAt: 't6', lifecycle: 'settled', outcome: 'terminated', metrics: null },
+				{ id: 'op6', kind: 'call', stack: 'root', source: 'you', destination: 'orch', startedAt: 't7', settledAt: null, lifecycle: 'in_flight', outcome: null, metrics: null },
 				// A second interrupt preempts mid-rewind, leaving the root paused with both a terminated return and a fresh call in its current phase.
-				{ id: 'op7', kind: 'call', stack: 'int2-stack', source: 'int2', destination: 'orch', startedAt: 't8', settledAt: null, lifecycle: 'in_flight', outcome: null, details: null, metrics: null },
+				{ id: 'op7', kind: 'call', stack: 'int2-stack', source: 'int2', destination: 'orch', startedAt: 't8', settledAt: null, lifecycle: 'in_flight', outcome: null, metrics: null },
 			],
 			status: 'running',
 		}
@@ -222,18 +222,18 @@ describe('InteractionModel helpers', () => {
 				{ id: 'int2', role: 'interrupt', kind: 'interrupt' },
 			],
 			operations: [
-				{ id: 'op1', kind: 'call', stack: 'root', source: 'you', destination: 'orch', startedAt: 't0', settledAt: null, lifecycle: 'in_flight', outcome: null, details: null, metrics: null },
-				{ id: 'op2', kind: 'call', stack: 'root', source: 'orch', destination: 'coder', startedAt: 't1', settledAt: null, lifecycle: 'in_flight', outcome: null, details: null, metrics: null },
-				{ id: 'op3', kind: 'call', stack: 'int-stack', source: 'int', destination: 'orch', startedAt: 't2', settledAt: null, lifecycle: 'in_flight', outcome: null, details: null, metrics: null },
+				{ id: 'op1', kind: 'call', stack: 'root', source: 'you', destination: 'orch', startedAt: 't0', settledAt: null, lifecycle: 'in_flight', outcome: null, metrics: null },
+				{ id: 'op2', kind: 'call', stack: 'root', source: 'orch', destination: 'coder', startedAt: 't1', settledAt: null, lifecycle: 'in_flight', outcome: null, metrics: null },
+				{ id: 'op3', kind: 'call', stack: 'int-stack', source: 'int', destination: 'orch', startedAt: 't2', settledAt: null, lifecycle: 'in_flight', outcome: null, metrics: null },
 				// The interrupt resolves; the root tears down the coder call with a terminated return, then restarts from the ancestor — a rewind.
-				{ id: 'op4', kind: 'return', stack: 'int-stack', source: 'orch', destination: 'int', startedAt: 't3', settledAt: 't4', lifecycle: 'settled', outcome: 'success', details: null, metrics: null },
-				{ id: 'op5', kind: 'return', stack: 'root', source: 'coder', destination: 'orch', startedAt: 't5', settledAt: 't6', lifecycle: 'settled', outcome: 'terminated', details: null, metrics: null },
-				{ id: 'op6', kind: 'call', stack: 'root', source: 'you', destination: 'orch', startedAt: 't7', settledAt: null, lifecycle: 'in_flight', outcome: null, details: null, metrics: null },
+				{ id: 'op4', kind: 'return', stack: 'int-stack', source: 'orch', destination: 'int', startedAt: 't3', settledAt: 't4', lifecycle: 'settled', outcome: 'success', metrics: null },
+				{ id: 'op5', kind: 'return', stack: 'root', source: 'coder', destination: 'orch', startedAt: 't5', settledAt: 't6', lifecycle: 'settled', outcome: 'terminated', metrics: null },
+				{ id: 'op6', kind: 'call', stack: 'root', source: 'you', destination: 'orch', startedAt: 't7', settledAt: null, lifecycle: 'in_flight', outcome: null, metrics: null },
 				// The rewind's restart (op6) is followed by normal nested work: a fresh coder-2 call and a tool call beneath it. The rewind is complete.
-				{ id: 'op7', kind: 'call', stack: 'root', source: 'orch', destination: 'coder2', startedAt: 't8', settledAt: null, lifecycle: 'in_flight', outcome: null, details: null, metrics: null },
-				{ id: 'op8', kind: 'call', stack: 'root', source: 'coder2', destination: 'readFile', startedAt: 't9', settledAt: null, lifecycle: 'in_flight', outcome: null, details: null, metrics: null },
+				{ id: 'op7', kind: 'call', stack: 'root', source: 'orch', destination: 'coder2', startedAt: 't8', settledAt: null, lifecycle: 'in_flight', outcome: null, metrics: null },
+				{ id: 'op8', kind: 'call', stack: 'root', source: 'coder2', destination: 'readFile', startedAt: 't9', settledAt: null, lifecycle: 'in_flight', outcome: null, metrics: null },
 				// A second interrupt re-preempts mid-normal-operation. The root's current phase carries the rewind's terminated return, the restart call, and the normal nested calls — the mixed-phase case.
-				{ id: 'op9', kind: 'call', stack: 'int2-stack', source: 'int2', destination: 'orch', startedAt: 't10', settledAt: null, lifecycle: 'in_flight', outcome: null, details: null, metrics: null },
+				{ id: 'op9', kind: 'call', stack: 'int2-stack', source: 'int2', destination: 'orch', startedAt: 't10', settledAt: null, lifecycle: 'in_flight', outcome: null, metrics: null },
 			],
 			status: 'running',
 		}
@@ -252,8 +252,8 @@ describe('InteractionModel helpers', () => {
 				{ id: 'int', role: 'interrupt', kind: 'interrupt' },
 			],
 			operations: [
-				{ id: 'op1', kind: 'call', stack: 'root', source: 'you', destination: 'orch', startedAt: 't0', settledAt: 't1', lifecycle: 'settled', outcome: null, details: null, metrics: null },
-				{ id: 'op2', kind: 'call', stack: 'root', source: 'orch', destination: 'coder', startedAt: 't1', settledAt: null, lifecycle: 'in_flight', outcome: null, details: null, metrics: null },
+				{ id: 'op1', kind: 'call', stack: 'root', source: 'you', destination: 'orch', startedAt: 't0', settledAt: 't1', lifecycle: 'settled', outcome: null, metrics: null },
+				{ id: 'op2', kind: 'call', stack: 'root', source: 'orch', destination: 'coder', startedAt: 't1', settledAt: null, lifecycle: 'in_flight', outcome: null, metrics: null },
 			],
 			status: 'running',
 			stacks: [
@@ -281,10 +281,10 @@ describe('InteractionModel helpers', () => {
 				{ id: 'det', role: 'loop_detector', kind: 'role' },
 			],
 			operations: [
-				{ id: 'op1', kind: 'call', stack: 'root', source: 'you', destination: 'orch', startedAt: 't0', settledAt: 't1', lifecycle: 'settled', outcome: null, details: null, metrics: null },
-				{ id: 'op2', kind: 'call', stack: 'root', source: 'orch', destination: 'coder', startedAt: 't1', settledAt: null, lifecycle: 'in_flight', outcome: null, details: null, metrics: null },
-				{ id: 'op3', kind: 'call', stack: 'int-stack', source: 'int', destination: 'det', startedAt: 't2', settledAt: 't3', lifecycle: 'settled', outcome: null, details: null, metrics: null },
-				{ id: 'op4', kind: 'return', stack: 'int-stack', source: 'det', destination: 'int', startedAt: 't3', settledAt: null, lifecycle: 'in_flight', outcome: 'success', details: null, metrics: null },
+				{ id: 'op1', kind: 'call', stack: 'root', source: 'you', destination: 'orch', startedAt: 't0', settledAt: 't1', lifecycle: 'settled', outcome: null, metrics: null },
+				{ id: 'op2', kind: 'call', stack: 'root', source: 'orch', destination: 'coder', startedAt: 't1', settledAt: null, lifecycle: 'in_flight', outcome: null, metrics: null },
+				{ id: 'op3', kind: 'call', stack: 'int-stack', source: 'int', destination: 'det', startedAt: 't2', settledAt: 't3', lifecycle: 'settled', outcome: null, metrics: null },
+				{ id: 'op4', kind: 'return', stack: 'int-stack', source: 'det', destination: 'int', startedAt: 't3', settledAt: null, lifecycle: 'in_flight', outcome: 'success', metrics: null },
 			],
 			status: 'running',
 			stacks: [
@@ -313,11 +313,11 @@ describe('InteractionModel helpers', () => {
 				{ id: 'rewind', role: 'rewind_stack', kind: 'tool' },
 			],
 			operations: [
-				{ id: 'op1', kind: 'call', stack: 'root', source: 'you', destination: 'orch', startedAt: 't0', settledAt: 't1', lifecycle: 'settled', outcome: null, details: null, metrics: null },
-				{ id: 'op2', kind: 'call', stack: 'root', source: 'orch', destination: 'coder', startedAt: 't1', settledAt: 't4', lifecycle: 'settled', outcome: null, details: null, metrics: null },
-				{ id: 'op3', kind: 'call', stack: 'int-stack', source: 'int', destination: 'det', startedAt: 't2', settledAt: 't3', lifecycle: 'settled', outcome: null, details: null, metrics: null },
-				{ id: 'op4', kind: 'terminate', stack: 'int-stack', source: 'rewind', destination: 'coder', startedAt: 't4', settledAt: 't4', lifecycle: 'settled', outcome: null, details: null, metrics: null },
-				{ id: 'op5', kind: 'return', stack: 'int-stack', source: 'det', destination: 'int', startedAt: 't5', settledAt: null, lifecycle: 'in_flight', outcome: 'success', details: null, metrics: null },
+				{ id: 'op1', kind: 'call', stack: 'root', source: 'you', destination: 'orch', startedAt: 't0', settledAt: 't1', lifecycle: 'settled', outcome: null, metrics: null },
+				{ id: 'op2', kind: 'call', stack: 'root', source: 'orch', destination: 'coder', startedAt: 't1', settledAt: 't4', lifecycle: 'settled', outcome: null, metrics: null },
+				{ id: 'op3', kind: 'call', stack: 'int-stack', source: 'int', destination: 'det', startedAt: 't2', settledAt: 't3', lifecycle: 'settled', outcome: null, metrics: null },
+				{ id: 'op4', kind: 'terminate', stack: 'int-stack', source: 'rewind', destination: 'coder', startedAt: 't4', settledAt: 't4', lifecycle: 'settled', outcome: null, metrics: null },
+				{ id: 'op5', kind: 'return', stack: 'int-stack', source: 'det', destination: 'int', startedAt: 't5', settledAt: null, lifecycle: 'in_flight', outcome: 'success', metrics: null },
 			],
 			status: 'running',
 			stacks: [
@@ -340,11 +340,11 @@ describe('InteractionModel helpers', () => {
 				{ id: 'orch2', role: 'orchestrator', kind: 'role' },
 			],
 			operations: [
-				{ id: 'op1', kind: 'call', stack: 'root', source: 'you', destination: 'orch', startedAt: 't0', settledAt: null, lifecycle: 'in_flight', outcome: null, details: null, metrics: null },
-				{ id: 'op2', kind: 'call', stack: 'root', source: 'orch', destination: 'coder', startedAt: 't1', settledAt: null, lifecycle: 'in_flight', outcome: null, details: null, metrics: null },
-				{ id: 'op3', kind: 'call', stack: 'int-stack', source: 'int', destination: 'orch2', startedAt: 't2', settledAt: null, lifecycle: 'in_flight', outcome: null, details: null, metrics: null },
+				{ id: 'op1', kind: 'call', stack: 'root', source: 'you', destination: 'orch', startedAt: 't0', settledAt: null, lifecycle: 'in_flight', outcome: null, metrics: null },
+				{ id: 'op2', kind: 'call', stack: 'root', source: 'orch', destination: 'coder', startedAt: 't1', settledAt: null, lifecycle: 'in_flight', outcome: null, metrics: null },
+				{ id: 'op3', kind: 'call', stack: 'int-stack', source: 'int', destination: 'orch2', startedAt: 't2', settledAt: null, lifecycle: 'in_flight', outcome: null, metrics: null },
 				// op4's source (orch2) is in the active int-stack; its destination (coder) is in the paused root. The observe is logged on the active stack.
-				{ id: 'op4', kind: 'observe', stack: 'int-stack', source: 'orch2', destination: 'coder', startedAt: 't3', settledAt: 't3', lifecycle: 'settled', outcome: null, details: 'peek', metrics: null },
+				{ id: 'op4', kind: 'observe', stack: 'int-stack', source: 'orch2', destination: 'coder', startedAt: 't3', settledAt: 't3', lifecycle: 'settled', outcome: null, metrics: null },
 			],
 			status: 'running',
 		}

@@ -47,7 +47,6 @@ import { isTerminalStatus } from './interaction-model.js'
  * @property {string | null} settledAt
  * @property {'in_flight' | 'settled'} lifecycle
  * @property {OperationOutcome | null} outcome
- * @property {string | null} details
  * @property {OperationMetrics | null} metrics
  */
 
@@ -75,7 +74,6 @@ import { isTerminalStatus } from './interaction-model.js'
  *   Return only: when the return completed.
  * @property {OperationOutcome} [outcome]
  *   Return only: the outcome the callee settled with.
- * @property {string} [details]
  */
 
 /**
@@ -89,21 +87,21 @@ function participant(id, role, kind) {
 	return { id, role, kind }
 }
 
-function callOperation(id, stack, source, destination, startedAt, details) {
-	return { id, kind: 'call', stack, source, destination, startedAt, details: details ?? null }
+function callOperation(id, stack, source, destination, startedAt) {
+	return { id, kind: 'call', stack, source, destination, startedAt }
 }
 
-function returnOperation(id, stack, source, destination, startedAt, settledAt, outcome, details) {
-	return { id, kind: 'return', stack, source, destination, startedAt, settledAt, outcome, details: details ?? null }
+function returnOperation(id, stack, source, destination, startedAt, settledAt, outcome) {
+	return { id, kind: 'return', stack, source, destination, startedAt, settledAt, outcome }
 }
 
-function observeOperation(id, stack, source, destination, startedAt, details) {
-	return { id, kind: 'observe', stack, source, destination, startedAt, details: details ?? null }
+function observeOperation(id, stack, source, destination, startedAt) {
+	return { id, kind: 'observe', stack, source, destination, startedAt }
 }
 
 // A terminate is an instantaneous destructive close: a rewind tool in the active stack reverts a target node in a paused stack. Like observe it carries no settledAt/outcome of its own (settledAt === startedAt, outcome null), but unlike observe it closes the targeted call — popping the open call whose destination matches — so the node is removed immediately and no separate 'terminated' return is needed for that call. A terminate never hands off activity, so the active operation stays the interrupt's own call rather than the terminate.
-function terminateOperation(id, stack, source, destination, startedAt, details) {
-	return { id, kind: 'terminate', stack, source, destination, startedAt, details: details ?? null }
+function terminateOperation(id, stack, source, destination, startedAt) {
+	return { id, kind: 'terminate', stack, source, destination, startedAt }
 }
 
 // Builds the full Operation list for the first `count` specs by replaying them. A call is in_flight only while it is the innermost still-open call on its stack: once a nested call appears on the same stack the outer call is settled at that nested call's startedAt (the callee delegated), and once its matching return appears it is settled at that return's startedAt. The return's outcome is never mirrored onto the call — the contract is "outcome is returns only", so a view that needs a call's eventual outcome pairs the call with its closing return rather than reading a duplicated field. This is what lets a single per-stack invariant ("at most one in_flight operation per stack") hold for nested chains, paused stacks, and reactivated legs alike.
@@ -195,12 +193,12 @@ function materializeOperations(specs, count) {
 				settledAt = delegationStartedAtByCallId.get(spec.id) ?? null
 				lifecycle = 'settled'
 			}
-			operations.push({ id: spec.id, kind: 'call', stack: spec.stack, source: spec.source, destination: spec.destination, startedAt: spec.startedAt, settledAt, lifecycle, outcome: null, details: spec.details ?? null, metrics: null })
+			operations.push({ id: spec.id, kind: 'call', stack: spec.stack, source: spec.source, destination: spec.destination, startedAt: spec.startedAt, settledAt, lifecycle, outcome: null, metrics: null })
 		} else if (spec.kind === 'return') {
-			operations.push({ id: spec.id, kind: 'return', stack: spec.stack, source: spec.source, destination: spec.destination, startedAt: spec.startedAt, settledAt: spec.settledAt, lifecycle: 'settled', outcome: spec.outcome, details: spec.details ?? null, metrics: null })
+			operations.push({ id: spec.id, kind: 'return', stack: spec.stack, source: spec.source, destination: spec.destination, startedAt: spec.startedAt, settledAt: spec.settledAt, lifecycle: 'settled', outcome: spec.outcome, metrics: null })
 		} else {
 			// observe and terminate are both instantaneous references logged on the active stack: settledAt === startedAt, lifecycle settled, outcome null. Neither opens or closes a call, so neither participates in the open-chain bookkeeping above.
-			operations.push({ id: spec.id, kind: spec.kind, stack: spec.stack, source: spec.source, destination: spec.destination, startedAt: spec.startedAt, settledAt: spec.startedAt, lifecycle: 'settled', outcome: null, details: spec.details ?? null, metrics: null })
+			operations.push({ id: spec.id, kind: spec.kind, stack: spec.stack, source: spec.source, destination: spec.destination, startedAt: spec.startedAt, settledAt: spec.startedAt, lifecycle: 'settled', outcome: null, metrics: null })
 		}
 	}
 	return operations
@@ -407,7 +405,7 @@ const pendingQuestion = {
 	],
 	operations: [
 		callOperation('op1', 'root', 'you', 'orchestrator', 't0'),
-		callOperation('op2', 'root', 'orchestrator', 'you-answerer', 't1', 'Which testing framework should I use?'),
+		callOperation('op2', 'root', 'orchestrator', 'you-answerer', 't1'),
 		returnOperation('op3', 'root', 'you-answerer', 'orchestrator', 't2', 't3', 'success'),
 		returnOperation('op4', 'root', 'orchestrator', 'you', 't4', 't5', 'success'),
 	],
@@ -433,7 +431,7 @@ const detectedLoopInterrupt = {
 		callOperation('op3', 'interrupt-stack', 'interrupt-1', 'loopDetector', 't2'),
 		callOperation('op4', 'interrupt-stack', 'loopDetector', 'readMessageWindow', 't3'),
 		// The tool reads the looping role's history: the observe's source is the tool participant, not the loop_detector agent, mirroring the backend where the agent calls a tool and the tool does the reading.
-		observeOperation('op5', 'interrupt-stack', 'readMessageWindow', 'coder', 't4', 'peek at the looping coder'),
+		observeOperation('op5', 'interrupt-stack', 'readMessageWindow', 'coder', 't4'),
 		returnOperation('op6', 'interrupt-stack', 'readMessageWindow', 'loopDetector', 't5', 't6', 'success'),
 		returnOperation('op7', 'interrupt-stack', 'loopDetector', 'interrupt-1', 't7', 't8', 'success'),
 		callOperation('op8', 'root', 'coder', 'readFile', 't9'),
@@ -493,7 +491,7 @@ const rewindFate = {
 		// The loop_detector calls the rewind tool; the tool, not the agent, performs the reverts.
 		callOperation('op4', 'interrupt-1-stack', 'loopDetector', 'rewindStack', 't3'),
 		// The tool reverts the looping coder: source is the tool participant, destination is the target node in the paused root stack. The terminate closes the call immediately, so the coder node is removed right away and no separate terminated return is needed.
-		terminateOperation('op5', 'interrupt-1-stack', 'rewindStack', 'coder', 't4', 'revert the looping coder'),
+		terminateOperation('op5', 'interrupt-1-stack', 'rewindStack', 'coder', 't4'),
 		returnOperation('op6', 'interrupt-1-stack', 'rewindStack', 'loopDetector', 't5', 't6', 'success'),
 		returnOperation('op7', 'interrupt-1-stack', 'loopDetector', 'interrupt-1', 't7', 't8', 'success'),
 		callOperation('op8', 'root', 'orchestrator', 'coder-2', 't9'),
@@ -529,7 +527,7 @@ const nestedInterruptDeep = {
 		callOperation('op5', 'interrupt-2-stack', 'interrupt-2', 'loopDetector-2', 't4'),
 		callOperation('op6', 'interrupt-2-stack', 'loopDetector-2', 'readMessageWindow-2', 't5'),
 		// The observe's source is the tool (readMessageWindow-2), not the loop_detector agent: the agent calls the tool and the tool reads the target role's history.
-		observeOperation('op7', 'interrupt-2-stack', 'readMessageWindow-2', 'coder', 't6', 'peek at the outermost looping coder across the middle stack'),
+		observeOperation('op7', 'interrupt-2-stack', 'readMessageWindow-2', 'coder', 't6'),
 		returnOperation('op8', 'interrupt-2-stack', 'readMessageWindow-2', 'loopDetector-2', 't7', 't8', 'success'),
 		returnOperation('op9', 'interrupt-2-stack', 'loopDetector-2', 'interrupt-2', 't9', 't10', 'success'),
 		returnOperation('op10', 'interrupt-1-stack', 'readMessageWindow-1', 'loopDetector-1', 't11', 't12', 'success'),
@@ -567,8 +565,8 @@ const rewindMultiTerminate = {
 		// The loop_detector calls the rewind tool; the tool, not the agent, performs the reverts.
 		callOperation('op5', 'interrupt-1-stack', 'loopDetector', 'rewindStack', 't4'),
 		// The tool reverts both paused-stack targets: one terminate op per reverted node, each sourced at the tool. Each terminate closes the targeted call immediately, so both nodes are removed right away and no separate terminated returns are needed.
-		terminateOperation('op6', 'interrupt-1-stack', 'rewindStack', 'coder', 't5', 'revert the looping coder'),
-		terminateOperation('op7', 'interrupt-1-stack', 'rewindStack', 'planner', 't6', 'revert the planner that delegated to it'),
+		terminateOperation('op6', 'interrupt-1-stack', 'rewindStack', 'coder', 't5'),
+		terminateOperation('op7', 'interrupt-1-stack', 'rewindStack', 'planner', 't6'),
 		returnOperation('op8', 'interrupt-1-stack', 'rewindStack', 'loopDetector', 't7', 't8', 'success'),
 		returnOperation('op9', 'interrupt-1-stack', 'loopDetector', 'interrupt-1', 't9', 't10', 'success'),
 		callOperation('op10', 'interrupt-2-stack', 'interrupt-2', 'loopDetector', 't11'),
@@ -603,8 +601,8 @@ const terminateFate = {
 		// The loop_detector calls the terminate_task tool; the tool, not the agent, performs the discard.
 		callOperation('op4', 'interrupt-1-stack', 'loopDetector', 'terminateTask', 't3'),
 		// The tool discards the whole task: one terminate op per node on the root stack, each sourced at the tool. Each terminate closes the targeted call immediately so the node is removed right away and no separate terminated return is needed.
-		terminateOperation('op5', 'interrupt-1-stack', 'terminateTask', 'coder', 't4', 'discard the looping coder'),
-		terminateOperation('op6', 'interrupt-1-stack', 'terminateTask', 'orchestrator', 't5', 'discard the orchestrator'),
+		terminateOperation('op5', 'interrupt-1-stack', 'terminateTask', 'coder', 't4'),
+		terminateOperation('op6', 'interrupt-1-stack', 'terminateTask', 'orchestrator', 't5'),
 		returnOperation('op7', 'interrupt-1-stack', 'terminateTask', 'loopDetector', 't6', 't7', 'success'),
 		returnOperation('op8', 'interrupt-1-stack', 'loopDetector', 'interrupt-1', 't8', 't9', 'success'),
 	],
