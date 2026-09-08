@@ -111,18 +111,72 @@ function edgeAnimationState(operation, model) {
 	return 'returning'
 }
 
+// Per-model memo for the renderer's whole-model derivations: a model is replaced wholesale on every poll and never mutated in place, so each structure is computed once on first request and read by identity afterwards, and the WeakMap drops the entry with its model on run switch. The undefined slots mean "not derived yet"; a cached value is never mutated afterwards.
+const derivedByModel = new WeakMap()
+
+function derivedOf(model) {
+	let derived = derivedByModel.get(model)
+	if (derived !== undefined) return derived
+	derived = { rows: undefined, topBar: undefined, costStrip: undefined }
+	derivedByModel.set(model, derived)
+	return derived
+}
+
+// The per-stack and per-participant lookups the row projection and the cost reads need: the latest call-or-return per stack, the return id → closed call mapping per stack, the first completing return per participant source, and the set of stacks that carry any operation. One chronological pass replaces the per-stack and per-node replays the renderer used to pay per render; the terminate handling mirrors openCallsByStack — a terminate pops the open call whose destination it targets wherever that call's stack lives, so every stack's open list is scanned (the per-stack replay this pass replaces scanned one stack's list per terminate, which lands the same pops per stack).
+function rowLookupsOf(model) {
+	const derived = derivedOf(model)
+	if (derived.rows !== undefined) return derived.rows
+	const lastCallOrReturnByStack = new Map()
+	const closedCallByReturnByStack = new Map()
+	const completionReturnBySource = new Map()
+	const stacksWithOperations = new Set()
+	const openByStack = new Map()
+	for (const operation of model.operations) {
+		stacksWithOperations.add(operation.stack)
+		if (operation.kind === 'call') {
+			let open = openByStack.get(operation.stack)
+			if (open === undefined) {
+				open = []
+				openByStack.set(operation.stack, open)
+			}
+			open.push(operation)
+			lastCallOrReturnByStack.set(operation.stack, operation)
+		} else if (operation.kind === 'return') {
+			lastCallOrReturnByStack.set(operation.stack, operation)
+			const open = openByStack.get(operation.stack)
+			const closed = open === undefined ? undefined : open.pop()
+			if (closed !== undefined) {
+				let closedByReturn = closedCallByReturnByStack.get(operation.stack)
+				if (closedByReturn === undefined) {
+					closedByReturn = new Map()
+					closedCallByReturnByStack.set(operation.stack, closedByReturn)
+				}
+				closedByReturn.set(operation.id, closed)
+			}
+			// The completion return is the participant's first return (a retried role's later instances carry their own ids), so only the first return per source is recorded.
+			if (!completionReturnBySource.has(operation.source)) completionReturnBySource.set(operation.source, operation)
+		} else if (operation.kind === 'terminate') {
+			for (const open of openByStack.values()) {
+				for (let index = open.length - 1; index >= 0; index -= 1) {
+					const candidate = open[index]
+					if (candidate === undefined) continue
+					if (candidate.destination === operation.destination) {
+						open.splice(index, 1)
+						break
+					}
+				}
+			}
+		}
+	}
+	derived.rows = { lastCallOrReturnByStack, closedCallByReturnByStack, completionReturnBySource, stacksWithOperations }
+	return derived.rows
+}
+
 // Projects a single stack to a row descriptor: the root participant, the participants to render (each at its call-depth column, flagged when it is a lingering return source), and the call and lingering-return edges between them. The open call chain gives the live participants and columns; a return lingers only while it is in_flight (its transit phase) — once it settles (the working phase) the returner has departed and neither the node nor its response edge is drawn, so the lingering leg never renders for a settled return even when it is the stack's last call-or-return. A stack whose open chain is empty but whose latest non-observe operation is an in_flight return still renders a row holding that single lingering leg (the terminal return's transit frame), with the return's caller as the row root; this is what lets the terminal frame show the returner and its response line until the See Result click settles the return. observe is skipped when finding that last call-or-return because an observe never affects activity and never enters a call chain, so it cannot be the caller's action that ends a lingering leg. Each edge carries the operation it renders so the animation layer can read its lifecycle and outcome directly.
 function projectRow(model, stackId) {
 	const chain = callChainOf(model, stackId)
-	const operationsOnStack = model.operations.filter((operation) => operation.stack === stackId)
-
-	let lastCallOrReturn = undefined
-	for (let index = operationsOnStack.length - 1; index >= 0; index -= 1) {
-		const operation = operationsOnStack[index]
-		if (operation.kind === 'observe' || operation.kind === 'terminate') continue
-		lastCallOrReturn = operation
-		break
-	}
+	const lookups = rowLookupsOf(model)
+	const lastCallOrReturn = lookups.lastCallOrReturnByStack.get(stackId)
 	const lingeringReturn = lastCallOrReturn !== undefined && lastCallOrReturn.kind === 'return' && lastCallOrReturn.lifecycle === 'in_flight'
 		? lastCallOrReturn
 		: undefined
@@ -134,7 +188,7 @@ function projectRow(model, stackId) {
 		if (firstStack !== undefined && stackId === firstStack.id) return null
 		const record = model.stacks.find((entry) => entry.id === stackId)
 		if (record === undefined) return null
-		if (model.operations.some((operation) => operation.stack === stackId)) return null
+		if (lookups.stacksWithOperations.has(stackId)) return null
 		return { stackId, rootId: record.root, participants: [{ id: record.root, column: 0, lingering: false }], callEdges: [], returnEdges: [] }
 	}
 
@@ -155,30 +209,11 @@ function projectRow(model, stackId) {
 		callEdges.push({ fromColumn: sourceColumn, toColumn: destinationColumn, operation: call })
 	}
 
-	const closedCallByReturn = new Map()
-	const open = []
-	for (const operation of model.operations) {
-		if (operation.kind === 'call' && operation.stack === stackId) {
-			open.push(operation)
-		} else if (operation.kind === 'return' && operation.stack === stackId) {
-			const closed = open.pop()
-			if (closed !== undefined) closedCallByReturn.set(operation.id, closed)
-		} else if (operation.kind === 'terminate') {
-			// A terminate closes the open call whose destination it targets, wherever that call's stack lives (the terminate itself is logged on the active stack while its target sits in a paused one) — matching by destination across the whole timeline, mirroring openCallsByStack. Skipping a terminate here would let a later outer return pop the killed call by mistake and render the terminated node in the returner's place.
-			for (let index = open.length - 1; index >= 0; index -= 1) {
-				const candidate = open[index]
-				if (candidate === undefined) continue
-				if (candidate.destination === operation.destination) {
-					open.splice(index, 1)
-					break
-				}
-			}
-		}
-	}
+	const closedByReturn = lookups.closedCallByReturnByStack.get(stackId)
 
 	const returnEdges = []
 	if (lingeringReturn !== undefined) {
-		const closedCall = closedCallByReturn.get(lingeringReturn.id)
+		const closedCall = closedByReturn?.get(lingeringReturn.id)
 		if (closedCall !== undefined) {
 			// The lingering leg renders only while the return is in transit (in_flight); once the return settles (working phase) the returner has departed and neither the node nor its response edge is drawn. The lingering source sat one column past the open chain's innermost node: it was the innermost call before its return popped it, so its depth is the current open chain length plus one.
 			const lingeringColumn = chain.length + 1
@@ -191,8 +226,10 @@ function projectRow(model, stackId) {
 	return { stackId, rootId, participants, callEdges, returnEdges }
 }
 
-// Aggregates every role/tool type that has ever appeared in the model into one top-bar slot, with the total invocation count (every participant instance of that role, current and departed, so the count matches the "ever run" rule) and the cumulative metrics drawn from the returns whose source is a participant of that role. Departed participants are represented here regardless of whether they currently linger in a row; the depart animation reconciles a lingering node with its slot in the animation layer.
+// Aggregates every role/tool type that has ever appeared in the model into one top-bar slot, with the total invocation count (every participant instance of that role, current and departed, so the count matches the "ever run" rule) and the cumulative metrics drawn from the returns whose source is a participant of that role. Departed participants are represented here regardless of whether they currently linger in a row; the depart animation reconciles a lingering node with its slot in the animation layer. The render and the lifecycle diff each read the strip per poll, so the slots are memoized per model and shared read-only between those readers.
 function projectTopBar(model) {
+	const derived = derivedOf(model)
+	if (derived.topBar !== undefined) return derived.topBar
 	const slotByRole = new Map()
 	for (const participant of model.participants) {
 		// The human is the eternal root of every run, never a role that "ran", so it never occupies a top-bar slot.
@@ -225,15 +262,14 @@ function projectTopBar(model) {
 		}
 		if (completion.outcome === 'error') slot.errored = true
 	}
-	return Array.from(slotByRole.values())
+	const slots = Array.from(slotByRole.values())
+	derived.topBar = slots
+	return slots
 }
 
-// The completion return for a participant (the return whose source is the participant), used to read its cost metrics and outcome. A participant still in flight has no completing return, so it carries no cost.
+// The completion return for a participant (the first return whose source is the participant), used to read its cost metrics and outcome. A participant still in flight has no completing return, so it carries no cost. Read from the per-model pass (rowLookupsOf) instead of scanning the operation list per node per render.
 function completionReturnFor(model, participantId) {
-	for (const operation of model.operations) {
-		if (operation.kind === 'return' && operation.source === participantId) return operation
-	}
-	return undefined
+	return rowLookupsOf(model).completionReturnBySource.get(participantId)
 }
 
 // Renders a single top-bar slot as a small square holding its invocation count, with a <title> carrying the label, count, and cumulative metrics for hover. A slot whose run ended in failure turns red so the failing role reads at a glance against an otherwise neutral strip.
@@ -684,6 +720,8 @@ export function deriveNowCaption(model, labels, tier) {
  * @returns {{ elapsedSeconds: number, tokens: number }}
  */
 export function deriveCostStrip(model) {
+	const derived = derivedOf(model)
+	if (derived.costStrip !== undefined) return derived.costStrip
 	let tokens = 0
 	let elapsedSeconds = 0
 	let foundElapsed = false
@@ -696,5 +734,6 @@ export function deriveCostStrip(model) {
 			foundElapsed = true
 		}
 	}
-	return { elapsedSeconds, tokens }
+	derived.costStrip = { elapsedSeconds, tokens }
+	return derived.costStrip
 }

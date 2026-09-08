@@ -358,3 +358,35 @@ describe('InteractionModel helpers', () => {
 		expect(isPaused(model, 'root')).toBe(true)
 	})
 })
+
+describe('InteractionModel derivation memoization', () => {
+	// The memoization contract is invisibility: every helper answers identically, computed once per model. These tests pin the one observable edge — repeated helper calls hand back the same derived object, and distinct models never share one — through the public helpers rather than the private memo.
+	function twoCallModel(): InteractionModel {
+		return {
+			participants: [
+				{ id: 'you', role: 'human', kind: 'human' },
+				{ id: 'orch', role: 'orchestrator', kind: 'role' },
+				{ id: 'coder', role: 'coder', kind: 'role' },
+			],
+			operations: [
+				{ id: 'op1', kind: 'call', stack: 'root', source: 'you', destination: 'orch', startedAt: 't0', settledAt: 't1', lifecycle: 'settled', outcome: null, metrics: null },
+				{ id: 'op2', kind: 'call', stack: 'root', source: 'orch', destination: 'coder', startedAt: 't1', settledAt: null, lifecycle: 'in_flight', outcome: null, metrics: null },
+			],
+			status: 'running',
+		}
+	}
+
+	test('repeated helper calls on one model return reference-equal derived results', () => {
+		const model = twoCallModel()
+		// Warm the derivation through a different helper first, so the pinned identity holds across helpers rather than within one call site.
+		expect(activeStack(model)).toBe('root')
+		expect(stacksOf(model)).toBe(stacksOf(model))
+	})
+
+	test('distinct models with identical content get distinct derived results', () => {
+		const first = twoCallModel()
+		const second = twoCallModel()
+		expect(stacksOf(first)).toEqual(stacksOf(second))
+		expect(stacksOf(first)).not.toBe(stacksOf(second))
+	})
+})

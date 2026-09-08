@@ -99,9 +99,22 @@ export function isTerminalStatus(status) {
 	return TERMINAL_STATUSES.has(status)
 }
 
+// The helpers re-derive the same whole-model structures (the open-call replay, the derived stack records, the active stack, the row list) several times per poll, and a model is replaced wholesale on every poll and never mutated in place, so a WeakMap keyed on model identity caches each structure on first request: every helper reads the same derivation instead of replaying the operation list per call, and an entry is dropped with its model on run switch. The undefined slots mean "not derived yet"; a cached value is never mutated afterwards, so readers may hold it without copying.
+const derivedByModel = new WeakMap()
+
+function derivedOf(model) {
+	let derived = derivedByModel.get(model)
+	if (derived !== undefined) return derived
+	derived = { chains: undefined, active: undefined, stackIds: undefined, records: undefined }
+	derivedByModel.set(model, derived)
+	return derived
+}
+
 // The stack records the helpers read: the model's own records when present, else a derivation from operations (first-appearance order; the root is the stack's first operation's source, which for any well-formed model is its root call's source). A zero-operation stack exists only in the model's own records — operations cannot name it.
 function stackRecordsOf(model) {
 	if (model.stacks !== undefined) return model.stacks
+	const derived = derivedOf(model)
+	if (derived.records !== undefined) return derived.records
 	const records = []
 	const seen = new Set()
 	for (const operation of model.operations) {
@@ -109,6 +122,7 @@ function stackRecordsOf(model) {
 		seen.add(operation.stack)
 		records.push({ id: operation.stack, root: operation.source })
 	}
+	derived.records = records
 	return records
 }
 
@@ -127,6 +141,14 @@ function stackRecordOf(model, stackId) {
  */
 export function activeStack(model) {
 	if (model.operations.length === 0) return null
+	const derived = derivedOf(model)
+	if (derived.active !== undefined) return derived.active
+	derived.active = computeActiveStack(model)
+	return derived.active
+}
+
+// The body of activeStack, run at most once per model; the caller guarantees a non-empty operation list.
+function computeActiveStack(model) {
 	const records = stackRecordsOf(model)
 	const newest = records[records.length - 1]
 	if (newest !== undefined && !model.operations.some((operation) => operation.stack === newest.id)) {
@@ -153,12 +175,13 @@ export function activeStack(model) {
 export function activeOperation(model) {
 	const stack = activeStack(model)
 	if (stack === null) return null
+	// The open chain is independent of where the scan below stops, so it is read once from the memoized replay and the scan selects against it, instead of rebuilding the chain for every candidate.
+	const chain = callChainOf(model, stack)
 	for (let index = model.operations.length - 1; index >= 0; index -= 1) {
 		const operation = model.operations[index]
 		if (operation.stack !== stack) continue
 		if (operation.kind === 'observe' || operation.kind === 'terminate') continue
 		if (operation.kind === 'return') return operation
-		const chain = callChainOf(model, stack)
 		for (const call of chain) {
 			if (call.id === operation.id) return operation
 		}
@@ -184,6 +207,8 @@ export function activeParticipant(model) {
 
 // Replays the operations in order to track the open call chain per stack id: a 'call' pushes onto its stack's chain, a 'return' pops the most recent open call on its own stack, and a 'terminate' closes the targeted call without handing off activity — it pops the open call whose destination matches the terminate's destination, so the node is removed immediately (the next frame the call is absent from the chain) and no separate 'terminated' return is needed for that call. A return closes a call regardless of outcome (a 'terminated' return pops just like a 'success' return), so the chain reflects "still open" rather than "still succeeding". 'observe' is ignored — it never enters a call chain. A terminate's destination lives in a different (paused) stack than the terminate itself (a tool in the active stack reaches across into a paused stack), so the match is by destination across every chain rather than by the terminate's own stack.
 function openCallsByStack(model) {
+	const derived = derivedOf(model)
+	if (derived.chains !== undefined) return derived.chains
 	const chains = new Map()
 	for (const operation of model.operations) {
 		if (operation.kind === 'call') {
@@ -212,6 +237,7 @@ function openCallsByStack(model) {
 			}
 		}
 	}
+	derived.chains = chains
 	return chains
 }
 
@@ -233,6 +259,8 @@ function latestActivityOperationOnStack(model, stackId) {
  * @returns {string[]}
  */
 export function stacksOf(model) {
+	const derived = derivedOf(model)
+	if (derived.stackIds !== undefined) return derived.stackIds
 	const chains = openCallsByStack(model)
 	const records = stackRecordsOf(model)
 	const orderByStack = new Map()
@@ -259,6 +287,7 @@ export function stacksOf(model) {
 		}
 	}
 	open.sort((a, b) => (orderByStack.get(a) ?? 0) - (orderByStack.get(b) ?? 0))
+	derived.stackIds = open
 	return open
 }
 
@@ -284,7 +313,8 @@ export function callChainOf(model, stackId) {
  */
 export function isPaused(model, stackId) {
 	if (activeStack(model) === stackId) return false
-	return callChainOf(model, stackId).length > 0
+	const chain = openCallsByStack(model).get(stackId)
+	return chain !== undefined && chain.length > 0
 }
 
 // The latest contiguous run of operations on a stack — the stack's current phase, ending at its most recent operation. For a paused stack this is the block it produced after the preempting stack's final return and before it was paused again; fateOf reads the fate off it. Observes are logged on the active stack, so they never split a paused stack's phase.

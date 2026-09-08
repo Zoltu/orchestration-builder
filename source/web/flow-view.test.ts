@@ -813,5 +813,24 @@ describe('deriveCostStrip — per-operation metric aggregation', () => {
 		const empty: InteractionModel = { participants: [], operations: [], status: 'running' }
 		expect(deriveCostStrip(empty)).toEqual({ elapsedSeconds: 0, tokens: 0 })
 	})
+
+	test('repeated calls on one model return reference-equal results, and distinct models never share one', () => {
+		// The strip is memoized per model, so the repeated call must hand back the same derived object while a content-identical second model derives its own.
+		const model: InteractionModel = {
+			participants: [participant('you', 'human', 'human'), participant('coder', 'coder', 'role')],
+			operations: [returnWithMetrics('op1', 'root', 'coder', 'you', 1.5, 120)],
+			status: 'running',
+		}
+		const twin: InteractionModel = {
+			participants: [participant('you', 'human', 'human'), participant('coder', 'coder', 'role')],
+			operations: [returnWithMetrics('op1', 'root', 'coder', 'you', 1.5, 120)],
+			status: 'running',
+		}
+		const first = deriveCostStrip(model)
+		expect(deriveCostStrip(model)).toBe(first)
+		expect(first).toEqual({ elapsedSeconds: 1.5, tokens: 120 })
+		expect(deriveCostStrip(twin)).toEqual(first)
+		expect(deriveCostStrip(twin)).not.toBe(first)
+	})
 })
 
