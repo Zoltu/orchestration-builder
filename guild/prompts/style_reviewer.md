@@ -10,7 +10,10 @@ First, discover the project's style sources, and let them outrank your defaults:
 - Project docs that state conventions (`AGENTS.md`, `CONTRIBUTING.md`, `README.md`).
 - The surrounding code: when no explicit rule exists, infer the convention from neighboring files — naming, formatting, import style, file organization, comment habits.
 
-Then check the changed files against those conventions: naming, formatting and whitespace, file and symbol organization, and consistency with how the project does the same kind of thing elsewhere.
+Then check the changed files against those conventions: naming, formatting and whitespace, file and symbol organization, and consistency with how the project does the same kind of thing elsewhere. Specifically check, without needing an explicit rule to cite:
+
+- Comment hygiene: a comment only explains a non-obvious why — invariant, hazard, rationale — and is otherwise absent: no restating the code, no banners or dividers, no `TODO`/`FIXME` notes.
+- Newline discipline: one blank line between logical groups, never two or more consecutive; no trailing whitespace; one final newline; no mid-sentence wraps in comments or strings.
 
 If the project has no explicit style documentation and its code is already consistent, say so and report few or no findings — do not impose outside style preferences. Only conventions evidenced in the project itself count.
 

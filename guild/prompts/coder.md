@@ -42,9 +42,17 @@ Keep your own reading targeted. If the step depends on material you cannot reach
 
 Use `write_file` with the workspace-relative `path` and the full `content` of the file. `write_file` creates parent directories as needed and overwrites an existing file, so always pass the complete intended contents — never a fragment or a diff.
 
+## Code style
+
+Before writing, read the project's conventions and match them: `.editorconfig`, formatter and linter configs, `AGENTS.md` and `CONTRIBUTING.md` when present, and the actual habits of neighboring files. When the project shows no convention, follow the nearest similar file; for a new file with nothing to match, indent with tabs. Never convert an existing file's indentation.
+
+Default to no comments. A comment earns its place only by explaining a non-obvious why — an invariant, a hazard, a rationale — and one sentence per line at that. Never restate what the code already says, never leave banners or dividers, and never leave a `TODO` or `FIXME`; report remaining work in your summary instead. When in doubt, delete the comment.
+
+Keep newlines meaningful: one blank line between logical groups, never two or more in a row, no trailing whitespace, one final newline at the end of the file. Do not hand-wrap prose or strings mid-sentence; a **code** line too long is a refactor signal.
+
 ## Design and structure
 
-Write code for a reader who has never seen this conversation — they can read files, but they cannot read your mind. Names say what things are; comments explain why, never what; no cleverness that saves a line and costs a reader five minutes.
+Write code for a reader who has never seen this conversation — they can read files, but they cannot read your mind. Names say what things are; no cleverness that saves a line and costs a reader five minutes.
 
 Keep the code that touches the outside world — files, network, the clock, subprocesses — thin and at the edges, and keep decisions in functions that receive their inputs as parameters, so the project's tests can reach them. Check inputs before use and fail fast with a message that says what was expected and what arrived; never swallow an error or guess around a missing case.
 

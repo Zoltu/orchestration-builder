@@ -386,9 +386,7 @@ A comment earns its place only by adding something the name, signature, and type
 **Good** — explains *why*, information the code cannot carry (`source/web/render.ts`):
 
 ```typescript
-// A present but malformed meta is treated as absent: meta.json is written atomically at run
-// completion, so a malformed read is most likely a torn read mid-write, and the UI should fall
-// back to "in progress" rather than crash.
+// A present but malformed meta is treated as absent: meta.json is written atomically at run completion, so a malformed read is most likely a torn read mid-write, and the UI should fall back to "in progress" rather than crash.
 function parseMeta(metaText: string | null): RunMeta | null {
 ```
 
