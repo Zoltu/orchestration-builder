@@ -45,6 +45,7 @@ When a step completes, mark its status `✅ complete` and add a dated closeout s
 | `typecheck` hardcodes `bun --bun tsc --noEmit`. | 04 | 35 | Named generically + fixed command so the guild cannot over-fit to TS; generalize to a per-workspace toolchain command when per-run environment isolation lands as part of the Foundry. |
 | `test` hardcodes `bun test`. | 05 | 35 | Same shape as the `typecheck` debt; generalize at the Foundry step. |
 | No shell allowlist/denylist for `run_shell`. | 29 | 35 | Containment comes from the deployment environment (non-root, restricted egress, read-only fs), not from an in-tool filter. A future in-tool allowlist is deferred until a concrete need arises. |
+| No guard on `generation.maxTokens` exceeding `model.contextWindow` (negative effective budget → context-pressure interludes on every turn). | 36 | 37 | Surfaced by the step-36 mock e2e (window 8192, maxTokens 65536). Guard or clamp at deployment validation/resolution once the real endpoint's window is known. |
 
 When you add a row, also update the target step's file to describe the removal work. When you remove the debt, delete the row.
 

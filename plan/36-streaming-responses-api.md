@@ -6,7 +6,7 @@ Targets that must keep working: **PPQ.ai** (`api.ppq.ai`), **llama.cpp** (`llama
 
 ## Status
 
-— in progress (2026-09-13)
+— ✅ in-environment complete (2026-09-13); see closeout at the bottom. Real-LLM verification against `llama-server` is a coordinated operator step (the endpoint was unreachable in-environment during this step).
 
 ## Non-negotiable design decisions
 
@@ -75,3 +75,11 @@ Remove `reasoningField` everywhere: the `ModelConfig`/`ResolvedModelConfig` fiel
 ## Open questions (decided during implementation, recorded at closeout)
 
 - None open at planning time. `max_output_tokens` value for the shipped deployment file is settled by the e2e run.
+
+## Closeout (2026-09-13)
+
+Landed in three commits: `5a64342` (dual-shape model catalog + `reasoningField` removal, docs), `7bd49bc` (streaming client rewrite), `bac3694` (review fixes). Review round (architecture + correctness + security, parallel) found two blockers, both fixed and re-validated: (1) stream-phase failures (`reader.read()` rejection, `OversizedSseLineError`) escaped the retry loop and reached the service's fatal-exit path — now mapped to `llm_unavailable` with `reader.cancel()` on every exit path; (2) assistant history input items lacked the `type: 'message'` discriminator, which llama.cpp's converter rejects with HTTP 400 on every multi-turn request — caught by the correctness review against llama.cpp source, fixed, and verified on the wire by a scripted mock-server integration test (real fetch/SSE over localhost; happy path, kill -9 resume, zero-delta `incomplete` failure path all PASS). Gates at closeout: `bun run typecheck`, `bun test source/` (1279), `bun run validate-data`, all green.
+
+**Operator handoff (coordinated final step):** the bundled Guild's real endpoint (`llama-server`, model "Agents A1") was unreachable in-environment for this step's e2e. When the operator brings it up: `bun source/serve.ts`, submit a task through the UI or `POST /api/runs`, and expect a normal run — the streaming client's first real-model contact. If the endpoint runs a llama.cpp build older than `b7793` (2026-01-21), it has no `/v1/responses` and every call fails; verify the build first (`curl -s http://llama-server:8080/v1/models` on a recent build reports the model).
+
+**Accepted notes:** `detectContextBudgetExceeded` lives in the SSE-named module though it classifies pre-stream HTTP error bodies (naming nit, deferred); the deployment file's `maxTokens: 65536` exceeds the mock model's window and produced a negative effective budget in the mock e2e — pre-existing platform behavior (no guard on `maxTokens > contextWindow`), recorded as tracked debt in `plan/README.md`; re-evaluate the value when the real endpoint's window is known.
