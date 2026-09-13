@@ -1461,7 +1461,6 @@ function sampleDeployment(overrides: Partial<DeploymentConfig> = {}): Deployment
 			name: 'qwen3.6:35b',
 			apiBase: 'http://llama-server:8080/v1',
 			contextWindow: 262144,
-			reasoningField: 'reasoning',
 			generation: { temperature: 0.2, maxTokens: 32768 },
 		},
 		executor: {

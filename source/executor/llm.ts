@@ -1,5 +1,5 @@
 import type { Message, ResolvedModelConfig, ToolCall, ToolManifest } from './types.js'
-import { isObject } from './validation.js'
+import { createResponsesStreamAccumulator, createSseLineAssembler, detectContextBudgetExceeded, mapHistoryToResponsesInput, mapTerminalResponseToCallResult, mapToolManifestsToResponsesTools, parseSseDataPayload, type ResponsesStreamSnapshot, type SseDataPayload } from './llm-sse.js'
 
 export interface LlmRequest {
 	messages: Message[]
@@ -20,7 +20,7 @@ export type LlmCallResult =
 		reasoning?: string | null
 		toolCalls: ToolCall[]
 		usage: LlmUsage
-		// OpenAI finish_reason for choices[0] (e.g. "stop", "length", "tool_calls", "content_filter"), so a reviewer can tell why the model stopped emitting. Absent when the endpoint omits the field, so "absent" is distinguishable from a default like "".
+		// The endpoint's finish reason (e.g. "stop", "length", "tool_calls"), so a reviewer can tell why the model stopped emitting. Absent when the endpoint omits the field, so "absent" is distinguishable from a default like "".
 		finishReason?: string
 	}
 	| { kind: 'context_budget_exceeded'; promptTokens: number; contextWindow: number }
@@ -30,28 +30,32 @@ export interface LlmCaller {
 	call(request: LlmRequest): Promise<LlmCallResult>
 }
 
-// The wire-level leaf the caller composes against: one HTTP round-trip that returns the status and raw body text and never converts an HTTP error status into a throw (network failures still reject, as fetch does). Everything above it — request shaping, response parsing, context-budget detection, the retry loop — is orchestration exercised in tests through createLlmCaller with a fake LlmFetch.
+// The wire-level leaf the caller composes against: one HTTP round-trip that hands back the raw SSE byte stream on a 2xx (unbuffered — the caller consumes it incrementally) and the fully-read body text on an error status (pre-stream errors are plain HTTP status + JSON on every target stack). It never converts an HTTP error status into a throw (network failures still reject, as fetch does). Everything above it — request shaping, response classification, context-budget detection, the retry loop, the stream fold — is orchestration exercised in tests through createLlmCaller with a fake LlmFetch.
 export interface LlmFetchRequest {
+	url: string
 	method: string
 	headers: Record<string, string>
 	body: string
 }
 
-export interface LlmFetchResponse {
-	status: number
-	body: string
-}
+export type LlmStreamResponse =
+	| { status: number; stream: ReadableStream<Uint8Array> }
+	| { status: number; errorBody: string }
 
-export type LlmFetch = (url: string, request: LlmFetchRequest) => Promise<LlmFetchResponse>
+export type LlmFetch = (request: LlmFetchRequest) => Promise<LlmStreamResponse>
 
 export function createLlmFetch(): LlmFetch {
-	return async (url, request) => {
-		const response = await fetch(url, {
+	return async (request) => {
+		const response = await fetch(request.url, {
 			method: request.method,
 			headers: request.headers,
 			body: request.body,
 		})
-		return { status: response.status, body: await response.text() }
+		// A 2xx without a body stream cannot drive a turn, so it is classified with the error bodies and reported as an unavailable endpoint rather than guessed into a success.
+		if (!response.ok || response.body === null) {
+			return { status: response.status, errorBody: await response.text() }
+		}
+		return { status: response.status, stream: response.body }
 	}
 }
 
@@ -66,10 +70,6 @@ export interface LlmCallerDependencies {
 	sleep: Sleep
 }
 
-function asRecord(value: unknown): Record<string, unknown> | undefined {
-	return isObject(value) ? value : undefined
-}
-
 interface ParsedSuccess {
 	kind: 'success'
 	content?: string
@@ -79,151 +79,15 @@ interface ParsedSuccess {
 	finishReason?: string
 }
 
-interface ParsedError {
-	kind: 'parse_error'
-	message: string
-}
-
-function parseOpenAiResponse(data: unknown, reasoningField: string | undefined): ParsedSuccess | ParsedError {
-	const record = asRecord(data)
-	if (!record) return { kind: 'parse_error', message: 'Response is not an object' }
-
-	const choicesRaw = record['choices']
-	if (!Array.isArray(choicesRaw) || choicesRaw.length === 0) {
-		return { kind: 'parse_error', message: 'No choices in response' }
-	}
-	const firstChoice = choicesRaw[0]
-	if (!isObject(firstChoice)) {
-		return { kind: 'parse_error', message: 'First choice is not an object' }
-	}
-
-	const messageRaw = firstChoice['message']
-	if (!isObject(messageRaw)) {
-		return { kind: 'parse_error', message: 'Choice message is not an object' }
-	}
-
-	const contentValue = messageRaw['content']
-	const content = typeof contentValue === 'string' ? contentValue : undefined
-
-	let reasoning: string | null | undefined = undefined
-	if (reasoningField !== undefined) {
-		const reasoningValue = messageRaw[reasoningField]
-		if (typeof reasoningValue === 'string') reasoning = reasoningValue
-		else if (reasoningValue === null) reasoning = null
-	}
-
-	const toolCallsRaw = messageRaw['tool_calls']
-	const toolCalls: ToolCall[] = []
-	if (Array.isArray(toolCallsRaw)) {
-		let index = 0
-		for (const tc of toolCallsRaw) {
-			if (!isObject(tc)) continue
-			const idValue = tc['id']
-			const fnRaw = tc['function']
-			if (!isObject(fnRaw)) continue
-			const nameValue = fnRaw['name']
-			const argsValue = fnRaw['arguments']
-			if (typeof nameValue !== 'string') continue
-			const argsString = typeof argsValue === 'string' ? argsValue : JSON.stringify(argsValue)
-			toolCalls.push({
-				id: typeof idValue === 'string' ? idValue : `call_${index}`,
-				type: 'function',
-				function: { name: nameValue, arguments: argsString },
-			})
-			index++
-		}
-	}
-
-	// finish_reason is read before usage so it sits with the rest of the choice-derived fields; absent when the endpoint omits it, so a reviewer can distinguish "model stopped" from "field missing".
-	const finishReasonValue = firstChoice['finish_reason']
-	const finishReason = typeof finishReasonValue === 'string' ? finishReasonValue : undefined
-
-	const usageRaw = record['usage']
-	let promptTokens = 0
-	let completionTokens = 0
-	let cachedPromptTokens: number | undefined
-	if (isObject(usageRaw)) {
-		const pt = usageRaw['prompt_tokens']
-		const ct = usageRaw['completion_tokens']
-		if (typeof pt === 'number') promptTokens = pt
-		if (typeof ct === 'number') completionTokens = ct
-		// OpenAI exposes the cached share of the prompt as usage.prompt_tokens_details.cached_tokens; it is already counted inside prompt_tokens, so we surface it as a sub-field rather than adding it on top.
-		const promptDetails = usageRaw['prompt_tokens_details']
-		if (isObject(promptDetails)) {
-			const cached = promptDetails['cached_tokens']
-			if (typeof cached === 'number') cachedPromptTokens = cached
-		}
-	}
-
-	const usage: LlmUsage = { promptTokens, completionTokens }
-	if (cachedPromptTokens !== undefined) usage.cachedPromptTokens = cachedPromptTokens
-
-	const parsedSuccess: ParsedSuccess = {
-		kind: 'success',
-		content,
-		reasoning,
-		toolCalls,
-		usage,
-	}
-	if (finishReason !== undefined) parsedSuccess.finishReason = finishReason
-	return parsedSuccess
-}
-
-function detectContextBudgetExceeded(status: number, errorBody: string, data: unknown, contextWindow: number): LlmCallResult | undefined {
-	if (status !== 400 && status !== 413 && status !== 429) return undefined
-
-	const lowered = errorBody.toLowerCase()
-	const contextKeywords = [
-		'context',
-		'too long',
-		'maximum context',
-		'context_length',
-		'context length',
-		'reduce the length',
-		'prompt is too long',
-		'token limit',
-	]
-	let looksLikeContext = false
-	for (const keyword of contextKeywords) {
-		if (lowered.includes(keyword)) {
-			looksLikeContext = true
-			break
-		}
-	}
-	if (!looksLikeContext) return undefined
-
-	let promptTokens = 0
-	const record = asRecord(data)
-	if (record) {
-		const errorInner = record['error']
-		const errorRecord = asRecord(errorInner)
-		if (errorRecord) {
-			const promptTokensRaw = errorRecord['prompt_tokens']
-			if (typeof promptTokensRaw === 'number') promptTokens = promptTokensRaw
-		}
-		const usageRaw = record['usage']
-		const usageRecord = asRecord(usageRaw)
-		if (usageRecord) {
-			const pt = usageRecord['prompt_tokens']
-			if (typeof pt === 'number') promptTokens = pt
-		}
-	}
-	return { kind: 'context_budget_exceeded', promptTokens, contextWindow }
-}
-
 type ParsedClassification =
 	| { kind: 'accept' }
 	| { kind: 'fail_immediately'; message: string }
 	| { kind: 'fail_retryable'; message: string }
 
-// A 200 response can still carry a failed or degenerate completion: llama.cpp reports finish_reason "error" inside a 200 body, and a thinking model can burn the entire completion budget on reasoning before any content is emitted.
-// Classifying after parse routes these to the retry loop or an immediate failure instead of a silent empty turn.
+// A completed stream can still be degenerate: a thinking model can burn the entire completion budget on reasoning before any content is emitted. Classifying after the terminal mapping routes these to the retry loop or an immediate failure instead of a silent empty turn.
 // "length" with no content fails without retrying because a retry would exhaust the same budget again — the operator's lever is the maxTokens deployment setting.
 // Non-empty content under "length" is a truncated-but-real response, and empty content with tool calls still drives the turn, so both remain successes.
 function classifyParsedResponse(parsed: ParsedSuccess): ParsedClassification {
-	if (parsed.finishReason === 'error') {
-		return { kind: 'fail_retryable', message: 'endpoint reported finish_reason: error' }
-	}
 	const hasContent = parsed.content !== undefined && parsed.content.trim() !== ''
 	if (hasContent || parsed.toolCalls.length > 0) return { kind: 'accept' }
 	if (parsed.finishReason === 'length') {
@@ -232,38 +96,68 @@ function classifyParsedResponse(parsed: ParsedSuccess): ParsedClassification {
 	return { kind: 'fail_retryable', message: 'empty response (no content, no tool calls)' }
 }
 
+// Stream-phase failures never retry (a fresh attempt would re-bill reasoning and risk duplicate tool calls), so the message carries what the accumulated state can tell a reviewer: the observed terminal kind and whether any deltas landed before the failure.
+function streamFailureMessage(snapshot: ResponsesStreamSnapshot): string {
+	const deltaDetail = snapshot.items.size === 0 ? 'no deltas received' : `deltas received for ${snapshot.items.size} item(s)`
+	if (snapshot.terminal === 'error') return `SSE stream error: ${snapshot.error ?? 'unknown stream error'} (${deltaDetail})`
+	return `SSE stream ended without a terminal event (${deltaDetail})`
+}
+
+// Folds one 2xx SSE stream to its mapped call result. Reading stops at the first terminal marker — the [DONE] sentinel or an accumulated terminal event — and the reader is cancelled so the underlying connection is released without draining the tail. The stream's last line may lack its terminator, so the assembler is drained before declaring the stream terminal-less.
+async function consumeResponsesStream(stream: ReadableStream<Uint8Array>): Promise<LlmCallResult> {
+	const decoder = new TextDecoder()
+	const assembler = createSseLineAssembler()
+	const accumulator = createResponsesStreamAccumulator()
+	const reader = stream.getReader()
+
+	function applyPayload(payload: SseDataPayload): boolean {
+		if (payload.kind === 'skip') return false
+		if (payload.kind === 'done') return true
+		if (payload.kind === 'error') accumulator.recordError(payload.value)
+		else accumulator.apply(payload.value)
+		return accumulator.snapshot().terminal !== 'none'
+	}
+
+	let reachedTerminal = false
+	while (!reachedTerminal) {
+		const chunk = await reader.read()
+		if (chunk.done) break
+		for (const line of assembler.feed(decoder.decode(chunk.value, { stream: true }))) {
+			if (applyPayload(parseSseDataPayload(line))) {
+				reachedTerminal = true
+				break
+			}
+		}
+	}
+	if (!reachedTerminal) {
+		for (const line of assembler.finish()) applyPayload(parseSseDataPayload(line))
+	}
+	await reader.cancel()
+
+	const snapshot = accumulator.snapshot()
+	if (snapshot.terminal === 'none' || snapshot.terminal === 'error') return { kind: 'llm_unavailable', message: streamFailureMessage(snapshot) }
+	// markTerminal only records a terminal together with its response payload, so this guard is unreachable by construction; the type still allows the absence and the failure mode is a silent crash if it were ignored.
+	if (snapshot.response === undefined) return { kind: 'llm_unavailable', message: `SSE stream terminal ${snapshot.terminal} carried no response payload` }
+	return mapTerminalResponseToCallResult(snapshot.response)
+}
+
 // The API key is a runtime credential (ORCHESTRATOR_API_KEY), so it rides as its own argument rather than a field on the model config — the deployment config file must never carry it. The caller takes the resolved model: the executor only ever runs with a complete model.
 export function createLlmCaller(model: ResolvedModelConfig, apiKey: string | undefined, dependencies: LlmCallerDependencies): LlmCaller {
-	const url = `${model.apiBase}/chat/completions`
-
 	async function call(request: LlmRequest): Promise<LlmCallResult> {
+		const mappedHistory = mapHistoryToResponsesInput(request.messages)
 		const body: Record<string, unknown> = {
 			model: model.name,
-			messages: request.messages,
+			input: mappedHistory.input,
+			tools: mapToolManifestsToResponsesTools(request.tools ?? []),
+			tool_choice: 'auto',
+			stream: true,
 		}
-		if (request.tools !== undefined && request.tools.length > 0) {
-			body['tools'] = request.tools.map((t) => ({
-				type: 'function',
-				function: {
-					name: t.name,
-					description: t.description,
-					parameters: t.parameters,
-				},
-			}))
-		}
-		if (model.generation.temperature !== undefined) {
-			body['temperature'] = model.generation.temperature
-		}
-		if (model.generation.maxTokens !== undefined) {
-			body['max_tokens'] = model.generation.maxTokens
-		}
+		if (mappedHistory.instructions !== undefined) body['instructions'] = mappedHistory.instructions
+		if (model.generation.maxTokens !== undefined) body['max_output_tokens'] = model.generation.maxTokens
+		if (model.generation.temperature !== undefined) body['temperature'] = model.generation.temperature
 
-		const headers: Record<string, string> = {
-			'Content-Type': 'application/json',
-		}
-		if (apiKey !== undefined && apiKey !== '') {
-			headers['Authorization'] = `Bearer ${apiKey}`
-		}
+		const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+		if (apiKey !== undefined && apiKey !== '') headers['Authorization'] = `Bearer ${apiKey}`
 
 		const maxAttempts = 3
 		let attempt = 0
@@ -272,13 +166,9 @@ export function createLlmCaller(model: ResolvedModelConfig, apiKey: string | und
 		while (attempt < maxAttempts) {
 			attempt++
 
-			let response: LlmFetchResponse
+			let response: LlmStreamResponse
 			try {
-				response = await dependencies.llmFetch(url, {
-					method: 'POST',
-					headers,
-					body: JSON.stringify(body),
-				})
+				response = await dependencies.llmFetch({ url: `${model.apiBase}/responses`, method: 'POST', headers, body: JSON.stringify(body) })
 			} catch (error) {
 				lastError = error instanceof Error ? error.message : String(error)
 				if (attempt >= maxAttempts) {
@@ -288,55 +178,33 @@ export function createLlmCaller(model: ResolvedModelConfig, apiKey: string | und
 				continue
 			}
 
-			if (response.status >= 200 && response.status < 300) {
-				let data: unknown
-				try {
-					data = JSON.parse(response.body)
-				} catch {
-					return { kind: 'llm_unavailable', message: 'Failed to parse JSON response' }
-				}
-				const parsed = parseOpenAiResponse(data, model.reasoningField)
-				if (parsed.kind === 'parse_error') {
-					return { kind: 'llm_unavailable', message: parsed.message }
-				}
-				const classification = classifyParsedResponse(parsed)
-				if (classification.kind === 'fail_immediately') {
-					return { kind: 'llm_unavailable', message: classification.message }
-				}
-				if (classification.kind === 'fail_retryable') {
-					lastError = classification.message
+			if ('errorBody' in response) {
+				const contextExceeded = detectContextBudgetExceeded(response.status, response.errorBody, model.contextWindow)
+				if (contextExceeded !== undefined) return contextExceeded
+				if (response.status >= 500 || response.status === 429) {
+					lastError = `HTTP ${response.status}: ${response.errorBody}`
 					if (attempt >= maxAttempts) {
 						return { kind: 'llm_unavailable', message: lastError }
 					}
 					await dependencies.sleep(Math.pow(2, attempt) * 100)
 					continue
 				}
-				return parsed
+				return { kind: 'llm_unavailable', message: `HTTP ${response.status}: ${response.errorBody}` }
 			}
 
-			const errorBodyText = response.body
-			let parsedErrorBody: unknown
-			try {
-				parsedErrorBody = JSON.parse(errorBodyText)
-			} catch {
-				parsedErrorBody = undefined
-			}
+			const streamed = await consumeResponsesStream(response.stream)
+			if (streamed.kind !== 'success') return streamed
 
-			const contextExceeded = detectContextBudgetExceeded(response.status, errorBodyText, parsedErrorBody, model.contextWindow)
-			if (contextExceeded !== undefined) {
-				return contextExceeded
+			const classification = classifyParsedResponse(streamed)
+			if (classification.kind === 'accept') return streamed
+			if (classification.kind === 'fail_immediately') {
+				return { kind: 'llm_unavailable', message: classification.message }
 			}
-
-			if (response.status >= 500 || response.status === 429) {
-				lastError = `HTTP ${response.status}: ${errorBodyText}`
-				if (attempt >= maxAttempts) {
-					return { kind: 'llm_unavailable', message: lastError }
-				}
-				await dependencies.sleep(Math.pow(2, attempt) * 100)
-				continue
+			lastError = classification.message
+			if (attempt >= maxAttempts) {
+				return { kind: 'llm_unavailable', message: lastError }
 			}
-
-			return { kind: 'llm_unavailable', message: `HTTP ${response.status}: ${errorBodyText}` }
+			await dependencies.sleep(Math.pow(2, attempt) * 100)
 		}
 
 		return { kind: 'llm_unavailable', message: `Max retries exceeded: ${lastError ?? 'unknown'}` }

@@ -37,7 +37,6 @@ export interface ModelConfig {
 	name?: string
 	apiBase: string
 	contextWindow?: number
-	reasoningField?: string
 	generation: GenerationConfig
 }
 
@@ -46,7 +45,6 @@ export interface ResolvedModelConfig {
 	name: string
 	apiBase: string
 	contextWindow: number
-	reasoningField?: string
 	generation: GenerationConfig
 }
 
