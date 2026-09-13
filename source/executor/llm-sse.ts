@@ -1,10 +1,9 @@
-import type { LlmCallResult, LlmUsage } from './llm.js'
-import type { Message, ToolCall, ToolManifest } from './types.js'
+import type { LlmCallResult, LlmUsage, Message, ToolCall, ToolManifest } from './types.js'
 import { isObject } from './validation.js'
 
-export const SSE_MAX_LINE_CHARS = 1_048_576
+export const SSE_MAX_LINE_CHARS = 16 * 1024 * 1024
 
-// The cap bounds unbounded buffering: a stream that keeps emitting without a terminator must not grow memory for the lifetime of the call. Exceeding it is a mid-stream protocol failure, so the cleanest mechanism is a dedicated error the caller classifies as terminal — an {oversized: true} return variant would thread a third outcome through every call site that no legitimate stream produces. A terminated line longer than the cap is still delivered: it is never buffered, so it cannot grow without bound.
+// The cap bounds the unterminated tail's memory: a stream that keeps emitting without a terminator must not grow the buffer for the lifetime of the call. Any line that arrives terminated is delivered regardless of length, and the 16 MiB backstop sits far above any legitimate line (the terminal response.completed event carries the whole response object — at a plausible max_output_tokens a worst-case line is a few hundred KB) — so a tail crossing the cap is a runaway stream, not a large event. Exceeding it is a mid-stream protocol failure, so the cleanest mechanism is a dedicated error the caller classifies as terminal — an {oversized: true} return variant would thread a third outcome through every call site that no legitimate stream produces.
 export class OversizedSseLineError extends Error {
 	constructor(
 		public bufferedChars: number,
@@ -57,7 +56,7 @@ function safeJsonParse(text: string): { ok: true; value: unknown } | { ok: false
 	}
 }
 
-// Takes one assembled SSE line whole (the assembler is field-agnostic): the data: field prefix is recognized here per the SSE spec (one optional leading space), and every non-data line — event:, id:, retry:, comments, blanks — skips. PPQ and llama.cpp send only bare data lines, but real streams still carry the other fields.
+// Takes one assembled SSE line whole (the assembler is field-agnostic): the data: field prefix is recognized here per the SSE spec (one optional leading space), and every non-data line — event:, id:, retry:, comments, blanks — skips. The spec allows one event's data to span multiple data: lines, but each line is parsed independently here, so a multi-line event surfaces as fragments that skip as invalid JSON — a deliberate limitation, since both target stacks send single-line data. PPQ and llama.cpp send only bare data lines, but real streams still carry the other fields.
 export function parseSseDataPayload(line: string): SseDataPayload {
 	if (!line.startsWith('data:')) return { kind: 'skip' }
 	const rawValue = line.slice('data:'.length)
@@ -65,7 +64,7 @@ export function parseSseDataPayload(line: string): SseDataPayload {
 	if (payload === '[DONE]') return { kind: 'done' }
 	const parsed = safeJsonParse(payload)
 	if (!parsed.ok || !isObject(parsed.value)) return { kind: 'skip' }
-	// A Responses event always carries a string type; a chat-shaped {"error": ...} line (llama.cpp's mid-stream failure shape) has none, so type wins when both are somehow present.
+	// A Responses event always carries a string type; a bare {"error": ...} line (llama.cpp's mid-stream failure shape) has none, so type wins when both are somehow present.
 	if (typeof parsed.value['type'] === 'string') return { kind: 'event', value: parsed.value }
 	if ('error' in parsed.value) return { kind: 'error', value: parsed.value }
 	return { kind: 'skip' }
@@ -192,7 +191,8 @@ export function createResponsesStreamAccumulator(): ResponsesStreamAccumulator {
 	}
 
 	function snapshot(): ResponsesStreamSnapshot {
-		return { terminal, response: terminalResponse, error: errorMessage, items }
+		// A copy, so a caller holding a snapshot cannot mutate the accumulator's item state through it.
+		return { terminal, response: terminalResponse, error: errorMessage, items: new Map(items) }
 	}
 
 	return { apply, recordError, snapshot }
@@ -203,7 +203,7 @@ export interface MappedResponsesHistory {
 	input: unknown[]
 }
 
-// The engine guarantees exactly one leading system message, so a system message anywhere else is a bug to fail on, not a shape to bend the wire format around. Reasoning is never sent back, matching the existing history behavior.
+// The engine guarantees exactly one leading system message, so a system message anywhere else is a bug to fail on, not a shape to bend the wire format around. Reasoning is never sent back: it is the model's own scratch work and has no input slot on the wire.
 export function mapHistoryToResponsesInput(messages: Message[]): MappedResponsesHistory {
 	let instructions: string | undefined
 	const input: unknown[] = []
@@ -218,8 +218,8 @@ export function mapHistoryToResponsesInput(messages: Message[]): MappedResponses
 			continue
 		}
 		if (message.role === 'assistant') {
-			// An empty-content assistant turn carries nothing on the wire; a tool-call turn is the common case.
-			if (message.content !== '') input.push({ role: 'assistant', content: [{ type: 'output_text', text: message.content }] })
+			// An empty-content assistant turn carries nothing on the wire; a tool-call turn is the common case. The role:'assistant' input item must carry the type:'message' discriminator — the wire's input-item schema requires it the same way output items do.
+			if (message.content !== '') input.push({ type: 'message', role: 'assistant', content: [{ type: 'output_text', text: message.content }] })
 			for (const toolCall of message.tool_calls ?? []) {
 				input.push({ type: 'function_call', call_id: toolCall.id, name: toolCall.function.name, arguments: toolCall.function.arguments })
 			}
@@ -265,7 +265,7 @@ function argumentsAsString(value: unknown): string {
 	return serialized ?? ''
 }
 
-// Builds the call result from the authoritative terminal response payload (response.completed / response.incomplete), not from the deltas. Every field comes from external wire data, so each is read through a guard and a missing field degrades to the same default the chat-completions parser produces.
+// Builds the call result from the authoritative terminal response payload (response.completed / response.incomplete), not from the deltas. Every field comes from external wire data, so each is read through a guard and a missing field degrades to an empty default.
 export function mapTerminalResponseToCallResult(response: Record<string, unknown>): LlmCallResult {
 	const output = Array.isArray(response['output']) ? response['output'] : []
 	const contentParts: string[] = []
@@ -277,7 +277,10 @@ export function mapTerminalResponseToCallResult(response: Record<string, unknown
 		if (item['type'] === 'message') {
 			contentParts.push(...collectTextParts(item['content'], 'output_text'))
 		} else if (item['type'] === 'reasoning') {
-			reasoningParts.push(...collectTextParts(item['content'], 'reasoning_text'))
+			// Some stacks report reasoning only as summary parts (no raw reasoning_text content), so an item whose content yields nothing falls back to its summary_text parts.
+			const contentReasoning = collectTextParts(item['content'], 'reasoning_text')
+			if (contentReasoning.length > 0) reasoningParts.push(...contentReasoning)
+			else reasoningParts.push(...collectTextParts(item['summary'], 'summary_text'))
 		} else if (item['type'] === 'function_call') {
 			hasFunctionCall = true
 			const name = item['name']
@@ -324,7 +327,7 @@ const CONTEXT_ERROR_KEYWORDS: readonly string[] = [
 	'token limit',
 ]
 
-// Port of the chat-completions heuristic (keyword gate over statuses 400/413/429, preserved exactly), extended for the Responses-era error shapes: the structured prompt_tokens paths come first, then the count embedded in error.message, then PPQ's nested upstream error under error.metadata.raw.
+// A keyword gate over statuses 400/413/429, extended for the Responses-era error shapes: the structured prompt_tokens paths come first, then the count embedded in error.message, then PPQ's nested upstream error under error.metadata.raw.
 export function detectContextBudgetExceeded(status: number, errorBody: string, contextWindow: number): LlmCallResult | undefined {
 	if (status !== 400 && status !== 413 && status !== 429) return undefined
 	const lowered = errorBody.toLowerCase()
@@ -356,16 +359,23 @@ function extractPromptTokens(errorBody: string): number {
 	return promptTokensFromMetadataRaw(errorRecord) ?? 0
 }
 
-// The last "<n> tokens" occurrence wins: providers phrase the failure as "<window> tokens ... <requested> tokens", and the requested (prompt) count comes last.
-function promptTokensFromText(value: unknown): number | undefined {
-	if (typeof value !== 'string') return undefined
-	let promptTokens: number | undefined
-	for (const match of value.matchAll(/(\d[\d,]*)\s*tokens?\b/gi)) {
+// Takes the last capture's digit count, commas stripped, so repeated scans can layer: the later pattern's matches overwrite the earlier scan's, keeping whichever phrasing the message actually used.
+function lastTokenCount(value: string, pattern: RegExp): number | undefined {
+	let last: number | undefined
+	for (const match of value.matchAll(pattern)) {
 		const digits = match[1]
 		if (digits === undefined) continue
-		promptTokens = Number.parseInt(digits.replaceAll(',', ''), 10)
+		last = Number.parseInt(digits.replaceAll(',', ''), 10)
 	}
-	return promptTokens
+	return last
+}
+
+// The last occurrence wins: providers phrase the failure as "<window> tokens ... <requested> tokens", and the requested (prompt) count comes last. The parenthesized "Requested tokens (N)" form is scanned after the prose form, so it wins when a message carries both phrasings.
+function promptTokensFromText(value: unknown): number | undefined {
+	if (typeof value !== 'string') return undefined
+	const prose = lastTokenCount(value, /(\d[\d,]*)\s*tokens?\b/gi)
+	const parenthesized = lastTokenCount(value, /tokens\s*\(([\d,]+)\)/gi)
+	return parenthesized ?? prose
 }
 
 // PPQ wraps the upstream provider's error body as a JSON string (or plain text) under error.metadata.raw; the wrapped copy is probed with the same structured paths before falling back to a text scan.

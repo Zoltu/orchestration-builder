@@ -135,6 +135,32 @@ export interface ToolCall {
 	}
 }
 
+// The LLM caller's request and result types, homed here with the other shared wire types so llm-sse.ts (which produces the results) imports them from here rather than back out of llm.ts.
+export interface LlmRequest {
+	messages: Message[]
+	tools?: ToolManifest[]
+}
+
+export interface LlmUsage {
+	promptTokens: number
+	completionTokens: number
+	// Cached prompt tokens reported by the endpoint via usage.prompt_tokens_details.cached_tokens, when present. Already included in promptTokens; split out because cached tokens are billed at a different (usually much lower) rate than uncached prompt tokens.
+	cachedPromptTokens?: number
+}
+
+export type LlmCallResult =
+	| {
+		kind: 'success'
+		content?: string
+		reasoning?: string | null
+		toolCalls: ToolCall[]
+		usage: LlmUsage
+		// The endpoint's finish reason (e.g. "stop", "length", "tool_calls"), so a reviewer can tell why the model stopped emitting. Absent when the endpoint omits the field, so "absent" is distinguishable from a default like "".
+		finishReason?: string
+	}
+	| { kind: 'context_budget_exceeded'; promptTokens: number; contextWindow: number }
+	| { kind: 'llm_unavailable'; message: string }
+
 export type ErrorKind =
 	| 'invalid_tool_call'
 	| 'unknown_tool'

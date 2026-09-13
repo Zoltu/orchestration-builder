@@ -55,6 +55,16 @@ describe('createSseLineAssembler', () => {
 		expect(assembler.finish()).toEqual([])
 	})
 
+	test('a >1 MiB line fed across many small chunks is delivered as one line once terminated, without throwing', () => {
+		const assembler = createSseLineAssembler()
+		const line = `data: ${'x'.repeat(1024 * 1024 + 17)}`
+		const lines: string[] = []
+		for (let start = 0; start < line.length; start += 4096) lines.push(...assembler.feed(line.slice(start, start + 4096)))
+		expect(lines).toEqual([])
+		expect(assembler.feed('\n')).toEqual([line])
+		expect(assembler.finish()).toEqual([])
+	})
+
 	test('an unterminated line at exactly the cap does not throw', () => {
 		const assembler = createSseLineAssembler()
 		expect(() => assembler.feed('x'.repeat(SSE_MAX_LINE_CHARS))).not.toThrow()
@@ -206,6 +216,13 @@ describe('createResponsesStreamAccumulator event folding', () => {
 		expect(snapshot.terminal).toBe('incomplete')
 		expect(snapshot.items.size).toBe(0)
 	})
+
+	test('the snapshot carries a copy of the item map, so mutating it does not touch the accumulator', () => {
+		const accumulator = accumulatorWithDeltas()
+		const snapshot = accumulator.snapshot()
+		snapshot.items.clear()
+		expect(accumulator.snapshot().items.size).toBe(1)
+	})
 })
 
 describe('createResponsesStreamAccumulator recordError', () => {
@@ -246,7 +263,7 @@ describe('mapHistoryToResponsesInput', () => {
 			{ role: 'user', content: [{ type: 'input_text', text: 'List the files.' }] },
 			{ type: 'function_call', call_id: 'call_9', name: 'list_files', arguments: '{}' },
 			{ type: 'function_call_output', call_id: 'call_9', output: 'a.ts, b.ts' },
-			{ role: 'assistant', content: [{ type: 'output_text', text: 'The files are a.ts and b.ts.' }] },
+			{ type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'The files are a.ts and b.ts.' }] },
 		])
 	})
 
@@ -262,7 +279,7 @@ describe('mapHistoryToResponsesInput', () => {
 			},
 		])
 		expect(mapped.input).toEqual([
-			{ role: 'assistant', content: [{ type: 'output_text', text: 'Let me check.' }] },
+			{ type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'Let me check.' }] },
 			{ type: 'function_call', call_id: 'c1', name: 'read_file', arguments: '{"path":"a.ts"}' },
 			{ type: 'function_call', call_id: 'c2', name: 'write_file', arguments: '{"path":"b.ts"}' },
 		])
@@ -364,6 +381,26 @@ describe('mapTerminalResponseToCallResult', () => {
 		})
 	})
 
+	test('a reasoning item whose content yields nothing falls back to its summary_text parts', () => {
+		const response: Record<string, unknown> = {
+			status: 'completed',
+			output: [{ type: 'reasoning', summary: [{ type: 'summary_text', text: 'summarized ' }, { type: 'summary_text', text: 'thought' }] }],
+		}
+		const result = mapTerminalResponseToCallResult(response)
+		if (result.kind !== 'success') throw new Error(`expected success, got ${result.kind}`)
+		expect(result.reasoning).toBe('summarized thought')
+	})
+
+	test('a reasoning item with content parts ignores its summary parts', () => {
+		const response: Record<string, unknown> = {
+			status: 'completed',
+			output: [{ type: 'reasoning', content: [{ type: 'reasoning_text', text: 'raw thought' }], summary: [{ type: 'summary_text', text: 'summary' }] }],
+		}
+		const result = mapTerminalResponseToCallResult(response)
+		if (result.kind !== 'success') throw new Error(`expected success, got ${result.kind}`)
+		expect(result.reasoning).toBe('raw thought')
+	})
+
 	test('usage without input_tokens_details carries no cached prompt tokens', () => {
 		const response: Record<string, unknown> = { status: 'completed', output: [], usage: { input_tokens: 7, output_tokens: 3 } }
 		const result = mapTerminalResponseToCallResult(response)
@@ -421,6 +458,16 @@ describe('detectContextBudgetExceeded', () => {
 	test('a token count embedded in error.message is extracted, last occurrence winning', () => {
 		const body = JSON.stringify({ error: { message: "This model's maximum context length is 4096 tokens. However, you requested 5000 tokens." } })
 		expect(detectContextBudgetExceeded(400, body, 4096)).toEqual({ kind: 'context_budget_exceeded', promptTokens: 5000, contextWindow: 4096 })
+	})
+
+	test('llama.cpp\'s "Requested tokens (N)" phrasing is extracted with commas stripped', () => {
+		const body = JSON.stringify({ error: { message: 'Requested tokens (4,242) exceed the context window' } })
+		expect(detectContextBudgetExceeded(400, body, 1000)).toEqual({ kind: 'context_budget_exceeded', promptTokens: 4242, contextWindow: 1000 })
+	})
+
+	test('when a message carries both phrasings, the parenthesized requested count wins over the window count', () => {
+		const body = JSON.stringify({ error: { message: 'Requested tokens (1269) exceed the context window of 512 tokens' } })
+		expect(detectContextBudgetExceeded(400, body, 512)).toEqual({ kind: 'context_budget_exceeded', promptTokens: 1269, contextWindow: 512 })
 	})
 
 	test('a PPQ metadata.raw nested as a JSON string is parsed for error.prompt_tokens', () => {

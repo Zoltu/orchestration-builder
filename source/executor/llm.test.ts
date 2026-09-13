@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import { createLlmCaller, type LlmFetch, type LlmFetchRequest, type LlmStreamResponse, type Sleep } from './llm.ts'
+import { SSE_MAX_LINE_CHARS } from './llm-sse.ts'
 import type { ResolvedModelConfig } from './types.js'
 
 const MODEL: ResolvedModelConfig = {
@@ -9,7 +10,7 @@ const MODEL: ResolvedModelConfig = {
 	generation: { temperature: 0.2, maxTokens: 512 },
 }
 
-// The credential is a runtime argument since it left the model config; tests that exercise the auth header pass it explicitly.
+// The credential is a runtime argument, never a field on the model config; tests that exercise the auth header pass it explicitly.
 const API_KEY = 'secret-key'
 
 // A fake wire leaf plus a fake sleep: SSE streams (or an error-body response, or a queued throw for a network failure) are handed back per request, every request is recorded, and backoff durations are collected instead of slept.
@@ -20,7 +21,7 @@ function createFakeWire(responses: Array<LlmStreamResponse | Error>) {
 	const llmFetch: LlmFetch = (request) => {
 		requests.push(request)
 		const next = queue.shift()
-		if (next === undefined) return Promise.resolve({ status: 500, errorBody: 'unscripted response' })
+		if (next === undefined) return Promise.resolve({ kind: 'http_error', status: 500, errorBody: 'unscripted response' })
 		if (next instanceof Error) return Promise.reject(next)
 		return Promise.resolve(next)
 	}
@@ -45,11 +46,11 @@ function sseStream(chunks: Uint8Array[], onCancel?: () => void): ReadableStream<
 }
 
 function streamResponse(chunks: Uint8Array[], onCancel?: () => void): LlmStreamResponse {
-	return { status: 200, stream: sseStream(chunks, onCancel) }
+	return { kind: 'stream', status: 200, stream: sseStream(chunks, onCancel) }
 }
 
 function errorResponse(status: number, errorBody: string): LlmStreamResponse {
-	return { status, errorBody }
+	return { kind: 'http_error', status, errorBody }
 }
 
 function encodedChunks(lines: string[]): Uint8Array[] {
@@ -311,6 +312,57 @@ describe('createLlmCaller stream consumption', () => {
 		const result = await caller.call({ messages: [] })
 		if (result.kind !== 'success') throw new Error(`expected success, got ${result.kind}`)
 		expect(result.content).toBe('héllo')
+	})
+
+	test('a stream whose read rejects mid-consumption maps to llm_unavailable instead of throwing', async () => {
+		// The source errors after the first chunk, so the second read() rejects. An errored stream's cancel() rejects too (the streams spec routes cancel on an errored stream to the stored error), so this also proves the guarded cancel cannot mask the mapped result with an unhandled rejection.
+		const stream = new ReadableStream<Uint8Array>({
+			start(controller) {
+				controller.enqueue(new TextEncoder().encode(dataLine({ type: 'output_text.delta', item_id: 'm1', delta: 'partial' })))
+				controller.error(new Error('connection reset'))
+			},
+		})
+		const wire = createFakeWire([{ kind: 'stream', status: 200, stream }])
+		const caller = createLlmCaller(MODEL, API_KEY, { llmFetch: wire.llmFetch, sleep: wire.sleep })
+		const result = await caller.call({ messages: [] })
+		if (result.kind !== 'llm_unavailable') throw new Error(`expected llm_unavailable, got ${result.kind}`)
+		expect(result.message).toContain('SSE stream read failed')
+		expect(result.message).toContain('connection reset')
+		// Buffered stream content never leaks into the failure message.
+		expect(result.message).not.toContain('partial')
+		expect(wire.requests).toHaveLength(1)
+		expect(wire.sleeps).toHaveLength(0)
+	})
+
+	test('an unterminated over-cap line maps to llm_unavailable instead of throwing and cancels the reader', async () => {
+		let cancelled = false
+		// The trailing chunk keeps the stream undrained when the failure lands, so the reader's cancel reaches the underlying source.
+		const wire = createFakeWire([streamResponse([
+			...encodedChunks([`data: ${'x'.repeat(SSE_MAX_LINE_CHARS + 1)}`]),
+			...encodedChunks(['data: tail\n\n']),
+		], () => {
+			cancelled = true
+		})])
+		const caller = createLlmCaller(MODEL, API_KEY, { llmFetch: wire.llmFetch, sleep: wire.sleep })
+		const result = await caller.call({ messages: [] })
+		if (result.kind !== 'llm_unavailable') throw new Error(`expected llm_unavailable, got ${result.kind}`)
+		expect(result.message).toContain('SSE protocol failure')
+		expect(result.message).not.toContain('xxxxx')
+		expect(cancelled).toBe(true)
+		expect(wire.requests).toHaveLength(1)
+		expect(wire.sleeps).toHaveLength(0)
+	})
+
+	test('a stream ending mid-UTF-8 flushes the dangling sequence into the final partial line', async () => {
+		// The tail line has no terminator and its é is cut after the first byte, so the final no-argument decode() flush is what hands the dangling sequence to the assembler; the flushed replacement character never parses, so the result is the same terminal-less failure either way — this pins the flush path against crashes and truncation regressions.
+		const bytes = new TextEncoder().encode('data: héllo')
+		const wire = createFakeWire([streamResponse([
+			...encodedChunks([dataLine({ type: 'response.created' })]),
+			bytes.slice(0, 'data: h'.length + 1),
+		])])
+		const caller = createLlmCaller(MODEL, API_KEY, { llmFetch: wire.llmFetch, sleep: wire.sleep })
+		const result = await caller.call({ messages: [] })
+		expect(result).toEqual({ kind: 'llm_unavailable', message: 'SSE stream ended without a terminal event (no deltas received)' })
 	})
 })
 

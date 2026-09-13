@@ -1,30 +1,8 @@
-import type { Message, ResolvedModelConfig, ToolCall, ToolManifest } from './types.js'
-import { createResponsesStreamAccumulator, createSseLineAssembler, detectContextBudgetExceeded, mapHistoryToResponsesInput, mapTerminalResponseToCallResult, mapToolManifestsToResponsesTools, parseSseDataPayload, type ResponsesStreamSnapshot, type SseDataPayload } from './llm-sse.js'
+import type { LlmCallResult, LlmRequest, ResolvedModelConfig } from './types.js'
+import { createResponsesStreamAccumulator, createSseLineAssembler, detectContextBudgetExceeded, mapHistoryToResponsesInput, mapTerminalResponseToCallResult, mapToolManifestsToResponsesTools, OversizedSseLineError, parseSseDataPayload, type ResponsesStreamSnapshot, type SseDataPayload } from './llm-sse.js'
 
-export interface LlmRequest {
-	messages: Message[]
-	tools?: ToolManifest[]
-}
-
-export interface LlmUsage {
-	promptTokens: number
-	completionTokens: number
-	// Cached prompt tokens reported by the endpoint via usage.prompt_tokens_details.cached_tokens, when present. Already included in promptTokens; split out because cached tokens are billed at a different (usually much lower) rate than uncached prompt tokens.
-	cachedPromptTokens?: number
-}
-
-export type LlmCallResult =
-	| {
-		kind: 'success'
-		content?: string
-		reasoning?: string | null
-		toolCalls: ToolCall[]
-		usage: LlmUsage
-		// The endpoint's finish reason (e.g. "stop", "length", "tool_calls"), so a reviewer can tell why the model stopped emitting. Absent when the endpoint omits the field, so "absent" is distinguishable from a default like "".
-		finishReason?: string
-	}
-	| { kind: 'context_budget_exceeded'; promptTokens: number; contextWindow: number }
-	| { kind: 'llm_unavailable'; message: string }
+// The shared LLM wire types live in types.ts (see it for the definitions); re-exported here so every import site keeps its path.
+export type { LlmCallResult, LlmRequest, LlmUsage } from './types.js'
 
 export interface LlmCaller {
 	call(request: LlmRequest): Promise<LlmCallResult>
@@ -39,8 +17,8 @@ export interface LlmFetchRequest {
 }
 
 export type LlmStreamResponse =
-	| { status: number; stream: ReadableStream<Uint8Array> }
-	| { status: number; errorBody: string }
+	| { kind: 'stream'; status: number; stream: ReadableStream<Uint8Array> }
+	| { kind: 'http_error'; status: number; errorBody: string }
 
 export type LlmFetch = (request: LlmFetchRequest) => Promise<LlmStreamResponse>
 
@@ -53,9 +31,9 @@ export function createLlmFetch(): LlmFetch {
 		})
 		// A 2xx without a body stream cannot drive a turn, so it is classified with the error bodies and reported as an unavailable endpoint rather than guessed into a success.
 		if (!response.ok || response.body === null) {
-			return { status: response.status, errorBody: await response.text() }
+			return { kind: 'http_error', status: response.status, errorBody: await response.text() }
 		}
-		return { status: response.status, stream: response.body }
+		return { kind: 'stream', status: response.status, stream: response.body }
 	}
 }
 
@@ -70,19 +48,17 @@ export interface LlmCallerDependencies {
 	sleep: Sleep
 }
 
-interface ParsedSuccess {
-	kind: 'success'
-	content?: string
-	reasoning?: string | null
-	toolCalls: ToolCall[]
-	usage: LlmUsage
-	finishReason?: string
-}
+type ParsedSuccess = Extract<LlmCallResult, { kind: 'success' }>
 
 type ParsedClassification =
 	| { kind: 'accept' }
 	| { kind: 'fail_immediately'; message: string }
 	| { kind: 'fail_retryable'; message: string }
+
+// Exponential backoff between retry attempts, scaled off the 1-based attempt number.
+function backoffMs(attempt: number): number {
+	return Math.pow(2, attempt) * 100
+}
 
 // A completed stream can still be degenerate: a thinking model can burn the entire completion budget on reasoning before any content is emitted. Classifying after the terminal mapping routes these to the retry loop or an immediate failure instead of a silent empty turn.
 // "length" with no content fails without retrying because a retry would exhaust the same budget again — the operator's lever is the maxTokens deployment setting.
@@ -103,7 +79,16 @@ function streamFailureMessage(snapshot: ResponsesStreamSnapshot): string {
 	return `SSE stream ended without a terminal event (${deltaDetail})`
 }
 
-// Folds one 2xx SSE stream to its mapped call result. Reading stops at the first terminal marker — the [DONE] sentinel or an accumulated terminal event — and the reader is cancelled so the underlying connection is released without draining the tail. The stream's last line may lack its terminator, so the assembler is drained before declaring the stream terminal-less.
+// Mid-stream crash diagnostics use the same safe shape — failure class, terminal state, delta counts — never buffered content.
+function streamCrashMessage(error: unknown, snapshot: ResponsesStreamSnapshot): string {
+	const terminalDetail = snapshot.terminal === 'none' ? 'no terminal event observed' : `terminal ${snapshot.terminal} observed`
+	const deltaDetail = snapshot.items.size === 0 ? 'no deltas received' : `deltas received for ${snapshot.items.size} item(s)`
+	if (error instanceof OversizedSseLineError) return `SSE protocol failure: ${error.message}; ${terminalDetail}; ${deltaDetail}`
+	const reason = error instanceof Error ? error.message : String(error)
+	return `SSE stream read failed: ${reason} (${terminalDetail}, ${deltaDetail})`
+}
+
+// Folds one 2xx SSE stream to its mapped call result. Reading stops at the first terminal marker — the [DONE] sentinel or an accumulated terminal event — and the reader is cancelled so the underlying connection is released without draining the tail. The stream's last line may lack its terminator, so the assembler is drained before declaring the stream terminal-less. A stream-phase failure (a rejected read, an over-cap line) maps to llm_unavailable instead of escaping: a throw out of here would reach run submission's fatal path and kill the run.
 async function consumeResponsesStream(stream: ReadableStream<Uint8Array>): Promise<LlmCallResult> {
 	const decoder = new TextDecoder()
 	const assembler = createSseLineAssembler()
@@ -118,21 +103,34 @@ async function consumeResponsesStream(stream: ReadableStream<Uint8Array>): Promi
 		return accumulator.snapshot().terminal !== 'none'
 	}
 
-	let reachedTerminal = false
-	while (!reachedTerminal) {
-		const chunk = await reader.read()
-		if (chunk.done) break
-		for (const line of assembler.feed(decoder.decode(chunk.value, { stream: true }))) {
-			if (applyPayload(parseSseDataPayload(line))) {
-				reachedTerminal = true
+	// The whole consumption phase sits in one catch because a mid-stream transport or protocol collapse is genuinely exceptional, not an expected shape to branch on; the catch only remaps the failure, it does not resume.
+	try {
+		let reachedTerminal = false
+		while (!reachedTerminal) {
+			const chunk = await reader.read()
+			if (chunk.done) {
+				// The no-argument decode flushes a trailing incomplete UTF-8 sequence the streaming decode held back, so the final partial line is not silently truncated.
+				for (const line of assembler.feed(decoder.decode())) {
+					if (applyPayload(parseSseDataPayload(line))) reachedTerminal = true
+				}
 				break
 			}
+			for (const line of assembler.feed(decoder.decode(chunk.value, { stream: true }))) {
+				if (applyPayload(parseSseDataPayload(line))) {
+					reachedTerminal = true
+					break
+				}
+			}
 		}
+		if (!reachedTerminal) {
+			for (const line of assembler.finish()) applyPayload(parseSseDataPayload(line))
+		}
+	} catch (error) {
+		return { kind: 'llm_unavailable', message: streamCrashMessage(error, accumulator.snapshot()) }
+	} finally {
+		// Cancel on every exit path so the connection is released. Cancel is called on a body that may have failed mid-write, so its own rejection is swallowed here to keep it from replacing (and masking) the mapped result.
+		await reader.cancel().catch(() => undefined)
 	}
-	if (!reachedTerminal) {
-		for (const line of assembler.finish()) applyPayload(parseSseDataPayload(line))
-	}
-	await reader.cancel()
 
 	const snapshot = accumulator.snapshot()
 	if (snapshot.terminal === 'none' || snapshot.terminal === 'error') return { kind: 'llm_unavailable', message: streamFailureMessage(snapshot) }
@@ -174,11 +172,11 @@ export function createLlmCaller(model: ResolvedModelConfig, apiKey: string | und
 				if (attempt >= maxAttempts) {
 					return { kind: 'llm_unavailable', message: `Network error after ${attempt} attempts: ${lastError}` }
 				}
-				await dependencies.sleep(Math.pow(2, attempt) * 100)
+				await dependencies.sleep(backoffMs(attempt))
 				continue
 			}
 
-			if ('errorBody' in response) {
+			if (response.kind === 'http_error') {
 				const contextExceeded = detectContextBudgetExceeded(response.status, response.errorBody, model.contextWindow)
 				if (contextExceeded !== undefined) return contextExceeded
 				if (response.status >= 500 || response.status === 429) {
@@ -186,17 +184,17 @@ export function createLlmCaller(model: ResolvedModelConfig, apiKey: string | und
 					if (attempt >= maxAttempts) {
 						return { kind: 'llm_unavailable', message: lastError }
 					}
-					await dependencies.sleep(Math.pow(2, attempt) * 100)
+					await dependencies.sleep(backoffMs(attempt))
 					continue
 				}
 				return { kind: 'llm_unavailable', message: `HTTP ${response.status}: ${response.errorBody}` }
 			}
 
-			const streamed = await consumeResponsesStream(response.stream)
-			if (streamed.kind !== 'success') return streamed
+			const result = await consumeResponsesStream(response.stream)
+			if (result.kind !== 'success') return result
 
-			const classification = classifyParsedResponse(streamed)
-			if (classification.kind === 'accept') return streamed
+			const classification = classifyParsedResponse(result)
+			if (classification.kind === 'accept') return result
 			if (classification.kind === 'fail_immediately') {
 				return { kind: 'llm_unavailable', message: classification.message }
 			}
@@ -204,7 +202,7 @@ export function createLlmCaller(model: ResolvedModelConfig, apiKey: string | und
 			if (attempt >= maxAttempts) {
 				return { kind: 'llm_unavailable', message: lastError }
 			}
-			await dependencies.sleep(Math.pow(2, attempt) * 100)
+			await dependencies.sleep(backoffMs(attempt))
 		}
 
 		return { kind: 'llm_unavailable', message: `Max retries exceeded: ${lastError ?? 'unknown'}` }
