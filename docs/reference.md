@@ -12,7 +12,7 @@ The executor is the minimal runtime that runs the small target model against the
 
 2. **Role execution loop.** For the active role, the executor repeats:
    - Assemble context: system prompt, user task, prior assistant/tool messages, child result cards.
-   - Call the model endpoint (`POST /v1/chat/completions`).
+   - Call the model endpoint (`POST {apiBase}/responses`, a streaming OpenAI Responses API request).
    - If reported usage crosses the context-pressure threshold, append a one-shot handoff notice at the next turn boundary (see "Context pressure and handoff" below).
    - If the prompt exceeds the context window, compact the conversation in place (bounded attempts; see "Context budget exceeded" below) and resume with a platform notice; if it cannot be made to fit, finish the role with `context_budget_exceeded`.
    - Parse content, reasoning, and tool calls.
@@ -265,7 +265,7 @@ Role fields:
 
 ### `tools`
 
-A list of tool-manifest file paths. Each manifest declares `name`, `description`, and `parameters` (JSON Schema). The executor validates calls against the schema and exposes the tools to the model in the chat/completions request. Each manifest also carries optional display fields the web client reads through `GET /api/config`: `humanLabel` (tiered display name), `humanDescription` (tiered one-line description), `humanCallLabel` (tiered template for the operation label when an agent calls this tool — interpolates `{source}` and optionally `{destination}`), and `humanWorkingLabel` (tiered text for the "now" caption when this tool is the active/working node — optionally interpolates `{participant}`). See [`docs/visualization.md`](visualization.md) "Labels".
+A list of tool-manifest file paths. Each manifest declares `name`, `description`, and `parameters` (JSON Schema). The executor validates calls against the schema and exposes the tools to the model in the Responses API request. Each manifest also carries optional display fields the web client reads through `GET /api/config`: `humanLabel` (tiered display name), `humanDescription` (tiered one-line description), `humanCallLabel` (tiered template for the operation label when an agent calls this tool — interpolates `{source}` and optionally `{destination}`), and `humanWorkingLabel` (tiered text for the "now" caption when this tool is the active/working node — optionally interpolates `{participant}`). See [`docs/visualization.md`](visualization.md) "Labels".
 
 ### Tool availability
 
@@ -281,7 +281,7 @@ The deployment file `deployment/deployment.json` holds the knobs an operator set
 
 The model credential is deliberately absent from the file: an `apiKey` key is rejected with a pointer to the `ORCHESTRATOR_API_KEY` environment variable, which injects the key at runtime (see [`README.md`](../README.md) "Configuration"). Like the Kagi key, it may also arrive as a Docker secret at `/run/secrets/orchestrator_api_key` (or `/run/secrets/ORCHESTRATOR_API_KEY`).
 
-`model.name` and `model.contextWindow` are optional in the file because the service probes the model API's model list (`GET {apiBase}/models`, the OpenAI-compatible listing) once at startup. An API-reported context window (llama.cpp's `meta.n_ctx`) is the server's ground truth and always replaces the configured value — the server's own number is what the executor must plan against, and a stale operator copy is the duplication this eliminates; the startup log states the override. `model.name` is only discovered from the API when it is unset in both the file and the environment and the server serves exactly one model; if the server lists several models and no name is configured, startup fails with an error listing the served ids so the operator can choose. When the probe fails (unreachable endpoint, timeout, HTTP error, unparseable body) the service boots on the configured values and logs the probe outcome — the endpoint being down is a runtime concern that runs surface as `llm_unavailable` on their own. If a needed field is then still missing, startup fails with an error that says the API did not provide it (distinguishing "could not be probed" from "did not report it") and names where to set it — the deployment file field or its environment variable (`ORCHESTRATOR_MODEL` / `ORCHESTRATOR_MODEL_CONTEXT_WINDOW`).
+`model.name` and `model.contextWindow` are optional in the file because the service probes the model API's model list (`GET {apiBase}/models`, the OpenAI-compatible listing) once at startup. An API-reported context window — llama.cpp's `meta.n_ctx`, or the top-level `context_length` of rich catalog entries like PPQ's, two interchangeable reports of the same number — is the server's ground truth and always replaces the configured value; the startup log states the override. `model.name` is only discovered from the API when it is unset in both the file and the environment and the server serves exactly one model; if the server lists several models and no name is configured, startup fails with an error listing the served ids so the operator can choose. When the probe fails (unreachable endpoint, timeout, HTTP error, unparseable body) the service boots on the configured values and logs the probe outcome — the endpoint being down is a runtime concern that runs surface as `llm_unavailable` on their own. If a needed field is then still missing, startup fails with an error that says the API did not provide it (distinguishing "could not be probed" from "did not report it") and names where to set it — the deployment file field or its environment variable (`ORCHESTRATOR_MODEL` / `ORCHESTRATOR_MODEL_CONTEXT_WINDOW`).
 
 ### Environment overrides
 
@@ -292,7 +292,6 @@ Individual deployment fields can be overridden at runtime with `ORCHESTRATOR_*` 
 | `ORCHESTRATOR_MODEL` | `model.name` (discovered from the API when unset) |
 | `ORCHESTRATOR_API_BASE` | `model.apiBase` |
 | `ORCHESTRATOR_MODEL_CONTEXT_WINDOW` | `model.contextWindow` (the API-reported value wins) |
-| `ORCHESTRATOR_REASONING_FIELD` | `model.reasoningField` |
 | `ORCHESTRATOR_TEMPERATURE` | `model.generation.temperature` |
 | `ORCHESTRATOR_MAX_TOKENS` | `model.generation.maxTokens` |
 | `ORCHESTRATOR_MAX_AGENT_DEPTH` | `executor.maxAgentDepth` |
@@ -316,16 +315,14 @@ The constraints mirror the file's semantics with the error pointing at the varia
   "name": "qwen2.5-coder:32b",
   "apiBase": "http://localhost:11434/v1",
   "contextWindow": 32768,
-  "reasoningField": "reasoning",
   "generation": { "temperature": 0.2, "maxTokens": 4096 }
 }
 ```
 
-- `name` (optional): the model id sent in chat/completions requests. Set it here or via `ORCHESTRATOR_MODEL`; when unset it is discovered from the model API at startup if exactly one model is served, and startup fails listing the served ids otherwise.
-- `apiBase`: OpenAI-compatible chat/completions endpoint.
-- `contextWindow` (optional): context window size in tokens. Set it here or via `ORCHESTRATOR_MODEL_CONTEXT_WINDOW`; an API-reported value (llama.cpp's `meta.n_ctx`) always wins over the configured one, and a value the API also does not report fails startup.
-- `reasoningField`: API response field containing reasoning content (e.g. `reasoning`, `reasoning_content`). Omit if the endpoint doesn't expose reasoning.
-- `generation`: default sampling parameters (`temperature`, `maxTokens`) applied to every role. There is no per-role generation override.
+- `name` (optional): the model id sent in Responses API requests. Set it here or via `ORCHESTRATOR_MODEL`; when unset it is discovered from the model API at startup if exactly one model is served, and startup fails listing the served ids otherwise.
+- `apiBase`: OpenAI-compatible Responses API base URL; the executor posts to `{apiBase}/responses`.
+- `contextWindow` (optional): context window size in tokens. Set it here or via `ORCHESTRATOR_MODEL_CONTEXT_WINDOW`; an API-reported value (llama.cpp's `meta.n_ctx`, or a rich catalog entry's top-level `context_length`) always wins over the configured one, and a value the API also does not report fails startup.
+- `generation`: default sampling parameters (`temperature`, `maxTokens`) applied to every role. There is no per-role generation override. `maxTokens` maps to the Responses API's `max_output_tokens`, which includes reasoning tokens, so a value that worked under chat completions may need raising to keep room for the visible answer.
 
 ### `executor`
 

@@ -189,7 +189,7 @@ describe('validateDeploymentFileConfig throws ValidationError with a path-based 
 	})
 	test('tolerates every optional field', () => {
 		const full: unknown = {
-			model: { name: 'm', apiBase: 'http://x', contextWindow: 1, reasoningField: 'reasoning', generation: { temperature: 0.2, maxTokens: 512 } },
+			model: { name: 'm', apiBase: 'http://x', contextWindow: 1, generation: { temperature: 0.2, maxTokens: 512 } },
 			executor: {
 				maxAgentDepth: 1,
 				defaultToolTimeoutSeconds: 1,
@@ -230,10 +230,13 @@ describe('validateDeploymentFileConfig throws ValidationError with a path-based 
 		['apiBase', 42],
 		['contextWindow', 'big'],
 		['generation', 42],
-		['reasoningField', 42],
 	])('rejects a malformed model.%s', (field, value) => {
 		const bad = { ...validDeployment, model: { ...validDeployment.model, [field]: value } }
 		expect(() => validateDeploymentFileConfig(bad)).toThrow(new RegExp(`model\\.${field}`))
+	})
+	test('rejects the removed reasoningField key as unknown inside model', () => {
+		const bad = { ...validDeployment, model: { ...validDeployment.model, reasoningField: 'reasoning' } }
+		expect(() => validateDeploymentFileConfig(bad)).toThrow(/model\.reasoningField.*unknown key "reasoningField"/)
 	})
 	test.each([
 		['maxAgentDepth', 'deep'],

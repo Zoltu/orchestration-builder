@@ -42,7 +42,7 @@ The Foundry reads the current Guild and recent run logs, prompts a large model t
 
 ## Execution model
 
-- **Single model on the executor.** The executor talks to exactly one OpenAI-compatible chat/completions endpoint.
+- **Single model on the executor.** The executor talks to exactly one OpenAI-compatible endpoint, using the streaming Responses API (`POST {apiBase}/responses`).
 - **Sequential.** Only one LLM request is in flight at a time. A run is a depth-first traversal of the role tree.
 - **One task at a time.** The server runs one run at a time; there is no queue.
 - **In-place workspace.** The executor modifies the mounted project directly, exactly as a developer would. Run bookkeeping goes under `<workspace>/.orchestration/`.

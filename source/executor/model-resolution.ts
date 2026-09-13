@@ -3,7 +3,7 @@ import { ConfigurationError } from './errors.js'
 import type { DeploymentConfig, DeploymentFileConfig, ModelConfig, ResolvedModelConfig } from './types.js'
 import { isObject } from './validation.js'
 
-// One entry of the model API's OpenAI-compatible model listing: every server reports the id, and llama.cpp servers additionally report the trained context size as meta.n_ctx. OpenAI and vLLM entries carry no meta, so contextWindow stays absent there.
+// One entry of the model API's OpenAI-compatible model listing: every server reports the id, and the context window arrives in whichever shape the catalog uses — llama.cpp reports the trained context size as meta.n_ctx, while rich catalog entries (PPQ) carry a top-level context_length. Entries carrying neither (OpenAI, vLLM) leave contextWindow absent.
 export interface ModelApiInfo {
 	id: string
 	contextWindow?: number
@@ -19,6 +19,17 @@ export interface ModelApiProbe {
 // Where a completed model field's value came from, for the startup log: the API's own report or the operator's configuration.
 export type ModelValueSource = 'api' | 'configuration'
 
+// The two interchangeable context-window sources: rich catalog entries report it top-level as context_length, llama.cpp nests it as meta.n_ctx. When an entry somehow carries both, context_length wins — they report the same number, so the choice only needs to be deterministic.
+function apiContextWindowOf(entry: Record<string, unknown>): number | undefined {
+	const contextLength = entry['context_length']
+	if (typeof contextLength === 'number' && Number.isFinite(contextLength) && contextLength > 0) return contextLength
+	const meta = entry['meta']
+	if (!isObject(meta)) return undefined
+	const nCtx = meta['n_ctx']
+	if (typeof nCtx === 'number' && Number.isFinite(nCtx) && nCtx > 0) return nCtx
+	return undefined
+}
+
 // Tolerant parse of a GET /models body: entries without a usable id are skipped and a body without a data array yields no entries rather than an error, because any of these means "the API reported nothing usable" — a fallback-to-configuration situation, not a crash.
 export function parseModelInfo(body: unknown): ModelApiInfo[] {
 	if (!isObject(body)) return []
@@ -30,11 +41,8 @@ export function parseModelInfo(body: unknown): ModelApiInfo[] {
 		const id = entry['id']
 		if (typeof id !== 'string' || id === '') continue
 		const model: ModelApiInfo = { id }
-		const meta = entry['meta']
-		if (isObject(meta)) {
-			const contextWindow = meta['n_ctx']
-			if (typeof contextWindow === 'number' && Number.isFinite(contextWindow) && contextWindow > 0) model.contextWindow = contextWindow
-		}
+		const contextWindow = apiContextWindowOf(entry)
+		if (contextWindow !== undefined) model.contextWindow = contextWindow
 		models.push(model)
 	}
 	return models
@@ -104,7 +112,7 @@ function resolveModelDetails(fileModel: ModelConfig, probe: ModelApiProbe): Mode
 	const name = resolveName(configuredName, probe)
 	const context = resolveContextWindow(configuredContextWindow, probe, configuredName)
 	return {
-		model: { name: name.name, apiBase: fileModel.apiBase, contextWindow: context.contextWindow, reasoningField: fileModel.reasoningField, generation: fileModel.generation },
+		model: { name: name.name, apiBase: fileModel.apiBase, contextWindow: context.contextWindow, generation: fileModel.generation },
 		nameSource: name.source,
 		contextWindowSource: context.source,
 		apiContextWindow: context.apiContextWindow,

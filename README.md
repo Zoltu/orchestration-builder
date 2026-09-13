@@ -40,7 +40,6 @@ Deployment field overrides — each variable defaults to the deployment file's v
 | `ORCHESTRATOR_MODEL` | `model.name` | non-empty string; discovered from the API when unset |
 | `ORCHESTRATOR_API_BASE` | `model.apiBase` | non-empty string |
 | `ORCHESTRATOR_MODEL_CONTEXT_WINDOW` | `model.contextWindow` | positive integer; the API-reported value wins |
-| `ORCHESTRATOR_REASONING_FIELD` | `model.reasoningField` | non-empty string |
 | `ORCHESTRATOR_TEMPERATURE` | `model.generation.temperature` | finite number |
 | `ORCHESTRATOR_MAX_TOKENS` | `model.generation.maxTokens` | positive integer |
 | `ORCHESTRATOR_MAX_AGENT_DEPTH` | `executor.maxAgentDepth` | positive integer |

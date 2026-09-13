@@ -3,7 +3,6 @@
 		"name": "Qwen 3.8 27b",
 		"apiBase": "http://llama-server/v1",
 		"contextWindow": 262144,
-		"reasoningField": "reasoning",
 		"generation": {
 			"temperature": 1.0,
 			"maxTokens": 65536

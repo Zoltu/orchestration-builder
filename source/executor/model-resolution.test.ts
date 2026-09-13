@@ -22,7 +22,6 @@ const completeModel: ModelConfig = {
 	name: 'm',
 	apiBase,
 	contextWindow: 32768,
-	reasoningField: 'reasoning',
 	generation: { temperature: 0.2, maxTokens: 512 },
 }
 
@@ -40,6 +39,25 @@ describe('parseModelInfo', () => {
 	test('reads the llama.cpp listing shape: id plus meta.n_ctx', () => {
 		const models = parseModelInfo({ data: [{ id: 'qwen', meta: { n_ctx: 131072, n_predict: 4096 } }] })
 		expect(models).toEqual([{ id: 'qwen', contextWindow: 131072 }])
+	})
+
+	test('reads the rich catalog shape: id plus top-level context_length alongside the extra fields', () => {
+		const models = parseModelInfo({ data: [{ id: 'qwen', context_length: 40960, supported_parameters: ['temperature'], pricing: { prompt: '0' } }] })
+		expect(models).toEqual([{ id: 'qwen', contextWindow: 40960 }])
+	})
+
+	test('a mixed listing parses llama.cpp entries, rich catalog entries, and bare ids in one body', () => {
+		const models = parseModelInfo({ data: [
+			{ id: 'llama-served', meta: { n_ctx: 8192 } },
+			{ id: 'catalog-served', context_length: 262144 },
+			{ id: 'bare' },
+		] })
+		expect(models).toEqual([{ id: 'llama-served', contextWindow: 8192 }, { id: 'catalog-served', contextWindow: 262144 }, { id: 'bare' }])
+	})
+
+	test('when an entry carries both context_length and meta.n_ctx, context_length wins', () => {
+		const models = parseModelInfo({ data: [{ id: 'both', context_length: 4096, meta: { n_ctx: 8192 } }] })
+		expect(models).toEqual([{ id: 'both', contextWindow: 4096 }])
 	})
 
 	test('reads the OpenAI listing shape: id only, no context window', () => {
@@ -64,20 +82,17 @@ describe('parseModelInfo', () => {
 		const models = parseModelInfo({ data: [{ id: 'zero', meta: { n_ctx: 0 } }, { id: 'negative', meta: { n_ctx: -5 } }, { id: 'nan', meta: { n_ctx: Number.NaN } }, { id: 'string', meta: { n_ctx: 'big' } }] })
 		expect(models).toEqual([{ id: 'zero' }, { id: 'negative' }, { id: 'nan' }, { id: 'string' }])
 	})
+
+	test('a non-positive, NaN, or non-number context_length is treated as absent', () => {
+		const models = parseModelInfo({ data: [{ id: 'zero', context_length: 0 }, { id: 'negative', context_length: -5 }, { id: 'nan', context_length: Number.NaN }, { id: 'string', context_length: 'big' }] })
+		expect(models).toEqual([{ id: 'zero' }, { id: 'negative' }, { id: 'nan' }, { id: 'string' }])
+	})
 })
 
 describe('resolveModelConfig', () => {
 	test('completes from configuration: present values pass through untouched', () => {
 		const resolved = resolveModelConfig(completeModel, notProbed())
-		expect(resolved).toEqual({ name: 'm', apiBase: 'http://x/v1', contextWindow: 32768, reasoningField: 'reasoning', generation: { temperature: 0.2, maxTokens: 512 } })
-	})
-
-	test('a model without the optional reasoningField resolves without one', () => {
-		const minimal: ModelConfig = { name: 'm', apiBase, contextWindow: 32768, generation: {} }
-		const resolved = resolveModelConfig(minimal, notProbed())
-		expect(resolved.reasoningField).toBeUndefined()
-		expect(resolved.name).toBe('m')
-		expect(resolved.contextWindow).toBe(32768)
+		expect(resolved).toEqual({ name: 'm', apiBase: 'http://x/v1', contextWindow: 32768, generation: { temperature: 0.2, maxTokens: 512 } })
 	})
 
 	test('an API-reported context window overrides a differing configured one', () => {
@@ -124,7 +139,7 @@ describe('resolveModelConfig', () => {
 
 	test('a failed probe falls back to complete configuration', () => {
 		const resolved = resolveModelConfig(completeModel, failedProbe('connection refused'))
-		expect(resolved).toEqual({ name: 'm', apiBase: 'http://x/v1', contextWindow: 32768, reasoningField: 'reasoning', generation: { temperature: 0.2, maxTokens: 512 } })
+		expect(resolved).toEqual({ name: 'm', apiBase: 'http://x/v1', contextWindow: 32768, generation: { temperature: 0.2, maxTokens: 512 } })
 	})
 
 	test('a missing name distinguishes an unreachable API from one that does not report it', () => {

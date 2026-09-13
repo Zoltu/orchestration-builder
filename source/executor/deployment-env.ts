@@ -11,7 +11,6 @@ export interface ModelOverride {
 	name?: string
 	apiBase?: string
 	contextWindow?: number
-	reasoningField?: string
 	generation?: GenerationOverride
 }
 
@@ -46,7 +45,6 @@ export interface DeploymentOverride {
 export const MODEL_ENV_VAR = 'ORCHESTRATOR_MODEL'
 const API_BASE_ENV_VAR = 'ORCHESTRATOR_API_BASE'
 export const MODEL_CONTEXT_WINDOW_ENV_VAR = 'ORCHESTRATOR_MODEL_CONTEXT_WINDOW'
-const REASONING_FIELD_ENV_VAR = 'ORCHESTRATOR_REASONING_FIELD'
 const TEMPERATURE_ENV_VAR = 'ORCHESTRATOR_TEMPERATURE'
 const MAX_TOKENS_ENV_VAR = 'ORCHESTRATOR_MAX_TOKENS'
 const MAX_AGENT_DEPTH_ENV_VAR = 'ORCHESTRATOR_MAX_AGENT_DEPTH'
@@ -107,7 +105,6 @@ export function resolveDeploymentOverride(environment: Record<string, string | u
 		name: readString(environment[MODEL_ENV_VAR]),
 		apiBase: readString(environment[API_BASE_ENV_VAR]),
 		contextWindow: readPositiveInteger(MODEL_CONTEXT_WINDOW_ENV_VAR, environment[MODEL_CONTEXT_WINDOW_ENV_VAR]),
-		reasoningField: readString(environment[REASONING_FIELD_ENV_VAR]),
 		generation: hasDefinedField(generation) ? generation : undefined,
 	}
 	if (hasDefinedField(model)) override.model = model
@@ -165,7 +162,6 @@ export function applyDeploymentOverride(base: DeploymentFileConfig, override: De
 		name: override.model?.name ?? base.model.name,
 		apiBase: override.model?.apiBase ?? base.model.apiBase,
 		contextWindow: override.model?.contextWindow ?? base.model.contextWindow,
-		reasoningField: override.model?.reasoningField ?? base.model.reasoningField,
 		generation: {
 			temperature: override.model?.generation?.temperature ?? base.model.generation.temperature,
 			maxTokens: override.model?.generation?.maxTokens ?? base.model.generation.maxTokens,

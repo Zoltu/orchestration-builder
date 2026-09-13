@@ -10,7 +10,6 @@ function makeBase(): DeploymentFileConfig {
 			name: 'base-model',
 			apiBase: 'http://base:8080/v1',
 			contextWindow: 8192,
-			reasoningField: 'reasoning',
 			generation: { temperature: 0.2, maxTokens: 4096 },
 		},
 		executor: {
@@ -30,7 +29,6 @@ const FULL_OVERRIDE_ENVIRONMENT: Record<string, string> = {
 	ORCHESTRATOR_MODEL: 'override-model',
 	ORCHESTRATOR_API_BASE: 'http://override:8080/v1',
 	ORCHESTRATOR_MODEL_CONTEXT_WINDOW: '131072',
-	ORCHESTRATOR_REASONING_FIELD: 'reasoning_content',
 	ORCHESTRATOR_TEMPERATURE: '0.7',
 	ORCHESTRATOR_MAX_TOKENS: '8192',
 	ORCHESTRATOR_MAX_AGENT_DEPTH: '16',
@@ -54,7 +52,6 @@ describe('resolveDeploymentOverride', () => {
 				name: 'override-model',
 				apiBase: 'http://override:8080/v1',
 				contextWindow: 131072,
-				reasoningField: 'reasoning_content',
 				generation: { temperature: 0.7, maxTokens: 8192 },
 			},
 			executor: {
@@ -81,6 +78,10 @@ describe('resolveDeploymentOverride', () => {
 
 	test('an empty-string variable means not set', () => {
 		expect(resolveDeploymentOverride({ ORCHESTRATOR_MODEL: '', ORCHESTRATOR_MAX_AGENT_DEPTH: '', ORCHESTRATOR_TEMPERATURE: '' })).toEqual({})
+	})
+
+	test('the removed reasoning-field variable is no longer read', () => {
+		expect(resolveDeploymentOverride({ ORCHESTRATOR_REASONING_FIELD: 'reasoning' })).toEqual({})
 	})
 
 	test('a section with only empty-string variables is not attached', () => {
@@ -142,7 +143,6 @@ describe('applyDeploymentOverride', () => {
 				name: 'override-model',
 				apiBase: 'http://override:8080/v1',
 				contextWindow: 131072,
-				reasoningField: 'reasoning_content',
 				generation: { temperature: 0.7, maxTokens: 8192 },
 			},
 			executor: {
@@ -183,7 +183,6 @@ describe('applyDeploymentOverride', () => {
 		expect(merged.model.name).toBe('override-model')
 		expect(merged.model.apiBase).toBe(base.model.apiBase)
 		expect(merged.model.contextWindow).toBe(base.model.contextWindow)
-		expect(merged.model.reasoningField).toBe(base.model.reasoningField)
 	})
 
 	test('the merge operates on the file shape, so an optional model field absent from the base stays absent', () => {
