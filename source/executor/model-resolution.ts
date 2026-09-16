@@ -1,6 +1,6 @@
 import { MODEL_CONTEXT_WINDOW_ENV_VAR, MODEL_ENV_VAR } from './deployment-env.js'
 import { ConfigurationError } from './errors.js'
-import type { DeploymentConfig, DeploymentFileConfig, ModelConfig, ResolvedModelConfig } from './types.js'
+import type { DeploymentConfig, DeploymentFileConfig, GenerationConfig, ModelConfig, ResolvedModelConfig } from './types.js'
 import { isObject } from './validation.js'
 
 // One entry of the model API's OpenAI-compatible model listing: every server reports the id, and the context window arrives in whichever shape the catalog uses — llama.cpp reports the trained context size as meta.n_ctx, while rich catalog entries (PPQ) carry a top-level context_length. Entries carrying neither (OpenAI, vLLM) leave contextWindow absent.
@@ -106,11 +106,19 @@ function configuredContextWindowOf(fileModel: ModelConfig): number | undefined {
 	return fileModel.contextWindow
 }
 
+// A completion budget at or above the context window can never produce a valid request (the prompt shares the same window, so the server would reject every call), so it is a misconfiguration to fail fast on. It lives here — where the final window (API-reported or configured) is known — so both the startup probe and offline resolution catch it.
+function assertMaxTokensBelowContextWindow(generation: GenerationConfig, contextWindow: number): void {
+	const maxTokens = generation.maxTokens
+	if (maxTokens === undefined || maxTokens < contextWindow) return
+	throw new ConfigurationError(`model.generation.maxTokens (${maxTokens}) must be smaller than the model's context window (${contextWindow}): lower it ("model"."generation"."maxTokens" in deployment.json) or raise the model's context window`)
+}
+
 function resolveModelDetails(fileModel: ModelConfig, probe: ModelApiProbe): ModelResolutionDetails {
 	const configuredName = configuredNameOf(fileModel)
 	const configuredContextWindow = configuredContextWindowOf(fileModel)
 	const name = resolveName(configuredName, probe)
 	const context = resolveContextWindow(configuredContextWindow, probe, configuredName)
+	assertMaxTokensBelowContextWindow(fileModel.generation, context.contextWindow)
 	return {
 		model: { name: name.name, apiBase: fileModel.apiBase, contextWindow: context.contextWindow, generation: fileModel.generation },
 		nameSource: name.source,

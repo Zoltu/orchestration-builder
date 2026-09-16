@@ -1,5 +1,6 @@
 import type { LlmCallResult, LlmRequest, ResolvedModelConfig } from './types.js'
-import { createResponsesStreamAccumulator, createSseLineAssembler, detectContextBudgetExceeded, mapHistoryToResponsesInput, mapTerminalResponseToCallResult, mapToolManifestsToResponsesTools, OversizedSseLineError, parseSseDataPayload, type ResponsesStreamSnapshot, type SseDataPayload } from './llm-sse.js'
+import { createResponsesStreamAccumulator, createSseLineAssembler, mapHistoryToResponsesInput, mapTerminalResponseToCallResult, mapToolManifestsToResponsesTools, OversizedSseLineError, parseSseDataPayload, type ResponsesStreamSnapshot, type SseDataPayload } from './llm-sse.js'
+import { isObject } from './validation.js'
 
 // The shared LLM wire types live in types.ts (see it for the definitions); re-exported here so every import site keeps its path.
 export type { LlmCallResult, LlmRequest, LlmUsage } from './types.js'
@@ -70,6 +71,95 @@ function classifyParsedResponse(parsed: ParsedSuccess): ParsedClassification {
 		return { kind: 'fail_immediately', message: 'completion budget exhausted before any content was produced (finish_reason: length)' }
 	}
 	return { kind: 'fail_retryable', message: 'empty response (no content, no tool calls)' }
+}
+
+const CONTEXT_ERROR_KEYWORDS: readonly string[] = [
+	'context',
+	'too long',
+	'maximum context',
+	'context_length',
+	'context length',
+	'reduce the length',
+	'prompt is too long',
+	'token limit',
+]
+
+// A keyword gate over statuses 400/413/429, extended for the Responses-era error shapes: the structured prompt_tokens paths come first, then the count embedded in error.message, then PPQ's nested upstream error under error.metadata.raw.
+export function detectContextBudgetExceeded(status: number, errorBody: string, contextWindow: number): LlmCallResult | undefined {
+	if (status !== 400 && status !== 413 && status !== 429) return undefined
+	const lowered = errorBody.toLowerCase()
+	let looksLikeContext = false
+	for (const keyword of CONTEXT_ERROR_KEYWORDS) {
+		if (lowered.includes(keyword)) {
+			looksLikeContext = true
+			break
+		}
+	}
+	if (!looksLikeContext) return undefined
+	return { kind: 'context_budget_exceeded', promptTokens: extractPromptTokens(errorBody), contextWindow }
+}
+
+function safeJsonParse(text: string): { ok: true; value: unknown } | { ok: false } {
+	try {
+		return { ok: true, value: JSON.parse(text) }
+	} catch {
+		return { ok: false }
+	}
+}
+
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+	return isObject(value) ? value : undefined
+}
+
+function extractPromptTokens(errorBody: string): number {
+	const parsed = safeJsonParse(errorBody)
+	if (!parsed.ok) return 0
+	const record = asRecord(parsed.value)
+	if (record === undefined) return 0
+	const errorRecord = asRecord(record['error'])
+	let promptTokens: number | undefined
+	if (errorRecord !== undefined && typeof errorRecord['prompt_tokens'] === 'number') promptTokens = errorRecord['prompt_tokens']
+	const usageRecord = asRecord(record['usage'])
+	if (usageRecord !== undefined && typeof usageRecord['prompt_tokens'] === 'number') promptTokens = usageRecord['prompt_tokens']
+	if (promptTokens !== undefined) return promptTokens
+	if (errorRecord === undefined) return 0
+	const fromMessage = promptTokensFromText(errorRecord['message'])
+	if (fromMessage !== undefined) return fromMessage
+	return promptTokensFromMetadataRaw(errorRecord) ?? 0
+}
+
+// Takes the last capture's digit count, commas stripped, so repeated scans can layer: the later pattern's matches overwrite the earlier scan's, keeping whichever phrasing the message actually used.
+function lastTokenCount(value: string, pattern: RegExp): number | undefined {
+	let last: number | undefined
+	for (const match of value.matchAll(pattern)) {
+		const digits = match[1]
+		if (digits === undefined) continue
+		last = Number.parseInt(digits.replaceAll(',', ''), 10)
+	}
+	return last
+}
+
+// The last occurrence wins: providers phrase the failure as "<window> tokens ... <requested> tokens", and the requested (prompt) count comes last. The parenthesized "Requested tokens (N)" form is scanned after the prose form, so it wins when a message carries both phrasings.
+function promptTokensFromText(value: unknown): number | undefined {
+	if (typeof value !== 'string') return undefined
+	const prose = lastTokenCount(value, /(\d[\d,]*)\s*tokens?\b/gi)
+	const parenthesized = lastTokenCount(value, /tokens\s*\(([\d,]+)\)/gi)
+	return parenthesized ?? prose
+}
+
+// PPQ wraps the upstream provider's error body as a JSON string (or plain text) under error.metadata.raw; the wrapped copy is probed with the same structured paths before falling back to a text scan.
+function promptTokensFromMetadataRaw(errorRecord: Record<string, unknown>): number | undefined {
+	const metadata = asRecord(errorRecord['metadata'])
+	if (metadata === undefined) return undefined
+	const raw = metadata['raw']
+	if (typeof raw !== 'string') return undefined
+	const nested = safeJsonParse(raw)
+	if (nested.ok && isObject(nested.value)) {
+		if (typeof nested.value['prompt_tokens'] === 'number') return nested.value['prompt_tokens']
+		const nestedError = asRecord(nested.value['error'])
+		if (nestedError !== undefined && typeof nestedError['prompt_tokens'] === 'number') return nestedError['prompt_tokens']
+	}
+	return promptTokensFromText(raw)
 }
 
 // Stream-phase failures never retry (a fresh attempt would re-bill reasoning and risk duplicate tool calls), so the message carries what the accumulated state can tell a reviewer: the observed terminal kind and whether any deltas landed before the failure.

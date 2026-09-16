@@ -175,6 +175,59 @@ describe('resolveModelConfig', () => {
 	})
 })
 
+describe('generation maxTokens vs context window guard', () => {
+	test('a maxTokens equal to the configured context window fails naming both values and the fix', () => {
+		const model: ModelConfig = { name: 'm', apiBase, contextWindow: 4096, generation: { maxTokens: 4096 } }
+		const message = expectConfigurationError(() => resolveModelConfig(model, notProbed()))
+		expect(message).toContain('model.generation.maxTokens (4096)')
+		expect(message).toContain('context window (4096)')
+		expect(message).toContain('"model"."generation"."maxTokens"')
+	})
+
+	test('a maxTokens above the configured context window fails', () => {
+		const model: ModelConfig = { name: 'm', apiBase, contextWindow: 4096, generation: { maxTokens: 4097 } }
+		const message = expectConfigurationError(() => resolveModelConfig(model, notProbed()))
+		expect(message).toContain('model.generation.maxTokens (4097)')
+		expect(message).toContain('context window (4096)')
+	})
+
+	test('a maxTokens at or above the API-resolved window fails, even when the configured window would have passed', () => {
+		const model: ModelConfig = { name: 'm', apiBase, contextWindow: 100000, generation: { maxTokens: 4096 } }
+		const equal = expectConfigurationError(() => resolveModelConfig(model, probeWith([{ id: 'm', contextWindow: 4096 }])))
+		expect(equal).toContain('model.generation.maxTokens (4096)')
+		expect(equal).toContain('context window (4096)')
+		const above: ModelConfig = { name: 'm', apiBase, contextWindow: 100000, generation: { maxTokens: 4097 } }
+		const message = expectConfigurationError(() => resolveModelConfig(above, probeWith([{ id: 'm', contextWindow: 4096 }])))
+		expect(message).toContain('model.generation.maxTokens (4097)')
+		expect(message).toContain('context window (4096)')
+	})
+
+	test('a maxTokens smaller than the context window passes', () => {
+		const model: ModelConfig = { name: 'm', apiBase, contextWindow: 4096, generation: { maxTokens: 4095 } }
+		const resolved = resolveModelConfig(model, notProbed())
+		expect(resolved.contextWindow).toBe(4096)
+		expect(resolved.generation.maxTokens).toBe(4095)
+	})
+
+	test('an undefined maxTokens passes', () => {
+		const model: ModelConfig = { name: 'm', apiBase, contextWindow: 4096, generation: {} }
+		const resolved = resolveModelConfig(model, notProbed())
+		expect(resolved.contextWindow).toBe(4096)
+		expect(resolved.generation.maxTokens).toBeUndefined()
+	})
+
+	test('the offline deployment resolution fails on the same misconfiguration', () => {
+		const fileDeployment = {
+			model: { name: 'm', apiBase, contextWindow: 4096, generation: { maxTokens: 4096 } } satisfies ModelConfig,
+			executor: { maxAgentDepth: 8, defaultToolTimeoutSeconds: 30, maxCompactionAttempts: 5 },
+			contextPolicy: { maxToolOutputChars: 50000 },
+		}
+		const message = expectConfigurationError(() => resolveDeploymentConfig(fileDeployment, notProbed()))
+		expect(message).toContain('model.generation.maxTokens (4096)')
+		expect(message).toContain('context window (4096)')
+	})
+})
+
 describe('resolveDeploymentConfig', () => {
 	test('composes the resolved deployment and reports where each completed field came from', () => {
 		const fileDeployment = {

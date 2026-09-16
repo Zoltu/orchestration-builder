@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { createLlmCaller, type LlmFetch, type LlmFetchRequest, type LlmStreamResponse, type Sleep } from './llm.ts'
+import { createLlmCaller, detectContextBudgetExceeded, type LlmFetch, type LlmFetchRequest, type LlmStreamResponse, type Sleep } from './llm.ts'
 import { SSE_MAX_LINE_CHARS } from './llm-sse.ts'
 import type { ResolvedModelConfig } from './types.js'
 
@@ -437,5 +437,70 @@ describe('createLlmCaller degenerate completed streams', () => {
 		expect(result.toolCalls).toHaveLength(1)
 		expect(result.toolCalls[0]?.function.name).toBe('read_file')
 		expect(wire.requests).toHaveLength(1)
+	})
+})
+
+describe('detectContextBudgetExceeded', () => {
+	test('a 400 with a context keyword and error.prompt_tokens reports the endpoint count', () => {
+		const body = JSON.stringify({ error: { message: 'This model maximum context length was exceeded', prompt_tokens: 4242 } })
+		expect(detectContextBudgetExceeded(400, body, 1000)).toEqual({ kind: 'context_budget_exceeded', promptTokens: 4242, contextWindow: 1000 })
+	})
+
+	test('a 413 with usage.prompt_tokens reports that count', () => {
+		const body = JSON.stringify({ usage: { prompt_tokens: 9001 }, error: { message: 'context length exceeded' } })
+		expect(detectContextBudgetExceeded(413, body, 8192)).toEqual({ kind: 'context_budget_exceeded', promptTokens: 9001, contextWindow: 8192 })
+	})
+
+	test('a keyword hit on a non-JSON body reports zero prompt tokens', () => {
+		expect(detectContextBudgetExceeded(429, 'request too long for the model context', 1000)).toEqual({ kind: 'context_budget_exceeded', promptTokens: 0, contextWindow: 1000 })
+	})
+
+	test('a non-matching status or a keyword miss is not a context-budget failure', () => {
+		expect(detectContextBudgetExceeded(500, 'maximum context length exceeded', 1000)).toBeUndefined()
+		expect(detectContextBudgetExceeded(400, 'bad request: invalid tool schema', 1000)).toBeUndefined()
+	})
+
+	test('the keyword gate is case-insensitive', () => {
+		const detected = detectContextBudgetExceeded(400, 'CONTEXT LENGTH EXCEEDED', 1000)
+		expect(detected?.kind).toBe('context_budget_exceeded')
+	})
+
+	test('a token count embedded in error.message is extracted, last occurrence winning', () => {
+		const body = JSON.stringify({ error: { message: "This model's maximum context length is 4096 tokens. However, you requested 5000 tokens." } })
+		expect(detectContextBudgetExceeded(400, body, 4096)).toEqual({ kind: 'context_budget_exceeded', promptTokens: 5000, contextWindow: 4096 })
+	})
+
+	test('llama.cpp\'s "Requested tokens (N)" phrasing is extracted with commas stripped', () => {
+		const body = JSON.stringify({ error: { message: 'Requested tokens (4,242) exceed the context window' } })
+		expect(detectContextBudgetExceeded(400, body, 1000)).toEqual({ kind: 'context_budget_exceeded', promptTokens: 4242, contextWindow: 1000 })
+	})
+
+	test('when a message carries both phrasings, the parenthesized requested count wins over the window count', () => {
+		const body = JSON.stringify({ error: { message: 'Requested tokens (1269) exceed the context window of 512 tokens' } })
+		expect(detectContextBudgetExceeded(400, body, 512)).toEqual({ kind: 'context_budget_exceeded', promptTokens: 1269, contextWindow: 512 })
+	})
+
+	test('a PPQ metadata.raw nested as a JSON string is parsed for error.prompt_tokens', () => {
+		const raw = JSON.stringify({ error: { prompt_tokens: 12345 } })
+		const body = JSON.stringify({ error: { message: 'upstream provider error: context length exceeded', metadata: { raw } } })
+		expect(detectContextBudgetExceeded(400, body, 8192)).toEqual({ kind: 'context_budget_exceeded', promptTokens: 12345, contextWindow: 8192 })
+	})
+
+	test('a PPQ metadata.raw carrying plain text is scanned for the token count, with commas stripped', () => {
+		const body = JSON.stringify({ error: { message: 'context length exceeded', metadata: { raw: 'prompt is too long: 4,242 tokens' } } })
+		expect(detectContextBudgetExceeded(400, body, 4096)).toEqual({ kind: 'context_budget_exceeded', promptTokens: 4242, contextWindow: 4096 })
+	})
+
+	test('a metadata.raw JSON payload without structured tokens falls back to a text scan', () => {
+		const raw = JSON.stringify({ message: 'too many tokens: 55 tokens' })
+		const body = JSON.stringify({ error: { message: 'context length exceeded', metadata: { raw } } })
+		expect(detectContextBudgetExceeded(400, body, 8192)).toEqual({ kind: 'context_budget_exceeded', promptTokens: 55, contextWindow: 8192 })
+	})
+
+	test('no extractable count anywhere reports zero prompt tokens', () => {
+		const withoutRaw = JSON.stringify({ error: { message: 'context exceeded' } })
+		expect(detectContextBudgetExceeded(400, withoutRaw, 1000)).toEqual({ kind: 'context_budget_exceeded', promptTokens: 0, contextWindow: 1000 })
+		const withEmptyRaw = JSON.stringify({ error: { message: 'context exceeded', metadata: { raw: 'no numbers here' } } })
+		expect(detectContextBudgetExceeded(400, withEmptyRaw, 1000)).toEqual({ kind: 'context_budget_exceeded', promptTokens: 0, contextWindow: 1000 })
 	})
 })

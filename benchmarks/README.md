@@ -133,7 +133,7 @@ The suite harness lives in `source/benchmarks/run-suite.ts`. `runSuite(deps, opt
 }
 ```
 
-`runSuite` receives its leaf dependencies (`listBenchmarkDirectories`, `readEvalConfig`, `runBenchmark`, `runValidation`, `writeSummary`) explicitly and reads no environment variables or command-line arguments itself; a thin CLI wrapper assembles the real leaves and calls it. End-to-end suite execution against a real LLM is wired by the CLI entry point (step 02) and exercised by the benchmark steps (06–08), whose operator handoffs cover real-LLM runs.
+`runSuite` receives its leaf dependencies (`listBenchmarkDirectories`, `readEvalConfig`, `runBenchmark`, `runValidation`, `writeSummary`) explicitly and reads no environment variables or command-line arguments itself, and the repository ships no CLI entry point for it: `run-suite.ts` is a library (plus its tests), so nothing in-repo assembles the real leaves. The shipped suite is checked structurally by `bun run validate-data` — every benchmark folder must carry a parseable `eval.json` and a non-empty task README — while end-to-end suite execution against a live executor is wired by Foundry-side tooling that assembles `runSuite`'s leaves itself and reuses the same validation helpers instead of duplicating them (see [`../docs/foundry.md`](../docs/foundry.md#evaluation)).
 
 ### Suite status semantics
 

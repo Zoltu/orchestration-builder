@@ -12,7 +12,7 @@ Your task is to add a second flag:
 
 This needs two changes:
 
-1. In `src/args.ts`, teach `parseArgs` to recognize `--reverse`. When the flag is present, the returned options should have `reverse: true`; otherwise `reverse: false`. The flag takes no value.
+1. In `src/args.ts`, teach `parseArgs` to recognize `--reverse`. When the flag is present, the returned options should have `reverse: true`; otherwise `reverse: false`. The flag takes no value. Unknown arguments, which `parseArgs` currently ignores, should be rejected with a descriptive error.
 2. In `src/printer.ts`, teach `formatLines` to reverse the order of the lines when `options.reverse` is true.
 
-The new tests in `tests/args.test.ts` and `tests/printer.test.ts` describe the exact behavior expected; they currently fail because `--reverse` is not supported yet. Make them pass. The existing tests must keep passing.
+The tests in `tests/args.test.ts` and `tests/printer.test.ts` describe the exact behavior expected; the `--reverse` and unknown-argument tests currently fail. Make them pass. The existing tests must keep passing.

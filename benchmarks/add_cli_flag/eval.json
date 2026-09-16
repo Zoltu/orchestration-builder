@@ -1,10 +1,10 @@
 {
 	"taskType": "medium",
-	"description": "Add a --reverse flag to the small CLI in src/. The flag reverses the order of the lines the CLI prints. Implement parsing of --reverse in src/args.ts (parseArgs should set options.reverse to true when the flag is present, false otherwise) and implement the reversing behavior in src/printer.ts (formatLines should reverse the lines when options.reverse is true). The new tests in tests/printer.test.ts and tests/args.test.ts describe the expected behavior and currently fail; make them pass while keeping the existing tests green.",
+	"description": "Add a --reverse flag to the small CLI in src/. The flag reverses the order of the lines the CLI prints. Implement parsing of --reverse in src/args.ts (parseArgs should set options.reverse to true when the flag is present, false otherwise) and reject unknown arguments with a descriptive error instead of silently ignoring them, then implement the reversing behavior in src/printer.ts (formatLines should reverse the lines when options.reverse is true). The tests in tests/printer.test.ts and tests/args.test.ts describe the exact expected behavior; the --reverse and unknown-argument tests currently fail. Make them pass while keeping the existing tests green.",
 	"validation": {
 		"command": "bun test tests/",
 		"expectedExitCode": 0,
-		"expectedStdoutContains": "8 pass",
+		"expectedStdoutContains": "9 pass",
 		"timeoutSeconds": 60
 	}
 }
