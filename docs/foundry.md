@@ -2,7 +2,7 @@
 
 The Foundry is an offline meta-optimizer that improves the Guild by proposing, testing, and merging changes. It is a separate program from the executor — it never imports from the executor codebase and talks to the executor exclusively over its HTTP API. It uses a large language model (commercial API or large local model) for hypothesis generation and merging; the executor itself never does.
 
-The Foundry is future work. Its design is documented here so executor and Guild decisions can account for it. Implementation is the final step of the development plan.
+The Foundry is future work. Its design is documented here so executor and Guild decisions can account for it. Implementation is planned in `PLAN.md` (repo root).
 
 ## Architecture
 

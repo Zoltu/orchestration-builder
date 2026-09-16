@@ -1448,7 +1448,7 @@ li:last-child {
 	fill: var(--svg-error);
 }
 
-/* --- Flow animation: node lifecycle + edge flow (step 04) ------------------ */
+/* --- Flow animation: node lifecycle + edge flow ----------------------------- */
 /* The active path animates at turn granularity: forward call edges flow left→right (marching-ants), lingering return edges flow right→left, and the active node pulses. The edge and pulse keyframes live above (graph-edge--flowing/returning, graph-node-pulse); the rules below cover the node lifecycle transitions that frame-diffing drives — a node entering the main area scales/fades in, and a node that has left for the top bar travels to its slot while shrinking and fading. All motion is CSS-only and reads the --svg-* tokens so it follows the light/dark theme. */
 
 /* A newly-arrived main-area node. The host <g> carries the translate (position); the inner <g> animates scale + opacity against its own bounding box so the node grows from its center rather than the SVG origin. */

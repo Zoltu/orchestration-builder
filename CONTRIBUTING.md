@@ -34,4 +34,4 @@ rm output.txt
 
 ## Development plan
 
-The work is broken into bite-sized, session-sized steps in [`plan/README.md`](plan/README.md). The foundation (original Phases 1–4) is complete; forward work begins at step `01`. Every step must leave the repository in a clean, healthy state — see the "Step hygiene" section of the plan and [`AGENTS.md`](AGENTS.md).
+Forward work — the Foundry, the offline meta-optimizer that improves the Guild — is planned in [`PLAN.md`](PLAN.md). Every change must leave the repository in a clean, healthy state — see [`AGENTS.md`](AGENTS.md).

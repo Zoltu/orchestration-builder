@@ -2,7 +2,7 @@
 
 ## Project-Wide Principles
 
-These principles apply to every change, in every plan step. They are the high-level rules; the sections below give the detailed mechanics.
+These principles apply to every change, in every milestone of the development plan. They are the high-level rules; the sections below give the detailed mechanics.
 
 ### No dependencies
 
@@ -238,7 +238,7 @@ Tests must run purely in-memory. Do not make network requests, hit real LLM endp
 
 Data-validity checks for the shipped Guild and benchmark suite live in `source/tools/validate-data.ts` (`bun run validate-data`), not in `bun test`, because they read the repo's data files by design.
 
-The LLM caller (`source/executor/llm.ts`, phase 2) is exercised in tests exclusively through a fake; integration against a real endpoint is a separate concern handled at deployment time, not in `bun test`.
+The LLM caller (`source/executor/llm.ts`) is exercised in tests exclusively through a fake; integration against a real endpoint is a separate concern handled at deployment time, not in `bun test`.
 
 ---
 
@@ -293,12 +293,12 @@ When adding a new function, use this to decide its pattern:
 
 ## Tool Dispatch
 
-Tool dispatch is the mechanism by which the executor invokes tools in response to LLM tool calls. It is defined in `source/executor/tool-dispatch.ts` and established in phase 1 so that phase 2's engine can compose against it.
+Tool dispatch is the mechanism by which the executor invokes tools in response to LLM tool calls. It is defined in `source/executor/tool-dispatch.ts`, and the engine composes against it.
 
 - `createToolDispatch(handlers)` is a factory that takes a map of tool-name → handler and returns a `ToolDispatch`.
 - The dispatcher parses the tool call's JSON arguments, validates they form an object, and invokes the handler.
 - Errors are returned as `ToolResult` with appropriate `ErrorKind`s (`unknown_tool`, `invalid_arguments`), never thrown.
-- Phase 2's engine composes the handler map from built-in tools (`finish`, `agent`) and from native tools (phase 3). Phase 3 adds the real implementations of file/shell/search tools.
+- The engine composes the handler map from built-in tools (`finish`, `agent`) and from native tools — the real implementations of the file/shell/search tools.
 - Tool dispatch is pure orchestration and is fully testable with fake handlers; see `source/executor/tool-dispatch.test.ts`.
 
 ## Guild Loader
@@ -368,19 +368,19 @@ Newlines carry semantic meaning. They separate statements, definitions, and logi
 
 ## Comments
 
-Source code must stand on its own. The development plan (`plan/`) is a transient artifact that will be deleted once the work is complete; it must never be referenced from source files, tests, or commit messages.
+Source code must stand on its own. The development plan (`PLAN.md`, repo root) tracks forward work and scheduling; it is not part of the shipped design and must never be referenced from source files, tests, or commit messages.
 
-- Do not write "step N", "phase N", "the plan", "see plan/...", or any equivalent in source comments, identifiers, error messages, or test names. A reader of the source (who has no plan in front of them) must be able to understand every file without it.
-- Comments that need to point to design context reference the permanent design docs (`docs/*.md`), which outlive the plan. Reference a doc by its filename and section heading, e.g. `docs/foundry.md "Foundry data layout"`.
-- Comments that need to point to a sibling module reference it by module path or symbol name (e.g. "applied by the branch manager", "the input to scoring"), not by the step that builds it. The plan's step boundaries are an implementation scheduling detail, not a property of the finished code.
-- The `plan/` directory is the only place that discusses steps, phases, sequencing, or the plan itself. `AGENTS.md` and `plan/README.md` are the exception: they govern the plan's own hygiene.
+- Do not write "milestone N", "the plan", "see PLAN.md", or any equivalent in source comments, identifiers, error messages, or test names. A reader of the source (who has no plan in front of them) must be able to understand every file without it.
+- Comments that need to point to design context reference the permanent design docs (`docs/*.md`). Reference a doc by its filename and section heading, e.g. `docs/foundry.md "Foundry data layout"`.
+- Comments that need to point to a sibling module reference it by module path or symbol name (e.g. "applied by the branch manager", "the input to scoring"), not by the milestone that builds it. Implementation scheduling is the development plan's business, not a property of the finished code.
+- `PLAN.md` is the only place that discusses milestones, sequencing, or the plan itself. `AGENTS.md` is the exception: it governs the plan's own hygiene.
 
 ### Comments explain why, never what
 
 A comment earns its place only by adding something the name, signature, and type cannot: the reason for a non-obvious choice, a constraint the code assumes but does not enforce, a hazard a reader would not anticipate, or a link to the decision that motivated it. A comment that paraphrases the item's name, signature, type, or obvious behavior is noise and a future source of drift — delete it.
 
 - Keep comments that explain an invariant, a hazard, an RAII/destructor-style contract, a deliberately-omitted API, a magic constant's meaning, or a non-obvious rationale. When in doubt whether a comment carries information the code itself does not, keep it.
-- No comments addressed to a future author. Bare `TODO`, `FIXME`, `XXX`, `HACK`, "later", "placeholder", and "not yet supported" notes do not belong in source. If the underlying work is real, record it in `plan/README.md`'s "Tracked technical debt" table (and name the step that will remove it) or in `docs/`, and leave an inline reference only if the project convention requires one.
+- No comments addressed to a future author. Bare `TODO`, `FIXME`, `XXX`, `HACK`, "later", "placeholder", and "not yet supported" notes do not belong in source. If the underlying work is real, record it in `PLAN.md`'s "Tracked technical debt" table (and name the milestone that will remove it) or in `docs/`, and leave an inline reference only if the project convention requires one.
 - One sentence per line in comments and doc blocks. Do not break a single sentence across multiple lines for width; let the reader's editor soft-wrap. (See "Formatting" below.)
 
 **Good** — explains *why*, information the code cannot carry (`source/web/render.ts`):
@@ -426,7 +426,7 @@ Before adding or keeping a comment, ask: **"Would a reader who has read the enti
 
 ### Enforcement
 
-Comment and newline quality is a review judgment, not a build-gate failure. No automated check is wired into `bun test`: mechanically detecting "reiterative comments" or "arbitrary wraps" produces false positives that make a lint a burden rather than a safety net, and a bare-`TODO` gate was rejected because this project has no issue tracker for such notes to reference (real work is tracked in `plan/README.md`'s debt table instead). Re-check comment and newline hygiene against this section and "Formatting" before declaring any change done — reiterative comments and mid-sentence wraps accumulate silently.
+Comment and newline quality is a review judgment, not a build-gate failure. No automated check is wired into `bun test`: mechanically detecting "reiterative comments" or "arbitrary wraps" produces false positives that make a lint a burden rather than a safety net, and a bare-`TODO` gate was rejected because this project has no issue tracker for such notes to reference (real work is tracked in `PLAN.md`'s debt table instead). Re-check comment and newline hygiene against this section and "Formatting" before declaring any change done — reiterative comments and mid-sentence wraps accumulate silently.
 
 ---
 
@@ -445,7 +445,9 @@ Comment and newline quality is a review judgment, not a build-gate failure. No a
 
 The Guild's own configured model endpoint is reachable from the agent environment: the bundled `guild/guild.json` targets `llama-server` (`http://llama-server:8080/v1`) with the model "Agents A1", and that endpoint is up with that model loaded.
 
-A real end-to-end run is **not** operator-only work. Steps that call for a real-LLM smoke test (an "Operator handoff" for real-LLM runs) can usually be exercised in-environment first: run the executor exactly as shipped, against the Guild's configured model, with no changes to `guild.json`. Do **not** repoint the Guild at any other endpoint or model — the configured one is the supported path and the only one guaranteed to behave (strict chat template, single leading system message). Anything a local run cannot exercise (multi-container Docker builds, hardware the sandbox lacks) still requires operator handoff.
+A real end-to-end run is **not** operator-only work. Work that calls for a real-LLM smoke test (an "Operator handoff" for real-LLM runs) can usually be exercised in-environment first: run the executor exactly as shipped, against the Guild's configured model, with no changes to `guild.json`. Do **not** repoint the Guild at any other endpoint or model — the configured one is the supported path and the only one guaranteed to behave (strict chat template, single leading system message). Anything a local run cannot exercise (multi-container Docker builds, hardware the sandbox lacks) still requires operator handoff.
+
+An Unsloth Studio endpoint (`http://unsloth:8000`) may also be available for real-model smoke tests against a second backend. Ask the operator before loading a model there — its VRAM may be in use for other things, and only the operator knows what is currently resident.
 
 ---
 
