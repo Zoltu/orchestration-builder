@@ -221,11 +221,11 @@ export interface RunMeta {
 	guildPath: string
 	benchmarkPath?: string
 	task: string
-	// Absent on runs written before the effort channel existed; present on every run started since. Optional so a torn or legacy meta read still parses.
+	// Optional so a meta missing the field, or a torn meta read, still parses.
 	effort?: EffortLevel
-	// The run's logging level (see docs/reference.md "Logging level"). Absent on runs written before the channel existed; optional so a torn or legacy meta read still parses.
+	// The run's logging level (see docs/reference.md "Logging level"). Optional so a torn meta read still parses.
 	logLevel?: LogLevel
-	// Set when this run continues a prior finished run: the prior run's id. Optional so legacy metas still parse; the lineage is what a follow-on run uses to find the prior run's artifacts.
+	// Set when this run continues a prior finished run: the prior run's id. The lineage is what a follow-on run uses to find the prior run's artifacts.
 	continuesFrom?: string
 	// 'interrupted' is terminal: the service stopped mid-run and the run could not (or was not chosen to) resume on restart — written by startup reconciliation so the UI stops showing the run as "in progress".
 	status: 'running' | 'success' | 'error' | 'needs_clarification' | 'interrupted'

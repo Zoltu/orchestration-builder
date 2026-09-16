@@ -67,7 +67,7 @@ const MAIN_STACK = 'main'
 const CONTROL_TOOLS = new Set(['agent', 'ask_human', 'finish'])
 
 // Narrowing helpers mirror render.ts so the adapter reads LogEvent payloads the same way the
-// legacy run view does — every external payload is validated before use, never cast.
+// run view does — every external payload is validated before use, never cast.
 function stringField(payload: unknown, field: string): string | null {
 	if (!isObject(payload)) return null
 	const value = payload[field]
@@ -149,7 +149,7 @@ interface OpenCallRecord {
 	// Set when a nested call lands on the same stack (the callee delegated), which ends this call's transit phase even though the invocation is still open.
 	delegatedAt: string | null
 	// Set when the callee's turn began (an llm_call_start for this call's destination role), the precise transit→working boundary — the callee began working the instant the request was dispatched.
-	// Precedes delegatedAt in the finalization below; null on logs predating llm_call_start, where delegatedAt carries the turn-level boundary instead.
+	// Precedes delegatedAt in the finalization below; null on logs that carry no llm_call_start events, where delegatedAt carries the turn-level boundary instead.
 	turnStartedAt: string | null
 	tokens: number
 	cachedPromptTokens: number
@@ -591,7 +591,7 @@ function deriveModel(snapshot: RunSnapshot, now: string): DerivedModel {
 			op.lifecycle = 'settled'
 		} else if (record.turnStartedAt !== null) {
 			// The callee began its turn (llm_call_start) before delegating: that is the precise transit→working boundary.
-			// When no llm_call_start was logged, delegatedAt carries the turn-level boundary instead, so pre-llm_call_start logs keep their existing behavior.
+			// When no llm_call_start was logged, delegatedAt carries the turn-level boundary instead.
 			op.settledAt = record.turnStartedAt
 			op.lifecycle = 'settled'
 		} else if (record.delegatedAt !== null) {

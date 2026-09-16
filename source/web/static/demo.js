@@ -26,7 +26,7 @@ let tier = 'detailed'
 // Frames themselves are not held locally — each is the adapter's output for an event-prefix, fetched on demand from /api/demo/flow/:scenario/:frame so the harness always renders adapter-derived models.
 let scenarios = []
 // The adapter-derived InteractionModel for the current scenario+frame, or null before the first frame loads (or while a fetch is in flight).
-// Every renderer reads this in place of the prior hand-authored `scenario.frames[frameIndex]`.
+// Every renderer reads this adapter-derived frame.
 let currentFrame = null
 // The frame rendered before `currentFrame`, kept so `deriveLifecycle` can diff entering/departing participants across consecutive frames — the same role the product client's `previousFlowModel` plays.
 // Reset to null on a scenario switch (the first frame of a scenario animates nothing).
@@ -69,7 +69,7 @@ const nowCaption = document.createElement('p')
 nowCaption.className = 'pb-now-caption'
 flowContainer.append(nowCaption)
 
-// The ambient cost strip lives in the harness chrome (not the flow area) so it stays visible as a quiet border read while the centerpiece changes. It carries elapsed and tokens aggregated off OperationMetrics, formatted as textContent. Effort is not carried by InteractionModel (it is a run-level setting, not per-operation data), so the ported strip reads elapsed and tokens only.
+// The ambient cost strip lives in the harness chrome (not the flow area) so it stays visible as a quiet border read while the centerpiece changes. It carries elapsed and tokens aggregated off OperationMetrics, formatted as textContent. Effort is not carried by InteractionModel (it is a run-level setting, not per-operation data), so the strip reads elapsed and tokens only.
 const costStrip = document.createElement('div')
 costStrip.className = 'pb-cost-strip'
 const costElapsed = document.createElement('span')
@@ -593,7 +593,7 @@ function closeResultModal() {
 }
 
 // The question modal opens on an ask_human transit frame and stays open until the user answers or dismisses it. Like the result modal it is an HTML overlay sibling to the SVG, mounted without rebuilding the SVG so the marching-ants and enter animations do not replay. The Question affordance stays on the answerer node while the modal is dismissed, so the operator can re-open it by clicking the button again.
-// The question text is the ask call's details, which the models no longer carry: the modal opens with the waiting fallback and the details fetch fills the question block in when it lands (a failure leaves the fallback — graceful, like the inspector card).
+// The question text is the ask call's details; the models carry no question text, so the modal opens with the waiting fallback and the details fetch fills the question block in when it lands (a failure leaves the fallback — graceful, like the inspector card).
 function openQuestionModal() {
 	if (questionModalNode !== null) return
 	const manifest = scenarios[scenarioIndex]

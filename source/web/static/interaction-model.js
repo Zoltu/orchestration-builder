@@ -6,7 +6,7 @@
 //
 // Interrupts spawn fresh call stacks rooted at a fresh Interrupt participant instance (instance-per-interrupt, like every role). A paused stack's fate (resuming / rewinding / terminating / terminated / active) is read off its own operations after the preemption point, never stored as a field — see fateOf.
 //
-// The module is browser-pure JS (served statically and imported by the view modules) and imports nothing. JSDoc typedefs carry the shape the TS tests assert against, mirroring how the view modules will be consumed by their tests.
+// The module is browser-pure JS (served statically and imported by the view modules) and imports nothing. JSDoc typedefs carry the shape the TS tests assert against, mirroring how the view modules' tests consume the typedefs.
 //
 // The model carries no detail bodies: an operation's per-call markdown (task text, tool arguments/results, summaries) is fetched on demand from the run's details endpoint when the inspector opens, not shipped with every polled frame.
 

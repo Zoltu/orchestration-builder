@@ -193,7 +193,7 @@ const modelKeys: readonly string[] = ['name', 'apiBase', 'contextWindow', 'gener
 
 function validateModelConfig(value: unknown, path: string): asserts value is ModelConfig {
 	if (!isObject(value)) throw new ValidationError(path, 'expected an object')
-	// A deployment file carrying a credential is almost always an operator copying an old guild.json: fail with the env-var pointer instead of silently ignoring the key (the deployment file is strict, so a near-miss like this must not pass as an unknown key with a generic message).
+	// A deployment file carrying a credential is misplaced configuration: fail with the env-var pointer instead of silently ignoring the key (the deployment file is strict, so a near-miss like this must not pass as an unknown key with a generic message).
 	if ('apiKey' in value) throw new ValidationError(`${path}.apiKey`, 'model credentials are runtime configuration: set the ORCHESTRATOR_API_KEY environment variable instead of writing them into the deployment file')
 	rejectUnknownKeys(value, modelKeys, path)
 	if (value.name !== undefined && (typeof value.name !== 'string' || value.name === '')) throw new ValidationError(`${path}.name`, 'expected a non-empty string')
@@ -267,7 +267,7 @@ function validateRoleDefinition(value: unknown, path: string): asserts value is 
 	}
 }
 
-// Keys of the old combined guild format that now live in the deployment file; their presence in a guild file means a stale or hand-merged file, so the validator names the right home instead of silently ignoring the sections.
+// Keys that belong in the deployment file; their presence in a guild file means a stale or hand-merged file, so the validator names the right home instead of silently ignoring the sections.
 const guildDeploymentKeys: readonly string[] = ['schemaVersion', 'model', 'executor', 'contextPolicy']
 
 export function validateGuildConfig(value: unknown): asserts value is GuildConfig {

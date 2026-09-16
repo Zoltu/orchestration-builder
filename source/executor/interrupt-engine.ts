@@ -131,7 +131,7 @@ async function runInquiryHandler(
 	// The chain from the draining leaf IS the entire live role set in this sequential engine; chainFromEntry is leaf-first, so reverse it for the root-first briefing list.
 	const liveInstances = chainFromEntry(deps.roleRegistry, entry).reverse()
 	const instanceLines = liveInstances.map((member) => `- ${member.roleId} (${member.roleName}, depth ${member.depth})${member.parentRoleId !== undefined ? `, child of ${member.parentRoleId}` : ''}`)
-	// The note must not promise message bodies the log does not carry: under the run's standard logging level (docs/reference.md "Logging level") llm_call events keep their structure, kinds, and usage but no sent/received bodies. A context without a level (a run that predates the channel) reads as full detail — the only mode those runs ever logged at.
+	// The note must not promise message bodies the log does not carry: under the run's standard logging level (docs/reference.md "Logging level") llm_call events keep their structure, kinds, and usage but no sent/received bodies. A context without a level reads as full detail.
 	const finishedRolesNote = context.logLevel === 'standard'
 		? 'Roles that already finished have no live conversation; their work is recorded in the run log and in the workspace itself. Read the run log with read_run_log and search_run_log (the run logs at standard detail, so its llm_call events carry no message bodies) and the workspace with the file tools.'
 		: 'Roles that already finished have no live conversation; their work is recorded in the run log and in the workspace itself. Read the run log with read_run_log (its llm_call events carry the full sent and received messages) and search_run_log, and the workspace with the file tools.'
@@ -189,7 +189,7 @@ export async function drainInterrupts(
 
 	const triggers = config.interruptTriggers
 	if (triggers !== undefined && context.roleName !== triggers.handlerRole) {
-		// The per-tier cadence scale is a tuning table preserving the old threshold × (effort + 1) spread of 2×–6×; a context without effort (a pre-effort checkpoint's frames) gets the most frequent checking.
+		// The per-tier cadence scale spreads interrupt checking across 2×–6× the base thresholds by effort tier; a context without an effort tier gets the most frequent checking.
 		const scaleByEffort: Record<EffortLevel, number> = { quick: 2, standard: 4, thorough: 6 }
 		const scale = scaleByEffort[context.effort ?? 'quick']
 		const toolCallThreshold = triggers.everyToolCalls * scale

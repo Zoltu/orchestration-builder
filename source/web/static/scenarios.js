@@ -2,7 +2,7 @@
 //
 // Each scenario is an ordered list of operation specs, and the frame builder expands every call/return spec into two consecutive frames — a transit frame (the operation is in_flight, so its line animates and its destination pulses) and a working frame (the operation is settled, so its line goes solid while its destination keeps pulsing) — so both phases of a step are scrubber-controllable rather than collapsed into one frame. An observe is instantaneous (it is a reference, not a call), so it expands to a single frame that keeps the prior active operation in its working phase. The frame builder overrides only the latest non-observe operation on the active stack; every earlier operation keeps the lifecycle the normal materialization derives, so paused stacks still carry their genuinely in_flight operations and the model's single invariant holds.
 //
-// Authoring against the model contract (operations and participants as first-class data, no event vocabulary and no window reconstruction) is what lets the scenarios exercise the cases the previous fixture set covered plus the cases only the new model can express honestly: instance-per-invocation retries, cross-stack observes, and the three interrupt fates (resume / rewind / terminate) read off operation sequences rather than a fate field.
+// Authoring against the model contract (operations and participants as first-class data, no event vocabulary and no window reconstruction) lets the scenarios exercise instance-per-invocation retries, cross-stack observes, and the three interrupt fates (resume / rewind / terminate) read off operation sequences rather than a fate field.
 //
 // The scenarios are browser-pure JS (imports only the sibling interaction-model.js) so the static server serves them and the test runner imports them from the filesystem, mirroring the sibling interaction-model.js convention.
 
@@ -470,7 +470,7 @@ const nestedInterrupt = {
 
 // Rewind fate: an interrupt's loop_detector calls a rewind tool, the tool emits a terminate op reverting the paused-stack target (which closes the call immediately, removing the node), the tool returns, the loop_detector returns, and the ancestor gets control and calls a fresh coder-2 instance. A second interrupt preempts mid-rewind so the rewind fate is observable on a paused stack.
 //
-// The act of reverting is the rewind tool's terminate ops, not a terminated outcome on a return: the operator was explicit that "it will be a tool that rewinds other rows, not the loop detector agent itself", so the loop_detector calls the tool, the tool terminates the target (source = the tool, destination = the target node), then the tool returns success to the loop_detector. The terminate op closes the targeted call immediately, so no separate terminated return is needed for that call — the node is removed right away.
+// The act of reverting is the rewind tool's terminate ops, not a terminated outcome on a return: the tool rewinds other rows' calls, not the loop detector agent itself, so the loop_detector calls the tool, the tool terminates the target (source = the tool, destination = the target node), then the tool returns success to the loop_detector. The terminate op closes the targeted call immediately, so no separate terminated return is needed for that call — the node is removed right away.
 const rewindFate = {
 	id: 'rewind-fate',
 	label: 'Rewind fate',

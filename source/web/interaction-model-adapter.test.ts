@@ -348,7 +348,7 @@ describe('deriveInteractionModel — llm_call_start transit/working distinction'
 		expect(frame9.operations.filter((o) => o.kind === 'return' && o.lifecycle === 'in_flight').length).toBe(0)
 	})
 
-	test('backward compatible: a call with only role_start + llm_call (no llm_call_start) stays in transit', () => {
+	test('a call with only role_start + llm_call (no llm_call_start) stays in transit', () => {
 		const events = [
 			event('t0', 'role_start', { role: 'coder', depth: 0, task: 'work' }),
 			event('t1', 'llm_call', { role: 'coder', usage: { promptTokens: 10, completionTokens: 5, totalTokens: 15 } }),

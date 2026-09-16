@@ -13,7 +13,7 @@ type Participant = InteractionModel['participants'][number]
 type Operation = InteractionModel['operations'][number]
 type LabelTier = Parameters<ReturnType<typeof createLabelResolver>['resolveParticipantLabel']>[1]
 
-// A fake `h` capturing the tag, props, and children of every vnode so the layout assertions walk a plain object tree rather than real DOM, mirroring the flow-view.test.ts convention.
+// A fake `h` capturing the tag, props, and children of every vnode so the layout assertions walk a plain object tree rather than real DOM.
 interface Vnode {
 	tag: string
 	props: Record<string, unknown>
@@ -685,7 +685,7 @@ describe('renderFlowView — terminal CTA', () => {
 	})
 })
 
-// The whimsical caption phrases rotate by a deterministic hash of the active operation id. These helpers independently interpolate the configured whimsical list with the same seed deriveNowCaption uses (hashString of the active operation id), so the assertion verifies the resolver's interpolation + rotation end-to-end rather than re-deriving the caption through the resolver itself. The detailed and friendly tiers hold single phrases, so their captions are asserted exactly and lock the new prose.
+// The whimsical caption phrases rotate by a deterministic hash of the active operation id. These helpers independently interpolate the configured whimsical list with the same seed deriveNowCaption uses (hashString of the active operation id), so the assertion verifies the resolver's interpolation + rotation end-to-end rather than re-deriving the caption through the resolver itself. The detailed and friendly tiers hold single phrases, so their captions are asserted exactly and pin the whimsical prose.
 function whimsicalOperationCaption(frame: InteractionModel, templateList: string[], sourceLabel: string, destinationLabel: string): string {
 	const opId = activeOperation(frame)?.id ?? ''
 	const idx = labelsModule.hashString(opId) % templateList.length

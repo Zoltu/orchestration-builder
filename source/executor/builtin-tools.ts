@@ -161,7 +161,7 @@ interface ReplaceOperation {
 
 type ContextEditOperation = DropOperation | StripReasoningOperation | ReplaceOperation
 
-// Message indices 0 (system prompt) and 1 (original task) are untouchable in every edit operation — the contract the context-manager prompt has always taught, enforced here so a bad range cannot amputate the target's identity. Validation rejects the whole call atomically, before any operation applies.
+// Message indices 0 (system prompt) and 1 (original task) are untouchable in every edit operation — the contract the context-manager prompt teaches, enforced here so a bad range cannot amputate the target's identity. Validation rejects the whole call atomically, before any operation applies.
 const PROTECTED_MESSAGE_COUNT = 2
 const PROTECTED_MESSAGES_MESSAGE = 'operations must not touch message index 0 (system prompt) or index 1 (original task)'
 
@@ -341,7 +341,7 @@ function lookupTarget(registry: RoleRegistry, args: Record<string, unknown>): { 
 	return { ok: true, entry }
 }
 
-// Resolves whose conversation a context_info/edit_context call operates on: the caller's own state when targetRole is absent (byte-for-byte the original behavior), else the named registry entry. A cross-role target must be registered — a finished role is unregistered and can no longer be compacted — and must not be the caller, which is active rather than suspended.
+// Resolves whose conversation a context_info/edit_context call operates on: the caller's own state when targetRole is absent, else the named registry entry. A cross-role target must be registered — a finished role is unregistered and can no longer be compacted — and must not be the caller, which is active rather than suspended.
 function resolveContextTarget(context: BuiltInToolContext, args: Record<string, unknown>): { ok: true; state: RoleState; roleId: string } | { ok: false; error: ToolResult } {
 	if (args['targetRole'] === undefined) {
 		return { ok: true, state: context.roleState, roleId: context.ownRoleId }

@@ -1039,7 +1039,7 @@ function ContinuationChip(state) {
 	])
 }
 
-// The compose screen is the hero when the service is idle — drafting a task is the primary activity when nothing is running, so the editor gets the whole stage. The submit path and the one-task-at-a-time busy contract are unchanged; in continuation mode the chip rides above the task field and the submit body carries continuesFrom.
+// The compose screen is the hero when the service is idle — drafting a task is the primary activity when nothing is running, so the editor gets the whole stage. The submit path is the shared create path; in continuation mode the chip rides above the task field and the submit body carries continuesFrom.
 function ComposeScreen(state) {
 	const disabled = state.justSubmittedRunId !== null || deriveActiveRunId(state.summaries) !== null
 	const runEffort = isEffort(state.runEffort) ? state.runEffort : DEFAULT_EFFORT
@@ -1341,7 +1341,7 @@ function view(state) {
 }
 
 // --- App -------------------------------------------------------------------
-// The subscriptions array is fixed-size with stable positions: [0] always polls the run list + questions every second; [1] polls the selected run's run view and flow model every second but only while one is selected and non-terminal (deactivating on terminal status replaces the manual clearInterval of the prior client); [2] primes the AudioContext on the first user interaction.
+// The subscriptions array is fixed-size with stable positions: [0] always polls the run list + questions every second; [1] polls the selected run's run view and flow model every second but only while one is selected and non-terminal (the deactivation on terminal status stops the polling); [2] primes the AudioContext on the first user interaction.
 
 app({
 	init: [

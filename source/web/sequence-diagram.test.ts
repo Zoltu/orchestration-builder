@@ -6,7 +6,7 @@ import { labelsModule } from './label-resolver-fixture.js'
 import { scenarios, GUILD_PARTICIPANTS } from './static/scenarios.js'
 import { defined } from './test-fixtures.js'
 
-// Pull the model type off a helper signature so the inline fixtures are contextually checked against the JSDoc shape without a cast, mirroring the sibling mvc-flow-view.test.ts convention.
+// Pull the model type off a helper signature so the inline fixtures are contextually checked against the JSDoc shape without a cast, mirroring the sibling flow-view.test.ts convention.
 type InteractionModel = Parameters<typeof observesOf>[0]
 type Participant = InteractionModel['participants'][number]
 type Operation = InteractionModel['operations'][number]

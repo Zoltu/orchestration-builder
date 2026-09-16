@@ -324,7 +324,7 @@ describe('deriveRoleTree', () => {
 		expect(defined(tree[0], 'tree[0]').active).toBe(true)
 	})
 
-	test('falls back to agent_call edges for a role_start that omitted parent (pre-enhancement log)', () => {
+	test('falls back to agent_call edges for a role_start that omitted parent (a log without parent fields)', () => {
 		const events: LogEvent[] = [
 			event('role_start', { role: 'orchestrator', depth: 0, task: 't' }),
 			event('agent_call', { parent: 'orchestrator', child: 'coder', depth: 1 }),
@@ -495,7 +495,7 @@ describe('foldLlmCallSent', () => {
 		expect(foldLlmCallSent(events, 3)).toEqual(event('llm_call', { role: 'coder', roleId: 'coder-0-1', messageCount: 3, sentFrom: 2, sent: [msg('system', 'p'), msg('user', 'task'), msg('assistant', 'turn one')] }))
 	})
 
-	test('a legacy event without sentFrom is a full snapshot that ends the walk', () => {
+	test('an event without sentFrom is a full snapshot that ends the walk', () => {
 		const events = [
 			event('llm_call', { role: 'coder', messageCount: 2, sent: [msg('system', 'p'), msg('user', 'task')] }),
 			event('llm_call', { role: 'coder', messageCount: 4, sentFrom: 2, sent: [msg('assistant', 'turn one'), msg('tool', 'result one')] }),
@@ -681,7 +681,7 @@ describe('formatLogEvent', () => {
 		expect(formatLogEvent(event('inquiry_dropped', { message: 'hello?' }))).toBe('inquiry dropped')
 	})
 
-	test('the retired operator_inquiry still reads sensibly in historical logs', () => {
+	test('an operator_inquiry event renders as the operator inquiry label', () => {
 		expect(formatLogEvent(event('operator_inquiry', { role: 'orchestrator', roleId: 'orchestrator-0-1', message: 'status?' }))).toBe('orchestrator · operator inquiry')
 	})
 
@@ -735,7 +735,7 @@ describe('renderRunView', () => {
 		expect(view.roles.length).toBe(1)
 	})
 
-	test('surfaces the run effort from meta.effort, or null when meta is absent or predates the channel', () => {
+	test('surfaces the run effort from meta.effort, or null when meta is absent or carries no effort', () => {
 		const withEffort = parseRunSnapshot({
 			metaText: JSON.stringify(sampleRunMeta({ effort: 'thorough' })),
 			logText: '',
@@ -1117,9 +1117,9 @@ describe('deriveInterruptHistory', () => {
 		])
 	})
 
-	test('ignores retired operator_inquiry events, non-inquiry triggers, and malformed payloads', () => {
+	test('ignores operator_inquiry events, non-inquiry triggers, and malformed payloads', () => {
 		const events: LogEvent[] = [
-			{ timestamp: 't1', type: 'operator_inquiry', payload: { role: 'coder', message: 'legacy?' } },
+			{ timestamp: 't1', type: 'operator_inquiry', payload: { role: 'coder', message: 'status?' } },
 			{ timestamp: 't2', type: 'interrupt', payload: null },
 			{ timestamp: 't3', type: 'interrupt', payload: { trigger: 'loop_check', handler: 'loop_detector', target: 'coder-1-2' } },
 			{ timestamp: 't4', type: 'interrupt', payload: { trigger: 'inquiry', handler: 'inquiry_responder', target: 'coder-1-2' } },

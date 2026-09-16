@@ -26,7 +26,7 @@ const EXCLUDE_MARKER = '# Added by the Adaptive Orchestrator: run bookkeeping'
 // The leading slash anchors the pattern to the repository root, mirroring the tool-level predicate's top-level-only rule: an unanchored `.orchestration/` would also hide a nested project's `.orchestration` from git.
 const EXCLUDE_ENTRY = '/.orchestration/'
 
-// Idempotency across executor versions: any of the spellings a previous run may have appended — the anchored entry, the older un-anchored one, or the bare name — counts as already present so re-runs never duplicate.
+// Idempotency: any of the spellings that may already be in the file — the anchored entry, the un-anchored form, or the bare name — counts as already present so re-runs never duplicate.
 function containsOrchestrationEntry(text: string): boolean {
 	for (const line of text.split('\n')) {
 		const trimmed = line.trim()

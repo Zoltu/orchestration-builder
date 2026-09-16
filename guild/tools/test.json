@@ -1,6 +1,6 @@
 {
 	"name": "test",
-	"description": "Run the workspace test suite (currently `bun test`) and return its output. Runs a single fixed command with no model-chosen arguments, no network, and no installs. A non-zero exit code (failing tests) is a normal result to read and iterate on, not an error.",
+	"description": "Run the workspace test suite (`bun test`) and return its output. Runs a single fixed command with no model-chosen arguments, no network, and no installs. A non-zero exit code (failing tests) is a normal result to read and iterate on, not an error.",
 	"humanLabel": {
 		"detailed": ["Run Tests"],
 		"friendly": ["Tests"],

@@ -2,7 +2,7 @@
 
 The Foundry is an offline meta-optimizer that improves the Guild by proposing, testing, and merging changes. It is a separate program from the executor — it never imports from the executor codebase and talks to the executor exclusively over its HTTP API. It uses a large language model (commercial API or large local model) for hypothesis generation and merging; the executor itself never does.
 
-The Foundry is future work. Its design is documented here so executor and Guild decisions can account for it. Implementation is planned in `PLAN.md` (repo root).
+The Foundry is future work. Its design is documented here so executor and Guild decisions can account for it.
 
 ## Architecture
 
@@ -10,7 +10,7 @@ The Foundry is a standalone program, not a subcommand of the executor service. I
 
 Each Foundry benchmark run gets its own container (one container = one benchmark) so benchmarks that install packages or download tooling cannot pollute each other. The Foundry copies the benchmark source into a temp directory, mounts it into the container at `/workspace` (read-write), mounts the branch Guild read-only, starts the container, polls for completion, captures the result, then stops the container and deletes the temp. The copy is necessary so repeated runs start from a clean source.
 
-The Foundry uses CLI args (not environment variables) because it is a batch tool with per-invocation parameters: `--suite`, `--cycles`, `--guild`, cost/plateau overrides, and the executor-service endpoint / container-image config. The project structure (in-repo subpackage vs separate repository) is decided when the step runs.
+The Foundry uses CLI args (not environment variables) because it is a batch tool with per-invocation parameters: `--suite`, `--cycles`, `--guild`, cost/plateau overrides, and the executor-service endpoint / container-image config. The project structure (in-repo subpackage vs separate repository) is decided with the operator during planning.
 
 ## Optimization loop
 

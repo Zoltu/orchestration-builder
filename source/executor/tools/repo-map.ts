@@ -4,7 +4,7 @@ import { createToolError } from '../errors.js'
 import type { ToolHandler } from '../tool-dispatch.js'
 import { nodePathFilesystem, resolveWithinWorkspace, wrapIoError } from './shared.js'
 
-// The extractor is a heuristic scanner rather than a compiler parse: typescript is a dev-only dependency and node_modules is stripped from the deployed image, so the executor cannot use the compiler API at runtime. Declarations are found by tracking bracket depth over a copy of the source with comments and string/template/regex literals blanked to spaces; the mask stays index-aligned with the original text, which is where emitted signature text comes from. Output conventions match the former compiler-based version: only export/async/static prefixes are rendered, method type parameters are omitted, and variables with non-function initializers reduce to a bare name.
+// The extractor is a heuristic scanner rather than a compiler parse: typescript is a dev-only dependency and node_modules is stripped from the deployed image, so the executor cannot use the compiler API at runtime. Declarations are found by tracking bracket depth over a copy of the source with comments and string/template/regex literals blanked to spaces; the mask stays index-aligned with the original text, which is where emitted signature text comes from. Output renders only export/async/static prefixes, omits method type parameters, and reduces variables with non-function initializers to a bare name.
 
 export const REPO_MAP_SOURCE_EXTENSIONS: ReadonlySet<string> = new Set(['.ts', '.mts', '.cts', '.js', '.jsx', '.tsx'])
 
@@ -253,7 +253,7 @@ function normalizeWhitespace(text: string): string {
 	return text.replace(/\s+/g, ' ').trim()
 }
 
-// A dangling comma from a multi-line parameter list is dropped, matching how the compiler version joined parameters.
+// A dangling comma from a multi-line parameter list is dropped.
 function normalizeParameters(sourceText: string, start: number, end: number): string {
 	const text = normalizeWhitespace(sourceText.slice(start, end))
 	if (text.endsWith(',')) return text.slice(0, -1)
@@ -406,7 +406,7 @@ interface FunctionLikeInitializer {
 	end: number
 }
 
-// start sits just after `=`. Recognizes arrow functions (parenthesized or single-identifier parameters, optional async and return type) and function expressions; any other initializer renders as a bare name, matching the compiler version.
+// start sits just after `=`. Recognizes arrow functions (parenthesized or single-identifier parameters, optional async and return type) and function expressions; any other initializer renders as a bare name.
 function parseFunctionLikeInitializer(sourceText: string, mask: string, start: number): FunctionLikeInitializer | null {
 	let i = skipWhitespace(mask, start)
 	const first = isIdentifierStart(mask[i]) ? readWord(mask, i) : null
@@ -459,7 +459,7 @@ function parseVariable(sourceText: string, mask: string, start: number, prefix: 
 		i = skipWhitespace(mask, i)
 		const char = mask[i]
 		if (char === '{' || char === '[') {
-			// Destructuring binds no single name, so it renders nothing — the compiler version's identifier-only rule.
+			// Destructuring binds no single name, so it renders nothing.
 			const patternEnd = scanDelimited(mask, i)
 			if (patternEnd === null) break
 			i = skipWhitespace(mask, patternEnd)
@@ -605,7 +605,7 @@ function parseMember(sourceText: string, mask: string, start: number): MemberRes
 	if (mask[afterName] !== '(' && mask[afterName] !== '<') return { line: null, end: skipMember(mask, i) }
 	let j = afterName
 	if (mask[j] === '<') {
-		// Method type parameters position the parameter list but are not rendered, matching the compiler version.
+		// Method type parameters position the parameter list but are not rendered.
 		const typeEnd = scanDelimited(mask, j)
 		if (typeEnd === null) return { line: null, end: i }
 		j = skipWhitespace(mask, typeEnd)

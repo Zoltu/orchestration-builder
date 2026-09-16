@@ -767,7 +767,7 @@ describe('resumeExecutor', () => {
 		expect(persistence.state.meta?.logLevel).toBe('standard')
 	})
 
-	test('a checkpoint from before the logging channel existed resumes at full detail', async () => {
+	test('a checkpoint without a recorded logging level resumes at full detail', async () => {
 		const uninterrupted = await driveUninterruptedRun()
 		const checkpoint = uninterrupted.checkpoints[1]
 		if (checkpoint === undefined) throw new Error('expected the mid-descent checkpoint')

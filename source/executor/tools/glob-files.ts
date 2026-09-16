@@ -33,7 +33,7 @@ function globToRegex(pattern: string): RegExp {
 				i += 3
 				continue
 			}
-			// A trailing whole-segment `**` and a `**` inside a segment keep the historical `.*`: after the literal `dir/` prefix a zero-segment match would leave a dangling slash no walked path has, so `dir/**` cannot match `dir` itself.
+			// A trailing whole-segment `**` and a `**` inside a segment compile to `.*`: after the literal `dir/` prefix a zero-segment match would leave a dangling slash no walked path has, so `dir/**` cannot match `dir` itself.
 			regex += '.*'
 			i += 2
 			continue

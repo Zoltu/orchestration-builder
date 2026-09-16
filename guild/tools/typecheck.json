@@ -1,6 +1,6 @@
 {
 	"name": "typecheck",
-	"description": "Run the workspace typechecker (currently Bun/TSC) and return its diagnostics. Runs a single fixed command with no model-chosen arguments, no network, and no installs. A non-zero exit code is a normal result to read and iterate on, not an error.",
+	"description": "Run the workspace typechecker (Bun/TSC) and return its diagnostics. Runs a single fixed command with no model-chosen arguments, no network, and no installs. A non-zero exit code is a normal result to read and iterate on, not an error.",
 	"humanLabel": {
 		"detailed": ["Type Check"],
 		"friendly": ["Check Types"],

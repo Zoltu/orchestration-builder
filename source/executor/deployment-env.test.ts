@@ -80,7 +80,7 @@ describe('resolveDeploymentOverride', () => {
 		expect(resolveDeploymentOverride({ ORCHESTRATOR_MODEL: '', ORCHESTRATOR_MAX_AGENT_DEPTH: '', ORCHESTRATOR_TEMPERATURE: '' })).toEqual({})
 	})
 
-	test('the removed reasoning-field variable is no longer read', () => {
+	test('an unrecognized variable is ignored', () => {
 		expect(resolveDeploymentOverride({ ORCHESTRATOR_REASONING_FIELD: 'reasoning' })).toEqual({})
 	})
 

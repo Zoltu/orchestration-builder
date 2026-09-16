@@ -1,17 +1,17 @@
 # Adaptive Orchestrator — Foundry Development Plan
 
-The executor, the seed Guild, the benchmark suite, the web UI, and the containerized deployment are complete. The remaining development work is the **Foundry**: an offline meta-optimizer that improves the Guild by proposing, testing, and merging changes against the benchmark suite. It is a standalone program — an HTTP client of the executor service that never imports from the executor codebase — and it uses a large language model for hypothesis generation and merging. The complete design (architecture, optimization loop, scoring, branch management, guardrails, promotion/rollback, reporting, data layout) lives in [`docs/foundry.md`](docs/foundry.md); this document plans the work of building it, not the design. Every change, in every milestone, follows [`AGENTS.md`](AGENTS.md).
+This plan covers the **Foundry**: an offline meta-optimizer that improves the Guild by proposing, testing, and merging changes against the benchmark suite. It is a standalone program — an HTTP client of the executor service that never imports from the executor codebase — and it uses a large language model for hypothesis generation and merging. The complete design (architecture, optimization loop, scoring, branch management, guardrails, promotion/rollback, reporting, data layout) lives in [`docs/foundry.md`](docs/foundry.md); this document plans the work of building it, not the design. Every change, in every milestone, follows [`AGENTS.md`](AGENTS.md).
 
 Milestones are sequential: the design decisions must land before the harness, the harness before the loop. Within a milestone, work follows the usual hygiene rules — `bun run typecheck` and `bun test source/` green at every close.
 
 ## Before the Foundry
 
-The completed work left a small set of operator-only verifications outstanding. None blocks design or harness work, but all should close before an optimization cycle is trusted:
+A small set of operator-only verifications is open. None blocks design or harness work, but all should close before an optimization cycle is trusted:
 
-- Exercise the streaming client end-to-end against the bundled Guild endpoint (`llama-server`, model "Agents A1") — the one real backend it has not touched; verify the endpoint's llama.cpp build serves the streaming API first.
+- Exercise the streaming client end-to-end against the bundled Guild endpoint (`llama-server`, model "Agents A1"); verify the endpoint's llama.cpp build serves the streaming API first.
 - Build the Docker image and run the smoke test outside this environment (Docker is unavailable in-environment): submit a task via the UI or API, confirm the service stays up after the run, and confirm the hardened invocation (`--read-only`, dropped capabilities, non-root) behaves.
-- Re-verify checkpoint/resume across a container restart (`docker stop` mid-run, restart, confirm the run resumes) against the current executor, if desired.
-- Operator sign-offs still open on the shipped product: real-world Guild tasks (representative tasks beyond the benchmark fixtures), full benchmark-suite runs against a real endpoint, and the run visualization in both light and dark themes.
+- Verify checkpoint/resume across a container restart (`docker stop` mid-run, restart, confirm the run resumes), if desired.
+- Operator sign-offs open on the shipped product: real-world Guild tasks (representative tasks beyond the benchmark fixtures), full benchmark-suite runs against a real endpoint, and the run visualization in both light and dark themes.
 
 ## Tracked technical debt
 
@@ -25,13 +25,13 @@ When you add a row, also update the target milestone's deliverables to describe 
 
 ## Backlog
 
-Unbuilt features, recorded so they are not lost. None is scheduled; each needs a fresh scoping before work begins.
+Unbuilt features. None is scheduled; each needs a fresh scoping before work begins.
 
-- **Token-level streaming cues in the flow view.** The executor foundation already exists (`llm_call_start` and the streaming client): the flow view can key the active node's state on whether the latest received bytes are reasoning, content, or a tool call, and carry a live token counter on the active node.
-- **Changed-files / diff review view.** The highest-value remaining result-review surface — what did the run actually change on disk — and the largest: it likely needs a small backend endpoint that lists or diffs the run's changed files before the client can render it.
+- **Token-level streaming cues in the flow view.** The executor provides `llm_call_start` and the streaming client: the flow view can key the active node's state on whether the latest received bytes are reasoning, content, or a tool call, and carry a live token counter on the active node.
+- **Changed-files / diff review view.** The highest-value result-review surface to build — what did the run actually change on disk — and the largest: it likely needs a small backend endpoint that lists or diffs the run's changed files before the client can render it.
 - **Run-list search/filter and persistent selection.** The run list has no search or filter, and the selected run is lost on page reload. Low value until many runs accumulate; cheap when needed.
 - **Filtered-fetch tool.** A `pattern`-parameter fetch to tame context thrash on large pages. The operator owns this idea and a separate approach to the context-thrash problem — coordinate with the operator before building anything here.
-- **Parked micro-items:** a sequence-view minimap (zoom/pan already exist; the minimap waits for a real need), flow-view rows for parallel children (anticipated by the design but not implemented — the executor is sequential; each active child gets its own row when parallelism lands), dollar pricing on cost displays (a small addition once a price source exists), and mobile support (desktop-first by design; a separate design pass if it is ever wanted).
+- **Parked micro-items:** a sequence-view minimap (zoom/pan exist; the minimap waits for a real need), flow-view rows for parallel children (the design anticipates them, but the executor is sequential; each active child gets its own row when parallelism lands), dollar pricing on cost displays (a small addition once a price source exists), and mobile support (desktop-first by design; a separate design pass if it is ever wanted).
 
 ## Milestone 1 — Discovery and design decisions (operator collaboration)
 
@@ -40,7 +40,7 @@ Unbuilt features, recorded so they are not lost. None is scheduled; each needs a
 **Deliverables.**
 
 1. **Project structure decision.** Decide with the operator whether the Foundry lives as an in-repo subpackage (its own `package.json`/`tsconfig`, consuming the executor only as an HTTP client) or as a separate repository that consumes the executor's published image and API. Document the decision and its rationale.
-2. **Re-validate the design against current reality.** [`docs/foundry.md`](docs/foundry.md) is the authoritative design reference, but it was written before the executor's recent evolution (streaming client, interrupt platform, run persistence and resumption, the researcher role, the review pipeline). Re-read it against the code as it stands, adjust the doc where reality demands, and agree on the module decomposition — the doc names the pieces (branch management, scoring, evaluation, hypothesis generation, merge, reporting, promotion, loop, entry point); the right breakdown is decided here, together.
+2. **Validate the design against the code.** [`docs/foundry.md`](docs/foundry.md) is the authoritative design reference. Read it against the code as it stands, adjust the doc where reality demands, and agree on the module decomposition — the doc names the pieces (branch management, scoring, evaluation, hypothesis generation, merge, reporting, promotion, loop, entry point); the right breakdown is decided here, together.
 3. **Per-run environment isolation design.** Design the hermetic per-run environment for benchmark evaluation: scoped `PATH`/`HOME`, no global pollution, no unapproved egress for installs and dependency fetches, the toolchain-profile concept that lets each workspace name its own checker commands, and the container boundary (one container per benchmark). The egress policy, the trust boundary, and any container-runtime decisions belong to the operator — propose, don't impose.
 
 **Acceptance criteria.**
@@ -92,5 +92,5 @@ Unbuilt features, recorded so they are not lost. None is scheduled; each needs a
 **Acceptance criteria.**
 
 - [ ] A real optimization cycle completes: report delivered, baseline promoted or an honest plateau recorded.
-- [ ] [`docs/foundry.md`](docs/foundry.md) matches what was built (updated where it did not).
+- [ ] [`docs/foundry.md`](docs/foundry.md) matches the implementation.
 - [ ] Bugs surfaced by the real run are recorded and fixed, with the fix re-verified by a cycle or a targeted evaluation.

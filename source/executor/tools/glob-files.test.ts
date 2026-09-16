@@ -87,8 +87,8 @@ describe('createGlobFiles ** semantics', () => {
 		expect(await runGlob(['a.ts', 'a/b.ts', 'src/deep/c.js'], '**')).toEqual({ kind: 'success', data: ['a.ts', 'a/b.ts', 'src/deep/c.js'] })
 	})
 
-	// Pinned as-is: a `**` that is not a whole segment keeps the historical `.*`, which crosses separators.
-	test('a ** inside a segment keeps the historical .* that crosses separators', async () => {
+	// Pinned as-is: a `**` that is not a whole segment compiles to `.*`, which crosses separators.
+	test('a ** inside a segment compiles to .* which crosses separators', async () => {
 		expect(await runGlob(['ab', 'axb', 'a/b', 'a/x/b', 'abc'], 'a**b')).toEqual({ kind: 'success', data: ['a/b', 'a/x/b', 'ab', 'axb'] })
 	})
 })

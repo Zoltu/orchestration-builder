@@ -139,7 +139,7 @@ function createStartRun(config: RunServiceConfig): StartRun {
 
 function createResumeRun(config: RunServiceConfig): ResumeRun {
 	return (checkpoint) => {
-		// The entry frame carries the run's resolved level (docs/reference.md "Logging level"); a checkpoint written before the channel existed falls back to full detail — the only mode those runs ever logged at. Must stay in sync with resumeExecutor's identical fallback (the metas it writes and the wrapper filtering this run's log must carry the same level).
+		// The entry frame carries the run's resolved level (docs/reference.md "Logging level"); a checkpoint whose entry frame carries no logLevel falls back to full detail. Must stay in sync with resumeExecutor's identical fallback (the metas it writes and the wrapper filtering this run's log must carry the same level).
 		const entryFrame = checkpoint.frames[0]
 		const logLevel = entryFrame?.logLevel ?? DEFAULT_LOG_LEVEL
 		const runPromise = withRunBindings(config, checkpoint.runId, logLevel, (dependencies) => resumeExecutor(dependencies, checkpoint, {

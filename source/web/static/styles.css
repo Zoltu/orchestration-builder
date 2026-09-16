@@ -1539,7 +1539,7 @@ li:last-child {
 }
 
 /* --- Human question modal --------------------------------------------------- */
-/* A per-run-view overlay that makes a pending ask_human question unmissable. It is scoped to the run view (the flow area), not the whole page: the overlay's containing block is `.pb-flow` (position: relative), so the backdrop covers the flow area and the centered card sits over it — a future multi-run world can switch away and back without a page-wide mask. The card carries the question and its context as sanitized Markdown (rendered through the same pipeline as the rest of the prose) and the answer input is trusted operator input. Colors read the visual tokens so it follows the light/dark theme. */
+/* A per-run-view overlay that makes a pending ask_human question unmissable. It is scoped to the run view (the flow area), not the whole page: the overlay's containing block is `.pb-flow` (position: relative), so the backdrop covers the flow area only, so the rest of the page stays usable while the modal is open. The card carries the question and its context as sanitized Markdown (rendered through the same pipeline as the rest of the prose) and the answer input is trusted operator input. Colors read the visual tokens so it follows the light/dark theme. */
 
 /* The flow area is the overlay's containing block so the backdrop covers exactly the run view. */
 .pb-flow {
@@ -1767,7 +1767,7 @@ li:last-child {
 }
 
 /* --- Result modal ----------------------------------------------------------- */
-/* A per-run-view overlay that presents a run's terminal result (success/error/needs-clarification). It mirrors the question modal's run-view-scoped overlay (containing block is `.pb-flow`, so the backdrop covers the flow area and the centered card sits over it) so a future multi-run world can switch away and back. The card's accent border follows the outcome — accent blue for a successful or needs-clarification result, calibrated error red for a failure — and the result summary renders as sanitized Markdown while artifacts stay plain text paths. On error, the raw error message renders as sanitized Markdown under an honest framing line, with a copy-raw button that hands the full error object (including the hidden `kind`) to the operator as JSON. Colors read the visual tokens so the modal follows the light/dark theme; the red is the calibrated --color-error token (never pure #ff0000). */
+/* A per-run-view overlay that presents a run's terminal result (success/error/needs-clarification). It mirrors the question modal's run-view-scoped overlay (containing block is `.pb-flow`): the backdrop covers the flow area only, so the rest of the page stays usable while the modal is open. The card's accent border follows the outcome — accent blue for a successful or needs-clarification result, calibrated error red for a failure — and the result summary renders as sanitized Markdown while artifacts stay plain text paths. On error, the raw error message renders as sanitized Markdown under an honest framing line, with a copy-raw button that hands the full error object (including the hidden `kind`) to the operator as JSON. Colors read the visual tokens so the modal follows the light/dark theme; the red is the calibrated --color-error token (never pure #ff0000). */
 
 .result-modal-overlay {
 	position: absolute;

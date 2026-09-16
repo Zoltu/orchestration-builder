@@ -244,7 +244,7 @@ snapshots.set('run-tree', {
 	].join('\n'),
 })
 
-// A run whose llm_call events carry the delta protocol (docs/reference.md "Log events"): turn 1 is a full snapshot, turn 2 a delta slice, and a third event is the full-snapshot twin of turn 2 — what a pre-delta logger would have written for the same conversation — so the detail endpoint's server-side fold can be compared against it byte for byte.
+// A run whose llm_call events carry the delta protocol (docs/reference.md "Log events"): turn 1 is a full snapshot, turn 2 a delta slice, and a third event is the same conversation logged as a full snapshot — so the detail endpoint's server-side fold can be compared against it byte for byte.
 snapshots.set('run-delta', {
 	metaText: JSON.stringify({
 		runId: 'run-delta',
@@ -283,7 +283,7 @@ snapshots.set('run-flow-details', {
 	].join('\n'),
 })
 
-// A run whose orchestrator delegates to coder twice (first errors, second succeeds) — mirrors a retry — so the per-invocation tree, the per-invocation status, and the inline error surfacing are all exercised end to end. Pre-fix this would have shown one merged coder pulsing while reading "error" despite the run succeeding.
+// A run whose orchestrator delegates to coder twice (first errors, second succeeds) — mirrors a retry — so the per-invocation tree, the per-invocation status, and the inline error surfacing are all exercised end to end.
 snapshots.set('run-retry', {
 	metaText: JSON.stringify({
 		runId: 'run-retry',
@@ -800,7 +800,7 @@ describe('GET /api/runs/:id', () => {
 		expect(errorFinish).toBeDefined()
 	})
 
-	test('includes the run effort from meta.effort, or null when the run predates the channel', async () => {
+	test('includes the run effort from meta.effort, or null when the run\'s meta carries no effort', async () => {
 		const { handler } = createHandlerHarness()
 		const withEffort = await handler(get('/api/runs/run-effort'))
 		expect(withEffort.status).toBe(200)
@@ -873,7 +873,7 @@ describe('GET /api/runs/:id/log', () => {
 
 	test('detail=<index> serves one event\'s paired detail sections', async () => {
 		const { handler } = createHandlerHarness()
-		// run-tree's event 1 is the llm_call whose sent/received bodies the run view no longer ships.
+		// run-tree's event 1 is an llm_call carrying paired sent/received detail bodies.
 		const response = await handler(get('/api/runs/run-tree/log?detail=1'))
 		expect(response.status).toBe(200)
 		const body = await response.json()

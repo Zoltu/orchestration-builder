@@ -1227,7 +1227,7 @@ describe('runRole — interrupt platform', () => {
 		expect(payloadField(resolved, 'trigger')).toBe('inquiry')
 		expect(payloadField(resolved, 'action')).toBe('answered')
 		expect(payloadField(resolved, 'summary')).toBe('the run is building the parser')
-		// The question never enters the suspended role's history, and the retired event is gone.
+		// The question never enters the suspended role's history, and no operator_inquiry event is emitted.
 		expect(defined(llm.calls[2], 'resumed main call').messages.some((m) => m.content.includes('what are you working on?'))).toBe(false)
 		expect(events.some((e) => e.type === 'operator_inquiry')).toBe(false)
 		// The suspended role resumes its turn loop once the handler finishes.

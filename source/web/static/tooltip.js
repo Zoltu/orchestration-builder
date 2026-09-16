@@ -1,6 +1,6 @@
 // Tooltip component for the flow-graph run view: a friendly-formatted detail card that appears when an operator hovers a node or edge, and disappears when the pointer leaves it.
 //
-// Each section is a labeled block whose content is rendered by kind — pretty-printed JSON for object/array content (indented, no raw `\n` escapes), sanitized Markdown for prose content (assistant summaries, error messages, task text, question text), and plain text for scalars. The card is read-only (no buttons): the formatted view is for reading while the pointer rests on the node/edge. It is the reusable inspector the future sequence diagram also uses.
+// Each section is a labeled block whose content is rendered by kind — pretty-printed JSON for object/array content (indented, no raw `\n` escapes), sanitized Markdown for prose content (assistant summaries, error messages, task text, question text), and plain text for scalars. The card is read-only (no buttons): the formatted view is for reading while the pointer rests on the node/edge. It is the reusable inspector the flow and sequence views both use.
 //
 // The card is an HTML overlay (a positioned `<div>`), not an SVG primitive: SVG cannot host the sanitized-Markdown vnodes (HTML `<p>`/`<ul>`/… produced by the `markdown-render` pipeline) or a wrapping `<pre>`, so the tooltip follows the question/result modal pattern (an HTML card scoped to the run view). The card is `pointer-events: auto` with `user-select: text` (styles.css) so the operator can move the pointer from the hovered node into the card to select and copy its contents; the wiring in `app.js` / `demo.js` keeps it open while the pointer is over the node or the card and dismisses it — after a short grace timer — once the pointer is over neither. See docs/security.md "Web client rendering pipeline".
 //
@@ -125,7 +125,7 @@ function scalarSection(label, content) {
 }
 
 // --- On-demand operation details --------------------------------------------
-// The model no longer carries per-operation detail bodies (they can be multi-megabyte tool
+// The model carries no per-operation detail bodies (they can be multi-megabyte tool
 // arguments/results and would ride every polled frame); the derivations receive a lookup the
 // wiring provides — a function from operation id to the session cache's state for that id:
 //   { status: 'loading' }                        the details fetch is in flight
@@ -233,7 +233,7 @@ export function deriveParticipantTooltip(model, labels, tier, participantId, ope
 	// the live question history. For every other kind the completing return's details (the result
 	// or summary) are preferred over the incoming call's (the request) so the card shows the
 	// outcome once it has arrived and the in-flight request otherwise. A return with no content
-	// (ready-null or failed) falls back to the call, matching the old null-details fallback; a
+	// (ready-null or failed) falls back to the call; a
 	// return still loading keeps the card on the return rather than flashing the request first.
 	let sourceId = null
 	let usedReturn = false

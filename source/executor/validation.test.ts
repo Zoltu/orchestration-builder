@@ -234,7 +234,7 @@ describe('validateDeploymentFileConfig throws ValidationError with a path-based 
 		const bad = { ...validDeployment, model: { ...validDeployment.model, [field]: value } }
 		expect(() => validateDeploymentFileConfig(bad)).toThrow(new RegExp(`model\\.${field}`))
 	})
-	test('rejects the removed reasoningField key as unknown inside model', () => {
+	test('rejects reasoningField as an unknown key inside model', () => {
 		const bad = { ...validDeployment, model: { ...validDeployment.model, reasoningField: 'reasoning' } }
 		expect(() => validateDeploymentFileConfig(bad)).toThrow(/model\.reasoningField.*unknown key "reasoningField"/)
 	})

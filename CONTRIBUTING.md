@@ -31,7 +31,3 @@ rm output.txt
 2. [`docs/reference.md`](docs/reference.md) — executor runtime, Guild format, HTTP API, benchmarks
 3. [`docs/foundry.md`](docs/foundry.md) — meta-optimization loop (future work)
 4. [`docs/security.md`](docs/security.md) — threat model and mitigations
-
-## Development plan
-
-Forward work — the Foundry, the offline meta-optimizer that improves the Guild — is planned in [`PLAN.md`](PLAN.md). Every change must leave the repository in a clean, healthy state — see [`AGENTS.md`](AGENTS.md).

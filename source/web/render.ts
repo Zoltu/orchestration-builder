@@ -168,7 +168,7 @@ export function formatLogEvent(event: LogEvent): string {
 			const reason = stringField(payload, 'reason')
 			return reason !== null ? `inquiry dropped (${reason})` : 'inquiry dropped'
 		}
-		// Never emitted anymore; kept so historical logs still read sensibly.
+		// The executor does not emit this event; the case exists so a run log that contains one still reads sensibly.
 		case 'operator_inquiry':
 			return withRole(role, 'operator inquiry')
 		case 'plan_modification':
@@ -373,7 +373,7 @@ export function formatLogDetailSections(event: LogEvent): LogDetailSection[] | n
 	return null
 }
 
-// Folds an llm_call event's delta back into the full sent conversation (docs/reference.md "Log events" documents the wire protocol): the event's sent list starts at conversation index sentFrom, and the messages below it live on the role instance's earlier llm_call events. The walk goes backward over same-instance llm_call events — matched on roleId, falling back to the role name for events that predate it, since a role may spawn a same-named child whose interleaved events would corrupt a name-based walk — each contributing the head of its sent list down to the still-uncovered index; absent sentFrom reads as 0, so a legacy full-snapshot event both contributes and ends the walk. The walk stops once the covered range reaches index 0. Each request is its predecessor's plus appended messages, so the concatenated slices are element-identical to the request a full-snapshot event would have carried. Returns the event unchanged for anything that is not a delta-carrying llm_call (a full snapshot with sentFrom 0, or the standard level's body-less event), and never mutates the input events.
+// Folds an llm_call event's delta back into the full sent conversation (docs/reference.md "Log events" documents the wire protocol): the event's sent list starts at conversation index sentFrom, and the messages below it live on the role instance's earlier llm_call events. The walk goes backward over same-instance llm_call events — matched on roleId, falling back to the role name for events that carry no roleId, since a role may spawn a same-named child whose interleaved events would corrupt a name-based walk — each contributing the head of its sent list down to the still-uncovered index; absent sentFrom reads as 0, so a full-snapshot event without sentFrom both contributes and ends the walk. The walk stops once the covered range reaches index 0. Each request is its predecessor's plus appended messages, so the concatenated slices are element-identical to the request a full-snapshot event would have carried. Returns the event unchanged for anything that is not a delta-carrying llm_call (a full snapshot with sentFrom 0, or the standard level's body-less event), and never mutates the input events.
 export function foldLlmCallSent(events: LogEvent[], index: number): LogEvent {
 	const event = events[index]
 	if (event === undefined) throw new Error(`foldLlmCallSent: no event at log index ${index}`)

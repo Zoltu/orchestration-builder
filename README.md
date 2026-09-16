@@ -1,6 +1,6 @@
 # Adaptive Orchestrator
 
-An orchestration engine that lets a small, consumer-grade language model solve complex tasks by working through a network of specialized roles and tools. The orchestration engine itself is intentionally minimal; most behavior is described by a JSON configuration called the **Guild**. A separate meta-optimization process called the **Foundry** automatically improves the Guild by proposing, testing, and merging changes.
+An orchestration engine that lets a small, consumer-grade language model solve complex tasks by working through a network of specialized roles and tools. The orchestration engine itself is intentionally minimal; most behavior is described by a JSON configuration called the **Guild**. A separate meta-optimization process called the **Foundry** will automatically improve the Guild by proposing, testing, and merging changes.
 
 For contributors and development setup, see [`CONTRIBUTING.md`](CONTRIBUTING.md).
 

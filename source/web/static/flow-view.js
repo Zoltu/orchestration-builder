@@ -122,7 +122,7 @@ function derivedOf(model) {
 	return derived
 }
 
-// The per-stack and per-participant lookups the row projection and the cost reads need: the latest call-or-return per stack, the return id → closed call mapping per stack, the first completing return per participant source, and the set of stacks that carry any operation. One chronological pass replaces the per-stack and per-node replays the renderer used to pay per render; the terminate handling mirrors openCallsByStack — a terminate pops the open call whose destination it targets wherever that call's stack lives, so every stack's open list is scanned (the per-stack replay this pass replaces scanned one stack's list per terminate, which lands the same pops per stack).
+// The per-stack and per-participant lookups the row projection and the cost reads need: the latest call-or-return per stack, the return id → closed call mapping per stack, the first completing return per participant source, and the set of stacks that carry any operation. One chronological pass computes all per-stack and per-participant lookups; the terminate handling mirrors openCallsByStack — a terminate pops the open call whose destination it targets wherever that call's stack lives, so every stack's open list is scanned, which lands the same pops per stack a per-stack replay would.
 function rowLookupsOf(model) {
 	const derived = derivedOf(model)
 	if (derived.rows !== undefined) return derived.rows
@@ -662,7 +662,7 @@ export function renderFlowView(h, model, labels, tier, lifecycle, cta, question,
 		svgChildren.push(CtaNode(h, { label: ctaDescriptor.label, active: isActive, tone: ctaDescriptor.tone, x: ctaLayout.x, y: ctaLayout.y, onclick }))
 	}
 
-	// The Question button overlays the answerer node while the ask_human call is pending. It carries no connecting edge (the removed-CTA-edge rule applies to these overlay affordances alike); the onclick is harness-supplied so the view stays free of modal coupling.
+	// The Question button overlays the answerer node while the ask_human call is pending. It carries no connecting edge (the CTA's no-connecting-edge rule applies to these overlay affordances alike); the onclick is harness-supplied so the view stays free of modal coupling.
 	const askHumanCall = activeAskHumanCall(model)
 	if (askHumanCall !== undefined && question !== undefined && question !== null && typeof question.onclick === 'function') {
 		const answererPosition = rowLayout.get(askHumanCall.destination)
@@ -699,7 +699,7 @@ export function deriveNowCaption(model, labels, tier) {
 	if (status === 'needs_clarification') return 'Waiting for your input…'
 	const operation = activeOperation(model)
 	if (operation === null) return 'Working…'
-	// A settled call is the working phase: the destination has started its own work, so the caption names what the destination is doing (e.g. "Planning the approach…") rather than the call relationship ("Orchestrator is calling Planner"). The working label is optional per participant; when absent the caption falls back to the operation label so a guild without working labels keeps the prior behavior. The seed is the operation id's hash so the whimsical tier rotates between operations while staying fixed within one, and the working phase reuses the call's seed so transit and working of the same call land on the same whimsical phrase.
+	// A settled call is the working phase: the destination has started its own work, so the caption names what the destination is doing (e.g. "Planning the approach…") rather than the call relationship ("Orchestrator is calling Planner"). The working label is optional per participant; when absent the caption falls back to the operation label so a guild without working labels still renders a caption. The seed is the operation id's hash so the whimsical tier rotates between operations while staying fixed within one, and the working phase reuses the call's seed so transit and working of the same call land on the same whimsical phrase.
 	const seed = labels.hashString(operation.id)
 	if (operation.kind === 'call' && operation.lifecycle === 'settled' && typeof labels.resolveWorkingLabel === 'function') {
 		const destination = model.participants.find((participant) => participant.id === operation.destination)

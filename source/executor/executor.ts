@@ -114,7 +114,7 @@ export async function resumeExecutor(deps: ExecutorDependencies, checkpoint: Run
 	if (entryFrame === undefined) throw new Error(`resumeExecutor: checkpoint for run ${checkpoint.runId} has no frames`)
 	const task = entryFrame.task
 	const effort = entryFrame.effort ?? DEFAULT_EFFORT
-	// The logging level survives the restart the same way the effort does: the entry frame carries the run's resolved level, and a checkpoint written before the channel existed falls back to full detail — the only mode those runs ever logged at. Must stay in sync with createResumeRun in serve.ts, which applies the same fallback to the log-filtering wrapper around this run (the metas and the wrapper must record and filter at the same level).
+	// The logging level survives the restart the same way the effort does: the entry frame carries the run's resolved level, and a checkpoint without a recorded level falls back to full detail. Must stay in sync with createResumeRun in serve.ts, which applies the same fallback to the log-filtering wrapper around this run (the metas and the wrapper must record and filter at the same level).
 	const logLevel = entryFrame.logLevel ?? DEFAULT_LOG_LEVEL
 	// The checkpoint carries the lineage id only (not the prior task/summary): on resume the entry role's history — the briefing included — is restored from the checkpoint verbatim, so the full continuation object is never recomposed and the empty task/summary here exist only so the metas keep the continuesFrom field.
 	const continuation: RunContinuation | undefined = entryFrame.continuesFrom !== undefined ? { runId: entryFrame.continuesFrom, task: '', summary: '' } : undefined

@@ -36,7 +36,7 @@ function serializeToolResult(result: ToolResult, maxChars: number): string {
 	return truncateToolOutput(text, maxChars).text
 }
 
-// Builds the role_finished payload, extending the legacy {role, status} with the instance id, depth, an optional parent, and the result-card summary/error so render.ts can build the parent→child tree and a reviewer reading only log.jsonl can see why a role finished (especially why it errored — without this, an erroring role's explanation lives only on the returned ResultCard / meta.json, never in the log stream).
+// Builds the role_finished payload: the {role, status} base plus the instance id, depth, an optional parent, and the result-card summary/error so render.ts can build the parent→child tree and a reviewer reading only log.jsonl can see why a role finished (especially why it errored — without this, an erroring role's explanation lives only on the returned ResultCard / meta.json, never in the log stream).
 // The added fields are additive: existing readers that read only role/status keep working.
 function roleFinishedPayload(roleName: string, depth: number, card: ResultCard, parent: string | undefined, roleId: string): unknown {
 	const payload: Record<string, unknown> = { role: roleName, roleId, depth, status: card.status }
