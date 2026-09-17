@@ -1,6 +1,6 @@
 {
 	"name": "test",
-	"description": "Run the workspace test suite (`bun test`) and return its output. Runs a single fixed command with no model-chosen arguments, no network, and no installs. A non-zero exit code (failing tests) is a normal result to read and iterate on, not an error.",
+	"description": "Run one or more test commands for the workspace's toolchain and return each command's result separately. Commands run sequentially in the workspace root. A non-zero exit code (failing tests) is a normal result to read and iterate on, not an error.",
 	"humanLabel": {
 		"detailed": ["Run Tests"],
 		"friendly": ["Tests"],
@@ -23,10 +23,17 @@
 	},
 	"parameters": {
 		"type": "object",
+		"required": ["commands"],
 		"properties": {
+			"commands": {
+				"type": "array",
+				"description": "The test commands to run, in order, for the project's toolchain (for example [\"bun test\"] or [\"python -m pytest tests/\"]).",
+				"items": { "type": "string" },
+				"maxItems": 16
+			},
 			"timeoutSeconds": {
 				"type": "number",
-				"description": "Optional timeout in seconds. Capped by the executor default tool timeout; a value above the cap is clamped to the cap."
+				"description": "Optional per-command timeout in seconds. Capped by the executor default tool timeout; a value above the cap is clamped to the cap."
 			}
 		}
 	}

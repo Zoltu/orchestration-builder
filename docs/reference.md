@@ -201,12 +201,20 @@ Native tools are implemented in the executor and operate against the mounted wor
 - `list_directory` — list directory entries
 - `repo_map` — symbol-level map of the workspace's TypeScript/JavaScript sources: one line per top-level declaration, grouped by file (tests, declaration files, vendored code, hidden directories, and build output excluded)
 - `run_shell` — run a shell command (via `sh -c`, with the workspace as the working directory)
+- `typecheck` — run the workspace's typecheck commands and return each command's result separately (see "Checker tools" below)
+- `test` — run the workspace's test commands and return each command's result separately (see "Checker tools" below)
 - `fetch_url` — fetch a document over HTTP/HTTPS. The `method` parameter selects the backend: `auto` (default) converts the page to markdown through Kagi Extract when `KAGI_API_KEY` is configured, then markdown.new, falling back to a direct fetch of the raw document; `direct` skips conversion (the right choice for API/JSON endpoints); `kagi` and `markdown_new` force a specific backend
 - `web_search` — search the web through Kagi, returning ranked results (title, url, snippet, time)
 
 `web_search` and the `kagi` fetch backend are optional capabilities keyed on `KAGI_API_KEY` (environment variable, or a Docker secret at `/run/secrets/kagi_api_key`). The Guild's tool set is static (see "Tool availability"), so without the key the tools stay visible to roles and report an `unavailable` error when called; prompts should treat that as a signal to work from known URLs with `fetch_url`.
 
 Each tool manifest in the Guild declares the name, description, and parameter schema. The executor validates calls against that schema.
+
+### Checker tools
+
+`typecheck` and `test` are the same tool under two names — semantic wrappers over the same subprocess machinery as `run_shell` (one spawn path; see [`docs/architecture.md`](architecture.md) "Tool surface"). Each takes `commands` (required: a non-empty array of non-empty strings) and an optional `timeoutSeconds`. The commands run sequentially in the workspace root, each via `sh -c`. Which commands a workspace's toolchain calls for is decided by the calling role at run time (by surveying the workspace and installing what is missing), never configured in the executor or the Guild. One call is a bounded envelope: at most 16 commands (a longer array is rejected as invalid arguments, mirrored by the manifests' `maxItems`), each under a per-command timeout clamped to the executor's default tool timeout (30 seconds in the shipped deployment), so a single invocation cannot run unbounded work.
+
+The success payload is an array with one entry per completed command: `{ command, exitCode, stdout, stderr }`, with each command's streams truncated by a per-command cap. A non-zero exit code is a normal result to read and iterate on, not an error. A command that outlives its timeout returns a `timeout` error whose message names the failing command and whose details carry the completed entries plus the timed-out entry (marked `timedOut`, exit code `null`, partial output); a command that fails to spawn returns `unavailable` naming it, with the completed entries in the details. Processing stops at the first timeout or spawn failure — later commands in the array are not run — and a command killed by a signal outside the timeout path reports `exitCode: null` like a timed-out one. `timeoutSeconds` is per command and clamped: the caller may lower it below the executor's default tool timeout, never raise it. The whole serialized result is also subject to the engine's `maxToolOutputChars` cap: on overflow it is cut from the tail, so the later commands' entries are the first dropped — batch long output into fewer commands rather than spreading it across many.
 
 ## Guild format
 

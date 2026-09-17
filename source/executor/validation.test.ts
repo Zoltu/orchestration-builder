@@ -181,6 +181,12 @@ describe('validateGuildConfig throws ValidationError with a path-based message',
 	test('validateToolManifest throws when parameters type is not object', () => {
 		expect(() => validateToolManifest({ ...validToolManifest, parameters: { type: 'array' } })).toThrow(/parameters\.type/)
 	})
+	test('validateToolManifest rejects a property whose declared type drifts from the expected type', () => {
+		const drifted = { ...validToolManifest, parameters: { type: 'object', required: ['commands'], properties: { commands: { type: 'string' } } } }
+		expect(() => validateToolManifest(drifted, { commands: 'array' })).toThrow(/parameters\.properties\.commands\.type/)
+		const pinned = { ...validToolManifest, parameters: { type: 'object', required: ['commands'], properties: { commands: { type: 'array' } } } }
+		expect(() => validateToolManifest(pinned, { commands: 'array' })).not.toThrow()
+	})
 })
 
 describe('validateDeploymentFileConfig throws ValidationError with a path-based message', () => {

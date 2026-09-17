@@ -83,6 +83,8 @@ interface ExpectedSignature {
 	file: string
 	required: string[]
 	properties: string[]
+	// Optional per-property JSON-schema type pins (checked by validateToolManifest) so a property whose type drifts fails the gate, not just one whose name or presence drifts.
+	propertyTypes?: Record<string, string>
 }
 
 const expectedSignatures: ExpectedSignature[] = [
@@ -99,8 +101,8 @@ const expectedSignatures: ExpectedSignature[] = [
 	{ file: 'fetch_url.json', required: ['url'], properties: ['url', 'method'] },
 	{ file: 'web_search.json', required: ['query'], properties: ['query', 'limit'] },
 	{ file: 'repo_map.json', required: [], properties: ['path'] },
-	{ file: 'typecheck.json', required: [], properties: ['timeoutSeconds'] },
-	{ file: 'test.json', required: [], properties: ['timeoutSeconds'] },
+	{ file: 'typecheck.json', required: ['commands'], properties: ['commands', 'timeoutSeconds'], propertyTypes: { commands: 'array', timeoutSeconds: 'number' } },
+	{ file: 'test.json', required: ['commands'], properties: ['commands', 'timeoutSeconds'], propertyTypes: { commands: 'array', timeoutSeconds: 'number' } },
 	{ file: 'run_shell.json', required: ['command'], properties: ['command', 'timeoutSeconds'] },
 	{ file: 'trigger_interrupt.json', required: ['targetRole', 'action', 'reason'], properties: ['targetRole', 'action', 'reason'] },
 	{ file: 'list_role_messages.json', required: ['targetRole'], properties: ['targetRole'] },
@@ -259,7 +261,8 @@ function checkGuild(loaded: LoadedGuildFiles): void {
 	}
 }
 
-function loadManifest(file: string): ToolManifest | null {
+function loadManifest(signature: ExpectedSignature): ToolManifest | null {
+	const file = signature.file
 	const filePath = path.join(manifestDir, file)
 	if (!fs.existsSync(filePath)) {
 		failures.push(`guild/tools: missing manifest "${file}"`)
@@ -273,7 +276,7 @@ function loadManifest(file: string): ToolManifest | null {
 		return null
 	}
 	try {
-		validateToolManifest(parsed)
+		validateToolManifest(parsed, signature.propertyTypes)
 	} catch (error) {
 		failures.push(`guild/tools/${file}: ${errorMessage(error)}`)
 		return null
@@ -290,7 +293,7 @@ function checkManifests(): void {
 
 	const manifests: ToolManifest[] = []
 	for (const signature of expectedSignatures) {
-		const manifest = loadManifest(signature.file)
+		const manifest = loadManifest(signature)
 		if (manifest === null) continue
 		manifests.push(manifest)
 		checkSameSet(`guild/tools/${signature.file}: required parameters`, new Set(manifest.parameters.required ?? []), new Set(signature.required))

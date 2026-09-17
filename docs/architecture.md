@@ -49,6 +49,10 @@ The Foundry reads the current Guild and recent run logs, prompts a large model t
 - **No dependencies.** The executor uses only Bun built-ins and web-standard APIs. No npm packages.
 - **Large model in the Foundry only.** The Foundry may use a commercial API or another local model.
 
+## Tool surface
+
+The deployment container is the security boundary; tools do not filter or allowlist commands. The targeted tools are high-signal semantic wrappers — a uniform discipline (workspace-rooted execution, clamped timeouts, structured, capped results) around what the model chooses — and `run_shell` is the general escape hatch for everything they do not cover. The toolchain a workspace needs is determined by the model at run time, by surveying the workspace, not configured in the executor or the Guild. See [`docs/security.md`](security.md) "Mitigations".
+
 ## Filesystem layout
 
 ```

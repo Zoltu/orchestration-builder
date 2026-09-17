@@ -1,7 +1,6 @@
 import { describe, expect, test } from 'bun:test'
-import { type SubprocessOutcome, type SubprocessRunner } from './subprocess-tool.ts'
-import { createTest } from './test.ts'
-import type { TestData } from './test.ts'
+import { type SubprocessRunner } from './subprocess-tool.ts'
+import { createTest, type TestData } from './test.ts'
 import { toolData } from '../test-fixtures.ts'
 import { isObject } from '../validation.ts'
 
@@ -11,19 +10,25 @@ interface RunnerCall {
 	timeoutMs: number
 }
 
-function makeRunner(
-	outcome: Partial<SubprocessOutcome> = {},
-	opts: { throwMessage?: string } = {},
-): SubprocessRunner & { calls: RunnerCall[] } {
+interface ScriptedOutcome {
+	exitCode?: number | null
+	stdout?: string
+	stderr?: string
+	timedOut?: boolean
+	throwMessage?: string
+}
+
+function makeScriptedRunner(script: ScriptedOutcome[]): SubprocessRunner & { calls: RunnerCall[] } {
 	const calls: RunnerCall[] = []
 	const runner: SubprocessRunner & { calls: RunnerCall[] } = async (options) => {
 		calls.push(options)
-		if (opts.throwMessage !== undefined) throw new Error(opts.throwMessage)
+		const scripted = script[calls.length - 1] ?? {}
+		if (scripted.throwMessage !== undefined) throw new Error(scripted.throwMessage)
 		return {
-			exitCode: outcome.exitCode ?? 0,
-			stdout: outcome.stdout ?? '',
-			stderr: outcome.stderr ?? '',
-			timedOut: outcome.timedOut ?? false,
+			exitCode: scripted.exitCode !== undefined ? scripted.exitCode : 0,
+			stdout: scripted.stdout ?? '',
+			stderr: scripted.stderr ?? '',
+			timedOut: scripted.timedOut ?? false,
 		}
 	}
 	runner.calls = calls
@@ -32,120 +37,32 @@ function makeRunner(
 
 const WORKSPACE = '/fake/workspace'
 
-function isSubprocessData(value: unknown): value is TestData {
-	return isObject(value) && (typeof value['exitCode'] === 'number' || value['exitCode'] === null) && typeof value['stdout'] === 'string' && typeof value['stderr'] === 'string'
+function isTestData(value: unknown): value is TestData {
+	return Array.isArray(value) && value.every((entry) => isObject(entry) && typeof entry['command'] === 'string' && typeof entry['stdout'] === 'string' && typeof entry['stderr'] === 'string' && (typeof entry['exitCode'] === 'number' || entry['exitCode'] === null))
 }
 
 describe('createTest', () => {
-	test('returns success with exit code 0 and the pass summary in stdout for a passing suite', async () => {
-		const passSummary = '(pass) pass\n1 pass, 0 fail, 1 expect)'
-		const runner = makeRunner({ exitCode: 0, stdout: passSummary, stderr: '' })
-		const handler = createTest(WORKSPACE, 30, runner)
-		const result = await handler({})
-		expect(result.kind).toBe('success')
-		const data = toolData(result, isSubprocessData)
-		expect(data.exitCode).toBe(0)
-		expect(data.stdout).toContain('1 pass')
-		expect(data.stderr).toBe('')
-		expect(runner.calls).toHaveLength(1)
-		expect(runner.calls[0]?.command).toEqual(['bun', 'test'])
-		expect(runner.calls[0]?.cwd).toBe(WORKSPACE)
-		expect(runner.calls[0]?.timeoutMs).toBe(30000)
-	})
-
-	test('returns a non-zero exit code as a success result with the failure in stdout', async () => {
+	test('passes the given commands through the checker machinery and returns per-command results', async () => {
 		const failureOutput = '(fail) math.test.ts > "adds"\n1 fail\nAssertionError: expected 3 to be 5'
-		const runner = makeRunner({ exitCode: 1, stdout: failureOutput, stderr: '' })
+		const runner = makeScriptedRunner([{ exitCode: 1, stdout: failureOutput }, { exitCode: 0, stdout: '1 pass' }])
 		const handler = createTest(WORKSPACE, 30, runner)
-		const result = await handler({})
+		const result = await handler({ commands: ['bun test', 'pytest tests/'] })
 		expect(result.kind).toBe('success')
-		const data = toolData(result, isSubprocessData)
-		expect(data.exitCode).toBe(1)
-		expect(data.stdout).toContain('1 fail')
-		expect(data.stdout).toContain('AssertionError')
+		const data = toolData(result, isTestData)
+		expect(data[0]?.command).toBe('bun test')
+		expect(data[0]?.stdout).toContain('AssertionError')
+		expect(data[1]?.command).toBe('pytest tests/')
+		expect(data[1]?.stdout).toBe('1 pass')
 	})
 
-	test('returns a timeout result when the runner reports a timeout', async () => {
-		const runner = makeRunner({ timedOut: true, exitCode: null, stdout: '', stderr: '' })
+	test('errors name the test tool', async () => {
+		const runner = makeScriptedRunner([{ timedOut: true, exitCode: null }])
 		const handler = createTest(WORKSPACE, 30, runner)
-		const result = await handler({})
+		const result = await handler({ commands: ['bun test'] })
 		expect(result.kind).toBe('timeout')
-		if (result.kind === 'timeout') {
-			expect(result.details).toEqual({ afterSeconds: 30 })
-		}
-	})
-
-	test('reports the effective (capped) timeout in the timeout details', async () => {
-		const runner = makeRunner({ timedOut: true, exitCode: null, stdout: '', stderr: '' })
-		const handler = createTest(WORKSPACE, 30, runner)
-		const result = await handler({ timeoutSeconds: 5 })
-		expect(result.kind).toBe('timeout')
-		if (result.kind === 'timeout') {
-			expect(result.details).toEqual({ afterSeconds: 5 })
-		}
-		expect(runner.calls[0]?.timeoutMs).toBe(5000)
-	})
-
-	test('caps a requested timeout at the executor default', async () => {
-		const runner = makeRunner({ exitCode: 0 })
-		const handler = createTest(WORKSPACE, 30, runner)
-		await handler({ timeoutSeconds: 120 })
-		expect(runner.calls[0]?.timeoutMs).toBe(30000)
-	})
-
-	test('uses the executor default when no timeout is requested', async () => {
-		const runner = makeRunner({ exitCode: 0 })
-		const handler = createTest(WORKSPACE, 45, runner)
-		await handler({})
-		expect(runner.calls[0]?.timeoutMs).toBe(45000)
-	})
-
-	test('truncates stdout past the cap with a clear marker', async () => {
-		const big = 'x'.repeat(20000)
-		const runner = makeRunner({ exitCode: 1, stdout: big, stderr: '' })
-		const handler = createTest(WORKSPACE, 30, runner)
-		const result = await handler({})
-		expect(result.kind).toBe('success')
-		const data = toolData(result, isSubprocessData)
-		expect(data.stdout.length).toBeLessThan(big.length)
-		expect(data.stdout).toContain('[truncated:')
-	})
-
-	test('truncates stderr past the cap with a clear marker', async () => {
-		const big = 'y'.repeat(20000)
-		const runner = makeRunner({ exitCode: 1, stdout: '', stderr: big })
-		const handler = createTest(WORKSPACE, 30, runner)
-		const result = await handler({})
-		expect(result.kind).toBe('success')
-		const data = toolData(result, isSubprocessData)
-		expect(data.stderr.length).toBeLessThan(big.length)
-		expect(data.stderr).toContain('[truncated:')
-	})
-
-	test('rejects a non-number timeoutSeconds', async () => {
-		const runner = makeRunner({ exitCode: 0 })
-		const handler = createTest(WORKSPACE, 30, runner)
-		const result = await handler({ timeoutSeconds: '30' })
-		expect(result.kind).toBe('invalid_arguments')
-		expect(runner.calls).toHaveLength(0)
-	})
-
-	test('rejects a zero or negative timeoutSeconds', async () => {
-		const runner = makeRunner({ exitCode: 0 })
-		const handler = createTest(WORKSPACE, 30, runner)
-		expect((await handler({ timeoutSeconds: 0 })).kind).toBe('invalid_arguments')
-		expect((await handler({ timeoutSeconds: -5 })).kind).toBe('invalid_arguments')
-		expect((await handler({ timeoutSeconds: NaN })).kind).toBe('invalid_arguments')
-		expect(runner.calls).toHaveLength(0)
-	})
-
-	test('returns an error result when the runner throws on spawn', async () => {
-		const runner = makeRunner({}, { throwMessage: 'ENOENT bun' })
-		const handler = createTest(WORKSPACE, 30, runner)
-		const result = await handler({})
-		expect(result.kind).toBe('unavailable')
-		if (result.kind === 'unavailable') {
-			expect(result.message).toContain('ENOENT bun')
+		if (result.kind === 'timeout' && typeof result.message === 'string') {
+			expect(result.message.startsWith('test timed out after 30s on "bun test"')).toBe(true)
+			expect(result.details).toEqual({ command: 'bun test', afterSeconds: 30, results: [{ command: 'bun test', exitCode: null, stdout: '', stderr: '', timedOut: true }] })
 		}
 	})
 })

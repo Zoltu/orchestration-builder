@@ -1,6 +1,6 @@
 {
 	"name": "typecheck",
-	"description": "Run the workspace typechecker (Bun/TSC) and return its diagnostics. Runs a single fixed command with no model-chosen arguments, no network, and no installs. A non-zero exit code is a normal result to read and iterate on, not an error.",
+	"description": "Run one or more typecheck commands for the workspace's toolchain and return each command's result separately. Commands run sequentially in the workspace root. A non-zero exit code is a normal result to read and iterate on, not an error.",
 	"humanLabel": {
 		"detailed": ["Type Check"],
 		"friendly": ["Check Types"],
@@ -23,10 +23,17 @@
 	},
 	"parameters": {
 		"type": "object",
+		"required": ["commands"],
 		"properties": {
+			"commands": {
+				"type": "array",
+				"description": "The typecheck commands to run, in order, for the project's toolchain (for example [\"bun --bun tsc --noEmit\"] or [\"cargo check\", \"cargo clippy\"]).",
+				"items": { "type": "string" },
+				"maxItems": 16
+			},
 			"timeoutSeconds": {
 				"type": "number",
-				"description": "Optional timeout in seconds. Capped by the executor default tool timeout; a value above the cap is clamped to the cap."
+				"description": "Optional per-command timeout in seconds. Capped by the executor default tool timeout; a value above the cap is clamped to the cap."
 			}
 		}
 	}

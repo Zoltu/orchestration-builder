@@ -1,15 +1,14 @@
 import type { ToolHandler } from '../tool-dispatch.js'
-import { createSubprocessTool, type SubprocessData, type SubprocessRunner } from './subprocess-tool.js'
+import { createCheckerTool, type CheckerData } from './checker-tool.js'
+import type { SubprocessRunner } from './subprocess-tool.js'
 
-// Naming and prompt wording stay generic ("typecheck") so the guild does not over-fit to a specific toolchain; the command itself is fixed here in the leaf.
-const TYPECHECK_COMMAND: readonly string[] = ['bun', '--bun', 'tsc', '--noEmit']
+export type TypecheckData = CheckerData
 
-export type TypecheckData = SubprocessData
-
+// Naming and prompt wording stay generic ("typecheck") so the guild does not over-fit to a specific toolchain; the commands to run are the model's survey decision at run time (see docs/architecture.md "Tool surface").
 export function createTypecheck(
 	workspaceRoot: string,
 	defaultTimeoutSeconds: number,
 	runner: SubprocessRunner,
 ): ToolHandler {
-	return createSubprocessTool({ command: TYPECHECK_COMMAND, noun: 'typecheck' }, workspaceRoot, defaultTimeoutSeconds, runner)
+	return createCheckerTool({ noun: 'typecheck' }, workspaceRoot, defaultTimeoutSeconds, runner)
 }

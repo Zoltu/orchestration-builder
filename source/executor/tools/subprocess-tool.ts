@@ -1,11 +1,9 @@
-import * as path from 'node:path'
 import { truncateToolOutput } from '../context-policy.js'
 import { createToolError } from '../errors.js'
-import type { ToolHandler } from '../tool-dispatch.js'
 import type { ToolResult } from '../types.js'
 
 // Caps captured output so a noisy subprocess cannot blow up the tool result or the run log.
-// The engine applies its own maxToolOutputChars truncation after serialization; this cap keeps the in-process string bounded before that point and reuses the same truncation helper + marker.
+// The engine applies its own maxToolOutputChars truncation after serialization; this cap keeps the in-process string bounded before that point and reuses the same truncation helper + marker, per command and per stream.
 const MAX_OUTPUT_CHARS = 8192
 
 export interface SubprocessData {
@@ -27,59 +25,28 @@ export type SubprocessRunner = (options: {
 	timeoutMs: number
 }) => Promise<SubprocessOutcome>
 
-export type CommandResolution =
-	| { ok: true; command: readonly string[] }
-	| { ok: false; error: ToolResult }
+export type TimeoutResolution = { ok: true; timeoutSeconds: number } | { ok: false; error: ToolResult }
 
-// A fixed argv for tools the model must not influence (the checkers: the command is pinned in the leaf, not the manifest); a resolver for the tool whose whole purpose is running a model-chosen command (run_shell) — the resolver validates the arguments and builds the argv, returning an error result rather than throwing.
-export type CommandSource = readonly string[] | ((args: Record<string, unknown>) => CommandResolution)
-
-export interface SubprocessToolConfig {
-	command: CommandSource
-	// The noun used in error messages ("typecheck", "test", "command") so the model reads which invocation failed or timed out.
-	noun: string
+// Shared timeout validation behind the subprocess tools: the caller may lower but never raise the executor cap, so a value above it clamps to the cap. Anything but a positive finite number is an invalid_arguments error.
+export function resolveToolTimeoutSeconds(args: Record<string, unknown>, defaultTimeoutSeconds: number): TimeoutResolution {
+	const requested = args['timeoutSeconds']
+	if (requested === undefined) return { ok: true, timeoutSeconds: defaultTimeoutSeconds }
+	if (typeof requested !== 'number' || !Number.isFinite(requested) || requested <= 0) {
+		return { ok: false, error: createToolError('invalid_arguments', 'timeoutSeconds must be a positive finite number') }
+	}
+	return { ok: true, timeoutSeconds: Math.min(requested, defaultTimeoutSeconds) }
 }
 
-// The shared machinery behind the subprocess tools: timeout validation (the caller may lower but never raise the executor cap), spawn, and output capture. A non-zero exit is a normal result the role reads and iterates on; only spawn/IO failure and timeout surface as error kinds.
-export function createSubprocessTool(
-	toolConfig: SubprocessToolConfig,
-	workspaceRoot: string,
-	defaultTimeoutSeconds: number,
-	runner: SubprocessRunner,
-): ToolHandler {
-	const resolvedRoot = path.resolve(workspaceRoot)
-	return async (args) => {
-		const source = toolConfig.command
-		const resolved: CommandResolution = typeof source === 'function' ? source(args) : { ok: true, command: source }
-		if (!resolved.ok) return resolved.error
-		const requested = args['timeoutSeconds']
-		let timeoutSeconds = defaultTimeoutSeconds
-		if (requested !== undefined) {
-			if (typeof requested !== 'number' || !Number.isFinite(requested) || requested <= 0) {
-				return createToolError('invalid_arguments', 'timeoutSeconds must be a positive finite number')
-			}
-			timeoutSeconds = Math.min(requested, defaultTimeoutSeconds)
-		}
-		let outcome: SubprocessOutcome
-		try {
-			outcome = await runner({
-				command: resolved.command,
-				cwd: resolvedRoot,
-				timeoutMs: timeoutSeconds * 1000,
-			})
-		} catch (error) {
-			const message = error instanceof Error ? error.message : 'spawn failed'
-			return createToolError('unavailable', `${toolConfig.noun} failed to run: ${message}`)
-		}
-		if (outcome.timedOut) {
-			return createToolError('timeout', `${toolConfig.noun} timed out after ${timeoutSeconds}s`, { afterSeconds: timeoutSeconds })
-		}
-		const data: SubprocessData = {
-			exitCode: outcome.exitCode,
-			stdout: truncateToolOutput(outcome.stdout, MAX_OUTPUT_CHARS).text,
-			stderr: truncateToolOutput(outcome.stderr, MAX_OUTPUT_CHARS).text,
-		}
-		return { kind: 'success', data }
+// The uniform command discipline shared by the subprocess tools: a model-supplied command string runs through a real shell (`sh -c`), with the caller passing the workspace root as the working directory. Containment is the deployment environment's job, not an in-tool allowlist.
+export function shellArgv(command: string): readonly string[] {
+	return ['sh', '-c', command]
+}
+
+// Per-command, per-stream output cap shared by the subprocess tools: each command's streams are truncated before its result is serialized.
+export function truncateStreams(outcome: SubprocessOutcome): { stdout: string; stderr: string } {
+	return {
+		stdout: truncateToolOutput(outcome.stdout, MAX_OUTPUT_CHARS).text,
+		stderr: truncateToolOutput(outcome.stderr, MAX_OUTPUT_CHARS).text,
 	}
 }
 

@@ -343,12 +343,18 @@ function validateToolParameter(value: unknown, path: string): asserts value is T
 	ensure(isOptionalBoolean, value.additionalProperties, `${path}.additionalProperties`, 'expected a boolean or undefined')
 }
 
-export function validateToolManifest(value: unknown): asserts value is ToolManifest {
+// expectedPropertyTypes pins declared properties to their JSON-schema type name (e.g. `{ commands: 'array' }`); a property that is missing or whose `type` drifted from the expectation is a stale or hand-mangled manifest. Callers without a pin (the loader) omit it.
+export function validateToolManifest(value: unknown, expectedPropertyTypes?: Readonly<Record<string, string>>): asserts value is ToolManifest {
 	if (!isObject(value)) throw new ValidationError('', 'expected an object')
 	ensure(isString, value.name, 'name', 'expected a string')
 	ensure(isString, value.description, 'description', 'expected a string')
 	validateToolParameter(value.parameters, 'parameters')
 	if (value.parameters.type !== 'object') throw new ValidationError('parameters.type', 'expected "object"')
+	for (const [propertyName, expectedType] of Object.entries(expectedPropertyTypes ?? {})) {
+		const property = value.parameters.properties?.[propertyName]
+		if (property === undefined) throw new ValidationError(`parameters.properties.${propertyName}`, `missing, expected type "${expectedType}"`)
+		if (property.type !== expectedType) throw new ValidationError(`parameters.properties.${propertyName}.type`, `expected "${expectedType}"`)
+	}
 	if (value.humanLabel !== undefined && !isHumanFacingText(value.humanLabel)) {
 		throw new ValidationError('humanLabel', 'expected an object with detailed (a non-empty string array), optional whimsical and friendly (non-empty string arrays)')
 	}

@@ -15,11 +15,7 @@ A small set of operator-only verifications is open. None blocks design or harnes
 
 ## Tracked technical debt
 
-| Debt | To be removed in | Notes |
-|---|---|---|
-| `typecheck` hardcodes `bun --bun tsc --noEmit`. | Evaluation harness | Named generically + fixed command so the Guild cannot over-fit to TypeScript; generalize to a per-workspace toolchain command when per-run environment isolation lands. |
-| `test` hardcodes `bun test`. | Evaluation harness | Same shape as the `typecheck` debt. |
-| No shell allowlist/denylist for `run_shell`. | The Foundry work | Containment comes from the deployment environment (non-root, restricted egress, read-only filesystem), not from an in-tool filter. An in-tool allowlist lands only if per-run environment isolation surfaces a concrete need. |
+No debt is currently tracked.
 
 When you add a row, also update the target milestone's deliverables to describe the removal work. When you remove the debt, delete the row.
 
@@ -41,7 +37,7 @@ Unbuilt features. None is scheduled; each needs a fresh scoping before work begi
 
 1. **Project structure decision.** Decide with the operator whether the Foundry lives as an in-repo subpackage (its own `package.json`/`tsconfig`, consuming the executor only as an HTTP client) or as a separate repository that consumes the executor's published image and API. Document the decision and its rationale.
 2. **Validate the design against the code.** [`docs/foundry.md`](docs/foundry.md) is the authoritative design reference. Read it against the code as it stands, adjust the doc where reality demands, and agree on the module decomposition — the doc names the pieces (branch management, scoring, evaluation, hypothesis generation, merge, reporting, promotion, loop, entry point); the right breakdown is decided here, together.
-3. **Per-run environment isolation design.** Design the hermetic per-run environment for benchmark evaluation: scoped `PATH`/`HOME`, no global pollution, no unapproved egress for installs and dependency fetches, the toolchain-profile concept that lets each workspace name its own checker commands, and the container boundary (one container per benchmark). The egress policy, the trust boundary, and any container-runtime decisions belong to the operator — propose, don't impose.
+3. **Per-run environment isolation design.** Design the hermetic per-run environment for benchmark evaluation: scoped `PATH`/`HOME`, no global pollution, no unapproved egress for installs and dependency fetches, and the container boundary (one container per benchmark). The isolation design scopes the environment only: which checker commands to run is the model's run-time decision per the survey contract (see docs/reference.md "Checker tools"), while toolchain profiles provision each environment with the toolchain a benchmark needs. The egress policy, the trust boundary, and any container-runtime decisions belong to the operator — propose, don't impose.
 
 **Acceptance criteria.**
 
@@ -56,14 +52,14 @@ Unbuilt features. None is scheduled; each needs a fresh scoping before work begi
 **Deliverables.**
 
 1. **Benchmarks through the executor HTTP API.** Submit runs via `POST /api/runs`, poll to completion, and read the final workspace — never importing from `source/executor/`. Each benchmark run gets its own environment (the isolation design from the discovery milestone) so benchmarks that install packages or download tooling cannot pollute each other.
-2. **Generalized checker commands.** Replace the hardcoded `typecheck`/`test` commands with per-workspace toolchain commands resolved through the toolchain profile, removing both debt rows from the table above.
+2. **Per-benchmark toolchain provisioning.** The executor's checkers run model-chosen commands, but a benchmark container still needs the toolchain present and the benchmark's own dependencies installed before its run can verify anything. The harness provisions each environment (image, toolchain profile, dependency install) as part of setting up the benchmark — driven by each benchmark's own metadata, never by operator input at run time.
 3. **Validation reuse.** Reuse the benchmark validation helpers (`source/benchmarks/`) rather than duplicating them; they are the same checks the standalone suite runner applies.
 4. **Result collection and teardown.** After each run, validate the final workspace and record a per-benchmark result (status, tokens, ask count, context-pressure events, errors, wall time, run id). Teardown (stop the environment, remove temporaries) happens on every exit path, including a run that hits the configurable timeout without terminating.
 
 **Acceptance criteria.**
 
 - [ ] A suite run executes every benchmark in its own environment through the HTTP API and produces validated, aggregated results.
-- [ ] Checker commands come from the workspace's toolchain profile, not hardcoded Bun commands; both debt rows are removed.
+- [ ] Each benchmark's environment is provisioned with its toolchain and dependencies from its own metadata, with no operator input at run time.
 - [ ] `bun run typecheck` and `bun test` pass (for the project(s) the Foundry lives in); teardown is verified on success, error, and timeout paths.
 
 ## Milestone 3 — The optimization loop
@@ -73,7 +69,7 @@ Unbuilt features. None is scheduled; each needs a fresh scoping before work begi
 **Deliverables.**
 
 1. **The loop itself:** observe (baseline Guild + recent run logs) → hypothesize (the large model clusters failures and proposes concrete, testable edits) → branch (candidate Guilds, filesystem-only, validated end-to-end with the Guild loader) → evaluate (the harness from the previous milestone) → score (adjusted score, improvement margin, regression flag) → merge (the large model resolves conflicting accepted branches) → report → promote (the sole writer of the baseline Guild, with history and rollback) → repeat under guardrails (cycle budget, cost budget, plateau). The full mechanics — scoring formula, branch operations, guardrail termination, report format — follow [`docs/foundry.md`](docs/foundry.md).
-2. **The tuning space.** The loop optimizes: prompt wording across all roles, the effort-mode mappings, the review-round caps, per-role tool lists, the Guild's numeric values (`maxAgentDepth`, `maxCompactionAttempts`, `maxToolOutputChars`, model sampling parameters), and role-set hypotheses (including wholesale `guild.json` edits). Deliberate seed decisions — reviewers hold no workspace tools, the fixed 30-second checker timeout — are decisions with recorded rationale, not oversights; the loop may revisit them, but only on evidence.
+2. **The tuning space.** The loop optimizes: prompt wording across all roles, the effort-mode mappings, the review-round caps, per-role tool lists, the Guild's numeric values (`maxAgentDepth`, `maxCompactionAttempts`, `maxToolOutputChars`, model sampling parameters), and role-set hypotheses (including wholesale `guild.json` edits). Deliberate seed decisions — reviewers hold no workspace tools, the clamped default tool timeout (30 seconds, lowerable per call) — are decisions with recorded rationale, not oversights; the loop may revisit them, but only on evidence.
 3. **Human simulation.** When a candidate Guild uses `ask_human`, answer questions through the executor's answer endpoint — deterministic benchmark answers on near-exact matches, then the persona-configured large model — so optimization runs stay reproducible, with the per-question penalty applied in scoring.
 
 **Acceptance criteria.**
