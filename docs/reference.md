@@ -25,7 +25,7 @@ The executor is the minimal runtime that runs the small target model against the
 
 ### Messages and context
 
-Each role invocation has its own message list. A role does not automatically see its ancestors' conversations — parents may include summaries or result cards when delegating via `agent`. Messages have `role` (`system`/`user`/`assistant`/`tool`), `content`, optional `reasoning`, and tool-call fields. Reasoning is stored separately and excluded from the prompt by default; a role opts in with `includeReasoning: true`.
+Each role invocation has its own message list. A role does not automatically see its ancestors' conversations — parents may include summaries or result cards when delegating via `agent`. Messages have `role` (`system`/`user`/`assistant`/`tool`), `content`, optional `reasoning`, and tool-call fields. Reasoning is retained in the history and replayed to the model every turn: each assistant message that carries reasoning is sent as a reasoning input item (`{type: "reasoning", content: [{type: "reasoning_text", text}]}`) placed before that turn's message and function-call items. Nothing drops reasoning automatically — not context pressure, and the compaction backstop only as a last resort (see "Context budget exceeded" below) — and the executor ships no `includeReasoning` flag; outside that backstop the only way to remove reasoning is the guild's deliberate `edit_context` `strip_reasoning` op (see "Built-in tools"). Unknown role keys — including the removed `includeReasoning` — are rejected at load with a validation error naming the key, so a stale guild file fails fast with a clear message; the flag's removal changed behavior: reasoning is now always retained and replayed, even for guilds that previously relied on the old strip-by-default behavior.
 
 The executor does not estimate token counts before sending. It trusts only the `usage` fields returned by the API, exposed via `context_info`; there is no char-based token estimator in the proactive path. Reported usage drives the context-pressure trigger (see "Context pressure and handoff" below), which asks the role to hand off before the wall — self-managed compaction strategy still belongs to the Guild. (The post-rejection compaction described below is a safety backstop calibrated from the endpoint's own rejection report, not a pre-send estimate.)
 
@@ -49,15 +49,21 @@ If the endpoint rejects a request because the prompt is too long, the role canno
 
 When no handler is configured — or the handler fails — the executor falls back to compacting the conversation itself before retrying:
 
-1. Reasoning is stripped from all messages.
-2. The oldest turns are dropped (the system prompt, the original task, and the most recent turn are always kept), never splitting an assistant tool call from its tool-result messages — an unmatched pair is a malformed request on OpenAI-compatible endpoints.
-3. Surviving tool results that are still oversized are truncated.
+1. The oldest turns are dropped (the system prompt, the original task, and the most recent turn are always kept), never splitting an assistant tool call from its tool-result messages — an unmatched pair is a malformed request on OpenAI-compatible endpoints.
+2. Surviving tool results that are still oversized are truncated.
+3. Only when the estimate is still over target, reasoning is stripped from the oldest surviving messages, one at a time, until the estimate fits or no strippable reasoning is left — the last assistant message's reasoning is never stripped.
+
+Reasoning is replayed to the model every turn (see "Messages and context" above), so stripping it silently rewrites what the model believes it decided; the backstop accepts that cost only after dropping and truncating cannot fit, and shedding reasoning proactively remains the guild's deliberate choice via the `edit_context` `strip_reasoning` op.
 
 The token estimate is calibrated with the prompt-token count the endpoint reported in its rejection (falling back to ~4 chars/token when it reports none) and the compaction target is 70% of the context window, leaving headroom for estimator error and the completion reservation. The compaction is logged as a `context_compacted` event, and the role resumes with a `[Platform notice — context window exceeded]` user message describing what was removed, so it can re-read what it needs or finish honestly.
 
 Recovery is bounded either way: after 3 consecutive rejections — or immediately, when even the undeletable remainder cannot fit — the role finishes with `{status: "error", error: {kind: "context_budget_exceeded"}}` and the parent recovers (the seed Guild re-delegates the work in smaller pieces via `recovery`). A successful call resets the counter.
 
 Separately, a role may manage its own context ahead of the limit with `context_info` and `edit_context`. If a role calls `edit_context` repeatedly without reducing tokens, the executor terminates it after `executor.maxCompactionAttempts`.
+
+### Compaction and the prompt cache
+
+Between compaction events a role's history is append-only, and reasoning is replayed to the model every turn (see "Messages and context" above). Server prompt caches re-prefill from the first differing token, so continuous history editing would re-prefill the whole suffix every turn, while an append-only turn pays only for its new tokens. All edits the backstop makes therefore coalesce into a single compaction event, and the earliest edit defines the refill — edits after it are cache-free; a rewrite the context manager makes through `edit_context` is not part of that coalescing, because those rewrites are themselves compaction events, agent-decided and each counting as the event. The backstop strips reasoning only as a last resort, oldest first across the surviving history, and never from the final assistant message (see the numbered list above; the system prompt and the original task carry no reasoning in practice). During agent-driven compaction it is the seed Guild's `context_manager` role that decides reasoning policy. A model change forces a cache refill regardless, which makes a coalesced deep rewrite free at that boundary.
 
 ### Error handling
 
@@ -266,7 +272,6 @@ A map from role name to definition:
 Role fields:
 - `systemPrompt` (string, required): path to a Markdown file.
 - `tools` (array, required): tool names this role may call.
-- `includeReasoning` (boolean, optional): include reasoning from prior turns. Default `false`.
 - `label` (object, optional): tiered display name (`{ detailed, friendly, whimsical }`) the web client renders.
 - `description` (object, optional): tiered one-line description of the role.
 - `workingLabel` (object, optional): tiered text for the "now" caption when this role is the destination of a settled call (its working phase). A `{participant}` placeholder interpolates to the role's own label at the chosen tier — e.g. `"{participant} is planning the approach"` → "Planner is planning the approach". See [`docs/visualization.md`](visualization.md) "Labels".
@@ -374,6 +379,8 @@ Optional section setting the deployment-wide default logging level for run logs 
 ## HTTP API
 
 The web UI is the primary interface. The HTTP API exists for programmatic access (e.g. the Foundry). All endpoints return JSON. The server runs one task at a time; there is no queue.
+
+The browser tab title of the served UI is a service setting, not a deployment field: `ORCHESTRATOR_TITLE` (default `Adaptive Orchestrator`) is substituted into the page's `<title>` element when the static handler serves it, so the configured title is present in the initial HTML and an empty value falls back to the default.
 
 ### `POST /api/runs`
 

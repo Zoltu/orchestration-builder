@@ -87,7 +87,6 @@ export interface HumanFacingText {
 export interface RoleDefinition {
 	systemPrompt: string
 	tools: string[]
-	includeReasoning?: boolean
 	label?: HumanFacingText
 	description?: HumanFacingText
 	workingLabel?: HumanFacingText

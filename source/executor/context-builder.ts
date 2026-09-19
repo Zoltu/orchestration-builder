@@ -1,14 +1,6 @@
 import type { EngineContext } from './engine-state.js'
-import type { Message, RoleDefinition, RunContinuation } from './types.js'
-import { stripReasoning } from './context-policy.js'
+import type { Message, RunContinuation } from './types.js'
 import { effortDirective } from './effort.js'
-
-export function buildMessages(roleDefinition: RoleDefinition, messages: Message[]): Message[] {
-	if (!roleDefinition.includeReasoning) {
-		return stripReasoning(messages, 2)
-	}
-	return messages
-}
 
 // The continuation block appended to the entry role's initial user message, below the operator's task and a blank line. The bracketed first line marks the block as platform-provided context, and the read_plan hint names the exact parameter so the Guild can pull the prior run's plan document; wording stays factual because the block must read coherently as conversation context, and it must stay inside the same user message — a second system message would break strict chat templates.
 function continuationBriefing(continuation: RunContinuation): string {

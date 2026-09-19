@@ -7,7 +7,8 @@ import { runRole } from './engine.ts'
 import type { EngineDependencies } from './engine-state.ts'
 import { resumeRoleStack } from './resume.ts'
 import { createInterruptQueue } from './interrupts.ts'
-import type { LlmCallResult, LlmCaller } from './llm.ts'
+import type { LlmCallResult, LlmCaller, LlmFetch, LlmFetchRequest, LlmStreamResponse } from './llm.ts'
+import { createLlmCaller } from './llm.ts'
 import type { LoadedGuild } from './loader.ts'
 import type { AppendLog } from './persistence.ts'
 import { createRoleRegistry } from './role-registry.ts'
@@ -53,6 +54,35 @@ class FakeLlm implements LlmCaller {
 		}
 		return next
 	}
+}
+
+// A fake wire leaf for tests that assert on the actual Responses API payload the engine produces: SSE streams are scripted per request and every request body is recorded whole.
+class FakeWire {
+	responses: LlmStreamResponse[] = []
+	requests: LlmFetchRequest[] = []
+
+	llmFetch: LlmFetch = (request) => {
+		this.requests.push(request)
+		const next = this.responses.shift()
+		if (next === undefined) return Promise.resolve({ kind: 'http_error', status: 500, errorBody: 'unscripted response' })
+		return Promise.resolve(next)
+	}
+}
+
+function sseChunks(output: unknown[]): Uint8Array[] {
+	const terminal = { type: 'response.completed', response: { status: 'completed', output, usage: { input_tokens: 10, output_tokens: 5 } } }
+	return [new TextEncoder().encode(`data: ${JSON.stringify(terminal)}\n\n`)]
+}
+
+function streamOf(chunks: Uint8Array[]): LlmStreamResponse {
+	return { kind: 'stream', status: 200, stream: new ReadableStream<Uint8Array>({ start(controller) { for (const chunk of chunks) controller.enqueue(chunk); controller.close() } }) }
+}
+
+function wireInput(request: LlmFetchRequest | undefined): unknown[] {
+	if (request === undefined) throw new Error('expected a captured wire request')
+	const parsed: unknown = JSON.parse(request.body)
+	if (!isRecord(parsed) || !Array.isArray(parsed['input'])) throw new Error('captured request body carries no input array')
+	return parsed['input']
 }
 
 function makeFakeAppendLog(): { appendLog: AppendLog; events: LogEvent[] } {
@@ -153,7 +183,7 @@ function agentCall(role: string, task: string): ToolCall {
 	}
 }
 
-function makeDeps(llm: FakeLlm): { deps: EngineDependencies; events: LogEvent[]; checkpoints: RunCheckpoint[] } {
+function makeDeps(llm: LlmCaller): { deps: EngineDependencies; events: LogEvent[]; checkpoints: RunCheckpoint[] } {
 	const { appendLog, events } = makeFakeAppendLog()
 	const roleRegistry = createRoleRegistry()
 	const contextPressureTracker = createContextPressureTracker()
@@ -341,6 +371,7 @@ describe('runRole — acceptance criteria', () => {
 		const compactedEvent = events.find((e) => e.type === 'context_compacted')
 		if (compactedEvent === undefined) throw new Error('expected a context_compacted event')
 		expect(payloadField(compactedEvent, 'droppedMessages')).toBe(4)
+		expect(payloadField(compactedEvent, 'strippedReasoningMessages')).toBe(0)
 	})
 
 	test('repeated context_budget_exceeded rejections finish the role with an error instead of looping', async () => {
@@ -670,10 +701,10 @@ describe('runRole — acceptance criteria', () => {
 		expect(notFoundEvent).toBeDefined()
 	})
 
-	test('includeReasoning: true keeps reasoning on assistant messages across a round-trip', async () => {
+	test('reasoning persists on assistant messages across a round-trip', async () => {
 		const guild = withTool(
 			buildGuild(
-				{ main: { systemPrompt: 'p', tools: ['echo', 'finish'], includeReasoning: true } },
+				{ main: { systemPrompt: 'p', tools: ['echo', 'finish'] } },
 				'main',
 			),
 			{
@@ -712,6 +743,135 @@ describe('runRole — acceptance criteria', () => {
 		const secondCallMessages = llm.calls[1]?.messages ?? []
 		const assistantInSecond = secondCallMessages.find((m) => m.role === 'assistant')
 		expect(assistantInSecond?.reasoning).toBe('I considered this carefully')
+	})
+
+	test('replayed reasoning reaches the wire before each assistant turn\'s items, and a null-reasoning turn emits no reasoning item', async () => {
+		const guild = withTool(
+			buildGuild(
+				{ main: { systemPrompt: 'p', tools: ['echo', 'finish'] } },
+				'main',
+			),
+			{
+				name: 'echo',
+				description: 'echo',
+				parameters: { type: 'object', properties: { x: { type: 'number' } } },
+			},
+		)
+		const wire = new FakeWire()
+		wire.responses = [
+			streamOf(sseChunks([
+				{ type: 'reasoning', content: [{ type: 'reasoning_text', text: 'round one thought' }] },
+				{ type: 'message', content: [{ type: 'output_text', text: 'Let me check.' }] },
+				{ type: 'function_call', call_id: 'call_1', name: 'echo', arguments: '{"x":1}' },
+			])),
+			streamOf(sseChunks([
+				{ type: 'message', content: [{ type: 'output_text', text: 'done' }] },
+			])),
+		]
+		const caller = createLlmCaller(baseModel, undefined, { llmFetch: wire.llmFetch, sleep: () => Promise.resolve() })
+		const { deps } = makeDeps(caller)
+		const depsWithEcho: EngineDependencies = { ...deps, additionalToolHandlers: { echo: echoHandler } }
+
+		const result = await runRole(depsWithEcho, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'do it' })
+
+		expect(result.status).toBe('success')
+		expect(wire.requests.length).toBe(2)
+		// Round 1: the first request carries only the task — the reasoning item appears when the turn is replayed.
+		expect(wireInput(wire.requests[0])).toEqual([
+			{ role: 'user', content: [{ type: 'input_text', text: 'do it' }] },
+		])
+		// Round 2: the tool-call turn's reasoning is replayed before its message and function_call items, with the tool result following.
+		expect(wireInput(wire.requests[1])).toEqual([
+			{ role: 'user', content: [{ type: 'input_text', text: 'do it' }] },
+			{ type: 'reasoning', content: [{ type: 'reasoning_text', text: 'round one thought' }] },
+			{ type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'Let me check.' }] },
+			{ type: 'function_call', call_id: 'call_1', name: 'echo', arguments: '{"x":1}' },
+			{ type: 'function_call_output', call_id: 'call_1', output: '{"x":1}' },
+		])
+	})
+
+	test('a message whose reasoning was cleared by edit_context strip_reasoning sends no reasoning item to the wire', async () => {
+		let guild = withTool(
+			buildGuild(
+				{ main: { systemPrompt: 'p', tools: ['echo', 'edit_context', 'finish'] } },
+				'main',
+			),
+			{
+				name: 'echo',
+				description: 'echo',
+				parameters: { type: 'object', properties: { x: { type: 'number' } } },
+			},
+		)
+		guild = withTool(guild, { name: 'edit_context', description: 'Edit context.', parameters: { type: 'object', required: ['operations'], properties: { operations: { type: 'array' } } } })
+		const wire = new FakeWire()
+		wire.responses = [
+			streamOf(sseChunks([
+				{ type: 'reasoning', content: [{ type: 'reasoning_text', text: 'round one thought' }] },
+				{ type: 'message', content: [{ type: 'output_text', text: 'Let me check.' }] },
+				{ type: 'function_call', call_id: 'call_1', name: 'echo', arguments: '{"x":1}' },
+			])),
+			streamOf(sseChunks([
+				{ type: 'function_call', call_id: 'call_2', name: 'edit_context', arguments: JSON.stringify({ operations: [{ op: 'strip_reasoning', range: [2, 3] }] }) },
+			])),
+			streamOf(sseChunks([
+				{ type: 'message', content: [{ type: 'output_text', text: 'done' }] },
+			])),
+		]
+		const caller = createLlmCaller(baseModel, undefined, { llmFetch: wire.llmFetch, sleep: () => Promise.resolve() })
+		const { deps } = makeDeps(caller)
+		const depsWithEcho: EngineDependencies = { ...deps, additionalToolHandlers: { echo: echoHandler } }
+
+		const result = await runRole(depsWithEcho, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'do it' })
+
+		expect(result.status).toBe('success')
+		expect(wire.requests.length).toBe(3)
+		// Before the strip, the turn's reasoning is replayed ahead of its items.
+		const beforeStrip = wireInput(wire.requests[1])
+		expect(beforeStrip[1]).toEqual({ type: 'reasoning', content: [{ type: 'reasoning_text', text: 'round one thought' }] })
+		// After the strip the message survives with its reasoning cleared (null — not a string), so the wire payload keeps the message and function_call items but carries no reasoning item at all.
+		const afterStrip = wireInput(wire.requests[2])
+		expect(afterStrip.some((item) => isRecord(item) && item['type'] === 'reasoning')).toBe(false)
+		expect(afterStrip[1]).toEqual({ type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'Let me check.' }] })
+		expect(afterStrip[2]).toEqual({ type: 'function_call', call_id: 'call_1', name: 'echo', arguments: '{"x":1}' })
+	})
+
+	test('the compaction backstop keeps reasoning: older turns are dropped whole and reasoning on survivors is intact', async () => {
+		const guild = withTool(
+			buildGuild(
+				{ main: { systemPrompt: 'p', tools: ['big', 'finish'] } },
+				'main',
+			),
+			{
+				name: 'big',
+				description: 'returns a large payload',
+				parameters: { type: 'object', properties: {} },
+			},
+		)
+		const bigCall = (id: string): ToolCall => ({ id, type: 'function', function: { name: 'big', arguments: '{}' } })
+		const bigHandler: ToolHandler = () => ({ kind: 'success', data: { text: 'x'.repeat(2000) } })
+		const llm = new FakeLlm()
+		llm.responses = [
+			{ kind: 'success', content: '', reasoning: 'round one thinking', toolCalls: [bigCall('b1')], usage: { promptTokens: 10, completionTokens: 5 } },
+			{ kind: 'success', content: '', reasoning: 'round two thinking', toolCalls: [bigCall('b2')], usage: { promptTokens: 10, completionTokens: 5 } },
+			contextExceeded(0, 1000),
+			success([finishCall({ status: 'success', summary: 'recovered' })]),
+		]
+		const { deps, events } = makeDeps(llm)
+		const depsWithBig: EngineDependencies = { ...deps, additionalToolHandlers: { big: bigHandler } }
+
+		const result = await runRole(depsWithBig, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'do it' })
+
+		expect(result).toEqual({ status: 'success', summary: 'recovered' })
+		const compactedEvent = events.find((e) => e.type === 'context_compacted')
+		if (compactedEvent === undefined) throw new Error('expected a context_compacted event')
+		expect(payloadField(compactedEvent, 'droppedMessages')).toBe(2)
+		expect(payloadField(compactedEvent, 'strippedReasoningMessages')).toBe(0)
+		const recoveryMessages = llm.calls[3]?.messages ?? []
+		// The oldest turn was dropped whole; the surviving assistant turn's reasoning was not stripped.
+		expect(recoveryMessages.length).toBe(5)
+		expect(recoveryMessages[2]?.reasoning).toBe('round two thinking')
+		// The recovery notice reports that reasoning survived because the drop alone already fit.
+		expect(recoveryMessages[recoveryMessages.length - 1]?.content.includes('reasoning was not removed')).toBe(true)
 	})
 
 	test('tool output exceeding maxToolOutputChars is truncated without double-encoding', async () => {

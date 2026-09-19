@@ -8,7 +8,7 @@ import type { ProjectSettings, ReadProjectSettings, WriteProjectSettings, RunSna
 import type { DeploymentConfig, EffortLevel, GuildConfig, LogLevel, RunContinuation, RunMeta } from '../executor/types.js'
 import { parseRunSnapshot, type RunSnapshot } from './render.ts'
 import { createRequestHandler, type RequestHandler } from './request-handler.ts'
-import { resolveStaticAsset } from './server.ts'
+import { createServeStatic, resolveStaticAsset, type ServeAssetFile } from './server.ts'
 
 function snapshotFor(runId: string, status: RunMeta['status'] = 'success', overrides: Partial<RunMeta> = {}): RunSnapshotRaw {
 	return {
@@ -382,7 +382,7 @@ function createHandlerHarness(): HandlerHarness {
 			readProjectSettings: settings.read,
 			writeProjectSettings: settings.write,
 		},
-		(requestPath) => {
+		async (requestPath) => {
 			staticCalls.push(requestPath)
 			return new Response('static body', { headers: { 'content-type': 'text/javascript; charset=utf-8' } })
 		},
@@ -474,6 +474,64 @@ describe('static asset resolution', () => {
 
 	test('falls back to a binary content type for unknown extensions', () => {
 		expect(resolveStaticAsset('/static', '/data.bin')).toEqual({ resolvedPath: '/static/data.bin', contentType: 'application/octet-stream' })
+	})
+})
+
+describe('static serving title substitution', () => {
+	const INDEX_HTML = '<!DOCTYPE html><html><head><title>Adaptive Orchestrator</title></head><body><div id="app"></div></body></html>'
+
+	// A fake asset reader standing in for the filesystem leaf: index.html serves the fixture document, missing.js is absent, everything else a JS body. The static dir is never touched.
+	function createTitleHarness(pageTitle: string, indexHtml: string = INDEX_HTML) {
+		const servedPaths: string[] = []
+		const serveAssetFile: ServeAssetFile = (asset) => {
+			servedPaths.push(asset.resolvedPath)
+			if (asset.resolvedPath === '/static/missing.js') return null
+			if (asset.resolvedPath === '/static/index.html') return new Response(indexHtml, { headers: { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' } })
+			return new Response('app.js bytes', { headers: { 'content-type': 'text/javascript; charset=utf-8' } })
+		}
+		return { serveStatic: createServeStatic({ staticDir: '/static', pageTitle, serveAssetFile }), servedPaths: () => servedPaths }
+	}
+
+	test('substitutes the configured title into the index page served at /', async () => {
+		const { serveStatic } = createTitleHarness('Mission Control')
+		const response = await serveStatic('/')
+		expect(response.status).toBe(200)
+		expect(response.headers.get('content-type')).toBe('text/html; charset=utf-8')
+		expect(response.headers.get('cache-control')).toBe('no-store')
+		expect(await response.text()).toBe(INDEX_HTML.replace('<title>Adaptive Orchestrator</title>', '<title>Mission Control</title>'))
+	})
+
+	test('substitutes the title when the index page is requested by name', async () => {
+		const { serveStatic } = createTitleHarness('Mission Control')
+		const response = await serveStatic('/index.html')
+		expect(await response.text()).toContain('<title>Mission Control</title>')
+	})
+
+	test('escapes an HTML-shaped title so the served page cannot be injected', async () => {
+		const { serveStatic } = createTitleHarness('</title><script>alert(1)</script>')
+		const body = await (await serveStatic('/')).text()
+		expect(body).toContain('<title>&lt;/title&gt;&lt;script&gt;alert(1)&lt;/script&gt;</title>')
+		expect(body).not.toContain('<script>alert(1)</script>')
+	})
+
+	test('other assets pass through without a title read', async () => {
+		const { serveStatic } = createTitleHarness('Mission Control')
+		const response = await serveStatic('/app.js')
+		expect(await response.text()).toBe('app.js bytes')
+	})
+
+	test('an index body with no title element is served unchanged', async () => {
+		const titleLess = '<!DOCTYPE html><html><body><h1>no title here</h1></body></html>'
+		const { serveStatic } = createTitleHarness('Mission Control', titleLess)
+		const response = await serveStatic('/')
+		expect(await response.text()).toBe(titleLess)
+	})
+
+	test('an absent asset is a JSON 404', async () => {
+		const { serveStatic } = createTitleHarness('Mission Control')
+		const response = await serveStatic('/missing.js')
+		expect(response.status).toBe(404)
+		expect(await response.json()).toEqual({ ok: false, error: 'not_found' })
 	})
 })
 

@@ -251,11 +251,13 @@ function validateLoggingConfig(value: unknown, path: string): asserts value is L
 	if (value.level !== undefined && !isLogLevel(value.level)) throw new ValidationError(`${path}.level`, 'expected "full" or "standard"')
 }
 
+const roleKeys: readonly string[] = ['systemPrompt', 'tools', 'label', 'description', 'workingLabel']
+
 function validateRoleDefinition(value: unknown, path: string): asserts value is RoleDefinition {
 	if (!isObject(value)) throw new ValidationError(path, 'expected an object')
+	rejectUnknownKeys(value, roleKeys, path)
 	ensure(isString, value.systemPrompt, `${path}.systemPrompt`, 'expected a string')
 	ensure(isStringArray, value.tools, `${path}.tools`, 'expected an array of strings')
-	ensure(isOptionalBoolean, value.includeReasoning, `${path}.includeReasoning`, 'expected a boolean or undefined')
 	if (value.label !== undefined && !isHumanFacingText(value.label)) {
 		throw new ValidationError(`${path}.label`, 'expected an object with detailed (a non-empty string array), optional whimsical and friendly (non-empty string arrays)')
 	}

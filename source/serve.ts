@@ -10,6 +10,8 @@ import { applyDeploymentOverride, applyLogLevel, createAppendLog, createDeleteCh
 const DEPLOYMENT_FILE_ENV_VAR = 'ORCHESTRATOR_DEPLOYMENT_FILE'
 const PORT_ENV_VAR = 'PORT'
 const WORKSPACE_ROOT_ENV_VAR = 'WORKSPACE_ROOT'
+const PAGE_TITLE_ENV_VAR = 'ORCHESTRATOR_TITLE'
+const DEFAULT_PAGE_TITLE = 'Adaptive Orchestrator'
 // Docker secrets mount at /run/secrets; the orchestrator and tool keys can also arrive as plain environment variables (see resolveSecret).
 const DOCKER_SECRETS_DIR = '/run/secrets'
 
@@ -190,6 +192,8 @@ const SHUTDOWN_NOTICE_MESSAGE = 'The service is shutting down. Please wind down:
 async function serve(): Promise<void> {
 	const port = parsePort(Bun.env[PORT_ENV_VAR], DEFAULT_PORT)
 	const workspaceRootPath = Bun.env[WORKSPACE_ROOT_ENV_VAR] || DEFAULT_WORKSPACE_ROOT
+	// An empty variable means "not set", the same convention WORKSPACE_ROOT follows.
+	const pageTitle = Bun.env[PAGE_TITLE_ENV_VAR] || DEFAULT_PAGE_TITLE
 	const runsBaseDir = path.resolve(workspaceRootPath, ORCHESTRATION_DIR, 'runs')
 	excludeOrchestrationFromGit(workspaceRootPath)
 
@@ -300,6 +304,7 @@ async function serve(): Promise<void> {
 
 	const webServer = createWebServer({
 		port,
+		pageTitle,
 		guildConfig: guild.config,
 		deployment: guild.deployment,
 		tools: guild.tools,

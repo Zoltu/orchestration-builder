@@ -1,9 +1,9 @@
 import { createResultCard, createToolError } from './errors.js'
-import type { ExecutorConfig, Message, ResultCard, RoleDefinition, ToolCall, ToolManifest, ToolResult } from './types.js'
+import type { ExecutorConfig, Message, ResultCard, ToolCall, ToolManifest, ToolResult } from './types.js'
 import { isObject, isResultCard } from './validation.js'
 import { checkGlobalBudgets, checkRoleBudgets, type GlobalBudgetState, type RoleBudgetState } from './budgets.js'
 import { createBuiltInToolHandlers } from './builtin-tools.js'
-import { buildInitialHistory, buildMessages } from './context-builder.js'
+import { buildInitialHistory } from './context-builder.js'
 import { applyContextBackstop, contextExceededCard, contextManagedNotice, contextPressureNotice, currentEffectiveBudget, MAX_CONTEXT_RECOVERY_ATTEMPTS, runContextManagerHandler } from './context-handoff.js'
 import { truncateToolOutput } from './context-policy.js'
 import { DEFAULT_CONTEXT_PRESSURE_THRESHOLD, recordContextRejection } from './context-pressure.js'
@@ -46,7 +46,8 @@ function roleFinishedPayload(roleName: string, depth: number, card: ResultCard, 
 	return payload
 }
 
-// Shapes a sent message for the llm_call payload: role and content only. Reasoning is omitted (it is an internal field, not part of what the reviewer needs to reconstruct the request), and tool_calls on assistant messages are carried so the message-list reflects the full prior turn.
+// Shapes a sent message for the llm_call payload: role and content only, plus tool_calls on assistant messages so the message list reflects the full prior turn.
+// Sent-side reasoning is omitted to bound log volume (the received side still carries it), so the `full`-level log under-records replayed reasoning items and cannot reconstruct the wire payload byte-for-byte.
 function shapeSentMessage(message: Message): { role: string; content: string; tool_calls?: Array<{ id: string; type: string; function: { name: string; arguments: string } }> } {
 	const shaped: { role: string; content: string; tool_calls?: Array<{ id: string; type: string; function: { name: string; arguments: string } }> } = {
 		role: message.role,
@@ -366,7 +367,7 @@ export async function runRole(deps: EngineDependencies, context: EngineContext, 
 		maxToolOutputChars: guild.deployment.contextPolicy.maxToolOutputChars,
 	}
 
-	const finalCard = await executeRoleLoop(deps, context, roleDefinition, roleState, registryEntry, allowedToolsManifests, dispatchCtx, guild.deployment.executor, resumed?.suspendedTurn)
+	const finalCard = await executeRoleLoop(deps, context, roleState, registryEntry, allowedToolsManifests, dispatchCtx, guild.deployment.executor, resumed?.suspendedTurn)
 	deps.roleRegistry.unregister(registryEntry.roleId)
 	deps.checkpointRecorder.unregisterFrame(registryEntry.roleId)
 	logEvent(deps.appendLog, 'role_finished', roleFinishedPayload(context.roleName, context.depth, finalCard, context.parent, registryEntry.roleId))
@@ -415,7 +416,6 @@ async function completeSuspendedTurn(deps: EngineDependencies, context: EngineCo
 async function executeRoleLoop(
 	deps: EngineDependencies,
 	context: EngineContext,
-	roleDefinition: RoleDefinition,
 	roleState: RoleState,
 	registryEntry: RoleRegistryEntry,
 	allowedToolsManifests: ToolManifest[],
@@ -480,7 +480,8 @@ async function executeRoleLoop(
 			return createResultCard('error', 'Role budget exceeded', { error: roleError })
 		}
 
-		const messages = buildMessages(roleDefinition, roleState.history)
+		// The request snapshots the history (shallow copy — the engine never mutates message objects in place): the caller and its transport must observe exactly the messages sent, even though the history array keeps growing as turns append.
+		const messages = [...roleState.history]
 
 		// llm_call_start marks the turn in flight the moment the request is dispatched, so the flow view can end the call's transit phase (flowing edge → solid) when the callee begins working rather than when the response completes.
 		// It fires on every turn, including the paths that later fail (llm_unavailable / context_budget_exceeded): the turn started even if it never completed.
@@ -495,7 +496,7 @@ async function executeRoleLoop(
 		const handling = handleLlmResult(llmResult, roleState, deps, context, config)
 		// llm_call is emitted after handleLlmResult so the received assistant response, finishReason, and per-call usage all land in one event. It is emitted only on the success paths (continue/tool_calls and success-finished): the llm_unavailable and context_budget_exceeded paths log their own dedicated events inside handleLlmResult and must not also emit a misleading llm_call.
 		if (llmResult.kind === 'success') {
-			// Delta protocol: a valid baseline (the request count of the role's last logged llm_call) slices the sent list down to the messages added since that call; an absent or out-of-range baseline — first turn, or a context edit or compaction that rewrote the history — falls back to the full snapshot. The baseline then advances to this request's size so the next event slices from here. The baseline indexes the request, which buildMessages derives one-to-one from the history.
+			// Delta protocol: a valid baseline (the request count of the role's last logged llm_call) slices the sent list down to the messages added since that call; an absent or out-of-range baseline — first turn, or a context edit or compaction that rewrote the history — falls back to the full snapshot. The baseline then advances to this request's size so the next event slices from here. The baseline indexes the request, which is the role's history itself.
 			const baseline = roleState.logSentBaseline
 			const sentFrom = baseline !== undefined && baseline <= messages.length ? baseline : 0
 			logEvent(deps.appendLog, 'llm_call', llmCallPayload(context.roleName, registryEntry.roleId, messages.slice(sentFrom), sentFrom, messages.length, llmResult))

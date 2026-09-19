@@ -136,19 +136,99 @@ describe('compactHistoryForContextBudget', () => {
 		expect(report.history).toEqual(history)
 	})
 
-	test('strips reasoning before measuring, which can be enough on its own', () => {
+	test('no strip when the earlier steps suffice: reasoning on the survivors is intact', () => {
+		const history: Message[] = [
+			{ role: 'system', content: pad(400) },
+			{ role: 'user', content: pad(400) },
+			{ role: 'assistant', content: pad(200), reasoning: pad(5000) },
+			{ role: 'tool', content: pad(400), tool_call_id: 'a' },
+			{ role: 'assistant', content: pad(100), reasoning: pad(300) },
+		]
+		// Reasoning is a last resort, so the reasoning-heavy a-turn can only lose its 5600 chars by being dropped whole: 6800 chars ≈ 1700 tokens over the 1200 target; after the drop, 1200 chars ≈ 300 tokens fits, and nothing else runs.
+		const report = compactHistoryForContextBudget(history, { contextWindow: 2000, promptTokens: 0, targetFraction: 0.6 })
+		expect(report.fits).toBe(true)
+		expect(report.droppedMessages).toBe(2)
+		expect(report.strippedReasoningMessages).toBe(0)
+		expect(report.history.length).toBe(3)
+		expect(report.history[2]?.reasoning).toBe(pad(300))
+	})
+
+	test('never strips the last assistant message\'s reasoning, so an un-droppable reasoning-heavy turn fails to fit', () => {
 		const history: Message[] = [
 			{ role: 'system', content: pad(400) },
 			{ role: 'user', content: pad(400) },
 			{ role: 'assistant', content: pad(200), reasoning: pad(5000) },
 			{ role: 'tool', content: pad(400), tool_call_id: 'a' },
 		]
-		// Default ratio (4 chars/token): 6400 chars ≈ 1600 tokens over the 1200 target; after stripping, 1400 chars ≈ 350 tokens fits.
+		// The a-turn is the protected most-recent turn and its assistant is the last one, so the only reasoning the strip pass could reach is exactly the reasoning that may not be stripped: nothing more can shrink, and the report says so instead of quietly deleting it.
 		const report = compactHistoryForContextBudget(history, { contextWindow: 2000, promptTokens: 0, targetFraction: 0.6 })
-		expect(report.fits).toBe(true)
-		expect(report.strippedReasoningMessages).toBe(1)
+		expect(report.fits).toBe(false)
 		expect(report.droppedMessages).toBe(0)
-		expect(report.history[2]?.reasoning).toBeNull()
+		expect(report.strippedReasoningMessages).toBe(0)
+		expect(report.history[2]?.reasoning).toBe(pad(5000))
+	})
+
+	test('strips reasoning oldest-first and stops once the estimate fits', () => {
+		const history: Message[] = [
+			{ role: 'system', content: pad(400), reasoning: pad(1000) },
+			{ role: 'user', content: pad(400), reasoning: pad(1000) },
+			{
+				role: 'assistant',
+				content: pad(200),
+				tool_calls: [{ id: 'a', type: 'function', function: { name: pad(10), arguments: pad(90) } }],
+			},
+			{ role: 'tool', content: pad(500), tool_call_id: 'a' },
+			{ role: 'assistant', content: pad(100), reasoning: pad(4000) },
+		]
+		// After the drop pass exhausts the droppable turns, the only surviving assistant is the protected last one, so the strip pass can only ever reach reasoning on the messages it cannot drop — here the system prompt and the user task (Message carries reasoning on any role, and the estimate counts it on every message). Full history 7700 chars ≈ 1925 tokens over the 1500 target; dropping the a-turn leaves 6900 ≈ 1725, still over, and truncation has nothing to shrink. The pass takes the oldest reasoning first — the system message's — and 5900 chars ≈ 1475 fits, so the user task's and the last assistant's reasoning survive.
+		const report = compactHistoryForContextBudget(history, { contextWindow: 2500, promptTokens: 0, targetFraction: 0.6 })
+		expect(report.fits).toBe(true)
+		expect(report.droppedMessages).toBe(2)
+		expect(report.truncatedToolMessages).toBe(0)
+		expect(report.strippedReasoningMessages).toBe(1)
+		expect(report.history[0]?.reasoning).toBeNull()
+		expect(report.history[1]?.reasoning).toBe(pad(1000))
+		expect(report.history[2]?.reasoning).toBe(pad(4000))
+	})
+
+	test('strips reasoning from every older message until the estimate fits', () => {
+		const history: Message[] = [
+			{ role: 'system', content: pad(400), reasoning: pad(1000) },
+			{ role: 'user', content: pad(400), reasoning: pad(1000) },
+			{
+				role: 'assistant',
+				content: pad(200),
+				tool_calls: [{ id: 'a', type: 'function', function: { name: pad(10), arguments: pad(90) } }],
+			},
+			{ role: 'tool', content: pad(500), tool_call_id: 'a' },
+			{ role: 'assistant', content: pad(100), reasoning: pad(4000) },
+		]
+		// A tighter 1320-token target needs both older reasonings: 6900 chars ≈ 1725 over, one strip leaves 5900 ≈ 1475 still over, two leave 4900 ≈ 1225 which fits. The last assistant message's reasoning is never reached.
+		const report = compactHistoryForContextBudget(history, { contextWindow: 2200, promptTokens: 0, targetFraction: 0.6 })
+		expect(report.fits).toBe(true)
+		expect(report.strippedReasoningMessages).toBe(2)
+		expect(report.history[0]?.reasoning).toBeNull()
+		expect(report.history[1]?.reasoning).toBeNull()
+		expect(report.history[2]?.reasoning).toBe(pad(4000))
+	})
+
+	test('reasoning exhausted before the estimate fits still reports fits false', () => {
+		const history: Message[] = [
+			{ role: 'system', content: pad(400), reasoning: pad(1000) },
+			{ role: 'user', content: pad(400), reasoning: pad(1000) },
+			{
+				role: 'assistant',
+				content: pad(200),
+				tool_calls: [{ id: 'a', type: 'function', function: { name: pad(10), arguments: pad(90) } }],
+			},
+			{ role: 'tool', content: pad(500), tool_call_id: 'a' },
+			{ role: 'assistant', content: pad(100), reasoning: pad(4000) },
+		]
+		// A 1200-token target is past everything the strip pass can reach: stripping both older reasonings leaves 4900 chars ≈ 1225, still over, with only the protected last assistant's reasoning left. The pass reports what it did and gives up.
+		const report = compactHistoryForContextBudget(history, { contextWindow: 2000, promptTokens: 0, targetFraction: 0.6 })
+		expect(report.fits).toBe(false)
+		expect(report.strippedReasoningMessages).toBe(2)
+		expect(report.history[2]?.reasoning).toBe(pad(4000))
 	})
 
 	test('drops oldest turns first, preserving system, task, and the most recent turn', () => {
@@ -194,6 +274,7 @@ describe('compactHistoryForContextBudget', () => {
 		expect(report.fits).toBe(true)
 		expect(report.droppedMessages).toBe(0)
 		expect(report.truncatedToolMessages).toBe(1)
+		expect(report.strippedReasoningMessages).toBe(0)
 		const toolMessage = report.history[3]
 		expect(toolMessage?.content.length).toBeLessThan(2100)
 		expect(toolMessage?.content.includes('[truncated:')).toBe(true)
@@ -214,6 +295,7 @@ describe('compactHistoryForContextBudget', () => {
 		const report = compactHistoryForContextBudget(history, { contextWindow: 100, promptTokens: 0, targetFraction: 0.5 })
 		expect(report.fits).toBe(false)
 		expect(report.truncatedToolMessages).toBe(1)
+		expect(report.strippedReasoningMessages).toBe(0)
 		expect(report.history[3]?.content.length).toBeLessThan(2050)
 	})
 
@@ -227,6 +309,7 @@ describe('compactHistoryForContextBudget', () => {
 		expect(report.fits).toBe(false)
 		expect(report.droppedMessages).toBe(0)
 		expect(report.truncatedToolMessages).toBe(0)
+		expect(report.strippedReasoningMessages).toBe(0)
 	})
 
 	test('calibrates the token estimate from the endpoint-reported prompt tokens', () => {
@@ -234,5 +317,6 @@ describe('compactHistoryForContextBudget', () => {
 		const report = compactHistoryForContextBudget(threeTurnHistory(), { contextWindow: 1000, promptTokens: 3200, targetFraction: 0.5 })
 		expect(report.fits).toBe(false)
 		expect(report.droppedMessages).toBe(4)
+		expect(report.strippedReasoningMessages).toBe(0)
 	})
 })

@@ -38,8 +38,8 @@ export interface RequestHandlerConfig {
 	writeProjectSettings: WriteProjectSettings
 }
 
-// The static-asset leaf: given a GET path that matched no API route, produce the response. Injected so the routing below is exercisable without touching the filesystem or a socket.
-export type ServeStatic = (requestPath: string) => Response
+// The static-asset leaf: given a GET path that matched no API route, produce the response. Injected so the routing below is exercisable without touching the filesystem or a socket. Async because the index route reads the served body to substitute the page title (see server.ts createServeStatic).
+export type ServeStatic = (requestPath: string) => Promise<Response>
 
 export type RequestHandler = (request: Request) => Promise<Response>
 

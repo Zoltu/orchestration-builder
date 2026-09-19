@@ -1,4 +1,4 @@
-// Data-validity gate for the shipped Guild (guild/), the deployment file (deployment/), and the benchmark suite (benchmarks/): loads every role prompt, tool manifest, and eval file and checks structural and cross-referential consistency, including that the manifest signatures match the handler tables they dispatch to.
+// Data-validity gate for the shipped Guild (guild/), the deployment file (deployment/), the benchmark suite (benchmarks/), and the web client's inlined favicon (source/web/static/): loads every role prompt, tool manifest, and eval file and checks structural and cross-referential consistency, including that the manifest signatures match the handler tables they dispatch to.
 // This reads the repo's data files by design, so it lives outside `bun test` (which runs purely in-memory). Run it via `bun run validate-data` after editing the Guild, the deployment, or the suite; it is also the data gate for image builds.
 
 import * as fs from 'node:fs'
@@ -13,12 +13,14 @@ import { createPlanToolHandlers } from '../executor/tools/plan.js'
 import { createRunLogToolHandlers } from '../executor/tools/run-log.js'
 import type { HumanFacingText, ToolManifest } from '../executor/types.js'
 import { isNonEmptyStringArray, validateToolManifest } from '../executor/validation.js'
+import { faviconHref } from '../web/static/favicon.js'
 
 const repoRoot = path.resolve(import.meta.dir, '..', '..')
 const guildDir = path.join(repoRoot, 'guild')
 const deploymentPath = path.join(repoRoot, 'deployment', 'deployment.json')
 const manifestDir = path.join(guildDir, 'tools')
 const benchmarksDir = path.join(repoRoot, 'benchmarks')
+const indexHtmlPath = path.join(repoRoot, 'source', 'web', 'static', 'index.html')
 
 const failures: string[] = []
 
@@ -383,10 +385,31 @@ function checkBenchmarks(): void {
 	check(large.includes('project_todo_cli'), 'benchmarks: missing large benchmark "project_todo_cli"')
 }
 
+// The index.html icon href hand-duplicates faviconHref('complete'), and the two can silently drift; pinning them here keeps the inline default and the JS module from diverging (the module comment in source/web/static/favicon.js documents the pairing).
+function checkIndexHtmlFavicon(): void {
+	if (!fs.existsSync(indexHtmlPath)) {
+		failures.push('source/web/static: index.html missing')
+		return
+	}
+	const iconMatch = fs.readFileSync(indexHtmlPath, 'utf8').match(/<link rel="icon" href="([^"]+)"/)
+	if (iconMatch === null) {
+		failures.push('source/web/static/index.html: <link rel="icon"> not found')
+		return
+	}
+	const iconHref = iconMatch[1]
+	if (iconHref === undefined) {
+		failures.push('source/web/static/index.html: <link rel="icon"> has no href')
+		return
+	}
+	const expectedHref = faviconHref('complete')
+	check(iconHref === expectedHref, `source/web/static/index.html: the <link rel="icon"> href does not match faviconHref('complete') from source/web/static/favicon.js — regenerate it from favicon.js`)
+}
+
 const loaded = loadGuildData()
 if (loaded !== null) checkGuild(loaded)
 checkManifests()
 checkBenchmarks()
+checkIndexHtmlFavicon()
 
 if (failures.length > 0) {
 	for (const failure of failures) console.error(`validate-data: FAIL ${failure}`)

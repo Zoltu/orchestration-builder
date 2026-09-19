@@ -14,9 +14,12 @@ const CONTEXT_RECOVERY_TARGET_FRACTION = 0.7
 // The platform notice a role receives after the executor compacted its conversation following a context-window rejection. It is a user message, not a synthetic tool result: on OpenAI-compatible endpoints a tool message must answer an assistant tool_call, so an orphan tool message would make the recovery request itself a malformed 400.
 function contextRecoveryNotice(llmResult: { promptTokens: number; contextWindow: number }, report: ContextCompactionReport): string {
 	const sizePart = llmResult.promptTokens > 0 ? ` (~${llmResult.promptTokens} prompt tokens vs window ${llmResult.contextWindow})` : ` (window ${llmResult.contextWindow} tokens)`
+	const reasoningPart = report.strippedReasoningMessages > 0
+		? `, and cleared reasoning from ${report.strippedReasoningMessages} older messages`
+		: '; reasoning was not removed'
 	return [
 		`[Platform notice — context window exceeded] Your last request to the model was rejected because this conversation had grown past the model's context window${sizePart}.`,
-		`The platform compacted this conversation so work can continue: it dropped ${report.droppedMessages} older messages, truncated ${report.truncatedToolMessages} oversized tool results, and cleared reasoning on ${report.strippedReasoningMessages} messages; the estimated prompt size is now ~${report.estimatedPromptTokens} tokens.`,
+		`The platform compacted this conversation so work can continue: it dropped ${report.droppedMessages} older messages and truncated ${report.truncatedToolMessages} oversized tool results${reasoningPart} (the estimated prompt size is now ~${report.estimatedPromptTokens} tokens).`,
 		'Your system prompt, your original task, and your most recent messages are intact.',
 		'Continue from your most recent state; re-read files or re-run commands if you need information that was removed.',
 		'If the task cannot be completed without the removed context, call finish with status "error" and error.kind "context_budget_exceeded" so the work can be re-delegated in smaller pieces.',
@@ -43,7 +46,7 @@ export function contextExceededCard(reason: string): { kind: 'finished'; card: R
 	}
 }
 
-// The naive in-place backstop for a context-window rejection: strip reasoning, drop the oldest turns, truncate oversized surviving tool results, then resume with a platform notice. Returns the terminal card when even the undeletable remainder cannot fit, null when the compacted role may continue. Used directly when no context handler is configured, and as the fallback when the handler cannot do better.
+// The naive in-place backstop for a context-window rejection: drop the oldest turns, truncate oversized surviving tool results, strip reasoning from the oldest survivors as a last resort, then resume with a platform notice (see compactHistoryForContextBudget). Returns the terminal card when even the undeletable remainder cannot fit, null when the compacted role may continue. Used directly when no context handler is configured, and as the fallback when the handler cannot do better.
 export function applyContextBackstop(roleState: RoleState, deps: EngineDependencies, context: EngineContext, rejection: { promptTokens: number; contextWindow: number }): ResultCard | null {
 	const report = compactHistoryForContextBudget(roleState.history, {
 		contextWindow: rejection.contextWindow,

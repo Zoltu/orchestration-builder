@@ -304,7 +304,7 @@ describe('edit_context tool', () => {
 
 	test('strip_reasoning operation clears reasoning on a range', async () => {
 		const guild = buildGuild(
-			{ main: { systemPrompt: 'sys', tools: ['edit_context', 'finish'], includeReasoning: true } },
+			{ main: { systemPrompt: 'sys', tools: ['edit_context', 'finish'] } },
 			'main',
 		)
 		const llm = new FakeLlm()

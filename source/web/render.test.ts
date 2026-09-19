@@ -594,7 +594,7 @@ describe('formatLogEvent', () => {
 	})
 
 	test('context_compacted → role · context compacted by platform', () => {
-		expect(formatLogEvent(event('context_compacted', { role: 'coder', droppedMessages: 4, truncatedToolMessages: 0, strippedReasoningMessages: 1, estimatedPromptTokens: 400, contextWindow: 1000 }))).toBe('coder · context compacted by platform')
+		expect(formatLogEvent(event('context_compacted', { role: 'coder', droppedMessages: 4, truncatedToolMessages: 0, strippedReasoningMessages: 0, estimatedPromptTokens: 400, contextWindow: 1000 }))).toBe('coder · context compacted by platform')
 	})
 
 	test('context_pressure → role · context pressure — handoff notice sent', () => {
@@ -1526,20 +1526,18 @@ describe('renderConfig', () => {
 		expect(defined(view.roles.empty, 'view.roles.empty').tools).toEqual([])
 	})
 
-	test('drops role-only fields that are not part of the safe subset (systemPrompt, includeReasoning)', () => {
+	test('drops role-only fields that are not part of the safe subset (systemPrompt)', () => {
 		const config = sampleGuildConfig({
 			roles: {
 				orchestrator: {
 					systemPrompt: 'prompts/orchestrator.md',
 					tools: ['finish'],
-					includeReasoning: true,
 				},
 			},
 		})
 		const view = renderConfig(config, sampleDeployment(), {})
 		expect(view.roles.orchestrator).toEqual({ tools: ['finish'] })
 		expect(view.roles.orchestrator).not.toHaveProperty('systemPrompt')
-		expect(view.roles.orchestrator).not.toHaveProperty('includeReasoning')
 	})
 
 	test('passes through the visualization section when the guild carries one', () => {

@@ -175,6 +175,10 @@ describe('validateGuildConfig throws ValidationError with a path-based message',
 		}
 		expect(() => validateGuildConfig(bad)).toThrow(ValidationError)
 	})
+	test('rejects includeReasoning as an unknown key inside a role definition', () => {
+		const bad = { ...validGuild, roles: { orchestrator: { systemPrompt: 'p', tools: ['finish'], includeReasoning: true } } }
+		expect(() => validateGuildConfig(bad)).toThrow(/roles\.orchestrator\.includeReasoning.*unknown key "includeReasoning"/)
+	})
 	test('validateToolManifest throws on non-string name', () => {
 		expect(() => validateToolManifest({ ...validToolManifest, name: 123 })).toThrow(/name/)
 	})

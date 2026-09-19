@@ -312,6 +312,82 @@ describe('mapHistoryToResponsesInput', () => {
 	})
 })
 
+describe('mapHistoryToResponsesInput — reasoning replay', () => {
+	test('assistant reasoning is replayed as a reasoning item before the turn\'s message item', () => {
+		const mapped = mapHistoryToResponsesInput([
+			{ role: 'user', content: 'hi' },
+			{ role: 'assistant', content: 'hello there', reasoning: 'I should greet the user warmly' },
+		])
+		expect(mapped.input).toEqual([
+			{ role: 'user', content: [{ type: 'input_text', text: 'hi' }] },
+			{ type: 'reasoning', content: [{ type: 'reasoning_text', text: 'I should greet the user warmly' }] },
+			{ type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'hello there' }] },
+		])
+	})
+
+	test('a tool-call turn replays reasoning before the message and function_call items, with tool results following', () => {
+		const mapped = mapHistoryToResponsesInput([
+			{ role: 'user', content: 'List the files.' },
+			{
+				role: 'assistant',
+				content: 'Let me check.',
+				reasoning: 'The list_files tool answers this.',
+				tool_calls: [{ id: 'call_9', type: 'function', function: { name: 'list_files', arguments: '{}' } }],
+			},
+			{ role: 'tool', content: 'a.ts, b.ts', tool_call_id: 'call_9' },
+		])
+		expect(mapped.input).toEqual([
+			{ role: 'user', content: [{ type: 'input_text', text: 'List the files.' }] },
+			{ type: 'reasoning', content: [{ type: 'reasoning_text', text: 'The list_files tool answers this.' }] },
+			{ type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'Let me check.' }] },
+			{ type: 'function_call', call_id: 'call_9', name: 'list_files', arguments: '{}' },
+			{ type: 'function_call_output', call_id: 'call_9', output: 'a.ts, b.ts' },
+		])
+	})
+
+	test('a tool-call turn with empty content replays only the reasoning and function_call items', () => {
+		const mapped = mapHistoryToResponsesInput([
+			{ role: 'assistant', content: '', reasoning: 'calling the tool', tool_calls: [{ id: 'c1', type: 'function', function: { name: 'read_file', arguments: '{}' } }] },
+		])
+		expect(mapped.input).toEqual([
+			{ type: 'reasoning', content: [{ type: 'reasoning_text', text: 'calling the tool' }] },
+			{ type: 'function_call', call_id: 'c1', name: 'read_file', arguments: '{}' },
+		])
+	})
+
+	test('null, absent, and empty reasoning emit no reasoning item', () => {
+		const mapped = mapHistoryToResponsesInput([
+			{ role: 'assistant', content: 'null reasoning', reasoning: null },
+			{ role: 'assistant', content: 'absent reasoning' },
+			{ role: 'assistant', content: 'empty reasoning', reasoning: '' },
+		])
+		expect(mapped.input).toEqual([
+			{ type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'null reasoning' }] },
+			{ type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'absent reasoning' }] },
+			{ type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'empty reasoning' }] },
+		])
+	})
+
+	test('a two-round tool conversation replays each round\'s reasoning before its own items', () => {
+		const mapped = mapHistoryToResponsesInput([
+			{ role: 'system', content: 'sys' },
+			{ role: 'user', content: 'task' },
+			{ role: 'assistant', content: '', reasoning: 'round one thought', tool_calls: [{ id: 'c1', type: 'function', function: { name: 'echo', arguments: '{"x":1}' } }] },
+			{ role: 'tool', content: '{"x":1}', tool_call_id: 'c1' },
+			{ role: 'assistant', content: 'done', reasoning: 'round two thought' },
+		])
+		expect(mapped.instructions).toBe('sys')
+		expect(mapped.input).toEqual([
+			{ role: 'user', content: [{ type: 'input_text', text: 'task' }] },
+			{ type: 'reasoning', content: [{ type: 'reasoning_text', text: 'round one thought' }] },
+			{ type: 'function_call', call_id: 'c1', name: 'echo', arguments: '{"x":1}' },
+			{ type: 'function_call_output', call_id: 'c1', output: '{"x":1}' },
+			{ type: 'reasoning', content: [{ type: 'reasoning_text', text: 'round two thought' }] },
+			{ type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'done' }] },
+		])
+	})
+})
+
 describe('mapToolManifestsToResponsesTools', () => {
 	test('manifests map to flat function definitions with parameters passed through', () => {
 		const manifests: ToolManifest[] = [

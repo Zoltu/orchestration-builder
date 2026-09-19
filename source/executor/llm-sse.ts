@@ -203,7 +203,7 @@ export interface MappedResponsesHistory {
 	input: unknown[]
 }
 
-// The engine guarantees exactly one leading system message, so a system message anywhere else is a bug to fail on, not a shape to bend the wire format around. Reasoning is never sent back: it is the model's own scratch work and has no input slot on the wire.
+// The engine guarantees exactly one leading system message, so a system message anywhere else is a bug to fail on, not a shape to bend the wire format around. Reasoning is replayed every turn as a reasoning input item placed before that turn's message and function_call items (OpenAI's documented replay pattern) — a message whose reasoning is absent, null, or empty (e.g. cleared by the guild's edit_context strip_reasoning op, or a non-reasoning turn) emits no reasoning item. The item carries no id (ids are ephemeral on the target stacks) and no summary. History stays append-only between compaction events — the context manager's agent-decided `edit_context` rewrites are themselves compaction events — to preserve the server's prompt-cache prefix (see docs/reference.md "Compaction and the prompt cache").
 export function mapHistoryToResponsesInput(messages: Message[]): MappedResponsesHistory {
 	let instructions: string | undefined
 	const input: unknown[] = []
@@ -218,6 +218,9 @@ export function mapHistoryToResponsesInput(messages: Message[]): MappedResponses
 			continue
 		}
 		if (message.role === 'assistant') {
+			if (typeof message.reasoning === 'string' && message.reasoning !== '') {
+				input.push({ type: 'reasoning', content: [{ type: 'reasoning_text', text: message.reasoning }] })
+			}
 			// An empty-content assistant turn carries nothing on the wire; a tool-call turn is the common case. The role:'assistant' input item must carry the type:'message' discriminator — the wire's input-item schema requires it the same way output items do.
 			if (message.content !== '') input.push({ type: 'message', role: 'assistant', content: [{ type: 'output_text', text: message.content }] })
 			for (const toolCall of message.tool_calls ?? []) {

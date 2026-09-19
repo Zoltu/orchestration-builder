@@ -2,6 +2,7 @@ import * as path from 'node:path'
 import { existsSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { createRequestHandler, type RequestHandlerConfig, type ServeStatic } from './request-handler.js'
+import { renderIndexHtmlWithPageTitle } from './page-title.js'
 
 const STATIC_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), 'static')
 
@@ -17,6 +18,8 @@ const CONTENT_TYPES: Record<string, string> = {
 
 export interface WebServerConfig extends RequestHandlerConfig {
 	port: number
+	// The browser tab title substituted into the served index.html (see page-title.ts); resolved from ORCHESTRATOR_TITLE in serve.ts.
+	pageTitle: string
 }
 
 export interface WebServer {
@@ -45,11 +48,12 @@ function notFound(): Response {
 	})
 }
 
-export function createServeStatic(staticDir: string): ServeStatic {
-	return (requestPath) => {
-		const asset = resolveStaticAsset(staticDir, requestPath)
-		if (asset === null) return notFound()
-		if (!existsSync(asset.resolvedPath)) return notFound()
+// The filesystem leaf behind the static handler: streams the resolved asset, or null when the file does not exist. Held separate from createServeStatic so the serve-time title substitution (an orchestration concern) is exercisable in-memory with a fake reader (see server.test.ts).
+export type ServeAssetFile = (asset: StaticAsset) => Response | null
+
+export function createServeAssetFile(): ServeAssetFile {
+	return (asset) => {
+		if (!existsSync(asset.resolvedPath)) return null
 		// no-store keeps the dev server from caching stale assets (or stale 404s) across restarts, so an edit to app.js is always picked up on the next page load.
 		return new Response(Bun.file(asset.resolvedPath), {
 			headers: {
@@ -60,10 +64,29 @@ export function createServeStatic(staticDir: string): ServeStatic {
 	}
 }
 
+export interface ServeStaticConfig {
+	staticDir: string
+	pageTitle: string
+	serveAssetFile: ServeAssetFile
+}
+
+export function createServeStatic(config: ServeStaticConfig): ServeStatic {
+	return async (requestPath) => {
+		const asset = resolveStaticAsset(config.staticDir, requestPath)
+		if (asset === null) return notFound()
+		const assetResponse = config.serveAssetFile(asset)
+		if (assetResponse === null) return notFound()
+		// Only the app shell's title is substituted; every other asset (and any other HTML page such as the demo harness) passes through untouched.
+		if (asset.resolvedPath !== path.resolve(config.staticDir, 'index.html')) return assetResponse
+		const html = await assetResponse.text()
+		return new Response(renderIndexHtmlWithPageTitle(html, config.pageTitle), { status: assetResponse.status, headers: assetResponse.headers })
+	}
+}
+
 export function createWebServer(config: WebServerConfig): WebServer {
 	const server = Bun.serve({
 		port: config.port,
-		fetch: createRequestHandler(config, createServeStatic(STATIC_DIR)),
+		fetch: createRequestHandler(config, createServeStatic({ staticDir: STATIC_DIR, pageTitle: config.pageTitle, serveAssetFile: createServeAssetFile() })),
 	})
 
 	const port = server.port

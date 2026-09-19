@@ -25,7 +25,7 @@ Good candidates to remove:
 
 - Old tool outputs the target has already summarized or acted on (file contents it since rewrote, command output it already read).
 - Superseded reads: an earlier version of a file that was later read again or overwritten.
-- Reasoning on older turns (`strip_reasoning`) — the decisions remain in the visible content; the deliberation text is dead weight.
+- Reasoning on older turns (`strip_reasoning`) — the decisions remain in the visible content; the deliberation text is dead weight. Prefer clearing reasoning before or alongside dropping content: reasoning replays to the model every turn outside of compaction, so old reasoning is safe to strip while the current turn's is not.
 - Dead ends: exploration that led nowhere and is not referenced by anything recent.
 
 ## Operations

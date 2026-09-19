@@ -42,6 +42,7 @@ export interface ContextCompactionReport {
 	history: Message[]
 	droppedMessages: number
 	truncatedToolMessages: number
+	// Messages whose reasoning the last-resort strip pass cleared (0 when the earlier steps already fit). The last assistant message's reasoning is never counted here because it is never stripped.
 	strippedReasoningMessages: number
 	estimatedPromptTokens: number
 	// False when even the undeletable remainder (system prompt, task, the protected most-recent turn) estimates over the target — retrying cannot help.
@@ -52,6 +53,7 @@ const DEFAULT_CHARS_PER_TOKEN = 4
 // Tool outputs surviving the drop pass are truncated to this many chars: big enough to keep the most recent turn usable, small enough that a few of them cannot refill the window.
 const COMPACTION_KEPT_TOOL_CHARS = 2000
 
+// The estimate counts reasoning chars because reasoning is replayed to the wire every turn (mapHistoryToResponsesInput emits a reasoning item for every assistant message that carries it) — ignoring it would under-count exactly the requests this compaction sizes.
 function messageChars(message: Message): number {
 	let chars = message.content.length
 	if (message.reasoning !== undefined && message.reasoning !== null) chars += message.reasoning.length
@@ -97,39 +99,34 @@ function segmentBlocks(messages: Message[]): HistoryBlock[] {
 	return blocks
 }
 
+// The automatic compaction backstop: drop the oldest turns, truncate oversized surviving tool results, then — only when the estimate still will not fit — strip reasoning from the oldest survivors, never from the last assistant message. Reasoning is replayed to the wire every turn (see mapHistoryToResponsesInput), so stripping it rewrites what the model believes it decided; that cost is accepted only after dropping and truncating cannot fit, and shedding reasoning proactively remains the guild's deliberate choice via the edit_context strip_reasoning op.
 export function compactHistoryForContextBudget(history: Message[], options: ContextCompactionOptions): ContextCompactionReport {
 	const targetTokens = Math.floor(options.contextWindow * options.targetFraction)
 	const charsPerToken = options.promptTokens > 0 ? totalChars(history) / options.promptTokens : DEFAULT_CHARS_PER_TOKEN
 	const estimateTokens = (chars: number): number => Math.ceil(chars / charsPerToken)
 
-	let strippedReasoningMessages = 0
-	for (const message of history) {
-		if (message.reasoning !== undefined && message.reasoning !== null) strippedReasoningMessages++
-	}
-	let next = stripReasoning(history)
-
 	let droppedMessages = 0
-	const blocks = segmentBlocks(next)
-	const charsAfterStrip = totalChars(next)
+	const blocks = segmentBlocks(history)
+	const charsBeforeDrop = totalChars(history)
 	let removedChars = 0
 	let dropBoundary = 2
 	// The most recent block is never dropped: it is the turn the role is about to continue from.
 	for (let blockIndex = 0; blockIndex < blocks.length - 1; blockIndex++) {
-		if (estimateTokens(charsAfterStrip - removedChars) <= targetTokens) break
+		if (estimateTokens(charsBeforeDrop - removedChars) <= targetTokens) break
 		const block = blocks[blockIndex]
 		if (block === undefined) break
 		removedChars += block.chars
 		droppedMessages += block.end - block.start
 		dropBoundary = block.end
 	}
-	if (dropBoundary > 2) next = next.slice(0, 2).concat(next.slice(dropBoundary))
+	let compacted = dropBoundary > 2 ? history.slice(0, 2).concat(history.slice(dropBoundary)) : history
 
 	let truncatedToolMessages = 0
-	while (estimateTokens(totalChars(next)) > targetTokens) {
+	while (estimateTokens(totalChars(compacted)) > targetTokens) {
 		let longestIndex = -1
 		let longestChars = 0
-		for (let i = 0; i < next.length; i++) {
-			const candidate = next[i]
+		for (let i = 0; i < compacted.length; i++) {
+			const candidate = compacted[i]
 			if (candidate === undefined || candidate.role !== 'tool') continue
 			if (candidate.content.length > longestChars) {
 				longestChars = candidate.content.length
@@ -137,18 +134,39 @@ export function compactHistoryForContextBudget(history: Message[], options: Cont
 			}
 		}
 		if (longestIndex === -1 || longestChars <= COMPACTION_KEPT_TOOL_CHARS) break
-		const longest = next[longestIndex]
+		const longest = compacted[longestIndex]
 		if (longest === undefined) break
 		const truncated = truncateToolOutput(longest.content, COMPACTION_KEPT_TOOL_CHARS).text
 		// The truncation marker can make a barely-over message longer, not shorter; without a progress check this loop would never terminate.
 		if (truncated.length >= longest.content.length) break
-		next = next.map((candidate, i) => (i === longestIndex ? { ...longest, content: truncated } : candidate))
+		compacted = compacted.map((candidate, i) => (i === longestIndex ? { ...longest, content: truncated } : candidate))
 		truncatedToolMessages++
 	}
 
-	const estimatedPromptTokens = estimateTokens(totalChars(next))
+	// Last resort, reached only when dropping and truncating leave the estimate over target: strip reasoning oldest-first, one message at a time, until the estimate fits or every strippable message is exhausted. The last assistant message keeps its reasoning — it is the decision the role is about to continue from, the same turn the drop pass protects.
+	let strippedReasoningMessages = 0
+	let lastAssistantIndex = -1
+	for (let i = compacted.length - 1; i >= 0; i--) {
+		if (compacted[i]?.role === 'assistant') {
+			lastAssistantIndex = i
+			break
+		}
+	}
+	let stripIndex = 0
+	while (estimateTokens(totalChars(compacted)) > targetTokens && stripIndex < compacted.length) {
+		const candidate = compacted[stripIndex]
+		if (stripIndex === lastAssistantIndex || candidate === undefined || candidate.reasoning === undefined || candidate.reasoning === null) {
+			stripIndex++
+			continue
+		}
+		compacted = stripReasoning(compacted, stripIndex, stripIndex + 1)
+		strippedReasoningMessages++
+		stripIndex++
+	}
+
+	const estimatedPromptTokens = estimateTokens(totalChars(compacted))
 	return {
-		history: next,
+		history: compacted,
 		droppedMessages,
 		truncatedToolMessages,
 		strippedReasoningMessages,

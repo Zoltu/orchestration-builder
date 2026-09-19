@@ -6,6 +6,7 @@ import { renderFlowView, deriveLifecycle, deriveNowCaption, deriveCostStrip, cre
 import { renderSequenceView } from './sequence-diagram.js'
 import { createLabelResolver, TIER_VALUES, isLabelTier } from './labels.js'
 import { isTerminalStatus } from './interaction-model.js'
+import { deriveFaviconState, faviconHref } from './favicon.js'
 import { createTooltipDismiss, deriveTooltipDescriptor, isInFlightAskHuman, resolveTooltipTarget } from './inspector.js'
 import { operationIdsForTooltipDetails } from './tooltip.js'
 import { copyRawToClipboard } from './clipboard.js'
@@ -227,6 +228,19 @@ function PrimeAudioFx() {
 	return [runPrimeAudio, null]
 }
 
+// The favicon effect: derives the three-state favicon from the polled run list and pending questions and swaps the `<link rel="icon">` href only when the derived state's href changes, so an identical poll tick never touches the DOM.
+function runUpdateFavicon(_dispatch, state) {
+	const link = document.querySelector('link[rel="icon"]')
+	if (link === null) return
+	const href = faviconHref(deriveFaviconState(state.summaries, state.pendingQuestions))
+	if (link.getAttribute('href') === href) return
+	link.setAttribute('href', href)
+}
+
+function UpdateFavicon(state) {
+	return [runUpdateFavicon, state]
+}
+
 // --- Actions ---------------------------------------------------------------
 // Actions are pure state transitions; side effects are returned as effect tuples alongside the next state. The polling action returns a fresh now so relative timestamps refresh every tick even when the server returns identical data.
 
@@ -277,7 +291,7 @@ function GotRunList(state, payload) {
 		nextState.selectedRunView = null
 		nextState.selectedRunStatus = null
 	}
-	return nextState
+	return [nextState, UpdateFavicon(nextState)]
 }
 
 // The newest interrupt-question answer the operator has not been shown yet, or null. Keys are run-scoped (`runId|askedAt`) so one map serves every run without per-run resets; a run's first read baselines its already-answered inquiries so opening an old run never pops stale answers.
@@ -365,9 +379,9 @@ function GotQuestions(state, payload) {
 	}
 	// Beep on a genuinely new question unless muted; the modal itself opens via questionModalOpen above. Falsy effects are ignored by hyperapp, so the conditional inlines cleanly.
 	if (hasNew) {
-		return [nextState, state.muted ? null : PlayBeep()]
+		return [nextState, UpdateFavicon(nextState), state.muted ? null : PlayBeep()]
 	}
-	return nextState
+	return [nextState, UpdateFavicon(nextState)]
 }
 
 function FetchFailed(state) {
