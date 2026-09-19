@@ -143,7 +143,7 @@ describe('reconcileRunsOnStartup', () => {
 		expect(meta?.error?.kind).toBe('interrupted')
 	})
 
-	test('a run with no meta and no checkpoint is marked interrupted with placeholder fields', () => {
+	test('a run with no meta and no checkpoint is marked interrupted, omitting the absent optional fields', () => {
 		const harness = makeHarness({ 'run-1': {} })
 
 		const report = reconcileRunsOnStartup(harness.dependencies)
@@ -153,6 +153,8 @@ describe('reconcileRunsOnStartup', () => {
 		expect(meta?.status).toBe('interrupted')
 		expect(meta?.task).toContain('unknown')
 		expect(meta?.error?.kind).toBe('interrupted')
+		expect('guildPath' in (meta ?? {})).toBe(false)
+		expect('benchmarkPath' in (meta ?? {})).toBe(false)
 	})
 
 	test('a corrupt checkpoint reconciles to interrupted rather than resuming', () => {

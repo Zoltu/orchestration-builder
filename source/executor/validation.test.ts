@@ -58,6 +58,15 @@ describe('boolean guards', () => {
 			status: 'running',
 			startTime: 'now',
 		})).toBe(true)
+		// An interrupted meta composed from lost run data omits the absent optional fields rather than pinning empty-string sentinels.
+		expect(isRunMeta({
+			runId: 'r',
+			task: 't',
+			status: 'interrupted',
+			startTime: 'now',
+			endTime: 'later',
+			error: { kind: 'interrupted', message: 'lost' },
+		})).toBe(true)
 	})
 	test('isRunMeta accepts an optional effort and rejects an invalid one', () => {
 		const base = {

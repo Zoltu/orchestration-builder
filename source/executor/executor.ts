@@ -18,8 +18,8 @@ export interface ExecutorDependencies {
 	appendLog: AppendLog
 	additionalToolHandlers: Record<string, ToolHandler>
 	humanBackend: HumanBackend
-	// Supplies the service-bound, resolved guild (the LoadedGuild constructed at startup, deployment included); not the loader's file-shaped LoadGuild, which the startup path completes first. The name deliberately differs from LoadGuild: the loader reads files, this getter hands back the already-loaded guild.
-	getLoadedGuild: () => LoadedGuild
+	// The service-bound, resolved guild (the LoadedGuild constructed at startup, deployment included); not the loader's file-shaped LoadGuild, which the startup path completes first. The name deliberately differs from LoadGuild: the loader reads files, this field carries the already-loaded guild.
+	loadedGuild: LoadedGuild
 	createRunDirectory: RunDirectory
 	writeMeta: WriteMeta
 	writeCheckpoint: WriteCheckpoint
@@ -44,7 +44,8 @@ function buildEngineDependencies(deps: ExecutorDependencies, runId: string, star
 	}
 }
 
-function terminalMeta(options: RunOptions, startTime: string, result: ResultCard): RunMeta {
+// The one composer for the executor's meta writes: identity fields map from the run's options (the optional ones spread only when present), the caller pins the status and start time, and a terminal write passes the result card, which fixes the end time at composition. The running writes and the terminal write all compose here so the optional-field mapping is spelled once.
+function composeRunMeta(options: RunOptions, startTime: string, status: RunMeta['status'], result?: ResultCard): RunMeta {
 	return {
 		runId: options.runId,
 		guildPath: options.guildPath,
@@ -53,33 +54,22 @@ function terminalMeta(options: RunOptions, startTime: string, result: ResultCard
 		effort: options.effort,
 		...(options.logLevel !== undefined ? { logLevel: options.logLevel } : {}),
 		...(options.continuation !== undefined ? { continuesFrom: options.continuation.runId } : {}),
-		status: result.status,
+		status,
 		startTime,
-		endTime: new Date().toISOString(),
-		result,
+		...(result === undefined ? {} : { endTime: new Date().toISOString(), result }),
 	}
 }
 
 export async function runExecutor(deps: ExecutorDependencies, options: RunOptions): Promise<RunMeta> {
 	deps.createRunDirectory()
 
-	const loadedGuild = deps.getLoadedGuild()
+	const loadedGuild = deps.loadedGuild
 
 	const startTime = new Date().toISOString()
 	// effort_set is logged once at run start so the trace records the chosen level before the entry role begins.
 	logEvent(deps.appendLog, 'effort_set', { effort: options.effort })
 	// Write a running meta before the entry role begins so the UI can show the task, run id, and start time while the run is in progress, rather than only after completion. It is overwritten with the terminal meta below.
-	deps.writeMeta({
-		runId: options.runId,
-		guildPath: options.guildPath,
-		...(options.benchmarkPath !== undefined ? { benchmarkPath: options.benchmarkPath } : {}),
-		task: options.task,
-		effort: options.effort,
-		...(options.logLevel !== undefined ? { logLevel: options.logLevel } : {}),
-		...(options.continuation !== undefined ? { continuesFrom: options.continuation.runId } : {}),
-		status: 'running',
-		startTime,
-	})
+	deps.writeMeta(composeRunMeta(options, startTime, 'running'))
 	const result = await runRole(
 		buildEngineDependencies(deps, options.runId, startTime, 0, undefined, options.continuation?.runId),
 		{
@@ -93,7 +83,7 @@ export async function runExecutor(deps: ExecutorDependencies, options: RunOption
 		},
 	)
 
-	const meta = terminalMeta(options, startTime, result)
+	const meta = composeRunMeta(options, startTime, result.status, result)
 
 	deps.writeMeta(meta)
 	// The terminal meta is the authoritative record; the checkpoint is removed so a restart never considers resuming a finished run.
@@ -128,23 +118,13 @@ export async function resumeExecutor(deps: ExecutorDependencies, checkpoint: Run
 
 	// No createRunDirectory here: a resume re-enters the run directory the checkpoint was read from, which therefore exists — and createRunDirectory refuses existing directories because a fresh run must never share one.
 
-	const loadedGuild = deps.getLoadedGuild()
+	const loadedGuild = deps.loadedGuild
 
 	const startTime = checkpoint.startTime
 	// run_resumed marks the restart boundary in the log: events before it belong to the pre-restart process, events after it to the resumed run. Resumed roles do not re-emit role_start, so a reviewer can tell why.
 	logEvent(deps.appendLog, 'run_resumed', { runId: checkpoint.runId, resumedFrames: checkpoint.frames.length })
 	// Re-assert the running meta: the pre-restart write may never have landed, and the terminal meta overwrites it below either way.
-	deps.writeMeta({
-		runId: checkpoint.runId,
-		guildPath: options.guildPath,
-		...(options.benchmarkPath !== undefined ? { benchmarkPath: options.benchmarkPath } : {}),
-		task,
-		effort,
-		logLevel,
-		...(continuation !== undefined ? { continuesFrom: continuation.runId } : {}),
-		status: 'running',
-		startTime,
-	})
+	deps.writeMeta(composeRunMeta(runOptions, startTime, 'running'))
 	const result = await resumeRoleStack(
 		runRole,
 		buildEngineDependencies(deps, checkpoint.runId, startTime, checkpoint.registryCounter, checkpoint.learnedContextCeiling, entryFrame.continuesFrom),
@@ -152,7 +132,7 @@ export async function resumeExecutor(deps: ExecutorDependencies, checkpoint: Run
 		checkpoint,
 	)
 
-	const meta = terminalMeta(runOptions, startTime, result)
+	const meta = composeRunMeta(runOptions, startTime, result.status, result)
 
 	deps.writeMeta(meta)
 	deps.deleteCheckpoint()

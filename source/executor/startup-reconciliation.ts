@@ -45,13 +45,13 @@ function readCheckpoint(readCheckpointById: ReadRunCheckpointById, runId: string
 const ABANDONED_MESSAGE = 'The service stopped while this run was in progress and it could not be resumed (no valid checkpoint).'
 const SUPERSEDED_MESSAGE = 'The service restarted with multiple resumable runs; only the most recent was resumed (one task at a time).'
 
-// Marks an abandoned run terminal so the UI stops showing it as "in progress". Fields from the existing meta are preserved when present; a run that died before its running meta landed gets honest placeholders — the run directory and log still identify it.
+// Marks an abandoned run terminal so the UI stops showing it as "in progress". Fields from the existing meta are preserved when present; a run that died before its running meta landed omits the absent optional fields rather than pinning empty-string sentinels — the run directory and log still identify it.
 function markInterrupted(dependencies: StartupReconciliationDependencies, runId: string, meta: RunMeta | null, message: string): void {
 	const endTime = new Date().toISOString()
 	dependencies.writeMetaFor(runId)({
 		runId,
-		guildPath: meta?.guildPath ?? '',
-		benchmarkPath: meta?.benchmarkPath ?? '',
+		...(meta?.guildPath !== undefined ? { guildPath: meta.guildPath } : {}),
+		...(meta?.benchmarkPath !== undefined ? { benchmarkPath: meta.benchmarkPath } : {}),
 		task: meta?.task ?? '(task unknown — run metadata was lost)',
 		...(meta?.effort !== undefined ? { effort: meta.effort } : {}),
 		status: 'interrupted',

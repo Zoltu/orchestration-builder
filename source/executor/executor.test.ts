@@ -1,7 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 
 import type { ContextPolicy, DeploymentConfig, ExecutorConfig, GuildConfig, LogEvent, ResolvedModelConfig, RoleDefinition, RunContinuation, RunMeta, ToolCall, ToolManifest } from './types.js'
-import { ValidationError } from './errors.js'
 import { isRunCheckpoint, type RunCheckpoint } from './checkpoint.ts'
 import { resumeExecutor, runExecutor, type ExecutorDependencies } from './executor.ts'
 import { createInterruptQueue } from './interrupts.ts'
@@ -147,15 +146,7 @@ function buildLoadedGuild(roles: Record<string, RoleDefinition>, entryRole: stri
 	return { config, deployment, prompts, tools }
 }
 
-function makeLoader(guild: LoadedGuild): () => LoadedGuild {
-	return () => guild
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-	return typeof value === 'object' && value !== null && !Array.isArray(value)
-}
-
-function makeDeps(llm: FakeLlm, persistence: FakePersistenceFns, getLoadedGuild: () => LoadedGuild): ExecutorDependencies {
+function makeDeps(llm: FakeLlm, persistence: FakePersistenceFns, loadedGuild: LoadedGuild): ExecutorDependencies {
 	return {
 		llmCaller: llm,
 		appendLog: persistence.appendLog,
@@ -165,39 +156,16 @@ function makeDeps(llm: FakeLlm, persistence: FakePersistenceFns, getLoadedGuild:
 		deleteCheckpoint: persistence.deleteCheckpoint,
 		additionalToolHandlers: {},
 		humanBackend: stubHumanBackend,
-		getLoadedGuild,
+		loadedGuild,
 		interruptQueue: createInterruptQueue(),
 	}
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
 describe('runExecutor', () => {
-	test('Guild-load failure propagates as a thrown ValidationError before runRole runs', async () => {
-		const llm = new FakeLlm()
-		const persistence = makeFakePersistence()
-		const failingLoadGuild: () => LoadedGuild = () => {
-			throw new ValidationError('', 'guild.json is not a valid GuildConfig')
-		}
-		const deps = makeDeps(llm, persistence, failingLoadGuild)
-
-		let caught: unknown
-		try {
-			await runExecutor(deps, {
-			runId: 'r-fail',
-			guildPath: '/guild',
-			benchmarkPath: '/bench',
-			task: 'do it',
-			effort: 'standard',
-		})
-		} catch (error) {
-			caught = error
-		}
-
-		expect(caught).toBeInstanceOf(ValidationError)
-		expect(llm.calls).toBe(0)
-		expect(persistence.state.createRunDirectoryCalls).toBe(1)
-		expect(persistence.state.meta).toBeNull()
-	})
-
 	test('happy path: creates run dir, loads Guild, runs entry, writes meta', async () => {
 		const guild = buildLoadedGuild(
 			{ main: { systemPrompt: 'p', tools: ['finish'] } },
@@ -215,7 +183,7 @@ describe('runExecutor', () => {
 			}]),
 		]
 		const persistence = makeFakePersistence()
-		const deps = makeDeps(llm, persistence, makeLoader(guild))
+		const deps = makeDeps(llm, persistence, guild)
 
 		const meta = await runExecutor(deps, {
 			runId: 'r1',
@@ -265,7 +233,7 @@ describe('runExecutor', () => {
 			}]),
 		]
 		const persistence = makeFakePersistence()
-		const deps = makeDeps(llm, persistence, makeLoader(guild))
+		const deps = makeDeps(llm, persistence, guild)
 
 		const meta = await runExecutor(deps, {
 			runId: 'r2',
@@ -295,7 +263,7 @@ describe('runExecutor', () => {
 			success([], { content: 'finished' }),
 		]
 		const persistence = makeFakePersistence()
-		const deps = makeDeps(llm, persistence, makeLoader(guild))
+		const deps = makeDeps(llm, persistence, guild)
 
 		const meta = await runExecutor(deps, {
 			runId: 'r3',
@@ -333,7 +301,7 @@ describe('runExecutor', () => {
 			}]),
 		]
 		const persistence = makeFakePersistence()
-		const deps = makeDeps(llm, persistence, makeLoader(guild))
+		const deps = makeDeps(llm, persistence, guild)
 
 		await runExecutor(deps, {
 			runId: 'r4',
@@ -373,7 +341,7 @@ describe('runExecutor', () => {
 			function: { name: 'finish', arguments: JSON.stringify({ status: 'success', summary: 'ok' }) },
 		}])]
 		const persistence = makeFakePersistence()
-		const deps = makeDeps(llm, persistence, makeLoader(guild))
+		const deps = makeDeps(llm, persistence, guild)
 
 		const meta = await runExecutor(deps, {
 			runId: 'r-effort',
@@ -407,7 +375,7 @@ describe('runExecutor', () => {
 			function: { name: 'finish', arguments: JSON.stringify({ status: 'success', summary: 'ok' }) },
 		}])]
 		const persistence = makeFakePersistence()
-		const deps = makeDeps(llm, persistence, makeLoader(guild))
+		const deps = makeDeps(llm, persistence, guild)
 		const continuation = { runId: 'run-20260101-000000', task: 'prior task', summary: 'prior summary' }
 
 		const meta = await runExecutor(deps, {
@@ -453,7 +421,7 @@ describe('runExecutor', () => {
 			function: { name: 'finish', arguments: JSON.stringify({ status: 'success', summary: 'done' }) },
 		}])]
 		const persistence = makeFakePersistence()
-		const deps = makeDeps(llm, persistence, makeLoader(guild))
+		const deps = makeDeps(llm, persistence, guild)
 
 		const meta = await runExecutor(deps, {
 			runId: 'r-plain',
@@ -480,7 +448,7 @@ describe('runExecutor', () => {
 			function: { name: 'finish', arguments: JSON.stringify({ status: 'success', summary: 'ok' }) },
 		}])]
 		const persistence = makeFakePersistence()
-		const deps = makeDeps(llm, persistence, makeLoader(guild))
+		const deps = makeDeps(llm, persistence, guild)
 
 		const meta = await runExecutor(deps, {
 			runId: 'r-log-level',
@@ -512,7 +480,7 @@ describe('runExecutor', () => {
 			function: { name: 'finish', arguments: JSON.stringify({ status: 'success', summary: 'ok' }) },
 		}])]
 		const persistence = makeFakePersistence()
-		const deps = makeDeps(llm, persistence, makeLoader(guild))
+		const deps = makeDeps(llm, persistence, guild)
 
 		const meta = await runExecutor(deps, {
 			runId: 'r-no-log-level',
@@ -592,7 +560,7 @@ describe('resumeExecutor', () => {
 			success([finishToolCall('f2', 'parent done')]),
 		]
 		const persistence = makeFakePersistence()
-		const deps = makeDeps(llm, persistence, makeLoader(guild))
+		const deps = makeDeps(llm, persistence, guild)
 
 		const meta = await runExecutor(deps, { runId: 'r-resume', ...resumeOptions, task: 'do it', effort: 'quick', ...(continuation !== undefined ? { continuation } : {}) })
 		return { meta, checkpoints: persistence.state.checkpoints }
@@ -611,7 +579,7 @@ describe('resumeExecutor', () => {
 			success([finishToolCall('f2', 'parent done')]),
 		]
 		const persistence = makeFakePersistence()
-		const deps = makeDeps(llm, persistence, makeLoader(guild))
+		const deps = makeDeps(llm, persistence, guild)
 
 		const meta = await resumeExecutor(deps, checkpoint, resumeOptions)
 
@@ -649,7 +617,7 @@ describe('resumeExecutor', () => {
 			success([finishToolCall('f2', 'parent done')]),
 		]
 		const persistence = makeFakePersistence()
-		const deps = makeDeps(llm, persistence, makeLoader(guild))
+		const deps = makeDeps(llm, persistence, guild)
 
 		const meta = await resumeExecutor(deps, checkpoint, resumeOptions)
 
@@ -682,7 +650,7 @@ describe('resumeExecutor', () => {
 			success([finishToolCall('f2', 'parent done')]),
 		]
 		const firstResumePersistence = makeFakePersistence()
-		await resumeExecutor(makeDeps(firstResumeLlm, firstResumePersistence, makeLoader(buildDelegationGuild())), firstCheckpoint, resumeOptions)
+		await resumeExecutor(makeDeps(firstResumeLlm, firstResumePersistence, buildDelegationGuild()), firstCheckpoint, resumeOptions)
 		// The first write of the resumed run is the re-entered coder's first safe point: the same mid-descent shape, now produced by the resume path.
 		const postResumeCheckpoint = firstResumePersistence.state.checkpoints[0]
 		if (postResumeCheckpoint === undefined) throw new Error('expected a post-resume checkpoint')
@@ -695,7 +663,7 @@ describe('resumeExecutor', () => {
 			success([finishToolCall('f2', 'parent done')]),
 		]
 		const secondResumePersistence = makeFakePersistence()
-		const meta = await resumeExecutor(makeDeps(secondResumeLlm, secondResumePersistence, makeLoader(buildDelegationGuild())), postResumeCheckpoint, resumeOptions)
+		const meta = await resumeExecutor(makeDeps(secondResumeLlm, secondResumePersistence, buildDelegationGuild()), postResumeCheckpoint, resumeOptions)
 
 		expect(meta.continuesFrom).toBe('run-20260101-000000')
 		expect(secondResumePersistence.state.metas.length).toBe(2)
@@ -717,7 +685,7 @@ describe('resumeExecutor', () => {
 			success([finishToolCall('f4', 'parent done')]),
 		]
 		const persistence = makeFakePersistence()
-		const deps = makeDeps(llm, persistence, makeLoader(guild))
+		const deps = makeDeps(llm, persistence, guild)
 
 		const meta = await resumeExecutor(deps, checkpoint, resumeOptions)
 
@@ -735,7 +703,7 @@ describe('resumeExecutor', () => {
 		const llm = new FakeLlm()
 		llm.responses = [success([finishToolCall('f1', 'done')])]
 		const persistence = makeFakePersistence()
-		const deps = makeDeps(llm, persistence, makeLoader(guild))
+		const deps = makeDeps(llm, persistence, guild)
 
 		await runExecutor(deps, { runId: 'r-clean', ...resumeOptions, task: 'do it', effort: 'standard' })
 
@@ -757,7 +725,7 @@ describe('resumeExecutor', () => {
 			success([finishToolCall('f2', 'parent done')]),
 		]
 		const persistence = makeFakePersistence()
-		const deps = makeDeps(llm, persistence, makeLoader(guild))
+		const deps = makeDeps(llm, persistence, guild)
 
 		const meta = await resumeExecutor(deps, checkpoint, resumeOptions)
 
@@ -782,7 +750,7 @@ describe('resumeExecutor', () => {
 			success([finishToolCall('f2', 'parent done')]),
 		]
 		const persistence = makeFakePersistence()
-		const deps = makeDeps(llm, persistence, makeLoader(guild))
+		const deps = makeDeps(llm, persistence, guild)
 
 		const meta = await resumeExecutor(deps, checkpoint, resumeOptions)
 

@@ -217,7 +217,8 @@ export interface RunOptions {
 
 export interface RunMeta {
 	runId: string
-	guildPath: string
+	// Optional so an interrupted meta composed from lost run data (the prior meta never landed) omits the field instead of pinning an empty-string sentinel; every other writer carries it from the run's options.
+	guildPath?: string
 	benchmarkPath?: string
 	task: string
 	// Optional so a meta missing the field, or a torn meta read, still parses.

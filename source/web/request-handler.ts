@@ -1,11 +1,11 @@
-import type { ListRunIds, ProjectSettings, ReadProjectSettings, ReadRunMetaById, ReadRunPlanById, ReadRunSnapshotStats, ReadRunSummaryById, ReadRunSummaryStats, WriteProjectSettings } from '../executor/persistence.js'
+import type { ListRunIds, ProjectSettings, ReadProjectSettings, ReadRunMetaById, ReadRunPlanById, ReadRunSnapshotStats, ReadRunSummaryStats, WriteProjectSettings } from '../executor/persistence.js'
 import { isRunIdShape } from '../executor/run-id.js'
 import type { DeploymentConfig, EffortLevel, GuildConfig, LogLevel, ToolManifest } from '../executor/types.js'
 import { isEffortLevel, isLogLevel, isObject, isTerminalRunStatus } from '../executor/validation.js'
 import type { RunState } from '../executor/run-state.js'
 import type { RunSubmission } from '../executor/run-submission.js'
 import { paginateLogEvents, parseRunMeta, renderConfig, renderProjectSettings, renderPendingQuestions, renderRunView, formatLogAsText, formatLogDetailSections, foldLlmCallSent } from './render.js'
-import { createRunListCache, type ReadRunListSummary } from './run-list-cache.js'
+import type { ReadRunListSummary } from './run-list-cache.js'
 import { deriveInteractionModel, deriveInteractionOperationDetail } from './interaction-model-adapter.js'
 import { DEMO_SCENARIOS, deriveDemoFrameModel, deriveDemoFrameOperationDetail, findDemoScenario } from './demo-fixtures.js'
 import type { ReadRunSnapshot } from './snapshot-cache.js'
@@ -18,9 +18,6 @@ const MAX_LOG_LINES = 200
 const LOG_WINDOW_DEFAULT_LIMIT = 50
 const LOG_WINDOW_MAX_LIMIT = 500
 
-// The run list is polled every second alongside the selected run's endpoints; 64 cached summaries covers every history a browser realistically browses while bounding memory on a long-lived service.
-const RUN_LIST_CACHE_MAX_ENTRIES = 64
-
 export interface RequestHandlerConfig {
 	guildConfig: GuildConfig
 	deployment: DeploymentConfig
@@ -29,7 +26,7 @@ export interface RequestHandlerConfig {
 	runSubmission: RunSubmission
 	readRunSnapshot: ReadRunSnapshot
 	readRunMetaById: ReadRunMetaById
-	readRunSummaryById: ReadRunSummaryById
+	readRunListSummary: ReadRunListSummary
 	readRunSummaryStats: ReadRunSummaryStats
 	readRunPlanById: ReadRunPlanById
 	readRunSnapshotStats: ReadRunSnapshotStats
@@ -264,8 +261,7 @@ export function createRequestHandler(config: RequestHandlerConfig, serveStatic: 
 	const runSubmission = config.runSubmission
 	const readRunSnapshot = config.readRunSnapshot
 	const readRunMetaById = config.readRunMetaById
-	const readRunSummaryById = config.readRunSummaryById
-	const readRunListSummary = createRunListCache({ readRunSummaryStats: config.readRunSummaryStats, readRunMetaById, readRunSummaryById }, RUN_LIST_CACHE_MAX_ENTRIES)
+	const readRunListSummary = config.readRunListSummary
 	const readRunPlanById = config.readRunPlanById
 	const readRunSnapshotStats = config.readRunSnapshotStats
 	const listRunIds = config.listRunIds

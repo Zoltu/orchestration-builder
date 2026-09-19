@@ -4,7 +4,8 @@ import * as path from 'node:path'
 import { createWebServer } from './web/server.js'
 import { createBootstrapFailureHandler } from './web/bootstrap-failure.js'
 import { createSnapshotCache } from './web/snapshot-cache.js'
-import { createTaskSummarizer, type TaskSummarizer } from './web/summarize.js'
+import { createRunListCache } from './web/run-list-cache.js'
+import { createTaskSummarizer, type TaskSummarizer } from './summarize.js'
 import { applyDeploymentOverride, applyLogLevel, createAppendLog, createDeleteCheckpoint, createDockerSecretReader, createGuildLoader, createInterruptChannel, createInterruptQueue, createLlmCaller, createLlmFetch, createListRunIds, createModelInfoProbe, createPlanToolHandlers, createReadProjectSettings, createReadRunCheckpointById, createReadRunLogTextFrom, createReadRunMetaById, createReadRunPlanById, createReadRunSnapshotById, createReadRunSnapshotStats, createReadRunSummaryById, createReadRunSummaryStats, createRunDirectory, createRunDirectoryExists, createRunLogToolHandlers, createRunState, createRunSubmission, createSleep, createTimeoutScheduler, createToolHandlers, createWebHumanBackend, createWriteCheckpoint, createWriteMeta, createWriteProjectSettings, createWriteRunSummary, ensureOrchestrationGitExcluded, entryFrameLogLevel, generateRunId, MODEL_PROBE_TIMEOUT_MS, nodeGitExcludeFilesystem, parseModelInfo, reconcileRunsOnStartup, resolveDeploymentConfig, resolveDeploymentOverride, resolveKagiApiKey, resolveSecret, resumeExecutor, runExecutor, validateDeploymentFileConfig, validateDeploymentRoleReferences, ConfigurationError, ValidationError, type AppendLog, type ExecutorDependencies, type InterruptChannel, type LoadedGuild, type LlmCaller, type LogLevel, type ModelApiProbe, type ResumeRun, type RunCheckpoint, type StartRun, type WebHumanBackend } from './executor/index.js'
 
 const DEPLOYMENT_FILE_ENV_VAR = 'ORCHESTRATOR_DEPLOYMENT_FILE'
@@ -27,6 +28,8 @@ const MAX_PORT = 65535
 const INTERRUPT_EXIT_CODE = 130
 // The snapshot cache needs to hold only the run the operator is viewing (plus the one they may switch back to); the run list bypasses it entirely.
 const SNAPSHOT_CACHE_MAX_ENTRIES = 4
+// The run list is polled every second alongside the selected run's endpoints; 64 cached summaries covers every history a browser realistically browses while bounding memory on a long-lived service.
+const RUN_LIST_CACHE_MAX_ENTRIES = 64
 
 // Accepts only plain decimal digit strings so forms like `0x1a`, `1e3`, `8080.0`, or ` 8080 ` are rejected rather than silently coerced by Number().
 function parsePort(value: string | undefined, fallback: number): number {
@@ -81,7 +84,7 @@ async function withRunBindings<T>(config: {
 	config.interruptChannel.bindQueue(interruptQueue)
 	const dependencies: ExecutorDependencies = {
 		llmCaller: config.llmCaller,
-		getLoadedGuild: () => config.loadedGuild,
+		loadedGuild: config.loadedGuild,
 		appendLog: filteredAppendLog,
 		createRunDirectory: createRunDirectory(runId, config.runsBaseDir),
 		writeMeta: createWriteMeta(runId, config.runsBaseDir),
@@ -258,6 +261,7 @@ async function serve(): Promise<void> {
 	const readRunSnapshot = createSnapshotCache({ readStats: readRunSnapshotStats, readMetaText: readRunMetaById, readLogTextFrom: createReadRunLogTextFrom(runsBaseDir) }, SNAPSHOT_CACHE_MAX_ENTRIES)
 	const readRunSummaryStats = createReadRunSummaryStats(runsBaseDir)
 	const readRunSummaryById = createReadRunSummaryById(runsBaseDir)
+	const readRunListSummary = createRunListCache({ readRunSummaryStats, readRunMetaById, readRunSummaryById }, RUN_LIST_CACHE_MAX_ENTRIES)
 	const readRunPlanById = createReadRunPlanById(runsBaseDir)
 	const listRunIds = createListRunIds(runsBaseDir)
 	const readProjectSettings = createReadProjectSettings(workspaceRootPath)
@@ -310,7 +314,7 @@ async function serve(): Promise<void> {
 		runSubmission,
 		readRunSnapshot,
 		readRunMetaById,
-		readRunSummaryById,
+		readRunListSummary,
 		readRunSummaryStats,
 		readRunPlanById,
 		readRunSnapshotStats,

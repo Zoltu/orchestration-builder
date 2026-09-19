@@ -1,8 +1,8 @@
 import { describe, expect, test } from 'bun:test'
-import type { LlmCallResult, LlmRequest } from '../executor/llm.js'
-import type { RunMeta } from '../executor/types.js'
+import type { LlmCallResult, LlmRequest } from './executor/llm.js'
+import type { RunMeta } from './executor/types.js'
 import { createTaskSummarizer, type TaskSummarizerDependencies } from './summarize.js'
-import { defined, present } from './test-fixtures.js'
+import { defined, present } from './web/test-fixtures.js'
 
 function successResult(content: string | undefined): LlmCallResult {
 	return { kind: 'success', content, toolCalls: [], usage: { promptTokens: 10, completionTokens: 5 } }

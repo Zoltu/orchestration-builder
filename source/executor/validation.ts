@@ -164,7 +164,7 @@ export function isProjectSettings(value: unknown): value is ProjectSettings {
 export function isRunMeta(value: unknown): value is RunMeta {
 	if (!isObject(value)) return false
 	if (!isString(value.runId)) return false
-	if (!isString(value.guildPath)) return false
+	if (!isOptionalString(value.guildPath)) return false
 	if (!isOptionalString(value.benchmarkPath)) return false
 	if (!isString(value.task)) return false
 	if (value.effort !== undefined && !isEffortLevel(value.effort)) return false

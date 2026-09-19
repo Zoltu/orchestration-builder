@@ -7,6 +7,7 @@ import type { RunCheckpoint } from '../executor/checkpoint.ts'
 import type { ProjectSettings, ReadProjectSettings, WriteProjectSettings, RunSnapshotRaw, RunSnapshotStats, RunSummaryStats } from '../executor/persistence.ts'
 import type { DeploymentConfig, EffortLevel, GuildConfig, LogLevel, RunContinuation, RunMeta } from '../executor/types.js'
 import { parseRunSnapshot, type RunSnapshot } from './render.ts'
+import { createRunListCache } from './run-list-cache.ts'
 import { createRequestHandler, type RequestHandler } from './request-handler.ts'
 import { createServeStatic, resolveStaticAsset, type ServeAssetFile } from './server.ts'
 
@@ -158,6 +159,9 @@ function readRunSummaryStats(runId: string): RunSummaryStats {
 		summary: null,
 	}
 }
+
+// Composed over the fixture readers the same way serve.ts composes it over the real ones.
+const readRunListSummary = createRunListCache({ readRunSummaryStats, readRunMetaById, readRunSummaryById }, 64)
 
 function listRunIds(): string[] {
 	return Array.from(snapshots.keys())
@@ -374,7 +378,7 @@ function createHandlerHarness(options: { runIdCollides?: boolean } = {}): Handle
 			runSubmission: submission,
 			readRunSnapshot,
 			readRunMetaById,
-			readRunSummaryById,
+			readRunListSummary,
 			readRunSummaryStats,
 			readRunPlanById,
 			readRunSnapshotStats,
