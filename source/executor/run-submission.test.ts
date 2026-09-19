@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import type { RunCheckpoint } from './checkpoint.ts'
 import { DEFAULT_LOG_LEVEL } from './log-level.ts'
 import type { EffortLevel, LogLevel, RunContinuation, RunMeta } from './types.js'
-import type { ReadProjectSettings } from './persistence.ts'
+import type { ReadProjectSettings, RunDirectoryExists } from './persistence.ts'
 import { DEFAULT_EFFORT } from './effort.ts'
 import { createRunSubmission, type ResumeRun, type RunSubmission, type StartRun } from './run-submission.ts'
 import { defined } from './test-fixtures.ts'
@@ -21,6 +21,9 @@ function sampleMeta(runId: string): RunMeta {
 
 const emptySettings: ReadProjectSettings = () => ({})
 
+// Most tests exercise submit(); this stand-in satisfies the collision guard where no run directory is taken.
+const emptyRunsDir: RunDirectoryExists = () => false
+
 // Most tests exercise submit(); this stand-in satisfies the dependency where resume is not under test.
 const unusedResumeRun: ResumeRun = async () => sampleMeta('resumed')
 
@@ -34,7 +37,7 @@ describe('createRunSubmission', () => {
 			startedRunId = runId
 			return sampleMeta(runId)
 		}
-		const submission = createRunSubmission({ startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings })
+		const submission = createRunSubmission({ startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings, runDirectoryExists: emptyRunsDir })
 
 		const result = submission.submit('do it')
 		expect(result).toEqual({ ok: true, runId: 'run-1' })
@@ -51,7 +54,7 @@ describe('createRunSubmission', () => {
 		})
 		const ids = ['run-1', 'run-2']
 		let next = 0
-		const submission = createRunSubmission({ startRun, resumeRun: unusedResumeRun, generateRunId: () => defined(ids[next++], 'run id'), readProjectSettings: emptySettings })
+		const submission = createRunSubmission({ startRun, resumeRun: unusedResumeRun, generateRunId: () => defined(ids[next++], 'run id'), readProjectSettings: emptySettings, runDirectoryExists: emptyRunsDir })
 
 		const first = submission.submit('first')
 		expect(first).toEqual({ ok: true, runId: 'run-1' })
@@ -64,6 +67,32 @@ describe('createRunSubmission', () => {
 		await submission.awaitActive()
 	})
 
+	test('submit refuses a run id whose directory already exists instead of sharing it', async () => {
+		let started = 0
+		const startRun: StartRun = async (runId) => {
+			started++
+			return sampleMeta(runId)
+		}
+		// Run ids have one-second resolution, so a previous run that failed instantly can still own the directory the fresh id maps to.
+		const submission = createRunSubmission({ startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', runDirectoryExists: () => true, readProjectSettings: emptySettings })
+
+		expect(submission.submit('do it')).toEqual({ ok: false, error: 'run_id_collision' })
+		expect(started).toBe(0)
+		expect(submission.activeRunId()).toBeUndefined()
+	})
+
+	test('a collision refusal does not consume the run, so the same id is started once its directory is free', async () => {
+		let directoryTaken = true
+		const startRun: StartRun = async (runId) => sampleMeta(runId)
+		const submission = createRunSubmission({ startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', runDirectoryExists: () => directoryTaken, readProjectSettings: emptySettings })
+
+		expect(submission.submit('do it')).toEqual({ ok: false, error: 'run_id_collision' })
+
+		directoryTaken = false
+		expect(submission.submit('do it')).toEqual({ ok: true, runId: 'run-1' })
+		await submission.awaitActive()
+	})
+
 	test('activeRunId clears when the run completes, allowing a new submit', async () => {
 		let resolveRun: (meta: RunMeta) => void = () => {}
 		const startRun: StartRun = () => new Promise<RunMeta>((resolve) => {
@@ -71,7 +100,7 @@ describe('createRunSubmission', () => {
 		})
 		const ids = ['run-1', 'run-2']
 		let next = 0
-		const submission = createRunSubmission({ startRun, resumeRun: unusedResumeRun, generateRunId: () => defined(ids[next++], 'run id'), readProjectSettings: emptySettings })
+		const submission = createRunSubmission({ startRun, resumeRun: unusedResumeRun, generateRunId: () => defined(ids[next++], 'run id'), readProjectSettings: emptySettings, runDirectoryExists: emptyRunsDir })
 
 		submission.submit('first')
 		expect(submission.activeRunId()).toBe('run-1')
@@ -93,7 +122,7 @@ describe('createRunSubmission', () => {
 		})
 		const ids = ['run-1', 'run-2']
 		let next = 0
-		const submission = createRunSubmission({ startRun, resumeRun: unusedResumeRun, generateRunId: () => defined(ids[next++], 'run id'), readProjectSettings: emptySettings })
+		const submission = createRunSubmission({ startRun, resumeRun: unusedResumeRun, generateRunId: () => defined(ids[next++], 'run id'), readProjectSettings: emptySettings, runDirectoryExists: emptyRunsDir })
 
 		submission.submit('first')
 		resolveRun(sampleMeta('run-1'))
@@ -111,7 +140,7 @@ describe('createRunSubmission', () => {
 	test('awaitActive resolves with the run meta for the active run', async () => {
 		const meta = sampleMeta('run-1')
 		const startRun: StartRun = async () => meta
-		const submission = createRunSubmission({ startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings })
+		const submission = createRunSubmission({ startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings, runDirectoryExists: emptyRunsDir })
 
 		submission.submit('do it')
 		expect(await submission.awaitActive()).toEqual(meta)
@@ -119,7 +148,7 @@ describe('createRunSubmission', () => {
 
 	test('awaitActive resolves with undefined when no run has been started', async () => {
 		const startRun: StartRun = async () => sampleMeta('run-1')
-		const submission = createRunSubmission({ startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings })
+		const submission = createRunSubmission({ startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings, runDirectoryExists: emptyRunsDir })
 
 		expect(await submission.awaitActive()).toBeUndefined()
 	})
@@ -127,7 +156,7 @@ describe('createRunSubmission', () => {
 	test('awaitActive still returns the completed run meta after it has already been awaited', async () => {
 		const meta = sampleMeta('run-1')
 		const startRun: StartRun = async () => meta
-		const submission = createRunSubmission({ startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings })
+		const submission = createRunSubmission({ startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings, runDirectoryExists: emptyRunsDir })
 
 		submission.submit('do it')
 		const first = await submission.awaitActive()
@@ -154,7 +183,7 @@ describe('createRunSubmission', () => {
 
 	test('a fatal startRun rejection clears the active slot and resolves awaitFatalError', async () => {
 		const startRun: StartRun = () => Promise.reject(new Error('disk full'))
-		const submission = createRunSubmission({ startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings })
+		const submission = createRunSubmission({ startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings, runDirectoryExists: emptyRunsDir })
 
 		submission.submit('do it')
 
@@ -168,7 +197,7 @@ describe('createRunSubmission', () => {
 
 	test('a non-Error rejection is normalized to an Error in awaitFatalError', async () => {
 		const startRun: StartRun = () => Promise.reject('bare string rejection')
-		const submission = createRunSubmission({ startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings })
+		const submission = createRunSubmission({ startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings, runDirectoryExists: emptyRunsDir })
 
 		submission.submit('do it')
 
@@ -181,7 +210,7 @@ describe('createRunSubmission', () => {
 
 	test('a successful run never resolves awaitFatalError', async () => {
 		const startRun: StartRun = async () => sampleMeta('run-1')
-		const submission = createRunSubmission({ startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings })
+		const submission = createRunSubmission({ startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings, runDirectoryExists: emptyRunsDir })
 
 		submission.submit('do it')
 		await submission.awaitActive()
@@ -225,7 +254,7 @@ describe('createRunSubmission resume', () => {
 	test('resume takes the active slot under the checkpoint run id and resolves awaitActive with the meta', async () => {
 		const checkpoint = sampleCheckpoint('run-9')
 		const resumeRun: ResumeRun = async () => sampleMeta('run-9')
-		const submission = createRunSubmission({ startRun: unusedStartRun, resumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings })
+		const submission = createRunSubmission({ startRun: unusedStartRun, resumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings, runDirectoryExists: emptyRunsDir })
 
 		submission.resume(checkpoint)
 
@@ -240,7 +269,7 @@ describe('createRunSubmission resume', () => {
 		const resumeRun: ResumeRun = () => new Promise<RunMeta>((resolve) => {
 			resolveResume = resolve
 		})
-		const submission = createRunSubmission({ startRun: unusedStartRun, resumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings })
+		const submission = createRunSubmission({ startRun: unusedStartRun, resumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings, runDirectoryExists: emptyRunsDir })
 
 		submission.resume(sampleCheckpoint('run-9'))
 
@@ -255,7 +284,7 @@ describe('createRunSubmission resume', () => {
 		const startRun: StartRun = () => new Promise<RunMeta>((resolve) => {
 			resolveRun = resolve
 		})
-		const submission = createRunSubmission({ startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings })
+		const submission = createRunSubmission({ startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings, runDirectoryExists: emptyRunsDir })
 
 		submission.submit('do it')
 
@@ -266,7 +295,7 @@ describe('createRunSubmission resume', () => {
 
 	test('a resumeRun rejection clears the active slot and resolves awaitFatalError', async () => {
 		const resumeRun: ResumeRun = () => Promise.reject(new Error('checkpoint unreadable'))
-		const submission = createRunSubmission({ startRun: unusedStartRun, resumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings })
+		const submission = createRunSubmission({ startRun: unusedStartRun, resumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings, runDirectoryExists: emptyRunsDir })
 
 		submission.resume(sampleCheckpoint('run-9'))
 
@@ -290,7 +319,7 @@ describe('createRunSubmission effort resolution', () => {
 
 	test('a per-run override is threaded into startRun', async () => {
 		const { startRun, captured } = captureEffort()
-		const submission = createRunSubmission({ startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings })
+		const submission = createRunSubmission({ startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings, runDirectoryExists: emptyRunsDir })
 
 		submission.submit('do it', 'thorough')
 		await submission.awaitActive()
@@ -300,7 +329,7 @@ describe('createRunSubmission effort resolution', () => {
 	test('the project default is applied when no override is given', async () => {
 		const { startRun, captured } = captureEffort()
 		const projectSettings: ReadProjectSettings = () => ({ effort: 'thorough' })
-		const submission = createRunSubmission({ startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: projectSettings })
+		const submission = createRunSubmission({ startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: projectSettings, runDirectoryExists: emptyRunsDir })
 
 		submission.submit('do it')
 		await submission.awaitActive()
@@ -310,7 +339,7 @@ describe('createRunSubmission effort resolution', () => {
 	test('a per-run override wins over the project default', async () => {
 		const { startRun, captured } = captureEffort()
 		const projectSettings: ReadProjectSettings = () => ({ effort: 'thorough' })
-		const submission = createRunSubmission({ startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: projectSettings })
+		const submission = createRunSubmission({ startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: projectSettings, runDirectoryExists: emptyRunsDir })
 
 		submission.submit('do it', 'quick')
 		await submission.awaitActive()
@@ -319,7 +348,7 @@ describe('createRunSubmission effort resolution', () => {
 
 	test('DEFAULT_EFFORT applies when neither override nor project setting fixes the effort', async () => {
 		const { startRun, captured } = captureEffort()
-		const submission = createRunSubmission({ startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings })
+		const submission = createRunSubmission({ startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings, runDirectoryExists: emptyRunsDir })
 
 		submission.submit('do it')
 		await submission.awaitActive()
@@ -339,7 +368,7 @@ describe('createRunSubmission continuation passthrough', () => {
 
 	test('submit threads the continuation through to startRun', async () => {
 		const { startRun, captured } = captureContinuation()
-		const submission = createRunSubmission({ startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings })
+		const submission = createRunSubmission({ startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings, runDirectoryExists: emptyRunsDir })
 		const continuation = { runId: 'run-20260101-000000', task: 'prior task', summary: 'prior summary' }
 
 		submission.submit('do it', undefined, undefined, continuation)
@@ -349,7 +378,7 @@ describe('createRunSubmission continuation passthrough', () => {
 
 	test('submit threads no continuation when none is given', async () => {
 		const { startRun, captured } = captureContinuation()
-		const submission = createRunSubmission({ startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings })
+		const submission = createRunSubmission({ startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings, runDirectoryExists: emptyRunsDir })
 
 		submission.submit('do it')
 		await submission.awaitActive()
@@ -369,7 +398,7 @@ describe('createRunSubmission log level resolution', () => {
 
 	test('a per-run override is threaded into startRun', async () => {
 		const { startRun, captured } = captureLogLevel()
-		const submission = createRunSubmission({ startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings })
+		const submission = createRunSubmission({ startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings, runDirectoryExists: emptyRunsDir })
 
 		submission.submit('do it', undefined, 'standard')
 		await submission.awaitActive()
@@ -379,7 +408,7 @@ describe('createRunSubmission log level resolution', () => {
 	test('the project default is applied when no override is given', async () => {
 		const { startRun, captured } = captureLogLevel()
 		const projectSettings: ReadProjectSettings = () => ({ logLevel: 'standard' })
-		const submission = createRunSubmission({ startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: projectSettings })
+		const submission = createRunSubmission({ startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: projectSettings, runDirectoryExists: emptyRunsDir })
 
 		submission.submit('do it')
 		await submission.awaitActive()
@@ -389,7 +418,7 @@ describe('createRunSubmission log level resolution', () => {
 	test('a per-run override wins over the project default', async () => {
 		const { startRun, captured } = captureLogLevel()
 		const projectSettings: ReadProjectSettings = () => ({ logLevel: 'standard' })
-		const submission = createRunSubmission({ startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: projectSettings })
+		const submission = createRunSubmission({ startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: projectSettings, runDirectoryExists: emptyRunsDir })
 
 		submission.submit('do it', undefined, 'full')
 		await submission.awaitActive()
@@ -398,7 +427,7 @@ describe('createRunSubmission log level resolution', () => {
 
 	test('the deployment default applies when neither override nor project setting fixes the level', async () => {
 		const { startRun, captured } = captureLogLevel()
-		const submission = createRunSubmission({ startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings, deploymentLogLevel: 'standard' })
+		const submission = createRunSubmission({ startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings, runDirectoryExists: emptyRunsDir, deploymentLogLevel: 'standard' })
 
 		submission.submit('do it')
 		await submission.awaitActive()
@@ -408,7 +437,7 @@ describe('createRunSubmission log level resolution', () => {
 	test('the project setting wins over the deployment default', async () => {
 		const { startRun, captured } = captureLogLevel()
 		const projectSettings: ReadProjectSettings = () => ({ logLevel: 'full' })
-		const submission = createRunSubmission({ startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: projectSettings, deploymentLogLevel: 'standard' })
+		const submission = createRunSubmission({ startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: projectSettings, runDirectoryExists: emptyRunsDir, deploymentLogLevel: 'standard' })
 
 		submission.submit('do it')
 		await submission.awaitActive()
@@ -417,7 +446,7 @@ describe('createRunSubmission log level resolution', () => {
 
 	test('a per-run override wins over the deployment default', async () => {
 		const { startRun, captured } = captureLogLevel()
-		const submission = createRunSubmission({ startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings, deploymentLogLevel: 'standard' })
+		const submission = createRunSubmission({ startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings, runDirectoryExists: emptyRunsDir, deploymentLogLevel: 'standard' })
 
 		submission.submit('do it', undefined, 'full')
 		await submission.awaitActive()
@@ -426,7 +455,7 @@ describe('createRunSubmission log level resolution', () => {
 
 	test('DEFAULT_LOG_LEVEL applies when nothing in the chain fixes the level', async () => {
 		const { startRun, captured } = captureLogLevel()
-		const submission = createRunSubmission({ startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings })
+		const submission = createRunSubmission({ startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings, runDirectoryExists: emptyRunsDir })
 
 		submission.submit('do it')
 		await submission.awaitActive()

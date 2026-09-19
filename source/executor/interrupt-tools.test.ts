@@ -47,6 +47,8 @@ function makeContext(): { context: BuiltInToolContext; registry: RoleRegistry; t
 		contextWindow: 1000,
 		roleRegistry: registry,
 		ownRoleId: 'context_manager-2-2',
+		// The caller stands in for a loop-check handler serving the coder instance: trigger_interrupt must accept that instance and no other.
+		handlerOf: 'coder-1-1',
 	}
 	return { context, registry, target, callerState }
 }
@@ -109,6 +111,28 @@ describe('trigger_interrupt', () => {
 		expect((await handlerFor(handlers, 'trigger_interrupt')({ targetRole: 'nope-9-9', action: 'continue', reason: '' })).kind).toBe('invalid_arguments')
 		expect((await handlerFor(handlers, 'trigger_interrupt')({ targetRole: 'coder-1-1', action: 'explode', reason: '' })).kind).toBe('invalid_arguments')
 		expect((await handlerFor(handlers, 'trigger_interrupt')({ targetRole: 'coder-1-1', action: 'abort', reason: 42 })).kind).toBe('invalid_arguments')
+		expect(registry.lookup('coder-1-1')?.interruptAction).toBeUndefined()
+	})
+
+	test('rejects a live instance other than the flagged one and leaves the registry unchanged', async () => {
+		const { context, registry, target } = makeContext()
+		const other = fixtureRoleState()
+		registry.register('coder', 1, undefined, other)
+		const handlers = createBuiltInToolHandlers(context)
+		expect((await handlerFor(handlers, 'trigger_interrupt')({ targetRole: 'context_manager-2-2', action: 'abort', reason: 'stuck' })).kind).toBe('invalid_arguments')
+		expect((await handlerFor(handlers, 'trigger_interrupt')({ targetRole: 'coder-1-2', action: 'redirect', reason: 'stop' })).kind).toBe('invalid_arguments')
+		expect(registry.lookup('coder-1-1')?.interruptAction).toBeUndefined()
+		expect(registry.lookup('coder-1-2')?.interruptAction).toBeUndefined()
+		expect(registry.lookup('context_manager-2-2')?.interruptAction).toBeUndefined()
+		expect(target.history.length).toBe(4)
+		expect(other.history.length).toBe(4)
+	})
+
+	test('rejects every target when the invocation flags no instance', async () => {
+		const { context, registry } = makeContext()
+		const handlers = createBuiltInToolHandlers({ ...context, handlerOf: undefined })
+		const result = await handlerFor(handlers, 'trigger_interrupt')({ targetRole: 'coder-1-1', action: 'abort', reason: 'stuck' })
+		expect(result.kind).toBe('invalid_arguments')
 		expect(registry.lookup('coder-1-1')?.interruptAction).toBeUndefined()
 	})
 })

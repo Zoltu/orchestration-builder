@@ -768,7 +768,7 @@ describe('runRole — acceptance criteria', () => {
 				{ type: 'message', content: [{ type: 'output_text', text: 'done' }] },
 			])),
 		]
-		const caller = createLlmCaller(baseModel, undefined, { llmFetch: wire.llmFetch, sleep: () => Promise.resolve() })
+		const caller = createLlmCaller(baseModel, undefined, { llmFetch: wire.llmFetch, sleep: () => Promise.resolve(), scheduleTimeout: () => () => undefined })
 		const { deps } = makeDeps(caller)
 		const depsWithEcho: EngineDependencies = { ...deps, additionalToolHandlers: { echo: echoHandler } }
 
@@ -817,7 +817,7 @@ describe('runRole — acceptance criteria', () => {
 				{ type: 'message', content: [{ type: 'output_text', text: 'done' }] },
 			])),
 		]
-		const caller = createLlmCaller(baseModel, undefined, { llmFetch: wire.llmFetch, sleep: () => Promise.resolve() })
+		const caller = createLlmCaller(baseModel, undefined, { llmFetch: wire.llmFetch, sleep: () => Promise.resolve(), scheduleTimeout: () => () => undefined })
 		const { deps } = makeDeps(caller)
 		const depsWithEcho: EngineDependencies = { ...deps, additionalToolHandlers: { echo: echoHandler } }
 
@@ -914,9 +914,37 @@ describe('runRole — acceptance criteria', () => {
 		const secondCallMessages = llm.calls[1]?.messages ?? []
 		const toolMessage = secondCallMessages.find((m) => m.role === 'tool')
 		const content = toolMessage?.content ?? ''
-		expect(content.includes('[truncated:')).toBe(true)
-		expect(content.startsWith('{')).toBe(true)
-		expect(content.startsWith('"')).toBe(false)
+	expect(content.includes('[truncated:')).toBe(true)
+	expect(content.startsWith('{')).toBe(true)
+	expect(content.startsWith('"')).toBe(false)
+})
+
+	test('an additionalToolHandlers entry under a built-in name does not shadow the built-in', async () => {
+		const guild = buildGuild(
+			{ main: { systemPrompt: 'p', tools: ['finish'] } },
+			'main',
+		)
+		const llm = new FakeLlm()
+		llm.responses = [success([finishCall({ status: 'success', summary: 'built-in finish won' })])]
+		const { deps, events } = makeDeps(llm)
+		// The built-ins spread last over additionalToolHandlers, so this handler must never run: had it won, its non-ResultCard payload would not have finalized the role and FakeLlm would run out of responses.
+		const shadowingHandler: ToolHandler = () => ({ kind: 'success', data: { shadowed: true } })
+		const depsWithShadow: EngineDependencies = { ...deps, additionalToolHandlers: { finish: shadowingHandler } }
+
+		const result = await runRole(depsWithShadow, {
+			loadedGuild: guild,
+			depth: 0,
+			roleName: 'main',
+			task: 'do it',
+		})
+
+		expect(result).toEqual({ status: 'success', summary: 'built-in finish won' })
+		expect(llm.calls.length).toBe(1)
+		// The recorded tool result is the built-in's validated ResultCard, not the shadow payload.
+		const toolResult = events.find((e) => e.type === 'tool_result' && payloadField(e, 'tool') === 'finish')
+		expect(toolResult).toBeDefined()
+		const toolResultEvent = defined(toolResult, 'finish tool_result event')
+		expect(payloadField(toolResultEvent, 'result')).toEqual({ kind: 'success', data: { status: 'success', summary: 'built-in finish won' } })
 	})
 })
 
@@ -1752,17 +1780,13 @@ describe('runRole — observe emission', () => {
 			success([finishCall({ status: 'success', summary: 'parent done' })]),
 		]
 		const { deps, events } = makeDeps(llm)
-		// The real built-in rejects an unknown instance; this override answers success for a stale id so the engine's registration gate is what stays silent.
-		const ghostListing: EngineDependencies = {
-			...deps,
-			additionalToolHandlers: { list_role_messages: () => ({ kind: 'success', data: { targetRole: 'ghost-0-9', messages: [] } }) },
-		}
 
-		await runRole(ghostListing, { loadedGuild: guild, depth: 0, roleName: 'parent', task: 'delegate' })
+		await runRole(deps, { loadedGuild: guild, depth: 0, roleName: 'parent', task: 'delegate' })
 
 		expect(events.some((e) => e.type === 'observe')).toBe(false)
+		// The real built-in rejects an unregistered instance, so the stale-target skip rides the failure path: no observe, and the tool_result carries the rejection.
 		const toolResult = events.find((e) => e.type === 'tool_result' && payloadField(e, 'tool') === 'list_role_messages')
-		expect(payloadField(defined(toolResult, 'ghost listing tool_result event'), 'kind')).toBe('success')
+		expect(payloadField(defined(toolResult, 'ghost listing tool_result event'), 'kind')).toBe('invalid_arguments')
 	})
 })
 

@@ -337,8 +337,8 @@ interface HandlerHarness {
 	resumedCheckpoints: () => RunCheckpoint[]
 }
 
-// Builds a fresh handler whose startRun and resumeRun park on caller-controlled resolvers, so each test drives its own run lifecycle without touching shared state. The static leaf is a recording fake; every dependency is in-memory.
-function createHandlerHarness(): HandlerHarness {
+// Builds a fresh handler whose startRun and resumeRun park on caller-controlled resolvers, so each test drives its own run lifecycle without touching shared state. The static leaf is a recording fake; every dependency is in-memory. runIdCollides makes runDirectoryExists report an existing directory for the generated id, exercising the submit-level run_id_collision refusal.
+function createHandlerHarness(options: { runIdCollides?: boolean } = {}): HandlerHarness {
 	let resolveActive: (meta: RunMeta) => void = () => {}
 	let resolveResumed: (meta: RunMeta) => void = () => {}
 	let capturedEffort: EffortLevel | undefined
@@ -361,7 +361,7 @@ function createHandlerHarness(): HandlerHarness {
 	}
 	let nextId = 0
 	const settings = createInMemorySettings()
-	const submission = createRunSubmission({ startRun, resumeRun, generateRunId: () => `test-run-${nextId++}`, readProjectSettings: settings.read })
+	const submission = createRunSubmission({ startRun, resumeRun, generateRunId: () => `test-run-${nextId++}`, runDirectoryExists: () => options.runIdCollides ?? false, readProjectSettings: settings.read })
 	const interruptChannel = createInterruptChannel()
 	const humanBackend = createWebHumanBackend()
 	const staticCalls: string[] = []
@@ -798,6 +798,13 @@ describe('GET /api/runs/:id', () => {
 		expect(await response.json()).toEqual({ ok: false, error: 'not_found' })
 	})
 
+	test('a malformed percent-encoding in the run id path is a 404, not a crash', async () => {
+		const { handler } = createHandlerHarness()
+		const response = await handler(get('/api/runs/%'))
+		expect(response.status).toBe(404)
+		expect(await response.json()).toEqual({ ok: false, error: 'not_found' })
+	})
+
 	test('returns questionHistory pairing ask_human with human_answer events', async () => {
 		const { handler } = createHandlerHarness()
 		const response = await handler(get('/api/runs/run-3'))
@@ -1005,6 +1012,13 @@ describe('GET /api/runs/:id/log', () => {
 	test('returns 404 for an unknown run id', async () => {
 		const { handler } = createHandlerHarness()
 		const response = await handler(get('/api/runs/never-started/log'))
+		expect(response.status).toBe(404)
+		expect(await response.json()).toEqual({ ok: false, error: 'not_found' })
+	})
+
+	test('a malformed percent-encoding in the path is a 404, not a crash', async () => {
+		const { handler } = createHandlerHarness()
+		const response = await handler(get('/api/runs/%/log'))
 		expect(response.status).toBe(404)
 		expect(await response.json()).toEqual({ ok: false, error: 'not_found' })
 	})
@@ -1222,6 +1236,13 @@ describe('GET /api/demo/flow/:scenario/:frame', () => {
 		expect(response.status).toBe(404)
 	})
 
+	test('a malformed percent-encoding in the path is a 404, not a crash', async () => {
+		const { handler } = createHandlerHarness()
+		const response = await handler(get('/api/demo/flow/%/0'))
+		expect(response.status).toBe(404)
+		expect(await response.json()).toEqual({ ok: false, error: 'not_found' })
+	})
+
 	test('?operation=<id> resolves one frame operation\'s details (the delegation task text)', async () => {
 		const { handler } = createHandlerHarness()
 		// delegation-chain frame 2: the planner role_start just landed, so op-2 is its call.
@@ -1263,6 +1284,15 @@ describe('POST /api/runs', () => {
 
 		resolveActive()(terminalMeta('test-run-0', 'first'))
 		await submission.awaitActive()
+	})
+
+	test('rejects a submit whose generated id collides with an existing run directory with 409 run_id_collision', async () => {
+		const { handler, submission } = createHandlerHarness({ runIdCollides: true })
+		const response = await handler(post('/api/runs', JSON.stringify({ task: 'a colliding task' })))
+		expect(response.status).toBe(409)
+		expect(await response.json()).toEqual({ ok: false, error: 'run_id_collision' })
+		// The collision refuses the submission outright: no run was started or tracked.
+		expect(submission.activeRunId()).toBeUndefined()
 	})
 
 	test('rejects a submit while a resumed run is still active, then accepts after it settles', async () => {
@@ -1515,19 +1545,35 @@ describe('POST /api/runs/:id/interrupt', () => {
 		expect(emptyMessage.status).toBe(400)
 	})
 
-	test('GET /api/runs/:id exposes whether an interrupt is pending', async () => {
-		const { handler, interruptChannel } = createHandlerHarness()
-		const knownRunId = 'run-a'
+	test('GET /api/runs/:id exposes whether an interrupt is pending for the active run only', async () => {
+		const { handler, submission, interruptChannel, resolveActive } = createHandlerHarness()
 		interruptChannel.bindQueue(createInterruptQueue())
+		const submitted = submission.submit('a task')
+		if (!submitted.ok) throw new Error('submit failed')
 
-		const before = await handler(get(`/api/runs/${knownRunId}`))
+		const before = await handler(get(`/api/runs/${submitted.runId}`))
 		expect(before.status).toBe(200)
 		expect((await before.json()).interruptPending).toBe(false)
 
 		interruptChannel.submit({ kind: 'inquiry', message: 'ping' })
-		const after = await handler(get(`/api/runs/${knownRunId}`))
+		const after = await handler(get(`/api/runs/${submitted.runId}`))
 		expect(after.status).toBe(200)
 		expect((await after.json()).interruptPending).toBe(true)
+
+		// The pending interrupt belongs to the active run: a terminal run viewed while it is still queued must report false, not inherit the channel's state.
+		const terminal = await handler(get('/api/runs/run-1'))
+		expect(terminal.status).toBe(200)
+		expect((await terminal.json()).interruptPending).toBe(false)
+
+		resolveActive()(terminalMeta('test-run-0', 'a task'))
+		await submission.awaitActive()
+	})
+
+	test('a malformed percent-encoding in the path is a 404, not a crash', async () => {
+		const { handler } = createHandlerHarness()
+		const response = await handler(post('/api/runs/%/interrupt', JSON.stringify({ kind: 'inquiry', message: 'hello?' })))
+		expect(response.status).toBe(404)
+		expect(await response.json()).toEqual({ ok: false, error: 'not_found' })
 	})
 })
 

@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { createLlmCaller, detectContextBudgetExceeded, type LlmFetch, type LlmFetchRequest, type LlmStreamResponse, type Sleep } from './llm.ts'
+import { createLlmCaller, detectContextBudgetExceeded, type LlmFetch, type LlmFetchRequest, type LlmStreamResponse, type ScheduleTimeout, type Sleep } from './llm.ts'
 import { SSE_MAX_LINE_CHARS } from './llm-sse.ts'
 import type { ResolvedModelConfig } from './types.js'
 
@@ -13,10 +13,11 @@ const MODEL: ResolvedModelConfig = {
 // The credential is a runtime argument, never a field on the model config; tests that exercise the auth header pass it explicitly.
 const API_KEY = 'secret-key'
 
-// A fake wire leaf plus a fake sleep: SSE streams (or an error-body response, or a queued throw for a network failure) are handed back per request, every request is recorded, and backoff durations are collected instead of slept.
+// A fake wire leaf plus a fake sleep and a fake timeout scheduler: SSE streams (or an error-body response, or a queued throw for a network failure) are handed back per request, every request is recorded, backoff durations are collected instead of slept, and each armed timeout fires on the next macrotask regardless of the configured bound — armed-then-cancelled timers are always cancelled within the preceding microtask drain, so only a genuinely stalled phase ever fires one, and timersFired exposes that to assertions.
 function createFakeWire(responses: Array<LlmStreamResponse | Error>) {
 	const requests: LlmFetchRequest[] = []
 	const sleeps: number[] = []
+	let timersFired = 0
 	const queue = [...responses]
 	const llmFetch: LlmFetch = (request) => {
 		requests.push(request)
@@ -29,7 +30,14 @@ function createFakeWire(responses: Array<LlmStreamResponse | Error>) {
 		sleeps.push(ms)
 		return Promise.resolve()
 	}
-	return { requests, sleeps, llmFetch, sleep }
+	const scheduleTimeout: ScheduleTimeout = (callback) => {
+		const id = setTimeout(() => {
+			timersFired++
+			callback()
+		}, 0)
+		return () => clearTimeout(id)
+	}
+	return { requests, sleeps, timersFired: () => timersFired, llmFetch, sleep, scheduleTimeout }
 }
 
 // A fake 2xx SSE body: the chunks are queued whole, so each reader read() observes exactly one crafted chunk boundary. The optional hook records a caller-initiated cancellation (a clean stop before the stream's natural end).
@@ -94,7 +102,7 @@ function happyPathChunks(): Uint8Array[] {
 describe('createLlmCaller request shaping', () => {
 	test('posts the model, mapped input, instructions, flat tools, and sampling parameters with the auth header', async () => {
 		const wire = createFakeWire([streamResponse(happyPathChunks())])
-		const caller = createLlmCaller(MODEL, API_KEY, { llmFetch: wire.llmFetch, sleep: wire.sleep })
+		const caller = createLlmCaller(MODEL, API_KEY, { llmFetch: wire.llmFetch, sleep: wire.sleep, scheduleTimeout: wire.scheduleTimeout })
 		await caller.call({
 			messages: [
 				{ role: 'system', content: 'You are a file agent.' },
@@ -121,18 +129,18 @@ describe('createLlmCaller request shaping', () => {
 
 	test('omits the auth header when the api key is absent or empty', async () => {
 		const wire = createFakeWire([streamResponse(happyPathChunks())])
-		const caller = createLlmCaller(MODEL, undefined, { llmFetch: wire.llmFetch, sleep: wire.sleep })
+		const caller = createLlmCaller(MODEL, undefined, { llmFetch: wire.llmFetch, sleep: wire.sleep, scheduleTimeout: wire.scheduleTimeout })
 		await caller.call({ messages: [{ role: 'user', content: 'hi' }] })
 		expect(wire.requests[0]?.headers['Authorization']).toBeUndefined()
 		const emptyWire = createFakeWire([streamResponse(happyPathChunks())])
-		const emptyCaller = createLlmCaller(MODEL, '', { llmFetch: emptyWire.llmFetch, sleep: emptyWire.sleep })
+		const emptyCaller = createLlmCaller(MODEL, '', { llmFetch: emptyWire.llmFetch, sleep: emptyWire.sleep, scheduleTimeout: emptyWire.scheduleTimeout })
 		await emptyCaller.call({ messages: [{ role: 'user', content: 'hi' }] })
 		expect(emptyWire.requests[0]?.headers['Authorization']).toBeUndefined()
 	})
 
 	test('omits instructions and the optional sampling fields when unset, sending an empty tool list', async () => {
 		const wire = createFakeWire([streamResponse(happyPathChunks())])
-		const caller = createLlmCaller({ ...MODEL, generation: {} }, undefined, { llmFetch: wire.llmFetch, sleep: wire.sleep })
+		const caller = createLlmCaller({ ...MODEL, generation: {} }, undefined, { llmFetch: wire.llmFetch, sleep: wire.sleep, scheduleTimeout: wire.scheduleTimeout })
 		await caller.call({ messages: [{ role: 'user', content: 'hi' }] })
 		const body = JSON.parse(wire.requests[0]?.body ?? '{}')
 		expect(body.instructions).toBeUndefined()
@@ -145,7 +153,7 @@ describe('createLlmCaller request shaping', () => {
 describe('createLlmCaller pre-stream retry classification', () => {
 	test('network failures are retried with exponential backoff and reported after the final attempt', async () => {
 		const wire = createFakeWire([new Error('connection refused'), new Error('connection refused'), new Error('connection refused')])
-		const caller = createLlmCaller(MODEL, API_KEY, { llmFetch: wire.llmFetch, sleep: wire.sleep })
+		const caller = createLlmCaller(MODEL, API_KEY, { llmFetch: wire.llmFetch, sleep: wire.sleep, scheduleTimeout: wire.scheduleTimeout })
 		const result = await caller.call({ messages: [] })
 		expect(result).toEqual({ kind: 'llm_unavailable', message: 'Network error after 3 attempts: connection refused' })
 		expect(wire.requests).toHaveLength(3)
@@ -154,7 +162,7 @@ describe('createLlmCaller pre-stream retry classification', () => {
 
 	test('a 5xx is retried with exponential backoff and eventually succeeds', async () => {
 		const wire = createFakeWire([errorResponse(500, 'boom'), errorResponse(502, 'boom again'), streamResponse(happyPathChunks())])
-		const caller = createLlmCaller(MODEL, API_KEY, { llmFetch: wire.llmFetch, sleep: wire.sleep })
+		const caller = createLlmCaller(MODEL, API_KEY, { llmFetch: wire.llmFetch, sleep: wire.sleep, scheduleTimeout: wire.scheduleTimeout })
 		const result = await caller.call({ messages: [] })
 		expect(result.kind).toBe('success')
 		expect(wire.requests).toHaveLength(3)
@@ -163,7 +171,7 @@ describe('createLlmCaller pre-stream retry classification', () => {
 
 	test('persistent 5xx fails after three attempts with the last error body', async () => {
 		const wire = createFakeWire([errorResponse(500, 'one'), errorResponse(500, 'two'), errorResponse(500, 'three')])
-		const caller = createLlmCaller(MODEL, API_KEY, { llmFetch: wire.llmFetch, sleep: wire.sleep })
+		const caller = createLlmCaller(MODEL, API_KEY, { llmFetch: wire.llmFetch, sleep: wire.sleep, scheduleTimeout: wire.scheduleTimeout })
 		const result = await caller.call({ messages: [] })
 		expect(result).toEqual({ kind: 'llm_unavailable', message: 'HTTP 500: three' })
 		expect(wire.requests).toHaveLength(3)
@@ -171,7 +179,7 @@ describe('createLlmCaller pre-stream retry classification', () => {
 
 	test('a 429 without context keywords is retried like a 5xx', async () => {
 		const wire = createFakeWire([errorResponse(429, 'rate limited'), streamResponse(happyPathChunks())])
-		const caller = createLlmCaller(MODEL, API_KEY, { llmFetch: wire.llmFetch, sleep: wire.sleep })
+		const caller = createLlmCaller(MODEL, API_KEY, { llmFetch: wire.llmFetch, sleep: wire.sleep, scheduleTimeout: wire.scheduleTimeout })
 		const result = await caller.call({ messages: [] })
 		expect(result.kind).toBe('success')
 		expect(wire.sleeps).toEqual([200])
@@ -179,7 +187,7 @@ describe('createLlmCaller pre-stream retry classification', () => {
 
 	test('other 4xx statuses fail immediately with the error body and no retry', async () => {
 		const wire = createFakeWire([errorResponse(400, 'bad request: invalid tool schema')])
-		const caller = createLlmCaller(MODEL, API_KEY, { llmFetch: wire.llmFetch, sleep: wire.sleep })
+		const caller = createLlmCaller(MODEL, API_KEY, { llmFetch: wire.llmFetch, sleep: wire.sleep, scheduleTimeout: wire.scheduleTimeout })
 		const result = await caller.call({ messages: [] })
 		expect(result).toEqual({ kind: 'llm_unavailable', message: 'HTTP 400: bad request: invalid tool schema' })
 		expect(wire.requests).toHaveLength(1)
@@ -189,7 +197,7 @@ describe('createLlmCaller pre-stream retry classification', () => {
 	test('a 400 whose plain body reports the context overflow is context_budget_exceeded with the endpoint prompt tokens', async () => {
 		const body = JSON.stringify({ error: { message: 'This model maximum context length was exceeded', prompt_tokens: 4242 } })
 		const wire = createFakeWire([errorResponse(400, body)])
-		const caller = createLlmCaller(MODEL, API_KEY, { llmFetch: wire.llmFetch, sleep: wire.sleep })
+		const caller = createLlmCaller(MODEL, API_KEY, { llmFetch: wire.llmFetch, sleep: wire.sleep, scheduleTimeout: wire.scheduleTimeout })
 		const result = await caller.call({ messages: [] })
 		expect(result).toEqual({ kind: 'context_budget_exceeded', promptTokens: 4242, contextWindow: 1000 })
 		expect(wire.requests).toHaveLength(1)
@@ -200,7 +208,7 @@ describe('createLlmCaller pre-stream retry classification', () => {
 		const raw = JSON.stringify({ error: { prompt_tokens: 12345 } })
 		const body = JSON.stringify({ error: { message: 'upstream provider error: context length exceeded', metadata: { raw } } })
 		const wire = createFakeWire([errorResponse(429, body)])
-		const caller = createLlmCaller(MODEL, API_KEY, { llmFetch: wire.llmFetch, sleep: wire.sleep })
+		const caller = createLlmCaller(MODEL, API_KEY, { llmFetch: wire.llmFetch, sleep: wire.sleep, scheduleTimeout: wire.scheduleTimeout })
 		const result = await caller.call({ messages: [] })
 		expect(result).toEqual({ kind: 'context_budget_exceeded', promptTokens: 12345, contextWindow: 1000 })
 		expect(wire.requests).toHaveLength(1)
@@ -210,7 +218,7 @@ describe('createLlmCaller pre-stream retry classification', () => {
 describe('createLlmCaller stream consumption', () => {
 	test('a full stream with reasoning, content, and a tool call maps usage, call ids, and the tool_calls finish reason', async () => {
 		const wire = createFakeWire([streamResponse(happyPathChunks())])
-		const caller = createLlmCaller(MODEL, API_KEY, { llmFetch: wire.llmFetch, sleep: wire.sleep })
+		const caller = createLlmCaller(MODEL, API_KEY, { llmFetch: wire.llmFetch, sleep: wire.sleep, scheduleTimeout: wire.scheduleTimeout })
 		const result = await caller.call({ messages: [{ role: 'user', content: 'hi' }] })
 		expect(result).toEqual({
 			kind: 'success',
@@ -231,7 +239,7 @@ describe('createLlmCaller stream consumption', () => {
 		], () => {
 			cancelled = true
 		})])
-		const caller = createLlmCaller(MODEL, API_KEY, { llmFetch: wire.llmFetch, sleep: wire.sleep })
+		const caller = createLlmCaller(MODEL, API_KEY, { llmFetch: wire.llmFetch, sleep: wire.sleep, scheduleTimeout: wire.scheduleTimeout })
 		const result = await caller.call({ messages: [] })
 		if (result.kind !== 'success') throw new Error(`expected success, got ${result.kind}`)
 		expect(result.content).toBe('first')
@@ -245,7 +253,7 @@ describe('createLlmCaller stream consumption', () => {
 			'data: [DONE]\n\n',
 			dataLine(completedEvent([{ type: 'message', content: [{ type: 'output_text', text: 'never read' }] }])),
 		]))])
-		const caller = createLlmCaller(MODEL, API_KEY, { llmFetch: wire.llmFetch, sleep: wire.sleep })
+		const caller = createLlmCaller(MODEL, API_KEY, { llmFetch: wire.llmFetch, sleep: wire.sleep, scheduleTimeout: wire.scheduleTimeout })
 		const result = await caller.call({ messages: [] })
 		expect(result).toEqual({ kind: 'llm_unavailable', message: 'SSE stream ended without a terminal event (no deltas received)' })
 		expect(wire.requests).toHaveLength(1)
@@ -258,7 +266,7 @@ describe('createLlmCaller stream consumption', () => {
 			dataLine({ type: 'response.in_progress' }),
 			dataLine({ type: 'response.incomplete', response: { status: 'incomplete', output: [], incomplete_details: { reason: 'max_output_tokens' } } }),
 		]))])
-		const caller = createLlmCaller(MODEL, API_KEY, { llmFetch: wire.llmFetch, sleep: wire.sleep })
+		const caller = createLlmCaller(MODEL, API_KEY, { llmFetch: wire.llmFetch, sleep: wire.sleep, scheduleTimeout: wire.scheduleTimeout })
 		const result = await caller.call({ messages: [] })
 		expect(result).toEqual({ kind: 'llm_unavailable', message: 'completion budget exhausted before any content was produced (finish_reason: length)' })
 		expect(wire.requests).toHaveLength(1)
@@ -270,7 +278,7 @@ describe('createLlmCaller stream consumption', () => {
 			dataLine({ type: 'output_text.delta', item_id: 'm1', delta: 'partial' }),
 			dataLine({ error: { message: 'generation failed' } }),
 		]))])
-		const caller = createLlmCaller(MODEL, API_KEY, { llmFetch: wire.llmFetch, sleep: wire.sleep })
+		const caller = createLlmCaller(MODEL, API_KEY, { llmFetch: wire.llmFetch, sleep: wire.sleep, scheduleTimeout: wire.scheduleTimeout })
 		const result = await caller.call({ messages: [] })
 		expect(result).toEqual({ kind: 'llm_unavailable', message: 'SSE stream error: generation failed (deltas received for 1 item(s))' })
 		expect(wire.requests).toHaveLength(1)
@@ -282,7 +290,7 @@ describe('createLlmCaller stream consumption', () => {
 			dataLine({ type: 'response.created' }),
 			dataLine({ type: 'reasoning_text.delta', item_id: 'r1', delta: 'cut off mid-thought' }),
 		]))])
-		const caller = createLlmCaller(MODEL, API_KEY, { llmFetch: wire.llmFetch, sleep: wire.sleep })
+		const caller = createLlmCaller(MODEL, API_KEY, { llmFetch: wire.llmFetch, sleep: wire.sleep, scheduleTimeout: wire.scheduleTimeout })
 		const result = await caller.call({ messages: [] })
 		expect(result).toEqual({ kind: 'llm_unavailable', message: 'SSE stream ended without a terminal event (deltas received for 1 item(s))' })
 		expect(wire.requests).toHaveLength(1)
@@ -291,7 +299,7 @@ describe('createLlmCaller stream consumption', () => {
 
 	test('non-SSE lines are skipped and a stream of only them ends without a terminal event', async () => {
 		const wire = createFakeWire([streamResponse(encodedChunks(['hello\n\n', ': keep-alive\n\n', 'event: ping\n\n']))])
-		const caller = createLlmCaller(MODEL, API_KEY, { llmFetch: wire.llmFetch, sleep: wire.sleep })
+		const caller = createLlmCaller(MODEL, API_KEY, { llmFetch: wire.llmFetch, sleep: wire.sleep, scheduleTimeout: wire.scheduleTimeout })
 		const result = await caller.call({ messages: [] })
 		expect(result).toEqual({ kind: 'llm_unavailable', message: 'SSE stream ended without a terminal event (no deltas received)' })
 		expect(wire.requests).toHaveLength(1)
@@ -308,7 +316,7 @@ describe('createLlmCaller stream consumption', () => {
 			bytes.slice(0, cut),
 			bytes.slice(cut),
 		])])
-		const caller = createLlmCaller(MODEL, API_KEY, { llmFetch: wire.llmFetch, sleep: wire.sleep })
+		const caller = createLlmCaller(MODEL, API_KEY, { llmFetch: wire.llmFetch, sleep: wire.sleep, scheduleTimeout: wire.scheduleTimeout })
 		const result = await caller.call({ messages: [] })
 		if (result.kind !== 'success') throw new Error(`expected success, got ${result.kind}`)
 		expect(result.content).toBe('héllo')
@@ -323,7 +331,7 @@ describe('createLlmCaller stream consumption', () => {
 			},
 		})
 		const wire = createFakeWire([{ kind: 'stream', status: 200, stream }])
-		const caller = createLlmCaller(MODEL, API_KEY, { llmFetch: wire.llmFetch, sleep: wire.sleep })
+		const caller = createLlmCaller(MODEL, API_KEY, { llmFetch: wire.llmFetch, sleep: wire.sleep, scheduleTimeout: wire.scheduleTimeout })
 		const result = await caller.call({ messages: [] })
 		if (result.kind !== 'llm_unavailable') throw new Error(`expected llm_unavailable, got ${result.kind}`)
 		expect(result.message).toContain('SSE stream read failed')
@@ -343,7 +351,7 @@ describe('createLlmCaller stream consumption', () => {
 		], () => {
 			cancelled = true
 		})])
-		const caller = createLlmCaller(MODEL, API_KEY, { llmFetch: wire.llmFetch, sleep: wire.sleep })
+		const caller = createLlmCaller(MODEL, API_KEY, { llmFetch: wire.llmFetch, sleep: wire.sleep, scheduleTimeout: wire.scheduleTimeout })
 		const result = await caller.call({ messages: [] })
 		if (result.kind !== 'llm_unavailable') throw new Error(`expected llm_unavailable, got ${result.kind}`)
 		expect(result.message).toContain('SSE protocol failure')
@@ -360,7 +368,7 @@ describe('createLlmCaller stream consumption', () => {
 			...encodedChunks([dataLine({ type: 'response.created' })]),
 			bytes.slice(0, 'data: h'.length + 1),
 		])])
-		const caller = createLlmCaller(MODEL, API_KEY, { llmFetch: wire.llmFetch, sleep: wire.sleep })
+		const caller = createLlmCaller(MODEL, API_KEY, { llmFetch: wire.llmFetch, sleep: wire.sleep, scheduleTimeout: wire.scheduleTimeout })
 		const result = await caller.call({ messages: [] })
 		expect(result).toEqual({ kind: 'llm_unavailable', message: 'SSE stream ended without a terminal event (no deltas received)' })
 	})
@@ -371,7 +379,7 @@ describe('createLlmCaller result mapping', () => {
 		const wire = createFakeWire([streamResponse(encodedChunks([
 			dataLine(completedEvent([{ type: 'message', content: [{ type: 'output_text', text: 'answer' }] }], { input_tokens: 7, output_tokens: 3 })),
 		]))])
-		const caller = createLlmCaller(MODEL, API_KEY, { llmFetch: wire.llmFetch, sleep: wire.sleep })
+		const caller = createLlmCaller(MODEL, API_KEY, { llmFetch: wire.llmFetch, sleep: wire.sleep, scheduleTimeout: wire.scheduleTimeout })
 		const result = await caller.call({ messages: [] })
 		expect(result).toEqual({
 			kind: 'success',
@@ -387,7 +395,7 @@ describe('createLlmCaller result mapping', () => {
 		const wire = createFakeWire([streamResponse(encodedChunks([
 			dataLine(completedEvent([{ type: 'function_call', name: 'no_id_tool', arguments: '{}' }])),
 		]))])
-		const caller = createLlmCaller(MODEL, API_KEY, { llmFetch: wire.llmFetch, sleep: wire.sleep })
+		const caller = createLlmCaller(MODEL, API_KEY, { llmFetch: wire.llmFetch, sleep: wire.sleep, scheduleTimeout: wire.scheduleTimeout })
 		const result = await caller.call({ messages: [] })
 		if (result.kind !== 'success') throw new Error(`expected success, got ${result.kind}`)
 		expect(result.toolCalls).toEqual([{ id: 'call_0', type: 'function', function: { name: 'no_id_tool', arguments: '{}' } }])
@@ -398,7 +406,7 @@ describe('createLlmCaller result mapping', () => {
 		const wire = createFakeWire([streamResponse(encodedChunks([
 			dataLine({ type: 'response.incomplete', response: { status: 'incomplete', output: [{ type: 'message', content: [{ type: 'output_text', text: 'partial answer' }] }], incomplete_details: { reason: 'max_output_tokens' } } }),
 		]))])
-		const caller = createLlmCaller(MODEL, API_KEY, { llmFetch: wire.llmFetch, sleep: wire.sleep })
+		const caller = createLlmCaller(MODEL, API_KEY, { llmFetch: wire.llmFetch, sleep: wire.sleep, scheduleTimeout: wire.scheduleTimeout })
 		const result = await caller.call({ messages: [] })
 		if (result.kind !== 'success') throw new Error(`expected success, got ${result.kind}`)
 		expect(result.content).toBe('partial answer')
@@ -411,7 +419,7 @@ describe('createLlmCaller degenerate completed streams', () => {
 	test('a completed stream with empty content and no tool calls is retried with backoff and then fails', async () => {
 		const chunks = encodedChunks([dataLine(completedEvent([]))])
 		const wire = createFakeWire([streamResponse(chunks), streamResponse(chunks), streamResponse(chunks)])
-		const caller = createLlmCaller(MODEL, API_KEY, { llmFetch: wire.llmFetch, sleep: wire.sleep })
+		const caller = createLlmCaller(MODEL, API_KEY, { llmFetch: wire.llmFetch, sleep: wire.sleep, scheduleTimeout: wire.scheduleTimeout })
 		const result = await caller.call({ messages: [] })
 		expect(result).toEqual({ kind: 'llm_unavailable', message: 'empty response (no content, no tool calls)' })
 		expect(wire.requests).toHaveLength(3)
@@ -421,7 +429,7 @@ describe('createLlmCaller degenerate completed streams', () => {
 	test('whitespace-only content under finish reason length counts as empty and fails immediately', async () => {
 		const chunks = encodedChunks([dataLine({ type: 'response.incomplete', response: { status: 'incomplete', output: [{ type: 'message', content: [{ type: 'output_text', text: '   ' }] }], incomplete_details: { reason: 'max_output_tokens' } } })])
 		const wire = createFakeWire([streamResponse(chunks)])
-		const caller = createLlmCaller(MODEL, API_KEY, { llmFetch: wire.llmFetch, sleep: wire.sleep })
+		const caller = createLlmCaller(MODEL, API_KEY, { llmFetch: wire.llmFetch, sleep: wire.sleep, scheduleTimeout: wire.scheduleTimeout })
 		const result = await caller.call({ messages: [] })
 		expect(result).toEqual({ kind: 'llm_unavailable', message: 'completion budget exhausted before any content was produced (finish_reason: length)' })
 		expect(wire.requests).toHaveLength(1)
@@ -431,7 +439,7 @@ describe('createLlmCaller degenerate completed streams', () => {
 	test('empty content with tool calls stays a success', async () => {
 		const chunks = encodedChunks([dataLine(completedEvent([{ type: 'function_call', call_id: 'call_1', name: 'read_file', arguments: '{"path":"a.ts"}' }]))])
 		const wire = createFakeWire([streamResponse(chunks)])
-		const caller = createLlmCaller(MODEL, API_KEY, { llmFetch: wire.llmFetch, sleep: wire.sleep })
+		const caller = createLlmCaller(MODEL, API_KEY, { llmFetch: wire.llmFetch, sleep: wire.sleep, scheduleTimeout: wire.scheduleTimeout })
 		const result = await caller.call({ messages: [] })
 		if (result.kind !== 'success') throw new Error(`expected success, got ${result.kind}`)
 		expect(result.toolCalls).toHaveLength(1)
@@ -502,5 +510,93 @@ describe('detectContextBudgetExceeded', () => {
 		expect(detectContextBudgetExceeded(400, withoutRaw, 1000)).toEqual({ kind: 'context_budget_exceeded', promptTokens: 0, contextWindow: 1000 })
 		const withEmptyRaw = JSON.stringify({ error: { message: 'context exceeded', metadata: { raw: 'no numbers here' } } })
 		expect(detectContextBudgetExceeded(400, withEmptyRaw, 1000)).toEqual({ kind: 'context_budget_exceeded', promptTokens: 0, contextWindow: 1000 })
+	})
+})
+
+describe('createLlmCaller stall timeouts', () => {
+	test('a connect timeout aborts the stalled request and is retried with backoff until llm_unavailable', async () => {
+		const requests: LlmFetchRequest[] = []
+		const sleeps: number[] = []
+		// A real fetch rejects when its signal aborts, so the fake mirrors that contract: it pends until the caller's connect timer fires and then rejects with the platform's AbortError shape.
+		const llmFetch: LlmFetch = (request) => {
+			requests.push(request)
+			const signal = request.signal
+			if (signal === undefined) return Promise.reject(new Error('expected the caller to arm a connect abort signal'))
+			return new Promise((_, reject) => {
+				const abort = () => {
+					const abortError = new Error('This operation was aborted')
+					abortError.name = 'AbortError'
+					reject(abortError)
+				}
+				if (signal.aborted) {
+					abort()
+					return
+				}
+				signal.addEventListener('abort', abort, { once: true })
+			})
+		}
+		const sleep: Sleep = (ms) => {
+			sleeps.push(ms)
+			return Promise.resolve()
+		}
+		const scheduleTimeout: ScheduleTimeout = (callback) => {
+			const id = setTimeout(callback, 0)
+			return () => clearTimeout(id)
+		}
+		const caller = createLlmCaller(MODEL, API_KEY, { llmFetch, sleep, scheduleTimeout })
+		const result = await caller.call({ messages: [] })
+		expect(result).toEqual({ kind: 'llm_unavailable', message: 'Network error after 3 attempts: no response headers within 30000ms' })
+		expect(requests).toHaveLength(3)
+		expect(sleeps).toEqual([200, 400])
+	})
+
+	test('a mid-stream idle timeout aborts the stalled read, releases the reader, and is retried with backoff until llm_unavailable', async () => {
+		const encoder = new TextEncoder()
+		let cancellations = 0
+		// One chunk, then the source goes silent and never closes: the second read is where the stream is wedged.
+		const stalledStream = (): ReadableStream<Uint8Array> => new ReadableStream<Uint8Array>({
+			start(controller) {
+				controller.enqueue(encoder.encode(dataLine({ type: 'response.created' })))
+			},
+			cancel() {
+				cancellations++
+			},
+		})
+		const wire = createFakeWire([
+			{ kind: 'stream', status: 200, stream: stalledStream() },
+			{ kind: 'stream', status: 200, stream: stalledStream() },
+			{ kind: 'stream', status: 200, stream: stalledStream() },
+		])
+		const caller = createLlmCaller(MODEL, API_KEY, { llmFetch: wire.llmFetch, sleep: wire.sleep, scheduleTimeout: wire.scheduleTimeout })
+		const result = await caller.call({ messages: [] })
+		expect(result).toEqual({ kind: 'llm_unavailable', message: 'no bytes arrived within 120000ms' })
+		expect(wire.requests).toHaveLength(3)
+		expect(wire.sleeps).toEqual([200, 400])
+		expect(wire.timersFired()).toBe(3)
+		// Every timed-out attempt releases its reader exactly like the existing cancellation path does.
+		expect(cancellations).toBe(3)
+	})
+
+	test('a slow-but-flowing stream is never aborted: bytes within the idle window reset the timer on every chunk', async () => {
+		// The happy-path body is eleven separately enqueued chunks, so every read arms a fresh idle timer and must cancel it again before the fake's macrotask can fire it.
+		const wire = createFakeWire([streamResponse(happyPathChunks())])
+		const caller = createLlmCaller(MODEL, API_KEY, { llmFetch: wire.llmFetch, sleep: wire.sleep, scheduleTimeout: wire.scheduleTimeout })
+		const result = await caller.call({ messages: [{ role: 'user', content: 'hi' }] })
+		if (result.kind !== 'success') throw new Error(`expected success, got ${result.kind}`)
+		expect(wire.timersFired()).toBe(0)
+	})
+
+	test('a successful call is unaffected by the timeout composition', async () => {
+		const wire = createFakeWire([streamResponse(happyPathChunks())])
+		const caller = createLlmCaller(MODEL, API_KEY, { llmFetch: wire.llmFetch, sleep: wire.sleep, scheduleTimeout: wire.scheduleTimeout })
+		const result = await caller.call({ messages: [{ role: 'user', content: 'hi' }] })
+		expect(result).toEqual({
+			kind: 'success',
+			content: 'Hello',
+			reasoning: 'thinking ',
+			toolCalls: [{ id: 'call_7', type: 'function', function: { name: 'read_file', arguments: '{"path":"a.ts"}' } }],
+			usage: { promptTokens: 100, completionTokens: 20, cachedPromptTokens: 64 },
+			finishReason: 'tool_calls',
+		})
 	})
 })

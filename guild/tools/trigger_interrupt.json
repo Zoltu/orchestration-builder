@@ -1,6 +1,6 @@
 {
 	"name": "trigger_interrupt",
-	"description": "Apply an interrupt decision to a suspended role instance. 'continue' resumes it unchanged; 'redirect' injects your reason as a user message into its conversation, then resumes it; 'abort' finishes it with a loop_detected error. Use after investigating with the inspection tools.",
+	"description": "Apply an interrupt decision to the suspended role instance flagged for your loop check. 'continue' resumes it unchanged; 'redirect' injects your reason as a user message into its conversation, then resumes it; 'abort' finishes it with a loop_detected error. The only valid targetRole is the flagged instance id named in your task; the tool rejects any other instance. Use after investigating with the inspection tools.",
 	"humanLabel": {
 		"detailed": ["Trigger Interrupt"],
 		"friendly": ["Interrupt"],
@@ -26,7 +26,7 @@
 		"properties": {
 			"targetRole": {
 				"type": "string",
-				"description": "The role-instance id of the suspended role to act on (given in your task)."
+				"description": "The role-instance id flagged for this loop check (given in your task); any other instance is rejected."
 			},
 			"action": {
 				"type": "string",

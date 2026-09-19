@@ -128,7 +128,7 @@ export async function resumeExecutor(deps: ExecutorDependencies, checkpoint: Run
 		...(continuation !== undefined ? { continuation } : {}),
 	}
 
-	deps.createRunDirectory()
+	// No createRunDirectory here: a resume re-enters the run directory the checkpoint was read from, which therefore exists — and createRunDirectory refuses existing directories because a fresh run must never share one.
 
 	const loadedGuild = deps.loadGuild()
 

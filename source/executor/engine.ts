@@ -356,9 +356,11 @@ export async function runRole(deps: EngineDependencies, context: EngineContext, 
 		contextWindow: guild.deployment.model.contextWindow,
 		roleRegistry: deps.roleRegistry,
 		ownRoleId: registryEntry.roleId,
+		handlerOf: context.handlerOf,
 	})
 
-	const handlers: Record<string, ToolHandler> = { ...builtInHandlers, ...deps.additionalToolHandlers }
+	// Built-ins spread last: platform invariants (finish, agent, ask_human, the context tools) are not shadowable by an additional handler that happens to collide on a key.
+	const handlers: Record<string, ToolHandler> = { ...deps.additionalToolHandlers, ...builtInHandlers }
 	const dispatch = createToolDispatch(handlers)
 	const dispatchCtx: DispatchContext = {
 		dispatch,

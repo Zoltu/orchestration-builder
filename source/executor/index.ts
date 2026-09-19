@@ -14,8 +14,8 @@ export type { CheckpointFrame, CheckpointRecorder, CheckpointRecorderDependencie
 export { reconcileRunsOnStartup } from './startup-reconciliation.js'
 export type { ReconciliationReport, StartupReconciliationDependencies } from './startup-reconciliation.js'
 
-export { createLlmCaller, createLlmFetch, createSleep } from './llm.js'
-export type { LlmCaller, LlmCallResult, LlmCallerDependencies, LlmFetch, LlmRequest, Sleep } from './llm.js'
+export { createLlmCaller, createLlmFetch, createSleep, createTimeoutScheduler } from './llm.js'
+export type { LlmCaller, LlmCallResult, LlmCallerDependencies, LlmFetch, LlmRequest, ScheduleTimeout, Sleep } from './llm.js'
 
 export { createGuildLoader } from './loader.js'
 export type { LoadGuild, LoadedGuild, LoadedGuildFiles } from './loader.js'
@@ -68,6 +68,7 @@ export { createDockerSecretReader, resolveKagiApiKey } from './tools/kagi.js'
 
 export {
 	createRunDirectory,
+	createRunDirectoryExists,
 	createAppendLog,
 	createWriteMeta,
 	createWriteCheckpoint,
@@ -87,6 +88,7 @@ export {
 } from './persistence.js'
 export type {
 	RunDirectory,
+	RunDirectoryExists,
 	AppendLog,
 	WriteMeta,
 	WriteCheckpoint,

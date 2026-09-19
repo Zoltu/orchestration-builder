@@ -23,15 +23,24 @@ export function copyRecursively(source: string, destination: string): void {
 	}
 }
 
-export function createRunDirectory(runId: string, baseDir: string = 'data/runs'): RunDirectory {
+// A fresh run must never share a directory with an existing one: run ids have one-second resolution, so two runs submitted within the same second (possible when the previous run failed instantly) generate the same id, and silently recursing into the existing directory would interleave their logs and metas. The submission layer refuses taken ids up front (source/executor/run-submission.ts "submit"); this check is the start-of-run backstop, so an existing directory fails the run loudly instead of being reused.
+export function createRunDirectory(runId: string, baseDir: string): RunDirectory {
 	const runDir = path.resolve(baseDir, runId)
 	return () => {
+		if (fs.existsSync(runDir)) throw new Error(`run directory already exists for run ${runId}: ${runDir}`)
 		fs.mkdirSync(runDir, { recursive: true })
 		return runDir
 	}
 }
 
-export function createAppendLog(runId: string, baseDir: string = 'data/runs'): AppendLog {
+export type RunDirectoryExists = (runId: string) => boolean
+
+// Whether a run directory already exists for the id: the submission layer consults it before accepting a fresh run, because a taken id means a previous run already owns that directory. Resume re-enters an existing directory by design and must not consult this.
+export function createRunDirectoryExists(baseDir: string): RunDirectoryExists {
+	return (runId) => fs.existsSync(path.resolve(baseDir, runId))
+}
+
+export function createAppendLog(runId: string, baseDir: string): AppendLog {
 	const runDir = path.resolve(baseDir, runId)
 	return (event: LogEvent) => {
 		const logPath = path.resolve(runDir, 'log.jsonl')
@@ -39,11 +48,14 @@ export function createAppendLog(runId: string, baseDir: string = 'data/runs'): A
 	}
 }
 
-export function createWriteMeta(runId: string, baseDir: string = 'data/runs'): WriteMeta {
+// The terminal meta is what startup reconciliation reads to decide a run is finished, so it must never be torn: a meta half-written by a crash, with the checkpoint not yet deleted, would make reconciliation resume an already-finished run. write-temp + rename guarantees the on-disk file is always a complete document (the same pattern the checkpoint and settings writes use).
+export function createWriteMeta(runId: string, baseDir: string): WriteMeta {
 	const runDir = path.resolve(baseDir, runId)
 	return (meta: RunMeta) => {
 		const metaPath = path.resolve(runDir, 'meta.json')
-		fs.writeFileSync(metaPath, JSON.stringify(meta, null, 2))
+		const tempPath = `${metaPath}.${process.pid}.tmp`
+		fs.writeFileSync(tempPath, JSON.stringify(meta, null, 2))
+		fs.renameSync(tempPath, metaPath)
 	}
 }
 
@@ -54,7 +66,7 @@ export type ReadRunCheckpointById = (runId: string) => string | null
 const CHECKPOINT_FILE_NAME = 'state.json'
 
 // The checkpoint is rewritten on every safe point, so it must never be torn: write-temp + rename guarantees the on-disk file is always a complete JSON document (the same pattern settings.json uses). A crash mid-write leaves the previous checkpoint, never a half-written one.
-export function createWriteCheckpoint(runId: string, baseDir: string = 'data/runs'): WriteCheckpoint {
+export function createWriteCheckpoint(runId: string, baseDir: string): WriteCheckpoint {
 	const runDir = path.resolve(baseDir, runId)
 	return (checkpoint: RunCheckpoint) => {
 		const checkpointPath = path.resolve(runDir, CHECKPOINT_FILE_NAME)
@@ -64,7 +76,7 @@ export function createWriteCheckpoint(runId: string, baseDir: string = 'data/run
 	}
 }
 
-export function createDeleteCheckpoint(runId: string, baseDir: string = 'data/runs'): DeleteCheckpoint {
+export function createDeleteCheckpoint(runId: string, baseDir: string): DeleteCheckpoint {
 	const runDir = path.resolve(baseDir, runId)
 	return () => {
 		const checkpointPath = path.resolve(runDir, CHECKPOINT_FILE_NAME)
@@ -72,7 +84,7 @@ export function createDeleteCheckpoint(runId: string, baseDir: string = 'data/ru
 	}
 }
 
-export function createReadRunCheckpointById(baseDir: string = 'data/runs'): ReadRunCheckpointById {
+export function createReadRunCheckpointById(baseDir: string): ReadRunCheckpointById {
 	return (runId: string) => {
 		const checkpointPath = path.resolve(baseDir, runId, CHECKPOINT_FILE_NAME)
 		return fs.existsSync(checkpointPath) ? fs.readFileSync(checkpointPath, 'utf8') : null
@@ -88,7 +100,7 @@ export type ReadRunSnapshotById = (runId: string) => RunSnapshotRaw
 
 // Reads any run's artifacts by id, so the server can serve the active run and any completed run without re-deriving closures per run.
 // The single-active-run invariant is enforced at the submission layer, not here.
-export function createReadRunSnapshotById(baseDir: string = 'data/runs'): ReadRunSnapshotById {
+export function createReadRunSnapshotById(baseDir: string): ReadRunSnapshotById {
 	return (runId: string) => {
 		const metaPath = path.resolve(baseDir, runId, 'meta.json')
 		const logPath = path.resolve(baseDir, runId, 'log.jsonl')
@@ -101,7 +113,7 @@ export function createReadRunSnapshotById(baseDir: string = 'data/runs'): ReadRu
 export type ReadRunMetaById = (runId: string) => string | null
 
 // Reads only a run's meta.json. The run list renders one summary per run and never touches log events, so it reads the small meta file rather than every run's full (and ever-growing) log on every poll.
-export function createReadRunMetaById(baseDir: string = 'data/runs'): ReadRunMetaById {
+export function createReadRunMetaById(baseDir: string): ReadRunMetaById {
 	return (runId: string) => {
 		const metaPath = path.resolve(baseDir, runId, 'meta.json')
 		return fs.existsSync(metaPath) ? fs.readFileSync(metaPath, 'utf8') : null
@@ -114,7 +126,7 @@ export type ReadRunSummaryById = (runId: string) => string | null
 const SUMMARY_FILE_NAME = 'summary.txt'
 
 // The one-line run summary is plain text, not JSON: there is no schema to validate, and absence (or a whitespace-only file) simply means "no summary", so the UI falls back to the task text. The run directory is created if missing because a start-of-run summary write can land before the executor has created it.
-export function createWriteRunSummary(runId: string, baseDir: string = 'data/runs'): WriteRunSummary {
+export function createWriteRunSummary(runId: string, baseDir: string): WriteRunSummary {
 	const runDir = path.resolve(baseDir, runId)
 	return (summary: string) => {
 		fs.mkdirSync(runDir, { recursive: true })
@@ -122,7 +134,7 @@ export function createWriteRunSummary(runId: string, baseDir: string = 'data/run
 	}
 }
 
-export function createReadRunSummaryById(baseDir: string = 'data/runs'): ReadRunSummaryById {
+export function createReadRunSummaryById(baseDir: string): ReadRunSummaryById {
 	return (runId: string) => {
 		const summaryPath = path.resolve(baseDir, runId, SUMMARY_FILE_NAME)
 		if (!fs.existsSync(summaryPath)) return null
@@ -139,7 +151,7 @@ export interface RunSummaryStats {
 export type ReadRunSummaryStats = (runId: string) => RunSummaryStats
 
 // Stats the two files a run-list summary is derived from without reading them, so the run-list cache revalidates each run per poll with two stat calls instead of two file reads plus a meta parse. summary.txt rides in the freshness key because the completion summary replaces the start one at a moment when meta.json does not change.
-export function createReadRunSummaryStats(baseDir: string = 'data/runs'): ReadRunSummaryStats {
+export function createReadRunSummaryStats(baseDir: string): ReadRunSummaryStats {
 	return (runId: string) => {
 		const metaPath = path.resolve(baseDir, runId, 'meta.json')
 		const summaryPath = path.resolve(baseDir, runId, SUMMARY_FILE_NAME)
@@ -153,7 +165,7 @@ export type ReadRunPlanById = (runId: string) => string | null
 export const PLAN_FILE_NAME = 'plan.md'
 
 // Reads the run's plan document per request for the run view. Absence is normal (the planner may not have written one yet), and a read failure after the existence check (e.g. a permission or io error) degrades to "no plan" rather than failing the run view that serves it — a plan the UI cannot show must never 500 the view.
-export function createReadRunPlanById(baseDir: string = 'data/runs'): ReadRunPlanById {
+export function createReadRunPlanById(baseDir: string): ReadRunPlanById {
 	return (runId: string) => {
 		const planPath = path.resolve(baseDir, runId, PLAN_FILE_NAME)
 		if (!fs.existsSync(planPath)) return null
@@ -193,7 +205,7 @@ function statOrNull(filePath: string): RunSnapshotFileStat | null {
 }
 
 // Stats a run's files without reading them. Size+mtime is the freshness key a snapshot cache validates against (the log is append-only, so every event changes its size), and a run with neither file is unknown — the cheap existence check the per-request handlers need before serving a snapshot.
-export function createReadRunSnapshotStats(baseDir: string = 'data/runs'): ReadRunSnapshotStats {
+export function createReadRunSnapshotStats(baseDir: string): ReadRunSnapshotStats {
 	return (runId: string) => {
 		const metaPath = path.resolve(baseDir, runId, 'meta.json')
 		const logPath = path.resolve(baseDir, runId, 'log.jsonl')
@@ -204,7 +216,7 @@ export function createReadRunSnapshotStats(baseDir: string = 'data/runs'): ReadR
 export type ReadRunLogTextFrom = (runId: string, byteOffset: number) => string
 
 // Reads a run's log.jsonl from a byte offset to the end of the file (offset 0 reads the whole log), so the snapshot cache re-reads only an active run's appended tail per poll instead of the whole ever-growing file. Stored offsets always fall just after a newline byte, which is never part of a multi-byte UTF-8 sequence, so reading from an offset cannot split a character.
-export function createReadRunLogTextFrom(baseDir: string = 'data/runs'): ReadRunLogTextFrom {
+export function createReadRunLogTextFrom(baseDir: string): ReadRunLogTextFrom {
 	return (runId: string, byteOffset: number) => {
 		const logPath = path.resolve(baseDir, runId, 'log.jsonl')
 		if (!fs.existsSync(logPath)) return ''
@@ -223,7 +235,7 @@ export function createReadRunLogTextFrom(baseDir: string = 'data/runs'): ReadRun
 
 export type ListRunIds = () => string[]
 
-export function createListRunIds(baseDir: string = 'data/runs'): ListRunIds {
+export function createListRunIds(baseDir: string): ListRunIds {
 	return () => {
 		if (!fs.existsSync(baseDir)) return []
 		return fs.readdirSync(baseDir).filter((entry) => fs.statSync(path.resolve(baseDir, entry)).isDirectory())

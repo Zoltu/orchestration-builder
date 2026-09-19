@@ -2,7 +2,7 @@ import type { RunCheckpoint } from './checkpoint.js'
 import { DEFAULT_EFFORT } from './effort.js'
 import { DEFAULT_LOG_LEVEL } from './log-level.js'
 import type { EffortLevel, LogLevel, RunContinuation, RunMeta } from './types.js'
-import type { ReadProjectSettings } from './persistence.js'
+import type { ReadProjectSettings, RunDirectoryExists } from './persistence.js'
 
 export type StartRun = (runId: string, task: string, effort: EffortLevel, logLevel: LogLevel, continuation?: RunContinuation) => Promise<RunMeta>
 export type ResumeRun = (checkpoint: RunCheckpoint) => Promise<RunMeta>
@@ -11,6 +11,8 @@ export interface RunSubmissionDependencies {
 	startRun: StartRun
 	resumeRun: ResumeRun
 	generateRunId: () => string
+	// Whether a run directory already exists for an id on disk: run ids have one-second resolution, so a fresh id can collide with the directory of a previous run that failed instantly. Submit refuses such ids (a collision would interleave the two runs' logs and metas); resume re-enters an existing directory by design and never consults this.
+	runDirectoryExists: RunDirectoryExists
 	readProjectSettings: ReadProjectSettings
 	// The deployment file's logging default (deployment.json "logging"."level"), resolved once at startup: the lowest-priority input of the log-level resolution chain, below the per-run override and the project setting.
 	deploymentLogLevel?: LogLevel
@@ -19,6 +21,7 @@ export interface RunSubmissionDependencies {
 export type SubmitResult =
 	| { ok: true; runId: string }
 	| { ok: false; error: 'run_in_progress' }
+	| { ok: false; error: 'run_id_collision' }
 
 export interface RunSubmission {
 	submit(task: string, effortOverride?: EffortLevel, logLevelOverride?: LogLevel, continuation?: RunContinuation): SubmitResult
@@ -79,6 +82,8 @@ export function createRunSubmission(dependencies: RunSubmissionDependencies): Ru
 		submit(task, effortOverride, logLevelOverride, continuation) {
 			if (activeRunId !== undefined) return { ok: false, error: 'run_in_progress' }
 			const runId = dependencies.generateRunId()
+			// Regeneration cannot produce a different id until the second ticks over (one-second resolution), so a taken id refuses the submission outright; the caller can simply retry. The run-start backstop is createRunDirectory, which fails loudly on an existing directory.
+			if (dependencies.runDirectoryExists(runId)) return { ok: false, error: 'run_id_collision' }
 			const effort = resolveEffort(effortOverride)
 			const logLevel = resolveLogLevel(logLevelOverride)
 			track(runId, dependencies.startRun(runId, task, effort, logLevel, continuation))

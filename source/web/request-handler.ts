@@ -64,10 +64,11 @@ function handleActiveRunFlow(readRunSnapshot: ReadRunSnapshot, readRunSnapshotSt
 	return runFlowPage(readRunSnapshot, readRunSnapshotStats, runId, query)
 }
 
-function handleGetRunById(readRunSnapshot: ReadRunSnapshot, readRunSnapshotStats: ReadRunSnapshotStats, readRunPlanById: ReadRunPlanById, runState: RunState, runId: string): Response {
+function handleGetRunById(readRunSnapshot: ReadRunSnapshot, readRunSnapshotStats: ReadRunSnapshotStats, readRunPlanById: ReadRunPlanById, runSubmission: RunSubmission, runState: RunState, runId: string): Response {
 	const view = runViewFor(readRunSnapshot, readRunSnapshotStats, readRunPlanById, runId)
 	if (view === null) return json({ ok: false, error: 'not_found' }, 404)
-	return json({ ...view, interruptPending: runState.interruptPending() })
+	// interruptPending reads the shared channel's state, so it describes the active run only: a terminal run viewed while another run is active must report false rather than inherit the active run's pending interrupt.
+	return json({ ...view, interruptPending: runSubmission.activeRunId() === runId && runState.interruptPending() })
 }
 
 function runLogPage(readRunSnapshot: ReadRunSnapshot, readRunSnapshotStats: ReadRunSnapshotStats, runId: string, query: URLSearchParams): Response {
@@ -116,6 +117,15 @@ function parseStrictNonNegativeInt(value: string): number | undefined {
 	const parsed = Number(value)
 	if (!Number.isInteger(parsed) || parsed < 0) return undefined
 	return parsed
+}
+
+// Strict variant for path identities: a segment that does not decode (a stray '%', a truncated escape, a lone surrogate) names a path that cannot exist, so the caller gets the same 404 as any other unknown id rather than a URIError escaping the fetch handler. decodeURIComponent signals malformed input only by throwing, so catching here is the check, not flow control.
+function decodePathSegment(segment: string): string | undefined {
+	try {
+		return decodeURIComponent(segment)
+	} catch {
+		return undefined
+	}
 }
 
 // Serves the structured InteractionModel derived from a run's full snapshot.
@@ -273,7 +283,8 @@ export function createRequestHandler(config: RequestHandlerConfig, serveStatic: 
 			if (pathname === '/api/run') return handleActiveRun(readRunSnapshot, readRunSnapshotStats, readRunPlanById, runSubmission, runState)
 			if (pathname === '/api/runs') return handleListRuns(readRunListSummary, listRunIds)
 			if (pathname.startsWith('/api/runs/')) {
-				const rest = decodeURIComponent(pathname.slice('/api/runs/'.length))
+				const rest = decodePathSegment(pathname.slice('/api/runs/'.length))
+				if (rest === undefined) return json({ ok: false, error: 'not_found' }, 404)
 				// Match a /log or /flow suffix before the bare :id route so /api/runs/<id>/log and /api/runs/<id>/flow reach their endpoints rather than being swallowed as a run id of "<id>/log" or "<id>/flow".
 				const slashIndex = rest.lastIndexOf('/')
 				if (slashIndex >= 0) {
@@ -284,12 +295,13 @@ export function createRequestHandler(config: RequestHandlerConfig, serveStatic: 
 						if (suffix === 'flow') return runFlowPage(readRunSnapshot, readRunSnapshotStats, runId, url.searchParams)
 					}
 				}
-				return handleGetRunById(readRunSnapshot, readRunSnapshotStats, readRunPlanById, runState, rest)
+				return handleGetRunById(readRunSnapshot, readRunSnapshotStats, readRunPlanById, runSubmission, runState, rest)
 			}
 			if (pathname === '/api/questions') return json(renderPendingQuestions(runState.pendingQuestions()))
 			if (pathname === '/api/demo/scenarios') return handleDemoScenarios()
 			if (pathname.startsWith('/api/demo/flow/')) {
-				const rest = decodeURIComponent(pathname.slice('/api/demo/flow/'.length))
+				const rest = decodePathSegment(pathname.slice('/api/demo/flow/'.length))
+				if (rest === undefined) return json({ ok: false, error: 'not_found' }, 404)
 				const slashIndex = rest.lastIndexOf('/')
 				if (slashIndex >= 0) {
 					const scenarioId = rest.slice(0, slashIndex)
@@ -311,8 +323,8 @@ export function createRequestHandler(config: RequestHandlerConfig, serveStatic: 
 				return handleCreateRun(runSubmission, readRunMetaById, body)
 			}
 			if (pathname.startsWith('/api/runs/') && pathname.endsWith('/interrupt')) {
-				const runId = decodeURIComponent(pathname.slice('/api/runs/'.length, pathname.length - '/interrupt'.length))
-				if (runId === '' || runId.includes('/')) return json({ ok: false, error: 'not_found' }, 404)
+				const runId = decodePathSegment(pathname.slice('/api/runs/'.length, pathname.length - '/interrupt'.length))
+				if (runId === undefined || runId === '' || runId.includes('/')) return json({ ok: false, error: 'not_found' }, 404)
 				const body = await readJsonBody(request)
 				if (body === undefined) return json({ ok: false, error: 'invalid_body' }, 400)
 				return handleInterrupt(runState, runSubmission, runId, body)
