@@ -1,3 +1,4 @@
+// The shared log-derivation home: render.ts's log-event derivation helpers (parseLogEventLine, deriveInterruptHistory) are also consumed by source/summarize.ts, so they live here rather than in a web-view module — do not relocate them.
 
 import type { PendingQuestion } from '../executor/human-backend.js'
 import { isObject, isRunMeta } from '../executor/validation.js'

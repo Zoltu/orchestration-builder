@@ -8,21 +8,6 @@ export type RunDirectory = () => string
 export type AppendLog = (event: LogEvent) => void
 export type WriteMeta = (meta: RunMeta) => void
 
-export function copyRecursively(source: string, destination: string): void {
-	const entries = fs.readdirSync(source)
-	for (const entry of entries) {
-		const sourcePathEntry = path.join(source, entry)
-		const destinationPathEntry = path.join(destination, entry)
-		const stat = fs.statSync(sourcePathEntry)
-		if (stat.isDirectory()) {
-			fs.mkdirSync(destinationPathEntry, { recursive: true })
-			copyRecursively(sourcePathEntry, destinationPathEntry)
-		} else {
-			fs.copyFileSync(sourcePathEntry, destinationPathEntry)
-		}
-	}
-}
-
 // A fresh run must never share a directory with an existing one: run ids have one-second resolution, so two runs submitted within the same second (possible when the previous run failed instantly) generate the same id, and silently recursing into the existing directory would interleave their logs and metas. The submission layer refuses taken ids up front (source/executor/run-submission.ts "submit"); this check is the start-of-run backstop, so an existing directory fails the run loudly instead of being reused.
 export function createRunDirectory(runId: string, baseDir: string): RunDirectory {
 	const runDir = path.resolve(baseDir, runId)
