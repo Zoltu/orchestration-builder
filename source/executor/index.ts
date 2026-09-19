@@ -8,7 +8,7 @@ export type { ExecutorDependencies, ResumeRunOptions } from './executor.js'
 
 export { ConfigurationError, ValidationError } from './errors.js'
 
-export { createCheckpointRecorder, isRunCheckpoint } from './checkpoint.js'
+export { createCheckpointRecorder, entryFrameLogLevel, isRunCheckpoint } from './checkpoint.js'
 export type { CheckpointFrame, CheckpointRecorder, CheckpointRecorderDependencies, PendingAgentSuspension, RunCheckpoint } from './checkpoint.js'
 
 export { reconcileRunsOnStartup } from './startup-reconciliation.js'

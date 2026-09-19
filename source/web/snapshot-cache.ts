@@ -1,6 +1,7 @@
 import type { ReadRunLogTextFrom, ReadRunMetaById, ReadRunSnapshotStats, RunSnapshotStats } from '../executor/persistence.js'
 import { isSameFileStat } from '../executor/persistence.js'
 import type { LogEvent } from '../executor/types.js'
+import { createLruReadCache } from './lru-cache.js'
 import { parseLogEventLine, parseLogEvents, parseRunMeta, type RunSnapshot } from './render.js'
 
 export type ReadRunSnapshot = (runId: string) => RunSnapshot
@@ -64,24 +65,9 @@ function refreshEntry(dependencies: SnapshotCacheDependencies, runId: string, fr
 // Caches parsed run snapshots keyed by run id, validating freshness by file stats (size + mtime) instead of re-reading and re-parsing the full log on every request. The client polls the run list every second and the selected run's two endpoints in lockstep, so an uncached parse per request is O(total run history) per second — and llm_call events carry full prompts, so logs grow large. An unchanged poll costs two stat calls; a changed poll re-reads meta.json only when its stat moved and, when the append-only log grew, parses only the bytes past the stored offset, so an active run costs one small tail read per poll. A shrunk or rewritten log, or any other stat anomaly, falls back to a full re-read and re-parse. A write racing a stat or tail read resolves itself on the next poll: the stale freshness key no longer matches and the delta is picked up from the offset.
 // Bounded with LRU eviction: runs accumulate forever on a long-lived service and a parsed snapshot is large, so the cache must not grow with run history. The per-run endpoints only ever touch the selected run, so a small bound loses nothing.
 export function createSnapshotCache(dependencies: SnapshotCacheDependencies, maxEntries: number): ReadRunSnapshot {
-	const entries = new Map<string, CacheEntry>()
+	const readEntry = createLruReadCache<CacheEntry>(maxEntries)
 	return (runId) => {
 		const freshness = dependencies.readStats(runId)
-		const cached = entries.get(runId)
-		if (cached !== undefined && isFresh(cached.freshness, freshness)) {
-			entries.delete(runId)
-			entries.set(runId, cached)
-			return cached.snapshot
-		}
-		const entry = refreshEntry(dependencies, runId, freshness, cached)
-		// Re-insert (not just overwrite) so a run that keeps rebuilding stays recency-fresh like a hit does; Map.set on an existing key keeps the original insertion order.
-		entries.delete(runId)
-		entries.set(runId, entry)
-		while (entries.size > maxEntries) {
-			const eldest = entries.keys().next()
-			if (eldest.done) break
-			entries.delete(eldest.value)
-		}
-		return entry.snapshot
+		return readEntry(runId, (cached) => isFresh(cached.freshness, freshness), (cached) => refreshEntry(dependencies, runId, freshness, cached)).snapshot
 	}
 }

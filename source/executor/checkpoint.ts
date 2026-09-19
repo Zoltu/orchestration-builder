@@ -1,4 +1,5 @@
 import { isErrorKind } from './errors.js'
+import { DEFAULT_LOG_LEVEL } from './log-level.js'
 import type { ContextPressureTracker } from './context-pressure.js'
 import type { EngineContext, RoleState } from './engine-state.js'
 import type { WriteCheckpoint } from './persistence.js'
@@ -31,6 +32,11 @@ export interface CheckpointFrame {
 	planInjection?: string
 	roleState: RoleState
 	pending?: PendingAgentSuspension
+}
+
+// The logging level a resumed run runs at: the entry frame carries the run's resolved level (docs/reference.md "Logging level"), and a checkpoint whose entry frame carries no logLevel falls back to full detail. Both the resume executor (which writes the metas) and the serve-side resume wrapper (which filters the run's log) derive the level here, so the metas a run records and the log filtering around it cannot disagree.
+export function entryFrameLogLevel(entryFrame: CheckpointFrame | undefined): LogLevel {
+	return entryFrame?.logLevel ?? DEFAULT_LOG_LEVEL
 }
 
 // The runnable state of a run, persisted so a service restart can resume it. Written atomically (temp file + rename) at every leaf safe point and on every role_finished, so the on-disk checkpoint is never torn and never more than one turn stale. `registryCounter` lets the resumed run mint fresh role-instance ids without colliding with the preserved ones; `learnedContextCeiling` carries the run's context-wall knowledge so resumed roles keep the tightened pressure threshold.

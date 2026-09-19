@@ -1,8 +1,8 @@
 import { createResultCard, createToolError } from './errors.js'
-import type { ExecutorConfig, Message, ResultCard, ToolCall, ToolManifest, ToolResult } from './types.js'
+import type { Message, ResultCard, ToolCall, ToolManifest, ToolResult } from './types.js'
 import { isObject, isResultCard } from './validation.js'
-import { checkGlobalBudgets, checkRoleBudgets, type GlobalBudgetState, type RoleBudgetState } from './budgets.js'
-import { createBuiltInToolHandlers } from './builtin-tools.js'
+import { checkGlobalBudgets, checkRoleBudgets } from './budgets.js'
+import { createBuiltInToolHandlers, OBSERVATION_TOOL_NAMES } from './builtin-tools.js'
 import { buildInitialHistory } from './context-builder.js'
 import { applyContextBackstop, contextExceededCard, contextManagedNotice, contextPressureNotice, currentEffectiveBudget, MAX_CONTEXT_RECOVERY_ATTEMPTS, runContextManagerHandler } from './context-handoff.js'
 import { truncateToolOutput } from './context-policy.js'
@@ -25,6 +25,8 @@ type LlmResultHandling =
 	| { kind: 'continue' }
 	| { kind: 'finished'; card: ResultCard }
 	| { kind: 'tool_calls'; toolCalls: ToolCall[] }
+
+type SuccessfulLlmCall = Extract<LlmCallResult, { kind: 'success' }>
 
 function serializeToolResult(result: ToolResult, maxChars: number): string {
 	let text: string
@@ -79,32 +81,28 @@ function shapeAssistantResponse(llmResult: { content?: string; reasoning?: strin
 // Builds the llm_call payload for a successful turn, carrying the sent message slice, the received assistant response, the finishReason, and the per-call usage in one event so a reviewer can reconstruct the full turn from the log.
 // sentMessages is the slice of the role's conversation this request added: sentFrom is the slice's conversation index and messageCount the request's total size, so a full snapshot is sentFrom 0 with sent.length === messageCount. Logging only the slice keeps the log's growth O(turns) instead of O(turns²); docs/reference.md "Log events" documents the protocol and the fold that reconstructs a full conversation from the deltas.
 // roleId is the instance id role_start already carries: a role may spawn a same-named child (the depth guard is the only limit), so identity in the log is the instance, not the name — the fold matches on it.
-// This is emitted only on the success paths (continue/tool_calls and success-finished); the llm_unavailable and context_budget_exceeded paths log their own dedicated events and must not emit a misleading llm_call.
 // promptTokens is the full prompt bill (cached + uncached); cachedPromptTokens is the subset the endpoint served from its prompt cache, so the uncached prompt bill is promptTokens - cachedPromptTokens. The two are tracked separately because they are billed at different rates.
-function llmCallPayload(roleName: string, roleId: string, sentMessages: Message[], sentFrom: number, messageCount: number, llmResult: LlmCallResult): unknown {
-	if (llmResult.kind === 'success') {
-		const promptTokens = llmResult.usage.promptTokens
-		const completionTokens = llmResult.usage.completionTokens
-		const cachedPromptTokens = llmResult.usage.cachedPromptTokens
-		const usage: Record<string, number> = {
-			promptTokens,
-			completionTokens,
-			totalTokens: promptTokens + completionTokens,
-		}
-		if (cachedPromptTokens !== undefined) usage['cachedPromptTokens'] = cachedPromptTokens
-		const payload: Record<string, unknown> = {
-			role: roleName,
-			roleId,
-			messageCount,
-			sentFrom,
-			sent: sentMessages.map(shapeSentMessage),
-			received: shapeAssistantResponse(llmResult),
-			usage,
-		}
-		if (llmResult.finishReason !== undefined) payload['finishReason'] = llmResult.finishReason
-		return payload
+function llmCallPayload(roleName: string, roleId: string, sentMessages: Message[], sentFrom: number, messageCount: number, llmResult: SuccessfulLlmCall): unknown {
+	const promptTokens = llmResult.usage.promptTokens
+	const completionTokens = llmResult.usage.completionTokens
+	const cachedPromptTokens = llmResult.usage.cachedPromptTokens
+	const usage: Record<string, number> = {
+		promptTokens,
+		completionTokens,
+		totalTokens: promptTokens + completionTokens,
 	}
-	return { role: roleName, messageCount }
+	if (cachedPromptTokens !== undefined) usage['cachedPromptTokens'] = cachedPromptTokens
+	const payload: Record<string, unknown> = {
+		role: roleName,
+		roleId,
+		messageCount,
+		sentFrom,
+		sent: sentMessages.map(shapeSentMessage),
+		received: shapeAssistantResponse(llmResult),
+		usage,
+	}
+	if (llmResult.finishReason !== undefined) payload['finishReason'] = llmResult.finishReason
+	return payload
 }
 
 function handleLlmResult(
@@ -112,8 +110,8 @@ function handleLlmResult(
 	roleState: RoleState,
 	deps: EngineDependencies,
 	context: EngineContext,
-	config: ExecutorConfig,
 ): LlmResultHandling {
+	const config = context.loadedGuild.deployment.executor
 	if (llmResult.kind === 'llm_unavailable') {
 		logEvent(deps.appendLog, 'llm_unavailable', { role: context.roleName, message: llmResult.message })
 		return {
@@ -159,10 +157,7 @@ function handleLlmResult(
 		}
 	}
 
-	const postCallBudgetState: RoleBudgetState = {
-		recentCompactionPromptTokens: roleState.recentCompactionPromptTokens,
-	}
-	const postCallBudgetError = checkRoleBudgets(postCallBudgetState, config)
+	const postCallBudgetError = checkRoleBudgets(roleState.recentCompactionPromptTokens, config)
 	if (postCallBudgetError !== null) {
 		logEvent(deps.appendLog, 'role_budget_exceeded', { role: context.roleName, phase: 'post_llm', error: postCallBudgetError })
 		return {
@@ -203,9 +198,6 @@ async function dispatchAndRecord({ deps, roleState, roleName, ownRoleId, dispatc
 	const result = await dispatchToolCall(dispatchCtx, toolCall)
 	return recordToolResult(deps, roleState, roleName, ownRoleId, dispatchCtx.maxToolOutputChars, toolCall, result)
 }
-
-// Only the read-only inspection tools count as observations for the observe event; edit_context mutates its target and never emits one.
-const OBSERVATION_TOOL_NAMES: ReadonlySet<string> = new Set(['list_role_messages', 'read_message_window', 'search_role_blocks', 'recent_role_tool_calls', 'context_info'])
 
 // Emits the observe event for a successful cross-role inspection, so the interaction model can draw the reference from the inspecting role to the suspended target it read. Self-inspection (targetRole absent or the caller's own id) is not an observation, and a target that is no longer registered cannot be drawn, so both are skipped.
 function maybeLogObservation(deps: EngineDependencies, ownRoleId: string, toolName: string, result: ToolResult): void {
@@ -305,10 +297,7 @@ export async function runRole(deps: EngineDependencies, context: EngineContext, 
 
 	const builtInHandlers = createBuiltInToolHandlers({
 		spawnAgent: async (childRoleName, childTask) => {
-			const childGlobalState: GlobalBudgetState = {
-				depth: context.depth + 1,
-			}
-			const depthCheck = checkGlobalBudgets(childGlobalState, guild.deployment.executor)
+			const depthCheck = checkGlobalBudgets(context.depth + 1, guild.deployment.executor)
 			if (depthCheck !== null) {
 				logEvent(deps.appendLog, 'depth_exceeded', { parent: context.roleName, child: childRoleName, depth: context.depth + 1, error: depthCheck })
 				return createResultCard('error', 'Depth budget exceeded', { error: depthCheck })
@@ -448,19 +437,13 @@ async function executeRoleLoop(
 		// The safe point: no LLM call is in flight and every queued platform mutation (drain, compaction, pressure notice) has been applied, so the checkpoint written here is the state a restart resumes from. Only the active leaf reaches this — suspended ancestors are captured through their registered frames.
 		deps.checkpointRecorder.write()
 
-		const globalState: GlobalBudgetState = {
-			depth: context.depth,
-		}
-		const globalError = checkGlobalBudgets(globalState, config)
+		const globalError = checkGlobalBudgets(context.depth, config)
 		if (globalError !== null) {
 			logEvent(deps.appendLog, 'global_budget_exceeded', { role: context.roleName, error: globalError })
 			return createResultCard('error', 'Global budget exceeded', { error: globalError })
 		}
 
-		const roleBudgetState: RoleBudgetState = {
-			recentCompactionPromptTokens: roleState.recentCompactionPromptTokens,
-		}
-		const roleError = checkRoleBudgets(roleBudgetState, config)
+		const roleError = checkRoleBudgets(roleState.recentCompactionPromptTokens, config)
 		if (roleError !== null) {
 			logEvent(deps.appendLog, 'role_budget_exceeded', { role: context.roleName, error: roleError })
 			return createResultCard('error', 'Role budget exceeded', { error: roleError })
@@ -479,7 +462,7 @@ async function executeRoleLoop(
 			tools: allowedToolsManifests,
 		})
 
-		const handling = handleLlmResult(llmResult, roleState, deps, context, config)
+		const handling = handleLlmResult(llmResult, roleState, deps, context)
 		// llm_call is emitted after handleLlmResult so the received assistant response, finishReason, and per-call usage all land in one event. It is emitted only on the success paths (continue/tool_calls and success-finished): the llm_unavailable and context_budget_exceeded paths log their own dedicated events inside handleLlmResult and must not also emit a misleading llm_call.
 		if (llmResult.kind === 'success') {
 			// Delta protocol: a valid baseline (the request count of the role's last logged llm_call) slices the sent list down to the messages added since that call; an absent or out-of-range baseline — first turn, or a context edit or compaction that rewrote the history — falls back to the full snapshot. The baseline then advances to this request's size so the next event slices from here. The baseline indexes the request, which is the role's history itself.

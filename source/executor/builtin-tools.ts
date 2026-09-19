@@ -457,6 +457,9 @@ function createRecentRoleToolCalls(context: BuiltInToolContext): ToolHandler {
 	}
 }
 
+// Only the read-only inspection tools count as observations for the engine's observe event; edit_context mutates its target and never emits one. Living beside the handler map it mirrors keeps the names from drifting apart.
+export const OBSERVATION_TOOL_NAMES: ReadonlySet<string> = new Set(['list_role_messages', 'read_message_window', 'search_role_blocks', 'recent_role_tool_calls', 'context_info'])
+
 export function createBuiltInToolHandlers(context: BuiltInToolContext): Record<string, ToolHandler> {
 	return {
 		finish: (args) => {
