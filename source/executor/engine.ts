@@ -7,7 +7,7 @@ import { buildInitialHistory } from './context-builder.js'
 import { applyContextBackstop, contextExceededCard, contextManagedNotice, contextPressureNotice, currentEffectiveBudget, MAX_CONTEXT_RECOVERY_ATTEMPTS, runContextManagerHandler } from './context-handoff.js'
 import { truncateToolOutput } from './context-policy.js'
 import { DEFAULT_CONTEXT_PRESSURE_THRESHOLD, recordContextRejection } from './context-pressure.js'
-import { logEvent, type EngineContext, type EngineDependencies, type RoleState } from './engine-state.js'
+import { logEvent, type EngineContext, type EngineDependencies, type ResumedRole, type RoleState, type SuspendedTurn } from './engine-state.js'
 import { drainInterrupts } from './interrupt-engine.js'
 import type { LlmCallResult } from './llm.js'
 import { hashArguments, RECENT_TOOL_CALLS_LIMIT } from './role-inspection.js'
@@ -249,22 +249,6 @@ function recordToolResult(deps: EngineDependencies, roleState: RoleState, roleNa
 	return null
 }
 
-// The turn a resumed role was suspended in: the full tool-call list, the index of the agent call it was waiting on, and a resolver for the child card. The resolver either returns the checkpoint's recorded card or re-enters the child frame's own resume — invoked from inside the parent's suspended turn so parents register root-first exactly as in live execution.
-export interface SuspendedTurn {
-	toolCalls: ToolCall[]
-	agentIndex: number
-	resolveChildCard: () => Promise<ResultCard>
-}
-
-// The checkpoint-preserved identity and state of a role being resumed. The role keeps its pre-restart instance id (and does not re-emit role_start), so the log's role_start/role_finished pairing and every id reference inside persisted histories survive the restart.
-export interface ResumedRole {
-	roleId: string
-	roleState: RoleState
-	planAbort?: boolean
-	planInjection?: string
-	suspendedTurn?: SuspendedTurn
-}
-
 export async function runRole(deps: EngineDependencies, context: EngineContext, resumed?: ResumedRole): Promise<ResultCard> {
 	const guild = context.loadedGuild
 	const roleDefinition = guild.config.roles[context.roleName]
@@ -353,7 +337,7 @@ export async function runRole(deps: EngineDependencies, context: EngineContext, 
 		},
 		roleState,
 		humanBackend: deps.humanBackend,
-		contextWindow: guild.deployment.model.contextWindow,
+		loadedGuild: guild,
 		roleRegistry: deps.roleRegistry,
 		ownRoleId: registryEntry.roleId,
 		handlerOf: context.handlerOf,
@@ -369,7 +353,7 @@ export async function runRole(deps: EngineDependencies, context: EngineContext, 
 		maxToolOutputChars: guild.deployment.contextPolicy.maxToolOutputChars,
 	}
 
-	const finalCard = await executeRoleLoop(deps, context, roleState, registryEntry, allowedToolsManifests, dispatchCtx, guild.deployment.executor, resumed?.suspendedTurn)
+	const finalCard = await executeRoleLoop(deps, context, roleState, registryEntry, allowedToolsManifests, dispatchCtx, resumed?.suspendedTurn)
 	deps.roleRegistry.unregister(registryEntry.roleId)
 	deps.checkpointRecorder.unregisterFrame(registryEntry.roleId)
 	logEvent(deps.appendLog, 'role_finished', roleFinishedPayload(context.roleName, context.depth, finalCard, context.parent, registryEntry.roleId))
@@ -422,22 +406,22 @@ async function executeRoleLoop(
 	registryEntry: RoleRegistryEntry,
 	allowedToolsManifests: ToolManifest[],
 	dispatchCtx: DispatchContext,
-	config: ExecutorConfig,
 	suspendedTurn?: SuspendedTurn,
 ): Promise<ResultCard> {
+	const config = context.loadedGuild.deployment.executor
 	if (suspendedTurn !== undefined) {
 		const completedCard = await completeSuspendedTurn(deps, context, roleState, registryEntry, dispatchCtx, suspendedTurn)
 		if (completedCard !== null) return completedCard
 	}
 	while (true) {
-		const interruptCard = await drainInterrupts(runRole, deps, context, roleState, registryEntry, config)
+		const interruptCard = await drainInterrupts(runRole, deps, context, roleState, registryEntry)
 		if (interruptCard !== null) return interruptCard
 
 		// A queued overflow compaction runs first: the role's last request was rejected for context size and cannot succeed until the handler shrinks the history (or the naive backstop does when the handler fails).
 		if (roleState.contextCompactionPending !== undefined) {
 			const pending = roleState.contextCompactionPending
 			roleState.contextCompactionPending = undefined
-			const handlerCard = await runContextManagerHandler(runRole, deps, context, registryEntry, config, 'context_budget_exceeded', { promptTokens: pending.promptTokens, budgetTokens: pending.contextWindow })
+			const handlerCard = await runContextManagerHandler(runRole, deps, context, registryEntry, 'context_budget_exceeded', { promptTokens: pending.promptTokens, budgetTokens: pending.contextWindow })
 			if (handlerCard.status === 'success') {
 				roleState.history.push({ role: 'user', content: contextManagedNotice('context_budget_exceeded', handlerCard.summary) })
 			} else {
@@ -450,7 +434,7 @@ async function executeRoleLoop(
 		if (roleState.contextPressureNotice === 'pending') {
 			roleState.contextPressureNotice = 'sent'
 			if (context.depth === 0 && config.contextHandlerRole !== undefined) {
-				const handlerCard = await runContextManagerHandler(runRole, deps, context, registryEntry, config, 'context_pressure', { promptTokens: roleState.lastPromptTokens, budgetTokens: currentEffectiveBudget(context, deps) })
+				const handlerCard = await runContextManagerHandler(runRole, deps, context, registryEntry, 'context_pressure', { promptTokens: roleState.lastPromptTokens, budgetTokens: currentEffectiveBudget(context, deps) })
 				if (handlerCard.status === 'success') {
 					roleState.history.push({ role: 'user', content: contextManagedNotice('context_pressure', handlerCard.summary) })
 				} else {

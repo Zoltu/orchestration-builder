@@ -312,6 +312,7 @@ function checkManifests(): void {
 		...createRunLogToolHandlers({ logPath: path.join(manifestDir, 'log.jsonl') }),
 	}
 	checkSameSet('native tool handler table', new Set(Object.keys(nativeHandlers)), nativeToolNames)
+	// Shape-only fixture: the handlers are compared by name and never invoked, so the guild stub only has to type-check.
 	const builtInHandlers = createBuiltInToolHandlers({
 		spawnAgent: async () => ({ status: 'success', summary: '' }),
 		roleState: {
@@ -326,7 +327,16 @@ function checkManifests(): void {
 			loopCheckTokenWatermark: 0,
 		},
 		humanBackend: { ask: async () => '' },
-		contextWindow: 1000,
+		loadedGuild: {
+			config: { entryRole: '', roles: {}, tools: [] },
+			deployment: {
+				model: { name: '', apiBase: '', contextWindow: 1000, generation: {} },
+				executor: { maxAgentDepth: 8, defaultToolTimeoutSeconds: 30, maxCompactionAttempts: 5 },
+				contextPolicy: { maxToolOutputChars: 4000 },
+			},
+			prompts: {},
+			tools: {},
+		},
 		roleRegistry: createRoleRegistry(),
 		ownRoleId: 'fixture-0-0',
 	})

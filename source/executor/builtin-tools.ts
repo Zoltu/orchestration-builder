@@ -4,15 +4,17 @@ import { stripReasoning } from './context-policy.js'
 import { indexRoleMessages, readMessageWindow, searchRoleBlocks, MAX_SEARCH_MATCHES, RECENT_TOOL_CALLS_LIMIT, type InspectionField, type RecentToolCall } from './role-inspection.js'
 import type { InterruptActionKind, RoleRegistry, RoleRegistryEntry } from './role-registry.js'
 import { isObject } from './validation.js'
+import { optionalPositiveInt } from './tools/shared.js'
 import type { ToolHandler } from './tool-dispatch.js'
 import type { HumanBackend } from './human-backend.js'
+import type { LoadedGuild } from './loader.js'
 import type { RoleState } from './engine-state.js'
 
 export interface BuiltInToolContext {
 	spawnAgent(roleName: string, task: string): Promise<ResultCard>
 	roleState: RoleState
 	humanBackend: HumanBackend
-	contextWindow: number
+	loadedGuild: LoadedGuild
 	roleRegistry: RoleRegistry
 	// The instance id of the role these handlers belong to. Cross-role tools reject a caller that targets itself: a caller is active, and cross-role targets must be suspended — self-edits go through the target-free self path.
 	ownRoleId: string
@@ -126,14 +128,15 @@ function createContextInfo(context: BuiltInToolContext): ToolHandler {
 		const target = resolveContextTarget(context, args)
 		if (!target.ok) return target.error
 		const state = target.state
+		const contextWindow = context.loadedGuild.deployment.model.contextWindow
 		const messages = snapshotMessages(state.history)
 		const totalContentChars = messages.reduce((sum, m) => sum + m.contentChars + m.reasoningChars, 0)
 		const estimatedPromptTokens = Math.ceil(totalContentChars / 4)
-		const budgetRemaining = Math.max(0, context.contextWindow - estimatedPromptTokens)
+		const budgetRemaining = Math.max(0, contextWindow - estimatedPromptTokens)
 		return {
 			kind: 'success',
 			data: {
-				contextWindow: context.contextWindow,
+				contextWindow,
 				currentPromptTokens: estimatedPromptTokens,
 				lastReportedPromptTokens: state.lastPromptTokens,
 				budgetRemaining,
@@ -365,12 +368,6 @@ function resolveContextTarget(context: BuiltInToolContext, args: Record<string, 
 
 function isInspectionField(value: unknown): value is InspectionField {
 	return value === 'content' || value === 'reasoning'
-}
-
-function optionalPositiveInt(value: unknown, fallback: number): number | null {
-	if (value === undefined) return fallback
-	if (typeof value !== 'number' || !Number.isInteger(value) || value <= 0) return null
-	return value
 }
 
 function createListRoleMessages(context: BuiltInToolContext): ToolHandler {

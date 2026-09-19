@@ -155,7 +155,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
-function makeDeps(llm: FakeLlm, persistence: FakePersistenceFns, loadGuild: () => LoadedGuild): ExecutorDependencies {
+function makeDeps(llm: FakeLlm, persistence: FakePersistenceFns, getLoadedGuild: () => LoadedGuild): ExecutorDependencies {
 	return {
 		llmCaller: llm,
 		appendLog: persistence.appendLog,
@@ -165,7 +165,7 @@ function makeDeps(llm: FakeLlm, persistence: FakePersistenceFns, loadGuild: () =
 		deleteCheckpoint: persistence.deleteCheckpoint,
 		additionalToolHandlers: {},
 		humanBackend: stubHumanBackend,
-		loadGuild,
+		getLoadedGuild,
 		interruptQueue: createInterruptQueue(),
 	}
 }

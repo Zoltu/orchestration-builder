@@ -1,10 +1,10 @@
-import type { ResumedRole } from './engine.js'
 import { compactHistoryForContextBudget, type ContextCompactionReport } from './context-policy.js'
 import { effectiveContextBudget } from './context-pressure.js'
 import { createResultCard, createToolError } from './errors.js'
+import { runHandlerInterlude } from './interrupt-engine.js'
 import type { RoleRegistryEntry } from './role-registry.js'
-import { logEvent, type EngineContext, type EngineDependencies, type RoleState } from './engine-state.js'
-import type { ExecutorConfig, ResultCard } from './types.js'
+import { logEvent, type EngineContext, type EngineDependencies, type RoleState, type RunRole } from './engine-state.js'
+import type { ResultCard } from './types.js'
 
 // The recovery loop for a context-window rejection: each rejection compacts with a fresh endpoint-reported token count, so the estimate recalibrates on every attempt. Three attempts give the estimate room to converge without letting a hopeless request spin.
 export const MAX_CONTEXT_RECOVERY_ATTEMPTS = 3
@@ -89,17 +89,16 @@ export function contextPressureNotice(promptTokens: number, effectiveBudget: num
 	].join(' ')
 }
 
-// Suspends the role and invokes the configured context handler against its frozen (registered) state — the same preempt-and-resume interlude as the loop-check handler, so it logs the same interrupt/interrupt_resolved pair and the interaction model roots the handler on a fresh interrupt stack. The target always resumes afterwards: a successful handler leaves a compacted history; a failed one leaves the history untouched and the caller falls back (the handoff notice at depth 0, the naive backstop at the wall).
-// runRole is threaded in by the engine so this module can drive role turns without importing the turn loop at runtime (the engine imports this module).
+// The context-compaction interlude (runHandlerInterlude in interrupt-engine.ts) for the two context triggers. The target always resumes afterwards: a successful handler leaves a compacted history; a failed one leaves the history untouched and the caller falls back (the handoff notice at depth 0, the naive backstop at the wall).
 export async function runContextManagerHandler(
-	runRole: (deps: EngineDependencies, context: EngineContext, resumed?: ResumedRole) => Promise<ResultCard>,
+	runRole: RunRole,
 	deps: EngineDependencies,
 	context: EngineContext,
 	entry: RoleRegistryEntry,
-	config: ExecutorConfig,
 	trigger: 'context_pressure' | 'context_budget_exceeded',
 	reported: { promptTokens: number; budgetTokens: number },
 ): Promise<ResultCard> {
+	const config = context.loadedGuild.deployment.executor
 	const handlerRole = config.contextHandlerRole
 	if (handlerRole === undefined) throw new Error('runContextManagerHandler called without executor.contextHandlerRole configured')
 	const task = trigger === 'context_pressure'
@@ -113,20 +112,12 @@ export async function runContextManagerHandler(
 			`Compact its conversation now: inspect it with list_role_messages, read_message_window, and search_role_blocks, prune it with edit_context (targetRole "${entry.roleId}"), confirm the reduction with context_info (targetRole "${entry.roleId}"), then call finish.`,
 			'It resumes its work when you finish, so preserve what it needs to continue.',
 		].join(' ')
-	logEvent(deps.appendLog, 'interrupt', { trigger, handler: handlerRole, target: entry.roleId })
-	const handlerCard = await runRole(deps, {
-		...context,
-		depth: Math.min(context.depth + 1, config.maxAgentDepth),
-		roleName: handlerRole,
-		task,
-		parent: context.roleName,
-		parentRoleId: entry.roleId,
-		handlerOf: entry.roleId,
+	return runHandlerInterlude(runRole, deps, context, entry, config, handlerRole, trigger, task, {}, (handlerCard) => {
+		if (handlerCard.status === 'success') {
+			logEvent(deps.appendLog, 'interrupt_resolved', { trigger, handler: handlerRole, target: entry.roleId, action: 'compacted' })
+		} else {
+			logEvent(deps.appendLog, 'interrupt_resolved', { trigger, handler: handlerRole, target: entry.roleId, action: 'failed', handlerStatus: handlerCard.status })
+		}
+		return handlerCard
 	})
-	if (handlerCard.status === 'success') {
-		logEvent(deps.appendLog, 'interrupt_resolved', { trigger, handler: handlerRole, target: entry.roleId, action: 'compacted' })
-	} else {
-		logEvent(deps.appendLog, 'interrupt_resolved', { trigger, handler: handlerRole, target: entry.roleId, action: 'failed', handlerStatus: handlerCard.status })
-	}
-	return handlerCard
 }

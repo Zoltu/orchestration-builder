@@ -81,7 +81,7 @@ async function withRunBindings<T>(config: {
 	config.interruptChannel.bindQueue(interruptQueue)
 	const dependencies: ExecutorDependencies = {
 		llmCaller: config.llmCaller,
-		loadGuild: () => config.loadedGuild,
+		getLoadedGuild: () => config.loadedGuild,
 		appendLog: filteredAppendLog,
 		createRunDirectory: createRunDirectory(runId, config.runsBaseDir),
 		writeMeta: createWriteMeta(runId, config.runsBaseDir),

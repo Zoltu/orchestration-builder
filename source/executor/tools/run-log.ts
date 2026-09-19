@@ -3,7 +3,7 @@ import { createToolError } from '../errors.js'
 import type { ToolHandler } from '../tool-dispatch.js'
 import type { ToolResult } from '../types.js'
 import { isObject } from '../validation.js'
-import { wrapIoError } from './shared.js'
+import { optionalNonNegativeInt, optionalPositiveInt, wrapIoError } from './shared.js'
 
 export interface RunLogToolConfig {
 	logPath: string
@@ -130,18 +130,6 @@ function readRunLogEntries(logPath: string): { ok: true; entries: RunLogEntry[] 
 		return { ok: false, result: wrapIoError(error, 'Cannot read run log') }
 	}
 	return { ok: true, entries: parseRunLogEntries(text) }
-}
-
-function optionalNonNegativeInt(value: unknown, fallback: number): number | null {
-	if (value === undefined) return fallback
-	if (typeof value !== 'number' || !Number.isInteger(value) || value < 0) return null
-	return value
-}
-
-function optionalPositiveInt(value: unknown, fallback: number): number | null {
-	if (value === undefined) return fallback
-	if (typeof value !== 'number' || !Number.isInteger(value) || value <= 0) return null
-	return value
 }
 
 function createReadRunLog(config: RunLogToolConfig): ToolHandler {

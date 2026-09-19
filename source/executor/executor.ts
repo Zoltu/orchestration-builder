@@ -4,7 +4,7 @@ import type { ResultCard, RunContinuation, RunMeta, RunOptions } from './types.j
 import { createCheckpointRecorder, type RunCheckpoint } from './checkpoint.js'
 import { createContextPressureTracker } from './context-pressure.js'
 import { runRole } from './engine.js'
-import type { EngineDependencies } from './engine-state.js'
+import { logEvent, type EngineDependencies } from './engine-state.js'
 import type { HumanBackend } from './human-backend.js'
 import type { InterruptQueue } from './interrupts.js'
 import type { LlmCaller } from './llm.js'
@@ -19,8 +19,8 @@ export interface ExecutorDependencies {
 	appendLog: AppendLog
 	additionalToolHandlers: Record<string, ToolHandler>
 	humanBackend: HumanBackend
-	// Supplies the service-bound, resolved guild (the LoadedGuild constructed at startup, deployment included); not the loader's file-shaped LoadGuild, which the startup path completes first.
-	loadGuild: () => LoadedGuild
+	// Supplies the service-bound, resolved guild (the LoadedGuild constructed at startup, deployment included); not the loader's file-shaped LoadGuild, which the startup path completes first. The name deliberately differs from LoadGuild: the loader reads files, this getter hands back the already-loaded guild.
+	getLoadedGuild: () => LoadedGuild
 	createRunDirectory: RunDirectory
 	writeMeta: WriteMeta
 	writeCheckpoint: WriteCheckpoint
@@ -64,11 +64,11 @@ function terminalMeta(options: RunOptions, startTime: string, result: ResultCard
 export async function runExecutor(deps: ExecutorDependencies, options: RunOptions): Promise<RunMeta> {
 	deps.createRunDirectory()
 
-	const loadedGuild = deps.loadGuild()
+	const loadedGuild = deps.getLoadedGuild()
 
 	const startTime = new Date().toISOString()
 	// effort_set is logged once at run start so the trace records the chosen level before the entry role begins.
-	deps.appendLog({ timestamp: new Date().toISOString(), type: 'effort_set', payload: { effort: options.effort } })
+	logEvent(deps.appendLog, 'effort_set', { effort: options.effort })
 	// Write a running meta before the entry role begins so the UI can show the task, run id, and start time while the run is in progress, rather than only after completion. It is overwritten with the terminal meta below.
 	deps.writeMeta({
 		runId: options.runId,
@@ -130,11 +130,11 @@ export async function resumeExecutor(deps: ExecutorDependencies, checkpoint: Run
 
 	// No createRunDirectory here: a resume re-enters the run directory the checkpoint was read from, which therefore exists — and createRunDirectory refuses existing directories because a fresh run must never share one.
 
-	const loadedGuild = deps.loadGuild()
+	const loadedGuild = deps.getLoadedGuild()
 
 	const startTime = checkpoint.startTime
 	// run_resumed marks the restart boundary in the log: events before it belong to the pre-restart process, events after it to the resumed run. Resumed roles do not re-emit role_start, so a reviewer can tell why.
-	deps.appendLog({ timestamp: new Date().toISOString(), type: 'run_resumed', payload: { runId: checkpoint.runId, resumedFrames: checkpoint.frames.length } })
+	logEvent(deps.appendLog, 'run_resumed', { runId: checkpoint.runId, resumedFrames: checkpoint.frames.length })
 	// Re-assert the running meta: the pre-restart write may never have landed, and the terminal meta overwrites it below either way.
 	deps.writeMeta({
 		runId: checkpoint.runId,

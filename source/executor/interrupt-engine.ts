@@ -1,8 +1,7 @@
-import type { ResumedRole } from './engine.js'
 import { createResultCard, createToolError } from './errors.js'
 import type { InterruptRequest } from './interrupts.js'
 import type { RoleRegistry, RoleRegistryEntry } from './role-registry.js'
-import { logEvent, type EngineContext, type EngineDependencies, type RoleState } from './engine-state.js'
+import { logEvent, type EngineContext, type EngineDependencies, type RoleState, type RunRole } from './engine-state.js'
 import type { EffortLevel, ExecutorConfig, ResultCard } from './types.js'
 
 // The marker prefix the orchestrator/planner prompts teach roles to recognize. A notice goes to the run's entry role (the chain root) as run-wide information to act on directly; a plan modification arrives only after active sub-work beneath the plan owner was aborted and asks the owner to re-plan around the change. An operator inquiry is never injected — it is answered by a fresh handler role (runInquiryHandler).
@@ -73,10 +72,38 @@ function routeOperatorInterrupt(
 	return null
 }
 
-// Suspends the active role and invokes the guild-configured handler role against its frozen (registered) state, then applies the handler's trigger_interrupt action: continue resumes unchanged, redirect resumes with the handler's message already injected (by the tool) into the target's history, abort finishes the target with a loop_detected card. The interrupt event lands immediately before the handler's role_start so the interaction model roots the handler under a fresh interrupt participant.
-// runRole is threaded in by the engine so this module can drive role turns without importing the turn loop at runtime (the engine imports this module).
+// The trigger vocabulary of the interrupt/interrupt_resolved event pair every handler interlude logs.
+export type InterludeTrigger = 'loop_check' | 'inquiry' | 'context_pressure' | 'context_budget_exceeded'
+
+// The shared handler interlude every handler invocation runs (the loop-check, inquiry, and context handlers): suspend the active role at the safe point, invoke the handler role against its frozen (registered) state, then apply the trigger's resolution step with the handler's finish card. The interrupt event lands immediately before the handler's role_start so the interaction model roots the handler under a fresh interrupt participant. The handler context is the target's context spread with handlerOf set to the target's instance id — the mark the drain point reads to exempt a handler from interrupt checking and operator-request draining, so a handler can never interrupt itself or consume operator requests meant for real work roles. The handler depth is one beneath the target clamped to maxAgentDepth: the interlude is platform infrastructure, not a delegation, so it must never trip the global depth budget itself. interruptDetails carries the trigger's extra interrupt event payload fields (the inquiry's verbatim question; nothing for the other triggers).
+export async function runHandlerInterlude<Resolution>(
+	runRole: RunRole,
+	deps: EngineDependencies,
+	context: EngineContext,
+	entry: RoleRegistryEntry,
+	config: ExecutorConfig,
+	handlerRole: string,
+	trigger: InterludeTrigger,
+	task: string,
+	interruptDetails: Record<string, unknown>,
+	resolve: (handlerCard: ResultCard) => Resolution,
+): Promise<Resolution> {
+	logEvent(deps.appendLog, 'interrupt', { trigger, handler: handlerRole, target: entry.roleId, ...interruptDetails })
+	const handlerCard = await runRole(deps, {
+		...context,
+		depth: Math.min(context.depth + 1, config.maxAgentDepth),
+		roleName: handlerRole,
+		task,
+		parent: context.roleName,
+		parentRoleId: entry.roleId,
+		handlerOf: entry.roleId,
+	})
+	return resolve(handlerCard)
+}
+
+// The loop-check interlude (runHandlerInterlude): the handler investigates the flagged instance and applies its trigger_interrupt action — continue resumes unchanged, redirect resumes with the handler's message already injected (by the tool) into the target's history, abort finishes the target with a loop_detected card.
 async function runInterruptHandler(
-	runRole: (deps: EngineDependencies, context: EngineContext, resumed?: ResumedRole) => Promise<ResultCard>,
+	runRole: RunRole,
 	deps: EngineDependencies,
 	context: EngineContext,
 	entry: RoleRegistryEntry,
@@ -88,34 +115,26 @@ async function runInterruptHandler(
 		`It has made ${entry.roleState.toolCallCount} tool calls and generated ${entry.roleState.generatedTokens} tokens so far.`,
 		'Investigate whether it is stuck in a loop, then call trigger_interrupt with that role-instance id and your decision.',
 	].join(' ')
-	logEvent(deps.appendLog, 'interrupt', { trigger: 'loop_check', handler: handlerRole, target: entry.roleId })
-	const handlerCard = await runRole(deps, {
-		...context,
-		depth: Math.min(context.depth + 1, config.maxAgentDepth),
-		roleName: handlerRole,
-		task,
-		parent: context.roleName,
-		parentRoleId: entry.roleId,
-		handlerOf: entry.roleId,
-	})
-	const action = entry.interruptAction
-	entry.interruptAction = undefined
-	if (action === undefined) {
-		// A handler that finishes without calling trigger_interrupt decides nothing; the target resumes unchanged. The handler's own outcome is logged for the reviewer.
-		logEvent(deps.appendLog, 'interrupt_resolved', { trigger: 'loop_check', handler: handlerRole, target: entry.roleId, action: 'continue', handlerStatus: handlerCard.status })
+	return runHandlerInterlude(runRole, deps, context, entry, config, handlerRole, 'loop_check', task, {}, (handlerCard) => {
+		const action = entry.interruptAction
+		entry.interruptAction = undefined
+		if (action === undefined) {
+			// A handler that finishes without calling trigger_interrupt decides nothing; the target resumes unchanged. The handler's own outcome is logged for the reviewer.
+			logEvent(deps.appendLog, 'interrupt_resolved', { trigger: 'loop_check', handler: handlerRole, target: entry.roleId, action: 'continue', handlerStatus: handlerCard.status })
+			return null
+		}
+		logEvent(deps.appendLog, 'interrupt_resolved', { trigger: 'loop_check', handler: handlerRole, target: entry.roleId, action: action.action })
+		if (action.action === 'abort') {
+			const summary = action.reason !== '' ? action.reason : 'Aborted by the loop-check handler'
+			return createResultCard('error', summary, { error: createToolError('loop_detected', action.reason) })
+		}
 		return null
-	}
-	logEvent(deps.appendLog, 'interrupt_resolved', { trigger: 'loop_check', handler: handlerRole, target: entry.roleId, action: action.action })
-	if (action.action === 'abort') {
-		const summary = action.reason !== '' ? action.reason : 'Aborted by the loop-check handler'
-		return createResultCard('error', summary, { error: createToolError('loop_detected', action.reason) })
-	}
-	return null
+	})
 }
 
-// Suspends the active role and invokes the configured inquiry handler role to answer the operator's question — the same preempt-and-resume interlude as the loop-check and context handlers, so it logs the same interrupt/interrupt_resolved pair and the interaction model roots the handler on a fresh interrupt stack. The handler is a fresh agent that was never given the run's conversations: the briefing lists the live (suspended) instances root first and points at the run-log tools and the workspace for researching roles that already finished. Its finish-card summary is the answer shown to the operator. The target always resumes afterwards, whatever the handler did — a question never finishes a run.
+// The inquiry interlude (runHandlerInterlude): the configured inquiry handler is a fresh agent that was never given the run's conversations — the briefing lists the live (suspended) instances root first and points at the run-log tools and the workspace for researching roles that already finished. Its finish-card summary is the answer shown to the operator. The target always resumes afterwards, whatever the handler did — a question never finishes a run.
 async function runInquiryHandler(
-	runRole: (deps: EngineDependencies, context: EngineContext, resumed?: ResumedRole) => Promise<ResultCard>,
+	runRole: RunRole,
 	deps: EngineDependencies,
 	context: EngineContext,
 	entry: RoleRegistryEntry,
@@ -149,33 +168,25 @@ async function runInquiryHandler(
 		finishedRolesNote,
 		'When you know the answer, call finish with status "success" and put the answer, in plain language, in the summary — the summary is shown to the operator as your answer. Do not modify the workspace or any role\'s conversation.',
 	].join('\n')
-	logEvent(deps.appendLog, 'interrupt', { trigger: 'inquiry', handler: handlerRole, target: entry.roleId, message: request.message })
-	const handlerCard = await runRole(deps, {
-		...context,
-		depth: Math.min(context.depth + 1, config.maxAgentDepth),
-		roleName: handlerRole,
-		task,
-		parent: context.roleName,
-		parentRoleId: entry.roleId,
-		handlerOf: entry.roleId,
+	await runHandlerInterlude(runRole, deps, context, entry, config, handlerRole, 'inquiry', task, { message: request.message }, (handlerCard) => {
+		if (handlerCard.status === 'success') {
+			logEvent(deps.appendLog, 'interrupt_resolved', { trigger: 'inquiry', handler: handlerRole, target: entry.roleId, action: 'answered', summary: handlerCard.summary })
+		} else {
+			logEvent(deps.appendLog, 'interrupt_resolved', { trigger: 'inquiry', handler: handlerRole, target: entry.roleId, action: 'failed', handlerStatus: handlerCard.status, summary: handlerCard.summary })
+		}
 	})
-	if (handlerCard.status === 'success') {
-		logEvent(deps.appendLog, 'interrupt_resolved', { trigger: 'inquiry', handler: handlerRole, target: entry.roleId, action: 'answered', summary: handlerCard.summary })
-	} else {
-		logEvent(deps.appendLog, 'interrupt_resolved', { trigger: 'inquiry', handler: handlerRole, target: entry.roleId, action: 'failed', handlerStatus: handlerCard.status, summary: handlerCard.summary })
-	}
 }
 
 // The platform's single safe point, run at the top of every turn: no LLM call is in flight here, so suspending or unwinding the role cannot tear a turn. Returns a ResultCard when the role must finish, or null to continue the turn.
 // Order: marks set by an earlier routing first, then (for non-handler roles only) the loop-check cadence, then one queued operator request.
 export async function drainInterrupts(
-	runRole: (deps: EngineDependencies, context: EngineContext, resumed?: ResumedRole) => Promise<ResultCard>,
+	runRole: RunRole,
 	deps: EngineDependencies,
 	context: EngineContext,
 	roleState: RoleState,
 	entry: RoleRegistryEntry,
-	config: ExecutorConfig,
 ): Promise<ResultCard | null> {
+	const config = context.loadedGuild.deployment.executor
 	if (entry.planAbort === true) {
 		return interruptedCard('Aborted by an operator plan modification')
 	}

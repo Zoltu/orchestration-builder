@@ -30,6 +30,20 @@ export function isObject(value: unknown): value is Record<string, unknown> {
 	return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
+// The record guard as a plain narrowing: for readers that treat absence-of-record as a value (undefined) rather than a rejected shape.
+export function asRecord(value: unknown): Record<string, unknown> | undefined {
+	return isObject(value) ? value : undefined
+}
+
+// A parse failure of untrusted JSON is an expected condition callers branch on, so the helper converts JSON.parse's throw into a value instead of letting the exception escape.
+export function safeJsonParse(text: string): { ok: true; value: unknown } | { ok: false } {
+	try {
+		return { ok: true, value: JSON.parse(text) }
+	} catch {
+		return { ok: false }
+	}
+}
+
 export function isString(value: unknown): value is string {
 	return typeof value === 'string'
 }

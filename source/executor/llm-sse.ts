@@ -1,5 +1,5 @@
 import type { LlmCallResult, LlmUsage, Message, ToolCall, ToolManifest } from './types.js'
-import { isObject } from './validation.js'
+import { asRecord, isObject, safeJsonParse } from './validation.js'
 
 export const SSE_MAX_LINE_CHARS = 16 * 1024 * 1024
 
@@ -48,14 +48,6 @@ export type SseDataPayload =
 	| { kind: 'error'; value: Record<string, unknown> }
 	| { kind: 'skip' }
 
-function safeJsonParse(text: string): { ok: true; value: unknown } | { ok: false } {
-	try {
-		return { ok: true, value: JSON.parse(text) }
-	} catch {
-		return { ok: false }
-	}
-}
-
 // Takes one assembled SSE line whole (the assembler is field-agnostic): the data: field prefix is recognized here per the SSE spec (one optional leading space), and every non-data line — event:, id:, retry:, comments, blanks — skips. The spec allows one event's data to span multiple data: lines, but each line is parsed independently here, so a multi-line event surfaces as fragments that skip as invalid JSON — a deliberate limitation, since both target stacks send single-line data. PPQ and llama.cpp send only bare data lines, but real streams still carry the other fields.
 export function parseSseDataPayload(line: string): SseDataPayload {
 	if (!line.startsWith('data:')) return { kind: 'skip' }
@@ -95,10 +87,6 @@ export interface ResponsesStreamAccumulator {
 }
 
 const ANONYMOUS_ITEM_KEY = ''
-
-function asRecord(value: unknown): Record<string, unknown> | undefined {
-	return isObject(value) ? value : undefined
-}
 
 // Delta events are keyed by item_id when the stack sends one, else by output_index (prefixed so the two key spaces can never collide), else all events share one anonymous slot.
 function eventItemKey(event: Record<string, unknown>): string {

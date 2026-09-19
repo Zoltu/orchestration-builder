@@ -8,7 +8,7 @@ import type { AppendLog } from './persistence.js'
 import type { RecentToolCall } from './role-inspection.js'
 import type { RoleRegistry } from './role-registry.js'
 import type { ToolHandler } from './tool-dispatch.js'
-import type { EffortLevel, LogLevel, LogEvent, Message, RunContinuation } from './types.js'
+import type { EffortLevel, LogLevel, LogEvent, Message, ResultCard, RunContinuation, ToolCall } from './types.js'
 
 export interface RoleState {
 	history: Message[]
@@ -45,7 +45,7 @@ export interface EngineContext {
 	parent?: string
 	// The calling role's instance id, omitted for the entry role. Lets the interrupt platform walk the live delegation chain (plan-modification routing).
 	parentRoleId?: string
-	// Set when this invocation is an interrupt handler serving the named target instance: the drain point skips the handler so a handler can never interrupt itself or consume operator requests meant for real work roles.
+	// Set when this invocation is an interrupt handler serving the named target instance, by the shared handler interlude (runHandlerInterlude in interrupt-engine.ts): the drain point skips the handler so a handler can never interrupt itself or consume operator requests meant for real work roles.
 	handlerOf?: string
 }
 
@@ -61,6 +61,25 @@ export interface EngineDependencies {
 	// The run's checkpoint recorder, created per run by runExecutor; every frame registers on start and the leaf writes the role stack at each safe point so a service restart can resume the run.
 	checkpointRecorder: CheckpointRecorder
 }
+
+// The turn a resumed role was suspended in: the full tool-call list, the index of the agent call it was waiting on, and a resolver for the child card. The resolver either returns the checkpoint's recorded card or re-enters the child frame's own resume — invoked from inside the parent's suspended turn so parents register root-first exactly as in live execution.
+export interface SuspendedTurn {
+	toolCalls: ToolCall[]
+	agentIndex: number
+	resolveChildCard: () => Promise<ResultCard>
+}
+
+// The checkpoint-preserved identity and state of a role being resumed. The role keeps its pre-restart instance id (and does not re-emit role_start), so the log's role_start/role_finished pairing and every id reference inside persisted histories survive the restart.
+export interface ResumedRole {
+	roleId: string
+	roleState: RoleState
+	planAbort?: boolean
+	planInjection?: string
+	suspendedTurn?: SuspendedTurn
+}
+
+// The engine's runRole turn loop, threaded in by the engine so the interrupt and resume modules can drive role turns without importing the turn loop at runtime (the engine imports these modules).
+export type RunRole = (deps: EngineDependencies, context: EngineContext, resumed?: ResumedRole) => Promise<ResultCard>
 
 export function logEvent(appendLog: AppendLog, type: string, payload: unknown): void {
 	const event: LogEvent = {

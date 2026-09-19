@@ -1,6 +1,6 @@
 import type { LlmCallResult, LlmRequest, ResolvedModelConfig } from './types.js'
 import { createResponsesStreamAccumulator, createSseLineAssembler, mapHistoryToResponsesInput, mapTerminalResponseToCallResult, mapToolManifestsToResponsesTools, OversizedSseLineError, parseSseDataPayload, type ResponsesStreamSnapshot, type SseDataPayload } from './llm-sse.js'
-import { isObject } from './validation.js'
+import { asRecord, isObject, safeJsonParse } from './validation.js'
 
 // The shared LLM wire types live in types.ts (see it for the definitions); re-exported here so every import site keeps its path.
 export type { LlmCallResult, LlmRequest, LlmUsage } from './types.js'
@@ -111,18 +111,6 @@ export function detectContextBudgetExceeded(status: number, errorBody: string, c
 	}
 	if (!looksLikeContext) return undefined
 	return { kind: 'context_budget_exceeded', promptTokens: extractPromptTokens(errorBody), contextWindow }
-}
-
-function safeJsonParse(text: string): { ok: true; value: unknown } | { ok: false } {
-	try {
-		return { ok: true, value: JSON.parse(text) }
-	} catch {
-		return { ok: false }
-	}
-}
-
-function asRecord(value: unknown): Record<string, unknown> | undefined {
-	return isObject(value) ? value : undefined
 }
 
 function extractPromptTokens(errorBody: string): number {

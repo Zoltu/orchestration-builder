@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import { createBuiltInToolHandlers, type BuiltInToolContext } from './builtin-tools.ts'
 import { createRoleRegistry, type RoleRegistry } from './role-registry.ts'
 import type { RoleState } from './engine-state.ts'
+import type { LoadedGuild } from './loader.ts'
 import { stubHumanBackend, toolData } from './test-fixtures.ts'
 import type { ToolHandler } from './tool-dispatch.ts'
 import type { Message, ToolResult } from './types.js'
@@ -34,6 +35,18 @@ function fixtureRoleState(): RoleState {
 	}
 }
 
+// The handlers under test never invoke context_info, so the guild is a shape-only stub; the window value matches the one the previous extracted-field fixture carried.
+const stubGuild: LoadedGuild = {
+	config: { entryRole: 'main', roles: {}, tools: [] },
+	deployment: {
+		model: { name: 'm', apiBase: 'http://x', contextWindow: 1000, generation: {} },
+		executor: { maxAgentDepth: 8, defaultToolTimeoutSeconds: 30, maxCompactionAttempts: 5 },
+		contextPolicy: { maxToolOutputChars: 4000 },
+	},
+	prompts: {},
+	tools: {},
+}
+
 function makeContext(): { context: BuiltInToolContext; registry: RoleRegistry; target: RoleState; callerState: RoleState } {
 	const registry = createRoleRegistry()
 	const target = fixtureRoleState()
@@ -44,7 +57,7 @@ function makeContext(): { context: BuiltInToolContext; registry: RoleRegistry; t
 		spawnAgent: async () => ({ status: 'success', summary: '' }),
 		roleState: callerState,
 		humanBackend: stubHumanBackend,
-		contextWindow: 1000,
+		loadedGuild: stubGuild,
 		roleRegistry: registry,
 		ownRoleId: 'context_manager-2-2',
 		// The caller stands in for a loop-check handler serving the coder instance: trigger_interrupt must accept that instance and no other.
