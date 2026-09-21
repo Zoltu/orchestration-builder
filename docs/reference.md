@@ -385,7 +385,7 @@ The browser tab title of the served UI is a service setting, not a deployment fi
 
 ### `POST /api/runs`
 
-Starts a run. **Body:** `{ "task": "...", "effort"?: "quick"|"standard"|"thorough", "logLevel"?: "full"|"standard", "continuesFrom"?: "<run_id>" }`. `effort` is optional; when omitted the project default (see `GET|PUT /api/settings`) is applied, falling back to `"standard"` when no default is set. Anything but the three tier strings returns `400 invalid_body`. `logLevel` is optional and picks the run's logging level (see "Logging level"); when omitted it resolves through the same chain — project default, then the deployment file's `logging.level`, then `"full"` — and anything but the two level strings returns `400 invalid_body`. `continuesFrom` starts a new run that continues a prior one; when present it must be a well-formed run id (`run-YYYYMMDD-HHMMSS`) naming a known run whose status is terminal (`success`, `error`, `needs_clarification`, or `interrupted` — a `running` run has no outcome to continue from), and anything else returns `400 invalid_body`. A continuation run records the lineage as `continuesFrom` in its `meta.json` (see "Persistence"), and the executor injects a clearly-marked briefing block into the entry role's initial user message — below the operator's new task text, quoting the prior run's task, its result summary, and the `read_plan` handle for the prior run's plan document — so the Guild can pick up where the prior run left off (the planner reads the prior plan with `read_plan(runId)`); the executor provides the channel only, and the Guild decides what to do with the continuation. **201:** `{ "runId": "..." }`. **409:** `{ "ok": false, "error": "run_in_progress" }`.
+Starts a run. **Body:** `{ "task": "...", "effort"?: "quick"|"standard"|"thorough", "logLevel"?: "full"|"standard", "continuesFrom"?: "<run_id>" }`. `effort` is optional; when omitted the project default (see `GET|PUT /api/settings`) is applied, falling back to `"standard"` when no default is set. Anything but the three tier strings returns `400 invalid_body`. `logLevel` is optional and picks the run's logging level (see "Logging level"); when omitted it resolves through the same chain — project default, then the deployment file's `logging.level`, then `"full"` — and anything but the two level strings returns `400 invalid_body`. `continuesFrom` starts a new run that continues a prior one; when present it must be a well-formed run id (`run-YYYYMMDD-HHMMSS`) naming a known run whose status is terminal (`success`, `error`, `needs_clarification`, or `interrupted` — a `running` run has no outcome to continue from), and anything else returns `400 invalid_body`. A continuation run records the lineage as `continuesFrom` in its `meta.json` (see "Persistence"), and the executor injects a clearly-marked briefing block into the entry role's initial user message — below the operator's new task text, quoting the prior run's task, its result summary, and the `read_plan` handle for the prior run's plan document — so the Guild can pick up where the prior run left off (the planner reads the prior plan with `read_plan(runId)`); the executor provides the channel only, and the Guild decides what to do with the continuation. **201:** `{ "runId": "..." }`. **409:** `{ "ok": false, "error": "run_in_progress" }` when a run is already active, or `{ "ok": false, "error": "run_id_collision" }` when the generated run id collides with an existing run directory — run ids have one-second resolution, so a prior run that failed instantly can still own the fresh id, and sharing a directory would interleave the two runs' logs and metas; resubmitting generates a new id.
 
 ### `GET /api/settings`
 
@@ -425,7 +425,7 @@ Submits an operator interrupt for the active run (see "Interrupt platform"). **B
 
 ### `GET /api/run`
 
-Convenience alias for the most recent run (active or last completed).
+Convenience alias for the most recent run (active or last completed). **404:** `{ "ok": false, "error": "no_run" }` when no run has ever started (there is nothing to alias), `{ "ok": false, "error": "not_found" }` when the most recent run's artifacts can no longer be read.
 
 ### `GET /api/questions`
 
@@ -434,6 +434,18 @@ Returns pending `ask_human` questions from the active run.
 ### `POST /api/answer`
 
 Submits an answer. **Body:** `{ "id": "...", "answer": "..." }`.
+
+### `GET /api/config`
+
+Returns the rendered configuration the web client boots from: the model endpoint (`name`, `contextWindow`), the executor budgets, the entry role, each role's tools and display fields, each tool manifest's display fields, and the guild's `visualization` section when present (see "Guild format" and [`docs/visualization.md`](visualization.md) "Labels").
+
+### `GET /api/demo/scenarios`
+
+Manifest of the fixture scenarios the visualization demo page serves: `{ id, label, frameCount, participants }` per scenario. `participants` is taken from the scenario's final frame so the sequence view can lay out every column from the first frame (see [`docs/visualization.md`](visualization.md) "Dev harness").
+
+### `GET /api/demo/flow/:scenario/:frame`
+
+Serves one frame of a demo scenario fed through the real adapter — the same `LogEvent` → InteractionModel derivation as `GET /api/runs/:id/flow` — so the demo harness exercises the product's data path (see [`docs/visualization.md`](visualization.md) "Dev harness"). `?operation=<id>` serves one operation's detail markdown the same way the run flow endpoint does. An unknown scenario or an out-of-range frame returns `404 not_found`.
 
 ### Lifecycle
 

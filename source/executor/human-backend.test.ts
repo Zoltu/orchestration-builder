@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import type { LogEvent } from './types.js'
 import { createWebHumanBackend } from './human-backend.ts'
-import { defined } from './test-fixtures.ts'
+import { defined, flushMicrotasks } from './test-fixtures.ts'
 import { isObject } from './validation.ts'
 
 describe('createWebHumanBackend', () => {
@@ -52,7 +52,8 @@ describe('createWebHumanBackend', () => {
 			resolved = true
 		})
 
-		await new Promise((resolve) => setTimeout(resolve, 10))
+		// The backend arms no timer of its own — the ask promise settles only through submitAnswer — so a microtask drain is the complete opportunity for it to resolve on its own.
+		await flushMicrotasks()
 		expect(resolved).toBe(false)
 		expect(backend.pendingQuestions().length).toBe(1)
 

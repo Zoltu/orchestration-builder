@@ -1,14 +1,14 @@
 import { describe, expect, test } from 'bun:test'
-import { createResponsesStreamAccumulator, createSseLineAssembler, mapHistoryToResponsesInput, mapTerminalResponseToCallResult, mapToolManifestsToResponsesTools, OversizedSseLineError, parseSseDataPayload, SSE_MAX_LINE_CHARS, type ResponsesAccumulatedItem, type ResponsesStreamAccumulator, type ResponsesStreamSnapshot } from './llm-sse.ts'
+import { createResponsesStreamAccumulator, createSseLineAssembler, mapHistoryToResponsesInput, mapTerminalResponseToCallResult, mapToolManifestsToResponsesTools, OversizedSseLineError, parseSseDataPayload, SSE_MAX_LINE_CHARS, type ResponsesStreamSnapshot } from './llm-sse.ts'
 import type { Message, ToolManifest } from './types.js'
 
-function itemUnder(snapshot: ResponsesStreamSnapshot, key: string): ResponsesAccumulatedItem {
+function itemUnder(snapshot: ResponsesStreamSnapshot, key: string) {
 	const item = snapshot.items.get(key)
 	if (item === undefined) throw new Error(`no item accumulated under "${key}"`)
 	return item
 }
 
-function accumulatorWithDeltas(): ResponsesStreamAccumulator {
+function accumulatorWithDeltas(): ReturnType<typeof createResponsesStreamAccumulator> {
 	const accumulator = createResponsesStreamAccumulator()
 	accumulator.apply({ type: 'output_item.added', item_id: 'item_1', item: { type: 'message', role: 'assistant' } })
 	accumulator.apply({ type: 'output_text.delta', item_id: 'item_1', delta: 'Hel' })

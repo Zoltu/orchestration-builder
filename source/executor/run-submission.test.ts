@@ -5,7 +5,7 @@ import type { EffortLevel, LogLevel, RunContinuation, RunMeta } from './types.js
 import type { ReadProjectSettings, RunDirectoryExists } from './persistence.ts'
 import { DEFAULT_EFFORT } from './effort.ts'
 import { createRunSubmission, type ResumeRun, type RunSubmission, type StartRun } from './run-submission.ts'
-import { defined } from './test-fixtures.ts'
+import { defined, flushMicrotasks } from './test-fixtures.ts'
 
 function sampleMeta(runId: string): RunMeta {
 	return {
@@ -217,7 +217,8 @@ describe('createRunSubmission', () => {
 
 		let resolved = false
 		submission.awaitFatalError().then(() => { resolved = true })
-		await new Promise((resolve) => setTimeout(resolve, 10))
+		// awaitFatalError settles only through a run rejection, and the run already completed and was awaited, so a microtask drain is the complete opportunity for a wrongful resolution to surface.
+		await flushMicrotasks()
 		expect(resolved).toBe(false)
 	})
 })

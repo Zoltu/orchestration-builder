@@ -13,7 +13,7 @@ export class OversizedSseLineError extends Error {
 	}
 }
 
-export interface SseLineAssembler {
+interface SseLineAssembler {
 	feed(text: string): string[]
 	finish(): string[]
 }
@@ -62,9 +62,9 @@ export function parseSseDataPayload(line: string): SseDataPayload {
 	return { kind: 'skip' }
 }
 
-export type ResponsesStreamTerminal = 'completed' | 'incomplete' | 'error' | 'none'
+type ResponsesStreamTerminal = 'completed' | 'incomplete' | 'error' | 'none'
 
-export interface ResponsesAccumulatedItem {
+interface ResponsesAccumulatedItem {
 	type: string
 	content: string
 	reasoning: string
@@ -80,7 +80,7 @@ export interface ResponsesStreamSnapshot {
 	items: Map<string, ResponsesAccumulatedItem>
 }
 
-export interface ResponsesStreamAccumulator {
+interface ResponsesStreamAccumulator {
 	apply(event: Record<string, unknown>): void
 	recordError(payload: Record<string, unknown>): void
 	snapshot(): ResponsesStreamSnapshot
@@ -186,7 +186,7 @@ export function createResponsesStreamAccumulator(): ResponsesStreamAccumulator {
 	return { apply, recordError, snapshot }
 }
 
-export interface MappedResponsesHistory {
+interface MappedResponsesHistory {
 	instructions: string | undefined
 	input: unknown[]
 }
@@ -222,7 +222,7 @@ export function mapHistoryToResponsesInput(messages: Message[]): MappedResponses
 	return { instructions, input }
 }
 
-export interface ResponsesTool {
+interface ResponsesTool {
 	type: 'function'
 	name: string
 	description: string

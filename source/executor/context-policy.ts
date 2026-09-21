@@ -1,6 +1,6 @@
 import type { Message } from './types.js'
 
-export interface TruncatedOutput {
+interface TruncatedOutput {
 	text: string
 	truncated: boolean
 	removedChars: number
@@ -30,7 +30,7 @@ export function stripReasoning(messages: Message[], startIndex?: number, endInde
 	})
 }
 
-export interface ContextCompactionOptions {
+interface ContextCompactionOptions {
 	contextWindow: number
 	// The prompt tokens the endpoint reported for the rejected request, used to calibrate the chars-per-token ratio against this exact conversation. 0 when the endpoint did not report a count, falling back to the default ratio.
 	promptTokens: number

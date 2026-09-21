@@ -7,6 +7,7 @@ import { parseEvalConfig, type EvalConfig } from '../benchmarks/validation.js'
 import { createBuiltInToolHandlers } from '../executor/builtin-tools.js'
 import { ERROR_KINDS } from '../executor/errors.js'
 import { createGuildLoader, type LoadedGuildFiles } from '../executor/loader.js'
+import { LOG_FILE_NAME } from '../executor/persistence.js'
 import { createRoleRegistry } from '../executor/role-registry.js'
 import { createToolHandlers } from '../executor/tools.js'
 import { createPlanToolHandlers } from '../executor/tools/plan.js'
@@ -309,7 +310,7 @@ function checkManifests(): void {
 	const nativeHandlers = {
 		...createToolHandlers({ workspaceRoot: manifestDir, defaultToolTimeoutSeconds: 30 }),
 		...createPlanToolHandlers({ runsBaseDir: manifestDir, runId: 'run-19700101-000000', workspaceRoot: repoRoot }),
-		...createRunLogToolHandlers({ logPath: path.join(manifestDir, 'log.jsonl') }),
+		...createRunLogToolHandlers({ logPath: path.join(manifestDir, LOG_FILE_NAME) }),
 	}
 	checkSameSet('native tool handler table', new Set(Object.keys(nativeHandlers)), nativeToolNames)
 	// Shape-only fixture: the handlers are compared by name and never invoked, so the guild stub only has to type-check.

@@ -85,6 +85,7 @@ export {
 	createListRunIds,
 	createReadProjectSettings,
 	createWriteProjectSettings,
+	LOG_FILE_NAME,
 } from './persistence.js'
 export type {
 	RunDirectory,

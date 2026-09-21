@@ -119,12 +119,6 @@ export interface Message {
 	tool_calls?: ToolCall[]
 }
 
-export interface AssistantResponse {
-	content?: string
-	reasoning?: string | null
-	tool_calls?: ToolCall[]
-}
-
 export interface ToolCall {
 	id: string
 	type: 'function'

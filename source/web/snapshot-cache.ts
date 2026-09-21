@@ -43,6 +43,7 @@ function isFresh(cached: RunSnapshotStats, current: RunSnapshotStats): boolean {
 }
 
 // Builds the entry for a poll whose freshness key missed. The meta is re-read only when its own stat changed, and the log contributes either nothing (meta-only change), just its appended tail (grew past the stored offset), or a full re-parse (first read, shrink, or any other anomaly).
+// The snapshot is assembled by hand rather than through parseRunSnapshot (render.ts): its output is identical, but this path must also learn the log's settled byte offset from parseLogText's single parse, and the other refresh paths feed it already-parsed state (cached meta, tail events) that parseRunSnapshot's raw-text interface cannot accept — using it would parse the log text a second time.
 function refreshEntry(dependencies: SnapshotCacheDependencies, runId: string, freshness: RunSnapshotStats, cached: CacheEntry | undefined): CacheEntry {
 	if (cached === undefined) {
 		const full = parseLogText(dependencies.readLogTextFrom(runId, 0))

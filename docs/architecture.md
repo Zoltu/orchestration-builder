@@ -58,6 +58,7 @@ The deployment container is the security boundary; tools do not filter or allowl
 ```
 workspace/                          # the user's project (mounted at /workspace)
 ├── .orchestration/                 # orchestrator bookkeeping (can be ignored)
+│   ├── settings.json               # project-wide settings (the default effort and logging level)
 │   └── runs/
 │       └── <run_id>/
 │           ├── meta.json           # run metadata, status, final result

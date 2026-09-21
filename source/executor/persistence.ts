@@ -25,10 +25,13 @@ export function createRunDirectoryExists(baseDir: string): RunDirectoryExists {
 	return (runId) => fs.existsSync(path.resolve(baseDir, runId))
 }
 
+export const LOG_FILE_NAME = 'log.jsonl'
+export const META_FILE_NAME = 'meta.json'
+
 export function createAppendLog(runId: string, baseDir: string): AppendLog {
 	const runDir = path.resolve(baseDir, runId)
 	return (event: LogEvent) => {
-		const logPath = path.resolve(runDir, 'log.jsonl')
+		const logPath = path.resolve(runDir, LOG_FILE_NAME)
 		fs.appendFileSync(logPath, JSON.stringify(event) + '\n')
 	}
 }
@@ -37,7 +40,7 @@ export function createAppendLog(runId: string, baseDir: string): AppendLog {
 export function createWriteMeta(runId: string, baseDir: string): WriteMeta {
 	const runDir = path.resolve(baseDir, runId)
 	return (meta: RunMeta) => {
-		const metaPath = path.resolve(runDir, 'meta.json')
+		const metaPath = path.resolve(runDir, META_FILE_NAME)
 		const tempPath = `${metaPath}.${process.pid}.tmp`
 		fs.writeFileSync(tempPath, JSON.stringify(meta, null, 2))
 		fs.renameSync(tempPath, metaPath)
@@ -87,8 +90,8 @@ export type ReadRunSnapshotById = (runId: string) => RunSnapshotRaw
 // The single-active-run invariant is enforced at the submission layer, not here.
 export function createReadRunSnapshotById(baseDir: string): ReadRunSnapshotById {
 	return (runId: string) => {
-		const metaPath = path.resolve(baseDir, runId, 'meta.json')
-		const logPath = path.resolve(baseDir, runId, 'log.jsonl')
+		const metaPath = path.resolve(baseDir, runId, META_FILE_NAME)
+		const logPath = path.resolve(baseDir, runId, LOG_FILE_NAME)
 		const metaText = fs.existsSync(metaPath) ? fs.readFileSync(metaPath, 'utf8') : null
 		const logText = fs.existsSync(logPath) ? fs.readFileSync(logPath, 'utf8') : ''
 		return { metaText, logText }
@@ -100,7 +103,7 @@ export type ReadRunMetaById = (runId: string) => string | null
 // Reads only a run's meta.json. The run list renders one summary per run and never touches log events, so it reads the small meta file rather than every run's full (and ever-growing) log on every poll.
 export function createReadRunMetaById(baseDir: string): ReadRunMetaById {
 	return (runId: string) => {
-		const metaPath = path.resolve(baseDir, runId, 'meta.json')
+		const metaPath = path.resolve(baseDir, runId, META_FILE_NAME)
 		return fs.existsSync(metaPath) ? fs.readFileSync(metaPath, 'utf8') : null
 	}
 }
@@ -138,7 +141,7 @@ export type ReadRunSummaryStats = (runId: string) => RunSummaryStats
 // Stats the two files a run-list summary is derived from without reading them, so the run-list cache revalidates each run per poll with two stat calls instead of two file reads plus a meta parse. summary.txt rides in the freshness key because the completion summary replaces the start one at a moment when meta.json does not change.
 export function createReadRunSummaryStats(baseDir: string): ReadRunSummaryStats {
 	return (runId: string) => {
-		const metaPath = path.resolve(baseDir, runId, 'meta.json')
+		const metaPath = path.resolve(baseDir, runId, META_FILE_NAME)
 		const summaryPath = path.resolve(baseDir, runId, SUMMARY_FILE_NAME)
 		return { meta: statOrNull(metaPath), summary: statOrNull(summaryPath) }
 	}
@@ -192,8 +195,8 @@ function statOrNull(filePath: string): RunSnapshotFileStat | null {
 // Stats a run's files without reading them. Size+mtime is the freshness key a snapshot cache validates against (the log is append-only, so every event changes its size), and a run with neither file is unknown — the cheap existence check the per-request handlers need before serving a snapshot.
 export function createReadRunSnapshotStats(baseDir: string): ReadRunSnapshotStats {
 	return (runId: string) => {
-		const metaPath = path.resolve(baseDir, runId, 'meta.json')
-		const logPath = path.resolve(baseDir, runId, 'log.jsonl')
+		const metaPath = path.resolve(baseDir, runId, META_FILE_NAME)
+		const logPath = path.resolve(baseDir, runId, LOG_FILE_NAME)
 		return { meta: statOrNull(metaPath), log: statOrNull(logPath) }
 	}
 }
@@ -203,7 +206,7 @@ export type ReadRunLogTextFrom = (runId: string, byteOffset: number) => string
 // Reads a run's log.jsonl from a byte offset to the end of the file (offset 0 reads the whole log), so the snapshot cache re-reads only an active run's appended tail per poll instead of the whole ever-growing file. Stored offsets always fall just after a newline byte, which is never part of a multi-byte UTF-8 sequence, so reading from an offset cannot split a character.
 export function createReadRunLogTextFrom(baseDir: string): ReadRunLogTextFrom {
 	return (runId: string, byteOffset: number) => {
-		const logPath = path.resolve(baseDir, runId, 'log.jsonl')
+		const logPath = path.resolve(baseDir, runId, LOG_FILE_NAME)
 		if (!fs.existsSync(logPath)) return ''
 		const descriptor = fs.openSync(logPath, 'r')
 		try {

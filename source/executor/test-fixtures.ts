@@ -10,6 +10,11 @@ export function defined<T>(value: T | undefined, label: string): T {
 	return value
 }
 
+// Yields to the event loop so a test can probe that a promise has not settled without sleeping on a real timer: each await drains the whole microtask queue (including microtasks queued while draining), so any settlement the code under test could have performed in the async flow has run by the time this returns. No macrotask ever runs — for code whose promises settle only through explicit calls and never timers, a real-timer grace wait adds latency without adding coverage.
+export async function flushMicrotasks(): Promise<void> {
+	for (let turn = 0; turn < 3; turn++) await Promise.resolve()
+}
+
 export function toolData<T>(result: ToolResult, guard: (value: unknown) => value is T): T {
 	if (result.kind !== 'success') throw new Error(`expected a success tool result, got ${result.kind}`)
 	if (!guard(result.data)) throw new Error('tool result data did not match the expected shape')
