@@ -3,6 +3,7 @@ import * as path from 'node:path'
 
 import { createWebServer } from './web/server.js'
 import { createBootstrapFailureHandler } from './web/bootstrap-failure.js'
+import { createBuildInfoReader } from './web/build-info.js'
 import { createSnapshotCache } from './web/snapshot-cache.js'
 import { createRunListCache } from './web/run-list-cache.js'
 import { createTaskSummarizer, type TaskSummarizer } from './summarize.js'
@@ -20,6 +21,8 @@ const DOCKER_SECRETS_DIR = '/run/secrets'
 // The guild's location is an implementation detail. The deployment file's path alone is a deployment variable: ORCHESTRATOR_DEPLOYMENT_FILE repoints it at a mounted file, docker config, or docker secret without rebuilding the image.
 const GUILD_PATH = path.resolve(import.meta.dir, '..', 'guild')
 const DEPLOYMENT_PATH = path.resolve(import.meta.dir, '..', 'deployment', 'deployment.json')
+// The build identifier the Dockerfile bakes next to the app (in the image, /app/build-info.json); a development checkout has no baked file and the read tolerates that.
+const BUILD_INFO_PATH = path.resolve(import.meta.dir, '..', 'build-info.json')
 const DEFAULT_PORT = 80
 const DEFAULT_WORKSPACE_ROOT = '/workspace'
 const ORCHESTRATION_DIR = '.orchestration'
@@ -198,6 +201,12 @@ async function serve(): Promise<void> {
 	const runsBaseDir = path.resolve(workspaceRootPath, ORCHESTRATION_DIR, 'runs')
 	excludeOrchestrationFromGit(workspaceRootPath)
 
+	// One tolerant startup read of the baked build identifier, for the startup log and GET /api/config.
+	const buildInfo = createBuildInfoReader(BUILD_INFO_PATH)()
+	if (buildInfo !== null) {
+		console.log(`Build: ${buildInfo.sha === undefined ? 'sha unknown' : buildInfo.sha}, built at ${buildInfo.builtAt}`)
+	}
+
 	let guild: LoadedGuild
 	let apiKey: string | undefined
 	let kagiApiKey: string | undefined
@@ -321,6 +330,7 @@ async function serve(): Promise<void> {
 		listRunIds,
 		readProjectSettings,
 		writeProjectSettings,
+		build: buildInfo,
 	})
 	console.log(`Web UI ready: http://localhost:${webServer.port}`)
 

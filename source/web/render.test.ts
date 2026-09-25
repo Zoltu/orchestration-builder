@@ -1475,7 +1475,7 @@ function sampleDeployment(overrides: Partial<DeploymentConfig> = {}): Deployment
 
 describe('renderConfig', () => {
 	test('shapes the model name and context window, executor budgets, entry role, and role tool lists', () => {
-		const view = renderConfig(sampleGuildConfig(), sampleDeployment(), {})
+		const view = renderConfig(sampleGuildConfig(), sampleDeployment(), {}, null)
 		expect(view.model).toEqual({ name: 'qwen3.6:35b', contextWindow: 262144 })
 		expect(view.executor).toEqual({
 			maxAgentDepth: 8,
@@ -1490,7 +1490,7 @@ describe('renderConfig', () => {
 	})
 
 	test('structurally omits apiKey and apiBase from the view', () => {
-		const view = renderConfig(sampleGuildConfig(), sampleDeployment(), {})
+		const view = renderConfig(sampleGuildConfig(), sampleDeployment(), {}, null)
 		expect(view.model).not.toHaveProperty('apiKey')
 		expect(view.model).not.toHaveProperty('apiBase')
 		const serialized = JSON.stringify(view)
@@ -1505,7 +1505,7 @@ describe('renderConfig', () => {
 				empty: { systemPrompt: 'p', tools: [] },
 			},
 		})
-		const view = renderConfig(config, sampleDeployment(), {})
+		const view = renderConfig(config, sampleDeployment(), {}, null)
 		expect(Object.keys(view.roles).sort()).toEqual(['empty', 'orchestrator'])
 		expect(defined(view.roles.orchestrator, 'view.roles.orchestrator').tools).toEqual(['finish'])
 		expect(defined(view.roles.empty, 'view.roles.empty').tools).toEqual([])
@@ -1519,7 +1519,7 @@ describe('renderConfig', () => {
 				empty: { systemPrompt: 'p', tools: [] },
 			},
 		})
-		const view = renderConfig(config, sampleDeployment(), {})
+		const view = renderConfig(config, sampleDeployment(), {}, null)
 		expect(Object.keys(view.roles).sort()).toEqual(['empty', 'orchestrator', 'planner'])
 		expect(defined(view.roles.orchestrator, 'view.roles.orchestrator').tools).toEqual(['agent', 'finish'])
 		expect(defined(view.roles.planner, 'view.roles.planner').tools).toEqual(['read_file', 'glob_files', 'search_text', 'finish'])
@@ -1535,7 +1535,7 @@ describe('renderConfig', () => {
 				},
 			},
 		})
-		const view = renderConfig(config, sampleDeployment(), {})
+		const view = renderConfig(config, sampleDeployment(), {}, null)
 		expect(view.roles.orchestrator).toEqual({ tools: ['finish'] })
 		expect(view.roles.orchestrator).not.toHaveProperty('systemPrompt')
 	})
@@ -1557,12 +1557,23 @@ describe('renderConfig', () => {
 			},
 		}
 		const config = sampleGuildConfig({ visualization })
-		const view = renderConfig(config, sampleDeployment(), {})
+		const view = renderConfig(config, sampleDeployment(), {}, null)
 		expect(view.visualization).toEqual(visualization)
 	})
 
 	test('omits the visualization field when the guild does not carry one', () => {
-		const view = renderConfig(sampleGuildConfig(), sampleDeployment(), {})
+		const view = renderConfig(sampleGuildConfig(), sampleDeployment(), {}, null)
 		expect(view).not.toHaveProperty('visualization')
+	})
+
+	test('carries the build identifier through to the view', () => {
+		const build = { sha: '9f3a2b7c4d1e5a6b', builtAt: '2026-09-25T12:00:00Z' }
+		const view = renderConfig(sampleGuildConfig(), sampleDeployment(), {}, build)
+		expect(view.build).toEqual({ sha: '9f3a2b7c4d1e5a6b', builtAt: '2026-09-25T12:00:00Z' })
+	})
+
+	test('reports build as null when the process has none', () => {
+		const view = renderConfig(sampleGuildConfig(), sampleDeployment(), {}, null)
+		expect(view.build).toBeNull()
 	})
 })

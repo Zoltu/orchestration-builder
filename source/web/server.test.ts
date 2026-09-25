@@ -7,6 +7,7 @@ import type { RunCheckpoint } from '../executor/checkpoint.ts'
 import type { ProjectSettings, ReadProjectSettings, WriteProjectSettings, RunSnapshotRaw, RunSnapshotStats, RunSummaryStats } from '../executor/persistence.ts'
 import type { DeploymentConfig, EffortLevel, GuildConfig, LogLevel, RunContinuation, RunMeta } from '../executor/types.js'
 import { parseRunSnapshot, type RunSnapshot } from './render.ts'
+import type { BuildInfo } from './build-info.ts'
 import { createRunListCache } from './run-list-cache.ts'
 import { createRequestHandler, type RequestHandler } from './request-handler.ts'
 import { createServeStatic, resolveStaticAsset, type ServeAssetFile } from './server.ts'
@@ -341,8 +342,8 @@ interface HandlerHarness {
 	resumedCheckpoints: () => RunCheckpoint[]
 }
 
-// Builds a fresh handler whose startRun and resumeRun park on caller-controlled resolvers, so each test drives its own run lifecycle without touching shared state. The static leaf is a recording fake; every dependency is in-memory. runIdCollides makes runDirectoryExists report an existing directory for the generated id, exercising the submit-level run_id_collision refusal.
-function createHandlerHarness(options: { runIdCollides?: boolean } = {}): HandlerHarness {
+// Builds a fresh handler whose startRun and resumeRun park on caller-controlled resolvers, so each test drives its own run lifecycle without touching shared state. The static leaf is a recording fake; every dependency is in-memory. runIdCollides makes runDirectoryExists report an existing directory for the generated id, exercising the submit-level run_id_collision refusal. build seeds the image build identifier GET /api/config surfaces (null, as from a source checkout, unless a test passes one).
+function createHandlerHarness(options: { runIdCollides?: boolean, build?: BuildInfo | null } = {}): HandlerHarness {
 	let resolveActive: (meta: RunMeta) => void = () => {}
 	let resolveResumed: (meta: RunMeta) => void = () => {}
 	let capturedEffort: EffortLevel | undefined
@@ -385,6 +386,7 @@ function createHandlerHarness(options: { runIdCollides?: boolean } = {}): Handle
 			listRunIds,
 			readProjectSettings: settings.read,
 			writeProjectSettings: settings.write,
+			build: options.build ?? null,
 		},
 		async (requestPath) => {
 			staticCalls.push(requestPath)
@@ -581,6 +583,14 @@ describe('GET /api/config', () => {
 			orchestrator: { tools: ['agent', 'ask_human', 'finish'] },
 			coder: { tools: ['read_file', 'write_file', 'finish'] },
 		})
+		expect(config.build).toBeNull()
+	})
+
+	test('carries the baked image build identifier through to the response', async () => {
+		const { handler } = createHandlerHarness({ build: { sha: '9f3a2b7c4d1e5a6b', builtAt: '2026-09-25T12:00:00Z' } })
+		const response = await handler(get('/api/config'))
+		const config = await response.json()
+		expect(config.build).toEqual({ sha: '9f3a2b7c4d1e5a6b', builtAt: '2026-09-25T12:00:00Z' })
 	})
 
 	test('structurally omits apiKey and apiBase from the response', async () => {

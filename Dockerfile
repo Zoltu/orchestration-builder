@@ -25,6 +25,10 @@ RUN --mount=type=cache,target=/home/bun/.bun/install/cache <<-EOF
 	rm -rf node_modules
 EOF
 
+# BUILD_SHA bakes the checkout's commit into the image (build args are not affected by .dockerignore): pass it with `docker build --build-arg BUILD_SHA=$(git rev-parse HEAD) -t adaptive-orchestrator .` The sha is stripped of `"` and `\` before the bake so metacharacters cannot produce invalid JSON; the step runs bash explicitly because the parameter substitutions are bash expansions and debian's /bin/sh is dash.
+ARG BUILD_SHA=""
+RUN bash -c 'buildSha="${BUILD_SHA//\"/}"; buildSha="${buildSha//\\/}"; printf "{\"sha\":\"%s\",\"builtAt\":\"%s\"}" "$buildSha" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > /app/build-info.json'
+
 RUN mkdir -p /workspace
 RUN chown bun:bun /workspace
 

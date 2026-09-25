@@ -27,6 +27,14 @@ curl -X POST http://localhost:12345/api/runs -H 'content-type: application/json'
 # → { "runId": "run-20260621-..." }
 ```
 
+### Building the image
+
+```bash
+docker build --build-arg BUILD_SHA=$(git rev-parse HEAD) -t adaptive-orchestrator .
+```
+
+The build bakes the commit sha (`BUILD_SHA` — omit it and the sha is left empty) and a UTC build timestamp (added automatically) into the image, and the serving UI shows this identifier in the top bar.
+
 ### Configuration
 
 Configuration is a bundled deployment file (model endpoint, budgets, context policy) with environment variables layered on top, passed via `docker run -e`. Precedence is deployment file first, environment variables second: an override variable replaces only its own field, and unset variables keep the file's value.

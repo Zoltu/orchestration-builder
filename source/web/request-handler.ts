@@ -5,6 +5,7 @@ import { isEffortLevel, isLogLevel, isObject, isTerminalRunStatus } from '../exe
 import type { RunState } from '../executor/run-state.js'
 import type { RunSubmission } from '../executor/run-submission.js'
 import { paginateLogEvents, parseRunMeta, renderConfig, renderProjectSettings, renderPendingQuestions, renderRunView, formatLogAsText, formatLogDetailSections, foldLlmCallSent } from './render.js'
+import type { BuildInfo } from './build-info.js'
 import type { ReadRunListSummary } from './run-list-cache.js'
 import { deriveInteractionModel, deriveInteractionOperationDetail } from './interaction-model-adapter.js'
 import { DEMO_SCENARIOS, deriveDemoFrameModel, deriveDemoFrameOperationDetail, findDemoScenario } from './demo-fixtures.js'
@@ -33,6 +34,8 @@ export interface RequestHandlerConfig {
 	listRunIds: ListRunIds
 	readProjectSettings: ReadProjectSettings
 	writeProjectSettings: WriteProjectSettings
+	// The baked image build identifier, read once at startup (null without a baked build-info); surfaced through GET /api/config.
+	build: BuildInfo | null
 }
 
 // The static-asset leaf: given a GET path that matched no API route, produce the response. Injected so the routing below is exercisable without touching the filesystem or a socket. Async because the index route reads the served body to substitute the page title (see server.ts createServeStatic).
@@ -273,7 +276,7 @@ export function createRequestHandler(config: RequestHandlerConfig, serveStatic: 
 		const { pathname } = url
 
 		if (request.method === 'GET') {
-			if (pathname === '/api/config') return json(renderConfig(guildConfig, deployment, config.tools))
+			if (pathname === '/api/config') return json(renderConfig(guildConfig, deployment, config.tools, config.build))
 			if (pathname === '/api/settings') return handleGetSettings(readProjectSettings)
 			if (pathname === '/api/run/flow') return handleActiveRunFlow(readRunSnapshot, readRunSnapshotStats, runSubmission, url.searchParams)
 			if (pathname === '/api/run') return handleActiveRun(readRunSnapshot, readRunSnapshotStats, readRunPlanById, runSubmission, runState)

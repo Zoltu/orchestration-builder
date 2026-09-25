@@ -4,6 +4,7 @@ import type { PendingQuestion } from '../executor/human-backend.js'
 import { isObject, isRunMeta } from '../executor/validation.js'
 import type { DeploymentConfig, EffortLevel, ExecutorConfig, GuildConfig, LogEvent, LogLevel, ResultCard, RunMeta, ToolManifest, HumanFacingText, VisualizationConfig } from '../executor/types.js'
 import type { ProjectSettings, RunSnapshotRaw } from '../executor/persistence.js'
+import type { BuildInfo } from './build-info.js'
 
 export interface RunSnapshot {
 	meta: RunMeta | null
@@ -757,9 +758,11 @@ export interface GuildConfigView {
 	roles: Record<string, { tools: string[]; label?: HumanFacingText; description?: HumanFacingText; workingLabel?: HumanFacingText }>
 	tools: Record<string, { humanLabel?: HumanFacingText; humanDescription?: HumanFacingText; humanCallLabel?: HumanFacingText; humanWorkingLabel?: HumanFacingText }>
 	visualization?: VisualizationConfig
+	// The baked image build identifier, or null when the process runs without one (a source checkout).
+	build: BuildInfo | null
 }
 
-export function renderConfig(config: GuildConfig, deployment: DeploymentConfig, tools: Record<string, ToolManifest>): GuildConfigView {
+export function renderConfig(config: GuildConfig, deployment: DeploymentConfig, tools: Record<string, ToolManifest>, build: BuildInfo | null): GuildConfigView {
 	const roles: Record<string, { tools: string[]; label?: HumanFacingText; description?: HumanFacingText; workingLabel?: HumanFacingText }> = {}
 	for (const [name, role] of Object.entries(config.roles)) {
 		roles[name] = {
@@ -784,6 +787,7 @@ export function renderConfig(config: GuildConfig, deployment: DeploymentConfig, 
 		entryRole: config.entryRole,
 		roles,
 		tools: toolsView,
+		build,
 	}
 	if (config.visualization !== undefined) view.visualization = config.visualization
 	return view

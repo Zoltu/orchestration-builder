@@ -11,6 +11,6 @@ const deploymentPath = path.join(repoRoot, 'deployment', 'deployment.json')
 const loaded = createGuildLoader(deploymentPath)(guildDir)
 const probe: ModelApiProbe = { apiBase: loaded.deployment.model.apiBase, models: undefined, failureReason: undefined }
 const { deployment } = resolveDeploymentConfig(loaded.deployment, probe)
-const config = renderConfig(loaded.config, deployment, loaded.tools)
+const config = renderConfig(loaded.config, deployment, loaded.tools, null)
 
 export const labelsModule = createLabelResolver(config)

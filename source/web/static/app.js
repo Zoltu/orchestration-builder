@@ -4,7 +4,9 @@ import { h, app } from './vendor/hyperapp.js'
 import { createMarkdownRenderer } from './markdown-render.js'
 import { renderFlowView, deriveLifecycle, deriveNowCaption, deriveCostStrip, createColumnTracker } from './flow-view.js'
 import { renderSequenceView } from './sequence-diagram.js'
+import { createScrollFollower } from './scroll-follow.js'
 import { createLabelResolver, TIER_VALUES, isLabelTier } from './labels.js'
+import { buildInfoFromConfig, formatBuildLabel } from './build-info.js'
 import { isTerminalStatus } from './interaction-model.js'
 import { deriveFaviconState, faviconHref } from './favicon.js'
 import { createTooltipDismiss, deriveTooltipDescriptor, isInFlightAskHuman, resolveTooltipTarget } from './inspector.js'
@@ -12,6 +14,7 @@ import { operationIdsForTooltipDetails } from './tooltip.js'
 import { copyRawToClipboard } from './clipboard.js'
 import { QuestionModal } from './question-modal.js'
 import { ResultModal, deriveTerminalResult } from './result-modal.js'
+import { InspectorModal, buildTurnIndex, resolveSelection, tailWindowOffset, olderWindowOffset, olderFetchLimit, canPageOlder, INSPECTOR_WINDOW_SIZE, INSPECTOR_PAGE_LIMIT, INSPECTOR_RETENTION_LIMIT } from './inspector-modal.js'
 import { Tooltip, tooltipStyle } from './tooltip.js'
 
 const POLL_INTERVAL_MS = 1000
@@ -95,6 +98,9 @@ const flowColumnTracker = createColumnTracker()
 // The inspector's operation-details session cache: key `<runId>|<operationId>` → 'loading' | 'failed' | { details }. The polled flow model ships no detail bodies (they can carry multi-megabyte tool arguments/results), so opening an inspector card fetches the ids its derivation may show from `api/runs/:id/flow?operation=<id>` exactly once per session and caches them here. Operation ids are stable within a run (events only append), so an entry never goes stale; the run id in the key keeps a previous run's entries from answering for another run's same-numbered operation. Module scope like flowColumnTracker — cache memory, not app state.
 const operationDetailsCache = new Map()
 
+// The LLM turn inspector's detail session cache: key `<runId>|<eventIndex>` → 'loading' | { sections }. The inspector fetches one turn's detail sections (`GET /api/runs/:id/log?detail=<index>`) exactly once per session and caches them here, so re-selecting a turn (and the in-flight turn completing under a live selection) never re-fetches; a failed fetch evicts its entry rather than caching the failure, so one transient 500 cannot poison a turn for the session — re-selecting retries. Event indexes are stable within a run (events only append), and the run id in the key keeps a previous run's entries from answering for another run's same-numbered event. Module scope like operationDetailsCache — cache memory, not app state.
+const inspectorDetailCache = new Map()
+
 function ensureAudioContext() {
 	if (audioContext === null) {
 		const Ctor = window.AudioContext !== undefined ? window.AudioContext : window.webkitAudioContext
@@ -170,6 +176,19 @@ function onFirstInteractionSubscriber(dispatch, payload) {
 
 function onFirstInteraction(action) {
 	return [onFirstInteractionSubscriber, { action }]
+}
+
+// The Escape key dismisses the inspector modal while it is open; the subscription is present only then (the subscriptions array carries it as a stable position whose value is falsy while the modal is closed, which hyperapp ignores), so no key listener exists otherwise.
+function onEscapeKeySubscriber(dispatch, payload) {
+	const handler = (event) => {
+		if (event.key === 'Escape') dispatch(payload.action)
+	}
+	window.addEventListener('keydown', handler)
+	return () => window.removeEventListener('keydown', handler)
+}
+
+function onEscapeKey(action) {
+	return [onEscapeKeySubscriber, { action }]
 }
 
 // --- Custom effects --------------------------------------------------------
@@ -261,20 +280,22 @@ function PollSelectedRun(state) {
 		Fetch({ url: `api/runs/${runId}`, ok: GotSelectedRun, fail: FetchFailed }),
 		// The flow model is derived server-side from the full log (the truncated recentLog the run view carries is not enough to reconstruct the active path, lingering legs, or per-invocation costs); the centerpiece reads it off this endpoint rather than re-deriving client-side.
 		Fetch({ url: `api/runs/${runId}/flow`, ok: GotFlowModel, fail: FetchFailed }),
+		// While the inspector modal is open, the same poll also refreshes the turn-list tail so in-flight turns appear when they complete (a null effect when closed — hyperapp ignores falsy effects).
+		InspectorTailRefresh(state),
 	]
 }
 
-// The live InteractionModel the flow/sequence views render. The previous frame is kept so `deriveLifecycle` can diff entering/departing nodes; a 404 (the run directory exists but is not yet readable in the instant after submit) clears the model so the centerpiece shows its placeholder until the first readable frame lands.
+// The live InteractionModel the flow/sequence views render. The previous frame is kept so `deriveLifecycle` can diff entering/departing nodes; a 404 (the run directory exists but is not yet readable in the instant after submit) clears the model so the centerpiece shows its placeholder until the first readable frame lands. Every path also syncs the sequence-view scroll follower: the model update grows (or clears) the sequence content after the view patch.
 function GotFlowModel(state, payload) {
 	const status = payload.status
 	const ok = payload.ok
 	const body = payload.body
-	if (status === 404) return { ...state, flowModel: null, previousFlowModel: null, serverAvailable: ok }
-	if (!ok || body === null || typeof body !== 'object') return { ...state, serverAvailable: ok }
+	if (status === 404) return [{ ...state, flowModel: null, previousFlowModel: null, serverAvailable: ok }, SyncSequenceFollower()]
+	if (!ok || body === null || typeof body !== 'object') return [{ ...state, serverAvailable: ok }, SyncSequenceFollower()]
 	if (!Array.isArray(body.participants) || !Array.isArray(body.operations) || typeof body.status !== 'string') {
-		return { ...state, serverAvailable: true }
+		return [{ ...state, serverAvailable: true }, SyncSequenceFollower()]
 	}
-	return { ...state, previousFlowModel: state.flowModel, flowModel: body, serverAvailable: true }
+	return [{ ...state, previousFlowModel: state.flowModel, flowModel: body, serverAvailable: true }, SyncSequenceFollower()]
 }
 
 function GotRunList(state, payload) {
@@ -320,7 +341,7 @@ function GotSelectedRun(state, payload) {
 	const body = payload.body
 	if (status === 404) {
 		// The run directory is created early in execution but may not be readable in the instant after submit; the per-run subscription keeps polling until the view appears.
-		return { ...state, selectedRunStatus: 'unknown', serverAvailable: ok }
+		return [{ ...state, selectedRunStatus: 'unknown', serverAvailable: ok }, SyncSequenceFollower()]
 	}
 	if (!ok || body === null) return state
 	// The result modal fires once when a run the operator is watching completes (a transition out of a non-terminal status into success/error). Selecting an already-terminal historical run does not auto-open it — the flow view's CTA re-opens it on demand — so `previousStatus === null` (the first read of a selected run) is excluded along with the terminal statuses.
@@ -348,7 +369,7 @@ function GotSelectedRun(state, payload) {
 		}
 	}
 
-	return { ...state, selectedRunView: body, selectedRunStatus: body.status, resultModalOpen, resultShownForRun, interruptAnswerCard, shownInterruptAnswerKeys, serverAvailable: true }
+	return [{ ...state, selectedRunView: body, selectedRunStatus: body.status, resultModalOpen, resultShownForRun, interruptAnswerCard, shownInterruptAnswerKeys, serverAvailable: true }, SyncSequenceFollower()]
 }
 
 function GotQuestions(state, payload) {
@@ -388,7 +409,7 @@ function FetchFailed(state) {
 	return { ...state, serverAvailable: false }
 }
 
-// The guild config is fetched exactly once on load and never polled, so this action runs a single time. The body is not retained in state; only the two derived values the flow/sequence views need are kept — the label resolver they localize through and the guild participant inventory the sequence view lays out columns from — so a swapped guild re-flavors the run view on the next load.
+// The guild config is fetched exactly once on load and never polled, so this action runs a single time. The body is not retained in state; only the derived values the views need are kept — the label resolver the flow/sequence views localize through, the guild participant inventory the sequence view lays out columns from, and the build identifier the top bar stamps (null when the response carries none, e.g. running from source).
 function GotConfig(state, payload) {
 	const ok = payload.ok
 	const body = payload.body
@@ -397,6 +418,7 @@ function GotConfig(state, payload) {
 		...state,
 		labelResolver: createLabelResolver(body),
 		guildParticipants: guildParticipantsFromConfig(body),
+		build: buildInfoFromConfig(body),
 	}
 }
 
@@ -488,25 +510,30 @@ function LogLevelSaveFailed(state) {
 }
 
 function SelectRun(state, runId) {
-	if (runId === state.selectedRunId) return { ...state, screen: 'watch' }
-	// The flow model, its previous-frame diff, and the per-run modal state belong to the previously-selected run; a switch clears them so the centerpiece shows the new run's first frame without a stale lifecycle diff or a leftover modal. Selecting a run always lands on the watch screen (history rows and the in-progress pill both go through here).
-	return {
-		...state,
-		screen: 'watch',
-		selectedRunId: runId,
-		selectedRunView: null,
-		selectedRunStatus: null,
-		flowModel: null,
-		previousFlowModel: null,
-		questionModalOpen: false,
-		resultModalOpen: false,
-		resultShownForRun: null,
-		tooltip: null,
-		interruptNotice: null,
-		interruptModalOpen: false,
-		interruptAnswerCard: null,
-		planExpanded: false,
-	}
+	if (runId === state.selectedRunId) return [{ ...state, screen: 'watch' }, SyncSequenceFollower()]
+	// The flow model, its previous-frame diff, and the per-run modal state belong to the previously-selected run; a switch clears them so the centerpiece shows the new run's first frame without a stale lifecycle diff or a leftover modal. Selecting a run always lands on the watch screen (history rows and the in-progress pill both go through here). Clearing the model unmounts the sequence container, so the switch syncs its scroll follower (the new run's first frame re-attaches it, pinned to the bottom).
+	return [
+		{
+			...state,
+			screen: 'watch',
+			selectedRunId: runId,
+			selectedRunView: null,
+			selectedRunStatus: null,
+			flowModel: null,
+			previousFlowModel: null,
+			questionModalOpen: false,
+			resultModalOpen: false,
+			resultShownForRun: null,
+			tooltip: null,
+			interruptNotice: null,
+			interruptModalOpen: false,
+			interruptAnswerCard: null,
+			planExpanded: false,
+			inspectorModalOpen: false,
+			inspector: initialInspectorState(),
+		},
+		SyncSequenceFollower(),
+	]
 }
 
 function ToggleMute(state, event) {
@@ -612,7 +639,7 @@ function GotCreatedRun(state, payload) {
 	const createdRunId = body.runId
 	// Selecting the new run activates its per-run subscription; an immediate run-list fetch clears justSubmittedRunId as soon as the run appears. The continuation and the per-run modal/flow state are reset for the same reason SelectRun resets it — the composed run is on the server now, and a leftover chip would brief a stale lineage into the next task.
 	return [
-		{ ...state, screen: 'watch', continuation: null, justSubmittedRunId: createdRunId, selectedRunId: createdRunId, selectedRunView: null, selectedRunStatus: null, flowModel: null, previousFlowModel: null, questionModalOpen: false, resultModalOpen: false, resultShownForRun: null, tooltip: null, planExpanded: false, serverAvailable: true },
+		{ ...state, screen: 'watch', continuation: null, justSubmittedRunId: createdRunId, selectedRunId: createdRunId, selectedRunView: null, selectedRunStatus: null, flowModel: null, previousFlowModel: null, questionModalOpen: false, resultModalOpen: false, resultShownForRun: null, tooltip: null, planExpanded: false, inspectorModalOpen: false, inspector: initialInspectorState(), serverAvailable: true },
 		Fetch({ url: 'api/runs', ok: GotRunList, fail: FetchFailed }),
 	]
 }
@@ -697,7 +724,8 @@ function PrimeAudio(state) {
 
 function SetFlowViewMode(state, mode) {
 	if (mode !== 'flow' && mode !== 'sequence') return state
-	return { ...state, flowViewMode: mode }
+	// Switching modes mounts or unmounts the sequence container, so the swap also syncs its scroll follower (attaching fresh, pinned to the bottom).
+	return [{ ...state, flowViewMode: mode }, SyncSequenceFollower()]
 }
 
 function ChangeFlowTier(state, event) {
@@ -711,7 +739,8 @@ function ChangeFlowTier(state, event) {
 
 function SetScreen(state, screen) {
 	if (screen !== 'watch' && screen !== 'history' && screen !== 'compose') return state
-	return { ...state, screen }
+	// Leaving the watch screen unmounts the sequence container (the follower must detach) and returning to it remounts a fresh one; the swap syncs the follower either way.
+	return [{ ...state, screen }, SyncSequenceFollower()]
 }
 
 function ToggleHistoryExpanded(state, runId) {
@@ -879,6 +908,180 @@ function ClickRunView(state, event) {
 	return HoverRunView(state, event)
 }
 
+// --- LLM turn inspector (modal) ---------------------------------------------
+// The stage-controls "Inspect" button opens a modal over the run view that lists the run's LLM turns (derived from the windowed log endpoint) and fetches one turn's request/response detail on demand. The data flow mirrors the operation-details pattern above: fetches run as effects, bodies land in a module-scope session cache, and the view re-renders from state plus the cache. The list loads with a single cheap probe (`?limit=1`) that learns the log's `total`, then fetches the most recent window; "older turns" pages back; while the modal is open on an active run the 1s poll appends the log's tail so in-flight turns appear when they complete.
+
+function initialInspectorState() {
+	return { loadState: 'loading', events: [], total: null, tailOffset: null, entries: [], selectedEventIndex: null, olderLoading: false }
+}
+
+// Validates a windowed-log response's shape (what `runLogPage` produces). Run identity is a separate concern: each action compares the body's `runId` against the currently selected run and ignores a mismatch, so a stale response crossing a run switch (which resets the inspector state for the new run) leaves that fresh state alone instead of marking it failed.
+function readableInspectorLogBody(payload) {
+	if (!payload.ok || payload.body === null || typeof payload.body !== 'object') return null
+	const body = payload.body
+	if (typeof body.runId !== 'string') return null
+	if (typeof body.total !== 'number' || !Number.isInteger(body.total) || body.total < 0) return null
+	if (typeof body.offset !== 'number' || !Number.isInteger(body.offset) || body.offset < 0) return null
+	if (!Array.isArray(body.events)) return null
+	return body
+}
+
+function OpenInspectorModal(state) {
+	if (typeof state.selectedRunId !== 'string' || state.selectedRunId === '') return state
+	// A cheap probe (one event) learns the log's `total` so the first real fetch can start at the most recent window; the probe response's own event is discarded.
+	return [
+		{ ...state, inspectorModalOpen: true, tooltip: null, inspector: initialInspectorState() },
+		CancelTooltipDismiss(),
+		Fetch({ url: `api/runs/${encodeURIComponent(state.selectedRunId)}/log?limit=1`, ok: InspectorTotalLoaded, fail: InspectorLogLoadFailed }),
+	]
+}
+
+function CloseInspectorModal(state) {
+	return { ...state, inspectorModalOpen: false }
+}
+
+function InspectorTotalLoaded(state, payload) {
+	const body = readableInspectorLogBody(payload)
+	if (body === null) return [{ ...state, inspector: { ...initialInspectorState(), loadState: 'failed' }, serverAvailable: payload.ok }]
+	if (body.runId !== state.selectedRunId) return state
+	if (body.total === 0) {
+		return [{ ...state, inspector: { ...initialInspectorState(), loadState: 'ready', total: 0, tailOffset: 0, entries: [] }, serverAvailable: true }]
+	}
+	const tailOffset = tailWindowOffset(body.total, INSPECTOR_WINDOW_SIZE)
+	return [
+		{ ...state, serverAvailable: true },
+		Fetch({ url: `api/runs/${encodeURIComponent(state.selectedRunId)}/log?offset=${tailOffset}&limit=${INSPECTOR_WINDOW_SIZE}`, ok: InspectorWindowLoaded, fail: InspectorLogLoadFailed }),
+	]
+}
+
+// The window response replaces the loaded events wholesale (initial tail load and gap resync both land here), so the loaded range is always a contiguous slice of the log. A selection made against the previous list survives through `resolveSelection` — an in-flight turn completing maps the selection to its new completed entry — and a completed selection whose detail is not yet cached triggers the on-demand detail fetch.
+function InspectorWindowLoaded(state, payload) {
+	const body = readableInspectorLogBody(payload)
+	if (body === null) return [{ ...state, inspector: { ...initialInspectorState(), loadState: 'failed' }, serverAvailable: payload.ok }]
+	if (body.runId !== state.selectedRunId) return state
+	const entries = buildTurnIndex(body.events)
+	const selectedEventIndex = resolveSelection(state.inspector.selectedEventIndex, entries)
+	const nextState = { ...state, inspector: { ...state.inspector, loadState: 'ready', events: body.events, total: body.total, tailOffset: body.offset, entries, selectedEventIndex, olderLoading: false }, serverAvailable: true }
+	return [nextState, inspectorDetailEffect(nextState)]
+}
+
+function LoadOlderTurns(state) {
+	const inspector = state.inspector
+	if (inspector.loadState !== 'ready' || inspector.olderLoading === true) return state
+	const tailOffset = inspector.tailOffset
+	if (!canPageOlder(tailOffset) || typeof state.selectedRunId !== 'string') return state
+	return [
+		{ ...state, inspector: { ...inspector, olderLoading: true } },
+		Fetch({ url: `api/runs/${encodeURIComponent(state.selectedRunId)}/log?offset=${olderWindowOffset(tailOffset, INSPECTOR_WINDOW_SIZE)}&limit=${olderFetchLimit(tailOffset, INSPECTOR_WINDOW_SIZE)}`, ok: OlderTurnsLoaded, fail: InspectorOlderLoadFailed }),
+	]
+}
+
+// The older page must slot exactly in front of the loaded events (contiguous range) — anything else is a stale or diverged response and leaves the list as it was, merely clearing the loading flag for a retry. The log is append-only, so `total` only moves forward through the tail refresh; the older page does not touch it.
+function OlderTurnsLoaded(state, payload) {
+	const body = readableInspectorLogBody(payload)
+	if (body === null || body.runId !== state.selectedRunId || body.offset + body.events.length !== state.inspector.tailOffset) {
+		return { ...state, inspector: { ...state.inspector, olderLoading: false } }
+	}
+	const events = [...body.events, ...state.inspector.events]
+	return { ...state, inspector: { ...state.inspector, events, tailOffset: body.offset, entries: buildTurnIndex(events), olderLoading: false }, serverAvailable: true }
+}
+
+function InspectorOlderLoadFailed(state) {
+	return { ...state, inspector: { ...state.inspector, olderLoading: false }, serverAvailable: false }
+}
+
+function InspectorLogLoadFailed(state) {
+	return { ...state, inspector: { ...initialInspectorState(), loadState: 'failed' }, serverAvailable: false }
+}
+
+// The poll piggyback: one windowed fetch from the loaded range's end. A null effect while the modal is closed, the log has not loaded, or no run is selected — hyperapp ignores falsy effects.
+function InspectorTailRefresh(state) {
+	if (!state.inspectorModalOpen) return null
+	if (state.inspector.loadState !== 'ready' || typeof state.inspector.total !== 'number' || typeof state.selectedRunId !== 'string') return null
+	return Fetch({ url: `api/runs/${encodeURIComponent(state.selectedRunId)}/log?offset=${state.inspector.total}&limit=${INSPECTOR_PAGE_LIMIT}`, ok: InspectorTailRefreshed, fail: FetchFailed })
+}
+
+// Appends the new events to the loaded range. A response that cannot bridge to the new total (more events landed between two polls than one page carries) resyncs with a fresh tail window instead of leaving a silent gap in the list — and so does a loaded range that has grown past the retention cap, since appending at the `full` log level would otherwise grow the modal's memory without bound. A response landing after the modal closed leaves the stale inspector state alone. The selection is re-resolved so a just-completed in-flight turn keeps it, and the completed turn's detail is fetched if not cached.
+function InspectorTailRefreshed(state, payload) {
+	const body = readableInspectorLogBody(payload)
+	if (!state.inspectorModalOpen) return state
+	if (body === null || body.runId !== state.selectedRunId || body.offset !== state.inspector.total || state.inspector.loadState !== 'ready') return state
+	if (body.events.length < body.total - body.offset || state.inspector.events.length >= INSPECTOR_RETENTION_LIMIT) {
+		const tailOffset = tailWindowOffset(body.total, INSPECTOR_WINDOW_SIZE)
+		return [state, Fetch({ url: `api/runs/${encodeURIComponent(state.selectedRunId)}/log?offset=${tailOffset}&limit=${INSPECTOR_WINDOW_SIZE}`, ok: InspectorWindowLoaded, fail: InspectorLogLoadFailed })]
+	}
+	if (body.events.length === 0) return state
+	const events = [...state.inspector.events, ...body.events]
+	const entries = buildTurnIndex(events)
+	const selectedEventIndex = resolveSelection(state.inspector.selectedEventIndex, entries)
+	const nextState = { ...state, inspector: { ...state.inspector, events, total: body.total, entries, selectedEventIndex }, serverAvailable: true }
+	return [nextState, inspectorDetailEffect(nextState)]
+}
+
+function SelectInspectorTurn(state, entry) {
+	if (entry === null || typeof entry !== 'object' || typeof entry.eventIndex !== 'number') return state
+	const selectedEventIndex = entry.eventIndex
+	const nextState = { ...state, inspector: { ...state.inspector, selectedEventIndex } }
+	return [nextState, inspectorDetailEffect(nextState)]
+}
+
+// The selected turn's entry in the current list, or null when the selection no longer resolves.
+function selectedInspectorEntry(state) {
+	if (state.inspector.selectedEventIndex === null) return null
+	return state.inspector.entries.find((entry) => entry.eventIndex === state.inspector.selectedEventIndex) ?? null
+}
+
+// Schedules the selected completed turn's detail fetch if it is not cached yet, marking the cache 'loading' synchronously so the first render reads a defined state; returns a null effect for in-flight turns (nothing to fetch until the llm_call lands), a cached or absent selection, or a missing run id.
+function inspectorDetailEffect(state) {
+	const entry = selectedInspectorEntry(state)
+	if (entry === null || entry.kind !== 'completed') return null
+	const runId = state.selectedRunId
+	if (typeof runId !== 'string' || runId === '') return null
+	const key = `${runId}|${entry.eventIndex}`
+	if (inspectorDetailCache.has(key)) return null
+	inspectorDetailCache.set(key, 'loading')
+	return Fetch({ url: `api/runs/${encodeURIComponent(runId)}/log?detail=${entry.eventIndex}`, ok: InspectorDetailLoaded(runId, entry.eventIndex), fail: InspectorDetailFailed(runId, entry.eventIndex) })
+}
+
+function InspectorDetailLoaded(runId, eventIndex) {
+	return function InspectorDetailLoadedForTurn(state, payload) {
+		const body = payload.ok && payload.body !== null && typeof payload.body === 'object' ? payload.body : null
+		const readable = body !== null && (body.detailSections === null || Array.isArray(body.detailSections))
+		// A failure evicts rather than caching: a cached failure would block the retry `inspectorDetailEffect` schedules on re-selection (and on the tail refresh under a live selection) forever.
+		if (!readable) {
+			inspectorDetailCache.delete(`${runId}|${eventIndex}`)
+			return { ...state }
+		}
+		inspectorDetailCache.set(`${runId}|${eventIndex}`, { sections: body.detailSections })
+		return { ...state }
+	}
+}
+
+function InspectorDetailFailed(runId, eventIndex) {
+	return function InspectorDetailFailedForTurn(state) {
+		inspectorDetailCache.delete(`${runId}|${eventIndex}`)
+		return { ...state }
+	}
+}
+
+// The inspector modal as the watch screen mounts it: the turn list from state, the selected turn's detail from the session cache (a miss reads as 'loading' — the select action schedules the fetch in the same dispatch). Cache misses never render invented content.
+function InspectorModalForRun(state) {
+	if (!state.inspectorModalOpen) return null
+	const runId = state.selectedRunId
+	const detailState = typeof runId === 'string' && state.inspector.selectedEventIndex !== null
+		? inspectorDetailCache.get(`${runId}|${state.inspector.selectedEventIndex}`) ?? null
+		: null
+	return InspectorModal(h, {
+		runLabel: typeof runId === 'string' ? runId : null,
+		turns: state.inspector,
+		detailState,
+		renderMarkdown,
+		onSelectTurn: SelectInspectorTurn,
+		onLoadOlder: LoadOlderTurns,
+		onClose: CloseInspectorModal,
+	})
+}
+
 // --- View ------------------------------------------------------------------
 
 // The primary label for a run where space is tight: the task's first line, capped at a word boundary so a long first line cannot stretch the top bar. History rows and the top bar both use it; the full task is one click away in the row's expanded details.
@@ -930,6 +1133,14 @@ function ViewedRunLabel(state) {
 	])
 }
 
+// The serving image's build identifier, the least urgent thing in the bar: a faint version stamp (short sha + built date) after the nav. Nothing renders when build info is absent or formats to an empty label — running from source without a baked build-info.json has nothing to stamp.
+function BuildLabel(build) {
+	if (build === null) return null
+	const label = formatBuildLabel(build)
+	if (label === '') return null
+	return h('span', { class: 'topbar-build', title: `Built ${build.builtAt}` }, label)
+}
+
 function TopBar(state) {
 	const activeRunId = deriveActiveRunId(state.summaries)
 	const composeDisabled = state.justSubmittedRunId !== null || activeRunId !== null
@@ -945,6 +1156,7 @@ function TopBar(state) {
 				'mute',
 			]),
 		]),
+		BuildLabel(state.build),
 	])
 }
 
@@ -1197,6 +1409,7 @@ function StageControls(state, model) {
 		]),
 		model !== null ? CostStrip(model) : null,
 		InterruptButton(state),
+		h('button', { type: 'button', class: 'inspector-open-button', title: 'Inspect this run\u2019s LLM requests and responses, turn by turn', onclick: OpenInspectorModal }, 'Inspect'),
 	])
 }
 
@@ -1220,6 +1433,33 @@ function LineageLine(state) {
 	return h('button', { type: 'button', class: 'run-lineage', title: 'View the run this run continues', onclick: [SelectRun, view.continuesFrom] }, `Continues run ${view.continuesFrom}`)
 }
 
+// --- Sequence-view scroll following ----------------------------------------
+// The sequence container follows new content while the operator sits at its bottom and browses freely otherwise (see scroll-follow.js). hyperapp has no mounted-element hook, so the follower is synced against the rendered DOM: the effect defers to its own requestAnimationFrame, which hyperapp's render — queued first, at setState — precedes in the same frame, so the patch has landed before the sync runs. The sync attaches a fresh follower when the container element was replaced (mode/screen switches and the placeholder-to-model transition remount it), detaches when the container is gone, and pins to the bottom on every model update while still attached.
+
+let sequenceFollower = null
+
+function runSyncSequenceFollower(_dispatch, _payload) {
+	requestAnimationFrame(() => {
+		const container = document.querySelector('.pb-sequence-scroll')
+		if (!(container instanceof HTMLElement)) {
+			if (sequenceFollower !== null) {
+				sequenceFollower.destroy()
+				sequenceFollower = null
+			}
+			return
+		}
+		if (sequenceFollower === null || sequenceFollower.element !== container) {
+			if (sequenceFollower !== null) sequenceFollower.destroy()
+			sequenceFollower = createScrollFollower(container)
+		}
+		sequenceFollower.follow()
+	})
+}
+
+function SyncSequenceFollower() {
+	return [runSyncSequenceFollower, null]
+}
+
 // The watch screen fills the viewport below the top bar: a controls row, the flex-filling stage, and the now-caption. The Flow view (product surface) and the Sequence view (debug surface) are independent leaves over the same model; the toggle swaps which renders without a fetch. The sequence view mounts inside a vertical scroll container because its timeline grows long, while the flow view scales to the stage.
 function WatchScreen(state) {
 	const labels = state.labelResolver
@@ -1234,7 +1474,7 @@ function WatchScreen(state) {
 		return h('section', { id: 'watch-screen' }, [
 			LineageLine(state),
 			StageControls(state, null),
-			h('div', { class: 'pb-flow flow-stage' }, h('p', { class: 'flow-empty' }, message)),
+			h('div', { class: 'pb-flow flow-stage' }, [h('p', { class: 'flow-empty' }, message), InspectorModalForRun(state)]),
 		])
 	}
 
@@ -1258,6 +1498,7 @@ function WatchScreen(state) {
 			QuestionModalForRun(state),
 			ResultModalForRun(state),
 			InterruptModalForRun(state),
+			InspectorModalForRun(state),
 			InterruptAnswerCardForRun(state),
 			TooltipCardForRun(state),
 		]),
@@ -1379,9 +1620,10 @@ app({
 			// The live InteractionModel the centerpiece renders, plus its previous frame for `deriveLifecycle`'s enter/depart diff. Both null until the first readable flow frame lands.
 			flowModel: null,
 			previousFlowModel: null,
-			// The label resolver and guild participant inventory are built once from `/api/config` (GotConfig); null/empty until that single load completes.
+			// The label resolver and guild participant inventory are built once from `/api/config` (GotConfig); null/empty until that single load completes. `build` rides the same load: the image's build identifier for the top bar, and stays null when running from source without a baked build-info.json.
 			labelResolver: null,
 			guildParticipants: [],
+			build: null,
 			flowTier: DEFAULT_FLOW_TIER,
 			flowViewMode: 'flow',
 			// The visible screen: 'watch' (the flow/sequence stage), 'history' (the run browser), or 'compose' (the new-task hero). A zero-state service shows compose regardless (see Main).
@@ -1395,6 +1637,9 @@ app({
 			resultModalOpen: false,
 			resultShownForRun: null,
 			interruptModalOpen: false,
+			// The LLM turn inspector opens only from the stage controls; its data (the loaded log window, the derived turn list, the selection) lives in `inspector` and resets on open and on run switch.
+			inspectorModalOpen: false,
+			inspector: initialInspectorState(),
 			// The plan disclosure under the stage: collapsed by default, reset with the other per-run view state on a run switch.
 			planExpanded: false,
 			// The inspector descriptor over the run view: null when nothing is hovered. Cleared on
@@ -1417,6 +1662,7 @@ app({
 		onEvery(Tick, POLL_INTERVAL_MS),
 		typeof state.selectedRunId === 'string' && state.selectedRunId !== '' && !isTerminalStatus(state.selectedRunStatus) && onEvery(PollSelectedRun, POLL_INTERVAL_MS),
 		onFirstInteraction(PrimeAudio),
+		state.inspectorModalOpen === true && onEscapeKey(CloseInspectorModal),
 	],
 	node: document.getElementById('app'),
 })

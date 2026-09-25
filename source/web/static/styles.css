@@ -231,6 +231,13 @@ body {
 	white-space: nowrap;
 }
 
+/* The serving image's build identifier (short sha + built date): the least urgent thing in the bar, so faint microcopy after the nav, matching the run microcopy's size. */
+.topbar-build {
+	font-size: 0.72rem;
+	opacity: 0.55;
+	white-space: nowrap;
+}
+
 .topbar-nav {
 	display: flex;
 	align-items: center;
@@ -1159,6 +1166,30 @@ li:last-child {
 	color: var(--color-accent);
 }
 
+/* The Inspect button shares the interrupt button's look; it is always present (past runs are inspectable too) while the interrupt button renders only on the active run, so the right-edge push lives on the Inspect button and is dropped when it directly follows the interrupt button. */
+.inspector-open-button {
+	margin-left: auto;
+	padding: 0.25rem var(--space-3);
+	border: 1px solid var(--color-border-strong);
+	border-radius: var(--radius-sm);
+	background: var(--color-surface);
+	color: var(--color-text);
+	font-size: 0.8rem;
+	font-weight: 500;
+	cursor: pointer;
+	white-space: nowrap;
+}
+
+.inspector-open-button:hover {
+	background: var(--color-accent-soft);
+	border-color: var(--color-accent);
+	color: var(--color-accent);
+}
+
+.interrupt-open-button + .inspector-open-button {
+	margin-left: 0;
+}
+
 /* The stage canvas: the flow SVG scales to fill it (viewBox + preserveAspectRatio), the sequence view's scroll container scrolls within it, and the per-run-view modals overlay it (`.pb-flow` is `position: relative`). */
 #watch-screen .flow-stage {
 	flex: 1 1 auto;
@@ -1711,6 +1742,311 @@ li:last-child {
 	color: #ffffff;
 	font-weight: 500;
 	cursor: pointer;
+}
+
+/* --- Inspector modal -------------------------------------------------------- */
+/* A stage-scoped overlay (the question/result modal pattern: containing block is `.pb-flow`) presenting the run's LLM turns with their on-demand request/response detail. The card is wide and tall — two panes side by side: the turn list (newest first, its own scroll) on the left and the selected turn's detail (its own scroll) on the right. Turn rows are buttons styled as rows; the in-flight row and the metadata-only hint tag read at a glance. Message bodies and reasoning render through the shared sanitized Markdown pipeline; raw structured fields (tool calls, usage) render as pretty-printed JSON in mono. Colors read the visual tokens so it follows the light/dark theme. */
+
+.inspector-modal-overlay {
+	position: absolute;
+	inset: 0;
+	z-index: 20;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+}
+
+.inspector-modal-backdrop {
+	position: absolute;
+	inset: 0;
+	background: rgba(13, 17, 23, 0.55);
+	backdrop-filter: blur(2px);
+	cursor: pointer;
+}
+
+.inspector-modal-card {
+	position: relative;
+	width: min(64rem, calc(100% - 2 * var(--space-5)));
+	height: min(48rem, calc(100% - 2 * var(--space-5)));
+	display: flex;
+	flex-direction: column;
+	padding: var(--space-5);
+	border-radius: var(--radius-lg);
+	background: var(--color-surface);
+	border: 1px solid var(--color-accent);
+	box-shadow: 0 12px 32px rgba(16, 24, 40, 0.28), 0 0 0 4px var(--color-accent-soft);
+}
+
+.inspector-modal-heading-row {
+	display: flex;
+	align-items: baseline;
+	justify-content: space-between;
+	gap: var(--space-4);
+	margin-bottom: var(--space-4);
+}
+
+.inspector-modal-heading {
+	margin: 0;
+	font-size: 0.8rem;
+	font-weight: 600;
+	text-transform: uppercase;
+	letter-spacing: 0.04em;
+	color: var(--color-accent);
+	overflow-wrap: anywhere;
+}
+
+.inspector-modal-close {
+	flex: none;
+	padding: var(--space-1) var(--space-3);
+	border: none;
+	border-radius: var(--radius-sm);
+	background: var(--color-accent);
+	color: #ffffff;
+	font-weight: 500;
+	cursor: pointer;
+}
+
+.inspector-modal-body {
+	display: flex;
+	gap: var(--space-4);
+	flex: 1;
+	min-height: 0;
+}
+
+.inspector-turn-pane {
+	width: 20rem;
+	flex: none;
+	display: flex;
+	flex-direction: column;
+	gap: var(--space-1);
+	overflow: auto;
+}
+
+.inspector-detail-pane {
+	flex: 1;
+	min-width: 0;
+	overflow: auto;
+	border-left: 1px solid var(--color-border);
+	padding-left: var(--space-4);
+}
+
+.inspector-list-note {
+	margin: 0;
+	color: var(--color-text-subtle);
+	font-size: 0.9rem;
+}
+
+.inspector-turn {
+	display: flex;
+	flex-direction: column;
+	gap: var(--space-1);
+	width: 100%;
+	padding: var(--space-2);
+	border: 1px solid transparent;
+	border-radius: var(--radius-sm);
+	background: none;
+	text-align: left;
+	font: inherit;
+	color: inherit;
+	cursor: pointer;
+}
+
+.inspector-turn:hover {
+	background: var(--color-surface-sunken);
+}
+
+.inspector-turn.is-selected {
+	border-color: var(--color-accent);
+	background: var(--color-accent-soft);
+}
+
+.inspector-turn.is-in-flight {
+	opacity: 0.6;
+}
+
+.inspector-turn-top {
+	display: flex;
+	align-items: baseline;
+	gap: var(--space-2);
+	min-width: 0;
+}
+
+.inspector-turn-number {
+	flex: none;
+	font-family: var(--font-mono);
+	font-size: 0.78rem;
+	color: var(--color-text-subtle);
+}
+
+.inspector-turn-role {
+	font-weight: 500;
+	font-size: 0.9rem;
+	overflow-wrap: anywhere;
+}
+
+.inspector-turn-time {
+	margin-left: auto;
+	flex: none;
+	font-size: 0.78rem;
+	color: var(--color-text-subtle);
+}
+
+.inspector-turn-bottom {
+	display: flex;
+	align-items: baseline;
+	gap: var(--space-2);
+	min-width: 0;
+}
+
+.inspector-turn-flight {
+	flex: none;
+	font-size: 0.78rem;
+	font-style: italic;
+	color: var(--color-accent);
+}
+
+.inspector-turn-tokens,
+.inspector-turn-finish {
+	font-size: 0.78rem;
+	color: var(--color-text-muted);
+	overflow-wrap: anywhere;
+}
+
+.inspector-turn-hint {
+	flex: none;
+	margin-left: auto;
+	padding: 0 var(--space-1);
+	border-radius: var(--radius-sm);
+	font-size: 0.7rem;
+	text-transform: uppercase;
+	letter-spacing: 0.04em;
+}
+
+.inspector-turn-hint-full {
+	color: var(--color-success);
+	background: var(--color-accent-soft);
+}
+
+.inspector-turn-hint-standard {
+	color: var(--color-text-subtle);
+	background: var(--color-surface-sunken);
+}
+
+.inspector-older {
+	margin-top: var(--space-2);
+	padding: var(--space-1) var(--space-3);
+	border: 1px solid var(--color-border-strong);
+	border-radius: var(--radius-sm);
+	background: none;
+	color: var(--color-text-muted);
+	font-size: 0.8rem;
+	cursor: pointer;
+}
+
+.inspector-older:disabled {
+	opacity: 0.5;
+	cursor: default;
+}
+
+.inspector-detail-note {
+	margin: 0;
+	color: var(--color-text-subtle);
+	font-size: 0.9rem;
+}
+
+.inspector-detail-degraded {
+	display: flex;
+	flex-direction: column;
+	gap: var(--space-3);
+}
+
+.inspector-degraded-notice {
+	margin: 0;
+	padding: var(--space-2) var(--space-3);
+	border: 1px solid var(--color-warn);
+	border-radius: var(--radius-sm);
+	color: var(--color-text-muted);
+	font-size: 0.88rem;
+}
+
+.inspector-detail-sections {
+	display: flex;
+	flex-direction: column;
+	gap: var(--space-4);
+}
+
+.inspector-section {
+	display: flex;
+	flex-direction: column;
+	gap: var(--space-1);
+}
+
+.inspector-section-label {
+	font-size: 0.75rem;
+	font-weight: 600;
+	text-transform: uppercase;
+	letter-spacing: 0.04em;
+	color: var(--color-text-subtle);
+}
+
+.inspector-json {
+	margin: 0;
+	padding: var(--space-2);
+	background: var(--color-surface-sunken);
+	border-radius: var(--radius-sm);
+	font-family: var(--font-mono);
+	font-size: 0.78rem;
+	line-height: 1.4;
+	color: var(--color-code-text);
+	white-space: pre-wrap;
+	word-break: break-word;
+	max-height: 16rem;
+	overflow: auto;
+}
+
+.inspector-scalar {
+	font-size: 0.9rem;
+	color: var(--color-text);
+}
+
+.inspector-empty-value {
+	color: var(--color-text-subtle);
+}
+
+.inspector-message-list {
+	display: flex;
+	flex-direction: column;
+	gap: var(--space-2);
+}
+
+.inspector-message {
+	display: flex;
+	flex-direction: column;
+	gap: var(--space-1);
+	padding-left: var(--space-3);
+	border-left: 2px solid var(--color-border-strong);
+}
+
+.inspector-message-role {
+	font-family: var(--font-mono);
+	font-size: 0.75rem;
+	color: var(--color-accent);
+}
+
+.inspector-message-content {
+	font-size: 0.9rem;
+}
+
+.inspector-prose {
+	font-size: 0.92rem;
+}
+
+.inspector-reasoning {
+	padding: var(--space-2) var(--space-3);
+	background: var(--color-surface-sunken);
+	border-left: 2px solid var(--color-accent);
+	font-size: 0.9rem;
+	color: var(--color-text-muted);
 }
 
 /* --- Interrupt answer card --------------------------------------------------- */

@@ -437,7 +437,7 @@ Submits an answer. **Body:** `{ "id": "...", "answer": "..." }`.
 
 ### `GET /api/config`
 
-Returns the rendered configuration the web client boots from: the model endpoint (`name`, `contextWindow`), the executor budgets, the entry role, each role's tools and display fields, each tool manifest's display fields, and the guild's `visualization` section when present (see "Guild format" and [`docs/visualization.md`](visualization.md) "Labels").
+Returns the rendered configuration the web client boots from: the model endpoint (`name`, `contextWindow`), the executor budgets, the entry role, each role's tools and display fields, each tool manifest's display fields, the guild's `visualization` section when present (see "Guild format" and [`docs/visualization.md`](visualization.md) "Labels"), and the image's build identifier as `build` — `{ sha, builtAt }`, with `sha` present only when the image was built with `BUILD_SHA` and `builtAt` the UTC timestamp baked at build time; `build` is `null` when running without a baked build-info file (e.g. from a source checkout).
 
 ### `GET /api/demo/scenarios`
 
