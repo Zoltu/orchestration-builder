@@ -7,6 +7,7 @@ import type { LlmCaller } from './llm.js'
 import type { AppendLog } from './persistence.js'
 import type { RecentToolCall } from './role-inspection.js'
 import type { RoleRegistry } from './role-registry.js'
+import type { RoleDelta } from './stream-channel.js'
 import type { ToolHandler } from './tool-dispatch.js'
 import type { EffortLevel, LogLevel, LogEvent, Message, ResultCard, RunContinuation, ToolCall } from './types.js'
 
@@ -60,6 +61,8 @@ export interface EngineDependencies {
 	contextPressureTracker: ContextPressureTracker
 	// The run's checkpoint recorder, created per run by runExecutor; every frame registers on start and the leaf writes the role stack at each safe point so a service restart can resume the run.
 	checkpointRecorder: CheckpointRecorder
+	// The run-scoped delta publisher: a leaf bound to the active run by the service (serve.ts's withRunBindings), so every streamed turn text carries the run's identity.
+	publishDelta: (delta: RoleDelta) => void
 }
 
 // The turn a resumed role was suspended in: the full tool-call list, the index of the agent call it was waiting on, and a resolver for the child card. The resolver either returns the checkpoint's recorded card or re-enters the child frame's own resume — invoked from inside the parent's suspended turn so parents register root-first exactly as in live execution.

@@ -158,6 +158,7 @@ function makeDeps(llm: FakeLlm, persistence: FakePersistenceFns, loadedGuild: Lo
 		humanBackend: stubHumanBackend,
 		loadedGuild,
 		interruptQueue: createInterruptQueue(),
+		publishDelta: () => undefined,
 	}
 }
 

@@ -15,7 +15,7 @@ export { reconcileRunsOnStartup } from './startup-reconciliation.js'
 export type { ReconciliationReport, StartupReconciliationDependencies } from './startup-reconciliation.js'
 
 export { createLlmCaller, createLlmFetch, createSleep, createTimeoutScheduler } from './llm.js'
-export type { LlmCaller, LlmCallResult, LlmCallerDependencies, LlmFetch, LlmRequest, ScheduleTimeout, Sleep } from './llm.js'
+export type { LlmCaller, LlmCallResult, LlmCallerDependencies, LlmFetch, LlmRequest, LlmStreamDelta, ScheduleTimeout, Sleep } from './llm.js'
 
 export { createGuildLoader } from './loader.js'
 export type { LoadGuild, LoadedGuild, LoadedGuildFiles } from './loader.js'
@@ -41,6 +41,9 @@ export type { RunState } from './run-state.js'
 
 export { createInterruptChannel, createInterruptQueue } from './interrupts.js'
 export type { InterruptChannel, InterruptQueue, InterruptRequest, InterruptSubmitResult } from './interrupts.js'
+
+export { createDeltaChannel } from './stream-channel.js'
+export type { DeltaChannel, DeltaField, DeltaSubscriber, RoleDelta, RunDelta } from './stream-channel.js'
 
 export { createRunSubmission } from './run-submission.js'
 export type { ResumeRun, RunSubmission, RunSubmissionDependencies, StartRun, SubmitResult } from './run-submission.js'

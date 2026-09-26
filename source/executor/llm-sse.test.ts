@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { createResponsesStreamAccumulator, createSseLineAssembler, mapHistoryToResponsesInput, mapTerminalResponseToCallResult, mapToolManifestsToResponsesTools, OversizedSseLineError, parseSseDataPayload, SSE_MAX_LINE_CHARS, type ResponsesStreamSnapshot } from './llm-sse.ts'
+import { createResponsesStreamAccumulator, createSseLineAssembler, mapHistoryToResponsesInput, mapTerminalResponseToCallResult, mapToolManifestsToResponsesTools, OversizedSseLineError, parseSseDataPayload, SSE_MAX_LINE_CHARS, streamDeltaOf, type ResponsesStreamSnapshot } from './llm-sse.ts'
 import type { Message, ToolManifest } from './types.js'
 
 function itemUnder(snapshot: ResponsesStreamSnapshot, key: string) {
@@ -385,6 +385,44 @@ describe('mapHistoryToResponsesInput — reasoning replay', () => {
 			{ type: 'reasoning', content: [{ type: 'reasoning_text', text: 'round two thought' }] },
 			{ type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'done' }] },
 		])
+	})
+})
+
+describe('streamDeltaOf', () => {
+	test('a reasoning_text.delta maps to the reasoning field with its text', () => {
+		expect(streamDeltaOf({ type: 'reasoning_text.delta', item_id: 'r1', delta: 'thinking ' })).toEqual({ field: 'reasoning', text: 'thinking ' })
+	})
+
+	test('an output_text.delta maps to the content field with its text', () => {
+		expect(streamDeltaOf({ type: 'output_text.delta', item_id: 'm1', delta: 'Hello' })).toEqual({ field: 'content', text: 'Hello' })
+	})
+
+	test('function-call argument deltas are not turn text and return undefined', () => {
+		expect(streamDeltaOf({ type: 'function_call_arguments.delta', item_id: 'f1', delta: '{"path"' })).toBeUndefined()
+	})
+
+	test('lifecycle, terminal, and done events return undefined', () => {
+		const events = [
+			{ type: 'response.created' },
+			{ type: 'response.in_progress' },
+			{ type: 'output_item.added', item_id: 'm1', item: { type: 'message' } },
+			{ type: 'output_text.done', item_id: 'm1', delta: 'ignored tail' },
+			{ type: 'response.completed', response: { status: 'completed', output: [] } },
+			{ type: 'totally.made.up', delta: 'nope' },
+		]
+		for (const event of events) {
+			expect(streamDeltaOf(event)).toBeUndefined()
+		}
+	})
+
+	test('a delta kind with a missing or non-string delta payload is malformed, not a delta', () => {
+		expect(streamDeltaOf({ type: 'output_text.delta' })).toBeUndefined()
+		expect(streamDeltaOf({ type: 'output_text.delta', delta: 42 })).toBeUndefined()
+		expect(streamDeltaOf({ type: 'reasoning_text.delta', delta: null })).toBeUndefined()
+	})
+
+	test('an event without a type is not a delta', () => {
+		expect(streamDeltaOf({ delta: 'orphan' })).toBeUndefined()
 	})
 })
 

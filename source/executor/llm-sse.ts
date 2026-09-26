@@ -186,6 +186,15 @@ export function createResponsesStreamAccumulator(): ResponsesStreamAccumulator {
 	return { apply, recordError, snapshot }
 }
 
+// Pure per-event delta mapping for the streaming tap: ONLY the two payload-text delta kinds map — reasoning_text.delta to the reasoning field, output_text.delta to content. Function-call argument deltas are tool-wire detail no client should render as turn text, and every other event (lifecycle, terminal, done) carries no delta, so all of them return undefined. A delta event whose payload is malformed (a missing or non-string delta) is not a delta.
+export function streamDeltaOf(event: Record<string, unknown>): { field: 'reasoning' | 'content'; text: string } | undefined {
+	const type = event['type']
+	if (type !== 'reasoning_text.delta' && type !== 'output_text.delta') return undefined
+	const delta = event['delta']
+	if (typeof delta !== 'string') return undefined
+	return { field: type === 'reasoning_text.delta' ? 'reasoning' : 'content', text: delta }
+}
+
 interface MappedResponsesHistory {
 	instructions: string | undefined
 	input: unknown[]

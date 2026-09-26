@@ -6,8 +6,9 @@ import { createBootstrapFailureHandler } from './web/bootstrap-failure.js'
 import { createBuildInfoReader } from './web/build-info.js'
 import { createSnapshotCache } from './web/snapshot-cache.js'
 import { createRunListCache } from './web/run-list-cache.js'
+import { createStreamHub } from './web/stream-hub.js'
 import { createTaskSummarizer, type TaskSummarizer } from './summarize.js'
-import { applyDeploymentOverride, applyLogLevel, createAppendLog, createDeleteCheckpoint, createDockerSecretReader, createGuildLoader, createInterruptChannel, createInterruptQueue, createLlmCaller, createLlmFetch, createListRunIds, createModelInfoProbe, createPlanToolHandlers, createReadProjectSettings, createReadRunCheckpointById, createReadRunLogTextFrom, createReadRunMetaById, createReadRunPlanById, createReadRunSnapshotById, createReadRunSnapshotStats, createReadRunSummaryById, createReadRunSummaryStats, createRunDirectory, createRunDirectoryExists, createRunLogToolHandlers, createRunState, createRunSubmission, createSleep, createTimeoutScheduler, createToolHandlers, createWebHumanBackend, createWriteCheckpoint, createWriteMeta, createWriteProjectSettings, createWriteRunSummary, ensureOrchestrationGitExcluded, entryFrameLogLevel, generateRunId, LOG_FILE_NAME, MODEL_PROBE_TIMEOUT_MS, nodeGitExcludeFilesystem, parseModelInfo, reconcileRunsOnStartup, resolveDeploymentConfig, resolveDeploymentOverride, resolveKagiApiKey, resolveSecret, resumeExecutor, runExecutor, validateDeploymentFileConfig, validateDeploymentRoleReferences, ConfigurationError, ValidationError, type AppendLog, type ExecutorDependencies, type InterruptChannel, type LoadedGuild, type LlmCaller, type LogLevel, type ModelApiProbe, type ResumeRun, type RunCheckpoint, type StartRun, type WebHumanBackend } from './executor/index.js'
+import { applyDeploymentOverride, applyLogLevel, createAppendLog, createDeleteCheckpoint, createDeltaChannel, createDockerSecretReader, createGuildLoader, createInterruptChannel, createInterruptQueue, createLlmCaller, createLlmFetch, createListRunIds, createModelInfoProbe, createPlanToolHandlers, createReadProjectSettings, createReadRunCheckpointById, createReadRunLogTextFrom, createReadRunMetaById, createReadRunPlanById, createReadRunSnapshotById, createReadRunSnapshotStats, createReadRunSummaryById, createReadRunSummaryStats, createRunDirectory, createRunDirectoryExists, createRunLogToolHandlers, createRunState, createRunSubmission, createSleep, createTimeoutScheduler, createToolHandlers, createWebHumanBackend, createWriteCheckpoint, createWriteMeta, createWriteProjectSettings, createWriteRunSummary, ensureOrchestrationGitExcluded, entryFrameLogLevel, generateRunId, LOG_FILE_NAME, MODEL_PROBE_TIMEOUT_MS, nodeGitExcludeFilesystem, parseModelInfo, reconcileRunsOnStartup, resolveDeploymentConfig, resolveDeploymentOverride, resolveKagiApiKey, resolveSecret, resumeExecutor, runExecutor, validateDeploymentFileConfig, validateDeploymentRoleReferences, ConfigurationError, ValidationError, type AppendLog, type DeltaChannel, type ExecutorDependencies, type InterruptChannel, type LoadedGuild, type LlmCaller, type LogLevel, type ModelApiProbe, type ResumeRun, type RunCheckpoint, type StartRun, type WebHumanBackend } from './executor/index.js'
 
 const DEPLOYMENT_FILE_ENV_VAR = 'ORCHESTRATOR_DEPLOYMENT_FILE'
 const PORT_ENV_VAR = 'PORT'
@@ -61,6 +62,7 @@ async function withRunBindings<T>(config: {
 	llmCaller: LlmCaller
 	humanBackend: WebHumanBackend
 	interruptChannel: InterruptChannel
+	deltaChannel: DeltaChannel
 	kagiApiKey: string | undefined
 	guildPath: string
 	workspaceRootPath: string
@@ -85,6 +87,8 @@ async function withRunBindings<T>(config: {
 	// The interrupt channel is likewise shared; bind the run's fresh queue so operator interrupts submitted mid-run reach the engine's drain.
 	const interruptQueue = createInterruptQueue()
 	config.interruptChannel.bindQueue(interruptQueue)
+	// The delta channel is the third shared backend; bind the run id so the engine's stream deltas are stamped with it and fanned out to subscribed browsers by the stream hub.
+	config.deltaChannel.bindRun(runId)
 	const dependencies: ExecutorDependencies = {
 		llmCaller: config.llmCaller,
 		loadedGuild: config.loadedGuild,
@@ -96,10 +100,12 @@ async function withRunBindings<T>(config: {
 		additionalToolHandlers,
 		humanBackend: config.humanBackend,
 		interruptQueue,
+		publishDelta: (delta) => config.deltaChannel.publish(delta),
 	}
 	try {
 		return await invoke(dependencies)
 	} finally {
+		config.deltaChannel.bindRun(null)
 		config.humanBackend.bindRunLog(null)
 		config.interruptChannel.bindQueue(null)
 	}
@@ -119,6 +125,7 @@ interface RunServiceConfig {
 	llmCaller: LlmCaller
 	humanBackend: WebHumanBackend
 	interruptChannel: InterruptChannel
+	deltaChannel: DeltaChannel
 	summarizer: TaskSummarizer
 	kagiApiKey: string | undefined
 	guildPath: string
@@ -264,6 +271,9 @@ async function serve(): Promise<void> {
 
 	const webHumanBackend = createWebHumanBackend()
 	const interruptChannel = createInterruptChannel()
+	// The delta channel and its browser-facing hub are the third shared-backend pair: the channel is bound per run in withRunBindings, and the hub fans each stamped delta out to the websocket sockets subscribed to that run (see source/web/stream-hub.ts).
+	const deltaChannel = createDeltaChannel()
+	const streamHub = createStreamHub(deltaChannel)
 	const runState = createRunState({ humanBackend: webHumanBackend, interruptChannel })
 	const readRunSnapshotStats = createReadRunSnapshotStats(runsBaseDir)
 	const readRunMetaById = createReadRunMetaById(runsBaseDir)
@@ -288,6 +298,7 @@ async function serve(): Promise<void> {
 		llmCaller,
 		humanBackend: webHumanBackend,
 		interruptChannel,
+		deltaChannel,
 		summarizer,
 		kagiApiKey,
 		guildPath: GUILD_PATH,
@@ -316,6 +327,7 @@ async function serve(): Promise<void> {
 	const webServer = createWebServer({
 		port,
 		pageTitle,
+		streamHub,
 		guildConfig: guild.config,
 		deployment: guild.deployment,
 		tools: guild.tools,

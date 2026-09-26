@@ -1,9 +1,9 @@
 import type { LlmCallResult, LlmRequest, ResolvedModelConfig } from './types.js'
-import { createResponsesStreamAccumulator, createSseLineAssembler, mapHistoryToResponsesInput, mapTerminalResponseToCallResult, mapToolManifestsToResponsesTools, OversizedSseLineError, parseSseDataPayload, type ResponsesStreamSnapshot, type SseDataPayload } from './llm-sse.js'
+import { createResponsesStreamAccumulator, createSseLineAssembler, mapHistoryToResponsesInput, mapTerminalResponseToCallResult, mapToolManifestsToResponsesTools, OversizedSseLineError, parseSseDataPayload, streamDeltaOf, type ResponsesStreamSnapshot, type SseDataPayload } from './llm-sse.js'
 import { asRecord, isObject, safeJsonParse } from './validation.js'
 
 // The shared LLM wire types live in types.ts (see it for the definitions); re-exported here so every import site keeps its path.
-export type { LlmCallResult, LlmRequest, LlmUsage } from './types.js'
+export type { LlmCallResult, LlmRequest, LlmStreamDelta, LlmUsage } from './types.js'
 
 export interface LlmCaller {
 	call(request: LlmRequest): Promise<LlmCallResult>
@@ -209,8 +209,8 @@ function readWithIdleTimeout(reader: ReadableStreamDefaultReader<Uint8Array>, id
 	})
 }
 
-// Folds one 2xx SSE stream to its mapped call result. Reading stops at the first terminal marker — the [DONE] sentinel or an accumulated terminal event — and the reader is cancelled so the underlying connection is released without draining the tail. Each read is raced against an idle timeout that resets on every delivered chunk, so a stalled stream is cut without an overall deadline on a slow-but-flowing one. An idle timeout is returned as the stream_idle_timeout outcome for the caller's retry loop; every other stream-phase failure (a rejected read, an over-cap line) maps to llm_unavailable instead of escaping: a throw out of here would reach run submission's fatal path and kill the run.
-async function consumeResponsesStream(stream: ReadableStream<Uint8Array>, options: { idleTimeoutMs: number; scheduleTimeout: ScheduleTimeout }): Promise<LlmCallResult | StreamIdleTimeout> {
+// Folds one 2xx SSE stream to its mapped call result. Reading stops at the first terminal marker — the [DONE] sentinel or an accumulated terminal event — and the reader is cancelled so the underlying connection is released without draining the tail. Each read is raced against an idle timeout that resets on every delivered chunk, so a stalled stream is cut without an overall deadline on a slow-but-flowing one. An idle timeout is returned as the stream_idle_timeout outcome for the caller's retry loop; every other stream-phase failure (a rejected read, an over-cap line) maps to llm_unavailable instead of escaping: a throw out of here would reach run submission's fatal path and kill the run. The optional onDelta fires after accumulator.apply for each recognized payload-text delta, in stream order.
+async function consumeResponsesStream(stream: ReadableStream<Uint8Array>, options: { idleTimeoutMs: number; scheduleTimeout: ScheduleTimeout; onDelta?: (delta: { field: 'reasoning' | 'content'; text: string }) => void }): Promise<LlmCallResult | StreamIdleTimeout> {
 	const decoder = new TextDecoder()
 	const assembler = createSseLineAssembler()
 	const accumulator = createResponsesStreamAccumulator()
@@ -220,7 +220,13 @@ async function consumeResponsesStream(stream: ReadableStream<Uint8Array>, option
 		if (payload.kind === 'skip') return false
 		if (payload.kind === 'done') return true
 		if (payload.kind === 'error') accumulator.recordError(payload.value)
-		else accumulator.apply(payload.value)
+		else {
+			accumulator.apply(payload.value)
+			if (options.onDelta !== undefined) {
+				const delta = streamDeltaOf(payload.value)
+				if (delta !== undefined) options.onDelta(delta)
+			}
+		}
 		return accumulator.snapshot().terminal !== 'none'
 	}
 
@@ -292,6 +298,9 @@ export function createLlmCaller(model: ResolvedModelConfig, apiKey: string | und
 		while (attempt < maxAttempts) {
 			attempt++
 
+			// Deltas re-emit from zero on every attempt, so from the second attempt on, the new stream opens by telling any client accumulation to clear — otherwise a client that rendered attempt N's partial text would append attempt N+1's on top of it.
+			if (attempt > 1 && request.onDelta !== undefined) request.onDelta({ field: 'content', text: '', reset: true })
+
 			// The connect phase is bounded by an abort, not a race: aborting the fetch both unblocks the await below and releases the socket, and the timer is cancelled the moment the response headers arrive.
 			const connectController = new AbortController()
 			const cancelConnectTimeout = dependencies.scheduleTimeout(() => connectController.abort(), LLM_CONNECT_TIMEOUT_MS)
@@ -328,7 +337,7 @@ export function createLlmCaller(model: ResolvedModelConfig, apiKey: string | und
 				return { kind: 'llm_unavailable', message: `HTTP ${response.status}: ${response.errorBody}` }
 			}
 
-			const consumed = await consumeResponsesStream(response.stream, { idleTimeoutMs: LLM_STREAM_IDLE_TIMEOUT_MS, scheduleTimeout: dependencies.scheduleTimeout })
+			const consumed = await consumeResponsesStream(response.stream, { idleTimeoutMs: LLM_STREAM_IDLE_TIMEOUT_MS, scheduleTimeout: dependencies.scheduleTimeout, onDelta: request.onDelta })
 			// An idle timeout is a transport-liveness failure like a failed connect, so it is retried with backoff instead of ending the loop the way every other stream failure does; the fold already released the reader on its exit path.
 			if (consumed.kind === 'stream_idle_timeout') {
 				lastError = consumed.message

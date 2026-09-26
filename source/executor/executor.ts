@@ -12,6 +12,7 @@ import type { AppendLog, DeleteCheckpoint, RunDirectory, WriteCheckpoint, WriteM
 import { resumeRoleStack } from './resume.js'
 import { createRoleRegistry } from './role-registry.js'
 import type { ToolHandler } from './tool-dispatch.js'
+import type { RoleDelta } from './stream-channel.js'
 
 export interface ExecutorDependencies {
 	llmCaller: LlmCaller
@@ -26,6 +27,8 @@ export interface ExecutorDependencies {
 	deleteCheckpoint: DeleteCheckpoint
 	// The run's interrupt queue, created by the caller so the service API can submit operator interrupts while the run is in flight; the engine drains it at turn boundaries. The role registry is run-internal and created here.
 	interruptQueue: InterruptQueue
+	// The run-scoped streaming-delta publisher, provided by the caller (bound to the shared delta channel in serve.ts); the engine stamps every streamed text delta with the publishing role. Required like the rest of the run-scoped leaves.
+	publishDelta: (delta: RoleDelta) => void
 }
 
 function buildEngineDependencies(deps: ExecutorDependencies, runId: string, startTime: string, registryCounter: number, learnedContextCeiling: number | undefined, continuesFrom: string | undefined): EngineDependencies {
@@ -39,6 +42,7 @@ function buildEngineDependencies(deps: ExecutorDependencies, runId: string, star
 		roleRegistry,
 		interruptQueue: deps.interruptQueue,
 		contextPressureTracker,
+		publishDelta: deps.publishDelta,
 		// The run's lineage rides the recorder so checkpoints written after a resume keep stamping continuesFrom onto the entry frame — the live context does not carry it on the resume path. The logging level needs no such stamp: the entry context carries it and the recorder serializes from there.
 		checkpointRecorder: createCheckpointRecorder({ writeCheckpoint: deps.writeCheckpoint, runId, startTime, roleRegistry, contextPressureTracker, continuesFrom }),
 	}

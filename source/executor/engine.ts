@@ -457,9 +457,11 @@ async function executeRoleLoop(
 		// Only the role is carried; the full turn lands in llm_call once the response arrives.
 		logEvent(deps.appendLog, 'llm_call_start', { role: context.roleName })
 
+		// The streaming tap fans each payload-text delta out through the run-scoped publisher, stamped with this role instance's identity so a client can attribute streamed text to the right role.
 		const llmResult = await deps.llmCaller.call({
 			messages,
 			tools: allowedToolsManifests,
+			onDelta: (delta) => deps.publishDelta({ roleId: registryEntry.roleId, role: context.roleName, ...delta }),
 		})
 
 		const handling = handleLlmResult(llmResult, roleState, deps, context)

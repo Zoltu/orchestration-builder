@@ -7,13 +7,14 @@ import { runRole } from './engine.ts'
 import type { EngineDependencies } from './engine-state.ts'
 import { resumeRoleStack } from './resume.ts'
 import { createInterruptQueue } from './interrupts.ts'
-import type { LlmCallResult, LlmCaller, LlmFetch, LlmFetchRequest, LlmStreamResponse } from './llm.ts'
+import type { LlmCallResult, LlmCaller, LlmFetch, LlmFetchRequest, LlmRequest, LlmStreamDelta, LlmStreamResponse } from './llm.ts'
 import { createLlmCaller } from './llm.ts'
 import type { LoadedGuild } from './loader.ts'
 import type { AppendLog } from './persistence.ts'
 import { createRoleRegistry } from './role-registry.ts'
 import type { RunCheckpoint } from './checkpoint.ts'
 import { createFakeCheckpointRecorder, stubHumanBackend, withTool, defined } from './test-fixtures.ts'
+import type { RoleDelta } from './stream-channel.ts'
 import type { ToolHandler } from './tool-dispatch.ts'
 
 function success(toolCalls: ToolCall[], opts: { content?: string; promptTokens?: number; completionTokens?: number; finishReason?: string } = {}): LlmCallResult {
@@ -42,9 +43,15 @@ function llmUnavailable(message = 'test'): LlmCallResult {
 class FakeLlm implements LlmCaller {
 	responses: LlmCallResult[] = []
 	calls: Array<{ messages: Message[]; tools?: ToolManifest[] }> = []
+	// Per-call scripted streaming deltas, emitted through the request's onDelta before the scripted response is returned. Absent for a call emits nothing.
+	deltasPerCall: LlmStreamDelta[][] = []
 
-	async call(request: { messages: Message[]; tools?: ToolManifest[] }): Promise<LlmCallResult> {
+	async call(request: LlmRequest): Promise<LlmCallResult> {
 		this.calls.push(request)
+		const deltas = this.deltasPerCall.shift()
+		if (deltas !== undefined) {
+			for (const delta of deltas) request.onDelta?.(delta)
+		}
 		if (this.responses.length === 0) {
 			throw new Error('FakeLlm ran out of responses')
 		}
@@ -197,9 +204,12 @@ function makeDeps(llm: LlmCaller): { deps: EngineDependencies; events: LogEvent[
 		interruptQueue: createInterruptQueue(),
 		contextPressureTracker,
 		checkpointRecorder: sink.recorder,
+		publishDelta: noOpPublishDelta,
 	}
 	return { deps, events, checkpoints: sink.checkpoints }
 }
+
+function noOpPublishDelta(): void {}
 
 const echoHandler: ToolHandler = (args) => ({ kind: 'success', data: args })
 
@@ -2575,5 +2585,68 @@ describe('runRole — llm_call delta protocol', () => {
 		expect(numberOf(resumedCall, 'sentFrom')).toBe(2)
 		expect(numberOf(resumedCall, 'messageCount')).toBe(4)
 		expect(sentOf(resumedCall).length).toBe(2)
+	})
+})
+
+describe('runRole — streamed delta publishing', () => {
+	test('the caller\'s onDelta reaches publishDelta stamped with the publishing role\'s identity, in emission order', async () => {
+		const guild = buildGuild(
+			{ main: { systemPrompt: 'p', tools: ['finish'] } },
+			'main',
+		)
+		const llm = new FakeLlm()
+		llm.responses = [success([finishCall({ status: 'success', summary: 'Done' })])]
+		llm.deltasPerCall = [
+			[{ field: 'reasoning', text: 'thin' }, { field: 'content', text: 'Hello' }],
+		]
+		const { deps } = makeDeps(llm)
+		const published: RoleDelta[] = []
+		const depsWithTap: EngineDependencies = { ...deps, publishDelta: (delta) => published.push(delta) }
+
+		const result = await runRole(depsWithTap, {
+			loadedGuild: guild,
+			depth: 0,
+			roleName: 'main',
+			task: 'do it',
+		})
+
+		expect(result.status).toBe('success')
+		expect(published).toEqual([
+			{ roleId: 'main-0-1', role: 'main', field: 'reasoning', text: 'thin' },
+			{ roleId: 'main-0-1', role: 'main', field: 'content', text: 'Hello' },
+		])
+	})
+
+	test('a child role\'s deltas carry the child\'s own instance identity, not the parent\'s', async () => {
+		const guild = buildGuild({
+			orchestrator: { systemPrompt: 'p', tools: ['agent', 'finish'] },
+			coder: { systemPrompt: 'c', tools: ['finish'] },
+		}, 'orchestrator')
+		const llm = new FakeLlm()
+		llm.responses = [
+			success([agentCall('coder', 'subtask')]),
+			success([finishCall({ status: 'success', summary: 'child done' })]),
+			success([finishCall({ status: 'success', summary: 'parent done' })]),
+		]
+		llm.deltasPerCall = [
+			[{ field: 'content', text: 'parent text' }],
+			[{ field: 'reasoning', text: 'child thinking' }],
+		]
+		const { deps } = makeDeps(llm)
+		const published: RoleDelta[] = []
+		const depsWithTap: EngineDependencies = { ...deps, publishDelta: (delta) => published.push(delta) }
+
+		const result = await runRole(depsWithTap, {
+			loadedGuild: guild,
+			depth: 0,
+			roleName: 'orchestrator',
+			task: 'do it',
+		})
+
+		expect(result.status).toBe('success')
+		expect(published).toEqual([
+			{ roleId: 'orchestrator-0-1', role: 'orchestrator', field: 'content', text: 'parent text' },
+			{ roleId: 'coder-1-2', role: 'coder', field: 'reasoning', text: 'child thinking' },
+		])
 	})
 })

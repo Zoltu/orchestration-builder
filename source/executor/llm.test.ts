@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { createLlmCaller, detectContextBudgetExceeded, type LlmFetch, type LlmFetchRequest, type LlmStreamResponse, type ScheduleTimeout, type Sleep } from './llm.ts'
+import { createLlmCaller, detectContextBudgetExceeded, type LlmFetch, type LlmFetchRequest, type LlmStreamDelta, type LlmStreamResponse, type ScheduleTimeout, type Sleep } from './llm.ts'
 import { SSE_MAX_LINE_CHARS } from './llm-sse.ts'
 import type { ResolvedModelConfig } from './types.js'
 
@@ -371,6 +371,68 @@ describe('createLlmCaller stream consumption', () => {
 		const caller = createLlmCaller(MODEL, API_KEY, { llmFetch: wire.llmFetch, sleep: wire.sleep, scheduleTimeout: wire.scheduleTimeout })
 		const result = await caller.call({ messages: [] })
 		expect(result).toEqual({ kind: 'llm_unavailable', message: 'SSE stream ended without a terminal event (no deltas received)' })
+	})
+})
+
+describe('createLlmCaller streaming deltas', () => {
+	test('onDelta fires in stream order across chunk boundaries, delivering only the two payload-text delta kinds', async () => {
+		// The reasoning delta's SSE line is cut mid-JSON across two transport chunks, so the tap only sees it once the assembler completes the line — and the arguments delta interleaved after the content delta must never reach it.
+		const reasoningLine = dataLine({ type: 'reasoning_text.delta', item_id: 'r1', delta: 'thin' })
+		const cut = Math.floor(reasoningLine.length / 2)
+		const wire = createFakeWire([streamResponse([
+			...encodedChunks([dataLine({ type: 'response.created' })]),
+			new TextEncoder().encode(reasoningLine.slice(0, cut)),
+			new TextEncoder().encode(reasoningLine.slice(cut) + dataLine({ type: 'output_text.delta', item_id: 'm1', delta: 'Hello' }) + dataLine({ type: 'function_call_arguments.delta', item_id: 'f1', delta: '{"x"' })),
+			...encodedChunks([dataLine(completedEvent([{ type: 'message', content: [{ type: 'output_text', text: 'Hello' }] }]))]),
+		])])
+		const caller = createLlmCaller(MODEL, API_KEY, { llmFetch: wire.llmFetch, sleep: wire.sleep, scheduleTimeout: wire.scheduleTimeout })
+		const deltas: LlmStreamDelta[] = []
+		const result = await caller.call({ messages: [], onDelta: (delta) => deltas.push(delta) })
+		expect(result.kind).toBe('success')
+		expect(deltas).toEqual([
+			{ field: 'reasoning', text: 'thin' },
+			{ field: 'content', text: 'Hello' },
+		])
+	})
+
+	test('a retried attempt opens with a reset content delta before the new attempt re-emits its deltas', async () => {
+		const wire = createFakeWire([errorResponse(500, 'boom'), streamResponse(happyPathChunks())])
+		const caller = createLlmCaller(MODEL, API_KEY, { llmFetch: wire.llmFetch, sleep: wire.sleep, scheduleTimeout: wire.scheduleTimeout })
+		const deltas: LlmStreamDelta[] = []
+		const result = await caller.call({ messages: [], onDelta: (delta) => deltas.push(delta) })
+		expect(result.kind).toBe('success')
+		expect(wire.requests).toHaveLength(2)
+		expect(deltas).toEqual([
+			{ field: 'content', text: '', reset: true },
+			{ field: 'reasoning', text: 'thinking ' },
+			{ field: 'content', text: 'Hello' },
+		])
+	})
+
+	test('a completed-but-degenerate stream that retries also opens the next attempt with a reset after the first attempt\'s deltas', async () => {
+		const degenerate = encodedChunks([dataLine({ type: 'reasoning_text.delta', item_id: 'r1', delta: 'burned budget' }), dataLine(completedEvent([]))])
+		const wire = createFakeWire([
+			streamResponse(degenerate),
+			streamResponse(encodedChunks([dataLine(completedEvent([{ type: 'message', content: [{ type: 'output_text', text: 'ok' }] }]))])),
+		])
+		const caller = createLlmCaller(MODEL, API_KEY, { llmFetch: wire.llmFetch, sleep: wire.sleep, scheduleTimeout: wire.scheduleTimeout })
+		const deltas: LlmStreamDelta[] = []
+		const result = await caller.call({ messages: [], onDelta: (delta) => deltas.push(delta) })
+		expect(result.kind).toBe('success')
+		// The second attempt's content rides only the terminal response payload (no delta events), so after the reset no further deltas arrive.
+		expect(deltas).toEqual([
+			{ field: 'reasoning', text: 'burned budget' },
+			{ field: 'content', text: '', reset: true },
+		])
+	})
+
+	test('a first-attempt success emits no reset delta', async () => {
+		const wire = createFakeWire([streamResponse(happyPathChunks())])
+		const caller = createLlmCaller(MODEL, API_KEY, { llmFetch: wire.llmFetch, sleep: wire.sleep, scheduleTimeout: wire.scheduleTimeout })
+		const deltas: LlmStreamDelta[] = []
+		await caller.call({ messages: [], onDelta: (delta) => deltas.push(delta) })
+		expect(deltas.length).toBeGreaterThan(0)
+		expect(deltas.some((delta) => delta.reset === true)).toBe(false)
 	})
 })
 

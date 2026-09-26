@@ -200,6 +200,7 @@ function makeDeps(llm: FakeLlm, humanBackend: HumanBackend): { deps: EngineDepen
 		interruptQueue: createInterruptQueue(),
 		contextPressureTracker,
 		checkpointRecorder: sink.recorder,
+		publishDelta: () => undefined,
 	}
 	return { deps, events }
 }
