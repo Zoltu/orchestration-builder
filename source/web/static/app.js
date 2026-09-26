@@ -13,6 +13,7 @@ import { createTooltipDismiss, deriveTooltipDescriptor, isInFlightAskHuman, reso
 import { operationIdsForTooltipDetails } from './tooltip.js'
 import { copyRawToClipboard } from './clipboard.js'
 import { QuestionModal } from './question-modal.js'
+import { createOperationDetails } from './operation-details.js'
 import { ResultModal, deriveTerminalResult } from './result-modal.js'
 import { InspectorModal, buildTurnIndex, resolveSelection, tailWindowOffset, olderWindowOffset, olderFetchLimit, canPageOlder, INSPECTOR_WINDOW_SIZE, INSPECTOR_PAGE_LIMIT, INSPECTOR_RETENTION_LIMIT } from './inspector-modal.js'
 import { Tooltip, tooltipStyle } from './tooltip.js'
@@ -95,10 +96,10 @@ let audioContext = null
 // The caller-held column high-water mark for the flow view (see createColumnTracker): one per page load so the centerpiece's width stays stable as runs deepen and unwind. Held at module scope like audioContext — it is view-render memory, not app state, and retention across run switches is harmless (the stage simply stays as wide as the deepest run seen this page load).
 const flowColumnTracker = createColumnTracker()
 
-// The inspector's operation-details session cache: key `<runId>|<operationId>` → 'loading' | 'failed' | { details }. The polled flow model ships no detail bodies (they can carry multi-megabyte tool arguments/results), so opening an inspector card fetches the ids its derivation may show from `api/runs/:id/flow?operation=<id>` exactly once per session and caches them here. Operation ids are stable within a run (events only append), so an entry never goes stale; the run id in the key keeps a previous run's entries from answering for another run's same-numbered operation. Module scope like flowColumnTracker — cache memory, not app state.
-const operationDetailsCache = new Map()
+// The inspector's operation-details controller (see operation-details.js): key `<runId>|<operationId>`, states 'loading' | 'failed' | ready. The polled flow model ships no detail bodies (they can carry multi-megabyte tool arguments/results), so opening an inspector card fetches the ids its derivation may show from `api/runs/:id/flow?operation=<id>` exactly once per session and caches them. Operation ids are stable within a run (events only append), so an entry never goes stale; the run id in the key keeps a previous run's entries from answering for another run's same-numbered operation. Module scope like flowColumnTracker — cache memory, not app state. This host drives the controller through `begin` + `record*` because its fetches are hyperapp effects whose ok/fail actions must return fresh state to trigger the re-render, so no `onLanded` fan-out is wired.
+const operationDetails = createOperationDetails({})
 
-// The LLM turn inspector's detail session cache: key `<runId>|<eventIndex>` → 'loading' | { sections }. The inspector fetches one turn's detail sections (`GET /api/runs/:id/log?detail=<index>`) exactly once per session and caches them here, so re-selecting a turn (and the in-flight turn completing under a live selection) never re-fetches; a failed fetch evicts its entry rather than caching the failure, so one transient 500 cannot poison a turn for the session — re-selecting retries. Event indexes are stable within a run (events only append), and the run id in the key keeps a previous run's entries from answering for another run's same-numbered event. Module scope like operationDetailsCache — cache memory, not app state.
+// The LLM turn inspector's detail session cache: key `<runId>|<eventIndex>` → 'loading' | { sections }. The inspector fetches one turn's detail sections (`GET /api/runs/:id/log?detail=<index>`) exactly once per session and caches them here, so re-selecting a turn (and the in-flight turn completing under a live selection) never re-fetches; a failed fetch evicts its entry rather than caching the failure, so one transient 500 cannot poison a turn for the session — re-selecting retries. Event indexes are stable within a run (events only append), and the run id in the key keeps a previous run's entries from answering for another run's same-numbered event. Module scope like operationDetails — cache memory, not app state.
 const inspectorDetailCache = new Map()
 
 function ensureAudioContext() {
@@ -819,38 +820,34 @@ function ClearTooltip(state) {
 	return state.tooltip === null ? state : { ...state, tooltip: null }
 }
 
-// The details fetches a hovered target's card may show: mark each uncached id 'loading'
-// synchronously so the first render reads a defined state, and return the fetch effects (empty
-// when every id is already cached or there is no selected run to fetch against).
+// The details fetches a hovered target's card may show: the controller marks each uncached id
+// 'loading' synchronously so the first render reads a defined state, and each id it began becomes
+// one fetch effect (empty when every id is already cached or there is no selected run to fetch
+// against).
 function fetchOperationDetails(state, target) {
 	const runId = state.selectedRunId
 	if (typeof runId !== 'string' || runId === '' || state.flowModel === null) return []
 	const effects = []
-	for (const operationId of operationIdsForTooltipDetails(state.flowModel, target)) {
-		const key = `${runId}|${operationId}`
-		if (operationDetailsCache.has(key)) continue
-		operationDetailsCache.set(key, 'loading')
+	for (const operationId of operationDetails.begin(runId, operationIdsForTooltipDetails(state.flowModel, target))) {
 		effects.push(Fetch({ url: `api/runs/${encodeURIComponent(runId)}/flow?operation=${encodeURIComponent(operationId)}`, ok: GotOperationDetails(runId, operationId), fail: OperationDetailsFailed(runId, operationId) }))
 	}
 	return effects
 }
 
-// The details fetch for one operation resolved: cache the server's answer and return a fresh state
-// so an open card fills in. A ready body caches the details string (or null when the operation
-// carries none); anything else — a 404 for an id the model no longer resolves, a malformed body, a
-// network failure — caches 'failed', which renders the card section-less.
+// The details fetch for one operation resolved: the controller records the server's answer and the
+// fresh state is returned so an open card fills in. A ready body caches the details string (or null
+// when the operation carries none); anything else — a 404 for an id the model no longer resolves, a
+// malformed body, a network failure — caches 'failed', which renders the card section-less.
 function GotOperationDetails(runId, operationId) {
 	return function GotOperationDetailsForOperation(state, payload) {
-		const body = payload.ok && payload.body !== null && typeof payload.body === 'object' ? payload.body : null
-		const details = body !== null && typeof body.details === 'string' ? { details: body.details } : body !== null && body.details === null ? { details: null } : 'failed'
-		operationDetailsCache.set(`${runId}|${operationId}`, details)
+		operationDetails.recordResponse(runId, operationId, payload.ok, payload.body)
 		return { ...state }
 	}
 }
 
 function OperationDetailsFailed(runId, operationId) {
 	return function OperationDetailsFailedForRun(state) {
-		operationDetailsCache.set(`${runId}|${operationId}`, 'failed')
+		operationDetails.recordFailure(runId, operationId)
 		return { ...state }
 	}
 }
@@ -1528,14 +1525,11 @@ function TooltipCardForRun(state) {
 	return Tooltip(h, { title: descriptor.title, sections: descriptor.sections, renderMarkdown, style: tooltipStyle(tooltip.rect) })
 }
 
-// The lookup the tooltip derivations read: the session cache's state for one operation id. A miss
-// (a card rendering before its fetch was scheduled, or no selected run) reads as failed, which the
-// derivations render as "no details section" — never as invented content.
+// The lookup the tooltip derivations read: the session cache's state for one operation id (a miss
+// reads as failed, which the derivations render as "no details section" — never as invented
+// content).
 function operationDetailsLookup(runId) {
-	return (operationId) => {
-		const entry = operationDetailsCache.get(`${runId}|${operationId}`)
-		return entry === undefined ? { status: 'failed' } : entry
-	}
+	return (operationId) => operationDetails.lookup(runId, operationId)
 }
 
 // The pending question the modal renders. The live `/api/questions` poll is the source, so the modal is driven by live data, and the answer form posts to `/api/answer` via the existing SubmitAnswer path. The first pending question is the active one; the modal opens when one arrives (GotQuestions) and re-opens via the flow view's Question affordance.

@@ -23,6 +23,14 @@ export const BOTTOM_MARGIN = 24
 // The minimum number of columns the canvas is sized for, so a run with few participants does not zoom the diagram in to fill the container width (the same high-water mark the flow view applies to its columns).
 const MIN_COLUMNS = 5
 
+// The pixel `scrollTop` that centers the last operation's row in a scroll container of `containerClientHeight`, given the SVG's rendered height `svgHeight`. The SVG scales to the container width, so the row's fractional position in the natural viewBox maps to a pixel offset inside the container's scroll range. Shared by every host that auto-scrolls a sequence view to the latest row.
+export function sequenceActiveRowScrollTop(operationCount, svgHeight, containerClientHeight) {
+	if (operationCount <= 0 || svgHeight === 0) return 0
+	const naturalHeight = HEADER_HEIGHT + operationCount * ROW_HEIGHT + BOTTOM_MARGIN
+	const rowY = HEADER_HEIGHT + (operationCount - 1) * ROW_HEIGHT + ROW_HEIGHT / 2
+	return Math.max(0, (rowY / naturalHeight) * svgHeight - containerClientHeight / 2)
+}
+
 // Approximate average character width at the 12px column-label size, used only to size the side margins so the first and last column labels stay on the canvas while remaining centered on their lifelines.
 const LABEL_CHAR_WIDTH = 7
 

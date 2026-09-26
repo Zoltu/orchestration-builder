@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { renderSequenceView, HEADER_HEIGHT, ROW_HEIGHT } from './static/sequence-diagram.js'
+import { renderSequenceView, sequenceActiveRowScrollTop, HEADER_HEIGHT, ROW_HEIGHT, BOTTOM_MARGIN } from './static/sequence-diagram.js'
 import { activeOperation, activeStack, observesOf } from './static/interaction-model.js'
 import { createLabelResolver } from './static/labels.js'
 import { labelsModule } from './label-resolver-fixture.js'
@@ -621,5 +621,25 @@ describe('sequence view — hover hit areas', () => {
 		const rowY = HEADER_HEIGHT + ROW_HEIGHT + ROW_HEIGHT / 2
 		expect(propNumber(area.props, 'y')).toBeLessThan(rowY - ROW_HEIGHT / 2)
 		expect(propNumber(area.props, 'height')).toBeGreaterThan(ROW_HEIGHT)
+	})
+})
+
+describe('sequenceActiveRowScrollTop', () => {
+	test('centers the last row at the scale the container renders it', () => {
+		const operationCount = 4
+		const naturalHeight = HEADER_HEIGHT + operationCount * ROW_HEIGHT + BOTTOM_MARGIN
+		const svgHeight = 600
+		const rowY = HEADER_HEIGHT + (operationCount - 1) * ROW_HEIGHT + ROW_HEIGHT / 2
+		const expected = (rowY / naturalHeight) * svgHeight - 300 / 2
+		expect(sequenceActiveRowScrollTop(operationCount, svgHeight, 300)).toBe(Math.max(0, expected))
+	})
+
+	test('clamps at zero when the content is shorter than the container', () => {
+		expect(sequenceActiveRowScrollTop(2, 100, 400)).toBe(0)
+	})
+
+	test('returns 0 for an empty timeline or an unsized svg', () => {
+		expect(sequenceActiveRowScrollTop(0, 600, 300)).toBe(0)
+		expect(sequenceActiveRowScrollTop(3, 0, 300)).toBe(0)
 	})
 })

@@ -101,7 +101,30 @@ Animation is layered on top of the settled structure via CSS class hooks the mod
 
 ## Dev harness
 
-The dev iteration surface is `source/web/static/demo.html` + `demo.js`, which fetch frames derived server-side from event-stream fixtures (`source/web/demo-fixtures.ts`) fed through the real adapter — the same `LogEvent` → `InteractionModel` derivation `GET /api/runs/:id/flow` runs — so the harness exercises the product's data path rather than hand-authored model frames. The scenarios cover single-role completion, delegation chains, instance-per-invocation retries, deep call trees, pending questions (`ask_human`), an operator inquiry answered on a preempting human-asker stack, detected-loop interrupts, nested interrupts (two and three stacks coexisting), and the three interrupt fates (resume / rewind / terminate). (The hand-authored model-frame scenarios in `source/web/static/scenarios.js` remain as the in-memory test bed the view-module unit tests render.) The harness exposes a scenario select, frame scrubber, play/pause, theme toggle, and the label-tier toggle.
+The dev iteration surface is `source/web/static/demo.html` + `demo.js`, which fetch frames derived server-side from event-stream fixtures (`source/web/demo-fixtures.ts`) fed through the real adapter — the same `LogEvent` → `InteractionModel` derivation `GET /api/runs/:id/flow` runs — so the harness exercises the product's data path rather than hand-authored model frames. The scenarios cover single-role completion, delegation chains, instance-per-invocation retries, deep call trees, pending questions (`ask_human`), an operator inquiry answered on a preempting human-asker stack, detected-loop interrupts, nested interrupts (two and three stacks coexisting), and the three interrupt fates (resume / rewind / terminate). (The hand-authored model-frame scenarios in `source/web/static/scenarios.js` remain as the in-memory test bed the view-module unit tests render.) The harness exposes a scenario select, frame scrubber, play/pause, theme toggle, and the label-tier toggle. What the harness may own, what it must inherit by import, and the manual drift check that holds it to that line are fixed in "The demo page is a fixture transport, not a sandbox" below.
+
+## The demo page is a fixture transport, not a sandbox
+
+The demo page exists to exercise the **production UI components** against recorded scenario frames — it is the transport that feeds fixtures into the real components, not a sandbox with its own copy of them. Everything a viewer sees or interacts with comes from the shared static modules the run view uses: the view modules and the model helpers they read (`flow-view.js`, `sequence-diagram.js`, `interaction-model.js`), the label resolver (`labels.js`), the sanitized Markdown pipeline (`markdown-render.js` over `markdown.js`), the inspector derivations and tooltip machinery (`inspector.js`, `tooltip.js`), the operation-details controller (`operation-details.js`), the modal components (`question-modal.js`, `result-modal.js`), and the shared clipboard leaf (`clipboard.js`), with the SVG primitives (`svg-primitives.js`) beneath them. A behavior the demo shows wrong is therefore a bug in a shared module or in `app.js`, and the fix belongs there — never patched around in `demo.js`.
+
+What `demo.js` may own is the harness around those components:
+
+- **Playback chrome** — the scenario select, frame scrubber, play/pause, jump-to-active, and the view/theme/label-tier toggles.
+- **The fixture transport** — fetching `/api/demo/scenarios` and the `/api/demo/flow/:scenario/:frame` frames the adapter derives server-side (see "Backend adapter" below).
+- **Container DOM construction** — the containers the shared components mount into, and the DOM-producing `h` factories that stand in for the product client's hyperapp renderer.
+- **Fixture-specific descriptor synthesis** — demo frames carry no real result fields, so `deriveDemoResultDescriptor` synthesizes the terminal-result descriptor from the frame's status rather than inventing scenario-specific prose.
+- **The debug text view** — the model's raw projection behind its toggle, the one surface the product client has no counterpart for.
+- **Sequence-container scroll handling** — the deliberate app-only/demo-only split: the live view follows new content with `scroll-follow.js` because only live polling grows content between user actions, while the harness's scroll handling (jump-to-active, preserving `scrollTop` across a frame rebuild) belongs to its playback chrome because frames are navigated, not streamed.
+
+What it must never do is reimplement shell behavior the shared modules already carry — the tooltip machinery (`tooltip.js`, `inspector.js`), the operation-details caching (`operation-details.js`), the modal components (`question-modal.js`, `result-modal.js`). When shell behavior changes in `app.js` and the shared modules, the demo inherits the change by importing, not by copying: a copy renders correctly the day it is made and drifts silently at the next shell change.
+
+### Reviewer checklist for demo drift
+
+No automated check guards this contract, and that is a considered decision: a mechanical drift check would be hole-prone — an import graph cannot tell a faithful import from a divergent re-derivation one inline callback away, and a rendered-output diff pins only what a snapshot thought to pin. The check is manual and is part of reviewing any change that touches `app.js` or a shared static module:
+
+1. Check `demo.js` imports the touched behavior rather than reimplementing it.
+2. Render a demo frame side-by-side with a live run view and compare.
+3. Confirm new shell features ship to both shells or are explicitly demo/app-only with a reason (the scroll split above is the current example of the latter).
 
 ## Backend adapter
 

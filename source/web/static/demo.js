@@ -5,9 +5,10 @@
 import { activeOperation, activeParticipant, activeStack, callChainOf, fateOf, isPaused, isTerminalStatus, observesOf, stacksOf } from './interaction-model.js'
 import { createLabelResolver, isLabelTier } from './labels.js'
 import { deriveLifecycle, renderFlowView, deriveNowCaption, deriveCostStrip, createColumnTracker } from './flow-view.js'
-import { renderSequenceView, HEADER_HEIGHT, ROW_HEIGHT, BOTTOM_MARGIN } from './sequence-diagram.js'
+import { renderSequenceView, sequenceActiveRowScrollTop } from './sequence-diagram.js'
 import { createMarkdownRenderer } from './markdown-render.js'
 import { createTooltipDismiss, deriveTooltipDescriptor, isInFlightAskHuman, resolveTooltipTarget } from './inspector.js'
+import { createOperationDetails } from './operation-details.js'
 import { operationIdsForTooltipDetails } from './tooltip.js'
 import { copyRawToClipboard } from './clipboard.js'
 import { Tooltip, tooltipStyle } from './tooltip.js'
@@ -246,64 +247,46 @@ let currentTooltipKey = null
 // The grace-period dismiss timer, shared with the product client via inspector.js; expiry tears the card down directly (the harness has no dispatch loop).
 const tooltipDismiss = createTooltipDismiss()
 
-// The operation-details session cache, mirroring the product client's: the frame models ship no
-// detail bodies, so opening a card fetches the ids its derivation may show from the demo frame
-// endpoint's ?operation= variant, once per scenario+operation per session. Operation ids are stable
-// across a scenario's frames (events only append), so an entry never goes stale.
-const operationDetailsCache = new Map()
+// The operation-details controller, shared with the product client via operation-details.js: the
+// frame models ship no detail bodies, so opening a card fetches the ids its derivation may show
+// from the demo frame endpoint's ?operation= variant, once per scenario+operation per session.
+// Operation ids are stable across a scenario's frames (events only append), so an entry never goes
+// stale; the scenario id in the key keeps one scenario's entries from answering for another's
+// same-numbered operation. This host drives the controller through the promise-based `ensure` (the
+// product client, whose fetches are hyperapp effects, drives `begin` + `record*` instead), and the
+// landing fan-out is the onLanded callback below.
+const operationDetails = createOperationDetails({ fetchDetail: fetchDemoOperationDetail, onLanded: operationDetailsLanded })
+
+// The details fetch for one operation, resolved to the landing shape the controller records (`{ ok,
+// body }` with the body already parsed): a network failure or an unparseable body rejects, which the
+// controller records as 'failed'. The URL reads the current frame index at fetch time — the cache
+// key carries only the scenario id because operation ids are stable across a scenario's frames.
+async function fetchDemoOperationDetail(context, operationId) {
+	const response = await fetch(`api/demo/flow/${encodeURIComponent(context)}/${frameIndex}?operation=${encodeURIComponent(operationId)}`)
+	return { ok: response.ok, body: await response.json() }
+}
 
 // The target the open card was built from, so a late details response can rebuild it in place.
 let currentTooltipTarget = null
 
-function detailsCacheKey(operationId) {
+function currentScenarioId() {
 	const manifest = scenarios[scenarioIndex]
-	return `${manifest !== undefined ? manifest.id : ''}|${operationId}`
+	return manifest !== undefined ? manifest.id : ''
 }
 
 function operationDetailsLookup() {
-	return (operationId) => {
-		const entry = operationDetailsCache.get(detailsCacheKey(operationId))
-		return entry === undefined ? { status: 'failed' } : entry
-	}
+	return (operationId) => operationDetails.lookup(currentScenarioId(), operationId)
 }
 
 // Marks each uncached id 'loading' and fetches it from the demo frame endpoint. Every landing —
-// response or failure — goes through operationDetailsLanded, so both surfaces waiting on the id
-// (the open inspector card and the question modal) fill in from one path. A 404 (an id the frame
-// no longer resolves) and a network failure both record 'failed', which renders section-less.
+// response or failure — goes through operationDetailsLanded (the controller's onLanded), so both
+// surfaces waiting on the id (the open inspector card and the question modal) fill in from one
+// path. A 404 (an id the frame no longer resolves) and a network failure both record 'failed',
+// which renders section-less.
 function fetchOperationDetails(target) {
 	const manifest = scenarios[scenarioIndex]
 	if (manifest === undefined || currentFrame === null) return
-	for (const operationId of operationIdsForTooltipDetails(currentFrame, target)) {
-		const key = detailsCacheKey(operationId)
-		if (operationDetailsCache.has(key)) continue
-		operationDetailsCache.set(key, 'loading')
-		fetch(`api/demo/flow/${encodeURIComponent(manifest.id)}/${frameIndex}?operation=${encodeURIComponent(operationId)}`).then(
-			(response) => {
-				const ok = response.ok
-				response.json().then(
-					(body) => {
-						operationDetailsCache.set(key, detailsStateFrom(ok, body))
-						operationDetailsLanded(operationId)
-					},
-					() => {
-						operationDetailsCache.set(key, 'failed')
-						operationDetailsLanded(operationId)
-					},
-				)
-			},
-			() => {
-				operationDetailsCache.set(key, 'failed')
-				operationDetailsLanded(operationId)
-			},
-		)
-	}
-}
-
-function detailsStateFrom(ok, body) {
-	if (ok && body !== null && typeof body === 'object' && typeof body.details === 'string') return { details: body.details }
-	if (ok && body !== null && typeof body === 'object' && body.details === null) return { details: null }
-	return 'failed'
+	operationDetails.ensure(manifest.id, operationIdsForTooltipDetails(currentFrame, target))
 }
 
 // Re-opens the current card when a late details response lands for an id it derives from, so the
@@ -320,12 +303,13 @@ function refillTooltip(operationId) {
 // The shared landing for a details response or failure: refill the open inspector card, and fill
 // the question modal when it is waiting on this operation's details. Routing both surfaces through
 // one path is what closes the hover-then-open-modal race — a modal opened while a hover fetch is
-// still in flight would otherwise never see the response.
-function operationDetailsLanded(operationId) {
+// still in flight would otherwise never see the response. The context is the scenario id the fetch
+// started under, which is also the key half the cache answered from.
+function operationDetailsLanded(context, operationId) {
 	refillTooltip(operationId)
 	if (questionModalOperationId !== operationId) return
-	const state = operationDetailsCache.get(detailsCacheKey(operationId))
-	if (state !== undefined && state.status === 'ready') applyQuestionModalDetails(state.details)
+	const state = operationDetails.lookup(context, operationId)
+	if (state.status === 'ready') applyQuestionModalDetails(state.details)
 }
 
 function closeTooltip() {
@@ -360,20 +344,14 @@ function openTooltip(target) {
 // Sequence-view scroll state. The SVG renders at its natural full-content viewBox and lives inside a scroll container, so a long timeline scrolls vertically (the page wheel) rather than zooming; the container is the single piece of state the jump-to-active affordance needs.
 let activeSequenceContainer = null
 
-// The SVG scales to the container width, so the row's fractional position in the natural viewBox maps to a pixel offset inside the container's scroll range.
+// Centers the latest message row using the layout math owned by sequence-diagram.js, so the harness consumes the production calculation rather than re-deriving it from the view's private constants.
 function jumpSequenceViewToActive(container) {
 	if (currentFrame === null) return
-	const frame = currentFrame
-	if (frame.operations.length === 0) return
 	const svg = container.firstElementChild
 	if (!(svg instanceof SVGSVGElement)) return
 	const rect = svg.getBoundingClientRect()
 	if (rect.height === 0) return
-	const lastIndex = frame.operations.length - 1
-	const naturalHeight = HEADER_HEIGHT + frame.operations.length * ROW_HEIGHT + BOTTOM_MARGIN
-	const rowY = HEADER_HEIGHT + lastIndex * ROW_HEIGHT + ROW_HEIGHT / 2
-	const target = (rowY / naturalHeight) * rect.height
-	container.scrollTop = Math.max(0, target - container.clientHeight / 2)
+	container.scrollTop = sequenceActiveRowScrollTop(currentFrame.operations.length, rect.height, container.clientHeight)
 }
 
 // Wires the inspector (hover/click) to the run-view container once.
@@ -619,34 +597,15 @@ function openQuestionModal() {
 // 'loading' entry needs no work here: the in-flight fetch's landing (operationDetailsLanded) sees
 // the modal's registered operation id and applies the details when it resolves. A failure lands the
 // same way and applies nothing, so the waiting fallback stays — graceful, like the inspector card.
+// The fetch goes through the controller's ensure, whose dedup keeps a loading or failed entry from
+// re-fetching — a cached failure is final for the session, like the tooltip path's.
 function fillQuestionModalWithDetails(manifest, operationId) {
-	const key = detailsCacheKey(operationId)
-	const cached = operationDetailsCache.get(key)
-	if (cached !== undefined && cached.status === 'ready') {
+	const cached = operationDetails.lookup(manifest.id, operationId)
+	if (cached.status === 'ready') {
 		applyQuestionModalDetails(cached.details)
 		return
 	}
-	if (cached !== undefined) return
-	operationDetailsCache.set(key, 'loading')
-	fetch(`api/demo/flow/${encodeURIComponent(manifest.id)}/${frameIndex}?operation=${encodeURIComponent(operationId)}`).then(
-		(response) => {
-			const ok = response.ok
-			response.json().then(
-				(body) => {
-					operationDetailsCache.set(key, detailsStateFrom(ok, body))
-					operationDetailsLanded(operationId)
-				},
-				() => {
-					operationDetailsCache.set(key, 'failed')
-					operationDetailsLanded(operationId)
-				},
-			)
-		},
-		() => {
-			operationDetailsCache.set(key, 'failed')
-			operationDetailsLanded(operationId)
-		},
-	)
+	operationDetails.ensure(manifest.id, [operationId])
 }
 
 // Swaps the open modal's question text for the fetched details markdown; nothing to do when the
