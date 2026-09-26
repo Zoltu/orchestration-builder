@@ -2,7 +2,7 @@
 
 export type DeltaField = 'reasoning' | 'content'
 
-// The engine-shaped delta: which role instance produced it, and which turn-text field it extends. `reset` marks the start of a retried attempt whose text re-emits from zero, so a client accumulation must clear before appending.
+// The engine-shaped delta: which role instance produced it, and which turn-text field it extends. `reset` marks the first delta of an attempt whose text re-emits from zero, so a client must clear its whole accumulation (reasoning and content) before appending.
 export interface RoleDelta {
 	roleId: string
 	role: string

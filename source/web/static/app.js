@@ -17,6 +17,8 @@ import { createOperationDetails } from './operation-details.js'
 import { ResultModal, deriveTerminalResult } from './result-modal.js'
 import { InspectorModal, buildTurnIndex, resolveSelection, tailWindowOffset, olderWindowOffset, olderFetchLimit, canPageOlder, INSPECTOR_WINDOW_SIZE, INSPECTOR_PAGE_LIMIT, INSPECTOR_RETENTION_LIMIT } from './inspector-modal.js'
 import { Tooltip, tooltipStyle } from './tooltip.js'
+import { createStreamClient } from './stream-client.js'
+import { nextLivePartial, activeLivePartial } from './live-partial.js'
 
 const POLL_INTERVAL_MS = 1000
 const STATUS_LABELS = {
@@ -101,6 +103,15 @@ const operationDetails = createOperationDetails({})
 
 // The LLM turn inspector's detail session cache: key `<runId>|<eventIndex>` → 'loading' | { sections }. The inspector fetches one turn's detail sections (`GET /api/runs/:id/log?detail=<index>`) exactly once per session and caches them here, so re-selecting a turn (and the in-flight turn completing under a live selection) never re-fetches; a failed fetch evicts its entry rather than caching the failure, so one transient 500 cannot poison a turn for the session — re-selecting retries. Event indexes are stable within a run (events only append), and the run id in the key keeps a previous run's entries from answering for another run's same-numbered event. Module scope like operationDetails — cache memory, not app state.
 const inspectorDetailCache = new Map()
+
+// The live-token-stream client (see stream-client.js and docs/reference.md "Live token stream"): module scope like the other session caches, created lazily by the stream subscription on the first watch-screen mount and left connected for the page's lifetime. The stream is an enhancement — the client is contained (never throws, shows no error surface), and the only state it feeds is the ephemeral `livePartial` the inspector modal's in-flight row renders.
+let streamClient = null
+
+// ws vs wss follows the page's own protocol so a TLS deployment upgrades the stream with it.
+function streamSocketUrl() {
+	const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+	return `${protocol}//${window.location.host}/ws/stream`
+}
 
 function ensureAudioContext() {
 	if (audioContext === null) {
@@ -345,7 +356,7 @@ function GotSelectedRun(state, payload) {
 		return [{ ...state, selectedRunStatus: 'unknown', serverAvailable: ok }, SyncSequenceFollower()]
 	}
 	if (!ok || body === null) return state
-	// The result modal fires once when a run the operator is watching completes (a transition out of a non-terminal status into success/error). Selecting an already-terminal historical run does not auto-open it — the flow view's CTA re-opens it on demand — so `previousStatus === null` (the first read of a selected run) is excluded along with the terminal statuses.
+	// The result modal fires once when a run the operator is watching completes (a transition out of a non-terminal status into success/error). Selecting an already-terminal historical run does not auto-open it — the flow view's CTA re-opens it on demand — so `previousStatus === null` (the first read of a selected run) is excluded along with the terminal statuses. A terminal status also clears the live partial: the in-flight turn it streamed is over (see "Live token stream").
 	const previousStatus = state.selectedRunStatus
 	const completedStatus = body.status === 'success' || body.status === 'error' ? body.status : null
 	const isCompletionTransition = completedStatus !== null
@@ -370,7 +381,7 @@ function GotSelectedRun(state, payload) {
 		}
 	}
 
-	return [{ ...state, selectedRunView: body, selectedRunStatus: body.status, resultModalOpen, resultShownForRun, interruptAnswerCard, shownInterruptAnswerKeys, serverAvailable: true }, SyncSequenceFollower()]
+	return [{ ...state, selectedRunView: body, selectedRunStatus: body.status, resultModalOpen, resultShownForRun, interruptAnswerCard, shownInterruptAnswerKeys, serverAvailable: true, livePartial: isTerminalStatus(body.status) ? null : state.livePartial }, SyncSequenceFollower()]
 }
 
 function GotQuestions(state, payload) {
@@ -512,7 +523,7 @@ function LogLevelSaveFailed(state) {
 
 function SelectRun(state, runId) {
 	if (runId === state.selectedRunId) return [{ ...state, screen: 'watch' }, SyncSequenceFollower()]
-	// The flow model, its previous-frame diff, and the per-run modal state belong to the previously-selected run; a switch clears them so the centerpiece shows the new run's first frame without a stale lifecycle diff or a leftover modal. Selecting a run always lands on the watch screen (history rows and the in-progress pill both go through here). Clearing the model unmounts the sequence container, so the switch syncs its scroll follower (the new run's first frame re-attaches it, pinned to the bottom).
+	// The flow model, its previous-frame diff, and the per-run modal state belong to the previously-selected run; a switch clears them so the centerpiece shows the new run's first frame without a stale lifecycle diff or a leftover modal. Selecting a run always lands on the watch screen (history rows and the in-progress pill both go through here). Clearing the model unmounts the sequence container, so the switch syncs its scroll follower (the new run's first frame re-attaches it, pinned to the bottom). The live partial belongs to the previous run too and clears with the rest (the stream subscription restarts onto the new run).
 	return [
 		{
 			...state,
@@ -532,6 +543,7 @@ function SelectRun(state, runId) {
 			planExpanded: false,
 			inspectorModalOpen: false,
 			inspector: initialInspectorState(),
+			livePartial: null,
 		},
 		SyncSequenceFollower(),
 	]
@@ -638,9 +650,9 @@ function GotCreatedRun(state, payload) {
 	const body = payload.body
 	if (!ok || body === null || typeof body !== 'object' || !('runId' in body)) return state
 	const createdRunId = body.runId
-	// Selecting the new run activates its per-run subscription; an immediate run-list fetch clears justSubmittedRunId as soon as the run appears. The continuation and the per-run modal/flow state are reset for the same reason SelectRun resets it — the composed run is on the server now, and a leftover chip would brief a stale lineage into the next task.
+	// Selecting the new run activates its per-run subscription; an immediate run-list fetch clears justSubmittedRunId as soon as the run appears. The continuation and the per-run modal/flow state are reset for the same reason SelectRun resets it — the composed run is on the server now, and a leftover chip would brief a stale lineage into the next task. The live partial clears with the rest (the stream subscription follows the new selection).
 	return [
-		{ ...state, screen: 'watch', continuation: null, justSubmittedRunId: createdRunId, selectedRunId: createdRunId, selectedRunView: null, selectedRunStatus: null, flowModel: null, previousFlowModel: null, questionModalOpen: false, resultModalOpen: false, resultShownForRun: null, tooltip: null, planExpanded: false, inspectorModalOpen: false, inspector: initialInspectorState(), serverAvailable: true },
+		{ ...state, screen: 'watch', continuation: null, justSubmittedRunId: createdRunId, selectedRunId: createdRunId, selectedRunView: null, selectedRunStatus: null, flowModel: null, previousFlowModel: null, questionModalOpen: false, resultModalOpen: false, resultShownForRun: null, tooltip: null, planExpanded: false, inspectorModalOpen: false, inspector: initialInspectorState(), livePartial: null, serverAvailable: true },
 		Fetch({ url: 'api/runs', ok: GotRunList, fail: FetchFailed }),
 	]
 }
@@ -951,14 +963,14 @@ function InspectorTotalLoaded(state, payload) {
 	]
 }
 
-// The window response replaces the loaded events wholesale (initial tail load and gap resync both land here), so the loaded range is always a contiguous slice of the log. A selection made against the previous list survives through `resolveSelection` — an in-flight turn completing maps the selection to its new completed entry — and a completed selection whose detail is not yet cached triggers the on-demand detail fetch.
+// The window response replaces the loaded events wholesale (initial tail load and gap resync both land here), so the loaded range is always a contiguous slice of the log. A selection made against the previous list survives through `resolveSelection` — an in-flight turn completing maps the selection to its new completed entry — and a completed selection whose detail is not yet cached triggers the on-demand detail fetch. The turn pairing also decides the live partial's fate: when the accumulated role no longer holds an in-flight turn, the poll has just recorded its completion and the partial clears (see "Live token stream").
 function InspectorWindowLoaded(state, payload) {
 	const body = readableInspectorLogBody(payload)
 	if (body === null) return [{ ...state, inspector: { ...initialInspectorState(), loadState: 'failed' }, serverAvailable: payload.ok }]
 	if (body.runId !== state.selectedRunId) return state
 	const entries = buildTurnIndex(body.events)
 	const selectedEventIndex = resolveSelection(state.inspector.selectedEventIndex, entries)
-	const nextState = { ...state, inspector: { ...state.inspector, loadState: 'ready', events: body.events, total: body.total, tailOffset: body.offset, entries, selectedEventIndex, olderLoading: false }, serverAvailable: true }
+	const nextState = { ...state, inspector: { ...state.inspector, loadState: 'ready', events: body.events, total: body.total, tailOffset: body.offset, entries, selectedEventIndex, olderLoading: false }, livePartial: activeLivePartial(state.livePartial, entries), serverAvailable: true }
 	return [nextState, inspectorDetailEffect(nextState)]
 }
 
@@ -1011,7 +1023,8 @@ function InspectorTailRefreshed(state, payload) {
 	const events = [...state.inspector.events, ...body.events]
 	const entries = buildTurnIndex(events)
 	const selectedEventIndex = resolveSelection(state.inspector.selectedEventIndex, entries)
-	const nextState = { ...state, inspector: { ...state.inspector, events, total: body.total, entries, selectedEventIndex }, serverAvailable: true }
+	// The pairing decides the live partial's fate here too: the completed in-flight turn's partial clears the moment the poll records its `llm_call` (see "Live token stream").
+	const nextState = { ...state, inspector: { ...state.inspector, events, total: body.total, entries, selectedEventIndex }, livePartial: activeLivePartial(state.livePartial, entries), serverAvailable: true }
 	return [nextState, inspectorDetailEffect(nextState)]
 }
 
@@ -1072,11 +1085,46 @@ function InspectorModalForRun(state) {
 		runLabel: typeof runId === 'string' ? runId : null,
 		turns: state.inspector,
 		detailState,
+		livePartial: state.livePartial,
 		renderMarkdown,
 		onSelectTurn: SelectInspectorTurn,
 		onLoadOlder: LoadOlderTurns,
 		onClose: CloseInspectorModal,
 	})
+}
+
+// --- Live token stream (enhancement) ----------------------------------------
+// The websocket deltas fold into `livePartial` — the ephemeral in-flight partial the inspector modal renders under the matching in-flight row. The polled run log stays the sole authority for turn history and run state; this only feeds live text, and every path that could leave the partial stale clears it.
+
+function GotLiveDelta(state, delta) {
+	// Deltas flow only for the active run; a historical selection (or no selection) ignores them.
+	if (state.selectedRunId === null || delta.runId !== state.selectedRunId) return state
+	return { ...state, livePartial: nextLivePartial(state.livePartial, delta) }
+}
+
+// Socket phase changes clear the partial. On a disconnect the text is stale (and would otherwise linger under the in-flight row); on a fresh connect the accumulation starts empty because deltas resume mid-turn with the middle lost, and showing a gapped text as if continuous would be wrong. Only live partial text is ever lost — the polled log is untouched, and no error surface exists anywhere.
+function GotStreamState(state, phase) {
+	if (phase !== 'connected' && phase !== 'disconnected') return state
+	if (state.livePartial === null) return state
+	return { ...state, livePartial: null }
+}
+
+// The stream subscription is mounted only while the watch screen shows a selected, non-terminal run (the same non-terminal guard the polling subscription uses). The payload's runId is the only field that changes, so hyperapp restarts the subscription exactly when the selected run changes, and each start re-subscribes (the server replaces the previous subscription). Teardown deliberately leaves the socket connected — the simple lifecycle choice: screen switches cost no reconnect, and deltas that arrive while another screen is shown are dropped by the run filter in GotLiveDelta.
+function streamSubscriber(dispatch, payload) {
+	if (streamClient === null) {
+		streamClient = createStreamClient({
+			url: streamSocketUrl(),
+			onDelta: (delta) => dispatch(GotLiveDelta, delta),
+			onStateChange: (phase) => dispatch(GotStreamState, phase),
+		})
+	}
+	streamClient.subscribe(payload.runId)
+	// hyperapp's patchSubs calls the old subscriber's return value on every restart, so a teardown function must always be returned; the stream client deliberately outlives the subscription (page-lifetime client), so teardown is a no-op.
+	return () => {}
+}
+
+function StreamSubscription(runId) {
+	return [streamSubscriber, { runId }]
 }
 
 // --- View ------------------------------------------------------------------
@@ -1590,7 +1638,7 @@ function view(state) {
 }
 
 // --- App -------------------------------------------------------------------
-// The subscriptions array is fixed-size with stable positions: [0] always polls the run list + questions every second; [1] polls the selected run's run view and flow model every second but only while one is selected and non-terminal (the deactivation on terminal status stops the polling); [2] primes the AudioContext on the first user interaction.
+// The subscriptions array is fixed-size with stable positions: [0] always polls the run list + questions every second; [1] polls the selected run's run view and flow model every second but only while one is selected and non-terminal (the deactivation on terminal status stops the polling); [2] primes the AudioContext on the first user interaction; [3] dismisses the inspector modal on Escape while it is open; [4] subscribes the live token stream to the selected run while the watch screen shows one that is selected and non-terminal (the same non-terminal guard [1] uses).
 
 app({
 	init: [
@@ -1636,6 +1684,8 @@ app({
 			inspector: initialInspectorState(),
 			// The plan disclosure under the stage: collapsed by default, reset with the other per-run view state on a run switch.
 			planExpanded: false,
+			// The live token stream's ephemeral partial (see "Live token stream"): the in-flight reasoning/content the inspector modal renders under the matching in-flight row. Null whenever nothing is streaming or the stream is down; never an authority on run state.
+			livePartial: null,
 			// The inspector descriptor over the run view: null when nothing is hovered. Cleared on
 			// `mouseleave` of the stage and on run switch; a stale id self-dismisses at render time.
 			tooltip: null,
@@ -1657,6 +1707,7 @@ app({
 		typeof state.selectedRunId === 'string' && state.selectedRunId !== '' && !isTerminalStatus(state.selectedRunStatus) && onEvery(PollSelectedRun, POLL_INTERVAL_MS),
 		onFirstInteraction(PrimeAudio),
 		state.inspectorModalOpen === true && onEscapeKey(CloseInspectorModal),
+		state.screen === 'watch' && typeof state.selectedRunId === 'string' && state.selectedRunId !== '' && !isTerminalStatus(state.selectedRunStatus) && StreamSubscription(state.selectedRunId),
 	],
 	node: document.getElementById('app'),
 })

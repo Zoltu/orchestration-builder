@@ -11,12 +11,10 @@ export type StreamSocket = {
 export interface StreamHub {
 	// Registers a freshly opened socket as connected but unsubscribed.
 	onOpen(socket: StreamSocket): void
-	// Consumes one client message. The only recognized shape is {"type":"subscribe","runId":"..."}; every other message is ignored silently, and a valid subscribe is acknowledged on the same socket.
+	// Consumes one client message. The only recognized shape is {"type":"subscribe","runId":"..."}; every other message is ignored silently, and a valid subscribe is acknowledged on the same socket. A subscribe replaces the socket's previous subscription (docs/reference.md "Live token stream"): each socket holds at most one run.
 	onMessage(socket: StreamSocket, raw: string): void
 	// Removes the socket and every subscription it holds.
 	onClose(socket: StreamSocket): void
-	// Whether the socket currently holds at least one run subscription.
-	subscribed(socket: StreamSocket): boolean
 }
 
 // Tolerant parse of the one message shape the hub understands: {"type":"subscribe","runId":"..."}. Malformed JSON, a non-object, an unknown type, or a non-string run id yields undefined, because a misbehaving client must not be able to break the hub or the run streaming behind it.
@@ -37,17 +35,23 @@ function serializeDelta(delta: RunDelta): string {
 }
 
 export function createStreamHub(channel: DeltaChannel): StreamHub {
-	// Both directions of the socket↔run relation, kept in step by drop() and subscribe; a socket may hold several run subscriptions and a run may fan out to several sockets.
+	// Both directions of the socket↔run relation, kept in step by drop() and onMessage; a socket holds at most one run subscription (a re-subscribe replaces the previous, see onMessage) and a run may fan out to several sockets.
 	const runsBySocket = new Map<StreamSocket, Set<string>>()
 	const socketsByRun = new Map<string, Set<StreamSocket>>()
 
+	// Removes one socket from one run bucket, pruning the bucket when it empties. Empty run buckets are removed so the long-lived service does not accumulate an entry per run id ever subscribed.
+	function removeFromRunBucket(socket: StreamSocket, runId: string): void {
+		const sockets = socketsByRun.get(runId)
+		if (sockets === undefined) return
+		sockets.delete(socket)
+		if (sockets.size === 0) socketsByRun.delete(runId)
+	}
+
 	function drop(socket: StreamSocket): void {
+		const runs = runsBySocket.get(socket)
+		if (runs === undefined) return
+		for (const runId of runs) removeFromRunBucket(socket, runId)
 		runsBySocket.delete(socket)
-		for (const [runId, sockets] of socketsByRun) {
-			sockets.delete(socket)
-			// Empty run buckets are removed so the long-lived service does not accumulate an entry per run id ever subscribed.
-			if (sockets.size === 0) socketsByRun.delete(runId)
-		}
 	}
 
 	// Sends best-effort: a throwing send means the socket died (typically a closed tab whose close event has not arrived yet), so the failure is contained and the socket dropped from every routing table instead of propagating into the channel's fan-out or the websocket handler.
@@ -79,6 +83,9 @@ export function createStreamHub(channel: DeltaChannel): StreamHub {
 				runs = new Set()
 				runsBySocket.set(socket, runs)
 			}
+			// A re-subscribe replaces the previous subscription (docs/reference.md "Live token stream"): the socket is removed from its old run buckets and the empties pruned, so each socket holds at most one run and a flood of subscribe messages cannot grow the routing tables.
+			for (const previous of runs) removeFromRunBucket(socket, previous)
+			runs.clear()
 			runs.add(runId)
 			let sockets = socketsByRun.get(runId)
 			if (sockets === undefined) {
@@ -89,9 +96,5 @@ export function createStreamHub(channel: DeltaChannel): StreamHub {
 			sendBestEffort(socket, JSON.stringify({ type: 'subscribed', runId }))
 		},
 		onClose: drop,
-		subscribed(socket) {
-			const runs = runsBySocket.get(socket)
-			return runs !== undefined && runs.size > 0
-		},
 	}
 }

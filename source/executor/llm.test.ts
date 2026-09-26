@@ -389,19 +389,22 @@ describe('createLlmCaller streaming deltas', () => {
 		const deltas: LlmStreamDelta[] = []
 		const result = await caller.call({ messages: [], onDelta: (delta) => deltas.push(delta) })
 		expect(result.kind).toBe('success')
+		// Every attempt's first delta is preceded by the reset marker; here the single attempt opens with it.
 		expect(deltas).toEqual([
+			{ field: 'content', text: '', reset: true },
 			{ field: 'reasoning', text: 'thin' },
 			{ field: 'content', text: 'Hello' },
 		])
 	})
 
-	test('a retried attempt opens with a reset content delta before the new attempt re-emits its deltas', async () => {
+	test('a retried attempt opens with a reset content delta before the new attempt re-emits its deltas, and a failed connect that produces no deltas emits nothing', async () => {
 		const wire = createFakeWire([errorResponse(500, 'boom'), streamResponse(happyPathChunks())])
 		const caller = createLlmCaller(MODEL, API_KEY, { llmFetch: wire.llmFetch, sleep: wire.sleep, scheduleTimeout: wire.scheduleTimeout })
 		const deltas: LlmStreamDelta[] = []
 		const result = await caller.call({ messages: [], onDelta: (delta) => deltas.push(delta) })
 		expect(result.kind).toBe('success')
 		expect(wire.requests).toHaveLength(2)
+		// The first attempt never streamed (a 500 carries no deltas), so it emits no spurious reset; the reset that opens the list belongs to the retried attempt.
 		expect(deltas).toEqual([
 			{ field: 'content', text: '', reset: true },
 			{ field: 'reasoning', text: 'thinking ' },
@@ -409,7 +412,7 @@ describe('createLlmCaller streaming deltas', () => {
 		])
 	})
 
-	test('a completed-but-degenerate stream that retries also opens the next attempt with a reset after the first attempt\'s deltas', async () => {
+	test('a degenerate stream that retries resets the first attempt\'s deltas, and an attempt producing no deltas emits no reset of its own', async () => {
 		const degenerate = encodedChunks([dataLine({ type: 'reasoning_text.delta', item_id: 'r1', delta: 'burned budget' }), dataLine(completedEvent([]))])
 		const wire = createFakeWire([
 			streamResponse(degenerate),
@@ -419,20 +422,21 @@ describe('createLlmCaller streaming deltas', () => {
 		const deltas: LlmStreamDelta[] = []
 		const result = await caller.call({ messages: [], onDelta: (delta) => deltas.push(delta) })
 		expect(result.kind).toBe('success')
-		// The second attempt's content rides only the terminal response payload (no delta events), so after the reset no further deltas arrive.
+		// The first attempt's first delta is preceded by its own reset. The second attempt emits no delta events (its content rides only the terminal response payload), and the reset being lazy — emitted only ahead of an actual delta — it emits no reset either.
 		expect(deltas).toEqual([
-			{ field: 'reasoning', text: 'burned budget' },
 			{ field: 'content', text: '', reset: true },
+			{ field: 'reasoning', text: 'burned budget' },
 		])
 	})
 
-	test('a first-attempt success emits no reset delta', async () => {
+	test('the first attempt opens with a reset before its first delta too', async () => {
 		const wire = createFakeWire([streamResponse(happyPathChunks())])
 		const caller = createLlmCaller(MODEL, API_KEY, { llmFetch: wire.llmFetch, sleep: wire.sleep, scheduleTimeout: wire.scheduleTimeout })
 		const deltas: LlmStreamDelta[] = []
 		await caller.call({ messages: [], onDelta: (delta) => deltas.push(delta) })
-		expect(deltas.length).toBeGreaterThan(0)
-		expect(deltas.some((delta) => delta.reset === true)).toBe(false)
+		expect(deltas[0]).toEqual({ field: 'content', text: '', reset: true })
+		// Only the opening reset: the later deltas of the same attempt append.
+		expect(deltas.slice(1).some((delta) => delta.reset === true)).toBe(false)
 	})
 })
 

@@ -292,14 +292,23 @@ export function createLlmCaller(model: ResolvedModelConfig, apiKey: string | und
 		if (apiKey !== undefined && apiKey !== '') headers['Authorization'] = `Bearer ${apiKey}`
 
 		const maxAttempts = 3
+		const onDelta = request.onDelta
 		let attempt = 0
 		let lastError: string | undefined
 
 		while (attempt < maxAttempts) {
 			attempt++
 
-			// Deltas re-emit from zero on every attempt, so from the second attempt on, the new stream opens by telling any client accumulation to clear — otherwise a client that rendered attempt N's partial text would append attempt N+1's on top of it.
-			if (attempt > 1 && request.onDelta !== undefined) request.onDelta({ field: 'content', text: '', reset: true })
+			// Deltas re-emit from zero on every attempt, so the first delta of every attempt — the first turn and every retry — is preceded by a reset marker telling any client accumulation to clear; otherwise a client that rendered an earlier attempt's partial text would append the new attempt's on top of it. The reset is emitted lazily, ahead of the attempt's first delta rather than at attempt start, so a failed connect that never produces deltas emits no spurious reset.
+			let attemptResetPending = onDelta !== undefined
+			const emitAttemptDelta = (delta: { field: 'reasoning' | 'content'; text: string }): void => {
+				if (onDelta === undefined) return
+				if (attemptResetPending) {
+					attemptResetPending = false
+					onDelta({ field: 'content', text: '', reset: true })
+				}
+				onDelta(delta)
+			}
 
 			// The connect phase is bounded by an abort, not a race: aborting the fetch both unblocks the await below and releases the socket, and the timer is cancelled the moment the response headers arrive.
 			const connectController = new AbortController()
@@ -337,7 +346,7 @@ export function createLlmCaller(model: ResolvedModelConfig, apiKey: string | und
 				return { kind: 'llm_unavailable', message: `HTTP ${response.status}: ${response.errorBody}` }
 			}
 
-			const consumed = await consumeResponsesStream(response.stream, { idleTimeoutMs: LLM_STREAM_IDLE_TIMEOUT_MS, scheduleTimeout: dependencies.scheduleTimeout, onDelta: request.onDelta })
+			const consumed = await consumeResponsesStream(response.stream, { idleTimeoutMs: LLM_STREAM_IDLE_TIMEOUT_MS, scheduleTimeout: dependencies.scheduleTimeout, onDelta: emitAttemptDelta })
 			// An idle timeout is a transport-liveness failure like a failed connect, so it is retried with backoff instead of ending the loop the way every other stream failure does; the fold already released the reader on its exit path.
 			if (consumed.kind === 'stream_idle_timeout') {
 				lastError = consumed.message

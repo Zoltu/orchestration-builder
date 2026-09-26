@@ -1,6 +1,6 @@
 // On-demand LLM request/response inspector for the run view: a stage-scoped modal listing the run's LLM turns (from the windowed log endpoint `GET /api/runs/:id/log`) with a detail pane that fetches one turn's full request/response bodies on demand (`GET /api/runs/:id/log?detail=<index>`, which folds an llm_call delta into the full conversation server-side). Proactive, not always-on: nothing here rides the 1s polls except the turn-list tail refresh while the modal is open on an active run, and detail bodies are fetched once per turn per session.
 //
-// Realtime contract: turns land at turn granularity only — the run log carries no token-level streaming. While a turn is in flight the log holds only its `llm_call_start` event (the role is known, the request and response are not), so the turn list renders that start as an "in flight" row and the tail refresh replaces it with the completed `llm_call` entry once the model responds. That delay is the intended behavior, not a defect.
+// Realtime contract: turns land at turn granularity only — the run log carries no token-level streaming. While a turn is in flight the log holds only its `llm_call_start` event (the role is known, the request and response are not), so the turn list renders that start as an "in flight" row and the tail refresh replaces it with the completed `llm_call` entry once the model responds. That delay is the intended behavior, not a defect. The live token stream (docs/reference.md "Live token stream") layers an optional refinement on top: the app passes the ephemeral `livePartial` it accumulates from the websocket, and this modal renders it as labeled reasoning/response under the matching in-flight row — nothing renders when the partial is absent, and the pairing this module derives is also what tells the app an in-flight turn has completed.
 //
 // Under the run's `standard` logging level the log drops the sent/received bodies (see docs/reference.md "Logging level"), so a detail fetch returns only turn metadata; the detail pane then renders an honest degraded notice pointing at the logging-level setting instead of an empty error. The `h` and `renderMarkdown` dependencies are passed in rather than imported so the component stays free of hyperapp and showdown coupling and is exercisable in tests with fakes (mirroring question-modal.js / result-modal.js).
 //
@@ -358,6 +358,49 @@ function detailSectionsNode(h, renderMarkdown, sections) {
 	return h('div', { class: 'inspector-detail-sections' }, children)
 }
 
+// --- Live partial -------------------------------------------------------------
+
+// The live partial prop, validated: an absent or malformed prop renders nothing rather than inventing sections (the same never-invent rule the detail pane follows). Only the fields the rendering reads are carried.
+/**
+ * @param {unknown} value
+ * @returns {{ role: string, reasoning: string, content: string }|null}
+ */
+function livePartialForRender(value) {
+	if (!isObject(value)) return null
+	const role = typeof value['role'] === 'string' ? value['role'] : null
+	if (role === null) return null
+	const reasoning = typeof value['reasoning'] === 'string' ? value['reasoning'] : ''
+	const content = typeof value['content'] === 'string' ? value['content'] : ''
+	return { role, reasoning, content }
+}
+
+// Whether the turn entry is the in-flight row the live partial belongs to: the partial's role name is the only key shared with the turn list (entries pair by role, not by role instance id).
+/**
+ * @param {unknown} entry
+ * @param {{ role: string, reasoning: string, content: string }|null} livePartial
+ * @returns {boolean}
+ */
+function isLiveRow(entry, livePartial) {
+	if (livePartial === null) return false
+	if (!isObject(entry)) return false
+	return entry['kind'] === 'in_flight' && entry['role'] === livePartial.role
+}
+
+// The live block under the in-flight row: the streamed reasoning and response, each labeled like the detail pane's received sections and rendered through the same sanitized Markdown pipeline. A field with no text yet renders nothing, and an all-empty partial renders no block at all — the app clears the partial when the socket drops, so a stale block never lingers.
+/**
+ * @param {function(string, Record<string, unknown>, unknown): unknown} h
+ * @param {function(string): unknown} renderMarkdown
+ * @param {{ role: string, reasoning: string, content: string }} livePartial
+ * @returns {unknown}
+ */
+function livePartialNode(h, renderMarkdown, livePartial) {
+	const children = []
+	if (livePartial.reasoning !== '') children.push(labeledSection(h, 'Reasoning', h('div', { class: 'inspector-reasoning markdown' }, renderMarkdown(livePartial.reasoning))))
+	if (livePartial.content !== '') children.push(labeledSection(h, 'Response', h('div', { class: 'inspector-prose markdown' }, renderMarkdown(livePartial.content))))
+	if (children.length === 0) return null
+	return h('div', { class: 'inspector-live-partial' }, children)
+}
+
 // The detail pane's body for the selected turn's cached detail state: `'loading'`/`null` (the fetch the select action scheduled is in flight), `'failed'` (the fetch errored), or `{ sections }` — rendered in full or, when the sections lack sent/received bodies, as the honest degraded notice alongside whatever metadata sections exist.
 function detailPaneBody(h, renderMarkdown, detailState) {
 	if (detailState === 'loading' || detailState === null || detailState === undefined) {
@@ -413,6 +456,7 @@ export function InspectorModal(h, props) {
 	const loadState = turns['loadState']
 	const olderLoading = turns['olderLoading'] === true
 	const hasOlder = canPageOlder(turns['tailOffset'])
+	const livePartial = livePartialForRender(props.livePartial)
 
 	const listChildren = []
 	if (loadState === 'loading') {
@@ -422,8 +466,17 @@ export function InspectorModal(h, props) {
 	} else if (entries.length === 0) {
 		listChildren.push(h('p', { class: 'inspector-list-note' }, 'No LLM turns logged for this run yet.'))
 	} else {
+		// The live partial attaches to the newest in-flight row of its role (with same-role nesting, the newest unmatched start is the call currently generating) and renders directly beneath it — no selection needed, so streaming text is visible the moment the modal is open. Only one row ever hosts it.
+		let liveAttached = false
 		for (let position = entries.length - 1; position >= 0; position--) {
-			listChildren.push(turnRowNode(h, entries[position], selectedEventIndex, onSelectTurn))
+			const entry = entries[position]
+			const row = turnRowNode(h, entry, selectedEventIndex, onSelectTurn)
+			if (!liveAttached && isLiveRow(entry, livePartial)) {
+				liveAttached = true
+				listChildren.push(h('div', { class: 'inspector-turn-live' }, [row, livePartialNode(h, renderMarkdown, livePartial)]))
+				continue
+			}
+			listChildren.push(row)
 		}
 	}
 	if (loadState === 'ready' && hasOlder) {

@@ -385,6 +385,36 @@ describe('InspectorModal', () => {
 		expect(collectText(pane)).toContain('once the model responds')
 	})
 
+	test('the live partial renders labeled reasoning and response under the matching in-flight row', () => {
+		const modal = renderModal({
+			turns: { loadState: 'ready', entries: completedEntries, total: 9, tailOffset: 0, selectedEventIndex: null, olderLoading: false },
+			livePartial: { roleId: 'coder-1', role: 'coder', reasoning: 'thinking hard', content: 'partial ans' },
+		})
+		const blocks = allByClass(modal, 'inspector-live-partial')
+		expect(blocks).toHaveLength(1)
+		const block = defined(blocks[0], 'live block')
+		expect(collectText(block)).toContain('Reasoning')
+		expect(collectText(block)).toContain('Response')
+		const markedTexts = allByTag(modal, 'span').filter((node) => node.props.class === 'md-marker').map((node) => node.props['data-text'])
+		expect(markedTexts).toContain('thinking hard')
+		expect(markedTexts).toContain('partial ans')
+		// The block sits with its row: the in-flight row is wrapped together with the live block, not detached elsewhere.
+		const wrapper = defined(allByClass(modal, 'inspector-turn-live')[0], 'live wrapper')
+		expect(allByClass(wrapper, 'inspector-turn')).toHaveLength(1)
+		expect(allByClass(wrapper, 'inspector-live-partial')).toHaveLength(1)
+	})
+
+	test('an empty or absent live partial renders no block, and neither does a mismatched role or a completed-only list', () => {
+		const turns = { loadState: 'ready', entries: completedEntries, total: 9, tailOffset: 0, selectedEventIndex: null, olderLoading: false }
+		expect(allByClass(renderModal({ turns }), 'inspector-live-partial')).toHaveLength(0)
+		expect(allByClass(renderModal({ turns, livePartial: null }), 'inspector-live-partial')).toHaveLength(0)
+		expect(allByClass(renderModal({ turns, livePartial: { roleId: 'coder-1', role: 'coder', reasoning: '', content: '' } }), 'inspector-live-partial')).toHaveLength(0)
+		expect(allByClass(renderModal({ turns, livePartial: { roleId: 'planner-1', role: 'planner', reasoning: 'drifting', content: '' } }), 'inspector-live-partial')).toHaveLength(0)
+		expect(allByClass(renderModal({ turns, livePartial: 'broken' }), 'inspector-live-partial')).toHaveLength(0)
+		const completedOnly = buildTurnIndex([startEvent(0, 'planner'), callEvent(3, 'planner')])
+		expect(allByClass(renderModal({ turns: { ...turns, entries: completedOnly }, livePartial: { roleId: 'planner-1', role: 'planner', reasoning: 'done', content: '' } }), 'inspector-live-partial')).toHaveLength(0)
+	})
+
 	test('a selected completed turn renders its sections, with reasoning clearly labeled through the Markdown pipeline', () => {
 		const detailState = {
 			sections: [

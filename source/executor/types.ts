@@ -132,11 +132,11 @@ export interface ToolCall {
 export interface LlmRequest {
 	messages: Message[]
 	tools?: ToolManifest[]
-	// Streaming tap for turn text: invoked with each recognized payload-text delta as it arrives, and with a `reset` delta at the top of every retry attempt after the first (a retried stream re-emits its text from zero, so a client accumulation must clear). Optional and additive — a caller that omits it simply streams nowhere.
+	// Streaming tap for turn text: invoked with each recognized payload-text delta as it arrives, and with a `reset` delta immediately before the first delta of every attempt — the first turn and every retry — because a retried stream re-emits its text from zero and a client accumulation must clear. Optional and additive — a caller that omits it simply streams nowhere.
 	onDelta?: (delta: LlmStreamDelta) => void
 }
 
-// One streamed turn-text delta. `reset` is set only on the synthetic empty-content delta that opens a retry attempt, marking that any prior accumulation must be cleared before appending.
+// One streamed turn-text delta. `reset` is set only on the synthetic empty-content delta that precedes an attempt's first delta, marking that the client's whole accumulation — reasoning and content, not just the named field — must be cleared before appending.
 export interface LlmStreamDelta {
 	field: 'reasoning' | 'content'
 	text: string
