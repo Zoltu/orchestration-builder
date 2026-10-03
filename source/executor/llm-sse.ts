@@ -106,6 +106,13 @@ function streamErrorMessage(payload: Record<string, unknown>): string {
 	return 'stream error without a message'
 }
 
+// The Responses wire prefixes every event type with `response.` (the OpenAI spec; llama.cpp's server emits `response.output_text.delta`, `response.reasoning_text.delta`, and so on). Every matcher reads the bare suffix, so the prefix is stripped once here; a bare (unprefixed) type passes through unchanged. Without the strip the delta matchers below never matched a real stream: runs still succeeded because the terminal event's payload is authoritative, but the live delta tap silently saw nothing.
+function responseEventType(event: Record<string, unknown>): string | undefined {
+	const type = event['type']
+	if (typeof type !== 'string') return undefined
+	return type.startsWith('response.') ? type.slice('response.'.length) : type
+}
+
 // Folds Responses SSE events into accumulated turn state. The delta-driven item map exists for incremental UX and mid-stream failure detail; the terminal event's response payload is authoritative for the result, and llama.cpp defers all *_done events to the end, so done events are informational only.
 export function createResponsesStreamAccumulator(): ResponsesStreamAccumulator {
 	let terminal: ResponsesStreamTerminal = 'none'
@@ -148,10 +155,10 @@ export function createResponsesStreamAccumulator(): ResponsesStreamAccumulator {
 	}
 
 	function apply(event: Record<string, unknown>): void {
-		const type = event['type']
-		if (typeof type !== 'string') return
-		if (type === 'response.completed' || type === 'response.incomplete') {
-			markTerminal(type === 'response.completed' ? 'completed' : 'incomplete', event['response'])
+		const type = responseEventType(event)
+		if (type === undefined) return
+		if (type === 'completed' || type === 'incomplete') {
+			markTerminal(type === 'completed' ? 'completed' : 'incomplete', event['response'])
 			return
 		}
 		if (type === 'output_item.added') {
@@ -188,7 +195,7 @@ export function createResponsesStreamAccumulator(): ResponsesStreamAccumulator {
 
 // Pure per-event delta mapping for the streaming tap: ONLY the two payload-text delta kinds map — reasoning_text.delta to the reasoning field, output_text.delta to content. Function-call argument deltas are tool-wire detail no client should render as turn text, and every other event (lifecycle, terminal, done) carries no delta, so all of them return undefined. A delta event whose payload is malformed (a missing or non-string delta) is not a delta.
 export function streamDeltaOf(event: Record<string, unknown>): { field: 'reasoning' | 'content'; text: string } | undefined {
-	const type = event['type']
+	const type = responseEventType(event)
 	if (type !== 'reasoning_text.delta' && type !== 'output_text.delta') return undefined
 	const delta = event['delta']
 	if (typeof delta !== 'string') return undefined

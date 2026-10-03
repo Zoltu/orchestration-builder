@@ -217,6 +217,20 @@ describe('createResponsesStreamAccumulator event folding', () => {
 		expect(snapshot.items.size).toBe(0)
 	})
 
+	test('the wire\'s response.-prefixed item and delta events accumulate exactly like their bare spellings', () => {
+		const accumulator = createResponsesStreamAccumulator()
+		accumulator.apply({ type: 'response.output_item.added', output_index: 0, item: { type: 'reasoning', id: 'rs_1' } })
+		accumulator.apply({ type: 'response.reasoning_text.delta', item_id: 'rs_1', output_index: 0, delta: 'thin' })
+		accumulator.apply({ type: 'response.output_item.added', output_index: 1, item: { type: 'message', id: 'msg_1', role: 'assistant' } })
+		accumulator.apply({ type: 'response.output_text.delta', item_id: 'msg_1', output_index: 1, delta: 'Hel' })
+		accumulator.apply({ type: 'response.output_text.delta', item_id: 'msg_1', output_index: 1, delta: 'lo' })
+		accumulator.apply({ type: 'response.completed', response: { status: 'completed', output: [] } })
+		const snapshot = accumulator.snapshot()
+		expect(snapshot.terminal).toBe('completed')
+		expect(itemUnder(snapshot, 'rs_1').reasoning).toBe('thin')
+		expect(itemUnder(snapshot, 'msg_1').content).toBe('Hello')
+	})
+
 	test('the snapshot carries a copy of the item map, so mutating it does not touch the accumulator', () => {
 		const accumulator = accumulatorWithDeltas()
 		const snapshot = accumulator.snapshot()
@@ -395,6 +409,12 @@ describe('streamDeltaOf', () => {
 
 	test('an output_text.delta maps to the content field with its text', () => {
 		expect(streamDeltaOf({ type: 'output_text.delta', item_id: 'm1', delta: 'Hello' })).toEqual({ field: 'content', text: 'Hello' })
+	})
+
+	test('the wire\'s response.-prefixed delta types map identically (llama.cpp emits response.output_text.delta / response.reasoning_text.delta)', () => {
+		expect(streamDeltaOf({ type: 'response.reasoning_text.delta', item_id: 'r1', delta: 'thinking ' })).toEqual({ field: 'reasoning', text: 'thinking ' })
+		expect(streamDeltaOf({ type: 'response.output_text.delta', item_id: 'm1', delta: 'Hello' })).toEqual({ field: 'content', text: 'Hello' })
+		expect(streamDeltaOf({ type: 'response.function_call_arguments.delta', item_id: 'f1', delta: '{"path"' })).toBeUndefined()
 	})
 
 	test('function-call argument deltas are not turn text and return undefined', () => {
