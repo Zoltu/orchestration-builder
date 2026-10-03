@@ -443,11 +443,13 @@ Comment and newline quality is a review judgment, not a build-gate failure. No a
 
 ## Local test model
 
-The Guild's own configured model endpoint is reachable from the agent environment: the bundled `guild/guild.json` targets `llama-server` (`http://llama-server:8080/v1`) with the model "Agents A1", and that endpoint is up with that model loaded.
+**Agents must never start, connect to, or download an LLM on their own.** This includes launching or restarting local inference servers (`llama-server`, Unsloth Studio, or anything similar — model weights are far too large to download), connecting to whatever model endpoints happen to be reachable, or driving real runs against them. Model servers are shared host resources: the operator turns them on explicitly for smoke tests, scheduled and coordinated with other work on the host, and only the operator knows what is currently resident or in use.
 
-A real end-to-end run is **not** operator-only work. Work that calls for a real-LLM smoke test (an "Operator handoff" for real-LLM runs) can usually be exercised in-environment first: run the executor exactly as shipped, against the Guild's configured model, with no changes to `guild.json`. Do **not** repoint the Guild at any other endpoint or model — the configured one is the supported path and the only one guaranteed to behave (strict chat template, single leading system message). Anything a local run cannot exercise (multi-container Docker builds, hardware the sandbox lacks) requires operator handoff.
+- `bun test` never touches an LLM: executor behavior is exercised through in-memory fakes (see "Testing Policy"), and this is always sufficient.
+- If work genuinely needs a real-LLM smoke test, stop and ask the operator to schedule it. Do not probe endpoints, run the executor against them, or assume a server is up even if documentation or past sessions suggest it was.
+- Reading public API specifications/documentation pages is fine and unrelated to this rule.
 
-An Unsloth Studio endpoint (`http://unsloth:8000`) may also be available for real-model smoke tests against a second backend. Ask the operator before loading a model there — its VRAM may be in use for other things, and only the operator knows what is currently resident.
+The Guild's bundled configuration (`guild/guild.json`) targets `llama-server` (`http://llama-server:8080/v1`) with the model "Agents A1" — treat that as deployment data, not as an invitation to connect.
 
 ---
 
