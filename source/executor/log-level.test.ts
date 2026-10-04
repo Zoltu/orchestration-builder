@@ -10,6 +10,7 @@ function event(type: string, payload: unknown): LogEvent {
 
 const fullLlmCallPayload = {
 	role: 'planner',
+	roleId: 'planner-0-1',
 	messageCount: 3,
 	sent: [{ role: 'system', content: 'prompt text' }, { role: 'user', content: 'task text' }],
 	received: { content: 'working on it', toolCalls: [{ id: 'c1', function: { name: 'read_file', arguments: '{"path":"x"}' } }] },
@@ -58,18 +59,24 @@ describe('applyLogLevel under full', () => {
 })
 
 describe('applyLogLevel under standard: llm_call slimming', () => {
-	test('drops the sent and received bodies and keeps role, messageCount, usage, and finishReason', () => {
+	test('drops the sent and received bodies and keeps role, roleId, messageCount, usage, and finishReason', () => {
 		const slimmed = applyLogLevel(event('llm_call', fullLlmCallPayload), 'standard')
 		expect(slimmed).toEqual({
 			timestamp: '2026-01-01T00:00:00.000Z',
 			type: 'llm_call',
 			payload: {
 				role: 'planner',
+				roleId: 'planner-0-1',
 				messageCount: 3,
 				usage: { promptTokens: 100, completionTokens: 20, totalTokens: 120, cachedPromptTokens: 40 },
 				finishReason: 'tool_calls',
 			},
 		})
+	})
+
+	test('the roleId identity field survives standard filtering, matching llm_call_start and role_start which always carry it', () => {
+		const slimmed = applyLogLevel(event('llm_call', { role: 'coder', roleId: 'coder-1-2', messageCount: 2, sent: [{ role: 'user', content: 'x' }], received: { content: 'y' } }), 'standard')
+		expect(slimmed.payload).toEqual({ role: 'coder', roleId: 'coder-1-2', messageCount: 2 })
 	})
 
 	test('keeps absent optional fields absent (no finishReason key appears)', () => {

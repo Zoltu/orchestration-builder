@@ -762,6 +762,7 @@ function SetSequenceRolesOnly(state, event) {
 function SetScreen(state, screen) {
 	if (screen !== 'watch' && screen !== 'history' && screen !== 'compose') return state
 	// Leaving the watch screen unmounts the sequence container (the follower must detach) and returning to it remounts a fresh one; the swap syncs the follower either way.
+	// Modal state is deliberately kept alive across the swap: returning to watch restores the session's modal state (an open inspector, its loaded window and scope) instead of a fresh view.
 	return [{ ...state, screen }, SyncSequenceFollower()]
 }
 
@@ -930,7 +931,7 @@ function ClickRunView(state, event) {
 }
 
 // --- LLM turn inspector (modal) ---------------------------------------------
-// The stage-controls "Inspect" button opens a modal over the run view that renders one agent instance's LLM turns as a continuous transcript (the inspector redesign, milestone 2), derived straight from the windowed log endpoint's `llm_call` payloads — the story needs no per-turn detail fetches; each completed turn's collapsed "on the wire" expander separately fetches the turn's full folded request from the same endpoint's `?detail=` variant, once per session into the bounded wire-details cache. The modal is scoped to one instance (milestone 1): the modal state carries the explicitly scoped instance id (null = auto — the most recently active instance in the loaded window), and the breadcrumb, instance dropdown, and each `agent` call's View affordance re-scope. The data flow is plain effects and state: the log loads with a single cheap probe (`?limit=1`) that learns the log's `total`, then fetches the most recent window; "older turns" pages back; while the modal is open on an active run the 1s poll appends the log's tail so in-flight turns appear when they complete and the live partial swaps for the completed turn.
+// The stage-controls "Inspect" button opens a modal over the run view that renders one agent instance's LLM turns as a continuous transcript (the per-instance-scoped transcript), derived straight from the windowed log endpoint's `llm_call` payloads — the story needs no per-turn detail fetches; each completed turn's collapsed "on the wire" expander separately fetches the turn's full folded request from the same endpoint's `?detail=` variant, once per session into the bounded wire-details cache. The modal is scoped to one instance of the windowed log: the modal state carries the explicitly scoped instance id (null = auto — the most recently active instance in the loaded window), and the breadcrumb, instance dropdown, and each `agent` call's View affordance re-scope. The data flow is plain effects and state: the log loads with a single cheap probe (`?limit=1`) that learns the log's `total`, then fetches the most recent window; "older turns" pages back; while the modal is open on an active run the 1s poll appends the log's tail so in-flight turns appear when they complete and the live partial swaps for the completed turn.
 
 function initialInspectorState() {
 	return { loadState: 'loading', events: [], total: null, tailOffset: null, entries: [], scopedRoleId: null, olderLoading: false }

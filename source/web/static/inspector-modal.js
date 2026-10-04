@@ -1,4 +1,4 @@
-// The run's LLM story for one agent instance: an on-demand modal over the run view that renders the scoped instance's turns as one continuous transcript (the inspector redesign, milestone 2). The turns come from the windowed log endpoint `GET /api/runs/:id/log`; each completed turn's `llm_call` payload carries the turn's NEW messages (the `sent` slice — the conversation opening on the first turn, then the prior response's echo, the tool results, and platform notices), the assistant response (`received`), the usage, and the finish reason, so the transcript's story needs no per-turn detail fetches: the loaded events are the story.
+// The run's LLM story for one agent instance: an on-demand modal over the run view that renders the scoped instance's turns as one continuous transcript. The turns come from the windowed log endpoint `GET /api/runs/:id/log`; each completed turn's `llm_call` payload carries the turn's NEW messages (the `sent` slice — the conversation opening on the first turn, then the prior response's echo, the tool results, and platform notices), the assistant response (`received`), the usage, and the finish reason, so the transcript's story needs no per-turn detail fetches: the loaded events are the story.
 //
 // Each completed turn's header also carries a collapsed "on the wire" expander: the FULL request conversation the model saw at that turn — system + task + every message up to and including the turn — which is a different view of the same turn than the inline new-messages rendering, so it is labeled distinctly and fetched on demand from the window endpoint's `?detail=` fold (the delta slices the story reads cannot show it). The app caches one fetched envelope per turn in a bounded session cache (wire-details.js) and hands the modal a lookup; the modal never fetches itself.
 //
@@ -8,9 +8,9 @@
 //
 // Under the run's `standard` logging level the log drops the sent/received bodies (see docs/reference.md "Logging level"), so each turn renders its header plus an honest degraded notice pointing at the logging-level setting; the transcript stays navigable. The `h` and `renderMarkdown` dependencies are passed in rather than imported so the component stays free of hyperapp and showdown coupling and is exercisable in tests with fakes (mirroring question-modal.js / result-modal.js).
 //
-// The log window is the milestone 1 windowing: the modal opens on the most recent `INSPECTOR_WINDOW_SIZE` log events and an "older turns" control pages back by the same size, growing the loaded range (the poll's tail refresh appends new events to the same range, resyncing past `INSPECTOR_RETENTION_LIMIT`). Paging back grows the transcript toward its true beginning — the opening expander re-derives from whatever the loaded range's first turn carries.
+// The transcript reads the windowed log: the modal opens on the most recent `INSPECTOR_WINDOW_SIZE` log events and an "older turns" control pages back by the same size, growing the loaded range (the poll's tail refresh appends new events to the same range, resyncing past `INSPECTOR_RETENTION_LIMIT`). Paging back grows the transcript toward its true beginning — the opening expander re-derives from whatever the loaded range's first turn carries.
 //
-// The transcript is scoped to one agent instance (the inspector redesign, milestone 1): a run's turns are spread across its role instances (the orchestrator, each delegated child), so the modal shows the scoped instance's turns — renumbered within the instance — with a breadcrumb (`orchestrator-0 ▸ coder-1 ▸ coder-1-2`) for the delegation chain and a minimal instance dropdown for wayfinding. The scoped instance defaults to the most recently active one (the newest unmatched `llm_call_start`, else the newest `llm_call`), and the caller re-scopes via the breadcrumb/dropdown or an `agent` call's View affordance. Instance identity comes from the events' `roleId` fields, falling back to the role name where a payload carries none (old logs and the `standard` logging level, matching the conversation fold's tolerance in source/web/render.ts) — under that fallback the turns of a role's instances are indistinguishable and scope to the role name as one group.
+// The transcript is scoped to one agent instance: a run's turns are spread across its role instances (the orchestrator, each delegated child), so the modal shows the scoped instance's turns — renumbered within the instance — with a breadcrumb (`orchestrator-0 ▸ coder-1 ▸ coder-1-2`) for the delegation chain and a minimal instance dropdown for wayfinding. The scoped instance defaults to the most recently active one (the newest unmatched `llm_call_start`, else the newest `llm_call`), and the caller re-scopes via the breadcrumb/dropdown or an `agent` call's View affordance. Instance identity comes from the events' `roleId` fields, falling back to the role name where a payload carries none (old logs whose turn events predate per-instance ids, matching the conversation fold's tolerance in source/web/render.ts) — under that fallback the turns of a role's instances are indistinguishable and scope to the role name as one group.
 //
 // The pure helpers (the window-offset math, the transcript derivation, `childInstanceFor`, and the instance/scope derivations) ship exported even though the component consumes them internally — per the labels.js convention, pure helpers are exported so the tests exercise the same implementations the view uses rather than a parallel copy.
 
@@ -36,7 +36,7 @@ export const INSPECTOR_RETENTION_LIMIT = INSPECTOR_WINDOW_SIZE * 20
  */
 
 /**
- * One LLM turn as the turn index derives it. `eventIndex` is the turn's identity in the log (a completed turn's `llm_call` event; an in-flight turn's `llm_call_start` event). `roleId` is the turn's role-instance id — the payload's `roleId` when present, else the role name (old logs and the `standard` logging level carry no instance id on turn events, matching the conversation fold's tolerance), so an in-flight turn that completes keeps its instance and never jumps scope.
+ * One LLM turn as the turn index derives it. `eventIndex` is the turn's identity in the log (a completed turn's `llm_call` event; an in-flight turn's `llm_call_start` event). `roleId` is the turn's role-instance id — the payload's `roleId` when present, else the role name (old logs' turn events carry no instance id, matching the conversation fold's tolerance), so an in-flight turn that completes keeps its instance and never jumps scope.
  *
  * @typedef {Object} TurnEntry
  * @property {'completed'|'in_flight'} kind
@@ -179,25 +179,31 @@ function readMessageCount(value) {
 	return value
 }
 
-// Derives the turn index from a window of log events (the shape `GET /api/runs/:id/log` returns). An `llm_call` event becomes a completed entry; an `llm_call_start` becomes an in-flight entry unless a matching `llm_call` for the same role follows it, in which case they pair into one completed entry. Matching is LIFO per role name so the same-name nesting the executor allows (a role spawning a same-named child) pairs like brackets — pairing stays name-keyed even though the events carry `roleId`, because a start may predate the executor's per-instance ids (old logs) and the executor's single-flight turn loop makes same-name nesting bracket-like; each entry's `roleId` comes from its own event's payload, falling back to the role name when absent. Entries come back in chronological (log) order with 1-based `turnNumber`s over the loaded events; malformed rows (non-objects, other types, non-record payloads, missing role, unusable index) are skipped so one torn row cannot corrupt the list. The log is append-only, so an in-flight entry that later completes is replaced wholesale by the next `buildTurnIndex` over the grown window.
+// Derives the turn index from a window of log events (the shape `GET /api/runs/:id/log` returns). An `llm_call` event becomes a completed entry; an `llm_call_start` becomes an in-flight entry unless a matching `llm_call` for the same role follows it, in which case they pair into one completed entry. Matching is LIFO per role name so the same-name nesting the executor allows (a role spawning a same-named child) pairs like brackets — pairing stays name-keyed even though the events carry `roleId`, because a start may predate the executor's per-instance ids (old logs) and the executor's single-flight turn loop makes same-name nesting bracket-like; each entry's `roleId` comes from its own event's payload, falling back to the role name when absent. An `llm_unavailable` or `context_budget_exceeded` event closes the same role's newest open start (single-flight makes that start the failed turn's bracket) instead of leaving it matched to nothing: a turn that never completed has no story of its own beyond the failure event, so it renders as failed/dropped there rather than as an eternal in-flight row. Entries come back in chronological (log) order with 1-based `turnNumber`s over the loaded events; malformed rows (non-objects, other types, non-record payloads, missing role, unusable index) are skipped so one torn row cannot corrupt the list. The log is append-only, so an in-flight entry that later completes is replaced wholesale by the next `buildTurnIndex` over the grown window.
 /**
  * @param {unknown} logEvents
  * @returns {TurnEntry[]}
  */
 export function buildTurnIndex(logEvents) {
 	if (!Array.isArray(logEvents)) return []
-	// Unmatched starts still open per role, chronological; popped LIFO on their matching call.
+	// Unmatched starts still open per role, chronological; popped LIFO on their matching call — or on the role's turn-failure event, which closes a failed turn's bracket so no ghost in-flight row survives.
 	const openStarts = new Map()
 	const entries = []
 	for (const event of logEvents) {
 		if (!isObject(event)) continue
 		const type = event['type']
-		if (type !== 'llm_call' && type !== 'llm_call_start') continue
+		if (type !== 'llm_call' && type !== 'llm_call_start' && type !== 'llm_unavailable' && type !== 'context_budget_exceeded') continue
 		const payload = event['payload']
 		if (!isObject(payload)) continue
 		const role = typeof payload['role'] === 'string' && payload['role'] !== '' ? payload['role'] : null
+		if (role === null) continue
+		if (type === 'llm_unavailable' || type === 'context_budget_exceeded') {
+			const failed = openStarts.get(role)
+			if (failed !== undefined && failed.length > 0) failed.pop()
+			continue
+		}
 		const eventIndex = readEventIndex(event['index'])
-		if (role === null || eventIndex === null) continue
+		if (eventIndex === null) continue
 		const timestamp = typeof event['timestamp'] === 'string' ? event['timestamp'] : null
 		const roleId = typeof payload['roleId'] === 'string' && payload['roleId'] !== '' ? payload['roleId'] : role
 		if (type === 'llm_call_start') {
@@ -247,7 +253,7 @@ export function buildTurnIndex(logEvents) {
 }
 
 // --- Instance scoping --------------------------------------------------------
-// The modal scopes its transcript to one agent instance. Instances are known from `role_start`/`role_finished` events (which always carry `roleId`) and, where the loaded turn events predate per-instance ids (old logs, the `standard` logging level), from the turn events themselves falling back to the role name — so the dropdown always offers at least the identity the turn entries can scope to.
+// The modal scopes its transcript to one agent instance. Instances are known from `role_start`/`role_finished` events (which always carry `roleId`) and, where the loaded turn events predate per-instance ids (old logs), from the turn events themselves falling back to the role name — so the dropdown always offers at least the identity the turn entries can scope to.
 
 /**
  * One agent instance present in the loaded event window, as the instance dropdown renders it.
@@ -312,7 +318,7 @@ export function instancesOf(logEvents) {
 			}
 			continue
 		}
-		// No id on the turn payload (old logs, the standard logging level): the role name is the only identity the transcript can scope to, and its live flag follows the newest turn event — a start reads as a turn in flight, a call as none.
+		// No id on the turn payload (old logs): the role name is the only identity the transcript can scope to, and its live flag follows the newest turn event — a start reads as a turn in flight, a call as none.
 		instances.set(role, { roleId: role, role, parentRoleId: null, parentRole: null, live: type === 'llm_call_start' })
 	}
 	return [...instances.values()]
@@ -1099,7 +1105,7 @@ function livePartialForRender(value) {
 	return { roleId, role, reasoning, content }
 }
 
-// Whether the transcript turn is the in-flight turn the live partial belongs to. The partial's own `roleId` is matched first so a same-named sibling instance's ghost turn (a start left unmatched by a failed turn) never hosts another instance's stream; turns whose id fell back to the role name (old logs, the standard logging level) pair on the role name as before.
+// Whether the transcript turn is the in-flight turn the live partial belongs to. The partial's own `roleId` is matched first so a same-named sibling instance's ghost turn (an unmatched start whose failure event has paged out of the loaded window) never hosts another instance's stream; turns whose id fell back to the role name (old logs) pair on the role name as before.
 /**
  * @param {TranscriptTurn} turn
  * @param {{ roleId: string|null, role: string, reasoning: string, content: string }|null} livePartial
@@ -1196,7 +1202,7 @@ function instanceSelectNode(h, instances, scopedRoleId, onScopeInstance) {
 	])
 }
 
-// The modal overlay: a backdrop over the run view plus a wide card whose body is the scoped instance's transcript — one continuous document of the instance's turns (the inspector redesign, milestone 2), topped by the "older turns" window control and the collapsed conversation opening. Above the body sit the heading, the delegation-chain breadcrumb, and the instance dropdown. `onScopeInstance` is wired bare on the dropdown (it reads the change event) and per crumb/View affordance with the instance id as payload; `onLoadOlder` and `onClose` are caller-supplied actions wired bare, mirroring the result modal's close wiring. `wireDetailLookup` reads the app's bounded session cache for a turn's "on the wire" envelope and `onToggleWire` is the app's open action factory (the expander wires it curried with the turn's event index, since the toggle event cannot carry it); a modal mounted without either renders no expanders.
+// The modal overlay: a backdrop over the run view plus a wide card whose body is the scoped instance's transcript — one continuous document of the instance's turns, topped by the "older turns" window control and the collapsed conversation opening. Above the body sit the heading, the delegation-chain breadcrumb, and the instance dropdown. `onScopeInstance` is wired bare on the dropdown (it reads the change event) and per crumb/View affordance with the instance id as payload; `onLoadOlder` and `onClose` are caller-supplied actions wired bare, mirroring the result modal's close wiring. `wireDetailLookup` reads the app's bounded session cache for a turn's "on the wire" envelope and `onToggleWire` is the app's open action factory (the expander wires it curried with the turn's event index, since the toggle event cannot carry it); a modal mounted without either renders no expanders.
 export function InspectorModal(h, props) {
 	const renderMarkdown = props.renderMarkdown
 	const logEvents = Array.isArray(props.logEvents) ? props.logEvents : []

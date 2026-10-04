@@ -15,7 +15,7 @@ function isRecordPayload(value: unknown): value is Record<string, unknown> {
 	return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
-const LLM_CALL_KEPT_FIELDS: readonly string[] = ['role', 'messageCount', 'usage', 'finishReason']
+const LLM_CALL_KEPT_FIELDS: readonly string[] = ['role', 'roleId', 'messageCount', 'usage', 'finishReason']
 const TOOL_RESULT_KEPT_FIELDS: readonly string[] = ['role', 'tool', 'kind']
 
 // Copies only the listed top-level payload fields (present ones), leaving everything else behind.

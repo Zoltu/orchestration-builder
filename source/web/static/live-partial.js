@@ -31,7 +31,7 @@ export function nextLivePartial(current, delta) {
 }
 
 /**
- * The partial as it should stand after a turn-list derivation: null when the accumulated role no longer holds an in-flight turn — the inspector's `llm_call_start`/`llm_call` pairing (buildTurnIndex, inspector-modal.js) proves the turn completed, since an in-flight turn keeps its start unmatched in the log — or the partial itself when the role is still generating. A non-array or malformed entry list reads as "nothing in flight" and clears, so a derivation that learned nothing never keeps a stale partial.
+ * The partial as it should stand after a turn-list derivation: null when the accumulated instance no longer holds an in-flight turn — the inspector's `llm_call_start`/`llm_call` pairing (buildTurnIndex, inspector-modal.js) proves the turn completed, since an in-flight turn keeps its start unmatched in the log — or the partial itself when the role is still generating. Pairing matches the entry's `roleId` first (mirroring isLiveTurn in inspector-modal.js, so a same-named sibling's in-flight row never hosts another instance's stream); an entry or partial carrying no instance id — old logs, whose turn events predate per-instance ids — falls back to the role name. A non-array or malformed entry list reads as "nothing in flight" and clears, so a derivation that learned nothing never keeps a stale partial.
  *
  * @param {LivePartial|null} livePartial
  * @param {unknown} entries
@@ -43,7 +43,16 @@ export function activeLivePartial(livePartial, entries) {
 	for (const entry of entries) {
 		if (!isObject(entry)) continue
 		if (entry['kind'] !== 'in_flight') continue
-		if (entry['role'] === livePartial.role) return livePartial
+		const role = typeof entry['role'] === 'string' && entry['role'] !== '' ? entry['role'] : null
+		if (role === null) continue
+		const roleId = typeof entry['roleId'] === 'string' && entry['roleId'] !== '' ? entry['roleId'] : null
+		const entryHasOwnId = roleId !== null && roleId !== role
+		const partialHasId = livePartial.roleId !== null && livePartial.roleId !== ''
+		if (entryHasOwnId && partialHasId) {
+			if (roleId === livePartial.roleId) return livePartial
+			continue
+		}
+		if (role === livePartial.role) return livePartial
 	}
 	return null
 }

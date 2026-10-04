@@ -1761,7 +1761,7 @@ li:last-child {
 }
 
 /* --- Inspector modal -------------------------------------------------------- */
-/* A stage-scoped overlay (the question/result modal pattern: containing block is `.pb-flow`) presenting the run's LLM turns with their on-demand request/response detail. The card is wide and tall — two panes side by side: the turn list (newest first, scoped to one agent instance, its own scroll) on the left and the selected turn's detail (its own scroll) on the right. A delegation-chain breadcrumb and a minimal instance dropdown sit above the panes for re-scoping (the redesign's wayfinding, milestone 1). Turn rows are buttons styled as rows; the in-flight row and the metadata-only hint tag read at a glance. Message bodies and reasoning render through the shared sanitized Markdown pipeline; raw structured fields (tool calls, usage) render as pretty-printed JSON in mono. Colors read the visual tokens so it follows the light/dark theme. */
+/* A stage-scoped overlay (the question/result modal pattern: containing block is `.pb-flow`) presenting the run's LLM turns with their on-demand request/response detail. The card is wide and tall — two panes side by side: the turn list (newest first, scoped to one agent instance, its own scroll) on the left and the selected turn's detail (its own scroll) on the right. A delegation-chain breadcrumb and a minimal instance dropdown sit above the panes for re-scoping. Turn rows are buttons styled as rows; the in-flight row and the metadata-only hint tag read at a glance. Message bodies and reasoning render through the shared sanitized Markdown pipeline; raw structured fields (tool calls, usage) render as pretty-printed JSON in mono. Colors read the visual tokens so it follows the light/dark theme. */
 
 .inspector-modal-overlay {
 	position: absolute;
@@ -1822,7 +1822,7 @@ li:last-child {
 	cursor: pointer;
 }
 
-/* The instance wayfinding (inspector redesign, milestone 1): the delegation-chain breadcrumb sits between the heading and the panes, and a minimal instance dropdown opens the turn pane. Both are small, quiet controls — they re-scope the list, they are not the reading surface. */
+/* The instance wayfinding: the delegation-chain breadcrumb sits between the heading and the panes, and a minimal instance dropdown opens the turn pane. Both are small, quiet controls — they re-scope the list, they are not the reading surface. */
 
 .inspector-breadcrumb-row {
 	display: flex;
@@ -1895,7 +1895,7 @@ li:last-child {
 	max-width: 100%;
 }
 
-/* The modal body is the transcript: one continuous, scrollable document of the scoped instance's turns (the inspector redesign, milestone 2) — no list/detail split. */
+/* The modal body is the transcript: one continuous, scrollable document of the scoped instance's turns — no list/detail split. */
 .inspector-modal-body {
 	flex: 1;
 	min-height: 0;

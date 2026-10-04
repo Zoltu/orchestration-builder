@@ -378,22 +378,34 @@ describe('nextLivePartial', () => {
 describe('activeLivePartial', () => {
 	const partial = { roleId: 'coder-2', role: 'coder', reasoning: 'in progress', content: '' }
 
-	test('kept while the role still holds an in-flight turn', () => {
-		const entries = [{ kind: 'completed', role: 'planner' }, { kind: 'in_flight', role: 'coder' }]
+	test('kept while the role instance still holds an in-flight turn (roleId match)', () => {
+		const entries = [{ kind: 'completed', role: 'planner', roleId: 'planner-1' }, { kind: 'in_flight', role: 'coder', roleId: 'coder-2' }]
 		expect(activeLivePartial(partial, entries)).toBe(partial)
 	})
 
-	test('cleared once the pairing shows the turn completed (no in-flight entry for the role)', () => {
-		const entries = [{ kind: 'completed', role: 'planner' }, { kind: 'completed', role: 'coder' }]
+	test('cleared once the pairing shows the turn completed (no in-flight entry for the instance)', () => {
+		const entries = [{ kind: 'completed', role: 'planner', roleId: 'planner-1' }, { kind: 'completed', role: 'coder', roleId: 'coder-2' }]
 		expect(activeLivePartial(partial, entries)).toBeNull()
 	})
 
+	test('a same-named sibling instance never keeps another instance\u2019s partial', () => {
+		const entries = [{ kind: 'in_flight', role: 'coder', roleId: 'coder-9' }]
+		expect(activeLivePartial(partial, entries)).toBeNull()
+	})
+
+	test('either side lacking an instance id falls back to the role name (old logs)', () => {
+		const idlessPartial = { roleId: '', role: 'coder', reasoning: '', content: '' }
+		expect(activeLivePartial(idlessPartial, [{ kind: 'in_flight', role: 'coder', roleId: 'coder-2' }])).toBe(idlessPartial)
+		const fallbackEntries = [{ kind: 'in_flight', role: 'coder', roleId: 'coder' }]
+		expect(activeLivePartial(partial, fallbackEntries)).toBe(partial)
+	})
+
 	test('a partial whose role never appears in the list clears', () => {
-		expect(activeLivePartial(partial, [{ kind: 'in_flight', role: 'planner' }])).toBeNull()
+		expect(activeLivePartial(partial, [{ kind: 'in_flight', role: 'planner', roleId: 'planner-1' }])).toBeNull()
 	})
 
 	test('null stays null and malformed inputs clear rather than throw', () => {
-		expect(activeLivePartial(null, [{ kind: 'in_flight', role: 'coder' }])).toBeNull()
+		expect(activeLivePartial(null, [{ kind: 'in_flight', role: 'coder', roleId: 'coder-2' }])).toBeNull()
 		expect(activeLivePartial(partial, 'broken')).toBeNull()
 		expect(activeLivePartial(partial, [null, 42, { kind: 'in_flight' }])).toBeNull()
 	})
