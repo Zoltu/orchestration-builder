@@ -10,7 +10,9 @@
 //
 // The transcript reads the windowed log: the modal opens on the most recent `INSPECTOR_WINDOW_SIZE` log events and an "older turns" control pages back by the same size, growing the loaded range (the poll's tail refresh appends new events to the same range, resyncing past `INSPECTOR_RETENTION_LIMIT`). Paging back grows the transcript toward its true beginning — the opening expander re-derives from whatever the loaded range's first turn carries.
 //
-// The transcript is scoped to one agent instance: a run's turns are spread across its role instances (the orchestrator, each delegated child), so the modal shows the scoped instance's turns — renumbered within the instance — with a breadcrumb (`orchestrator-0 ▸ coder-1 ▸ coder-1-2`) for the delegation chain and a minimal instance dropdown for wayfinding. The scoped instance defaults to the most recently active one (the newest unmatched `llm_call_start`, else the newest `llm_call`), and the caller re-scopes via the breadcrumb/dropdown or an `agent` call's View affordance. Instance identity comes from the events' `roleId` fields, falling back to the role name where a payload carries none (old logs whose turn events predate per-instance ids, matching the conversation fold's tolerance in source/web/render.ts) — under that fallback the turns of a role's instances are indistinguishable and scope to the role name as one group.
+// Scoping to an instance loads that instance's data explicitly: the endpoint's `?instance=<roleId>` variant filters the log server-side to the instance's turns and its full ancestor chain's lifecycle, so a scoped transcript opens on the most recent window of the instance's OWN sequence — an old agent's turns and complete breadcrumb load without paging back through the whole log — and "older turns" pages back within the filtered set (see "Per-scope windows" below).
+//
+// The transcript is scoped to one agent instance: a run's turns are spread across its role instances (the orchestrator, each delegated child), so the modal shows the scoped instance's turns — renumbered within the instance — with a breadcrumb (`orchestrator-0 ▸ coder-1 ▸ coder-1-2`) for the delegation chain and a minimal instance dropdown for wayfinding. The scoped instance defaults to the most recently active one (the newest unmatched `llm_call_start`, else the newest `llm_call`), and the caller re-scopes via the breadcrumb/dropdown or an `agent` call's View affordance. Instance identity comes from the events' `roleId` fields, falling back to the role name where a payload carries none (old logs whose turn events predate per-instance ids, matching the conversation fold's tolerance in source/web/render.ts) — under that fallback the turns of a role's instances are indistinguishable and scope to the role name as one group. The scoped render source is the scope's own window merged with the unscoped tail window (`mergeLogEvents`): the tail keeps the dropdown's wayfinding and the `agent` calls' child affordances alive (the server filter deliberately omits children), while the scope's own filtered sequence is authoritative for the transcript and its paging offsets.
 //
 // The pure helpers (the window-offset math, the transcript derivation, `childInstanceFor`, and the instance/scope derivations) ship exported even though the component consumes them internally — per the labels.js convention, pure helpers are exported so the tests exercise the same implementations the view uses rather than a parallel copy.
 
@@ -126,6 +128,177 @@ export function tailRefreshMustResync(pageEventCount, pageOffset, pageTotal, loa
 	if (!Number.isInteger(pageTotal) || pageTotal < 0) return false
 	if (pageEventCount < pageTotal - pageOffset) return true
 	return Number.isInteger(loadedEventCount) && loadedEventCount >= INSPECTOR_RETENTION_LIMIT
+}
+
+// --- Per-scope windows -------------------------------------------------------
+// Scoping the modal to one agent instance loads that instance's data explicitly from the server-filtered window endpoint (`?instance=<roleId>`): the server sees the whole log, so the scoped window carries the instance's turns and its full ancestor chain's lifecycle no matter how far back they fall — the breadcrumb always renders completely, and an old agent's transcript needs no paging back through the whole log. The app keeps one loaded window per explicit scope, keyed by the scoped role id, alongside the unscoped tail window (which keeps serving the instance dropdown's wayfinding, the default scope, and the child-instance affordances the filter deliberately omits — children are not ancestors). The endpoint windows the filtered sequence, so the same offset math drives both windows.
+
+/**
+ * A per-scope loaded window: the same fields the unscoped window carries, for one instance's server-filtered event set. `total` is the FILTERED sequence's total and `tailOffset` the loaded window's start within it.
+ *
+ * @typedef {Object} ScopeWindow
+ * @property {'loading'|'ready'|'failed'} loadState
+ * @property {LogWindowEvent[]} events
+ * @property {number|null} total
+ * @property {number|null} tailOffset
+ * @property {TurnEntry[]} entries
+ */
+
+/**
+ * A fresh per-scope window: loading, empty. The scope's probe and window fetches fill it.
+ *
+ * @returns {ScopeWindow}
+ */
+export function initialScopeWindow() {
+	return { loadState: 'loading', events: [], total: null, tailOffset: null, entries: [] }
+}
+
+/**
+ * Merges two windowed event lists into one deduped, log-order list: the render source for an explicitly scoped modal is the scope's own window augmented with the unscoped tail window, whose overlapping rows (both are windows over the same append-only log, and a row's global `index` is its identity) collapse to one. Rows without a usable global index are dropped — every row the endpoint ships carries one, and the transcript's pairing reads only indexed rows anyway.
+ *
+ * @param {unknown} firstEvents
+ * @param {unknown} secondEvents
+ * @returns {LogWindowEvent[]}
+ */
+export function mergeLogEvents(firstEvents, secondEvents) {
+	const byIndex = new Map()
+	const sources = [...(Array.isArray(firstEvents) ? firstEvents : []), ...(Array.isArray(secondEvents) ? secondEvents : [])]
+	for (const event of sources) {
+		if (!isObject(event)) continue
+		const index = event['index']
+		if (typeof index !== 'number' || !Number.isInteger(index) || index < 0) continue
+		if (!byIndex.has(index)) byIndex.set(index, event)
+	}
+	return [...byIndex.values()].sort((a, b) => a['index'] - b['index'])
+}
+
+/**
+ * The modal's render inputs for the modal's current scope: the explicit scope's own window (its load state and paging offsets — the "Older turns" control pages within the filtered set) with its events merged with the unscoped tail window (wayfinding: the dropdown's instance list and the `agent` calls' child affordances read the instances the scoped filter deliberately omits), or the unscoped window itself when the scope is unset or its window has not landed yet (the modal then shows the unscoped window's loading state until the scope's probe responds).
+ *
+ * @param {unknown} inspector the app's inspector state
+ * @param {string|null} explicitScopeRoleId
+ * @returns {{ loadState: string, events: LogWindowEvent[], total: number|null, tailOffset: number|null }}
+ */
+export function scopeViewFor(inspector, explicitScopeRoleId) {
+	const state = isObject(inspector) ? inspector : {}
+	const unscoped = {
+		loadState: typeof state['loadState'] === 'string' ? state['loadState'] : 'loading',
+		events: Array.isArray(state['events']) ? state['events'] : [],
+		total: typeof state['total'] === 'number' ? state['total'] : null,
+		tailOffset: typeof state['tailOffset'] === 'number' ? state['tailOffset'] : null,
+	}
+	if (typeof explicitScopeRoleId !== 'string' || explicitScopeRoleId === '' || !isObject(state['scopes'])) return unscoped
+	const record = state['scopes'][explicitScopeRoleId]
+	if (!isObject(record)) return unscoped
+	return {
+		loadState: typeof record['loadState'] === 'string' ? record['loadState'] : 'loading',
+		events: mergeLogEvents(record['events'], unscoped.events),
+		total: typeof record['total'] === 'number' ? record['total'] : null,
+		tailOffset: typeof record['tailOffset'] === 'number' ? record['tailOffset'] : null,
+	}
+}
+
+// The windowed-log fetch URL for one page: the optional instance scope filters server-side, and offset/limit window the (filtered) sequence. Exported because the app's landing actions build the follow-up fetches (probe → window, tail resync) against the same URL shape the fetch-decision helpers return.
+/**
+ * @param {unknown} runId raw (unencoded)
+ * @param {string|null} scopeRoleId
+ * @param {number} offset
+ * @param {number} limit
+ * @returns {string}
+ */
+export function logWindowUrl(runId, scopeRoleId, offset, limit) {
+	if (typeof runId !== 'string' || runId === '') return ''
+	const scope = scopeRoleId !== null ? `&instance=${encodeURIComponent(scopeRoleId)}` : ''
+	return `api/runs/${encodeURIComponent(runId)}/log?offset=${offset}&limit=${limit}${scope}`
+}
+
+/**
+ * The fetch a scope change to `roleId` needs, or null when no fetch should fire: a scope whose window already loaded (or is loading) is reused as-is — the poll's scoped tail refresh keeps a live run's window current, and a terminal run's window is complete — while a failed window retries. The fetch is the cheap one-event probe that learns the FILTERED total, so the window fetch can start at the most recent window of the instance's own sequence (the unscoped total says nothing about it).
+ *
+ * @param {unknown} inspector
+ * @param {unknown} runId
+ * @param {unknown} roleId
+ * @returns {{ url: string }|null}
+ */
+export function scopeLoadFetch(inspector, runId, roleId) {
+	if (typeof runId !== 'string' || runId === '') return null
+	if (typeof roleId !== 'string' || roleId === '') return null
+	if (isObject(inspector) && isObject(inspector['scopes'])) {
+		const record = inspector['scopes'][roleId]
+		if (isObject(record) && record['loadState'] !== 'failed') return null
+	}
+	return { url: logWindowUrl(runId, roleId, 0, 1) }
+}
+
+/**
+ * The poll's tail-refresh fetch for the modal's ACTIVE scope — the explicit scope's own window when one is set (the transcript is the live surface then; the unscoped window's dropdown contents are session-static while the scope holds, and a scope reset to the default catches the unscoped window up on the next tick), else the unscoped window. Null when the active window has not loaded, the run id is unusable, or the modal is closed (the caller guards). The response lands back in the same scope's window: the app curries the landing action with `scopeRoleId`.
+ *
+ * @param {unknown} inspector
+ * @param {unknown} runId
+ * @returns {{ scopeRoleId: string|null, url: string }|null}
+ */
+export function tailRefreshFetch(inspector, runId) {
+	if (typeof runId !== 'string' || runId === '' || !isObject(inspector)) return null
+	const scopeRoleId = typeof inspector['scopedRoleId'] === 'string' && inspector['scopedRoleId'] !== '' ? inspector['scopedRoleId'] : null
+	if (scopeRoleId !== null) {
+		const record = isObject(inspector['scopes']) ? inspector['scopes'][scopeRoleId] : undefined
+		if (!isObject(record) || record['loadState'] !== 'ready' || typeof record['total'] !== 'number') return null
+		return { scopeRoleId, url: logWindowUrl(runId, scopeRoleId, record['total'], INSPECTOR_PAGE_LIMIT) }
+	}
+	if (inspector['loadState'] !== 'ready' || typeof inspector['total'] !== 'number') return null
+	return { scopeRoleId: null, url: logWindowUrl(runId, null, inspector['total'], INSPECTOR_PAGE_LIMIT) }
+}
+
+/**
+ * The "Older turns" fetch for the modal's ACTIVE scope: one page back within that scope's own loaded sequence — the unscoped window's offsets for the default scope, the scoped window's filtered offsets when explicitly scoped (the endpoint windows the filtered list, so the same offset math applies). Null when a page is already in flight, the active window has nothing older, or the ids are unusable.
+ *
+ * @param {unknown} inspector
+ * @param {unknown} runId
+ * @returns {{ scopeRoleId: string|null, url: string }|null}
+ */
+export function olderTurnsFetch(inspector, runId) {
+	if (typeof runId !== 'string' || runId === '' || !isObject(inspector)) return null
+	if (inspector['olderLoading'] === true) return null
+	const scopeRoleId = typeof inspector['scopedRoleId'] === 'string' && inspector['scopedRoleId'] !== '' ? inspector['scopedRoleId'] : null
+	if (scopeRoleId !== null) {
+		const record = isObject(inspector['scopes']) ? inspector['scopes'][scopeRoleId] : undefined
+		if (!isObject(record) || record['loadState'] !== 'ready' || !canPageOlder(record['tailOffset'])) return null
+		const tailOffset = record['tailOffset']
+		return { scopeRoleId, url: logWindowUrl(runId, scopeRoleId, olderWindowOffset(tailOffset, INSPECTOR_WINDOW_SIZE), olderFetchLimit(tailOffset, INSPECTOR_WINDOW_SIZE)) }
+	}
+	if (inspector['loadState'] !== 'ready' || !canPageOlder(inspector['tailOffset'])) return null
+	return { scopeRoleId: null, url: logWindowUrl(runId, null, olderWindowOffset(inspector['tailOffset'], INSPECTOR_WINDOW_SIZE), olderFetchLimit(inspector['tailOffset'], INSPECTOR_WINDOW_SIZE)) }
+}
+
+/**
+ * The loaded window list after an older page slots exactly in front of it, or null when the page cannot (a stale or diverged response): the log is append-only, so the page must end exactly where the loaded window begins.
+ *
+ * @param {unknown} existingEvents
+ * @param {unknown} existingTailOffset
+ * @param {unknown} page the validated window response body
+ * @returns {LogWindowEvent[]|null}
+ */
+export function olderPageSpliced(existingEvents, existingTailOffset, page) {
+	if (!Array.isArray(existingEvents) || !isObject(page) || !Array.isArray(page['events'])) return null
+	const offset = page['offset']
+	if (typeof offset !== 'number' || !Number.isInteger(offset) || offset < 0) return null
+	if (offset + page['events'].length !== existingTailOffset) return null
+	return [...page['events'], ...existingEvents]
+}
+
+/**
+ * The loaded window list after a tail page appends, or null when it cannot (a response landing at an offset the window's end does not name, or an empty page with nothing to append).
+ *
+ * @param {unknown} existingEvents
+ * @param {unknown} existingTotal
+ * @param {unknown} page the validated window response body
+ * @returns {LogWindowEvent[]|null}
+ */
+export function tailPageAppended(existingEvents, existingTotal, page) {
+	if (!Array.isArray(existingEvents) || !isObject(page) || !Array.isArray(page['events'])) return null
+	if (page['offset'] !== existingTotal) return null
+	if (page['events'].length === 0) return null
+	return [...existingEvents, ...page['events']]
 }
 
 // --- Turn index derivation ---------------------------------------------------

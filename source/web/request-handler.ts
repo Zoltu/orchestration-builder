@@ -5,7 +5,7 @@ import { isEffortLevel, isLogLevel, isObject, isTerminalRunStatus } from '../exe
 import { cancelWaitingItem, editWaitingItem, enqueueAtHead, enqueueAtTail, normalizeNewItem, recordAnswer, removeWaitingItem, reorderWaitingItem, requireWaitingItem, requeueErrorItem, type QueueItem, type QueueMutation } from '../executor/task-queue.js'
 import type { RunState } from '../executor/run-state.js'
 import type { RunSubmission } from '../executor/run-submission.js'
-import { paginateLogEvents, parseRunMeta, renderConfig, renderProjectSettings, renderPendingQuestions, renderRunView, formatLogAsText, formatLogDetailSections, foldLlmCallSent } from './render.js'
+import { paginateLogEvents, parseRunMeta, renderConfig, renderProjectSettings, renderPendingQuestions, renderRunView, formatLogAsText, formatLogDetailSections, foldLlmCallSent, filterLogEventsForInstance } from './render.js'
 import type { BuildInfo } from './build-info.js'
 import type { ReadRunListSummary } from './run-list-cache.js'
 import { deriveInteractionModel, deriveInteractionOperationDetail } from './interaction-model-adapter.js'
@@ -102,6 +102,13 @@ function runLogPage(readRunSnapshot: ReadRunSnapshot, readRunSnapshotStats: Read
 				'content-disposition': `attachment; filename="${runId}.log"`,
 			},
 		})
+	}
+	// ?instance=<roleId> scopes the window to one agent instance (the inspector modal's per-instance transcript): the filter keeps the instance's turns, its own lifecycle, and its ancestors' lifecycle (see filterLogEventsForInstance), and the offset/limit window then pages the FILTERED sequence — so `total` is the filtered count while every row keeps its log-wide `index` (the identity the client stitches pages and addresses detail links by). An absent or empty instance serves the unfiltered window; an id that names nothing yields an empty 200 rather than a 404, so a stale client scope renders an empty transcript instead of an error. `?detail=` and `?format=text` ignore the filter on purpose: detail is addressed by log-global index (its fold needs the full log's slice chain) and the text export is run-wide.
+	const instanceParam = query.get('instance')
+	if (instanceParam !== null && instanceParam !== '') {
+		const filtered = filterLogEventsForInstance(events, instanceParam)
+		const filteredPage = offset >= filtered.length ? [] : filtered.slice(offset, offset + limit)
+		return json({ runId, total: filtered.length, offset, limit, events: filteredPage.map((entry) => ({ index: entry.index, timestamp: entry.event.timestamp, type: entry.event.type, payload: entry.event.payload })) })
 	}
 	const page = paginateLogEvents(events, { offset, limit })
 	return json({ runId, total: page.total, offset: page.offset, limit: page.limit, events: page.events.map((event, position) => ({ index: offset + position, timestamp: event.timestamp, type: event.type, payload: event.payload })) })

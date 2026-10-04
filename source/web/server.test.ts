@@ -351,6 +351,100 @@ snapshots.set('run-effort', {
 	].join('\n'),
 })
 
+// A run with a three-deep delegation chain (orchestrator-0 → coder-1 → coder-1-2), a sibling instance (coder-2), and unrelated event types between them, so the log endpoint's ?instance= filter is exercisable end to end: the scoped instance's turns and lifecycle plus its full ancestor chain come back, everything else stays out.
+snapshots.set('run-chain', {
+	metaText: JSON.stringify({
+		runId: 'run-chain',
+		guildPath: 'guild',
+		benchmarkPath: 'bench',
+		task: 'task for run-chain',
+		status: 'success',
+		startTime: '2026-01-01T00:00:00.000Z',
+		endTime: '2026-01-01T00:01:00.000Z',
+	}),
+	logText: [
+		JSON.stringify({ timestamp: 't000', type: 'role_start', payload: { role: 'orchestrator', roleId: 'orchestrator-0', depth: 0 } }),
+		JSON.stringify({ timestamp: 't001', type: 'llm_call_start', payload: { role: 'orchestrator', roleId: 'orchestrator-0' } }),
+		JSON.stringify({ timestamp: 't002', type: 'llm_call', payload: { role: 'orchestrator', roleId: 'orchestrator-0' } }),
+		JSON.stringify({ timestamp: 't003', type: 'role_start', payload: { role: 'coder', roleId: 'coder-1', depth: 1, parent: 'orchestrator', parentRoleId: 'orchestrator-0' } }),
+		JSON.stringify({ timestamp: 't004', type: 'llm_call_start', payload: { role: 'coder', roleId: 'coder-1' } }),
+		JSON.stringify({ timestamp: 't005', type: 'llm_call', payload: { role: 'coder', roleId: 'coder-1' } }),
+		JSON.stringify({ timestamp: 't006', type: 'role_start', payload: { role: 'coder', roleId: 'coder-1-2', depth: 2, parent: 'coder', parentRoleId: 'coder-1' } }),
+		JSON.stringify({ timestamp: 't007', type: 'llm_call_start', payload: { role: 'coder', roleId: 'coder-1-2' } }),
+		JSON.stringify({ timestamp: 't008', type: 'llm_call', payload: { role: 'coder', roleId: 'coder-1-2' } }),
+		JSON.stringify({ timestamp: 't009', type: 'role_finished', payload: { role: 'coder', roleId: 'coder-1-2', depth: 2, status: 'success' } }),
+		JSON.stringify({ timestamp: 't010', type: 'tool_call', payload: { role: 'coder', roleId: 'coder-1-2', tool: 'write_file' } }),
+		JSON.stringify({ timestamp: 't011', type: 'role_finished', payload: { role: 'coder', roleId: 'coder-1', depth: 1, status: 'success' } }),
+		JSON.stringify({ timestamp: 't012', type: 'role_start', payload: { role: 'coder', roleId: 'coder-2', depth: 1, parent: 'orchestrator', parentRoleId: 'orchestrator-0' } }),
+		JSON.stringify({ timestamp: 't013', type: 'llm_call', payload: { role: 'coder', roleId: 'coder-2' } }),
+		JSON.stringify({ timestamp: 't014', type: 'role_finished', payload: { role: 'coder', roleId: 'coder-2', depth: 1, status: 'success' } }),
+		JSON.stringify({ timestamp: 't015', type: 'llm_unavailable', payload: { role: 'orchestrator', message: 'endpoint down' } }),
+		JSON.stringify({ timestamp: 't016', type: 'role_finished', payload: { role: 'orchestrator', roleId: 'orchestrator-0', depth: 0, status: 'success' } }),
+	].join('\n'),
+})
+
+// An old-format log: the role_start events carry the parent ROLE name and depth but predate per-instance parent ids (no parentRoleId), so the ?instance= ancestry walk must fall back to the name-and-depth heuristic.
+snapshots.set('run-chain-legacy', {
+	metaText: JSON.stringify({
+		runId: 'run-chain-legacy',
+		guildPath: 'guild',
+		benchmarkPath: 'bench',
+		task: 'task for run-chain-legacy',
+		status: 'success',
+		startTime: '2026-01-01T00:00:00.000Z',
+		endTime: '2026-01-01T00:01:00.000Z',
+	}),
+	logText: [
+		JSON.stringify({ timestamp: 't000', type: 'role_start', payload: { role: 'orchestrator', roleId: 'orchestrator-0', depth: 0 } }),
+		JSON.stringify({ timestamp: 't001', type: 'llm_call', payload: { role: 'orchestrator', roleId: 'orchestrator-0' } }),
+		JSON.stringify({ timestamp: 't002', type: 'role_start', payload: { role: 'coder', roleId: 'coder-1', depth: 1, parent: 'orchestrator' } }),
+		JSON.stringify({ timestamp: 't003', type: 'llm_call', payload: { role: 'coder', roleId: 'coder-1' } }),
+		JSON.stringify({ timestamp: 't004', type: 'role_finished', payload: { role: 'coder', roleId: 'coder-1', depth: 1, status: 'success' } }),
+		JSON.stringify({ timestamp: 't005', type: 'role_finished', payload: { role: 'orchestrator', roleId: 'orchestrator-0', depth: 0, status: 'success' } }),
+	].join('\n'),
+})
+
+// A log whose child names its parent instance by id but the named start is genuinely absent (a torn or foreign log): the ancestry walk must stop rather than invent or crash.
+snapshots.set('run-chain-orphan', {
+	metaText: JSON.stringify({
+		runId: 'run-chain-orphan',
+		guildPath: 'guild',
+		benchmarkPath: 'bench',
+		task: 'task for run-chain-orphan',
+		status: 'success',
+		startTime: '2026-01-01T00:00:00.000Z',
+		endTime: '2026-01-01T00:01:00.000Z',
+	}),
+	logText: [
+		JSON.stringify({ timestamp: 't000', type: 'role_start', payload: { role: 'orchestrator', roleId: 'orchestrator-0', depth: 0 } }),
+		JSON.stringify({ timestamp: 't001', type: 'role_start', payload: { role: 'coder', roleId: 'coder-1', depth: 1, parent: 'orchestrator', parentRoleId: 'orchestrator-9' } }),
+		JSON.stringify({ timestamp: 't002', type: 'llm_call', payload: { role: 'coder', roleId: 'coder-1' } }),
+		JSON.stringify({ timestamp: 't003', type: 'role_finished', payload: { role: 'coder', roleId: 'coder-1', depth: 1, status: 'success' } }),
+		JSON.stringify({ timestamp: 't004', type: 'role_finished', payload: { role: 'orchestrator', roleId: 'orchestrator-0', depth: 0, status: 'success' } }),
+	].join('\n'),
+})
+
+// A log whose scoped instance's turn failed (the failure paths emit no llm_call): the role-named failure event must ride the filtered set, so the client's turn pairing closes the failed turn's bracket instead of rendering it eternally in flight.
+snapshots.set('run-chain-failure', {
+	metaText: JSON.stringify({
+		runId: 'run-chain-failure',
+		guildPath: 'guild',
+		benchmarkPath: 'bench',
+		task: 'task for run-chain-failure',
+		status: 'error',
+		startTime: '2026-01-01T00:00:00.000Z',
+		endTime: '2026-01-01T00:01:00.000Z',
+	}),
+	logText: [
+		JSON.stringify({ timestamp: 't000', type: 'role_start', payload: { role: 'orchestrator', roleId: 'orchestrator-0', depth: 0 } }),
+		JSON.stringify({ timestamp: 't001', type: 'role_start', payload: { role: 'coder', roleId: 'coder-1', depth: 1, parent: 'orchestrator', parentRoleId: 'orchestrator-0' } }),
+		JSON.stringify({ timestamp: 't002', type: 'llm_call_start', payload: { role: 'coder', roleId: 'coder-1' } }),
+		JSON.stringify({ timestamp: 't003', type: 'llm_unavailable', payload: { role: 'coder', message: 'endpoint down' } }),
+		JSON.stringify({ timestamp: 't004', type: 'role_finished', payload: { role: 'coder', roleId: 'coder-1', depth: 1, status: 'error' } }),
+		JSON.stringify({ timestamp: 't005', type: 'role_finished', payload: { role: 'orchestrator', roleId: 'orchestrator-0', depth: 0, status: 'success' } }),
+	].join('\n'),
+})
+
 interface HandlerHarness {
 	handler: RequestHandler
 	submission: RunSubmission
@@ -712,7 +806,7 @@ describe('GET /api/runs (list)', () => {
 		expect(response.status).toBe(200)
 		const list = await response.json()
 		expect(Array.isArray(list)).toBe(true)
-		expect(list.length).toBe(13)
+		expect(list.length).toBe(17)
 		expect(list[0].runId).toBe('run-tree')
 		expect(list[1].runId).toBe('run-retry')
 		expect(list[2].runId).toBe('run-long')
@@ -720,12 +814,16 @@ describe('GET /api/runs (list)', () => {
 		expect(list[4].runId).toBe('run-flow-details')
 		expect(list[5].runId).toBe('run-effort')
 		expect(list[6].runId).toBe('run-delta')
-		expect(list[7].runId).toBe('run-cached')
-		expect(list[8].runId).toBe('run-active')
-		expect(list[9].runId).toBe('run-3')
-		expect(list[10].runId).toBe('run-20260101-000000')
-		expect(list[11].runId).toBe('run-2')
-		expect(list[12].runId).toBe('run-1')
+		expect(list[7].runId).toBe('run-chain-orphan')
+		expect(list[8].runId).toBe('run-chain-legacy')
+		expect(list[9].runId).toBe('run-chain-failure')
+		expect(list[10].runId).toBe('run-chain')
+		expect(list[11].runId).toBe('run-cached')
+		expect(list[12].runId).toBe('run-active')
+		expect(list[13].runId).toBe('run-3')
+		expect(list[14].runId).toBe('run-20260101-000000')
+		expect(list[15].runId).toBe('run-2')
+		expect(list[16].runId).toBe('run-1')
 		expect(list[3]).toEqual({
 			runId: 'run-interrupted',
 			status: 'interrupted',
@@ -748,7 +846,7 @@ describe('GET /api/runs (list)', () => {
 			error: null,
 			summary: null,
 		})
-		expect(list[11]).toEqual({
+		expect(list[15]).toEqual({
 			runId: 'run-2',
 			status: 'error',
 			task: 'task for run-2',
@@ -1121,6 +1219,98 @@ describe('GET /api/runs/:id/log', () => {
 		const response = await handler(get('/api/runs/never-started/log?format=text'))
 		expect(response.status).toBe(404)
 		expect(await response.json()).toEqual({ ok: false, error: 'not_found' })
+	})
+
+	test('?instance=<roleId> scopes the window to the instance\'s turns, its own lifecycle, and its full ancestor chain\'s lifecycle', async () => {
+		const { handler } = createHandlerHarness()
+		const response = await handler(get('/api/runs/run-chain/log?instance=coder-1-2'))
+		expect(response.status).toBe(200)
+		const body = await response.json()
+		// Own lifecycle + turns (6..9), each ancestor's lifecycle only (coder-1: 3 and 11; orchestrator-0: 0 and 16). The ancestors' turns (1, 2, 4, 5), the sibling instance (12..14), the unrelated types (10, 15), and the root's turn-failure event stay out.
+		expect(body.total).toBe(8)
+		expect(body.events.map((event: { index: number }) => event.index)).toEqual([0, 3, 6, 7, 8, 9, 11, 16])
+	})
+
+	test('the filtered rows keep their log-wide indexes, timestamps, types, and payloads', async () => {
+		const { handler } = createHandlerHarness()
+		const response = await handler(get('/api/runs/run-chain/log?instance=coder-1-2'))
+		const body = await response.json()
+		expect(body.events[2]).toEqual({ index: 6, timestamp: 't006', type: 'role_start', payload: { role: 'coder', roleId: 'coder-1-2', depth: 2, parent: 'coder', parentRoleId: 'coder-1' } })
+		expect(body.events[7]).toEqual({ index: 16, timestamp: 't016', type: 'role_finished', payload: { role: 'orchestrator', roleId: 'orchestrator-0', depth: 0, status: 'success' } })
+	})
+
+	test('offset and limit window the filtered sequence, with global indexes preserved', async () => {
+		const { handler } = createHandlerHarness()
+		const response = await handler(get('/api/runs/run-chain/log?instance=coder-1-2&offset=2&limit=3'))
+		expect(response.status).toBe(200)
+		const body = await response.json()
+		expect(body.total).toBe(8)
+		expect(body.offset).toBe(2)
+		expect(body.limit).toBe(3)
+		expect(body.events.map((event: { index: number }) => event.index)).toEqual([6, 7, 8])
+	})
+
+	test('scoping a mid-chain instance keeps its own turns but not its children\'s lifecycle', async () => {
+		const { handler } = createHandlerHarness()
+		const response = await handler(get('/api/runs/run-chain/log?instance=coder-1'))
+		const body = await response.json()
+		// Own turns (4, 5) and own lifecycle (3, 11), the root's lifecycle (0, 16). The child's lifecycle (6, 9) and turns stay out (children are not ancestors), and the root's role-named failure event (15) names another role.
+		expect(body.total).toBe(6)
+		expect(body.events.map((event: { index: number }) => event.index)).toEqual([0, 3, 4, 5, 11, 16])
+	})
+
+	test('an unknown roleId returns an empty 200, not a 404', async () => {
+		const { handler } = createHandlerHarness()
+		const response = await handler(get('/api/runs/run-chain/log?instance=nobody'))
+		expect(response.status).toBe(200)
+		const body = await response.json()
+		expect(body.total).toBe(0)
+		expect(body.events).toEqual([])
+		expect(body.offset).toBe(0)
+	})
+
+	test('an empty instance value serves the unfiltered window', async () => {
+		const { handler } = createHandlerHarness()
+		const response = await handler(get('/api/runs/run-chain/log?instance='))
+		const body = await response.json()
+		expect(body.total).toBe(17)
+	})
+
+	test('old logs without parentRoleId resolve ancestry by role name and depth', async () => {
+		const { handler } = createHandlerHarness()
+		const response = await handler(get('/api/runs/run-chain-legacy/log?instance=coder-1'))
+		const body = await response.json()
+		// The name-and-depth fallback finds orchestrator-0 (depth 0 === 1 − 1, latest earlier start), so the root's lifecycle joins the scoped set.
+		expect(body.total).toBe(5)
+		expect(body.events.map((event: { index: number }) => event.index)).toEqual([0, 2, 3, 4, 5])
+	})
+
+	test('a genuinely absent ancestor start ends the ancestry walk', async () => {
+		const { handler } = createHandlerHarness()
+		const response = await handler(get('/api/runs/run-chain-orphan/log?instance=coder-1'))
+		const body = await response.json()
+		// The naming field points at an id with no role_start in the log; the walk stops — orchestrator-0's lifecycle (0, 4) is not linked by it and stays out.
+		expect(body.total).toBe(3)
+		expect(body.events.map((event: { index: number }) => event.index)).toEqual([1, 2, 3])
+	})
+
+	test('the instance\'s role-named turn-failure events ride the filtered set', async () => {
+		const { handler } = createHandlerHarness()
+		const response = await handler(get('/api/runs/run-chain-failure/log?instance=coder-1'))
+		const body = await response.json()
+		// The llm_unavailable at index 3 carries no roleId — only the role name — but closes the failed turn's bracket in the client's pairing, so it is kept.
+		expect(body.total).toBe(6)
+		expect(body.events.map((event: { index: number }) => event.index)).toEqual([0, 1, 2, 3, 4, 5])
+	})
+
+	test('?detail= serves the log-global event regardless of the instance filter', async () => {
+		const { handler } = createHandlerHarness()
+		// run-tree's event 2 is a tool_call; the detail fold is addressed by log-global index even when an instance scope rides along.
+		const response = await handler(get('/api/runs/run-tree/log?instance=coder&detail=2'))
+		expect(response.status).toBe(200)
+		const body = await response.json()
+		expect(body.index).toBe(2)
+		expect(body.detailSections.map((section: { label: string }) => section.label)).toEqual(['arguments'])
 	})
 })
 

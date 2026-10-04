@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { InspectorModal, buildTurnIndex, childInstanceFor, deriveDefaultScopeRoleId, deriveInstanceChain, deriveTranscriptTurns, instancesOf, scopeTurnEntries, tailRefreshMustResync, tailWindowOffset, olderWindowOffset, olderFetchLimit, canPageOlder, INSPECTOR_WINDOW_SIZE, INSPECTOR_PAGE_LIMIT, INSPECTOR_RETENTION_LIMIT } from './static/inspector-modal.js'
+import { InspectorModal, buildTurnIndex, childInstanceFor, deriveDefaultScopeRoleId, deriveInstanceChain, deriveTranscriptTurns, instancesOf, scopeTurnEntries, tailRefreshMustResync, tailWindowOffset, olderWindowOffset, olderFetchLimit, canPageOlder, initialScopeWindow, mergeLogEvents, scopeViewFor, scopeLoadFetch, tailRefreshFetch, olderTurnsFetch, olderPageSpliced, tailPageAppended, INSPECTOR_WINDOW_SIZE, INSPECTOR_PAGE_LIMIT, INSPECTOR_RETENTION_LIMIT } from './static/inspector-modal.js'
 import { actionProp, defined, present } from './test-fixtures.js'
 
 // The inspector-modal component is browser-pure JS, so its exports arrive with inferred JS types. The interfaces and fake `h`/`renderMarkdown` below carry the shape the tests assert against, mirroring question-modal.test.ts / result-modal.test.ts.
@@ -1158,5 +1158,165 @@ describe('InspectorModal', () => {
 		// No lookup prop wired: no expander renders rather than a dead one.
 		expect(allByClass(renderModal({ logEvents: stitchEvents, scopedRoleId: 'coder-1' }), 'inspector-wire')).toHaveLength(0)
 		expect(allByClass(renderModalWithWire({ logEvents: stitchEvents, scopedRoleId: 'coder-1', onToggleWire: 'broken' }), 'inspector-wire')).toHaveLength(0)
+	})
+})
+
+// --- Per-scope windows (server-filtered instance scopes) -------------------------------------
+
+describe('per-scope windows', () => {
+	// The unscoped tail window the modal keeps alongside the per-scope windows: another instance's recent turn plus a lifecycle row overlapping the scoped chain.
+	const tailWindow = [
+		startEvent(90, 'coder', 'coder-2'),
+		callEvent(91, 'coder', { roleId: 'coder-2' }),
+		roleStartEvent(92, 'coder-1-2', 'coder', { depth: 2, parent: 'coder', parentRoleId: 'coder-1' }),
+	]
+
+	// The server-filtered window the endpoint returns for `?instance=coder-1-2`: the instance's turns and lifecycle plus the full ancestor chain's lifecycle, at their log-global indexes (mirrors the run-chain server fixture).
+	const coderGrandchildWindow = [
+		roleStartEvent(0, 'orchestrator-0', 'orchestrator'),
+		roleStartEvent(3, 'coder-1', 'coder', { depth: 1, parent: 'orchestrator', parentRoleId: 'orchestrator-0' }),
+		roleStartEvent(6, 'coder-1-2', 'coder', { depth: 2, parent: 'coder', parentRoleId: 'coder-1' }),
+		startEvent(7, 'coder', 'coder-1-2'),
+		callEvent(8, 'coder', { roleId: 'coder-1-2' }),
+		roleFinishedEvent(9, 'coder-1-2', 'coder'),
+		roleFinishedEvent(11, 'coder-1', 'coder'),
+		roleFinishedEvent(16, 'orchestrator-0', 'orchestrator'),
+	]
+
+	function inspectorWith(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+		return { loadState: 'ready', events: [], total: null, tailOffset: null, entries: [], scopedRoleId: null, olderLoading: false, scopes: {}, ...overrides }
+	}
+
+	test('initialScopeWindow is a fresh loading window', () => {
+		expect(initialScopeWindow()).toEqual({ loadState: 'loading', events: [], total: null, tailOffset: null, entries: [] })
+	})
+
+	test('mergeLogEvents dedupes by global index and returns log order', () => {
+		const first = [callEvent(0, 'coder', { roleId: 'coder-1' }), callEvent(2, 'coder', { roleId: 'coder-1' })]
+		const second = [callEvent(1, 'coder', { roleId: 'coder-1' }), callEvent(2, 'coder', { roleId: 'coder-1' })]
+		expect(mergeLogEvents(first, second).map((event) => event.index)).toEqual([0, 1, 2])
+		// Malformed rows drop; a row with only an index is still a row (the merge judges the index, never the content).
+		expect(mergeLogEvents([{ index: 5 }, 'nope', null, callEvent(6, 'coder', { roleId: 'coder-1' })], 'not-a-list').map((event) => event.index)).toEqual([5, 6])
+	})
+
+	test('scopeLoadFetch probes a new scope\u0027s filtered total and reuses an already-loading or ready scope', () => {
+		const fresh = inspectorWith()
+		expect(present(scopeLoadFetch(fresh, 'run-1', 'coder-1-2'), 'plan').url).toBe('api/runs/run-1/log?offset=0&limit=1&instance=coder-1-2')
+		// An already-known scope (loading or ready) fetches nothing — the poll's scoped tail refresh keeps it current.
+		expect(scopeLoadFetch(inspectorWith({ scopes: { 'coder-1-2': initialScopeWindow() } }), 'run-1', 'coder-1-2')).toBeNull()
+		expect(scopeLoadFetch(inspectorWith({ scopes: { 'coder-1-2': { ...initialScopeWindow(), loadState: 'ready' } } }), 'run-1', 'coder-1-2')).toBeNull()
+		// A failed window retries on the next scope change to it.
+		expect(scopeLoadFetch(inspectorWith({ scopes: { 'coder-1-2': { ...initialScopeWindow(), loadState: 'failed' } } }), 'run-1', 'coder-1-2')).not.toBeNull()
+		// Unusable ids fetch nothing.
+		expect(scopeLoadFetch(fresh, '', 'coder-1-2')).toBeNull()
+		expect(scopeLoadFetch(fresh, 'run-1', '')).toBeNull()
+	})
+
+	test('scopeViewFor without an explicit scope serves the unscoped window', () => {
+		const view = scopeViewFor(inspectorWith({ events: tailWindow, total: 100, tailOffset: 50 }), null)
+		expect(view.loadState).toBe('ready')
+		expect(view.total).toBe(100)
+		expect(view.tailOffset).toBe(50)
+		expect(view.events).toEqual(tailWindow)
+	})
+
+	test('scopeViewFor merges a ready scope\u0027s events with the unscoped tail and surfaces the record\u0027s state and offsets', () => {
+		const scoped = inspectorWith({ scopedRoleId: 'coder-1-2', scopes: { 'coder-1-2': { loadState: 'ready', events: coderGrandchildWindow, total: 8, tailOffset: 0, entries: [] } }, events: tailWindow, total: 100, tailOffset: 50 })
+		const view = present(scopeViewFor(scoped, 'coder-1-2'), 'view')
+		expect(view.loadState).toBe('ready')
+		expect(view.total).toBe(8)
+		expect(view.tailOffset).toBe(0)
+		// The merged source: the scope's filtered rows and the tail's rows collapse by global index, in log order — the tail's other-instance turn (90, 91) rides along for wayfinding and the child affordances.
+		expect(view.events.map((event) => event.index)).toEqual([0, 3, 6, 7, 8, 9, 11, 16, 90, 91, 92])
+	})
+
+	test('scopeViewFor surfaces a loading scope record and falls back to the unscoped window when the record has not landed', () => {
+		const loading = scopeViewFor(inspectorWith({ scopedRoleId: 'coder-1-2', scopes: { 'coder-1-2': initialScopeWindow() }, events: tailWindow, total: 100, tailOffset: 50 }), 'coder-1-2')
+		expect(loading.loadState).toBe('loading')
+		expect(loading.events).toEqual(tailWindow)
+		// No record yet (the probe has not responded): the unscoped window stands in.
+		expect(scopeViewFor(inspectorWith({ scopedRoleId: 'coder-1-2', events: tailWindow, total: 100, tailOffset: 50 }), 'coder-1-2').loadState).toBe('ready')
+		// Malformed state reads as a fresh unscoped window.
+		expect(scopeViewFor('broken', 'coder-1-2')).toEqual({ loadState: 'loading', events: [], total: null, tailOffset: null })
+	})
+
+	test('tailRefreshFetch refreshes the active scope\u0027s own window, scoped by roleId', () => {
+		const scoped = inspectorWith({ scopedRoleId: 'coder-1-2', scopes: { 'coder-1-2': { loadState: 'ready', events: coderGrandchildWindow, total: 8, tailOffset: 0, entries: [] } } })
+		const scopedPlan = present(tailRefreshFetch(scoped, 'run-1'), 'scoped plan')
+		expect(scopedPlan.scopeRoleId).toBe('coder-1-2')
+		expect(scopedPlan.url).toBe('api/runs/run-1/log?offset=8&limit=500&instance=coder-1-2')
+		// The unscoped window refreshes plainly while no scope is set.
+		const unscopedPlan = present(tailRefreshFetch(inspectorWith({ total: 300 }), 'run-1'), 'unscoped plan')
+		expect(unscopedPlan.scopeRoleId).toBeNull()
+		expect(unscopedPlan.url).toBe('api/runs/run-1/log?offset=300&limit=500')
+		// A scope whose window has not loaded refreshes nothing, and neither does an unloaded unscoped window.
+		expect(tailRefreshFetch(inspectorWith({ scopedRoleId: 'coder-1-2' }), 'run-1')).toBeNull()
+		expect(tailRefreshFetch(inspectorWith(), 'run-1')).toBeNull()
+	})
+
+	test('olderTurnsFetch pages back within the active scope\u0027s own filtered sequence', () => {
+		const scoped = inspectorWith({ scopedRoleId: 'coder-1-2', scopes: { 'coder-1-2': { loadState: 'ready', events: coderGrandchildWindow, total: 800, tailOffset: 600, entries: [] } } })
+		const scopedPlan = present(olderTurnsFetch(scoped, 'run-1'), 'scoped plan')
+		expect(scopedPlan.scopeRoleId).toBe('coder-1-2')
+		expect(scopedPlan.url).toBe('api/runs/run-1/log?offset=400&limit=200&instance=coder-1-2')
+		// A page already in flight fires nothing.
+		expect(olderTurnsFetch({ ...scoped, olderLoading: true }, 'run-1')).toBeNull()
+		// The unscoped window's math is unchanged.
+		expect(present(olderTurnsFetch(inspectorWith({ tailOffset: 100 }), 'run-1'), 'unscoped plan').url).toBe('api/runs/run-1/log?offset=0&limit=100')
+	})
+
+	test('olderPageSpliced and tailPageAppended enforce the contiguity rules per window', () => {
+		const existing = [callEvent(4, 'coder', { roleId: 'coder-1' })]
+		const olderPage = { total: 10, offset: 2, limit: 2, events: [callEvent(2, 'coder', { roleId: 'coder-1' }), callEvent(3, 'coder', { roleId: 'coder-1' })] }
+		expect(olderPageSpliced(existing, 4, olderPage)).toEqual([...olderPage.events, ...existing])
+		// A page that does not end exactly where the window begins is stale — null, not a wrong splice.
+		expect(olderPageSpliced(existing, 5, olderPage)).toBeNull()
+		expect(olderPageSpliced(existing, 4, { ...olderPage, offset: 'x' })).toBeNull()
+		expect(olderPageSpliced('broken', 4, olderPage)).toBeNull()
+		const tailPage = { total: 6, offset: 5, limit: 500, events: [callEvent(5, 'coder', { roleId: 'coder-1' })] }
+		expect(tailPageAppended(existing, 5, tailPage)).toEqual([...existing, ...tailPage.events])
+		// An offset the window's end does not name, an empty page, or a malformed body appends nothing.
+		expect(tailPageAppended(existing, 4, tailPage)).toBeNull()
+		expect(tailPageAppended(existing, 5, { ...tailPage, events: [] })).toBeNull()
+		expect(tailPageAppended(existing, 5, 'broken')).toBeNull()
+	})
+
+	test('a server-filtered window carries the complete ancestor chain, so the breadcrumb renders fully', () => {
+		// The chain derives from the scoped window alone — no paging back through the unscoped tail.
+		expect(deriveInstanceChain(coderGrandchildWindow, 'coder-1-2')).toEqual([
+			{ roleId: 'orchestrator-0', role: 'orchestrator' },
+			{ roleId: 'coder-1', role: 'coder' },
+			{ roleId: 'coder-1-2', role: 'coder' },
+		])
+		// The chain-walk tolerance for a genuinely absent ancestor stays: the walk renders as far as known.
+		const absentAncestor = [roleStartEvent(1, 'coder-1', 'coder', { depth: 1, parent: 'orchestrator', parentRoleId: 'orchestrator-9' })]
+		expect(deriveInstanceChain(absentAncestor, 'coder-1')).toEqual([{ roleId: 'coder-1', role: 'coder' }])
+	})
+
+	test('the scoped modal renders the merged per-scope set: complete breadcrumb, scoped turns only', () => {
+		const merged = mergeLogEvents(coderGrandchildWindow, tailWindow)
+		const modal = InspectorModal(fakeH, {
+			runLabel: 'run-2026',
+			logEvents: merged,
+			turns: { loadState: 'ready', total: 8, tailOffset: 0, olderLoading: false },
+			instances: instancesOf(merged),
+			chain: deriveInstanceChain(merged, 'coder-1-2'),
+			scopedRoleId: 'coder-1-2',
+			livePartial: null,
+			renderMarkdown: fakeRenderMarkdown,
+			onScopeInstance: () => undefined,
+			onLoadOlder: () => undefined,
+			onClose: () => undefined,
+		})
+		// The breadcrumb renders the full root → instance chain from the server-filtered window.
+		const row = defined(allByClass(modal, 'inspector-breadcrumb-row')[0], 'breadcrumb row')
+		expect(allByClass(row, 'inspector-crumb')).toHaveLength(3)
+		// The transcript holds only the scoped instance's turn (the tail window's coder-2 turn stays out), renumbered within the instance.
+		const headers = allByClass(modal, 'inspector-turn-header')
+		expect(headers).toHaveLength(1)
+		expect(collectText(defined(headers[0], 'turn header'))).toContain('Turn 1')
+		// The dropdown lists the scoped chain plus the tail window's instance (wayfinding).
+		const select = defined(allByClass(modal, 'inspector-instance-select')[0], 'instance select')
+		expect(allByTag(select, 'option')).toHaveLength(4)
 	})
 })

@@ -440,6 +440,111 @@ export function paginateLogEvents(events: LogEvent[], options: { offset: number,
 	return { events: page, total, offset, limit }
 }
 
+// --- Per-instance log filtering ----------------------------------------------
+
+// One filtered log event paired with its log-wide index: the window endpoint's rows are addressed by the event's position in the FULL log (the identity the client's page stitching and detail links depend on), which a filtered list's array position no longer implies.
+export interface IndexedLogEvent {
+	event: LogEvent
+	index: number
+}
+
+interface InstanceStartRecord {
+	roleId: string
+	role: string
+	parentRoleId: string | null
+	parentRole: string | null
+	depth: number | null
+	position: number
+}
+
+// A non-empty string field of a log payload, or null.
+function payloadString(payload: Record<string, unknown>, field: string): string | null {
+	const value = payload[field]
+	return typeof value === 'string' && value !== '' ? value : null
+}
+
+// The role_start records the ancestry walk resolves through, keyed by instance id. The first start per id wins (instance ids are unique per run; a duplicate is a malformed log), and a start without a usable roleId cannot be addressed by id and never enters the map — the client's chain walk (inspector-modal.js deriveInstanceChain) cannot see it either.
+function instanceStartsOf(events: LogEvent[]): Map<string, InstanceStartRecord> {
+	const starts = new Map<string, InstanceStartRecord>()
+	let position = 0
+	for (const event of events) {
+		if (event.type === 'role_start' && isObject(event.payload)) {
+			const roleId = payloadString(event.payload, 'roleId')
+			const role = payloadString(event.payload, 'role')
+			// The first start per id wins: instance ids are unique per run, so a duplicate is a malformed log.
+			if (roleId !== null && role !== null && !starts.has(roleId)) {
+				const depthValue = event.payload['depth']
+				starts.set(roleId, {
+					roleId,
+					role,
+					parentRoleId: payloadString(event.payload, 'parentRoleId'),
+					parentRole: payloadString(event.payload, 'parent'),
+					depth: typeof depthValue === 'number' && Number.isFinite(depthValue) ? depthValue : null,
+					position,
+				})
+			}
+		}
+		position += 1
+	}
+	return starts
+}
+
+// The parent start for one walked instance, or null when the chain ends: the exact parent instance when the payload names its parentRoleId, else — for old logs whose starts predate per-instance parent ids — the latest earlier role_start of the parent role at depth − 1, which the executor's single-flight depth-first execution makes unambiguous (the same heuristic the client's resolveParentStart applies). A named parent whose start is absent from the log ends the walk: the server sees the full log, so an unresolved id is a genuinely torn or foreign log, and the chain renders as far as it is known. A cycle in a malformed log ends the walk too.
+function resolveParentStart(start: InstanceStartRecord, starts: Map<string, InstanceStartRecord>, visited: Set<string>): InstanceStartRecord | null {
+	if (start.parentRoleId !== null) {
+		if (visited.has(start.parentRoleId)) return null
+		return starts.get(start.parentRoleId) ?? null
+	}
+	if (start.parentRole === null || start.depth === null) return null
+	let best: InstanceStartRecord | null = null
+	for (const [candidateId, candidate] of starts) {
+		if (visited.has(candidateId)) continue
+		if (candidate.role !== start.parentRole) continue
+		if (candidate.depth === null || candidate.depth !== start.depth - 1) continue
+		if (candidate.position >= start.position) continue
+		if (best === null || candidate.position > best.position) best = candidate
+	}
+	return best
+}
+
+// Filters the log to one agent instance's view for `GET /api/runs/:id/log?instance=<roleId>`: the instance's own turns (`llm_call`/`llm_call_start`, matched on the payload's roleId, falling back to the role name for old logs whose turn events predate per-instance ids — the same identity the client's turn index falls back to), its role-named turn-failure events (`llm_unavailable`/`context_budget_exceeded` carry no roleId; single-flight execution makes the role-name match unambiguous, and the client's turn pairing closes a failed turn's bracket on them, so omitting them would render a failed turn as eternally in flight), its own `role_start`/`role_finished` lifecycle, and the lifecycle of its ancestor chain walked through `parentRoleId` to the root — the server sees the full log, so ancestry is always resolvable from it, which is the whole point of scoping server-side. Children are deliberately not included: the scoped transcript is the instance's own story, and the client's child-instance affordances read the unscoped tail window it keeps alongside. An id that names nothing yields an empty list, which the endpoint serves as a 200 with total 0 rather than a 404 so a stale client scope renders an empty transcript instead of an error. Cost is linear in the log: one pass builds the start map, the chain walk is bounded by the chain's depth, and one pass filters.
+export function filterLogEventsForInstance(events: LogEvent[], instanceId: string): IndexedLogEvent[] {
+	if (instanceId === '') return []
+	const starts = instanceStartsOf(events)
+	const ancestorIds = new Set<string>()
+	const visited = new Set<string>([instanceId])
+	let current = starts.get(instanceId)
+	while (current !== undefined) {
+		const parent = resolveParentStart(current, starts, visited)
+		if (parent === null) break
+		ancestorIds.add(parent.roleId)
+		visited.add(parent.roleId)
+		current = parent
+	}
+	const own = starts.get(instanceId)
+	// The role name the turn-failure events match on: the instance's own start names it; a start-less id is treated as the role-name-fallback scope identity (an id that is neither matches no failure events).
+	const ownRoleName = own !== undefined ? own.role : instanceId
+	const filtered: IndexedLogEvent[] = []
+	let index = 0
+	for (const event of events) {
+		if (isObject(event.payload)) {
+			const payload = event.payload
+			if (event.type === 'llm_call' || event.type === 'llm_call_start') {
+				const roleId = payloadString(payload, 'roleId')
+				const identity = roleId ?? payloadString(payload, 'role')
+				if (identity === instanceId) filtered.push({ event, index })
+			} else if (event.type === 'llm_unavailable' || event.type === 'context_budget_exceeded') {
+				if (payloadString(payload, 'role') === ownRoleName) filtered.push({ event, index })
+			} else if (event.type === 'role_start' || event.type === 'role_finished') {
+				const roleId = payloadString(payload, 'roleId')
+				if (roleId === instanceId || (roleId !== null && ancestorIds.has(roleId))) filtered.push({ event, index })
+			}
+		}
+		index += 1
+	}
+	return filtered
+}
+
 // Renders the full log as plain text, one event per line, for export.
 // Each line is tab-separated: timestamp, type, then the readable summary from formatLogEvent, so the export mirrors exactly what the on-screen log shows.
 export function formatLogAsText(events: LogEvent[]): string {
