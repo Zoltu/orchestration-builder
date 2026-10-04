@@ -210,10 +210,10 @@ Native tools are implemented in the executor and operate against the mounted wor
 - `run_shell` — run a shell command (via `sh -c`, with the workspace as the working directory)
 - `typecheck` — run the workspace's typecheck commands and return each command's result separately (see "Checker tools" below)
 - `test` — run the workspace's test commands and return each command's result separately (see "Checker tools" below)
-- `fetch_url` — fetch a document over HTTP/HTTPS. The `method` parameter selects the backend: `auto` (default) converts the page to markdown through Kagi Extract when `KAGI_API_KEY` is configured, then markdown.new, falling back to a direct fetch of the raw document; `direct` skips conversion (the right choice for API/JSON endpoints); `kagi` and `markdown_new` force a specific backend
+- `fetch_url` — fetch a document over HTTP/HTTPS. The `method` parameter selects the backend: `auto` (default) converts the page to markdown through Kagi Extract when `ORCHESTRATOR_KAGI_API_KEY` is configured, then markdown.new, falling back to a direct fetch of the raw document; `direct` skips conversion (the right choice for API/JSON endpoints); `kagi` and `markdown_new` force a specific backend
 - `web_search` — search the web through Kagi, returning ranked results (title, url, snippet, time)
 
-`web_search` and the `kagi` fetch backend are optional capabilities keyed on `KAGI_API_KEY` (environment variable, or a Docker secret at `/run/secrets/kagi_api_key`). The Guild's tool set is static (see "Tool availability"), so without the key the tools stay visible to roles and report an `unavailable` error when called; prompts should treat that as a signal to work from known URLs with `fetch_url`.
+`web_search` and the `kagi` fetch backend are optional capabilities keyed on `ORCHESTRATOR_KAGI_API_KEY` (environment variable, or a Docker secret at `/run/secrets/kagi_api_key`). The Guild's tool set is static (see "Tool availability"), so without the key the tools stay visible to roles and report an `unavailable` error when called; prompts should treat that as a signal to work from known URLs with `fetch_url`.
 
 Each tool manifest in the Guild declares the name, description, and parameter schema. The executor validates calls against that schema.
 

@@ -44,7 +44,7 @@ Configuration is a bundled deployment file (model endpoint, budgets, context pol
 | `ORCHESTRATOR_API_KEY` | _(none)_ | Model API key, injected into the model configuration at startup and never stored in the Guild. May also be provided as a Docker secret at `/run/secrets/orchestrator_api_key`. Omit for a local endpoint that needs no key. |
 | `ORCHESTRATOR_DEPLOYMENT_FILE` | Bundled `deployment/deployment.json` | Path to the deployment configuration file. Point it at a docker config, docker secret, or bind mount to change the deployment without rebuilding the image. |
 | `ORCHESTRATOR_TITLE` | `Adaptive Orchestrator` | Browser tab title of the web UI. Substituted into the page when the service serves it, so the tab reads correctly from the first paint. |
-| `KAGI_API_KEY` | _(none)_ | Kagi API key enabling the `web_search` tool and `fetch_url`'s Kagi Extract backend. May also be provided as a Docker secret at `/run/secrets/kagi_api_key`. Without it those tools report themselves unavailable and `fetch_url` falls back to markdown.new and direct fetching. |
+| `ORCHESTRATOR_KAGI_API_KEY` | _(none)_ | Kagi API key enabling the `web_search` tool and `fetch_url`'s Kagi Extract backend. May also be provided as a Docker secret at `/run/secrets/kagi_api_key`. Without it those tools report themselves unavailable and `fetch_url` falls back to markdown.new and direct fetching. |
 | `PORT` | `80` | Port the HTTP service listens on inside the container. |
 | `WORKSPACE_ROOT` | `/workspace` | The path inside the container that the project the executor operates on. Run artifacts are written to `<WORKSPACE_ROOT>/.orchestration/runs/`. |
 

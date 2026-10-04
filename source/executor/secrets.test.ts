@@ -70,4 +70,22 @@ describe('resolveSecret', () => {
 		expect(resolveSecret('orchestrator_api_key', channels)).toBeUndefined()
 		expect(secretCalls).toEqual(['orchestrator_api_key', 'ORCHESTRATOR_API_KEY'])
 	})
+
+	test('an explicit environment name overrides the derived one', () => {
+		const { channels, secretCalls } = makeChannels({ ORCHESTRATOR_KAGI_API_KEY: 'env-key' }, { kagi_api_key: 'secret-key' })
+		expect(resolveSecret('kagi_api_key', channels, 'ORCHESTRATOR_KAGI_API_KEY')).toBe('env-key')
+		expect(secretCalls).toEqual([])
+	})
+
+	test('an explicit environment name leaves the lowercase secret path unchanged', () => {
+		const { channels, secretCalls } = makeChannels({}, { kagi_api_key: 'secret-key' })
+		expect(resolveSecret('kagi_api_key', channels, 'ORCHESTRATOR_KAGI_API_KEY')).toBe('secret-key')
+		expect(secretCalls).toEqual(['kagi_api_key'])
+	})
+
+	test('an explicit environment name derives the upper-snake secret fallback from the environment variable', () => {
+		const { channels, secretCalls } = makeChannels({}, { kagi_api_key: '', ORCHESTRATOR_KAGI_API_KEY: 'upper-key' })
+		expect(resolveSecret('kagi_api_key', channels, 'ORCHESTRATOR_KAGI_API_KEY')).toBe('upper-key')
+		expect(secretCalls).toEqual(['kagi_api_key', 'ORCHESTRATOR_KAGI_API_KEY'])
+	})
 })

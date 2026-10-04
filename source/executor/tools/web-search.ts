@@ -34,7 +34,7 @@ export function createWebSearch(options: WebSearchOptions): ToolHandler {
 			limit = Math.min(limitValue, MAX_LIMIT)
 		}
 		if (options.search === undefined) {
-			return createToolError('unavailable', 'web_search is not configured: KAGI_API_KEY is not set')
+			return createToolError('unavailable', 'web_search is not configured: ORCHESTRATOR_KAGI_API_KEY is not set')
 		}
 		let body: unknown
 		try {

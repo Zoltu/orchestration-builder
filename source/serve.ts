@@ -237,7 +237,7 @@ async function serve(): Promise<void> {
 		apiKey = resolveSecret('orchestrator_api_key', { environment: Bun.env, readDockerSecret: createDockerSecretReader(DOCKER_SECRETS_DIR) })
 		kagiApiKey = resolveKagiApiKey(Bun.env, createDockerSecretReader(DOCKER_SECRETS_DIR))
 		if (kagiApiKey === undefined) {
-			console.log('KAGI_API_KEY not set: web_search and the kagi fetch backend will report themselves unavailable')
+			console.log('ORCHESTRATOR_KAGI_API_KEY not set: web_search and the kagi fetch backend will report themselves unavailable')
 		}
 
 		// One startup probe of the model API, before the resolved composition: the server's own values are ground truth, so an API-reported context window always replaces the configured one, and a missing name is discovered when the API serves exactly one model.

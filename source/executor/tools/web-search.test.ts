@@ -144,7 +144,7 @@ describe('createWebSearch', () => {
 		const result = await handler({ query: 'q' })
 		expect(result.kind).toBe('unavailable')
 		if (result.kind !== 'success') {
-			expect(result.message).toBe('web_search is not configured: KAGI_API_KEY is not set')
+			expect(result.message).toBe('web_search is not configured: ORCHESTRATOR_KAGI_API_KEY is not set')
 		}
 	})
 

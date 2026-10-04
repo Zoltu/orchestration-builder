@@ -1,6 +1,6 @@
 {
 	"name": "web_search",
-	"description": "Search the web through Kagi and return ranked results as structured data: title, url, snippet, and time for each hit. Requires KAGI_API_KEY in the executor's environment; when it is not configured the tool reports itself unavailable, so fall back to fetch_url against URLs you already know. Pair it with fetch_url: search to find the pages, then fetch the ones that matter.",
+	"description": "Search the web through Kagi and return ranked results as structured data: title, url, snippet, and time for each hit. Requires ORCHESTRATOR_KAGI_API_KEY in the executor's environment; when it is not configured the tool reports itself unavailable, so fall back to fetch_url against URLs you already know. Pair it with fetch_url: search to find the pages, then fetch the ones that matter.",
 	"humanLabel": {
 		"detailed": ["Web Search"],
 		"friendly": ["Search Web"],

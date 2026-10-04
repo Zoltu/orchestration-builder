@@ -69,7 +69,7 @@ export function createFetchUrl(timeoutMs: number, options: FetchUrlOptions = {})
 			method = methodValue
 		}
 		if (method === 'kagi' && kagiFetcher === undefined) {
-			return createToolError('unavailable', 'fetch_url method "kagi" requires KAGI_API_KEY, which is not set')
+			return createToolError('unavailable', 'fetch_url method "kagi" requires ORCHESTRATOR_KAGI_API_KEY, which is not set')
 		}
 		const backends: FetchBackend[] = []
 		if ((method === 'auto' || method === 'kagi') && kagiFetcher !== undefined) {

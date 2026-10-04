@@ -169,7 +169,7 @@ describe('createFetchUrl', () => {
 		const result = await handler({ url: 'https://example.com', method: 'kagi' })
 		expect(result.kind).toBe('unavailable')
 		if (result.kind !== 'success') {
-			expect(result.message).toBe('fetch_url method "kagi" requires KAGI_API_KEY, which is not set')
+			expect(result.message).toBe('fetch_url method "kagi" requires ORCHESTRATOR_KAGI_API_KEY, which is not set')
 		}
 		expect(fetcher.calls).toEqual([])
 	})

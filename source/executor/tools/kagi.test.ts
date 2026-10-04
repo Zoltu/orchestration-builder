@@ -124,48 +124,48 @@ describe('resolveKagiApiKey', () => {
 
 	test('prefers the environment variable over secrets', () => {
 		const reader = makeSecretReader({ kagi_api_key: 'secret-key' })
-		const key = resolveKagiApiKey({ KAGI_API_KEY: 'env-key' }, reader.readSecret)
+		const key = resolveKagiApiKey({ ORCHESTRATOR_KAGI_API_KEY: 'env-key' }, reader.readSecret)
 		expect(key).toBe('env-key')
 		expect(reader.calls).toEqual([])
 	})
 
 	test('trims the environment variable', () => {
 		const reader = makeSecretReader({})
-		const key = resolveKagiApiKey({ KAGI_API_KEY: '  padded  ' }, reader.readSecret)
+		const key = resolveKagiApiKey({ ORCHESTRATOR_KAGI_API_KEY: '  padded  ' }, reader.readSecret)
 		expect(key).toBe('padded')
 	})
 
 	test('falls through to secrets when the environment variable is empty', () => {
 		const reader = makeSecretReader({ kagi_api_key: 'secret-key' })
-		const key = resolveKagiApiKey({ KAGI_API_KEY: '' }, reader.readSecret)
+		const key = resolveKagiApiKey({ ORCHESTRATOR_KAGI_API_KEY: '' }, reader.readSecret)
 		expect(key).toBe('secret-key')
 		expect(reader.calls).toEqual(['kagi_api_key'])
 	})
 
 	test('falls through to secrets when the environment variable is whitespace only', () => {
 		const reader = makeSecretReader({ kagi_api_key: 'secret-key' })
-		const key = resolveKagiApiKey({ KAGI_API_KEY: '   ' }, reader.readSecret)
+		const key = resolveKagiApiKey({ ORCHESTRATOR_KAGI_API_KEY: '   ' }, reader.readSecret)
 		expect(key).toBe('secret-key')
 	})
 
-	test('reads the lowercase secret before the uppercase one', () => {
-		const reader = makeSecretReader({ kagi_api_key: 'lower', KAGI_API_KEY: 'upper' })
+	test('reads the lowercase secret before the upper-snake one', () => {
+		const reader = makeSecretReader({ kagi_api_key: 'lower', ORCHESTRATOR_KAGI_API_KEY: 'upper' })
 		const key = resolveKagiApiKey({}, reader.readSecret)
 		expect(key).toBe('lower')
 		expect(reader.calls).toEqual(['kagi_api_key'])
 	})
 
-	test('reads the uppercase secret when the lowercase one is absent', () => {
-		const reader = makeSecretReader({ KAGI_API_KEY: 'upper' })
+	test('reads the upper-snake secret when the lowercase one is absent', () => {
+		const reader = makeSecretReader({ ORCHESTRATOR_KAGI_API_KEY: 'upper' })
 		const key = resolveKagiApiKey({}, reader.readSecret)
 		expect(key).toBe('upper')
-		expect(reader.calls).toEqual(['kagi_api_key', 'KAGI_API_KEY'])
+		expect(reader.calls).toEqual(['kagi_api_key', 'ORCHESTRATOR_KAGI_API_KEY'])
 	})
 
 	test('returns undefined when nothing yields a key', () => {
 		const reader = makeSecretReader({})
 		const key = resolveKagiApiKey({}, reader.readSecret)
 		expect(key).toBeUndefined()
-		expect(reader.calls).toEqual(['kagi_api_key', 'KAGI_API_KEY'])
+		expect(reader.calls).toEqual(['kagi_api_key', 'ORCHESTRATOR_KAGI_API_KEY'])
 	})
 })

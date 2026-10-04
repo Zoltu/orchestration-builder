@@ -121,5 +121,6 @@ export function createDockerSecretReader(secretsDir: string): (name: string) => 
 }
 
 export function resolveKagiApiKey(environment: Record<string, string | undefined>, readSecret: (name: string) => string | undefined): string | undefined {
-	return resolveSecret('kagi_api_key', { environment, readDockerSecret: readSecret })
+	// The Docker-secret channel keeps the plain secret name (kagi_api_key, so /run/secrets/kagi_api_key works); only the environment variable carries the ORCHESTRATOR_ prefix.
+	return resolveSecret('kagi_api_key', { environment, readDockerSecret: readSecret }, 'ORCHESTRATOR_KAGI_API_KEY')
 }
