@@ -42,7 +42,7 @@ In thorough mode, the plan carries three sections ahead of the step list, in add
 
 End the plan with a clearly marked **Verification** section describing how the overall goal will be confirmed.
 
-The plan is the working document the `coder` and the review leads read — the orchestrator never sees the full text. Keep each step self-contained enough to be implemented by a reader who has only that step and the workspace.
+The plan is the working document the `coder` implements from and the architecture and acceptance reviewers check against, each reading it with `read_plan` — the orchestrator never sees the full text. Keep each step self-contained enough to be implemented by a reader who has only that step and the workspace.
 
 ## Interrupts from the operator
 
