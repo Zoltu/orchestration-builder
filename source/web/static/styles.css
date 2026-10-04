@@ -1745,7 +1745,7 @@ li:last-child {
 }
 
 /* --- Inspector modal -------------------------------------------------------- */
-/* A stage-scoped overlay (the question/result modal pattern: containing block is `.pb-flow`) presenting the run's LLM turns with their on-demand request/response detail. The card is wide and tall — two panes side by side: the turn list (newest first, its own scroll) on the left and the selected turn's detail (its own scroll) on the right. Turn rows are buttons styled as rows; the in-flight row and the metadata-only hint tag read at a glance. Message bodies and reasoning render through the shared sanitized Markdown pipeline; raw structured fields (tool calls, usage) render as pretty-printed JSON in mono. Colors read the visual tokens so it follows the light/dark theme. */
+/* A stage-scoped overlay (the question/result modal pattern: containing block is `.pb-flow`) presenting the run's LLM turns with their on-demand request/response detail. The card is wide and tall — two panes side by side: the turn list (newest first, scoped to one agent instance, its own scroll) on the left and the selected turn's detail (its own scroll) on the right. A delegation-chain breadcrumb and a minimal instance dropdown sit above the panes for re-scoping (the redesign's wayfinding, milestone 1). Turn rows are buttons styled as rows; the in-flight row and the metadata-only hint tag read at a glance. Message bodies and reasoning render through the shared sanitized Markdown pipeline; raw structured fields (tool calls, usage) render as pretty-printed JSON in mono. Colors read the visual tokens so it follows the light/dark theme. */
 
 .inspector-modal-overlay {
 	position: absolute;
@@ -1804,6 +1804,79 @@ li:last-child {
 	color: #ffffff;
 	font-weight: 500;
 	cursor: pointer;
+}
+
+/* The instance wayfinding (inspector redesign, milestone 1): the delegation-chain breadcrumb sits between the heading and the panes, and a minimal instance dropdown opens the turn pane. Both are small, quiet controls — they re-scope the list, they are not the reading surface. */
+
+.inspector-breadcrumb-row {
+	display: flex;
+	align-items: center;
+	flex-wrap: wrap;
+	gap: var(--space-1);
+	margin-bottom: var(--space-3);
+	font-size: 0.8rem;
+}
+
+.inspector-crumb {
+	padding: 0 var(--space-1);
+	border: none;
+	border-radius: var(--radius-sm);
+	background: none;
+	font: inherit;
+	color: var(--color-accent);
+	cursor: pointer;
+	overflow-wrap: anywhere;
+}
+
+.inspector-crumb:hover {
+	background: var(--color-accent-soft);
+}
+
+.inspector-crumb.is-current {
+	color: var(--color-text);
+	font-weight: 600;
+	cursor: default;
+}
+
+.inspector-crumb-sep {
+	color: var(--color-text-subtle);
+}
+
+.inspector-parent-up {
+	padding: 0 var(--space-2);
+	border: 1px solid var(--color-border);
+	border-radius: var(--radius-sm);
+	background: none;
+	font: inherit;
+	font-size: 0.78rem;
+	color: var(--color-text-muted);
+	cursor: pointer;
+	margin-left: var(--space-2);
+}
+
+.inspector-parent-up:hover {
+	color: var(--color-accent);
+	border-color: var(--color-accent);
+}
+
+.inspector-instance-row {
+	display: inline-flex;
+	align-items: center;
+	gap: var(--space-1);
+	font-size: 0.8rem;
+	color: var(--color-text-muted);
+	margin-bottom: var(--space-2);
+}
+
+.inspector-instance-select {
+	font: inherit;
+	font-size: 0.8rem;
+	color: var(--color-text);
+	background: var(--color-surface);
+	border: 1px solid var(--color-border);
+	border-radius: var(--radius-sm);
+	padding: 0.1rem var(--space-1);
+	max-width: 100%;
 }
 
 .inspector-modal-body {

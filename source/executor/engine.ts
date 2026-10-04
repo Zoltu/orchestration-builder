@@ -275,7 +275,7 @@ export async function runRole(deps: EngineDependencies, context: EngineContext, 
 		deps.checkpointRecorder.setPending(registryEntry.roleId, { toolCalls: resumed.suspendedTurn.toolCalls, agentIndex: resumed.suspendedTurn.agentIndex })
 	}
 
-	// role_start is emitted after the role definition is confirmed to exist and the instance is registered, so an unknown entry role still fires role_not_found without leaving an orphan role_start, and the event can carry the instance id the interrupt platform targets. The depth and optional parent let render.ts reconstruct the parent→child tree. A resumed role skips the event: its role_start is already in the log from before the restart.
+	// role_start is emitted after the role definition is confirmed to exist and the instance is registered, so an unknown entry role still fires role_not_found without leaving an orphan role_start, and the event can carry the instance id the interrupt platform targets. The depth and optional parent let render.ts reconstruct the parent→child tree, and parentRoleId names the parent instance exactly so a client can walk the instance chain without guessing among same-named ancestors (the inspector's breadcrumb). A resumed role skips the event: its role_start is already in the log from before the restart.
 	if (resumed === undefined) {
 		const roleStartPayload: Record<string, unknown> = {
 			role: context.roleName,
@@ -284,6 +284,7 @@ export async function runRole(deps: EngineDependencies, context: EngineContext, 
 			task: context.task,
 		}
 		if (context.parent !== undefined) roleStartPayload['parent'] = context.parent
+		if (context.parentRoleId !== undefined) roleStartPayload['parentRoleId'] = context.parentRoleId
 		logEvent(deps.appendLog, 'role_start', roleStartPayload)
 	}
 
@@ -454,8 +455,8 @@ async function executeRoleLoop(
 
 		// llm_call_start marks the turn in flight the moment the request is dispatched, so the flow view can end the call's transit phase (flowing edge → solid) when the callee begins working rather than when the response completes.
 		// It fires on every turn, including the paths that later fail (llm_unavailable / context_budget_exceeded): the turn started even if it never completed.
-		// Only the role is carried; the full turn lands in llm_call once the response arrives.
-		logEvent(deps.appendLog, 'llm_call_start', { role: context.roleName })
+		// roleId rides along so a client can attribute the in-flight turn to the role instance (the inspector's per-instance turn list); the full turn lands in llm_call once the response arrives.
+		logEvent(deps.appendLog, 'llm_call_start', { role: context.roleName, roleId: registryEntry.roleId })
 
 		// The streaming tap fans each payload-text delta out through the run-scoped publisher, stamped with this role instance's identity so a client can attribute streamed text to the right role.
 		const llmResult = await deps.llmCaller.call({

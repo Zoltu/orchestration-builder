@@ -6,7 +6,9 @@
 //
 // The turn list is windowed: the modal opens on the most recent `INSPECTOR_WINDOW_SIZE` log events and an "older turns" control pages back by the same size, growing the loaded range (the loaded events are kept so pairing an `llm_call_start` with its `llm_call` stays correct across page boundaries; the poll's tail refresh appends new events to the same range). The loaded range therefore grows while the modal stays open on an active run — turn-inspection sessions are expected to be short, and reopening the modal resets it — so past `INSPECTOR_RETENTION_LIMIT` loaded events the poll resyncs with a fresh tail window instead of appending, keeping long-lived sessions bounded.
 //
-// The pure helpers (the window-offset math and `deriveDetailBodyState`) ship exported even though the component consumes them internally — per the labels.js convention, pure math/detail helpers are exported so the tests exercise the same implementations the view uses rather than a parallel copy.
+// The list is scoped to one agent instance (the inspector redesign, milestone 1): a run's turns are spread across its role instances (the orchestrator, each delegated child), so the modal shows the scoped instance's turns — renumbered within the instance — with a breadcrumb (`orchestrator-0 ▸ coder-1 ▸ coder-1-2`) for the delegation chain and a minimal instance dropdown for wayfinding (the redesign's view click-throughs land later). The scoped instance defaults to the most recently active one (the newest unmatched `llm_call_start`, else the newest `llm_call`), and the caller re-scopes via the breadcrumb/dropdown. Instance identity comes from the events' `roleId` fields, falling back to the role name where a payload carries none (old logs and the `standard` logging level, matching the conversation fold's tolerance in source/web/render.ts) — under that fallback the turns of a role's instances are indistinguishable and scope to the role name as one group.
+//
+// The pure helpers (the window-offset math, `deriveDetailBodyState`, and the instance/scope derivations) ship exported even though the component consumes them internally — per the labels.js convention, pure helpers are exported so the tests exercise the same implementations the view uses rather than a parallel copy.
 
 import { isObject } from './guards.js'
 
@@ -30,7 +32,7 @@ export const INSPECTOR_RETENTION_LIMIT = INSPECTOR_WINDOW_SIZE * 20
  */
 
 /**
- * One LLM turn as the turn list renders it. `eventIndex` is the identity used for selection and `?detail=` addressing (a completed turn's `llm_call` event; an in-flight turn's `llm_call_start` event).
+ * One LLM turn as the turn list renders it. `eventIndex` is the identity used for selection and `?detail=` addressing (a completed turn's `llm_call` event; an in-flight turn's `llm_call_start` event). `roleId` is the turn's role-instance id — the payload's `roleId` when present, else the role name (old logs and the `standard` logging level carry no instance id on turn events, matching the conversation fold's tolerance), so an in-flight turn that completes keeps its instance and never jumps scope.
  *
  * @typedef {Object} TurnEntry
  * @property {'completed'|'in_flight'} kind
@@ -38,6 +40,7 @@ export const INSPECTOR_RETENTION_LIMIT = INSPECTOR_WINDOW_SIZE * 20
  * @property {number|null} startEventIndex the paired `llm_call_start`'s index, on completed entries only
  * @property {number} turnNumber 1-based, chronological over the loaded events
  * @property {string} role
+ * @property {string} roleId
  * @property {string|null} timestamp
  * @property {TurnUsage|null} usage
  * @property {string|null} finishReason
@@ -153,7 +156,7 @@ function readEventIndex(value) {
 	return value
 }
 
-// Derives the turn list from a window of log events (the shape `GET /api/runs/:id/log` returns). An `llm_call` event becomes a completed entry; an `llm_call_start` becomes an in-flight entry unless a matching `llm_call` for the same role follows it, in which case they pair into one completed entry. Matching is LIFO per role name so the same-name nesting the executor allows (a role spawning a same-named child) pairs like brackets — the log cannot carry the start's roleId, so the role name is the only key available. Entries come back in chronological (log) order with 1-based `turnNumber`s over the loaded events; malformed rows (non-objects, other types, non-record payloads, missing role, unusable index) are skipped so one torn row cannot corrupt the list. The log is append-only, so an in-flight entry that later completes is replaced wholesale by the next `buildTurnIndex` over the grown window.
+// Derives the turn list from a window of log events (the shape `GET /api/runs/:id/log` returns). An `llm_call` event becomes a completed entry; an `llm_call_start` becomes an in-flight entry unless a matching `llm_call` for the same role follows it, in which case they pair into one completed entry. Matching is LIFO per role name so the same-name nesting the executor allows (a role spawning a same-named child) pairs like brackets — pairing stays name-keyed even though the events carry `roleId`, because a start may predate the executor's per-instance ids (old logs) and the executor's single-flight turn loop makes same-name nesting bracket-like; each entry's `roleId` comes from its own event's payload, falling back to the role name when absent. Entries come back in chronological (log) order with 1-based `turnNumber`s over the loaded events; malformed rows (non-objects, other types, non-record payloads, missing role, unusable index) are skipped so one torn row cannot corrupt the list. The log is append-only, so an in-flight entry that later completes is replaced wholesale by the next `buildTurnIndex` over the grown window.
 /**
  * @param {unknown} logEvents
  * @returns {TurnEntry[]}
@@ -173,12 +176,13 @@ export function buildTurnIndex(logEvents) {
 		const eventIndex = readEventIndex(event['index'])
 		if (role === null || eventIndex === null) continue
 		const timestamp = typeof event['timestamp'] === 'string' ? event['timestamp'] : null
+		const roleId = typeof payload['roleId'] === 'string' && payload['roleId'] !== '' ? payload['roleId'] : role
 		if (type === 'llm_call_start') {
 			const open = openStarts.get(role)
 			if (open === undefined) {
-				openStarts.set(role, [{ eventIndex, timestamp }])
+				openStarts.set(role, [{ eventIndex, timestamp, roleId }])
 			} else {
-				open.push({ eventIndex, timestamp })
+				open.push({ eventIndex, timestamp, roleId })
 			}
 			continue
 		}
@@ -190,6 +194,7 @@ export function buildTurnIndex(logEvents) {
 			startEventIndex: start !== null ? start.eventIndex : null,
 			turnNumber: 0,
 			role,
+			roleId,
 			timestamp,
 			usage: readUsage(payload['usage']),
 			finishReason: typeof payload['finishReason'] === 'string' && payload['finishReason'] !== '' ? payload['finishReason'] : null,
@@ -204,6 +209,7 @@ export function buildTurnIndex(logEvents) {
 				startEventIndex: null,
 				turnNumber: 0,
 				role,
+				roleId: start.roleId,
 				timestamp: start.timestamp,
 				usage: null,
 				finishReason: null,
@@ -213,6 +219,199 @@ export function buildTurnIndex(logEvents) {
 	}
 	entries.sort((a, b) => a.eventIndex - b.eventIndex)
 	return entries.map((entry, position) => ({ ...entry, turnNumber: position + 1 }))
+}
+
+// --- Instance scoping --------------------------------------------------------
+// The modal scopes its turn list to one agent instance. Instances are known from `role_start`/`role_finished` events (which always carry `roleId`) and, where the loaded turn events predate per-instance ids (old logs, the `standard` logging level), from the turn events themselves falling back to the role name — so the dropdown always offers at least the identity the turn entries can scope to.
+
+/**
+ * One agent instance present in the loaded event window, as the instance dropdown renders it.
+ *
+ * @typedef {Object} InstanceRecord
+ * @property {string} roleId
+ * @property {string} role
+ * @property {string|null} parentRoleId the parent instance's id when an event names it; null when absent or unknown
+ * @property {string|null} parentRole the parent role's name; null for the entry role or unknown
+ * @property {boolean} live true while no `role_finished` for the instance is in the window (a start whose finish has paged out still reads live — the window is all the modal knows)
+ */
+
+/**
+ * A non-empty string field, or null.
+ * @param {unknown} value
+ * @returns {string|null}
+ */
+function readInstanceId(value) {
+	if (typeof value !== 'string' || value === '') return null
+	return value
+}
+
+// The distinct agent instances in a window of log events, in first-appearance order. Real instances come from `role_start` (which also carries the parent linkage) and are marked finished by `role_finished`; turn events (`llm_call`/`llm_call_start`) whose payload carries no `roleId` ensure a role-name fallback instance whose live flag follows its newest turn event (a start reads as a turn in flight, a call as none). Malformed rows are skipped; an empty or non-array window yields no instances.
+/**
+ * @param {unknown} logEvents
+ * @returns {InstanceRecord[]}
+ */
+export function instancesOf(logEvents) {
+	if (!Array.isArray(logEvents)) return []
+	const instances = new Map()
+	const realIds = new Set()
+	for (const event of logEvents) {
+		if (!isObject(event)) continue
+		const type = event['type']
+		const payload = event['payload']
+		if (!isObject(payload)) continue
+		if (type === 'role_start' || type === 'role_finished') {
+			const roleId = readInstanceId(payload['roleId'])
+			const role = readInstanceId(payload['role'])
+			if (roleId === null || role === null) continue
+			const known = instances.get(roleId)
+			if (type === 'role_start') {
+				if (known === undefined) {
+					instances.set(roleId, { roleId, role, parentRoleId: readInstanceId(payload['parentRoleId']), parentRole: readInstanceId(payload['parent']), live: true })
+				}
+			} else if (known === undefined) {
+				instances.set(roleId, { roleId, role, parentRoleId: null, parentRole: readInstanceId(payload['parent']), live: false })
+			} else {
+				known['live'] = false
+			}
+			realIds.add(roleId)
+			continue
+		}
+		if (type !== 'llm_call' && type !== 'llm_call_start') continue
+		const role = readInstanceId(payload['role'])
+		if (role === null) continue
+		const payloadRoleId = readInstanceId(payload['roleId'])
+		if (payloadRoleId !== null) {
+			// A real id whose role_start paged out still lists (live — no finish is known for it); its status stays owned by the role events.
+			if (!realIds.has(payloadRoleId) && !instances.has(payloadRoleId)) {
+				instances.set(payloadRoleId, { roleId: payloadRoleId, role, parentRoleId: null, parentRole: null, live: true })
+			}
+			continue
+		}
+		// No id on the turn payload (old logs, the standard logging level): the role name is the only identity the turn list can scope to, and its live flag follows the newest turn event — a start reads as a turn in flight, a call as none.
+		instances.set(role, { roleId: role, role, parentRoleId: null, parentRole: null, live: type === 'llm_call_start' })
+	}
+	return [...instances.values()]
+}
+
+/**
+ * One breadcrumb crumb: an instance on the delegation chain from the chain root down to the scoped instance.
+ *
+ * @typedef {Object} ChainCrumb
+ * @property {string} roleId
+ * @property {string} role
+ */
+
+// The delegation chain for `roleId` as far as the loaded window allows: the instance's own `role_start` event walks up through its parent linkage — the exact `parentRoleId` when the payload names it, else (old logs) the latest earlier `role_start` of the parent role at depth − 1, which the executor's single-flight depth-first execution makes unambiguous. An ancestor outside the window (or named by id but absent) ends the walk: the chain renders root-most-known → instance rather than inventing a root. A roleId with no `role_start` in the window (a turn event's instance whose start paged out) renders as a lone crumb, its role name read from the turn payload when available. Cycles in malformed logs end the walk too.
+/**
+ * @param {unknown} logEvents
+ * @param {unknown} roleId
+ * @returns {ChainCrumb[]}
+ */
+export function deriveInstanceChain(logEvents, roleId) {
+	if (typeof roleId !== 'string' || roleId === '') return []
+	if (!Array.isArray(logEvents)) return [{ roleId, role: roleId }]
+	const starts = new Map()
+	const turnRoles = new Map()
+	let position = 0
+	for (const event of logEvents) {
+		if (!isObject(event)) continue
+		const payload = event['payload']
+		if (!isObject(payload)) continue
+		if (event['type'] === 'role_start') {
+			const startRoleId = readInstanceId(payload['roleId'])
+			const role = readInstanceId(payload['role'])
+			if (startRoleId === null || role === null) continue
+			if (!starts.has(startRoleId)) {
+				starts.set(startRoleId, {
+					role,
+					parentRoleId: readInstanceId(payload['parentRoleId']),
+					parentRole: readInstanceId(payload['parent']),
+					depth: typeof payload['depth'] === 'number' && Number.isFinite(payload['depth']) ? payload['depth'] : null,
+					position,
+				})
+			}
+			position += 1
+			continue
+		}
+		if (event['type'] !== 'llm_call' && event['type'] !== 'llm_call_start') continue
+		const startRoleId = readInstanceId(payload['roleId'])
+		const role = readInstanceId(payload['role'])
+		if (startRoleId !== null && role !== null) turnRoles.set(startRoleId, role)
+	}
+	const own = starts.get(roleId)
+	const chain = [{ roleId, role: own !== undefined ? own.role : turnRoles.get(roleId) ?? roleId }]
+	if (own === undefined) return chain
+	const visited = new Set([roleId])
+	let current = own
+	while (true) {
+		const parent = resolveParentStart(current, starts, visited)
+		if (parent === null) break
+		chain.unshift({ roleId: parent.roleId, role: parent.role })
+		visited.add(parent.roleId)
+		current = parent
+	}
+	return chain
+}
+
+// The parent's `role_start` for the walk above, or null when the chain ends: the exact parent instance when the payload names its id and the window holds its start; otherwise the name-and-depth heuristic for logs whose starts carry no `parentRoleId`.
+/**
+ * @param {{ role: string, parentRoleId: string|null, parentRole: string|null, depth: number|null, position: number }} start
+ * @param {Map<string, { role: string, parentRoleId: string|null, parentRole: string|null, depth: number|null, position: number }>} starts
+ * @param {Set<string>} visited
+ * @returns {{ roleId: string, role: string, parentRoleId: string|null, parentRole: string|null, depth: number|null, position: number }|null}
+ */
+function resolveParentStart(start, starts, visited) {
+	if (start.parentRoleId !== null) {
+		if (visited.has(start.parentRoleId)) return null
+		const exact = starts.get(start.parentRoleId)
+		return exact !== undefined ? { roleId: start.parentRoleId, ...exact } : null
+	}
+	if (start.parentRole === null || start.depth === null) return null
+	let best = null
+	for (const [candidateId, candidate] of starts) {
+		if (visited.has(candidateId)) continue
+		if (candidate.role !== start.parentRole) continue
+		if (candidate.depth === null || candidate.depth !== start.depth - 1) continue
+		if (candidate.position >= start.position) continue
+		if (best === null || candidate.position > best.position) best = { roleId: candidateId, ...candidate }
+	}
+	return best
+}
+
+// The instance id the modal scopes to when the operator has not picked one: the most recently active instance in the freshly derived list — the newest turn still in flight (an unmatched `llm_call_start`), else the newest turn of any kind. Null when the list holds no usable entries.
+/**
+ * @param {unknown} entries
+ * @returns {string|null}
+ */
+export function deriveDefaultScopeRoleId(entries) {
+	if (!Array.isArray(entries)) return null
+	let newest = null
+	let newestInFlight = null
+	for (const entry of entries) {
+		if (!isObject(entry)) continue
+		if (typeof entry['roleId'] !== 'string' || entry['roleId'] === '') continue
+		newest = entry['roleId']
+		if (entry['kind'] === 'in_flight') newestInFlight = entry['roleId']
+	}
+	return newestInFlight ?? newest
+}
+
+// The turn entries of one instance, renumbered 1-based within the instance (the list shows the scoped instance's turns, so its numbering is the instance's own). An unset or empty scope yields an empty list — the dropdown is the way back. Entries are copied so the renumbering never mutates the full list.
+/**
+ * @param {unknown} entries
+ * @param {unknown} scopedRoleId
+ * @returns {TurnEntry[]}
+ */
+export function scopeTurnEntries(entries, scopedRoleId) {
+	if (!Array.isArray(entries)) return []
+	if (typeof scopedRoleId !== 'string' || scopedRoleId === '') return []
+	const scoped = []
+	for (const entry of entries) {
+		if (!isObject(entry)) continue
+		if (entry['roleId'] !== scopedRoleId) continue
+		scoped.push(entry)
+	}
+	return scoped.map((entry, position) => ({ ...entry, turnNumber: position + 1 }))
 }
 
 // --- Detail body availability ------------------------------------------------
@@ -363,27 +562,32 @@ function detailSectionsNode(h, renderMarkdown, sections) {
 // The live partial prop, validated: an absent or malformed prop renders nothing rather than inventing sections (the same never-invent rule the detail pane follows). Only the fields the rendering reads are carried.
 /**
  * @param {unknown} value
- * @returns {{ role: string, reasoning: string, content: string }|null}
+ * @returns {{ roleId: string|null, role: string, reasoning: string, content: string }|null}
  */
 function livePartialForRender(value) {
 	if (!isObject(value)) return null
 	const role = typeof value['role'] === 'string' ? value['role'] : null
 	if (role === null) return null
+	const roleId = typeof value['roleId'] === 'string' && value['roleId'] !== '' ? value['roleId'] : null
 	const reasoning = typeof value['reasoning'] === 'string' ? value['reasoning'] : ''
 	const content = typeof value['content'] === 'string' ? value['content'] : ''
-	return { role, reasoning, content }
+	return { roleId, role, reasoning, content }
 }
 
-// Whether the turn entry is the in-flight row the live partial belongs to: the partial's role name is the only key shared with the turn list (entries pair by role, not by role instance id).
+// Whether the turn entry is the in-flight row the live partial belongs to. Within a scoped list the partial's own `roleId` is matched first so a same-named sibling instance's ghost row (a start left unmatched by a failed turn) never hosts another instance's stream; entries whose id fell back to the role name (old logs, the standard logging level) pair on the role name as before.
 /**
  * @param {unknown} entry
- * @param {{ role: string, reasoning: string, content: string }|null} livePartial
+ * @param {{ roleId: string|null, role: string, reasoning: string, content: string }|null} livePartial
  * @returns {boolean}
  */
 function isLiveRow(entry, livePartial) {
 	if (livePartial === null) return false
 	if (!isObject(entry)) return false
-	return entry['kind'] === 'in_flight' && entry['role'] === livePartial.role
+	if (entry['kind'] !== 'in_flight') return false
+	const roleId = typeof entry['roleId'] === 'string' ? entry['roleId'] : null
+	const roleName = typeof entry['role'] === 'string' ? entry['role'] : null
+	if (roleId !== null && roleId !== roleName && typeof livePartial.roleId === 'string' && livePartial.roleId !== '') return roleId === livePartial.roleId
+	return roleName !== null && roleName === livePartial.role
 }
 
 // The live block under the in-flight row: the streamed reasoning and response, each labeled like the detail pane's received sections and rendered through the same sanitized Markdown pipeline. A field with no text yet renders nothing, and an all-empty partial renders no block at all — the app clears the partial when the socket drops, so a stale block never lingers.
@@ -443,14 +647,59 @@ function turnRowNode(h, entry, selectedEventIndex, onSelectTurn) {
 	])
 }
 
-// The modal overlay: a backdrop over the run view plus a wide two-pane card — the turn list on the left (newest first, with an "older turns" control paging back through the log), the selected turn's detail on the right. `onSelectTurn` is wired per row with the entry as payload; `onLoadOlder` and `onClose` are caller-supplied actions wired bare, mirroring the result modal's close wiring.
+// The breadcrumb row: one crumb per chain instance, root first, joined by '▸' separators; the last crumb is the scoped instance (disabled — it is where the list already is). Each earlier crumb and the '↑ parent' affordance re-scope via the hyperapp tuple `[onScopeInstance, roleId]`, so the action receives the instance id directly. A chain that renders nothing (no loaded instances) renders no row.
+function breadcrumbNode(h, chain, onScopeInstance) {
+	const crumbs = []
+	for (const crumb of chain) {
+		if (!isObject(crumb) || typeof crumb['roleId'] !== 'string' || crumb['roleId'] === '') return null
+		crumbs.push(crumb)
+	}
+	if (crumbs.length === 0) return null
+	const children = []
+	for (let position = 0; position < crumbs.length; position++) {
+		const crumb = crumbs[position]
+		if (position > 0) children.push(h('span', { class: 'inspector-crumb-sep' }, '▸'))
+		const isCurrent = position === crumbs.length - 1
+		children.push(h('button', { type: 'button', class: { 'inspector-crumb': true, 'is-current': isCurrent }, disabled: isCurrent, title: isCurrent ? 'The instance the turn list is scoped to' : `Scope the turn list to ${crumb.roleId}`, onclick: [onScopeInstance, crumb.roleId] }, [crumb.roleId]))
+	}
+	if (crumbs.length > 1) {
+		const parent = crumbs[crumbs.length - 2]
+		children.push(h('button', { type: 'button', class: 'inspector-parent-up', title: `Scope the turn list to the parent instance ${parent.roleId}`, onclick: [onScopeInstance, parent.roleId] }, '↑ parent'))
+	}
+	return h('div', { class: 'inspector-breadcrumb-row' }, children)
+}
+
+// The minimal instance dropdown above the turn list (wayfinding until the redesign's view click-throughs land): one option per loaded instance, labeled with the role name, the instance id when it differs, and the live/finished status; selecting re-scopes. The change event goes to the bare `onScopeInstance` action (the app reads the selected value off the event, mirroring the flow-tier select).
+function instanceSelectNode(h, instances, scopedRoleId, onScopeInstance) {
+	const options = []
+	for (const instance of instances) {
+		if (!isObject(instance) || typeof instance['roleId'] !== 'string' || instance['roleId'] === '') return null
+		const role = typeof instance['role'] === 'string' && instance['role'] !== '' ? instance['role'] : instance['roleId']
+		const status = instance['live'] === true ? 'live' : 'finished'
+		const idSuffix = instance['roleId'] !== role ? ` (${instance['roleId']})` : ''
+		options.push(h('option', { value: instance['roleId'], selected: instance['roleId'] === scopedRoleId }, [`${role}${idSuffix} — ${status}`]))
+	}
+	if (options.length === 0) return null
+	const selectProps = { class: 'inspector-instance-select', onchange: onScopeInstance }
+	if (scopedRoleId !== null) selectProps['value'] = scopedRoleId
+	return h('label', { class: 'inspector-instance-row' }, [
+		h('span', { class: 'inspector-instance-label' }, 'Instance'),
+		h('select', selectProps, options),
+	])
+}
+
+// The modal overlay: a backdrop over the run view plus a wide two-pane card — the turn list on the left (newest first, scoped to one agent instance, with an "older turns" control paging back through the log), the selected turn's detail on the right. Above the panes sit the breadcrumb (the scoped instance's delegation chain) and the heading. `onSelectTurn` is wired per row with the entry as payload; `onScopeInstance` is wired bare on the dropdown (it reads the change event) and per crumb with the instance id as payload; `onLoadOlder` and `onClose` are caller-supplied actions wired bare, mirroring the result modal's close wiring.
 export function InspectorModal(h, props) {
 	const renderMarkdown = props.renderMarkdown
 	const turns = isObject(props.turns) ? props.turns : {}
 	const entries = Array.isArray(turns['entries']) ? turns['entries'] : []
 	const selectedEventIndex = typeof turns['selectedEventIndex'] === 'number' ? turns['selectedEventIndex'] : null
 	const runLabel = typeof props.runLabel === 'string' && props.runLabel !== '' ? props.runLabel : null
+	const scopedRoleId = typeof props.scopedRoleId === 'string' && props.scopedRoleId !== '' ? props.scopedRoleId : null
+	const instances = Array.isArray(props.instances) ? props.instances : []
+	const chain = Array.isArray(props.chain) ? props.chain : []
 	const onSelectTurn = props.onSelectTurn
+	const onScopeInstance = props.onScopeInstance
 	const onLoadOlder = props.onLoadOlder
 	const onClose = props.onClose
 	const loadState = turns['loadState']
@@ -459,14 +708,17 @@ export function InspectorModal(h, props) {
 	const livePartial = livePartialForRender(props.livePartial)
 
 	const listChildren = []
+	const instanceRow = instanceSelectNode(h, instances, scopedRoleId, onScopeInstance)
+	if (instanceRow !== null) listChildren.push(instanceRow)
 	if (loadState === 'loading') {
 		listChildren.push(h('p', { class: 'inspector-list-note' }, 'Loading the run log…'))
 	} else if (loadState === 'failed') {
 		listChildren.push(h('p', { class: 'inspector-list-note' }, 'The run log could not be loaded.'))
 	} else if (entries.length === 0) {
-		listChildren.push(h('p', { class: 'inspector-list-note' }, 'No LLM turns logged for this run yet.'))
+		// Scoped and unscoped empties read differently: a scope with no turns in the loaded range is wayfinding (older turns may page back, another instance may hold them), not an empty log.
+		listChildren.push(h('p', { class: 'inspector-list-note' }, scopedRoleId !== null ? 'No turns logged for this instance in the loaded range yet.' : 'No LLM turns logged for this run yet.'))
 	} else {
-		// The live partial attaches to the newest in-flight row of its role (with same-role nesting, the newest unmatched start is the call currently generating) and renders directly beneath it — no selection needed, so streaming text is visible the moment the modal is open. Only one row ever hosts it.
+		// The live partial attaches to the newest in-flight row of its instance (the newest unmatched start is the call currently generating) and renders directly beneath it — no selection needed, so streaming text is visible the moment the modal is open. Only one row ever hosts it.
 		let liveAttached = false
 		for (let position = entries.length - 1; position >= 0; position--) {
 			const entry = entries[position]
@@ -494,6 +746,7 @@ export function InspectorModal(h, props) {
 		}
 	}
 
+	const breadcrumb = breadcrumbNode(h, chain, onScopeInstance)
 	return h('div', { class: 'inspector-modal-overlay' }, [
 		h('div', { class: 'inspector-modal-backdrop', onclick: onClose }),
 		h('div', { class: 'inspector-modal-card' }, [
@@ -501,6 +754,7 @@ export function InspectorModal(h, props) {
 				h('p', { class: 'inspector-modal-heading' }, runLabel !== null ? [`LLM turns \u00b7 ${runLabel}`] : ['LLM turns']),
 				h('button', { type: 'button', class: 'inspector-modal-close', onclick: onClose }, 'Close'),
 			]),
+			breadcrumb !== null ? breadcrumb : null,
 			h('div', { class: 'inspector-modal-body' }, [
 				h('div', { class: 'inspector-turn-pane' }, listChildren),
 				h('div', { class: 'inspector-detail-pane' }, detailChildren),

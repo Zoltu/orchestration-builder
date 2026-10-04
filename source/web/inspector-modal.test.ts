@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { InspectorModal, buildTurnIndex, deriveDetailBodyState, resolveSelection, tailWindowOffset, olderWindowOffset, olderFetchLimit, canPageOlder, INSPECTOR_WINDOW_SIZE, INSPECTOR_PAGE_LIMIT } from './static/inspector-modal.js'
+import { InspectorModal, buildTurnIndex, deriveDetailBodyState, deriveDefaultScopeRoleId, deriveInstanceChain, instancesOf, resolveSelection, scopeTurnEntries, tailWindowOffset, olderWindowOffset, olderFetchLimit, canPageOlder, INSPECTOR_WINDOW_SIZE, INSPECTOR_PAGE_LIMIT } from './static/inspector-modal.js'
 import { actionProp, defined, present } from './test-fixtures.js'
 
 // The inspector-modal component is browser-pure JS, so its exports arrive with inferred JS types. The interfaces and fake `h`/`renderMarkdown` below carry the shape the tests assert against, mirroring question-modal.test.ts / result-modal.test.ts.
@@ -94,8 +94,10 @@ interface WindowEvent {
 	payload: unknown
 }
 
-function startEvent(index: number, role: string): WindowEvent {
-	return { index, timestamp: `2026-01-01T00:00:${String(index % 60).padStart(2, '0')}Z`, type: 'llm_call_start', payload: { role } }
+function startEvent(index: number, role: string, roleId?: string): WindowEvent {
+	const payload: Record<string, unknown> = { role }
+	if (roleId !== undefined) payload['roleId'] = roleId
+	return { index, timestamp: `2026-01-01T00:00:${String(index % 60).padStart(2, '0')}Z`, type: 'llm_call_start', payload }
 }
 
 // A full-level llm_call payload: sent slice, received response with reasoning, usage, finish reason.
@@ -121,6 +123,15 @@ function callEvent(index: number, role: string, overrides: Record<string, unknow
 // A standard-level llm_call payload: the kept identity/usage fields only (source/executor/log-level.ts).
 function standardCallEvent(index: number, role: string): WindowEvent {
 	return callEvent(index, role, { sent: undefined, received: undefined, sentFrom: undefined, roleId: undefined })
+}
+
+// A role_start event: the instance registry's identity, depth, and optional parent linkage (`parent` names the parent role, `parentRoleId` its instance).
+function roleStartEvent(index: number, roleId: string, role: string, extras: Record<string, unknown> = {}): WindowEvent {
+	return { index, timestamp: `2026-01-01T00:00:${String(index % 60).padStart(2, '0')}Z`, type: 'role_start', payload: { role, roleId, depth: 0, task: 't', ...extras } }
+}
+
+function roleFinishedEvent(index: number, roleId: string, role: string): WindowEvent {
+	return { index, timestamp: `2026-01-01T00:00:${String(index % 60).padStart(2, '0')}Z`, type: 'role_finished', payload: { role, roleId, depth: 0, status: 'success' } }
 }
 
 describe('buildTurnIndex', () => {
@@ -165,6 +176,21 @@ describe('buildTurnIndex', () => {
 		expect(entry.usage).toBeNull()
 		expect(entry.finishReason).toBeNull()
 		expect(entry.levelHint).toBeNull()
+	})
+
+	test('entries carry the payload roleId, falling back to the role name when absent', () => {
+		const entries = buildTurnIndex([
+			startEvent(0, 'planner', 'planner-0-1'),
+			callEvent(3, 'planner', { roleId: 'planner-0-1' }),
+			startEvent(5, 'coder'),
+			standardCallEvent(7, 'critic'),
+		])
+		// The paired start folds into its completed entry, which carries the llm_call payload's id.
+		expect(defined(entries[0], 'entries[0]').roleId).toBe('planner-0-1')
+		// A start without a roleId (old logs) falls back to the role name…
+		expect(defined(entries[1], 'entries[1]').roleId).toBe('coder')
+		// …and a standard-level llm_call drops the id the same way.
+		expect(defined(entries[2], 'entries[2]').roleId).toBe('critic')
 	})
 
 	test('same-name nesting pairs LIFO, like brackets', () => {
@@ -306,6 +332,170 @@ describe('turn-list paging offset math', () => {
 	})
 })
 
+describe('instancesOf', () => {
+	test('lists real instances from role_start/role_finished with parent linkage and live/finished status', () => {
+		const instances = instancesOf([
+			roleStartEvent(0, 'orchestrator-0', 'orchestrator'),
+			roleStartEvent(2, 'coder-1', 'coder', { depth: 1, parent: 'orchestrator', parentRoleId: 'orchestrator-0' }),
+			roleFinishedEvent(9, 'coder-1', 'coder'),
+		])
+		expect(instances).toHaveLength(2)
+		expect(defined(instances[0], 'instances[0]')).toEqual({ roleId: 'orchestrator-0', role: 'orchestrator', parentRoleId: null, parentRole: null, live: true })
+		expect(defined(instances[1], 'instances[1]')).toEqual({ roleId: 'coder-1', role: 'coder', parentRoleId: 'orchestrator-0', parentRole: 'orchestrator', live: false })
+	})
+
+	test('a start without a finish in the window reads live; a finish without a start is still listed', () => {
+		const instances = instancesOf([
+			roleStartEvent(0, 'coder-1', 'coder'),
+			roleFinishedEvent(1, 'planner-0-1', 'planner'),
+		])
+		expect(defined(instances[0], 'instances[0]').live).toBe(true)
+		const finished = defined(instances[1], 'instances[1]')
+		expect(finished.roleId).toBe('planner-0-1')
+		expect(finished.live).toBe(false)
+	})
+
+	test('turn events without a roleId ensure a role-name fallback instance whose live flag follows its newest turn event', () => {
+		const inFlight = instancesOf([startEvent(0, 'coder')])
+		expect(inFlight).toHaveLength(1)
+		expect(defined(inFlight[0], 'inFlight[0]')).toEqual({ roleId: 'coder', role: 'coder', parentRoleId: null, parentRole: null, live: true })
+		const settled = instancesOf([startEvent(0, 'coder'), callEvent(1, 'coder', { roleId: undefined })])
+		expect(defined(settled[0], 'settled[0]').live).toBe(false)
+	})
+
+	test('a turn event carrying a roleId ensures the real instance when its role_start paged out', () => {
+		const instances = instancesOf([callEvent(0, 'coder', { roleId: 'coder-1-9' })])
+		expect(instances).toHaveLength(1)
+		expect(defined(instances[0], 'instances[0]')).toEqual({ roleId: 'coder-1-9', role: 'coder', parentRoleId: null, parentRole: null, live: true })
+	})
+
+	test('empty and malformed windows yield no instances, and malformed rows are skipped', () => {
+		expect(instancesOf([])).toEqual([])
+		expect(instancesOf(null)).toEqual([])
+		expect(instancesOf('broken')).toEqual([])
+		expect(instancesOf([null, 'broken', { index: 0, type: 'role_start', payload: 'not-a-record' }, { index: 1, type: 'role_start', payload: { role: 'x' } }, { index: 2, type: 'llm_call', payload: { role: '' } }])).toEqual([])
+	})
+})
+
+describe('deriveInstanceChain', () => {
+	// New logs: every role_start names its parent instance exactly.
+	const exactEvents = [
+		roleStartEvent(0, 'orchestrator-0', 'orchestrator', { depth: 0 }),
+		roleStartEvent(2, 'coder-1', 'coder', { depth: 1, parent: 'orchestrator', parentRoleId: 'orchestrator-0' }),
+		roleStartEvent(5, 'coder-1-2', 'coder', { depth: 2, parent: 'coder', parentRoleId: 'coder-1' }),
+	]
+
+	test('walks a deep chain root → scoped instance through the exact parentRoleId linkage', () => {
+		expect(deriveInstanceChain(exactEvents, 'coder-1-2')).toEqual([
+			{ roleId: 'orchestrator-0', role: 'orchestrator' },
+			{ roleId: 'coder-1', role: 'coder' },
+			{ roleId: 'coder-1-2', role: 'coder' },
+		])
+	})
+
+	test('ancestors outside the loaded window end the walk at the root-most known start', () => {
+		const partialWindow = [roleStartEvent(5, 'coder-1-2', 'coder', { depth: 2, parent: 'coder', parentRoleId: 'coder-1' })]
+		expect(deriveInstanceChain(partialWindow, 'coder-1-2')).toEqual([{ roleId: 'coder-1-2', role: 'coder' }])
+	})
+
+	test('old logs without parentRoleId fall back to the latest same-named role_start at depth − 1', () => {
+		const legacyEvents = [
+			roleStartEvent(0, 'orchestrator-0', 'orchestrator', { depth: 0 }),
+			roleStartEvent(2, 'coder-1', 'coder', { depth: 1, parent: 'orchestrator' }),
+			roleStartEvent(5, 'coder-2', 'coder', { depth: 1, parent: 'orchestrator' }),
+			roleStartEvent(8, 'coder-2-4', 'coder', { depth: 2, parent: 'coder' }),
+		]
+		// The latest depth-1 'coder' start before the child's own is the true parent (the executor's single-flight depth-first execution), not the earlier sibling.
+		expect(deriveInstanceChain(legacyEvents, 'coder-2-4')).toEqual([
+			{ roleId: 'orchestrator-0', role: 'orchestrator' },
+			{ roleId: 'coder-2', role: 'coder' },
+			{ roleId: 'coder-2-4', role: 'coder' },
+		])
+	})
+
+	test('a root scopes to a single crumb', () => {
+		expect(deriveInstanceChain(exactEvents, 'orchestrator-0')).toEqual([{ roleId: 'orchestrator-0', role: 'orchestrator' }])
+	})
+
+	test('an instance with no role_start in the window renders as a lone crumb, its role read from the turn payload', () => {
+		const events = [...exactEvents, callEvent(9, 'coder', { roleId: 'coder-1-9' })]
+		expect(deriveInstanceChain(events, 'coder-1-9')).toEqual([{ roleId: 'coder-1-9', role: 'coder' }])
+		expect(deriveInstanceChain(exactEvents, 'mystery-9')).toEqual([{ roleId: 'mystery-9', role: 'mystery-9' }])
+	})
+
+	test('an empty or malformed window degrades to the lone crumb, and a malformed cycle ends the walk', () => {
+		expect(deriveInstanceChain([], 'coder-1')).toEqual([{ roleId: 'coder-1', role: 'coder-1' }])
+		expect(deriveInstanceChain(null, 'coder-1')).toEqual([{ roleId: 'coder-1', role: 'coder-1' }])
+		expect(deriveInstanceChain('broken', 'coder-1')).toEqual([{ roleId: 'coder-1', role: 'coder-1' }])
+		expect(deriveInstanceChain(exactEvents, null)).toEqual([])
+		const cyclic = [
+			roleStartEvent(0, 'a-0', 'a', { depth: 0, parentRoleId: 'b-0' }),
+			roleStartEvent(1, 'b-0', 'b', { depth: 1, parentRoleId: 'a-0' }),
+		]
+		expect(deriveInstanceChain(cyclic, 'a-0')).toEqual([{ roleId: 'b-0', role: 'b' }, { roleId: 'a-0', role: 'a' }])
+	})
+})
+
+describe('deriveDefaultScopeRoleId', () => {
+	test('the newest in-flight turn wins; otherwise the newest turn of any kind', () => {
+		const entries = buildTurnIndex([
+			callEvent(1, 'planner', { roleId: 'planner-0-1' }),
+			callEvent(5, 'critic', { roleId: 'critic-0-1' }),
+		])
+		expect(deriveDefaultScopeRoleId(entries)).toBe('critic-0-1')
+		const withFlight = buildTurnIndex([
+			callEvent(1, 'planner', { roleId: 'planner-0-1' }),
+			startEvent(3, 'coder', 'coder-1-2'),
+		])
+		expect(deriveDefaultScopeRoleId(withFlight)).toBe('coder-1-2')
+		// Any unmatched start outranks a newer completed call — the spec's "newest llm_call_start without matching llm_call, else the newest llm_call".
+		const mixed = buildTurnIndex([
+			startEvent(1, 'coder', 'coder-1-2'),
+			callEvent(5, 'critic', { roleId: 'critic-0-1' }),
+		])
+		expect(deriveDefaultScopeRoleId(mixed)).toBe('coder-1-2')
+	})
+
+	test('an empty or malformed list reads as no default scope', () => {
+		expect(deriveDefaultScopeRoleId([])).toBeNull()
+		expect(deriveDefaultScopeRoleId(null)).toBeNull()
+		expect(deriveDefaultScopeRoleId('broken')).toBeNull()
+	})
+})
+
+describe('scopeTurnEntries', () => {
+	const entries = buildTurnIndex([
+		startEvent(0, 'planner', 'planner-0-1'),
+		callEvent(1, 'planner', { roleId: 'planner-0-1' }),
+		startEvent(2, 'planner', 'planner-0-1'),
+		callEvent(3, 'planner', { roleId: 'planner-0-1' }),
+		callEvent(5, 'coder', { roleId: 'coder-1-2' }),
+		startEvent(7, 'coder', 'coder-1-2'),
+	])
+
+	test('keeps only the scoped instance turns, renumbered within the instance', () => {
+		const scoped = scopeTurnEntries(entries, 'coder-1-2')
+		expect(scoped.map((entry) => entry.eventIndex)).toEqual([5, 7])
+		expect(scoped.map((entry) => entry.turnNumber)).toEqual([1, 2])
+		expect(defined(scoped[0], 'scoped[0]').kind).toBe('completed')
+		expect(defined(scoped[1], 'scoped[1]').kind).toBe('in_flight')
+		expect(defined(scoped[1], 'scoped[1]').role).toBe('coder')
+	})
+
+	test('a completed selection keeps its identity across renumbering', () => {
+		const scoped = scopeTurnEntries(entries, 'planner-0-1')
+		expect(scoped.map((entry) => entry.eventIndex)).toEqual([1, 3])
+		expect(scoped.map((entry) => entry.turnNumber)).toEqual([1, 2])
+	})
+
+	test('an unset or unknown scope yields an empty list, and malformed input is tolerated', () => {
+		expect(scopeTurnEntries(entries, null)).toEqual([])
+		expect(scopeTurnEntries(entries, '')).toEqual([])
+		expect(scopeTurnEntries(entries, 'nobody-0-9')).toEqual([])
+		expect(scopeTurnEntries(null, 'coder-1-2')).toEqual([])
+	})
+})
+
 describe('resolveSelection', () => {
 	const entries = buildTurnIndex([
 		callEvent(1, 'planner'),
@@ -328,16 +518,37 @@ describe('resolveSelection', () => {
 		expect(resolveSelection(2.5, entries)).toBeNull()
 		expect(resolveSelection(1, [])).toBeNull()
 	})
+
+	test('operates within the scoped instance turns: another instance scope deselects, the same scope keeps and maps', () => {
+		const grown = buildTurnIndex([
+			startEvent(0, 'planner', 'planner-0-1'),
+			callEvent(1, 'planner', { roleId: 'planner-0-1' }),
+			startEvent(3, 'coder', 'coder-1-2'),
+			callEvent(4, 'coder', { roleId: 'coder-1-2' }),
+		])
+		const plannerScope = scopeTurnEntries(grown, 'planner-0-1')
+		const coderScope = scopeTurnEntries(grown, 'coder-1-2')
+		// A selection made on the planner's turn survives within the planner scope and maps when its in-flight start completes…
+		expect(resolveSelection(0, plannerScope)).toBe(1)
+		// …and reads as deselected once the operator re-scopes to the coder.
+		expect(resolveSelection(0, coderScope)).toBeNull()
+		// The coder's own in-flight selection maps to its completed entry within its scope.
+		expect(resolveSelection(3, coderScope)).toBe(4)
+	})
 })
 
 describe('InspectorModal', () => {
 	function renderModal(overrides: Record<string, unknown> = {}): Vnode {
 		return InspectorModal(fakeH, {
 			runLabel: 'run-2026',
-			turns: { loadState: 'ready', entries: [], total: 0, tailOffset: 0, selectedEventIndex: null, olderLoading: false },
+			turns: { loadState: 'ready', entries: [], total: 0, tailOffset: 0, selectedEventIndex: null, scopedRoleId: null, olderLoading: false },
+			instances: [],
+			chain: [],
+			scopedRoleId: null,
 			detailState: null,
 			renderMarkdown: fakeRenderMarkdown,
 			onSelectTurn: () => undefined,
+			onScopeInstance: () => undefined,
 			onLoadOlder: () => undefined,
 			onClose: () => undefined,
 			...overrides,
@@ -485,8 +696,102 @@ describe('InspectorModal', () => {
 	test('the empty and failed turn lists read honestly', () => {
 		const empty = renderModal()
 		expect(collectText(empty)).toContain('No LLM turns logged')
-		const failed = renderModal({ turns: { loadState: 'failed', entries: [], total: null, tailOffset: null, selectedEventIndex: null, olderLoading: false } })
+		const failed = renderModal({ turns: { loadState: 'failed', entries: [], total: null, tailOffset: null, selectedEventIndex: null, scopedRoleId: null, olderLoading: false } })
 		expect(collectText(failed)).toContain('could not be loaded')
+	})
+
+	test('a scope with no turns in the loaded range reads as wayfinding, not an empty log', () => {
+		const scopedEmpty = renderModal({ turns: { loadState: 'ready', entries: [], total: 0, tailOffset: 0, selectedEventIndex: null, scopedRoleId: null, olderLoading: false }, scopedRoleId: 'coder-1-2' })
+		expect(collectText(scopedEmpty)).toContain('No turns logged for this instance in the loaded range yet.')
+		expect(collectText(scopedEmpty)).not.toContain('No LLM turns logged')
+	})
+
+	test('the breadcrumb renders the chain root-first with the scoped crumb current, and crumbs re-scope via the instance action', () => {
+		const chain = [
+			{ roleId: 'orchestrator-0', role: 'orchestrator' },
+			{ roleId: 'coder-1', role: 'coder' },
+			{ roleId: 'coder-1-2', role: 'coder' },
+		]
+		const modal = renderModal({ chain, scopedRoleId: 'coder-1-2' })
+		const row = defined(allByClass(modal, 'inspector-breadcrumb-row')[0], 'breadcrumb row')
+		const crumbs = allByClass(row, 'inspector-crumb')
+		expect(crumbs).toHaveLength(3)
+		expect(allByClass(row, 'inspector-crumb-sep')).toHaveLength(2)
+		expect(collectText(defined(crumbs[0], 'crumbs[0]'))).toBe('orchestrator-0')
+		expect(collectText(defined(crumbs[2], 'crumbs[2]'))).toBe('coder-1-2')
+		expect(defined(crumbs[2], 'crumbs[2]').props.disabled).toBe(true)
+		expect(classOf(defined(crumbs[2], 'crumbs[2]').props)).toContain('is-current')
+		expect(defined(crumbs[0], 'crumbs[0]').props.disabled).toBe(false)
+		// Each crumb wires the scope action with the instance id as the tuple payload.
+		expect(actionTuple(defined(crumbs[0], 'crumbs[0]').props.onclick)[1]).toBe('orchestrator-0')
+		expect(actionTuple(defined(crumbs[1], 'crumbs[1]').props.onclick)[1]).toBe('coder-1')
+	})
+
+	test('the parent affordance appears only on a chain deeper than one and scopes to the immediate parent', () => {
+		const shallow = renderModal({ chain: [{ roleId: 'orchestrator-0', role: 'orchestrator' }] })
+		expect(allByClass(shallow, 'inspector-parent-up')).toHaveLength(0)
+		const deep = renderModal({
+			chain: [
+				{ roleId: 'orchestrator-0', role: 'orchestrator' },
+				{ roleId: 'coder-1', role: 'coder' },
+			],
+			scopedRoleId: 'coder-1',
+		})
+		const up = defined(allByClass(deep, 'inspector-parent-up')[0], 'parent affordance')
+		expect(collectText(up)).toBe('↑ parent')
+		expect(actionTuple(up.props.onclick)[1]).toBe('orchestrator-0')
+	})
+
+	test('the instance dropdown lists role name plus status, marks the scoped one selected, and wires the change event bare', () => {
+		const onChange = () => undefined
+		const modal = renderModal({
+			instances: [
+				{ roleId: 'orchestrator-0', role: 'orchestrator', parentRoleId: null, parentRole: null, live: true },
+				{ roleId: 'coder-1-2', role: 'coder', parentRoleId: 'orchestrator-0', parentRole: 'orchestrator', live: false },
+			],
+			scopedRoleId: 'coder-1-2',
+			onScopeInstance: onChange,
+		})
+		const select = defined(allByClass(modal, 'inspector-instance-select')[0], 'instance select')
+		expect(select.props.onchange).toBe(onChange)
+		const options = allByTag(select, 'option')
+		expect(options).toHaveLength(2)
+		expect(collectText(defined(options[0], 'options[0]'))).toBe('orchestrator (orchestrator-0) — live')
+		expect(collectText(defined(options[1], 'options[1]'))).toBe('coder (coder-1-2) — finished')
+		expect(defined(options[1], 'options[1]').props.selected).toBe(true)
+		expect(defined(options[0], 'options[0]').props.selected).toBe(false)
+		expect(select.props.value).toBe('coder-1-2')
+	})
+
+	test('no loaded instances render neither the breadcrumb row nor the dropdown', () => {
+		const modal = renderModal()
+		expect(allByClass(modal, 'inspector-breadcrumb-row')).toHaveLength(0)
+		expect(allByClass(modal, 'inspector-instance-select')).toHaveLength(0)
+	})
+
+	test('the live partial pairs on the instance id first so a same-named sibling ghost never hosts another instance stream', () => {
+		const flightEntries = buildTurnIndex([startEvent(2, 'coder', 'coder-1-1')])
+		const matching = renderModal({
+			turns: { loadState: 'ready', entries: flightEntries, total: 9, tailOffset: 0, selectedEventIndex: null, scopedRoleId: 'coder-1-1', olderLoading: false },
+			scopedRoleId: 'coder-1-1',
+			livePartial: { roleId: 'coder-1-1', role: 'coder', reasoning: 'thinking', content: '' },
+		})
+		expect(allByClass(matching, 'inspector-live-partial')).toHaveLength(1)
+		// Same role name, different instance: no block.
+		const mismatched = renderModal({
+			turns: { loadState: 'ready', entries: flightEntries, total: 9, tailOffset: 0, selectedEventIndex: null, scopedRoleId: 'coder-1-1', olderLoading: false },
+			scopedRoleId: 'coder-1-1',
+			livePartial: { roleId: 'coder-1-2', role: 'coder', reasoning: 'drifting', content: '' },
+		})
+		expect(allByClass(mismatched, 'inspector-live-partial')).toHaveLength(0)
+		// A fallback entry (old log, no roleId on the start) still pairs on the role name.
+		const fallbackEntries = buildTurnIndex([startEvent(2, 'coder')])
+		const fallback = renderModal({
+			turns: { loadState: 'ready', entries: fallbackEntries, total: 9, tailOffset: 0, selectedEventIndex: null, scopedRoleId: 'coder', olderLoading: false },
+			scopedRoleId: 'coder',
+			livePartial: { roleId: 'coder-1-1', role: 'coder', reasoning: 'legacy', content: '' },
+		})
+		expect(allByClass(fallback, 'inspector-live-partial')).toHaveLength(1)
 	})
 
 	test('constants match the endpoint contract sizes', () => {
