@@ -300,17 +300,17 @@ function PollSelectedRun(state) {
 	]
 }
 
-// The live InteractionModel the flow/sequence views render. The previous frame is kept so `deriveLifecycle` can diff entering/departing nodes; a 404 (the run directory exists but is not yet readable in the instant after submit) clears the model so the centerpiece shows its placeholder until the first readable frame lands. Every path also syncs the sequence-view scroll follower: the model update grows (or clears) the sequence content after the view patch.
+// The live InteractionModel the flow/sequence views render. The previous frame is kept so `deriveLifecycle` can diff entering/departing nodes; a 404 (the run directory exists but is not yet readable in the instant after submit) clears the model so the centerpiece shows its placeholder until the first readable frame lands. Every path also syncs the scroll followers: the model update grows (or clears) the sequence content after the view patch, and an open inspector modal's body element is replaced where the placeholder transitions to the model (the poll-time sync re-attaches its follower before the next content update can rely on it).
 function GotFlowModel(state, payload) {
 	const status = payload.status
 	const ok = payload.ok
 	const body = payload.body
-	if (status === 404) return [{ ...state, flowModel: null, previousFlowModel: null, serverAvailable: ok }, SyncSequenceFollower()]
-	if (!ok || body === null || typeof body !== 'object') return [{ ...state, serverAvailable: ok }, SyncSequenceFollower()]
+	if (status === 404) return [{ ...state, flowModel: null, previousFlowModel: null, serverAvailable: ok }, SyncSequenceFollower(), SyncInspectorFollower()]
+	if (!ok || body === null || typeof body !== 'object') return [{ ...state, serverAvailable: ok }, SyncSequenceFollower(), SyncInspectorFollower()]
 	if (!Array.isArray(body.participants) || !Array.isArray(body.operations) || typeof body.status !== 'string') {
-		return [{ ...state, serverAvailable: true }, SyncSequenceFollower()]
+		return [{ ...state, serverAvailable: true }, SyncSequenceFollower(), SyncInspectorFollower()]
 	}
-	return [{ ...state, previousFlowModel: state.flowModel, flowModel: body, serverAvailable: true }, SyncSequenceFollower()]
+	return [{ ...state, previousFlowModel: state.flowModel, flowModel: body, serverAvailable: true }, SyncSequenceFollower(), SyncInspectorFollower()]
 }
 
 function GotRunList(state, payload) {
@@ -702,8 +702,8 @@ function LogLevelSaveFailed(state) {
 }
 
 function SelectRun(state, runId) {
-	if (runId === state.selectedRunId) return [{ ...state, screen: 'watch' }, SyncSequenceFollower()]
-	// The flow model, its previous-frame diff, and the per-run modal state belong to the previously-selected run; a switch clears them so the centerpiece shows the new run's first frame without a stale lifecycle diff or a leftover modal. Selecting a run always lands on the watch screen (history rows and the in-progress pill both go through here). Clearing the model unmounts the sequence container, so the switch syncs its scroll follower (the new run's first frame re-attaches it, pinned to the bottom). The live partial belongs to the previous run too and clears with the rest (the stream subscription restarts onto the new run).
+	if (runId === state.selectedRunId) return [{ ...state, screen: 'watch' }, SyncSequenceFollower(), SyncInspectorFollower()]
+	// The flow model, its previous-frame diff, and the per-run modal state belong to the previously-selected run; a switch clears them so the centerpiece shows the new run's first frame without a stale lifecycle diff or a leftover modal. Selecting a run always lands on the watch screen (history rows and the in-progress pill both go through here). Clearing the model unmounts the sequence container, so the switch syncs its scroll follower (the new run's first frame re-attaches it, pinned to the bottom), and the cleared inspector unmounts the modal body (its follower detaches the same way). The live partial belongs to the previous run too and clears with the rest (the stream subscription restarts onto the new run).
 	return [
 		{
 			...state,
@@ -726,6 +726,7 @@ function SelectRun(state, runId) {
 			livePartial: null,
 		},
 		SyncSequenceFollower(),
+		SyncInspectorFollower(),
 	]
 }
 
@@ -955,8 +956,8 @@ function SetSequenceRolesOnly(state, event) {
 function SetScreen(state, screen) {
 	if (screen !== 'watch' && screen !== 'history' && screen !== 'compose' && screen !== 'queue') return state
 	// Leaving the watch screen unmounts the sequence container (the follower must detach) and returning to it remounts a fresh one; the swap syncs the follower either way.
-	// Modal state is deliberately kept alive across the swap: returning to watch restores the session's modal state (an open inspector, its loaded window and scope) instead of a fresh view.
-	return [{ ...state, screen }, SyncSequenceFollower()]
+	// Modal state is deliberately kept alive across the swap: returning to watch restores the session's modal state (an open inspector, its loaded window and scope) instead of a fresh view. The unmounted inspector body detaches its follower the same way, and returning to watch re-attaches it pinned.
+	return [{ ...state, screen }, SyncSequenceFollower(), SyncInspectorFollower()]
 }
 
 function ToggleHistoryExpanded(state, runId) {
@@ -1150,17 +1151,18 @@ function readableInspectorLogBody(payload) {
 function OpenInspectorModal(state, payload) {
 	if (typeof state.selectedRunId !== 'string' || state.selectedRunId === '') return state
 	const scopedRoleId = typeof payload === 'string' && payload !== '' ? payload : null
-	// A cheap probe (one event) learns the log's `total` so the first real fetch can start at the most recent window; the probe response's own event is discarded.
+	// A cheap probe (one event) learns the log's `total` so the first real fetch can start at the most recent window; the probe response's own event is discarded. Opening mounts the modal's transcript body, so the open also syncs its scroll follower (attaching fresh, pinned to the bottom).
 	return [
 		{ ...state, inspectorModalOpen: true, tooltip: null, inspector: { ...initialInspectorState(), scopedRoleId } },
 		CancelTooltipDismiss(),
+		SyncInspectorFollower(),
 		Fetch({ url: `api/runs/${encodeURIComponent(state.selectedRunId)}/log?limit=1`, ok: InspectorTotalLoaded, fail: InspectorLogLoadFailed }),
 	]
 }
 
 function CloseInspectorModal(state) {
-	// Closing ends the inspection session (scope, selection, and loaded window with it): reopening refetches from scratch, so no stale scope survives the close.
-	return { ...state, inspectorModalOpen: false, inspector: initialInspectorState() }
+	// Closing ends the inspection session (scope, selection, and loaded window with it): reopening refetches from scratch, so no stale scope survives the close. The sync detaches the transcript follower the unmounted body leaves behind.
+	return [{ ...state, inspectorModalOpen: false, inspector: initialInspectorState() }, SyncInspectorFollower()]
 }
 
 function InspectorTotalLoaded(state, payload) {
@@ -1183,7 +1185,7 @@ function InspectorWindowLoaded(state, payload) {
 	if (body === null) return [{ ...state, inspector: { ...initialInspectorState(), loadState: 'failed' }, serverAvailable: payload.ok }]
 	if (body.runId !== state.selectedRunId) return state
 	const entries = buildTurnIndex(body.events)
-	return { ...state, inspector: { ...state.inspector, loadState: 'ready', events: body.events, total: body.total, tailOffset: body.offset, entries, olderLoading: false }, livePartial: activeLivePartial(state.livePartial, entries), serverAvailable: true }
+	return [{ ...state, inspector: { ...state.inspector, loadState: 'ready', events: body.events, total: body.total, tailOffset: body.offset, entries, olderLoading: false }, livePartial: activeLivePartial(state.livePartial, entries), serverAvailable: true }, SyncInspectorFollower()]
 }
 
 function LoadOlderTurns(state) {
@@ -1204,7 +1206,7 @@ function OlderTurnsLoaded(state, payload) {
 		return { ...state, inspector: { ...state.inspector, olderLoading: false } }
 	}
 	const events = [...body.events, ...state.inspector.events]
-	return { ...state, inspector: { ...state.inspector, events, tailOffset: body.offset, entries: buildTurnIndex(events), olderLoading: false }, serverAvailable: true }
+	return [{ ...state, inspector: { ...state.inspector, events, tailOffset: body.offset, entries: buildTurnIndex(events), olderLoading: false }, serverAvailable: true }, SyncInspectorFollower()]
 }
 
 function InspectorOlderLoadFailed(state) {
@@ -1235,7 +1237,7 @@ function InspectorTailRefreshed(state, payload) {
 	const events = [...state.inspector.events, ...body.events]
 	const entries = buildTurnIndex(events)
 	// The pairing decides the live partial's fate here too: the completed in-flight turn's partial clears the moment the poll records its `llm_call` (see "Live token stream").
-	return { ...state, inspector: { ...state.inspector, events, total: body.total, entries }, livePartial: activeLivePartial(state.livePartial, entries), serverAvailable: true }
+	return [{ ...state, inspector: { ...state.inspector, events, total: body.total, entries }, livePartial: activeLivePartial(state.livePartial, entries), serverAvailable: true }, SyncInspectorFollower()]
 }
 
 // Re-scopes the transcript to an instance. The breadcrumb chain derives from the loaded events, so setting the scope pushes the crumb on, and the ↑ parent affordance pops back.
@@ -1282,11 +1284,11 @@ function ToggleWireDetail(eventIndex) {
 	}
 }
 
-// The wire fetch resolved: a body carrying `detailSections` (array or explicit null) caches ready; anything else evicts so re-opening retries. Fresh state re-renders the open expander in place; a response landing after the modal closed only updates the cache.
+// The wire fetch resolved: a body carrying `detailSections` (array or explicit null) caches ready; anything else evicts so re-opening retries. Fresh state re-renders the open expander in place (its fetched sections grow the transcript, so the sync keeps a pinned view at the bottom); a response landing after the modal closed only updates the cache.
 function WireDetailLoaded(runId, eventIndex) {
 	return function WireDetailLoadedForTurn(state, payload) {
 		wireDetails.recordResponse(runId, eventIndex, payload.ok, payload.body)
-		return state.inspectorModalOpen === true ? { ...state } : state
+		return state.inspectorModalOpen === true ? [{ ...state }, SyncInspectorFollower()] : state
 	}
 }
 
@@ -1323,9 +1325,9 @@ function InspectorModalForRun(state) {
 // The websocket deltas fold into `livePartial` — the ephemeral in-flight partial the inspector modal renders under the matching in-flight row. The polled run log stays the sole authority for turn history and run state; this only feeds live text, and every path that could leave the partial stale clears it.
 
 function GotLiveDelta(state, delta) {
-	// Deltas flow only for the active run; a historical selection (or no selection) ignores them.
+	// Deltas flow only for the active run; a historical selection (or no selection) ignores them. Each delta grows the modal's in-flight section, so the transcript follower syncs with the partial too (a no-op while the modal is closed — the sync finds no body element).
 	if (state.selectedRunId === null || delta.runId !== state.selectedRunId) return state
-	return { ...state, livePartial: nextLivePartial(state.livePartial, delta) }
+	return [{ ...state, livePartial: nextLivePartial(state.livePartial, delta) }, SyncInspectorFollower()]
 }
 
 // Socket phase changes clear the partial. On a disconnect the text is stale (and would otherwise linger under the in-flight row); on a fresh connect the accumulation starts empty because deltas resume mid-turn with the middle lost, and showing a gapped text as if continuous would be wrong. Only live partial text is ever lost — the polled log is untouched, and no error surface exists anywhere.
@@ -1831,6 +1833,31 @@ function runSyncSequenceFollower(_dispatch, _payload) {
 
 function SyncSequenceFollower() {
 	return [runSyncSequenceFollower, null]
+}
+
+// The inspector modal's transcript body follows new content while the operator sits at its bottom — live partials, newly completed turns, tail refreshes, and wire expanders all grow it — the same follow-with-free-scroll contract the sequence container gets, through the same shared follower (see scroll-follow.js and runSyncSequenceFollower). The sync defers to its own requestAnimationFrame so the modal's patch has landed before it runs, attaches a fresh follower whenever the body element was replaced (modal open/close, screen swaps, the placeholder-to-model transition all remount it), detaches when the element is gone, and pins to the bottom on every wired update while still attached.
+let inspectorFollower = null
+
+function runSyncInspectorFollower(_dispatch, _payload) {
+	requestAnimationFrame(() => {
+		const container = document.querySelector('.inspector-modal-body')
+		if (!(container instanceof HTMLElement)) {
+			if (inspectorFollower !== null) {
+				inspectorFollower.destroy()
+				inspectorFollower = null
+			}
+			return
+		}
+		if (inspectorFollower === null || inspectorFollower.element !== container) {
+			if (inspectorFollower !== null) inspectorFollower.destroy()
+			inspectorFollower = createScrollFollower(container)
+		}
+		inspectorFollower.follow()
+	})
+}
+
+function SyncInspectorFollower() {
+	return [runSyncInspectorFollower, null]
 }
 
 // The watch screen fills the viewport below the top bar: a controls row, the flex-filling stage, and the now-caption. The Flow view (product surface) and the Sequence view (debug surface) are independent leaves over the same model; the toggle swaps which renders without a fetch. The sequence view mounts inside a vertical scroll container because its timeline grows long, while the flow view scales to the stage.
