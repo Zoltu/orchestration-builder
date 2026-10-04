@@ -99,7 +99,7 @@
 		},
 		"architecture_reviewer": {
 			"systemPrompt": "prompts/architecture_reviewer.md",
-			"tools": ["list_directory", "glob_files", "read_file", "read_file_partial", "search_text", "repo_map", "finish"],
+			"tools": ["list_directory", "glob_files", "read_file", "read_file_partial", "read_plan", "search_text", "repo_map", "finish"],
 			"label": {
 				"detailed": ["Architecture Reviewer"],
 				"friendly": ["Architecture Reviewer"],
