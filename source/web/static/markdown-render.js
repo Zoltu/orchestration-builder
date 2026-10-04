@@ -1,6 +1,6 @@
 // Markdown → sanitized hyperapp vnode pipeline, shared by the product client (`app.js`) and the demo harness.
 //
-// Agent-authored prose (task, result summary, ask_human question text/context, error message) is Markdown the UI renders as formatted text rather than literal punctuation. `showdown` (window.showdown) turns it into HTML, `highlight.js` (window.hljs) highlights fenced code, that HTML is parsed into a neutral tree by `DOMParser`, walked through the allowlist in `markdown.js`, and turned back into hyperapp vnodes. The result is memoized by text so a per-second poll does not re-run showdown/highlight.js on unchanged content, and the cached vnodes are reference-stable so the renderer's diff no-ops on a steady view.
+// Agent-authored prose (task, result summary, ask_human question text/context, error message) is Markdown the UI renders as formatted text rather than literal punctuation. `showdown` (window.showdown) turns it into HTML, `highlight.js` (window.hljs) highlights fenced code, that HTML is parsed into a neutral tree by `DOMParser`, and walked through the allowlist in `markdown.js`. The sanitized neutral tree is memoized by text so a per-second poll does not re-run showdown/highlight.js on unchanged content; the hyperapp vnodes are then rebuilt from it on every call — they must never be cached, because hyperapp's differ assigns each vnode's `node` property in place, so a vnode object shared across tree positions (the same text can render in several turns) would have its `node` claimed by one position and left stale at the others; the next position shift (an inspector "Older turns" page prepend, a window resync, a turn completing) then makes the differ patch through the stale reference, which throws DOMException mid-patch and leaves the mounted tree corrupted.
 //
 // This module is the browser-facing half of the pipeline: it touches the window globals (showdown, hljs) and the DOM (DOMParser), so it lives here rather than in `markdown.js` (which is a pure transform over the neutral tree and imports nothing). `h` is passed into the factory rather than imported so the pipeline is exercisable in tests with a fake `h` and so both the product client and the harness share one implementation. See docs/security.md "Web client rendering pipeline" for the threat model: the model is a trusted component and this is a defense-in-depth backstop against prompt injection, never the primary defense.
 
@@ -65,7 +65,7 @@ function childNodesToNodes(childNodes) {
 	return out
 }
 
-// Builds a `renderMarkdown(text)` closure bound to the supplied `h`. A single showdown Converter is constructed lazily on first use and reused for every render; GFM tables and strikethrough are enabled and noHeaderId suppresses showdown's auto-generated heading ids (anchor links the UI does not need and that would only add attributes for the sanitizer to strip). Empty/absent input yields the em-dash placeholder the non-Markdown fields also use; if the vendored libraries are unavailable or showdown throws, the raw text is returned as a single text node so the field stays readable instead of blank.
+// Builds a `renderMarkdown(text)` closure bound to the supplied `h`. A single showdown Converter is constructed lazily on first use and reused for every render; GFM tables and strikethrough are enabled and noHeaderId suppresses showdown's auto-generated heading ids (anchor links the UI does not need and that would only add attributes for the sanitizer to strip). Empty/absent input yields the em-dash placeholder the non-Markdown fields also use; if the vendored libraries are unavailable or showdown throws, the raw text is returned as a single text node so the field stays readable instead of blank. The memo holds the sanitized neutral tree (the expensive showdown/highlight/parse/sanitize result), never vnodes — see the module header for why shared vnode objects corrupt hyperapp's differ.
 export function createMarkdownRenderer(h) {
 	const cache = new Map()
 	let converter = null
@@ -91,27 +91,26 @@ export function createMarkdownRenderer(h) {
 		}
 		if (typeof html !== 'string') return [text]
 		html = highlightCodeBlocks(html)
+		const cachedTree = cache.get(text)
+		if (cachedTree !== undefined) {
+			// Re-insert on hit so the Map's insertion order tracks recency and eviction removes the least-recently-used entry, not the least-recently-inserted one.
+			cache.delete(text)
+			cache.set(text, cachedTree)
+			return htmlNodesToVnodes(cachedTree, h)
+		}
 		const sanitized = sanitizeNodes(parseHtmlToNodes(html))
+		cache.set(text, sanitized)
+		while (cache.size > MARKDOWN_CACHE_MAX) {
+			const eldest = cache.keys().next()
+			if (eldest.done) break
+			cache.delete(eldest.value)
+		}
 		const vnodes = htmlNodesToVnodes(sanitized, h)
 		return vnodes.length > 0 ? vnodes : [text]
 	}
 
 	return function renderMarkdown(text) {
 		if (typeof text !== 'string' || text === '') return ['—']
-		const cached = cache.get(text)
-		if (cached !== undefined) {
-			// Re-insert on hit so the Map's insertion order tracks recency and eviction removes the least-recently-used entry, not the least-recently-inserted one.
-			cache.delete(text)
-			cache.set(text, cached)
-			return cached
-		}
-		const vnodes = textToVnodes(text)
-		cache.set(text, vnodes)
-		while (cache.size > MARKDOWN_CACHE_MAX) {
-			const eldest = cache.keys().next()
-			if (eldest.done) break
-			cache.delete(eldest.value)
-		}
-		return vnodes
+		return textToVnodes(text)
 	}
 }
