@@ -540,7 +540,7 @@ The file tools (`read_file`, `write_file`, `list_directory`, `glob_files`, `sear
 
 ## Effort channel
 
-The effort channel is a per-run, project-wide speed-vs-quality setting with three named tiers: `quick` (fastest and most direct), `standard`, and `thorough` (slowest and most careful). The three lowercase strings are the wire format everywhere: the HTTP API, `settings.json`, `meta.json`, checkpoints, and the `effort_set` log event all carry them verbatim. The executor provides the **channel only** — it accepts, persists, logs, and injects the tier; it makes no decision about what each tier *means*. The mapping from effort to concrete behavior (generation overrides, review-loop round caps, retry thresholds) lives entirely in the Guild prompts and is tunable by the Foundry, so hardcoding it in the executor would conflict with the Foundry's job.
+The effort channel is a per-run, project-wide speed-vs-quality setting with three named tiers: `quick` (fastest and most direct), `standard`, and `thorough` (slowest and most careful). The three lowercase strings are the wire format everywhere: the HTTP API, `settings.json`, `meta.json`, checkpoints, and the `effort_set` log event all carry them verbatim. The executor provides the **channel only** — it accepts, persists, logs, and injects the tier; it makes no decision about what each tier *means*. The mapping from effort to concrete behavior (generation overrides, the quality bar the review loops run to — what findings the leads act on and how convergence is confirmed, with no round caps — retry thresholds) lives entirely in the Guild prompts and is tunable by the Foundry, so hardcoding it in the executor would conflict with the Foundry's job.
 
 ### Resolution
 
