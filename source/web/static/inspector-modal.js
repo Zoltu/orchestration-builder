@@ -1,14 +1,16 @@
-// On-demand LLM request/response inspector for the run view: a stage-scoped modal listing the run's LLM turns (from the windowed log endpoint `GET /api/runs/:id/log`) with a detail pane that fetches one turn's full request/response bodies on demand (`GET /api/runs/:id/log?detail=<index>`, which folds an llm_call delta into the full conversation server-side). Proactive, not always-on: nothing here rides the 1s polls except the turn-list tail refresh while the modal is open on an active run, and detail bodies are fetched once per turn per session.
+// The run's LLM story for one agent instance: an on-demand modal over the run view that renders the scoped instance's turns as one continuous transcript (the inspector redesign, milestone 2). The turns come from the windowed log endpoint `GET /api/runs/:id/log`; each completed turn's `llm_call` payload carries the turn's NEW messages (the `sent` slice — the conversation opening on the first turn, then the prior response's echo, the tool results, and platform notices), the assistant response (`received`), the usage, and the finish reason, so the transcript performs no per-turn detail fetches: the loaded events are the story.
 //
-// Realtime contract: turns land at turn granularity only — the run log carries no token-level streaming. While a turn is in flight the log holds only its `llm_call_start` event (the role is known, the request and response are not), so the turn list renders that start as an "in flight" row and the tail refresh replaces it with the completed `llm_call` entry once the model responds. That delay is the intended behavior, not a defect. The live token stream (docs/reference.md "Live token stream") layers an optional refinement on top: the app passes the ephemeral `livePartial` it accumulates from the websocket, and this modal renders it as labeled reasoning/response under the matching in-flight row — nothing renders when the partial is absent, and the pairing this module derives is also what tells the app an in-flight turn has completed.
+// Reading order: the conversation opening (system prompt + task, the first turn's leading system/user messages) is hoisted into one collapsed expander above the turns; every turn then renders a quiet header (turn number within the instance, token bill, finish reason) followed by its new messages in order and its response — reasoning labeled 💭, all agent-authored prose through the sanitized Markdown pipeline. Tool calls render inline with their outcome joined from the tool result that answers them: the executor appends an assistant message holding all its calls first and then each result in call order, so pairing within a slice is positional. The echo assistant message at a slice's head renders nowhere — its content and calls are the previous turn's response section — which is why each turn contributes only its slice and the document never repeats itself.
 //
-// Under the run's `standard` logging level the log drops the sent/received bodies (see docs/reference.md "Logging level"), so a detail fetch returns only turn metadata; the detail pane then renders an honest degraded notice pointing at the logging-level setting instead of an empty error. The `h` and `renderMarkdown` dependencies are passed in rather than imported so the component stays free of hyperapp and showdown coupling and is exercisable in tests with fakes (mirroring question-modal.js / result-modal.js).
+// Realtime contract: turns land at turn granularity only — the run log carries no token-level streaming. While a turn is in flight the log holds only its `llm_call_start` event (the role is known, the request and response are not), so the transcript renders it as an in-flight section at the bottom, and the poll's tail refresh replaces it with the completed `llm_call` turn in sequence. The live token stream (docs/reference.md "Live token stream") layers an optional refinement on top: the app passes the ephemeral `livePartial` it accumulates from the websocket, and the in-flight section renders it as labeled reasoning/response — nothing renders when the partial is absent, and the pairing this module derives is also what tells the app an in-flight turn has completed.
 //
-// The turn list is windowed: the modal opens on the most recent `INSPECTOR_WINDOW_SIZE` log events and an "older turns" control pages back by the same size, growing the loaded range (the loaded events are kept so pairing an `llm_call_start` with its `llm_call` stays correct across page boundaries; the poll's tail refresh appends new events to the same range). The loaded range therefore grows while the modal stays open on an active run — turn-inspection sessions are expected to be short, and reopening the modal resets it — so past `INSPECTOR_RETENTION_LIMIT` loaded events the poll resyncs with a fresh tail window instead of appending, keeping long-lived sessions bounded.
+// Under the run's `standard` logging level the log drops the sent/received bodies (see docs/reference.md "Logging level"), so each turn renders its header plus an honest degraded notice pointing at the logging-level setting; the transcript stays navigable. The `h` and `renderMarkdown` dependencies are passed in rather than imported so the component stays free of hyperapp and showdown coupling and is exercisable in tests with fakes (mirroring question-modal.js / result-modal.js).
 //
-// The list is scoped to one agent instance (the inspector redesign, milestone 1): a run's turns are spread across its role instances (the orchestrator, each delegated child), so the modal shows the scoped instance's turns — renumbered within the instance — with a breadcrumb (`orchestrator-0 ▸ coder-1 ▸ coder-1-2`) for the delegation chain and a minimal instance dropdown for wayfinding (the redesign's view click-throughs land later). The scoped instance defaults to the most recently active one (the newest unmatched `llm_call_start`, else the newest `llm_call`), and the caller re-scopes via the breadcrumb/dropdown. Instance identity comes from the events' `roleId` fields, falling back to the role name where a payload carries none (old logs and the `standard` logging level, matching the conversation fold's tolerance in source/web/render.ts) — under that fallback the turns of a role's instances are indistinguishable and scope to the role name as one group.
+// The log window is the milestone 1 windowing: the modal opens on the most recent `INSPECTOR_WINDOW_SIZE` log events and an "older turns" control pages back by the same size, growing the loaded range (the poll's tail refresh appends new events to the same range, resyncing past `INSPECTOR_RETENTION_LIMIT`). Paging back grows the transcript toward its true beginning — the opening expander re-derives from whatever the loaded range's first turn carries.
 //
-// The pure helpers (the window-offset math, `deriveDetailBodyState`, and the instance/scope derivations) ship exported even though the component consumes them internally — per the labels.js convention, pure helpers are exported so the tests exercise the same implementations the view uses rather than a parallel copy.
+// The transcript is scoped to one agent instance (the inspector redesign, milestone 1): a run's turns are spread across its role instances (the orchestrator, each delegated child), so the modal shows the scoped instance's turns — renumbered within the instance — with a breadcrumb (`orchestrator-0 ▸ coder-1 ▸ coder-1-2`) for the delegation chain and a minimal instance dropdown for wayfinding. The scoped instance defaults to the most recently active one (the newest unmatched `llm_call_start`, else the newest `llm_call`), and the caller re-scopes via the breadcrumb/dropdown or an `agent` call's View affordance. Instance identity comes from the events' `roleId` fields, falling back to the role name where a payload carries none (old logs and the `standard` logging level, matching the conversation fold's tolerance in source/web/render.ts) — under that fallback the turns of a role's instances are indistinguishable and scope to the role name as one group.
+//
+// The pure helpers (the window-offset math, the transcript derivation, `childInstanceFor`, and the instance/scope derivations) ship exported even though the component consumes them internally — per the labels.js convention, pure helpers are exported so the tests exercise the same implementations the view uses rather than a parallel copy.
 
 import { isObject } from './guards.js'
 
@@ -22,7 +24,7 @@ export const INSPECTOR_PAGE_LIMIT = 500
 export const INSPECTOR_RETENTION_LIMIT = INSPECTOR_WINDOW_SIZE * 20
 
 /**
- * A log event as the windowed endpoint ships it: `{ index, timestamp, type, payload }`, where `index` is the event's log-wide position (the same identity `?detail=` addresses).
+ * A log event as the windowed endpoint ships it: `{ index, timestamp, type, payload }`, where `index` is the event's log-wide position.
  *
  * @typedef {Object} LogWindowEvent
  * @property {number} index
@@ -32,7 +34,7 @@ export const INSPECTOR_RETENTION_LIMIT = INSPECTOR_WINDOW_SIZE * 20
  */
 
 /**
- * One LLM turn as the turn list renders it. `eventIndex` is the identity used for selection and `?detail=` addressing (a completed turn's `llm_call` event; an in-flight turn's `llm_call_start` event). `roleId` is the turn's role-instance id — the payload's `roleId` when present, else the role name (old logs and the `standard` logging level carry no instance id on turn events, matching the conversation fold's tolerance), so an in-flight turn that completes keeps its instance and never jumps scope.
+ * One LLM turn as the turn index derives it. `eventIndex` is the turn's identity in the log (a completed turn's `llm_call` event; an in-flight turn's `llm_call_start` event). `roleId` is the turn's role-instance id — the payload's `roleId` when present, else the role name (old logs and the `standard` logging level carry no instance id on turn events, matching the conversation fold's tolerance), so an in-flight turn that completes keeps its instance and never jumps scope.
  *
  * @typedef {Object} TurnEntry
  * @property {'completed'|'in_flight'} kind
@@ -53,14 +55,6 @@ export const INSPECTOR_RETENTION_LIMIT = INSPECTOR_WINDOW_SIZE * 20
  * @property {number} completionTokens
  * @property {number} totalTokens
  * @property {number} [cachedPromptTokens]
- */
-
-/**
- * A detail section as the detail endpoint ships it (the `LogDetailSection` shape from source/web/render.ts): a machine label (`'sent'`, `'received'`, `'finish reason'`, `'usage'`) and the raw content.
- *
- * @typedef {Object} DetailSection
- * @property {string} label
- * @property {unknown} content
  */
 
 // --- Window offset math -----------------------------------------------------
@@ -130,7 +124,7 @@ function payloadLevelHint(payload) {
 }
 
 /**
- * The usage triple the turn list renders, or null when the payload carries none (absent, non-object, or non-numeric fields).
+ * The usage triple the transcript header renders, or null when the payload carries none (absent, non-object, or non-numeric fields).
  * @param {unknown} value
  * @returns {TurnUsage|null}
  */
@@ -147,7 +141,7 @@ function readUsage(value) {
 }
 
 /**
- * The event's log-wide index, or null when the window row does not carry a usable one (a non-integer or negative index cannot address `?detail=`).
+ * The event's log-wide index, or null when the window row does not carry a usable one (a non-integer or negative index cannot be a turn's identity).
  * @param {unknown} value
  * @returns {number|null}
  */
@@ -156,7 +150,7 @@ function readEventIndex(value) {
 	return value
 }
 
-// Derives the turn list from a window of log events (the shape `GET /api/runs/:id/log` returns). An `llm_call` event becomes a completed entry; an `llm_call_start` becomes an in-flight entry unless a matching `llm_call` for the same role follows it, in which case they pair into one completed entry. Matching is LIFO per role name so the same-name nesting the executor allows (a role spawning a same-named child) pairs like brackets — pairing stays name-keyed even though the events carry `roleId`, because a start may predate the executor's per-instance ids (old logs) and the executor's single-flight turn loop makes same-name nesting bracket-like; each entry's `roleId` comes from its own event's payload, falling back to the role name when absent. Entries come back in chronological (log) order with 1-based `turnNumber`s over the loaded events; malformed rows (non-objects, other types, non-record payloads, missing role, unusable index) are skipped so one torn row cannot corrupt the list. The log is append-only, so an in-flight entry that later completes is replaced wholesale by the next `buildTurnIndex` over the grown window.
+// Derives the turn index from a window of log events (the shape `GET /api/runs/:id/log` returns). An `llm_call` event becomes a completed entry; an `llm_call_start` becomes an in-flight entry unless a matching `llm_call` for the same role follows it, in which case they pair into one completed entry. Matching is LIFO per role name so the same-name nesting the executor allows (a role spawning a same-named child) pairs like brackets — pairing stays name-keyed even though the events carry `roleId`, because a start may predate the executor's per-instance ids (old logs) and the executor's single-flight turn loop makes same-name nesting bracket-like; each entry's `roleId` comes from its own event's payload, falling back to the role name when absent. Entries come back in chronological (log) order with 1-based `turnNumber`s over the loaded events; malformed rows (non-objects, other types, non-record payloads, missing role, unusable index) are skipped so one torn row cannot corrupt the list. The log is append-only, so an in-flight entry that later completes is replaced wholesale by the next `buildTurnIndex` over the grown window.
 /**
  * @param {unknown} logEvents
  * @returns {TurnEntry[]}
@@ -222,7 +216,7 @@ export function buildTurnIndex(logEvents) {
 }
 
 // --- Instance scoping --------------------------------------------------------
-// The modal scopes its turn list to one agent instance. Instances are known from `role_start`/`role_finished` events (which always carry `roleId`) and, where the loaded turn events predate per-instance ids (old logs, the `standard` logging level), from the turn events themselves falling back to the role name — so the dropdown always offers at least the identity the turn entries can scope to.
+// The modal scopes its transcript to one agent instance. Instances are known from `role_start`/`role_finished` events (which always carry `roleId`) and, where the loaded turn events predate per-instance ids (old logs, the `standard` logging level), from the turn events themselves falling back to the role name — so the dropdown always offers at least the identity the turn entries can scope to.
 
 /**
  * One agent instance present in the loaded event window, as the instance dropdown renders it.
@@ -287,7 +281,7 @@ export function instancesOf(logEvents) {
 			}
 			continue
 		}
-		// No id on the turn payload (old logs, the standard logging level): the role name is the only identity the turn list can scope to, and its live flag follows the newest turn event — a start reads as a turn in flight, a call as none.
+		// No id on the turn payload (old logs, the standard logging level): the role name is the only identity the transcript can scope to, and its live flag follows the newest turn event — a start reads as a turn in flight, a call as none.
 		instances.set(role, { roleId: role, role, parentRoleId: null, parentRole: null, live: type === 'llm_call_start' })
 	}
 	return [...instances.values()]
@@ -396,7 +390,7 @@ export function deriveDefaultScopeRoleId(entries) {
 	return newestInFlight ?? newest
 }
 
-// The turn entries of one instance, renumbered 1-based within the instance (the list shows the scoped instance's turns, so its numbering is the instance's own). An unset or empty scope yields an empty list — the dropdown is the way back. Entries are copied so the renumbering never mutates the full list.
+// The turn entries of one instance, renumbered 1-based within the instance (the transcript shows the scoped instance's turns, so its numbering is the instance's own). An unset or empty scope yields an empty list — the dropdown is the way back. Entries are copied so the renumbering never mutates the full list.
 /**
  * @param {unknown} entries
  * @param {unknown} scopedRoleId
@@ -414,74 +408,363 @@ export function scopeTurnEntries(entries, scopedRoleId) {
 	return scoped.map((entry, position) => ({ ...entry, turnNumber: position + 1 }))
 }
 
-// --- Detail body availability ------------------------------------------------
+// --- Transcript derivation ---------------------------------------------------
+// The scoped instance's turns as one continuous document. Each completed turn contributes only the slice its `llm_call` payload carries — its new messages plus its response — so stitching the turns in order never repeats a message: the echo assistant message at a slice's head is the previous turn's response (rendered there, with the calls and the outcome the slice's tool results supply), and a tool result that answers a call rendered in the previous turn's response is consumed by that rendering.
 
 /**
- * Whether a detail response carries the turn's message bodies: `'full'` when a `sent` or `received` section is present, `'degraded'` otherwise (metadata-only sections, no sections at all, or a malformed response — under the `standard` logging level bodies are dropped from the log itself, so the honest rendering is the degraded notice, not an error). The caller distinguishes a fetch failure via its own state.
- * @param {unknown} detailSections
- * @returns {'full'|'degraded'}
+ * The outcome a tool result reports, as the transcript renders it: the result kind when the serialization names one, and a one-line summary.
+ *
+ * @typedef {Object} TranscriptOutcome
+ * @property {string|null} kind
+ * @property {string} summary
  */
-export function deriveDetailBodyState(detailSections) {
-	if (!Array.isArray(detailSections)) return 'degraded'
-	for (const section of detailSections) {
-		if (!isObject(section)) continue
-		if (section['label'] === 'sent' || section['label'] === 'received') return 'full'
+
+/**
+ * One of a turn's new messages as the transcript renders it. Assistant messages never render (their content and calls are the previous turn's response section), so a message is a user/system prose message or a tool result with its parsed outcome.
+ *
+ * @typedef {Object} TranscriptMessage
+ * @property {string} role
+ * @property {string} content
+ * @property {TranscriptOutcome|null} outcome tool messages only
+ */
+
+/**
+ * One tool call of the assistant's response: the call's identity, its raw arguments text, and the outcome of the tool result that answered it — null when no answered result is in the loaded window (the call belongs to the newest turn, or the answering turn's slice is not logged).
+ *
+ * @typedef {Object} TranscriptToolCall
+ * @property {string} id
+ * @property {string} name
+ * @property {string} argumentsText
+ * @property {TranscriptOutcome|null} outcome
+ */
+
+/**
+ * One turn of the transcript. `opening` carries the hoisted conversation opening (the first turn's leading system/user messages — the system prompt and the task; empty on every other turn); `messages` the turn's remaining new messages in order; `received` the response (null for an in-flight turn and for a turn whose bodies the standard logging level dropped).
+ *
+ * @typedef {Object} TranscriptTurn
+ * @property {'completed'|'in_flight'} kind
+ * @property {number} turnNumber
+ * @property {number} eventIndex
+ * @property {string} role
+ * @property {string} roleId
+ * @property {string|null} timestamp
+ * @property {TurnUsage|null} usage
+ * @property {string|null} finishReason
+ * @property {'full'|'standard'|null} bodyLevel
+ * @property {TranscriptMessage[]} opening
+ * @property {TranscriptMessage[]} messages
+ * @property {{ reasoning: string, content: string, toolCalls: TranscriptToolCall[] }|null} received
+ */
+
+// The loaded events indexed by log position, so each turn entry can read its own `llm_call` payload in one pass. Non-record payloads index as null and read as body-less.
+/**
+ * @param {unknown[]} logEvents
+ * @returns {Map<number, unknown>}
+ */
+function payloadIndex(logEvents) {
+	const byIndex = new Map()
+	for (const event of logEvents) {
+		if (!isObject(event)) continue
+		const index = readEventIndex(event['index'])
+		if (index === null) continue
+		byIndex.set(index, isObject(event['payload']) ? event['payload'] : null)
 	}
-	return 'degraded'
+	return byIndex
 }
 
-// --- Selection continuity ----------------------------------------------------
-
+// The validated sent slice of an `llm_call` payload: each message as the transcript renders it — role, content, the parsed outcome of tool results, and the raw tool calls assistant messages carry (so the slice walk can join them with the results that follow). Messages that are not records or lack a role are skipped; null when the payload carries no slice (the standard logging level dropped the bodies).
 /**
- * The selected turn's event index in the freshly derived list, given the selection made against the previous list. The log is append-only, so a surviving index keeps the selection; an in-flight turn's start index that has since paired maps to its completed entry (so a selected "in flight" row seamlessly becomes its completed detail); anything else reads as deselected.
- * @param {unknown} previousEventIndex
- * @param {TurnEntry[]} entries
- * @returns {number|null}
+ * @param {unknown} payload
+ * @returns {TranscriptMessage[]|null}
  */
-export function resolveSelection(previousEventIndex, entries) {
-	if (!Number.isInteger(previousEventIndex) || previousEventIndex < 0) return null
-	for (const entry of entries) {
-		if (entry.eventIndex === previousEventIndex) return previousEventIndex
+function sentSliceOf(payload) {
+	if (payload === null || !isObject(payload)) return null
+	if (!Array.isArray(payload['sent'])) return null
+	const messages = []
+	for (const raw of payload['sent']) {
+		if (!isObject(raw)) continue
+		const role = typeof raw['role'] === 'string' && raw['role'] !== '' ? raw['role'] : null
+		if (role === null) continue
+		const content = typeof raw['content'] === 'string' ? raw['content'] : ''
+		const message = { role, content, outcome: null }
+		if (role === 'tool') {
+			message['outcome'] = outcomeOfToolContent(content)
+		} else if (role === 'assistant' && Array.isArray(raw['tool_calls'])) {
+			message['tool_calls'] = toolCallsOf(raw['tool_calls'])
+		}
+		messages.push(message)
 	}
+	return messages
+}
+
+// The validated received response of an `llm_call` payload, or null when the payload carries none. Only the fields the transcript renders are kept.
+/**
+ * @param {unknown} payload
+ * @returns {{ reasoning: string, content: string, toolCalls: TranscriptToolCall[] }|null}
+ */
+function receivedOf(payload) {
+	if (payload === null || !isObject(payload)) return null
+	const received = payload['received']
+	if (!isObject(received)) return null
+	return {
+		reasoning: typeof received['reasoning'] === 'string' ? received['reasoning'] : '',
+		content: typeof received['content'] === 'string' ? received['content'] : '',
+		toolCalls: Array.isArray(received['toolCalls']) ? toolCallsOf(received['toolCalls']) : [],
+	}
+}
+
+// The validated tool calls of an assistant message (`tool_calls`, the wire shape) or a received response (`toolCalls`, the shaped shape) — both carry `id` and `function.name`/`function.arguments`, which is all the transcript renders.
+/**
+ * @param {unknown[]} rawCalls
+ * @returns {TranscriptToolCall[]}
+ */
+function toolCallsOf(rawCalls) {
+	const calls = []
+	for (const rawCall of rawCalls) {
+		if (!isObject(rawCall) || !isObject(rawCall['function'])) continue
+		calls.push({
+			id: typeof rawCall['id'] === 'string' ? rawCall['id'] : '',
+			name: typeof rawCall['function']['name'] === 'string' ? rawCall['function']['name'] : '',
+			argumentsText: typeof rawCall['function']['arguments'] === 'string' ? rawCall['function']['arguments'] : '',
+		})
+	}
+	return calls
+}
+
+// The outcome a tool-result message reports: the conversation carries the serialized ToolResult — success results are the bare data JSON, errors the `{ kind, message, details }` envelope — so the kind is read off the envelope when it names one and the summary prefers the error message, then the result card's summary, then the compact JSON. Non-JSON text (a serialization the conversation-length truncation cut) reads as an unknown kind with the raw text.
+/**
+ * @param {string} content
+ * @returns {TranscriptOutcome}
+ */
+function outcomeOfToolContent(content) {
+	const parsed = parseJsonOrUndefined(content)
+	if (parsed === undefined) return { kind: null, summary: capSummary(content) }
+	if (isObject(parsed) && typeof parsed['kind'] === 'string' && parsed['kind'] !== 'success' && typeof parsed['message'] === 'string' && parsed['message'] !== '') {
+		return { kind: parsed['kind'], summary: capSummary(parsed['message']) }
+	}
+	if (isObject(parsed) && typeof parsed['summary'] === 'string' && parsed['summary'] !== '') return { kind: 'success', summary: capSummary(parsed['summary']) }
+	return { kind: 'success', summary: compactValue(parsed) }
+}
+
+// Walks one turn's sent slice pairing each assistant message's tool calls with the tool messages that answer them — the executor appends the assistant message with all its calls first and then each result in call order, so the pairing within the slice is positional. Returns the outcome per call id (the map the previous turn's response renders its calls from) and, per tool-message position, the id of the call it answers (the consumed positions the next slice's rendering skips).
+/**
+ * @param {TranscriptMessage[]} sent
+ * @returns {{ byId: Map<string, TranscriptOutcome>, answeredBy: Map<number, string> }}
+ */
+function sliceOutcomeWalk(sent) {
+	const byId = new Map()
+	const answeredBy = new Map()
+	const pending = []
+	for (let position = 0; position < sent.length; position++) {
+		const message = sent[position]
+		if (message['role'] === 'assistant' && Array.isArray(message['tool_calls'])) {
+			for (const call of message['tool_calls']) pending.push(call)
+			continue
+		}
+		if (message['role'] !== 'tool') continue
+		const call = pending.shift()
+		if (call === undefined) continue
+		answeredBy.set(position, call['id'])
+		byId.set(call['id'], message['outcome'])
+	}
+	return { byId, answeredBy }
+}
+
+// The call ids the previous turn's response rendered inline, or null when there is no previous turn in the document or its response was not rendered (its bodies were not logged) — a slice's tool results then render standalone instead of being consumed by that rendering.
+/**
+ * @param {{ sent: TranscriptMessage[], received: { reasoning: string, content: string, toolCalls: TranscriptToolCall[] }|null }|null} previousBody
+ * @returns {Set<string>|null}
+ */
+function renderedCallIds(previousBody) {
+	if (previousBody === null || previousBody.received === null) return null
+	const ids = new Set()
+	for (const call of previousBody.received.toolCalls) ids.add(call['id'])
+	return ids
+}
+
+// The conversation opening: the leading run of system/user messages at the head of the scoped instance's first turn's slice — the system prompt and the task. The run stops at the first assistant or tool message (those belong to the turn's own rendering).
+/**
+ * @param {TranscriptMessage[]} sent
+ * @returns {TranscriptMessage[]}
+ */
+function leadingOpening(sent) {
+	const opening = []
+	for (const message of sent) {
+		if (message['role'] !== 'system' && message['role'] !== 'user') break
+		opening.push(message)
+	}
+	return opening
+}
+
+// The scoped instance's transcript: its turn entries stitched into one continuous document (see the module header for the no-repetition contract). Entries arrive pre-scoped and renumbered (scopeTurnEntries); each completed turn's body comes from the `llm_call` payload the loaded events hold at the entry's event index — a turn the standard level logged body-less renders its header and notice only, an in-flight turn carries no body at all. Malformed entries are skipped.
+/**
+ * @param {unknown} entries
+ * @param {unknown} logEvents
+ * @returns {TranscriptTurn[]}
+ */
+export function deriveTranscriptTurns(entries, logEvents) {
+	if (!Array.isArray(entries)) return []
+	const events = Array.isArray(logEvents) ? logEvents : []
+	const payloads = payloadIndex(events)
+	const bodies = []
+	const walks = []
 	for (const entry of entries) {
-		if (entry.kind === 'completed' && entry.startEventIndex === previousEventIndex) return entry.eventIndex
+		if (!isObject(entry) || entry['levelHint'] !== 'full') {
+			bodies.push(null)
+			walks.push(null)
+			continue
+		}
+		const payload = payloads.get(entry['eventIndex'])
+		const sent = sentSliceOf(payload)
+		const body = sent !== null ? { sent, received: receivedOf(payload) } : null
+		bodies.push(body)
+		walks.push(body !== null ? sliceOutcomeWalk(body.sent) : null)
+	}
+	const turns = []
+	for (let position = 0; position < entries.length; position++) {
+		const entry = entries[position]
+		if (!isObject(entry)) continue
+		const body = bodies[position]
+		const opening = []
+		const messages = []
+		let received = null
+		if (body !== null) {
+			const walk = walks[position]
+			// The previous turn's rendered calls: the tool results in this turn's slice that answer them are already rendered there (inline with the calls), so they do not render again here.
+			const previousCallIds = renderedCallIds(bodies[position - 1] ?? null)
+			let startFrom = 0
+			if (position === 0) {
+				for (const message of leadingOpening(body.sent)) opening.push(message)
+				startFrom = opening.length
+			}
+			for (let index = startFrom; index < body.sent.length; index++) {
+				const message = body.sent[index]
+				if (message === undefined) continue
+				// The echo assistant message is the previous turn's response — its content and calls render in that turn's response section (or, when that turn lies outside the loaded window, the Older turns control pages it into the document).
+				if (message['role'] === 'assistant') continue
+				if (message['role'] === 'tool' && previousCallIds !== null && walk !== null) {
+					const answered = walk.answeredBy.get(index)
+					if (answered !== undefined && previousCallIds.has(answered)) continue
+				}
+				messages.push(message)
+			}
+			// The answering results live in the next turn's slice; the transcript's last turn has none, so its calls read as unanswered.
+			const nextWalk = position + 1 < walks.length ? walks[position + 1] : null
+			const ownReceived = body.received
+			if (ownReceived !== null) {
+				received = {
+					reasoning: ownReceived.reasoning,
+					content: ownReceived.content,
+					toolCalls: ownReceived.toolCalls.map((call) => ({ ...call, outcome: nextWalk !== null && nextWalk.byId.has(call['id']) ? nextWalk.byId.get(call['id']) ?? null : null })),
+				}
+			}
+		}
+		turns.push({
+			kind: entry['kind'] === 'in_flight' ? 'in_flight' : 'completed',
+			turnNumber: typeof entry['turnNumber'] === 'number' ? entry['turnNumber'] : 0,
+			eventIndex: typeof entry['eventIndex'] === 'number' ? entry['eventIndex'] : 0,
+			role: typeof entry['role'] === 'string' ? entry['role'] : '',
+			roleId: typeof entry['roleId'] === 'string' ? entry['roleId'] : '',
+			timestamp: typeof entry['timestamp'] === 'string' ? entry['timestamp'] : null,
+			usage: readUsage(entry['usage']),
+			finishReason: typeof entry['finishReason'] === 'string' ? entry['finishReason'] : null,
+			bodyLevel: entry['levelHint'] === 'full' || entry['levelHint'] === 'standard' ? entry['levelHint'] : null,
+			opening,
+			messages,
+			received,
+		})
+	}
+	return turns
+}
+
+// The child instance an `agent` tool call spawned, or null: the first `role_start` after the turn's event whose `parentRoleId` names the parent instance. The executor dispatches the agent call immediately after the turn's `llm_call` lands, so the first match is the call's child — a turn that delegates twice delegates sequentially, and one affordance per turn resolves to the first child. Old logs whose `role_start` predates per-instance parent ids fall back to the parent role-name echo (`parent`), matching the scope's own role-name fallback. Malformed input reads as no child.
+/**
+ * @param {unknown} logEvents
+ * @param {unknown} parentRoleId
+ * @param {unknown} afterEventIndex
+ * @returns {string|null}
+ */
+export function childInstanceFor(logEvents, parentRoleId, afterEventIndex) {
+	if (!Array.isArray(logEvents)) return null
+	if (typeof parentRoleId !== 'string' || parentRoleId === '') return null
+	if (typeof afterEventIndex !== 'number' || !Number.isInteger(afterEventIndex) || afterEventIndex < 0) return null
+	for (const event of logEvents) {
+		if (!isObject(event)) continue
+		if (event['type'] !== 'role_start') continue
+		const index = readEventIndex(event['index'])
+		if (index === null || index <= afterEventIndex) continue
+		const payload = event['payload']
+		if (!isObject(payload)) continue
+		const roleId = readInstanceId(payload['roleId'])
+		if (roleId === null) continue
+		const exactParent = readInstanceId(payload['parentRoleId'])
+		if (exactParent !== null) {
+			if (exactParent === parentRoleId) return roleId
+			continue
+		}
+		if (payload['parent'] === parentRoleId) return roleId
 	}
 	return null
 }
 
 // --- Rendering ---------------------------------------------------------------
 
-// Fixed trusted copy for the degraded state (not agent prose, so it never flows through Markdown): it names the cause (the run logged at the standard level) and the fix (pick Full logging before starting a run), instead of showing an empty pane that reads as a bug.
-const DEGRADED_NOTICE = 'Message bodies were not logged for this run: the logging level is Standard, which records turn metadata only (roles, usage, finish reasons). Choose Full logging on the compose screen before starting a run to capture the full request and response bodies here.'
+// Fixed trusted copy for the per-turn degraded notice (not agent prose, so it never flows through Markdown): it names the cause (the run logged at the standard level) and the fix (pick Full logging before starting a run), instead of an empty section that reads as a bug.
+const DEGRADED_NOTICE = 'Message bodies were not logged for this turn: the run\u2019s logging level is Standard, which records turn metadata only (roles, usage, finish reasons). Choose Full logging on the compose screen before starting a run to capture the full request and response bodies here.'
 
 const IN_FLIGHT_NOTE = 'This turn is in flight — its request and response appear here once the model responds.'
 
-// The selected turn's row label for the detail pane's fallback when the selection no longer resolves (the poll has since rebuilt the list): treated as "nothing selected" rather than an error.
-const DETAIL_EMPTY = 'Select a turn to inspect its request and response.'
+const OPENING_LABEL = 'system prompt \u00b7 task'
 
-function clockLabel(timestamp) {
-	if (typeof timestamp !== 'string' || timestamp === '') return '—'
-	const parsed = new Date(timestamp)
-	if (Number.isNaN(parsed.getTime())) return timestamp
-	return parsed.toLocaleTimeString()
+// Compact summaries cap at this length so the transcript reads inline; the full text rides the element's title.
+const SUMMARY_MAX_CHARS = 240
+
+function capSummary(text) {
+	if (text.length <= SUMMARY_MAX_CHARS) return text
+	return `${text.slice(0, SUMMARY_MAX_CHARS)}\u2026`
 }
 
-function usageLabel(usage) {
-	if (usage === null || typeof usage.totalTokens !== 'number' || !Number.isFinite(usage.totalTokens)) return '—'
-	return `${usage.totalTokens} tok`
-}
-
-// Pretty-prints a value as JSON, falling back to its String form when it is not serializable so the `<pre>` never throws (mirrors tooltip.js).
-function toJsonText(value) {
+// Parses a JSON text, or undefined when it is not valid JSON. Tool results and tool-call arguments are serialized JSON, but the conversation-length truncation can cut one mid-string; parse failure is an expected shape, not an exceptional one.
+/**
+ * @param {string} text
+ * @returns {unknown}
+ */
+function parseJsonOrUndefined(text) {
+	if (typeof text !== 'string' || text === '') return undefined
 	try {
-		return JSON.stringify(value, null, 2)
+		return JSON.parse(text)
 	} catch {
-		return String(value)
+		return undefined
 	}
 }
 
-function jsonBlock(h, content) {
-	return h('pre', { class: 'inspector-json' }, [toJsonText(content)])
+// One-line JSON form of a parsed value, falling back to its String form when it is not serializable so the summary never throws (mirrors tooltip.js).
+/**
+ * @param {unknown} value
+ * @returns {string}
+ */
+function compactValue(value) {
+	try {
+		return capSummary(JSON.stringify(value))
+	} catch {
+		return capSummary(String(value))
+	}
+}
+
+// One-line summary of a tool call's raw arguments: the arguments re-stringified compact when parseable, else the raw text.
+/**
+ * @param {string} argumentsText
+ * @returns {string}
+ */
+function argumentsSummary(argumentsText) {
+	const parsed = parseJsonOrUndefined(argumentsText)
+	if (parsed === undefined) return capSummary(argumentsText)
+	return compactValue(parsed)
+}
+
+function usageLabel(usage) {
+	if (usage === null || typeof usage['totalTokens'] !== 'number' || !Number.isFinite(usage['totalTokens'])) return '\u2014'
+	return `${usage['totalTokens']} tok`
 }
 
 function labeledSection(h, label, bodyNode) {
@@ -491,75 +774,108 @@ function labeledSection(h, label, bodyNode) {
 	])
 }
 
-// The `sent` section: one labeled block per message — role as a machine chip, content as sanitized Markdown, tool calls as pretty-printed JSON. A message that is neither renders as its JSON so nothing is invented or dropped.
-function sentMessagesNode(h, renderMarkdown, messages) {
-	const rows = []
-	for (const message of messages) {
-		if (!isObject(message)) continue
-		const children = [h('span', { class: 'inspector-message-role' }, typeof message['role'] === 'string' && message['role'] !== '' ? message['role'] : 'message')]
-		if (typeof message['content'] === 'string' && message['content'] !== '') {
-			children.push(h('div', { class: 'inspector-message-content markdown' }, renderMarkdown(message['content'])))
-		}
-		if (Array.isArray(message['tool_calls']) && message['tool_calls'].length > 0) {
-			children.push(jsonBlock(h, message['tool_calls']))
-		}
-		if (children.length > 1) rows.push(h('div', { class: 'inspector-message' }, children))
-	}
-	if (rows.length === 0) return h('span', { class: 'inspector-empty-value' }, ['—'])
-	return h('div', { class: 'inspector-message-list' }, rows)
+// The success/error chip a tool result or an answered tool call carries. An unknown kind (non-JSON result text) renders the neutral em dash so nothing is invented.
+/**
+ * @param {function(string, Record<string, unknown>, unknown): unknown} h
+ * @param {TranscriptOutcome|null} outcome
+ * @returns {unknown}
+ */
+function outcomeChipNode(h, outcome) {
+	if (outcome === null || outcome.kind === null || outcome.kind === '') return null
+	if (outcome.kind === 'success') return h('span', { class: 'inspector-tool-outcome inspector-tool-outcome-success' }, ['\u2713 success'])
+	return h('span', { class: 'inspector-tool-outcome inspector-tool-outcome-error' }, [`\u2717 ${outcome.kind}`])
 }
 
-// The `received` section: the assistant response with its content, its reasoning (clearly labeled and rendered as Markdown — the reasoning is model prose an operator is specifically inspecting for), and its parsed tool calls.
-function receivedNode(h, renderMarkdown, received) {
-	if (!isObject(received)) return h('span', { class: 'inspector-empty-value' }, ['—'])
+// The transcript's message blocks: a user or system message renders its role chip and its content through the sanitized Markdown pipeline; a tool message renders as a result row with its outcome chip and compact summary.
+/**
+ * @param {function(string, Record<string, unknown>, unknown): unknown} h
+ * @param {function(string): unknown} renderMarkdown
+ * @param {TranscriptMessage} message
+ * @returns {unknown}
+ */
+function messageNode(h, renderMarkdown, message) {
+	if (message.role === 'tool') {
+		const outcome = message.outcome
+		return h('div', { class: 'inspector-message inspector-tool-result' }, [
+			h('span', { class: 'inspector-message-role' }, ['tool result']),
+			outcomeChipNode(h, outcome),
+			outcome !== null && outcome.summary !== '' ? h('pre', { class: 'inspector-tool-call-result' }, [outcome.summary]) : null,
+		])
+	}
+	return h('div', { class: 'inspector-message' }, [
+		h('span', { class: 'inspector-message-role' }, [message.role]),
+		message.content !== '' ? h('div', { class: 'inspector-message-content markdown' }, renderMarkdown(message.content)) : null,
+	])
+}
+
+// One inline tool call of the assistant's response: the tool name, the compact arguments summary, the outcome chip once the answering result exists in the loaded window, and the compact result summary. An `agent` call that spawned a child instance renders as the delegation affordance — `agent → <child>` with a View control that re-scopes the transcript to the child (pushing the breadcrumb; the ↑ parent affordance pops back). No identifiable child renders the call as plain text.
+/**
+ * @param {function(string, Record<string, unknown>, unknown): unknown} h
+ * @param {TranscriptTurn} turn
+ * @param {TranscriptToolCall} call
+ * @param {{ logEvents: unknown[], scopedRoleId: string|null, livePartial: { roleId: string|null, role: string, reasoning: string, content: string }|null, onScopeInstance: unknown }} links
+ * @returns {unknown}
+ */
+function toolCallNode(h, turn, call, links) {
+	const childRoleId = call.name === 'agent' ? childInstanceFor(links.logEvents, links.scopedRoleId, turn.eventIndex) : null
+	const children = [h('span', { class: 'inspector-tool-call-name' }, [call.name])]
+	if (childRoleId !== null) children.push(h('span', { class: 'inspector-tool-call-child-id' }, [`\u2192 ${childRoleId}`]))
+	const argsSummary = argumentsSummary(call.argumentsText)
+	if (argsSummary !== '') children.push(h('span', { class: 'inspector-tool-call-args', title: call.argumentsText }, [argsSummary]))
+	if (call.outcome !== null) children.push(outcomeChipNode(h, call.outcome))
+	if (childRoleId !== null) {
+		children.push(h('button', { type: 'button', class: 'inspector-tool-call-view', title: `Scope the transcript to the child instance ${childRoleId}`, onclick: [links.onScopeInstance, childRoleId] }, ['View \u25b8']))
+	}
+	if (call.outcome !== null && call.outcome.summary !== '') children.push(h('pre', { class: 'inspector-tool-call-result' }, [call.outcome.summary]))
+	return h('div', { class: 'inspector-tool-call' }, children)
+}
+
+// The turn's response: the reasoning (labeled 💭 — the model's prose an operator is specifically inspecting for) and the content, both through the sanitized Markdown pipeline, then the response's tool calls inline.
+/**
+ * @param {function(string, Record<string, unknown>, unknown): unknown} h
+ * @param {function(string): unknown} renderMarkdown
+ * @param {TranscriptTurn} turn
+ * @param {{ logEvents: unknown[], scopedRoleId: string|null, livePartial: { roleId: string|null, role: string, reasoning: string, content: string }|null, onScopeInstance: unknown }} links
+ * @returns {unknown}
+ */
+function responseNode(h, renderMarkdown, turn, links) {
+	const received = turn.received
+	if (received === null) return null
 	const children = []
-	if (typeof received['content'] === 'string' && received['content'] !== '') {
-		children.push(labeledSection(h, 'Response', h('div', { class: 'inspector-prose markdown' }, renderMarkdown(received['content']))))
-	}
-	if (typeof received['reasoning'] === 'string' && received['reasoning'] !== '') {
-		children.push(labeledSection(h, 'Reasoning', h('div', { class: 'inspector-reasoning markdown' }, renderMarkdown(received['reasoning']))))
-	}
-	if (Array.isArray(received['toolCalls']) && received['toolCalls'].length > 0) {
-		children.push(labeledSection(h, 'Tool calls', jsonBlock(h, received['toolCalls'])))
-	}
-	if (children.length === 0) return h('span', { class: 'inspector-empty-value' }, ['—'])
-	return h('div', { class: 'inspector-received' }, children)
+	if (received.reasoning !== '') children.push(labeledSection(h, '\ud83d\udcad Reasoning', h('div', { class: 'inspector-reasoning markdown' }, renderMarkdown(received.reasoning))))
+	if (received.content !== '') children.push(h('div', { class: 'inspector-prose markdown' }, renderMarkdown(received.content)))
+	for (const call of received.toolCalls) children.push(toolCallNode(h, turn, call, links))
+	if (children.length === 0) children.push(h('span', { class: 'inspector-empty-value' }, ['\u2014']))
+	return h('div', { class: 'inspector-response' }, children)
 }
 
-// Renders one detail section by its machine label. The turn list only ever fetches `llm_call` details, so the labels are the four `formatLogDetailSections` produces for that type; anything else falls back to the tooltip's by-kind formatting (JSON for objects, Markdown for prose) so a future section kind degrades readably rather than vanishing.
-function detailSectionNode(h, renderMarkdown, section) {
-	if (!isObject(section)) return null
-	const label = typeof section['label'] === 'string' ? section['label'] : ''
-	const content = section['content']
-	if (label === 'sent') {
-		if (!Array.isArray(content)) return null
-		return labeledSection(h, 'Sent messages', sentMessagesNode(h, renderMarkdown, content))
-	}
-	if (label === 'received') return labeledSection(h, 'Received', receivedNode(h, renderMarkdown, content))
-	if (label === 'finish reason') {
-		return labeledSection(h, 'Finish reason', h('span', { class: 'inspector-scalar' }, [typeof content === 'string' && content !== '' ? content : '—']))
-	}
-	if (label === 'usage') {
-		if (!isObject(content)) return null
-		return labeledSection(h, 'Usage', jsonBlock(h, content))
-	}
-	if (isObject(content) || Array.isArray(content)) return labeledSection(h, label, jsonBlock(h, content))
-	if (typeof content === 'string' && content !== '') return labeledSection(h, label, h('div', { class: 'inspector-prose markdown' }, renderMarkdown(content)))
-	return labeledSection(h, label, h('span', { class: 'inspector-scalar' }, [content === null || content === undefined ? '—' : String(content)]))
+// The quiet per-turn header: the turn's number within the instance, its token bill, and its finish reason. An in-flight turn has none of the latter two yet — it reads "in flight…".
+/**
+ * @param {function(string, Record<string, unknown>, unknown): unknown} h
+ * @param {TranscriptTurn} turn
+ * @returns {unknown}
+ */
+function turnHeaderNode(h, turn) {
+	if (turn.kind === 'in_flight') return h('div', { class: 'inspector-turn-header' }, [`Turn ${turn.turnNumber} \u00b7 in flight\u2026`])
+	return h('div', { class: 'inspector-turn-header' }, [`Turn ${turn.turnNumber} \u00b7 ${usageLabel(turn.usage)} \u00b7 ${turn.finishReason ?? '\u2014'}`])
 }
 
-function detailSectionsNode(h, renderMarkdown, sections) {
-	const children = []
-	for (const section of sections) {
-		const node = detailSectionNode(h, renderMarkdown, section)
-		if (node !== null) children.push(node)
-	}
-	return h('div', { class: 'inspector-detail-sections' }, children)
+// The conversation opening (the scoped instance's first turn's leading system/user messages — the system prompt and the task), collapsed by default: it is context, not story, so one native details expander holds it above the turns.
+/**
+ * @param {function(string, Record<string, unknown>, unknown): unknown} h
+ * @param {function(string): unknown} renderMarkdown
+ * @param {TranscriptMessage[]} opening
+ * @returns {unknown}
+ */
+function openingNode(h, renderMarkdown, opening) {
+	if (opening.length === 0) return null
+	return h('details', { class: 'inspector-opening' }, [
+		h('summary', { class: 'inspector-opening-summary' }, [OPENING_LABEL]),
+		h('div', { class: 'inspector-opening-body' }, opening.map((message) => messageNode(h, renderMarkdown, message))),
+	])
 }
 
-// --- Live partial -------------------------------------------------------------
-
-// The live partial prop, validated: an absent or malformed prop renders nothing rather than inventing sections (the same never-invent rule the detail pane follows). Only the fields the rendering reads are carried.
+// The live partial prop, validated: an absent or malformed prop renders nothing rather than inventing sections (the never-invent rule the transcript follows throughout). Only the fields the rendering reads are carried.
 /**
  * @param {unknown} value
  * @returns {{ roleId: string|null, role: string, reasoning: string, content: string }|null}
@@ -574,23 +890,20 @@ function livePartialForRender(value) {
 	return { roleId, role, reasoning, content }
 }
 
-// Whether the turn entry is the in-flight row the live partial belongs to. Within a scoped list the partial's own `roleId` is matched first so a same-named sibling instance's ghost row (a start left unmatched by a failed turn) never hosts another instance's stream; entries whose id fell back to the role name (old logs, the standard logging level) pair on the role name as before.
+// Whether the transcript turn is the in-flight turn the live partial belongs to. The partial's own `roleId` is matched first so a same-named sibling instance's ghost turn (a start left unmatched by a failed turn) never hosts another instance's stream; turns whose id fell back to the role name (old logs, the standard logging level) pair on the role name as before.
 /**
- * @param {unknown} entry
+ * @param {TranscriptTurn} turn
  * @param {{ roleId: string|null, role: string, reasoning: string, content: string }|null} livePartial
  * @returns {boolean}
  */
-function isLiveRow(entry, livePartial) {
+function isLiveTurn(turn, livePartial) {
 	if (livePartial === null) return false
-	if (!isObject(entry)) return false
-	if (entry['kind'] !== 'in_flight') return false
-	const roleId = typeof entry['roleId'] === 'string' ? entry['roleId'] : null
-	const roleName = typeof entry['role'] === 'string' ? entry['role'] : null
-	if (roleId !== null && roleId !== roleName && typeof livePartial.roleId === 'string' && livePartial.roleId !== '') return roleId === livePartial.roleId
-	return roleName !== null && roleName === livePartial.role
+	if (turn.kind !== 'in_flight') return false
+	if (turn.role !== turn.roleId && livePartial.roleId !== null && livePartial.roleId !== '') return turn.roleId === livePartial.roleId
+	return turn.role === livePartial.role
 }
 
-// The live block under the in-flight row: the streamed reasoning and response, each labeled like the detail pane's received sections and rendered through the same sanitized Markdown pipeline. A field with no text yet renders nothing, and an all-empty partial renders no block at all — the app clears the partial when the socket drops, so a stale block never lingers.
+// The live block at the in-flight turn: the streamed reasoning and response, each labeled like the transcript's response sections and rendered through the same sanitized Markdown pipeline. A field with no text yet renders nothing, and an all-empty partial renders no block at all — the app clears the partial when the socket drops, so a stale block never lingers.
 /**
  * @param {function(string, Record<string, unknown>, unknown): unknown} h
  * @param {function(string): unknown} renderMarkdown
@@ -599,55 +912,39 @@ function isLiveRow(entry, livePartial) {
  */
 function livePartialNode(h, renderMarkdown, livePartial) {
 	const children = []
-	if (livePartial.reasoning !== '') children.push(labeledSection(h, 'Reasoning', h('div', { class: 'inspector-reasoning markdown' }, renderMarkdown(livePartial.reasoning))))
+	if (livePartial.reasoning !== '') children.push(labeledSection(h, '\ud83d\udcad Reasoning', h('div', { class: 'inspector-reasoning markdown' }, renderMarkdown(livePartial.reasoning))))
 	if (livePartial.content !== '') children.push(labeledSection(h, 'Response', h('div', { class: 'inspector-prose markdown' }, renderMarkdown(livePartial.content))))
 	if (children.length === 0) return null
 	return h('div', { class: 'inspector-live-partial' }, children)
 }
 
-// The detail pane's body for the selected turn's cached detail state: `'loading'`/`null` (the fetch the select action scheduled is in flight), `'failed'` (the fetch errored), or `{ sections }` — rendered in full or, when the sections lack sent/received bodies, as the honest degraded notice alongside whatever metadata sections exist.
-function detailPaneBody(h, renderMarkdown, detailState) {
-	if (detailState === 'loading' || detailState === null || detailState === undefined) {
-		return h('p', { class: 'inspector-detail-note' }, 'Loading the turn detail…')
+// One turn of the transcript: the quiet header, then the turn's new messages in order, then the response. An in-flight turn renders its note and — when the websocket partial matches this instance — the live reasoning/content block beneath it; the poll's completed turn replaces both in sequence. A turn the standard level logged body-less renders the honest degraded notice instead.
+/**
+ * @param {function(string, Record<string, unknown>, unknown): unknown} h
+ * @param {function(string): unknown} renderMarkdown
+ * @param {TranscriptTurn} turn
+ * @param {{ logEvents: unknown[], scopedRoleId: string|null, livePartial: { roleId: string|null, role: string, reasoning: string, content: string }|null, onScopeInstance: unknown }} links
+ * @returns {unknown}
+ */
+function turnSectionNode(h, renderMarkdown, turn, links) {
+	const children = [turnHeaderNode(h, turn)]
+	if (turn.kind === 'in_flight') {
+		children.push(h('p', { class: 'inspector-transcript-note' }, [IN_FLIGHT_NOTE]))
+		if (isLiveTurn(turn, links.livePartial) && links.livePartial !== null) {
+			const block = livePartialNode(h, renderMarkdown, links.livePartial)
+			if (block !== null) children.push(block)
+		}
+	} else if (turn.bodyLevel === 'standard') {
+		children.push(h('p', { class: 'inspector-degraded-notice' }, [DEGRADED_NOTICE]))
+	} else {
+		for (const message of turn.messages) children.push(messageNode(h, renderMarkdown, message))
+		const response = responseNode(h, renderMarkdown, turn, links)
+		if (response !== null) children.push(response)
 	}
-	if (detailState === 'failed') {
-		return h('p', { class: 'inspector-detail-note' }, 'The turn detail could not be loaded.')
-	}
-	if (!isObject(detailState)) return h('p', { class: 'inspector-detail-note' }, 'The turn detail could not be loaded.')
-	const sections = detailState['sections']
-	if (deriveDetailBodyState(sections) === 'degraded') {
-		const metadataSections = Array.isArray(sections) ? sections : []
-		return h('div', { class: 'inspector-detail-degraded' }, [
-			h('p', { class: 'inspector-degraded-notice' }, DEGRADED_NOTICE),
-			detailSectionsNode(h, renderMarkdown, metadataSections),
-		])
-	}
-	return detailSectionsNode(h, renderMarkdown, Array.isArray(sections) ? sections : [])
+	return h('div', { class: { 'inspector-turn-section': true, 'is-in-flight': turn.kind === 'in_flight' } }, children)
 }
 
-// One turn row: number, role, and time on the top line; usage, finish reason, and the body-availability hint on the second. The click is wired as the hyperapp tuple `[onSelectTurn, entry]` so the action receives the entry (mirroring how app.js wires list-row actions).
-function turnRowNode(h, entry, selectedEventIndex, onSelectTurn) {
-	const inFlight = entry.kind === 'in_flight'
-	const hint = entry.levelHint
-	const hintTitle = hint === 'full'
-		? 'Message bodies are logged for this turn.'
-		: 'Only turn metadata was logged (standard logging level) — no message bodies.'
-	return h('button', { type: 'button', class: { 'inspector-turn': true, 'is-selected': entry.eventIndex === selectedEventIndex, 'is-in-flight': inFlight }, onclick: [onSelectTurn, entry] }, [
-		h('span', { class: 'inspector-turn-top' }, [
-			h('span', { class: 'inspector-turn-number' }, [`#${entry.turnNumber}`]),
-			h('span', { class: 'inspector-turn-role' }, [entry.role]),
-			h('time', { class: 'inspector-turn-time', title: entry.timestamp ?? '' }, [clockLabel(entry.timestamp)]),
-		]),
-		h('span', { class: 'inspector-turn-bottom' }, [
-			inFlight ? h('span', { class: 'inspector-turn-flight' }, ['in flight…']) : null,
-			h('span', { class: 'inspector-turn-tokens' }, [inFlight ? '' : usageLabel(entry.usage)]),
-			h('span', { class: 'inspector-turn-finish' }, [inFlight ? '' : entry.finishReason ?? '—']),
-			hint !== null ? h('span', { class: `inspector-turn-hint inspector-turn-hint-${hint}`, title: hintTitle }, [hint]) : null,
-		]),
-	])
-}
-
-// The breadcrumb row: one crumb per chain instance, root first, joined by '▸' separators; the last crumb is the scoped instance (disabled — it is where the list already is). Each earlier crumb and the '↑ parent' affordance re-scope via the hyperapp tuple `[onScopeInstance, roleId]`, so the action receives the instance id directly. A chain that renders nothing (no loaded instances) renders no row.
+// The breadcrumb row: one crumb per chain instance, root first, joined by '▸' separators; the last crumb is the scoped instance (disabled — it is where the transcript already is). Each earlier crumb and the '↑ parent' affordance re-scope via the hyperapp tuple `[onScopeInstance, roleId]`, so the action receives the instance id directly. A chain that renders nothing (no loaded instances) renders no row.
 function breadcrumbNode(h, chain, onScopeInstance) {
 	const crumbs = []
 	for (const crumb of chain) {
@@ -658,18 +955,18 @@ function breadcrumbNode(h, chain, onScopeInstance) {
 	const children = []
 	for (let position = 0; position < crumbs.length; position++) {
 		const crumb = crumbs[position]
-		if (position > 0) children.push(h('span', { class: 'inspector-crumb-sep' }, '▸'))
+		if (position > 0) children.push(h('span', { class: 'inspector-crumb-sep' }, '\u25b8'))
 		const isCurrent = position === crumbs.length - 1
-		children.push(h('button', { type: 'button', class: { 'inspector-crumb': true, 'is-current': isCurrent }, disabled: isCurrent, title: isCurrent ? 'The instance the turn list is scoped to' : `Scope the turn list to ${crumb.roleId}`, onclick: [onScopeInstance, crumb.roleId] }, [crumb.roleId]))
+		children.push(h('button', { type: 'button', class: { 'inspector-crumb': true, 'is-current': isCurrent }, disabled: isCurrent, title: isCurrent ? 'The instance the transcript is scoped to' : `Scope the transcript to ${crumb.roleId}`, onclick: [onScopeInstance, crumb.roleId] }, [crumb.roleId]))
 	}
 	if (crumbs.length > 1) {
 		const parent = crumbs[crumbs.length - 2]
-		children.push(h('button', { type: 'button', class: 'inspector-parent-up', title: `Scope the turn list to the parent instance ${parent.roleId}`, onclick: [onScopeInstance, parent.roleId] }, '↑ parent'))
+		children.push(h('button', { type: 'button', class: 'inspector-parent-up', title: `Scope the transcript to the parent instance ${parent.roleId}`, onclick: [onScopeInstance, parent.roleId] }, '\u2191 parent'))
 	}
 	return h('div', { class: 'inspector-breadcrumb-row' }, children)
 }
 
-// The minimal instance dropdown above the turn list (wayfinding until the redesign's view click-throughs land): one option per loaded instance, labeled with the role name, the instance id when it differs, and the live/finished status; selecting re-scopes. The change event goes to the bare `onScopeInstance` action (the app reads the selected value off the event, mirroring the flow-tier select).
+// The minimal instance dropdown above the transcript (wayfinding): one option per loaded instance, labeled with the role name, the instance id when it differs, and the live/finished status; selecting re-scopes. The change event goes to the bare `onScopeInstance` action (the app reads the selected value off the event, mirroring the flow-tier select).
 function instanceSelectNode(h, instances, scopedRoleId, onScopeInstance) {
 	const options = []
 	for (const instance of instances) {
@@ -677,7 +974,7 @@ function instanceSelectNode(h, instances, scopedRoleId, onScopeInstance) {
 		const role = typeof instance['role'] === 'string' && instance['role'] !== '' ? instance['role'] : instance['roleId']
 		const status = instance['live'] === true ? 'live' : 'finished'
 		const idSuffix = instance['roleId'] !== role ? ` (${instance['roleId']})` : ''
-		options.push(h('option', { value: instance['roleId'], selected: instance['roleId'] === scopedRoleId }, [`${role}${idSuffix} — ${status}`]))
+		options.push(h('option', { value: instance['roleId'], selected: instance['roleId'] === scopedRoleId }, [`${role}${idSuffix} \u2014 ${status}`]))
 	}
 	if (options.length === 0) return null
 	const selectProps = { class: 'inspector-instance-select', onchange: onScopeInstance }
@@ -688,17 +985,15 @@ function instanceSelectNode(h, instances, scopedRoleId, onScopeInstance) {
 	])
 }
 
-// The modal overlay: a backdrop over the run view plus a wide two-pane card — the turn list on the left (newest first, scoped to one agent instance, with an "older turns" control paging back through the log), the selected turn's detail on the right. Above the panes sit the breadcrumb (the scoped instance's delegation chain) and the heading. `onSelectTurn` is wired per row with the entry as payload; `onScopeInstance` is wired bare on the dropdown (it reads the change event) and per crumb with the instance id as payload; `onLoadOlder` and `onClose` are caller-supplied actions wired bare, mirroring the result modal's close wiring.
+// The modal overlay: a backdrop over the run view plus a wide card whose body is the scoped instance's transcript — one continuous document of the instance's turns (the inspector redesign, milestone 2), topped by the "older turns" window control and the collapsed conversation opening. Above the body sit the heading, the delegation-chain breadcrumb, and the instance dropdown. `onScopeInstance` is wired bare on the dropdown (it reads the change event) and per crumb/View affordance with the instance id as payload; `onLoadOlder` and `onClose` are caller-supplied actions wired bare, mirroring the result modal's close wiring.
 export function InspectorModal(h, props) {
 	const renderMarkdown = props.renderMarkdown
-	const turns = isObject(props.turns) ? props.turns : {}
-	const entries = Array.isArray(turns['entries']) ? turns['entries'] : []
-	const selectedEventIndex = typeof turns['selectedEventIndex'] === 'number' ? turns['selectedEventIndex'] : null
-	const runLabel = typeof props.runLabel === 'string' && props.runLabel !== '' ? props.runLabel : null
+	const logEvents = Array.isArray(props.logEvents) ? props.logEvents : []
 	const scopedRoleId = typeof props.scopedRoleId === 'string' && props.scopedRoleId !== '' ? props.scopedRoleId : null
+	const turns = isObject(props.turns) ? props.turns : {}
+	const runLabel = typeof props.runLabel === 'string' && props.runLabel !== '' ? props.runLabel : null
 	const instances = Array.isArray(props.instances) ? props.instances : []
 	const chain = Array.isArray(props.chain) ? props.chain : []
-	const onSelectTurn = props.onSelectTurn
 	const onScopeInstance = props.onScopeInstance
 	const onLoadOlder = props.onLoadOlder
 	const onClose = props.onClose
@@ -707,46 +1002,34 @@ export function InspectorModal(h, props) {
 	const hasOlder = canPageOlder(turns['tailOffset'])
 	const livePartial = livePartialForRender(props.livePartial)
 
-	const listChildren = []
-	const instanceRow = instanceSelectNode(h, instances, scopedRoleId, onScopeInstance)
-	if (instanceRow !== null) listChildren.push(instanceRow)
-	if (loadState === 'loading') {
-		listChildren.push(h('p', { class: 'inspector-list-note' }, 'Loading the run log…'))
-	} else if (loadState === 'failed') {
-		listChildren.push(h('p', { class: 'inspector-list-note' }, 'The run log could not be loaded.'))
-	} else if (entries.length === 0) {
-		// Scoped and unscoped empties read differently: a scope with no turns in the loaded range is wayfinding (older turns may page back, another instance may hold them), not an empty log.
-		listChildren.push(h('p', { class: 'inspector-list-note' }, scopedRoleId !== null ? 'No turns logged for this instance in the loaded range yet.' : 'No LLM turns logged for this run yet.'))
-	} else {
-		// The live partial attaches to the newest in-flight row of its instance (the newest unmatched start is the call currently generating) and renders directly beneath it — no selection needed, so streaming text is visible the moment the modal is open. Only one row ever hosts it.
-		let liveAttached = false
-		for (let position = entries.length - 1; position >= 0; position--) {
-			const entry = entries[position]
-			const row = turnRowNode(h, entry, selectedEventIndex, onSelectTurn)
-			if (!liveAttached && isLiveRow(entry, livePartial)) {
-				liveAttached = true
-				listChildren.push(h('div', { class: 'inspector-turn-live' }, [row, livePartialNode(h, renderMarkdown, livePartial)]))
-				continue
-			}
-			listChildren.push(row)
-		}
-	}
-	if (loadState === 'ready' && hasOlder) {
-		listChildren.push(h('button', { type: 'button', class: 'inspector-older', disabled: olderLoading, onclick: onLoadOlder }, olderLoading ? 'loading older turns…' : 'Older turns'))
-	}
+	const entries = scopeTurnEntries(buildTurnIndex(logEvents), scopedRoleId)
+	const transcript = deriveTranscriptTurns(entries, logEvents)
+	const links = { logEvents, scopedRoleId, livePartial, onScopeInstance }
 
-	// The detail pane: the selected turn resolved against the list so a stale selection reads as "nothing selected", then the in-flight note, then the cached detail state.
-	const selectedEntry = entries.find((entry) => isObject(entry) && entry['eventIndex'] === selectedEventIndex) ?? null
-	let detailChildren = [h('p', { class: 'inspector-detail-note' }, DETAIL_EMPTY)]
-	if (selectedEntry !== null) {
-		if (selectedEntry.kind === 'in_flight') {
-			detailChildren = [h('p', { class: 'inspector-detail-note' }, IN_FLIGHT_NOTE)]
+	const bodyChildren = []
+	if (loadState === 'loading') {
+		bodyChildren.push(h('p', { class: 'inspector-transcript-note' }, ['Loading the run log\u2026']))
+	} else if (loadState === 'failed') {
+		bodyChildren.push(h('p', { class: 'inspector-transcript-note' }, ['The run log could not be loaded.']))
+	} else {
+		if (hasOlder) {
+			bodyChildren.push(h('button', { type: 'button', class: 'inspector-older', disabled: olderLoading, onclick: onLoadOlder }, olderLoading ? 'loading older turns\u2026' : 'Older turns'))
+		}
+		if (transcript.length === 0) {
+			// Scoped and unscoped empties read differently: a scope with no turns in the loaded range is wayfinding (older turns may page back, another instance may hold them), not an empty log.
+			bodyChildren.push(h('p', { class: 'inspector-transcript-note' }, [scopedRoleId !== null ? 'No turns logged for this instance in the loaded range yet.' : 'No LLM turns logged for this run yet.']))
 		} else {
-			detailChildren = [detailPaneBody(h, renderMarkdown, props.detailState)]
+			const firstTurn = transcript[0]
+			if (firstTurn !== undefined) {
+				const opening = openingNode(h, renderMarkdown, firstTurn.opening)
+				if (opening !== null) bodyChildren.push(opening)
+			}
+			for (const turn of transcript) bodyChildren.push(turnSectionNode(h, renderMarkdown, turn, links))
 		}
 	}
 
 	const breadcrumb = breadcrumbNode(h, chain, onScopeInstance)
+	const instanceRow = instanceSelectNode(h, instances, scopedRoleId, onScopeInstance)
 	return h('div', { class: 'inspector-modal-overlay' }, [
 		h('div', { class: 'inspector-modal-backdrop', onclick: onClose }),
 		h('div', { class: 'inspector-modal-card' }, [
@@ -755,10 +1038,8 @@ export function InspectorModal(h, props) {
 				h('button', { type: 'button', class: 'inspector-modal-close', onclick: onClose }, 'Close'),
 			]),
 			breadcrumb !== null ? breadcrumb : null,
-			h('div', { class: 'inspector-modal-body' }, [
-				h('div', { class: 'inspector-turn-pane' }, listChildren),
-				h('div', { class: 'inspector-detail-pane' }, detailChildren),
-			]),
+			instanceRow !== null ? instanceRow : null,
+			h('div', { class: 'inspector-modal-body' }, bodyChildren),
 		]),
 	])
 }

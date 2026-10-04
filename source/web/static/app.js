@@ -15,7 +15,7 @@ import { copyRawToClipboard } from './clipboard.js'
 import { QuestionModal } from './question-modal.js'
 import { createOperationDetails } from './operation-details.js'
 import { ResultModal, deriveTerminalResult } from './result-modal.js'
-import { InspectorModal, buildTurnIndex, resolveSelection, scopeTurnEntries, deriveDefaultScopeRoleId, instancesOf, deriveInstanceChain, tailWindowOffset, olderWindowOffset, olderFetchLimit, canPageOlder, INSPECTOR_WINDOW_SIZE, INSPECTOR_PAGE_LIMIT, INSPECTOR_RETENTION_LIMIT } from './inspector-modal.js'
+import { InspectorModal, buildTurnIndex, deriveDefaultScopeRoleId, instancesOf, deriveInstanceChain, tailWindowOffset, olderWindowOffset, olderFetchLimit, canPageOlder, INSPECTOR_WINDOW_SIZE, INSPECTOR_PAGE_LIMIT, INSPECTOR_RETENTION_LIMIT } from './inspector-modal.js'
 import { Tooltip, tooltipStyle } from './tooltip.js'
 import { createStreamClient } from './stream-client.js'
 import { nextLivePartial, activeLivePartial } from './live-partial.js'
@@ -101,10 +101,7 @@ const flowColumnTracker = createColumnTracker()
 // The inspector's operation-details controller (see operation-details.js): key `<runId>|<operationId>`, states 'loading' | 'failed' | ready. The polled flow model ships no detail bodies (they can carry multi-megabyte tool arguments/results), so opening an inspector card fetches the ids its derivation may show from `api/runs/:id/flow?operation=<id>` exactly once per session and caches them. Operation ids are stable within a run (events only append), so an entry never goes stale; the run id in the key keeps a previous run's entries from answering for another run's same-numbered operation. Module scope like flowColumnTracker — cache memory, not app state. This host drives the controller through `begin` + `record*` because its fetches are hyperapp effects whose ok/fail actions must return fresh state to trigger the re-render, so no `onLanded` fan-out is wired.
 const operationDetails = createOperationDetails({})
 
-// The LLM turn inspector's detail session cache: key `<runId>|<eventIndex>` → 'loading' | { sections }. The inspector fetches one turn's detail sections (`GET /api/runs/:id/log?detail=<index>`) exactly once per session and caches them here, so re-selecting a turn (and the in-flight turn completing under a live selection) never re-fetches; a failed fetch evicts its entry rather than caching the failure, so one transient 500 cannot poison a turn for the session — re-selecting retries. Event indexes are stable within a run (events only append), and the run id in the key keeps a previous run's entries from answering for another run's same-numbered event. Module scope like operationDetails — cache memory, not app state.
-const inspectorDetailCache = new Map()
-
-// The live-token-stream client (see stream-client.js and docs/reference.md "Live token stream"): module scope like the other session caches, created lazily by the stream subscription on the first watch-screen mount and left connected for the page's lifetime. The stream is an enhancement — the client is contained (never throws, shows no error surface), and the only state it feeds is the ephemeral `livePartial` the inspector modal's in-flight row renders.
+// The live-token-stream client (see stream-client.js and docs/reference.md "Live token stream"): module scope like the other session caches, created lazily by the stream subscription on the first watch-screen mount and left connected for the page's lifetime. The stream is an enhancement — the client is contained (never throws, shows no error surface), and the only state it feeds is the ephemeral `livePartial` the inspector modal's in-flight turn renders.
 let streamClient = null
 
 // ws vs wss follows the page's own protocol so a TLS deployment upgrades the stream with it.
@@ -292,7 +289,7 @@ function PollSelectedRun(state) {
 		Fetch({ url: `api/runs/${runId}`, ok: GotSelectedRun, fail: FetchFailed }),
 		// The flow model is derived server-side from the full log (the truncated recentLog the run view carries is not enough to reconstruct the active path, lingering legs, or per-invocation costs); the centerpiece reads it off this endpoint rather than re-deriving client-side.
 		Fetch({ url: `api/runs/${runId}/flow`, ok: GotFlowModel, fail: FetchFailed }),
-		// While the inspector modal is open, the same poll also refreshes the turn-list tail so in-flight turns appear when they complete (a null effect when closed — hyperapp ignores falsy effects).
+		// While the inspector modal is open, the same poll also refreshes the log-window tail so in-flight turns appear when they complete (a null effect when closed — hyperapp ignores falsy effects).
 		InspectorTailRefresh(state),
 	]
 }
@@ -921,13 +918,13 @@ function ClickRunView(state, event) {
 }
 
 // --- LLM turn inspector (modal) ---------------------------------------------
-// The stage-controls "Inspect" button opens a modal over the run view that lists the run's LLM turns (derived from the windowed log endpoint) and fetches one turn's request/response detail on demand. The list is scoped to one agent instance (the inspector redesign, milestone 1): the modal state carries the explicitly scoped instance id (null = auto — the most recently active instance in the loaded window), the breadcrumb and instance dropdown re-scope, and the selection/detail flow operates within the scoped instance's turns. The data flow mirrors the operation-details pattern above: fetches run as effects, bodies land in a module-scope session cache, and the view re-renders from state plus the cache. The list loads with a single cheap probe (`?limit=1`) that learns the log's `total`, then fetches the most recent window; "older turns" pages back; while the modal is open on an active run the 1s poll appends the log's tail so in-flight turns appear when they complete.
+// The stage-controls "Inspect" button opens a modal over the run view that renders one agent instance's LLM turns as a continuous transcript (the inspector redesign, milestone 2), derived straight from the windowed log endpoint's `llm_call` payloads — no per-turn detail fetches. The modal is scoped to one instance (milestone 1): the modal state carries the explicitly scoped instance id (null = auto — the most recently active instance in the loaded window), and the breadcrumb, instance dropdown, and each `agent` call's View affordance re-scope. The data flow is plain effects and state: the log loads with a single cheap probe (`?limit=1`) that learns the log's `total`, then fetches the most recent window; "older turns" pages back; while the modal is open on an active run the 1s poll appends the log's tail so in-flight turns appear when they complete and the live partial swaps for the completed turn.
 
 function initialInspectorState() {
-	return { loadState: 'loading', events: [], total: null, tailOffset: null, entries: [], selectedEventIndex: null, scopedRoleId: null, olderLoading: false }
+	return { loadState: 'loading', events: [], total: null, tailOffset: null, entries: [], scopedRoleId: null, olderLoading: false }
 }
 
-// The inspector's effective scope: the explicitly scoped instance id, or — while unset — the most recently active instance in the loaded window (the newest turn still in flight, else the newest turn), so the modal opens on whatever the run is doing now. A stale explicit scope (its turns paged out of the loaded range) is kept as-is: the list reads empty and the dropdown re-scopes.
+// The inspector's effective scope: the explicitly scoped instance id, or — while unset — the most recently active instance in the loaded window (the newest turn still in flight, else the newest turn), so the modal opens on whatever the run is doing now. A stale explicit scope (its turns paged out of the loaded range) is kept as-is: the transcript reads empty and the dropdown re-scopes.
 function effectiveInspectorScope(state) {
 	return state.inspector.scopedRoleId ?? deriveDefaultScopeRoleId(state.inspector.entries)
 }
@@ -972,16 +969,13 @@ function InspectorTotalLoaded(state, payload) {
 	]
 }
 
-// The window response replaces the loaded events wholesale (initial tail load and gap resync both land here), so the loaded range is always a contiguous slice of the log. A selection made against the previous list survives through `resolveSelection` over the scoped instance's turns — an in-flight turn completing maps the selection to its new completed entry, a selection of another instance's turn reads as deselected — and a completed selection whose detail is not yet cached triggers the on-demand detail fetch. The turn pairing also decides the live partial's fate: when the accumulated role no longer holds an in-flight turn, the poll has just recorded its completion and the partial clears (see "Live token stream"); the pairing runs over the full list so a turn completing in an unscoped instance still clears it.
+// The window response replaces the loaded events wholesale (initial tail load and gap resync both land here), so the loaded range is always a contiguous slice of the log. The turn pairing also decides the live partial's fate: when the accumulated role no longer holds an in-flight turn, the poll has just recorded its completion and the partial clears (see "Live token stream"); the pairing runs over the full list so a turn completing in an unscoped instance still clears it.
 function InspectorWindowLoaded(state, payload) {
 	const body = readableInspectorLogBody(payload)
 	if (body === null) return [{ ...state, inspector: { ...initialInspectorState(), loadState: 'failed' }, serverAvailable: payload.ok }]
 	if (body.runId !== state.selectedRunId) return state
 	const entries = buildTurnIndex(body.events)
-	const scopedEntries = scopeTurnEntries(entries, state.inspector.scopedRoleId ?? deriveDefaultScopeRoleId(entries))
-	const selectedEventIndex = resolveSelection(state.inspector.selectedEventIndex, scopedEntries)
-	const nextState = { ...state, inspector: { ...state.inspector, loadState: 'ready', events: body.events, total: body.total, tailOffset: body.offset, entries, selectedEventIndex, olderLoading: false }, livePartial: activeLivePartial(state.livePartial, entries), serverAvailable: true }
-	return [nextState, inspectorDetailEffect(nextState)]
+	return { ...state, inspector: { ...state.inspector, loadState: 'ready', events: body.events, total: body.total, tailOffset: body.offset, entries, olderLoading: false }, livePartial: activeLivePartial(state.livePartial, entries), serverAvailable: true }
 }
 
 function LoadOlderTurns(state) {
@@ -1020,7 +1014,7 @@ function InspectorTailRefresh(state) {
 	return Fetch({ url: `api/runs/${encodeURIComponent(state.selectedRunId)}/log?offset=${state.inspector.total}&limit=${INSPECTOR_PAGE_LIMIT}`, ok: InspectorTailRefreshed, fail: FetchFailed })
 }
 
-// Appends the new events to the loaded range. A response that cannot bridge to the new total (more events landed between two polls than one page carries) resyncs with a fresh tail window instead of leaving a silent gap in the list — and so does a loaded range that has grown past the retention cap, since appending at the `full` log level would otherwise grow the modal's memory without bound. A response landing after the modal closed leaves the stale inspector state alone. The selection is re-resolved so a just-completed in-flight turn keeps it, and the completed turn's detail is fetched if not cached.
+// Appends the new events to the loaded range. A response that cannot bridge to the new total (more events landed between two polls than one page carries) resyncs with a fresh tail window instead of leaving a silent gap in the transcript — and so does a loaded range that has grown past the retention cap, since appending at the `full` log level would otherwise grow the modal's memory without bound. A response landing after the modal closed leaves the stale inspector state alone.
 function InspectorTailRefreshed(state, payload) {
 	const body = readableInspectorLogBody(payload)
 	if (!state.inspectorModalOpen) return state
@@ -1032,27 +1026,14 @@ function InspectorTailRefreshed(state, payload) {
 	if (body.events.length === 0) return state
 	const events = [...state.inspector.events, ...body.events]
 	const entries = buildTurnIndex(events)
-	const scopedEntries = scopeTurnEntries(entries, state.inspector.scopedRoleId ?? deriveDefaultScopeRoleId(entries))
-	const selectedEventIndex = resolveSelection(state.inspector.selectedEventIndex, scopedEntries)
 	// The pairing decides the live partial's fate here too: the completed in-flight turn's partial clears the moment the poll records its `llm_call` (see "Live token stream").
-	const nextState = { ...state, inspector: { ...state.inspector, events, total: body.total, entries, selectedEventIndex }, livePartial: activeLivePartial(state.livePartial, entries), serverAvailable: true }
-	return [nextState, inspectorDetailEffect(nextState)]
+	return { ...state, inspector: { ...state.inspector, events, total: body.total, entries }, livePartial: activeLivePartial(state.livePartial, entries), serverAvailable: true }
 }
 
-function SelectInspectorTurn(state, entry) {
-	if (entry === null || typeof entry !== 'object' || typeof entry.eventIndex !== 'number') return state
-	const selectedEventIndex = entry.eventIndex
-	const nextState = { ...state, inspector: { ...state.inspector, selectedEventIndex } }
-	return [nextState, inspectorDetailEffect(nextState)]
-}
-
-// Re-scopes the turn list to an instance: the selection re-resolves within the newly scoped list (another instance's turn reads as deselected) and the detail fetch follows the selection.
+// Re-scopes the transcript to an instance. The breadcrumb chain derives from the loaded events, so setting the scope pushes the crumb on, and the ↑ parent affordance pops back.
 function scopeInspectorTo(state, roleId) {
 	if (state.inspector.scopedRoleId === roleId) return state
-	const scopedEntries = scopeTurnEntries(state.inspector.entries, roleId)
-	const selectedEventIndex = resolveSelection(state.inspector.selectedEventIndex, scopedEntries)
-	const nextState = { ...state, inspector: { ...state.inspector, scopedRoleId: roleId, selectedEventIndex } }
-	return [nextState, inspectorDetailEffect(nextState)]
+	return { ...state, inspector: { ...state.inspector, scopedRoleId: roleId } }
 }
 
 // The selected value off a change event, or null when it does not carry a usable one.
@@ -1064,7 +1045,7 @@ function eventTargetValue(event) {
 	return typeof value === 'string' && value !== '' ? value : null
 }
 
-// The breadcrumb crumbs and the parent affordance pass the instance id directly; the instance dropdown passes the change event. Both re-scope the turn list.
+// The breadcrumb crumbs, the parent affordance, and an agent call's View control pass the instance id directly; the instance dropdown passes the change event. All re-scope the transcript.
 function ScopeInspectorInstance(state, payload) {
 	if (state.inspectorModalOpen !== true) return state
 	const roleId = typeof payload === 'string' && payload !== '' ? payload : eventTargetValue(payload)
@@ -1072,63 +1053,20 @@ function ScopeInspectorInstance(state, payload) {
 	return scopeInspectorTo(state, roleId)
 }
 
-// The selected turn's entry in the scoped instance's list, or null when the selection no longer resolves within the scope.
-function selectedInspectorEntry(state) {
-	if (state.inspector.selectedEventIndex === null) return null
-	return scopeTurnEntries(state.inspector.entries, effectiveInspectorScope(state)).find((entry) => entry.eventIndex === state.inspector.selectedEventIndex) ?? null
-}
-
-// Schedules the selected completed turn's detail fetch if it is not cached yet, marking the cache 'loading' synchronously so the first render reads a defined state; returns a null effect for in-flight turns (nothing to fetch until the llm_call lands), a cached or absent selection, or a missing run id.
-function inspectorDetailEffect(state) {
-	const entry = selectedInspectorEntry(state)
-	if (entry === null || entry.kind !== 'completed') return null
-	const runId = state.selectedRunId
-	if (typeof runId !== 'string' || runId === '') return null
-	const key = `${runId}|${entry.eventIndex}`
-	if (inspectorDetailCache.has(key)) return null
-	inspectorDetailCache.set(key, 'loading')
-	return Fetch({ url: `api/runs/${encodeURIComponent(runId)}/log?detail=${entry.eventIndex}`, ok: InspectorDetailLoaded(runId, entry.eventIndex), fail: InspectorDetailFailed(runId, entry.eventIndex) })
-}
-
-function InspectorDetailLoaded(runId, eventIndex) {
-	return function InspectorDetailLoadedForTurn(state, payload) {
-		const body = payload.ok && payload.body !== null && typeof payload.body === 'object' ? payload.body : null
-		const readable = body !== null && (body.detailSections === null || Array.isArray(body.detailSections))
-		// A failure evicts rather than caching: a cached failure would block the retry `inspectorDetailEffect` schedules on re-selection (and on the tail refresh under a live selection) forever.
-		if (!readable) {
-			inspectorDetailCache.delete(`${runId}|${eventIndex}`)
-			return { ...state }
-		}
-		inspectorDetailCache.set(`${runId}|${eventIndex}`, { sections: body.detailSections })
-		return { ...state }
-	}
-}
-
-function InspectorDetailFailed(runId, eventIndex) {
-	return function InspectorDetailFailedForTurn(state) {
-		inspectorDetailCache.delete(`${runId}|${eventIndex}`)
-		return { ...state }
-	}
-}
-
-// The inspector modal as the watch screen mounts it: the turn list from state, scoped to the effective instance and renumbered within it, plus the breadcrumb chain and instance dropdown derived from the loaded events. The selected turn's detail comes from the session cache (a miss reads as 'loading' — the select action schedules the fetch in the same dispatch). Cache misses never render invented content.
+// The inspector modal as the watch screen mounts it: the transcript derives inside the component from the loaded log window and the effective scope (the modal is a pure function of its props, so the vnode tests exercise the same derivation the view renders), plus the breadcrumb chain and instance dropdown from the same events. Cache-less by design: the transcript reads the event payloads directly.
 function InspectorModalForRun(state) {
 	if (!state.inspectorModalOpen) return null
 	const runId = state.selectedRunId
-	const detailState = typeof runId === 'string' && state.inspector.selectedEventIndex !== null
-		? inspectorDetailCache.get(`${runId}|${state.inspector.selectedEventIndex}`) ?? null
-		: null
 	const scopedRoleId = effectiveInspectorScope(state)
 	return InspectorModal(h, {
 		runLabel: typeof runId === 'string' ? runId : null,
-		turns: { ...state.inspector, entries: scopeTurnEntries(state.inspector.entries, scopedRoleId) },
+		logEvents: state.inspector.events,
+		turns: { loadState: state.inspector.loadState, total: state.inspector.total, tailOffset: state.inspector.tailOffset, olderLoading: state.inspector.olderLoading },
 		instances: instancesOf(state.inspector.events),
 		chain: deriveInstanceChain(state.inspector.events, scopedRoleId),
 		scopedRoleId,
-		detailState,
 		livePartial: state.livePartial,
 		renderMarkdown,
-		onSelectTurn: SelectInspectorTurn,
 		onScopeInstance: ScopeInspectorInstance,
 		onLoadOlder: LoadOlderTurns,
 		onClose: CloseInspectorModal,
@@ -1721,7 +1659,7 @@ app({
 			resultModalOpen: false,
 			resultShownForRun: null,
 			interruptModalOpen: false,
-			// The LLM turn inspector opens only from the stage controls; its data (the loaded log window, the derived turn list, the selection) lives in `inspector` and resets on open and on run switch.
+			// The LLM turn inspector opens only from the stage controls; its data (the loaded log window and the derived turn index) lives in `inspector` and resets on open and on run switch.
 			inspectorModalOpen: false,
 			inspector: initialInspectorState(),
 			// The plan disclosure under the stage: collapsed by default, reset with the other per-run view state on a run switch.

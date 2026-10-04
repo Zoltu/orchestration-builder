@@ -1879,150 +1879,25 @@ li:last-child {
 	max-width: 100%;
 }
 
+/* The modal body is the transcript: one continuous, scrollable document of the scoped instance's turns (the inspector redesign, milestone 2) — no list/detail split. */
 .inspector-modal-body {
-	display: flex;
-	gap: var(--space-4);
 	flex: 1;
 	min-height: 0;
-}
-
-.inspector-turn-pane {
-	width: 20rem;
-	flex: none;
+	overflow: auto;
 	display: flex;
 	flex-direction: column;
-	gap: var(--space-1);
-	overflow: auto;
+	gap: var(--space-4);
 }
 
-.inspector-detail-pane {
-	flex: 1;
-	min-width: 0;
-	overflow: auto;
-	border-left: 1px solid var(--color-border);
-	padding-left: var(--space-4);
-}
-
-.inspector-list-note {
+.inspector-transcript-note {
 	margin: 0;
 	color: var(--color-text-subtle);
 	font-size: 0.9rem;
 }
 
-.inspector-turn {
-	display: flex;
-	flex-direction: column;
-	gap: var(--space-1);
-	width: 100%;
-	padding: var(--space-2);
-	border: 1px solid transparent;
-	border-radius: var(--radius-sm);
-	background: none;
-	text-align: left;
-	font: inherit;
-	color: inherit;
-	cursor: pointer;
-}
-
-.inspector-turn:hover {
-	background: var(--color-surface-sunken);
-}
-
-.inspector-turn.is-selected {
-	border-color: var(--color-accent);
-	background: var(--color-accent-soft);
-}
-
-.inspector-turn.is-in-flight {
-	opacity: 0.6;
-}
-
-.inspector-turn-top {
-	display: flex;
-	align-items: baseline;
-	gap: var(--space-2);
-	min-width: 0;
-}
-
-.inspector-turn-number {
-	flex: none;
-	font-family: var(--font-mono);
-	font-size: 0.78rem;
-	color: var(--color-text-subtle);
-}
-
-.inspector-turn-role {
-	font-weight: 500;
-	font-size: 0.9rem;
-	overflow-wrap: anywhere;
-}
-
-.inspector-turn-time {
-	margin-left: auto;
-	flex: none;
-	font-size: 0.78rem;
-	color: var(--color-text-subtle);
-}
-
-.inspector-turn-bottom {
-	display: flex;
-	align-items: baseline;
-	gap: var(--space-2);
-	min-width: 0;
-}
-
-.inspector-turn-flight {
-	flex: none;
-	font-size: 0.78rem;
-	font-style: italic;
-	color: var(--color-accent);
-}
-
-.inspector-turn-tokens,
-.inspector-turn-finish {
-	font-size: 0.78rem;
-	color: var(--color-text-muted);
-	overflow-wrap: anywhere;
-}
-
-.inspector-turn-hint {
-	flex: none;
-	margin-left: auto;
-	padding: 0 var(--space-1);
-	border-radius: var(--radius-sm);
-	font-size: 0.7rem;
-	text-transform: uppercase;
-	letter-spacing: 0.04em;
-}
-
-.inspector-turn-hint-full {
-	color: var(--color-success);
-	background: var(--color-accent-soft);
-}
-
-.inspector-turn-hint-standard {
-	color: var(--color-text-subtle);
-	background: var(--color-surface-sunken);
-}
-
-/* The live partial under an in-flight turn row (the websocket stream, docs/reference.md "Live token stream"): a quiet inset block so the streamed text reads as part of the row, not as another pane. */
-.inspector-turn-live {
-	display: flex;
-	flex-direction: column;
-	gap: var(--space-1);
-}
-
-.inspector-live-partial {
-	display: flex;
-	flex-direction: column;
-	gap: var(--space-2);
-	padding: var(--space-2);
-	border: 1px solid var(--color-border);
-	border-radius: var(--radius-sm);
-}
-
+/* The "older turns" window control sits at the top of the transcript: paging back prepends earlier turns to the document. */
 .inspector-older {
-	margin-top: var(--space-2);
+	align-self: flex-start;
 	padding: var(--space-1) var(--space-3);
 	border: 1px solid var(--color-border-strong);
 	border-radius: var(--radius-sm);
@@ -2037,31 +1912,137 @@ li:last-child {
 	cursor: default;
 }
 
-.inspector-detail-note {
-	margin: 0;
-	color: var(--color-text-subtle);
-	font-size: 0.9rem;
-}
-
-.inspector-detail-degraded {
-	display: flex;
-	flex-direction: column;
-	gap: var(--space-3);
-}
-
-.inspector-degraded-notice {
-	margin: 0;
-	padding: var(--space-2) var(--space-3);
-	border: 1px solid var(--color-warn);
+/* The collapsed conversation opening (system prompt + task) hoisted above the turns: context, not story, so it starts shut. */
+.inspector-opening {
+	border: 1px solid var(--color-border);
 	border-radius: var(--radius-sm);
-	color: var(--color-text-muted);
-	font-size: 0.88rem;
 }
 
-.inspector-detail-sections {
+.inspector-opening-summary {
+	padding: var(--space-2) var(--space-3);
+	font-size: 0.8rem;
+	color: var(--color-text-muted);
+	cursor: pointer;
+	user-select: none;
+}
+
+.inspector-opening-body {
+	padding: 0 var(--space-3) var(--space-2);
 	display: flex;
 	flex-direction: column;
-	gap: var(--space-4);
+	gap: var(--space-2);
+}
+
+.inspector-turn-section {
+	display: flex;
+	flex-direction: column;
+	gap: var(--space-2);
+}
+
+.inspector-turn-section.is-in-flight {
+	opacity: 0.75;
+}
+
+.inspector-turn-header {
+	padding-bottom: var(--space-1);
+	border-bottom: 1px solid var(--color-border);
+	font-family: var(--font-mono);
+	font-size: 0.78rem;
+	color: var(--color-text-subtle);
+	overflow-wrap: anywhere;
+}
+
+.inspector-turn-section .inspector-degraded-notice {
+	margin: 0;
+}
+
+/* The turn's response: an accent-edged block so the assistant's voice reads distinctly from the user and tool-result messages above it. */
+.inspector-response {
+	display: flex;
+	flex-direction: column;
+	gap: var(--space-2);
+	padding-left: var(--space-3);
+	border-left: 2px solid var(--color-accent);
+}
+
+/* One inline tool call: name, compact arguments, outcome chip, and the compact result summary beneath. */
+.inspector-tool-call {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: baseline;
+	gap: var(--space-1) var(--space-2);
+	padding: var(--space-2);
+	background: var(--color-surface-sunken);
+	border-radius: var(--radius-sm);
+	font-size: 0.85rem;
+}
+
+.inspector-tool-call-name {
+	font-family: var(--font-mono);
+	font-size: 0.8rem;
+	color: var(--color-accent);
+	overflow-wrap: anywhere;
+}
+
+.inspector-tool-call-child-id {
+	font-family: var(--font-mono);
+	font-size: 0.8rem;
+	color: var(--color-text);
+	overflow-wrap: anywhere;
+}
+
+.inspector-tool-call-args {
+	font-family: var(--font-mono);
+	font-size: 0.75rem;
+	color: var(--color-text-muted);
+	overflow-wrap: anywhere;
+}
+
+.inspector-tool-call-result {
+	flex-basis: 100%;
+	margin: 0;
+	font-family: var(--font-mono);
+	font-size: 0.75rem;
+	line-height: 1.4;
+	color: var(--color-code-text);
+	white-space: pre-wrap;
+	word-break: break-word;
+}
+
+.inspector-tool-outcome {
+	flex: none;
+	padding: 0 var(--space-1);
+	border-radius: var(--radius-sm);
+	font-size: 0.7rem;
+	text-transform: uppercase;
+	letter-spacing: 0.04em;
+}
+
+.inspector-tool-outcome-success {
+	color: var(--color-success);
+	background: var(--color-accent-soft);
+}
+
+.inspector-tool-outcome-error {
+	color: var(--color-error);
+	background: var(--color-error-soft);
+}
+
+/* The child-instance affordance on an agent call that spawned a child: re-scopes the transcript (pushing the breadcrumb; ↑ parent pops back). */
+.inspector-tool-call-view {
+	padding: 0 var(--space-2);
+	border: 1px solid var(--color-border);
+	border-radius: var(--radius-sm);
+	background: none;
+	font: inherit;
+	font-size: 0.75rem;
+	color: var(--color-text-muted);
+	cursor: pointer;
+}
+
+.inspector-tool-call-view:hover {
+	color: var(--color-accent);
+	border-color: var(--color-accent);
 }
 
 .inspector-section {
@@ -2078,34 +2059,28 @@ li:last-child {
 	color: var(--color-text-subtle);
 }
 
-.inspector-json {
-	margin: 0;
-	padding: var(--space-2);
-	background: var(--color-surface-sunken);
-	border-radius: var(--radius-sm);
-	font-family: var(--font-mono);
-	font-size: 0.78rem;
-	line-height: 1.4;
-	color: var(--color-code-text);
-	white-space: pre-wrap;
-	word-break: break-word;
-	max-height: 16rem;
-	overflow: auto;
-}
-
-.inspector-scalar {
-	font-size: 0.9rem;
-	color: var(--color-text);
-}
-
 .inspector-empty-value {
 	color: var(--color-text-subtle);
 }
 
-.inspector-message-list {
+/* The honest per-turn notice a standard-level turn renders in place of its bodies (fixed trusted copy, not agent prose). */
+.inspector-degraded-notice {
+	margin: 0;
+	padding: var(--space-2) var(--space-3);
+	border: 1px solid var(--color-warn);
+	border-radius: var(--radius-sm);
+	color: var(--color-text-muted);
+	font-size: 0.88rem;
+}
+
+/* The live partial in the in-flight turn (the websocket stream, docs/reference.md "Live token stream"): a quiet inset block so the streamed text reads as part of the turn, not as another pane. */
+.inspector-live-partial {
 	display: flex;
 	flex-direction: column;
 	gap: var(--space-2);
+	padding: var(--space-2);
+	border: 1px solid var(--color-border);
+	border-radius: var(--radius-sm);
 }
 
 .inspector-message {

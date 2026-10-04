@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { InspectorModal, buildTurnIndex, deriveDetailBodyState, deriveDefaultScopeRoleId, deriveInstanceChain, instancesOf, resolveSelection, scopeTurnEntries, tailWindowOffset, olderWindowOffset, olderFetchLimit, canPageOlder, INSPECTOR_WINDOW_SIZE, INSPECTOR_PAGE_LIMIT } from './static/inspector-modal.js'
+import { InspectorModal, buildTurnIndex, childInstanceFor, deriveDefaultScopeRoleId, deriveInstanceChain, deriveTranscriptTurns, instancesOf, scopeTurnEntries, tailWindowOffset, olderWindowOffset, olderFetchLimit, canPageOlder, INSPECTOR_WINDOW_SIZE, INSPECTOR_PAGE_LIMIT } from './static/inspector-modal.js'
 import { actionProp, defined, present } from './test-fixtures.js'
 
 // The inspector-modal component is browser-pure JS, so its exports arrive with inferred JS types. The interfaces and fake `h`/`renderMarkdown` below carry the shape the tests assert against, mirroring question-modal.test.ts / result-modal.test.ts.
@@ -75,6 +75,11 @@ function collectText(vnode: Vnode): string {
 	return out
 }
 
+// The number of times a needle occurs in a haystack (for no-repetition assertions).
+function occurrences(haystack: string, needle: string): number {
+	return haystack.split(needle).length - 1
+}
+
 // A fake Markdown renderer that records its argument and returns a marker vnode carrying the text, so the tests assert both that the prose flowed through the renderer and that its output reached the modal.
 function fakeRenderMarkdown(text: string): Vnode {
 	return { tag: 'span', props: { class: 'md-marker', 'data-text': text }, children: [text] }
@@ -84,6 +89,13 @@ function fakeRenderMarkdown(text: string): Vnode {
 function actionTuple(value: unknown): [unknown, unknown] {
 	if (!Array.isArray(value) || value.length !== 2 || typeof value[0] !== 'function') throw new Error('prop is not a two-element action tuple')
 	return [value[0], value[1]]
+}
+
+// Dispatches a hyperapp action tuple the way the framework would on the event: the action receives the tuple's payload.
+function dispatchActionTuple(value: unknown): unknown {
+	const [action, payload] = actionTuple(value)
+	if (typeof action !== 'function') throw new Error('action tuple head is not a function')
+	return action(payload)
 }
 
 // Window-shaped log events (the fields the windowed endpoint ships and the derivation reads).
@@ -132,6 +144,44 @@ function roleStartEvent(index: number, roleId: string, role: string, extras: Rec
 
 function roleFinishedEvent(index: number, roleId: string, role: string): WindowEvent {
 	return { index, timestamp: `2026-01-01T00:00:${String(index % 60).padStart(2, '0')}Z`, type: 'role_finished', payload: { role, roleId, depth: 0, status: 'success' } }
+}
+
+// A tool call in either wire shape (a sent assistant message's `tool_calls` and a received response's `toolCalls` carry the same id/name/arguments fields).
+function wireToolCall(id: string, name: string, args: string): Record<string, unknown> {
+	return { id, type: 'function', function: { name, arguments: args } }
+}
+
+// A two-turn coder conversation: turn 1 opens the conversation and calls a tool; turn 2's slice carries that response's echo plus the tool result, and replies.
+const stitchEvents: WindowEvent[] = [
+	startEvent(0, 'coder', 'coder-1'),
+	callEvent(1, 'coder', {
+		roleId: 'coder-1',
+		messageCount: 2,
+		sentFrom: 0,
+		sent: [
+			{ role: 'system', content: 'system prompt text' },
+			{ role: 'user', content: 'the task text' },
+		],
+		received: { content: 'turn one reply', reasoning: 'turn one thinking', toolCalls: [wireToolCall('c1', 'write_file', '{"path":"a.txt"}')] },
+		usage: { promptTokens: 100, completionTokens: 20, totalTokens: 120 },
+		finishReason: 'tool_calls',
+	}),
+	callEvent(2, 'coder', {
+		roleId: 'coder-1',
+		messageCount: 4,
+		sentFrom: 2,
+		sent: [
+			{ role: 'assistant', content: 'turn one reply', tool_calls: [wireToolCall('c1', 'write_file', '{"path":"a.txt"}')] },
+			{ role: 'tool', content: '{"kind":"tool_error","message":"no space"}' },
+		],
+		received: { content: 'turn two reply', reasoning: 'turn two thinking', toolCalls: [] },
+		usage: { promptTokens: 200, completionTokens: 10, totalTokens: 210 },
+		finishReason: 'stop',
+	}),
+]
+
+function transcriptOf(events: WindowEvent[], roleId: string): ReturnType<typeof deriveTranscriptTurns> {
+	return deriveTranscriptTurns(scopeTurnEntries(buildTurnIndex(events), roleId), events)
 }
 
 describe('buildTurnIndex', () => {
@@ -268,26 +318,6 @@ describe('buildTurnIndex', () => {
 		expect(entry.usage).toBeNull()
 		expect(entry.finishReason).toBeNull()
 		expect(entry.levelHint).toBe('standard')
-	})
-})
-
-describe('deriveDetailBodyState', () => {
-	test('full when a sent or received section is present', () => {
-		expect(deriveDetailBodyState([{ label: 'sent', content: [] }, { label: 'received', content: {} }])).toBe('full')
-		expect(deriveDetailBodyState([{ label: 'received', content: {} }])).toBe('full')
-		expect(deriveDetailBodyState([{ label: 'sent', content: [] }])).toBe('full')
-	})
-
-	test('degraded when sections carry only metadata', () => {
-		expect(deriveDetailBodyState([{ label: 'usage', content: {} }, { label: 'finish reason', content: 'stop' }])).toBe('degraded')
-		expect(deriveDetailBodyState([])).toBe('degraded')
-	})
-
-	test('degraded for a null or malformed response — an honest notice, not an error', () => {
-		expect(deriveDetailBodyState(null)).toBe('degraded')
-		expect(deriveDetailBodyState(undefined)).toBe('degraded')
-		expect(deriveDetailBodyState('broken')).toBe('degraded')
-		expect(deriveDetailBodyState([null, 42])).toBe('degraded')
 	})
 })
 
@@ -496,44 +526,187 @@ describe('scopeTurnEntries', () => {
 	})
 })
 
-describe('resolveSelection', () => {
-	const entries = buildTurnIndex([
-		callEvent(1, 'planner'),
-		startEvent(5, 'coder'),
-	])
-
-	test('keeps a selection the new list still carries', () => {
-		expect(resolveSelection(1, entries)).toBe(1)
-		expect(resolveSelection(5, entries)).toBe(5)
+describe('deriveTranscriptTurns', () => {
+	test('stitches each turn out of its own slice only, so no message repeats across turns', () => {
+		const turns = transcriptOf(stitchEvents, 'coder-1')
+		expect(turns).toHaveLength(2)
+		const first = defined(turns[0], 'turns[0]')
+		const second = defined(turns[1], 'turns[1]')
+		// Turn 1: the slice is entirely the hoisted opening, so nothing inline remains; the response carries the call…
+		expect(first.messages).toHaveLength(0)
+		expect(present(first.received, 'first.received').content).toBe('turn one reply')
+		// …turn 2: the echo of turn 1's response and the tool result answering its call are both consumed — only the new response remains.
+		expect(second.messages).toHaveLength(0)
+		expect(present(second.received, 'second.received').content).toBe('turn two reply')
+		// The document states each datum once: turn 1's reply appears in no later turn's material.
+		expect(JSON.stringify(turns).split('turn one reply').length - 1).toBe(1)
 	})
 
-	test('maps a completed in-flight selection to its paired completed entry', () => {
-		const grown = buildTurnIndex([callEvent(1, 'planner'), startEvent(5, 'coder'), callEvent(6, 'coder')])
-		expect(resolveSelection(5, grown)).toBe(6)
+	test('the first turn hoists its leading system/user messages as the conversation opening, stopping at the first assistant/tool message', () => {
+		const turns = transcriptOf(stitchEvents, 'coder-1')
+		const first = defined(turns[0], 'turns[0]')
+		expect(first.opening.map((message) => message.role)).toEqual(['system', 'user'])
+		expect(first.opening.map((message) => message.content)).toEqual(['system prompt text', 'the task text'])
+		// Later turns never carry an opening.
+		expect(defined(turns[1], 'turns[1]').opening).toHaveLength(0)
+		const boundary = [
+			callEvent(4, 'coder', {
+				roleId: 'coder-1',
+				messageCount: 3,
+				sentFrom: 2,
+				sent: [
+					{ role: 'assistant', content: 'earlier reply', tool_calls: [wireToolCall('c9', 'read_file', '{}')] },
+					{ role: 'tool', content: '{"path":"ok"}' },
+				],
+				received: { content: 'later reply', reasoning: '', toolCalls: [] },
+			}),
+		]
+		// A loaded window that begins mid-instance (the first slice starts with the echo) hoists nothing.
+		const boundaryTurns = transcriptOf(boundary, 'coder-1')
+		expect(defined(boundaryTurns[0], 'boundaryTurns[0]').opening).toHaveLength(0)
 	})
 
-	test('deselects when the index no longer resolves', () => {
-		expect(resolveSelection(99, entries)).toBeNull()
-		expect(resolveSelection(null, entries)).toBeNull()
-		expect(resolveSelection(2.5, entries)).toBeNull()
-		expect(resolveSelection(1, [])).toBeNull()
+	test('a tool call\u0027s outcome joins from the tool result that answers it in the following turn\u0027s slice', () => {
+		const turns = transcriptOf(stitchEvents, 'coder-1')
+		const call = defined(present(defined(turns[0], 'turns[0]').received, 'turns[0].received').toolCalls[0], 'toolCalls[0]')
+		expect(call.id).toBe('c1')
+		expect(call.name).toBe('write_file')
+		expect(call.argumentsText).toBe('{"path":"a.txt"}')
+		const outcome = present(call.outcome, 'call.outcome')
+		expect(outcome.kind).toBe('tool_error')
+		expect(outcome.summary).toBe('no space')
 	})
 
-	test('operates within the scoped instance turns: another instance scope deselects, the same scope keeps and maps', () => {
-		const grown = buildTurnIndex([
-			startEvent(0, 'planner', 'planner-0-1'),
-			callEvent(1, 'planner', { roleId: 'planner-0-1' }),
-			startEvent(3, 'coder', 'coder-1-2'),
-			callEvent(4, 'coder', { roleId: 'coder-1-2' }),
-		])
-		const plannerScope = scopeTurnEntries(grown, 'planner-0-1')
-		const coderScope = scopeTurnEntries(grown, 'coder-1-2')
-		// A selection made on the planner's turn survives within the planner scope and maps when its in-flight start completes…
-		expect(resolveSelection(0, plannerScope)).toBe(1)
-		// …and reads as deselected once the operator re-scopes to the coder.
-		expect(resolveSelection(0, coderScope)).toBeNull()
-		// The coder's own in-flight selection maps to its completed entry within its scope.
-		expect(resolveSelection(3, coderScope)).toBe(4)
+	test('a tool result whose call is not rendered renders standalone with its own parsed outcome', () => {
+		const events = [
+			callEvent(0, 'coder', {
+				roleId: 'coder-1',
+				sent: [{ role: 'tool', content: '{"path":"written"}' }],
+				received: { content: 'done', reasoning: '', toolCalls: [] },
+				finishReason: 'stop',
+			}),
+		]
+		const turns = transcriptOf(events, 'coder-1')
+		const message = defined(defined(turns[0], 'turns[0]').messages[0], 'messages[0]')
+		expect(message.role).toBe('tool')
+		const outcome = present(message.outcome, 'message.outcome')
+		expect(outcome.kind).toBe('success')
+		expect(outcome.summary).toBe('{"path":"written"}')
+	})
+
+	test('an unanswered call (the newest turn) carries no invented outcome', () => {
+		const withTailCall = [
+			...stitchEvents,
+			callEvent(3, 'coder', {
+				roleId: 'coder-1',
+				messageCount: 5,
+				sentFrom: 4,
+				sent: [{ role: 'assistant', content: 'turn two reply', tool_calls: [wireToolCall('c2', 'read_file', '{}')] }],
+				received: { content: 'final', reasoning: '', toolCalls: [wireToolCall('c2', 'read_file', '{}')] },
+			}),
+		]
+		const tailTurns = transcriptOf(withTailCall, 'coder-1')
+		const last = defined(tailTurns[2], 'tailTurns[2]')
+		const call = defined(present(last.received, 'last.received').toolCalls[0], 'toolCalls[0]')
+		expect(call.outcome).toBeNull()
+	})
+
+	test('a standard-level turn renders header data only — no bodies, no invention', () => {
+		const turns = transcriptOf([standardCallEvent(0, 'coder')], 'coder')
+		const turn = defined(turns[0], 'turns[0]')
+		expect(turn.bodyLevel).toBe('standard')
+		expect(turn.opening).toHaveLength(0)
+		expect(turn.messages).toHaveLength(0)
+		expect(turn.received).toBeNull()
+		expect(turn.usage).not.toBeNull()
+		expect(turn.finishReason).toBe('tool_calls')
+	})
+
+	test('an in-flight turn carries no body yet', () => {
+		const turns = transcriptOf([startEvent(0, 'coder', 'coder-1')], 'coder-1')
+		const turn = defined(turns[0], 'turns[0]')
+		expect(turn.kind).toBe('in_flight')
+		expect(turn.bodyLevel).toBeNull()
+		expect(turn.messages).toHaveLength(0)
+		expect(turn.received).toBeNull()
+		expect(turn.usage).toBeNull()
+	})
+
+	test('turn headers carry the instance-renumbered number, usage, and finish reason', () => {
+		const turns = transcriptOf(stitchEvents, 'coder-1')
+		const first = defined(turns[0], 'turns[0]')
+		const second = defined(turns[1], 'turns[1]')
+		expect(first.turnNumber).toBe(1)
+		expect(present(first.usage, 'first.usage').totalTokens).toBe(120)
+		expect(first.finishReason).toBe('tool_calls')
+		expect(second.turnNumber).toBe(2)
+		expect(present(second.usage, 'second.usage').totalTokens).toBe(210)
+		expect(second.finishReason).toBe('stop')
+	})
+
+	test('an empty or malformed input yields an empty transcript', () => {
+		expect(deriveTranscriptTurns([], [])).toEqual([])
+		expect(deriveTranscriptTurns(null, [])).toEqual([])
+		expect(deriveTranscriptTurns(undefined, 'broken')).toEqual([])
+	})
+})
+
+describe('childInstanceFor', () => {
+	// A deep delegation chain: the orchestrator's turn delegates to coder-1, whose own turn delegates to coder-1-1.
+	const chainEvents = [
+		roleStartEvent(0, 'orchestrator-0', 'orchestrator', { depth: 0 }),
+		callEvent(1, 'orchestrator', { roleId: 'orchestrator-0' }),
+		roleStartEvent(2, 'coder-1', 'coder', { depth: 1, parent: 'orchestrator', parentRoleId: 'orchestrator-0' }),
+		callEvent(3, 'coder', { roleId: 'coder-1' }),
+		roleStartEvent(4, 'coder-1-1', 'coder', { depth: 2, parent: 'coder', parentRoleId: 'coder-1' }),
+	]
+
+	test('matches the first role_start after the turn whose parentRoleId names the parent, through deep chains', () => {
+		expect(childInstanceFor(chainEvents, 'orchestrator-0', 1)).toBe('coder-1')
+		expect(childInstanceFor(chainEvents, 'coder-1', 3)).toBe('coder-1-1')
+	})
+
+	test('ambiguous timing resolves by position: an earlier sibling start never matches a later turn', () => {
+		const repeated = [
+			roleStartEvent(2, 'coder-1', 'coder', { depth: 1, parent: 'orchestrator', parentRoleId: 'orchestrator-0' }),
+			callEvent(5, 'orchestrator', { roleId: 'orchestrator-0' }),
+			roleStartEvent(7, 'coder-2', 'coder', { depth: 1, parent: 'orchestrator', parentRoleId: 'orchestrator-0' }),
+		]
+		expect(childInstanceFor(repeated, 'orchestrator-0', 5)).toBe('coder-2')
+		// Two candidate starts both after the turn: the first wins (the executor dispatches agent calls sequentially).
+		const parallel = [
+			roleStartEvent(6, 'first-1', 'coder', { parentRoleId: 'parent-0' }),
+			roleStartEvent(8, 'second-1', 'writer', { parentRoleId: 'parent-0' }),
+		]
+		expect(childInstanceFor(parallel, 'parent-0', 5)).toBe('first-1')
+	})
+
+	test('no child identified reads as null: no start after the turn, a mismatched parent, or a refused spawn', () => {
+		expect(childInstanceFor(chainEvents, 'orchestrator-0', 2)).toBeNull()
+		expect(childInstanceFor(chainEvents, 'writer-0', 1)).toBeNull()
+		expect(childInstanceFor([], 'orchestrator-0', 0)).toBeNull()
+	})
+
+	test('old logs whose role_start predates parentRoleId fall back to the parent role-name echo', () => {
+		const legacy = [
+			roleStartEvent(0, 'orchestrator-0', 'orchestrator'),
+			callEvent(1, 'orchestrator', { roleId: 'orchestrator-0' }),
+			roleStartEvent(2, 'coder-1', 'coder', { depth: 1, parent: 'orchestrator' }),
+		]
+		// The scope under the fallback world is the role name itself, so the echo compares against it.
+		expect(childInstanceFor(legacy, 'orchestrator', 1)).toBe('coder-1')
+		// A start that names a different parent exactly never falls through to the echo.
+		const exactMismatch = [roleStartEvent(2, 'coder-1', 'coder', { depth: 1, parent: 'orchestrator', parentRoleId: 'someone-else' })]
+		expect(childInstanceFor(exactMismatch, 'orchestrator', 1)).toBeNull()
+	})
+
+	test('malformed input reads as no child', () => {
+		expect(childInstanceFor('broken', 'orchestrator-0', 1)).toBeNull()
+		expect(childInstanceFor(chainEvents, '', 1)).toBeNull()
+		expect(childInstanceFor(chainEvents, null, 1)).toBeNull()
+		expect(childInstanceFor(chainEvents, 'orchestrator-0', null)).toBeNull()
+		expect(childInstanceFor(chainEvents, 'orchestrator-0', 2.5)).toBeNull()
+		expect(childInstanceFor([{ index: 4, type: 'role_start', payload: { role: 'coder' } }], 'orchestrator-0', 1)).toBeNull()
 	})
 })
 
@@ -541,22 +714,19 @@ describe('InspectorModal', () => {
 	function renderModal(overrides: Record<string, unknown> = {}): Vnode {
 		return InspectorModal(fakeH, {
 			runLabel: 'run-2026',
-			turns: { loadState: 'ready', entries: [], total: 0, tailOffset: 0, selectedEventIndex: null, scopedRoleId: null, olderLoading: false },
+			logEvents: [],
+			turns: { loadState: 'ready', total: 0, tailOffset: 0, olderLoading: false },
 			instances: [],
 			chain: [],
 			scopedRoleId: null,
-			detailState: null,
+			livePartial: null,
 			renderMarkdown: fakeRenderMarkdown,
-			onSelectTurn: () => undefined,
 			onScopeInstance: () => undefined,
 			onLoadOlder: () => undefined,
 			onClose: () => undefined,
 			...overrides,
 		})
 	}
-
-	const completedEntries = buildTurnIndex([startEvent(0, 'planner'), callEvent(3, 'planner'), startEvent(5, 'coder')])
-	const inFlightEntry = defined(completedEntries[1], 'completedEntries[1]')
 
 	test('renders a backdrop and a card over the run view, with the run named in the heading', () => {
 		const modal = renderModal()
@@ -579,131 +749,169 @@ describe('InspectorModal', () => {
 		expect(closed).toBe(2)
 	})
 
-	test('turn rows render newest first and wire the select action with the entry as payload', () => {
-		const modal = renderModal({ turns: { loadState: 'ready', entries: completedEntries, total: 9, tailOffset: 0, selectedEventIndex: null, olderLoading: false } })
-		const rows = allByClass(modal, 'inspector-turn')
-		expect(rows).toHaveLength(2)
-		expect(collectText(defined(rows[0], 'rows[0]'))).toContain('#2')
-		expect(collectText(defined(rows[1], 'rows[1]'))).toContain('#1')
-		const tuple = actionTuple(defined(rows[0], 'rows[0]').props.onclick)
-		expect(tuple[1]).toBe(inFlightEntry)
+	test('the transcript renders one continuous document: the collapsed opening expander first, then the turns in order', () => {
+		const modal = renderModal({ logEvents: stitchEvents, scopedRoleId: 'coder-1' })
+		const opening = defined(allByClass(modal, 'inspector-opening')[0], 'opening')
+		const summary = defined(allByTag(opening, 'summary')[0], 'opening summary')
+		expect(collectText(summary)).toBe('system prompt \u00b7 task')
+		// Collapsed by default: the native expander carries no `open` prop.
+		expect(opening.props.open).toBeUndefined()
+		const sections = allByClass(modal, 'inspector-turn-section')
+		expect(sections).toHaveLength(2)
+		const headers = allByClass(modal, 'inspector-turn-header')
+		expect(collectText(defined(headers[0], 'headers[0]'))).toBe('Turn 1 \u00b7 120 tok \u00b7 tool_calls')
+		expect(collectText(defined(headers[1], 'headers[1]'))).toBe('Turn 2 \u00b7 210 tok \u00b7 stop')
 	})
 
-	test('an in-flight turn row shows the in-flight marker and the detail pane explains the contract', () => {
-		const modal = renderModal({ turns: { loadState: 'ready', entries: completedEntries, total: 9, tailOffset: 0, selectedEventIndex: inFlightEntry.eventIndex, olderLoading: false } })
-		expect(collectText(modal)).toContain('in flight…')
-		const pane = defined(allByClass(modal, 'inspector-detail-pane')[0], 'detail pane')
-		expect(collectText(pane)).toContain('once the model responds')
+	test('the opening expander carries the first turn\u0027s system prompt and task through the Markdown pipeline', () => {
+		const modal = renderModal({ logEvents: stitchEvents, scopedRoleId: 'coder-1' })
+		const opening = defined(allByClass(modal, 'inspector-opening')[0], 'opening')
+		const markers = allByTag(opening, 'span').filter((node) => node.props.class === 'md-marker').map((node) => node.props['data-text'])
+		expect(markers).toContain('system prompt text')
+		expect(markers).toContain('the task text')
 	})
 
-	test('the live partial renders labeled reasoning and response under the matching in-flight row', () => {
-		const modal = renderModal({
-			turns: { loadState: 'ready', entries: completedEntries, total: 9, tailOffset: 0, selectedEventIndex: null, olderLoading: false },
-			livePartial: { roleId: 'coder-1', role: 'coder', reasoning: 'thinking hard', content: 'partial ans' },
-		})
-		const blocks = allByClass(modal, 'inspector-live-partial')
-		expect(blocks).toHaveLength(1)
-		const block = defined(blocks[0], 'live block')
+	test('each turn renders its new messages and its response, with reasoning labeled through the Markdown pipeline, and nothing repeats', () => {
+		const modal = renderModal({ logEvents: stitchEvents, scopedRoleId: 'coder-1' })
+		const text = collectText(modal)
+		// Each prose datum appears exactly once across the whole document.
+		expect(occurrences(text, 'turn one reply')).toBe(1)
+		expect(occurrences(text, 'turn two reply')).toBe(1)
+		expect(occurrences(text, 'no space')).toBe(1)
+		const markers = allByTag(modal, 'span').filter((node) => node.props.class === 'md-marker').map((node) => node.props['data-text'])
+		expect(markers).toContain('turn one thinking')
+		expect(markers).toContain('turn one reply')
+		expect(markers).toContain('turn two thinking')
+		expect(markers).toContain('turn two reply')
+		// The reasoning is labeled 💭, the opening's messages render as their own blocks, and each turn's response renders as the response block.
+		expect(text).toContain('\ud83d\udcad Reasoning')
+		expect(allByClass(modal, 'inspector-message')).toHaveLength(2)
+		expect(allByClass(modal, 'inspector-response')).toHaveLength(2)
+	})
+
+	test('tool calls render inline with name, compact arguments, outcome, and result summary', () => {
+		const modal = renderModal({ logEvents: stitchEvents, scopedRoleId: 'coder-1' })
+		const call = defined(allByClass(modal, 'inspector-tool-call')[0], 'tool call')
+		const text = collectText(call)
+		expect(text).toContain('write_file')
+		expect(text).toContain('{"path":"a.txt"}')
+		expect(text).not.toContain('turn one reply')
+		const outcome = defined(allByClass(call, 'inspector-tool-outcome-error')[0], 'error chip')
+		expect(collectText(outcome)).toBe('\u2717 tool_error')
+		expect(collectText(call)).toContain('no space')
+	})
+
+	test('an agent call with an identifiable child renders the delegation affordance wired to the scope action; without one it stays plain text', () => {
+		const agentEvents: WindowEvent[] = [
+			startEvent(0, 'orchestrator', 'orchestrator-0'),
+			callEvent(1, 'orchestrator', {
+				roleId: 'orchestrator-0',
+				sent: [{ role: 'user', content: 'the task text' }],
+				received: { content: 'delegating', reasoning: '', toolCalls: [wireToolCall('a1', 'agent', '{"role":"coder","task":"subtask"}')] },
+				finishReason: 'tool_calls',
+			}),
+			roleStartEvent(2, 'coder-1-1', 'coder', { depth: 1, parent: 'orchestrator', parentRoleId: 'orchestrator-0' }),
+			roleFinishedEvent(3, 'coder-1-1', 'coder'),
+			// The child returns: the next turn's slice carries the agent call's echo plus its result, so the affordance also shows the outcome.
+			callEvent(4, 'orchestrator', {
+				roleId: 'orchestrator-0',
+				messageCount: 3,
+				sentFrom: 2,
+				sent: [
+					{ role: 'assistant', content: 'delegating', tool_calls: [wireToolCall('a1', 'agent', '{"role":"coder","task":"subtask"}')] },
+					{ role: 'tool', content: '{"status":"success","summary":"done"}' },
+				],
+				received: { content: 'child done', reasoning: '', toolCalls: [] },
+				finishReason: 'stop',
+			}),
+		]
+		const scoped = renderModal({ logEvents: agentEvents, scopedRoleId: 'orchestrator-0' })
+		const call = defined(allByClass(scoped, 'inspector-tool-call')[0], 'agent call')
+		expect(collectText(call)).toContain('agent')
+		expect(collectText(call)).toContain('\u2192 coder-1-1')
+		const outcome = defined(allByClass(call, 'inspector-tool-outcome-success')[0], 'success chip')
+		expect(collectText(outcome)).toBe('\u2713 success')
+		expect(collectText(call)).toContain('done')
+		const view = defined(allByClass(call, 'inspector-tool-call-view')[0], 'view affordance')
+		expect(collectText(view)).toBe('View \u25b8')
+		let scopedTo = ''
+		const onScopeInstance = (payload: unknown) => { scopedTo = typeof payload === 'string' ? payload : '' }
+		const wired = renderModal({ logEvents: agentEvents, scopedRoleId: 'orchestrator-0', onScopeInstance })
+		const wiredView = defined(allByClass(defined(allByClass(wired, 'inspector-tool-call')[0], 'agent call'), 'inspector-tool-call-view')[0], 'view affordance')
+		dispatchActionTuple(wiredView.props.onclick)
+		expect(scopedTo).toBe('coder-1-1')
+		// No child role_start after the turn: the call renders as plain text with no affordance.
+		const childless = renderModal({ logEvents: agentEvents.slice(0, 2), scopedRoleId: 'orchestrator-0' })
+		const plainCall = defined(allByClass(childless, 'inspector-tool-call')[0], 'agent call')
+		expect(collectText(plainCall)).not.toContain('\u2192')
+		expect(allByClass(plainCall, 'inspector-tool-call-view')).toHaveLength(0)
+		expect(collectText(plainCall)).toContain('{"role":"coder","task":"subtask"}')
+	})
+
+	test('the in-flight turn sits at the transcript bottom and hosts the matching live partial, clearly labeled', () => {
+		const flightEvents = [...stitchEvents, startEvent(3, 'coder', 'coder-1')]
+		const partial = { roleId: 'coder-1', role: 'coder', reasoning: 'streamed thinking', content: 'streamed reply' }
+		const modal = renderModal({ logEvents: flightEvents, scopedRoleId: 'coder-1', livePartial: partial })
+		const sections = allByClass(modal, 'inspector-turn-section')
+		expect(sections).toHaveLength(3)
+		const last = defined(sections[2], 'last section')
+		expect(classOf(last.props)).toContain('is-in-flight')
+		expect(collectText(last)).toContain('Turn 3 \u00b7 in flight\u2026')
+		expect(collectText(last)).toContain('once the model responds')
+		const block = defined(allByClass(last, 'inspector-live-partial')[0], 'live block')
 		expect(collectText(block)).toContain('Reasoning')
 		expect(collectText(block)).toContain('Response')
-		const markedTexts = allByTag(modal, 'span').filter((node) => node.props.class === 'md-marker').map((node) => node.props['data-text'])
-		expect(markedTexts).toContain('thinking hard')
-		expect(markedTexts).toContain('partial ans')
-		// The block sits with its row: the in-flight row is wrapped together with the live block, not detached elsewhere.
-		const wrapper = defined(allByClass(modal, 'inspector-turn-live')[0], 'live wrapper')
-		expect(allByClass(wrapper, 'inspector-turn')).toHaveLength(1)
-		expect(allByClass(wrapper, 'inspector-live-partial')).toHaveLength(1)
+		const markers = allByTag(block, 'span').filter((node) => node.props.class === 'md-marker').map((node) => node.props['data-text'])
+		expect(markers).toContain('streamed thinking')
+		expect(markers).toContain('streamed reply')
 	})
 
-	test('an empty or absent live partial renders no block, and neither does a mismatched role or a completed-only list', () => {
-		const turns = { loadState: 'ready', entries: completedEntries, total: 9, tailOffset: 0, selectedEventIndex: null, olderLoading: false }
-		expect(allByClass(renderModal({ turns }), 'inspector-live-partial')).toHaveLength(0)
-		expect(allByClass(renderModal({ turns, livePartial: null }), 'inspector-live-partial')).toHaveLength(0)
-		expect(allByClass(renderModal({ turns, livePartial: { roleId: 'coder-1', role: 'coder', reasoning: '', content: '' } }), 'inspector-live-partial')).toHaveLength(0)
-		expect(allByClass(renderModal({ turns, livePartial: { roleId: 'planner-1', role: 'planner', reasoning: 'drifting', content: '' } }), 'inspector-live-partial')).toHaveLength(0)
-		expect(allByClass(renderModal({ turns, livePartial: 'broken' }), 'inspector-live-partial')).toHaveLength(0)
-		const completedOnly = buildTurnIndex([startEvent(0, 'planner'), callEvent(3, 'planner')])
-		expect(allByClass(renderModal({ turns: { ...turns, entries: completedOnly }, livePartial: { roleId: 'planner-1', role: 'planner', reasoning: 'done', content: '' } }), 'inspector-live-partial')).toHaveLength(0)
+	test('an absent, empty, or mismatched live partial renders no block, and a same-named sibling never hosts another instance\u0027s stream', () => {
+		const flightEvents = [...stitchEvents, startEvent(3, 'coder', 'coder-1')]
+		const turns = { loadState: 'ready', total: 9, tailOffset: 0, olderLoading: false }
+		expect(allByClass(renderModal({ logEvents: flightEvents, scopedRoleId: 'coder-1', turns }), 'inspector-live-partial')).toHaveLength(0)
+		expect(allByClass(renderModal({ logEvents: flightEvents, scopedRoleId: 'coder-1', turns, livePartial: { roleId: 'coder-1', role: 'coder', reasoning: '', content: '' } }), 'inspector-live-partial')).toHaveLength(0)
+		expect(allByClass(renderModal({ logEvents: flightEvents, scopedRoleId: 'coder-1', turns, livePartial: { roleId: 'coder-1-9', role: 'coder', reasoning: 'drifting', content: '' } }), 'inspector-live-partial')).toHaveLength(0)
+		expect(allByClass(renderModal({ logEvents: flightEvents, scopedRoleId: 'coder-1', turns, livePartial: 'broken' }), 'inspector-live-partial')).toHaveLength(0)
+		// A fallback turn (old logs, no roleId on the start) still pairs on the role name.
+		const fallbackEvents = [...stitchEvents, startEvent(3, 'coder')]
+		const fallback = renderModal({ logEvents: fallbackEvents, scopedRoleId: 'coder', livePartial: { roleId: 'coder-1', role: 'coder', reasoning: 'legacy', content: '' } })
+		expect(allByClass(fallback, 'inspector-live-partial')).toHaveLength(1)
 	})
 
-	test('a selected completed turn renders its sections, with reasoning clearly labeled through the Markdown pipeline', () => {
-		const detailState = {
-			sections: [
-				{ label: 'sent', content: [{ role: 'user', content: 'do the thing' }] },
-				{ label: 'received', content: { content: 'on it', reasoning: 'step by step…', toolCalls: [] } },
-				{ label: 'finish reason', content: 'tool_calls' },
-				{ label: 'usage', content: { promptTokens: 100, completionTokens: 20, totalTokens: 120 } },
-			],
-		}
-		const modal = renderModal({
-			turns: { loadState: 'ready', entries: completedEntries, total: 9, tailOffset: 0, selectedEventIndex: 3, olderLoading: false },
-			detailState,
-		})
+	test('a standard-level turn renders its header with the honest degraded notice, and the transcript stays navigable', () => {
+		const standardEvents = [standardCallEvent(0, 'coder'), standardCallEvent(1, 'coder')]
+		const modal = renderModal({ logEvents: standardEvents, scopedRoleId: 'coder' })
+		const sections = allByClass(modal, 'inspector-turn-section')
+		expect(sections).toHaveLength(2)
 		const text = collectText(modal)
-		expect(text).toContain('Sent messages')
-		expect(text).toContain('Reasoning')
-		expect(text).toContain('Finish reason')
-		expect(text).toContain('tool_calls')
-		const markers = allByTag(modal, 'span').filter((node) => node.props.class === 'md-marker')
-		const markedTexts = markers.map((node) => node.props['data-text'])
-		expect(markedTexts).toContain('do the thing')
-		expect(markedTexts).toContain('on it')
-		expect(markedTexts).toContain('step by step…')
-	})
-
-	test('degraded detail sections render the honest notice pointing at the logging level, not an error', () => {
-		const modal = renderModal({
-			turns: { loadState: 'ready', entries: completedEntries, total: 9, tailOffset: 0, selectedEventIndex: 3, olderLoading: false },
-			detailState: { sections: [{ label: 'usage', content: { totalTokens: 120 } }] },
-		})
-		const text = collectText(modal)
-		expect(text).toContain('Standard')
+		expect(text).toContain('Turn 1 \u00b7 120 tok \u00b7 tool_calls')
+		expect(text).toContain('Turn 2 \u00b7 120 tok \u00b7 tool_calls')
+		expect(occurrences(text, 'Standard')).toBeGreaterThanOrEqual(2)
 		expect(text).toContain('compose screen')
 		expect(text).not.toContain('could not be loaded')
 	})
 
-	test('a failed detail fetch and a loading one each read honestly', () => {
-		const failed = renderModal({
-			turns: { loadState: 'ready', entries: completedEntries, total: 9, tailOffset: 0, selectedEventIndex: 3, olderLoading: false },
-			detailState: 'failed',
-		})
-		expect(collectText(failed)).toContain('could not be loaded')
-		const loading = renderModal({
-			turns: { loadState: 'ready', entries: completedEntries, total: 9, tailOffset: 0, selectedEventIndex: 3, olderLoading: false },
-			detailState: 'loading',
-		})
-		expect(collectText(loading)).toContain('Loading the turn detail…')
-	})
-
-	test('with no selection the detail pane invites a selection', () => {
-		const modal = renderModal({ turns: { loadState: 'ready', entries: completedEntries, total: 9, tailOffset: 0, selectedEventIndex: null, olderLoading: false } })
-		expect(collectText(modal)).toContain('Select a turn')
+	test('the loading, failed, and empty states read honestly, and a scope with no turns reads as wayfinding', () => {
+		expect(collectText(renderModal({ turns: { loadState: 'loading', total: null, tailOffset: null, olderLoading: false } }))).toContain('Loading the run log\u2026')
+		expect(collectText(renderModal({ turns: { loadState: 'failed', total: null, tailOffset: null, olderLoading: false } }))).toContain('The run log could not be loaded.')
+		expect(collectText(renderModal())).toContain('No LLM turns logged for this run yet.')
+		const scopedEmpty = renderModal({ scopedRoleId: 'coder-1-2' })
+		expect(collectText(scopedEmpty)).toContain('No turns logged for this instance in the loaded range yet.')
+		expect(collectText(scopedEmpty)).not.toContain('No LLM turns logged')
 	})
 
 	test('the older-turns control appears only when older events exist and reflects the loading state', () => {
-		const withoutOlder = renderModal({ turns: { loadState: 'ready', entries: completedEntries, total: 9, tailOffset: 0, selectedEventIndex: null, olderLoading: false } })
+		const withoutOlder = renderModal({ logEvents: stitchEvents, scopedRoleId: 'coder-1' })
 		expect(allByClass(withoutOlder, 'inspector-older')).toHaveLength(0)
-		const withOlder = renderModal({ turns: { loadState: 'ready', entries: completedEntries, total: 400, tailOffset: 200, selectedEventIndex: null, olderLoading: false } })
+		const withOlder = renderModal({ logEvents: stitchEvents, scopedRoleId: 'coder-1', turns: { loadState: 'ready', total: 400, tailOffset: 200, olderLoading: false } })
 		const older = defined(allByClass(withOlder, 'inspector-older')[0], 'older button')
 		expect(collectText(older)).toBe('Older turns')
 		expect(older.props.disabled).toBe(false)
-		const loadingOlder = renderModal({ turns: { loadState: 'ready', entries: completedEntries, total: 400, tailOffset: 200, selectedEventIndex: null, olderLoading: true } })
+		const loadingOlder = renderModal({ logEvents: stitchEvents, scopedRoleId: 'coder-1', turns: { loadState: 'ready', total: 400, tailOffset: 200, olderLoading: true } })
 		const olderLoading = defined(allByClass(loadingOlder, 'inspector-older')[0], 'older loading button')
 		expect(olderLoading.props.disabled).toBe(true)
-		expect(collectText(olderLoading)).toContain('loading older turns…')
-	})
-
-	test('the empty and failed turn lists read honestly', () => {
-		const empty = renderModal()
-		expect(collectText(empty)).toContain('No LLM turns logged')
-		const failed = renderModal({ turns: { loadState: 'failed', entries: [], total: null, tailOffset: null, selectedEventIndex: null, scopedRoleId: null, olderLoading: false } })
-		expect(collectText(failed)).toContain('could not be loaded')
-	})
-
-	test('a scope with no turns in the loaded range reads as wayfinding, not an empty log', () => {
-		const scopedEmpty = renderModal({ turns: { loadState: 'ready', entries: [], total: 0, tailOffset: 0, selectedEventIndex: null, scopedRoleId: null, olderLoading: false }, scopedRoleId: 'coder-1-2' })
-		expect(collectText(scopedEmpty)).toContain('No turns logged for this instance in the loaded range yet.')
-		expect(collectText(scopedEmpty)).not.toContain('No LLM turns logged')
+		expect(collectText(olderLoading)).toContain('loading older turns\u2026')
 	})
 
 	test('the breadcrumb renders the chain root-first with the scoped crumb current, and crumbs re-scope via the instance action', () => {
@@ -738,7 +946,7 @@ describe('InspectorModal', () => {
 			scopedRoleId: 'coder-1',
 		})
 		const up = defined(allByClass(deep, 'inspector-parent-up')[0], 'parent affordance')
-		expect(collectText(up)).toBe('↑ parent')
+		expect(collectText(up)).toBe('\u2191 parent')
 		expect(actionTuple(up.props.onclick)[1]).toBe('orchestrator-0')
 	})
 
@@ -756,8 +964,8 @@ describe('InspectorModal', () => {
 		expect(select.props.onchange).toBe(onChange)
 		const options = allByTag(select, 'option')
 		expect(options).toHaveLength(2)
-		expect(collectText(defined(options[0], 'options[0]'))).toBe('orchestrator (orchestrator-0) — live')
-		expect(collectText(defined(options[1], 'options[1]'))).toBe('coder (coder-1-2) — finished')
+		expect(collectText(defined(options[0], 'options[0]'))).toBe('orchestrator (orchestrator-0) \u2014 live')
+		expect(collectText(defined(options[1], 'options[1]'))).toBe('coder (coder-1-2) \u2014 finished')
 		expect(defined(options[1], 'options[1]').props.selected).toBe(true)
 		expect(defined(options[0], 'options[0]').props.selected).toBe(false)
 		expect(select.props.value).toBe('coder-1-2')
@@ -767,31 +975,6 @@ describe('InspectorModal', () => {
 		const modal = renderModal()
 		expect(allByClass(modal, 'inspector-breadcrumb-row')).toHaveLength(0)
 		expect(allByClass(modal, 'inspector-instance-select')).toHaveLength(0)
-	})
-
-	test('the live partial pairs on the instance id first so a same-named sibling ghost never hosts another instance stream', () => {
-		const flightEntries = buildTurnIndex([startEvent(2, 'coder', 'coder-1-1')])
-		const matching = renderModal({
-			turns: { loadState: 'ready', entries: flightEntries, total: 9, tailOffset: 0, selectedEventIndex: null, scopedRoleId: 'coder-1-1', olderLoading: false },
-			scopedRoleId: 'coder-1-1',
-			livePartial: { roleId: 'coder-1-1', role: 'coder', reasoning: 'thinking', content: '' },
-		})
-		expect(allByClass(matching, 'inspector-live-partial')).toHaveLength(1)
-		// Same role name, different instance: no block.
-		const mismatched = renderModal({
-			turns: { loadState: 'ready', entries: flightEntries, total: 9, tailOffset: 0, selectedEventIndex: null, scopedRoleId: 'coder-1-1', olderLoading: false },
-			scopedRoleId: 'coder-1-1',
-			livePartial: { roleId: 'coder-1-2', role: 'coder', reasoning: 'drifting', content: '' },
-		})
-		expect(allByClass(mismatched, 'inspector-live-partial')).toHaveLength(0)
-		// A fallback entry (old log, no roleId on the start) still pairs on the role name.
-		const fallbackEntries = buildTurnIndex([startEvent(2, 'coder')])
-		const fallback = renderModal({
-			turns: { loadState: 'ready', entries: fallbackEntries, total: 9, tailOffset: 0, selectedEventIndex: null, scopedRoleId: 'coder', olderLoading: false },
-			scopedRoleId: 'coder',
-			livePartial: { roleId: 'coder-1-1', role: 'coder', reasoning: 'legacy', content: '' },
-		})
-		expect(allByClass(fallback, 'inspector-live-partial')).toHaveLength(1)
 	})
 
 	test('constants match the endpoint contract sizes', () => {
