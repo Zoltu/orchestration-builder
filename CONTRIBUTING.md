@@ -31,3 +31,4 @@ rm output.txt
 2. [`docs/reference.md`](docs/reference.md) — executor runtime, Guild format, HTTP API, benchmarks
 3. [`docs/foundry.md`](docs/foundry.md) — meta-optimization loop (future work)
 4. [`docs/security.md`](docs/security.md) — threat model and mitigations
+5. [`docs/queueing.md`](docs/queueing.md) — task queueing (storage, scheduler, parking, briefing)
