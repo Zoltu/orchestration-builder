@@ -132,9 +132,15 @@ function callEvent(index: number, role: string, overrides: Record<string, unknow
 	}
 }
 
-// A standard-level llm_call payload: the kept identity/usage fields only (source/executor/log-level.ts).
+// A standard-level llm_call payload: the sent/received bodies and the sentFrom marker are dropped; the identity/usage fields (roleId included) stay (source/executor/log-level.ts).
 function standardCallEvent(index: number, role: string): WindowEvent {
-	return callEvent(index, role, { sent: undefined, received: undefined, sentFrom: undefined, roleId: undefined })
+	return callEvent(index, role, { sent: undefined, received: undefined, sentFrom: undefined })
+}
+
+// A turn-failure event (the failure paths that emit no llm_call): carries the role but no instance id, and closes the role's open llm_call_start like a bracket.
+function turnFailureEvent(index: number, type: 'llm_unavailable' | 'context_budget_exceeded', role: string): WindowEvent {
+	const payload: Record<string, unknown> = type === 'llm_unavailable' ? { role, message: 'endpoint down' } : { role, promptTokens: 9000, contextWindow: 8000 }
+	return { index, timestamp: `2026-01-01T00:00:${String(index % 60).padStart(2, '0')}Z`, type, payload }
 }
 
 // A role_start event: the instance registry's identity, depth, and optional parent linkage (`parent` names the parent role, `parentRoleId` its instance).
@@ -239,8 +245,8 @@ describe('buildTurnIndex', () => {
 		expect(defined(entries[0], 'entries[0]').roleId).toBe('planner-0-1')
 		// A start without a roleId (old logs) falls back to the role name…
 		expect(defined(entries[1], 'entries[1]').roleId).toBe('coder')
-		// …and a standard-level llm_call drops the id the same way.
-		expect(defined(entries[2], 'entries[2]').roleId).toBe('critic')
+		// …while a standard-level llm_call keeps the id (an identity field, source/executor/log-level.ts).
+		expect(defined(entries[2], 'entries[2]').roleId).toBe('critic-1')
 	})
 
 	test('same-name nesting pairs LIFO, like brackets', () => {
@@ -257,6 +263,25 @@ describe('buildTurnIndex', () => {
 		expect(first.startEventIndex).toBe(1)
 		expect(second.eventIndex).toBe(3)
 		expect(second.startEventIndex).toBe(0)
+	})
+
+	test('a turn-failure event closes the same-role open start, so a failed turn leaves no eternal in-flight row', () => {
+		expect(buildTurnIndex([startEvent(0, 'coder', 'coder-1'), turnFailureEvent(1, 'llm_unavailable', 'coder')])).toEqual([])
+		expect(buildTurnIndex([startEvent(0, 'coder', 'coder-1'), turnFailureEvent(1, 'context_budget_exceeded', 'coder')])).toEqual([])
+	})
+
+	test('the failure closes the newest open start (LIFO, like the call pairing); an older same-name start stays in flight', () => {
+		const entries = buildTurnIndex([startEvent(0, 'coder'), startEvent(1, 'coder'), turnFailureEvent(2, 'llm_unavailable', 'coder')])
+		expect(entries).toHaveLength(1)
+		const entry = defined(entries[0], 'entries[0]')
+		expect(entry.kind).toBe('in_flight')
+		expect(entry.eventIndex).toBe(0)
+	})
+
+	test('a failure event whose role holds no open start is ignored', () => {
+		const entries = buildTurnIndex([callEvent(0, 'planner'), turnFailureEvent(1, 'context_budget_exceeded', 'coder')])
+		expect(entries).toHaveLength(1)
+		expect(defined(entries[0], 'entries[0]').eventIndex).toBe(0)
 	})
 
 	test('entries come back chronological with sequential turn numbers regardless of kind', () => {
@@ -514,6 +539,15 @@ describe('deriveDefaultScopeRoleId', () => {
 		expect(deriveDefaultScopeRoleId(mixed)).toBe('coder-1-2')
 	})
 
+	test('a failed turn no longer reads as the newest in-flight turn, so the default scope never prefers a ghost', () => {
+		const entries = buildTurnIndex([
+			startEvent(0, 'coder', 'coder-1-2'),
+			turnFailureEvent(1, 'llm_unavailable', 'coder'),
+			callEvent(5, 'critic', { roleId: 'critic-0-1' }),
+		])
+		expect(deriveDefaultScopeRoleId(entries)).toBe('critic-0-1')
+	})
+
 	test('an empty or malformed list reads as no default scope', () => {
 		expect(deriveDefaultScopeRoleId([])).toBeNull()
 		expect(deriveDefaultScopeRoleId(null)).toBeNull()
@@ -640,7 +674,7 @@ describe('deriveTranscriptTurns', () => {
 	})
 
 	test('a standard-level turn renders header data only — no bodies, no invention', () => {
-		const turns = transcriptOf([standardCallEvent(0, 'coder')], 'coder')
+		const turns = transcriptOf([standardCallEvent(0, 'coder')], 'coder-1')
 		const turn = defined(turns[0], 'turns[0]')
 		expect(turn.bodyLevel).toBe('standard')
 		expect(turn.opening).toHaveLength(0)
@@ -926,7 +960,7 @@ describe('InspectorModal', () => {
 
 	test('a standard-level turn renders its header with the honest degraded notice, and the transcript stays navigable', () => {
 		const standardEvents = [standardCallEvent(0, 'coder'), standardCallEvent(1, 'coder')]
-		const modal = renderModal({ logEvents: standardEvents, scopedRoleId: 'coder' })
+		const modal = renderModal({ logEvents: standardEvents, scopedRoleId: 'coder-1' })
 		const sections = allByClass(modal, 'inspector-turn-section')
 		expect(sections).toHaveLength(2)
 		const text = collectText(modal)
