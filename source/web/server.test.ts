@@ -3,6 +3,8 @@ import { createWebHumanBackend, type WebHumanBackend } from '../executor/human-b
 import { createInterruptChannel, createInterruptQueue, type InterruptChannel } from '../executor/interrupts.ts'
 import { createRunState } from '../executor/run-state.ts'
 import { createRunSubmission, type ResumeRun, type RunSubmission, type StartRun } from '../executor/run-submission.ts'
+import { createTaskScheduler } from '../executor/scheduler.ts'
+import type { QueueItem, TaskQueue } from '../executor/task-queue.ts'
 import type { RunCheckpoint } from '../executor/checkpoint.ts'
 import type { ProjectSettings, ReadProjectSettings, WriteProjectSettings, RunSnapshotRaw, RunSnapshotStats, RunSummaryStats } from '../executor/persistence.ts'
 import type { DeploymentConfig, EffortLevel, GuildConfig, LogLevel, RunContinuation, RunMeta } from '../executor/types.js'
@@ -12,8 +14,27 @@ import { createRunListCache } from './run-list-cache.ts'
 import { createRequestHandler, type RequestHandler } from './request-handler.ts'
 import { createServeStatic, resolveStaticAsset, type ServeAssetFile } from './server.ts'
 
-// The settlement hook the server tests never observe.
-const settleNothing = async (): Promise<void> => {}
+// A plain-object queue store standing in for the filesystem leaves, so the /api/queue route tests and the POST /api/runs enqueue path observe the queue's exact state.
+function createInMemoryQueueStore(initial: QueueItem[] = []): { readQueue: () => TaskQueue; writeQueue: (queue: TaskQueue) => void; snapshot: () => TaskQueue } {
+	let current: TaskQueue = { items: [...initial] }
+	return {
+		readQueue: () => current,
+		writeQueue: (queue) => {
+			current = queue
+		},
+		snapshot: () => current,
+	}
+}
+
+function queueItem(id: string, task = 'fix the parser bug', overrides: Partial<QueueItem> = {}): QueueItem {
+	return {
+		id,
+		task,
+		status: 'waiting',
+		queuedAt: '2026-01-01T00:00:00.000Z',
+		...overrides,
+	}
+}
 
 function snapshotFor(runId: string, status: RunMeta['status'] = 'success', overrides: Partial<RunMeta> = {}): RunSnapshotRaw {
 	return {
@@ -334,29 +355,34 @@ interface HandlerHarness {
 	handler: RequestHandler
 	submission: RunSubmission
 	settings: InMemorySettings
+	queue: { readQueue: () => TaskQueue; writeQueue: (queue: TaskQueue) => void; snapshot: () => TaskQueue }
 	interruptChannel: InterruptChannel
 	humanBackend: WebHumanBackend
 	staticCalls: string[]
 	lastEffort: () => EffortLevel | undefined
 	lastLogLevel: () => LogLevel | undefined
 	lastContinuation: () => RunContinuation | undefined
+	lastQueueTracked: () => boolean | undefined
 	resolveActive: () => (meta: RunMeta) => void
 	resolveResumed: () => (meta: RunMeta) => void
 	resumedCheckpoints: () => RunCheckpoint[]
 }
 
 // Builds a fresh handler whose startRun and resumeRun park on caller-controlled resolvers, so each test drives its own run lifecycle without touching shared state. The static leaf is a recording fake; every dependency is in-memory. runIdCollides makes runDirectoryExists report an existing directory for the generated id, exercising the submit-level run_id_collision refusal. build seeds the image build identifier GET /api/config surfaces (null, as from a source checkout, unless a test passes one).
-function createHandlerHarness(options: { runIdCollides?: boolean, build?: BuildInfo | null } = {}): HandlerHarness {
+// The queue store and the scheduler are wired exactly as serve.ts wires them: the handler's mutations and the POST /api/runs enqueue go through the same in-memory leaves, the scheduler dispatches through the submission, and a settled run promise maps its item and ticks onward.
+function createHandlerHarness(options: { runIdCollides?: boolean, build?: BuildInfo | null, initialQueueItems?: QueueItem[] } = {}): HandlerHarness {
 	let resolveActive: (meta: RunMeta) => void = () => {}
 	let resolveResumed: (meta: RunMeta) => void = () => {}
 	let capturedEffort: EffortLevel | undefined
 	let capturedLogLevel: LogLevel | undefined
 	let capturedContinuation: RunContinuation | undefined
+	let capturedQueueTracked: boolean | undefined
 	const resumed: RunCheckpoint[] = []
-	const startRun: StartRun = (_runId, _task, effort, logLevel, continuation) => {
+	const startRun: StartRun = (_runId, _task, effort, logLevel, continuation, queueTracked) => {
 		capturedEffort = effort
 		capturedLogLevel = logLevel
 		capturedContinuation = continuation
+		capturedQueueTracked = queueTracked
 		return new Promise<RunMeta>((resolve) => {
 			resolveActive = resolve
 		})
@@ -369,7 +395,20 @@ function createHandlerHarness(options: { runIdCollides?: boolean, build?: BuildI
 	}
 	let nextId = 0
 	const settings = createInMemorySettings()
-	const submission = createRunSubmission({ onRunSettled: settleNothing, startRun, resumeRun, generateRunId: () => `test-run-${nextId++}`, runDirectoryExists: () => options.runIdCollides ?? false, readProjectSettings: settings.read })
+	const queue = createInMemoryQueueStore(options.initialQueueItems ?? [])
+	const submission = createRunSubmission({ onRunSettled: (meta) => scheduler.onRunSettled(meta), startRun, resumeRun, generateRunId: () => `test-run-${nextId++}`, runDirectoryExists: () => options.runIdCollides ?? false, readProjectSettings: settings.read })
+	// The scheduler references the submission and the submission's settlement hook references the scheduler; each closure captures the other's binding lazily, exactly as serve.ts composes them.
+	const scheduler = createTaskScheduler({
+		readQueue: queue.readQueue,
+		writeQueue: queue.writeQueue,
+		readRunMetaById,
+		listRunIds,
+		readRunListSummary,
+		submitRun: (queued) => submission.submit(queued.task, queued.effort, queued.logLevel, queued.continuation),
+		hasActiveRun: () => submission.activeRunId() !== undefined,
+		sleep: async () => {},
+		now: () => new Date().toISOString(),
+	})
 	const interruptChannel = createInterruptChannel()
 	const humanBackend = createWebHumanBackend()
 	const staticCalls: string[] = []
@@ -389,6 +428,9 @@ function createHandlerHarness(options: { runIdCollides?: boolean, build?: BuildI
 			listRunIds,
 			readProjectSettings: settings.read,
 			writeProjectSettings: settings.write,
+			readQueue: queue.readQueue,
+			writeQueue: queue.writeQueue,
+			tickScheduler: () => scheduler.tick(),
 			build: options.build ?? null,
 		},
 		async (requestPath) => {
@@ -400,12 +442,14 @@ function createHandlerHarness(options: { runIdCollides?: boolean, build?: BuildI
 		handler,
 		submission,
 		settings,
+		queue,
 		interruptChannel,
 		humanBackend,
 		staticCalls,
 		lastEffort: () => capturedEffort,
 		lastLogLevel: () => capturedLogLevel,
 		lastContinuation: () => capturedContinuation,
+		lastQueueTracked: () => capturedQueueTracked,
 		resolveActive: () => resolveActive,
 		resolveResumed: () => resolveResumed,
 		resumedCheckpoints: () => resumed,
@@ -460,12 +504,21 @@ function get(path: string): Request {
 	return new Request(`http://handler.test${path}`)
 }
 
-function post(path: string, body: string): Request {
-	return new Request(`http://handler.test${path}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body })
+// body is optional because POST /api/queue/:id/requeue carries no body.
+function post(path: string, body?: string): Request {
+	return new Request(`http://handler.test${path}`, { method: 'POST', headers: { 'content-type': 'application/json' }, ...(body !== undefined ? { body } : {}) })
 }
 
 function put(path: string, body: string): Request {
 	return new Request(`http://handler.test${path}`, { method: 'PUT', headers: { 'content-type': 'application/json' }, body })
+}
+
+function patch(path: string, body: string): Request {
+	return new Request(`http://handler.test${path}`, { method: 'PATCH', headers: { 'content-type': 'application/json' }, body })
+}
+
+function del(path: string): Request {
+	return new Request(`http://handler.test${path}`, { method: 'DELETE' })
 }
 
 describe('static asset resolution', () => {
@@ -1340,10 +1393,11 @@ describe('POST /api/runs', () => {
 		expect(await response.json()).toEqual({ ok: false, error: 'invalid_body' })
 	})
 
-	test('threads a valid effort override into the started run', async () => {
+	test('threads a valid effort override into the dispatched run', async () => {
 		const { handler, submission, lastEffort, resolveActive } = createHandlerHarness()
 		const response = await handler(post('/api/runs', JSON.stringify({ task: 'careful task', effort: 'thorough' })))
 		expect(response.status).toBe(201)
+		// The request's effort is recorded on the enqueued item and threads into its run as the override.
 		expect(lastEffort()).toBe('thorough')
 
 		resolveActive()(terminalMeta('test-run-0', 'careful task'))
@@ -1410,21 +1464,30 @@ describe('POST /api/runs', () => {
 		expect(await response.json()).toEqual({ ok: false, error: 'invalid_body' })
 	})
 
-	test('accepts a valid continuesFrom and threads the resolved continuation into the started run', async () => {
+	test('accepts a valid continuesFrom and threads the scheduler-assembled continuation into the started run', async () => {
 		const { handler, submission, lastContinuation, resolveActive } = createHandlerHarness()
 		const response = await handler(post('/api/runs', JSON.stringify({ task: 'pick up where that left off', continuesFrom: 'run-20260101-000000' })))
 		expect(response.status).toBe(201)
-		expect(lastContinuation()).toEqual({ runId: 'run-20260101-000000', task: 'prior run task', summary: 'prior run finished cleanly' })
+		// The item records the request's continuesFrom; the dispatching scheduler re-reads the prior run's terminal meta and assembles the continuation — the prior run's task and outcome summary plus the interim briefing (whose run lines carry the ids the stale-task fast path cites).
+		const continuation = lastContinuation()
+		expect(continuation?.runId).toBe('run-20260101-000000')
+		expect(continuation?.task).toBe('prior run task')
+		expect(continuation?.summary).toBe('prior run finished cleanly')
+		expect(Array.isArray(continuation?.briefing)).toBe(true)
 
 		resolveActive()(terminalMeta('test-run-0', 'pick up where that left off'))
 		await submission.awaitActive()
 	})
 
-	test('threads no continuation when continuesFrom is absent', async () => {
+	test('threads a briefing-only continuation when continuesFrom is absent', async () => {
 		const { handler, submission, lastContinuation, resolveActive } = createHandlerHarness()
 		const response = await handler(post('/api/runs', JSON.stringify({ task: 'a fresh task' })))
 		expect(response.status).toBe(201)
-		expect(lastContinuation()).toBeUndefined()
+		// A first queue dispatch records no lineage: the continuation carries only the interim briefing, and meta.continuesFrom stays honest.
+		const continuation = lastContinuation()
+		expect(continuation?.runId).toBeUndefined()
+		expect(continuation?.task).toBe('a fresh task')
+		expect(Array.isArray(continuation?.briefing)).toBe(true)
 
 		resolveActive()(terminalMeta('test-run-0', 'a fresh task'))
 		await submission.awaitActive()
@@ -1449,6 +1512,263 @@ describe('POST /api/runs', () => {
 		const response = await handler(post('/api/runs', JSON.stringify({ task: 'x', continuesFrom: 'not-a-run-id' })))
 		expect(response.status).toBe(400)
 		expect(await response.json()).toEqual({ ok: false, error: 'invalid_body' })
+	})
+
+	test('an idle submit enqueues at the head and dispatches through the scheduler within the request', async () => {
+		const { handler, submission, queue, lastQueueTracked, resolveActive } = createHandlerHarness()
+		const response = await handler(post('/api/runs', JSON.stringify({ task: 'a new task' })))
+		expect(response.status).toBe(201)
+		expect(await response.json()).toEqual({ runId: 'test-run-0' })
+		// The queue store saw the item, dispatched: active with the run id, recorded log-level absent when the request carried none.
+		const items = queue.snapshot().items
+		expect(items.length).toBe(1)
+		expect(items[0]?.status).toBe('active')
+		expect(items[0]?.runId).toBe('test-run-0')
+		expect(items[0]?.logLevel).toBeUndefined()
+		expect(items[0]?.continuesFrom).toBeUndefined()
+		// The dispatch marks the run queue-tracked — the bit that activates pre-write parking.
+		expect(lastQueueTracked()).toBe(true)
+		expect(submission.activeRunId()).toBe('test-run-0')
+
+		resolveActive()(terminalMeta('test-run-0', 'a new task'))
+		await submission.awaitActive()
+	})
+
+	test('the request logLevel, continuesFrom, and effort are recorded on the enqueued item', async () => {
+		const { handler, submission, queue, resolveActive } = createHandlerHarness()
+		const response = await handler(post('/api/runs', JSON.stringify({ task: 'quiet continuation', logLevel: 'standard', continuesFrom: 'run-20260101-000000', effort: 'thorough' })))
+		expect(response.status).toBe(201)
+		const items = queue.snapshot().items
+		expect(items[0]?.logLevel).toBe('standard')
+		expect(items[0]?.continuesFrom).toBe('run-20260101-000000')
+		expect(items[0]?.effort).toBe('thorough')
+
+		resolveActive()(terminalMeta('test-run-0', 'quiet continuation'))
+		await submission.awaitActive()
+	})
+
+	test('a submit while a run is in flight returns 409 and enqueues nothing', async () => {
+		const { handler, submission, queue, resolveActive } = createHandlerHarness()
+		const started = await handler(post('/api/runs', JSON.stringify({ task: 'first' })))
+		expect(started.status).toBe(201)
+		const response = await handler(post('/api/runs', JSON.stringify({ task: 'second' })))
+		expect(response.status).toBe(409)
+		expect(await response.json()).toEqual({ ok: false, error: 'run_in_progress' })
+		// Checked before enqueueing: the busy service's queue is untouched.
+		expect(queue.snapshot().items.length).toBe(1)
+
+		resolveActive()(terminalMeta('test-run-0', 'first'))
+		await submission.awaitActive()
+	})
+
+	test('a collision that survives the scheduler retries surfaces as 409 and removes the created head item', async () => {
+		const { handler, queue } = createHandlerHarness({ runIdCollides: true })
+		const response = await handler(post('/api/runs', JSON.stringify({ task: 'a colliding task' })))
+		expect(response.status).toBe(409)
+		expect(await response.json()).toEqual({ ok: false, error: 'run_id_collision' })
+		// The just-created head item is removed so the caller's resubmit behaves exactly as it does today.
+		expect(queue.snapshot().items).toEqual([])
+	})
+
+	test('settling the active run maps its item and dispatches the next waiting one', async () => {
+		const { handler, submission, queue, resolveActive } = createHandlerHarness({ initialQueueItems: [queueItem('seeded', 'the queued follow-up')] })
+		const response = await handler(post('/api/runs', JSON.stringify({ task: 'first task' })))
+		expect(response.status).toBe(201)
+		resolveActive()(terminalMeta('test-run-0', 'first task'))
+		await submission.awaitActive()
+		// The settlement hook mapped the first item done and the tick dispatched the seeded item, whose run now holds the slot.
+		const items = queue.snapshot().items
+		expect(items[0]?.status).toBe('done')
+		expect(items[0]?.runId).toBe('test-run-0')
+		expect(items[1]?.status).toBe('active')
+		expect(items[1]?.runId).toBe('test-run-1')
+		expect(submission.activeRunId()).toBe('test-run-1')
+
+		resolveActive()(terminalMeta('test-run-1', 'the queued follow-up'))
+		await submission.awaitActive()
+	})
+})
+
+describe('/api/queue', () => {
+	test('GET returns the ordered item list with statuses, head first', async () => {
+		const { handler } = createHandlerHarness({ initialQueueItems: [
+			queueItem('w1', 'first waiting'),
+			queueItem('n1', 'needs answer', { status: 'needs_input', question: 'which database?', continuesFrom: 'run-20260101-000000' }),
+			queueItem('w2', 'second waiting'),
+		] })
+		const response = await handler(get('/api/queue'))
+		expect(response.status).toBe(200)
+		expect(await response.json()).toEqual([
+			{ id: 'w1', task: 'first waiting', status: 'waiting', queuedAt: '2026-01-01T00:00:00.000Z' },
+			{ id: 'n1', task: 'needs answer', status: 'needs_input', queuedAt: '2026-01-01T00:00:00.000Z', question: 'which database?', continuesFrom: 'run-20260101-000000' },
+			{ id: 'w2', task: 'second waiting', status: 'waiting', queuedAt: '2026-01-01T00:00:00.000Z' },
+		])
+	})
+
+	test('POST enqueues at the tail with 201 and the created item, and the tick dispatches an idle system', async () => {
+		const { handler, submission, queue, resolveActive } = createHandlerHarness({ initialQueueItems: [queueItem('ahead', 'already waiting')] })
+		const response = await handler(post('/api/queue', JSON.stringify({ task: 'a queued task', effort: 'quick' })))
+		expect(response.status).toBe(201)
+		const created = await response.json()
+		expect(created.task).toBe('a queued task')
+		expect(created.effort).toBe('quick')
+		expect(created.status).toBe('waiting')
+		// The new item is behind the already-waiting one (always tail), and the tick dispatched the head — never a 409.
+		const items = queue.snapshot().items
+		expect(items.map((item) => item.id)).toEqual(['ahead', created.id])
+		expect(items[0]?.status).toBe('active')
+		expect(items[0]?.runId).toBe('test-run-0')
+		expect(submission.activeRunId()).toBe('test-run-0')
+
+		resolveActive()(terminalMeta('test-run-0', 'already waiting'))
+		await submission.awaitActive()
+	})
+
+	test('POST rejects malformed bodies with 400 invalid_body', async () => {
+		const { handler, queue } = createHandlerHarness()
+		for (const body of ['{ not json', '"a string"', '{}', { task: '' }, { task: 3 }, { task: 'x', effort: 'copious' }, { task: 'x', effort: 2 }]) {
+			const raw = typeof body === 'string' ? body : JSON.stringify(body)
+			const response = await handler(post('/api/queue', raw))
+			expect(response.status).toBe(400)
+			expect(await response.json()).toEqual({ ok: false, error: 'invalid_body' })
+		}
+		expect(queue.snapshot().items).toEqual([])
+	})
+
+	test('PATCH edits the task and effort of a waiting item', async () => {
+		const { handler } = createHandlerHarness({ initialQueueItems: [queueItem('w1', 'original text')] })
+		const response = await handler(patch('/api/queue/w1', JSON.stringify({ task: 'edited text', effort: 'thorough' })))
+		expect(response.status).toBe(200)
+		const item = await response.json()
+		expect(item.task).toBe('edited text')
+		expect(item.effort).toBe('thorough')
+	})
+
+	test('PATCH moves a waiting item to a clamped 0-based position in the waiting list', async () => {
+		const { handler } = createHandlerHarness({ initialQueueItems: [queueItem('w1'), queueItem('w2'), queueItem('w3'), queueItem('d1', 'done task', { status: 'done', settledAt: '2026-01-01T00:01:00.000Z' })] })
+		const toFront = await handler(patch('/api/queue/w3', JSON.stringify({ position: 0 })))
+		expect(toFront.status).toBe(200)
+		const moved = await handler(get('/api/queue'))
+		expect((await moved.json()).map((item: { id: string }) => item.id)).toEqual(['w3', 'w1', 'w2', 'd1'])
+
+		const outOfRange = await handler(patch('/api/queue/w3', JSON.stringify({ position: 99 })))
+		expect(outOfRange.status).toBe(200)
+		const clamped = await handler(get('/api/queue'))
+		// Clamped into the waiting list's end; the non-waiting item keeps its file position.
+		expect((await clamped.json()).map((item: { id: string }) => item.id)).toEqual(['w1', 'w2', 'w3', 'd1'])
+	})
+
+	test('PATCH rejects a malformed body with 400, an unknown id with 404, and a non-waiting item with 409; an empty patch is a no-op on a waiting item', async () => {
+		const { handler } = createHandlerHarness({ initialQueueItems: [queueItem('w1'), queueItem('d1', 'done task', { status: 'done', settledAt: '2026-01-01T00:01:00.000Z' })] })
+		const badPosition = await handler(patch('/api/queue/w1', JSON.stringify({ position: '1' })))
+		expect(badPosition.status).toBe(400)
+		const badTask = await handler(patch('/api/queue/w1', JSON.stringify({ task: '' })))
+		expect(badTask.status).toBe(400)
+		const unknown = await handler(patch('/api/queue/missing', JSON.stringify({ task: 'x' })))
+		expect(unknown.status).toBe(404)
+		expect(await unknown.json()).toEqual({ ok: false, error: 'not_found' })
+		const settled = await handler(patch('/api/queue/d1', JSON.stringify({ task: 'x' })))
+		expect(settled.status).toBe(409)
+		expect(await settled.json()).toEqual({ ok: false, error: 'status_forbidden' })
+		const empty = await handler(patch('/api/queue/w1', JSON.stringify({})))
+		expect(empty.status).toBe(200)
+		expect(await empty.json()).toEqual({ id: 'w1', task: 'fix the parser bug', status: 'waiting', queuedAt: '2026-01-01T00:00:00.000Z' })
+		const emptyOnSettled = await handler(patch('/api/queue/d1', JSON.stringify({})))
+		expect(emptyOnSettled.status).toBe(409)
+	})
+
+	test('DELETE cancels a waiting item; other statuses are 409 and unknown ids 404', async () => {
+		const { handler } = createHandlerHarness({ initialQueueItems: [queueItem('w1'), queueItem('d1', 'done task', { status: 'done', settledAt: '2026-01-01T00:01:00.000Z' })] })
+		const response = await handler(del('/api/queue/w1'))
+		expect(response.status).toBe(200)
+		const cancelled = await response.json()
+		expect(cancelled.id).toBe('w1')
+		expect(cancelled.task).toBe('fix the parser bug')
+		expect(cancelled.status).toBe('cancelled')
+		expect(typeof cancelled.settledAt).toBe('string')
+
+		const list = await handler(get('/api/queue'))
+		// The cancelled item keeps its file position (marked, not dropped) so the UI can show the recent outcome.
+		expect((await list.json()).map((item: { id: string; status: string }) => `${item.id}:${item.status}`)).toEqual(['w1:cancelled', 'd1:done'])
+
+		const settled = await handler(del('/api/queue/d1'))
+		expect(settled.status).toBe(409)
+		const unknown = await handler(del('/api/queue/missing'))
+		expect(unknown.status).toBe(404)
+	})
+
+	test('POST /:id/answer records the answer, fronts the item, and the tick dispatches it as a continuation of the parked run', async () => {
+		const { handler, submission, lastContinuation, queue, resolveActive } = createHandlerHarness({ initialQueueItems: [
+			queueItem('w1', 'already waiting'),
+			queueItem('n1', 'parked task', { status: 'needs_input', question: 'which database?', continuesFrom: 'run-20260101-000000', runId: 'run-2' }),
+		] })
+		const response = await handler(post('/api/queue/n1/answer', JSON.stringify({ answer: 'postgres' })))
+		expect(response.status).toBe(200)
+		const item = await response.json()
+		expect(item.status).toBe('waiting')
+		expect(item.answer).toBe('postgres')
+		// The parked run's id is dropped from the waiting item; the lineage (continuesFrom) carries the resume.
+		expect(item.runId).toBeUndefined()
+		// The answered item fronts the waiting list and the tick dispatched it (ahead of the earlier waiting item) as a continuation of the parked run.
+		const items = queue.snapshot().items
+		expect(items[0]?.id).toBe('n1')
+		expect(items[0]?.status).toBe('active')
+		expect(items[0]?.runId).toBe('test-run-0')
+		const continuation = lastContinuation()
+		expect(continuation?.runId).toBe('run-20260101-000000')
+		expect(continuation?.briefing).toContain('Resuming from your question: which database?')
+		expect(continuation?.briefing).toContain('The operator answered: postgres')
+		expect(submission.activeRunId()).toBe('test-run-0')
+
+		resolveActive()(terminalMeta('test-run-0', 'parked task'))
+		await submission.awaitActive()
+	})
+
+	test('POST /:id/answer rejects a malformed body with 400, an unknown id with 404, and a non-needs_input item with 409', async () => {
+		const { handler } = createHandlerHarness({ initialQueueItems: [queueItem('w1'), queueItem('d1', 'done task', { status: 'done', settledAt: '2026-01-01T00:01:00.000Z' })] })
+		const malformed = await handler(post('/api/queue/w1/answer', JSON.stringify({ answer: 3 })))
+		expect(malformed.status).toBe(400)
+		const badJson = await handler(post('/api/queue/w1/answer', '{ not json'))
+		expect(badJson.status).toBe(400)
+		const unknown = await handler(post('/api/queue/missing/answer', JSON.stringify({ answer: 'x' })))
+		expect(unknown.status).toBe(404)
+		const waiting = await handler(post('/api/queue/w1/answer', JSON.stringify({ answer: 'x' })))
+		expect(waiting.status).toBe(409)
+		expect(await waiting.json()).toEqual({ ok: false, error: 'status_forbidden' })
+		const done = await handler(post('/api/queue/d1/answer', JSON.stringify({ answer: 'x' })))
+		expect(done.status).toBe(409)
+	})
+
+	test('POST /:id/requeue returns an error item to waiting at the tail with its lineage re-pointed, and the tick dispatches it', async () => {
+		const { handler, submission, lastContinuation, queue, resolveActive } = createHandlerHarness({ initialQueueItems: [
+			queueItem('e1', 'the failed task', { status: 'error', runId: 'run-2', settledAt: '2026-01-01T00:01:00.000Z' }),
+		] })
+		const response = await handler(post('/api/queue/e1/requeue'))
+		expect(response.status).toBe(200)
+		const item = await response.json()
+		expect(item.status).toBe('waiting')
+		// The lineage re-points at the errored run, so the retry's continuation briefing carries the failure's outcome summary.
+		expect(item.continuesFrom).toBe('run-2')
+		const items = queue.snapshot().items
+		expect(items[0]?.id).toBe('e1')
+		expect(items[0]?.status).toBe('active')
+		const continuation = lastContinuation()
+		expect(continuation?.runId).toBe('run-2')
+		expect(continuation?.task).toBe('task for run-2')
+		expect(continuation?.summary).toBe('failed')
+		expect(submission.activeRunId()).toBe('test-run-0')
+
+		resolveActive()(terminalMeta('test-run-0', 'the failed task'))
+		await submission.awaitActive()
+	})
+
+	test('POST /:id/requeue rejects a non-error item with 409 and an unknown id with 404', async () => {
+		const { handler } = createHandlerHarness({ initialQueueItems: [queueItem('w1'), queueItem('d1', 'done task', { status: 'done', settledAt: '2026-01-01T00:01:00.000Z' })] })
+		const waiting = await handler(post('/api/queue/w1/requeue'))
+		expect(waiting.status).toBe(409)
+		expect(await waiting.json()).toEqual({ ok: false, error: 'status_forbidden' })
+		const unknown = await handler(post('/api/queue/missing/requeue'))
+		expect(unknown.status).toBe(404)
 	})
 })
 

@@ -142,6 +142,26 @@ export function enqueueAtHead(queue: TaskQueue, item: QueueItem): TaskQueue {
 	return { items: [item, ...queue.items] }
 }
 
+// The by-id guard behind every operator PATCH: the item must exist (404) and be waiting (409), whether or not the patch carries a field to apply.
+export function requireWaitingItem(queue: TaskQueue, id: string): QueueMutation {
+	const target = findById(queue, id)
+	if (target === undefined) return { ok: false, reason: 'not_found' }
+	if (target.status !== 'waiting') return { ok: false, reason: 'forbidden_status' }
+	return { ok: true, queue, item: target }
+}
+
+// The PATCH endpoint's text/effort edit half: only a waiting item's task and effort are operator-editable (the dispatch may already be running otherwise). Fields absent from the edit carry forward.
+export function editWaitingItem(queue: TaskQueue, id: string, edit: { task?: string; effort?: EffortLevel }): QueueMutation {
+	const required = requireWaitingItem(queue, id)
+	if (!required.ok) return required
+	const edited: QueueItem = {
+		...required.item,
+		...(edit.task !== undefined ? { task: edit.task } : {}),
+		...(edit.effort !== undefined ? { effort: edit.effort } : {}),
+	}
+	return { ok: true, queue: withReplacedItem(queue, edited), item: edited }
+}
+
 export function reorderWaitingItem(queue: TaskQueue, id: string, position: number): QueueMutation {
 	const target = findById(queue, id)
 	if (target === undefined) return { ok: false, reason: 'not_found' }
@@ -175,6 +195,13 @@ export function cancelWaitingItem(queue: TaskQueue, id: string, settledAt: strin
 	return { ok: true, queue: withReplacedItem(queue, cancelled), item: cancelled }
 }
 
+// The POST /api/runs path's collision rollback: a run_id_collision that exhausted the scheduler's retry budget leaves the just-created head item waiting with no run behind it, and the item is dropped outright so the caller's resubmit behaves exactly as it does today. Only a still-waiting item is ever dropped — an item the tick dispatched (or a settled one's record) is left alone.
+export function removeWaitingItem(queue: TaskQueue, id: string): QueueMutation {
+	const required = requireWaitingItem(queue, id)
+	if (!required.ok) return required
+	return { ok: true, queue: { items: queue.items.filter((item) => item.id !== id) }, item: required.item }
+}
+
 export function recordAnswer(queue: TaskQueue, id: string, answer: string): QueueMutation {
 	const target = findById(queue, id)
 	if (target === undefined) return { ok: false, reason: 'not_found' }
@@ -182,7 +209,7 @@ export function recordAnswer(queue: TaskQueue, id: string, answer: string): Queu
 	const answered: QueueItem = {
 		...carriedFields(target),
 		...(target.continuesFrom !== undefined ? { continuesFrom: target.continuesFrom } : {}),
-		...(target.runId !== undefined ? { runId: target.runId } : {}),
+		// The parked run's id is deliberately dropped: the lineage (continuesFrom) carries the resume, and a waiting item showing an old run id misleads the UI into reading it as the run in flight.
 		answer,
 		status: 'waiting',
 	}

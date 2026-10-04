@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { assembleBriefingLines, cancelWaitingItem, dispatchingItem, enqueueAtHead, enqueueAtTail, isQueueItem, isTaskQueue, mapSettledItemState, MAX_BRIEFING_RUN_LINES, normalizeNewItem, recordAnswer, requeueErrorItem, releaseToWaiting, reorderWaitingItem, repairActiveItem, settleActiveItem } from './task-queue.ts'
+import { assembleBriefingLines, cancelWaitingItem, dispatchingItem, editWaitingItem, enqueueAtHead, enqueueAtTail, isQueueItem, isTaskQueue, mapSettledItemState, MAX_BRIEFING_RUN_LINES, normalizeNewItem, recordAnswer, removeWaitingItem, requeueErrorItem, releaseToWaiting, reorderWaitingItem, repairActiveItem, requireWaitingItem, settleActiveItem } from './task-queue.ts'
 import type { QueueItem, TaskQueue } from './task-queue.ts'
 import type { RunMeta } from './types.js'
 
@@ -234,6 +234,8 @@ describe('recordAnswer', () => {
 			expect(result.item.answer).toBe('postgres')
 			expect(result.item.question).toBe('which database?')
 			expect(result.item.continuesFrom).toBe('run-20260101-000000')
+			// The parked run's id is dropped: the lineage carries the resume, and a waiting item showing an old run id would mislead the UI into reading it as the run in flight.
+			expect(result.item.runId).toBeUndefined()
 			expect(result.queue.items.map((i) => i.id)).toEqual(['item-1', 'other'])
 		}
 	})
@@ -241,6 +243,47 @@ describe('recordAnswer', () => {
 	test('rejects an unknown id and a non-needs_input target', () => {
 		expect(recordAnswer(queue(item()), 'ghost', 'a')).toEqual({ ok: false, reason: 'not_found' })
 		expect(recordAnswer(queue(item({ status: 'waiting' })), 'item-1', 'a')).toEqual({ ok: false, reason: 'forbidden_status' })
+	})
+})
+
+describe('requireWaitingItem', () => {
+	test('returns the untouched item when it exists and is waiting, and refuses otherwise', () => {
+		expect(requireWaitingItem(queue(item()), 'item-1')).toEqual({ ok: true, queue: queue(item()), item: item() })
+		expect(requireWaitingItem(queue(item()), 'ghost')).toEqual({ ok: false, reason: 'not_found' })
+		expect(requireWaitingItem(queue(item({ status: 'active' })), 'item-1')).toEqual({ ok: false, reason: 'forbidden_status' })
+	})
+})
+
+describe('editWaitingItem', () => {
+	test('edits the task and effort of a waiting item, carrying absent fields forward', () => {
+		const target = item({ effort: 'quick' })
+		const result = editWaitingItem(queue(item({ id: 'other' }), target), 'item-1', { task: 'edited task', effort: 'thorough' })
+		expect(result.ok).toBe(true)
+		if (result.ok) {
+			expect(result.item.task).toBe('edited task')
+			expect(result.item.effort).toBe('thorough')
+			expect(result.queue.items.map((i) => i.id)).toEqual(['other', 'item-1'])
+		}
+		const partial = editWaitingItem(queue(target), 'item-1', { task: 'edited task' })
+		expect(partial.ok).toBe(true)
+		if (partial.ok) expect(partial.item.effort).toBe('quick')
+	})
+
+	test('rejects an unknown id and a non-waiting target', () => {
+		expect(editWaitingItem(queue(item()), 'ghost', { task: 'x' })).toEqual({ ok: false, reason: 'not_found' })
+		expect(editWaitingItem(queue(item({ status: 'active' })), 'item-1', { task: 'x' })).toEqual({ ok: false, reason: 'forbidden_status' })
+	})
+})
+
+describe('removeWaitingItem', () => {
+	test('drops a waiting item outright — the collision rollback — and refuses anything else', () => {
+		const result = removeWaitingItem(queue(item({ id: 'other' }), item()), 'item-1')
+		expect(result.ok).toBe(true)
+		if (result.ok) expect(result.queue.items.map((i) => i.id)).toEqual(['other'])
+		expect(removeWaitingItem(queue(item()), 'ghost')).toEqual({ ok: false, reason: 'not_found' })
+		// A dispatched or settled item is never dropped: only a still-waiting one.
+		expect(removeWaitingItem(queue(item({ status: 'active' })), 'item-1')).toEqual({ ok: false, reason: 'forbidden_status' })
+		expect(removeWaitingItem(queue(item({ status: 'error', runId: 'run-20260101-010000', settledAt: '2026-01-01T00:40:00.000Z' })), 'item-1')).toEqual({ ok: false, reason: 'forbidden_status' })
 	})
 })
 

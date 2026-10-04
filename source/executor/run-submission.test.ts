@@ -50,6 +50,20 @@ describe('createRunSubmission', () => {
 		await submission.awaitActive()
 	})
 
+	test('submit marks every started run queue-tracked — the bit that gates the pre-write park', async () => {
+		const marks: boolean[] = []
+		const startRun: StartRun = async (_runId, _task, _effort, _logLevel, _continuation, queueTracked) => {
+			marks.push(queueTracked)
+			return sampleMeta('run-1')
+		}
+		const submission = createRunSubmission({ onRunSettled: settleNothing, startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings, runDirectoryExists: emptyRunsDir })
+
+		// The queue is universal and the scheduler is submit's only caller, so every submission is a queue dispatch.
+		submission.submit('do it')
+		await submission.awaitActive()
+		expect(marks).toEqual([true])
+	})
+
 	test('submit rejects a second task while a run is active', async () => {
 		let resolveFirst: (meta: RunMeta) => void = () => {}
 		const startRun: StartRun = () => new Promise<RunMeta>((resolve) => {

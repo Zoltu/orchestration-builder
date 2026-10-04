@@ -20,6 +20,7 @@ import { createWireDetails, WIRE_DETAIL_CACHE_LIMIT } from './wire-details.js'
 import { Tooltip, tooltipStyle } from './tooltip.js'
 import { createStreamClient } from './stream-client.js'
 import { nextLivePartial, activeLivePartial } from './live-partial.js'
+import { backlogCount, deriveQueueSections, deriveReorderPosition, isQueueItemLike, queueItemPrimaryText, queueStatusLabel, reorderWaitingItems, taskFirstLine } from './queue-panel.js'
 
 const POLL_INTERVAL_MS = 1000
 const STATUS_LABELS = {
@@ -281,6 +282,7 @@ function Tick(state) {
 		{ ...state, now: Date.now() },
 		Fetch({ url: 'api/runs', ok: GotRunList, fail: FetchFailed }),
 		Fetch({ url: 'api/questions', ok: GotQuestions, fail: FetchFailed }),
+		Fetch({ url: 'api/queue', ok: GotQueue, fail: FetchFailed }),
 	]
 }
 
@@ -423,6 +425,180 @@ function GotQuestions(state, payload) {
 
 function FetchFailed(state) {
 	return { ...state, serverAvailable: false }
+}
+
+// --- Queue panel actions -----------------------------------------------------
+// The polled queue feeds the queue screen; the mutations post to the /api/queue surface (docs/queueing.md "HTTP API") and every confirm path refetches the queue, since the server's tick may already have dispatched the item the mutation touched.
+
+function GotQueue(state, payload) {
+	const ok = payload.ok
+	const body = payload.body
+	const items = ok && Array.isArray(body) ? body.filter(isQueueItemLike) : []
+	const nextState = { ...state, queueItems: items, serverAvailable: ok }
+	// The add's in-flight guard releases once the created item shows up in the polled queue — the same release GotRunList applies to justSubmittedRunId; a response that fails or omits the item keeps the guard up.
+	if (nextState.justSubmittedItemId !== null && items.some((item) => item.id === nextState.justSubmittedItemId)) nextState.justSubmittedItemId = null
+	return nextState
+}
+
+// The queue add resolved: the created item's id is remembered so the follow-up queue read can see whether the scheduler dispatched it within the same request (the idle case) — the operator then lands on the new run's watch screen exactly as a start-now submit always has. The poll's own queue reads deliberately do not consume this selection: a task added while a run is in flight dispatches much later, and jumping then would yank the operator off whatever they are reading.
+function GotQueuedTask(state, payload) {
+	const ok = payload.ok
+	const body = payload.body
+	if (!ok || body === null || typeof body !== 'object' || typeof body.id !== 'string' || body.id === '') return { ...state, serverAvailable: ok }
+	return [
+		{ ...state, justSubmittedItemId: body.id, pendingAddSelectionId: body.id, serverAvailable: true },
+		Fetch({ url: 'api/queue', ok: GotQueueAfterAdd, fail: FetchFailed }),
+	]
+}
+
+function GotQueueAfterAdd(state, payload) {
+	const addedId = state.pendingAddSelectionId
+	const queued = GotQueue(state, payload)
+	if (typeof addedId !== 'string') return queued
+	const cleared = { ...queued, pendingAddSelectionId: null }
+	const added = queued.queueItems.find((item) => item.id === addedId)
+	if (added !== undefined && typeof added.runId === 'string' && added.runId !== '') return SelectRun(cleared, added.runId)
+	// The task is still waiting its turn (a run was in flight) — the queue screen is where the operator sees where it sits in line.
+	return SetScreen(cleared, 'queue')
+}
+
+function StartItemEdit(state, itemId) {
+	if (typeof itemId !== 'string' || itemId === '') return state
+	return { ...state, editingItemId: itemId }
+}
+
+function CancelItemEdit(state) {
+	return { ...state, editingItemId: null }
+}
+
+function SaveItemEdit(state, event) {
+	event.preventDefault()
+	const itemId = state.editingItemId
+	if (typeof itemId !== 'string' || itemId === '') return state
+	const textarea = event.target.querySelector('textarea')
+	if (textarea === null) return state
+	const task = textarea.value.trim()
+	if (task === '') return state
+	return [
+		{ ...state, editingItemId: null },
+		Fetch({
+			url: `api/queue/${encodeURIComponent(itemId)}`,
+			init: { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ task }) },
+			ok: QueueMutated,
+			fail: QueueMutationFailed,
+		}),
+	]
+}
+
+function RemoveQueueItem(state, itemId) {
+	if (typeof itemId !== 'string' || itemId === '') return state
+	return [
+		state,
+		Fetch({
+			url: `api/queue/${encodeURIComponent(itemId)}`,
+			init: { method: 'DELETE' },
+			ok: QueueMutated,
+			fail: QueueMutationFailed,
+		}),
+	]
+}
+
+function SubmitQueueAnswer(itemId) {
+	return function SubmitAnswerForQueueItem(state, event) {
+		event.preventDefault()
+		const input = event.target.querySelector('input')
+		if (input === null) return state
+		const answer = input.value
+		if (answer === '') return state
+		return [
+			{ ...state, queueAnswerPendingId: itemId },
+			Fetch({
+				url: `api/queue/${encodeURIComponent(itemId)}/answer`,
+				init: { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ answer }) },
+				ok: QueueMutated,
+				fail: QueueMutationFailed,
+			}),
+		]
+	}
+}
+
+function RequeueFailedItem(state, itemId) {
+	if (typeof itemId !== 'string' || itemId === '') return state
+	return [
+		state,
+		Fetch({
+			url: `api/queue/${encodeURIComponent(itemId)}/requeue`,
+			init: { method: 'POST' },
+			ok: QueueMutated,
+			fail: QueueMutationFailed,
+		}),
+	]
+}
+
+// Every queue mutation's confirm path refetches the queue rather than patching state from the response body: the server's tick may already have dispatched (or re-ordered) the item, so the refetched list is the truth.
+function QueueMutated(state, payload) {
+	if (!payload.ok) return { ...state, queueAnswerPendingId: null, serverAvailable: true }
+	return [
+		{ ...state, queueAnswerPendingId: null, serverAvailable: true },
+		Fetch({ url: 'api/queue', ok: GotQueue, fail: FetchFailed }),
+	]
+}
+
+// A refused or failed mutation refetches too, so an optimistic update (a drag) reconciles with the server's order.
+function QueueMutationFailed(state) {
+	return [
+		{ ...state, queueAnswerPendingId: null, serverAvailable: false },
+		Fetch({ url: 'api/queue', ok: GotQueue, fail: FetchFailed }),
+	]
+}
+
+// --- Queue drag-to-reorder ---------------------------------------------------
+// Waiting rows are HTML5 drag sources and drop targets: dragstart records the dragged item's id (and sets the transfer data, without which Firefox refuses to start the drag), the drop computes the PATCH position from the target row's waiting index, and the reorder applies optimistically before the PATCH confirms. dragend clears the marker whatever happened — including a drop outside any row.
+
+// The event target's data-attribute value, or null — the DOM read every queue row action shares.
+function dataAttributeOf(event, attribute) {
+	const target = event.currentTarget
+	if (target === null || typeof target !== 'object') return null
+	const value = target.getAttribute(attribute)
+	return typeof value === 'string' && value !== '' ? value : null
+}
+
+function DragQueueItem(state, event) {
+	const itemId = dataAttributeOf(event, 'data-item-id')
+	if (itemId === null) return state
+	if (event.dataTransfer !== null && event.dataTransfer !== undefined) {
+		event.dataTransfer.setData('text/plain', itemId)
+		event.dataTransfer.effectAllowed = 'move'
+	}
+	return { ...state, draggingItemId: itemId }
+}
+
+function DragOverQueueItem(state, event) {
+	event.preventDefault()
+	if (event.dataTransfer !== null && event.dataTransfer !== undefined) event.dataTransfer.dropEffect = 'move'
+	return state
+}
+
+function DropQueueItem(state, event) {
+	event.preventDefault()
+	const targetId = dataAttributeOf(event, 'data-item-id')
+	const draggedId = state.draggingItemId
+	if (targetId === null || typeof draggedId !== 'string' || draggedId === targetId) return { ...state, draggingItemId: null }
+	const position = deriveReorderPosition(state.queueItems, draggedId, targetId)
+	if (position === null) return { ...state, draggingItemId: null }
+	return [
+		{ ...state, queueItems: reorderWaitingItems(state.queueItems, draggedId, position), draggingItemId: null },
+		Fetch({
+			url: `api/queue/${encodeURIComponent(draggedId)}`,
+			init: { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ position }) },
+			ok: QueueMutated,
+			fail: QueueMutationFailed,
+		}),
+	]
+}
+
+function DragEndQueueItem(state) {
+	return state.draggingItemId === null ? state : { ...state, draggingItemId: null }
 }
 
 // The guild config is fetched exactly once on load and never polled, so this action runs a single time. The body is not retained in state; only the derived values the views need are kept — the label resolver the flow/sequence views localize through, the guild participant inventory the sequence view lays out columns from, and the build identifier the top bar stamps (null when the response carries none, e.g. running from source).
@@ -579,13 +755,25 @@ function TaskTextareaKeydown(state, event) {
 
 function SubmitRun(state, event) {
 	event.preventDefault()
-	if (state.justSubmittedRunId !== null || deriveActiveRunId(state.summaries) !== null) return state
+	if (state.justSubmittedItemId !== null || state.justSubmittedRunId !== null) return state
 	const form = event.target
 	const textarea = form.querySelector('textarea')
 	if (textarea === null) return state
 	const task = textarea.value.trim()
 	if (task === '') return state
 	textarea.value = ''
+	// The compose box is the queue's front door (docs/queueing.md "UI interaction model"): a plain add posts to the universal queue and the scheduler dispatches it at once when idle. Only a continuation still needs the run-submission endpoint, whose body is the only one that can carry continuesFrom — so while a run is in flight a continuation stays disabled rather than queueing without its lineage.
+	if (state.continuation === null) {
+		return [
+			state,
+			Fetch({
+				url: 'api/queue',
+				init: { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(buildQueueTaskBody(task, state.runEffort)) },
+				ok: GotQueuedTask,
+				fail: FetchFailed,
+			}),
+		]
+	}
 	return [
 		state,
 		Fetch({
@@ -595,6 +783,11 @@ function SubmitRun(state, event) {
 			fail: FetchFailed,
 		}),
 	]
+}
+
+// The queue task body carries the effort pick; logLevel is deliberately absent — a queue-native item resolves the level through the standard chain at dispatch (docs/queueing.md "The queue: storage, item model, state machine").
+function buildQueueTaskBody(task, runEffort) {
+	return isEffort(runEffort) ? { task, effort: runEffort } : { task }
 }
 
 // effort and logLevel are omitted when their selectors have not yet initialized (settings still loading), so the server applies its resolution chain rather than receiving a null. continuesFrom rides only when the compose screen is in continuation mode; a re-run passes null and submits a plain task.
@@ -757,10 +950,10 @@ function SetSequenceRolesOnly(state, event) {
 }
 
 // --- Screen navigation ------------------------------------------------------
-// The page is a single-screen console: one of three screens (watch / history / compose) fills the viewport below the top bar. The screen is stored view state; nothing here fetches.
+// The page is a single-screen console: one of four screens (watch / history / compose / queue) fills the viewport below the top bar. The screen is stored view state; nothing here fetches.
 
 function SetScreen(state, screen) {
-	if (screen !== 'watch' && screen !== 'history' && screen !== 'compose') return state
+	if (screen !== 'watch' && screen !== 'history' && screen !== 'compose' && screen !== 'queue') return state
 	// Leaving the watch screen unmounts the sequence container (the follower must detach) and returning to it remounts a fresh one; the swap syncs the follower either way.
 	// Modal state is deliberately kept alive across the swap: returning to watch restores the session's modal state (an open inspector, its loaded window and scope) instead of a fresh view.
 	return [{ ...state, screen }, SyncSequenceFollower()]
@@ -1162,19 +1355,11 @@ function StreamSubscription(runId) {
 
 // --- View ------------------------------------------------------------------
 
-// The primary label for a run where space is tight: the task's first line, capped at a word boundary so a long first line cannot stretch the top bar. History rows and the top bar both use it; the full task is one click away in the row's expanded details.
-function firstLineOfTask(task) {
-	const firstLine = task.split('\n', 1)[0].trim()
-	if (firstLine.length <= 100) return firstLine
-	const capped = firstLine.slice(0, 100)
-	const lastSpace = capped.lastIndexOf(' ')
-	return `${lastSpace > 60 ? capped.slice(0, lastSpace) : capped}…`
-}
-
+// The primary label for a run where space is tight: the task's first line, capped at a word boundary so a long first line cannot stretch the top bar (see queue-panel.js taskFirstLine). History rows and the top bar both use it; the full task is one click away in the row's expanded details.
 // The primary label for a run: the LLM-generated one-line summary when the summarizer has produced one, otherwise the task's first line, otherwise the run id. History rows and the top bar share it.
 function runPrimaryLabel(summary) {
 	if (typeof summary.summary === 'string' && summary.summary !== '') return summary.summary
-	if (typeof summary.task === 'string' && summary.task !== '') return firstLineOfTask(summary.task)
+	if (typeof summary.task === 'string' && summary.task !== '') return taskFirstLine(summary.task)
 	return summary.runId
 }
 
@@ -1220,14 +1405,14 @@ function BuildLabel(build) {
 }
 
 function TopBar(state) {
-	const activeRunId = deriveActiveRunId(state.summaries)
-	const composeDisabled = state.justSubmittedRunId !== null || activeRunId !== null
 	return h('header', { class: 'topbar' }, [
 		h('span', { class: 'topbar-wordmark' }, 'Adaptive Orchestrator'),
 		...StatusPills(state),
 		ViewedRunLabel(state),
 		h('nav', { class: 'topbar-nav' }, [
-			h('button', { type: 'button', class: { 'nav-button': true, 'is-active': state.screen === 'compose' }, disabled: composeDisabled, title: composeDisabled ? 'A run is in progress — a new task can start when it finishes' : 'Start a new task', onclick: [SetScreen, 'compose'] }, 'New task'),
+			// The compose screen is always reachable: with the queue universal, adding a task while a run is in flight queues it for its turn instead of being refused (docs/queueing.md "UI interaction model").
+			h('button', { type: 'button', class: { 'nav-button': true, 'is-active': state.screen === 'compose' }, title: 'Add a task to the queue', onclick: [SetScreen, 'compose'] }, 'Add task'),
+			h('button', { type: 'button', class: { 'nav-button': true, 'is-active': state.screen === 'queue' }, title: 'Manage the task queue', onclick: [SetScreen, 'queue'] }, `Queue (${backlogCount(state.queueItems)})`),
 			h('button', { type: 'button', class: { 'nav-button': true, 'is-active': state.screen === 'history' }, title: 'Browse past runs', onclick: [SetScreen, 'history'] }, `History (${state.summaries.length})`),
 			h('label', { class: 'mute-toggle', title: 'Mute the alert sound for incoming questions' }, [
 				h('input', { type: 'checkbox', checked: state.muted, onchange: ToggleMute }),
@@ -1296,6 +1481,106 @@ function HistoryScreen(state) {
 	])
 }
 
+// --- Queue panel -------------------------------------------------------------
+// The queue screen (docs/queueing.md "UI interaction model"): the polled items grouped into the four sections — waiting (draggable, editable, removable), the one active run, the items waiting for an answer (inline answer box), and the recently settled bucket (done/error/cancelled, with the re-queue action on errors). Item prose — task, question, result summary, error — renders through the sanitized Markdown pipeline (docs/security.md "Web client rendering pipeline"); ids, statuses, and timestamps stay textContent.
+
+function QueueItemMeta(state, item) {
+	const parts = []
+	if (typeof item.runId === 'string' && item.runId !== '') parts.push(item.runId)
+	parts.push(`queued ${formatRelative(item.queuedAt, state.now)}`)
+	if (typeof item.settledAt === 'string') parts.push(`settled ${formatRelative(item.settledAt, state.now)}`)
+	return h('span', { class: 'queue-item-meta' }, parts.join(' · '))
+}
+
+// The waiting row's inline edit form, swapped for the task text while this item is being edited. The textarea is prefilled with the item's current task; saving PATCHes the trimmed text.
+function QueueItemEditForm(state, item) {
+	return h('form', { class: 'queue-edit-form', onsubmit: SaveItemEdit }, [
+		h('textarea', { value: item.task, rows: '3', onkeydown: TaskTextareaKeydown }),
+		h('div', { class: 'queue-edit-actions' }, [
+			h('button', { type: 'submit' }, 'Save'),
+			h('button', { type: 'button', onclick: CancelItemEdit }, 'Cancel'),
+		]),
+	])
+}
+
+// The needs_input row's inline answer box: the recorded question, one input, one submit — the queue-native resume of the parked run.
+function QueueItemAnswerForm(state, item) {
+	const pending = state.queueAnswerPendingId === item.id
+	return h('form', { class: 'queue-answer-form', onsubmit: SubmitQueueAnswer(item.id) }, [
+		h('input', { type: 'text', placeholder: 'type your answer', autocomplete: 'off', disabled: pending }),
+		h('button', { type: 'submit', disabled: pending }, pending ? 'Sending…' : 'Answer'),
+	])
+}
+
+function QueueItemRow(state, item) {
+	const waiting = item.status === 'waiting'
+	const editing = waiting && state.editingItemId === item.id
+	const children = [
+		h('div', { class: 'queue-item-main' }, [
+			h('span', { class: `run-status queue-status queue-status-${item.status}` }, queueStatusLabel(item.status)),
+			editing ? QueueItemEditForm(state, item) : h('div', { class: 'queue-item-text markdown' }, renderMarkdown(queueItemPrimaryText(item))),
+			QueueItemMeta(state, item),
+		]),
+	]
+	// A re-dispatched waiting item's record of why it ran again (the operator's previous answer) — operator input, rendered as text.
+	if (waiting && !editing && typeof item.answer === 'string') {
+		children.push(h('p', { class: 'queue-item-answer' }, `Your earlier answer: ${item.answer}`))
+	}
+	// The error item's own message (what the run said went wrong), under the primary line — agent prose through the sanitized Markdown pipeline.
+	if (item.status === 'error' && typeof item.error === 'string' && item.error !== '') {
+		children.push(h('div', { class: 'queue-item-error markdown' }, renderMarkdown(item.error)))
+	}
+	if (waiting && !editing) {
+		children.push(h('div', { class: 'queue-item-actions' }, [
+			h('button', { type: 'button', class: 'rerun-button', title: 'Edit the task text', onclick: [StartItemEdit, item.id] }, 'Edit'),
+			h('button', { type: 'button', class: 'rerun-button', title: 'Remove the task from the queue', onclick: [RemoveQueueItem, item.id] }, 'Remove'),
+		]))
+	}
+	if (item.status === 'needs_input') children.push(QueueItemAnswerForm(state, item))
+	if (item.status === 'error') {
+		children.push(h('div', { class: 'queue-item-actions' }, [
+			h('button', { type: 'button', class: 'rerun-button', title: 'Queue the task again — it runs after everything already waiting', onclick: [RequeueFailedItem, item.id] }, 'Re-queue'),
+		]))
+	}
+	return h('li', {
+		key: item.id,
+		class: { 'queue-item': true, 'is-waiting': waiting, 'is-dragging': state.draggingItemId === item.id },
+		// Only waiting rows drag: a drag is a reorder, and the reorder endpoint takes waiting items only.
+		draggable: waiting && !editing,
+		'data-item-id': item.id,
+		ondragstart: DragQueueItem,
+		ondragover: DragOverQueueItem,
+		ondrop: DropQueueItem,
+		ondragend: DragEndQueueItem,
+	}, children)
+}
+
+function QueueSection(state, heading, items, emptyText) {
+	return h('div', { class: 'queue-section' }, [
+		h('h2', { class: 'queue-section-heading' }, `${heading} (${items.length})`),
+		items.length === 0
+			? h('p', { class: 'queue-section-empty' }, emptyText)
+			: h('ul', { class: 'queue-list' }, items.map((item) => QueueItemRow(state, item))),
+	])
+}
+
+function QueueScreen(state) {
+	const sections = deriveQueueSections(state.queueItems)
+	if (state.queueItems.length === 0) {
+		return h('section', { id: 'queue-screen' }, [
+			h('p', { class: 'queue-empty' }, 'No queued tasks — add one from the Add task screen.'),
+		])
+	}
+	return h('section', { id: 'queue-screen' }, [
+		h('div', { class: 'queue-scroll' }, [
+			QueueSection(state, 'Waiting', sections.waiting, 'Nothing is waiting — tasks added now start immediately.'),
+			QueueSection(state, 'Running now', sections.active, 'No run is active right now.'),
+			QueueSection(state, 'Needs your answer', sections.needsInput, 'Nothing is waiting for an answer.'),
+			QueueSection(state, 'Recently finished', sections.recent, 'No finished tasks yet.'),
+		]),
+	])
+}
+
 // The effort selector is one radio group (shared `name`, real inputs) so arrow keys and screen readers work natively, with each whole card clickable via its wrapping label. The option values are the wire strings verbatim — picking a card fires SaveRunEffort, so the choice applies to the next run and persists as the project default at once. The names, descriptions, and recommended badge all render from EFFORT_OPTIONS, the single home of the per-level copy.
 function EffortLevelSelector(value, disabled, saving) {
 	return h('fieldset', { class: 'effort-control', disabled }, [
@@ -1336,29 +1621,29 @@ function ContinuationChip(state) {
 	return h('div', { class: 'continuation-chip', 'aria-label': `Continuing run ${continuation.runId}` }, [
 		h('div', { class: 'continuation-chip-text' }, [
 			h('p', { class: 'continuation-chip-title' }, `Continuing run ${continuation.runId}`),
-			typeof continuation.task === 'string' && continuation.task !== '' ? h('p', { class: 'continuation-chip-task' }, firstLineOfTask(continuation.task)) : null,
+			typeof continuation.task === 'string' && continuation.task !== '' ? h('p', { class: 'continuation-chip-task' }, taskFirstLine(continuation.task)) : null,
 			continuation.summary !== null ? h('p', { class: 'continuation-chip-outcome' }, `Prior outcome: ${continuation.summary}`) : null,
 		]),
 		h('button', { type: 'button', class: 'continuation-chip-dismiss', title: 'Discard the continuation and write a fresh task', onclick: CancelContinuation }, 'Cancel'),
 	])
 }
 
-// The compose screen is the hero when the service is idle — drafting a task is the primary activity when nothing is running, so the editor gets the whole stage. The submit path is the shared create path; in continuation mode the chip rides above the task field and the submit body carries continuesFrom.
+// The compose screen is the hero when the service is idle — drafting a task is the primary activity when nothing is running, so the editor gets the whole stage. The submit path is the queue's universal add (the scheduler dispatches it at once when the system is idle, so the user-visible behavior of today's "start now" is preserved); in continuation mode the chip rides above the task field and the submit body carries continuesFrom — the only body that can — so a continuation stays disabled while a run is in flight rather than queueing without its lineage.
 function ComposeScreen(state) {
-	const disabled = state.justSubmittedRunId !== null || deriveActiveRunId(state.summaries) !== null
+	const disabled = state.continuation !== null && deriveActiveRunId(state.summaries) !== null
 	const runEffort = isEffort(state.runEffort) ? state.runEffort : DEFAULT_EFFORT
 	const runLogLevel = isLogLevel(state.runLogLevel) ? state.runLogLevel : DEFAULT_LOG_LEVEL
 	return h('section', { id: 'compose-screen' }, [
 		h('div', { class: 'compose-hero' }, [
-			h('h1', { class: 'compose-heading' }, state.summaries.length === 0 ? 'What should the orchestrator do?' : 'New task'),
-			h('p', { class: 'compose-sub' }, 'Describe the task in plain language — Markdown works too. The orchestrator runs one task at a time.'),
+			h('h1', { class: 'compose-heading' }, state.summaries.length === 0 ? 'What should the orchestrator do?' : 'Add task'),
+			h('p', { class: 'compose-sub' }, 'Describe the task in plain language — Markdown works too. Tasks run one at a time; a task added while a run is in progress waits in the queue and starts when it finishes.'),
 			h('form', { class: { 'create-run-form': true, 'is-busy': disabled }, onsubmit: SubmitRun }, [
 				ContinuationChip(state),
-				h('textarea', { name: 'task', placeholder: disabled ? 'a run is already in progress — a new task can start when it finishes' : 'describe a task (Markdown supported) and start a run', autocomplete: 'off', disabled, onkeydown: TaskTextareaKeydown }),
+				h('textarea', { name: 'task', placeholder: disabled ? 'a run is already in progress — a continuation starts when it finishes' : 'describe a task (Markdown supported)', autocomplete: 'off', disabled, onkeydown: TaskTextareaKeydown }),
 				EffortLevelSelector(runEffort, disabled, state.savingEffort === true),
 				LoggingLevelSelector(runLogLevel, disabled, state.savingLogLevel === true),
 				h('div', { class: 'submit-controls' }, [
-					h('button', { type: 'submit', disabled }, disabled ? 'Run in progress…' : 'Start run'),
+					h('button', { type: 'submit', disabled }, disabled ? 'Run in progress…' : 'Add task'),
 				]),
 			]),
 		]),
@@ -1675,6 +1960,7 @@ function ResultModalForRun(state) {
 function Main(state) {
 	if (state.screen === 'history') return h('main', {}, [HistoryScreen(state)])
 	if (state.screen === 'compose') return h('main', {}, [ComposeScreen(state)])
+	if (state.screen === 'queue') return h('main', {}, [QueueScreen(state)])
 	if (state.summaries.length === 0 && state.selectedRunId === null) return h('main', {}, [ComposeScreen(state)])
 	return h('main', {}, [WatchScreen(state)])
 }
@@ -1684,7 +1970,7 @@ function view(state) {
 }
 
 // --- App -------------------------------------------------------------------
-// The subscriptions array is fixed-size with stable positions: [0] always polls the run list + questions every second; [1] polls the selected run's run view and flow model every second but only while one is selected and non-terminal (the deactivation on terminal status stops the polling); [2] primes the AudioContext on the first user interaction; [3] dismisses the inspector modal on Escape while it is open; [4] subscribes the live token stream to the selected run while the watch screen shows one that is selected and non-terminal (the same non-terminal guard [1] uses).
+// The subscriptions array is fixed-size with stable positions: [0] always polls the run list, the pending questions, and the task queue every second; [1] polls the selected run's run view and flow model every second but only while one is selected and non-terminal (the deactivation on terminal status stops the polling); [2] primes the AudioContext on the first user interaction; [3] dismisses the inspector modal on Escape while it is open; [4] subscribes the live token stream to the selected run while the watch screen shows one that is selected and non-terminal (the same non-terminal guard [1] uses).
 
 app({
 	init: [
@@ -1694,6 +1980,14 @@ app({
 			selectedRunView: null,
 			selectedRunStatus: null,
 			pendingQuestions: [],
+			// The polled task queue (docs/queueing.md "UI interaction model"), head first. The add-flow's ids: justSubmittedItemId guards a second submit while one is in flight; pendingAddSelectionId is consumed once by the very next queue read to jump to the new run's watch screen when the scheduler dispatched it within the add request.
+			queueItems: [],
+			justSubmittedItemId: null,
+			pendingAddSelectionId: null,
+			// The queue panel's row-level view state: the waiting item being inline-edited, the row being dragged, and the item whose answer is posting.
+			editingItemId: null,
+			draggingItemId: null,
+			queueAnswerPendingId: null,
 			serverAvailable: true,
 			justSubmittedRunId: null,
 			muted: false,

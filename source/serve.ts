@@ -134,7 +134,7 @@ interface RunServiceConfig {
 }
 
 function createStartRun(config: RunServiceConfig): StartRun {
-	return (runId, task, effort, logLevel, continuation) => {
+	return (runId, task, effort, logLevel, continuation, queueTracked) => {
 		const runPromise = withRunBindings(config, runId, logLevel, (dependencies) => runExecutor(dependencies, {
 			runId,
 			guildPath: config.guildPath,
@@ -142,6 +142,8 @@ function createStartRun(config: RunServiceConfig): StartRun {
 			effort,
 			logLevel,
 			...(continuation !== undefined ? { continuation } : {}),
+			// The submission layer marks every submission a queue dispatch (the queue is universal), so the run's park tracker is born queue-tracked (docs/queueing.md "Parking: the pre-write rule").
+			...(queueTracked ? { queueTracked: true } : {}),
 		}))
 		fireAndForgetSummary(config.summarizer.summarizeTaskStart(runId, task), runId)
 		runPromise.then(
@@ -368,6 +370,9 @@ async function serve(): Promise<void> {
 		listRunIds,
 		readProjectSettings,
 		writeProjectSettings,
+		readQueue,
+		writeQueue,
+		tickScheduler: () => scheduler.tick(),
 		build: buildInfo,
 	})
 	console.log(`Web UI ready: http://localhost:${webServer.port}`)

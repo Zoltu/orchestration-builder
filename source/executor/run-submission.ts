@@ -4,7 +4,8 @@ import { DEFAULT_LOG_LEVEL } from './log-level.js'
 import type { EffortLevel, LogLevel, RunContinuation, RunMeta } from './types.js'
 import type { ReadProjectSettings, RunDirectoryExists } from './persistence.js'
 
-export type StartRun = (runId: string, task: string, effort: EffortLevel, logLevel: LogLevel, continuation?: RunContinuation) => Promise<RunMeta>
+// Every fresh run is started through submit, and submit is called only by the scheduler's dispatch path (the queue is universal — docs/queueing.md "Dispatch and the scheduler"), so the submission layer marks every started run queue-tracked: the bit that gates the pre-write park (docs/queueing.md "Parking: the pre-write rule"). The mark does not survive a restart (it does not ride the checkpoint), so a boot-resumed run keeps today's blocking ask behavior.
+export type StartRun = (runId: string, task: string, effort: EffortLevel, logLevel: LogLevel, continuation: RunContinuation | undefined, queueTracked: boolean) => Promise<RunMeta>
 export type ResumeRun = (checkpoint: RunCheckpoint) => Promise<RunMeta>
 
 export interface RunSubmissionDependencies {
@@ -89,7 +90,7 @@ export function createRunSubmission(dependencies: RunSubmissionDependencies): Ru
 			if (dependencies.runDirectoryExists(runId)) return { ok: false, error: 'run_id_collision' }
 			const effort = resolveEffort(effortOverride)
 			const logLevel = resolveLogLevel(logLevelOverride)
-			track(runId, dependencies.startRun(runId, task, effort, logLevel, continuation))
+			track(runId, dependencies.startRun(runId, task, effort, logLevel, continuation, true))
 			return { ok: true, runId }
 		},
 		resume(checkpoint) {

@@ -219,6 +219,8 @@ export interface RunOptions {
 	// The run's logging level (see docs/reference.md "Logging level"), resolved at submission; the run's appendLog writes are filtered at this level.
 	logLevel?: LogLevel
 	continuation?: RunContinuation
+	// Set by the dispatch path (the submission layer's submit — the scheduler is its only caller) when the run was dispatched from the task queue: the mark that gates the pre-write park (docs/queueing.md "Parking: the pre-write rule"). It deliberately does not ride the checkpoint — a boot-resumed run's answer path is /api/answer (blocking), so an untracked run must never park into a question no endpoint can answer.
+	queueTracked?: boolean
 }
 
 export interface RunMeta {

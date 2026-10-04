@@ -32,11 +32,11 @@ export interface ExecutorDependencies {
 	publishDelta: (delta: RoleDelta) => void
 }
 
-function buildEngineDependencies(deps: ExecutorDependencies, runId: string, startTime: string, registryCounter: number, learnedContextCeiling: number | undefined, writeCapableStarted: boolean | undefined, continuesFrom: string | undefined): EngineDependencies {
+function buildEngineDependencies(deps: ExecutorDependencies, runId: string, startTime: string, registryCounter: number, learnedContextCeiling: number | undefined, writeCapableStarted: boolean | undefined, continuesFrom: string | undefined, queueTracked: boolean | undefined): EngineDependencies {
 	const roleRegistry = createRoleRegistry(registryCounter)
 	const contextPressureTracker = createContextPressureTracker(learnedContextCeiling)
-	// The resume path seeds the park tracker from the checkpoint so a restart cannot reset the write-capability flag and park a run whose writes happened before the restart (docs/queueing.md "Parking: the pre-write rule").
-	const parkTracker = createRunParkTracker(writeCapableStarted)
+	// The resume path seeds the park tracker from the checkpoint so a restart cannot reset the write-capability flag and park a run whose writes happened before the restart (docs/queueing.md "Parking: the pre-write rule"). The queue-tracking mark is NOT restored here: it is set only by the dispatch path of the process that dispatched the run, so a boot-resumed run blocks on ask_human (answerable through /api/answer) instead of parking into a question no endpoint can answer.
+	const parkTracker = createRunParkTracker(writeCapableStarted, queueTracked)
 	return {
 		llmCaller: deps.llmCaller,
 		appendLog: deps.appendLog,
@@ -80,7 +80,7 @@ export async function runExecutor(deps: ExecutorDependencies, options: RunOption
 	// Write a running meta before the entry role begins so the UI can show the task, run id, and start time while the run is in progress, rather than only after completion. It is overwritten with the terminal meta below.
 	deps.writeMeta(composeRunMeta(options, startTime, 'running'))
 	const result = await runRole(
-		buildEngineDependencies(deps, options.runId, startTime, 0, undefined, undefined, options.continuation?.runId),
+		buildEngineDependencies(deps, options.runId, startTime, 0, undefined, undefined, options.continuation?.runId, options.queueTracked),
 		{
 			loadedGuild,
 			depth: 0,
@@ -136,7 +136,7 @@ export async function resumeExecutor(deps: ExecutorDependencies, checkpoint: Run
 	deps.writeMeta(composeRunMeta(runOptions, startTime, 'running'))
 	const result = await resumeRoleStack(
 		runRole,
-		buildEngineDependencies(deps, checkpoint.runId, startTime, checkpoint.registryCounter, checkpoint.learnedContextCeiling, checkpoint.writeCapableStarted, entryFrame.continuesFrom),
+		buildEngineDependencies(deps, checkpoint.runId, startTime, checkpoint.registryCounter, checkpoint.learnedContextCeiling, checkpoint.writeCapableStarted, entryFrame.continuesFrom, undefined),
 		loadedGuild,
 		checkpoint,
 	)

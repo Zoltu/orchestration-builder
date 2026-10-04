@@ -1,4 +1,4 @@
-/* Visual system for the web client. Design tokens (color palette, spacing scale, radii, shadows, fonts) are declared once on :root and referenced uniformly so the screens read as one interface. The layout is a single-screen console: a slim top bar above one full-viewport screen — Watch (the flow/sequence stage), History (the run browser), or Compose (the new-task hero) — and the page itself never scrolls. */
+/* Visual system for the web client. Design tokens (color palette, spacing scale, radii, shadows, fonts) are declared once on :root and referenced uniformly so the screens read as one interface. The layout is a single-screen console: a slim top bar above one full-viewport screen — Watch (the flow/sequence stage), History (the run browser), Compose (the add-task hero), or Queue (the task queue panel) — and the page itself never scrolls. */
 
 :root {
 	--color-bg: #f6f6f8;
@@ -136,7 +136,7 @@ body {
 	outline-offset: 1px;
 }
 
-/* The app shell is a full-viewport flex column: the slim top bar on top and one screen (watch / history / compose) filling the rest. The page itself never scrolls; scrolling lives inside the screens that need it (the history list, the sequence view's timeline). */
+/* The app shell is a full-viewport flex column: the slim top bar on top and one screen (watch / history / compose / queue) filling the rest. The page itself never scrolls; scrolling lives inside the screens that need it (the history list, the queue panel, the sequence view's timeline). */
 .app-shell {
 	display: flex;
 	flex-direction: column;
@@ -2825,3 +2825,229 @@ li:last-child {
 	}
 }
 
+/* --- Queue panel ------------------------------------------------------------ */
+/* The queue screen (docs/queueing.md "UI interaction model"): the polled task queue grouped into four sections — waiting (drag to reorder, edit, remove), the active run, the items waiting for an answer (inline answer box), and the recently finished bucket. The layout mirrors the history screen's scrolling one-column browser, and every color reads the shared tokens so the panel follows the light/dark theme with the rest of the console. */
+
+#queue-screen {
+	display: flex;
+	flex-direction: column;
+	overflow: hidden;
+	flex: 1;
+	min-height: 0;
+}
+
+.queue-scroll {
+	overflow-y: auto;
+	flex: 1;
+	min-height: 0;
+	padding: var(--space-5) var(--space-6);
+	display: flex;
+	flex-direction: column;
+	gap: var(--space-5);
+	max-width: 64rem;
+	width: 100%;
+	margin: 0 auto;
+}
+
+.queue-section-heading {
+	margin: 0 0 var(--space-2);
+	font-size: 0.8rem;
+	font-weight: 600;
+	text-transform: uppercase;
+	letter-spacing: 0.04em;
+	color: var(--color-text-subtle);
+}
+
+.queue-section-empty {
+	margin: 0;
+	padding: var(--space-2) var(--space-3);
+	color: var(--color-text-subtle);
+	font-size: 0.85rem;
+	font-style: italic;
+}
+
+.queue-empty {
+	margin: var(--space-6) auto;
+	max-width: 64rem;
+	color: var(--color-text-subtle);
+	font-style: italic;
+}
+
+.queue-list {
+	list-style: none;
+	margin: 0;
+	padding: 0;
+	display: flex;
+	flex-direction: column;
+}
+
+.queue-item {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: flex-start;
+	gap: var(--space-2);
+	padding: var(--space-2) var(--space-3);
+	border-bottom: 1px solid var(--color-surface-sunken);
+	border-radius: var(--radius-sm);
+}
+
+.queue-item.is-waiting {
+	cursor: grab;
+}
+
+.queue-item.is-dragging {
+	opacity: 0.4;
+}
+
+.queue-item-main {
+	flex: 1 1 auto;
+	display: flex;
+	align-items: baseline;
+	gap: var(--space-3);
+	min-width: 0;
+}
+
+.queue-item-text {
+	flex: 1 1 auto;
+	min-width: 0;
+	font-size: 0.9rem;
+	overflow-wrap: anywhere;
+}
+
+/* The queue's own status tones (the run-status vocabulary does not carry the queue's statuses). */
+.queue-status-waiting {
+	color: var(--color-accent);
+}
+
+.queue-status-active {
+	color: var(--color-accent);
+	font-weight: 600;
+}
+
+.queue-status-needs_input {
+	color: var(--color-warn);
+	font-weight: 600;
+}
+
+.queue-status-done {
+	color: var(--color-success);
+}
+
+.queue-status-error,
+.queue-status-cancelled {
+	color: var(--color-error);
+}
+
+.queue-item-meta {
+	flex: 0 0 auto;
+	font-family: var(--font-mono);
+	font-size: 0.72rem;
+	color: var(--color-text-subtle);
+	overflow-wrap: anywhere;
+}
+
+.queue-item-answer {
+	flex: 1 1 100%;
+	margin: 0;
+	padding: var(--space-1) var(--space-2);
+	border-left: 2px solid var(--color-border-strong);
+	color: var(--color-text-muted);
+	font-size: 0.85rem;
+}
+
+.queue-item-actions {
+	flex: 0 0 auto;
+	display: flex;
+	gap: var(--space-1);
+}
+
+/* The needs_input row's inline answer box and the waiting row's inline edit form reuse the create form's control language at row scale. */
+.queue-answer-form {
+	flex: 1 1 100%;
+	display: flex;
+	gap: var(--space-2);
+}
+
+.queue-answer-form input {
+	flex: 1 1 auto;
+	border: 1px solid var(--color-border-strong);
+	border-radius: var(--radius-sm);
+	padding: var(--space-1) var(--space-2);
+	font: inherit;
+	font-size: 0.85rem;
+	background: var(--color-surface);
+	color: var(--color-text);
+}
+
+.queue-answer-form button {
+	flex: 0 0 auto;
+	border: 1px solid var(--color-accent);
+	border-radius: var(--radius-sm);
+	background: var(--color-accent-soft);
+	color: var(--color-accent);
+	font-size: 0.8rem;
+	padding: var(--space-1) var(--space-3);
+	cursor: pointer;
+}
+
+.queue-answer-form button:disabled {
+	opacity: 0.5;
+	cursor: default;
+}
+
+.queue-edit-form {
+	flex: 1 1 auto;
+	display: flex;
+	flex-direction: column;
+	gap: var(--space-2);
+}
+
+.queue-edit-form textarea {
+	resize: vertical;
+	min-height: 3rem;
+	border: 1px solid var(--color-border-strong);
+	border-radius: var(--radius-sm);
+	padding: var(--space-2);
+	font: inherit;
+	font-size: 0.9rem;
+	background: var(--color-surface);
+	color: var(--color-text);
+}
+
+.queue-edit-form textarea:focus-visible {
+	outline: none;
+	border-color: var(--color-accent);
+}
+
+.queue-edit-actions {
+	display: flex;
+	gap: var(--space-2);
+}
+
+.queue-edit-actions button {
+	border: 1px solid var(--color-border-strong);
+	border-radius: var(--radius-sm);
+	background: var(--color-bg);
+	color: var(--color-text-muted);
+	font-size: 0.78rem;
+	padding: var(--space-1) var(--space-3);
+	cursor: pointer;
+}
+
+.queue-edit-actions button:hover {
+	background: var(--color-accent-soft);
+	border-color: var(--color-accent);
+	color: var(--color-accent);
+}
+
+/* The error item's own message, under the primary line: error-toned like the history details' error block so a failed task reads as one at a glance. */
+.queue-item-error {
+	flex: 1 1 100%;
+	margin: 0;
+	padding: var(--space-1) var(--space-2);
+	border: 1px solid var(--color-error);
+	border-radius: var(--radius-sm);
+	background: var(--color-error-soft);
+	color: var(--color-error);
+	font-size: 0.85rem;
+}

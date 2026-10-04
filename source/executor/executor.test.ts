@@ -7,7 +7,7 @@ import { createInterruptQueue } from './interrupts.ts'
 import type { LlmCallResult, LlmCaller } from './llm.ts'
 import type { LoadedGuild } from './loader.ts'
 import type { AppendLog, DeleteCheckpoint, RunDirectory, WriteCheckpoint, WriteMeta } from './persistence.ts'
-import { stubHumanBackend, defined } from './test-fixtures.ts'
+import { stubHumanBackend, recordingHumanBackend, defined } from './test-fixtures.ts'
 
 function success(toolCalls: ToolCall[], opts: { content?: string } = {}): LlmCallResult {
 	return {
@@ -252,6 +252,51 @@ describe('runExecutor', () => {
 			}
 		}
 		expect(persistence.state.meta?.status).toBe('error')
+	})
+
+	test('the queue-tracking mark rides RunOptions into the park tracker: a marked run parks a pre-write ask, an unmarked one blocks', async () => {
+		const askHumanManifest: ToolManifest = {
+			name: 'ask_human',
+			description: 'Ask a human a question.',
+			parameters: { type: 'object', required: ['question'], properties: { question: { type: 'string' } } },
+		}
+		const guild: LoadedGuild = {
+			config: { entryRole: 'main', roles: { main: { systemPrompt: 'p', tools: ['ask_human', 'finish'] } }, tools: [] },
+			deployment: { model: baseModel, executor: baseExecutor, contextPolicy: baseContextPolicy },
+			prompts: { main: 'prompt for main' },
+			tools: { finish: finishManifest, ask_human: askHumanManifest },
+		}
+		const human = recordingHumanBackend()
+		const askCall: ToolCall = { id: 'ask_1', type: 'function', function: { name: 'ask_human', arguments: JSON.stringify({ question: 'Which database?' }) } }
+		const finishCall: ToolCall = { id: 'f1', type: 'function', function: { name: 'finish', arguments: JSON.stringify({ status: 'success', summary: 'done' }) } }
+
+		const parkedLlm = new FakeLlm()
+		parkedLlm.responses = [success([askCall])]
+		const parkedPersistence = makeFakePersistence()
+		const parkedMeta = await runExecutor(makeDeps(parkedLlm, parkedPersistence, guild), {
+			runId: 'r1',
+			guildPath: '/guild',
+			task: 'do it',
+			effort: 'standard',
+			queueTracked: true,
+		})
+		expect(parkedMeta.status).toBe('needs_clarification')
+		expect(parkedMeta.result?.summary).toBe('waiting for an answer to: Which database?')
+		expect(human.questions).toEqual([])
+
+		const blockingLlm = new FakeLlm()
+		blockingLlm.responses = [success([askCall]), success([finishCall])]
+		const blockingPersistence = makeFakePersistence()
+		const blockingDeps = makeDeps(blockingLlm, blockingPersistence, guild)
+		blockingDeps.humanBackend = human
+		const blockingMeta = await runExecutor(blockingDeps, {
+			runId: 'r2',
+			guildPath: '/guild',
+			task: 'do it',
+			effort: 'standard',
+		})
+		expect(blockingMeta.status).toBe('success')
+		expect(human.questions).toEqual([{ question: 'Which database?', context: undefined }])
 	})
 
 	test('meta.json contains run id, guild path, status, and final result', async () => {
