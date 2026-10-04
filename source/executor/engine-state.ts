@@ -5,6 +5,7 @@ import type { InterruptQueue } from './interrupts.js'
 import type { LoadedGuild } from './loader.js'
 import type { LlmCaller } from './llm.js'
 import type { AppendLog } from './persistence.js'
+import type { RunParkTracker } from './park-state.js'
 import type { RecentToolCall } from './role-inspection.js'
 import type { RoleRegistry } from './role-registry.js'
 import type { RoleDelta } from './stream-channel.js'
@@ -61,6 +62,8 @@ export interface EngineDependencies {
 	contextPressureTracker: ContextPressureTracker
 	// The run's checkpoint recorder, created per run by runExecutor; every frame registers on start and the leaf writes the role stack at each safe point so a service restart can resume the run.
 	checkpointRecorder: CheckpointRecorder
+	// The run-scoped park state (docs/queueing.md "Parking: the pre-write rule"), created per run by runExecutor: the ask handler parks pre-write asks into it and the engine checks the mark at every safe point.
+	parkTracker: RunParkTracker
 	// The run-scoped delta publisher: a leaf bound to the active run by the service (serve.ts's withRunBindings), so every streamed turn text carries the run's identity.
 	publishDelta: (delta: RoleDelta) => void
 }

@@ -48,6 +48,15 @@ export type { DeltaChannel, DeltaField, DeltaSubscriber, RoleDelta, RunDelta } f
 export { createRunSubmission } from './run-submission.js'
 export type { ResumeRun, RunSubmission, RunSubmissionDependencies, StartRun, SubmitResult } from './run-submission.js'
 
+export { createTaskScheduler, COLLISION_RETRY_DELAY_MS, MAX_COLLISION_RETRIES } from './scheduler.js'
+export type { QueuedRunSubmission, SubmitQueuedRun, TaskScheduler, TaskSchedulerDependencies } from './scheduler.js'
+
+export { isQueueItem, isTaskQueue, normalizeNewItem, enqueueAtTail, enqueueAtHead, reorderWaitingItem, cancelWaitingItem, recordAnswer, requeueErrorItem, releaseToWaiting, dispatchingItem, withReplacedItem, mapSettledItemState, settleActiveItem, repairActiveItem, assembleBriefingLines, MAX_BRIEFING_RUN_LINES } from './task-queue.js'
+export type { ActiveItemRepair, BriefingInput, NewQueueItemResult, QueueItem, QueueItemStatus, QueueMutation, QueueMutationRejection, RunListEntry, SettlementOutcome, TaskQueue, TerminalItemState } from './task-queue.js'
+
+export { createRunParkTracker, isWriteCapableRole, parkCard, parkSummary, questionFromParkSummary, PARK_SUMMARY_PREFIX, WRITE_CAPABLE_TOOL_NAMES } from './park-state.js'
+export type { RunParkTracker } from './park-state.js'
+
 export { ensureOrchestrationGitExcluded, nodeGitExcludeFilesystem } from './git-exclude.js'
 export type { GitExcludeFilesystem, GitExcludeResult } from './git-exclude.js'
 
@@ -88,6 +97,8 @@ export {
 	createListRunIds,
 	createReadProjectSettings,
 	createWriteProjectSettings,
+	createReadQueue,
+	createWriteQueue,
 	LOG_FILE_NAME,
 } from './persistence.js'
 export type {
@@ -114,6 +125,8 @@ export type {
 	ProjectSettings,
 	ReadProjectSettings,
 	WriteProjectSettings,
+	ReadTaskQueue,
+	WriteTaskQueue,
 } from './persistence.js'
 
 export type { DeploymentConfig, DeploymentFileConfig, LoggingConfig, ModelConfig, ResolvedModelConfig, RunContinuation, RunOptions, RunMeta, ResultCard, EffortLevel } from './types.js'

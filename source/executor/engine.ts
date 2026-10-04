@@ -8,6 +8,7 @@ import { applyContextBackstop, contextExceededCard, contextManagedNotice, contex
 import { truncateToolOutput } from './context-policy.js'
 import { DEFAULT_CONTEXT_PRESSURE_THRESHOLD, recordContextRejection } from './context-pressure.js'
 import { logEvent, type EngineContext, type EngineDependencies, type ResumedRole, type RoleState, type SuspendedTurn } from './engine-state.js'
+import { isWriteCapableRole, parkCard } from './park-state.js'
 import { drainInterrupts } from './interrupt-engine.js'
 import type { LlmCallResult } from './llm.js'
 import { hashArguments, RECENT_TOOL_CALLS_LIMIT } from './role-inspection.js'
@@ -254,6 +255,9 @@ export async function runRole(deps: EngineDependencies, context: EngineContext, 
 
 	const systemPrompt = guild.prompts[context.roleName] ?? ''
 
+	// The pre-write rule (docs/queueing.md "Parking: the pre-write rule"): the run-scoped flag flips when a write-capable role starts and never resets. It is conservative by construction — a false positive merely degrades a later park to today's blocking behavior, while a false negative would park a run that has already written.
+	if (isWriteCapableRole(roleDefinition.tools)) deps.parkTracker.writeCapableStarted = true
+
 	const roleState: RoleState = resumed?.roleState ?? {
 		history: buildInitialHistory(systemPrompt, context),
 		lastPromptTokens: 0,
@@ -330,6 +334,8 @@ export async function runRole(deps: EngineDependencies, context: EngineContext, 
 		loadedGuild: guild,
 		roleRegistry: deps.roleRegistry,
 		ownRoleId: registryEntry.roleId,
+		appendLog: deps.appendLog,
+		parkTracker: deps.parkTracker,
 		handlerOf: context.handlerOf,
 	})
 
@@ -363,6 +369,8 @@ async function dispatchToolCallSequence(
 	for (let index = startIndex; index < toolCalls.length; index++) {
 		const toolCall = toolCalls[index]
 		if (toolCall === undefined) continue
+		// The park mark checked between dispatches is load-bearing (docs/queueing.md "Parking: the pre-write rule"): a batched ask_human + agent turn must not start the child after the park decision, or the run writes after the pre-write premise was decided. The mark is run-scoped, so a suspended ancestor unwinds here with the same platform-authored park card once its child's card has propagated up.
+		if (deps.parkTracker.parkedQuestion !== undefined) return parkCard(deps.parkTracker.parkedQuestion)
 		// An agent dispatch suspends this role mid-turn until the child returns; record the suspension so a checkpoint taken while the child runs captures where this role resumes. Cleared once the dispatch settles.
 		if (toolCall.function.name === 'agent') {
 			deps.checkpointRecorder.setPending(registryEntry.roleId, { toolCalls, agentIndex: index })
@@ -404,6 +412,9 @@ async function executeRoleLoop(
 		if (completedCard !== null) return completedCard
 	}
 	while (true) {
+		// The park mark unwinds the run at the loop top — the safe point before any further LLM request — with the platform-authored park card; the LLM is never asked to finish gracefully and never gets a turn to talk itself out of parking (docs/queueing.md "Parking: the pre-write rule").
+		if (deps.parkTracker.parkedQuestion !== undefined) return parkCard(deps.parkTracker.parkedQuestion)
+
 		const interruptCard = await drainInterrupts(runRole, deps, context, roleState, registryEntry)
 		if (interruptCard !== null) return interruptCard
 

@@ -77,4 +77,39 @@ describe('buildInitialHistory', () => {
 		const history = buildInitialHistory('child prompt', contextFor({ depth: 1, parent: 'main', continuation }))
 		expect(history).toEqual(initialMessages('child prompt', 'do it'))
 	})
+
+	test('a first queue dispatch (briefing only, no runId) renders the briefing lines below the task with no prior-run lines', () => {
+		const briefingOnly = { task: 'unused', summary: '', briefing: ['[Queued-task briefing — what happened while this task waited in the queue.]', 'Queued at 2026-01-01T00:00:00.000Z.', 'The workspace may have changed since this task was queued; re-verify the premise before relying on earlier findings.'] }
+		const history = buildInitialHistory('sys', contextFor({ continuation: briefingOnly }))
+		expect(history.length).toBe(2)
+		const userMessage = defined(history[1], 'initial user message')
+		expect(userMessage.content).toContain('Queued at 2026-01-01T00:00:00.000Z.')
+		expect(userMessage.content).not.toContain('continues run')
+		expect(userMessage.content).not.toContain('Prior task:')
+		expect(userMessage.content.split('\n', 1)[0]).toBe('do it')
+	})
+
+	test('a continuation of a parked run renders the prior-run lines followed by the briefing lines in the same block', () => {
+		const resumed = { ...continuation, briefing: ['Queued at 2026-01-01T00:00:00.000Z.', 'The operator answered: postgres'] }
+		const history = buildInitialHistory('sys', contextFor({ continuation: resumed }))
+		const userMessage = defined(history[1], 'initial user message')
+		const content = userMessage.content
+		const priorOutcomeIndex = content.indexOf('Prior outcome: prior summary')
+		const queuedIndex = content.indexOf('Queued at 2026-01-01T00:00:00.000Z.')
+		const answerIndex = content.indexOf('The operator answered: postgres')
+		expect(priorOutcomeIndex).toBeGreaterThanOrEqual(0)
+		expect(queuedIndex).toBeGreaterThan(priorOutcomeIndex)
+		expect(answerIndex).toBeGreaterThan(queuedIndex)
+	})
+
+	test('a child context with an inherited briefing-only continuation receives neither block', () => {
+		const briefingOnly = { task: 'unused', summary: '', briefing: ['Queued at 2026-01-01T00:00:00.000Z.'] }
+		const history = buildInitialHistory('child prompt', contextFor({ depth: 1, parent: 'main', continuation: briefingOnly }))
+		expect(history).toEqual(initialMessages('child prompt', 'do it'))
+	})
+
+	test('a continuation with neither runId nor briefing renders as the bare task', () => {
+		const history = buildInitialHistory('sys', contextFor({ continuation: { task: 'prior', summary: '' } }))
+		expect(history).toEqual(initialMessages('sys', 'do it'))
+	})
 })

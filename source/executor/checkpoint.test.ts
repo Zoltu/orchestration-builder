@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 
 import { createCheckpointRecorder, isRunCheckpoint, type CheckpointFrame, type CheckpointRecorder, type RunCheckpoint } from './checkpoint.ts'
+import { createRunParkTracker } from './park-state.ts'
 import { createContextPressureTracker } from './context-pressure.ts'
 import type { EngineContext, RoleState } from './engine-state.ts'
 import type { LoadedGuild } from './loader.ts'
@@ -229,6 +230,22 @@ describe('isRunCheckpoint', () => {
 		expect(isRunCheckpoint(copy)).toBe(true)
 	})
 
+	test('accepts a set write-capability flag on the run level and round-trips it through JSON', () => {
+		const checkpoint = sampleCheckpoint()
+		checkpoint.writeCapableStarted = true
+		expect(isRunCheckpoint(checkpoint)).toBe(true)
+		const copy: unknown = JSON.parse(JSON.stringify(checkpoint))
+		expect(isRunCheckpoint(copy)).toBe(true)
+	})
+
+	test('rejects a malformed write-capability flag: only true or absent', () => {
+		const checkpoint = sampleCheckpoint()
+		checkpoint.writeCapableStarted = false
+		expect(isRunCheckpoint(checkpoint)).toBe(false)
+		const lying: unknown = { ...sampleCheckpoint(), writeCapableStarted: 'yes' }
+		expect(isRunCheckpoint(lying)).toBe(false)
+	})
+
 	test('rejects a malformed logging level', () => {
 		const checkpoint = sampleCheckpoint()
 		const root = checkpoint.frames[0]
@@ -269,7 +286,7 @@ describe('createCheckpointRecorder', () => {
 		const written: RunCheckpoint[] = []
 		const registry = createRoleRegistry()
 		const tracker = createContextPressureTracker(4096)
-		const recorder = createCheckpointRecorder({ writeCheckpoint: (c) => written.push(c), runId: 'run-9', startTime: '2026-01-01T00:00:00.000Z', roleRegistry: registry, contextPressureTracker: tracker })
+		const recorder = createCheckpointRecorder({ parkTracker: createRunParkTracker(), writeCheckpoint: (c) => written.push(c), runId: 'run-9', startTime: '2026-01-01T00:00:00.000Z', roleRegistry: registry, contextPressureTracker: tracker })
 
 		registerRoot(recorder, registry)
 		const childContext = frameContext('coder', 1, { parent: 'main', parentRoleId: 'main-0-1' })
@@ -293,7 +310,7 @@ describe('createCheckpointRecorder', () => {
 	test('reads live role state at write time, so mutations between writes are captured', () => {
 		const written: RunCheckpoint[] = []
 		const registry = createRoleRegistry()
-		const recorder = createCheckpointRecorder({ writeCheckpoint: (c) => written.push(c), runId: 'run-1', startTime: '2026-01-01T00:00:00.000Z', roleRegistry: registry, contextPressureTracker: createContextPressureTracker() })
+		const recorder = createCheckpointRecorder({ parkTracker: createRunParkTracker(), writeCheckpoint: (c) => written.push(c), runId: 'run-1', startTime: '2026-01-01T00:00:00.000Z', roleRegistry: registry, contextPressureTracker: createContextPressureTracker() })
 		const entry = registerRoot(recorder, registry)
 
 		entry.roleState.toolCallCount = 7
@@ -308,7 +325,7 @@ describe('createCheckpointRecorder', () => {
 	test('pending suspension and child card are recorded on the frame and cleared', () => {
 		const written: RunCheckpoint[] = []
 		const registry = createRoleRegistry()
-		const recorder = createCheckpointRecorder({ writeCheckpoint: (c) => written.push(c), runId: 'run-1', startTime: '2026-01-01T00:00:00.000Z', roleRegistry: registry, contextPressureTracker: createContextPressureTracker() })
+		const recorder = createCheckpointRecorder({ parkTracker: createRunParkTracker(), writeCheckpoint: (c) => written.push(c), runId: 'run-1', startTime: '2026-01-01T00:00:00.000Z', roleRegistry: registry, contextPressureTracker: createContextPressureTracker() })
 		const entry = registerRoot(recorder, registry)
 
 		recorder.setPending(entry.roleId, { toolCalls: [agentToolCall()], agentIndex: 0 })
@@ -323,7 +340,7 @@ describe('createCheckpointRecorder', () => {
 
 	test('recording a child card with no pending suspension fails fast', () => {
 		const registry = createRoleRegistry()
-		const recorder = createCheckpointRecorder({ writeCheckpoint: () => {}, runId: 'run-1', startTime: '2026-01-01T00:00:00.000Z', roleRegistry: registry, contextPressureTracker: createContextPressureTracker() })
+		const recorder = createCheckpointRecorder({ parkTracker: createRunParkTracker(), writeCheckpoint: () => {}, runId: 'run-1', startTime: '2026-01-01T00:00:00.000Z', roleRegistry: registry, contextPressureTracker: createContextPressureTracker() })
 		const entry = registerRoot(recorder, registry)
 
 		expect(() => recorder.setPendingChildCard(entry.roleId, { status: 'success', summary: 'x' })).toThrow()
@@ -332,7 +349,7 @@ describe('createCheckpointRecorder', () => {
 	test('writes are suppressed while a handler frame is on the stack and resume when it unwinds', () => {
 		const written: RunCheckpoint[] = []
 		const registry = createRoleRegistry()
-		const recorder = createCheckpointRecorder({ writeCheckpoint: (c) => written.push(c), runId: 'run-1', startTime: '2026-01-01T00:00:00.000Z', roleRegistry: registry, contextPressureTracker: createContextPressureTracker() })
+		const recorder = createCheckpointRecorder({ parkTracker: createRunParkTracker(), writeCheckpoint: (c) => written.push(c), runId: 'run-1', startTime: '2026-01-01T00:00:00.000Z', roleRegistry: registry, contextPressureTracker: createContextPressureTracker() })
 		registerRoot(recorder, registry)
 
 		const handlerContext = frameContext('loop_detector', 1, { parent: 'main', parentRoleId: 'main-0-1', handlerOf: 'main-0-1' })
@@ -350,7 +367,7 @@ describe('createCheckpointRecorder', () => {
 	test('unregistered frames disappear from later writes', () => {
 		const written: RunCheckpoint[] = []
 		const registry = createRoleRegistry()
-		const recorder = createCheckpointRecorder({ writeCheckpoint: (c) => written.push(c), runId: 'run-1', startTime: '2026-01-01T00:00:00.000Z', roleRegistry: registry, contextPressureTracker: createContextPressureTracker() })
+		const recorder = createCheckpointRecorder({ parkTracker: createRunParkTracker(), writeCheckpoint: (c) => written.push(c), runId: 'run-1', startTime: '2026-01-01T00:00:00.000Z', roleRegistry: registry, contextPressureTracker: createContextPressureTracker() })
 		registerRoot(recorder, registry)
 		const childEntry = registry.register('coder', 1, 'main-0-1', sampleRoleState())
 		recorder.registerFrame(frameContext('coder', 1, { parent: 'main', parentRoleId: 'main-0-1' }), childEntry)
@@ -365,7 +382,7 @@ describe('createCheckpointRecorder', () => {
 	test('frames are ordered by depth even when registered leaf-first (the resume path)', () => {
 		const written: RunCheckpoint[] = []
 		const registry = createRoleRegistry(2)
-		const recorder = createCheckpointRecorder({ writeCheckpoint: (c) => written.push(c), runId: 'run-1', startTime: '2026-01-01T00:00:00.000Z', roleRegistry: registry, contextPressureTracker: createContextPressureTracker() })
+		const recorder = createCheckpointRecorder({ parkTracker: createRunParkTracker(), writeCheckpoint: (c) => written.push(c), runId: 'run-1', startTime: '2026-01-01T00:00:00.000Z', roleRegistry: registry, contextPressureTracker: createContextPressureTracker() })
 
 		const leafEntry = registry.register('coder', 1, 'main-0-1', sampleRoleState(), 'coder-1-2')
 		recorder.registerFrame(frameContext('coder', 1, { parent: 'main', parentRoleId: 'main-0-1' }), leafEntry)
@@ -379,7 +396,7 @@ describe('createCheckpointRecorder', () => {
 	test('the entry frame alone carries the continuation lineage, even when child contexts inherited it', () => {
 		const written: RunCheckpoint[] = []
 		const registry = createRoleRegistry()
-		const recorder = createCheckpointRecorder({ writeCheckpoint: (c) => written.push(c), runId: 'run-1', startTime: '2026-01-01T00:00:00.000Z', roleRegistry: registry, contextPressureTracker: createContextPressureTracker() })
+		const recorder = createCheckpointRecorder({ parkTracker: createRunParkTracker(), writeCheckpoint: (c) => written.push(c), runId: 'run-1', startTime: '2026-01-01T00:00:00.000Z', roleRegistry: registry, contextPressureTracker: createContextPressureTracker() })
 		const continuation = { runId: 'run-20260101-000000', task: 'prior task', summary: 'prior summary' }
 
 		// The agent spawn spreads the entry context into children, so the child context carries the same continuation; only the depth-0 frame serializes it.
@@ -396,7 +413,7 @@ describe('createCheckpointRecorder', () => {
 	test('the recorder stamps its resume lineage onto the entry frame when the context carries no live continuation', () => {
 		const written: RunCheckpoint[] = []
 		const registry = createRoleRegistry()
-		const recorder = createCheckpointRecorder({ writeCheckpoint: (c) => written.push(c), runId: 'run-1', startTime: '2026-01-01T00:00:00.000Z', roleRegistry: registry, contextPressureTracker: createContextPressureTracker(), continuesFrom: 'run-20260101-000000' })
+		const recorder = createCheckpointRecorder({ parkTracker: createRunParkTracker(), writeCheckpoint: (c) => written.push(c), runId: 'run-1', startTime: '2026-01-01T00:00:00.000Z', roleRegistry: registry, contextPressureTracker: createContextPressureTracker(), continuesFrom: 'run-20260101-000000' })
 
 		// The resume path re-registers contexts without a continuation (the briefing is already in the checkpointed history), so the entry frame's lineage comes from the recorder's stamp.
 		const rootEntry = registry.register('main', 0, undefined, sampleRoleState())
@@ -412,7 +429,7 @@ describe('createCheckpointRecorder', () => {
 	test('a recorder without a resume lineage stamps nothing when the context carries no continuation', () => {
 		const written: RunCheckpoint[] = []
 		const registry = createRoleRegistry()
-		const recorder = createCheckpointRecorder({ writeCheckpoint: (c) => written.push(c), runId: 'run-1', startTime: '2026-01-01T00:00:00.000Z', roleRegistry: registry, contextPressureTracker: createContextPressureTracker() })
+		const recorder = createCheckpointRecorder({ parkTracker: createRunParkTracker(), writeCheckpoint: (c) => written.push(c), runId: 'run-1', startTime: '2026-01-01T00:00:00.000Z', roleRegistry: registry, contextPressureTracker: createContextPressureTracker() })
 
 		const rootEntry = registry.register('main', 0, undefined, sampleRoleState())
 		recorder.registerFrame(frameContext('main', 0), rootEntry)
@@ -424,7 +441,7 @@ describe('createCheckpointRecorder', () => {
 	test('the entry frame alone carries the context logging level (the resume path re-threads it from frames[0])', () => {
 		const written: RunCheckpoint[] = []
 		const registry = createRoleRegistry()
-		const recorder = createCheckpointRecorder({ writeCheckpoint: (c) => written.push(c), runId: 'run-1', startTime: '2026-01-01T00:00:00.000Z', roleRegistry: registry, contextPressureTracker: createContextPressureTracker() })
+		const recorder = createCheckpointRecorder({ parkTracker: createRunParkTracker(), writeCheckpoint: (c) => written.push(c), runId: 'run-1', startTime: '2026-01-01T00:00:00.000Z', roleRegistry: registry, contextPressureTracker: createContextPressureTracker() })
 
 		// The entry context gets the run's level from runExecutor and children inherit it through the spread; a frame without it in the test means its context had none.
 		const rootEntry = registry.register('main', 0, undefined, sampleRoleState())
@@ -440,12 +457,28 @@ describe('createCheckpointRecorder', () => {
 	test('a context without a logging level stamps none', () => {
 		const written: RunCheckpoint[] = []
 		const registry = createRoleRegistry()
-		const recorder = createCheckpointRecorder({ writeCheckpoint: (c) => written.push(c), runId: 'run-1', startTime: '2026-01-01T00:00:00.000Z', roleRegistry: registry, contextPressureTracker: createContextPressureTracker() })
+		const recorder = createCheckpointRecorder({ parkTracker: createRunParkTracker(), writeCheckpoint: (c) => written.push(c), runId: 'run-1', startTime: '2026-01-01T00:00:00.000Z', roleRegistry: registry, contextPressureTracker: createContextPressureTracker() })
 
 		const rootEntry = registry.register('main', 0, undefined, sampleRoleState())
 		recorder.registerFrame(frameContext('main', 0), rootEntry)
 		recorder.write()
 
 		expect(written[0]?.frames[0]?.logLevel).toBeUndefined()
+	})
+
+	test('the write-capability flag rides the checkpoint once flipped, and is omitted while unset', () => {
+		const written: RunCheckpoint[] = []
+		const registry = createRoleRegistry()
+		const parkTracker = createRunParkTracker()
+		const recorder = createCheckpointRecorder({ parkTracker, writeCheckpoint: (c) => written.push(c), runId: 'run-1', startTime: '2026-01-01T00:00:00.000Z', roleRegistry: registry, contextPressureTracker: createContextPressureTracker() })
+
+		const rootEntry = registry.register('main', 0, undefined, sampleRoleState())
+		recorder.registerFrame(frameContext('main', 0), rootEntry)
+		recorder.write()
+		expect(written[0]?.writeCapableStarted).toBeUndefined()
+
+		parkTracker.writeCapableStarted = true
+		recorder.write()
+		expect(written[1]?.writeCapableStarted).toBe(true)
 	})
 })

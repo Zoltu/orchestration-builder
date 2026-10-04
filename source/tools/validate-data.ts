@@ -8,6 +8,7 @@ import { createBuiltInToolHandlers } from '../executor/builtin-tools.js'
 import { ERROR_KINDS } from '../executor/errors.js'
 import { createGuildLoader, type LoadedGuildFiles } from '../executor/loader.js'
 import { LOG_FILE_NAME } from '../executor/persistence.js'
+import { createRunParkTracker } from '../executor/park-state.js'
 import { createRoleRegistry } from '../executor/role-registry.js'
 import { createToolHandlers } from '../executor/tools.js'
 import { createPlanToolHandlers } from '../executor/tools/plan.js'
@@ -340,6 +341,8 @@ function checkManifests(): void {
 		},
 		roleRegistry: createRoleRegistry(),
 		ownRoleId: 'fixture-0-0',
+		appendLog: () => undefined,
+		parkTracker: createRunParkTracker(),
 	})
 	checkSameSet('built-in tool handler table', new Set(Object.keys(builtInHandlers)), builtInToolNames)
 	for (const manifest of manifests) {

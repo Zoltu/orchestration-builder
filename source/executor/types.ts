@@ -200,11 +200,14 @@ export interface ResultCard {
 	error?: { kind: ErrorKind; message?: string; details?: unknown }
 }
 
-// The resolved prior-run lineage for a task-continuation run: the prior run's id, its operator task, and its result summary (empty when the prior run finished without a result card). The executor treats it as an opaque channel — it validates, persists the lineage in meta, and injects the briefing into the entry context; the Guild decides what the continuation means.
+// The resolved prior-run lineage and briefing channel for a queue-dispatched run: a genuine continuation carries the prior run's id, operator task, and result summary (empty when the prior run finished without a result card); a first queue dispatch carries only the interim briefing, with runId omitted so meta.continuesFrom stays honest. The executor treats it as an opaque channel — it validates, persists the lineage in meta, and injects the briefing into the entry context; the Guild decides what the continuation means.
 export interface RunContinuation {
-	runId: string
+	// Present only when the run genuinely continues a prior run; absent for a first queue dispatch.
+	runId?: string
 	task: string
 	summary: string
+	// The interim briefing lines about what happened while the task waited in the queue (docs/queueing.md "The interim briefing"), composed by the scheduler and rendered under the same depth-0 gate as the prior-run lines.
+	briefing?: string[]
 }
 
 export interface RunOptions {

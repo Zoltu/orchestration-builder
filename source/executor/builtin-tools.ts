@@ -8,7 +8,9 @@ import { optionalPositiveInt } from './tools/shared.js'
 import type { ToolHandler } from './tool-dispatch.js'
 import type { HumanBackend } from './human-backend.js'
 import type { LoadedGuild } from './loader.js'
-import type { RoleState } from './engine-state.js'
+import { logEvent, type RoleState } from './engine-state.js'
+import type { AppendLog } from './persistence.js'
+import type { RunParkTracker } from './park-state.js'
 
 export interface BuiltInToolContext {
 	spawnAgent(roleName: string, task: string): Promise<ResultCard>
@@ -18,6 +20,10 @@ export interface BuiltInToolContext {
 	roleRegistry: RoleRegistry
 	// The instance id of the role these handlers belong to. Cross-role tools reject a caller that targets itself: a caller is active, and cross-role targets must be suspended — self-edits go through the target-free self path.
 	ownRoleId: string
+	// The run's filtered log emitter: the ask_human park path emits the event itself because the human backend is never called and so never logs.
+	appendLog: AppendLog
+	// The run-scoped park state (docs/queueing.md "Parking: the pre-write rule"): a pre-write ask parks the run instead of blocking.
+	parkTracker: RunParkTracker
 	// The flagged instance this invocation serves as an interrupt handler (EngineContext.handlerOf), when the role runs as one. trigger_interrupt refuses any other target: only the flagged entry's interruptAction is consumed by the loop-check resolution, so a decision parked on another entry would sit unapplied and fire out of context at that entry's next loop check.
 	handlerOf?: string
 }
@@ -302,6 +308,17 @@ function createAskHuman(context: BuiltInToolContext): ToolHandler {
 		}
 		const contextValue = args['context']
 		const contextString = typeof contextValue === 'string' ? contextValue : undefined
+		// The pre-write park (docs/queueing.md "Parking: the pre-write rule"): before any write-capable role has started there is no workspace change to protect, so a queue-dispatched run parks instead of blocking the pipeline on one unanswered question — the human backend is never called (no pending question is registered), the event is emitted here so the run's own log stays a faithful record, and the recorded question marks the run to terminate at the next safe point. A run the queue does not track keeps today's blocking behavior: its parked question would be answerable through no endpoint.
+		if (context.parkTracker.queueTracked === true && !context.parkTracker.writeCapableStarted) {
+			context.parkTracker.parkedQuestion = questionValue
+			logEvent(context.appendLog, 'ask_human', {
+				id: crypto.randomUUID(),
+				question: questionValue,
+				...(contextString !== undefined ? { context: contextString } : {}),
+				parked: true,
+			})
+			return { kind: 'success', data: { question: questionValue, parked: true } }
+		}
 		const answer = await context.humanBackend.ask(questionValue, contextString)
 		return { kind: 'success', data: { question: questionValue, answer } }
 	}

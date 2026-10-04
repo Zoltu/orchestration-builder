@@ -2,11 +2,16 @@ import { describe, expect, test } from 'bun:test'
 import { createBuiltInToolHandlers, type BuiltInToolContext } from './builtin-tools.ts'
 import { createRoleRegistry, type RoleRegistry } from './role-registry.ts'
 import type { RoleState } from './engine-state.ts'
+import { createRunParkTracker } from './park-state.ts'
 import type { LoadedGuild } from './loader.ts'
 import { stubHumanBackend, toolData } from './test-fixtures.ts'
 import type { ToolHandler } from './tool-dispatch.ts'
-import type { Message, ToolResult } from './types.js'
+import type { LogEvent, Message, ToolResult } from './types.js'
 import { isObject } from './validation.ts'
+
+function makeFakeAppendLog(): { appendLog: (event: LogEvent) => void } {
+	return { appendLog: () => undefined }
+}
 
 function fixtureHistory(): Message[] {
 	return [
@@ -53,6 +58,7 @@ function makeContext(): { context: BuiltInToolContext; registry: RoleRegistry; t
 	registry.register('coder', 1, undefined, target)
 	const callerState = fixtureRoleState()
 	registry.register('context_manager', 2, undefined, callerState)
+	const { appendLog } = makeFakeAppendLog()
 	const context: BuiltInToolContext = {
 		spawnAgent: async () => ({ status: 'success', summary: '' }),
 		roleState: callerState,
@@ -60,6 +66,8 @@ function makeContext(): { context: BuiltInToolContext; registry: RoleRegistry; t
 		loadedGuild: stubGuild,
 		roleRegistry: registry,
 		ownRoleId: 'context_manager-2-2',
+		appendLog,
+		parkTracker: createRunParkTracker(),
 		// The caller stands in for a loop-check handler serving the coder instance: trigger_interrupt must accept that instance and no other.
 		handlerOf: 'coder-1-1',
 	}

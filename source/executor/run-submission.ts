@@ -16,6 +16,8 @@ export interface RunSubmissionDependencies {
 	readProjectSettings: ReadProjectSettings
 	// The deployment file's logging default (deployment.json "logging"."level"), resolved once at startup: the lowest-priority input of the log-level resolution chain, below the per-run override and the project setting.
 	deploymentLogLevel?: LogLevel
+	// The queue's settlement hook (docs/queueing.md "Dispatch and the scheduler"): awaited once after the active slot clears on a fulfilled run promise, so it maps the settled run's item and ticks the scheduler while the slot is free. Never invoked on the rejection branch — a rejected run promise is the fatal teardown path, not a settlement.
+	onRunSettled: (meta: RunMeta) => Promise<void>
 }
 
 export type SubmitResult =
@@ -60,13 +62,14 @@ export function createRunSubmission(dependencies: RunSubmissionDependencies): Ru
 		return DEFAULT_LOG_LEVEL
 	}
 
-	// Puts a run promise in the active slot: the slot clears on settlement, a rejection clears it and surfaces through awaitFatalError so a failed run tears the service down non-zero instead of becoming an unhandled rejection.
+	// Puts a run promise in the active slot: the slot clears on settlement, a rejection clears it and surfaces through awaitFatalError so a failed run tears the service down non-zero instead of becoming an unhandled rejection. On fulfillment the settlement hook is awaited after the slot clears, so its tick can dispatch into the freed slot.
 	function track(runId: string, promise: Promise<RunMeta>): void {
 		activeRunId = runId
 		lastRunId = runId
 		activePromise = promise.then(
-			(meta) => {
+			async (meta) => {
 				activeRunId = undefined
+				await dependencies.onRunSettled(meta)
 				return meta
 			},
 			(error) => {

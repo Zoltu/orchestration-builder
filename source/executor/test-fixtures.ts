@@ -2,6 +2,7 @@ import { createCheckpointRecorder, isRunCheckpoint, type CheckpointRecorder, typ
 import type { ContextPressureTracker } from './context-pressure.js'
 import type { HumanBackend } from './human-backend.js'
 import type { LoadedGuild } from './loader.js'
+import { createRunParkTracker, type RunParkTracker } from './park-state.js'
 import type { RoleRegistry } from './role-registry.js'
 import type { GuildConfig, ToolManifest, ToolResult } from './types.js'
 
@@ -54,8 +55,8 @@ export interface FakeCheckpointSink {
 	checkpoints: RunCheckpoint[]
 }
 
-// A real recorder over an in-memory sink. The recorder passes live references to writeCheckpoint, so the sink deep-copies through JSON to freeze each write as made — and re-validates the copy, so every test using this fixture also proves the recorder's output passes the resume-time guard.
-export function createFakeCheckpointRecorder(roleRegistry: RoleRegistry, contextPressureTracker: ContextPressureTracker, runId: string = 'test-run'): FakeCheckpointSink {
+// A real recorder over an in-memory sink. The recorder passes live references to writeCheckpoint, so the sink deep-copies through JSON to freeze each write as made — and re-validates the copy, so every test using this fixture also proves the recorder's output passes the resume-time guard. parkTracker may be passed when the test drives the engine's park path, so the recorder and the engine dependencies share the run-scoped state.
+export function createFakeCheckpointRecorder(roleRegistry: RoleRegistry, contextPressureTracker: ContextPressureTracker, parkTracker?: RunParkTracker, runId: string = 'test-run'): FakeCheckpointSink {
 	const checkpoints: RunCheckpoint[] = []
 	const recorder = createCheckpointRecorder({
 		writeCheckpoint: (checkpoint) => {
@@ -67,6 +68,7 @@ export function createFakeCheckpointRecorder(roleRegistry: RoleRegistry, context
 		startTime: '2026-01-01T00:00:00.000Z',
 		roleRegistry,
 		contextPressureTracker,
+		parkTracker: parkTracker ?? createRunParkTracker(),
 	})
 	return { recorder, checkpoints }
 }

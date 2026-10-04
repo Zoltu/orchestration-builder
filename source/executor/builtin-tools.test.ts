@@ -10,6 +10,7 @@ import type { LoadedGuild } from './loader.ts'
 import type { AppendLog } from './persistence.ts'
 import { createRoleRegistry } from './role-registry.ts'
 import { createFakeCheckpointRecorder, recordingHumanBackend } from './test-fixtures.ts'
+import { createRunParkTracker } from './park-state.ts'
 
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -190,7 +191,8 @@ function makeDeps(llm: FakeLlm, humanBackend: HumanBackend): { deps: EngineDepen
 	const { appendLog, events } = makeFakeAppendLog()
 	const roleRegistry = createRoleRegistry()
 	const contextPressureTracker = createContextPressureTracker()
-	const sink = createFakeCheckpointRecorder(roleRegistry, contextPressureTracker)
+	const parkTracker = createRunParkTracker()
+	const sink = createFakeCheckpointRecorder(roleRegistry, contextPressureTracker, parkTracker)
 	const deps: EngineDependencies = {
 		llmCaller: llm,
 		appendLog,
@@ -200,6 +202,7 @@ function makeDeps(llm: FakeLlm, humanBackend: HumanBackend): { deps: EngineDepen
 		interruptQueue: createInterruptQueue(),
 		contextPressureTracker,
 		checkpointRecorder: sink.recorder,
+		parkTracker,
 		publishDelta: () => undefined,
 	}
 	return { deps, events }
@@ -405,7 +408,7 @@ describe('edit_context tool', () => {
 describe('ask_human tool', () => {
 	test('returns the human backend answer wrapped as a tool result', async () => {
 		const guild = buildGuild(
-			{ main: { systemPrompt: 'sys', tools: ['ask_human', 'finish'] } },
+			{ main: { systemPrompt: 'sys', tools: ['ask_human', 'finish', 'run_shell'] } },
 			'main',
 		)
 		const llm = new FakeLlm()
@@ -432,7 +435,7 @@ describe('ask_human tool', () => {
 
 	test('passes context to the human backend when provided', async () => {
 		const guild = buildGuild(
-			{ main: { systemPrompt: 'sys', tools: ['ask_human', 'finish'] } },
+			{ main: { systemPrompt: 'sys', tools: ['ask_human', 'finish', 'run_shell'] } },
 			'main',
 		)
 		const llm = new FakeLlm()
@@ -455,7 +458,7 @@ describe('ask_human tool', () => {
 
 	test('rejects a missing question with invalid_arguments', async () => {
 		const guild = buildGuild(
-			{ main: { systemPrompt: 'sys', tools: ['ask_human', 'finish'] } },
+			{ main: { systemPrompt: 'sys', tools: ['ask_human', 'finish', 'run_shell'] } },
 			'main',
 		)
 		const llm = new FakeLlm()

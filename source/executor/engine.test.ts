@@ -13,7 +13,8 @@ import type { LoadedGuild } from './loader.ts'
 import type { AppendLog } from './persistence.ts'
 import { createRoleRegistry } from './role-registry.ts'
 import type { RunCheckpoint } from './checkpoint.ts'
-import { createFakeCheckpointRecorder, stubHumanBackend, withTool, defined } from './test-fixtures.ts'
+import { createFakeCheckpointRecorder, recordingHumanBackend, stubHumanBackend, withTool, defined } from './test-fixtures.ts'
+import { createRunParkTracker, type RunParkTracker } from './park-state.ts'
 import type { RoleDelta } from './stream-channel.ts'
 import type { ToolHandler } from './tool-dispatch.ts'
 
@@ -190,11 +191,12 @@ function agentCall(role: string, task: string): ToolCall {
 	}
 }
 
-function makeDeps(llm: LlmCaller): { deps: EngineDependencies; events: LogEvent[]; checkpoints: RunCheckpoint[] } {
+function makeDeps(llm: LlmCaller): { deps: EngineDependencies; events: LogEvent[]; checkpoints: RunCheckpoint[]; parkTracker: RunParkTracker } {
 	const { appendLog, events } = makeFakeAppendLog()
 	const roleRegistry = createRoleRegistry()
 	const contextPressureTracker = createContextPressureTracker()
-	const sink = createFakeCheckpointRecorder(roleRegistry, contextPressureTracker)
+	const parkTracker = createRunParkTracker()
+	const sink = createFakeCheckpointRecorder(roleRegistry, contextPressureTracker, parkTracker)
 	const deps: EngineDependencies = {
 		llmCaller: llm,
 		appendLog,
@@ -204,9 +206,10 @@ function makeDeps(llm: LlmCaller): { deps: EngineDependencies; events: LogEvent[
 		interruptQueue: createInterruptQueue(),
 		contextPressureTracker,
 		checkpointRecorder: sink.recorder,
+		parkTracker,
 		publishDelta: noOpPublishDelta,
 	}
-	return { deps, events, checkpoints: sink.checkpoints }
+	return { deps, events, checkpoints: sink.checkpoints, parkTracker }
 }
 
 function noOpPublishDelta(): void {}
@@ -2648,5 +2651,198 @@ describe('runRole — streamed delta publishing', () => {
 			{ roleId: 'orchestrator-0-1', role: 'orchestrator', field: 'content', text: 'parent text' },
 			{ roleId: 'coder-1-2', role: 'coder', field: 'reasoning', text: 'child thinking' },
 		])
+	})
+})
+
+describe('runRole — the pre-write park rule', () => {
+	const askHumanManifest: ToolManifest = {
+		name: 'ask_human',
+		description: 'Ask a human a question.',
+		parameters: {
+			type: 'object',
+			required: ['question'],
+			properties: { question: { type: 'string' }, context: { type: 'string' } },
+		},
+	}
+
+	function askCall(question: string): ToolCall {
+		return { id: 'ask_1', type: 'function', function: { name: 'ask_human', arguments: JSON.stringify({ question }) } }
+	}
+
+	function buildParkGuild(roles: Record<string, RoleDefinition>, entryRole: string): LoadedGuild {
+		return withTool(buildGuild(roles, entryRole), askHumanManifest)
+	}
+
+	test('a queue-tracked pre-write ask_human parks the run: the backend is never called and the run ends needs_clarification with the platform summary', async () => {
+		const guild = buildParkGuild(
+			{ main: { systemPrompt: 'p', tools: ['ask_human', 'finish'] } },
+			'main',
+		)
+		const llm = new FakeLlm()
+		llm.responses = [success([askCall('Which database should I use?')])]
+		const { deps, events, parkTracker } = makeDeps(llm)
+		const human = recordingHumanBackend()
+		const depsWithHuman: EngineDependencies = { ...deps, humanBackend: human }
+		// The dispatch path marks a queue-dispatched run; only such a run parks (docs/queueing.md "Parking: the pre-write rule").
+		parkTracker.queueTracked = true
+
+		const result = await runRole(depsWithHuman, {
+			loadedGuild: guild,
+			depth: 0,
+			roleName: 'main',
+			task: 'do it',
+		})
+
+		expect(result.status).toBe('needs_clarification')
+		expect(result.summary).toBe('waiting for an answer to: Which database should I use?')
+		// The human backend is never called — no pending question is registered; answering happens through the queue item.
+		expect(human.questions).toEqual([])
+		// No further LLM request after the mark is set: the run never gets a turn to talk itself out of parking.
+		expect(llm.calls.length).toBe(1)
+		expect(parkTracker.parkedQuestion).toBe('Which database should I use?')
+		// The run's own log stays a faithful record: the ask_human event fired with the pairing id, marked as parked.
+		const askEvent = events.find((e) => e.type === 'ask_human')
+		expect(askEvent).toBeDefined()
+		const askPayload = defined(askEvent, 'ask_human event').payload
+		expect(isRecord(askPayload) && askPayload['parked'] === true).toBe(true)
+		expect(isRecord(askPayload) && typeof askPayload['id'] === 'string' && askPayload['id'] !== '').toBe(true)
+	})
+
+	test('a run the queue does not track blocks on a pre-write ask exactly as today: the backend receives the question and a pending question registers', async () => {
+		const guild = buildParkGuild(
+			{ main: { systemPrompt: 'p', tools: ['ask_human', 'finish'] } },
+			'main',
+		)
+		const llm = new FakeLlm()
+		llm.responses = [
+			success([askCall('Which database should I use?')]),
+			success([finishCall({ status: 'success', summary: 'done' })]),
+		]
+		const { deps, parkTracker } = makeDeps(llm)
+		const human = recordingHumanBackend()
+		const depsWithHuman: EngineDependencies = { ...deps, humanBackend: human }
+
+		const result = await runRole(depsWithHuman, {
+			loadedGuild: guild,
+			depth: 0,
+			roleName: 'main',
+			task: 'do it',
+		})
+
+		expect(result).toEqual({ status: 'success', summary: 'done' })
+		// Today's blocking behavior: the backend received the question and its pending entry registered.
+		expect(human.questions).toEqual([{ question: 'Which database should I use?', context: undefined }])
+		expect(llm.calls.length).toBe(2)
+		expect(parkTracker.parkedQuestion).toBeUndefined()
+	})
+
+	test('a batched ask_human + agent turn parks before the child role starts', async () => {
+		const guild = buildParkGuild(
+			{
+				main: { systemPrompt: 'p', tools: ['ask_human', 'agent', 'finish'] },
+				coder: { systemPrompt: 'c', tools: ['finish'] },
+			},
+			'main',
+		)
+		const llm = new FakeLlm()
+		llm.responses = [success([askCall('Which database?'), agentCall('coder', 'do the work')])]
+		const { deps, events, parkTracker } = makeDeps(llm)
+		parkTracker.queueTracked = true
+
+		const result = await runRole(deps, {
+			loadedGuild: guild,
+			depth: 0,
+			roleName: 'main',
+			task: 'do it',
+		})
+
+		expect(result.status).toBe('needs_clarification')
+		expect(result.summary).toBe('waiting for an answer to: Which database?')
+		// The between-dispatch check is load-bearing: the coder must not start after the park decision.
+		expect(llm.calls.length).toBe(1)
+		expect(events.some((e) => e.type === 'agent_call')).toBe(false)
+		expect(events.some((e) => e.type === 'role_start' && payloadField(e, 'role') === 'coder')).toBe(false)
+	})
+
+	test('after a write-capable role has started, ask_human blocks on the human backend exactly as today', async () => {
+		const guild = buildParkGuild(
+			{ main: { systemPrompt: 'p', tools: ['run_shell', 'ask_human', 'finish'] } },
+			'main',
+		)
+		const llm = new FakeLlm()
+		llm.responses = [
+			success([askCall('Which database should I use?')]),
+			success([finishCall({ status: 'success', summary: 'done' })]),
+		]
+		const { deps, parkTracker } = makeDeps(llm)
+		const human = recordingHumanBackend()
+		const depsWithHuman: EngineDependencies = { ...deps, humanBackend: human }
+		// Tracked and post-write: the write-capability half of the gate is what keeps this ask blocking.
+		parkTracker.queueTracked = true
+
+		const result = await runRole(depsWithHuman, {
+			loadedGuild: guild,
+			depth: 0,
+			roleName: 'main',
+			task: 'do it',
+		})
+
+		expect(result).toEqual({ status: 'success', summary: 'done' })
+		expect(human.questions).toEqual([{ question: 'Which database should I use?', context: undefined }])
+		expect(llm.calls.length).toBe(2)
+		expect(parkTracker.writeCapableStarted).toBe(true)
+		expect(parkTracker.parkedQuestion).toBeUndefined()
+	})
+
+	test('the write-capability flag rides the checkpoint so a restart cannot reset it', async () => {
+		const guild = buildParkGuild(
+			{ main: { systemPrompt: 'p', tools: ['run_shell', 'finish'] } },
+			'main',
+		)
+		const llm = new FakeLlm()
+		llm.responses = [success([finishCall({ status: 'success', summary: 'done' })])]
+		const { deps, checkpoints, parkTracker } = makeDeps(llm)
+
+		await runRole(deps, {
+			loadedGuild: guild,
+			depth: 0,
+			roleName: 'main',
+			task: 'do it',
+		})
+
+		expect(parkTracker.writeCapableStarted).toBe(true)
+		expect(checkpoints.length).toBeGreaterThan(0)
+		expect(checkpoints.every((checkpoint) => checkpoint.writeCapableStarted === true)).toBe(true)
+	})
+
+	test('a park in a child role unwinds the suspended parent with the same park card', async () => {
+		const guild = buildParkGuild(
+			{
+				parent: { systemPrompt: 'p', tools: ['agent', 'finish'] },
+				coder: { systemPrompt: 'c', tools: ['ask_human', 'finish'] },
+			},
+			'parent',
+		)
+		const llm = new FakeLlm()
+		llm.responses = [
+			success([agentCall('coder', 'do the work')]),
+			success([askCall('Which database?')]),
+		]
+		const { deps, events, parkTracker } = makeDeps(llm)
+		parkTracker.queueTracked = true
+
+		const result = await runRole(deps, {
+			loadedGuild: guild,
+			depth: 0,
+			roleName: 'parent',
+			task: 'do it',
+		})
+
+		expect(result.status).toBe('needs_clarification')
+		expect(result.summary).toBe('waiting for an answer to: Which database?')
+		// The child asked and parked; the parent finished with the same card without another LLM request.
+		expect(llm.calls.length).toBe(2)
+		const finishes = events.filter((e) => e.type === 'role_finished').map((e) => payloadField(e, 'status'))
+		expect(finishes).toEqual(['needs_clarification', 'needs_clarification'])
 	})
 })

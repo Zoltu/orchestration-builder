@@ -2,6 +2,7 @@ import { DEFAULT_EFFORT } from './effort.js'
 import type { ResultCard, RunContinuation, RunMeta, RunOptions } from './types.js'
 import { createCheckpointRecorder, entryFrameLogLevel, type RunCheckpoint } from './checkpoint.js'
 import { createContextPressureTracker } from './context-pressure.js'
+import { createRunParkTracker } from './park-state.js'
 import { runRole } from './engine.js'
 import { logEvent, type EngineDependencies } from './engine-state.js'
 import type { HumanBackend } from './human-backend.js'
@@ -31,9 +32,11 @@ export interface ExecutorDependencies {
 	publishDelta: (delta: RoleDelta) => void
 }
 
-function buildEngineDependencies(deps: ExecutorDependencies, runId: string, startTime: string, registryCounter: number, learnedContextCeiling: number | undefined, continuesFrom: string | undefined): EngineDependencies {
+function buildEngineDependencies(deps: ExecutorDependencies, runId: string, startTime: string, registryCounter: number, learnedContextCeiling: number | undefined, writeCapableStarted: boolean | undefined, continuesFrom: string | undefined): EngineDependencies {
 	const roleRegistry = createRoleRegistry(registryCounter)
 	const contextPressureTracker = createContextPressureTracker(learnedContextCeiling)
+	// The resume path seeds the park tracker from the checkpoint so a restart cannot reset the write-capability flag and park a run whose writes happened before the restart (docs/queueing.md "Parking: the pre-write rule").
+	const parkTracker = createRunParkTracker(writeCapableStarted)
 	return {
 		llmCaller: deps.llmCaller,
 		appendLog: deps.appendLog,
@@ -43,8 +46,9 @@ function buildEngineDependencies(deps: ExecutorDependencies, runId: string, star
 		interruptQueue: deps.interruptQueue,
 		contextPressureTracker,
 		publishDelta: deps.publishDelta,
+		parkTracker,
 		// The run's lineage rides the recorder so checkpoints written after a resume keep stamping continuesFrom onto the entry frame — the live context does not carry it on the resume path. The logging level needs no such stamp: the entry context carries it and the recorder serializes from there.
-		checkpointRecorder: createCheckpointRecorder({ writeCheckpoint: deps.writeCheckpoint, runId, startTime, roleRegistry, contextPressureTracker, continuesFrom }),
+		checkpointRecorder: createCheckpointRecorder({ writeCheckpoint: deps.writeCheckpoint, runId, startTime, roleRegistry, contextPressureTracker, parkTracker, continuesFrom }),
 	}
 }
 
@@ -57,7 +61,8 @@ function composeRunMeta(options: RunOptions, startTime: string, status: RunMeta[
 		task: options.task,
 		effort: options.effort,
 		...(options.logLevel !== undefined ? { logLevel: options.logLevel } : {}),
-		...(options.continuation !== undefined ? { continuesFrom: options.continuation.runId } : {}),
+		// Only a genuine continuation stamps the lineage: a briefing-only continuation (a first queue dispatch) has no prior run, and meta.continuesFrom must stay honest.
+		...(options.continuation?.runId !== undefined ? { continuesFrom: options.continuation.runId } : {}),
 		status,
 		startTime,
 		...(result === undefined ? {} : { endTime: new Date().toISOString(), result }),
@@ -75,7 +80,7 @@ export async function runExecutor(deps: ExecutorDependencies, options: RunOption
 	// Write a running meta before the entry role begins so the UI can show the task, run id, and start time while the run is in progress, rather than only after completion. It is overwritten with the terminal meta below.
 	deps.writeMeta(composeRunMeta(options, startTime, 'running'))
 	const result = await runRole(
-		buildEngineDependencies(deps, options.runId, startTime, 0, undefined, options.continuation?.runId),
+		buildEngineDependencies(deps, options.runId, startTime, 0, undefined, undefined, options.continuation?.runId),
 		{
 			loadedGuild,
 			depth: 0,
@@ -131,7 +136,7 @@ export async function resumeExecutor(deps: ExecutorDependencies, checkpoint: Run
 	deps.writeMeta(composeRunMeta(runOptions, startTime, 'running'))
 	const result = await resumeRoleStack(
 		runRole,
-		buildEngineDependencies(deps, checkpoint.runId, startTime, checkpoint.registryCounter, checkpoint.learnedContextCeiling, entryFrame.continuesFrom),
+		buildEngineDependencies(deps, checkpoint.runId, startTime, checkpoint.registryCounter, checkpoint.learnedContextCeiling, checkpoint.writeCapableStarted, entryFrame.continuesFrom),
 		loadedGuild,
 		checkpoint,
 	)

@@ -12,6 +12,9 @@ import { createRunListCache } from './run-list-cache.ts'
 import { createRequestHandler, type RequestHandler } from './request-handler.ts'
 import { createServeStatic, resolveStaticAsset, type ServeAssetFile } from './server.ts'
 
+// The settlement hook the server tests never observe.
+const settleNothing = async (): Promise<void> => {}
+
 function snapshotFor(runId: string, status: RunMeta['status'] = 'success', overrides: Partial<RunMeta> = {}): RunSnapshotRaw {
 	return {
 		metaText: JSON.stringify({
@@ -366,7 +369,7 @@ function createHandlerHarness(options: { runIdCollides?: boolean, build?: BuildI
 	}
 	let nextId = 0
 	const settings = createInMemorySettings()
-	const submission = createRunSubmission({ startRun, resumeRun, generateRunId: () => `test-run-${nextId++}`, runDirectoryExists: () => options.runIdCollides ?? false, readProjectSettings: settings.read })
+	const submission = createRunSubmission({ onRunSettled: settleNothing, startRun, resumeRun, generateRunId: () => `test-run-${nextId++}`, runDirectoryExists: () => options.runIdCollides ?? false, readProjectSettings: settings.read })
 	const interruptChannel = createInterruptChannel()
 	const humanBackend = createWebHumanBackend()
 	const staticCalls: string[] = []

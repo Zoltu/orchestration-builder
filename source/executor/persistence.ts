@@ -2,6 +2,8 @@ import * as fs from 'node:fs'
 import * as path from 'node:path'
 import type { RunCheckpoint } from './checkpoint.js'
 import { isProjectSettings } from './validation.js'
+import { isTaskQueue } from './task-queue.js'
+import type { TaskQueue } from './task-queue.js'
 import type { EffortLevel, LogLevel, LogEvent, RunMeta } from './types.js'
 
 export type RunDirectory = () => string
@@ -274,6 +276,48 @@ export function createWriteProjectSettings(workspaceRoot: string): WriteProjectS
 		if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true })
 		const tempPath = `${filePath}.${process.pid}.tmp`
 		fs.writeFileSync(tempPath, JSON.stringify(settings, null, 2))
+		fs.renameSync(tempPath, filePath)
+	}
+}
+
+export type ReadTaskQueue = () => TaskQueue
+export type WriteTaskQueue = (queue: TaskQueue) => void
+
+const QUEUE_FILE_NAME = 'queue.json'
+
+function queueFilePath(workspaceRoot: string): string {
+	return path.resolve(workspaceRoot, '.orchestration', QUEUE_FILE_NAME)
+}
+
+// The durable task queue (docs/queueing.md "The queue: storage, item model, state machine"), read with the settings pattern: a missing or malformed file — the queue has never been written, or a torn write slipped past the atomic rename — reads as an empty queue, and every well-formed read is validated through the isTaskQueue guard.
+export function createReadQueue(workspaceRoot: string): ReadTaskQueue {
+	const filePath = queueFilePath(workspaceRoot)
+	return () => {
+		if (!fs.existsSync(filePath)) return { items: [] }
+		let text: string
+		try {
+			text = fs.readFileSync(filePath, 'utf8')
+		} catch {
+			return { items: [] }
+		}
+		let parsed: unknown
+		try {
+			parsed = JSON.parse(text)
+		} catch {
+			return { items: [] }
+		}
+		return isTaskQueue(parsed) ? parsed : { items: [] }
+	}
+}
+
+// Writes the queue atomically (write-temp + rename), creating the .orchestration directory if needed — the first queue write may precede any run. Every mutation is an atomic whole-file write, so the queue survives restarts by construction.
+export function createWriteQueue(workspaceRoot: string): WriteTaskQueue {
+	const filePath = queueFilePath(workspaceRoot)
+	return (queue) => {
+		const dir = path.dirname(filePath)
+		if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true })
+		const tempPath = `${filePath}.${process.pid}.tmp`
+		fs.writeFileSync(tempPath, JSON.stringify(queue, null, 2))
 		fs.renameSync(tempPath, filePath)
 	}
 }
