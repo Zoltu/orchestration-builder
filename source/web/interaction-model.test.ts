@@ -6,6 +6,8 @@ import {
 	fateOf,
 	isPaused,
 	observesOf,
+	rolesOnlyModel,
+	rolesOnlyParticipants,
 	stacksOf,
 } from './static/interaction-model.js'
 
@@ -388,5 +390,131 @@ describe('InteractionModel derivation memoization', () => {
 		const second = twoCallModel()
 		expect(stacksOf(first)).toEqual(stacksOf(second))
 		expect(stacksOf(first)).not.toBe(stacksOf(second))
+	})
+})
+
+describe('rolesOnlyParticipants', () => {
+	test('keeps role and human participants and drops tools and the interrupt pseudo-role, preserving order', () => {
+		const filtered = rolesOnlyParticipants([
+			{ id: 'you', role: 'human', kind: 'human' },
+			{ id: 'orch', role: 'orchestrator', kind: 'role' },
+			{ id: 'read', role: 'read_file', kind: 'tool' },
+			{ id: 'int', role: 'interrupt', kind: 'interrupt' },
+			{ id: 'coder', role: 'coder', kind: 'role' },
+			{ id: 'asker', role: 'human', kind: 'human' },
+		])
+		expect(filtered).toEqual([
+			{ id: 'you', role: 'human', kind: 'human' },
+			{ id: 'orch', role: 'orchestrator', kind: 'role' },
+			{ id: 'coder', role: 'coder', kind: 'role' },
+			{ id: 'asker', role: 'human', kind: 'human' },
+		])
+	})
+
+	test('an empty list filters to empty', () => {
+		expect(rolesOnlyParticipants([])).toEqual([])
+	})
+})
+
+describe('rolesOnlyModel', () => {
+	// A model shaped like the adapter's output: a delegation chain, a tool leg, an observe, an ask_human exchange, and an interrupt preemption with a synthetic root — every operation kind and participant kind the filter rules decide over.
+	function fullModel(): InteractionModel {
+		return {
+			participants: [
+				{ id: 'you', role: 'human', kind: 'human' },
+				{ id: 'orch', role: 'orchestrator', kind: 'role', roleId: 'orchestrator-0-1' },
+				{ id: 'read', role: 'read_file', kind: 'tool' },
+				{ id: 'coder', role: 'coder', kind: 'role', roleId: 'coder-1-2' },
+				{ id: 'answerer', role: 'human', kind: 'human' },
+				{ id: 'int', role: 'interrupt', kind: 'interrupt' },
+				{ id: 'detector', role: 'loop_detector', kind: 'role', roleId: 'loop_detector-1-3' },
+			],
+			operations: [
+				{ id: 'op1', kind: 'call', stack: 'main', source: 'you', destination: 'orch', startedAt: 't0', settledAt: 't1', lifecycle: 'settled', outcome: null, metrics: null },
+				{ id: 'op2', kind: 'call', stack: 'main', source: 'orch', destination: 'read', startedAt: 't1', settledAt: 't2', lifecycle: 'settled', outcome: null, metrics: null },
+				{ id: 'op3', kind: 'return', stack: 'main', source: 'read', destination: 'orch', startedAt: 't2', settledAt: 't3', lifecycle: 'settled', outcome: 'success', metrics: null },
+				{ id: 'op4', kind: 'call', stack: 'main', source: 'orch', destination: 'coder', startedAt: 't3', settledAt: null, lifecycle: 'in_flight', outcome: null, metrics: null },
+				{ id: 'op5', kind: 'observe', stack: 'main', source: 'read', destination: 'coder', startedAt: 't4', settledAt: 't4', lifecycle: 'settled', outcome: null, metrics: null },
+				{ id: 'op6', kind: 'call', stack: 'main', source: 'coder', destination: 'answerer', startedAt: 't5', settledAt: null, lifecycle: 'in_flight', outcome: null, metrics: null },
+				{ id: 'op7', kind: 'return', stack: 'main', source: 'answerer', destination: 'coder', startedAt: 't6', settledAt: 't7', lifecycle: 'settled', outcome: 'success', metrics: null },
+				{ id: 'op8', kind: 'call', stack: 'int-1-stack', source: 'int', destination: 'detector', startedAt: 't7', settledAt: null, lifecycle: 'in_flight', outcome: null, metrics: null },
+				{ id: 'op9', kind: 'terminate', stack: 'int-1-stack', source: 'read', destination: 'coder', startedAt: 't8', settledAt: 't8', lifecycle: 'settled', outcome: null, metrics: null },
+			],
+			status: 'running',
+			stacks: [
+				{ id: 'main', root: 'you' },
+				{ id: 'int-1-stack', root: 'int' },
+			],
+		}
+	}
+
+	test('keeps the agent/human call chains and drops tool legs, observes, and terminates', () => {
+		const filtered = rolesOnlyModel(fullModel())
+		// Kept: the human→orchestrator call, the orchestrator→coder delegation, and the coder↔human ask_human exchange. Dropped with the tool column: the tool call/return legs (op2, op3), the tool-sourced observe (op5) and terminate (op9). The interrupt-rooted preemption call (op8) drops with the interrupt pseudo-role.
+		expect(filtered.operations.map((operation) => operation.id)).toEqual(['op1', 'op4', 'op6', 'op7'])
+	})
+
+	test('collapses participants to agent roles plus the human, preserving order and the roleId field', () => {
+		const filtered = rolesOnlyModel(fullModel())
+		expect(filtered.participants).toEqual([
+			{ id: 'you', role: 'human', kind: 'human' },
+			{ id: 'orch', role: 'orchestrator', kind: 'role', roleId: 'orchestrator-0-1' },
+			{ id: 'coder', role: 'coder', kind: 'role', roleId: 'coder-1-2' },
+			{ id: 'answerer', role: 'human', kind: 'human' },
+			{ id: 'detector', role: 'loop_detector', kind: 'role', roleId: 'loop_detector-1-3' },
+		])
+	})
+
+	test('drops stack records whose root no longer survives and passes the status through', () => {
+		const filtered = rolesOnlyModel(fullModel())
+		// The synthetic-interrupt stack's root is dropped, so its record drops; the main stack (rooted at the human) survives.
+		expect(filtered.stacks).toEqual([{ id: 'main', root: 'you' }])
+		expect(filtered.status).toBe('running')
+	})
+
+	test('a hand-authored model without stack records filters without inventing them', () => {
+		const model = fullModel()
+		delete model.stacks
+		const filtered = rolesOnlyModel(model)
+		expect(filtered.stacks).toBeUndefined()
+		expect(filtered.operations.map((operation) => operation.id)).toEqual(['op1', 'op4', 'op6', 'op7'])
+	})
+
+	test('an all-tool-traffic model filters to no operations while the human column stays', () => {
+		const model: InteractionModel = {
+			participants: [
+				{ id: 'you', role: 'human', kind: 'human' },
+				{ id: 'read', role: 'read_file', kind: 'tool' },
+			],
+			operations: [
+				{ id: 'op1', kind: 'observe', stack: 'main', source: 'read', destination: 'you', startedAt: 't0', settledAt: 't0', lifecycle: 'settled', outcome: null, metrics: null },
+			],
+			status: 'running',
+		}
+		const filtered = rolesOnlyModel(model)
+		expect(filtered.operations).toEqual([])
+		expect(filtered.participants.map((participant) => participant.role)).toEqual(['human'])
+	})
+
+	test('an empty model filters to an empty model', () => {
+		const model: InteractionModel = { participants: [], operations: [], status: 'unknown' }
+		const filtered = rolesOnlyModel(model)
+		expect(filtered.participants).toEqual([])
+		expect(filtered.operations).toEqual([])
+		expect(filtered.status).toBe('unknown')
+	})
+
+	test('filtering is idempotent — filtering a filtered model is a deep identity', () => {
+		const once = rolesOnlyModel(fullModel())
+		const twice = rolesOnlyModel(once)
+		expect(twice).toEqual(once)
+	})
+
+	test('the filter never mutates the model it reads', () => {
+		const model = fullModel()
+		rolesOnlyModel(model)
+		expect(model.operations).toHaveLength(9)
+		expect(model.participants).toHaveLength(7)
+		expect(model.stacks).toHaveLength(2)
 	})
 })

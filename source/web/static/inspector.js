@@ -3,6 +3,7 @@
 // The attribute names are exported as constants and consumed by flow-view.js / sequence-diagram.js where they stamp them, so the contract between what the views stamp and what the resolver reads is code rather than comments — renaming an attribute breaks both sides at import time instead of silently disabling hover in two clients.
 
 import { deriveOperationTooltip, deriveParticipantTooltip, deriveRoleTooltip } from './tooltip.js'
+import { isObject } from './guards.js'
 
 export const ATTR_OPERATION = 'data-operation'
 export const ATTR_PARTICIPANT = 'data-participant'
@@ -72,4 +73,78 @@ export function isInFlightAskHuman(model, operationId) {
 	if (operation === undefined || operation.kind !== 'call' || operation.lifecycle !== 'in_flight') return false
 	const destination = model.participants.find((participant) => participant.id === operation.destination)
 	return destination !== undefined && destination.kind === 'human'
+}
+
+// --- Click-through scoping ----------------------------------------------------
+// A click (as opposed to a hover) on an agent's node or message is the drill-in that opens the LLM-turn inspector modal pre-scoped to that agent's instance. The mapping from inspector target to the modal's scope identity (the executor's role-instance id, the modal's `roleId`) lives here so both the target contract and the scope rule sit next to the resolution the click already routes through.
+
+// Looks up a participant by id, or undefined when the model does not carry it (a stale target from a frame the poll has since replaced).
+function participantByIdIn(model, participantId) {
+	for (const participant of model.participants) {
+		if (participant['id'] === participantId) return participant
+	}
+	return undefined
+}
+
+// Looks up an operation by id, or undefined when the model does not carry it.
+function operationByIdIn(model, operationId) {
+	for (const operation of model.operations) {
+		if (operation['id'] === operationId) return operation
+	}
+	return undefined
+}
+
+// The scope id a participant contributes: the executor's instance id when the participant carries one (every `role_start` in a current log does), else the role name — which is the identity the modal's turn entries fall back to on logs without per-instance ids, so a role-name scope still lands on that role's turns there. Null when neither identity is a usable string.
+function instanceScopeIdOf(participant) {
+	if (typeof participant['roleId'] === 'string' && participant['roleId'] !== '') return participant['roleId']
+	if (typeof participant['role'] !== 'string' || participant['role'] === '') return null
+	return participant['role']
+}
+
+// Whether the participant is an agent role — the drill-in target kind. The human, interrupt, and tool participants have no LLM turns to inspect, so a click on them keeps the hover behavior.
+function isAgentParticipant(participant) {
+	return participant['kind'] === 'role'
+}
+
+/**
+ * Resolves the inspector modal's instance scope for a clicked inspector target, or null when the click is not a drill-in (a human/tool/interrupt target, an unknown id, or a malformed input) — the caller then keeps the hover-tooltip behavior. The `unknown` typing follows the sibling derivations in inspector-modal.js: the consumers are plain-JS modules, so the inputs are validated here rather than trusted.
+ *
+ * A participant target (a flow main-area node) scopes to that participant's instance. A role target (a flow top-bar slot, which aggregates every instance of the role) scopes to the role's most recent instance. An operation target (a flow edge or a sequence message/terminal node) scopes to the worker the operation is about — the destination for a call/observe/terminate, the source (the returner) for a return. Only agent-'role' participants scope; the pseudo-roles and tools fall through to the hover path.
+ *
+ * @param {unknown} model
+ * @param {unknown} target
+ * @returns {string | null}
+ */
+export function resolveInspectorScope(model, target) {
+	if (!isObject(model) || !isObject(target)) return null
+	if (!Array.isArray(model['participants']) || !Array.isArray(model['operations'])) return null
+	if (target['kind'] === 'participant') {
+		if (typeof target['id'] !== 'string') return null
+		const participant = participantByIdIn(model, target['id'])
+		if (participant === undefined || !isObject(participant) || !isAgentParticipant(participant)) return null
+		return instanceScopeIdOf(participant)
+	}
+	if (target['kind'] === 'role') {
+		if (typeof target['id'] !== 'string') return null
+		// The slot aggregates the role's instances; the most recent one (last in chronological first-appearance order) is the instance a drill-in names. A slot whose role has no agent participants (a tool slot) is not a drill-in.
+		let latest = null
+		for (const participant of model['participants']) {
+			if (!isObject(participant)) continue
+			if (participant['role'] !== target['id']) continue
+			if (!isAgentParticipant(participant)) continue
+			latest = participant
+		}
+		return latest !== null ? instanceScopeIdOf(latest) : null
+	}
+	if (target['kind'] === 'operation') {
+		if (typeof target['id'] !== 'string') return null
+		const operation = operationByIdIn(model, target['id'])
+		if (operation === undefined || !isObject(operation)) return null
+		const workerId = operation['kind'] === 'return' ? operation['source'] : operation['destination']
+		if (typeof workerId !== 'string') return null
+		const participant = participantByIdIn(model, workerId)
+		if (participant === undefined || !isObject(participant) || !isAgentParticipant(participant)) return null
+		return instanceScopeIdOf(participant)
+	}
+	return null
 }

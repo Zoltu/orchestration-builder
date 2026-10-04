@@ -17,6 +17,8 @@ interface Participant {
 	id: string
 	role: string
 	kind: ParticipantKind
+	// The executor's role-instance id (the role_start payload's roleId, e.g. "coder-1-2"), carried by 'role'-kind participants when the log supplies it. This is the identity the LLM-turn inspector scopes to, so the view click-through can map a flow node/message to its transcript instance (see static/inspector.js resolveInspectorScope). Pseudo-roles and tools have no instance ids in the log vocabulary, and logs predating per-instance ids carry none, so the field is optional.
+	roleId?: string
 }
 
 interface OperationMetrics {
@@ -217,8 +219,8 @@ function deriveModel(snapshot: RunSnapshot, now: string): DerivedModel {
 		return `op-${opCounter}`
 	}
 
-	function addParticipant(id: string, role: string, kind: ParticipantKind): string {
-		const participant: Participant = { id, role, kind }
+	function addParticipant(id: string, role: string, kind: ParticipantKind, roleId?: string): string {
+		const participant: Participant = roleId === undefined ? { id, role, kind } : { id, role, kind, roleId }
 		participants.push(participant)
 		registry.set(id, participant)
 		return id
@@ -377,7 +379,8 @@ function deriveModel(snapshot: RunSnapshot, now: string): DerivedModel {
 				const detailText = pendingInquiryMessage ?? task
 				pendingInquiryMessage = null
 				const roleId = `role:${role}:${nextId('role:' + role)}`
-				addParticipant(roleId, role, 'role')
+				// The payload's roleId is the executor's instance id (the inspector's scope identity); it rides on the participant so a click-through can map this node to its transcript instance. Old logs without per-instance ids leave the field off the participant.
+				addParticipant(roleId, role, 'role', stringField(event.payload, 'roleId') ?? undefined)
 				settlePreviousByDelegation(event.timestamp)
 				// The source is the active frame's innermost open call, or the frame's root (the human for the main stack, the interrupt instance or human asker for an interrupt stack) when the stack is empty.
 				recordCall(event, activeRoleParticipantId(), roleId, role, 'role', null, detailText === null ? null : { kind: 'text', text: detailText })

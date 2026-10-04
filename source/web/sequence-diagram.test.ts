@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import { renderSequenceView, sequenceActiveRowScrollTop, HEADER_HEIGHT, ROW_HEIGHT, BOTTOM_MARGIN } from './static/sequence-diagram.js'
-import { activeOperation, activeStack, observesOf } from './static/interaction-model.js'
+import { activeOperation, activeStack, observesOf, rolesOnlyModel, rolesOnlyParticipants } from './static/interaction-model.js'
 import { createLabelResolver } from './static/labels.js'
 import { labelsModule } from './label-resolver-fixture.js'
 import { scenarios, GUILD_PARTICIPANTS } from './static/scenarios.js'
@@ -621,6 +621,55 @@ describe('sequence view — hover hit areas', () => {
 		const rowY = HEADER_HEIGHT + ROW_HEIGHT + ROW_HEIGHT / 2
 		expect(propNumber(area.props, 'y')).toBeLessThan(rowY - ROW_HEIGHT / 2)
 		expect(propNumber(area.props, 'height')).toBeGreaterThan(ROW_HEIGHT)
+	})
+})
+
+describe('renderSequenceView — roles-only filter', () => {
+	// A model with the full cast — human, two agent roles, a tool, an interrupt — and the operation mix that follows from it, plus the static guild set the hosts pass so the tools column would otherwise always be present.
+	function filtered(): { full: Vnode; collapsed: Vnode } {
+		const model: InteractionModel = {
+			participants: [
+				participant('you', 'human', 'human'),
+				participant('orchestrator', 'orchestrator', 'role'),
+				participant('read_file-1', 'read_file', 'tool'),
+				participant('int-1', 'interrupt', 'interrupt'),
+				participant('coder', 'coder', 'role'),
+			],
+			operations: [
+				callOperation('op1', 'main', 'you', 'orchestrator'),
+				{ id: 'op2', kind: 'call', stack: 'main', source: 'orchestrator', destination: 'read_file-1', startedAt: 't1', settledAt: null, lifecycle: 'in_flight', outcome: null, metrics: null },
+				callOperation('op3', 'int-1-stack', 'int-1', 'coder'),
+			],
+			status: 'running',
+			stacks: [
+				{ id: 'main', root: 'you' },
+				{ id: 'int-1-stack', root: 'int-1' },
+			],
+		}
+		const guild = [
+			participant('guild:orchestrator', 'orchestrator', 'role'),
+			participant('guild:coder', 'coder', 'role'),
+			participant('guild:read_file', 'read_file', 'tool'),
+		]
+		return {
+			full: renderSequenceView(fakeH, model, labelsModule, 'detailed', guild),
+			collapsed: renderSequenceView(fakeH, rolesOnlyModel(model), labelsModule, 'detailed', rolesOnlyParticipants(guild)),
+		}
+	}
+
+	test('the columns collapse to the human plus the agent roles — no tools or interrupt column', () => {
+		const { full, collapsed } = filtered()
+		expect(columnRoles(full)).toEqual(['human', 'interrupt', 'orchestrator', 'coder', 'tools'])
+		expect(columnRoles(collapsed)).toEqual(['human', 'orchestrator', 'coder'])
+	})
+
+	test('tool legs, observes, and interrupt-rooted rows drop; the agent call chain stays', () => {
+		const { full, collapsed } = filtered()
+		const fullIds = messageGroups(full).map((group) => propString(group.props, 'data-operation') ?? '')
+		const collapsedIds = messageGroups(collapsed).map((group) => propString(group.props, 'data-operation') ?? '')
+		// The full view renders one row per operation; the roles-only view drops the tool call (op2) and the interrupt-rooted call (op3) — every row whose endpoints are not all agent/human.
+		expect(fullIds).toEqual(['op1', 'op2', 'op3'])
+		expect(collapsedIds).toEqual(['op1'])
 	})
 })
 

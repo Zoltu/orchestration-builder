@@ -41,6 +41,8 @@
  * @property {string} role
  *   The role or tool name; 'human' for the You root and 'interrupt' for interrupt roots. The sequence-view column key.
  * @property {ParticipantKind} kind
+ * @property {string} [roleId]
+ *   The executor's role-instance id (a `role_start` payload's `roleId`, e.g. "coder-1-2"), carried by 'role'-kind participants when the producer supplies it. This is the identity the LLM-turn inspector scopes to, so a view click-through can map a flow participant to its transcript instance. Absent on pseudo-roles and tools (the log carries no instance ids for them) and on hand-authored models.
  */
 
 /**
@@ -395,4 +397,44 @@ export function observesOf(model) {
  */
 export function terminatesOf(model) {
 	return model.operations.filter((operation) => operation.kind === 'terminate')
+}
+
+// --- Roles-only filter --------------------------------------------------------
+// The sequence view's roles-only lens (the toggle next to the flow/sequence controls): a filtered copy of the model whose columns collapse to the agent roles plus the human, so the operator can read the delegation story without the tool traffic. Both shells (product client and dev harness) consume these helpers; the filter is a view lens, never a model mutation — the original model is untouched and the next filter-off render reads the full frame again.
+
+/**
+ * The participant kinds the roles-only filter keeps: 'role' (a real agent invocation) and 'human' (the You root and the asker/answerer instances — the human side of the story stays). The 'tool' kind and the 'interrupt' pseudo-role drop, so the sequence columns collapse to agent roles plus the human.
+ *
+ * @param {'human' | 'interrupt' | 'role' | 'tool'} kind
+ * @returns {boolean}
+ */
+function isRolesOnlyKind(kind) {
+	return kind === 'role' || kind === 'human'
+}
+
+/**
+ * Filters a participant list to the roles-only column set (agent roles plus the human), preserving order. Shared by the model filter below and by the callers that feed the sequence view its static guild participant inventory (whose tools would otherwise keep the tools column alive), so the kind rule lives in exactly one place.
+ *
+ * @param {Participant[]} participants
+ * @returns {Participant[]}
+ */
+export function rolesOnlyParticipants(participants) {
+	if (!Array.isArray(participants)) return []
+	return participants.filter((participant) => isRolesOnlyKind(participant.kind))
+}
+
+/**
+ * Returns a filtered copy of the model for the sequence view's roles-only toggle: participants collapse to agent roles plus the human, and an operation survives only when every participant it references survives — a tool-sourced observe, a terminate, and every tool call/return leg drop with the tool column, while the agent↔agent and agent↔human call chains (including the ask_human exchange with its human answerer) stay readable. Stack records drop with their roots, keeping the filtered model internally consistent; the run status passes through untouched.
+ *
+ * The filter is a pure lens, not a projection the activity rule re-derives: the filtered model answers "what is happening right now" from its own surviving operations, so a hidden tool leg reads as a quiet role world — which is honest for a view that hides tool traffic. Filtering an already-filtered model is an identity (idempotence), so double-applying the toggle cannot corrupt a frame.
+ *
+ * @param {InteractionModel} model
+ * @returns {InteractionModel}
+ */
+export function rolesOnlyModel(model) {
+	const participants = rolesOnlyParticipants(model.participants)
+	const keptIds = new Set(participants.map((participant) => participant.id))
+	const operations = model.operations.filter((operation) => keptIds.has(operation.source) && keptIds.has(operation.destination))
+	const stacks = model.stacks === undefined ? undefined : model.stacks.filter((record) => keptIds.has(record.root))
+	return { participants, operations, status: model.status, stacks }
 }

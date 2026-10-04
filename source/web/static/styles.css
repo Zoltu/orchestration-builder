@@ -1260,6 +1260,22 @@ li:last-child {
 	padding: 0.1rem var(--space-1);
 }
 
+/* The roles-only sequence filter (next to the flow/sequence toggle): a checkbox that filters the sequence view to the agent roles plus the human. It mirrors the mute toggle's checkbox look so the two filter-ish controls read alike. */
+.sequence-roles-control {
+	display: inline-flex;
+	align-items: center;
+	gap: var(--space-1);
+	font-size: 0.8rem;
+	color: var(--color-text-muted);
+	cursor: pointer;
+	user-select: none;
+	white-space: nowrap;
+}
+
+.sequence-roles-control input {
+	cursor: pointer;
+}
+
 /* --- Flow-graph SVG primitives --------------------------------------------- */
 /* The graph is hand-rolled SVG rendered as hyperapp vnodes. Every node is self-contained against its own local 0,0 origin; the layout assigns each a translate and the primitives never hardcode an absolute position or internal padding. Borders and padding live on the container (.graph), not inside the SVG. Colors read the --svg-* tokens so the graph follows the light/dark theme with the rest of the page. Machine fields (labels, counters, costs) are SVG <text> textContent, never markup, so the textContent security invariant holds. */
 

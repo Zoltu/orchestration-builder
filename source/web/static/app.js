@@ -7,9 +7,9 @@ import { renderSequenceView } from './sequence-diagram.js'
 import { createScrollFollower } from './scroll-follow.js'
 import { createLabelResolver, TIER_VALUES, isLabelTier } from './labels.js'
 import { buildInfoFromConfig, formatBuildLabel } from './build-info.js'
-import { isTerminalStatus } from './interaction-model.js'
+import { isTerminalStatus, rolesOnlyModel, rolesOnlyParticipants } from './interaction-model.js'
 import { deriveFaviconState, faviconHref } from './favicon.js'
-import { createTooltipDismiss, deriveTooltipDescriptor, isInFlightAskHuman, resolveTooltipTarget } from './inspector.js'
+import { createTooltipDismiss, deriveTooltipDescriptor, isInFlightAskHuman, resolveInspectorScope, resolveTooltipTarget } from './inspector.js'
 import { operationIdsForTooltipDetails } from './tooltip.js'
 import { copyRawToClipboard } from './clipboard.js'
 import { QuestionModal } from './question-modal.js'
@@ -747,6 +747,11 @@ function ChangeFlowTier(state, event) {
 	return { ...state, flowTier: value }
 }
 
+// The sequence view's roles-only lens (see interaction-model.js rolesOnlyModel): a checkbox next to the flow/sequence controls that filters the sequence render down to the agent roles plus the human. Pure view state — the full model stays the single source the other surfaces (now caption, cost strip, flow view) read, so toggling only re-renders the sequence view.
+function SetSequenceRolesOnly(state, event) {
+	return { ...state, sequenceRolesOnly: event.target.checked }
+}
+
 // --- Screen navigation ------------------------------------------------------
 // The page is a single-screen console: one of three screens (watch / history / compose) fills the viewport below the top bar. The screen is stored view state; nothing here fetches.
 
@@ -901,10 +906,9 @@ function LeaveRunView(state) {
 
 // Clicking an in-flight `ask_human` row re-opens the question modal: the sequence view has no
 // Question-button overlay like the flow view, so the message row itself is the re-entry affordance
-// after a dismiss. Every other click falls through to the hover path so a click also opens the
-// inspector at the clicked node, mirroring the dev harness. Clicking inside the card (to select text
-// or press a copy affordance) falls through to the hover path's "over the card" branch, which keeps
-// the card open.
+// after a dismiss. A click on an agent's node/slot/message is the drill-in: it opens the inspector modal pre-scoped to that instance (resolveInspectorScope maps the clicked target to the instance id the modal scopes to), and the modal open clears the tooltip so the card does not linger over it.
+// Every other click — human/tool/interrupt targets, unknown ids — falls through to the hover path so the click still opens the inspector card at the clicked node, mirroring the dev harness. Hover keeps showing the card exactly as before; the drill-in is the click's job.
+// Clicking inside the card (to select text or press a copy affordance) falls through to the hover path's "over the card" branch, which keeps the card open.
 function ClickRunView(state, event) {
 	if (event.target instanceof Element && event.target.closest('.tooltip-card') !== null) {
 		return HoverRunView(state, event)
@@ -913,6 +917,10 @@ function ClickRunView(state, event) {
 	if (target !== null && target.kind === 'operation' && state.flowModel !== null && isInFlightAskHuman(state.flowModel, target.id)) {
 		// Open the modal and dismiss the inspector so the card does not linger over the modal.
 		return [{ ...state, questionModalOpen: true, tooltip: null }, CancelTooltipDismiss()]
+	}
+	if (target !== null && state.flowModel !== null) {
+		const scopeId = resolveInspectorScope(state.flowModel, target)
+		if (scopeId !== null) return OpenInspectorModal(state, scopeId)
 	}
 	return HoverRunView(state, event)
 }
@@ -940,11 +948,13 @@ function readableInspectorLogBody(payload) {
 	return body
 }
 
-function OpenInspectorModal(state) {
+// Opens the inspector modal over the run view. `payload` pre-scopes the transcript to an instance id (the view click-through's drill-in; a plain string) or is absent/event-shaped (the stage-controls button), which leaves the scope unset so the modal opens on the most recently active instance.
+function OpenInspectorModal(state, payload) {
 	if (typeof state.selectedRunId !== 'string' || state.selectedRunId === '') return state
+	const scopedRoleId = typeof payload === 'string' && payload !== '' ? payload : null
 	// A cheap probe (one event) learns the log's `total` so the first real fetch can start at the most recent window; the probe response's own event is discarded.
 	return [
-		{ ...state, inspectorModalOpen: true, tooltip: null, inspector: initialInspectorState() },
+		{ ...state, inspectorModalOpen: true, tooltip: null, inspector: { ...initialInspectorState(), scopedRoleId } },
 		CancelTooltipDismiss(),
 		Fetch({ url: `api/runs/${encodeURIComponent(state.selectedRunId)}/log?limit=1`, ok: InspectorTotalLoaded, fail: InspectorLogLoadFailed }),
 	]
@@ -1428,6 +1438,8 @@ function StageControls(state, model) {
 			h('button', { type: 'button', class: state.flowViewMode === 'flow' ? 'is-active' : '', onclick: [SetFlowViewMode, 'flow'] }, 'Flow'),
 			h('button', { type: 'button', class: state.flowViewMode === 'sequence' ? 'is-active' : '', onclick: [SetFlowViewMode, 'sequence'] }, 'Sequence'),
 		]),
+		// The roles-only filter is a sequence-view lens, so the toggle shows only while that view is active (the same show-with-the-sequence rule the harness's jump-to-active button follows).
+		state.flowViewMode === 'sequence' ? SequenceRolesOnlyToggle(state) : null,
 		h('label', { class: 'flow-tier-control' }, [
 			h('span', {}, 'Label tier'),
 			h('select', { value: state.flowTier, onchange: ChangeFlowTier }, TIER_VALUES.map((value) => h('option', { value, selected: value === state.flowTier }, value))),
@@ -1435,6 +1447,14 @@ function StageControls(state, model) {
 		model !== null ? CostStrip(model) : null,
 		InterruptButton(state),
 		h('button', { type: 'button', class: 'inspector-open-button', title: 'Inspect this run\u2019s LLM requests and responses, turn by turn', onclick: OpenInspectorModal }, 'Inspect'),
+	])
+}
+
+// The roles-only checkbox (see SetSequenceRolesOnly). Mirrors the mute toggle's checkbox look so the two filter-ish controls read alike.
+function SequenceRolesOnlyToggle(state) {
+	return h('label', { class: 'sequence-roles-control', title: 'Hide tool and interrupt columns — show only the agent roles and the human' }, [
+		h('input', { type: 'checkbox', checked: state.sequenceRolesOnly === true, onchange: SetSequenceRolesOnly }),
+		'roles only',
 	])
 }
 
@@ -1507,9 +1527,12 @@ function WatchScreen(state) {
 	const lifecycle = state.previousFlowModel !== null ? deriveLifecycle(state.previousFlowModel, model) : undefined
 	const cta = { onclick: OpenResultModal }
 	const question = { onclick: OpenQuestionModal }
+	// The roles-only toggle filters the sequence render only (model and static guild set alike, so the tools column collapses with the tool rows); the caption, cost strip, and flow view keep reading the full model — the filter is a lens on this one surface, not a change to the run.
+	const sequenceModel = state.sequenceRolesOnly === true ? rolesOnlyModel(model) : model
+	const sequenceGuildParticipants = state.sequenceRolesOnly === true ? rolesOnlyParticipants(state.guildParticipants) : state.guildParticipants
 	// The sequence view takes the guild's static participant set so every role column appears from the first frame.
 	const stageContent = state.flowViewMode === 'sequence'
-		? h('div', { class: 'pb-sequence-scroll' }, [renderSequenceView(h, model, labels, tier, state.guildParticipants)])
+		? h('div', { class: 'pb-sequence-scroll' }, [renderSequenceView(h, sequenceModel, labels, tier, sequenceGuildParticipants)])
 		: renderFlowView(h, model, labels, tier, lifecycle, cta, question, flowColumnTracker)
 
 	const nowCaption = deriveNowCaption(model, labels, tier)
@@ -1648,6 +1671,8 @@ app({
 			build: null,
 			flowTier: DEFAULT_FLOW_TIER,
 			flowViewMode: 'flow',
+			// The sequence view's roles-only lens (see rolesOnlyModel in interaction-model.js): off by default so the sequence view shows everything.
+			sequenceRolesOnly: false,
 			// The visible screen: 'watch' (the flow/sequence stage), 'history' (the run browser), or 'compose' (the new-task hero). A zero-state service shows compose regardless (see Main).
 			screen: 'watch',
 			// Per-history-row expansion, keyed by run id, so the full task/result of several runs can be open at once.

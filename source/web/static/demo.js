@@ -2,7 +2,7 @@
 // Renders the current frame two ways: the flow view SVG (the product surface) and a debug text view (the model's raw projection) that stays behind a toggle so the SVG can be cross-checked against the model's helpers during development.
 // Each frame is the output of the real `deriveInteractionModel` adapter run server-side over the first `N` events of a fixture event stream (see `GET /api/demo/flow/:scenario/:frame`), fetched here over HTTP. The harness therefore exercises the identical `LogEvent → InteractionModel` path the product polls against a live run, so a behavior the demo shows is the behavior the product renders — the harness is a faithful poll simulator, not a hand-curated showcase. `scenarios.js` stays as the in-memory renderer test bed (its model-frame fixtures are consumed by `flow-view.test.ts` / `sequence-diagram.test.ts`); this harness consumes adapter output instead, so the adapter is exercised in the browser too.
 // The harness imports only its sibling static modules; it touches nothing in the product client (app.js).
-import { activeOperation, activeParticipant, activeStack, callChainOf, fateOf, isPaused, isTerminalStatus, observesOf, stacksOf } from './interaction-model.js'
+import { activeOperation, activeParticipant, activeStack, callChainOf, fateOf, isPaused, isTerminalStatus, observesOf, rolesOnlyModel, rolesOnlyParticipants, stacksOf } from './interaction-model.js'
 import { createLabelResolver, isLabelTier } from './labels.js'
 import { deriveLifecycle, renderFlowView, deriveNowCaption, deriveCostStrip, createColumnTracker } from './flow-view.js'
 import { renderSequenceView, sequenceActiveRowScrollTop } from './sequence-diagram.js'
@@ -130,8 +130,9 @@ if (viewToggleSpacer !== null) {
 function applyViewToggle() {
 	flowButton.classList.toggle('is-active', viewMode === 'flow')
 	sequenceButton.classList.toggle('is-active', viewMode === 'sequence')
-	// The jump-to-active affordance is meaningful only on the sequence view (the flow view has no scrollable time axis), so it shows and hides with the sequence segment.
+	// The jump-to-active affordance is meaningful only on the sequence view (the flow view has no scrollable time axis), so it shows and hides with the sequence segment. The roles-only filter is likewise a sequence-view lens, so its toggle follows the same rule.
 	jumpToActiveButton.style.display = viewMode === 'sequence' ? '' : 'none'
+	rolesOnlyLabel.style.display = viewMode === 'sequence' ? '' : 'none'
 }
 
 // The jump-to-active button is shown for the sequence view (which has a scrollable time axis); the flow view has no scrollable axis.
@@ -148,6 +149,29 @@ if (jumpSpacer !== null) {
 jumpToActiveButton.addEventListener('click', () => {
 	if (activeSequenceContainer === null) return
 	jumpSequenceViewToActive(activeSequenceContainer)
+})
+
+// The roles-only sequence filter toggle (see interaction-model.js rolesOnlyModel): the same shared filter helper the product client's view controls consume — the harness inherits the behavior by import (per the demo contract), owning only the playback chrome around it. Hidden with the sequence segment like the jump-to-active button.
+const rolesOnlyToggle = document.createElement('input')
+rolesOnlyToggle.type = 'checkbox'
+rolesOnlyToggle.id = 'demo-roles-only'
+const rolesOnlyLabel = document.createElement('label')
+rolesOnlyLabel.style.display = 'none'
+rolesOnlyLabel.style.gap = '0.25rem'
+rolesOnlyLabel.style.alignItems = 'center'
+rolesOnlyLabel.style.fontSize = '0.8rem'
+rolesOnlyLabel.style.textTransform = 'uppercase'
+rolesOnlyLabel.style.letterSpacing = '0.04em'
+rolesOnlyLabel.title = 'Hide tool and interrupt columns — show only the agent roles and the human'
+rolesOnlyLabel.append('Roles only', rolesOnlyToggle)
+const rolesOnlySpacer = document.querySelector('.demo-bar .demo-spacer')
+if (rolesOnlySpacer !== null) {
+	rolesOnlySpacer.insertAdjacentElement('afterend', rolesOnlyLabel)
+} else {
+	scenarioSelect.parentElement?.append(rolesOnlyLabel)
+}
+rolesOnlyToggle.addEventListener('change', () => {
+	render()
 })
 
 flowButton.addEventListener('click', () => {
@@ -361,6 +385,7 @@ function jumpSequenceViewToActive(container) {
 //  - `mouseover` over empty run-view area: schedule a grace-period dismiss — if the pointer reaches the card (or a new node) before it fires, the dismiss is canceled; otherwise the card dismisses once the pointer is over neither.
 //  - `mouseleave` on the container: schedule a grace-period dismiss (the pointer left the run view).
 //  - `click` on an in-flight `ask_human` row: re-open the question modal (the sequence view's re-entry affordance); every other click falls through to the hover path.
+// The product client's click also drills into the LLM-turn inspector modal (app.js ClickRunView via resolveInspectorScope); that modal is app-only — the harness has no run-log window to feed it, and building a fixture-log transport plus a second inspector controller would reimplement shell behavior the demo contract forbids — so a click here stays a tooltip affordance.
 function wireRunViewInteractions() {
 	const openAt = (event) => {
 		if (event.target instanceof Element && event.target.closest('.tooltip-card') !== null) {
@@ -506,8 +531,10 @@ function renderSequenceViewSvg() {
 	if (labels === null || currentFrame === null) return null
 	const manifest = scenarios[scenarioIndex]
 	if (manifest === undefined) return null
-	// The sequence view lays out a column per guild role plus the special human/tools columns from the first frame; the manifest carries the scenario's full participant set (every participant the run ever produces) so columns appear from frame 0 without peeking at a future frame.
-	return renderSequenceView(domH, currentFrame, labels, tier, manifest.participants)
+	// The sequence view lays out a column per guild role plus the special human/tools columns from the first frame; the manifest carries the scenario's full participant set (every participant the run ever produces) so columns appear from frame 0 without peeking at a future frame. The roles-only toggle filters both the frame and the static set through the same shared helpers the product client consumes, so the tools column collapses with the tool rows.
+	const frame = rolesOnlyToggle.checked ? rolesOnlyModel(currentFrame) : currentFrame
+	const guildParticipants = rolesOnlyToggle.checked ? rolesOnlyParticipants(manifest.participants) : manifest.participants
+	return renderSequenceView(domH, frame, labels, tier, guildParticipants)
 }
 
 // Derives the terminal-result descriptor the modal renders. The demo frames carry no result/error text (the InteractionModel has no result field), so the summary is a fixed honest line keyed off the current frame's terminal status and the error block surfaces only on an error status — enough for the modal to read as a real result affordance without inventing scenario-specific prose. The current frame is terminal whenever the modal opens (openResultModal gates on isTerminalStatus), so its status is the run's terminal status.

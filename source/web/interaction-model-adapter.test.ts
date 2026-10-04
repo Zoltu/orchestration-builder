@@ -88,6 +88,35 @@ describe('deriveInteractionModel — single-role completion', () => {
 	})
 })
 
+describe('deriveInteractionModel — participant instance ids', () => {
+	test('a role_start carrying a roleId stamps the participant with the executor instance id', () => {
+		const events = [
+			event('t0', 'role_start', { role: 'orchestrator', roleId: 'orchestrator-0-1', depth: 0, task: 'the task' }),
+			event('t1', 'role_start', { role: 'coder', roleId: 'coder-1-2', depth: 1, parent: 'orchestrator', parentRoleId: 'orchestrator-0-1', task: 'code it' }),
+		]
+		const model = deriveInteractionModel(snapshot(events, meta('running')), NOW)
+		const orchestrator = defined(model.participants[1], 'model.participants[1]')
+		const coder = defined(model.participants[2], 'model.participants[2]')
+		expect(orchestrator.roleId).toBe('orchestrator-0-1')
+		expect(coder.roleId).toBe('coder-1-2')
+		// The flow node key keeps its own minted scheme; the instance id rides alongside it.
+		expect(orchestrator.id).toBe('role:orchestrator:1')
+		assertHelpersSensible(model)
+	})
+
+	test('a role_start without a roleId (old logs) leaves the field off the participant', () => {
+		const events = [
+			event('t0', 'role_start', { role: 'orchestrator', depth: 0, task: 'do the thing' }),
+		]
+		const model = deriveInteractionModel(snapshot(events, meta('running')), NOW)
+		const orchestrator = defined(model.participants[1], 'model.participants[1]')
+		expect(orchestrator).not.toHaveProperty('roleId')
+		// Pseudo-roles and tools carry no instance ids either — the human root has none.
+		expect(defined(model.participants[0], 'model.participants[0]')).not.toHaveProperty('roleId')
+		assertHelpersSensible(model)
+	})
+})
+
 describe('deriveInteractionModel — delegation chain', () => {
 	test('nests the child call under the parent and unwinds the returns on finish', () => {
 		const events = [

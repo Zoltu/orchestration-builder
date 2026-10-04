@@ -17,6 +17,7 @@ interface Participant {
 	id: string                // instance-scoped, unique per invocation — the flow-view node key
 	role: string              // role/tool name; 'human' or 'interrupt' for the pseudo-roles; the sequence-view column key
 	kind: 'human' | 'interrupt' | 'role' | 'tool'
+	roleId?: string           // the executor's role-instance id (role_start's roleId, e.g. "coder-1-2"); 'role'-kind participants only, when the producer carries it — the identity the LLM-turn inspector scopes to (see "View click-throughs")
 }
 
 interface Operation {
@@ -98,6 +99,13 @@ Both views are **independent leaves** over the `InteractionModel`: each imports 
 - **Sequence view** (`source/web/static/sequence-diagram.js`) — projects the model to a UML-style lifeline diagram: one column per guild role plus a shared `tools` column, one row per operation in chronological order. Routing is a pure function of the source and destination columns: distinct columns render a straight arrow; the same column (a same-role cross-instance call) renders a loopback U-turn. The inspector (the shared `tooltip.js` card) opens on hover/click and renders an operation's on-demand details through the sanitized Markdown pipeline.
 
 Animation is layered on top of the settled structure via CSS class hooks the model carries no animation state for. The single invariant governs every motion class: a call/return edge animates iff it is `in_flight` and its stack is not paused — the active stack is never paused, and a resolved stack (its chain is empty) is not paused either, so a resolved stack's final return leg keeps marching in its outcome color while it travels; paused stacks' lines are frozen solid; `observe` and `terminate` never animate. The active participant's node pulses; participants in paused stacks do not.
+
+### View click-throughs and the roles-only sequence filter
+
+Two affordances sit on top of the two views (the entry points that make the LLM-turn inspector reachable from the graphs):
+
+- **Click-through** — a *hover* shows the inspector card; a *click* on an agent drills in: clicking an agent's flow node, its top-bar slot, or a message/terminal node whose worker is an agent opens the inspect modal pre-scoped to that instance. The mapping from clicked target to the modal's scope identity is `resolveInspectorScope` (`source/web/static/inspector.js`): participant targets map through the participant's `roleId` (falling back to the role name, the identity turn entries use on logs without per-instance ids), role targets map to the role's most recent instance, and operation targets map to the worker the operation is about (destination for call/observe/terminate, the returning source for a return). Human/tool/interrupt targets are not drill-ins — their clicks keep the hover-card behavior, as do the in-flight `ask_human` row clicks that re-open the question modal. The click-through is app-only today: the inspect modal is mounted by `app.js` alone (the demo harness has no run-log window to feed it — see "The demo page is a fixture transport, not a sandbox").
+- **Roles-only sequence filter** — a toggle next to the flow/sequence view controls filters the sequence render to the agent roles plus the human: participants collapse via `rolesOnlyParticipants` and the frame via `rolesOnlyModel` (`source/web/static/interaction-model.js`), pure helpers both shells consume. An operation survives only when every participant it references survives, so tool call/return legs, tool-sourced `observe`/`terminate` rows, and synthetic-interrupt-rooted preemptions drop while the agent↔agent and agent↔human chains (including the `ask_human` exchange) stay readable. The filter is a lens on the one surface: the now caption, cost strip, and flow view keep reading the full model.
 
 ## Dev harness
 
