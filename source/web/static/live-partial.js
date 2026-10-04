@@ -57,6 +57,33 @@ export function activeLivePartial(livePartial, entries) {
 	return null
 }
 
+/**
+ * The partial as it should stand after a SCOPED window's turn-list derivation (one instance's server-filtered entries): null only when the entries hold a COMPLETED turn matching the partial's instance — positive evidence the poll recorded that turn's `llm_call` — and the partial itself otherwise. A scoped window cannot see other instances' turns, so a partial belonging to a different instance is merely absent here, not completed: clearing on absence would drop a stream that still renders in the scope the partial belongs to, and re-scoping back mid-turn would show the gapped text as continuous. Matching mirrors `activeLivePartial` (the entry's `roleId` first, the role name when either side carries no instance id); a non-array or malformed entry list proves nothing and keeps the partial.
+ *
+ * @param {LivePartial|null} livePartial
+ * @param {unknown} entries
+ * @returns {LivePartial|null}
+ */
+export function scopedActiveLivePartial(livePartial, entries) {
+	if (livePartial === null) return null
+	if (!Array.isArray(entries)) return livePartial
+	for (const entry of entries) {
+		if (!isObject(entry)) continue
+		if (entry['kind'] !== 'completed') continue
+		const role = typeof entry['role'] === 'string' && entry['role'] !== '' ? entry['role'] : null
+		if (role === null) continue
+		const roleId = typeof entry['roleId'] === 'string' && entry['roleId'] !== '' ? entry['roleId'] : null
+		const entryHasOwnId = roleId !== null && roleId !== role
+		const partialHasId = livePartial.roleId !== null && livePartial.roleId !== ''
+		if (entryHasOwnId && partialHasId) {
+			if (roleId === livePartial.roleId) return null
+			continue
+		}
+		if (role === livePartial.role) return null
+	}
+	return livePartial
+}
+
 // The delta guard the fold re-validates on its own behalf: the fields the accumulation reads must be present and well-typed. (The stream client validates full wire messages before invoking the host; this guards the helper against any caller.)
 /**
  * @param {unknown} value

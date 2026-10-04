@@ -134,7 +134,7 @@ export function tailRefreshMustResync(pageEventCount, pageOffset, pageTotal, loa
 // Scoping the modal to one agent instance loads that instance's data explicitly from the server-filtered window endpoint (`?instance=<roleId>`): the server sees the whole log, so the scoped window carries the instance's turns and its full ancestor chain's lifecycle no matter how far back they fall — the breadcrumb always renders completely, and an old agent's transcript needs no paging back through the whole log. The app keeps one loaded window per explicit scope, keyed by the scoped role id, alongside the unscoped tail window (which keeps serving the instance dropdown's wayfinding, the default scope, and the child-instance affordances the filter deliberately omits — children are not ancestors). The endpoint windows the filtered sequence, so the same offset math drives both windows.
 
 /**
- * A per-scope loaded window: the same fields the unscoped window carries, for one instance's server-filtered event set. `total` is the FILTERED sequence's total and `tailOffset` the loaded window's start within it.
+ * A per-scope loaded window: the same fields the unscoped window carries, for one instance's server-filtered event set. `total` is the FILTERED sequence's total and `tailOffset` the loaded window's start within it. `olderLoading` is the window's OWN older-page-in-flight flag (one per window, so re-scoping mid-fetch starts clean — app.js's `LoadOlderTurns` sets it and the curried landing actions clear it).
  *
  * @typedef {Object} ScopeWindow
  * @property {'loading'|'ready'|'failed'} loadState
@@ -142,6 +142,7 @@ export function tailRefreshMustResync(pageEventCount, pageOffset, pageTotal, loa
  * @property {number|null} total
  * @property {number|null} tailOffset
  * @property {TurnEntry[]} entries
+ * @property {boolean} olderLoading
  */
 
 /**
@@ -150,7 +151,7 @@ export function tailRefreshMustResync(pageEventCount, pageOffset, pageTotal, loa
  * @returns {ScopeWindow}
  */
 export function initialScopeWindow() {
-	return { loadState: 'loading', events: [], total: null, tailOffset: null, entries: [] }
+	return { loadState: 'loading', events: [], total: null, tailOffset: null, entries: [], olderLoading: false }
 }
 
 /**
@@ -173,11 +174,11 @@ export function mergeLogEvents(firstEvents, secondEvents) {
 }
 
 /**
- * The modal's render inputs for the modal's current scope: the explicit scope's own window (its load state and paging offsets — the "Older turns" control pages within the filtered set) with its events merged with the unscoped tail window (wayfinding: the dropdown's instance list and the `agent` calls' child affordances read the instances the scoped filter deliberately omits), or the unscoped window itself when the scope is unset or its window has not landed yet (the modal then shows the unscoped window's loading state until the scope's probe responds).
+ * The modal's render inputs for the modal's current scope: the explicit scope's own window (its load state, paging offsets, and older-page flag — the "Older turns" control pages within the filtered set and disables on that window's own in-flight fetch) with its events merged with the unscoped tail window (wayfinding: the dropdown's instance list and the `agent` calls' child affordances read the instances the scoped filter deliberately omits), or the unscoped window itself when the scope is unset or its window has not landed yet (the modal then shows the unscoped window's loading state until the scope's probe responds).
  *
  * @param {unknown} inspector the app's inspector state
  * @param {string|null} explicitScopeRoleId
- * @returns {{ loadState: string, events: LogWindowEvent[], total: number|null, tailOffset: number|null }}
+ * @returns {{ loadState: string, events: LogWindowEvent[], total: number|null, tailOffset: number|null, olderLoading: boolean }}
  */
 export function scopeViewFor(inspector, explicitScopeRoleId) {
 	const state = isObject(inspector) ? inspector : {}
@@ -186,6 +187,7 @@ export function scopeViewFor(inspector, explicitScopeRoleId) {
 		events: Array.isArray(state['events']) ? state['events'] : [],
 		total: typeof state['total'] === 'number' ? state['total'] : null,
 		tailOffset: typeof state['tailOffset'] === 'number' ? state['tailOffset'] : null,
+		olderLoading: state['olderLoading'] === true,
 	}
 	if (typeof explicitScopeRoleId !== 'string' || explicitScopeRoleId === '' || !isObject(state['scopes'])) return unscoped
 	const record = state['scopes'][explicitScopeRoleId]
@@ -195,6 +197,7 @@ export function scopeViewFor(inspector, explicitScopeRoleId) {
 		events: mergeLogEvents(record['events'], unscoped.events),
 		total: typeof record['total'] === 'number' ? record['total'] : null,
 		tailOffset: typeof record['tailOffset'] === 'number' ? record['tailOffset'] : null,
+		olderLoading: record['olderLoading'] === true,
 	}
 }
 
@@ -250,7 +253,7 @@ export function tailRefreshFetch(inspector, runId) {
 }
 
 /**
- * The "Older turns" fetch for the modal's ACTIVE scope: one page back within that scope's own loaded sequence — the unscoped window's offsets for the default scope, the scoped window's filtered offsets when explicitly scoped (the endpoint windows the filtered list, so the same offset math applies). Null when a page is already in flight, the active window has nothing older, or the ids are unusable.
+ * The "Older turns" fetch for the modal's ACTIVE scope: one page back within that scope's own loaded sequence — the unscoped window's offsets for the default scope, the scoped window's filtered offsets when explicitly scoped (the endpoint windows the filtered list, so the same offset math applies). Null when a page is already in flight for THAT window (each window carries its own `olderLoading`, so a re-scope mid-fetch starts the new scope clean instead of inheriting the old window's flag), the active window has nothing older, or the ids are unusable.
  *
  * @param {unknown} inspector
  * @param {unknown} runId
@@ -258,15 +261,14 @@ export function tailRefreshFetch(inspector, runId) {
  */
 export function olderTurnsFetch(inspector, runId) {
 	if (typeof runId !== 'string' || runId === '' || !isObject(inspector)) return null
-	if (inspector['olderLoading'] === true) return null
 	const scopeRoleId = typeof inspector['scopedRoleId'] === 'string' && inspector['scopedRoleId'] !== '' ? inspector['scopedRoleId'] : null
 	if (scopeRoleId !== null) {
 		const record = isObject(inspector['scopes']) ? inspector['scopes'][scopeRoleId] : undefined
-		if (!isObject(record) || record['loadState'] !== 'ready' || !canPageOlder(record['tailOffset'])) return null
+		if (!isObject(record) || record['loadState'] !== 'ready' || record['olderLoading'] === true || !canPageOlder(record['tailOffset'])) return null
 		const tailOffset = record['tailOffset']
 		return { scopeRoleId, url: logWindowUrl(runId, scopeRoleId, olderWindowOffset(tailOffset, INSPECTOR_WINDOW_SIZE), olderFetchLimit(tailOffset, INSPECTOR_WINDOW_SIZE)) }
 	}
-	if (inspector['loadState'] !== 'ready' || !canPageOlder(inspector['tailOffset'])) return null
+	if (inspector['loadState'] !== 'ready' || inspector['olderLoading'] === true || !canPageOlder(inspector['tailOffset'])) return null
 	return { scopeRoleId: null, url: logWindowUrl(runId, null, olderWindowOffset(inspector['tailOffset'], INSPECTOR_WINDOW_SIZE), olderFetchLimit(inspector['tailOffset'], INSPECTOR_WINDOW_SIZE)) }
 }
 
@@ -841,7 +843,7 @@ export function deriveTranscriptTurns(entries, logEvents) {
 		let received = null
 		if (body !== null) {
 			const walk = walks[position]
-			// The previous turn's rendered calls: the tool results in this turn's slice that answer them are already rendered there (inline with the calls), so they do not render again here.
+			// The previous turn's rendered calls: the tool results in this turn's slice that answer them are already rendered there (inline with the calls), so they do not render again here. Known limit of this adjacency-only pairing: in the unscoped default view an orchestrator's `agent` call outcome pairs to a standalone tool result one entry later under sequential execution (scoped views are immune — same-instance entries are consecutive).
 			const previousCallIds = renderedCallIds(bodies[position - 1] ?? null)
 			let startFrom = 0
 			if (position === 0) {

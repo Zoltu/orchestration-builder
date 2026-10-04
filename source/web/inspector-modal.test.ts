@@ -1187,8 +1187,8 @@ describe('per-scope windows', () => {
 		return { loadState: 'ready', events: [], total: null, tailOffset: null, entries: [], scopedRoleId: null, olderLoading: false, scopes: {}, ...overrides }
 	}
 
-	test('initialScopeWindow is a fresh loading window', () => {
-		expect(initialScopeWindow()).toEqual({ loadState: 'loading', events: [], total: null, tailOffset: null, entries: [] })
+	test('initialScopeWindow is a fresh loading window with its own older-page flag', () => {
+		expect(initialScopeWindow()).toEqual({ loadState: 'loading', events: [], total: null, tailOffset: null, entries: [], olderLoading: false })
 	})
 
 	test('mergeLogEvents dedupes by global index and returns log order', () => {
@@ -1237,7 +1237,19 @@ describe('per-scope windows', () => {
 		// No record yet (the probe has not responded): the unscoped window stands in.
 		expect(scopeViewFor(inspectorWith({ scopedRoleId: 'coder-1-2', events: tailWindow, total: 100, tailOffset: 50 }), 'coder-1-2').loadState).toBe('ready')
 		// Malformed state reads as a fresh unscoped window.
-		expect(scopeViewFor('broken', 'coder-1-2')).toEqual({ loadState: 'loading', events: [], total: null, tailOffset: null })
+		expect(scopeViewFor('broken', 'coder-1-2')).toEqual({ loadState: 'loading', events: [], total: null, tailOffset: null, olderLoading: false })
+	})
+
+	test('scopeViewFor surfaces the active window\u0027s own older-loading flag, so a re-scope mid-fetch starts clean', () => {
+		// The unscoped window's flag while no scope is set.
+		expect(scopeViewFor(inspectorWith({ olderLoading: true }), null).olderLoading).toBe(true)
+		// The bug this fixes: an in-flight unscoped page must not show as loading in a freshly scoped window (the flag is each window's own).
+		const rescoped = inspectorWith({ olderLoading: true, scopedRoleId: 'coder-1-2', scopes: { 'coder-1-2': initialScopeWindow() } })
+		expect(scopeViewFor(rescoped, 'coder-1-2').olderLoading).toBe(false)
+		// A scope's flag comes from its own record, and a record without the field reads as not loading.
+		const record = { loadState: 'ready', events: coderGrandchildWindow, total: 8, tailOffset: 0, entries: [] }
+		expect(scopeViewFor(inspectorWith({ scopedRoleId: 'coder-1-2', scopes: { 'coder-1-2': { ...record, olderLoading: true } } }), 'coder-1-2').olderLoading).toBe(true)
+		expect(scopeViewFor(inspectorWith({ scopedRoleId: 'coder-1-2', scopes: { 'coder-1-2': record } }), 'coder-1-2').olderLoading).toBe(false)
 	})
 
 	test('tailRefreshFetch refreshes the active scope\u0027s own window, scoped by roleId', () => {
@@ -1254,13 +1266,21 @@ describe('per-scope windows', () => {
 		expect(tailRefreshFetch(inspectorWith(), 'run-1')).toBeNull()
 	})
 
-	test('olderTurnsFetch pages back within the active scope\u0027s own filtered sequence', () => {
-		const scoped = inspectorWith({ scopedRoleId: 'coder-1-2', scopes: { 'coder-1-2': { loadState: 'ready', events: coderGrandchildWindow, total: 800, tailOffset: 600, entries: [] } } })
+	test('olderTurnsFetch pages back within the active scope\u0027s own filtered sequence, gated by that window\u0027s own in-flight flag', () => {
+		const readyRecord = { loadState: 'ready', events: coderGrandchildWindow, total: 800, tailOffset: 600, entries: [] }
+		const scoped = inspectorWith({ scopedRoleId: 'coder-1-2', scopes: { 'coder-1-2': readyRecord } })
 		const scopedPlan = present(olderTurnsFetch(scoped, 'run-1'), 'scoped plan')
 		expect(scopedPlan.scopeRoleId).toBe('coder-1-2')
 		expect(scopedPlan.url).toBe('api/runs/run-1/log?offset=400&limit=200&instance=coder-1-2')
-		// A page already in flight fires nothing.
-		expect(olderTurnsFetch({ ...scoped, olderLoading: true }, 'run-1')).toBeNull()
+		// A page already in flight for THIS window fires nothing.
+		expect(olderTurnsFetch(inspectorWith({ scopedRoleId: 'coder-1-2', scopes: { 'coder-1-2': { ...readyRecord, olderLoading: true } } }), 'run-1')).toBeNull()
+		// The flag is each window's own: an in-flight unscoped page does not block a scope's fetch (the re-scoped window starts clean)...
+		expect(olderTurnsFetch({ ...scoped, olderLoading: true }, 'run-1')).not.toBeNull()
+		// ...and an in-flight scoped page does not block the unscoped window's.
+		const busyScope = inspectorWith({ tailOffset: 100, scopedRoleId: 'coder-1-2', scopes: { 'coder-1-2': { ...readyRecord, olderLoading: true } } })
+		expect(present(olderTurnsFetch({ ...busyScope, scopedRoleId: null }, 'run-1'), 'unscoped plan').url).toBe('api/runs/run-1/log?offset=0&limit=100')
+		// The unscoped window's own flag still gates its fetch.
+		expect(olderTurnsFetch(inspectorWith({ tailOffset: 100, olderLoading: true }), 'run-1')).toBeNull()
 		// The unscoped window's math is unchanged.
 		expect(present(olderTurnsFetch(inspectorWith({ tailOffset: 100 }), 'run-1'), 'unscoped plan').url).toBe('api/runs/run-1/log?offset=0&limit=100')
 	})

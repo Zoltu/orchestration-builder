@@ -19,7 +19,7 @@ import { InspectorModal, buildTurnIndex, deriveDefaultScopeRoleId, instancesOf, 
 import { createWireDetails, WIRE_DETAIL_CACHE_LIMIT } from './wire-details.js'
 import { Tooltip, tooltipStyle } from './tooltip.js'
 import { createStreamClient } from './stream-client.js'
-import { nextLivePartial, activeLivePartial } from './live-partial.js'
+import { nextLivePartial, activeLivePartial, scopedActiveLivePartial } from './live-partial.js'
 import { backlogCount, deriveQueueSections, deriveReorderPosition, isQueueItemLike, queueItemPrimaryText, queueStatusLabel, reorderWaitingItems, taskFirstLine } from './queue-panel.js'
 
 const POLL_INTERVAL_MS = 1000
@@ -1128,7 +1128,7 @@ function ClickRunView(state, event) {
 // The stage-controls "Inspect" button opens a modal over the run view that renders one agent instance's LLM turns as a continuous transcript (the per-instance-scoped transcript), derived straight from the windowed log endpoint's `llm_call` payloads — the story needs no per-turn detail fetches; each completed turn's collapsed "on the wire" expander separately fetches the turn's full folded request from the same endpoint's `?detail=` variant, once per session into the bounded wire-details cache. The modal is scoped to one instance: the modal state carries the explicitly scoped instance id (null = auto — the most recently active instance in the loaded window), and the breadcrumb, instance dropdown, and each `agent` call's View affordance re-scope. The data flow is plain effects and state: the log loads with a single cheap probe (`?limit=1`) that learns the log's `total`, then fetches the most recent window; "older turns" pages back; while the modal is open on an active run the 1s poll appends the log's tail so in-flight turns appear when they complete and the live partial swaps for the completed turn. A scope change fetches that instance's server-filtered window (`?instance=<roleId>`) into a per-scope window keyed by the scoped role id — the server sees the whole log, so the scope's own turns and its complete ancestor chain (the breadcrumb) load without paging back through the unscoped tail — while the unscoped tail window stays for the instance dropdown's wayfinding and the default scope.
 
 function initialInspectorState() {
-	// `events`/`total`/`tailOffset`/`entries` are the unscoped tail window (the default scope's data, the instance dropdown's wayfinding, and the default-scope derivation); `scopes` holds one per-scope window (the same fields) per explicitly scoped instance id.
+	// `events`/`total`/`tailOffset`/`entries` are the unscoped tail window (the default scope's data, the instance dropdown's wayfinding, and the default-scope derivation), and its `olderLoading` is that window's own older-page-in-flight flag; `scopes` holds one per-scope window (the same fields, each with its own flag) per explicitly scoped instance id — the flag being per-window is what keeps a re-scope mid-fetch from showing the previous scope's loading state.
 	return { loadState: 'loading', events: [], total: null, tailOffset: null, entries: [], scopedRoleId: null, olderLoading: false, scopes: {} }
 }
 
@@ -1148,13 +1148,13 @@ function readableInspectorLogBody(payload) {
 	return body
 }
 
-// Reads one loaded inspector window: the unscoped tail's fields when scopeKey is null, else the scope's own per-scope window (null when the scope has none yet — its probe has not landed).
+// Reads one loaded inspector window: the unscoped tail's fields when scopeKey is null, else the scope's own per-scope window (null when the scope has none yet — its probe has not landed). Either shape carries the window's own `olderLoading`, so the landing actions treat both windows uniformly.
 function inspectorWindowOf(inspector, scopeKey) {
-	if (scopeKey === null) return { loadState: inspector.loadState, events: inspector.events, total: inspector.total, tailOffset: inspector.tailOffset, entries: inspector.entries }
+	if (scopeKey === null) return { loadState: inspector.loadState, events: inspector.events, total: inspector.total, tailOffset: inspector.tailOffset, entries: inspector.entries, olderLoading: inspector.olderLoading }
 	return inspector.scopes[scopeKey] ?? null
 }
 
-// Writes one loaded inspector window's fields: the unscoped tail's when scopeKey is null, else the scope's own record (created when absent). Scoped writes leave the top-level fields (the explicit scope id, the older-turns flag) untouched, and unscoped writes leave the per-scope windows untouched.
+// Writes one loaded inspector window's fields: the unscoped tail's when scopeKey is null, else the scope's own record (created when absent). Scoped writes replace the scope's own record wholesale and leave the top-level fields (the explicit scope id and the unscoped window's own fields) untouched, and unscoped writes leave the per-scope windows untouched.
 function inspectorWindowWritten(state, scopeKey, window) {
 	if (scopeKey === null) return { ...state, inspector: { ...state.inspector, ...window } }
 	return { ...state, inspector: { ...state.inspector, scopes: { ...state.inspector.scopes, [scopeKey]: { ...initialScopeWindow(), ...window } } } }
@@ -1213,44 +1213,57 @@ function InspectorTotalLoaded(scopeKey) {
 	}
 }
 
-// The window response replaces the loaded window wholesale (initial tail load and gap resync both land here), so the loaded range is always a contiguous slice — of the full log for the unscoped window, of the filtered sequence for a scoped window. The turn pairing also decides the live partial's fate: when the accumulated role no longer holds an in-flight turn, the poll has just recorded its completion and the partial clears (see "Live token stream"). A scoped window's pairing sees the scoped instance's turns only, so a partial for another instance clears with it — that partial renders nowhere while the scope holds (the scoped transcript has no matching row), and the instance's next stream re-accumulates it fresh.
+// The live partial as a window landing at `scopeKey` leaves it: the unscoped tail's pairing is authoritative across instances (an absent in-flight turn there means the poll recorded the completion), while a scoped window sees one instance's turns only, so it proves completion and never absence — a partial for another instance is merely invisible in it and survives (see "Live token stream").
+function windowLandingLivePartial(scopeKey, livePartial, entries) {
+	if (scopeKey === null) return activeLivePartial(livePartial, entries)
+	return scopedActiveLivePartial(livePartial, entries)
+}
+
+// The window response replaces the loaded window wholesale (initial tail load and gap resync both land here), so the loaded range is always a contiguous slice — of the full log for the unscoped window, of the filtered sequence for a scoped window. The wholesale write also resets that window's own older-turns flag (a replaced window's in-flight page is moot; its landing re-validates against the new range). The turn pairing also decides the live partial's fate: when the unscoped window's pairing shows the accumulated role no longer holds an in-flight turn, the poll has just recorded its completion and the partial clears; a scoped window clears the partial only when its own entries show the matching turn completed, and leaves a partial belonging to a different instance untouched (see "Live token stream").
 function InspectorWindowLoaded(scopeKey) {
 	return function InspectorWindowLoadedForScope(state, payload) {
 		const body = readableInspectorLogBody(payload)
 		if (body === null) return inspectorLoadFailed(state, scopeKey, payload.ok)
 		if (body.runId !== state.selectedRunId) return state
 		const entries = buildTurnIndex(body.events)
-		const written = inspectorWindowWritten(state, scopeKey, { loadState: 'ready', events: body.events, total: body.total, tailOffset: body.offset, entries })
-		return [{ ...written, inspector: { ...written.inspector, olderLoading: false }, livePartial: activeLivePartial(state.livePartial, entries), serverAvailable: true }, SyncInspectorFollower()]
+		const written = inspectorWindowWritten(state, scopeKey, { loadState: 'ready', events: body.events, total: body.total, tailOffset: body.offset, entries, olderLoading: false })
+		return [{ ...written, livePartial: windowLandingLivePartial(scopeKey, state.livePartial, entries), serverAvailable: true }, SyncInspectorFollower()]
 	}
 }
 
 function LoadOlderTurns(state) {
 	const plan = olderTurnsFetch(state.inspector, state.selectedRunId)
 	if (plan === null) return state
+	const record = inspectorWindowOf(state.inspector, plan.scopeRoleId)
+	if (record === null) return state
 	return [
-		{ ...state, inspector: { ...state.inspector, olderLoading: true } },
-		Fetch({ url: plan.url, ok: OlderTurnsLoaded(plan.scopeRoleId), fail: InspectorOlderLoadFailed }),
+		inspectorWindowWritten(state, plan.scopeRoleId, { ...record, olderLoading: true }),
+		Fetch({ url: plan.url, ok: OlderTurnsLoaded(plan.scopeRoleId), fail: InspectorOlderLoadFailed(plan.scopeRoleId) }),
 	]
 }
 
-// The older page must slot exactly in front of the loaded window it was fetched for (contiguous range — the response lands in the scope's own window via the curried scope key, so a re-scope between click and response cannot splice it into the wrong window) — anything else is a stale or diverged response and leaves the list as it was, merely clearing the loading flag for a retry. The log is append-only, so the older page does not touch the totals.
+// The older page must slot exactly in front of the loaded window it was fetched for (contiguous range — the response lands in the scope's own window via the curried scope key, so a re-scope between click and response cannot splice it into the wrong window) — anything else is a stale or diverged response and leaves the list as it was, merely clearing that window's loading flag for a retry. The log is append-only, so the older page does not touch the totals.
 function OlderTurnsLoaded(scopeKey) {
 	return function OlderTurnsLoadedForScope(state, payload) {
 		const body = readableInspectorLogBody(payload)
 		const record = inspectorWindowOf(state.inspector, scopeKey)
 		const spliced = body !== null && record !== null && record.loadState === 'ready' ? olderPageSpliced(record.events, record.tailOffset, body) : null
 		if (body === null || spliced === null) {
-			return { ...state, inspector: { ...state.inspector, olderLoading: false } }
+			if (record === null) return state
+			return inspectorWindowWritten(state, scopeKey, { ...record, olderLoading: false })
 		}
 		const entries = buildTurnIndex(spliced)
-		const written = inspectorWindowWritten(state, scopeKey, { ...record, events: spliced, tailOffset: body.offset, entries })
-		return [{ ...written, inspector: { ...written.inspector, olderLoading: false }, serverAvailable: true }, SyncInspectorFollower()]
+		const written = inspectorWindowWritten(state, scopeKey, { ...record, events: spliced, tailOffset: body.offset, entries, olderLoading: false })
+		return [{ ...written, serverAvailable: true }, SyncInspectorFollower()]
 	}
 }
 
-function InspectorOlderLoadFailed(state) {
-	return { ...state, inspector: { ...state.inspector, olderLoading: false }, serverAvailable: false }
+function InspectorOlderLoadFailed(scopeKey) {
+	return function InspectorOlderLoadFailedForScope(state) {
+		const record = inspectorWindowOf(state.inspector, scopeKey)
+		if (record === null) return { ...state, serverAvailable: false }
+		return [{ ...inspectorWindowWritten(state, scopeKey, { ...record, olderLoading: false }), serverAvailable: false }]
+	}
 }
 
 // The poll piggyback: one windowed fetch from the ACTIVE scope's loaded window's end (the scoped instance's filtered sequence when explicitly scoped, else the unscoped tail). A null effect while the modal is closed, the active window has not loaded, or no run is selected — hyperapp ignores falsy effects.
@@ -1276,8 +1289,8 @@ function InspectorTailRefreshed(scopeKey) {
 		if (appended === null) return state
 		const entries = buildTurnIndex(appended)
 		const written = inspectorWindowWritten(state, scopeKey, { ...record, events: appended, total: body.total, entries })
-		// The pairing decides the live partial's fate here too: the completed in-flight turn's partial clears the moment the poll records its `llm_call` (see "Live token stream").
-		return [{ ...written, livePartial: activeLivePartial(state.livePartial, entries), serverAvailable: true }, SyncInspectorFollower()]
+		// The pairing decides the live partial's fate here too: the unscoped tail's pairing is authoritative across instances, while a scoped window clears the partial only when its own entries show the matching turn completed (see "Live token stream").
+		return [{ ...written, livePartial: windowLandingLivePartial(scopeKey, state.livePartial, entries), serverAvailable: true }, SyncInspectorFollower()]
 	}
 }
 
@@ -1356,7 +1369,7 @@ function InspectorModalForRun(state) {
 	return InspectorModal(h, {
 		runLabel: typeof runId === 'string' ? runId : null,
 		logEvents: view.events,
-		turns: { loadState: view.loadState, total: view.total, tailOffset: view.tailOffset, olderLoading: state.inspector.olderLoading },
+		turns: { loadState: view.loadState, total: view.total, tailOffset: view.tailOffset, olderLoading: view.olderLoading },
 		instances: instancesOf(view.events),
 		chain: deriveInstanceChain(view.events, scopedRoleId),
 		scopedRoleId,

@@ -1,6 +1,6 @@
 import { describe, expect, test, vi } from 'bun:test'
 import { createStreamClient } from './static/stream-client.js'
-import { nextLivePartial, activeLivePartial } from './static/live-partial.js'
+import { nextLivePartial, activeLivePartial, scopedActiveLivePartial } from './static/live-partial.js'
 import { defined } from './test-fixtures.js'
 
 // The stream client and the live-partial helpers are browser-pure JS, so their exports arrive with inferred JSDoc types. The interfaces below carry the shapes the tests assert against, mirroring inspector-modal.test.ts.
@@ -408,5 +408,37 @@ describe('activeLivePartial', () => {
 		expect(activeLivePartial(null, [{ kind: 'in_flight', role: 'coder', roleId: 'coder-2' }])).toBeNull()
 		expect(activeLivePartial(partial, 'broken')).toBeNull()
 		expect(activeLivePartial(partial, [null, 42, { kind: 'in_flight' }])).toBeNull()
+	})
+})
+
+describe('scopedActiveLivePartial', () => {
+	const partial = { roleId: 'coder-2', role: 'coder', reasoning: 'in progress', content: '' }
+
+	test('cleared only when the scope holds the partial\u2019s own turn completed (roleId match)', () => {
+		expect(scopedActiveLivePartial(partial, [{ kind: 'in_flight', role: 'coder', roleId: 'coder-2' }])).toBe(partial)
+		expect(scopedActiveLivePartial(partial, [{ kind: 'completed', role: 'planner', roleId: 'planner-1' }, { kind: 'completed', role: 'coder', roleId: 'coder-2' }])).toBeNull()
+	})
+
+	test('a partial for another instance is merely absent in a foreign scope and survives the landing', () => {
+		// The scoped window cannot see the streaming instance: absence is not completion, so the partial stays for the scope it belongs to.
+		expect(scopedActiveLivePartial(partial, [{ kind: 'completed', role: 'planner', roleId: 'planner-1' }])).toBe(partial)
+		expect(scopedActiveLivePartial(partial, [{ kind: 'in_flight', role: 'planner', roleId: 'planner-1' }])).toBe(partial)
+		expect(scopedActiveLivePartial(partial, [])).toBe(partial)
+	})
+
+	test('a same-named sibling\u2019s completed turn never clears another instance\u2019s partial when ids can distinguish', () => {
+		expect(scopedActiveLivePartial(partial, [{ kind: 'completed', role: 'coder', roleId: 'coder-9' }])).toBe(partial)
+	})
+
+	test('either side lacking an instance id falls back to the role name (old logs)', () => {
+		const idlessPartial = { roleId: '', role: 'coder', reasoning: '', content: '' }
+		expect(scopedActiveLivePartial(idlessPartial, [{ kind: 'completed', role: 'coder', roleId: 'coder-2' }])).toBeNull()
+		expect(scopedActiveLivePartial(partial, [{ kind: 'completed', role: 'coder', roleId: 'coder' }])).toBeNull()
+	})
+
+	test('null stays null and malformed inputs prove nothing (the partial survives)', () => {
+		expect(scopedActiveLivePartial(null, [{ kind: 'completed', role: 'coder', roleId: 'coder-2' }])).toBeNull()
+		expect(scopedActiveLivePartial(partial, 'broken')).toBe(partial)
+		expect(scopedActiveLivePartial(partial, [null, 42, { kind: 'completed' }])).toBe(partial)
 	})
 })
