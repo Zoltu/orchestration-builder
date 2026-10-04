@@ -128,6 +128,8 @@ No-op detection (wording-only changes) is a discard rule, not a termination reas
 
 When `ask_human` is in the Guild, the Foundry answers questions via the large model configured with a persona. The simulator returns deterministic `humanResponses` from the benchmark's `eval.json` on near-exact matches before falling back to the big-model persona. This keeps optimization runs reproducible. The Foundry answers as an HTTP client posting to the executor's `/api/answer` endpoint — the tool schema is identical to what the small model sees in production.
 
+The simulated-answer flow serves only post-write blocking questions: a run the queue dispatched that asks `ask_human` before any write-capable role has started parks instead of blocking — the platform terminates the run with a `needs_clarification` park card and the question never registers a pending entry, so the simulator never sees it (see [`docs/queueing.md`](queueing.md) "Parking: the pre-write rule"). A benchmark whose expected flow answers a pre-write question and continues therefore records a park (a `needs_clarification` run with no workspace change, which fails the benchmark's validation) instead of a pause-and-continue. The `ask_human` log event still fires, so the `humanQuestionPenalty` term still counts the ask; what changes shape is the outcome — `eval.json`'s `humanResponses` can only ever be served for a post-write blocking question.
+
 Every `ask_human` call reduces the run's score by `humanQuestionPenalty`. This penalizes branches that ask too many questions while allowing occasional clarifying questions.
 
 ## Reporting

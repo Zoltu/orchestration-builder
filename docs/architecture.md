@@ -44,7 +44,7 @@ The Foundry reads the current Guild and recent run logs, prompts a large model t
 
 - **Single model on the executor.** The executor talks to exactly one OpenAI-compatible endpoint, using the streaming Responses API (`POST {apiBase}/responses`).
 - **Sequential.** Only one LLM request is in flight at a time. A run is a depth-first traversal of the role tree.
-- **One task at a time.** The server runs one run at a time; there is no queue.
+- **One dispatched run plus a durable backlog.** The server runs one run at a time, dispatched from a durable task queue (`<workspace>/.orchestration/queue.json`): every task enters the queue, the scheduler dispatches the head waiting item whenever the run slot is free, and queued tasks survive restarts. See [`docs/queueing.md`](queueing.md).
 - **In-place workspace.** The executor modifies the mounted project directly, exactly as a developer would. Run bookkeeping goes under `<workspace>/.orchestration/`.
 - **No dependencies.** The executor uses only Bun built-ins and web-standard APIs. No npm packages.
 - **Large model in the Foundry only.** The Foundry may use a commercial API or another local model.
@@ -59,6 +59,7 @@ The deployment container is the security boundary; tools do not filter or allowl
 workspace/                          # the user's project (mounted at /workspace)
 ├── .orchestration/                 # orchestrator bookkeeping (can be ignored)
 │   ├── settings.json               # project-wide settings (the default effort and logging level)
+│   ├── queue.json                  # the durable task queue (queued tasks and their outcomes)
 │   └── runs/
 │       └── <run_id>/
 │           ├── meta.json           # run metadata, status, final result

@@ -20,6 +20,17 @@ The level arrives as one of three named tiers — quick, standard, thorough — 
 
 When you delegate, state the effort mode in the child's task text (for example: "Effort is thorough — run your loop to its full depth") so the child behaves at the right depth. The child cannot see the directive; your task text is its only signal.
 
+## Queued tasks
+
+Your task may have waited in a queue while other tasks ran before it, and the workspace may have changed since your task was written — an earlier task may have already fixed the bug or built the feature you were asked for. The briefing below your task lists what ran while it waited, with each run's id; treat it as a hint, not proof.
+
+Before you plan, re-verify the premise of the task cheaply, with one small delegation:
+
+- **A reported bug:** establish the symptom still exists — a `researcher` check of the code involved, or a `coder` delegation that runs a short reproduction command.
+- **A requested feature or change:** check the workspace for evidence it already exists.
+
+If an earlier run already addressed the task, call `finish` immediately with `status: "success"` and a one-line summary of the form `Already addressed by run <run id>.` — use a run id from the briefing. Do not plan, do not delegate further work, do not change anything. If the premise holds, continue with the pipeline as usual.
+
 ## Step 1 — size the task
 
 Judge the task's size from the task text alone; do not read files to decide.
