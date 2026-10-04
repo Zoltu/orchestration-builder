@@ -15,7 +15,8 @@ import { copyRawToClipboard } from './clipboard.js'
 import { QuestionModal } from './question-modal.js'
 import { createOperationDetails } from './operation-details.js'
 import { ResultModal, deriveTerminalResult } from './result-modal.js'
-import { InspectorModal, buildTurnIndex, deriveDefaultScopeRoleId, instancesOf, deriveInstanceChain, tailWindowOffset, olderWindowOffset, olderFetchLimit, canPageOlder, INSPECTOR_WINDOW_SIZE, INSPECTOR_PAGE_LIMIT, INSPECTOR_RETENTION_LIMIT } from './inspector-modal.js'
+import { InspectorModal, buildTurnIndex, deriveDefaultScopeRoleId, instancesOf, deriveInstanceChain, tailWindowOffset, olderWindowOffset, olderFetchLimit, canPageOlder, tailRefreshMustResync, INSPECTOR_WINDOW_SIZE, INSPECTOR_PAGE_LIMIT } from './inspector-modal.js'
+import { createWireDetails, WIRE_DETAIL_CACHE_LIMIT } from './wire-details.js'
 import { Tooltip, tooltipStyle } from './tooltip.js'
 import { createStreamClient } from './stream-client.js'
 import { nextLivePartial, activeLivePartial } from './live-partial.js'
@@ -100,6 +101,9 @@ const flowColumnTracker = createColumnTracker()
 
 // The inspector's operation-details controller (see operation-details.js): key `<runId>|<operationId>`, states 'loading' | 'failed' | ready. The polled flow model ships no detail bodies (they can carry multi-megabyte tool arguments/results), so opening an inspector card fetches the ids its derivation may show from `api/runs/:id/flow?operation=<id>` exactly once per session and caches them. Operation ids are stable within a run (events only append), so an entry never goes stale; the run id in the key keeps a previous run's entries from answering for another run's same-numbered operation. Module scope like flowColumnTracker — cache memory, not app state. This host drives the controller through `begin` + `record*` because its fetches are hyperapp effects whose ok/fail actions must return fresh state to trigger the re-render, so no `onLanded` fan-out is wired.
 const operationDetails = createOperationDetails({})
+
+// The inspector transcript's per-turn wire-envelope cache (see wire-details.js): key `<runId>|<eventIndex>` → the folded request sections the window endpoint's `?detail=` returns for a completed turn's "on the wire" expander. The expander fetches on first open and caches per session, so re-opening a turn (and every re-render under an open expander) never re-fetches; a failed fetch evicts rather than caching, so one transient 500 cannot poison a turn — re-opening retries; and the cache is bounded past WIRE_DETAIL_CACHE_LIMIT entries (oldest evicted — a re-opened evicted turn re-fetches). Module scope like operationDetails — cache memory, not app state.
+const wireDetails = createWireDetails({ maxEntries: WIRE_DETAIL_CACHE_LIMIT })
 
 // The live-token-stream client (see stream-client.js and docs/reference.md "Live token stream"): module scope like the other session caches, created lazily by the stream subscription on the first watch-screen mount and left connected for the page's lifetime. The stream is an enhancement — the client is contained (never throws, shows no error surface), and the only state it feeds is the ephemeral `livePartial` the inspector modal's in-flight turn renders.
 let streamClient = null
@@ -926,7 +930,7 @@ function ClickRunView(state, event) {
 }
 
 // --- LLM turn inspector (modal) ---------------------------------------------
-// The stage-controls "Inspect" button opens a modal over the run view that renders one agent instance's LLM turns as a continuous transcript (the inspector redesign, milestone 2), derived straight from the windowed log endpoint's `llm_call` payloads — no per-turn detail fetches. The modal is scoped to one instance (milestone 1): the modal state carries the explicitly scoped instance id (null = auto — the most recently active instance in the loaded window), and the breadcrumb, instance dropdown, and each `agent` call's View affordance re-scope. The data flow is plain effects and state: the log loads with a single cheap probe (`?limit=1`) that learns the log's `total`, then fetches the most recent window; "older turns" pages back; while the modal is open on an active run the 1s poll appends the log's tail so in-flight turns appear when they complete and the live partial swaps for the completed turn.
+// The stage-controls "Inspect" button opens a modal over the run view that renders one agent instance's LLM turns as a continuous transcript (the inspector redesign, milestone 2), derived straight from the windowed log endpoint's `llm_call` payloads — the story needs no per-turn detail fetches; each completed turn's collapsed "on the wire" expander separately fetches the turn's full folded request from the same endpoint's `?detail=` variant, once per session into the bounded wire-details cache. The modal is scoped to one instance (milestone 1): the modal state carries the explicitly scoped instance id (null = auto — the most recently active instance in the loaded window), and the breadcrumb, instance dropdown, and each `agent` call's View affordance re-scope. The data flow is plain effects and state: the log loads with a single cheap probe (`?limit=1`) that learns the log's `total`, then fetches the most recent window; "older turns" pages back; while the modal is open on an active run the 1s poll appends the log's tail so in-flight turns appear when they complete and the live partial swaps for the completed turn.
 
 function initialInspectorState() {
 	return { loadState: 'loading', events: [], total: null, tailOffset: null, entries: [], scopedRoleId: null, olderLoading: false }
@@ -1024,12 +1028,12 @@ function InspectorTailRefresh(state) {
 	return Fetch({ url: `api/runs/${encodeURIComponent(state.selectedRunId)}/log?offset=${state.inspector.total}&limit=${INSPECTOR_PAGE_LIMIT}`, ok: InspectorTailRefreshed, fail: FetchFailed })
 }
 
-// Appends the new events to the loaded range. A response that cannot bridge to the new total (more events landed between two polls than one page carries) resyncs with a fresh tail window instead of leaving a silent gap in the transcript — and so does a loaded range that has grown past the retention cap, since appending at the `full` log level would otherwise grow the modal's memory without bound. A response landing after the modal closed leaves the stale inspector state alone.
+// Appends the new events to the loaded range. A response that cannot bridge to the new total (more events landed between two polls than one page carries) resyncs with a fresh tail window instead of leaving a silent gap in the transcript — and so does a loaded range that has grown past the retention cap, since appending at the `full` log level would otherwise grow the modal's memory without bound: the oldest events drop and the "Older turns" control re-fetches them. A response landing after the modal closed leaves the stale inspector state alone.
 function InspectorTailRefreshed(state, payload) {
 	const body = readableInspectorLogBody(payload)
 	if (!state.inspectorModalOpen) return state
 	if (body === null || body.runId !== state.selectedRunId || body.offset !== state.inspector.total || state.inspector.loadState !== 'ready') return state
-	if (body.events.length < body.total - body.offset || state.inspector.events.length >= INSPECTOR_RETENTION_LIMIT) {
+	if (tailRefreshMustResync(body.events.length, body.offset, body.total, state.inspector.events.length)) {
 		const tailOffset = tailWindowOffset(body.total, INSPECTOR_WINDOW_SIZE)
 		return [state, Fetch({ url: `api/runs/${encodeURIComponent(state.selectedRunId)}/log?offset=${tailOffset}&limit=${INSPECTOR_WINDOW_SIZE}`, ok: InspectorWindowLoaded, fail: InspectorLogLoadFailed })]
 	}
@@ -1063,7 +1067,43 @@ function ScopeInspectorInstance(state, payload) {
 	return scopeInspectorTo(state, roleId)
 }
 
-// The inspector modal as the watch screen mounts it: the transcript derives inside the component from the loaded log window and the effective scope (the modal is a pure function of its props, so the vnode tests exercise the same derivation the view renders), plus the breadcrumb chain and instance dropdown from the same events. Cache-less by design: the transcript reads the event payloads directly.
+// Whether a `<details>` toggle event reports the expander opening (vs collapsing) — the wire expander fetches on open only.
+function toggleOpened(event) {
+	if (event === null || typeof event !== 'object') return false
+	const target = event.target
+	if (target === null || typeof target !== 'object') return false
+	return target.open === true
+}
+
+// A turn's "on the wire" expander opened: fetch its folded request sections once into the session cache (a cached turn — loading or ready — fetches nothing). The modal wires the action curried with the turn's event index, because the toggle event cannot carry it. Closing touches nothing; re-opening after a failed fetch (the cache evicted it) re-fetches.
+function ToggleWireDetail(eventIndex) {
+	return function ToggleWireDetailForTurn(state, event) {
+		if (state.inspectorModalOpen !== true) return state
+		if (!toggleOpened(event)) return state
+		if (typeof eventIndex !== 'number' || !Number.isInteger(eventIndex) || eventIndex < 0) return state
+		const runId = state.selectedRunId
+		if (typeof runId !== 'string' || runId === '') return state
+		if (!wireDetails.begin(runId, eventIndex)) return state
+		return [{ ...state }, Fetch({ url: `api/runs/${encodeURIComponent(runId)}/log?detail=${eventIndex}`, ok: WireDetailLoaded(runId, eventIndex), fail: WireDetailFailed(runId, eventIndex) })]
+	}
+}
+
+// The wire fetch resolved: a body carrying `detailSections` (array or explicit null) caches ready; anything else evicts so re-opening retries. Fresh state re-renders the open expander in place; a response landing after the modal closed only updates the cache.
+function WireDetailLoaded(runId, eventIndex) {
+	return function WireDetailLoadedForTurn(state, payload) {
+		wireDetails.recordResponse(runId, eventIndex, payload.ok, payload.body)
+		return state.inspectorModalOpen === true ? { ...state } : state
+	}
+}
+
+function WireDetailFailed(runId, eventIndex) {
+	return function WireDetailFailedForTurn(state) {
+		wireDetails.recordFailure(runId, eventIndex)
+		return state.inspectorModalOpen === true ? { ...state } : state
+	}
+}
+
+// The inspector modal as the watch screen mounts it: the transcript derives inside the component from the loaded log window and the effective scope (the modal is a pure function of its props, so the vnode tests exercise the same derivation the view renders), plus the breadcrumb chain and instance dropdown from the same events. The turn story reads the event payloads directly; the per-turn "on the wire" expanders read the wire-details session cache through the lookup prop and fetch through the curried toggle action.
 function InspectorModalForRun(state) {
 	if (!state.inspectorModalOpen) return null
 	const runId = state.selectedRunId
@@ -1077,6 +1117,8 @@ function InspectorModalForRun(state) {
 		scopedRoleId,
 		livePartial: state.livePartial,
 		renderMarkdown,
+		wireDetailLookup: typeof runId === 'string' ? (eventIndex) => wireDetails.lookup(runId, eventIndex) : null,
+		onToggleWire: ToggleWireDetail,
 		onScopeInstance: ScopeInspectorInstance,
 		onLoadOlder: LoadOlderTurns,
 		onClose: CloseInspectorModal,

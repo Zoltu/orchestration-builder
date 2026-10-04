@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { InspectorModal, buildTurnIndex, childInstanceFor, deriveDefaultScopeRoleId, deriveInstanceChain, deriveTranscriptTurns, instancesOf, scopeTurnEntries, tailWindowOffset, olderWindowOffset, olderFetchLimit, canPageOlder, INSPECTOR_WINDOW_SIZE, INSPECTOR_PAGE_LIMIT } from './static/inspector-modal.js'
+import { InspectorModal, buildTurnIndex, childInstanceFor, deriveDefaultScopeRoleId, deriveInstanceChain, deriveTranscriptTurns, instancesOf, scopeTurnEntries, tailRefreshMustResync, tailWindowOffset, olderWindowOffset, olderFetchLimit, canPageOlder, INSPECTOR_WINDOW_SIZE, INSPECTOR_PAGE_LIMIT, INSPECTOR_RETENTION_LIMIT } from './static/inspector-modal.js'
 import { actionProp, defined, present } from './test-fixtures.js'
 
 // The inspector-modal component is browser-pure JS, so its exports arrive with inferred JS types. The interfaces and fake `h`/`renderMarkdown` below carry the shape the tests assert against, mirroring question-modal.test.ts / result-modal.test.ts.
@@ -285,6 +285,16 @@ describe('buildTurnIndex', () => {
 		expect(entry.finishReason).toBe('tool_calls')
 	})
 
+	test('entries carry the payload\u0027s messageCount; absent or malformed reads as null, in-flight as null', () => {
+		const entries = buildTurnIndex([callEvent(0, 'coder', { messageCount: 7 }), standardCallEvent(1, 'coder'), startEvent(2, 'coder')])
+		expect(defined(entries[0], 'entries[0]').messageCount).toBe(7)
+		// The standard level keeps messageCount (a kept field, source/executor/log-level.ts).
+		expect(defined(entries[1], 'entries[1]').messageCount).toBe(3)
+		expect(defined(entries[2], 'entries[2]').messageCount).toBeNull()
+		const malformed = buildTurnIndex([callEvent(3, 'coder', { messageCount: '4' }), callEvent(4, 'coder', { messageCount: -1 }), callEvent(5, 'coder', { messageCount: 2.5 })])
+		for (const entry of malformed) expect(entry.messageCount).toBeNull()
+	})
+
 	test('usage with cached tokens carries the cached share; non-numeric usage reads as none', () => {
 		const cached = buildTurnIndex([callEvent(0, 'coder', { usage: { promptTokens: 10, completionTokens: 5, totalTokens: 15, cachedPromptTokens: 8 } })])
 		expect(present(defined(cached[0], 'cached[0]').usage, 'usage').cachedPromptTokens).toBe(8)
@@ -359,6 +369,24 @@ describe('turn-list paging offset math', () => {
 		expect(canPageOlder(null)).toBe(false)
 		expect(canPageOlder(2.5)).toBe(false)
 		expect(canPageOlder(-1)).toBe(false)
+	})
+
+	test('a bridging tail-refresh page appends; a gapped or over-cap page resyncs to the fresh tail window', () => {
+		// The page bridges its range (50 events cover offset 950 → total 1000): append, unless the loaded range has hit the retention cap.
+		expect(tailRefreshMustResync(50, 950, 1000, 0)).toBe(false)
+		expect(tailRefreshMustResync(50, 950, 1000, INSPECTOR_RETENTION_LIMIT - 1)).toBe(false)
+		// A page that cannot bridge (events landed between two polls than one page carries) would leave a silent gap.
+		expect(tailRefreshMustResync(30, 950, 1000, 0)).toBe(true)
+		// At the cap the oldest events drop: resync to the newest window and let "Older turns" re-fetch.
+		expect(tailRefreshMustResync(50, 950, 1000, INSPECTOR_RETENTION_LIMIT)).toBe(true)
+	})
+
+	test('malformed tail-refresh inputs read as no resync so a broken response never throws', () => {
+		expect(tailRefreshMustResync('x', 950, 1000, 0)).toBe(false)
+		expect(tailRefreshMustResync(50, 2.5, 1000, 0)).toBe(false)
+		expect(tailRefreshMustResync(50, 950, null, 0)).toBe(false)
+		expect(tailRefreshMustResync(50, 950, 1000, 'x')).toBe(false)
+		expect(tailRefreshMustResync(-1, 950, 1000, 0)).toBe(false)
 	})
 })
 
@@ -644,6 +672,23 @@ describe('deriveTranscriptTurns', () => {
 		expect(second.finishReason).toBe('stop')
 	})
 
+	test('a window that starts mid-conversation renders the first turn from what is loaded: the echo is skipped and its tool result renders standalone', () => {
+		// A retention resync (or an unopened "Older turns" page) leaves a window whose first slice begins with the previous turn's echo — the previous turn and its response are absent from the window.
+		const midWindow = [defined(stitchEvents[2], 'stitchEvents[2]')]
+		const turns = transcriptOf(midWindow, 'coder-1')
+		expect(turns).toHaveLength(1)
+		const first = defined(turns[0], 'turns[0]')
+		// The echo assistant message renders nowhere (it is the absent previous turn's response); the tool result answering its call renders standalone with its parsed outcome, since the call's rendering paged out.
+		expect(first.opening).toHaveLength(0)
+		expect(first.messages).toHaveLength(1)
+		const result = defined(first.messages[0], 'first.messages[0]')
+		expect(result.role).toBe('tool')
+		expect(present(result.outcome, 'result.outcome').summary).toBe('no space')
+		expect(present(first.received, 'first.received').content).toBe('turn two reply')
+		// The absent previous turn's reply is invented nowhere.
+		expect(JSON.stringify(turns).split('turn one reply').length - 1).toBe(0)
+	})
+
 	test('an empty or malformed input yields an empty transcript', () => {
 		expect(deriveTranscriptTurns([], [])).toEqual([])
 		expect(deriveTranscriptTurns(null, [])).toEqual([])
@@ -914,6 +959,19 @@ describe('InspectorModal', () => {
 		expect(collectText(olderLoading)).toContain('loading older turns\u2026')
 	})
 
+	test('a mid-conversation window (a retention resync kept only the newest window) renders the load-older affordance above turns built from the partial slice', () => {
+		// The loaded window begins at the echo slice: the earlier turns and the conversation opening are absent, and the control pages them back in.
+		const modal = renderModal({ logEvents: [defined(stitchEvents[2], 'stitchEvents[2]')], scopedRoleId: 'coder-1', turns: { loadState: 'ready', total: 400, tailOffset: 200, olderLoading: false } })
+		const older = defined(allByClass(modal, 'inspector-older')[0], 'older control')
+		expect(collectText(older)).toBe('Older turns')
+		// The transcript renders from what is loaded: the renumbered turn header, the standalone tool result, and no opening expander (its material paged out).
+		expect(collectText(defined(allByClass(modal, 'inspector-turn-header')[0], 'header'))).toBe('Turn 1 \u00b7 210 tok \u00b7 stop')
+		expect(allByClass(modal, 'inspector-opening')).toHaveLength(0)
+		const text = collectText(modal)
+		expect(text).toContain('no space')
+		expect(text).not.toContain('turn one reply')
+	})
+
 	test('the breadcrumb renders the chain root-first with the scoped crumb current, and crumbs re-scope via the instance action', () => {
 		const chain = [
 			{ roleId: 'orchestrator-0', role: 'orchestrator' },
@@ -980,5 +1038,91 @@ describe('InspectorModal', () => {
 	test('constants match the endpoint contract sizes', () => {
 		expect(INSPECTOR_WINDOW_SIZE).toBe(200)
 		expect(INSPECTOR_PAGE_LIMIT).toBe(500)
+		expect(INSPECTOR_RETENTION_LIMIT).toBe(4000)
+	})
+
+	// --- On-the-wire expander ---------------------------------------------------
+
+	function renderModalWithWire(overrides: Record<string, unknown> = {}): Vnode {
+		return renderModal({ wireDetailLookup: () => ({ status: 'idle' }), onToggleWire: () => () => undefined, ...overrides })
+	}
+
+	test('each completed turn renders a collapsed "on the wire" expander labeled with the payload\u2019s message count; in-flight turns render none', () => {
+		const modal = renderModalWithWire({ logEvents: stitchEvents, scopedRoleId: 'coder-1' })
+		const expanders = allByClass(modal, 'inspector-wire')
+		expect(expanders).toHaveLength(2)
+		// Collapsed by default: the native expander carries no `open` prop.
+		for (const expander of expanders) expect(expander.props.open).toBeUndefined()
+		const summaries = expanders.map((expander) => collectText(defined(allByTag(expander, 'summary')[0], 'summary')))
+		// The counts are the full request's message counts the turns' own llm_call payloads report — known before any fetch.
+		expect(summaries).toEqual(['on the wire \u00b7 2 messages', 'on the wire \u00b7 4 messages'])
+		const flightEvents = [...stitchEvents, startEvent(3, 'coder', 'coder-1')]
+		expect(allByClass(renderModalWithWire({ logEvents: flightEvents, scopedRoleId: 'coder-1' }), 'inspector-wire')).toHaveLength(2)
+	})
+
+	test('a singular message count reads "1 message" and an unknown count renders the bare label', () => {
+		const one = renderModalWithWire({ logEvents: [callEvent(0, 'coder', { roleId: 'coder-1', messageCount: 1 })], scopedRoleId: 'coder-1' })
+		expect(collectText(defined(allByClass(one, 'inspector-wire-summary')[0], 'summary'))).toBe('on the wire \u00b7 1 message')
+		const unknown = renderModalWithWire({ logEvents: [callEvent(0, 'coder', { roleId: 'coder-1', messageCount: 'broken' })], scopedRoleId: 'coder-1' })
+		expect(collectText(defined(allByClass(unknown, 'inspector-wire-summary')[0], 'summary'))).toBe('on the wire')
+	})
+
+	test('a ready lookup renders the folded request\u2019s sections through the Markdown pipeline, finish reason and usage included', () => {
+		const lookup = (eventIndex: number) => eventIndex === 1
+			? { status: 'ready', sections: [
+					{ label: 'sent', content: [{ role: 'system', content: 'wire system prompt' }, { role: 'user', content: 'wire task text' }] },
+					{ label: 'received', content: { content: 'wire reply', reasoning: 'wire thinking', toolCalls: [] } },
+					{ label: 'finish reason', content: 'stop' },
+					{ label: 'usage', content: { promptTokens: 1, completionTokens: 2, totalTokens: 3 } },
+				] }
+			: { status: 'loading' }
+		const modal = renderModalWithWire({ logEvents: [callEvent(1, 'coder', { roleId: 'coder-1' })], scopedRoleId: 'coder-1', wireDetailLookup: lookup })
+		const expander = defined(allByClass(modal, 'inspector-wire')[0], 'expander')
+		const markers = allByTag(expander, 'span').filter((node) => node.props.class === 'md-marker').map((node) => node.props['data-text'])
+		expect(markers).toContain('wire system prompt')
+		expect(markers).toContain('wire task text')
+		expect(markers).toContain('wire reply')
+		expect(markers).toContain('wire thinking')
+		const text = collectText(expander)
+		expect(text).toContain('Sent messages')
+		expect(text).toContain('Finish reason')
+		expect(text).toContain('stop')
+		// The usage section renders as a pretty-printed JSON block — a text node, never markup.
+		const usageBlock = defined(allByClass(expander, 'inspector-json')[0], 'usage json')
+		expect(collectText(usageBlock)).toContain('"totalTokens": 3')
+	})
+
+	test('loading, ready-null, and idle each render their honest fixed notice', () => {
+		const events = [callEvent(1, 'coder', { roleId: 'coder-1' })]
+		const loading = renderModalWithWire({ logEvents: events, scopedRoleId: 'coder-1', wireDetailLookup: () => ({ status: 'loading' }) })
+		expect(collectText(defined(allByClass(loading, 'inspector-wire-body')[0], 'loading body'))).toContain('Loading the full request')
+		const empty = renderModalWithWire({ logEvents: events, scopedRoleId: 'coder-1', wireDetailLookup: () => ({ status: 'ready', sections: null }) })
+		expect(collectText(defined(allByClass(empty, 'inspector-wire-body')[0], 'empty body'))).toContain('No request or response detail was logged for this turn.')
+		const idle = renderModalWithWire({ logEvents: events, scopedRoleId: 'coder-1' })
+		expect(collectText(defined(allByClass(idle, 'inspector-wire-body')[0], 'idle body'))).toContain('could not be loaded')
+	})
+
+	test('malformed lookup states render the retry notice and never invented sections', () => {
+		const modal = renderModalWithWire({ logEvents: [callEvent(1, 'coder', { roleId: 'coder-1' })], scopedRoleId: 'coder-1', wireDetailLookup: () => 'broken' })
+		const body = defined(allByClass(modal, 'inspector-wire-body')[0], 'body')
+		expect(collectText(body)).toContain('could not be loaded')
+		expect(allByClass(body, 'inspector-section')).toHaveLength(0)
+	})
+
+	test('the expander wires the toggle handler with the turn\u2019s event index, and a modal without the wiring renders none', () => {
+		const toggled: number[] = []
+		const modal = renderModalWithWire({ logEvents: stitchEvents, scopedRoleId: 'coder-1', onToggleWire: (eventIndex: number) => {
+			toggled.push(eventIndex)
+			return () => undefined
+		} })
+		for (const expander of allByClass(modal, 'inspector-wire')) {
+			const ontoggle = expander.props.ontoggle
+			if (typeof ontoggle !== 'function') throw new Error('ontoggle is not a function')
+			ontoggle({}, { target: { open: true } })
+		}
+		expect(toggled).toEqual([1, 2])
+		// No lookup prop wired: no expander renders rather than a dead one.
+		expect(allByClass(renderModal({ logEvents: stitchEvents, scopedRoleId: 'coder-1' }), 'inspector-wire')).toHaveLength(0)
+		expect(allByClass(renderModalWithWire({ logEvents: stitchEvents, scopedRoleId: 'coder-1', onToggleWire: 'broken' }), 'inspector-wire')).toHaveLength(0)
 	})
 })

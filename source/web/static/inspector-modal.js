@@ -1,4 +1,6 @@
-// The run's LLM story for one agent instance: an on-demand modal over the run view that renders the scoped instance's turns as one continuous transcript (the inspector redesign, milestone 2). The turns come from the windowed log endpoint `GET /api/runs/:id/log`; each completed turn's `llm_call` payload carries the turn's NEW messages (the `sent` slice — the conversation opening on the first turn, then the prior response's echo, the tool results, and platform notices), the assistant response (`received`), the usage, and the finish reason, so the transcript performs no per-turn detail fetches: the loaded events are the story.
+// The run's LLM story for one agent instance: an on-demand modal over the run view that renders the scoped instance's turns as one continuous transcript (the inspector redesign, milestone 2). The turns come from the windowed log endpoint `GET /api/runs/:id/log`; each completed turn's `llm_call` payload carries the turn's NEW messages (the `sent` slice — the conversation opening on the first turn, then the prior response's echo, the tool results, and platform notices), the assistant response (`received`), the usage, and the finish reason, so the transcript's story needs no per-turn detail fetches: the loaded events are the story.
+//
+// Each completed turn's header also carries a collapsed "on the wire" expander: the FULL request conversation the model saw at that turn — system + task + every message up to and including the turn — which is a different view of the same turn than the inline new-messages rendering, so it is labeled distinctly and fetched on demand from the window endpoint's `?detail=` fold (the delta slices the story reads cannot show it). The app caches one fetched envelope per turn in a bounded session cache (wire-details.js) and hands the modal a lookup; the modal never fetches itself.
 //
 // Reading order: the conversation opening (system prompt + task, the first turn's leading system/user messages) is hoisted into one collapsed expander above the turns; every turn then renders a quiet header (turn number within the instance, token bill, finish reason) followed by its new messages in order and its response — reasoning labeled 💭, all agent-authored prose through the sanitized Markdown pipeline. Tool calls render inline with their outcome joined from the tool result that answers them: the executor appends an assistant message holding all its calls first and then each result in call order, so pairing within a slice is positional. The echo assistant message at a slice's head renders nowhere — its content and calls are the previous turn's response section — which is why each turn contributes only its slice and the document never repeats itself.
 //
@@ -20,7 +22,7 @@ export const INSPECTOR_WINDOW_SIZE = 200
 // The poll-refresh page cap: the largest gap one tail-refresh fetch can bridge (bounded by the endpoint's own limit cap).
 export const INSPECTOR_PAGE_LIMIT = 500
 
-// The loaded-range retention cap: while the modal sits open on an active run the tail refresh keeps appending to the loaded events (rows carry full payloads at the `full` log level), so past this many loaded events the app.js poll takes the fresh-tail-window resync instead of appending.
+// The loaded-range retention cap: while the modal sits open on an active run the tail refresh keeps appending to the loaded events (rows carry full payloads at the `full` log level), so past this many loaded events the app.js poll takes the fresh-tail-window resync instead of appending — the oldest events drop and the "Older turns" control re-fetches them on demand.
 export const INSPECTOR_RETENTION_LIMIT = INSPECTOR_WINDOW_SIZE * 20
 
 /**
@@ -43,6 +45,7 @@ export const INSPECTOR_RETENTION_LIMIT = INSPECTOR_WINDOW_SIZE * 20
  * @property {number} turnNumber 1-based, chronological over the loaded events
  * @property {string} role
  * @property {string} roleId
+ * @property {number|null} messageCount the full request's message count (the `llm_call` payload's `messageCount`; null when absent or malformed, and for in-flight turns)
  * @property {string|null} timestamp
  * @property {TurnUsage|null} usage
  * @property {string|null} finishReason
@@ -109,6 +112,22 @@ export function canPageOlder(tailOffset) {
 	return Number.isInteger(tailOffset) && tailOffset > 0
 }
 
+// Whether a tail-refresh page must resync the loaded window instead of appending: the page cannot bridge to the new total (more events landed between two polls than one page carries — appending would leave a silent gap in the transcript), or the loaded range has grown past the retention cap (the memory bound — the oldest events drop out and the "Older turns" control re-fetches them on demand). Malformed inputs read as "no resync" so a broken response never throws; the caller resyncs via `tailWindowOffset`.
+/**
+ * @param {unknown} pageEventCount the page's event count
+ * @param {unknown} pageOffset the page's log-wide offset
+ * @param {unknown} pageTotal the log's total at fetch time
+ * @param {unknown} loadedEventCount the loaded range's current event count
+ * @returns {boolean}
+ */
+export function tailRefreshMustResync(pageEventCount, pageOffset, pageTotal, loadedEventCount) {
+	if (!Number.isInteger(pageEventCount) || pageEventCount < 0) return false
+	if (!Number.isInteger(pageOffset) || pageOffset < 0) return false
+	if (!Number.isInteger(pageTotal) || pageTotal < 0) return false
+	if (pageEventCount < pageTotal - pageOffset) return true
+	return Number.isInteger(loadedEventCount) && loadedEventCount >= INSPECTOR_RETENTION_LIMIT
+}
+
 // --- Turn index derivation ---------------------------------------------------
 
 /**
@@ -146,6 +165,16 @@ function readUsage(value) {
  * @returns {number|null}
  */
 function readEventIndex(value) {
+	if (typeof value !== 'number' || !Number.isInteger(value) || value < 0) return null
+	return value
+}
+
+/**
+ * The full request's message count the payload reports (docs/reference.md "Log events"), or null when absent or malformed — the wire expander's collapsed summary shows it before any fetch.
+ * @param {unknown} value
+ * @returns {number|null}
+ */
+function readMessageCount(value) {
 	if (typeof value !== 'number' || !Number.isInteger(value) || value < 0) return null
 	return value
 }
@@ -189,6 +218,7 @@ export function buildTurnIndex(logEvents) {
 			turnNumber: 0,
 			role,
 			roleId,
+			messageCount: readMessageCount(payload['messageCount']),
 			timestamp,
 			usage: readUsage(payload['usage']),
 			finishReason: typeof payload['finishReason'] === 'string' && payload['finishReason'] !== '' ? payload['finishReason'] : null,
@@ -197,18 +227,19 @@ export function buildTurnIndex(logEvents) {
 	}
 	for (const [role, open] of openStarts) {
 		for (const start of open) {
-			entries.push({
-				kind: 'in_flight',
-				eventIndex: start.eventIndex,
-				startEventIndex: null,
-				turnNumber: 0,
-				role,
-				roleId: start.roleId,
-				timestamp: start.timestamp,
-				usage: null,
-				finishReason: null,
-				levelHint: null,
-			})
+		entries.push({
+			kind: 'in_flight',
+			eventIndex: start.eventIndex,
+			startEventIndex: null,
+			turnNumber: 0,
+			role,
+			roleId: start.roleId,
+			messageCount: null,
+			timestamp: start.timestamp,
+			usage: null,
+			finishReason: null,
+			levelHint: null,
+		})
 		}
 	}
 	entries.sort((a, b) => a.eventIndex - b.eventIndex)
@@ -447,6 +478,7 @@ export function scopeTurnEntries(entries, scopedRoleId) {
  * @property {number} eventIndex
  * @property {string} role
  * @property {string} roleId
+ * @property {number|null} messageCount the full request's message count, for the wire expander's collapsed summary
  * @property {string|null} timestamp
  * @property {TurnUsage|null} usage
  * @property {string|null} finishReason
@@ -665,6 +697,7 @@ export function deriveTranscriptTurns(entries, logEvents) {
 			eventIndex: typeof entry['eventIndex'] === 'number' ? entry['eventIndex'] : 0,
 			role: typeof entry['role'] === 'string' ? entry['role'] : '',
 			roleId: typeof entry['roleId'] === 'string' ? entry['roleId'] : '',
+			messageCount: readMessageCount(entry['messageCount']),
 			timestamp: typeof entry['timestamp'] === 'string' ? entry['timestamp'] : null,
 			usage: readUsage(entry['usage']),
 			finishReason: typeof entry['finishReason'] === 'string' ? entry['finishReason'] : null,
@@ -875,6 +908,182 @@ function openingNode(h, renderMarkdown, opening) {
 	])
 }
 
+// --- On-the-wire expander ----------------------------------------------------
+// Each completed turn's collapsed view of the FULL request the model saw at that turn (system + task + every message up to and including it). It is a different view of the same turn than the inline new-messages rendering above the response — the transcript's story vs the complete envelope — so it is labeled distinctly and its body comes from the window endpoint's `?detail=` fold via the app's bounded session cache (wire-details.js), which the modal reads through the injected lookup and never fetches itself.
+
+const WIRE_LABEL = 'on the wire'
+
+// Fixed trusted copy for the expander's three non-section states (not agent prose, so none flows through Markdown). The idle state is only visible when a fetch has failed and been evicted (or the entry aged out of the cache) — an open expander never renders it otherwise, because the open marks the cache loading before the next render.
+const WIRE_RETRY_NOTICE = 'The full request could not be loaded — close and reopen this expander to retry.'
+
+const WIRE_LOADING_NOTE = 'Loading the full request\u2026'
+
+const WIRE_EMPTY_NOTICE = 'No request or response detail was logged for this turn.'
+
+// The wire state a turn's expander renders, normalized from the session cache's lookup so a malformed entry reads as the retry notice rather than inventing content (the never-invent rule the transcript follows throughout).
+/**
+ * @param {unknown} value
+ * @returns {{ status: 'idle' } | { status: 'loading' } | { status: 'ready', sections: Array<{label: string, content: unknown}>|null }}
+ */
+function wireStateForRender(value) {
+	if (!isObject(value)) return { status: 'idle' }
+	if (value['status'] === 'loading') return { status: 'loading' }
+	if (value['status'] === 'ready') return { status: 'ready', sections: Array.isArray(value['sections']) ? value['sections'] : null }
+	return { status: 'idle' }
+}
+
+// The expander's collapsed summary: the label plus the full request's message count when the turn's payload reports one — the count is known before any fetch, because it rides the turn's own `llm_call` payload.
+/**
+ * @param {TranscriptTurn} turn
+ * @returns {string}
+ */
+function wireSummaryLabel(turn) {
+	const count = turn.messageCount
+	if (typeof count !== 'number') return WIRE_LABEL
+	return `${WIRE_LABEL} \u00b7 ${count} message${count === 1 ? '' : 's'}`
+}
+
+// Pretty-prints a value as JSON, falling back to its String form when it is not serializable so the `<pre>` never throws (mirrors tooltip.js).
+/**
+ * @param {unknown} value
+ * @returns {string}
+ */
+function toJsonText(value) {
+	try {
+		return JSON.stringify(value, null, 2)
+	} catch {
+		return String(value)
+	}
+}
+
+function jsonBlock(h, content) {
+	return h('pre', { class: 'inspector-json' }, [toJsonText(content)])
+}
+
+// The `sent` section: one labeled block per message of the folded request — role as a machine chip, content as sanitized Markdown, tool calls as pretty-printed JSON. A message that is neither renders as its JSON so nothing is invented or dropped.
+/**
+ * @param {function(string, Record<string, unknown>, unknown): unknown} h
+ * @param {function(string): unknown} renderMarkdown
+ * @param {unknown[]} messages
+ * @returns {unknown}
+ */
+function sentMessagesNode(h, renderMarkdown, messages) {
+	const rows = []
+	for (const message of messages) {
+		if (!isObject(message)) continue
+		const children = [h('span', { class: 'inspector-message-role' }, typeof message['role'] === 'string' && message['role'] !== '' ? message['role'] : 'message')]
+		if (typeof message['content'] === 'string' && message['content'] !== '') {
+			children.push(h('div', { class: 'inspector-message-content markdown' }, renderMarkdown(message['content'])))
+		}
+		if (Array.isArray(message['tool_calls']) && message['tool_calls'].length > 0) {
+			children.push(jsonBlock(h, message['tool_calls']))
+		}
+		if (children.length > 1) rows.push(h('div', { class: 'inspector-message' }, children))
+	}
+	if (rows.length === 0) return h('span', { class: 'inspector-empty-value' }, ['\u2014'])
+	return h('div', { class: 'inspector-message-list' }, rows)
+}
+
+// The `received` section: the assistant response with its content and its reasoning (both rendered as Markdown — model prose an operator is specifically inspecting for) and its parsed tool calls.
+/**
+ * @param {function(string, Record<string, unknown>, unknown): unknown} h
+ * @param {function(string): unknown} renderMarkdown
+ * @param {unknown} received
+ * @returns {unknown}
+ */
+function receivedNode(h, renderMarkdown, received) {
+	if (!isObject(received)) return h('span', { class: 'inspector-empty-value' }, ['\u2014'])
+	const children = []
+	if (typeof received['content'] === 'string' && received['content'] !== '') {
+		children.push(labeledSection(h, 'Response', h('div', { class: 'inspector-prose markdown' }, renderMarkdown(received['content']))))
+	}
+	if (typeof received['reasoning'] === 'string' && received['reasoning'] !== '') {
+		children.push(labeledSection(h, 'Reasoning', h('div', { class: 'inspector-reasoning markdown' }, renderMarkdown(received['reasoning']))))
+	}
+	if (Array.isArray(received['toolCalls']) && received['toolCalls'].length > 0) {
+		children.push(labeledSection(h, 'Tool calls', jsonBlock(h, received['toolCalls'])))
+	}
+	if (children.length === 0) return h('span', { class: 'inspector-empty-value' }, ['\u2014'])
+	return h('div', { class: 'inspector-received' }, children)
+}
+
+// Renders one wire section by its machine label. The endpoint only ever returns the four `formatLogDetailSections` labels for an `llm_call`; anything else falls back to the tooltip's by-kind formatting (JSON for objects, Markdown for prose) so a future section kind degrades readably rather than vanishing.
+/**
+ * @param {function(string, Record<string, unknown>, unknown): unknown} h
+ * @param {function(string): unknown} renderMarkdown
+ * @param {unknown} section
+ * @returns {unknown}
+ */
+function wireSectionNode(h, renderMarkdown, section) {
+	if (!isObject(section)) return null
+	const label = typeof section['label'] === 'string' ? section['label'] : ''
+	const content = section['content']
+	if (label === 'sent') {
+		if (!Array.isArray(content)) return null
+		return labeledSection(h, 'Sent messages', sentMessagesNode(h, renderMarkdown, content))
+	}
+	if (label === 'received') return labeledSection(h, 'Received', receivedNode(h, renderMarkdown, content))
+	if (label === 'finish reason') {
+		return labeledSection(h, 'Finish reason', h('span', { class: 'inspector-scalar' }, [typeof content === 'string' && content !== '' ? content : '\u2014']))
+	}
+	if (label === 'usage') {
+		if (!isObject(content)) return null
+		return labeledSection(h, 'Usage', jsonBlock(h, content))
+	}
+	if (isObject(content) || Array.isArray(content)) return labeledSection(h, label, jsonBlock(h, content))
+	if (typeof content === 'string' && content !== '') return labeledSection(h, label, h('div', { class: 'inspector-prose markdown' }, renderMarkdown(content)))
+	return labeledSection(h, label, h('span', { class: 'inspector-scalar' }, [content === null || content === undefined ? '\u2014' : String(content)]))
+}
+
+/**
+ * @param {function(string, Record<string, unknown>, unknown): unknown} h
+ * @param {function(string): unknown} renderMarkdown
+ * @param {Array<{label: string, content: unknown}>} sections
+ * @returns {unknown}
+ */
+function wireSectionsNode(h, renderMarkdown, sections) {
+	const children = []
+	for (const section of sections) {
+		const node = wireSectionNode(h, renderMarkdown, section)
+		if (node !== null) children.push(node)
+	}
+	return h('div', { class: 'inspector-wire-sections' }, children)
+}
+
+// The expander's body from the cache's normalized state: the folded sections (or the honest empty notice), the loading note, or the retry notice for a state with no envelope behind it.
+/**
+ * @param {function(string, Record<string, unknown>, unknown): unknown} h
+ * @param {function(string): unknown} renderMarkdown
+ * @param {{ status: 'idle' } | { status: 'loading' } | { status: 'ready', sections: Array<{label: string, content: unknown}>|null }} state
+ * @returns {unknown}
+ */
+function wireBodyNode(h, renderMarkdown, state) {
+	if (state.status === 'ready') {
+		if (state.sections === null) return h('p', { class: 'inspector-wire-note' }, [WIRE_EMPTY_NOTICE])
+		return wireSectionsNode(h, renderMarkdown, state.sections)
+	}
+	if (state.status === 'loading') return h('p', { class: 'inspector-wire-note' }, [WIRE_LOADING_NOTE])
+	return h('p', { class: 'inspector-wire-note' }, [WIRE_RETRY_NOTICE])
+}
+
+// The per-turn "on the wire" expander, rendered by every completed turn (an in-flight turn has no `llm_call` to fetch). Collapsed like the opening expander; the first open fires the app's toggle handler, which fetches the sections once into the session cache, and the body renders the cache's state. The lookup and toggle wiring are injected props — a modal mounted without them renders no expander rather than a dead one.
+/**
+ * @param {function(string, Record<string, unknown>, unknown): unknown} h
+ * @param {function(string): unknown} renderMarkdown
+ * @param {TranscriptTurn} turn
+ * @param {{ logEvents: unknown[], scopedRoleId: string|null, livePartial: { roleId: string|null, role: string, reasoning: string, content: string }|null, onScopeInstance: unknown, wireDetailLookup: ((eventIndex: number) => unknown)|null, onToggleWire: ((eventIndex: number) => unknown)|null }} links
+ * @returns {unknown}
+ */
+function wireExpanderNode(h, renderMarkdown, turn, links) {
+	if (turn.kind !== 'completed') return null
+	if (links.wireDetailLookup === null || links.onToggleWire === null) return null
+	const state = wireStateForRender(links.wireDetailLookup(turn.eventIndex))
+	return h('details', { class: 'inspector-wire', ontoggle: links.onToggleWire(turn.eventIndex) }, [
+		h('summary', { class: 'inspector-wire-summary' }, [wireSummaryLabel(turn)]),
+		h('div', { class: 'inspector-wire-body' }, [wireBodyNode(h, renderMarkdown, state)]),
+	])
+}
+
 // The live partial prop, validated: an absent or malformed prop renders nothing rather than inventing sections (the never-invent rule the transcript follows throughout). Only the fields the rendering reads are carried.
 /**
  * @param {unknown} value
@@ -918,12 +1127,12 @@ function livePartialNode(h, renderMarkdown, livePartial) {
 	return h('div', { class: 'inspector-live-partial' }, children)
 }
 
-// One turn of the transcript: the quiet header, then the turn's new messages in order, then the response. An in-flight turn renders its note and — when the websocket partial matches this instance — the live reasoning/content block beneath it; the poll's completed turn replaces both in sequence. A turn the standard level logged body-less renders the honest degraded notice instead.
+// One turn of the transcript: the quiet header, then the turn's new messages in order, then the response, then the collapsed "on the wire" expander (completed turns only). An in-flight turn renders its note and — when the websocket partial matches this instance — the live reasoning/content block beneath it; the poll's completed turn replaces both in sequence. A turn the standard level logged body-less renders the honest degraded notice instead.
 /**
  * @param {function(string, Record<string, unknown>, unknown): unknown} h
  * @param {function(string): unknown} renderMarkdown
  * @param {TranscriptTurn} turn
- * @param {{ logEvents: unknown[], scopedRoleId: string|null, livePartial: { roleId: string|null, role: string, reasoning: string, content: string }|null, onScopeInstance: unknown }} links
+ * @param {{ logEvents: unknown[], scopedRoleId: string|null, livePartial: { roleId: string|null, role: string, reasoning: string, content: string }|null, onScopeInstance: unknown, wireDetailLookup: ((eventIndex: number) => unknown)|null, onToggleWire: ((eventIndex: number) => unknown)|null }} links
  * @returns {unknown}
  */
 function turnSectionNode(h, renderMarkdown, turn, links) {
@@ -941,6 +1150,8 @@ function turnSectionNode(h, renderMarkdown, turn, links) {
 		const response = responseNode(h, renderMarkdown, turn, links)
 		if (response !== null) children.push(response)
 	}
+	const wire = wireExpanderNode(h, renderMarkdown, turn, links)
+	if (wire !== null) children.push(wire)
 	return h('div', { class: { 'inspector-turn-section': true, 'is-in-flight': turn.kind === 'in_flight' } }, children)
 }
 
@@ -985,7 +1196,7 @@ function instanceSelectNode(h, instances, scopedRoleId, onScopeInstance) {
 	])
 }
 
-// The modal overlay: a backdrop over the run view plus a wide card whose body is the scoped instance's transcript — one continuous document of the instance's turns (the inspector redesign, milestone 2), topped by the "older turns" window control and the collapsed conversation opening. Above the body sit the heading, the delegation-chain breadcrumb, and the instance dropdown. `onScopeInstance` is wired bare on the dropdown (it reads the change event) and per crumb/View affordance with the instance id as payload; `onLoadOlder` and `onClose` are caller-supplied actions wired bare, mirroring the result modal's close wiring.
+// The modal overlay: a backdrop over the run view plus a wide card whose body is the scoped instance's transcript — one continuous document of the instance's turns (the inspector redesign, milestone 2), topped by the "older turns" window control and the collapsed conversation opening. Above the body sit the heading, the delegation-chain breadcrumb, and the instance dropdown. `onScopeInstance` is wired bare on the dropdown (it reads the change event) and per crumb/View affordance with the instance id as payload; `onLoadOlder` and `onClose` are caller-supplied actions wired bare, mirroring the result modal's close wiring. `wireDetailLookup` reads the app's bounded session cache for a turn's "on the wire" envelope and `onToggleWire` is the app's open action factory (the expander wires it curried with the turn's event index, since the toggle event cannot carry it); a modal mounted without either renders no expanders.
 export function InspectorModal(h, props) {
 	const renderMarkdown = props.renderMarkdown
 	const logEvents = Array.isArray(props.logEvents) ? props.logEvents : []
@@ -997,6 +1208,8 @@ export function InspectorModal(h, props) {
 	const onScopeInstance = props.onScopeInstance
 	const onLoadOlder = props.onLoadOlder
 	const onClose = props.onClose
+	const wireDetailLookup = typeof props.wireDetailLookup === 'function' ? props.wireDetailLookup : null
+	const onToggleWire = typeof props.onToggleWire === 'function' ? props.onToggleWire : null
 	const loadState = turns['loadState']
 	const olderLoading = turns['olderLoading'] === true
 	const hasOlder = canPageOlder(turns['tailOffset'])
@@ -1004,7 +1217,7 @@ export function InspectorModal(h, props) {
 
 	const entries = scopeTurnEntries(buildTurnIndex(logEvents), scopedRoleId)
 	const transcript = deriveTranscriptTurns(entries, logEvents)
-	const links = { logEvents, scopedRoleId, livePartial, onScopeInstance }
+	const links = { logEvents, scopedRoleId, livePartial, onScopeInstance, wireDetailLookup, onToggleWire }
 
 	const bodyChildren = []
 	if (loadState === 'loading') {
