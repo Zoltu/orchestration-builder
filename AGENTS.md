@@ -242,13 +242,13 @@ The LLM caller (`source/executor/llm.ts`) is exercised in tests exclusively thro
 
 ---
 
-## Browser static JS is outside the typechecker
+## Browser client sources are TypeScript, transpiled at serve time
 
-`bun run typecheck` (`tsc --noEmit`) covers only `source/**/*.ts` and `benchmarks/**/*.ts`. The browser client under `source/web/static/*.js` is plain JS by design (served as-is, no build step, vendored `hyperapp`), is loaded via `<script>` tags rather than imported from any TS file, and so never enters the typechecker's program: `allowJs` notwithstanding, its JSDoc typedefs are decorative and nothing in it is statically checked. Enabling `checkJs` on it was evaluated and declined for now — it surfaces ~900 errors (implicit-`any` parameters and the defensive-guard `unknown` narrowing style), which is annotation debt, not signal, and would not have caught the vnode-identity bug class anyway (the differ mutates its own implicitly-`any` state).
+The browser client's sources live as TypeScript under `source/web/static/ts/` and are transpiled on request by the static server (`Bun.Transpiler`, a Bun built-in — no build step, no emitted output on disk). The browser-facing URL space is unchanged: pages still load `app.js`/`demo.js` and modules still import `./sibling.js` — the server maps a `.js` request (outside `vendor/`) to `ts/<same path>.ts` when that source exists and falls back to the real file otherwise, so converted and unconverted modules coexist. Converted modules are covered by `bun run typecheck`; modules still plain JS at the static root are not statically checked (their `checkJs` annotation debt was evaluated and declined). While a converted module still has plain-JS importers, a one-line forwarding module stays at its old path, because Bun resolves plain-JS importers' specifiers literally and `bun test` imports those modules.
 
 Two consequences every change to `source/web/static/` must respect:
 
-- **Runtime guards are the typechecker there.** Every external value the browser modules read (fetch bodies, websocket messages, DOM events) goes through the `guards.js`-style shape checks; keep that discipline, since no compiler will catch a missing field.
+- **Runtime guards are still required at every external ingress.** Types don't validate: every external value the browser modules read (fetch bodies, websocket messages, DOM events, `window.showdown`/`hljs` presence) goes through the shape checks, and a type annotation never rejects a malformed payload — keep that discipline even where the module is now TypeScript.
 - **Never share vnode objects across renders or tree positions.** hyperapp's differ mutates a vnode's `node` property in place, so a vnode object reused at two positions (e.g. a memo cache handing the same object out for repeated text) corrupts the mounted tree the next time positions shift — it throws `DOMException` mid-patch and every following render crashes. The markdown pipeline (`markdown-render.js`) caches its sanitized neutral tree and rebuilds vnodes per call for exactly this reason; keep that shape for any future memoization.
 
 ---

@@ -264,7 +264,7 @@ function htmlH(tag, props, children = []) {
 const renderMarkdown = createMarkdownRenderer(htmlH)
 
 // The inspector overlay: one positioned card mounted inside the run-view container (`flowContainer`), rebuilt per hover and anchored flush against the hovered node's rect.
-// The card is `pointer-events: auto` and `user-select: text` (styles.css) so the operator can move the pointer from the node into the card to select and copy its contents; a short grace period on leaving the node (or the card) keeps the card open while the pointer travels between them, and the card dismisses once the pointer is over neither.
+// The card is `pointer-events: auto` and `user-select: text` (stylesheets/styles.css) so the operator can move the pointer from the node into the card to select and copy its contents; a short grace period on leaving the node (or the card) keeps the card open while the pointer travels between them, and the card dismisses once the pointer is over neither.
 // The dedup key is `${kind}:${id}` so the card is reused (not flickered) as the pointer moves within the same operation (a sequence message → its terminal node) or the same participant (a node's box → its cost figures).
 let currentTooltipNode = null
 let currentTooltipKey = null

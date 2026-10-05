@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import { parseBuildInfo } from './build-info.ts'
-import { buildInfoFromConfig, formatBuildLabel } from './static/build-info.js'
+import { buildInfoFromConfig, formatBuildLabel } from './static/ts/build-info.js'
 
 describe('parseBuildInfo', () => {
 	test('shapes a valid document, dropping unknown sibling fields', () => {

@@ -2,7 +2,7 @@
 //
 // Each primitive is a self-contained vnode laid out against its own local origin (0,0); the caller applies the translate and the primitive never hardcodes an absolute position, so moving a composed node is a one-number change to its translate.
 //
-// Colors reuse the project's --svg-* tokens via the existing graph-node and graph-edge CSS classes declared in styles.css, so the views follow the light/dark theme without adding CSS in this layer. Machine fields (labels, counters, costs) are SVG <text> textContent, never markup, so the textContent security invariant holds. No motion classes are emitted here: call and return edges render as settled strokes and the observe line is a distinct dashed static style; the flowing/returning motion classes are layered on top of these primitives by the animation layer, never by the primitives themselves.
+// Colors reuse the project's --svg-* tokens via the existing graph-node and graph-edge CSS classes declared in stylesheets/styles.css, so the views follow the light/dark theme without adding CSS in this layer. Machine fields (labels, counters, costs) are SVG <text> textContent, never markup, so the textContent security invariant holds. No motion classes are emitted here: call and return edges render as settled strokes and the observe line is a distinct dashed static style; the flowing/returning motion classes are layered on top of these primitives by the animation layer, never by the primitives themselves.
 //
 // `h` is passed in rather than imported so the module stays free of hyperapp coupling and the vnode shape is exercisable in tests with a fake `h`. The module is plain browser JS, imports nothing, and touches no external system.
 

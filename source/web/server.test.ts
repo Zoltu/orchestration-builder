@@ -12,7 +12,7 @@ import { parseRunSnapshot, type RunSnapshot } from './render.ts'
 import type { BuildInfo } from './build-info.ts'
 import { createRunListCache } from './run-list-cache.ts'
 import { createRequestHandler, type RequestHandler } from './request-handler.ts'
-import { createServeStatic, resolveStaticAsset, type ServeAssetFile } from './server.ts'
+import { createServeStatic, createServeTypeScriptSource, resolveStaticAsset, resolveTypeScriptSourceAsset, type ServeAssetFile, type TypeScriptSourceFilesystem } from './server.ts'
 
 // A plain-object queue store standing in for the filesystem leaves, so the /api/queue route tests and the POST /api/runs enqueue path observe the queue's exact state.
 function createInMemoryQueueStore(initial: QueueItem[] = []): { readQueue: () => TaskQueue; writeQueue: (queue: TaskQueue) => void; snapshot: () => TaskQueue } {
@@ -631,12 +631,110 @@ describe('static asset resolution', () => {
 	test('falls back to a binary content type for unknown extensions', () => {
 		expect(resolveStaticAsset('/static', '/data.bin')).toEqual({ resolvedPath: '/static/data.bin', contentType: 'application/octet-stream' })
 	})
+
+	test('refuses to resolve a raw .ts source', () => {
+		expect(resolveStaticAsset('/static', '/ts/app.ts')).toBeNull()
+	})
+
+	test('maps a module URL to its TypeScript source with the js content type', () => {
+		expect(resolveTypeScriptSourceAsset('/static', '/x.js')).toEqual({ resolvedPath: '/static/ts/x.ts', contentType: 'text/javascript; charset=utf-8' })
+	})
+
+	test('maps a nested module URL beneath the ts directory', () => {
+		expect(resolveTypeScriptSourceAsset('/static', '/views/panel.js')).toEqual({ resolvedPath: '/static/ts/views/panel.ts', contentType: 'text/javascript; charset=utf-8' })
+	})
+
+	test('does not map vendor assets, non-module paths, or escapes', () => {
+		expect(resolveTypeScriptSourceAsset('/static', '/vendor/hyperapp.js')).toBeNull()
+		expect(resolveTypeScriptSourceAsset('/static', '/page.html')).toBeNull()
+		expect(resolveTypeScriptSourceAsset('/static', '/../../outside.js')).toBeNull()
+	})
+})
+
+describe('serve-time TypeScript mapping', () => {
+	// A fake asset-file leaf standing in for the real files on disk: a member of `files` serves fixed bytes, everything else is absent. The TypeScript sources live in an in-memory map, so no filesystem is touched; the transpiler itself is the real Bun.Transpiler.
+	function createMappingHarness(typeScriptSources: Map<string, string>, files: Set<string>) {
+		const filesystem: TypeScriptSourceFilesystem = { readSource: (sourcePath) => typeScriptSources.get(sourcePath) ?? null }
+		const realFilesServed: string[] = []
+		const serveAssetFile: ServeAssetFile = (asset) => {
+			if (!files.has(asset.resolvedPath)) return null
+			realFilesServed.push(asset.resolvedPath)
+			return new Response('real file bytes', { headers: { 'content-type': asset.contentType, 'cache-control': 'no-store' } })
+		}
+		const serveStatic = createServeStatic({ staticDir: '/static', pageTitle: 'Mission Control', serveAssetFile, serveTypeScriptSource: createServeTypeScriptSource(filesystem) })
+		return { serveStatic, realFilesServed: () => realFilesServed }
+	}
+
+	test('serves /x.js from the transpiled ts/x.ts source', async () => {
+		const { serveStatic } = createMappingHarness(new Map([['/static/ts/x.ts', 'export const answer: number = 42\n']]), new Set())
+		const response = await serveStatic('/x.js')
+		expect(response.status).toBe(200)
+		expect(response.headers.get('content-type')).toBe('text/javascript; charset=utf-8')
+		expect(response.headers.get('cache-control')).toBe('no-store')
+		const body = await response.text()
+		expect(body).toContain('42')
+		expect(body).not.toContain(': number')
+	})
+
+	test('falls back to the real root file when no TS source exists', async () => {
+		const { serveStatic, realFilesServed } = createMappingHarness(new Map(), new Set(['/static/x.js']))
+		const response = await serveStatic('/x.js')
+		expect(response.status).toBe(200)
+		expect(response.headers.get('content-type')).toBe('text/javascript; charset=utf-8')
+		expect(await response.text()).toBe('real file bytes')
+		expect(realFilesServed()).toEqual(['/static/x.js'])
+	})
+
+	test('the TS source wins over a real root file at the same module URL', async () => {
+		const { serveStatic, realFilesServed } = createMappingHarness(new Map([['/static/ts/x.ts', 'export const answer: number = 42\n']]), new Set(['/static/x.js']))
+		const response = await serveStatic('/x.js')
+		expect(response.status).toBe(200)
+		const body = await response.text()
+		expect(body).toContain('42')
+		expect(body).not.toContain(': number')
+		expect(body).not.toBe('real file bytes')
+		expect(realFilesServed()).toEqual([])
+	})
+
+	test('a .. that the ts/ prefix absorbs back inside the root maps there and still 404s for a missing target', async () => {
+		expect(resolveTypeScriptSourceAsset('/static', '/../x.js')).toEqual({ resolvedPath: '/static/x.ts', contentType: 'text/javascript; charset=utf-8' })
+		const { serveStatic } = createMappingHarness(new Map(), new Set())
+		const response = await serveStatic('/../x.js')
+		expect(response.status).toBe(404)
+		expect(await response.json()).toEqual({ ok: false, error: 'not_found' })
+	})
+
+	test('a malformed TS source rejects the request instead of falling back to a 404', async () => {
+		const { serveStatic } = createMappingHarness(new Map([['/static/ts/x.ts', 'export const answer: number = ;\n']]), new Set(['/static/x.js']))
+		await expect(serveStatic('/x.js')).rejects.toThrow()
+	})
+
+	test('vendor assets are never remapped even when a same-named TS source exists', async () => {
+		const { serveStatic, realFilesServed } = createMappingHarness(new Map([['/static/ts/vendor/hyperapp.ts', 'export const fake = true\n']]), new Set(['/static/vendor/hyperapp.js']))
+		const response = await serveStatic('/vendor/hyperapp.js')
+		expect(await response.text()).toBe('real file bytes')
+		expect(realFilesServed()).toEqual(['/static/vendor/hyperapp.js'])
+	})
+
+	test('a raw .ts source request is a 404 even when the source exists on disk', async () => {
+		const { serveStatic } = createMappingHarness(new Map([['/static/ts/x.ts', 'export const answer: number = 42\n']]), new Set(['/static/ts/x.ts']))
+		const response = await serveStatic('/ts/x.ts')
+		expect(response.status).toBe(404)
+		expect(await response.json()).toEqual({ ok: false, error: 'not_found' })
+	})
+
+	test('a .. escape through the mapping is a 404', async () => {
+		const { serveStatic } = createMappingHarness(new Map(), new Set())
+		const response = await serveStatic('/../../outside.js')
+		expect(response.status).toBe(404)
+		expect(await response.json()).toEqual({ ok: false, error: 'not_found' })
+	})
 })
 
 describe('static serving title substitution', () => {
 	const INDEX_HTML = '<!DOCTYPE html><html><head><title>Adaptive Orchestrator</title></head><body><div id="app"></div></body></html>'
 
-	// A fake asset reader standing in for the filesystem leaf: index.html serves the fixture document, missing.js is absent, everything else a JS body. The static dir is never touched.
+	// A fake asset reader standing in for the filesystem leaves: index.html serves the fixture document, missing.js is absent, everything else a JS body. The TypeScript leaf always reads null (no converted sources in this harness), so a mapped .js request falls through to the real-file leaf. The static dir is never touched.
 	function createTitleHarness(pageTitle: string, indexHtml: string = INDEX_HTML) {
 		const servedPaths: string[] = []
 		const serveAssetFile: ServeAssetFile = (asset) => {
@@ -645,7 +743,8 @@ describe('static serving title substitution', () => {
 			if (asset.resolvedPath === '/static/index.html') return new Response(indexHtml, { headers: { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' } })
 			return new Response('app.js bytes', { headers: { 'content-type': 'text/javascript; charset=utf-8' } })
 		}
-		return { serveStatic: createServeStatic({ staticDir: '/static', pageTitle, serveAssetFile }), servedPaths: () => servedPaths }
+		const serveTypeScriptSource: ServeAssetFile = () => null
+		return { serveStatic: createServeStatic({ staticDir: '/static', pageTitle, serveAssetFile, serveTypeScriptSource }), servedPaths: () => servedPaths }
 	}
 
 	test('substitutes the configured title into the index page served at /', async () => {

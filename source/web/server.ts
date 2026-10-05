@@ -1,5 +1,5 @@
 import * as path from 'node:path'
-import { existsSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { createRequestHandler, type RequestHandlerConfig, type ServeStatic } from './request-handler.js'
 import { renderIndexHtmlWithPageTitle } from './page-title.js'
@@ -38,13 +38,24 @@ export interface StaticAsset {
 	contentType: string
 }
 
-// Maps a request path to a file inside the static dir, or null when the path escapes it. The separator check rejects `..` segments that resolve outside the static dir (e.g. `/../source/web/server.ts`), preserving the traversal safety the explicit route map gave for free.
+// Maps a request path to a file inside the static dir, or null when the path escapes it. The separator check rejects `..` segments that resolve outside the static dir (e.g. `/../source/web/server.ts`), preserving the traversal safety the explicit route map gave for free. Raw `.ts` sources are refused outright: they are the authoring format and are never shipped to the browser — the browser-facing URL for a converted module is its `.js` path (see resolveTypeScriptSourceAsset).
 export function resolveStaticAsset(staticDir: string, requestPath: string): StaticAsset | null {
 	const relativePath = requestPath === '/' ? 'index.html' : requestPath.slice(1)
 	const resolvedPath = path.resolve(staticDir, relativePath)
 	if (!resolvedPath.startsWith(staticDir + path.sep)) return null
 	const extension = path.extname(resolvedPath)
+	if (extension === '.ts') return null
 	return { resolvedPath, contentType: CONTENT_TYPES[extension] ?? 'application/octet-stream' }
+}
+
+// The TypeScript source behind a browser-facing module URL: a `.js` request outside `vendor/` is served from `ts/<same path>.ts` when that source exists, so converted modules keep their pre-conversion URLs and their import specifiers never change. Null when the request is not a module URL, targets the vendored third-party files (always served verbatim), or would escape the static dir — the same separator check as resolveStaticAsset.
+export function resolveTypeScriptSourceAsset(staticDir: string, requestPath: string): StaticAsset | null {
+	if (!requestPath.endsWith('.js')) return null
+	const relativePath = requestPath.slice(1)
+	if (relativePath.startsWith('vendor/')) return null
+	const resolvedPath = path.resolve(staticDir, 'ts', `${relativePath.slice(0, -'.js'.length)}.ts`)
+	if (!resolvedPath.startsWith(staticDir + path.sep)) return null
+	return { resolvedPath, contentType: CONTENT_TYPES['.js'] ?? 'application/octet-stream' }
 }
 
 function notFound(): Response {
@@ -70,14 +81,44 @@ export function createServeAssetFile(): ServeAssetFile {
 	}
 }
 
+// The filesystem access the TypeScript-serving leaf reads; null is the "no source converted yet" signal that falls back to the real file. Injectable so the transpile pipeline is exercisable in-memory, mirroring PathFilesystem in executor/tools/shared.ts.
+export interface TypeScriptSourceFilesystem {
+	readSource(sourcePath: string): string | null
+}
+
+export const nodeTypeScriptSourceFilesystem: TypeScriptSourceFilesystem = {
+	readSource: (sourcePath) => existsSync(sourcePath) ? readFileSync(sourcePath, 'utf8') : null,
+}
+
+// Transpiles the mapped TS source into browser JavaScript on every request. No result cache: the no-store edit-and-refresh contract must keep working and ~25 small files transpile in trivial time. A source that fails to transpile throws — a broken module must be loud, not fall back to a 404 for a file that does not exist.
+export function createServeTypeScriptSource(filesystem: TypeScriptSourceFilesystem): ServeAssetFile {
+	const transpiler = new Bun.Transpiler({ loader: 'ts' })
+	return (asset) => {
+		const source = filesystem.readSource(asset.resolvedPath)
+		if (source === null) return null
+		return new Response(transpiler.transformSync(source), {
+			headers: {
+				'content-type': asset.contentType,
+				'cache-control': 'no-store',
+			},
+		})
+	}
+}
+
 export interface ServeStaticConfig {
 	staticDir: string
 	pageTitle: string
 	serveAssetFile: ServeAssetFile
+	serveTypeScriptSource: ServeAssetFile
 }
 
 export function createServeStatic(config: ServeStaticConfig): ServeStatic {
 	return async (requestPath) => {
+		const typeScriptSource = resolveTypeScriptSourceAsset(config.staticDir, requestPath)
+		if (typeScriptSource !== null) {
+			const sourceResponse = config.serveTypeScriptSource(typeScriptSource)
+			if (sourceResponse !== null) return sourceResponse
+		}
 		const asset = resolveStaticAsset(config.staticDir, requestPath)
 		if (asset === null) return notFound()
 		const assetResponse = config.serveAssetFile(asset)
@@ -99,7 +140,12 @@ function createWebSocketHandlers(streamHub: StreamHub): Bun.WebSocketHandler<und
 }
 
 export function createWebServer(config: WebServerConfig): WebServer {
-	const handleRequest = createRequestHandler(config, createServeStatic({ staticDir: STATIC_DIR, pageTitle: config.pageTitle, serveAssetFile: createServeAssetFile() }))
+	const handleRequest = createRequestHandler(config, createServeStatic({
+		staticDir: STATIC_DIR,
+		pageTitle: config.pageTitle,
+		serveAssetFile: createServeAssetFile(),
+		serveTypeScriptSource: createServeTypeScriptSource(nodeTypeScriptSourceFilesystem),
+	}))
 	const streamHub = config.streamHub
 	// Two option shapes because Bun's types require a definite `websocket` key when one is present. The upgrade branch intercepts before the request handler: a websocket client GETs the stream path with upgrade headers and server.upgrade answers the 101 handshake, after which Bun requires no response (hence the undefined return). A false return — a plain GET of the path — falls through to the normal handler like any other request.
 	const server = streamHub === undefined

@@ -1977,7 +1977,7 @@ function WatchScreen(state) {
 // re-derives its labels. A descriptor whose id no longer resolves (an operation from a frame the
 // poll has since replaced, or a participant/role the model no longer carries) yields an empty title
 // and is treated as "no card" so a stale hover state dismisses rather than rendering a heading-less
-// card. The card is `position: fixed` (styles.css), anchored to the snapshot rect taken at hover
+// card. The card is `position: fixed` (stylesheets/styles.css), anchored to the snapshot rect taken at hover
 // time, so it sits at a fixed position relative to the node (not the pointer) and stays put while
 // the pointer is over it; its only prose-carrying section is the operation details markdown, which
 // the hover wiring fetches on demand and which `formatTooltipContent` routes through the sanitized

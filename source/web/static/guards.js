@@ -1,4 +1,2 @@
-// The shared record guard for the browser modules: a plain object (not null, not an array). One definition so the view modules' input checks cannot drift apart, mirroring the exported isObject the server-side modules share (source/executor/validation.ts) — the static bundle cannot import from the executor, so the browser side keeps its own copy of the same semantics.
-export function isObject(value) {
-	return typeof value === 'object' && value !== null && !Array.isArray(value)
-}
+// Forwarding module for the unconverted plain-JS importers of this path: the browser loads /guards.js through the server's TypeScript mapping (ts/guards.ts), but Bun resolves plain-JS importers' specifiers literally, so the test suite's module graph needs a real file at this path.
+export { isObject } from './ts/guards.ts'
