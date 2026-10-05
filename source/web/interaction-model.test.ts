@@ -9,7 +9,7 @@ import {
 	rolesOnlyModel,
 	rolesOnlyParticipants,
 	stacksOf,
-} from './static/interaction-model.js'
+} from './static/ts/interaction-model.js'
 
 // The helpers arrive typed from the module's JSDoc. Pulling the model type off activeStack's parameter lets the inline literals below be contextually checked against the JSDoc shape without a cast.
 type InteractionModel = Parameters<typeof activeStack>[0]

@@ -4,113 +4,69 @@
 //
 // Authoring against the model contract (operations and participants as first-class data, no event vocabulary and no window reconstruction) lets the scenarios exercise instance-per-invocation retries, cross-stack observes, and the three interrupt fates (resume / rewind / terminate) read off operation sequences rather than a fate field.
 //
-// The scenarios are browser-pure JS (imports only the sibling interaction-model.js) so the static server serves them and the test runner imports them from the filesystem, mirroring the sibling interaction-model.js convention.
+// The scenarios are browser-pure TypeScript (imports only the sibling interaction-model.js) so the static server serves them and the test runner imports them from the filesystem, mirroring the sibling interaction-model.js convention.
 
+import type { InteractionModel, Operation, OperationKind, OperationLifecycle, OperationOutcome, Participant, ParticipantKind, RunStatus } from './interaction-model.js'
 import { isTerminalStatus } from './interaction-model.js'
 
-/**
- * @typedef {'human' | 'interrupt' | 'role' | 'tool'} ParticipantKind
- */
-
-/**
- * @typedef {Object} Participant
- * @property {string} id
- *   Instance-scoped, unique per invocation. A role invoked twice carries two participants with distinct ids, so a retry renders a second node rather than a counter on the first.
- * @property {string} role
- *   The role or tool name; 'human' for the You root and 'interrupt' for interrupt roots.
- * @property {ParticipantKind} kind
- */
-
-/**
- * @typedef {'call' | 'return' | 'observe' | 'terminate'} OperationKind
- */
-
-/**
- * @typedef {'success' | 'error' | 'terminated'} OperationOutcome
- */
-
-/**
- * @typedef {Object} OperationMetrics
- * @property {number | null} tokens
- * @property {number | null} cachedPromptTokens
- * @property {number | null} elapsedSeconds
- */
-
-/**
- * @typedef {Object} Operation
- * @property {string} id
- * @property {OperationKind} kind
- * @property {string} stack
- * @property {string} source
- * @property {string} destination
- * @property {string} startedAt
- * @property {string | null} settledAt
- * @property {'in_flight' | 'settled'} lifecycle
- * @property {OperationOutcome | null} outcome
- * @property {OperationMetrics | null} metrics
- */
-
-/**
- * @typedef {'running' | 'success' | 'error' | 'needs_clarification' | 'interrupted' | 'unknown'} RunStatus
- */
-
-/**
- * @typedef {Object} InteractionModel
- * @property {Participant[]} participants
- * @property {Operation[]} operations
- * @property {RunStatus} status
- */
-
 // An operation spec is the authored input to the frame builder: a call carries no settledAt/lifecycle/outcome (those are derived from how later specs advance it), a return carries its own settledAt and outcome, and an observe is instantaneous.
-/**
- * @typedef {Object} OperationSpec
- * @property {string} id
- * @property {OperationKind} kind
- * @property {string} stack
- * @property {string} source
- * @property {string} destination
- * @property {string} startedAt
- * @property {string} [settledAt]
- *   Return only: when the return completed.
- * @property {OperationOutcome} [outcome]
- *   Return only: the outcome the callee settled with.
- */
+export interface OperationSpec {
+	id: string
+	kind: OperationKind
+	stack: string
+	source: string
+	destination: string
+	startedAt: string
+	// Return only: when the return completed.
+	settledAt?: string
+	// Return only: the outcome the callee settled with.
+	outcome?: OperationOutcome
+}
 
-/**
- * @typedef {Object} Scenario
- * @property {string} id
- * @property {string} label
- * @property {InteractionModel[]} frames
- */
+export interface Scenario {
+	id: string
+	label: string
+	frames: InteractionModel[]
+}
 
-function participant(id, role, kind) {
+// The authored scenario the frame builder expands: the static participant inventory, the ordered operation specs, and the run status each frame carries.
+interface ScenarioSource {
+	id: string
+	label: string
+	participants: Participant[]
+	operations: OperationSpec[]
+	statuses: RunStatus[]
+}
+
+function participant(id: string, role: string, kind: ParticipantKind): Participant {
 	return { id, role, kind }
 }
 
-function callOperation(id, stack, source, destination, startedAt) {
+function callOperation(id: string, stack: string, source: string, destination: string, startedAt: string): OperationSpec {
 	return { id, kind: 'call', stack, source, destination, startedAt }
 }
 
-function returnOperation(id, stack, source, destination, startedAt, settledAt, outcome) {
+function returnOperation(id: string, stack: string, source: string, destination: string, startedAt: string, settledAt: string, outcome: OperationOutcome): OperationSpec {
 	return { id, kind: 'return', stack, source, destination, startedAt, settledAt, outcome }
 }
 
-function observeOperation(id, stack, source, destination, startedAt) {
+function observeOperation(id: string, stack: string, source: string, destination: string, startedAt: string): OperationSpec {
 	return { id, kind: 'observe', stack, source, destination, startedAt }
 }
 
 // A terminate is an instantaneous destructive close: a rewind tool in the active stack reverts a target node in a paused stack. Like observe it carries no settledAt/outcome of its own (settledAt === startedAt, outcome null), but unlike observe it closes the targeted call — popping the open call whose destination matches — so the node is removed immediately and no separate 'terminated' return is needed for that call. A terminate never hands off activity, so the active operation stays the interrupt's own call rather than the terminate.
-function terminateOperation(id, stack, source, destination, startedAt) {
+function terminateOperation(id: string, stack: string, source: string, destination: string, startedAt: string): OperationSpec {
 	return { id, kind: 'terminate', stack, source, destination, startedAt }
 }
 
 // Builds the full Operation list for the first `count` specs by replaying them. A call is in_flight only while it is the innermost still-open call on its stack: once a nested call appears on the same stack the outer call is settled at that nested call's startedAt (the callee delegated), and once its matching return appears it is settled at that return's startedAt. The return's outcome is never mirrored onto the call — the contract is "outcome is returns only", so a view that needs a call's eventual outcome pairs the call with its closing return rather than reading a duplicated field. This is what lets a single per-stack invariant ("at most one in_flight operation per stack") hold for nested chains, paused stacks, and reactivated legs alike.
-function materializeOperations(specs, count) {
-	const closingReturnByCallId = new Map()
-	const openCallIdsByStack = new Map()
-	const openCallSpecsByStack = new Map()
+function materializeOperations(specs: OperationSpec[], count: number): Operation[] {
+	const closingReturnByCallId = new Map<string, { settledAt: string; outcome: OperationOutcome | null }>()
+	const openCallIdsByStack = new Map<string, string[]>()
+	const openCallSpecsByStack = new Map<string, OperationSpec[]>()
 	for (let index = 0; index < count; index += 1) {
 		const spec = specs[index]
+		if (spec === undefined) continue
 		if (spec.kind === 'call') {
 			let openChain = openCallIdsByStack.get(spec.stack)
 			let openSpecChain = openCallSpecsByStack.get(spec.stack)
@@ -132,7 +88,7 @@ function materializeOperations(specs, count) {
 			}
 			if (openSpecChain !== undefined && openSpecChain.length > 0) {
 				const callSpec = openSpecChain.pop()
-				if (callSpec !== undefined) closingReturnByCallId.set(callSpec.id, { settledAt: spec.startedAt, outcome: spec.outcome })
+				if (callSpec !== undefined) closingReturnByCallId.set(callSpec.id, { settledAt: spec.startedAt, outcome: spec.outcome ?? null })
 			}
 		} else if (spec.kind === 'terminate') {
 			// A terminate closes the targeted call (the open call whose destination it reverts) without a return carrying the killed result, so the call's lifecycle flips to settled and the chain pops immediately. Matching by destination across every stack mirrors openCallsByStack: a terminate's destination lives in a paused stack while the terminate itself is logged on the active stack.
@@ -153,7 +109,7 @@ function materializeOperations(specs, count) {
 		}
 	}
 	// innermostOpenCallByStack must be derived from the surviving open-chain ids (terminate may have popped the innermost), not the spec chain, so a terminate that closed a stack's innermost call no longer reports that call as innermost.
-	const innermostOpenCallByStack = new Map()
+	const innermostOpenCallByStack = new Map<string, string>()
 	for (const [stackId, openChain] of openCallIdsByStack) {
 		// The ids chain may carry an id whose spec was popped by a terminate without a corresponding return; reconcile against the surviving specs so only genuinely-open calls remain innermost.
 		const survivingSpecChain = openCallSpecsByStack.get(stackId) ?? []
@@ -168,24 +124,27 @@ function materializeOperations(specs, count) {
 		}
 	}
 	// A call that is still open but no longer innermost was settled by delegation: its settledAt is the startedAt of the next operation to land on its stack (the nested call that took over).
-	const delegationStartedAtByCallId = new Map()
+	const delegationStartedAtByCallId = new Map<string, string>()
 	for (let index = 0; index < count; index += 1) {
 		const spec = specs[index]
-		if (spec.kind !== 'call') continue
+		if (spec === undefined || spec.kind !== 'call') continue
 		for (let next = index + 1; next < count; next += 1) {
-			if (specs[next].stack === spec.stack) {
-				delegationStartedAtByCallId.set(spec.id, specs[next].startedAt)
+			const nextSpec = specs[next]
+			if (nextSpec === undefined) continue
+			if (nextSpec.stack === spec.stack) {
+				delegationStartedAtByCallId.set(spec.id, nextSpec.startedAt)
 				break
 			}
 		}
 	}
-	const operations = []
+	const operations: Operation[] = []
 	for (let index = 0; index < count; index += 1) {
 		const spec = specs[index]
+		if (spec === undefined) continue
 		if (spec.kind === 'call') {
 			const closingReturn = closingReturnByCallId.get(spec.id)
-			let settledAt = null
-			let lifecycle = 'in_flight'
+			let settledAt: string | null = null
+			let lifecycle: OperationLifecycle = 'in_flight'
 			if (closingReturn !== undefined) {
 				settledAt = closingReturn.settledAt
 				lifecycle = 'settled'
@@ -195,7 +154,7 @@ function materializeOperations(specs, count) {
 			}
 			operations.push({ id: spec.id, kind: 'call', stack: spec.stack, source: spec.source, destination: spec.destination, startedAt: spec.startedAt, settledAt, lifecycle, outcome: null, metrics: null })
 		} else if (spec.kind === 'return') {
-			operations.push({ id: spec.id, kind: 'return', stack: spec.stack, source: spec.source, destination: spec.destination, startedAt: spec.startedAt, settledAt: spec.settledAt, lifecycle: 'settled', outcome: spec.outcome, metrics: null })
+			operations.push({ id: spec.id, kind: 'return', stack: spec.stack, source: spec.source, destination: spec.destination, startedAt: spec.startedAt, settledAt: spec.settledAt ?? null, lifecycle: 'settled', outcome: spec.outcome ?? null, metrics: null })
 		} else {
 			// observe and terminate are both instantaneous references logged on the active stack: settledAt === startedAt, lifecycle settled, outcome null. Neither opens or closes a call, so neither participates in the open-chain bookkeeping above.
 			operations.push({ id: spec.id, kind: spec.kind, stack: spec.stack, source: spec.source, destination: spec.destination, startedAt: spec.startedAt, settledAt: spec.startedAt, lifecycle: 'settled', outcome: null, metrics: null })
@@ -205,9 +164,9 @@ function materializeOperations(specs, count) {
 }
 
 // Collects participants in chronological first-appearance order by scanning the frame's operations; the registry holds the full Participant objects so the lookup is a pure mapping from id to { role, kind }. The 'interrupt' pseudo-role therefore appears only on the frame where an interrupt's first call lands, matching the model's first-use rule.
-function participantsInOrder(operations, registry) {
-	const seen = new Set()
-	const ordered = []
+function participantsInOrder(operations: Operation[], registry: Map<string, Participant>): Participant[] {
+	const seen = new Set<string>()
+	const ordered: Participant[] = []
 	for (const operation of operations) {
 		for (const id of [operation.source, operation.destination]) {
 			if (seen.has(id)) continue
@@ -221,11 +180,14 @@ function participantsInOrder(operations, registry) {
 }
 
 // Returns the index of the latest activity-affecting operation on the active stack (the model's "active operation"), or -1 when the active stack carries only observes/terminates. This is the single operation whose lifecycle a transit/working frame overrides; every earlier operation keeps the lifecycle the normal materialization derived, so paused stacks keep their genuinely in_flight operations and the model's single invariant holds.
-function activeOperationIndex(operations) {
+function activeOperationIndex(operations: Operation[]): number {
 	if (operations.length === 0) return -1
-	const activeStackId = operations[operations.length - 1].stack
+	const latestOperation = operations[operations.length - 1]
+	if (latestOperation === undefined) return -1
+	const activeStackId = latestOperation.stack
 	for (let index = operations.length - 1; index >= 0; index -= 1) {
 		const operation = operations[index]
+		if (operation === undefined) continue
 		if (operation.stack !== activeStackId) continue
 		if (operation.kind === 'observe' || operation.kind === 'terminate') continue
 		return index
@@ -234,11 +196,13 @@ function activeOperationIndex(operations) {
 }
 
 // Materializes the first `count` specs under the normal lifecycle rules, then overrides the active operation's lifecycle to the requested phase. 'transit' forces the active operation in_flight (the call/return is traveling, so its line animates) and 'working' forces it settled (the call/return has arrived, so its line goes solid while its destination keeps pulsing). Sibling in_flight operations on the active stack are settled in BOTH phases, not just transit, because only the active operation is ever in_flight on the active stack: a return in transit animates its own return line, and a return's working frame leaves the caller's established call solid (not flowing) — the caller resumed but its call is no longer traveling. Paused stacks are never touched (their operations live on other stacks), so they keep their genuinely in_flight operations and the model's single invariant holds.
-function materializeForPhase(specs, count, phase) {
+function materializeForPhase(specs: OperationSpec[], count: number, phase: 'transit' | 'working'): Operation[] {
 	const operations = materializeOperations(specs, count)
 	const activeIndex = activeOperationIndex(operations)
 	if (activeIndex === -1) return operations
-	const activeStackId = operations[activeIndex].stack
+	const activeOperation = operations[activeIndex]
+	if (activeOperation === undefined) return operations
+	const activeStackId = activeOperation.stack
 	return operations.map((operation, index) => {
 		if (index === activeIndex) {
 			if (phase === 'transit') return { ...operation, lifecycle: 'in_flight', settledAt: null }
@@ -252,24 +216,17 @@ function materializeForPhase(specs, count, phase) {
 	})
 }
 
-/**
- * @param {object} raw
- * @param {string} raw.id
- * @param {string} raw.label
- * @param {Participant[]} raw.participants
- * @param {OperationSpec[]} raw.operations
- * @param {RunStatus[]} raw.statuses
- * @returns {Scenario}
- */
-function buildScenario(raw) {
+function buildScenario(raw: ScenarioSource): Scenario {
 	const registry = new Map(raw.participants.map((entry) => [entry.id, entry]))
 	if (raw.operations.length === 0) throw new Error(`scenario "${raw.id}" has no operations`)
 	if (raw.statuses.length !== raw.operations.length) throw new Error(`scenario "${raw.id}" statuses length does not match operations length`)
-	const frames = []
+	const frames: InteractionModel[] = []
 	for (let index = 0; index < raw.operations.length; index += 1) {
 		const spec = raw.operations[index]
+		if (spec === undefined) continue
 		const count = index + 1
 		const status = raw.statuses[index]
+		if (status === undefined) throw new Error(`scenario "${raw.id}" is missing the status for operation index ${index}`)
 		const isLastSpec = index === raw.operations.length - 1
 		// An observe or terminate is instantaneous, so it expands to a single frame that holds the prior active operation in its working phase (the call it peeked at or reverted is still being worked on); giving it its own transit/working pair would re-animate a line that should stay solid.
 		if (spec.kind === 'observe' || spec.kind === 'terminate') {
@@ -301,14 +258,14 @@ function buildScenario(raw) {
 }
 
 // Fills every frame's status with 'running' except the final frame, which carries the run's terminal status. Used by scenarios whose mid-run status is uniformly 'running'.
-function runningThenTerminal(operationCount, terminalStatus) {
-	const statuses = new Array(operationCount).fill('running')
+function runningThenTerminal(operationCount: number, terminalStatus: RunStatus): RunStatus[] {
+	const statuses: RunStatus[] = new Array(operationCount).fill('running')
 	statuses[operationCount - 1] = terminalStatus
 	return statuses
 }
 
 // Single-role completion: the human delegates directly to one role, the role returns, the run ends. Establishes the minimal frame pair against which every more elaborate scenario is a variation.
-const singleRoleCompletion = {
+const singleRoleCompletion: ScenarioSource = {
 	id: 'single-role-completion',
 	label: 'Single-role completion',
 	participants: [
@@ -323,7 +280,7 @@ const singleRoleCompletion = {
 }
 
 // Delegation chain: orchestrator hands to planner, planner to coder, coder to a tool, then the returns unwind to the human. Four-deep nesting exercises the call-chain projection and the in_flight handoff between nesting levels.
-const delegationChain = {
+const delegationChain: ScenarioSource = {
 	id: 'delegation-chain',
 	label: 'Delegation chain',
 	participants: [
@@ -347,7 +304,7 @@ const delegationChain = {
 }
 
 // Retry: the orchestrator delegates to a coder, the coder returns, the orchestrator re-delegates to a fresh coder instance. coder-1 and coder-2 are distinct Participant instances sharing role 'coder', exercising instance-per-invocation rather than a counter on the first node.
-const retryWithFreshInstance = {
+const retryWithFreshInstance: ScenarioSource = {
 	id: 'retry-with-fresh-instance',
 	label: 'Retry (fresh instance)',
 	participants: [
@@ -368,7 +325,7 @@ const retryWithFreshInstance = {
 }
 
 // Deep call tree: five levels of nesting (human to orchestrator to planner to coder to critic to a tool). Exceeds the four-deep delegation chain so the call-chain projection and the per-stack in_flight rule are visibly exercised one level further.
-const deepCallTree = {
+const deepCallTree: ScenarioSource = {
 	id: 'deep-call-tree',
 	label: 'Deep call tree',
 	participants: [
@@ -395,7 +352,7 @@ const deepCallTree = {
 }
 
 // Pending question (ask_human): the orchestrator asks the human a question via a call that targets a DISTINCT human answerer instance — instance-per-invocation for human, like coder-1/coder-2 — rather than the root 'you' (the task submitter, who is never the target of a question). The ask_human call persists in transit (a single transit frame, no working frame) until the user answers, then the human_answer return closes the call and turns the answerer green, and the run completes with a terminal return to the root 'you'.
-const pendingQuestion = {
+const pendingQuestion: ScenarioSource = {
 	id: 'pending-question',
 	label: 'Pending question',
 	participants: [
@@ -413,7 +370,7 @@ const pendingQuestion = {
 }
 
 // Interrupt (detected loop): a coder is mid-flight when an Interrupt instance spawns a fresh stack rooted at the loop detector. The detector calls a tool, the tool observes into the paused coder stack and returns to the detector, the detector returns, and the coder stack resumes. The observe crosses stacks (source in the active interrupt stack, destination in the paused root) and never enters a call chain.
-const detectedLoopInterrupt = {
+const detectedLoopInterrupt: ScenarioSource = {
 	id: 'detected-loop-interrupt',
 	label: 'Interrupt (detected loop)',
 	participants: [
@@ -443,7 +400,7 @@ const detectedLoopInterrupt = {
 }
 
 // Nested interrupt: an interrupt preempts an interrupt. Three stacks (root, interrupt-1, interrupt-2) briefly coexist with open calls before the innermost resolves, then the next, then the root. Confirms an interrupt is itself preemptable and each gets its own stack id. Each interrupt calls its own fresh loop_detector instance (instance-per-invocation, mirroring coder-1/coder-2), so the two simultaneously-open interrupt stacks carry distinct participants and the active-node highlight lights up only the active stack's detector rather than both.
-const nestedInterrupt = {
+const nestedInterrupt: ScenarioSource = {
 	id: 'nested-interrupt',
 	label: 'Nested interrupt',
 	participants: [
@@ -471,7 +428,7 @@ const nestedInterrupt = {
 // Rewind fate: an interrupt's loop_detector calls a rewind tool, the tool emits a terminate op reverting the paused-stack target (which closes the call immediately, removing the node), the tool returns, the loop_detector returns, and the ancestor gets control and calls a fresh coder-2 instance. A second interrupt preempts mid-rewind so the rewind fate is observable on a paused stack.
 //
 // The act of reverting is the rewind tool's terminate ops, not a terminated outcome on a return: the tool rewinds other rows' calls, not the loop detector agent itself, so the loop_detector calls the tool, the tool terminates the target (source = the tool, destination = the target node), then the tool returns success to the loop_detector. The terminate op closes the targeted call immediately, so no separate terminated return is needed for that call — the node is removed right away.
-const rewindFate = {
+const rewindFate: ScenarioSource = {
 	id: 'rewind-fate',
 	label: 'Rewind fate',
 	participants: [
@@ -504,7 +461,7 @@ const rewindFate = {
 }
 
 // Deeper nested interrupt: three stacks (root, interrupt-1, interrupt-2) coexist with open calls while the innermost runs. Each interrupt calls its own fresh loop_detector instance (instance-per-invocation, like every role), and each loop_detector in turn calls its own fresh read_message_window instance, so the two simultaneously-open interrupt stacks carry distinct participants and the observe's source (the tool) is unambiguous. The inner interrupt's tool observes the outermost paused stack across the middle row, exercising a non-adjacent observe line. Each paused stack carries an in_flight call that must render frozen. Resolving the inner stack resumes the middle one, which then resumes the root — the active-stack row reorders inward as stacks close.
-const nestedInterruptDeep = {
+const nestedInterruptDeep: ScenarioSource = {
 	id: 'nested-interrupt-deep',
 	label: 'Nested interrupt (deep, three stacks)',
 	participants: [
@@ -541,7 +498,7 @@ const nestedInterruptDeep = {
 }
 
 // Rewind whose tool terminates multiple children (coder, then planner) before the ancestor's fresh call, then a normal nested call after the rewind, then a re-pause mid-flight. The loop_detector calls the rewind tool, the tool emits one terminate per reverted node (each sourced at the tool), the terminate closes each targeted call immediately (removing the node right away), then the tool returns success, the loop_detector returns, and the ancestor (orchestrator) gets control and calls a fresh coder-2. The mid-rewind preemption (interrupt-2) leaves the root paused while the rewind is in progress. The post-rewind re-pause (interrupt-3) leaves the root paused mid-normal-operation past the rewind.
-const rewindMultiTerminate = {
+const rewindMultiTerminate: ScenarioSource = {
 	id: 'rewind-multi-terminate',
 	label: 'Rewind (multi-terminate, mixed phase)',
 	participants: [
@@ -583,7 +540,7 @@ const rewindMultiTerminate = {
 }
 
 // Terminate fate: an interrupt's loop_detector calls a terminate_task tool, which discards the whole task by emitting a terminate op targeting each node on the root stack (coder, then orchestrator). Each terminate closes the targeted call immediately, removing the node right away; no separate terminated returns are needed for the killed calls. After the terminates, the root stack has no open calls and the run ends cleanly (the tool returns success to the loop_detector, which returns to the interrupt). The model's RunStatus has no 'terminated' value, so a terminated run maps to 'success' (the run ended without erroring).
-const terminateFate = {
+const terminateFate: ScenarioSource = {
 	id: 'terminate-fate',
 	label: 'Terminate fate',
 	participants: [
@@ -610,7 +567,7 @@ const terminateFate = {
 }
 
 // Error: a role returns with outcome 'error', and the run ends in the error status. The error outcome lives on the return only; a view reading the call chain derives the failed leg by pairing the call with its closing return, not by reading an outcome off the call.
-const errorReturn = {
+const errorReturn: ScenarioSource = {
 	id: 'error-return',
 	label: 'Error',
 	participants: [
@@ -627,7 +584,7 @@ const errorReturn = {
 	statuses: runningThenTerminal(4, 'error'),
 }
 
-const rawScenarios = [
+const rawScenarios: ScenarioSource[] = [
 	singleRoleCompletion,
 	delegationChain,
 	retryWithFreshInstance,
@@ -642,15 +599,11 @@ const rawScenarios = [
 	errorReturn,
 ]
 
-/**
- * The ordered demo scenarios, each materialized into a full InteractionModel frame sequence.
- *
- * @type {Scenario[]}
- */
-export const scenarios = rawScenarios.map(buildScenario)
+// The ordered demo scenarios, each materialized into a full InteractionModel frame sequence.
+export const scenarios: Scenario[] = rawScenarios.map(buildScenario)
 
 // The complete role and tool inventory the demo guild defines statically. The guild config lists every role up front — a run reveals which get called over time, so the sequence view must show every guild role as a column from frame 0 rather than growing the column set as participants first appear (peeking at a future frame to know which roles will be called would defeat the model's "the run reveals what happens" contract). A column may therefore carry no messages for an entire scenario; that is a guild role the run simply did not invoke. The 'human' and 'tools' columns are added by the view (human always present, tools collapsing every tool-kind participant), so this list carries only the real roles and tools.
-export const GUILD_PARTICIPANTS = [
+export const GUILD_PARTICIPANTS: Participant[] = [
 	participant('guild:orchestrator', 'orchestrator', 'role'),
 	participant('guild:planner', 'planner', 'role'),
 	participant('guild:coder', 'coder', 'role'),

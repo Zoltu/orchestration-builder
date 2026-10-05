@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
-import { resolveInspectorScope } from './static/inspector.js'
-import { activeStack } from './static/interaction-model.js'
+import { resolveInspectorScope } from './static/ts/inspector.js'
+import { activeStack } from './static/ts/interaction-model.js'
 
 // The model type arrives typed from interaction-model.js's JSDoc (the convention the sibling view tests follow), so the inline fixtures are contextually checked without a cast.
 type InteractionModel = Parameters<typeof activeStack>[0]

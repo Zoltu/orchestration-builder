@@ -1,63 +1,20 @@
 import type { LogEvent, RunMeta } from '../executor/types.js'
 import { isObject } from '../executor/validation.js'
 import type { RunSnapshot } from './render.js'
+import type { InteractionModel, Operation, OperationOutcome, Participant, ParticipantKind, RunStatus, StackRecord } from './static/ts/interaction-model.js'
 
 // The InteractionModel shape this adapter produces is the contract the browser view modules
-// render. The canonical definition lives in `source/web/static/interaction-model.js` (JSDoc —
-// the read helpers both views call) and `docs/visualization.md` "The model"; these interfaces
-// mirror that shape so the server typechecks against the same contract the client consumes.
+// render. The canonical definition lives in `source/web/static/ts/interaction-model.ts` (the
+// read helpers both views call) and `docs/visualization.md` "The model"; the types are imported
+// from there so the server typechecks against the same contract the client consumes.
 
-type ParticipantKind = 'human' | 'interrupt' | 'role' | 'tool'
-type OperationKind = 'call' | 'return' | 'observe' | 'terminate'
-type OperationLifecycle = 'in_flight' | 'settled'
-type OperationOutcome = 'success' | 'error' | 'terminated'
-type RunStatus = 'running' | 'success' | 'error' | 'needs_clarification' | 'interrupted' | 'unknown'
-
-interface Participant {
-	id: string
-	role: string
-	kind: ParticipantKind
-	// The executor's role-instance id (the role_start payload's roleId, e.g. "coder-1-2"), carried by 'role'-kind participants when the log supplies it. This is the identity the LLM-turn inspector scopes to, so the view click-through can map a flow node/message to its transcript instance (see static/inspector.js resolveInspectorScope). Pseudo-roles and tools have no instance ids in the log vocabulary, and logs predating per-instance ids carry none, so the field is optional.
-	roleId?: string
-}
-
-interface OperationMetrics {
-	tokens: number | null
-	cachedPromptTokens: number | null
-	elapsedSeconds: number | null
-}
-
-interface Operation {
-	id: string
-	kind: OperationKind
-	stack: string
-	source: string
-	destination: string
-	startedAt: string
-	settledAt: string | null
-	lifecycle: OperationLifecycle
-	outcome: OperationOutcome | null
-	metrics: OperationMetrics | null
-}
+export type { InteractionModel }
 
 // The unformatted detail material an operation carries, recorded during the walk and formatted only when a details request names the operation (deriveInteractionOperationDetail). Tool arguments/results can be multi-megabyte, so formatting them per poll for every operation would dominate the flow endpoint's cost; the raw source is a reference the poll never serializes.
 type OperationDetailSource =
 	| { kind: 'text'; text: string }
 	| { kind: 'arguments'; arguments: string }
 	| { kind: 'result'; result: unknown }
-
-interface StackRecord {
-	id: string
-	root: string
-}
-
-export interface InteractionModel {
-	participants: Participant[]
-	operations: Operation[]
-	status: RunStatus
-	// Stack roots in push order (oldest first). A freshly preempted stack has no operations yet, so operations alone cannot name it; the records carry every stack the run has pushed, resolved or not.
-	stacks: StackRecord[]
-}
 
 const ROOT_HUMAN_ID = 'human:root'
 const MAIN_STACK = 'main'

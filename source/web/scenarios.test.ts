@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
-import { scenarios } from './static/scenarios.js'
-import { activeStack, observesOf } from './static/interaction-model.js'
+import { scenarios } from './static/ts/scenarios.js'
+import { activeStack, observesOf } from './static/ts/interaction-model.js'
 import { defined } from './test-fixtures.js'
 
 // Pull the model type off the helper signature so the validator's parameter is contextually checked against the JSDoc shape without a cast, mirroring how the model's own test derives its type.

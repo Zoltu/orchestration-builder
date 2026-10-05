@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import type { LogEvent, RunMeta } from '../executor/types.js'
 import type { RunSnapshot } from './render.js'
 import { deriveInteractionModel, deriveInteractionOperationDetail } from './interaction-model-adapter.js'
-import { activeParticipant, activeStack, callChainOf, fateOf, observesOf, stacksOf, terminatesOf } from './static/interaction-model.js'
+import { activeParticipant, activeStack, callChainOf, fateOf, observesOf, stacksOf, terminatesOf } from './static/ts/interaction-model.js'
 import { defined, present } from './test-fixtures.js'
 
 // The helpers arrive typed from the module's JSDoc; the adapter's InteractionModel is

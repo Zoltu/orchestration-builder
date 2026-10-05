@@ -10,60 +10,53 @@ import { isObject } from './guards.js'
 const INITIAL_BACKOFF_MS = 500
 const MAX_BACKOFF_MS = 8000
 
-/**
- * A delta message as the server ships it on the stream: the message type, the role instance and role name that produced the text, which turn-text field it extends, the text itself, and — for a retried attempt whose text re-emits from zero — the `reset` marker.
- *
- * @typedef {Object} StreamDeltaMessage
- * @property {'delta'} type
- * @property {string} runId
- * @property {string} roleId
- * @property {string} role
- * @property {'reasoning'|'content'} field
- * @property {string} text
- * @property {boolean} [reset]
- */
+// A delta message as the server ships it on the stream: the message type, the role instance and role name that produced the text, which turn-text field it extends, the text itself, and — for a retried attempt whose text re-emits from zero — the `reset` marker.
+export interface StreamDeltaMessage {
+	type: 'delta'
+	runId: string
+	roleId: string
+	role: string
+	field: 'reasoning' | 'content'
+	text: string
+	reset?: boolean
+}
 
-/**
- * The handler set a socket factory wires onto the connection's events. `onMessage` is invoked with text frames only; the protocol is JSON-only, so binary frames arrive mapped to an empty string and are dropped by the tolerant parse.
- *
- * @typedef {Object} StreamSocketHandlers
- * @property {() => void} onOpen
- * @property {(raw: string) => void} onMessage
- * @property {() => void} onClose
- * @property {() => void} onError
- */
+// The handler set a socket factory wires onto the connection's events. `onMessage` is invoked with text frames only; the protocol is JSON-only, so binary frames arrive mapped to an empty string and are dropped by the tolerant parse.
+export interface StreamSocketHandlers {
+	onOpen: () => void
+	onMessage: (raw: string) => void
+	onClose: () => void
+	onError: () => void
+}
 
-/**
- * Opens a socket and wires the handlers onto it, returning the minimal send/close handle the client drives. The native WebSocket satisfies this structurally; tests inject a fake.
- *
- * @typedef {(url: string, handlers: StreamSocketHandlers) => { send(text: string): void, close(): void }} OpenSocket
- */
+// The minimal send/close handle the client drives. The native WebSocket satisfies this structurally; tests inject a fake.
+export interface StreamSocket {
+	send(text: string): void
+	close(): void
+}
 
-/**
- * The client handle: `subscribe` asks for one run's stream (a re-subscribe replaces the previous), `close` shuts the socket down and stops reconnecting for good.
- *
- * @typedef {Object} StreamClient
- * @property {(runId: string) => void} subscribe
- * @property {() => void} close
- */
+// Opens a socket and wires the handlers onto it, returning the minimal send/close handle the client drives.
+export type OpenSocket = (url: string, handlers: StreamSocketHandlers) => StreamSocket
 
-/**
- * The factory's options.
- *
- * @typedef {Object} StreamClientOptions
- * @property {string} url The websocket endpoint (`ws:`/`wss:` + the `/ws/stream` path).
- * @property {(delta: StreamDeltaMessage) => void} onDelta Called with each well-formed delta message.
- * @property {(state: 'connected'|'disconnected') => void} [onStateChange] Socket lifecycle phases: `connected` when a socket opens, `disconnected` when one closes or errors.
- * @property {OpenSocket} [openSocket] The socket factory; defaults to the native WebSocket.
- */
+// The client handle: `subscribe` asks for one run's stream (a re-subscribe replaces the previous), `close` shuts the socket down and stops reconnecting for good.
+export interface StreamClient {
+	subscribe(runId: string): void
+	close(): void
+}
+
+export interface StreamClientOptions {
+	// The websocket endpoint (`ws:`/`wss:` + the `/ws/stream` path).
+	url: string
+	// Called with each well-formed delta message.
+	onDelta: (delta: StreamDeltaMessage) => void
+	// Socket lifecycle phases: `connected` when a socket opens, `disconnected` when one closes or errors.
+	onStateChange?: (state: 'connected' | 'disconnected') => void
+	// The socket factory; defaults to the native WebSocket.
+	openSocket?: OpenSocket
+}
 
 // The production socket factory: a native WebSocket with the handlers wired as properties. `error` is wired to the same teardown as `close` — the browser always follows an error with a close event, but a fake or exotic embedder may not, and the per-connection teardown is idempotent either way.
-/**
- * @param {string} url
- * @param {StreamSocketHandlers} handlers
- * @returns {{ send(text: string): void, close(): void }}
- */
-function defaultOpenSocket(url, handlers) {
+function defaultOpenSocket(url: string, handlers: StreamSocketHandlers): StreamSocket {
 	const socket = new WebSocket(url)
 	socket.onopen = () => handlers.onOpen()
 	socket.onmessage = (event) => handlers.onMessage(typeof event.data === 'string' ? event.data : '')
@@ -73,11 +66,7 @@ function defaultOpenSocket(url, handlers) {
 }
 
 // The delta wire-message guard: every field the accumulation reads must be present and well-typed, so a half-formed delta is dropped rather than corrupting the host's text.
-/**
- * @param {unknown} value
- * @returns {boolean}
- */
-function isDeltaMessage(value) {
+function isDeltaMessage(value: unknown): value is StreamDeltaMessage {
 	if (!isObject(value)) return false
 	if (value['type'] !== 'delta') return false
 	if (typeof value['runId'] !== 'string') return false
@@ -88,34 +77,25 @@ function isDeltaMessage(value) {
 }
 
 // The ack guard: `{"type":"subscribed","runId":"..."}`. Only the shape matters here (the ack resets the backoff ladder); the run id is the server echoing the request back.
-/**
- * @param {unknown} value
- * @returns {boolean}
- */
-function isSubscribedMessage(value) {
+function isSubscribedMessage(value: unknown): boolean {
 	return isObject(value) && value['type'] === 'subscribed' && typeof value['runId'] === 'string'
 }
 
-/**
- * Creates the stream client. All failures — socket construction, sends, host callbacks, malformed messages — are contained; the client degrades to silence and keeps its retry loop alive instead of throwing into the host.
- *
- * @param {StreamClientOptions} options
- * @returns {StreamClient}
- */
-export function createStreamClient(options) {
+// Creates the stream client. All failures — socket construction, sends, host callbacks, malformed messages — are contained; the client degrades to silence and keeps its retry loop alive instead of throwing into the host.
+export function createStreamClient(options: StreamClientOptions): StreamClient {
 	const url = options.url
 	const onDelta = options.onDelta
 	const onStateChange = options.onStateChange
 	const openSocket = options.openSocket ?? defaultOpenSocket
 
-	let socket = null
-	let desiredRunId = null
-	let reconnectTimer = null
+	let socket: StreamSocket | null = null
+	let desiredRunId: string | null = null
+	let reconnectTimer: ReturnType<typeof setTimeout> | null = null
 	let backoffMs = INITIAL_BACKOFF_MS
 	let closedByHost = false
 
 	// Containment for the two ways the outside world can throw through this module: a host callback with a bug, and a socket call on a connection that died without its close event arriving. Both are swallowed by design — the stream is best-effort in both directions (mirroring the hub's sendBestEffort) and must never break its host.
-	function contain(sideEffect) {
+	function contain(sideEffect: () => void): void {
 		try {
 			sideEffect()
 		} catch {
@@ -123,18 +103,18 @@ export function createStreamClient(options) {
 		}
 	}
 
-	function emitState(state) {
+	function emitState(state: 'connected' | 'disconnected'): void {
 		if (onStateChange === undefined) return
 		contain(() => onStateChange(state))
 	}
 
-	function cancelReconnect() {
+	function cancelReconnect(): void {
 		if (reconnectTimer === null) return
 		clearTimeout(reconnectTimer)
 		reconnectTimer = null
 	}
 
-	function scheduleReconnect() {
+	function scheduleReconnect(): void {
 		if (closedByHost) return
 		cancelReconnect()
 		const delay = backoffMs
@@ -142,8 +122,8 @@ export function createStreamClient(options) {
 		reconnectTimer = setTimeout(connect, delay)
 	}
 
-	function handleServerMessage(raw) {
-		let parsed
+	function handleServerMessage(raw: string): void {
+		let parsed: unknown
 		try {
 			parsed = JSON.parse(raw)
 		} catch {
@@ -159,7 +139,7 @@ export function createStreamClient(options) {
 	}
 
 	// Best-effort send (mirroring the hub's sendBestEffort): a throwing send means the socket died, so it is closed to let the close event tear the connection down and hand control to the retry loop.
-	function sendSubscribe(runId) {
+	function sendSubscribe(runId: string): void {
 		const target = socket
 		if (target === null) return
 		try {
@@ -169,19 +149,19 @@ export function createStreamClient(options) {
 		}
 	}
 
-	function connect() {
+	function connect(): void {
 		if (closedByHost) return
 		reconnectTimer = null
 		// Per-connection bookkeeping: `tornDown` folds close and error into one teardown (browsers fire an error before every close, so whichever arrives second is a no-op), and `handle` is captured before the factory returns so a synchronously-firing handler still reaches it.
-		const connection = { handle: null, tornDown: false }
-		const markDown = () => {
+		const connection: { handle: StreamSocket | null; tornDown: boolean } = { handle: null, tornDown: false }
+		const markDown = (): void => {
 			if (connection.tornDown) return
 			connection.tornDown = true
 			if (socket === connection.handle) socket = null
 			emitState('disconnected')
 			scheduleReconnect()
 		}
-		const handlers = {
+		const handlers: StreamSocketHandlers = {
 			onOpen: () => {
 				if (connection.tornDown) return
 				socket = connection.handle
@@ -205,8 +185,9 @@ export function createStreamClient(options) {
 	}
 
 	return {
-		subscribe(runId) {
+		subscribe(runId: string): void {
 			if (closedByHost) return
+			// The run id arrives from plain-JS hosts, so the well-formedness check stays a runtime guard rather than a type-only promise.
 			if (typeof runId !== 'string' || runId === '') return
 			desiredRunId = runId
 			const target = socket
@@ -217,7 +198,7 @@ export function createStreamClient(options) {
 			}
 			sendSubscribe(runId)
 		},
-		close() {
+		close(): void {
 			closedByHost = true
 			cancelReconnect()
 			desiredRunId = null

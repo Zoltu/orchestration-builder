@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import { createLabelResolver } from './static/ts/labels.js'
-import { activeStack } from './static/interaction-model.js'
-import { scenarios } from './static/scenarios.js'
+import { activeStack } from './static/ts/interaction-model.js'
+import { scenarios } from './static/ts/scenarios.js'
 
 // Pull the model types off helper signatures so the test fixtures are contextually checked against the JSDoc shape without a cast, mirroring the sibling scenarios.test.ts convention.
 type InteractionModel = Parameters<typeof activeStack>[0]

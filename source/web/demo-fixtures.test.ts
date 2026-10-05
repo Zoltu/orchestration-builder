@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import type { LogEvent } from '../executor/types.js'
-import { activeParticipant, activeStack, stacksOf } from './static/interaction-model.js'
+import { activeParticipant, activeStack, stacksOf } from './static/ts/interaction-model.js'
 import { deriveDemoFrameModel, DEMO_SCENARIOS, findDemoScenario } from './demo-fixtures.js'
 import { defined } from './test-fixtures.js'
 

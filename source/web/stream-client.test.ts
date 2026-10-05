@@ -1,5 +1,5 @@
 import { describe, expect, test, vi } from 'bun:test'
-import { createStreamClient } from './static/stream-client.js'
+import { createStreamClient } from './static/ts/stream-client.js'
 import { nextLivePartial, activeLivePartial, scopedActiveLivePartial } from './static/ts/live-partial.js'
 import { defined } from './test-fixtures.js'
 

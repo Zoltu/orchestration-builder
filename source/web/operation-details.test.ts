@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { createOperationDetails } from './static/operation-details.js'
+import { createOperationDetails } from './static/ts/operation-details.js'
 import { defined } from './test-fixtures.js'
 
 // The controller is browser-pure JS, so its exports arrive with inferred JS types; the aliases

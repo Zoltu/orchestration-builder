@@ -1,9 +1,9 @@
 import { describe, expect, test } from 'bun:test'
 import { deriveLifecycle, renderFlowView, deriveNowCaption, deriveCostStrip, createColumnTracker, COL_GAP } from './static/flow-view.js'
-import { activeOperation, activeParticipant, activeStack, observesOf, stacksOf } from './static/interaction-model.js'
+import { activeOperation, activeParticipant, activeStack, observesOf, stacksOf } from './static/ts/interaction-model.js'
 import { createLabelResolver } from './static/ts/labels.js'
 import { labelsModule } from './label-resolver-fixture.js'
-import { scenarios } from './static/scenarios.js'
+import { scenarios } from './static/ts/scenarios.js'
 import { NODE_WIDTH } from './static/svg-primitives.js'
 import { defined } from './test-fixtures.js'
 

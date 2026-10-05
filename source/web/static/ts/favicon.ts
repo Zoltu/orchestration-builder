@@ -2,7 +2,7 @@
 //
 // State priority: a pending question means the operator is needed, so 'pending-input' wins even while a run is mid-flight — a needs_clarification run is non-terminal, so both signals typically hold at once. Any summary whose status is not a known terminal status counts as in progress, including 'unknown': that is a run whose meta.json could not be read, which the rest of the UI also renders as "in progress" and keeps polling. With no pending questions and no non-terminal summary — including the no-runs-yet initial state — the favicon reads 'complete'.
 
-import { isTerminalStatus } from '../interaction-model.js'
+import { isTerminalStatus } from './interaction-model.js'
 
 // 'pending-input' (amber) — at least one pending question awaits an operator answer; 'working' (blue) — a run is in progress and no question is pending; 'complete' (green) — nothing in progress and nothing pending, or the initial idle state.
 export type FaviconState = 'pending-input' | 'working' | 'complete'
