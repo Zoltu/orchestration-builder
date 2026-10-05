@@ -45,7 +45,7 @@ describe('faviconHref', () => {
 	test('the three states share the shape and differ only in the fill color', () => {
 		const bodies = (['pending-input', 'working', 'complete'] as const).map((state) => decodeURIComponent(faviconHref(state).slice('data:image/svg+xml,'.length)))
 		const colors = bodies.map((body) => body.match(/fill="([^"]+)"/)?.[1])
-		expect(colors).toEqual(['#e5a50a', '#1c71d8', '#26a269'])
+		expect(colors).toEqual(['#f6d32d', '#c01c28', '#26a269'])
 		const shapes = bodies.map((body) => body.replace(/fill="[^"]+"/, 'fill="COLOR"'))
 		expect(new Set(shapes).size).toBe(1)
 	})

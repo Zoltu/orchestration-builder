@@ -4,13 +4,13 @@
 
 import { isTerminalStatus } from './interaction-model.js'
 
-// 'pending-input' (amber) — at least one pending question awaits an operator answer; 'working' (blue) — a run is in progress and no question is pending; 'complete' (green) — nothing in progress and nothing pending, or the initial idle state.
+// 'pending-input' (yellow) — at least one pending question awaits an operator answer; 'working' (red) — a run is in progress and no question is pending; 'complete' (green) — nothing in progress and nothing pending, or the initial idle state.
 export type FaviconState = 'pending-input' | 'working' | 'complete'
 
-// GNOME-palette mid-tones, chosen so all three read on both light and dark browser chrome. Typed as a plain string record so faviconHref's state check stays a runtime guard: the browser callers are plain JS, and a type annotation never rejects a malformed payload at that boundary.
+// GNOME-palette tones, chosen so all three read on both light and dark browser chrome: yellow 3 is brighter than the amber it replaces, so on light chrome it reads as a bright filled shape rather than a mid-tone. Typed as a plain string record so faviconHref's state lookup keeps its fail-fast runtime guard: a state with no color entry must throw, never encode an undefined fill.
 const FAVICON_COLORS: Record<string, string> = {
-	'pending-input': '#e5a50a',
-	working: '#1c71d8',
+	'pending-input': '#f6d32d',
+	working: '#c01c28',
 	complete: '#26a269',
 }
 
