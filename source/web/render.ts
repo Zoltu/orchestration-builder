@@ -463,7 +463,7 @@ function payloadString(payload: Record<string, unknown>, field: string): string 
 	return typeof value === 'string' && value !== '' ? value : null
 }
 
-// The role_start records the ancestry walk resolves through, keyed by instance id. The first start per id wins (instance ids are unique per run; a duplicate is a malformed log), and a start without a usable roleId cannot be addressed by id and never enters the map — the client's chain walk (inspector-modal.js deriveInstanceChain) cannot see it either.
+// The role_start records the ancestry walk resolves through, keyed by instance id. The first start per id wins (instance ids are unique per run; a duplicate is a malformed log), and a start without a usable roleId cannot be addressed by id and never enters the map — the client's chain walk (ts/inspector-modal.ts deriveInstanceChain) cannot see it either.
 function instanceStartsOf(events: LogEvent[]): Map<string, InstanceStartRecord> {
 	const starts = new Map<string, InstanceStartRecord>()
 	let position = 0
