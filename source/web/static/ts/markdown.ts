@@ -24,8 +24,8 @@ export interface HtmlNode {
 	children?: HtmlNode[]
 }
 
-// The hyperscript function the vnode conversion targets: hyperapp's `h`, or a test fake with the same shape.
-export type Hyperscript = (tag: string, attributes: Record<string, string>, children: unknown[]) => unknown
+// The hyperscript function the vnode conversion targets: hyperapp's `h`, a host's DOM-building `h`, or a test fake with the same shape. Generic over the host's vnode product `V` (hyperapp's vnodes, a DOM host's element wrappers, a test double) so each host's own product type flows through the conversion unchanged and the renderer's product is described in the host's terms.
+export type Hyperscript<V> = (tag: string, attributes: Record<string, string>, children: (V | string)[]) => V
 
 // Tags the UI may render. Everything Markdown produces for prose (headings, lists, code, emphasis, links, tables) is covered; `span` is allowed because `highlight.js` wraps syntax tokens in `<span class="hljs-…">`.
 export const ALLOWED_TAGS: ReadonlySet<string> = new Set([
@@ -117,11 +117,12 @@ export function sanitizeNodes(nodes: unknown): HtmlNode[] {
 }
 
 // Converts a sanitized node tree into hyperapp vnode children using the supplied `h`. A text node becomes a bare string (hyperapp wraps strings in text nodes — never markup); an element becomes `h(tag, attributes, children)`. `h` is passed in rather than imported so the module stays free of hyperapp coupling and the conversion is exercisable in tests with a fake `h`. The input is assumed already sanitized; callers always run `sanitizeNodes` first, and an element missing any of its fields is skipped rather than handed to `h` half-formed.
-export function htmlNodesToVnodes(nodes: readonly HtmlNode[], h: Hyperscript): unknown[] {
-	const out: unknown[] = []
+export function htmlNodesToVnodes<V>(nodes: readonly HtmlNode[], h: Hyperscript<V>): (V | string)[] {
+	const out: (V | string)[] = []
 	for (const node of nodes) {
 		if (node.type === 'text') {
-			out.push(node.value)
+			// A text node's value is a string whenever the sanitizer produced the node; a valueless node contributes nothing, exactly as a dropped child would.
+			if (typeof node.value === 'string') out.push(node.value)
 		} else if (node.type === 'element' && node.tag !== undefined && node.attributes !== undefined && node.children !== undefined) {
 			out.push(h(node.tag, node.attributes, htmlNodesToVnodes(node.children, h)))
 		}

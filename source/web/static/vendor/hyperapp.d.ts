@@ -2,7 +2,7 @@
 //
 // `Vnode` is the exchange shape the view layer programs against: tag/props/children — the fields every `h` implementation in the checked graph builds and every call site passes. The vendored implementation's runtime vnode carries the same payload under hyperapp-internal field names (name/node/type/key); no checked code reads those fields, so they are not part of the contract.
 //
-// Two hyperscript shapes are declared because the two call conventions are checked against different `h` implementations: `H` is the SVG view family's surface (every call passes a props object and a flat children array); `LooseH` is the overlay components' surface (children exactly as hyperapp accepts them — a bare string, a single vnode, a nested array, with null/undefined/boolean children dropped, or no children at all).
+// Two hyperscript shapes are declared because the two call conventions are checked against different `h` implementations: `H` is the SVG view family's surface (every call passes a props object and a flat children array); `LooseH` is the overlay components' surface (children exactly as hyperapp accepts them — a bare string, a single vnode, a nested array, with null/undefined/boolean children dropped, or no children at all). Both type the tag as a string only: the vendored `h` also has a function-tag branch that no call site uses, so these declarations need widening if component tags are ever adopted.
 
 export interface Vnode {
 	tag: string
@@ -21,7 +21,6 @@ export type LooseH = (tag: string, props: Record<string, unknown>, children?: Vn
 
 export interface AppProps {
 	init?: unknown
-	state?: unknown
 	view?: (state: unknown) => unknown
 	node?: unknown
 	subscriptions?: (state: unknown) => unknown

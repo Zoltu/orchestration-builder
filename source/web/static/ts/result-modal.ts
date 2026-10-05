@@ -8,7 +8,7 @@ import { isTerminalStatus } from './interaction-model.js'
 import { isObject } from './guards.js'
 import type { LooseH, Vnode, VnodeChildInput } from '../vendor/hyperapp.js'
 
-// The sanitized-Markdown renderer the component receives: the createMarkdownRenderer product in the hosts, or a single-vnode fake in the tests. Its return is children input exactly as `LooseH` accepts it.
+// The sanitized-Markdown renderer the component receives: the createMarkdownRenderer product in the hosts — generic over the host's vnode product, an array of host vnodes and strings, which is children input exactly as `LooseH` accepts it wherever the host's `h` builds the exchange shape — or a single-vnode fake in the tests.
 type RenderMarkdown = (text: string) => VnodeChildInput
 
 // The terminal-status descriptor for a run: the run's terminal status, the result card's summary and artifacts, and — on error and interrupted statuses — the error block, whose human `message` is what renders and whose opaque `raw` is what the copy-raw button hands over.

@@ -6,7 +6,7 @@
 
 import type { LooseH, Vnode, VnodeChildInput } from '../vendor/hyperapp.js'
 
-// The sanitized-Markdown renderer the component receives: the createMarkdownRenderer product in the hosts, or a single-vnode fake in the tests. Its return is children input exactly as `LooseH` accepts it.
+// The sanitized-Markdown renderer the component receives: the createMarkdownRenderer product in the hosts — generic over the host's vnode product, an array of host vnodes and strings, which is children input exactly as `LooseH` accepts it wherever the host's `h` builds the exchange shape — or a single-vnode fake in the tests.
 type RenderMarkdown = (text: string) => VnodeChildInput
 
 // The pending question the modal renders: the ask_human call's question text plus its optional context. The model's other fields (id, askedAt) are the producer's bookkeeping and are not read here.

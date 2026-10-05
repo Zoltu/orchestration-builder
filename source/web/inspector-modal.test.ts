@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { InspectorModal, buildTurnIndex, childInstanceFor, deriveDefaultScopeRoleId, deriveInstanceChain, deriveTranscriptTurns, instancesOf, scopeTurnEntries, tailRefreshMustResync, tailWindowOffset, olderWindowOffset, olderFetchLimit, canPageOlder, initialScopeWindow, mergeLogEvents, scopeViewFor, scopeLoadFetch, tailRefreshFetch, olderTurnsFetch, olderPageSpliced, tailPageAppended, INSPECTOR_WINDOW_SIZE, INSPECTOR_PAGE_LIMIT, INSPECTOR_RETENTION_LIMIT } from './static/inspector-modal.js'
+import { InspectorModal, buildTurnIndex, childInstanceFor, deriveDefaultScopeRoleId, deriveInstanceChain, deriveTranscriptTurns, instancesOf, scopeTurnEntries, tailRefreshMustResync, tailWindowOffset, olderWindowOffset, olderFetchLimit, canPageOlder, initialScopeWindow, mergeLogEvents, scopeViewFor, scopeLoadFetch, tailRefreshFetch, olderTurnsFetch, olderPageSpliced, tailPageAppended, INSPECTOR_WINDOW_SIZE, INSPECTOR_PAGE_LIMIT, INSPECTOR_RETENTION_LIMIT } from './static/ts/inspector-modal.js'
 import { actionProp, defined, present } from './test-fixtures.js'
 
 // The inspector-modal component is browser-pure JS, so its exports arrive with inferred JS types. The interfaces and fake `h`/`renderMarkdown` below carry the shape the tests assert against, mirroring question-modal.test.ts / result-modal.test.ts.

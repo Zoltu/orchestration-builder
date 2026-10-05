@@ -4,38 +4,83 @@
 // The harness imports only its sibling static modules; it touches nothing in the product client (app.js).
 import { activeOperation, activeParticipant, activeStack, callChainOf, fateOf, isPaused, isTerminalStatus, observesOf, rolesOnlyModel, rolesOnlyParticipants, stacksOf } from './interaction-model.js'
 import { createLabelResolver, isLabelTier } from './labels.js'
-import { deriveLifecycle, renderFlowView, deriveNowCaption, deriveCostStrip, createColumnTracker } from './flow-view.js'
+import { activeAskHumanCall, createColumnTracker, deriveCostStrip, deriveLifecycle, deriveNowCaption, renderFlowView } from './flow-view.js'
 import { renderSequenceView, sequenceActiveRowScrollTop } from './sequence-diagram.js'
 import { createMarkdownRenderer } from './markdown-render.js'
 import { createTooltipDismiss, deriveTooltipDescriptor, isInFlightAskHuman, resolveTooltipTarget } from './inspector.js'
 import { createOperationDetails } from './operation-details.js'
-import { operationIdsForTooltipDetails } from './tooltip.js'
+import { isObject } from './guards.js'
+import { operationIdsForTooltipDetails, Tooltip, tooltipStyle } from './tooltip.js'
 import { copyRawToClipboard } from './clipboard.js'
-import { Tooltip, tooltipStyle } from './tooltip.js'
 import { ResultModal } from './result-modal.js'
 import { QuestionModal } from './question-modal.js'
-import { activeAskHumanCall } from './flow-view.js'
+import type { InteractionModel, Operation, Participant, RunStatus } from './interaction-model.js'
+import type { LabelResolver, LabelTier } from './labels.js'
+import type { TooltipTarget } from './inspector.js'
+import type { OperationDetailsState } from './operation-details.js'
+import type { TerminalResult } from './result-modal.js'
+import type { Vnode, VnodeChild, VnodeChildInput } from '../vendor/hyperapp.js'
 
 const PLAY_INTERVAL_MS = 1000
 const SVG_NAMESPACE = 'http://www.w3.org/2000/svg'
 
-// The demo harness loads its labels from the same /api/config the product client loads, so a swapped guild re-flavors the harness the same way it re-flavors the run view. The harness is served by the same web server (see server.ts serveStaticPath), so the endpoint is reachable at the page origin.
-let labels = null
-let tier = 'detailed'
+// One scenario manifest from the /api/demo/scenarios list: each entry carries the id, label, frame count, and the full participant set (the sequence view's static column source). The rows come from the first-party adapter endpoint and are re-guarded downstream where individual fields are read.
+interface DemoScenarioManifest {
+	id: string
+	label: string
+	frameCount: number
+	participants: Participant[]
+}
 
-// The scenario manifest fetched once from /api/demo/scenarios: each entry carries the id, label, frame count, and the full participant set (the sequence view's static column source).
+// The demo endpoints are first-party, but types never validate what arrives over the wire: these guards check the fields the harness itself reads (id/role/kind on participants; the lifecycle fields on operations) so a malformed body fails fast with a readable message instead of surfacing as undefined reads deep in a render. Fields only the checked view modules read stay to those modules' contract.
+function isParticipantRecord(value: unknown): value is Participant {
+	return isObject(value) && typeof value['id'] === 'string' && typeof value['role'] === 'string' && typeof value['kind'] === 'string'
+}
+
+function isOperationRecord(value: unknown): value is Operation {
+	if (!isObject(value)) return false
+	if (typeof value['id'] !== 'string' || typeof value['kind'] !== 'string' || typeof value['lifecycle'] !== 'string') return false
+	if (typeof value['stack'] !== 'string' || typeof value['startedAt'] !== 'string') return false
+	if (value['settledAt'] !== null && typeof value['settledAt'] !== 'string') return false
+	return value['outcome'] === null || typeof value['outcome'] === 'string'
+}
+
+function isInteractionModelPayload(value: unknown): value is InteractionModel {
+	if (!isObject(value)) return false
+	if (typeof value['status'] !== 'string') return false
+	if (!Array.isArray(value['participants']) || !value['participants'].every(isParticipantRecord)) return false
+	return Array.isArray(value['operations']) && value['operations'].every(isOperationRecord)
+}
+
+function isScenarioManifest(value: unknown): value is DemoScenarioManifest {
+	if (!isObject(value)) return false
+	if (typeof value['id'] !== 'string' || value['id'] === '') return false
+	if (typeof value['label'] !== 'string') return false
+	if (typeof value['frameCount'] !== 'number' || !Number.isInteger(value['frameCount']) || value['frameCount'] < 0) return false
+	return Array.isArray(value['participants']) && value['participants'].every(isParticipantRecord)
+}
+
+function isScenarioManifestList(value: unknown): value is DemoScenarioManifest[] {
+	return Array.isArray(value) && value.every(isScenarioManifest)
+}
+
+// The demo harness loads its labels from the same /api/config the product client loads, so a swapped guild re-flavors the harness the same way it re-flavors the run view. The harness is served by the same web server (see server.ts serveStaticPath), so the endpoint is reachable at the page origin.
+let labels: LabelResolver | null = null
+let tier: LabelTier = 'detailed'
+
 // Frames themselves are not held locally — each is the adapter's output for an event-prefix, fetched on demand from /api/demo/flow/:scenario/:frame so the harness always renders adapter-derived models.
-let scenarios = []
+let scenarios: DemoScenarioManifest[] = []
 // The adapter-derived InteractionModel for the current scenario+frame, or null before the first frame loads (or while a fetch is in flight).
 // Every renderer reads this adapter-derived frame.
-let currentFrame = null
+let currentFrame: InteractionModel | null = null
 // The frame rendered before `currentFrame`, kept so `deriveLifecycle` can diff entering/departing participants across consecutive frames — the same role the product client's `previousFlowModel` plays.
 // Reset to null on a scenario switch (the first frame of a scenario animates nothing).
-let previousFrame = null
+let previousFrame: InteractionModel | null = null
 // The caller-held column high-water mark for the flow view (see createColumnTracker): one per page load, so the stage width stays stable as scenarios deepen and unwind.
 const flowColumnTracker = createColumnTracker()
 
-function requireElement(id, constructorFunction) {
+// Looks up the demo chrome by id and checks its element kind; a missing or mismatched element is a broken page, so it throws with the id rather than handing undefined into the wiring.
+function requireElement<C>(id: string, constructorFunction: new () => C): C {
 	const element = document.getElementById(id)
 	if (element === null) throw new Error(`demo harness chrome is missing element "${id}"`)
 	if (!(element instanceof constructorFunction)) throw new Error(`element "${id}" is not a ${constructorFunction.name}`)
@@ -127,7 +172,7 @@ if (viewToggleSpacer !== null) {
 	scenarioSelect.parentElement?.append(viewToggle)
 }
 
-function applyViewToggle() {
+function applyViewToggle(): void {
 	flowButton.classList.toggle('is-active', viewMode === 'flow')
 	sequenceButton.classList.toggle('is-active', viewMode === 'sequence')
 	// The jump-to-active affordance is meaningful only on the sequence view (the flow view has no scrollable time axis), so it shows and hides with the sequence segment. The roles-only filter is likewise a sequence-view lens, so its toggle follows the same rule.
@@ -186,23 +231,33 @@ sequenceButton.addEventListener('click', () => {
 	render()
 })
 
-function applyShowTextToggle() {
+function applyShowTextToggle(): void {
 	textView.style.display = showTextToggle.checked ? 'block' : 'none'
 }
 showTextToggle.addEventListener('change', applyShowTextToggle)
 
 // A DOM-producing `h` so the flow view's vnode tree mounts as a real SVG without a separate render step. The flow view passes only string-valued attributes (class, transform, data-*, geometry, text-anchor) plus the departing overlay's `style` object (CSS custom properties the depart keyframe reads as var(--from-*)/var(--to-*)); string-valued props become SVG attributes, the `style` object is applied via CSSStyleDeclaration so the custom properties land on the element rather than being stringified to "[object Object]", and `on*` props are wired as event listeners so the terminal CTA's onclick toggles its modal state. String children become text nodes and vnode children are appended in order.
-function isEventListener(value) {
+function isEventListener(value: unknown): value is () => unknown {
 	return typeof value === 'function'
 }
 
-function isStyleObject(value) {
-	if (typeof value !== 'object' || value === null) return false
-	if (Array.isArray(value)) return false
-	return true
+// The vnode product this host's `h` implementations build: the exchange shape's fields for the view layer (which never reads them) plus the live element the host mounts. The fields really exist on the object, so the wrapper satisfies the declared `Vnode` contract without a cast.
+interface HostVnode extends Vnode {
+	element: Element
 }
 
-function domH(tag, props, children = []) {
+// Narrows a rendered product back to the host's wrapper so it can be mounted. The shared views type their products as the exchange shape; in this host every product comes from domH/htmlH, so a product without the wrapper's fields is a broken render and throws.
+function isHostVnode(value: VnodeChildInput): value is HostVnode {
+	if (typeof value !== 'object' || value === null) return false
+	return 'tag' in value && 'props' in value && 'children' in value && 'element' in value
+}
+
+function hostElementOf(vnode: Vnode, what: string): Element {
+	if (!isHostVnode(vnode)) throw new Error(`${what} rendered a product without a host element`)
+	return vnode.element
+}
+
+function domH(tag: string, props: Record<string, unknown>, children: VnodeChild[] = []): HostVnode {
 	const element = document.createElementNS(SVG_NAMESPACE, tag)
 	for (const [key, value] of Object.entries(props)) {
 		// Boolean HTML/SVG attributes are present=true/absent=false, so a `false` value must skip the attribute rather than stringify it: setAttribute('disabled', 'false') still disables the element because the attribute exists. Skipping the false value leaves the attribute absent, which is the false state; a true value still stringifies to 'true', whose presence is the true state.
@@ -211,7 +266,7 @@ function domH(tag, props, children = []) {
 			element.addEventListener(key.slice(2), value)
 			continue
 		}
-		if (key === 'style' && isStyleObject(value)) {
+		if (key === 'style' && isObject(value)) {
 			for (const [prop, propValue] of Object.entries(value)) {
 				if (propValue === undefined || propValue === null) continue
 				element.style.setProperty(prop, String(propValue))
@@ -220,19 +275,23 @@ function domH(tag, props, children = []) {
 		}
 		element.setAttribute(key, String(value))
 	}
+	const collected: VnodeChild[] = []
 	for (const child of children) {
-		if (child === null || child === undefined) continue
 		if (typeof child === 'string') {
 			element.appendChild(document.createTextNode(child))
-		} else if (child instanceof Node) {
-			element.appendChild(child)
+			collected.push(child)
+			continue
+		}
+		if (isHostVnode(child)) {
+			element.appendChild(child.element)
+			collected.push(child)
 		}
 	}
-	return element
+	return { tag, props, children: collected, element }
 }
 
-// An HTML-producing `h` for the inspector card and the sanitized-Markdown vnodes it renders. The sequence view SVG cannot host HTML (the tooltip card is a positioned `<div>` carrying `<p>`/`<ul>`/`<pre>` from the markdown pipeline), so the inspector reuses tooltip.js with an HTML `h` rather than the SVG `domH` the views use. `on*` props wire event listeners and the `style` object is applied via CSSStyleDeclaration so positioning lands as real CSS rather than a stringified object, mirroring domH's handling.
-function htmlH(tag, props, children = []) {
+// An HTML-producing `h` for the inspector card and the sanitized-Markdown vnodes it renders. The sequence view SVG cannot host HTML (the tooltip card is a positioned `<div>` carrying `<p>`/`<ul>`/`<pre>` from the markdown pipeline), so the inspector reuses tooltip.js with an HTML `h` rather than the SVG `domH` the views use. `on*` props wire event listeners and the `style` object is applied via CSSStyleDeclaration so positioning lands as real CSS rather than a stringified object, mirroring domH's handling. Children arrive in the LooseH convention — an array, a bare string, or absent — so a bare string iterates character-wise (each character becomes its own text node, this host's original DOM shape), and anything else that is not an array renders nothing.
+function htmlH(tag: string, props: Record<string, unknown>, children: VnodeChildInput = []): HostVnode {
 	const element = document.createElement(tag)
 	for (const [key, value] of Object.entries(props)) {
 		// Boolean HTML attributes are present=true/absent=false, so a `false` value must skip the attribute rather than stringify it: setAttribute('disabled', 'false') still disables the element because the attribute exists. Skipping the false value leaves the attribute absent (the false state); a true value still stringifies to 'true' (its presence is the true state).
@@ -241,7 +300,7 @@ function htmlH(tag, props, children = []) {
 			element.addEventListener(key.slice(2), value)
 			continue
 		}
-		if (key === 'style' && isStyleObject(value)) {
+		if (key === 'style' && isObject(value)) {
 			for (const [prop, propValue] of Object.entries(value)) {
 				if (propValue === undefined || propValue === null) continue
 				element.style.setProperty(prop, String(propValue))
@@ -250,15 +309,21 @@ function htmlH(tag, props, children = []) {
 		}
 		element.setAttribute(key, String(value))
 	}
-	for (const child of children) {
-		if (child === null || child === undefined) continue
+	const collected: VnodeChild[] = []
+	const childList: Iterable<VnodeChildInput> = typeof children === 'string' ? children : Array.isArray(children) ? children : []
+	for (const child of childList) {
+		if (child === null || child === undefined || typeof child === 'boolean') continue
 		if (typeof child === 'string') {
 			element.appendChild(document.createTextNode(child))
-		} else if (child instanceof Node) {
-			element.appendChild(child)
+			collected.push(child)
+			continue
+		}
+		if (isHostVnode(child)) {
+			element.appendChild(child.element)
+			collected.push(child)
 		}
 	}
-	return element
+	return { tag, props, children: collected, element }
 }
 
 const renderMarkdown = createMarkdownRenderer(htmlH)
@@ -266,8 +331,8 @@ const renderMarkdown = createMarkdownRenderer(htmlH)
 // The inspector overlay: one positioned card mounted inside the run-view container (`flowContainer`), rebuilt per hover and anchored flush against the hovered node's rect.
 // The card is `pointer-events: auto` and `user-select: text` (stylesheets/styles.css) so the operator can move the pointer from the node into the card to select and copy its contents; a short grace period on leaving the node (or the card) keeps the card open while the pointer travels between them, and the card dismisses once the pointer is over neither.
 // The dedup key is `${kind}:${id}` so the card is reused (not flickered) as the pointer moves within the same operation (a sequence message → its terminal node) or the same participant (a node's box → its cost figures).
-let currentTooltipNode = null
-let currentTooltipKey = null
+let currentTooltipNode: Element | null = null
+let currentTooltipKey: string | null = null
 // The grace-period dismiss timer, shared with the product client via inspector.js; expiry tears the card down directly (the harness has no dispatch loop).
 const tooltipDismiss = createTooltipDismiss()
 
@@ -285,20 +350,20 @@ const operationDetails = createOperationDetails({ fetchDetail: fetchDemoOperatio
 // body }` with the body already parsed): a network failure or an unparseable body rejects, which the
 // controller records as 'failed'. The URL reads the current frame index at fetch time — the cache
 // key carries only the scenario id because operation ids are stable across a scenario's frames.
-async function fetchDemoOperationDetail(context, operationId) {
+async function fetchDemoOperationDetail(context: string, operationId: string): Promise<{ ok: boolean; body: unknown }> {
 	const response = await fetch(`api/demo/flow/${encodeURIComponent(context)}/${frameIndex}?operation=${encodeURIComponent(operationId)}`)
 	return { ok: response.ok, body: await response.json() }
 }
 
 // The target the open card was built from, so a late details response can rebuild it in place.
-let currentTooltipTarget = null
+let currentTooltipTarget: TooltipTarget | null = null
 
-function currentScenarioId() {
+function currentScenarioId(): string {
 	const manifest = scenarios[scenarioIndex]
 	return manifest !== undefined ? manifest.id : ''
 }
 
-function operationDetailsLookup() {
+function operationDetailsLookup(): (operationId: string) => OperationDetailsState {
 	return (operationId) => operationDetails.lookup(currentScenarioId(), operationId)
 }
 
@@ -307,7 +372,7 @@ function operationDetailsLookup() {
 // surfaces waiting on the id (the open inspector card and the question modal) fill in from one
 // path. A 404 (an id the frame no longer resolves) and a network failure both record 'failed',
 // which renders section-less.
-function fetchOperationDetails(target) {
+function fetchOperationDetails(target: TooltipTarget): void {
 	const manifest = scenarios[scenarioIndex]
 	if (manifest === undefined || currentFrame === null) return
 	operationDetails.ensure(manifest.id, operationIdsForTooltipDetails(currentFrame, target))
@@ -316,7 +381,7 @@ function fetchOperationDetails(target) {
 // Re-opens the current card when a late details response lands for an id it derives from, so the
 // card fills in; the dedup in openTooltip is bypassed by closing first, and a card the pointer has
 // since left stays closed.
-function refillTooltip(operationId) {
+function refillTooltip(operationId: string): void {
 	if (currentTooltipNode === null || currentTooltipTarget === null || currentFrame === null) return
 	if (!operationIdsForTooltipDetails(currentFrame, currentTooltipTarget).includes(operationId)) return
 	const target = currentTooltipTarget
@@ -329,14 +394,14 @@ function refillTooltip(operationId) {
 // one path is what closes the hover-then-open-modal race — a modal opened while a hover fetch is
 // still in flight would otherwise never see the response. The context is the scenario id the fetch
 // started under, which is also the key half the cache answered from.
-function operationDetailsLanded(context, operationId) {
+function operationDetailsLanded(context: string, operationId: string): void {
 	refillTooltip(operationId)
 	if (questionModalOperationId !== operationId) return
 	const state = operationDetails.lookup(context, operationId)
 	if (state.status === 'ready') applyQuestionModalDetails(state.details)
 }
 
-function closeTooltip() {
+function closeTooltip(): void {
 	tooltipDismiss.cancel()
 	if (currentTooltipNode === null) return
 	currentTooltipNode.remove()
@@ -347,7 +412,7 @@ function closeTooltip() {
 
 // Builds the inspector card from the live InteractionModel via the shared descriptor dispatch in `inspector.js` (the same one the product client uses), so the dev harness and the live view consume one inspector derivation.
 // The card is anchored to the target's snapshot rect (flush against it) and appended to the run-view container so a `mouseleave` on the container covers both the SVG and the card — moving from a node into the card keeps the card open. The target's details are fetched on demand if not cached; the first render shows the loading placeholder and the refill fills it in.
-function openTooltip(target) {
+function openTooltip(target: TooltipTarget): void {
 	if (labels === null || currentFrame === null) return
 	const descriptor = deriveTooltipDescriptor(currentFrame, labels, tier, target, operationDetailsLookup())
 	if (descriptor.title === '') return
@@ -359,17 +424,18 @@ function openTooltip(target) {
 	closeTooltip()
 	fetchOperationDetails(target)
 	const card = Tooltip(htmlH, { title: descriptor.title, sections: descriptor.sections, renderMarkdown, style: tooltipStyle(target.rect) })
-	flowContainer.appendChild(card)
-	currentTooltipNode = card
+	const cardElement = hostElementOf(card, 'the tooltip card')
+	flowContainer.appendChild(cardElement)
+	currentTooltipNode = cardElement
 	currentTooltipKey = key
 	currentTooltipTarget = target
 }
 
 // Sequence-view scroll state. The SVG renders at its natural full-content viewBox and lives inside a scroll container, so a long timeline scrolls vertically (the page wheel) rather than zooming; the container is the single piece of state the jump-to-active affordance needs.
-let activeSequenceContainer = null
+let activeSequenceContainer: HTMLElement | null = null
 
 // Centers the latest message row using the layout math owned by sequence-diagram.js, so the harness consumes the production calculation rather than re-deriving it from the view's private constants.
-function jumpSequenceViewToActive(container) {
+function jumpSequenceViewToActive(container: HTMLElement): void {
 	if (currentFrame === null) return
 	const svg = container.firstElementChild
 	if (!(svg instanceof SVGSVGElement)) return
@@ -386,8 +452,8 @@ function jumpSequenceViewToActive(container) {
 //  - `mouseleave` on the container: schedule a grace-period dismiss (the pointer left the run view).
 //  - `click` on an in-flight `ask_human` row: re-open the question modal (the sequence view's re-entry affordance); every other click falls through to the hover path.
 // The product client's click also drills into the LLM-turn inspector modal (app.js ClickRunView via resolveInspectorScope); that modal is app-only — the harness has no run-log window to feed it, and building a fixture-log transport plus a second inspector controller would reimplement shell behavior the demo contract forbids — so a click here stays a tooltip affordance.
-function wireRunViewInteractions() {
-	const openAt = (event) => {
+function wireRunViewInteractions(): void {
+	const openAt = (event: Event): void => {
 		if (event.target instanceof Element && event.target.closest('.tooltip-card') !== null) {
 			tooltipDismiss.cancel()
 			return
@@ -419,28 +485,28 @@ function wireRunViewInteractions() {
 
 // Records the active sequence scroll container so the jump-to-active affordance can center the latest message row.
 // The hover listeners live on `flowContainer` (wired once by `wireRunViewInteractions`), so this only updates the scroll-state reference.
-function wireSequenceInteractions(container) {
+function wireSequenceInteractions(container: HTMLElement): void {
 	activeSequenceContainer = container
 }
 
 let scenarioIndex = 0
 let frameIndex = 0
-let viewMode = 'flow'
-let playTimer = null
+let viewMode: 'flow' | 'sequence' = 'flow'
+let playTimer: ReturnType<typeof setInterval> | null = null
 // The result-modal mount, or null when no modal is open. The modal is a view concern layered on a terminal frame (the run's status, not model state): opening it mounts an HTML overlay sibling to the SVG without rebuilding the SVG, so the enter animation and marching-ants do not replay on a modal toggle.
-let resultModalNode = null
+let resultModalNode: Element | null = null
 // Set by the See Result click so the next flow-area repaint materializes the terminal return as settled (the working-phase equivalent), departing the returner and its response line. The flag is view-side state, not model state: the scenario's terminal frame is unchanged, so navigating away and back restores the lingering leg. The See Result click stands in for the operation You would emit to settle the terminal return, since You is the run's root and never emits a real operation.
 let resultAcknowledged = false
 // The question-modal mount, or null when no modal is open. The modal is a view concern layered on an ask_human transit frame (a pending question, not model state): opening it mounts an HTML overlay sibling to the SVG without rebuilding the SVG, so the enter animation and marching-ants do not replay on a modal toggle.
-let questionModalNode = null
+let questionModalNode: HTMLElement | null = null
 // The ask_human call operation the open modal's question text derives from, or null when no modal is open. The shared details-landing path checks it so a response for an in-flight fetch fills the modal even when the fetch was started by a hover rather than the modal itself.
-let questionModalOperationId = null
+let questionModalOperationId: string | null = null
 // Set by loadScenario/render so the next render knows the scenario (not just the frame) changed and the sequence scroll position resets to the top rather than preserving a scrollTop that mapped onto a different scenario's content.
 let scenarioChanged = true
 // Set to 'forward' by Next and Play so the next render auto-scrolls the sequence view to the latest row; every other navigation (Previous, arbitrary scrub, tier swap, view toggle) leaves it 'preserve' so the user's scroll position is kept rather than yanked to the bottom on a non-advancing step.
-let pendingScrollIntent = 'preserve'
+let pendingScrollIntent: 'preserve' | 'forward' = 'preserve'
 
-function roleLabelOf(participantId) {
+function roleLabelOf(labels: LabelResolver, participantId: string): string {
 	if (currentFrame === null) return participantId
 	const found = currentFrame.participants.find((participant) => participant.id === participantId)
 	if (found === undefined) return participantId
@@ -448,13 +514,14 @@ function roleLabelOf(participantId) {
 	return `${labels.resolveParticipantLabel(found, tier)} (${found.id})`
 }
 
-function formatOperation(operation, participants) {
+function formatOperation(labels: LabelResolver, operation: Operation, participants: Participant[]): string {
 	const outcome = operation.outcome === null ? '' : ` → ${operation.outcome}`
 	const label = labels.resolveOperationLabel(operation, participants, tier, labels.hashString(operation.id))
 	return `${label} [${operation.lifecycle}${outcome}]`
 }
 
-function renderTextView() {
+function renderTextView(): string {
+	if (labels === null) return ''
 	const manifest = scenarios[scenarioIndex]
 	if (manifest === undefined || currentFrame === null) return ''
 	const frame = currentFrame
@@ -462,13 +529,13 @@ function renderTextView() {
 	const participant = activeParticipant(frame)
 	const openStacks = stacksOf(frame)
 	const observes = observesOf(frame)
-	const lines = []
+	const lines: string[] = []
 	lines.push(`scenario: ${manifest.label} (${manifest.id})`)
 	lines.push(`frame:    ${frameIndex + 1} / ${manifest.frameCount}`)
 	lines.push(`status:   ${frame.status}`)
 	lines.push(``)
 	lines.push(`active stack:       ${stack ?? '—'}`)
-	lines.push(`active participant: ${participant === null ? '—' : roleLabelOf(participant)}`)
+	lines.push(`active participant: ${participant === null ? '—' : roleLabelOf(labels, participant)}`)
 	lines.push(``)
 	lines.push(`open call chains:`)
 	if (openStacks.length === 0) {
@@ -481,7 +548,7 @@ function renderTextView() {
 			const tag = paused ? ` (paused, fate: ${fate})` : ` (active, fate: ${fate})`
 			lines.push(`  ${stackId}${tag}`)
 			for (const call of chain) {
-				lines.push(`    ${formatOperation(call, frame.participants)}`)
+				lines.push(`    ${formatOperation(labels, call, frame.participants)}`)
 			}
 		}
 	}
@@ -491,17 +558,17 @@ function renderTextView() {
 		lines.push(`  (none)`)
 	} else {
 		for (const observe of observes) {
-			lines.push(`  ${formatOperation(observe, frame.participants)}  [stack: ${observe.stack}]`)
+			lines.push(`  ${formatOperation(labels, observe, frame.participants)}  [stack: ${observe.stack}]`)
 		}
 	}
 	return lines.join('\n')
 }
 
 // The See Result click stands in for the operation You would emit to settle the terminal return. Settling the active in_flight return departs the returner (the lingering leg renders only while in_flight), so the next render shows the returner and its response line leaving for the top bar — the working-phase equivalent reached by user acknowledgment rather than a modeled operation. Only the active in_flight return is touched; every earlier operation keeps the lifecycle the frame already carries.
-function acknowledgeFrame(frame) {
+function acknowledgeFrame(frame: InteractionModel): InteractionModel {
 	const active = activeOperation(frame)
 	if (active === null || active.kind !== 'return' || active.lifecycle !== 'in_flight') return frame
-	const operations = frame.operations.map((operation) => {
+	const operations: Operation[] = frame.operations.map((operation) => {
 		if (operation === active) {
 			return { ...operation, lifecycle: 'settled', settledAt: operation.settledAt ?? operation.startedAt }
 		}
@@ -510,12 +577,12 @@ function acknowledgeFrame(frame) {
 	return { ...frame, operations }
 }
 
-function resolveActiveFrame() {
+function resolveActiveFrame(): InteractionModel | undefined {
 	if (currentFrame === null) return undefined
 	return resultAcknowledged ? acknowledgeFrame(currentFrame) : currentFrame
 }
 
-function renderFlowViewSvg() {
+function renderFlowViewSvg(): Vnode | null {
 	if (labels === null || currentFrame === null) return null
 	const baseFrame = currentFrame
 	const frame = resultAcknowledged ? acknowledgeFrame(baseFrame) : baseFrame
@@ -527,7 +594,7 @@ function renderFlowViewSvg() {
 	return renderFlowView(domH, frame, labels, tier, lifecycle, cta, question, flowColumnTracker)
 }
 
-function renderSequenceViewSvg() {
+function renderSequenceViewSvg(): Vnode | null {
 	if (labels === null || currentFrame === null) return null
 	const manifest = scenarios[scenarioIndex]
 	if (manifest === undefined) return null
@@ -538,7 +605,7 @@ function renderSequenceViewSvg() {
 }
 
 // Derives the terminal-result descriptor the modal renders. The demo frames carry no result/error text (the InteractionModel has no result field), so the summary is a fixed honest line keyed off the current frame's terminal status and the error block surfaces only on an error status — enough for the modal to read as a real result affordance without inventing scenario-specific prose. The current frame is terminal whenever the modal opens (openResultModal gates on isTerminalStatus), so its status is the run's terminal status.
-function deriveDemoResultDescriptor(status) {
+function deriveDemoResultDescriptor(status: RunStatus): TerminalResult {
 	if (status === 'error') {
 		return { status, summary: null, artifacts: [], error: { message: 'The run stopped with an error.', raw: null } }
 	}
@@ -551,7 +618,7 @@ function deriveDemoResultDescriptor(status) {
 	return { status, summary: 'The run completed.', artifacts: [], error: null }
 }
 
-function openResultModal() {
+function openResultModal(): void {
 	if (resultModalNode !== null) return
 	if (currentFrame === null) return
 	if (!isTerminalStatus(currentFrame.status)) return
@@ -567,14 +634,15 @@ function openResultModal() {
 		onCopyRaw: copyRawToClipboard,
 		onClose: closeResultModal,
 	})
-	flowContainer.appendChild(modal)
-	resultModalNode = modal
+	const modalElement = hostElementOf(modal, 'the result modal')
+	flowContainer.appendChild(modalElement)
+	resultModalNode = modalElement
 	// Repaint the flow area so the returner departs immediately; the modal (appended after the now caption) survives the repaint, which only swaps the SVG that sits before the now caption.
 	paintFlowArea()
 }
 
 // Rebuilds the flow SVG (and the caption/cost surfaces derived from the same frame) without touching the result modal or the acknowledge flag. The acknowledge path calls this so the returner departs while the modal stays mounted; the navigation path uses render() instead, which additionally closes the modal and resets the flag.
-function paintFlowArea() {
+function paintFlowArea(): void {
 	const frame = resolveActiveFrame()
 	if (frame === undefined) return
 	while (flowContainer.firstChild !== null) {
@@ -583,7 +651,7 @@ function paintFlowArea() {
 	}
 	const svg = renderFlowViewSvg()
 	if (svg !== null) {
-		flowContainer.insertBefore(svg, nowCaption)
+		flowContainer.insertBefore(hostElementOf(svg, 'the flow view'), nowCaption)
 	}
 	if (labels !== null) nowCaption.textContent = deriveNowCaption(frame, labels, tier)
 	const cost = deriveCostStrip(frame)
@@ -591,7 +659,7 @@ function paintFlowArea() {
 	costTokens.textContent = `${cost.tokens.toLocaleString()} tokens`
 }
 
-function closeResultModal() {
+function closeResultModal(): void {
 	if (resultModalNode === null) return
 	resultModalNode.remove()
 	resultModalNode = null
@@ -599,7 +667,7 @@ function closeResultModal() {
 
 // The question modal opens on an ask_human transit frame and stays open until the user answers or dismisses it. Like the result modal it is an HTML overlay sibling to the SVG, mounted without rebuilding the SVG so the marching-ants and enter animations do not replay. The Question affordance stays on the answerer node while the modal is dismissed, so the operator can re-open it by clicking the button again.
 // The question text is the ask call's details; the models carry no question text, so the modal opens with the waiting fallback and the details fetch fills the question block in when it lands (a failure leaves the fallback — graceful, like the inspector card).
-function openQuestionModal() {
+function openQuestionModal(): void {
 	if (questionModalNode !== null) return
 	const manifest = scenarios[scenarioIndex]
 	if (manifest === undefined) return
@@ -614,8 +682,10 @@ function openQuestionModal() {
 		onSubmit: submitQuestion,
 		onClose: closeQuestionModal,
 	})
-	flowContainer.appendChild(modal)
-	questionModalNode = modal
+	const modalElement = hostElementOf(modal, 'the question modal')
+	if (!(modalElement instanceof HTMLElement)) throw new Error('the question modal did not render an HTML element')
+	flowContainer.appendChild(modalElement)
+	questionModalNode = modalElement
 	questionModalOperationId = askHumanCall.id
 	fillQuestionModalWithDetails(manifest, askHumanCall.id)
 }
@@ -626,7 +696,7 @@ function openQuestionModal() {
 // same way and applies nothing, so the waiting fallback stays — graceful, like the inspector card.
 // The fetch goes through the controller's ensure, whose dedup keeps a loading or failed entry from
 // re-fetching — a cached failure is final for the session, like the tooltip path's.
-function fillQuestionModalWithDetails(manifest, operationId) {
+function fillQuestionModalWithDetails(manifest: DemoScenarioManifest, operationId: string): void {
 	const cached = operationDetails.lookup(manifest.id, operationId)
 	if (cached.status === 'ready') {
 		applyQuestionModalDetails(cached.details)
@@ -637,18 +707,18 @@ function fillQuestionModalWithDetails(manifest, operationId) {
 
 // Swaps the open modal's question text for the fetched details markdown; nothing to do when the
 // operation carried no details or the modal has since closed.
-function applyQuestionModalDetails(details) {
+function applyQuestionModalDetails(details: unknown): void {
 	if (questionModalNode === null) return
 	if (typeof details !== 'string' || details === '') return
 	const block = questionModalNode.querySelector('.question-modal-question')
 	if (block === null) return
 	while (block.firstChild !== null) block.removeChild(block.firstChild)
 	for (const child of renderMarkdown(details)) {
-		block.appendChild(typeof child === 'string' ? document.createTextNode(child) : child)
+		block.appendChild(typeof child === 'string' ? document.createTextNode(child) : child.element)
 	}
 }
 
-function closeQuestionModal() {
+function closeQuestionModal(): void {
 	if (questionModalNode === null) return
 	questionModalNode.remove()
 	questionModalNode = null
@@ -656,7 +726,7 @@ function closeQuestionModal() {
 }
 
 // Submitting the answer advances to the next frame (the human_answer return), which turns the answerer green and closes the call. The answer text is not stored in the demo (the InteractionModel carries no answer field), so advancing the frame is the whole of the response; the product client would POST the answer and the backend would emit the return.
-function submitQuestion(event) {
+function submitQuestion(event: Event): void {
 	event.preventDefault()
 	closeQuestionModal()
 	const manifest = scenarios[scenarioIndex]
@@ -667,7 +737,7 @@ function submitQuestion(event) {
 	loadFrame()
 }
 
-function render() {
+function render(): void {
 	const manifest = scenarios[scenarioIndex]
 	if (manifest === undefined) return
 	if (currentFrame === null) return
@@ -700,7 +770,7 @@ function render() {
 	if (viewMode === 'flow') {
 		const svg = renderFlowViewSvg()
 		if (svg !== null) {
-			flowContainer.insertBefore(svg, nowCaption)
+			flowContainer.insertBefore(hostElementOf(svg, 'the flow view'), nowCaption)
 		}
 		// Auto-open the question modal when landing on an ask_human transit frame so the operator can answer immediately; dismissing it leaves the Question affordance on the answerer node for re-entry.
 		openQuestionModal()
@@ -714,7 +784,7 @@ function render() {
 		pendingScrollIntent = 'preserve'
 		return
 	}
-	sequenceScrollContainer.replaceChildren(svg)
+	sequenceScrollContainer.replaceChildren(hostElementOf(svg, 'the sequence view'))
 	flowContainer.insertBefore(sequenceScrollContainer, nowCaption)
 	wireSequenceInteractions(sequenceScrollContainer)
 	// Auto-open the question modal in the sequence view too, so a pending ask_human prompts the operator regardless of which view is active; re-opening after dismissal is via clicking the ask_human message row (wired in wireSequenceInteractions).
@@ -726,7 +796,7 @@ function render() {
 }
 
 // On a forward frame advance (Next or Play), scroll the sequence container so the latest (active) message row lands in view — the same affordance the "Jump to active" button offers, but automatic, so an in-progress run's current operation never drifts off-screen as Play or Next advances. On a backward step, an arbitrary scrub, a tier swap, or a view toggle, restore the pixel scrollTop captured before the rebuild so the user's scroll position is preserved rather than yanked. A scenario switch resets to the top because the preserved scrollTop mapped onto a different scenario's content.
-function applySequenceScroll(preservedScrollTop, isForwardAdvance) {
+function applySequenceScroll(preservedScrollTop: number, isForwardAdvance: boolean): void {
 	if (scenarioChanged) {
 		sequenceScrollContainer.scrollTop = 0
 		return
@@ -738,7 +808,7 @@ function applySequenceScroll(preservedScrollTop, isForwardAdvance) {
 	sequenceScrollContainer.scrollTop = preservedScrollTop
 }
 
-function loadScenario(newScenarioIndex) {
+function loadScenario(newScenarioIndex: number): void {
 	scenarioIndex = newScenarioIndex
 	frameIndex = 0
 	scenarioChanged = true
@@ -751,7 +821,7 @@ function loadScenario(newScenarioIndex) {
 // A fetch failure leaves the harness showing the last good frame (or empty before the first load) rather than crashing.
 // A generation guard drops stale responses so rapid scrubbing cannot land an older frame after a newer one (the last fetch requested always wins).
 let loadGeneration = 0
-async function loadFrame() {
+async function loadFrame(): Promise<void> {
 	const manifest = scenarios[scenarioIndex]
 	if (manifest === undefined) return
 	const generation = ++loadGeneration
@@ -761,21 +831,22 @@ async function loadFrame() {
 		if (currentFrame === null) render()
 		return
 	}
-	const frame = await response.json()
+	const frame: unknown = await response.json()
 	if (generation !== loadGeneration) return
+	if (!isInteractionModelPayload(frame)) throw new Error(`demo frame payload for scenario "${manifest.id}" at frame ${frameIndex} is not a valid interaction model`)
 	previousFrame = currentFrame
 	currentFrame = frame
 	render()
 }
 
-function stopPlaying() {
+function stopPlaying(): void {
 	if (playTimer === null) return
 	clearInterval(playTimer)
 	playTimer = null
 	playButton.textContent = 'Play'
 }
 
-function togglePlaying() {
+function togglePlaying(): void {
 	if (playTimer !== null) {
 		stopPlaying()
 		return
@@ -794,7 +865,7 @@ function togglePlaying() {
 	}, PLAY_INTERVAL_MS)
 }
 
-function applyTheme(theme) {
+function applyTheme(theme: string): void {
 	document.documentElement.setAttribute('data-theme', theme)
 	themeButton.textContent = theme === 'dark' ? 'Light' : 'Dark'
 }
@@ -857,6 +928,7 @@ Promise.all([
 	fetch('api/demo/scenarios').then((response) => response.json()),
 ])
 	.then(([config, manifestList]) => {
+		if (!isScenarioManifestList(manifestList)) throw new Error('demo scenario list is not an array of valid scenario manifests')
 		labels = createLabelResolver(config)
 		scenarios = manifestList
 		for (const [index, manifest] of scenarios.entries()) {

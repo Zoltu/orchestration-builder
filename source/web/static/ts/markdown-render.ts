@@ -73,8 +73,8 @@ function childNodesToNodes(childNodes: NodeListOf<ChildNode>): HtmlNode[] {
 	return out
 }
 
-// Builds a `renderMarkdown(text)` closure bound to the supplied `h`. A single showdown Converter is constructed lazily on first use and reused for every render; GFM tables and strikethrough are enabled and noHeaderId suppresses showdown's auto-generated heading ids (anchor links the UI does not need and that would only add attributes for the sanitizer to strip). Empty/absent input yields the em-dash placeholder the non-Markdown fields also use; if the vendored libraries are unavailable or showdown throws, the raw text is returned as a single text node so the field stays readable instead of blank. The memo holds the sanitized neutral tree (the expensive showdown/highlight/parse/sanitize result), never vnodes — see the module header for why shared vnode objects corrupt hyperapp's differ.
-export function createMarkdownRenderer(h: Hyperscript): (text: string) => unknown[] {
+// Builds a `renderMarkdown(text)` closure bound to the supplied `h`. A single showdown Converter is constructed lazily on first use and reused for every render; GFM tables and strikethrough are enabled and noHeaderId suppresses showdown's auto-generated heading ids (anchor links the UI does not need and that would only add attributes for the sanitizer to strip). Empty/absent input yields the em-dash placeholder the non-Markdown fields also use; if the vendored libraries are unavailable or showdown throws, the raw text is returned as a single text node so the field stays readable instead of blank. The memo holds the sanitized neutral tree (the expensive showdown/highlight/parse/sanitize result), never vnodes — see the module header for why shared vnode objects corrupt hyperapp's differ. The product is generic over the host's vnode product (see Hyperscript in markdown.ts): an array of the host's vnodes and strings.
+export function createMarkdownRenderer<V>(h: Hyperscript<V>): (text: string) => (V | string)[] {
 	const cache = new Map<string, HtmlNode[]>()
 	let converter: { makeHtml(text: string): unknown } | null = null
 
@@ -88,7 +88,7 @@ export function createMarkdownRenderer(h: Hyperscript): (text: string) => unknow
 		return converter
 	}
 
-	function textToVnodes(text: string): unknown[] {
+	function textToVnodes(text: string): (V | string)[] {
 		const activeConverter = ensureConverter()
 		if (activeConverter === null || typeof activeConverter.makeHtml !== 'function') return [text]
 		let html: unknown
