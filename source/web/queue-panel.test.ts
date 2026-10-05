@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test'
-import { backlogCount, deriveQueueSections, deriveReorderPosition, isQueueItemLike, queueItemPrimaryText, queueStatusLabel, reorderWaitingItems, RECENT_QUEUE_LIMIT, taskFirstLine } from './static/queue-panel.js'
+import { backlogCount, deriveQueueSections, deriveReorderPosition, isQueueItemLike, queueItemPrimaryText, queueStatusLabel, reorderWaitingItems, RECENT_QUEUE_LIMIT, taskFirstLine } from './static/ts/queue-panel.js'
 
-// The panel logic is browser-pure JS, so the exports arrive with inferred types; the fixture shape below mirrors the queue item's wire shape (docs/queueing.md "The queue: storage, item model, state machine") the tests build against, mirroring the sibling flow-view.test.ts convention.
+// The fixture shape below mirrors the queue item's wire shape (docs/queueing.md "The queue: storage, item model, state machine") the tests build against, pulled off the module's API so the fixtures are checked against the module's own QueueItemLike, mirroring the sibling flow-view.test.ts convention.
 type QueueItemLike = Parameters<typeof queueItemPrimaryText>[0]
 
 function item(overrides: Partial<QueueItemLike> = {}): QueueItemLike {

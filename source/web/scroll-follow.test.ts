@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { createScrollFollower, isAtBottom, pinnedScrollTop } from './static/scroll-follow.js'
+import { createScrollFollower, isAtBottom, pinnedScrollTop } from './static/ts/scroll-follow.js'
 
 // Fake scroll container: plain fields plus a recorded scroll listener, no real DOM. follow() drives scrollTop through the same property a browser would clamp, so the fake needs no scrollTo.
 class FakeScrollElement {

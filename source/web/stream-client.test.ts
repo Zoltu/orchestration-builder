@@ -1,9 +1,9 @@
 import { describe, expect, test, vi } from 'bun:test'
 import { createStreamClient } from './static/stream-client.js'
-import { nextLivePartial, activeLivePartial, scopedActiveLivePartial } from './static/live-partial.js'
+import { nextLivePartial, activeLivePartial, scopedActiveLivePartial } from './static/ts/live-partial.js'
 import { defined } from './test-fixtures.js'
 
-// The stream client and the live-partial helpers are browser-pure JS, so their exports arrive with inferred JSDoc types. The interfaces below carry the shapes the tests assert against, mirroring inspector-modal.test.ts.
+// The stream client is still browser-pure JS, so its exports arrive with inferred JSDoc types (the live-partial helpers it feeds are TypeScript at static/ts/live-partial.ts). The interfaces below carry the shapes the tests assert against, mirroring inspector-modal.test.ts.
 
 /** The handler set the fake records from the socket factory (stream-client.js's `StreamSocketHandlers`). */
 interface StreamSocketHandlers {

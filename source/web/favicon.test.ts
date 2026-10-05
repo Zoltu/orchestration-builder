@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { deriveFaviconState, faviconHref } from './static/favicon.js'
+import { deriveFaviconState, faviconHref } from './static/ts/favicon.js'
 
 // Pull the favicon types off helper signatures so the fixtures are contextually checked against the JSDoc shape without a cast, mirroring the sibling labels.test.ts convention.
 type FaviconState = Parameters<typeof faviconHref>[0]

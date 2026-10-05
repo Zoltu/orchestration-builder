@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import { renderSequenceView, sequenceActiveRowScrollTop, HEADER_HEIGHT, ROW_HEIGHT, BOTTOM_MARGIN } from './static/sequence-diagram.js'
 import { activeOperation, activeStack, observesOf, rolesOnlyModel, rolesOnlyParticipants } from './static/interaction-model.js'
-import { createLabelResolver } from './static/labels.js'
+import { createLabelResolver } from './static/ts/labels.js'
 import { labelsModule } from './label-resolver-fixture.js'
 import { scenarios, GUILD_PARTICIPANTS } from './static/scenarios.js'
 import { defined } from './test-fixtures.js'

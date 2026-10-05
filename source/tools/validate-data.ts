@@ -15,7 +15,7 @@ import { createPlanToolHandlers } from '../executor/tools/plan.js'
 import { createRunLogToolHandlers } from '../executor/tools/run-log.js'
 import type { HumanFacingText, ToolManifest } from '../executor/types.js'
 import { isNonEmptyStringArray, validateToolManifest } from '../executor/validation.js'
-import { faviconHref } from '../web/static/favicon.js'
+import { faviconHref } from '../web/static/ts/favicon.js'
 
 const repoRoot = path.resolve(import.meta.dir, '..', '..')
 const guildDir = path.join(repoRoot, 'guild')
@@ -454,7 +454,7 @@ function checkBenchmarks(): void {
 	check(large.includes('project_todo_cli'), 'benchmarks: missing large benchmark "project_todo_cli"')
 }
 
-// The index.html icon href hand-duplicates faviconHref('complete'), and the two can silently drift; pinning them here keeps the inline default and the JS module from diverging (the module comment in source/web/static/favicon.js documents the pairing).
+// The index.html icon href hand-duplicates faviconHref('complete'), and the two can silently drift; pinning them here keeps the inline default and the module from diverging (the module comment in source/web/static/ts/favicon.ts documents the pairing).
 function checkIndexHtmlFavicon(): void {
 	if (!fs.existsSync(indexHtmlPath)) {
 		failures.push('source/web/static: index.html missing')
@@ -471,7 +471,7 @@ function checkIndexHtmlFavicon(): void {
 		return
 	}
 	const expectedHref = faviconHref('complete')
-	check(iconHref === expectedHref, `source/web/static/index.html: the <link rel="icon"> href does not match faviconHref('complete') from source/web/static/favicon.js — regenerate it from favicon.js`)
+	check(iconHref === expectedHref, `source/web/static/index.html: the <link rel="icon"> href does not match faviconHref('complete') from source/web/static/ts/favicon.ts — regenerate it from ts/favicon.ts`)
 }
 
 const loaded = loadGuildData()

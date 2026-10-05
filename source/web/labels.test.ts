@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { createLabelResolver } from './static/labels.js'
+import { createLabelResolver } from './static/ts/labels.js'
 import { activeStack } from './static/interaction-model.js'
 import { scenarios } from './static/scenarios.js'
 

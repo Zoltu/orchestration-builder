@@ -7,7 +7,7 @@ import {
 	htmlNodesToVnodes,
 	isSafeUrl,
 	sanitizeNodes,
-} from './static/markdown.js'
+} from './static/ts/markdown.js'
 
 // A plain-text node and a tag/attributes/children element are the two shapes the sanitizer operates on; tests build them by hand so the suite needs no DOM.
 interface HtmlNode {

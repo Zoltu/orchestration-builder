@@ -75,7 +75,7 @@ An interrupt spawns a **new call stack** rooted at a fresh `Interrupt` pseudo-pa
 
 ## Labels
 
-Labels are **localization**, and the localization data lives in the **Guild** so a swapped Guild re-flavors the views without a frontend change. The model carries no prose; the resolver (`source/web/static/labels.js`, a `createLabelResolver(config)` factory) reads three data sources the frontend already loads via `GET /api/config`:
+Labels are **localization**, and the localization data lives in the **Guild** so a swapped Guild re-flavors the views without a frontend change. The model carries no prose; the resolver (`source/web/static/ts/labels.ts`, a `createLabelResolver(config)` factory) reads three data sources the frontend already loads via `GET /api/config`:
 
 - **Real role labels** — `role.label` on each role definition; `role.workingLabel` carries the active/working-state text (with a `{participant}` placeholder) used when a settled call's destination is doing its own work.
 - **Real tool labels** — `tool.humanLabel` on each tool manifest; `tool.humanCallLabel` is a per-tool call-operation template (with `{source}` and optionally `{destination}`) that overrides the generic `role->tool` / `interrupt->tool` operation template; `tool.humanWorkingLabel` is the per-tool working-state text (optionally with `{participant}`) that overrides the generic tool working template.
