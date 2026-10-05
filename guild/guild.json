@@ -57,7 +57,8 @@
 				"detailed": ["role {participantRole} is generating the next code change (streaming tokens)"],
 				"friendly": ["Writing code"],
 				"whimsical": ["Hamster wheels are spinning", "Sharpening all the pencils", "Consulting the rubber duck", "Aligning the widget flanges", "Reticulating splines"]
-			}
+			},
+			"styleGuide": "prompts/style.md"
 		},
 		"researcher": {
 			"systemPrompt": "prompts/researcher.md",
@@ -133,7 +134,8 @@
 				"detailed": ["role {participantRole} is directing the style review loop (streaming tokens)"],
 				"friendly": ["Directing the style review"],
 				"whimsical": ["Coordinating the wardrobe", "Matching the curtains to the carpet", "Enforcing the dress code"]
-			}
+			},
+			"styleGuide": "prompts/style.md"
 		},
 		"style_reviewer": {
 			"systemPrompt": "prompts/style_reviewer.md",
@@ -152,7 +154,8 @@
 				"detailed": ["role {participantRole} is reviewing the style (streaming tokens)"],
 				"friendly": ["Reviewing the style"],
 				"whimsical": ["Combing the code for cowlicks", "Checking the dress rehearsal", "Hunting the rogue semicolon"]
-			}
+			},
+			"styleGuide": "prompts/style.md"
 		},
 		"security_lead": {
 			"systemPrompt": "prompts/security_lead.md",

@@ -87,6 +87,8 @@ export interface HumanFacingText {
 export interface RoleDefinition {
 	systemPrompt: string
 	tools: string[]
+	// Optional path, relative to the guild directory, of a style-standard file whose content the loader appends to this role's system prompt at load time (see docs/reference.md "Guild format").
+	styleGuide?: string
 	label?: HumanFacingText
 	description?: HumanFacingText
 	workingLabel?: HumanFacingText

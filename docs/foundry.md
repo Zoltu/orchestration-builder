@@ -78,6 +78,8 @@ A hypothesis is a concrete, testable change to the Guild:
 
 An `edit` is the **complete new file content** for the path (not a diff/patch). This needs no patch engine and keeps branch application auditable (write-then-validate).
 
+Style rules are one load-time-appended unit, not prompt text: the standard lives in `guild/prompts/style.md`, referenced by the `styleGuide` field on the roles that enforce it. Hypotheses must not inline style rules into role prompts and must not add, drop, or repoint `styleGuide` fields — the data gate (`source/tools/validate-data.ts`) pins the wiring, and branch validation treats those pins as part of the promoted-state contract.
+
 The large model is given the current Guild, recent run logs, aggregated failure summaries, and instructions to produce only actionable hypotheses. Hypotheses whose edits produce an invalid Guild are dropped (not crashed on), with the reason recorded. No-op hypotheses (wording-only changes that don't move scores) are discarded as a loop rule, not a termination reason.
 
 ## Branch management

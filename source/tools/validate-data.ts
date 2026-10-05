@@ -6,7 +6,7 @@ import * as path from 'node:path'
 import { parseEvalConfig, type EvalConfig } from '../benchmarks/validation.js'
 import { createBuiltInToolHandlers } from '../executor/builtin-tools.js'
 import { ERROR_KINDS } from '../executor/errors.js'
-import { createGuildLoader, type LoadedGuildFiles } from '../executor/loader.js'
+import { composeRolePrompt, createGuildLoader, type LoadedGuildFiles } from '../executor/loader.js'
 import { LOG_FILE_NAME } from '../executor/persistence.js'
 import { createRunParkTracker } from '../executor/park-state.js'
 import { createRoleRegistry } from '../executor/role-registry.js'
@@ -120,12 +120,66 @@ const expectedSignatures: ExpectedSignature[] = [
 	{ file: 'ask_human.json', required: ['question'], properties: ['question', 'context'] },
 ]
 
+// The style standard is one swappable file appended to the designated roles' prompts at load time (composeRolePrompt in source/executor/loader.ts); these pins keep the role set, the file, and the composed prompts from drifting apart silently.
+const styleGuideRoles = new Set(['coder', 'style_lead', 'style_reviewer'])
+const styleGuidePath = 'prompts/style.md'
+const styleGuideHeadings = ['## Style standard', '## Formatting', '## Comments']
+// Distinctive fragments of the standard's body, pinned so gutting the file's content while keeping its headings fails the gate the way a dropped heading does.
+const styleGuideFragments = ['Newlines carry semantic meaning', 'A comment earns its place only']
+// Distinctive fragments of the inline style rules the role prompts duplicated before the standard was shipped; their absence from every composed styleGuide prompt proves the duplication was deleted rather than carried alongside it.
+const removedInlineStyleRules = ['Default to no comments', 'Keep newlines meaningful']
+
 function loadGuildData(): LoadedGuildFiles | null {
 	try {
 		return createGuildLoader(deploymentPath)(guildDir)
 	} catch (error) {
 		failures.push(`guild: ${errorMessage(error)}`)
 		return null
+	}
+}
+
+// The declared styleGuide role set, the shipped standard's content, and the composed prompts the loader must produce — each pinned so the load-time wiring cannot rot silently.
+function checkStyleStandard(loaded: LoadedGuildFiles): void {
+	const config = loaded.config
+	for (const [name, role] of Object.entries(config.roles)) {
+		if (styleGuideRoles.has(name)) {
+			check(role.styleGuide === styleGuidePath, `guild: role "${name}" must declare styleGuide "${styleGuidePath}" (got "${role.styleGuide ?? 'undefined'}")`)
+		} else {
+			check(role.styleGuide === undefined, `guild: role "${name}" must not declare styleGuide (only ${[...styleGuideRoles].join(', ')} do)`)
+		}
+	}
+	const coderRole = config.roles['coder']
+	if (coderRole === undefined) {
+		failures.push('guild: missing role "coder"')
+		return
+	}
+	check(coderRole.systemPrompt === 'prompts/coder.md', 'guild: role "coder" must declare systemPrompt "prompts/coder.md" (the composed-prompt pin below reads that file)')
+	const styleGuideFilePath = path.join(guildDir, styleGuidePath)
+	if (!fs.existsSync(styleGuideFilePath)) {
+		failures.push(`guild: ${styleGuidePath} missing`)
+		return
+	}
+	const coderPromptFilePath = path.join(guildDir, 'prompts', 'coder.md')
+	if (!fs.existsSync(coderPromptFilePath)) {
+		failures.push('guild: prompts/coder.md missing')
+		return
+	}
+	const styleGuide = fs.readFileSync(styleGuideFilePath, 'utf8')
+	check(styleGuide.trim().length > 0, `guild: ${styleGuidePath} is empty`)
+	for (const heading of styleGuideHeadings) {
+		check(styleGuide.includes(heading), `guild: ${styleGuidePath} lacks the "${heading}" heading`)
+	}
+	for (const fragment of styleGuideFragments) {
+		check(styleGuide.includes(fragment), `guild: ${styleGuidePath} lacks the expected fragment "${fragment}"`)
+	}
+	const baseCoderPrompt = fs.readFileSync(coderPromptFilePath, 'utf8')
+	const expectedCoderPrompt = composeRolePrompt(baseCoderPrompt, coderRole.styleGuide, (declaredPath) => fs.readFileSync(path.join(guildDir, declaredPath), 'utf8'))
+	check(loaded.prompts['coder'] === expectedCoderPrompt, 'guild: the composed coder prompt is not exactly prompts/coder.md composed with its declared styleGuide (unexpected separator, extra content, or a loader regression)')
+	for (const name of styleGuideRoles) {
+		const composedPrompt = loaded.prompts[name] ?? ''
+		for (const removedRule of removedInlineStyleRules) {
+			check(!composedPrompt.includes(removedRule), `guild: the composed ${name} prompt still duplicates the removed inline style rule "${removedRule}"`)
+		}
 	}
 }
 
@@ -229,6 +283,7 @@ function checkGuild(loaded: LoadedGuildFiles): void {
 			check(role.tools.includes(runLogTool) === (name === 'inquiry_responder'), `guild: run-log tool "${runLogTool}" must be held only by "inquiry_responder" (found on "${name}")`)
 		}
 	}
+	checkStyleStandard(loaded)
 	check(deployment.executor.contextHandlerRole === 'context_manager', `deployment: executor.contextHandlerRole must be "context_manager" (got "${deployment.executor.contextHandlerRole ?? 'undefined'}")`)
 	const triggers = deployment.executor.interruptTriggers
 	if (triggers === undefined) {

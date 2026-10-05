@@ -4,7 +4,7 @@ import { ValidationError } from './errors.js'
 import type { DeploymentConfig, DeploymentFileConfig, GuildConfig, ToolManifest } from './types.js'
 import { validateDeploymentFileConfig, validateDeploymentRoleReferences, validateGuildConfig, validateToolManifest } from './validation.js'
 
-// What the loader reads straight from the files: the deployment is still file-shaped, so model.name and model.contextWindow may be absent and the consumer completes them (resolveDeploymentConfig) into a LoadedGuild before the executor sees them.
+// What the loader reads from the files (role prompts composed with their declared style guides): the deployment is still file-shaped, so model.name and model.contextWindow may be absent and the consumer completes them (resolveDeploymentConfig) into a LoadedGuild before the executor sees them.
 export interface LoadedGuildFiles {
 	config: GuildConfig
 	deployment: DeploymentFileConfig
@@ -45,6 +45,12 @@ function readJsonFile(filePath: string, errorPath: string): unknown {
 	}
 }
 
+// Prompt composition shared by the guild loader and the data validator: a role without a styleGuide keeps its prompt byte-identical, and one with it gets the base prompt, exactly one blank line, then the style file's content (the base's trailing whitespace is trimmed because every shipped prompt file ends with a final newline, which would otherwise double the separator; the style file carries its own `## Style standard` heading — none is injected here). The reader is injected so the composition is testable in memory; its errors (the loader maps a missing file to a ValidationError naming `roles.<name>.styleGuide`) propagate unchanged.
+export function composeRolePrompt(basePrompt: string, styleGuide: string | undefined, readStyleGuide: (styleGuidePath: string) => string): string {
+	if (styleGuide === undefined) return basePrompt
+	return `${basePrompt.trimEnd()}\n\n${readStyleGuide(styleGuide)}`
+}
+
 // The deployment file path is fixed per service (it lives beside the guild in the bundle and is not per-run), so the factory closes over it and the returned LoadGuild keeps the guild-dir-only signature. The LoadedGuildFiles it yields is file-shaped; completing the model into the LoadedGuild the executor consumes is the startup path's job (resolveDeploymentConfig in serve.ts).
 export function createGuildLoader(deploymentFilePath: string): LoadGuild {
 	return (guildDir: string): LoadedGuildFiles => {
@@ -57,7 +63,8 @@ export function createGuildLoader(deploymentFilePath: string): LoadGuild {
 		const prompts: Record<string, string> = {}
 		for (const [roleName, role] of Object.entries(config.roles)) {
 			const promptPath = path.join(guildDir, role.systemPrompt)
-			prompts[roleName] = readRequiredFile(promptPath, `roles.${roleName}.systemPrompt`)
+			const basePrompt = readRequiredFile(promptPath, `roles.${roleName}.systemPrompt`)
+			prompts[roleName] = composeRolePrompt(basePrompt, role.styleGuide, (styleGuidePath) => readRequiredFile(path.join(guildDir, styleGuidePath), `roles.${roleName}.styleGuide`))
 		}
 		const tools: Record<string, ToolManifest> = {}
 		for (const toolPath of config.tools) {

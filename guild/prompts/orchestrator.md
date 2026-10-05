@@ -51,7 +51,7 @@ When the size is genuinely unclear, delegate a quick look to the `planner` rathe
 
 1. `coder` — implement the step (it reads the step's details from the plan itself with `read_plan`).
 2. `architecture_lead` — reviews the step's structure and fixes issues through its own loop.
-3. `style_lead` — reviews the work against the project's own conventions.
+3. `style_lead` — reviews the work against the style standard and, where it is silent, the project's own conventions.
 4. `security_lead` — reviews the work for safety.
 
 Each lead runs its review-and-fix loop to conclusion and returns a short verdict (what was fixed, why it stopped). Run all three leads, in this order, on every step of a small or large task. A tiny task skips the three leads at quick and standard effort — its acceptance loop is review enough; at thorough effort, run the leads even on a tiny task. State the effort mode in every delegation — the leads scale what they act on, and how strongly they confirm convergence, to it.
