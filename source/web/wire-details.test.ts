@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { createWireDetails, WIRE_DETAIL_CACHE_LIMIT } from './static/wire-details.js'
+import { createWireDetails, WIRE_DETAIL_CACHE_LIMIT } from './static/ts/wire-details.js'
 
 // The controller is browser-pure JS, so its exports arrive with inferred JS types; the alias
 // below pulls the lookup contract off the factory's JSDoc, mirroring operation-details.test.ts.

@@ -7,30 +7,37 @@ import { isObject } from './guards.js'
 // The shipped cache bound: folded conversations ride the response whole, so the cache holds a bounded number of opened turns and re-fetches an evicted one on reopen.
 export const WIRE_DETAIL_CACHE_LIMIT = 100
 
-/**
- * The lookup state for one turn's wire envelope: nothing fetched yet (a miss), the fetch in flight, or the server's answer — `sections` pairs the folded bodies under machine labels and is the explicit null when the event carries none.
- *
- * @typedef {{ status: 'idle' } | { status: 'loading' } | { status: 'ready', sections: Array<{label: string, content: unknown}> | null }} WireDetailState
- */
+// One labeled section pair from the endpoint's folded body.
+export interface WireDetailSection {
+	label: string
+	content: unknown
+}
 
-/**
- * @typedef {Object} WireDetailsController
- * @property {(runId: string, eventIndex: number) => WireDetailState} lookup the cache's state for one turn; a miss reads as idle so the host can distinguish "not fetched" from "in flight"
- * @property {(runId: string, eventIndex: number) => boolean} begin marks an uncached turn 'loading' synchronously (so the open's first render reads a defined state) and returns whether it started — the host builds exactly one fetch per true
- * @property {(runId: string, eventIndex: number, ok: boolean, body: unknown) => void} recordResponse records a resolved fetch: an ok body carrying `detailSections` as an array (or an explicit null) reads ready; anything else evicts so reopening retries
- * @property {(runId: string, eventIndex: number) => void} recordFailure records a fetch that never produced a response by evicting, so reopening retries
- */
+// The lookup state for one turn's wire envelope: nothing fetched yet (a miss), the fetch in flight, or the server's answer — `sections` pairs the folded bodies under machine labels and is the explicit null when the event carries none.
+export type WireDetailState = { status: 'idle' } | { status: 'loading' } | { status: 'ready'; sections: WireDetailSection[] | null }
 
-/**
- * @param {{ maxEntries: number }} options the entry bound past which the oldest cached turn is evicted
- * @returns {WireDetailsController}
- */
-export function createWireDetails(options) {
+export interface WireDetailsController {
+	// The cache's state for one turn; a miss reads as idle so the host can distinguish "not fetched" from "in flight".
+	lookup(runId: string, eventIndex: number): WireDetailState
+	// Marks an uncached turn 'loading' synchronously (so the open's first render reads a defined state) and returns whether it started — the host builds exactly one fetch per true.
+	begin(runId: string, eventIndex: number): boolean
+	// Records a resolved fetch: an ok body carrying `detailSections` as an array (or an explicit null) reads ready; anything else evicts so reopening retries.
+	recordResponse(runId: string, eventIndex: number, ok: boolean, body: unknown): void
+	// Records a fetch that never produced a response by evicting, so reopening retries.
+	recordFailure(runId: string, eventIndex: number): void
+}
+
+export interface WireDetailsOptions {
+	// The entry bound past which the oldest cached turn is evicted.
+	maxEntries: number
+}
+
+export function createWireDetails(options: WireDetailsOptions): WireDetailsController {
 	const { maxEntries } = options
 	if (!Number.isInteger(maxEntries) || maxEntries < 1) throw new Error('createWireDetails: maxEntries must be a positive integer')
-	const cache = new Map()
+	const cache = new Map<string, WireDetailState>()
 
-	function keyOf(runId, eventIndex) {
+	function keyOf(runId: string, eventIndex: number): string {
 		return `${runId}|${eventIndex}`
 	}
 
@@ -42,16 +49,16 @@ export function createWireDetails(options) {
 		}
 	}
 
-	function evict(runId, eventIndex) {
+	function evict(runId: string, eventIndex: number) {
 		cache.delete(keyOf(runId, eventIndex))
 	}
 
-	function lookup(runId, eventIndex) {
+	function lookup(runId: string, eventIndex: number): WireDetailState {
 		const entry = cache.get(keyOf(runId, eventIndex))
 		return entry === undefined ? { status: 'idle' } : entry
 	}
 
-	function begin(runId, eventIndex) {
+	function begin(runId: string, eventIndex: number): boolean {
 		const key = keyOf(runId, eventIndex)
 		if (cache.has(key)) return false
 		cache.set(key, { status: 'loading' })
@@ -59,7 +66,7 @@ export function createWireDetails(options) {
 		return true
 	}
 
-	function recordResponse(runId, eventIndex, ok, body) {
+	function recordResponse(runId: string, eventIndex: number, ok: boolean, body: unknown) {
 		const sections = readySectionsOf(ok, body)
 		if (sections === undefined) {
 			evict(runId, eventIndex)
@@ -73,12 +80,7 @@ export function createWireDetails(options) {
 }
 
 // The shared read of a detail response body, identical across the wires: only an ok response carrying an object whose `detailSections` is an array (or an explicit null for "this event carries none") is ready; anything else returns undefined, which records the landing as an eviction — a failure must not block the reopen retry.
-/**
- * @param {boolean} ok
- * @param {unknown} body
- * @returns {Array<{label: string, content: unknown}>|null|undefined}
- */
-function readySectionsOf(ok, body) {
+function readySectionsOf(ok: boolean, body: unknown): WireDetailSection[] | null | undefined {
 	if (!ok) return undefined
 	if (!isObject(body)) return undefined
 	if (Array.isArray(body['detailSections'])) return body['detailSections']

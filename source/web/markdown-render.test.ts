@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
-import { createMarkdownRenderer } from './static/markdown-render.js'
+import { createMarkdownRenderer } from './static/ts/markdown-render.js'
 
 // A fake hyperscript that mirrors how hyperapp's `h` is used (`h(tag, props, children)`) and produces a fresh vnode object per call, so any object identity shared across two renders can only come from the renderer caching vnodes.
 interface FakeVnode {

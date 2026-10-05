@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { QuestionModal } from './static/question-modal.js'
+import { QuestionModal } from './static/ts/question-modal.js'
 import { defined } from './test-fixtures.js'
 
 // The question-modal component is browser-pure JS, so its exports arrive with inferred JS types. The interfaces and fake `h`/`renderMarkdown` below carry the shape the tests assert against, mirroring flow-view.test.ts.

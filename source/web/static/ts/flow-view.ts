@@ -48,11 +48,16 @@
 // in (rather than imported) alongside the selected tier so a caller can swap the
 // resolver or tier without the view reaching for globals; node prose is
 // localization, a view concern, and the model carries no prose. The module is
-// plain browser JS, imports only its siblings, and touches no external system.
+// browser-pure TypeScript: it imports only its siblings and the vendored `h`
+// type, and touches no external system.
 
 import { activeOperation, activeParticipant, callChainOf, isPaused, isTerminalStatus, observesOf, stacksOf, terminatesOf } from './interaction-model.js'
+import type { InteractionModel, Operation, Participant, ParticipantKind, RunStatus } from './interaction-model.js'
+import type { LabelResolver, LabelTier } from './labels.js'
 import { ATTR_OPERATION, ATTR_PARTICIPANT, ATTR_ROLE } from './inspector.js'
 import { GraphEdge, GraphNode, NODE_HEIGHT, NODE_WIDTH, nodeAnchor } from './svg-primitives.js'
+import type { Anchor } from './svg-primitives.js'
+import type { H, Vnode } from '../vendor/hyperapp.js'
 
 // Horizontal gap between call-depth columns and vertical gap between rows. Generous horizontal spacing keeps the left-to-right call chain legible; the vertical gap separates the main run from each preempting interrupt stack.
 export const COL_GAP = 96
@@ -67,41 +72,47 @@ const TOP_BAR_PER_ROW = 14
 const DEFAULT_MIN_COLUMNS = 5
 
 // A caller-held high-water mark of the column count the flow view has rendered. A frame whose call chain is shallower than a previous frame still sizes to this width so nodes do not slide leftward when a deep delegation unwinds — a stable stage reads better than one that resizes per frame. The mark lives in an explicit tracker the caller creates and hands in (rather than module scope) so the view stays a pure function of its inputs: each client holds one tracker for the page-load lifetime, and each test constructs a fresh one, keeping renders order-independent.
-export function createColumnTracker() {
+export interface ColumnTracker {
+	minColumns: number
+}
+
+export function createColumnTracker(): ColumnTracker {
 	return { minColumns: DEFAULT_MIN_COLUMNS }
 }
 
 // Vertical gap between the history top bar and the row stack. The two live in one shared SVG coordinate space so a node leaving a row for its top-bar slot travels in the same space (the counter increment is the point of the depart animation).
 const TOPBAR_GAP = 24
 
-function translate(x, y) {
+function translate(x: number, y: number): string {
 	return `translate(${x},${y})`
 }
 
-function rowPixel(column, rowIndex, yOffset) {
+function rowPixel(column: number, rowIndex: number, yOffset: number): Anchor {
 	return { x: column * (NODE_WIDTH + COL_GAP), y: rowIndex * (NODE_HEIGHT + ROW_GAP) + yOffset }
 }
 
-function topBarPixel(index) {
+function topBarPixel(index: number): Anchor {
 	const row = Math.floor(index / TOP_BAR_PER_ROW)
 	const col = index % TOP_BAR_PER_ROW
 	return { x: col * (SMALL_SIZE + SMALL_GAP), y: row * (SMALL_SIZE + SMALL_GAP) }
 }
 
-function topBarWidth(count) {
+function topBarWidth(count: number): number {
 	if (count === 0) return 0
 	const cols = Math.min(count, TOP_BAR_PER_ROW)
 	return cols * SMALL_SIZE + (cols - 1) * SMALL_GAP
 }
 
-function topBarHeight(count) {
+function topBarHeight(count: number): number {
 	if (count === 0) return 0
 	const rows = Math.ceil(count / TOP_BAR_PER_ROW)
 	return rows * SMALL_SIZE + (rows - 1) * SMALL_GAP
 }
 
 // The motion state a call/return edge carries under the single invariant: a line animates iff it is in_flight and its stack is not paused — the active stack is never paused, and a resolved stack (its chain is empty) is not paused either, so a resolved stack's final return leg keeps marching in its outcome color while it travels, exactly like the active stack's own in-flight lines. A call animates 'flowing' only while its lifecycle is in_flight (the transit phase); once it settles (the working phase, or delegation, or its return) it goes solid. A return edge exists only while it is the lingering response leg, so it animates 'returning' (or 'error'/'terminated' for the matching outcome) only while in_flight (its transit phase) and goes solid once settled (its working phase). Any edge on a paused stack is frozen 'static', and observe and terminate never reach here (both render their own static dashed lines).
-function edgeAnimationState(operation, model) {
+type EdgeAnimationState = 'static' | 'flowing' | 'returning' | 'error' | 'terminated'
+
+function edgeAnimationState(operation: Operation, model: InteractionModel): EdgeAnimationState {
 	if (operation.kind === 'observe' || operation.kind === 'terminate') return 'static'
 	if (isPaused(model, operation.stack)) return 'static'
 	if (operation.lifecycle === 'settled') return 'static'
@@ -112,9 +123,37 @@ function edgeAnimationState(operation, model) {
 }
 
 // Per-model memo for the renderer's whole-model derivations: a model is replaced wholesale on every poll and never mutated in place, so each structure is computed once on first request and read by identity afterwards, and the WeakMap drops the entry with its model on run switch. The undefined slots mean "not derived yet"; a cached value is never mutated afterwards.
-const derivedByModel = new WeakMap()
+interface FlowLookups {
+	lastCallOrReturnByStack: Map<string, Operation>
+	closedCallByReturnByStack: Map<string, Map<string, Operation>>
+	completionReturnBySource: Map<string, Operation>
+	stacksWithOperations: Set<string>
+}
 
-function derivedOf(model) {
+interface TopBarSlot {
+	role: string
+	kind: ParticipantKind
+	invocations: number
+	totalTime: number
+	totalTokens: number
+	hasMetrics: boolean
+	errored: boolean
+}
+
+interface CostStrip {
+	elapsedSeconds: number
+	tokens: number
+}
+
+interface DerivedFlow {
+	rows: FlowLookups | undefined
+	topBar: TopBarSlot[] | undefined
+	costStrip: CostStrip | undefined
+}
+
+const derivedByModel = new WeakMap<object, DerivedFlow>()
+
+function derivedOf(model: InteractionModel): DerivedFlow {
 	let derived = derivedByModel.get(model)
 	if (derived !== undefined) return derived
 	derived = { rows: undefined, topBar: undefined, costStrip: undefined }
@@ -123,14 +162,14 @@ function derivedOf(model) {
 }
 
 // The per-stack and per-participant lookups the row projection and the cost reads need: the latest call-or-return per stack, the return id → closed call mapping per stack, the first completing return per participant source, and the set of stacks that carry any operation. One chronological pass computes all per-stack and per-participant lookups; the terminate handling mirrors openCallsByStack — a terminate pops the open call whose destination it targets wherever that call's stack lives, so every stack's open list is scanned, which lands the same pops per stack a per-stack replay would.
-function rowLookupsOf(model) {
+function rowLookupsOf(model: InteractionModel): FlowLookups {
 	const derived = derivedOf(model)
 	if (derived.rows !== undefined) return derived.rows
-	const lastCallOrReturnByStack = new Map()
-	const closedCallByReturnByStack = new Map()
-	const completionReturnBySource = new Map()
-	const stacksWithOperations = new Set()
-	const openByStack = new Map()
+	const lastCallOrReturnByStack = new Map<string, Operation>()
+	const closedCallByReturnByStack = new Map<string, Map<string, Operation>>()
+	const completionReturnBySource = new Map<string, Operation>()
+	const stacksWithOperations = new Set<string>()
+	const openByStack = new Map<string, Operation[]>()
 	for (const operation of model.operations) {
 		stacksWithOperations.add(operation.stack)
 		if (operation.kind === 'call') {
@@ -168,12 +207,33 @@ function rowLookupsOf(model) {
 			}
 		}
 	}
-	derived.rows = { lastCallOrReturnByStack, closedCallByReturnByStack, completionReturnBySource, stacksWithOperations }
-	return derived.rows
+	const lookups: FlowLookups = { lastCallOrReturnByStack, closedCallByReturnByStack, completionReturnBySource, stacksWithOperations }
+	derived.rows = lookups
+	return lookups
+}
+
+interface RowParticipant {
+	id: string
+	column: number
+	lingering: boolean
+}
+
+interface RowEdge {
+	fromColumn: number
+	toColumn: number
+	operation: Operation
+}
+
+interface RowProjection {
+	stackId: string
+	rootId: string
+	participants: RowParticipant[]
+	callEdges: RowEdge[]
+	returnEdges: RowEdge[]
 }
 
 // Projects a single stack to a row descriptor: the root participant, the participants to render (each at its call-depth column, flagged when it is a lingering return source), and the call and lingering-return edges between them. The open call chain gives the live participants and columns; a return lingers only while it is in_flight (its transit phase) — once it settles (the working phase) the returner has departed and neither the node nor its response edge is drawn, so the lingering leg never renders for a settled return even when it is the stack's last call-or-return. A stack whose open chain is empty but whose latest non-observe operation is an in_flight return still renders a row holding that single lingering leg (the terminal return's transit frame), with the return's caller as the row root; this is what lets the terminal frame show the returner and its response line until the See Result click settles the return. observe is skipped when finding that last call-or-return because an observe never affects activity and never enters a call chain, so it cannot be the caller's action that ends a lingering leg. Each edge carries the operation it renders so the animation layer can read its lifecycle and outcome directly.
-function projectRow(model, stackId) {
+function projectRow(model: InteractionModel, stackId: string): RowProjection | null {
 	const chain = callChainOf(model, stackId)
 	const lookups = rowLookupsOf(model)
 	const lastCallOrReturn = lookups.lastCallOrReturnByStack.get(stackId)
@@ -181,7 +241,8 @@ function projectRow(model, stackId) {
 		? lastCallOrReturn
 		: undefined
 
-	if (chain.length === 0 && lingeringReturn === undefined) {
+	const rootCall = chain[0]
+	if (rootCall === undefined && lingeringReturn === undefined) {
 		// A freshly preempted stack has no operations yet: it renders a row holding just its root, the current worker while the preempting party readies its first act. Operations alone cannot name such a stack, so the row exists only when the model carries stack records (the adapter emits them; hand-authored models render nothing here). The first stack with no operations is an empty run and renders nothing instead.
 		if (model.stacks === undefined) return null
 		const firstStack = model.stacks[0]
@@ -192,13 +253,16 @@ function projectRow(model, stackId) {
 		return { stackId, rootId: record.root, participants: [{ id: record.root, column: 0, lingering: false }], callEdges: [], returnEdges: [] }
 	}
 
-	// The row root is the open chain's first call source, or — when the chain is empty — the lingering return's caller (its destination), who is the stack's effective root while the last return leg is still in flight.
-	const rootId = chain.length > 0 ? chain[0].source : lingeringReturn.destination
+	// The row root is the open chain's first call source, or — when the chain is empty — the lingering return's caller (its destination), who is the stack's effective root while the last return leg is still in flight. The throw is the guard above's invariant: an empty chain reaches here only with a lingering return, which the guard already returned on.
+	let rootId: string
+	if (rootCall !== undefined) rootId = rootCall.source
+	else if (lingeringReturn !== undefined) rootId = lingeringReturn.destination
+	else throw new Error('projectRow invariant violated: a row was projected with neither an open call nor an in-flight return leg')
 
-	const columnByParticipant = new Map()
+	const columnByParticipant = new Map<string, number>()
 	columnByParticipant.set(rootId, 0)
-	const participants = [{ id: rootId, column: 0, lingering: false }]
-	const callEdges = []
+	const participants: RowParticipant[] = [{ id: rootId, column: 0, lingering: false }]
+	const callEdges: RowEdge[] = []
 	for (let index = 0; index < chain.length; index += 1) {
 		const call = chain[index]
 		if (call === undefined) continue
@@ -211,7 +275,7 @@ function projectRow(model, stackId) {
 
 	const closedByReturn = lookups.closedCallByReturnByStack.get(stackId)
 
-	const returnEdges = []
+	const returnEdges: RowEdge[] = []
 	if (lingeringReturn !== undefined) {
 		const closedCall = closedByReturn?.get(lingeringReturn.id)
 		if (closedCall !== undefined) {
@@ -227,10 +291,10 @@ function projectRow(model, stackId) {
 }
 
 // Aggregates every role/tool type that has ever appeared in the model into one top-bar slot, with the total invocation count (every participant instance of that role, current and departed, so the count matches the "ever run" rule) and the cumulative metrics drawn from the returns whose source is a participant of that role. Departed participants are represented here regardless of whether they currently linger in a row; the depart animation reconciles a lingering node with its slot in the animation layer. The render and the lifecycle diff each read the strip per poll, so the slots are memoized per model and shared read-only between those readers.
-function projectTopBar(model) {
+function projectTopBar(model: InteractionModel): TopBarSlot[] {
 	const derived = derivedOf(model)
 	if (derived.topBar !== undefined) return derived.topBar
-	const slotByRole = new Map()
+	const slotByRole = new Map<string, TopBarSlot>()
 	for (const participant of model.participants) {
 		// The human is the eternal root of every run, never a role that "ran", so it never occupies a top-bar slot.
 		if (participant.kind === 'human') continue
@@ -241,7 +305,7 @@ function projectTopBar(model) {
 		}
 		slot.invocations += 1
 	}
-	const returnBySource = new Map()
+	const returnBySource = new Map<string, Operation>()
 	for (const operation of model.operations) {
 		if (operation.kind !== 'return') continue
 		returnBySource.set(operation.source, operation)
@@ -268,12 +332,12 @@ function projectTopBar(model) {
 }
 
 // The completion return for a participant (the first return whose source is the participant), used to read its cost metrics and outcome. A participant still in flight has no completing return, so it carries no cost. Read from the per-model pass (rowLookupsOf) instead of scanning the operation list per node per render.
-function completionReturnFor(model, participantId) {
+function completionReturnFor(model: InteractionModel, participantId: string): Operation | undefined {
 	return rowLookupsOf(model).completionReturnBySource.get(participantId)
 }
 
 // Renders a single top-bar slot as a small square holding its invocation count, with a <title> carrying the label, count, and cumulative metrics for hover. A slot whose run ended in failure turns red so the failing role reads at a glance against an otherwise neutral strip.
-function renderSmallNode(h, slot, label, index) {
+function renderSmallNode(h: H, slot: TopBarSlot, label: string, index: number): Vnode {
 	const pos = topBarPixel(index)
 	const classes = ['flow-small-node']
 	const runErrored = slot.errored
@@ -292,8 +356,8 @@ function renderSmallNode(h, slot, label, index) {
 }
 
 // Renders one row: edges first (so node boxes paint over anchor overlap), then nodes translated to their call-depth columns. The row group carries the stack id so the structure is discoverable from the DOM and the animation layer can target it. Each call/return edge carries its motion state off the operation it renders and the single invariant; the active participant's node carries the active class so it pulses. A node flagged as a terminate target carries the terminate-target class so the CSS overlays the orange dashed border.
-function renderRow(h, row, rowIndex, yOffset, model, labels, tier, participantById, enteringIds, activeParticipantId, terminateTargetIds) {
-	const edgeVnodes = []
+function renderRow(h: H, row: RowProjection, rowIndex: number, yOffset: number, model: InteractionModel, labels: LabelResolver, tier: LabelTier, participantById: Map<string, Participant>, enteringIds: ReadonlySet<string>, activeParticipantId: string | null, terminateTargetIds: ReadonlySet<string>): Vnode {
+	const edgeVnodes: Vnode[] = []
 	for (const callEdge of row.callEdges) {
 		const fromPos = rowPixel(callEdge.fromColumn, rowIndex, yOffset)
 		const toPos = rowPixel(callEdge.toColumn, rowIndex, yOffset)
@@ -313,7 +377,7 @@ function renderRow(h, row, rowIndex, yOffset, model, labels, tier, participantBy
 		]))
 	}
 
-	const nodeVnodes = row.participants.map((entry) => {
+	const nodeVnodes = row.participants.map((entry): Vnode => {
 		const participant = participantById.get(entry.id)
 		const resolvedLabel = participant !== undefined ? labels.resolveParticipantLabel(participant, tier) : entry.id
 		const sublabel = participant !== undefined && participant.kind !== 'human' && participant.kind !== 'interrupt' ? participant.role : undefined
@@ -342,9 +406,9 @@ function renderRow(h, row, rowIndex, yOffset, model, labels, tier, participantBy
 }
 
 // Renders every observe operation as a static dashed line between its source (in the active stack's row) and its destination (in a paused row), so a cross-stack observation reads as a reference rather than an in-flight call. The line never animates and never enters any call chain.
-function renderObserves(h, model, rowLayout) {
+function renderObserves(h: H, model: InteractionModel, rowLayout: Map<string, Anchor>): Vnode[] {
 	if (rowLayout.size === 0) return []
-	const vnodes = []
+	const vnodes: Vnode[] = []
 	for (const observe of observesOf(model)) {
 		const sourceLayout = rowLayout.get(observe.source)
 		const destinationLayout = rowLayout.get(observe.destination)
@@ -359,9 +423,9 @@ function renderObserves(h, model, rowLayout) {
 }
 
 // Renders every terminate operation as a static red dashed line from the rewind tool (in the active stack's row) to its target (in a paused row), so a cross-stack revert reads as a destructive reference rather than an in-flight call. The line never animates and never enters any call chain; the target's orange dashed border is applied separately by the row renderer via the terminate-target id set. A terminate whose source or destination has departed the rows is skipped, so the line disappears once the tool returns or the reverted target's call closes.
-function renderTerminates(h, model, rowLayout) {
+function renderTerminates(h: H, model: InteractionModel, rowLayout: Map<string, Anchor>): Vnode[] {
 	if (rowLayout.size === 0) return []
-	const vnodes = []
+	const vnodes: Vnode[] = []
 	for (const terminate of terminatesOf(model)) {
 		const sourceLayout = rowLayout.get(terminate.source)
 		const destinationLayout = rowLayout.get(terminate.destination)
@@ -376,8 +440,8 @@ function renderTerminates(h, model, rowLayout) {
 }
 
 // Collects the destination ids of every terminate whose source and destination both still render in the rows, so the row renderer can overlay the orange dashed border on exactly the targets whose red revert line is visible. Tying the border to the line's visibility keeps the two cues in sync: once the tool departs or the target's call closes, neither the line nor the border renders.
-function terminateTargetIdsIn(model, rowLayout) {
-	const ids = new Set()
+function terminateTargetIdsIn(model: InteractionModel, rowLayout: Map<string, Anchor>): Set<string> {
+	const ids = new Set<string>()
 	for (const terminate of terminatesOf(model)) {
 		if (!rowLayout.has(terminate.source)) continue
 		if (!rowLayout.has(terminate.destination)) continue
@@ -387,8 +451,8 @@ function terminateTargetIdsIn(model, rowLayout) {
 }
 
 // Maps every participant that lands in a row to its rendered row index and call-depth column, by replaying the same stacksOf + projectRow projection the renderer uses. deriveLifecycle reads this for both frames so a departing participant's previous position is computed against the same layout the renderer will paint, and entering ids are exactly the participants present in the current rows but absent from the previous rows.
-function rowParticipantPositions(model) {
-	const positions = new Map()
+function rowParticipantPositions(model: InteractionModel): Map<string, { rowIndex: number; column: number }> {
+	const positions = new Map<string, { rowIndex: number; column: number }>()
 	let rowIndex = 0
 	for (const stackId of stacksOf(model)) {
 		const row = projectRow(model, stackId)
@@ -402,40 +466,48 @@ function rowParticipantPositions(model) {
 }
 
 // Maps each role to its top-bar slot index in a model, by replaying projectTopBar. deriveLifecycle uses this to place a departing participant's destination on the current frame's top bar, so the travel lands on the slot the counter increment will read against.
-function topBarSlotIndexByRole(model) {
-	const indexByRole = new Map()
+function topBarSlotIndexByRole(model: InteractionModel): Map<string, number> {
+	const indexByRole = new Map<string, number>()
 	projectTopBar(model).forEach((slot, index) => indexByRole.set(slot.role, index))
 	return indexByRole
 }
 
-function topBarRoleSet(model) {
+function topBarRoleSet(model: InteractionModel): Set<string> {
 	return new Set(projectTopBar(model).map((slot) => slot.role))
 }
 
 // Looks up a participant by id in a model. Participants never leave the model's participant list (they only leave the rows), so a participant departing the rows of the current frame is still present here and the renderer can read its role/kind/label off the current model.
-function participantByIdIn(model, participantId) {
+function participantByIdIn(model: InteractionModel, participantId: string): Participant | undefined {
 	for (const participant of model.participants) {
 		if (participant.id === participantId) return participant
 	}
 	return undefined
 }
 
-/**
- * Diffs two consecutive InteractionModel frames into a node-lifecycle descriptor the renderer animates. `enteringIds` is the set of participant ids present in the current rows but absent from the previous rows; each renders a scale/fade-in. `departing` lists participants present in the previous rows but absent from the current rows, each carrying its previous row/column (so the renderer can place the travel origin) and its top-bar slot destination in the current frame (so the travel lands on the slot), plus `merged` when the role's slot already existed in the previous top bar (the counter increments) versus a fresh slot. Both positions live in the shared SVG coordinate space the renderer paints, so a departing node visibly travels to its slot. A null previousModel (the first frame of a scenario) animates nothing — the graph renders settled rather than every node fading in on each scenario select.
- *
- * @param {InteractionModel | null | undefined} previousModel
- * @param {InteractionModel} currentModel
- * @returns {{ enteringIds: Set<string>, departing: Array<{ participantId: string, previousRowIndex: number, previousColumn: number, slotIndex: number, merged: boolean }> }}
- */
-export function deriveLifecycle(previousModel, currentModel) {
-	const enteringIds = new Set()
-	const departing = []
+interface DepartingNode {
+	participantId: string
+	previousRowIndex: number
+	previousColumn: number
+	slotIndex: number
+	merged: boolean
+}
+
+// The frame-diff descriptor deriveLifecycle produces and renderFlowView consumes: the participants entering the rows (scale/fade in) and those departing them for a top-bar slot.
+export interface FrameLifecycle {
+	enteringIds: Set<string>
+	departing: DepartingNode[]
+}
+
+// Diffs two consecutive InteractionModel frames into a node-lifecycle descriptor the renderer animates. `enteringIds` is the set of participant ids present in the current rows but absent from the previous rows; each renders a scale/fade-in. `departing` lists participants present in the previous rows but absent from the current rows, each carrying its previous row/column (so the renderer can place the travel origin) and its top-bar slot destination in the current frame (so the travel lands on the slot), plus `merged` when the role's slot already existed in the previous top bar (the counter increments) versus a fresh slot. Both positions live in the shared SVG coordinate space the renderer paints, so a departing node visibly travels to its slot. A null previousModel (the first frame of a scenario) animates nothing — the graph renders settled rather than every node fading in on each scenario select.
+export function deriveLifecycle(previousModel: InteractionModel | null | undefined, currentModel: InteractionModel): FrameLifecycle {
+	const enteringIds = new Set<string>()
+	const departing: DepartingNode[] = []
 	if (previousModel === undefined || previousModel === null) {
 		return { enteringIds, departing }
 	}
 	const previousPositions = rowParticipantPositions(previousModel)
 	const currentPositions = rowParticipantPositions(currentModel)
-	for (const [participantId, currentPos] of currentPositions) {
+	for (const participantId of currentPositions.keys()) {
 		if (!previousPositions.has(participantId)) enteringIds.add(participantId)
 	}
 	const currentSlotIndexByRole = topBarSlotIndexByRole(currentModel)
@@ -461,20 +533,17 @@ export function deriveLifecycle(previousModel, currentModel) {
 }
 
 // The terminal-result call-to-action node renders on a terminal frame so the run offers a result affordance. The CTA is a view concern layered on model.status (never model state): the tone follows the status, and the active/modal state plus onclick are harness-managed. A layered "bezel + bevel + face" 3D button reads as pressable at a glance; the active state adds a glowing inner ring and a flowing You→CTA edge so the open-modal connection reads. The gradients are declared inline (stable ids) so the button is self-contained.
-function CtaNode(h, props) {
+function CtaNode(h: H, props: { label: string; active: boolean; tone: 'accent' | 'error'; x: number; y: number; onclick: unknown }): Vnode {
 	const label = props.label
 	const active = props.active === true
 	const tone = props.tone === 'error' ? 'error' : 'accent'
-	const x = props.x
-	const y = props.y
-	const onclick = props.onclick
 	const classes = active ? 'flow-node flow-cta flow-cta--active' : 'flow-node flow-cta'
-	return h('g', { class: classes, transform: translate(x, y), onclick }, [
+	return h('g', { class: classes, transform: translate(props.x, props.y), onclick: props.onclick }, [
 		CtaButton(h, { label, active, tone }),
 	])
 }
 
-function CtaButton(h, props) {
+function CtaButton(h: H, props: { label: string; active: boolean; tone: 'accent' | 'error' }): Vnode {
 	const label = props.label
 	const active = props.active === true
 	const tone = props.tone === 'error' ? 'error' : 'accent'
@@ -483,7 +552,7 @@ function CtaButton(h, props) {
 	const faceId = tone === 'error' ? 'flow-cta-face-error' : 'flow-cta-face-grad'
 	const insetBevel = 2
 	const insetFace = 5
-	const children = [
+	const children: Vnode[] = [
 		h('defs', {}, [
 			h('linearGradient', { id: bezelId, x1: '0', y1: '0', x2: '0', y2: '1' }, [
 				h('stop', { offset: '0%', 'stop-color': '#e2e2e7' }, []),
@@ -520,14 +589,14 @@ function CtaButton(h, props) {
 }
 
 // Maps a terminal run status to the CTA's label and tone. A needs_clarification run is waiting on the human, so it reads as an accent (not an error); a failed or interrupted run is error-toned; success is accent.
-function ctaDescriptorForStatus(status) {
+function ctaDescriptorForStatus(status: RunStatus): { label: string; tone: 'accent' | 'error' } {
 	if (status === 'error' || status === 'interrupted') return { label: 'See error', tone: 'error' }
 	if (status === 'needs_clarification') return { label: 'Respond', tone: 'accent' }
 	return { label: 'See result', tone: 'accent' }
 }
 
 // The ask_human call, when its question is pending: the active operation is an in_flight call whose destination is a human participant (the answerer). A human never emits an operation that would advance the call to its working phase, so the call stays in transit until the user answers — the same single-transit-frame rule the terminal op follows, but the run is not terminal here. The Question affordance overlays the answerer node for the duration of this frame.
-export function activeAskHumanCall(model) {
+export function activeAskHumanCall(model: InteractionModel): Operation | undefined {
 	const operation = activeOperation(model)
 	if (operation === null) return undefined
 	if (operation.kind !== 'call' || operation.lifecycle !== 'in_flight') return undefined
@@ -537,12 +606,9 @@ export function activeAskHumanCall(model) {
 }
 
 // The "Question for Human" overlay button, rendered on the answerer node while the ask_human call is pending. Mirrors the terminal CTA — a standalone overlay button with no connecting edge, so it reads as an affordance rather than a graph node — but sits on the answerer (downstream of the asker) instead of the root. The label splits across three lines ("Question" / "for" / "Human") via stacked <tspan> elements so the three-word affordance reads at a glance within the node box.
-function QuestionButton(h, props) {
-	const x = props.x
-	const y = props.y
-	const onclick = props.onclick
+function QuestionButton(h: H, props: { x: number; y: number; onclick: unknown }): Vnode {
 	const centerX = NODE_WIDTH / 2
-	return h('g', { class: 'flow-node flow-question-button', transform: translate(x, y), onclick }, [
+	return h('g', { class: 'flow-node flow-question-button', transform: translate(props.x, props.y), onclick: props.onclick }, [
 		h('defs', {}, [
 			h('linearGradient', { id: 'flow-question-face', x1: '0', y1: '0', x2: '0', y2: '1' }, [
 				h('stop', { offset: '0%', 'stop-color': '#f0a93c' }, []),
@@ -560,10 +626,21 @@ function QuestionButton(h, props) {
 	])
 }
 
-// Renders the flow view as a single SVG containing the history top bar, the observe cross-stack lines, the terminate cross-stack lines, the row stack, the departing overlay, the (on a terminal frame) result CTA, and (while an ask_human call is pending) the Question button overlay on the answerer node. Edges paint before nodes within each row so node boxes cover anchor overlap; observes and terminates sit behind the rows so node boxes cover their endpoints; the departing overlay paints last so the travel reads on top of the settled graph; the CTA and Question button paint after the rows so they sit above the graph. `lifecycle` (optional) carries the frame-diff entering/departing descriptor from deriveLifecycle; `cta` (optional) carries `{ active, onclick }` harness state for the terminal CTA — the view itself decides whether to render a CTA by reading model.status; `question` (optional) carries `{ onclick }` harness state for the Question button — the view itself decides whether to render the button by reading the active ask_human call. `columns` is the caller-held high-water-mark tracker from createColumnTracker.
-export function renderFlowView(h, model, labels, tier, lifecycle, cta, question, columns) {
+// The harness-state bags renderFlowView's optional CTA and Question parameters carry: the active flag and click handler for the terminal CTA, and the click handler for the pending-question overlay. The view itself decides whether to render either affordance by reading the model.
+export interface CtaControls {
+	active?: unknown
+	onclick?: unknown
+}
+
+export interface QuestionControls {
+	onclick?: unknown
+}
+
+// Renders the flow view as a single SVG containing the history top bar, the observe cross-stack lines, the terminate cross-stack lines, the row stack, the departing overlay, the (on a terminal frame) result CTA, and (while an ask_human call is pending) the Question button overlay on the answerer node. Edges paint before nodes within each row so node boxes cover anchor overlap; observes and terminates sit behind the rows so node boxes cover their endpoints; the departing overlay paints last so the travel reads on top of the settled graph; the CTA and Question button paint after the rows so they sit above the graph. `lifecycle` (optional) carries the frame-diff entering/departing descriptor from deriveLifecycle; `cta` and `question` carry the harness state for the two overlay affordances — the view itself decides whether to render them by reading model.status and the active ask_human call. `columns` is the caller-held high-water-mark tracker from createColumnTracker.
+// `lifecycle`, `cta`, and `question` are nullable-but-required parameters (not optional ones) so the positional call shape the hosts use — passing undefined for the affordances they omit — stays exactly the shape the types describe.
+export function renderFlowView(h: H, model: InteractionModel, labels: LabelResolver, tier: LabelTier, lifecycle: FrameLifecycle | undefined, cta: CtaControls | undefined, question: QuestionControls | undefined, columns: ColumnTracker): Vnode {
 	const stackIds = stacksOf(model)
-	const rows = []
+	const rows: RowProjection[] = []
 	for (const stackId of stackIds) {
 		const row = projectRow(model, stackId)
 		if (row !== null) rows.push(row)
@@ -574,11 +651,11 @@ export function renderFlowView(h, model, labels, tier, lifecycle, cta, question,
 	const topBarHeightValue = topBarHeight(slots.length)
 	const mainYOffset = topBarHeightValue + (slots.length === 0 ? 0 : TOPBAR_GAP)
 
-	const participantById = new Map()
+	const participantById = new Map<string, Participant>()
 	for (const participant of model.participants) participantById.set(participant.id, participant)
 
 	// Position every participant that lands in a row so the observe layer can route between rows by participant id.
-	const rowLayout = new Map()
+	const rowLayout = new Map<string, Anchor>()
 	for (let rowIndex = 0; rowIndex < rows.length; rowIndex += 1) {
 		const row = rows[rowIndex]
 		if (row === undefined) continue
@@ -604,7 +681,7 @@ export function renderFlowView(h, model, labels, tier, lifecycle, cta, question,
 	const terminateVnodes = renderTerminates(h, model, rowLayout)
 
 	// The departing overlay paints a node mid-travel from its previous row position to its top-bar slot, both in the current frame's shared SVG coordinate space (the same mainYOffset the rows use) so the travel lands on the slot the counter increment reads against.
-	const departingVnodes = lifecycle !== undefined ? lifecycle.departing.map((entry) => {
+	const departingVnodes: Vnode[] = lifecycle !== undefined ? lifecycle.departing.map((entry) => {
 		const fromPos = rowPixel(entry.previousColumn, entry.previousRowIndex, mainYOffset)
 		const toPos = topBarPixel(entry.slotIndex)
 		const participant = participantById.get(entry.participantId)
@@ -629,8 +706,8 @@ export function renderFlowView(h, model, labels, tier, lifecycle, cta, question,
 	}) : []
 
 	const showCta = isTerminalStatus(model.status)
-	let ctaLayout = null
-	let ctaDescriptor = null
+	let ctaLayout: Anchor | null = null
+	let ctaDescriptor: { label: string; tone: 'accent' | 'error' } | null = null
 	if (showCta) {
 		ctaLayout = { x: 0, y: mainYOffset }
 		ctaDescriptor = ctaDescriptorForStatus(model.status)
@@ -648,7 +725,7 @@ export function renderFlowView(h, model, labels, tier, lifecycle, cta, question,
 	const width = Math.max(topBarWidth(slots.length), mainWidth, showCta ? NODE_WIDTH : 0)
 	const height = topBarHeightValue + (slots.length === 0 ? 0 : TOPBAR_GAP) + Math.max(mainHeight, ctaHeight)
 
-	const svgChildren = [
+	const svgChildren: Vnode[] = [
 		h('g', { class: 'flow-topbar' }, topBarVnodes),
 		h('g', { class: 'flow-observes' }, observeVnodes),
 		h('g', { class: 'flow-terminates' }, terminateVnodes),
@@ -675,23 +752,15 @@ export function renderFlowView(h, model, labels, tier, lifecycle, cta, question,
 }
 
 // A reusable empty set so the no-lifecycle path avoids allocating a Set per render.
-const EMPTY_SET = new Set()
+const EMPTY_SET: ReadonlySet<string> = new Set()
 
 // --- Product surfaces: "now" caption + cost strip ----------------------------
 // The two ambient surfaces that wrap the flow view so the page conveys meaning the graph's structure alone cannot. Both are pure derivations off the InteractionModel (the same frame the flow view renders), so they never drift from the graph and never reach for a separate run-view shape. The caption localizes through the label resolver so the tier toggle swaps its voice; the cost strip reads only OperationMetrics, so it carries no prose.
 
-/**
- * A one-line plain-language caption describing what the run is doing right now, derived from the active operation's resolved label at the chosen tier. The active operation (the latest non-observe operation on the active stack, via activeOperation) names both the active participant (its destination) and the in-flight operation; resolving its label through the tier resolver localizes the line and lets the tier toggle swap its voice without touching the model. A terminal run status short-circuits to a fixed completion line so a finished run reads as finished regardless of a lingering return leg.
- *
- * A call has two phases the caption distinguishes: the transit phase (lifecycle in_flight, the line animates) reads "A is calling B…" via the operation label; the working phase (lifecycle settled, the line goes solid because B has started producing) reads "B is planning…" via the working label of the destination — the relationship is no longer the story, B's own work is. When no working label is configured for the destination, the working phase falls back to the operation label so a minimal guild never crashes. An in-flight call appends an ellipsis to convey an action in progress; a settled return (the lingering response leg) carries no ellipsis because the leg is the current state, not a pending action.
- *
- * @param {InteractionModel} model
- * @param {InteractionModel} model
- * @param {{ resolveOperationLabel: (operation: Operation, participants: Participant[], tier: 'whimsical' | 'friendly' | 'detailed', seed: number) => string, resolveWorkingLabel?: (participant: Participant, tier: 'whimsical' | 'friendly' | 'detailed', seed: number) => string | null, hashString: (value: string) => number }} labels
- * @param {'whimsical' | 'friendly' | 'detailed'} tier
- * @returns {string}
- */
-export function deriveNowCaption(model, labels, tier) {
+// A one-line plain-language caption describing what the run is doing right now, derived from the active operation's resolved label at the chosen tier. The active operation (the latest non-observe operation on the active stack, via activeOperation) names both the active participant (its destination) and the in-flight operation; resolving its label through the tier resolver localizes the line and lets the tier toggle swap its voice without touching the model. A terminal run status short-circuits to a fixed completion line so a finished run reads as finished regardless of a lingering return leg.
+//
+// A call has two phases the caption distinguishes: the transit phase (lifecycle in_flight, the line animates) reads "A is calling B…" via the operation label; the working phase (lifecycle settled, the line goes solid because B has started producing) reads "B is planning…" via the working label of the destination — the relationship is no longer the story, B's own work is. When no working label is configured for the destination, the working phase falls back to the operation label so a minimal guild never crashes. An in-flight call appends an ellipsis to convey an action in progress; a settled return (the lingering response leg) carries no ellipsis because the leg is the current state, not a pending action.
+export function deriveNowCaption(model: InteractionModel, labels: LabelResolver, tier: LabelTier): string {
 	const status = model.status
 	if (status === 'success') return 'Done.'
 	if (status === 'error') return 'The run stopped with an error.'
@@ -713,13 +782,8 @@ export function deriveNowCaption(model, labels, tier) {
 	return label
 }
 
-/**
- * Aggregates per-operation metrics into the ambient cost strip's values. Tokens are summed across every operation that carries them (cumulative spend across the whole run); elapsed is the latest non-null elapsedSeconds — the most recent operation's reported elapsed, so an in-flight operation with no elapsed yet falls back to the last operation that reported one rather than reading as zero. Returns plain numbers so the harness formats them as textContent; no prose lives here. Operations without metrics or with null fields contribute nothing.
- *
- * @param {InteractionModel} model
- * @returns {{ elapsedSeconds: number, tokens: number }}
- */
-export function deriveCostStrip(model) {
+// Aggregates per-operation metrics into the ambient cost strip's values. Tokens are summed across every operation that carries them (cumulative spend across the whole run); elapsed is the latest non-null elapsedSeconds — the most recent operation's reported elapsed, so an in-flight operation with no elapsed yet falls back to the last operation that reported one rather than reading as zero. Returns plain numbers so the harness formats them as textContent; no prose lives here. Operations without metrics or with null fields contribute nothing.
+export function deriveCostStrip(model: InteractionModel): CostStrip {
 	const derived = derivedOf(model)
 	if (derived.costStrip !== undefined) return derived.costStrip
 	let tokens = 0
@@ -727,6 +791,7 @@ export function deriveCostStrip(model) {
 	let foundElapsed = false
 	for (let index = model.operations.length - 1; index >= 0; index -= 1) {
 		const operation = model.operations[index]
+		if (operation === undefined) continue
 		if (operation.metrics === null) continue
 		if (operation.metrics.tokens !== null) tokens += operation.metrics.tokens
 		if (!foundElapsed && operation.metrics.elapsedSeconds !== null) {
@@ -734,6 +799,7 @@ export function deriveCostStrip(model) {
 			foundElapsed = true
 		}
 	}
-	derived.costStrip = { elapsedSeconds, tokens }
-	return derived.costStrip
+	const strip: CostStrip = { elapsedSeconds, tokens }
+	derived.costStrip = strip
+	return strip
 }

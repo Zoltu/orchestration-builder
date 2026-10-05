@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { Tooltip, formatTooltipContent, deriveOperationTooltip, deriveParticipantTooltip, deriveRoleTooltip, isTooltipSection } from './static/tooltip.js'
+import { Tooltip, formatTooltipContent, deriveOperationTooltip, deriveParticipantTooltip, deriveRoleTooltip, isTooltipSection } from './static/ts/tooltip.js'
 import { stacksOf } from './static/ts/interaction-model.js'
 import { labelsModule } from './label-resolver-fixture.js'
 import { defined } from './test-fixtures.js'

@@ -1,2 +1,0 @@
-// Forwarding module for the unconverted plain-JS importers of this path: the browser loads /inspector.js through the server's TypeScript mapping (ts/inspector.ts), but Bun resolves plain-JS importers' specifiers literally, so the test suite's module graph needs a real file at this path.
-export { ATTR_OPERATION, ATTR_PARTICIPANT, ATTR_ROLE, TOOLTIP_GRACE_MS, createTooltipDismiss, deriveTooltipDescriptor, isInFlightAskHuman, resolveInspectorScope, resolveTooltipTarget, snapshotRect } from './ts/inspector.ts'

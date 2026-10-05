@@ -1,2 +1,0 @@
-// Forwarding module for the unconverted plain-JS importers of this path: the browser loads /interaction-model.js through the server's TypeScript mapping (ts/interaction-model.ts), but Bun resolves plain-JS importers' specifiers literally, so the test suite's module graph needs a real file at this path.
-export { activeOperation, activeParticipant, activeStack, callChainOf, fateOf, isPaused, isTerminalStatus, observesOf, rolesOnlyModel, rolesOnlyParticipants, stacksOf, terminatesOf } from './ts/interaction-model.ts'

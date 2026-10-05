@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { ResultModal, deriveTerminalResult } from './static/result-modal.js'
+import { ResultModal, deriveTerminalResult } from './static/ts/result-modal.js'
 import { actionProp, defined, present } from './test-fixtures.js'
 
 // The result-modal component is browser-pure JS, so its exports arrive with inferred JS types. The interfaces and fake `h`/`renderMarkdown` below carry the shape the tests assert against, mirroring question-modal.test.ts.

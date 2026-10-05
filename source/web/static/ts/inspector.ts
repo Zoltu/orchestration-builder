@@ -6,7 +6,7 @@ import { isObject } from './guards.js'
 import type { InteractionModel } from './interaction-model.js'
 import type { LabelResolver, LabelTier } from './labels.js'
 import type { OperationDetailsState } from './operation-details.js'
-import { deriveOperationTooltip, deriveParticipantTooltip, deriveRoleTooltip } from '../tooltip.js'
+import { deriveOperationTooltip, deriveParticipantTooltip, deriveRoleTooltip } from './tooltip.js'
 
 export const ATTR_OPERATION = 'data-operation'
 export const ATTR_PARTICIPANT = 'data-participant'

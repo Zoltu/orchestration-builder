@@ -1,10 +1,10 @@
 import { describe, expect, test } from 'bun:test'
-import { deriveLifecycle, renderFlowView, deriveNowCaption, deriveCostStrip, createColumnTracker, COL_GAP } from './static/flow-view.js'
+import { deriveLifecycle, renderFlowView, deriveNowCaption, deriveCostStrip, createColumnTracker, COL_GAP } from './static/ts/flow-view.js'
 import { activeOperation, activeParticipant, activeStack, observesOf, stacksOf } from './static/ts/interaction-model.js'
 import { createLabelResolver } from './static/ts/labels.js'
 import { labelsModule } from './label-resolver-fixture.js'
 import { scenarios } from './static/ts/scenarios.js'
-import { NODE_WIDTH } from './static/svg-primitives.js'
+import { NODE_WIDTH } from './static/ts/svg-primitives.js'
 import { defined } from './test-fixtures.js'
 
 // Pull the model type off a helper signature so the inline fixtures are contextually checked against the JSDoc shape without a cast, mirroring the sibling interaction-model.test.ts convention.

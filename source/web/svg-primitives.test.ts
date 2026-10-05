@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { GraphEdge, GraphNode, LoopbackEdge, NODE_HEIGHT, NODE_WIDTH, nodeAnchor } from './static/svg-primitives.js'
+import { GraphEdge, GraphNode, LoopbackEdge, NODE_HEIGHT, NODE_WIDTH, nodeAnchor } from './static/ts/svg-primitives.js'
 import { defined } from './test-fixtures.js'
 
 // A fake `h` capturing the tag, props, and children of every vnode so the assertions walk a plain object tree rather than real DOM, mirroring the flow-view.test.ts convention.

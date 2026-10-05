@@ -1,16 +1,19 @@
 // Sequence view renderer over an InteractionModel.
 //
-// The view is a temporal layout: one column per role (grouped from the model's participants — human always first, then interrupt on first use, then roles in first-appearance order, then a single shared "tools" column that every tool routes to), with each operation drawn as a horizontal message on a vertical time axis whose row index is the operation's position in the timeline. A call/return between two distinct columns is a straight arrow landing on a terminal node on the destination's lifeline; a same-role cross-instance call (source and destination resolve to the same column) is the LoopbackEdge U-turn from svg-primitives.js so the out/turn/back legs read on a new line rather than as a zero-length arrow. observe renders as a static dashed cross-column line with no arrowhead and no terminal node — it is a reference, never an in-flight call, so it never activates a lifeline. terminate renders the same way as a static red dashed line, plus a single orange dashed marker on the target's lifeline, so a destructive revert likewise never activates the target.
+// The view is a temporal layout: one column per role (grouped from the model's participants — human always first, then interrupt on first use, then roles in first-appearance order, then a single shared "tools" column that every tool routes to), with each operation drawn as a horizontal message on a vertical time axis whose row index is the operation's position in the timeline. A call/return between two distinct columns is a straight arrow landing on a terminal node on the destination's lifeline; a same-role cross-instance call (source and destination resolve to the same column) is the LoopbackEdge U-turn from svg-primitives so the out/turn/back legs read on a new line rather than as a zero-length arrow. observe renders as a static dashed cross-column line with no arrowhead and no terminal node — it is a reference, never an in-flight call, so it never activates a lifeline. terminate renders the same way as a static red dashed line, plus a single orange dashed marker on the target's lifeline, so a destructive revert likewise never activates the target.
 //
 // Each operation is exactly one row, in chronological order, across every scenario — nothing is dropped or phantom. The model already encodes each operation's lifecycle and outcome, so the static layout reads them directly: a return carries a source node on the callee's lifeline with its outcome color (success/error/terminated) — mirroring the flow view, which colors the returning (callee) node — and a terminated return's source node and incoming arrow carry the distinct warn-toned treatment so a leg abandoned mid-rewind reads as neither success nor failure. The active participant and the in-flight line are read off the model by the animation layer; this module renders the settled structure and carries `data-operation` on every message group so the inspector can resolve an operation's details markdown from the model without the view re-deriving it.
 //
-// The module is an independent leaf over the model: it imports only its siblings (./svg-primitives.js for LoopbackEdge, ./labels.js for the resolver) and touches no external system. It does not import the flow view — the two views are independent leaves over the same model and share no rendering code.
+// The module is an independent leaf over the model: it imports only its siblings and the vendored `h` type, and touches no external system. It does not import the flow view — the two views are independent leaves over the same model and share no rendering code.
 //
-// `h` is passed in rather than imported so the module stays free of hyperapp coupling and the vnode shape is exercisable in tests with a fake `h`, mirroring the sibling flow-view.js convention. The label resolver is passed in alongside the selected tier so a caller can swap the resolver or tier without the view reaching for globals; node prose is localization, a view concern, and the model carries no prose.
+// `h` is passed in rather than imported so the module stays free of hyperapp coupling and the vnode shape is exercisable in tests with a fake `h`, mirroring the sibling flow-view convention. The label resolver is passed in alongside the selected tier so a caller can swap the resolver or tier without the view reaching for globals; node prose is localization, a view concern, and the model carries no prose.
 
 import { activeOperation, activeStack } from './interaction-model.js'
+import type { InteractionModel, Operation, Participant, ParticipantKind } from './interaction-model.js'
+import type { LabelResolver, LabelTier } from './labels.js'
 import { ATTR_OPERATION, ATTR_ROLE } from './inspector.js'
 import { LoopbackEdge } from './svg-primitives.js'
+import type { H, Vnode } from '../vendor/hyperapp.js'
 
 // Layout constants. Columns are evenly spaced on COLUMN_WIDTH centers; messages stack on ROW_HEIGHT centers below the header. The viewBox is sized to the laid-out content so the host container can scale it to fit its width and scroll vertically for long timelines.
 export const COLUMN_WIDTH = 150
@@ -24,7 +27,7 @@ export const BOTTOM_MARGIN = 24
 const MIN_COLUMNS = 5
 
 // The pixel `scrollTop` that centers the last operation's row in a scroll container of `containerClientHeight`, given the SVG's rendered height `svgHeight`. The SVG scales to the container width, so the row's fractional position in the natural viewBox maps to a pixel offset inside the container's scroll range. Shared by every host that auto-scrolls a sequence view to the latest row.
-export function sequenceActiveRowScrollTop(operationCount, svgHeight, containerClientHeight) {
+export function sequenceActiveRowScrollTop(operationCount: number, svgHeight: number, containerClientHeight: number): number {
 	if (operationCount <= 0 || svgHeight === 0) return 0
 	const naturalHeight = HEADER_HEIGHT + operationCount * ROW_HEIGHT + BOTTOM_MARGIN
 	const rowY = HEADER_HEIGHT + (operationCount - 1) * ROW_HEIGHT + ROW_HEIGHT / 2
@@ -42,17 +45,22 @@ const TERMINAL_NODE_HEIGHT = 12
 const LOOPBACK_HEIGHT = 14
 
 // Looks up a participant by id in the model. A missing id is a model contract violation (every operation endpoint must reference a known participant); failing fast surfaces it rather than rendering a message against undefined.
-function requireParticipant(participantsById, participantId) {
+function requireParticipant(participantsById: Map<string, Participant>, participantId: string): Participant {
 	const found = participantsById.get(participantId)
 	if (found === undefined) throw new Error(`operation references unknown participant id "${participantId}"`)
 	return found
 }
 
+interface SequenceColumn {
+	role: string
+	kind: ParticipantKind
+}
+
 // Derives the column set: human always first, then interrupt (only once an Interrupt participant has appeared in the current frame — the first-use rule), then every role the guild defines in definition order, then a single shared "tools" column. A role invoked multiple times (instance-per-invocation retries) collapses to a single column keyed by role, which is what makes a same-role cross-instance call resolve to one column and render as a loopback. Every tool routes to the one "tools" column so the role chain stays focal and the tool inventory does not fan out across the diagram. `guildParticipants` (optional) supplies the full participant set the guild defines so every role column and the tools column appear from frame 0 rather than growing as participants first appear; when absent the column set falls back to the roles and tools present in the current frame.
-function buildColumns(model, guildParticipants) {
+function buildColumns(model: InteractionModel, guildParticipants: Participant[] | undefined): SequenceColumn[] {
 	const source = guildParticipants ?? model.participants
-	const roleColumns = []
-	const seenRoles = new Set()
+	const roleColumns: string[] = []
+	const seenRoles = new Set<string>()
 	let guildHasTool = false
 	for (const participant of source) {
 		if (participant.kind === 'role' && !seenRoles.has(participant.role)) {
@@ -69,7 +77,7 @@ function buildColumns(model, guildParticipants) {
 			break
 		}
 	}
-	const columns = [{ role: 'human', kind: 'human' }]
+	const columns: SequenceColumn[] = [{ role: 'human', kind: 'human' }]
 	if (hasInterrupt) columns.push({ role: 'interrupt', kind: 'interrupt' })
 	for (const role of roleColumns) columns.push({ role, kind: 'role' })
 	if (guildHasTool) columns.push({ role: 'tools', kind: 'tool' })
@@ -77,7 +85,7 @@ function buildColumns(model, guildParticipants) {
 }
 
 // Finds a representative participant of a column's role so the column header can resolve its localized label. Every role column is derived from the model's participants, so a representative always exists for a column the renderer built.
-function representativeParticipant(model, role, kind) {
+function representativeParticipant(model: InteractionModel, role: string, kind: ParticipantKind): Participant | undefined {
 	for (const participant of model.participants) {
 		if (participant.role === role && participant.kind === kind) return participant
 	}
@@ -85,7 +93,7 @@ function representativeParticipant(model, role, kind) {
 }
 
 // Resolves a column's localized header label. Every role column is derived from the model's participants, so a representative participant exists to resolve against; the shared "tools" column has no single participant, so it resolves against a synthetic tools participant whose label entry gives the localized header.
-function resolveColumnLabel(model, column, labels, tier) {
+function resolveColumnLabel(model: InteractionModel, column: SequenceColumn, labels: LabelResolver, tier: LabelTier): string {
 	if (column.role === 'tools') {
 		return labels.resolveParticipantLabel({ id: 'tools', role: 'tools', kind: 'tool' }, tier)
 	}
@@ -94,22 +102,15 @@ function resolveColumnLabel(model, column, labels, tier) {
 }
 
 // Resolves a participant to its column index. Tool-kind participants all route to the single shared "tools" column so the per-tool lifelines collapse to one; every other kind maps by its role.
-function columnIndexForParticipant(participant, columnIndexByRole) {
+function columnIndexForParticipant(participant: Participant, columnIndexByRole: Map<string, number>): number {
 	if (participant.kind === 'tool') return columnIndexByRole.get('tools') ?? 0
 	return columnIndexByRole.get(participant.role) ?? 0
 }
 
-// The terminal-node state an operation's destination carries. A return carries its outcome (success/error/terminated); a call carries no outcome state in the settled layout (the active highlight is layered on by the animation layer).
-function terminalState(operation) {
-	if (operation.kind !== 'return') return null
-	if (operation.outcome === 'success') return 'success'
-	if (operation.outcome === 'error') return 'error'
-	if (operation.outcome === 'terminated') return 'terminated'
-	return null
-}
+// The motion state a message line carries under the single invariant. This mirrors the sibling flow-view's `edgeAnimationState`: a line animates iff it is in_flight and its stack is the active stack — a call animates 'flowing' while in_flight (the transit phase) and goes solid once settled (the working phase); a return animates 'returning' (or 'error'/'terminated' for the matching outcome) only while in_flight (its transit phase) and goes solid once settled (its working phase, a leg abandoned mid-rewind still reading distinctly from both success and failure via its settled terminated class). The flow view encodes the same rule per-edge; the sequence view renders every operation as a row, so the guard here additionally requires the operation to be the active operation (the latest non-observe operation in the active stack) — earlier messages in the active stack are settled and stay solid. observe never reaches here (it renders its own static line). The two views therefore agree on "what is in flight right now" because both read it off the same activeOperation helper.
+type MessageAnimationState = 'static' | 'flowing' | 'returning' | 'error' | 'terminated'
 
-// The motion state a message line carries under the single invariant. This mirrors the sibling flow-view.js `edgeAnimationState`: a line animates iff it is in_flight and its stack is the active stack — a call animates 'flowing' while in_flight (the transit phase) and goes solid once settled (the working phase); a return animates 'returning' (or 'error'/'terminated' for the matching outcome) only while in_flight (its transit phase) and goes solid once settled (its working phase, a leg abandoned mid-rewind still reading distinctly from both success and failure via its settled terminated class). The flow view encodes the same rule per-edge; the sequence view renders every operation as a row, so the guard here additionally requires the operation to be the active operation (the latest non-observe operation in the active stack) — earlier messages in the active stack are settled and stay solid. observe never reaches here (it renders its own static line). The two views therefore agree on "what is in flight right now" because both read it off the same activeOperation helper.
-function messageAnimationState(operation, model, activeOperationId) {
+function messageAnimationState(operation: Operation, model: InteractionModel, activeOperationId: string | null): MessageAnimationState {
 	if (operation.kind === 'observe' || operation.kind === 'terminate') return 'static'
 	if (operation.id !== activeOperationId) return 'static'
 	if (operation.stack !== activeStack(model)) return 'static'
@@ -121,7 +122,7 @@ function messageAnimationState(operation, model, activeOperationId) {
 }
 
 // The line class list for a message. Past (settled) calls are solid neutral; past returns are dashed neutral; a terminated return carries the warn-toned variant so an abandoned leg reads distinctly; observe carries its own static dashed variant and terminate carries a static red dashed variant. When the message is the active operation, the animation class (flowing/returning/error/terminated) replaces the settled modifier so the marching-ants stroke and color read on the in-flight line and do not clash with the settled dash variant. A terminated return that is the active operation carries the warn-toned marching variant, distinct from a green success march and a red error march.
-function messageLineClass(operation, animationState) {
+function messageLineClass(operation: Operation, animationState: MessageAnimationState): string {
 	const classes = ['seq-message']
 	if (operation.kind === 'observe') {
 		classes.push('seq-message--observe')
@@ -143,7 +144,7 @@ function messageLineClass(operation, animationState) {
 }
 
 // The arrowhead marker id for a message. The active operation's arrowhead matches its line color so the head and the marching line read as one colored unit; a terminated return that is the active operation points to the warn-toned marching marker; a settled terminated return points to the static warn marker; every other settled call/return points to the neutral marker. observe carries no arrowhead — it is a reference, not a directed call.
-function arrowheadId(operation, animationState) {
+function arrowheadId(operation: Operation, animationState: MessageAnimationState): string {
 	if (animationState === 'flowing') return 'seq-arrow-flowing'
 	if (animationState === 'returning') return 'seq-arrow-returning'
 	if (animationState === 'error') return 'seq-arrow-error'
@@ -152,14 +153,14 @@ function arrowheadId(operation, animationState) {
 	return 'seq-arrow-neutral'
 }
 
-function arrowMarker(h, id, className) {
+function arrowMarker(h: H, id: string, className: string): Vnode {
 	return h('marker', { id, viewBox: '0 0 10 10', refX: 9, refY: 5, markerWidth: 7, markerHeight: 7, orient: 'auto' }, [
 		h('path', { class: `seq-arrowhead ${className}`, d: 'M 0 0 L 10 5 L 0 10 z' }, []),
 	])
 }
 
 // A terminal node on a column's lifeline at a message row: a small rounded rect carrying a state class so a settled leg's outcome reads at a glance and the active operation's destination pulses. `end` distinguishes the destination node (where the arrow lands, which pulses when the operation is the active operation) from a return's source node (the callee, which carries the return's outcome color, mirroring the flow view where the returning node is the callee). `data-operation`, `data-node-end`, and `data-column-role` let the inspector locate a node by operation and assert which end and column it landed on.
-function renderTerminalNode(h, x, y, state, operation, columnRole, end) {
+function renderTerminalNode(h: H, x: number, y: number, state: string | null, operation: Operation, columnRole: string, end: 'source' | 'destination'): Vnode {
 	const rectX = x - TERMINAL_NODE_WIDTH / 2
 	const classes = ['seq-node']
 	if (state !== null) classes.push(`seq-node--${state}`)
@@ -169,13 +170,13 @@ function renderTerminalNode(h, x, y, state, operation, columnRole, end) {
 }
 
 // The terminal-node state for the destination end of a message. A call's destination node is neutral in the settled layout and pulses only when it is the active operation (the active layer adds 'active'); a return's destination node likewise pulses when it is the active operation and is neutral otherwise, because the return's outcome color lives on the source (callee) node — the same split the flow view makes between a returning source node and its caller.
-function destinationNodeState(operation, isActiveOperation) {
+function destinationNodeState(isActiveOperation: boolean): string | null {
 	if (isActiveOperation) return 'active'
 	return null
 }
 
 // The terminal-node state for the source end of a message. Only a return carries a source node — its outcome (success/error/terminated) is a settled fact about the callee that just returned, so it reads on the callee's lifeline the way the flow view colors the returning node. A call has no source node (no outcome to carry), so this returns 'none' to signal the caller to skip the source node entirely.
-function sourceNodeState(operation) {
+function sourceNodeState(operation: Operation): 'none' | 'success' | 'error' | 'terminated' | null {
 	if (operation.kind !== 'return') return 'none'
 	if (operation.outcome === 'success') return 'success'
 	if (operation.outcome === 'error') return 'error'
@@ -184,22 +185,22 @@ function sourceNodeState(operation) {
 }
 
 // An invisible hit band covering a message row's full height between the two columns the message connects, painted beneath the visible line and nodes. The 1.4px line alone is a needlessly precise hover target for the inspector; the band makes the whole row hoverable without changing anything visible. Adjacent rows tile exactly, so a band never steals a neighbouring row's hover.
-function messageHitArea(h, sourceX, destinationX, rowY) {
+function messageHitArea(h: H, sourceX: number, destinationX: number, rowY: number): Vnode {
 	return h('rect', { class: 'seq-hit-area', x: Math.min(sourceX, destinationX), y: rowY - ROW_HEIGHT / 2, width: Math.abs(destinationX - sourceX), height: ROW_HEIGHT }, [])
 }
 
 // The loopback U-turn leaves its column to the right and returns on the same row, so its hit band covers the out-and-back area beside the column rather than a span between two columns.
-function loopbackHitArea(h, columnX, rowY) {
+function loopbackHitArea(h: H, columnX: number, rowY: number): Vnode {
 	return h('rect', { class: 'seq-hit-area', x: columnX, y: rowY - LOOPBACK_HEIGHT - ROW_HEIGHT / 2, width: 60 + TERMINAL_NODE_WIDTH, height: LOOPBACK_HEIGHT + ROW_HEIGHT }, [])
 }
 
 // Renders the sequence view as a single SVG sized to its laid-out content. Columns render as headers plus dashed vertical lifelines spanning the message area; operations render top-to-bottom by index, each as a horizontal arrow (or a loopback U-turn for a same-role cross-instance call, or a static dashed line for observe) landing on a terminal node on the destination's lifeline. The active operation's line carries the flowing/returning/error animation class and its destination node pulses; a return additionally carries a source node on the callee's lifeline with its outcome color. Every message group carries `data-operation` so the inspector resolves the operation's details markdown and label from the model without the view re-deriving or embedding them. `guildParticipants` (optional) supplies the full participant set the guild defines so every role column and the tools column appear from frame 0 rather than growing as participants first appear; when absent the column set falls back to the participants present in the current frame.
-export function renderSequenceView(h, model, labels, tier, guildParticipants) {
+export function renderSequenceView(h: H, model: InteractionModel, labels: LabelResolver, tier: LabelTier, guildParticipants?: Participant[]): Vnode {
 	const columns = buildColumns(model, guildParticipants)
-	const columnIndexByRole = new Map()
+	const columnIndexByRole = new Map<string, number>()
 	columns.forEach((column, index) => columnIndexByRole.set(column.role, index))
 
-	const participantsById = new Map()
+	const participantsById = new Map<string, Participant>()
 	for (const participant of model.participants) participantsById.set(participant.id, participant)
 
 	const activeOperationId = activeOperation(model)?.id ?? null
@@ -214,7 +215,7 @@ export function renderSequenceView(h, model, labels, tier, guildParticipants) {
 	const lastLabel = lastColumn !== undefined ? resolveColumnLabel(model, lastColumn, labels, tier) : ''
 	const leftMargin = Math.max(LEFT_MARGIN, Math.ceil((firstLabel.length * LABEL_CHAR_WIDTH) / 2) + 6)
 	const rightMargin = Math.max(RIGHT_MARGIN, Math.ceil((lastLabel.length * LABEL_CHAR_WIDTH) / 2) + 6)
-	const columnX = (index) => leftMargin + index * COLUMN_WIDTH
+	const columnX = (index: number) => leftMargin + index * COLUMN_WIDTH
 	const lastColumnX = columns.length > 0 ? columnX(columns.length - 1) : leftMargin
 	const naturalWidth = lastColumnX + rightMargin
 	const minWidth = LEFT_MARGIN + (MIN_COLUMNS - 1) * COLUMN_WIDTH + RIGHT_MARGIN
@@ -239,7 +240,7 @@ export function renderSequenceView(h, model, labels, tier, guildParticipants) {
 		])
 	})
 
-	const messageGroups = operations.map((operation, index) => {
+	const messageGroups = operations.map((operation, index): Vnode => {
 		const rowY = HEADER_HEIGHT + index * ROW_HEIGHT + ROW_HEIGHT / 2
 		const sourceParticipant = requireParticipant(participantsById, operation.source)
 		const destinationParticipant = requireParticipant(participantsById, operation.destination)
@@ -276,7 +277,7 @@ export function renderSequenceView(h, model, labels, tier, guildParticipants) {
 		}
 
 		const markerEnd = `url(#${arrowheadId(operation, animationState)})`
-		let path
+		let path: Vnode
 		if (sameColumn) {
 			// A same-role cross-instance call connects two distinct participant instances that collapse to one column, so a straight arrow would be zero-length; the LoopbackEdge U-turn (out, turn, back on a new line) gives the interaction a visible leg. The out leg leaves from above the row center and the return leg lands at the row center on a separate line, with the arrowhead tucked into the terminal node.
 			const fromAnchor = { x: sourceX, y: rowY - LOOPBACK_HEIGHT }
@@ -290,7 +291,7 @@ export function renderSequenceView(h, model, labels, tier, guildParticipants) {
 		}
 
 		const isActiveOperation = operation.id === activeOperationId
-		const destinationNode = renderTerminalNode(h, destinationX, rowY, destinationNodeState(operation, isActiveOperation), operation, destinationParticipant.role, 'destination')
+		const destinationNode = renderTerminalNode(h, destinationX, rowY, destinationNodeState(isActiveOperation), operation, destinationParticipant.role, 'destination')
 		// A return carries a source node on the callee's lifeline with its outcome color; a call has no source node (no outcome to carry), so the destination node alone marks the landing.
 		const sourceState = sourceNodeState(operation)
 		const sourceNode = sourceState === 'none' ? null : renderTerminalNode(h, sourceX, rowY, sourceState === null ? null : sourceState, operation, sourceParticipant.role, 'source')

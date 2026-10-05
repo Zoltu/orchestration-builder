@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { renderSequenceView, sequenceActiveRowScrollTop, HEADER_HEIGHT, ROW_HEIGHT, BOTTOM_MARGIN } from './static/sequence-diagram.js'
+import { renderSequenceView, sequenceActiveRowScrollTop, HEADER_HEIGHT, ROW_HEIGHT, BOTTOM_MARGIN } from './static/ts/sequence-diagram.js'
 import { activeOperation, activeStack, observesOf, rolesOnlyModel, rolesOnlyParticipants } from './static/ts/interaction-model.js'
 import { createLabelResolver } from './static/ts/labels.js'
 import { labelsModule } from './label-resolver-fixture.js'

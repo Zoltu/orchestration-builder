@@ -6,30 +6,48 @@
 
 import { isTerminalStatus } from './interaction-model.js'
 import { isObject } from './guards.js'
+import type { LooseH, Vnode, VnodeChildInput } from '../vendor/hyperapp.js'
+
+// The sanitized-Markdown renderer the component receives: the createMarkdownRenderer product in the hosts, or a single-vnode fake in the tests. Its return is children input exactly as `LooseH` accepts it.
+type RenderMarkdown = (text: string) => VnodeChildInput
+
+// The terminal-status descriptor for a run: the run's terminal status, the result card's summary and artifacts, and — on error and interrupted statuses — the error block, whose human `message` is what renders and whose opaque `raw` is what the copy-raw button hands over.
+export interface TerminalResultError {
+	message: string | null
+	raw: unknown
+}
+
+export interface TerminalResult {
+	status: string
+	summary: string | null
+	artifacts: string[]
+	error: TerminalResultError | null
+}
 
 // The terminal-status descriptor for a run, or undefined when the run is not yet terminal. A run is terminal when its status is `success`, `error`, `needs_clarification`, or `interrupted`. The summary and artifacts come from the run's `result` card (the executor's summary of what it did and what it produced); the error block is derived on `error` and `interrupted` statuses, from the run-level `error` first (the executor's surfaced failure — for `interrupted`, the reconciliation's record of why the run could not resume) and falling back to the result card's nested error. The error `kind` is carried on the descriptor's `error.raw` for the copy-raw button but is never rendered as text — only the human `message` is shown, as sanitized Markdown.
-export function deriveTerminalResult(runView) {
-	if (typeof runView !== 'object' || runView === null) return undefined
-	const status = runView.status
+export function deriveTerminalResult(runView: unknown): TerminalResult | undefined {
+	if (!isObject(runView)) return undefined
+	const status = runView['status']
 	if (typeof status !== 'string' || !isTerminalStatus(status)) return undefined
 
-	const result = isObject(runView.result) ? runView.result : null
-	const runError = isObject(runView.error) ? runView.error : null
+	const result = isObject(runView['result']) ? runView['result'] : null
+	const runError = isObject(runView['error']) ? runView['error'] : null
 
-	const summary = result !== null && typeof result.summary === 'string' && result.summary !== ''
-		? result.summary
+	const summary = result !== null && typeof result['summary'] === 'string' && result['summary'] !== ''
+		? result['summary']
 		: null
 
-	const artifacts = Array.isArray(result?.artifacts)
-		? result.artifacts.filter((path) => typeof path === 'string' && path !== '')
+	const rawArtifacts = result !== null ? result['artifacts'] : undefined
+	const artifacts = Array.isArray(rawArtifacts)
+		? rawArtifacts.filter((path: unknown): path is string => typeof path === 'string' && path !== '')
 		: []
 
-	// The error block is derived only on error and interrupted statuses. Built as a standalone value and assigned in the descriptor literal so the inferred property type is the union (object | null) rather than collapsing to null.
-	let error = null
+	// The error block is derived only on error and interrupted statuses. Built as a standalone value and assigned in the descriptor literal so the property type is the union (object | null) rather than collapsing to null.
+	let error: TerminalResultError | null = null
 	if (status === 'error' || status === 'interrupted') {
-		const rawError = runError ?? (isObject(result?.error) ? result.error : null)
-		const message = typeof rawError?.message === 'string' && rawError.message !== ''
-			? rawError.message
+		const rawError = runError ?? (isObject(result?.['error']) ? result['error'] : null)
+		const message = typeof rawError?.['message'] === 'string' && rawError['message'] !== ''
+			? rawError['message']
 			: null
 		error = { message, raw: rawError }
 	}
@@ -39,14 +57,23 @@ export function deriveTerminalResult(runView) {
 // The honest framing line shown above the raw error message. Fixed trusted text (not agent prose, so it never flows through Markdown): it tells the operator the system reported a failure and the copy-raw button exists for sharing, without translating the failure into reassurance.
 const ERROR_FRAMING = 'Something went wrong — here\u2019s what the system reported; copy this to share with support or your own assistant.'
 
+export interface ResultModalProps {
+	descriptor: TerminalResult
+	runLabel?: string | null
+	renderMarkdown: RenderMarkdown
+	onCopyRaw?: (rawJson: string) => void
+	onClose: unknown
+	// Optional technical meta line ({ text, title }) for advanced users — the product client derives it from the run view; the demo harness passes none. Rendered as muted microcopy, all textContent.
+	metaLine?: { text?: unknown; title?: unknown } | null
+}
+
 // The modal overlay: a backdrop over the run view plus a centered card carrying the status, the result summary, the artifacts, and — on error — the raw error block with a copy-raw button. The card names which run the result belongs to (`runLabel`). The status sets the card's accent border (accent for success/needs-clarification, error red for failure) so the outcome reads at a glance. The close button and the copy-raw button are caller-supplied so the component is exercisable in tests with fakes.
-export function ResultModal(h, props) {
+export function ResultModal(h: LooseH, props: ResultModalProps): Vnode {
 	const descriptor = props.descriptor
 	const runLabel = props.runLabel
 	const renderMarkdown = props.renderMarkdown
 	const onCopyRaw = props.onCopyRaw
 	const onClose = props.onClose
-	// Optional technical meta line ({ text, title }) for advanced users — the product client derives it from the run view; the demo harness passes none. Rendered as muted microcopy, all textContent.
 	const metaLine = props.metaLine
 
 	const status = descriptor.status
@@ -56,7 +83,7 @@ export function ResultModal(h, props) {
 
 	const cardClass = status === 'error' || status === 'interrupted' ? 'result-modal-card result-modal-card--error' : 'result-modal-card'
 
-	const children = [
+	const children: Vnode[] = [
 		h('p', { class: 'result-modal-heading' }, runLabel !== null && runLabel !== undefined && runLabel !== ''
 			? `Result \u00b7 ${runLabel}`
 			: 'Result'),
@@ -82,7 +109,7 @@ export function ResultModal(h, props) {
 
 	if (error !== null) {
 		// The error block: honest framing, the sanitized message, and a copy-raw button that hands the full error object (including the hidden `kind`) to the caller as JSON. The `kind` is deliberately not rendered as text; it surfaces only through copy-raw so a non-developer is not asked to interpret the machine taxonomy. The copy button's onclick is a closure that invokes the injected `onCopyRaw` leaf with the precomputed JSON and returns the state unchanged — hyperapp actions must return state, and a leaf that returns `undefined` would corrupt the app state, so the component wraps the leaf rather than passing it bare.
-		const errorChildren = [h('p', { class: 'result-modal-error-framing' }, ERROR_FRAMING)]
+		const errorChildren: Vnode[] = [h('p', { class: 'result-modal-error-framing' }, ERROR_FRAMING)]
 		if (error.message !== null) {
 			errorChildren.push(h('div', { class: 'result-modal-error-message markdown' }, renderMarkdown(error.message)))
 		}
@@ -90,7 +117,7 @@ export function ResultModal(h, props) {
 			const rawJson = errorToRawJson(error.raw)
 			errorChildren.push(
 				h('div', { class: 'result-modal-error-actions' }, [
-					h('button', { type: 'button', class: 'result-modal-copy', onclick: (state) => { onCopyRaw(rawJson); return state } }, 'Copy raw'),
+					h('button', { type: 'button', class: 'result-modal-copy', onclick: (state: unknown) => { onCopyRaw(rawJson); return state } }, 'Copy raw'),
 				]),
 			)
 		}
@@ -109,7 +136,7 @@ export function ResultModal(h, props) {
 	])
 }
 
-function statusLabel(status) {
+function statusLabel(status: string): string {
 	if (status === 'success') return 'Completed successfully'
 	if (status === 'error') return 'Completed with an error'
 	if (status === 'interrupted') return 'Interrupted'
@@ -117,10 +144,10 @@ function statusLabel(status) {
 }
 
 // Serializes the full error object (kind, message, and any details) to JSON for the copy-raw button. Computed once at render so the button's onclick payload is stable and the caller's handler receives the exact string that will reach the clipboard. A non-serializable object falls back to a minimal envelope so the button never throws.
-function errorToRawJson(rawError) {
+function errorToRawJson(rawError: unknown): string {
 	try {
 		return JSON.stringify(rawError)
 	} catch {
-		return JSON.stringify({ message: typeof rawError?.message === 'string' ? rawError.message : '' })
+		return JSON.stringify({ message: isObject(rawError) && typeof rawError['message'] === 'string' ? rawError['message'] : '' })
 	}
 }

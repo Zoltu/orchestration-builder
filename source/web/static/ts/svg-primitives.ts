@@ -4,13 +4,21 @@
 //
 // Colors reuse the project's --svg-* tokens via the existing graph-node and graph-edge CSS classes declared in stylesheets/styles.css, so the views follow the light/dark theme without adding CSS in this layer. Machine fields (labels, counters, costs) are SVG <text> textContent, never markup, so the textContent security invariant holds. No motion classes are emitted here: call and return edges render as settled strokes and the observe line is a distinct dashed static style; the flowing/returning motion classes are layered on top of these primitives by the animation layer, never by the primitives themselves.
 //
-// `h` is passed in rather than imported so the module stays free of hyperapp coupling and the vnode shape is exercisable in tests with a fake `h`. The module is plain browser JS, imports nothing, and touches no external system.
+// `h` is passed in rather than imported so the module stays free of hyperapp coupling and the vnode shape is exercisable in tests with a fake `h`. The props stay a plain record — the primitives receive fresh literals from the views and plain objects from the test harness — so each field read narrows with the same checks the layout needs, failing fast on structurally invalid values. The module is browser-pure TypeScript: it imports the shared record guard and the vendor `h` type only, and touches no external system.
+
+import { isObject } from './guards.js'
+import type { H, Vnode } from '../vendor/hyperapp.js'
 
 export const NODE_WIDTH = 160
 export const NODE_HEIGHT = 64
 
+export interface Anchor {
+	x: number
+	y: number
+}
+
 // Returns the anchor point of a node positioned at (x, y) on the requested side. Edges are a separate layer that reads these anchors, so a node and its connecting edge stay aligned through one source of truth.
-export function nodeAnchor(x, y, side) {
+export function nodeAnchor(x: number, y: number, side: string): Anchor {
 	switch (side) {
 		case 'top':
 			return { x: x + NODE_WIDTH / 2, y }
@@ -26,14 +34,15 @@ export function nodeAnchor(x, y, side) {
 }
 
 // A graph node: a <g> with its box, a centered label, an optional sublabel, an optional invocation counter badge, and an optional cost line. status ('success' | 'error') applies the existing static stroke classes so a settled node's outcome reads at a glance; active (the destination of the latest operation in the active stack) applies the pulsing stroke class so the eye lands on the current-flow recipient. A 'terminated' return outcome does NOT color the node — the node was killed externally (it did not succeed or fail), so the warn-toned rendering lives on the return line only, and the orange border comes exclusively from a terminate op targeting the node (flow-node--terminate-target). Internal layout only; the caller applies the translate.
-export function GraphNode(h, props) {
-	const label = props.label
-	const sublabel = props.sublabel
-	const counter = props.counter
-	const costTime = props.costTime
-	const costTokens = props.costTokens
-	const status = props.status
-	const active = props.active === true
+export function GraphNode(h: H, props: Record<string, unknown>): Vnode {
+	const label = props['label']
+	if (typeof label !== 'string') throw new Error('GraphNode: label must be a string')
+	const sublabel = props['sublabel']
+	const counter = props['counter']
+	const costTime = props['costTime']
+	const costTokens = props['costTokens']
+	const status = props['status']
+	const active = props['active'] === true
 
 	const classes = ['graph-node']
 	if (active) classes.push('graph-node--active')
@@ -45,7 +54,7 @@ export function GraphNode(h, props) {
 		h('text', { class: 'graph-node-label', x: NODE_WIDTH / 2, y: 26, 'text-anchor': 'middle' }, [label]),
 	]
 
-	if (sublabel !== undefined && sublabel !== null && sublabel !== '') {
+	if (typeof sublabel === 'string' && sublabel !== '') {
 		children.push(h('text', { class: 'graph-node-sublabel', x: NODE_WIDTH / 2, y: 44, 'text-anchor': 'middle' }, [sublabel]))
 	}
 
@@ -62,25 +71,26 @@ export function GraphNode(h, props) {
 	return h('g', { class: classes.join(' ') }, children)
 }
 
-function formatCost(costTime, costTokens) {
-	const parts = []
+function formatCost(costTime: unknown, costTokens: unknown): string | null {
+	const parts: string[] = []
 	if (costTime !== undefined && costTime !== null) parts.push(`${costTime}s`)
 	if (costTokens !== undefined && costTokens !== null) parts.push(`${formatTokens(costTokens)} tok`)
 	if (parts.length === 0) return null
 	return parts.join(' \u00b7 ')
 }
 
-function formatTokens(value) {
-	if (value >= 1000) return `${Math.round(value / 100) / 10}k`
+function formatTokens(value: unknown): string {
+	if (typeof value === 'number' && value >= 1000) return `${Math.round(value / 100) / 10}k`
 	return String(value)
 }
 
 // A graph edge: a <path> between two face anchors, shaped by kind. A call bows horizontally between the side faces (caller right → callee left); a return bows downward between the bottom faces so the response leg sits below the forward call line and never overlaps it; an observe is a vertical line drawn dashed so a cross-stack observation reads as a static reference rather than an in-flight call. A terminate shares the observe's sideways-bowed cross-stack geometry; its red dashed stroke is applied by the flow view's CSS (the wrapper carries flow-edge--terminate), so the primitive carries no terminate-specific styling of its own. The state prop ('flowing' | 'returning' | 'error' | 'static') layers the matching motion class onto the path so the CSS drives the marching-ants animation; the primitive carries no animation logic of its own.
-export function GraphEdge(h, props) {
-	const fromAnchor = props.fromAnchor
-	const toAnchor = props.toAnchor
-	const kind = props.kind
-	const state = props.state
+export function GraphEdge(h: H, props: Record<string, unknown>): Vnode {
+	const fromAnchor = props['fromAnchor']
+	const toAnchor = props['toAnchor']
+	if (!isAnchor(fromAnchor) || !isAnchor(toAnchor)) throw new Error('GraphEdge: fromAnchor and toAnchor must be {x, y} points')
+	const kind = props['kind']
+	const state = props['state']
 
 	const classes = ['graph-edge']
 	if (state === 'flowing') classes.push('graph-edge--flowing')
@@ -88,13 +98,19 @@ export function GraphEdge(h, props) {
 	else if (state === 'error') classes.push('graph-edge--error')
 	else if (state === 'terminated') classes.push('graph-edge--terminated')
 
-	const pathProps = { class: classes.join(' '), d: edgePath(fromAnchor, toAnchor, kind) }
+	const pathProps: Record<string, unknown> = { class: classes.join(' '), d: edgePath(fromAnchor, toAnchor, kind) }
 	if (kind === 'observe') pathProps['stroke-dasharray'] = '3 3'
 	return h('path', pathProps, [])
 }
 
+function isAnchor(value: unknown): value is Anchor {
+	if (!isObject(value)) return false
+	if (!('x' in value) || !('y' in value)) return false
+	return typeof value['x'] === 'number' && typeof value['y'] === 'number'
+}
+
 // A gentle cubic curve between the anchors so sibling edges separate rather than overlap. Calls bow horizontally to keep the left-to-right chain readable; returns bow downward so the response leg curves below the nodes and never paints over the forward call line; observes and terminates bow slightly sideways so two stacked cross-stack lines don't sit on top of each other.
-function edgePath(from, to, kind) {
+function edgePath(from: Anchor, to: Anchor, kind: unknown): string {
 	if (kind === 'return') {
 		const bow = 40
 		return `M ${from.x} ${from.y} C ${from.x} ${from.y + bow}, ${to.x} ${to.y + bow}, ${to.x} ${to.y}`
@@ -111,16 +127,17 @@ function edgePath(from, to, kind) {
 // A loopback edge for a same-column cross-instance call: two participants at the same call depth (a role re-invoked at its own column, or a self-delegation) connect via a U-turn on the right side rather than a straight line that would overlap the column's other edges. Shared with the sequence view, which lays same-column messages the same way.
 //
 // `markerEnd` and `extraClass` let the sequence view attach an arrowhead and its own message classes (seq-message, seq-message--return, …) onto the same shared path so the U-turn geometry stays defined in one place. Both are optional; the flow view omits them and the path renders as a plain graph-edge stroke.
-export function LoopbackEdge(h, props) {
-	const fromAnchor = props.fromAnchor
-	const toAnchor = props.toAnchor
-	const markerEnd = props.markerEnd
-	const extraClass = props.extraClass
+export function LoopbackEdge(h: H, props: Record<string, unknown>): Vnode {
+	const fromAnchor = props['fromAnchor']
+	const toAnchor = props['toAnchor']
+	if (!isAnchor(fromAnchor) || !isAnchor(toAnchor)) throw new Error('LoopbackEdge: fromAnchor and toAnchor must be {x, y} points')
+	const markerEnd = props['markerEnd']
+	const extraClass = props['extraClass']
 	const bow = 60
 	const x = Math.max(fromAnchor.x, toAnchor.x) + bow
 	const d = `M ${fromAnchor.x} ${fromAnchor.y} C ${x} ${fromAnchor.y}, ${x} ${toAnchor.y}, ${toAnchor.x} ${toAnchor.y}`
 	const classValue = extraClass !== undefined && extraClass !== '' ? `graph-edge ${extraClass}` : 'graph-edge'
-	const pathProps = { class: classValue, d }
+	const pathProps: Record<string, unknown> = { class: classValue, d }
 	if (markerEnd !== undefined && markerEnd !== null) pathProps['marker-end'] = markerEnd
 	return h('path', pathProps, [])
 }
