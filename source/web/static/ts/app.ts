@@ -1,29 +1,327 @@
 // Hyperapp client for the long-running service.
 // The whole UI is one reactive view of a single state object; polling runs as subscriptions and every side effect (fetch, POST, audio, flash) runs as an effect. The model is a trusted component; its prose fields (task, result summary, question text, question context, error message) are Markdown the UI renders as formatted text via `showdown` + `highlight.js`. The residual concern is not a malicious model but prompt injection — a malicious file in the workspace coercing the model's output — so the parsed HTML is walked through the allowlist in markdown.js before reaching the DOM; this is a defense-in-depth backstop, with the primary injection defense upstream (see docs/security.md "Web client rendering pipeline"). Machine fields (tool names, operation arguments/results, timestamps, role names, run ids, the one-line current-activity summary) are interpolated only as children of h() or text-node arguments, which hyperapp places into text nodes and properties — never into markup.
-import { h, app } from './vendor/hyperapp.js'
+import { app, h } from '../vendor/hyperapp.js'
+import type { Vnode } from '../vendor/hyperapp.js'
 import { createMarkdownRenderer } from './markdown-render.js'
-import { renderFlowView, deriveLifecycle, deriveNowCaption, deriveCostStrip, createColumnTracker } from './flow-view.js'
+import { createColumnTracker, deriveCostStrip, deriveLifecycle, deriveNowCaption, renderFlowView } from './flow-view.js'
 import { renderSequenceView } from './sequence-diagram.js'
 import { createScrollFollower } from './scroll-follow.js'
-import { createLabelResolver, TIER_VALUES, isLabelTier } from './labels.js'
+import { createLabelResolver, isLabelTier, TIER_VALUES } from './labels.js'
 import { buildInfoFromConfig, formatBuildLabel } from './build-info.js'
 import { isTerminalStatus, rolesOnlyModel, rolesOnlyParticipants } from './interaction-model.js'
 import { deriveFaviconState, faviconHref } from './favicon.js'
 import { createTooltipDismiss, deriveTooltipDescriptor, isInFlightAskHuman, resolveInspectorScope, resolveTooltipTarget } from './inspector.js'
-import { operationIdsForTooltipDetails } from './tooltip.js'
+import { operationIdsForTooltipDetails, tooltipStyle, Tooltip } from './tooltip.js'
 import { copyRawToClipboard } from './clipboard.js'
 import { QuestionModal } from './question-modal.js'
 import { createOperationDetails } from './operation-details.js'
-import { ResultModal, deriveTerminalResult } from './result-modal.js'
-import { InspectorModal, buildTurnIndex, deriveDefaultScopeRoleId, instancesOf, deriveInstanceChain, tailWindowOffset, tailRefreshMustResync, initialScopeWindow, scopeViewFor, scopeLoadFetch, tailRefreshFetch, olderTurnsFetch, olderPageSpliced, tailPageAppended, logWindowUrl, INSPECTOR_WINDOW_SIZE, INSPECTOR_PAGE_LIMIT } from './inspector-modal.js'
+import { deriveTerminalResult, ResultModal } from './result-modal.js'
+import { InspectorModal, INSPECTOR_WINDOW_SIZE, buildTurnIndex, deriveDefaultScopeRoleId, deriveInstanceChain, initialScopeWindow, instancesOf, logWindowUrl, olderPageSpliced, olderTurnsFetch, scopeLoadFetch, scopeViewFor, tailPageAppended, tailRefreshFetch, tailRefreshMustResync, tailWindowOffset } from './inspector-modal.js'
 import { createWireDetails, WIRE_DETAIL_CACHE_LIMIT } from './wire-details.js'
-import { Tooltip, tooltipStyle } from './tooltip.js'
+import { isObject } from './guards.js'
 import { createStreamClient } from './stream-client.js'
-import { nextLivePartial, activeLivePartial, scopedActiveLivePartial } from './live-partial.js'
+import { activeLivePartial, nextLivePartial, scopedActiveLivePartial } from './live-partial.js'
 import { backlogCount, deriveQueueSections, deriveReorderPosition, isQueueItemLike, queueItemPrimaryText, queueStatusLabel, reorderWaitingItems, taskFirstLine } from './queue-panel.js'
+import type { InteractionModel, Operation, Participant, RunStatus } from './interaction-model.js'
+import type { LabelConfig, LabelResolver, LabelTier } from './labels.js'
+import type { LogWindowEvent, ScopeWindow, TurnEntry } from './inspector-modal.js'
+import type { LivePartial } from './live-partial.js'
+import type { ElementRect, TooltipTarget } from './inspector.js'
+import type { OperationDetailsState } from './operation-details.js'
+import type { ScrollFollower } from './scroll-follow.js'
+import type { QueueItemLike } from './queue-panel.js'
+import type { StreamClient, StreamDeltaMessage } from './stream-client.js'
+import type { BuildInfo } from './build-info.js'
+
+// --- Application state -----------------------------------------------------
+// The single state object every action threads. The wire shapes below mirror the server contracts (source/web/render.ts) but live here because the static bundle cannot import from the server modules; every field a poll fills in is re-guarded at its fetch's ingress action.
+
+// One run-list summary (GET /api/runs, `renderRunSummary` server-side).
+export interface RunSummary {
+	runId: string
+	status: RunStatus
+	task: string | null
+	// The wire carries an effort level, but the client only ever reads it through isEffort, so it stays a string here and narrows at the read sites.
+	effort: string | null
+	startTime: string | null
+	endTime: string | null
+	// Optional because the actions tolerate a summary whose result field is absent, not just null.
+	result?: RunResultCard | null
+	error?: unknown
+	summary: string | null
+}
+
+// The result card embedded in a run summary or run view (`ResultCard` in source/executor/types.ts).
+export interface RunResultCard {
+	status: 'success' | 'error' | 'needs_clarification'
+	summary: string
+	artifacts?: string[]
+	error?: { kind: string; message?: string; details?: unknown }
+}
+
+// One interrupt-history entry in a run view (`InterruptHistoryEntry` in source/web/render.ts).
+export interface InterruptInquiryEntry {
+	kind: 'inquiry'
+	askedAt: string
+	role: string | null
+	message: string
+	answer: string | null
+	answeredAt: string | null
+	ended: boolean
+}
+
+export interface InterruptPlanModEntry {
+	kind: 'plan_modification'
+	askedAt: string
+	message: string
+	target: string | null
+	targetRole: string | null
+	aborted: string[]
+}
+
+export type InterruptHistoryEntry = InterruptInquiryEntry | InterruptPlanModEntry
+
+// The full run view (GET /api/runs/:id, `renderRunView` server-side).
+export interface RunView {
+	status: RunStatus
+	runId: string | null
+	task: string | null
+	// The wire carries an effort level, but the client only ever reads it through isEffort, so it stays a string here and narrows at the read sites.
+	effort: string | null
+	startTime: string | null
+	endTime: string | null
+	result: RunResultCard | null
+	error?: unknown
+	continuesFrom: string | null
+	plan: string | null
+	roles: RoleActivity[]
+	roleTree: RoleTreeNode[] | null
+	recentLog: RecentLogEntry[]
+	currentActivity: CurrentActivity | null
+	questionHistory: QuestionHistoryEntry[]
+	interrupts: InterruptHistoryEntry[]
+	// Added on top of renderRunView by the request handler (source/web/request-handler.ts): whether the run has an interrupt queued at its safe point — true only for the active run.
+	interruptPending?: boolean
+	budgets: RunBudgets
+}
+
+export interface RoleActivity {
+	role: string
+	firstSeen: string
+	lastSeen: string
+	eventCount: number
+	llmCalls: number
+	toolCalls: number
+	recentTools: string[]
+	lastPromptTokens: number | null
+}
+
+export interface RoleTreeNode {
+	role: string
+	depth: number
+	parent: string | null
+	status: string | null
+	summary: string | null
+	active: boolean
+	children: RoleTreeNode[]
+}
+
+export interface RecentLogEntry {
+	index: number
+	timestamp: string
+	type: string
+	text: string
+}
+
+export interface QuestionHistoryEntry {
+	id: string | null
+	question: string
+	context?: string
+	askedAt: string
+	answer?: string
+	answeredAt?: string
+}
+
+export interface CurrentActivity {
+	role: string | null
+	summary: string
+}
+
+export interface RunBudgets {
+	elapsedSeconds: number
+	toolCalls: number
+	tokensUsed: number | null
+	tokenBreakdown: TokenUsage | null
+}
+
+export interface TokenUsage {
+	promptTokens: number
+	cachedPromptTokens: number
+	completionTokens: number
+	totalTokens: number
+}
+
+// One pending question (GET /api/questions, `renderPendingQuestions` server-side).
+export interface ApiQuestion {
+	id: string
+	question: string
+	context?: string
+	askedAt: string
+}
+
+// The compose screen's continuation chip: the prior run's id (submitted as continuesFrom) plus the task and outcome summary it echoes.
+export interface Continuation {
+	runId: string
+	task: string
+	summary: string | null
+}
+
+// The one-time presentation of a newly-arrived interrupt answer.
+export interface InterruptAnswerCard {
+	question: string
+	answer: string | null
+	role: string | null
+}
+
+// The inspector card snapshot over the run view: which stamped target it anchors to and the element rect it was snapshotted at.
+export interface TooltipSnapshot {
+	kind: TooltipTarget['kind']
+	id: string
+	rect: ElementRect
+}
+
+// The inspector modal's window state. The unscoped fields are the tail window (the default scope's data and the instance dropdown's wayfinding); `scopes` holds one `ScopeWindow` per explicitly scoped instance id, each with its own loading flag so a re-scope mid-fetch never shows the previous scope's state.
+export type InspectorLoadState = 'loading' | 'ready' | 'failed'
+
+export interface InspectorState {
+	loadState: InspectorLoadState
+	events: LogWindowEvent[]
+	total: number | null
+	tailOffset: number | null
+	entries: TurnEntry[]
+	scopedRoleId: string | null
+	olderLoading: boolean
+	scopes: Record<string, ScopeWindow>
+}
+
+export type EffortLevel = 'quick' | 'standard' | 'thorough'
+export type LogLevel = 'full' | 'standard'
+export type InterruptMode = 'inquiry' | 'plan_modification'
+export type FlowViewMode = 'flow' | 'sequence'
+export type Screen = 'watch' | 'history' | 'compose' | 'queue'
+
+export interface ApplicationState {
+	summaries: RunSummary[]
+	selectedRunId: string | null
+	selectedRunView: RunView | null
+	selectedRunStatus: RunStatus | null
+	pendingQuestions: ApiQuestion[]
+	// The polled task queue (docs/queueing.md "UI interaction model"), head first. The add-flow's ids: justSubmittedItemId guards a second submit while one is in flight; pendingAddSelectionId is consumed once by the very next queue read to jump to the new run's watch screen when the scheduler dispatched it within the add request.
+	queueItems: QueueItemLike[]
+	justSubmittedItemId: string | null
+	pendingAddSelectionId: string | null
+	// The queue panel's row-level view state: the waiting item being inline-edited, the row being dragged, and the item whose answer is posting.
+	editingItemId: string | null
+	draggingItemId: string | null
+	queueAnswerPendingId: string | null
+	serverAvailable: boolean
+	justSubmittedRunId: string | null
+	muted: boolean
+	shownQuestionIds: Record<string, boolean>
+	firstQuestionsPoll: boolean
+	pendingAnswerId: string | null
+	// null until the saved settings load; the selectors initialize from the persisted levels on first load.
+	runEffort: EffortLevel | null
+	savingEffort: boolean
+	runLogLevel: LogLevel | null
+	savingLogLevel: boolean
+	// The live InteractionModel the centerpiece renders, plus its previous frame for `deriveLifecycle`'s enter/depart diff. Both null until the first readable flow frame lands.
+	flowModel: InteractionModel | null
+	previousFlowModel: InteractionModel | null
+	// The label resolver and guild participant inventory are built once from `/api/config` (GotConfig); null/empty until that single load completes. `build` rides the same load: the image's build identifier for the top bar, and stays null when running from source without a baked build-info.json.
+	labelResolver: LabelResolver | null
+	guildParticipants: Participant[]
+	build: BuildInfo | null
+	flowTier: LabelTier
+	flowViewMode: FlowViewMode
+	// The sequence view's roles-only lens (see rolesOnlyModel in interaction-model.js): off by default so the sequence view shows everything.
+	sequenceRolesOnly: boolean
+	// The visible screen: 'watch' (the flow/sequence stage), 'history' (the run browser), or 'compose' (the new-task hero). A zero-state service shows compose regardless (see Main).
+	screen: Screen
+	// Per-history-row expansion, keyed by run id, so the full task/result of several runs can be open at once.
+	historyExpanded: Record<string, boolean>
+	// The continuation pending on the compose screen, or null for a plain new task. Set by the History row's Continue button; cleared by the chip's Cancel and after a successful submit.
+	continuation: Continuation | null
+	// Per-run-view modal state. The question modal opens on a new pending question; the result modal opens on a watched run's completion. `resultShownForRun` dedups the auto-open across the polls that follow a completion. The interrupt modal opens only from the stage controls.
+	questionModalOpen: boolean
+	resultModalOpen: boolean
+	resultShownForRun: string | null
+	interruptModalOpen: boolean
+	// The LLM turn inspector opens only from the stage controls; its data (the loaded log window and the derived turn index) lives in `inspector` and resets on open and on run switch.
+	inspectorModalOpen: boolean
+	inspector: InspectorState
+	// The plan disclosure under the stage: collapsed by default, reset with the other per-run view state on a run switch.
+	planExpanded: boolean
+	// The live token stream's ephemeral partial (see "Live token stream"): the in-flight reasoning/content the inspector modal renders under the matching in-flight row. Null whenever nothing is streaming or the stream is down; never an authority on run state.
+	livePartial: LivePartial | null
+	// The inspector descriptor over the run view: null when nothing is hovered. Cleared on `mouseleave` of the stage and on run switch; a stale id self-dismisses at render time.
+	tooltip: TooltipSnapshot | null
+	// Interrupt form state: the kind toggle, an in-flight send flag, and a one-line outcome notice. The answer card presents each newly-arrived interrupt answer once (keys run-scoped in shownInterruptAnswerKeys); a run's first read baselines its answered history so old runs never pop stale cards.
+	interruptMode: InterruptMode
+	interruptSending: boolean
+	interruptNotice: string | null
+	interruptAnswerCard: InterruptAnswerCard | null
+	shownInterruptAnswerKeys: Record<string, boolean>
+	now: number
+}
+
+// --- Action and effect contract --------------------------------------------
+// hyperapp v1 actions are pure state transitions that may return effect tuples; effects are `[runner, payload]` pairs the framework invokes with a dispatch. The payload types are read off this module's own dispatch calls.
+
+export type Action<Payload> = (state: ApplicationState, payload: Payload) => ActionReturn
+
+// hyperapp flattens the effect list and ignores falsy entries, so actions use null effects as a no-op branch (e.g. the muted beep in GotQuestions).
+export type OptionalEffect = EffectItem | null | undefined | false
+
+export type ActionReturn = ApplicationState | [ApplicationState, ...OptionalEffect[]]
+
+export type EffectRunner<Payload> = (dispatch: Dispatch, payload: Payload) => void
+
+export type Dispatch = <Payload>(action: Action<Payload>, payload?: Payload) => void
+
+// The fetch effecter's payload: the ok action receives the response envelope once the body has been parsed (or the raw text when the body is not JSON); the fail action fires only on a network error.
+export interface FetchResultPayload {
+	status: number
+	ok: boolean
+	body: unknown
+}
+
+export interface FetchEffectPayload {
+	url: string
+	init?: RequestInit
+	ok: Action<FetchResultPayload>
+	fail: Action<undefined>
+}
+
+export type FetchEffect = [EffectRunner<FetchEffectPayload>, FetchEffectPayload]
+export type NullPayloadEffect = [EffectRunner<null>, null]
+export type FaviconEffect = [EffectRunner<ApplicationState>, ApplicationState]
+
+export type EffectItem = FetchEffect | NullPayloadEffect | FaviconEffect
+
+// A windowed-log response's shape (what `runLogPage` produces). Run identity is a separate concern: each action compares the body's `runId` against the currently selected run and ignores a mismatch, so a stale response crossing a run switch leaves the new run's fresh inspector state alone instead of marking it failed.
+export interface InspectorLogBody {
+	runId: string
+	total: number
+	offset: number
+	events: LogWindowEvent[]
+}
+
+// --- Constants and formatting helpers --------------------------------------
 
 const POLL_INTERVAL_MS = 1000
-const STATUS_LABELS = {
+
+const STATUS_LABELS: Record<string, string> = {
 	unknown: 'in progress',
 	running: 'running',
 	success: 'success',
@@ -31,54 +329,60 @@ const STATUS_LABELS = {
 	needs_clarification: 'needs clarification',
 	interrupted: 'interrupted',
 }
+
 const SERVER_UNAVAILABLE_MESSAGE = 'server unavailable — it may have shut down'
 
 // The effort channel's three levels. The wire strings are the contract (see docs/reference.md "Effort channel"): state, API bodies, and run metadata carry them verbatim, so there is no mapping table — display capitalization is a UI concern only and the executor never reads it. The per-option descriptions are the single copy of what each level means; the compose screen's selector (EffortLevelSelector) and the history badge's hover title both render from this list.
-const DEFAULT_EFFORT = 'standard'
-const EFFORT_OPTIONS = [
+const DEFAULT_EFFORT: EffortLevel = 'standard'
+const EFFORT_OPTIONS: { value: EffortLevel; description: string; recommended?: boolean }[] = [
 	{ value: 'quick', description: 'The fastest, lightest pass. Good for small fixes and simple tasks.' },
 	{ value: 'standard', description: 'Careful work at a reasonable pace. The right choice for most tasks.', recommended: true },
 	{ value: 'thorough', description: 'The slowest, most meticulous pass. Best for large or important projects.' },
 ]
 
-function isEffort(value) {
+function isEffort(value: unknown): value is EffortLevel {
 	return EFFORT_OPTIONS.some((option) => option.value === value)
 }
 
-function effortLabel(effort) {
+function effortLabel(effort: unknown): string {
 	if (!isEffort(effort)) return '—'
 	return effort.charAt(0).toUpperCase() + effort.slice(1)
 }
 
-function effortDescription(effort) {
+function effortDescription(effort: unknown): string {
 	const option = EFFORT_OPTIONS.find((entry) => entry.value === effort)
 	return option !== undefined ? option.description : ''
 }
 
 // The logging-level channel's two levels (see docs/reference.md "Logging level"). The wire strings are the contract — API bodies and settings carry them verbatim. Under `standard` the run log still receives every event, but the heavy bodies (each llm_call's sent conversation and received response, each tool_result's full result) are dropped, which keeps long runs' log files small at the cost of the raw-detail toggle showing fewer bodies.
-const DEFAULT_LOG_LEVEL = 'full'
-const LOG_LEVEL_OPTIONS = [
+const DEFAULT_LOG_LEVEL: LogLevel = 'full'
+const LOG_LEVEL_OPTIONS: { value: LogLevel; label: string }[] = [
 	{ value: 'full', label: 'Full logging' },
 	{ value: 'standard', label: 'Standard (smaller logs)' },
 ]
 
-function isLogLevel(value) {
+function isLogLevel(value: unknown): value is LogLevel {
 	return LOG_LEVEL_OPTIONS.some((option) => option.value === value)
 }
 
+// A polled status value is a RunStatus exactly when the status-label table knows it: the table's keys are the full RunStatus set, so membership doubles as the wire guard at every ingress that needs the type.
+function isRunStatus(value: unknown): value is RunStatus {
+	return typeof value === 'string' && Object.hasOwn(STATUS_LABELS, value)
+}
+
 // The label tier the flow/sequence views localize through. 'detailed' is the default so a fresh load reads precisely; the toggle in the run-view controls swaps it for a non-technical voice. The values come from labels.js (TIER_VALUES), so a swap re-renders the views through the same resolver without touching the model.
-const DEFAULT_FLOW_TIER = 'detailed'
+const DEFAULT_FLOW_TIER: LabelTier = 'detailed'
 
 // Derives the guild's static role/tool inventory from the live `/api/config` so the sequence view can lay out every guild role as a column from the first frame (peeking at future participants would defeat the model's "the run reveals what happens" contract). The flow view does not need this — it projects only active participants — but passing it is harmless and keeps the two views' column sets aligned. The 'human' and 'tools' columns are added by the view itself, so this carries only the real roles and tools.
-function guildParticipantsFromConfig(config) {
-	if (config === null || typeof config !== 'object') return []
-	const participants = []
-	const roles = config.roles
-	if (roles !== null && typeof roles === 'object') {
+function guildParticipantsFromConfig(config: unknown): Participant[] {
+	if (!isObject(config)) return []
+	const participants: Participant[] = []
+	const roles = config['roles']
+	if (isObject(roles)) {
 		for (const name of Object.keys(roles)) participants.push({ id: `guild:${name}`, role: name, kind: 'role' })
 	}
-	const tools = config.tools
-	if (tools !== null && typeof tools === 'object') {
+	const tools = config['tools']
+	if (isObject(tools)) {
 		for (const name of Object.keys(tools)) participants.push({ id: `guild:${name}`, role: name, kind: 'tool' })
 	}
 	return participants
@@ -88,14 +392,14 @@ function guildParticipantsFromConfig(config) {
 const numberFormatter = new Intl.NumberFormat(navigator.language)
 
 // Formats any numeric value with locale grouping, returning '—' for null/undefined/non-numbers so callers can pass optional fields (token totals absent on a run with no usage) without a separate guard.
-function formatNumber(value) {
+function formatNumber(value: unknown): string {
 	if (value === null || value === undefined) return '—'
 	if (typeof value !== 'number' || !Number.isFinite(value)) return '—'
 	return numberFormatter.format(value)
 }
 
 // The AudioContext is created lazily on first user interaction (browsers start it suspended until a gesture) and reused for every beep; it is module state, not app state, because it is an opaque resource with no place in the view.
-let audioContext = null
+let audioContext: AudioContext | null = null
 
 // The caller-held column high-water mark for the flow view (see createColumnTracker): one per page load so the centerpiece's width stays stable as runs deepen and unwind. Held at module scope like audioContext — it is view-render memory, not app state, and retention across run switches is harmless (the stage simply stays as wide as the deepest run seen this page load).
 const flowColumnTracker = createColumnTracker()
@@ -107,23 +411,23 @@ const operationDetails = createOperationDetails({})
 const wireDetails = createWireDetails({ maxEntries: WIRE_DETAIL_CACHE_LIMIT })
 
 // The live-token-stream client (see stream-client.js and docs/reference.md "Live token stream"): module scope like the other session caches, created lazily by the stream subscription on the first watch-screen mount and left connected for the page's lifetime. The stream is an enhancement — the client is contained (never throws, shows no error surface), and the only state it feeds is the ephemeral `livePartial` the inspector modal's in-flight turn renders.
-let streamClient = null
+let streamClient: StreamClient | null = null
 
 // ws vs wss follows the page's own protocol so a TLS deployment upgrades the stream with it.
-function streamSocketUrl() {
+function streamSocketUrl(): string {
 	const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
 	return `${protocol}//${window.location.host}/ws/stream`
 }
 
-function ensureAudioContext() {
+function ensureAudioContext(): AudioContext | null {
 	if (audioContext === null) {
-		const Ctor = window.AudioContext !== undefined ? window.AudioContext : window.webkitAudioContext
-		if (Ctor !== undefined) audioContext = new Ctor()
+		const audioConstructor = window.AudioContext !== undefined ? window.AudioContext : window.webkitAudioContext
+		if (audioConstructor !== undefined) audioContext = new audioConstructor()
 	}
 	return audioContext
 }
 
-function formatRelative(iso, now) {
+function formatRelative(iso: string | null | undefined, now: number): string {
 	if (iso === null || iso === undefined || iso === '') return '—'
 	const then = Date.parse(iso)
 	if (Number.isNaN(then)) return iso
@@ -138,12 +442,12 @@ function formatRelative(iso, now) {
 	return `${formatNumber(days)}d ago`
 }
 
-function statusLabel(status) {
+function statusLabel(status: string | null | undefined): string {
 	if (status === null || status === undefined) return '—'
 	return STATUS_LABELS[status] ?? status
 }
 
-function formatElapsed(seconds) {
+function formatElapsed(seconds: unknown): string {
 	if (typeof seconds !== 'number' || seconds < 0 || !Number.isFinite(seconds)) return '—'
 	const minutes = Math.floor(seconds / 60)
 	const remaining = seconds % 60
@@ -151,7 +455,7 @@ function formatElapsed(seconds) {
 	return `${formatNumber(minutes)}m ${formatNumber(remaining)}s`
 }
 
-function formatTokens(tokens) {
+function formatTokens(tokens: unknown): string {
 	return formatNumber(tokens)
 }
 
@@ -161,7 +465,7 @@ function formatTokens(tokens) {
 const renderMarkdown = createMarkdownRenderer(h)
 
 // The active run is the first non-terminal summary; derived in the view rather than stored, so it can never drift from the run list.
-function deriveActiveRunId(summaries) {
+function deriveActiveRunId(summaries: RunSummary[]): string | null {
 	const active = summaries.find((summary) => !isTerminalStatus(summary.status))
 	return active === undefined ? null : active.runId
 }
@@ -169,16 +473,16 @@ function deriveActiveRunId(summaries) {
 // --- Custom subscriptions --------------------------------------------------
 // hyperapp's @hyperapp/time package would provide onEvery, but vendoring a second file for ~5 lines is not worth the supply-chain cost; the subscriber is defined once here so its reference is stable across renders (patchSubs compares subscriber references to decide whether to restart a subscription).
 
-function onEverySubscriber(dispatch, payload) {
+function onEverySubscriber(dispatch: Dispatch, payload: { action: Action<undefined>; interval: number }): () => void {
 	const id = setInterval(() => dispatch(payload.action), payload.interval)
 	return () => clearInterval(id)
 }
 
-function onEvery(action, interval) {
+function onEvery(action: Action<undefined>, interval: number): [typeof onEverySubscriber, { action: Action<undefined>; interval: number }] {
 	return [onEverySubscriber, { action, interval }]
 }
 
-function onFirstInteractionSubscriber(dispatch, payload) {
+function onFirstInteractionSubscriber(dispatch: Dispatch, payload: { action: Action<undefined> }): () => void {
 	const handler = () => dispatch(payload.action)
 	window.addEventListener('pointerdown', handler, { once: true })
 	window.addEventListener('keydown', handler, { once: true })
@@ -188,33 +492,33 @@ function onFirstInteractionSubscriber(dispatch, payload) {
 	}
 }
 
-function onFirstInteraction(action) {
+function onFirstInteraction(action: Action<undefined>): [typeof onFirstInteractionSubscriber, { action: Action<undefined> }] {
 	return [onFirstInteractionSubscriber, { action }]
 }
 
 // The Escape key dismisses the inspector modal while it is open; the subscription is present only then (the subscriptions array carries it as a stable position whose value is falsy while the modal is closed, which hyperapp ignores), so no key listener exists otherwise.
-function onEscapeKeySubscriber(dispatch, payload) {
-	const handler = (event) => {
+function onEscapeKeySubscriber(dispatch: Dispatch, payload: { action: Action<undefined> }): () => void {
+	const handler = (event: KeyboardEvent): void => {
 		if (event.key === 'Escape') dispatch(payload.action)
 	}
 	window.addEventListener('keydown', handler)
 	return () => window.removeEventListener('keydown', handler)
 }
 
-function onEscapeKey(action) {
+function onEscapeKey(action: Action<undefined>): [typeof onEscapeKeySubscriber, { action: Action<undefined> }] {
 	return [onEscapeKeySubscriber, { action }]
 }
 
 // --- Custom effects --------------------------------------------------------
 // @hyperapp/http is still "planned", so the fetch effecter is hand-written. It parses the body, then dispatches the ok action on a requestAnimationFrame so the dispatch lands in step with hyperapp's repaint cycle (per hyperapp's effects doc); the fail action fires only on a network error, since any HTTP response — even a 4xx/5xx — resolves the ok branch with its status.
 
-function runFetch(dispatch, payload) {
+function runFetch(dispatch: Dispatch, payload: FetchEffectPayload): void {
 	fetch(payload.url, payload.init).then(
 		(response) => {
 			const status = response.status
 			const ok = response.ok
 			response.text().then((text) => {
-				let body = null
+				let body: unknown = null
 				if (text.length > 0) {
 					try {
 						body = JSON.parse(text)
@@ -229,11 +533,11 @@ function runFetch(dispatch, payload) {
 	)
 }
 
-function Fetch(payload) {
+function Fetch(payload: FetchEffectPayload): FetchEffect {
 	return [runFetch, payload]
 }
 
-function runBeep(_dispatch, _payload) {
+function runBeep(_dispatch: Dispatch, _payload: null): void {
 	const ctx = audioContext
 	if (ctx === null || ctx.state !== 'running') return
 	const oscillator = ctx.createOscillator()
@@ -248,21 +552,21 @@ function runBeep(_dispatch, _payload) {
 	oscillator.stop(now + 0.18)
 }
 
-function PlayBeep() {
+function PlayBeep(): NullPayloadEffect {
 	return [runBeep, null]
 }
 
-function runPrimeAudio(_dispatch, _payload) {
+function runPrimeAudio(_dispatch: Dispatch, _payload: null): void {
 	const ctx = ensureAudioContext()
 	if (ctx !== null && ctx.state === 'suspended') ctx.resume()
 }
 
-function PrimeAudioFx() {
+function PrimeAudioFx(): NullPayloadEffect {
 	return [runPrimeAudio, null]
 }
 
 // The favicon effect: derives the three-state favicon from the polled run list and pending questions and swaps the `<link rel="icon">` href only when the derived state's href changes, so an identical poll tick never touches the DOM.
-function runUpdateFavicon(_dispatch, state) {
+function runUpdateFavicon(_dispatch: Dispatch, state: ApplicationState): void {
 	const link = document.querySelector('link[rel="icon"]')
 	if (link === null) return
 	const href = faviconHref(deriveFaviconState(state.summaries, state.pendingQuestions))
@@ -270,14 +574,14 @@ function runUpdateFavicon(_dispatch, state) {
 	link.setAttribute('href', href)
 }
 
-function UpdateFavicon(state) {
+function UpdateFavicon(state: ApplicationState): FaviconEffect {
 	return [runUpdateFavicon, state]
 }
 
 // --- Actions ---------------------------------------------------------------
 // Actions are pure state transitions; side effects are returned as effect tuples alongside the next state. The polling action returns a fresh now so relative timestamps refresh every tick even when the server returns identical data.
 
-function Tick(state) {
+function Tick(state: ApplicationState): ActionReturn {
 	return [
 		{ ...state, now: Date.now() },
 		Fetch({ url: 'api/runs', ok: GotRunList, fail: FetchFailed }),
@@ -286,7 +590,7 @@ function Tick(state) {
 	]
 }
 
-function PollSelectedRun(state) {
+function PollSelectedRun(state: ApplicationState): ActionReturn {
 	// Bail on a non-string id rather than fetching `/api/runs/undefined`; `selectedRunId` is null until a run is selected and can briefly be undefined across a state transition, so the guard keeps the poll from firing on an invalid id.
 	if (typeof state.selectedRunId !== 'string' || state.selectedRunId === '') return state
 	const runId = encodeURIComponent(state.selectedRunId)
@@ -300,39 +604,60 @@ function PollSelectedRun(state) {
 	]
 }
 
+// The flow model's ingress guard: the fields the flow/sequence views read off the model, element-checked like the demo harness's adapter guard, so a malformed frame falls to the placeholder branch instead of surfacing undefined reads deep in a render.
+function isParticipantRecord(value: unknown): value is Participant {
+	return isObject(value) && typeof value['id'] === 'string' && typeof value['role'] === 'string' && typeof value['kind'] === 'string'
+}
+
+function isOperationRecord(value: unknown): value is Operation {
+	if (!isObject(value)) return false
+	if (typeof value['id'] !== 'string' || typeof value['kind'] !== 'string' || typeof value['lifecycle'] !== 'string') return false
+	if (typeof value['stack'] !== 'string' || typeof value['startedAt'] !== 'string') return false
+	if (value['settledAt'] !== null && typeof value['settledAt'] !== 'string') return false
+	return value['outcome'] === null || typeof value['outcome'] === 'string'
+}
+
+function isInteractionModelPayload(value: unknown): value is InteractionModel {
+	if (!isObject(value)) return false
+	if (typeof value['status'] !== 'string') return false
+	if (!Array.isArray(value['participants']) || !value['participants'].every(isParticipantRecord)) return false
+	return Array.isArray(value['operations']) && value['operations'].every(isOperationRecord)
+}
+
 // The live InteractionModel the flow/sequence views render. The previous frame is kept so `deriveLifecycle` can diff entering/departing nodes; a 404 (the run directory exists but is not yet readable in the instant after submit) clears the model so the centerpiece shows its placeholder until the first readable frame lands. Every path also syncs the scroll followers: the model update grows (or clears) the sequence content after the view patch, and an open inspector modal's body element is replaced where the placeholder transitions to the model (the poll-time sync re-attaches its follower before the next content update can rely on it).
-function GotFlowModel(state, payload) {
+function GotFlowModel(state: ApplicationState, payload: FetchResultPayload): ActionReturn {
 	const status = payload.status
 	const ok = payload.ok
 	const body = payload.body
 	if (status === 404) return [{ ...state, flowModel: null, previousFlowModel: null, serverAvailable: ok }, SyncSequenceFollower(), SyncInspectorFollower()]
 	if (!ok || body === null || typeof body !== 'object') return [{ ...state, serverAvailable: ok }, SyncSequenceFollower(), SyncInspectorFollower()]
-	if (!Array.isArray(body.participants) || !Array.isArray(body.operations) || typeof body.status !== 'string') {
-		return [{ ...state, serverAvailable: true }, SyncSequenceFollower(), SyncInspectorFollower()]
-	}
+	if (!isInteractionModelPayload(body)) return [{ ...state, serverAvailable: true }, SyncSequenceFollower(), SyncInspectorFollower()]
 	return [{ ...state, previousFlowModel: state.flowModel, flowModel: body, serverAvailable: true }, SyncSequenceFollower(), SyncInspectorFollower()]
 }
 
-function GotRunList(state, payload) {
+function GotRunList(state: ApplicationState, payload: FetchResultPayload): ActionReturn {
 	const ok = payload.ok
 	const body = payload.body
-	const summaries = ok && Array.isArray(body) ? body : []
+	const summaries: RunSummary[] = ok && Array.isArray(body) ? body : []
 	const nextState = { ...state, summaries, serverAvailable: ok }
 	if (nextState.justSubmittedRunId !== null && summaries.some((summary) => summary.runId === nextState.justSubmittedRunId)) {
 		nextState.justSubmittedRunId = null
 	}
 	// Auto-select the newest run when nothing is selected so the user lands on live activity.
 	if (nextState.selectedRunId === null && summaries.length > 0) {
-		nextState.selectedRunId = summaries[0].runId
-		nextState.selectedRunView = null
-		nextState.selectedRunStatus = null
+		const newest = summaries[0]
+		if (newest !== undefined) {
+			nextState.selectedRunId = newest.runId
+			nextState.selectedRunView = null
+			nextState.selectedRunStatus = null
+		}
 	}
 	return [nextState, UpdateFavicon(nextState)]
 }
 
 // The newest interrupt-question answer the operator has not been shown yet, or null. Keys are run-scoped (`runId|askedAt`) so one map serves every run without per-run resets; a run's first read baselines its already-answered inquiries so opening an old run never pops stale answers.
-function latestUnshownAnswer(interrupts, runId, shownInterruptAnswerKeys) {
-	let latest = null
+function latestUnshownAnswer(interrupts: InterruptHistoryEntry[], runId: string | null, shownInterruptAnswerKeys: Record<string, boolean>): InterruptInquiryEntry | null {
+	let latest: InterruptInquiryEntry | null = null
 	for (const entry of interrupts) {
 		if (entry.kind !== 'inquiry' || entry.answer === null) continue
 		if (shownInterruptAnswerKeys[`${runId}|${entry.askedAt}`] === true) continue
@@ -341,8 +666,8 @@ function latestUnshownAnswer(interrupts, runId, shownInterruptAnswerKeys) {
 	return latest
 }
 
-function answeredInquiryKeys(interrupts, runId) {
-	const keys = []
+function answeredInquiryKeys(interrupts: InterruptHistoryEntry[], runId: string | null): string[] {
+	const keys: string[] = []
 	for (const entry of interrupts) {
 		if (entry.kind !== 'inquiry' || entry.answer === null) continue
 		keys.push(`${runId}|${entry.askedAt}`)
@@ -350,7 +675,16 @@ function answeredInquiryKeys(interrupts, runId) {
 	return keys
 }
 
-function GotSelectedRun(state, payload) {
+// The run view's ingress guard: the fields this action reads (plus run id, which the wire may legitimately carry as null). The remaining RunView fields ride the server's typed contract and are re-guarded where the view reads them.
+function isReadableRunView(value: unknown): value is RunView {
+	if (!isObject(value)) return false
+	if (!isRunStatus(value['status'])) return false
+	const runId = value['runId']
+	if (runId !== null && typeof runId !== 'string') return false
+	return Array.isArray(value['interrupts'])
+}
+
+function GotSelectedRun(state: ApplicationState, payload: FetchResultPayload): ActionReturn {
 	const status = payload.status
 	const ok = payload.ok
 	const body = payload.body
@@ -358,19 +692,14 @@ function GotSelectedRun(state, payload) {
 		// The run directory is created early in execution but may not be readable in the instant after submit; the per-run subscription keeps polling until the view appears.
 		return [{ ...state, selectedRunStatus: 'unknown', serverAvailable: ok }, SyncSequenceFollower()]
 	}
-	if (!ok || body === null) return state
+	if (!ok || body === null || !isReadableRunView(body)) return state
 	// The result modal fires once when a run the operator is watching completes (a transition out of a non-terminal status into success/error). Selecting an already-terminal historical run does not auto-open it — the flow view's CTA re-opens it on demand — so `previousStatus === null` (the first read of a selected run) is excluded along with the terminal statuses. A terminal status also clears the live partial: the in-flight turn it streamed is over (see "Live token stream").
 	const previousStatus = state.selectedRunStatus
 	const completedStatus = body.status === 'success' || body.status === 'error' ? body.status : null
-	const isCompletionTransition = completedStatus !== null
-		&& previousStatus !== null
-		&& previousStatus !== 'success'
-		&& previousStatus !== 'error'
-		&& previousStatus !== 'needs_clarification'
+	const isCompletionTransition = completedStatus !== null && previousStatus !== null && previousStatus !== 'success' && previousStatus !== 'error' && previousStatus !== 'needs_clarification'
 	const runId = typeof body.runId === 'string' ? body.runId : state.selectedRunId
 	const resultModalOpen = isCompletionTransition && state.resultShownForRun !== runId ? true : state.resultModalOpen
 	const resultShownForRun = isCompletionTransition ? runId : state.resultShownForRun
-
 	const interrupts = Array.isArray(body.interrupts) ? body.interrupts : []
 	const shownInterruptAnswerKeys = { ...state.shownInterruptAnswerKeys }
 	let interruptAnswerCard = state.interruptAnswerCard
@@ -383,20 +712,17 @@ function GotSelectedRun(state, payload) {
 			interruptAnswerCard = { question: newAnswer.message, answer: newAnswer.answer, role: newAnswer.role }
 		}
 	}
-
 	// A completion transition resets the inspector's scope to auto, so the next open lands on the most recently active instance (here, the finishing one) instead of whatever the operator had scoped to during the run.
 	const inspector = isCompletionTransition ? { ...state.inspector, scopedRoleId: null } : state.inspector
-
 	return [{ ...state, selectedRunView: body, selectedRunStatus: body.status, resultModalOpen, resultShownForRun, interruptAnswerCard, shownInterruptAnswerKeys, serverAvailable: true, inspector, livePartial: isTerminalStatus(body.status) ? null : state.livePartial }, SyncSequenceFollower()]
 }
 
-function GotQuestions(state, payload) {
+function GotQuestions(state: ApplicationState, payload: FetchResultPayload): ActionReturn {
 	const ok = payload.ok
 	const body = payload.body
-	const questions = ok && Array.isArray(body) ? body : []
-	const currentIds = {}
+	const questions: ApiQuestion[] = ok && Array.isArray(body) ? body : []
+	const currentIds: Record<string, boolean> = {}
 	for (const question of questions) currentIds[question.id] = true
-
 	let hasNew = false
 	if (!state.firstQuestionsPoll) {
 		for (const id of Object.keys(currentIds)) {
@@ -406,7 +732,6 @@ function GotQuestions(state, payload) {
 			}
 		}
 	}
-
 	const nextState = {
 		...state,
 		pendingQuestions: questions,
@@ -423,17 +748,17 @@ function GotQuestions(state, payload) {
 	return [nextState, UpdateFavicon(nextState)]
 }
 
-function FetchFailed(state) {
+function FetchFailed(state: ApplicationState): ApplicationState {
 	return { ...state, serverAvailable: false }
 }
 
 // --- Queue panel actions -----------------------------------------------------
 // The polled queue feeds the queue screen; the mutations post to the /api/queue surface (docs/queueing.md "HTTP API") and every confirm path refetches the queue, since the server's tick may already have dispatched the item the mutation touched.
 
-function GotQueue(state, payload) {
+function GotQueue(state: ApplicationState, payload: FetchResultPayload): ApplicationState {
 	const ok = payload.ok
 	const body = payload.body
-	const items = ok && Array.isArray(body) ? body.filter(isQueueItemLike) : []
+	const items: QueueItemLike[] = ok && Array.isArray(body) ? body.filter(isQueueItemLike) : []
 	const nextState = { ...state, queueItems: items, serverAvailable: ok }
 	// The add's in-flight guard releases once the created item shows up in the polled queue — the same release GotRunList applies to justSubmittedRunId; a response that fails or omits the item keeps the guard up.
 	if (nextState.justSubmittedItemId !== null && items.some((item) => item.id === nextState.justSubmittedItemId)) nextState.justSubmittedItemId = null
@@ -441,17 +766,17 @@ function GotQueue(state, payload) {
 }
 
 // The queue add resolved: the created item's id is remembered so the follow-up queue read can see whether the scheduler dispatched it within the same request (the idle case) — the operator then lands on the new run's watch screen exactly as a start-now submit always has. The poll's own queue reads deliberately do not consume this selection: a task added while a run is in flight dispatches much later, and jumping then would yank the operator off whatever they are reading.
-function GotQueuedTask(state, payload) {
+function GotQueuedTask(state: ApplicationState, payload: FetchResultPayload): ActionReturn {
 	const ok = payload.ok
 	const body = payload.body
-	if (!ok || body === null || typeof body !== 'object' || typeof body.id !== 'string' || body.id === '') return { ...state, serverAvailable: ok }
+	if (!ok || !isObject(body) || typeof body['id'] !== 'string' || body['id'] === '') return { ...state, serverAvailable: ok }
 	return [
-		{ ...state, justSubmittedItemId: body.id, pendingAddSelectionId: body.id, serverAvailable: true },
+		{ ...state, justSubmittedItemId: body['id'], pendingAddSelectionId: body['id'], serverAvailable: true },
 		Fetch({ url: 'api/queue', ok: GotQueueAfterAdd, fail: FetchFailed }),
 	]
 }
 
-function GotQueueAfterAdd(state, payload) {
+function GotQueueAfterAdd(state: ApplicationState, payload: FetchResultPayload): ActionReturn {
 	const addedId = state.pendingAddSelectionId
 	const queued = GotQueue(state, payload)
 	if (typeof addedId !== 'string') return queued
@@ -462,21 +787,23 @@ function GotQueueAfterAdd(state, payload) {
 	return SetScreen(cleared, 'queue')
 }
 
-function StartItemEdit(state, itemId) {
+function StartItemEdit(state: ApplicationState, itemId: unknown): ApplicationState {
 	if (typeof itemId !== 'string' || itemId === '') return state
 	return { ...state, editingItemId: itemId }
 }
 
-function CancelItemEdit(state) {
+function CancelItemEdit(state: ApplicationState): ApplicationState {
 	return { ...state, editingItemId: null }
 }
 
-function SaveItemEdit(state, event) {
+function SaveItemEdit(state: ApplicationState, event: Event): ActionReturn {
 	event.preventDefault()
 	const itemId = state.editingItemId
 	if (typeof itemId !== 'string' || itemId === '') return state
-	const textarea = event.target.querySelector('textarea')
-	if (textarea === null) return state
+	const target = event.target
+	if (!(target instanceof HTMLFormElement)) return state
+	const textarea = target.querySelector('textarea')
+	if (!(textarea instanceof HTMLTextAreaElement)) return state
 	const task = textarea.value.trim()
 	if (task === '') return state
 	return [
@@ -490,7 +817,7 @@ function SaveItemEdit(state, event) {
 	]
 }
 
-function RemoveQueueItem(state, itemId) {
+function RemoveQueueItem(state: ApplicationState, itemId: unknown): ActionReturn {
 	if (typeof itemId !== 'string' || itemId === '') return state
 	return [
 		state,
@@ -503,11 +830,13 @@ function RemoveQueueItem(state, itemId) {
 	]
 }
 
-function SubmitQueueAnswer(itemId) {
-	return function SubmitAnswerForQueueItem(state, event) {
+function SubmitQueueAnswer(itemId: string) {
+	return function SubmitAnswerForQueueItem(state: ApplicationState, event: Event): ActionReturn {
 		event.preventDefault()
-		const input = event.target.querySelector('input')
-		if (input === null) return state
+		const target = event.target
+		if (!(target instanceof HTMLFormElement)) return state
+		const input = target.querySelector('input')
+		if (!(input instanceof HTMLInputElement)) return state
 		const answer = input.value
 		if (answer === '') return state
 		return [
@@ -522,7 +851,7 @@ function SubmitQueueAnswer(itemId) {
 	}
 }
 
-function RequeueFailedItem(state, itemId) {
+function RequeueFailedItem(state: ApplicationState, itemId: unknown): ActionReturn {
 	if (typeof itemId !== 'string' || itemId === '') return state
 	return [
 		state,
@@ -536,7 +865,7 @@ function RequeueFailedItem(state, itemId) {
 }
 
 // Every queue mutation's confirm path refetches the queue rather than patching state from the response body: the server's tick may already have dispatched (or re-ordered) the item, so the refetched list is the truth.
-function QueueMutated(state, payload) {
+function QueueMutated(state: ApplicationState, payload: FetchResultPayload): ActionReturn {
 	if (!payload.ok) return { ...state, queueAnswerPendingId: null, serverAvailable: true }
 	return [
 		{ ...state, queueAnswerPendingId: null, serverAvailable: true },
@@ -545,7 +874,7 @@ function QueueMutated(state, payload) {
 }
 
 // A refused or failed mutation refetches too, so an optimistic update (a drag) reconciles with the server's order.
-function QueueMutationFailed(state) {
+function QueueMutationFailed(state: ApplicationState): ActionReturn {
 	return [
 		{ ...state, queueAnswerPendingId: null, serverAvailable: false },
 		Fetch({ url: 'api/queue', ok: GotQueue, fail: FetchFailed }),
@@ -556,14 +885,14 @@ function QueueMutationFailed(state) {
 // Waiting rows are HTML5 drag sources and drop targets: dragstart records the dragged item's id (and sets the transfer data, without which Firefox refuses to start the drag), the drop computes the PATCH position from the target row's waiting index, and the reorder applies optimistically before the PATCH confirms. dragend clears the marker whatever happened — including a drop outside any row.
 
 // The event target's data-attribute value, or null — the DOM read every queue row action shares.
-function dataAttributeOf(event, attribute) {
+function dataAttributeOf(event: Event, attribute: string): string | null {
 	const target = event.currentTarget
-	if (target === null || typeof target !== 'object') return null
+	if (!(target instanceof Element)) return null
 	const value = target.getAttribute(attribute)
 	return typeof value === 'string' && value !== '' ? value : null
 }
 
-function DragQueueItem(state, event) {
+function DragQueueItem(state: ApplicationState, event: DragEvent): ApplicationState {
 	const itemId = dataAttributeOf(event, 'data-item-id')
 	if (itemId === null) return state
 	if (event.dataTransfer !== null && event.dataTransfer !== undefined) {
@@ -573,13 +902,13 @@ function DragQueueItem(state, event) {
 	return { ...state, draggingItemId: itemId }
 }
 
-function DragOverQueueItem(state, event) {
+function DragOverQueueItem(state: ApplicationState, event: DragEvent): ApplicationState {
 	event.preventDefault()
 	if (event.dataTransfer !== null && event.dataTransfer !== undefined) event.dataTransfer.dropEffect = 'move'
 	return state
 }
 
-function DropQueueItem(state, event) {
+function DropQueueItem(state: ApplicationState, event: DragEvent): ActionReturn {
 	event.preventDefault()
 	const targetId = dataAttributeOf(event, 'data-item-id')
 	const draggedId = state.draggingItemId
@@ -597,15 +926,15 @@ function DropQueueItem(state, event) {
 	]
 }
 
-function DragEndQueueItem(state) {
+function DragEndQueueItem(state: ApplicationState): ApplicationState {
 	return state.draggingItemId === null ? state : { ...state, draggingItemId: null }
 }
 
 // The guild config is fetched exactly once on load and never polled, so this action runs a single time. The body is not retained in state; only the derived values the views need are kept — the label resolver the flow/sequence views localize through, the guild participant inventory the sequence view lays out columns from, and the build identifier the top bar stamps (null when the response carries none, e.g. running from source).
-function GotConfig(state, payload) {
+function GotConfig(state: ApplicationState, payload: FetchResultPayload): ActionReturn {
 	const ok = payload.ok
 	const body = payload.body
-	if (!ok || body === null || typeof body !== 'object') return state
+	if (!ok || !isLabelConfig(body)) return state
 	return {
 		...state,
 		labelResolver: createLabelResolver(body),
@@ -614,14 +943,23 @@ function GotConfig(state, payload) {
 	}
 }
 
+// The config's ingress guard, at the depth createLabelResolver consumes: the three label tables are objects when present, and the resolver itself tolerates their contents.
+function isLabelConfig(value: unknown): value is LabelConfig {
+	if (!isObject(value)) return false
+	if (value['roles'] !== undefined && !isObject(value['roles'])) return false
+	if (value['tools'] !== undefined && !isObject(value['tools'])) return false
+	if (value['visualization'] !== undefined && !isObject(value['visualization'])) return false
+	return true
+}
+
 // The saved settings are fetched once on load so the selectors start where the operator last left them; later settings fetches (none today) would not override levels the operator has since picked.
-function GotSettings(state, payload) {
+function GotSettings(state: ApplicationState, payload: FetchResultPayload): ActionReturn {
 	const ok = payload.ok
 	const body = payload.body
 	if (state.runEffort !== null && state.runLogLevel !== null) return { ...state, serverAvailable: ok }
-	const readable = ok && body !== null && typeof body === 'object'
-	const effort = readable && isEffort(body.effort) ? body.effort : null
-	const logLevel = readable && isLogLevel(body.logLevel) ? body.logLevel : null
+	const record = ok && isObject(body) ? body : null
+	const effort = record !== null && isEffort(record['effort']) ? record['effort'] : null
+	const logLevel = record !== null && isLogLevel(record['logLevel']) ? record['logLevel'] : null
 	return {
 		...state,
 		runEffort: state.runEffort !== null ? state.runEffort : (effort !== null ? effort : DEFAULT_EFFORT),
@@ -630,20 +968,22 @@ function GotSettings(state, payload) {
 	}
 }
 
-function SettingsFetchFailed(state) {
+function SettingsFetchFailed(state: ApplicationState): ApplicationState {
 	// The selectors still need concrete values to render, so fall back to the defaults rather than sitting at null forever.
 	return { ...state, runEffort: state.runEffort ?? DEFAULT_EFFORT, runLogLevel: state.runLogLevel ?? DEFAULT_LOG_LEVEL, serverAvailable: false }
 }
 
 // The settings write replaces the file wholesale, so a save carries both persisted fields. The selectors' values are null until the initial GET /api/settings resolves — before that they would only contribute the defaults the selectors show, silently clobbering the operator's persisted choices, so buildSettingsBody refuses to build a body (and the save actions skip the PUT) until both are initialized; the pick still applies locally and persists on the next save.
-function buildSettingsBody(runEffort, runLogLevel) {
+function buildSettingsBody(runEffort: EffortLevel | null, runLogLevel: LogLevel | null): { effort: EffortLevel; logLevel: LogLevel } | null {
 	if (!isEffort(runEffort) || !isLogLevel(runLogLevel)) return null
 	return { effort: runEffort, logLevel: runLogLevel }
 }
 
 // A radio pick is one deliberate gesture (unlike a slider drag), so a single change handler both updates state and persists the level as the default for the next run — the selector stays where the operator last left it across page reloads and restarts, with one PUT per pick.
-function SaveRunEffort(state, event) {
-	const value = event.target.value
+function SaveRunEffort(state: ApplicationState, event: Event): ActionReturn {
+	const target = event.target
+	if (!(target instanceof HTMLInputElement)) return state
+	const value = target.value
 	if (!isEffort(value)) return state
 	const body = buildSettingsBody(value, state.runLogLevel)
 	if (body === null) return { ...state, runEffort: value }
@@ -658,22 +998,25 @@ function SaveRunEffort(state, event) {
 	]
 }
 
-function EffortSaved(state, payload) {
+function EffortSaved(state: ApplicationState, payload: FetchResultPayload): ApplicationState {
 	const ok = payload.ok
 	const body = payload.body
-	if (!ok || body === null || typeof body !== 'object' || !isEffort(body.effort)) {
-		return { ...state, savingEffort: false, serverAvailable: true }
-	}
-	return { ...state, savingEffort: false, runEffort: body.effort, runLogLevel: isLogLevel(body.logLevel) ? body.logLevel : state.runLogLevel, serverAvailable: true }
+	if (!ok || !isObject(body)) return { ...state, savingEffort: false, serverAvailable: true }
+	const effort = body['effort']
+	const logLevel = body['logLevel']
+	if (!isEffort(effort)) return { ...state, savingEffort: false, serverAvailable: true }
+	return { ...state, savingEffort: false, runEffort: effort, runLogLevel: isLogLevel(logLevel) ? logLevel : state.runLogLevel, serverAvailable: true }
 }
 
-function EffortSaveFailed(state) {
+function EffortSaveFailed(state: ApplicationState): ApplicationState {
 	return { ...state, savingEffort: false, serverAvailable: false }
 }
 
 // The logging-level picker follows the effort picker exactly: one change both updates state and persists the choice as the project default for the next run.
-function SaveRunLogLevel(state, event) {
-	const value = event.target.value
+function SaveRunLogLevel(state: ApplicationState, event: Event): ActionReturn {
+	const target = event.target
+	if (!(target instanceof HTMLInputElement)) return state
+	const value = target.value
 	if (!isLogLevel(value)) return state
 	const body = buildSettingsBody(state.runEffort, value)
 	if (body === null) return { ...state, runLogLevel: value }
@@ -688,22 +1031,23 @@ function SaveRunLogLevel(state, event) {
 	]
 }
 
-function LogLevelSaved(state, payload) {
+function LogLevelSaved(state: ApplicationState, payload: FetchResultPayload): ApplicationState {
 	const ok = payload.ok
 	const body = payload.body
-	if (!ok || body === null || typeof body !== 'object' || !isLogLevel(body.logLevel)) {
-		return { ...state, savingLogLevel: false, serverAvailable: true }
-	}
-	return { ...state, savingLogLevel: false, runLogLevel: body.logLevel, runEffort: isEffort(body.effort) ? body.effort : state.runEffort, serverAvailable: true }
+	if (!ok || !isObject(body)) return { ...state, savingLogLevel: false, serverAvailable: true }
+	const effort = body['effort']
+	const logLevel = body['logLevel']
+	if (!isLogLevel(logLevel)) return { ...state, savingLogLevel: false, serverAvailable: true }
+	return { ...state, savingLogLevel: false, runLogLevel: logLevel, runEffort: isEffort(effort) ? effort : state.runEffort, serverAvailable: true }
 }
 
-function LogLevelSaveFailed(state) {
+function LogLevelSaveFailed(state: ApplicationState): ApplicationState {
 	return { ...state, savingLogLevel: false, serverAvailable: false }
 }
 
-function SelectRun(state, runId) {
+function SelectRun(state: ApplicationState, runId: string): ActionReturn {
 	if (runId === state.selectedRunId) return [{ ...state, screen: 'watch' }, SyncSequenceFollower(), SyncInspectorFollower()]
-	// The flow model, its previous-frame diff, and the per-run modal state belong to the previously-selected run; a switch clears them so the centerpiece shows the new run's first frame without a stale lifecycle diff or a leftover modal. Selecting a run always lands on the watch screen (history rows and the in-progress pill both go through here). Clearing the model unmounts the sequence container, so the switch syncs its scroll follower (the new run's first frame re-attaches it, pinned to the bottom), and the cleared inspector unmounts the modal body (its follower detaches the same way). The live partial belongs to the previous run too and clears with the rest (the stream subscription restarts onto the new run).
+	// The flow model, its previous-frame diff, and the per-run modal state belong to the previously-selected run; a switch clears them so the centerpiece shows the new run's first frame without a stale lifecycle diff or a leftover modal. Selecting a run always lands on the watch screen (history rows and the in-progress pill both go through here). Clearing the model unmounts the sequence container, so the switch syncs its scroll follower (the new run's first frame re-attaches it, pinned to the bottom), and the cleared inspector unmounts the modal body (its follower detaches the same way). The live partial belongs to the previous run too and clears with the rest (the stream subscription restarts onto the new selection).
 	return [
 		{
 			...state,
@@ -730,36 +1074,44 @@ function SelectRun(state, runId) {
 	]
 }
 
-function ToggleMute(state, event) {
-	return { ...state, muted: event.target.checked }
+function ToggleMute(state: ApplicationState, event: Event): ApplicationState {
+	const target = event.target
+	if (!(target instanceof HTMLInputElement)) return state
+	return { ...state, muted: target.checked }
 }
 
 // The task editor is a multiline textarea, not a single-line input: a task is free-form Markdown a user may draft at length. Enter inserts a newline (the browser default for a textarea) and Tab inserts a real tab character at the caret (handled below), so neither key submits; submission is the submit button, with Ctrl/Cmd+Enter as a keyboard shortcut that re-enters the form's submit path.
-function TaskTextareaKeydown(state, event) {
+function TaskTextareaKeydown(state: ApplicationState, event: KeyboardEvent): ApplicationState {
 	if (event.key === 'Tab') {
 		event.preventDefault()
-		const textarea = event.target
-		const start = textarea.selectionStart
-		const end = textarea.selectionEnd
-		textarea.value = textarea.value.slice(0, start) + '\t' + textarea.value.slice(end)
-		textarea.selectionStart = textarea.selectionEnd = start + 1
+		const target = event.target
+		if (!(target instanceof HTMLTextAreaElement)) return state
+		const start = target.selectionStart
+		const end = target.selectionEnd
+		if (start === null || end === null) return state
+		target.value = target.value.slice(0, start) + '\t' + target.value.slice(end)
+		target.selectionStart = start + 1
+		target.selectionEnd = start + 1
 		return state
 	}
 	if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) {
 		event.preventDefault()
-		const form = event.target.form
+		const target = event.target
+		if (!(target instanceof HTMLTextAreaElement)) return state
+		const form = target.form
 		if (form !== null && typeof form.requestSubmit === 'function') form.requestSubmit()
 		return state
 	}
 	return state
 }
 
-function SubmitRun(state, event) {
+function SubmitRun(state: ApplicationState, event: Event): ActionReturn {
 	event.preventDefault()
 	if (state.justSubmittedItemId !== null || state.justSubmittedRunId !== null) return state
-	const form = event.target
-	const textarea = form.querySelector('textarea')
-	if (textarea === null) return state
+	const target = event.target
+	if (!(target instanceof HTMLFormElement)) return state
+	const textarea = target.querySelector('textarea')
+	if (!(textarea instanceof HTMLTextAreaElement)) return state
 	const task = textarea.value.trim()
 	if (task === '') return state
 	textarea.value = ''
@@ -787,13 +1139,13 @@ function SubmitRun(state, event) {
 }
 
 // The queue task body carries the effort pick; logLevel is deliberately absent — a queue-native item resolves the level through the standard chain at dispatch (docs/queueing.md "The queue: storage, item model, state machine").
-function buildQueueTaskBody(task, runEffort) {
+function buildQueueTaskBody(task: string, runEffort: EffortLevel | null): { task: string; effort?: EffortLevel } {
 	return isEffort(runEffort) ? { task, effort: runEffort } : { task }
 }
 
 // effort and logLevel are omitted when their selectors have not yet initialized (settings still loading), so the server applies its resolution chain rather than receiving a null. continuesFrom rides only when the compose screen is in continuation mode; a re-run passes null and submits a plain task.
-function buildRunBody(task, runEffort, runLogLevel, continuation) {
-	const body = isEffort(runEffort) ? { task, effort: runEffort } : { task }
+function buildRunBody(task: string, runEffort: EffortLevel | null, runLogLevel: LogLevel | null, continuation: Continuation | null): { task: string; effort?: EffortLevel; logLevel?: LogLevel; continuesFrom?: string } {
+	const body: { task: string; effort?: EffortLevel; logLevel?: LogLevel; continuesFrom?: string } = isEffort(runEffort) ? { task, effort: runEffort } : { task }
 	if (isLogLevel(runLogLevel)) body.logLevel = runLogLevel
 	if (continuation !== null && typeof continuation.runId === 'string' && continuation.runId !== '') body.continuesFrom = continuation.runId
 	return body
@@ -801,10 +1153,12 @@ function buildRunBody(task, runEffort, runLogLevel, continuation) {
 
 // A re-run is a one-click resubmit of a past run's task; it reuses the create path (POST /api/runs → GotCreatedRun) so the new run is selected and the active-run guard applies identically.
 // stopPropagation keeps the click from also triggering the enclosing list entry's select handler; the task is read from the button's data-task attribute so the action stays a stable top-level function (hyperapp passes the DOM event as the payload to a bare-function handler).
-function RerunTask(state, event) {
+function RerunTask(state: ApplicationState, event: MouseEvent): ActionReturn {
 	event.stopPropagation()
 	if (state.justSubmittedRunId !== null || deriveActiveRunId(state.summaries) !== null) return state
-	const task = event.currentTarget.getAttribute('data-task')
+	const target = event.currentTarget
+	if (!(target instanceof Element)) return state
+	const task = target.getAttribute('data-task')
 	if (typeof task !== 'string' || task === '') return state
 	return [
 		state,
@@ -818,17 +1172,20 @@ function RerunTask(state, event) {
 }
 
 // The prior run's outcome summary for the continuation chip, or null when the prior run has no result card to quote — the chip then omits the outcome line entirely (the server-side briefing handles the empty case on its own).
-function priorOutcomeOf(summary) {
-	if (summary.result === null || summary.result === undefined) return null
-	if (typeof summary.result.summary !== 'string' || summary.result.summary === '') return null
-	return summary.result.summary
+function priorOutcomeOf(summary: RunSummary): string | null {
+	const result = summary.result
+	if (result === null || result === undefined) return null
+	if (typeof result.summary !== 'string' || result.summary === '') return null
+	return result.summary
 }
 
 // Continue switches the compose screen into continuation mode: a new run will anchor to the finished run's outcome via continuesFrom. Like RerunTask it reads the run id off the button (stopPropagation keeps the row's select handler out of the way), and it shares the re-run button's disabled condition so the one-task-at-a-time contract holds for continuations too. The prior task and outcome for the chip are read from the already-polled run list rather than data attributes, so nothing large rides the DOM.
-function ContinueRun(state, event) {
+function ContinueRun(state: ApplicationState, event: MouseEvent): ApplicationState {
 	event.stopPropagation()
 	if (state.justSubmittedRunId !== null || deriveActiveRunId(state.summaries) !== null) return state
-	const runId = event.currentTarget.getAttribute('data-run-id')
+	const target = event.currentTarget
+	if (!(target instanceof Element)) return state
+	const runId = target.getAttribute('data-run-id')
 	if (typeof runId !== 'string' || runId === '') return state
 	const summary = state.summaries.find((entry) => entry.runId === runId)
 	if (summary === undefined) return state
@@ -839,15 +1196,15 @@ function ContinueRun(state, event) {
 	}
 }
 
-function CancelContinuation(state) {
+function CancelContinuation(state: ApplicationState): ApplicationState {
 	return { ...state, continuation: null }
 }
 
-function GotCreatedRun(state, payload) {
+function GotCreatedRun(state: ApplicationState, payload: FetchResultPayload): ActionReturn {
 	const ok = payload.ok
 	const body = payload.body
-	if (!ok || body === null || typeof body !== 'object' || !('runId' in body)) return state
-	const createdRunId = body.runId
+	if (!ok || !isObject(body) || typeof body['runId'] !== 'string') return state
+	const createdRunId = body['runId']
 	// Selecting the new run activates its per-run subscription; an immediate run-list fetch clears justSubmittedRunId as soon as the run appears. The continuation and the per-run modal/flow state are reset for the same reason SelectRun resets it — the composed run is on the server now, and a leftover chip would brief a stale lineage into the next task. The live partial clears with the rest (the stream subscription follows the new selection).
 	return [
 		{ ...state, screen: 'watch', continuation: null, justSubmittedRunId: createdRunId, selectedRunId: createdRunId, selectedRunView: null, selectedRunStatus: null, flowModel: null, previousFlowModel: null, questionModalOpen: false, resultModalOpen: false, resultShownForRun: null, tooltip: null, planExpanded: false, inspectorModalOpen: false, inspector: initialInspectorState(), livePartial: null, serverAvailable: true },
@@ -855,11 +1212,13 @@ function GotCreatedRun(state, payload) {
 	]
 }
 
-function SubmitAnswer(questionId) {
-	return function SubmitAnswerForQuestion(state, event) {
+function SubmitAnswer(questionId: string) {
+	return function SubmitAnswerForQuestion(state: ApplicationState, event: Event): ActionReturn {
 		event.preventDefault()
-		const input = event.target.querySelector('input')
-		if (input === null) return state
+		const target = event.target
+		if (!(target instanceof HTMLFormElement)) return state
+		const input = target.querySelector('input')
+		if (!(input instanceof HTMLInputElement)) return state
 		const answer = input.value
 		if (answer === '') return state
 		return [
@@ -874,30 +1233,32 @@ function SubmitAnswer(questionId) {
 	}
 }
 
-function AnswerSent(state) {
+function AnswerSent(state: ApplicationState): ActionReturn {
 	// Refresh the pending list immediately so the answered question disappears without waiting for the next tick. An answered question ends a `needs_clarification` wait, which is a terminal status that deactivated the per-run poll; resetting the status to the non-terminal 'unknown' reactivates that poll so the run view and flow model resume as the run continues, and completion can later fire the result modal. The next poll repopulates the real status from the run's meta.
-	const reactivated = { ...state, pendingAnswerId: null, selectedRunStatus: 'unknown', serverAvailable: true }
+	const reactivated: ApplicationState = { ...state, pendingAnswerId: null, selectedRunStatus: 'unknown', serverAvailable: true }
 	return [reactivated, Fetch({ url: 'api/questions', ok: GotQuestions, fail: FetchFailed })]
 }
 
-function AnswerFailed(state) {
+function AnswerFailed(state: ApplicationState): ApplicationState {
 	return { ...state, pendingAnswerId: null, serverAvailable: false }
 }
 
 // --- Interrupt form ----------------------------------------------------------
 // The operator can speak into the active run at its next safe point: an inquiry asks the run a direct question; a plan modification aborts the active sub-work and re-plans from the top-level planner. The form targets the selected run only while it is the active one, mirroring the server-side 409 contract.
 
-function SetInterruptMode(state, mode) {
+function SetInterruptMode(state: ApplicationState, mode: unknown): ApplicationState {
 	if (mode !== 'inquiry' && mode !== 'plan_modification') return state
 	return { ...state, interruptMode: mode }
 }
 
-function SubmitInterrupt(state, event) {
+function SubmitInterrupt(state: ApplicationState, event: Event): ActionReturn {
 	event.preventDefault()
 	const runId = state.selectedRunId
 	if (typeof runId !== 'string' || runId === '') return state
-	const textarea = event.target.querySelector('textarea')
-	if (textarea === null) return state
+	const target = event.target
+	if (!(target instanceof HTMLFormElement)) return state
+	const textarea = target.querySelector('textarea')
+	if (!(textarea instanceof HTMLTextAreaElement)) return state
 	const message = textarea.value.trim()
 	if (message === '') return state
 	textarea.value = ''
@@ -912,7 +1273,7 @@ function SubmitInterrupt(state, event) {
 	]
 }
 
-function InterruptResponded(state, payload) {
+function InterruptResponded(state: ApplicationState, payload: FetchResultPayload): ApplicationState {
 	if (payload.status === 202) {
 		return { ...state, interruptSending: false, interruptNotice: 'Interrupt sent — it lands at the run\u2019s next safe point; the response appears in the Interrupts list.' }
 	}
@@ -922,164 +1283,145 @@ function InterruptResponded(state, payload) {
 	return { ...state, interruptSending: false, interruptNotice: 'The interrupt was rejected.' }
 }
 
-function InterruptFailed(state) {
+function InterruptFailed(state: ApplicationState): ApplicationState {
 	return { ...state, interruptSending: false, interruptNotice: 'The server could not be reached.', serverAvailable: false }
 }
 
-function PrimeAudio(state) {
+function PrimeAudio(state: ApplicationState): ActionReturn {
 	return [state, PrimeAudioFx()]
 }
 
 // --- Flow / Sequence view controls ----------------------------------------
 // The centerpiece's view-mode (Flow vs Sequence) and label tier are pure view state; a swap re-renders the views through the same resolver and model without fetching. The modals are view-side state layered on the live model: the result modal opens on completion (GotSelectedRun) or the flow view's CTA, the question modal opens on a new pending question (GotQuestions) or the flow view's Question affordance.
 
-function SetFlowViewMode(state, mode) {
+function SetFlowViewMode(state: ApplicationState, mode: unknown): ActionReturn {
 	if (mode !== 'flow' && mode !== 'sequence') return state
 	// Switching modes mounts or unmounts the sequence container, so the swap also syncs its scroll follower (attaching fresh, pinned to the bottom).
 	return [{ ...state, flowViewMode: mode }, SyncSequenceFollower()]
 }
 
-function ChangeFlowTier(state, event) {
-	const value = event.target.value
+function ChangeFlowTier(state: ApplicationState, event: Event): ApplicationState {
+	const target = event.target
+	if (!(target instanceof HTMLSelectElement) && !(target instanceof HTMLInputElement)) return state
+	const value = target.value
 	if (!isLabelTier(value)) return state
 	return { ...state, flowTier: value }
 }
 
 // The sequence view's roles-only lens (see interaction-model.js rolesOnlyModel): a checkbox next to the flow/sequence controls that filters the sequence render down to the agent roles plus the human. Pure view state — the full model stays the single source the other surfaces (now caption, cost strip, flow view) read, so toggling only re-renders the sequence view.
-function SetSequenceRolesOnly(state, event) {
-	return { ...state, sequenceRolesOnly: event.target.checked }
+function SetSequenceRolesOnly(state: ApplicationState, event: Event): ApplicationState {
+	const target = event.target
+	if (!(target instanceof HTMLInputElement)) return state
+	return { ...state, sequenceRolesOnly: target.checked }
 }
 
 // --- Screen navigation ------------------------------------------------------
 // The page is a single-screen console: one of four screens (watch / history / compose / queue) fills the viewport below the top bar. The screen is stored view state; nothing here fetches.
 
-function SetScreen(state, screen) {
+function SetScreen(state: ApplicationState, screen: unknown): ActionReturn {
 	if (screen !== 'watch' && screen !== 'history' && screen !== 'compose' && screen !== 'queue') return state
 	// Leaving the watch screen unmounts the sequence container (the follower must detach) and returning to it remounts a fresh one; the swap syncs the follower either way.
 	// Modal state is deliberately kept alive across the swap: returning to watch restores the session's modal state (an open inspector, its loaded window and scope) instead of a fresh view. The unmounted inspector body detaches its follower the same way, and returning to watch re-attaches it pinned.
 	return [{ ...state, screen }, SyncSequenceFollower(), SyncInspectorFollower()]
 }
 
-function ToggleHistoryExpanded(state, runId) {
+function ToggleHistoryExpanded(state: ApplicationState, runId: unknown): ApplicationState {
 	if (typeof runId !== 'string' || runId === '') return state
 	return { ...state, historyExpanded: { ...state.historyExpanded, [runId]: state.historyExpanded[runId] !== true } }
 }
 
 // The plan disclosure is per-view state (only the selected run's plan is rendered), so a single boolean reset on run switch is enough; the poll replacing the run view must not collapse it.
-function TogglePlanExpanded(state) {
+function TogglePlanExpanded(state: ApplicationState): ApplicationState {
 	return { ...state, planExpanded: state.planExpanded !== true }
 }
 
-function OpenInterruptModal(state) {
+function OpenInterruptModal(state: ApplicationState): ActionReturn {
 	return [{ ...state, interruptModalOpen: true, tooltip: null }, CancelTooltipDismiss()]
 }
 
-function CloseInterruptModal(state) {
+function CloseInterruptModal(state: ApplicationState): ApplicationState {
 	return { ...state, interruptModalOpen: false }
 }
 
-function DismissInterruptAnswer(state) {
+function DismissInterruptAnswer(state: ApplicationState): ApplicationState {
 	return { ...state, interruptAnswerCard: null }
 }
 
-function OpenResultModal(state) {
+function OpenResultModal(state: ApplicationState): ActionReturn {
 	// A modal opening covers the run view; clear the inspector so the card does not linger beneath it.
 	return [{ ...state, resultModalOpen: true, tooltip: null }, CancelTooltipDismiss()]
 }
 
-function CloseResultModal(state) {
+function CloseResultModal(state: ApplicationState): ApplicationState {
 	return { ...state, resultModalOpen: false }
 }
 
-function OpenQuestionModal(state) {
+function OpenQuestionModal(state: ApplicationState): ActionReturn {
 	return [{ ...state, questionModalOpen: true, tooltip: null }, CancelTooltipDismiss()]
 }
 
-function CloseQuestionModal(state) {
+function CloseQuestionModal(state: ApplicationState): ApplicationState {
 	return { ...state, questionModalOpen: false }
 }
 
 // --- Run-view inspector (hover) --------------------------------------------
-// The inspector card over the flow and sequence SVGs is a hyperapp-managed overlay (the same pattern
-// the question/result modals follow), not an imperative DOM append: hovering a node or edge stores a
-// tooltip descriptor in state (the target kind+id plus a snapshot of the node's viewport rect), the
-// watch stage renders the `Tooltip` card vnode anchored to that rect by `tooltipStyle`, and dismissal
-// runs on a short grace timer so the operator can move the pointer from the node into the card to
-// select or copy its contents (the card is `pointer-events: auto`, `user-select: text`). The card
-// stays open while the pointer is over the node or the card; it dismisses once the pointer is over
-// neither. The handlers read the hovered element's `data-operation` / `data-participant` /
-// `data-role` off the live `state.flowModel` and `state.labelResolver` (resolved at render time), so
-// the inspector never re-fetches and never invents content the model does not carry.
+// The inspector card over the flow and sequence SVGs is a hyperapp-managed overlay (the same pattern the question/result modals follow), not an imperative DOM append: hovering a node or edge stores a tooltip descriptor in state (the target kind+id plus a snapshot of the node's viewport rect), the watch stage renders the `Tooltip` card vnode anchored to that rect by `tooltipStyle`, and dismissal runs on a short grace timer so the operator can move the pointer from the node into the card to select or copy its contents (the card is `pointer-events: auto`, `user-select: text`). The card stays open while the pointer is over the node or the card; it dismisses once the pointer is over neither. The handlers read the hovered element's `data-operation` / `data-participant` / `data-role` off the live `state.flowModel` and `state.labelResolver` (resolved at render time), so the inspector never re-fetches and never invents content the model does not carry.
 
 // The grace-period dismiss timer, shared with the dev harness via inspector.js. Expiry dispatches the ClearTooltip action; the factory closes over the raw timer, which is an opaque resource with no place in the view state.
 const tooltipDismiss = createTooltipDismiss()
 
-function runScheduleTooltipDismiss(dispatch) {
+function runScheduleTooltipDismiss(dispatch: Dispatch): void {
 	tooltipDismiss.schedule(() => dispatch(ClearTooltip))
 }
 
-function ScheduleTooltipDismiss() {
+function ScheduleTooltipDismiss(): NullPayloadEffect {
 	return [runScheduleTooltipDismiss, null]
 }
 
-function runCancelTooltipDismiss() {
+function runCancelTooltipDismiss(): void {
 	tooltipDismiss.cancel()
 }
 
-function CancelTooltipDismiss() {
+function CancelTooltipDismiss(): NullPayloadEffect {
 	return [runCancelTooltipDismiss, null]
 }
 
-// Dispatched by the grace timer. A no-op when the tooltip is already cleared (e.g. the pointer moved
-// to another node and switched, or a modal open cleared it) so a stale timer firing causes no harm.
-function ClearTooltip(state) {
+// Dispatched by the grace timer. A no-op when the tooltip is already cleared (e.g. the pointer moved to another node and switched, or a modal open cleared it) so a stale timer firing causes no harm.
+function ClearTooltip(state: ApplicationState): ApplicationState {
 	return state.tooltip === null ? state : { ...state, tooltip: null }
 }
 
-// The details fetches a hovered target's card may show: the controller marks each uncached id
-// 'loading' synchronously so the first render reads a defined state, and each id it began becomes
-// one fetch effect (empty when every id is already cached or there is no selected run to fetch
-// against).
-function fetchOperationDetails(state, target) {
+// The details fetches a hovered target's card may show: the controller marks each uncached id 'loading' synchronously so the first render reads a defined state, and each id it began becomes one fetch effect (empty when every id is already cached or there is no selected run to fetch against).
+function fetchOperationDetails(state: ApplicationState, target: TooltipTarget): FetchEffect[] {
 	const runId = state.selectedRunId
 	if (typeof runId !== 'string' || runId === '' || state.flowModel === null) return []
-	const effects = []
+	const effects: FetchEffect[] = []
 	for (const operationId of operationDetails.begin(runId, operationIdsForTooltipDetails(state.flowModel, target))) {
 		effects.push(Fetch({ url: `api/runs/${encodeURIComponent(runId)}/flow?operation=${encodeURIComponent(operationId)}`, ok: GotOperationDetails(runId, operationId), fail: OperationDetailsFailed(runId, operationId) }))
 	}
 	return effects
 }
 
-// The details fetch for one operation resolved: the controller records the server's answer and the
-// fresh state is returned so an open card fills in. A ready body caches the details string (or null
-// when the operation carries none); anything else — a 404 for an id the model no longer resolves, a
-// malformed body, a network failure — caches 'failed', which renders the card section-less.
-function GotOperationDetails(runId, operationId) {
-	return function GotOperationDetailsForOperation(state, payload) {
+// The details fetch for one operation resolved: the controller records the server's answer and the fresh state is returned so an open card fills in. A ready body caches the details string (or null when the operation carries none); anything else — a 404 for an id the model no longer resolves, a malformed body, a network failure — caches 'failed', which renders the card section-less.
+function GotOperationDetails(runId: string, operationId: string) {
+	return function GotOperationDetailsForOperation(state: ApplicationState, payload: FetchResultPayload): ApplicationState {
 		operationDetails.recordResponse(runId, operationId, payload.ok, payload.body)
 		return { ...state }
 	}
 }
 
-function OperationDetailsFailed(runId, operationId) {
-	return function OperationDetailsFailedForRun(state) {
+function OperationDetailsFailed(runId: string, operationId: string) {
+	return function OperationDetailsFailedForRun(state: ApplicationState): ApplicationState {
 		operationDetails.recordFailure(runId, operationId)
 		return { ...state }
 	}
 }
 
-// `mouseover` bubbles from every SVG child the pointer enters, so this fires on each element
-// crossing. Three cases:
-//  - over the card itself: keep it open and cancel any pending dismiss (the pointer entered the card
-//    to select/copy).
-//  - over a node/edge target: switch the card to it (canceling any pending dismiss), snapshotting its
-//    rect so the card anchors to the node. Returning the same state when the target is unchanged lets
-//    hyperapp bail without a re-render. The target's details are fetched here if not cached (the
-//    derivation reads them through the session cache once they land).
-//  - over empty run-view area: schedule a grace-period dismiss — if the pointer reaches the card (or a
-//    new node) before it fires, the dismiss is canceled; otherwise the card dismisses once the pointer
-//    is over neither.
-function HoverRunView(state, event) {
+// `mouseover` bubbles from every SVG child the pointer enters, so this fires on each element crossing. Three cases:
+//  - over the card itself: keep it open and cancel any pending dismiss (the pointer entered the card to select/copy).
+//  - over a node/edge target: switch the card to it (canceling any pending dismiss), snapshotting its rect so the card anchors to the node. Returning the same state when the target is unchanged lets hyperapp bail without a re-render. The target's details are fetched here if not cached (the derivation reads them through the session cache once they land).
+//  - over empty run-view area: schedule a grace-period dismiss — if the pointer reaches the card (or a new node) before it fires, the dismiss is canceled; otherwise the card dismisses once the pointer is over neither.
+function HoverRunView(state: ApplicationState, event: MouseEvent): ActionReturn {
 	if (event.target instanceof Element && event.target.closest('.tooltip-card') !== null) {
 		return [state, CancelTooltipDismiss()]
 	}
@@ -1095,20 +1437,16 @@ function HoverRunView(state, event) {
 	return [{ ...state, tooltip: { kind: target.kind, id: target.id, rect: target.rect } }, CancelTooltipDismiss(), ...fetchOperationDetails(state, target)]
 }
 
-// `mouseleave` on the run-view stage fires when the pointer leaves the stage entirely (the SVG and
-// the card are both descendants of the stage, so moving between them does not fire it). A grace period
-// lets the pointer re-enter quickly without a dismiss+reopen flicker; otherwise it clears the card.
-function LeaveRunView(state) {
+// `mouseleave` on the run-view stage fires when the pointer leaves the stage entirely (the SVG and the card are both descendants of the stage, so moving between them does not fire it). A grace period lets the pointer re-enter quickly without a dismiss+reopen flicker; otherwise it clears the card.
+function LeaveRunView(state: ApplicationState): ActionReturn {
 	if (state.tooltip === null) return [state, CancelTooltipDismiss()]
 	return [state, ScheduleTooltipDismiss()]
 }
 
-// Clicking an in-flight `ask_human` row re-opens the question modal: the sequence view has no
-// Question-button overlay like the flow view, so the message row itself is the re-entry affordance
-// after a dismiss. A click on an agent's node/slot/message is the drill-in: it opens the inspector modal pre-scoped to that instance (resolveInspectorScope maps the clicked target to the instance id the modal scopes to), and the modal open clears the tooltip so the card does not linger over it.
+// Clicking an in-flight `ask_human` row re-opens the question modal: the sequence view has no Question-button overlay like the flow view, so the message row itself is the re-entry affordance after a dismiss. A click on an agent's node/slot/message is the drill-in: it opens the inspector modal pre-scoped to that instance (resolveInspectorScope maps the clicked target to the instance id the modal scopes to), and the modal open clears the tooltip so the card does not linger over it.
 // Every other click — human/tool/interrupt targets, unknown ids — falls through to the hover path so the click still opens the inspector card at the clicked node, mirroring the dev harness. Hover keeps showing the card exactly as before; the drill-in is the click's job.
 // Clicking inside the card (to select text or press a copy affordance) falls through to the hover path's "over the card" branch, which keeps the card open.
-function ClickRunView(state, event) {
+function ClickRunView(state: ApplicationState, event: MouseEvent): ActionReturn {
 	if (event.target instanceof Element && event.target.closest('.tooltip-card') !== null) {
 		return HoverRunView(state, event)
 	}
@@ -1127,53 +1465,73 @@ function ClickRunView(state, event) {
 // --- LLM turn inspector (modal) ---------------------------------------------
 // The stage-controls "Inspect" button opens a modal over the run view that renders one agent instance's LLM turns as a continuous transcript (the per-instance-scoped transcript), derived straight from the windowed log endpoint's `llm_call` payloads — the story needs no per-turn detail fetches; each completed turn's collapsed "on the wire" expander separately fetches the turn's full folded request from the same endpoint's `?detail=` variant, once per session into the bounded wire-details cache. The modal is scoped to one instance: the modal state carries the explicitly scoped instance id (null = auto — the most recently active instance in the loaded window), and the breadcrumb, instance dropdown, and each `agent` call's View affordance re-scope. The data flow is plain effects and state: the log loads with a single cheap probe (`?limit=1`) that learns the log's `total`, then fetches the most recent window; "older turns" pages back; while the modal is open on an active run the 1s poll appends the log's tail so in-flight turns appear when they complete and the live partial swaps for the completed turn. A scope change fetches that instance's server-filtered window (`?instance=<roleId>`) into a per-scope window keyed by the scoped role id — the server sees the whole log, so the scope's own turns and its complete ancestor chain (the breadcrumb) load without paging back through the unscoped tail — while the unscoped tail window stays for the instance dropdown's wayfinding and the default scope.
 
-function initialInspectorState() {
+function initialInspectorState(): InspectorState {
 	// `events`/`total`/`tailOffset`/`entries` are the unscoped tail window (the default scope's data, the instance dropdown's wayfinding, and the default-scope derivation), and its `olderLoading` is that window's own older-page-in-flight flag; `scopes` holds one per-scope window (the same fields, each with its own flag) per explicitly scoped instance id — the flag being per-window is what keeps a re-scope mid-fetch from showing the previous scope's loading state.
 	return { loadState: 'loading', events: [], total: null, tailOffset: null, entries: [], scopedRoleId: null, olderLoading: false, scopes: {} }
 }
 
 // The inspector's effective scope: the explicitly scoped instance id, or — while unset — the most recently active instance in the loaded window (the newest turn still in flight, else the newest turn), so the modal opens on whatever the run is doing now. A stale explicit scope (its turns paged out of the loaded range) is kept as-is: the transcript reads empty and the dropdown re-scopes.
-function effectiveInspectorScope(state) {
+function effectiveInspectorScope(state: ApplicationState): string | null {
 	return state.inspector.scopedRoleId ?? deriveDefaultScopeRoleId(state.inspector.entries)
 }
 
 // Validates a windowed-log response's shape (what `runLogPage` produces). Run identity is a separate concern: each action compares the body's `runId` against the currently selected run and ignores a mismatch, so a stale response crossing a run switch (which resets the inspector state for the new run) leaves that fresh state alone instead of marking it failed.
-function readableInspectorLogBody(payload) {
-	if (!payload.ok || payload.body === null || typeof payload.body !== 'object') return null
+function readableInspectorLogBody(payload: FetchResultPayload): InspectorLogBody | null {
+	if (!payload.ok || !isObject(payload.body)) return null
 	const body = payload.body
-	if (typeof body.runId !== 'string') return null
-	if (typeof body.total !== 'number' || !Number.isInteger(body.total) || body.total < 0) return null
-	if (typeof body.offset !== 'number' || !Number.isInteger(body.offset) || body.offset < 0) return null
-	if (!Array.isArray(body.events)) return null
-	return body
+	if (typeof body['runId'] !== 'string') return null
+	if (typeof body['total'] !== 'number' || !Number.isInteger(body['total']) || body['total'] < 0) return null
+	if (typeof body['offset'] !== 'number' || !Number.isInteger(body['offset']) || body['offset'] < 0) return null
+	if (!Array.isArray(body['events'])) return null
+	return { runId: body['runId'], total: body['total'], offset: body['offset'], events: body['events'] }
+}
+
+// One loaded inspector window's fields, unified across the unscoped tail and the per-scope records so the landing actions read and write both windows through one shape.
+interface InspectorWindowRecord {
+	loadState: InspectorLoadState
+	events: LogWindowEvent[]
+	total: number | null
+	tailOffset: number | null
+	entries: TurnEntry[]
+	olderLoading: boolean
 }
 
 // Reads one loaded inspector window: the unscoped tail's fields when scopeKey is null, else the scope's own per-scope window (null when the scope has none yet — its probe has not landed). Either shape carries the window's own `olderLoading`, so the landing actions treat both windows uniformly.
-function inspectorWindowOf(inspector, scopeKey) {
+function inspectorWindowOf(inspector: InspectorState, scopeKey: string | null): InspectorWindowRecord | null {
 	if (scopeKey === null) return { loadState: inspector.loadState, events: inspector.events, total: inspector.total, tailOffset: inspector.tailOffset, entries: inspector.entries, olderLoading: inspector.olderLoading }
 	return inspector.scopes[scopeKey] ?? null
 }
 
 // Writes one loaded inspector window's fields: the unscoped tail's when scopeKey is null, else the scope's own record (created when absent). Scoped writes replace the scope's own record wholesale and leave the top-level fields (the explicit scope id and the unscoped window's own fields) untouched, and unscoped writes leave the per-scope windows untouched.
-function inspectorWindowWritten(state, scopeKey, window) {
+// A partial window write: absent fields keep the window's current values.
+interface InspectorWindowPatch {
+	loadState?: InspectorLoadState
+	events?: LogWindowEvent[]
+	total?: number | null
+	tailOffset?: number | null
+	entries?: TurnEntry[]
+	olderLoading?: boolean
+}
+
+function inspectorWindowWritten(state: ApplicationState, scopeKey: string | null, window: InspectorWindowPatch): ApplicationState {
 	if (scopeKey === null) return { ...state, inspector: { ...state.inspector, ...window } }
 	return { ...state, inspector: { ...state.inspector, scopes: { ...state.inspector.scopes, [scopeKey]: { ...initialScopeWindow(), ...window } } } }
 }
 
 // Marks one loaded window failed: the whole inspector for the unscoped window (it is the modal's only data then), the scope's own record for a scoped window (the dropdown's unscoped window stands).
-function inspectorLoadFailed(state, scopeKey, ok) {
+function inspectorLoadFailed(state: ApplicationState, scopeKey: string | null, ok: boolean): [ApplicationState] {
 	if (scopeKey === null) return [{ ...state, inspector: { ...initialInspectorState(), loadState: 'failed' }, serverAvailable: ok }]
 	return [{ ...inspectorWindowWritten(state, scopeKey, { loadState: 'failed', events: [], total: null, tailOffset: null, entries: [] }), serverAvailable: ok }]
 }
 
-function InspectorLogLoadFailed(scopeKey) {
-	return function InspectorLogLoadFailedForScope(state) {
+function InspectorLogLoadFailed(scopeKey: string | null) {
+	return function InspectorLogLoadFailedForScope(state: ApplicationState): [ApplicationState] {
 		return inspectorLoadFailed(state, scopeKey, false)
 	}
 }
 
 // Opens the inspector modal over the run view. `payload` pre-scopes the transcript to an instance id (the view click-through's drill-in; a plain string) or is absent/event-shaped (the stage-controls button), which leaves the scope unset so the modal opens on the most recently active instance. A pre-scoped open loads both windows in parallel: the scoped instance's server-filtered window (the probe learns the FILTERED total so the transcript opens on the most recent window of the instance's own sequence — an old agent's turns load without paging back through the whole log) and the unscoped tail (the instance dropdown's wayfinding). Opening mounts the modal's transcript body, so the open also syncs its scroll follower (attaching fresh, pinned to the bottom).
-function OpenInspectorModal(state, payload) {
+function OpenInspectorModal(state: ApplicationState, payload: unknown): ActionReturn {
 	if (typeof state.selectedRunId !== 'string' || state.selectedRunId === '') return state
 	const scopedRoleId = typeof payload === 'string' && payload !== '' ? payload : null
 	if (scopedRoleId === null) {
@@ -1193,14 +1551,14 @@ function OpenInspectorModal(state, payload) {
 	]
 }
 
-function CloseInspectorModal(state) {
+function CloseInspectorModal(state: ApplicationState): ActionReturn {
 	// Closing ends the inspection session (scope, per-scope windows, selection, and loaded windows with it): reopening refetches from scratch, so no stale scope survives the close. The sync detaches the transcript follower the unmounted body leaves behind.
 	return [{ ...state, inspectorModalOpen: false, inspector: initialInspectorState() }, SyncInspectorFollower()]
 }
 
 // The one-event probe's response: it learned the log's total — the FILTERED sequence's total for a scoped probe — so the window fetch can start at the most recent `INSPECTOR_WINDOW_SIZE` rows of that sequence.
-function InspectorTotalLoaded(scopeKey) {
-	return function InspectorTotalLoadedForScope(state, payload) {
+function InspectorTotalLoaded(scopeKey: string | null) {
+	return function InspectorTotalLoadedForScope(state: ApplicationState, payload: FetchResultPayload): ActionReturn {
 		const body = readableInspectorLogBody(payload)
 		if (body === null) return inspectorLoadFailed(state, scopeKey, payload.ok)
 		if (body.runId !== state.selectedRunId) return state
@@ -1214,14 +1572,14 @@ function InspectorTotalLoaded(scopeKey) {
 }
 
 // The live partial as a window landing at `scopeKey` leaves it: the unscoped tail's pairing is authoritative across instances (an absent in-flight turn there means the poll recorded the completion), while a scoped window sees one instance's turns only, so it proves completion and never absence — a partial for another instance is merely invisible in it and survives (see "Live token stream").
-function windowLandingLivePartial(scopeKey, livePartial, entries) {
+function windowLandingLivePartial(scopeKey: string | null, livePartial: LivePartial | null, entries: TurnEntry[]): LivePartial | null {
 	if (scopeKey === null) return activeLivePartial(livePartial, entries)
 	return scopedActiveLivePartial(livePartial, entries)
 }
 
 // The window response replaces the loaded window wholesale (initial tail load and gap resync both land here), so the loaded range is always a contiguous slice — of the full log for the unscoped window, of the filtered sequence for a scoped window. The wholesale write also resets that window's own older-turns flag (a replaced window's in-flight page is moot; its landing re-validates against the new range). The turn pairing also decides the live partial's fate: when the unscoped window's pairing shows the accumulated role no longer holds an in-flight turn, the poll has just recorded its completion and the partial clears; a scoped window clears the partial only when its own entries show the matching turn completed, and leaves a partial belonging to a different instance untouched (see "Live token stream").
-function InspectorWindowLoaded(scopeKey) {
-	return function InspectorWindowLoadedForScope(state, payload) {
+function InspectorWindowLoaded(scopeKey: string | null) {
+	return function InspectorWindowLoadedForScope(state: ApplicationState, payload: FetchResultPayload): ActionReturn {
 		const body = readableInspectorLogBody(payload)
 		if (body === null) return inspectorLoadFailed(state, scopeKey, payload.ok)
 		if (body.runId !== state.selectedRunId) return state
@@ -1231,7 +1589,7 @@ function InspectorWindowLoaded(scopeKey) {
 	}
 }
 
-function LoadOlderTurns(state) {
+function LoadOlderTurns(state: ApplicationState): ActionReturn {
 	const plan = olderTurnsFetch(state.inspector, state.selectedRunId)
 	if (plan === null) return state
 	const record = inspectorWindowOf(state.inspector, plan.scopeRoleId)
@@ -1243,23 +1601,21 @@ function LoadOlderTurns(state) {
 }
 
 // The older page must slot exactly in front of the loaded window it was fetched for (contiguous range — the response lands in the scope's own window via the curried scope key, so a re-scope between click and response cannot splice it into the wrong window) — anything else is a stale or diverged response and leaves the list as it was, merely clearing that window's loading flag for a retry. The log is append-only, so the older page does not touch the totals.
-function OlderTurnsLoaded(scopeKey) {
-	return function OlderTurnsLoadedForScope(state, payload) {
+function OlderTurnsLoaded(scopeKey: string | null) {
+	return function OlderTurnsLoadedForScope(state: ApplicationState, payload: FetchResultPayload): ActionReturn {
 		const body = readableInspectorLogBody(payload)
 		const record = inspectorWindowOf(state.inspector, scopeKey)
-		const spliced = body !== null && record !== null && record.loadState === 'ready' ? olderPageSpliced(record.events, record.tailOffset, body) : null
-		if (body === null || spliced === null) {
-			if (record === null) return state
-			return inspectorWindowWritten(state, scopeKey, { ...record, olderLoading: false })
-		}
+		if (record === null) return state
+		const spliced = body !== null && record.loadState === 'ready' ? olderPageSpliced(record.events, record.tailOffset, body) : null
+		if (body === null || spliced === null) return inspectorWindowWritten(state, scopeKey, { ...record, olderLoading: false })
 		const entries = buildTurnIndex(spliced)
 		const written = inspectorWindowWritten(state, scopeKey, { ...record, events: spliced, tailOffset: body.offset, entries, olderLoading: false })
 		return [{ ...written, serverAvailable: true }, SyncInspectorFollower()]
 	}
 }
 
-function InspectorOlderLoadFailed(scopeKey) {
-	return function InspectorOlderLoadFailedForScope(state) {
+function InspectorOlderLoadFailed(scopeKey: string | null) {
+	return function InspectorOlderLoadFailedForScope(state: ApplicationState): ActionReturn {
 		const record = inspectorWindowOf(state.inspector, scopeKey)
 		if (record === null) return { ...state, serverAvailable: false }
 		return [{ ...inspectorWindowWritten(state, scopeKey, { ...record, olderLoading: false }), serverAvailable: false }]
@@ -1267,7 +1623,7 @@ function InspectorOlderLoadFailed(scopeKey) {
 }
 
 // The poll piggyback: one windowed fetch from the ACTIVE scope's loaded window's end (the scoped instance's filtered sequence when explicitly scoped, else the unscoped tail). A null effect while the modal is closed, the active window has not loaded, or no run is selected — hyperapp ignores falsy effects.
-function InspectorTailRefresh(state) {
+function InspectorTailRefresh(state: ApplicationState): OptionalEffect {
 	if (!state.inspectorModalOpen) return null
 	const plan = tailRefreshFetch(state.inspector, state.selectedRunId)
 	if (plan === null) return null
@@ -1275,8 +1631,8 @@ function InspectorTailRefresh(state) {
 }
 
 // Appends the new events to the scope's loaded window. A response that cannot bridge to the scope's new total (more events landed between two polls than one page carries) resyncs with a fresh window of that scope's sequence instead of leaving a silent gap in the transcript — and so does a loaded range that has grown past the retention cap, since appending at the `full` log level would otherwise grow the modal's memory without bound: the oldest events drop and the "Older turns" control re-fetches them. A response landing after the modal closed leaves the stale inspector state alone.
-function InspectorTailRefreshed(scopeKey) {
-	return function InspectorTailRefreshedForScope(state, payload) {
+function InspectorTailRefreshed(scopeKey: string | null) {
+	return function InspectorTailRefreshedForScope(state: ApplicationState, payload: FetchResultPayload): ActionReturn {
 		const body = readableInspectorLogBody(payload)
 		if (!state.inspectorModalOpen) return state
 		const record = inspectorWindowOf(state.inspector, scopeKey)
@@ -1295,7 +1651,7 @@ function InspectorTailRefreshed(scopeKey) {
 }
 
 // Re-scopes the transcript to an instance. A first scope to an instance fetches its server-filtered window (the probe learns the filtered total, then the most recent window of the instance's own sequence loads), so the breadcrumb chain derives from the full log's ancestry and an old agent's turns load without paging back; an already-loaded scope is reused as-is (the poll's scoped tail refresh keeps a live run's window current) and a failed one retries. Setting the scope pushes the crumb on, and the ↑ parent affordance pops back.
-function scopeInspectorTo(state, roleId) {
+function scopeInspectorTo(state: ApplicationState, roleId: string): ActionReturn {
 	if (state.inspector.scopedRoleId === roleId) return state
 	const runId = state.selectedRunId
 	if (typeof runId !== 'string' || runId === '') return { ...state, inspector: { ...state.inspector, scopedRoleId: roleId } }
@@ -1307,37 +1663,37 @@ function scopeInspectorTo(state, roleId) {
 	]
 }
 
-// The selected value off a change event, or null when it does not carry a usable one.
-function eventTargetValue(event) {
-	if (event === null || typeof event !== 'object') return null
-	const target = event.target
-	if (target === null || typeof target !== 'object') return null
-	const value = target.value
+// The selected value off a change event, or null when it does not carry a usable one. The event arrives untyped through the modal's wiring, so the target and its value are read behind record guards.
+function eventTargetValue(event: unknown): string | null {
+	if (!isObject(event)) return null
+	const target = event['target']
+	if (!isObject(target)) return null
+	const value = target['value']
 	return typeof value === 'string' && value !== '' ? value : null
 }
 
 // The breadcrumb crumbs, the parent affordance, and an agent call's View control pass the instance id directly; the instance dropdown passes the change event. All re-scope the transcript.
-function ScopeInspectorInstance(state, payload) {
+function ScopeInspectorInstance(state: ApplicationState, payload: unknown): ActionReturn {
 	if (state.inspectorModalOpen !== true) return state
 	const roleId = typeof payload === 'string' && payload !== '' ? payload : eventTargetValue(payload)
 	if (roleId === null) return state
 	return scopeInspectorTo(state, roleId)
 }
 
-// Whether a `<details>` toggle event reports the expander opening (vs collapsing) — the wire expander fetches on open only.
-function toggleOpened(event) {
-	if (event === null || typeof event !== 'object') return false
-	const target = event.target
-	if (target === null || typeof target !== 'object') return false
-	return target.open === true
+// Whether a `<details>` toggle event reports the expander opening (vs collapsing) — the wire expander fetches on open only. The event arrives untyped through the modal's wiring, so the target is read behind record guards.
+function toggleOpened(event: unknown): boolean {
+	if (!isObject(event)) return false
+	const target = event['target']
+	if (!isObject(target)) return false
+	return target['open'] === true
 }
 
 // A turn's "on the wire" expander opened: fetch its folded request sections once into the session cache (a cached turn — loading or ready — fetches nothing). The modal wires the action curried with the turn's event index, because the toggle event cannot carry it. Closing touches nothing; re-opening after a failed fetch (the cache evicted it) re-fetches.
-function ToggleWireDetail(eventIndex) {
-	return function ToggleWireDetailForTurn(state, event) {
+function ToggleWireDetail(eventIndex: number) {
+	return function ToggleWireDetailForTurn(state: ApplicationState, event: unknown): ActionReturn {
 		if (state.inspectorModalOpen !== true) return state
 		if (!toggleOpened(event)) return state
-		if (typeof eventIndex !== 'number' || !Number.isInteger(eventIndex) || eventIndex < 0) return state
+		if (!Number.isInteger(eventIndex) || eventIndex < 0) return state
 		const runId = state.selectedRunId
 		if (typeof runId !== 'string' || runId === '') return state
 		if (!wireDetails.begin(runId, eventIndex)) return state
@@ -1346,22 +1702,22 @@ function ToggleWireDetail(eventIndex) {
 }
 
 // The wire fetch resolved: a body carrying `detailSections` (array or explicit null) caches ready; anything else evicts so re-opening retries. Fresh state re-renders the open expander in place (its fetched sections grow the transcript, so the sync keeps a pinned view at the bottom); a response landing after the modal closed only updates the cache.
-function WireDetailLoaded(runId, eventIndex) {
-	return function WireDetailLoadedForTurn(state, payload) {
+function WireDetailLoaded(runId: string, eventIndex: number) {
+	return function WireDetailLoadedForTurn(state: ApplicationState, payload: FetchResultPayload): ActionReturn {
 		wireDetails.recordResponse(runId, eventIndex, payload.ok, payload.body)
 		return state.inspectorModalOpen === true ? [{ ...state }, SyncInspectorFollower()] : state
 	}
 }
 
-function WireDetailFailed(runId, eventIndex) {
-	return function WireDetailFailedForTurn(state) {
+function WireDetailFailed(runId: string, eventIndex: number) {
+	return function WireDetailFailedForTurn(state: ApplicationState): ApplicationState {
 		wireDetails.recordFailure(runId, eventIndex)
 		return state.inspectorModalOpen === true ? { ...state } : state
 	}
 }
 
 // The inspector modal as the watch screen mounts it: the transcript derives inside the component from the active scope's render source (the modal is a pure function of its props, so the vnode tests exercise the same derivation the view renders), plus the breadcrumb chain and instance dropdown from the same events. The active scope's render source is the explicitly scoped instance's own server-filtered window merged with the unscoped tail window (scopeViewFor — the tail keeps the dropdown and the child affordances alive), or the unscoped tail itself for the default scope; the turns prop carries the active window's load state and paging offsets, so "Older turns" pages within the active scope's own sequence. The turn story reads the event payloads directly; the per-turn "on the wire" expanders read the wire-details session cache through the lookup prop and fetch through the curried toggle action.
-function InspectorModalForRun(state) {
+function InspectorModalForRun(state: ApplicationState): Vnode | null {
 	if (!state.inspectorModalOpen) return null
 	const runId = state.selectedRunId
 	const scopedRoleId = effectiveInspectorScope(state)
@@ -1375,7 +1731,7 @@ function InspectorModalForRun(state) {
 		scopedRoleId,
 		livePartial: state.livePartial,
 		renderMarkdown,
-		wireDetailLookup: typeof runId === 'string' ? (eventIndex) => wireDetails.lookup(runId, eventIndex) : null,
+		wireDetailLookup: typeof runId === 'string' ? (eventIndex: number) => wireDetails.lookup(runId, eventIndex) : null,
 		onToggleWire: ToggleWireDetail,
 		onScopeInstance: ScopeInspectorInstance,
 		onLoadOlder: LoadOlderTurns,
@@ -1386,21 +1742,21 @@ function InspectorModalForRun(state) {
 // --- Live token stream (enhancement) ----------------------------------------
 // The websocket deltas fold into `livePartial` — the ephemeral in-flight partial the inspector modal renders under the matching in-flight row. The polled run log stays the sole authority for turn history and run state; this only feeds live text, and every path that could leave the partial stale clears it.
 
-function GotLiveDelta(state, delta) {
+function GotLiveDelta(state: ApplicationState, delta: StreamDeltaMessage): ActionReturn {
 	// Deltas flow only for the active run; a historical selection (or no selection) ignores them. Each delta grows the modal's in-flight section, so the transcript follower syncs with the partial too (a no-op while the modal is closed — the sync finds no body element).
 	if (state.selectedRunId === null || delta.runId !== state.selectedRunId) return state
 	return [{ ...state, livePartial: nextLivePartial(state.livePartial, delta) }, SyncInspectorFollower()]
 }
 
 // Socket phase changes clear the partial. On a disconnect the text is stale (and would otherwise linger under the in-flight row); on a fresh connect the accumulation starts empty because deltas resume mid-turn with the middle lost, and showing a gapped text as if continuous would be wrong. Only live partial text is ever lost — the polled log is untouched, and no error surface exists anywhere.
-function GotStreamState(state, phase) {
+function GotStreamState(state: ApplicationState, phase: 'connected' | 'disconnected'): ApplicationState {
 	if (phase !== 'connected' && phase !== 'disconnected') return state
 	if (state.livePartial === null) return state
 	return { ...state, livePartial: null }
 }
 
 // The stream subscription is mounted only while the watch screen shows a selected, non-terminal run (the same non-terminal guard the polling subscription uses). The payload's runId is the only field that changes, so hyperapp restarts the subscription exactly when the selected run changes, and each start re-subscribes (the server replaces the previous subscription). Teardown deliberately leaves the socket connected — the simple lifecycle choice: screen switches cost no reconnect, and deltas that arrive while another screen is shown are dropped by the run filter in GotLiveDelta.
-function streamSubscriber(dispatch, payload) {
+function streamSubscriber(dispatch: Dispatch, payload: { runId: string }): () => void {
 	if (streamClient === null) {
 		streamClient = createStreamClient({
 			url: streamSocketUrl(),
@@ -1413,7 +1769,7 @@ function streamSubscriber(dispatch, payload) {
 	return () => {}
 }
 
-function StreamSubscription(runId) {
+function StreamSubscription(runId: string): [typeof streamSubscriber, { runId: string }] {
 	return [streamSubscriber, { runId }]
 }
 
@@ -1421,14 +1777,14 @@ function StreamSubscription(runId) {
 
 // The primary label for a run where space is tight: the task's first line, capped at a word boundary so a long first line cannot stretch the top bar (see queue-panel.js taskFirstLine). History rows and the top bar both use it; the full task is one click away in the row's expanded details.
 // The primary label for a run: the LLM-generated one-line summary when the summarizer has produced one, otherwise the task's first line, otherwise the run id. History rows and the top bar share it.
-function runPrimaryLabel(summary) {
+function runPrimaryLabel(summary: RunSummary): string {
 	if (typeof summary.summary === 'string' && summary.summary !== '') return summary.summary
 	if (typeof summary.task === 'string' && summary.task !== '') return taskFirstLine(summary.task)
 	return summary.runId
 }
 
 // The top bar's live status read: a server-unavailable warning, a clickable "a run is in progress" jump when nothing is selected, the viewed run's status, and a secondary jump pill when the user is browsing a historical run while another is live.
-function StatusPills(state) {
+function StatusPills(state: ApplicationState): Vnode[] {
 	const activeRunId = deriveActiveRunId(state.summaries)
 	if (!state.serverAvailable) {
 		return [h('span', { class: 'status-pill status-pill-warn' }, SERVER_UNAVAILABLE_MESSAGE)]
@@ -1448,7 +1804,7 @@ function StatusPills(state) {
 }
 
 // The viewed run's identity in the top bar: its task's first line as the primary read, with the run id, effort, and relative start as microcopy. Everything here is a machine field or the operator's own task text rendered as textContent.
-function ViewedRunLabel(state) {
+function ViewedRunLabel(state: ApplicationState): Vnode | null {
 	const summary = state.summaries.find((entry) => entry.runId === state.selectedRunId)
 	if (summary === undefined) return null
 	const metaParts = [summary.runId]
@@ -1461,14 +1817,14 @@ function ViewedRunLabel(state) {
 }
 
 // The serving image's build identifier, the least urgent thing in the bar: a faint version stamp (short sha + built date) after the nav. Nothing renders when build info is absent or formats to an empty label — running from source without a baked build-info.json has nothing to stamp.
-function BuildLabel(build) {
+function BuildLabel(build: BuildInfo | null): Vnode | null {
 	if (build === null) return null
 	const label = formatBuildLabel(build)
 	if (label === '') return null
 	return h('span', { class: 'topbar-build', title: `Built ${build.builtAt}` }, label)
 }
 
-function TopBar(state) {
+function TopBar(state: ApplicationState): Vnode {
 	return h('header', { class: 'topbar' }, [
 		h('span', { class: 'topbar-wordmark' }, 'Adaptive Orchestrator'),
 		...StatusPills(state),
@@ -1488,7 +1844,7 @@ function TopBar(state) {
 }
 
 // The History screen is the full-screen run browser: compact one-line rows that stay legible no matter how large the underlying prompts and results are, with the full content one expand away. The row's primary line is the run's generated summary (or its task's first line when none exists yet); the expanded details carry the full task and, for terminal runs, the result summary or error — all agent prose through the sanitized Markdown pipeline except the primary line, which is textContent.
-function HistoryRow(state, summary, rerunDisabled) {
+function HistoryRow(state: ApplicationState, summary: RunSummary, rerunDisabled: boolean): Vnode {
 	const expanded = state.historyExpanded[summary.runId] === true
 	return h('li', { key: summary.runId, class: { 'history-row': true, 'is-expanded': expanded, 'is-selected': summary.runId === state.selectedRunId } }, [
 		h('div', { class: 'history-row-main', onclick: [SelectRun, summary.runId], title: 'Watch this run' }, [
@@ -1511,7 +1867,7 @@ function HistoryRow(state, summary, rerunDisabled) {
 }
 
 // The expanded details are where large prompts and results get their room: the exact run meta, the full task, and the terminal result or error, all rendered at full length inside the scrollable history view.
-function HistoryRowDetails(summary) {
+function HistoryRowDetails(summary: RunSummary): Vnode {
 	const metaParts = [summary.runId]
 	if (isEffort(summary.effort)) metaParts.push(`effort ${effortLabel(summary.effort)}`)
 	if (typeof summary.startTime === 'string') metaParts.push(`started ${summary.startTime}`)
@@ -1526,7 +1882,8 @@ function HistoryRowDetails(summary) {
 		children.push(h('p', { class: 'history-details-heading' }, 'Result'))
 		children.push(h('div', { class: 'markdown history-details-text' }, renderMarkdown(resultSummary)))
 	}
-	const errorMessage = summary.error !== null && summary.error !== undefined && typeof summary.error.message === 'string' && summary.error.message !== '' ? summary.error.message : null
+	// The error rides the wire untyped (`error?: unknown`), so the message is read behind the record guard instead of the null checks a typed shape would allow.
+	const errorMessage = isObject(summary.error) && typeof summary.error['message'] === 'string' && summary.error['message'] !== '' ? summary.error['message'] : null
 	if (errorMessage !== null) {
 		children.push(h('p', { class: 'history-details-heading' }, 'Error'))
 		children.push(h('div', { class: 'markdown history-details-error' }, renderMarkdown(errorMessage)))
@@ -1534,7 +1891,7 @@ function HistoryRowDetails(summary) {
 	return h('div', { class: 'history-details' }, children)
 }
 
-function HistoryScreen(state) {
+function HistoryScreen(state: ApplicationState): Vnode {
 	const rerunDisabled = state.justSubmittedRunId !== null || deriveActiveRunId(state.summaries) !== null
 	return h('section', { id: 'history-screen' }, [
 		h('div', { class: 'history-scroll' }, [
@@ -1548,8 +1905,8 @@ function HistoryScreen(state) {
 // --- Queue panel -------------------------------------------------------------
 // The queue screen (docs/queueing.md "UI interaction model"): the polled items grouped into the four sections — waiting (draggable, editable, removable), the one active run, the items waiting for an answer (inline answer box), and the recently settled bucket (done/error/cancelled, with the re-queue action on errors). Item prose — task, question, result summary, error — renders through the sanitized Markdown pipeline (docs/security.md "Web client rendering pipeline"); ids, statuses, and timestamps stay textContent.
 
-function QueueItemMeta(state, item) {
-	const parts = []
+function QueueItemMeta(state: ApplicationState, item: QueueItemLike): Vnode {
+	const parts: string[] = []
 	if (typeof item.runId === 'string' && item.runId !== '') parts.push(item.runId)
 	parts.push(`queued ${formatRelative(item.queuedAt, state.now)}`)
 	if (typeof item.settledAt === 'string') parts.push(`settled ${formatRelative(item.settledAt, state.now)}`)
@@ -1557,7 +1914,7 @@ function QueueItemMeta(state, item) {
 }
 
 // The waiting row's inline edit form, swapped for the task text while this item is being edited. The textarea is prefilled with the item's current task; saving PATCHes the trimmed text.
-function QueueItemEditForm(state, item) {
+function QueueItemEditForm(_state: ApplicationState, item: QueueItemLike): Vnode {
 	return h('form', { class: 'queue-edit-form', onsubmit: SaveItemEdit }, [
 		h('textarea', { value: item.task, rows: '3', onkeydown: TaskTextareaKeydown }),
 		h('div', { class: 'queue-edit-actions' }, [
@@ -1568,7 +1925,7 @@ function QueueItemEditForm(state, item) {
 }
 
 // The needs_input row's inline answer box: the recorded question, one input, one submit — the queue-native resume of the parked run.
-function QueueItemAnswerForm(state, item) {
+function QueueItemAnswerForm(state: ApplicationState, item: QueueItemLike): Vnode {
 	const pending = state.queueAnswerPendingId === item.id
 	return h('form', { class: 'queue-answer-form', onsubmit: SubmitQueueAnswer(item.id) }, [
 		h('input', { type: 'text', placeholder: 'type your answer', autocomplete: 'off', disabled: pending }),
@@ -1576,7 +1933,7 @@ function QueueItemAnswerForm(state, item) {
 	])
 }
 
-function QueueItemRow(state, item) {
+function QueueItemRow(state: ApplicationState, item: QueueItemLike): Vnode {
 	const waiting = item.status === 'waiting'
 	const editing = waiting && state.editingItemId === item.id
 	const children = [
@@ -1619,7 +1976,7 @@ function QueueItemRow(state, item) {
 	}, children)
 }
 
-function QueueSection(state, heading, items, emptyText) {
+function QueueSection(state: ApplicationState, heading: string, items: QueueItemLike[], emptyText: string): Vnode {
 	return h('div', { class: 'queue-section' }, [
 		h('h2', { class: 'queue-section-heading' }, `${heading} (${items.length})`),
 		items.length === 0
@@ -1628,7 +1985,7 @@ function QueueSection(state, heading, items, emptyText) {
 	])
 }
 
-function QueueScreen(state) {
+function QueueScreen(state: ApplicationState): Vnode {
 	const sections = deriveQueueSections(state.queueItems)
 	if (state.queueItems.length === 0) {
 		return h('section', { id: 'queue-screen' }, [
@@ -1646,7 +2003,7 @@ function QueueScreen(state) {
 }
 
 // The effort selector is one radio group (shared `name`, real inputs) so arrow keys and screen readers work natively, with each whole card clickable via its wrapping label. The option values are the wire strings verbatim — picking a card fires SaveRunEffort, so the choice applies to the next run and persists as the project default at once. The names, descriptions, and recommended badge all render from EFFORT_OPTIONS, the single home of the per-level copy.
-function EffortLevelSelector(value, disabled, saving) {
+function EffortLevelSelector(value: EffortLevel, disabled: boolean, saving: boolean): Vnode {
 	return h('fieldset', { class: 'effort-control', disabled }, [
 		h('legend', { class: 'effort-label' }, 'Effort level'),
 		h('div', { class: 'effort-options' }, EFFORT_OPTIONS.map((option) =>
@@ -1665,7 +2022,7 @@ function EffortLevelSelector(value, disabled, saving) {
 }
 
 // The logging-level selector mirrors the effort selector's radio group at a smaller size — two options whose labels come from LOG_LEVEL_OPTIONS, the single home of the copy. Picking one fires SaveRunLogLevel, so the choice applies to the next run and persists as the project default at once.
-function LoggingLevelSelector(value, disabled, saving) {
+function LoggingLevelSelector(value: LogLevel, disabled: boolean, saving: boolean): Vnode {
 	return h('fieldset', { class: 'logging-level-control', disabled }, [
 		h('legend', { class: 'logging-level-label' }, 'Logging level'),
 		h('div', { class: 'logging-level-options' }, LOG_LEVEL_OPTIONS.map((option) =>
@@ -1679,7 +2036,7 @@ function LoggingLevelSelector(value, disabled, saving) {
 }
 
 // The continuation banner above the compose textarea: names the run being continued and echoes its task (and its outcome, when one exists) so the follow-up is drafted against the right context. Every dynamic string is a machine field rendered as text — never markup. Dismissing returns the form to a plain new task.
-function ContinuationChip(state) {
+function ContinuationChip(state: ApplicationState): Vnode | null {
 	const continuation = state.continuation
 	if (continuation === null) return null
 	return h('div', { class: 'continuation-chip', 'aria-label': `Continuing run ${continuation.runId}` }, [
@@ -1693,7 +2050,7 @@ function ContinuationChip(state) {
 }
 
 // The compose screen is the hero when the service is idle — drafting a task is the primary activity when nothing is running, so the editor gets the whole stage. The submit path is the queue's universal add (the scheduler dispatches it at once when the system is idle, so the user-visible behavior of today's "start now" is preserved); in continuation mode the chip rides above the task field and the submit body carries continuesFrom — the only body that can — so a continuation stays disabled while a run is in flight rather than queueing without its lineage.
-function ComposeScreen(state) {
+function ComposeScreen(state: ApplicationState): Vnode {
 	const disabled = state.continuation !== null && deriveActiveRunId(state.summaries) !== null
 	const runEffort = isEffort(state.runEffort) ? state.runEffort : DEFAULT_EFFORT
 	const runLogLevel = isLogLevel(state.runLogLevel) ? state.runLogLevel : DEFAULT_LOG_LEVEL
@@ -1715,7 +2072,7 @@ function ComposeScreen(state) {
 }
 
 // The interrupt history is the visible record of what the operator sent and what the run did with it: each inquiry pairs with the role's answer (or a waiting/ended note), each plan modification lists its delivery target and abort count. The question/outcome lines are machine fields or the operator's own text (textContent); the answer is agent prose and renders only through the sanitized Markdown pipeline.
-function InterruptHistory(state) {
+function InterruptHistory(state: ApplicationState): Vnode | null {
 	const view = state.selectedRunView
 	if (view === null || !Array.isArray(view.interrupts) || view.interrupts.length === 0) return null
 	return h('div', { class: 'interrupt-history' }, [
@@ -1748,7 +2105,7 @@ function InterruptHistory(state) {
 }
 
 // The interrupt form addresses the selected run only while it is the one in flight; a historical selection or an idle service renders nothing. The plan-modification mode carries an upfront warning because it aborts the work currently happening. Every string here is trusted UI copy or the operator's own input (posted, never rendered back), so the form introduces no untrusted-content path.
-function InterruptForm(state) {
+function InterruptForm(state: ApplicationState): Vnode | null {
 	const activeRunId = deriveActiveRunId(state.summaries)
 	if (activeRunId === null || state.selectedRunId !== activeRunId) return null
 	const mode = state.interruptMode
@@ -1781,7 +2138,7 @@ function InterruptForm(state) {
 }
 
 // The stage-scoped interrupt modal pairs the history of what the operator already sent with the form to send more, so an answer appears in the same place the question was asked. It is reachable only while viewing the active run (the controls-row button is the single entry point and renders only then); the form itself re-checks the condition in case the run completes while the modal is open.
-function InterruptModalForRun(state) {
+function InterruptModalForRun(state: ApplicationState): Vnode | null {
 	if (!state.interruptModalOpen) return null
 	return h('div', { class: 'interrupt-modal-overlay' }, [
 		h('div', { class: 'interrupt-modal-backdrop', onclick: CloseInterruptModal }),
@@ -1797,18 +2154,19 @@ function InterruptModalForRun(state) {
 }
 
 // A newly-arrived answer to the operator's interrupt question, presented as a dismissible card pinned over the stage's corner: unmissable on arrival but never blocking the run view the way a modal would. The question and the answering role's name are textContent (the operator's own words and a machine field); the answer is agent prose through the sanitized Markdown pipeline. The full exchange also lives in the interrupt modal's history.
-function InterruptAnswerCardForRun(state) {
+function InterruptAnswerCardForRun(state: ApplicationState): Vnode | null {
 	const card = state.interruptAnswerCard
 	if (card === null) return null
+	// The card is only created for an answered inquiry (latestUnshownAnswer skips unanswered entries), and the renderer maps an empty or absent text to the same em-dash placeholder either way, so the null arm of the wire type is unreachable here.
 	return h('div', { class: 'interrupt-answer-card' }, [
 		h('p', { class: 'interrupt-answer-card-heading' }, card.role !== null && typeof card.role === 'string' ? `Answer from ${card.role}` : 'The run answered'),
 		h('p', { class: 'interrupt-answer-card-question' }, card.question),
-		h('div', { class: 'interrupt-answer-card-answer markdown' }, renderMarkdown(card.answer)),
+		h('div', { class: 'interrupt-answer-card-answer markdown' }, renderMarkdown(card.answer ?? '')),
 		h('button', { type: 'button', class: 'interrupt-answer-card-close', onclick: DismissInterruptAnswer }, 'Dismiss'),
 	])
 }
 
-function CostStrip(model) {
+function CostStrip(model: InteractionModel): Vnode {
 	const cost = deriveCostStrip(model)
 	return h('div', { class: 'pb-cost-strip' }, [
 		h('span', { class: 'pb-cost-item' }, `elapsed ${formatElapsed(cost.elapsedSeconds)}`),
@@ -1818,13 +2176,13 @@ function CostStrip(model) {
 }
 
 // The interrupt modal's single entry point, visible only while the viewed run is the one in flight; a historical selection or an idle service renders nothing, mirroring the server-side 409 contract.
-function InterruptButton(state) {
+function InterruptButton(state: ApplicationState): Vnode | null {
 	const activeRunId = deriveActiveRunId(state.summaries)
 	if (activeRunId === null || state.selectedRunId !== activeRunId) return null
 	return h('button', { type: 'button', class: 'interrupt-open-button', title: 'Ask the run a question or change its plan', onclick: OpenInterruptModal }, 'Interrupt')
 }
 
-function StageControls(state, model) {
+function StageControls(state: ApplicationState, model: InteractionModel | null): Vnode {
 	return h('div', { class: 'stage-controls' }, [
 		h('div', { class: 'pb-view-toggle', role: 'group', 'aria-label': 'run view' }, [
 			h('button', { type: 'button', class: state.flowViewMode === 'flow' ? 'is-active' : '', onclick: [SetFlowViewMode, 'flow'] }, 'Flow'),
@@ -1843,7 +2201,7 @@ function StageControls(state, model) {
 }
 
 // The roles-only checkbox (see SetSequenceRolesOnly). Mirrors the mute toggle's checkbox look so the two filter-ish controls read alike.
-function SequenceRolesOnlyToggle(state) {
+function SequenceRolesOnlyToggle(state: ApplicationState): Vnode {
 	return h('label', { class: 'sequence-roles-control', title: 'Hide tool and interrupt columns — show only the agent roles and the human' }, [
 		h('input', { type: 'checkbox', checked: state.sequenceRolesOnly === true, onchange: SetSequenceRolesOnly }),
 		'roles only',
@@ -1851,7 +2209,7 @@ function SequenceRolesOnlyToggle(state) {
 }
 
 // The run's plan document (the Markdown the planner writes through write_plan), shown as a collapsed disclosure between the stage and the now-caption so the plan is one click away without competing with the live graph. The plan is agent-authored prose like any other the run produces, so its body renders only through the shared sanitized Markdown pipeline; a run without a plan renders nothing at all.
-function PlanSection(state) {
+function PlanSection(state: ApplicationState): Vnode | null {
 	const view = state.selectedRunView
 	const plan = view !== null && typeof view.plan === 'string' ? view.plan : ''
 	if (plan === '') return null
@@ -1863,7 +2221,7 @@ function PlanSection(state) {
 }
 
 // The run's lineage: a run that continued a prior finished run names it here, and clicking jumps to the prior run's view through the same SelectRun path the history rows and status pills use. The id is a machine field rendered as text; a run without lineage renders nothing.
-function LineageLine(state) {
+function LineageLine(state: ApplicationState): Vnode | null {
 	const view = state.selectedRunView
 	if (view === null) return null
 	if (typeof view.continuesFrom !== 'string' || view.continuesFrom === '') return null
@@ -1873,9 +2231,9 @@ function LineageLine(state) {
 // --- Sequence-view scroll following ----------------------------------------
 // The sequence container follows new content while the operator sits at its bottom and browses freely otherwise (see scroll-follow.js). hyperapp has no mounted-element hook, so the follower is synced against the rendered DOM: the effect defers to its own requestAnimationFrame, which hyperapp's render — queued first, at setState — precedes in the same frame, so the patch has landed before the sync runs. The sync attaches a fresh follower when the container element was replaced (mode/screen switches and the placeholder-to-model transition remount it), detaches when the container is gone, and pins to the bottom on every model update while still attached.
 
-let sequenceFollower = null
+let sequenceFollower: ScrollFollower | null = null
 
-function runSyncSequenceFollower(_dispatch, _payload) {
+function runSyncSequenceFollower(_dispatch: Dispatch, _payload: null): void {
 	requestAnimationFrame(() => {
 		const container = document.querySelector('.pb-sequence-scroll')
 		if (!(container instanceof HTMLElement)) {
@@ -1893,14 +2251,14 @@ function runSyncSequenceFollower(_dispatch, _payload) {
 	})
 }
 
-function SyncSequenceFollower() {
+function SyncSequenceFollower(): NullPayloadEffect {
 	return [runSyncSequenceFollower, null]
 }
 
 // The inspector modal's transcript body follows new content while the operator sits at its bottom — live partials, newly completed turns, tail refreshes, and wire expanders all grow it — the same follow-with-free-scroll contract the sequence container gets, through the same shared follower (see scroll-follow.js and runSyncSequenceFollower). The sync defers to its own requestAnimationFrame so the modal's patch has landed before it runs, attaches a fresh follower whenever the body element was replaced (modal open/close, screen swaps, the placeholder-to-model transition all remount it), detaches when the element is gone, and pins to the bottom on every wired update while still attached.
-let inspectorFollower = null
+let inspectorFollower: ScrollFollower | null = null
 
-function runSyncInspectorFollower(_dispatch, _payload) {
+function runSyncInspectorFollower(_dispatch: Dispatch, _payload: null): void {
 	requestAnimationFrame(() => {
 		const container = document.querySelector('.inspector-modal-body')
 		if (!(container instanceof HTMLElement)) {
@@ -1918,12 +2276,12 @@ function runSyncInspectorFollower(_dispatch, _payload) {
 	})
 }
 
-function SyncInspectorFollower() {
+function SyncInspectorFollower(): NullPayloadEffect {
 	return [runSyncInspectorFollower, null]
 }
 
 // The watch screen fills the viewport below the top bar: a controls row, the flex-filling stage, and the now-caption. The Flow view (product surface) and the Sequence view (debug surface) are independent leaves over the same model; the toggle swaps which renders without a fetch. The sequence view mounts inside a vertical scroll container because its timeline grows long, while the flow view scales to the stage.
-function WatchScreen(state) {
+function WatchScreen(state: ApplicationState): Vnode {
 	const labels = state.labelResolver
 	const model = state.flowModel
 	// Before the guild config or the first readable flow frame lands, the stage shows a placeholder rather than a half-built graph; both arrive within the first poll, so the placeholder is transient.
@@ -1982,7 +2340,7 @@ function WatchScreen(state) {
 // the pointer is over it; its only prose-carrying section is the operation details markdown, which
 // the hover wiring fetches on demand and which `formatTooltipContent` routes through the sanitized
 // pipeline.
-function TooltipCardForRun(state) {
+function TooltipCardForRun(state: ApplicationState): Vnode | null {
 	const tooltip = state.tooltip
 	if (tooltip === null) return null
 	const model = state.flowModel
@@ -1996,12 +2354,13 @@ function TooltipCardForRun(state) {
 // The lookup the tooltip derivations read: the session cache's state for one operation id (a miss
 // reads as failed, which the derivations render as "no details section" — never as invented
 // content).
-function operationDetailsLookup(runId) {
-	return (operationId) => operationDetails.lookup(runId, operationId)
+function operationDetailsLookup(runId: string | null): (operationId: string) => OperationDetailsState {
+	// A null context keys a cache namespace nothing begins under (the fetch path guards the run id first), so the empty string reads as failed exactly as the untyped null key did.
+	return (operationId) => operationDetails.lookup(runId ?? '', operationId)
 }
 
 // The pending question the modal renders. The live `/api/questions` poll is the source, so the modal is driven by live data, and the answer form posts to `/api/answer` via the existing SubmitAnswer path. The first pending question is the active one; the modal opens when one arrives (GotQuestions) and re-opens via the flow view's Question affordance.
-function QuestionModalForRun(state) {
+function QuestionModalForRun(state: ApplicationState): Vnode | null {
 	if (!state.questionModalOpen) return null
 	const question = state.pendingQuestions[0]
 	if (question === undefined) return null
@@ -2017,18 +2376,21 @@ function QuestionModalForRun(state) {
 }
 
 // The technical meta line the result modal carries for advanced users: run id, effort, duration, and tool-call count in the text, with the exact start/end timestamps on the hover title. Derived from the run view the per-run poll already fetches, so the modal re-opens with no extra request.
-function resultMetaLine(view) {
-	if (typeof view.runId !== 'string' || view.budgets === null || view.budgets === undefined) return null
+function resultMetaLine(view: RunView): { text: string; title: string } | null {
+	if (typeof view.runId !== 'string') return null
+	// The ingress guard does not validate budgets, so a malformed body can reach this function with the field absent — the widened annotation keeps that defensive check honest instead of trusting the declared type.
+	const budgets: RunBudgets | null | undefined = view.budgets
+	if (budgets === null || budgets === undefined) return null
 	const parts = [view.runId]
 	if (isEffort(view.effort)) parts.push(`effort ${effortLabel(view.effort)}`)
-	parts.push(formatElapsed(view.budgets.elapsedSeconds))
-	parts.push(`${formatNumber(view.budgets.toolCalls)} tool calls`)
+	parts.push(formatElapsed(budgets.elapsedSeconds))
+	parts.push(`${formatNumber(budgets.toolCalls)} tool calls`)
 	const title = `started ${view.startTime ?? '—'} → ended ${view.endTime ?? '—'}`
 	return { text: parts.join(' · '), title }
 }
 
 // The terminal result the modal renders, derived from the live run view the per-run poll already fetches (the flow endpoint carries no result/error fields). The modal opens on a watched run's completion (GotSelectedRun) and re-opens via the flow view's CTA; the descriptor is undefined for a non-terminal run so the modal renders nothing then.
-function ResultModalForRun(state) {
+function ResultModalForRun(state: ApplicationState): Vnode | null {
 	if (!state.resultModalOpen) return null
 	const view = state.selectedRunView
 	if (view === null) return null
@@ -2046,7 +2408,7 @@ function ResultModalForRun(state) {
 }
 
 // The screen switch. A zero-state service (no runs, nothing selected) shows the compose hero regardless of the stored screen — drafting the first task is the only meaningful activity then.
-function Main(state) {
+function Main(state: ApplicationState): Vnode {
 	if (state.screen === 'history') return h('main', {}, [HistoryScreen(state)])
 	if (state.screen === 'compose') return h('main', {}, [ComposeScreen(state)])
 	if (state.screen === 'queue') return h('main', {}, [QueueScreen(state)])
@@ -2054,12 +2416,36 @@ function Main(state) {
 	return h('main', {}, [WatchScreen(state)])
 }
 
-function view(state) {
+function view(state: ApplicationState): Vnode {
 	return h('div', { class: 'app-shell' }, [TopBar(state), Main(state)])
 }
 
 // --- App -------------------------------------------------------------------
 // The subscriptions array is fixed-size with stable positions: [0] always polls the run list, the pending questions, and the task queue every second; [1] polls the selected run's run view and flow model every second but only while one is selected and non-terminal (the deactivation on terminal status stops the polling); [2] primes the AudioContext on the first user interaction; [3] dismisses the inspector modal on Escape while it is open; [4] subscribes the live token stream to the selected run while the watch screen shows one that is selected and non-terminal (the same non-terminal guard [1] uses).
+
+// hyperapp re-enters `view` and `subscriptions` with the state it holds, but the vendored declaration types that re-entry as `unknown` (it is app-agnostic). The state provably stays an ApplicationState — init plants a checked literal and every action returns a checked transition — so this guard confirms the wiring rather than re-validating data, and a mismatch fails the mount instead of rendering garbage.
+function isApplicationState(value: unknown): value is ApplicationState {
+	if (!isObject(value)) return false
+	const stateKeys: (keyof ApplicationState)[] = [
+		'summaries', 'selectedRunId', 'selectedRunView', 'selectedRunStatus', 'pendingQuestions',
+		'queueItems', 'justSubmittedItemId', 'pendingAddSelectionId', 'editingItemId', 'draggingItemId', 'queueAnswerPendingId',
+		'serverAvailable', 'justSubmittedRunId', 'muted', 'shownQuestionIds', 'firstQuestionsPoll', 'pendingAnswerId',
+		'runEffort', 'savingEffort', 'runLogLevel', 'savingLogLevel',
+		'flowModel', 'previousFlowModel', 'labelResolver', 'guildParticipants', 'build',
+		'flowTier', 'flowViewMode', 'sequenceRolesOnly', 'screen', 'historyExpanded', 'continuation',
+		'questionModalOpen', 'resultModalOpen', 'resultShownForRun', 'interruptModalOpen',
+		'inspectorModalOpen', 'inspector', 'planExpanded', 'livePartial', 'tooltip',
+		'interruptMode', 'interruptSending', 'interruptNotice', 'interruptAnswerCard', 'shownInterruptAnswerKeys', 'now',
+	]
+	return stateKeys.every((key) => key in value)
+}
+
+// A missing mount element is a broken page, so the lookup throws with the id rather than handing null into hyperapp's mount.
+function requireMountNode(id: string): HTMLElement {
+	const node = document.getElementById(id)
+	if (node === null) throw new Error(`the app mount point is missing element "${id}"`)
+	return node
+}
 
 app({
 	init: [
@@ -2069,11 +2455,9 @@ app({
 			selectedRunView: null,
 			selectedRunStatus: null,
 			pendingQuestions: [],
-			// The polled task queue (docs/queueing.md "UI interaction model"), head first. The add-flow's ids: justSubmittedItemId guards a second submit while one is in flight; pendingAddSelectionId is consumed once by the very next queue read to jump to the new run's watch screen when the scheduler dispatched it within the add request.
 			queueItems: [],
 			justSubmittedItemId: null,
 			pendingAddSelectionId: null,
-			// The queue panel's row-level view state: the waiting item being inline-edited, the row being dragged, and the item whose answer is posting.
 			editingItemId: null,
 			draggingItemId: null,
 			queueAnswerPendingId: null,
@@ -2083,62 +2467,55 @@ app({
 			shownQuestionIds: {},
 			firstQuestionsPoll: true,
 			pendingAnswerId: null,
-			// null until the saved settings load; the selectors initialize from the persisted levels on first load.
 			runEffort: null,
 			savingEffort: false,
 			runLogLevel: null,
 			savingLogLevel: false,
-			// The live InteractionModel the centerpiece renders, plus its previous frame for `deriveLifecycle`'s enter/depart diff. Both null until the first readable flow frame lands.
 			flowModel: null,
 			previousFlowModel: null,
-			// The label resolver and guild participant inventory are built once from `/api/config` (GotConfig); null/empty until that single load completes. `build` rides the same load: the image's build identifier for the top bar, and stays null when running from source without a baked build-info.json.
 			labelResolver: null,
 			guildParticipants: [],
 			build: null,
 			flowTier: DEFAULT_FLOW_TIER,
 			flowViewMode: 'flow',
-			// The sequence view's roles-only lens (see rolesOnlyModel in interaction-model.js): off by default so the sequence view shows everything.
 			sequenceRolesOnly: false,
-			// The visible screen: 'watch' (the flow/sequence stage), 'history' (the run browser), or 'compose' (the new-task hero). A zero-state service shows compose regardless (see Main).
 			screen: 'watch',
-			// Per-history-row expansion, keyed by run id, so the full task/result of several runs can be open at once.
 			historyExpanded: {},
-			// The continuation pending on the compose screen: the prior run's id (submitted as continuesFrom) plus the task and outcome summary the chip echoes, or null for a plain new task. Set by the History row's Continue button; cleared by the chip's Cancel and after a successful submit.
 			continuation: null,
-			// Per-run-view modal state. The question modal opens on a new pending question; the result modal opens on a watched run's completion. `resultShownForRun` dedups the auto-open across the polls that follow a completion. The interrupt modal opens only from the stage controls.
 			questionModalOpen: false,
 			resultModalOpen: false,
 			resultShownForRun: null,
 			interruptModalOpen: false,
-			// The LLM turn inspector opens only from the stage controls; its data (the loaded log window and the derived turn index) lives in `inspector` and resets on open and on run switch.
 			inspectorModalOpen: false,
 			inspector: initialInspectorState(),
-			// The plan disclosure under the stage: collapsed by default, reset with the other per-run view state on a run switch.
 			planExpanded: false,
-			// The live token stream's ephemeral partial (see "Live token stream"): the in-flight reasoning/content the inspector modal renders under the matching in-flight row. Null whenever nothing is streaming or the stream is down; never an authority on run state.
 			livePartial: null,
-			// The inspector descriptor over the run view: null when nothing is hovered. Cleared on
-			// `mouseleave` of the stage and on run switch; a stale id self-dismisses at render time.
 			tooltip: null,
-		// Interrupt form state: the kind toggle, an in-flight send flag, and a one-line outcome notice. The answer card presents each newly-arrived interrupt answer once (keys run-scoped in shownInterruptAnswerKeys); a run's first read baselines its answered history so old runs never pop stale cards.
-		interruptMode: 'inquiry',
-		interruptSending: false,
-		interruptNotice: null,
-		interruptAnswerCard: null,
-		shownInterruptAnswerKeys: {},
-		now: Date.now(),
+			interruptMode: 'inquiry',
+			interruptSending: false,
+			interruptNotice: null,
+			interruptAnswerCard: null,
+			shownInterruptAnswerKeys: {},
+			now: Date.now(),
+		},
+		// The guild config and the saved settings (effort and logging level) are each loaded once on load and never polled, so their fetches are init effects rather than subscriptions.
+		Fetch({ url: 'api/config', ok: GotConfig, fail: FetchFailed }),
+		Fetch({ url: 'api/settings', ok: GotSettings, fail: SettingsFetchFailed }),
+	],
+	view: (state) => {
+		if (!isApplicationState(state)) throw new Error('hyperapp re-entered with a state that is not an ApplicationState')
+		return view(state)
 	},
-	// The guild config and the saved settings (effort and logging level) are each loaded once on load and never polled, so their fetches are init effects rather than subscriptions.
-	Fetch({ url: 'api/config', ok: GotConfig, fail: FetchFailed }),
-	Fetch({ url: 'api/settings', ok: GotSettings, fail: SettingsFetchFailed }),
-	],
-	view,
-	subscriptions: (state) => [
-		onEvery(Tick, POLL_INTERVAL_MS),
-		typeof state.selectedRunId === 'string' && state.selectedRunId !== '' && !isTerminalStatus(state.selectedRunStatus) && onEvery(PollSelectedRun, POLL_INTERVAL_MS),
-		onFirstInteraction(PrimeAudio),
-		state.inspectorModalOpen === true && onEscapeKey(CloseInspectorModal),
-		state.screen === 'watch' && typeof state.selectedRunId === 'string' && state.selectedRunId !== '' && !isTerminalStatus(state.selectedRunStatus) && StreamSubscription(state.selectedRunId),
-	],
-	node: document.getElementById('app'),
+	subscriptions: (state) => {
+		if (!isApplicationState(state)) throw new Error('hyperapp re-entered with a state that is not an ApplicationState')
+		return [
+			onEvery(Tick, POLL_INTERVAL_MS),
+			// A null selectedRunStatus (a just-selected run whose first per-run poll has not landed) reads as non-terminal — the dynamic set lookup missed null — so the per-run poll and the stream stay live across a run switch until the first frame arrives.
+			typeof state.selectedRunId === 'string' && state.selectedRunId !== '' && (state.selectedRunStatus === null || !isTerminalStatus(state.selectedRunStatus)) && onEvery(PollSelectedRun, POLL_INTERVAL_MS),
+			onFirstInteraction(PrimeAudio),
+			state.inspectorModalOpen === true && onEscapeKey(CloseInspectorModal),
+			state.screen === 'watch' && typeof state.selectedRunId === 'string' && state.selectedRunId !== '' && (state.selectedRunStatus === null || !isTerminalStatus(state.selectedRunStatus)) && StreamSubscription(state.selectedRunId),
+		]
+	},
+	node: requireMountNode('app'),
 })

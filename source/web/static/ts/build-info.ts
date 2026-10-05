@@ -28,7 +28,7 @@ function formatBuildDate(builtAt: string): string {
 	return new Date(parsed).toISOString().slice(0, 10)
 }
 
-// Formats the top-bar version label: the sha's 7-character short form plus the built date (e.g. `9f3a2b7 · 2026-09-25`), or the built date alone when the build carried no sha. A null or malformed build yields the empty string so the caller skips rendering the label. The field checks stay runtime guards rather than trusting the types: the caller (app.js) is still plain JS, and a type annotation never rejects a malformed payload at that boundary.
+// Formats the top-bar version label: the sha's 7-character short form plus the built date (e.g. `9f3a2b7 · 2026-09-25`), or the built date alone when the build carried no sha. A null or malformed build yields the empty string so the caller skips rendering the label. The field checks stay runtime guards rather than trusting the types: the payload arrives over `/api/config`, and a type annotation never rejects a malformed response at that boundary.
 export function formatBuildLabel(build: BuildInfo | null): string {
 	if (build === null || typeof build.builtAt !== 'string' || build.builtAt === '') return ''
 	const sha = typeof build.sha === 'string' && build.sha !== '' ? `${build.sha.slice(0, 7)} · ` : ''

@@ -21,6 +21,8 @@ export interface QueueItemLike {
 	answer?: string
 	// done/error: the terminal run's result summary.
 	resultSummary?: string
+	// error: what the run said went wrong, set when the item reaches error.
+	error?: string
 	// Set when the scheduler dispatches the item's run.
 	runId?: string
 }
