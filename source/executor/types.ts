@@ -163,7 +163,8 @@ export type LlmCallResult =
 		finishReason?: string
 	}
 	| { kind: 'context_budget_exceeded'; promptTokens: number; contextWindow: number }
-	| { kind: 'llm_unavailable'; message: string }
+	// detail is the endpoint's raw error-response body (bounded; absent when the failure produced no response body, e.g. a connect error), kept out of the message so the human-readable surfaces stay concise while the payload stays reviewable.
+	| { kind: 'llm_unavailable'; message: string; detail?: string }
 
 export type ErrorKind =
 	| 'invalid_tool_call'
@@ -200,6 +201,8 @@ export interface ResultCard {
 	summary: string
 	artifacts?: string[]
 	error?: { kind: ErrorKind; message?: string; details?: unknown }
+	// The raw failure payload behind a platform-authored error card (the LLM endpoint's error-response body, bounded), rendered as collapsed technical details and included in copy-raw. Absent on every success card; the engine sets it only from an LlmCallResult that carries one.
+	detail?: string
 }
 
 // The resolved prior-run lineage and briefing channel for a queue-dispatched run: a genuine continuation carries the prior run's id, operator task, and result summary (empty when the prior run finished without a result card); a first queue dispatch carries only the interim briefing, with runId omitted so meta.continuesFrom stays honest. The executor treats it as an opaque channel — it validates, persists the lineage in meta, and injects the briefing into the entry context; the Guild decides what the continuation means.

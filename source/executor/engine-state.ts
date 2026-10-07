@@ -81,6 +81,8 @@ export interface ResumedRole {
 	roleState: RoleState
 	planAbort?: boolean
 	planInjection?: string
+	// A framed operator note carried on an explicit resume of an errored run, set only on the re-entered leaf frame. The engine appends it to the restored history at the loop entry — after a suspended turn's tool result has been recorded — so the note rides the same persisted history every message uses and is part of the first LLM request without landing between an assistant tool_calls message and its tool result (a malformed request on strict endpoints).
+	resumeNote?: string
 	suspendedTurn?: SuspendedTurn
 }
 

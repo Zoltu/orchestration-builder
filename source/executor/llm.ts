@@ -70,6 +70,17 @@ type ParsedClassification =
 	| { kind: 'fail_immediately'; message: string }
 	| { kind: 'fail_retryable'; message: string }
 
+// The bound on the error-response body preserved as an llm_unavailable result's detail: a provider error body can be an arbitrarily large HTML or JSON page, and the diagnostic value sits in its first lines. A truncated copy carries an explicit marker so a reader can tell.
+const MAX_ERROR_DETAIL_CHARS = 2000
+
+// The error body is machine data for the technical-details view (and copy-raw), never rendered prose, so it is trimmed but otherwise verbatim.
+function boundedErrorDetail(errorBody: string): string | undefined {
+	const trimmed = errorBody.trim()
+	if (trimmed === '') return undefined
+	if (trimmed.length <= MAX_ERROR_DETAIL_CHARS) return trimmed
+	return `${trimmed.slice(0, MAX_ERROR_DETAIL_CHARS)}… [truncated]`
+}
+
 // Exponential backoff between retry attempts, scaled off the 1-based attempt number.
 function backoffMs(attempt: number): number {
 	return Math.pow(2, attempt) * 100
@@ -180,6 +191,12 @@ function streamCrashMessage(error: unknown, snapshot: ResponsesStreamSnapshot): 
 	return `SSE stream read failed: ${reason} (${terminalDetail}, ${deltaDetail})`
 }
 
+// A mid-stream error event's raw payload is preserved (bounded) as the detail: the extracted message text can omit fields a support reader needs (an error code, a nested cause), and some payloads carry no message at all.
+function streamErrorDetail(snapshot: ResponsesStreamSnapshot): string | undefined {
+	if (snapshot.terminal !== 'error' || snapshot.errorPayload === undefined) return undefined
+	return boundedErrorDetail(JSON.stringify(snapshot.errorPayload))
+}
+
 // The idle timeout's outcome: a transport-liveness failure the caller retries like a failed connect, surfaced as its own variant because every LlmCallResult kind ends the retry loop.
 type StreamIdleTimeout = { kind: 'stream_idle_timeout'; message: string }
 
@@ -262,7 +279,10 @@ async function consumeResponsesStream(stream: ReadableStream<Uint8Array>, option
 	}
 
 	const snapshot = accumulator.snapshot()
-	if (snapshot.terminal === 'none' || snapshot.terminal === 'error') return { kind: 'llm_unavailable', message: streamFailureMessage(snapshot) }
+	if (snapshot.terminal === 'none' || snapshot.terminal === 'error') {
+		const detail = streamErrorDetail(snapshot)
+		return { kind: 'llm_unavailable', message: streamFailureMessage(snapshot), ...(detail !== undefined ? { detail } : {}) }
+	}
 	// markTerminal only records a terminal together with its response payload, so this guard is unreachable by construction; the type still allows the absence and the failure mode is a silent crash if it were ignored.
 	if (snapshot.response === undefined) return { kind: 'llm_unavailable', message: `SSE stream terminal ${snapshot.terminal} carried no response payload` }
 	return mapTerminalResponseToCallResult(snapshot.response)
@@ -335,15 +355,16 @@ export function createLlmCaller(model: ResolvedModelConfig, apiKey: string | und
 			if (response.kind === 'http_error') {
 				const contextExceeded = detectContextBudgetExceeded(response.status, response.errorBody, model.contextWindow)
 				if (contextExceeded !== undefined) return contextExceeded
+				// The status stays in the message (the human-readable surfaces quote it verbatim); the response body rides separately as the bounded detail the error card renders as technical details.
+				const detail = boundedErrorDetail(response.errorBody)
 				if (response.status >= 500 || response.status === 429) {
-					lastError = `HTTP ${response.status}: ${response.errorBody}`
 					if (attempt >= maxAttempts) {
-						return { kind: 'llm_unavailable', message: lastError }
+						return { kind: 'llm_unavailable', message: `HTTP ${response.status}`, ...(detail !== undefined ? { detail } : {}) }
 					}
 					await dependencies.sleep(backoffMs(attempt))
 					continue
 				}
-				return { kind: 'llm_unavailable', message: `HTTP ${response.status}: ${response.errorBody}` }
+				return { kind: 'llm_unavailable', message: `HTTP ${response.status}`, ...(detail !== undefined ? { detail } : {}) }
 			}
 
 			const consumed = await consumeResponsesStream(response.stream, { idleTimeoutMs: LLM_STREAM_IDLE_TIMEOUT_MS, scheduleTimeout: dependencies.scheduleTimeout, onDelta: emitAttemptDelta })

@@ -49,6 +49,10 @@ describe('boolean guards', () => {
 		expect(isResultCard({ status: 'error', summary: 'x', error: { kind: 'context_handoff' } })).toBe(true)
 		expect(isResultCard({ status: 'error', summary: 'x', error: { kind: 'not_a_kind' } })).toBe(false)
 	})
+	test('isResultCard accepts and would preserve an optional string detail', () => {
+		expect(isResultCard({ status: 'error', summary: 'x', error: { kind: 'llm_unavailable', message: 'HTTP 402' }, detail: '{"error":"Insufficient credit"}' })).toBe(true)
+		expect(isResultCard({ status: 'error', summary: 'x', detail: 42 })).toBe(false)
+	})
 	test('isRunMeta accepts a minimal valid RunMeta', () => {
 		expect(isRunMeta({
 			runId: 'r',

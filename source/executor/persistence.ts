@@ -81,6 +81,13 @@ export function createReadRunCheckpointById(baseDir: string): ReadRunCheckpointB
 	}
 }
 
+export type RunCheckpointExists = (runId: string) => boolean
+
+// Whether a run directory holds a checkpoint file, as a bare existence check: the run view's resumable flag consults it per poll, so it must not read (let alone parse) the checkpoint body the way createReadRunCheckpointById does.
+export function createRunCheckpointExists(baseDir: string): RunCheckpointExists {
+	return (runId) => fs.existsSync(path.resolve(baseDir, runId, CHECKPOINT_FILE_NAME))
+}
+
 export interface RunSnapshotRaw {
 	metaText: string | null
 	logText: string

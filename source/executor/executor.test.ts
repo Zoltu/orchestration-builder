@@ -756,6 +756,81 @@ describe('resumeExecutor', () => {
 		expect(persistence.state.deleteCheckpointCalls).toBe(1)
 	})
 
+	test('a run that ends in error keeps its checkpoint so the operator can explicitly resume it', async () => {
+		const guild = buildLoadedGuild(
+			{ main: { systemPrompt: 'p', tools: ['finish'] } },
+			'main',
+		)
+		const llm = new FakeLlm()
+		llm.responses = [success([{
+			id: 'f1',
+			type: 'function',
+			function: { name: 'finish', arguments: JSON.stringify({ status: 'error', summary: 'the endpoint is down', error: { kind: 'llm_unavailable', message: 'connection refused' } }) },
+		}])]
+		const persistence = makeFakePersistence()
+		const deps = makeDeps(llm, persistence, guild)
+
+		const meta = await runExecutor(deps, { runId: 'r-error', ...resumeOptions, task: 'do it', effort: 'standard' })
+
+		expect(meta.status).toBe('error')
+		expect(persistence.state.checkpoints.length).toBeGreaterThan(0)
+		expect(persistence.state.deleteCheckpointCalls).toBe(0)
+	})
+
+	test('a run that parks pre-write deletes its checkpoint — the answer flow continues it as a new run', async () => {
+		const askHumanManifest: ToolManifest = {
+			name: 'ask_human',
+			description: 'Ask a human a question.',
+			parameters: { type: 'object', required: ['question'], properties: { question: { type: 'string' } } },
+		}
+		const guild: LoadedGuild = {
+			config: { entryRole: 'main', roles: { main: { systemPrompt: 'p', tools: ['ask_human', 'finish'] } }, tools: [] },
+			deployment: { model: baseModel, executor: baseExecutor, contextPolicy: baseContextPolicy },
+			prompts: { main: 'prompt for main' },
+			tools: { finish: finishManifest, ask_human: askHumanManifest },
+		}
+		const llm = new FakeLlm()
+		llm.responses = [success([{ id: 'ask_1', type: 'function', function: { name: 'ask_human', arguments: JSON.stringify({ question: 'Which database?' }) } }])]
+		const persistence = makeFakePersistence()
+		const deps = makeDeps(llm, persistence, guild)
+
+		const meta = await runExecutor(deps, {
+			runId: 'r-park',
+			guildPath: '/guild',
+			task: 'do it',
+			effort: 'standard',
+			queueTracked: true,
+		})
+
+		expect(meta.status).toBe('needs_clarification')
+		expect(persistence.state.deleteCheckpointCalls).toBe(1)
+	})
+
+	test('a resumed run that ends in error also keeps its checkpoint, so it stays resumable', async () => {
+		const uninterrupted = await driveUninterruptedRun()
+		const checkpoint = uninterrupted.checkpoints[1]
+		if (checkpoint === undefined) throw new Error('expected the mid-descent checkpoint')
+
+		const guild = buildDelegationGuild()
+		const llm = new FakeLlm()
+		// The resumed coder re-enters first (its frame's own turn), then the orchestrator continues and finishes with the error — the terminal error keeps the checkpoint.
+		llm.responses = [
+			success([finishToolCall('f1', 'child done')]),
+			success([{
+				id: 'f2',
+				type: 'function',
+				function: { name: 'finish', arguments: JSON.stringify({ status: 'error', summary: 'still broken', error: { kind: 'llm_unavailable', message: 'connection refused' } }) },
+			}]),
+		]
+		const persistence = makeFakePersistence()
+		const deps = makeDeps(llm, persistence, guild)
+
+		const meta = await resumeExecutor(deps, checkpoint, resumeOptions)
+
+		expect(meta.status).toBe('error')
+		expect(persistence.state.deleteCheckpointCalls).toBe(0)
+	})
+
 	test('a resumed run keeps the logging level recorded on its checkpoint entry frame', async () => {
 		const uninterrupted = await driveUninterruptedRun()
 		const checkpoint = uninterrupted.checkpoints[1]
@@ -802,5 +877,232 @@ describe('resumeExecutor', () => {
 
 		expect(meta.logLevel).toBe('full')
 		expect(persistence.state.meta?.logLevel).toBe('full')
+	})
+
+	test('an explicit resume stamps the operator note on run_resumed and into the resumed leaf history before its first LLM call', async () => {
+		const uninterrupted = await driveUninterruptedRun()
+		const checkpoint = uninterrupted.checkpoints[1]
+		if (checkpoint === undefined) throw new Error('expected the mid-descent checkpoint')
+
+		const guild = buildDelegationGuild()
+		const llm = new FakeLlm()
+		llm.responses = [
+			success([finishToolCall('f1', 'child done')]),
+			success([finishToolCall('f2', 'parent done')]),
+		]
+		const persistence = makeFakePersistence()
+		const deps = makeDeps(llm, persistence, guild)
+
+		await resumeExecutor(deps, checkpoint, { ...resumeOptions, operatorNote: 'The operator resumed this run after a failure. Message from the operator: carry on' })
+
+		const resumedEvent = persistence.state.events.find((e) => e.type === 'run_resumed')
+		expect(resumedEvent).toBeDefined()
+		const resumedPayload = defined(resumedEvent, 'run_resumed event').payload
+		expect(isRecord(resumedPayload)).toBe(true)
+		if (isRecord(resumedPayload)) expect(resumedPayload['operatorNote']).toBe('The operator resumed this run after a failure. Message from the operator: carry on')
+		// The note is the last message of the first post-resume request (the re-entered coder's turn).
+		const firstCall = defined(persistence.state.events.find((e) => e.type === 'llm_call'), 'first llm_call event')
+		const callPayload = firstCall.payload
+		expect(isRecord(callPayload)).toBe(true)
+		if (isRecord(callPayload)) {
+			const sent = callPayload['sent']
+			expect(Array.isArray(sent)).toBe(true)
+			if (Array.isArray(sent)) {
+				const noteMessage = sent[sent.length - 1]
+				expect(isRecord(noteMessage)).toBe(true)
+				if (isRecord(noteMessage)) {
+					expect(noteMessage['role']).toBe('user')
+					expect(noteMessage['content']).toBe('The operator resumed this run after a failure. Message from the operator: carry on')
+				}
+			}
+		}
+		// The note rides the same persisted history every message uses: the resumed run's own checkpoints carry it (on the leaf frame it was injected into).
+		const postResumeCheckpoint = persistence.state.checkpoints[0]
+		if (postResumeCheckpoint === undefined) throw new Error('expected a post-resume checkpoint')
+		const noteInHistory = postResumeCheckpoint.frames.some((frame) => frame.roleState.history.some((message) => message.role === 'user' && message.content === 'The operator resumed this run after a failure. Message from the operator: carry on'))
+		expect(noteInHistory).toBe(true)
+	})
+
+	test('the operator note lands after a suspended turn\'s recorded tool result, never between the agent call and its result', async () => {
+		// The error-run checkpoint shape: the child already returned, so the root's suspension carries its recorded card and the resume re-enters the root alone.
+		const uninterrupted = await driveUninterruptedRun()
+		const checkpoint = uninterrupted.checkpoints[2]
+		if (checkpoint === undefined) throw new Error('expected the post-child checkpoint')
+		expect(checkpoint.frames.length).toBe(1)
+		expect(checkpoint.frames[0]?.pending?.childCard).toBeDefined()
+
+		const guild = buildDelegationGuild()
+		const llm = new FakeLlm()
+		llm.responses = [success([finishToolCall('f2', 'parent done')])]
+		const persistence = makeFakePersistence()
+		const deps = makeDeps(llm, persistence, guild)
+
+		await resumeExecutor(deps, checkpoint, { ...resumeOptions, operatorNote: 'The operator resumed this run after a failure. Message from the operator: the child already finished; summarize' })
+
+		const firstCall = defined(persistence.state.events.find((e) => e.type === 'llm_call'), 'first llm_call event')
+		const callPayload = firstCall.payload
+		expect(isRecord(callPayload)).toBe(true)
+		if (isRecord(callPayload)) {
+			const sent = callPayload['sent']
+			expect(Array.isArray(sent)).toBe(true)
+			if (Array.isArray(sent)) {
+				// The sent slice must read agent tool_calls → tool result → note: a user message between the assistant call and its result would be a malformed request on strict endpoints.
+				const assistantCall = sent[0]
+				const toolResult = sent[1]
+				const noteMessage = sent[2]
+				expect(isRecord(assistantCall) && Array.isArray(assistantCall['tool_calls'])).toBe(true)
+				expect(isRecord(toolResult) && toolResult['role'] === 'tool').toBe(true)
+				expect(isRecord(noteMessage) && noteMessage['role'] === 'user').toBe(true)
+			}
+		}
+	})
+
+	test('the first post-resume request picks the note up through the delta protocol: a sliced sent list still carries it', async () => {
+		// A run that errors on the root's SECOND llm call, so the checkpointed role carries a delta baseline from the first: the resumed request must slice from that baseline and still contain the note.
+		const guild = buildDelegationGuild()
+		const llm = new FakeLlm()
+		llm.responses = [
+			success([agentToolCall('a1', 'coder', 'subtask')]),
+			success([finishToolCall('f1', 'child done')]),
+			{ kind: 'llm_unavailable', message: 'connection refused' },
+		]
+		const originalPersistence = makeFakePersistence()
+		await runExecutor(makeDeps(llm, originalPersistence, guild), { runId: 'r-delta', ...resumeOptions, task: 'do it', effort: 'quick' })
+		const checkpoint = originalPersistence.state.checkpoints[originalPersistence.state.checkpoints.length - 1]
+		if (checkpoint === undefined) throw new Error('expected the final checkpoint')
+		expect(checkpoint.frames[0]?.pending).toBeUndefined()
+
+		const resumedGuild = buildDelegationGuild()
+		const resumedLlm = new FakeLlm()
+		resumedLlm.responses = [success([finishToolCall('f2', 'parent done')])]
+		const persistence = makeFakePersistence()
+		const deps = makeDeps(resumedLlm, persistence, resumedGuild)
+
+		await resumeExecutor(deps, checkpoint, { ...resumeOptions, operatorNote: 'The operator resumed this run after a failure. Message from the operator: carry on' })
+
+		const firstCall = defined(persistence.state.events.find((e) => e.type === 'llm_call'), 'first llm_call event')
+		const callPayload = firstCall.payload
+		expect(isRecord(callPayload)).toBe(true)
+		if (isRecord(callPayload)) {
+			// sentFrom 2 is the pre-error baseline: the event is a delta slice, not a full snapshot, and the note rides the slice as its last message.
+			expect(callPayload['sentFrom']).toBe(2)
+			expect(callPayload['messageCount']).toBe(5)
+			const sent = callPayload['sent']
+			expect(Array.isArray(sent)).toBe(true)
+			if (Array.isArray(sent)) {
+				expect(sent.length).toBe(3)
+				const noteMessage = sent[2]
+				expect(isRecord(noteMessage)).toBe(true)
+				if (isRecord(noteMessage)) {
+					expect(noteMessage['role']).toBe('user')
+					expect(noteMessage['content']).toBe('The operator resumed this run after a failure. Message from the operator: carry on')
+				}
+			}
+		}
+	})
+
+	test('the note is delivered even when the resumed turn terminates without an LLM request (a finish among the remaining calls)', async () => {
+		// The error-run checkpoint shape where the root's interrupted turn was batched [agent, finish]: the child's card is recorded, and the turn's remaining call is the finish — the resumed role terminates without a further LLM request, so the loop-entry injection alone would silently drop the note.
+		const finishCall: ToolCall = { id: 'f1', type: 'function', function: { name: 'finish', arguments: JSON.stringify({ status: 'success', summary: 'wrapped up' }) } }
+		const checkpoint: RunCheckpoint = {
+			version: 1,
+			runId: 'r-batched',
+			startTime: '2026-01-01T00:00:00.000Z',
+			registryCounter: 1,
+			frames: [
+				{
+					roleId: 'orchestrator-0-1',
+					roleName: 'orchestrator',
+					depth: 0,
+					task: 'do it',
+					roleState: {
+						history: [
+							{ role: 'system', content: 'prompt' },
+							{ role: 'user', content: 'do it' },
+							{ role: 'assistant', content: '', tool_calls: [agentToolCall('a1', 'coder', 'subtask'), finishCall] },
+						],
+						lastPromptTokens: 10,
+						recentCompactionPromptTokens: [],
+						recentToolCalls: [],
+						toolCallCount: 1,
+						generatedTokens: 5,
+						contextExceededAttempts: 0,
+						loopCheckToolCallWatermark: 0,
+						loopCheckTokenWatermark: 0,
+					},
+					pending: {
+						toolCalls: [agentToolCall('a1', 'coder', 'subtask'), finishCall],
+						agentIndex: 0,
+						childCard: { status: 'success', summary: 'child done' },
+					},
+				},
+			],
+		}
+
+		const guild = buildDelegationGuild()
+		const llm = new FakeLlm()
+		const persistence = makeFakePersistence()
+		const deps = makeDeps(llm, persistence, guild)
+
+		const meta = await resumeExecutor(deps, checkpoint, { ...resumeOptions, operatorNote: 'The operator resumed this run after a failure. Message from the operator: the child already finished; wrap up' })
+
+		// The turn completed from the recorded card and the remaining finish — no LLM request was needed, and the note still reached the conversation.
+		expect(llm.calls).toBe(0)
+		expect(meta.status).toBe('success')
+		expect(meta.result).toEqual({ status: 'success', summary: 'wrapped up' })
+		// The checkpoint fixture's roleState is the live object the resumed engine mutated: the history must read agent tool_calls → tool result → note → finish result, well-formed throughout.
+		const frame = defined(checkpoint.frames[0], 'resumed frame')
+		const history = frame.roleState.history
+		expect(history.length).toBe(6)
+		const assistantMessage = history[2]
+		const agentResult = history[3]
+		const noteMessage = history[4]
+		const finishResult = history[5]
+		expect(assistantMessage?.tool_calls?.length).toBe(2)
+		expect(agentResult?.role).toBe('tool')
+		expect(noteMessage?.role).toBe('user')
+		expect(noteMessage?.content).toBe('The operator resumed this run after a failure. Message from the operator: the child already finished; wrap up')
+		expect(finishResult?.role).toBe('tool')
+	})
+
+	test('a twice-errored run stays resumable throughout and only its final success deletes the checkpoint', async () => {
+		const guild = buildLoadedGuild(
+			{ main: { systemPrompt: 'p', tools: ['finish'] } },
+			'main',
+		)
+		const errorFinish: ToolCall = { id: 'f1', type: 'function', function: { name: 'finish', arguments: JSON.stringify({ status: 'error', summary: 'the endpoint is down', error: { kind: 'llm_unavailable', message: 'connection refused' } }) } }
+		const originalLlm = new FakeLlm()
+		originalLlm.responses = [success([errorFinish])]
+		const originalPersistence = makeFakePersistence()
+		const originalMeta = await runExecutor(makeDeps(originalLlm, originalPersistence, guild), { runId: 'r-twice', ...resumeOptions, task: 'do it', effort: 'standard' })
+		expect(originalMeta.status).toBe('error')
+		expect(originalPersistence.state.deleteCheckpointCalls).toBe(0)
+
+		// First resume: errors again — the checkpoint is kept and the note is stamped on the resume boundary.
+		const firstCheckpoint = originalPersistence.state.checkpoints[originalPersistence.state.checkpoints.length - 1]
+		if (firstCheckpoint === undefined) throw new Error('expected the original run checkpoint')
+		const firstResumeLlm = new FakeLlm()
+		firstResumeLlm.responses = [success([errorFinish])]
+		const firstResumePersistence = makeFakePersistence()
+		const firstResumeMeta = await resumeExecutor(makeDeps(firstResumeLlm, firstResumePersistence, guild), firstCheckpoint, { ...resumeOptions, operatorNote: 'The operator resumed this run after a failure. Message from the operator: try again' })
+		expect(firstResumeMeta.status).toBe('error')
+		expect(firstResumeMeta.runId).toBe('r-twice')
+		expect(firstResumeMeta.startTime).toBe(originalMeta.startTime)
+		expect(firstResumePersistence.state.deleteCheckpointCalls).toBe(0)
+		const resumedEvent = firstResumePersistence.state.events.find((e) => e.type === 'run_resumed')
+		const resumedPayload = defined(resumedEvent, 'run_resumed event').payload
+		if (isRecord(resumedPayload)) expect(resumedPayload['operatorNote']).toBe('The operator resumed this run after a failure. Message from the operator: try again')
+
+		// Second resume — from the resumed run's own last checkpoint — succeeds, and only then is the checkpoint deleted.
+		const secondCheckpoint = firstResumePersistence.state.checkpoints[firstResumePersistence.state.checkpoints.length - 1]
+		if (secondCheckpoint === undefined) throw new Error('expected the first resume checkpoint')
+		const secondResumeLlm = new FakeLlm()
+		secondResumeLlm.responses = [success([finishToolCall('f2', 'finally done')])]
+		const secondResumePersistence = makeFakePersistence()
+		const secondResumeMeta = await resumeExecutor(makeDeps(secondResumeLlm, secondResumePersistence, guild), secondCheckpoint, resumeOptions)
+		expect(secondResumeMeta.status).toBe('success')
+		expect(secondResumeMeta.runId).toBe('r-twice')
+		expect(secondResumeMeta.startTime).toBe(originalMeta.startTime)
+		expect(secondResumePersistence.state.deleteCheckpointCalls).toBe(1)
 	})
 })

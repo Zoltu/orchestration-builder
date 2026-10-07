@@ -173,7 +173,7 @@ describe('createLlmCaller pre-stream retry classification', () => {
 		const wire = createFakeWire([errorResponse(500, 'one'), errorResponse(500, 'two'), errorResponse(500, 'three')])
 		const caller = createLlmCaller(MODEL, API_KEY, { llmFetch: wire.llmFetch, sleep: wire.sleep, scheduleTimeout: wire.scheduleTimeout })
 		const result = await caller.call({ messages: [] })
-		expect(result).toEqual({ kind: 'llm_unavailable', message: 'HTTP 500: three' })
+		expect(result).toEqual({ kind: 'llm_unavailable', message: 'HTTP 500', detail: 'three' })
 		expect(wire.requests).toHaveLength(3)
 	})
 
@@ -189,9 +189,39 @@ describe('createLlmCaller pre-stream retry classification', () => {
 		const wire = createFakeWire([errorResponse(400, 'bad request: invalid tool schema')])
 		const caller = createLlmCaller(MODEL, API_KEY, { llmFetch: wire.llmFetch, sleep: wire.sleep, scheduleTimeout: wire.scheduleTimeout })
 		const result = await caller.call({ messages: [] })
-		expect(result).toEqual({ kind: 'llm_unavailable', message: 'HTTP 400: bad request: invalid tool schema' })
+		expect(result).toEqual({ kind: 'llm_unavailable', message: 'HTTP 400', detail: 'bad request: invalid tool schema' })
 		expect(wire.requests).toHaveLength(1)
 		expect(wire.sleeps).toHaveLength(0)
+	})
+
+	test('a 402 with a JSON body surfaces the status in the message and the body text as the detail', async () => {
+		const body = JSON.stringify({ error: 'Insufficient credit on credit id abc: this request requires a minimum balance of $0.1875 and your current balance is $0.0176. Please top up.' })
+		const wire = createFakeWire([errorResponse(402, body)])
+		const caller = createLlmCaller(MODEL, API_KEY, { llmFetch: wire.llmFetch, sleep: wire.sleep, scheduleTimeout: wire.scheduleTimeout })
+		const result = await caller.call({ messages: [] })
+		expect(result).toEqual({ kind: 'llm_unavailable', message: 'HTTP 402', detail: body })
+		if (result.kind !== 'llm_unavailable') throw new Error(`expected llm_unavailable, got ${result.kind}`)
+		expect(result.message).toContain('HTTP 402')
+		expect(result.detail).toContain('Insufficient credit')
+		expect(wire.requests).toHaveLength(1)
+		expect(wire.sleeps).toHaveLength(0)
+	})
+
+	test('an error body past the detail cap is truncated with an explicit marker', async () => {
+		const wire = createFakeWire([errorResponse(402, 'x'.repeat(3000))])
+		const caller = createLlmCaller(MODEL, API_KEY, { llmFetch: wire.llmFetch, sleep: wire.sleep, scheduleTimeout: wire.scheduleTimeout })
+		const result = await caller.call({ messages: [] })
+		if (result.kind !== 'llm_unavailable') throw new Error(`expected llm_unavailable, got ${result.kind}`)
+		expect(result.detail).toBeDefined()
+		expect(result.detail?.length).toBeLessThan(3000)
+		expect(result.detail?.endsWith('… [truncated]')).toBe(true)
+	})
+
+	test('an error response with an empty body carries no detail', async () => {
+		const wire = createFakeWire([errorResponse(402, '')])
+		const caller = createLlmCaller(MODEL, API_KEY, { llmFetch: wire.llmFetch, sleep: wire.sleep, scheduleTimeout: wire.scheduleTimeout })
+		const result = await caller.call({ messages: [] })
+		expect(result).toEqual({ kind: 'llm_unavailable', message: 'HTTP 402' })
 	})
 
 	test('a 400 whose plain body reports the context overflow is context_budget_exceeded with the endpoint prompt tokens', async () => {
@@ -280,7 +310,19 @@ describe('createLlmCaller stream consumption', () => {
 		]))])
 		const caller = createLlmCaller(MODEL, API_KEY, { llmFetch: wire.llmFetch, sleep: wire.sleep, scheduleTimeout: wire.scheduleTimeout })
 		const result = await caller.call({ messages: [] })
-		expect(result).toEqual({ kind: 'llm_unavailable', message: 'SSE stream error: generation failed (deltas received for 1 item(s))' })
+		// The stream error's raw payload rides as the detail, so the body behind the extracted message stays reviewable.
+		expect(result).toEqual({ kind: 'llm_unavailable', message: 'SSE stream error: generation failed (deltas received for 1 item(s))', detail: '{"error":{"message":"generation failed"}}' })
+		expect(wire.requests).toHaveLength(1)
+		expect(wire.sleeps).toHaveLength(0)
+	})
+
+	test('a mid-stream error payload without a message still surfaces the payload as the detail', async () => {
+		const wire = createFakeWire([streamResponse(encodedChunks([
+			dataLine({ error: { code: 402, cause: 'insufficient credit' } }),
+		]))])
+		const caller = createLlmCaller(MODEL, API_KEY, { llmFetch: wire.llmFetch, sleep: wire.sleep, scheduleTimeout: wire.scheduleTimeout })
+		const result = await caller.call({ messages: [] })
+		expect(result).toEqual({ kind: 'llm_unavailable', message: 'SSE stream error: stream error without a message (no deltas received)', detail: '{"error":{"code":402,"cause":"insufficient credit"}}' })
 		expect(wire.requests).toHaveLength(1)
 		expect(wire.sleeps).toHaveLength(0)
 	})

@@ -77,6 +77,8 @@ export interface ResponsesStreamSnapshot {
 	terminal: ResponsesStreamTerminal
 	response: Record<string, unknown> | undefined
 	error: string | undefined
+	// The raw error event's data payload, kept whole so the caller can preserve the body behind the extracted message (some error payloads carry no message at all, or fields a support reader needs that the message string omits).
+	errorPayload: Record<string, unknown> | undefined
 	items: Map<string, ResponsesAccumulatedItem>
 }
 
@@ -118,6 +120,7 @@ export function createResponsesStreamAccumulator(): ResponsesStreamAccumulator {
 	let terminal: ResponsesStreamTerminal = 'none'
 	let terminalResponse: Record<string, unknown> | undefined
 	let errorMessage: string | undefined
+	let errorPayload: Record<string, unknown> | undefined
 	const items = new Map<string, ResponsesAccumulatedItem>()
 
 	function ensureSlot(key: string, type: string): ResponsesAccumulatedItem {
@@ -183,11 +186,12 @@ export function createResponsesStreamAccumulator(): ResponsesStreamAccumulator {
 		if (terminal !== 'none') return
 		terminal = 'error'
 		errorMessage = streamErrorMessage(payload)
+		errorPayload = payload
 	}
 
 	function snapshot(): ResponsesStreamSnapshot {
 		// A copy, so a caller holding a snapshot cannot mutate the accumulator's item state through it.
-		return { terminal, response: terminalResponse, error: errorMessage, items: new Map(items) }
+		return { terminal, response: terminalResponse, error: errorMessage, errorPayload, items: new Map(items) }
 	}
 
 	return { apply, recordError, snapshot }

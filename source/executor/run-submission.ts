@@ -1,12 +1,14 @@
-import type { RunCheckpoint } from './checkpoint.js'
+import { isRunCheckpoint, type RunCheckpoint } from './checkpoint.js'
 import { DEFAULT_EFFORT } from './effort.js'
 import { DEFAULT_LOG_LEVEL } from './log-level.js'
+import { isRunMeta, safeJsonParse } from './validation.js'
 import type { EffortLevel, LogLevel, RunContinuation, RunMeta } from './types.js'
-import type { ReadProjectSettings, RunDirectoryExists } from './persistence.js'
+import type { ReadProjectSettings, ReadRunCheckpointById, ReadRunMetaById, ReadTaskQueue, RunDirectoryExists, WriteTaskQueue } from './persistence.js'
+import { reactivateErrorItem } from './task-queue.js'
 
 // Every fresh run is started through submit, and submit is called only by the scheduler's dispatch path (the queue is universal — docs/queueing.md "Dispatch and the scheduler"), so the submission layer marks every started run queue-tracked: the bit that gates the pre-write park (docs/queueing.md "Parking: the pre-write rule"). The mark does not survive a restart (it does not ride the checkpoint), so a boot-resumed run keeps today's blocking ask behavior.
 export type StartRun = (runId: string, task: string, effort: EffortLevel, logLevel: LogLevel, continuation: RunContinuation | undefined, queueTracked: boolean) => Promise<RunMeta>
-export type ResumeRun = (checkpoint: RunCheckpoint) => Promise<RunMeta>
+export type ResumeRun = (checkpoint: RunCheckpoint, resumeNote?: string) => Promise<RunMeta>
 
 export interface RunSubmissionDependencies {
 	startRun: StartRun
@@ -28,8 +30,8 @@ export type SubmitResult =
 
 export interface RunSubmission {
 	submit(task: string, effortOverride?: EffortLevel, logLevelOverride?: LogLevel, continuation?: RunContinuation): SubmitResult
-	// The startup-reconciliation path: re-enters a checkpointed run under its original run id. The caller (startup, before the server accepts submissions) guarantees no run is active; a resume while active is a bug and fails fast.
-	resume(checkpoint: RunCheckpoint): void
+	// The startup-reconciliation path: re-enters a checkpointed run under its original run id. The caller (startup, before the server accepts submissions) guarantees no run is active; a resume while active is a bug and fails fast. resumeNote is the framed operator note on an explicit error-resume and is absent for boot reconciliation.
+	resume(checkpoint: RunCheckpoint, resumeNote?: string): void
 	activeRunId(): string | undefined
 	lastRunId(): string | undefined
 	awaitActive(): Promise<RunMeta | undefined>
@@ -93,9 +95,9 @@ export function createRunSubmission(dependencies: RunSubmissionDependencies): Ru
 			track(runId, dependencies.startRun(runId, task, effort, logLevel, continuation, true))
 			return { ok: true, runId }
 		},
-		resume(checkpoint) {
+		resume(checkpoint, resumeNote) {
 			if (activeRunId !== undefined) throw new Error(`resume called while run ${activeRunId} is active`)
-			track(checkpoint.runId, dependencies.resumeRun(checkpoint))
+			track(checkpoint.runId, dependencies.resumeRun(checkpoint, resumeNote))
 		},
 		activeRunId() {
 			return activeRunId
@@ -109,5 +111,53 @@ export function createRunSubmission(dependencies: RunSubmissionDependencies): Ru
 		awaitFatalError() {
 			return fatalErrorPromise
 		},
+	}
+}
+
+// The framing put around an operator's note when a run is resumed from its error checkpoint (docs/queueing.md "Resume of an errored run"): the resumed conversation is the failed run's own, so the note says who is speaking and why the run is continuing.
+const RESUME_NOTE_PREFIX = 'The operator resumed this run after a failure. Message from the operator: '
+
+export type ResumeErroredRunRejection =
+	| 'run_not_found'
+	| 'run_not_errored'
+	| 'checkpoint_missing'
+	| 'run_in_progress'
+
+export type ResumeErroredRunResult =
+	| { ok: true; runId: string }
+	| { ok: false; error: ResumeErroredRunRejection }
+
+export interface ResumeErroredRunDependencies {
+	// The same single-slot submission layer every other run goes through: the resumed run occupies the slot under its own id, and its settlement ticks the scheduler exactly as a submitted run's would.
+	runSubmission: RunSubmission
+	readRunMetaById: ReadRunMetaById
+	readCheckpointById: ReadRunCheckpointById
+	readQueue: ReadTaskQueue
+	writeQueue: WriteTaskQueue
+}
+
+export type ResumeErroredRun = (runId: string, note: string | undefined) => ResumeErroredRunResult
+
+// The explicit resume of an error-ended run from its checkpoint (docs/queueing.md "Resume of an errored run"): the only path that re-enters a terminal run, and strictly operator-driven — startup reconciliation never touches an error meta. The run keeps its own run id, start time, effort, and log level (they live in the checkpoint, and the resume path re-asserts the running meta from them); the optional note rides into the restored conversation; and the queue item settled to error for this run is re-activated so the panel tracks the live run. Every rejection is a value, so the HTTP layer maps codes to statuses.
+export function createResumeErroredRun(dependencies: ResumeErroredRunDependencies): ResumeErroredRun {
+	return (runId, note) => {
+		if (dependencies.runSubmission.activeRunId() !== undefined) return { ok: false, error: 'run_in_progress' }
+		const metaText = dependencies.readRunMetaById(runId)
+		if (metaText === null) return { ok: false, error: 'run_not_found' }
+		const parsedMeta = safeJsonParse(metaText)
+		const meta = parsedMeta.ok && isRunMeta(parsedMeta.value) ? parsedMeta.value : null
+		if (meta === null) return { ok: false, error: 'run_not_found' }
+		if (meta.status !== 'error') return { ok: false, error: 'run_not_errored' }
+		const checkpointText = dependencies.readCheckpointById(runId)
+		if (checkpointText === null) return { ok: false, error: 'checkpoint_missing' }
+		const parsedCheckpoint = safeJsonParse(checkpointText)
+		const checkpoint = parsedCheckpoint.ok && isRunCheckpoint(parsedCheckpoint.value) ? parsedCheckpoint.value : null
+		// The directory name is the run's identity; a checkpoint naming a different run id is treated as corrupt, exactly as startup reconciliation treats one (a corrupt checkpoint is no checkpoint — the briefed continuation is the fallback).
+		if (checkpoint === null || checkpoint.runId !== runId) return { ok: false, error: 'checkpoint_missing' }
+		// The settled item returns to the active slot before the resume starts, in the same marker-then-submit order the dispatch path uses: the slot is filled synchronously by resume, so no scheduler tick can observe the item active against a still-error meta. A run with no matching error item (its record was requeued or cancelled) resumes regardless — the queue record does not gate the run.
+		const reactivation = reactivateErrorItem(dependencies.readQueue(), runId)
+		if (reactivation.ok) dependencies.writeQueue(reactivation.queue)
+		dependencies.runSubmission.resume(checkpoint, note === undefined ? undefined : `${RESUME_NOTE_PREFIX}${note}`)
+		return { ok: true, runId: checkpoint.runId }
 	}
 }

@@ -42,13 +42,15 @@ export function createToolError(kind: ErrorKind, message?: string, details?: unk
 	return { kind, message, details }
 }
 
-export function createResultCard(status: ResultCard['status'], summary: string, options?: { artifacts?: string[]; error?: ToolResult }): ResultCard {
+// detail rides only alongside an error block — the composer attaches it in the error branch alone, so a detail can never leak onto a card without an error.
+export function createResultCard(status: ResultCard['status'], summary: string, options?: { artifacts?: string[]; error?: ToolResult; detail?: string }): ResultCard {
 	const error = options?.error
 	if (error && error.kind !== 'success') {
 		return {
 			status,
 			summary,
-			artifacts: options.artifacts,
+			artifacts: options?.artifacts,
+			...(options?.detail !== undefined ? { detail: options.detail } : {}),
 			error: {
 				kind: error.kind,
 				message: error.message,

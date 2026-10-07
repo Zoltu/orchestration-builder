@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import { createWebHumanBackend, type WebHumanBackend } from '../executor/human-backend.ts'
 import { createInterruptChannel, createInterruptQueue, type InterruptChannel } from '../executor/interrupts.ts'
 import { createRunState } from '../executor/run-state.ts'
-import { createRunSubmission, type ResumeRun, type RunSubmission, type StartRun } from '../executor/run-submission.ts'
+import { createResumeErroredRun, createRunSubmission, type ResumeRun, type RunSubmission, type StartRun } from '../executor/run-submission.ts'
 import { createTaskScheduler } from '../executor/scheduler.ts'
 import type { QueueItem, TaskQueue } from '../executor/task-queue.ts'
 import type { RunCheckpoint } from '../executor/checkpoint.ts'
@@ -114,6 +114,40 @@ snapshots.set('run-20260101-000000', {
 	logText: '',
 })
 
+// An error-ended run with a shape-valid run id, so the resume endpoint's happy path has a resumable target: the terminal error meta is what the endpoint validates against, and the harness's checkpoint store (not this map) decides whether the run has a checkpoint.
+snapshots.set('run-20260101-000100', {
+	metaText: JSON.stringify({
+		runId: 'run-20260101-000100',
+		guildPath: 'guild',
+		benchmarkPath: 'bench',
+		task: 'task for run-20260101-000100',
+		status: 'error',
+		startTime: '2026-01-01T00:00:00.000Z',
+		endTime: '2026-01-01T00:01:00.000Z',
+		result: { status: 'error', summary: 'LLM unavailable: connection refused' },
+		error: { kind: 'llm_unavailable', message: 'connection refused' },
+	}),
+	logText: [
+		JSON.stringify({ timestamp: '2026-01-01T00:00:01.000Z', type: 'llm_call', payload: { role: 'orchestrator', usage: { promptTokens: 100, completionTokens: 20, totalTokens: 120 } } }),
+		JSON.stringify({ timestamp: '2026-01-01T00:00:02.000Z', type: 'llm_unavailable', payload: { role: 'orchestrator', message: 'connection refused' } }),
+	].join('\n'),
+})
+
+// An interrupted run with a shape-valid run id, so the resume endpoint can prove a terminal-but-not-error run is refused (409), not unknown (404).
+snapshots.set('run-20260101-000300', {
+	metaText: JSON.stringify({
+		runId: 'run-20260101-000300',
+		guildPath: 'guild',
+		benchmarkPath: 'bench',
+		task: 'task for run-20260101-000300',
+		status: 'interrupted',
+		startTime: '2026-01-01T00:00:00.000Z',
+		endTime: '2026-01-01T00:02:00.000Z',
+		error: { kind: 'interrupted', message: 'The service stopped while this run was in progress and it could not be resumed (no valid checkpoint).' },
+	}),
+	logText: '',
+})
+
 // 'run-19990101-000000' is run-id shaped but has no run directory, so the continuation validation's known-run check is exercisable (the default fabrication would otherwise invent a meta for any id).
 const unknownRunIds = new Set(['never-started', 'run-19990101-000000'])
 
@@ -146,10 +180,6 @@ function rawSnapshotById(runId: string): RunSnapshotRaw {
 	return snapshots.get(runId) ?? snapshotFor(runId)
 }
 
-function readRunSnapshot(runId: string): RunSnapshot {
-	return parseRunSnapshot(rawSnapshotById(runId))
-}
-
 function readRunMetaById(runId: string): string | null {
 	return rawSnapshotById(runId).metaText
 }
@@ -166,14 +196,6 @@ const plans = new Map<string, string>([
 
 function readRunPlanById(runId: string): string | null {
 	return plans.get(runId) ?? null
-}
-
-function readRunSnapshotStats(runId: string): RunSnapshotStats {
-	const raw = rawSnapshotById(runId)
-	return {
-		meta: raw.metaText === null ? null : { size: raw.metaText.length, mtimeMs: 1 },
-		log: raw.logText === '' ? null : { size: raw.logText.length, mtimeMs: 1 },
-	}
 }
 
 // No fixture run carries a generated summary; the run-list cache's freshness key sees a permanently absent summary.txt, which the summary reader below mirrors.
@@ -460,11 +482,13 @@ interface HandlerHarness {
 	resolveActive: () => (meta: RunMeta) => void
 	resolveResumed: () => (meta: RunMeta) => void
 	resumedCheckpoints: () => RunCheckpoint[]
+	resumedNotes: () => Array<string | undefined>
+	checkpoints: Map<string, string>
 }
 
-// Builds a fresh handler whose startRun and resumeRun park on caller-controlled resolvers, so each test drives its own run lifecycle without touching shared state. The static leaf is a recording fake; every dependency is in-memory. runIdCollides makes runDirectoryExists report an existing directory for the generated id, exercising the submit-level run_id_collision refusal. build seeds the image build identifier GET /api/config surfaces (null, as from a source checkout, unless a test passes one).
+// Builds a fresh handler whose startRun and resumeRun park on caller-controlled resolvers, so each test drives its own run lifecycle without touching shared state. The static leaf is a recording fake; every dependency is in-memory. runIdCollides makes runDirectoryExists report an existing directory for the generated id, exercising the submit-level run_id_collision refusal. build seeds the image build identifier GET /api/config surfaces (null, as from a source checkout, unless a test passes one). initialCheckpoints seeds the in-memory checkpoint store (raw state.json text by run id) the resume submission and the resumable flag read.
 // The queue store and the scheduler are wired exactly as serve.ts wires them: the handler's mutations and the POST /api/runs enqueue go through the same in-memory leaves, the scheduler dispatches through the submission, and a settled run promise maps its item and ticks onward.
-function createHandlerHarness(options: { runIdCollides?: boolean, build?: BuildInfo | null, initialQueueItems?: QueueItem[] } = {}): HandlerHarness {
+function createHandlerHarness(options: { runIdCollides?: boolean, build?: BuildInfo | null, initialQueueItems?: QueueItem[], initialCheckpoints?: Map<string, string> } = {}): HandlerHarness {
 	let resolveActive: (meta: RunMeta) => void = () => {}
 	let resolveResumed: (meta: RunMeta) => void = () => {}
 	let capturedEffort: EffortLevel | undefined
@@ -472,6 +496,7 @@ function createHandlerHarness(options: { runIdCollides?: boolean, build?: BuildI
 	let capturedContinuation: RunContinuation | undefined
 	let capturedQueueTracked: boolean | undefined
 	const resumed: RunCheckpoint[] = []
+	const resumedNotes: Array<string | undefined> = []
 	const startRun: StartRun = (_runId, _task, effort, logLevel, continuation, queueTracked) => {
 		capturedEffort = effort
 		capturedLogLevel = logLevel
@@ -481,11 +506,34 @@ function createHandlerHarness(options: { runIdCollides?: boolean, build?: BuildI
 			resolveActive = resolve
 		})
 	}
-	const resumeRun: ResumeRun = (checkpoint) => {
+	// Metas a fake run start/resume has written, layered over the fixture snapshots: the real executor writes a running meta as its first act (and the resumed meta flip is what the UI reads), so the fake mirrors that write synchronously at call time — the same point the real writeMeta lands inside submission.resume.
+	const metaOverrides = new Map<string, string>()
+	const harnessRawSnapshot = (runId: string): RunSnapshotRaw => {
+		const base = rawSnapshotById(runId)
+		return { metaText: metaOverrides.get(runId) ?? base.metaText, logText: base.logText }
+	}
+	const harnessReadRunMetaById = (runId: string): string | null => harnessRawSnapshot(runId).metaText
+	const harnessReadRunSnapshot = (runId: string): RunSnapshot => parseRunSnapshot(harnessRawSnapshot(runId))
+	const harnessReadRunSnapshotStats = (runId: string): RunSnapshotStats => {
+		const raw = harnessRawSnapshot(runId)
+		return {
+			meta: raw.metaText === null ? null : { size: raw.metaText.length, mtimeMs: 1 },
+			log: raw.logText === '' ? null : { size: raw.logText.length, mtimeMs: 1 },
+		}
+	}
+	const checkpoints = new Map<string, string>(options.initialCheckpoints ?? [])
+	const resumeRun: ResumeRun = (checkpoint, resumeNote) => {
 		resumed.push(checkpoint)
-		return new Promise<RunMeta>((resolve) => {
+		resumedNotes.push(resumeNote)
+		metaOverrides.set(checkpoint.runId, JSON.stringify({ runId: checkpoint.runId, guildPath: 'guild', task: `task for ${checkpoint.runId}`, status: 'running', startTime: checkpoint.startTime }))
+		const runPromise = new Promise<RunMeta>((resolve) => {
 			resolveResumed = resolve
 		})
+		// The settled meta is the resume path's second write (the terminal meta over the running one), so the fake mirrors it on resolution — a twice-errored resume must find the re-written error meta on the next request.
+		void runPromise.then((meta) => {
+			metaOverrides.set(checkpoint.runId, JSON.stringify(meta))
+		})
+		return runPromise
 	}
 	let nextId = 0
 	const settings = createInMemorySettings()
@@ -495,7 +543,7 @@ function createHandlerHarness(options: { runIdCollides?: boolean, build?: BuildI
 	const scheduler = createTaskScheduler({
 		readQueue: queue.readQueue,
 		writeQueue: queue.writeQueue,
-		readRunMetaById,
+		readRunMetaById: harnessReadRunMetaById,
 		listRunIds,
 		readRunListSummary,
 		submitRun: (queued) => submission.submit(queued.task, queued.effort, queued.logLevel, queued.continuation),
@@ -506,6 +554,14 @@ function createHandlerHarness(options: { runIdCollides?: boolean, build?: BuildI
 	const interruptChannel = createInterruptChannel()
 	const humanBackend = createWebHumanBackend()
 	const staticCalls: string[] = []
+	// The explicit error-resume submission, composed over the fakes exactly as serve.ts composes it over the real leaves.
+	const resumeErroredRun = createResumeErroredRun({
+		runSubmission: submission,
+		readRunMetaById: harnessReadRunMetaById,
+		readCheckpointById: (runId) => checkpoints.get(runId) ?? null,
+		readQueue: queue.readQueue,
+		writeQueue: queue.writeQueue,
+	})
 	const handler = createRequestHandler(
 		{
 			guildConfig: sampleGuildConfig,
@@ -513,17 +569,19 @@ function createHandlerHarness(options: { runIdCollides?: boolean, build?: BuildI
 			tools: {},
 			runState: createRunState({ humanBackend, interruptChannel }),
 			runSubmission: submission,
-			readRunSnapshot,
-			readRunMetaById,
+			readRunSnapshot: harnessReadRunSnapshot,
+			readRunMetaById: harnessReadRunMetaById,
 			readRunListSummary,
 			readRunSummaryStats,
 			readRunPlanById,
-			readRunSnapshotStats,
+			readRunSnapshotStats: harnessReadRunSnapshotStats,
 			listRunIds,
 			readProjectSettings: settings.read,
 			writeProjectSettings: settings.write,
 			readQueue: queue.readQueue,
 			writeQueue: queue.writeQueue,
+			resumeErroredRun,
+			runCheckpointExists: (runId) => checkpoints.has(runId),
 			tickScheduler: () => scheduler.tick(),
 			build: options.build ?? null,
 		},
@@ -547,6 +605,8 @@ function createHandlerHarness(options: { runIdCollides?: boolean, build?: BuildI
 		resolveActive: () => resolveActive,
 		resolveResumed: () => resolveResumed,
 		resumedCheckpoints: () => resumed,
+		resumedNotes: () => resumedNotes,
+		checkpoints,
 	}
 }
 
@@ -905,7 +965,7 @@ describe('GET /api/runs (list)', () => {
 		expect(response.status).toBe(200)
 		const list = await response.json()
 		expect(Array.isArray(list)).toBe(true)
-		expect(list.length).toBe(17)
+		expect(list.length).toBe(19)
 		expect(list[0].runId).toBe('run-tree')
 		expect(list[1].runId).toBe('run-retry')
 		expect(list[2].runId).toBe('run-long')
@@ -920,9 +980,11 @@ describe('GET /api/runs (list)', () => {
 		expect(list[11].runId).toBe('run-cached')
 		expect(list[12].runId).toBe('run-active')
 		expect(list[13].runId).toBe('run-3')
-		expect(list[14].runId).toBe('run-20260101-000000')
-		expect(list[15].runId).toBe('run-2')
-		expect(list[16].runId).toBe('run-1')
+		expect(list[14].runId).toBe('run-20260101-000300')
+		expect(list[15].runId).toBe('run-20260101-000100')
+		expect(list[16].runId).toBe('run-20260101-000000')
+		expect(list[17].runId).toBe('run-2')
+		expect(list[18].runId).toBe('run-1')
 		expect(list[3]).toEqual({
 			runId: 'run-interrupted',
 			status: 'interrupted',
@@ -945,7 +1007,7 @@ describe('GET /api/runs (list)', () => {
 			error: null,
 			summary: null,
 		})
-		expect(list[15]).toEqual({
+		expect(list[17]).toEqual({
 			runId: 'run-2',
 			status: 'error',
 			task: 'task for run-2',
@@ -1768,6 +1830,55 @@ describe('POST /api/runs', () => {
 		await submission.awaitActive()
 	})
 
+	test('accepts a continuation with an empty task, standing the prior run\u2019s task text in', async () => {
+		const { handler, submission, queue, lastContinuation, resolveActive } = createHandlerHarness()
+		const response = await handler(post('/api/runs', JSON.stringify({ task: '', continuesFrom: 'run-20260101-000000' })))
+		expect(response.status).toBe(201)
+		// The composed continuation uses the prior run's task either way; the queued item (and so the dispatched run's task) carries the prior task text too, since the run re-runs it.
+		const continuation = lastContinuation()
+		expect(continuation?.runId).toBe('run-20260101-000000')
+		expect(continuation?.task).toBe('prior run task')
+		expect(continuation?.summary).toBe('prior run finished cleanly')
+		const items = queue.snapshot().items
+		expect(items[0]?.task).toBe('prior run task')
+
+		resolveActive()(terminalMeta('test-run-0', 'prior run task'))
+		await submission.awaitActive()
+	})
+
+	test('accepts a continuation with the task field absent entirely', async () => {
+		const { handler, submission, lastContinuation, resolveActive } = createHandlerHarness()
+		const response = await handler(post('/api/runs', JSON.stringify({ continuesFrom: 'run-20260101-000000' })))
+		expect(response.status).toBe(201)
+		expect(lastContinuation()?.task).toBe('prior run task')
+
+		resolveActive()(terminalMeta('test-run-0', 'prior run task'))
+		await submission.awaitActive()
+	})
+
+	test('still rejects an empty task without continuesFrom with 400 invalid_body', async () => {
+		const { handler } = createHandlerHarness()
+		const emptyString = await handler(post('/api/runs', JSON.stringify({ task: '' })))
+		expect(emptyString.status).toBe(400)
+		const missingField = await handler(post('/api/runs', JSON.stringify({})))
+		expect(missingField.status).toBe(400)
+		expect(await missingField.json()).toEqual({ ok: false, error: 'invalid_body' })
+	})
+
+	test('rejects an empty task with an unknown continuesFrom with 400 invalid_body', async () => {
+		const { handler } = createHandlerHarness()
+		const response = await handler(post('/api/runs', JSON.stringify({ task: '', continuesFrom: 'run-19990101-000000' })))
+		expect(response.status).toBe(400)
+		expect(await response.json()).toEqual({ ok: false, error: 'invalid_body' })
+	})
+
+	test('rejects a present-but-non-string task even with a valid continuesFrom with 400 invalid_body', async () => {
+		const { handler } = createHandlerHarness()
+		const response = await handler(post('/api/runs', JSON.stringify({ task: 42, continuesFrom: 'run-20260101-000000' })))
+		expect(response.status).toBe(400)
+		expect(await response.json()).toEqual({ ok: false, error: 'invalid_body' })
+	})
+
 	test('threads a briefing-only continuation when continuesFrom is absent', async () => {
 		const { handler, submission, lastContinuation, resolveActive } = createHandlerHarness()
 		const response = await handler(post('/api/runs', JSON.stringify({ task: 'a fresh task' })))
@@ -2200,6 +2311,173 @@ describe('POST /api/runs/:id/interrupt', () => {
 		const response = await handler(post('/api/runs/%/interrupt', JSON.stringify({ kind: 'inquiry', message: 'hello?' })))
 		expect(response.status).toBe(404)
 		expect(await response.json()).toEqual({ ok: false, error: 'not_found' })
+	})
+})
+
+describe('POST /api/runs/:id/resume', () => {
+	const RESUMABLE_RUN = 'run-20260101-000100'
+	const NOTE = 'The operator resumed this run after a failure. Message from the operator: the endpoint is back; carry on'
+
+	function resumeHarness(initialQueueItems: QueueItem[] = []): ReturnType<typeof createHandlerHarness> {
+		const checkpoints = new Map([[RESUMABLE_RUN, JSON.stringify(resumeCheckpoint(RESUMABLE_RUN))]])
+		return createHandlerHarness({ initialQueueItems, initialCheckpoints: checkpoints })
+	}
+
+	test('a happy resume returns 201 with the same run id, occupies the slot, threads the framed note, and re-activates the settled item', async () => {
+		const erroredItem = queueItem('item-resume', 'task for run-20260101-000100', { status: 'error', runId: RESUMABLE_RUN, settledAt: '2026-01-01T00:02:00.000Z', resultSummary: 'LLM unavailable: connection refused', error: 'connection refused' })
+		const harness = resumeHarness([erroredItem])
+
+		const response = await harness.handler(post(`/api/runs/${RESUMABLE_RUN}/resume`, JSON.stringify({ note: 'the endpoint is back; carry on' })))
+
+		expect(response.status).toBe(201)
+		expect(await response.json()).toEqual({ runId: RESUMABLE_RUN })
+		expect(harness.submission.activeRunId()).toBe(RESUMABLE_RUN)
+		expect(harness.resumedCheckpoints()[0]?.runId).toBe(RESUMABLE_RUN)
+		expect(harness.resumedNotes()).toEqual([NOTE])
+		const item = harness.queue.snapshot().items.find((entry) => entry.id === 'item-resume')
+		expect(item?.status).toBe('active')
+		expect(item?.runId).toBe(RESUMABLE_RUN)
+		expect(item?.error).toBeUndefined()
+		expect(item?.settledAt).toBeUndefined()
+
+		harness.resolveResumed()(terminalMeta(RESUMABLE_RUN, `task for ${RESUMABLE_RUN}`))
+		await harness.submission.awaitActive()
+	})
+
+	test('the resumed run view flips to running and the pre-resume view advertises resumable', async () => {
+		const harness = resumeHarness()
+
+		const before = await harness.handler(get(`/api/runs/${RESUMABLE_RUN}`))
+		expect(before.status).toBe(200)
+		const beforeView = await before.json()
+		expect(beforeView.status).toBe('error')
+		expect(beforeView.resumable).toBe(true)
+
+		await harness.handler(post(`/api/runs/${RESUMABLE_RUN}/resume`))
+		const after = await harness.handler(get(`/api/runs/${RESUMABLE_RUN}`))
+		expect(after.status).toBe(200)
+		const afterView = await after.json()
+		expect(afterView.status).toBe('running')
+		expect(afterView.resumable).toBe(false)
+
+		harness.resolveResumed()(terminalMeta(RESUMABLE_RUN, `task for ${RESUMABLE_RUN}`))
+		await harness.submission.awaitActive()
+	})
+
+	test('an absent, null, or empty note resumes with no note injected', async () => {
+		for (const body of [undefined, 'null', '{}', JSON.stringify({ note: null }), JSON.stringify({ note: '' })]) {
+			const harness = resumeHarness()
+			const response = await harness.handler(post(`/api/runs/${RESUMABLE_RUN}/resume`, body))
+			expect(response.status).toBe(201)
+			expect(await response.json()).toEqual({ runId: RESUMABLE_RUN })
+			expect(harness.resumedNotes()).toEqual([undefined])
+			harness.resolveResumed()(terminalMeta(RESUMABLE_RUN, `task for ${RESUMABLE_RUN}`))
+			await harness.submission.awaitActive()
+		}
+	})
+
+	test('an unknown run id is a 404', async () => {
+		const { handler } = resumeHarness()
+		const response = await handler(post('/api/runs/run-19990101-000000/resume'))
+		expect(response.status).toBe(404)
+		expect(await response.json()).toEqual({ ok: false, error: 'not_found' })
+	})
+
+	test('a malformed run id is a 404 without reaching the readers', async () => {
+		const { handler } = resumeHarness()
+		const response = await handler(post('/api/runs/not-a-run-id/resume'))
+		expect(response.status).toBe(404)
+		expect(await response.json()).toEqual({ ok: false, error: 'not_found' })
+	})
+
+	test('a twice-errored run can be resumed again and again until it succeeds', async () => {
+		const erroredItem = queueItem('item-resume', 'task for run-20260101-000100', { status: 'error', runId: RESUMABLE_RUN, settledAt: '2026-01-01T00:02:00.000Z', resultSummary: 'LLM unavailable: connection refused', error: 'connection refused' })
+		const harness = resumeHarness([erroredItem])
+		const errorMeta: RunMeta = {
+			runId: RESUMABLE_RUN,
+			guildPath: 'guild',
+			task: `task for ${RESUMABLE_RUN}`,
+			status: 'error',
+			startTime: '2026-01-01T00:00:00.000Z',
+			endTime: '2026-01-01T00:03:00.000Z',
+			result: { status: 'error', summary: 'LLM unavailable: connection refused' },
+			error: { kind: 'llm_unavailable', message: 'connection refused' },
+		}
+
+		// First resume: the run errors again — the item re-settles to error and the run stays resumable.
+		const first = await harness.handler(post(`/api/runs/${RESUMABLE_RUN}/resume`, JSON.stringify({ note: 'first try' })))
+		expect(first.status).toBe(201)
+		expect(await first.json()).toEqual({ runId: RESUMABLE_RUN })
+		harness.resolveResumed()(errorMeta)
+		await harness.submission.awaitActive()
+		const itemAfterFirst = harness.queue.snapshot().items.find((entry) => entry.id === 'item-resume')
+		expect(itemAfterFirst?.status).toBe('error')
+
+		// Second resume: accepted against the re-written error meta, the item re-activates again, and the note is threaded again.
+		const second = await harness.handler(post(`/api/runs/${RESUMABLE_RUN}/resume`, JSON.stringify({ note: 'second try' })))
+		expect(second.status).toBe(201)
+		expect(await second.json()).toEqual({ runId: RESUMABLE_RUN })
+		const itemAfterSecond = harness.queue.snapshot().items.find((entry) => entry.id === 'item-resume')
+		expect(itemAfterSecond?.status).toBe('active')
+		expect(harness.resumedCheckpoints().map((checkpoint) => checkpoint.runId)).toEqual([RESUMABLE_RUN, RESUMABLE_RUN])
+		expect(harness.resumedNotes()).toEqual([
+			'The operator resumed this run after a failure. Message from the operator: first try',
+			'The operator resumed this run after a failure. Message from the operator: second try',
+		])
+
+		// The run finally succeeds and the item settles done.
+		harness.resolveResumed()(terminalMeta(RESUMABLE_RUN, `task for ${RESUMABLE_RUN}`))
+		await harness.submission.awaitActive()
+		expect(harness.queue.snapshot().items.find((entry) => entry.id === 'item-resume')?.status).toBe('done')
+		// The checkpoint record was never consumed by the resume path — retention is the executor's job and is pinned there.
+		expect(harness.checkpoints.has(RESUMABLE_RUN)).toBe(true)
+	})
+
+	test('a meta that is not error is a 409 run_not_errored', async () => {
+		const { handler } = resumeHarness()
+		for (const runId of ['run-20260101-000000', 'run-20260101-000300']) {
+			const response = await handler(post(`/api/runs/${runId}/resume`))
+			expect(response.status).toBe(409)
+			expect(await response.json()).toEqual({ ok: false, error: 'run_not_errored' })
+		}
+	})
+
+	test('a missing checkpoint is a 409 pointing at the briefed-continuation alternative', async () => {
+		const { handler } = createHandlerHarness()
+		const response = await handler(post(`/api/runs/${RESUMABLE_RUN}/resume`))
+		expect(response.status).toBe(409)
+		const body = await response.json()
+		expect(body.ok).toBe(false)
+		expect(body.error).toBe('checkpoint_missing')
+		expect(body.message).toContain('POST /api/runs')
+		expect(body.message).toContain('continuesFrom')
+	})
+
+	test('a malformed note body is a 400', async () => {
+		const harness = resumeHarness()
+		for (const body of ['{not json', '[]', '"a string"', '5', JSON.stringify({ note: 5 })]) {
+			const response = await harness.handler(post(`/api/runs/${RESUMABLE_RUN}/resume`, body))
+			expect(response.status).toBe(400)
+			expect(await response.json()).toEqual({ ok: false, error: 'invalid_body' })
+		}
+	})
+
+	test('a resume while a run is active is a 409 run_in_progress with nothing touched', async () => {
+		const erroredItem = queueItem('item-resume', 'task for run-20260101-000100', { status: 'error', runId: RESUMABLE_RUN, settledAt: '2026-01-01T00:02:00.000Z', error: 'connection refused' })
+		const harness = resumeHarness([erroredItem])
+		const submitted = harness.submission.submit('a fresh task')
+		if (!submitted.ok) throw new Error('submit failed')
+
+		const response = await harness.handler(post(`/api/runs/${RESUMABLE_RUN}/resume`, JSON.stringify({ note: 'too late' })))
+		expect(response.status).toBe(409)
+		expect(await response.json()).toEqual({ ok: false, error: 'run_in_progress' })
+		expect(harness.submission.activeRunId()).toBe(submitted.runId)
+		// The rejection touches nothing: the item stays settled to error and no checkpoint was consumed.
+		expect(harness.queue.snapshot().items.find((entry) => entry.id === 'item-resume')?.status).toBe('error')
+		expect(harness.resumedCheckpoints()).toEqual([])
+
+		harness.resolveActive()(terminalMeta(submitted.runId, 'a fresh task'))
+		await harness.submission.awaitActive()
 	})
 })
 

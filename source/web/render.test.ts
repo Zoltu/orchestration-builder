@@ -763,6 +763,19 @@ describe('renderRunView', () => {
 		expect(renderRunView(inProgress, { maxLogLines: 200, now: NOW }).continuesFrom).toBeNull()
 	})
 
+	test('resumable is true only for an error meta the caller found a checkpoint file for', () => {
+		const errored = parseRunSnapshot({ metaText: JSON.stringify(sampleRunMeta({ status: 'error' })), logText: '' })
+		expect(renderRunView(errored, { maxLogLines: 200, now: NOW, checkpointExists: true }).resumable).toBe(true)
+		expect(renderRunView(errored, { maxLogLines: 200, now: NOW, checkpointExists: false }).resumable).toBe(false)
+		expect(renderRunView(errored, { maxLogLines: 200, now: NOW }).resumable).toBe(false)
+
+		const succeeded = parseRunSnapshot({ metaText: JSON.stringify(sampleRunMeta()), logText: '' })
+		expect(renderRunView(succeeded, { maxLogLines: 200, now: NOW, checkpointExists: true }).resumable).toBe(false)
+
+		const missingMeta = parseRunSnapshot({ metaText: null, logText: '' })
+		expect(renderRunView(missingMeta, { maxLogLines: 200, now: NOW, checkpointExists: true }).resumable).toBe(false)
+	})
+
 	test('carries the raw plan markdown through to the view, or null when the caller read none', () => {
 		const snapshot = parseRunSnapshot({ metaText: JSON.stringify(sampleRunMeta()), logText: '' })
 		expect(renderRunView(snapshot, { maxLogLines: 200, now: NOW, plan: '# Plan\n\nstep one' }).plan).toBe('# Plan\n\nstep one')
@@ -799,6 +812,16 @@ describe('renderRunView', () => {
 		})
 		const view = renderRunView(snapshot, { maxLogLines: 200, now: NOW })
 		expect(view.result).toBeNull()
+	})
+
+	test('the result card passes through verbatim, including an error card\u2019s technical detail', () => {
+		const card = { status: 'error' as const, summary: 'LLM unavailable: HTTP 402', error: { kind: 'llm_unavailable' as const, message: 'HTTP 402' }, detail: '{"error":"Insufficient credit"}' }
+		const snapshot = parseRunSnapshot({
+			metaText: JSON.stringify(sampleRunMeta({ status: 'error', result: card })),
+			logText: '',
+		})
+		const view = renderRunView(snapshot, { maxLogLines: 200, now: NOW })
+		expect(view.result).toEqual(card)
 	})
 
 	test('recentLog entries carry the log-wide index and the one-line text, with no payload or detail sections', () => {
@@ -1298,6 +1321,14 @@ describe('renderRunSummary', () => {
 		const summary = renderRunSummary('r', meta, null)
 		expect(summary.result).toEqual({ status: 'success', summary: 'fixed it', artifacts: ['a.ts'] })
 		expect(summary.error).toEqual({ kind: 'llm_unavailable', message: 'endpoint down' })
+	})
+
+	test('passes an error card\u2019s technical detail through to the history summary', () => {
+		const meta = parseRunMeta(JSON.stringify(sampleRunMeta({
+			status: 'error',
+			result: { status: 'error', summary: 'LLM unavailable: HTTP 402', error: { kind: 'llm_unavailable', message: 'HTTP 402' }, detail: '{"error":"Insufficient credit"}' },
+		})))
+		expect(renderRunSummary('r', meta, null).result?.detail).toBe('{"error":"Insufficient credit"}')
 	})
 
 	test('carries the generated one-line summary through to the client', () => {

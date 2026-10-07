@@ -751,6 +751,8 @@ export interface RunView {
 	error: NonNullable<RunMeta['error']> | null
 	// The prior run's id when this run continues one (meta.continuesFrom), else null; the client renders the run view's lineage line from it.
 	continuesFrom: string | null
+	// Whether the operator can explicitly resume this run from its checkpoint: a terminal error meta plus a checkpoint file on disk (the caller stats for it). False for every other status and for an error run whose checkpoint is gone — those continue only through the briefed-continuation flow.
+	resumable: boolean
 	// The run's raw plan Markdown (plan.md), read per request by the caller; never derived from the cached snapshot, which carries only meta and log text.
 	plan: string | null
 	roles: RoleActivity[]
@@ -767,6 +769,8 @@ export interface RenderRunViewOptions {
 	now: string
 	// The raw plan Markdown the caller read for this run; omitted (absent document) and null both mean "no plan".
 	plan?: string | null
+	// Whether a checkpoint file exists for this run, read per request by the caller; omitted reads as false.
+	checkpointExists?: boolean
 }
 
 export function renderRunView(snapshot: RunSnapshot, options: RenderRunViewOptions): RunView {
@@ -789,6 +793,7 @@ export function renderRunView(snapshot: RunSnapshot, options: RenderRunViewOptio
 		result: meta === null ? null : (meta.result ?? null),
 		error: meta === null ? null : (meta.error ?? null),
 		continuesFrom: meta === null ? null : (meta.continuesFrom ?? null),
+		resumable: meta !== null && meta.status === 'error' && options.checkpointExists === true,
 		plan: options.plan ?? null,
 		roles: deriveRoleActivity(snapshot.logEvents),
 		roleTree: deriveRoleTree(snapshot.logEvents),

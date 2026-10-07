@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { assembleBriefingLines, cancelWaitingItem, dispatchingItem, editWaitingItem, enqueueAtHead, enqueueAtTail, isQueueItem, isTaskQueue, mapSettledItemState, MAX_BRIEFING_RUN_LINES, normalizeNewItem, recordAnswer, removeWaitingItem, requeueErrorItem, releaseToWaiting, reorderWaitingItem, repairActiveItem, requireWaitingItem, settleActiveItem } from './task-queue.ts'
+import { assembleBriefingLines, cancelWaitingItem, dispatchingItem, editWaitingItem, enqueueAtHead, enqueueAtTail, isQueueItem, isTaskQueue, mapSettledItemState, MAX_BRIEFING_RUN_LINES, normalizeNewItem, reactivateErrorItem, recordAnswer, removeWaitingItem, requeueErrorItem, releaseToWaiting, reorderWaitingItem, repairActiveItem, requireWaitingItem, settleActiveItem } from './task-queue.ts'
 import type { QueueItem, TaskQueue } from './task-queue.ts'
 import type { RunMeta } from './types.js'
 
@@ -220,6 +220,28 @@ describe('requeueErrorItem', () => {
 	test('rejects an unknown id and a non-error target', () => {
 		expect(requeueErrorItem(queue(item()), 'ghost')).toEqual({ ok: false, reason: 'not_found' })
 		expect(requeueErrorItem(queue(item({ status: 'waiting' })), 'item-1')).toEqual({ ok: false, reason: 'forbidden_status' })
+	})
+
+	test('re-activates the error item a resumed run belongs to, under the same run id, without carrying the settled outcome fields', () => {
+		const errored = item({ status: 'error', runId: 'run-20260101-010000', settledAt: '2026-01-01T01:00:00.000Z', resultSummary: 'boom', error: 'it broke', continuesFrom: 'run-20260101-000000' })
+		const result = reactivateErrorItem(queue(errored), 'run-20260101-010000')
+		expect(result.ok).toBe(true)
+		if (result.ok) {
+			expect(result.item.status).toBe('active')
+			expect(result.item.runId).toBe('run-20260101-010000')
+			expect(result.item.continuesFrom).toBe('run-20260101-000000')
+			expect(result.item.resultSummary).toBeUndefined()
+			expect(result.item.error).toBeUndefined()
+			expect(result.item.settledAt).toBeUndefined()
+			// The re-activated item settles naturally at the resumed run's next terminal, exactly like any active item's.
+			const settlement = settleActiveItem(result.queue, 'run-20260101-010000', meta({ status: 'success', result: { status: 'success', summary: 'recovered' } }), '2026-01-01T02:00:00.000Z')
+			expect(settlement.kind).toBe('settled')
+		}
+	})
+
+	test('leaves the queue untouched when no error item names the resumed run', () => {
+		expect(reactivateErrorItem(queue(item({ status: 'error', runId: 'run-20260101-010000' })), 'run-19990101-000000')).toEqual({ ok: false, reason: 'not_found' })
+		expect(reactivateErrorItem(queue(item()), 'run-20260101-010000')).toEqual({ ok: false, reason: 'not_found' })
 	})
 })
 

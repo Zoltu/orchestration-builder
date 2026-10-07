@@ -45,13 +45,13 @@ export type { InterruptChannel, InterruptQueue, InterruptRequest, InterruptSubmi
 export { createDeltaChannel } from './stream-channel.js'
 export type { DeltaChannel, DeltaField, DeltaSubscriber, RoleDelta, RunDelta } from './stream-channel.js'
 
-export { createRunSubmission } from './run-submission.js'
-export type { ResumeRun, RunSubmission, RunSubmissionDependencies, StartRun, SubmitResult } from './run-submission.js'
+export { createRunSubmission, createResumeErroredRun } from './run-submission.js'
+export type { ResumeErroredRun, ResumeErroredRunDependencies, ResumeErroredRunRejection, ResumeErroredRunResult, ResumeRun, RunSubmission, RunSubmissionDependencies, StartRun, SubmitResult } from './run-submission.js'
 
 export { createTaskScheduler, COLLISION_RETRY_DELAY_MS, MAX_COLLISION_RETRIES } from './scheduler.js'
 export type { QueuedRunSubmission, SubmitQueuedRun, TaskScheduler, TaskSchedulerDependencies } from './scheduler.js'
 
-export { isQueueItem, isTaskQueue, normalizeNewItem, enqueueAtTail, enqueueAtHead, reorderWaitingItem, cancelWaitingItem, removeWaitingItem, requireWaitingItem, editWaitingItem, recordAnswer, requeueErrorItem, releaseToWaiting, dispatchingItem, withReplacedItem, mapSettledItemState, settleActiveItem, repairActiveItem, assembleBriefingLines, MAX_BRIEFING_RUN_LINES } from './task-queue.js'
+export { isQueueItem, isTaskQueue, normalizeNewItem, enqueueAtTail, enqueueAtHead, reorderWaitingItem, cancelWaitingItem, removeWaitingItem, requireWaitingItem, editWaitingItem, recordAnswer, requeueErrorItem, reactivateErrorItem, releaseToWaiting, dispatchingItem, withReplacedItem, mapSettledItemState, settleActiveItem, repairActiveItem, assembleBriefingLines, MAX_BRIEFING_RUN_LINES } from './task-queue.js'
 export type { ActiveItemRepair, BriefingInput, NewQueueItemResult, QueueItem, QueueItemStatus, QueueMutation, QueueMutationRejection, RunListEntry, SettlementOutcome, TaskQueue, TerminalItemState } from './task-queue.js'
 
 export { createRunParkTracker, isWriteCapableRole, parkCard, parkSummary, questionFromParkSummary, PARK_SUMMARY_PREFIX, WRITE_CAPABLE_TOOL_NAMES } from './park-state.js'
@@ -86,6 +86,7 @@ export {
 	createWriteCheckpoint,
 	createDeleteCheckpoint,
 	createReadRunCheckpointById,
+	createRunCheckpointExists,
 	createReadRunSnapshotById,
 	createReadRunMetaById,
 	createWriteRunSummary,
@@ -109,6 +110,7 @@ export type {
 	WriteCheckpoint,
 	DeleteCheckpoint,
 	ReadRunCheckpointById,
+	RunCheckpointExists,
 	ReadRunSnapshotById,
 	ReadRunMetaById,
 	WriteRunSummary,

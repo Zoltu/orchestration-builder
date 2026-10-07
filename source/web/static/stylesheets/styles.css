@@ -444,6 +444,13 @@ li:last-child {
 	white-space: nowrap;
 }
 
+/* The compose screen's notice for a refused resume (another run in flight, a missing checkpoint): muted microcopy under the submit button, so the reason sits where the click landed and the typed note stays in the box for a retry. Mirrors the interrupt form's notice styling. */
+.resume-notice {
+	margin: var(--space-2) 0 0;
+	font-size: 0.82rem;
+	color: var(--color-text-muted);
+}
+
 /* The History screen is the full-screen run browser. Rows stay one line tall regardless of how large the underlying prompt or result is — the primary line ellipsizes — and the full content lives in the per-row expanded details. The list scrolls inside the screen; the page does not. */
 #history-screen {
 	flex: 1 1 auto;
@@ -2383,6 +2390,35 @@ li:last-child {
 	margin: 0.2rem 0;
 }
 
+/* The technical-details disclosure: collapsed by default (the <details> element carries no open attribute), holding the raw failure payload as preformatted text. */
+.result-modal-error-detail {
+	margin-top: var(--space-2);
+}
+
+.result-modal-error-detail-summary {
+	cursor: pointer;
+	font-size: 0.8rem;
+	font-weight: 500;
+	color: var(--color-text-muted);
+	user-select: none;
+}
+
+.result-modal-error-detail-text {
+	margin: var(--space-2) 0 0;
+	padding: var(--space-2);
+	border: 1px solid var(--color-error);
+	border-radius: var(--radius-sm);
+	background: var(--color-surface);
+	font-family: var(--font-mono);
+	font-size: 0.8rem;
+	line-height: 1.4;
+	color: var(--color-text);
+	white-space: pre-wrap;
+	overflow-wrap: anywhere;
+	max-height: 12rem;
+	overflow: auto;
+}
+
 .result-modal-error-actions {
 	margin-top: var(--space-3);
 }
@@ -2407,6 +2443,7 @@ li:last-child {
 	padding-top: var(--space-5);
 	display: flex;
 	justify-content: center;
+	gap: var(--space-2);
 }
 
 .result-modal-close {
@@ -2417,6 +2454,23 @@ li:last-child {
 	color: #ffffff;
 	font-weight: 500;
 	cursor: pointer;
+}
+
+/* The error modal's Continue and Resume affordances: secondary buttons beside Close, so the run's failure reads as a waypoint — one click re-opens the compose screen (Continue, anchored to this run's outcome) or restarts the same run from its checkpoint (Resume, offered when the checkpoint makes a same-run resume possible). Both are the same kind of waypoint, so they share one rule list. */
+.result-modal-continue,
+.result-modal-resume {
+	padding: var(--space-2) var(--space-4);
+	border: 1px solid var(--color-accent);
+	border-radius: var(--radius-sm);
+	background: var(--color-surface);
+	color: var(--color-accent);
+	font-weight: 500;
+	cursor: pointer;
+}
+
+.result-modal-continue:hover,
+.result-modal-resume:hover {
+	background: var(--color-accent-soft);
 }
 
 /* The terminal-result call-to-action node, rendered as a layered 3D "bezel + bevel + face" button modeled on a classic chrome-rimmed pushbutton. Three stacked SVG rects read as a raised, chrome-rimmed solid object: a grey-gradient bezel (the brushed-metal rim), a radial-gradient inner bevel (the beveled edge), and the accent- or error-gradient face (the colored surface). A cast drop-shadow lifts the whole button off the surface; hover lifts it further; press sinks it (the button depresses). All within the same NODE_WIDTH × NODE_HEIGHT box, so layout is unchanged. The inactive (modal-closed) and active (modal-open) states share the same 3D body — the active state adds a glowing inner ring (accent blue for success, error red for a failed run) + a stronger pulse so the open-modal connection reads. The gradients are declared inline in the vnode; the rules below carry the label/cast/motion styling. */

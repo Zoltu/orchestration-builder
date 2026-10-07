@@ -232,6 +232,19 @@ export function requeueErrorItem(queue: TaskQueue, id: string): QueueMutation {
 	return { ok: true, queue: enqueueAtTail({ items: queue.items.filter((existing) => existing.id !== id) }, requeued), item: requeued }
 }
 
+// The explicit error-resume's queue counterpart: the operator resumed an errored run from its checkpoint under the same run id, so the item settled to error for that run returns to the active slot under it — the queue panel tracks the live run instead of showing a stale error, and the resumed run's own settlement maps the item exactly as any active item's would (settleActiveItem matches on the run id). Outcome fields (settledAt, resultSummary, error) belong to the settled stage and are not carried, mirroring carriedFields; an unknown or non-error item leaves the queue untouched — the resume is driven by the run's meta and checkpoint, and an item whose record was requeued or cancelled does not bind.
+export function reactivateErrorItem(queue: TaskQueue, runId: string): QueueMutation {
+	const target = queue.items.find((item) => item.status === 'error' && item.runId === runId)
+	if (target === undefined) return { ok: false, reason: 'not_found' }
+	const reactivated: QueueItem = {
+		...carriedFields(target),
+		...(target.continuesFrom !== undefined ? { continuesFrom: target.continuesFrom } : {}),
+		status: 'active',
+		runId,
+	}
+	return { ok: true, queue: withReplacedItem(queue, reactivated), item: reactivated }
+}
+
 export interface TerminalItemState {
 	status: 'done' | 'error' | 'needs_input'
 	resultSummary?: string

@@ -142,6 +142,8 @@ export function isResultCard(value: unknown): value is ResultCard {
 	if (!isString(value.status) || !resultCardStatuses.some((s) => s === value.status)) return false
 	if (!isString(value.summary)) return false
 	if (value.artifacts !== undefined && !isStringArray(value.artifacts)) return false
+	// The technical detail on an error card is accepted and preserved (an unknown key would silently drop it from every meta read back).
+	if (!isOptionalString(value.detail)) return false
 	if (value.error !== undefined) {
 		if (!isObject(value.error)) return false
 		if (!isErrorKind(value.error.kind)) return false

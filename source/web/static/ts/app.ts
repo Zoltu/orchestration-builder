@@ -93,6 +93,8 @@ export interface RunView {
 	result: RunResultCard | null
 	error?: unknown
 	continuesFrom: string | null
+	// Whether the operator can explicitly resume this errored run from its kept checkpoint (terminal error meta plus a checkpoint on disk — `resumable` in source/web/render.ts). Present on run-view endpoints only, never on run-list summaries; the modal's Resume gating consumes it through the raw-body read in deriveTerminalResult, so the typed field mirrors the contract rather than gating reads.
+	resumable: boolean
 	plan: string | null
 	roles: RoleActivity[]
 	roleTree: RoleTreeNode[] | null
@@ -252,6 +254,11 @@ export interface ApplicationState {
 	historyExpanded: Record<string, boolean>
 	// The continuation pending on the compose screen, or null for a plain new task. Set by the History row's Continue button; cleared by the chip's Cancel and after a successful submit.
 	continuation: Continuation | null
+	// The errored run the compose screen is resuming, or null for a non-resume mode. Set by the result modal's Resume button (the same run restarts in place from its checkpoint, an optional note riding along); mutually exclusive with `continuation` — entering either mode clears the other. Cleared by the chip's Cancel and after a successful resume.
+	resumingRunId: string | null
+	// The resume request's in-flight flag (the submit button and the double-submit guard read it) and the one-line notice a refused or unreadable resume leaves on the compose screen. The notice clears on entry, cancel, and success.
+	resumeSending: boolean
+	resumeNotice: string | null
 	// Per-run-view modal state. The question modal opens on a new pending question; the result modal opens on a watched run's completion. `resultShownForRun` dedups the auto-open across the polls that follow a completion. The interrupt modal opens only from the stage controls.
 	questionModalOpen: boolean
 	resultModalOpen: boolean
@@ -1107,13 +1114,27 @@ function TaskTextareaKeydown(state: ApplicationState, event: KeyboardEvent): App
 
 function SubmitRun(state: ApplicationState, event: Event): ActionReturn {
 	event.preventDefault()
-	if (state.justSubmittedItemId !== null || state.justSubmittedRunId !== null) return state
+	if (state.justSubmittedItemId !== null || state.justSubmittedRunId !== null || state.resumeSending) return state
 	const target = event.target
 	if (!(target instanceof HTMLFormElement)) return state
 	const textarea = target.querySelector('textarea')
 	if (!(textarea instanceof HTMLTextAreaElement)) return state
 	const task = textarea.value.trim()
-	if (task === '') return state
+	// A resume posts to the errored run's own endpoint, and the note is optional either way (the run restarts with or without one), so neither the empty-text guard nor the textarea clear applies — the note stays in the box until the landing, because a refused resume must not lose it.
+	const resumingRunId = state.resumingRunId
+	if (resumingRunId !== null) {
+		return [
+			{ ...state, resumeSending: true, resumeNotice: null },
+			Fetch({
+				url: `api/runs/${encodeURIComponent(resumingRunId)}/resume`,
+				init: { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(buildResumeBody(task)) },
+				ok: GotResumedRun,
+				fail: ResumeFailed,
+			}),
+		]
+	}
+	// A continuation may submit with no note: the run re-runs the prior task (the server stands the prior run's task text in when the body's task is empty). A fresh task still requires text.
+	if (task === '' && state.continuation === null) return state
 	textarea.value = ''
 	// The compose box is the queue's front door (docs/queueing.md "UI interaction model"): a plain add posts to the universal queue and the scheduler dispatches it at once when idle. Only a continuation still needs the run-submission endpoint, whose body is the only one that can carry continuesFrom — so while a run is in flight a continuation stays disabled rather than queueing without its lineage.
 	if (state.continuation === null) {
@@ -1149,6 +1170,11 @@ function buildRunBody(task: string, runEffort: EffortLevel | null, runLogLevel: 
 	if (isLogLevel(runLogLevel)) body.logLevel = runLogLevel
 	if (continuation !== null && typeof continuation.runId === 'string' && continuation.runId !== '') body.continuesFrom = continuation.runId
 	return body
+}
+
+// The resume body carries only the operator's note, and the key is omitted entirely when the note is empty: the server reads an absent, null, or empty note as "no note" (source/web/request-handler.ts parseResumeBody), so an empty object is the cleanest "no note" a JSON body can be.
+function buildResumeBody(note: string): { note?: string } {
+	return note === '' ? {} : { note }
 }
 
 // A re-run is a one-click resubmit of a past run's task; it reuses the create path (POST /api/runs → GotCreatedRun) so the new run is selected and the active-run guard applies identically.
@@ -1193,11 +1219,35 @@ function ContinueRun(state: ApplicationState, event: MouseEvent): ApplicationSta
 		...state,
 		screen: 'compose',
 		continuation: { runId, task: typeof summary.task === 'string' ? summary.task : '', summary: priorOutcomeOf(summary) },
+		// Continuation and resume are mutually exclusive compose modes: entering one leaves the other.
+		resumingRunId: null,
+		resumeNotice: null,
+		resumeSending: false,
 	}
 }
 
 function CancelContinuation(state: ApplicationState): ApplicationState {
 	return { ...state, continuation: null }
+}
+
+// The result modal's Continue affordance: the same continuation hand-off the history row's Continue button drives (ContinueRun reads the run id off the button's data-run-id), plus closing the modal so the compose screen takes over cleanly. When the continuation cannot start (a run in flight, an unknown run) the state is unchanged and the modal stays open.
+function ContinueFromResultModal(state: ApplicationState, event: MouseEvent): ApplicationState {
+	const next = ContinueRun(state, event)
+	if (next === state) return state
+	return { ...next, resultModalOpen: false }
+}
+
+// The result modal's Resume affordance: closes the modal and switches the compose screen into resume mode for the errored run, where the operator drafts an optional note and submits (the endpoint restarts the same run from its kept checkpoint). Unlike the continuation hand-off it does not consult the one-run-at-a-time guard here — the compose screen disables the form while a run is active, and a 409 that slips through surfaces as the compose notice. stopPropagation keeps the stage's click handler out of the way, mirroring the history row's buttons.
+function ResumeFromResultModal(state: ApplicationState, event: MouseEvent): ApplicationState {
+	event.stopPropagation()
+	const runId = dataAttributeOf(event, 'data-run-id')
+	if (runId === null) return state
+	return { ...state, screen: 'compose', resultModalOpen: false, resumingRunId: runId, resumeNotice: null, resumeSending: false, continuation: null }
+}
+
+// Cancels resume mode. The in-flight flag clears with the mode: a response landing after the cancel finds no resume mode (GotResumedRun bails) and must not leave the form stuck disabled.
+function CancelResume(state: ApplicationState): ApplicationState {
+	return { ...state, resumingRunId: null, resumeNotice: null, resumeSending: false }
 }
 
 function GotCreatedRun(state: ApplicationState, payload: FetchResultPayload): ActionReturn {
@@ -1210,6 +1260,41 @@ function GotCreatedRun(state: ApplicationState, payload: FetchResultPayload): Ac
 		{ ...state, screen: 'watch', continuation: null, justSubmittedRunId: createdRunId, selectedRunId: createdRunId, selectedRunView: null, selectedRunStatus: null, flowModel: null, previousFlowModel: null, questionModalOpen: false, resultModalOpen: false, resultShownForRun: null, tooltip: null, planExpanded: false, inspectorModalOpen: false, inspector: initialInspectorState(), livePartial: null, serverAvailable: true },
 		Fetch({ url: 'api/runs', ok: GotRunList, fail: FetchFailed }),
 	]
+}
+
+// The resume landing: a 201 whose body confirms the SAME run id (the endpoint restarts the errored run in place) hands off exactly like GotCreatedRun — the compose screen's resume mode clears, the resumed run is selected onto the watch screen with the per-run view state reset for the switch, and an immediate run-list fetch shows it as the active run.
+function GotResumedRun(state: ApplicationState, payload: FetchResultPayload): ActionReturn {
+	const resumedRunId = state.resumingRunId
+	// The response belongs to the resume mode it was sent from; a cancel mid-flight drops it — the polled run list shows whatever the server actually did.
+	if (resumedRunId === null) return state
+	if (payload.status === 201) {
+		const body = payload.body
+		if (isObject(body) && typeof body['runId'] === 'string' && body['runId'] === resumedRunId) {
+			return [
+				{ ...state, screen: 'watch', resumingRunId: null, resumeSending: false, resumeNotice: null, continuation: null, justSubmittedRunId: resumedRunId, selectedRunId: resumedRunId, selectedRunView: null, selectedRunStatus: null, flowModel: null, previousFlowModel: null, questionModalOpen: false, resultModalOpen: false, resultShownForRun: null, tooltip: null, planExpanded: false, inspectorModalOpen: false, inspector: initialInspectorState(), livePartial: null, serverAvailable: true },
+				Fetch({ url: 'api/runs', ok: GotRunList, fail: FetchFailed }),
+			]
+		}
+		// A 201 that does not confirm the same run id is not a landing to act on: keep the mode (and the note) so the operator can retry, with the oddity said plainly.
+		return { ...state, resumeSending: false, resumeNotice: 'The server confirmed the resume but the response could not be read — check History before resuming again.' }
+	}
+	return { ...state, resumeSending: false, resumeNotice: resumeFailureNotice(payload) }
+}
+
+// The compose-screen notice for a refused resume, keyed off the resume endpoint's statuses (source/web/request-handler.ts handleResumeErroredRun). Network failures never reach here — the fail action (ResumeFailed) covers them.
+function resumeFailureNotice(payload: FetchResultPayload): string {
+	if (payload.status === 404) return 'The run could not be found — it may have been removed.'
+	if (payload.status === 409) {
+		const error = isObject(payload.body) ? payload.body['error'] : undefined
+		if (error === 'run_in_progress') return 'Another run is in progress — resume this one after it finishes.'
+		if (error === 'checkpoint_missing') return 'This run has no resumable checkpoint — continue it as a new run instead.'
+		return 'The run is no longer waiting to be resumed — it may already be running again.'
+	}
+	return 'The resume was rejected.'
+}
+
+function ResumeFailed(state: ApplicationState): ApplicationState {
+	return { ...state, resumeSending: false, resumeNotice: 'The server could not be reached.', serverAvailable: false }
 }
 
 function SubmitAnswer(questionId: string) {
@@ -2049,9 +2134,38 @@ function ContinuationChip(state: ApplicationState): Vnode | null {
 	])
 }
 
-// The compose screen is the hero when the service is idle — drafting a task is the primary activity when nothing is running, so the editor gets the whole stage. The submit path is the queue's universal add (the scheduler dispatches it at once when the system is idle, so the user-visible behavior of today's "start now" is preserved); in continuation mode the chip rides above the task field and the submit body carries continuesFrom — the only body that can — so a continuation stays disabled while a run is in flight rather than queueing without its lineage.
+// The resume banner above the compose textarea while the operator is resuming an errored run from its result modal: it names the run being restarted and says the note is optional — the run restarts from its checkpointed context either way. It reuses the continuation chip's styling (the same attached-context chrome for the compose form's two anchored modes) and the Cancel button returns the form to a plain new task.
+function ResumeChip(state: ApplicationState): Vnode | null {
+	const resumingRunId = state.resumingRunId
+	if (resumingRunId === null) return null
+	return h('div', { class: 'continuation-chip', 'aria-label': `Resuming run ${resumingRunId}` }, [
+		h('div', { class: 'continuation-chip-text' }, [
+			h('p', { class: 'continuation-chip-title' }, `Resuming run ${resumingRunId}`),
+			h('p', { class: 'continuation-chip-outcome' }, 'The run restarts from its checkpoint with its full context; the note below is optional.'),
+		]),
+		h('button', { type: 'button', class: 'continuation-chip-dismiss', title: 'Discard the resume and write a fresh task', onclick: CancelResume }, 'Cancel'),
+	])
+}
+
+// The compose textarea's placeholder announces the form's mode: a resume note is optional (the run restarts with or without one), a plain task is required, and a blocked form says why it is waiting.
+function composePlaceholder(resuming: boolean, blocked: boolean): string {
+	if (blocked) return resuming ? 'a run is already in progress — the resume starts when it finishes' : 'a run is already in progress — a continuation starts when it finishes'
+	return resuming ? 'add an optional note for the resumed run (Markdown supported)' : 'describe a task (Markdown supported)'
+}
+
+// The submit button's label tracks the same mode, with an in-flight resume named so the wait reads as progress rather than a dead button.
+function composeSubmitLabel(resuming: boolean, sending: boolean, blocked: boolean): string {
+	if (sending) return 'Resuming…'
+	if (blocked) return 'Run in progress…'
+	return resuming ? 'Resume run' : 'Add task'
+}
+
+// The compose screen is the hero when the service is idle — drafting a task is the primary activity when nothing is running, so the editor gets the whole stage. The submit path is the queue's universal add (the scheduler dispatches it at once when the system is idle, so the user-visible behavior of today's "start now" is preserved); in continuation mode the chip rides above the task field and the submit body carries continuesFrom — the only body that can — so a continuation stays disabled while a run is in flight rather than queueing without its lineage. In resume mode the chip names the errored run being restarted and the submit body is the optional note.
 function ComposeScreen(state: ApplicationState): Vnode {
-	const disabled = state.continuation !== null && deriveActiveRunId(state.summaries) !== null
+	const resuming = state.resumingRunId !== null
+	// A continuation and a resume both submit to run-submission endpoints that hold the one-run-at-a-time slot, so either mode disables while a run is in flight (a plain task queues instead); a resume already in flight disables until it lands.
+	const blocked = (state.continuation !== null || resuming) && deriveActiveRunId(state.summaries) !== null
+	const disabled = blocked || state.resumeSending
 	const runEffort = isEffort(state.runEffort) ? state.runEffort : DEFAULT_EFFORT
 	const runLogLevel = isLogLevel(state.runLogLevel) ? state.runLogLevel : DEFAULT_LOG_LEVEL
 	return h('section', { id: 'compose-screen' }, [
@@ -2060,12 +2174,15 @@ function ComposeScreen(state: ApplicationState): Vnode {
 			h('p', { class: 'compose-sub' }, 'Describe the task in plain language — Markdown works too. Tasks run one at a time; a task added while a run is in progress waits in the queue and starts when it finishes.'),
 			h('form', { class: { 'create-run-form': true, 'is-busy': disabled }, onsubmit: SubmitRun }, [
 				ContinuationChip(state),
-				h('textarea', { name: 'task', placeholder: disabled ? 'a run is already in progress — a continuation starts when it finishes' : 'describe a task (Markdown supported)', autocomplete: 'off', disabled, onkeydown: TaskTextareaKeydown }),
+				ResumeChip(state),
+				h('textarea', { name: 'task', placeholder: composePlaceholder(resuming, blocked), autocomplete: 'off', disabled: blocked, onkeydown: TaskTextareaKeydown }),
 				EffortLevelSelector(runEffort, disabled, state.savingEffort === true),
 				LoggingLevelSelector(runLogLevel, disabled, state.savingLogLevel === true),
 				h('div', { class: 'submit-controls' }, [
-					h('button', { type: 'submit', disabled }, disabled ? 'Run in progress…' : 'Add task'),
+					h('button', { type: 'submit', disabled }, composeSubmitLabel(resuming, state.resumeSending, blocked)),
 				]),
+				// A refused resume's notice, under the submit button so the reason sits where the click landed. Gated on resume mode: a response landing after a cancel must not address a plain new-task form.
+				resuming && state.resumeNotice !== null ? h('p', { class: 'resume-notice' }, state.resumeNotice) : null,
 			]),
 		]),
 	])
@@ -2403,6 +2520,8 @@ function ResultModalForRun(state: ApplicationState): Vnode | null {
 		metaLine,
 		renderMarkdown,
 		onCopyRaw: copyRawToClipboard,
+		onContinue: ContinueFromResultModal,
+		onResume: ResumeFromResultModal,
 		onClose: CloseResultModal,
 	})
 }
@@ -2433,6 +2552,7 @@ function isApplicationState(value: unknown): value is ApplicationState {
 		'runEffort', 'savingEffort', 'runLogLevel', 'savingLogLevel',
 		'flowModel', 'previousFlowModel', 'labelResolver', 'guildParticipants', 'build',
 		'flowTier', 'flowViewMode', 'sequenceRolesOnly', 'screen', 'historyExpanded', 'continuation',
+		'resumingRunId', 'resumeSending', 'resumeNotice',
 		'questionModalOpen', 'resultModalOpen', 'resultShownForRun', 'interruptModalOpen',
 		'inspectorModalOpen', 'inspector', 'planExpanded', 'livePartial', 'tooltip',
 		'interruptMode', 'interruptSending', 'interruptNotice', 'interruptAnswerCard', 'shownInterruptAnswerKeys', 'now',
@@ -2482,6 +2602,9 @@ app({
 			screen: 'watch',
 			historyExpanded: {},
 			continuation: null,
+			resumingRunId: null,
+			resumeSending: false,
+			resumeNotice: null,
 			questionModalOpen: false,
 			resultModalOpen: false,
 			resultShownForRun: null,

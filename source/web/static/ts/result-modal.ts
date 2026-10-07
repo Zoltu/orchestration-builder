@@ -1,8 +1,8 @@
 // Per-run-view modal for a run's terminal result, and the derivation that detects one.
 //
-// The modal is an overlay scoped to the run view (not `document.body`-wide), mirroring the question modal: it covers the active run's flow area only, so the rest of the page stays usable while the modal is open. It renders the result summary as sanitized Markdown (via the `renderMarkdown` closure passed in, the same pipeline the product client uses), the artifacts list as plain text paths (a machine field, so they stay `textContent` and never flow through Markdown), and — on error — the raw error message as sanitized Markdown in a copyable block with honest framing. The machine error `kind` is intentionally not surfaced to the user (it is an internal taxonomy a non-developer cannot act on); the "copy raw" button copies the full error object as JSON so the operator can hand it to support. The framing copy is fixed trusted text, not agent prose. See docs/security.md "Web client rendering pipeline".
+// The modal is an overlay scoped to the run view (not `document.body`-wide), mirroring the question modal: it covers the active run's flow area only, so the rest of the page stays usable while the modal is open. It renders the result summary as sanitized Markdown (via the `renderMarkdown` closure passed in, the same pipeline the product client uses), the artifacts list as plain text paths (a machine field, so they stay `textContent` and never flow through Markdown), and — on error — the raw error message as sanitized Markdown in a copyable block with honest framing, plus the error card's technical detail (a machine field) as collapsed preformatted text. The machine error `kind` is intentionally not surfaced to the user (it is an internal taxonomy a non-developer cannot act on); the "copy raw" button copies the full error object as JSON so the operator can hand it to support. The framing copy is fixed trusted text, not agent prose. See docs/security.md "Web client rendering pipeline".
 //
-// `h` and `renderMarkdown` are passed in rather than imported so the component stays free of hyperapp and showdown coupling and is exercisable in tests with fakes (mirroring question-modal.js and flow-view.js). The close and copy-raw handlers are supplied by the caller: in the demo harness `onClose` clears the modal-open flag and `onCopyRaw` writes the JSON to the clipboard; in the product client `onClose` will clear the flag and `onCopyRaw` will POST or clipboard the raw object.
+// `h` and `renderMarkdown` are passed in rather than imported so the component stays free of hyperapp and showdown coupling and is exercisable in tests with fakes (mirroring question-modal.js and flow-view.js). The close and copy-raw handlers are supplied by the caller: in the demo harness `onClose` clears the modal-open flag and `onCopyRaw` writes the JSON to the clipboard; in the product client `onClose` will clear the flag and `onCopyRaw` will POST or clipboard the raw object. The optional `onContinue` and `onResume` affordances (error outcomes only) are supplied the same way; the demo harness omits both.
 
 import { isTerminalStatus } from './interaction-model.js'
 import { isObject } from './guards.js'
@@ -22,9 +22,13 @@ export interface TerminalResult {
 	summary: string | null
 	artifacts: string[]
 	error: TerminalResultError | null
+	// The result card's technical detail (the raw failure payload behind the message, e.g. the LLM endpoint's error-response body), present only when the card carried one. Rendered as collapsed preformatted text and merged into the copy-raw payload.
+	detail?: string
+	// Whether the run can be explicitly resumed from its kept checkpoint (carried from the run view's `resumable` field, only ever true on an error outcome). The demo harness's hand-built descriptors omit it, which reads as not resumable.
+	resumable?: boolean
 }
 
-// The terminal-status descriptor for a run, or undefined when the run is not yet terminal. A run is terminal when its status is `success`, `error`, `needs_clarification`, or `interrupted`. The summary and artifacts come from the run's `result` card (the executor's summary of what it did and what it produced); the error block is derived on `error` and `interrupted` statuses, from the run-level `error` first (the executor's surfaced failure — for `interrupted`, the reconciliation's record of why the run could not resume) and falling back to the result card's nested error. The error `kind` is carried on the descriptor's `error.raw` for the copy-raw button but is never rendered as text — only the human `message` is shown, as sanitized Markdown.
+// The terminal-status descriptor for a run, or undefined when the run is not yet terminal. A run is terminal when its status is `success`, `error`, `needs_clarification`, or `interrupted`. The summary and artifacts come from the run's `result` card (the executor's summary of what it did and what it produced); the error block is derived on `error` and `interrupted` statuses, from the run-level `error` first (the executor's surfaced failure — for `interrupted`, the reconciliation's record of why the run could not resume) and falling back to the result card's nested error. The error `kind` is carried on the descriptor's `error.raw` for the copy-raw button but is never rendered as text — only the human `message` is shown, as sanitized Markdown. The `resumable` flag copies the run view's field onto error outcomes only, so the modal's Resume gating reads the descriptor alone.
 export function deriveTerminalResult(runView: unknown): TerminalResult | undefined {
 	if (!isObject(runView)) return undefined
 	const status = runView['status']
@@ -42,16 +46,20 @@ export function deriveTerminalResult(runView: unknown): TerminalResult | undefin
 		? rawArtifacts.filter((path: unknown): path is string => typeof path === 'string' && path !== '')
 		: []
 
-	// The error block is derived only on error and interrupted statuses. Built as a standalone value and assigned in the descriptor literal so the property type is the union (object | null) rather than collapsing to null.
+	// The error block is derived only on error and interrupted statuses. Built as a standalone value and assigned in the descriptor literal so the property type is the union (object | null) rather than collapsing to null. The card's technical detail is error-surface data like the error block itself, so it is picked up under the same gate and never surfaces on a success or needs-clarification run.
 	let error: TerminalResultError | null = null
+	let detail: string | undefined
 	if (status === 'error' || status === 'interrupted') {
 		const rawError = runError ?? (isObject(result?.['error']) ? result['error'] : null)
 		const message = typeof rawError?.['message'] === 'string' && rawError['message'] !== ''
 			? rawError['message']
 			: null
+		const rawDetail = result !== null ? result['detail'] : undefined
+		if (typeof rawDetail === 'string' && rawDetail !== '') detail = rawDetail
 		error = { message, raw: rawError }
 	}
-	return { status, summary, artifacts, error }
+	// The resume flag copies the run view's `resumable` (terminal error meta plus a checkpoint on disk) but only onto an error outcome, so the descriptor's own shape keeps the resume gating honest even for a malformed body that carries the flag on another status.
+	return { status, summary, artifacts, error, resumable: status === 'error' && runView['resumable'] === true, ...(detail !== undefined ? { detail } : {}) }
 }
 
 // The honest framing line shown above the raw error message. Fixed trusted text (not agent prose, so it never flows through Markdown): it tells the operator the system reported a failure and the copy-raw button exists for sharing, without translating the failure into reassurance.
@@ -63,6 +71,10 @@ export interface ResultModalProps {
 	renderMarkdown: RenderMarkdown
 	onCopyRaw?: (rawJson: string) => void
 	onClose: unknown
+	// Optional Continue affordance for an errored run: when supplied (a hyperapp click action, like onClose), an error-status modal renders a Continue button that invokes it. The action reads the run id off the button's data-run-id attribute — the same contract the history row's Continue button uses — so the host can wire the very same continuation hand-off. The demo harness omits the prop, so its modals keep only Close.
+	onContinue?: unknown
+	// Optional Resume affordance for an errored run whose checkpoint makes a same-run resume possible: when supplied AND the descriptor is resumable, the Resume button replaces Continue — one primary recovery action, resume restarting the run in place from its full checkpointed context while continue is the briefed fallback for a run with no checkpoint. Same action contract as onContinue: a hyperapp click action reading the run id off the button's data-run-id attribute. The demo harness omits the prop.
+	onResume?: unknown
 	// Optional technical meta line ({ text, title }) for advanced users — the product client derives it from the run view; the demo harness passes none. Rendered as muted microcopy, all textContent.
 	metaLine?: { text?: unknown; title?: unknown } | null
 }
@@ -74,12 +86,16 @@ export function ResultModal(h: LooseH, props: ResultModalProps): Vnode {
 	const renderMarkdown = props.renderMarkdown
 	const onCopyRaw = props.onCopyRaw
 	const onClose = props.onClose
+	const onContinue = props.onContinue
+	const onResume = props.onResume
 	const metaLine = props.metaLine
 
 	const status = descriptor.status
 	const summary = descriptor.summary
 	const artifacts = descriptor.artifacts
 	const error = descriptor.error
+	const detail = descriptor.detail
+	const resumable = descriptor.resumable === true
 
 	const cardClass = status === 'error' || status === 'interrupted' ? 'result-modal-card result-modal-card--error' : 'result-modal-card'
 
@@ -108,13 +124,22 @@ export function ResultModal(h: LooseH, props: ResultModalProps): Vnode {
 	}
 
 	if (error !== null) {
-		// The error block: honest framing, the sanitized message, and a copy-raw button that hands the full error object (including the hidden `kind`) to the caller as JSON. The `kind` is deliberately not rendered as text; it surfaces only through copy-raw so a non-developer is not asked to interpret the machine taxonomy. The copy button's onclick is a closure that invokes the injected `onCopyRaw` leaf with the precomputed JSON and returns the state unchanged — hyperapp actions must return state, and a leaf that returns `undefined` would corrupt the app state, so the component wraps the leaf rather than passing it bare.
+		// The error block: honest framing, the sanitized message, the collapsed technical-details block when the card carries the raw payload, and a copy-raw button that hands the full error object (including the hidden `kind`) to the caller as JSON. The `kind` is deliberately not rendered as text; it surfaces only through copy-raw so a non-developer is not asked to interpret the machine taxonomy. The copy button's onclick is a closure that invokes the injected `onCopyRaw` leaf with the precomputed JSON and returns the state unchanged — hyperapp actions must return state, and a leaf that returns `undefined` would corrupt the app state, so the component wraps the leaf rather than passing it bare.
 		const errorChildren: Vnode[] = [h('p', { class: 'result-modal-error-framing' }, ERROR_FRAMING)]
 		if (error.message !== null) {
 			errorChildren.push(h('div', { class: 'result-modal-error-message markdown' }, renderMarkdown(error.message)))
 		}
+		if (typeof detail === 'string' && detail !== '') {
+			// The raw failure payload behind the message (e.g. the endpoint's error-response body): collapsed by default, rendered as preformatted text. A machine field, so it stays textContent and never flows through Markdown.
+			errorChildren.push(
+				h('details', { class: 'result-modal-error-detail' }, [
+					h('summary', { class: 'result-modal-error-detail-summary' }, 'Technical details'),
+					h('pre', { class: 'result-modal-error-detail-text' }, [detail]),
+				]),
+			)
+		}
 		if (error.raw !== null && onCopyRaw !== undefined) {
-			const rawJson = errorToRawJson(error.raw)
+			const rawJson = errorToRawJson(error.raw, typeof detail === 'string' && detail !== '' ? detail : undefined)
 			errorChildren.push(
 				h('div', { class: 'result-modal-error-actions' }, [
 					h('button', { type: 'button', class: 'result-modal-copy', onclick: (state: unknown) => { onCopyRaw(rawJson); return state } }, 'Copy raw'),
@@ -124,11 +149,14 @@ export function ResultModal(h: LooseH, props: ResultModalProps): Vnode {
 		children.push(h('div', { class: 'result-modal-error' }, errorChildren))
 	}
 
-	children.push(
-		h('div', { class: 'result-modal-actions' }, [
-			h('button', { type: 'button', class: 'result-modal-close', onclick: onClose }, 'Close'),
-		]),
-	)
+	// The action row: Close always; on an error outcome exactly one recovery affordance — Resume when the host supplies it and the descriptor is resumable (it replaces Continue, since a checkpointed run restarts in place), Continue when no checkpoint exists (the briefed-continuation fallback). Both stamp the run id the same way the history row's Continue button does (data-run-id), so the injected actions are the very same logic reading the same attribute.
+	const actions: Vnode[] = [h('button', { type: 'button', class: 'result-modal-close', onclick: onClose }, 'Close')]
+	if (status === 'error' && resumable && onResume !== undefined) {
+		actions.unshift(h('button', { type: 'button', class: 'result-modal-resume', 'data-run-id': typeof runLabel === 'string' ? runLabel : '', onclick: onResume }, 'Resume'))
+	} else if (status === 'error' && onContinue !== undefined) {
+		actions.unshift(h('button', { type: 'button', class: 'result-modal-continue', 'data-run-id': typeof runLabel === 'string' ? runLabel : '', onclick: onContinue }, 'Continue'))
+	}
+	children.push(h('div', { class: 'result-modal-actions' }, actions))
 
 	return h('div', { class: 'result-modal-overlay' }, [
 		h('div', { class: 'result-modal-backdrop', onclick: onClose }),
@@ -143,10 +171,11 @@ function statusLabel(status: string): string {
 	return 'Needs clarification'
 }
 
-// Serializes the full error object (kind, message, and any details) to JSON for the copy-raw button. Computed once at render so the button's onclick payload is stable and the caller's handler receives the exact string that will reach the clipboard. A non-serializable object falls back to a minimal envelope so the button never throws.
-function errorToRawJson(rawError: unknown): string {
+// Serializes the full error object (kind, message, and any details) to JSON for the copy-raw button, with the descriptor's technical detail (the raw failure payload behind the message) merged in when present, so what reaches the clipboard includes the body a support reader needs. Computed once at render so the button's onclick payload is stable and the caller's handler receives the exact string that will reach the clipboard. A non-serializable object falls back to a minimal envelope so the button never throws.
+function errorToRawJson(rawError: unknown, detail: string | undefined): string {
 	try {
-		return JSON.stringify(rawError)
+		if (detail === undefined) return JSON.stringify(rawError)
+		return JSON.stringify(isObject(rawError) ? { ...rawError, detail } : { detail })
 	} catch {
 		return JSON.stringify({ message: isObject(rawError) && typeof rawError['message'] === 'string' ? rawError['message'] : '' })
 	}

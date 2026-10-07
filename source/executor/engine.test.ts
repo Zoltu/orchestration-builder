@@ -614,6 +614,33 @@ describe('runRole — acceptance criteria', () => {
 		if (result.error) {
 			expect(result.error.kind).toBe('llm_unavailable')
 		}
+		// A failure without a response body carries no detail.
+		expect(result.detail).toBeUndefined()
+	})
+
+	test('LLM unavailable carries the endpoint error body as the card detail', async () => {
+		const guild = buildGuild(
+			{ main: { systemPrompt: 'p', tools: ['finish'] } },
+			'main',
+		)
+		const llm = new FakeLlm()
+		llm.responses = [{ kind: 'llm_unavailable', message: 'HTTP 402', detail: '{"error":"Insufficient credit. Please top up."}' }]
+		const { deps } = makeDeps(llm)
+
+		const result = await runRole(deps, {
+			loadedGuild: guild,
+			depth: 0,
+			roleName: 'main',
+			task: 'do it',
+		})
+
+		expect(result.status).toBe('error')
+		expect(result.summary).toBe('LLM unavailable: HTTP 402')
+		expect(result.detail).toBe('{"error":"Insufficient credit. Please top up."}')
+		if (result.error) {
+			expect(result.error.kind).toBe('llm_unavailable')
+			expect(result.error.message).toBe('HTTP 402')
+		}
 	})
 
 	test('unknown role returns an error ResultCard', async () => {

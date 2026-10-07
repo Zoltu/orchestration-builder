@@ -95,8 +95,8 @@ export async function runExecutor(deps: ExecutorDependencies, options: RunOption
 	const meta = composeRunMeta(options, startTime, result.status, result)
 
 	deps.writeMeta(meta)
-	// The terminal meta is the authoritative record; the checkpoint is removed so a restart never considers resuming a finished run.
-	deps.deleteCheckpoint()
+	// The terminal meta is the authoritative record, and the checkpoint is removed so a restart never considers resuming a finished run — except when the terminal status is 'error': an error run's checkpoint is kept so the operator can explicitly resume the run with its full context (docs/queueing.md "Resume of an errored run"). Startup reconciliation never auto-resumes one — it considers only runs whose meta reads 'running' — so a kept checkpoint makes the run resumable, not resumed.
+	if (result.status !== 'error') deps.deleteCheckpoint()
 
 	return meta
 }
@@ -104,6 +104,8 @@ export async function runExecutor(deps: ExecutorDependencies, options: RunOption
 export interface ResumeRunOptions {
 	guildPath: string
 	benchmarkPath?: string
+	// The framed operator note on an explicit resume of an errored run; the resumed leaf role's loop entry appends it to the restored history (see resumeRoleStack). Absent for boot reconciliation, which injects nothing.
+	operatorNote?: string
 }
 
 // Resumes a run from its checkpoint after a service restart. The run's identity (run id, task, effort, start time) comes from the checkpoint — the meta keeps the original startTime so elapsed-time accounting survives the restart. The stack is reconstructed by resumeRoleStack and the run continues from the suspended leaf.
@@ -130,21 +132,23 @@ export async function resumeExecutor(deps: ExecutorDependencies, checkpoint: Run
 	const loadedGuild = deps.loadedGuild
 
 	const startTime = checkpoint.startTime
-	// run_resumed marks the restart boundary in the log: events before it belong to the pre-restart process, events after it to the resumed run. Resumed roles do not re-emit role_start, so a reviewer can tell why.
-	logEvent(deps.appendLog, 'run_resumed', { runId: checkpoint.runId, resumedFrames: checkpoint.frames.length })
-	// Re-assert the running meta: the pre-restart write may never have landed, and the terminal meta overwrites it below either way.
+	// run_resumed marks the restart boundary in the log: events before it belong to the pre-restart process, events after it to the resumed run. Resumed roles do not re-emit role_start, so a reviewer can tell why. An explicit error-resume stamps the operator's note on the boundary so the log shows the human intervention as well.
+	logEvent(deps.appendLog, 'run_resumed', { runId: checkpoint.runId, resumedFrames: checkpoint.frames.length, ...(options.operatorNote !== undefined ? { operatorNote: options.operatorNote } : {}) })
+	// Re-assert the running meta: the pre-restart write may never have landed, and the terminal meta overwrites it below either way. On an explicit error-resume this same write flips the run's terminal error meta back to running — the old error card belongs to the log, not the live meta.
 	deps.writeMeta(composeRunMeta(runOptions, startTime, 'running'))
 	const result = await resumeRoleStack(
 		runRole,
 		buildEngineDependencies(deps, checkpoint.runId, startTime, checkpoint.registryCounter, checkpoint.learnedContextCeiling, checkpoint.writeCapableStarted, entryFrame.continuesFrom, undefined),
 		loadedGuild,
 		checkpoint,
+		options.operatorNote,
 	)
 
 	const meta = composeRunMeta(runOptions, startTime, result.status, result)
 
 	deps.writeMeta(meta)
-	deps.deleteCheckpoint()
+	// Same checkpoint rule as the fresh-run path: an error run stays resumable from its checkpoint, every other terminal status cleans up.
+	if (result.status !== 'error') deps.deleteCheckpoint()
 
 	return meta
 }

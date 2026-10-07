@@ -140,6 +140,48 @@ describe('deriveTerminalResult', () => {
 		expect(descriptor.status).toBe('needs_clarification')
 		expect(descriptor.error).toBeNull()
 	})
+
+	test('a result card\u2019s technical detail rides the descriptor', () => {
+		const runView = {
+			status: 'error',
+			result: {
+				status: 'error',
+				summary: 'LLM unavailable: HTTP 402',
+				error: { kind: 'llm_unavailable', message: 'HTTP 402' },
+				detail: '{"error":"Insufficient credit"}',
+			},
+		}
+		const descriptor = defined(deriveTerminalResult(runView), 'descriptor')
+		expect(descriptor.detail).toBe('{"error":"Insufficient credit"}')
+		const error = present(descriptor.error, 'descriptor.error')
+		expect(error.raw).toEqual({ kind: 'llm_unavailable', message: 'HTTP 402' })
+	})
+
+	test('an empty or non-string card detail is treated as absent', () => {
+		const runView = {
+			status: 'error',
+			result: { status: 'error', summary: 'failed.', error: { kind: 'llm_unavailable', message: 'HTTP 500' }, detail: '' },
+		}
+		const descriptor = defined(deriveTerminalResult(runView), 'descriptor')
+		expect(descriptor.detail).toBeUndefined()
+		expect(present(descriptor.error, 'descriptor.error').raw).toEqual({ kind: 'llm_unavailable', message: 'HTTP 500' })
+	})
+
+	test('a card detail on a success run never surfaces', () => {
+		const runView = { status: 'success', result: { status: 'success', summary: 'done.', detail: 'stray' } }
+		const descriptor = defined(deriveTerminalResult(runView), 'descriptor')
+		expect(descriptor.detail).toBeUndefined()
+		expect(descriptor.error).toBeNull()
+	})
+
+	test('the resumable flag rides only an error descriptor', () => {
+		expect(defined(deriveTerminalResult({ status: 'error', resumable: true }), 'descriptor').resumable).toBe(true)
+		expect(defined(deriveTerminalResult({ status: 'error' }), 'descriptor').resumable).toBe(false)
+		// A non-boolean flag reads as not resumable, like any other guarded wire field.
+		expect(defined(deriveTerminalResult({ status: 'error', resumable: 'yes' }), 'descriptor').resumable).toBe(false)
+		// A malformed body carrying the flag on a non-error status is contained: the descriptor stays consistent with its own status.
+		expect(defined(deriveTerminalResult({ status: 'success', resumable: true }), 'descriptor').resumable).toBe(false)
+	})
 })
 
 describe('ResultModal', () => {
@@ -270,6 +312,46 @@ describe('ResultModal', () => {
 		expect(allByTag(modal, 'button').some((b) => b.props.class === 'result-modal-copy')).toBe(false)
 	})
 
+	test('the card detail renders in a collapsed details block as preformatted text', () => {
+		const withDetail = {
+			status: 'error' as const,
+			summary: 'LLM unavailable: HTTP 402',
+			artifacts: [],
+			error: { message: 'HTTP 402', raw: { kind: 'llm_unavailable', message: 'HTTP 402' } },
+			detail: '{"error":"Insufficient credit"}',
+		}
+		const modal: Vnode = ResultModal(fakeH, { descriptor: withDetail, runLabel: 'run-1', renderMarkdown: fakeRenderMarkdown, onCopyRaw: () => undefined, onClose: () => undefined })
+		const details = defined(allByTag(modal, 'details').find((d) => d.props.class === 'result-modal-error-detail'), 'details')
+		expect(details).toBeDefined()
+		// Collapsed by default: no open attribute.
+		expect(details.props['open']).toBeUndefined()
+		const summary = defined(byTag(details, 'summary')[0], 'summary')
+		expect(summary.children.join('')).toBe('Technical details')
+		const pre = defined(byTag(details, 'pre')[0], 'pre')
+		// A machine field, so it stays textContent — never routed through the Markdown pipeline.
+		expect(pre.children.join('')).toBe('{"error":"Insufficient credit"}')
+	})
+
+	test('no technical-details block when the descriptor carries no detail', () => {
+		const modal: Vnode = ResultModal(fakeH, { descriptor: errorDescriptor, runLabel: 'run-1', renderMarkdown: fakeRenderMarkdown, onCopyRaw: () => undefined, onClose: () => undefined })
+		expect(allByTag(modal, 'details')).toEqual([])
+	})
+
+	test('the copy-raw payload includes the card detail', () => {
+		let captured = ''
+		const withDetail = {
+			status: 'error' as const,
+			summary: 'LLM unavailable: HTTP 402',
+			artifacts: [],
+			error: { message: 'HTTP 402', raw: { kind: 'llm_unavailable', message: 'HTTP 402' } },
+			detail: '{"error":"Insufficient credit"}',
+		}
+		const modal: Vnode = ResultModal(fakeH, { descriptor: withDetail, runLabel: 'run-1', renderMarkdown: fakeRenderMarkdown, onCopyRaw: (rawJson) => { captured = rawJson }, onClose: () => undefined })
+		const copyButton = defined(allByTag(modal, 'button').find((b) => b.props.class === 'result-modal-copy'), 'copyButton')
+		actionProp(copyButton.props, 'onclick')({ marker: 'state' })
+		expect(JSON.parse(captured)).toEqual({ kind: 'llm_unavailable', message: 'HTTP 402', detail: '{"error":"Insufficient credit"}' })
+	})
+
 	test('the close button wires the onClose handler', () => {
 		let closed = false
 		const onClose = () => { closed = true }
@@ -291,6 +373,72 @@ describe('ResultModal', () => {
 		expect(backdrop.props.onclick).toBe(onClose)
 		actionProp(backdrop.props, 'onclick')(undefined)
 		expect(closed).toBe(true)
+	})
+
+	test('an error modal renders a Continue button only when the host supplies the capability', () => {
+		// Without the prop — the demo harness's shape — the action row keeps only Close.
+		const withoutProp: Vnode = ResultModal(fakeH, { descriptor: errorDescriptor, runLabel: 'run-1', renderMarkdown: fakeRenderMarkdown, onCopyRaw: () => undefined, onClose: () => undefined })
+		expect(allByTag(withoutProp, 'button').some((b) => b.props.class === 'result-modal-continue')).toBe(false)
+
+		let fired = false
+		const onContinue = () => { fired = true }
+		const withProp: Vnode = ResultModal(fakeH, { descriptor: errorDescriptor, runLabel: 'run-42', renderMarkdown: fakeRenderMarkdown, onCopyRaw: () => undefined, onContinue, onClose: () => undefined })
+		const continueButton = defined(allByTag(withProp, 'button').find((b) => b.props.class === 'result-modal-continue'), 'continueButton')
+		// The run id rides the same data-run-id attribute the history row's Continue button uses, so the host wires one action for both.
+		expect(continueButton.props['data-run-id']).toBe('run-42')
+		expect(continueButton.props.onclick).toBe(onContinue)
+		// The affordance sits beside Close, not in place of it.
+		expect(allByTag(withProp, 'button').some((b) => b.props.class === 'result-modal-close')).toBe(true)
+		actionProp(continueButton.props, 'onclick')(undefined)
+		expect(fired).toBe(true)
+	})
+
+	test('a success modal renders no Continue button even when the host supplies the capability', () => {
+		const modal: Vnode = ResultModal(fakeH, { descriptor: successDescriptor, runLabel: 'run-1', renderMarkdown: fakeRenderMarkdown, onCopyRaw: () => undefined, onContinue: () => undefined, onClose: () => undefined })
+		expect(allByTag(modal, 'button').some((b) => b.props.class === 'result-modal-continue')).toBe(false)
+	})
+
+	// The Resume affordance: the primary recovery action for an errored run whose checkpoint survives. Same action contract as Continue — a hyperapp click action reading the run id off the button's data-run-id attribute.
+	const resumableErrorDescriptor = { ...errorDescriptor, resumable: true }
+
+	test('the Resume button renders only for an error outcome that is resumable and has the capability', () => {
+		// Not resumable (the error descriptor carries no flag): no Resume even with the prop.
+		const notResumable: Vnode = ResultModal(fakeH, { descriptor: errorDescriptor, runLabel: 'run-1', renderMarkdown: fakeRenderMarkdown, onResume: () => undefined, onClose: () => undefined })
+		expect(allByTag(notResumable, 'button').some((b) => b.props.class === 'result-modal-resume')).toBe(false)
+		// Resumable but the host omits the prop — the demo harness's shape: no Resume.
+		const withoutProp: Vnode = ResultModal(fakeH, { descriptor: resumableErrorDescriptor, runLabel: 'run-1', renderMarkdown: fakeRenderMarkdown, onClose: () => undefined })
+		expect(allByTag(withoutProp, 'button').some((b) => b.props.class === 'result-modal-resume')).toBe(false)
+		// A non-error outcome never renders it, even when resumable and the prop is present.
+		const success: Vnode = ResultModal(fakeH, { descriptor: { ...successDescriptor, resumable: true }, runLabel: 'run-1', renderMarkdown: fakeRenderMarkdown, onResume: () => undefined, onClose: () => undefined })
+		expect(allByTag(success, 'button').some((b) => b.props.class === 'result-modal-resume')).toBe(false)
+	})
+
+	test('the Resume button fires with the run id stamped on it and replaces Continue when resumable', () => {
+		let fired = false
+		const onResume = () => { fired = true }
+		const modal: Vnode = ResultModal(fakeH, { descriptor: resumableErrorDescriptor, runLabel: 'run-42', renderMarkdown: fakeRenderMarkdown, onContinue: () => undefined, onResume, onClose: () => undefined })
+		const resumeButton = defined(allByTag(modal, 'button').find((b) => b.props.class === 'result-modal-resume'), 'resumeButton')
+		// The run id rides the same data-run-id attribute the history row's Continue button uses.
+		expect(resumeButton.props['data-run-id']).toBe('run-42')
+		expect(resumeButton.props.onclick).toBe(onResume)
+		// Resumable means Resume REPLACES Continue: one primary recovery action.
+		expect(allByTag(modal, 'button').some((b) => b.props.class === 'result-modal-continue')).toBe(false)
+		expect(allByTag(modal, 'button').some((b) => b.props.class === 'result-modal-close')).toBe(true)
+		actionProp(resumeButton.props, 'onclick')(undefined)
+		expect(fired).toBe(true)
+	})
+
+	test('Continue still renders when the errored run is not resumable', () => {
+		const modal: Vnode = ResultModal(fakeH, { descriptor: errorDescriptor, runLabel: 'run-1', renderMarkdown: fakeRenderMarkdown, onContinue: () => undefined, onResume: () => undefined, onClose: () => undefined })
+		expect(allByTag(modal, 'button').some((b) => b.props.class === 'result-modal-continue')).toBe(true)
+		expect(allByTag(modal, 'button').some((b) => b.props.class === 'result-modal-resume')).toBe(false)
+	})
+
+	test('demo-style usage with no recovery props is unchanged', () => {
+		const modal: Vnode = ResultModal(fakeH, { descriptor: errorDescriptor, runLabel: 'demo scenario', renderMarkdown: fakeRenderMarkdown, onCopyRaw: () => undefined, onClose: () => undefined })
+		expect(allByTag(modal, 'button').some((b) => b.props.class === 'result-modal-resume')).toBe(false)
+		expect(allByTag(modal, 'button').some((b) => b.props.class === 'result-modal-continue')).toBe(false)
+		expect(allByTag(modal, 'button').some((b) => b.props.class === 'result-modal-close')).toBe(true)
 	})
 })
 

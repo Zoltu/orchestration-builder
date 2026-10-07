@@ -119,6 +119,7 @@ function handleLlmResult(
 			kind: 'finished',
 			card: createResultCard('error', `LLM unavailable: ${llmResult.message}`, {
 				error: createToolError('llm_unavailable', llmResult.message),
+				...(llmResult.detail !== undefined ? { detail: llmResult.detail } : {}),
 			}),
 		}
 	}
@@ -349,7 +350,7 @@ export async function runRole(deps: EngineDependencies, context: EngineContext, 
 		maxToolOutputChars: guild.deployment.contextPolicy.maxToolOutputChars,
 	}
 
-	const finalCard = await executeRoleLoop(deps, context, roleState, registryEntry, allowedToolsManifests, dispatchCtx, resumed?.suspendedTurn)
+	const finalCard = await executeRoleLoop(deps, context, roleState, registryEntry, allowedToolsManifests, dispatchCtx, resumed?.suspendedTurn, resumed?.resumeNote)
 	deps.roleRegistry.unregister(registryEntry.roleId)
 	deps.checkpointRecorder.unregisterFrame(registryEntry.roleId)
 	logEvent(deps.appendLog, 'role_finished', roleFinishedPayload(context.roleName, context.depth, finalCard, context.parent, registryEntry.roleId))
@@ -385,7 +386,8 @@ async function dispatchToolCallSequence(
 }
 
 // Completes a resumed role's suspended turn: the child card is resolved (re-running the child frame's resume when the checkpoint has no recorded card), checkpointed onto the pending suspension exactly as the live role_finished path does, and recorded as the agent call's tool result — the agent_call event and the child's events are already in the log from the live dispatch. The turn's remaining tool calls then dispatch normally.
-async function completeSuspendedTurn(deps: EngineDependencies, context: EngineContext, roleState: RoleState, registryEntry: RoleRegistryEntry, dispatchCtx: DispatchContext, suspendedTurn: SuspendedTurn): Promise<ResultCard | null> {
+// resumeNote is delivered at this walk's equivalent loop entry — after the recorded tool result, before the remaining calls execute — so a turn whose remaining calls include finish still carries the note in its conversation even though no further LLM request happens; the ordering rule holds (never between an assistant tool_calls message and its tool results). Undefined for boot reconciliation.
+async function completeSuspendedTurn(deps: EngineDependencies, context: EngineContext, roleState: RoleState, registryEntry: RoleRegistryEntry, dispatchCtx: DispatchContext, suspendedTurn: SuspendedTurn, resumeNote?: string): Promise<ResultCard | null> {
 	const agentCall = suspendedTurn.toolCalls[suspendedTurn.agentIndex]
 	if (agentCall === undefined) throw new Error(`completeSuspendedTurn: agentIndex ${suspendedTurn.agentIndex} out of range in a validated checkpoint`)
 	const childCard = await suspendedTurn.resolveChildCard()
@@ -393,6 +395,9 @@ async function completeSuspendedTurn(deps: EngineDependencies, context: EngineCo
 	deps.checkpointRecorder.write()
 	recordToolResult(deps, roleState, context.roleName, registryEntry.roleId, dispatchCtx.maxToolOutputChars, agentCall, { kind: 'success', data: childCard })
 	deps.checkpointRecorder.setPending(registryEntry.roleId, undefined)
+	if (resumeNote !== undefined) {
+		roleState.history.push({ role: 'user', content: resumeNote })
+	}
 	return dispatchToolCallSequence(deps, context, roleState, registryEntry, dispatchCtx, suspendedTurn.toolCalls, suspendedTurn.agentIndex + 1)
 }
 
@@ -405,11 +410,18 @@ async function executeRoleLoop(
 	allowedToolsManifests: ToolManifest[],
 	dispatchCtx: DispatchContext,
 	suspendedTurn?: SuspendedTurn,
+	resumeNote?: string,
 ): Promise<ResultCard> {
 	const config = context.loadedGuild.deployment.executor
+	// The note is delivered exactly once, at the resumed role's equivalent loop entry: inside the suspended-turn completion when there is one (its remaining calls may include the finish that terminates the role without a further LLM request), else at the loop top. Either way it lands after the previous turn's tool results and before the role's next decision, and the loop top's checkpoint write persists it like any other history message.
+	let noteToInject = resumeNote
 	if (suspendedTurn !== undefined) {
-		const completedCard = await completeSuspendedTurn(deps, context, roleState, registryEntry, dispatchCtx, suspendedTurn)
+		const completedCard = await completeSuspendedTurn(deps, context, roleState, registryEntry, dispatchCtx, suspendedTurn, noteToInject)
+		noteToInject = undefined
 		if (completedCard !== null) return completedCard
+	}
+	if (noteToInject !== undefined) {
+		roleState.history.push({ role: 'user', content: noteToInject })
 	}
 	while (true) {
 		// The park mark unwinds the run at the loop top — the safe point before any further LLM request — with the platform-authored park card; the LLM is never asked to finish gracefully and never gets a turn to talk itself out of parking (docs/queueing.md "Parking: the pre-write rule").

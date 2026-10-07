@@ -1,10 +1,10 @@
-import type { ListRunIds, ProjectSettings, ReadProjectSettings, ReadRunMetaById, ReadRunPlanById, ReadRunSnapshotStats, ReadRunSummaryStats, ReadTaskQueue, WriteProjectSettings, WriteTaskQueue } from '../executor/persistence.js'
+import type { ListRunIds, ProjectSettings, ReadProjectSettings, ReadRunMetaById, ReadRunPlanById, ReadRunSnapshotStats, ReadRunSummaryStats, ReadTaskQueue, RunCheckpointExists, WriteProjectSettings, WriteTaskQueue } from '../executor/persistence.js'
 import { isRunIdShape } from '../executor/run-id.js'
 import type { DeploymentConfig, EffortLevel, GuildConfig, LogLevel, ToolManifest } from '../executor/types.js'
 import { isEffortLevel, isLogLevel, isObject, isTerminalRunStatus } from '../executor/validation.js'
 import { cancelWaitingItem, editWaitingItem, enqueueAtHead, enqueueAtTail, normalizeNewItem, recordAnswer, removeWaitingItem, reorderWaitingItem, requireWaitingItem, requeueErrorItem, type QueueItem, type QueueMutation } from '../executor/task-queue.js'
 import type { RunState } from '../executor/run-state.js'
-import type { RunSubmission } from '../executor/run-submission.js'
+import type { ResumeErroredRun, RunSubmission } from '../executor/run-submission.js'
 import { paginateLogEvents, parseRunMeta, renderConfig, renderProjectSettings, renderPendingQuestions, renderRunView, formatLogAsText, formatLogDetailSections, foldLlmCallSent, filterLogEventsForInstance } from './render.js'
 import type { BuildInfo } from './build-info.js'
 import type { ReadRunListSummary } from './run-list-cache.js'
@@ -38,6 +38,10 @@ export interface RequestHandlerConfig {
 	// The durable task queue's leaves (docs/queueing.md "The queue: storage, item model, state machine"): every /api/queue mutation is a whole-file read-modify-write through these.
 	readQueue: ReadTaskQueue
 	writeQueue: WriteTaskQueue
+	// The explicit resume of an error-ended run (docs/queueing.md "Resume of an errored run"), composed in serve.ts over the submission layer and the run/checkpoint/queue leaves.
+	resumeErroredRun: ResumeErroredRun
+	// The bare existence check behind the run view's resumable flag: one stat per run-view request.
+	runCheckpointExists: RunCheckpointExists
 	// The scheduler's tick: queue mutations that could find the slot free (enqueue, answer, requeue) and the idle POST /api/runs path dispatch through it, so a free slot never sits idle behind a waiting item.
 	tickScheduler: () => Promise<void>
 	// The baked image build identifier, read once at startup (null without a baked build-info); surfaced through GET /api/config.
@@ -56,10 +60,10 @@ function json(data: unknown, status = 200): Response {
 	})
 }
 
-function handleActiveRun(readRunSnapshot: ReadRunSnapshot, readRunSnapshotStats: ReadRunSnapshotStats, readRunPlanById: ReadRunPlanById, runSubmission: RunSubmission, runState: RunState): Response {
+function handleActiveRun(readRunSnapshot: ReadRunSnapshot, readRunSnapshotStats: ReadRunSnapshotStats, readRunPlanById: ReadRunPlanById, runCheckpointExists: RunCheckpointExists, runSubmission: RunSubmission, runState: RunState): Response {
 	const runId = runSubmission.lastRunId()
 	if (runId === undefined) return json({ ok: false, error: 'no_run' }, 404)
-	const view = runViewFor(readRunSnapshot, readRunSnapshotStats, readRunPlanById, runId)
+	const view = runViewFor(readRunSnapshot, readRunSnapshotStats, readRunPlanById, runCheckpointExists, runId)
 	if (view === null) return json({ ok: false, error: 'not_found' }, 404)
 	return json({ ...view, interruptPending: runState.interruptPending() })
 }
@@ -70,8 +74,8 @@ function handleActiveRunFlow(readRunSnapshot: ReadRunSnapshot, readRunSnapshotSt
 	return runFlowPage(readRunSnapshot, readRunSnapshotStats, runId, query)
 }
 
-function handleGetRunById(readRunSnapshot: ReadRunSnapshot, readRunSnapshotStats: ReadRunSnapshotStats, readRunPlanById: ReadRunPlanById, runSubmission: RunSubmission, runState: RunState, runId: string): Response {
-	const view = runViewFor(readRunSnapshot, readRunSnapshotStats, readRunPlanById, runId)
+function handleGetRunById(readRunSnapshot: ReadRunSnapshot, readRunSnapshotStats: ReadRunSnapshotStats, readRunPlanById: ReadRunPlanById, runCheckpointExists: RunCheckpointExists, runSubmission: RunSubmission, runState: RunState, runId: string): Response {
+	const view = runViewFor(readRunSnapshot, readRunSnapshotStats, readRunPlanById, runCheckpointExists, runId)
 	if (view === null) return json({ ok: false, error: 'not_found' }, 404)
 	// interruptPending reads the shared channel's state, so it describes the active run only: a terminal run viewed while another run is active must report false rather than inherit the active run's pending interrupt.
 	return json({ ...view, interruptPending: runSubmission.activeRunId() === runId && runState.interruptPending() })
@@ -156,11 +160,11 @@ function runFlowPage(readRunSnapshot: ReadRunSnapshot, readRunSnapshotStats: Rea
 	return json(deriveInteractionModel(snapshot, new Date().toISOString()))
 }
 
-function runViewFor(readRunSnapshot: ReadRunSnapshot, readRunSnapshotStats: ReadRunSnapshotStats, readRunPlanById: ReadRunPlanById, runId: string): ReturnType<typeof renderRunView> | null {
+function runViewFor(readRunSnapshot: ReadRunSnapshot, readRunSnapshotStats: ReadRunSnapshotStats, readRunPlanById: ReadRunPlanById, runCheckpointExists: RunCheckpointExists, runId: string): ReturnType<typeof renderRunView> | null {
 	if (!isKnownRun(readRunSnapshotStats, runId)) return null
 	const snapshot = readRunSnapshot(runId)
 	// The plan is read per request rather than riding the snapshot cache: it is a separate document the run may gain mid-flight, and the file is small enough that re-reading is free.
-	return renderRunView(snapshot, { maxLogLines: MAX_LOG_LINES, now: new Date().toISOString(), plan: readRunPlanById(runId) })
+	return renderRunView(snapshot, { maxLogLines: MAX_LOG_LINES, now: new Date().toISOString(), plan: readRunPlanById(runId), checkpointExists: runCheckpointExists(runId) })
 }
 
 // Feeds the scenario's first `frameIndex + 1` events through the real adapter — the same derivation the product's `/api/runs/:id/flow` runs — so the demo harness exercises the product's `LogEvent → InteractionModel` path rather than authored model frames. `?operation=<id>` resolves one operation's details the same way the product's flow endpoint does, so the harness's inspector fetches on demand like the product client.
@@ -233,25 +237,29 @@ function handleInterrupt(runState: RunState, runSubmission: RunSubmission, runId
 // POST /api/runs keeps today's external contract exactly (docs/queueing.md "HTTP API") while every run becomes queue-tracked: the validated task is enqueued at the head of the durable queue and the scheduler — the only caller of submission — dispatches it within the same request when the slot is free, so the response is still 201 { runId }. The request's effort, logLevel, and continuesFrom are recorded on the item and thread into the dispatched run. When a run is in flight the request is refused with nothing enqueued, exactly today's 409.
 async function handleCreateRun(runSubmission: RunSubmission, readRunMetaById: ReadRunMetaById, readQueue: ReadTaskQueue, writeQueue: WriteTaskQueue, tickScheduler: () => Promise<void>, body: unknown): Promise<Response> {
 	if (!isObject(body)) return json({ ok: false, error: 'invalid_body' }, 400)
+	const continuesFromValue = body['continuesFrom']
+	if (continuesFromValue !== undefined && !isRunIdShape(continuesFromValue)) return json({ ok: false, error: 'invalid_body' }, 400)
+	const priorMeta = continuesFromValue === undefined ? null : parseRunMeta(readRunMetaById(continuesFromValue))
+	if (continuesFromValue !== undefined && (priorMeta === null || !isTerminalRunStatus(priorMeta.status))) return json({ ok: false, error: 'invalid_body' }, 400)
+	// A continuation may omit task text — the run re-runs the prior task, so the prior run's own task text stands in as the effective task (the scheduler's continuation carries it as RunContinuation.task either way). A fresh submission still requires text.
 	const taskValue = body['task']
-	if (typeof taskValue !== 'string' || taskValue === '') return json({ ok: false, error: 'invalid_body' }, 400)
+	// A present-but-non-string task is malformed even for a continuation, which may omit the task or pass an empty one but never a non-string — silently discarding what the caller sent would dispatch a different task than the request named.
+	if (taskValue !== undefined && typeof taskValue !== 'string') return json({ ok: false, error: 'invalid_body' }, 400)
+	if ((taskValue === undefined || taskValue === '') && priorMeta === null) return json({ ok: false, error: 'invalid_body' }, 400)
+	const task = typeof taskValue === 'string' && taskValue !== '' ? taskValue : (priorMeta?.task ?? '')
 	const effortValue = body['effort']
 	if (effortValue !== undefined && !isEffortLevel(effortValue)) return json({ ok: false, error: 'invalid_body' }, 400)
 	const effortOverride: EffortLevel | undefined = effortValue
 	const logLevelValue = body['logLevel']
 	if (logLevelValue !== undefined && !isLogLevel(logLevelValue)) return json({ ok: false, error: 'invalid_body' }, 400)
 	const logLevelOverride: LogLevel | undefined = logLevelValue
-	const continuesFromValue = body['continuesFrom']
-	if (continuesFromValue !== undefined && !isRunIdShape(continuesFromValue)) return json({ ok: false, error: 'invalid_body' }, 400)
-	const priorMeta = continuesFromValue === undefined ? null : parseRunMeta(readRunMetaById(continuesFromValue))
-	if (continuesFromValue !== undefined && (priorMeta === null || !isTerminalRunStatus(priorMeta.status))) return json({ ok: false, error: 'invalid_body' }, 400)
 	// Checked before enqueueing so a busy service enqueues nothing, exactly as the 409 contract promises scripts.
 	if (runSubmission.activeRunId() !== undefined) return json({ ok: false, error: 'run_in_progress' }, 409)
 	const normalized = normalizeNewItem(
-		{ task: taskValue, ...(effortOverride !== undefined ? { effort: effortOverride } : {}), ...(logLevelOverride !== undefined ? { logLevel: logLevelOverride } : {}), ...(continuesFromValue !== undefined ? { continuesFrom: continuesFromValue } : {}) },
+		{ task, ...(effortOverride !== undefined ? { effort: effortOverride } : {}), ...(logLevelOverride !== undefined ? { logLevel: logLevelOverride } : {}), ...(continuesFromValue !== undefined ? { continuesFrom: continuesFromValue } : {}) },
 		{ id: crypto.randomUUID(), queuedAt: new Date().toISOString() },
 	)
-	// Unreachable: every field was validated above, so the normalization cannot refuse.
+	// Unreachable for a well-formed prior meta; a prior meta whose task text is itself empty (a hand-edited file) is refused here instead of dispatching a taskless run.
 	if (!normalized.ok) return json({ ok: false, error: 'invalid_body' }, 400)
 	writeQueue(enqueueAtHead(readQueue(), normalized.item))
 	await tickScheduler()
@@ -263,6 +271,34 @@ async function handleCreateRun(runSubmission: RunSubmission, readRunMetaById: Re
 	if (!removal.ok) return json({ ok: false, error: 'run_in_progress' }, 409)
 	writeQueue(removal.queue)
 	return json({ ok: false, error: 'run_id_collision' }, 409)
+}
+
+// POST /api/runs/:id/resume carries an optional note, so unlike the other POST bodies an absent body is valid: an empty request body (no JSON at all) means "no note", while a present but unparseable body is malformed. A JSON null body reads as absent too.
+async function parseResumeBody(request: Request): Promise<{ ok: true; note?: string } | { ok: false }> {
+	const text = await request.text()
+	if (text.trim() === '') return { ok: true }
+	let parsed: unknown
+	try {
+		parsed = JSON.parse(text)
+	} catch {
+		return { ok: false }
+	}
+	if (parsed === null) return { ok: true }
+	if (!isObject(parsed)) return { ok: false }
+	const noteValue = parsed['note']
+	if (noteValue === undefined || noteValue === null || noteValue === '') return { ok: true }
+	if (typeof noteValue !== 'string') return { ok: false }
+	return { ok: true, note: noteValue }
+}
+
+// The explicit resume of an error-ended run: same-run-id continuation from the kept checkpoint (docs/queueing.md "Resume of an errored run"). Status codes follow the API's conventions — an unknown run is 404, a state conflict (not errored, no checkpoint, run in flight) is 409 — and the checkpoint-missing conflict names the briefed-continuation alternative, which stays the fallback for runs without a checkpoint.
+function handleResumeErroredRun(resumeErroredRun: ResumeErroredRun, runId: string, note: string | undefined): Response {
+	const result = resumeErroredRun(runId, note)
+	if (result.ok) return json({ runId: result.runId }, 201)
+	if (result.error === 'run_not_found') return json({ ok: false, error: 'not_found' }, 404)
+	if (result.error === 'run_in_progress') return json({ ok: false, error: 'run_in_progress' }, 409)
+	if (result.error === 'checkpoint_missing') return json({ ok: false, error: 'checkpoint_missing', message: 'This run has no resumable checkpoint. Continue it as a new run instead: POST /api/runs with "continuesFrom" set to this run id.' }, 409)
+	return json({ ok: false, error: 'run_not_errored' }, 409)
 }
 
 // --- /api/queue (docs/queueing.md "HTTP API") --------------------------------
@@ -387,6 +423,8 @@ export function createRequestHandler(config: RequestHandlerConfig, serveStatic: 
 	const writeProjectSettings = config.writeProjectSettings
 	const readQueue = config.readQueue
 	const writeQueue = config.writeQueue
+	const resumeErroredRun = config.resumeErroredRun
+	const runCheckpointExists = config.runCheckpointExists
 	const tickScheduler = config.tickScheduler
 
 	return async (request) => {
@@ -398,7 +436,7 @@ export function createRequestHandler(config: RequestHandlerConfig, serveStatic: 
 			if (pathname === '/api/queue') return handleGetQueue(readQueue)
 			if (pathname === '/api/settings') return handleGetSettings(readProjectSettings)
 			if (pathname === '/api/run/flow') return handleActiveRunFlow(readRunSnapshot, readRunSnapshotStats, runSubmission, url.searchParams)
-			if (pathname === '/api/run') return handleActiveRun(readRunSnapshot, readRunSnapshotStats, readRunPlanById, runSubmission, runState)
+			if (pathname === '/api/run') return handleActiveRun(readRunSnapshot, readRunSnapshotStats, readRunPlanById, runCheckpointExists, runSubmission, runState)
 			if (pathname === '/api/runs') return handleListRuns(readRunListSummary, listRunIds)
 			if (pathname.startsWith('/api/runs/')) {
 				const rest = decodePathSegment(pathname.slice('/api/runs/'.length))
@@ -413,7 +451,7 @@ export function createRequestHandler(config: RequestHandlerConfig, serveStatic: 
 						if (suffix === 'flow') return runFlowPage(readRunSnapshot, readRunSnapshotStats, runId, url.searchParams)
 					}
 				}
-				return handleGetRunById(readRunSnapshot, readRunSnapshotStats, readRunPlanById, runSubmission, runState, rest)
+				return handleGetRunById(readRunSnapshot, readRunSnapshotStats, readRunPlanById, runCheckpointExists, runSubmission, runState, rest)
 			}
 			if (pathname === '/api/questions') return json(renderPendingQuestions(runState.pendingQuestions()))
 			if (pathname === '/api/demo/scenarios') return handleDemoScenarios()
@@ -466,6 +504,14 @@ export function createRequestHandler(config: RequestHandlerConfig, serveStatic: 
 				const body = await readJsonBody(request)
 				if (body === undefined) return json({ ok: false, error: 'invalid_body' }, 400)
 				return handleInterrupt(runState, runSubmission, runId, body)
+			}
+			if (pathname.startsWith('/api/runs/') && pathname.endsWith('/resume')) {
+				const runId = decodePathSegment(pathname.slice('/api/runs/'.length, pathname.length - '/resume'.length))
+				// The shape guard matches continuesFrom's validation: a malformed id names no run, so it 404s immediately instead of reaching the readers.
+				if (runId === undefined || runId === '' || runId.includes('/') || !isRunIdShape(runId)) return json({ ok: false, error: 'not_found' }, 404)
+				const body = await parseResumeBody(request)
+				if (!body.ok) return json({ ok: false, error: 'invalid_body' }, 400)
+				return handleResumeErroredRun(resumeErroredRun, runId, body.note)
 			}
 			if (pathname === '/api/answer') {
 				const body = await readJsonBody(request)
