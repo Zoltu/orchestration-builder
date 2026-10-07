@@ -13,8 +13,8 @@
 // a paused row as static dashed lines; terminate operations cross the same way
 // as static red dashed lines, with an orange dashed border on the target. A
 // top-bar strip aggregates every role/tool type that has ever run, with
-// invocation counts and cumulative metrics drawn from the participants and
-// their completing returns.
+// invocation counts and cumulative metrics drawn from each instance's incoming
+// call operations (the only operations that carry metrics).
 //
 // Animation is layered on top of the settled structure via class hooks the
 // existing CSS keyframes drive; the model carries no animation state. The
@@ -51,7 +51,7 @@
 // browser-pure TypeScript: it imports only its siblings and the vendored `h`
 // type, and touches no external system.
 
-import { activeOperation, activeParticipant, callChainOf, isPaused, isTerminalStatus, observesOf, stacksOf, terminatesOf } from './interaction-model.js'
+import { activeOperation, activeParticipant, callChainOf, callMetricsByDestination, isPaused, isTerminalStatus, observesOf, stacksOf, terminatesOf } from './interaction-model.js'
 import type { InteractionModel, Operation, Participant, ParticipantKind, RunStatus } from './interaction-model.js'
 import type { LabelResolver, LabelTier } from './labels.js'
 import { ATTR_OPERATION, ATTR_PARTICIPANT, ATTR_ROLE } from './inspector.js'
@@ -136,6 +136,7 @@ interface TopBarSlot {
 	invocations: number
 	totalTime: number
 	totalTokens: number
+	totalCachedTokens: number
 	hasMetrics: boolean
 	errored: boolean
 }
@@ -290,7 +291,7 @@ function projectRow(model: InteractionModel, stackId: string): RowProjection | n
 	return { stackId, rootId, participants, callEdges, returnEdges }
 }
 
-// Aggregates every role/tool type that has ever appeared in the model into one top-bar slot, with the total invocation count (every participant instance of that role, current and departed, so the count matches the "ever run" rule) and the cumulative metrics drawn from the returns whose source is a participant of that role. Departed participants are represented here regardless of whether they currently linger in a row; the depart animation reconciles a lingering node with its slot in the animation layer. The render and the lifecycle diff each read the strip per poll, so the slots are memoized per model and shared read-only between those readers.
+// Aggregates every role/tool type that has ever appeared in the model into one top-bar slot, with the total invocation count (every participant instance of that role, current and departed, so the count matches the "ever run" rule) and the cumulative metrics drawn from each instance's incoming call operations — the adapter accumulates a callee's LLM spend (final attempts plus discarded retry attempts) on its call, while returns carry no metrics. The outcome is the one return concern: any instance whose completing return errored flags the slot. Departed participants are represented here regardless of whether they currently linger in a row; the depart animation reconciles a lingering node with its slot in the animation layer. The render and the lifecycle diff each read the strip per poll, so the slots are memoized per model and shared read-only between those readers.
 function projectTopBar(model: InteractionModel): TopBarSlot[] {
 	const derived = derivedOf(model)
 	if (derived.topBar !== undefined) return derived.topBar
@@ -300,38 +301,36 @@ function projectTopBar(model: InteractionModel): TopBarSlot[] {
 		if (participant.kind === 'human') continue
 		let slot = slotByRole.get(participant.role)
 		if (slot === undefined) {
-			slot = { role: participant.role, kind: participant.kind, invocations: 0, totalTime: 0, totalTokens: 0, hasMetrics: false, errored: false }
+			slot = { role: participant.role, kind: participant.kind, invocations: 0, totalTime: 0, totalTokens: 0, totalCachedTokens: 0, hasMetrics: false, errored: false }
 			slotByRole.set(participant.role, slot)
 		}
 		slot.invocations += 1
 	}
-	const returnBySource = new Map<string, Operation>()
-	for (const operation of model.operations) {
-		if (operation.kind !== 'return') continue
-		returnBySource.set(operation.source, operation)
-	}
+	const metricsByDestination = callMetricsByDestination(model)
 	for (const participant of model.participants) {
 		const slot = slotByRole.get(participant.role)
 		if (slot === undefined) continue
-		const completion = returnBySource.get(participant.id)
-		if (completion === undefined || completion.metrics === null) continue
-		const metrics = completion.metrics
-		if (metrics.elapsedSeconds !== null) {
-			slot.totalTime += metrics.elapsedSeconds
-			slot.hasMetrics = true
+		const metrics = metricsByDestination.get(participant.id)
+		if (metrics !== undefined) {
+			if (metrics.elapsedSeconds !== null) {
+				slot.totalTime += metrics.elapsedSeconds
+				slot.hasMetrics = true
+			}
+			if (metrics.tokens !== null) {
+				slot.totalTokens += metrics.tokens
+				slot.hasMetrics = true
+			}
+			if (metrics.cachedPromptTokens !== null) slot.totalCachedTokens += metrics.cachedPromptTokens
 		}
-		if (metrics.tokens !== null) {
-			slot.totalTokens += metrics.tokens
-			slot.hasMetrics = true
-		}
-		if (completion.outcome === 'error') slot.errored = true
+		const completion = completionReturnFor(model, participant.id)
+		if (completion !== undefined && completion.outcome === 'error') slot.errored = true
 	}
 	const slots = Array.from(slotByRole.values())
 	derived.topBar = slots
 	return slots
 }
 
-// The completion return for a participant (the first return whose source is the participant), used to read its cost metrics and outcome. A participant still in flight has no completing return, so it carries no cost. Read from the per-model pass (rowLookupsOf) instead of scanning the operation list per node per render.
+// The completion return for a participant (the first return whose source is the participant), read for its outcome — the status stroke. Cost metrics no longer come from here (the adapter attaches metrics to call operations only), so the cost reads the participant's incoming call via callMetricsByDestination. A participant still in flight has no completing return, so it carries no status. Read from the per-model pass (rowLookupsOf) instead of scanning the operation list per node per render.
 function completionReturnFor(model: InteractionModel, participantId: string): Operation | undefined {
 	return rowLookupsOf(model).completionReturnBySource.get(participantId)
 }
@@ -345,7 +344,11 @@ function renderSmallNode(h: H, slot: TopBarSlot, label: string, index: number): 
 	const titleParts = [label, `${slot.invocations} call${slot.invocations === 1 ? '' : 's'}`]
 	if (slot.hasMetrics) {
 		if (slot.totalTime > 0) titleParts.push(`${slot.totalTime}s`)
-		if (slot.totalTokens > 0) titleParts.push(`${slot.totalTokens.toLocaleString()} tokens`)
+		if (slot.totalTokens > 0) {
+			titleParts.push(`${slot.totalTokens.toLocaleString()} tokens`)
+			// The cached share is a subset of the prompt bill, so it rides the tokens figure as a note rather than standing as its own bucket.
+			if (slot.totalCachedTokens > 0) titleParts.push(`cached ${slot.totalCachedTokens.toLocaleString()}`)
+		}
 	}
 	if (runErrored) titleParts.push('errored')
 	return h('g', { class: classes.join(' '), transform: translate(pos.x, pos.y), [ATTR_ROLE]: slot.role, 'data-kind': slot.kind }, [
@@ -381,8 +384,9 @@ function renderRow(h: H, row: RowProjection, rowIndex: number, yOffset: number, 
 		const participant = participantById.get(entry.id)
 		const resolvedLabel = participant !== undefined ? labels.resolveParticipantLabel(participant, tier) : entry.id
 		const sublabel = participant !== undefined && participant.kind !== 'human' && participant.kind !== 'interrupt' ? participant.role : undefined
+		// Cost comes from the participant's incoming call (the callee's own spend); the status stroke comes from the completing return — two different operations, so two different lookups.
+		const incoming = callMetricsByDestination(model).get(entry.id)
 		const completion = completionReturnFor(model, entry.id)
-		const metrics = completion !== undefined && completion.metrics !== null ? completion.metrics : null
 		const status = completion !== undefined ? completion.outcome : undefined
 		const pos = rowPixel(entry.column, rowIndex, yOffset)
 		const isTerminateTarget = terminateTargetIds.has(entry.id)
@@ -391,8 +395,8 @@ function renderRow(h: H, row: RowProjection, rowIndex: number, yOffset: number, 
 			sublabel,
 			status: status === 'success' ? 'success' : status === 'error' ? 'error' : undefined,
 			active: entry.id === activeParticipantId,
-			costTime: metrics !== null ? metrics.elapsedSeconds : undefined,
-			costTokens: metrics !== null ? metrics.tokens : undefined,
+			costTime: incoming !== undefined ? incoming.elapsedSeconds : undefined,
+			costTokens: incoming !== undefined ? incoming.tokens : undefined,
 		})
 		if (enteringIds.has(entry.id)) {
 			return h('g', { class: ['flow-node', 'flow-node--entering-host', isTerminateTarget ? 'flow-node--terminate-target' : null].filter((token) => token !== null).join(' '), transform: translate(pos.x, pos.y), [ATTR_PARTICIPANT]: entry.id, [ATTR_ROLE]: participant !== undefined ? participant.role : '', 'data-kind': participant !== undefined ? participant.kind : '', 'data-lingering': entry.lingering ? 'true' : 'false' }, [
@@ -687,8 +691,9 @@ export function renderFlowView(h: H, model: InteractionModel, labels: LabelResol
 		const participant = participantById.get(entry.participantId)
 		const resolvedLabel = participant !== undefined ? labels.resolveParticipantLabel(participant, tier) : entry.participantId
 		const sublabel = participant !== undefined && participant.kind !== 'human' && participant.kind !== 'interrupt' ? participant.role : undefined
+		// Same split as the row nodes: the cost line reads the incoming call, the status stroke the completing return.
+		const incoming = callMetricsByDestination(model).get(entry.participantId)
 		const completion = completionReturnFor(model, entry.participantId)
-		const metrics = completion !== undefined && completion.metrics !== null ? completion.metrics : null
 		const status = completion !== undefined ? completion.outcome : undefined
 		const style = { '--from-x': `${fromPos.x}px`, '--from-y': `${fromPos.y}px`, '--to-x': `${toPos.x}px`, '--to-y': `${toPos.y}px` }
 		const classes = entry.merged ? 'flow-node flow-node--departing flow-node--merging' : 'flow-node flow-node--departing'
@@ -698,8 +703,8 @@ export function renderFlowView(h: H, model: InteractionModel, labels: LabelResol
 					label: resolvedLabel,
 					sublabel,
 					status: status === 'success' ? 'success' : status === 'error' ? 'error' : undefined,
-					costTime: metrics !== null ? metrics.elapsedSeconds : undefined,
-					costTokens: metrics !== null ? metrics.tokens : undefined,
+					costTime: incoming !== undefined ? incoming.elapsedSeconds : undefined,
+					costTokens: incoming !== undefined ? incoming.tokens : undefined,
 				}),
 			]),
 		])
@@ -782,7 +787,7 @@ export function deriveNowCaption(model: InteractionModel, labels: LabelResolver,
 	return label
 }
 
-// Aggregates per-operation metrics into the ambient cost strip's values. Tokens are summed across every operation that carries them (cumulative spend across the whole run); elapsed is the latest non-null elapsedSeconds — the most recent operation's reported elapsed, so an in-flight operation with no elapsed yet falls back to the last operation that reported one rather than reading as zero. Returns plain numbers so the harness formats them as textContent; no prose lives here. Operations without metrics or with null fields contribute nothing.
+// Aggregates per-operation metrics into the ambient cost strip's values. Tokens are summed across every call that carries them (cumulative spend across the whole run); elapsed is the latest non-null elapsedSeconds — the most recent call's reported elapsed, so an in-flight call with no elapsed yet falls back to the last call that reported one rather than reading as zero. Returns plain numbers so the harness formats them as textContent; no prose lives here. Operations without metrics or with null fields contribute nothing, and the call-kind guard below keeps the calls-only contract structural: returns carry no metrics (see callMetricsByDestination), so a producer that ever attached some would double count a call against its return.
 export function deriveCostStrip(model: InteractionModel): CostStrip {
 	const derived = derivedOf(model)
 	if (derived.costStrip !== undefined) return derived.costStrip
@@ -792,6 +797,7 @@ export function deriveCostStrip(model: InteractionModel): CostStrip {
 	for (let index = model.operations.length - 1; index >= 0; index -= 1) {
 		const operation = model.operations[index]
 		if (operation === undefined) continue
+		if (operation.kind !== 'call') continue
 		if (operation.metrics === null) continue
 		if (operation.metrics.tokens !== null) tokens += operation.metrics.tokens
 		if (!foundElapsed && operation.metrics.elapsedSeconds !== null) {

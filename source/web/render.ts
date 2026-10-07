@@ -610,15 +610,15 @@ export function deriveBudgets(logEvents: LogEvent[], meta: RunMeta | null, now: 
 	let totalSum = 0
 	for (const event of logEvents) {
 		if (event.type === 'tool_call') toolCalls++
-		if (event.type === 'llm_call') {
-			const usage = usageOf(event.payload)
-			if (usage !== null) {
-				sawUsage = true
-				promptSum += usage.promptTokens
-				cachedSum += usage.cachedPromptTokens
-				completionSum += usage.completionTokens
-				totalSum += usage.totalTokens
-			}
+		// llm_retry and summarizer_llm_call carry the same usage shape as llm_call and are real spend: the retry's discarded attempts were billed before the successful attempt replaced them, and the summarizer is a service-level call against the run's model (docs/reference.md "Log events"). A payload without a usable usage object contributes nothing.
+		if (event.type !== 'llm_call' && event.type !== 'llm_retry' && event.type !== 'summarizer_llm_call') continue
+		const usage = usageOf(event.payload)
+		if (usage !== null) {
+			sawUsage = true
+			promptSum += usage.promptTokens
+			cachedSum += usage.cachedPromptTokens
+			completionSum += usage.completionTokens
+			totalSum += usage.totalTokens
 		}
 	}
 

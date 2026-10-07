@@ -35,8 +35,14 @@ export interface Participant {
 }
 
 export interface OperationMetrics {
+	// The invocation's total token bill (prompt + completion, the cached subset included). Null until a usage report folds into the call: a tool call, an ask_human call, or an agent call whose endpoint answered without usage carries null, never a fabricated zero — while a reported {0, 0} is endpoint data and stays numeric (source/executor/types.ts LlmUsagePayload).
 	tokens: number | null
+	// The full prompt bill; null under the same never-reported rule as tokens.
+	promptTokens: number | null
+	completionTokens: number | null
+	// The prompt share the endpoint served from its prompt cache — a subset of promptTokens, never an additive bucket. Null until a usage that reports it folds in (the backend omits the field when unreported).
 	cachedPromptTokens: number | null
+	// Call start → matching return, or → now while the invocation is still open. Always measured: real time, never a fabricated value (null only on hand-authored models that carry no metrics).
 	elapsedSeconds: number | null
 }
 
@@ -87,6 +93,7 @@ interface DerivedStack {
 	active: string | undefined
 	stackIds: string[] | undefined
 	records: StackRecord[] | undefined
+	callMetrics: Map<string, OperationMetrics> | undefined
 }
 
 // The helpers re-derive the same whole-model structures (the open-call replay, the derived stack records, the active stack, the row list) several times per poll, and a model is replaced wholesale on every poll and never mutated in place, so a WeakMap keyed on model identity caches each structure on first request: every helper reads the same derivation instead of replaying the operation list per call, and an entry is dropped with its model on run switch. The undefined slots mean "not derived yet"; a cached value is never mutated afterwards, so readers may hold it without copying.
@@ -95,7 +102,7 @@ const derivedByModel = new WeakMap<object, DerivedStack>()
 function derivedOf(model: InteractionModel): DerivedStack {
 	let derived = derivedByModel.get(model)
 	if (derived !== undefined) return derived
-	derived = { chains: undefined, active: undefined, stackIds: undefined, records: undefined }
+	derived = { chains: undefined, active: undefined, stackIds: undefined, records: undefined, callMetrics: undefined }
 	derivedByModel.set(model, derived)
 	return derived
 }
@@ -271,6 +278,33 @@ export function callChainOf(model: InteractionModel, stackId: string): Operation
 	const chain = openCallsByStack(model).get(stackId)
 	if (chain === undefined) return []
 	return chain.slice()
+}
+
+// Sums the per-call metrics by destination participant id — the callee's own cost for each invocation. The backend adapter attaches metrics to call operations only (a call's metrics accumulate its destination's LLM spend while the call is open, discarded retry attempts included) and carries none on returns, so every per-participant cost read — flow-node cost lines, the top-bar strip, the role tooltips — reads the incoming call, never the return, and a read that pairs both would double count. Each adapter call targets a distinct participant instance (instance-per-invocation), so the map holds one entry per participant in practice; the sum keeps hand-authored models that point several calls at one participant honest. Each counter sums its non-null contributions and stays null when no call reported that counter.
+export function callMetricsByDestination(model: InteractionModel): Map<string, OperationMetrics> {
+	const derived = derivedOf(model)
+	if (derived.callMetrics !== undefined) return derived.callMetrics
+	const metrics = new Map<string, OperationMetrics>()
+	for (const operation of model.operations) {
+		if (operation.kind !== 'call') continue
+		const contribution = operation.metrics
+		if (contribution === null) continue
+		const accumulated = metrics.get(operation.destination)
+		metrics.set(operation.destination, {
+			tokens: sumCounter(accumulated?.tokens, contribution.tokens),
+			promptTokens: sumCounter(accumulated?.promptTokens, contribution.promptTokens),
+			completionTokens: sumCounter(accumulated?.completionTokens, contribution.completionTokens),
+			cachedPromptTokens: sumCounter(accumulated?.cachedPromptTokens, contribution.cachedPromptTokens),
+			elapsedSeconds: sumCounter(accumulated?.elapsedSeconds, contribution.elapsedSeconds),
+		})
+	}
+	derived.callMetrics = metrics
+	return metrics
+}
+
+function sumCounter(accumulated: number | null | undefined, contribution: number | null): number | null {
+	if (contribution === null) return accumulated ?? null
+	return (accumulated ?? 0) + contribution
 }
 
 // True when the stack is not the active stack and still carries open calls. A paused stack's in-flight operations stay in flight (the model never flips lifecycle on pause); this helper is the rule the view reads to freeze a paused stack's lines without touching the model.

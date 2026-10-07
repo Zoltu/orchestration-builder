@@ -616,11 +616,26 @@ function isParticipantRecord(value: unknown): value is Participant {
 	return isObject(value) && typeof value['id'] === 'string' && typeof value['role'] === 'string' && typeof value['kind'] === 'string'
 }
 
+// The metric counters a call operation's metrics carry, each nullable (an unreported counter is null, never a fabricated zero).
+const METRIC_COUNTERS: readonly string[] = ['tokens', 'promptTokens', 'completionTokens', 'cachedPromptTokens', 'elapsedSeconds']
+
+function isOperationMetricsRecord(value: unknown): boolean {
+	if (!isObject(value)) return false
+	for (const key of METRIC_COUNTERS) {
+		const counter = value[key]
+		if (counter === null) continue
+		// Finite or nothing: a NaN/Infinity counter would poison every sum it touched (the cost strip, the top-bar totals).
+		if (typeof counter !== 'number' || !Number.isFinite(counter)) return false
+	}
+	return true
+}
+
 function isOperationRecord(value: unknown): value is Operation {
 	if (!isObject(value)) return false
 	if (typeof value['id'] !== 'string' || typeof value['kind'] !== 'string' || typeof value['lifecycle'] !== 'string') return false
 	if (typeof value['stack'] !== 'string' || typeof value['startedAt'] !== 'string') return false
 	if (value['settledAt'] !== null && typeof value['settledAt'] !== 'string') return false
+	if (value['metrics'] !== null && !isOperationMetricsRecord(value['metrics'])) return false
 	return value['outcome'] === null || typeof value['outcome'] === 'string'
 }
 
@@ -2492,7 +2507,7 @@ function QuestionModalForRun(state: ApplicationState): Vnode | null {
 	})
 }
 
-// The technical meta line the result modal carries for advanced users: run id, effort, duration, and tool-call count in the text, with the exact start/end timestamps on the hover title. Derived from the run view the per-run poll already fetches, so the modal re-opens with no extra request.
+// The technical meta line the result modal carries for advanced users: run id, effort, duration, tool-call count, and the token bill with its input/output split in the text, with the exact start/end timestamps on the hover title. Derived from the run view the per-run poll already fetches, so the modal re-opens with no extra request.
 function resultMetaLine(view: RunView): { text: string; title: string } | null {
 	if (typeof view.runId !== 'string') return null
 	// The ingress guard does not validate budgets, so a malformed body can reach this function with the field absent — the widened annotation keeps that defensive check honest instead of trusting the declared type.
@@ -2502,8 +2517,21 @@ function resultMetaLine(view: RunView): { text: string; title: string } | null {
 	if (isEffort(view.effort)) parts.push(`effort ${effortLabel(view.effort)}`)
 	parts.push(formatElapsed(budgets.elapsedSeconds))
 	parts.push(`${formatNumber(budgets.toolCalls)} tool calls`)
+	const breakdown: TokenUsage | null | undefined = budgets.tokenBreakdown
+	if (isTokenUsage(breakdown)) parts.push(tokensMetaPart(breakdown))
 	const title = `started ${view.startTime ?? '—'} → ended ${view.endTime ?? '—'}`
 	return { text: parts.join(' · '), title }
+}
+
+// The meta line's tokens figure: the total bill, then the input/output split with the cached share nested inside the input in parentheses — cached tokens are part of the prompt bill, a subset rather than an additive bucket (source/executor/types.ts LlmUsagePayload).
+function tokensMetaPart(breakdown: TokenUsage): string {
+	const cached = breakdown.cachedPromptTokens > 0 ? ` (cached ${formatTokens(breakdown.cachedPromptTokens)})` : ''
+	return `${formatTokens(breakdown.totalTokens)} tokens (input ${formatTokens(breakdown.promptTokens)}${cached}, output ${formatTokens(breakdown.completionTokens)})`
+}
+
+function isTokenUsage(value: unknown): value is TokenUsage {
+	if (!isObject(value)) return false
+	return typeof value['promptTokens'] === 'number' && typeof value['completionTokens'] === 'number' && typeof value['totalTokens'] === 'number' && typeof value['cachedPromptTokens'] === 'number'
 }
 
 // The terminal result the modal renders, derived from the live run view the per-run poll already fetches (the flow endpoint carries no result/error fields). The modal opens on a watched run's completion (GotSelectedRun) and re-opens via the flow view's CTA; the descriptor is undefined for a non-terminal run so the modal renders nothing then.

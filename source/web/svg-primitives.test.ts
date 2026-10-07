@@ -212,6 +212,12 @@ describe('the cost formatters (through the GraphNode cost line)', () => {
 		expect(costTextOf(graphNode({ label: 'n', costTokens: 0 }))).toBe('0 tok')
 	})
 
+	test('a null token count renders no token part while a measured zero time still renders', () => {
+		// The lingering-tool shape: elapsed is measured (a real 0s), but tokens were never reported, so no token part may fabricate a 0 tok.
+		expect(costTextOf(graphNode({ label: 'n', costTime: 0, costTokens: null }))).toBe('0s')
+		expect(costTextOf(graphNode({ label: 'n', costTime: 1.5, costTokens: null }))).toBe('1.5s')
+	})
+
 	test('token counts below 1000 render as the raw number', () => {
 		expect(costTextOf(graphNode({ label: 'n', costTokens: 999 }))).toBe('999 tok')
 	})

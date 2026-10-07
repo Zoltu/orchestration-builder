@@ -33,10 +33,10 @@ function stringField(payload: unknown, field: string): string | null {
 	return typeof value === 'string' ? value : null
 }
 
-// Extracts only the two counters the model carries: the total token bill and the cached-prompt
-// subset. The full breakdown the run view shows is a run-wide concern (render.ts deriveBudgets);
-// per-invocation metrics need only the totals the flow nodes display.
-function usageOf(payload: unknown): { totalTokens: number; cachedPromptTokens: number } | null {
+// The full usage breakdown one usage-carrying event reports: the two reported counts plus their sum, and the cached-prompt subset (a subset of the prompt bill, not additive). A payload with neither a reported total nor a reportable prompt+completion pair has no usage; a present-but-partial usage object degrades its missing fields to 0 (endpoint-reported data), matching the run view's reader (render.ts usageOf). cachedPromptTokens is null when the usage object does not report it — the backend omits the field when unreported, and that absence must survive the fold so a null is never replaced by a fabricated zero.
+type UsageBreakdown = { promptTokens: number; completionTokens: number; totalTokens: number; cachedPromptTokens: number | null }
+
+function usageOf(payload: unknown): UsageBreakdown | null {
 	if (!isObject(payload)) return null
 	const usage = payload['usage']
 	if (!isObject(usage)) return null
@@ -44,15 +44,13 @@ function usageOf(payload: unknown): { totalTokens: number; cachedPromptTokens: n
 	const prompt = usage['promptTokens']
 	const completion = usage['completionTokens']
 	const cached = usage['cachedPromptTokens']
-	let totalTokens: number | null = null
-	if (typeof total === 'number') {
-		totalTokens = total
-	} else if (typeof prompt === 'number' && typeof completion === 'number') {
-		totalTokens = prompt + completion
-	}
-	if (totalTokens === null) return null
-	const cachedPromptTokens = typeof cached === 'number' ? cached : 0
-	return { totalTokens, cachedPromptTokens }
+	const promptTokens = typeof prompt === 'number' ? prompt : 0
+	const completionTokens = typeof completion === 'number' ? completion : 0
+	const hasPromptCompletion = typeof prompt === 'number' && typeof completion === 'number'
+	if (typeof total !== 'number' && !hasPromptCompletion) return null
+	const totalTokens = typeof total === 'number' ? total : promptTokens + completionTokens
+	const cachedPromptTokens = typeof cached === 'number' ? cached : null
+	return { promptTokens, completionTokens, totalTokens, cachedPromptTokens }
 }
 
 function runStatusOf(meta: RunMeta | null): RunStatus {
@@ -110,8 +108,11 @@ interface OpenCallRecord {
 	// Set when the callee's turn began (an llm_call_start for this call's destination role), the precise transit→working boundary — the callee began working the instant the request was dispatched.
 	// Precedes delegatedAt in the finalization below; null on logs that carry no llm_call_start events, where delegatedAt carries the turn-level boundary instead.
 	turnStartedAt: string | null
-	tokens: number
-	cachedPromptTokens: number
+	// Token counters start null — nothing has been reported for this invocation yet — and turn numeric with the first folded usage, so a tool call, an ask_human call, or an agent call whose endpoint answered without usage stays null instead of reading as a fabricated zero (the contract the model's OperationMetrics documents). cachedPromptTokens additionally stays null until a usage that reports it folds in.
+	tokens: number | null
+	promptTokens: number | null
+	completionTokens: number | null
+	cachedPromptTokens: number | null
 }
 
 interface ReturnRecord {
@@ -235,6 +236,24 @@ function deriveModel(snapshot: RunSnapshot, now: string): DerivedModel {
 		if (top.returnTimestamp === null && top.delegatedAt === null) top.delegatedAt = timestamp
 	}
 
+	// The call's metrics accumulate the callee's work: the innermost open call whose destination role matches the event's role — the role's own invocation (a same-named child delegates deeper, so the innermost match is the child's own call). The token counters turn numeric with the first folded usage (a reported {0, 0} is endpoint data and stays numeric zero); the cached subset survives folds that do not report it.
+	function foldUsageIntoOpenCall(role: string, usage: UsageBreakdown): void {
+		const frame = currentFrame()
+		for (let i = frame.openCalls.length - 1; i >= 0; i -= 1) {
+			const candidate = frame.openCalls[i]
+			if (candidate === undefined) continue
+			if (candidate.destinationRole === role) {
+				candidate.tokens = (candidate.tokens ?? 0) + usage.totalTokens
+				candidate.promptTokens = (candidate.promptTokens ?? 0) + usage.promptTokens
+				candidate.completionTokens = (candidate.completionTokens ?? 0) + usage.completionTokens
+				if (usage.cachedPromptTokens !== null) {
+					candidate.cachedPromptTokens = (candidate.cachedPromptTokens ?? 0) + usage.cachedPromptTokens
+				}
+				break
+			}
+		}
+	}
+
 	function recordCall(event: LogEvent, source: string, destinationId: string, destinationRole: string, destinationKind: ParticipantKind, questionId: string | null, detailSource: OperationDetailSource | null): void {
 		settleLingering(event.timestamp)
 		settleResolvedLingering(event.timestamp)
@@ -262,8 +281,10 @@ function deriveModel(snapshot: RunSnapshot, now: string): DerivedModel {
 			returnTimestamp: null,
 			delegatedAt: null,
 			turnStartedAt: null,
-			tokens: 0,
-			cachedPromptTokens: 0,
+			tokens: null,
+			promptTokens: null,
+			completionTokens: null,
+			cachedPromptTokens: null,
 		}
 		frame.openCalls.push(record)
 		allCallRecords.push(record)
@@ -446,18 +467,21 @@ function deriveModel(snapshot: RunSnapshot, now: string): DerivedModel {
 				// An llm_call from the caller settles a lingering return leg (the caller resumed).
 				settleLingeringIfCaller(role, event.timestamp)
 				if (usage === null) break
-				// The call's metrics accumulate the callee's work: the innermost open call whose destination is the role that produced this llm_call.
-				for (let i = currentFrame().openCalls.length - 1; i >= 0; i -= 1) {
-					const candidate = currentFrame().openCalls[i]
-					if (candidate === undefined) continue
-					if (candidate.destinationRole === role) {
-						candidate.tokens += usage.totalTokens
-						candidate.cachedPromptTokens += usage.cachedPromptTokens
-						break
-					}
-				}
+				foldUsageIntoOpenCall(role, usage)
 				break
 			}
+			case 'llm_retry': {
+				// The discarded retry attempts' spend folds into the same invocation its llm_call folds into: the retry event immediately precedes that llm_call (source/executor/engine.ts), so the same innermost-open-call match lands both on the same call. Retry spend is real spend but not caller activity, so it settles no lingering leg.
+				const role = stringField(event.payload, 'role')
+				if (role === null) break
+				const usage = usageOf(event.payload)
+				if (usage === null) break
+				foldUsageIntoOpenCall(role, usage)
+				break
+			}
+			case 'summarizer_llm_call':
+				// Run-wide spend only (render.ts deriveBudgets sums it): the summarizer is not a role turn — it opens no call, creates no participant, and folds no flow metrics.
+				break
 			case 'llm_call_start': {
 				const role = stringField(event.payload, 'role')
 				if (role === null) break
@@ -569,7 +593,7 @@ function deriveModel(snapshot: RunSnapshot, now: string): DerivedModel {
 		const elapsed = record.returnTimestamp !== null
 			? secondsBetween(op.startedAt, record.returnTimestamp)
 			: secondsBetween(op.startedAt, now)
-		op.metrics = { tokens: record.tokens, cachedPromptTokens: record.cachedPromptTokens, elapsedSeconds: elapsed }
+		op.metrics = { tokens: record.tokens, promptTokens: record.promptTokens, completionTokens: record.completionTokens, cachedPromptTokens: record.cachedPromptTokens, elapsedSeconds: elapsed }
 	}
 
 	for (const record of allReturnRecords) {

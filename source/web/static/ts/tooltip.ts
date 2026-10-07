@@ -7,9 +7,11 @@
 // `h` and `renderMarkdown` are passed in rather than imported so the component stays free of hyperapp and showdown coupling and is exercisable in tests with fakes (mirroring question-modal.js / result-modal.js).
 
 import { isObject } from './guards.js'
+import { callMetricsByDestination } from './interaction-model.js'
 import type { InteractionModel, Operation, Participant } from './interaction-model.js'
 import type { LabelResolver, LabelTier } from './labels.js'
 import type { OperationDetailsState } from './operation-details.js'
+import { formatTokens } from './svg-primitives.js'
 import type { LooseH, Vnode, VnodeChildInput } from '../vendor/hyperapp.js'
 
 // A labeled detail block, mirroring the `LogDetailSection` shape `formatLogDetailSections` (source/web/render.ts) produces: a machine label (`'arguments'`, `'result'`, `'summary'`, `'error'`, `'usage'`, …) and the raw content the tooltip then formats by kind.
@@ -307,53 +309,63 @@ function representativeParticipantOfRole(model: InteractionModel, role: string):
 	return undefined
 }
 
-// Aggregates every participant instance of a role into a cumulative summary, mirroring the
-// `projectTopBar` aggregation the flow view's top-bar strip already computes: the invocation count
-// (every participant instance of the role, current and departed), the total time and total tokens
-// drawn from the returns whose source is a participant of the role, and whether any invocation
-// errored. `hasMetrics` distinguishes "no metrics yet" from "zero metrics" so the card omits the
-// time/tokens rows while a role is still in flight rather than reading as a measured zero.
+// Aggregates every participant instance of a role into a cumulative summary, mirroring the `projectTopBar` aggregation the flow view's top-bar strip already computes: the invocation count (every participant instance of the role, current and departed), the total time and the token totals (with their input/cached/output split) drawn from each instance's incoming call operations — the adapter accumulates a callee's LLM spend on its call, discarded retry attempts included, while returns carry no metrics — and whether any invocation errored (read off the returns, the one place outcomes live). Each total stays null until at least one of the role's calls reported that counter — a tool role or a usage-silent endpoint leaves the token totals null, never a fabricated zero — so the card renders each row only when the role has a measured figure for it.
 interface RoleAggregate {
 	invocations: number
-	totalTime: number
-	totalTokens: number
+	totalTime: number | null
+	totalTokens: number | null
+	promptTokens: number | null
+	cachedTokens: number | null
+	completionTokens: number | null
 	errored: boolean
-	hasMetrics: boolean
 }
 
 function aggregateRole(model: InteractionModel, role: string): RoleAggregate {
 	let invocations = 0
-	let totalTime = 0
-	let totalTokens = 0
+	let totalTime: number | null = null
+	let totalTokens: number | null = null
+	let promptTokens: number | null = null
+	let cachedTokens: number | null = null
+	let completionTokens: number | null = null
 	let errored = false
-	let hasMetrics = false
-	const returnsBySource = new Map<string, Operation>()
+	const errorSources = new Set<string>()
 	for (const operation of model.operations) {
-		if (operation.kind === 'return') returnsBySource.set(operation.source, operation)
+		if (operation.kind === 'return' && operation.outcome === 'error') errorSources.add(operation.source)
 	}
+	const metricsByDestination = callMetricsByDestination(model)
 	for (const participant of model.participants) {
 		if (participant.role !== role) continue
 		invocations += 1
-		const completion = returnsBySource.get(participant.id)
-		if (completion === undefined) continue
-		if (completion.outcome === 'error') errored = true
-		if (completion.metrics === null) continue
-		if (completion.metrics.elapsedSeconds !== null) {
-			totalTime += completion.metrics.elapsedSeconds
-			hasMetrics = true
-		}
-		if (completion.metrics.tokens !== null) {
-			totalTokens += completion.metrics.tokens
-			hasMetrics = true
-		}
+		if (errorSources.has(participant.id)) errored = true
+		const metrics = metricsByDestination.get(participant.id)
+		if (metrics === undefined) continue
+		if (metrics.elapsedSeconds !== null) totalTime = (totalTime ?? 0) + metrics.elapsedSeconds
+		if (metrics.tokens !== null) totalTokens = (totalTokens ?? 0) + metrics.tokens
+		if (metrics.promptTokens !== null) promptTokens = (promptTokens ?? 0) + metrics.promptTokens
+		if (metrics.cachedPromptTokens !== null) cachedTokens = (cachedTokens ?? 0) + metrics.cachedPromptTokens
+		if (metrics.completionTokens !== null) completionTokens = (completionTokens ?? 0) + metrics.completionTokens
 	}
-	return { invocations, totalTime, totalTokens, errored, hasMetrics }
+	return { invocations, totalTime, totalTokens, promptTokens, cachedTokens, completionTokens, errored }
+}
+
+// The tokens line's figures: the total bill, then the input/output split with the cached share nested inside the input in parentheses — cached tokens are part of the prompt bill (a subset, never an additive bucket). Null buckets are omitted entirely (no fabricated zeros), the cached note rides only a reported nonzero share, and a measured-zero total reads as a plain '0'.
+function tokensSummary(aggregate: RoleAggregate): string {
+	if (aggregate.totalTokens === 0) return '0'
+	let summary = formatTokens(aggregate.totalTokens)
+	if (aggregate.promptTokens !== null) summary += ` \u00b7 input ${formatTokens(aggregate.promptTokens)}${cachedNote(aggregate.cachedTokens)}`
+	if (aggregate.completionTokens !== null) summary += ` \u00b7 output ${formatTokens(aggregate.completionTokens)}`
+	return summary
+}
+
+function cachedNote(cachedTokens: number | null): string {
+	if (cachedTokens === null || cachedTokens === 0) return ''
+	return ` (cached ${formatTokens(cachedTokens)})`
 }
 
 // Top-bar node (flow, by `data-role`): the role's cumulative summary across every participant
-// instance of that role — invocation count, total time, total tokens, and whether any invocation
-// errored. The figures match the count the top-bar slot displays and the <title> the strip carries,
-// so hovering a slot reads the same aggregation the strip renders.
+// instance of that role — invocation count, total time, total tokens (with the input/cached/output
+// split), and whether any invocation errored. The figures match the count the top-bar slot displays
+// and the <title> the strip carries, so hovering a slot reads the same aggregation the strip renders.
 export function deriveRoleTooltip(model: InteractionModel, labels: LabelResolver, tier: LabelTier, role: string): TooltipDescriptor {
 	if (!isObject(model) || typeof role !== 'string') return { title: '', sections: [] }
 	const representative = representativeParticipantOfRole(model, role)
@@ -361,10 +373,8 @@ export function deriveRoleTooltip(model: InteractionModel, labels: LabelResolver
 	const title = labels.resolveParticipantLabel(representative, tier)
 	const aggregate = aggregateRole(model, role)
 	const sections: TooltipSection[] = [scalarSection('invocations', aggregate.invocations)]
-	if (aggregate.hasMetrics) {
-		sections.push(scalarSection('total time', `${aggregate.totalTime}s`))
-		sections.push(scalarSection('total tokens', aggregate.totalTokens))
-	}
+	if (aggregate.totalTime !== null) sections.push(scalarSection('total time', `${aggregate.totalTime}s`))
+	if (aggregate.totalTokens !== null) sections.push(scalarSection('total tokens', tokensSummary(aggregate)))
 	if (aggregate.errored) sections.push(scalarSection('status', 'errored'))
 	return { title, sections }
 }

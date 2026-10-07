@@ -1,9 +1,11 @@
 import { describe, expect, test } from 'bun:test'
+import type { LogEvent, RunMeta } from '../executor/types.js'
 import { deriveLifecycle, renderFlowView, deriveNowCaption, deriveCostStrip, createColumnTracker, COL_GAP } from './static/ts/flow-view.js'
 import { activeOperation, activeParticipant, activeStack, observesOf, stacksOf } from './static/ts/interaction-model.js'
 import { createLabelResolver } from './static/ts/labels.js'
 import { labelsModule } from './label-resolver-fixture.js'
 import { scenarios } from './static/ts/scenarios.js'
+import { deriveInteractionModel } from './interaction-model-adapter.js'
 import { NODE_WIDTH } from './static/ts/svg-primitives.js'
 import { defined } from './test-fixtures.js'
 
@@ -769,11 +771,7 @@ describe('deriveCostStrip — per-operation metric aggregation', () => {
 		return { id, kind: 'call', stack, source, destination, startedAt: 't0', settledAt: null, lifecycle: 'in_flight', outcome: null, metrics }
 	}
 
-	function returnWithMetrics(id: string, stack: string, source: string, destination: string, elapsedSeconds: number, tokens: number): Operation {
-		return { id, kind: 'return', stack, source, destination, startedAt: 't0', settledAt: 't1', lifecycle: 'settled', outcome: 'success', metrics: { tokens, cachedPromptTokens: null, elapsedSeconds } }
-	}
-
-	test('tokens are summed across every operation that carries them and null metrics contribute nothing', () => {
+	test('tokens are summed across the call operations that carry them — returns carry none, so a call and its return never double count', () => {
 		const model: InteractionModel = {
 			participants: [
 				participant('you', 'human', 'human'),
@@ -781,22 +779,34 @@ describe('deriveCostStrip — per-operation metric aggregation', () => {
 				participant('coder', 'coder', 'role'),
 			],
 			operations: [
-				callWithMetrics('op1', 'root', 'you', 'orchestrator', { tokens: 120, cachedPromptTokens: null, elapsedSeconds: 1.5 }),
-				returnWithMetrics('op2', 'root', 'orchestrator', 'you', 1.5, 120),
+				callWithMetrics('op1', 'root', 'you', 'orchestrator', { tokens: 120, promptTokens: 100, completionTokens: 20, cachedPromptTokens: null, elapsedSeconds: 1.5 }),
+				{ id: 'op2', kind: 'return', stack: 'root', source: 'orchestrator', destination: 'you', startedAt: 't0', settledAt: 't1', lifecycle: 'settled', outcome: 'success', metrics: null },
 				callWithMetrics('op3', 'root', 'you', 'coder', null),
-				returnWithMetrics('op4', 'root', 'coder', 'you', 2.0, 80),
+				callWithMetrics('op4', 'root', 'you', 'coder', { tokens: 80, promptTokens: 60, completionTokens: 20, cachedPromptTokens: null, elapsedSeconds: 2.0 }),
 			],
 			status: 'running',
 		}
-		expect(deriveCostStrip(model)).toEqual({ elapsedSeconds: 2.0, tokens: 320 })
+		expect(deriveCostStrip(model)).toEqual({ elapsedSeconds: 2.0, tokens: 200 })
+	})
+
+	test('a return that carries metrics is ignored — the calls-only contract is structural, not convention', () => {
+		const model: InteractionModel = {
+			participants: [participant('you', 'human', 'human'), participant('coder', 'coder', 'role')],
+			operations: [
+				callWithMetrics('op1', 'root', 'you', 'coder', { tokens: 50, promptTokens: 40, completionTokens: 10, cachedPromptTokens: null, elapsedSeconds: 3.0 }),
+				{ id: 'op2', kind: 'return', stack: 'root', source: 'coder', destination: 'you', startedAt: 't0', settledAt: 't1', lifecycle: 'settled', outcome: 'success', metrics: { tokens: 999, promptTokens: 999, completionTokens: 999, cachedPromptTokens: null, elapsedSeconds: 99 } },
+			],
+			status: 'running',
+		}
+		expect(deriveCostStrip(model)).toEqual({ elapsedSeconds: 3.0, tokens: 50 })
 	})
 
 	test('elapsed reads the latest non-null elapsedSeconds, falling back to the previous operation when the latest has none', () => {
 		const model: InteractionModel = {
 			participants: [participant('you', 'human', 'human'), participant('coder', 'coder', 'role')],
 			operations: [
-				returnWithMetrics('op1', 'root', 'coder', 'you', 3.0, 50),
-				callWithMetrics('op2', 'root', 'you', 'coder', { tokens: null, cachedPromptTokens: null, elapsedSeconds: null }),
+				callWithMetrics('op1', 'root', 'you', 'coder', { tokens: 50, promptTokens: 40, completionTokens: 10, cachedPromptTokens: null, elapsedSeconds: 3.0 }),
+				callWithMetrics('op2', 'root', 'you', 'coder', { tokens: null, promptTokens: null, completionTokens: null, cachedPromptTokens: null, elapsedSeconds: null }),
 			],
 			status: 'running',
 		}
@@ -816,14 +826,15 @@ describe('deriveCostStrip — per-operation metric aggregation', () => {
 
 	test('repeated calls on one model return reference-equal results, and distinct models never share one', () => {
 		// The strip is memoized per model, so the repeated call must hand back the same derived object while a content-identical second model derives its own.
+		const metrics = { tokens: 120, promptTokens: 100, completionTokens: 20, cachedPromptTokens: null, elapsedSeconds: 1.5 }
 		const model: InteractionModel = {
 			participants: [participant('you', 'human', 'human'), participant('coder', 'coder', 'role')],
-			operations: [returnWithMetrics('op1', 'root', 'coder', 'you', 1.5, 120)],
+			operations: [callWithMetrics('op1', 'root', 'you', 'coder', metrics)],
 			status: 'running',
 		}
 		const twin: InteractionModel = {
 			participants: [participant('you', 'human', 'human'), participant('coder', 'coder', 'role')],
-			operations: [returnWithMetrics('op1', 'root', 'coder', 'you', 1.5, 120)],
+			operations: [callWithMetrics('op1', 'root', 'you', 'coder', metrics)],
 			status: 'running',
 		}
 		const first = deriveCostStrip(model)
@@ -831,6 +842,102 @@ describe('deriveCostStrip — per-operation metric aggregation', () => {
 		expect(first).toEqual({ elapsedSeconds: 1.5, tokens: 120 })
 		expect(deriveCostStrip(twin)).toEqual(first)
 		expect(deriveCostStrip(twin)).not.toBe(first)
+	})
+})
+
+// The metrics seam: the real adapter attaches per-invocation metrics to call operations only (a
+// call's metrics accumulate its destination's LLM spend; returns carry metrics: null), so the flow
+// view's cost surfaces must read calls by destination. Building the model through the real
+// deriveInteractionModel — not hand-authored operations whose metric placement is whatever the
+// fixture authored — is what pins that seam: fixtures that placed metrics on returns once hid
+// every per-role token display this guards against.
+describe('renderFlowView over the real adapter — the call-metrics seam', () => {
+	function logEvent(offsetSeconds: number, type: string, payload: unknown): LogEvent {
+		return { timestamp: new Date(Date.UTC(2026, 0, 1, 0, 0, offsetSeconds)).toISOString(), type, payload }
+	}
+
+	function usage(promptTokens: number, completionTokens: number, cachedPromptTokens?: number): Record<string, number> {
+		const shaped: Record<string, number> = { promptTokens, completionTokens, totalTokens: promptTokens + completionTokens }
+		if (cachedPromptTokens !== undefined) shaped['cachedPromptTokens'] = cachedPromptTokens
+		return shaped
+	}
+
+	function adapterModel(events: LogEvent[], status: RunMeta['status'], now: string): InteractionModel {
+		return deriveInteractionModel({ meta: { runId: 'seam', guildPath: 'g', benchmarkPath: 'b', task: 'work', status, startTime: '2026-01-01T00:00:00.000Z' }, logEvents: events }, now)
+	}
+
+	test('an in-flight callee node renders its call’s token cost line, and the cost strip sums the same call', () => {
+		const events = [
+			logEvent(0, 'role_start', { role: 'coder', depth: 0, task: 'work' }),
+			logEvent(1, 'llm_call', { role: 'coder', usage: usage(100, 20, 40) }),
+		]
+		const frame = adapterModel(events, 'running', '2026-01-01T00:00:11.000Z')
+		const view = render(frame)
+		const coderNode = allByTag(view, 'g').find((group) => {
+			if (!(propString(group.props, 'class') ?? '').split(' ').includes('flow-node')) return false
+			const participantId = propString(group.props, 'data-participant')
+			return participantId !== undefined && participantId.startsWith('role:coder:')
+		})
+		expect(coderNode).toBeDefined()
+		const cost = allByTag(defined(coderNode, 'coderNode'), 'text').find((text) => propString(text.props, 'class') === 'graph-node-cost')
+		expect(defined(cost, 'cost line').children.join('')).toBe('11s \u00b7 120 tok')
+		// The ambient strip reads the same call metrics: 120 tokens and the elapsed counted to now.
+		expect(deriveCostStrip(frame)).toEqual({ elapsedSeconds: 11, tokens: 120 })
+	})
+
+	test('the top-bar title of a departed role carries the token total and the cached subset note', () => {
+		const events = [
+			logEvent(0, 'role_start', { role: 'coder', depth: 0, task: 'work' }),
+			logEvent(1, 'llm_call', { role: 'coder', usage: usage(100, 20, 40) }),
+			logEvent(6, 'role_finished', { role: 'coder', depth: 0, status: 'success', summary: 'done' }),
+		]
+		const frame = adapterModel(events, 'success', '2026-01-01T00:01:00.000Z')
+		const view = render(frame)
+		const coderSlot = groupsWithClass(view, 'flow-small-node').find((slot) => propString(slot.props, 'data-role') === 'coder')
+		expect(coderSlot).toBeDefined()
+		const titles = allByTag(defined(coderSlot, 'coderSlot'), 'title')
+		expect(titles).toHaveLength(1)
+		const titleText = defined(titles[0], 'titles[0]').children.join('')
+		expect(titleText).toContain('1 call')
+		expect(titleText).toContain('120 tokens')
+		// The cached 40 is a subset of the prompt bill, so it rides the tokens figure as a note.
+		expect(titleText).toContain('cached 40')
+	})
+
+	test('a lingering tool call never receives usage, so its cost line is time-only — no fabricated 0 tok', () => {
+		const events = [
+			logEvent(0, 'role_start', { role: 'coder', depth: 0, task: 'work' }),
+			logEvent(1, 'tool_call', { role: 'coder', tool: 'read_file', arguments: '{"path":"README.md"}' }),
+		]
+		const frame = adapterModel(events, 'running', '2026-01-01T00:00:11.000Z')
+		const view = render(frame)
+		const toolNode = allByTag(view, 'g').find((group) => {
+			if (!(propString(group.props, 'class') ?? '').split(' ').includes('flow-node')) return false
+			const participantId = propString(group.props, 'data-participant')
+			return participantId !== undefined && participantId.startsWith('tool:read_file:')
+		})
+		expect(toolNode).toBeDefined()
+		const cost = allByTag(defined(toolNode, 'toolNode'), 'text').find((text) => propString(text.props, 'class') === 'graph-node-cost')
+		// The measured elapsed renders (real time); the unreported token counters must not read as a zero bill.
+		expect(defined(cost, 'cost line').children.join('')).toBe('10s')
+	})
+
+	test('a usage-silent agent call renders a time-only cost line — endpoint silence is never a fabricated 0 tok', () => {
+		const events = [
+			logEvent(0, 'role_start', { role: 'coder', depth: 0, task: 'work' }),
+			logEvent(1, 'llm_call', { role: 'coder' }),
+		]
+		const frame = adapterModel(events, 'running', '2026-01-01T00:00:11.000Z')
+		const view = render(frame)
+		const coderNode = allByTag(view, 'g').find((group) => {
+			if (!(propString(group.props, 'class') ?? '').split(' ').includes('flow-node')) return false
+			const participantId = propString(group.props, 'data-participant')
+			return participantId !== undefined && participantId.startsWith('role:coder:')
+		})
+		expect(coderNode).toBeDefined()
+		const cost = allByTag(defined(coderNode, 'coderNode'), 'text').find((text) => propString(text.props, 'class') === 'graph-node-cost')
+		// The call opened at role_start (t0), so the measured span to now is 11s — rendered as real time; the unreported tokens render nothing.
+		expect(defined(cost, 'cost line').children.join('')).toBe('11s')
 	})
 })
 

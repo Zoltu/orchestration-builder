@@ -71,6 +71,7 @@ export function GraphNode(h: H, props: Record<string, unknown>): Vnode {
 	return h('g', { class: classes.join(' ') }, children)
 }
 
+// The cost line stays a compact time · tokens pair: the cached-prompt subset is a hover-level detail (the top-bar <title> notes it, the tooltip cards carry the full split), not something that fits a node's one-line cost readout.
 function formatCost(costTime: unknown, costTokens: unknown): string | null {
 	const parts: string[] = []
 	if (costTime !== undefined && costTime !== null) parts.push(`${costTime}s`)
@@ -79,7 +80,8 @@ function formatCost(costTime: unknown, costTokens: unknown): string | null {
 	return parts.join(' \u00b7 ')
 }
 
-function formatTokens(value: unknown): string {
+// Formats a token count compactly: counts from 1000 up render in k with one decimal (1234 → "1.2k") and there is no larger unit, so a 262144-token context reads "262.1k". Exported because the tooltip card's token figures abbreviate the same way — one formatter so every token count the UI renders never drifts between surfaces.
+export function formatTokens(value: unknown): string {
 	if (typeof value === 'number' && value >= 1000) return `${Math.round(value / 100) / 10}k`
 	return String(value)
 }

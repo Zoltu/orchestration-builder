@@ -1266,6 +1266,46 @@ describe('deriveBudgets', () => {
 		expect(breakdown.cachedPromptTokens).toBe(0)
 		expect(breakdown.promptTokens).toBe(100)
 	})
+
+	test('llm_retry usage is real spend and sums into the run-wide totals', () => {
+		const meta = sampleRunMeta()
+		const logEvents: LogEvent[] = [
+			{ timestamp: 't1', type: 'llm_retry', payload: { role: 'coder', roleId: 'coder-0-1', discardedAttempts: 2, usage: { promptTokens: 90, completionTokens: 10, totalTokens: 100 } } },
+			llmCallEvent('coder', 't2', { promptTokens: 100, completionTokens: 20, totalTokens: 120 }),
+		]
+		const budgets = deriveBudgets(logEvents, meta, NOW)
+		expect(budgets.tokensUsed).toBe(220)
+		const breakdown = present(budgets.tokenBreakdown, 'tokenBreakdown')
+		expect(breakdown.promptTokens).toBe(190)
+		expect(breakdown.completionTokens).toBe(30)
+	})
+
+	test('an llm_retry without a usage object contributes nothing', () => {
+		const meta = sampleRunMeta()
+		const logEvents: LogEvent[] = [
+			{ timestamp: 't1', type: 'llm_retry', payload: { role: 'coder', roleId: 'coder-0-1', discardedAttempts: 1 } },
+			llmCallEvent('coder', 't2', { promptTokens: 40, completionTokens: 10, totalTokens: 50 }),
+		]
+		expect(deriveBudgets(logEvents, meta, NOW).tokensUsed).toBe(50)
+	})
+
+	test('summarizer_llm_call usage sums into the run-wide totals without naming a role', () => {
+		const meta = sampleRunMeta()
+		const logEvents: LogEvent[] = [
+			{ timestamp: 't1', type: 'summarizer_llm_call', payload: { usage: { promptTokens: 500, completionTokens: 30, totalTokens: 530 } } },
+			llmCallEvent('coder', 't2', { promptTokens: 40, completionTokens: 10, totalTokens: 50 }),
+		]
+		expect(deriveBudgets(logEvents, meta, NOW).tokensUsed).toBe(580)
+	})
+
+	test('does not throw on a malformed llm_retry or summarizer_llm_call payload', () => {
+		const meta = sampleRunMeta()
+		const logEvents: LogEvent[] = [
+			{ timestamp: 't1', type: 'llm_retry', payload: 'broken' },
+			{ timestamp: 't2', type: 'summarizer_llm_call', payload: { usage: 'not-an-object' } },
+		]
+		expect(deriveBudgets(logEvents, meta, NOW).tokensUsed).toBeNull()
+	})
 })
 
 describe('renderRunSummary', () => {

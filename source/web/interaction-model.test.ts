@@ -3,6 +3,7 @@ import {
 	activeParticipant,
 	activeStack,
 	callChainOf,
+	callMetricsByDestination,
 	fateOf,
 	isPaused,
 	observesOf,
@@ -516,5 +517,44 @@ describe('rolesOnlyModel', () => {
 		expect(model.operations).toHaveLength(9)
 		expect(model.participants).toHaveLength(7)
 		expect(model.stacks).toHaveLength(2)
+	})
+})
+
+describe('callMetricsByDestination', () => {
+	test('sums per destination and preserves null per counter — a never-reported counter stays null across folds', () => {
+		const model: InteractionModel = {
+			participants: [
+				{ id: 'you', role: 'human', kind: 'human' },
+				{ id: 'coder', role: 'coder', kind: 'role' },
+			],
+			operations: [
+				// Two calls into the same participant: the first reported tokens with no cached share, the second reported nothing at all. Tokens/prompt/completion accumulate over their non-null contributions; the cached subset and the second call's unreported counters never read as fabricated zeros.
+				{ id: 'op1', kind: 'call', stack: 'root', source: 'you', destination: 'coder', startedAt: 't0', settledAt: 't1', lifecycle: 'settled', outcome: null, metrics: { tokens: 120, promptTokens: 100, completionTokens: 20, cachedPromptTokens: null, elapsedSeconds: 5 } },
+				{ id: 'op2', kind: 'call', stack: 'root', source: 'you', destination: 'coder', startedAt: 't1', settledAt: null, lifecycle: 'in_flight', outcome: null, metrics: { tokens: null, promptTokens: null, completionTokens: null, cachedPromptTokens: null, elapsedSeconds: 3 } },
+			],
+			status: 'running',
+		}
+		const metrics = callMetricsByDestination(model).get('coder')
+		expect(metrics?.tokens).toBe(120)
+		expect(metrics?.promptTokens).toBe(100)
+		expect(metrics?.completionTokens).toBe(20)
+		expect(metrics?.cachedPromptTokens).toBeNull()
+		expect(metrics?.elapsedSeconds).toBe(8)
+	})
+
+	test('a participant whose calls carry no metrics is absent from the map, and the result is memoized per model', () => {
+		const model: InteractionModel = {
+			participants: [
+				{ id: 'you', role: 'human', kind: 'human' },
+				{ id: 'orch', role: 'orchestrator', kind: 'role' },
+			],
+			operations: [
+				{ id: 'op1', kind: 'call', stack: 'root', source: 'you', destination: 'orch', startedAt: 't0', settledAt: null, lifecycle: 'in_flight', outcome: null, metrics: null },
+			],
+			status: 'running',
+		}
+		const lookup = callMetricsByDestination(model)
+		expect(lookup.get('orch')).toBeUndefined()
+		expect(callMetricsByDestination(model)).toBe(lookup)
 	})
 })

@@ -1,7 +1,9 @@
 import { describe, expect, test } from 'bun:test'
+import type { LogEvent } from '../executor/types.js'
 import { Tooltip, formatTooltipContent, deriveOperationTooltip, deriveParticipantTooltip, deriveRoleTooltip, isTooltipSection } from './static/ts/tooltip.js'
 import { stacksOf } from './static/ts/interaction-model.js'
 import { labelsModule } from './label-resolver-fixture.js'
+import { deriveInteractionModel } from './interaction-model-adapter.js'
 import { defined } from './test-fixtures.js'
 
 // The tooltip component is browser-pure JS, so its exports arrive with inferred JS types. The interfaces and fake `h`/`renderMarkdown` below carry the shape the tests assert against, mirroring result-modal.test.ts.
@@ -216,12 +218,17 @@ function participant(id: string, role: string, kind: Participant['kind']): Parti
 	return { id, role, kind }
 }
 
-function callOperation(id: string, source: string, destination: string): Operation {
-	return { id, kind: 'call', stack: 'root', source, destination, startedAt: 't0', settledAt: null, lifecycle: 'in_flight', outcome: null, metrics: null }
+function callOperation(id: string, source: string, destination: string, metrics: Operation['metrics'] = null): Operation {
+	return { id, kind: 'call', stack: 'root', source, destination, startedAt: 't0', settledAt: null, lifecycle: 'in_flight', outcome: null, metrics }
 }
 
 function returnOperation(id: string, source: string, destination: string, outcome: Operation['outcome'], metrics: Operation['metrics']): Operation {
 	return { id, kind: 'return', stack: 'root', source, destination, startedAt: 't0', settledAt: null, lifecycle: 'settled', outcome, metrics }
+}
+
+// Call metrics in the adapter's wire shape: the four reported counters plus the elapsed span. The cached count is a subset of the prompt bill.
+function callMetrics(tokens: number, promptTokens: number, completionTokens: number, cachedPromptTokens: number, elapsedSeconds: number): Operation['metrics'] {
+	return { tokens, promptTokens, completionTokens, cachedPromptTokens, elapsedSeconds }
 }
 
 // The operation-details lookup state the derivations read (see tooltip.js "On-demand operation
@@ -235,6 +242,8 @@ function readyDetails(map: Record<string, string | null>): (operationId: string)
 // A delegation chain model used by several derivation tests: the human delegates to the orchestrator,
 // which delegates to a coder, which calls a read_file tool; the returns unwind with summaries and a
 // result. The detail markdown each call/return surfaces comes from the lookup the wiring passes.
+// Metrics ride the call operations only (the adapter's contract): each instance's incoming call
+// carries that instance's own spend.
 function delegationModel(): InteractionModel {
 	return {
 		participants: [
@@ -244,12 +253,12 @@ function delegationModel(): InteractionModel {
 			participant('tool:read_file:1', 'read_file', 'tool'),
 		],
 		operations: [
-			callOperation('op1', 'human:root', 'role:orchestrator:1'),
-			callOperation('op2', 'role:orchestrator:1', 'role:coder:1'),
-			callOperation('op3', 'role:coder:1', 'tool:read_file:1'),
-			returnOperation('op4', 'tool:read_file:1', 'role:coder:1', 'success', { tokens: 120, cachedPromptTokens: 0, elapsedSeconds: 1 }),
-			returnOperation('op5', 'role:coder:1', 'role:orchestrator:1', 'success', { tokens: 800, cachedPromptTokens: 0, elapsedSeconds: 9 }),
-			returnOperation('op6', 'role:orchestrator:1', 'human:root', 'success', { tokens: 1500, cachedPromptTokens: 0, elapsedSeconds: 15 }),
+			callOperation('op1', 'human:root', 'role:orchestrator:1', callMetrics(1500, 1300, 200, 0, 15)),
+			callOperation('op2', 'role:orchestrator:1', 'role:coder:1', callMetrics(800, 700, 100, 0, 9)),
+			callOperation('op3', 'role:coder:1', 'tool:read_file:1', callMetrics(120, 100, 20, 0, 1)),
+			returnOperation('op4', 'tool:read_file:1', 'role:coder:1', 'success', null),
+			returnOperation('op5', 'role:coder:1', 'role:orchestrator:1', 'success', null),
+			returnOperation('op6', 'role:orchestrator:1', 'human:root', 'success', null),
 		],
 		status: 'success',
 	}
@@ -408,9 +417,11 @@ describe('deriveParticipantTooltip', () => {
 })
 
 describe('deriveRoleTooltip', () => {
-	test('a role aggregates invocations, total time, total tokens across every instance, and surfaces an error', () => {
+	test('a role aggregates invocations, total time, and the token split across every instance, and surfaces an error', () => {
 		// Two coder instances: the first errored, the second succeeded. The cumulative summary counts
-		// both invocations, sums their time and tokens, and flags errored because one errored.
+		// both invocations, sums their time and token counters, and flags errored because one errored.
+		// The metrics ride each instance's incoming call (the adapter's contract), and the second
+		// instance's call reports a cached share — a subset of its prompt bill.
 		const model: InteractionModel = {
 			participants: [
 				participant('human:root', 'human', 'human'),
@@ -419,12 +430,12 @@ describe('deriveRoleTooltip', () => {
 				participant('role:coder:2', 'coder', 'role'),
 			],
 			operations: [
-				callOperation('op1', 'human:root', 'role:orchestrator:1'),
-				callOperation('op2', 'role:orchestrator:1', 'role:coder:1'),
-				returnOperation('op3', 'role:coder:1', 'role:orchestrator:1', 'error', { tokens: 300, cachedPromptTokens: 0, elapsedSeconds: 4 }),
-				callOperation('op4', 'role:orchestrator:1', 'role:coder:2'),
-				returnOperation('op5', 'role:coder:2', 'role:orchestrator:1', 'success', { tokens: 900, cachedPromptTokens: 0, elapsedSeconds: 6 }),
-				returnOperation('op6', 'role:orchestrator:1', 'human:root', 'success', { tokens: 1000, cachedPromptTokens: 0, elapsedSeconds: 12 }),
+				callOperation('op1', 'human:root', 'role:orchestrator:1', callMetrics(1000, 900, 100, 0, 12)),
+				callOperation('op2', 'role:orchestrator:1', 'role:coder:1', callMetrics(300, 280, 20, 200, 4)),
+				returnOperation('op3', 'role:coder:1', 'role:orchestrator:1', 'error', null),
+				callOperation('op4', 'role:orchestrator:1', 'role:coder:2', callMetrics(900, 800, 100, 0, 6)),
+				returnOperation('op5', 'role:coder:2', 'role:orchestrator:1', 'success', null),
+				returnOperation('op6', 'role:orchestrator:1', 'human:root', 'success', null),
 			],
 			status: 'success',
 		}
@@ -432,8 +443,26 @@ describe('deriveRoleTooltip', () => {
 		expect(result.sections.map((s) => s.label)).toEqual(['invocations', 'total time', 'total tokens', 'status'])
 		expect(defined(result.sections.find((s) => s.label === 'invocations'), 'invocations section').content).toBe(2)
 		expect(defined(result.sections.find((s) => s.label === 'total time'), 'total time section').content).toBe('10s')
-		expect(defined(result.sections.find((s) => s.label === 'total tokens'), 'total tokens section').content).toBe(1200)
+		// 1200 total = 300 + 900; the cached 200 rides inside the input figure as a subset, never as an additive bucket.
+		expect(defined(result.sections.find((s) => s.label === 'total tokens'), 'total tokens section').content).toBe('1.2k \u00b7 input 1.1k (cached 200) \u00b7 output 120')
 		expect(defined(result.sections.find((s) => s.label === 'status'), 'status section').content).toBe('errored')
+	})
+
+	test('a role whose instances never served from cache omits the cached note from the token split', () => {
+		const model = delegationModel()
+		const result = deriveRoleTooltip(model, labelsModule, TIER, 'coder')
+		expect(defined(result.sections.find((s) => s.label === 'total tokens'), 'total tokens section').content).toBe('800 \u00b7 input 700 \u00b7 output 100')
+	})
+
+	test('a measured-zero token total carries no split (no zero buckets)', () => {
+		const model: InteractionModel = {
+			participants: [participant('human:root', 'human', 'human'), participant('tool:read_file:1', 'read_file', 'tool')],
+			operations: [callOperation('op1', 'human:root', 'tool:read_file:1', callMetrics(0, 0, 0, 0, 3))],
+			status: 'running',
+		}
+		const result = deriveRoleTooltip(model, labelsModule, TIER, 'read_file')
+		expect(defined(result.sections.find((s) => s.label === 'total time'), 'total time section').content).toBe('3s')
+		expect(defined(result.sections.find((s) => s.label === 'total tokens'), 'total tokens section').content).toBe('0')
 	})
 
 	test('a role still in flight (no completing returns) shows invocations only — no measured-zero time/tokens', () => {
@@ -456,5 +485,31 @@ describe('deriveRoleTooltip', () => {
 	test('an unknown role yields an empty title-only result', () => {
 		const model = delegationModel()
 		expect(deriveRoleTooltip(model, labelsModule, TIER, 'nope')).toEqual({ title: '', sections: [] })
+	})
+})
+
+// The metrics seam: the real adapter attaches per-invocation metrics to call operations only, so
+// the role tooltip must aggregate calls by destination. Building the model through the real
+// deriveInteractionModel — not hand-authored operations whose metric placement is whatever the
+// fixture authored — is what pins that seam: fixtures that placed metrics on returns once hid the
+// dead token displays this guards against.
+describe('deriveRoleTooltip over the real adapter — the call-metrics seam', () => {
+	function logEvent(offsetSeconds: number, type: string, payload: unknown): LogEvent {
+		return { timestamp: new Date(Date.UTC(2026, 0, 1, 0, 0, offsetSeconds)).toISOString(), type, payload }
+	}
+
+	test('a model derived through the real adapter aggregates tokens, the cached subset, and retry spend into the role tooltip', () => {
+		const events = [
+			logEvent(0, 'role_start', { role: 'coder', depth: 0, task: 'work' }),
+			// The discarded retry attempt's spend is real spend and must land in the aggregate alongside the final attempt's llm_call usage.
+			logEvent(1, 'llm_retry', { role: 'coder', roleId: 'coder-0-1', discardedAttempts: 1, usage: { promptTokens: 50, completionTokens: 10, totalTokens: 60 } }),
+			logEvent(2, 'llm_call', { role: 'coder', usage: { promptTokens: 100, completionTokens: 20, totalTokens: 120, cachedPromptTokens: 40 } }),
+			logEvent(6, 'role_finished', { role: 'coder', depth: 0, status: 'success' }),
+		]
+		const model = deriveInteractionModel({ meta: { runId: 'seam', guildPath: 'g', benchmarkPath: 'b', task: 'work', status: 'success', startTime: events[0]?.timestamp ?? '' }, logEvents: events }, '2026-01-01T00:01:00.000Z')
+		const result = deriveRoleTooltip(model, labelsModule, TIER, 'coder')
+		expect(result.sections.map((s) => s.label)).toEqual(['invocations', 'total time', 'total tokens'])
+		// 180 total = the retry's 60 + the call's 120; the cached 40 rides inside the input figure.
+		expect(defined(result.sections.find((s) => s.label === 'total tokens'), 'total tokens section').content).toBe('180 \u00b7 input 150 (cached 40) \u00b7 output 30')
 	})
 })

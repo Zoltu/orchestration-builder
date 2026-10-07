@@ -283,8 +283,107 @@ describe('deriveInteractionModel — per-invocation metrics', () => {
 		const model = deriveInteractionModel(snapshot(events, meta('success')), NOW)
 		const call = defined(model.operations[0], 'model.operations[0]')
 		expect(call.metrics?.tokens).toBe(120)
+		expect(call.metrics?.promptTokens).toBe(100)
+		expect(call.metrics?.completionTokens).toBe(20)
 		expect(call.metrics?.cachedPromptTokens).toBe(40)
 		expect(call.metrics?.elapsedSeconds).toBe(6)
+		assertHelpersSensible(model)
+	})
+
+	test('llm_retry usage folds into the same call op as its llm_call — retry spend is real spend', () => {
+		const events = [
+			event('2026-01-01T00:00:00.000Z', 'role_start', { role: 'coder', depth: 0, task: 'work' }),
+			// The retry event immediately precedes its call's llm_call (source/executor/engine.ts) and matches the same role.
+			event('2026-01-01T00:00:01.000Z', 'llm_retry', { role: 'coder', roleId: 'coder-0-1', discardedAttempts: 2, usage: { promptTokens: 90, completionTokens: 10, totalTokens: 100 } }),
+			event('2026-01-01T00:00:02.000Z', 'llm_call', { role: 'coder', usage: { promptTokens: 100, completionTokens: 20, totalTokens: 120, cachedPromptTokens: 40 } }),
+			event('2026-01-01T00:00:06.000Z', 'role_finished', { role: 'coder', depth: 0, status: 'success' }),
+		]
+		const model = deriveInteractionModel(snapshot(events, meta('success')), NOW)
+		const call = defined(model.operations[0], 'model.operations[0]')
+		// 220 = the discarded attempts' 100 + the final attempt's 120; the breakdown sums across both.
+		expect(call.metrics?.tokens).toBe(220)
+		expect(call.metrics?.promptTokens).toBe(190)
+		expect(call.metrics?.completionTokens).toBe(30)
+		expect(call.metrics?.cachedPromptTokens).toBe(40)
+		assertHelpersSensible(model)
+	})
+
+	test('an llm_retry without usage folds nothing, and a summarizer_llm_call touches neither participants nor operations', () => {
+		const events = [
+			event('2026-01-01T00:00:00.000Z', 'role_start', { role: 'coder', depth: 0, task: 'work' }),
+			event('2026-01-01T00:00:01.000Z', 'llm_retry', { role: 'coder', roleId: 'coder-0-1', discardedAttempts: 1 }),
+			event('2026-01-01T00:00:02.000Z', 'llm_call', { role: 'coder', usage: { promptTokens: 10, completionTokens: 5, totalTokens: 15 } }),
+			// The summarizer is not a role turn: its spend is run-wide only (render.ts deriveBudgets), so it creates no participant and no operation here.
+			event('2026-01-01T00:00:03.000Z', 'summarizer_llm_call', { usage: { promptTokens: 500, completionTokens: 30, totalTokens: 530 } }),
+		]
+		const model = deriveInteractionModel(snapshot(events, meta('running')), NOW)
+		expect(model.operations).toHaveLength(1)
+		expect(model.participants.map((p) => p.role)).toEqual(['human', 'coder'])
+		const call = defined(model.operations[0], 'model.operations[0]')
+		expect(call.metrics?.tokens).toBe(15)
+		assertHelpersSensible(model)
+	})
+
+	test('a tool call never receives usage, so its token counters stay null while elapsed stays measured', () => {
+		const events = [
+			event('2026-01-01T00:00:00.000Z', 'role_start', { role: 'coder', depth: 0, task: 'work' }),
+			event('2026-01-01T00:00:01.000Z', 'tool_call', { role: 'coder', tool: 'read_file', arguments: '{"path":"README.md"}' }),
+		]
+		const model = deriveInteractionModel(snapshot(events, meta('running')), '2026-01-01T00:00:11.000Z')
+		const toolCall = defined(model.operations[1], 'model.operations[1]')
+		expect(toolCall.kind).toBe('call')
+		expect(toolCall.metrics?.tokens).toBeNull()
+		expect(toolCall.metrics?.promptTokens).toBeNull()
+		expect(toolCall.metrics?.completionTokens).toBeNull()
+		expect(toolCall.metrics?.cachedPromptTokens).toBeNull()
+		expect(toolCall.metrics?.elapsedSeconds).toBe(10)
+		assertHelpersSensible(model)
+	})
+
+	test('an agent call whose llm_call omitted usage carries null token counters — endpoint silence is never a fabricated zero', () => {
+		const events = [
+			event('2026-01-01T00:00:00.000Z', 'role_start', { role: 'coder', depth: 0, task: 'work' }),
+			event('2026-01-01T00:00:01.000Z', 'llm_call', { role: 'coder' }),
+		]
+		const model = deriveInteractionModel(snapshot(events, meta('running')), '2026-01-01T00:00:11.000Z')
+		const call = defined(model.operations[0], 'model.operations[0]')
+		expect(call.metrics?.tokens).toBeNull()
+		expect(call.metrics?.promptTokens).toBeNull()
+		expect(call.metrics?.completionTokens).toBeNull()
+		expect(call.metrics?.cachedPromptTokens).toBeNull()
+		// The call opened at role_start (t0), so the measured span to now is 11s.
+		expect(call.metrics?.elapsedSeconds).toBe(11)
+		assertHelpersSensible(model)
+	})
+
+	test('a reported zero stays numeric — a {0, 0} usage folds in as numbers, not null', () => {
+		const events = [
+			event('2026-01-01T00:00:00.000Z', 'role_start', { role: 'coder', depth: 0, task: 'work' }),
+			event('2026-01-01T00:00:01.000Z', 'llm_call', { role: 'coder', usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 } }),
+		]
+		const model = deriveInteractionModel(snapshot(events, meta('running')), NOW)
+		const call = defined(model.operations[0], 'model.operations[0]')
+		expect(call.metrics?.tokens).toBe(0)
+		expect(call.metrics?.promptTokens).toBe(0)
+		expect(call.metrics?.completionTokens).toBe(0)
+		// The usage object did not report a cached share, so the cached subset stays null even though the other counters turned numeric.
+		expect(call.metrics?.cachedPromptTokens).toBeNull()
+		assertHelpersSensible(model)
+	})
+
+	test('cachedPromptTokens stays null until a usage that reports it folds in, then accumulates only reported figures', () => {
+		const events = [
+			event('2026-01-01T00:00:00.000Z', 'role_start', { role: 'coder', depth: 0, task: 'work' }),
+			// First turn reports no cached share; second turn reports one. The null must survive the first fold.
+			event('2026-01-01T00:00:01.000Z', 'llm_call', { role: 'coder', usage: { promptTokens: 10, completionTokens: 5, totalTokens: 15 } }),
+			event('2026-01-01T00:00:02.000Z', 'llm_call', { role: 'coder', usage: { promptTokens: 20, completionTokens: 10, totalTokens: 30, cachedPromptTokens: 7 } }),
+		]
+		const model = deriveInteractionModel(snapshot(events, meta('running')), NOW)
+		const call = defined(model.operations[0], 'model.operations[0]')
+		expect(call.metrics?.tokens).toBe(45)
+		expect(call.metrics?.promptTokens).toBe(30)
+		expect(call.metrics?.completionTokens).toBe(15)
+		expect(call.metrics?.cachedPromptTokens).toBe(7)
 		assertHelpersSensible(model)
 	})
 
