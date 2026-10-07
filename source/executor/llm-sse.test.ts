@@ -504,15 +504,21 @@ describe('mapTerminalResponseToCallResult', () => {
 		expect(result.finishReason).toBe('stop')
 	})
 
-	test('a response without output or usage degrades to empty content, no tool calls, zero usage, and stop', () => {
-		expect(mapTerminalResponseToCallResult({ status: 'completed', output: [] })).toEqual({
-			kind: 'success',
-			content: undefined,
-			reasoning: undefined,
-			toolCalls: [],
-			usage: { promptTokens: 0, completionTokens: 0 },
-			finishReason: 'stop',
-		})
+	test('a terminal payload without a usage object maps to a success carrying no usage at all', () => {
+		const result = mapTerminalResponseToCallResult({ status: 'completed', output: [] })
+		if (result.kind !== 'success') throw new Error(`expected success, got ${result.kind}`)
+		// Absent means "the endpoint reported nothing about spend" — it must stay distinguishable from a reported zero, so no usage object is manufactured.
+		expect(result.usage).toBeUndefined()
+		expect(result.content).toBeUndefined()
+		expect(result.reasoning).toBeUndefined()
+		expect(result.toolCalls).toEqual([])
+		expect(result.finishReason).toBe('stop')
+	})
+
+	test('a present-but-partial usage object is endpoint-reported data: its missing fields degrade to zero', () => {
+		const result = mapTerminalResponseToCallResult({ status: 'completed', output: [], usage: {} })
+		if (result.kind !== 'success') throw new Error(`expected success, got ${result.kind}`)
+		expect(result.usage).toEqual({ promptTokens: 0, completionTokens: 0 })
 	})
 
 	test('a reasoning item whose content yields nothing falls back to its summary_text parts', () => {
@@ -539,8 +545,10 @@ describe('mapTerminalResponseToCallResult', () => {
 		const response: Record<string, unknown> = { status: 'completed', output: [], usage: { input_tokens: 7, output_tokens: 3 } }
 		const result = mapTerminalResponseToCallResult(response)
 		if (result.kind !== 'success') throw new Error(`expected success, got ${result.kind}`)
-		expect(result.usage).toEqual({ promptTokens: 7, completionTokens: 3 })
-		expect(result.usage.cachedPromptTokens).toBeUndefined()
+		const usage = result.usage
+		if (usage === undefined) throw new Error('expected a reported usage object')
+		expect(usage).toEqual({ promptTokens: 7, completionTokens: 3 })
+		expect(usage.cachedPromptTokens).toBeUndefined()
 	})
 
 	test('malformed items are skipped, a missing call_id is synthesized, and non-string arguments are stringified', () => {

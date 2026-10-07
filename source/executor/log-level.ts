@@ -16,7 +16,17 @@ function isRecordPayload(value: unknown): value is Record<string, unknown> {
 }
 
 const LLM_CALL_KEPT_FIELDS: readonly string[] = ['role', 'roleId', 'messageCount', 'usage', 'finishReason']
+const LLM_RETRY_KEPT_FIELDS: readonly string[] = ['role', 'roleId', 'discardedAttempts', 'usage']
+// The summarizer's usage event is written by the service wiring outside the run's filter chokepoint, but it is listed here so its token fields are declared kept should it ever flow through the filter; its payload carries nothing else.
+const SUMMARIZER_LLM_CALL_KEPT_FIELDS: readonly string[] = ['usage']
 const TOOL_RESULT_KEPT_FIELDS: readonly string[] = ['role', 'tool', 'kind']
+
+const KEPT_FIELDS_BY_EVENT_TYPE: Partial<Record<string, readonly string[]>> = {
+	llm_call: LLM_CALL_KEPT_FIELDS,
+	llm_retry: LLM_RETRY_KEPT_FIELDS,
+	summarizer_llm_call: SUMMARIZER_LLM_CALL_KEPT_FIELDS,
+	tool_result: TOOL_RESULT_KEPT_FIELDS,
+}
 
 // Copies only the listed top-level payload fields (present ones), leaving everything else behind.
 function keepPayloadFields(payload: unknown, keptKeys: readonly string[]): Record<string, unknown> | null {
@@ -29,11 +39,11 @@ function keepPayloadFields(payload: unknown, keptKeys: readonly string[]): Recor
 	return kept
 }
 
-// Returns the event unchanged for `full` (the same reference, so a `full` run's log is byte-identical to an unwrapped writer) and the slimmed clone for `standard`: on an `llm_call` the sent conversation and received response bodies are dropped (the identity and usage fields the flow view and budget derivations read are kept), and on a `tool_result` the full un-truncated result body is dropped. Every other event type — and any event whose payload is not a record — passes through untouched, so event counts and order never change. The input event is never mutated.
+// Returns the event unchanged for `full` (the same reference, so a `full` run's log is byte-identical to an unwrapped writer) and the slimmed clone for `standard`: on an `llm_call` the sent conversation and received response bodies are dropped (the identity and usage fields the flow view and budget derivations read are kept), on an `llm_retry` and a `summarizer_llm_call` the token-relevant fields are kept (those payloads carry nothing else), and on a `tool_result` the full un-truncated result body is dropped. Every other event type — and any event whose payload is not a record — passes through untouched, so event counts and order never change. The input event is never mutated.
 export function applyLogLevel(event: LogEvent, level: LogLevel): LogEvent {
 	if (level === 'full') return event
-	if (event.type !== 'llm_call' && event.type !== 'tool_result') return event
-	const keptKeys = event.type === 'llm_call' ? LLM_CALL_KEPT_FIELDS : TOOL_RESULT_KEPT_FIELDS
+	const keptKeys = KEPT_FIELDS_BY_EVENT_TYPE[event.type]
+	if (keptKeys === undefined) return event
 	const payload = keepPayloadFields(event.payload, keptKeys)
 	if (payload === null) return event
 	return { ...event, payload }

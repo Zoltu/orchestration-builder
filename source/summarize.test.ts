@@ -1,11 +1,16 @@
 import { describe, expect, test } from 'bun:test'
-import type { LlmCallResult, LlmRequest } from './executor/llm.js'
+import type { LlmCallResult, LlmRequest, LlmUsage } from './executor/llm.js'
 import type { RunMeta } from './executor/types.js'
 import { createTaskSummarizer, type TaskSummarizerDependencies } from './summarize.js'
 import { defined, present } from './web/test-fixtures.js'
 
-function successResult(content: string | undefined): LlmCallResult {
-	return { kind: 'success', content, toolCalls: [], usage: { promptTokens: 10, completionTokens: 5 } }
+function successResult(content: string | undefined, usage: LlmUsage = { promptTokens: 10, completionTokens: 5 }): LlmCallResult {
+	return { kind: 'success', content, toolCalls: [], usage }
+}
+
+// A success the endpoint answered without a usage report: the result carries no usage object at all.
+function successWithoutUsage(content: string | undefined): LlmCallResult {
+	return { kind: 'success', content, toolCalls: [] }
 }
 
 function sampleMeta(overrides: Partial<RunMeta> = {}): RunMeta {
@@ -25,6 +30,7 @@ function createHarness(initialResult: LlmCallResult) {
 	let current = initialResult
 	const requests: LlmRequest[] = []
 	const writes: Array<{ runId: string; summary: string }> = []
+	const recordedUsage: Array<{ runId: string; usage: LlmUsage }> = []
 	const log = { text: '' }
 	const dependencies: TaskSummarizerDependencies = {
 		callLlm: (request) => {
@@ -35,11 +41,15 @@ function createHarness(initialResult: LlmCallResult) {
 		writeRunSummaryText: (runId, summary) => {
 			writes.push({ runId, summary })
 		},
+		recordLlmUsage: (runId, usage) => {
+			recordedUsage.push({ runId, usage })
+		},
 	}
 	return {
 		dependencies,
 		requests,
 		writes,
+		recordedUsage,
 		log,
 		setResult(result: LlmCallResult) {
 			current = result
@@ -102,6 +112,44 @@ describe('summarizeTaskStart', () => {
 		const harness = createHarness(successResult(undefined))
 		await createTaskSummarizer(harness.dependencies).summarizeTaskStart('run-1', 'fix the login bug')
 		expect(harness.writes).toEqual([])
+	})
+})
+
+describe('summarizer usage forwarding', () => {
+	test('a successful call forwards its usage verbatim with the run id, before the content is judged', async () => {
+		const usage: LlmUsage = { promptTokens: 33, completionTokens: 8, cachedPromptTokens: 20 }
+		const harness = createHarness(successResult('Fix the login redirect loop', usage))
+		await createTaskSummarizer(harness.dependencies).summarizeTaskStart('run-1', 'fix the login bug')
+		expect(harness.recordedUsage).toEqual([{ runId: 'run-1', usage }])
+		expect(harness.writes).toEqual([{ runId: 'run-1', summary: 'Fix the login redirect loop' }])
+	})
+
+	test('usage is recorded even when the content is unusable and nothing is written', async () => {
+		const harness = createHarness(successResult(''))
+		await createTaskSummarizer(harness.dependencies).summarizeTaskStart('run-1', 'fix the login bug')
+		expect(harness.recordedUsage).toEqual([{ runId: 'run-1', usage: { promptTokens: 10, completionTokens: 5 } }])
+		expect(harness.writes).toEqual([])
+	})
+
+	test('a success without endpoint-reported usage invokes no usage recording', async () => {
+		const harness = createHarness(successWithoutUsage('Fix the login redirect loop'))
+		await createTaskSummarizer(harness.dependencies).summarizeTaskStart('run-1', 'fix the login bug')
+		expect(harness.recordedUsage).toEqual([])
+		// The summary itself is unaffected by the missing report.
+		expect(harness.writes).toEqual([{ runId: 'run-1', summary: 'Fix the login redirect loop' }])
+	})
+
+	test('a failed call invokes no usage recording', async () => {
+		const harness = createHarness({ kind: 'llm_unavailable', message: 'connection refused' })
+		await createTaskSummarizer(harness.dependencies).summarizeRunCompletion(sampleMeta())
+		expect(harness.recordedUsage).toEqual([])
+	})
+
+	test('the completion summary forwards its own call\u2019s usage under the run\u2019s id', async () => {
+		const usage: LlmUsage = { promptTokens: 7, completionTokens: 2 }
+		const harness = createHarness(successResult('Fixed the login redirect loop and added tests', usage))
+		await createTaskSummarizer(harness.dependencies).summarizeRunCompletion(sampleMeta())
+		expect(harness.recordedUsage).toEqual([{ runId: 'run-1', usage }])
 	})
 })
 

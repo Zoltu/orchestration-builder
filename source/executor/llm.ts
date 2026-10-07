@@ -1,4 +1,4 @@
-import type { LlmCallResult, LlmRequest, ResolvedModelConfig } from './types.js'
+import type { LlmCallResult, LlmRequest, LlmUsage, ResolvedModelConfig } from './types.js'
 import { createResponsesStreamAccumulator, createSseLineAssembler, mapHistoryToResponsesInput, mapTerminalResponseToCallResult, mapToolManifestsToResponsesTools, OversizedSseLineError, parseSseDataPayload, streamDeltaOf, type ResponsesStreamSnapshot, type SseDataPayload } from './llm-sse.js'
 import { asRecord, isObject, safeJsonParse } from './validation.js'
 
@@ -315,6 +315,13 @@ export function createLlmCaller(model: ResolvedModelConfig, apiKey: string | und
 		const onDelta = request.onDelta
 		let attempt = 0
 		let lastError: string | undefined
+		// The retry spend accumulates across the loop: an attempt that ran to a completed terminal was billed at least the full prompt even though its degenerate response is thrown away, so its reported usage is summed here and rides the returned result as retry spend (stream failures and failed connects have no completed terminal, so they have no usage to collect).
+		let discardedAttempts = 0
+		let discardedPromptTokens = 0
+		let discardedCompletionTokens = 0
+		let discardedCachedPromptTokens: number | undefined
+		// Tracked separately from the sums so an endpoint-reported zero stays "reported": deciding by a token sum would turn a reported {0, 0} into a fabricated absence.
+		let sawReportedUsage = false
 
 		while (attempt < maxAttempts) {
 			attempt++
@@ -381,11 +388,27 @@ export function createLlmCaller(model: ResolvedModelConfig, apiKey: string | und
 			if (result.kind !== 'success') return result
 
 			const classification = classifyParsedResponse(result)
-			if (classification.kind === 'accept') return result
+			if (classification.kind === 'accept') {
+				if (discardedAttempts === 0) return result
+				// The summed usage is attached only when at least one discarded attempt actually reported usage: an all-unreported discard must stay absent-usage rather than masquerade as a billed zero.
+				if (sawReportedUsage) {
+					const discardedUsage: LlmUsage = { promptTokens: discardedPromptTokens, completionTokens: discardedCompletionTokens }
+					if (discardedCachedPromptTokens !== undefined) discardedUsage.cachedPromptTokens = discardedCachedPromptTokens
+					return { ...result, discardedRetrySpend: { attempts: discardedAttempts, usage: discardedUsage } }
+				}
+				return { ...result, discardedRetrySpend: { attempts: discardedAttempts } }
+			}
 			if (classification.kind === 'fail_immediately') {
 				return { kind: 'llm_unavailable', message: classification.message }
 			}
 			lastError = classification.message
+			discardedAttempts++
+			if (result.usage !== undefined) {
+				sawReportedUsage = true
+				discardedPromptTokens += result.usage.promptTokens
+				discardedCompletionTokens += result.usage.completionTokens
+				if (result.usage.cachedPromptTokens !== undefined) discardedCachedPromptTokens = (discardedCachedPromptTokens ?? 0) + result.usage.cachedPromptTokens
+			}
 			if (attempt >= maxAttempts) {
 				return { kind: 'llm_unavailable', message: lastError }
 			}

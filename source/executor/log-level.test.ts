@@ -115,6 +115,23 @@ describe('applyLogLevel under standard: tool_result slimming', () => {
 	})
 })
 
+describe('applyLogLevel under standard: retry and summarizer usage events', () => {
+	test('llm_retry keeps its token-relevant fields under standard', () => {
+		const payload = { role: 'planner', roleId: 'planner-0-1', discardedAttempts: 2, usage: { promptTokens: 220, completionTokens: 4, totalTokens: 224, cachedPromptTokens: 80 } }
+		const slimmed = applyLogLevel(event('llm_retry', payload), 'standard')
+		expect(slimmed.payload).toEqual(payload)
+		// A retry spend with no reported usage has no usage key to keep; the identity and count fields survive.
+		const unreported = applyLogLevel(event('llm_retry', { role: 'planner', roleId: 'planner-0-1', discardedAttempts: 2 }), 'standard')
+		expect(unreported.payload).toEqual({ role: 'planner', roleId: 'planner-0-1', discardedAttempts: 2 })
+	})
+
+	test('summarizer_llm_call keeps its usage field under standard', () => {
+		const payload = { usage: { promptTokens: 10, completionTokens: 5, totalTokens: 15 } }
+		const slimmed = applyLogLevel(event('summarizer_llm_call', payload), 'standard')
+		expect(slimmed.payload).toEqual(payload)
+	})
+})
+
 describe('applyLogLevel under standard: pass-through', () => {
 	test('every unaffected event type is returned with its payload untouched', () => {
 		const unaffected: LogEvent[] = [

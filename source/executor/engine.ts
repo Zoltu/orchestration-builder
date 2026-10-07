@@ -1,5 +1,5 @@
 import { createResultCard, createToolError } from './errors.js'
-import type { Message, ResultCard, ToolCall, ToolManifest, ToolResult } from './types.js'
+import type { DiscardedRetrySpend, LlmUsage, LlmUsagePayload, Message, ResultCard, ToolCall, ToolManifest, ToolResult } from './types.js'
 import { isObject, isResultCard } from './validation.js'
 import { checkGlobalBudgets, checkRoleBudgets } from './budgets.js'
 import { createBuiltInToolHandlers, OBSERVATION_TOOL_NAMES } from './builtin-tools.js'
@@ -79,20 +79,23 @@ function shapeAssistantResponse(llmResult: { content?: string; reasoning?: strin
 	return shaped
 }
 
+// Builds the log-event usage shape shared by every usage-carrying event (llm_call, llm_retry, and the service's summarizer_llm_call), so the three payloads stay byte-identical for the same usage: the two reported counts plus their sum, with the cached subset carried only when the endpoint reported it. Exported because the summarizer's wiring in serve.ts appends its usage event through the executor's public surface.
+export function llmUsagePayload(usage: LlmUsage): LlmUsagePayload {
+	const payload: LlmUsagePayload = {
+		promptTokens: usage.promptTokens,
+		completionTokens: usage.completionTokens,
+		totalTokens: usage.promptTokens + usage.completionTokens,
+	}
+	if (usage.cachedPromptTokens !== undefined) payload.cachedPromptTokens = usage.cachedPromptTokens
+	return payload
+}
+
 // Builds the llm_call payload for a successful turn, carrying the sent message slice, the received assistant response, the finishReason, and the per-call usage in one event so a reviewer can reconstruct the full turn from the log.
 // sentMessages is the slice of the role's conversation this request added: sentFrom is the slice's conversation index and messageCount the request's total size, so a full snapshot is sentFrom 0 with sent.length === messageCount. Logging only the slice keeps the log's growth O(turns) instead of O(turns²); docs/reference.md "Log events" documents the protocol and the fold that reconstructs a full conversation from the deltas.
 // roleId is the instance id role_start already carries: a role may spawn a same-named child (the depth guard is the only limit), so identity in the log is the instance, not the name — the fold matches on it.
 // promptTokens is the full prompt bill (cached + uncached); cachedPromptTokens is the subset the endpoint served from its prompt cache, so the uncached prompt bill is promptTokens - cachedPromptTokens. The two are tracked separately because they are billed at different rates.
+// A successful call the endpoint answered without a usage report logs no usage field at all: absence means "the endpoint reported nothing" and must stay distinguishable from a reported zero for the log's readers.
 function llmCallPayload(roleName: string, roleId: string, sentMessages: Message[], sentFrom: number, messageCount: number, llmResult: SuccessfulLlmCall): unknown {
-	const promptTokens = llmResult.usage.promptTokens
-	const completionTokens = llmResult.usage.completionTokens
-	const cachedPromptTokens = llmResult.usage.cachedPromptTokens
-	const usage: Record<string, number> = {
-		promptTokens,
-		completionTokens,
-		totalTokens: promptTokens + completionTokens,
-	}
-	if (cachedPromptTokens !== undefined) usage['cachedPromptTokens'] = cachedPromptTokens
 	const payload: Record<string, unknown> = {
 		role: roleName,
 		roleId,
@@ -100,9 +103,20 @@ function llmCallPayload(roleName: string, roleId: string, sentMessages: Message[
 		sentFrom,
 		sent: sentMessages.map(shapeSentMessage),
 		received: shapeAssistantResponse(llmResult),
-		usage,
 	}
 	if (llmResult.finishReason !== undefined) payload['finishReason'] = llmResult.finishReason
+	if (llmResult.usage !== undefined) payload['usage'] = llmUsagePayload(llmResult.usage)
+	return payload
+}
+
+// Builds the llm_retry payload: the spend of the discarded retry attempts behind one successful call (docs/reference.md "Log events"). The usage shape is the shared llmUsagePayload so the retry spend reads exactly like an llm_call's, and the usage key is omitted entirely when none of the discarded attempts reported usage — never a fabricated zero.
+function llmRetryPayload(roleName: string, roleId: string, discardedRetrySpend: DiscardedRetrySpend): unknown {
+	const payload: Record<string, unknown> = {
+		role: roleName,
+		roleId,
+		discardedAttempts: discardedRetrySpend.attempts,
+	}
+	if (discardedRetrySpend.usage !== undefined) payload['usage'] = llmUsagePayload(discardedRetrySpend.usage)
 	return payload
 }
 
@@ -146,16 +160,19 @@ function handleLlmResult(
 	}
 
 	roleState.contextExceededAttempts = 0
-	roleState.lastPromptTokens = llmResult.usage.promptTokens
-	roleState.generatedTokens += llmResult.usage.completionTokens
+	// A success the endpoint answered without a usage report updates no accumulator: lastPromptTokens keeps reflecting the last reported conversation size (an absent report must not be able to masquerade as a zero-token conversation in the pressure check or context_info), no tokens are added to the generated total, and the pressure check is skipped — it reads real reported usage only. A reported zero is endpoint data and is recorded as one.
+	if (llmResult.usage !== undefined) {
+		roleState.lastPromptTokens = llmResult.usage.promptTokens
+		roleState.generatedTokens += llmResult.usage.completionTokens
 
-	// The proactive pressure check reads real reported usage only, and fires once per role instance: the flag moves pending → sent and never re-arms, so a role that keeps working after the notice is not re-noticed on every subsequent turn.
-	if (roleState.contextPressureNotice === undefined) {
-		const threshold = config.contextPressureThreshold ?? DEFAULT_CONTEXT_PRESSURE_THRESHOLD
-		const budget = currentEffectiveBudget(context, deps)
-		if (roleState.lastPromptTokens >= threshold * budget) {
-			roleState.contextPressureNotice = 'pending'
-			logEvent(deps.appendLog, 'context_pressure', { role: context.roleName, promptTokens: roleState.lastPromptTokens, effectiveBudget: budget })
+		// The proactive pressure check reads real reported usage only, and fires once per role instance: the flag moves pending → sent and never re-arms, so a role that keeps working after the notice is not re-noticed on every subsequent turn.
+		if (roleState.contextPressureNotice === undefined) {
+			const threshold = config.contextPressureThreshold ?? DEFAULT_CONTEXT_PRESSURE_THRESHOLD
+			const budget = currentEffectiveBudget(context, deps)
+			if (roleState.lastPromptTokens >= threshold * budget) {
+				roleState.contextPressureNotice = 'pending'
+				logEvent(deps.appendLog, 'context_pressure', { role: context.roleName, promptTokens: roleState.lastPromptTokens, effectiveBudget: budget })
+			}
 		}
 	}
 
@@ -491,6 +508,10 @@ async function executeRoleLoop(
 		const handling = handleLlmResult(llmResult, roleState, deps, context)
 		// llm_call is emitted after handleLlmResult so the received assistant response, finishReason, and per-call usage all land in one event. It is emitted only on the success paths (continue/tool_calls and success-finished): the llm_unavailable and context_budget_exceeded paths log their own dedicated events inside handleLlmResult and must not also emit a misleading llm_call.
 		if (llmResult.kind === 'success') {
+			// The discarded retry attempts' spend is logged ahead of the llm_call it belongs to: those attempts ran and were billed before the final one, and the llm_call's own usage stays the final attempt's so pressure/context semantics keep reflecting the live conversation size rather than a retry-inflated total.
+			if (llmResult.discardedRetrySpend !== undefined) {
+				logEvent(deps.appendLog, 'llm_retry', llmRetryPayload(context.roleName, registryEntry.roleId, llmResult.discardedRetrySpend))
+			}
 			// Delta protocol: a valid baseline (the request count of the role's last logged llm_call) slices the sent list down to the messages added since that call; an absent or out-of-range baseline — first turn, or a context edit or compaction that rewrote the history — falls back to the full snapshot. The baseline then advances to this request's size so the next event slices from here. The baseline indexes the request, which is the role's history itself.
 			const baseline = roleState.logSentBaseline
 			const sentFrom = baseline !== undefined && baseline <= messages.length ? baseline : 0

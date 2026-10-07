@@ -556,6 +556,101 @@ describe('createLlmCaller degenerate completed streams', () => {
 	})
 })
 
+describe('createLlmCaller retry spend', () => {
+	const finalChunks = encodedChunks([dataLine(completedEvent([{ type: 'message', content: [{ type: 'output_text', text: 'ok' }] }], { input_tokens: 110, output_tokens: 3 }))])
+
+	function degenerateChunks(usage?: Record<string, unknown>): Uint8Array[] {
+		return encodedChunks([dataLine(completedEvent([], usage))])
+	}
+
+	test('a discarded degenerate attempt that completed with usage rides the successful result as retry spend, alongside the final attempt\u2019s own usage', async () => {
+		const wire = createFakeWire([
+			streamResponse(degenerateChunks({ input_tokens: 100, output_tokens: 0, input_tokens_details: { cached_tokens: 40 } })),
+			streamResponse(finalChunks),
+		])
+		const caller = createLlmCaller(MODEL, API_KEY, { llmFetch: wire.llmFetch, sleep: wire.sleep, scheduleTimeout: wire.scheduleTimeout })
+		const result = await caller.call({ messages: [] })
+		expect(result).toEqual({
+			kind: 'success',
+			content: 'ok',
+			reasoning: undefined,
+			toolCalls: [],
+			usage: { promptTokens: 110, completionTokens: 3 },
+			discardedRetrySpend: { attempts: 1, usage: { promptTokens: 100, completionTokens: 0, cachedPromptTokens: 40 } },
+			finishReason: 'stop',
+		})
+		expect(wire.requests).toHaveLength(2)
+	})
+
+	test('usage from multiple discarded attempts is summed, with the cached shares added across attempts', async () => {
+		const wire = createFakeWire([
+			streamResponse(degenerateChunks({ input_tokens: 100, output_tokens: 0, input_tokens_details: { cached_tokens: 30 } })),
+			streamResponse(degenerateChunks({ input_tokens: 120, output_tokens: 4, input_tokens_details: { cached_tokens: 50 } })),
+			streamResponse(finalChunks),
+		])
+		const caller = createLlmCaller(MODEL, API_KEY, { llmFetch: wire.llmFetch, sleep: wire.sleep, scheduleTimeout: wire.scheduleTimeout })
+		const result = await caller.call({ messages: [] })
+		if (result.kind !== 'success') throw new Error(`expected success, got ${result.kind}`)
+		expect(result.discardedRetrySpend).toEqual({ attempts: 2, usage: { promptTokens: 220, completionTokens: 4, cachedPromptTokens: 80 } })
+	})
+
+	test('a discarded attempt whose endpoint reported no usage adds to the attempt count but not to the summed tokens', async () => {
+		const wire = createFakeWire([
+			streamResponse(degenerateChunks({ input_tokens: 100, output_tokens: 0, input_tokens_details: { cached_tokens: 40 } })),
+			streamResponse(degenerateChunks()),
+			streamResponse(finalChunks),
+		])
+		const caller = createLlmCaller(MODEL, API_KEY, { llmFetch: wire.llmFetch, sleep: wire.sleep, scheduleTimeout: wire.scheduleTimeout })
+		const result = await caller.call({ messages: [] })
+		if (result.kind !== 'success') throw new Error(`expected success, got ${result.kind}`)
+		expect(result.discardedRetrySpend).toEqual({ attempts: 2, usage: { promptTokens: 100, completionTokens: 0, cachedPromptTokens: 40 } })
+	})
+
+	test('a discard where no attempt reported usage carries the attempt count without a fabricated usage', async () => {
+		const wire = createFakeWire([
+			streamResponse(degenerateChunks()),
+			streamResponse(degenerateChunks()),
+			streamResponse(finalChunks),
+		])
+		const caller = createLlmCaller(MODEL, API_KEY, { llmFetch: wire.llmFetch, sleep: wire.sleep, scheduleTimeout: wire.scheduleTimeout })
+		const result = await caller.call({ messages: [] })
+		if (result.kind !== 'success') throw new Error(`expected success, got ${result.kind}`)
+		expect(result.discardedRetrySpend).toEqual({ attempts: 2 })
+	})
+
+	test('a reported zero usage on a discarded attempt is still reported: the retry spend keeps a present zero', async () => {
+		// A cached-tokens-only report (input/output absent, so they degrade to 0) is endpoint-reported data: the flag that decides "reported" must fire on it, never on a token sum.
+		const wire = createFakeWire([
+			streamResponse(degenerateChunks({ input_tokens_details: { cached_tokens: 40 } })),
+			streamResponse(finalChunks),
+		])
+		const caller = createLlmCaller(MODEL, API_KEY, { llmFetch: wire.llmFetch, sleep: wire.sleep, scheduleTimeout: wire.scheduleTimeout })
+		const result = await caller.call({ messages: [] })
+		if (result.kind !== 'success') throw new Error(`expected success, got ${result.kind}`)
+		expect(result.discardedRetrySpend).toEqual({ attempts: 1, usage: { promptTokens: 0, completionTokens: 0, cachedPromptTokens: 40 } })
+	})
+
+	test('a final attempt without endpoint-reported usage still carries the discarded attempts\u2019 spend', async () => {
+		const wire = createFakeWire([
+			streamResponse(degenerateChunks({ input_tokens: 100, output_tokens: 0 })),
+			streamResponse(encodedChunks([dataLine(completedEvent([{ type: 'message', content: [{ type: 'output_text', text: 'ok' }] }]))])),
+		])
+		const caller = createLlmCaller(MODEL, API_KEY, { llmFetch: wire.llmFetch, sleep: wire.sleep, scheduleTimeout: wire.scheduleTimeout })
+		const result = await caller.call({ messages: [] })
+		if (result.kind !== 'success') throw new Error(`expected success, got ${result.kind}`)
+		expect(result.usage).toBeUndefined()
+		expect(result.discardedRetrySpend).toEqual({ attempts: 1, usage: { promptTokens: 100, completionTokens: 0 } })
+	})
+
+	test('a clean first-attempt success carries no retry spend', async () => {
+		const wire = createFakeWire([streamResponse(finalChunks)])
+		const caller = createLlmCaller(MODEL, API_KEY, { llmFetch: wire.llmFetch, sleep: wire.sleep, scheduleTimeout: wire.scheduleTimeout })
+		const result = await caller.call({ messages: [] })
+		if (result.kind !== 'success') throw new Error(`expected success, got ${result.kind}`)
+		expect(result.discardedRetrySpend).toBeUndefined()
+	})
+})
+
 describe('detectContextBudgetExceeded', () => {
 	test('a 400 with a context keyword and error.prompt_tokens reports the endpoint count', () => {
 		const body = JSON.stringify({ error: { message: 'This model maximum context length was exceeded', prompt_tokens: 4242 } })

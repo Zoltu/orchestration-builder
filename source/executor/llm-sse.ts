@@ -276,7 +276,7 @@ function argumentsAsString(value: unknown): string {
 	return serialized ?? ''
 }
 
-// Builds the call result from the authoritative terminal response payload (response.completed / response.incomplete), not from the deltas. Every field comes from external wire data, so each is read through a guard and a missing field degrades to an empty default.
+// Builds the call result from the authoritative terminal response payload (response.completed / response.incomplete), not from the deltas. Every field comes from external wire data, so each is read through a guard and a missing field degrades to an empty default — except usage as a whole, which is left absent when the payload carries no usage object at all so endpoint silence stays distinguishable from a reported zero.
 export function mapTerminalResponseToCallResult(response: Record<string, unknown>): LlmCallResult {
 	const output = Array.isArray(response['output']) ? response['output'] : []
 	const contentParts: string[] = []
@@ -319,10 +319,11 @@ export function mapTerminalResponseToCallResult(response: Record<string, unknown
 		finishReason = 'length'
 	}
 
-	const usage: LlmUsage = { promptTokens, completionTokens }
-	if (cachedPromptTokens !== undefined) usage.cachedPromptTokens = cachedPromptTokens
-
 	const content = contentParts.length > 0 ? contentParts.join('') : undefined
 	const reasoning = reasoningParts.length > 0 ? reasoningParts.join('') : undefined
+	// An absent usage object means the endpoint reported nothing about spend, which must stay distinguishable from a reported zero downstream (the engine neither updates its accumulators nor invents a zero). A present-but-partial usage object is endpoint-reported data, so its missing fields still degrade to 0 above.
+	if (usageRecord === undefined) return { kind: 'success', content, reasoning, toolCalls, finishReason }
+	const usage: LlmUsage = { promptTokens, completionTokens }
+	if (cachedPromptTokens !== undefined) usage.cachedPromptTokens = cachedPromptTokens
 	return { kind: 'success', content, reasoning, toolCalls, usage, finishReason }
 }

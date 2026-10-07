@@ -6,6 +6,10 @@
 export { runExecutor, resumeExecutor } from './executor.js'
 export type { ExecutorDependencies, ResumeRunOptions } from './executor.js'
 
+// llmUsagePayload is a public surface because the service's summarizer wiring (serve.ts) appends its summarizer_llm_call usage event through it, keeping the payload shape identical to the engine's usage events.
+export { llmUsagePayload } from './engine.js'
+export type { LlmUsagePayload, DiscardedRetrySpend } from './types.js'
+
 export { ConfigurationError, ValidationError } from './errors.js'
 
 export { createCheckpointRecorder, entryFrameLogLevel, isRunCheckpoint } from './checkpoint.js'

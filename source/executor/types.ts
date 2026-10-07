@@ -152,13 +152,30 @@ export interface LlmUsage {
 	cachedPromptTokens?: number
 }
 
+// The log-event shape of a call's usage (docs/reference.md "Log events"): the two reported counts plus their sum, with the cached subset carried only when the endpoint reported it. Built by one shared helper so the llm_call, llm_retry, and summarizer_llm_call usage shapes stay identical.
+export interface LlmUsagePayload {
+	promptTokens: number
+	completionTokens: number
+	totalTokens: number
+	cachedPromptTokens?: number
+}
+
+// The token spend of an LLM call's discarded retry attempts: attempts that ran to a completed terminal (billing at least the full prompt) but were thrown away for a degenerate empty response and retried. attempts counts every discarded completed attempt; usage sums the usage those attempts reported and is present only when at least one of them did — a discard where none reported usage carries no usage rather than a fabricated zero, while a reported zero is endpoint data and is kept.
+export interface DiscardedRetrySpend {
+	attempts: number
+	usage?: LlmUsage
+}
+
 export type LlmCallResult =
 	| {
 		kind: 'success'
 		content?: string
 		reasoning?: string | null
 		toolCalls: ToolCall[]
-		usage: LlmUsage
+		// The endpoint-reported usage for the call. Absent when the terminal payload carried no usage object at all, so "the endpoint reported nothing" stays distinguishable from a reported zero (the engine's accumulators treat absence as no-report); a present-but-partial usage object still degrades its missing fields to 0.
+		usage?: LlmUsage
+		// The spend of this call's discarded retry attempts, summed across them (see DiscardedRetrySpend). Absent when no attempt was discarded.
+		discardedRetrySpend?: DiscardedRetrySpend
 		// The endpoint's finish reason (e.g. "stop", "length", "tool_calls"), so a reviewer can tell why the model stopped emitting. Absent when the endpoint omits the field, so "absent" is distinguishable from a default like "".
 		finishReason?: string
 	}

@@ -243,7 +243,7 @@ function isReceivedLlmResponse(value: unknown): value is ReceivedLlmResponse {
 	})
 }
 
-function isUsageTotals(value: unknown): value is { promptTokens: number; completionTokens: number; totalTokens: number } {
+function isUsageTotals(value: unknown): value is { promptTokens: number; completionTokens: number; totalTokens: number; cachedPromptTokens?: number } {
 	return isRecord(value) && typeof value['promptTokens'] === 'number' && typeof value['completionTokens'] === 'number' && typeof value['totalTokens'] === 'number'
 }
 
@@ -2871,5 +2871,164 @@ describe('runRole — the pre-write park rule', () => {
 		expect(llm.calls.length).toBe(2)
 		const finishes = events.filter((e) => e.type === 'role_finished').map((e) => payloadField(e, 'status'))
 		expect(finishes).toEqual(['needs_clarification', 'needs_clarification'])
+	})
+})
+
+describe('runRole — usage accounting and retry spend', () => {
+	const echoManifest: ToolManifest = {
+		name: 'echo',
+		description: 'Echoes its arguments.',
+		parameters: { type: 'object', properties: {} },
+	}
+
+	function echoTurnCall(id: string): ToolCall {
+		return { id, type: 'function', function: { name: 'echo', arguments: '{}' } }
+	}
+
+	// A success the endpoint answered without a usage report: the result carries no usage object at all.
+	function successWithoutUsage(toolCalls: ToolCall[]): LlmCallResult {
+		return { kind: 'success', content: '', reasoning: null, toolCalls }
+	}
+
+	function usagePayloadOf(event: LogEvent): { promptTokens: number; completionTokens: number; totalTokens: number; cachedPromptTokens?: number } {
+		const usage = payloadField(event, 'usage')
+		if (!isUsageTotals(usage)) throw new Error('expected the event to carry usage totals')
+		return usage
+	}
+
+	test('a success without endpoint-reported usage omits the llm_call usage field and updates no accumulator', async () => {
+		const guild = withTool(buildGuild({ main: { systemPrompt: 'p', tools: ['echo', 'finish'] } }, 'main'), echoManifest)
+		const llm = new FakeLlm()
+		llm.responses = [
+			success([echoTurnCall('e1')]),
+			successWithoutUsage([echoTurnCall('e2')]),
+			success([finishCall({ status: 'success', summary: 'done' })]),
+		]
+		const { deps, events, checkpoints } = makeDeps(llm)
+		const depsWithEcho: EngineDependencies = { ...deps, additionalToolHandlers: { echo: echoHandler } }
+
+		const result = await runRole(depsWithEcho, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'do it' })
+
+		expect(result).toEqual({ status: 'success', summary: 'done' })
+		const llmCalls = events.filter((e) => e.type === 'llm_call')
+		expect(llmCalls.length).toBe(3)
+		// The reported turn carries its usage; the unreported turn's event has no usage field at all.
+		expect(usagePayloadOf(defined(llmCalls[0], 'first llm_call'))).toEqual({ promptTokens: 10, completionTokens: 5, totalTokens: 15 })
+		const unreported = defined(llmCalls[1], 'second llm_call')
+		expect(payloadField(unreported, 'usage')).toBeUndefined()
+		// The unreported turn neither reset lastPromptTokens to 0 nor added tokens: the checkpoint at the third loop top still shows the first turn's reported values.
+		const thirdLoopTop = defined(checkpoints[2], 'checkpoint at the third loop top')
+		const roleState = defined(thirdLoopTop.frames[0], 'entry frame').roleState
+		expect(roleState.lastPromptTokens).toBe(10)
+		expect(roleState.generatedTokens).toBe(5)
+	})
+
+	test('a reported zero-valued usage is real endpoint data: the llm_call carries it and the accumulators record it', async () => {
+		const guild = withTool(buildGuild({ main: { systemPrompt: 'p', tools: ['echo', 'finish'] } }, 'main'), echoManifest)
+		const llm = new FakeLlm()
+		llm.responses = [
+			success([echoTurnCall('e1')], { promptTokens: 0, completionTokens: 7 }),
+			success([finishCall({ status: 'success', summary: 'done' })]),
+		]
+		const { deps, events, checkpoints } = makeDeps(llm)
+		const depsWithEcho: EngineDependencies = { ...deps, additionalToolHandlers: { echo: echoHandler } }
+
+		await runRole(depsWithEcho, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'do it' })
+
+		const firstCall = defined(events.find((e) => e.type === 'llm_call'), 'first llm_call')
+		expect(usagePayloadOf(firstCall)).toEqual({ promptTokens: 0, completionTokens: 7, totalTokens: 7 })
+		// A real 0 must still be recorded as 0, and the reported completions still accumulate.
+		const secondLoopTop = defined(checkpoints[1], 'checkpoint at the second loop top')
+		const roleState = defined(secondLoopTop.frames[0], 'entry frame').roleState
+		expect(roleState.lastPromptTokens).toBe(0)
+		expect(roleState.generatedTokens).toBe(7)
+	})
+
+	test('a success carrying discarded retry spend emits llm_retry ahead of the llm_call, whose usage stays the final attempt\u2019s', async () => {
+		const guild = buildGuild({ main: { systemPrompt: 'p', tools: ['finish'] } }, 'main')
+		const llm = new FakeLlm()
+		const retriedSuccess: LlmCallResult = {
+			kind: 'success',
+			content: '',
+			reasoning: null,
+			toolCalls: [finishCall({ status: 'success', summary: 'done' })],
+			usage: { promptTokens: 110, completionTokens: 3 },
+			discardedRetrySpend: { attempts: 2, usage: { promptTokens: 220, completionTokens: 4, cachedPromptTokens: 80 } },
+			finishReason: 'tool_calls',
+		}
+		llm.responses = [retriedSuccess]
+		const { deps, events } = makeDeps(llm)
+
+		await runRole(deps, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'do it' })
+
+		const retryEvents = events.filter((e) => e.type === 'llm_retry')
+		expect(retryEvents.length).toBe(1)
+		const retryEvent = defined(retryEvents[0], 'llm_retry event')
+		expect(payloadField(retryEvent, 'role')).toBe('main')
+		expect(payloadField(retryEvent, 'roleId')).toBe('main-0-1')
+		expect(payloadField(retryEvent, 'discardedAttempts')).toBe(2)
+		expect(usagePayloadOf(retryEvent)).toEqual({ promptTokens: 220, completionTokens: 4, totalTokens: 224, cachedPromptTokens: 80 })
+		// The llm_call follows the retry event and carries only the final attempt's usage: pressure and context semantics must keep reflecting the live conversation size, with retry spend as separate bookkeeping.
+		const llmCallEvent = defined(events.find((e) => e.type === 'llm_call'), 'llm_call event')
+		expect(events.indexOf(retryEvent)).toBeLessThan(events.indexOf(llmCallEvent))
+		expect(usagePayloadOf(llmCallEvent)).toEqual({ promptTokens: 110, completionTokens: 3, totalTokens: 113 })
+	})
+
+	test('a clean success emits no llm_retry', async () => {
+		const guild = buildGuild({ main: { systemPrompt: 'p', tools: ['finish'] } }, 'main')
+		const llm = new FakeLlm()
+		llm.responses = [success([finishCall({ status: 'success', summary: 'done' })])]
+		const { deps, events } = makeDeps(llm)
+
+		await runRole(deps, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'do it' })
+
+		expect(events.some((e) => e.type === 'llm_retry')).toBe(false)
+	})
+
+	test('a retry spend with no reported usage emits llm_retry without a usage field', async () => {
+		const guild = buildGuild({ main: { systemPrompt: 'p', tools: ['finish'] } }, 'main')
+		const llm = new FakeLlm()
+		const retriedSuccess: LlmCallResult = {
+			kind: 'success',
+			content: '',
+			reasoning: null,
+			toolCalls: [finishCall({ status: 'success', summary: 'done' })],
+			usage: { promptTokens: 110, completionTokens: 3 },
+			// No discarded attempt reported usage, so the retry spend carries the count only.
+			discardedRetrySpend: { attempts: 2 },
+			finishReason: 'tool_calls',
+		}
+		llm.responses = [retriedSuccess]
+		const { deps, events } = makeDeps(llm)
+
+		await runRole(deps, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'do it' })
+
+		const retryEvent = defined(events.find((e) => e.type === 'llm_retry'), 'llm_retry event')
+		expect(payloadField(retryEvent, 'discardedAttempts')).toBe(2)
+		expect(payloadField(retryEvent, 'usage')).toBeUndefined()
+	})
+
+	test('through the real caller, a degenerate first stream retried into a success emits llm_retry with the discarded spend', async () => {
+		const guild = buildGuild({ main: { systemPrompt: 'p', tools: ['finish'] } }, 'main')
+		const wire = new FakeWire()
+		wire.responses = [
+			// The first attempt completes with usage but an empty response, so the caller discards and retries it.
+			streamOf([new TextEncoder().encode(`data: ${JSON.stringify({ type: 'response.completed', response: { status: 'completed', output: [], usage: { input_tokens: 100, output_tokens: 0 } } })}\n\n`)]),
+			streamOf(sseChunks([{ type: 'message', content: [{ type: 'output_text', text: 'done' }] }])),
+		]
+		const caller = createLlmCaller(baseModel, undefined, { llmFetch: wire.llmFetch, sleep: () => Promise.resolve(), scheduleTimeout: () => () => undefined })
+		const { deps, events } = makeDeps(caller)
+
+		const result = await runRole(deps, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'do it' })
+
+		expect(result.status).toBe('success')
+		expect(wire.requests.length).toBe(2)
+		const retryEvent = defined(events.find((e) => e.type === 'llm_retry'), 'llm_retry event')
+		expect(payloadField(retryEvent, 'role')).toBe('main')
+		expect(payloadField(retryEvent, 'discardedAttempts')).toBe(1)
+		expect(usagePayloadOf(retryEvent)).toEqual({ promptTokens: 100, completionTokens: 0, totalTokens: 100 })
+		// The final attempt's usage is the sseChunks terminal's reported 10/5 — the retry's 100 prompt tokens never inflate it.
+		const llmCallEvent = defined(events.find((e) => e.type === 'llm_call'), 'llm_call event')
+		expect(usagePayloadOf(llmCallEvent)).toEqual({ promptTokens: 10, completionTokens: 5, totalTokens: 15 })
 	})
 })
