@@ -444,9 +444,9 @@ describe('deriveParticipantTooltip', () => {
 })
 
 describe('deriveRoleTooltip', () => {
-	test('a role aggregates invocations, total time, and the token split across every instance, and surfaces an error', () => {
+	test('a role aggregates invocations, the error count, total time, and the token split across every instance', () => {
 		// Two coder instances: the first errored, the second succeeded. The cumulative summary counts
-		// both invocations, sums their time and token counters, and flags errored because one errored.
+		// both invocations, counts the one errored completion, and sums their time and token counters.
 		// The metrics ride each instance's incoming call (the adapter's contract), and the second
 		// instance's call reports a cached share — a subset of its prompt bill.
 		const model: InteractionModel = {
@@ -467,12 +467,55 @@ describe('deriveRoleTooltip', () => {
 			status: 'success',
 		}
 		const result = deriveRoleTooltip(model, labelsModule, TIER, 'coder')
-		expect(result.sections.map((s) => s.label)).toEqual(['invocations', 'total time', 'total tokens', 'status'])
+		// The errors row sits directly beneath invocations — a rate over the same denominator.
+		expect(result.sections.map((s) => s.label)).toEqual(['invocations', 'errors', 'total time', 'total tokens'])
 		expect(defined(result.sections.find((s) => s.label === 'invocations'), 'invocations section').content).toBe(2)
+		expect(defined(result.sections.find((s) => s.label === 'errors'), 'errors section').content).toBe('1 of 2 (50%)')
 		expect(defined(result.sections.find((s) => s.label === 'total time'), 'total time section').content).toBe('10s')
 		// 1200 total = 300 + 900; the cached 200 rides inside the input figure as a subset, never as an additive bucket.
 		expect(defined(result.sections.find((s) => s.label === 'total tokens'), 'total tokens section').content).toBe('1.2k \u00b7 input 1.1k (cached 200) \u00b7 output 120')
-		expect(defined(result.sections.find((s) => s.label === 'status'), 'status section').content).toBe('errored')
+	})
+
+	test('a role whose invocations all errored counts every one (100%)', () => {
+		const model: InteractionModel = {
+			participants: [
+				participant('human:root', 'human', 'human'),
+				participant('role:coder:1', 'coder', 'role'),
+				participant('role:coder:2', 'coder', 'role'),
+			],
+			operations: [
+				callOperation('op1', 'human:root', 'role:coder:1'),
+				returnOperation('op2', 'role:coder:1', 'human:root', 'error', null),
+				callOperation('op3', 'human:root', 'role:coder:2'),
+				returnOperation('op4', 'role:coder:2', 'human:root', 'error', null),
+			],
+			status: 'error',
+		}
+		const result = deriveRoleTooltip(model, labelsModule, TIER, 'coder')
+		expect(defined(result.sections.find((s) => s.label === 'errors'), 'errors section').content).toBe('2 of 2 (100%)')
+	})
+
+	test('the error count reads the completion returns alone — metrics presence is irrelevant, and the percentage rounds to an integer', () => {
+		// Three coder instances, none carrying call metrics at all: the two errored completions still count, and 2/3 renders as the rounded integer 67%, never a decimal rate.
+		const model: InteractionModel = {
+			participants: [
+				participant('human:root', 'human', 'human'),
+				participant('role:coder:1', 'coder', 'role'),
+				participant('role:coder:2', 'coder', 'role'),
+				participant('role:coder:3', 'coder', 'role'),
+			],
+			operations: [
+				callOperation('op1', 'human:root', 'role:coder:1'),
+				returnOperation('op2', 'role:coder:1', 'human:root', 'error', null),
+				callOperation('op3', 'human:root', 'role:coder:2'),
+				returnOperation('op4', 'role:coder:2', 'human:root', 'success', null),
+				callOperation('op5', 'human:root', 'role:coder:3'),
+				returnOperation('op6', 'role:coder:3', 'human:root', 'error', null),
+			],
+			status: 'error',
+		}
+		const result = deriveRoleTooltip(model, labelsModule, TIER, 'coder')
+		expect(defined(result.sections.find((s) => s.label === 'errors'), 'errors section').content).toBe('2 of 3 (67%)')
 	})
 
 	test('a role whose instances never served from cache omits the cached note from the token split', () => {
@@ -502,11 +545,28 @@ describe('deriveRoleTooltip', () => {
 		expect(result.sections).toEqual([{ label: 'invocations', content: 1, scalar: true }])
 	})
 
-	test('a role whose invocations all succeeded omits the errored status', () => {
+	test('a role whose invocations all succeeded omits the errors section', () => {
 		const model = delegationModel()
 		const result = deriveRoleTooltip(model, labelsModule, TIER, 'coder')
 		expect(result.sections.map((s) => s.label)).toEqual(['invocations', 'total time', 'total tokens'])
 		expect(defined(result.sections.find((s) => s.label === 'invocations'), 'invocations section').content).toBe(1)
+	})
+
+	test('a duplicate return from one source never rewrites the completion outcome (first return wins)', () => {
+		// The adapter emits one completion return per instance, so a second return from the same
+		// source only arises in hand-authored models; the count must still stay stable rather than
+		// let a later return flip an already-decided outcome.
+		const model: InteractionModel = {
+			participants: [participant('human:root', 'human', 'human'), participant('role:coder:1', 'coder', 'role')],
+			operations: [
+				callOperation('op1', 'human:root', 'role:coder:1'),
+				returnOperation('op2', 'role:coder:1', 'human:root', 'success', null),
+				returnOperation('op3', 'role:coder:1', 'human:root', 'error', null),
+			],
+			status: 'running',
+		}
+		const result = deriveRoleTooltip(model, labelsModule, TIER, 'coder')
+		expect(result.sections.find((s) => s.label === 'errors')).toBeUndefined()
 	})
 
 	test('an unknown role yields an empty title-only result', () => {

@@ -139,7 +139,6 @@ interface TopBarSlot {
 	totalTokens: number
 	totalCachedTokens: number
 	hasMetrics: boolean
-	errored: boolean
 }
 
 interface CostStrip {
@@ -292,7 +291,7 @@ function projectRow(model: InteractionModel, stackId: string): RowProjection | n
 	return { stackId, rootId, participants, callEdges, returnEdges }
 }
 
-// Aggregates every role/tool type that has ever appeared in the model into one top-bar slot, with the total invocation count (every participant instance of that role, current and departed, so the count matches the "ever run" rule) and the cumulative metrics drawn from each instance's incoming call operations — the adapter accumulates a callee's LLM spend (final attempts plus discarded retry attempts) on its call, while returns carry no metrics. The outcome is the one return concern: any instance whose completing return errored flags the slot. Departed participants are represented here regardless of whether they currently linger in a row; the depart animation reconciles a lingering node with its slot in the animation layer. The render and the lifecycle diff each read the strip per poll, so the slots are memoized per model and shared read-only between those readers.
+// Aggregates every role/tool type that has ever appeared in the model into one top-bar slot, with the total invocation count (every participant instance of that role, current and departed, so the count matches the "ever run" rule) and the cumulative metrics drawn from each instance's incoming call operations — the adapter accumulates a callee's LLM spend (final attempts plus discarded retry attempts) on its call, while returns carry no metrics. The strip carries no status state: a slot's color is identity only (the role's accent or the tool tint — renderSmallNode), and error outcomes surface in the role tooltip's error count (aggregateRole in tooltip.ts), never on the tile. Departed participants are represented here regardless of whether they currently linger in a row; the depart animation reconciles a lingering node with its slot in the animation layer. The render and the lifecycle diff each read the strip per poll, so the slots are memoized per model and shared read-only between those readers.
 function projectTopBar(model: InteractionModel): TopBarSlot[] {
 	const derived = derivedOf(model)
 	if (derived.topBar !== undefined) return derived.topBar
@@ -302,7 +301,7 @@ function projectTopBar(model: InteractionModel): TopBarSlot[] {
 		if (participant.kind === 'human') continue
 		let slot = slotByRole.get(participant.role)
 		if (slot === undefined) {
-			slot = { role: participant.role, kind: participant.kind, invocations: 0, totalTime: 0, totalTokens: 0, totalCachedTokens: 0, hasMetrics: false, errored: false }
+			slot = { role: participant.role, kind: participant.kind, invocations: 0, totalTime: 0, totalTokens: 0, totalCachedTokens: 0, hasMetrics: false }
 			slotByRole.set(participant.role, slot)
 		}
 		slot.invocations += 1
@@ -323,8 +322,6 @@ function projectTopBar(model: InteractionModel): TopBarSlot[] {
 			}
 			if (metrics.cachedPromptTokens !== null) slot.totalCachedTokens += metrics.cachedPromptTokens
 		}
-		const completion = completionReturnFor(model, participant.id)
-		if (completion !== undefined && completion.outcome === 'error') slot.errored = true
 	}
 	const slots = Array.from(slotByRole.values())
 	derived.topBar = slots
@@ -336,12 +333,10 @@ function completionReturnFor(model: InteractionModel, participantId: string): Op
 	return rowLookupsOf(model).completionReturnBySource.get(participantId)
 }
 
-// Renders a single top-bar slot as a small square holding its invocation count, with a <title> carrying the label, count, and cumulative metrics for hover. A slot whose run ended in failure turns red so the failing role reads at a glance against an otherwise neutral strip; a tool-type slot carries the tool modifier so tools read apart from agent roles in the strip too. An agent role's slot carries the role's accent (an inline --node-accent custom property plus the flow-small-node--accented modifier, resolved from the guild's full role list) so the strip's slots are identifiable at a glance; a null accent — the tools, the pseudo-roles, a role outside the guild's config — adds neither the class nor the style, so the slot renders exactly the neutral vnode.
+// Renders a single top-bar slot as a small square holding its invocation count, with a <title> carrying the label, count, and cumulative metrics for hover. The tile carries no status state — its color is identity only (the tool modifier or the role's accent below), so success and failure never recolor the strip and a role's failures surface through the role tooltip's error count instead. An agent role's slot carries the role's accent (an inline --node-accent custom property plus the flow-small-node--accented modifier, resolved from the guild's full role list) so the strip's slots are identifiable at a glance; a null accent — the tools, the pseudo-roles, a role outside the guild's config — adds neither the class nor the style, so the slot renders exactly the neutral vnode.
 function renderSmallNode(h: H, slot: TopBarSlot, label: string, index: number, roleAccents: RoleAccentResolver): Vnode {
 	const pos = topBarPixel(index)
 	const classes = ['flow-small-node']
-	const runErrored = slot.errored
-	if (runErrored) classes.push('flow-small-node--error')
 	if (slot.kind === 'tool') classes.push('flow-small-node--tool')
 	const accent = slot.kind === 'role' ? roleAccents(slot.role) : null
 	if (accent !== null) classes.push('flow-small-node--accented')
@@ -356,7 +351,6 @@ function renderSmallNode(h: H, slot: TopBarSlot, label: string, index: number, r
 			if (slot.totalCachedTokens > 0) titleParts.push(`cached ${slot.totalCachedTokens.toLocaleString()}`)
 		}
 	}
-	if (runErrored) titleParts.push('errored')
 	return h('g', props, [
 		h('title', {}, [titleParts.join(' \u00b7 ')]),
 		h('rect', { class: 'flow-small-node-box', x: 0, y: 0, width: SMALL_SIZE, height: SMALL_SIZE, rx: 5 }, []),

@@ -1126,3 +1126,56 @@ describe('renderFlowView — per-role accents', () => {
 	})
 })
 
+describe('renderFlowView — top-bar tiles carry no status state', () => {
+	// The settled twin of the mixed fixtures: every call/return settled with a per-participant outcome, so both the coder role and the readFile tool have completed and departed to their top-bar slots. Each outcome rides its completion return — exactly what the adapter reports for a failed or passing invocation.
+	function settledModel(coderOutcome: 'success' | 'error', toolOutcome: 'success' | 'error'): InteractionModel {
+		return {
+			participants: [
+				participant('you', 'human', 'human'),
+				participant('coder', 'coder', 'role'),
+				participant('readFile', 'read_file', 'tool'),
+			],
+			operations: [
+				{ id: 'op1', kind: 'call', stack: 'root', source: 'you', destination: 'coder', startedAt: 't0', settledAt: 't1', lifecycle: 'settled', outcome: null, metrics: null },
+				{ id: 'op2', kind: 'call', stack: 'root', source: 'coder', destination: 'readFile', startedAt: 't1', settledAt: 't2', lifecycle: 'settled', outcome: null, metrics: null },
+				{ id: 'op3', kind: 'return', stack: 'root', source: 'readFile', destination: 'coder', startedAt: 't2', settledAt: 't3', lifecycle: 'settled', outcome: toolOutcome, metrics: null },
+				{ id: 'op4', kind: 'return', stack: 'root', source: 'coder', destination: 'you', startedAt: 't3', settledAt: 't4', lifecycle: 'settled', outcome: coderOutcome, metrics: null },
+			],
+			status: 'running',
+		}
+	}
+
+	function slotTitleText(slot: Vnode): string {
+		return allByTag(slot, 'title').map((title) => title.children.join('')).join('')
+	}
+
+	test('an errored role’s top-bar tile carries no error class or marker and keeps its role accent', () => {
+		const accents = createRoleAccentResolver(['coder'])
+		const view = render(settledModel('error', 'success'), 'detailed', accents)
+		const coderSlot = defined(groupsWithClass(view, 'flow-small-node').find((slot) => propString(slot.props, 'data-role') === 'coder'), 'coderSlot')
+		const classes = (propString(coderSlot.props, 'class') ?? '').split(' ')
+		expect(classes.includes('flow-small-node--error')).toBe(false)
+		expect(classes.includes('flow-small-node--accented')).toBe(true)
+		expect(styleVar(coderSlot.props, '--node-accent')).toBe(present(accents('coder'), 'the resolver\'s accent for coder'))
+		expect(slotTitleText(coderSlot)).not.toContain('errored')
+	})
+
+	test('an errored tool’s top-bar tile keeps the violet modifier and carries no error class or marker', () => {
+		const view = render(settledModel('success', 'error'))
+		const readFileSlot = defined(groupsWithClass(view, 'flow-small-node').find((slot) => propString(slot.props, 'data-role') === 'read_file'), 'readFileSlot')
+		const classes = (propString(readFileSlot.props, 'class') ?? '').split(' ')
+		expect(classes.includes('flow-small-node--error')).toBe(false)
+		expect(classes.includes('flow-small-node--tool')).toBe(true)
+		expect(slotTitleText(readFileSlot)).not.toContain('errored')
+	})
+
+	test('a passing role’s top-bar tile renders the same identity-only look — no error class, accent kept', () => {
+		const accents = createRoleAccentResolver(['coder'])
+		const view = render(settledModel('success', 'success'), 'detailed', accents)
+		const coderSlot = defined(groupsWithClass(view, 'flow-small-node').find((slot) => propString(slot.props, 'data-role') === 'coder'), 'coderSlot')
+		const classes = (propString(coderSlot.props, 'class') ?? '').split(' ')
+		expect(classes.includes('flow-small-node--error')).toBe(false)
+		expect(classes.includes('flow-small-node--accented')).toBe(true)
+		expect(slotTitleText(coderSlot)).not.toContain('errored')
+	})
+})

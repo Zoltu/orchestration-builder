@@ -314,34 +314,42 @@ function representativeParticipantOfRole(model: InteractionModel, role: string):
 	return undefined
 }
 
-// Aggregates every participant instance of a role into a cumulative summary, mirroring the `projectTopBar` aggregation the flow view's top-bar strip already computes: the invocation count (every participant instance of the role, current and departed), the total time and the token totals (with their input/cached/output split) drawn from each instance's incoming call operations — the adapter accumulates a callee's LLM spend on its call, discarded retry attempts included, while returns carry no metrics — and whether any invocation errored (read off the returns, the one place outcomes live). Each total stays null until at least one of the role's calls reported that counter — a tool role or a usage-silent endpoint leaves the token totals null, never a fabricated zero — so the card renders each row only when the role has a measured figure for it.
+// Aggregates every participant instance of a role into a cumulative summary, mirroring the `projectTopBar` aggregation the flow view's top-bar strip already computes: the invocation count (every participant instance of the role, current and departed), the total time and the token totals (with their input/cached/output split) drawn from each instance's incoming call operations — the adapter accumulates a callee's LLM spend on its call, discarded retry attempts included, while returns carry no metrics — and how many invocations errored, counted off each instance's completing return (the first return per source, the one place outcomes live) independent of whether that call carried metrics. Each total stays null until at least one of the role's calls reported that counter — a tool role or a usage-silent endpoint leaves the token totals null, never a fabricated zero — so the card renders each row only when the role has a measured figure for it.
 interface RoleAggregate {
 	invocations: number
+	erroredCalls: number
 	totalTime: number | null
 	totalTokens: number | null
 	promptTokens: number | null
 	cachedTokens: number | null
 	completionTokens: number | null
-	errored: boolean
+}
+
+// The outcome of each source's completing return — the first return whose source it is — by participant id. Only the first return per source is the completing one (a retried role's later instances carry their own ids), the same rule the flow view's completion-return lookup applies, so a later duplicate return never rewrites an instance's outcome.
+function completionOutcomeBySource(model: InteractionModel): Map<string, Operation['outcome']> {
+	const outcomeBySource = new Map<string, Operation['outcome']>()
+	for (const operation of model.operations) {
+		if (operation.kind !== 'return') continue
+		if (outcomeBySource.has(operation.source)) continue
+		outcomeBySource.set(operation.source, operation.outcome)
+	}
+	return outcomeBySource
 }
 
 function aggregateRole(model: InteractionModel, role: string): RoleAggregate {
 	let invocations = 0
+	let erroredCalls = 0
 	let totalTime: number | null = null
 	let totalTokens: number | null = null
 	let promptTokens: number | null = null
 	let cachedTokens: number | null = null
 	let completionTokens: number | null = null
-	let errored = false
-	const errorSources = new Set<string>()
-	for (const operation of model.operations) {
-		if (operation.kind === 'return' && operation.outcome === 'error') errorSources.add(operation.source)
-	}
+	const completionOutcomes = completionOutcomeBySource(model)
 	const metricsByDestination = callMetricsByDestination(model)
 	for (const participant of model.participants) {
 		if (participant.role !== role) continue
 		invocations += 1
-		if (errorSources.has(participant.id)) errored = true
+		if (completionOutcomes.get(participant.id) === 'error') erroredCalls += 1
 		const metrics = metricsByDestination.get(participant.id)
 		if (metrics === undefined) continue
 		if (metrics.elapsedSeconds !== null) totalTime = (totalTime ?? 0) + metrics.elapsedSeconds
@@ -350,7 +358,7 @@ function aggregateRole(model: InteractionModel, role: string): RoleAggregate {
 		if (metrics.cachedPromptTokens !== null) cachedTokens = (cachedTokens ?? 0) + metrics.cachedPromptTokens
 		if (metrics.completionTokens !== null) completionTokens = (completionTokens ?? 0) + metrics.completionTokens
 	}
-	return { invocations, totalTime, totalTokens, promptTokens, cachedTokens, completionTokens, errored }
+	return { invocations, erroredCalls, totalTime, totalTokens, promptTokens, cachedTokens, completionTokens }
 }
 
 // The tokens line's figures, shared by the role aggregate card and the per-participant card so the two surfaces format identically: the total bill, then the input/output split with the cached share nested inside the input in parentheses — cached tokens are part of the prompt bill (a subset, never an additive bucket). Null buckets are omitted entirely (no fabricated zeros), the cached note rides only a reported nonzero share, and a measured-zero total reads as a plain '0'. The caller guards that `totalTokens` is non-null (a card with no measured total carries no tokens section at all).
@@ -368,9 +376,10 @@ function cachedNote(cachedTokens: number | null): string {
 }
 
 // Top-bar node (flow, by `data-role`): the role's cumulative summary across every participant
-// instance of that role — invocation count, total time, total tokens (with the input/cached/output
-// split), and whether any invocation errored. The figures match the count the top-bar slot displays
-// and the <title> the strip carries, so hovering a slot reads the same aggregation the strip renders.
+// instance of that role — invocation count, the error count (errored invocations over total, as a
+// rate), total time, and total tokens (with the input/cached/output split). The figures match the
+// count the top-bar slot displays and the <title> the strip carries, so hovering a slot reads the
+// same aggregation the strip renders.
 export function deriveRoleTooltip(model: InteractionModel, labels: LabelResolver, tier: LabelTier, role: string): TooltipDescriptor {
 	if (!isObject(model) || typeof role !== 'string') return { title: '', sections: [] }
 	const representative = representativeParticipantOfRole(model, role)
@@ -378,9 +387,10 @@ export function deriveRoleTooltip(model: InteractionModel, labels: LabelResolver
 	const title = labels.resolveParticipantLabel(representative, tier)
 	const aggregate = aggregateRole(model, role)
 	const sections: TooltipSection[] = [scalarSection('invocations', aggregate.invocations)]
+	// The error rate rides the same denominator as the invocations row, so it sits directly beneath it: errored calls over total calls, with the percentage rounded to an integer.
+	if (aggregate.erroredCalls >= 1) sections.push(scalarSection('errors', `${aggregate.erroredCalls} of ${aggregate.invocations} (${Math.round((aggregate.erroredCalls / aggregate.invocations) * 100)}%)`))
 	if (aggregate.totalTime !== null) sections.push(scalarSection('total time', `${aggregate.totalTime}s`))
 	if (aggregate.totalTokens !== null) sections.push(scalarSection('total tokens', tokenBreakdownText(aggregate.totalTokens, aggregate.promptTokens, aggregate.cachedTokens, aggregate.completionTokens)))
-	if (aggregate.errored) sections.push(scalarSection('status', 'errored'))
 	return { title, sections }
 }
 

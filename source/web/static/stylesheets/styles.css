@@ -1497,7 +1497,7 @@ li:last-child {
 	color: var(--color-text-muted);
 }
 
-/* Small top-bar nodes: a compact square holding just the invocation count, so a long run's history stays a thin strip. The strip is cumulative/aggregate history (total invocations per type), so it carries no per-invocation status except the terminal-failure exception below — a slot whose run ended in error turns red so the failing role reads at a glance against an otherwise neutral strip. The role/tool name and cumulative token/time details surface via the native SVG <title> hover tooltip, not in the strip. */
+/* Small top-bar nodes: a compact square holding just the invocation count, so a long run's history stays a thin strip. The strip is cumulative/aggregate history (total invocations per type), so a tile carries no status state at all — its color is identity only (the role's accent or the tool violet below), and a role's failures surface through the role tooltip's error count, not the strip. The role/tool name and cumulative token/time details surface via the native SVG <title> hover tooltip, not in the strip. */
 .flow-small-node-box {
 	fill: var(--svg-node-fill);
 	stroke: var(--svg-node-border);
@@ -1511,7 +1511,7 @@ li:last-child {
 	font-variant-numeric: tabular-nums;
 }
 
-/* A tool type's slot carries the same violet as the main area's tool nodes (the flow-small-node--tool modifier, stamped from the slot's participant kind), so the agent-vs-tool distinction reads in the history strip too. An agent role's slot instead carries the role's accent (the flow-small-node--accented modifier, the hue riding the inline --node-accent custom property), derived with the same color-mix-against-the-per-theme-tokens rule as the main area's accented nodes so the strip's slots are identifiable at a glance. Declared before the error variant so a failed slot still turns red. */
+/* A tool type's slot carries the same violet as the main area's tool nodes (the flow-small-node--tool modifier, stamped from the slot's participant kind), so the agent-vs-tool distinction reads in the history strip too. An agent role's slot instead carries the role's accent (the flow-small-node--accented modifier, the hue riding the inline --node-accent custom property), derived with the same color-mix-against-the-per-theme-tokens rule as the main area's accented nodes so the strip's slots are identifiable at a glance. */
 .flow-small-node--tool .flow-small-node-box {
 	fill: var(--svg-tool-node-fill);
 	stroke: var(--svg-tool-node-border);
@@ -1520,16 +1520,6 @@ li:last-child {
 .flow-small-node--accented .flow-small-node-box {
 	fill: color-mix(in oklch, var(--node-accent) 14%, var(--svg-node-fill));
 	stroke: color-mix(in oklch, var(--node-accent) 60%, var(--svg-node-border));
-}
-
-/* A slot whose run ended in failure: the box border and the count turn red so the failing role's top-bar node reads as errored at a glance. Only the terminal outcome is colored — a slot that errored mid-run but was retried to success stays neutral, because the strip carries the role's aggregate result, not each invocation's. The red is the calibrated --svg-error token (not pure #ff0000) so it reads correctly in both light and dark. */
-.flow-small-node--error .flow-small-node-box {
-	stroke: var(--svg-error);
-	stroke-width: 1.5;
-}
-
-.flow-small-node--error .flow-small-node-count {
-	fill: var(--svg-error);
 }
 
 /* --- Flow animation: node lifecycle + edge flow ----------------------------- */
