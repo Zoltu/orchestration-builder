@@ -253,7 +253,7 @@ export interface ApplicationState {
 	build: BuildInfo | null
 	flowTier: LabelTier
 	flowViewMode: FlowViewMode
-	// The sequence view's roles-only lens (see rolesOnlyModel in interaction-model.js): off by default so the sequence view shows everything.
+	// The sequence view's roles-only lens (see rolesOnlyModel in interaction-model.js): on by default so the sequence view opens on the delegation story, with the full traffic one toggle away.
 	sequenceRolesOnly: boolean
 	// The visible screen: 'watch' (the flow/sequence stage), 'history' (the run browser), or 'compose' (the new-task hero). A zero-state service shows compose regardless (see Main).
 	screen: Screen
@@ -2642,7 +2642,7 @@ app({
 			build: null,
 			flowTier: DEFAULT_FLOW_TIER,
 			flowViewMode: 'flow',
-			sequenceRolesOnly: false,
+			sequenceRolesOnly: true,
 			screen: 'watch',
 			historyExpanded: {},
 			continuation: null,

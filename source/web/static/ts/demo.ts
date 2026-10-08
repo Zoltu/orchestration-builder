@@ -206,6 +206,8 @@ jumpToActiveButton.addEventListener('click', () => {
 const rolesOnlyToggle = document.createElement('input')
 rolesOnlyToggle.type = 'checkbox'
 rolesOnlyToggle.id = 'demo-roles-only'
+// The app's sequence view opens with the roles-only filter on (app.ts sequenceRolesOnly), so the harness matches that default.
+rolesOnlyToggle.checked = true
 const rolesOnlyLabel = document.createElement('label')
 rolesOnlyLabel.style.display = 'none'
 rolesOnlyLabel.style.gap = '0.25rem'
