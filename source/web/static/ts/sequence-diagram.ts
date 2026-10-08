@@ -11,6 +11,7 @@
 import { activeOperation, activeStack } from './interaction-model.js'
 import type { InteractionModel, Operation, Participant, ParticipantKind } from './interaction-model.js'
 import type { LabelResolver, LabelTier } from './labels.js'
+import type { RoleAccentResolver } from './role-accents.js'
 import { ATTR_OPERATION, ATTR_ROLE } from './inspector.js'
 import { LoopbackEdge } from './svg-primitives.js'
 import type { H, Vnode } from '../vendor/hyperapp.js'
@@ -159,13 +160,17 @@ function arrowMarker(h: H, id: string, className: string): Vnode {
 	])
 }
 
-// A terminal node on a column's lifeline at a message row: a small rounded rect carrying a state class so a settled leg's outcome reads at a glance and the active operation's destination pulses. The node's column is the one its participant routes to (`columnIndexForParticipant`), so the participant's kind is the column's kind and a tool participant's node carries the seq-node--tool tint, mirroring the flow view's graph-node--tool; the state classes are declared after the tint rule in the stylesheet so a status stroke still wins. `end` distinguishes the destination node (where the arrow lands, which pulses when the operation is the active operation) from a return's source node (the callee, which carries the return's outcome color, mirroring the flow view where the returning node is the callee). `data-operation`, `data-node-end`, and `data-column-role` let the inspector locate a node by operation and assert which end and column it landed on.
-function renderTerminalNode(h: H, x: number, y: number, state: string | null, operation: Operation, participant: Participant, end: 'source' | 'destination'): Vnode {
+// A terminal node on a column's lifeline at a message row: a small rounded rect carrying a state class so a settled leg's outcome reads at a glance and the active operation's destination pulses. The node's column is the one its participant routes to (`columnIndexForParticipant`), so the participant's kind is the column's kind and a tool participant's node carries the seq-node--tool tint, mirroring the flow view's graph-node--tool; an agent role's node carries the role's accent (an inline --node-accent custom property plus the seq-node--accented modifier, resolved from the guild's full role list — a null accent adds neither the class nor the style, so the node renders exactly the neutral vnode); the state classes are declared after both tint rules in the stylesheet so a status stroke still wins. `end` distinguishes the destination node (where the arrow lands, which pulses when the operation is the active operation) from a return's source node (the callee, which carries the return's outcome color, mirroring the flow view where the returning node is the callee). `data-operation`, `data-node-end`, and `data-column-role` let the inspector locate a node by operation and assert which end and column it landed on.
+function renderTerminalNode(h: H, x: number, y: number, state: string | null, operation: Operation, participant: Participant, end: 'source' | 'destination', roleAccents: RoleAccentResolver): Vnode {
 	const rectX = x - TERMINAL_NODE_WIDTH / 2
 	const classes = ['seq-node']
 	if (participant.kind === 'tool') classes.push('seq-node--tool')
+	const accent = participant.kind === 'role' ? roleAccents(participant.role) : null
+	if (accent !== null) classes.push('seq-node--accented')
 	if (state !== null) classes.push(`seq-node--${state}`)
-	return h('g', { class: classes.join(' '), [ATTR_OPERATION]: operation.id, 'data-node-end': end, 'data-column-role': participant.role, 'data-state': state === null ? 'neutral' : state }, [
+	const props: Record<string, unknown> = { class: classes.join(' '), [ATTR_OPERATION]: operation.id, 'data-node-end': end, 'data-column-role': participant.role, 'data-state': state === null ? 'neutral' : state }
+	if (accent !== null) props['style'] = { '--node-accent': accent }
+	return h('g', props, [
 		h('rect', { class: 'seq-node-box', x: rectX, y: y - TERMINAL_NODE_HEIGHT / 2, width: TERMINAL_NODE_WIDTH, height: TERMINAL_NODE_HEIGHT, rx: 3 }, []),
 	])
 }
@@ -195,8 +200,8 @@ function loopbackHitArea(h: H, columnX: number, rowY: number): Vnode {
 	return h('rect', { class: 'seq-hit-area', x: columnX, y: rowY - LOOPBACK_HEIGHT - ROW_HEIGHT / 2, width: 60 + TERMINAL_NODE_WIDTH, height: LOOPBACK_HEIGHT + ROW_HEIGHT }, [])
 }
 
-// Renders the sequence view as a single SVG sized to its laid-out content. Columns render as headers plus dashed vertical lifelines spanning the message area; operations render top-to-bottom by index, each as a horizontal arrow (or a loopback U-turn for a same-role cross-instance call, or a static dashed line for observe) landing on a terminal node on the destination's lifeline. The active operation's line carries the flowing/returning/error animation class and its destination node pulses; a return additionally carries a source node on the callee's lifeline with its outcome color. Every message group carries `data-operation` so the inspector resolves the operation's details markdown and label from the model without the view re-deriving or embedding them. `guildParticipants` (optional) supplies the full participant set the guild defines so every role column and the tools column appear from frame 0 rather than growing as participants first appear; when absent the column set falls back to the participants present in the current frame.
-export function renderSequenceView(h: H, model: InteractionModel, labels: LabelResolver, tier: LabelTier, guildParticipants?: Participant[]): Vnode {
+// Renders the sequence view as a single SVG sized to its laid-out content. Columns render as headers plus dashed vertical lifelines spanning the message area; operations render top-to-bottom by index, each as a horizontal arrow (or a loopback U-turn for a same-role cross-instance call, or a static dashed line for observe) landing on a terminal node on the destination's lifeline. The active operation's line carries the flowing/returning/error animation class and its destination node pulses; a return additionally carries a source node on the callee's lifeline with its outcome color. Every message group carries `data-operation` so the inspector resolves the operation's details markdown and label from the model without the view re-deriving or embedding them. `roleAccents` is the per-role accent resolver the hosts build from the guild's full role list (createRoleAccentResolver) — agent columns' terminal nodes take their role's accent, and a resolver that returns null for everything renders exactly the neutral look. `guildParticipants` (optional) supplies the full participant set the guild defines so every role column and the tools column appear from frame 0 rather than growing as participants first appear; when absent the column set falls back to the participants present in the current frame.
+export function renderSequenceView(h: H, model: InteractionModel, labels: LabelResolver, tier: LabelTier, roleAccents: RoleAccentResolver, guildParticipants?: Participant[]): Vnode {
 	const columns = buildColumns(model, guildParticipants)
 	const columnIndexByRole = new Map<string, number>()
 	columns.forEach((column, index) => columnIndexByRole.set(column.role, index))
@@ -268,7 +273,7 @@ export function renderSequenceView(h: H, model: InteractionModel, labels: LabelR
 		if (operation.kind === 'terminate') {
 			const d = `M ${sourceX} ${rowY} L ${destinationX} ${rowY}`
 			const path = h('path', { class: messageLineClass(operation, animationState), d, 'data-source-role': sourceParticipant.role, 'data-destination-role': destinationParticipant.role }, [])
-			const targetNode = renderTerminalNode(h, destinationX, rowY, 'terminate-target', operation, destinationParticipant, 'destination')
+			const targetNode = renderTerminalNode(h, destinationX, rowY, 'terminate-target', operation, destinationParticipant, 'destination', roleAccents)
 			return h('g', { class: 'seq-message-group', [ATTR_OPERATION]: operation.id, 'data-kind': 'terminate', 'data-routing': 'terminate', 'data-source-role': sourceParticipant.role, 'data-destination-role': destinationParticipant.role, 'data-animation': animationState }, [
 				h('title', {}, [label]),
 				messageHitArea(h, sourceX, destinationX, rowY),
@@ -292,10 +297,10 @@ export function renderSequenceView(h: H, model: InteractionModel, labels: LabelR
 		}
 
 		const isActiveOperation = operation.id === activeOperationId
-		const destinationNode = renderTerminalNode(h, destinationX, rowY, destinationNodeState(isActiveOperation), operation, destinationParticipant, 'destination')
+		const destinationNode = renderTerminalNode(h, destinationX, rowY, destinationNodeState(isActiveOperation), operation, destinationParticipant, 'destination', roleAccents)
 		// A return carries a source node on the callee's lifeline with its outcome color; a call has no source node (no outcome to carry), so the destination node alone marks the landing.
 		const sourceState = sourceNodeState(operation)
-		const sourceNode = sourceState === 'none' ? null : renderTerminalNode(h, sourceX, rowY, sourceState === null ? null : sourceState, operation, sourceParticipant, 'source')
+		const sourceNode = sourceState === 'none' ? null : renderTerminalNode(h, sourceX, rowY, sourceState === null ? null : sourceState, operation, sourceParticipant, 'source', roleAccents)
 		const nodes = sourceNode === null ? [destinationNode] : [sourceNode, destinationNode]
 
 		return h('g', {

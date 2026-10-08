@@ -54,6 +54,7 @@
 import { activeOperation, activeParticipant, callChainOf, callMetricsByDestination, isPaused, isTerminalStatus, observesOf, stacksOf, terminatesOf } from './interaction-model.js'
 import type { InteractionModel, Operation, Participant, ParticipantKind, RunStatus } from './interaction-model.js'
 import type { LabelResolver, LabelTier } from './labels.js'
+import type { RoleAccentResolver } from './role-accents.js'
 import { ATTR_OPERATION, ATTR_PARTICIPANT, ATTR_ROLE } from './inspector.js'
 import { GraphEdge, GraphNode, NODE_HEIGHT, NODE_WIDTH, nodeAnchor } from './svg-primitives.js'
 import type { Anchor } from './svg-primitives.js'
@@ -335,13 +336,17 @@ function completionReturnFor(model: InteractionModel, participantId: string): Op
 	return rowLookupsOf(model).completionReturnBySource.get(participantId)
 }
 
-// Renders a single top-bar slot as a small square holding its invocation count, with a <title> carrying the label, count, and cumulative metrics for hover. A slot whose run ended in failure turns red so the failing role reads at a glance against an otherwise neutral strip; a tool-type slot carries the tool modifier so tools read apart from agent roles in the strip too.
-function renderSmallNode(h: H, slot: TopBarSlot, label: string, index: number): Vnode {
+// Renders a single top-bar slot as a small square holding its invocation count, with a <title> carrying the label, count, and cumulative metrics for hover. A slot whose run ended in failure turns red so the failing role reads at a glance against an otherwise neutral strip; a tool-type slot carries the tool modifier so tools read apart from agent roles in the strip too. An agent role's slot carries the role's accent (an inline --node-accent custom property plus the flow-small-node--accented modifier, resolved from the guild's full role list) so the strip's slots are identifiable at a glance; a null accent — the tools, the pseudo-roles, a role outside the guild's config — adds neither the class nor the style, so the slot renders exactly the neutral vnode.
+function renderSmallNode(h: H, slot: TopBarSlot, label: string, index: number, roleAccents: RoleAccentResolver): Vnode {
 	const pos = topBarPixel(index)
 	const classes = ['flow-small-node']
 	const runErrored = slot.errored
 	if (runErrored) classes.push('flow-small-node--error')
 	if (slot.kind === 'tool') classes.push('flow-small-node--tool')
+	const accent = slot.kind === 'role' ? roleAccents(slot.role) : null
+	if (accent !== null) classes.push('flow-small-node--accented')
+	const props: Record<string, unknown> = { class: classes.join(' '), transform: translate(pos.x, pos.y), [ATTR_ROLE]: slot.role, 'data-kind': slot.kind }
+	if (accent !== null) props['style'] = { '--node-accent': accent }
 	const titleParts = [label, `${slot.invocations} call${slot.invocations === 1 ? '' : 's'}`]
 	if (slot.hasMetrics) {
 		if (slot.totalTime > 0) titleParts.push(`${slot.totalTime}s`)
@@ -352,15 +357,15 @@ function renderSmallNode(h: H, slot: TopBarSlot, label: string, index: number): 
 		}
 	}
 	if (runErrored) titleParts.push('errored')
-	return h('g', { class: classes.join(' '), transform: translate(pos.x, pos.y), [ATTR_ROLE]: slot.role, 'data-kind': slot.kind }, [
+	return h('g', props, [
 		h('title', {}, [titleParts.join(' \u00b7 ')]),
 		h('rect', { class: 'flow-small-node-box', x: 0, y: 0, width: SMALL_SIZE, height: SMALL_SIZE, rx: 5 }, []),
 		h('text', { class: 'flow-small-node-count', x: SMALL_SIZE / 2, y: SMALL_SIZE / 2 + 1, 'text-anchor': 'middle', 'dominant-baseline': 'middle' }, [String(slot.invocations)]),
 	])
 }
 
-// Renders one row: edges first (so node boxes paint over anchor overlap), then nodes translated to their call-depth columns. The row group carries the stack id so the structure is discoverable from the DOM and the animation layer can target it. Each call/return edge carries its motion state off the operation it renders and the single invariant; the active participant's node carries the active class so it pulses. A node flagged as a terminate target carries the terminate-target class so the CSS overlays the orange dashed border.
-function renderRow(h: H, row: RowProjection, rowIndex: number, yOffset: number, model: InteractionModel, labels: LabelResolver, tier: LabelTier, participantById: Map<string, Participant>, enteringIds: ReadonlySet<string>, activeParticipantId: string | null, terminateTargetIds: ReadonlySet<string>): Vnode {
+// Renders one row: edges first (so node boxes paint over anchor overlap), then nodes translated to their call-depth columns. The row group carries the stack id so the structure is discoverable from the DOM and the animation layer can target it. Each call/return edge carries its motion state off the operation it renders and the single invariant; the active participant's node carries the active class so it pulses. A node flagged as a terminate target carries the terminate-target class so the CSS overlays the orange dashed border. An agent role's node carries its guild-assigned accent (an inline --node-accent custom property plus the flow-node--accented modifier on the row host, which the inner box inherits); tools keep the violet kind tint and human/interrupt stay neutral — a null accent adds neither the class nor the style, so the node renders exactly the neutral vnode.
+function renderRow(h: H, row: RowProjection, rowIndex: number, yOffset: number, model: InteractionModel, labels: LabelResolver, tier: LabelTier, roleAccents: RoleAccentResolver, participantById: Map<string, Participant>, enteringIds: ReadonlySet<string>, activeParticipantId: string | null, terminateTargetIds: ReadonlySet<string>): Vnode {
 	const edgeVnodes: Vnode[] = []
 	for (const callEdge of row.callEdges) {
 		const fromPos = rowPixel(callEdge.fromColumn, rowIndex, yOffset)
@@ -391,6 +396,7 @@ function renderRow(h: H, row: RowProjection, rowIndex: number, yOffset: number, 
 		const status = completion !== undefined ? completion.outcome : undefined
 		const pos = rowPixel(entry.column, rowIndex, yOffset)
 		const isTerminateTarget = terminateTargetIds.has(entry.id)
+		const accent = participant !== undefined && participant.kind === 'role' ? roleAccents(participant.role) : null
 		const inner = GraphNode(h, {
 			label: resolvedLabel,
 			sublabel,
@@ -401,11 +407,15 @@ function renderRow(h: H, row: RowProjection, rowIndex: number, yOffset: number, 
 			costContextTokens: incoming !== undefined ? incoming.lastPromptTokens : undefined,
 		})
 		if (enteringIds.has(entry.id)) {
-			return h('g', { class: ['flow-node', 'flow-node--entering-host', isTerminateTarget ? 'flow-node--terminate-target' : null].filter((token) => token !== null).join(' '), transform: translate(pos.x, pos.y), [ATTR_PARTICIPANT]: entry.id, [ATTR_ROLE]: participant !== undefined ? participant.role : '', 'data-kind': participant !== undefined ? participant.kind : '', 'data-lingering': entry.lingering ? 'true' : 'false' }, [
+			const enteringProps: Record<string, unknown> = { class: ['flow-node', 'flow-node--entering-host', accent !== null ? 'flow-node--accented' : null, isTerminateTarget ? 'flow-node--terminate-target' : null].filter((token) => token !== null).join(' '), transform: translate(pos.x, pos.y), [ATTR_PARTICIPANT]: entry.id, [ATTR_ROLE]: participant !== undefined ? participant.role : '', 'data-kind': participant !== undefined ? participant.kind : '', 'data-lingering': entry.lingering ? 'true' : 'false' }
+			if (accent !== null) enteringProps['style'] = { '--node-accent': accent }
+			return h('g', enteringProps, [
 				h('g', { class: 'flow-node--entering' }, [inner]),
 			])
 		}
-		return h('g', { class: ['flow-node', isTerminateTarget ? 'flow-node--terminate-target' : null].filter((token) => token !== null).join(' '), transform: translate(pos.x, pos.y), [ATTR_PARTICIPANT]: entry.id, [ATTR_ROLE]: participant !== undefined ? participant.role : '', 'data-kind': participant !== undefined ? participant.kind : '', 'data-lingering': entry.lingering ? 'true' : 'false' }, [inner])
+		const props: Record<string, unknown> = { class: ['flow-node', accent !== null ? 'flow-node--accented' : null, isTerminateTarget ? 'flow-node--terminate-target' : null].filter((token) => token !== null).join(' '), transform: translate(pos.x, pos.y), [ATTR_PARTICIPANT]: entry.id, [ATTR_ROLE]: participant !== undefined ? participant.role : '', 'data-kind': participant !== undefined ? participant.kind : '', 'data-lingering': entry.lingering ? 'true' : 'false' }
+		if (accent !== null) props['style'] = { '--node-accent': accent }
+		return h('g', props, [inner])
 	})
 
 	return h('g', { class: 'flow-row', 'data-stack': row.stackId, 'data-row-index': String(rowIndex) }, [...edgeVnodes, ...nodeVnodes])
@@ -642,9 +652,9 @@ export interface QuestionControls {
 	onclick?: unknown
 }
 
-// Renders the flow view as a single SVG containing the history top bar, the observe cross-stack lines, the terminate cross-stack lines, the row stack, the departing overlay, the (on a terminal frame) result CTA, and (while an ask_human call is pending) the Question button overlay on the answerer node. Edges paint before nodes within each row so node boxes cover anchor overlap; observes and terminates sit behind the rows so node boxes cover their endpoints; the departing overlay paints last so the travel reads on top of the settled graph; the CTA and Question button paint after the rows so they sit above the graph. `lifecycle` (optional) carries the frame-diff entering/departing descriptor from deriveLifecycle; `cta` and `question` carry the harness state for the two overlay affordances — the view itself decides whether to render them by reading model.status and the active ask_human call. `columns` is the caller-held high-water-mark tracker from createColumnTracker.
+// Renders the flow view as a single SVG containing the history top bar, the observe cross-stack lines, the terminate cross-stack lines, the row stack, the departing overlay, the (on a terminal frame) result CTA, and (while an ask_human call is pending) the Question button overlay on the answerer node. Edges paint before nodes within each row so node boxes cover anchor overlap; observes and terminates sit behind the rows so node boxes cover their endpoints; the departing overlay paints last so the travel reads on top of the settled graph; the CTA and Question button paint after the rows so they sit above the graph. `lifecycle` (optional) carries the frame-diff entering/departing descriptor from deriveLifecycle; `cta` and `question` carry the harness state for the two overlay affordances — the view itself decides whether to render them by reading model.status and the active ask_human call. `columns` is the caller-held high-water-mark tracker from createColumnTracker. `roleAccents` is the per-role accent resolver the hosts build from the guild's full role list (createRoleAccentResolver) — agent nodes take their role's accent wherever they render (row nodes, the departing overlay, the top-bar slots), and a resolver that returns null for everything renders exactly the neutral look.
 // `lifecycle`, `cta`, and `question` are nullable-but-required parameters (not optional ones) so the positional call shape the hosts use — passing undefined for the affordances they omit — stays exactly the shape the types describe.
-export function renderFlowView(h: H, model: InteractionModel, labels: LabelResolver, tier: LabelTier, lifecycle: FrameLifecycle | undefined, cta: CtaControls | undefined, question: QuestionControls | undefined, columns: ColumnTracker): Vnode {
+export function renderFlowView(h: H, model: InteractionModel, labels: LabelResolver, tier: LabelTier, roleAccents: RoleAccentResolver, lifecycle: FrameLifecycle | undefined, cta: CtaControls | undefined, question: QuestionControls | undefined, columns: ColumnTracker): Vnode {
 	const stackIds = stacksOf(model)
 	const rows: RowProjection[] = []
 	for (const stackId of stackIds) {
@@ -678,15 +688,15 @@ export function renderFlowView(h: H, model: InteractionModel, labels: LabelResol
 	const topBarVnodes = slots.map((slot, index) => {
 		const participant = model.participants.find((entry) => entry.role === slot.role)
 		const label = participant !== undefined ? labels.resolveParticipantLabel(participant, tier) : slot.role
-		return renderSmallNode(h, slot, label, index)
+		return renderSmallNode(h, slot, label, index, roleAccents)
 	})
 
-	const rowVnodes = rows.map((row, rowIndex) => renderRow(h, row, rowIndex, mainYOffset, model, labels, tier, participantById, enteringIds, activeParticipantId, terminateTargetIds))
+	const rowVnodes = rows.map((row, rowIndex) => renderRow(h, row, rowIndex, mainYOffset, model, labels, tier, roleAccents, participantById, enteringIds, activeParticipantId, terminateTargetIds))
 
 	const observeVnodes = renderObserves(h, model, rowLayout)
 	const terminateVnodes = renderTerminates(h, model, rowLayout)
 
-	// The departing overlay paints a node mid-travel from its previous row position to its top-bar slot, both in the current frame's shared SVG coordinate space (the same mainYOffset the rows use) so the travel lands on the slot the counter increment reads against.
+	// The departing overlay paints a node mid-travel from its previous row position to its top-bar slot, both in the current frame's shared SVG coordinate space (the same mainYOffset the rows use) so the travel lands on the slot the counter increment reads against. The traveling node keeps its role's accent so the departure reads as the same colored node arriving at its slot.
 	const departingVnodes: Vnode[] = lifecycle !== undefined ? lifecycle.departing.map((entry) => {
 		const fromPos = rowPixel(entry.previousColumn, entry.previousRowIndex, mainYOffset)
 		const toPos = topBarPixel(entry.slotIndex)
@@ -697,8 +707,10 @@ export function renderFlowView(h: H, model: InteractionModel, labels: LabelResol
 		const incoming = callMetricsByDestination(model).get(entry.participantId)
 		const completion = completionReturnFor(model, entry.participantId)
 		const status = completion !== undefined ? completion.outcome : undefined
-		const style = { '--from-x': `${fromPos.x}px`, '--from-y': `${fromPos.y}px`, '--to-x': `${toPos.x}px`, '--to-y': `${toPos.y}px` }
-		const classes = entry.merged ? 'flow-node flow-node--departing flow-node--merging' : 'flow-node flow-node--departing'
+		const accent = participant !== undefined && participant.kind === 'role' ? roleAccents(participant.role) : null
+		const style: Record<string, string> = { '--from-x': `${fromPos.x}px`, '--from-y': `${fromPos.y}px`, '--to-x': `${toPos.x}px`, '--to-y': `${toPos.y}px` }
+		if (accent !== null) style['--node-accent'] = accent
+		const classes = ['flow-node', 'flow-node--departing', entry.merged ? 'flow-node--merging' : null, accent !== null ? 'flow-node--accented' : null].filter((token) => token !== null).join(' ')
 		return h('g', { class: classes, style, [ATTR_PARTICIPANT]: entry.participantId }, [
 			h('g', { class: 'flow-node--departing-scale' }, [
 				GraphNode(h, {

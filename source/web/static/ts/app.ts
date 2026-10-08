@@ -7,6 +7,7 @@ import { createColumnTracker, deriveCostStrip, deriveLifecycle, deriveNowCaption
 import { renderSequenceView } from './sequence-diagram.js'
 import { createScrollFollower } from './scroll-follow.js'
 import { createLabelResolver, isLabelTier, TIER_VALUES } from './labels.js'
+import { agentRoleNames, createRoleAccentResolver } from './role-accents.js'
 import { buildInfoFromConfig, formatBuildLabel } from './build-info.js'
 import { isTerminalStatus, rolesOnlyModel, rolesOnlyParticipants } from './interaction-model.js'
 import { deriveFaviconState, faviconHref } from './favicon.js'
@@ -25,6 +26,7 @@ import { activeLivePartial, nextLivePartial, scopedActiveLivePartial } from './l
 import { backlogCount, deriveQueueSections, deriveReorderPosition, isQueueItemLike, queueItemPrimaryText, queueStatusLabel, reorderWaitingItems, taskFirstLine } from './queue-panel.js'
 import type { InteractionModel, Operation, Participant, RunStatus } from './interaction-model.js'
 import type { LabelConfig, LabelResolver, LabelTier } from './labels.js'
+import type { RoleAccentResolver } from './role-accents.js'
 import type { LogWindowEvent, ScopeWindow, TurnEntry } from './inspector-modal.js'
 import type { LivePartial } from './live-partial.js'
 import type { ElementRect, TooltipTarget } from './inspector.js'
@@ -246,6 +248,8 @@ export interface ApplicationState {
 	// The label resolver and guild participant inventory are built once from `/api/config` (GotConfig); null/empty until that single load completes. `build` rides the same load: the image's build identifier for the top bar, and stays null when running from source without a baked build-info.json.
 	labelResolver: LabelResolver | null
 	guildParticipants: Participant[]
+	// The per-role accent resolver (see role-accents.js), built from the same config fetch's full role list so a role's hue is stable for the page load and never shifts as roles appear mid-run; accents nothing until the config lands.
+	roleAccents: RoleAccentResolver
 	build: BuildInfo | null
 	flowTier: LabelTier
 	flowViewMode: FlowViewMode
@@ -954,15 +958,17 @@ function DragEndQueueItem(state: ApplicationState): ApplicationState {
 	return state.draggingItemId === null ? state : { ...state, draggingItemId: null }
 }
 
-// The guild config is fetched exactly once on load and never polled, so this action runs a single time. The body is not retained in state; only the derived values the views need are kept — the label resolver the flow/sequence views localize through, the guild participant inventory the sequence view lays out columns from, and the build identifier the top bar stamps (null when the response carries none, e.g. running from source).
+// The guild config is fetched exactly once on load and never polled, so this action runs a single time. The body is not retained in state; only the derived values the views need are kept — the label resolver the flow/sequence views localize through, the guild participant inventory the sequence view lays out columns from, the per-role accent resolver built over that same parse's agent roles (so a role's hue is fixed for the page load), and the build identifier the top bar stamps (null when the response carries none, e.g. running from source).
 function GotConfig(state: ApplicationState, payload: FetchResultPayload): ActionReturn {
 	const ok = payload.ok
 	const body = payload.body
 	if (!ok || !isLabelConfig(body)) return state
+	const participants = guildParticipantsFromConfig(body)
 	return {
 		...state,
 		labelResolver: createLabelResolver(body),
-		guildParticipants: guildParticipantsFromConfig(body),
+		guildParticipants: participants,
+		roleAccents: createRoleAccentResolver(agentRoleNames(participants)),
 		build: buildInfoFromConfig(body),
 	}
 }
@@ -2445,10 +2451,10 @@ function WatchScreen(state: ApplicationState): Vnode {
 	// The roles-only toggle filters the sequence render only (model and static guild set alike, so the tools column collapses with the tool rows); the caption, cost strip, and flow view keep reading the full model — the filter is a lens on this one surface, not a change to the run.
 	const sequenceModel = state.sequenceRolesOnly === true ? rolesOnlyModel(model) : model
 	const sequenceGuildParticipants = state.sequenceRolesOnly === true ? rolesOnlyParticipants(state.guildParticipants) : state.guildParticipants
-	// The sequence view takes the guild's static participant set so every role column appears from the first frame.
+	// The sequence view takes the guild's static participant set so every role column appears from the first frame; both views take the per-role accent resolver so agent nodes carry their role's hue.
 	const stageContent = state.flowViewMode === 'sequence'
-		? h('div', { class: 'pb-sequence-scroll' }, [renderSequenceView(h, sequenceModel, labels, tier, sequenceGuildParticipants)])
-		: renderFlowView(h, model, labels, tier, lifecycle, cta, question, flowColumnTracker)
+		? h('div', { class: 'pb-sequence-scroll' }, [renderSequenceView(h, sequenceModel, labels, tier, state.roleAccents, sequenceGuildParticipants)])
+		: renderFlowView(h, model, labels, tier, state.roleAccents, lifecycle, cta, question, flowColumnTracker)
 
 	const nowCaption = deriveNowCaption(model, labels, tier)
 
@@ -2586,7 +2592,7 @@ function isApplicationState(value: unknown): value is ApplicationState {
 		'queueItems', 'justSubmittedItemId', 'pendingAddSelectionId', 'editingItemId', 'draggingItemId', 'queueAnswerPendingId',
 		'serverAvailable', 'justSubmittedRunId', 'createSending', 'muted', 'shownQuestionIds', 'firstQuestionsPoll', 'pendingAnswerId',
 		'runEffort', 'savingEffort', 'runLogLevel', 'savingLogLevel',
-		'flowModel', 'previousFlowModel', 'labelResolver', 'guildParticipants', 'build',
+		'flowModel', 'previousFlowModel', 'labelResolver', 'guildParticipants', 'roleAccents', 'build',
 		'flowTier', 'flowViewMode', 'sequenceRolesOnly', 'screen', 'historyExpanded', 'continuation',
 		'resumingRunId', 'resumeSending', 'resumeNotice',
 		'questionModalOpen', 'resultModalOpen', 'resultShownForRun', 'interruptModalOpen',
@@ -2632,6 +2638,7 @@ app({
 			previousFlowModel: null,
 			labelResolver: null,
 			guildParticipants: [],
+			roleAccents: createRoleAccentResolver([]),
 			build: null,
 			flowTier: DEFAULT_FLOW_TIER,
 			flowViewMode: 'flow',

@@ -1,5 +1,6 @@
 // Test-only guards that replace non-null assertions and typecasts in the web tests: each throws
 // naming its label, so a failed lookup fails the test with a readable message.
+import type { RoleAccentResolver } from './static/ts/role-accents.js'
 
 export function defined<T>(value: T | undefined, label: string): T {
 	if (value === undefined) throw new Error(`${label} is undefined`)
@@ -16,3 +17,6 @@ export function actionProp(props: Record<string, unknown>, key: string): (state:
 	if (typeof value !== 'function') throw new Error(`prop "${key}" is not a function`)
 	return (...args: unknown[]) => value(...args)
 }
+
+// A resolver that accents nothing — the default view-test fixture, so every existing assertion renders against today's neutral look and only the accent-specific tests opt into a real resolver.
+export const nullRoleAccents: RoleAccentResolver = () => null

@@ -4,6 +4,7 @@
 // The harness imports only its sibling static modules; it touches nothing in the product client (app.js).
 import { activeOperation, activeParticipant, activeStack, callChainOf, fateOf, isPaused, isTerminalStatus, observesOf, rolesOnlyModel, rolesOnlyParticipants, stacksOf } from './interaction-model.js'
 import { createLabelResolver, isLabelTier } from './labels.js'
+import { agentRoleNames, createRoleAccentResolver } from './role-accents.js'
 import { activeAskHumanCall, createColumnTracker, deriveCostStrip, deriveLifecycle, deriveNowCaption, renderFlowView } from './flow-view.js'
 import { renderSequenceView, sequenceActiveRowScrollTop } from './sequence-diagram.js'
 import { createMarkdownRenderer } from './markdown-render.js'
@@ -16,6 +17,7 @@ import { ResultModal } from './result-modal.js'
 import { QuestionModal } from './question-modal.js'
 import type { InteractionModel, Operation, Participant, RunStatus } from './interaction-model.js'
 import type { LabelResolver, LabelTier } from './labels.js'
+import type { RoleAccentResolver } from './role-accents.js'
 import type { TooltipTarget } from './inspector.js'
 import type { OperationDetailsState } from './operation-details.js'
 import type { TerminalResult } from './result-modal.js'
@@ -68,6 +70,9 @@ function isScenarioManifestList(value: unknown): value is DemoScenarioManifest[]
 // The demo harness loads its labels from the same /api/config the product client loads, so a swapped guild re-flavors the harness the same way it re-flavors the run view. The harness is served by the same web server (see server.ts serveStaticPath), so the endpoint is reachable at the page origin.
 let labels: LabelResolver | null = null
 let tier: LabelTier = 'detailed'
+
+// The per-role accent resolver is built once the scenario manifest list lands, over the union of every manifest's participants — the demo's full guild inventory, the analog of the app's /api/config role list — so a role's accent is stable across scenarios and frames. Until then it accents nothing.
+let roleAccents: RoleAccentResolver = createRoleAccentResolver([])
 
 // Frames themselves are not held locally — each is the adapter's output for an event-prefix, fetched on demand from /api/demo/flow/:scenario/:frame so the harness always renders adapter-derived models.
 let scenarios: DemoScenarioManifest[] = []
@@ -592,7 +597,7 @@ function renderFlowViewSvg(): Vnode | null {
 	const lifecycle = diffBase !== null ? deriveLifecycle(diffBase, frame) : undefined
 	const cta = { onclick: openResultModal }
 	const question = { onclick: openQuestionModal }
-	return renderFlowView(domH, frame, labels, tier, lifecycle, cta, question, flowColumnTracker)
+	return renderFlowView(domH, frame, labels, tier, roleAccents, lifecycle, cta, question, flowColumnTracker)
 }
 
 function renderSequenceViewSvg(): Vnode | null {
@@ -602,7 +607,7 @@ function renderSequenceViewSvg(): Vnode | null {
 	// The sequence view lays out a column per guild role plus the special human/tools columns from the first frame; the manifest carries the scenario's full participant set (every participant the run ever produces) so columns appear from frame 0 without peeking at a future frame. The roles-only toggle filters both the frame and the static set through the same shared helpers the product client consumes, so the tools column collapses with the tool rows.
 	const frame = rolesOnlyToggle.checked ? rolesOnlyModel(currentFrame) : currentFrame
 	const guildParticipants = rolesOnlyToggle.checked ? rolesOnlyParticipants(manifest.participants) : manifest.participants
-	return renderSequenceView(domH, frame, labels, tier, guildParticipants)
+	return renderSequenceView(domH, frame, labels, tier, roleAccents, guildParticipants)
 }
 
 // Derives the terminal-result descriptor the modal renders. The demo frames carry no result/error text (the InteractionModel has no result field), so the summary is a fixed honest line keyed off the current frame's terminal status and the error block surfaces only on an error status — enough for the modal to read as a real result affordance without inventing scenario-specific prose. The current frame is terminal whenever the modal opens (openResultModal gates on isTerminalStatus), so its status is the run's terminal status.
@@ -932,6 +937,7 @@ Promise.all([
 		if (!isScenarioManifestList(manifestList)) throw new Error('demo scenario list is not an array of valid scenario manifests')
 		labels = createLabelResolver(config)
 		scenarios = manifestList
+		roleAccents = createRoleAccentResolver(agentRoleNames(manifestList.flatMap((manifest) => manifest.participants)))
 		for (const [index, manifest] of scenarios.entries()) {
 			const option = document.createElement('option')
 			option.value = String(index)

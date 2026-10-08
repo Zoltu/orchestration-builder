@@ -4,7 +4,9 @@ import { activeOperation, activeStack, observesOf, rolesOnlyModel, rolesOnlyPart
 import { createLabelResolver } from './static/ts/labels.js'
 import { labelsModule } from './label-resolver-fixture.js'
 import { scenarios, GUILD_PARTICIPANTS } from './static/ts/scenarios.js'
-import { defined } from './test-fixtures.js'
+import { defined, nullRoleAccents, present } from './test-fixtures.js'
+import { isObject } from './static/ts/guards.js'
+import { createRoleAccentResolver } from './static/ts/role-accents.js'
 
 // Pull the model type off a helper signature so the inline fixtures are contextually checked against the JSDoc shape without a cast, mirroring the sibling flow-view.test.ts convention.
 type InteractionModel = Parameters<typeof observesOf>[0]
@@ -67,13 +69,14 @@ function callOperation(id: string, stack: string, source: string, destination: s
 	return { id, kind: 'call', stack, source, destination, startedAt: 't0', settledAt: null, lifecycle: 'in_flight', outcome: null, metrics: null }
 }
 
-function render(model: InteractionModel, tier: LabelTier = 'detailed'): Vnode {
-	return renderSequenceView(fakeH, model, labelsModule, tier)
+// The default role-accent resolver accents nothing, so every existing assertion renders against today's neutral look; accent-specific tests opt into a real resolver.
+function render(model: InteractionModel, tier: LabelTier = 'detailed', roleAccents: (role: string) => string | null = nullRoleAccents): Vnode {
+	return renderSequenceView(fakeH, model, labelsModule, tier, roleAccents)
 }
 
 // Renders with the demo's static guild participant set so the column-set behavior the demo harness exercises (every guild role column present from frame 0) is asserted against the same data the harness passes.
 function renderWithGuild(model: InteractionModel, tier: LabelTier = 'detailed'): Vnode {
-	return renderSequenceView(fakeH, model, labelsModule, tier, GUILD_PARTICIPANTS)
+	return renderSequenceView(fakeH, model, labelsModule, tier, nullRoleAccents, GUILD_PARTICIPANTS)
 }
 
 function columnRoles(view: Vnode): string[] {
@@ -712,8 +715,8 @@ describe('renderSequenceView — roles-only filter', () => {
 			participant('guild:read_file', 'read_file', 'tool'),
 		]
 		return {
-			full: renderSequenceView(fakeH, model, labelsModule, 'detailed', guild),
-			collapsed: renderSequenceView(fakeH, rolesOnlyModel(model), labelsModule, 'detailed', rolesOnlyParticipants(guild)),
+			full: renderSequenceView(fakeH, model, labelsModule, 'detailed', nullRoleAccents, guild),
+			collapsed: renderSequenceView(fakeH, rolesOnlyModel(model), labelsModule, 'detailed', nullRoleAccents, rolesOnlyParticipants(guild)),
 		}
 	}
 
@@ -750,5 +753,63 @@ describe('sequenceActiveRowScrollTop', () => {
 	test('returns 0 for an empty timeline or an unsized svg', () => {
 		expect(sequenceActiveRowScrollTop(0, 600, 300)).toBe(0)
 		expect(sequenceActiveRowScrollTop(3, 0, 300)).toBe(0)
+	})
+})
+
+// Reads a CSS custom property off a vnode's inline style record, so the accent-seam assertions read the exact custom property the stylesheet's color-mix rules consume (mirrors the sibling flow-view.test.ts helper).
+function styleVar(props: Record<string, unknown>, key: string): string | undefined {
+	const style = props['style']
+	if (!isObject(style)) return undefined
+	const value = style[key]
+	return typeof value === 'string' ? value : undefined
+}
+
+describe('renderSequenceView — per-role accents', () => {
+	// A model with an agent call, an agent return (so both terminal-node ends render on the coder column), and a tool call (so the tools column's violet exclusion is asserted alongside).
+	function accentModel(): InteractionModel {
+		return {
+			participants: [
+				participant('you', 'human', 'human'),
+				participant('coder', 'coder', 'role'),
+				participant('readFile', 'read_file', 'tool'),
+			],
+			operations: [
+				callOperation('op1', 'root', 'you', 'coder'),
+				callOperation('op2', 'root', 'coder', 'readFile'),
+				{ id: 'op3', kind: 'return', stack: 'root', source: 'coder', destination: 'you', startedAt: 't2', settledAt: 't3', lifecycle: 'settled', outcome: 'success', metrics: null },
+			],
+			status: 'running',
+		}
+	}
+
+	test('terminal nodes on an agent column carry the accent var and modifier on both ends', () => {
+		const accents = createRoleAccentResolver(['coder'])
+		const view = render(accentModel(), 'detailed', accents)
+		// The assertions read the resolver's own output rather than a hardcoded hue, so the seam (style var + modifier class) is what is pinned, not a particular color.
+		const destinationNode = defined(terminalNodeForOperationEnd(view, 'op1', 'destination'), 'destinationNode')
+		expect((propString(destinationNode.props, 'class') ?? '').split(' ').includes('seq-node--accented')).toBe(true)
+		expect(propString(destinationNode.props, 'data-column-role')).toBe('coder')
+		expect(styleVar(destinationNode.props, '--node-accent')).toBe(present(accents('coder'), 'the resolver\'s accent for coder'))
+		const sourceNode = defined(terminalNodeForOperationEnd(view, 'op3', 'source'), 'sourceNode')
+		expect((propString(sourceNode.props, 'class') ?? '').split(' ').includes('seq-node--accented')).toBe(true)
+		expect(styleVar(sourceNode.props, '--node-accent')).toBe(present(accents('coder'), 'the resolver\'s accent for coder'))
+	})
+
+	test('a tool column’s terminal nodes keep the violet modifier and never carry the accent', () => {
+		const accents = createRoleAccentResolver(['coder'])
+		const view = render(accentModel(), 'detailed', accents)
+		const toolNode = defined(terminalNodeForOperationEnd(view, 'op2', 'destination'), 'toolNode')
+		expect(propString(toolNode.props, 'data-column-role')).toBe('read_file')
+		expect((propString(toolNode.props, 'class') ?? '').split(' ').includes('seq-node--accented')).toBe(false)
+		expect((propString(toolNode.props, 'class') ?? '').split(' ').includes('seq-node--tool')).toBe(true)
+		expect(styleVar(toolNode.props, '--node-accent')).toBeUndefined()
+	})
+
+	test('a null resolver renders every terminal node exactly the neutral look — no accent classes, no style vars', () => {
+		const view = render(accentModel())
+		for (const group of allByTag(view, 'g')) {
+			expect((propString(group.props, 'class') ?? '').split(' ').includes('seq-node--accented')).toBe(false)
+			expect(styleVar(group.props, '--node-accent')).toBeUndefined()
+		}
 	})
 })

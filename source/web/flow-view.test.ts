@@ -7,7 +7,9 @@ import { labelsModule } from './label-resolver-fixture.js'
 import { scenarios } from './static/ts/scenarios.js'
 import { deriveInteractionModel } from './interaction-model-adapter.js'
 import { NODE_WIDTH } from './static/ts/svg-primitives.js'
-import { defined } from './test-fixtures.js'
+import { defined, nullRoleAccents, present } from './test-fixtures.js'
+import { isObject } from './static/ts/guards.js'
+import { createRoleAccentResolver } from './static/ts/role-accents.js'
 
 // Pull the model type off a helper signature so the inline fixtures are contextually checked against the JSDoc shape without a cast, mirroring the sibling interaction-model.test.ts convention.
 type InteractionModel = Parameters<typeof stacksOf>[0]
@@ -74,9 +76,9 @@ function callOperation(id: string, stack: string, source: string, destination: s
 	return { id, kind: 'call', stack, source, destination, startedAt: 't0', settledAt: null, lifecycle: 'in_flight', outcome: null, metrics: null }
 }
 
-// A fresh column tracker per render keeps every test order-independent: the high-water mark is caller-held state, so tests construct their own rather than sharing a module-level one.
-function render(model: InteractionModel, tier: LabelTier = 'detailed', lifecycle?: ReturnType<typeof deriveLifecycle>): Vnode {
-	return renderFlowView(fakeH, model, labelsModule, tier, lifecycle, undefined, undefined, createColumnTracker())
+// A fresh column tracker per render keeps every test order-independent: the high-water mark is caller-held state, so tests construct their own rather than sharing a module-level one. The default role-accent resolver accents nothing, so every existing assertion renders against today's neutral look; accent-specific tests opt into a real resolver.
+function render(model: InteractionModel, tier: LabelTier = 'detailed', roleAccents: (role: string) => string | null = nullRoleAccents, lifecycle?: ReturnType<typeof deriveLifecycle>): Vnode {
+	return renderFlowView(fakeH, model, labelsModule, tier, roleAccents, lifecycle, undefined, undefined, createColumnTracker())
 }
 
 describe('renderFlowView — row projection', () => {
@@ -543,7 +545,7 @@ describe('deriveLifecycle — frame-diff node lifecycle', () => {
 		const current = scenarioFrame('delegation-chain', 2)
 		const lifecycle = deriveLifecycle(previous, current)
 		expect(lifecycle.enteringIds.has('planner')).toBe(true)
-		const view = render(current, 'detailed', lifecycle)
+		const view = render(current, 'detailed', nullRoleAccents, lifecycle)
 		const flowNodes = allByTag(view, 'g').filter((group) => (propString(group.props, 'class') ?? '').split(' ').includes('flow-node--entering-host'))
 		const plannerEntering = flowNodes.some((group) => propString(group.props, 'data-participant') === 'planner')
 		expect(plannerEntering).toBe(true)
@@ -893,7 +895,7 @@ describe('renderFlowView — agent vs tool node distinction', () => {
 		// The tool departs for its slot; the top bar already carried it (participants populate the strip regardless of rows), so the merge variant applies.
 		const departed = defined(lifecycle.departing.find((entry) => entry.participantId === 'readFile'), 'departed readFile')
 		expect(departed.merged).toBe(true)
-		const view = render(current, 'detailed', lifecycle)
+		const view = render(current, 'detailed', nullRoleAccents, lifecycle)
 		const departingGroups = groupsWithClass(view, 'flow-node--departing')
 		expect(departingGroups.length).toBe(1)
 		const overlayClasses = allByTag(defined(departingGroups[0], 'departingGroups[0]'), 'g').map((group) => propString(group.props, 'class') ?? '')
@@ -1015,6 +1017,112 @@ describe('renderFlowView over the real adapter — the call-metrics seam', () =>
 		const cost = allByTag(defined(coderNode, 'coderNode'), 'text').find((text) => propString(text.props, 'class') === 'graph-node-cost')
 		// The call opened at role_start (t0), so the measured span to now is 11s — rendered as real time; the unreported tokens render nothing.
 		expect(defined(cost, 'cost line').children.join('')).toBe('11s')
+	})
+})
+
+// Reads a CSS custom property off a vnode's inline style record, so the accent-seam assertions read the exact custom property the stylesheet's color-mix rules consume.
+function styleVar(props: Record<string, unknown>, key: string): string | undefined {
+	const style = props['style']
+	if (!isObject(style)) return undefined
+	const value = style[key]
+	return typeof value === 'string' ? value : undefined
+}
+
+describe('renderFlowView — per-role accents', () => {
+	// A frame with an open agent delegation to a tool: coder renders as an agent row node, readFile as a tool row node, and the human root renders alongside.
+	function accentRowModel(): InteractionModel {
+		return {
+			participants: [
+				participant('you', 'human', 'human'),
+				participant('coder', 'coder', 'role'),
+				participant('readFile', 'read_file', 'tool'),
+			],
+			operations: [
+				callOperation('op1', 'root', 'you', 'coder'),
+				callOperation('op2', 'root', 'coder', 'readFile'),
+			],
+			status: 'running',
+		}
+	}
+
+	// The fully settled twin of accentRowModel: every call/return settled, so both role and tool have departed and the top bar carries a slot for each.
+	function accentSlotModel(): InteractionModel {
+		return {
+			participants: [
+				participant('you', 'human', 'human'),
+				participant('coder', 'coder', 'role'),
+				participant('readFile', 'read_file', 'tool'),
+			],
+			operations: [
+				{ id: 'op1', kind: 'call', stack: 'root', source: 'you', destination: 'coder', startedAt: 't0', settledAt: 't1', lifecycle: 'settled', outcome: null, metrics: null },
+				{ id: 'op2', kind: 'call', stack: 'root', source: 'coder', destination: 'readFile', startedAt: 't1', settledAt: 't2', lifecycle: 'settled', outcome: null, metrics: null },
+				{ id: 'op3', kind: 'return', stack: 'root', source: 'readFile', destination: 'coder', startedAt: 't2', settledAt: 't3', lifecycle: 'settled', outcome: 'success', metrics: null },
+				{ id: 'op4', kind: 'return', stack: 'root', source: 'coder', destination: 'you', startedAt: 't3', settledAt: 't4', lifecycle: 'settled', outcome: 'success', metrics: null },
+			],
+			status: 'running',
+		}
+	}
+
+	test('an agent row node carries the accent var and modifier; the tool and human nodes do not', () => {
+		// The assertions read the resolver's own output rather than a hardcoded hue, so the seam (style var + modifier class) is what is pinned, not a particular color.
+		const accents = createRoleAccentResolver(['coder'])
+		const view = render(accentRowModel(), 'detailed', accents)
+		const flowNodes = allByTag(view, 'g').filter((group) => (propString(group.props, 'class') ?? '').split(' ').includes('flow-node'))
+		const coderNode = defined(flowNodes.find((group) => propString(group.props, 'data-participant') === 'coder'), 'coderNode')
+		expect((propString(coderNode.props, 'class') ?? '').split(' ').includes('flow-node--accented')).toBe(true)
+		expect(styleVar(coderNode.props, '--node-accent')).toBe(present(accents('coder'), 'the resolver\'s accent for coder'))
+		const toolNode = defined(flowNodes.find((group) => propString(group.props, 'data-participant') === 'readFile'), 'toolNode')
+		expect((propString(toolNode.props, 'class') ?? '').split(' ').includes('flow-node--accented')).toBe(false)
+		expect(styleVar(toolNode.props, '--node-accent')).toBeUndefined()
+		// The tool's violet kind tint is unchanged: the accent never touches a tool node.
+		const toolInnerClasses = allByTag(toolNode, 'g').map((group) => propString(group.props, 'class') ?? '')
+		expect(toolInnerClasses.some((value) => value.split(' ').includes('graph-node--tool'))).toBe(true)
+		const humanNode = defined(flowNodes.find((group) => propString(group.props, 'data-participant') === 'you'), 'humanNode')
+		expect((propString(humanNode.props, 'class') ?? '').split(' ').includes('flow-node--accented')).toBe(false)
+		expect(styleVar(humanNode.props, '--node-accent')).toBeUndefined()
+	})
+
+	test('an agent role’s top-bar slot carries the accent; a tool slot keeps the violet modifier and an accented slot never carries the tool one', () => {
+		const accents = createRoleAccentResolver(['coder'])
+		const view = render(accentSlotModel(), 'detailed', accents)
+		const slots = groupsWithClass(view, 'flow-small-node')
+		const coderSlot = defined(slots.find((slot) => propString(slot.props, 'data-role') === 'coder'), 'coderSlot')
+		expect((propString(coderSlot.props, 'class') ?? '').split(' ').includes('flow-small-node--accented')).toBe(true)
+		expect(styleVar(coderSlot.props, '--node-accent')).toBe(present(accents('coder'), 'the resolver\'s accent for coder'))
+		const readFileSlot = defined(slots.find((slot) => propString(slot.props, 'data-role') === 'read_file'), 'readFileSlot')
+		expect((propString(readFileSlot.props, 'class') ?? '').split(' ').includes('flow-small-node--accented')).toBe(false)
+		expect((propString(readFileSlot.props, 'class') ?? '').split(' ').includes('flow-small-node--tool')).toBe(true)
+		expect(styleVar(readFileSlot.props, '--node-accent')).toBeUndefined()
+	})
+
+	test('a departing agent node keeps its accent in the departing overlay', () => {
+		// Settling the terminal return departs coder for its slot; the overlay's traveling node must arrive at the strip already wearing the role's color.
+		const accents = createRoleAccentResolver(['coder'])
+		const previous = scenarioFrame('single-role-completion', 2)
+		const current: InteractionModel = {
+			...previous,
+			operations: previous.operations.map((operation) =>
+				operation.id === 'op2'
+					? { ...operation, lifecycle: 'settled', settledAt: operation.settledAt ?? operation.startedAt }
+					: operation,
+			),
+		}
+		const lifecycle = deriveLifecycle(previous, current)
+		const view = render(current, 'detailed', accents, lifecycle)
+		const coderOverlay = defined(groupsWithClass(view, 'flow-node--departing').find((group) => propString(group.props, 'data-participant') === 'coder'), 'coderOverlay')
+		expect((propString(coderOverlay.props, 'class') ?? '').split(' ').includes('flow-node--accented')).toBe(true)
+		expect(styleVar(coderOverlay.props, '--node-accent')).toBe(present(accents('coder'), 'the resolver\'s accent for coder'))
+	})
+
+	test('a null resolver renders every node exactly the neutral look — no accent classes, no style vars', () => {
+		// The default the existing suites render against: a guild the resolver does not know (or a config that has not landed) must leave today's vnodes untouched.
+		const view = render(accentRowModel())
+		for (const group of allByTag(view, 'g')) {
+			const tokens = (propString(group.props, 'class') ?? '').split(' ')
+			expect(tokens.includes('flow-node--accented')).toBe(false)
+			expect(tokens.includes('flow-small-node--accented')).toBe(false)
+			expect(styleVar(group.props, '--node-accent')).toBeUndefined()
+		}
 	})
 })
 
