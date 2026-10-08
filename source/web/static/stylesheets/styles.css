@@ -2811,6 +2811,12 @@ li:last-child {
 	stroke-width: 1;
 }
 
+/* Tool columns' terminal nodes (the seq-node--tool modifier the view stamps from the participant kind — every tool routes to the shared tools column) read apart from agent columns, mirroring the flow view's graph-node--tool and drawing the same --svg-tool-node-* tokens so both views' tints stay one calibrated violet per theme block. Declared BEFORE the status rules so an outcome stroke (success/error/terminated) or the active pulse still wins over the kind tint — kind is identity, status is state. */
+.seq-node--tool .seq-node-box {
+	fill: var(--svg-tool-node-fill);
+	stroke: var(--svg-tool-node-border);
+}
+
 .seq-node--active .seq-node-box {
 	stroke: var(--svg-active-pulse);
 	stroke-width: 2;

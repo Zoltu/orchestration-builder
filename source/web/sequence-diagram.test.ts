@@ -247,6 +247,66 @@ describe('renderSequenceView — message rows', () => {
 	})
 })
 
+describe('renderSequenceView — tool-kind terminal nodes', () => {
+	// One agent leg and one tool leg so the agent, human, and tools columns all carry terminal nodes in one view.
+	function tintModel(): InteractionModel {
+		return {
+			participants: [
+				participant('you', 'human', 'human'),
+				participant('orchestrator', 'orchestrator', 'role'),
+				participant('read_file-1', 'read_file', 'tool'),
+			],
+			operations: [
+				callOperation('op1', 'root', 'you', 'orchestrator'),
+				callOperation('op2', 'root', 'orchestrator', 'read_file-1'),
+				{ id: 'op3', kind: 'return', stack: 'root', source: 'read_file-1', destination: 'orchestrator', startedAt: 't2', settledAt: 't3', lifecycle: 'settled', outcome: 'success', metrics: null },
+				{ id: 'op4', kind: 'return', stack: 'root', source: 'orchestrator', destination: 'you', startedAt: 't3', settledAt: 't4', lifecycle: 'settled', outcome: 'success', metrics: null },
+			],
+			status: 'running',
+		}
+	}
+
+	test("a tool column's terminal nodes carry the tool modifier while agent and human columns' nodes do not", () => {
+		const view = render(tintModel())
+		const toolNode = defined(terminalNodeForOperationEnd(view, 'op2', 'destination'), 'tool destination node')
+		expect(propString(toolNode.props, 'data-column-role')).toBe('read_file')
+		expect((propString(toolNode.props, 'class') ?? '').split(' ')).toContain('seq-node--tool')
+
+		const agentNode = defined(terminalNodeForOperationEnd(view, 'op1', 'destination'), 'agent destination node')
+		expect(propString(agentNode.props, 'data-column-role')).toBe('orchestrator')
+		expect((propString(agentNode.props, 'class') ?? '').split(' ')).not.toContain('seq-node--tool')
+
+		const humanNode = defined(terminalNodeForOperationEnd(view, 'op4', 'destination'), 'human destination node')
+		expect(propString(humanNode.props, 'data-column-role')).toBe('human')
+		expect((propString(humanNode.props, 'class') ?? '').split(' ')).not.toContain('seq-node--tool')
+	})
+
+	test("a tool return's source node carries both the kind tint and the outcome state", () => {
+		// The kind tint is identity and the outcome is state, so both classes ride one node; the stylesheet declares the status stroke after the tint rule so the outcome still colors the node.
+		const view = render(tintModel())
+		const sourceNode = defined(terminalNodeForOperationEnd(view, 'op3', 'source'), 'tool source node')
+		const tokens = (propString(sourceNode.props, 'class') ?? '').split(' ')
+		expect(tokens).toContain('seq-node--tool')
+		expect(tokens).toContain('seq-node--success')
+	})
+
+	test('every tool participant column is tinted and every other column is not across every demo scenario frame', () => {
+		for (const scenario of scenarios) {
+			scenario.frames.forEach((frame, frameIndex) => {
+				const toolRoles = new Set(frame.participants.filter((entry) => entry.kind === 'tool').map((entry) => entry.role))
+				const view = render(frame)
+				for (const node of groupsWithClass(view, 'seq-node')) {
+					const columnRole = propString(node.props, 'data-column-role') ?? ''
+					const tinted = (propString(node.props, 'class') ?? '').split(' ').includes('seq-node--tool')
+					if (tinted !== toolRoles.has(columnRole)) {
+						throw new Error(`${scenario.id} frame ${frameIndex}: terminal node on column "${columnRole}" tint ${tinted} does not match the column's tool membership`)
+					}
+				}
+			})
+		}
+	})
+})
+
 describe('renderSequenceView — same-role cross-instance loopback', () => {
 	test('a call between two instances of one role renders as the loopback path, not a cross-column arrow', () => {
 		// coder-1 delegates to coder-2: both share role 'coder', so source and destination collapse to one column and the message renders the LoopbackEdge U-turn.

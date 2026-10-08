@@ -2,7 +2,7 @@
 //
 // The view is a temporal layout: one column per role (grouped from the model's participants — human always first, then interrupt on first use, then roles in first-appearance order, then a single shared "tools" column that every tool routes to), with each operation drawn as a horizontal message on a vertical time axis whose row index is the operation's position in the timeline. A call/return between two distinct columns is a straight arrow landing on a terminal node on the destination's lifeline; a same-role cross-instance call (source and destination resolve to the same column) is the LoopbackEdge U-turn from svg-primitives so the out/turn/back legs read on a new line rather than as a zero-length arrow. observe renders as a static dashed cross-column line with no arrowhead and no terminal node — it is a reference, never an in-flight call, so it never activates a lifeline. terminate renders the same way as a static red dashed line, plus a single orange dashed marker on the target's lifeline, so a destructive revert likewise never activates the target.
 //
-// Each operation is exactly one row, in chronological order, across every scenario — nothing is dropped or phantom. The model already encodes each operation's lifecycle and outcome, so the static layout reads them directly: a return carries a source node on the callee's lifeline with its outcome color (success/error/terminated) — mirroring the flow view, which colors the returning (callee) node — and a terminated return's source node and incoming arrow carry the distinct warn-toned treatment so a leg abandoned mid-rewind reads as neither success nor failure. The active participant and the in-flight line are read off the model by the animation layer; this module renders the settled structure and carries `data-operation` on every message group so the inspector can resolve an operation's details markdown from the model without the view re-deriving it.
+// Each operation is exactly one row, in chronological order, across every scenario — nothing is dropped or phantom. The model already encodes each operation's lifecycle and outcome, so the static layout reads them directly: a return carries a source node on the callee's lifeline with its outcome color (success/error/terminated) — mirroring the flow view, which colors the returning (callee) node — and a terminated return's source node and incoming arrow carry the distinct warn-toned treatment so a leg abandoned mid-rewind reads as neither success nor failure. The active participant and the in-flight line are read off the model by the animation layer; this module renders the settled structure and carries `data-operation` on every message group so the inspector can resolve an operation's details markdown from the model without the view re-deriving it. Terminal nodes on the shared tools column carry the same violet kind tint the flow view stamps on its tool nodes (`seq-node--tool`, reading the same `--svg-tool-node-*` tokens), so the tool-vs-agent color association reads identically in both views; the status classes still win in the stylesheet.
 //
 // The module is an independent leaf over the model: it imports only its siblings and the vendored `h` type, and touches no external system. It does not import the flow view — the two views are independent leaves over the same model and share no rendering code.
 //
@@ -159,12 +159,13 @@ function arrowMarker(h: H, id: string, className: string): Vnode {
 	])
 }
 
-// A terminal node on a column's lifeline at a message row: a small rounded rect carrying a state class so a settled leg's outcome reads at a glance and the active operation's destination pulses. `end` distinguishes the destination node (where the arrow lands, which pulses when the operation is the active operation) from a return's source node (the callee, which carries the return's outcome color, mirroring the flow view where the returning node is the callee). `data-operation`, `data-node-end`, and `data-column-role` let the inspector locate a node by operation and assert which end and column it landed on.
-function renderTerminalNode(h: H, x: number, y: number, state: string | null, operation: Operation, columnRole: string, end: 'source' | 'destination'): Vnode {
+// A terminal node on a column's lifeline at a message row: a small rounded rect carrying a state class so a settled leg's outcome reads at a glance and the active operation's destination pulses. The node's column is the one its participant routes to (`columnIndexForParticipant`), so the participant's kind is the column's kind and a tool participant's node carries the seq-node--tool tint, mirroring the flow view's graph-node--tool; the state classes are declared after the tint rule in the stylesheet so a status stroke still wins. `end` distinguishes the destination node (where the arrow lands, which pulses when the operation is the active operation) from a return's source node (the callee, which carries the return's outcome color, mirroring the flow view where the returning node is the callee). `data-operation`, `data-node-end`, and `data-column-role` let the inspector locate a node by operation and assert which end and column it landed on.
+function renderTerminalNode(h: H, x: number, y: number, state: string | null, operation: Operation, participant: Participant, end: 'source' | 'destination'): Vnode {
 	const rectX = x - TERMINAL_NODE_WIDTH / 2
 	const classes = ['seq-node']
+	if (participant.kind === 'tool') classes.push('seq-node--tool')
 	if (state !== null) classes.push(`seq-node--${state}`)
-	return h('g', { class: classes.join(' '), [ATTR_OPERATION]: operation.id, 'data-node-end': end, 'data-column-role': columnRole, 'data-state': state === null ? 'neutral' : state }, [
+	return h('g', { class: classes.join(' '), [ATTR_OPERATION]: operation.id, 'data-node-end': end, 'data-column-role': participant.role, 'data-state': state === null ? 'neutral' : state }, [
 		h('rect', { class: 'seq-node-box', x: rectX, y: y - TERMINAL_NODE_HEIGHT / 2, width: TERMINAL_NODE_WIDTH, height: TERMINAL_NODE_HEIGHT, rx: 3 }, []),
 	])
 }
@@ -267,7 +268,7 @@ export function renderSequenceView(h: H, model: InteractionModel, labels: LabelR
 		if (operation.kind === 'terminate') {
 			const d = `M ${sourceX} ${rowY} L ${destinationX} ${rowY}`
 			const path = h('path', { class: messageLineClass(operation, animationState), d, 'data-source-role': sourceParticipant.role, 'data-destination-role': destinationParticipant.role }, [])
-			const targetNode = renderTerminalNode(h, destinationX, rowY, 'terminate-target', operation, destinationParticipant.role, 'destination')
+			const targetNode = renderTerminalNode(h, destinationX, rowY, 'terminate-target', operation, destinationParticipant, 'destination')
 			return h('g', { class: 'seq-message-group', [ATTR_OPERATION]: operation.id, 'data-kind': 'terminate', 'data-routing': 'terminate', 'data-source-role': sourceParticipant.role, 'data-destination-role': destinationParticipant.role, 'data-animation': animationState }, [
 				h('title', {}, [label]),
 				messageHitArea(h, sourceX, destinationX, rowY),
@@ -291,10 +292,10 @@ export function renderSequenceView(h: H, model: InteractionModel, labels: LabelR
 		}
 
 		const isActiveOperation = operation.id === activeOperationId
-		const destinationNode = renderTerminalNode(h, destinationX, rowY, destinationNodeState(isActiveOperation), operation, destinationParticipant.role, 'destination')
+		const destinationNode = renderTerminalNode(h, destinationX, rowY, destinationNodeState(isActiveOperation), operation, destinationParticipant, 'destination')
 		// A return carries a source node on the callee's lifeline with its outcome color; a call has no source node (no outcome to carry), so the destination node alone marks the landing.
 		const sourceState = sourceNodeState(operation)
-		const sourceNode = sourceState === 'none' ? null : renderTerminalNode(h, sourceX, rowY, sourceState === null ? null : sourceState, operation, sourceParticipant.role, 'source')
+		const sourceNode = sourceState === 'none' ? null : renderTerminalNode(h, sourceX, rowY, sourceState === null ? null : sourceState, operation, sourceParticipant, 'source')
 		const nodes = sourceNode === null ? [destinationNode] : [sourceNode, destinationNode]
 
 		return h('g', {
