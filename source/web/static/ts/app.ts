@@ -219,7 +219,7 @@ export interface ApplicationState {
 	selectedRunView: RunView | null
 	selectedRunStatus: RunStatus | null
 	pendingQuestions: ApiQuestion[]
-	// The polled task queue (docs/queueing.md "UI interaction model"), head first. The add-flow's ids: justSubmittedItemId guards a second submit while one is in flight; pendingAddSelectionId is consumed once by the very next queue read to jump to the new run's watch screen when the scheduler dispatched it within the add request.
+	// The polled task queue (docs/queueing.md "UI interaction model"), head first. The add-flow's ids: justSubmittedItemId dedups a second add once the add's response has landed, until the item shows up in the polled queue; pendingAddSelectionId is consumed once by the very next queue read to jump to the new run's watch screen when the scheduler dispatched it within the add request.
 	queueItems: QueueItemLike[]
 	justSubmittedItemId: string | null
 	pendingAddSelectionId: string | null
@@ -229,6 +229,8 @@ export interface ApplicationState {
 	queueAnswerPendingId: string | null
 	serverAvailable: boolean
 	justSubmittedRunId: string | null
+	// The create POST's in-flight flag (a plain queue add, a continuation, a new run, and a re-run each dispatch one): set synchronously when the request leaves and cleared by the create response actions on both the ok and fail paths, so a double click or a second Ctrl+Enter inside the window is a no-op instead of a duplicate. Complements the justSubmitted* ids, whose dedup starts only once a response has landed.
+	createSending: boolean
 	muted: boolean
 	shownQuestionIds: Record<string, boolean>
 	firstQuestionsPoll: boolean
@@ -795,7 +797,7 @@ function GotQueue(state: ApplicationState, payload: FetchResultPayload): Applica
 	const body = payload.body
 	const items: QueueItemLike[] = ok && Array.isArray(body) ? body.filter(isQueueItemLike) : []
 	const nextState = { ...state, queueItems: items, serverAvailable: ok }
-	// The add's in-flight guard releases once the created item shows up in the polled queue — the same release GotRunList applies to justSubmittedRunId; a response that fails or omits the item keeps the guard up.
+	// The add's post-response guard releases once the created item shows up in the polled queue — the same release GotRunList applies to justSubmittedRunId; a response that fails or omits the item keeps the guard up.
 	if (nextState.justSubmittedItemId !== null && items.some((item) => item.id === nextState.justSubmittedItemId)) nextState.justSubmittedItemId = null
 	return nextState
 }
@@ -804,9 +806,10 @@ function GotQueue(state: ApplicationState, payload: FetchResultPayload): Applica
 function GotQueuedTask(state: ApplicationState, payload: FetchResultPayload): ActionReturn {
 	const ok = payload.ok
 	const body = payload.body
-	if (!ok || !isObject(body) || typeof body['id'] !== 'string' || body['id'] === '') return { ...state, serverAvailable: ok }
+	// A refused or unreadable add still ends the in-flight window: the guard releases so the operator can retry.
+	if (!ok || !isObject(body) || typeof body['id'] !== 'string' || body['id'] === '') return { ...state, createSending: false, serverAvailable: ok }
 	return [
-		{ ...state, justSubmittedItemId: body['id'], pendingAddSelectionId: body['id'], serverAvailable: true },
+		{ ...state, justSubmittedItemId: body['id'], pendingAddSelectionId: body['id'], createSending: false, serverAvailable: true },
 		Fetch({ url: 'api/queue', ok: GotQueueAfterAdd, fail: FetchFailed }),
 	]
 }
@@ -1142,7 +1145,7 @@ function TaskTextareaKeydown(state: ApplicationState, event: KeyboardEvent): App
 
 function SubmitRun(state: ApplicationState, event: Event): ActionReturn {
 	event.preventDefault()
-	if (state.justSubmittedItemId !== null || state.justSubmittedRunId !== null || state.resumeSending) return state
+	if (state.createSending || state.justSubmittedItemId !== null || state.justSubmittedRunId !== null || state.resumeSending) return state
 	const target = event.target
 	if (!(target instanceof HTMLFormElement)) return state
 	const textarea = target.querySelector('textarea')
@@ -1167,22 +1170,22 @@ function SubmitRun(state: ApplicationState, event: Event): ActionReturn {
 	// The compose box is the queue's front door (docs/queueing.md "UI interaction model"): a plain add posts to the universal queue and the scheduler dispatches it at once when idle. Only a continuation still needs the run-submission endpoint, whose body is the only one that can carry continuesFrom — so while a run is in flight a continuation stays disabled rather than queueing without its lineage.
 	if (state.continuation === null) {
 		return [
-			state,
+			{ ...state, createSending: true },
 			Fetch({
 				url: 'api/queue',
 				init: { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(buildQueueTaskBody(task, state.runEffort)) },
 				ok: GotQueuedTask,
-				fail: FetchFailed,
+				fail: CreateFailed,
 			}),
 		]
 	}
 	return [
-		state,
+		{ ...state, createSending: true },
 		Fetch({
 			url: 'api/runs',
 			init: { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(buildRunBody(task, state.runEffort, state.runLogLevel, state.continuation)) },
 			ok: GotCreatedRun,
-			fail: FetchFailed,
+			fail: CreateFailed,
 		}),
 	]
 }
@@ -1209,18 +1212,18 @@ function buildResumeBody(note: string): { note?: string } {
 // stopPropagation keeps the click from also triggering the enclosing list entry's select handler; the task is read from the button's data-task attribute so the action stays a stable top-level function (hyperapp passes the DOM event as the payload to a bare-function handler).
 function RerunTask(state: ApplicationState, event: MouseEvent): ActionReturn {
 	event.stopPropagation()
-	if (state.justSubmittedRunId !== null || deriveActiveRunId(state.summaries) !== null) return state
+	if (state.createSending || state.justSubmittedRunId !== null || deriveActiveRunId(state.summaries) !== null) return state
 	const target = event.currentTarget
 	if (!(target instanceof Element)) return state
 	const task = target.getAttribute('data-task')
 	if (typeof task !== 'string' || task === '') return state
 	return [
-		state,
+		{ ...state, createSending: true },
 		Fetch({
 			url: 'api/runs',
 			init: { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(buildRunBody(task, state.runEffort, state.runLogLevel, null)) },
 			ok: GotCreatedRun,
-			fail: FetchFailed,
+			fail: CreateFailed,
 		}),
 	]
 }
@@ -1281,13 +1284,19 @@ function CancelResume(state: ApplicationState): ApplicationState {
 function GotCreatedRun(state: ApplicationState, payload: FetchResultPayload): ActionReturn {
 	const ok = payload.ok
 	const body = payload.body
-	if (!ok || !isObject(body) || typeof body['runId'] !== 'string') return state
+	// A refused or unreadable create still ends the in-flight window: the guard releases so the operator can retry.
+	if (!ok || !isObject(body) || typeof body['runId'] !== 'string') return { ...state, createSending: false }
 	const createdRunId = body['runId']
 	// Selecting the new run activates its per-run subscription; an immediate run-list fetch clears justSubmittedRunId as soon as the run appears. The continuation and the per-run modal/flow state are reset for the same reason SelectRun resets it — the composed run is on the server now, and a leftover chip would brief a stale lineage into the next task. The live partial clears with the rest (the stream subscription follows the new selection).
 	return [
-		{ ...state, screen: 'watch', continuation: null, justSubmittedRunId: createdRunId, selectedRunId: createdRunId, selectedRunView: null, selectedRunStatus: null, flowModel: null, previousFlowModel: null, questionModalOpen: false, resultModalOpen: false, resultShownForRun: null, tooltip: null, planExpanded: false, inspectorModalOpen: false, inspector: initialInspectorState(), livePartial: null, serverAvailable: true },
+		{ ...state, screen: 'watch', continuation: null, justSubmittedRunId: createdRunId, createSending: false, selectedRunId: createdRunId, selectedRunView: null, selectedRunStatus: null, flowModel: null, previousFlowModel: null, questionModalOpen: false, resultModalOpen: false, resultShownForRun: null, tooltip: null, planExpanded: false, inspectorModalOpen: false, inspector: initialInspectorState(), livePartial: null, serverAvailable: true },
 		Fetch({ url: 'api/runs', ok: GotRunList, fail: FetchFailed }),
 	]
+}
+
+// A fail action of the create POST's own rather than the shared FetchFailed: only the create's failure may release the in-flight guard — a poll or config fetch failing must not.
+function CreateFailed(state: ApplicationState): ApplicationState {
+	return { ...state, createSending: false, serverAvailable: false }
 }
 
 // The resume landing: a 201 whose body confirms the SAME run id (the endpoint restarts the errored run in place) hands off exactly like GotCreatedRun — the compose screen's resume mode clears, the resumed run is selected onto the watch screen with the per-run view state reset for the switch, and an immediate run-list fetch shows it as the active run.
@@ -2005,7 +2014,7 @@ function HistoryRowDetails(summary: RunSummary): Vnode {
 }
 
 function HistoryScreen(state: ApplicationState): Vnode {
-	const rerunDisabled = state.justSubmittedRunId !== null || deriveActiveRunId(state.summaries) !== null
+	const rerunDisabled = state.createSending || state.justSubmittedRunId !== null || deriveActiveRunId(state.summaries) !== null
 	return h('section', { id: 'history-screen' }, [
 		h('div', { class: 'history-scroll' }, [
 			state.summaries.length === 0
@@ -2181,9 +2190,9 @@ function composePlaceholder(resuming: boolean, blocked: boolean): string {
 	return resuming ? 'add an optional note for the resumed run (Markdown supported)' : 'describe a task (Markdown supported)'
 }
 
-// The submit button's label tracks the same mode, with an in-flight resume named so the wait reads as progress rather than a dead button.
+// The submit button's label tracks the same mode, with an in-flight resume or create named so the wait reads as progress rather than a dead button.
 function composeSubmitLabel(resuming: boolean, sending: boolean, blocked: boolean): string {
-	if (sending) return 'Resuming…'
+	if (sending) return resuming ? 'Resuming…' : 'Adding…'
 	if (blocked) return 'Run in progress…'
 	return resuming ? 'Resume run' : 'Add task'
 }
@@ -2191,9 +2200,9 @@ function composeSubmitLabel(resuming: boolean, sending: boolean, blocked: boolea
 // The compose screen is the hero when the service is idle — drafting a task is the primary activity when nothing is running, so the editor gets the whole stage. The submit path is the queue's universal add (the scheduler dispatches it at once when the system is idle, so the user-visible behavior of today's "start now" is preserved); in continuation mode the chip rides above the task field and the submit body carries continuesFrom — the only body that can — so a continuation stays disabled while a run is in flight rather than queueing without its lineage. In resume mode the chip names the errored run being restarted and the submit body is the optional note.
 function ComposeScreen(state: ApplicationState): Vnode {
 	const resuming = state.resumingRunId !== null
-	// A continuation and a resume both submit to run-submission endpoints that hold the one-run-at-a-time slot, so either mode disables while a run is in flight (a plain task queues instead); a resume already in flight disables until it lands.
+	// A continuation and a resume both submit to run-submission endpoints that hold the one-run-at-a-time slot, so either mode disables while a run is in flight (a plain task queues instead); a resume or a create already in flight disables until it lands.
 	const blocked = (state.continuation !== null || resuming) && deriveActiveRunId(state.summaries) !== null
-	const disabled = blocked || state.resumeSending
+	const disabled = blocked || state.resumeSending || state.createSending
 	const runEffort = isEffort(state.runEffort) ? state.runEffort : DEFAULT_EFFORT
 	const runLogLevel = isLogLevel(state.runLogLevel) ? state.runLogLevel : DEFAULT_LOG_LEVEL
 	return h('section', { id: 'compose-screen' }, [
@@ -2207,7 +2216,7 @@ function ComposeScreen(state: ApplicationState): Vnode {
 				EffortLevelSelector(runEffort, disabled, state.savingEffort === true),
 				LoggingLevelSelector(runLogLevel, disabled, state.savingLogLevel === true),
 				h('div', { class: 'submit-controls' }, [
-					h('button', { type: 'submit', disabled }, composeSubmitLabel(resuming, state.resumeSending, blocked)),
+					h('button', { type: 'submit', disabled }, composeSubmitLabel(resuming, state.resumeSending || state.createSending, blocked)),
 				]),
 				// A refused resume's notice, under the submit button so the reason sits where the click landed. Gated on resume mode: a response landing after a cancel must not address a plain new-task form.
 				resuming && state.resumeNotice !== null ? h('p', { class: 'resume-notice' }, state.resumeNotice) : null,
@@ -2589,7 +2598,7 @@ function isApplicationState(value: unknown): value is ApplicationState {
 	const stateKeys: (keyof ApplicationState)[] = [
 		'summaries', 'selectedRunId', 'selectedRunView', 'selectedRunStatus', 'pendingQuestions',
 		'queueItems', 'justSubmittedItemId', 'pendingAddSelectionId', 'editingItemId', 'draggingItemId', 'queueAnswerPendingId',
-		'serverAvailable', 'justSubmittedRunId', 'muted', 'shownQuestionIds', 'firstQuestionsPoll', 'pendingAnswerId',
+		'serverAvailable', 'justSubmittedRunId', 'createSending', 'muted', 'shownQuestionIds', 'firstQuestionsPoll', 'pendingAnswerId',
 		'runEffort', 'savingEffort', 'runLogLevel', 'savingLogLevel',
 		'flowModel', 'previousFlowModel', 'labelResolver', 'guildParticipants', 'build',
 		'flowTier', 'flowViewMode', 'sequenceRolesOnly', 'screen', 'historyExpanded', 'continuation',
@@ -2624,6 +2633,7 @@ app({
 			queueAnswerPendingId: null,
 			serverAvailable: true,
 			justSubmittedRunId: null,
+			createSending: false,
 			muted: false,
 			shownQuestionIds: {},
 			firstQuestionsPoll: true,
