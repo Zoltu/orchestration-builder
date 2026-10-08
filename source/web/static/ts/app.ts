@@ -19,6 +19,7 @@ import { deriveTerminalResult, ResultModal } from './result-modal.js'
 import { InspectorModal, INSPECTOR_WINDOW_SIZE, buildTurnIndex, deriveDefaultScopeRoleId, deriveInstanceChain, initialScopeWindow, instancesOf, logWindowUrl, olderPageSpliced, olderTurnsFetch, scopeLoadFetch, scopeViewFor, tailPageAppended, tailRefreshFetch, tailRefreshMustResync, tailWindowOffset } from './inspector-modal.js'
 import { createWireDetails, WIRE_DETAIL_CACHE_LIMIT } from './wire-details.js'
 import { isObject } from './guards.js'
+import { responseBelongsToSelection } from './stale-response.js'
 import { createStreamClient } from './stream-client.js'
 import { activeLivePartial, nextLivePartial, scopedActiveLivePartial } from './live-partial.js'
 import { backlogCount, deriveQueueSections, deriveReorderPosition, isQueueItemLike, queueItemPrimaryText, queueStatusLabel, reorderWaitingItems, taskFirstLine } from './queue-panel.js'
@@ -517,26 +518,29 @@ function onEscapeKey(action: Action<undefined>): [typeof onEscapeKeySubscriber, 
 }
 
 // --- Custom effects --------------------------------------------------------
-// @hyperapp/http is still "planned", so the fetch effecter is hand-written. It parses the body, then dispatches the ok action on a requestAnimationFrame so the dispatch lands in step with hyperapp's repaint cycle (per hyperapp's effects doc); the fail action fires only on a network error, since any HTTP response — even a 4xx/5xx — resolves the ok branch with its status.
+// @hyperapp/http is still "planned", so the fetch effecter is hand-written. It parses the body and dispatches straight from the promise callbacks: hyperapp coalesces renders itself behind its own render lock (../vendor/hyperapp.js), so a microtask dispatch cannot interleave with a render, while a requestAnimationFrame hop would delay every state update a frame and — in a hidden tab, where requestAnimationFrame never fires — strand every completed poll's parsed body in a pending callback until the tab resurfaced. The fail action fires on any network failure, including a dropped connection mid-body (the body read rejects, not the fetch itself); any HTTP response — even a 4xx/5xx — resolves the ok branch with its status.
 
 function runFetch(dispatch: Dispatch, payload: FetchEffectPayload): void {
 	fetch(payload.url, payload.init).then(
 		(response) => {
 			const status = response.status
 			const ok = response.ok
-			response.text().then((text) => {
-				let body: unknown = null
-				if (text.length > 0) {
-					try {
-						body = JSON.parse(text)
-					} catch {
-						body = text
+			response.text().then(
+				(text) => {
+					let body: unknown = null
+					if (text.length > 0) {
+						try {
+							body = JSON.parse(text)
+						} catch {
+							body = text
+						}
 					}
-				}
-				requestAnimationFrame(() => dispatch(payload.ok, { status, ok, body }))
-			})
+					dispatch(payload.ok, { status, ok, body })
+				},
+				() => dispatch(payload.fail),
+			)
 		},
-		() => requestAnimationFrame(() => dispatch(payload.fail)),
+		() => dispatch(payload.fail),
 	)
 }
 
@@ -603,9 +607,9 @@ function PollSelectedRun(state: ApplicationState): ActionReturn {
 	const runId = encodeURIComponent(state.selectedRunId)
 	return [
 		state,
-		Fetch({ url: `api/runs/${runId}`, ok: GotSelectedRun, fail: FetchFailed }),
+		Fetch({ url: `api/runs/${runId}`, ok: GotSelectedRun(state.selectedRunId), fail: FetchFailed }),
 		// The flow model is derived server-side from the full log (the truncated recentLog the run view carries is not enough to reconstruct the active path, lingering legs, or per-invocation costs); the centerpiece reads it off this endpoint rather than re-deriving client-side.
-		Fetch({ url: `api/runs/${runId}/flow`, ok: GotFlowModel, fail: FetchFailed }),
+		Fetch({ url: `api/runs/${runId}/flow`, ok: GotFlowModel(state.selectedRunId), fail: FetchFailed }),
 		// While the inspector modal is open, the same poll also refreshes the log-window tail so in-flight turns appear when they complete (a null effect when closed — hyperapp ignores falsy effects).
 		InspectorTailRefresh(state),
 	]
@@ -646,15 +650,18 @@ function isInteractionModelPayload(value: unknown): value is InteractionModel {
 	return Array.isArray(value['operations']) && value['operations'].every(isOperationRecord)
 }
 
-// The live InteractionModel the flow/sequence views render. The previous frame is kept so `deriveLifecycle` can diff entering/departing nodes; a 404 (the run directory exists but is not yet readable in the instant after submit) clears the model so the centerpiece shows its placeholder until the first readable frame lands. Every path also syncs the scroll followers: the model update grows (or clears) the sequence content after the view patch, and an open inspector modal's body element is replaced where the placeholder transitions to the model (the poll-time sync re-attaches its follower before the next content update can rely on it).
-function GotFlowModel(state: ApplicationState, payload: FetchResultPayload): ActionReturn {
-	const status = payload.status
-	const ok = payload.ok
-	const body = payload.body
-	if (status === 404) return [{ ...state, flowModel: null, previousFlowModel: null, serverAvailable: ok }, SyncSequenceFollower(), SyncInspectorFollower()]
-	if (!ok || body === null || typeof body !== 'object') return [{ ...state, serverAvailable: ok }, SyncSequenceFollower(), SyncInspectorFollower()]
-	if (!isInteractionModelPayload(body)) return [{ ...state, serverAvailable: true }, SyncSequenceFollower(), SyncInspectorFollower()]
-	return [{ ...state, previousFlowModel: state.flowModel, flowModel: body, serverAvailable: true }, SyncSequenceFollower(), SyncInspectorFollower()]
+// The live InteractionModel the flow/sequence views render, scoped to the run the poll fetched it for: the flow payload carries no run id of its own, so the selected run id is curried in when the effect is built (PollSelectedRun) and the response is dropped when it no longer matches the selection at application time — a late frame for run A must not render over run B's stage. The previous frame is kept so `deriveLifecycle` can diff entering/departing nodes; a 404 (the run directory exists but is not yet readable in the instant after submit) clears the model so the centerpiece shows its placeholder until the first readable frame lands. Every path also syncs the scroll followers: the model update grows (or clears) the sequence content after the view patch, and an open inspector modal's body element is replaced where the placeholder transitions to the model (the poll-time sync re-attaches its follower before the next content update can rely on it).
+function GotFlowModel(runId: string) {
+	return function GotFlowModelForRun(state: ApplicationState, payload: FetchResultPayload): ActionReturn {
+		if (!responseBelongsToSelection(runId, state.selectedRunId)) return state
+		const status = payload.status
+		const ok = payload.ok
+		const body = payload.body
+		if (status === 404) return [{ ...state, flowModel: null, previousFlowModel: null, serverAvailable: ok }, SyncSequenceFollower(), SyncInspectorFollower()]
+		if (!ok || body === null || typeof body !== 'object') return [{ ...state, serverAvailable: ok }, SyncSequenceFollower(), SyncInspectorFollower()]
+		if (!isInteractionModelPayload(body)) return [{ ...state, serverAvailable: true }, SyncSequenceFollower(), SyncInspectorFollower()]
+		return [{ ...state, previousFlowModel: state.flowModel, flowModel: body, serverAvailable: true }, SyncSequenceFollower(), SyncInspectorFollower()]
+	}
 }
 
 function GotRunList(state: ApplicationState, payload: FetchResultPayload): ActionReturn {
@@ -706,37 +713,43 @@ function isReadableRunView(value: unknown): value is RunView {
 	return Array.isArray(value['interrupts'])
 }
 
-function GotSelectedRun(state: ApplicationState, payload: FetchResultPayload): ActionReturn {
-	const status = payload.status
-	const ok = payload.ok
-	const body = payload.body
-	if (status === 404) {
-		// The run directory is created early in execution but may not be readable in the instant after submit; the per-run subscription keeps polling until the view appears.
-		return [{ ...state, selectedRunStatus: 'unknown', serverAvailable: ok }, SyncSequenceFollower()]
-	}
-	if (!ok || body === null || !isReadableRunView(body)) return state
-	// The result modal fires once when a run the operator is watching completes (a transition out of a non-terminal status into success/error). Selecting an already-terminal historical run does not auto-open it — the flow view's CTA re-opens it on demand — so `previousStatus === null` (the first read of a selected run) is excluded along with the terminal statuses. A terminal status also clears the live partial: the in-flight turn it streamed is over (see "Live token stream").
-	const previousStatus = state.selectedRunStatus
-	const completedStatus = body.status === 'success' || body.status === 'error' ? body.status : null
-	const isCompletionTransition = completedStatus !== null && previousStatus !== null && previousStatus !== 'success' && previousStatus !== 'error' && previousStatus !== 'needs_clarification'
-	const runId = typeof body.runId === 'string' ? body.runId : state.selectedRunId
-	const resultModalOpen = isCompletionTransition && state.resultShownForRun !== runId ? true : state.resultModalOpen
-	const resultShownForRun = isCompletionTransition ? runId : state.resultShownForRun
-	const interrupts = Array.isArray(body.interrupts) ? body.interrupts : []
-	const shownInterruptAnswerKeys = { ...state.shownInterruptAnswerKeys }
-	let interruptAnswerCard = state.interruptAnswerCard
-	if (previousStatus === null) {
-		for (const key of answeredInquiryKeys(interrupts, runId)) shownInterruptAnswerKeys[key] = true
-	} else {
-		const newAnswer = latestUnshownAnswer(interrupts, runId, shownInterruptAnswerKeys)
-		if (newAnswer !== null) {
-			for (const key of answeredInquiryKeys(interrupts, runId)) shownInterruptAnswerKeys[key] = true
-			interruptAnswerCard = { question: newAnswer.message, answer: newAnswer.answer, role: newAnswer.role }
+function GotSelectedRun(curriedRunId: string) {
+	return function GotSelectedRunForRun(state: ApplicationState, payload: FetchResultPayload): ActionReturn {
+		// A response that does not belong to the currently selected run is dropped wholesale: a late poll frame for the previously selected run would otherwise overwrite this run's view and status — a stale 404 would set 'unknown' so this run's first terminal frame computes a false completion transition and pops the result modal, and a stale terminal status would deactivate the per-run poll and stream subscriptions and freeze the watch screen.
+		// The curried run id is the only identity the 404 body carries, so it guards every branch; on the readable path the body's own runId re-checks the server's answer against the same selection.
+		if (!responseBelongsToSelection(curriedRunId, state.selectedRunId)) return state
+		const status = payload.status
+		const ok = payload.ok
+		const body = payload.body
+		if (status === 404) {
+			// The run directory is created early in execution but may not be readable in the instant after submit; the per-run subscription keeps polling until the view appears.
+			return [{ ...state, selectedRunStatus: 'unknown', serverAvailable: ok }, SyncSequenceFollower()]
 		}
+		if (!ok || body === null || !isReadableRunView(body)) return state
+		if (!responseBelongsToSelection(body.runId, state.selectedRunId)) return state
+		// The result modal fires once when a run the operator is watching completes (a transition out of a non-terminal status into success/error). Selecting an already-terminal historical run does not auto-open it — the flow view's CTA re-opens it on demand — so `previousStatus === null` (the first read of a selected run) is excluded along with the terminal statuses. A terminal status also clears the live partial: the in-flight turn it streamed is over (see "Live token stream").
+		const previousStatus = state.selectedRunStatus
+		const completedStatus = body.status === 'success' || body.status === 'error' ? body.status : null
+		const isCompletionTransition = completedStatus !== null && previousStatus !== null && previousStatus !== 'success' && previousStatus !== 'error' && previousStatus !== 'needs_clarification'
+		const runId = typeof body.runId === 'string' ? body.runId : state.selectedRunId
+		const resultModalOpen = isCompletionTransition && state.resultShownForRun !== runId ? true : state.resultModalOpen
+		const resultShownForRun = isCompletionTransition ? runId : state.resultShownForRun
+		const interrupts = Array.isArray(body.interrupts) ? body.interrupts : []
+		const shownInterruptAnswerKeys = { ...state.shownInterruptAnswerKeys }
+		let interruptAnswerCard = state.interruptAnswerCard
+		if (previousStatus === null) {
+			for (const key of answeredInquiryKeys(interrupts, runId)) shownInterruptAnswerKeys[key] = true
+		} else {
+			const newAnswer = latestUnshownAnswer(interrupts, runId, shownInterruptAnswerKeys)
+			if (newAnswer !== null) {
+				for (const key of answeredInquiryKeys(interrupts, runId)) shownInterruptAnswerKeys[key] = true
+				interruptAnswerCard = { question: newAnswer.message, answer: newAnswer.answer, role: newAnswer.role }
+			}
+		}
+		// A completion transition resets the inspector's scope to auto, so the next open lands on the most recently active instance (here, the finishing one) instead of whatever the operator had scoped to during the run.
+		const inspector = isCompletionTransition ? { ...state.inspector, scopedRoleId: null } : state.inspector
+		return [{ ...state, selectedRunView: body, selectedRunStatus: body.status, resultModalOpen, resultShownForRun, interruptAnswerCard, shownInterruptAnswerKeys, serverAvailable: true, inspector, livePartial: isTerminalStatus(body.status) ? null : state.livePartial }, SyncSequenceFollower()]
 	}
-	// A completion transition resets the inspector's scope to auto, so the next open lands on the most recently active instance (here, the finishing one) instead of whatever the operator had scoped to during the run.
-	const inspector = isCompletionTransition ? { ...state.inspector, scopedRoleId: null } : state.inspector
-	return [{ ...state, selectedRunView: body, selectedRunStatus: body.status, resultModalOpen, resultShownForRun, interruptAnswerCard, shownInterruptAnswerKeys, serverAvailable: true, inspector, livePartial: isTerminalStatus(body.status) ? null : state.livePartial }, SyncSequenceFollower()]
 }
 
 function GotQuestions(state: ApplicationState, payload: FetchResultPayload): ActionReturn {
