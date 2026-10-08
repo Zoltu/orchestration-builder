@@ -32,6 +32,9 @@
 	--svg-success: var(--color-success);
 	--svg-counter-fill: var(--color-accent);
 	--svg-counter-text: #ffffff;
+	/* Tool-kind node colors. The flow view marks tool nodes (a tool call's main-area node, a tool type's top-bar slot) with a violet fill/stroke so tools read apart from agent roles, which keep the neutral node look. Violet is calibrated per theme (there is no surface/accent token to derive from) and sits clear of the status hues — blue accent, green success, red error, yellow warn — and of red/green generally, so the distinction never rides the error/success encoding and stays legible for color-blind operators. */
+	--svg-tool-node-fill: #f5f0fc;
+	--svg-tool-node-border: #8250df;
 	--space-1: 0.25rem;
 	--space-2: 0.5rem;
 	--space-3: 0.75rem;
@@ -78,6 +81,8 @@
 		--svg-success: var(--color-success);
 		--svg-counter-fill: var(--color-accent);
 		--svg-counter-text: #0d1117;
+		--svg-tool-node-fill: rgba(163, 113, 247, 0.14);
+		--svg-tool-node-border: #a371f7;
 	}
 }
 
@@ -113,6 +118,8 @@
 	--svg-success: var(--color-success);
 	--svg-counter-fill: var(--color-accent);
 	--svg-counter-text: #0d1117;
+	--svg-tool-node-fill: rgba(163, 113, 247, 0.14);
+	--svg-tool-node-border: #a371f7;
 }
 
 :root[data-theme='light'] {
@@ -1332,6 +1339,12 @@ li:last-child {
 	font-variant-numeric: tabular-nums;
 }
 
+/* Tool nodes (a tool call's main-area node, via the graph-node--tool modifier the flow view stamps from the participant kind) read apart from agent nodes, which keep the neutral default: a violet fill and border instead of the surface/gray pair. Declared BEFORE the status rules so an outcome stroke (success/error) still wins over the kind tint — kind is identity, status is state. */
+.graph-node--tool .graph-node-box {
+	fill: var(--svg-tool-node-fill);
+	stroke: var(--svg-tool-node-border);
+}
+
 /* Active/success/error states re-stroke the box so the node's status reads at a glance; the active state also pulses so the eye lands on the currently-running role. */
 .graph-node--active .graph-node-box {
 	stroke: var(--svg-active-pulse);
@@ -1490,6 +1503,12 @@ li:last-child {
 	font-size: 11px;
 	font-weight: 600;
 	font-variant-numeric: tabular-nums;
+}
+
+/* A tool type's slot carries the same violet as the main area's tool nodes (the flow-small-node--tool modifier, stamped from the slot's participant kind), so the agent-vs-tool distinction reads in the history strip too. Declared before the error variant so a failed tool slot still turns red. */
+.flow-small-node--tool .flow-small-node-box {
+	fill: var(--svg-tool-node-fill);
+	stroke: var(--svg-tool-node-border);
 }
 
 /* A slot whose run ended in failure: the box border and the count turn red so the failing role's top-bar node reads as errored at a glance. Only the terminal outcome is colored — a slot that errored mid-run but was retried to success stays neutral, because the strip carries the role's aggregate result, not each invocation's. The red is the calibrated --svg-error token (not pure #ff0000) so it reads correctly in both light and dark. */

@@ -335,12 +335,13 @@ function completionReturnFor(model: InteractionModel, participantId: string): Op
 	return rowLookupsOf(model).completionReturnBySource.get(participantId)
 }
 
-// Renders a single top-bar slot as a small square holding its invocation count, with a <title> carrying the label, count, and cumulative metrics for hover. A slot whose run ended in failure turns red so the failing role reads at a glance against an otherwise neutral strip.
+// Renders a single top-bar slot as a small square holding its invocation count, with a <title> carrying the label, count, and cumulative metrics for hover. A slot whose run ended in failure turns red so the failing role reads at a glance against an otherwise neutral strip; a tool-type slot carries the tool modifier so tools read apart from agent roles in the strip too.
 function renderSmallNode(h: H, slot: TopBarSlot, label: string, index: number): Vnode {
 	const pos = topBarPixel(index)
 	const classes = ['flow-small-node']
 	const runErrored = slot.errored
 	if (runErrored) classes.push('flow-small-node--error')
+	if (slot.kind === 'tool') classes.push('flow-small-node--tool')
 	const titleParts = [label, `${slot.invocations} call${slot.invocations === 1 ? '' : 's'}`]
 	if (slot.hasMetrics) {
 		if (slot.totalTime > 0) titleParts.push(`${slot.totalTime}s`)
@@ -384,7 +385,7 @@ function renderRow(h: H, row: RowProjection, rowIndex: number, yOffset: number, 
 		const participant = participantById.get(entry.id)
 		const resolvedLabel = participant !== undefined ? labels.resolveParticipantLabel(participant, tier) : entry.id
 		const sublabel = participant !== undefined && participant.kind !== 'human' && participant.kind !== 'interrupt' ? participant.role : undefined
-		// Cost comes from the participant's incoming call (the callee's own spend); the status stroke comes from the completing return — two different operations, so two different lookups.
+		// Cost comes from the participant's incoming call (the callee's own spend); the status stroke comes from the completing return — two different operations, so two different lookups. The cost line's token figure is the call's lastPromptTokens (the invocation's current context window size), not its cumulative bill.
 		const incoming = callMetricsByDestination(model).get(entry.id)
 		const completion = completionReturnFor(model, entry.id)
 		const status = completion !== undefined ? completion.outcome : undefined
@@ -393,10 +394,11 @@ function renderRow(h: H, row: RowProjection, rowIndex: number, yOffset: number, 
 		const inner = GraphNode(h, {
 			label: resolvedLabel,
 			sublabel,
+			kind: participant !== undefined ? participant.kind : undefined,
 			status: status === 'success' ? 'success' : status === 'error' ? 'error' : undefined,
 			active: entry.id === activeParticipantId,
 			costTime: incoming !== undefined ? incoming.elapsedSeconds : undefined,
-			costTokens: incoming !== undefined ? incoming.tokens : undefined,
+			costContextTokens: incoming !== undefined ? incoming.lastPromptTokens : undefined,
 		})
 		if (enteringIds.has(entry.id)) {
 			return h('g', { class: ['flow-node', 'flow-node--entering-host', isTerminateTarget ? 'flow-node--terminate-target' : null].filter((token) => token !== null).join(' '), transform: translate(pos.x, pos.y), [ATTR_PARTICIPANT]: entry.id, [ATTR_ROLE]: participant !== undefined ? participant.role : '', 'data-kind': participant !== undefined ? participant.kind : '', 'data-lingering': entry.lingering ? 'true' : 'false' }, [
@@ -691,7 +693,7 @@ export function renderFlowView(h: H, model: InteractionModel, labels: LabelResol
 		const participant = participantById.get(entry.participantId)
 		const resolvedLabel = participant !== undefined ? labels.resolveParticipantLabel(participant, tier) : entry.participantId
 		const sublabel = participant !== undefined && participant.kind !== 'human' && participant.kind !== 'interrupt' ? participant.role : undefined
-		// Same split as the row nodes: the cost line reads the incoming call, the status stroke the completing return.
+		// Same split as the row nodes: the cost line reads the incoming call (its lastPromptTokens context figure), the status stroke the completing return.
 		const incoming = callMetricsByDestination(model).get(entry.participantId)
 		const completion = completionReturnFor(model, entry.participantId)
 		const status = completion !== undefined ? completion.outcome : undefined
@@ -702,9 +704,10 @@ export function renderFlowView(h: H, model: InteractionModel, labels: LabelResol
 				GraphNode(h, {
 					label: resolvedLabel,
 					sublabel,
+					kind: participant !== undefined ? participant.kind : undefined,
 					status: status === 'success' ? 'success' : status === 'error' ? 'error' : undefined,
 					costTime: incoming !== undefined ? incoming.elapsedSeconds : undefined,
-					costTokens: incoming !== undefined ? incoming.tokens : undefined,
+					costContextTokens: incoming !== undefined ? incoming.lastPromptTokens : undefined,
 				}),
 			]),
 		])

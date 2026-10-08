@@ -528,9 +528,9 @@ describe('callMetricsByDestination', () => {
 				{ id: 'coder', role: 'coder', kind: 'role' },
 			],
 			operations: [
-				// Two calls into the same participant: the first reported tokens with no cached share, the second reported nothing at all. Tokens/prompt/completion accumulate over their non-null contributions; the cached subset and the second call's unreported counters never read as fabricated zeros.
-				{ id: 'op1', kind: 'call', stack: 'root', source: 'you', destination: 'coder', startedAt: 't0', settledAt: 't1', lifecycle: 'settled', outcome: null, metrics: { tokens: 120, promptTokens: 100, completionTokens: 20, cachedPromptTokens: null, elapsedSeconds: 5 } },
-				{ id: 'op2', kind: 'call', stack: 'root', source: 'you', destination: 'coder', startedAt: 't1', settledAt: null, lifecycle: 'in_flight', outcome: null, metrics: { tokens: null, promptTokens: null, completionTokens: null, cachedPromptTokens: null, elapsedSeconds: 3 } },
+				// Two calls into the same participant: the first reported tokens with no cached share, the second reported nothing at all. Tokens/prompt/completion accumulate over their non-null contributions; the cached subset and the second call's unreported counters never read as fabricated zeros. lastPromptTokens keeps the first call's reported figure — the second call reported nothing, so the latest reported value stands.
+				{ id: 'op1', kind: 'call', stack: 'root', source: 'you', destination: 'coder', startedAt: 't0', settledAt: 't1', lifecycle: 'settled', outcome: null, metrics: { tokens: 120, promptTokens: 100, completionTokens: 20, cachedPromptTokens: null, lastPromptTokens: 100, elapsedSeconds: 5 } },
+				{ id: 'op2', kind: 'call', stack: 'root', source: 'you', destination: 'coder', startedAt: 't1', settledAt: null, lifecycle: 'in_flight', outcome: null, metrics: { tokens: null, promptTokens: null, completionTokens: null, cachedPromptTokens: null, lastPromptTokens: null, elapsedSeconds: 3 } },
 			],
 			status: 'running',
 		}
@@ -539,7 +539,28 @@ describe('callMetricsByDestination', () => {
 		expect(metrics?.promptTokens).toBe(100)
 		expect(metrics?.completionTokens).toBe(20)
 		expect(metrics?.cachedPromptTokens).toBeNull()
+		expect(metrics?.lastPromptTokens).toBe(100)
 		expect(metrics?.elapsedSeconds).toBe(8)
+	})
+
+	test('lastPromptTokens takes the latest reported value across calls — assignment, not a sum', () => {
+		const model: InteractionModel = {
+			participants: [
+				{ id: 'you', role: 'human', kind: 'human' },
+				{ id: 'coder', role: 'coder', kind: 'role' },
+			],
+			operations: [
+				// Hand-authored models may point several calls at one participant (the adapter's calls are instance-per-invocation). The chronologically later call's reported figure wins; a later null never erases it.
+				{ id: 'op1', kind: 'call', stack: 'root', source: 'you', destination: 'coder', startedAt: 't0', settledAt: 't1', lifecycle: 'settled', outcome: null, metrics: { tokens: 120, promptTokens: 100, completionTokens: 20, cachedPromptTokens: null, lastPromptTokens: 100, elapsedSeconds: 5 } },
+				{ id: 'op2', kind: 'call', stack: 'root', source: 'you', destination: 'coder', startedAt: 't1', settledAt: 't2', lifecycle: 'settled', outcome: null, metrics: { tokens: 210, promptTokens: 200, completionTokens: 10, cachedPromptTokens: null, lastPromptTokens: 200, elapsedSeconds: 3 } },
+				{ id: 'op3', kind: 'call', stack: 'root', source: 'you', destination: 'coder', startedAt: 't2', settledAt: null, lifecycle: 'in_flight', outcome: null, metrics: { tokens: null, promptTokens: null, completionTokens: null, cachedPromptTokens: null, lastPromptTokens: null, elapsedSeconds: 1 } },
+			],
+			status: 'running',
+		}
+		const metrics = callMetricsByDestination(model).get('coder')
+		// promptTokens sums (300) — lastPromptTokens reads the latest turn's 200, the destination's current context window size.
+		expect(metrics?.promptTokens).toBe(300)
+		expect(metrics?.lastPromptTokens).toBe(200)
 	})
 
 	test('a participant whose calls carry no metrics is absent from the map, and the result is memoized per model', () => {

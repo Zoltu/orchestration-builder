@@ -108,11 +108,12 @@ interface OpenCallRecord {
 	// Set when the callee's turn began (an llm_call_start for this call's destination role), the precise transit→working boundary — the callee began working the instant the request was dispatched.
 	// Precedes delegatedAt in the finalization below; null on logs that carry no llm_call_start events, where delegatedAt carries the turn-level boundary instead.
 	turnStartedAt: string | null
-	// Token counters start null — nothing has been reported for this invocation yet — and turn numeric with the first folded usage, so a tool call, an ask_human call, or an agent call whose endpoint answered without usage stays null instead of reading as a fabricated zero (the contract the model's OperationMetrics documents). cachedPromptTokens additionally stays null until a usage that reports it folds in.
+	// Token counters start null — nothing has been reported for this invocation yet — and turn numeric with the first folded usage, so a tool call, an ask_human call, or an agent call whose endpoint answered without usage stays null instead of reading as a fabricated zero (the contract the model's OperationMetrics documents). cachedPromptTokens additionally stays null until a usage that reports it folds in. lastPromptTokens is the exception to the accumulate rule: each folded usage overwrites it with that turn's promptTokens, so it carries the invocation's current context window size (the executor's per-role lastPromptTokens), not a sum.
 	tokens: number | null
 	promptTokens: number | null
 	completionTokens: number | null
 	cachedPromptTokens: number | null
+	lastPromptTokens: number | null
 }
 
 interface ReturnRecord {
@@ -236,7 +237,7 @@ function deriveModel(snapshot: RunSnapshot, now: string): DerivedModel {
 		if (top.returnTimestamp === null && top.delegatedAt === null) top.delegatedAt = timestamp
 	}
 
-	// The call's metrics accumulate the callee's work: the innermost open call whose destination role matches the event's role — the role's own invocation (a same-named child delegates deeper, so the innermost match is the child's own call). The token counters turn numeric with the first folded usage (a reported {0, 0} is endpoint data and stays numeric zero); the cached subset survives folds that do not report it.
+	// The call's metrics accumulate the callee's work: the innermost open call whose destination role matches the event's role — the role's own invocation (a same-named child delegates deeper, so the innermost match is the child's own call). The token counters turn numeric with the first folded usage (a reported {0, 0} is endpoint data and stays numeric zero); the cached subset survives folds that do not report it. lastPromptTokens alone assigns rather than accumulates — each fold overwrites it with that turn's prompt size, the invocation's current context window size.
 	function foldUsageIntoOpenCall(role: string, usage: UsageBreakdown): void {
 		const frame = currentFrame()
 		for (let i = frame.openCalls.length - 1; i >= 0; i -= 1) {
@@ -246,6 +247,7 @@ function deriveModel(snapshot: RunSnapshot, now: string): DerivedModel {
 				candidate.tokens = (candidate.tokens ?? 0) + usage.totalTokens
 				candidate.promptTokens = (candidate.promptTokens ?? 0) + usage.promptTokens
 				candidate.completionTokens = (candidate.completionTokens ?? 0) + usage.completionTokens
+				candidate.lastPromptTokens = usage.promptTokens
 				if (usage.cachedPromptTokens !== null) {
 					candidate.cachedPromptTokens = (candidate.cachedPromptTokens ?? 0) + usage.cachedPromptTokens
 				}
@@ -285,6 +287,7 @@ function deriveModel(snapshot: RunSnapshot, now: string): DerivedModel {
 			promptTokens: null,
 			completionTokens: null,
 			cachedPromptTokens: null,
+			lastPromptTokens: null,
 		}
 		frame.openCalls.push(record)
 		allCallRecords.push(record)
@@ -593,7 +596,7 @@ function deriveModel(snapshot: RunSnapshot, now: string): DerivedModel {
 		const elapsed = record.returnTimestamp !== null
 			? secondsBetween(op.startedAt, record.returnTimestamp)
 			: secondsBetween(op.startedAt, now)
-		op.metrics = { tokens: record.tokens, promptTokens: record.promptTokens, completionTokens: record.completionTokens, cachedPromptTokens: record.cachedPromptTokens, elapsedSeconds: elapsed }
+		op.metrics = { tokens: record.tokens, promptTokens: record.promptTokens, completionTokens: record.completionTokens, cachedPromptTokens: record.cachedPromptTokens, lastPromptTokens: record.lastPromptTokens, elapsedSeconds: elapsed }
 	}
 
 	for (const record of allReturnRecords) {

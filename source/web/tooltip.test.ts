@@ -226,9 +226,9 @@ function returnOperation(id: string, source: string, destination: string, outcom
 	return { id, kind: 'return', stack: 'root', source, destination, startedAt: 't0', settledAt: null, lifecycle: 'settled', outcome, metrics }
 }
 
-// Call metrics in the adapter's wire shape: the four reported counters plus the elapsed span. The cached count is a subset of the prompt bill.
+// Call metrics in the adapter's wire shape: the reported counters plus the elapsed span. The cached count is a subset of the prompt bill, and lastPromptTokens mirrors the single-turn fold these fixtures represent (the last turn's prompt size).
 function callMetrics(tokens: number, promptTokens: number, completionTokens: number, cachedPromptTokens: number, elapsedSeconds: number): Operation['metrics'] {
-	return { tokens, promptTokens, completionTokens, cachedPromptTokens, elapsedSeconds }
+	return { tokens, promptTokens, completionTokens, cachedPromptTokens, lastPromptTokens: promptTokens, elapsedSeconds }
 }
 
 // The operation-details lookup state the derivations read (see tooltip.js "On-demand operation
@@ -336,13 +336,15 @@ describe('deriveOperationTooltip', () => {
 })
 
 describe('deriveParticipantTooltip', () => {
-	test('a completed role shows kind, status, and the finish summary (return details preferred over the call task)', () => {
+	test('a completed role shows kind, status, the token breakdown, and the finish summary (return details preferred over the call task)', () => {
 		const model = delegationModel()
 		const result = deriveParticipantTooltip(model, labelsModule, TIER, 'role:coder:1', readyDetails({ op2: 'Implement the feature.', op5: 'Done implementing.' }))
 		const labels = result.sections.map((s) => s.label)
-		expect(labels).toEqual(['kind', 'status', 'summary'])
+		// The tokens section sits above the task/details section (the operator's placement rule), in the format the role aggregate card uses.
+		expect(labels).toEqual(['kind', 'status', 'tokens', 'summary'])
 		expect(defined(result.sections.find((s) => s.label === 'kind'), 'kind section').content).toBe('role')
 		expect(defined(result.sections.find((s) => s.label === 'status'), 'status section').content).toBe('success')
+		expect(defined(result.sections.find((s) => s.label === 'tokens'), 'tokens section').content).toBe('800 \u00b7 input 700 \u00b7 output 100')
 		expect(defined(result.sections.find((s) => s.label === 'summary'), 'summary section').content).toBe('Done implementing.')
 	})
 
@@ -357,10 +359,10 @@ describe('deriveParticipantTooltip', () => {
 		expect(defined(result.sections.find((s) => s.label === 'task'), 'task section').content).toBe('Implement the feature.')
 	})
 
-	test('a completed tool shows kind, status, and the result details', () => {
+	test('a completed tool shows kind, status, the token breakdown, and the result details', () => {
 		const model = delegationModel()
 		const result = deriveParticipantTooltip(model, labelsModule, TIER, 'tool:read_file:1', readyDetails({ op3: '```json\n{"path":"README.md"}\n```', op4: '```json\n{"content":"# Project"}\n```' }))
-		expect(result.sections.map((s) => s.label)).toEqual(['kind', 'status', 'result'])
+		expect(result.sections.map((s) => s.label)).toEqual(['kind', 'status', 'tokens', 'result'])
 		expect(defined(result.sections.find((s) => s.label === 'kind'), 'kind section').content).toBe('tool')
 		expect(defined(result.sections.find((s) => s.label === 'status'), 'status section').content).toBe('success')
 		expect(defined(result.sections.find((s) => s.label === 'result'), 'result section').content).toBe('```json\n{"content":"# Project"}\n```')
@@ -382,7 +384,7 @@ describe('deriveParticipantTooltip', () => {
 	test('a return whose details failed or are absent falls back to the call task', () => {
 		const model = delegationModel()
 		const failedReturn = deriveParticipantTooltip(model, labelsModule, TIER, 'role:coder:1', readyDetails({ op2: 'Implement the feature.', op5: null }))
-		expect(failedReturn.sections.map((s) => s.label)).toEqual(['kind', 'status', 'task'])
+		expect(failedReturn.sections.map((s) => s.label)).toEqual(['kind', 'status', 'tokens', 'task'])
 		expect(defined(failedReturn.sections.find((s) => s.label === 'task'), 'task section').content).toBe('Implement the feature.')
 	})
 
@@ -406,8 +408,33 @@ describe('deriveParticipantTooltip', () => {
 		// The return (op5) is in flight in the lookup, the call (op2) failed: the preferred return
 		// source renders its loading placeholder instead of falling back to the call.
 		const loading = deriveParticipantTooltip(model, labelsModule, TIER, 'role:coder:1', (operationId: string): DetailsState => operationId === 'op5' ? { status: 'loading' } : { status: 'failed' })
-		expect(loading.sections.map((s) => s.label)).toEqual(['kind', 'status', 'summary'])
+		expect(loading.sections.map((s) => s.label)).toEqual(['kind', 'status', 'tokens', 'summary'])
 		expect(defined(loading.sections.find((s) => s.label === 'summary'), 'summary section').content).toBe('loading details…')
+	})
+
+	test('the tokens section formats the k-abbreviated total with the cached subset nested in the input', () => {
+		// The operator's example shape, through the same shared formatter the role aggregate card uses: total 1200 → 1.2k, input 1100 → 1.1k with the cached 200 nested, output 120 plain.
+		const model: InteractionModel = {
+			participants: [participant('human:root', 'human', 'human'), participant('role:coder:1', 'coder', 'role')],
+			operations: [callOperation('op1', 'human:root', 'role:coder:1', callMetrics(1200, 1100, 120, 200, 9))],
+			status: 'running',
+		}
+		const result = deriveParticipantTooltip(model, labelsModule, TIER, 'role:coder:1')
+		expect(result.sections.map((s) => s.label)).toEqual(['kind', 'tokens'])
+		expect(defined(result.sections.find((s) => s.label === 'tokens'), 'tokens section').content).toBe('1.2k \u00b7 input 1.1k (cached 200) \u00b7 output 120')
+	})
+
+	test('a participant whose calls reported no usage carries no tokens section — no fabricated zero, in no position', () => {
+		// The usage-silent agent call: its metrics exist (elapsed is measured) but every token counter is null, so the card skips the section.
+		const silent: InteractionModel = {
+			participants: [participant('human:root', 'human', 'human'), participant('role:coder:1', 'coder', 'role')],
+			operations: [callOperation('op1', 'human:root', 'role:coder:1', { tokens: null, promptTokens: null, completionTokens: null, cachedPromptTokens: null, lastPromptTokens: null, elapsedSeconds: 11 })],
+			status: 'running',
+		}
+		expect(deriveParticipantTooltip(silent, labelsModule, TIER, 'role:coder:1').sections.map((s) => s.label)).toEqual(['kind'])
+		// A participant with no incoming call at all (the run's root human) has no metrics entry either.
+		const model = delegationModel()
+		expect(deriveParticipantTooltip(model, labelsModule, TIER, 'human:root').sections.map((s) => s.label)).toEqual(['kind'])
 	})
 
 	test('an unknown participant id yields an empty title-only result', () => {

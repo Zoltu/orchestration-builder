@@ -18,7 +18,7 @@ import { createOperationDetails } from './operation-details.js'
 import { deriveTerminalResult, ResultModal } from './result-modal.js'
 import { InspectorModal, INSPECTOR_WINDOW_SIZE, buildTurnIndex, deriveDefaultScopeRoleId, deriveInstanceChain, initialScopeWindow, instancesOf, logWindowUrl, olderPageSpliced, olderTurnsFetch, scopeLoadFetch, scopeViewFor, tailPageAppended, tailRefreshFetch, tailRefreshMustResync, tailWindowOffset } from './inspector-modal.js'
 import { createWireDetails, WIRE_DETAIL_CACHE_LIMIT } from './wire-details.js'
-import { isObject } from './guards.js'
+import { isObject, isOperationMetricsRecord } from './guards.js'
 import { responseBelongsToSelection } from './stale-response.js'
 import { createStreamClient } from './stream-client.js'
 import { activeLivePartial, nextLivePartial, scopedActiveLivePartial } from './live-partial.js'
@@ -617,23 +617,9 @@ function PollSelectedRun(state: ApplicationState): ActionReturn {
 	]
 }
 
-// The flow model's ingress guard: the fields the flow/sequence views read off the model, element-checked like the demo harness's adapter guard, so a malformed frame falls to the placeholder branch instead of surfacing undefined reads deep in a render.
+// The flow model's ingress guard: the fields the flow/sequence views read off the model, element-checked like the demo harness's adapter guard, so a malformed frame falls to the placeholder branch instead of surfacing undefined reads deep in a render. The metrics record check (isOperationMetricsRecord) is the shared guard in guards.js, so both wire ingress points validate the same counter set.
 function isParticipantRecord(value: unknown): value is Participant {
 	return isObject(value) && typeof value['id'] === 'string' && typeof value['role'] === 'string' && typeof value['kind'] === 'string'
-}
-
-// The metric counters a call operation's metrics carry, each nullable (an unreported counter is null, never a fabricated zero).
-const METRIC_COUNTERS: readonly string[] = ['tokens', 'promptTokens', 'completionTokens', 'cachedPromptTokens', 'elapsedSeconds']
-
-function isOperationMetricsRecord(value: unknown): boolean {
-	if (!isObject(value)) return false
-	for (const key of METRIC_COUNTERS) {
-		const counter = value[key]
-		if (counter === null) continue
-		// Finite or nothing: a NaN/Infinity counter would poison every sum it touched (the cost strip, the top-bar totals).
-		if (typeof counter !== 'number' || !Number.isFinite(counter)) return false
-	}
-	return true
 }
 
 function isOperationRecord(value: unknown): value is Operation {

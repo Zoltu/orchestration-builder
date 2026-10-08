@@ -42,6 +42,8 @@ export interface OperationMetrics {
 	completionTokens: number | null
 	// The prompt share the endpoint served from its prompt cache — a subset of promptTokens, never an additive bucket. Null until a usage that reports it folds in (the backend omits the field when unreported).
 	cachedPromptTokens: number | null
+	// The invocation's current context window size: the LAST LLM turn's promptTokens, overwriting on every folded usage — an assignment, not a sum, matching the executor's per-role lastPromptTokens (source/executor/engine.ts). Null under the same never-reported rule as the counters above.
+	lastPromptTokens: number | null
 	// Call start → matching return, or → now while the invocation is still open. Always measured: real time, never a fabricated value (null only on hand-authored models that carry no metrics).
 	elapsedSeconds: number | null
 }
@@ -280,7 +282,7 @@ export function callChainOf(model: InteractionModel, stackId: string): Operation
 	return chain.slice()
 }
 
-// Sums the per-call metrics by destination participant id — the callee's own cost for each invocation. The backend adapter attaches metrics to call operations only (a call's metrics accumulate its destination's LLM spend while the call is open, discarded retry attempts included) and carries none on returns, so every per-participant cost read — flow-node cost lines, the top-bar strip, the role tooltips — reads the incoming call, never the return, and a read that pairs both would double count. Each adapter call targets a distinct participant instance (instance-per-invocation), so the map holds one entry per participant in practice; the sum keeps hand-authored models that point several calls at one participant honest. Each counter sums its non-null contributions and stays null when no call reported that counter.
+// Sums the per-call metrics by destination participant id — the callee's own cost for each invocation. The backend adapter attaches metrics to call operations only (a call's metrics accumulate its destination's LLM spend while the call is open, discarded retry attempts included) and carries none on returns, so every per-participant cost read — flow-node cost lines, the top-bar strip, the role tooltips — reads the incoming call, never the return, and a read that pairs both would double count. Each adapter call targets a distinct participant instance (instance-per-invocation), so the map holds one entry per participant in practice; the sum keeps hand-authored models that point several calls at one participant honest. Each counter sums its non-null contributions and stays null when no call reported that counter — except lastPromptTokens, whose assignment semantics take the latest reported value (the destination's current context window size), never a sum.
 export function callMetricsByDestination(model: InteractionModel): Map<string, OperationMetrics> {
 	const derived = derivedOf(model)
 	if (derived.callMetrics !== undefined) return derived.callMetrics
@@ -295,6 +297,7 @@ export function callMetricsByDestination(model: InteractionModel): Map<string, O
 			promptTokens: sumCounter(accumulated?.promptTokens, contribution.promptTokens),
 			completionTokens: sumCounter(accumulated?.completionTokens, contribution.completionTokens),
 			cachedPromptTokens: sumCounter(accumulated?.cachedPromptTokens, contribution.cachedPromptTokens),
+			lastPromptTokens: latestCounter(accumulated?.lastPromptTokens, contribution.lastPromptTokens),
 			elapsedSeconds: sumCounter(accumulated?.elapsedSeconds, contribution.elapsedSeconds),
 		})
 	}
@@ -305,6 +308,12 @@ export function callMetricsByDestination(model: InteractionModel): Map<string, O
 function sumCounter(accumulated: number | null | undefined, contribution: number | null): number | null {
 	if (contribution === null) return accumulated ?? null
 	return (accumulated ?? 0) + contribution
+}
+
+// The assignment counterpart of sumCounter for lastPromptTokens: operations fold in chronological order, so a reported contribution overwrites whatever earlier calls reported and a null contribution leaves the latest reported value standing.
+function latestCounter(accumulated: number | null | undefined, contribution: number | null): number | null {
+	if (contribution !== null) return contribution
+	return accumulated ?? null
 }
 
 // True when the stack is not the active stack and still carries open calls. A paused stack's in-flight operations stay in flight (the model never flips lifecycle on pause); this helper is the rule the view reads to freeze a paused stack's lines without touching the model.

@@ -286,7 +286,27 @@ describe('deriveInteractionModel — per-invocation metrics', () => {
 		expect(call.metrics?.promptTokens).toBe(100)
 		expect(call.metrics?.completionTokens).toBe(20)
 		expect(call.metrics?.cachedPromptTokens).toBe(40)
+		expect(call.metrics?.lastPromptTokens).toBe(100)
 		expect(call.metrics?.elapsedSeconds).toBe(6)
+		assertHelpersSensible(model)
+	})
+
+	test('lastPromptTokens assigns the last turn’s prompt size while the bill counters sum — the current-context-window contract', () => {
+		const events = [
+			event('2026-01-01T00:00:00.000Z', 'role_start', { role: 'coder', depth: 0, task: 'work' }),
+			event('2026-01-01T00:00:01.000Z', 'llm_call', { role: 'coder', usage: { promptTokens: 100, completionTokens: 20, totalTokens: 120, cachedPromptTokens: 40 } }),
+			event('2026-01-01T00:00:02.000Z', 'llm_call', { role: 'coder', usage: { promptTokens: 200, completionTokens: 10, totalTokens: 210, cachedPromptTokens: 0 } }),
+		]
+		const model = deriveInteractionModel(snapshot(events, meta('running')), NOW)
+		const call = defined(model.operations[0], 'model.operations[0]')
+		// Assignment semantics: the invocation's current context window size is the LAST turn's 200, never the 300 prompt sum.
+		expect(call.metrics?.lastPromptTokens).toBe(200)
+		// The spend counters keep accumulating: 330 total, 300 prompt, 30 completion.
+		expect(call.metrics?.tokens).toBe(330)
+		expect(call.metrics?.promptTokens).toBe(300)
+		expect(call.metrics?.completionTokens).toBe(30)
+		// The cached subset still sums its reported figures — 40 from the first turn plus the second turn's reported 0.
+		expect(call.metrics?.cachedPromptTokens).toBe(40)
 		assertHelpersSensible(model)
 	})
 
@@ -305,6 +325,8 @@ describe('deriveInteractionModel — per-invocation metrics', () => {
 		expect(call.metrics?.promptTokens).toBe(190)
 		expect(call.metrics?.completionTokens).toBe(30)
 		expect(call.metrics?.cachedPromptTokens).toBe(40)
+		// The discarded attempt's 90-token prompt is superseded: the context figure reads the final attempt's 100.
+		expect(call.metrics?.lastPromptTokens).toBe(100)
 		assertHelpersSensible(model)
 	})
 
@@ -336,6 +358,7 @@ describe('deriveInteractionModel — per-invocation metrics', () => {
 		expect(toolCall.metrics?.promptTokens).toBeNull()
 		expect(toolCall.metrics?.completionTokens).toBeNull()
 		expect(toolCall.metrics?.cachedPromptTokens).toBeNull()
+		expect(toolCall.metrics?.lastPromptTokens).toBeNull()
 		expect(toolCall.metrics?.elapsedSeconds).toBe(10)
 		assertHelpersSensible(model)
 	})
@@ -351,6 +374,7 @@ describe('deriveInteractionModel — per-invocation metrics', () => {
 		expect(call.metrics?.promptTokens).toBeNull()
 		expect(call.metrics?.completionTokens).toBeNull()
 		expect(call.metrics?.cachedPromptTokens).toBeNull()
+		expect(call.metrics?.lastPromptTokens).toBeNull()
 		// The call opened at role_start (t0), so the measured span to now is 11s.
 		expect(call.metrics?.elapsedSeconds).toBe(11)
 		assertHelpersSensible(model)
@@ -366,6 +390,8 @@ describe('deriveInteractionModel — per-invocation metrics', () => {
 		expect(call.metrics?.tokens).toBe(0)
 		expect(call.metrics?.promptTokens).toBe(0)
 		expect(call.metrics?.completionTokens).toBe(0)
+		// A reported zero is the context window size the endpoint measured, so it folds in as a numeric zero too.
+		expect(call.metrics?.lastPromptTokens).toBe(0)
 		// The usage object did not report a cached share, so the cached subset stays null even though the other counters turned numeric.
 		expect(call.metrics?.cachedPromptTokens).toBeNull()
 		assertHelpersSensible(model)

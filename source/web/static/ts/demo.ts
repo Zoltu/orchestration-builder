@@ -9,7 +9,7 @@ import { renderSequenceView, sequenceActiveRowScrollTop } from './sequence-diagr
 import { createMarkdownRenderer } from './markdown-render.js'
 import { createTooltipDismiss, deriveTooltipDescriptor, isInFlightAskHuman, resolveTooltipTarget } from './inspector.js'
 import { createOperationDetails } from './operation-details.js'
-import { isObject } from './guards.js'
+import { isObject, isOperationMetricsRecord } from './guards.js'
 import { operationIdsForTooltipDetails, Tooltip, tooltipStyle } from './tooltip.js'
 import { copyRawToClipboard } from './clipboard.js'
 import { ResultModal } from './result-modal.js'
@@ -32,23 +32,9 @@ interface DemoScenarioManifest {
 	participants: Participant[]
 }
 
-// The demo endpoints are first-party, but types never validate what arrives over the wire: these guards check the fields the harness itself reads (id/role/kind on participants; the lifecycle fields on operations) so a malformed body fails fast with a readable message instead of surfacing as undefined reads deep in a render. Fields only the checked view modules read stay to those modules' contract.
+// The demo endpoints are first-party, but types never validate what arrives over the wire: these guards check the fields the harness itself reads (id/role/kind on participants; the lifecycle fields on operations) so a malformed body fails fast with a readable message instead of surfacing as undefined reads deep in a render. Fields only the checked view modules read stay to those modules' contract. The metrics record check (isOperationMetricsRecord) is the shared guard in guards.js, so both wire ingress points validate the same counter set.
 function isParticipantRecord(value: unknown): value is Participant {
 	return isObject(value) && typeof value['id'] === 'string' && typeof value['role'] === 'string' && typeof value['kind'] === 'string'
-}
-
-// The metric counters a call operation's metrics carry, each nullable (an unreported counter is null, never a fabricated zero).
-const METRIC_COUNTERS: readonly string[] = ['tokens', 'promptTokens', 'completionTokens', 'cachedPromptTokens', 'elapsedSeconds']
-
-function isOperationMetricsRecord(value: unknown): boolean {
-	if (!isObject(value)) return false
-	for (const key of METRIC_COUNTERS) {
-		const counter = value[key]
-		if (counter === null) continue
-		// Finite or nothing: a NaN/Infinity counter would poison every sum it touched (the cost strip, the top-bar totals).
-		if (typeof counter !== 'number' || !Number.isFinite(counter)) return false
-	}
-	return true
 }
 
 function isOperationRecord(value: unknown): value is Operation {

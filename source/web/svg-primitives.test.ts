@@ -104,6 +104,17 @@ describe('GraphNode', () => {
 		expect(classTokens(graphNode({ label: 'n', status: 'terminated' }))).toEqual(['graph-node'])
 	})
 
+	test("the tool kind applies the tool modifier, and an agent's plain look is the default", () => {
+		// The kind modifier is the agent-vs-tool distinction the stylesheet colors: tools get the violet box, agents (kind 'role') and pseudo-roles stay neutral.
+		expect(classTokens(graphNode({ label: 'n', kind: 'tool' }))).toEqual(['graph-node', 'graph-node--tool'])
+		expect(classTokens(graphNode({ label: 'n', kind: 'role' }))).toEqual(['graph-node'])
+		expect(classTokens(graphNode({ label: 'n', kind: 'human' }))).toEqual(['graph-node'])
+		expect(classTokens(graphNode({ label: 'n', kind: 'interrupt' }))).toEqual(['graph-node'])
+		expect(classTokens(graphNode({ label: 'n' }))).toEqual(['graph-node'])
+		// The kind modifier composes with the status and active classes.
+		expect(classTokens(graphNode({ label: 'n', kind: 'tool', status: 'success' }))).toEqual(['graph-node', 'graph-node--tool', 'graph-node--success'])
+	})
+
 	test('the active class is applied only to a strictly-boolean true', () => {
 		expect(classTokens(graphNode({ label: 'n', active: true }))).toEqual(['graph-node', 'graph-node--active'])
 		expect(classTokens(graphNode({ label: 'n' }))).toEqual(['graph-node'])
@@ -201,37 +212,37 @@ describe('LoopbackEdge', () => {
 })
 
 describe('the cost formatters (through the GraphNode cost line)', () => {
-	test('a node with no time and no tokens renders no cost line', () => {
-		for (const props of [{}, { costTime: undefined, costTokens: null }, { costTime: null, costTokens: undefined }]) {
+	test('a node with no time and no context figure renders no cost line', () => {
+		for (const props of [{}, { costTime: undefined, costContextTokens: null }, { costTime: null, costContextTokens: undefined }]) {
 			expect(costTextOf(graphNode({ label: 'n', ...props }))).toBeUndefined()
 		}
 	})
 
 	test('a zero on either part still renders — zero is a measurement, not an absence', () => {
 		expect(costTextOf(graphNode({ label: 'n', costTime: 0 }))).toBe('0s')
-		expect(costTextOf(graphNode({ label: 'n', costTokens: 0 }))).toBe('0 tok')
+		expect(costTextOf(graphNode({ label: 'n', costContextTokens: 0 }))).toBe('0 ctx')
 	})
 
-	test('a null token count renders no token part while a measured zero time still renders', () => {
-		// The lingering-tool shape: elapsed is measured (a real 0s), but tokens were never reported, so no token part may fabricate a 0 tok.
-		expect(costTextOf(graphNode({ label: 'n', costTime: 0, costTokens: null }))).toBe('0s')
-		expect(costTextOf(graphNode({ label: 'n', costTime: 1.5, costTokens: null }))).toBe('1.5s')
+	test('a null context figure renders no context part while a measured zero time still renders', () => {
+		// The usage-silent shape: elapsed is measured (a real 0s), but no usage ever folded in, so no context part may fabricate a 0 ctx.
+		expect(costTextOf(graphNode({ label: 'n', costTime: 0, costContextTokens: null }))).toBe('0s')
+		expect(costTextOf(graphNode({ label: 'n', costTime: 1.5, costContextTokens: null }))).toBe('1.5s')
 	})
 
-	test('token counts below 1000 render as the raw number', () => {
-		expect(costTextOf(graphNode({ label: 'n', costTokens: 999 }))).toBe('999 tok')
+	test('context figures below 1000 render as the raw number', () => {
+		expect(costTextOf(graphNode({ label: 'n', costContextTokens: 999 }))).toBe('999 ctx')
 	})
 
-	test('token counts from 1000 up render in k with one decimal, and no larger unit exists', () => {
-		expect(costTextOf(graphNode({ label: 'n', costTokens: 1000 }))).toBe('1k tok')
-		expect(costTextOf(graphNode({ label: 'n', costTokens: 1234 }))).toBe('1.2k tok')
-		expect(costTextOf(graphNode({ label: 'n', costTokens: 262144 }))).toBe('262.1k tok')
-		expect(costTextOf(graphNode({ label: 'n', costTokens: 1000000 }))).toBe('1000k tok')
+	test('context figures from 1000 up render in k with one decimal, and no larger unit exists', () => {
+		expect(costTextOf(graphNode({ label: 'n', costContextTokens: 1000 }))).toBe('1k ctx')
+		expect(costTextOf(graphNode({ label: 'n', costContextTokens: 1234 }))).toBe('1.2k ctx')
+		expect(costTextOf(graphNode({ label: 'n', costContextTokens: 262144 }))).toBe('262.1k ctx')
+		expect(costTextOf(graphNode({ label: 'n', costContextTokens: 1000000 }))).toBe('1000k ctx')
 	})
 
 	test('both parts join on one line with a middle dot, time first', () => {
-		expect(costTextOf(graphNode({ label: 'n', costTime: 1.5, costTokens: 1234 }))).toBe('1.5s · 1.2k tok')
-		expect(costTextOf(graphNode({ label: 'n', costTime: 12, costTokens: 999 }))).toBe('12s · 999 tok')
+		expect(costTextOf(graphNode({ label: 'n', costTime: 1.5, costContextTokens: 1234 }))).toBe('1.5s · 1.2k ctx')
+		expect(costTextOf(graphNode({ label: 'n', costTime: 12, costContextTokens: 999 }))).toBe('12s · 999 ctx')
 	})
 
 	test('the cost line is centered at the bottom of the box', () => {

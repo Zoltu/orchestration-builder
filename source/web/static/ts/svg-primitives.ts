@@ -33,19 +33,21 @@ export function nodeAnchor(x: number, y: number, side: string): Anchor {
 	}
 }
 
-// A graph node: a <g> with its box, a centered label, an optional sublabel, an optional invocation counter badge, and an optional cost line. status ('success' | 'error') applies the existing static stroke classes so a settled node's outcome reads at a glance; active (the destination of the latest operation in the active stack) applies the pulsing stroke class so the eye lands on the current-flow recipient. A 'terminated' return outcome does NOT color the node — the node was killed externally (it did not succeed or fail), so the warn-toned rendering lives on the return line only, and the orange border comes exclusively from a terminate op targeting the node (flow-node--terminate-target). Internal layout only; the caller applies the translate.
+// A graph node: a <g> with its box, a centered label, an optional sublabel, an optional invocation counter badge, and an optional cost line. status ('success' | 'error') applies the existing static stroke classes so a settled node's outcome reads at a glance; active (the destination of the latest operation in the active stack) applies the pulsing stroke class so the eye lands on the current-flow recipient; kind 'tool' applies the tool modifier class so a tool call's node reads apart from an agent's (agents keep the neutral default). A 'terminated' return outcome does NOT color the node — the node was killed externally (it did not succeed or fail), so the warn-toned rendering lives on the return line only, and the orange border comes exclusively from a terminate op targeting the node (flow-node--terminate-target). Internal layout only; the caller applies the translate.
 export function GraphNode(h: H, props: Record<string, unknown>): Vnode {
 	const label = props['label']
 	if (typeof label !== 'string') throw new Error('GraphNode: label must be a string')
 	const sublabel = props['sublabel']
 	const counter = props['counter']
 	const costTime = props['costTime']
-	const costTokens = props['costTokens']
+	const costContextTokens = props['costContextTokens']
 	const status = props['status']
+	const kind = props['kind']
 	const active = props['active'] === true
 
 	const classes = ['graph-node']
 	if (active) classes.push('graph-node--active')
+	if (kind === 'tool') classes.push('graph-node--tool')
 	if (status === 'success') classes.push('graph-node--success')
 	if (status === 'error') classes.push('graph-node--error')
 
@@ -63,7 +65,7 @@ export function GraphNode(h: H, props: Record<string, unknown>): Vnode {
 		children.push(h('text', { class: 'graph-node-counter-text', x: NODE_WIDTH - 19, y: 17, 'text-anchor': 'middle' }, [String(counter)]))
 	}
 
-	const costText = formatCost(costTime, costTokens)
+	const costText = formatCost(costTime, costContextTokens)
 	if (costText !== null) {
 		children.push(h('text', { class: 'graph-node-cost', x: NODE_WIDTH / 2, y: NODE_HEIGHT - 6, 'text-anchor': 'middle' }, [costText]))
 	}
@@ -71,11 +73,11 @@ export function GraphNode(h: H, props: Record<string, unknown>): Vnode {
 	return h('g', { class: classes.join(' ') }, children)
 }
 
-// The cost line stays a compact time · tokens pair: the cached-prompt subset is a hover-level detail (the top-bar <title> notes it, the tooltip cards carry the full split), not something that fits a node's one-line cost readout.
-function formatCost(costTime: unknown, costTokens: unknown): string | null {
+// The cost line stays a compact time · context pair. The context figure is the invocation's current context window size (the last LLM turn's prompt size — the executor's lastPromptTokens), not the invocation's cumulative token bill: what an operator watching a live node needs is how full the callee's context window is. The cached-prompt subset and the full input/output split stay hover-level details (the top-bar <title> notes the cumulative totals, the tooltip cards carry the breakdown), not something that fits a node's one-line cost readout.
+function formatCost(costTime: unknown, costContextTokens: unknown): string | null {
 	const parts: string[] = []
 	if (costTime !== undefined && costTime !== null) parts.push(`${costTime}s`)
-	if (costTokens !== undefined && costTokens !== null) parts.push(`${formatTokens(costTokens)} tok`)
+	if (costContextTokens !== undefined && costContextTokens !== null) parts.push(`${formatTokens(costContextTokens)} ctx`)
 	if (parts.length === 0) return null
 	return parts.join(' \u00b7 ')
 }

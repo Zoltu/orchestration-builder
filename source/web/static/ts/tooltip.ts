@@ -267,6 +267,11 @@ export function deriveParticipantTooltip(model: InteractionModel, labels: LabelR
 	if (completionReturn !== undefined && completionReturn.outcome !== null) {
 		sections.push(scalarSection('status', completionReturn.outcome))
 	}
+	// The token breakdown sits above the task/details section, from the same per-destination call metrics the flow view's cost line reads (callMetricsByDestination — no second lookup). It is formatted exactly like the role aggregate card's tokens row, but scoped to this invocation's instances: the cumulative spend with the input/cached/output split. A participant whose calls reported no usage carries no section (null, never a fabricated zero); a measured zero reads as a plain '0'.
+	const metrics = callMetricsByDestination(model).get(participantId)
+	if (metrics !== undefined && metrics.tokens !== null) {
+		sections.push(scalarSection('tokens', tokenBreakdownText(metrics.tokens, metrics.promptTokens, metrics.cachedPromptTokens, metrics.completionTokens)))
+	}
 	// A human answerer's relevant detail is the question (its incoming ask_human call), not the
 	// answer (its return) — the operator re-reads the question on hover, and the answer is already
 	// the live question history. For every other kind the completing return's details (the result
@@ -348,12 +353,12 @@ function aggregateRole(model: InteractionModel, role: string): RoleAggregate {
 	return { invocations, totalTime, totalTokens, promptTokens, cachedTokens, completionTokens, errored }
 }
 
-// The tokens line's figures: the total bill, then the input/output split with the cached share nested inside the input in parentheses — cached tokens are part of the prompt bill (a subset, never an additive bucket). Null buckets are omitted entirely (no fabricated zeros), the cached note rides only a reported nonzero share, and a measured-zero total reads as a plain '0'.
-function tokensSummary(aggregate: RoleAggregate): string {
-	if (aggregate.totalTokens === 0) return '0'
-	let summary = formatTokens(aggregate.totalTokens)
-	if (aggregate.promptTokens !== null) summary += ` \u00b7 input ${formatTokens(aggregate.promptTokens)}${cachedNote(aggregate.cachedTokens)}`
-	if (aggregate.completionTokens !== null) summary += ` \u00b7 output ${formatTokens(aggregate.completionTokens)}`
+// The tokens line's figures, shared by the role aggregate card and the per-participant card so the two surfaces format identically: the total bill, then the input/output split with the cached share nested inside the input in parentheses — cached tokens are part of the prompt bill (a subset, never an additive bucket). Null buckets are omitted entirely (no fabricated zeros), the cached note rides only a reported nonzero share, and a measured-zero total reads as a plain '0'. The caller guards that `totalTokens` is non-null (a card with no measured total carries no tokens section at all).
+function tokenBreakdownText(totalTokens: number, promptTokens: number | null, cachedTokens: number | null, completionTokens: number | null): string {
+	if (totalTokens === 0) return '0'
+	let summary = formatTokens(totalTokens)
+	if (promptTokens !== null) summary += ` \u00b7 input ${formatTokens(promptTokens)}${cachedNote(cachedTokens)}`
+	if (completionTokens !== null) summary += ` \u00b7 output ${formatTokens(completionTokens)}`
 	return summary
 }
 
@@ -374,7 +379,7 @@ export function deriveRoleTooltip(model: InteractionModel, labels: LabelResolver
 	const aggregate = aggregateRole(model, role)
 	const sections: TooltipSection[] = [scalarSection('invocations', aggregate.invocations)]
 	if (aggregate.totalTime !== null) sections.push(scalarSection('total time', `${aggregate.totalTime}s`))
-	if (aggregate.totalTokens !== null) sections.push(scalarSection('total tokens', tokensSummary(aggregate)))
+	if (aggregate.totalTokens !== null) sections.push(scalarSection('total tokens', tokenBreakdownText(aggregate.totalTokens, aggregate.promptTokens, aggregate.cachedTokens, aggregate.completionTokens)))
 	if (aggregate.errored) sections.push(scalarSection('status', 'errored'))
 	return { title, sections }
 }
