@@ -114,6 +114,22 @@ describe('createSnapshotCache', () => {
 		expect(backend.metaReads()).toBe(1)
 	})
 
+	test('a tail append grows the cache-owned logEvents array in place rather than copying it', () => {
+		const backend = createFakeBackend()
+		backend.writeMeta('run-1', metaFor('run-1'))
+		backend.writeLog('run-1', `${logLine('t1', 'role_start')}\n`)
+		const read = readOf(backend)
+		const first = read('run-1')
+		const originalEvents = first.logEvents
+		expect(originalEvents).toHaveLength(1)
+		const appended = [logLine('t2', 'llm_call'), logLine('t3', 'role_finished', { status: 'success' })].map((line) => line + '\n').join('')
+		backend.appendLog('run-1', appended)
+		const second = read('run-1')
+		expect(second.logEvents).toBe(originalEvents)
+		expect(second.logEvents).toHaveLength(3)
+		expect(second.logEvents.map((event) => event.timestamp)).toEqual(['t1', 't2', 't3'])
+	})
+
 	test('a torn final line is left unparsed and parses exactly once once the append completes it', () => {
 		const backend = createFakeBackend()
 		backend.writeMeta('run-1', metaFor('run-1'))

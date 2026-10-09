@@ -57,7 +57,12 @@ function refreshEntry(dependencies: SnapshotCacheDependencies, runId: string, fr
 	}
 	if (currentLog !== null && cachedLog !== null && currentLog.size > cachedLog.size && currentLog.size >= cached.logOffset) {
 		const tail = parseLogText(dependencies.readLogTextFrom(runId, cached.logOffset))
-		return { freshness, snapshot: { meta, logEvents: [...cached.snapshot.logEvents, ...tail.events] }, logOffset: cached.logOffset + tail.consumedBytes }
+		// The appended events are pushed into the cached array in place so a tail poll does not copy all N existing events (O(N) per poll, O(N^2) over the run) and negate the incremental parse.
+		// This is safe only because the logEvents array is cache-owned and consumed synchronously within a single request: the GET handlers derive and serialize the snapshot before awaiting, so no caller observes the array across requests and none memoizes derived state on its identity.
+		// A future caller that holds the array past the request or keys a cache on it would see it grow here and must not rely on that.
+		const events = cached.snapshot.logEvents
+		for (const event of tail.events) events.push(event)
+		return { freshness, snapshot: { meta, logEvents: events }, logOffset: cached.logOffset + tail.consumedBytes }
 	}
 	const full = parseLogText(dependencies.readLogTextFrom(runId, 0))
 	return { freshness, snapshot: { meta, logEvents: full.events }, logOffset: full.consumedBytes }
