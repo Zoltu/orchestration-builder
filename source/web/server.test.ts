@@ -11,6 +11,8 @@ import type { DeploymentConfig, EffortLevel, GuildConfig, LogLevel, RunContinuat
 import { parseRunSnapshot, type RunSnapshot } from './render.ts'
 import type { BuildInfo } from './build-info.ts'
 import { createRunListCache } from './run-list-cache.ts'
+import { flowModelFromReplicaState } from './static/ts/flow-collections.js'
+import { createFlowReplicaRegistry, type FlowReplicaRegistryOptions } from './flow-replica-registry.ts'
 import { createRequestHandler, type RequestHandler } from './request-handler.ts'
 import { createServeStatic, createServeTypeScriptSource, resolveStaticAsset, resolveTypeScriptSourceAsset, type ServeAssetFile, type TypeScriptSourceFilesystem } from './server.ts'
 
@@ -488,7 +490,7 @@ interface HandlerHarness {
 
 // Builds a fresh handler whose startRun and resumeRun park on caller-controlled resolvers, so each test drives its own run lifecycle without touching shared state. The static leaf is a recording fake; every dependency is in-memory. runIdCollides makes runDirectoryExists report an existing directory for the generated id, exercising the submit-level run_id_collision refusal. build seeds the image build identifier GET /api/config surfaces (null, as from a source checkout, unless a test passes one). initialCheckpoints seeds the in-memory checkpoint store (raw state.json text by run id) the resume submission and the resumable flag read.
 // The queue store and the scheduler are wired exactly as serve.ts wires them: the handler's mutations and the POST /api/runs enqueue go through the same in-memory leaves, the scheduler dispatches through the submission, and a settled run promise maps its item and ticks onward.
-function createHandlerHarness(options: { runIdCollides?: boolean, build?: BuildInfo | null, initialQueueItems?: QueueItem[], initialCheckpoints?: Map<string, string> } = {}): HandlerHarness {
+function createHandlerHarness(options: { runIdCollides?: boolean, build?: BuildInfo | null, initialQueueItems?: QueueItem[], initialCheckpoints?: Map<string, string>, flowReplicaOptions?: FlowReplicaRegistryOptions } = {}): HandlerHarness {
 	let resolveActive: (meta: RunMeta) => void = () => {}
 	let resolveResumed: (meta: RunMeta) => void = () => {}
 	let capturedEffort: EffortLevel | undefined
@@ -562,6 +564,7 @@ function createHandlerHarness(options: { runIdCollides?: boolean, build?: BuildI
 		readQueue: queue.readQueue,
 		writeQueue: queue.writeQueue,
 	})
+	const flowReplicaRegistry = createFlowReplicaRegistry(options.flowReplicaOptions ?? { epoch: 'test-epoch', historyLimit: 64, maxRuns: 8 })
 	const handler = createRequestHandler(
 		{
 			guildConfig: sampleGuildConfig,
@@ -584,6 +587,7 @@ function createHandlerHarness(options: { runIdCollides?: boolean, build?: BuildI
 			runCheckpointExists: (runId) => checkpoints.has(runId),
 			tickScheduler: () => scheduler.tick(),
 			build: options.build ?? null,
+			flowEnvelopeFor: flowReplicaRegistry.envelopeFor,
 		},
 		async (requestPath) => {
 			staticCalls.push(requestPath)
@@ -1476,19 +1480,25 @@ describe('GET /api/runs/:id/log', () => {
 })
 
 describe('GET /api/runs/:id/flow', () => {
-	test('returns the InteractionModel for a known run with the root human and entry role', async () => {
+	test('returns the InteractionModel envelope for a known run with the root human and entry role', async () => {
 		const { handler } = createHandlerHarness()
 		const response = await handler(get('/api/runs/run-tree/flow'))
 		expect(response.status).toBe(200)
 		expect(response.headers.get('content-type')).toContain('application/json')
-		const model = await response.json()
+		const envelope = await response.json()
+		expect(envelope.kind).toBe('snapshot')
+		const model = flowModelFromReplicaState(envelope.collections)
 		expect(model.status).toBe('success')
 		expect(model.participants.map((p: { role: string }) => p.role)).toEqual(['human', 'orchestrator', 'coder'])
 		expect(model.participants[0]).toEqual({ id: 'human:root', role: 'human', kind: 'human' })
 		// run-tree delegates orchestrator → coder then unwinds: two calls and two returns.
 		expect(model.operations.map((o: { kind: string }) => o.kind)).toEqual(['call', 'call', 'return', 'return'])
-		expect(model.operations[0].source).toBe('human:root')
-		expect(model.operations[1].destination).toBe(model.participants[2].id)
+		const firstOperation = model.operations[0]
+		const secondOperation = model.operations[1]
+		const coderParticipant = model.participants[2]
+		if (firstOperation === undefined || secondOperation === undefined || coderParticipant === undefined) throw new Error('expected the run-tree model to carry the delegation chain')
+		expect(firstOperation.source).toBe('human:root')
+		expect(secondOperation.destination).toBe(coderParticipant.id)
 		// A terminal run has nothing in flight.
 		expect(model.operations.every((o: { lifecycle: string }) => o.lifecycle === 'settled')).toBe(true)
 	})
@@ -1504,7 +1514,7 @@ describe('GET /api/runs/:id/flow', () => {
 		const { handler } = createHandlerHarness()
 		const response = await handler(get('/api/runs/run-interrupted/flow'))
 		expect(response.status).toBe(200)
-		const model = await response.json()
+		const model = flowModelFromReplicaState((await response.json()).collections)
 		expect(model.status).toBe('interrupted')
 	})
 
@@ -1512,13 +1522,14 @@ describe('GET /api/runs/:id/flow', () => {
 		const { handler } = createHandlerHarness()
 		const response = await handler(get('/api/runs/run-flow-details/flow'))
 		expect(response.status).toBe(200)
-		const model = await response.json()
+		const envelope = await response.json()
+		const model = flowModelFromReplicaState(envelope.collections)
 		expect(model.operations.length).toBeGreaterThan(0)
 		for (const operation of model.operations) {
 			expect(operation).not.toHaveProperty('details')
 		}
 		// The heavy task/arguments/result bodies must not appear anywhere in the polled flow model.
-		const serialized = JSON.stringify(model)
+		const serialized = JSON.stringify(envelope)
 		expect(serialized).not.toContain('do the work')
 		expect(serialized).not.toContain('README.md')
 		expect(serialized).not.toContain('details')

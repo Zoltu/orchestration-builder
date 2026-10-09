@@ -4,8 +4,11 @@ import type { RunState } from '../executor/run-state.ts'
 import type { ResumeErroredRun, RunSubmission } from '../executor/run-submission.ts'
 import type { TaskQueue } from '../executor/task-queue.ts'
 import type { DeploymentConfig, GuildConfig, RunMeta } from '../executor/types.ts'
+import { applyDelta } from './static/ts/entity-diff/index.js'
+import { flowDefinitions, flowModelFromReplicaState } from './static/ts/flow-collections.js'
 import { createRequestHandler, type RequestHandler } from './request-handler.ts'
 import { createRunListCache } from './run-list-cache.ts'
+import { createFlowReplicaRegistry, type FlowReplicaRegistryOptions } from './flow-replica-registry.ts'
 import { parseRunSnapshot } from './render.ts'
 import type { ReadRunSnapshot } from './snapshot-cache.ts'
 
@@ -61,7 +64,7 @@ interface VersioningHarness {
 	setInterruptPending: (pending: boolean) => void
 }
 
-function createVersioningHarness(initialRuns: Array<[string, StoredRun]>): VersioningHarness {
+function createVersioningHarness(initialRuns: Array<[string, StoredRun]>, flowReplicaOptions: FlowReplicaRegistryOptions = { epoch: 'versioning-epoch', historyLimit: 64, maxRuns: 8 }): VersioningHarness {
 	const runs = new Map(initialRuns)
 	let activeRunId: string | undefined
 	let interruptPending = false
@@ -114,6 +117,7 @@ function createVersioningHarness(initialRuns: Array<[string, StoredRun]>): Versi
 	const readQueue = () => emptyQueue
 	const writeQueue = () => {}
 	const resumeErroredRun: ResumeErroredRun = () => ({ ok: false, error: 'run_not_found' })
+	const flowReplicaRegistry = createFlowReplicaRegistry(flowReplicaOptions)
 
 	const handler = createRequestHandler(
 		{
@@ -137,6 +141,7 @@ function createVersioningHarness(initialRuns: Array<[string, StoredRun]>): Versi
 			runCheckpointExists,
 			tickScheduler: async () => {},
 			build: null,
+			flowEnvelopeFor: flowReplicaRegistry.envelopeFor,
 		},
 		async () => new Response('static body'),
 	)
@@ -275,39 +280,79 @@ describe('run-view version changes', () => {
 	})
 })
 
-describe('flow-model and run-list conditional requests', () => {
-	test('the flow model 304s on an unchanged poll and 200s when the log changes', async () => {
-		const { handler, runs } = createVersioningHarness([['run-1', storedRun('run-1')]])
-		const etag = requireEtag(await handler(get('/api/runs/run-1/flow')))
-		expect((await handler(get('/api/runs/run-1/flow', etag))).status).toBe(304)
-		storedRunOrThrow(runs, 'run-1').logText += `\n${JSON.stringify({ timestamp: '2026-01-01T00:00:02.000Z', type: 'role_finished', payload: { role: 'planner', status: 'success' } })}`
-		const changed = await handler(get('/api/runs/run-1/flow', etag))
-		expect(changed.status).toBe(200)
-		expect(changed.headers.get('etag')).not.toBe(etag)
-	})
-
-	test('a flow operation detail has its own validator, distinct from the base model and from another operation', async () => {
+describe('flow-model envelope and run-list conditional requests', () => {
+	test('the base flow route returns a snapshot, then unchanged, then a delta whose application reconstructs the model', async () => {
 		const { handler, runs } = createVersioningHarness([['run-1', storedRun('run-1')]])
 		storedRunOrThrow(runs, 'run-1').logText = flowLogText()
-		const baseEtag = requireEtag(await handler(get('/api/runs/run-1/flow')))
+		const first = await handler(get('/api/runs/run-1/flow'))
+		expect(first.status).toBe(200)
+		expect(first.headers.get('etag')).toBeNull()
+		const snapshot = await first.json()
+		expect(snapshot.kind).toBe('snapshot')
+		expect(typeof snapshot.version).toBe('string')
+		expect(typeof snapshot.contentHash).toBe('string')
+		expect(flowModelFromReplicaState(snapshot.collections).operations.length).toBe(2)
+
+		const unchanged = await handler(get(`/api/runs/run-1/flow?have=${encodeURIComponent(snapshot.version)}`))
+		expect(await unchanged.json()).toEqual({ kind: 'unchanged', version: snapshot.version })
+
+		storedRunOrThrow(runs, 'run-1').logText += `\n${JSON.stringify({ timestamp: '2026-01-01T00:00:03.000Z', type: 'role_finished', payload: { role: 'worker', status: 'success' } })}`
+		const changed = await handler(get(`/api/runs/run-1/flow?have=${encodeURIComponent(snapshot.version)}`))
+		const delta = await changed.json()
+		expect(delta.kind).toBe('delta')
+		expect(delta.base).toBe(snapshot.version)
+		expect(delta.next).not.toBe(snapshot.version)
+
+		const reaction = applyDelta(flowDefinitions, snapshot.collections, snapshot.version, delta)
+		expect(reaction.kind).toBe('applied')
+		if (reaction.kind !== 'applied') throw new Error('expected the delta to apply')
+		const reconstructed = flowModelFromReplicaState(reaction.state)
+
+		const fresh = await (await handler(get('/api/runs/run-1/flow'))).json()
+		expect(fresh.kind).toBe('snapshot')
+		expect(flowModelFromReplicaState(fresh.collections)).toEqual(reconstructed)
+	})
+
+	test('an unknown or evicted have returns a snapshot', async () => {
+		const { handler } = createVersioningHarness([['run-1', storedRun('run-1')], ['run-2', storedRun('run-2')]], { epoch: 'evict-epoch', historyLimit: 64, maxRuns: 1 })
+		const first = await (await handler(get('/api/runs/run-1/flow'))).json()
+		expect(first.kind).toBe('snapshot')
+		// Requesting run-2 evicts run-1's replica; re-requesting run-1 with the pre-eviction revision falls back to a snapshot.
+		expect((await (await handler(get('/api/runs/run-2/flow'))).json()).kind).toBe('snapshot')
+		const reRequested = await (await handler(get(`/api/runs/run-1/flow?have=${encodeURIComponent(first.version)}`))).json()
+		expect(reRequested.kind).toBe('snapshot')
+
+		const unknown = await (await handler(get('/api/runs/run-1/flow?have=not-a-revision'))).json()
+		expect(unknown.kind).toBe('snapshot')
+	})
+
+	test("a run switch never cross-contaminates: run-2 does not accept run-1's revision", async () => {
+		const { handler } = createVersioningHarness([['run-1', storedRun('run-1')], ['run-2', storedRun('run-2')]])
+		const first = await (await handler(get('/api/runs/run-1/flow'))).json()
+		const other = await (await handler(get(`/api/runs/run-2/flow?have=${encodeURIComponent(first.version)}`))).json()
+		expect(other.kind).toBe('snapshot')
+	})
+
+	test('?operation= keeps its own ETag validator, distinct per operation', async () => {
+		const { handler, runs } = createVersioningHarness([['run-1', storedRun('run-1')]])
+		storedRunOrThrow(runs, 'run-1').logText = flowLogText()
 		const first = await handler(get('/api/runs/run-1/flow?operation=op-1'))
 		expect(first.status).toBe(200)
 		const detailEtag = requireEtag(first)
 		expect((await first.json()).operationId).toBe('op-1')
-		expect(detailEtag).not.toBe(baseEtag)
 		expect((await handler(get('/api/runs/run-1/flow?operation=op-1', detailEtag))).status).toBe(304)
-		// A validator is per-URL: replaying either token against the other URL revalidates nothing.
-		expect((await handler(get('/api/runs/run-1/flow', detailEtag))).status).toBe(200)
-		expect((await handler(get('/api/runs/run-1/flow?operation=op-1', baseEtag))).status).toBe(200)
+		// The base route is unconditional now, so replaying the detail validator there is a fresh 200 envelope, not a 304.
+		const base = await handler(get('/api/runs/run-1/flow', detailEtag))
+		expect(base.status).toBe(200)
+		expect((await base.json()).kind).toBe('snapshot')
 		const secondEtag = requireEtag(await handler(get('/api/runs/run-1/flow?operation=op-2')))
 		expect(secondEtag).not.toBe(detailEtag)
 	})
 
-	test('a base flow ETag does not 304 a detail request for a nonexistent operation', async () => {
+	test('?operation= still returns 404 for a nonexistent operation', async () => {
 		const { handler, runs } = createVersioningHarness([['run-1', storedRun('run-1')]])
 		storedRunOrThrow(runs, 'run-1').logText = flowLogText()
-		const baseEtag = requireEtag(await handler(get('/api/runs/run-1/flow')))
-		const response = await handler(get('/api/runs/run-1/flow?operation=ghost', baseEtag))
+		const response = await handler(get('/api/runs/run-1/flow?operation=ghost'))
 		expect(response.status).toBe(404)
 	})
 

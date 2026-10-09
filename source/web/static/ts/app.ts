@@ -19,13 +19,16 @@ import { createOperationDetails } from './operation-details.js'
 import { deriveTerminalResult, ResultModal } from './result-modal.js'
 import { InspectorModal, INSPECTOR_WINDOW_SIZE, buildTurnIndex, deriveDefaultScopeRoleId, deriveInstanceChain, initialScopeWindow, instancesOf, logWindowUrl, olderPageSpliced, olderTurnsFetch, scopeLoadFetch, scopeViewFor, tailPageAppended, tailRefreshFetch, tailRefreshMustResync, tailWindowOffset } from './inspector-modal.js'
 import { createWireDetails, WIRE_DETAIL_CACHE_LIMIT } from './wire-details.js'
-import { isObject, isOperationMetricsRecord } from './guards.js'
+import { isObject } from './guards.js'
+import { applyFlowEnvelope, emptyFlowReplicaState } from './flow-collections.js'
+import { createEntityHasher } from './entity-diff/index.js'
 import { buildStageMemoInputs, createStageMemo } from './stage-memo.js'
 import { responseBelongsToSelection } from './stale-response.js'
 import { createStreamClient } from './stream-client.js'
 import { activeLivePartial, nextLivePartial, scopedActiveLivePartial } from './live-partial.js'
 import { backlogCount, deriveQueueSections, deriveReorderPosition, isQueueItemLike, queueItemPrimaryText, queueStatusLabel, reorderWaitingItems, taskFirstLine } from './queue-panel.js'
-import type { InteractionModel, Operation, Participant, RunStatus } from './interaction-model.js'
+import type { InteractionModel, Participant, RunStatus } from './interaction-model.js'
+import type { FlowReplicaState } from './flow-collections.js'
 import type { LabelConfig, LabelResolver, LabelTier } from './labels.js'
 import type { RoleAccentResolver } from './role-accents.js'
 import type { LogWindowEvent, ScopeWindow, TurnEntry } from './inspector-modal.js'
@@ -233,7 +236,7 @@ export interface ApplicationState {
 	draggingItemId: string | null
 	queueAnswerPendingId: string | null
 	serverAvailable: boolean
-	// The ETag validators for the versioned GET endpoints, keyed by request URL (the base flow model and each `?operation=` detail are distinct URLs, so a base validator can never be replayed on a detail request). Each poll echoes the stored value as If-None-Match; a 304 leaves the already-held payload untouched.
+	// The ETag validators for the versioned GET endpoints (the run list and the run view), keyed by request URL. Each poll echoes the stored value as If-None-Match; a 304 leaves the already-held payload untouched. The flow model no longer rides this map: entity-diff versions it through the replica revision in flowVersion.
 	versions: Record<string, string>
 	justSubmittedRunId: string | null
 	// The create POST's in-flight flag (a plain queue add, a continuation, a new run, and a re-run each dispatch one): set synchronously when the request leaves and cleared by the create response actions on both the ok and fail paths, so a double click or a second Ctrl+Enter inside the window is a no-op instead of a duplicate. Complements the justSubmitted* ids, whose dedup starts only once a response has landed.
@@ -247,9 +250,11 @@ export interface ApplicationState {
 	savingEffort: boolean
 	runLogLevel: LogLevel | null
 	savingLogLevel: boolean
-	// The live InteractionModel the centerpiece renders, plus its previous frame for `deriveLifecycle`'s enter/depart diff. Both null until the first readable flow frame lands.
+	// The live InteractionModel the centerpiece renders, plus its previous frame for `deriveLifecycle`'s enter/depart diff. Both null until the first readable flow frame lands. The model is reconstructed from flowCollections on every apply, so the replica and its revision are the poll's diff base rather than an ETag.
 	flowModel: InteractionModel | null
 	previousFlowModel: InteractionModel | null
+	flowCollections: FlowReplicaState
+	flowVersion: string | null
 	// The label resolver and guild participant inventory are built once from `/api/config` (GotConfig); null/empty until that single load completes. `build` rides the same load: the image's build identifier for the top bar, and stays null when running from source without a baked build-info.json.
 	labelResolver: LabelResolver | null
 	guildParticipants: Participant[]
@@ -426,6 +431,9 @@ let audioContext: AudioContext | null = null
 
 // The caller-held column high-water mark for the flow view (see createColumnTracker): one per page load so the centerpiece's width stays stable as runs deepen and unwind. Held at module scope like audioContext — it is view-render memory, not app state, and retention across run switches is harmless (the stage simply stays as wide as the deepest run seen this page load).
 const flowColumnTracker = createColumnTracker()
+
+// The entity-diff hasher the flow reduce path requires; module scope so its identity-keyed hash cache serves every poll. The flow collections all declare a cheap versionOf, so no entity currently reaches the hasher, but it is the required argument to the reduce and a snapshot's content verification.
+const flowHasher = createEntityHasher()
 
 // The inspector's operation-details controller (see operation-details.js): key `<runId>|<operationId>`, states 'loading' | 'failed' | ready. The polled flow model ships no detail bodies (they can carry multi-megabyte tool arguments/results), so opening an inspector card fetches the ids its derivation may show from `api/runs/:id/flow?operation=<id>` exactly once per session and caches them. Operation ids are stable within a run (events only append), so an entry never goes stale; the run id in the key keeps a previous run's entries from answering for another run's same-numbered operation. Module scope like flowColumnTracker — cache memory, not app state. This host drives the controller through `begin` + `record*` because its fetches are hyperapp effects whose ok/fail actions must return fresh state to trigger the re-render, so no `onLanded` fan-out is wired.
 const operationDetails = createOperationDetails({})
@@ -642,50 +650,35 @@ function PollSelectedRun(state: ApplicationState): ActionReturn {
 	const runId = encodeURIComponent(state.selectedRunId)
 	const runUrl = `api/runs/${runId}`
 	const flowUrl = `api/runs/${runId}/flow`
+	// The client's current flow revision rides as `have`; omitting it (no revision held yet) asks the server for a snapshot. The flow model is derived server-side from the full log (the truncated recentLog the run view carries is not enough to reconstruct the active path, lingering legs, or per-invocation costs), and entity-diff sends only the delta since that revision.
+	const flowRequestUrl = state.flowVersion === null ? flowUrl : `${flowUrl}?have=${encodeURIComponent(state.flowVersion)}`
 	return [
 		state,
 		Fetch({ url: runUrl, ifNoneMatch: storedVersionFor(state.versions, runUrl), ok: GotSelectedRun(state.selectedRunId), fail: FetchFailed }),
-		// The flow model is derived server-side from the full log (the truncated recentLog the run view carries is not enough to reconstruct the active path, lingering legs, or per-invocation costs); the centerpiece reads it off this endpoint rather than re-deriving client-side.
-		Fetch({ url: flowUrl, ifNoneMatch: storedVersionFor(state.versions, flowUrl), ok: GotFlowModel(state.selectedRunId), fail: FetchFailed }),
+		// The flow fetch is uncacheable but carries no ETag: its entity-diff `have` revision is the revalidation, so it sets no-store directly rather than through withIfNoneMatch.
+		Fetch({ url: flowRequestUrl, init: { cache: 'no-store' }, ok: GotFlowModel(state.selectedRunId), fail: FetchFailed }),
 		// While the inspector modal is open, the same poll also refreshes the log-window tail so in-flight turns appear when they complete (a null effect when closed — hyperapp ignores falsy effects).
 		InspectorTailRefresh(state),
 	]
 }
 
-// The flow model's ingress guard: the fields the flow/sequence views read off the model, element-checked like the demo harness's adapter guard, so a malformed frame falls to the placeholder branch instead of surfacing undefined reads deep in a render. The metrics record check (isOperationMetricsRecord) is the shared guard in guards.js, so both wire ingress points validate the same counter set.
-function isParticipantRecord(value: unknown): value is Participant {
-	return isObject(value) && typeof value['id'] === 'string' && typeof value['role'] === 'string' && typeof value['kind'] === 'string'
-}
-
-function isOperationRecord(value: unknown): value is Operation {
-	if (!isObject(value)) return false
-	if (typeof value['id'] !== 'string' || typeof value['kind'] !== 'string' || typeof value['lifecycle'] !== 'string') return false
-	if (typeof value['stack'] !== 'string' || typeof value['startedAt'] !== 'string') return false
-	if (value['settledAt'] !== null && typeof value['settledAt'] !== 'string') return false
-	if (value['metrics'] !== null && !isOperationMetricsRecord(value['metrics'])) return false
-	return value['outcome'] === null || typeof value['outcome'] === 'string'
-}
-
-function isInteractionModelPayload(value: unknown): value is InteractionModel {
-	if (!isObject(value)) return false
-	if (typeof value['status'] !== 'string') return false
-	if (!Array.isArray(value['participants']) || !value['participants'].every(isParticipantRecord)) return false
-	return Array.isArray(value['operations']) && value['operations'].every(isOperationRecord)
-}
-
-// The live InteractionModel the flow/sequence views render, scoped to the run the poll fetched it for: the flow payload carries no run id of its own, so the selected run id is curried in when the effect is built (PollSelectedRun) and the response is dropped when it no longer matches the selection at application time — a late frame for run A must not render over run B's stage. The previous frame is kept so `deriveLifecycle` can diff entering/departing nodes; a 404 (the run directory exists but is not yet readable in the instant after submit) clears the model so the centerpiece shows its placeholder until the first readable frame lands. Every path also syncs the scroll followers: the model update grows (or clears) the sequence content after the view patch, and an open inspector modal's body element is replaced where the placeholder transitions to the model (the poll-time sync re-attaches its follower before the next content update can rely on it).
+// The live InteractionModel the flow/sequence views render, scoped to the run the poll fetched it for: the flow payload carries no run id of its own, so the selected run id is curried in when the effect is built (PollSelectedRun) and the response is dropped when it no longer matches the selection at application time — a late frame for run A must not render over run B's stage. The body is an entity-diff envelope, so it is reduced against the replica the client holds (applyFlowEnvelope) and the model is reconstructed from the resulting state. The previous frame is kept so `deriveLifecycle` can diff entering/departing nodes; a 404 (the run directory exists but is not yet readable in the instant after submit) clears the replica and model so the centerpiece shows its placeholder until the first readable frame lands. Every path that changes the model also syncs the scroll followers: the model update grows (or clears) the sequence content after the view patch, and an open inspector modal's body element is replaced where the placeholder transitions to the model (the poll-time sync re-attaches its follower before the next content update can rely on it).
 function GotFlowModel(runId: string) {
 	return function GotFlowModelForRun(state: ApplicationState, payload: FetchResultPayload): ActionReturn {
 		if (!responseBelongsToSelection(runId, state.selectedRunId)) return state
-		const status = payload.status
-		const ok = payload.ok
-		const body = payload.body
-		// A 304 must be handled before the `!ok` check below (which a 304 would otherwise trip): the model is unchanged, so it is kept BY REFERENCE — reassigning it would break the WeakMap-keyed memoization in interaction-model.ts/flow-view.ts and force a full re-derivation on every unchanged poll. No follower sync is needed because nothing mounted changed.
-		if (status === 304) return { ...state, serverAvailable: true }
-		if (status === 404) return [{ ...state, flowModel: null, previousFlowModel: null, serverAvailable: ok }, SyncSequenceFollower(), SyncInspectorFollower()]
-		if (!ok || body === null || typeof body !== 'object') return [{ ...state, serverAvailable: ok }, SyncSequenceFollower(), SyncInspectorFollower()]
-		if (!isInteractionModelPayload(body)) return [{ ...state, serverAvailable: true }, SyncSequenceFollower(), SyncInspectorFollower()]
-		return [{ ...state, previousFlowModel: state.flowModel, flowModel: body, serverAvailable: true, versions: recordVersion(state.versions, payload) }, SyncSequenceFollower(), SyncInspectorFollower()]
+		if (payload.status === 404) return [{ ...state, flowModel: null, previousFlowModel: null, flowCollections: emptyFlowReplicaState(), flowVersion: null, serverAvailable: payload.ok }, SyncSequenceFollower(), SyncInspectorFollower()]
+		const result = applyFlowEnvelope(state.flowCollections, state.flowVersion, payload.body, flowHasher)
+		// An unchanged envelope keeps the model and replica BY REFERENCE — reassigning them would break the WeakMap-keyed memoization in interaction-model.ts/flow-view.ts — so only server availability is refreshed and no follower sync is needed (nothing mounted changed).
+		if (result.outcome === 'unchanged') return { ...state, serverAvailable: true }
+		if (result.outcome === 'applied' || result.outcome === 'snapshot') {
+			return [{ ...state, flowCollections: result.state, flowVersion: result.version, previousFlowModel: state.flowModel, flowModel: result.model, serverAvailable: true }, SyncSequenceFollower(), SyncInspectorFollower()]
+		}
+		// A delta whose base the client no longer holds cannot be applied; re-fetching with no `have` asks the server for a full snapshot. The held replica and model stand until it lands.
+		if (result.outcome === 'needsSnapshot') {
+			return [{ ...state, serverAvailable: payload.ok }, Fetch({ url: `api/runs/${encodeURIComponent(runId)}/flow`, init: { cache: 'no-store' }, ok: GotFlowModel(runId), fail: FetchFailed })]
+		}
+		// invalid: the envelope failed validation, so the held replica and model stand, but the fetch result still updates server availability.
+		return { ...state, serverAvailable: payload.ok }
 	}
 }
 
@@ -1114,7 +1107,7 @@ function LogLevelSaveFailed(state: ApplicationState): ApplicationState {
 
 function SelectRun(state: ApplicationState, runId: string): ActionReturn {
 	if (runId === state.selectedRunId) return [{ ...state, screen: 'watch' }, SyncSequenceFollower(), SyncInspectorFollower()]
-	// The flow model, its previous-frame diff, and the per-run modal state belong to the previously-selected run; a switch clears them so the centerpiece shows the new run's first frame without a stale lifecycle diff or a leftover modal. Selecting a run always lands on the watch screen (history rows and the in-progress pill both go through here). Clearing the model unmounts the sequence container, so the switch syncs its scroll follower (the new run's first frame re-attaches it, pinned to the bottom), and the cleared inspector unmounts the modal body (its follower detaches the same way). The live partial belongs to the previous run too and clears with the rest (the stream subscription restarts onto the new selection).
+	// The flow model, its replica, its previous-frame diff, and the per-run modal state belong to the previously-selected run; a switch clears them so the centerpiece shows the new run's first frame without a stale lifecycle diff or a leftover modal. Selecting a run always lands on the watch screen (history rows and the in-progress pill both go through here). Clearing the model unmounts the sequence container, so the switch syncs its scroll follower (the new run's first frame re-attaches it, pinned to the bottom), and the cleared inspector unmounts the modal body (its follower detaches the same way). The live partial belongs to the previous run too and clears with the rest (the stream subscription restarts onto the new selection).
 	return [
 		{
 			...state,
@@ -1124,6 +1117,8 @@ function SelectRun(state: ApplicationState, runId: string): ActionReturn {
 			selectedRunStatus: null,
 			flowModel: null,
 			previousFlowModel: null,
+			flowCollections: emptyFlowReplicaState(),
+			flowVersion: null,
 			questionModalOpen: false,
 			resultModalOpen: false,
 			resultShownForRun: null,
@@ -1318,7 +1313,7 @@ function GotCreatedRun(state: ApplicationState, payload: FetchResultPayload): Ac
 	const createdRunId = body['runId']
 	// Selecting the new run activates its per-run subscription; an immediate run-list fetch clears justSubmittedRunId as soon as the run appears. The continuation and the per-run modal/flow state are reset for the same reason SelectRun resets it — the composed run is on the server now, and a leftover chip would brief a stale lineage into the next task. The live partial clears with the rest (the stream subscription follows the new selection).
 	return [
-		{ ...state, screen: 'watch', continuation: null, justSubmittedRunId: createdRunId, createSending: false, selectedRunId: createdRunId, selectedRunView: null, selectedRunStatus: null, flowModel: null, previousFlowModel: null, questionModalOpen: false, resultModalOpen: false, resultShownForRun: null, tooltip: null, planExpanded: false, inspectorModalOpen: false, inspector: initialInspectorState(), livePartial: null, serverAvailable: true },
+		{ ...state, screen: 'watch', continuation: null, justSubmittedRunId: createdRunId, createSending: false, selectedRunId: createdRunId, selectedRunView: null, selectedRunStatus: null, flowModel: null, previousFlowModel: null, flowCollections: emptyFlowReplicaState(), flowVersion: null, questionModalOpen: false, resultModalOpen: false, resultShownForRun: null, tooltip: null, planExpanded: false, inspectorModalOpen: false, inspector: initialInspectorState(), livePartial: null, serverAvailable: true },
 		Fetch({ url: 'api/runs', ok: GotRunList, fail: FetchFailed }),
 	]
 }
@@ -1337,7 +1332,7 @@ function GotResumedRun(state: ApplicationState, payload: FetchResultPayload): Ac
 		const body = payload.body
 		if (isObject(body) && typeof body['runId'] === 'string' && body['runId'] === resumedRunId) {
 			return [
-				{ ...state, screen: 'watch', resumingRunId: null, resumeSending: false, resumeNotice: null, continuation: null, justSubmittedRunId: resumedRunId, selectedRunId: resumedRunId, selectedRunView: null, selectedRunStatus: null, flowModel: null, previousFlowModel: null, questionModalOpen: false, resultModalOpen: false, resultShownForRun: null, tooltip: null, planExpanded: false, inspectorModalOpen: false, inspector: initialInspectorState(), livePartial: null, serverAvailable: true },
+				{ ...state, screen: 'watch', resumingRunId: null, resumeSending: false, resumeNotice: null, continuation: null, justSubmittedRunId: resumedRunId, selectedRunId: resumedRunId, selectedRunView: null, selectedRunStatus: null, flowModel: null, previousFlowModel: null, flowCollections: emptyFlowReplicaState(), flowVersion: null, questionModalOpen: false, resultModalOpen: false, resultShownForRun: null, tooltip: null, planExpanded: false, inspectorModalOpen: false, inspector: initialInspectorState(), livePartial: null, serverAvailable: true },
 				Fetch({ url: 'api/runs', ok: GotRunList, fail: FetchFailed }),
 			]
 		}
@@ -2657,7 +2652,7 @@ function isApplicationState(value: unknown): value is ApplicationState {
 		'queueItems', 'justSubmittedItemId', 'pendingAddSelectionId', 'editingItemId', 'draggingItemId', 'queueAnswerPendingId',
 		'serverAvailable', 'versions', 'justSubmittedRunId', 'createSending', 'muted', 'shownQuestionIds', 'firstQuestionsPoll', 'pendingAnswerId',
 		'runEffort', 'savingEffort', 'runLogLevel', 'savingLogLevel',
-		'flowModel', 'previousFlowModel', 'labelResolver', 'guildParticipants', 'roleAccents', 'build',
+		'flowModel', 'previousFlowModel', 'flowCollections', 'flowVersion', 'labelResolver', 'guildParticipants', 'roleAccents', 'build',
 		'flowTier', 'flowViewMode', 'sequenceRolesOnly', 'screen', 'historyExpanded', 'continuation',
 		'resumingRunId', 'resumeSending', 'resumeNotice',
 		'questionModalOpen', 'resultModalOpen', 'resultShownForRun', 'interruptModalOpen',
@@ -2702,6 +2697,8 @@ app({
 			savingLogLevel: false,
 			flowModel: null,
 			previousFlowModel: null,
+			flowCollections: emptyFlowReplicaState(),
+			flowVersion: null,
 			labelResolver: null,
 			guildParticipants: [],
 			roleAccents: createRoleAccentResolver([]),

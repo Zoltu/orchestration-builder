@@ -6,6 +6,7 @@ import { createBootstrapFailureHandler } from './web/bootstrap-failure.js'
 import { createBuildInfoReader } from './web/build-info.js'
 import { createSnapshotCache } from './web/snapshot-cache.js'
 import { createRunListCache } from './web/run-list-cache.js'
+import { createFlowReplicaRegistry } from './web/flow-replica-registry.js'
 import { createStreamHub } from './web/stream-hub.js'
 import { createTaskSummarizer, type TaskSummarizer } from './summarize.js'
 import { applyDeploymentOverride, applyLogLevel, createAppendLog, createDeleteCheckpoint, createDeltaChannel, createDockerSecretReader, createGuildLoader, createInterruptChannel, createInterruptQueue, createLlmCaller, createLlmFetch, createListRunIds, createModelInfoProbe, createPlanToolHandlers, createReadProjectSettings, createReadQueue, createReadRunCheckpointById, createReadRunLogTextFrom, createReadRunMetaById, createReadRunPlanById, createReadRunSnapshotById, createReadRunSnapshotStats, createReadRunSummaryById, createReadRunSummaryStats, createResumeErroredRun, createRunCheckpointExists, createRunDirectory, createRunDirectoryExists, createRunLogToolHandlers, createRunState, createRunSubmission, createSleep, createTaskScheduler, createTimeoutScheduler, createToolHandlers, createWebHumanBackend, createWriteCheckpoint, createWriteMeta, createWriteProjectSettings, createWriteQueue, createWriteRunSummary, ensureOrchestrationGitExcluded, entryFrameLogLevel, generateRunId, llmUsagePayload, LOG_FILE_NAME, MODEL_PROBE_TIMEOUT_MS, nodeGitExcludeFilesystem, parseModelInfo, reconcileRunsOnStartup, resolveDeploymentConfig, resolveDeploymentOverride, resolveKagiApiKey, resolveSecret, resumeExecutor, runExecutor, validateDeploymentFileConfig, validateDeploymentRoleReferences, ConfigurationError, ValidationError, type AppendLog, type DeltaChannel, type ExecutorDependencies, type InterruptChannel, type LoadedGuild, type LlmCaller, type LogLevel, type ModelApiProbe, type ResumeRun, type RunCheckpoint, type StartRun, type WebHumanBackend } from './executor/index.js'
@@ -34,6 +35,9 @@ const INTERRUPT_EXIT_CODE = 130
 const SNAPSHOT_CACHE_MAX_ENTRIES = 4
 // The run list is polled every second alongside the selected run's endpoints; 64 cached summaries covers every history a browser realistically browses while bounding memory on a long-lived service.
 const RUN_LIST_CACHE_MAX_ENTRIES = 64
+// The flow endpoint's entity-diff replicas: 64 retained revisions per run answer a client that fell behind a few polls with a delta, and 8 runs bound the retained replicas to the run the operator is viewing plus a few recently visited ones.
+const FLOW_REPLICA_HISTORY_LIMIT = 64
+const FLOW_REPLICA_MAX_RUNS = 8
 
 // Accepts only plain decimal digit strings so forms like `0x1a`, `1e3`, `8080.0`, or ` 8080 ` are rejected rather than silently coerced by Number().
 function parsePort(value: string | undefined, fallback: number): number {
@@ -366,6 +370,9 @@ async function serve(): Promise<void> {
 	// Boot order (docs/queueing.md "Dispatch and the scheduler"): reconciliation first, then exactly one scheduler tick. The tick repairs stale active items from their metas and dispatches the head waiting item — unless the resumed run holds the slot, in which case the dispatch restores the head and the resumed run's own settlement ticks onward.
 	await scheduler.tick()
 
+	// The flow replicas are process-local: the random epoch makes every revision this process issues distinct from a previous process's, so a browser holding a pre-restart revision is forced to resync by snapshot rather than reading a stale `unchanged`.
+	const flowReplicaRegistry = createFlowReplicaRegistry({ epoch: crypto.randomUUID(), historyLimit: FLOW_REPLICA_HISTORY_LIMIT, maxRuns: FLOW_REPLICA_MAX_RUNS })
+
 	const webServer = createWebServer({
 		port,
 		pageTitle,
@@ -390,6 +397,7 @@ async function serve(): Promise<void> {
 		runCheckpointExists,
 		tickScheduler: () => scheduler.tick(),
 		build: buildInfo,
+		flowEnvelopeFor: flowReplicaRegistry.envelopeFor,
 	})
 	console.log(`Web UI ready: http://localhost:${webServer.port}`)
 

@@ -9,6 +9,10 @@ import { paginateLogEvents, parseRunMeta, renderConfig, renderProjectSettings, r
 import type { BuildInfo } from './build-info.js'
 import type { ReadRunListSummary } from './run-list-cache.js'
 import { deriveInteractionModel, deriveInteractionOperationDetail } from './interaction-model-adapter.js'
+import type { InteractionModel } from './interaction-model-adapter.js'
+import type { FlowEnvelopeFor } from './flow-replica-registry.js'
+import { RUN_STATUS_ENTITY_ID } from './static/ts/flow-collections.js'
+import type { FlowReplicaState } from './static/ts/flow-collections.js'
 import { DEMO_SCENARIOS, deriveDemoFrameModel, deriveDemoFrameOperationDetail, findDemoScenario } from './demo-fixtures.js'
 import type { ReadRunSnapshot } from './snapshot-cache.js'
 import { deriveVersion, type VersionToken } from './version.js'
@@ -46,6 +50,8 @@ export interface RequestHandlerConfig {
 	tickScheduler: () => Promise<void>
 	// The baked image build identifier, read once at startup (null without a baked build-info); surfaced through GET /api/config.
 	build: BuildInfo | null
+	// The flow endpoint's entity-diff envelope: a per-run server replica (see flow-replica-registry.ts) answers the base flow route with `unchanged`/`delta`/`snapshot` instead of re-sending the whole model each poll.
+	flowEnvelopeFor: FlowEnvelopeFor
 }
 
 // The static-asset leaf: given a GET path that matched no API route, produce the response. Injected so the routing below is exercisable without touching the filesystem or a socket. Async because the index route reads the served body to substitute the page title (see server.ts createServeStatic).
@@ -82,6 +88,14 @@ function jsonVersioned(payload: unknown, version: VersionToken): Response {
 	})
 }
 
+// The base flow envelope is uncacheable but unversioned: it carries no ETag (the envelope's own `unchanged` reply is the revalidation), yet the browser must not heuristically cache the polled JSON, so it sends the same no-store the versioned JSON does.
+function jsonNoStore(payload: unknown): Response {
+	return new Response(JSON.stringify(payload), {
+		status: 200,
+		headers: { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' },
+	})
+}
+
 function handleActiveRun(readRunSnapshot: ReadRunSnapshot, readRunSnapshotStats: ReadRunSnapshotStats, readRunPlanById: ReadRunPlanById, runCheckpointExists: RunCheckpointExists, runSubmission: RunSubmission, runState: RunState): Response {
 	const runId = runSubmission.lastRunId()
 	if (runId === undefined) return json({ ok: false, error: 'no_run' }, 404)
@@ -90,10 +104,10 @@ function handleActiveRun(readRunSnapshot: ReadRunSnapshot, readRunSnapshotStats:
 	return json({ ...view, interruptPending: runState.interruptPending() })
 }
 
-function handleActiveRunFlow(readRunSnapshot: ReadRunSnapshot, readRunSnapshotStats: ReadRunSnapshotStats, runSubmission: RunSubmission, query: URLSearchParams): Response {
+function handleActiveRunFlow(readRunSnapshot: ReadRunSnapshot, readRunSnapshotStats: ReadRunSnapshotStats, flowEnvelopeFor: FlowEnvelopeFor, runSubmission: RunSubmission, query: URLSearchParams): Response {
 	const runId = runSubmission.lastRunId()
 	if (runId === undefined) return json({ ok: false, error: 'no_run' }, 404)
-	return runFlowPage(readRunSnapshot, readRunSnapshotStats, runId, query)
+	return runFlowPage(readRunSnapshot, readRunSnapshotStats, flowEnvelopeFor, runId, query)
 }
 
 function handleGetRunByIdVersioned(request: Request, runId: string, dependencies: {
@@ -175,10 +189,21 @@ function decodePathSegment(segment: string): string | undefined {
 	}
 }
 
+// The replica state behind the flow endpoint's entity-diff envelope: the derived model's collections plus the run status as the singleton run-status entity. entity-diff treats collections as unordered, so a client sorts by its own domain key after applying.
+function flowReplicaStateFromModel(model: InteractionModel): FlowReplicaState {
+	return {
+		participants: model.participants,
+		operations: model.operations,
+		stacks: model.stacks ?? [],
+		runStatus: [{ id: RUN_STATUS_ENTITY_ID, status: model.status }],
+	}
+}
+
 // Serves the structured InteractionModel derived from a run's full snapshot.
 // The model is JSON (identifiers, counters, costs as values; no detail bodies); the client renders operation details only through the on-demand variant below and its sanitized Markdown pipeline, so the server does not sanitize — it must not serve pre-rendered HTML that would bypass the client's sanitization.
-// ?operation=<id> serves that single operation's details markdown instead of the whole model: the derive is the same O(N) walk, but only one detail string is formatted and shipped, so a hover costs a tiny response while the polled model carries none.
-function runFlowPage(readRunSnapshot: ReadRunSnapshot, readRunSnapshotStats: ReadRunSnapshotStats, runId: string, query: URLSearchParams): Response {
+// The base route ships an entity-diff envelope (unchanged/delta/snapshot) keyed off the client's `have` revision, so a steady poll transfers only the changed entities; an absent or unknown `have` yields a snapshot. The envelope replaces the base route's ETag/304.
+// ?operation=<id> serves that single operation's details markdown instead of the whole model: the derive is the same O(N) walk, but only one detail string is formatted and shipped, so a hover costs a tiny response while the polled model carries none. `operation` wins over `have`; the two are mutually exclusive.
+function runFlowPage(readRunSnapshot: ReadRunSnapshot, readRunSnapshotStats: ReadRunSnapshotStats, flowEnvelopeFor: FlowEnvelopeFor, runId: string, query: URLSearchParams): Response {
 	if (!isKnownRun(readRunSnapshotStats, runId)) return json({ ok: false, error: 'not_found' }, 404)
 	const snapshot = readRunSnapshot(runId)
 	const operationId = query.get('operation')
@@ -187,25 +212,27 @@ function runFlowPage(readRunSnapshot: ReadRunSnapshot, readRunSnapshotStats: Rea
 		if (detail === null) return json({ ok: false, error: 'not_found' }, 404)
 		return json(detail)
 	}
-	return json(deriveInteractionModel(snapshot))
+	return jsonNoStore(flowEnvelopeFor(runId, flowReplicaStateFromModel(deriveInteractionModel(snapshot)), query.get('have')))
 }
 
 function handleGetRunFlowVersioned(request: Request, runId: string, query: URLSearchParams, dependencies: {
 	readRunSnapshotStats: ReadRunSnapshotStats
 	readRunSnapshot: ReadRunSnapshot
+	flowEnvelopeFor: FlowEnvelopeFor
 }): Response {
-	// The operation discriminator is folded into the version inputs, so the base model and each operation detail derive distinct tokens and the match check below is safe before the operation is resolved: a base token replayed on a ?operation= URL never matches, and a token for a detail that was never served (a nonexistent id) is never issued.
+	// The operation discriminator is folded into the version inputs, so each operation detail derives its own token and the match check below is safe before the operation is resolved: a token for a detail that was never served (a nonexistent id) is never issued.
 	const operationId = query.get('operation')
 	const inputs = gatherFlowInputs(dependencies, runId, operationId)
 	if (inputs === null) return json({ ok: false, error: 'not_found' }, 404)
-	const version = deriveVersion(inputs)
-	if (ifNoneMatchToken(request) === version) return notModified(version)
 	if (inputs.operationId !== null) {
+		const version = deriveVersion(inputs)
+		if (ifNoneMatchToken(request) === version) return notModified(version)
 		const detail = buildFlowOperationDetail(inputs, dependencies)
 		if (detail === null) return json({ ok: false, error: 'not_found' }, 404)
 		return jsonVersioned(detail, version)
 	}
-	return jsonVersioned(buildFlowModel(inputs, dependencies), version)
+	// The base route is unconditional: the entity-diff envelope's own `unchanged` response is the revalidation, so no ETag or 304 is involved, but the polled JSON still must not be heuristically cached.
+	return jsonNoStore(dependencies.flowEnvelopeFor(runId, flowReplicaStateFromModel(buildFlowModel(inputs, dependencies)), query.get('have')))
 }
 
 function runViewFor(readRunSnapshot: ReadRunSnapshot, readRunSnapshotStats: ReadRunSnapshotStats, readRunPlanById: ReadRunPlanById, runCheckpointExists: RunCheckpointExists, runId: string): ReturnType<typeof renderRunView> | null {
@@ -478,6 +505,7 @@ export function createRequestHandler(config: RequestHandlerConfig, serveStatic: 
 	const resumeErroredRun = config.resumeErroredRun
 	const runCheckpointExists = config.runCheckpointExists
 	const tickScheduler = config.tickScheduler
+	const flowEnvelopeFor = config.flowEnvelopeFor
 
 	// The leaf set the three versioned poll endpoints share; each named handler accepts the subset it directly uses, so the superset is assignable structurally.
 	const versionedDependencies = {
@@ -490,6 +518,7 @@ export function createRequestHandler(config: RequestHandlerConfig, serveStatic: 
 		readRunListSummary,
 		readRunSummaryStats,
 		listRunIds,
+		flowEnvelopeFor,
 	}
 
 	return async (request) => {
@@ -500,7 +529,7 @@ export function createRequestHandler(config: RequestHandlerConfig, serveStatic: 
 			if (pathname === '/api/config') return json(renderConfig(guildConfig, deployment, config.tools, config.build))
 			if (pathname === '/api/queue') return handleGetQueue(readQueue)
 			if (pathname === '/api/settings') return handleGetSettings(readProjectSettings)
-			if (pathname === '/api/run/flow') return handleActiveRunFlow(readRunSnapshot, readRunSnapshotStats, runSubmission, url.searchParams)
+			if (pathname === '/api/run/flow') return handleActiveRunFlow(readRunSnapshot, readRunSnapshotStats, flowEnvelopeFor, runSubmission, url.searchParams)
 			if (pathname === '/api/run') return handleActiveRun(readRunSnapshot, readRunSnapshotStats, readRunPlanById, runCheckpointExists, runSubmission, runState)
 			if (pathname === '/api/runs') return handleListRunsVersioned(request, versionedDependencies)
 			if (pathname.startsWith('/api/runs/')) {
