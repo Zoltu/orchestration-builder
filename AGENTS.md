@@ -300,6 +300,15 @@ When adding a new function, use this to decide its pattern:
    - **Yes:** It is **testable orchestration**. Accept a `dependencies` object containing only the configured leaf functions it needs. Do not provide defaults.
    - **No:** It is a **pure helper**. Import it directly wherever needed.
 
+### Shared module: `entity-diff`
+
+`source/web/static/ts/entity-diff/` is a self-contained, generic module that ships and applies entity-level diffs of id-keyed state (content-addressed versions, keyed deltas, a bounded delta history, and a total snapshot fallback). It is a **dependency** of the app, not a participant in its layers:
+
+- **It must not reference any file outside its own folder.** Its only imports are sibling modules under `entity-diff/`; it uses no app module, no `Bun.*`, no `node:*`, and no DOM. The app imports it; it never imports the app. Keep it that way: a reference out of the folder would break its standalone testability and its ability to run unchanged in both runtimes. Its tests (`source/web/entity-diff/`) import it by the same specifier the app uses.
+- **It is shared between the browser client and the server.** It lives under `source/web/static/ts/` so the browser loads it (transpiled on request, like every other browser module) and the server imports it through the same `./static/ts/entity-diff/index.js` specifier. Because it runs in the browser it must stay browser-pure: web-standard globals only (`TextEncoder`, `fetch`, `Map`, `WeakMap`, `Set`, `JSON`). Its hashing is a pure-JS SHA-256 — not `Bun.CryptoHasher` (server-only) and not `crypto.subtle` (secure-context only).
+- **Domain types stay in the app.** The module is generic over an entity constrained to `{ id: string }`; it never names `Operation`, `Participant`, or any other app type. The app declares its collections with `defineCollection`, owns the entity bodies, and owns the runtime guards for them.
+- **Integration contracts the app must honor:** entities and returned state are treated as immutable (replace objects, never mutate in place — the identity-keyed hash cache depends on it), and collections are unordered (the version is order-independent, so the app must sort by its own domain key when display order matters).
+
 ---
 
 ## Tool Dispatch
