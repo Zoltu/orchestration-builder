@@ -522,9 +522,9 @@ function roleLabelOf(labels: LabelResolver, participantId: string): string {
 	return `${labels.resolveParticipantLabel(found, tier)} (${found.id})`
 }
 
-function formatOperation(labels: LabelResolver, operation: Operation, participants: Participant[]): string {
+function formatOperation(labels: LabelResolver, operation: Operation, participantsById: ReadonlyMap<string, Participant>): string {
 	const outcome = operation.outcome === null ? '' : ` → ${operation.outcome}`
-	const label = labels.resolveOperationLabel(operation, participants, tier, labels.hashString(operation.id))
+	const label = labels.resolveOperationLabel(operation, participantsById, tier, labels.hashString(operation.id))
 	return `${label} [${operation.lifecycle}${outcome}]`
 }
 
@@ -533,6 +533,8 @@ function renderTextView(): string {
 	const manifest = scenarios[scenarioIndex]
 	if (manifest === undefined || currentFrame === null) return ''
 	const frame = currentFrame
+	const participantsById = new Map<string, Participant>()
+	for (const participant of frame.participants) participantsById.set(participant.id, participant)
 	const stack = activeStack(frame)
 	const participant = activeParticipant(frame)
 	const openStacks = stacksOf(frame)
@@ -556,7 +558,7 @@ function renderTextView(): string {
 			const tag = paused ? ` (paused, fate: ${fate})` : ` (active, fate: ${fate})`
 			lines.push(`  ${stackId}${tag}`)
 			for (const call of chain) {
-				lines.push(`    ${formatOperation(labels, call, frame.participants)}`)
+				lines.push(`    ${formatOperation(labels, call, participantsById)}`)
 			}
 		}
 	}
@@ -566,7 +568,7 @@ function renderTextView(): string {
 		lines.push(`  (none)`)
 	} else {
 		for (const observe of observes) {
-			lines.push(`  ${formatOperation(labels, observe, frame.participants)}  [stack: ${observe.stack}]`)
+			lines.push(`  ${formatOperation(labels, observe, participantsById)}  [stack: ${observe.stack}]`)
 		}
 	}
 	return lines.join('\n')

@@ -110,6 +110,12 @@ function operation(id: string, kind: Operation['kind'], stack: string, source: s
 	return { id, kind, stack, source, destination, startedAt: 't0', settledAt: null, lifecycle: 'in_flight', outcome, metrics: null }
 }
 
+function indexParticipants(participants: Participant[]): ReadonlyMap<string, Participant> {
+	const byId = new Map<string, Participant>()
+	for (const participant of participants) byId.set(participant.id, participant)
+	return byId
+}
+
 describe('resolveParticipantLabel', () => {
 	test('returns index 0 of the requested tier for a seeded role', () => {
 		const coder: Participant = { id: 'coder', role: 'coder', kind: 'role' }
@@ -148,10 +154,10 @@ describe('resolveParticipantLabel', () => {
 
 describe('resolveOperationLabel', () => {
 	test('renders each tier for a role-to-role call at seed 0', () => {
-		const participants: Participant[] = [
+		const participants = indexParticipants([
 			{ id: 'orchestrator', role: 'orchestrator', kind: 'role' },
 			{ id: 'planner', role: 'planner', kind: 'role' },
-		]
+		])
 		const op = operation('op1', 'call', 'root', 'orchestrator', 'planner')
 		expect(labels.resolveOperationLabel(op, participants, 'whimsical', 0)).toBe('Conductor is passing the baton to Strategist')
 		expect(labels.resolveOperationLabel(op, participants, 'friendly', 0)).toBe('Orchestrator is delegating to Planner')
@@ -159,10 +165,10 @@ describe('resolveOperationLabel', () => {
 	})
 
 	test('rotates through the whimsical list by seed and wraps around', () => {
-		const participants: Participant[] = [
+		const participants = indexParticipants([
 			{ id: 'orchestrator', role: 'orchestrator', kind: 'role' },
 			{ id: 'planner', role: 'planner', kind: 'role' },
-		]
+		])
 		const op = operation('op1', 'call', 'root', 'orchestrator', 'planner')
 		// The role->role whimsical list has three entries; seed picks the index, so different operations of the same kind render different phrases while the same operation stays stable across re-renders.
 		expect(labels.resolveOperationLabel(op, participants, 'whimsical', 1)).toBe('Conductor is tossing the ball to Strategist')
@@ -171,10 +177,10 @@ describe('resolveOperationLabel', () => {
 	})
 
 	test('a role-to-tool call uses the per-tool humanCallLabel when the tool carries one', () => {
-		const participants: Participant[] = [
+		const participants = indexParticipants([
 			{ id: 'coder', role: 'coder', kind: 'role' },
 			{ id: 'readFile', role: 'read_file', kind: 'tool' },
-		]
+		])
 		const op = operation('op1', 'call', 'root', 'coder', 'readFile')
 		expect(labels.resolveOperationLabel(op, participants, 'whimsical', 0)).toBe('Builder is getting a book off the shelf')
 		expect(labels.resolveOperationLabel(op, participants, 'friendly', 0)).toBe('Coder is reading a file')
@@ -182,20 +188,20 @@ describe('resolveOperationLabel', () => {
 	})
 
 	test('a role-to-tool call falls back to the discriminator template when the tool has no humanCallLabel', () => {
-		const participants: Participant[] = [
+		const participants = indexParticipants([
 			{ id: 'coder', role: 'coder', kind: 'role' },
 			{ id: 'writeFile', role: 'write_file', kind: 'tool' },
-		]
+		])
 		const op = operation('op1', 'call', 'root', 'coder', 'writeFile')
 		expect(labels.resolveOperationLabel(op, participants, 'whimsical', 0)).toBe('Builder is grabbing the Pen It Down gadget')
 		expect(labels.resolveOperationLabel(op, participants, 'detailed', 0)).toBe('role coder is invoking tool write_file (stack root)')
 	})
 
 	test('interpolates both source and destination labels into the rendered operation label', () => {
-		const participants: Participant[] = [
+		const participants = indexParticipants([
 			{ id: 'you', role: 'human', kind: 'human' },
 			{ id: 'orchestrator', role: 'orchestrator', kind: 'role' },
-		]
+		])
 		const op = operation('op1', 'call', 'root', 'you', 'orchestrator')
 		const rendered = labels.resolveOperationLabel(op, participants, 'friendly', 0)
 		expect(rendered).toContain('The human')
@@ -203,20 +209,20 @@ describe('resolveOperationLabel', () => {
 	})
 
 	test('the detailed tier names the raw role ids, kinds, stack, and outcome for troubleshooting', () => {
-		const participants: Participant[] = [
+		const participants = indexParticipants([
 			{ id: 'readFile', role: 'read_file', kind: 'tool' },
 			{ id: 'coder', role: 'coder', kind: 'role' },
-		]
+		])
 		const op = operation('op1', 'return', 'root', 'readFile', 'coder', 'error')
 		expect(labels.resolveOperationLabel(op, participants, 'detailed', 0)).toBe('tool read_file is returning error to role coder (stack root)')
 	})
 
 	test('falls back to the per-kind generic template for an unseeded participant-kind combination', () => {
 		// No specific 'tool->tool' discriminator is seeded, so a call between two tools uses the generic 'call' template at the chosen tier.
-		const participants: Participant[] = [
+		const participants = indexParticipants([
 			{ id: 'readFile', role: 'read_file', kind: 'tool' },
 			{ id: 'writeFile', role: 'write_file', kind: 'tool' },
-		]
+		])
 		const op = operation('op1', 'call', 'root', 'readFile', 'writeFile')
 		expect(labels.resolveOperationLabel(op, participants, 'detailed', 0)).toBe('tool read_file is calling tool write_file (stack root)')
 		expect(labels.resolveOperationLabel(op, participants, 'friendly', 0)).toBe('Read is calling Write')
@@ -283,6 +289,7 @@ describe('end-to-end over the demo scenarios', () => {
 		for (const scenario of scenarios) {
 			const finalFrame = scenario.frames[scenario.frames.length - 1]
 			if (finalFrame === undefined) throw new Error(`scenario "${scenario.id}" has no frames`)
+			const participantsById = indexParticipants(finalFrame.participants)
 			for (const participant of finalFrame.participants) {
 				for (const tier of ['whimsical', 'friendly', 'detailed'] as const) {
 					const label = labels.resolveParticipantLabel(participant, tier)
@@ -295,7 +302,7 @@ describe('end-to-end over the demo scenarios', () => {
 			for (const operation of finalFrame.operations) {
 				for (const tier of ['whimsical', 'friendly', 'detailed'] as const) {
 					const seed = labels.hashString(operation.id)
-					const label = labels.resolveOperationLabel(operation, finalFrame.participants, tier, seed)
+					const label = labels.resolveOperationLabel(operation, participantsById, tier, seed)
 					expect(label.length).toBeGreaterThan(0)
 				}
 			}

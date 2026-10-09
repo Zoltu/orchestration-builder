@@ -288,7 +288,9 @@ function askHumanModel(answered: boolean): InteractionModel {
 }
 
 function labelOf(model: InteractionModel, operation: Operation): string {
-	return labelsModule.resolveOperationLabel(operation, model.participants, TIER, labelsModule.hashString(operation.id))
+	const participantsById = new Map<string, Participant>()
+	for (const participant of model.participants) participantsById.set(participant.id, participant)
+	return labelsModule.resolveOperationLabel(operation, participantsById, TIER, labelsModule.hashString(operation.id))
 }
 
 describe('deriveOperationTooltip', () => {

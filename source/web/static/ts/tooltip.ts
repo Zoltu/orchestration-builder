@@ -234,7 +234,9 @@ export function deriveOperationTooltip(model: InteractionModel, labels: LabelRes
 	if (!isObject(model) || typeof operationId !== 'string') return { title: '', sections: [] }
 	const operation = findOperation(model, operationId)
 	if (operation === undefined) return { title: '', sections: [] }
-	const title = labels.resolveOperationLabel(operation, model.participants, tier, labels.hashString(operation.id))
+	const participantsById = new Map<string, Participant>()
+	for (const participant of model.participants) participantsById.set(participant.id, participant)
+	const title = labels.resolveOperationLabel(operation, participantsById, tier, labels.hashString(operation.id))
 	const section = detailsSectionOf(operationDetails, operationId)
 	return { title, sections: section !== null ? [section] : [] }
 }

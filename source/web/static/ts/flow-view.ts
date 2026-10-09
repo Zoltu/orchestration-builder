@@ -782,16 +782,18 @@ export function deriveNowCaption(model: InteractionModel, labels: LabelResolver,
 	if (status === 'needs_clarification') return 'Waiting for your input…'
 	const operation = activeOperation(model)
 	if (operation === null) return 'Working…'
+	const participantsById = new Map<string, Participant>()
+	for (const participant of model.participants) participantsById.set(participant.id, participant)
 	// A settled call is the working phase: the destination has started its own work, so the caption names what the destination is doing (e.g. "Planning the approach…") rather than the call relationship ("Orchestrator is calling Planner"). The working label is optional per participant; when absent the caption falls back to the operation label so a guild without working labels still renders a caption. The seed is the operation id's hash so the whimsical tier rotates between operations while staying fixed within one, and the working phase reuses the call's seed so transit and working of the same call land on the same whimsical phrase.
 	const seed = labels.hashString(operation.id)
 	if (operation.kind === 'call' && operation.lifecycle === 'settled' && typeof labels.resolveWorkingLabel === 'function') {
-		const destination = model.participants.find((participant) => participant.id === operation.destination)
+		const destination = participantsById.get(operation.destination)
 		if (destination !== undefined) {
 			const working = labels.resolveWorkingLabel(destination, tier, seed)
 			if (working !== null) return `${working}…`
 		}
 	}
-	const label = labels.resolveOperationLabel(operation, model.participants, tier, seed)
+	const label = labels.resolveOperationLabel(operation, participantsById, tier, seed)
 	if (operation.lifecycle === 'in_flight') return `${label}…`
 	return label
 }

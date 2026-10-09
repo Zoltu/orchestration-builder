@@ -51,7 +51,7 @@ export interface LabelConfig {
 
 export interface LabelResolver {
 	resolveParticipantLabel(participant: Participant, tier: LabelTier): string
-	resolveOperationLabel(operation: Operation, participants: Participant[], tier: LabelTier, seed: number): string
+	resolveOperationLabel(operation: Operation, participantsById: ReadonlyMap<string, Participant>, tier: LabelTier, seed: number): string
 	resolveWorkingLabel(participant: Participant, tier: LabelTier, seed: number): string | null
 	hashString(value: string): number
 }
@@ -130,9 +130,9 @@ export function createLabelResolver(config: LabelConfig): LabelResolver {
 	const genericOperationTemplates = visualization?.genericOperationTemplates
 	const workingTemplates = visualization?.workingTemplates
 
-	// Looks up a participant by id in the frame's participant list. A missing id is a model contract violation (every operation endpoint must reference a known participant); failing fast surfaces it rather than rendering a label against undefined.
-	function findParticipant(participants: Participant[], participantId: string): Participant {
-		const found = participants.find((participant) => participant.id === participantId)
+	// Looks up a participant by id in the frame's participant index. A missing id is a model contract violation (every operation endpoint must reference a known participant); failing fast surfaces it rather than rendering a label against undefined. The index is built once per render by the caller so the lookup is O(1) rather than a scan per operation.
+	function requireParticipant(participantsById: ReadonlyMap<string, Participant>, participantId: string): Participant {
+		const found = participantsById.get(participantId)
 		if (found === undefined) throw new Error(`operation references unknown participant id "${participantId}"`)
 		return found
 	}
@@ -172,9 +172,9 @@ export function createLabelResolver(config: LabelConfig): LabelResolver {
 		}
 	}
 
-	function resolveOperationLabel(operation: Operation, participants: Participant[], tier: LabelTier, seed: number): string {
-		const source = findParticipant(participants, operation.source)
-		const destination = findParticipant(participants, operation.destination)
+	function resolveOperationLabel(operation: Operation, participantsById: ReadonlyMap<string, Participant>, tier: LabelTier, seed: number): string {
+		const source = requireParticipant(participantsById, operation.source)
+		const destination = requireParticipant(participantsById, operation.destination)
 		if (operationTemplates === undefined || genericOperationTemplates === undefined) {
 			throw new Error(`no operation template for kind "${operation.kind}" at tier "${tier}" (visualization section missing)`)
 		}
