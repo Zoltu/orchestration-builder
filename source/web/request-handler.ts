@@ -11,8 +11,8 @@ import type { ReadRunListSummary } from './run-list-cache.js'
 import { deriveInteractionModel, deriveInteractionOperationDetail } from './interaction-model-adapter.js'
 import { DEMO_SCENARIOS, deriveDemoFrameModel, deriveDemoFrameOperationDetail, findDemoScenario } from './demo-fixtures.js'
 import type { ReadRunSnapshot } from './snapshot-cache.js'
-
-const MAX_LOG_LINES = 200
+import { deriveVersion, type VersionToken } from './version.js'
+import { buildFlowModel, buildFlowOperationDetail, buildRunList, buildRunView, gatherFlowInputs, gatherRunListInputs, gatherRunViewInputs, MAX_LOG_LINES } from './versioned-views.js'
 
 // The log window endpoint's paging defaults and cap: a 1s poll that wants a compact identity view
 // fetches 50 rows, and no single request may be tricked (or misconfigured) into serializing the
@@ -60,6 +60,28 @@ function json(data: unknown, status = 200): Response {
 	})
 }
 
+// The If-None-Match value a client echoes back may carry the W/ weakness prefix and surrounding quotes; both are stripped and the remaining token is compared exactly (a fixed-size hex digest makes any range or prefix interpretation wrong).
+function ifNoneMatchToken(request: Request): string | null {
+	const header = request.headers.get('if-none-match')
+	if (header === null) return null
+	const trimmed = header.trim()
+	const withoutWeakness = trimmed.startsWith('W/') ? trimmed.slice(2) : trimmed
+	if (withoutWeakness.startsWith('"') && withoutWeakness.endsWith('"') && withoutWeakness.length >= 2) return withoutWeakness.slice(1, -1)
+	return withoutWeakness
+}
+
+// A 304 carries no body; the ETag is echoed so the client can revalidate again, and no-store keeps the browser from heuristically caching the JSON it is revalidating.
+function notModified(version: VersionToken): Response {
+	return new Response(null, { status: 304, headers: { etag: `"${version}"`, 'cache-control': 'no-store' } })
+}
+
+function jsonVersioned(payload: unknown, version: VersionToken): Response {
+	return new Response(JSON.stringify(payload), {
+		status: 200,
+		headers: { 'content-type': 'application/json; charset=utf-8', etag: `"${version}"`, 'cache-control': 'no-store' },
+	})
+}
+
 function handleActiveRun(readRunSnapshot: ReadRunSnapshot, readRunSnapshotStats: ReadRunSnapshotStats, readRunPlanById: ReadRunPlanById, runCheckpointExists: RunCheckpointExists, runSubmission: RunSubmission, runState: RunState): Response {
 	const runId = runSubmission.lastRunId()
 	if (runId === undefined) return json({ ok: false, error: 'no_run' }, 404)
@@ -74,11 +96,19 @@ function handleActiveRunFlow(readRunSnapshot: ReadRunSnapshot, readRunSnapshotSt
 	return runFlowPage(readRunSnapshot, readRunSnapshotStats, runId, query)
 }
 
-function handleGetRunById(readRunSnapshot: ReadRunSnapshot, readRunSnapshotStats: ReadRunSnapshotStats, readRunPlanById: ReadRunPlanById, runCheckpointExists: RunCheckpointExists, runSubmission: RunSubmission, runState: RunState, runId: string): Response {
-	const view = runViewFor(readRunSnapshot, readRunSnapshotStats, readRunPlanById, runCheckpointExists, runId)
-	if (view === null) return json({ ok: false, error: 'not_found' }, 404)
-	// interruptPending reads the shared channel's state, so it describes the active run only: a terminal run viewed while another run is active must report false rather than inherit the active run's pending interrupt.
-	return json({ ...view, interruptPending: runSubmission.activeRunId() === runId && runState.interruptPending() })
+function handleGetRunByIdVersioned(request: Request, runId: string, dependencies: {
+	readRunSnapshotStats: ReadRunSnapshotStats
+	readRunPlanById: ReadRunPlanById
+	runCheckpointExists: RunCheckpointExists
+	runState: RunState
+	activeRunId: () => string | undefined
+	readRunSnapshot: ReadRunSnapshot
+}): Response {
+	const inputs = gatherRunViewInputs(dependencies, runId)
+	if (inputs === null) return json({ ok: false, error: 'not_found' }, 404)
+	const version = deriveVersion(inputs)
+	if (ifNoneMatchToken(request) === version) return notModified(version)
+	return jsonVersioned(buildRunView(inputs, dependencies), version)
 }
 
 function runLogPage(readRunSnapshot: ReadRunSnapshot, readRunSnapshotStats: ReadRunSnapshotStats, runId: string, query: URLSearchParams): Response {
@@ -160,6 +190,24 @@ function runFlowPage(readRunSnapshot: ReadRunSnapshot, readRunSnapshotStats: Rea
 	return json(deriveInteractionModel(snapshot))
 }
 
+function handleGetRunFlowVersioned(request: Request, runId: string, query: URLSearchParams, dependencies: {
+	readRunSnapshotStats: ReadRunSnapshotStats
+	readRunSnapshot: ReadRunSnapshot
+}): Response {
+	// The operation discriminator is folded into the version inputs, so the base model and each operation detail derive distinct tokens and the match check below is safe before the operation is resolved: a base token replayed on a ?operation= URL never matches, and a token for a detail that was never served (a nonexistent id) is never issued.
+	const operationId = query.get('operation')
+	const inputs = gatherFlowInputs(dependencies, runId, operationId)
+	if (inputs === null) return json({ ok: false, error: 'not_found' }, 404)
+	const version = deriveVersion(inputs)
+	if (ifNoneMatchToken(request) === version) return notModified(version)
+	if (inputs.operationId !== null) {
+		const detail = buildFlowOperationDetail(inputs, dependencies)
+		if (detail === null) return json({ ok: false, error: 'not_found' }, 404)
+		return jsonVersioned(detail, version)
+	}
+	return jsonVersioned(buildFlowModel(inputs, dependencies), version)
+}
+
 function runViewFor(readRunSnapshot: ReadRunSnapshot, readRunSnapshotStats: ReadRunSnapshotStats, readRunPlanById: ReadRunPlanById, runCheckpointExists: RunCheckpointExists, runId: string): ReturnType<typeof renderRunView> | null {
 	if (!isKnownRun(readRunSnapshotStats, runId)) return null
 	const snapshot = readRunSnapshot(runId)
@@ -197,12 +245,15 @@ function isKnownRun(readRunSnapshotStats: ReadRunSnapshotStats, runId: string): 
 	return stats.meta !== null || stats.log !== null
 }
 
-function handleListRuns(readRunListSummary: ReadRunListSummary, listRunIds: ListRunIds): Response {
-	const summaries = listRunIds()
-		.slice()
-		.sort((a, b) => (a < b ? 1 : a > b ? -1 : 0))
-		.map((runId) => readRunListSummary(runId))
-	return json(summaries)
+function handleListRunsVersioned(request: Request, dependencies: {
+	listRunIds: ListRunIds
+	readRunSummaryStats: ReadRunSummaryStats
+	readRunListSummary: ReadRunListSummary
+}): Response {
+	const inputs = gatherRunListInputs(dependencies)
+	const version = deriveVersion(inputs)
+	if (ifNoneMatchToken(request) === version) return notModified(version)
+	return jsonVersioned(buildRunList(inputs, dependencies), version)
 }
 
 function handleAnswer(runState: RunState, body: unknown): Response {
@@ -418,6 +469,7 @@ export function createRequestHandler(config: RequestHandlerConfig, serveStatic: 
 	const readRunListSummary = config.readRunListSummary
 	const readRunPlanById = config.readRunPlanById
 	const readRunSnapshotStats = config.readRunSnapshotStats
+	const readRunSummaryStats = config.readRunSummaryStats
 	const listRunIds = config.listRunIds
 	const readProjectSettings = config.readProjectSettings
 	const writeProjectSettings = config.writeProjectSettings
@@ -426,6 +478,19 @@ export function createRequestHandler(config: RequestHandlerConfig, serveStatic: 
 	const resumeErroredRun = config.resumeErroredRun
 	const runCheckpointExists = config.runCheckpointExists
 	const tickScheduler = config.tickScheduler
+
+	// The leaf set the three versioned poll endpoints share; each named handler accepts the subset it directly uses, so the superset is assignable structurally.
+	const versionedDependencies = {
+		readRunSnapshot,
+		readRunSnapshotStats,
+		readRunPlanById,
+		runCheckpointExists,
+		runState,
+		activeRunId: runSubmission.activeRunId,
+		readRunListSummary,
+		readRunSummaryStats,
+		listRunIds,
+	}
 
 	return async (request) => {
 		const url = new URL(request.url)
@@ -437,7 +502,7 @@ export function createRequestHandler(config: RequestHandlerConfig, serveStatic: 
 			if (pathname === '/api/settings') return handleGetSettings(readProjectSettings)
 			if (pathname === '/api/run/flow') return handleActiveRunFlow(readRunSnapshot, readRunSnapshotStats, runSubmission, url.searchParams)
 			if (pathname === '/api/run') return handleActiveRun(readRunSnapshot, readRunSnapshotStats, readRunPlanById, runCheckpointExists, runSubmission, runState)
-			if (pathname === '/api/runs') return handleListRuns(readRunListSummary, listRunIds)
+			if (pathname === '/api/runs') return handleListRunsVersioned(request, versionedDependencies)
 			if (pathname.startsWith('/api/runs/')) {
 				const rest = decodePathSegment(pathname.slice('/api/runs/'.length))
 				if (rest === undefined) return json({ ok: false, error: 'not_found' }, 404)
@@ -448,10 +513,10 @@ export function createRequestHandler(config: RequestHandlerConfig, serveStatic: 
 					const runId = rest.slice(0, slashIndex)
 					if (runId !== '') {
 						if (suffix === 'log') return runLogPage(readRunSnapshot, readRunSnapshotStats, runId, url.searchParams)
-						if (suffix === 'flow') return runFlowPage(readRunSnapshot, readRunSnapshotStats, runId, url.searchParams)
+						if (suffix === 'flow') return handleGetRunFlowVersioned(request, runId, url.searchParams, versionedDependencies)
 					}
 				}
-				return handleGetRunById(readRunSnapshot, readRunSnapshotStats, readRunPlanById, runCheckpointExists, runSubmission, runState, rest)
+				return handleGetRunByIdVersioned(request, rest, versionedDependencies)
 			}
 			if (pathname === '/api/questions') return json(renderPendingQuestions(runState.pendingQuestions()))
 			if (pathname === '/api/demo/scenarios') return handleDemoScenarios()

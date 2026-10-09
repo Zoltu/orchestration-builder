@@ -386,6 +386,8 @@ Optional section setting the deployment-wide default logging level for run logs 
 
 The web UI is the primary interface. The HTTP API exists for programmatic access (e.g. the Foundry). All endpoints return JSON. The server dispatches one run at a time from a durable task queue: tasks submitted while a run is in flight wait in the queue and start when the slot frees (see [`docs/queueing.md`](queueing.md) for the queue's design).
 
+Three polled endpoints — `GET /api/runs`, `GET /api/runs/:id`, and `GET /api/runs/:id/flow` (including its `?operation=<id>` detail variant) — support conditional requests. Each returns an `ETag` that identifies exactly the representation of the requested URL, honors an `If-None-Match` request header by returning `304 Not Modified` with no body when that representation is unchanged (the validator is echoed back so the client can revalidate again), and always sends `Cache-Control: no-store`. Validators are per-URL: the base flow model and each `?operation=<id>` detail are distinct representations with distinct tokens, so a validator obtained from one URL must never be replayed against another — a client that does so receives a fresh `200`, never a spurious `304`.
+
 The browser tab title of the served UI is a service setting, not a deployment field: `ORCHESTRATOR_TITLE` (default `Adaptive Orchestrator`) is substituted into the page's `<title>` element when the static handler serves it, so the configured title is present in the initial HTML and an empty value falls back to the default.
 
 ### `POST /api/runs`
