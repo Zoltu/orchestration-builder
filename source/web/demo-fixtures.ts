@@ -1,6 +1,7 @@
 import type { LogEvent, RunMeta } from '../executor/types.js'
 import { deriveInteractionModel, deriveInteractionOperationDetail, type InteractionOperationDetail } from './interaction-model-adapter.js'
 import type { InteractionModel } from './interaction-model-adapter.js'
+import { withLiveElapsed } from './static/ts/interaction-model.js'
 
 // Event-stream fixtures the demo harness feeds through the real `deriveInteractionModel` adapter (the same derivation `/api/runs/:id/flow` runs), so the harness exercises the product's `LogEvent → InteractionModel` path rather than authored model frames like `scenarios.js`.
 // Each frame is the adapter's output for `events[0..N]` — the model a product poll would see the moment that event had landed.
@@ -395,19 +396,19 @@ export function deriveDemoFrameModel(scenario: DemoScenario, frameIndex: number)
 	const meta = demoScenarioMeta(scenario, frameIndex)
 	const frameEvent = scenario.events[frameIndex]
 	if (frameEvent === undefined) throw new Error(`demo scenario "${scenario.id}" has no frame ${frameIndex}`)
-	const now = frameEvent.timestamp
+	// The adapter leaves an open call's elapsed null (a clock-independent payload); a demo frame's "now" is its last event's stored timestamp, so the harness fills it from that — deterministic per frame and identical to what the product client computes from its wall clock for a live run.
+	const nowMs = Date.parse(frameEvent.timestamp)
 	if (frameIndex !== scenario.events.length - 1) {
-		return deriveInteractionModel({ meta, logEvents: events }, now)
+		return withLiveElapsed(deriveInteractionModel({ meta, logEvents: events }), nowMs)
 	}
-	const model = deriveInteractionModel({ meta: { ...meta, status: 'running' }, logEvents: events }, now)
-	return { ...model, status: meta.status }
+	const model = deriveInteractionModel({ meta: { ...meta, status: 'running' }, logEvents: events })
+	return { ...withLiveElapsed(model, nowMs), status: meta.status }
 }
 
 // One frame operation's details on demand, mirroring deriveDemoFrameModel's event-prefix walk. Status plays no role in the detail derivation, so the terminal-frame stamping the model path applies is not needed here.
 export function deriveDemoFrameOperationDetail(scenario: DemoScenario, frameIndex: number, operationId: string): InteractionOperationDetail | null {
 	const events = scenario.events.slice(0, frameIndex + 1)
 	const meta = demoScenarioMeta(scenario, frameIndex)
-	const frameEvent = scenario.events[frameIndex]
-	if (frameEvent === undefined) throw new Error(`demo scenario "${scenario.id}" has no frame ${frameIndex}`)
-	return deriveInteractionOperationDetail({ meta, logEvents: events }, frameEvent.timestamp, operationId)
+	if (scenario.events[frameIndex] === undefined) throw new Error(`demo scenario "${scenario.id}" has no frame ${frameIndex}`)
+	return deriveInteractionOperationDetail({ meta, logEvents: events }, operationId)
 }

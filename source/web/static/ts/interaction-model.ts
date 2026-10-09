@@ -44,7 +44,7 @@ export interface OperationMetrics {
 	cachedPromptTokens: number | null
 	// The invocation's current context window size: the LAST LLM turn's promptTokens, overwriting on every folded usage — an assignment, not a sum, matching the executor's per-role lastPromptTokens (source/executor/engine.ts). Null under the same never-reported rule as the counters above.
 	lastPromptTokens: number | null
-	// Call start → matching return, or → now while the invocation is still open. Always measured: real time, never a fabricated value (null only on hand-authored models that carry no metrics).
+	// Call start → matching return, or, on a terminal run, start → the run's stored end for a call that never returned (so a finished run's elapsed is frozen). Null while the invocation is still open on a non-terminal run: the server cannot report a clock-independent moving value, so the client fills it in from its own clock (withLiveElapsed). Also null on hand-authored models that carry no metrics.
 	elapsedSeconds: number | null
 }
 
@@ -314,6 +314,29 @@ function sumCounter(accumulated: number | null | undefined, contribution: number
 function latestCounter(accumulated: number | null | undefined, contribution: number | null): number | null {
 	if (contribution !== null) return contribution
 	return accumulated ?? null
+}
+
+// The whole seconds between an ISO timestamp and a caller-supplied now (epoch milliseconds), rounded like the server's settled-span arithmetic and clamped at 0 so a client clock behind the server never yields a negative duration. Null when the timestamp does not parse.
+export function secondsBetweenIso(timestamp: string, nowMs: number): number | null {
+	const then = Date.parse(timestamp)
+	if (Number.isNaN(then)) return null
+	return Math.max(0, Math.round((nowMs - then) / 1000))
+}
+
+// Returns a model whose call operations with a null elapsedSeconds carry the live span from their start to `nowMs`: the server leaves a running call's elapsedSeconds null because a clock-independent payload cannot report a moving value, so the client fills it here from its own clock, while a terminal run's calls already carry the stored span to the run's end and are left untouched. Only call operations are touched — returns never carry metrics (callMetricsByDestination's calls-only contract) — and a call that already reports a span keeps it. A model with nothing to fill is returned unchanged by reference, so the per-model memoization every view helper relies on survives each settled frame.
+export function withLiveElapsed(model: InteractionModel, nowMs: number): InteractionModel {
+	let changed = false
+	const operations = model.operations.map((operation) => {
+		if (operation.kind !== 'call') return operation
+		const metrics = operation.metrics
+		if (metrics === null || metrics.elapsedSeconds !== null) return operation
+		const elapsedSeconds = secondsBetweenIso(operation.startedAt, nowMs)
+		if (elapsedSeconds === null) return operation
+		changed = true
+		return { ...operation, metrics: { ...metrics, elapsedSeconds } }
+	})
+	if (!changed) return model
+	return { ...model, operations }
 }
 
 // True when the stack is not the active stack and still carries open calls. A paused stack's in-flight operations stay in flight (the model never flips lifecycle on pause); this helper is the rule the view reads to freeze a paused stack's lines without touching the model.

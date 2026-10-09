@@ -153,18 +153,18 @@ function runFlowPage(readRunSnapshot: ReadRunSnapshot, readRunSnapshotStats: Rea
 	const snapshot = readRunSnapshot(runId)
 	const operationId = query.get('operation')
 	if (operationId !== null) {
-		const detail = deriveInteractionOperationDetail(snapshot, new Date().toISOString(), operationId)
+		const detail = deriveInteractionOperationDetail(snapshot, operationId)
 		if (detail === null) return json({ ok: false, error: 'not_found' }, 404)
 		return json(detail)
 	}
-	return json(deriveInteractionModel(snapshot, new Date().toISOString()))
+	return json(deriveInteractionModel(snapshot))
 }
 
 function runViewFor(readRunSnapshot: ReadRunSnapshot, readRunSnapshotStats: ReadRunSnapshotStats, readRunPlanById: ReadRunPlanById, runCheckpointExists: RunCheckpointExists, runId: string): ReturnType<typeof renderRunView> | null {
 	if (!isKnownRun(readRunSnapshotStats, runId)) return null
 	const snapshot = readRunSnapshot(runId)
 	// The plan is read per request rather than riding the snapshot cache: it is a separate document the run may gain mid-flight, and the file is small enough that re-reading is free.
-	return renderRunView(snapshot, { maxLogLines: MAX_LOG_LINES, now: new Date().toISOString(), plan: readRunPlanById(runId), checkpointExists: runCheckpointExists(runId) })
+	return renderRunView(snapshot, { maxLogLines: MAX_LOG_LINES, plan: readRunPlanById(runId), checkpointExists: runCheckpointExists(runId) })
 }
 
 // Feeds the scenario's first `frameIndex + 1` events through the real adapter — the same derivation the product's `/api/runs/:id/flow` runs — so the demo harness exercises the product's `LogEvent → InteractionModel` path rather than authored model frames. `?operation=<id>` resolves one operation's details the same way the product's flow endpoint does, so the harness's inspector fetches on demand like the product client.

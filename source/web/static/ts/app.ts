@@ -9,7 +9,7 @@ import { createScrollFollower } from './scroll-follow.js'
 import { createLabelResolver, isLabelTier, TIER_VALUES } from './labels.js'
 import { agentRoleNames, createRoleAccentResolver } from './role-accents.js'
 import { buildInfoFromConfig, formatBuildLabel } from './build-info.js'
-import { isTerminalStatus, rolesOnlyModel, rolesOnlyParticipants } from './interaction-model.js'
+import { isTerminalStatus, rolesOnlyModel, rolesOnlyParticipants, secondsBetweenIso, withLiveElapsed } from './interaction-model.js'
 import { deriveFaviconState, faviconHref } from './favicon.js'
 import { createTooltipDismiss, deriveTooltipDescriptor, isInFlightAskHuman, resolveInspectorScope, resolveTooltipTarget } from './inspector.js'
 import { operationIdsForTooltipDetails, tooltipStyle, Tooltip } from './tooltip.js'
@@ -153,7 +153,8 @@ export interface CurrentActivity {
 }
 
 export interface RunBudgets {
-	elapsedSeconds: number
+	// The settled span the server reports for a finished run, or null while the run is still in progress; the client computes a live figure from startTime and its own clock (see resultMetaLine).
+	elapsedSeconds: number | null
 	toolCalls: number
 	tokensUsed: number | null
 	tokenBreakdown: TokenUsage | null
@@ -2429,9 +2430,9 @@ function SyncInspectorFollower(): NullPayloadEffect {
 // The watch screen fills the viewport below the top bar: a controls row, the flex-filling stage, and the now-caption. The Flow view (product surface) and the Sequence view (debug surface) are independent leaves over the same model; the toggle swaps which renders without a fetch. The sequence view mounts inside a vertical scroll container because its timeline grows long, while the flow view scales to the stage.
 function WatchScreen(state: ApplicationState): Vnode {
 	const labels = state.labelResolver
-	const model = state.flowModel
+	const serverModel = state.flowModel
 	// Before the guild config or the first readable flow frame lands, the stage shows a placeholder rather than a half-built graph; both arrive within the first poll, so the placeholder is transient.
-	if (labels === null || model === null) {
+	if (labels === null || serverModel === null) {
 		const message = state.selectedRunId === null
 			? 'Select a run to see its flow.'
 			: labels === null
@@ -2444,6 +2445,8 @@ function WatchScreen(state: ApplicationState): Vnode {
 		])
 	}
 
+	// The polled flow payload is a pure function of stored data, so an open call's elapsedSeconds is null; fill it from this client's clock once here so every elapsed surface below (node cost lines, top-bar titles, the cost strip, the tooltip) reads a live span through the same helpers.
+	const model = withLiveElapsed(serverModel, state.now)
 	const tier = state.flowTier
 	const lifecycle = state.previousFlowModel !== null ? deriveLifecycle(state.previousFlowModel, model) : undefined
 	const cta = { onclick: OpenResultModal }
@@ -2489,9 +2492,11 @@ function WatchScreen(state: ApplicationState): Vnode {
 function TooltipCardForRun(state: ApplicationState): Vnode | null {
 	const tooltip = state.tooltip
 	if (tooltip === null) return null
-	const model = state.flowModel
+	const serverModel = state.flowModel
 	const labels = state.labelResolver
-	if (model === null || labels === null) return null
+	if (serverModel === null || labels === null) return null
+	// The tooltip's cumulative time reads the same live-filled elapsed the flow view does; the tooltip only opens over the current frame, so filling from the current clock is exact.
+	const model = withLiveElapsed(serverModel, state.now)
 	const descriptor = deriveTooltipDescriptor(model, labels, state.flowTier, tooltip, operationDetailsLookup(state.selectedRunId))
 	if (descriptor.title === '') return null
 	return Tooltip(h, { title: descriptor.title, sections: descriptor.sections, renderMarkdown, style: tooltipStyle(tooltip.rect) })
@@ -2522,14 +2527,18 @@ function QuestionModalForRun(state: ApplicationState): Vnode | null {
 }
 
 // The technical meta line the result modal carries for advanced users: run id, effort, duration, tool-call count, and the token bill with its input/output split in the text, with the exact start/end timestamps on the hover title. Derived from the run view the per-run poll already fetches, so the modal re-opens with no extra request.
-function resultMetaLine(view: RunView): { text: string; title: string } | null {
+function resultMetaLine(view: RunView, nowMs: number): { text: string; title: string } | null {
 	if (typeof view.runId !== 'string') return null
 	// The ingress guard does not validate budgets, so a malformed body can reach this function with the field absent — the widened annotation keeps that defensive check honest instead of trusting the declared type.
 	const budgets: RunBudgets | null | undefined = view.budgets
 	if (budgets === null || budgets === undefined) return null
 	const parts = [view.runId]
 	if (isEffort(view.effort)) parts.push(`effort ${effortLabel(view.effort)}`)
-	parts.push(formatElapsed(budgets.elapsedSeconds))
+	// A run without a stored endTime is still in progress, so its elapsed is computed live from startTime and this client's clock; a finished run uses the server's settled span, which is the same stored-timestamp arithmetic without the clock.
+	const elapsed = view.endTime === null
+		? (typeof view.startTime === 'string' ? secondsBetweenIso(view.startTime, nowMs) : null)
+		: budgets.elapsedSeconds
+	parts.push(formatElapsed(elapsed))
 	parts.push(`${formatNumber(budgets.toolCalls)} tool calls`)
 	const breakdown: TokenUsage | null | undefined = budgets.tokenBreakdown
 	if (isTokenUsage(breakdown)) parts.push(tokensMetaPart(breakdown))
@@ -2555,7 +2564,7 @@ function ResultModalForRun(state: ApplicationState): Vnode | null {
 	if (view === null) return null
 	const descriptor = deriveTerminalResult(view)
 	if (descriptor === undefined) return null
-	const metaLine = resultMetaLine(view)
+	const metaLine = resultMetaLine(view, state.now)
 	return ResultModal(h, {
 		descriptor,
 		runLabel: typeof view.runId === 'string' ? view.runId : null,

@@ -36,11 +36,9 @@ function assertHelpersSensible(model: InteractionModel): void {
 	}
 }
 
-const NOW = '2026-01-01T00:01:00.000Z'
-
 // Resolves one operation's on-demand details, failing the test when the id names no operation.
 function detailOf(events: LogEvent[], runMeta: RunMeta | null, operationId: string): string | null {
-	const detail = deriveInteractionOperationDetail(snapshot(events, runMeta), NOW, operationId)
+	const detail = deriveInteractionOperationDetail(snapshot(events, runMeta), operationId)
 	expect(detail).not.toBeNull()
 	return detail === null ? null : detail.details
 }
@@ -51,7 +49,7 @@ describe('deriveInteractionModel — single-role completion', () => {
 			event('2026-01-01T00:00:00.000Z', 'role_start', { role: 'orchestrator', depth: 0, task: 'do the thing' }),
 			event('2026-01-01T00:00:05.000Z', 'role_finished', { role: 'orchestrator', depth: 0, status: 'success', summary: 'done' }),
 		]
-		const model = deriveInteractionModel(snapshot(events, meta('success')), NOW)
+		const model = deriveInteractionModel(snapshot(events, meta('success')))
 		expect(model.status).toBe('success')
 		expect(model.participants.map((p) => p.role)).toEqual(['human', 'orchestrator'])
 		expect(model.participants.map((p) => p.kind)).toEqual(['human', 'role'])
@@ -79,7 +77,7 @@ describe('deriveInteractionModel — single-role completion', () => {
 			event('2026-01-01T00:00:00.000Z', 'role_start', { role: 'orchestrator', depth: 0, task: 'do the thing' }),
 			event('2026-01-01T00:00:05.000Z', 'role_finished', { role: 'orchestrator', depth: 0, status: 'success', summary: 'done' }),
 		]
-		const model = deriveInteractionModel(snapshot(events, meta('success')), NOW)
+		const model = deriveInteractionModel(snapshot(events, meta('success')))
 		for (const operation of model.operations) {
 			expect(operation).not.toHaveProperty('details')
 		}
@@ -94,7 +92,7 @@ describe('deriveInteractionModel — participant instance ids', () => {
 			event('t0', 'role_start', { role: 'orchestrator', roleId: 'orchestrator-0-1', depth: 0, task: 'the task' }),
 			event('t1', 'role_start', { role: 'coder', roleId: 'coder-1-2', depth: 1, parent: 'orchestrator', parentRoleId: 'orchestrator-0-1', task: 'code it' }),
 		]
-		const model = deriveInteractionModel(snapshot(events, meta('running')), NOW)
+		const model = deriveInteractionModel(snapshot(events, meta('running')))
 		const orchestrator = defined(model.participants[1], 'model.participants[1]')
 		const coder = defined(model.participants[2], 'model.participants[2]')
 		expect(orchestrator.roleId).toBe('orchestrator-0-1')
@@ -108,7 +106,7 @@ describe('deriveInteractionModel — participant instance ids', () => {
 		const events = [
 			event('t0', 'role_start', { role: 'orchestrator', depth: 0, task: 'do the thing' }),
 		]
-		const model = deriveInteractionModel(snapshot(events, meta('running')), NOW)
+		const model = deriveInteractionModel(snapshot(events, meta('running')))
 		const orchestrator = defined(model.participants[1], 'model.participants[1]')
 		expect(orchestrator).not.toHaveProperty('roleId')
 		// Pseudo-roles and tools carry no instance ids either — the human root has none.
@@ -128,7 +126,7 @@ describe('deriveInteractionModel — delegation chain', () => {
 			event('t5', 'llm_call', { role: 'orchestrator', usage: { promptTokens: 80, completionTokens: 10, totalTokens: 90 } }),
 			event('t6', 'role_finished', { role: 'orchestrator', depth: 0, status: 'success', summary: 'wrapped up' }),
 		]
-		const model = deriveInteractionModel(snapshot(events, meta('success')), NOW)
+		const model = deriveInteractionModel(snapshot(events, meta('success')))
 		expect(model.participants.map((p) => `${p.role}:${p.kind}`)).toEqual(['human:human', 'orchestrator:role', 'coder:role'])
 		expect(model.operations).toHaveLength(4)
 		const callYou = defined(model.operations[0], 'model.operations[0]')
@@ -160,7 +158,7 @@ describe('deriveInteractionModel — instance-per-invocation retry', () => {
 			event('t4', 'role_finished', { role: 'coder', depth: 1, status: 'success', summary: 'fixed', parent: 'orchestrator' }),
 			event('t5', 'role_finished', { role: 'orchestrator', depth: 0, status: 'success', summary: 'done' }),
 		]
-		const model = deriveInteractionModel(snapshot(events, meta('success')), NOW)
+		const model = deriveInteractionModel(snapshot(events, meta('success')))
 		const coders = model.participants.filter((p) => p.role === 'coder')
 		expect(coders).toHaveLength(2)
 		expect(defined(coders[0], 'coders[0]').id).not.toBe(defined(coders[1], 'coders[1]').id)
@@ -179,7 +177,7 @@ describe('deriveInteractionModel — in-flight tool node', () => {
 			event('t0', 'role_start', { role: 'coder', depth: 0, task: 'read something' }),
 			event('t1', 'tool_call', { role: 'coder', tool: 'read_file', arguments: '{"path":"README.md"}' }),
 		]
-		const model = deriveInteractionModel(snapshot(events, meta('running')), NOW)
+		const model = deriveInteractionModel(snapshot(events, meta('running')))
 		expect(model.participants.map((p) => `${p.role}:${p.kind}`)).toEqual(['human:human', 'coder:role', 'read_file:tool'])
 		expect(model.operations).toHaveLength(2)
 		const roleCall = defined(model.operations[0], 'model.operations[0]')
@@ -202,7 +200,7 @@ describe('deriveInteractionModel — lingering return leg', () => {
 			event('t1', 'role_start', { role: 'coder', depth: 1, parent: 'orchestrator', task: 'work' }),
 			event('t2', 'role_finished', { role: 'coder', depth: 1, status: 'success', summary: 'done', parent: 'orchestrator' }),
 		]
-		const model = deriveInteractionModel(snapshot(events, meta('running')), NOW)
+		const model = deriveInteractionModel(snapshot(events, meta('running')))
 		expect(model.operations).toHaveLength(3)
 		const coderReturn = defined(model.operations[2], 'model.operations[2]')
 		expect(coderReturn.kind).toBe('return')
@@ -223,7 +221,7 @@ describe('deriveInteractionModel — lingering return leg', () => {
 			event('t2', 'role_finished', { role: 'coder', depth: 1, status: 'success', summary: 'done', parent: 'orchestrator' }),
 			event('t3', 'llm_call', { role: 'orchestrator', usage: { promptTokens: 10, completionTokens: 5, totalTokens: 15 } }),
 		]
-		const model = deriveInteractionModel(snapshot(events, meta('running')), NOW)
+		const model = deriveInteractionModel(snapshot(events, meta('running')))
 		const coderReturn = defined(model.operations[2], 'model.operations[2]')
 		expect(coderReturn.lifecycle).toBe('settled')
 		expect(coderReturn.settledAt).toBe('t3')
@@ -241,7 +239,7 @@ describe('deriveInteractionModel — ask_human question', () => {
 			event('t2', 'human_answer', { id: 'q1', answer: 'react' }),
 			event('t3', 'role_finished', { role: 'orchestrator', depth: 0, status: 'success', summary: 'picked react' }),
 		]
-		const model = deriveInteractionModel(snapshot(events, meta('success')), NOW)
+		const model = deriveInteractionModel(snapshot(events, meta('success')))
 		const humans = model.participants.filter((p) => p.kind === 'human')
 		expect(humans).toHaveLength(2)
 		expect(defined(humans[0], 'humans[0]').id).toBe('human:root')
@@ -264,7 +262,7 @@ describe('deriveInteractionModel — ask_human question', () => {
 			event('t0', 'role_start', { role: 'orchestrator', depth: 0, task: 'decide' }),
 			event('t1', 'ask_human', { id: 'q1', question: 'Which framework?' }),
 		]
-		const model = deriveInteractionModel(snapshot(events, meta('needs_clarification')), NOW)
+		const model = deriveInteractionModel(snapshot(events, meta('needs_clarification')))
 		expect(model.status).toBe('needs_clarification')
 		const callAsk = defined(model.operations[1], 'model.operations[1]')
 		expect(callAsk.lifecycle).toBe('in_flight')
@@ -280,7 +278,7 @@ describe('deriveInteractionModel — per-invocation metrics', () => {
 			event('2026-01-01T00:00:01.000Z', 'llm_call', { role: 'coder', usage: { promptTokens: 100, completionTokens: 20, totalTokens: 120, cachedPromptTokens: 40 } }),
 			event('2026-01-01T00:00:06.000Z', 'role_finished', { role: 'coder', depth: 0, status: 'success' }),
 		]
-		const model = deriveInteractionModel(snapshot(events, meta('success')), NOW)
+		const model = deriveInteractionModel(snapshot(events, meta('success')))
 		const call = defined(model.operations[0], 'model.operations[0]')
 		expect(call.metrics?.tokens).toBe(120)
 		expect(call.metrics?.promptTokens).toBe(100)
@@ -297,7 +295,7 @@ describe('deriveInteractionModel — per-invocation metrics', () => {
 			event('2026-01-01T00:00:01.000Z', 'llm_call', { role: 'coder', usage: { promptTokens: 100, completionTokens: 20, totalTokens: 120, cachedPromptTokens: 40 } }),
 			event('2026-01-01T00:00:02.000Z', 'llm_call', { role: 'coder', usage: { promptTokens: 200, completionTokens: 10, totalTokens: 210, cachedPromptTokens: 0 } }),
 		]
-		const model = deriveInteractionModel(snapshot(events, meta('running')), NOW)
+		const model = deriveInteractionModel(snapshot(events, meta('running')))
 		const call = defined(model.operations[0], 'model.operations[0]')
 		// Assignment semantics: the invocation's current context window size is the LAST turn's 200, never the 300 prompt sum.
 		expect(call.metrics?.lastPromptTokens).toBe(200)
@@ -318,7 +316,7 @@ describe('deriveInteractionModel — per-invocation metrics', () => {
 			event('2026-01-01T00:00:02.000Z', 'llm_call', { role: 'coder', usage: { promptTokens: 100, completionTokens: 20, totalTokens: 120, cachedPromptTokens: 40 } }),
 			event('2026-01-01T00:00:06.000Z', 'role_finished', { role: 'coder', depth: 0, status: 'success' }),
 		]
-		const model = deriveInteractionModel(snapshot(events, meta('success')), NOW)
+		const model = deriveInteractionModel(snapshot(events, meta('success')))
 		const call = defined(model.operations[0], 'model.operations[0]')
 		// 220 = the discarded attempts' 100 + the final attempt's 120; the breakdown sums across both.
 		expect(call.metrics?.tokens).toBe(220)
@@ -338,7 +336,7 @@ describe('deriveInteractionModel — per-invocation metrics', () => {
 			// The summarizer is not a role turn: its spend is run-wide only (render.ts deriveBudgets), so it creates no participant and no operation here.
 			event('2026-01-01T00:00:03.000Z', 'summarizer_llm_call', { usage: { promptTokens: 500, completionTokens: 30, totalTokens: 530 } }),
 		]
-		const model = deriveInteractionModel(snapshot(events, meta('running')), NOW)
+		const model = deriveInteractionModel(snapshot(events, meta('running')))
 		expect(model.operations).toHaveLength(1)
 		expect(model.participants.map((p) => p.role)).toEqual(['human', 'coder'])
 		const call = defined(model.operations[0], 'model.operations[0]')
@@ -346,12 +344,12 @@ describe('deriveInteractionModel — per-invocation metrics', () => {
 		assertHelpersSensible(model)
 	})
 
-	test('a tool call never receives usage, so its token counters stay null while elapsed stays measured', () => {
+	test('a tool call never receives usage, so its token counters stay null and its open elapsed is null', () => {
 		const events = [
 			event('2026-01-01T00:00:00.000Z', 'role_start', { role: 'coder', depth: 0, task: 'work' }),
 			event('2026-01-01T00:00:01.000Z', 'tool_call', { role: 'coder', tool: 'read_file', arguments: '{"path":"README.md"}' }),
 		]
-		const model = deriveInteractionModel(snapshot(events, meta('running')), '2026-01-01T00:00:11.000Z')
+		const model = deriveInteractionModel(snapshot(events, meta('running')))
 		const toolCall = defined(model.operations[1], 'model.operations[1]')
 		expect(toolCall.kind).toBe('call')
 		expect(toolCall.metrics?.tokens).toBeNull()
@@ -359,7 +357,8 @@ describe('deriveInteractionModel — per-invocation metrics', () => {
 		expect(toolCall.metrics?.completionTokens).toBeNull()
 		expect(toolCall.metrics?.cachedPromptTokens).toBeNull()
 		expect(toolCall.metrics?.lastPromptTokens).toBeNull()
-		expect(toolCall.metrics?.elapsedSeconds).toBe(10)
+		// No return has landed, so there is no stored end to span to; the elapsed is null and the client fills it from its own clock.
+		expect(toolCall.metrics?.elapsedSeconds).toBeNull()
 		assertHelpersSensible(model)
 	})
 
@@ -368,15 +367,15 @@ describe('deriveInteractionModel — per-invocation metrics', () => {
 			event('2026-01-01T00:00:00.000Z', 'role_start', { role: 'coder', depth: 0, task: 'work' }),
 			event('2026-01-01T00:00:01.000Z', 'llm_call', { role: 'coder' }),
 		]
-		const model = deriveInteractionModel(snapshot(events, meta('running')), '2026-01-01T00:00:11.000Z')
+		const model = deriveInteractionModel(snapshot(events, meta('running')))
 		const call = defined(model.operations[0], 'model.operations[0]')
 		expect(call.metrics?.tokens).toBeNull()
 		expect(call.metrics?.promptTokens).toBeNull()
 		expect(call.metrics?.completionTokens).toBeNull()
 		expect(call.metrics?.cachedPromptTokens).toBeNull()
 		expect(call.metrics?.lastPromptTokens).toBeNull()
-		// The call opened at role_start (t0), so the measured span to now is 11s.
-		expect(call.metrics?.elapsedSeconds).toBe(11)
+		// The call is still open (no return), so its elapsed is null in the clock-independent payload.
+		expect(call.metrics?.elapsedSeconds).toBeNull()
 		assertHelpersSensible(model)
 	})
 
@@ -385,7 +384,7 @@ describe('deriveInteractionModel — per-invocation metrics', () => {
 			event('2026-01-01T00:00:00.000Z', 'role_start', { role: 'coder', depth: 0, task: 'work' }),
 			event('2026-01-01T00:00:01.000Z', 'llm_call', { role: 'coder', usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 } }),
 		]
-		const model = deriveInteractionModel(snapshot(events, meta('running')), NOW)
+		const model = deriveInteractionModel(snapshot(events, meta('running')))
 		const call = defined(model.operations[0], 'model.operations[0]')
 		expect(call.metrics?.tokens).toBe(0)
 		expect(call.metrics?.promptTokens).toBe(0)
@@ -404,7 +403,7 @@ describe('deriveInteractionModel — per-invocation metrics', () => {
 			event('2026-01-01T00:00:01.000Z', 'llm_call', { role: 'coder', usage: { promptTokens: 10, completionTokens: 5, totalTokens: 15 } }),
 			event('2026-01-01T00:00:02.000Z', 'llm_call', { role: 'coder', usage: { promptTokens: 20, completionTokens: 10, totalTokens: 30, cachedPromptTokens: 7 } }),
 		]
-		const model = deriveInteractionModel(snapshot(events, meta('running')), NOW)
+		const model = deriveInteractionModel(snapshot(events, meta('running')))
 		const call = defined(model.operations[0], 'model.operations[0]')
 		expect(call.metrics?.tokens).toBe(45)
 		expect(call.metrics?.promptTokens).toBe(30)
@@ -413,23 +412,23 @@ describe('deriveInteractionModel — per-invocation metrics', () => {
 		assertHelpersSensible(model)
 	})
 
-	test('an in-flight call counts elapsed up to now when no return has landed', () => {
+	test('an in-flight call reports null elapsed — its live span is the client’s to compute', () => {
 		const events = [
 			event('2026-01-01T00:00:00.000Z', 'role_start', { role: 'coder', depth: 0, task: 'work' }),
 			event('2026-01-01T00:00:01.000Z', 'llm_call', { role: 'coder', usage: { promptTokens: 10, completionTokens: 5, totalTokens: 15 } }),
 		]
-		const model = deriveInteractionModel(snapshot(events, meta('running')), '2026-01-01T00:00:31.000Z')
+		const model = deriveInteractionModel(snapshot(events, meta('running')))
 		const call = defined(model.operations[0], 'model.operations[0]')
 		expect(call.lifecycle).toBe('in_flight')
 		expect(call.metrics?.tokens).toBe(15)
-		expect(call.metrics?.elapsedSeconds).toBe(31)
+		expect(call.metrics?.elapsedSeconds).toBeNull()
 		assertHelpersSensible(model)
 	})
 })
 
 describe('deriveInteractionModel — root human and graceful absence', () => {
 	test('the root human is always present even for an empty or unreadable run', () => {
-		const model = deriveInteractionModel(snapshot([], null), NOW)
+		const model = deriveInteractionModel(snapshot([], null))
 		expect(model.status).toBe('unknown')
 		expect(model.participants).toEqual([{ id: 'human:root', role: 'human', kind: 'human' }])
 		expect(model.operations).toEqual([])
@@ -443,7 +442,7 @@ describe('deriveInteractionModel — root human and graceful absence', () => {
 			event('t0', 'role_start', { role: 'orchestrator', depth: 0, task: 'work' }),
 			event('t1', 'role_finished', { role: 'orchestrator', depth: 0, status: 'success' }),
 		]
-		const model = deriveInteractionModel(snapshot(events, meta('success')), NOW)
+		const model = deriveInteractionModel(snapshot(events, meta('success')))
 		expect(model.participants.every((p) => p.kind !== 'interrupt')).toBe(true)
 		expect(model.operations.every((o) => o.stack === 'main')).toBe(true)
 		expect(terminatesOf(model)).toEqual([])
@@ -459,8 +458,8 @@ describe('deriveInteractionModel — llm_call_start transit/working distinction'
 			event('t1', 'llm_call_start', { role: 'coder' }),
 			event('t2', 'llm_call', { role: 'coder', usage: { promptTokens: 10, completionTokens: 5, totalTokens: 15 } }),
 		]
-		const frame0 = deriveInteractionModel(snapshot(events.slice(0, 1), meta('running')), NOW)
-		const frame1 = deriveInteractionModel(snapshot(events.slice(0, 2), meta('running')), NOW)
+		const frame0 = deriveInteractionModel(snapshot(events.slice(0, 1), meta('running')))
+		const frame1 = deriveInteractionModel(snapshot(events.slice(0, 2), meta('running')))
 		expect(defined(frame0.operations[0], 'frame0.operations[0]').lifecycle).toBe('in_flight')
 		expect(defined(frame1.operations[0], 'frame1.operations[0]').lifecycle).toBe('settled')
 		expect(defined(frame1.operations[0], 'frame1.operations[0]').settledAt).toBe('t1')
@@ -478,10 +477,10 @@ describe('deriveInteractionModel — llm_call_start transit/working distinction'
 			event('t7', 'tool_result', { role: 'coder', tool: 'write_file', kind: 'success', result: { kind: 'success', data: {} } }),
 			event('t8', 'llm_call_start', { role: 'coder' }),
 		]
-		const frame7 = deriveInteractionModel(snapshot(events.slice(0, 8), meta('running')), NOW)
+		const frame7 = deriveInteractionModel(snapshot(events.slice(0, 8), meta('running')))
 		expect(frame7.operations.filter((o) => o.kind === 'return' && o.lifecycle === 'in_flight').length).toBe(1)
 		// Frame 8 (coder llm_call_start): the coder's call transit settles, but the write_file return must still linger — llm_call_start settles only the call transit, not the lingering return.
-		const frame8 = deriveInteractionModel(snapshot(events.slice(0, 9), meta('running')), NOW)
+		const frame8 = deriveInteractionModel(snapshot(events.slice(0, 9), meta('running')))
 		expect(frame8.operations.filter((o) => o.kind === 'return' && o.lifecycle === 'in_flight').length).toBe(1)
 	})
 
@@ -498,7 +497,7 @@ describe('deriveInteractionModel — llm_call_start transit/working distinction'
 			event('t8', 'llm_call_start', { role: 'coder' }),
 			event('t9', 'llm_call', { role: 'coder', usage: { promptTokens: 15, completionTokens: 8, totalTokens: 23 } }),
 		]
-		const frame9 = deriveInteractionModel(snapshot(events.slice(0, 10), meta('running')), NOW)
+		const frame9 = deriveInteractionModel(snapshot(events.slice(0, 10), meta('running')))
 		expect(frame9.operations.filter((o) => o.kind === 'return' && o.lifecycle === 'in_flight').length).toBe(0)
 	})
 
@@ -507,7 +506,7 @@ describe('deriveInteractionModel — llm_call_start transit/working distinction'
 			event('t0', 'role_start', { role: 'coder', depth: 0, task: 'work' }),
 			event('t1', 'llm_call', { role: 'coder', usage: { promptTokens: 10, completionTokens: 5, totalTokens: 15 } }),
 		]
-		const model = deriveInteractionModel(snapshot(events, meta('running')), NOW)
+		const model = deriveInteractionModel(snapshot(events, meta('running')))
 		expect(defined(model.operations[0], 'model.operations[0]').lifecycle).toBe('in_flight')
 	})
 })
@@ -523,7 +522,7 @@ describe('deriveInteractionModel — interrupts, observes, and terminates', () =
 			event('t5', 'role_finished', { role: 'loop_detector', status: 'success', summary: 'no loop' }),
 			event('t6', 'role_finished', { role: 'orchestrator', status: 'success', summary: 'done' }),
 		]
-		const model = deriveInteractionModel(snapshot(events, meta('success')), NOW)
+		const model = deriveInteractionModel(snapshot(events, meta('success')))
 		// An interrupt participant exists and the loop_detector call is on the interrupt stack, not main.
 		const interrupt = defined(model.participants.find((p) => p.kind === 'interrupt'), 'interrupt')
 		expect(interrupt).toBeDefined()
@@ -548,7 +547,7 @@ describe('deriveInteractionModel — interrupts, observes, and terminates', () =
 			event('t3', 'role_start', { role: 'loop_detector', depth: 1, task: 'detect' }),
 			event('t4', 'tool_call', { role: 'loop_detector', tool: 'read_message_window', arguments: '{}' }),
 		]
-		const model = deriveInteractionModel(snapshot(events, meta('running')), NOW)
+		const model = deriveInteractionModel(snapshot(events, meta('running')))
 		// The interrupt stack is active (the latest operations are on it); the main stack is paused with the coder call still open.
 		expect(activeStack(model)).not.toBe('main')
 		const mainChain = callChainOf(model, 'main')
@@ -568,7 +567,7 @@ describe('deriveInteractionModel — interrupts, observes, and terminates', () =
 			event('t4', 'tool_call', { role: 'loop_detector', tool: 'read_message_window', arguments: '{}' }),
 			event('t5', 'observe', { role: 'coder', details: 'peek at the looping coder' }),
 		]
-		const model = deriveInteractionModel(snapshot(events, meta('running')), NOW)
+		const model = deriveInteractionModel(snapshot(events, meta('running')))
 		const observe = defined(observesOf(model)[0], 'observe')
 		expect(observe).toBeDefined()
 		const readTool = defined(model.participants.find((p) => p.role === 'read_message_window'), 'read_message_window participant')
@@ -591,7 +590,7 @@ describe('deriveInteractionModel — interrupts, observes, and terminates', () =
 			event('t4', 'tool_call', { role: 'loop_detector', tool: 'rewind_stack', arguments: '{}' }),
 			event('t5', 'terminate', { role: 'coder', details: 'revert the looping coder' }),
 		]
-		const model = deriveInteractionModel(snapshot(events, meta('running')), NOW)
+		const model = deriveInteractionModel(snapshot(events, meta('running')))
 		const terminate = defined(terminatesOf(model)[0], 'terminate')
 		expect(terminate).toBeDefined()
 		const rewindTool = defined(model.participants.find((p) => p.role === 'rewind_stack'), 'rewind_stack participant')
@@ -612,7 +611,7 @@ describe('deriveInteractionModel — interrupts, observes, and terminates', () =
 			event('t1', 'role_start', { role: 'coder', depth: 1, parent: 'orchestrator', task: 'code' }),
 			event('t2', 'interrupt', {}),
 		]
-		const model = deriveInteractionModel(snapshot(events, meta('running')), NOW)
+		const model = deriveInteractionModel(snapshot(events, meta('running')))
 		// The interrupt has landed but its first call has not: the fresh stack is active and its root is the current worker, while the main stack pauses with the coder call still open.
 		expect(activeStack(model)).not.toBe('main')
 		const interrupt = defined(model.participants.find((p) => p.kind === 'interrupt'), 'interrupt')
@@ -636,7 +635,7 @@ describe('deriveInteractionModel — interrupts, observes, and terminates', () =
 			event('t3', 'role_start', { role: 'loop_detector', depth: 1, task: 'detect' }),
 			event('t4', 'role_finished', { role: 'loop_detector', status: 'success', summary: 'no loop' }),
 		]
-		const resolved = deriveInteractionModel(snapshot(events, meta('running')), NOW)
+		const resolved = deriveInteractionModel(snapshot(events, meta('running')))
 		const interrupt = defined(resolved.participants.find((p) => p.kind === 'interrupt'), 'interrupt')
 		const loopDetector = defined(resolved.participants.find((p) => p.role === 'loop_detector'), 'loop_detector participant')
 		const coder = defined(resolved.participants.find((p) => p.role === 'coder'), 'coder participant')
@@ -651,7 +650,7 @@ describe('deriveInteractionModel — interrupts, observes, and terminates', () =
 		expect(stacksOf(resolved)).toEqual(['main', 'interrupt-1-stack'])
 
 		// The preempted stack's next operation confirms the leg: it settles and the interrupt stack closes out.
-		const resumed = deriveInteractionModel(snapshot([...events, event('t5', 'tool_call', { role: 'coder', tool: 'read_file', arguments: '{}' })], meta('running')), NOW)
+		const resumed = deriveInteractionModel(snapshot([...events, event('t5', 'tool_call', { role: 'coder', tool: 'read_file', arguments: '{}' })], meta('running')))
 		expect(resumed.operations.filter((o) => o.lifecycle === 'in_flight' && o.kind === 'return').length).toBe(0)
 		expect(stacksOf(resumed)).toEqual(['main'])
 		assertHelpersSensible(resumed)
@@ -666,7 +665,7 @@ describe('deriveInteractionModel — interrupts, observes, and terminates', () =
 			event('t4', 'interrupt', {}),
 			event('t5', 'role_start', { role: 'loop_detector', depth: 2, task: 'detect inner' }),
 		]
-		const model = deriveInteractionModel(snapshot(events, meta('running')), NOW)
+		const model = deriveInteractionModel(snapshot(events, meta('running')))
 		// Three stacks render rows: main (root), interrupt-1, interrupt-2.
 		expect(stacksOf(model).length).toBe(3)
 		const interrupts = model.participants.filter((p) => p.kind === 'interrupt')
@@ -687,7 +686,7 @@ describe('deriveInteractionModel — interrupts, observes, and terminates', () =
 			event('t4', 'role_finished', { role: 'loop_detector', status: 'success', summary: 'no loop' }),
 			event('t5', 'tool_call', { role: 'coder', tool: 'read_file', arguments: '{}' }),
 		]
-		const model = deriveInteractionModel(snapshot(events, meta('running')), NOW)
+		const model = deriveInteractionModel(snapshot(events, meta('running')))
 		// The interrupt resolved; the coder's tool call is back on the active main stack.
 		expect(activeStack(model)).toBe('main')
 		const readFile = defined(model.participants.find((p) => p.role === 'read_file'), 'read_file participant')
@@ -709,7 +708,7 @@ describe('deriveInteractionModel — operator inquiry interrupt', () => {
 	}
 
 	test('an inquiry interrupt pushes a new stack rooted at a fresh human asker', () => {
-		const model = deriveInteractionModel(snapshot(inquiryRunEvents(), meta('running')), NOW)
+		const model = deriveInteractionModel(snapshot(inquiryRunEvents(), meta('running')))
 		const asker = defined(model.participants.find((p) => p.kind === 'human' && p.id !== 'human:root'), 'asker')
 		expect(asker).toBeDefined()
 		expect(asker.id).toBe('human:asker:1')
@@ -732,7 +731,7 @@ describe('deriveInteractionModel — operator inquiry interrupt', () => {
 			...inquiryRunEvents(),
 			event('t3', 'role_start', { role: 'inquiry_responder', depth: 2, parent: 'coder', task: 'the generated briefing' }),
 		]
-		const model = deriveInteractionModel(snapshot(events, meta('running')), NOW)
+		const model = deriveInteractionModel(snapshot(events, meta('running')))
 		const responder = defined(model.participants.find((p) => p.role === 'inquiry_responder'), 'inquiry_responder participant')
 		expect(responder).toBeDefined()
 		const call = defined(model.operations.find((o) => o.kind === 'call' && o.destination === responder.id), 'call')
@@ -750,7 +749,7 @@ describe('deriveInteractionModel — operator inquiry interrupt', () => {
 			event('t1', 'interrupt', { trigger: 'inquiry', handler: 'inquiry_responder', target: 'orchestrator-0-1' }),
 			event('t2', 'role_start', { role: 'inquiry_responder', depth: 1, parent: 'orchestrator', task: 'the generated briefing' }),
 		]
-		const model = deriveInteractionModel(snapshot(events, meta('running')), NOW)
+		const model = deriveInteractionModel(snapshot(events, meta('running')))
 		const responder = defined(model.participants.find((p) => p.role === 'inquiry_responder'), 'inquiry_responder participant')
 		const call = defined(model.operations.find((o) => o.kind === 'call' && o.destination === responder.id), 'call')
 		expect(detailOf(events, meta('running'), call.id)).toBe('the generated briefing')
@@ -763,7 +762,7 @@ describe('deriveInteractionModel — operator inquiry interrupt', () => {
 			event('t3', 'role_start', { role: 'inquiry_responder', depth: 2, parent: 'coder', task: 'the generated briefing' }),
 			event('t4', 'role_finished', { role: 'inquiry_responder', depth: 2, status: 'success', summary: 'the coder is writing the page', parent: 'coder' }),
 		]
-		const model = deriveInteractionModel(snapshot(events, meta('running')), NOW)
+		const model = deriveInteractionModel(snapshot(events, meta('running')))
 		// The handler's return closed the inquiry stack's root call: the main stack is active again with the coder still open, and the resolved stack's final return lingers (visible) until the next operation confirms it.
 		expect(activeStack(model)).toBe('main')
 		expect(callChainOf(model, 'main')).toHaveLength(2)
@@ -780,7 +779,7 @@ describe('deriveInteractionModel — operator inquiry interrupt', () => {
 			event('t0', 'role_start', { role: 'orchestrator', depth: 0, task: 'build the site' }),
 			event('t1', 'interrupt', { trigger: 'loop_check', handler: 'loop_detector', target: 'orchestrator-0-1' }),
 		]
-		const model = deriveInteractionModel(snapshot(events, meta('running')), NOW)
+		const model = deriveInteractionModel(snapshot(events, meta('running')))
 		const interrupt = defined(model.participants.find((p) => p.kind === 'interrupt'), 'interrupt')
 		expect(interrupt).toBeDefined()
 		expect(interrupt.id).toBe('interrupt:1')
@@ -798,14 +797,14 @@ describe('deriveInteractionOperationDetail', () => {
 		const events = [
 			event('t0', 'role_start', { role: 'coder', depth: 0, task: 'work' }),
 		]
-		expect(deriveInteractionOperationDetail(snapshot(events, meta('running')), NOW, 'op-9')).toBeNull()
+		expect(deriveInteractionOperationDetail(snapshot(events, meta('running')), 'op-9')).toBeNull()
 	})
 
 	test('an operation without detail material resolves to details null, not an error', () => {
 		const events = [
 			event('t0', 'role_start', { role: 'coder', depth: 0 }),
 		]
-		const detail = deriveInteractionOperationDetail(snapshot(events, meta('running')), NOW, 'op-1')
+		const detail = deriveInteractionOperationDetail(snapshot(events, meta('running')), 'op-1')
 		expect(detail).not.toBeNull()
 		expect(present(detail, 'detail').details).toBeNull()
 	})
@@ -838,11 +837,80 @@ describe('deriveInteractionOperationDetail', () => {
 			event('t0', 'role_start', { role: 'coder', depth: 0, task: 'work' }),
 			event('t1', 'tool_call', { role: 'coder', tool: 'read_file', arguments: '{"path":"README.md"}' }),
 		]
-		const detail = deriveInteractionOperationDetail(snapshot(events, meta('running')), NOW, 'op-2')
+		const detail = deriveInteractionOperationDetail(snapshot(events, meta('running')), 'op-2')
 		expect(present(detail, 'detail').details).toContain('"path": "README.md"')
-		const model = deriveInteractionModel(snapshot(events, meta('running')), NOW)
+		const model = deriveInteractionModel(snapshot(events, meta('running')))
 		for (const operation of model.operations) {
 			expect(operation).not.toHaveProperty('details')
 		}
+	})
+})
+
+describe('deriveInteractionModel — clock independence', () => {
+	// The payload must be a pure function of stored data so an ETag over it can detect change: for the same snapshot, two derivations at different wall-clock moments are deeply equal.
+	test('two derivations of the same snapshot are deeply equal', () => {
+		const events = [
+			event('2026-01-01T00:00:00.000Z', 'role_start', { role: 'orchestrator', depth: 0, task: 'the task' }),
+			event('2026-01-01T00:00:01.000Z', 'llm_call_start', { role: 'orchestrator' }),
+			event('2026-01-01T00:00:02.000Z', 'llm_call', { role: 'orchestrator', usage: { promptTokens: 50, completionTokens: 10, totalTokens: 60 } }),
+			event('2026-01-01T00:00:03.000Z', 'role_start', { role: 'coder', depth: 1, parent: 'orchestrator', task: 'code' }),
+			event('2026-01-01T00:00:04.000Z', 'tool_call', { role: 'coder', tool: 'read_file', arguments: '{}' }),
+		]
+		const first = deriveInteractionModel(snapshot(events, meta('running')))
+		const second = deriveInteractionModel(snapshot(events, meta('running')))
+		expect(second).toEqual(first)
+	})
+
+	test('an open call reports null elapsed while a returned call reports its deterministic start-to-return span', () => {
+		const events = [
+			event('2026-01-01T00:00:00.000Z', 'role_start', { role: 'coder', depth: 0, task: 'work' }),
+			event('2026-01-01T00:00:01.000Z', 'llm_call_start', { role: 'coder' }),
+			event('2026-01-01T00:00:03.000Z', 'role_start', { role: 'critic', depth: 1, parent: 'coder', task: 'review' }),
+			event('2026-01-01T00:00:04.000Z', 'role_finished', { role: 'critic', depth: 1, status: 'success', summary: 'ok', parent: 'coder' }),
+			event('2026-01-01T00:00:09.000Z', 'role_finished', { role: 'coder', depth: 0, status: 'success', summary: 'done' }),
+		]
+		const model = deriveInteractionModel(snapshot(events, meta('success')))
+		// The critic call returns at 00:00:04 (started 00:00:03), a 1s span; the coder call returns at 00:00:09 (started 00:00:00), a 9s span.
+		const criticCall = defined(model.operations.find((operation) => operation.kind === 'call' && operation.destination === defined(model.participants.find((participant) => participant.role === 'critic'), 'critic').id), 'criticCall')
+		const coderCall = defined(model.operations.find((operation) => operation.kind === 'call' && operation.destination === defined(model.participants.find((participant) => participant.role === 'coder'), 'coder').id), 'coderCall')
+		expect(criticCall.metrics?.elapsedSeconds).toBe(1)
+		expect(coderCall.metrics?.elapsedSeconds).toBe(9)
+
+		// The same prefix without the coder's finish leaves the coder call open: its elapsed is null, not a clock-derived figure.
+		const open = deriveInteractionModel(snapshot(events.slice(0, 4), meta('running')))
+		const openCoderCall = defined(open.operations.find((operation) => operation.kind === 'call' && operation.destination === defined(open.participants.find((participant) => participant.role === 'coder'), 'coder').id), 'openCoderCall')
+		expect(openCoderCall.metrics?.elapsedSeconds).toBeNull()
+	})
+
+	test('a terminal run freezes a never-returned call at the stored end, while a running run leaves it null', () => {
+		const events = [
+			event('2026-01-01T00:00:00.000Z', 'role_start', { role: 'coder', depth: 0, task: 'work' }),
+			event('2026-01-01T00:00:01.000Z', 'tool_call', { role: 'coder', tool: 'read_file', arguments: '{}' }),
+		]
+		const terminalMeta: RunMeta = { ...meta('success'), endTime: '2026-01-01T00:00:10.000Z' }
+		const first = deriveInteractionModel(snapshot(events, terminalMeta))
+		const second = deriveInteractionModel(snapshot(events, terminalMeta))
+		const toolCall = defined(first.operations.find((operation) => operation.kind === 'call' && operation.destination.startsWith('tool:')), 'toolCall')
+		// The tool call never returned; on a terminal run its span runs start → meta.endTime, so it is non-null and identical across derivations (the client's clock no longer advances a finished run).
+		expect(toolCall.metrics?.elapsedSeconds).toBe(9)
+		const toolCallAgain = defined(second.operations.find((operation) => operation.kind === 'call' && operation.destination.startsWith('tool:')), 'toolCallAgain')
+		expect(toolCallAgain.metrics?.elapsedSeconds).toBe(toolCall.metrics?.elapsedSeconds)
+		// The same open call on a running run carries null so the browser ticks it live.
+		const running = deriveInteractionModel(snapshot(events, meta('running')))
+		const runningToolCall = defined(running.operations.find((operation) => operation.kind === 'call' && operation.destination.startsWith('tool:')), 'runningToolCall')
+		expect(runningToolCall.metrics?.elapsedSeconds).toBeNull()
+	})
+
+	test('needs_clarification is terminal for elapsed: an open ask_human call freezes at the stored end while staying in flight', () => {
+		const events = [
+			event('2026-01-01T00:00:00.000Z', 'role_start', { role: 'orchestrator', depth: 0, task: 'decide' }),
+			event('2026-01-01T00:00:02.000Z', 'ask_human', { id: 'q1', question: 'Which framework?' }),
+		]
+		const clarificationMeta: RunMeta = { ...meta('needs_clarification'), endTime: '2026-01-01T00:00:12.000Z' }
+		const model = deriveInteractionModel(snapshot(events, clarificationMeta))
+		const askCall = defined(model.operations.find((operation) => operation.kind === 'call' && operation.destination.startsWith('human:answerer')), 'askCall')
+		// The run is terminal for the client's polling set, so the question's elapsed is frozen at the stored end even though the call stays in flight awaiting an answer.
+		expect(askCall.lifecycle).toBe('in_flight')
+		expect(askCall.metrics?.elapsedSeconds).toBe(10)
 	})
 })

@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import type { LogEvent, RunMeta } from '../executor/types.js'
 import { deriveLifecycle, renderFlowView, deriveNowCaption, deriveCostStrip, createColumnTracker, COL_GAP } from './static/ts/flow-view.js'
-import { activeOperation, activeParticipant, activeStack, observesOf, stacksOf } from './static/ts/interaction-model.js'
+import { activeOperation, activeParticipant, activeStack, observesOf, stacksOf, withLiveElapsed } from './static/ts/interaction-model.js'
 import { createLabelResolver } from './static/ts/labels.js'
 import { labelsModule } from './label-resolver-fixture.js'
 import { scenarios } from './static/ts/scenarios.js'
@@ -921,7 +921,9 @@ describe('renderFlowView over the real adapter — the call-metrics seam', () =>
 	}
 
 	function adapterModel(events: LogEvent[], status: RunMeta['status'], now: string): InteractionModel {
-		return deriveInteractionModel({ meta: { runId: 'seam', guildPath: 'g', benchmarkPath: 'b', task: 'work', status, startTime: '2026-01-01T00:00:00.000Z' }, logEvents: events }, now)
+		const model = deriveInteractionModel({ meta: { runId: 'seam', guildPath: 'g', benchmarkPath: 'b', task: 'work', status, startTime: '2026-01-01T00:00:00.000Z' }, logEvents: events })
+		// The adapter's payload is clock-independent (open calls carry null elapsed); the product client fills those from its own clock, so these seam tests do the same with the frame's fixed "now".
+		return withLiveElapsed(model, Date.parse(now))
 	}
 
 	test('an in-flight callee node renders its call’s context figure (the last turn’s prompt size, not the cumulative bill), and the cost strip sums the same call', () => {

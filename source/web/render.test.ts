@@ -25,9 +25,6 @@ import {
 } from './render.ts'
 import { defined, present } from './test-fixtures.js'
 
-// A fixed "now" so renderRunView's elapsed-time output is deterministic; completed runs use meta.endTime regardless, but in-progress views use this value.
-const NOW = '2026-01-01T00:02:00.000Z'
-
 function logEvent(type: string, role: string, timestamp: string, extra: Record<string, unknown> = {}): string {
 	return JSON.stringify({ timestamp, type, payload: { role, ...extra } })
 }
@@ -713,7 +710,7 @@ describe('renderRunView', () => {
 			].join('\n'),
 		})
 
-		const view = renderRunView(snapshot, { maxLogLines: 200, now: NOW })
+		const view = renderRunView(snapshot, { maxLogLines: 200 })
 		expect(view.status).toBe('success')
 		expect(view.runId).toBe('run-1')
 		expect(view.task).toBe('fix the bug')
@@ -727,7 +724,7 @@ describe('renderRunView', () => {
 
 	test('reports unknown status when meta is absent (run in progress)', () => {
 		const snapshot = parseRunSnapshot({ metaText: null, logText: logEvent('llm_call', 'planner', 't1') })
-		const view = renderRunView(snapshot, { maxLogLines: 200, now: NOW })
+		const view = renderRunView(snapshot, { maxLogLines: 200 })
 		expect(view.status).toBe('unknown')
 		expect(view.runId).toBeNull()
 		expect(view.task).toBeNull()
@@ -740,13 +737,13 @@ describe('renderRunView', () => {
 			metaText: JSON.stringify(sampleRunMeta({ effort: 'thorough' })),
 			logText: '',
 		})
-		expect(renderRunView(withEffort, { maxLogLines: 200, now: NOW }).effort).toBe('thorough')
+		expect(renderRunView(withEffort, { maxLogLines: 200 }).effort).toBe('thorough')
 
 		const withoutEffort = parseRunSnapshot({ metaText: JSON.stringify(sampleRunMeta()), logText: '' })
-		expect(renderRunView(withoutEffort, { maxLogLines: 200, now: NOW }).effort).toBeNull()
+		expect(renderRunView(withoutEffort, { maxLogLines: 200 }).effort).toBeNull()
 
 		const inProgress = parseRunSnapshot({ metaText: null, logText: '' })
-		expect(renderRunView(inProgress, { maxLogLines: 200, now: NOW }).effort).toBeNull()
+		expect(renderRunView(inProgress, { maxLogLines: 200 }).effort).toBeNull()
 	})
 
 	test('surfaces the run lineage from meta.continuesFrom, or null when absent or meta is missing', () => {
@@ -754,33 +751,33 @@ describe('renderRunView', () => {
 			metaText: JSON.stringify(sampleRunMeta({ continuesFrom: 'run-20260101-000000' })),
 			logText: '',
 		})
-		expect(renderRunView(continuation, { maxLogLines: 200, now: NOW }).continuesFrom).toBe('run-20260101-000000')
+		expect(renderRunView(continuation, { maxLogLines: 200 }).continuesFrom).toBe('run-20260101-000000')
 
 		const standalone = parseRunSnapshot({ metaText: JSON.stringify(sampleRunMeta()), logText: '' })
-		expect(renderRunView(standalone, { maxLogLines: 200, now: NOW }).continuesFrom).toBeNull()
+		expect(renderRunView(standalone, { maxLogLines: 200 }).continuesFrom).toBeNull()
 
 		const inProgress = parseRunSnapshot({ metaText: null, logText: '' })
-		expect(renderRunView(inProgress, { maxLogLines: 200, now: NOW }).continuesFrom).toBeNull()
+		expect(renderRunView(inProgress, { maxLogLines: 200 }).continuesFrom).toBeNull()
 	})
 
 	test('resumable is true only for an error meta the caller found a checkpoint file for', () => {
 		const errored = parseRunSnapshot({ metaText: JSON.stringify(sampleRunMeta({ status: 'error' })), logText: '' })
-		expect(renderRunView(errored, { maxLogLines: 200, now: NOW, checkpointExists: true }).resumable).toBe(true)
-		expect(renderRunView(errored, { maxLogLines: 200, now: NOW, checkpointExists: false }).resumable).toBe(false)
-		expect(renderRunView(errored, { maxLogLines: 200, now: NOW }).resumable).toBe(false)
+		expect(renderRunView(errored, { maxLogLines: 200, checkpointExists: true }).resumable).toBe(true)
+		expect(renderRunView(errored, { maxLogLines: 200, checkpointExists: false }).resumable).toBe(false)
+		expect(renderRunView(errored, { maxLogLines: 200 }).resumable).toBe(false)
 
 		const succeeded = parseRunSnapshot({ metaText: JSON.stringify(sampleRunMeta()), logText: '' })
-		expect(renderRunView(succeeded, { maxLogLines: 200, now: NOW, checkpointExists: true }).resumable).toBe(false)
+		expect(renderRunView(succeeded, { maxLogLines: 200, checkpointExists: true }).resumable).toBe(false)
 
 		const missingMeta = parseRunSnapshot({ metaText: null, logText: '' })
-		expect(renderRunView(missingMeta, { maxLogLines: 200, now: NOW, checkpointExists: true }).resumable).toBe(false)
+		expect(renderRunView(missingMeta, { maxLogLines: 200, checkpointExists: true }).resumable).toBe(false)
 	})
 
 	test('carries the raw plan markdown through to the view, or null when the caller read none', () => {
 		const snapshot = parseRunSnapshot({ metaText: JSON.stringify(sampleRunMeta()), logText: '' })
-		expect(renderRunView(snapshot, { maxLogLines: 200, now: NOW, plan: '# Plan\n\nstep one' }).plan).toBe('# Plan\n\nstep one')
-		expect(renderRunView(snapshot, { maxLogLines: 200, now: NOW, plan: null }).plan).toBeNull()
-		expect(renderRunView(snapshot, { maxLogLines: 200, now: NOW }).plan).toBeNull()
+		expect(renderRunView(snapshot, { maxLogLines: 200, plan: '# Plan\n\nstep one' }).plan).toBe('# Plan\n\nstep one')
+		expect(renderRunView(snapshot, { maxLogLines: 200, plan: null }).plan).toBeNull()
+		expect(renderRunView(snapshot, { maxLogLines: 200 }).plan).toBeNull()
 	})
 
 	test('truncates the recent log to the last maxLogLines events', () => {
@@ -790,7 +787,7 @@ describe('renderRunView', () => {
 		}
 		const snapshot = parseRunSnapshot({ metaText: null, logText: lines.join('\n') })
 
-		const view = renderRunView(snapshot, { maxLogLines: 3, now: NOW })
+		const view = renderRunView(snapshot, { maxLogLines: 3 })
 		expect(view.recentLog.length).toBe(3)
 		expect(defined(view.recentLog[0], 'view.recentLog[0]').timestamp).toBe('t7')
 		expect(defined(view.recentLog[2], 'view.recentLog[2]').timestamp).toBe('t9')
@@ -801,7 +798,7 @@ describe('renderRunView', () => {
 			metaText: null,
 			logText: logEvent('llm_call', 'planner', 't1'),
 		})
-		const view = renderRunView(snapshot, { maxLogLines: 200, now: NOW })
+		const view = renderRunView(snapshot, { maxLogLines: 200 })
 		expect(view.recentLog.length).toBe(1)
 	})
 
@@ -810,7 +807,7 @@ describe('renderRunView', () => {
 			metaText: JSON.stringify(sampleRunMeta({ result: undefined })),
 			logText: '',
 		})
-		const view = renderRunView(snapshot, { maxLogLines: 200, now: NOW })
+		const view = renderRunView(snapshot, { maxLogLines: 200 })
 		expect(view.result).toBeNull()
 	})
 
@@ -820,7 +817,7 @@ describe('renderRunView', () => {
 			metaText: JSON.stringify(sampleRunMeta({ status: 'error', result: card })),
 			logText: '',
 		})
-		const view = renderRunView(snapshot, { maxLogLines: 200, now: NOW })
+		const view = renderRunView(snapshot, { maxLogLines: 200 })
 		expect(view.result).toEqual(card)
 	})
 
@@ -833,7 +830,7 @@ describe('renderRunView', () => {
 			].join('\n'),
 		})
 
-		const view = renderRunView(snapshot, { maxLogLines: 200, now: NOW })
+		const view = renderRunView(snapshot, { maxLogLines: 200 })
 		expect(view.recentLog.length).toBe(2)
 		expect(view.recentLog[0]).toEqual({
 			index: 0,
@@ -852,19 +849,19 @@ describe('renderRunView', () => {
 		}
 		const snapshot = parseRunSnapshot({ metaText: null, logText: lines.join('\n') })
 
-		const view = renderRunView(snapshot, { maxLogLines: 3, now: NOW })
+		const view = renderRunView(snapshot, { maxLogLines: 3 })
 		expect(view.recentLog.map((entry) => entry.index)).toEqual([7, 8, 9])
 	})
 
 	test('error is null while a run is in progress', () => {
 		const snapshot = parseRunSnapshot({ metaText: null, logText: '' })
-		const view = renderRunView(snapshot, { maxLogLines: 200, now: NOW })
+		const view = renderRunView(snapshot, { maxLogLines: 200 })
 		expect(view.error).toBeNull()
 	})
 
 	test('error is null when a completed run has no error', () => {
 		const snapshot = parseRunSnapshot({ metaText: JSON.stringify(sampleRunMeta()), logText: '' })
-		const view = renderRunView(snapshot, { maxLogLines: 200, now: NOW })
+		const view = renderRunView(snapshot, { maxLogLines: 200 })
 		expect(view.error).toBeNull()
 	})
 
@@ -877,7 +874,7 @@ describe('renderRunView', () => {
 			logText: '',
 		})
 
-		const view = renderRunView(snapshot, { maxLogLines: 200, now: NOW })
+		const view = renderRunView(snapshot, { maxLogLines: 200 })
 		expect(view.error).toEqual({ kind: 'llm_unavailable', message: 'connection refused' })
 	})
 
@@ -890,13 +887,13 @@ describe('renderRunView', () => {
 			].join('\n'),
 		})
 
-		const view = renderRunView(snapshot, { maxLogLines: 200, now: NOW })
+		const view = renderRunView(snapshot, { maxLogLines: 200 })
 		expect(view.currentActivity).toEqual({ role: 'coder', summary: 'coder · write_file' })
 	})
 
 	test('currentActivity is null for an empty log', () => {
 		const snapshot = parseRunSnapshot({ metaText: null, logText: '' })
-		const view = renderRunView(snapshot, { maxLogLines: 200, now: NOW })
+		const view = renderRunView(snapshot, { maxLogLines: 200 })
 		expect(view.currentActivity).toBeNull()
 	})
 
@@ -908,7 +905,7 @@ describe('renderRunView', () => {
 				logEvent('tool_call', 'planner', 't2', { tool: 'finish' }),
 			].join('\n'),
 		})
-		const view = renderRunView(snapshot, { maxLogLines: 200, now: NOW })
+		const view = renderRunView(snapshot, { maxLogLines: 200 })
 		expect(view.roleTree).toBeNull()
 		expect(view.roles.length).toBe(1)
 	})
@@ -924,7 +921,7 @@ describe('renderRunView', () => {
 				JSON.stringify({ timestamp: 't5', type: 'role_finished', payload: { role: 'orchestrator', depth: 0, status: 'success' } }),
 			].join('\n'),
 		})
-		const view = renderRunView(snapshot, { maxLogLines: 200, now: NOW })
+		const view = renderRunView(snapshot, { maxLogLines: 200 })
 		expect(view.roleTree).not.toBeNull()
 		const roleTree = present(view.roleTree, 'view.roleTree')
 		expect(roleTree.length).toBe(1)
@@ -944,7 +941,7 @@ describe('renderRunView', () => {
 			].join('\n'),
 		})
 
-		const view = renderRunView(snapshot, { maxLogLines: 200, now: NOW })
+		const view = renderRunView(snapshot, { maxLogLines: 200 })
 		expect(view.questionHistory.length).toBe(2)
 		expect(view.questionHistory[0]).toEqual({
 			id: 'q1',
@@ -970,8 +967,25 @@ describe('renderRunView', () => {
 			].join('\n'),
 		})
 
-		const view = renderRunView(snapshot, { maxLogLines: 200, now: NOW })
+		const view = renderRunView(snapshot, { maxLogLines: 200 })
 		expect(view.questionHistory).toEqual([])
+	})
+
+	test('two renders of the same snapshot are deeply equal — the payload is clock-independent', () => {
+		// The run view feeds an ETag over stored data, so two derivations at different wall-clock moments must serialize identically.
+		const snapshot = parseRunSnapshot({
+			metaText: JSON.stringify(sampleRunMeta({ startTime: '2026-01-01T00:00:00.000Z', endTime: '2026-01-01T00:01:00.000Z' })),
+			logText: [
+				logEvent('llm_call', 'planner', '2026-01-01T00:00:01.000Z'),
+				logEvent('role_finished', 'planner', '2026-01-01T00:00:02.000Z', { status: 'success' }),
+			].join('\n'),
+		})
+		const first = renderRunView(snapshot, { maxLogLines: 200 })
+		const second = renderRunView(snapshot, { maxLogLines: 200 })
+		expect(second).toEqual(first)
+		// An in-progress run (no stored endTime) reports null elapsed, not a clock-derived figure.
+		const inProgress = parseRunSnapshot({ metaText: JSON.stringify(sampleRunMeta({ startTime: '2026-01-01T00:00:00.000Z', endTime: undefined })), logText: '' })
+		expect(renderRunView(inProgress, { maxLogLines: 200 }).budgets.elapsedSeconds).toBeNull()
 	})
 })
 
@@ -1172,23 +1186,23 @@ describe('deriveBudgets', () => {
 
 	test('derives elapsed time from meta.startTime to meta.endTime for a completed run', () => {
 		const meta = sampleRunMeta({ startTime: '2026-01-01T00:00:00.000Z', endTime: '2026-01-01T00:01:30.000Z' })
-		const budgets = deriveBudgets([], meta, '2026-06-24T00:00:00.000Z')
+		const budgets = deriveBudgets([], meta)
 		expect(budgets.elapsedSeconds).toBe(90)
 	})
 
-	test('derives elapsed time from the first log event to now for an in-progress run (meta null)', () => {
+	test('reports null elapsed for an in-progress run (meta null) — a live figure is the client’s to compute', () => {
 		const logEvents: LogEvent[] = [
 			{ timestamp: '2026-01-01T00:00:00.000Z', type: 'llm_call', payload: { role: 'planner' } },
 			toolCallEvent('planner', '2026-01-01T00:00:10.000Z', 'read_file'),
 		]
-		const budgets = deriveBudgets(logEvents, null, '2026-01-01T00:00:40.000Z')
-		expect(budgets.elapsedSeconds).toBe(40)
+		const budgets = deriveBudgets(logEvents, null)
+		expect(budgets.elapsedSeconds).toBeNull()
 	})
 
-	test('clamps elapsed to 0 when now precedes the start (client/server clock skew)', () => {
-		const meta = sampleRunMeta({ startTime: '2026-01-01T00:01:00.000Z' })
-		const budgets = deriveBudgets([], meta, '2026-01-01T00:00:00.000Z')
-		expect(budgets.elapsedSeconds).toBe(0)
+	test('reports null elapsed for a run whose meta carries no stored endTime', () => {
+		const meta = sampleRunMeta({ startTime: '2026-01-01T00:01:00.000Z', endTime: undefined })
+		const budgets = deriveBudgets([], meta)
+		expect(budgets.elapsedSeconds).toBeNull()
 	})
 
 	test('counts tool_call events across all roles', () => {
@@ -1199,7 +1213,7 @@ describe('deriveBudgets', () => {
 			toolCallEvent('coder', 't3', 'read_file'),
 			{ timestamp: 't4', type: 'tool_result', payload: { role: 'coder', tool: 'write_file', kind: 'success' } },
 		]
-		expect(deriveBudgets(logEvents, meta, NOW).toolCalls).toBe(3)
+		expect(deriveBudgets(logEvents, meta).toolCalls).toBe(3)
 	})
 
 	test('sums totalTokens from llm_call usage fields across roles', () => {
@@ -1208,7 +1222,7 @@ describe('deriveBudgets', () => {
 			llmCallEvent('planner', 't1', { promptTokens: 100, completionTokens: 20, totalTokens: 120 }),
 			llmCallEvent('coder', 't2', { promptTokens: 200, completionTokens: 50, totalTokens: 250 }),
 		]
-		expect(deriveBudgets(logEvents, meta, NOW).tokensUsed).toBe(370)
+		expect(deriveBudgets(logEvents, meta).tokensUsed).toBe(370)
 	})
 
 	test('returns null tokens when no llm_call event carries usage', () => {
@@ -1217,8 +1231,8 @@ describe('deriveBudgets', () => {
 			{ timestamp: 't1', type: 'llm_call', payload: { role: 'planner' } },
 			toolCallEvent('planner', 't2', 'read_file'),
 		]
-		expect(deriveBudgets(logEvents, meta, NOW).tokensUsed).toBeNull()
-		expect(deriveBudgets(logEvents, meta, NOW).tokenBreakdown).toBeNull()
+		expect(deriveBudgets(logEvents, meta).tokensUsed).toBeNull()
+		expect(deriveBudgets(logEvents, meta).tokenBreakdown).toBeNull()
 	})
 
 	test('sums usage from the events that carry it and skips those that do not', () => {
@@ -1227,7 +1241,7 @@ describe('deriveBudgets', () => {
 			{ timestamp: 't1', type: 'llm_call', payload: { role: 'planner' } },
 			llmCallEvent('coder', 't2', { promptTokens: 40, completionTokens: 10, totalTokens: 50 }),
 		]
-		expect(deriveBudgets(logEvents, meta, NOW).tokensUsed).toBe(50)
+		expect(deriveBudgets(logEvents, meta).tokensUsed).toBe(50)
 	})
 
 	test('does not throw on a malformed llm_call payload', () => {
@@ -1236,11 +1250,11 @@ describe('deriveBudgets', () => {
 			{ timestamp: 't1', type: 'llm_call', payload: 'broken' },
 			{ timestamp: 't2', type: 'llm_call', payload: { role: 'coder', usage: 'not-an-object' } },
 		]
-		expect(deriveBudgets(logEvents, meta, NOW).tokensUsed).toBeNull()
+		expect(deriveBudgets(logEvents, meta).tokensUsed).toBeNull()
 	})
 
-	test('returns zero elapsed and zero tool calls for an empty log with no meta', () => {
-		expect(deriveBudgets([], null, NOW)).toEqual({ elapsedSeconds: 0, toolCalls: 0, tokensUsed: null, tokenBreakdown: null })
+	test('returns null elapsed and zero tool calls for an empty log with no meta', () => {
+		expect(deriveBudgets([], null)).toEqual({ elapsedSeconds: null, toolCalls: 0, tokensUsed: null, tokenBreakdown: null })
 	})
 
 	test('breaks tokens into prompt, cached prompt, and completion buckets', () => {
@@ -1249,7 +1263,7 @@ describe('deriveBudgets', () => {
 			llmCallEvent('planner', 't1', { promptTokens: 100, completionTokens: 20, totalTokens: 120, cachedPromptTokens: 60 }),
 			llmCallEvent('coder', 't2', { promptTokens: 200, completionTokens: 50, totalTokens: 250 }),
 		]
-		expect(deriveBudgets(logEvents, meta, NOW).tokenBreakdown).toEqual({
+		expect(deriveBudgets(logEvents, meta).tokenBreakdown).toEqual({
 			promptTokens: 300,
 			cachedPromptTokens: 60,
 			completionTokens: 70,
@@ -1262,7 +1276,7 @@ describe('deriveBudgets', () => {
 		const logEvents: LogEvent[] = [
 			llmCallEvent('planner', 't1', { promptTokens: 100, completionTokens: 20, totalTokens: 120 }),
 		]
-		const breakdown = present(deriveBudgets(logEvents, meta, NOW).tokenBreakdown, 'tokenBreakdown')
+		const breakdown = present(deriveBudgets(logEvents, meta).tokenBreakdown, 'tokenBreakdown')
 		expect(breakdown.cachedPromptTokens).toBe(0)
 		expect(breakdown.promptTokens).toBe(100)
 	})
@@ -1273,7 +1287,7 @@ describe('deriveBudgets', () => {
 			{ timestamp: 't1', type: 'llm_retry', payload: { role: 'coder', roleId: 'coder-0-1', discardedAttempts: 2, usage: { promptTokens: 90, completionTokens: 10, totalTokens: 100 } } },
 			llmCallEvent('coder', 't2', { promptTokens: 100, completionTokens: 20, totalTokens: 120 }),
 		]
-		const budgets = deriveBudgets(logEvents, meta, NOW)
+		const budgets = deriveBudgets(logEvents, meta)
 		expect(budgets.tokensUsed).toBe(220)
 		const breakdown = present(budgets.tokenBreakdown, 'tokenBreakdown')
 		expect(breakdown.promptTokens).toBe(190)
@@ -1286,7 +1300,7 @@ describe('deriveBudgets', () => {
 			{ timestamp: 't1', type: 'llm_retry', payload: { role: 'coder', roleId: 'coder-0-1', discardedAttempts: 1 } },
 			llmCallEvent('coder', 't2', { promptTokens: 40, completionTokens: 10, totalTokens: 50 }),
 		]
-		expect(deriveBudgets(logEvents, meta, NOW).tokensUsed).toBe(50)
+		expect(deriveBudgets(logEvents, meta).tokensUsed).toBe(50)
 	})
 
 	test('summarizer_llm_call usage sums into the run-wide totals without naming a role', () => {
@@ -1295,7 +1309,7 @@ describe('deriveBudgets', () => {
 			{ timestamp: 't1', type: 'summarizer_llm_call', payload: { usage: { promptTokens: 500, completionTokens: 30, totalTokens: 530 } } },
 			llmCallEvent('coder', 't2', { promptTokens: 40, completionTokens: 10, totalTokens: 50 }),
 		]
-		expect(deriveBudgets(logEvents, meta, NOW).tokensUsed).toBe(580)
+		expect(deriveBudgets(logEvents, meta).tokensUsed).toBe(580)
 	})
 
 	test('does not throw on a malformed llm_retry or summarizer_llm_call payload', () => {
@@ -1304,7 +1318,7 @@ describe('deriveBudgets', () => {
 			{ timestamp: 't1', type: 'llm_retry', payload: 'broken' },
 			{ timestamp: 't2', type: 'summarizer_llm_call', payload: { usage: 'not-an-object' } },
 		]
-		expect(deriveBudgets(logEvents, meta, NOW).tokensUsed).toBeNull()
+		expect(deriveBudgets(logEvents, meta).tokensUsed).toBeNull()
 	})
 })
 

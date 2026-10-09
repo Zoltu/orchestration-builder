@@ -595,7 +595,7 @@ describe('deriveRoleTooltip over the real adapter — the call-metrics seam', ()
 			logEvent(2, 'llm_call', { role: 'coder', usage: { promptTokens: 100, completionTokens: 20, totalTokens: 120, cachedPromptTokens: 40 } }),
 			logEvent(6, 'role_finished', { role: 'coder', depth: 0, status: 'success' }),
 		]
-		const model = deriveInteractionModel({ meta: { runId: 'seam', guildPath: 'g', benchmarkPath: 'b', task: 'work', status: 'success', startTime: events[0]?.timestamp ?? '' }, logEvents: events }, '2026-01-01T00:01:00.000Z')
+		const model = deriveInteractionModel({ meta: { runId: 'seam', guildPath: 'g', benchmarkPath: 'b', task: 'work', status: 'success', startTime: events[0]?.timestamp ?? '' }, logEvents: events })
 		const result = deriveRoleTooltip(model, labelsModule, TIER, 'coder')
 		expect(result.sections.map((s) => s.label)).toEqual(['invocations', 'total time', 'total tokens'])
 		// 180 total = the retry's 60 + the call's 120; the cached 40 rides inside the input figure.

@@ -564,7 +564,8 @@ export interface TokenUsage {
 }
 
 export interface Budgets {
-	elapsedSeconds: number
+	// The settled span from meta.startTime to meta.endTime, or null while the run is still in progress (no stored end). A live figure is the client's to compute from startTime and its own clock, so this payload stays a pure function of stored data.
+	elapsedSeconds: number | null
 	toolCalls: number
 	tokensUsed: number | null
 	tokenBreakdown: TokenUsage | null
@@ -589,17 +590,13 @@ function usageOf(payload: unknown): { promptTokens: number; completionTokens: nu
 	return { promptTokens, completionTokens, cachedPromptTokens, totalTokens }
 }
 
-export function deriveBudgets(logEvents: LogEvent[], meta: RunMeta | null, now: string): Budgets {
-	const startTime = meta !== null ? meta.startTime : (logEvents[0]?.timestamp ?? null)
-	const endTime = meta !== null && meta.endTime !== undefined ? meta.endTime : now
-
-	let elapsedSeconds = 0
-	if (startTime !== null) {
-		const startMs = Date.parse(startTime)
-		const endMs = Date.parse(endTime)
-		if (!Number.isNaN(startMs) && !Number.isNaN(endMs)) {
-			elapsedSeconds = Math.max(0, Math.round((endMs - startMs) / 1000))
-		}
+export function deriveBudgets(logEvents: LogEvent[], meta: RunMeta | null): Budgets {
+	// The settled span is the only elapsed a pure function of stored data can report; a run without an endTime is still in progress, and its live elapsed is the client's to compute from startTime and its own clock. The log's first event is deliberately not a fallback for a missing startTime: meta.startTime is the run's declared start, and a log-derived start would drift from it.
+	let elapsedSeconds: number | null = null
+	if (meta !== null && meta.endTime !== undefined) {
+		const startMs = Date.parse(meta.startTime)
+		const endMs = Date.parse(meta.endTime)
+		if (!Number.isNaN(startMs) && !Number.isNaN(endMs)) elapsedSeconds = Math.max(0, Math.round((endMs - startMs) / 1000))
 	}
 
 	let toolCalls = 0
@@ -766,7 +763,6 @@ export interface RunView {
 
 export interface RenderRunViewOptions {
 	maxLogLines: number
-	now: string
 	// The raw plan Markdown the caller read for this run; omitted (absent document) and null both mean "no plan".
 	plan?: string | null
 	// Whether a checkpoint file exists for this run, read per request by the caller; omitted reads as false.
@@ -801,7 +797,7 @@ export function renderRunView(snapshot: RunSnapshot, options: RenderRunViewOptio
 		currentActivity,
 		questionHistory: deriveQuestionHistory(snapshot.logEvents),
 		interrupts: deriveInterruptHistory(snapshot.logEvents),
-		budgets: deriveBudgets(snapshot.logEvents, meta, options.now),
+		budgets: deriveBudgets(snapshot.logEvents, meta),
 	}
 }
 

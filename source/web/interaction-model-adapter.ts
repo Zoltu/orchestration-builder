@@ -1,6 +1,7 @@
 import type { LogEvent, RunMeta } from '../executor/types.js'
 import { isObject } from '../executor/validation.js'
 import type { RunSnapshot } from './render.js'
+import { isTerminalStatus } from './static/ts/interaction-model.js'
 import type { InteractionModel, Operation, OperationOutcome, Participant, ParticipantKind, RunStatus, StackRecord } from './static/ts/interaction-model.js'
 
 // The InteractionModel shape this adapter produces is the contract the browser view modules
@@ -144,10 +145,10 @@ interface DerivedModel {
 	detailSources: Map<string, OperationDetailSource>
 }
 
-function deriveModel(snapshot: RunSnapshot, now: string): DerivedModel {
+function deriveModel(snapshot: RunSnapshot): DerivedModel {
 	const status = runStatusOf(snapshot.meta)
 	// A run that is running, waiting on a question (needs_clarification), or has no readable meta
-	// (unknown) still has something in flight at `now`; a finished run (success/error) has settled.
+	// (unknown) still has something in flight at derivation time; a finished run (success/error) has settled.
 	const runActive = status === 'running' || status === 'needs_clarification' || status === 'unknown'
 
 	const rootParticipant: Participant = { id: ROOT_HUMAN_ID, role: 'human', kind: 'human' }
@@ -571,6 +572,13 @@ function deriveModel(snapshot: RunSnapshot, now: string): DerivedModel {
 		}
 	}
 
+	// The stored end of a terminal run: meta.endTime when present, else the last log event's timestamp. Read once here so neither the defensive settle nor the elapsed fallback consults the clock, keeping the payload a pure function of stored data.
+	const lastLogEvent = snapshot.logEvents.length > 0 ? snapshot.logEvents[snapshot.logEvents.length - 1] : undefined
+	const lastEventTimestamp = lastLogEvent === undefined ? null : lastLogEvent.timestamp
+	const terminalTime = snapshot.meta?.endTime ?? lastEventTimestamp
+	// Terminal is the client's own polling set (interaction-model.ts isTerminalStatus), the one app.ts reads to stop the per-run poll. Matching that set keeps the elapsed deterministic for exactly the runs whose client clock no longer advances the view; it includes needs_clarification, a run awaiting a human answer that is likewise not polled, so its open ask_human call must freeze too. runActive above deliberately stays as it is (needs_clarification still reads as in flight for lifecycle); only the elapsed is frozen here.
+	const runTerminal = isTerminalStatus(status)
+
 	for (const record of allCallRecords) {
 		const op = record.operation
 		if (record.returnTimestamp !== null) {
@@ -588,14 +596,16 @@ function deriveModel(snapshot: RunSnapshot, now: string): DerivedModel {
 			op.settledAt = null
 			op.lifecycle = 'in_flight'
 		} else {
-			// A terminal run should have no open calls; defensively settle one that does at `now`.
-			op.settledAt = now
+			// A terminal run should have no open calls; defensively settle one that does at the run's stored end, or — when meta carries none — at the last log event, never at the wall clock, so the payload stays a pure function of stored data.
+			op.settledAt = terminalTime ?? op.startedAt
 			op.lifecycle = 'settled'
 		}
-		// The per-invocation span runs to the matching return, or to `now` while the invocation is still open (the transit boundary marks the working phase, not the invocation's end).
+		// The per-invocation span runs to the matching return; a call with no return on a terminal run spans to the run's stored end (terminalTime, the same value the defensive settle records), while a call still open on a non-terminal run has no stored end, so its elapsed is null and the client fills it from its own clock (withLiveElapsed).
 		const elapsed = record.returnTimestamp !== null
 			? secondsBetween(op.startedAt, record.returnTimestamp)
-			: secondsBetween(op.startedAt, now)
+			: runTerminal
+				? secondsBetween(op.startedAt, terminalTime ?? op.startedAt)
+				: null
 		op.metrics = { tokens: record.tokens, promptTokens: record.promptTokens, completionTokens: record.completionTokens, cachedPromptTokens: record.cachedPromptTokens, lastPromptTokens: record.lastPromptTokens, elapsedSeconds: elapsed }
 	}
 
@@ -618,8 +628,8 @@ function deriveModel(snapshot: RunSnapshot, now: string): DerivedModel {
 	return { model: { participants, operations, status, stacks: stackRecords }, detailSources }
 }
 
-export function deriveInteractionModel(snapshot: RunSnapshot, now: string): InteractionModel {
-	return deriveModel(snapshot, now).model
+export function deriveInteractionModel(snapshot: RunSnapshot): InteractionModel {
+	return deriveModel(snapshot).model
 }
 
 export interface InteractionOperationDetail {
@@ -633,8 +643,8 @@ export interface InteractionOperationDetail {
 // operation in the model — a stale id from a frame the poll has since replaced — which the endpoint
 // surfaces as a 404; an operation that exists but carries no detail material resolves to
 // `details: null`.
-export function deriveInteractionOperationDetail(snapshot: RunSnapshot, now: string, operationId: string): InteractionOperationDetail | null {
-	const { model, detailSources } = deriveModel(snapshot, now)
+export function deriveInteractionOperationDetail(snapshot: RunSnapshot, operationId: string): InteractionOperationDetail | null {
+	const { model, detailSources } = deriveModel(snapshot)
 	const operation = model.operations.find((candidate) => candidate.id === operationId)
 	if (operation === undefined) return null
 	const source = detailSources.get(operationId)

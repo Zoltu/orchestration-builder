@@ -9,7 +9,9 @@ import {
 	observesOf,
 	rolesOnlyModel,
 	rolesOnlyParticipants,
+	secondsBetweenIso,
 	stacksOf,
+	withLiveElapsed,
 } from './static/ts/interaction-model.js'
 
 // The helpers arrive typed from the module's JSDoc. Pulling the model type off activeStack's parameter lets the inline literals below be contextually checked against the JSDoc shape without a cast.
@@ -577,5 +579,63 @@ describe('callMetricsByDestination', () => {
 		const lookup = callMetricsByDestination(model)
 		expect(lookup.get('orch')).toBeUndefined()
 		expect(callMetricsByDestination(model)).toBe(lookup)
+	})
+})
+
+describe('secondsBetweenIso', () => {
+	test('rounds to whole seconds and clamps a clock behind the timestamp to zero', () => {
+		const now = Date.parse('2026-01-01T00:00:10.500Z')
+		expect(secondsBetweenIso('2026-01-01T00:00:00.000Z', now)).toBe(11)
+		expect(secondsBetweenIso('2026-01-01T00:00:05.000Z', now)).toBe(6)
+		// A client clock behind the server's start never yields a negative duration.
+		expect(secondsBetweenIso('2026-01-01T00:00:20.000Z', now)).toBe(0)
+	})
+
+	test('returns null for an unparseable timestamp', () => {
+		expect(secondsBetweenIso('not-a-date', Date.now())).toBeNull()
+	})
+})
+
+describe('withLiveElapsed', () => {
+	function openCall(metrics: InteractionModel['operations'][number]['metrics']): InteractionModel {
+		return {
+			participants: [
+				{ id: 'you', role: 'human', kind: 'human' },
+				{ id: 'coder', role: 'coder', kind: 'role' },
+			],
+			operations: [
+				{ id: 'op1', kind: 'call', stack: 'root', source: 'you', destination: 'coder', startedAt: '2026-01-01T00:00:00.000Z', settledAt: null, lifecycle: 'in_flight', outcome: null, metrics },
+			],
+			status: 'running',
+		}
+	}
+
+	test('fills an open call’s null elapsed from the supplied clock', () => {
+		const model = openCall({ tokens: 10, promptTokens: 8, completionTokens: 2, cachedPromptTokens: null, lastPromptTokens: 8, elapsedSeconds: null })
+		const live = withLiveElapsed(model, Date.parse('2026-01-01T00:00:07.000Z'))
+		expect(live.operations[0]?.metrics?.elapsedSeconds).toBe(7)
+		// The tokens the server did report are untouched.
+		expect(live.operations[0]?.metrics?.tokens).toBe(10)
+		// The original model is never mutated.
+		expect(model.operations[0]?.metrics?.elapsedSeconds).toBeNull()
+	})
+
+	test('leaves a reported span and a metrics-less call untouched, and returns the same model when nothing needs filling', () => {
+		const settled = openCall({ tokens: null, promptTokens: null, completionTokens: null, cachedPromptTokens: null, lastPromptTokens: null, elapsedSeconds: 5 })
+		expect(withLiveElapsed(settled, Date.parse('2026-01-01T00:00:07.000Z'))).toBe(settled)
+
+		const noMetrics = openCall(null)
+		expect(withLiveElapsed(noMetrics, Date.parse('2026-01-01T00:00:07.000Z'))).toBe(noMetrics)
+	})
+
+	test('never touches a return operation’s metrics', () => {
+		const model: InteractionModel = {
+			participants: [{ id: 'you', role: 'human', kind: 'human' }],
+			operations: [
+				{ id: 'op1', kind: 'return', stack: 'root', source: 'you', destination: 'you', startedAt: '2026-01-01T00:00:00.000Z', settledAt: null, lifecycle: 'in_flight', outcome: 'success', metrics: null },
+			],
+			status: 'running',
+		}
+		expect(withLiveElapsed(model, Date.parse('2026-01-01T00:00:07.000Z'))).toBe(model)
 	})
 })
