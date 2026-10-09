@@ -34,6 +34,7 @@ const FAKE_HTML = '<p>shared body paragraph</p>'
 
 class FakeConverter {
 	makeHtml(text: string): string {
+		makeHtmlCalls += 1
 		if (text !== MARKDOWN_TEXT) throw new Error(`unexpected markdown: ${text}`)
 		return FAKE_HTML
 	}
@@ -47,6 +48,7 @@ interface FakeDomNode {
 	childNodes: FakeDomNode[]
 }
 
+let makeHtmlCalls = 0
 let parseCalls = 0
 
 class FakeDOMParser {
@@ -60,6 +62,7 @@ class FakeDOMParser {
 
 describe('createMarkdownRenderer — fresh vnodes per render', () => {
 	beforeEach(() => {
+		makeHtmlCalls = 0
 		parseCalls = 0
 		Reflect.set(globalThis, 'window', { showdown: { Converter: FakeConverter } })
 		Reflect.set(globalThis, 'DOMParser', FakeDOMParser)
@@ -78,6 +81,8 @@ describe('createMarkdownRenderer — fresh vnodes per render', () => {
 		expect(secondRender).not.toBe(firstRender)
 		// The second render hit the memoized neutral tree (the parse-and-sanitize pass ran once) yet still rebuilt every vnode from it.
 		expect(parseCalls).toBe(1)
+		// The cache is consulted before showdown runs, so the second render must not reach makeHtml at all; counting it locks in that the lookup precedes the expensive conversion rather than merely preceding the parse.
+		expect(makeHtmlCalls).toBe(1)
 		const firstVnodes: FakeVnode[] = []
 		const secondVnodes: FakeVnode[] = []
 		collectVnodes(firstRender, firstVnodes)

@@ -89,6 +89,13 @@ export function createMarkdownRenderer<V>(h: Hyperscript<V>): (text: string) => 
 	}
 
 	function textToVnodes(text: string): (V | string)[] {
+		const cachedTree = cache.get(text)
+		if (cachedTree !== undefined) {
+			// Re-insert on hit so the Map's insertion order tracks recency and eviction removes the least-recently-used entry, not the least-recently-inserted one.
+			cache.delete(text)
+			cache.set(text, cachedTree)
+			return htmlNodesToVnodes(cachedTree, h)
+		}
 		const activeConverter = ensureConverter()
 		if (activeConverter === null || typeof activeConverter.makeHtml !== 'function') return [text]
 		let html: unknown
@@ -99,13 +106,6 @@ export function createMarkdownRenderer<V>(h: Hyperscript<V>): (text: string) => 
 		}
 		if (typeof html !== 'string') return [text]
 		const highlightedHtml = highlightCodeBlocks(html)
-		const cachedTree = cache.get(text)
-		if (cachedTree !== undefined) {
-			// Re-insert on hit so the Map's insertion order tracks recency and eviction removes the least-recently-used entry, not the least-recently-inserted one.
-			cache.delete(text)
-			cache.set(text, cachedTree)
-			return htmlNodesToVnodes(cachedTree, h)
-		}
 		const sanitized = sanitizeNodes(parseHtmlToNodes(highlightedHtml))
 		cache.set(text, sanitized)
 		while (cache.size > MARKDOWN_CACHE_MAX) {
