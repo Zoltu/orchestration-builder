@@ -1,4 +1,4 @@
-import type { ListRunIds, ProjectSettings, ReadProjectSettings, ReadRunMetaById, ReadRunPlanById, ReadRunSnapshotStats, ReadRunSummaryStats, ReadTaskQueue, RunCheckpointExists, WriteProjectSettings, WriteTaskQueue } from '../executor/persistence.js'
+import type { ListRunIds, ProjectSettings, ReadProjectSettings, ReadRunMetaById, ReadRunPlanById, ReadRunSnapshotStats, ReadTaskQueue, RunCheckpointExists, WriteProjectSettings, WriteTaskQueue } from '../executor/persistence.js'
 import { isRunIdShape } from '../executor/run-id.js'
 import type { DeploymentConfig, EffortLevel, GuildConfig, LogLevel, ToolManifest } from '../executor/types.js'
 import { isEffortLevel, isLogLevel, isObject, isTerminalRunStatus } from '../executor/validation.js'
@@ -6,17 +6,20 @@ import { cancelWaitingItem, editWaitingItem, enqueueAtHead, enqueueAtTail, norma
 import type { RunState } from '../executor/run-state.js'
 import type { ResumeErroredRun, RunSubmission } from '../executor/run-submission.js'
 import { paginateLogEvents, parseRunMeta, renderConfig, renderProjectSettings, renderPendingQuestions, renderRunView, formatLogAsText, formatLogDetailSections, foldLlmCallSent, filterLogEventsForInstance } from './render.js'
+import type { RunSummary } from './render.js'
 import type { BuildInfo } from './build-info.js'
 import type { ReadRunListSummary } from './run-list-cache.js'
 import { deriveInteractionModel, deriveInteractionOperationDetail } from './interaction-model-adapter.js'
 import type { InteractionModel } from './interaction-model-adapter.js'
 import type { FlowEnvelopeFor } from './flow-replica-registry.js'
+import type { RunListEnvelopeFor } from './run-list-replica.js'
 import { RUN_STATUS_ENTITY_ID } from './static/ts/flow-collections.js'
 import type { FlowReplicaState } from './static/ts/flow-collections.js'
+import type { RunListReplicaState, RunSummaryEntity } from './static/ts/run-list-collections.js'
 import { DEMO_SCENARIOS, deriveDemoFrameModel, deriveDemoFrameOperationDetail, findDemoScenario } from './demo-fixtures.js'
 import type { ReadRunSnapshot } from './snapshot-cache.js'
 import { deriveVersion, type VersionToken } from './version.js'
-import { buildFlowModel, buildFlowOperationDetail, buildRunList, buildRunView, gatherFlowInputs, gatherRunListInputs, gatherRunViewInputs, MAX_LOG_LINES } from './versioned-views.js'
+import { buildFlowModel, buildFlowOperationDetail, buildRunView, gatherFlowInputs, gatherRunViewInputs, MAX_LOG_LINES } from './versioned-views.js'
 
 // The log window endpoint's paging defaults and cap: a 1s poll that wants a compact identity view
 // fetches 50 rows, and no single request may be tricked (or misconfigured) into serializing the
@@ -33,7 +36,6 @@ export interface RequestHandlerConfig {
 	readRunSnapshot: ReadRunSnapshot
 	readRunMetaById: ReadRunMetaById
 	readRunListSummary: ReadRunListSummary
-	readRunSummaryStats: ReadRunSummaryStats
 	readRunPlanById: ReadRunPlanById
 	readRunSnapshotStats: ReadRunSnapshotStats
 	listRunIds: ListRunIds
@@ -52,6 +54,8 @@ export interface RequestHandlerConfig {
 	build: BuildInfo | null
 	// The flow endpoint's entity-diff envelope: a per-run server replica (see flow-replica-registry.ts) answers the base flow route with `unchanged`/`delta`/`snapshot` instead of re-sending the whole model each poll.
 	flowEnvelopeFor: FlowEnvelopeFor
+	// The run-list endpoint's entity-diff envelope: a single server replica (see run-list-replica.ts) answers GET /api/runs with `unchanged`/`delta`/`snapshot` instead of re-sending the whole list each poll.
+	runListEnvelopeFor: RunListEnvelopeFor
 }
 
 // The static-asset leaf: given a GET path that matched no API route, produce the response. Injected so the routing below is exercisable without touching the filesystem or a socket. Async because the index route reads the served body to substitute the page title (see server.ts createServeStatic).
@@ -272,15 +276,30 @@ function isKnownRun(readRunSnapshotStats: ReadRunSnapshotStats, runId: string): 
 	return stats.meta !== null || stats.log !== null
 }
 
-function handleListRunsVersioned(request: Request, dependencies: {
+// Converts a server run summary to the entity-diff entity: the run id becomes the entity's `id` (the collection key) and the wire `runId` is restored by runSummariesFromReplicaState on reconstruction.
+function runSummaryEntityFor(summary: RunSummary): RunSummaryEntity {
+	return {
+		id: summary.runId,
+		status: summary.status,
+		task: summary.task,
+		effort: summary.effort,
+		startTime: summary.startTime,
+		endTime: summary.endTime,
+		result: summary.result,
+		error: summary.error,
+		summary: summary.summary,
+	}
+}
+
+// GET /api/runs ships an entity-diff envelope keyed off the client's `have` revision instead of the whole list with an ETag: a steady poll transfers only the changed runs. The list is built newest-first (run ids sort newest-first) so the snapshot's collection order already matches the display order, though entity-diff treats collections as unordered and the client sorts on apply regardless.
+function handleListRuns(query: URLSearchParams, dependencies: {
 	listRunIds: ListRunIds
-	readRunSummaryStats: ReadRunSummaryStats
 	readRunListSummary: ReadRunListSummary
+	runListEnvelopeFor: RunListEnvelopeFor
 }): Response {
-	const inputs = gatherRunListInputs(dependencies)
-	const version = deriveVersion(inputs)
-	if (ifNoneMatchToken(request) === version) return notModified(version)
-	return jsonVersioned(buildRunList(inputs, dependencies), version)
+	const runIds = dependencies.listRunIds().slice().sort((a, b) => (a < b ? 1 : a > b ? -1 : 0))
+	const state: RunListReplicaState = { runs: runIds.map((runId) => runSummaryEntityFor(dependencies.readRunListSummary(runId))) }
+	return jsonNoStore(dependencies.runListEnvelopeFor(state, query.get('have')))
 }
 
 function handleAnswer(runState: RunState, body: unknown): Response {
@@ -496,7 +515,6 @@ export function createRequestHandler(config: RequestHandlerConfig, serveStatic: 
 	const readRunListSummary = config.readRunListSummary
 	const readRunPlanById = config.readRunPlanById
 	const readRunSnapshotStats = config.readRunSnapshotStats
-	const readRunSummaryStats = config.readRunSummaryStats
 	const listRunIds = config.listRunIds
 	const readProjectSettings = config.readProjectSettings
 	const writeProjectSettings = config.writeProjectSettings
@@ -506,8 +524,9 @@ export function createRequestHandler(config: RequestHandlerConfig, serveStatic: 
 	const runCheckpointExists = config.runCheckpointExists
 	const tickScheduler = config.tickScheduler
 	const flowEnvelopeFor = config.flowEnvelopeFor
+	const runListEnvelopeFor = config.runListEnvelopeFor
 
-	// The leaf set the three versioned poll endpoints share; each named handler accepts the subset it directly uses, so the superset is assignable structurally.
+	// The leaf set the two versioned poll endpoints share; each named handler accepts the subset it directly uses, so the superset is assignable structurally.
 	const versionedDependencies = {
 		readRunSnapshot,
 		readRunSnapshotStats,
@@ -515,10 +534,14 @@ export function createRequestHandler(config: RequestHandlerConfig, serveStatic: 
 		runCheckpointExists,
 		runState,
 		activeRunId: runSubmission.activeRunId,
-		readRunListSummary,
-		readRunSummaryStats,
-		listRunIds,
 		flowEnvelopeFor,
+	}
+
+	// The run list's leaves: unlike the versioned endpoints it derives no version token server-side (the envelope's revision is the revalidation), so it needs only the run-id listing, the summary reader, and its replica.
+	const runListDependencies = {
+		listRunIds,
+		readRunListSummary,
+		runListEnvelopeFor,
 	}
 
 	return async (request) => {
@@ -531,7 +554,7 @@ export function createRequestHandler(config: RequestHandlerConfig, serveStatic: 
 			if (pathname === '/api/settings') return handleGetSettings(readProjectSettings)
 			if (pathname === '/api/run/flow') return handleActiveRunFlow(readRunSnapshot, readRunSnapshotStats, flowEnvelopeFor, runSubmission, url.searchParams)
 			if (pathname === '/api/run') return handleActiveRun(readRunSnapshot, readRunSnapshotStats, readRunPlanById, runCheckpointExists, runSubmission, runState)
-			if (pathname === '/api/runs') return handleListRunsVersioned(request, versionedDependencies)
+			if (pathname === '/api/runs') return handleListRuns(url.searchParams, runListDependencies)
 			if (pathname.startsWith('/api/runs/')) {
 				const rest = decodePathSegment(pathname.slice('/api/runs/'.length))
 				if (rest === undefined) return json({ ok: false, error: 'not_found' }, 404)

@@ -1,0 +1,159 @@
+import { canonicalSerialize, defineCollection, reduceServerResponse } from './entity-diff/index.js'
+import type { CollectionDefinitions, EntityHasher, ReplicaState } from './entity-diff/index.js'
+import { isObject } from './guards.js'
+import type { RunStatus } from './interaction-model.js'
+
+// The result card and run-level error a run summary carries, declared structurally here so this browser-pure module never imports the server render module (whose ResultCard is the same wire shape).
+export interface RunResultCard {
+	status: 'success' | 'error' | 'needs_clarification'
+	summary: string
+	artifacts?: string[]
+	error?: { kind: string; message?: string; details?: unknown }
+	detail?: string
+}
+
+export interface RunSummaryError {
+	kind: string
+	message: string
+}
+
+// The run-list entity. entity-diff keys a collection by `id`, so the entity carries the run id as its `id`; `runSummariesFromReplicaState` restores the wire's `runId` field on reconstruction. Every field below can change while a run is in flight (a status flips, an end time lands, a result or error card appears, the generated summary arrives), so the versionOf covers all of them.
+export interface RunSummaryEntity {
+	id: string
+	status: RunStatus
+	task: string | null
+	effort: string | null
+	startTime: string | null
+	endTime: string | null
+	result: RunResultCard | null
+	error: RunSummaryError | null
+	summary: string | null
+}
+
+// The run-list summary as the client reads it (GET /api/runs), structurally the server's renderRunSummary output with the entity's `id` renamed back to `runId`.
+export interface RunSummary {
+	runId: string
+	status: RunStatus
+	task: string | null
+	effort: string | null
+	startTime: string | null
+	endTime: string | null
+	result: RunResultCard | null
+	error: RunSummaryError | null
+	summary: string | null
+}
+
+export interface RunListCollections {
+	runs: RunSummaryEntity
+}
+
+function isRunStatus(value: unknown): value is RunStatus {
+	return value === 'running' || value === 'success' || value === 'error' || value === 'needs_clarification' || value === 'interrupted' || value === 'unknown'
+}
+
+function isNullableString(value: unknown): value is string | null {
+	return value === null || typeof value === 'string'
+}
+
+function isStringArray(value: unknown): value is string[] {
+	if (!Array.isArray(value)) return false
+	for (const item of value) {
+		if (typeof item !== 'string') return false
+	}
+	return true
+}
+
+function isResultCardStatus(value: unknown): value is RunResultCard['status'] {
+	return value === 'success' || value === 'error' || value === 'needs_clarification'
+}
+
+// The card's nested error validates its identifying fields only: `details` is an opaque machine payload the server preserves but never constrains, so the guard must not reject it.
+function isResultCardError(value: unknown): value is { kind: string; message?: string; details?: unknown } {
+	if (!isObject(value)) return false
+	if (typeof value['kind'] !== 'string') return false
+	const message = value['message']
+	if (message !== undefined && typeof message !== 'string') return false
+	return true
+}
+
+function isResultCard(value: unknown): value is RunResultCard {
+	if (!isObject(value)) return false
+	if (!isResultCardStatus(value['status'])) return false
+	if (typeof value['summary'] !== 'string') return false
+	const artifacts = value['artifacts']
+	if (artifacts !== undefined && !isStringArray(artifacts)) return false
+	const error = value['error']
+	if (error !== undefined && !isResultCardError(error)) return false
+	const detail = value['detail']
+	if (detail !== undefined && typeof detail !== 'string') return false
+	return true
+}
+
+function isRunSummaryError(value: unknown): value is RunSummaryError {
+	if (!isObject(value)) return false
+	if (typeof value['kind'] !== 'string') return false
+	if (typeof value['message'] !== 'string') return false
+	return true
+}
+
+function isRunSummaryEntity(value: unknown): value is RunSummaryEntity {
+	if (!isObject(value)) return false
+	if (typeof value['id'] !== 'string' || value['id'] === '') return false
+	if (!isRunStatus(value['status'])) return false
+	if (!isNullableString(value['task'])) return false
+	if (!isNullableString(value['effort'])) return false
+	if (!isNullableString(value['startTime'])) return false
+	if (!isNullableString(value['endTime'])) return false
+	const result = value['result']
+	if (result !== null && !isResultCard(result)) return false
+	const error = value['error']
+	if (error !== null && !isRunSummaryError(error)) return false
+	if (!isNullableString(value['summary'])) return false
+	return true
+}
+
+// A cheap change detector: it serializes the mutable fields (not the identity-bearing id) canonically, so a change to any field bumps the entity version while an unchanged entity is stable. canonicalSerialize escapes strings, so free-text task/summary content cannot shift field boundaries and collide two different summaries.
+function runSummaryVersionOf(summary: RunSummaryEntity): string {
+	return canonicalSerialize([summary.status, summary.task, summary.effort, summary.startTime, summary.endTime, summary.result, summary.error, summary.summary])
+}
+
+export const runListDefinitions: CollectionDefinitions<RunListCollections> = {
+	runs: defineCollection(isRunSummaryEntity, runSummaryVersionOf),
+}
+
+export type RunListReplicaState = ReplicaState<RunListCollections>
+
+export function emptyRunListReplicaState(): RunListReplicaState {
+	return { runs: [] }
+}
+
+// Rebuilds the summaries the history view reads. Unlike the flow collections the run list is NOT append-ordered — the server prepends a new run — so the client must impose its own order: run ids are timestamp-encoded and sort lexicographically newest-first, so descending by id yields the newest-first display order.
+export function runSummariesFromReplicaState(state: RunListReplicaState): RunSummary[] {
+	const summaries: RunSummary[] = state.runs.map((entity) => ({
+		runId: entity.id,
+		status: entity.status,
+		task: entity.task,
+		effort: entity.effort,
+		startTime: entity.startTime,
+		endTime: entity.endTime,
+		result: entity.result,
+		error: entity.error,
+		summary: entity.summary,
+	}))
+	summaries.sort((left, right) => (left.runId < right.runId ? 1 : left.runId > right.runId ? -1 : 0))
+	return summaries
+}
+
+// The outcome of reducing a run-list endpoint envelope: the four entity-diff reactions plus the summaries reconstructed from the resulting state. A non-applying reaction carries null summaries, and only the three applying reactions carry a version (a response the client cannot apply leaves the held version in place).
+export type RunListEnvelopeResult =
+	| { outcome: 'unchanged' | 'applied' | 'snapshot'; state: RunListReplicaState; version: string; summaries: RunSummary[] }
+	| { outcome: 'needsSnapshot' | 'invalid'; state: RunListReplicaState; version: string | null; summaries: null }
+
+// Reduces one run-list envelope against the replica the client holds and reconstructs the newest-first summaries, so the poll action keeps one state/version/summaries triple instead of re-deriving the list at every call site. On needsSnapshot the server could not answer from the client's base, so the caller re-fetches without a `have` and the server replies with a full snapshot.
+export function applyRunListEnvelope(state: RunListReplicaState, version: string | null, raw: unknown, hasher: EntityHasher): RunListEnvelopeResult {
+	const reaction = reduceServerResponse(runListDefinitions, hasher, state, version, raw)
+	if (reaction.kind === 'unchanged') return { outcome: 'unchanged', state: reaction.state, version: reaction.version, summaries: runSummariesFromReplicaState(reaction.state) }
+	if (reaction.kind === 'applied') return { outcome: 'applied', state: reaction.state, version: reaction.version, summaries: runSummariesFromReplicaState(reaction.state) }
+	if (reaction.kind === 'snapshot') return { outcome: 'snapshot', state: reaction.state, version: reaction.version, summaries: runSummariesFromReplicaState(reaction.state) }
+	return { outcome: reaction.kind, state: reaction.state, version: reaction.version, summaries: null }
+}

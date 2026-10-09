@@ -4,11 +4,13 @@ import type { RunState } from '../executor/run-state.ts'
 import type { ResumeErroredRun, RunSubmission } from '../executor/run-submission.ts'
 import type { TaskQueue } from '../executor/task-queue.ts'
 import type { DeploymentConfig, GuildConfig, RunMeta } from '../executor/types.ts'
-import { applyDelta } from './static/ts/entity-diff/index.js'
+import { applyDelta, createEntityHasher } from './static/ts/entity-diff/index.js'
 import { flowDefinitions, flowModelFromReplicaState } from './static/ts/flow-collections.js'
+import { applyRunListEnvelope, emptyRunListReplicaState, runListDefinitions, runSummariesFromReplicaState } from './static/ts/run-list-collections.js'
 import { createRequestHandler, type RequestHandler } from './request-handler.ts'
 import { createRunListCache } from './run-list-cache.ts'
 import { createFlowReplicaRegistry, type FlowReplicaRegistryOptions } from './flow-replica-registry.ts'
+import { createRunListReplica } from './run-list-replica.ts'
 import { parseRunSnapshot } from './render.ts'
 import type { ReadRunSnapshot } from './snapshot-cache.ts'
 
@@ -118,6 +120,7 @@ function createVersioningHarness(initialRuns: Array<[string, StoredRun]>, flowRe
 	const writeQueue = () => {}
 	const resumeErroredRun: ResumeErroredRun = () => ({ ok: false, error: 'run_not_found' })
 	const flowReplicaRegistry = createFlowReplicaRegistry(flowReplicaOptions)
+	const runListReplica = createRunListReplica({ epoch: 'versioning-epoch', historyLimit: 64 })
 
 	const handler = createRequestHandler(
 		{
@@ -129,7 +132,6 @@ function createVersioningHarness(initialRuns: Array<[string, StoredRun]>, flowRe
 			readRunSnapshot,
 			readRunMetaById,
 			readRunListSummary,
-			readRunSummaryStats,
 			readRunPlanById,
 			readRunSnapshotStats,
 			listRunIds,
@@ -142,6 +144,7 @@ function createVersioningHarness(initialRuns: Array<[string, StoredRun]>, flowRe
 			tickScheduler: async () => {},
 			build: null,
 			flowEnvelopeFor: flowReplicaRegistry.envelopeFor,
+			runListEnvelopeFor: runListReplica.envelopeFor,
 		},
 		async () => new Response('static body'),
 	)
@@ -356,32 +359,60 @@ describe('flow-model envelope and run-list conditional requests', () => {
 		expect(response.status).toBe(404)
 	})
 
-	test('the run list 304s on an unchanged poll', async () => {
-		const { handler } = createVersioningHarness([['run-1', storedRun('run-1')], ['run-2', storedRun('run-2')]])
-		const etag = requireEtag(await handler(get('/api/runs')))
-		const response = await handler(get('/api/runs', etag))
-		expect(response.status).toBe(304)
-		expect(await response.text()).toBe('')
-	})
-
-	test('the run-list token changes when a run summary changes', async () => {
+	test('the run list returns a snapshot, then unchanged, then a delta whose application reconstructs the list', async () => {
 		const { handler, runs } = createVersioningHarness([['run-1', storedRun('run-1')]])
-		const etag = requireEtag(await handler(get('/api/runs')))
+		const first = await handler(get('/api/runs'))
+		expect(first.status).toBe(200)
+		expect(first.headers.get('etag')).toBeNull()
+		expect(first.headers.get('cache-control')).toBe('no-store')
+		const snapshot = await first.json()
+		expect(snapshot.kind).toBe('snapshot')
+		expect(typeof snapshot.version).toBe('string')
+		expect(typeof snapshot.contentHash).toBe('string')
+		expect(runSummariesFromReplicaState(snapshot.collections).map((summary) => summary.runId)).toEqual(['run-1'])
+		// The client helper must verify the server's snapshot content hash against the shared definitions, so the two sides agree on every entity version.
+		const applied = applyRunListEnvelope(emptyRunListReplicaState(), null, snapshot, createEntityHasher())
+		expect(applied.outcome).toBe('snapshot')
+		expect(applied.summaries?.map((summary) => summary.runId)).toEqual(['run-1'])
+
+		const unchanged = await handler(get(`/api/runs?have=${encodeURIComponent(snapshot.version)}`))
+		expect(await unchanged.json()).toEqual({ kind: 'unchanged', version: snapshot.version })
+
 		const run = storedRunOrThrow(runs, 'run-1')
 		run.summaryText = 'a generated summary'
 		run.summaryMtimeMs = 2
-		const response = await handler(get('/api/runs', etag))
-		expect(response.status).toBe(200)
-		expect(response.headers.get('etag')).not.toBe(etag)
-		expect((await response.json())[0].summary).toBe('a generated summary')
+		const changed = await handler(get(`/api/runs?have=${encodeURIComponent(snapshot.version)}`))
+		const delta = await changed.json()
+		expect(delta.kind).toBe('delta')
+		expect(delta.base).toBe(snapshot.version)
+		expect(delta.next).not.toBe(snapshot.version)
+
+		const reaction = applyDelta(runListDefinitions, snapshot.collections, snapshot.version, delta)
+		expect(reaction.kind).toBe('applied')
+		if (reaction.kind !== 'applied') throw new Error('expected the delta to apply')
+		const reconstructed = runSummariesFromReplicaState(reaction.state)
+		expect(reconstructed[0]?.summary).toBe('a generated summary')
+
+		const fresh = await (await handler(get('/api/runs'))).json()
+		expect(fresh.kind).toBe('snapshot')
+		expect(runSummariesFromReplicaState(fresh.collections)).toEqual(reconstructed)
 	})
 
-	test('adding a run changes the run-list token', async () => {
+	test('adding a run yields a delta that carries the new run newest-first', async () => {
 		const { handler, runs } = createVersioningHarness([['run-1', storedRun('run-1')]])
-		const etag = requireEtag(await handler(get('/api/runs')))
+		const snapshot = await (await handler(get('/api/runs'))).json()
 		runs.set('run-2', storedRun('run-2'))
-		const response = await handler(get('/api/runs', etag))
-		expect(response.status).toBe(200)
-		expect(response.headers.get('etag')).not.toBe(etag)
+		const delta = await (await handler(get(`/api/runs?have=${encodeURIComponent(snapshot.version)}`))).json()
+		expect(delta.kind).toBe('delta')
+		const reaction = applyDelta(runListDefinitions, snapshot.collections, snapshot.version, delta)
+		expect(reaction.kind).toBe('applied')
+		if (reaction.kind !== 'applied') throw new Error('expected the delta to apply')
+		expect(runSummariesFromReplicaState(reaction.state).map((summary) => summary.runId)).toEqual(['run-2', 'run-1'])
+	})
+
+	test('an unknown have returns a snapshot', async () => {
+		const { handler } = createVersioningHarness([['run-1', storedRun('run-1')]])
+		const unknown = await (await handler(get('/api/runs?have=not-a-revision'))).json()
+		expect(unknown.kind).toBe('snapshot')
 	})
 })

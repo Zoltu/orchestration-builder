@@ -94,7 +94,7 @@ The web client renders a run two ways — a flow-graph product surface and a seq
 
 ## Shared state sync: `entity-diff`
 
-The polled UI state (the run list, the run view, and the visualization's `InteractionModel`) is derived server-side and consumed by the browser. Instead of re-sending the whole derived state whenever it changes, the app can ship entity-level diffs through a shared module, `source/web/static/ts/entity-diff/`.
+The polled UI state that grows with a run or the number of runs — the run list and the visualization's `InteractionModel` — is derived server-side and consumed by the browser. Instead of re-sending the whole derived state whenever it changes, the app ships entity-level diffs through a shared module, `source/web/static/ts/entity-diff/`. (The run view is a single bounded document and remains on plain conditional requests.)
 
 The module is generic over id-keyed entities and owns the sync machinery: a content-addressed version per state, keyed `added`/`changed`/`removed` deltas, a bounded server-side delta history, and a total snapshot fallback so a client that is too far behind (or carries an unknown version) always recovers. The app declares its collections and owns the entity bodies; the module never names an app type.
 

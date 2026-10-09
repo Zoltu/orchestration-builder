@@ -1,11 +1,10 @@
-// The per-resource version inputs and payload builders for the three polled endpoints. Each resource has exactly one gather function returning a typed inputs struct and one build function consuming exactly that struct (plus the snapshot leaf that resolves data identified by the struct), so the token derived from the struct covers every input the payload derives from and a field added to the struct forces both the gather and the hash to account for it.
+// The per-resource version inputs and payload builders for the versioned polled resources (the run view, and the flow model's `?operation=` detail). Each resource has exactly one gather function returning a typed inputs struct and one build function consuming exactly that struct (plus the snapshot leaf that resolves data identified by the struct), so the token derived from the struct covers every input the payload derives from and a field added to the struct forces both the gather and the hash to account for it.
 
-import type { ListRunIds, ReadRunPlanById, ReadRunSnapshotStats, ReadRunSummaryStats, RunCheckpointExists } from '../executor/persistence.js'
+import type { ReadRunPlanById, ReadRunSnapshotStats, RunCheckpointExists } from '../executor/persistence.js'
 import type { RunState } from '../executor/run-state.js'
 import type { InteractionModel, InteractionOperationDetail } from './interaction-model-adapter.js'
 import { deriveInteractionModel, deriveInteractionOperationDetail } from './interaction-model-adapter.js'
-import { renderRunView, type RunSummary, type RunView } from './render.js'
-import type { ReadRunListSummary } from './run-list-cache.js'
+import { renderRunView, type RunView } from './render.js'
 import type { ReadRunSnapshot } from './snapshot-cache.js'
 
 // The run view's recent-log window: the polled payload carries only the tail, and the full log is reachable through the window endpoint.
@@ -71,23 +70,4 @@ export function buildFlowModel(inputs: FlowInputs, dependencies: { readRunSnapsh
 export function buildFlowOperationDetail(inputs: FlowInputs, dependencies: { readRunSnapshot: ReadRunSnapshot }): InteractionOperationDetail | null {
 	if (inputs.operationId === null) return null
 	return deriveInteractionOperationDetail(dependencies.readRunSnapshot(inputs.runId), inputs.operationId)
-}
-
-export type RunListInputs = {
-	runs: Array<{ runId: string; metaStat: FileStat | null; summaryStat: FileStat | null }>
-}
-
-// The list payload depends on which runs exist, their newest-first order, and each run's meta and summary freshness. The run-list cache validates freshness on the same two stats, so the token and the cache agree by construction.
-export function gatherRunListInputs(dependencies: { listRunIds: ListRunIds; readRunSummaryStats: ReadRunSummaryStats }): RunListInputs {
-	const runIds = dependencies.listRunIds().slice().sort((a, b) => (a < b ? 1 : a > b ? -1 : 0))
-	return {
-		runs: runIds.map((runId) => {
-			const stats = dependencies.readRunSummaryStats(runId)
-			return { runId, metaStat: stats.meta, summaryStat: stats.summary }
-		}),
-	}
-}
-
-export function buildRunList(inputs: RunListInputs, dependencies: { readRunListSummary: ReadRunListSummary }): RunSummary[] {
-	return inputs.runs.map((run) => dependencies.readRunListSummary(run.runId))
 }

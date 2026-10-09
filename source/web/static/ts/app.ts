@@ -21,6 +21,7 @@ import { InspectorModal, INSPECTOR_WINDOW_SIZE, buildTurnIndex, deriveDefaultSco
 import { createWireDetails, WIRE_DETAIL_CACHE_LIMIT } from './wire-details.js'
 import { isObject } from './guards.js'
 import { applyFlowEnvelope, emptyFlowReplicaState } from './flow-collections.js'
+import { applyRunListEnvelope, emptyRunListReplicaState } from './run-list-collections.js'
 import { createEntityHasher } from './entity-diff/index.js'
 import { buildStageMemoInputs, createStageMemo } from './stage-memo.js'
 import { responseBelongsToSelection } from './stale-response.js'
@@ -29,6 +30,7 @@ import { activeLivePartial, nextLivePartial, scopedActiveLivePartial } from './l
 import { backlogCount, deriveQueueSections, deriveReorderPosition, isQueueItemLike, queueItemPrimaryText, queueStatusLabel, reorderWaitingItems, taskFirstLine } from './queue-panel.js'
 import type { InteractionModel, Participant, RunStatus } from './interaction-model.js'
 import type { FlowReplicaState } from './flow-collections.js'
+import type { RunListReplicaState, RunResultCard, RunSummary } from './run-list-collections.js'
 import type { LabelConfig, LabelResolver, LabelTier } from './labels.js'
 import type { RoleAccentResolver } from './role-accents.js'
 import type { LogWindowEvent, ScopeWindow, TurnEntry } from './inspector-modal.js'
@@ -43,29 +45,6 @@ import type { BuildInfo } from './build-info.js'
 
 // --- Application state -----------------------------------------------------
 // The single state object every action threads. The wire shapes below mirror the server contracts (source/web/render.ts) but live here because the static bundle cannot import from the server modules; every field a poll fills in is re-guarded at its fetch's ingress action.
-
-// One run-list summary (GET /api/runs, `renderRunSummary` server-side).
-export interface RunSummary {
-	runId: string
-	status: RunStatus
-	task: string | null
-	// The wire carries an effort level, but the client only ever reads it through isEffort, so it stays a string here and narrows at the read sites.
-	effort: string | null
-	startTime: string | null
-	endTime: string | null
-	// Optional because the actions tolerate a summary whose result field is absent, not just null.
-	result?: RunResultCard | null
-	error?: unknown
-	summary: string | null
-}
-
-// The result card embedded in a run summary or run view (`ResultCard` in source/executor/types.ts).
-export interface RunResultCard {
-	status: 'success' | 'error' | 'needs_clarification'
-	summary: string
-	artifacts?: string[]
-	error?: { kind: string; message?: string; details?: unknown }
-}
 
 // One interrupt-history entry in a run view (`InterruptHistoryEntry` in source/web/render.ts).
 export interface InterruptInquiryEntry {
@@ -236,7 +215,7 @@ export interface ApplicationState {
 	draggingItemId: string | null
 	queueAnswerPendingId: string | null
 	serverAvailable: boolean
-	// The ETag validators for the versioned GET endpoints (the run list and the run view), keyed by request URL. Each poll echoes the stored value as If-None-Match; a 304 leaves the already-held payload untouched. The flow model no longer rides this map: entity-diff versions it through the replica revision in flowVersion.
+	// The ETag validators for the versioned GET endpoints, keyed by request URL. Each poll echoes the stored value as If-None-Match; a 304 leaves the already-held payload untouched. Only the run view still rides this map: the flow model and the run list are entity-diff collections versioned through their replica revisions in flowVersion and runListVersion.
 	versions: Record<string, string>
 	justSubmittedRunId: string | null
 	// The create POST's in-flight flag (a plain queue add, a continuation, a new run, and a re-run each dispatch one): set synchronously when the request leaves and cleared by the create response actions on both the ok and fail paths, so a double click or a second Ctrl+Enter inside the window is a no-op instead of a duplicate. Complements the justSubmitted* ids, whose dedup starts only once a response has landed.
@@ -255,6 +234,9 @@ export interface ApplicationState {
 	previousFlowModel: InteractionModel | null
 	flowCollections: FlowReplicaState
 	flowVersion: string | null
+	// The polled run-list replica and its revision. The summaries are reconstructed newest-first from runListCollections on every apply, so the replica and its revision are the poll's diff base rather than an ETag.
+	runListCollections: RunListReplicaState
+	runListVersion: string | null
 	// The label resolver and guild participant inventory are built once from `/api/config` (GotConfig); null/empty until that single load completes. `build` rides the same load: the image's build identifier for the top bar, and stays null when running from source without a baked build-info.json.
 	labelResolver: LabelResolver | null
 	guildParticipants: Participant[]
@@ -325,7 +307,7 @@ export interface FetchResultPayload {
 export interface FetchEffectPayload {
 	url: string
 	init?: RequestInit
-	// The stored ETag to revalidate with, sent as If-None-Match; absent or empty means an unconditional request. Only the three versioned GET endpoints carry it.
+	// The stored ETag to revalidate with, sent as If-None-Match; absent or empty means an unconditional request. Only the run view still carries it — the run list and flow model now sync through entity-diff.
 	ifNoneMatch?: string | null
 	ok: Action<FetchResultPayload>
 	fail: Action<undefined>
@@ -434,6 +416,9 @@ const flowColumnTracker = createColumnTracker()
 
 // The entity-diff hasher the flow reduce path requires; module scope so its identity-keyed hash cache serves every poll. The flow collections all declare a cheap versionOf, so no entity currently reaches the hasher, but it is the required argument to the reduce and a snapshot's content verification.
 const flowHasher = createEntityHasher()
+
+// The entity-diff hasher the run-list reduce path requires; module scope like flowHasher so its identity-keyed hash cache serves every poll. The runs collection declares a cheap versionOf, so the hasher is reached only for a snapshot's content verification.
+const runListHasher = createEntityHasher()
 
 // The inspector's operation-details controller (see operation-details.js): key `<runId>|<operationId>`, states 'loading' | 'failed' | ready. The polled flow model ships no detail bodies (they can carry multi-megabyte tool arguments/results), so opening an inspector card fetches the ids its derivation may show from `api/runs/:id/flow?operation=<id>` exactly once per session and caches them. Operation ids are stable within a run (events only append), so an entry never goes stale; the run id in the key keeps a previous run's entries from answering for another run's same-numbered operation. Module scope like flowColumnTracker — cache memory, not app state. This host drives the controller through `begin` + `record*` because its fetches are hyperapp effects whose ok/fail actions must return fresh state to trigger the re-render, so no `onLanded` fan-out is wired.
 const operationDetails = createOperationDetails({})
@@ -637,7 +622,8 @@ function UpdateFavicon(state: ApplicationState): FaviconEffect {
 function Tick(state: ApplicationState): ActionReturn {
 	return [
 		{ ...state, now: Date.now() },
-		Fetch({ url: 'api/runs', ifNoneMatch: storedVersionFor(state.versions, 'api/runs'), ok: GotRunList, fail: FetchFailed }),
+		// The run list is an entity-diff envelope: the held revision rides as `have` (omitted on the first poll, which asks for a snapshot) and the response's own `unchanged` reply is the revalidation, so the fetch is uncacheable rather than ETag-versioned.
+		Fetch({ url: state.runListVersion === null ? 'api/runs' : `api/runs?have=${encodeURIComponent(state.runListVersion)}`, init: { cache: 'no-store' }, ok: GotRunList, fail: FetchFailed }),
 		// `api/questions` and `api/queue` carry no ETag, so their polls stay unconditional rather than replaying a validator the server never issued.
 		Fetch({ url: 'api/questions', ok: GotQuestions, fail: FetchFailed }),
 		Fetch({ url: 'api/queue', ok: GotQueue, fail: FetchFailed }),
@@ -682,26 +668,32 @@ function GotFlowModel(runId: string) {
 	}
 }
 
+// The run list arrives as an entity-diff envelope, so it is reduced against the replica the client holds (applyRunListEnvelope) and the newest-first summaries are reconstructed from the resulting state. An unchanged envelope keeps the summaries and replica BY REFERENCE (the history view's identity-keyed memoization relies on it); applied/snapshot store the new replica and version and the reconstructed summaries; a delta whose base the client no longer holds re-fetches with no `have` for a full snapshot; an invalid envelope leaves the held state untouched.
 function GotRunList(state: ApplicationState, payload: FetchResultPayload): ActionReturn {
-	// A 304 carries no body and has ok === false, so it must be handled before the `!ok` logic below: the list is unchanged, so keep summaries exactly, skip auto-selection, and skip the favicon effect (nothing it derives from changed).
-	if (payload.status === 304) return { ...state, serverAvailable: true }
-	const ok = payload.ok
-	const body = payload.body
-	const summaries: RunSummary[] = ok && Array.isArray(body) ? body : []
-	const nextState = { ...state, summaries, serverAvailable: ok, versions: recordVersion(state.versions, payload) }
-	if (nextState.justSubmittedRunId !== null && summaries.some((summary) => summary.runId === nextState.justSubmittedRunId)) {
-		nextState.justSubmittedRunId = null
-	}
-	// Auto-select the newest run when nothing is selected so the user lands on live activity.
-	if (nextState.selectedRunId === null && summaries.length > 0) {
-		const newest = summaries[0]
-		if (newest !== undefined) {
-			nextState.selectedRunId = newest.runId
-			nextState.selectedRunView = null
-			nextState.selectedRunStatus = null
+	const result = applyRunListEnvelope(state.runListCollections, state.runListVersion, payload.body, runListHasher)
+	if (result.outcome === 'unchanged') return { ...state, serverAvailable: true }
+	if (result.outcome === 'applied' || result.outcome === 'snapshot') {
+		const nextState = { ...state, runListCollections: result.state, runListVersion: result.version, summaries: result.summaries, serverAvailable: true }
+		if (nextState.justSubmittedRunId !== null && result.summaries.some((summary) => summary.runId === nextState.justSubmittedRunId)) {
+			nextState.justSubmittedRunId = null
 		}
+		// Auto-select the newest run when nothing is selected so the user lands on live activity.
+		if (nextState.selectedRunId === null && result.summaries.length > 0) {
+			const newest = result.summaries[0]
+			if (newest !== undefined) {
+				nextState.selectedRunId = newest.runId
+				nextState.selectedRunView = null
+				nextState.selectedRunStatus = null
+			}
+		}
+		return [nextState, UpdateFavicon(nextState)]
 	}
-	return [nextState, UpdateFavicon(nextState)]
+	// A delta whose base the client no longer holds cannot be applied; re-fetching with no `have` asks the server for a full snapshot. The held replica and summaries stand until it lands.
+	if (result.outcome === 'needsSnapshot') {
+		return [{ ...state, serverAvailable: payload.ok }, Fetch({ url: 'api/runs', init: { cache: 'no-store' }, ok: GotRunList, fail: FetchFailed })]
+	}
+	// invalid: the envelope failed validation, so the held replica and summaries stand, but the fetch result still updates server availability.
+	return { ...state, serverAvailable: payload.ok }
 }
 
 // The newest interrupt-question answer the operator has not been shown yet, or null. Keys are run-scoped (`runId|askedAt`) so one map serves every run without per-run resets; a run's first read baselines its already-answered inquiries so opening an old run never pops stale answers.
@@ -2652,7 +2644,7 @@ function isApplicationState(value: unknown): value is ApplicationState {
 		'queueItems', 'justSubmittedItemId', 'pendingAddSelectionId', 'editingItemId', 'draggingItemId', 'queueAnswerPendingId',
 		'serverAvailable', 'versions', 'justSubmittedRunId', 'createSending', 'muted', 'shownQuestionIds', 'firstQuestionsPoll', 'pendingAnswerId',
 		'runEffort', 'savingEffort', 'runLogLevel', 'savingLogLevel',
-		'flowModel', 'previousFlowModel', 'flowCollections', 'flowVersion', 'labelResolver', 'guildParticipants', 'roleAccents', 'build',
+		'flowModel', 'previousFlowModel', 'flowCollections', 'flowVersion', 'runListCollections', 'runListVersion', 'labelResolver', 'guildParticipants', 'roleAccents', 'build',
 		'flowTier', 'flowViewMode', 'sequenceRolesOnly', 'screen', 'historyExpanded', 'continuation',
 		'resumingRunId', 'resumeSending', 'resumeNotice',
 		'questionModalOpen', 'resultModalOpen', 'resultShownForRun', 'interruptModalOpen',
@@ -2699,6 +2691,8 @@ app({
 			previousFlowModel: null,
 			flowCollections: emptyFlowReplicaState(),
 			flowVersion: null,
+			runListCollections: emptyRunListReplicaState(),
+			runListVersion: null,
 			labelResolver: null,
 			guildParticipants: [],
 			roleAccents: createRoleAccentResolver([]),

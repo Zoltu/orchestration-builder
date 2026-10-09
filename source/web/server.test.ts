@@ -12,7 +12,9 @@ import { parseRunSnapshot, type RunSnapshot } from './render.ts'
 import type { BuildInfo } from './build-info.ts'
 import { createRunListCache } from './run-list-cache.ts'
 import { flowModelFromReplicaState } from './static/ts/flow-collections.js'
+import { runSummariesFromReplicaState } from './static/ts/run-list-collections.js'
 import { createFlowReplicaRegistry, type FlowReplicaRegistryOptions } from './flow-replica-registry.ts'
+import { createRunListReplica } from './run-list-replica.ts'
 import { createRequestHandler, type RequestHandler } from './request-handler.ts'
 import { createServeStatic, createServeTypeScriptSource, resolveStaticAsset, resolveTypeScriptSourceAsset, type ServeAssetFile, type TypeScriptSourceFilesystem } from './server.ts'
 
@@ -565,6 +567,7 @@ function createHandlerHarness(options: { runIdCollides?: boolean, build?: BuildI
 		writeQueue: queue.writeQueue,
 	})
 	const flowReplicaRegistry = createFlowReplicaRegistry(options.flowReplicaOptions ?? { epoch: 'test-epoch', historyLimit: 64, maxRuns: 8 })
+	const runListReplica = createRunListReplica({ epoch: 'test-epoch', historyLimit: 64 })
 	const handler = createRequestHandler(
 		{
 			guildConfig: sampleGuildConfig,
@@ -575,7 +578,6 @@ function createHandlerHarness(options: { runIdCollides?: boolean, build?: BuildI
 			readRunSnapshot: harnessReadRunSnapshot,
 			readRunMetaById: harnessReadRunMetaById,
 			readRunListSummary,
-			readRunSummaryStats,
 			readRunPlanById,
 			readRunSnapshotStats: harnessReadRunSnapshotStats,
 			listRunIds,
@@ -588,6 +590,7 @@ function createHandlerHarness(options: { runIdCollides?: boolean, build?: BuildI
 			tickScheduler: () => scheduler.tick(),
 			build: options.build ?? null,
 			flowEnvelopeFor: flowReplicaRegistry.envelopeFor,
+			runListEnvelopeFor: runListReplica.envelopeFor,
 		},
 		async (requestPath) => {
 			staticCalls.push(requestPath)
@@ -963,33 +966,21 @@ describe('GET /api/run alias', () => {
 })
 
 describe('GET /api/runs (list)', () => {
-	test('returns the known runs as summaries, newest first by id', async () => {
+	test('returns the known runs as a newest-first snapshot envelope', async () => {
 		const { handler } = createHandlerHarness()
 		const response = await handler(get('/api/runs'))
 		expect(response.status).toBe(200)
-		const list = await response.json()
+		expect(response.headers.get('cache-control')).toBe('no-store')
+		expect(response.headers.get('etag')).toBeNull()
+		const envelope = await response.json()
+		expect(envelope.kind).toBe('snapshot')
+		const list = runSummariesFromReplicaState(envelope.collections)
 		expect(Array.isArray(list)).toBe(true)
 		expect(list.length).toBe(19)
-		expect(list[0].runId).toBe('run-tree')
-		expect(list[1].runId).toBe('run-retry')
-		expect(list[2].runId).toBe('run-long')
-		expect(list[3].runId).toBe('run-interrupted')
-		expect(list[4].runId).toBe('run-flow-details')
-		expect(list[5].runId).toBe('run-effort')
-		expect(list[6].runId).toBe('run-delta')
-		expect(list[7].runId).toBe('run-chain-orphan')
-		expect(list[8].runId).toBe('run-chain-legacy')
-		expect(list[9].runId).toBe('run-chain-failure')
-		expect(list[10].runId).toBe('run-chain')
-		expect(list[11].runId).toBe('run-cached')
-		expect(list[12].runId).toBe('run-active')
-		expect(list[13].runId).toBe('run-3')
-		expect(list[14].runId).toBe('run-20260101-000300')
-		expect(list[15].runId).toBe('run-20260101-000100')
-		expect(list[16].runId).toBe('run-20260101-000000')
-		expect(list[17].runId).toBe('run-2')
-		expect(list[18].runId).toBe('run-1')
-		expect(list[3]).toEqual({
+		expect(list.map((entry) => entry.runId)).toEqual([
+			'run-tree', 'run-retry', 'run-long', 'run-interrupted', 'run-flow-details', 'run-effort', 'run-delta', 'run-chain-orphan', 'run-chain-legacy', 'run-chain-failure', 'run-chain', 'run-cached', 'run-active', 'run-3', 'run-20260101-000300', 'run-20260101-000100', 'run-20260101-000000', 'run-2', 'run-1',
+		])
+		expect(list).toContainEqual({
 			runId: 'run-interrupted',
 			status: 'interrupted',
 			task: 'task for run-interrupted',
@@ -1000,7 +991,7 @@ describe('GET /api/runs (list)', () => {
 			error: { kind: 'interrupted', message: 'The service stopped while this run was in progress and it could not be resumed (no valid checkpoint).' },
 			summary: null,
 		})
-		expect(list[5]).toEqual({
+		expect(list).toContainEqual({
 			runId: 'run-effort',
 			status: 'success',
 			task: 'task for run-effort',
@@ -1011,7 +1002,7 @@ describe('GET /api/runs (list)', () => {
 			error: null,
 			summary: null,
 		})
-		expect(list[17]).toEqual({
+		expect(list).toContainEqual({
 			runId: 'run-2',
 			status: 'error',
 			task: 'task for run-2',
