@@ -92,6 +92,15 @@ The web client renders a run two ways — a flow-graph product surface and a seq
 
 **Live token stream.** One WebSocket endpoint (`/ws/stream`, see [`docs/reference.md`](reference.md) "Live token stream") layers an isolated enhancement channel over this polling architecture: a browser client may additionally subscribe to the active run's in-flight partials, which render only inside the inspector modal's in-flight row and feed no other state. The channel degrades by design — polling remains the sole authority for run state and turn history, and the UI keeps fully working when the socket is absent, rejected, or dies mid-stream (only live partial text is lost).
 
+## Web client
+
+The browser client's sources are TypeScript under `source/web/static/ts/` and are transpiled on request by the static server (`Bun.Transpiler`, a Bun built-in — no build step, no emitted output on disk). The browser-facing URL space is unchanged: pages still load `app.js`/`demo.js` and modules still import `./sibling.js` — the server maps a `.js` request (outside `vendor/`) to `ts/<same path>.ts` when that source exists and falls back to the real file otherwise, and a raw `.ts`/`.d.ts` request 404s, so the authoring sources are never shipped to the browser. Every first-party browser module is covered by `bun run typecheck`; no plain-JS module or forwarding shim remains. Should a future change convert a module while plain-JS importers of it remain, a one-line forwarding module stays at the converted module's old path for the duration of the conversion, because Bun resolves plain-JS importers' specifiers literally and `bun test` imports those modules.
+
+Two consequences every change to `source/web/static/` must respect:
+
+- **Runtime guards are still required at every external ingress.** Types don't validate: every external value the browser modules read (fetch bodies, websocket messages, DOM events, `window.showdown`/`hljs` presence) goes through shape checks, and a type annotation never rejects a malformed payload — keep that discipline even where the module is TypeScript.
+- **Never share vnode objects across renders or tree positions.** hyperapp's differ mutates a vnode's `node` property in place, so a vnode object reused at two positions (e.g. a memo cache handing the same object out for repeated text) corrupts the mounted tree the next time positions shift — it throws `DOMException` mid-patch and every following render crashes. The markdown pipeline (`markdown-render.ts`) caches its sanitized neutral tree and rebuilds vnodes per call for exactly this reason; keep that shape for any future memoization.
+
 ## Shared state sync: `entity-diff`
 
 The polled UI state that grows with a run or the number of runs — the run list and the visualization's `InteractionModel` — is derived server-side and consumed by the browser. Instead of re-sending the whole derived state whenever it changes, the app ships entity-level diffs through a shared module, `source/web/static/ts/entity-diff/`. (The run view is a single bounded document and remains on plain conditional requests.)

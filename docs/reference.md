@@ -157,6 +157,12 @@ The second path is explicit: `POST /api/runs/:id/resume` re-enters an **error**-
 - `run_resumed` — `{ runId, resumedFrames, operatorNote? }`. Emitted once when a run resumes from its checkpoint, ahead of any resumed-role events; it marks the boundary between the pre-restart and post-restart portions of the log (see "Run persistence and resumption"). `operatorNote` is present only on an explicit resume of an error-ended run and carries the operator's framed note (see `POST /api/runs/:id/resume`). Resumed roles do not re-emit `role_start`, and a few events immediately straddling the boundary may duplicate.
 - `role_budget_exceeded`, `global_budget_exceeded`, `llm_unavailable`, `context_budget_exceeded`, `implicit_finish`, `unknown_tool`, `invalid_tool_call` — failure and lifecycle events carrying the role and the relevant detail.
 
+## Tool dispatch
+
+Tool dispatch is the mechanism by which the executor invokes a tool in response to a model tool call. `createToolDispatch(handlers)` is a factory that takes a map of tool-name → handler and returns a `ToolDispatch`; its `dispatch(call)` looks up the handler, parses the call's JSON arguments, rejects anything that is not a JSON object, and invokes the handler. Errors are returned as a `ToolResult` carrying the appropriate kind (`unknown_tool`, `invalid_arguments`), never thrown, so a malformed call is a normal result the role can read and act on.
+
+`dispatchToolCall(config, call)` wraps that dispatch with the role-scoped checks the engine performs first: a name absent from the Guild's manifests is `unknown_tool`, and a name the role is not allowed to call is `invalid_tool_call`. The engine composes the handler map from the built-in tools (below) and the native tools, so every tool a role can call is reachable through the same dispatcher. Tool dispatch is pure orchestration and is fully testable with fake handlers.
+
 ## Built-in tools
 
 Built-in tools are listed in the Guild like any other tool but are implemented by the executor.
@@ -293,6 +299,12 @@ The set of tools a role may call is part of the Guild. The executor does not hid
 ### Workflows
 
 There is no separate graph or playbook file. A workflow is a role calling `agent` multiple times and combining results before calling `finish`. If the Foundry wants a different workflow, it rewrites the orchestrator prompt or adds/removes roles.
+
+### Loading and validation
+
+`createGuildLoader(deploymentFilePath)` is a leaf factory that returns a `LoadGuild` whose `loadGuild(guildDir)` reads `guild.json`, validates it with the shared `validateGuildConfig`, reads and validates the deployment file, and cross-checks that every handler role the deployment names exists in the Guild. It then resolves each role's `systemPrompt` Markdown file (composing in that role's optional `styleGuide` with `composeRolePrompt`), validates every referenced tool-manifest JSON file with `validateToolManifest`, and checks that each role's `tools` list names only declared manifests. Validation failures surface as a `ValidationError` naming the offending path.
+
+The loader's return value is file-shaped — the validated `GuildConfig`, the deployment still unresolved (`model.name` and `model.contextWindow` may be absent), the resolved prompt text per role, and the parsed tool manifests keyed by name. Completing the model into the `LoadedGuild` the executor consumes is the startup path's job. The loader is a leaf and is not unit-tested; the shipped Guild data is validated by a dedicated script run directly (see `bun run validate-data`), not under `bun test`.
 
 ## Deployment configuration
 

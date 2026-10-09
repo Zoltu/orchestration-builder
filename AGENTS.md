@@ -6,7 +6,7 @@ These principles apply to every change. They are the high-level rules; the secti
 
 ### No dependencies
 
-The project must not introduce any runtime or dev dependencies beyond what is already in `package.json` (Bun's built-ins, `@types/bun`, `typescript`). The executor and all tooling rely solely on Bun built-ins and web-standard APIs. This keeps the codebase easy to audit, the deployment image tiny, and the supply chain minimal.
+The project must not introduce any runtime or dev dependencies beyond what is already in `package.json` (Bun's built-ins, `@types/bun`, `typescript`). This keeps the codebase easy to audit, the deployment image tiny, and the supply chain minimal.
 
 If a dependency is deemed absolutely necessary, do not add it unilaterally. First evaluate alternatives (reimplementing with built-ins, restructuring the code, splitting the work differently). If no reasonable alternative exists, ask the operator before adding anything, and explain the alternatives you considered.
 
@@ -16,7 +16,7 @@ Code quality is of the utmost importance. Take the time to do things well rather
 
 ### In-memory, fast tests
 
-Tests must run purely in-memory, must not hit the network or real LLM endpoints, and must not depend on external services. Every test should run in milliseconds so the full suite is never a burden to run frequently. See "Testing Policy" below for the full rules.
+Tests must run purely in-memory and must not hit the network or any external service. Every test should run in milliseconds so the full suite is never a burden to run frequently. See "Testing Policy" below for the full rules.
 
 ### Testable business logic
 
@@ -24,7 +24,7 @@ Business logic must be easy to test under the above constraints. Structure code 
 
 ### Maintainable and auditable
 
-The codebase must be easy to maintain and audit. Prefer explicit, readable data flow over implicit globals and magic. Avoid cleverness that obscures intent. Every external input is validated (see "External Data Validation"). Behavior should be discoverable from reading the code and the Guild data, not from tribal knowledge. A reader should be able to follow what a run does from `main` down to the leaf calls without guessing.
+The codebase must be easy to maintain and audit. Prefer explicit, readable data flow over implicit globals and magic. Avoid cleverness that obscures intent. Every external input is validated (see "External Data Validation"). Behavior should be discoverable from reading the code, not from tribal knowledge. A reader should be able to follow the control flow from `main` down to the leaf calls without guessing.
 
 ---
 
@@ -234,22 +234,11 @@ export function runAnalysis(dependencies: { parseConfiguration: () => Configurat
 
 ### In-memory tests only
 
-Tests must run purely in-memory. Do not make network requests, hit real LLM endpoints, touch the filesystem (including temporary directories), spawn subprocesses, or depend on external services. Use fakes for the LLM caller, tool handlers, and any other external dependency. The goal is fast iteration: every test should run in milliseconds.
+Tests must run purely in-memory. Do not make network requests, hit real external endpoints, touch the filesystem (including temporary directories), spawn subprocesses, or depend on external services. Use fakes for external callers, tool handlers, and any other external dependency. The goal is fast iteration: every test should run in milliseconds.
 
-Data-validity checks for the shipped Guild and benchmark suite live in `source/tools/validate-data.ts` (`bun run validate-data`), not in `bun test`, because they read the repo's data files by design.
+Checks that read the repository's own data files by design live in a dedicated script run directly, not under `bun test`, because `bun test` must stay in-memory.
 
-The LLM caller (`source/executor/llm.ts`) is exercised in tests exclusively through a fake; integration against a real endpoint is a separate concern handled at deployment time, not in `bun test`.
-
----
-
-## Browser client sources are TypeScript, transpiled at serve time
-
-The browser client's sources are all TypeScript under `source/web/static/ts/` and are transpiled on request by the static server (`Bun.Transpiler`, a Bun built-in — no build step, no emitted output on disk). The browser-facing URL space is unchanged: pages still load `app.js`/`demo.js` and modules still import `./sibling.js` — the server maps a `.js` request (outside `vendor/`) to `ts/<same path>.ts` when that source exists and falls back to the real file otherwise, and a raw `.ts`/`.d.ts` request 404s, so the authoring sources are never shipped to the browser. Every first-party browser module is covered by `bun run typecheck`; no plain-JS module or forwarding shim remains. Should a future change convert a module while plain-JS importers of it remain, a one-line forwarding module stays at the converted module's old path for the duration of the conversion, because Bun resolves plain-JS importers' specifiers literally and `bun test` imports those modules.
-
-Two consequences every change to `source/web/static/` must respect:
-
-- **Runtime guards are still required at every external ingress.** Types don't validate: every external value the browser modules read (fetch bodies, websocket messages, DOM events, `window.showdown`/`hljs` presence) goes through the shape checks, and a type annotation never rejects a malformed payload — keep that discipline even where the module is now TypeScript.
-- **Never share vnode objects across renders or tree positions.** hyperapp's differ mutates a vnode's `node` property in place, so a vnode object reused at two positions (e.g. a memo cache handing the same object out for repeated text) corrupts the mounted tree the next time positions shift — it throws `DOMException` mid-patch and every following render crashes. The markdown pipeline (`markdown-render.ts`) caches its sanitized neutral tree and rebuilds vnodes per call for exactly this reason; keep that shape for any future memoization.
+External callers are exercised in tests exclusively through fakes; integration against a real endpoint is a separate concern handled at deployment time, not in `bun test`.
 
 ---
 
@@ -263,7 +252,7 @@ Leaf functions directly touch external systems: network, filesystem, subprocess,
 
 Leaf functions are exported as **factories** that return configured functions. All configuration that does not vary per call is closed over at construction time.
 
-Examples: `source/executor/persistence.ts` (`createAppendLog`, `createReadRunSnapshotById` — close over the runs base directory), `source/executor/llm.ts` (`createLlmFetch`, `createSleep` — the thin wire/timer leaves the caller composes), `source/executor/loader.ts` (`createGuildLoader`), `source/executor/tools/*.ts` (each per-tool factory closes over `workspaceRoot`).
+Examples: a filesystem leaf that closes over a base directory; a network leaf that closes over an endpoint and a credential.
 
 ### Orchestration Functions
 
@@ -271,13 +260,13 @@ Orchestration functions sequence calls, make decisions, handle errors, and branc
 
 Each orchestration function declares its own type containing **only** the configured leaf functions it **directly** uses. Do not use type unions (`&`) to compose dependency types from callees. Because TypeScript uses structural typing, a superset object is assignable to a subset type automatically.
 
-Examples: `source/executor/engine.ts` (`runRole`), `source/executor/executor.ts` (`runExecutor`), `source/executor/llm.ts` (`createLlmCaller` — request shaping, response parsing, and the retry loop composed over the injected `llmFetch`/`sleep` leaves), `source/executor/run-submission.ts` (`createRunSubmission`), `source/web/snapshot-cache.ts` (`createSnapshotCache`).
+Examples: a loop that sequences several calls and handles their errors; a dispatcher that branches on the kind of input it receives.
 
 ### Pure Helper Functions
 
 Pure helper functions contain parsing, validation, formatting, transformation, and decision-making logic. They are directly imported wherever needed and never injected.
 
-Examples: `source/executor/validation.ts` (`isRunMeta`, `validateGuildConfig`, and the shared `isObject` record guard), `source/executor/effort.ts` (`effortDirective`), `source/executor/context-policy.ts` (`truncateToolOutput`), `source/web/render.ts` (`formatLogEvent`, `deriveBudgets`).
+Examples: a validation guard that narrows an unknown value; a formatting function that renders a duration.
 
 ### Important Rules
 
@@ -285,7 +274,7 @@ Examples: `source/executor/validation.ts` (`isRunMeta`, `validateGuildConfig`, a
 - **Never use type unions (`&`) to compose dependency types.** List each dependency explicitly in each orchestration function's type. When a transitive dependency changes, the type checker will surface the mismatch at the call site.
 - Pass the accumulated `dependencies` object down without destructuring. Because of structural typing, `main` assembles one object and passes it to each handler; handlers accept subset types, so TypeScript enforces that everything needed is provided without manual repackaging.
 - **Only leaf functions go in `dependencies`.** Plain data (strings, numbers, objects), configuration values, or user input belong as regular function parameters, not inside `dependencies`. `dependencies` is exclusively for configured leaf functions that touch external systems.
-- **Run-scoped in-memory state carriers (a registry, queue, tracker, recorder) may ride in `dependencies`** because they are state the call chain threads explicitly, not hidden globals.
+- **Per-invocation in-memory state carriers (a registry, queue, tracker, recorder) may ride in `dependencies`** because they are state the call chain threads explicitly, not hidden globals.
 - **Do not export functions solely for testing.** Functions should only be exported if they are part of the module's public API used by other modules. If a function is not reachable through the exported surface area, it should not be tested. Extract logic into the testable area (orchestration or pure helpers) only when it genuinely improves the architecture — not just to enable a test.
 
 ### Decision Tree
@@ -307,27 +296,7 @@ When one module is consumed by more than one runtime (a browser client and a ser
 - **It must not reference any file outside its own folder.** Its imports are its own sibling modules only; it uses no consumer module. This preserves standalone testability and lets the same source run unchanged in every runtime that consumes it.
 - **It must be pure with respect to every runtime it targets.** Restrict it to the APIs all of them share (web-standard globals, for instance) rather than one runtime's exclusive built-ins, so no consumer needs a different build or a shim.
 - **Domain types stay with the consumers.** The module is generic over the shapes it operates on and never names a consumer's domain types; each consumer owns its concrete types and validates its own external inputs at the boundary.
-- **State the integration contracts the consumers must honor** — the invariants the module's correctness depends on but cannot enforce (immutability of the values it is handed, an ordering it does not preserve, and so on). Keep the concrete, project-specific contract in `docs/`, not here.
-
----
-
-## Tool Dispatch
-
-Tool dispatch is the mechanism by which the executor invokes tools in response to LLM tool calls. It is defined in `source/executor/tool-dispatch.ts`, and the engine composes against it.
-
-- `createToolDispatch(handlers)` is a factory that takes a map of tool-name → handler and returns a `ToolDispatch`.
-- The dispatcher parses the tool call's JSON arguments, validates they form an object, and invokes the handler.
-- Errors are returned as `ToolResult` with appropriate `ErrorKind`s (`unknown_tool`, `invalid_arguments`), never thrown.
-- The engine composes the handler map from built-in tools (`finish`, `agent`) and from native tools — the real implementations of the file/shell/search tools.
-- Tool dispatch is pure orchestration and is fully testable with fake handlers; see `source/executor/tool-dispatch.test.ts`.
-
-## Guild Loader
-
-Guild loading is a leaf factory defined in `source/executor/loader.ts`.
-
-- `createGuildLoader()` returns a `LoadGuild` function whose `loadGuild(guildDir)` reads `guild.json`, resolves every role's `systemPrompt` Markdown file, and validates every referenced tool-manifest JSON file. The return value is a `LoadedGuild` containing the validated `GuildConfig`, the resolved prompt text per role, and the parsed tool manifests keyed by name.
-- The loader uses the shared `validateGuildConfig` and `validateToolManifest` functions and surfaces validation errors as `ValidationError` (see `source/executor/errors.ts`).
-- The loader is a leaf and is not unit-tested; the shipped Guild data is validated by `bun run validate-data` (see `source/tools/validate-data.ts`).
+- **State the integration contracts the consumers must honor** — the invariants the module's correctness depends on but cannot enforce (immutability of the values it is handed, an ordering it does not preserve, and so on). Keep the concrete contract with the consumers, not here.
 
 ---
 
@@ -370,8 +339,8 @@ Prefer verbose, descriptive names. Avoid abbreviations, acronyms, and single-let
 
 - `userRepository` rather than `userRepo`
 - `configuration` rather than `cfg`
-- `guild.json` rather than `g.json`
-- `source/executor/persistence.ts` rather than `src/exec/persist.ts`
+- `user-settings.json` rather than `u-settings.json`
+- `src/persistence/user-repository.ts` rather than `src/persist/user-repo.ts`
 
 Single-letter names are acceptable only where the language idiom requires them (e.g., a `for` loop index). Common short forms that are already part of the project's vocabulary (`id`, `url`, `json`) are fine. The goal is clarity over brevity; do not invent new abbreviations.
 
@@ -388,34 +357,33 @@ Newlines carry semantic meaning. They separate statements, definitions, and logi
 
 ## Comments
 
-Source code must stand on its own. The development plan is a transient artifact; it must never be referenced from source files, tests, or commit messages.
+Source code must stand on its own. Transient planning artifacts must never be referenced from source files, tests, or commit messages.
 
-- Do not write "milestone N", "the plan", or any equivalent in source comments, identifiers, error messages, or test names. A reader of the source (who has no plan in front of them) must be able to understand every file without it.
-- Comments that need to point to design context reference the permanent design docs (`docs/*.md`). Reference a doc by its filename and section heading, e.g. `docs/foundry.md "Foundry data layout"`.
-- Comments that need to point to a sibling module reference it by module path or symbol name (e.g. "applied by the branch manager", "the input to scoring"), not by the milestone that builds it. Implementation scheduling is the development plan's business, not a property of the finished code.
-- The development plan is the only place that discusses milestones and sequencing; this file is the exception: it governs planning hygiene.
+- Do not write "milestone N", "the plan", or any equivalent in source comments, identifiers, error messages, or test names. A reader of the source must be able to understand every file without a plan in front of them.
+- Comments that need to point to design context reference the permanent design documentation, citing its section heading rather than a transient plan.
+- Comments that need to point to a sibling module reference it by module path or symbol name (e.g. "applied by the cache", "the input to validation"), not by the task or milestone that builds it. Implementation scheduling is a planning concern, not a property of the finished code.
 
 ### Comments explain why, never what
 
 A comment earns its place only by adding something the name, signature, and type cannot: the reason for a non-obvious choice, a constraint the code assumes but does not enforce, a hazard a reader would not anticipate, or a link to the decision that motivated it. A comment that paraphrases the item's name, signature, type, or obvious behavior is noise and a future source of drift — delete it.
 
 - Keep comments that explain an invariant, a hazard, an RAII/destructor-style contract, a deliberately-omitted API, a magic constant's meaning, or a non-obvious rationale. When in doubt whether a comment carries information the code itself does not, keep it.
-- No comments addressed to a future author. Bare `TODO`, `FIXME`, `XXX`, `HACK`, "later", "placeholder", and "not yet supported" notes do not belong in source. If the underlying work is real, record it in the development plan's debt table (and name the milestone that will remove it) or in `docs/`, and leave an inline reference only if the project convention requires one.
+- No comments addressed to a future author. Bare `TODO`, `FIXME`, `XXX`, `HACK`, "later", "placeholder", and "not yet supported" notes do not belong in source. If the underlying work is real, record it in the project's planning or issue-tracking system, and leave an inline reference only if the project convention requires one.
 - One sentence per line in comments and doc blocks. Do not break a single sentence across multiple lines for width; let the reader's editor soft-wrap. (See "Formatting" below.)
 
-**Good** — explains *why*, information the code cannot carry (`source/web/render.ts`):
+**Good** — explains *why*, information the code cannot carry:
 
 ```typescript
-// A present but malformed meta is treated as absent: meta.json is written atomically at run completion, so a malformed read is most likely a torn read mid-write, and the UI should fall back to "in progress" rather than crash.
-function parseMeta(metaText: string | null): RunMeta | null {
+// A malformed cached value is treated as absent: the cache file is written atomically, so a malformed read is most likely a torn read mid-write, and the caller should recompute rather than crash.
+function parseCachedValue(cachedText: string | null): CachedValue | null {
 ```
 
 **Bad** — restates *what* the signature says:
 
 ```typescript
-// Validates an eval.json object and returns it typed as EvalConfig.
-// Throws a ValidationError with a path-based message when the input is malformed.
-export function parseEvalConfig(value: unknown): EvalConfig {
+// Validates a settings object and returns it typed as Settings.
+// Throws an error with a path-based message when the input is malformed.
+export function parseSettings(value: unknown): Settings {
 ```
 
 ### Comment Necessity Test
@@ -428,7 +396,7 @@ Before adding or keeping a comment, ask: **"Would a reader who has read the enti
    If the comment describes what the code does (e.g., `// sets background color`), it's redundant. The code itself shows this.
 
 2. **Is the information duplicated elsewhere?**
-   If the same fact is already documented in another file (e.g., a comment explaining when a constant is used, but that logic appears in `run-submission.ts`), don't repeat it. Reference the existing documentation instead.
+   If the same fact is already documented elsewhere (e.g., a comment explaining when a constant is used, but that logic is visible in the function that uses it), don't repeat it. Reference the existing documentation instead.
 
 3. **Does it explain a non-obvious design choice?**
    Keep comments that reveal:
@@ -446,7 +414,7 @@ Before adding or keeping a comment, ask: **"Would a reader who has read the enti
 
 ### Enforcement
 
-Comment and newline quality is a review judgment, not a build-gate failure. No automated check is wired into `bun test`: mechanically detecting "reiterative comments" or "arbitrary wraps" produces false positives that make a lint a burden rather than a safety net, and no bare-`TODO` gate is wired in because this project has no issue tracker for such notes to reference (real work is tracked in the development plan's debt table instead). Re-check comment and newline hygiene against this section and "Formatting" before declaring any change done — reiterative comments and mid-sentence wraps accumulate silently.
+Comment and newline quality is a review judgment, not a build-gate failure. No automated check is wired into `bun test`: mechanically detecting "reiterative comments" or "arbitrary wraps" produces false positives that make a lint a burden rather than a safety net, and no bare-`TODO` gate is wired in because such notes are better tracked in the project's planning or issue-tracking system. Re-check comment and newline hygiene against this section and "Formatting" before declaring any change done — reiterative comments and mid-sentence wraps accumulate silently.
 
 ---
 
@@ -463,13 +431,11 @@ Comment and newline quality is a review judgment, not a build-gate failure. No a
 
 ## Local test model
 
-**Agents must never start, connect to, or download an LLM on their own.** This includes launching or restarting local inference servers (`llama-server`, Unsloth Studio, or anything similar — model weights are far too large to download), connecting to whatever model endpoints happen to be reachable, or driving real runs against them. Model servers are shared host resources: the operator turns them on explicitly for smoke tests, scheduled and coordinated with other work on the host, and only the operator knows what is currently resident or in use.
+**Agents must never start, connect to, or download a model or inference server on their own.** This includes launching or restarting a local inference server (model weights are far too large to download), connecting to whatever model endpoints happen to be reachable, or driving real runs against them. Model servers are shared host resources: the operator turns them on explicitly for smoke tests, scheduled and coordinated with other work on the host, and only the operator knows what is currently resident or in use.
 
-- `bun test` never touches an LLM: executor behavior is exercised through in-memory fakes (see "Testing Policy"), and this is always sufficient.
-- If work genuinely needs a real-LLM smoke test, stop and ask the operator to schedule it. Do not probe endpoints, run the executor against them, or assume a server is up even if documentation or past sessions suggest it was.
+- `bun test` never touches a model: behavior is exercised through in-memory fakes (see "Testing Policy"), and this is always sufficient.
+- If work genuinely needs a real-model smoke test, stop and ask the operator to schedule it. Do not probe endpoints, run the program against them, or assume a server is up even if documentation or past sessions suggest it was.
 - Reading public API specifications/documentation pages is fine and unrelated to this rule.
-
-The Guild's bundled configuration (`guild/guild.json`) targets `llama-server` (`http://llama-server:8080/v1`) with the model "Agents A1" — treat that as deployment data, not as an invitation to connect.
 
 ---
 
