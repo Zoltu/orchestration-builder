@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import { createClientReplica, createServerReplica } from '../static/ts/entity-diff/index.js'
 import type { ClientReplica, ServerReplica, SyncRequest } from '../static/ts/entity-diff/index.js'
-import { definitions, makeState } from './test-schema.js'
+import { definitions, makeState, stateContentHash } from './test-schema.js'
 import type { AppSchema, Task, User } from './test-schema.js'
 
 function user(id: string, name: string): User {
@@ -19,20 +19,16 @@ interface Harness {
 	setResponder: (next: (request: SyncRequest) => unknown) => void
 }
 
-function createHarness(verifyDeltas = false): Harness {
-	const server = createServerReplica(definitions, { historyLimit: 16 })
+function createHarness(): Harness {
+	const server = createServerReplica(definitions, { historyLimit: 16, epoch: 'e' })
 	const calls: SyncRequest[] = []
 	let responder: (request: SyncRequest) => unknown = (request) => server.respond(request.have)
-	const client = createClientReplica(
-		definitions,
-		{
-			fetchResponse: async (request) => {
-				calls.push(request)
-				return responder(request)
-			},
+	const client = createClientReplica(definitions, {
+		fetchResponse: async (request) => {
+			calls.push(request)
+			return responder(request)
 		},
-		{ verifyDeltas },
-	)
+	})
 	return {
 		server,
 		client,
@@ -101,7 +97,7 @@ describe('createClientReplica', () => {
 		const versionB = server.update(makeState([user('u1', 'Anne')], []))
 		const snapshotAtB = server.snapshot()
 		server.update(makeState([user('u1', 'Anne')], [task('t1', 'one')]))
-		// The transport delivers a still-valid snapshot from an older server version; the client accepts it and lands behind, then a later delta carries it to the tip.
+		// The transport delivers a still-valid snapshot from an older server revision; the client accepts it and lands behind, then a later delta carries it to the tip.
 		setResponder(() => snapshotAtB)
 		const behind = await client.sync()
 		expect(behind.outcome).toBe('snapshot')
@@ -121,12 +117,12 @@ describe('createClientReplica', () => {
 		expect(result.version).toBe(server.version())
 	})
 
-	test('rejects a forged but well-formed delta under verifyDeltas and resyncs via a snapshot', async () => {
-		const { server, client, setResponder } = createHarness(true)
+	test('accepts a forged delta whose base matches, because the base precondition is the only check', async () => {
+		const { server, client, setResponder } = createHarness()
 		const versionA = server.update(makeState([user('u1', 'Ann')], []))
 		await client.sync()
 		const versionB = server.update(makeState([user('u1', 'Anne')], []))
-		// The delta's shape and base are valid, so only the O(total) version recomputation can catch the tampered entity.
+		// The delta's shape and base are valid, so the client trusts it and reports its next revision with the tampered content.
 		setResponder((request) => {
 			if (request.have === null) return server.respond(null)
 			return {
@@ -137,9 +133,24 @@ describe('createClientReplica', () => {
 			}
 		})
 		const result = await client.sync()
+		expect(result.outcome).toBe('delta')
+		expect(result.version).toBe(versionB)
+		expect(result.state.users.map((entity) => entity.name)).toEqual(['Forged'])
+	})
+
+	test('resyncs via a snapshot when a forged delta base does not match', async () => {
+		const { server, client, setResponder } = createHarness()
+		server.update(makeState([user('u1', 'Ann')], []))
+		await client.sync()
+		server.update(makeState([user('u1', 'Anne')], []))
+		setResponder((request) => {
+			if (request.have === null) return server.respond(null)
+			return { kind: 'delta', base: 'forged-base', next: server.version(), collections: {} }
+		})
+		const result = await client.sync()
 		expect(result.outcome).toBe('snapshot')
 		expect(result.version).toBe(server.version())
-		expect(versionA).not.toBe(versionB)
+		expect(stateContentHash(definitions, result.state)).toBe(server.snapshot().contentHash)
 	})
 
 	test('surfaces invalid when both the response and the snapshot retry are unusable', async () => {
@@ -150,12 +161,14 @@ describe('createClientReplica', () => {
 		expect(result.version).toBeNull()
 	})
 
-	test('recovers from a snapshot whose version does not match its contents', async () => {
+	test('recovers from a snapshot whose content hash does not match its contents', async () => {
 		const { server, client, setResponder } = createHarness()
 		server.update(makeState([user('u1', 'Ann')], []))
+		await client.sync()
 		setResponder((request) => {
 			if (request.have === null) return server.respond(null)
-			return { kind: 'snapshot', version: 'tampered', collections: server.snapshot().collections }
+			const snapshot = server.snapshot()
+			return { kind: 'snapshot', version: snapshot.version, contentHash: 'tampered', collections: snapshot.collections }
 		})
 		const result = await client.sync()
 		expect(result.outcome).toBe('snapshot')
@@ -168,7 +181,7 @@ describe('createClientReplica', () => {
 		setResponder((request) => {
 			if (request.have === null) return server.respond(null)
 			const snapshot = server.snapshot()
-			return { kind: 'snapshot', version: snapshot.version, collections: { ...snapshot.collections, ghosts: [] } }
+			return { kind: 'snapshot', version: snapshot.version, contentHash: snapshot.contentHash, collections: { ...snapshot.collections, ghosts: [] } }
 		})
 		const result = await client.sync()
 		expect(result.outcome).toBe('snapshot')

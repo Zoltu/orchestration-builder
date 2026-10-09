@@ -1,4 +1,4 @@
-import { createEntityHasher, defineCollection, isPlainObject, snapshotState } from '../static/ts/entity-diff/index.js'
+import { buildCollections, contentVersion, createEntityHasher, defineCollection, isPlainObject } from '../static/ts/entity-diff/index.js'
 import type { CollectionDefinitions, EntityBase, ReadonlyReplicaState, ReplicaState } from '../static/ts/entity-diff/index.js'
 
 // An interface-declared schema, not a type alias: interfaces have no implicit index signature, so it only compiles against the self-referential mapped constraint the module uses.
@@ -17,33 +17,44 @@ export interface AppSchema {
 	tasks: Task
 }
 
-export const userCollection = defineCollection<User>((value): value is User => {
+function isUser(value: unknown): value is User {
 	if (!isPlainObject(value)) return false
 	if (typeof value.id !== 'string') return false
 	if (typeof value.name !== 'string') return false
 	if (typeof value.team !== 'string') return false
 	return true
-})
+}
 
-export const taskCollection = defineCollection<Task>((value): value is Task => {
+function isTask(value: unknown): value is Task {
 	if (!isPlainObject(value)) return false
 	if (typeof value.id !== 'string') return false
 	if (typeof value.title !== 'string') return false
 	if (typeof value.done !== 'boolean') return false
 	return true
-})
+}
+
+// The default collections omit `versionOf`, so every change is detected through the full content hash. Tests that exercise the cheap path build their own definitions.
+export const userCollection = defineCollection<User>(isUser)
+
+export const taskCollection = defineCollection<Task>(isTask)
 
 export const definitions: CollectionDefinitions<AppSchema> = {
 	users: userCollection,
 	tasks: taskCollection,
 }
 
+export const versionedDefinitions: CollectionDefinitions<AppSchema> = {
+	users: defineCollection<User>(isUser, (entity) => `${entity.name}|${entity.team}`),
+	tasks: defineCollection<Task>(isTask, (entity) => `${entity.title}|${String(entity.done)}`),
+}
+
 export function makeState(users: User[], tasks: Task[]): ReplicaState<AppSchema> {
 	return { users, tasks }
 }
 
-export function stateVersion(state: ReadonlyReplicaState<AppSchema>): string {
-	return snapshotState(definitions, createEntityHasher(), state).version
+// The aggregate content hash of a state: the analogue of the old content-addressed wire version, used by tests to assert that a client's held state matches a server's content.
+export function stateContentHash(definitionsToUse: CollectionDefinitions<AppSchema>, state: ReadonlyReplicaState<AppSchema>): string {
+	return contentVersion(definitionsToUse, buildCollections(definitionsToUse, createEntityHasher(), state))
 }
 
 // mulberry32: a tiny deterministic PRNG so convergence tests are reproducible without clocks or Math.random.

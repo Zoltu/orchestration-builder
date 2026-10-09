@@ -1,16 +1,22 @@
-import { describe, test } from 'bun:test'
-import { createClientReplica, createServerReplica, isServerResponse } from '../static/ts/entity-diff/index.js'
-import type { ClientReplica, ClientState, ServerReplica, ServerResponse, Snapshot, SyncRequest } from '../static/ts/entity-diff/index.js'
-import { createRandom, definitions, makeState, stateVersion } from './test-schema.js'
+import { describe, expect, test } from 'bun:test'
+import { buildCollections, createClientReplica, createEntityHasher, createServerReplica, defineCollection, isServerResponse } from '../static/ts/entity-diff/index.js'
+import type { ClientReplica, ClientState, CollectionDefinitions, ReplicaState, ServerReplica, ServerResponse, Snapshot, SyncRequest } from '../static/ts/entity-diff/index.js'
+import { createRandom, definitions, makeState, stateContentHash, taskCollection, userCollection } from './test-schema.js'
 import type { AppSchema, Task, User } from './test-schema.js'
+
+// The default collections hash full content, so a version token is content-addressed and unique per body. These draw each entity's version from a tiny set, so a version can repeatedly return to a value it held earlier — the composition case the content-hash fallback cannot produce.
+const cyclingDefinitions: CollectionDefinitions<AppSchema> = {
+	users: defineCollection<User>(userCollection.isEntity, (entity) => entity.name),
+	tasks: defineCollection<Task>(taskCollection.isEntity, (entity) => entity.title),
+}
 
 interface Adversary {
 	fetchResponse: (request: SyncRequest) => Promise<unknown>
 	stop: () => void
 }
 
-// Every corruption below must fail the protocol guard, otherwise a tampered-but-guard-passing delta would be accepted in verifyDeltas:false mode and the client would hold a wrong state. The one exception is forgeDelta, which is deliberately self-consistent and only enabled for the verifyDeltas client, where the O(total) recomputation catches it.
-function corrupt(base: ServerResponse<AppSchema>, random: () => number): unknown {
+// Every corruption below must fail the protocol guard, so a tampered payload is rejected at ingress and the client resyncs rather than holding it.
+function corrupt(definitionsToUse: CollectionDefinitions<AppSchema>, base: ServerResponse<AppSchema>, random: () => number): unknown {
 	let candidate: unknown
 	if (base.kind === 'unchanged') {
 		candidate = { kind: 'unchanged' }
@@ -32,20 +38,20 @@ function corrupt(base: ServerResponse<AppSchema>, random: () => number): unknown
 		else if (first !== undefined) candidate = { ...base, collections: { ...base.collections, users: [...users, first] } }
 		else candidate = { ...base, collections: { ...base.collections, tasks: 'not-an-array' } }
 	}
-	if (isServerResponse(definitions, candidate)) throw new Error('adversary produced a corruption the protocol guard accepts')
+	if (isServerResponse(definitionsToUse, candidate)) throw new Error('adversary produced a corruption the protocol guard accepts')
 	return candidate
 }
 
-// A delta whose shape is valid and whose next is the real target version, but whose entity content is tampered. Only verifyDeltas can reject it.
+// A delta with valid shape but tampered content and a base the client cannot hold: the base precondition is the only remaining integrity check, so it must force a resync rather than be applied.
 function forgeDelta(base: ServerResponse<AppSchema>): unknown | null {
 	if (base.kind !== 'delta') return null
 	const users = base.collections.users
-	const entity = users?.changed[0]
-	if (entity === undefined) return null
-	return { ...base, collections: { ...base.collections, users: { added: users?.added ?? [], changed: [{ ...entity, name: 'forged' }], removed: users?.removed ?? [] } } }
+	const entity = users?.changed[0] ?? users?.added[0]
+	if (entity === undefined) return { ...base, base: 'forged:0' }
+	return { ...base, base: 'forged:0', collections: { ...base.collections, users: { added: [], changed: [{ ...entity, name: 'forged' }], removed: [] } } }
 }
 
-function createAdversary(random: () => number, server: ServerReplica<AppSchema>, snapshots: Snapshot<AppSchema>[], allowForgery: boolean): Adversary {
+function createAdversary(random: () => number, server: ServerReplica<AppSchema>, snapshots: Snapshot<AppSchema>[], definitionsToUse: CollectionDefinitions<AppSchema>): Adversary {
 	let adversarial = true
 	let previous: unknown = null
 	return {
@@ -57,17 +63,15 @@ function createAdversary(random: () => number, server: ServerReplica<AppSchema>,
 			if (roll < 0.35) {
 				response = base
 			} else if (roll < 0.55) {
-				// A stale response from an earlier version: still a valid snapshot, so the client may legitimately land behind and catch up later.
+				// A stale response from an earlier revision: still a valid snapshot, so the client may legitimately land behind and catch up later.
 				const index = snapshots.length === 1 ? 0 : Math.floor(random() * (snapshots.length - 1))
 				response = snapshots[index] ?? base
 			} else if (roll < 0.7) {
 				response = previous ?? base
 			} else if (roll < 0.85) {
-				response = corrupt(base, random)
-			} else if (allowForgery) {
-				response = forgeDelta(base) ?? corrupt(base, random)
+				response = corrupt(definitionsToUse, base, random)
 			} else {
-				response = corrupt(base, random)
+				response = forgeDelta(base) ?? corrupt(definitionsToUse, base, random)
 			}
 			previous = response
 			return response
@@ -78,12 +82,13 @@ function createAdversary(random: () => number, server: ServerReplica<AppSchema>,
 	}
 }
 
-function assertConsistent(seed: number, step: number, label: string, client: ClientReplica<AppSchema>, result: ClientState<AppSchema>, knownVersions: Set<string>): void {
+function assertConsistent(seed: number, step: number, client: ClientReplica<AppSchema>, result: ClientState<AppSchema>, contentByRevision: Map<string, string>, definitionsToUse: CollectionDefinitions<AppSchema>): void {
 	if (result.version === null) return
-	if (!knownVersions.has(result.version)) throw new Error(`convergence failed at seed ${seed} step ${step} (${label}): client reports unknown version ${result.version}`)
-	if (stateVersion(result.state) !== result.version) throw new Error(`convergence failed at seed ${seed} step ${step} (${label}): returned state does not hash to its reported version`)
+	const expected = contentByRevision.get(result.version)
+	if (expected === undefined) throw new Error(`convergence failed at seed ${seed} step ${step}: client reports unknown revision ${result.version}`)
+	if (stateContentHash(definitionsToUse, result.state) !== expected) throw new Error(`convergence failed at seed ${seed} step ${step}: returned state does not match its reported revision`)
 	const held = client.state()
-	if (stateVersion(held) !== result.version) throw new Error(`convergence failed at seed ${seed} step ${step} (${label}): client holds a state that does not hash to its reported version`)
+	if (stateContentHash(definitionsToUse, held) !== expected) throw new Error(`convergence failed at seed ${seed} step ${step}: client holds a state that does not match its reported revision`)
 }
 
 function nextState(random: () => number, users: User[], tasks: Task[], nextId: number): { users: User[]; tasks: Task[]; nextId: number } {
@@ -110,15 +115,43 @@ function nextState(random: () => number, users: User[], tasks: Task[], nextId: n
 	return { users: nextUsers, tasks: nextTasks, nextId }
 }
 
-async function runConvergence(verifyDeltas: boolean): Promise<void> {
-	const label = verifyDeltas ? 'verifyDeltas:true' : 'verifyDeltas:false'
+interface EntityVersionHistory {
+	lastVersion: string
+	seenVersions: Set<string>
+}
+
+// Reports whether any entity's version changed and then returned to a value it held earlier. An unchanged version between steps is not a return, so the history only records a recurrence when a version actually moves back.
+function observeVersionRecurrence(definitionsToUse: CollectionDefinitions<AppSchema>, state: ReplicaState<AppSchema>, history: Map<string, EntityVersionHistory>): boolean {
+	const collections = buildCollections(definitionsToUse, createEntityHasher(), state)
+	let recurred = false
+	for (const name of ['users', 'tasks'] as const) {
+		for (const [id, record] of collections[name]) {
+			const previous = history.get(id)
+			if (previous === undefined) {
+				history.set(id, { lastVersion: record.version, seenVersions: new Set([record.version]) })
+				continue
+			}
+			if (record.version === previous.lastVersion) continue
+			if (previous.seenVersions.has(record.version)) recurred = true
+			previous.seenVersions.add(record.version)
+			previous.lastVersion = record.version
+		}
+	}
+	return recurred
+}
+
+async function runConvergence(definitionsToUse: CollectionDefinitions<AppSchema>): Promise<boolean> {
+	let sawRecurrence = false
 	for (let seed = 1; seed <= 20; seed++) {
 		const random = createRandom(seed)
-		const server = createServerReplica(definitions, { historyLimit: 1 + Math.floor(random() * 3) })
-		const knownVersions = new Set<string>([server.version()])
-		const snapshots: Snapshot<AppSchema>[] = [server.snapshot()]
-		const adversary = createAdversary(random, server, snapshots, verifyDeltas)
-		const client = createClientReplica(definitions, { fetchResponse: adversary.fetchResponse }, { verifyDeltas })
+		const server = createServerReplica(definitionsToUse, { historyLimit: 1 + Math.floor(random() * 3), epoch: 'e' })
+		const contentByRevision = new Map<string, string>()
+		const initial = server.snapshot()
+		contentByRevision.set(initial.version, initial.contentHash)
+		const snapshots: Snapshot<AppSchema>[] = [initial]
+		const adversary = createAdversary(random, server, snapshots, definitionsToUse)
+		const client = createClientReplica(definitionsToUse, { fetchResponse: adversary.fetchResponse })
+		const versionHistory = new Map<string, EntityVersionHistory>()
 		let users: User[] = []
 		let tasks: Task[] = []
 		let nextId = 0
@@ -127,27 +160,31 @@ async function runConvergence(verifyDeltas: boolean): Promise<void> {
 			users = evolved.users
 			tasks = evolved.tasks
 			nextId = evolved.nextId
+			if (observeVersionRecurrence(definitionsToUse, makeState(users, tasks), versionHistory)) sawRecurrence = true
 			server.update(makeState(users, tasks))
-			knownVersions.add(server.version())
-			snapshots.push(server.snapshot())
+			const snapshot = server.snapshot()
+			contentByRevision.set(snapshot.version, snapshot.contentHash)
+			snapshots.push(snapshot)
 			if (random() < 0.25) continue
 			const result = await client.sync()
-			assertConsistent(seed, step, label, client, result, knownVersions)
+			assertConsistent(seed, step, client, result, contentByRevision, definitionsToUse)
 		}
 		adversary.stop()
 		let result = await client.sync()
 		for (let attempt = 0; attempt < 5 && result.version !== server.version(); attempt++) result = await client.sync()
-		if (result.version !== server.version()) throw new Error(`convergence failed at seed ${seed} (${label}): client never reached the server version after the adversary stopped`)
-		if (stateVersion(client.state()) !== server.version()) throw new Error(`convergence failed at seed ${seed} (${label}): converged state does not match the server`)
+		if (result.version !== server.version()) throw new Error(`convergence failed at seed ${seed}: client never reached the server revision after the adversary stopped`)
+		if (stateContentHash(definitionsToUse, client.state()) !== server.snapshot().contentHash) throw new Error(`convergence failed at seed ${seed}: converged state does not match the server`)
 	}
+	return sawRecurrence
 }
 
 describe('convergence under an adversarial transport', () => {
-	test('converges with verifyDeltas false', async () => {
-		await runConvergence(false)
+	test('converges with stale, duplicate, corrupt, and forged responses', async () => {
+		await runConvergence(definitions)
 	})
 
-	test('converges with verifyDeltas true', async () => {
-		await runConvergence(true)
+	test('converges when versionOf values cycle back to a prior value', async () => {
+		const sawRecurrence = await runConvergence(cyclingDefinitions)
+		expect(sawRecurrence).toBe(true)
 	})
 })

@@ -6,6 +6,7 @@ export interface EntityBase {
 
 export interface CollectionDefinition<Entity extends EntityBase> {
 	readonly isEntity: (value: unknown) => value is Entity
+	readonly versionOf?: (entity: Entity) => string
 }
 
 // A convenience alias for a schema that is already a plain record of entities. It is deliberately not used as a generic constraint: an app-declared `interface` schema has no implicit index signature, so it does not satisfy `Record<string, EntityBase>`. Consumers naming the constraint should use `EntitySchemaConstraint` instead.
@@ -21,8 +22,12 @@ export type ReadonlyReplicaState<Schema extends EntitySchemaConstraint<Schema>> 
 
 export type CollectionDefinitions<Schema extends EntitySchemaConstraint<Schema>> = { [K in keyof Schema]: CollectionDefinition<Schema[K]> }
 
-export function defineCollection<Entity extends EntityBase>(isEntity: (value: unknown) => value is Entity): CollectionDefinition<Entity> {
-	return { isEntity }
+// `versionOf` is the per-entity cheap change detector: it must return a string that changes whenever the entity's serialized content changes and is stable otherwise. Omitting it falls back to a full content hash, which is correct but O(content) per entity per update; large collections should supply it.
+export function defineCollection<Entity extends EntityBase>(
+	isEntity: (value: unknown) => value is Entity,
+	versionOf?: (entity: Entity) => string,
+): CollectionDefinition<Entity> {
+	return { isEntity, versionOf }
 }
 
 // Narrows the plain `string` that `Object.keys` yields to the schema's key type without a cast; the hasOwnProperty check is what a type predicate is allowed to base its claim on.
@@ -54,9 +59,11 @@ export interface Delta<Schema extends EntitySchemaConstraint<Schema>> {
 	collections: CollectionDiffs<Schema>
 }
 
+// `version` is the server's opaque revision token, not a content hash. `contentHash` is the O(total) content hash of `collections`, carried so a client can verify a snapshot's contents against it; deltas carry no such field because they are trusted on their base precondition alone.
 export interface Snapshot<Schema extends EntitySchemaConstraint<Schema>> {
 	kind: 'snapshot'
 	version: VersionToken
+	contentHash: VersionToken
 	collections: ReplicaState<Schema>
 }
 

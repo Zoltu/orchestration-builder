@@ -16,12 +16,12 @@ describe('isServerResponse', () => {
 	})
 
 	test('accepts a well-formed snapshot', () => {
-		const value = { kind: 'snapshot', version: 'v1', collections: { users: [validUser], tasks: [validTask] } }
+		const value = { kind: 'snapshot', version: 'v1', contentHash: 'h1', collections: { users: [validUser], tasks: [validTask] } }
 		expect(isServerResponse(definitions, value)).toBe(true)
 	})
 
 	test('accepts a snapshot with empty collections', () => {
-		expect(isServerResponse(definitions, { kind: 'snapshot', version: 'v1', collections: { users: [], tasks: [] } })).toBe(true)
+		expect(isServerResponse(definitions, { kind: 'snapshot', version: 'v1', contentHash: 'h1', collections: { users: [], tasks: [] } })).toBe(true)
 	})
 
 	test('rejects non-objects', () => {
@@ -41,6 +41,7 @@ describe('isServerResponse', () => {
 		expect(isServerResponse(definitions, { kind: 'delta', next: 'v2', collections: {} })).toBe(false)
 		expect(isServerResponse(definitions, { kind: 'delta', base: 'v1', next: 'v2' })).toBe(false)
 		expect(isServerResponse(definitions, { kind: 'snapshot', version: 'v1' })).toBe(false)
+		expect(isServerResponse(definitions, { kind: 'snapshot', version: 'v1', collections: { users: [], tasks: [] } })).toBe(false)
 	})
 
 	test('rejects a delta whose collections field is not an object', () => {
@@ -60,12 +61,12 @@ describe('isServerResponse', () => {
 	test('rejects an unknown collection key', () => {
 		const delta = { kind: 'delta', base: 'v1', next: 'v2', collections: { ghosts: { added: [], changed: [], removed: [] } } }
 		expect(isServerResponse(definitions, delta)).toBe(false)
-		const snapshot = { kind: 'snapshot', version: 'v1', collections: { users: [], tasks: [], ghosts: [] } }
+		const snapshot = { kind: 'snapshot', version: 'v1', contentHash: 'h1', collections: { users: [], tasks: [], ghosts: [] } }
 		expect(isServerResponse(definitions, snapshot)).toBe(false)
 	})
 
 	test('rejects a snapshot missing a declared collection', () => {
-		expect(isServerResponse(definitions, { kind: 'snapshot', version: 'v1', collections: { users: [] } })).toBe(false)
+		expect(isServerResponse(definitions, { kind: 'snapshot', version: 'v1', contentHash: 'h1', collections: { users: [] } })).toBe(false)
 	})
 
 	test('rejects duplicate ids within a single list', () => {
@@ -83,7 +84,7 @@ describe('isServerResponse', () => {
 	})
 
 	test('rejects a snapshot with a duplicate id', () => {
-		const value = { kind: 'snapshot', version: 'v1', collections: { users: [validUser, { ...validUser }], tasks: [] } }
+		const value = { kind: 'snapshot', version: 'v1', contentHash: 'h1', collections: { users: [validUser, { ...validUser }], tasks: [] } }
 		expect(isServerResponse(definitions, value)).toBe(false)
 	})
 })

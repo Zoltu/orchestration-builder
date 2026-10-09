@@ -43,6 +43,7 @@ function isDelta<Schema extends EntitySchemaConstraint<Schema>>(definitions: Col
 
 function isSnapshot<Schema extends EntitySchemaConstraint<Schema>>(definitions: CollectionDefinitions<Schema>, value: Record<string, unknown>): boolean {
 	if (typeof value.version !== 'string') return false
+	if (typeof value.contentHash !== 'string') return false
 	const collections = value.collections
 	if (!isPlainObject(collections)) return false
 	for (const name of collectionNames(definitions)) {

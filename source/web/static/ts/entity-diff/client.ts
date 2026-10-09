@@ -6,10 +6,6 @@ export interface ClientReplicaDependencies {
 	fetchResponse: (request: SyncRequest) => Promise<unknown>
 }
 
-export interface ClientReplicaOptions {
-	verifyDeltas: boolean
-}
-
 // The state handed to callers is the client's internal state by reference, typed readonly to signal the immutability contract: replace entities and collections, never mutate them in place, or the identity hash cache returns a stale version.
 export interface ClientState<Schema extends EntitySchemaConstraint<Schema>> {
 	state: ReadonlyReplicaState<Schema>
@@ -33,7 +29,6 @@ function clientStateFromReaction<Schema extends EntitySchemaConstraint<Schema>>(
 export function createClientReplica<Schema extends EntitySchemaConstraint<Schema>>(
 	definitions: CollectionDefinitions<Schema>,
 	dependencies: ClientReplicaDependencies,
-	options: ClientReplicaOptions,
 ): ClientReplica<Schema> {
 	const hasher = createEntityHasher()
 	let currentState = emptyState(definitions)
@@ -42,7 +37,7 @@ export function createClientReplica<Schema extends EntitySchemaConstraint<Schema
 
 	async function performSync(): Promise<ClientState<Schema>> {
 		const first = await dependencies.fetchResponse({ have: currentVersion })
-		const firstReaction = reduceServerResponse(definitions, hasher, currentState, currentVersion, first, options.verifyDeltas)
+		const firstReaction = reduceServerResponse(definitions, hasher, currentState, currentVersion, first)
 		if (firstReaction.kind !== 'needsSnapshot' && firstReaction.kind !== 'invalid') {
 			currentState = firstReaction.state
 			currentVersion = firstReaction.version
@@ -50,7 +45,7 @@ export function createClientReplica<Schema extends EntitySchemaConstraint<Schema
 		}
 		// A response the client cannot apply at its current version is answered with one unconditional snapshot request; if that too is unusable the client surfaces invalid rather than looping.
 		const retry = await dependencies.fetchResponse({ have: null })
-		const retryReaction = reduceServerResponse(definitions, hasher, currentState, currentVersion, retry, options.verifyDeltas)
+		const retryReaction = reduceServerResponse(definitions, hasher, currentState, currentVersion, retry)
 		if (retryReaction.kind === 'needsSnapshot' || retryReaction.kind === 'invalid') {
 			return { state: currentState, version: currentVersion, outcome: 'invalid' }
 		}

@@ -3,6 +3,7 @@ import { isServerResponse } from './protocol.js'
 import { sha256Hex } from './sha256.js'
 import { collectionNames } from './types.js'
 import type {
+	CollectionDefinition,
 	CollectionDefinitions,
 	CollectionDiff,
 	CollectionDiffs,
@@ -42,17 +43,12 @@ export function createEntityHasher(): EntityHasher {
 
 export interface EntityRecord<Entity extends EntityBase> {
 	entity: Entity
-	hash: VersionToken
+	version: string
 }
 
 export type SnapshotCollections<Schema extends EntitySchemaConstraint<Schema>> = { [K in keyof Schema]: Map<string, EntityRecord<Schema[K]>> }
 
-export interface StateSnapshot<Schema extends EntitySchemaConstraint<Schema>> {
-	version: VersionToken
-	collections: SnapshotCollections<Schema>
-}
-
-export type TouchedCollections<Schema extends EntitySchemaConstraint<Schema>> = { [K in keyof Schema]?: Map<string, VersionToken | null> }
+export type TouchedCollections<Schema extends EntitySchemaConstraint<Schema>> = { [K in keyof Schema]?: Map<string, string | null> }
 
 export interface HistoryEntry<Schema extends EntitySchemaConstraint<Schema>> {
 	base: VersionToken
@@ -68,30 +64,13 @@ function snapshotNames<Schema extends EntitySchemaConstraint<Schema>>(collection
 	return Object.keys(collections).filter((key): key is keyof Schema & string => Object.prototype.hasOwnProperty.call(collections, key))
 }
 
-function collectionRecords<Entity extends EntityBase>(hasher: EntityHasher, entities: readonly Entity[]): Map<string, EntityRecord<Entity>> {
-	const records = new Map<string, EntityRecord<Entity>>()
-	for (const entity of entities) {
-		if (typeof entity.id !== 'string') throw new Error('entity-diff: an entity is missing a string id')
-		if (records.has(entity.id)) throw new Error(`entity-diff: duplicate entity id "${entity.id}"`)
-		records.set(entity.id, { entity, hash: hasher.hash(entity) })
-	}
-	return records
+// The per-entity version is the caller's cheap `versionOf` when supplied; otherwise it is the full content hash. `buildCollections` is the only place this choice is made, so a collection with `versionOf` never reaches the hasher.
+function entityVersion<Entity extends EntityBase>(definition: CollectionDefinition<Entity>, hasher: EntityHasher, entity: Entity): string {
+	if (definition.versionOf !== undefined) return definition.versionOf(entity)
+	return hasher.hash(entity)
 }
 
-function collectionVersion<Entity extends EntityBase>(records: Map<string, EntityRecord<Entity>>): VersionToken {
-	const pairs: [string, VersionToken][] = []
-	for (const [id, record] of records) pairs.push([id, record.hash])
-	pairs.sort((left, right) => (left[0] < right[0] ? -1 : left[0] > right[0] ? 1 : 0))
-	return sha256Hex(canonicalSerialize(pairs))
-}
-
-function entitiesOf<Entity extends EntityBase>(records: Map<string, EntityRecord<Entity>>): Entity[] {
-	const entities: Entity[] = []
-	for (const record of records.values()) entities.push(record.entity)
-	return entities
-}
-
-// An empty state is the server's and client's starting point; every declared collection must be present because snapshotState treats a missing one as a programming error.
+// An empty state is the server's and client's starting point; every declared collection must be present because buildCollections treats a missing one as a programming error.
 export function emptyState<Schema extends EntitySchemaConstraint<Schema>>(definitions: CollectionDefinitions<Schema>): ReplicaState<Schema> {
 	const state: ReplicaState<Schema> = Object.create(null)
 	for (const name of collectionNames(definitions)) {
@@ -100,40 +79,63 @@ export function emptyState<Schema extends EntitySchemaConstraint<Schema>>(defini
 	return state
 }
 
-// A mapped type over a generic schema cannot be built with an object literal without an assertion, so the accumulator starts as a prototype-less object; the prototype is also the safe choice because the keys come from the schema.
-//
-// COLLECTIONS ARE UNORDERED: the version is a content hash over id/hash pairs sorted by id, so it is independent of array order. An app that needs a stable display order MUST sort by its own domain key (an id, a timestamp, a name); the module makes no ordering guarantee.
-export function snapshotState<Schema extends EntitySchemaConstraint<Schema>>(
+// Building the collection maps is O(total) cheap comparisons when every collection supplies `versionOf`; it is O(total * content) only when a collection falls back to hashing. It never computes the aggregate content hash, which is what keeps `update` cheap.
+export function buildCollections<Schema extends EntitySchemaConstraint<Schema>>(
 	definitions: CollectionDefinitions<Schema>,
 	hasher: EntityHasher,
 	state: ReadonlyReplicaState<Schema>,
-): StateSnapshot<Schema> {
+): SnapshotCollections<Schema> {
 	const collections: SnapshotCollections<Schema> = Object.create(null)
-	const versions: [string, VersionToken][] = []
 	for (const name of collectionNames(definitions)) {
 		const entities = state[name]
 		if (!Array.isArray(entities)) throw new Error(`entity-diff: state is missing the "${name}" collection`)
-		const records = collectionRecords(hasher, entities)
+		const records = new Map<string, EntityRecord<Schema[typeof name]>>()
+		for (const entity of entities) {
+			if (typeof entity.id !== 'string') throw new Error('entity-diff: an entity is missing a string id')
+			if (records.has(entity.id)) throw new Error(`entity-diff: duplicate entity id "${entity.id}"`)
+			records.set(entity.id, { entity, version: entityVersion(definitions[name], hasher, entity) })
+		}
 		collections[name] = records
-		versions.push([name, collectionVersion(records)])
 	}
-	versions.sort((left, right) => (left[0] < right[0] ? -1 : left[0] > right[0] ? 1 : 0))
-	return { version: sha256Hex(canonicalSerialize(versions)), collections }
+	return collections
 }
 
-export function materializeState<Schema extends EntitySchemaConstraint<Schema>>(current: StateSnapshot<Schema>): ReplicaState<Schema> {
+function entitiesOf<Entity extends EntityBase>(records: Map<string, EntityRecord<Entity>>): Entity[] {
+	const entities: Entity[] = []
+	for (const record of records.values()) entities.push(record.entity)
+	return entities
+}
+
+export function materializeState<Schema extends EntitySchemaConstraint<Schema>>(collections: SnapshotCollections<Schema>): ReplicaState<Schema> {
 	const state: ReplicaState<Schema> = Object.create(null)
-	for (const name of snapshotNames(current.collections)) {
-		state[name] = entitiesOf(current.collections[name])
+	for (const name of snapshotNames(collections)) {
+		state[name] = entitiesOf(collections[name])
 	}
 	return state
+}
+
+// The aggregate content hash is O(total) and exists only so a snapshot's contents can be verified against the hash the server reported; deltas never pay it. It hashes the per-entity versions the collections already carry (sorted by id per collection, then combined across collections sorted by name), so it does not re-serialize entity bodies. Because it hashes versions rather than bodies, snapshot verification strength is bounded by `versionOf`: the content-hash fallback verifies full content, but a lossy `versionOf` (two different bodies with the same version string) weakens it to verifying only those version strings.
+export function contentVersion<Schema extends EntitySchemaConstraint<Schema>>(
+	definitions: CollectionDefinitions<Schema>,
+	collections: SnapshotCollections<Schema>,
+): VersionToken {
+	const versions: [string, VersionToken][] = []
+	for (const name of collectionNames(definitions)) {
+		const records = collections[name]
+		const pairs: [string, string][] = []
+		for (const [id, record] of records) pairs.push([id, record.version])
+		pairs.sort((left, right) => (left[0] < right[0] ? -1 : left[0] > right[0] ? 1 : 0))
+		versions.push([name, sha256Hex(canonicalSerialize(pairs))])
+	}
+	versions.sort((left, right) => (left[0] < right[0] ? -1 : left[0] > right[0] ? 1 : 0))
+	return sha256Hex(canonicalSerialize(versions))
 }
 
 interface CollectionDelta<Entity extends EntityBase> {
 	added: Entity[]
 	changed: Entity[]
 	removed: string[]
-	touched: Map<string, VersionToken | null>
+	touched: Map<string, string | null>
 }
 
 function diffCollection<Entity extends EntityBase>(
@@ -143,7 +145,7 @@ function diffCollection<Entity extends EntityBase>(
 	const added: Entity[] = []
 	const changed: Entity[] = []
 	const removed: string[] = []
-	const touched = new Map<string, VersionToken | null>()
+	const touched = new Map<string, string | null>()
 	for (const [id, record] of nextRecords) {
 		const before = previousRecords.get(id)
 		if (before === undefined) {
@@ -151,33 +153,104 @@ function diffCollection<Entity extends EntityBase>(
 			touched.set(id, null)
 			continue
 		}
-		if (before.hash !== record.hash) {
+		if (before.version !== record.version) {
 			changed.push(record.entity)
-			touched.set(id, before.hash)
+			touched.set(id, before.version)
 		}
 	}
 	for (const [id, record] of previousRecords) {
 		if (nextRecords.has(id)) continue
 		removed.push(id)
-		touched.set(id, record.hash)
+		touched.set(id, record.version)
 	}
 	return { added, changed, removed, touched }
 }
 
-export function diffSnapshots<Schema extends EntitySchemaConstraint<Schema>>(
+export function diffCollections<Schema extends EntitySchemaConstraint<Schema>>(
 	definitions: CollectionDefinitions<Schema>,
-	previous: StateSnapshot<Schema>,
-	next: StateSnapshot<Schema>,
-): { touched: TouchedCollections<Schema>; delta: Delta<Schema> } {
+	previous: SnapshotCollections<Schema>,
+	next: SnapshotCollections<Schema>,
+): { touched: TouchedCollections<Schema>; collections: CollectionDiffs<Schema> } {
 	const touched: TouchedCollections<Schema> = {}
 	const collections: CollectionDiffs<Schema> = {}
 	for (const name of collectionNames(definitions)) {
-		const diff = diffCollection(previous.collections[name], next.collections[name])
+		const diff = diffCollection(previous[name], next[name])
 		if (diff.added.length === 0 && diff.changed.length === 0 && diff.removed.length === 0) continue
 		collections[name] = { added: diff.added, changed: diff.changed, removed: diff.removed }
 		touched[name] = diff.touched
 	}
-	return { touched, delta: { kind: 'delta', base: previous.version, next: next.version, collections } }
+	return { touched, collections }
+}
+
+function composeCollection<Entity extends EntityBase>(
+	currentRecords: Map<string, EntityRecord<Entity>>,
+	touched: Map<string, string | null>,
+): CollectionDiff<Entity> {
+	const added: Entity[] = []
+	const changed: Entity[] = []
+	const removed: string[] = []
+	for (const [id, beforeVersion] of touched) {
+		const record = currentRecords.get(id)
+		if (record === undefined) {
+			if (beforeVersion !== null) removed.push(id)
+			continue
+		}
+		if (beforeVersion === null) {
+			added.push(record.entity)
+			continue
+		}
+		if (beforeVersion !== record.version) changed.push(record.entity)
+	}
+	return { added, changed, removed }
+}
+
+function snapshotResponse<Schema extends EntitySchemaConstraint<Schema>>(
+	current: SnapshotCollections<Schema>,
+	revision: VersionToken,
+	contentHash: () => VersionToken,
+): Snapshot<Schema> {
+	return { kind: 'snapshot', version: revision, contentHash: contentHash(), collections: materializeState(current) }
+}
+
+// The delta is computed from the tip of the chain: the first history entry that touched an id (from the requested base forward) supplies the id's before-version, and that before-version is compared against the current state to drop ids whose net effect cancels out. `contentHash` is a thunk so the O(total) aggregate hash is paid only on the snapshot paths, and the server can cache it per revision.
+export function respond<Schema extends EntitySchemaConstraint<Schema>>(
+	definitions: CollectionDefinitions<Schema>,
+	current: SnapshotCollections<Schema>,
+	revision: VersionToken,
+	history: readonly HistoryEntry<Schema>[],
+	have: VersionToken | null,
+	contentHash: () => VersionToken,
+): ServerResponse<Schema> {
+	if (have !== null && have === revision) return { kind: 'unchanged', version: revision }
+	if (have === null) return snapshotResponse(current, revision, contentHash)
+	let startIndex = -1
+	for (let index = history.length - 1; index >= 0; index--) {
+		const entry = history[index]
+		if (entry === undefined) continue
+		if (entry.base === have) {
+			startIndex = index
+			break
+		}
+	}
+	if (startIndex === -1) return snapshotResponse(current, revision, contentHash)
+	const collections: CollectionDiffs<Schema> = {}
+	for (const name of collectionNames(definitions)) {
+		const merged = new Map<string, string | null>()
+		for (let index = startIndex; index < history.length; index++) {
+			const entry = history[index]
+			if (entry === undefined) continue
+			const touched = entry.touched[name]
+			if (touched === undefined) continue
+			for (const [id, beforeVersion] of touched) {
+				if (!merged.has(id)) merged.set(id, beforeVersion)
+			}
+		}
+		if (merged.size === 0) continue
+		const diff = composeCollection(current[name], merged)
+		if (diff.added.length === 0 && diff.changed.length === 0 && diff.removed.length === 0) continue
+		collections[name] = diff
+	}
+	return { kind: 'delta', base: have, next: revision, collections }
 }
 
 function applyCollectionDelta<Entity extends EntityBase>(
@@ -198,73 +271,12 @@ function copyEntities<Entity extends EntityBase>(entities: readonly Entity[]): E
 	return [...entities]
 }
 
-function composeCollection<Entity extends EntityBase>(
-	currentRecords: Map<string, EntityRecord<Entity>>,
-	touched: Map<string, VersionToken | null>,
-): CollectionDiff<Entity> {
-	const added: Entity[] = []
-	const changed: Entity[] = []
-	const removed: string[] = []
-	for (const [id, beforeHash] of touched) {
-		const record = currentRecords.get(id)
-		if (record === undefined) {
-			if (beforeHash !== null) removed.push(id)
-			continue
-		}
-		if (beforeHash === null) {
-			added.push(record.entity)
-			continue
-		}
-		if (beforeHash !== record.hash) changed.push(record.entity)
-	}
-	return { added, changed, removed }
-}
-
-// The delta is computed from the tip of the chain: the first history entry that touched an id (from the requested base forward) supplies the id's before-hash, and that before-hash is compared against the current state to drop ids whose net effect cancels out.
-export function respond<Schema extends EntitySchemaConstraint<Schema>>(
-	current: StateSnapshot<Schema>,
-	history: readonly HistoryEntry<Schema>[],
-	have: VersionToken | null,
-): ServerResponse<Schema> {
-	if (have !== null && have === current.version) return { kind: 'unchanged', version: current.version }
-	if (have === null) return { kind: 'snapshot', version: current.version, collections: materializeState(current) }
-	let startIndex = -1
-	for (let index = history.length - 1; index >= 0; index--) {
-		const entry = history[index]
-		if (entry === undefined) continue
-		if (entry.base === have) {
-			startIndex = index
-			break
-		}
-	}
-	if (startIndex === -1) return { kind: 'snapshot', version: current.version, collections: materializeState(current) }
-	const collections: CollectionDiffs<Schema> = {}
-	for (const name of snapshotNames(current.collections)) {
-		const merged = new Map<string, VersionToken | null>()
-		for (let index = startIndex; index < history.length; index++) {
-			const entry = history[index]
-			if (entry === undefined) continue
-			const touched = entry.touched[name]
-			if (touched === undefined) continue
-			for (const [id, beforeHash] of touched) {
-				if (!merged.has(id)) merged.set(id, beforeHash)
-			}
-		}
-		if (merged.size === 0) continue
-		const diff = composeCollection(current.collections[name], merged)
-		if (diff.added.length === 0 && diff.changed.length === 0 && diff.removed.length === 0) continue
-		collections[name] = diff
-	}
-	return { kind: 'delta', base: have, next: current.version, collections }
-}
-
+// The base precondition is the delta's only integrity check: trusting `delta.next` keeps apply O(changed), and there is deliberately no content re-hash here. The base is a revision token, not a content check, so a forged or corrupt delta whose base matches the client can set `next` to the server's true current revision while carrying wrong content; the server then answers `unchanged` and the client stays silently stale until a snapshot is otherwise forced or those entities change again. That is the accepted tradeoff of trusting the base precondition.
 export function applyDelta<Schema extends EntitySchemaConstraint<Schema>>(
 	definitions: CollectionDefinitions<Schema>,
-	hasher: EntityHasher,
 	state: ReplicaState<Schema>,
 	version: VersionToken | null,
 	delta: Delta<Schema>,
-	verify: boolean,
 ): ClientReaction<Schema> {
 	if (version === null || version !== delta.base) {
 		return { kind: 'needsSnapshot', state, version, reason: 'delta base does not match the client version' }
@@ -274,12 +286,6 @@ export function applyDelta<Schema extends EntitySchemaConstraint<Schema>>(
 		const entities = state[name]
 		if (!Array.isArray(entities)) throw new Error(`entity-diff: state is missing the "${name}" collection`)
 		materialized[name] = applyCollectionDelta(entities, delta.collections[name])
-	}
-	// Trusting delta.next is what keeps the default apply O(changed): recomputing the whole version would re-hash every entity and make apply O(total), defeating the point of a delta. Callers that cannot trust the transport set verify, which pays the O(total) re-hash in exchange for detecting a corrupted or forged delta. verify detects corruption, not a malicious server: a self-consistent forgery (tampered entities paired with a next that hashes to the forged result) passes verification, because verification only checks that the contents match the claimed version, not that the server was honest.
-	if (!verify) return { kind: 'applied', state: materialized, version: delta.next }
-	const computed = snapshotState(definitions, hasher, materialized)
-	if (computed.version !== delta.next) {
-		return { kind: 'needsSnapshot', state, version, reason: 'delta verification failed' }
 	}
 	return { kind: 'applied', state: materialized, version: delta.next }
 }
@@ -297,9 +303,9 @@ export function applySnapshot<Schema extends EntitySchemaConstraint<Schema>>(
 		if (!Array.isArray(entities)) throw new Error(`entity-diff: snapshot is missing the "${name}" collection`)
 		materialized[name] = copyEntities(entities)
 	}
-	const computed = snapshotState(definitions, hasher, materialized)
-	if (computed.version !== snapshot.version) {
-		return { kind: 'invalid', state, version, reason: 'snapshot version does not match its contents' }
+	const computed = contentVersion(definitions, buildCollections(definitions, hasher, materialized))
+	if (computed !== snapshot.contentHash) {
+		return { kind: 'invalid', state, version, reason: 'snapshot content hash does not match its contents' }
 	}
 	return { kind: 'snapshot', state: materialized, version: snapshot.version }
 }
@@ -310,13 +316,12 @@ export function reduceServerResponse<Schema extends EntitySchemaConstraint<Schem
 	state: ReplicaState<Schema>,
 	version: VersionToken | null,
 	raw: unknown,
-	verifyDeltas: boolean,
 ): ClientReaction<Schema> {
 	if (!isServerResponse(definitions, raw)) return { kind: 'invalid', state, version, reason: 'server response failed validation' }
 	if (raw.kind === 'unchanged') {
 		if (version !== null && raw.version === version) return { kind: 'unchanged', state, version }
 		return { kind: 'needsSnapshot', state, version, reason: 'server reported unchanged at an unknown version' }
 	}
-	if (raw.kind === 'delta') return applyDelta(definitions, hasher, state, version, raw, verifyDeltas)
+	if (raw.kind === 'delta') return applyDelta(definitions, state, version, raw)
 	return applySnapshot(definitions, hasher, state, version, raw)
 }
