@@ -123,7 +123,7 @@ function edgeAnimationState(operation: Operation, model: InteractionModel): Edge
 	return 'returning'
 }
 
-// Per-model memo for the renderer's whole-model derivations: a model is replaced wholesale on every poll and never mutated in place, so each structure is computed once on first request and read by identity afterwards, and the WeakMap drops the entry with its model on run switch. The undefined slots mean "not derived yet"; a cached value is never mutated afterwards.
+// Per-model memo for the renderer's whole-model derivations: the model object is never mutated in place and is replaced only when its data changes, so an unchanged poll keeps the same object by reference; each structure is computed once on first request and read by identity afterwards, and the WeakMap drops the entry with its model on run switch. The undefined slots mean "not derived yet"; a cached value is never mutated afterwards.
 interface FlowLookups {
 	lastCallOrReturnByStack: Map<string, Operation>
 	closedCallByReturnByStack: Map<string, Map<string, Operation>>

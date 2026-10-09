@@ -231,6 +231,8 @@ export interface ApplicationState {
 	draggingItemId: string | null
 	queueAnswerPendingId: string | null
 	serverAvailable: boolean
+	// The ETag validators for the versioned GET endpoints, keyed by request URL (the base flow model and each `?operation=` detail are distinct URLs, so a base validator can never be replayed on a detail request). Each poll echoes the stored value as If-None-Match; a 304 leaves the already-held payload untouched.
+	versions: Record<string, string>
 	justSubmittedRunId: string | null
 	// The create POST's in-flight flag (a plain queue add, a continuation, a new run, and a re-run each dispatch one): set synchronously when the request leaves and cleared by the create response actions on both the ok and fail paths, so a double click or a second Ctrl+Enter inside the window is a no-op instead of a duplicate. Complements the justSubmitted* ids, whose dedup starts only once a response has landed.
 	createSending: boolean
@@ -304,16 +306,20 @@ export type EffectRunner<Payload> = (dispatch: Dispatch, payload: Payload) => vo
 
 export type Dispatch = <Payload>(action: Action<Payload>, payload?: Payload) => void
 
-// The fetch effecter's payload: the ok action receives the response envelope once the body has been parsed (or the raw text when the body is not JSON); the fail action fires only on a network error.
+// The fetch effecter's payload: the ok action receives the response envelope once the body has been parsed (or the raw text when the body is not JSON); the fail action fires only on a network error. `version` is the response's ETag (or null when the server sent none) and `url` the request URL, so the receiving action can store the validator under the exact URL it will be replayed against.
 export interface FetchResultPayload {
 	status: number
 	ok: boolean
 	body: unknown
+	version: string | null
+	url: string
 }
 
 export interface FetchEffectPayload {
 	url: string
 	init?: RequestInit
+	// The stored ETag to revalidate with, sent as If-None-Match; absent or empty means an unconditional request. Only the three versioned GET endpoints carry it.
+	ifNoneMatch?: string | null
 	ok: Action<FetchResultPayload>
 	fail: Action<undefined>
 }
@@ -527,11 +533,20 @@ function onEscapeKey(action: Action<undefined>): [typeof onEscapeKeySubscriber, 
 // --- Custom effects --------------------------------------------------------
 // @hyperapp/http is still "planned", so the fetch effecter is hand-written. It parses the body and dispatches straight from the promise callbacks: hyperapp coalesces renders itself behind its own render lock (../vendor/hyperapp.js), so a microtask dispatch cannot interleave with a render, while a requestAnimationFrame hop would delay every state update a frame and — in a hidden tab, where requestAnimationFrame never fires — strand every completed poll's parsed body in a pending callback until the tab resurfaced. The fail action fires on any network failure, including a dropped connection mid-body (the body read rejects, not the fetch itself); any HTTP response — even a 4xx/5xx — resolves the ok branch with its status.
 
+// Merges an If-None-Match validator into a request's headers without clobbering any header the caller set. A Headers instance normalizes the caller's headers (object, array, or Headers), and an absent or empty validator returns the init unchanged so unconditional requests keep their exact shape.
+function withIfNoneMatch(init: RequestInit | undefined, ifNoneMatch: string | null | undefined): RequestInit | undefined {
+	if (typeof ifNoneMatch !== 'string' || ifNoneMatch === '') return init
+	const headers = new Headers(init?.headers)
+	headers.set('If-None-Match', ifNoneMatch)
+	return { ...init, headers, cache: 'no-store' }
+}
+
 function runFetch(dispatch: Dispatch, payload: FetchEffectPayload): void {
-	fetch(payload.url, payload.init).then(
+	fetch(payload.url, withIfNoneMatch(payload.init, payload.ifNoneMatch)).then(
 		(response) => {
 			const status = response.status
 			const ok = response.ok
+			const version = response.headers.get('etag')
 			response.text().then(
 				(text) => {
 					let body: unknown = null
@@ -542,13 +557,23 @@ function runFetch(dispatch: Dispatch, payload: FetchEffectPayload): void {
 							body = text
 						}
 					}
-					dispatch(payload.ok, { status, ok, body })
+					dispatch(payload.ok, { status, ok, body, version, url: payload.url })
 				},
 				() => dispatch(payload.fail),
 			)
 		},
 		() => dispatch(payload.fail),
 	)
+}
+
+// Records a response's ETag under its request URL, returning a fresh map so the poll keys validators per URL. A response without an ETag (an unversioned endpoint, or a 304 whose validator the server omitted) leaves the map unchanged, so a previously stored token survives.
+function recordVersion(versions: Record<string, string>, payload: FetchResultPayload): Record<string, string> {
+	if (typeof payload.version !== 'string' || payload.version === '') return versions
+	return { ...versions, [payload.url]: payload.version }
+}
+
+function storedVersionFor(versions: Record<string, string>, url: string): string | null {
+	return versions[url] ?? null
 }
 
 function Fetch(payload: FetchEffectPayload): FetchEffect {
@@ -602,7 +627,8 @@ function UpdateFavicon(state: ApplicationState): FaviconEffect {
 function Tick(state: ApplicationState): ActionReturn {
 	return [
 		{ ...state, now: Date.now() },
-		Fetch({ url: 'api/runs', ok: GotRunList, fail: FetchFailed }),
+		Fetch({ url: 'api/runs', ifNoneMatch: storedVersionFor(state.versions, 'api/runs'), ok: GotRunList, fail: FetchFailed }),
+		// `api/questions` and `api/queue` carry no ETag, so their polls stay unconditional rather than replaying a validator the server never issued.
 		Fetch({ url: 'api/questions', ok: GotQuestions, fail: FetchFailed }),
 		Fetch({ url: 'api/queue', ok: GotQueue, fail: FetchFailed }),
 	]
@@ -612,11 +638,13 @@ function PollSelectedRun(state: ApplicationState): ActionReturn {
 	// Bail on a non-string id rather than fetching `/api/runs/undefined`; `selectedRunId` is null until a run is selected and can briefly be undefined across a state transition, so the guard keeps the poll from firing on an invalid id.
 	if (typeof state.selectedRunId !== 'string' || state.selectedRunId === '') return state
 	const runId = encodeURIComponent(state.selectedRunId)
+	const runUrl = `api/runs/${runId}`
+	const flowUrl = `api/runs/${runId}/flow`
 	return [
 		state,
-		Fetch({ url: `api/runs/${runId}`, ok: GotSelectedRun(state.selectedRunId), fail: FetchFailed }),
+		Fetch({ url: runUrl, ifNoneMatch: storedVersionFor(state.versions, runUrl), ok: GotSelectedRun(state.selectedRunId), fail: FetchFailed }),
 		// The flow model is derived server-side from the full log (the truncated recentLog the run view carries is not enough to reconstruct the active path, lingering legs, or per-invocation costs); the centerpiece reads it off this endpoint rather than re-deriving client-side.
-		Fetch({ url: `api/runs/${runId}/flow`, ok: GotFlowModel(state.selectedRunId), fail: FetchFailed }),
+		Fetch({ url: flowUrl, ifNoneMatch: storedVersionFor(state.versions, flowUrl), ok: GotFlowModel(state.selectedRunId), fail: FetchFailed }),
 		// While the inspector modal is open, the same poll also refreshes the log-window tail so in-flight turns appear when they complete (a null effect when closed — hyperapp ignores falsy effects).
 		InspectorTailRefresh(state),
 	]
@@ -650,18 +678,22 @@ function GotFlowModel(runId: string) {
 		const status = payload.status
 		const ok = payload.ok
 		const body = payload.body
+		// A 304 must be handled before the `!ok` check below (which a 304 would otherwise trip): the model is unchanged, so it is kept BY REFERENCE — reassigning it would break the WeakMap-keyed memoization in interaction-model.ts/flow-view.ts and force a full re-derivation on every unchanged poll. No follower sync is needed because nothing mounted changed.
+		if (status === 304) return { ...state, serverAvailable: true }
 		if (status === 404) return [{ ...state, flowModel: null, previousFlowModel: null, serverAvailable: ok }, SyncSequenceFollower(), SyncInspectorFollower()]
 		if (!ok || body === null || typeof body !== 'object') return [{ ...state, serverAvailable: ok }, SyncSequenceFollower(), SyncInspectorFollower()]
 		if (!isInteractionModelPayload(body)) return [{ ...state, serverAvailable: true }, SyncSequenceFollower(), SyncInspectorFollower()]
-		return [{ ...state, previousFlowModel: state.flowModel, flowModel: body, serverAvailable: true }, SyncSequenceFollower(), SyncInspectorFollower()]
+		return [{ ...state, previousFlowModel: state.flowModel, flowModel: body, serverAvailable: true, versions: recordVersion(state.versions, payload) }, SyncSequenceFollower(), SyncInspectorFollower()]
 	}
 }
 
 function GotRunList(state: ApplicationState, payload: FetchResultPayload): ActionReturn {
+	// A 304 carries no body and has ok === false, so it must be handled before the `!ok` logic below: the list is unchanged, so keep summaries exactly, skip auto-selection, and skip the favicon effect (nothing it derives from changed).
+	if (payload.status === 304) return { ...state, serverAvailable: true }
 	const ok = payload.ok
 	const body = payload.body
 	const summaries: RunSummary[] = ok && Array.isArray(body) ? body : []
-	const nextState = { ...state, summaries, serverAvailable: ok }
+	const nextState = { ...state, summaries, serverAvailable: ok, versions: recordVersion(state.versions, payload) }
 	if (nextState.justSubmittedRunId !== null && summaries.some((summary) => summary.runId === nextState.justSubmittedRunId)) {
 		nextState.justSubmittedRunId = null
 	}
@@ -714,6 +746,8 @@ function GotSelectedRun(curriedRunId: string) {
 		const status = payload.status
 		const ok = payload.ok
 		const body = payload.body
+		// A 304 carries no body and has ok === false, so it must be handled before the 404/`!ok` checks below: the view and status are unchanged, so keep both exactly and skip the completion transition, the interrupt/answer bookkeeping, and the follower sync.
+		if (status === 304) return { ...state, serverAvailable: true }
 		if (status === 404) {
 			// The run directory is created early in execution but may not be readable in the instant after submit; the per-run subscription keeps polling until the view appears.
 			return [{ ...state, selectedRunStatus: 'unknown', serverAvailable: ok }, SyncSequenceFollower()]
@@ -741,7 +775,7 @@ function GotSelectedRun(curriedRunId: string) {
 		}
 		// A completion transition resets the inspector's scope to auto, so the next open lands on the most recently active instance (here, the finishing one) instead of whatever the operator had scoped to during the run.
 		const inspector = isCompletionTransition ? { ...state.inspector, scopedRoleId: null } : state.inspector
-		return [{ ...state, selectedRunView: body, selectedRunStatus: body.status, resultModalOpen, resultShownForRun, interruptAnswerCard, shownInterruptAnswerKeys, serverAvailable: true, inspector, livePartial: isTerminalStatus(body.status) ? null : state.livePartial }, SyncSequenceFollower()]
+		return [{ ...state, selectedRunView: body, selectedRunStatus: body.status, resultModalOpen, resultShownForRun, interruptAnswerCard, shownInterruptAnswerKeys, serverAvailable: true, inspector, livePartial: isTerminalStatus(body.status) ? null : state.livePartial, versions: recordVersion(state.versions, payload) }, SyncSequenceFollower()]
 	}
 }
 
@@ -2599,7 +2633,7 @@ function isApplicationState(value: unknown): value is ApplicationState {
 	const stateKeys: (keyof ApplicationState)[] = [
 		'summaries', 'selectedRunId', 'selectedRunView', 'selectedRunStatus', 'pendingQuestions',
 		'queueItems', 'justSubmittedItemId', 'pendingAddSelectionId', 'editingItemId', 'draggingItemId', 'queueAnswerPendingId',
-		'serverAvailable', 'justSubmittedRunId', 'createSending', 'muted', 'shownQuestionIds', 'firstQuestionsPoll', 'pendingAnswerId',
+		'serverAvailable', 'versions', 'justSubmittedRunId', 'createSending', 'muted', 'shownQuestionIds', 'firstQuestionsPoll', 'pendingAnswerId',
 		'runEffort', 'savingEffort', 'runLogLevel', 'savingLogLevel',
 		'flowModel', 'previousFlowModel', 'labelResolver', 'guildParticipants', 'roleAccents', 'build',
 		'flowTier', 'flowViewMode', 'sequenceRolesOnly', 'screen', 'historyExpanded', 'continuation',
@@ -2633,6 +2667,7 @@ app({
 			draggingItemId: null,
 			queueAnswerPendingId: null,
 			serverAvailable: true,
+			versions: {},
 			justSubmittedRunId: null,
 			createSending: false,
 			muted: false,

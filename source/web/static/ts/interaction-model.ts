@@ -98,7 +98,7 @@ interface DerivedStack {
 	callMetrics: Map<string, OperationMetrics> | undefined
 }
 
-// The helpers re-derive the same whole-model structures (the open-call replay, the derived stack records, the active stack, the row list) several times per poll, and a model is replaced wholesale on every poll and never mutated in place, so a WeakMap keyed on model identity caches each structure on first request: every helper reads the same derivation instead of replaying the operation list per call, and an entry is dropped with its model on run switch. The undefined slots mean "not derived yet"; a cached value is never mutated afterwards, so readers may hold it without copying.
+// The helpers re-derive the same whole-model structures (the open-call replay, the derived stack records, the active stack, the row list) several times per poll; the model object is never mutated in place and is replaced only when its data changes, so an unchanged poll keeps the same object by reference and a WeakMap keyed on model identity caches each structure on first request: every helper reads the same derivation instead of replaying the operation list per call, and an entry is dropped with its model on run switch. The undefined slots mean "not derived yet"; a cached value is never mutated afterwards, so readers may hold it without copying.
 const derivedByModel = new WeakMap<object, DerivedStack>()
 
 function derivedOf(model: InteractionModel): DerivedStack {
