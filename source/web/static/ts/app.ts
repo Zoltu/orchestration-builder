@@ -20,6 +20,7 @@ import { deriveTerminalResult, ResultModal } from './result-modal.js'
 import { InspectorModal, INSPECTOR_WINDOW_SIZE, buildTurnIndex, deriveDefaultScopeRoleId, deriveInstanceChain, initialScopeWindow, instancesOf, logWindowUrl, olderPageSpliced, olderTurnsFetch, scopeLoadFetch, scopeViewFor, tailPageAppended, tailRefreshFetch, tailRefreshMustResync, tailWindowOffset } from './inspector-modal.js'
 import { createWireDetails, WIRE_DETAIL_CACHE_LIMIT } from './wire-details.js'
 import { isObject, isOperationMetricsRecord } from './guards.js'
+import { buildStageMemoInputs, createStageMemo } from './stage-memo.js'
 import { responseBelongsToSelection } from './stale-response.js'
 import { createStreamClient } from './stream-client.js'
 import { activeLivePartial, nextLivePartial, scopedActiveLivePartial } from './live-partial.js'
@@ -29,6 +30,7 @@ import type { LabelConfig, LabelResolver, LabelTier } from './labels.js'
 import type { RoleAccentResolver } from './role-accents.js'
 import type { LogWindowEvent, ScopeWindow, TurnEntry } from './inspector-modal.js'
 import type { LivePartial } from './live-partial.js'
+import type { StageMemoInputs } from './stage-memo.js'
 import type { ElementRect, TooltipTarget } from './inspector.js'
 import type { OperationDetailsState } from './operation-details.js'
 import type { ScrollFollower } from './scroll-follow.js'
@@ -2461,6 +2463,25 @@ function SyncInspectorFollower(): NullPayloadEffect {
 	return [runSyncInspectorFollower, null]
 }
 
+// The stage builder. It receives exactly the stable memo inputs and returns the flow or sequence vnode; the module-level memo wraps it so a `now`-only tick reuses the same vnode and hyperapp's `oldVNode === newVNode` short-circuit skips the SVG diff. Live elapsed is hydrated once at build time — the intended tradeoff, where an open call's elapsed freezes between model changes while the cost strip and caption outside the memo keep ticking. It always returns a vnode, so the stage position is never null.
+function buildStageContent(inputs: StageMemoInputs): Vnode {
+	const model = withLiveElapsed(inputs.serverModel, Date.now())
+	const lifecycle = inputs.previousModel !== null ? deriveLifecycle(inputs.previousModel, model) : undefined
+	const cta = { onclick: OpenResultModal }
+	const question = { onclick: OpenQuestionModal }
+	// The roles-only toggle filters the sequence render only (model and static guild set alike, so the tools column collapses with the tool rows); the flow view keeps reading the full model — the filter is a lens on this one surface, not a change to the run.
+	const sequenceModel = inputs.rolesOnly === true ? rolesOnlyModel(model) : model
+	const sequenceGuildParticipants = inputs.rolesOnly === true ? rolesOnlyParticipants(inputs.guildParticipants) : inputs.guildParticipants
+	// The sequence view takes the guild's static participant set so every role column appears from the first frame; both views take the per-role accent resolver so agent nodes carry their role's hue.
+	if (inputs.viewMode === 'sequence') {
+		return h('div', { class: 'pb-sequence-scroll' }, [renderSequenceView(h, sequenceModel, inputs.labels, inputs.tier, inputs.roleAccents, sequenceGuildParticipants)])
+	}
+	return renderFlowView(h, model, inputs.labels, inputs.tier, inputs.roleAccents, lifecycle, cta, question, flowColumnTracker)
+}
+
+// The single memo instance for the stage. It caches the last vnode and the inputs it was built from, so the SAME vnode object is returned while the inputs are unchanged and hyperapp skips the diff. The cached vnode is mounted at exactly one keyed tree position (child 0 of `.pb-flow`, key 'watch-flow'), so it is never reused at two positions or after a position shift (see stage-memo.ts and AGENTS.md "Browser client sources are TypeScript").
+const stageMemo = createStageMemo(buildStageContent)
+
 // The watch screen fills the viewport below the top bar: a controls row, the flex-filling stage, and the now-caption. The Flow view (product surface) and the Sequence view (debug surface) are independent leaves over the same model; the toggle swaps which renders without a fetch. The sequence view mounts inside a vertical scroll container because its timeline grows long, while the flow view scales to the stage.
 function WatchScreen(state: ApplicationState): Vnode {
 	const labels = state.labelResolver
@@ -2475,23 +2496,24 @@ function WatchScreen(state: ApplicationState): Vnode {
 		return h('section', { id: 'watch-screen' }, [
 			LineageLine(state),
 			StageControls(state, null),
-			h('div', { class: 'pb-flow flow-stage' }, [h('p', { class: 'flow-empty' }, message), InspectorModalForRun(state)]),
+			h('div', { key: 'watch-flow', class: 'pb-flow flow-stage' }, [h('p', { class: 'flow-empty' }, message), InspectorModalForRun(state)]),
 		])
 	}
 
-	// The polled flow payload is a pure function of stored data, so an open call's elapsedSeconds is null; fill it from this client's clock once here so every elapsed surface below (node cost lines, top-bar titles, the cost strip, the tooltip) reads a live span through the same helpers.
+	// The polled flow payload is a pure function of stored data, so an open call's elapsedSeconds is null; fill it from this client's clock once here so StageControls and the now-caption read a live span through the same helpers. The stage below hydrates its own elapsed at build time and is memoized on the stable inputs only, so a `now`-only tick never rebuilds it.
 	const model = withLiveElapsed(serverModel, state.now)
 	const tier = state.flowTier
-	const lifecycle = state.previousFlowModel !== null ? deriveLifecycle(state.previousFlowModel, model) : undefined
-	const cta = { onclick: OpenResultModal }
-	const question = { onclick: OpenQuestionModal }
-	// The roles-only toggle filters the sequence render only (model and static guild set alike, so the tools column collapses with the tool rows); the caption, cost strip, and flow view keep reading the full model — the filter is a lens on this one surface, not a change to the run.
-	const sequenceModel = state.sequenceRolesOnly === true ? rolesOnlyModel(model) : model
-	const sequenceGuildParticipants = state.sequenceRolesOnly === true ? rolesOnlyParticipants(state.guildParticipants) : state.guildParticipants
-	// The sequence view takes the guild's static participant set so every role column appears from the first frame; both views take the per-role accent resolver so agent nodes carry their role's hue.
-	const stageContent = state.flowViewMode === 'sequence'
-		? h('div', { class: 'pb-sequence-scroll' }, [renderSequenceView(h, sequenceModel, labels, tier, state.roleAccents, sequenceGuildParticipants)])
-		: renderFlowView(h, model, labels, tier, state.roleAccents, lifecycle, cta, question, flowColumnTracker)
+	// The memo returns the cached vnode while the stable inputs are unchanged; it is mounted at exactly one keyed position — child 0 of the `.pb-flow` container keyed 'watch-flow' — and that key keeps the position stable while the container's unkeyed siblings (LineageLine, PlanSection) toggle in and out, so the cached vnode is only ever diffed against its own previous self. The reuse is safe because it never lands at two positions or after a position shift (see AGENTS.md "Browser client sources are TypeScript").
+	const stageContent = stageMemo(buildStageMemoInputs({
+		serverModel,
+		previousModel: state.previousFlowModel,
+		labels,
+		tier,
+		roleAccents: state.roleAccents,
+		guildParticipants: state.guildParticipants,
+		viewMode: state.flowViewMode,
+		rolesOnly: state.sequenceRolesOnly,
+	}))
 
 	const nowCaption = deriveNowCaption(model, labels, tier)
 
@@ -2499,7 +2521,7 @@ function WatchScreen(state: ApplicationState): Vnode {
 		LineageLine(state),
 		StageControls(state, model),
 		// `.pb-flow` is the positioning context for the per-run-view modals (the question, result, and interrupt overlays are absolute inset 0 within it), so the modals cover the run view rather than the whole page. It is also the hover stage for the inspector: `mouseover`/`mouseleave`/`click` bubble here from every SVG child, so the inspector is wired once for both the flow and sequence views.
-		h('div', { class: 'pb-flow flow-stage', onmouseover: HoverRunView, onmouseleave: LeaveRunView, onclick: ClickRunView }, [
+		h('div', { key: 'watch-flow', class: 'pb-flow flow-stage', onmouseover: HoverRunView, onmouseleave: LeaveRunView, onclick: ClickRunView }, [
 			stageContent,
 			QuestionModalForRun(state),
 			ResultModalForRun(state),
