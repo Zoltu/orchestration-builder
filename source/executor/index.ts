@@ -78,6 +78,8 @@ export type { NativeToolsConfig } from './tools.js'
 
 export { createPlanToolHandlers } from './tools/plan.js'
 
+export { createStyleGuideToolHandlers } from './tools/style-guide.js'
+
 export { createRunLogToolHandlers } from './tools/run-log.js'
 
 export { generateRunId } from './run-id.js'

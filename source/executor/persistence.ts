@@ -229,6 +229,9 @@ export type ReadRunPlanById = (runId: string) => string | null
 // Written only by the write_plan tool (source/executor/tools/plan.ts), which writes atomically (write-temp + rename), so a reader never sees a torn document.
 export const PLAN_FILE_NAME = 'plan.md'
 
+// Written only by the write_style_guide tool (source/executor/tools/style-guide.ts), which writes atomically (write-temp + rename), so a reader never sees a torn document.
+export const STYLE_GUIDE_FILE_NAME = 'style-guide.md'
+
 // Reads the run's plan document per request for the run view. Absence is normal (the planner may not have written one yet), and a read failure after the existence check (e.g. a permission or io error) degrades to "no plan" rather than failing the run view that serves it — a plan the UI cannot show must never 500 the view.
 export function createReadRunPlanById(baseDir: string): ReadRunPlanById {
 	return (runId: string) => {

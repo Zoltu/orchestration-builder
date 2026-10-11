@@ -1,0 +1,33 @@
+{
+	"name": "read_style_guide",
+	"description": "Read the style guide document for a run. Returns the style guide content plus a truncated flag and the total character count; content past the size cap is cut off with a truncation marker. By default reads the current run's style guide; pass runId to read another run's style guide. A run that has not written a style guide returns an unavailable result.",
+	"humanLabel": {
+		"detailed": ["Read Style Guide"],
+		"friendly": ["Read Style Guide"],
+		"whimsical": ["Consult the House Style"]
+	},
+	"humanDescription": {
+		"detailed": ["Reads a run's style guide document."],
+		"friendly": ["Read the style guide."],
+		"whimsical": ["Check the house style."]
+	},
+	"humanCallLabel": {
+		"detailed": ["role {sourceRole} is invoking tool {destinationRole} (stack {stack})"],
+		"friendly": ["{source} is reading the style guide"],
+		"whimsical": ["{source} is consulting the house style", "{source} is checking the style sheet", "{source} is reading the house rules"]
+	},
+	"humanWorkingLabel": {
+		"detailed": ["tool {participantRole} is reading the style guide"],
+		"friendly": ["Reading the style guide"],
+		"whimsical": ["Consulting the house style", "Checking the style sheet", "Reading the house rules", "Brushing up on the style"]
+	},
+	"parameters": {
+		"type": "object",
+		"properties": {
+			"runId": {
+				"type": "string",
+				"description": "Optional run id (run-YYYYMMDD-HHMMSS) whose style guide to read. Omit it to read the current run's style guide."
+			}
+		}
+	}
+}

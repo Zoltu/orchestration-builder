@@ -1,0 +1,36 @@
+{
+	"name": "write_style_guide",
+	"description": "Replace the current run's style guide document with the given content. The write is a full overwrite: the previous style guide is discarded, so always pass the complete document rather than a patch. The style guide location is fixed by the run; there is no path parameter.",
+	"humanLabel": {
+		"detailed": ["Write Style Guide"],
+		"friendly": ["Write Style Guide"],
+		"whimsical": ["Set the House Style"]
+	},
+	"humanDescription": {
+		"detailed": ["Writes a run's style guide document."],
+		"friendly": ["Write the style guide."],
+		"whimsical": ["Set the house style."]
+	},
+	"humanCallLabel": {
+		"detailed": ["role {sourceRole} is invoking tool {destinationRole} (stack {stack})"],
+		"friendly": ["{source} is writing the style guide"],
+		"whimsical": ["{source} is setting the house style", "{source} is writing the house rules", "{source} is drafting the style sheet"]
+	},
+	"humanWorkingLabel": {
+		"detailed": ["tool {participantRole} is writing the style guide"],
+		"friendly": ["Writing the style guide"],
+		"whimsical": ["Setting the house style", "Writing the house rules", "Drafting the style sheet", "Laying down the style"]
+	},
+	"parameters": {
+		"type": "object",
+		"required": [
+			"content"
+		],
+		"properties": {
+			"content": {
+				"type": "string",
+				"description": "The complete style guide document. It replaces the previous style guide in full."
+			}
+		}
+	}
+}

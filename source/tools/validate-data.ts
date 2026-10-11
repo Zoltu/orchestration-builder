@@ -12,6 +12,7 @@ import { createRunParkTracker } from '../executor/park-state.js'
 import { createRoleRegistry } from '../executor/role-registry.js'
 import { createToolHandlers } from '../executor/tools.js'
 import { createPlanToolHandlers } from '../executor/tools/plan.js'
+import { createStyleGuideToolHandlers } from '../executor/tools/style-guide.js'
 import { createRunLogToolHandlers } from '../executor/tools/run-log.js'
 import type { HumanFacingText, ToolManifest } from '../executor/types.js'
 import { isNonEmptyStringArray, validateToolManifest } from '../executor/validation.js'
@@ -73,13 +74,13 @@ const expectedRoles = [
 
 const expectedToolNames = new Set([
 	'agent', 'continue_agent', 'finish', 'context_info', 'edit_context', 'ask_human',
-	'list_directory', 'glob_files', 'read_file', 'read_file_partial', 'search_text', 'write_file', 'read_plan', 'write_plan', 'fetch_url', 'typecheck', 'test',
+	'list_directory', 'glob_files', 'read_file', 'read_file_partial', 'search_text', 'write_file', 'read_plan', 'write_plan', 'read_style_guide', 'write_style_guide', 'fetch_url', 'typecheck', 'test',
 	'run_shell', 'repo_map', 'web_search',
 	'read_run_log', 'search_run_log',
 	'trigger_interrupt', 'list_role_messages', 'read_message_window', 'search_role_blocks', 'recent_role_tool_calls',
 ])
 
-const nativeToolNames = new Set(['list_directory', 'glob_files', 'read_file', 'read_file_partial', 'search_text', 'write_file', 'read_plan', 'write_plan', 'read_run_log', 'search_run_log', 'fetch_url', 'typecheck', 'test', 'run_shell', 'repo_map', 'web_search'])
+const nativeToolNames = new Set(['list_directory', 'glob_files', 'read_file', 'read_file_partial', 'search_text', 'write_file', 'read_plan', 'write_plan', 'read_style_guide', 'write_style_guide', 'read_run_log', 'search_run_log', 'fetch_url', 'typecheck', 'test', 'run_shell', 'repo_map', 'web_search'])
 
 const builtInToolNames = new Set(['agent', 'continue_agent', 'finish', 'context_info', 'edit_context', 'ask_human', 'trigger_interrupt', 'list_role_messages', 'read_message_window', 'search_role_blocks', 'recent_role_tool_calls'])
 
@@ -100,6 +101,8 @@ const expectedSignatures: ExpectedSignature[] = [
 	{ file: 'write_file.json', required: ['path', 'content'], properties: ['path', 'content'] },
 	{ file: 'read_plan.json', required: [], properties: ['runId'] },
 	{ file: 'write_plan.json', required: ['content'], properties: ['content'] },
+	{ file: 'read_style_guide.json', required: [], properties: ['runId'] },
+	{ file: 'write_style_guide.json', required: ['content'], properties: ['content'] },
 	{ file: 'read_run_log.json', required: [], properties: ['offset', 'limit'] },
 	{ file: 'search_run_log.json', required: ['query'], properties: ['query', 'type', 'limit'] },
 	{ file: 'fetch_url.json', required: ['url'], properties: ['url', 'method'] },
@@ -124,7 +127,7 @@ const expectedSignatures: ExpectedSignature[] = [
 // The style standard is one swappable file appended to the designated roles' prompts at load time (composeRolePrompt in source/executor/loader.ts); these pins keep the role set, the file, and the composed prompts from drifting apart silently.
 const styleGuideRoles = new Set(['coder', 'style_lead', 'style_reviewer'])
 const styleGuidePath = 'prompts/style.md'
-const styleGuideHeadings = ['## Style standard', '## Formatting', '## Comments']
+const styleGuideHeadings = ['## Style standard', '## Formatting', '## Prose and documentation', '## Comments']
 // Distinctive fragments of the standard's body, pinned so gutting the file's content while keeping its headings fails the gate the way a dropped heading does.
 const styleGuideFragments = ['Newlines carry semantic meaning', 'A comment earns its place only']
 // Distinctive fragments of the inline style rules the role prompts duplicated before the standard was shipped; their absence from every composed styleGuide prompt proves the duplication was deleted rather than carried alongside it.
@@ -363,10 +366,11 @@ function checkManifests(): void {
 	const duplicateNames = manifestNames.filter((name, index) => manifestNames.indexOf(name) !== index)
 	check(new Set(manifestNames).size === manifestNames.length, `guild/tools: duplicate manifest names: ${[...new Set(duplicateNames)].join(', ')}`)
 
-	// Plan and run-log handlers close over their run's directory (they are bound per run in the server), so the gate constructs them over fixture bindings it never invokes, solely to compare the full native handler table.
+	// Plan, style-guide, and run-log handlers close over their run's directory (they are bound per run in the server), so the gate constructs them over fixture bindings it never invokes, solely to compare the full native handler table.
 	const nativeHandlers = {
 		...createToolHandlers({ workspaceRoot: manifestDir, defaultToolTimeoutSeconds: 30 }),
 		...createPlanToolHandlers({ runsBaseDir: manifestDir, runId: 'run-19700101-000000', workspaceRoot: repoRoot }),
+		...createStyleGuideToolHandlers({ runsBaseDir: manifestDir, runId: 'run-19700101-000000', workspaceRoot: repoRoot }),
 		...createRunLogToolHandlers({ logPath: path.join(manifestDir, LOG_FILE_NAME) }),
 	}
 	checkSameSet('native tool handler table', new Set(Object.keys(nativeHandlers)), nativeToolNames)

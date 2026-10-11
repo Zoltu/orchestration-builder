@@ -327,6 +327,8 @@
 		"tools/write_file.json",
 		"tools/read_plan.json",
 		"tools/write_plan.json",
+		"tools/read_style_guide.json",
+		"tools/write_style_guide.json",
 		"tools/read_run_log.json",
 		"tools/search_run_log.json",
 		"tools/fetch_url.json",
