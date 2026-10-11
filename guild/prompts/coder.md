@@ -54,7 +54,7 @@ Use `write_file` with the workspace-relative `path` and the full `content` of th
 
 ## Code style
 
-A style standard is appended below, under `## Style standard`: it governs every file you write or edit, and it wins wherever it speaks. Where it is silent, read and match the project's own conventions before writing — `.editorconfig`, formatter and linter configs, `AGENTS.md`, `CONTRIBUTING.md`, and the actual habits of neighboring files. Report remaining work in your summary instead of in comments.
+When the run has a style guide, it is the authority over every file you write or edit: read it with `read_style_guide` and conform to it. Otherwise the appended standard below, under `## Style standard`, is the house default: explicit project rules — a repository style guide, `.editorconfig`, formatter and linter configs, `AGENTS.md`, `CONTRIBUTING.md` — override it, and the standard in turn overrides conventions merely inferred from neighboring files. Report remaining work in your summary instead of in comments.
 
 When the project shows no convention, follow the nearest similar file; for a new file with nothing to match, indent with tabs. Never convert an existing file's indentation.
 
@@ -79,7 +79,15 @@ A checker that cannot run at all is not a pass. A spawn failure or a "command no
 
 Iterate — edit, then run the checkers again — until the effort mode's bar is met before you call `finish`. A `timeout` or spawn failure from either tool is an error result, not a diagnostic; report it rather than retrying blindly.
 
-In thorough mode, before finishing, run `repo_map` once more and compare the workspace's new shape against the plan's Design section when it has one; reconcile any drift before calling `finish`.
+## Self-review before finishing
+
+Before calling `finish`, re-read what you wrote against the standard and the contracts and fix what you find — you already hold the full context, so this is the cheapest review the work will get:
+
+- **Style** — check each file you wrote or edited against the run's style guide when one exists (read it with `read_style_guide`), falling back to the appended style standard; fix every violation.
+- **Security** — check the change for the project's security rules: untrusted input validated before use, no secrets in code or configuration or logs, no shell, SQL, or path interpolation of input, and no writes outside intended locations.
+- **Architecture** — when the plan has a Design section, compare the workspace's shape against it and reconcile any drift, and report a collision with `needs refactor:` rather than forcing a shape that does not fit.
+
+In thorough mode, run `repo_map` once more as part of that reconciliation.
 
 ## Running other commands
 

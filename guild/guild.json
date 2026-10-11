@@ -42,7 +42,7 @@
 		},
 		"coder": {
 			"systemPrompt": "prompts/coder.md",
-			"tools": ["list_directory", "glob_files", "read_file", "read_file_partial", "read_plan", "search_text", "repo_map", "write_file", "fetch_url", "typecheck", "test", "run_shell", "finish"],
+			"tools": ["list_directory", "glob_files", "read_file", "read_file_partial", "read_plan", "read_style_guide", "search_text", "repo_map", "write_file", "fetch_url", "typecheck", "test", "run_shell", "finish"],
 			"label": {
 				"detailed": ["Coder"],
 				"friendly": ["Coder"],
@@ -139,7 +139,7 @@
 		},
 		"style_reviewer": {
 			"systemPrompt": "prompts/style_reviewer.md",
-			"tools": ["list_directory", "glob_files", "read_file", "read_file_partial", "search_text", "repo_map", "finish"],
+			"tools": ["list_directory", "glob_files", "read_file", "read_file_partial", "read_style_guide", "search_text", "repo_map", "finish"],
 			"label": {
 				"detailed": ["Style Reviewer"],
 				"friendly": ["Style Reviewer"],
@@ -154,6 +154,26 @@
 				"detailed": ["role {participantRole} is reviewing the style (streaming tokens)"],
 				"friendly": ["Reviewing the style"],
 				"whimsical": ["Combing the code for cowlicks", "Checking the dress rehearsal", "Hunting the rogue semicolon"]
+			},
+			"styleGuide": "prompts/style.md"
+		},
+		"style_guide_author": {
+			"systemPrompt": "prompts/style_guide_author.md",
+			"tools": ["list_directory", "glob_files", "read_file", "read_file_partial", "read_plan", "read_style_guide", "search_text", "repo_map", "write_style_guide", "ask_human", "finish"],
+			"label": {
+				"detailed": ["Style Guide Author"],
+				"friendly": ["Style Guide Author"],
+				"whimsical": ["Taste Smith"]
+			},
+			"description": {
+				"detailed": ["Reads the task, the repository's style sources, and the style standard, and produces the single run style guide the coder conforms to and the style review enforces."],
+				"friendly": ["Writes the style guide for this run's work."],
+				"whimsical": ["Picks the house style before the paint goes on."]
+			},
+			"workingLabel": {
+				"detailed": ["role {participantRole} is composing the run style guide (streaming tokens)"],
+				"friendly": ["Writing the run style guide"],
+				"whimsical": ["Choosing the palette", "Mixing the house colors", "Setting the type"]
 			},
 			"styleGuide": "prompts/style.md"
 		},

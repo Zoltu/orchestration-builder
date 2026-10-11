@@ -66,7 +66,7 @@ function checkRotatingTieredText(label: string, value: HumanFacingText | undefin
 const expectedRoles = [
 	'orchestrator', 'planner', 'coder', 'researcher',
 	'architecture_lead', 'architecture_reviewer',
-	'style_lead', 'style_reviewer',
+	'style_lead', 'style_reviewer', 'style_guide_author',
 	'security_lead', 'security_reviewer',
 	'acceptance_lead', 'acceptance_reviewer',
 	'context_manager', 'recovery', 'loop_detector', 'inquiry_responder',
@@ -125,7 +125,7 @@ const expectedSignatures: ExpectedSignature[] = [
 ]
 
 // The style standard is one swappable file appended to the designated roles' prompts at load time (composeRolePrompt in source/executor/loader.ts); these pins keep the role set, the file, and the composed prompts from drifting apart silently.
-const styleGuideRoles = new Set(['coder', 'style_lead', 'style_reviewer'])
+const styleGuideRoles = new Set(['coder', 'style_lead', 'style_reviewer', 'style_guide_author'])
 const styleGuidePath = 'prompts/style.md'
 const styleGuideHeadings = ['## Style standard', '## Formatting', '## Prose and documentation', '## Comments']
 // Distinctive fragments of the standard's body, pinned so gutting the file's content while keeping its headings fails the gate the way a dropped heading does.
@@ -280,6 +280,16 @@ function checkGuild(loaded: LoadedGuildFiles): void {
 		const prompt = (loaded.prompts['researcher'] ?? '').toLowerCase()
 		check(prompt.includes('brief'), 'guild: researcher prompt lacks the compact-brief contract')
 		check(prompt.includes('cite'), 'guild: researcher prompt lacks the cite-your-sources guidance')
+	}
+	const styleGuideAuthor = config.roles['style_guide_author']
+	if (styleGuideAuthor === undefined) {
+		failures.push('guild: missing role "style_guide_author"')
+	} else {
+		// The guide author is a read-only leaf: it inspects the workspace and writes only the run style guide, so it must hold none of the workspace-mutating tools.
+		checkSameSet('guild: style_guide_author tools', new Set(styleGuideAuthor.tools), new Set(['list_directory', 'glob_files', 'read_file', 'read_file_partial', 'read_plan', 'read_style_guide', 'search_text', 'repo_map', 'write_style_guide', 'ask_human', 'finish']))
+		for (const mutatingTool of ['write_file', 'run_shell', 'typecheck', 'test']) {
+			check(!styleGuideAuthor.tools.includes(mutatingTool), `guild: style_guide_author must not hold workspace-mutating tool "${mutatingTool}"`)
+		}
 	}
 	// The run-log tools expose every role's full conversations, so they must stay exclusive to the inquiry handler — the one read-only, handler-only role the platform invokes for operator questions.
 	for (const [name, role] of Object.entries(config.roles)) {
