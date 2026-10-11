@@ -81,7 +81,7 @@
 		},
 		"architecture_lead": {
 			"systemPrompt": "prompts/architecture_lead.md",
-			"tools": ["agent", "finish"],
+			"tools": ["agent", "continue_agent", "finish"],
 			"label": {
 				"detailed": ["Architecture Lead"],
 				"friendly": ["Architecture Lead"],
@@ -119,7 +119,7 @@
 		},
 		"style_lead": {
 			"systemPrompt": "prompts/style_lead.md",
-			"tools": ["agent", "finish"],
+			"tools": ["agent", "continue_agent", "finish"],
 			"label": {
 				"detailed": ["Style Lead"],
 				"friendly": ["Style Lead"],
@@ -159,7 +159,7 @@
 		},
 		"security_lead": {
 			"systemPrompt": "prompts/security_lead.md",
-			"tools": ["agent", "finish"],
+			"tools": ["agent", "continue_agent", "finish"],
 			"label": {
 				"detailed": ["Security Lead"],
 				"friendly": ["Security Lead"],
@@ -197,7 +197,7 @@
 		},
 		"acceptance_lead": {
 			"systemPrompt": "prompts/acceptance_lead.md",
-			"tools": ["agent", "finish"],
+			"tools": ["agent", "continue_agent", "finish"],
 			"label": {
 				"detailed": ["Acceptance Lead"],
 				"friendly": ["Acceptance Lead"],
