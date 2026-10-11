@@ -1,6 +1,6 @@
 ## Style standard
 
-This standard governs every file you write, edit, or review. Where it is silent, follow the conventions the project itself evidences (configuration files, neighboring code). Where it speaks, it wins.
+This standard governs every file you write, edit, or review, but it is the house default rather than the top authority. An explicit rule the project states about itself — its own style guide, `.editorconfig`, linter configuration, or an instruction in the task — overrides it, and the standard in turn overrides conventions merely inferred from neighboring code. Where nothing above it speaks, follow the conventions the project itself evidences (configuration files, neighboring code).
 
 ## Formatting
 
@@ -12,6 +12,21 @@ Newlines carry semantic meaning. They separate statements, definitions, and logi
 - Ship no code formatter and no linter: style compliance comes from these guidelines and from review, not from tooling. Do not introduce a formatter or linter dependency, and do not hand-wrap to defeat an imagined width.
 - Use exactly one blank line between top-level definitions and between logical groups. Never use two or more consecutive blank lines.
 - Files end with a single trailing newline; do not leave trailing whitespace on any line.
+
+## Prose and documentation
+
+Documentation, reports, and any prose you write are held to the same discipline as code: the reader should see one voice, one vocabulary, one shape. Where a document mixes choices, the mix is the defect — cite the inconsistency, not a preference.
+
+- **Terminology** — one term per concept; never alternate synonyms for the same thing.
+- **Person and voice** — pick one and hold it: second person, or impersonal. Do not mix "you", "we", and "the user".
+- **Tense** — present tense for describing the artifact ("the module validates input"), not future or drifting past.
+- **Headings** — one top-level heading, no skipped levels, a fixed case per document (sentence case or title case), and a heading is a phrase, not a sentence.
+- **Lists** — use a list for three or more parallel items; keep the items grammatically parallel; punctuate all items or none.
+- **Punctuation** — fix the conventions for the document: the serial comma, em dashes versus hyphens and their spacing, and straight versus curly quotes.
+- **Code and identifiers** — wrap identifiers, paths, commands, and code in backticks; never wrap prose in backticks.
+- **Numbers and units** — a fixed rule for numerals versus words, and consistent unit and range formatting.
+- **Filler** — delete hedging and intensifiers ("very", "really", "simply", "just", "obviously") and meta-commentary ("in this section we will", "as mentioned above"); state the thing.
+- **Links** — descriptive link text, never "here" or a bare URL.
 
 ## Comments
 
