@@ -72,7 +72,7 @@ const expectedRoles = [
 ] as const
 
 const expectedToolNames = new Set([
-	'agent', 'finish', 'context_info', 'edit_context', 'ask_human',
+	'agent', 'continue_agent', 'finish', 'context_info', 'edit_context', 'ask_human',
 	'list_directory', 'glob_files', 'read_file', 'read_file_partial', 'search_text', 'write_file', 'read_plan', 'write_plan', 'fetch_url', 'typecheck', 'test',
 	'run_shell', 'repo_map', 'web_search',
 	'read_run_log', 'search_run_log',
@@ -81,7 +81,7 @@ const expectedToolNames = new Set([
 
 const nativeToolNames = new Set(['list_directory', 'glob_files', 'read_file', 'read_file_partial', 'search_text', 'write_file', 'read_plan', 'write_plan', 'read_run_log', 'search_run_log', 'fetch_url', 'typecheck', 'test', 'run_shell', 'repo_map', 'web_search'])
 
-const builtInToolNames = new Set(['agent', 'finish', 'context_info', 'edit_context', 'ask_human', 'trigger_interrupt', 'list_role_messages', 'read_message_window', 'search_role_blocks', 'recent_role_tool_calls'])
+const builtInToolNames = new Set(['agent', 'continue_agent', 'finish', 'context_info', 'edit_context', 'ask_human', 'trigger_interrupt', 'list_role_messages', 'read_message_window', 'search_role_blocks', 'recent_role_tool_calls'])
 
 interface ExpectedSignature {
 	file: string
@@ -114,6 +114,7 @@ const expectedSignatures: ExpectedSignature[] = [
 	{ file: 'search_role_blocks.json', required: ['targetRole', 'pattern'], properties: ['targetRole', 'pattern', 'kind', 'field', 'maxMatches'] },
 	{ file: 'recent_role_tool_calls.json', required: ['targetRole'], properties: ['targetRole', 'limit'] },
 	{ file: 'agent.json', required: ['role', 'task'], properties: ['role', 'task'] },
+	{ file: 'continue_agent.json', required: ['role'], properties: ['role', 'roleId', 'comment'] },
 	{ file: 'finish.json', required: ['status', 'summary'], properties: ['status', 'summary', 'artifacts', 'error'] },
 	{ file: 'context_info.json', required: [], properties: ['targetRole'] },
 	{ file: 'edit_context.json', required: ['operations'], properties: ['operations', 'targetRole'] },
@@ -372,6 +373,7 @@ function checkManifests(): void {
 	// Shape-only fixture: the handlers are compared by name and never invoked, so the guild stub only has to type-check.
 	const builtInHandlers = createBuiltInToolHandlers({
 		spawnAgent: async () => ({ status: 'success', summary: '' }),
+		continueAgent: async () => ({ status: 'success', summary: '' }),
 		roleState: {
 			history: [],
 			lastPromptTokens: 0,

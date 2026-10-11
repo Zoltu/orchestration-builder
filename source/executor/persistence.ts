@@ -1,6 +1,7 @@
 import * as fs from 'node:fs'
 import * as path from 'node:path'
 import type { RunCheckpoint } from './checkpoint.js'
+import { isRoleSnapshot, type RoleSnapshot, type RoleSnapshotInput, type RoleSnapshotStore, type RoleSnapshotSummary } from './role-snapshot.js'
 import { isProjectSettings } from './validation.js'
 import { isTaskQueue } from './task-queue.js'
 import type { TaskQueue } from './task-queue.js'
@@ -71,6 +72,73 @@ export function createDeleteCheckpoint(runId: string, baseDir: string): DeleteCh
 	return () => {
 		const checkpointPath = path.resolve(runDir, CHECKPOINT_FILE_NAME)
 		if (fs.existsSync(checkpointPath)) fs.unlinkSync(checkpointPath)
+	}
+}
+
+const ROLES_DIR_NAME = 'roles'
+
+// Role instance ids are minted from guild role names, which are arbitrary JSON keys; an id carrying a path separator or traversal segment must not be allowed to place a snapshot outside roles/. A safe id is non-empty, contains no separator, and equals its own file name.
+function isSafeRoleSnapshotId(roleId: string): boolean {
+	if (roleId.length === 0) return false
+	if (roleId.includes('/') || roleId.includes('\\')) return false
+	if (roleId === '.' || roleId === '..') return false
+	return path.basename(roleId) === roleId
+}
+
+// The per-run store of finished child roles' conversations, keyed by instance id. A parent continues a finished child by reading its snapshot back, so the capability survives a service restart (the live registry does not). Writes are atomic (write-temp + rename) so a torn snapshot is never read; a malformed or unreadable file degrades to "absent" rather than throwing, mirroring the settings/queue readers, because a snapshot is only ever a convenience for a later continuation and must never fail a run.
+export function createRoleSnapshotStore(runId: string, baseDir: string): RoleSnapshotStore {
+	const rolesDir = path.resolve(baseDir, runId, ROLES_DIR_NAME)
+	const snapshotPath = (roleId: string): string => {
+		if (!isSafeRoleSnapshotId(roleId)) throw new Error(`role snapshot store: role id "${roleId}" is not a safe file name`)
+		return path.join(rolesDir, `${roleId}.json`)
+	}
+
+	function read(roleId: string): RoleSnapshot | null {
+		const targetPath = snapshotPath(roleId)
+		if (!fs.existsSync(targetPath)) return null
+		let text: string
+		try {
+			text = fs.readFileSync(targetPath, 'utf8')
+		} catch {
+			return null
+		}
+		let parsed: unknown
+		try {
+			parsed = JSON.parse(text)
+		} catch {
+			return null
+		}
+		return isRoleSnapshot(parsed) ? parsed : null
+	}
+
+	return {
+		write(input: RoleSnapshotInput) {
+			fs.mkdirSync(rolesDir, { recursive: true })
+			const targetPath = snapshotPath(input.roleId)
+			const tempPath = `${targetPath}.${process.pid}.tmp`
+			const snapshot: RoleSnapshot = { version: 1, runId, ...input }
+			fs.writeFileSync(tempPath, JSON.stringify(snapshot))
+			fs.renameSync(tempPath, targetPath)
+		},
+		read,
+		// Each snapshot file is parsed in full to project its summary: continuation is rare, so reading every body is acceptable, and a metadata index is the deferred optimization.
+		list(): RoleSnapshotSummary[] {
+			if (!fs.existsSync(rolesDir)) return []
+			const summaries: RoleSnapshotSummary[] = []
+			for (const entry of fs.readdirSync(rolesDir)) {
+				if (!entry.endsWith('.json')) continue
+				const snapshot = read(entry.slice(0, -'.json'.length))
+				if (snapshot === null) continue
+				summaries.push({
+					roleId: snapshot.roleId,
+					roleName: snapshot.roleName,
+					depth: snapshot.depth,
+					parentRoleId: snapshot.parentRoleId,
+					finishedAt: snapshot.finishedAt,
+				})
+			}
+			return summaries
+		},
 	}
 }
 

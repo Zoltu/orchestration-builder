@@ -14,6 +14,8 @@ import type { RunParkTracker } from './park-state.js'
 
 export interface BuiltInToolContext {
 	spawnAgent(roleName: string, task: string): Promise<ResultCard>
+	// Continues a finished child as a new instance seeded from its persisted conversation. comment, when present, is appended to the seed; roleId disambiguates among several finished instances of the same role name.
+	continueAgent(roleName: string, comment: string | undefined, roleId: string | undefined): Promise<ResultCard>
 	roleState: RoleState
 	humanBackend: HumanBackend
 	loadedGuild: LoadedGuild
@@ -105,6 +107,40 @@ function validateAgentArgs(args: Record<string, unknown>): AgentValidationSucces
 	}
 
 	return { kind: 'success', roleName: roleValue, task: taskValue }
+}
+
+interface ContinueAgentValidationSuccess {
+	kind: 'success'
+	roleName: string
+	comment: string | undefined
+	roleId: string | undefined
+}
+
+function validateContinueAgentArgs(args: Record<string, unknown>): ContinueAgentValidationSuccess | FinishValidationError {
+	const roleValue = args['role']
+	if (typeof roleValue !== 'string') {
+		return { kind: 'error', result: createToolError('invalid_arguments', 'role must be a string') }
+	}
+
+	let commentValue: string | undefined
+	const commentRaw = args['comment']
+	if (commentRaw !== undefined) {
+		if (typeof commentRaw !== 'string') {
+			return { kind: 'error', result: createToolError('invalid_arguments', 'comment must be a string') }
+		}
+		commentValue = commentRaw
+	}
+
+	let roleIdValue: string | undefined
+	const roleIdRaw = args['roleId']
+	if (roleIdRaw !== undefined) {
+		if (typeof roleIdRaw !== 'string') {
+			return { kind: 'error', result: createToolError('invalid_arguments', 'roleId must be a string') }
+		}
+		roleIdValue = roleIdRaw
+	}
+
+	return { kind: 'success', roleName: roleValue, comment: commentValue, roleId: roleIdValue }
 }
 
 interface ContextInfoMessage {
@@ -488,6 +524,12 @@ export function createBuiltInToolHandlers(context: BuiltInToolContext): Record<s
 			const validation = validateAgentArgs(args)
 			if (validation.kind === 'error') return validation.result
 			const card = await context.spawnAgent(validation.roleName, validation.task)
+			return { kind: 'success', data: card }
+		},
+		continue_agent: async (args) => {
+			const validation = validateContinueAgentArgs(args)
+			if (validation.kind === 'error') return validation.result
+			const card = await context.continueAgent(validation.roleName, validation.comment, validation.roleId)
 			return { kind: 'success', data: card }
 		},
 		context_info: createContextInfo(context),

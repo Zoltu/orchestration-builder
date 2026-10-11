@@ -17,7 +17,7 @@ export async function resumeRoleStack(runRole: RunRole, deps: EngineDependencies
 			const recorded = frame.pending.childCard
 			suspendedTurn = {
 				toolCalls: frame.pending.toolCalls,
-				agentIndex: frame.pending.agentIndex,
+				childIndex: frame.pending.childIndex,
 				resolveChildCard: recorded !== undefined ? () => Promise.resolve(recorded) : () => resumeAt(index + 1),
 			}
 		}

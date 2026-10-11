@@ -61,6 +61,7 @@ function makeContext(): { context: BuiltInToolContext; registry: RoleRegistry; t
 	const { appendLog } = makeFakeAppendLog()
 	const context: BuiltInToolContext = {
 		spawnAgent: async () => ({ status: 'success', summary: '' }),
+		continueAgent: async () => ({ status: 'success', summary: '' }),
 		roleState: callerState,
 		humanBackend: stubHumanBackend,
 		loadedGuild: stubGuild,

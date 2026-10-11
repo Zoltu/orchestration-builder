@@ -12,9 +12,10 @@ import { createLlmCaller } from './llm.ts'
 import type { LoadedGuild } from './loader.ts'
 import type { AppendLog } from './persistence.ts'
 import { createRoleRegistry } from './role-registry.ts'
-import type { RunCheckpoint } from './checkpoint.ts'
-import { createFakeCheckpointRecorder, recordingHumanBackend, stubHumanBackend, withTool, defined } from './test-fixtures.ts'
+import { isRunCheckpoint, type RunCheckpoint } from './checkpoint.ts'
+import { createFakeCheckpointRecorder, createFakeRoleSnapshotStore, recordingHumanBackend, stubHumanBackend, withTool, defined } from './test-fixtures.ts'
 import { createRunParkTracker, type RunParkTracker } from './park-state.ts'
+import type { RoleSnapshotStore } from './role-snapshot.ts'
 import type { RoleDelta } from './stream-channel.ts'
 import type { ToolHandler } from './tool-dispatch.ts'
 
@@ -146,6 +147,20 @@ const agentManifest: ToolManifest = {
 	},
 }
 
+const continueAgentManifest: ToolManifest = {
+	name: 'continue_agent',
+	description: 'Continue a finished child role as a new seeded instance.',
+	parameters: {
+		type: 'object',
+		required: ['role'],
+		properties: {
+			role: { type: 'string' },
+			roleId: { type: 'string' },
+			comment: { type: 'string' },
+		},
+	},
+}
+
 function buildGuild(roles: Record<string, RoleDefinition>, entryRole: string, extras: Partial<DeploymentConfig> = {}): LoadedGuild {
 	const config: GuildConfig = {
 		entryRole,
@@ -191,11 +206,57 @@ function agentCall(role: string, task: string): ToolCall {
 	}
 }
 
-function makeDeps(llm: LlmCaller): { deps: EngineDependencies; events: LogEvent[]; checkpoints: RunCheckpoint[]; parkTracker: RunParkTracker } {
+function continueAgentCall(role: string, comment?: string, roleId?: string): ToolCall {
+	const args: Record<string, unknown> = { role }
+	if (comment !== undefined) args['comment'] = comment
+	if (roleId !== undefined) args['roleId'] = roleId
+	return {
+		id: 'continue_1',
+		type: 'function',
+		function: {
+			name: 'continue_agent',
+			arguments: JSON.stringify(args),
+		},
+	}
+}
+
+function continueAgentGuild(): LoadedGuild {
+	const guild = buildGuild(
+		{
+			parent: { systemPrompt: 'p', tools: ['agent', 'continue_agent', 'finish'] },
+			child: { systemPrompt: 'c', tools: ['finish'] },
+		},
+		'parent',
+	)
+	return withTool(guild, continueAgentManifest)
+}
+
+interface ContinueAgentCardShape {
+	status: string
+	error?: { kind: string }
+}
+
+// Narrows the ResultCard the parent received back from a continue_agent tool result, so the error-path assertions read the card's status and error kind without a typecast.
+function continueAgentCard(events: LogEvent[]): ContinueAgentCardShape {
+	const toolResult = events.find((e) => e.type === 'tool_result' && payloadField(e, 'tool') === 'continue_agent')
+	const event = defined(toolResult, 'continue_agent tool_result event')
+	const loggedResult = payloadField(event, 'result')
+	if (!isRecord(loggedResult)) throw new Error('expected a logged continue_agent result')
+	const data = loggedResult['data']
+	if (!isRecord(data)) throw new Error('expected the continue_agent card data')
+	const status = data['status']
+	if (typeof status !== 'string') throw new Error('expected the continue_agent card status')
+	const errorRaw = data['error']
+	if (isRecord(errorRaw) && typeof errorRaw['kind'] === 'string') return { status, error: { kind: errorRaw['kind'] } }
+	return { status }
+}
+
+function makeDeps(llm: LlmCaller): { deps: EngineDependencies; events: LogEvent[]; checkpoints: RunCheckpoint[]; parkTracker: RunParkTracker; roleSnapshots: RoleSnapshotStore } {
 	const { appendLog, events } = makeFakeAppendLog()
 	const roleRegistry = createRoleRegistry()
 	const contextPressureTracker = createContextPressureTracker()
 	const parkTracker = createRunParkTracker()
+	const roleSnapshots = createFakeRoleSnapshotStore()
 	const sink = createFakeCheckpointRecorder(roleRegistry, contextPressureTracker, parkTracker)
 	const deps: EngineDependencies = {
 		llmCaller: llm,
@@ -208,8 +269,9 @@ function makeDeps(llm: LlmCaller): { deps: EngineDependencies; events: LogEvent[
 		checkpointRecorder: sink.recorder,
 		parkTracker,
 		publishDelta: noOpPublishDelta,
+		roleSnapshots,
 	}
-	return { deps, events, checkpoints: sink.checkpoints, parkTracker }
+	return { deps, events, checkpoints: sink.checkpoints, parkTracker, roleSnapshots }
 }
 
 function noOpPublishDelta(): void {}
@@ -2310,7 +2372,7 @@ describe('run persistence and resumption', () => {
 		const parent = checkpoint.frames[0]
 		const leaf = checkpoint.frames[1]
 		expect(parent?.roleName).toBe('orchestrator')
-		expect(parent?.pending?.toolCalls[parent.pending.agentIndex]?.function.name).toBe('agent')
+		expect(parent?.pending?.toolCalls[parent.pending.childIndex]?.function.name).toBe('agent')
 		expect(parent?.pending?.childCard).toBeUndefined()
 		expect(leaf?.roleName).toBe('coder')
 		expect(leaf?.parentRoleId).toBe(parent?.roleId)
@@ -3030,5 +3092,239 @@ describe('runRole — usage accounting and retry spend', () => {
 		// The final attempt's usage is the sseChunks terminal's reported 10/5 — the retry's 100 prompt tokens never inflate it.
 		const llmCallEvent = defined(events.find((e) => e.type === 'llm_call'), 'llm_call event')
 		expect(usagePayloadOf(llmCallEvent)).toEqual({ promptTokens: 10, completionTokens: 5, totalTokens: 15 })
+	})
+})
+
+describe('runRole — continue_agent', () => {
+	test('continues a finished child as a new instance seeded with the appended comment', async () => {
+		const guild = continueAgentGuild()
+		const llm = new FakeLlm()
+		llm.responses = [
+			success([agentCall('child', 'subtask')]),
+			success([finishCall({ status: 'success', summary: 'child done' })]),
+			success([continueAgentCall('child', 'keep going')]),
+			success([finishCall({ status: 'success', summary: 'child continued' })]),
+			success([finishCall({ status: 'success', summary: 'parent done' })]),
+		]
+		const { deps, events } = makeDeps(llm)
+
+		const result = await runRole(deps, { loadedGuild: guild, depth: 0, roleName: 'parent', task: 'delegate' })
+
+		expect(result).toEqual({ status: 'success', summary: 'parent done' })
+		expect(llm.calls.length).toBe(5)
+
+		// A new child instance with a fresh id, whose role_start names the instance it continues.
+		const childStarts = events.filter((e) => e.type === 'role_start' && payloadField(e, 'role') === 'child')
+		expect(childStarts.length).toBe(2)
+		const firstChildStart = defined(childStarts[0], 'first child role_start')
+		const secondChildStart = defined(childStarts[1], 'second child role_start')
+		const firstChildId = payloadField(firstChildStart, 'roleId')
+		const secondChildId = payloadField(secondChildStart, 'roleId')
+		expect(typeof firstChildId).toBe('string')
+		expect(typeof secondChildId).toBe('string')
+		expect(secondChildId).not.toBe(firstChildId)
+		expect(payloadField(secondChildStart, 'continuedFrom')).toBe(firstChildId)
+
+		// The continued instance's first request begins with the finished child's full history plus the comment.
+		const continuedCall = defined(llm.calls[3], 'continued child call')
+		expect(continuedCall.messages.length).toBe(5)
+		expect(continuedCall.messages[0]?.role).toBe('system')
+		expect(continuedCall.messages[1]).toEqual({ role: 'user', content: 'subtask' })
+		expect(continuedCall.messages[2]?.role).toBe('assistant')
+		expect(continuedCall.messages[3]?.role).toBe('tool')
+		expect(continuedCall.messages[4]).toEqual({ role: 'user', content: 'keep going' })
+
+		// The parent receives the continued child's new card.
+		const continueResult = events.find((e) => e.type === 'tool_result' && payloadField(e, 'tool') === 'continue_agent')
+		const continueEvent = defined(continueResult, 'continue_agent tool_result event')
+		expect(payloadField(continueEvent, 'result')).toEqual({ kind: 'success', data: { status: 'success', summary: 'child continued' } })
+	})
+
+	test('without a comment the seed truncates the finished child terminal finish block', async () => {
+		const guild = continueAgentGuild()
+		const llm = new FakeLlm()
+		llm.responses = [
+			success([agentCall('child', 'subtask')]),
+			success([finishCall({ status: 'success', summary: 'child done' })]),
+			success([continueAgentCall('child')]),
+			success([finishCall({ status: 'success', summary: 'child continued' })]),
+			success([finishCall({ status: 'success', summary: 'parent done' })]),
+		]
+		const { deps } = makeDeps(llm)
+
+		const result = await runRole(deps, { loadedGuild: guild, depth: 0, roleName: 'parent', task: 'delegate' })
+
+		expect(result).toEqual({ status: 'success', summary: 'parent done' })
+		const continuedCall = defined(llm.calls[3], 'continued child call')
+		expect(continuedCall.messages).toEqual([
+			{ role: 'system', content: 'prompt for child' },
+			{ role: 'user', content: 'subtask' },
+		])
+	})
+
+	test('returns an error card when no finished child matches', async () => {
+		const guild = continueAgentGuild()
+		const llm = new FakeLlm()
+		llm.responses = [
+			success([continueAgentCall('child', 'go')]),
+			success([finishCall({ status: 'success', summary: 'parent done' })]),
+		]
+		const { deps, events } = makeDeps(llm)
+
+		const result = await runRole(deps, { loadedGuild: guild, depth: 0, roleName: 'parent', task: 'delegate' })
+
+		expect(result).toEqual({ status: 'success', summary: 'parent done' })
+		const card = continueAgentCard(events)
+		expect(card.status).toBe('error')
+		expect(card.error?.kind).toBe('invalid_arguments')
+	})
+
+	test('returns an error card for a finished child that belongs to a different parent', async () => {
+		const guild = continueAgentGuild()
+		const llm = new FakeLlm()
+		llm.responses = [
+			success([continueAgentCall('child', undefined, 'child-1-2')]),
+			success([finishCall({ status: 'success', summary: 'parent done' })]),
+		]
+		const { deps, events, roleSnapshots } = makeDeps(llm)
+		roleSnapshots.write({ roleId: 'child-1-2', roleName: 'child', depth: 1, task: 'subtask', parentRoleId: 'other-0-9', finishedAt: '2026-01-01T00:00:00.000Z', history: [] })
+
+		const result = await runRole(deps, { loadedGuild: guild, depth: 0, roleName: 'parent', task: 'delegate' })
+
+		expect(result).toEqual({ status: 'success', summary: 'parent done' })
+		expect(continueAgentCard(events).status).toBe('error')
+	})
+
+	test('returns an error card for an unknown instance id of the parent own child', async () => {
+		const guild = continueAgentGuild()
+		const llm = new FakeLlm()
+		llm.responses = [
+			success([continueAgentCall('child', undefined, 'child-9-9')]),
+			success([finishCall({ status: 'success', summary: 'parent done' })]),
+		]
+		const { deps, events, roleSnapshots } = makeDeps(llm)
+		roleSnapshots.write({ roleId: 'child-1-2', roleName: 'child', depth: 1, task: 'subtask', parentRoleId: 'parent-0-1', finishedAt: '2026-01-01T00:00:00.000Z', history: [] })
+
+		const result = await runRole(deps, { loadedGuild: guild, depth: 0, roleName: 'parent', task: 'delegate' })
+
+		expect(result).toEqual({ status: 'success', summary: 'parent done' })
+		expect(continueAgentCard(events).status).toBe('error')
+	})
+
+	// Drives a full parent→child→continue→child descent: the parent delegates, the child finishes (storing its snapshot), the parent continues it with a comment, the continued child finishes, and the parent finishes. Returns the final card plus every checkpoint written.
+	async function driveContinueRun(): Promise<{ card: ResultCard; checkpoints: RunCheckpoint[] }> {
+		const guild = continueAgentGuild()
+		const llm = new FakeLlm()
+		llm.responses = [
+			success([agentCall('child', 'subtask')]),
+			success([finishCall({ status: 'success', summary: 'child done' })]),
+			success([continueAgentCall('child', 'keep going')]),
+			success([finishCall({ status: 'success', summary: 'child continued' })]),
+			success([finishCall({ status: 'success', summary: 'parent done' })]),
+		]
+		const { deps, checkpoints } = makeDeps(llm)
+		const card = await runRole(deps, { loadedGuild: guild, depth: 0, roleName: 'parent', task: 'delegate' })
+		return { card, checkpoints }
+	}
+
+	// Finds the first checkpoint holding a pending suspension on the named tool, either while its child still runs (no recorded card) or after the child returned (recorded card).
+	function findPendingCheckpoint(checkpoints: RunCheckpoint[], tool: string, hasCard: boolean): RunCheckpoint {
+		const match = checkpoints.find((checkpoint) =>
+			checkpoint.frames.some((frame) => {
+				const pending = frame.pending
+				if (pending === undefined) return false
+				if (pending.toolCalls[pending.childIndex]?.function.name !== tool) return false
+				return hasCard ? pending.childCard !== undefined : pending.childCard === undefined
+			}),
+		)
+		if (match === undefined) throw new Error(`no checkpoint pending on ${tool} with hasCard=${hasCard}`)
+		return match
+	}
+
+	test('a suspended continue_agent turn is accepted by the guard and resumes from the recorded child card without re-running the child', async () => {
+		const { checkpoints } = await driveContinueRun()
+
+		// While the continued child runs the parent is the non-leaf frame suspended on the continue_agent call, with no recorded card.
+		const whileRunning = findPendingCheckpoint(checkpoints, 'continue_agent', false)
+		expect(whileRunning.frames.length).toBe(2)
+		expect(whileRunning.frames[0]?.roleName).toBe('parent')
+		expect(whileRunning.frames[1]?.roleName).toBe('child')
+		expect(isRunCheckpoint(whileRunning)).toBe(true)
+
+		// Once the continued child returns the parent is the leaf frame and its pending carries the recorded card.
+		const withCard = findPendingCheckpoint(checkpoints, 'continue_agent', true)
+		expect(withCard.frames.length).toBe(1)
+		expect(withCard.frames[0]?.pending?.childCard).toEqual({ status: 'success', summary: 'child continued' })
+		expect(isRunCheckpoint(withCard)).toBe(true)
+
+		const guild = continueAgentGuild()
+		const llm = new FakeLlm()
+		llm.responses = [success([finishCall({ status: 'success', summary: 'parent done' })])]
+		const { deps, events } = makeDeps(llm)
+
+		const card = await resumeRoleStack(runRole, deps, guild, withCard)
+
+		expect(card).toEqual({ status: 'success', summary: 'parent done' })
+		// One turn only: the parent's follow-up. The finished continued child is not re-run.
+		expect(llm.calls.length).toBe(1)
+		const continueResult = events.find((event) => event.type === 'tool_result' && payloadField(event, 'tool') === 'continue_agent')
+		const continueEvent = defined(continueResult, 'continue_agent tool_result event')
+		expect(payloadField(continueEvent, 'result')).toEqual({ kind: 'success', data: { status: 'success', summary: 'child continued' } })
+	})
+
+	test('the continued instance starts with fresh RoleState counters even though its history is seeded', async () => {
+		const { checkpoints } = await driveContinueRun()
+		const whileRunning = findPendingCheckpoint(checkpoints, 'continue_agent', false)
+		const continuedLeaf = whileRunning.frames[1]
+		if (continuedLeaf === undefined) throw new Error('missing continued child frame')
+
+		// The seed carries the finished child's full conversation plus the appended comment.
+		expect(continuedLeaf.roleState.history.length).toBe(5)
+		// Every accumulator starts fresh: only the history is inherited.
+		expect(continuedLeaf.roleState.toolCallCount).toBe(0)
+		expect(continuedLeaf.roleState.generatedTokens).toBe(0)
+		expect(continuedLeaf.roleState.contextExceededAttempts).toBe(0)
+		expect(continuedLeaf.roleState.loopCheckToolCallWatermark).toBe(0)
+		expect(continuedLeaf.roleState.loopCheckTokenWatermark).toBe(0)
+		expect(continuedLeaf.roleState.recentToolCalls).toEqual([])
+		expect(continuedLeaf.roleState.logSentBaseline).toBeUndefined()
+	})
+
+	test('snapshots only non-entry, non-handler children', async () => {
+		const guild = continueAgentGuild()
+		const llm = new FakeLlm()
+		llm.responses = [
+			success([agentCall('child', 'subtask')]),
+			success([finishCall({ status: 'success', summary: 'child done' })]),
+			success([finishCall({ status: 'success', summary: 'parent done' })]),
+		]
+		const { deps, roleSnapshots } = makeDeps(llm)
+
+		await runRole(deps, { loadedGuild: guild, depth: 0, roleName: 'parent', task: 'delegate' })
+
+		// The entry role (parent) has no parent to continue it, so only the child is stored.
+		const summaries = roleSnapshots.list()
+		expect(summaries.length).toBe(1)
+		expect(summaries[0]?.roleName).toBe('child')
+		expect(summaries[0]?.parentRoleId).toBeDefined()
+	})
+
+	test('a handler invocation is not snapshotted even when it has a parent', async () => {
+		const guild = continueAgentGuild()
+		const llm = new FakeLlm()
+		llm.responses = [success([finishCall({ status: 'success', summary: 'handler done' })])]
+		const { deps, roleSnapshots } = makeDeps(llm)
+
+		await runRole(deps, {
+			loadedGuild: guild,
+			depth: 1,
+			roleName: 'child',
+			task: 'inspect',
+			parent: 'parent',
+			parentRoleId: 'parent-0-1',
+			handlerOf: 'child-1-1',
+		})
+
+		expect(roleSnapshots.list()).toEqual([])
 	})
 })

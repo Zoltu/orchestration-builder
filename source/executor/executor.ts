@@ -12,6 +12,7 @@ import type { LoadedGuild } from './loader.js'
 import type { AppendLog, DeleteCheckpoint, RunDirectory, WriteCheckpoint, WriteMeta } from './persistence.js'
 import { resumeRoleStack } from './resume.js'
 import { createRoleRegistry } from './role-registry.js'
+import type { RoleSnapshotStore } from './role-snapshot.js'
 import type { ToolHandler } from './tool-dispatch.js'
 import type { RoleDelta } from './stream-channel.js'
 
@@ -30,6 +31,8 @@ export interface ExecutorDependencies {
 	interruptQueue: InterruptQueue
 	// The run-scoped streaming-delta publisher, provided by the caller (bound to the shared delta channel in serve.ts); the engine stamps every streamed text delta with the publishing role. Required like the rest of the run-scoped leaves.
 	publishDelta: (delta: RoleDelta) => void
+	// The per-run store of finished child conversations, so a parent can continue a finished child as a new seeded instance.
+	roleSnapshots: RoleSnapshotStore
 }
 
 function buildEngineDependencies(deps: ExecutorDependencies, runId: string, startTime: string, registryCounter: number, learnedContextCeiling: number | undefined, writeCapableStarted: boolean | undefined, continuesFrom: string | undefined, queueTracked: boolean | undefined): EngineDependencies {
@@ -46,6 +49,7 @@ function buildEngineDependencies(deps: ExecutorDependencies, runId: string, star
 		interruptQueue: deps.interruptQueue,
 		contextPressureTracker,
 		publishDelta: deps.publishDelta,
+		roleSnapshots: deps.roleSnapshots,
 		parkTracker,
 		// The run's lineage rides the recorder so checkpoints written after a resume keep stamping continuesFrom onto the entry frame — the live context does not carry it on the resume path. The logging level needs no such stamp: the entry context carries it and the recorder serializes from there.
 		checkpointRecorder: createCheckpointRecorder({ writeCheckpoint: deps.writeCheckpoint, runId, startTime, roleRegistry, contextPressureTracker, parkTracker, continuesFrom }),

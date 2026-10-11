@@ -4,7 +4,7 @@
 	"roles": {
 		"orchestrator": {
 			"systemPrompt": "prompts/orchestrator.md",
-			"tools": ["agent", "ask_human", "finish"],
+			"tools": ["agent", "continue_agent", "ask_human", "finish"],
 			"label": {
 				"detailed": ["Orchestrator"],
 				"friendly": ["Orchestrator"],
@@ -292,7 +292,7 @@
 		},
 		"recovery": {
 			"systemPrompt": "prompts/recovery.md",
-			"tools": ["agent", "ask_human", "finish"],
+			"tools": ["agent", "continue_agent", "ask_human", "finish"],
 			"label": {
 				"detailed": ["Recovery"],
 				"friendly": ["Recovery"],
@@ -313,6 +313,7 @@
 
 	"tools": [
 		"tools/agent.json",
+		"tools/continue_agent.json",
 		"tools/finish.json",
 		"tools/context_info.json",
 		"tools/edit_context.json",

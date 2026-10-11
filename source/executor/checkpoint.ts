@@ -1,22 +1,24 @@
 import { isErrorKind } from './errors.js'
+import { SUSPENDING_CHILD_TOOLS } from './engine-state.js'
 import { DEFAULT_LOG_LEVEL } from './log-level.js'
 import type { ContextPressureTracker } from './context-pressure.js'
 import type { EngineContext, RoleState } from './engine-state.js'
+import { isMessage, isToolCall } from './message-validation.js'
 import type { RunParkTracker } from './park-state.js'
 import type { WriteCheckpoint } from './persistence.js'
 import type { RoleRegistry, RoleRegistryEntry } from './role-registry.js'
-import type { EffortLevel, LogLevel, Message, MessageRole, ResultCard, ToolCall } from './types.js'
+import type { EffortLevel, LogLevel, ResultCard, ToolCall } from './types.js'
 import { isRunIdShape } from './run-id.js'
 import { isEffortLevel, isLogLevel, isNonNegativeInteger, isNonNegativeNumber, isObject, isResultCard, isString } from './validation.js'
 
-// The suspension point of a role paused mid-turn inside its `agent` tool dispatch: the turn's full tool-call list and the index of the agent call it is waiting on. Once the child returns, its card is recorded here so a resume delivers the recorded card instead of re-running the child. Tool calls before agentIndex are already recorded in the role's persisted history; calls after it are dispatched on resume.
-export interface PendingAgentSuspension {
+// The suspension point of a role paused mid-turn inside a child-spawning tool dispatch (agent or continue_agent): the turn's full tool-call list and the index of the child-spawning call it is waiting on. Once the child returns, its card is recorded here so a resume delivers the recorded card instead of re-running the child. Tool calls before childIndex are already recorded in the role's persisted history; calls after it are dispatched on resume.
+export interface PendingChildSuspension {
 	toolCalls: ToolCall[]
-	agentIndex: number
+	childIndex: number
 	childCard?: ResultCard
 }
 
-// One live role invocation on the depth-first stack. Frames serialize root-first; a non-leaf frame is always suspended on an agent call whose child still runs below it, and the leaf is either the active role (no pending) or a parent whose child just returned (pending carrying the recorded child card). Handler invocations (loop-check and context handlers) never appear: writes are suppressed while a handler runs, so a handler interlude is atomic with respect to the checkpoint — either it completes and the post-drain write captures its effects, or the resume re-runs the drain from the pre-interlude checkpoint.
+// One live role invocation on the depth-first stack. Frames serialize root-first; a non-leaf frame is always suspended on a child-spawning call whose child still runs below it, and the leaf is either the active role (no pending) or a parent whose child just returned (pending carrying the recorded child card). Handler invocations (loop-check and context handlers) never appear: writes are suppressed while a handler runs, so a handler interlude is atomic with respect to the checkpoint — either it completes and the post-drain write captures its effects, or the resume re-runs the drain from the pre-interlude checkpoint.
 export interface CheckpointFrame {
 	roleId: string
 	roleName: string
@@ -32,7 +34,7 @@ export interface CheckpointFrame {
 	planAbort?: boolean
 	planInjection?: string
 	roleState: RoleState
-	pending?: PendingAgentSuspension
+	pending?: PendingChildSuspension
 }
 
 // The logging level a resumed run runs at: the entry frame carries the run's resolved level (docs/reference.md "Logging level"), and a checkpoint whose entry frame carries no logLevel falls back to full detail. Both the resume executor (which writes the metas) and the serve-side resume wrapper (which filters the run's log) derive the level here, so the metas a run records and the log filtering around it cannot disagree.
@@ -49,28 +51,6 @@ export interface RunCheckpoint {
 	learnedContextCeiling?: number
 	writeCapableStarted?: boolean
 	frames: CheckpointFrame[]
-}
-
-const messageRoles: readonly MessageRole[] = ['system', 'user', 'assistant', 'tool']
-
-function isToolCall(value: unknown): value is ToolCall {
-	if (!isObject(value)) return false
-	if (!isString(value.id)) return false
-	if (value.type !== 'function') return false
-	if (!isObject(value.function)) return false
-	if (!isString(value.function.name)) return false
-	if (!isString(value.function.arguments)) return false
-	return true
-}
-
-function isMessage(value: unknown): value is Message {
-	if (!isObject(value)) return false
-	if (!isString(value.role) || !messageRoles.some((role) => role === value.role)) return false
-	if (!isString(value.content)) return false
-	if (value.reasoning !== undefined && value.reasoning !== null && !isString(value.reasoning)) return false
-	if (value.tool_call_id !== undefined && !isString(value.tool_call_id)) return false
-	if (value.tool_calls !== undefined && (!Array.isArray(value.tool_calls) || !value.tool_calls.every(isToolCall))) return false
-	return true
 }
 
 function isRecentToolCall(value: unknown): boolean {
@@ -102,11 +82,11 @@ function isRoleState(value: unknown): value is RoleState {
 	return true
 }
 
-function isPendingAgentSuspension(value: unknown): value is PendingAgentSuspension {
+function isPendingChildSuspension(value: unknown): value is PendingChildSuspension {
 	if (!isObject(value)) return false
 	if (!Array.isArray(value.toolCalls) || value.toolCalls.length === 0 || !value.toolCalls.every(isToolCall)) return false
-	if (!isNonNegativeInteger(value.agentIndex) || value.agentIndex >= value.toolCalls.length) return false
-	if (value.toolCalls[value.agentIndex]?.function.name !== 'agent') return false
+	if (!isNonNegativeInteger(value.childIndex) || value.childIndex >= value.toolCalls.length) return false
+	if (!SUSPENDING_CHILD_TOOLS.has(value.toolCalls[value.childIndex]?.function.name ?? '')) return false
 	if (value.childCard !== undefined && !isResultCard(value.childCard)) return false
 	return true
 }
@@ -125,7 +105,7 @@ function isCheckpointFrame(value: unknown): value is CheckpointFrame {
 	if (value.planAbort !== undefined && value.planAbort !== true) return false
 	if (value.planInjection !== undefined && !isString(value.planInjection)) return false
 	if (!isRoleState(value.roleState)) return false
-	if (value.pending !== undefined && !isPendingAgentSuspension(value.pending)) return false
+	if (value.pending !== undefined && !isPendingChildSuspension(value.pending)) return false
 	return true
 }
 
@@ -166,7 +146,7 @@ export function isRunCheckpoint(value: unknown): value is RunCheckpoint {
 export interface CheckpointRecorder {
 	registerFrame(context: EngineContext, entry: RoleRegistryEntry): void
 	unregisterFrame(roleId: string): void
-	setPending(roleId: string, pending: PendingAgentSuspension | undefined): void
+	setPending(roleId: string, pending: PendingChildSuspension | undefined): void
 	setPendingChildCard(roleId: string, card: ResultCard): void
 	write(): void
 }
@@ -174,7 +154,7 @@ export interface CheckpointRecorder {
 interface RecorderFrame {
 	context: EngineContext
 	entry: RoleRegistryEntry
-	pending?: PendingAgentSuspension
+	pending?: PendingChildSuspension
 }
 
 export interface CheckpointRecorderDependencies {
@@ -246,7 +226,7 @@ export function createCheckpointRecorder(dependencies: CheckpointRecorderDepende
 		},
 		setPendingChildCard(roleId, card) {
 			const frame = requireFrame(roleId)
-			if (frame.pending === undefined) throw new Error(`checkpoint recorder: role instance "${roleId}" recorded a child card with no pending agent suspension`)
+			if (frame.pending === undefined) throw new Error(`checkpoint recorder: role instance "${roleId}" recorded a child card with no pending child suspension`)
 			frame.pending = { ...frame.pending, childCard: card }
 		},
 		write() {

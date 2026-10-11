@@ -19,12 +19,12 @@ type OperationDetailSource =
 
 const ROOT_HUMAN_ID = 'human:root'
 const MAIN_STACK = 'main'
-// The agent/ask_human/finish tools are control-flow primitives, not work a node represents:
-// agent is the delegation wrapper (the role_start/role_finished pair is the call), ask_human is
-// the question (the ask_human/human_answer events are the call), and finish ends the role (the
-// role_finished return is the close). Their tool_call/tool_result events are skipped so a
-// delegation does not also spawn a redundant "agent" tool node.
-const CONTROL_TOOLS = new Set(['agent', 'ask_human', 'finish'])
+// The agent/continue_agent/ask_human/finish tools are control-flow primitives, not work a node
+// represents: agent and continue_agent are the delegation wrappers (the role_start/role_finished
+// pair of the spawned instance is the call), ask_human is the question (the ask_human/human_answer
+// events are the call), and finish ends the role (the role_finished return is the close). Their
+// tool_call/tool_result events are skipped so a delegation does not also spawn a redundant tool node.
+const CONTROL_TOOLS = new Set(['agent', 'continue_agent', 'ask_human', 'finish'])
 
 // Narrowing helpers mirror render.ts so the adapter reads LogEvent payloads the same way the
 // run view does — every external payload is validated before use, never cast.

@@ -66,7 +66,8 @@ workspace/                          # the user's project (mounted at /workspace)
 │           ├── log.jsonl           # event stream: llm calls, tool calls, errors
 │           ├── state.json          # checkpoint for restart resumption (deleted on completion)
 │           ├── summary.txt         # LLM-generated one-line run summary (UI label; best-effort)
-│           └── plan.md             # the run's plan document (write_plan/read_plan)
+│           ├── plan.md             # the run's plan document (write_plan/read_plan)
+│           └── roles/              # finished child snapshots, one <roleId>.json each, written at role finish (makes continue_agent survive a restart)
 ├── (project files)
 guild/                              # bundled into the image at /app/guild/
 ├── guild.json                      # current baseline Guild

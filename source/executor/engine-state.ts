@@ -8,9 +8,13 @@ import type { AppendLog } from './persistence.js'
 import type { RunParkTracker } from './park-state.js'
 import type { RecentToolCall } from './role-inspection.js'
 import type { RoleRegistry } from './role-registry.js'
+import type { RoleSnapshotStore } from './role-snapshot.js'
 import type { RoleDelta } from './stream-channel.js'
 import type { ToolHandler } from './tool-dispatch.js'
 import type { EffortLevel, LogLevel, LogEvent, Message, ResultCard, RunContinuation, ToolCall } from './types.js'
+
+// The tools that spawn a child role and suspend the caller mid-turn until it returns. They share the suspension bookkeeping (checkpoint.ts's pending frame and the engine's dispatch sequence), so the set is defined here where both the engine and the checkpoint guard can read it without a runtime cycle.
+export const SUSPENDING_CHILD_TOOLS: ReadonlySet<string> = new Set(['agent', 'continue_agent'])
 
 export interface RoleState {
 	history: Message[]
@@ -66,13 +70,21 @@ export interface EngineDependencies {
 	parkTracker: RunParkTracker
 	// The run-scoped delta publisher: a leaf bound to the active run by the service (serve.ts's withRunBindings), so every streamed turn text carries the run's identity.
 	publishDelta: (delta: RoleDelta) => void
+	// The per-run store of finished child conversations, so a parent can continue a finished child as a new seeded instance across a restart (the live registry does not survive one).
+	roleSnapshots: RoleSnapshotStore
 }
 
-// The turn a resumed role was suspended in: the full tool-call list, the index of the agent call it was waiting on, and a resolver for the child card. The resolver either returns the checkpoint's recorded card or re-enters the child frame's own resume — invoked from inside the parent's suspended turn so parents register root-first exactly as in live execution.
+// The turn a resumed role was suspended in: the full tool-call list, the index of the child-spawning call it was waiting on, and a resolver for the child card. The resolver either returns the checkpoint's recorded card or re-enters the child frame's own resume — invoked from inside the parent's suspended turn so parents register root-first exactly as in live execution.
 export interface SuspendedTurn {
 	toolCalls: ToolCall[]
-	agentIndex: number
+	childIndex: number
 	resolveChildCard: () => Promise<ResultCard>
+}
+
+// The seed for a role instance continued from a finished child: the conversation it starts from and the id of the instance it continues. The new instance gets a fresh roleId and normal role_start/role_finished events; only its initial history is inherited.
+export interface SeededRole {
+	history: Message[]
+	continuedFrom: string
 }
 
 // The checkpoint-preserved identity and state of a role being resumed. The role keeps its pre-restart instance id (and does not re-emit role_start), so the log's role_start/role_finished pairing and every id reference inside persisted histories survive the restart.
@@ -87,7 +99,7 @@ export interface ResumedRole {
 }
 
 // The engine's runRole turn loop, threaded in by the engine so the interrupt and resume modules can drive role turns without importing the turn loop at runtime (the engine imports these modules).
-export type RunRole = (deps: EngineDependencies, context: EngineContext, resumed?: ResumedRole) => Promise<ResultCard>
+export type RunRole = (deps: EngineDependencies, context: EngineContext, resumed?: ResumedRole, seeded?: SeededRole) => Promise<ResultCard>
 
 export function logEvent(appendLog: AppendLog, type: string, payload: unknown): void {
 	const event: LogEvent = {

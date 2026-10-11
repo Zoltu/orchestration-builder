@@ -7,7 +7,7 @@ import { createInterruptQueue } from './interrupts.ts'
 import type { LlmCallResult, LlmCaller } from './llm.ts'
 import type { LoadedGuild } from './loader.ts'
 import type { AppendLog, DeleteCheckpoint, RunDirectory, WriteCheckpoint, WriteMeta } from './persistence.ts'
-import { stubHumanBackend, recordingHumanBackend, defined } from './test-fixtures.ts'
+import { createFakeRoleSnapshotStore, stubHumanBackend, recordingHumanBackend, defined } from './test-fixtures.ts'
 
 function success(toolCalls: ToolCall[], opts: { content?: string } = {}): LlmCallResult {
 	return {
@@ -159,6 +159,7 @@ function makeDeps(llm: FakeLlm, persistence: FakePersistenceFns, loadedGuild: Lo
 		loadedGuild,
 		interruptQueue: createInterruptQueue(),
 		publishDelta: () => undefined,
+		roleSnapshots: createFakeRoleSnapshotStore(),
 	}
 }
 
@@ -1032,7 +1033,7 @@ describe('resumeExecutor', () => {
 					},
 					pending: {
 						toolCalls: [agentToolCall('a1', 'coder', 'subtask'), finishCall],
-						agentIndex: 0,
+						childIndex: 0,
 						childCard: { status: 'success', summary: 'child done' },
 					},
 				},

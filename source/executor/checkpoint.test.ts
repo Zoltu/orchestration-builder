@@ -34,6 +34,14 @@ function agentToolCall(id: string = 'agent_1'): ToolCall {
 	}
 }
 
+function continueAgentToolCall(id: string = 'continue_1'): ToolCall {
+	return {
+		id,
+		type: 'function',
+		function: { name: 'continue_agent', arguments: JSON.stringify({ role: 'coder' }) },
+	}
+}
+
 function sampleCheckpoint(): RunCheckpoint {
 	return {
 		version: 1,
@@ -55,7 +63,7 @@ function sampleCheckpoint(): RunCheckpoint {
 					],
 					toolCallCount: 1,
 				}),
-				pending: { toolCalls: [agentToolCall()], agentIndex: 0 },
+				pending: { toolCalls: [agentToolCall()], childIndex: 0 },
 			},
 			{
 				roleId: 'coder-1-2',
@@ -113,7 +121,7 @@ describe('isRunCheckpoint', () => {
 		const pendingOnLeaf = sampleCheckpoint()
 		const leaf = pendingOnLeaf.frames[1]
 		if (leaf === undefined) throw new Error('missing leaf')
-		leaf.pending = { toolCalls: [agentToolCall()], agentIndex: 0 }
+		leaf.pending = { toolCalls: [agentToolCall()], childIndex: 0 }
 		expect(isRunCheckpoint(pendingOnLeaf)).toBe(false)
 
 		const leafWithCard = sampleCheckpoint()
@@ -136,15 +144,25 @@ describe('isRunCheckpoint', () => {
 		expect(isRunCheckpoint(missingPending)).toBe(false)
 	})
 
-	test('rejects a pending whose indexed call is not an agent call', () => {
+	test('rejects a pending whose indexed call is not a child-spawning tool', () => {
 		const checkpoint = sampleCheckpoint()
 		const root = checkpoint.frames[0]
 		if (root === undefined || root.pending === undefined) throw new Error('missing pending')
 		root.pending = {
 			toolCalls: [{ id: 'f1', type: 'function', function: { name: 'finish', arguments: '{}' } }],
-			agentIndex: 0,
+			childIndex: 0,
 		}
 		expect(isRunCheckpoint(checkpoint)).toBe(false)
+	})
+
+	test('accepts a pending suspended on a continue_agent call and round-trips it through JSON', () => {
+		const checkpoint = sampleCheckpoint()
+		const root = checkpoint.frames[0]
+		if (root === undefined || root.pending === undefined) throw new Error('missing pending')
+		root.pending = { toolCalls: [continueAgentToolCall()], childIndex: 0 }
+		expect(isRunCheckpoint(checkpoint)).toBe(true)
+		const copy: unknown = JSON.parse(JSON.stringify(checkpoint))
+		expect(isRunCheckpoint(copy)).toBe(true)
 	})
 
 	test('rejects a stack that does not root at depth 0 or breaks the parent chain', () => {
@@ -328,7 +346,7 @@ describe('createCheckpointRecorder', () => {
 		const recorder = createCheckpointRecorder({ parkTracker: createRunParkTracker(), writeCheckpoint: (c) => written.push(c), runId: 'run-1', startTime: '2026-01-01T00:00:00.000Z', roleRegistry: registry, contextPressureTracker: createContextPressureTracker() })
 		const entry = registerRoot(recorder, registry)
 
-		recorder.setPending(entry.roleId, { toolCalls: [agentToolCall()], agentIndex: 0 })
+		recorder.setPending(entry.roleId, { toolCalls: [agentToolCall()], childIndex: 0 })
 		recorder.setPendingChildCard(entry.roleId, { status: 'success', summary: 'child done' })
 		recorder.write()
 		expect(written[0]?.frames[0]?.pending?.childCard).toEqual({ status: 'success', summary: 'child done' })

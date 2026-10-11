@@ -7,12 +7,13 @@ import { buildInitialHistory } from './context-builder.js'
 import { applyContextBackstop, contextExceededCard, contextManagedNotice, contextPressureNotice, currentEffectiveBudget, MAX_CONTEXT_RECOVERY_ATTEMPTS, runContextManagerHandler } from './context-handoff.js'
 import { truncateToolOutput } from './context-policy.js'
 import { DEFAULT_CONTEXT_PRESSURE_THRESHOLD, recordContextRejection } from './context-pressure.js'
-import { logEvent, type EngineContext, type EngineDependencies, type ResumedRole, type RoleState, type SuspendedTurn } from './engine-state.js'
+import { logEvent, SUSPENDING_CHILD_TOOLS, type EngineContext, type EngineDependencies, type ResumedRole, type RoleState, type SeededRole, type SuspendedTurn } from './engine-state.js'
 import { isWriteCapableRole, parkCard } from './park-state.js'
 import { drainInterrupts } from './interrupt-engine.js'
 import type { LlmCallResult } from './llm.js'
 import { hashArguments, RECENT_TOOL_CALLS_LIMIT } from './role-inspection.js'
 import type { RoleRegistryEntry } from './role-registry.js'
+import { buildContinuationHistory, selectContinuableChild } from './role-snapshot.js'
 import { createToolDispatch, dispatchToolCall, type ToolDispatch, type ToolHandler } from './tool-dispatch.js'
 
 interface DispatchContext {
@@ -231,7 +232,7 @@ function maybeLogObservation(deps: EngineDependencies, ownRoleId: string, toolNa
 	logEvent(deps.appendLog, 'observe', { role: target.roleName, roleId: targetRole, details: toolName })
 }
 
-// Records a settled tool call: logs the call/result pair, appends the (truncated) tool message, and updates the counters. Shared by the live dispatch path and the resume path, which re-records a suspended agent call's result from the checkpoint without re-dispatching it — so both paths apply exactly the same bookkeeping.
+// Records a settled tool call: logs the call/result pair, appends the (truncated) tool message, and updates the counters. Shared by the live dispatch path and the resume path, which re-records a suspended child-spawning call's result from the checkpoint without re-dispatching it — so both paths apply exactly the same bookkeeping.
 function recordToolResult(deps: EngineDependencies, roleState: RoleState, roleName: string, ownRoleId: string, maxToolOutputChars: number, toolCall: ToolCall, result: ToolResult): ResultCard | null {
 	if (result.kind === 'unknown_tool') {
 		logEvent(deps.appendLog, 'unknown_tool', { role: roleName, tool: toolCall.function.name })
@@ -260,7 +261,7 @@ function recordToolResult(deps: EngineDependencies, roleState: RoleState, roleNa
 	return null
 }
 
-export async function runRole(deps: EngineDependencies, context: EngineContext, resumed?: ResumedRole): Promise<ResultCard> {
+export async function runRole(deps: EngineDependencies, context: EngineContext, resumed?: ResumedRole, seeded?: SeededRole): Promise<ResultCard> {
 	const guild = context.loadedGuild
 	const roleDefinition = guild.config.roles[context.roleName]
 
@@ -277,7 +278,7 @@ export async function runRole(deps: EngineDependencies, context: EngineContext, 
 	if (isWriteCapableRole(roleDefinition.tools)) deps.parkTracker.writeCapableStarted = true
 
 	const roleState: RoleState = resumed?.roleState ?? {
-		history: buildInitialHistory(systemPrompt, context),
+		history: seeded !== undefined ? seeded.history : buildInitialHistory(systemPrompt, context),
 		lastPromptTokens: 0,
 		recentCompactionPromptTokens: [],
 		recentToolCalls: [],
@@ -294,7 +295,7 @@ export async function runRole(deps: EngineDependencies, context: EngineContext, 
 	deps.checkpointRecorder.registerFrame(context, registryEntry)
 	// A role resumed mid-suspension restores its pending marker so checkpoints taken while the resumed child runs capture the suspension exactly as the live dispatch path does.
 	if (resumed?.suspendedTurn !== undefined) {
-		deps.checkpointRecorder.setPending(registryEntry.roleId, { toolCalls: resumed.suspendedTurn.toolCalls, agentIndex: resumed.suspendedTurn.agentIndex })
+		deps.checkpointRecorder.setPending(registryEntry.roleId, { toolCalls: resumed.suspendedTurn.toolCalls, childIndex: resumed.suspendedTurn.childIndex })
 	}
 
 	// role_start is emitted after the role definition is confirmed to exist and the instance is registered, so an unknown entry role still fires role_not_found without leaving an orphan role_start, and the event can carry the instance id the interrupt platform targets. The depth and optional parent let render.ts reconstruct the parent→child tree, and parentRoleId names the parent instance exactly so a client can walk the instance chain without guessing among same-named ancestors (the inspector's breadcrumb). A resumed role skips the event: its role_start is already in the log from before the restart.
@@ -307,6 +308,7 @@ export async function runRole(deps: EngineDependencies, context: EngineContext, 
 		}
 		if (context.parent !== undefined) roleStartPayload['parent'] = context.parent
 		if (context.parentRoleId !== undefined) roleStartPayload['parentRoleId'] = context.parentRoleId
+		if (seeded !== undefined) roleStartPayload['continuedFrom'] = seeded.continuedFrom
 		logEvent(deps.appendLog, 'role_start', roleStartPayload)
 	}
 
@@ -318,34 +320,60 @@ export async function runRole(deps: EngineDependencies, context: EngineContext, 
 		}
 	}
 
-	const builtInHandlers = createBuiltInToolHandlers({
-		spawnAgent: async (childRoleName, childTask) => {
-			const depthCheck = checkGlobalBudgets(context.depth + 1, guild.deployment.executor)
-			if (depthCheck !== null) {
-				logEvent(deps.appendLog, 'depth_exceeded', { parent: context.roleName, child: childRoleName, depth: context.depth + 1, error: depthCheck })
-				return createResultCard('error', 'Depth budget exceeded', { error: depthCheck })
-			}
-			const childDefinition = guild.config.roles[childRoleName]
-			if (childDefinition === undefined) {
-				logEvent(deps.appendLog, 'role_not_found', { parent: context.roleName, roleName: childRoleName })
-				return createResultCard('error', `Unknown role: ${childRoleName}`, {
-					error: createToolError('unknown_tool', `Unknown role: ${childRoleName}`),
-				})
-			}
-			// agent_call logs the parent→child edge with depth before the child runs, so the parent→child linkage is recoverable even from a caller that does not read role_start.
-			logEvent(deps.appendLog, 'agent_call', { parent: context.roleName, child: childRoleName, depth: context.depth + 1 })
-			const childCard = await runRole(deps, {
+	// The shared child-spawn body behind both agent and continue_agent: budget and role checks, the agent_call edge, the child turn, and the pending-card checkpoint. The two tools differ only in the seed the child starts from.
+	const runChild = async (childRoleName: string, childTask: string, seed?: SeededRole): Promise<ResultCard> => {
+		const depthCheck = checkGlobalBudgets(context.depth + 1, guild.deployment.executor)
+		if (depthCheck !== null) {
+			logEvent(deps.appendLog, 'depth_exceeded', { parent: context.roleName, child: childRoleName, depth: context.depth + 1, error: depthCheck })
+			return createResultCard('error', 'Depth budget exceeded', { error: depthCheck })
+		}
+		const childDefinition = guild.config.roles[childRoleName]
+		if (childDefinition === undefined) {
+			logEvent(deps.appendLog, 'role_not_found', { parent: context.roleName, roleName: childRoleName })
+			return createResultCard('error', `Unknown role: ${childRoleName}`, {
+				error: createToolError('unknown_tool', `Unknown role: ${childRoleName}`),
+			})
+		}
+		// agent_call logs the parent→child edge with depth before the child runs, so the parent→child linkage is recoverable even from a caller that does not read role_start.
+		logEvent(deps.appendLog, 'agent_call', { parent: context.roleName, child: childRoleName, depth: context.depth + 1 })
+		const childCard = await runRole(
+			deps,
+			{
 				...context,
 				depth: context.depth + 1,
 				roleName: childRoleName,
 				task: childTask,
 				parent: context.roleName,
 				parentRoleId: registryEntry.roleId,
+			},
+			undefined,
+			seed,
+		)
+		// The child is done: record its card on this frame's pending suspension and checkpoint, so a restart here resumes by delivering the recorded card instead of re-running the child. The card is delivered to the conversation by recordToolResult after this handler returns.
+		deps.checkpointRecorder.setPendingChildCard(registryEntry.roleId, childCard)
+		deps.checkpointRecorder.write()
+		return childCard
+	}
+
+	const builtInHandlers = createBuiltInToolHandlers({
+		spawnAgent: async (childRoleName, childTask) => runChild(childRoleName, childTask),
+		continueAgent: async (childRoleName, comment, childRoleId) => {
+			const resolution = selectContinuableChild(deps.roleSnapshots.list(), {
+				parentRoleId: registryEntry.roleId,
+				roleName: childRoleName,
+				...(childRoleId !== undefined ? { roleId: childRoleId } : {}),
 			})
-			// The child is done: record its card on this frame's pending suspension and checkpoint, so a restart here resumes by delivering the recorded card instead of re-running the child. The card is delivered to the conversation by recordToolResult after this handler returns.
-			deps.checkpointRecorder.setPendingChildCard(registryEntry.roleId, childCard)
-			deps.checkpointRecorder.write()
-			return childCard
+			if (!resolution.ok) {
+				const message = resolution.reason === 'unknown_id' ? `No finished child of this role with instance id ${childRoleId}` : `No finished child named ${childRoleName} to continue`
+				return createResultCard('error', message, { error: createToolError('invalid_arguments', message) })
+			}
+			const snapshot = deps.roleSnapshots.read(resolution.roleId)
+			if (snapshot === null) {
+				const message = `Finished child snapshot ${resolution.roleId} could not be read`
+				return createResultCard('error', message, { error: createToolError('unavailable', message) })
+			}
+			const history = buildContinuationHistory(snapshot.history, comment)
+			return runChild(snapshot.roleName, snapshot.task, { history, continuedFrom: snapshot.roleId })
 		},
 		roleState,
 		humanBackend: deps.humanBackend,
@@ -371,10 +399,22 @@ export async function runRole(deps: EngineDependencies, context: EngineContext, 
 	deps.roleRegistry.unregister(registryEntry.roleId)
 	deps.checkpointRecorder.unregisterFrame(registryEntry.roleId)
 	logEvent(deps.appendLog, 'role_finished', roleFinishedPayload(context.roleName, context.depth, finalCard, context.parent, registryEntry.roleId))
+	// A finished child is persisted so its parent can later continue it as a new seeded instance, across a restart. Only children qualify (a root has no parent to continue it) and handler instances are excluded — they are platform-invoked and never a parent's delegation.
+	if (context.parentRoleId !== undefined && context.handlerOf === undefined) {
+		deps.roleSnapshots.write({
+			roleId: registryEntry.roleId,
+			roleName: context.roleName,
+			depth: context.depth,
+			task: context.task,
+			parentRoleId: context.parentRoleId,
+			finishedAt: new Date().toISOString(),
+			history: roleState.history,
+		})
+	}
 	return finalCard
 }
 
-// Dispatches a turn's tool calls in order, tracking agent suspensions on the checkpoint recorder so a checkpoint taken while a child runs captures where this role resumes. Shared by the live turn path (starting at 0) and the resumed-suspension path (starting after the agent call, whose result the resume already recorded).
+// Dispatches a turn's tool calls in order, tracking child-spawning suspensions on the checkpoint recorder so a checkpoint taken while a child runs captures where this role resumes. Shared by the live turn path (starting at 0) and the resumed-suspension path (starting after the child-spawning call, whose result the resume already recorded).
 async function dispatchToolCallSequence(
 	deps: EngineDependencies,
 	context: EngineContext,
@@ -389,12 +429,12 @@ async function dispatchToolCallSequence(
 		if (toolCall === undefined) continue
 		// The park mark checked between dispatches is load-bearing (docs/queueing.md "Parking: the pre-write rule"): a batched ask_human + agent turn must not start the child after the park decision, or the run writes after the pre-write premise was decided. The mark is run-scoped, so a suspended ancestor unwinds here with the same platform-authored park card once its child's card has propagated up.
 		if (deps.parkTracker.parkedQuestion !== undefined) return parkCard(deps.parkTracker.parkedQuestion)
-		// An agent dispatch suspends this role mid-turn until the child returns; record the suspension so a checkpoint taken while the child runs captures where this role resumes. Cleared once the dispatch settles.
-		if (toolCall.function.name === 'agent') {
-			deps.checkpointRecorder.setPending(registryEntry.roleId, { toolCalls, agentIndex: index })
+		// A child-spawning dispatch suspends this role mid-turn until the child returns; record the suspension so a checkpoint taken while the child runs captures where this role resumes. Cleared once the dispatch settles.
+		if (SUSPENDING_CHILD_TOOLS.has(toolCall.function.name)) {
+			deps.checkpointRecorder.setPending(registryEntry.roleId, { toolCalls, childIndex: index })
 		}
 		const finalCard = await dispatchAndRecord({ deps, roleState, roleName: context.roleName, ownRoleId: registryEntry.roleId, dispatchCtx, toolCall })
-		if (toolCall.function.name === 'agent') {
+		if (SUSPENDING_CHILD_TOOLS.has(toolCall.function.name)) {
 			deps.checkpointRecorder.setPending(registryEntry.roleId, undefined)
 		}
 		if (finalCard !== null) return finalCard
@@ -402,20 +442,20 @@ async function dispatchToolCallSequence(
 	return null
 }
 
-// Completes a resumed role's suspended turn: the child card is resolved (re-running the child frame's resume when the checkpoint has no recorded card), checkpointed onto the pending suspension exactly as the live role_finished path does, and recorded as the agent call's tool result — the agent_call event and the child's events are already in the log from the live dispatch. The turn's remaining tool calls then dispatch normally.
+// Completes a resumed role's suspended turn: the child card is resolved (re-running the child frame's resume when the checkpoint has no recorded card), checkpointed onto the pending suspension exactly as the live role_finished path does, and recorded as the child-spawning call's tool result — the agent_call event and the child's events are already in the log from the live dispatch. The turn's remaining tool calls then dispatch normally.
 // resumeNote is delivered at this walk's equivalent loop entry — after the recorded tool result, before the remaining calls execute — so a turn whose remaining calls include finish still carries the note in its conversation even though no further LLM request happens; the ordering rule holds (never between an assistant tool_calls message and its tool results). Undefined for boot reconciliation.
 async function completeSuspendedTurn(deps: EngineDependencies, context: EngineContext, roleState: RoleState, registryEntry: RoleRegistryEntry, dispatchCtx: DispatchContext, suspendedTurn: SuspendedTurn, resumeNote?: string): Promise<ResultCard | null> {
-	const agentCall = suspendedTurn.toolCalls[suspendedTurn.agentIndex]
-	if (agentCall === undefined) throw new Error(`completeSuspendedTurn: agentIndex ${suspendedTurn.agentIndex} out of range in a validated checkpoint`)
+	const childCall = suspendedTurn.toolCalls[suspendedTurn.childIndex]
+	if (childCall === undefined) throw new Error(`completeSuspendedTurn: childIndex ${suspendedTurn.childIndex} out of range in a validated checkpoint`)
 	const childCard = await suspendedTurn.resolveChildCard()
 	deps.checkpointRecorder.setPendingChildCard(registryEntry.roleId, childCard)
 	deps.checkpointRecorder.write()
-	recordToolResult(deps, roleState, context.roleName, registryEntry.roleId, dispatchCtx.maxToolOutputChars, agentCall, { kind: 'success', data: childCard })
+	recordToolResult(deps, roleState, context.roleName, registryEntry.roleId, dispatchCtx.maxToolOutputChars, childCall, { kind: 'success', data: childCard })
 	deps.checkpointRecorder.setPending(registryEntry.roleId, undefined)
 	if (resumeNote !== undefined) {
 		roleState.history.push({ role: 'user', content: resumeNote })
 	}
-	return dispatchToolCallSequence(deps, context, roleState, registryEntry, dispatchCtx, suspendedTurn.toolCalls, suspendedTurn.agentIndex + 1)
+	return dispatchToolCallSequence(deps, context, roleState, registryEntry, dispatchCtx, suspendedTurn.toolCalls, suspendedTurn.childIndex + 1)
 }
 
 // The role's turn loop, extracted from runRole so every exit emits exactly one role_finished at the runRole call site, guaranteeing the role_start/role_finished pairing regardless of which budget or finish path terminates the role.

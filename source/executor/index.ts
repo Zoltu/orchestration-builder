@@ -13,7 +13,9 @@ export type { LlmUsagePayload, DiscardedRetrySpend } from './types.js'
 export { ConfigurationError, ValidationError } from './errors.js'
 
 export { createCheckpointRecorder, entryFrameLogLevel, isRunCheckpoint } from './checkpoint.js'
-export type { CheckpointFrame, CheckpointRecorder, CheckpointRecorderDependencies, PendingAgentSuspension, RunCheckpoint } from './checkpoint.js'
+export type { CheckpointFrame, CheckpointRecorder, CheckpointRecorderDependencies, PendingChildSuspension, RunCheckpoint } from './checkpoint.js'
+
+export type { RoleSnapshotStore } from './role-snapshot.js'
 
 export { reconcileRunsOnStartup } from './startup-reconciliation.js'
 export type { ReconciliationReport, StartupReconciliationDependencies } from './startup-reconciliation.js'
@@ -89,6 +91,7 @@ export {
 	createWriteMeta,
 	createWriteCheckpoint,
 	createDeleteCheckpoint,
+	createRoleSnapshotStore,
 	createReadRunCheckpointById,
 	createRunCheckpointExists,
 	createReadRunSnapshotById,

@@ -1,0 +1,44 @@
+{
+	"name": "continue_agent",
+	"description": "Continue a child role that has already finished, as a new instance seeded from its prior conversation. The new instance runs to completion and returns its ResultCard.",
+	"humanLabel": {
+		"detailed": ["Continue Agent"],
+		"friendly": ["Continue"],
+		"whimsical": ["Encore"]
+	},
+	"humanDescription": {
+		"detailed": ["Continues a finished child role as a new instance seeded from its prior conversation."],
+		"friendly": ["Picks up a finished helper where it left off."],
+		"whimsical": ["Calls the specialist back for one more round."]
+	},
+	"humanCallLabel": {
+		"detailed": ["role {sourceRole} is continuing tool {destinationRole} (stack {stack})"],
+		"friendly": ["{source} is continuing another agent"],
+		"whimsical": ["{source} is calling the specialist back", "{source} is asking for an encore", "{source} is reopening the case"]
+	},
+	"humanWorkingLabel": {
+		"detailed": ["tool {participantRole} is continuing a child role"],
+		"friendly": ["Continuing another agent"],
+		"whimsical": ["Calling the specialist back", "Asking for an encore", "Reopening the case", "Picking up where they left off"]
+	},
+	"parameters": {
+		"type": "object",
+		"required": [
+			"role"
+		],
+		"properties": {
+			"role": {
+				"type": "string",
+				"description": "Name of the finished child role to continue, as declared in the Guild."
+			},
+			"roleId": {
+				"type": "string",
+				"description": "Optional instance id of the finished child to continue when more than one instance of the role has finished."
+			},
+			"comment": {
+				"type": "string",
+				"description": "Optional message appended to the child's history to steer the continued work."
+			}
+		}
+	}
+}

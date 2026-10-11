@@ -4,6 +4,7 @@ import type { HumanBackend } from './human-backend.js'
 import type { LoadedGuild } from './loader.js'
 import { createRunParkTracker, type RunParkTracker } from './park-state.js'
 import type { RoleRegistry } from './role-registry.js'
+import type { RoleSnapshot, RoleSnapshotStore } from './role-snapshot.js'
 import type { GuildConfig, ToolManifest, ToolResult } from './types.js'
 
 export function defined<T>(value: T | undefined, label: string): T {
@@ -56,6 +57,28 @@ export interface FakeCheckpointSink {
 }
 
 // A real recorder over an in-memory sink. The recorder passes live references to writeCheckpoint, so the sink deep-copies through JSON to freeze each write as made — and re-validates the copy, so every test using this fixture also proves the recorder's output passes the resume-time guard. parkTracker may be passed when the test drives the engine's park path, so the recorder and the engine dependencies share the run-scoped state.
+// An in-memory RoleSnapshotStore mirroring the on-disk leaf: writes and reads key on the role instance id, list projects the summaries. Tests that assert on continuation seeding read the snapshots directly.
+export function createFakeRoleSnapshotStore(): RoleSnapshotStore {
+	const snapshots = new Map<string, RoleSnapshot>()
+	return {
+		write(input) {
+			snapshots.set(input.roleId, { version: 1, runId: 'test-run', ...input })
+		},
+		read(roleId) {
+			return snapshots.get(roleId) ?? null
+		},
+		list() {
+			return [...snapshots.values()].map((snapshot) => ({
+				roleId: snapshot.roleId,
+				roleName: snapshot.roleName,
+				depth: snapshot.depth,
+				parentRoleId: snapshot.parentRoleId,
+				finishedAt: snapshot.finishedAt,
+			}))
+		},
+	}
+}
+
 export function createFakeCheckpointRecorder(roleRegistry: RoleRegistry, contextPressureTracker: ContextPressureTracker, parkTracker?: RunParkTracker, runId: string = 'test-run'): FakeCheckpointSink {
 	const checkpoints: RunCheckpoint[] = []
 	const recorder = createCheckpointRecorder({
