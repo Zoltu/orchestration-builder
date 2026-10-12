@@ -1,0 +1,44 @@
+{
+	"name": "git_diff",
+	"description": "Show the workspace repository's changes as a unified diff. By default the unstaged working-tree changes are shown; set staged to show the changes staged for the next commit, and pass paths to limit the diff to specific workspace-relative files or directories. Read-only.",
+	"humanLabel": {
+		"detailed": ["Git Diff"],
+		"friendly": ["Git Diff"],
+		"whimsical": ["Change X-Ray"]
+	},
+	"humanDescription": {
+		"detailed": ["Shows the repository changes as a diff."],
+		"friendly": ["See the actual changes."],
+		"whimsical": ["Hold the changes up to the light."]
+	},
+	"humanCallLabel": {
+		"detailed": ["role {sourceRole} is invoking tool {destinationRole} (stack {stack})"],
+		"friendly": ["{source} is diffing the repo"],
+		"whimsical": ["{source} is x-raying the changes", "{source} is comparing the before and after", "{source} is laying the edits side by side"]
+	},
+	"humanWorkingLabel": {
+		"detailed": ["tool {participantRole} is computing the repository diff"],
+		"friendly": ["Computing the diff"],
+		"whimsical": ["X-raying the changes", "Comparing before and after", "Laying edits side by side", "Spotting the differences"]
+	},
+	"parameters": {
+		"type": "object",
+		"properties": {
+			"staged": {
+				"type": "boolean",
+				"description": "Optional. When true, show the changes staged for the next commit instead of the unstaged working-tree changes."
+			},
+			"paths": {
+				"type": "array",
+				"description": "Optional list of workspace-relative file or directory paths to limit the diff to. If omitted, the whole repository is diffed.",
+				"items": {
+					"type": "string"
+				}
+			},
+			"timeoutSeconds": {
+				"type": "number",
+				"description": "Optional timeout in seconds. Capped by the executor default tool timeout; a value above the cap is clamped to the cap."
+			}
+		}
+	}
+}

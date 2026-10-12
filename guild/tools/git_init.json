@@ -1,0 +1,33 @@
+{
+	"name": "git_init",
+	"description": "Initialize a git repository in the workspace root if one is not already present. Safe to call when a repository already exists.",
+	"humanLabel": {
+		"detailed": ["Git Init"],
+		"friendly": ["Init Repo"],
+		"whimsical": ["Repo Genesis"]
+	},
+	"humanDescription": {
+		"detailed": ["Initializes a git repository in the workspace."],
+		"friendly": ["Start a git repository."],
+		"whimsical": ["Let there be version control."]
+	},
+	"humanCallLabel": {
+		"detailed": ["role {sourceRole} is invoking tool {destinationRole} (stack {stack})"],
+		"friendly": ["{source} is initializing the repo"],
+		"whimsical": ["{source} is planting the repo seed", "{source} is laying the first stone", "{source} is starting the repo from scratch"]
+	},
+	"humanWorkingLabel": {
+		"detailed": ["tool {participantRole} is initializing a git repository"],
+		"friendly": ["Initializing the repo"],
+		"whimsical": ["Planting the repo seed", "Laying the first stone", "Rolling out the red carpet", "Beginning the repository"]
+	},
+	"parameters": {
+		"type": "object",
+		"properties": {
+			"timeoutSeconds": {
+				"type": "number",
+				"description": "Optional timeout in seconds. Capped by the executor default tool timeout; a value above the cap is clamped to the cap."
+			}
+		}
+	}
+}

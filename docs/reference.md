@@ -241,6 +241,23 @@ Each tool manifest in the Guild declares the name, description, and parameter sc
 
 The success payload is an array with one entry per completed command: `{ command, exitCode, stdout, stderr }`, with each command's streams truncated by a per-command cap. A non-zero exit code is a normal result to read and iterate on, not an error. A command that outlives its timeout returns a `timeout` error whose message names the failing command and whose details carry the completed entries plus the timed-out entry (marked `timedOut`, exit code `null`, partial output); a command that fails to spawn returns `unavailable` naming it, with the completed entries in the details. Processing stops at the first timeout or spawn failure — later commands in the array are not run — and a command killed by a signal outside the timeout path reports `exitCode: null` like a timed-out one. `timeoutSeconds` is per command and clamped: the caller may lower it below the executor's default tool timeout, never raise it. The whole serialized result is also subject to the engine's `maxToolOutputChars` cap: on overflow it is cut from the tail, so the later commands' entries are the first dropped — batch long output into fewer commands rather than spreading it across many.
 
+### Git tools
+
+Six git tools give a role a narrow, safe version-control surface.
+They run `git` directly with a fixed argv — never through a shell — and share one safety posture: only read-only operations plus `init`, `commit`, and branch-at-HEAD; no history rewrite, no checkout or switch, no remote, push, fetch, or pull, no branch delete or force.
+Hooks and the fsmonitor hook are disabled (`core.hooksPath=/dev/null`, `core.fsmonitor=false`), the identity is pinned (`user.name=Adaptive Orchestrator`, `user.email=orchestrator@localhost`), and signing is off (`commit.gpgsign=false`), so a commit never depends on the workspace's own configuration.
+On success each returns the captured `{ exitCode, stdout, stderr }`; a non-zero exit is an `invalid_arguments` error carrying git's own stderr, a timeout is `timeout`, and a spawn failure is `unavailable`.
+Every tool also accepts an optional `timeoutSeconds`, capped by `executor.defaultToolTimeoutSeconds`; the parameters below are the tool-specific ones.
+
+- `git_status` — no tool-specific parameters. Runs `git status --porcelain=v1 --branch --untracked-files=normal`; read-only.
+- `git_log` — optional `count` (a positive integer, default `20`, max `100`). Runs `git log --oneline --decorate -n <count>`; read-only.
+- `git_diff` — optional `staged` (boolean, default `false`: the unstaged diff; `true`: `--staged`), optional `paths` (an array of workspace-relative path strings, each rejected if it escapes the workspace or names the `.orchestration` bookkeeping). Runs `git diff --no-ext-diff --no-textconv [--staged] [-- <paths>]`; read-only.
+- `git_init` — no tool-specific parameters. Runs `git init`, then re-ensures the `.orchestration` exclusion so run bookkeeping is never staged or committed even on a fresh workspace; safe when a repository already exists.
+- `git_commit` — required `message` (a non-empty string of at most 1000 characters with no NUL). Stages the entire working tree (`git add -A`) and commits on the current branch (`git commit -m <message>`); it never amends. If there is nothing to commit it returns a normal success explaining so.
+- `git_branch` — required `name` (a valid git branch name). Runs `git branch -- <name>`; creates the branch at the current HEAD but does not switch to it, and fails if the branch already exists or HEAD is unborn (no commits yet).
+
+The seed Guild grants these tools to the `orchestrator` role only; they are a guardrail for the orchestrator's behavior, not a containment boundary (see [`docs/security.md`](security.md) "Git tool policy").
+
 ## Guild format
 
 The Guild is the entire behavior of the orchestrator described as JSON: role definitions, tool manifests, the entry role name, and the optional visualization section. There is no workflow graph — workflows emerge from roles calling `agent` to invoke other roles. The deployment knobs (model endpoint, executor budgets, context policy) live in a separate deployment file, described under [Deployment configuration](#deployment-configuration); a guild file carrying them (or a `schemaVersion` key) is rejected with a pointer to that file.

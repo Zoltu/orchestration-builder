@@ -4,7 +4,7 @@
 	"roles": {
 		"orchestrator": {
 			"systemPrompt": "prompts/orchestrator.md",
-			"tools": ["agent", "continue_agent", "ask_human", "finish"],
+			"tools": ["agent", "continue_agent", "ask_human", "finish", "git_status", "git_log", "git_diff", "git_init", "git_commit", "git_branch"],
 			"projectDocs": ["AGENTS.md", "README.md"],
 			"label": {
 				"detailed": ["Orchestrator"],
@@ -361,7 +361,13 @@
 		"tools/list_role_messages.json",
 		"tools/read_message_window.json",
 		"tools/search_role_blocks.json",
-		"tools/recent_role_tool_calls.json"
+		"tools/recent_role_tool_calls.json",
+		"tools/git_status.json",
+		"tools/git_log.json",
+		"tools/git_diff.json",
+		"tools/git_init.json",
+		"tools/git_commit.json",
+		"tools/git_branch.json"
 	],
 
 	"visualization": {

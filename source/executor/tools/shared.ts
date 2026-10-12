@@ -9,7 +9,7 @@ export interface ResolvedPath {
 }
 
 // The run-bookkeeping directory at the workspace top level. Only the top-level entry is reserved: a nested project/.orchestration/ is ordinary project content.
-const ORCHESTRATION_DIR_NAME = '.orchestration'
+export const ORCHESTRATION_DIR_NAME = '.orchestration'
 
 // True only for the executor's own bookkeeping directory at the workspace top level. Relative paths come from path.relative and so carry the platform separator, which is normalized here the same way the walk tools normalize their output (nested .orchestration directories deliberately stay accessible).
 export function isOrchestrationPath(relativePath: string): boolean {

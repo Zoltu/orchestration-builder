@@ -72,6 +72,18 @@ If `showdown` or `highlight.js` fails to load or throws, a prose field falls bac
 - **`run_shell` containment.** Containment comes from the deployment environment (non-root user, restricted egress, read-only filesystem outside the workspace mount), not from an in-tool command allowlist. Per-run environment isolation (scoped `PATH`/`HOME`) is Foundry work that hardens benchmark evaluation; an in-tool allowlist remains a deferred enhancement.
 - **Secrets.** API keys are passed through environment variables or Docker secrets (`/run/secrets`), never stored in the Guild, the deployment file, or the workspace.
 
+### Git tool policy
+
+A run may use a small, fixed git tool family (`git_status`, `git_log`, `git_diff`, `git_init`, `git_commit`, `git_branch`), granted to the `orchestrator` role only, so it can take a baseline, commit accepted work, and branch before a risky change.
+The family is read-only plus `init`/`commit`/`branch`-at-HEAD: it cannot rewrite history, check out another branch, or push, and every command runs with a fixed argv (no shell), hooks and the fsmonitor hook disabled, a pinned identity, and signing off.
+
+Enforcement is deliberately **soft**.
+The `coder` still holds `run_shell`, so it can run arbitrary git commands; the tools guard the orchestrator's behavior and provide rollback points, but they do not contain a haywire agent.
+The deployment container remains the trust boundary, exactly as it does for `run_shell` (see "Tool exposure is a Guild decision" above).
+
+The residual vector is staging: the fixed argv cannot stop a workspace repo's configured clean filter from running during `git add`, so a commit can execute a workspace-chosen program.
+This is the same workspace-as-untrusted-input exposure the threat model already accepts for the subprocess tools, and the container is again the containment.
+
 ## What the design does not prevent
 
 - A deliberately destructive task given by a legitimate user. The executor does not second-guess the user; it only contains execution to the workspace.

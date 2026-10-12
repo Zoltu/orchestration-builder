@@ -1,0 +1,38 @@
+{
+	"name": "git_branch",
+	"description": "Create a new branch at the current HEAD in the workspace repository. Fails if a branch with that name already exists; it never force-creates or moves an existing branch.",
+	"humanLabel": {
+		"detailed": ["Git Branch"],
+		"friendly": ["New Branch"],
+		"whimsical": ["Branch Forge"]
+	},
+	"humanDescription": {
+		"detailed": ["Creates a branch at the current HEAD."],
+		"friendly": ["Start a new branch."],
+		"whimsical": ["Grow a new limb off the trunk."]
+	},
+	"humanCallLabel": {
+		"detailed": ["role {sourceRole} is invoking tool {destinationRole} (stack {stack})"],
+		"friendly": ["{source} is creating a branch"],
+		"whimsical": ["{source} is growing a new branch", "{source} is forging a fork in the road", "{source} is splitting off a limb"]
+	},
+	"humanWorkingLabel": {
+		"detailed": ["tool {participantRole} is creating a git branch"],
+		"friendly": ["Creating a branch"],
+		"whimsical": ["Growing a new branch", "Forging a fork", "Splitting off a limb", "Sprouting a branch"]
+	},
+	"parameters": {
+		"type": "object",
+		"required": ["name"],
+		"properties": {
+			"name": {
+				"type": "string",
+				"description": "Name of the branch to create at the current HEAD. Must be a valid git branch name."
+			},
+			"timeoutSeconds": {
+				"type": "number",
+				"description": "Optional timeout in seconds. Capped by the executor default tool timeout; a value above the cap is clamped to the cap."
+			}
+		}
+	}
+}

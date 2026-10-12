@@ -1,0 +1,37 @@
+{
+	"name": "git_log",
+	"description": "Show the workspace repository's most recent commits, one line each with the abbreviated hash, decorations, and subject. Read-only.",
+	"humanLabel": {
+		"detailed": ["Git Log"],
+		"friendly": ["Git Log"],
+		"whimsical": ["Commit Chronicle"]
+	},
+	"humanDescription": {
+		"detailed": ["Lists recent commits from the workspace repository."],
+		"friendly": ["See the recent commits."],
+		"whimsical": ["Read the repository's diary."]
+	},
+	"humanCallLabel": {
+		"detailed": ["role {sourceRole} is invoking tool {destinationRole} (stack {stack})"],
+		"friendly": ["{source} is reading the git log"],
+		"whimsical": ["{source} is flipping through the commit history", "{source} is unrolling the commit scroll", "{source} is browsing the changelog"]
+	},
+	"humanWorkingLabel": {
+		"detailed": ["tool {participantRole} is reading recent commits"],
+		"friendly": ["Reading the git log"],
+		"whimsical": ["Flipping through history", "Unrolling the commit scroll", "Browsing the changelog", "Reading the repo's diary"]
+	},
+	"parameters": {
+		"type": "object",
+		"properties": {
+			"count": {
+				"type": "integer",
+				"description": "Optional number of commits to show (default 20, maximum 100)."
+			},
+			"timeoutSeconds": {
+				"type": "number",
+				"description": "Optional timeout in seconds. Capped by the executor default tool timeout; a value above the cap is clamped to the cap."
+			}
+		}
+	}
+}

@@ -1,0 +1,33 @@
+{
+	"name": "git_status",
+	"description": "Show the workspace repository's status in git's porcelain v1 format: the current branch and each staged, modified, or untracked path. Read-only — it never changes the repository.",
+	"humanLabel": {
+		"detailed": ["Git Status"],
+		"friendly": ["Git Status"],
+		"whimsical": ["Repo Recon"]
+	},
+	"humanDescription": {
+		"detailed": ["Reports the working-tree and staging state of the workspace repository."],
+		"friendly": ["See what has changed in the repo."],
+		"whimsical": ["Take the pulse of the repository."]
+	},
+	"humanCallLabel": {
+		"detailed": ["role {sourceRole} is invoking tool {destinationRole} (stack {stack})"],
+		"friendly": ["{source} is checking git status"],
+		"whimsical": ["{source} is checking the pulse of the repo", "{source} is surveying the working tree", "{source} is taking the repo's temperature"]
+	},
+	"humanWorkingLabel": {
+		"detailed": ["tool {participantRole} is reading the repository status"],
+		"friendly": ["Checking git status"],
+		"whimsical": ["Reading the repo's pulse", "Surveying the working tree", "Taking the repo's temperature", "Checking what has changed"]
+	},
+	"parameters": {
+		"type": "object",
+		"properties": {
+			"timeoutSeconds": {
+				"type": "number",
+				"description": "Optional timeout in seconds. Capped by the executor default tool timeout; a value above the cap is clamped to the cap."
+			}
+		}
+	}
+}

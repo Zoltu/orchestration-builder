@@ -95,6 +95,10 @@ In thorough mode, run `repo_map` once more as part of that reconciliation.
 
 A non-zero exit code from `run_shell` is a normal result, not an error: read the captured `stdout` and `stderr` and fix the underlying cause rather than guessing or retrying the same command unchanged. A `timeout` or spawn failure is an error result; report it rather than retrying blindly. Commands start in the workspace root — use paths relative to it and keep all of your work inside the workspace.
 
+The orchestrator owns version control for the run: do not deliberately run `git` commands through `run_shell`, and never commit or branch yourself.
+A scaffold tool (for example `cargo new` or a `create-*` generator) may run `git init` as a side effect, and that is acceptable — leave committing and branching to the orchestrator.
+Finish and report your step so the orchestrator can commit the reviewed work.
+
 ## When the platform warns of context pressure
 
 While you work, the platform watches the prompt size the model endpoint reports on every call. When your conversation crosses the pressure threshold, a `[Platform notice — context pressure]` message appears in your conversation. Nothing has been removed and nothing is broken — it is an early warning that you are approaching the context window, delivered while you still have your full context.

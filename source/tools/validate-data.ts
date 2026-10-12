@@ -76,11 +76,12 @@ const expectedToolNames = new Set([
 	'agent', 'continue_agent', 'finish', 'context_info', 'edit_context', 'ask_human',
 	'list_directory', 'glob_files', 'read_file', 'read_file_partial', 'search_text', 'write_file', 'read_plan', 'write_plan', 'read_style_guide', 'write_style_guide', 'fetch_url', 'typecheck', 'test',
 	'run_shell', 'repo_map', 'web_search',
+	'git_status', 'git_log', 'git_diff', 'git_init', 'git_commit', 'git_branch',
 	'read_run_log', 'search_run_log',
 	'trigger_interrupt', 'list_role_messages', 'read_message_window', 'search_role_blocks', 'recent_role_tool_calls',
 ])
 
-const nativeToolNames = new Set(['list_directory', 'glob_files', 'read_file', 'read_file_partial', 'search_text', 'write_file', 'read_plan', 'write_plan', 'read_style_guide', 'write_style_guide', 'read_run_log', 'search_run_log', 'fetch_url', 'typecheck', 'test', 'run_shell', 'repo_map', 'web_search'])
+const nativeToolNames = new Set(['list_directory', 'glob_files', 'read_file', 'read_file_partial', 'search_text', 'write_file', 'read_plan', 'write_plan', 'read_style_guide', 'write_style_guide', 'read_run_log', 'search_run_log', 'fetch_url', 'typecheck', 'test', 'run_shell', 'repo_map', 'web_search', 'git_status', 'git_log', 'git_diff', 'git_init', 'git_commit', 'git_branch'])
 
 const builtInToolNames = new Set(['agent', 'continue_agent', 'finish', 'context_info', 'edit_context', 'ask_human', 'trigger_interrupt', 'list_role_messages', 'read_message_window', 'search_role_blocks', 'recent_role_tool_calls'])
 
@@ -111,6 +112,12 @@ const expectedSignatures: ExpectedSignature[] = [
 	{ file: 'typecheck.json', required: ['commands'], properties: ['commands', 'timeoutSeconds'], propertyTypes: { commands: 'array', timeoutSeconds: 'number' } },
 	{ file: 'test.json', required: ['commands'], properties: ['commands', 'timeoutSeconds'], propertyTypes: { commands: 'array', timeoutSeconds: 'number' } },
 	{ file: 'run_shell.json', required: ['command'], properties: ['command', 'timeoutSeconds'] },
+	{ file: 'git_status.json', required: [], properties: ['timeoutSeconds'], propertyTypes: { timeoutSeconds: 'number' } },
+	{ file: 'git_log.json', required: [], properties: ['count', 'timeoutSeconds'], propertyTypes: { count: 'integer', timeoutSeconds: 'number' } },
+	{ file: 'git_diff.json', required: [], properties: ['staged', 'paths', 'timeoutSeconds'], propertyTypes: { staged: 'boolean', paths: 'array', timeoutSeconds: 'number' } },
+	{ file: 'git_init.json', required: [], properties: ['timeoutSeconds'], propertyTypes: { timeoutSeconds: 'number' } },
+	{ file: 'git_commit.json', required: ['message'], properties: ['message', 'timeoutSeconds'], propertyTypes: { message: 'string', timeoutSeconds: 'number' } },
+	{ file: 'git_branch.json', required: ['name'], properties: ['name', 'timeoutSeconds'], propertyTypes: { name: 'string', timeoutSeconds: 'number' } },
 	{ file: 'trigger_interrupt.json', required: ['targetRole', 'action', 'reason'], properties: ['targetRole', 'action', 'reason'] },
 	{ file: 'list_role_messages.json', required: ['targetRole'], properties: ['targetRole'] },
 	{ file: 'read_message_window.json', required: ['targetRole', 'index', 'field', 'start', 'end'], properties: ['targetRole', 'index', 'field', 'start', 'end'] },

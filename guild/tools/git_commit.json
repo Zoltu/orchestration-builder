@@ -1,0 +1,38 @@
+{
+	"name": "git_commit",
+	"description": "Stage all changes in the workspace and commit them on the current branch with the given message. Never amends; if there is nothing to commit it reports success without creating an empty commit. The executor's .orchestration directory is already excluded from the repository.",
+	"humanLabel": {
+		"detailed": ["Git Commit"],
+		"friendly": ["Commit"],
+		"whimsical": ["Seal the Changes"]
+	},
+	"humanDescription": {
+		"detailed": ["Stages all workspace changes and commits them."],
+		"friendly": ["Commit the changes."],
+		"whimsical": ["Put a bow on the changes."]
+	},
+	"humanCallLabel": {
+		"detailed": ["role {sourceRole} is invoking tool {destinationRole} (stack {stack})"],
+		"friendly": ["{source} is committing changes"],
+		"whimsical": ["{source} is sealing the changes", "{source} is stamping the commit", "{source} is wrapping up the work"]
+	},
+	"humanWorkingLabel": {
+		"detailed": ["tool {participantRole} is committing workspace changes"],
+		"friendly": ["Committing changes"],
+		"whimsical": ["Sealing the changes", "Stamping the commit", "Wrapping up the work", "Tying the bow"]
+	},
+	"parameters": {
+		"type": "object",
+		"required": ["message"],
+		"properties": {
+			"message": {
+				"type": "string",
+				"description": "The commit message. Must be a non-empty string of at most 1000 characters."
+			},
+			"timeoutSeconds": {
+				"type": "number",
+				"description": "Optional timeout in seconds. Capped by the executor default tool timeout; a value above the cap is clamped to the cap."
+			}
+		}
+	}
+}

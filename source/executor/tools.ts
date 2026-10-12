@@ -1,5 +1,7 @@
 import type { ToolHandler } from './tool-dispatch.js'
+import { ensureOrchestrationGitExcluded, nodeGitExcludeFilesystem } from './git-exclude.js'
 import { createFetchUrl, type Fetcher } from './tools/fetch-url.js'
+import { createGitTools } from './tools/git.js'
 import { createGlobFiles, nodeGlobFilesystem } from './tools/glob-files.js'
 import { createKagiClient } from './tools/kagi.js'
 import { createListDirectory } from './tools/list-directory.js'
@@ -39,6 +41,12 @@ export function createToolHandlers(config: NativeToolsConfig): Record<string, To
 	const runShell = createRunShell(config.workspaceRoot, config.defaultToolTimeoutSeconds, subprocessRunner)
 	const test = createTest(config.workspaceRoot, config.defaultToolTimeoutSeconds, subprocessRunner)
 	const typecheck = createTypecheck(config.workspaceRoot, config.defaultToolTimeoutSeconds, subprocessRunner)
+	// The tool factory has no run-scoped logger, so a failed best-effort re-ensure is reported to the console the same way startup's excludeOrchestrationFromGit reports it.
+	const ensureOrchestrationExcluded = () => {
+		const result = ensureOrchestrationGitExcluded(config.workspaceRoot, nodeGitExcludeFilesystem)
+		if (!result.ok) console.log(`Could not exclude .orchestration from the workspace's git repository: ${result.reason}`)
+	}
+	const git = createGitTools({ workspaceRoot: config.workspaceRoot, defaultToolTimeoutSeconds: config.defaultToolTimeoutSeconds, runner: subprocessRunner, ensureOrchestrationExcluded })
 	return {
 		list_directory: list,
 		glob_files: glob,
@@ -52,5 +60,6 @@ export function createToolHandlers(config: NativeToolsConfig): Record<string, To
 		run_shell: runShell,
 		test,
 		typecheck,
+		...git,
 	}
 }
