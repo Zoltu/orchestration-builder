@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { backlogCount, deriveQueueSections, deriveReorderPosition, isQueueItemLike, queueItemPrimaryText, queueStatusLabel, reorderWaitingItems, RECENT_QUEUE_LIMIT, taskFirstLine } from './static/ts/queue-panel.js'
+import { backlogCount, deriveQueuedItems, deriveReorderPosition, isQueueItemLike, queueItemPrimaryText, queueStatusLabel, reorderWaitingItems, taskFirstLine } from './static/ts/queue-panel.js'
 
 // The fixture shape below mirrors the queue item's wire shape (docs/queueing.md "The queue: storage, item model, state machine") the tests build against, pulled off the module's API so the fixtures are checked against the module's own QueueItemLike, mirroring the sibling flow-view.test.ts convention.
 type QueueItemLike = Parameters<typeof queueItemPrimaryText>[0]
@@ -28,31 +28,24 @@ describe('isQueueItemLike', () => {
 	})
 })
 
-describe('deriveQueueSections', () => {
-	test('groups the polled items into the four panel sections in display order', () => {
-		const sections = deriveQueueSections([
+describe('deriveQueuedItems', () => {
+	test('groups the polled items into the three queued groups in display order and drops the settled and malformed ones', () => {
+		const queued = deriveQueuedItems([
 			item({ id: 'a', status: 'done', settledAt: '2026-01-01T00:01:00.000Z' }),
 			item({ id: 'b' }),
+			{ id: 'malformed', task: '', status: 'waiting', queuedAt: '2026-01-01T00:00:00.000Z' },
 			item({ id: 'c', status: 'needs_input' }),
 			item({ id: 'd', status: 'active' }),
 			item({ id: 'e', status: 'cancelled', settledAt: '2026-01-01T00:02:00.000Z' }),
 			item({ id: 'f' }),
 		])
-		expect(sections.waiting.map((entry) => entry.id)).toEqual(['b', 'f'])
-		expect(sections.active.map((entry) => entry.id)).toEqual(['d'])
-		expect(sections.needsInput.map((entry) => entry.id)).toEqual(['c'])
-		expect(sections.recent.map((entry) => entry.id)).toEqual(['e', 'a'])
+		expect(queued.waiting.map((entry) => entry.id)).toEqual(['b', 'f'])
+		expect(queued.active.map((entry) => entry.id)).toEqual(['d'])
+		expect(queued.needsInput.map((entry) => entry.id)).toEqual(['c'])
 	})
 
-	test('orders the recent bucket newest-settled first and caps it', () => {
-		const settled = Array.from({ length: RECENT_QUEUE_LIMIT + 3 }, (_unused, index) => item({ id: `s${index}`, status: 'done', settledAt: `2026-01-01T00:${String(index).padStart(2, '0')}:00.000Z` }))
-		const sections = deriveQueueSections(settled)
-		expect(sections.recent.length).toBe(RECENT_QUEUE_LIMIT)
-		expect(sections.recent[0]?.id).toBe(`s${RECENT_QUEUE_LIMIT + 2}`)
-	})
-
-	test('an empty queue yields four empty sections', () => {
-		expect(deriveQueueSections([])).toEqual({ waiting: [], active: [], needsInput: [], recent: [] })
+	test('an empty queue yields three empty groups', () => {
+		expect(deriveQueuedItems([])).toEqual({ waiting: [], active: [], needsInput: [] })
 	})
 })
 

@@ -1,4 +1,4 @@
-// Pure logic for the queue panel (docs/queueing.md "UI interaction model"): grouping the polled items into the panel's four sections, the display labels, the drag-reorder position arithmetic, and the shape guard the poll filters its response through. No rendering happens here — the panel component in app.js turns these derivations into vnodes — so every decision is unit-testable in memory against plain objects.
+// Pure logic for the queue rows the merged history screen shows (docs/queueing.md "UI interaction model"): grouping the polled items into the queued groups, the display labels, the drag-reorder position arithmetic, and the shape guard the poll filters its response through. No rendering happens here — the screen component in app.js turns these derivations into vnodes — so every decision is unit-testable in memory against plain objects.
 
 import { isObject } from './guards.js'
 
@@ -29,9 +29,6 @@ export interface QueueItemLike {
 
 const QUEUE_ITEM_STATUSES: readonly QueueItemStatus[] = ['waiting', 'active', 'needs_input', 'done', 'error', 'cancelled']
 
-// How many settled items (done / error / cancelled) the "recently finished" bucket keeps: the panel is a triage view of what just happened, not a second history screen — the full run browser has that job — so older settled items simply age out of the panel while staying in queue.json.
-export const RECENT_QUEUE_LIMIT = 8
-
 // The minimal shape the panel renders: any polled entry without it is dropped rather than half-rendered.
 export function isQueueItemLike(value: unknown): value is QueueItemLike {
 	if (!isObject(value)) return false
@@ -40,26 +37,22 @@ export function isQueueItemLike(value: unknown): value is QueueItemLike {
 	return QUEUE_ITEM_STATUSES.some((status) => status === value['status'])
 }
 
-export interface QueueSections {
+export interface QueuedItems {
 	waiting: QueueItemLike[]
 	active: QueueItemLike[]
 	needsInput: QueueItemLike[]
-	recent: QueueItemLike[]
 }
 
-// The panel's four sections, in display order. `waiting` keeps the polled order (head first, the order items will run in); `recent` is the settled items newest-first so the latest outcome is on top. Cancelled items have no section of their own — they join the recent bucket.
-export function deriveQueueSections(items: unknown[]): QueueSections {
-	const sections: QueueSections = { waiting: [], active: [], needsInput: [], recent: [] }
+// The queued rows the merged history screen shows above the run list, in display order: the waiting items head-first (the order they will run in), then the one active item, then the items parked on a question. Settled items (done/error/cancelled) get no row here — their runs carry the outcome in the history list below.
+export function deriveQueuedItems(items: unknown[]): QueuedItems {
+	const queued: QueuedItems = { waiting: [], active: [], needsInput: [] }
 	for (const item of items) {
 		if (!isQueueItemLike(item)) continue
-		if (item.status === 'waiting') sections.waiting.push(item)
-		else if (item.status === 'active') sections.active.push(item)
-		else if (item.status === 'needs_input') sections.needsInput.push(item)
-		else sections.recent.push(item)
+		if (item.status === 'waiting') queued.waiting.push(item)
+		else if (item.status === 'active') queued.active.push(item)
+		else if (item.status === 'needs_input') queued.needsInput.push(item)
 	}
-	sections.recent.sort((a, b) => (b.settledAt ?? '').localeCompare(a.settledAt ?? ''))
-	if (sections.recent.length > RECENT_QUEUE_LIMIT) sections.recent.length = RECENT_QUEUE_LIMIT
-	return sections
+	return queued
 }
 
 // The nav button's live count: the tasks that are not running yet and not finished — the backlog the operator can still act on.
@@ -89,7 +82,7 @@ export function taskFirstLine(task: string): string {
 	return `${lastSpace > 60 ? capped.slice(0, lastSpace) : capped}…`
 }
 
-// The item's primary line: the task's first line, except for a settled item with a result summary (what happened) or a needs_input item (what the run asked). Callers render the returned string as text or route it through the sanitized Markdown pipeline — it is agent/operator prose either way.
+// The item's primary line: the task's first line, except for a settled item with a result summary (what happened) or a needs_input item (what the run asked). The merged history screen renders the returned string as a plain text span, so it is never Markdown.
 export function queueItemPrimaryText(item: QueueItemLike): string {
 	if (item.status === 'needs_input' && typeof item.question === 'string' && item.question !== '') return item.question
 	if ((item.status === 'done' || item.status === 'error') && typeof item.resultSummary === 'string' && item.resultSummary !== '') return item.resultSummary
