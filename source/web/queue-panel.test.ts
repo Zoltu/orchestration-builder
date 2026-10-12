@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { backlogCount, deriveQueuedItems, deriveReorderPosition, isQueueItemLike, queueItemPrimaryText, queueStatusLabel, reorderWaitingItems, taskFirstLine } from './static/ts/queue-panel.js'
+import { backlogCount, deriveQueuedItems, deriveReorderPosition, isQueueItemLike, queueItemPrimaryText, queueStatusLabel, questionSummary, reorderWaitingItems, taskFirstLine } from './static/ts/queue-panel.js'
 
 // The fixture shape below mirrors the queue item's wire shape (docs/queueing.md "The queue: storage, item model, state machine") the tests build against, pulled off the module's API so the fixtures are checked against the module's own QueueItemLike, mirroring the sibling flow-view.test.ts convention.
 type QueueItemLike = Parameters<typeof queueItemPrimaryText>[0]
@@ -77,11 +77,44 @@ describe('taskFirstLine', () => {
 		const longSentence = `${'w'.repeat(50)} ${'y'.repeat(80)}`
 		expect(taskFirstLine(longSentence).endsWith('…')).toBe(true)
 	})
+
+	test('cuts at the last space when it falls past the floor', () => {
+		const withBoundary = `${'a'.repeat(61)} ${'b'.repeat(50)}`
+		expect(taskFirstLine(withBoundary)).toBe(`${'a'.repeat(61)}…`)
+	})
+})
+
+describe('questionSummary', () => {
+	test('returns the first non-empty line, trimmed', () => {
+		expect(questionSummary('which database?\nand which schema?')).toBe('which database?')
+		expect(questionSummary('\n\n   which database?  \n')).toBe('which database?')
+		expect(questionSummary('')).toBe('')
+		expect(questionSummary('   \n\t ')).toBe('')
+	})
+
+	test('caps a long line at a word boundary with a trailing ellipsis', () => {
+		const longSentence = `${'word '.repeat(20)}end`
+		const summary = questionSummary(longSentence)
+		expect(summary.endsWith('…')).toBe(true)
+		expect(summary.length).toBeLessThanOrEqual(73)
+		expect(summary.includes('  ')).toBe(false)
+	})
+
+	test('cuts at the last space when it falls past the floor', () => {
+		const withBoundary = `${'word '.repeat(10)}${'x'.repeat(30)}`
+		expect(questionSummary(withBoundary)).toBe(`${'word '.repeat(9)}word…`)
+	})
+
+	test('caps a long unbroken token at the limit', () => {
+		const longWord = 'x'.repeat(100)
+		expect(questionSummary(longWord)).toBe(`${longWord.slice(0, 72)}…`)
+	})
 })
 
 describe('queueItemPrimaryText', () => {
-	test('prefers the question for needs_input and the result summary for settled items', () => {
-		expect(queueItemPrimaryText(item({ status: 'needs_input', question: 'which database?' }))).toBe('which database?')
+	test('prefers a question preview for needs_input and the result summary for settled items', () => {
+		expect(queueItemPrimaryText(item({ status: 'needs_input', question: 'which database?\nwith which user?' }))).toBe('which database?')
+		expect(queueItemPrimaryText(item({ status: 'needs_input', question: '   \n  ' }))).toBe('fix the parser bug')
 		expect(queueItemPrimaryText(item({ status: 'done', resultSummary: 'fixed it', settledAt: '2026-01-01T00:01:00.000Z' }))).toBe('fixed it')
 		expect(queueItemPrimaryText(item({ status: 'error', resultSummary: 'blew up', settledAt: '2026-01-01T00:01:00.000Z' }))).toBe('blew up')
 		expect(queueItemPrimaryText(item())).toBe('fix the parser bug')

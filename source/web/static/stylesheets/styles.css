@@ -1640,6 +1640,13 @@ li:last-child {
 	justify-content: center;
 }
 
+/* The queue-driven instance opens from the history screen, which has no run-view containing block, so it covers the whole viewport and sits above the run-view overlays. */
+.question-modal-overlay--fixed {
+	position: fixed;
+	inset: 0;
+	z-index: 60;
+}
+
 .question-modal-backdrop {
 	position: absolute;
 	inset: 0;
@@ -1702,8 +1709,10 @@ li:last-child {
 	margin-top: var(--space-4);
 }
 
-.question-modal-form input[type='text'] {
+.question-modal-form textarea {
 	flex: 1;
+	resize: vertical;
+	min-height: 3rem;
 	padding: var(--space-2) var(--space-3);
 	border: 1px solid var(--color-border-strong);
 	border-radius: var(--radius-sm);
@@ -1712,7 +1721,7 @@ li:last-child {
 	font-size: 0.95rem;
 }
 
-.question-modal-form input[type='text']:focus-visible {
+.question-modal-form textarea:focus-visible {
 	outline: 2px solid var(--color-accent);
 	outline-offset: 0;
 	border-color: var(--color-accent);
@@ -2948,13 +2957,17 @@ li:last-child {
 	color: var(--color-error);
 }
 
-/* A queued row's main area is not a run selector, so it keeps the default cursor; a waiting row shows the grab cursor because the whole row is the drag handle. */
+/* A queued row's main area is not a run selector, so it keeps the default cursor; a waiting row shows the grab cursor because the whole row is the drag handle; a needs_input row shows the pointer because clicking it opens the question modal. */
 .queue-row .history-row-main {
 	cursor: default;
 }
 
 .queue-row.is-waiting .history-row-main {
 	cursor: grab;
+}
+
+.queue-row.is-needs-input .history-row-main {
+	cursor: pointer;
 }
 
 .queue-row.is-dragging {
@@ -2967,40 +2980,6 @@ li:last-child {
 	border-left: 2px solid var(--color-border-strong);
 	color: var(--color-text-muted);
 	font-size: 0.85rem;
-}
-
-/* The needs_input row's inline answer box and the waiting row's inline edit form reuse the create form's control language at row scale. The answer box claims a full line of its own under the row's main line. */
-.queue-answer-form {
-	flex: 1 1 100%;
-	display: flex;
-	gap: var(--space-2);
-}
-
-.queue-answer-form input {
-	flex: 1 1 auto;
-	border: 1px solid var(--color-border-strong);
-	border-radius: var(--radius-sm);
-	padding: var(--space-1) var(--space-2);
-	font: inherit;
-	font-size: 0.85rem;
-	background: var(--color-surface);
-	color: var(--color-text);
-}
-
-.queue-answer-form button {
-	flex: 0 0 auto;
-	border: 1px solid var(--color-accent);
-	border-radius: var(--radius-sm);
-	background: var(--color-accent-soft);
-	color: var(--color-accent);
-	font-size: 0.8rem;
-	padding: var(--space-1) var(--space-3);
-	cursor: pointer;
-}
-
-.queue-answer-form button:disabled {
-	opacity: 0.5;
-	cursor: default;
 }
 
 .queue-edit-form {

@@ -73,18 +73,28 @@ export function queueStatusLabel(status: string): string {
 	return QUEUE_STATUS_LABELS[status] ?? status
 }
 
-// The primary label for a queue item's task: the first line, capped at a word boundary the same way history rows cap theirs — a long first line must not stretch the panel.
-export function taskFirstLine(task: string): string {
-	const firstLine = (task.split('\n', 1)[0] ?? '').trim()
-	if (firstLine.length <= 100) return firstLine
-	const capped = firstLine.slice(0, 100)
+// The one truncation rule both row previews share: an already-trimmed line shortened to `limit` characters at the last space past `floor` (or at `limit` when no such space exists), with a trailing ellipsis when shortened. The caller picks the line and the limits; only the cap-and-ellipsis rule lives here.
+function capLineAtWordBoundary(line: string, limit: number, floor: number): string {
+	if (line.length <= limit) return line
+	const capped = line.slice(0, limit)
 	const lastSpace = capped.lastIndexOf(' ')
-	return `${lastSpace > 60 ? capped.slice(0, lastSpace) : capped}…`
+	return `${lastSpace > floor ? capped.slice(0, lastSpace) : capped}…`
 }
 
-// The item's primary line: the task's first line, except for a settled item with a result summary (what happened) or a needs_input item (what the run asked). The merged history screen renders the returned string as a plain text span, so it is never Markdown.
+// The primary label for a queue item's task: the first line, capped at a word boundary the same way history rows cap theirs — a long first line must not stretch the panel.
+export function taskFirstLine(task: string): string {
+	return capLineAtWordBoundary((task.split('\n', 1)[0] ?? '').trim(), 100, 60)
+}
+
+// A short phrase previewing a needs_input question on its one-line row: the first non-empty line, trimmed, capped at a word boundary with a trailing ellipsis. A parked question is often multi-line, and the row ellipsizes anyway, so the first line is the meaningful preview; the modal shows the full question.
+export function questionSummary(question: string): string {
+	const firstLine = question.split('\n').map((line) => line.trim()).find((line) => line !== '') ?? ''
+	return capLineAtWordBoundary(firstLine, 72, 40)
+}
+
+// The item's primary line: the task's first line, except for a settled item with a result summary (what happened) or a needs_input item (a short preview of what the run asked — the full question opens in the modal). The merged history screen renders the returned string as a plain text span, so it is never Markdown.
 export function queueItemPrimaryText(item: QueueItemLike): string {
-	if (item.status === 'needs_input' && typeof item.question === 'string' && item.question !== '') return item.question
+	if (item.status === 'needs_input' && typeof item.question === 'string' && item.question.trim() !== '') return questionSummary(item.question)
 	if ((item.status === 'done' || item.status === 'error') && typeof item.resultSummary === 'string' && item.resultSummary !== '') return item.resultSummary
 	return item.task
 }

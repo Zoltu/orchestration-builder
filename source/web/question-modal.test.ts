@@ -106,25 +106,33 @@ describe('QuestionModal', () => {
 		expect(heading.children.join('')).toBe('Question')
 	})
 
-	test('the answer input is autofocus and the form wires the supplied submit handler', () => {
+	test('the answer textarea is multi-line and autofocus, and the form wires the supplied submit handler', () => {
 		const onSubmit = () => undefined
 		const modal: Vnode = QuestionModal(fakeH, { question, runLabel: 'run-1', renderMarkdown: fakeRenderMarkdown, onSubmit, answerPending: false })
 		const form = defined(allByTag(modal, 'form').find((f) => f.props.class === 'question-modal-form'), 'form')
 		expect(form).toBeDefined()
 		expect(form.props.onsubmit).toBe(onSubmit)
-		const input = defined(byTag(form, 'input')[0], 'input')
-		expect(input).toBeDefined()
-		expect(input.props.autofocus).toBe(true)
-		expect(input.props.disabled).toBe(false)
+		const textarea = defined(byTag(form, 'textarea')[0], 'textarea')
+		expect(textarea).toBeDefined()
+		expect(textarea.props.rows).toBe('4')
+		expect(textarea.props.autofocus).toBe(true)
+		expect(textarea.props.disabled).toBe(false)
 		expect(defined(byTag(form, 'button')[0], 'button').props.disabled).toBe(false)
 	})
 
-	test('answerPending disables the input and the submit button', () => {
+	test('answerPending disables the textarea and the submit button', () => {
 		const modal: Vnode = QuestionModal(fakeH, { question, runLabel: 'run-1', renderMarkdown: fakeRenderMarkdown, onSubmit: () => undefined, answerPending: true })
 		const form = defined(allByTag(modal, 'form').find((f) => f.props.class === 'question-modal-form'), 'form')
-		const input = byTag(form, 'input')[0]
+		const textarea = byTag(form, 'textarea')[0]
 		const button = byTag(form, 'button')[0]
-		expect(defined(input, 'input').props.disabled).toBe(true)
+		expect(defined(textarea, 'textarea').props.disabled).toBe(true)
 		expect(defined(button, 'button').props.disabled).toBe(true)
+	})
+
+	test('the fixed prop adds the viewport-covering overlay modifier', () => {
+		const fixed: Vnode = QuestionModal(fakeH, { question, runLabel: 'run-1', renderMarkdown: fakeRenderMarkdown, onSubmit: () => undefined, fixed: true })
+		expect(fixed.props.class).toBe('question-modal-overlay question-modal-overlay--fixed')
+		const scoped: Vnode = QuestionModal(fakeH, { question, runLabel: 'run-1', renderMarkdown: fakeRenderMarkdown, onSubmit: () => undefined })
+		expect(scoped.props.class).toBe('question-modal-overlay')
 	})
 })

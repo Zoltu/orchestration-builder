@@ -210,10 +210,11 @@ export interface ApplicationState {
 	queueItems: QueueItemLike[]
 	justSubmittedItemId: string | null
 	pendingAddSelectionId: string | null
-	// The queue panel's row-level view state: the waiting item being inline-edited, the row being dragged, and the item whose answer is posting.
+	// The queue panel's row-level view state: the waiting item being inline-edited, the row being dragged, and the item whose answer is posting. `openQueueQuestionId` drives the app-shell question modal a needs_input row (or the watch screen's Respond CTA) opens, so a parked run's question is answerable from the history list.
 	editingItemId: string | null
 	draggingItemId: string | null
 	queueAnswerPendingId: string | null
+	openQueueQuestionId: string | null
 	serverAvailable: boolean
 	// The ETag validators for the versioned GET endpoints, keyed by request URL. Each poll echoes the stored value as If-None-Match; a 304 leaves the already-held payload untouched. Only the run view still rides this map: the flow model and the run list are entity-diff collections versioned through their replica revisions in flowVersion and runListVersion.
 	versions: Record<string, string>
@@ -603,17 +604,26 @@ function PrimeAudioFx(): NullPayloadEffect {
 	return [runPrimeAudio, null]
 }
 
-// The favicon effect: derives the three-state favicon from the polled run list and pending questions and swaps the `<link rel="icon">` href only when the derived state's href changes, so an identical poll tick never touches the DOM.
+// The favicon effect: derives the three-state favicon from the polled run list, pending questions, and task queue, and swaps the `<link rel="icon">` href only when the derived state's href changes, so an identical poll tick never touches the DOM.
 function runUpdateFavicon(_dispatch: Dispatch, state: ApplicationState): void {
 	const link = document.querySelector('link[rel="icon"]')
 	if (link === null) return
-	const href = faviconHref(deriveFaviconState(state.summaries, state.pendingQuestions))
+	const href = faviconHref(deriveFaviconState(state.summaries, state.pendingQuestions, state.queueItems))
 	if (link.getAttribute('href') === href) return
 	link.setAttribute('href', href)
 }
 
 function UpdateFavicon(state: ApplicationState): FaviconEffect {
 	return [runUpdateFavicon, state]
+}
+
+// Appends a favicon repaint for the resulting state to an action's return, so a handler whose branches delegate to another action (SelectRun, SetScreen) still repaints the icon from the queue read it just applied.
+function withFavicon(result: ActionReturn): ActionReturn {
+	if (Array.isArray(result)) {
+		const [nextState, ...effects] = result
+		return [nextState, ...effects, UpdateFavicon(nextState)]
+	}
+	return [result, UpdateFavicon(result)]
 }
 
 // --- Actions ---------------------------------------------------------------
@@ -804,14 +814,21 @@ function FetchFailed(state: ApplicationState): ApplicationState {
 // --- Queue panel actions -----------------------------------------------------
 // The polled queue feeds the queue screen; the mutations post to the /api/queue surface (docs/queueing.md "HTTP API") and every confirm path refetches the queue, since the server's tick may already have dispatched the item the mutation touched.
 
-function GotQueue(state: ApplicationState, payload: FetchResultPayload): ApplicationState {
+function reduceQueue(state: ApplicationState, payload: FetchResultPayload): ApplicationState {
 	const ok = payload.ok
 	const body = payload.body
 	const items: QueueItemLike[] = ok && Array.isArray(body) ? body.filter(isQueueItemLike) : []
-	const nextState = { ...state, queueItems: items, serverAvailable: ok }
 	// The add's post-response guard releases once the created item shows up in the polled queue — the same release GotRunList applies to justSubmittedRunId; a response that fails or omits the item keeps the guard up.
-	if (nextState.justSubmittedItemId !== null && items.some((item) => item.id === nextState.justSubmittedItemId)) nextState.justSubmittedItemId = null
-	return nextState
+	const justSubmittedItemId = state.justSubmittedItemId !== null && items.some((item) => item.id === state.justSubmittedItemId)
+		? null
+		: state.justSubmittedItemId
+	return { ...state, queueItems: items, serverAvailable: ok, justSubmittedItemId }
+}
+
+// The queue poll's ingress: reduce the payload, then repaint the favicon, so a poll that parks an item on a question (or clears one) turns the icon yellow (or back) without waiting for the run-list poll.
+function GotQueue(state: ApplicationState, payload: FetchResultPayload): ActionReturn {
+	const nextState = reduceQueue(state, payload)
+	return [nextState, UpdateFavicon(nextState)]
 }
 
 // The queue add resolved: the created item's id is remembered so the follow-up queue read can see whether the scheduler dispatched it within the same request (the idle case) — the operator then lands on the new run's watch screen exactly as a start-now submit always has. The poll's own queue reads deliberately do not consume this selection: a task added while a run is in flight dispatches much later, and jumping then would yank the operator off whatever they are reading.
@@ -828,13 +845,14 @@ function GotQueuedTask(state: ApplicationState, payload: FetchResultPayload): Ac
 
 function GotQueueAfterAdd(state: ApplicationState, payload: FetchResultPayload): ActionReturn {
 	const addedId = state.pendingAddSelectionId
-	const queued = GotQueue(state, payload)
-	if (typeof addedId !== 'string') return queued
+	const queued = reduceQueue(state, payload)
+	if (typeof addedId !== 'string') return [queued, UpdateFavicon(queued)]
 	const cleared = { ...queued, pendingAddSelectionId: null }
 	const added = queued.queueItems.find((item) => item.id === addedId)
-	if (added !== undefined && typeof added.runId === 'string' && added.runId !== '') return SelectRun(cleared, added.runId)
+	// Repaint the favicon in every branch: the read weighs the whole queue, so another item in the same response may have become needs_input even though the just-added one did not.
+	if (added !== undefined && typeof added.runId === 'string' && added.runId !== '') return withFavicon(SelectRun(cleared, added.runId))
 	// The task is still waiting its turn (a run was in flight) — the history screen's queued rows are where the operator sees where it sits in line.
-	return SetScreen(cleared, 'history')
+	return withFavicon(SetScreen(cleared, 'history'))
 }
 
 function StartItemEdit(state: ApplicationState, itemId: unknown): ApplicationState {
@@ -886,29 +904,49 @@ function SubmitQueueAnswer(itemId: string) {
 		event.preventDefault()
 		const target = event.target
 		if (!(target instanceof HTMLFormElement)) return state
-		const input = target.querySelector('input')
-		if (!(input instanceof HTMLInputElement)) return state
-		const answer = input.value
+		const textarea = target.querySelector('textarea')
+		if (!(textarea instanceof HTMLTextAreaElement)) return state
+		const answer = textarea.value
 		if (answer === '') return state
 		return [
 			{ ...state, queueAnswerPendingId: itemId },
 			Fetch({
 				url: `api/queue/${encodeURIComponent(itemId)}/answer`,
 				init: { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ answer }) },
-				ok: QueueMutated,
+				// The answer handler is bound to this item's id at request time, so the mutation kind is fixed when the request leaves rather than inferred from shared state when the response lands (a concurrent edit or a dismissed modal must not reroute it).
+				ok: GotQueueAfterAnswer(itemId),
 				fail: QueueMutationFailed,
 			}),
 		]
 	}
 }
 
-// Every queue mutation's confirm path refetches the queue rather than patching state from the response body: the server's tick may already have dispatched (or re-ordered) the item, so the refetched list is the truth.
+// The edit/remove/reorder mutation's confirm path: the response body is the mutated item, so the client refetches the queue for the authoritative list, and that refetch's GotQueue reduces it and repaints the favicon. Answers do not route here — SubmitQueueAnswer binds its own curried handler.
 function QueueMutated(state: ApplicationState, payload: FetchResultPayload): ActionReturn {
-	if (!payload.ok) return { ...state, queueAnswerPendingId: null, serverAvailable: true }
+	if (!payload.ok) return { ...state, serverAvailable: true }
 	return [
-		{ ...state, queueAnswerPendingId: null, serverAvailable: true },
+		{ ...state, serverAvailable: true },
 		Fetch({ url: 'api/queue', ok: GotQueue, fail: FetchFailed }),
 	]
+}
+
+// The answer POST's response handler, curried with the answered item's id at request time: a refused answer still ends the in-flight window, and an accepted one clears the app-shell question modal's id and refetches the queue so ApplyAnsweredQueue can select the run the answer dispatched.
+function GotQueueAfterAnswer(answeredItemId: string) {
+	return function GotQueueAfterAnswerForItem(state: ApplicationState, payload: FetchResultPayload): ActionReturn {
+		if (!payload.ok) return { ...state, queueAnswerPendingId: null, serverAvailable: true }
+		const nextState = { ...state, queueAnswerPendingId: null, openQueueQuestionId: null, serverAvailable: true }
+		return [nextState, Fetch({ url: 'api/queue', ok: ApplyAnsweredQueue(answeredItemId), fail: FetchFailed })]
+	}
+}
+
+// The answer's follow-up queue read, curried with the answered item's id: answering a parked item drops its old runId and fronts it for re-dispatch (recordAnswer), and the scheduler's tick then submits a NEW continuation run with a fresh runId. Once the refetched item carries that id the client selects it, so the watch screen leaves the old terminal needs_clarification run instead of showing a stale "Respond" CTA. When the slot was busy the item is still waiting with no runId, so the client stays put; the periodic queue poll then dispatches it in the background.
+function ApplyAnsweredQueue(answeredItemId: string) {
+	return function ApplyAnsweredQueueForItem(state: ApplicationState, payload: FetchResultPayload): ActionReturn {
+		const queued = reduceQueue(state, payload)
+		const item = queued.queueItems.find((entry) => entry.id === answeredItemId)
+		if (item !== undefined && typeof item.runId === 'string' && item.runId !== '') return SelectRun(queued, item.runId)
+		return [queued, UpdateFavicon(queued)]
+	}
 }
 
 // A refused or failed mutation refetches too, so an optimistic update (a drag) reconciles with the server's order.
@@ -1343,9 +1381,9 @@ function SubmitAnswer(questionId: string) {
 		event.preventDefault()
 		const target = event.target
 		if (!(target instanceof HTMLFormElement)) return state
-		const input = target.querySelector('input')
-		if (!(input instanceof HTMLInputElement)) return state
-		const answer = input.value
+		const textarea = target.querySelector('textarea')
+		if (!(textarea instanceof HTMLTextAreaElement)) return state
+		const answer = textarea.value
 		if (answer === '') return state
 		return [
 			{ ...state, pendingAnswerId: questionId },
@@ -1489,6 +1527,26 @@ function OpenQuestionModal(state: ApplicationState): ActionReturn {
 
 function CloseQuestionModal(state: ApplicationState): ApplicationState {
 	return { ...state, questionModalOpen: false }
+}
+
+// Opens the app-shell question modal for a parked queue item. The id is stored unvalidated; the render finds the item and gates on its needs_input status, so a stale id renders nothing rather than a modal for a settled item.
+function OpenQueueQuestion(state: ApplicationState, itemId: unknown): ApplicationState {
+	if (typeof itemId !== 'string' || itemId === '') return state
+	return { ...state, openQueueQuestionId: itemId }
+}
+
+function CloseQueueQuestion(state: ApplicationState): ApplicationState {
+	return { ...state, openQueueQuestionId: null }
+}
+
+// The watch screen's terminal CTA for a parked run: a needs_clarification run's question is its result summary and lives on the queue item, so the Respond button opens that item's answer modal when one matches the selected run. A run with no matching queue item (or a different terminal status) falls back to the result modal, which is where the CTA historically led.
+function OpenParkedQuestion(state: ApplicationState): ActionReturn {
+	const runId = state.selectedRunId
+	if (typeof runId === 'string' && runId !== '') {
+		const parked = state.queueItems.find((item) => item.status === 'needs_input' && item.runId === runId)
+		if (parked !== undefined) return [{ ...state, openQueueQuestionId: parked.id, tooltip: null }, CancelTooltipDismiss()]
+	}
+	return OpenResultModal(state)
 }
 
 // --- Run-view inspector (hover) --------------------------------------------
@@ -2064,16 +2122,7 @@ function QueueItemEditForm(_state: ApplicationState, item: QueueItemLike): Vnode
 	])
 }
 
-// The needs_input row's inline answer box: one input, one submit — the queue-native resume of the parked run.
-function QueueItemAnswerForm(state: ApplicationState, item: QueueItemLike): Vnode {
-	const pending = state.queueAnswerPendingId === item.id
-	return h('form', { class: 'queue-answer-form', onsubmit: SubmitQueueAnswer(item.id) }, [
-		h('input', { type: 'text', placeholder: 'type your answer', autocomplete: 'off', disabled: pending }),
-		h('button', { type: 'submit', disabled: pending }, pending ? 'Sending…' : 'Answer'),
-	])
-}
-
-// The expanded details of a queued row: the queue meta, the full task (or the inline edit form while editing), the operator's earlier answer on a re-dispatched waiting item, and the run's error when the item failed. The task and error render through the sanitized Markdown pipeline. The needs_input answer box is not here — it renders inline on the row so answering a blocking run needs no expansion.
+// The expanded details of a queued row: the queue meta, the full task (or the inline edit form while editing), the operator's earlier answer on a re-dispatched waiting item, and the run's error when the item failed. The task and error render through the sanitized Markdown pipeline. The needs_input answer box is not here — clicking the row's main area opens the question modal, so answering a blocking run needs no expansion.
 function QueueItemRowDetails(state: ApplicationState, item: QueueItemLike): Vnode {
 	const meta = QueueItemMeta(item)
 	const children: Vnode[] = meta === null ? [] : [meta]
@@ -2094,9 +2143,10 @@ function QueueItemRowDetails(state: ApplicationState, item: QueueItemLike): Vnod
 	return h('div', { class: 'history-details' }, children)
 }
 
-// A queued row in the merged list: history-style markup with the queue status tone in place of the run status. The main area is not a run selector — the details expander is the only toggle — so the Edit and Remove buttons carry no click-bubbling hazard.
+// A queued row in the merged list: history-style markup with the queue status tone in place of the run status. The main area is not a run selector — the details expander is the only toggle — so the Edit and Remove buttons carry no click-bubbling hazard. A needs_input row's main area opens the question modal instead: its question is the parked run's, and the modal is the only place to answer it.
 function QueueItemRow(state: ApplicationState, item: QueueItemLike): Vnode {
 	const waiting = item.status === 'waiting'
+	const needsInput = item.status === 'needs_input'
 	const editing = waiting && state.editingItemId === item.id
 	const expanded = state.expandedRowIds[item.id] === true
 	const mainChildren: Vnode[] = [
@@ -2109,15 +2159,13 @@ function QueueItemRow(state: ApplicationState, item: QueueItemLike): Vnode {
 		mainChildren.push(h('button', { type: 'button', class: 'rerun-button', title: 'Remove the task from the queue', onclick: [RemoveQueueItem, item.id] }, 'Remove'))
 	}
 	const children: Vnode[] = [
-		h('div', { class: 'history-row-main' }, mainChildren),
+		h('div', { class: 'history-row-main', onclick: needsInput ? [OpenQueueQuestion, item.id] : undefined }, mainChildren),
 		h('button', { type: 'button', class: 'history-expand', 'aria-expanded': expanded, title: expanded ? 'Hide details' : 'Show the full task and details', onclick: [ToggleRowExpanded, item.id] }, expanded ? 'less ▴' : 'details ▾'),
 	]
-	// The answer box stays visible without expanding: a needs_input run is blocked until the operator answers, so the form must not hide behind a disclosure.
-	if (item.status === 'needs_input') children.push(QueueItemAnswerForm(state, item))
 	if (expanded) children.push(QueueItemRowDetails(state, item))
 	return h('li', {
 		key: item.id,
-		class: { 'history-row': true, 'queue-row': true, 'is-waiting': waiting, 'is-dragging': state.draggingItemId === item.id },
+		class: { 'history-row': true, 'queue-row': true, 'is-waiting': waiting, 'is-needs-input': needsInput, 'is-dragging': state.draggingItemId === item.id },
 		// Only waiting rows drag: a drag is a reorder, and the reorder endpoint takes waiting items only.
 		draggable: waiting && !editing,
 		'data-item-id': item.id,
@@ -2442,7 +2490,8 @@ function SyncInspectorFollower(): NullPayloadEffect {
 function buildStageContent(inputs: StageMemoInputs): Vnode {
 	const model = withLiveElapsed(inputs.serverModel, Date.now())
 	const lifecycle = inputs.previousModel !== null ? deriveLifecycle(inputs.previousModel, model) : undefined
-	const cta = { onclick: OpenResultModal }
+	// A needs_clarification run's question lives on its parked queue item, so its Respond CTA opens that item's answer modal; every other terminal status keeps the result modal. The status rides the memo's serverModel input, so a status change already rebuilds the stage — no new memo input is needed.
+	const cta = { onclick: model.status === 'needs_clarification' ? OpenParkedQuestion : OpenResultModal }
 	const question = { onclick: OpenQuestionModal }
 	// The roles-only toggle filters the sequence render only (model and static guild set alike, so the tools column collapses with the tool rows); the flow view keeps reading the full model — the filter is a lens on this one surface, not a change to the run.
 	const sequenceModel = inputs.rolesOnly === true ? rolesOnlyModel(model) : model
@@ -2557,6 +2606,23 @@ function QuestionModalForRun(state: ApplicationState): Vnode | null {
 	})
 }
 
+// The app-shell question modal for a parked queue item, driven by `openQueueQuestionId`. It renders nothing unless the id resolves to a current needs_input item, so an answered (or removed) item closes the modal the moment the queue poll updates. It is the `fixed` overlay variant because the history screen has no run-view container to scope it to. The item's own status gates it, so no explicit close is needed on answer success beyond the id clear in GotQueueAfterAnswer.
+function QueueQuestionModalForApp(state: ApplicationState): Vnode | null {
+	const itemId = state.openQueueQuestionId
+	if (itemId === null) return null
+	const item = state.queueItems.find((entry) => entry.id === itemId)
+	if (item === undefined || item.status !== 'needs_input') return null
+	return QuestionModal(h, {
+		question: { question: typeof item.question === 'string' ? item.question : '' },
+		runLabel: item.runId ?? null,
+		renderMarkdown,
+		onSubmit: SubmitQueueAnswer(item.id),
+		onClose: CloseQueueQuestion,
+		answerPending: state.queueAnswerPendingId === item.id,
+		fixed: true,
+	})
+}
+
 // The technical meta line the result modal carries for advanced users: run id, effort, duration, tool-call count, and the token bill with its input/output split in the text, with the exact start/end timestamps on the hover title. Derived from the run view the per-run poll already fetches, so the modal re-opens with no extra request.
 function resultMetaLine(view: RunView, nowMs: number): { text: string; title: string } | null {
 	if (typeof view.runId !== 'string') return null
@@ -2617,7 +2683,7 @@ function Main(state: ApplicationState): Vnode {
 }
 
 function view(state: ApplicationState): Vnode {
-	return h('div', { class: 'app-shell' }, [TopBar(state), Main(state)])
+	return h('div', { class: 'app-shell' }, [TopBar(state), Main(state), QueueQuestionModalForApp(state)])
 }
 
 // --- App -------------------------------------------------------------------
@@ -2628,7 +2694,7 @@ function isApplicationState(value: unknown): value is ApplicationState {
 	if (!isObject(value)) return false
 	const stateKeys: (keyof ApplicationState)[] = [
 		'summaries', 'selectedRunId', 'selectedRunView', 'selectedRunStatus', 'pendingQuestions',
-		'queueItems', 'justSubmittedItemId', 'pendingAddSelectionId', 'editingItemId', 'draggingItemId', 'queueAnswerPendingId',
+		'queueItems', 'justSubmittedItemId', 'pendingAddSelectionId', 'editingItemId', 'draggingItemId', 'queueAnswerPendingId', 'openQueueQuestionId',
 		'serverAvailable', 'versions', 'justSubmittedRunId', 'createSending', 'muted', 'shownQuestionIds', 'firstQuestionsPoll', 'pendingAnswerId',
 		'runEffort', 'savingEffort', 'runLogLevel', 'savingLogLevel',
 		'flowModel', 'previousFlowModel', 'flowCollections', 'flowVersion', 'runListCollections', 'runListVersion', 'labelResolver', 'guildParticipants', 'roleAccents', 'build',
@@ -2662,6 +2728,7 @@ app({
 			editingItemId: null,
 			draggingItemId: null,
 			queueAnswerPendingId: null,
+			openQueueQuestionId: null,
 			serverAvailable: true,
 			versions: {},
 			justSubmittedRunId: null,

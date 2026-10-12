@@ -4,6 +4,11 @@ import { deriveFaviconState, faviconHref } from './static/ts/favicon.js'
 // Pull the favicon types off helper signatures so the fixtures are contextually checked against the JSDoc shape without a cast, mirroring the sibling labels.test.ts convention.
 type FaviconState = Parameters<typeof faviconHref>[0]
 
+// A realistic queue-item fixture. The favicon's own admitsStatus guard only requires an object with a status field, so the extra fields are present for realism rather than necessity.
+function queueItem(overrides: { id?: string; task?: string; status?: string; queuedAt?: string } = {}): Record<string, string> {
+	return { id: 'item-1', task: 'fix the parser bug', status: 'waiting', queuedAt: '2026-01-01T00:00:00.000Z', ...overrides }
+}
+
 describe('deriveFaviconState', () => {
 	test('reads complete with no runs and no questions — the initial idle and no-runs-yet state', () => {
 		expect(deriveFaviconState([], [])).toBe('complete')
@@ -21,6 +26,31 @@ describe('deriveFaviconState', () => {
 	test('reads pending-input when a question is pending, even while a run is in progress', () => {
 		expect(deriveFaviconState([], [{ id: 'q1' }])).toBe('pending-input')
 		expect(deriveFaviconState([{ status: 'running' }], [{ id: 'q1' }])).toBe('pending-input')
+	})
+
+	test('reads pending-input for a parked needs_input queue item even while a run is in progress and no question is pending', () => {
+		expect(deriveFaviconState([{ status: 'running' }], [], [queueItem({ status: 'needs_input' })])).toBe('pending-input')
+		expect(deriveFaviconState([], [], [queueItem({ status: 'needs_input' })])).toBe('pending-input')
+	})
+
+	test('a queue item that is not needs_input does not force pending-input', () => {
+		expect(deriveFaviconState([{ status: 'success' }], [], [queueItem({ status: 'waiting' })])).toBe('complete')
+		expect(deriveFaviconState([{ status: 'success' }], [], [queueItem({ status: 'done' })])).toBe('complete')
+		expect(deriveFaviconState([{ status: 'running' }], [], [queueItem({ status: 'waiting' })])).toBe('working')
+	})
+
+	test('reads pending-input from any queue entry that admits a needs_input status', () => {
+		expect(deriveFaviconState([], [], [{ status: 'needs_input' }])).toBe('pending-input')
+	})
+
+	test('ignores queue entries that cannot admit a needs_input status', () => {
+		expect(deriveFaviconState([], [], [null, 'garbage', 42, { status: 'waiting' }])).toBe('complete')
+	})
+
+	test('omitting the queue argument leaves the two-argument behavior unchanged', () => {
+		expect(deriveFaviconState([{ status: 'running' }], [])).toBe('working')
+		expect(deriveFaviconState([], [{ id: 'q1' }])).toBe('pending-input')
+		expect(deriveFaviconState([], [])).toBe('complete')
 	})
 
 	test('counts a summary entry that cannot be proven terminal as in progress', () => {

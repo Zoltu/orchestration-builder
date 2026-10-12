@@ -22,9 +22,11 @@ export interface QuestionModalProps {
 	onSubmit: unknown
 	onClose?: unknown
 	answerPending?: boolean
+	// When true the overlay covers the whole viewport (`position: fixed`) instead of being scoped to the run view's `.pb-flow` containing block. The queue-driven instance opens from the history screen, which has no run-view container to cover, so it needs the viewport-wide variant.
+	fixed?: boolean
 }
 
-// The modal overlay: a backdrop over the run view plus a centered card carrying the question, its context, and the answer form. The card names which run is asking (`runLabel`). The answer input carries `autofocus` so the operator can type immediately without hunting for focus; `answerPending` disables the form while a submit is in flight (the product client's POST path; the harness answers instantly). `onClose` is wired to the backdrop click so the operator can dismiss a pending question without answering it — the Question affordance stays on the answerer node so the modal is re-openable, mirroring the result modal's dismiss path.
+// The modal overlay: a backdrop over the run view plus a centered card carrying the question, its context, and the answer form. The card names which run is asking (`runLabel`). The answer textarea carries `autofocus` so the operator can type immediately without hunting for focus; `answerPending` disables the form while a submit is in flight (the product client's POST path; the harness answers instantly). `onClose` is wired to the backdrop click so the operator can dismiss a pending question without answering it — the Question affordance stays on the answerer node so the modal is re-openable, mirroring the result modal's dismiss path.
 export function QuestionModal(h: LooseH, props: QuestionModalProps): Vnode {
 	const question = props.question
 	const runLabel = props.runLabel
@@ -32,12 +34,13 @@ export function QuestionModal(h: LooseH, props: QuestionModalProps): Vnode {
 	const onSubmit = props.onSubmit
 	const onClose = props.onClose
 	const answerPending = props.answerPending === true
+	const overlayClass = props.fixed === true ? 'question-modal-overlay question-modal-overlay--fixed' : 'question-modal-overlay'
 
 	const context = question.context !== undefined && typeof question.context === 'string' && question.context !== ''
 		? question.context
 		: null
 
-	return h('div', { class: 'question-modal-overlay' }, [
+	return h('div', { class: overlayClass }, [
 		h('div', { class: 'question-modal-backdrop', onclick: onClose }),
 		h('div', { class: 'question-modal-card', id: 'question-modal-card' }, [
 			h('p', { class: 'question-modal-heading' }, runLabel !== null && runLabel !== undefined && runLabel !== ''
@@ -48,7 +51,7 @@ export function QuestionModal(h: LooseH, props: QuestionModalProps): Vnode {
 				? h('div', { class: 'question-modal-context question-context markdown' }, renderMarkdown(context))
 				: null,
 			h('form', { class: 'question-modal-form', onsubmit: onSubmit }, [
-				h('input', { type: 'text', placeholder: 'your answer', autofocus: true, disabled: answerPending }),
+				h('textarea', { rows: '4', placeholder: 'your answer', autofocus: true, disabled: answerPending }),
 				h('button', { type: 'submit', disabled: answerPending }, 'Answer'),
 			]),
 		]),
