@@ -31,7 +31,7 @@ The executor provides the stage. The Guild is the script. The Foundry is the pla
 ## Data flow: a single run
 
 1. The user mounts a project at `/workspace` and submits a task through the web UI (or HTTP API).
-2. The executor loads the Guild and starts the entry role with the task.
+2. The executor loads the Guild and starts the entry role with the task; when the entry role declares `projectDocs`, their contents are injected into its initial user message as untrusted project reference material (see [`docs/security.md`](security.md) "Attack surface").
 3. The active role calls tools. Tool results are appended to the role's conversation. If the role calls `agent`, a child role runs to completion and returns a result card. If the role calls `ask_human`, the question surfaces in the web UI and the run pauses for an answer.
 4. The run ends when the entry role calls `finish` or a hard safety budget is exhausted.
 5. The executor writes `meta.json` and `log.jsonl` under `<workspace>/.orchestration/runs/<run_id>/`. The workspace itself holds the final filesystem state — the executor modified it in place.
@@ -67,6 +67,7 @@ workspace/                          # the user's project (mounted at /workspace)
 │           ├── state.json          # checkpoint for restart resumption (deleted on completion)
 │           ├── summary.txt         # LLM-generated one-line run summary (UI label; best-effort)
 │           ├── plan.md             # the run's plan document (write_plan/read_plan)
+│           ├── style-guide.md      # the run's style guide document (write_style_guide/read_style_guide)
 │           └── roles/              # finished child snapshots, one <roleId>.json each, written at role finish (makes continue_agent survive a restart)
 ├── (project files)
 guild/                              # bundled into the image at /app/guild/

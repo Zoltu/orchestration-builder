@@ -221,6 +221,8 @@ Native tools are implemented in the executor and operate against the mounted wor
 - `write_file` — write or overwrite a file
 - `read_plan` — read a run's plan document, capped with a truncation flag (the current run by default, or another run by `runId`)
 - `write_plan` — replace the current run's plan document in full (the location is fixed per run; no path parameter)
+- `read_style_guide` — read a run's style guide document, capped with a truncation flag and total character count (the current run by default, or another run by `runId`); a run that has not written one returns an `unavailable` result
+- `write_style_guide` — replace the current run's style guide document in full (the location is fixed per run; no path parameter)
 - `list_directory` — list directory entries
 - `repo_map` — symbol-level map of the workspace's TypeScript/JavaScript sources: one line per top-level declaration, grouped by file (tests, declaration files, vendored code, hidden directories, and build output excluded)
 - `run_shell` — run a shell command (via `sh -c`, with the workspace as the working directory)
@@ -294,6 +296,8 @@ Role fields:
 - `label` (object, optional): tiered display name (`{ detailed, friendly, whimsical }`) the web client renders.
 - `description` (object, optional): tiered one-line description of the role.
 - `workingLabel` (object, optional): tiered text for the "now" caption when this role is the destination of a settled call (its working phase). A `{participant}` placeholder interpolates to the role's own label at the chosen tier — e.g. `"{participant} is planning the approach"` → "Planner is planning the approach". See [`docs/visualization.md`](visualization.md) "Labels".
+
+The seed Guild's style workflow uses these fields together. Its `style_guide_author` role is read-only with respect to project files — it writes only the run style guide — and merges the task's style rules, the repository's style documents, `.editorconfig`, linter and formatter configuration, and the guild style standard — in that precedence, falling back to the repository's applied style when those are silent — into one run style guide, written with `write_style_guide`. The `coder`, the `style_reviewer`, and the author itself read that guide with `read_style_guide`, and the orchestrator delegates to the author after planning and before the first `coder` delegation whenever a style review will run. The orchestrator additionally declares `projectDocs: ["AGENTS.md", "README.md"]`, injecting the repository's top-level documentation as the untrusted project-context block described above.
 
 ### `tools`
 
@@ -575,14 +579,15 @@ Run bookkeeping lives alongside the project under `.orchestration/runs/`:
 │   ├── state.json     # checkpoint: the runnable role stack, written atomically at every safe point; the executor deletes it at terminal except error (kept for explicit resume)
 │   ├── log.jsonl      # one JSON object per line: effort_set, run_resumed, llm calls, tool calls, errors (payload detail per the run's logging level)
 │   ├── summary.txt    # LLM-generated one-line run summary (UI label; best-effort)
-│   └── plan.md        # the run's plan document (write_plan/read_plan)
+│   ├── plan.md        # the run's plan document (write_plan/read_plan)
+│   └── style-guide.md # the run's style guide document (write_style_guide/read_style_guide)
 ├── settings.json      # project-wide settings (the default effort and logging level)
 └── queue.json         # the durable task queue: every queued task, its status, and its outcome (see docs/queueing.md)
 ```
 
 The workspace itself holds the final filesystem state (mutated in place). `log.jsonl` is append-only — the executor logs every role start/finish, the parent→child agent-call edges, every LLM turn (its new messages as a delta against the role's previous turn — see "Log events", received response, finish reason, per-call usage), and every tool call/result (raw arguments and the full un-truncated result) so a reviewer can reconstruct exactly what happened from the log alone. `state.json` is the run's resumable state (see "Run persistence and resumption"): present only while a run is live, rewritten at every safe point and on every `role_finished`, and validated on startup before any of it is trusted.
 
-The file tools (`read_file`, `write_file`, `list_directory`, `glob_files`, `search_text`, `repo_map`) refuse the top-level `.orchestration` directory with a `permission_denied` error — it is the executor's bookkeeping, not project content, so a role reading or writing there is always a mistake. The bookkeeping a role legitimately needs is mediated by the dedicated tools instead: `read_plan`/`write_plan` for the run's plan and `read_run_log`/`search_run_log` for the event log.
+The file tools (`read_file`, `write_file`, `list_directory`, `glob_files`, `search_text`, `repo_map`) refuse the top-level `.orchestration` directory with a `permission_denied` error — it is the executor's bookkeeping, not project content, so a role reading or writing there is always a mistake. The bookkeeping a role legitimately needs is mediated by the dedicated tools instead: `read_plan`/`write_plan` for the run's plan, `read_style_guide`/`write_style_guide` for the run style guide, and `read_run_log`/`search_run_log` for the event log.
 
 ## Effort channel
 
