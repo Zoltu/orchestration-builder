@@ -10,6 +10,7 @@ import type { InterruptQueue } from './interrupts.js'
 import type { LlmCaller } from './llm.js'
 import type { LoadedGuild } from './loader.js'
 import type { AppendLog, DeleteCheckpoint, RunDirectory, WriteCheckpoint, WriteMeta } from './persistence.js'
+import type { ReadProjectDoc } from './project-docs.js'
 import { resumeRoleStack } from './resume.js'
 import { createRoleRegistry } from './role-registry.js'
 import type { RoleSnapshotStore } from './role-snapshot.js'
@@ -33,6 +34,8 @@ export interface ExecutorDependencies {
 	publishDelta: (delta: RoleDelta) => void
 	// The per-run store of finished child conversations, so a parent can continue a finished child as a new seeded instance.
 	roleSnapshots: RoleSnapshotStore
+	// The leaf that reads a role's declared projectDocs from the workspace (project-docs.ts), closed over the workspace root by the service. Rides into EngineDependencies so buildInitialHistory can inject the entry role's project-context block at run start.
+	readProjectDoc: ReadProjectDoc
 }
 
 function buildEngineDependencies(deps: ExecutorDependencies, runId: string, startTime: string, registryCounter: number, learnedContextCeiling: number | undefined, writeCapableStarted: boolean | undefined, continuesFrom: string | undefined, queueTracked: boolean | undefined): EngineDependencies {
@@ -50,6 +53,7 @@ function buildEngineDependencies(deps: ExecutorDependencies, runId: string, star
 		contextPressureTracker,
 		publishDelta: deps.publishDelta,
 		roleSnapshots: deps.roleSnapshots,
+		readProjectDoc: deps.readProjectDoc,
 		parkTracker,
 		// The run's lineage rides the recorder so checkpoints written after a resume keep stamping continuesFrom onto the entry frame — the live context does not carry it on the resume path. The logging level needs no such stamp: the entry context carries it and the recorder serializes from there.
 		checkpointRecorder: createCheckpointRecorder({ writeCheckpoint: deps.writeCheckpoint, runId, startTime, roleRegistry, contextPressureTracker, parkTracker, continuesFrom }),

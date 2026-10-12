@@ -205,6 +205,7 @@ function makeDeps(llm: FakeLlm, humanBackend: HumanBackend): { deps: EngineDepen
 		parkTracker,
 		publishDelta: () => undefined,
 		roleSnapshots: createFakeRoleSnapshotStore(),
+		readProjectDoc: () => ({ kind: 'unavailable', reason: 'not used in these tests' }),
 	}
 	return { deps, events }
 }

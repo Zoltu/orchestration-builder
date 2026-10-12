@@ -270,6 +270,7 @@ function makeDeps(llm: LlmCaller): { deps: EngineDependencies; events: LogEvent[
 		parkTracker,
 		publishDelta: noOpPublishDelta,
 		roleSnapshots,
+		readProjectDoc: () => ({ kind: 'unavailable', reason: 'not used in these tests' }),
 	}
 	return { deps, events, checkpoints: sink.checkpoints, parkTracker, roleSnapshots }
 }

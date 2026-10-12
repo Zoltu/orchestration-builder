@@ -26,6 +26,9 @@ export type { LlmCaller, LlmCallResult, LlmCallerDependencies, LlmFetch, LlmRequ
 export { createGuildLoader } from './loader.js'
 export type { LoadGuild, LoadedGuild, LoadedGuildFiles } from './loader.js'
 
+export { createReadProjectDoc } from './project-docs.js'
+export type { ReadProjectDoc, ReadProjectDocResult } from './project-docs.js'
+
 export { createModelInfoProbe, MODEL_PROBE_TIMEOUT_MS } from './model-probe.js'
 export type { ModelProbeResult } from './model-probe.js'
 

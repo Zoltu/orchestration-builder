@@ -5,6 +5,7 @@ import type { InterruptQueue } from './interrupts.js'
 import type { LoadedGuild } from './loader.js'
 import type { LlmCaller } from './llm.js'
 import type { AppendLog } from './persistence.js'
+import type { ReadProjectDoc } from './project-docs.js'
 import type { RunParkTracker } from './park-state.js'
 import type { RecentToolCall } from './role-inspection.js'
 import type { RoleRegistry } from './role-registry.js'
@@ -72,6 +73,8 @@ export interface EngineDependencies {
 	publishDelta: (delta: RoleDelta) => void
 	// The per-run store of finished child conversations, so a parent can continue a finished child as a new seeded instance across a restart (the live registry does not survive one).
 	roleSnapshots: RoleSnapshotStore
+	// The leaf that reads a role's declared projectDocs from the workspace at run start (project-docs.ts); buildInitialHistory injects the bounded block into the entry role's depth-0 initial user message, so it is read once and rides the checkpoint thereafter.
+	readProjectDoc: ReadProjectDoc
 }
 
 // The turn a resumed role was suspended in: the full tool-call list, the index of the child-spawning call it was waiting on, and a resolver for the child card. The resolver either returns the checkpoint's recorded card or re-enters the child frame's own resume — invoked from inside the parent's suspended turn so parents register root-first exactly as in live execution.

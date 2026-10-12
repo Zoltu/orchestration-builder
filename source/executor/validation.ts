@@ -267,7 +267,7 @@ function validateLoggingConfig(value: unknown, path: string): asserts value is L
 	if (value.level !== undefined && !isLogLevel(value.level)) throw new ValidationError(`${path}.level`, 'expected "full" or "standard"')
 }
 
-const roleKeys: readonly string[] = ['systemPrompt', 'tools', 'label', 'description', 'workingLabel', 'styleGuide']
+const roleKeys: readonly string[] = ['systemPrompt', 'tools', 'label', 'description', 'workingLabel', 'styleGuide', 'projectDocs']
 
 function validateRoleDefinition(value: unknown, path: string): asserts value is RoleDefinition {
 	if (!isObject(value)) throw new ValidationError(path, 'expected an object')
@@ -275,6 +275,9 @@ function validateRoleDefinition(value: unknown, path: string): asserts value is 
 	ensure(isString, value.systemPrompt, `${path}.systemPrompt`, 'expected a string')
 	if (value.styleGuide !== undefined && (typeof value.styleGuide !== 'string' || value.styleGuide === '')) {
 		throw new ValidationError(`${path}.styleGuide`, 'expected a non-empty string or undefined')
+	}
+	if (!isOptionalNonEmptyStringArray(value.projectDocs)) {
+		throw new ValidationError(`${path}.projectDocs`, 'expected a non-empty array of non-empty strings or undefined')
 	}
 	ensure(isStringArray, value.tools, `${path}.tools`, 'expected an array of strings')
 	if (value.label !== undefined && !isHumanFacingText(value.label)) {

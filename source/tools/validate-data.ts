@@ -213,6 +213,21 @@ function checkGuild(loaded: LoadedGuildFiles): void {
 			check(orchestrator.tools.includes(tool), `guild: orchestrator must hold "${tool}"`)
 		}
 	}
+	// The entry role's projectDocs are injected as untrusted project context at run start; the pin keeps the declaring role, the exact paths and order, and their presence at the workspace root from drifting silently (mirroring the styleGuide pins). The raw array is compared, not a set, so a duplicate or reordered entry fails.
+	const projectDocsRoles = new Set(['orchestrator'])
+	const expectedProjectDocs = ['AGENTS.md', 'README.md']
+	for (const [name, role] of Object.entries(config.roles)) {
+		if (projectDocsRoles.has(name)) {
+			const declared = role.projectDocs
+			const exact = declared !== undefined && declared.length === expectedProjectDocs.length && declared.every((entry, index) => entry === expectedProjectDocs[index])
+			check(exact, `guild: role "${name}" projectDocs must be exactly ${JSON.stringify(expectedProjectDocs)} in order (got ${JSON.stringify(declared ?? null)})`)
+			for (const docPath of declared ?? []) {
+				check(fs.existsSync(path.join(repoRoot, docPath)), `guild: role "${name}" projectDocs entry "${docPath}" not found at the repository root`)
+			}
+		} else {
+			check(role.projectDocs === undefined, `guild: role "${name}" must not declare projectDocs (only ${[...projectDocsRoles].join(', ')} do)`)
+		}
+	}
 	const orchestratorPrompt = (loaded.prompts['orchestrator'] ?? '').toLowerCase()
 	check(orchestratorPrompt.includes('clarifying'), 'guild: orchestrator prompt lacks clarifying-question guidance')
 	check(orchestratorPrompt.includes('ask_human'), 'guild: orchestrator prompt does not mention ask_human')

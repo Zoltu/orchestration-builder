@@ -278,7 +278,7 @@ export async function runRole(deps: EngineDependencies, context: EngineContext, 
 	if (isWriteCapableRole(roleDefinition.tools)) deps.parkTracker.writeCapableStarted = true
 
 	const roleState: RoleState = resumed?.roleState ?? {
-		history: seeded !== undefined ? seeded.history : buildInitialHistory(systemPrompt, context),
+		history: seeded !== undefined ? seeded.history : buildInitialHistory(systemPrompt, context, deps),
 		lastPromptTokens: 0,
 		recentCompactionPromptTokens: [],
 		recentToolCalls: [],

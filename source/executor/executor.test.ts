@@ -160,6 +160,7 @@ function makeDeps(llm: FakeLlm, persistence: FakePersistenceFns, loadedGuild: Lo
 		interruptQueue: createInterruptQueue(),
 		publishDelta: () => undefined,
 		roleSnapshots: createFakeRoleSnapshotStore(),
+		readProjectDoc: () => ({ kind: 'unavailable', reason: 'not used in these tests' }),
 	}
 }
 

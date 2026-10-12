@@ -89,6 +89,8 @@ export interface RoleDefinition {
 	tools: string[]
 	// Optional path, relative to the guild directory, of a style-standard file whose content the loader appends to this role's system prompt at load time (see docs/reference.md "Guild format").
 	styleGuide?: string
+	// Optional workspace-relative file paths whose contents are injected into this role's initial user message at depth 0 as untrusted project context (see docs/reference.md "Guild format" and project-docs.ts). A missing or unreadable file is skipped with a notice rather than failing the run.
+	projectDocs?: string[]
 	label?: HumanFacingText
 	description?: HumanFacingText
 	workingLabel?: HumanFacingText

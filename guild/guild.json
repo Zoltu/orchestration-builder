@@ -5,6 +5,7 @@
 		"orchestrator": {
 			"systemPrompt": "prompts/orchestrator.md",
 			"tools": ["agent", "continue_agent", "ask_human", "finish"],
+			"projectDocs": ["AGENTS.md", "README.md"],
 			"label": {
 				"detailed": ["Orchestrator"],
 				"friendly": ["Orchestrator"],
