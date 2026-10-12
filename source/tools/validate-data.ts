@@ -213,7 +213,7 @@ function checkGuild(loaded: LoadedGuildFiles): void {
 			check(orchestrator.tools.includes(tool), `guild: orchestrator must hold "${tool}"`)
 		}
 	}
-	// The entry role's projectDocs are injected as untrusted project context at run start; the pin keeps the declaring role, the exact paths and order, and their presence at the workspace root from drifting silently (mirroring the styleGuide pins). The raw array is compared, not a set, so a duplicate or reordered entry fails.
+	// The entry role's projectDocs name workspace-relative files injected as untrusted project context at run start; the pin keeps the declaring role and the exact paths and order from drifting silently (mirroring the styleGuide pins). The paths resolve against the run's workspace, not this repository, so their presence is not checked here. The raw array is compared, not a set, so a duplicate or reordered entry fails.
 	const projectDocsRoles = new Set(['orchestrator'])
 	const expectedProjectDocs = ['AGENTS.md', 'README.md']
 	for (const [name, role] of Object.entries(config.roles)) {
@@ -221,9 +221,6 @@ function checkGuild(loaded: LoadedGuildFiles): void {
 			const declared = role.projectDocs
 			const exact = declared !== undefined && declared.length === expectedProjectDocs.length && declared.every((entry, index) => entry === expectedProjectDocs[index])
 			check(exact, `guild: role "${name}" projectDocs must be exactly ${JSON.stringify(expectedProjectDocs)} in order (got ${JSON.stringify(declared ?? null)})`)
-			for (const docPath of declared ?? []) {
-				check(fs.existsSync(path.join(repoRoot, docPath)), `guild: role "${name}" projectDocs entry "${docPath}" not found at the repository root`)
-			}
 		} else {
 			check(role.projectDocs === undefined, `guild: role "${name}" must not declare projectDocs (only ${[...projectDocsRoles].join(', ')} do)`)
 		}
