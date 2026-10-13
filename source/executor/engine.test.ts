@@ -14,6 +14,7 @@ import type { AppendLog } from './persistence.ts'
 import { createRoleRegistry } from './role-registry.ts'
 import { isRunCheckpoint, type RunCheckpoint } from './checkpoint.ts'
 import { createFakeCheckpointRecorder, createFakeRoleSnapshotStore, recordingHumanBackend, stubHumanBackend, withTool, defined } from './test-fixtures.ts'
+import { createRunBaseTracker } from './base-state.ts'
 import { createRunParkTracker, type RunParkTracker } from './park-state.ts'
 import type { RoleSnapshotStore } from './role-snapshot.ts'
 import type { RoleDelta } from './stream-channel.ts'
@@ -256,8 +257,9 @@ function makeDeps(llm: LlmCaller): { deps: EngineDependencies; events: LogEvent[
 	const roleRegistry = createRoleRegistry()
 	const contextPressureTracker = createContextPressureTracker()
 	const parkTracker = createRunParkTracker()
+	const baseTracker = createRunBaseTracker()
 	const roleSnapshots = createFakeRoleSnapshotStore()
-	const sink = createFakeCheckpointRecorder(roleRegistry, contextPressureTracker, parkTracker)
+	const sink = createFakeCheckpointRecorder(roleRegistry, contextPressureTracker, parkTracker, baseTracker)
 	const deps: EngineDependencies = {
 		llmCaller: llm,
 		appendLog,
@@ -268,6 +270,7 @@ function makeDeps(llm: LlmCaller): { deps: EngineDependencies; events: LogEvent[
 		contextPressureTracker,
 		checkpointRecorder: sink.recorder,
 		parkTracker,
+		baseTracker,
 		publishDelta: noOpPublishDelta,
 		roleSnapshots,
 		readProjectDoc: () => ({ kind: 'unavailable', reason: 'not used in these tests' }),

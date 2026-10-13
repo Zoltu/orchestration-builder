@@ -19,7 +19,7 @@ function continuationBriefing(continuation: RunContinuation): string {
 
 // Assembles a role's first messages: the system prompt, then the user task.
 // The entry role (depth 0) additionally receives the effort directive appended to the system prompt, so prompts can branch on the run's quality level. The directive is merged into the single system message rather than emitted as a second one: many model chat templates (Gemma-family and others) reject a `system` message that is not the first message, so two consecutive system messages would break those endpoints. Child roles never receive the directive — the depth-0 gate ensures it even though the agent spawn copies the context — leaving the parent to translate effort into delegation instructions.
-// The continuation briefing (prior-run lineage and/or the queue's interim briefing, docs/queueing.md "The interim briefing") and the project-context block (a depth-0 role's declared projectDocs, project-docs.ts) are appended to the entry role's initial user message after the operator's task text, keeping the task as the message's first line. The same depth-0 gate keeps child histories free of both, so each appears exactly once across the run, and checkpointed histories already contain them — they are never re-derived on resume.
+// The continuation briefing (prior-run lineage and/or the queue's interim briefing, docs/queueing.md "The interim briefing") and the project-context block (a depth-0 role's declared projectDocs, project-docs.ts) are appended to the entry role's initial user message after the operator's task text, keeping the task as the message's first line. The workspace git notice (git-state.ts) is appended last, describing the repository's starting state so the role can decide how to handle a dirty or absent one. The same depth-0 gate keeps child histories free of all three, so each appears exactly once across the run, and checkpointed histories already contain them — they are never re-derived on resume.
 export function buildInitialHistory(systemPrompt: string, context: EngineContext, dependencies: { readProjectDoc: ReadProjectDoc }): Message[] {
 	let systemContent = systemPrompt
 	if (context.depth === 0 && context.effort !== undefined) {
@@ -35,6 +35,9 @@ export function buildInitialHistory(systemPrompt: string, context: EngineContext
 		const projectDocs = context.loadedGuild.config.roles[context.roleName]?.projectDocs
 		if (projectDocs !== undefined && projectDocs.length > 0) {
 			blocks.push(buildProjectContextBlock(projectDocs, dependencies))
+		}
+		if (context.workspaceGitNotice !== undefined) {
+			blocks.push(context.workspaceGitNotice)
 		}
 	}
 	if (blocks.length === 0) {

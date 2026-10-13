@@ -1,3 +1,4 @@
+import type { RunBaseTracker } from './base-state.js'
 import type { ToolHandler } from './tool-dispatch.js'
 import { ensureOrchestrationGitExcluded, nodeGitExcludeFilesystem } from './git-exclude.js'
 import { createFetchUrl, type Fetcher } from './tools/fetch-url.js'
@@ -21,6 +22,8 @@ export interface NativeToolsConfig {
 	defaultToolTimeoutSeconds: number
 	fetcher?: Fetcher
 	kagiApiKey?: string
+	// The run-scoped base commit state, shared with the executor so the git diff tools and git_set_base see the same base.
+	baseTracker: RunBaseTracker
 }
 
 export function createToolHandlers(config: NativeToolsConfig): Record<string, ToolHandler> {
@@ -46,7 +49,7 @@ export function createToolHandlers(config: NativeToolsConfig): Record<string, To
 		const result = ensureOrchestrationGitExcluded(config.workspaceRoot, nodeGitExcludeFilesystem)
 		if (!result.ok) console.log(`Could not exclude .orchestration from the workspace's git repository: ${result.reason}`)
 	}
-	const git = createGitTools({ workspaceRoot: config.workspaceRoot, defaultToolTimeoutSeconds: config.defaultToolTimeoutSeconds, runner: subprocessRunner, ensureOrchestrationExcluded })
+	const git = createGitTools({ workspaceRoot: config.workspaceRoot, defaultToolTimeoutSeconds: config.defaultToolTimeoutSeconds, runner: subprocessRunner, ensureOrchestrationExcluded, baseTracker: config.baseTracker })
 	return {
 		list_directory: list,
 		glob_files: glob,

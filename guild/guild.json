@@ -4,7 +4,7 @@
 	"roles": {
 		"orchestrator": {
 			"systemPrompt": "prompts/orchestrator.md",
-			"tools": ["agent", "continue_agent", "ask_human", "finish", "git_status", "git_log", "git_diff", "git_init", "git_commit", "git_branch"],
+			"tools": ["agent", "continue_agent", "ask_human", "finish", "git_status", "git_log", "git_diff", "git_init", "git_commit", "git_branch", "git_set_base"],
 			"projectDocs": ["AGENTS.md", "README.md"],
 			"label": {
 				"detailed": ["Orchestrator"],
@@ -80,6 +80,25 @@
 				"whimsical": ["Digging through the stacks", "Chasing down a citation", "Reading the footnotes", "Following the paper trail"]
 			}
 		},
+		"change_summarizer": {
+			"systemPrompt": "prompts/change_summarizer.md",
+			"tools": ["git_uncommitted_changes", "read_file", "read_file_partial", "search_text", "repo_map", "finish"],
+			"label": {
+				"detailed": ["Change Summarizer"],
+				"friendly": ["Change Summarizer"],
+				"whimsical": ["Commit Wordsmith"]
+			},
+			"description": {
+				"detailed": ["Reads a change set and writes one concise, accurate commit message describing what changed and why, without changing anything."],
+				"friendly": ["Writes a commit message for a change set."],
+				"whimsical": ["Turns a pile of edits into one tidy sentence."]
+			},
+			"workingLabel": {
+				"detailed": ["role {participantRole} is composing a commit message (streaming tokens)"],
+				"friendly": ["Writing a commit message"],
+				"whimsical": ["Naming the changes", "Finding the right words", "Distilling the diff", "Putting the change into words"]
+			}
+		},
 		"architecture_lead": {
 			"systemPrompt": "prompts/architecture_lead.md",
 			"tools": ["agent", "continue_agent", "finish"],
@@ -101,7 +120,7 @@
 		},
 		"architecture_reviewer": {
 			"systemPrompt": "prompts/architecture_reviewer.md",
-			"tools": ["list_directory", "glob_files", "read_file", "read_file_partial", "read_plan", "search_text", "repo_map", "finish"],
+			"tools": ["list_directory", "glob_files", "read_file", "read_file_partial", "read_plan", "search_text", "repo_map", "git_changes_since_base", "finish"],
 			"label": {
 				"detailed": ["Architecture Reviewer"],
 				"friendly": ["Architecture Reviewer"],
@@ -140,7 +159,7 @@
 		},
 		"style_reviewer": {
 			"systemPrompt": "prompts/style_reviewer.md",
-			"tools": ["list_directory", "glob_files", "read_file", "read_file_partial", "read_style_guide", "search_text", "repo_map", "finish"],
+			"tools": ["list_directory", "glob_files", "read_file", "read_file_partial", "read_style_guide", "search_text", "repo_map", "git_changes_since_base", "finish"],
 			"label": {
 				"detailed": ["Style Reviewer"],
 				"friendly": ["Style Reviewer"],
@@ -199,7 +218,7 @@
 		},
 		"security_reviewer": {
 			"systemPrompt": "prompts/security_reviewer.md",
-			"tools": ["list_directory", "glob_files", "read_file", "read_file_partial", "search_text", "repo_map", "finish"],
+			"tools": ["list_directory", "glob_files", "read_file", "read_file_partial", "search_text", "repo_map", "git_changes_since_base", "finish"],
 			"label": {
 				"detailed": ["Security Reviewer"],
 				"friendly": ["Security Reviewer"],
@@ -367,7 +386,10 @@
 		"tools/git_diff.json",
 		"tools/git_init.json",
 		"tools/git_commit.json",
-		"tools/git_branch.json"
+		"tools/git_branch.json",
+		"tools/git_set_base.json",
+		"tools/git_changes_since_base.json",
+		"tools/git_uncommitted_changes.json"
 	],
 
 	"visualization": {

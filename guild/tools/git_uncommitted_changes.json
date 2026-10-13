@@ -1,0 +1,44 @@
+{
+	"name": "git_uncommitted_changes",
+	"description": "List the workspace's uncommitted changes — staged, unstaged, and untracked files — as a name-status list by default, one line per changed path, or as the full unified diff — with the contents of untracked files — when includeDiff is true. Pass paths to limit the result to specific workspace-relative files or directories. If the workspace is not a git repository, it reports that plainly rather than failing. Read-only.",
+	"humanLabel": {
+		"detailed": ["Git Uncommitted Changes"],
+		"friendly": ["Uncommitted Changes"],
+		"whimsical": ["Loose Ends"]
+	},
+	"humanDescription": {
+		"detailed": ["Lists the workspace's uncommitted changes, as a name-status list or a full diff."],
+		"friendly": ["See the uncommitted changes."],
+		"whimsical": ["Gather the loose ends."]
+	},
+	"humanCallLabel": {
+		"detailed": ["role {sourceRole} is invoking tool {destinationRole} (stack {stack})"],
+		"friendly": ["{source} is listing uncommitted changes"],
+		"whimsical": ["{source} is sweeping up the uncommitted work", "{source} is gathering the loose ends", "{source} is checking what is still unsaved"]
+	},
+	"humanWorkingLabel": {
+		"detailed": ["tool {participantRole} is computing the uncommitted changes"],
+		"friendly": ["Computing the uncommitted changes"],
+		"whimsical": ["Sweeping up the uncommitted work", "Gathering the loose ends", "Checking what is still unsaved", "Rounding up the unsaved edits"]
+	},
+	"parameters": {
+		"type": "object",
+		"properties": {
+			"paths": {
+				"type": "array",
+				"description": "Optional list of workspace-relative file or directory paths to limit the result to. If omitted, the whole repository is considered.",
+				"items": {
+					"type": "string"
+				}
+			},
+			"includeDiff": {
+				"type": "boolean",
+				"description": "Optional. When true, return the full unified diff instead of the name-status list; when false (the default), only the name-status list is returned."
+			},
+			"timeoutSeconds": {
+				"type": "number",
+				"description": "Optional timeout in seconds. Capped by the executor default tool timeout; a value above the cap is clamped to the cap."
+			}
+		}
+	}
+}

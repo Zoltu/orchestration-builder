@@ -2,12 +2,14 @@ import { describe, expect, test } from 'bun:test'
 
 import type { ContextPolicy, DeploymentConfig, ExecutorConfig, GuildConfig, LogEvent, ResolvedModelConfig, RoleDefinition, RunContinuation, RunMeta, ToolCall, ToolManifest } from './types.js'
 import { isRunCheckpoint, type RunCheckpoint } from './checkpoint.ts'
+import { createRunBaseTracker } from './base-state.ts'
+import { createGitTools, EMPTY_TREE_HASH } from './tools/git.ts'
 import { resumeExecutor, runExecutor, type ExecutorDependencies } from './executor.ts'
 import { createInterruptQueue } from './interrupts.ts'
 import type { LlmCallResult, LlmCaller } from './llm.ts'
 import type { LoadedGuild } from './loader.ts'
 import type { AppendLog, DeleteCheckpoint, RunDirectory, WriteCheckpoint, WriteMeta } from './persistence.ts'
-import { createFakeRoleSnapshotStore, stubHumanBackend, recordingHumanBackend, defined } from './test-fixtures.ts'
+import { createFakeRoleSnapshotStore, stubHumanBackend, recordingHumanBackend, defined, makeScriptedRunner } from './test-fixtures.ts'
 
 function success(toolCalls: ToolCall[], opts: { content?: string } = {}): LlmCallResult {
 	return {
@@ -161,6 +163,8 @@ function makeDeps(llm: FakeLlm, persistence: FakePersistenceFns, loadedGuild: Lo
 		publishDelta: () => undefined,
 		roleSnapshots: createFakeRoleSnapshotStore(),
 		readProjectDoc: () => ({ kind: 'unavailable', reason: 'not used in these tests' }),
+		baseTracker: createRunBaseTracker(),
+		readWorkspaceGitState: async () => ({ isRepository: false, unbornHead: false, uncommittedPaths: [] }),
 	}
 }
 
@@ -544,6 +548,110 @@ describe('runExecutor', () => {
 		for (const checkpoint of persistence.state.checkpoints) {
 			expect(checkpoint.frames[0]?.logLevel).toBeUndefined()
 		}
+	})
+
+	test('records the default base and injects the git notice at run start', async () => {
+		const guild = buildLoadedGuild({ main: { systemPrompt: 'p', tools: ['finish'] } }, 'main')
+		const llm = new FakeLlm()
+		llm.responses = [success([{ id: 'f1', type: 'function', function: { name: 'finish', arguments: JSON.stringify({ status: 'success', summary: 'ok' }) } }])]
+		const persistence = makeFakePersistence()
+		const deps = makeDeps(llm, persistence, guild)
+		deps.readWorkspaceGitState = async () => ({ isRepository: true, unbornHead: false, headHash: 'abcdef1234567890', uncommittedPaths: [] })
+
+		await runExecutor(deps, { runId: 'r-base', guildPath: '/guild', task: 'do it', effort: 'standard' })
+
+		expect(deps.baseTracker.baseHash).toBe('abcdef1234567890')
+		expect(persistence.state.checkpoints.some((checkpoint) => checkpoint.baseHash === 'abcdef1234567890')).toBe(true)
+		const llmCall = defined(persistence.state.events.find((event) => event.type === 'llm_call'), 'llm_call event')
+		const payload = llmCall.payload
+		expect(isRecord(payload)).toBe(true)
+		if (isRecord(payload)) {
+			const sent = payload['sent']
+			expect(Array.isArray(sent)).toBe(true)
+			if (Array.isArray(sent)) {
+				const userMessage = sent[1]
+				expect(isRecord(userMessage)).toBe(true)
+				if (isRecord(userMessage)) expect(userMessage['content']).toBe('do it\n\nThe workspace git repository is clean at abcdef1.')
+			}
+		}
+	})
+
+	test('records the empty tree as the base when HEAD is unborn', async () => {
+		const guild = buildLoadedGuild({ main: { systemPrompt: 'p', tools: ['finish'] } }, 'main')
+		const llm = new FakeLlm()
+		llm.responses = [success([{ id: 'f1', type: 'function', function: { name: 'finish', arguments: JSON.stringify({ status: 'success', summary: 'ok' }) } }])]
+		const persistence = makeFakePersistence()
+		const deps = makeDeps(llm, persistence, guild)
+		deps.readWorkspaceGitState = async () => ({ isRepository: true, unbornHead: true, uncommittedPaths: [] })
+
+		await runExecutor(deps, { runId: 'r-unborn', guildPath: '/guild', task: 'do it', effort: 'standard' })
+
+		expect(deps.baseTracker.baseHash).toBe(EMPTY_TREE_HASH)
+	})
+
+	test('a non-repository workspace records no base and injects no notice', async () => {
+		const guild = buildLoadedGuild({ main: { systemPrompt: 'p', tools: ['finish'] } }, 'main')
+		const llm = new FakeLlm()
+		llm.responses = [success([{ id: 'f1', type: 'function', function: { name: 'finish', arguments: JSON.stringify({ status: 'success', summary: 'ok' }) } }])]
+		const persistence = makeFakePersistence()
+		const deps = makeDeps(llm, persistence, guild)
+
+		await runExecutor(deps, { runId: 'r-no-repo', guildPath: '/guild', task: 'do it', effort: 'standard' })
+
+		expect(deps.baseTracker.baseHash).toBeUndefined()
+		const llmCall = defined(persistence.state.events.find((event) => event.type === 'llm_call'), 'llm_call event')
+		const payload = llmCall.payload
+		if (isRecord(payload) && Array.isArray(payload['sent'])) {
+			const userMessage = payload['sent'][1]
+			if (isRecord(userMessage)) expect(userMessage['content']).toBe('do it')
+		}
+	})
+
+	test('logs a workspace_dirty_at_start warning with the count when the repository is dirty', async () => {
+		const guild = buildLoadedGuild({ main: { systemPrompt: 'p', tools: ['finish'] } }, 'main')
+		const llm = new FakeLlm()
+		llm.responses = [success([{ id: 'f1', type: 'function', function: { name: 'finish', arguments: JSON.stringify({ status: 'success', summary: 'ok' }) } }])]
+		const persistence = makeFakePersistence()
+		const deps = makeDeps(llm, persistence, guild)
+		deps.readWorkspaceGitState = async () => ({ isRepository: true, unbornHead: false, headHash: 'abc', uncommittedPaths: ['src/a.ts', 'src/b.ts'] })
+
+		await runExecutor(deps, { runId: 'r-dirty', guildPath: '/guild', task: 'do it', effort: 'standard' })
+
+		const dirtyEvent = defined(persistence.state.events.find((event) => event.type === 'workspace_dirty_at_start'), 'workspace_dirty_at_start event')
+		expect(isRecord(dirtyEvent.payload)).toBe(true)
+		if (isRecord(dirtyEvent.payload)) expect(dirtyEvent.payload['count']).toBe(2)
+	})
+
+	test('git_set_base moves the base and the new base persists into the checkpoint', async () => {
+		const gitSetBaseManifest: ToolManifest = {
+			name: 'git_set_base',
+			description: 'Set the run base commit.',
+			parameters: { type: 'object', required: [], properties: { ref: { type: 'string' } } },
+		}
+		const baseGuild = buildLoadedGuild({ main: { systemPrompt: 'p', tools: ['git_set_base', 'finish'] } }, 'main')
+		const guild: LoadedGuild = {
+			config: { ...baseGuild.config, tools: ['guild/tools/finish.json', 'guild/tools/git_set_base.json'] },
+			deployment: baseGuild.deployment,
+			prompts: baseGuild.prompts,
+			tools: { ...baseGuild.tools, git_set_base: gitSetBaseManifest },
+		}
+		const runner = makeScriptedRunner([{ exitCode: 0, stdout: 'moved-hash\n' }])
+		const baseTracker = createRunBaseTracker('initial-hash')
+		const gitTools = createGitTools({ workspaceRoot: '/fake/workspace', defaultToolTimeoutSeconds: 30, runner, ensureOrchestrationExcluded: () => {}, baseTracker })
+		const llm = new FakeLlm()
+		llm.responses = [
+			success([{ id: 'g1', type: 'function', function: { name: 'git_set_base', arguments: JSON.stringify({ ref: 'main' }) } }]),
+			success([{ id: 'f1', type: 'function', function: { name: 'finish', arguments: JSON.stringify({ status: 'success', summary: 'ok' }) } }]),
+		]
+		const persistence = makeFakePersistence()
+		const deps = makeDeps(llm, persistence, guild)
+		deps.baseTracker = baseTracker
+		deps.additionalToolHandlers = gitTools
+
+		await runExecutor(deps, { runId: 'r-set-base', guildPath: '/guild', task: 'do it', effort: 'standard' })
+
+		expect(baseTracker.baseHash).toBe('moved-hash')
+		expect(persistence.state.checkpoints.some((checkpoint) => checkpoint.baseHash === 'moved-hash')).toBe(true)
 	})
 })
 
@@ -1106,5 +1214,73 @@ describe('resumeExecutor', () => {
 		expect(secondResumeMeta.runId).toBe('r-twice')
 		expect(secondResumeMeta.startTime).toBe(originalMeta.startTime)
 		expect(secondResumePersistence.state.deleteCheckpointCalls).toBe(1)
+	})
+
+	test('resume restores the checkpoint base and never re-reads the workspace git state', async () => {
+		const uninterrupted = await driveUninterruptedRun()
+		const checkpoint = uninterrupted.checkpoints[1]
+		if (checkpoint === undefined) throw new Error('expected the mid-descent checkpoint')
+		checkpoint.baseHash = 'restored-hash'
+
+		const guild = buildDelegationGuild()
+		const llm = new FakeLlm()
+		llm.responses = [
+			success([finishToolCall('f1', 'child done')]),
+			success([finishToolCall('f2', 'parent done')]),
+		]
+		const persistence = makeFakePersistence()
+		const deps = makeDeps(llm, persistence, guild)
+		let gitStateReads = 0
+		deps.readWorkspaceGitState = async () => {
+			gitStateReads++
+			return { isRepository: false, unbornHead: false, uncommittedPaths: [] }
+		}
+
+		await resumeExecutor(deps, checkpoint, resumeOptions)
+
+		expect(deps.baseTracker.baseHash).toBe('restored-hash')
+		expect(gitStateReads).toBe(0)
+	})
+
+	test('the git notice is injected once on a fresh repository run and not re-injected on resume', async () => {
+		const guild = buildDelegationGuild()
+		const llm = new FakeLlm()
+		llm.responses = [
+			success([agentToolCall('a1', 'coder', 'subtask')]),
+			success([finishToolCall('f1', 'child done')]),
+			success([finishToolCall('f2', 'parent done')]),
+		]
+		const persistence = makeFakePersistence()
+		const deps = makeDeps(llm, persistence, guild)
+		deps.readWorkspaceGitState = async () => ({ isRepository: true, unbornHead: false, headHash: 'abcdef1234567890', uncommittedPaths: [] })
+
+		await runExecutor(deps, { runId: 'r-notice', ...resumeOptions, task: 'do it', effort: 'quick' })
+
+		const checkpoint = persistence.state.checkpoints[1]
+		if (checkpoint === undefined) throw new Error('expected the mid-descent checkpoint')
+		const carriesNotice = (content: string | undefined): boolean => typeof content === 'string' && content.includes('clean at abcdef1')
+		const entryHistory = checkpoint.frames[0]?.roleState.history ?? []
+		expect(entryHistory.filter((message) => carriesNotice(message.content)).length).toBe(1)
+
+		const resumeLlm = new FakeLlm()
+		resumeLlm.responses = [
+			success([finishToolCall('f1', 'child done')]),
+			success([finishToolCall('f2', 'parent done')]),
+		]
+		const resumePersistence = makeFakePersistence()
+		const resumeDeps = makeDeps(resumeLlm, resumePersistence, buildDelegationGuild())
+		let gitStateReads = 0
+		resumeDeps.readWorkspaceGitState = async () => {
+			gitStateReads++
+			return { isRepository: true, unbornHead: false, headHash: 'abcdef1234567890', uncommittedPaths: [] }
+		}
+
+		await resumeExecutor(resumeDeps, checkpoint, resumeOptions)
+
+		expect(gitStateReads).toBe(0)
+		const postResume = resumePersistence.state.checkpoints[0]
+		if (postResume === undefined) throw new Error('expected a post-resume checkpoint')
+		const postHistory = postResume.frames[0]?.roleState.history ?? []
+		expect(postHistory.filter((message) => carriesNotice(message.content)).length).toBe(1)
 	})
 })

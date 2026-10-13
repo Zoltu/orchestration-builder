@@ -49,6 +49,20 @@ The Foundry reads the current Guild and recent run logs, prompts a large model t
 - **No dependencies.** The executor uses only Bun built-ins and web-standard APIs. No npm packages.
 - **Large model in the Foundry only.** The Foundry may use a commercial API or another local model.
 
+## Review and version-control cadence
+
+The orchestrator implements every plan step first, then runs one consolidated review pass — the architecture, style, and security reviewers, each scoped to the run's accumulated change set — before the final acceptance review of the whole workspace.
+It may insert a single interim consolidated review at a milestone boundary, but only when foundation risk warrants it: a new subsystem, a risky integration, an unfamiliar domain, or a `needs replan:`/`needs refactor:` signal from a child.
+There is no per-step review; one pass keeps review cost proportional to the run rather than to the number of steps, and the change set scopes what each reviewer reads.
+
+The orchestrator commits after every meaningful unit of work, not only after review.
+The executor records a base commit — HEAD at task start, the git empty tree when HEAD is unborn, and no base when the workspace is not a repository — and the run's reviewers diff against it.
+Separately, it appends a one-line advisory notice to the entry role's initial message when a repository exists — a prompt to handle the dirty state when there are uncommitted changes (no HEAD sha), a note that there are no commits when HEAD is unborn, or the short HEAD when the tree is clean — and injects no notice when there is no repository.
+The orchestrator may move the base with `git_set_base` — a hint, not a requirement, is to advance it after a review round completes — and the base rides the checkpoint so a resumed run keeps it.
+`git_changes_since_base` reads the diff from that base to the working tree, so a consolidated review pass sees exactly what the run has changed so far, and the orchestrator may delegate a commit message to the `change_summarizer` when it wants the message derived from the diff.
+Acceptance reviews the whole workspace and holds no git tool.
+With no repository the change-set tools report there is nothing to show, and the git surface never depends on git being present.
+
 ## Tool surface
 
 The deployment container is the security boundary; tools do not filter or allowlist commands. The targeted tools are high-signal semantic wrappers — a uniform discipline (workspace-rooted execution, clamped timeouts, structured, capped results) around what the model chooses — and `run_shell` is the general escape hatch for everything they do not cover. The toolchain a workspace needs is determined by the model at run time, by surveying the workspace, not configured in the executor or the Guild. See [`docs/security.md`](security.md) "Mitigations".

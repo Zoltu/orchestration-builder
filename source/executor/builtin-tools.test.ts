@@ -10,6 +10,7 @@ import type { LoadedGuild } from './loader.ts'
 import type { AppendLog } from './persistence.ts'
 import { createRoleRegistry } from './role-registry.ts'
 import { createFakeCheckpointRecorder, createFakeRoleSnapshotStore, recordingHumanBackend } from './test-fixtures.ts'
+import { createRunBaseTracker } from './base-state.ts'
 import { createRunParkTracker } from './park-state.ts'
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -192,7 +193,8 @@ function makeDeps(llm: FakeLlm, humanBackend: HumanBackend): { deps: EngineDepen
 	const roleRegistry = createRoleRegistry()
 	const contextPressureTracker = createContextPressureTracker()
 	const parkTracker = createRunParkTracker()
-	const sink = createFakeCheckpointRecorder(roleRegistry, contextPressureTracker, parkTracker)
+	const baseTracker = createRunBaseTracker()
+	const sink = createFakeCheckpointRecorder(roleRegistry, contextPressureTracker, parkTracker, baseTracker)
 	const deps: EngineDependencies = {
 		llmCaller: llm,
 		appendLog,
@@ -203,6 +205,7 @@ function makeDeps(llm: FakeLlm, humanBackend: HumanBackend): { deps: EngineDepen
 		contextPressureTracker,
 		checkpointRecorder: sink.recorder,
 		parkTracker,
+		baseTracker,
 		publishDelta: () => undefined,
 		roleSnapshots: createFakeRoleSnapshotStore(),
 		readProjectDoc: () => ({ kind: 'unavailable', reason: 'not used in these tests' }),

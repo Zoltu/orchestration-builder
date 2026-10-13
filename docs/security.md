@@ -74,8 +74,10 @@ If `showdown` or `highlight.js` fails to load or throws, a prose field falls bac
 
 ### Git tool policy
 
-A run may use a small, fixed git tool family (`git_status`, `git_log`, `git_diff`, `git_init`, `git_commit`, `git_branch`), granted to the `orchestrator` role only, so it can take a baseline, commit accepted work, and branch before a risky change.
-The family is read-only plus `init`/`commit`/`branch`-at-HEAD: it cannot rewrite history, check out another branch, or push, and every command runs with a fixed argv (no shell), hooks and the fsmonitor hook disabled, a pinned identity, and signing off.
+A run may use a small, fixed git tool family, split by capability.
+The tools that change the repository (`git_init`, `git_commit`, `git_branch`) and the base-setting `git_set_base` are granted to the `orchestrator` role only, so it can take a baseline, commit work as it proceeds, branch before a risky change, and move the run's base commit.
+The read-only change-set tools are exposed more widely: `git_changes_since_base` to the architecture, style, and security reviewers, and `git_uncommitted_changes` to the `change_summarizer`, so each can inspect the run's changes without holding any write path; acceptance reviews the whole workspace and holds no git tool.
+The family is read-only plus `init`/`commit`/`branch`-at-HEAD and the run-scoped base move: it cannot rewrite history, check out another branch, or push, and every command runs with a fixed argv (no shell), hooks and the fsmonitor hook disabled, a pinned identity, and signing off.
 
 Enforcement is deliberately **soft**.
 The `coder` still holds `run_shell`, so it can run arbitrary git commands; the tools guard the orchestrator's behavior and provide rollback points, but they do not contain a haywire agent.

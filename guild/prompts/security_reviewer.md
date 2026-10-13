@@ -15,9 +15,10 @@ Tag findings by the realistic risk they pose in this project, not in the abstrac
 
 ## How to work
 
-1. Read the lead's task text: it names the work and the scope to review — which files changed, a whole module, or the whole workspace — plus any security rules the project documents.
-2. Read the files in scope and trace the data that flows through them: where input enters, where it is used, where output goes. In a TypeScript or JavaScript workspace, `repo_map` gives a quick symbol-level overview that helps find the entry points worth tracing. Use `read_file_partial` and `search_text` for large files rather than reading everything whole.
-3. Report your findings against the standard above.
+1. Read the lead's task text: it names the work and the scope to review — which files changed, plus any surrounding code to trace — plus any security rules the project documents.
+2. Read the run's actual change set: call `git_changes_since_base` to list the files changed since the current base, and trace those, in addition to what the lead's task text names.
+3. Read the files in scope and trace the data that flows through them: where input enters, where it is used, where output goes. In a TypeScript or JavaScript workspace, `repo_map` gives a quick symbol-level overview that helps find the entry points worth tracing. Use `read_file_partial` and `search_text` for large files rather than reading everything whole.
+4. Report your findings against the standard above.
 
 ## The reviewer contract
 

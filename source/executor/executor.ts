@@ -2,9 +2,12 @@ import { DEFAULT_EFFORT } from './effort.js'
 import type { ResultCard, RunContinuation, RunMeta, RunOptions } from './types.js'
 import { createCheckpointRecorder, entryFrameLogLevel, type RunCheckpoint } from './checkpoint.js'
 import { createContextPressureTracker } from './context-pressure.js'
+import type { RunBaseTracker } from './base-state.js'
 import { createRunParkTracker } from './park-state.js'
+import { EMPTY_TREE_HASH } from './tools/git.js'
+import { formatWorkspaceGitNotice, type ReadWorkspaceGitState } from './git-state.js'
 import { runRole } from './engine.js'
-import { logEvent, type EngineDependencies } from './engine-state.js'
+import { logEvent, type EngineContext, type EngineDependencies } from './engine-state.js'
 import type { HumanBackend } from './human-backend.js'
 import type { InterruptQueue } from './interrupts.js'
 import type { LlmCaller } from './llm.js'
@@ -36,13 +39,31 @@ export interface ExecutorDependencies {
 	roleSnapshots: RoleSnapshotStore
 	// The leaf that reads a role's declared projectDocs from the workspace (project-docs.ts), closed over the workspace root by the service. Rides into EngineDependencies so buildInitialHistory can inject the entry role's project-context block at run start.
 	readProjectDoc: ReadProjectDoc
+	// The run-scoped base commit state, created by the caller so the service can share it with the git tool handlers; runExecutor records the starting base and resumeExecutor restores it from the checkpoint.
+	baseTracker: RunBaseTracker
+	// The leaf that reads the workspace's git state once at run start (git-state.ts), closed over the workspace root by the service. runExecutor uses it to record the base and build the entry role's git notice.
+	readWorkspaceGitState: ReadWorkspaceGitState
 }
 
-function buildEngineDependencies(deps: ExecutorDependencies, runId: string, startTime: string, registryCounter: number, learnedContextCeiling: number | undefined, writeCapableStarted: boolean | undefined, continuesFrom: string | undefined, queueTracked: boolean | undefined): EngineDependencies {
-	const roleRegistry = createRoleRegistry(registryCounter)
-	const contextPressureTracker = createContextPressureTracker(learnedContextCeiling)
+// The per-run identity and restore state buildEngineDependencies threads into the engine. A fresh run supplies only runId/startTime/registryCounter plus its continuation and queue flags; the resume path additionally restores the checkpoint's learned ceiling, write-capability flag, and base.
+interface EngineDependencyInput {
+	runId: string
+	startTime: string
+	registryCounter: number
+	learnedContextCeiling?: number
+	writeCapableStarted?: boolean
+	continuesFrom?: string
+	queueTracked?: boolean
+	baseHash?: string
+}
+
+function buildEngineDependencies(deps: ExecutorDependencies, input: EngineDependencyInput): EngineDependencies {
+	const roleRegistry = createRoleRegistry(input.registryCounter)
+	const contextPressureTracker = createContextPressureTracker(input.learnedContextCeiling)
 	// The resume path seeds the park tracker from the checkpoint so a restart cannot reset the write-capability flag and park a run whose writes happened before the restart (docs/queueing.md "Parking: the pre-write rule"). The queue-tracking mark is NOT restored here: it is set only by the dispatch path of the process that dispatched the run, so a boot-resumed run blocks on ask_human (answerable through /api/answer) instead of parking into a question no endpoint can answer.
-	const parkTracker = createRunParkTracker(writeCapableStarted, queueTracked)
+	const parkTracker = createRunParkTracker(input.writeCapableStarted, input.queueTracked)
+	// The resume path restores the base from the checkpoint so a restart keeps diffing against the same change set; a fresh run records it after reading the workspace's git state.
+	if (deps.baseTracker.baseHash === undefined && input.baseHash !== undefined) deps.baseTracker.baseHash = input.baseHash
 	return {
 		llmCaller: deps.llmCaller,
 		appendLog: deps.appendLog,
@@ -55,8 +76,9 @@ function buildEngineDependencies(deps: ExecutorDependencies, runId: string, star
 		roleSnapshots: deps.roleSnapshots,
 		readProjectDoc: deps.readProjectDoc,
 		parkTracker,
+		baseTracker: deps.baseTracker,
 		// The run's lineage rides the recorder so checkpoints written after a resume keep stamping continuesFrom onto the entry frame — the live context does not carry it on the resume path. The logging level needs no such stamp: the entry context carries it and the recorder serializes from there.
-		checkpointRecorder: createCheckpointRecorder({ writeCheckpoint: deps.writeCheckpoint, runId, startTime, roleRegistry, contextPressureTracker, parkTracker, continuesFrom }),
+		checkpointRecorder: createCheckpointRecorder({ writeCheckpoint: deps.writeCheckpoint, runId: input.runId, startTime: input.startTime, roleRegistry, contextPressureTracker, parkTracker, baseTracker: deps.baseTracker, continuesFrom: input.continuesFrom }),
 	}
 }
 
@@ -87,18 +109,31 @@ export async function runExecutor(deps: ExecutorDependencies, options: RunOption
 	logEvent(deps.appendLog, 'effort_set', { effort: options.effort })
 	// Write a running meta before the entry role begins so the UI can show the task, run id, and start time while the run is in progress, rather than only after completion. It is overwritten with the terminal meta below.
 	deps.writeMeta(composeRunMeta(options, startTime, 'running'))
-	const result = await runRole(
-		buildEngineDependencies(deps, options.runId, startTime, 0, undefined, undefined, options.continuation?.runId, options.queueTracked),
-		{
-			loadedGuild,
-			depth: 0,
-			roleName: loadedGuild.config.entryRole,
-			task: options.task,
-			effort: options.effort,
-			...(options.logLevel !== undefined ? { logLevel: options.logLevel } : {}),
-			...(options.continuation !== undefined ? { continuation: options.continuation } : {}),
-		},
-	)
+	const engineDeps = buildEngineDependencies(deps, { runId: options.runId, startTime, registryCounter: 0, continuesFrom: options.continuation?.runId, queueTracked: options.queueTracked })
+	// The workspace's git state is read once, before the entry role's history is built: it records the default base (HEAD, or the empty tree when HEAD is unborn) and supplies the entry role's git notice. A workspace with no repository simply records no base and injects no notice.
+	const gitState = await deps.readWorkspaceGitState()
+	if (gitState.isRepository) {
+		if (deps.baseTracker.baseHash === undefined) {
+			const initialBase = gitState.unbornHead ? EMPTY_TREE_HASH : gitState.headHash
+			if (initialBase !== undefined) deps.baseTracker.baseHash = initialBase
+		}
+		if (gitState.uncommittedPaths.length > 0) {
+			logEvent(deps.appendLog, 'workspace_dirty_at_start', { count: gitState.uncommittedPaths.length })
+		}
+	}
+	// The notice is undefined when there is no repository, so a non-repository workspace injects nothing rather than a "not a git repository" line.
+	const workspaceGitNotice = formatWorkspaceGitNotice(gitState)
+	const entryContext: EngineContext = {
+		loadedGuild,
+		depth: 0,
+		roleName: loadedGuild.config.entryRole,
+		task: options.task,
+		effort: options.effort,
+		...(options.logLevel !== undefined ? { logLevel: options.logLevel } : {}),
+		...(options.continuation !== undefined ? { continuation: options.continuation } : {}),
+		...(workspaceGitNotice !== undefined ? { workspaceGitNotice } : {}),
+	}
+	const result = await runRole(engineDeps, entryContext)
 
 	const meta = composeRunMeta(options, startTime, result.status, result)
 
@@ -146,7 +181,7 @@ export async function resumeExecutor(deps: ExecutorDependencies, checkpoint: Run
 	deps.writeMeta(composeRunMeta(runOptions, startTime, 'running'))
 	const result = await resumeRoleStack(
 		runRole,
-		buildEngineDependencies(deps, checkpoint.runId, startTime, checkpoint.registryCounter, checkpoint.learnedContextCeiling, checkpoint.writeCapableStarted, entryFrame.continuesFrom, undefined),
+		buildEngineDependencies(deps, { runId: checkpoint.runId, startTime, registryCounter: checkpoint.registryCounter, learnedContextCeiling: checkpoint.learnedContextCeiling, writeCapableStarted: checkpoint.writeCapableStarted, continuesFrom: entryFrame.continuesFrom, baseHash: checkpoint.baseHash }),
 		loadedGuild,
 		checkpoint,
 		options.operatorNote,

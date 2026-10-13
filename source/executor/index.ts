@@ -66,6 +66,17 @@ export type { ActiveItemRepair, BriefingInput, NewQueueItemResult, QueueItem, Qu
 export { createRunParkTracker, isWriteCapableRole, parkCard, parkSummary, questionFromParkSummary, PARK_SUMMARY_PREFIX, WRITE_CAPABLE_TOOL_NAMES } from './park-state.js'
 export type { RunParkTracker } from './park-state.js'
 
+export { createRunBaseTracker } from './base-state.js'
+export type { RunBaseTracker } from './base-state.js'
+
+export { createReadWorkspaceGitState, formatWorkspaceGitNotice } from './git-state.js'
+export type { ReadWorkspaceGitState, ReadWorkspaceGitStateConfig, WorkspaceGitState } from './git-state.js'
+
+export { EMPTY_TREE_HASH } from './tools/git.js'
+
+export { createBunSubprocessRunner } from './tools/subprocess-tool.js'
+export type { SubprocessRunner } from './tools/subprocess-tool.js'
+
 export { ensureOrchestrationGitExcluded, nodeGitExcludeFilesystem } from './git-exclude.js'
 export type { GitExcludeFilesystem, GitExcludeResult } from './git-exclude.js'
 

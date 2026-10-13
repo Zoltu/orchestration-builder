@@ -2,14 +2,48 @@ import { createCheckpointRecorder, isRunCheckpoint, type CheckpointRecorder, typ
 import type { ContextPressureTracker } from './context-pressure.js'
 import type { HumanBackend } from './human-backend.js'
 import type { LoadedGuild } from './loader.js'
+import { createRunBaseTracker, type RunBaseTracker } from './base-state.js'
 import { createRunParkTracker, type RunParkTracker } from './park-state.js'
 import type { RoleRegistry } from './role-registry.js'
 import type { RoleSnapshot, RoleSnapshotStore } from './role-snapshot.js'
+import type { SubprocessRunner } from './tools/subprocess-tool.js'
 import type { GuildConfig, ToolManifest, ToolResult } from './types.js'
 
 export function defined<T>(value: T | undefined, label: string): T {
 	if (value === undefined) throw new Error(`${label} is missing`)
 	return value
+}
+
+// The scripted subprocess runner shared by the git and executor tests: it records every call and returns the outcome scripted for that call's position, defaulting to a clean exit 0 with empty streams once the script is exhausted.
+export interface ScriptedSubprocessOutcome {
+	exitCode?: number | null
+	stdout?: string
+	stderr?: string
+	timedOut?: boolean
+	throwMessage?: string
+}
+
+export interface RecordedRunnerCall {
+	command: readonly string[]
+	cwd: string
+	timeoutMs: number
+}
+
+export function makeScriptedRunner(script: ScriptedSubprocessOutcome[]): SubprocessRunner & { calls: RecordedRunnerCall[] } {
+	const calls: RecordedRunnerCall[] = []
+	const runner: SubprocessRunner & { calls: RecordedRunnerCall[] } = async (options) => {
+		calls.push(options)
+		const scripted = script[calls.length - 1] ?? {}
+		if (scripted.throwMessage !== undefined) throw new Error(scripted.throwMessage)
+		return {
+			exitCode: scripted.exitCode !== undefined ? scripted.exitCode : 0,
+			stdout: scripted.stdout ?? '',
+			stderr: scripted.stderr ?? '',
+			timedOut: scripted.timedOut ?? false,
+		}
+	}
+	runner.calls = calls
+	return runner
 }
 
 // Yields to the event loop so a test can probe that a promise has not settled without sleeping on a real timer: each await drains the whole microtask queue (including microtasks queued while draining), so any settlement the code under test could have performed in the async flow has run by the time this returns. No macrotask ever runs — for code whose promises settle only through explicit calls and never timers, a real-timer grace wait adds latency without adding coverage.
@@ -79,7 +113,7 @@ export function createFakeRoleSnapshotStore(): RoleSnapshotStore {
 	}
 }
 
-export function createFakeCheckpointRecorder(roleRegistry: RoleRegistry, contextPressureTracker: ContextPressureTracker, parkTracker?: RunParkTracker, runId: string = 'test-run'): FakeCheckpointSink {
+export function createFakeCheckpointRecorder(roleRegistry: RoleRegistry, contextPressureTracker: ContextPressureTracker, parkTracker?: RunParkTracker, baseTracker?: RunBaseTracker, runId: string = 'test-run'): FakeCheckpointSink {
 	const checkpoints: RunCheckpoint[] = []
 	const recorder = createCheckpointRecorder({
 		writeCheckpoint: (checkpoint) => {
@@ -92,6 +126,7 @@ export function createFakeCheckpointRecorder(roleRegistry: RoleRegistry, context
 		roleRegistry,
 		contextPressureTracker,
 		parkTracker: parkTracker ?? createRunParkTracker(),
+		baseTracker: baseTracker ?? createRunBaseTracker(),
 	})
 	return { recorder, checkpoints }
 }

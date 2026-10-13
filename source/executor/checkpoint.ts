@@ -4,6 +4,7 @@ import { DEFAULT_LOG_LEVEL } from './log-level.js'
 import type { ContextPressureTracker } from './context-pressure.js'
 import type { EngineContext, RoleState } from './engine-state.js'
 import { isMessage, isToolCall } from './message-validation.js'
+import type { RunBaseTracker } from './base-state.js'
 import type { RunParkTracker } from './park-state.js'
 import type { WriteCheckpoint } from './persistence.js'
 import type { RoleRegistry, RoleRegistryEntry } from './role-registry.js'
@@ -42,7 +43,7 @@ export function entryFrameLogLevel(entryFrame: CheckpointFrame | undefined): Log
 	return entryFrame?.logLevel ?? DEFAULT_LOG_LEVEL
 }
 
-// The runnable state of a run, persisted so a service restart can resume it. Written atomically (temp file + rename) at every leaf safe point and on every role_finished, so the on-disk checkpoint is never torn and never more than one turn stale. `registryCounter` lets the resumed run mint fresh role-instance ids without colliding with the preserved ones; `learnedContextCeiling` carries the run's context-wall knowledge so resumed roles keep the tightened pressure threshold; `writeCapableStarted` carries the pre-write park rule's flag so a restart cannot reset it and park a run whose writes happened before the restart (docs/queueing.md "Parking: the pre-write rule").
+// The runnable state of a run, persisted so a service restart can resume it. Written atomically (temp file + rename) at every leaf safe point and on every role_finished, so the on-disk checkpoint is never torn and never more than one turn stale. `registryCounter` lets the resumed run mint fresh role-instance ids without colliding with the preserved ones; `learnedContextCeiling` carries the run's context-wall knowledge so resumed roles keep the tightened pressure threshold; `writeCapableStarted` carries the pre-write park rule's flag so a restart cannot reset it and park a run whose writes happened before the restart (docs/queueing.md "Parking: the pre-write rule"); `baseHash` carries the run's base commit so a restart keeps diffing against the same change set.
 export interface RunCheckpoint {
 	version: 1
 	runId: string
@@ -50,6 +51,7 @@ export interface RunCheckpoint {
 	registryCounter: number
 	learnedContextCeiling?: number
 	writeCapableStarted?: boolean
+	baseHash?: string
 	frames: CheckpointFrame[]
 }
 
@@ -118,6 +120,7 @@ export function isRunCheckpoint(value: unknown): value is RunCheckpoint {
 	if (!isNonNegativeInteger(value.registryCounter)) return false
 	if (value.learnedContextCeiling !== undefined && !isNonNegativeNumber(value.learnedContextCeiling)) return false
 	if (value.writeCapableStarted !== undefined && value.writeCapableStarted !== true) return false
+	if (value.baseHash !== undefined && (!isString(value.baseHash) || value.baseHash === '')) return false
 	if (!Array.isArray(value.frames) || value.frames.length === 0) return false
 	if (!value.frames.every(isCheckpointFrame)) return false
 	const frames: CheckpointFrame[] = value.frames
@@ -167,6 +170,8 @@ export interface CheckpointRecorderDependencies {
 	contextPressureTracker: ContextPressureTracker
 	// The run's park state (docs/queueing.md "Parking: the pre-write rule"): the write-capability flag rides the checkpoint like learnedContextCeiling rides the pressure tracker.
 	parkTracker: RunParkTracker
+	// The run's base commit state: the hash rides the checkpoint so a restart keeps diffing against the same change set.
+	baseTracker: RunBaseTracker
 }
 
 // The optional per-frame lineage source: a live context continuation on a fresh run, or the recorder's resume stamp when the context carries none. A continuation without a runId carries only the queue briefing — no lineage, so meta stays honest.
@@ -239,6 +244,7 @@ export function createCheckpointRecorder(dependencies: CheckpointRecorderDepende
 				registryCounter: dependencies.roleRegistry.counter(),
 				...(dependencies.contextPressureTracker.learnedCeiling !== undefined ? { learnedContextCeiling: dependencies.contextPressureTracker.learnedCeiling } : {}),
 				...(dependencies.parkTracker.writeCapableStarted ? { writeCapableStarted: true } : {}),
+				...(dependencies.baseTracker.baseHash !== undefined ? { baseHash: dependencies.baseTracker.baseHash } : {}),
 				frames: ordered.map((frame) => serializeFrame(frame, dependencies.continuesFrom)),
 			}
 			dependencies.writeCheckpoint(checkpoint)

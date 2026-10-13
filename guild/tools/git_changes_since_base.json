@@ -1,0 +1,44 @@
+{
+	"name": "git_changes_since_base",
+	"description": "List the workspace changes made since the run's base commit (recorded for the run at task start and advanced with git_set_base), including untracked files: a name-status list by default, one line per changed path, or the full unified diff — with the contents of untracked files — when includeDiff is true. Pass paths to limit the result to specific workspace-relative files or directories. If the workspace is not a git repository, it reports that plainly rather than failing. Read-only.",
+	"humanLabel": {
+		"detailed": ["Git Changes Since Base"],
+		"friendly": ["Changes Since Base"],
+		"whimsical": ["Delta Since the Line"]
+	},
+	"humanDescription": {
+		"detailed": ["Lists the changes made since the run's base commit, as a name-status list or a full diff."],
+		"friendly": ["See what changed since the base."],
+		"whimsical": ["Weigh the delta since the starting line."]
+	},
+	"humanCallLabel": {
+		"detailed": ["role {sourceRole} is invoking tool {destinationRole} (stack {stack})"],
+		"friendly": ["{source} is listing changes since the base"],
+		"whimsical": ["{source} is counting the changes since the base", "{source} is measuring the delta", "{source} is reading the run's ledger"]
+	},
+	"humanWorkingLabel": {
+		"detailed": ["tool {participantRole} is computing the changes since the base commit"],
+		"friendly": ["Computing changes since the base"],
+		"whimsical": ["Counting the changes since the base", "Measuring the delta", "Reading the run's ledger", "Comparing against the base"]
+	},
+	"parameters": {
+		"type": "object",
+		"properties": {
+			"paths": {
+				"type": "array",
+				"description": "Optional list of workspace-relative file or directory paths to limit the result to. If omitted, the whole repository is considered.",
+				"items": {
+					"type": "string"
+				}
+			},
+			"includeDiff": {
+				"type": "boolean",
+				"description": "Optional. When true, return the full unified diff instead of the name-status list; when false (the default), only the name-status list is returned."
+			},
+			"timeoutSeconds": {
+				"type": "number",
+				"description": "Optional timeout in seconds. Capped by the executor default tool timeout; a value above the cap is clamped to the cap."
+			}
+		}
+	}
+}

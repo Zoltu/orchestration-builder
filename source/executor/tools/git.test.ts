@@ -1,40 +1,10 @@
 import { describe, expect, test } from 'bun:test'
-import { createGitTools } from './git.ts'
+import { createGitTools, EMPTY_TREE_HASH } from './git.ts'
 import { type SubprocessRunner } from './subprocess-tool.ts'
 import type { ToolHandler } from '../tool-dispatch.ts'
-import { toolData } from '../test-fixtures.ts'
+import { createRunBaseTracker, type RunBaseTracker } from '../base-state.ts'
+import { makeScriptedRunner, toolData } from '../test-fixtures.ts'
 import { isObject } from '../validation.ts'
-
-interface RunnerCall {
-	command: readonly string[]
-	cwd: string
-	timeoutMs: number
-}
-
-interface ScriptedOutcome {
-	exitCode?: number | null
-	stdout?: string
-	stderr?: string
-	timedOut?: boolean
-	throwMessage?: string
-}
-
-function makeScriptedRunner(script: ScriptedOutcome[]): SubprocessRunner & { calls: RunnerCall[] } {
-	const calls: RunnerCall[] = []
-	const runner: SubprocessRunner & { calls: RunnerCall[] } = async (options) => {
-		calls.push(options)
-		const scripted = script[calls.length - 1] ?? {}
-		if (scripted.throwMessage !== undefined) throw new Error(scripted.throwMessage)
-		return {
-			exitCode: scripted.exitCode !== undefined ? scripted.exitCode : 0,
-			stdout: scripted.stdout ?? '',
-			stderr: scripted.stderr ?? '',
-			timedOut: scripted.timedOut ?? false,
-		}
-	}
-	runner.calls = calls
-	return runner
-}
 
 const WORKSPACE = '/fake/workspace'
 const DEFAULT_TIMEOUT_SECONDS = 30
@@ -57,25 +27,28 @@ function isGitSuccessData(value: unknown): value is GitSuccessData {
 	return true
 }
 
-function makeTools(runner: SubprocessRunner, ensureOrchestrationExcluded: () => void = () => {}): Record<string, ToolHandler> {
-	return createGitTools({ workspaceRoot: WORKSPACE, defaultToolTimeoutSeconds: DEFAULT_TIMEOUT_SECONDS, runner, ensureOrchestrationExcluded })
+function makeTools(runner: SubprocessRunner, ensureOrchestrationExcluded: () => void = () => {}, baseTracker: RunBaseTracker = createRunBaseTracker()): Record<string, ToolHandler> {
+	return createGitTools({ workspaceRoot: WORKSPACE, defaultToolTimeoutSeconds: DEFAULT_TIMEOUT_SECONDS, runner, ensureOrchestrationExcluded, baseTracker })
 }
 
 describe('createGitTools registration', () => {
-	test('registers exactly the six git tools', () => {
+	test('registers exactly the nine git tools', () => {
 		const tools = makeTools(makeScriptedRunner([]))
-		expect(Object.keys(tools).sort()).toEqual(['git_branch', 'git_commit', 'git_diff', 'git_init', 'git_log', 'git_status'])
+		expect(Object.keys(tools).sort()).toEqual(['git_branch', 'git_changes_since_base', 'git_commit', 'git_diff', 'git_init', 'git_log', 'git_set_base', 'git_status', 'git_uncommitted_changes'])
 	})
 
 	test('every operation invokes git directly and never a shell', async () => {
-		const runner = makeScriptedRunner([{}, {}, {}, {}, {}, {}, {}])
-		const tools = makeTools(runner)
+		const runner = makeScriptedRunner([{}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}])
+		const tools = makeTools(runner, () => {}, createRunBaseTracker('base-hash'))
 		await tools['git_status']?.({})
 		await tools['git_log']?.({})
 		await tools['git_diff']?.({})
 		await tools['git_init']?.({})
 		await tools['git_commit']?.({ message: 'm' })
 		await tools['git_branch']?.({ name: 'b' })
+		await tools['git_set_base']?.({ ref: 'main' })
+		await tools['git_changes_since_base']?.({})
+		await tools['git_uncommitted_changes']?.({})
 		for (const call of runner.calls) {
 			expect(call.command[0]).toBe('git')
 			expect(call.command.includes('sh')).toBe(false)
@@ -255,6 +228,258 @@ describe('git_diff', () => {
 		expect((await tools['git_diff']?.({ paths: 'src/a.ts' }))?.kind).toBe('invalid_arguments')
 		expect((await tools['git_diff']?.({ staged: 'yes' }))?.kind).toBe('invalid_arguments')
 		expect(runner.calls).toHaveLength(0)
+	})
+})
+
+describe('git_set_base', () => {
+	test('defaults the ref to HEAD and records the resolved commit hash', async () => {
+		const baseTracker = createRunBaseTracker()
+		const runner = makeScriptedRunner([{ exitCode: 0, stdout: 'abc123\n' }])
+		const tools = makeTools(runner, () => {}, baseTracker)
+		const result = await tools['git_set_base']?.({})
+		expect(result?.kind).toBe('success')
+		const data = toolData(result ?? { kind: 'invalid_arguments' }, isGitSuccessData)
+		expect(data.stdout).toBe('abc123')
+		expect(runner.calls[0]?.command).toEqual([...EXPECTED_PREFIX, 'rev-parse', '--verify', '--end-of-options', 'HEAD^{commit}'])
+		expect(runner.calls[0]?.cwd).toBe(WORKSPACE)
+		expect(runner.calls[0]?.timeoutMs).toBe(DEFAULT_TIMEOUT_SECONDS * 1000)
+		expect(baseTracker.baseHash).toBe('abc123')
+	})
+
+	test('resolves an explicit ref and replaces an existing base', async () => {
+		const baseTracker = createRunBaseTracker('old-hash')
+		const runner = makeScriptedRunner([{ exitCode: 0, stdout: 'new-hash\n' }])
+		const tools = makeTools(runner, () => {}, baseTracker)
+		await tools['git_set_base']?.({ ref: 'feature/x' })
+		expect(runner.calls[0]?.command).toEqual([...EXPECTED_PREFIX, 'rev-parse', '--verify', '--end-of-options', 'feature/x^{commit}'])
+		expect(baseTracker.baseHash).toBe('new-hash')
+	})
+
+	test('rejects an invalid ref without spawning', async () => {
+		const runner = makeScriptedRunner([])
+		const tools = makeTools(runner)
+		const invalidRefs: unknown[] = ['', '-x', 'a b', 'HEAD~1', 'a:b', 'a^b', 'a?b', 'a*b', 'a[b', 42]
+		for (const ref of invalidRefs) {
+			expect((await tools['git_set_base']?.({ ref }))?.kind).toBe('invalid_arguments')
+		}
+		expect(runner.calls).toHaveLength(0)
+	})
+
+	test('surfaces a not-a-repository failure as an invalid_arguments error', async () => {
+		const runner = makeScriptedRunner([{ exitCode: 128, stderr: 'fatal: not a git repository (or any of the parent directories): .git' }])
+		const tools = makeTools(runner)
+		const result = await tools['git_set_base']?.({})
+		expect(result?.kind).toBe('invalid_arguments')
+		if (result?.kind === 'invalid_arguments') expect(result.message).toContain('not a git repository')
+	})
+
+	test('fails fast when git resolves an empty hash', async () => {
+		const runner = makeScriptedRunner([{ exitCode: 0, stdout: '' }])
+		const tools = makeTools(runner)
+		const result = await tools['git_set_base']?.({})
+		expect(result?.kind).toBe('invalid_arguments')
+	})
+})
+
+describe('git_changes_since_base', () => {
+	test('reports a success sentence without spawning when no base is recorded', async () => {
+		const runner = makeScriptedRunner([])
+		const tools = makeTools(runner)
+		const result = await tools['git_changes_since_base']?.({})
+		expect(result?.kind).toBe('success')
+		const data = toolData(result ?? { kind: 'invalid_arguments' }, isGitSuccessData)
+		expect(data.stdout).toContain('No base commit is recorded')
+		expect(runner.calls).toHaveLength(0)
+	})
+
+	test('lists untracked files alongside tracked changes in name-status mode', async () => {
+		const runner = makeScriptedRunner([
+			{ exitCode: 0, stdout: 'M\tsrc/a.ts\n' },
+			{ exitCode: 0, stdout: 'new.txt\n' },
+		])
+		const tools = makeTools(runner, () => {}, createRunBaseTracker('base-hash'))
+		const result = await tools['git_changes_since_base']?.({})
+		expect(result?.kind).toBe('success')
+		const data = toolData(result ?? { kind: 'invalid_arguments' }, isGitSuccessData)
+		expect(data.stdout).toBe('M\tsrc/a.ts\n??\tnew.txt')
+		expect(runner.calls[1]?.command).toEqual([...EXPECTED_PREFIX, 'ls-files', '--others', '--exclude-standard'])
+	})
+
+	test('lists an untracked-only change set', async () => {
+		const runner = makeScriptedRunner([
+			{ exitCode: 0, stdout: '' },
+			{ exitCode: 0, stdout: 'new.txt\n' },
+		])
+		const tools = makeTools(runner, () => {}, createRunBaseTracker('base-hash'))
+		const result = await tools['git_changes_since_base']?.({})
+		expect(result?.kind).toBe('success')
+		const data = toolData(result ?? { kind: 'invalid_arguments' }, isGitSuccessData)
+		expect(data.stdout).toBe('??\tnew.txt')
+	})
+
+	test('forwards pathspecs to the untracked listing', async () => {
+		const runner = makeScriptedRunner([
+			{ exitCode: 0, stdout: '' },
+			{ exitCode: 0, stdout: '' },
+		])
+		const tools = makeTools(runner, () => {}, createRunBaseTracker('base-hash'))
+		await tools['git_changes_since_base']?.({ paths: ['src'] })
+		expect(runner.calls[1]?.command).toEqual([...EXPECTED_PREFIX, 'ls-files', '--others', '--exclude-standard', '--', 'src'])
+	})
+
+	test('includes untracked file contents in includeDiff mode', async () => {
+		const runner = makeScriptedRunner([
+			{ exitCode: 0, stdout: 'diff --git a/src/a.ts b/src/a.ts\n' },
+			{ exitCode: 0, stdout: 'new.txt\n' },
+			{ exitCode: 1, stdout: 'diff --git a/dev/null b/new.txt\n+hello\n' },
+		])
+		const tools = makeTools(runner, () => {}, createRunBaseTracker('base-hash'))
+		const result = await tools['git_changes_since_base']?.({ includeDiff: true })
+		expect(result?.kind).toBe('success')
+		const data = toolData(result ?? { kind: 'invalid_arguments' }, isGitSuccessData)
+		expect(data.stdout).toContain('diff --git a/src/a.ts b/src/a.ts')
+		expect(data.stdout).toContain('+hello')
+		expect(runner.calls[2]?.command).toEqual([...EXPECTED_PREFIX, 'diff', '--no-ext-diff', '--no-textconv', '--no-index', '--', '/dev/null', 'new.txt'])
+	})
+
+	test('filters untracked paths that escape the workspace', async () => {
+		const runner = makeScriptedRunner([
+			{ exitCode: 0, stdout: '' },
+			{ exitCode: 0, stdout: '.orchestration/secret\n../escape\nnew.txt\n' },
+		])
+		const tools = makeTools(runner, () => {}, createRunBaseTracker('base-hash'))
+		const result = await tools['git_changes_since_base']?.({})
+		expect(result?.kind).toBe('success')
+		const data = toolData(result ?? { kind: 'invalid_arguments' }, isGitSuccessData)
+		expect(data.stdout).toBe('??\tnew.txt')
+	})
+
+	test('caps the number of untracked file contents diffed and notes the omission', async () => {
+		const untrackedDiffCap = 10
+		const untrackedPaths = Array.from({ length: untrackedDiffCap + 2 }, (_, index) => `file-${index}.txt`)
+		const runner = makeScriptedRunner([
+			{ exitCode: 0, stdout: '' },
+			{ exitCode: 0, stdout: `${untrackedPaths.join('\n')}\n` },
+			...untrackedPaths.slice(0, untrackedDiffCap).map((untrackedPath) => ({ exitCode: 1, stdout: `diff --git a/dev/null b/${untrackedPath}\n+content\n` })),
+		])
+		const tools = makeTools(runner, () => {}, createRunBaseTracker('base-hash'))
+		const result = await tools['git_changes_since_base']?.({ includeDiff: true })
+		expect(result?.kind).toBe('success')
+		const data = toolData(result ?? { kind: 'invalid_arguments' }, isGitSuccessData)
+		expect(data.stdout).toContain('2 more untracked file diffs omitted')
+		// The tracked diff, the single ls-files call, and exactly the capped number of no-index diffs — nothing beyond the cap.
+		expect(runner.calls).toHaveLength(2 + untrackedDiffCap)
+	})
+
+	test('diffs against the recorded base with --name-status by default', async () => {
+		const runner = makeScriptedRunner([{ exitCode: 0, stdout: 'M\tsrc/a.ts\n' }])
+		const tools = makeTools(runner, () => {}, createRunBaseTracker('base-hash'))
+		const result = await tools['git_changes_since_base']?.({})
+		expect(result?.kind).toBe('success')
+		expect(runner.calls[0]?.command).toEqual([...EXPECTED_PREFIX, 'diff', '--no-ext-diff', '--no-textconv', '--name-status', 'base-hash'])
+		expect(runner.calls[0]?.cwd).toBe(WORKSPACE)
+		expect(runner.calls[0]?.timeoutMs).toBe(DEFAULT_TIMEOUT_SECONDS * 1000)
+	})
+
+	test('omits --name-status and forwards pathspecs when includeDiff is set', async () => {
+		const runner = makeScriptedRunner([{ exitCode: 0 }])
+		const tools = makeTools(runner, () => {}, createRunBaseTracker('base-hash'))
+		await tools['git_changes_since_base']?.({ includeDiff: true, paths: ['src/a.ts'] })
+		expect(runner.calls[0]?.command).toEqual([...EXPECTED_PREFIX, 'diff', '--no-ext-diff', '--no-textconv', 'base-hash', '--', 'src/a.ts'])
+	})
+
+	test('rejects unsafe paths and a non-boolean includeDiff without spawning', async () => {
+		const runner = makeScriptedRunner([])
+		const tools = makeTools(runner, () => {}, createRunBaseTracker('base-hash'))
+		expect((await tools['git_changes_since_base']?.({ paths: ['../secret'] }))?.kind).toBe('invalid_arguments')
+		expect((await tools['git_changes_since_base']?.({ includeDiff: 'yes' }))?.kind).toBe('invalid_arguments')
+		expect(runner.calls).toHaveLength(0)
+	})
+})
+
+describe('git_uncommitted_changes', () => {
+	test('reports a success sentence without a diff when the workspace is not a repository', async () => {
+		const runner = makeScriptedRunner([{ exitCode: 128, stderr: 'fatal: not a git repository' }])
+		const tools = makeTools(runner)
+		const result = await tools['git_uncommitted_changes']?.({})
+		expect(result?.kind).toBe('success')
+		const data = toolData(result ?? { kind: 'invalid_arguments' }, isGitSuccessData)
+		expect(data.stdout).toContain('not a git repository')
+		expect(runner.calls).toHaveLength(1)
+		expect(runner.calls[0]?.command).toEqual([...EXPECTED_PREFIX, 'rev-parse', '--is-inside-work-tree'])
+	})
+
+	test('diffs HEAD with --name-status by default', async () => {
+		const runner = makeScriptedRunner([
+			{ exitCode: 0, stdout: 'true\n' },
+			{ exitCode: 0, stdout: 'abc123\n' },
+			{ exitCode: 0, stdout: ' M src/a.ts\n' },
+		])
+		const tools = makeTools(runner)
+		const result = await tools['git_uncommitted_changes']?.({})
+		expect(result?.kind).toBe('success')
+		expect(runner.calls[1]?.command).toEqual([...EXPECTED_PREFIX, 'rev-parse', '--verify', '--end-of-options', 'HEAD^{commit}'])
+		expect(runner.calls[2]?.command).toEqual([...EXPECTED_PREFIX, 'diff', '--no-ext-diff', '--no-textconv', '--name-status', 'HEAD'])
+		expect(runner.calls[2]?.cwd).toBe(WORKSPACE)
+		expect(runner.calls[2]?.timeoutMs).toBe(DEFAULT_TIMEOUT_SECONDS * 1000)
+	})
+
+	test('uses the empty tree when HEAD is unborn', async () => {
+		const runner = makeScriptedRunner([
+			{ exitCode: 0, stdout: 'true\n' },
+			{ exitCode: 128, stderr: 'fatal: Needed a single revision' },
+			{ exitCode: 0, stdout: '' },
+		])
+		const tools = makeTools(runner)
+		await tools['git_uncommitted_changes']?.({})
+		expect(runner.calls[2]?.command).toEqual([...EXPECTED_PREFIX, 'diff', '--no-ext-diff', '--no-textconv', '--name-status', EMPTY_TREE_HASH])
+	})
+
+	test('omits --name-status and forwards pathspecs when includeDiff is set', async () => {
+		const runner = makeScriptedRunner([
+			{ exitCode: 0, stdout: 'true\n' },
+			{ exitCode: 0, stdout: 'abc123\n' },
+			{ exitCode: 0 },
+		])
+		const tools = makeTools(runner)
+		await tools['git_uncommitted_changes']?.({ includeDiff: true, paths: ['src/a.ts'] })
+		expect(runner.calls[2]?.command).toEqual([...EXPECTED_PREFIX, 'diff', '--no-ext-diff', '--no-textconv', 'HEAD', '--', 'src/a.ts'])
+	})
+
+	test('rejects unsafe paths without spawning', async () => {
+		const runner = makeScriptedRunner([])
+		const tools = makeTools(runner)
+		expect((await tools['git_uncommitted_changes']?.({ paths: ['../secret'] }))?.kind).toBe('invalid_arguments')
+		expect(runner.calls).toHaveLength(0)
+	})
+
+	test('lists untracked files alongside uncommitted changes', async () => {
+		const runner = makeScriptedRunner([
+			{ exitCode: 0, stdout: 'true\n' },
+			{ exitCode: 0, stdout: 'abc123\n' },
+			{ exitCode: 0, stdout: ' M src/a.ts\n' },
+			{ exitCode: 0, stdout: 'new.txt\n' },
+		])
+		const tools = makeTools(runner)
+		const result = await tools['git_uncommitted_changes']?.({})
+		expect(result?.kind).toBe('success')
+		const data = toolData(result ?? { kind: 'invalid_arguments' }, isGitSuccessData)
+		expect(data.stdout).toBe(' M src/a.ts\n??\tnew.txt')
+	})
+
+	test('includes untracked file contents in includeDiff mode', async () => {
+		const runner = makeScriptedRunner([
+			{ exitCode: 0, stdout: 'true\n' },
+			{ exitCode: 0, stdout: 'abc123\n' },
+			{ exitCode: 0, stdout: 'diff --git a/src/a.ts b/src/a.ts\n' },
+			{ exitCode: 0, stdout: 'new.txt\n' },
+			{ exitCode: 1, stdout: 'diff --git a/dev/null b/new.txt\n+hello\n' },
+		])
+		const tools = makeTools(runner)
+		const result = await tools['git_uncommitted_changes']?.({ includeDiff: true })
+		expect(result?.kind).toBe('success')
+		const data = toolData(result ?? { kind: 'invalid_arguments' }, isGitSuccessData)
+		expect(data.stdout).toContain('+hello')
 	})
 })
 

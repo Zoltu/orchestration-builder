@@ -6,6 +6,7 @@ import type { LoadedGuild } from './loader.js'
 import type { LlmCaller } from './llm.js'
 import type { AppendLog } from './persistence.js'
 import type { ReadProjectDoc } from './project-docs.js'
+import type { RunBaseTracker } from './base-state.js'
 import type { RunParkTracker } from './park-state.js'
 import type { RecentToolCall } from './role-inspection.js'
 import type { RoleRegistry } from './role-registry.js'
@@ -48,6 +49,8 @@ export interface EngineContext {
 	logLevel?: LogLevel
 	// The prior run this run continues, set only on the entry-role context by runExecutor. Like effort, it rides the context spread to children but the briefing is gated on depth 0 in buildInitialHistory, so the continuation block appears only in the entry role's initial history — exactly once per run. Never set on resume: the composed history is already checkpointed, so re-deriving the briefing would duplicate it.
 	continuation?: RunContinuation
+	// The one-line git notice describing the workspace's starting state (git-state.ts), set only on the entry-role context by runExecutor. Like effort and continuation it rides the context spread to children, but buildInitialHistory gates its injection on depth 0, so it appears once in the entry role's initial history and is never re-derived on resume. Undefined when there is nothing to say (no repository, or the read failed).
+	workspaceGitNotice?: string
 	// The calling role's name, omitted for the entry role at depth 0 so a reviewer can distinguish a root role from a child and render.ts can build the parent→child tree.
 	parent?: string
 	// The calling role's instance id, omitted for the entry role. Lets the interrupt platform walk the live delegation chain (plan-modification routing).
@@ -69,6 +72,8 @@ export interface EngineDependencies {
 	checkpointRecorder: CheckpointRecorder
 	// The run-scoped park state (docs/queueing.md "Parking: the pre-write rule"), created per run by runExecutor: the ask handler parks pre-write asks into it and the engine checks the mark at every safe point.
 	parkTracker: RunParkTracker
+	// The run-scoped base commit state, created per run by runExecutor: git_set_base moves it and the diff tools read it, and it rides the checkpoint so a restart keeps diffing against the same change set.
+	baseTracker: RunBaseTracker
 	// The run-scoped delta publisher: a leaf bound to the active run by the service (serve.ts's withRunBindings), so every streamed turn text carries the run's identity.
 	publishDelta: (delta: RoleDelta) => void
 	// The per-run store of finished child conversations, so a parent can continue a finished child as a new seeded instance across a restart (the live registry does not survive one).

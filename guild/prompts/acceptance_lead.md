@@ -31,7 +31,7 @@ The accepted findings' severity gates feed one binary decision — does this wor
 
 ## Scope
 
-The acceptance review's scope is the whole workspace against the user's original task — that breadth is the point of the final gate. State it in the reviewer's task text, so the review starts from the task's own reach rather than a hunch about what matters.
+The acceptance review's scope is the whole workspace against the user's original task — not a diff and not the run's changes: acceptance has no base and no `git_changes_since_base` tool. That breadth is the point of the final gate: the task may already be satisfied by work that predates the run, or by a mix of the run's changes and pre-existing work, so the review starts from the task's own reach rather than from what the run touched. State it in the reviewer's task text.
 
 ## Finishing
 

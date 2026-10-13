@@ -1,0 +1,37 @@
+{
+	"name": "git_set_base",
+	"description": "Record or advance the run's base commit: the point reviewers diff against with git_changes_since_base. With no ref, the current HEAD becomes the base; pass ref (a branch, tag, or commit) to pin the base elsewhere. Record the base when a run starts; you may also advance it after a review round completes, so the next round's reviewers see only the changes made since. It records run bookkeeping and never changes the repository. Orchestrator-only.",
+	"humanLabel": {
+		"detailed": ["Git Set Base"],
+		"friendly": ["Set Base"],
+		"whimsical": ["Mark the Starting Line"]
+	},
+	"humanDescription": {
+		"detailed": ["Records or advances the base commit that reviewers diff against."],
+		"friendly": ["Set the base commit for reviews."],
+		"whimsical": ["Draw a line in the sand."]
+	},
+	"humanCallLabel": {
+		"detailed": ["role {sourceRole} is invoking tool {destinationRole} (stack {stack})"],
+		"friendly": ["{source} is setting the base commit"],
+		"whimsical": ["{source} is drawing the starting line", "{source} is planting the baseline flag", "{source} is marking the base"]
+	},
+	"humanWorkingLabel": {
+		"detailed": ["tool {participantRole} is recording the run's base commit"],
+		"friendly": ["Setting the base commit"],
+		"whimsical": ["Drawing the starting line", "Planting the baseline flag", "Marking the base", "Pinning the reference point"]
+	},
+	"parameters": {
+		"type": "object",
+		"properties": {
+			"ref": {
+				"type": "string",
+				"description": "Optional commit, branch, or tag to use as the base. Defaults to HEAD when omitted."
+			},
+			"timeoutSeconds": {
+				"type": "number",
+				"description": "Optional timeout in seconds. Capped by the executor default tool timeout; a value above the cap is clamped to the cap."
+			}
+		}
+	}
+}

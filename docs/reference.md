@@ -135,6 +135,7 @@ The second path is explicit: `POST /api/runs/:id/resume` re-enters an **error**-
 
 - `role_start` — `{ role, roleId, depth, task, parent?, parentRoleId?, continuedFrom? }`. Emitted when a role begins, after its definition is confirmed to exist and the instance is registered. `roleId` is the role-instance id (see "Interrupt platform"); `parent` is the calling role's name and `parentRoleId` its instance id, both omitted for the entry role at depth 0; `continuedFrom` is present only on an instance started by `continue_agent` and names the finished instance it was seeded from. A refused `agent` call (depth exceeded or unknown child) emits no `role_start` for the never-run child.
 - `effort_set` — `{ effort }`. Emitted once at run start, before the entry role begins, recording the run's chosen effort tier (`quick`, `standard`, or `thorough`; see "Effort channel").
+- `workspace_dirty_at_start` — `{ count }`. Emitted once at run start when the workspace's git repository has uncommitted changes, carrying their count; the entry role's git-state notice tells it to familiarize itself with them before planning (see "Git tools"). Not emitted for a clean repository or a non-repository.
 - `role_finished` — `{ role, roleId, depth, status, summary?, error?, parent? }`. Emitted when a role returns a final card. `status` is the `ResultCard` status; `summary` is the role's own explanation of its result (so a reviewer reading only the log can see why a role errored, rather than only that it did); `error` is the structured `{ kind, message?, details? }` when the card carried one; `parent` is omitted for the entry role. Every `role_start` is paired with exactly one `role_finished`.
 - `agent_call` — `{ parent, child, depth }`. Emitted when the `agent` or `continue_agent` tool is invoked, before the child runs, carrying the parent→child edge even for callers that do not read `role_start` (a continuation is additionally marked by `continuedFrom` on the child's `role_start`).
 - `llm_call_start` — `{ role, roleId }`. Emitted immediately before the LLM request is dispatched, on every turn (including the paths that later fail: `llm_unavailable` and `context_budget_exceeded`). It marks the turn in flight the moment the request is sent, so the flow view can end the call's transit phase (flowing edge → solid) when the callee begins working rather than when the response completes. `roleId` is the role-instance id the `role_start` event carries, so the in-flight turn is attributable to its instance; the full turn (message list, response, usage) lands in the succeeding `llm_call`.
@@ -243,11 +244,13 @@ The success payload is an array with one entry per completed command: `{ command
 
 ### Git tools
 
-Six git tools give a role a narrow, safe version-control surface.
-They run `git` directly with a fixed argv — never through a shell — and share one safety posture: only read-only operations plus `init`, `commit`, and branch-at-HEAD; no history rewrite, no checkout or switch, no remote, push, fetch, or pull, no branch delete or force.
+Nine git tools give roles a narrow, safe version-control surface.
+They run `git` directly with a fixed argv — never through a shell — and share one safety posture: only read-only operations plus `init`, `commit`, branch-at-HEAD, and a run-scoped base move; no history rewrite, no checkout or switch, no remote, push, fetch, or pull, no branch delete or force.
 Hooks and the fsmonitor hook are disabled (`core.hooksPath=/dev/null`, `core.fsmonitor=false`), the identity is pinned (`user.name=Adaptive Orchestrator`, `user.email=orchestrator@localhost`), and signing is off (`commit.gpgsign=false`), so a commit never depends on the workspace's own configuration.
 On success each returns the captured `{ exitCode, stdout, stderr }`; a non-zero exit is an `invalid_arguments` error carrying git's own stderr, a timeout is `timeout`, and a spawn failure is `unavailable`.
 Every tool also accepts an optional `timeoutSeconds`, capped by `executor.defaultToolTimeoutSeconds`; the parameters below are the tool-specific ones.
+
+The orchestrator holds these seven — the baseline, commit, and branch tools plus `git_set_base` — so it can take a baseline, commit work as it proceeds, branch before a risky change, and move the run's base:
 
 - `git_status` — no tool-specific parameters. Runs `git status --porcelain=v1 --branch --untracked-files=normal`; read-only.
 - `git_log` — optional `count` (a positive integer, default `20`, max `100`). Runs `git log --oneline --decorate -n <count>`; read-only.
@@ -255,8 +258,34 @@ Every tool also accepts an optional `timeoutSeconds`, capped by `executor.defaul
 - `git_init` — no tool-specific parameters. Runs `git init`, then re-ensures the `.orchestration` exclusion so run bookkeeping is never staged or committed even on a fresh workspace; safe when a repository already exists.
 - `git_commit` — required `message` (a non-empty string of at most 1000 characters with no NUL). Stages the entire working tree (`git add -A`) and commits on the current branch (`git commit -m <message>`); it never amends. If there is nothing to commit it returns a normal success explaining so.
 - `git_branch` — required `name` (a valid git branch name). Runs `git branch -- <name>`; creates the branch at the current HEAD but does not switch to it, and fails if the branch already exists or HEAD is unborn (no commits yet).
+- `git_set_base` — optional `ref` (a branch, tag, or commit; HEAD when omitted). Resolves `ref` to a commit hash and records it as the run's base commit; a ref that does not resolve is an `invalid_arguments` error. It changes run bookkeeping, not the repository.
 
-The seed Guild grants these tools to the `orchestrator` role only; they are a guardrail for the orchestrator's behavior, not a containment boundary (see [`docs/security.md`](security.md) "Git tool policy").
+Two read-only change-set tools let the review and summarizer roles inspect the run's changes without a write path:
+
+- `git_changes_since_base` — optional `paths` (validated like `git_diff`'s), optional `includeDiff` (boolean, default `false`). Lists the paths changed since the run's base commit — tracked modifications plus untracked files, the latter marked `??` — as a name-status list by default, or the full unified diff, including the contents of untracked files, when `includeDiff` is `true`; read-only. Held by the architecture, style, and security reviewers.
+- `git_uncommitted_changes` — optional `paths` (validated like `git_diff`'s), optional `includeDiff` (boolean, default `false`). The same name-status list or full diff, for the workspace's staged, unstaged, and untracked changes against HEAD — resolved per call, using the git empty tree when HEAD is unborn, so it still works after a mid-run `git_init`; read-only. Held by the `change_summarizer` role, a read-only role the orchestrator may delegate to for a commit message derived from the diff.
+
+#### The base commit
+
+Every run has a base commit — the point its reviewers measure the run's changes against.
+The executor records HEAD as the base when the task starts; when HEAD is unborn (a repository with no commits) the base is the git empty tree, so a fresh repository still yields a full change set; when the workspace is not a git repository there is no base.
+When the workspace is a repository, it reads the git state once before the entry role starts and appends a one-line advisory notice to that role's initial user message — a prompt to handle the dirty state when there are uncommitted changes (no HEAD sha), a note that there are no commits yet when HEAD is unborn, or the short HEAD when the tree is clean — logging `workspace_dirty_at_start` when it is dirty.
+The base is persisted in the run checkpoint, so a resumed run keeps the base it started with.
+The orchestrator may move the base with `git_set_base` — a hint, not a requirement, is to advance it after a review round completes, so the next round's reviewers see only the changes made since.
+
+The review roles read the change set because the seed Guild reviews on a consolidated cadence: the orchestrator implements every plan step, then runs one architecture/style/security review pass scoped to the run's accumulated changes, then the final acceptance review.
+It may add one interim consolidated review at a milestone when foundation risk warrants it — a new subsystem, a risky integration, an unfamiliar domain, or a `needs replan:`/`needs refactor:` signal from a child — and it runs no per-step review.
+The orchestrator commits after every meaningful unit of work, not only after review, and may delegate a commit message to the `change_summarizer` when it wants the message derived from the diff.
+Acceptance reviews the whole workspace and holds no git tool.
+
+#### Degradation without git
+
+The git surface degrades gracefully, and the notice is advisory — the probe never throws and a run never depends on git being present.
+A tool that spawns `git` returns an `unavailable` result when the process cannot be started, rather than erroring.
+The two change-set tools instead report a plain sentence when there is nothing to diff — `git_changes_since_base` when no base was recorded (the workspace is not a repository), and `git_uncommitted_changes` when its probe cannot confirm a repository — and neither errors.
+When the workspace is not a repository, the executor injects no git-state notice.
+
+The seed Guild grants the tools that change the repository and `git_set_base` to the `orchestrator` role only, and the two read-only change-set tools to the review and summarizer roles as above; they are a guardrail for those roles' behavior, not a containment boundary (see [`docs/security.md`](security.md) "Git tool policy").
 
 ## Guild format
 

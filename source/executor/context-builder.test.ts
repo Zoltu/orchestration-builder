@@ -120,6 +120,14 @@ describe('buildInitialHistory', () => {
 		const history = initialHistory('sys', contextFor({ continuation: { task: 'prior', summary: '' } }))
 		expect(history).toEqual(initialMessages('sys', 'do it'))
 	})
+
+	test('the entry role receives the workspace git notice, and a child inheriting it does not', () => {
+		const notice = 'The workspace git repository is clean at abc1234.'
+		const entry = initialHistory('sys', contextFor({ workspaceGitNotice: notice }))
+		expect(defined(entry[1], 'initial user message').content).toBe(`do it\n\n${notice}`)
+		const child = initialHistory('child prompt', contextFor({ depth: 1, parent: 'main', workspaceGitNotice: notice }))
+		expect(child).toEqual(initialMessages('child prompt', 'do it'))
+	})
 })
 
 describe('buildInitialHistory — project context', () => {

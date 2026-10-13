@@ -4,6 +4,7 @@
 import * as fs from 'node:fs'
 import * as path from 'node:path'
 import { parseEvalConfig, type EvalConfig } from '../benchmarks/validation.js'
+import { createRunBaseTracker } from '../executor/base-state.js'
 import { createBuiltInToolHandlers } from '../executor/builtin-tools.js'
 import { ERROR_KINDS } from '../executor/errors.js'
 import { composeRolePrompt, createGuildLoader, type LoadedGuildFiles } from '../executor/loader.js'
@@ -64,7 +65,7 @@ function checkRotatingTieredText(label: string, value: HumanFacingText | undefin
 }
 
 const expectedRoles = [
-	'orchestrator', 'planner', 'coder', 'researcher',
+	'orchestrator', 'planner', 'coder', 'researcher', 'change_summarizer',
 	'architecture_lead', 'architecture_reviewer',
 	'style_lead', 'style_reviewer', 'style_guide_author',
 	'security_lead', 'security_reviewer',
@@ -77,11 +78,12 @@ const expectedToolNames = new Set([
 	'list_directory', 'glob_files', 'read_file', 'read_file_partial', 'search_text', 'write_file', 'read_plan', 'write_plan', 'read_style_guide', 'write_style_guide', 'fetch_url', 'typecheck', 'test',
 	'run_shell', 'repo_map', 'web_search',
 	'git_status', 'git_log', 'git_diff', 'git_init', 'git_commit', 'git_branch',
+	'git_set_base', 'git_changes_since_base', 'git_uncommitted_changes',
 	'read_run_log', 'search_run_log',
 	'trigger_interrupt', 'list_role_messages', 'read_message_window', 'search_role_blocks', 'recent_role_tool_calls',
 ])
 
-const nativeToolNames = new Set(['list_directory', 'glob_files', 'read_file', 'read_file_partial', 'search_text', 'write_file', 'read_plan', 'write_plan', 'read_style_guide', 'write_style_guide', 'read_run_log', 'search_run_log', 'fetch_url', 'typecheck', 'test', 'run_shell', 'repo_map', 'web_search', 'git_status', 'git_log', 'git_diff', 'git_init', 'git_commit', 'git_branch'])
+const nativeToolNames = new Set(['list_directory', 'glob_files', 'read_file', 'read_file_partial', 'search_text', 'write_file', 'read_plan', 'write_plan', 'read_style_guide', 'write_style_guide', 'read_run_log', 'search_run_log', 'fetch_url', 'typecheck', 'test', 'run_shell', 'repo_map', 'web_search', 'git_status', 'git_log', 'git_diff', 'git_init', 'git_commit', 'git_branch', 'git_set_base', 'git_changes_since_base', 'git_uncommitted_changes'])
 
 const builtInToolNames = new Set(['agent', 'continue_agent', 'finish', 'context_info', 'edit_context', 'ask_human', 'trigger_interrupt', 'list_role_messages', 'read_message_window', 'search_role_blocks', 'recent_role_tool_calls'])
 
@@ -118,6 +120,9 @@ const expectedSignatures: ExpectedSignature[] = [
 	{ file: 'git_init.json', required: [], properties: ['timeoutSeconds'], propertyTypes: { timeoutSeconds: 'number' } },
 	{ file: 'git_commit.json', required: ['message'], properties: ['message', 'timeoutSeconds'], propertyTypes: { message: 'string', timeoutSeconds: 'number' } },
 	{ file: 'git_branch.json', required: ['name'], properties: ['name', 'timeoutSeconds'], propertyTypes: { name: 'string', timeoutSeconds: 'number' } },
+	{ file: 'git_set_base.json', required: [], properties: ['ref', 'timeoutSeconds'], propertyTypes: { ref: 'string', timeoutSeconds: 'number' } },
+	{ file: 'git_changes_since_base.json', required: [], properties: ['paths', 'includeDiff', 'timeoutSeconds'], propertyTypes: { paths: 'array', includeDiff: 'boolean', timeoutSeconds: 'number' } },
+	{ file: 'git_uncommitted_changes.json', required: [], properties: ['paths', 'includeDiff', 'timeoutSeconds'], propertyTypes: { paths: 'array', includeDiff: 'boolean', timeoutSeconds: 'number' } },
 	{ file: 'trigger_interrupt.json', required: ['targetRole', 'action', 'reason'], properties: ['targetRole', 'action', 'reason'] },
 	{ file: 'list_role_messages.json', required: ['targetRole'], properties: ['targetRole'] },
 	{ file: 'read_message_window.json', required: ['targetRole', 'index', 'field', 'start', 'end'], properties: ['targetRole', 'index', 'field', 'start', 'end'] },
@@ -310,6 +315,35 @@ function checkGuild(loaded: LoadedGuildFiles): void {
 			check(!styleGuideAuthor.tools.includes(mutatingTool), `guild: style_guide_author must not hold workspace-mutating tool "${mutatingTool}"`)
 		}
 	}
+	// The base and change-set tools are split by role — only the orchestrator moves the run's base, the three review roles read the change set since it, and the summarizer reads the uncommitted change set — so a role silently gaining or losing one of them fails the gate.
+	const orchestratorRole = config.roles['orchestrator']
+	if (orchestratorRole === undefined) {
+		failures.push('guild: missing role "orchestrator"')
+	} else {
+		check(orchestratorRole.tools.includes('git_set_base'), 'guild: orchestrator must hold "git_set_base"')
+		check(!orchestratorRole.tools.includes('git_changes_since_base') && !orchestratorRole.tools.includes('git_uncommitted_changes'), 'guild: orchestrator must not hold the read-only change-set tools')
+	}
+	for (const role of ['architecture_reviewer', 'style_reviewer', 'security_reviewer']) {
+		const reviewer = config.roles[role]
+		if (reviewer === undefined) continue
+		check(reviewer.tools.includes('git_changes_since_base'), `guild: reviewer "${role}" must hold "git_changes_since_base"`)
+	}
+	const changeSummarizer = config.roles['change_summarizer']
+	if (changeSummarizer === undefined) {
+		failures.push('guild: missing role "change_summarizer"')
+	} else {
+		checkSameSet('guild: change_summarizer tools', new Set(changeSummarizer.tools), new Set(['git_uncommitted_changes', 'read_file', 'read_file_partial', 'search_text', 'repo_map', 'finish']))
+		for (const writeTool of ['write_file', 'run_shell', 'typecheck', 'test', 'git_set_base', 'git_commit', 'git_init', 'git_branch']) {
+			check(!changeSummarizer.tools.includes(writeTool), `guild: change_summarizer must not hold write-capable tool "${writeTool}"`)
+		}
+	}
+	for (const role of ['acceptance_lead', 'acceptance_reviewer']) {
+		const acceptanceRole = config.roles[role]
+		if (acceptanceRole === undefined) continue
+		for (const tool of ['git_set_base', 'git_changes_since_base', 'git_uncommitted_changes']) {
+			check(!acceptanceRole.tools.includes(tool), `guild: acceptance role "${role}" must not hold "${tool}"`)
+		}
+	}
 	// The run-log tools expose every role's full conversations, so they must stay exclusive to the inquiry handler — the one read-only, handler-only role the platform invokes for operator questions.
 	for (const [name, role] of Object.entries(config.roles)) {
 		for (const runLogTool of ['read_run_log', 'search_run_log']) {
@@ -397,7 +431,7 @@ function checkManifests(): void {
 
 	// Plan, style-guide, and run-log handlers close over their run's directory (they are bound per run in the server), so the gate constructs them over fixture bindings it never invokes, solely to compare the full native handler table.
 	const nativeHandlers = {
-		...createToolHandlers({ workspaceRoot: manifestDir, defaultToolTimeoutSeconds: 30 }),
+		...createToolHandlers({ workspaceRoot: manifestDir, defaultToolTimeoutSeconds: 30, baseTracker: createRunBaseTracker() }),
 		...createPlanToolHandlers({ runsBaseDir: manifestDir, runId: 'run-19700101-000000', workspaceRoot: repoRoot }),
 		...createStyleGuideToolHandlers({ runsBaseDir: manifestDir, runId: 'run-19700101-000000', workspaceRoot: repoRoot }),
 		...createRunLogToolHandlers({ logPath: path.join(manifestDir, LOG_FILE_NAME) }),
