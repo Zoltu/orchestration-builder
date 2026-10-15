@@ -2579,7 +2579,7 @@ function TooltipCardForRun(state: ApplicationState): Vnode | null {
 	const model = withLiveElapsed(serverModel, state.now)
 	const descriptor = deriveTooltipDescriptor(model, labels, state.flowTier, tooltip, operationDetailsLookup(state.selectedRunId))
 	if (descriptor.title === '') return null
-	return Tooltip(h, { title: descriptor.title, sections: descriptor.sections, renderMarkdown, style: tooltipStyle(tooltip.rect) })
+	return Tooltip(h, { title: descriptor.title, sections: descriptor.sections, renderMarkdown, style: tooltipStyle(tooltip.rect, { width: window.innerWidth, height: window.innerHeight }) })
 }
 
 // The lookup the tooltip derivations read: the session cache's state for one operation id (a miss

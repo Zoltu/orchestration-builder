@@ -431,7 +431,7 @@ function openTooltip(target: TooltipTarget): void {
 	}
 	closeTooltip()
 	fetchOperationDetails(target)
-	const card = Tooltip(htmlH, { title: descriptor.title, sections: descriptor.sections, renderMarkdown, style: tooltipStyle(target.rect) })
+	const card = Tooltip(htmlH, { title: descriptor.title, sections: descriptor.sections, renderMarkdown, style: tooltipStyle(target.rect, { width: window.innerWidth, height: window.innerHeight }) })
 	const cardElement = hostElementOf(card, 'the tooltip card')
 	flowContainer.appendChild(cardElement)
 	currentTooltipNode = cardElement

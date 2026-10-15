@@ -81,7 +81,7 @@ function tryParseJsonObject(text: string): object | undefined {
 	return value
 }
 
-// The tooltip card: a heading and one labeled block per section. `style` carries the caller-chosen positioning (left/top or right/bottom near a viewport edge) applied inline so the card can be placed against the hovered node without a layout pass. The card carries no interactive chrome: it is a read-only hover inspector with no close button and no copy-raw button. Dismissal is the wiring's concern, not the component's — the card is `pointer-events: auto` with `user-select: text` (stylesheets/styles.css) so the operator can move the pointer into it to select text, and the wiring in `app.js` / `demo.js` dismisses it (after a short grace timer) once the pointer is over neither the node/edge nor the card. `sections` accepts anything and filters through `isTooltipSection`, so a host passing an unfiltered or malformed list yields a heading-only card rather than a crash.
+// The tooltip card: a heading and one labeled block per section. `style` carries the caller-chosen positioning (a clamped left/top, or right/bottom when the card is anchored flush to a near edge) applied inline so the card can be placed against the hovered node without a layout pass. The card carries no interactive chrome: it is a read-only hover inspector with no close button and no copy-raw button. Dismissal is the wiring's concern, not the component's — the card is `pointer-events: auto` with `user-select: text` (stylesheets/styles.css) so the operator can move the pointer into it to select text, and the wiring in `app.js` / `demo.js` dismisses it (after a short grace timer) once the pointer is over neither the node/edge nor the card. `sections` accepts anything and filters through `isTooltipSection`, so a host passing an unfiltered or malformed list yields a heading-only card rather than a crash.
 export interface TooltipProps {
 	title: string
 	sections: unknown
@@ -108,14 +108,12 @@ export function Tooltip(h: LooseH, props: TooltipProps): Vnode {
 }
 
 // --- Inline positioning ----------------------------------------------------
-// Anchors the card to the hovered node/edge's bounding rect so the card sits at a fixed position
-// relative to the node (not the pointer): flush against the node's right edge by default, flipping
-// to anchor its left edge when the node is near the right viewport margin, and the same vertically
-// (below by default, flipping above near the bottom margin). Flush placement means the pointer can
-// travel directly from the node into the card without crossing empty space, so the card stays open
-// while the operator moves into it to select or copy text (the card is `pointer-events: auto`).
-// Shared by the product client (`app.js`) and the dev harness (`demo.js`) so the two surfaces place
-// the card identically. `rect` is a DOMRect (or a plain `{ left, top, right, bottom }` snapshot).
+// Anchors the card to the hovered node/edge's bounding rect so the card sits at a fixed position relative to the node (not the pointer): flush against the node's far edge by default, flush against its near edge (via `right`/`bottom`) when the far side lacks room, and clamped to the far edge when neither side fits.
+// Anchoring the near side with `right`/`bottom` (not `left`/`top`) keeps the card flush against the node regardless of the card's real width, which is what lets the pointer travel directly from the node into the card without crossing empty space; the card stays open while the operator moves into it to select or copy text (the card is `pointer-events: auto`).
+// A wide element — a sequence message group spanning from the source column to a far-right role column — has room on neither side, so the clamp is what keeps the card readable rather than pinned off-screen.
+// The estimated sizes are the card's CSS caps (stylesheets/styles.css `.tooltip-card` `max-width`/`max-height`, 24rem/28rem at the default 16px root), so the clamp cannot under-reserve space for the real card.
+// Shared by the product client (`app.js`) and the dev harness (`demo.js`) so the two surfaces place the card identically.
+// `rect` is a DOMRect (or a plain `{ left, top, right, bottom }` snapshot); the hosts are the only place that reads `window`, passing its size in as `viewport`.
 
 export interface RectSnapshot {
 	left: number
@@ -124,23 +122,44 @@ export interface RectSnapshot {
 	bottom: number
 }
 
-export function tooltipStyle(rect: RectSnapshot): Record<string, string> {
-	const viewportWidth = window.innerWidth
-	const viewportHeight = window.innerHeight
-	const margin = 8
-	const estimatedWidth = 380
-	const estimatedHeight = 280
+export interface ViewportSize {
+	width: number
+	height: number
+}
+
+const TOOLTIP_MARGIN = 8
+const TOOLTIP_ESTIMATED_WIDTH = 384
+const TOOLTIP_ESTIMATED_HEIGHT = 448
+
+function clamp(value: number, minimum: number, maximum: number): number {
+	if (value < minimum) return minimum
+	if (value > maximum) return maximum
+	return value
+}
+
+// Which CSS edge of the card to anchor on one axis and the coordinate for it: `start` is `left`/`top`, `end` is `right`/`bottom`.
+interface AxisPlacement {
+	edge: 'start' | 'end'
+	coordinate: number
+}
+
+// Places one axis: flush past the far edge when the card fits there, otherwise flush to the near edge via `end`, and when neither side fits (a wide element) the far edge clamped into `[margin, max(margin, viewportExtent - estimatedSize - margin)]` so the card stays fully on-screen.
+function axisPlacement(nearEdge: number, farEdge: number, estimatedSize: number, viewportExtent: number): AxisPlacement {
+	const maximum = Math.max(TOOLTIP_MARGIN, viewportExtent - estimatedSize - TOOLTIP_MARGIN)
+	if (farEdge + estimatedSize + TOOLTIP_MARGIN <= viewportExtent) return { edge: 'start', coordinate: clamp(farEdge, TOOLTIP_MARGIN, maximum) }
+	if (nearEdge - estimatedSize - TOOLTIP_MARGIN >= 0) return { edge: 'end', coordinate: clamp(viewportExtent - nearEdge, TOOLTIP_MARGIN, maximum) }
+	return { edge: 'start', coordinate: clamp(farEdge, TOOLTIP_MARGIN, maximum) }
+}
+
+function applyAxis(style: Record<string, string>, startProperty: string, endProperty: string, placement: AxisPlacement): void {
+	const property = placement.edge === 'start' ? startProperty : endProperty
+	style[property] = `${placement.coordinate}px`
+}
+
+export function tooltipStyle(rect: RectSnapshot, viewport: ViewportSize): Record<string, string> {
 	const style: Record<string, string> = {}
-	if (rect.right + estimatedWidth + margin > viewportWidth) {
-		style.right = `${Math.max(margin, viewportWidth - rect.left)}px`
-	} else {
-		style.left = `${rect.right}px`
-	}
-	if (rect.bottom + estimatedHeight + margin > viewportHeight) {
-		style.bottom = `${Math.max(margin, viewportHeight - rect.top)}px`
-	} else {
-		style.top = `${rect.bottom}px`
-	}
+	applyAxis(style, 'left', 'right', axisPlacement(rect.left, rect.right, TOOLTIP_ESTIMATED_WIDTH, viewport.width))
+	applyAxis(style, 'top', 'bottom', axisPlacement(rect.top, rect.bottom, TOOLTIP_ESTIMATED_HEIGHT, viewport.height))
 	return style
 }
 

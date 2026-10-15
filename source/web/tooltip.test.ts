@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import type { LogEvent } from '../executor/types.js'
-import { Tooltip, formatTooltipContent, deriveOperationTooltip, deriveParticipantTooltip, deriveRoleTooltip, isTooltipSection } from './static/ts/tooltip.js'
+import { Tooltip, formatTooltipContent, tooltipStyle, deriveOperationTooltip, deriveParticipantTooltip, deriveRoleTooltip, isTooltipSection } from './static/ts/tooltip.js'
 import { stacksOf } from './static/ts/interaction-model.js'
 import { labelsModule } from './label-resolver-fixture.js'
 import { deriveInteractionModel } from './interaction-model-adapter.js'
@@ -149,6 +149,78 @@ describe('formatTooltipContent', () => {
 			expect(vnode.props.class).toBe('tooltip-scalar')
 			expect(textOf(vnode)).toBe('\u2014')
 		}
+	})
+})
+
+describe('tooltipStyle', () => {
+	const VIEWPORT = { width: 1440, height: 900 }
+	const MARGIN = 8
+	const ESTIMATED_WIDTH = 384
+	const ESTIMATED_HEIGHT = 448
+
+	function px(value: string): number {
+		return Number.parseInt(value, 10)
+	}
+
+	test('a small node well inside the viewport places the card at its far edge (right and below)', () => {
+		const style = tooltipStyle({ left: 100, top: 100, right: 200, bottom: 150 }, VIEWPORT)
+		expect(style['left']).toBe('200px')
+		expect(style['top']).toBe('150px')
+		expect(style['right']).toBeUndefined()
+		expect(style['bottom']).toBeUndefined()
+	})
+
+	test('a node near the right edge anchors flush to its left edge via `right`, regardless of card width', () => {
+		const style = tooltipStyle({ left: 1200, top: 100, right: 1350, bottom: 150 }, VIEWPORT)
+		expect(style['right']).toBe('240px')
+		expect(style['left']).toBeUndefined()
+		// The card's right edge sits exactly at the node's left edge (1440 - 240 = 1200), independent of the real card width.
+		expect(VIEWPORT.width - px(defined(style['right'], 'right'))).toBe(1200)
+	})
+
+	test('a node near the bottom anchors flush to its top edge via `bottom`', () => {
+		const style = tooltipStyle({ left: 100, top: 800, right: 200, bottom: 850 }, VIEWPORT)
+		expect(style['bottom']).toBe('100px')
+		expect(style['top']).toBeUndefined()
+		expect(VIEWPORT.height - px(defined(style['bottom'], 'bottom'))).toBe(800)
+	})
+
+	test('a wide element spanning the viewport has room on neither side, so the far-edge clamp keeps the card on-screen', () => {
+		// The regression: a sequence message group spans Human (near x=0) to a far-right role, so rect.right is near the viewport edge and rect.left is near 0.
+		const style = tooltipStyle({ left: 0, top: 100, right: 1400, bottom: 130 }, VIEWPORT)
+		const left = px(defined(style['left'], 'left'))
+		expect(style['left']).toBe('1048px')
+		expect(left).toBeGreaterThanOrEqual(MARGIN)
+		expect(left).toBeLessThanOrEqual(VIEWPORT.width - ESTIMATED_WIDTH - MARGIN)
+		expect(style['right']).toBeUndefined()
+	})
+
+	test('an element scrolled fully off the left clamps the left edge to the margin', () => {
+		const style = tooltipStyle({ left: -500, top: 100, right: -200, bottom: 130 }, VIEWPORT)
+		expect(style['left']).toBe('8px')
+	})
+
+	test('an element wider than the viewport clamps to the far edge on-screen', () => {
+		const style = tooltipStyle({ left: -100, top: 100, right: 1600, bottom: 130 }, VIEWPORT)
+		expect(style['left']).toBe('1048px')
+	})
+
+	test('an element at the very top places the card at its bottom edge', () => {
+		const style = tooltipStyle({ left: 100, top: 0, right: 200, bottom: 30 }, VIEWPORT)
+		expect(style['top']).toBe('30px')
+	})
+
+	test('a viewport equal to the estimated card size clamps both axes to the margin', () => {
+		const style = tooltipStyle({ left: 100, top: 100, right: 200, bottom: 150 }, { width: ESTIMATED_WIDTH, height: ESTIMATED_HEIGHT })
+		expect(style['left']).toBe('8px')
+		expect(style['top']).toBe('8px')
+	})
+
+	test('a viewport narrower than the estimated card width clamps the left edge to the margin, never negative', () => {
+		const style = tooltipStyle({ left: 50, top: 50, right: 100, bottom: 80 }, { width: 300, height: 900 })
+		const left = px(defined(style['left'], 'left'))
+		expect(style['left']).toBe('8px')
+		expect(left).toBeGreaterThanOrEqual(0)
 	})
 })
 
