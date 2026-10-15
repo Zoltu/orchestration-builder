@@ -4,7 +4,8 @@ WORKDIR /app
 
 # Aim apt at the Debian snapshot the base image was built against (its deb822 sources ship that snapshot's URL commented out above the live mirror).
 # The live mirror drops superseded packages, so only the frozen snapshot keeps rebuilds working, and pinning its metadata digests below makes the install reproducible.
-# Install git (the executor shells out to it for workspace bookkeeping), verifying the downloaded archive metadata against the digests captured from this base image's snapshot: a mismatch means the archive history changed under us and the build fails instead of installing from it.
+# Install git (the executor shells out to it for workspace bookkeeping) and ca-certificates, verifying the downloaded archive metadata against the digests captured from this base image's snapshot: a mismatch means the archive history changed under us and the build fails instead of installing from it.
+# The base image ships no CA trust store, and --no-install-recommends skips git's recommended ca-certificates package, so HTTPS via git and other system TLS clients would fail certificate verification without it; Bun's own bundled roots are unaffected.
 # The digest check doubles as the guard on the sed pair — if they stop matching the sources file, the metadata lands under the live mirror's filenames and sha256sum -c fails on the missing snapshot paths.
 RUN <<-EOF
 	set -e
@@ -14,7 +15,8 @@ RUN <<-EOF
 	echo "d66e2e0619558676bf085c026cf699c59a61538906128e41909654c2ec9bf741  /var/lib/apt/lists/snapshot.debian.org_archive_debian-security_20260505T000000Z_dists_trixie-security_InRelease
 	046525dd9b1481195c9cecde891d01cd9b3b4c7abb3b4dcde81023a6b6b88453  /var/lib/apt/lists/snapshot.debian.org_archive_debian_20260505T000000Z_dists_trixie-updates_InRelease
 	7592e4ccb4658a58bfe485d3356b3c983bf8ccff7fca1f6091e4d4296284ed18  /var/lib/apt/lists/snapshot.debian.org_archive_debian_20260505T000000Z_dists_trixie_InRelease" | sha256sum -c
-	apt-get install -y --no-install-recommends git
+	apt-get install -y --no-install-recommends git ca-certificates
+	test -s /etc/ssl/certs/ca-certificates.crt
 	rm -rf /var/lib/apt/lists/*
 EOF
 
