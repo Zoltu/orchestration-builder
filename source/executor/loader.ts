@@ -4,7 +4,7 @@ import { ValidationError } from './errors.js'
 import type { DeploymentConfig, DeploymentFileConfig, GuildConfig, ToolManifest } from './types.js'
 import { validateDeploymentFileConfig, validateDeploymentRoleReferences, validateGuildConfig, validateToolManifest } from './validation.js'
 
-// What the loader reads from the files (role prompts composed with their declared style guides): the deployment is still file-shaped, so model.name and model.contextWindow may be absent and the consumer completes them (resolveDeploymentConfig) into a LoadedGuild before the executor sees them.
+// What the loader reads from the files (role prompts composed with their declared concepts): the deployment is still file-shaped, so model.name and model.contextWindow may be absent and the consumer completes them (resolveDeploymentConfig) into a LoadedGuild before the executor sees them.
 export interface LoadedGuildFiles {
 	config: GuildConfig
 	deployment: DeploymentFileConfig
@@ -45,10 +45,28 @@ function readJsonFile(filePath: string, errorPath: string): unknown {
 	}
 }
 
-// Prompt composition shared by the guild loader and the data validator: a role without a styleGuide keeps its prompt byte-identical, and one with it gets the base prompt, exactly one blank line, then the style file's content (the base's trailing whitespace is trimmed because every shipped prompt file ends with a final newline, which would otherwise double the separator; the style file carries its own `## Style standard` heading — none is injected here). The reader is injected so the composition is testable in memory; its errors (the loader maps a missing file to a ValidationError naming `roles.<name>.styleGuide`) propagate unchanged.
-export function composeRolePrompt(basePrompt: string, styleGuide: string | undefined, readStyleGuide: (styleGuidePath: string) => string): string {
-	if (styleGuide === undefined) return basePrompt
-	return `${basePrompt.trimEnd()}\n\n${readStyleGuide(styleGuide)}`
+// A guild-relative concept file reader: returns the file's contents, or throws a ValidationError naming the concept (the loader binds it to readRequiredFile; tests bind an in-memory map).
+export type ReadConceptFile = (conceptName: string, conceptPath: string) => string
+
+// Resolves a role's declared concept names to their file contents in declaration order. A name absent from the registry is a ValidationError (validateGuildConfig already rejects such a guild, so this only guards a loader called without validation). The reader is injected so the resolution is testable in memory; a missing file surfaces the reader's ValidationError unchanged.
+export function resolveConceptContents(roleName: string, declaredConcepts: readonly string[], conceptRegistry: Readonly<Record<string, string>>, readConceptFile: ReadConceptFile): string[] {
+	const contents: string[] = []
+	for (let index = 0; index < declaredConcepts.length; index++) {
+		const conceptName = declaredConcepts[index]
+		if (conceptName === undefined) continue
+		const conceptPath = conceptRegistry[conceptName]
+		if (conceptPath === undefined) {
+			throw new ValidationError(`roles.${roleName}.concepts[${index}]`, `references unknown concept "${conceptName}" (not declared in guild.json "concepts")`)
+		}
+		contents.push(readConceptFile(conceptName, conceptPath))
+	}
+	return contents
+}
+
+// Prompt composition shared by the guild loader and the data validator: a role with no concepts keeps its prompt byte-identical; otherwise the base prompt is followed by each concept file's content, separated by exactly one blank line, and the result ends with a single trailing newline. The base and every concept's trailing whitespace is trimmed first because every shipped prompt and concept file ends with a final newline, which would otherwise double the separator. Each concept file carries its own headings — none is injected here.
+export function composeRolePrompt(basePrompt: string, conceptContents: string[]): string {
+	if (conceptContents.length === 0) return basePrompt
+	return `${basePrompt.trimEnd()}\n\n${conceptContents.map((content) => content.trimEnd()).join('\n\n')}\n`
 }
 
 // The deployment file path is fixed per service (it lives beside the guild in the bundle and is not per-run), so the factory closes over it and the returned LoadGuild keeps the guild-dir-only signature. The LoadedGuildFiles it yields is file-shaped; completing the model into the LoadedGuild the executor consumes is the startup path's job (resolveDeploymentConfig in serve.ts).
@@ -64,7 +82,8 @@ export function createGuildLoader(deploymentFilePath: string): LoadGuild {
 		for (const [roleName, role] of Object.entries(config.roles)) {
 			const promptPath = path.join(guildDir, role.systemPrompt)
 			const basePrompt = readRequiredFile(promptPath, `roles.${roleName}.systemPrompt`)
-			prompts[roleName] = composeRolePrompt(basePrompt, role.styleGuide, (styleGuidePath) => readRequiredFile(path.join(guildDir, styleGuidePath), `roles.${roleName}.styleGuide`))
+			const conceptContents = resolveConceptContents(roleName, role.concepts ?? [], config.concepts ?? {}, (conceptName, conceptPath) => readRequiredFile(path.join(guildDir, conceptPath), `concepts.${conceptName}`))
+			prompts[roleName] = composeRolePrompt(basePrompt, conceptContents)
 		}
 		const tools: Record<string, ToolManifest> = {}
 		for (const toolPath of config.tools) {

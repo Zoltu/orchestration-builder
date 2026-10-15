@@ -299,16 +299,18 @@ deployment/
 guild/
 ├── guild.json             # top-level configuration
 ├── prompts/               # role system prompts (Markdown)
+├── concepts/              # shared concept files appended to role prompts (Markdown)
 └── tools/                 # tool manifests (JSON)
 ```
 
-System prompts and tool manifests are plain files so the Foundry can rewrite them independently.
+System prompts, concept files, and tool manifests are plain files so the Foundry can rewrite them independently.
 
 ### Top-level schema
 
 ```json
 {
   "entryRole": "orchestrator",
+  "concepts": { "style": "concepts/style.md" },
   "roles": { ... },
   "tools": [ ... ],
   "visualization": { ... }
@@ -316,6 +318,14 @@ System prompts and tool manifests are plain files so the Foundry can rewrite the
 ```
 
 The optional `visualization` section carries display-only localization the web client reads through `GET /api/config`: `pseudoRoleLabels` (labels for the `human`/`interrupt`/`tools` pseudo-roles the views invent), `operationTemplates` (per-kind, per-source-kind→destination-kind tiered templates that interpolate `{source}` and `{destination}`), `genericOperationTemplates` (per-kind fallbacks), and `workingTemplates` (generic per-participant-kind fallback for the working-state caption when a role/tool has no per-entry `workingLabel`). The executor ignores it; it exists so a swapped Guild re-flavors the diagram without a frontend change. See [`docs/visualization.md`](visualization.md) "Labels".
+
+### `concepts`
+
+A registry mapping a concept name to a guild-relative Markdown file. A role pulls one or more concepts into its prompt by naming them in its own `concepts` array (below); the loader appends each declared file's content to that role's system prompt at load time, in declaration order, with one blank line between sections. Concepts are the Guild's standing engineering standards, shared across roles and swappable in one place rather than duplicated inline; swapping one requires a service restart because the guild is loaded once per process.
+
+The seed Guild ships `style` (`concepts/style.md`), `dependency-injection` (`concepts/dependency-injection.md`), and `privacy-posture` (`concepts/privacy-posture.md`).
+
+**Precedence and trust.** Guild concepts are the standing defaults. A project's own explicit rules — its documentation, `.editorconfig`, linter configuration, or an instruction in the task — override them, and they in turn override conventions merely inferred from neighboring code. Each concept file states its own scope and precedence in a leading paragraph. Guild concepts are trusted guild content, whereas the workspace documentation injected via `projectDocs` remains untrusted reference material.
 
 ### `entryRole`
 
@@ -337,13 +347,13 @@ A map from role name to definition:
 Role fields:
 - `systemPrompt` (string, required): path to a Markdown file.
 - `tools` (array, required): tool names this role may call.
-- `styleGuide` (string, optional): path to a Markdown file, relative to the guild directory, whose content is appended to this role's system prompt at load time (separated by one blank line). Style rules shared by several roles live in one swappable file the roles must not duplicate inline; swapping the file requires a service restart because the guild is loaded once per process.
+- `concepts` (array of strings, optional): concept names (keys of the top-level `concepts` registry) whose files are appended to this role's system prompt at load time, in declaration order, separated by one blank line. Shared standards live in one swappable concept file the roles must not duplicate inline.
 - `projectDocs` (array of strings, optional): workspace-relative file paths whose contents are injected into this role's initial user message when it starts at depth 0 (the entry role), inside one labeled `[Platform notice — project context]` block framed as untrusted project reference material. Each file is read once at run start and rides the checkpoint, never re-derived on resume. Each file is read with a hard 256 KiB byte cap and its decoded text is cut to 40,000 characters with a `… (truncated)` marker; a missing, non-regular, or unreadable file is skipped with a short notice in the block rather than failing the run. Paths are canonicalized against the workspace and symlink escapes are rejected.
 - `label` (object, optional): tiered display name (`{ detailed, friendly, whimsical }`) the web client renders.
 - `description` (object, optional): tiered one-line description of the role.
 - `workingLabel` (object, optional): tiered text for the "now" caption when this role is the destination of a settled call (its working phase). A `{participant}` placeholder interpolates to the role's own label at the chosen tier — e.g. `"{participant} is planning the approach"` → "Planner is planning the approach". See [`docs/visualization.md`](visualization.md) "Labels".
 
-The seed Guild's style workflow uses these fields together. Its `style_guide_author` role is read-only with respect to project files — it writes only the run style guide — and merges the task's style rules, the repository's style documents, `.editorconfig`, linter and formatter configuration, and the guild style standard — in that precedence, falling back to the repository's applied style when those are silent — into one run style guide, written with `write_style_guide`. The `coder`, the `style_reviewer`, and the author itself read that guide with `read_style_guide`, and the orchestrator delegates to the author after planning and before the first `coder` delegation whenever a style review will run. The orchestrator additionally declares `projectDocs: ["AGENTS.md", "README.md"]`, injecting the repository's top-level documentation as the untrusted project-context block described above.
+The seed Guild's style workflow uses these fields together. Its `style_guide_author` role is read-only with respect to project files — it writes only the run style guide — and merges the task's style rules, the repository's style documents, `.editorconfig`, linter and formatter configuration, and the guild `style` concept — in that precedence, falling back to the repository's applied style when those are silent — into one run style guide, written with `write_style_guide`. The `coder`, the `style_reviewer`, and the author itself read that guide with `read_style_guide`, and the orchestrator delegates to the author after planning and before the first `coder` delegation whenever a style review will run. The orchestrator additionally declares `projectDocs: ["AGENTS.md", "README.md"]`, injecting the repository's top-level documentation as the untrusted project-context block described above.
 
 ### `tools`
 
@@ -359,7 +369,7 @@ There is no separate graph or playbook file. A workflow is a role calling `agent
 
 ### Loading and validation
 
-`createGuildLoader(deploymentFilePath)` is a leaf factory that returns a `LoadGuild` whose `loadGuild(guildDir)` reads `guild.json`, validates it with the shared `validateGuildConfig`, reads and validates the deployment file, and cross-checks that every handler role the deployment names exists in the Guild. It then resolves each role's `systemPrompt` Markdown file (composing in that role's optional `styleGuide` with `composeRolePrompt`), validates every referenced tool-manifest JSON file with `validateToolManifest`, and checks that each role's `tools` list names only declared manifests. Validation failures surface as a `ValidationError` naming the offending path.
+`createGuildLoader(deploymentFilePath)` is a leaf factory that returns a `LoadGuild` whose `loadGuild(guildDir)` reads `guild.json`, validates it with the shared `validateGuildConfig`, reads and validates the deployment file, and cross-checks that every handler role the deployment names exists in the Guild. It then resolves each role's `systemPrompt` Markdown file (composing in that role's declared `concepts` with `composeRolePrompt`), validates every referenced tool-manifest JSON file with `validateToolManifest`, and checks that each role's `tools` list names only declared manifests. Validation failures surface as a `ValidationError` naming the offending path.
 
 The loader's return value is file-shaped — the validated `GuildConfig`, the deployment still unresolved (`model.name` and `model.contextWindow` may be absent), the resolved prompt text per role, and the parsed tool manifests keyed by name. Completing the model into the `LoadedGuild` the executor consumes is the startup path's job. The loader is a leaf and is not unit-tested; the shipped Guild data is validated by a dedicated script run directly (see `bun run validate-data`), not under `bun test`.
 

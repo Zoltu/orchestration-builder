@@ -8,6 +8,8 @@ export interface GuildConfig {
 	entryRole: string
 	roles: Record<string, RoleDefinition>
 	tools: string[]
+	// The guild's concept registry: concept name -> guild-relative path of the concept file. A role's `concepts` list names entries here, and the loader appends each named file's content to that role's system prompt in declaration order (see docs/reference.md "Guild format").
+	concepts?: Record<string, string>
 	visualization?: VisualizationConfig
 }
 
@@ -87,8 +89,8 @@ export interface HumanFacingText {
 export interface RoleDefinition {
 	systemPrompt: string
 	tools: string[]
-	// Optional path, relative to the guild directory, of a style-standard file whose content the loader appends to this role's system prompt at load time (see docs/reference.md "Guild format").
-	styleGuide?: string
+	// Optional non-empty list of concept names from the guild's top-level `concepts` registry whose file contents the loader appends to this role's system prompt, in declaration order (see docs/reference.md "Guild format").
+	concepts?: string[]
 	// Optional workspace-relative file paths whose contents are injected into this role's initial user message at depth 0 as untrusted project context (see docs/reference.md "Guild format" and project-docs.ts). A missing or unreadable file is skipped with a notice rather than failing the run.
 	projectDocs?: string[]
 	label?: HumanFacingText

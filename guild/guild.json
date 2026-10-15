@@ -1,6 +1,12 @@
 {
 	"entryRole": "orchestrator",
 
+	"concepts": {
+		"style": "concepts/style.md",
+		"dependency-injection": "concepts/dependency-injection.md",
+		"privacy-posture": "concepts/privacy-posture.md"
+	},
+
 	"roles": {
 		"orchestrator": {
 			"systemPrompt": "prompts/orchestrator.md",
@@ -39,7 +45,8 @@
 				"detailed": ["role {participantRole} is composing the plan (streaming tokens)"],
 				"friendly": ["Planning the approach"],
 				"whimsical": ["Charting the course", "Mapping the route", "Noodling on the map", "Surveying the terrain"]
-			}
+			},
+			"concepts": ["privacy-posture"]
 		},
 		"coder": {
 			"systemPrompt": "prompts/coder.md",
@@ -59,7 +66,7 @@
 				"friendly": ["Writing code"],
 				"whimsical": ["Hamster wheels are spinning", "Sharpening all the pencils", "Consulting the rubber duck", "Aligning the widget flanges", "Reticulating splines"]
 			},
-			"styleGuide": "prompts/style.md"
+			"concepts": ["style", "dependency-injection", "privacy-posture"]
 		},
 		"researcher": {
 			"systemPrompt": "prompts/researcher.md",
@@ -116,7 +123,8 @@
 				"detailed": ["role {participantRole} is directing the architecture review loop (streaming tokens)"],
 				"friendly": ["Directing the architecture review"],
 				"whimsical": ["Shuffling the blueprints", "Squinting at the load-bearing walls", "Rearranging the floor plan"]
-			}
+			},
+			"concepts": ["dependency-injection", "privacy-posture"]
 		},
 		"architecture_reviewer": {
 			"systemPrompt": "prompts/architecture_reviewer.md",
@@ -135,7 +143,8 @@
 				"detailed": ["role {participantRole} is reviewing the architecture (streaming tokens)"],
 				"friendly": ["Reviewing the architecture"],
 				"whimsical": ["Measuring the hallways", "Checking the foundation", "Reading the blueprints upside down"]
-			}
+			},
+			"concepts": ["dependency-injection", "privacy-posture"]
 		},
 		"style_lead": {
 			"systemPrompt": "prompts/style_lead.md",
@@ -155,7 +164,7 @@
 				"friendly": ["Directing the style review"],
 				"whimsical": ["Coordinating the wardrobe", "Matching the curtains to the carpet", "Enforcing the dress code"]
 			},
-			"styleGuide": "prompts/style.md"
+			"concepts": ["style"]
 		},
 		"style_reviewer": {
 			"systemPrompt": "prompts/style_reviewer.md",
@@ -175,7 +184,7 @@
 				"friendly": ["Reviewing the style"],
 				"whimsical": ["Combing the code for cowlicks", "Checking the dress rehearsal", "Hunting the rogue semicolon"]
 			},
-			"styleGuide": "prompts/style.md"
+			"concepts": ["style"]
 		},
 		"style_guide_author": {
 			"systemPrompt": "prompts/style_guide_author.md",
@@ -195,7 +204,7 @@
 				"friendly": ["Writing the run style guide"],
 				"whimsical": ["Choosing the palette", "Mixing the house colors", "Setting the type"]
 			},
-			"styleGuide": "prompts/style.md"
+			"concepts": ["style"]
 		},
 		"security_lead": {
 			"systemPrompt": "prompts/security_lead.md",
@@ -214,7 +223,8 @@
 				"detailed": ["role {participantRole} is directing the security review loop (streaming tokens)"],
 				"friendly": ["Directing the security review"],
 				"whimsical": ["Rattling the doorknobs", "Posting the night watch", "Counting the keys"]
-			}
+			},
+			"concepts": ["privacy-posture"]
 		},
 		"security_reviewer": {
 			"systemPrompt": "prompts/security_reviewer.md",
@@ -233,7 +243,8 @@
 				"detailed": ["role {participantRole} is reviewing security (streaming tokens)"],
 				"friendly": ["Reviewing security"],
 				"whimsical": ["Sniffing the perimeter", "Testing the window latches", "Patrolling the code"]
-			}
+			},
+			"concepts": ["privacy-posture"]
 		},
 		"acceptance_lead": {
 			"systemPrompt": "prompts/acceptance_lead.md",

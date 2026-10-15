@@ -48,6 +48,10 @@ export function isString(value: unknown): value is string {
 	return typeof value === 'string'
 }
 
+function isNonEmptyString(value: unknown): value is string {
+	return typeof value === 'string' && value !== ''
+}
+
 function isNumber(value: unknown): value is number {
 	return typeof value === 'number' && Number.isFinite(value)
 }
@@ -80,8 +84,9 @@ function isStringArray(value: unknown): value is string[] {
 	return Array.isArray(value) && value.every(isString)
 }
 
+// The shared shape of projectDocs, a role's concepts, and the HumanFacingText tiers: a non-empty array whose every element is a non-empty string.
 export function isNonEmptyStringArray(value: unknown): value is string[] {
-	return Array.isArray(value) && value.length > 0 && value.every(isString)
+	return Array.isArray(value) && value.length > 0 && value.every(isNonEmptyString)
 }
 
 function isOptionalNonEmptyStringArray(value: unknown): boolean {
@@ -113,6 +118,16 @@ function isRecordOfHumanFacingText(value: unknown): value is Record<string, Huma
 	if (!isObject(value)) return false
 	for (const key of Object.keys(value)) {
 		if (!isHumanFacingText(value[key])) return false
+	}
+	return true
+}
+
+// A map of non-empty names to non-empty strings: the guild's concept registry, whose keys are concept names and whose values are guild-relative file paths.
+function isRecordOfNonEmptyStrings(value: unknown): value is Record<string, string> {
+	if (!isObject(value)) return false
+	for (const [key, entry] of Object.entries(value)) {
+		if (key === '') return false
+		if (typeof entry !== 'string' || entry === '') return false
 	}
 	return true
 }
@@ -267,14 +282,14 @@ function validateLoggingConfig(value: unknown, path: string): asserts value is L
 	if (value.level !== undefined && !isLogLevel(value.level)) throw new ValidationError(`${path}.level`, 'expected "full" or "standard"')
 }
 
-const roleKeys: readonly string[] = ['systemPrompt', 'tools', 'label', 'description', 'workingLabel', 'styleGuide', 'projectDocs']
+const roleKeys: readonly string[] = ['systemPrompt', 'tools', 'label', 'description', 'workingLabel', 'concepts', 'projectDocs']
 
 function validateRoleDefinition(value: unknown, path: string): asserts value is RoleDefinition {
 	if (!isObject(value)) throw new ValidationError(path, 'expected an object')
 	rejectUnknownKeys(value, roleKeys, path)
 	ensure(isString, value.systemPrompt, `${path}.systemPrompt`, 'expected a string')
-	if (value.styleGuide !== undefined && (typeof value.styleGuide !== 'string' || value.styleGuide === '')) {
-		throw new ValidationError(`${path}.styleGuide`, 'expected a non-empty string or undefined')
+	if (!isOptionalNonEmptyStringArray(value.concepts)) {
+		throw new ValidationError(`${path}.concepts`, 'expected a non-empty array of non-empty strings or undefined')
 	}
 	if (!isOptionalNonEmptyStringArray(value.projectDocs)) {
 		throw new ValidationError(`${path}.projectDocs`, 'expected a non-empty array of non-empty strings or undefined')
@@ -294,15 +309,33 @@ function validateRoleDefinition(value: unknown, path: string): asserts value is 
 // Keys that belong in the deployment file; their presence in a guild file means a stale or hand-merged file, so the validator names the right home instead of silently ignoring the sections.
 const guildDeploymentKeys: readonly string[] = ['schemaVersion', 'model', 'executor', 'contextPolicy']
 
+// The guild file's own top-level keys: the deployment keys above are caught first with a pointer to deployment.json, so this allowlist rejects only stray or misspelled keys.
+const guildKeys: readonly string[] = ['entryRole', 'roles', 'tools', 'concepts', 'visualization']
+
 export function validateGuildConfig(value: unknown): asserts value is GuildConfig {
 	if (!isObject(value)) throw new ValidationError('', 'expected an object')
 	for (const key of guildDeploymentKeys) {
 		if (key in value) throw new ValidationError(key, `"${key}" is deployment configuration: move it to deployment.json (the guild file describes only orchestrator behavior)`)
 	}
+	rejectUnknownKeys(value, guildKeys, '')
 	ensure(isString, value.entryRole, 'entryRole', 'expected a string')
 	if (!isObject(value.roles)) throw new ValidationError('roles', 'expected an object')
+	const declaredConceptRegistry = value.concepts
+	if (declaredConceptRegistry !== undefined && !isRecordOfNonEmptyStrings(declaredConceptRegistry)) {
+		throw new ValidationError('concepts', 'expected an object mapping concept names to non-empty guild-relative file paths')
+	}
+	const conceptRegistry = new Set(declaredConceptRegistry === undefined ? [] : Object.keys(declaredConceptRegistry))
 	for (const [name, role] of Object.entries(value.roles)) {
 		validateRoleDefinition(role, `roles.${name}`)
+		const declaredConcepts = role.concepts
+		if (declaredConcepts === undefined) continue
+		for (let index = 0; index < declaredConcepts.length; index++) {
+			const conceptName = declaredConcepts[index]
+			if (conceptName === undefined) continue
+			if (!conceptRegistry.has(conceptName)) {
+				throw new ValidationError(`roles.${name}.concepts[${index}]`, `references unknown concept "${conceptName}" (not declared in guild.json "concepts")`)
+			}
+		}
 	}
 	ensure(isStringArray, value.tools, 'tools', 'expected an array of strings')
 	if (value.visualization !== undefined) validateVisualizationConfig(value.visualization, 'visualization')

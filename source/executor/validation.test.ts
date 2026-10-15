@@ -192,6 +192,11 @@ describe('validateGuildConfig throws ValidationError with a path-based message',
 		const bad = { ...validGuild, roles: { orchestrator: { systemPrompt: 'p', tools: ['finish'], includeReasoning: true } } }
 		expect(() => validateGuildConfig(bad)).toThrow(/roles\.orchestrator\.includeReasoning.*unknown key "includeReasoning"/)
 	})
+	test('rejects an unknown top-level guild key with the key path', () => {
+		const bad = { ...validGuild, rolez: {} }
+		expect(() => validateGuildConfig(bad)).toThrow(ValidationError)
+		expect(() => validateGuildConfig(bad)).toThrow(/rolez: unknown key "rolez"/)
+	})
 	test('validateToolManifest throws on non-string name', () => {
 		expect(() => validateToolManifest({ ...validToolManifest, name: 123 })).toThrow(/name/)
 	})
@@ -203,6 +208,64 @@ describe('validateGuildConfig throws ValidationError with a path-based message',
 		expect(() => validateToolManifest(drifted, { commands: 'array' })).toThrow(/parameters\.properties\.commands\.type/)
 		const pinned = { ...validToolManifest, parameters: { type: 'object', required: ['commands'], properties: { commands: { type: 'array' } } } }
 		expect(() => validateToolManifest(pinned, { commands: 'array' })).not.toThrow()
+	})
+})
+
+describe('validateGuildConfig concepts', () => {
+	const role = { systemPrompt: 'p', tools: ['finish'] }
+	function guild(roleDefinition: unknown, concepts?: unknown): unknown {
+		return concepts === undefined
+			? { ...validGuild, roles: { coder: roleDefinition } }
+			: { ...validGuild, roles: { coder: roleDefinition }, concepts }
+	}
+	test('a valid role with concepts passes', () => {
+		expect(() => validateGuildConfig(guild({ ...role, concepts: ['style'] }, { style: 'concepts/style.md' }))).not.toThrow()
+	})
+	test('a role without concepts passes', () => {
+		expect(() => validateGuildConfig(guild(role))).not.toThrow()
+	})
+	test('a non-array concepts is rejected with the role path', () => {
+		expect(() => validateGuildConfig(guild({ ...role, concepts: 42 }))).toThrow(ValidationError)
+		expect(() => validateGuildConfig(guild({ ...role, concepts: 42 }))).toThrow(/roles\.coder\.concepts/)
+	})
+	test('an empty concepts array is rejected with the role path', () => {
+		expect(() => validateGuildConfig(guild({ ...role, concepts: [] }))).toThrow(ValidationError)
+		expect(() => validateGuildConfig(guild({ ...role, concepts: [] }))).toThrow(/roles\.coder\.concepts/)
+	})
+	test('a non-string concept element is rejected with the role path', () => {
+		expect(() => validateGuildConfig(guild({ ...role, concepts: [42] }))).toThrow(ValidationError)
+		expect(() => validateGuildConfig(guild({ ...role, concepts: [42] }))).toThrow(/roles\.coder\.concepts/)
+	})
+	test('an empty-string concept element is rejected with the role path', () => {
+		expect(() => validateGuildConfig(guild({ ...role, concepts: [''] }, { style: 'concepts/style.md' }))).toThrow(ValidationError)
+		expect(() => validateGuildConfig(guild({ ...role, concepts: [''] }, { style: 'concepts/style.md' }))).toThrow(/roles\.coder\.concepts/)
+	})
+	test('an empty-string projectDocs element is rejected with the role path', () => {
+		expect(() => validateGuildConfig(guild({ ...role, projectDocs: [''] }))).toThrow(ValidationError)
+		expect(() => validateGuildConfig(guild({ ...role, projectDocs: [''] }))).toThrow(/roles\.coder\.projectDocs/)
+	})
+	test('a role referencing an unknown concept is rejected with the role path', () => {
+		expect(() => validateGuildConfig(guild({ ...role, concepts: ['ghost'] }, { style: 'concepts/style.md' }))).toThrow(ValidationError)
+		expect(() => validateGuildConfig(guild({ ...role, concepts: ['ghost'] }, { style: 'concepts/style.md' }))).toThrow(/roles\.coder\.concepts\[0\].*ghost/)
+	})
+	test('a role referencing a concept with no registry at all is rejected', () => {
+		expect(() => validateGuildConfig(guild({ ...role, concepts: ['style'] }))).toThrow(/roles\.coder\.concepts\[0\].*style/)
+	})
+	test('a valid top-level concepts map passes', () => {
+		expect(() => validateGuildConfig(guild(role, { style: 'concepts/style.md', conventions: 'concepts/conventions.md' }))).not.toThrow()
+	})
+	test('a non-object concepts is rejected at the concepts path', () => {
+		expect(() => validateGuildConfig(guild(role, 42))).toThrow(ValidationError)
+		expect(() => validateGuildConfig(guild(role, 42))).toThrow(/concepts/)
+	})
+	test('a concepts map with a non-string value is rejected', () => {
+		expect(() => validateGuildConfig(guild(role, { style: 42 }))).toThrow(/concepts/)
+	})
+	test('a concepts map with an empty value is rejected', () => {
+		expect(() => validateGuildConfig(guild(role, { style: '' }))).toThrow(/concepts/)
+	})
+	test('a concepts map with an empty key is rejected', () => {
+		expect(() => validateGuildConfig(guild(role, { '': 'concepts/style.md' }))).toThrow(/concepts/)
 	})
 })
 
