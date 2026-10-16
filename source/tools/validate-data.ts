@@ -141,19 +141,20 @@ const expectedConcepts: Record<string, string> = {
 	style: 'concepts/style.md',
 	'dependency-injection': 'concepts/dependency-injection.md',
 	'privacy-posture': 'concepts/privacy-posture.md',
+	'security-posture': 'concepts/security-posture.md',
 }
 
 // The concept names each role must declare, in order; the raw array is compared, not a set, so a duplicate or reordered entry fails. A role absent here must declare no concepts, so a new declaration is a deliberate, pinned change.
 const expectedRoleConcepts: Record<string, string[]> = {
-	coder: ['style', 'dependency-injection', 'privacy-posture'],
+	coder: ['style', 'dependency-injection', 'security-posture', 'privacy-posture'],
 	style_lead: ['style'],
 	style_reviewer: ['style'],
 	style_guide_author: ['style'],
-	planner: ['privacy-posture'],
-	architecture_lead: ['dependency-injection', 'privacy-posture'],
-	architecture_reviewer: ['dependency-injection', 'privacy-posture'],
-	security_lead: ['privacy-posture'],
-	security_reviewer: ['privacy-posture'],
+	planner: ['security-posture', 'privacy-posture'],
+	architecture_lead: ['dependency-injection', 'security-posture', 'privacy-posture'],
+	architecture_reviewer: ['dependency-injection', 'security-posture', 'privacy-posture'],
+	security_lead: ['security-posture', 'privacy-posture'],
+	security_reviewer: ['security-posture', 'privacy-posture'],
 }
 
 // Headings each concept file must carry, pinned so gutting a file's content while keeping its name fails the gate the way a dropped file does.
@@ -161,13 +162,15 @@ const conceptHeadings: Record<string, string[]> = {
 	style: ['## Style standard', '## Formatting', '## Prose and documentation', '## Comments'],
 	'dependency-injection': ['## Dependency injection'],
 	'privacy-posture': ['## Privacy posture'],
+	'security-posture': ['## Security posture'],
 }
 
 // Distinctive fragments of each concept's body, pinned so gutting a file's content while keeping its headings fails the gate the way a dropped heading does.
 const conceptFragments: Record<string, string[]> = {
 	style: ['Newlines carry semantic meaning', 'A comment earns its place only'],
 	'dependency-injection': ['Construct dependencies at the edge'],
-	'privacy-posture': ['Minimize dependencies'],
+	'privacy-posture': ['Default to local processing'],
+	'security-posture': ['Minimize dependencies'],
 }
 
 // The style concept owns these fragments; the composed style prompts must not re-inline them, so any that appears in a composed prompt is a failure.

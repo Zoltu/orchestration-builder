@@ -4,7 +4,8 @@
 	"concepts": {
 		"style": "concepts/style.md",
 		"dependency-injection": "concepts/dependency-injection.md",
-		"privacy-posture": "concepts/privacy-posture.md"
+		"privacy-posture": "concepts/privacy-posture.md",
+		"security-posture": "concepts/security-posture.md"
 	},
 
 	"roles": {
@@ -46,7 +47,7 @@
 				"friendly": ["Planning the approach"],
 				"whimsical": ["Charting the course", "Mapping the route", "Noodling on the map", "Surveying the terrain"]
 			},
-			"concepts": ["privacy-posture"]
+			"concepts": ["security-posture", "privacy-posture"]
 		},
 		"coder": {
 			"systemPrompt": "prompts/coder.md",
@@ -66,7 +67,7 @@
 				"friendly": ["Writing code"],
 				"whimsical": ["Hamster wheels are spinning", "Sharpening all the pencils", "Consulting the rubber duck", "Aligning the widget flanges", "Reticulating splines"]
 			},
-			"concepts": ["style", "dependency-injection", "privacy-posture"]
+			"concepts": ["style", "dependency-injection", "security-posture", "privacy-posture"]
 		},
 		"researcher": {
 			"systemPrompt": "prompts/researcher.md",
@@ -124,7 +125,7 @@
 				"friendly": ["Directing the architecture review"],
 				"whimsical": ["Shuffling the blueprints", "Squinting at the load-bearing walls", "Rearranging the floor plan"]
 			},
-			"concepts": ["dependency-injection", "privacy-posture"]
+			"concepts": ["dependency-injection", "security-posture", "privacy-posture"]
 		},
 		"architecture_reviewer": {
 			"systemPrompt": "prompts/architecture_reviewer.md",
@@ -144,7 +145,7 @@
 				"friendly": ["Reviewing the architecture"],
 				"whimsical": ["Measuring the hallways", "Checking the foundation", "Reading the blueprints upside down"]
 			},
-			"concepts": ["dependency-injection", "privacy-posture"]
+			"concepts": ["dependency-injection", "security-posture", "privacy-posture"]
 		},
 		"style_lead": {
 			"systemPrompt": "prompts/style_lead.md",
@@ -224,7 +225,7 @@
 				"friendly": ["Directing the security review"],
 				"whimsical": ["Rattling the doorknobs", "Posting the night watch", "Counting the keys"]
 			},
-			"concepts": ["privacy-posture"]
+			"concepts": ["security-posture", "privacy-posture"]
 		},
 		"security_reviewer": {
 			"systemPrompt": "prompts/security_reviewer.md",
@@ -244,7 +245,7 @@
 				"friendly": ["Reviewing security"],
 				"whimsical": ["Sniffing the perimeter", "Testing the window latches", "Patrolling the code"]
 			},
-			"concepts": ["privacy-posture"]
+			"concepts": ["security-posture", "privacy-posture"]
 		},
 		"acceptance_lead": {
 			"systemPrompt": "prompts/acceptance_lead.md",
