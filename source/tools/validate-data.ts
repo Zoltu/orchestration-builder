@@ -140,41 +140,73 @@ const expectedSignatures: ExpectedSignature[] = [
 const expectedConcepts: Record<string, string> = {
 	style: 'concepts/style.md',
 	'dependency-injection': 'concepts/dependency-injection.md',
-	'privacy-posture': 'concepts/privacy-posture.md',
+	'module-boundaries': 'concepts/module-boundaries.md',
+	'type-safety': 'concepts/type-safety.md',
+	'error-handling': 'concepts/error-handling.md',
+	'external-data-validation': 'concepts/external-data-validation.md',
+	testability: 'concepts/testability.md',
+	'verification-and-evidence': 'concepts/verification-and-evidence.md',
 	'security-posture': 'concepts/security-posture.md',
+	'privacy-posture': 'concepts/privacy-posture.md',
 }
 
 // The concept names each role must declare, in order; the raw array is compared, not a set, so a duplicate or reordered entry fails. A role absent here must declare no concepts, so a new declaration is a deliberate, pinned change.
 const expectedRoleConcepts: Record<string, string[]> = {
-	coder: ['style', 'dependency-injection', 'security-posture', 'privacy-posture'],
+	coder: ['style', 'dependency-injection', 'module-boundaries', 'type-safety', 'error-handling', 'external-data-validation', 'testability', 'verification-and-evidence', 'security-posture', 'privacy-posture'],
 	style_lead: ['style'],
 	style_reviewer: ['style'],
 	style_guide_author: ['style'],
-	planner: ['security-posture', 'privacy-posture'],
-	architecture_lead: ['dependency-injection', 'security-posture', 'privacy-posture'],
-	architecture_reviewer: ['dependency-injection', 'security-posture', 'privacy-posture'],
-	security_lead: ['security-posture', 'privacy-posture'],
-	security_reviewer: ['security-posture', 'privacy-posture'],
+	planner: ['module-boundaries', 'error-handling', 'external-data-validation', 'testability', 'verification-and-evidence', 'security-posture', 'privacy-posture'],
+	architecture_lead: ['dependency-injection', 'module-boundaries', 'type-safety', 'error-handling', 'external-data-validation', 'testability', 'verification-and-evidence', 'security-posture', 'privacy-posture'],
+	architecture_reviewer: ['dependency-injection', 'module-boundaries', 'type-safety', 'error-handling', 'external-data-validation', 'testability', 'verification-and-evidence', 'security-posture', 'privacy-posture'],
+	security_lead: ['external-data-validation', 'security-posture', 'privacy-posture'],
+	security_reviewer: ['external-data-validation', 'security-posture', 'privacy-posture'],
+	acceptance_lead: ['testability', 'verification-and-evidence'],
+	acceptance_reviewer: ['testability', 'verification-and-evidence'],
 }
 
 // Headings each concept file must carry, pinned so gutting a file's content while keeping its name fails the gate the way a dropped file does.
 const conceptHeadings: Record<string, string[]> = {
 	style: ['## Style standard', '## Formatting', '## Prose and documentation', '## Comments'],
 	'dependency-injection': ['## Dependency injection'],
-	'privacy-posture': ['## Privacy posture'],
+	'module-boundaries': ['## Module boundaries'],
+	'type-safety': ['## Type safety'],
+	'error-handling': ['## Error handling'],
+	'external-data-validation': ['## External data validation'],
+	testability: ['## Testability'],
+	'verification-and-evidence': ['## Verification and evidence'],
 	'security-posture': ['## Security posture'],
+	'privacy-posture': ['## Privacy posture'],
 }
 
 // Distinctive fragments of each concept's body, pinned so gutting a file's content while keeping its headings fails the gate the way a dropped heading does.
 const conceptFragments: Record<string, string[]> = {
 	style: ['Newlines carry semantic meaning', 'A comment earns its place only'],
 	'dependency-injection': ['Construct dependencies at the edge'],
-	'privacy-posture': ['Default to local processing'],
+	'module-boundaries': ['Give each file and symbol one clear job'],
+	'type-safety': ['Never use a typecast'],
+	'error-handling': ['Fail fast'],
+	'external-data-validation': ['Treat every value that crosses a trust boundary'],
+	testability: ['Keep decision logic in functions'],
+	'verification-and-evidence': ['Verification means running the project'],
 	'security-posture': ['Minimize dependencies'],
+	'privacy-posture': ['Default to local processing'],
 }
 
 // The style concept owns these fragments; the composed style prompts must not re-inline them, so any that appears in a composed prompt is a failure.
 const removedInlineStyleRules = ['Default to no comments', 'Keep newlines meaningful']
+
+// The shared concepts own these rules; the composed prompts must not re-inline them, so any that appears is a failure. Each fragment is distinctive to the removed inline copy and absent from the concept files themselves, whose own wording necessarily appears in a composed prompt.
+const removedInlineConceptRules = [
+	'Check inputs before use and fail fast',
+	'and an abstraction with a single caller earns its place only when it isolates an external system for testing',
+	'keep one clear job per file',
+	'no shell, SQL, or path interpolation of input',
+	'is the decision logic reachable from the project\'s tests',
+	'does each file and symbol have one clear job',
+	'weigh a reported pass as a claim, not evidence',
+	'outside intended locations',
+]
 
 function loadGuildData(): LoadedGuildFiles | null {
 	try {
@@ -254,6 +286,11 @@ function checkComposedConceptPrompt(loaded: LoadedGuildFiles): void {
 		const composedPrompt = loaded.prompts[name] ?? ''
 		for (const removedRule of removedInlineStyleRules) {
 			check(!composedPrompt.includes(removedRule), `guild: the composed ${name} prompt still duplicates the removed inline style rule "${removedRule}"`)
+		}
+	}
+	for (const [name, composedPrompt] of Object.entries(loaded.prompts)) {
+		for (const removedRule of removedInlineConceptRules) {
+			check(!composedPrompt.includes(removedRule), `guild: the composed ${name} prompt still duplicates the removed inline concept rule "${removedRule}"`)
 		}
 	}
 }

@@ -62,9 +62,7 @@ When the project shows no convention, follow the nearest similar file; for a new
 
 Write code for a reader who has never seen this conversation — they can read files, but they cannot read your mind. Names say what things are; no cleverness that saves a line and costs a reader five minutes.
 
-Keep the code that touches the outside world — files, network, the clock, subprocesses — thin and at the edges, and keep decisions in functions that receive their inputs as parameters, so the project's tests can reach them. Check inputs before use and fail fast with a message that says what was expected and what arrived; never swallow an error or guess around a missing case.
-
-Build only what the step names: no options or abstractions for imagined futures, and an abstraction with a single caller earns its place only when it isolates an external system for testing. When torn between two designs, choose the plainer one. In a TypeScript or JavaScript workspace, prefer named top-level declarations over buried closures and keep one clear job per file — the `repo_map` outline is the overview every reviewer orients from, and it should read as documentation.
+Build only what the step names. In a TypeScript or JavaScript workspace, prefer named top-level declarations over buried closures — the `repo_map` outline is the overview every reviewer orients from, and it should read as documentation.
 
 ## Verifying changes
 
@@ -75,7 +73,7 @@ After writing files, verify your work by running the project's check commands (f
 
 This survey-then-verify contract is strongly encouraged, never mechanically required: checks are evidence for the review pipeline, never a gate for `finish`. A task without meaningful runtime checks (markup-only changes, prose, pure configuration) finishes on the acceptance loop's judgment — say so in your summary instead of running hollow checks.
 
-A checker that cannot run at all is not a pass. A spawn failure or a "command not found" result means the toolchain that command needs is not installed — install it with `run_shell` (provisioning belongs to your survey) and re-run, so the check actually happened. Never treat a checker that never ran as verification, and never claim it in your summary.
+A spawn failure or a "command not found" result means the toolchain that command needs is not installed — install it with `run_shell` (provisioning belongs to your survey) and re-run, so the check actually happened. If it still cannot run, the appended `## Verification and evidence` standard governs how you report that.
 
 Iterate — edit, then run the checkers again — until the effort mode's bar is met before you call `finish`. A `timeout` or spawn failure from either tool is an error result, not a diagnostic; report it rather than retrying blindly.
 
@@ -84,7 +82,7 @@ Iterate — edit, then run the checkers again — until the effort mode's bar is
 Before calling `finish`, re-read what you wrote against the standard and the contracts and fix what you find — you already hold the full context, so this is the cheapest review the work will get:
 
 - **Style** — check each file you wrote or edited against the run's style guide when one exists (read it with `read_style_guide`), falling back to the appended style standard; fix every violation.
-- **Security** — check the change for the project's security rules: untrusted input validated before use, no secrets in code or configuration or logs, no shell, SQL, or path interpolation of input, and no writes outside intended locations.
+- **Security** — check the change against the appended `## Security posture` and `## External data validation` standards.
 - **Architecture** — when the plan has a Design section, compare the workspace's shape against it and reconcile any drift, and report a collision with `needs refactor:` rather than forcing a shape that does not fit.
 
 In thorough mode, run `repo_map` once more as part of that reconciliation.

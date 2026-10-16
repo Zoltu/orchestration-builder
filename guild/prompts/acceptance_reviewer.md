@@ -9,7 +9,7 @@ Acceptance inspects the whole workspace, not a diff and not the run's changes: y
 - Coverage: does every part of the original task have corresponding work in the workspace — a change from this run, or pre-existing work that already satisfies it? Name any part that is missing.
 - Correctness in combination: do the pieces work together, or does each look fine alone but fail in combination — mismatched names, inconsistent formats, a file nobody writes, a step whose output another step was meant to consume but does not?
 - Leftovers: scratch files, debugging output, dead code, or partial work that does not belong in the finished state.
-- Honesty of the result: if the task asked for behavior (a working page, a passing check), is there evidence the behavior exists — or only files that claim it? Evidence is what you can verify with what you have: tests in the workspace that exist and exercise the claimed behavior, artifacts you can inspect, and any verification status the lead's task text reports — weigh a reported pass as a claim, not evidence. Where the task demands demonstrated behavior and neither the workspace nor the task text shows any verification, that absence is itself a `blocking` finding.
+- Honesty of the result: if the task asked for behavior (a working page, a passing check), is there evidence the behavior exists — or only files that claim it? Evidence is what you can verify with what you have: tests in the workspace that exist and exercise the claimed behavior, artifacts you can inspect, and any verification status the lead's task text reports. Where the task demands demonstrated behavior and neither the workspace nor the task text shows any verification, that absence is itself a `blocking` finding.
 
 ## How to work
 

@@ -4,8 +4,14 @@
 	"concepts": {
 		"style": "concepts/style.md",
 		"dependency-injection": "concepts/dependency-injection.md",
-		"privacy-posture": "concepts/privacy-posture.md",
-		"security-posture": "concepts/security-posture.md"
+		"module-boundaries": "concepts/module-boundaries.md",
+		"type-safety": "concepts/type-safety.md",
+		"error-handling": "concepts/error-handling.md",
+		"external-data-validation": "concepts/external-data-validation.md",
+		"testability": "concepts/testability.md",
+		"verification-and-evidence": "concepts/verification-and-evidence.md",
+		"security-posture": "concepts/security-posture.md",
+		"privacy-posture": "concepts/privacy-posture.md"
 	},
 
 	"roles": {
@@ -47,7 +53,7 @@
 				"friendly": ["Planning the approach"],
 				"whimsical": ["Charting the course", "Mapping the route", "Noodling on the map", "Surveying the terrain"]
 			},
-			"concepts": ["security-posture", "privacy-posture"]
+			"concepts": ["module-boundaries", "error-handling", "external-data-validation", "testability", "verification-and-evidence", "security-posture", "privacy-posture"]
 		},
 		"coder": {
 			"systemPrompt": "prompts/coder.md",
@@ -67,7 +73,7 @@
 				"friendly": ["Writing code"],
 				"whimsical": ["Hamster wheels are spinning", "Sharpening all the pencils", "Consulting the rubber duck", "Aligning the widget flanges", "Reticulating splines"]
 			},
-			"concepts": ["style", "dependency-injection", "security-posture", "privacy-posture"]
+			"concepts": ["style", "dependency-injection", "module-boundaries", "type-safety", "error-handling", "external-data-validation", "testability", "verification-and-evidence", "security-posture", "privacy-posture"]
 		},
 		"researcher": {
 			"systemPrompt": "prompts/researcher.md",
@@ -125,7 +131,7 @@
 				"friendly": ["Directing the architecture review"],
 				"whimsical": ["Shuffling the blueprints", "Squinting at the load-bearing walls", "Rearranging the floor plan"]
 			},
-			"concepts": ["dependency-injection", "security-posture", "privacy-posture"]
+			"concepts": ["dependency-injection", "module-boundaries", "type-safety", "error-handling", "external-data-validation", "testability", "verification-and-evidence", "security-posture", "privacy-posture"]
 		},
 		"architecture_reviewer": {
 			"systemPrompt": "prompts/architecture_reviewer.md",
@@ -145,7 +151,7 @@
 				"friendly": ["Reviewing the architecture"],
 				"whimsical": ["Measuring the hallways", "Checking the foundation", "Reading the blueprints upside down"]
 			},
-			"concepts": ["dependency-injection", "security-posture", "privacy-posture"]
+			"concepts": ["dependency-injection", "module-boundaries", "type-safety", "error-handling", "external-data-validation", "testability", "verification-and-evidence", "security-posture", "privacy-posture"]
 		},
 		"style_lead": {
 			"systemPrompt": "prompts/style_lead.md",
@@ -225,7 +231,7 @@
 				"friendly": ["Directing the security review"],
 				"whimsical": ["Rattling the doorknobs", "Posting the night watch", "Counting the keys"]
 			},
-			"concepts": ["security-posture", "privacy-posture"]
+			"concepts": ["external-data-validation", "security-posture", "privacy-posture"]
 		},
 		"security_reviewer": {
 			"systemPrompt": "prompts/security_reviewer.md",
@@ -245,7 +251,7 @@
 				"friendly": ["Reviewing security"],
 				"whimsical": ["Sniffing the perimeter", "Testing the window latches", "Patrolling the code"]
 			},
-			"concepts": ["security-posture", "privacy-posture"]
+			"concepts": ["external-data-validation", "security-posture", "privacy-posture"]
 		},
 		"acceptance_lead": {
 			"systemPrompt": "prompts/acceptance_lead.md",
@@ -264,7 +270,8 @@
 				"detailed": ["role {participantRole} is directing the final acceptance review (streaming tokens)"],
 				"friendly": ["Directing the final acceptance review"],
 				"whimsical": ["Preparing the verdict", "Calling the court to order", "Reviewing the evidence"]
-			}
+			},
+			"concepts": ["testability", "verification-and-evidence"]
 		},
 		"acceptance_reviewer": {
 			"systemPrompt": "prompts/acceptance_reviewer.md",
@@ -283,7 +290,8 @@
 				"detailed": ["role {participantRole} is checking the work against the original task (streaming tokens)"],
 				"friendly": ["Checking the work against the original task"],
 				"whimsical": ["Running the white-glove test", "Checking the list twice", "Reading the fine print"]
-			}
+			},
+			"concepts": ["testability", "verification-and-evidence"]
 		},
 		"loop_detector": {
 			"systemPrompt": "prompts/loop_detector.md",
