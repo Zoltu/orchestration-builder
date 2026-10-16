@@ -66,6 +66,7 @@ function checkRotatingTieredText(label: string, value: HumanFacingText | undefin
 
 const expectedRoles = [
 	'orchestrator', 'planner', 'coder', 'researcher', 'change_summarizer',
+	'analyst', 'technical_writer', 'verifier',
 	'architecture_lead', 'architecture_reviewer',
 	'style_lead', 'style_reviewer', 'style_guide_author',
 	'security_lead', 'security_reviewer',
@@ -163,6 +164,9 @@ const expectedRoleConcepts: Record<string, string[]> = {
 	security_reviewer: ['external-data-validation', 'security-posture', 'privacy-posture'],
 	acceptance_lead: ['testability', 'verification-and-evidence'],
 	acceptance_reviewer: ['testability', 'verification-and-evidence'],
+	analyst: ['module-boundaries', 'security-posture', 'privacy-posture'],
+	technical_writer: ['style', 'verification-and-evidence'],
+	verifier: ['verification-and-evidence'],
 }
 
 // Headings each concept file must carry, pinned so gutting a file's content while keeping its name fails the gate the way a dropped file does.
@@ -346,7 +350,7 @@ function checkGuild(loaded: LoadedGuildFiles): void {
 	check(orchestratorPrompt.includes('ask_human'), 'guild: orchestrator prompt does not mention ask_human')
 
 	// These roles scale their behavior to the run's effort tier, so each prompt must name all three tier modes.
-	for (const role of ['orchestrator', 'planner', 'coder', 'researcher', 'architecture_lead', 'style_lead', 'security_lead', 'acceptance_lead']) {
+	for (const role of ['orchestrator', 'planner', 'coder', 'researcher', 'analyst', 'technical_writer', 'verifier', 'architecture_lead', 'style_lead', 'security_lead', 'acceptance_lead']) {
 		const prompt = (loaded.prompts[role] ?? '').toLowerCase()
 		for (const tier of ['quick mode', 'standard mode', 'thorough mode']) {
 			check(prompt.includes(tier), `guild: role "${role}" prompt lacks the "${tier}" tier`)
@@ -418,6 +422,27 @@ function checkGuild(loaded: LoadedGuildFiles): void {
 		for (const mutatingTool of ['write_file', 'run_shell', 'typecheck', 'test']) {
 			check(!styleGuideAuthor.tools.includes(mutatingTool), `guild: style_guide_author must not hold workspace-mutating tool "${mutatingTool}"`)
 		}
+	}
+	const analyst = config.roles['analyst']
+	if (analyst === undefined) {
+		failures.push('guild: missing role "analyst"')
+	} else {
+		// The analyst investigates the workspace read-only, writes its findings, and finishes — it cannot delegate or run checkers.
+		checkSameSet('guild: analyst tools', new Set(analyst.tools), new Set(['list_directory', 'glob_files', 'read_file', 'read_file_partial', 'search_text', 'repo_map', 'read_plan', 'write_file', 'finish']))
+	}
+	const technicalWriter = config.roles['technical_writer']
+	if (technicalWriter === undefined) {
+		failures.push('guild: missing role "technical_writer"')
+	} else {
+		// The technical writer drafts deliverables against the run style guide and writes them — it cannot delegate or run checkers.
+		checkSameSet('guild: technical_writer tools', new Set(technicalWriter.tools), new Set(['list_directory', 'glob_files', 'read_file', 'read_file_partial', 'search_text', 'repo_map', 'read_plan', 'read_style_guide', 'write_file', 'finish']))
+	}
+	const verifier = config.roles['verifier']
+	if (verifier === undefined) {
+		failures.push('guild: missing role "verifier"')
+	} else {
+		// The verifier is a read-only leaf: it checks deliverables against their evidence and cannot delegate, write, or run checkers.
+		checkSameSet('guild: verifier tools', new Set(verifier.tools), new Set(['list_directory', 'glob_files', 'read_file', 'read_file_partial', 'search_text', 'repo_map', 'read_plan', 'web_search', 'fetch_url', 'finish']))
 	}
 	// The base and change-set tools are split by role — only the orchestrator moves the run's base, the three review roles read the change set since it, and the summarizer reads the uncommitted change set — so a role silently gaining or losing one of them fails the gate.
 	const orchestratorRole = config.roles['orchestrator']

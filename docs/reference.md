@@ -273,10 +273,12 @@ When the workspace is a repository, it reads the git state once before the entry
 The base is persisted in the run checkpoint, so a resumed run keeps the base it started with.
 The orchestrator may move the base with `git_set_base` — a hint, not a requirement, is to advance it after a review round completes, so the next round's reviewers see only the changes made since.
 
-The review roles read the change set because the seed Guild reviews on a consolidated cadence: the orchestrator implements every plan step, then runs one architecture/style/security review pass scoped to the run's accumulated changes, then the final acceptance review.
+The review roles read the change set because the seed Guild reviews on a consolidated cadence: the orchestrator implements every plan step, then runs one consolidated review pass scoped to the run's accumulated changes, then the final acceptance review.
+The orchestrator chooses which review lenses apply to the work — the architecture, style, and security review-and-fix leads are the available lenses, and it runs only those the work calls for rather than always running all three.
 It may add one interim consolidated review at a milestone when foundation risk warrants it — a new subsystem, a risky integration, an unfamiliar domain, or a `needs replan:`/`needs refactor:` signal from a child — and it runs no per-step review.
 The orchestrator commits after every meaningful unit of work, not only after review, and may delegate a commit message to the `change_summarizer` when it wants the message derived from the diff.
 Acceptance reviews the whole workspace and holds no git tool.
+Separately from those lenses, non-code deliverables — reports, briefs, and instructions — are verified by the `verifier` against their evidence rather than reviewed for code structure.
 
 #### Degradation without git
 
@@ -353,7 +355,9 @@ Role fields:
 - `description` (object, optional): tiered one-line description of the role.
 - `workingLabel` (object, optional): tiered text for the "now" caption when this role is the destination of a settled call (its working phase). A `{participant}` placeholder interpolates to the role's own label at the chosen tier — e.g. `"{participant} is planning the approach"` → "Planner is planning the approach". See [`docs/visualization.md`](visualization.md) "Labels".
 
-The seed Guild's style workflow uses these fields together. Its `style_guide_author` role is read-only with respect to project files — it writes only the run style guide — and merges the task's style rules, the repository's style documents, `.editorconfig`, linter and formatter configuration, and the guild `style` concept — in that precedence, falling back to the repository's applied style when those are silent — into one run style guide, written with `write_style_guide`. The `coder`, the `style_reviewer`, and the author itself read that guide with `read_style_guide`, and the orchestrator delegates to the author after planning and before the first `coder` delegation whenever a style review will run. The orchestrator additionally declares `projectDocs: ["AGENTS.md", "README.md"]`, injecting the repository's top-level documentation as the untrusted project-context block described above.
+The seed Guild's style workflow uses these fields together. Its `style_guide_author` role is read-only with respect to project files — it writes only the run style guide — and merges the task's style rules, the repository's style documents, `.editorconfig`, linter and formatter configuration, and the guild `style` concept — in that precedence, falling back to the repository's applied style when those are silent — into one run style guide, written with `write_style_guide`. The `coder`, the `technical_writer`, the `style_reviewer`, and the author itself read that guide with `read_style_guide`, and the orchestrator delegates to the author after planning and before the first producing delegation whenever a style review will run. The orchestrator additionally declares `projectDocs: ["AGENTS.md", "README.md"]`, injecting the repository's top-level documentation as the untrusted project-context block described above.
+
+The seed Guild's non-code work routes to three roles. The `analyst` investigates the workspace — module boundaries, security posture, and privacy posture — and produces an evidence-backed findings report without changing existing code. The `technical_writer` reads the code, configuration, and scripts and writes or updates the documentation and usage instructions to match what the software actually does, against the run style guide. The `verifier` independently checks a deliverable's claims against the material it describes and its coverage for completeness, reporting findings and a verdict without code-structure review.
 
 ### Author hygiene
 

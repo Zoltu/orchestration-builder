@@ -113,6 +113,66 @@
 				"whimsical": ["Naming the changes", "Finding the right words", "Distilling the diff", "Putting the change into words"]
 			}
 		},
+		"analyst": {
+			"systemPrompt": "prompts/analyst.md",
+			"tools": ["list_directory", "glob_files", "read_file", "read_file_partial", "search_text", "repo_map", "read_plan", "write_file", "finish"],
+			"label": {
+				"detailed": ["Analyst"],
+				"friendly": ["Analyst"],
+				"whimsical": ["Investigator"]
+			},
+			"description": {
+				"detailed": ["Investigates a workspace systematically and produces an evidence-backed findings report, citing every claim, without changing any existing code."],
+				"friendly": ["Investigates a workspace and reports what it finds."],
+				"whimsical": ["Follows every clue back to the source."]
+			},
+			"workingLabel": {
+				"detailed": ["role {participantRole} is investigating the workspace (streaming tokens)"],
+				"friendly": ["Investigating the workspace"],
+				"whimsical": ["Sweeping the scene", "Following the evidence trail", "Connecting the dots", "Reading between the lines"]
+			},
+			"concepts": ["module-boundaries", "security-posture", "privacy-posture"]
+		},
+		"technical_writer": {
+			"systemPrompt": "prompts/technical_writer.md",
+			"tools": ["list_directory", "glob_files", "read_file", "read_file_partial", "search_text", "repo_map", "read_plan", "read_style_guide", "write_file", "finish"],
+			"label": {
+				"detailed": ["Technical Writer"],
+				"friendly": ["Technical Writer"],
+				"whimsical": ["Scribe"]
+			},
+			"description": {
+				"detailed": ["Reads the code, configuration, and scripts and writes or updates the documentation and usage instructions to match what the software actually does, changing no code."],
+				"friendly": ["Writes docs that match what the code actually does."],
+				"whimsical": ["Turns the machinery into instructions."]
+			},
+			"workingLabel": {
+				"detailed": ["role {participantRole} is writing the documentation (streaming tokens)"],
+				"friendly": ["Writing the documentation"],
+				"whimsical": ["Sharpening the pencil", "Finding the right words", "Turning code into prose", "Laying out the manual"]
+			},
+			"concepts": ["style", "verification-and-evidence"]
+		},
+		"verifier": {
+			"systemPrompt": "prompts/verifier.md",
+			"tools": ["list_directory", "glob_files", "read_file", "read_file_partial", "search_text", "repo_map", "read_plan", "web_search", "fetch_url", "finish"],
+			"label": {
+				"detailed": ["Verifier"],
+				"friendly": ["Verifier"],
+				"whimsical": ["Fact Checker"]
+			},
+			"description": {
+				"detailed": ["Independently checks a deliverable's claims against the material it describes and its coverage for completeness, then reports findings and a verdict without changing anything."],
+				"friendly": ["Checks a deliverable against its sources."],
+				"whimsical": ["Reads the fine print against the source."]
+			},
+			"workingLabel": {
+				"detailed": ["role {participantRole} is verifying the deliverable (streaming tokens)"],
+				"friendly": ["Verifying the deliverable"],
+				"whimsical": ["Cross-checking the claims", "Checking the citations", "Comparing notes with the source", "Spot-checking the facts"]
+			},
+			"concepts": ["verification-and-evidence"]
+		},
 		"architecture_lead": {
 			"systemPrompt": "prompts/architecture_lead.md",
 			"tools": ["agent", "continue_agent", "finish"],

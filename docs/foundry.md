@@ -174,4 +174,4 @@ data/foundry/
 
 ## Seed Guild
 
-The Foundry needs an initial Guild to optimize. The seed Guild is hand-written with basic roles (`orchestrator`, `planner`, `coder`, `researcher`, `change_summarizer`, `style_guide_author`, `recovery`, `context_manager`, plus lead/reviewer pairs for architecture, style, security, and acceptance review, and the platform handlers `loop_detector` and `inquiry_responder`), built-in tools, a small number of native tools, and conservative budgets. It does not need to be good — it only needs to be runnable.
+The Foundry needs an initial Guild to optimize. The seed Guild is hand-written with basic roles (`orchestrator`, `planner`, `coder`, `researcher`, `analyst`, `technical_writer`, `verifier`, `change_summarizer`, `style_guide_author`, `recovery`, `context_manager`, plus lead/reviewer pairs for architecture, style, security, and acceptance review, and the platform handlers `loop_detector` and `inquiry_responder`), built-in tools, a small number of native tools, and conservative budgets. It does not need to be good — it only needs to be runnable.

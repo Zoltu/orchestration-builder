@@ -51,9 +51,10 @@ The Foundry reads the current Guild and recent run logs, prompts a large model t
 
 ## Review and version-control cadence
 
-The orchestrator implements every plan step first, then runs one consolidated review pass — the architecture, style, and security reviewers, each scoped to the run's accumulated change set — before the final acceptance review of the whole workspace.
+The orchestrator implements every plan step first, then runs one consolidated review pass — choosing which of the three review-and-fix lenses (architecture, style, security) apply to the work, each scoped to the run's accumulated change set — before the final acceptance review of the whole workspace.
 It may insert a single interim consolidated review at a milestone boundary, but only when foundation risk warrants it: a new subsystem, a risky integration, an unfamiliar domain, or a `needs replan:`/`needs refactor:` signal from a child.
 There is no per-step review; one pass keeps review cost proportional to the run rather than to the number of steps, and the change set scopes what each reviewer reads.
+Separately from those lenses, non-code deliverables — reports, briefs, and instructions — are verified by the `verifier` against their evidence rather than reviewed for code structure.
 
 The orchestrator commits after every meaningful unit of work, not only after review.
 The executor records a base commit — HEAD at task start, the git empty tree when HEAD is unborn, and no base when the workspace is not a repository — and the run's reviewers diff against it.
