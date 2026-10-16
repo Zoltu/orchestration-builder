@@ -321,11 +321,11 @@ The optional `visualization` section carries display-only localization the web c
 
 ### `concepts`
 
-A registry mapping a concept name to a guild-relative Markdown file. A role pulls one or more concepts into its prompt by naming them in its own `concepts` array (below); the loader appends each declared file's content to that role's system prompt at load time, in declaration order, with one blank line between sections. Concepts are the Guild's standing engineering standards, shared across roles and swappable in one place rather than duplicated inline; swapping one requires a service restart because the guild is loaded once per process.
+A registry mapping a concept name to a guild-relative Markdown file. A role pulls one or more concepts into its prompt by naming them in its own `concepts` array (below); the loader prepends a shared `## Shared concepts` preamble stating the precedence rule, then appends each declared file's content to that role's system prompt at load time, in declaration order, with one blank line between sections. Concepts are the Guild's standing engineering standards, shared across roles and swappable in one place rather than duplicated inline; swapping one requires a service restart because the guild is loaded once per process.
 
 The seed Guild ships ten concepts, grouped by concern: `style` (`concepts/style.md`); architecture — `dependency-injection` (`concepts/dependency-injection.md`), `module-boundaries` (`concepts/module-boundaries.md`), `type-safety` (`concepts/type-safety.md`), `error-handling` (`concepts/error-handling.md`); testing — `testability` (`concepts/testability.md`), `verification-and-evidence` (`concepts/verification-and-evidence.md`); and security/privacy — `external-data-validation` (`concepts/external-data-validation.md`), `security-posture` (`concepts/security-posture.md`), `privacy-posture` (`concepts/privacy-posture.md`).
 
-**Precedence and trust.** Guild concepts are the standing defaults. A project's own explicit rules — its documentation, `.editorconfig`, linter configuration, or an instruction in the task — override them, and they in turn override conventions merely inferred from neighboring code. Each concept file states its own scope and precedence in a leading paragraph. Guild concepts are trusted guild content, whereas the workspace documentation injected via `projectDocs` remains untrusted reference material.
+**Precedence and trust.** Guild concepts are the standing defaults. A project's own explicit rules — its documentation, `.editorconfig`, linter configuration, or an instruction in the task — override them, and they in turn override conventions merely inferred from neighboring code. The loader injects the precedence rule once per role as the `## Shared concepts` preamble, so each concept file carries only its domain standards. Guild concepts are trusted guild content, whereas the workspace documentation injected via `projectDocs` remains untrusted reference material.
 
 ### `entryRole`
 
@@ -347,13 +347,26 @@ A map from role name to definition:
 Role fields:
 - `systemPrompt` (string, required): path to a Markdown file.
 - `tools` (array, required): tool names this role may call.
-- `concepts` (array of strings, optional): concept names (keys of the top-level `concepts` registry) whose files are appended to this role's system prompt at load time, in declaration order, separated by one blank line. Shared standards live in one swappable concept file the roles must not duplicate inline.
+- `concepts` (array of strings, optional): concept names (keys of the top-level `concepts` registry) whose files are appended to this role's system prompt at load time, in declaration order, separated by one blank line, all preceded by the loader-injected `## Shared concepts` preamble (injected once before the role's concepts). Shared standards live in one swappable concept file the roles must not duplicate inline.
 - `projectDocs` (array of strings, optional): workspace-relative file paths whose contents are injected into this role's initial user message when it starts at depth 0 (the entry role), inside one labeled `[Platform notice — project context]` block framed as untrusted project reference material. Each file is read once at run start and rides the checkpoint, never re-derived on resume. Each file is read with a hard 256 KiB byte cap and its decoded text is cut to 40,000 characters with a `… (truncated)` marker; a missing, non-regular, or unreadable file is skipped with a short notice in the block rather than failing the run. Paths are canonicalized against the workspace and symlink escapes are rejected.
 - `label` (object, optional): tiered display name (`{ detailed, friendly, whimsical }`) the web client renders.
 - `description` (object, optional): tiered one-line description of the role.
 - `workingLabel` (object, optional): tiered text for the "now" caption when this role is the destination of a settled call (its working phase). A `{participant}` placeholder interpolates to the role's own label at the chosen tier — e.g. `"{participant} is planning the approach"` → "Planner is planning the approach". See [`docs/visualization.md`](visualization.md) "Labels".
 
 The seed Guild's style workflow uses these fields together. Its `style_guide_author` role is read-only with respect to project files — it writes only the run style guide — and merges the task's style rules, the repository's style documents, `.editorconfig`, linter and formatter configuration, and the guild `style` concept — in that precedence, falling back to the repository's applied style when those are silent — into one run style guide, written with `write_style_guide`. The `coder`, the `style_reviewer`, and the author itself read that guide with `read_style_guide`, and the orchestrator delegates to the author after planning and before the first `coder` delegation whenever a style review will run. The orchestrator additionally declares `projectDocs: ["AGENTS.md", "README.md"]`, injecting the repository's top-level documentation as the untrusted project-context block described above.
+
+### Author hygiene
+
+A child role starts from a fresh, information-constrained context and sees only its system prompt and the task text it is handed.
+Some roles — above all a fresh reviewer — must reach their own conclusions: they must be unbiased and unpoisoned, reasoning about the work in front of them rather than the machinery around it.
+Priming changes behavior: a reviewer told that a review pipeline exists, that it is round two, what a previous reviewer found, which findings are expected, or that it is being graded will look for what it was primed to find and stop looking elsewhere.
+
+So when you author or change the Guild:
+
+- Keep process out of shared concepts. A concept is appended to every role that declares it, so a process concept would leak the process into roles — including reviewers — that must stay unaware of the meta process. Concepts carry engineering standards only.
+- Keep process in the process roles. The orchestrator and the leads are process-aware and their prompts carry the loop; a fresh reviewer's task text must not.
+- Hand a child only what it needs. A parent's task text carries the work, the scope, the standards to apply, and the work parameters the child's own prompt expects (such as the effort level); it must not carry the parent's process state, prior findings, expected results, or evaluation framing.
+- Before adding a prompt or a concept, ask whether a fresh, unbiased agent would be better or worse off for having read it. If a role does not need it to do its job, it does not belong in that role's context.
 
 ### `tools`
 

@@ -7,7 +7,7 @@ import { parseEvalConfig, type EvalConfig } from '../benchmarks/validation.js'
 import { createRunBaseTracker } from '../executor/base-state.js'
 import { createBuiltInToolHandlers } from '../executor/builtin-tools.js'
 import { ERROR_KINDS } from '../executor/errors.js'
-import { composeRolePrompt, createGuildLoader, resolveConceptContents, type LoadedGuildFiles } from '../executor/loader.js'
+import { composeRolePrompt, createGuildLoader, resolveConceptContents, SHARED_CONCEPTS_PREAMBLE, type LoadedGuildFiles } from '../executor/loader.js'
 import { LOG_FILE_NAME } from '../executor/persistence.js'
 import { createRunParkTracker } from '../executor/park-state.js'
 import { createRoleRegistry } from '../executor/role-registry.js'
@@ -259,7 +259,7 @@ function checkConcepts(loaded: LoadedGuildFiles): void {
 	}
 }
 
-// The loader composes each role's prompt from its base prompt plus its declared concept files, in declaration order; the composed coder prompt is pinned exactly so an unexpected separator, extra content, or loader regression fails the gate.
+// The loader composes each role's prompt from its base prompt, the shared concepts preamble, and its declared concept files, in declaration order; the composed coder prompt is pinned exactly (including the preamble appearing once) so an unexpected separator, extra content, or loader regression fails the gate.
 function checkComposedConceptPrompt(loaded: LoadedGuildFiles): void {
 	const config = loaded.config
 	const coder = config.roles['coder']
@@ -282,6 +282,14 @@ function checkComposedConceptPrompt(loaded: LoadedGuildFiles): void {
 	const conceptContents = resolveConceptContents('coder', coder.concepts ?? [], config.concepts ?? {}, (_conceptName, conceptPath) => fs.readFileSync(path.join(guildDir, conceptPath), 'utf8'))
 	const expectedCoderPrompt = composeRolePrompt(baseCoderPrompt, conceptContents)
 	check(loaded.prompts['coder'] === expectedCoderPrompt, 'guild: the composed coder prompt is not exactly prompts/coder.md composed with its declared concepts (unexpected separator, extra content, or a loader regression)')
+	const preambleCount = (loaded.prompts['coder'] ?? '').split(SHARED_CONCEPTS_PREAMBLE).length - 1
+	check(preambleCount === 1, `guild: the composed coder prompt must contain the shared concepts preamble exactly once (found ${preambleCount})`)
+	// The converse invariant: a role that declares no concepts keeps its prompt byte-identical, so the loader must not inject the preamble into it.
+	for (const [name, role] of Object.entries(config.roles)) {
+		if ((role.concepts ?? []).length > 0) continue
+		const noConceptPreambleCount = (loaded.prompts[name] ?? '').split(SHARED_CONCEPTS_PREAMBLE).length - 1
+		check(noConceptPreambleCount === 0, `guild: role "${name}" declares no concepts, so its composed prompt must not carry the shared concepts preamble (found ${noConceptPreambleCount})`)
+	}
 	for (const name of ['coder', 'style_lead', 'style_reviewer', 'style_guide_author']) {
 		const composedPrompt = loaded.prompts[name] ?? ''
 		for (const removedRule of removedInlineStyleRules) {

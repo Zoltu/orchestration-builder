@@ -1,7 +1,5 @@
 ## Privacy posture
 
-This standard governs what the program does with data about people, but it is the house default rather than the top authority. An explicit rule the project states about itself — its own conventions, its configuration, or an instruction in the task — overrides it, and the standard in turn overrides conventions merely inferred from neighboring code. Where nothing above it speaks, follow the conventions the project itself evidences (configuration files, neighboring code).
-
 - Collect only the data the work actually requires; never gather data on the chance it might be useful.
 - Classify the data you handle — public, internal, personal, or sensitive — and apply the handling each class requires.
 - Default to local processing; do not send user data to a third party.

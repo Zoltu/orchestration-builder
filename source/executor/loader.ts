@@ -63,10 +63,15 @@ export function resolveConceptContents(roleName: string, declaredConcepts: reado
 	return contents
 }
 
-// Prompt composition shared by the guild loader and the data validator: a role with no concepts keeps its prompt byte-identical; otherwise the base prompt is followed by each concept file's content, separated by exactly one blank line, and the result ends with a single trailing newline. The base and every concept's trailing whitespace is trimmed first because every shipped prompt and concept file ends with a final newline, which would otherwise double the separator. Each concept file carries its own headings — none is injected here.
+// Injecting the precedence rule once per role keeps a role that declares many concepts from repeating it in each concept file. The concept files themselves carry only their domain standards.
+export const SHARED_CONCEPTS_PREAMBLE = `## Shared concepts
+
+The standards below are the house defaults for their domains, not the top authority. An explicit rule the project states about itself — its own conventions, its configuration, or an instruction in the task — overrides them, and these standards in turn override conventions merely inferred from neighboring code. Where nothing above them speaks, follow the conventions the project itself evidences (configuration files, neighboring code).`
+
+// Prompt composition shared by the guild loader and the data validator: a role with no concepts keeps its prompt byte-identical; otherwise the base prompt is followed by the shared concepts preamble, then each concept file's content, separated by exactly one blank line, and the result ends with a single trailing newline. The base and every concept's trailing whitespace is trimmed first because every shipped prompt and concept file ends with a final newline, which would otherwise double the separator. Each concept file carries its own domain headings — none is injected here.
 export function composeRolePrompt(basePrompt: string, conceptContents: string[]): string {
 	if (conceptContents.length === 0) return basePrompt
-	return `${basePrompt.trimEnd()}\n\n${conceptContents.map((content) => content.trimEnd()).join('\n\n')}\n`
+	return `${basePrompt.trimEnd()}\n\n${SHARED_CONCEPTS_PREAMBLE}\n\n${conceptContents.map((content) => content.trimEnd()).join('\n\n')}\n`
 }
 
 // The deployment file path is fixed per service (it lives beside the guild in the bundle and is not per-run), so the factory closes over it and the returned LoadGuild keeps the guild-dir-only signature. The LoadedGuildFiles it yields is file-shaped; completing the model into the LoadedGuild the executor consumes is the startup path's job (resolveDeploymentConfig in serve.ts).

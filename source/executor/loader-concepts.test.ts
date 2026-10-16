@@ -1,29 +1,38 @@
 import { describe, expect, test } from 'bun:test'
 
 import { ValidationError } from './errors.js'
-import { composeRolePrompt, resolveConceptContents } from './loader.js'
+import { composeRolePrompt, resolveConceptContents, SHARED_CONCEPTS_PREAMBLE } from './loader.js'
 
 const styleConcept = '## Style standard\n\nWrite tab-indented code.\n'
 
+function countOccurrences(haystack: string, needle: string): number {
+	return haystack.split(needle).length - 1
+}
+
 describe('composeRolePrompt', () => {
-	test('a role without concepts keeps its prompt byte-identical', () => {
+	test('a role without concepts keeps its prompt byte-identical and gets no preamble', () => {
 		expect(composeRolePrompt('You are the coder.\n', [])).toBe('You are the coder.\n')
 		expect(composeRolePrompt('', [])).toBe('')
+		expect(composeRolePrompt('You are the coder.\n', [])).not.toContain(SHARED_CONCEPTS_PREAMBLE)
 	})
-	test('one concept is appended after exactly one blank line, the base without one', () => {
-		expect(composeRolePrompt('You are the coder.', [styleConcept])).toBe('You are the coder.\n\n## Style standard\n\nWrite tab-indented code.\n')
+	test('one concept is appended after the preamble, one blank line between every section', () => {
+		expect(composeRolePrompt('You are the coder.', [styleConcept])).toBe(`You are the coder.\n\n${SHARED_CONCEPTS_PREAMBLE}\n\n## Style standard\n\nWrite tab-indented code.\n`)
 	})
-	test('a base prompt with a trailing newline composes to exactly one blank line before the concept, not two', () => {
-		expect(composeRolePrompt('You are the coder.\n', [styleConcept])).toBe('You are the coder.\n\n## Style standard\n\nWrite tab-indented code.\n')
+	test('a base prompt with a trailing newline composes to exactly one blank line before the preamble, not two', () => {
+		expect(composeRolePrompt('You are the coder.\n', [styleConcept])).toBe(`You are the coder.\n\n${SHARED_CONCEPTS_PREAMBLE}\n\n## Style standard\n\nWrite tab-indented code.\n`)
 	})
-	test('an empty base prompt composes to the blank-line separator before the concept content', () => {
-		expect(composeRolePrompt('', [styleConcept])).toBe('\n\n## Style standard\n\nWrite tab-indented code.\n')
+	test('an empty base prompt composes to the blank-line separator before the preamble', () => {
+		expect(composeRolePrompt('', [styleConcept])).toBe(`\n\n${SHARED_CONCEPTS_PREAMBLE}\n\n## Style standard\n\nWrite tab-indented code.\n`)
 	})
-	test('multiple concepts are joined by exactly one blank line in declaration order', () => {
-		expect(composeRolePrompt('Base', ['one\n', 'two\n'])).toBe('Base\n\none\n\ntwo\n')
+	test('multiple concepts are joined by exactly one blank line in declaration order after the preamble', () => {
+		expect(composeRolePrompt('Base', ['one\n', 'two\n'])).toBe(`Base\n\n${SHARED_CONCEPTS_PREAMBLE}\n\none\n\ntwo\n`)
+	})
+	test('the shared preamble appears exactly once in a multi-concept composition', () => {
+		const composed = composeRolePrompt('Base', ['one\n', 'two\n', 'three\n'])
+		expect(countOccurrences(composed, SHARED_CONCEPTS_PREAMBLE)).toBe(1)
 	})
 	test('the composed prompt ends with exactly one trailing newline regardless of the inputs', () => {
-		expect(composeRolePrompt('Base\n', ['one\n\n\n', 'two'])).toBe('Base\n\none\n\ntwo\n')
+		expect(composeRolePrompt('Base\n', ['one\n\n\n', 'two'])).toBe(`Base\n\n${SHARED_CONCEPTS_PREAMBLE}\n\none\n\ntwo\n`)
 	})
 })
 

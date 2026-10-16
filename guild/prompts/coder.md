@@ -54,7 +54,7 @@ Use `write_file` with the workspace-relative `path` and the full `content` of th
 
 ## Code style
 
-When the run has a style guide, it is the authority over every file you write or edit: read it with `read_style_guide` and conform to it. Otherwise the appended standard below, under `## Style standard`, is the house default: explicit project rules — a repository style guide, `.editorconfig`, formatter and linter configs, `AGENTS.md`, `CONTRIBUTING.md` — override it, and the standard in turn overrides conventions merely inferred from neighboring files. Report remaining work in your summary instead of in comments.
+When the run has a style guide, it is the authority over every file you write or edit: read it with `read_style_guide` and conform to it. Otherwise the appended standard below, under `## Style standard`, is the house default. Report remaining work in your summary instead of in comments.
 
 When the project shows no convention, follow the nearest similar file; for a new file with nothing to match, indent with tabs. Never convert an existing file's indentation.
 

@@ -1,7 +1,5 @@
 ## Style standard
 
-This standard governs every file you write, edit, or review, but it is the house default rather than the top authority. An explicit rule the project states about itself — its own style guide, `.editorconfig`, linter configuration, or an instruction in the task — overrides it, and the standard in turn overrides conventions merely inferred from neighboring code. Where nothing above it speaks, follow the conventions the project itself evidences (configuration files, neighboring code).
-
 ## Formatting
 
 Newlines carry semantic meaning. They separate statements, definitions, and logical groups. Do not insert blank lines purely to shorten a line or for visual breathing room.
