@@ -5,7 +5,7 @@ import { isRoleSnapshot, type RoleSnapshot, type RoleSnapshotInput, type RoleSna
 import { isProjectSettings } from './validation.js'
 import { isTaskQueue } from './task-queue.js'
 import type { TaskQueue } from './task-queue.js'
-import type { EffortLevel, LogLevel, LogEvent, RunMeta } from './types.js'
+import type { EffortLevel, InvolvementLevel, LogLevel, LogEvent, RunMeta } from './types.js'
 
 export type RunDirectory = () => string
 export type AppendLog = (event: LogEvent) => void
@@ -312,6 +312,8 @@ export function createListRunIds(baseDir: string): ListRunIds {
 
 export interface ProjectSettings {
 	effort?: EffortLevel
+	// The project-wide default human-involvement level (docs/reference.md "Involvement channel"); absent means the deployment default applies.
+	involvement?: InvolvementLevel
 	// The project-wide default logging level (docs/reference.md "Logging level"); absent means the deployment default applies.
 	logLevel?: LogLevel
 }

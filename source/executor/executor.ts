@@ -1,4 +1,5 @@
 import { DEFAULT_EFFORT } from './effort.js'
+import { DEFAULT_INVOLVEMENT } from './involvement.js'
 import type { ResultCard, RunContinuation, RunMeta, RunOptions } from './types.js'
 import { createCheckpointRecorder, entryFrameLogLevel, type RunCheckpoint } from './checkpoint.js'
 import { createContextPressureTracker } from './context-pressure.js'
@@ -90,6 +91,7 @@ function composeRunMeta(options: RunOptions, startTime: string, status: RunMeta[
 		...(options.benchmarkPath !== undefined ? { benchmarkPath: options.benchmarkPath } : {}),
 		task: options.task,
 		effort: options.effort,
+		involvement: options.involvement,
 		...(options.logLevel !== undefined ? { logLevel: options.logLevel } : {}),
 		// Only a genuine continuation stamps the lineage: a briefing-only continuation (a first queue dispatch) has no prior run, and meta.continuesFrom must stay honest.
 		...(options.continuation?.runId !== undefined ? { continuesFrom: options.continuation.runId } : {}),
@@ -105,8 +107,9 @@ export async function runExecutor(deps: ExecutorDependencies, options: RunOption
 	const loadedGuild = deps.loadedGuild
 
 	const startTime = new Date().toISOString()
-	// effort_set is logged once at run start so the trace records the chosen level before the entry role begins.
+	// effort_set and involvement_set are logged once at run start so the trace records the chosen levels before the entry role begins.
 	logEvent(deps.appendLog, 'effort_set', { effort: options.effort })
+	logEvent(deps.appendLog, 'involvement_set', { involvement: options.involvement })
 	// Write a running meta before the entry role begins so the UI can show the task, run id, and start time while the run is in progress, rather than only after completion. It is overwritten with the terminal meta below.
 	deps.writeMeta(composeRunMeta(options, startTime, 'running'))
 	const engineDeps = buildEngineDependencies(deps, { runId: options.runId, startTime, registryCounter: 0, continuesFrom: options.continuation?.runId, queueTracked: options.queueTracked })
@@ -129,6 +132,7 @@ export async function runExecutor(deps: ExecutorDependencies, options: RunOption
 		roleName: loadedGuild.config.entryRole,
 		task: options.task,
 		effort: options.effort,
+		involvement: options.involvement,
 		...(options.logLevel !== undefined ? { logLevel: options.logLevel } : {}),
 		...(options.continuation !== undefined ? { continuation: options.continuation } : {}),
 		...(workspaceGitNotice !== undefined ? { workspaceGitNotice } : {}),
@@ -151,12 +155,13 @@ export interface ResumeRunOptions {
 	operatorNote?: string
 }
 
-// Resumes a run from its checkpoint after a service restart. The run's identity (run id, task, effort, start time) comes from the checkpoint — the meta keeps the original startTime so elapsed-time accounting survives the restart. The stack is reconstructed by resumeRoleStack and the run continues from the suspended leaf.
+// Resumes a run from its checkpoint after a service restart. The run's identity (run id, task, effort, involvement, log level, start time) comes from the checkpoint — the meta keeps the original startTime so elapsed-time accounting survives the restart. The stack is reconstructed by resumeRoleStack and the run continues from the suspended leaf.
 export async function resumeExecutor(deps: ExecutorDependencies, checkpoint: RunCheckpoint, options: ResumeRunOptions): Promise<RunMeta> {
 	const entryFrame = checkpoint.frames[0]
 	if (entryFrame === undefined) throw new Error(`resumeExecutor: checkpoint for run ${checkpoint.runId} has no frames`)
 	const task = entryFrame.task
 	const effort = entryFrame.effort ?? DEFAULT_EFFORT
+	const involvement = entryFrame.involvement ?? DEFAULT_INVOLVEMENT
 	const logLevel = entryFrameLogLevel(entryFrame)
 	// The checkpoint carries the lineage id only (not the prior task/summary): on resume the entry role's history — the briefing included — is restored from the checkpoint verbatim, so the full continuation object is never recomposed and the empty task/summary here exist only so the metas keep the continuesFrom field.
 	const continuation: RunContinuation | undefined = entryFrame.continuesFrom !== undefined ? { runId: entryFrame.continuesFrom, task: '', summary: '' } : undefined
@@ -166,6 +171,7 @@ export async function resumeExecutor(deps: ExecutorDependencies, checkpoint: Run
 		...(options.benchmarkPath !== undefined ? { benchmarkPath: options.benchmarkPath } : {}),
 		task,
 		effort,
+		involvement,
 		logLevel,
 		...(continuation !== undefined ? { continuation } : {}),
 	}

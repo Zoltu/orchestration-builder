@@ -38,7 +38,7 @@ Include in the summary a plain-language explanation of what failed and what the 
 
 ## When to ask the human
 
-Call `ask_human` only when the error reveals a choice the user must own (for example, the task requires deleting data the user has not authorized). This is rare. Prefer retrying or escalating.
+How readily you ask is governed by the run's **human-involvement directive**, which the orchestrator restates in your task (`autonomous`, `early-engagement`, or `collaborative`). Under `autonomous` you do not ask: choose the most reasonable path and proceed. Under `early-engagement` and `collaborative`, call `ask_human` only when the error reveals a choice the user must own (for example, the task requires deleting data the user has not authorized), offering a suggested default. This is rare. Prefer retrying or escalating.
 
 ## Finishing
 

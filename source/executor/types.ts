@@ -65,6 +65,8 @@ export interface ExecutorConfig {
 	contextHandlerRole?: string
 	// The guild role the engine invokes to answer an operator inquiry: the run suspends at the safe point and a fresh instance of this role investigates with its tools; its finish-card summary is the answer. Optional; when unset, an inquiry is dropped (logged) rather than answered — a question never kills a run.
 	inquiryHandlerRole?: string
+	// The deployment-wide default human-involvement level (docs/reference.md "Involvement channel"): the chain's lowest-priority input, below the per-run override and the project setting. Optional; when unset, DEFAULT_INVOLVEMENT applies.
+	defaultInvolvement?: InvolvementLevel
 	interruptTriggers?: InterruptTriggersConfig
 }
 
@@ -242,6 +244,8 @@ export interface RunOptions {
 	benchmarkPath?: string
 	task: string
 	effort: EffortLevel
+	// The run's human-involvement level (see docs/reference.md "Involvement channel"), resolved at submission.
+	involvement: InvolvementLevel
 	// The run's logging level (see docs/reference.md "Logging level"), resolved at submission; the run's appendLog writes are filtered at this level.
 	logLevel?: LogLevel
 	continuation?: RunContinuation
@@ -257,6 +261,8 @@ export interface RunMeta {
 	task: string
 	// Optional so a meta missing the field, or a torn meta read, still parses.
 	effort?: EffortLevel
+	// The run's human-involvement level (see docs/reference.md "Involvement channel"). Optional so a torn meta read still parses.
+	involvement?: InvolvementLevel
 	// The run's logging level (see docs/reference.md "Logging level"). Optional so a torn meta read still parses.
 	logLevel?: LogLevel
 	// Set when this run continues a prior finished run: the prior run's id. The lineage is what a follow-on run uses to find the prior run's artifacts.
@@ -271,6 +277,9 @@ export interface RunMeta {
 
 // Per-run speed-vs-quality setting. The three tier names are the contract on every wire (API bodies, settings.json, meta.json, checkpoints, the effort_set event); the executor carries and logs the tier but makes no decision about what each tier means — that mapping is Guild-defined.
 export type EffortLevel = 'quick' | 'standard' | 'thorough'
+
+// Per-run human-involvement setting. The three level names are the contract on every wire (API bodies, settings.json, meta.json, checkpoints, the involvement_set event); the executor carries and logs the level and composes the level's guidance directive, which the Guild role prompts defer to.
+export type InvolvementLevel = 'autonomous' | 'early-engagement' | 'collaborative'
 
 export interface LogEvent {
 	timestamp: string

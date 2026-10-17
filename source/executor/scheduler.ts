@@ -2,15 +2,16 @@ import type { Sleep } from './llm.js'
 import type { ListRunIds, ReadRunMetaById, ReadTaskQueue, WriteTaskQueue } from './persistence.js'
 import { assembleBriefingLines, dispatchingItem, releaseToWaiting, repairActiveItem, settleActiveItem, withReplacedItem, type QueueItem, type RunListEntry } from './task-queue.js'
 import { isRunMeta, isTerminalRunStatus, safeJsonParse } from './validation.js'
-import type { EffortLevel, LogLevel, RunContinuation, RunMeta } from './types.js'
+import type { EffortLevel, InvolvementLevel, LogLevel, RunContinuation, RunMeta } from './types.js'
 import type { SubmitResult } from './run-submission.js'
 
 // The platform scheduler (docs/queueing.md "Dispatch and the scheduler"): dispatches queued tasks as runs whenever the single run slot is free. Dispatch is platform code, never the LLM, and the scheduler is the only caller of submission in the dispatch path.
 
-// The shaped submission the scheduler hands to the submission layer: the item's task, its effort and logLevel overrides, and the continuation assembled from the item's lineage (the prior run's terminal meta) plus the interim briefing. Omitting any of these would silently drop lineage or the log-level override for queue-tracked runs.
+// The shaped submission the scheduler hands to the submission layer: the item's task, its effort, involvement, and logLevel overrides, and the continuation assembled from the item's lineage (the prior run's terminal meta) plus the interim briefing. Omitting any of these would silently drop lineage or an override for queue-tracked runs.
 export interface QueuedRunSubmission {
 	task: string
 	effort?: EffortLevel
+	involvement?: InvolvementLevel
 	logLevel?: LogLevel
 	continuation?: RunContinuation
 }
@@ -101,6 +102,7 @@ export function createTaskScheduler(dependencies: TaskSchedulerDependencies): Ta
 		})
 		const overrides = {
 			...(item.effort !== undefined ? { effort: item.effort } : {}),
+			...(item.involvement !== undefined ? { involvement: item.involvement } : {}),
 			...(item.logLevel !== undefined ? { logLevel: item.logLevel } : {}),
 		}
 		if (item.continuesFrom !== undefined) {

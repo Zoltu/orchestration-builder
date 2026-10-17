@@ -56,6 +56,7 @@ function sampleCheckpoint(): RunCheckpoint {
 				depth: 0,
 				task: 'do it',
 				effort: 'standard',
+				involvement: 'early-engagement',
 				roleState: sampleRoleState({
 					history: [
 						{ role: 'system', content: 'prompt' },
@@ -295,7 +296,7 @@ describe('createCheckpointRecorder', () => {
 	}
 
 	function registerRoot(recorder: CheckpointRecorder, registry: RoleRegistry): RoleRegistryEntry {
-		const context = frameContext('main', 0, { effort: 'standard' })
+		const context = frameContext('main', 0, { effort: 'standard', involvement: 'early-engagement' })
 		const entry = registry.register('main', 0, undefined, sampleRoleState())
 		recorder.registerFrame(context, entry)
 		return entry
@@ -471,6 +472,21 @@ describe('createCheckpointRecorder', () => {
 
 		expect(written[0]?.frames[0]?.logLevel).toBe('standard')
 		expect(written[0]?.frames[1]?.logLevel).toBeUndefined()
+	})
+
+	test('every frame carries the involvement level from its context, like effort', () => {
+		const written: RunCheckpoint[] = []
+		const registry = createRoleRegistry()
+		const recorder = createCheckpointRecorder({ parkTracker: createRunParkTracker(), baseTracker: createRunBaseTracker(), writeCheckpoint: (c) => written.push(c), runId: 'run-1', startTime: '2026-01-01T00:00:00.000Z', roleRegistry: registry, contextPressureTracker: createContextPressureTracker() })
+
+		const rootEntry = registry.register('main', 0, undefined, sampleRoleState())
+		recorder.registerFrame(frameContext('main', 0, { involvement: 'collaborative' }), rootEntry)
+		const childEntry = registry.register('coder', 1, 'main-0-1', sampleRoleState())
+		recorder.registerFrame(frameContext('coder', 1, { parent: 'main', parentRoleId: 'main-0-1', involvement: 'collaborative' }), childEntry)
+		recorder.write()
+
+		expect(written[0]?.frames[0]?.involvement).toBe('collaborative')
+		expect(written[0]?.frames[1]?.involvement).toBe('collaborative')
 	})
 
 	test('a context without a logging level stamps none', () => {

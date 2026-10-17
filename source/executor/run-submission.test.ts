@@ -1,9 +1,10 @@
 import { describe, expect, test } from 'bun:test'
 import type { RunCheckpoint } from './checkpoint.ts'
 import { DEFAULT_LOG_LEVEL } from './log-level.ts'
-import type { EffortLevel, LogLevel, RunContinuation, RunMeta } from './types.js'
+import type { EffortLevel, InvolvementLevel, LogLevel, RunContinuation, RunMeta } from './types.js'
 import type { ReadProjectSettings, ReadRunCheckpointById, ReadRunMetaById, RunDirectoryExists } from './persistence.ts'
 import { DEFAULT_EFFORT } from './effort.ts'
+import { DEFAULT_INVOLVEMENT } from './involvement.ts'
 import { createResumeErroredRun, createRunSubmission, type ResumeErroredRunDependencies, type ResumeRun, type RunSubmission, type StartRun } from './run-submission.ts'
 import type { QueueItem, TaskQueue } from './task-queue.ts'
 import { defined, flushMicrotasks } from './test-fixtures.ts'
@@ -53,7 +54,7 @@ describe('createRunSubmission', () => {
 
 	test('submit marks every started run queue-tracked — the bit that gates the pre-write park', async () => {
 		const marks: boolean[] = []
-		const startRun: StartRun = async (_runId, _task, _effort, _logLevel, _continuation, queueTracked) => {
+		const startRun: StartRun = async (_runId, _task, _effort, _involvement, _logLevel, _continuation, queueTracked) => {
 			marks.push(queueTracked)
 			return sampleMeta('run-1')
 		}
@@ -490,7 +491,7 @@ describe('createRunSubmission effort resolution', () => {
 describe('createRunSubmission continuation passthrough', () => {
 	function captureContinuation(): { startRun: StartRun; captured: Array<RunContinuation | undefined> } {
 		const captured: Array<RunContinuation | undefined> = []
-		const startRun: StartRun = async (_runId, _task, _effort, _logLevel, continuation) => {
+		const startRun: StartRun = async (_runId, _task, _effort, _involvement, _logLevel, continuation) => {
 			captured.push(continuation)
 			return sampleMeta('run-1')
 		}
@@ -502,7 +503,7 @@ describe('createRunSubmission continuation passthrough', () => {
 		const submission = createRunSubmission({ onRunSettled: settleNothing, startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings, runDirectoryExists: emptyRunsDir })
 		const continuation = { runId: 'run-20260101-000000', task: 'prior task', summary: 'prior summary' }
 
-		submission.submit('do it', undefined, undefined, continuation)
+		submission.submit('do it', undefined, undefined, undefined, continuation)
 		await submission.awaitActive()
 		expect(captured).toEqual([continuation])
 	})
@@ -520,7 +521,7 @@ describe('createRunSubmission continuation passthrough', () => {
 describe('createRunSubmission log level resolution', () => {
 	function captureLogLevel(): { startRun: StartRun; captured: LogLevel[] } {
 		const captured: LogLevel[] = []
-		const startRun: StartRun = async (_runId, _task, _effort, logLevel) => {
+		const startRun: StartRun = async (_runId, _task, _effort, _involvement, logLevel) => {
 			captured.push(logLevel)
 			return sampleMeta('run-1')
 		}
@@ -531,7 +532,7 @@ describe('createRunSubmission log level resolution', () => {
 		const { startRun, captured } = captureLogLevel()
 		const submission = createRunSubmission({ onRunSettled: settleNothing, startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings, runDirectoryExists: emptyRunsDir })
 
-		submission.submit('do it', undefined, 'standard')
+		submission.submit('do it', undefined, undefined, 'standard')
 		await submission.awaitActive()
 		expect(captured).toEqual(['standard'])
 	})
@@ -551,7 +552,7 @@ describe('createRunSubmission log level resolution', () => {
 		const projectSettings: ReadProjectSettings = () => ({ logLevel: 'standard' })
 		const submission = createRunSubmission({ onRunSettled: settleNothing, startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: projectSettings, runDirectoryExists: emptyRunsDir })
 
-		submission.submit('do it', undefined, 'full')
+		submission.submit('do it', undefined, undefined, 'full')
 		await submission.awaitActive()
 		expect(captured).toEqual(['full'])
 	})
@@ -579,7 +580,7 @@ describe('createRunSubmission log level resolution', () => {
 		const { startRun, captured } = captureLogLevel()
 		const submission = createRunSubmission({ onRunSettled: settleNothing, startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings, runDirectoryExists: emptyRunsDir, deploymentLogLevel: 'standard' })
 
-		submission.submit('do it', undefined, 'full')
+		submission.submit('do it', undefined, undefined, 'full')
 		await submission.awaitActive()
 		expect(captured).toEqual(['full'])
 	})
@@ -591,6 +592,83 @@ describe('createRunSubmission log level resolution', () => {
 		submission.submit('do it')
 		await submission.awaitActive()
 		expect(captured).toEqual([DEFAULT_LOG_LEVEL])
+	})
+})
+
+describe('createRunSubmission involvement resolution', () => {
+	function captureInvolvement(): { startRun: StartRun; captured: InvolvementLevel[] } {
+		const captured: InvolvementLevel[] = []
+		const startRun: StartRun = async (_runId, _task, _effort, involvement) => {
+			captured.push(involvement)
+			return sampleMeta('run-1')
+		}
+		return { startRun, captured }
+	}
+
+	test('a per-run override is threaded into startRun', async () => {
+		const { startRun, captured } = captureInvolvement()
+		const submission = createRunSubmission({ onRunSettled: settleNothing, startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings, runDirectoryExists: emptyRunsDir })
+
+		submission.submit('do it', undefined, 'collaborative')
+		await submission.awaitActive()
+		expect(captured).toEqual(['collaborative'])
+	})
+
+	test('the project default is applied when no override is given', async () => {
+		const { startRun, captured } = captureInvolvement()
+		const projectSettings: ReadProjectSettings = () => ({ involvement: 'collaborative' })
+		const submission = createRunSubmission({ onRunSettled: settleNothing, startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: projectSettings, runDirectoryExists: emptyRunsDir })
+
+		submission.submit('do it')
+		await submission.awaitActive()
+		expect(captured).toEqual(['collaborative'])
+	})
+
+	test('a per-run override wins over the project default', async () => {
+		const { startRun, captured } = captureInvolvement()
+		const projectSettings: ReadProjectSettings = () => ({ involvement: 'collaborative' })
+		const submission = createRunSubmission({ onRunSettled: settleNothing, startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: projectSettings, runDirectoryExists: emptyRunsDir })
+
+		submission.submit('do it', undefined, 'autonomous')
+		await submission.awaitActive()
+		expect(captured).toEqual(['autonomous'])
+	})
+
+	test('the deployment default applies when neither override nor project setting fixes the level', async () => {
+		const { startRun, captured } = captureInvolvement()
+		const submission = createRunSubmission({ onRunSettled: settleNothing, startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings, runDirectoryExists: emptyRunsDir, deploymentInvolvement: 'collaborative' })
+
+		submission.submit('do it')
+		await submission.awaitActive()
+		expect(captured).toEqual(['collaborative'])
+	})
+
+	test('the project setting wins over the deployment default', async () => {
+		const { startRun, captured } = captureInvolvement()
+		const projectSettings: ReadProjectSettings = () => ({ involvement: 'autonomous' })
+		const submission = createRunSubmission({ onRunSettled: settleNothing, startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: projectSettings, runDirectoryExists: emptyRunsDir, deploymentInvolvement: 'collaborative' })
+
+		submission.submit('do it')
+		await submission.awaitActive()
+		expect(captured).toEqual(['autonomous'])
+	})
+
+	test('a per-run override wins over the deployment default', async () => {
+		const { startRun, captured } = captureInvolvement()
+		const submission = createRunSubmission({ onRunSettled: settleNothing, startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings, runDirectoryExists: emptyRunsDir, deploymentInvolvement: 'collaborative' })
+
+		submission.submit('do it', undefined, 'autonomous')
+		await submission.awaitActive()
+		expect(captured).toEqual(['autonomous'])
+	})
+
+	test('DEFAULT_INVOLVEMENT applies when nothing in the chain fixes the level', async () => {
+		const { startRun, captured } = captureInvolvement()
+		const submission = createRunSubmission({ onRunSettled: settleNothing, startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings, runDirectoryExists: emptyRunsDir })
+
+		submission.submit('do it')
+		await submission.awaitActive()
+		expect(captured).toEqual([DEFAULT_INVOLVEMENT])
 	})
 })
 

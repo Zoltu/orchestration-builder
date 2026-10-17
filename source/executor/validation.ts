@@ -9,8 +9,9 @@ import type {
 	GenerationConfig,
 	GuildConfig,
 	HumanFacingText,
-	LoggingConfig,
 	InterruptTriggersConfig,
+	InvolvementLevel,
+	LoggingConfig,
 	ModelConfig,
 	OperationKind,
 	ResultCard,
@@ -171,9 +172,14 @@ export function isEffortLevel(value: unknown): value is EffortLevel {
 	return value === 'quick' || value === 'standard' || value === 'thorough'
 }
 
+export function isInvolvementLevel(value: unknown): value is InvolvementLevel {
+	return value === 'autonomous' || value === 'early-engagement' || value === 'collaborative'
+}
+
 export function isProjectSettings(value: unknown): value is ProjectSettings {
 	if (!isObject(value)) return false
 	if (value.effort !== undefined && !isEffortLevel(value.effort)) return false
+	if (value.involvement !== undefined && !isInvolvementLevel(value.involvement)) return false
 	if (value.logLevel !== undefined && !isLogLevel(value.logLevel)) return false
 	return true
 }
@@ -185,6 +191,7 @@ export function isRunMeta(value: unknown): value is RunMeta {
 	if (!isOptionalString(value.benchmarkPath)) return false
 	if (!isString(value.task)) return false
 	if (value.effort !== undefined && !isEffortLevel(value.effort)) return false
+	if (value.involvement !== undefined && !isInvolvementLevel(value.involvement)) return false
 	if (value.logLevel !== undefined && !isLogLevel(value.logLevel)) return false
 	if (value.continuesFrom !== undefined && !isRunIdShape(value.continuesFrom)) return false
 	if (!isString(value.status) || !runMetaStatuses.some((s) => s === value.status)) return false
@@ -246,7 +253,7 @@ function validateInterruptTriggersConfig(value: unknown, path: string): asserts 
 	}
 }
 
-const executorKeys: readonly string[] = ['maxAgentDepth', 'defaultToolTimeoutSeconds', 'maxCompactionAttempts', 'contextPressureThreshold', 'contextHandlerRole', 'inquiryHandlerRole', 'interruptTriggers']
+const executorKeys: readonly string[] = ['maxAgentDepth', 'defaultToolTimeoutSeconds', 'maxCompactionAttempts', 'contextPressureThreshold', 'contextHandlerRole', 'inquiryHandlerRole', 'defaultInvolvement', 'interruptTriggers']
 
 function validateExecutorConfig(value: unknown, path: string): asserts value is ExecutorConfig {
 	if (!isObject(value)) throw new ValidationError(path, 'expected an object')
@@ -262,6 +269,9 @@ function validateExecutorConfig(value: unknown, path: string): asserts value is 
 	}
 	if (value.inquiryHandlerRole !== undefined && (typeof value.inquiryHandlerRole !== 'string' || value.inquiryHandlerRole === '')) {
 		throw new ValidationError(`${path}.inquiryHandlerRole`, 'expected a non-empty string or undefined')
+	}
+	if (value.defaultInvolvement !== undefined && !isInvolvementLevel(value.defaultInvolvement)) {
+		throw new ValidationError(`${path}.defaultInvolvement`, 'expected "autonomous", "early-engagement", or "collaborative" or undefined')
 	}
 	if (value.interruptTriggers !== undefined) validateInterruptTriggersConfig(value.interruptTriggers, `${path}.interruptTriggers`)
 }

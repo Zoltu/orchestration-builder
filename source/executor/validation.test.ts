@@ -3,6 +3,7 @@ import { describe, expect, test } from 'bun:test'
 import { ValidationError } from './errors.js'
 import {
 	isEffortLevel,
+	isInvolvementLevel,
 	isProjectSettings,
 	isResultCard,
 	isRunMeta,
@@ -85,6 +86,21 @@ describe('boolean guards', () => {
 		expect(isRunMeta({ ...base, effort: 3 })).toBe(false)
 		expect(isRunMeta({ ...base, effort: 'copious' })).toBe(false)
 	})
+	test('isRunMeta accepts an optional involvement and rejects an invalid one', () => {
+		const base = {
+			runId: 'r',
+			guildPath: 'g',
+			benchmarkPath: 'b',
+			task: 't',
+			status: 'running' as const,
+			startTime: 'now',
+		}
+		expect(isRunMeta({ ...base, involvement: 'autonomous' })).toBe(true)
+		expect(isRunMeta({ ...base, involvement: 'early-engagement' })).toBe(true)
+		expect(isRunMeta({ ...base, involvement: 'collaborative' })).toBe(true)
+		expect(isRunMeta({ ...base, involvement: 3 })).toBe(false)
+		expect(isRunMeta({ ...base, involvement: 'hands-off' })).toBe(false)
+	})
 	test('isRunMeta accepts an optional logLevel and rejects an invalid one', () => {
 		const base = {
 			runId: 'r',
@@ -124,6 +140,17 @@ describe('boolean guards', () => {
 		expect(isEffortLevel(null)).toBe(false)
 		expect(isEffortLevel(undefined)).toBe(false)
 	})
+	test('isInvolvementLevel accepts the three level strings and rejects everything else', () => {
+		expect(isInvolvementLevel('autonomous')).toBe(true)
+		expect(isInvolvementLevel('early-engagement')).toBe(true)
+		expect(isInvolvementLevel('collaborative')).toBe(true)
+		expect(isInvolvementLevel('Autonomous')).toBe(false)
+		expect(isInvolvementLevel('early_engagement')).toBe(false)
+		expect(isInvolvementLevel('')).toBe(false)
+		expect(isInvolvementLevel(3)).toBe(false)
+		expect(isInvolvementLevel(null)).toBe(false)
+		expect(isInvolvementLevel(undefined)).toBe(false)
+	})
 	test('isTerminalRunStatus accepts every settled status and rejects running', () => {
 		expect(isTerminalRunStatus('success')).toBe(true)
 		expect(isTerminalRunStatus('error')).toBe(true)
@@ -144,6 +171,12 @@ describe('boolean guards', () => {
 		expect(isProjectSettings({ effort: 'quick', logLevel: 'full' })).toBe(true)
 		expect(isProjectSettings({ logLevel: 'copious' })).toBe(false)
 		expect(isProjectSettings({ logLevel: 1 })).toBe(false)
+	})
+	test('isProjectSettings accepts a valid involvement and rejects an invalid one', () => {
+		expect(isProjectSettings({ involvement: 'collaborative' })).toBe(true)
+		expect(isProjectSettings({ effort: 'quick', involvement: 'autonomous', logLevel: 'full' })).toBe(true)
+		expect(isProjectSettings({ involvement: 'hands-off' })).toBe(false)
+		expect(isProjectSettings({ involvement: 3 })).toBe(false)
 	})
 })
 
@@ -283,6 +316,7 @@ describe('validateDeploymentFileConfig throws ValidationError with a path-based 
 				contextPressureThreshold: 0.8,
 				contextHandlerRole: 'context_manager',
 				inquiryHandlerRole: 'inquiry_responder',
+				defaultInvolvement: 'collaborative',
 				interruptTriggers: { handlerRole: 'loop_detector', everyToolCalls: 12, everyTokens: 30000, planOwnerRole: 'planner' },
 			},
 			contextPolicy: { maxToolOutputChars: 1 },
@@ -378,6 +412,17 @@ describe('validateDeploymentFileConfig throws ValidationError with a path-based 
 		expect(() => validateDeploymentFileConfig(withHandler('inquirer'))).not.toThrow()
 		expect(() => validateDeploymentFileConfig(withHandler(''))).toThrow(/executor\.inquiryHandlerRole/)
 		expect(() => validateDeploymentFileConfig(withHandler(42))).toThrow(/executor\.inquiryHandlerRole/)
+	})
+	test('accepts a valid defaultInvolvement and rejects an invalid one', () => {
+		const withInvolvement = (defaultInvolvement: unknown) => ({
+			...validDeployment,
+			executor: { ...validDeployment.executor, defaultInvolvement },
+		})
+		expect(() => validateDeploymentFileConfig(withInvolvement('autonomous'))).not.toThrow()
+		expect(() => validateDeploymentFileConfig(withInvolvement('early-engagement'))).not.toThrow()
+		expect(() => validateDeploymentFileConfig(withInvolvement('collaborative'))).not.toThrow()
+		expect(() => validateDeploymentFileConfig(withInvolvement('hands-off'))).toThrow(/executor\.defaultInvolvement/)
+		expect(() => validateDeploymentFileConfig(withInvolvement(42))).toThrow(/executor\.defaultInvolvement/)
 	})
 	test('rejects unknown top-level keys', () => {
 		const bad = { ...validDeployment, budgest: {} }

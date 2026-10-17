@@ -198,6 +198,7 @@ describe('runExecutor', () => {
 			benchmarkPath: '/bench',
 			task: 'do it',
 			effort: 'standard',
+			involvement: 'early-engagement',
 		})
 
 		expect(persistence.state.createRunDirectoryCalls).toBe(1)
@@ -248,6 +249,7 @@ describe('runExecutor', () => {
 			benchmarkPath: '/bench',
 			task: 'do it',
 			effort: 'standard',
+			involvement: 'early-engagement',
 		})
 
 		expect(meta.status).toBe('error')
@@ -284,6 +286,7 @@ describe('runExecutor', () => {
 			guildPath: '/guild',
 			task: 'do it',
 			effort: 'standard',
+			involvement: 'early-engagement',
 			queueTracked: true,
 		})
 		expect(parkedMeta.status).toBe('needs_clarification')
@@ -300,6 +303,7 @@ describe('runExecutor', () => {
 			guildPath: '/guild',
 			task: 'do it',
 			effort: 'standard',
+			involvement: 'early-engagement',
 		})
 		expect(blockingMeta.status).toBe('success')
 		expect(human.questions).toEqual([{ question: 'Which database?', context: undefined }])
@@ -323,6 +327,7 @@ describe('runExecutor', () => {
 			benchmarkPath: '/bench',
 			task: 'implicit',
 			effort: 'standard',
+			involvement: 'early-engagement',
 		})
 
 		expect(persistence.state.meta).not.toBeNull()
@@ -361,6 +366,7 @@ describe('runExecutor', () => {
 			benchmarkPath: '/bench',
 			task: 'do it',
 			effort: 'standard',
+			involvement: 'early-engagement',
 		})
 
 		const eventTypes = persistence.state.events.map((e) => e.type)
@@ -381,7 +387,7 @@ describe('runExecutor', () => {
 		}
 	})
 
-	test('logs an effort_set event once at run start and carries effort into the meta', async () => {
+	test('logs effort_set and involvement_set once at run start and carries both into the metas', async () => {
 		const guild = buildLoadedGuild(
 			{ main: { systemPrompt: 'p', tools: ['finish'] } },
 			'main',
@@ -401,6 +407,7 @@ describe('runExecutor', () => {
 			benchmarkPath: '/bench',
 			task: 'do it',
 			effort: 'thorough',
+			involvement: 'collaborative',
 		})
 
 		const effortSetEvents = persistence.state.events.filter((e) => e.type === 'effort_set')
@@ -409,10 +416,19 @@ describe('runExecutor', () => {
 		const effortPayload = effortEvent.payload
 		expect(isRecord(effortPayload)).toBe(true)
 		if (isRecord(effortPayload)) expect(effortPayload['effort']).toBe('thorough')
-		// effort_set is the first event, ahead of the entry role's role_start.
+		// Both level events precede the entry role's role_start so the trace records the run's chosen levels before any role activity.
 		expect(defined(persistence.state.events[0], 'first logged event').type).toBe('effort_set')
 		expect(meta.effort).toBe('thorough')
 		expect(persistence.state.meta?.effort).toBe('thorough')
+		const involvementSetEvents = persistence.state.events.filter((e) => e.type === 'involvement_set')
+		expect(involvementSetEvents.length).toBe(1)
+		const involvementEvent = defined(involvementSetEvents[0], 'involvement_set event')
+		const involvementPayload = involvementEvent.payload
+		expect(isRecord(involvementPayload)).toBe(true)
+		if (isRecord(involvementPayload)) expect(involvementPayload['involvement']).toBe('collaborative')
+		expect(defined(persistence.state.events[1], 'second logged event').type).toBe('involvement_set')
+		expect(meta.involvement).toBe('collaborative')
+		expect(persistence.state.meta?.involvement).toBe('collaborative')
 	})
 
 	test('a continuation run writes continuesFrom into both metas and briefs the entry role once', async () => {
@@ -436,6 +452,7 @@ describe('runExecutor', () => {
 			benchmarkPath: '/bench',
 			task: 'do it again',
 			effort: 'standard',
+			involvement: 'early-engagement',
 			continuation,
 		})
 
@@ -481,6 +498,7 @@ describe('runExecutor', () => {
 			benchmarkPath: '/bench',
 			task: 'do it',
 			effort: 'standard',
+			involvement: 'early-engagement',
 		})
 
 		expect('continuesFrom' in meta).toBe(false)
@@ -508,6 +526,7 @@ describe('runExecutor', () => {
 			benchmarkPath: '/bench',
 			task: 'do it',
 			effort: 'standard',
+			involvement: 'early-engagement',
 			logLevel: 'standard',
 		})
 
@@ -540,6 +559,7 @@ describe('runExecutor', () => {
 			benchmarkPath: '/bench',
 			task: 'do it',
 			effort: 'standard',
+			involvement: 'early-engagement',
 		})
 
 		expect('logLevel' in meta).toBe(false)
@@ -558,7 +578,7 @@ describe('runExecutor', () => {
 		const deps = makeDeps(llm, persistence, guild)
 		deps.readWorkspaceGitState = async () => ({ isRepository: true, unbornHead: false, headHash: 'abcdef1234567890', uncommittedPaths: [] })
 
-		await runExecutor(deps, { runId: 'r-base', guildPath: '/guild', task: 'do it', effort: 'standard' })
+		await runExecutor(deps, { runId: 'r-base', guildPath: '/guild', task: 'do it', effort: 'standard', involvement: 'early-engagement' })
 
 		expect(deps.baseTracker.baseHash).toBe('abcdef1234567890')
 		expect(persistence.state.checkpoints.some((checkpoint) => checkpoint.baseHash === 'abcdef1234567890')).toBe(true)
@@ -584,7 +604,7 @@ describe('runExecutor', () => {
 		const deps = makeDeps(llm, persistence, guild)
 		deps.readWorkspaceGitState = async () => ({ isRepository: true, unbornHead: true, uncommittedPaths: [] })
 
-		await runExecutor(deps, { runId: 'r-unborn', guildPath: '/guild', task: 'do it', effort: 'standard' })
+		await runExecutor(deps, { runId: 'r-unborn', guildPath: '/guild', task: 'do it', effort: 'standard', involvement: 'early-engagement' })
 
 		expect(deps.baseTracker.baseHash).toBe(EMPTY_TREE_HASH)
 	})
@@ -596,7 +616,7 @@ describe('runExecutor', () => {
 		const persistence = makeFakePersistence()
 		const deps = makeDeps(llm, persistence, guild)
 
-		await runExecutor(deps, { runId: 'r-no-repo', guildPath: '/guild', task: 'do it', effort: 'standard' })
+		await runExecutor(deps, { runId: 'r-no-repo', guildPath: '/guild', task: 'do it', effort: 'standard', involvement: 'early-engagement' })
 
 		expect(deps.baseTracker.baseHash).toBeUndefined()
 		const llmCall = defined(persistence.state.events.find((event) => event.type === 'llm_call'), 'llm_call event')
@@ -615,7 +635,7 @@ describe('runExecutor', () => {
 		const deps = makeDeps(llm, persistence, guild)
 		deps.readWorkspaceGitState = async () => ({ isRepository: true, unbornHead: false, headHash: 'abc', uncommittedPaths: ['src/a.ts', 'src/b.ts'] })
 
-		await runExecutor(deps, { runId: 'r-dirty', guildPath: '/guild', task: 'do it', effort: 'standard' })
+		await runExecutor(deps, { runId: 'r-dirty', guildPath: '/guild', task: 'do it', effort: 'standard', involvement: 'early-engagement' })
 
 		const dirtyEvent = defined(persistence.state.events.find((event) => event.type === 'workspace_dirty_at_start'), 'workspace_dirty_at_start event')
 		expect(isRecord(dirtyEvent.payload)).toBe(true)
@@ -648,7 +668,7 @@ describe('runExecutor', () => {
 		deps.baseTracker = baseTracker
 		deps.additionalToolHandlers = gitTools
 
-		await runExecutor(deps, { runId: 'r-set-base', guildPath: '/guild', task: 'do it', effort: 'standard' })
+		await runExecutor(deps, { runId: 'r-set-base', guildPath: '/guild', task: 'do it', effort: 'standard', involvement: 'early-engagement' })
 
 		expect(baseTracker.baseHash).toBe('moved-hash')
 		expect(persistence.state.checkpoints.some((checkpoint) => checkpoint.baseHash === 'moved-hash')).toBe(true)
@@ -718,7 +738,7 @@ describe('resumeExecutor', () => {
 		const persistence = makeFakePersistence()
 		const deps = makeDeps(llm, persistence, guild)
 
-		const meta = await runExecutor(deps, { runId: 'r-resume', ...resumeOptions, task: 'do it', effort: 'quick', ...(continuation !== undefined ? { continuation } : {}) })
+		const meta = await runExecutor(deps, { runId: 'r-resume', ...resumeOptions, task: 'do it', effort: 'quick', involvement: 'early-engagement', ...(continuation !== undefined ? { continuation } : {}) })
 		return { meta, checkpoints: persistence.state.checkpoints }
 	}
 
@@ -861,7 +881,7 @@ describe('resumeExecutor', () => {
 		const persistence = makeFakePersistence()
 		const deps = makeDeps(llm, persistence, guild)
 
-		await runExecutor(deps, { runId: 'r-clean', ...resumeOptions, task: 'do it', effort: 'standard' })
+		await runExecutor(deps, { runId: 'r-clean', ...resumeOptions, task: 'do it', effort: 'standard', involvement: 'early-engagement' })
 
 		expect(persistence.state.deleteCheckpointCalls).toBe(1)
 	})
@@ -880,7 +900,7 @@ describe('resumeExecutor', () => {
 		const persistence = makeFakePersistence()
 		const deps = makeDeps(llm, persistence, guild)
 
-		const meta = await runExecutor(deps, { runId: 'r-error', ...resumeOptions, task: 'do it', effort: 'standard' })
+		const meta = await runExecutor(deps, { runId: 'r-error', ...resumeOptions, task: 'do it', effort: 'standard', involvement: 'early-engagement' })
 
 		expect(meta.status).toBe('error')
 		expect(persistence.state.checkpoints.length).toBeGreaterThan(0)
@@ -909,6 +929,7 @@ describe('resumeExecutor', () => {
 			guildPath: '/guild',
 			task: 'do it',
 			effort: 'standard',
+			involvement: 'early-engagement',
 			queueTracked: true,
 		})
 
@@ -1077,7 +1098,7 @@ describe('resumeExecutor', () => {
 			{ kind: 'llm_unavailable', message: 'connection refused' },
 		]
 		const originalPersistence = makeFakePersistence()
-		await runExecutor(makeDeps(llm, originalPersistence, guild), { runId: 'r-delta', ...resumeOptions, task: 'do it', effort: 'quick' })
+		await runExecutor(makeDeps(llm, originalPersistence, guild), { runId: 'r-delta', ...resumeOptions, task: 'do it', effort: 'quick', involvement: 'early-engagement' })
 		const checkpoint = originalPersistence.state.checkpoints[originalPersistence.state.checkpoints.length - 1]
 		if (checkpoint === undefined) throw new Error('expected the final checkpoint')
 		expect(checkpoint.frames[0]?.pending).toBeUndefined()
@@ -1184,7 +1205,7 @@ describe('resumeExecutor', () => {
 		const originalLlm = new FakeLlm()
 		originalLlm.responses = [success([errorFinish])]
 		const originalPersistence = makeFakePersistence()
-		const originalMeta = await runExecutor(makeDeps(originalLlm, originalPersistence, guild), { runId: 'r-twice', ...resumeOptions, task: 'do it', effort: 'standard' })
+		const originalMeta = await runExecutor(makeDeps(originalLlm, originalPersistence, guild), { runId: 'r-twice', ...resumeOptions, task: 'do it', effort: 'standard', involvement: 'early-engagement' })
 		expect(originalMeta.status).toBe('error')
 		expect(originalPersistence.state.deleteCheckpointCalls).toBe(0)
 
@@ -1254,7 +1275,7 @@ describe('resumeExecutor', () => {
 		const deps = makeDeps(llm, persistence, guild)
 		deps.readWorkspaceGitState = async () => ({ isRepository: true, unbornHead: false, headHash: 'abcdef1234567890', uncommittedPaths: [] })
 
-		await runExecutor(deps, { runId: 'r-notice', ...resumeOptions, task: 'do it', effort: 'quick' })
+		await runExecutor(deps, { runId: 'r-notice', ...resumeOptions, task: 'do it', effort: 'quick', involvement: 'early-engagement' })
 
 		const checkpoint = persistence.state.checkpoints[1]
 		if (checkpoint === undefined) throw new Error('expected the mid-descent checkpoint')

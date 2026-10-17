@@ -23,6 +23,7 @@ export interface RunSummaryEntity {
 	status: RunStatus
 	task: string | null
 	effort: string | null
+	involvement: string | null
 	startTime: string | null
 	endTime: string | null
 	result: RunResultCard | null
@@ -36,6 +37,7 @@ export interface RunSummary {
 	status: RunStatus
 	task: string | null
 	effort: string | null
+	involvement: string | null
 	startTime: string | null
 	endTime: string | null
 	result: RunResultCard | null
@@ -102,6 +104,7 @@ function isRunSummaryEntity(value: unknown): value is RunSummaryEntity {
 	if (!isRunStatus(value['status'])) return false
 	if (!isNullableString(value['task'])) return false
 	if (!isNullableString(value['effort'])) return false
+	if (!isNullableString(value['involvement'])) return false
 	if (!isNullableString(value['startTime'])) return false
 	if (!isNullableString(value['endTime'])) return false
 	const result = value['result']
@@ -114,7 +117,7 @@ function isRunSummaryEntity(value: unknown): value is RunSummaryEntity {
 
 // A cheap change detector: it serializes the mutable fields (not the identity-bearing id) canonically, so a change to any field bumps the entity version while an unchanged entity is stable. canonicalSerialize escapes strings, so free-text task/summary content cannot shift field boundaries and collide two different summaries.
 function runSummaryVersionOf(summary: RunSummaryEntity): string {
-	return canonicalSerialize([summary.status, summary.task, summary.effort, summary.startTime, summary.endTime, summary.result, summary.error, summary.summary])
+	return canonicalSerialize([summary.status, summary.task, summary.effort, summary.involvement, summary.startTime, summary.endTime, summary.result, summary.error, summary.summary])
 }
 
 export const runListDefinitions: CollectionDefinitions<RunListCollections> = {
@@ -134,6 +137,7 @@ export function runSummariesFromReplicaState(state: RunListReplicaState): RunSum
 		status: entity.status,
 		task: entity.task,
 		effort: entity.effort,
+		involvement: entity.involvement,
 		startTime: entity.startTime,
 		endTime: entity.endTime,
 		result: entity.result,

@@ -4,6 +4,8 @@ import type { EngineContext } from './engine-state.ts'
 import type { LoadedGuild } from './loader.ts'
 import type { ReadProjectDoc } from './project-docs.ts'
 import { buildInitialHistory } from './context-builder.ts'
+import { effortDirective } from './effort.ts'
+import { involvementDirective } from './involvement.ts'
 import { defined } from './test-fixtures.ts'
 
 const guild: LoadedGuild = {
@@ -79,6 +81,22 @@ describe('buildInitialHistory', () => {
 		expect(history.length).toBe(2)
 		expect(history[0]?.role).toBe('system')
 		expect(history[1]?.role).toBe('user')
+	})
+
+	test('the entry role receives the effort and involvement directives in the same single system message', () => {
+		const history = initialHistory('sys', contextFor({ effort: 'standard', involvement: 'collaborative' }))
+		expect(history.length).toBe(2)
+		expect(history[0]).toEqual({ role: 'system', content: `sys\n\n${effortDirective('standard')}\n\n${involvementDirective('collaborative')}` })
+	})
+
+	test('the entry role receives no involvement directive when the context carries none', () => {
+		const history = initialHistory('sys', contextFor({ effort: 'standard' }))
+		expect(history[0]).toEqual({ role: 'system', content: `sys\n\n${effortDirective('standard')}` })
+	})
+
+	test('a child context does not receive the involvement directive even when inherited', () => {
+		const history = initialHistory('child prompt', contextFor({ depth: 1, parent: 'main', involvement: 'collaborative' }))
+		expect(history).toEqual(initialMessages('child prompt', 'do it'))
 	})
 
 	test('a child context with an inherited continuation does not receive the briefing', () => {

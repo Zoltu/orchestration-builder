@@ -7,7 +7,7 @@ import { createTaskScheduler } from '../executor/scheduler.ts'
 import type { QueueItem, TaskQueue } from '../executor/task-queue.ts'
 import type { RunCheckpoint } from '../executor/checkpoint.ts'
 import type { ProjectSettings, ReadProjectSettings, WriteProjectSettings, RunSnapshotRaw, RunSnapshotStats, RunSummaryStats } from '../executor/persistence.ts'
-import type { DeploymentConfig, EffortLevel, GuildConfig, LogLevel, RunContinuation, RunMeta } from '../executor/types.js'
+import type { DeploymentConfig, EffortLevel, GuildConfig, InvolvementLevel, LogLevel, RunContinuation, RunMeta } from '../executor/types.js'
 import { parseRunSnapshot, type RunSnapshot } from './render.ts'
 import type { BuildInfo } from './build-info.ts'
 import { createRunListCache } from './run-list-cache.ts'
@@ -359,7 +359,7 @@ snapshots.set('run-retry', {
 	].join('\n'),
 })
 
-// A run whose meta carries an effort level, so the /api/runs/:id effort-surfacing and the list summary are exercised end to end.
+// A run whose meta carries an effort level and a human-involvement level, so the /api/runs/:id surfacing and the list summary are exercised end to end for both channels.
 snapshots.set('run-effort', {
 	metaText: JSON.stringify({
 		runId: 'run-effort',
@@ -367,12 +367,14 @@ snapshots.set('run-effort', {
 		benchmarkPath: 'bench',
 		task: 'task for run-effort',
 		effort: 'thorough',
+		involvement: 'collaborative',
 		status: 'success',
 		startTime: '2026-01-01T00:00:00.000Z',
 		endTime: '2026-01-01T00:01:00.000Z',
 	}),
 	logText: [
 		JSON.stringify({ timestamp: '2026-01-01T00:00:00.000Z', type: 'effort_set', payload: { effort: 'thorough' } }),
+		JSON.stringify({ timestamp: '2026-01-01T00:00:00.500Z', type: 'involvement_set', payload: { involvement: 'collaborative' } }),
 		JSON.stringify({ timestamp: '2026-01-01T00:00:01.000Z', type: 'role_finished', payload: { role: 'planner', status: 'success' } }),
 	].join('\n'),
 })
@@ -480,6 +482,7 @@ interface HandlerHarness {
 	humanBackend: WebHumanBackend
 	staticCalls: string[]
 	lastEffort: () => EffortLevel | undefined
+	lastInvolvement: () => InvolvementLevel | undefined
 	lastLogLevel: () => LogLevel | undefined
 	lastContinuation: () => RunContinuation | undefined
 	lastQueueTracked: () => boolean | undefined
@@ -496,13 +499,15 @@ function createHandlerHarness(options: { runIdCollides?: boolean, build?: BuildI
 	let resolveActive: (meta: RunMeta) => void = () => {}
 	let resolveResumed: (meta: RunMeta) => void = () => {}
 	let capturedEffort: EffortLevel | undefined
+	let capturedInvolvement: InvolvementLevel | undefined
 	let capturedLogLevel: LogLevel | undefined
 	let capturedContinuation: RunContinuation | undefined
 	let capturedQueueTracked: boolean | undefined
 	const resumed: RunCheckpoint[] = []
 	const resumedNotes: Array<string | undefined> = []
-	const startRun: StartRun = (_runId, _task, effort, logLevel, continuation, queueTracked) => {
+	const startRun: StartRun = (_runId, _task, effort, involvement, logLevel, continuation, queueTracked) => {
 		capturedEffort = effort
+		capturedInvolvement = involvement
 		capturedLogLevel = logLevel
 		capturedContinuation = continuation
 		capturedQueueTracked = queueTracked
@@ -550,7 +555,7 @@ function createHandlerHarness(options: { runIdCollides?: boolean, build?: BuildI
 		readRunMetaById: harnessReadRunMetaById,
 		listRunIds,
 		readRunListSummary,
-		submitRun: (queued) => submission.submit(queued.task, queued.effort, queued.logLevel, queued.continuation),
+		submitRun: (queued) => submission.submit(queued.task, queued.effort, queued.involvement, queued.logLevel, queued.continuation),
 		hasActiveRun: () => submission.activeRunId() !== undefined,
 		sleep: async () => {},
 		now: () => new Date().toISOString(),
@@ -606,6 +611,7 @@ function createHandlerHarness(options: { runIdCollides?: boolean, build?: BuildI
 		humanBackend,
 		staticCalls,
 		lastEffort: () => capturedEffort,
+		lastInvolvement: () => capturedInvolvement,
 		lastLogLevel: () => capturedLogLevel,
 		lastContinuation: () => capturedContinuation,
 		lastQueueTracked: () => capturedQueueTracked,
@@ -985,6 +991,7 @@ describe('GET /api/runs (list)', () => {
 			status: 'interrupted',
 			task: 'task for run-interrupted',
 			effort: null,
+			involvement: null,
 			startTime: '2026-01-01T00:00:00.000Z',
 			endTime: '2026-01-01T00:02:00.000Z',
 			result: null,
@@ -996,6 +1003,7 @@ describe('GET /api/runs (list)', () => {
 			status: 'success',
 			task: 'task for run-effort',
 			effort: 'thorough',
+			involvement: 'collaborative',
 			startTime: '2026-01-01T00:00:00.000Z',
 			endTime: '2026-01-01T00:01:00.000Z',
 			result: null,
@@ -1007,6 +1015,7 @@ describe('GET /api/runs (list)', () => {
 			status: 'error',
 			task: 'task for run-2',
 			effort: null,
+			involvement: null,
 			startTime: '2026-01-01T00:00:00.000Z',
 			endTime: '2026-01-01T00:01:00.000Z',
 			result: { status: 'error', summary: 'failed', artifacts: ['output.txt', 'logs/run.txt'] },
@@ -1198,6 +1207,17 @@ describe('GET /api/runs/:id', () => {
 		const withoutEffort = await handler(get('/api/runs/run-1'))
 		expect(withoutEffort.status).toBe(200)
 		expect((await withoutEffort.json()).effort).toBeNull()
+	})
+
+	test('includes the run involvement from meta.involvement, or null when the run\'s meta carries none', async () => {
+		const { handler } = createHandlerHarness()
+		const withInvolvement = await handler(get('/api/runs/run-effort'))
+		expect(withInvolvement.status).toBe(200)
+		expect((await withInvolvement.json()).involvement).toBe('collaborative')
+
+		const withoutInvolvement = await handler(get('/api/runs/run-1'))
+		expect(withoutInvolvement.status).toBe(200)
+		expect((await withoutInvolvement.json()).involvement).toBeNull()
 	})
 })
 
@@ -1817,6 +1837,41 @@ describe('POST /api/runs', () => {
 		expect(await response.json()).toEqual({ ok: false, error: 'invalid_body' })
 	})
 
+	test('threads a valid involvement override into the dispatched run', async () => {
+		const { handler, submission, lastInvolvement, resolveActive } = createHandlerHarness()
+		const response = await handler(post('/api/runs', JSON.stringify({ task: 'collaborative task', involvement: 'collaborative' })))
+		expect(response.status).toBe(201)
+		expect(lastInvolvement()).toBe('collaborative')
+
+		resolveActive()(terminalMeta('test-run-0', 'collaborative task'))
+		await submission.awaitActive()
+	})
+
+	test('applies the project involvement default when involvement is omitted', async () => {
+		const { handler, submission, settings, lastInvolvement, resolveActive } = createHandlerHarness()
+		settings.write({ involvement: 'autonomous' })
+		const response = await handler(post('/api/runs', JSON.stringify({ task: 'defaulted task' })))
+		expect(response.status).toBe(201)
+		expect(lastInvolvement()).toBe('autonomous')
+
+		resolveActive()(terminalMeta('test-run-0', 'defaulted task'))
+		await submission.awaitActive()
+	})
+
+	test('rejects an unknown involvement level with 400 invalid_body', async () => {
+		const { handler } = createHandlerHarness()
+		const response = await handler(post('/api/runs', JSON.stringify({ task: 'x', involvement: 'hands-off' })))
+		expect(response.status).toBe(400)
+		expect(await response.json()).toEqual({ ok: false, error: 'invalid_body' })
+	})
+
+	test('rejects a numeric involvement with 400 invalid_body', async () => {
+		const { handler } = createHandlerHarness()
+		const response = await handler(post('/api/runs', JSON.stringify({ task: 'x', involvement: 2 })))
+		expect(response.status).toBe(400)
+		expect(await response.json()).toEqual({ ok: false, error: 'invalid_body' })
+	})
+
 	test('accepts a valid continuesFrom and threads the scheduler-assembled continuation into the started run', async () => {
 		const { handler, submission, lastContinuation, resolveActive } = createHandlerHarness()
 		const response = await handler(post('/api/runs', JSON.stringify({ task: 'pick up where that left off', continuesFrom: 'run-20260101-000000' })))
@@ -1936,14 +1991,15 @@ describe('POST /api/runs', () => {
 		await submission.awaitActive()
 	})
 
-	test('the request logLevel, continuesFrom, and effort are recorded on the enqueued item', async () => {
+	test('the request logLevel, continuesFrom, effort, and involvement are recorded on the enqueued item', async () => {
 		const { handler, submission, queue, resolveActive } = createHandlerHarness()
-		const response = await handler(post('/api/runs', JSON.stringify({ task: 'quiet continuation', logLevel: 'standard', continuesFrom: 'run-20260101-000000', effort: 'thorough' })))
+		const response = await handler(post('/api/runs', JSON.stringify({ task: 'quiet continuation', logLevel: 'standard', continuesFrom: 'run-20260101-000000', effort: 'thorough', involvement: 'collaborative' })))
 		expect(response.status).toBe(201)
 		const items = queue.snapshot().items
 		expect(items[0]?.logLevel).toBe('standard')
 		expect(items[0]?.continuesFrom).toBe('run-20260101-000000')
 		expect(items[0]?.effort).toBe('thorough')
+		expect(items[0]?.involvement).toBe('collaborative')
 
 		resolveActive()(terminalMeta('test-run-0', 'quiet continuation'))
 		await submission.awaitActive()
@@ -2009,11 +2065,12 @@ describe('/api/queue', () => {
 
 	test('POST enqueues at the tail with 201 and the created item, and the tick dispatches an idle system', async () => {
 		const { handler, submission, queue, resolveActive } = createHandlerHarness({ initialQueueItems: [queueItem('ahead', 'already waiting')] })
-		const response = await handler(post('/api/queue', JSON.stringify({ task: 'a queued task', effort: 'quick' })))
+		const response = await handler(post('/api/queue', JSON.stringify({ task: 'a queued task', effort: 'quick', involvement: 'autonomous' })))
 		expect(response.status).toBe(201)
 		const created = await response.json()
 		expect(created.task).toBe('a queued task')
 		expect(created.effort).toBe('quick')
+		expect(created.involvement).toBe('autonomous')
 		expect(created.status).toBe('waiting')
 		// The new item is behind the already-waiting one (always tail), and the tick dispatched the head — never a 409.
 		const items = queue.snapshot().items
@@ -2028,7 +2085,7 @@ describe('/api/queue', () => {
 
 	test('POST rejects malformed bodies with 400 invalid_body', async () => {
 		const { handler, queue } = createHandlerHarness()
-		for (const body of ['{ not json', '"a string"', '{}', { task: '' }, { task: 3 }, { task: 'x', effort: 'copious' }, { task: 'x', effort: 2 }]) {
+		for (const body of ['{ not json', '"a string"', '{}', { task: '' }, { task: 3 }, { task: 'x', effort: 'copious' }, { task: 'x', effort: 2 }, { task: 'x', involvement: 'copious' }, { task: 'x', involvement: 2 }]) {
 			const raw = typeof body === 'string' ? body : JSON.stringify(body)
 			const response = await handler(post('/api/queue', raw))
 			expect(response.status).toBe(400)
@@ -2037,13 +2094,14 @@ describe('/api/queue', () => {
 		expect(queue.snapshot().items).toEqual([])
 	})
 
-	test('PATCH edits the task and effort of a waiting item', async () => {
+	test('PATCH edits the task, effort, and involvement of a waiting item', async () => {
 		const { handler } = createHandlerHarness({ initialQueueItems: [queueItem('w1', 'original text')] })
-		const response = await handler(patch('/api/queue/w1', JSON.stringify({ task: 'edited text', effort: 'thorough' })))
+		const response = await handler(patch('/api/queue/w1', JSON.stringify({ task: 'edited text', effort: 'thorough', involvement: 'collaborative' })))
 		expect(response.status).toBe(200)
 		const item = await response.json()
 		expect(item.task).toBe('edited text')
 		expect(item.effort).toBe('thorough')
+		expect(item.involvement).toBe('collaborative')
 	})
 
 	test('PATCH moves a waiting item to a clamped 0-based position in the waiting list', async () => {
@@ -2488,37 +2546,56 @@ describe('/api/settings', () => {
 		const { handler } = createHandlerHarness()
 		const response = await handler(get('/api/settings'))
 		expect(response.status).toBe(200)
-		expect(await response.json()).toEqual({ effort: null, logLevel: null })
+		expect(await response.json()).toEqual({ effort: null, involvement: null, logLevel: null })
 	})
 
 	test('GET /api/settings returns the stored defaults after a write', async () => {
 		const { handler, settings } = createHandlerHarness()
-		settings.write({ effort: 'thorough', logLevel: 'standard' })
+		settings.write({ effort: 'thorough', involvement: 'collaborative', logLevel: 'standard' })
 		const response = await handler(get('/api/settings'))
 		expect(response.status).toBe(200)
-		expect(await response.json()).toEqual({ effort: 'thorough', logLevel: 'standard' })
+		expect(await response.json()).toEqual({ effort: 'thorough', involvement: 'collaborative', logLevel: 'standard' })
 	})
 
 	test('PUT /api/settings persists the effort and echoes it back', async () => {
 		const { handler, settings } = createHandlerHarness()
 		const response = await handler(put('/api/settings', JSON.stringify({ effort: 'standard' })))
 		expect(response.status).toBe(200)
-		expect(await response.json()).toEqual({ effort: 'standard', logLevel: null })
+		expect(await response.json()).toEqual({ effort: 'standard', involvement: null, logLevel: null })
 		expect(settings.snapshot()).toEqual({ effort: 'standard' })
 
 		const getResponse = await handler(get('/api/settings'))
-		expect(await getResponse.json()).toEqual({ effort: 'standard', logLevel: null })
+		expect(await getResponse.json()).toEqual({ effort: 'standard', involvement: null, logLevel: null })
+	})
+
+	test('PUT /api/settings persists an optional involvement and echoes it back', async () => {
+		const { handler, settings } = createHandlerHarness()
+		const response = await handler(put('/api/settings', JSON.stringify({ effort: 'standard', involvement: 'autonomous' })))
+		expect(response.status).toBe(200)
+		expect(await response.json()).toEqual({ effort: 'standard', involvement: 'autonomous', logLevel: null })
+		expect(settings.snapshot()).toEqual({ effort: 'standard', involvement: 'autonomous' })
+
+		const getResponse = await handler(get('/api/settings'))
+		expect(await getResponse.json()).toEqual({ effort: 'standard', involvement: 'autonomous', logLevel: null })
+	})
+
+	test('PUT /api/settings rejects an invalid involvement with 400 invalid_body', async () => {
+		const { handler, settings } = createHandlerHarness()
+		const response = await handler(put('/api/settings', JSON.stringify({ effort: 'standard', involvement: 'hands-off' })))
+		expect(response.status).toBe(400)
+		expect(await response.json()).toEqual({ ok: false, error: 'invalid_body' })
+		expect(settings.snapshot()).toEqual({})
 	})
 
 	test('PUT /api/settings persists an optional logLevel and echoes it back', async () => {
 		const { handler, settings } = createHandlerHarness()
 		const response = await handler(put('/api/settings', JSON.stringify({ effort: 'standard', logLevel: 'standard' })))
 		expect(response.status).toBe(200)
-		expect(await response.json()).toEqual({ effort: 'standard', logLevel: 'standard' })
+		expect(await response.json()).toEqual({ effort: 'standard', involvement: null, logLevel: 'standard' })
 		expect(settings.snapshot()).toEqual({ effort: 'standard', logLevel: 'standard' })
 
 		const getResponse = await handler(get('/api/settings'))
-		expect(await getResponse.json()).toEqual({ effort: 'standard', logLevel: 'standard' })
+		expect(await getResponse.json()).toEqual({ effort: 'standard', involvement: null, logLevel: 'standard' })
 	})
 
 	test('PUT /api/settings without logLevel clears a previously persisted one', async () => {
@@ -2527,7 +2604,17 @@ describe('/api/settings', () => {
 
 		const response = await handler(put('/api/settings', JSON.stringify({ effort: 'quick' })))
 		expect(response.status).toBe(200)
-		expect(await response.json()).toEqual({ effort: 'quick', logLevel: null })
+		expect(await response.json()).toEqual({ effort: 'quick', involvement: null, logLevel: null })
+		expect(settings.snapshot()).toEqual({ effort: 'quick' })
+	})
+
+	test('PUT /api/settings without involvement clears a previously persisted one', async () => {
+		const { handler, settings } = createHandlerHarness()
+		settings.write({ effort: 'quick', involvement: 'collaborative' })
+
+		const response = await handler(put('/api/settings', JSON.stringify({ effort: 'quick' })))
+		expect(response.status).toBe(200)
+		expect(await response.json()).toEqual({ effort: 'quick', involvement: null, logLevel: null })
 		expect(settings.snapshot()).toEqual({ effort: 'quick' })
 	})
 

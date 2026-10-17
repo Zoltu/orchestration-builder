@@ -8,9 +8,9 @@ import type { RunBaseTracker } from './base-state.js'
 import type { RunParkTracker } from './park-state.js'
 import type { WriteCheckpoint } from './persistence.js'
 import type { RoleRegistry, RoleRegistryEntry } from './role-registry.js'
-import type { EffortLevel, LogLevel, ResultCard, ToolCall } from './types.js'
+import type { EffortLevel, InvolvementLevel, LogLevel, ResultCard, ToolCall } from './types.js'
 import { isRunIdShape } from './run-id.js'
-import { isEffortLevel, isLogLevel, isNonNegativeInteger, isNonNegativeNumber, isObject, isResultCard, isString } from './validation.js'
+import { isEffortLevel, isInvolvementLevel, isLogLevel, isNonNegativeInteger, isNonNegativeNumber, isObject, isResultCard, isString } from './validation.js'
 
 // The suspension point of a role paused mid-turn inside a child-spawning tool dispatch (agent or continue_agent): the turn's full tool-call list and the index of the child-spawning call it is waiting on. Once the child returns, its card is recorded here so a resume delivers the recorded card instead of re-running the child. Tool calls before childIndex are already recorded in the role's persisted history; calls after it are dispatched on resume.
 export interface PendingChildSuspension {
@@ -28,6 +28,8 @@ export interface CheckpointFrame {
 	parent?: string
 	parentRoleId?: string
 	effort?: EffortLevel
+	// Carried by frames whose context holds it — the entry context gets the run's involvement level from runExecutor and children inherit it through the context spread, so the resume path can restore it per frame (docs/reference.md "Involvement channel").
+	involvement?: InvolvementLevel
 	// Carried by frames whose context holds it — the entry context gets the run's logging level from runExecutor and children inherit it through the context spread, so the resume path can restore it per frame (docs/reference.md "Logging level").
 	logLevel?: LogLevel
 	// Set only on the entry frame: the prior run this run continues. The lineage id rides the checkpoint so a restart-resumed run still writes continuesFrom into its metas; the briefing itself is not carried because it is already baked into the frame's persisted history.
@@ -102,6 +104,7 @@ function isCheckpointFrame(value: unknown): value is CheckpointFrame {
 	if (value.parent !== undefined && !isString(value.parent)) return false
 	if (value.parentRoleId !== undefined && !isString(value.parentRoleId)) return false
 	if (value.effort !== undefined && !isEffortLevel(value.effort)) return false
+	if (value.involvement !== undefined && !isInvolvementLevel(value.involvement)) return false
 	if (value.logLevel !== undefined && !isLogLevel(value.logLevel)) return false
 	if (value.continuesFrom !== undefined && !isRunIdShape(value.continuesFrom)) return false
 	if (value.planAbort !== undefined && value.planAbort !== true) return false
@@ -196,6 +199,7 @@ function serializeFrame(frame: RecorderFrame, resumeStamp: string | undefined): 
 		...(context.parent !== undefined ? { parent: context.parent } : {}),
 		...(context.parentRoleId !== undefined ? { parentRoleId: context.parentRoleId } : {}),
 		...(context.effort !== undefined ? { effort: context.effort } : {}),
+		...(context.involvement !== undefined ? { involvement: context.involvement } : {}),
 		...(logLevel !== undefined ? { logLevel } : {}),
 		...(continuesFrom !== undefined ? { continuesFrom } : {}),
 		...(entry.planAbort === true ? { planAbort: true } : {}),

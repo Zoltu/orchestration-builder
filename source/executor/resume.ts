@@ -29,6 +29,7 @@ export async function resumeRoleStack(runRole: RunRole, deps: EngineDependencies
 			...(frame.parent !== undefined ? { parent: frame.parent } : {}),
 			...(frame.parentRoleId !== undefined ? { parentRoleId: frame.parentRoleId } : {}),
 			...(frame.effort !== undefined ? { effort: frame.effort } : {}),
+			...(frame.involvement !== undefined ? { involvement: frame.involvement } : {}),
 			...(runLogLevel !== undefined ? { logLevel: runLogLevel } : {}),
 		}
 		return await runRole(deps, context, {

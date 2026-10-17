@@ -222,9 +222,9 @@ describe('createTaskScheduler tick — dispatch', () => {
 })
 
 describe('createTaskScheduler tick — submission threading', () => {
-	test('the item\u2019s effort and logLevel overrides thread into the submission; a plain item carries none', async () => {
+	test('the item\u2019s effort, involvement, and logLevel overrides thread into the submission; a plain item carries none', async () => {
 		const store = fakeQueueStore([
-			waitingItem({ id: 'overridden', effort: 'thorough', logLevel: 'standard' }),
+			waitingItem({ id: 'overridden', effort: 'thorough', involvement: 'collaborative', logLevel: 'standard' }),
 		])
 		const submit = fakeSubmit([
 			{ ok: true, runId: 'run-20260101-010000' },
@@ -235,12 +235,14 @@ describe('createTaskScheduler tick — submission threading', () => {
 		await tick()
 
 		expect(submit.calls[0]?.effort).toBe('thorough')
+		expect(submit.calls[0]?.involvement).toBe('collaborative')
 		expect(submit.calls[0]?.logLevel).toBe('standard')
 
 		const plainStore = fakeQueueStore([waitingItem()])
 		const plainScheduler = schedulerOver(plainStore, fakeSubmit([{ ok: true, runId: 'run-20260101-010000' }]))
 		await plainScheduler.tick()
 		expect(submit.calls[1]?.effort).toBeUndefined()
+		expect(submit.calls[1]?.involvement).toBeUndefined()
 		expect(submit.calls[1]?.logLevel).toBeUndefined()
 	})
 

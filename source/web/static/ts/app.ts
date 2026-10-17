@@ -75,6 +75,8 @@ export interface RunView {
 	task: string | null
 	// The wire carries an effort level, but the client only ever reads it through isEffort, so it stays a string here and narrows at the read sites.
 	effort: string | null
+	// The wire carries a human-involvement level, read through isInvolvement and narrowed at the read sites.
+	involvement: string | null
 	startTime: string | null
 	endTime: string | null
 	result: RunResultCard | null
@@ -195,6 +197,7 @@ export interface InspectorState {
 }
 
 export type EffortLevel = 'quick' | 'standard' | 'thorough'
+export type InvolvementLevel = 'autonomous' | 'early-engagement' | 'collaborative'
 export type LogLevel = 'full' | 'standard'
 export type InterruptMode = 'inquiry' | 'plan_modification'
 export type FlowViewMode = 'flow' | 'sequence'
@@ -228,6 +231,8 @@ export interface ApplicationState {
 	// null until the saved settings load; the selectors initialize from the persisted levels on first load.
 	runEffort: EffortLevel | null
 	savingEffort: boolean
+	runInvolvement: InvolvementLevel | null
+	savingInvolvement: boolean
 	runLogLevel: LogLevel | null
 	savingLogLevel: boolean
 	// The live InteractionModel the centerpiece renders, plus its previous frame for `deriveLifecycle`'s enter/depart diff. Both null until the first readable flow frame lands. The model is reconstructed from flowCollections on every apply, so the replica and its revision are the poll's diff base rather than an ETag.
@@ -362,6 +367,28 @@ function effortLabel(effort: unknown): string {
 
 function effortDescription(effort: unknown): string {
 	const option = EFFORT_OPTIONS.find((entry) => entry.value === effort)
+	return option !== undefined ? option.description : ''
+}
+
+// The human-involvement channel's three levels (see docs/reference.md "Involvement channel"). The wire strings are the contract; the per-option descriptions are the single copy of what each level means, rendered by the compose screen's selector and the history badge's hover title.
+const DEFAULT_INVOLVEMENT: InvolvementLevel = 'early-engagement'
+const INVOLVEMENT_OPTIONS: { value: InvolvementLevel; description: string }[] = [
+	{ value: 'autonomous', description: 'Makes reasonable choices and works without checking in.' },
+	{ value: 'early-engagement', description: 'Clarifies up front, then works on its own.' },
+	{ value: 'collaborative', description: 'Checks in with you as it goes.' },
+]
+
+function isInvolvement(value: unknown): value is InvolvementLevel {
+	return INVOLVEMENT_OPTIONS.some((option) => option.value === value)
+}
+
+function involvementLabel(involvement: unknown): string {
+	if (!isInvolvement(involvement)) return '—'
+	return involvement === 'early-engagement' ? 'Early engagement' : involvement.charAt(0).toUpperCase() + involvement.slice(1)
+}
+
+function involvementDescription(involvement: unknown): string {
+	const option = INVOLVEMENT_OPTIONS.find((entry) => entry.value === involvement)
 	return option !== undefined ? option.description : ''
 }
 
@@ -1034,13 +1061,15 @@ function isLabelConfig(value: unknown): value is LabelConfig {
 function GotSettings(state: ApplicationState, payload: FetchResultPayload): ActionReturn {
 	const ok = payload.ok
 	const body = payload.body
-	if (state.runEffort !== null && state.runLogLevel !== null) return { ...state, serverAvailable: ok }
+	if (state.runEffort !== null && state.runInvolvement !== null && state.runLogLevel !== null) return { ...state, serverAvailable: ok }
 	const record = ok && isObject(body) ? body : null
 	const effort = record !== null && isEffort(record['effort']) ? record['effort'] : null
+	const involvement = record !== null && isInvolvement(record['involvement']) ? record['involvement'] : null
 	const logLevel = record !== null && isLogLevel(record['logLevel']) ? record['logLevel'] : null
 	return {
 		...state,
 		runEffort: state.runEffort !== null ? state.runEffort : (effort !== null ? effort : DEFAULT_EFFORT),
+		runInvolvement: state.runInvolvement !== null ? state.runInvolvement : (involvement !== null ? involvement : DEFAULT_INVOLVEMENT),
 		runLogLevel: state.runLogLevel !== null ? state.runLogLevel : (logLevel !== null ? logLevel : DEFAULT_LOG_LEVEL),
 		serverAvailable: ok,
 	}
@@ -1048,13 +1077,13 @@ function GotSettings(state: ApplicationState, payload: FetchResultPayload): Acti
 
 function SettingsFetchFailed(state: ApplicationState): ApplicationState {
 	// The selectors still need concrete values to render, so fall back to the defaults rather than sitting at null forever.
-	return { ...state, runEffort: state.runEffort ?? DEFAULT_EFFORT, runLogLevel: state.runLogLevel ?? DEFAULT_LOG_LEVEL, serverAvailable: false }
+	return { ...state, runEffort: state.runEffort ?? DEFAULT_EFFORT, runInvolvement: state.runInvolvement ?? DEFAULT_INVOLVEMENT, runLogLevel: state.runLogLevel ?? DEFAULT_LOG_LEVEL, serverAvailable: false }
 }
 
-// The settings write replaces the file wholesale, so a save carries both persisted fields. The selectors' values are null until the initial GET /api/settings resolves — before that they would only contribute the defaults the selectors show, silently clobbering the operator's persisted choices, so buildSettingsBody refuses to build a body (and the save actions skip the PUT) until both are initialized; the pick still applies locally and persists on the next save.
-function buildSettingsBody(runEffort: EffortLevel | null, runLogLevel: LogLevel | null): { effort: EffortLevel; logLevel: LogLevel } | null {
-	if (!isEffort(runEffort) || !isLogLevel(runLogLevel)) return null
-	return { effort: runEffort, logLevel: runLogLevel }
+// The settings write replaces the file wholesale, so a save carries all three persisted fields. The selectors' values are null until the initial GET /api/settings resolves — before that they would only contribute the defaults the selectors show, silently clobbering the operator's persisted choices, so buildSettingsBody refuses to build a body (and the save actions skip the PUT) until all are initialized; the pick still applies locally and persists on the next save.
+function buildSettingsBody(runEffort: EffortLevel | null, runInvolvement: InvolvementLevel | null, runLogLevel: LogLevel | null): { effort: EffortLevel; involvement: InvolvementLevel; logLevel: LogLevel } | null {
+	if (!isEffort(runEffort) || !isInvolvement(runInvolvement) || !isLogLevel(runLogLevel)) return null
+	return { effort: runEffort, involvement: runInvolvement, logLevel: runLogLevel }
 }
 
 // A radio pick is one deliberate gesture (unlike a slider drag), so a single change handler both updates state and persists the level as the default for the next run — the selector stays where the operator last left it across page reloads and restarts, with one PUT per pick.
@@ -1063,7 +1092,7 @@ function SaveRunEffort(state: ApplicationState, event: Event): ActionReturn {
 	if (!(target instanceof HTMLInputElement)) return state
 	const value = target.value
 	if (!isEffort(value)) return state
-	const body = buildSettingsBody(value, state.runLogLevel)
+	const body = buildSettingsBody(value, state.runInvolvement, state.runLogLevel)
 	if (body === null) return { ...state, runEffort: value }
 	return [
 		{ ...state, runEffort: value, savingEffort: true },
@@ -1081,13 +1110,48 @@ function EffortSaved(state: ApplicationState, payload: FetchResultPayload): Appl
 	const body = payload.body
 	if (!ok || !isObject(body)) return { ...state, savingEffort: false, serverAvailable: true }
 	const effort = body['effort']
+	const involvement = body['involvement']
 	const logLevel = body['logLevel']
 	if (!isEffort(effort)) return { ...state, savingEffort: false, serverAvailable: true }
-	return { ...state, savingEffort: false, runEffort: effort, runLogLevel: isLogLevel(logLevel) ? logLevel : state.runLogLevel, serverAvailable: true }
+	return { ...state, savingEffort: false, runEffort: effort, runInvolvement: isInvolvement(involvement) ? involvement : state.runInvolvement, runLogLevel: isLogLevel(logLevel) ? logLevel : state.runLogLevel, serverAvailable: true }
 }
 
 function EffortSaveFailed(state: ApplicationState): ApplicationState {
 	return { ...state, savingEffort: false, serverAvailable: false }
+}
+
+// The human-involvement picker follows the effort picker exactly: one change both updates state and persists the choice as the project default for the next run.
+function SaveRunInvolvement(state: ApplicationState, event: Event): ActionReturn {
+	const target = event.target
+	if (!(target instanceof HTMLInputElement)) return state
+	const value = target.value
+	if (!isInvolvement(value)) return state
+	const body = buildSettingsBody(state.runEffort, value, state.runLogLevel)
+	if (body === null) return { ...state, runInvolvement: value }
+	return [
+		{ ...state, runInvolvement: value, savingInvolvement: true },
+		Fetch({
+			url: 'api/settings',
+			init: { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) },
+			ok: InvolvementSaved,
+			fail: InvolvementSaveFailed,
+		}),
+	]
+}
+
+function InvolvementSaved(state: ApplicationState, payload: FetchResultPayload): ApplicationState {
+	const ok = payload.ok
+	const body = payload.body
+	if (!ok || !isObject(body)) return { ...state, savingInvolvement: false, serverAvailable: true }
+	const effort = body['effort']
+	const involvement = body['involvement']
+	const logLevel = body['logLevel']
+	if (!isInvolvement(involvement)) return { ...state, savingInvolvement: false, serverAvailable: true }
+	return { ...state, savingInvolvement: false, runInvolvement: involvement, runEffort: isEffort(effort) ? effort : state.runEffort, runLogLevel: isLogLevel(logLevel) ? logLevel : state.runLogLevel, serverAvailable: true }
+}
+
+function InvolvementSaveFailed(state: ApplicationState): ApplicationState {
+	return { ...state, savingInvolvement: false, serverAvailable: false }
 }
 
 // The logging-level picker follows the effort picker exactly: one change both updates state and persists the choice as the project default for the next run.
@@ -1096,7 +1160,7 @@ function SaveRunLogLevel(state: ApplicationState, event: Event): ActionReturn {
 	if (!(target instanceof HTMLInputElement)) return state
 	const value = target.value
 	if (!isLogLevel(value)) return state
-	const body = buildSettingsBody(state.runEffort, value)
+	const body = buildSettingsBody(state.runEffort, state.runInvolvement, value)
 	if (body === null) return { ...state, runLogLevel: value }
 	return [
 		{ ...state, runLogLevel: value, savingLogLevel: true },
@@ -1114,9 +1178,10 @@ function LogLevelSaved(state: ApplicationState, payload: FetchResultPayload): Ap
 	const body = payload.body
 	if (!ok || !isObject(body)) return { ...state, savingLogLevel: false, serverAvailable: true }
 	const effort = body['effort']
+	const involvement = body['involvement']
 	const logLevel = body['logLevel']
 	if (!isLogLevel(logLevel)) return { ...state, savingLogLevel: false, serverAvailable: true }
-	return { ...state, savingLogLevel: false, runLogLevel: logLevel, runEffort: isEffort(effort) ? effort : state.runEffort, serverAvailable: true }
+	return { ...state, savingLogLevel: false, runLogLevel: logLevel, runEffort: isEffort(effort) ? effort : state.runEffort, runInvolvement: isInvolvement(involvement) ? involvement : state.runInvolvement, serverAvailable: true }
 }
 
 function LogLevelSaveFailed(state: ApplicationState): ApplicationState {
@@ -1215,7 +1280,7 @@ function SubmitRun(state: ApplicationState, event: Event): ActionReturn {
 			{ ...state, createSending: true },
 			Fetch({
 				url: 'api/queue',
-				init: { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(buildQueueTaskBody(task, state.runEffort)) },
+				init: { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(buildQueueTaskBody(task, state.runEffort, state.runInvolvement)) },
 				ok: GotQueuedTask,
 				fail: CreateFailed,
 			}),
@@ -1225,21 +1290,26 @@ function SubmitRun(state: ApplicationState, event: Event): ActionReturn {
 		{ ...state, createSending: true },
 		Fetch({
 			url: 'api/runs',
-			init: { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(buildRunBody(task, state.runEffort, state.runLogLevel, state.continuation)) },
+			init: { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(buildRunBody(task, state.runEffort, state.runInvolvement, state.runLogLevel, state.continuation)) },
 			ok: GotCreatedRun,
 			fail: CreateFailed,
 		}),
 	]
 }
 
-// The queue task body carries the effort pick; logLevel is deliberately absent — a queue-native item resolves the level through the standard chain at dispatch (docs/queueing.md "The queue: storage, item model, state machine").
-function buildQueueTaskBody(task: string, runEffort: EffortLevel | null): { task: string; effort?: EffortLevel } {
-	return isEffort(runEffort) ? { task, effort: runEffort } : { task }
+// The queue task body carries the effort and involvement picks; logLevel is deliberately absent — a queue-native item resolves the level through the standard chain at dispatch (docs/queueing.md "The queue: storage, item model, state machine").
+function buildQueueTaskBody(task: string, runEffort: EffortLevel | null, runInvolvement: InvolvementLevel | null): { task: string; effort?: EffortLevel; involvement?: InvolvementLevel } {
+	const body: { task: string; effort?: EffortLevel; involvement?: InvolvementLevel } = { task }
+	if (isEffort(runEffort)) body.effort = runEffort
+	if (isInvolvement(runInvolvement)) body.involvement = runInvolvement
+	return body
 }
 
-// effort and logLevel are omitted when their selectors have not yet initialized (settings still loading), so the server applies its resolution chain rather than receiving a null. continuesFrom rides only when the compose screen is in continuation mode; a re-run passes null and submits a plain task.
-function buildRunBody(task: string, runEffort: EffortLevel | null, runLogLevel: LogLevel | null, continuation: Continuation | null): { task: string; effort?: EffortLevel; logLevel?: LogLevel; continuesFrom?: string } {
-	const body: { task: string; effort?: EffortLevel; logLevel?: LogLevel; continuesFrom?: string } = isEffort(runEffort) ? { task, effort: runEffort } : { task }
+// effort, involvement, and logLevel are omitted when their selectors have not yet initialized (settings still loading), so the server applies its resolution chain rather than receiving a null. continuesFrom rides only when the compose screen is in continuation mode; a re-run passes null and submits a plain task.
+function buildRunBody(task: string, runEffort: EffortLevel | null, runInvolvement: InvolvementLevel | null, runLogLevel: LogLevel | null, continuation: Continuation | null): { task: string; effort?: EffortLevel; involvement?: InvolvementLevel; logLevel?: LogLevel; continuesFrom?: string } {
+	const body: { task: string; effort?: EffortLevel; involvement?: InvolvementLevel; logLevel?: LogLevel; continuesFrom?: string } = { task }
+	if (isEffort(runEffort)) body.effort = runEffort
+	if (isInvolvement(runInvolvement)) body.involvement = runInvolvement
 	if (isLogLevel(runLogLevel)) body.logLevel = runLogLevel
 	if (continuation !== null && typeof continuation.runId === 'string' && continuation.runId !== '') body.continuesFrom = continuation.runId
 	return body
@@ -1263,7 +1333,7 @@ function RerunTask(state: ApplicationState, event: MouseEvent): ActionReturn {
 		{ ...state, createSending: true },
 		Fetch({
 			url: 'api/runs',
-			init: { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(buildRunBody(task, state.runEffort, state.runLogLevel, null)) },
+			init: { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(buildRunBody(task, state.runEffort, state.runInvolvement, state.runLogLevel, null)) },
 			ok: GotCreatedRun,
 			fail: CreateFailed,
 		}),
@@ -1988,12 +2058,13 @@ function StatusPills(state: ApplicationState): Vnode[] {
 	return pills
 }
 
-// The viewed run's identity in the top bar: its task's first line as the primary read, with the run id, effort, and relative start as microcopy. Everything here is a machine field or the operator's own task text rendered as textContent.
+// The viewed run's identity in the top bar: its task's first line as the primary read, with the run id, effort, involvement, and relative start as microcopy. Everything here is a machine field or the operator's own task text rendered as textContent.
 function ViewedRunLabel(state: ApplicationState): Vnode | null {
 	const summary = state.summaries.find((entry) => entry.runId === state.selectedRunId)
 	if (summary === undefined) return null
 	const metaParts = [summary.runId]
 	if (isEffort(summary.effort)) metaParts.push(`effort ${effortLabel(summary.effort)}`)
+	if (isInvolvement(summary.involvement)) metaParts.push(`involvement ${involvementLabel(summary.involvement)}`)
 	metaParts.push(`started ${formatRelative(summary.startTime, state.now)}`)
 	return h('span', { class: 'topbar-run' }, [
 		h('span', { class: 'topbar-run-primary' }, runPrimaryLabel(summary)),
@@ -2041,6 +2112,9 @@ function HistoryRow(state: ApplicationState, summary: RunSummary, rerunDisabled:
 			isEffort(summary.effort)
 				? h('span', { class: 'run-effort-badge', title: effortDescription(summary.effort) }, `effort ${effortLabel(summary.effort)}`)
 				: null,
+			isInvolvement(summary.involvement)
+				? h('span', { class: 'run-involvement-badge', title: involvementDescription(summary.involvement) }, `involvement ${involvementLabel(summary.involvement)}`)
+				: null,
 			h('time', { class: 'history-when', title: summary.startTime ?? '' }, formatRelative(summary.startTime, state.now)),
 			// The re-run button shares the create form's disabled condition (a run is active or a submission is in flight) so the one-task-at-a-time contract holds identically for re-runs.
 			h('button', { type: 'button', class: 'rerun-button', 'data-task': summary.task ?? '', disabled: rerunDisabled || typeof summary.task !== 'string' || summary.task === '', onclick: RerunTask }, 're-run'),
@@ -2058,6 +2132,7 @@ function HistoryRow(state: ApplicationState, summary: RunSummary, rerunDisabled:
 function HistoryRowDetails(summary: RunSummary): Vnode {
 	const metaParts = [summary.runId]
 	if (isEffort(summary.effort)) metaParts.push(`effort ${effortLabel(summary.effort)}`)
+	if (isInvolvement(summary.involvement)) metaParts.push(`involvement ${involvementLabel(summary.involvement)}`)
 	if (typeof summary.startTime === 'string') metaParts.push(`started ${summary.startTime}`)
 	if (typeof summary.endTime === 'string') metaParts.push(`ended ${summary.endTime}`)
 	const children = [h('p', { class: 'history-details-meta' }, metaParts.join(' · '))]
@@ -2195,6 +2270,21 @@ function EffortLevelSelector(value: EffortLevel, disabled: boolean, saving: bool
 	])
 }
 
+// The human-involvement selector mirrors the effort selector's radio group: the option values are the wire strings verbatim, and picking a card fires SaveRunInvolvement, so the choice applies to the next run and persists as the project default at once. The names and descriptions render from INVOLVEMENT_OPTIONS, the single home of the per-level copy.
+function InvolvementLevelSelector(value: InvolvementLevel, disabled: boolean, saving: boolean): Vnode {
+	return h('fieldset', { class: 'involvement-control', disabled }, [
+		h('legend', { class: 'involvement-label' }, 'Human involvement'),
+		h('div', { class: 'involvement-options' }, INVOLVEMENT_OPTIONS.map((option) =>
+			h('label', { class: { 'involvement-option': true, 'is-selected': option.value === value } }, [
+				h('input', { type: 'radio', name: 'run-involvement', value: option.value, checked: option.value === value, onchange: SaveRunInvolvement }),
+				h('span', { class: 'involvement-option-name' }, involvementLabel(option.value)),
+				h('span', { class: 'involvement-option-description' }, option.description),
+			]),
+		)),
+		h('p', { class: 'involvement-note' }, saving ? 'saving…' : ''),
+	])
+}
+
 // The logging-level selector mirrors the effort selector's radio group at a smaller size — two options whose labels come from LOG_LEVEL_OPTIONS, the single home of the copy. Picking one fires SaveRunLogLevel, so the choice applies to the next run and persists as the project default at once.
 function LoggingLevelSelector(value: LogLevel, disabled: boolean, saving: boolean): Vnode {
 	return h('fieldset', { class: 'logging-level-control', disabled }, [
@@ -2256,6 +2346,7 @@ function ComposeScreen(state: ApplicationState): Vnode {
 	const blocked = (state.continuation !== null || resuming) && deriveActiveRunId(state.summaries) !== null
 	const disabled = blocked || state.resumeSending || state.createSending
 	const runEffort = isEffort(state.runEffort) ? state.runEffort : DEFAULT_EFFORT
+	const runInvolvement = isInvolvement(state.runInvolvement) ? state.runInvolvement : DEFAULT_INVOLVEMENT
 	const runLogLevel = isLogLevel(state.runLogLevel) ? state.runLogLevel : DEFAULT_LOG_LEVEL
 	return h('section', { id: 'compose-screen' }, [
 		h('div', { class: 'compose-hero' }, [
@@ -2266,6 +2357,7 @@ function ComposeScreen(state: ApplicationState): Vnode {
 				ResumeChip(state),
 				h('textarea', { name: 'task', placeholder: composePlaceholder(resuming, blocked), autocomplete: 'off', disabled: blocked, onkeydown: TaskTextareaKeydown }),
 				EffortLevelSelector(runEffort, disabled, state.savingEffort === true),
+				InvolvementLevelSelector(runInvolvement, disabled, state.savingInvolvement === true),
 				LoggingLevelSelector(runLogLevel, disabled, state.savingLogLevel === true),
 				h('div', { class: 'submit-controls' }, [
 					h('button', { type: 'submit', disabled }, composeSubmitLabel(resuming, state.resumeSending || state.createSending, blocked)),
@@ -2623,7 +2715,7 @@ function QueueQuestionModalForApp(state: ApplicationState): Vnode | null {
 	})
 }
 
-// The technical meta line the result modal carries for advanced users: run id, effort, duration, tool-call count, and the token bill with its input/output split in the text, with the exact start/end timestamps on the hover title. Derived from the run view the per-run poll already fetches, so the modal re-opens with no extra request.
+// The technical meta line the result modal carries for advanced users: run id, effort, involvement, duration, tool-call count, and the token bill with its input/output split in the text, with the exact start/end timestamps on the hover title. Derived from the run view the per-run poll already fetches, so the modal re-opens with no extra request.
 function resultMetaLine(view: RunView, nowMs: number): { text: string; title: string } | null {
 	if (typeof view.runId !== 'string') return null
 	// The ingress guard does not validate budgets, so a malformed body can reach this function with the field absent — the widened annotation keeps that defensive check honest instead of trusting the declared type.
@@ -2631,6 +2723,7 @@ function resultMetaLine(view: RunView, nowMs: number): { text: string; title: st
 	if (budgets === null || budgets === undefined) return null
 	const parts = [view.runId]
 	if (isEffort(view.effort)) parts.push(`effort ${effortLabel(view.effort)}`)
+	if (isInvolvement(view.involvement)) parts.push(`involvement ${involvementLabel(view.involvement)}`)
 	// A run without a stored endTime is still in progress, so its elapsed is computed live from startTime and this client's clock; a finished run uses the server's settled span, which is the same stored-timestamp arithmetic without the clock.
 	const elapsed = view.endTime === null
 		? (typeof view.startTime === 'string' ? secondsBetweenIso(view.startTime, nowMs) : null)
@@ -2696,7 +2789,7 @@ function isApplicationState(value: unknown): value is ApplicationState {
 		'summaries', 'selectedRunId', 'selectedRunView', 'selectedRunStatus', 'pendingQuestions',
 		'queueItems', 'justSubmittedItemId', 'pendingAddSelectionId', 'editingItemId', 'draggingItemId', 'queueAnswerPendingId', 'openQueueQuestionId',
 		'serverAvailable', 'versions', 'justSubmittedRunId', 'createSending', 'muted', 'shownQuestionIds', 'firstQuestionsPoll', 'pendingAnswerId',
-		'runEffort', 'savingEffort', 'runLogLevel', 'savingLogLevel',
+		'runEffort', 'savingEffort', 'runInvolvement', 'savingInvolvement', 'runLogLevel', 'savingLogLevel',
 		'flowModel', 'previousFlowModel', 'flowCollections', 'flowVersion', 'runListCollections', 'runListVersion', 'labelResolver', 'guildParticipants', 'roleAccents', 'build',
 		'flowTier', 'flowViewMode', 'sequenceRolesOnly', 'screen', 'expandedRowIds', 'continuation',
 		'resumingRunId', 'resumeSending', 'resumeNotice',
@@ -2739,6 +2832,8 @@ app({
 			pendingAnswerId: null,
 			runEffort: null,
 			savingEffort: false,
+			runInvolvement: null,
+			savingInvolvement: false,
 			runLogLevel: null,
 			savingLogLevel: false,
 			flowModel: null,
@@ -2776,7 +2871,7 @@ app({
 			shownInterruptAnswerKeys: {},
 			now: Date.now(),
 		},
-		// The guild config and the saved settings (effort and logging level) are each loaded once on load and never polled, so their fetches are init effects rather than subscriptions.
+		// The guild config and the saved settings (effort, involvement, and logging level) are each loaded once on load and never polled, so their fetches are init effects rather than subscriptions.
 		Fetch({ url: 'api/config', ok: GotConfig, fail: FetchFailed }),
 		Fetch({ url: 'api/settings', ok: GotSettings, fail: SettingsFetchFailed }),
 	],

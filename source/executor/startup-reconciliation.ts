@@ -54,6 +54,7 @@ function markInterrupted(dependencies: StartupReconciliationDependencies, runId:
 		...(meta?.benchmarkPath !== undefined ? { benchmarkPath: meta.benchmarkPath } : {}),
 		task: meta?.task ?? '(task unknown — run metadata was lost)',
 		...(meta?.effort !== undefined ? { effort: meta.effort } : {}),
+		...(meta?.involvement !== undefined ? { involvement: meta.involvement } : {}),
 		status: 'interrupted',
 		startTime: meta?.startTime ?? endTime,
 		endTime,

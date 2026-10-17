@@ -1,6 +1,7 @@
 // Environment layer over the deployment file: the file is the base (replaced wholesale at load time), and each ORCHESTRATOR_* variable set in the environment overrides exactly one of its fields on top. Absent and empty-string variables mean "not set", so an override can only replace a field's value, never clear it. Every parse or semantic failure names the offending variable, mirroring the deployment file's strictness so a typo fails loudly at startup instead of silently keeping the file's value. Failures throw ConfigurationError so the service can present them on the bootstrap error page (see source/web/bootstrap-failure.ts).
 import { ConfigurationError } from './errors.js'
-import type { ContextPolicy, DeploymentFileConfig, InterruptTriggersConfig, ModelConfig } from './types.js'
+import { isInvolvementLevel } from './validation.js'
+import type { ContextPolicy, DeploymentFileConfig, InterruptTriggersConfig, InvolvementLevel, ModelConfig } from './types.js'
 
 export interface GenerationOverride {
 	temperature?: number
@@ -28,6 +29,7 @@ export interface ExecutorOverride {
 	contextPressureThreshold?: number
 	contextHandlerRole?: string
 	inquiryHandlerRole?: string
+	defaultInvolvement?: InvolvementLevel
 	interruptTriggers?: InterruptTriggersOverride
 }
 
@@ -53,6 +55,7 @@ const MAX_COMPACTION_ATTEMPTS_ENV_VAR = 'ORCHESTRATOR_MAX_COMPACTION_ATTEMPTS'
 const CONTEXT_PRESSURE_THRESHOLD_ENV_VAR = 'ORCHESTRATOR_CONTEXT_PRESSURE_THRESHOLD'
 const CONTEXT_HANDLER_ROLE_ENV_VAR = 'ORCHESTRATOR_CONTEXT_HANDLER_ROLE'
 const INQUIRY_HANDLER_ROLE_ENV_VAR = 'ORCHESTRATOR_INQUIRY_HANDLER_ROLE'
+const DEFAULT_INVOLVEMENT_ENV_VAR = 'ORCHESTRATOR_INVOLVEMENT'
 const INTERRUPT_HANDLER_ROLE_ENV_VAR = 'ORCHESTRATOR_INTERRUPT_HANDLER_ROLE'
 const INTERRUPT_EVERY_TOOL_CALLS_ENV_VAR = 'ORCHESTRATOR_INTERRUPT_EVERY_TOOL_CALLS'
 const INTERRUPT_EVERY_TOKENS_ENV_VAR = 'ORCHESTRATOR_INTERRUPT_EVERY_TOKENS'
@@ -62,6 +65,13 @@ const MAX_TOOL_OUTPUT_CHARS_ENV_VAR = 'ORCHESTRATOR_MAX_TOOL_OUTPUT_CHARS'
 function readString(value: string | undefined): string | undefined {
 	if (value === undefined || value === '') return undefined
 	return value
+}
+
+function readInvolvementLevel(name: string, value: string | undefined): InvolvementLevel | undefined {
+	const raw = readString(value)
+	if (raw === undefined) return undefined
+	if (!isInvolvementLevel(raw)) throw new ConfigurationError(`${name} must be one of: autonomous, early-engagement, collaborative (got "${raw}")`)
+	return raw
 }
 
 // Accepts only plain decimal digit strings so forms like `0x1a`, `1e3`, `8080.0`, or ` 8080 ` are rejected rather than silently coerced by Number() (the same discipline as parsePort in source/serve.ts).
@@ -122,6 +132,7 @@ export function resolveDeploymentOverride(environment: Record<string, string | u
 		contextPressureThreshold: readPressureThreshold(CONTEXT_PRESSURE_THRESHOLD_ENV_VAR, environment[CONTEXT_PRESSURE_THRESHOLD_ENV_VAR]),
 		contextHandlerRole: readString(environment[CONTEXT_HANDLER_ROLE_ENV_VAR]),
 		inquiryHandlerRole: readString(environment[INQUIRY_HANDLER_ROLE_ENV_VAR]),
+		defaultInvolvement: readInvolvementLevel(DEFAULT_INVOLVEMENT_ENV_VAR, environment[DEFAULT_INVOLVEMENT_ENV_VAR]),
 		interruptTriggers: hasDefinedField(interruptTriggers) ? interruptTriggers : undefined,
 	}
 	if (hasDefinedField(executor)) override.executor = executor
@@ -175,6 +186,7 @@ export function applyDeploymentOverride(base: DeploymentFileConfig, override: De
 		contextPressureThreshold: override.executor?.contextPressureThreshold ?? base.executor.contextPressureThreshold,
 		contextHandlerRole: override.executor?.contextHandlerRole ?? base.executor.contextHandlerRole,
 		inquiryHandlerRole: override.executor?.inquiryHandlerRole ?? base.executor.inquiryHandlerRole,
+		defaultInvolvement: override.executor?.defaultInvolvement ?? base.executor.defaultInvolvement,
 		interruptTriggers,
 	}
 	const contextPolicy: ContextPolicy = {

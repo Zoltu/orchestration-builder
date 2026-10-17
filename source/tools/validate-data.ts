@@ -357,6 +357,15 @@ function checkGuild(loaded: LoadedGuildFiles): void {
 		}
 	}
 
+	// These roles hold the ask posture, so each prompt must defer to the run's human-involvement directive and name all three levels.
+	for (const role of ['orchestrator', 'recovery', 'style_guide_author']) {
+		const prompt = (loaded.prompts[role] ?? '').toLowerCase()
+		check(prompt.includes('human-involvement directive'), `guild: role "${role}" prompt does not defer to the human-involvement directive`)
+		for (const level of ['autonomous', 'early-engagement', 'collaborative']) {
+			check(prompt.includes(level), `guild: role "${role}" prompt lacks the "${level}" involvement level`)
+		}
+	}
+
 	const recoveryPrompt = (loaded.prompts['recovery'] ?? '').toLowerCase()
 	for (const kind of ERROR_KINDS) {
 		check(recoveryPrompt.includes(kind), `guild: recovery prompt does not cover error kind "${kind}"`)

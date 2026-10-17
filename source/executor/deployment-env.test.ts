@@ -19,6 +19,7 @@ function makeBase(): DeploymentFileConfig {
 			contextPressureThreshold: 0.8,
 			contextHandlerRole: 'context_manager',
 			inquiryHandlerRole: 'inquiry_responder',
+			defaultInvolvement: 'collaborative',
 			interruptTriggers: { handlerRole: 'loop_detector', everyToolCalls: 12, everyTokens: 30000, planOwnerRole: 'planner' },
 		},
 		contextPolicy: { maxToolOutputChars: 50000 },
@@ -37,6 +38,7 @@ const FULL_OVERRIDE_ENVIRONMENT: Record<string, string> = {
 	ORCHESTRATOR_CONTEXT_PRESSURE_THRESHOLD: '0.95',
 	ORCHESTRATOR_CONTEXT_HANDLER_ROLE: 'override_context',
 	ORCHESTRATOR_INQUIRY_HANDLER_ROLE: 'override_inquiry',
+	ORCHESTRATOR_INVOLVEMENT: 'autonomous',
 	ORCHESTRATOR_INTERRUPT_HANDLER_ROLE: 'override_loop',
 	ORCHESTRATOR_INTERRUPT_EVERY_TOOL_CALLS: '6',
 	ORCHESTRATOR_INTERRUPT_EVERY_TOKENS: '15000',
@@ -61,6 +63,7 @@ describe('resolveDeploymentOverride', () => {
 				contextPressureThreshold: 0.95,
 				contextHandlerRole: 'override_context',
 				inquiryHandlerRole: 'override_inquiry',
+				defaultInvolvement: 'autonomous',
 				interruptTriggers: {
 					handlerRole: 'override_loop',
 					everyToolCalls: 6,
@@ -126,6 +129,14 @@ describe('resolveDeploymentOverride', () => {
 		expect(override.executor?.contextPressureThreshold).toBe(0.0001)
 		expect(override.model?.generation?.temperature).toBe(0)
 	})
+
+	test('accepts each involvement level and rejects anything else, naming the variable', () => {
+		const involvementLevels = ['autonomous', 'early-engagement', 'collaborative'] as const
+		for (const value of involvementLevels) {
+			expect(resolveDeploymentOverride({ ORCHESTRATOR_INVOLVEMENT: value }).executor?.defaultInvolvement).toBe(value)
+		}
+		expect(() => resolveDeploymentOverride({ ORCHESTRATOR_INVOLVEMENT: 'hands-off' })).toThrow('ORCHESTRATOR_INVOLVEMENT')
+	})
 })
 
 describe('applyDeploymentOverride', () => {
@@ -152,6 +163,7 @@ describe('applyDeploymentOverride', () => {
 				contextPressureThreshold: 0.95,
 				contextHandlerRole: 'override_context',
 				inquiryHandlerRole: 'override_inquiry',
+				defaultInvolvement: 'autonomous',
 				interruptTriggers: {
 					handlerRole: 'override_loop',
 					everyToolCalls: 6,

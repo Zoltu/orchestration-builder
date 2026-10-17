@@ -32,6 +32,7 @@ const fullItem: QueueItem = {
 	id: '8a3a2c1e-0000-4000-8000-000000000001',
 	task: 'fix the parser bug',
 	effort: 'thorough',
+	involvement: 'collaborative',
 	logLevel: 'standard',
 	continuesFrom: 'run-20260101-000000',
 	status: 'needs_input',
@@ -69,6 +70,7 @@ describe('isQueueItem', () => {
 	test('rejects malformed optional fields', () => {
 		expect(isQueueItem(rawItem({ status: 'pending' }))).toBe(false)
 		expect(isQueueItem(rawItem({ effort: 'extreme' }))).toBe(false)
+		expect(isQueueItem(rawItem({ involvement: 'extreme' }))).toBe(false)
 		expect(isQueueItem(rawItem({ logLevel: 'quiet' }))).toBe(false)
 		expect(isQueueItem(rawItem({ continuesFrom: 'not-a-run-id' }))).toBe(false)
 		expect(isQueueItem(rawItem({ runId: 'not-a-run-id' }))).toBe(false)
@@ -115,10 +117,11 @@ describe('normalizeNewItem', () => {
 		})
 	})
 
-	test('accepts logLevel and continuesFrom when well-formed', () => {
-		const result = normalizeNewItem({ task: 't', logLevel: 'standard', continuesFrom: 'run-20260101-000000' }, handles)
+	test('accepts involvement, logLevel, and continuesFrom when well-formed', () => {
+		const result = normalizeNewItem({ task: 't', involvement: 'collaborative', logLevel: 'standard', continuesFrom: 'run-20260101-000000' }, handles)
 		expect(result.ok).toBe(true)
 		if (result.ok) {
+			expect(result.item.involvement).toBe('collaborative')
 			expect(result.item.logLevel).toBe('standard')
 			expect(result.item.continuesFrom).toBe('run-20260101-000000')
 		}
@@ -129,6 +132,7 @@ describe('normalizeNewItem', () => {
 		expect(normalizeNewItem({}, handles).ok).toBe(false)
 		expect(normalizeNewItem({ task: '' }, handles).ok).toBe(false)
 		expect(normalizeNewItem({ task: 't', effort: 'extreme' }, handles).ok).toBe(false)
+		expect(normalizeNewItem({ task: 't', involvement: 'extreme' }, handles).ok).toBe(false)
 		expect(normalizeNewItem({ task: 't', logLevel: 'quiet' }, handles).ok).toBe(false)
 		expect(normalizeNewItem({ task: 't', continuesFrom: 'nope' }, handles).ok).toBe(false)
 	})
@@ -277,18 +281,22 @@ describe('requireWaitingItem', () => {
 })
 
 describe('editWaitingItem', () => {
-	test('edits the task and effort of a waiting item, carrying absent fields forward', () => {
-		const target = item({ effort: 'quick' })
-		const result = editWaitingItem(queue(item({ id: 'other' }), target), 'item-1', { task: 'edited task', effort: 'thorough' })
+	test('edits the task, effort, and involvement of a waiting item, carrying absent fields forward', () => {
+		const target = item({ effort: 'quick', involvement: 'autonomous' })
+		const result = editWaitingItem(queue(item({ id: 'other' }), target), 'item-1', { task: 'edited task', effort: 'thorough', involvement: 'collaborative' })
 		expect(result.ok).toBe(true)
 		if (result.ok) {
 			expect(result.item.task).toBe('edited task')
 			expect(result.item.effort).toBe('thorough')
+			expect(result.item.involvement).toBe('collaborative')
 			expect(result.queue.items.map((i) => i.id)).toEqual(['other', 'item-1'])
 		}
 		const partial = editWaitingItem(queue(target), 'item-1', { task: 'edited task' })
 		expect(partial.ok).toBe(true)
-		if (partial.ok) expect(partial.item.effort).toBe('quick')
+		if (partial.ok) {
+			expect(partial.item.effort).toBe('quick')
+			expect(partial.item.involvement).toBe('autonomous')
+		}
 	})
 
 	test('rejects an unknown id and a non-waiting target', () => {

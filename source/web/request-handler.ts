@@ -1,7 +1,7 @@
 import type { ListRunIds, ProjectSettings, ReadProjectSettings, ReadRunMetaById, ReadRunPlanById, ReadRunSnapshotStats, ReadTaskQueue, RunCheckpointExists, WriteProjectSettings, WriteTaskQueue } from '../executor/persistence.js'
 import { isRunIdShape } from '../executor/run-id.js'
-import type { DeploymentConfig, EffortLevel, GuildConfig, LogLevel, ToolManifest } from '../executor/types.js'
-import { isEffortLevel, isLogLevel, isObject, isTerminalRunStatus } from '../executor/validation.js'
+import type { DeploymentConfig, EffortLevel, GuildConfig, InvolvementLevel, LogLevel, ToolManifest } from '../executor/types.js'
+import { isEffortLevel, isInvolvementLevel, isLogLevel, isObject, isTerminalRunStatus } from '../executor/validation.js'
 import { cancelWaitingItem, editWaitingItem, enqueueAtHead, enqueueAtTail, normalizeNewItem, recordAnswer, removeWaitingItem, reorderWaitingItem, requireWaitingItem, requeueErrorItem, type QueueItem, type QueueMutation } from '../executor/task-queue.js'
 import type { RunState } from '../executor/run-state.js'
 import type { ResumeErroredRun, RunSubmission } from '../executor/run-submission.js'
@@ -283,6 +283,7 @@ function runSummaryEntityFor(summary: RunSummary): RunSummaryEntity {
 		status: summary.status,
 		task: summary.task,
 		effort: summary.effort,
+		involvement: summary.involvement,
 		startTime: summary.startTime,
 		endTime: summary.endTime,
 		result: summary.result,
@@ -331,7 +332,7 @@ function handleInterrupt(runState: RunState, runSubmission: RunSubmission, runId
 	return json({ ok: false, error: 'run_not_active' }, 409)
 }
 
-// POST /api/runs keeps today's external contract exactly (docs/queueing.md "HTTP API") while every run becomes queue-tracked: the validated task is enqueued at the head of the durable queue and the scheduler — the only caller of submission — dispatches it within the same request when the slot is free, so the response is still 201 { runId }. The request's effort, logLevel, and continuesFrom are recorded on the item and thread into the dispatched run. When a run is in flight the request is refused with nothing enqueued, exactly today's 409.
+// POST /api/runs keeps today's external contract exactly (docs/queueing.md "HTTP API") while every run becomes queue-tracked: the validated task is enqueued at the head of the durable queue and the scheduler — the only caller of submission — dispatches it within the same request when the slot is free, so the response is still 201 { runId }. The request's effort, involvement, logLevel, and continuesFrom are recorded on the item and thread into the dispatched run. When a run is in flight the request is refused with nothing enqueued, exactly today's 409.
 async function handleCreateRun(runSubmission: RunSubmission, readRunMetaById: ReadRunMetaById, readQueue: ReadTaskQueue, writeQueue: WriteTaskQueue, tickScheduler: () => Promise<void>, body: unknown): Promise<Response> {
 	if (!isObject(body)) return json({ ok: false, error: 'invalid_body' }, 400)
 	const continuesFromValue = body['continuesFrom']
@@ -347,13 +348,16 @@ async function handleCreateRun(runSubmission: RunSubmission, readRunMetaById: Re
 	const effortValue = body['effort']
 	if (effortValue !== undefined && !isEffortLevel(effortValue)) return json({ ok: false, error: 'invalid_body' }, 400)
 	const effortOverride: EffortLevel | undefined = effortValue
+	const involvementValue = body['involvement']
+	if (involvementValue !== undefined && !isInvolvementLevel(involvementValue)) return json({ ok: false, error: 'invalid_body' }, 400)
+	const involvementOverride: InvolvementLevel | undefined = involvementValue
 	const logLevelValue = body['logLevel']
 	if (logLevelValue !== undefined && !isLogLevel(logLevelValue)) return json({ ok: false, error: 'invalid_body' }, 400)
 	const logLevelOverride: LogLevel | undefined = logLevelValue
 	// Checked before enqueueing so a busy service enqueues nothing, exactly as the 409 contract promises scripts.
 	if (runSubmission.activeRunId() !== undefined) return json({ ok: false, error: 'run_in_progress' }, 409)
 	const normalized = normalizeNewItem(
-		{ task, ...(effortOverride !== undefined ? { effort: effortOverride } : {}), ...(logLevelOverride !== undefined ? { logLevel: logLevelOverride } : {}), ...(continuesFromValue !== undefined ? { continuesFrom: continuesFromValue } : {}) },
+		{ task, ...(effortOverride !== undefined ? { effort: effortOverride } : {}), ...(involvementOverride !== undefined ? { involvement: involvementOverride } : {}), ...(logLevelOverride !== undefined ? { logLevel: logLevelOverride } : {}), ...(continuesFromValue !== undefined ? { continuesFrom: continuesFromValue } : {}) },
 		{ id: crypto.randomUUID(), queuedAt: new Date().toISOString() },
 	)
 	// Unreachable for a well-formed prior meta; a prior meta whose task text is itself empty (a hand-edited file) is refused here instead of dispatching a taskless run.
@@ -411,17 +415,17 @@ function handleGetQueue(readQueue: ReadTaskQueue): Response {
 	return json(readQueue().items)
 }
 
-// POST /api/queue always enqueues at the tail — never 409 — and ticks the scheduler, so an idle system dispatches the new task within the same request. Only task and effort are read from the body: a queue-native item's logLevel resolves through the standard chain at dispatch (docs/queueing.md "The queue: storage, item model, state machine"), and other fields are lineage or outcome bookkeeping the platform owns.
+// POST /api/queue always enqueues at the tail — never 409 — and ticks the scheduler, so an idle system dispatches the new task within the same request. Only task, effort, and involvement are read from the body: a queue-native item's logLevel resolves through the standard chain at dispatch (docs/queueing.md "The queue: storage, item model, state machine"), and other fields are lineage or outcome bookkeeping the platform owns.
 async function handleEnqueueTask(readQueue: ReadTaskQueue, writeQueue: WriteTaskQueue, tickScheduler: () => Promise<void>, body: unknown): Promise<Response> {
 	if (!isObject(body)) return json({ ok: false, error: 'invalid_body' }, 400)
-	const normalized = normalizeNewItem({ task: body['task'], effort: body['effort'] }, { id: crypto.randomUUID(), queuedAt: new Date().toISOString() })
+	const normalized = normalizeNewItem({ task: body['task'], effort: body['effort'], involvement: body['involvement'] }, { id: crypto.randomUUID(), queuedAt: new Date().toISOString() })
 	if (!normalized.ok) return json({ ok: false, error: 'invalid_body' }, 400)
 	writeQueue(enqueueAtTail(readQueue(), normalized.item))
 	await tickScheduler()
 	return json(normalized.item, 201)
 }
 
-// PATCH edits task/effort and/or moves the item to a clamped 0-based position in the waiting list; waiting items only.
+// PATCH edits task/effort/involvement and/or moves the item to a clamped 0-based position in the waiting list; waiting items only.
 function handlePatchQueueItem(readQueue: ReadTaskQueue, writeQueue: WriteTaskQueue, itemId: string, body: unknown): Response {
 	if (!isObject(body)) return json({ ok: false, error: 'invalid_body' }, 400)
 	const taskValue = body['task']
@@ -430,13 +434,16 @@ function handlePatchQueueItem(readQueue: ReadTaskQueue, writeQueue: WriteTaskQue
 	const effortValue = body['effort']
 	if (effortValue !== undefined && !isEffortLevel(effortValue)) return json({ ok: false, error: 'invalid_body' }, 400)
 	const effort: EffortLevel | undefined = effortValue
+	const involvementValue = body['involvement']
+	if (involvementValue !== undefined && !isInvolvementLevel(involvementValue)) return json({ ok: false, error: 'invalid_body' }, 400)
+	const involvement: InvolvementLevel | undefined = involvementValue
 	const positionValue = body['position']
 	if (positionValue !== undefined && !isQueuePosition(positionValue)) return json({ ok: false, error: 'invalid_body' }, 400)
 	const position: number | undefined = positionValue
 	let queue = readQueue()
 	let item: QueueItem | undefined
-	if (task !== undefined || effort !== undefined) {
-		const edited = editWaitingItem(queue, itemId, { ...(task !== undefined ? { task } : {}), ...(effort !== undefined ? { effort } : {}) })
+	if (task !== undefined || effort !== undefined || involvement !== undefined) {
+		const edited = editWaitingItem(queue, itemId, { ...(task !== undefined ? { task } : {}), ...(effort !== undefined ? { effort } : {}), ...(involvement !== undefined ? { involvement } : {}) })
 		if (!edited.ok) return queueMutationResponse(edited)
 		queue = edited.queue
 		item = edited.item
@@ -493,14 +500,16 @@ function handleGetSettings(readProjectSettings: ReadProjectSettings): Response {
 	return json(renderProjectSettings(readProjectSettings()))
 }
 
-// The write replaces settings.json wholesale, so the body is the complete new settings: effort is required (the field the compose screen always has a value for), and the optional logLevel is cleared when absent — the client always sends both so saving one never clears the other.
+// The write replaces settings.json wholesale, so the body is the complete new settings: effort is required (the field the compose screen always has a value for), and the optional involvement and logLevel are cleared when absent — the client always sends all three so saving one never clears the others.
 function handlePutSettings(writeProjectSettings: WriteProjectSettings, body: unknown): Response {
 	if (!isObject(body)) return json({ ok: false, error: 'invalid_body' }, 400)
 	const effortValue = body['effort']
 	if (!isEffortLevel(effortValue)) return json({ ok: false, error: 'invalid_body' }, 400)
+	const involvementValue = body['involvement']
+	if (involvementValue !== undefined && !isInvolvementLevel(involvementValue)) return json({ ok: false, error: 'invalid_body' }, 400)
 	const logLevelValue = body['logLevel']
 	if (logLevelValue !== undefined && !isLogLevel(logLevelValue)) return json({ ok: false, error: 'invalid_body' }, 400)
-	const settings: ProjectSettings = { effort: effortValue, ...(logLevelValue !== undefined ? { logLevel: logLevelValue } : {}) }
+	const settings: ProjectSettings = { effort: effortValue, ...(involvementValue !== undefined ? { involvement: involvementValue } : {}), ...(logLevelValue !== undefined ? { logLevel: logLevelValue } : {}) }
 	writeProjectSettings(settings)
 	return json(renderProjectSettings(settings))
 }

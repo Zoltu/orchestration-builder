@@ -10,7 +10,7 @@ import { createFlowReplicaRegistry } from './web/flow-replica-registry.js'
 import { createRunListReplica } from './web/run-list-replica.js'
 import { createStreamHub } from './web/stream-hub.js'
 import { createTaskSummarizer, type TaskSummarizer } from './summarize.js'
-import { applyDeploymentOverride, applyLogLevel, createAppendLog, createBunSubprocessRunner, createDeleteCheckpoint, createDeltaChannel, createDockerSecretReader, createGuildLoader, createInterruptChannel, createInterruptQueue, createLlmCaller, createLlmFetch, createListRunIds, createModelInfoProbe, createPlanToolHandlers, createReadProjectDoc, createReadProjectSettings, createReadQueue, createReadRunCheckpointById, createReadRunLogTextFrom, createReadRunMetaById, createReadRunPlanById, createReadRunSnapshotById, createReadRunSnapshotStats, createReadRunSummaryById, createReadRunSummaryStats, createReadWorkspaceGitState, createResumeErroredRun, createRoleSnapshotStore, createRunBaseTracker, createRunCheckpointExists, createRunDirectory, createRunDirectoryExists, createRunLogToolHandlers, createRunState, createRunSubmission, createSleep, createStyleGuideToolHandlers, createTaskScheduler, createTimeoutScheduler, createToolHandlers, createWebHumanBackend, createWriteCheckpoint, createWriteMeta, createWriteProjectSettings, createWriteQueue, createWriteRunSummary, ensureOrchestrationGitExcluded, entryFrameLogLevel, generateRunId, llmUsagePayload, LOG_FILE_NAME, MODEL_PROBE_TIMEOUT_MS, nodeGitExcludeFilesystem, parseModelInfo, reconcileRunsOnStartup, resolveDeploymentConfig, resolveDeploymentOverride, resolveKagiApiKey, resolveSecret, resumeExecutor, runExecutor, validateDeploymentFileConfig, validateDeploymentRoleReferences, ConfigurationError, ValidationError, type AppendLog, type DeltaChannel, type ExecutorDependencies, type InterruptChannel, type LoadedGuild, type LlmCaller, type LogLevel, type ModelApiProbe, type ResumeRun, type RunCheckpoint, type StartRun, type WebHumanBackend } from './executor/index.js'
+import { applyDeploymentOverride, applyLogLevel, createAppendLog, createBunSubprocessRunner, createDeleteCheckpoint, createDeltaChannel, createDockerSecretReader, createGuildLoader, createInterruptChannel, createInterruptQueue, createLlmCaller, createLlmFetch, createListRunIds, createModelInfoProbe, createPlanToolHandlers, createReadProjectDoc, createReadProjectSettings, createReadQueue, createReadRunCheckpointById, createReadRunLogTextFrom, createReadRunMetaById, createReadRunPlanById, createReadRunSnapshotById, createReadRunSnapshotStats, createReadRunSummaryById, createReadRunSummaryStats, createReadWorkspaceGitState, createResumeErroredRun, createRoleSnapshotStore, createRunBaseTracker, createRunCheckpointExists, createRunDirectory, createRunDirectoryExists, createRunLogToolHandlers, createRunState, createRunSubmission, createSleep, createStyleGuideToolHandlers, createTaskScheduler, createTimeoutScheduler, createToolHandlers, createWebHumanBackend, createWriteCheckpoint, createWriteMeta, createWriteProjectSettings, createWriteQueue, createWriteRunSummary, ensureOrchestrationGitExcluded, entryFrameLogLevel, generateRunId, llmUsagePayload, LOG_FILE_NAME, MODEL_PROBE_TIMEOUT_MS, nodeGitExcludeFilesystem, parseModelInfo, reconcileRunsOnStartup, resolveDeploymentConfig, resolveDeploymentOverride, resolveKagiApiKey, resolveSecret, resumeExecutor, runExecutor, validateDeploymentFileConfig, validateDeploymentRoleReferences, ConfigurationError, ValidationError, type AppendLog, type DeltaChannel, type ExecutorDependencies, type InterruptChannel, type InvolvementLevel, type LoadedGuild, type LlmCaller, type LogLevel, type ModelApiProbe, type ResumeRun, type RunCheckpoint, type StartRun, type WebHumanBackend } from './executor/index.js'
 
 const DEPLOYMENT_FILE_ENV_VAR = 'ORCHESTRATOR_DEPLOYMENT_FILE'
 const PORT_ENV_VAR = 'PORT'
@@ -149,12 +149,13 @@ interface RunServiceConfig {
 }
 
 function createStartRun(config: RunServiceConfig): StartRun {
-	return (runId, task, effort, logLevel, continuation, queueTracked) => {
+	return (runId, task, effort, involvement, logLevel, continuation, queueTracked) => {
 		const runPromise = withRunBindings(config, runId, logLevel, (dependencies) => runExecutor(dependencies, {
 			runId,
 			guildPath: config.guildPath,
 			task,
 			effort,
+			involvement,
 			logLevel,
 			...(continuation !== undefined ? { continuation } : {}),
 			// The submission layer marks every submission a queue dispatch (the queue is universal), so the run's park tracker is born queue-tracked (docs/queueing.md "Parking: the pre-write rule").
@@ -235,6 +236,8 @@ async function serve(): Promise<void> {
 	let guild: LoadedGuild
 	let apiKey: string | undefined
 	let kagiApiKey: string | undefined
+	// The deployment file's involvement default (docs/reference.md "Involvement channel"), captured at startup and handed to the run submission as the chain's lowest-priority input.
+	let deploymentInvolvement: InvolvementLevel | undefined
 	// The deployment file's logging default (docs/reference.md "Logging level"), captured at startup and handed to the run submission as the chain's lowest-priority input.
 	let deploymentLogLevel: LogLevel | undefined
 	try {
@@ -247,6 +250,7 @@ async function serve(): Promise<void> {
 		const mergedDeployment = applyDeploymentOverride(loadedGuildFiles.deployment, resolveDeploymentOverride(Bun.env))
 		validateDeploymentFileConfig(mergedDeployment)
 		validateDeploymentRoleReferences(mergedDeployment, roleNames)
+		deploymentInvolvement = mergedDeployment.executor.defaultInvolvement
 		deploymentLogLevel = mergedDeployment.logging?.level
 
 		// The orchestrator credential comes from the shared secret channels: the ORCHESTRATOR_API_KEY environment variable first, then a docker secret mounted at /run/secrets/orchestrator_api_key (or ORCHESTRATOR_API_KEY).
@@ -340,6 +344,7 @@ async function serve(): Promise<void> {
 		generateRunId: () => generateRunId(new Date()),
 		runDirectoryExists: createRunDirectoryExists(runsBaseDir),
 		readProjectSettings,
+		deploymentInvolvement,
 		deploymentLogLevel,
 		onRunSettled: (meta) => scheduler.onRunSettled(meta),
 	})
@@ -357,7 +362,7 @@ async function serve(): Promise<void> {
 		readRunMetaById,
 		listRunIds,
 		readRunListSummary,
-		submitRun: (submission) => runSubmission.submit(submission.task, submission.effort, submission.logLevel, submission.continuation),
+		submitRun: (submission) => runSubmission.submit(submission.task, submission.effort, submission.involvement, submission.logLevel, submission.continuation),
 		hasActiveRun: () => runSubmission.activeRunId() !== undefined,
 		sleep: createSleep(),
 		now: () => new Date().toISOString(),

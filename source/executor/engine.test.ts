@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test'
 
 import type { ContextPolicy, DeploymentConfig, ExecutorConfig, GuildConfig, LogEvent, Message, ResolvedModelConfig, ResultCard, RoleDefinition, ToolCall, ToolManifest } from './types.js'
 import { effortDirective } from './effort.ts'
+import { involvementDirective } from './involvement.ts'
 import { createContextPressureTracker } from './context-pressure.ts'
 import { runRole } from './engine.ts'
 import type { EngineDependencies } from './engine-state.ts'
@@ -2318,6 +2319,86 @@ describe('runRole effort directive injection', () => {
 		expect(childMessages[1]).toEqual({ role: 'user', content: 'subtask' })
 		expect(childMessages.length).toBe(2)
 		expect(childMessages.some((m) => m.content.includes('Quality level'))).toBe(false)
+	})
+})
+
+describe('runRole involvement directive injection', () => {
+	test('the entry role receives the involvement directive merged into its single system message', async () => {
+		const guild = buildGuild(
+			{ main: { systemPrompt: 'p', tools: ['finish'] } },
+			'main',
+		)
+		const llm = new FakeLlm()
+		llm.responses = [success([finishCall({ status: 'success', summary: 'Done' })])]
+		const { deps } = makeDeps(llm)
+
+		await runRole(deps, {
+			loadedGuild: guild,
+			depth: 0,
+			roleName: 'main',
+			task: 'do it',
+			involvement: 'collaborative',
+		})
+
+		expect(llm.calls.length).toBe(1)
+		const messages = defined(llm.calls[0], 'entry call').messages
+		// The directive is merged into the single system message, not emitted as a second one — many chat templates reject a system message that is not the first message.
+		expect(messages).toHaveLength(2)
+		expect(messages[0]).toEqual({ role: 'system', content: `prompt for main\n\n${involvementDirective('collaborative')}` })
+		expect(defined(messages[0], 'system message').content).toContain('Human involvement: collaborative')
+		expect(messages[1]).toEqual({ role: 'user', content: 'do it' })
+	})
+
+	test('the entry role receives no involvement directive when the context carries none', async () => {
+		const guild = buildGuild(
+			{ main: { systemPrompt: 'p', tools: ['finish'] } },
+			'main',
+		)
+		const llm = new FakeLlm()
+		llm.responses = [success([finishCall({ status: 'success', summary: 'Done' })])]
+		const { deps } = makeDeps(llm)
+
+		await runRole(deps, {
+			loadedGuild: guild,
+			depth: 0,
+			roleName: 'main',
+			task: 'do it',
+		})
+
+		const messages = defined(llm.calls[0], 'entry call').messages
+		expect(messages.length).toBe(2)
+		expect(messages[0]).toEqual({ role: 'system', content: 'prompt for main' })
+	})
+
+	test('a child role does not receive the involvement directive even though the context is spread from the parent', async () => {
+		const guild = buildGuild(
+			{
+				parent: { systemPrompt: 'p', tools: ['agent', 'finish'] },
+				child: { systemPrompt: 'c', tools: ['finish'] },
+			},
+			'parent',
+		)
+		const llm = new FakeLlm()
+		llm.responses = [
+			success([agentCall('child', 'subtask')]),
+			success([finishCall({ status: 'success', summary: 'child done' })]),
+			success([finishCall({ status: 'success', summary: 'parent done' })]),
+		]
+		const { deps } = makeDeps(llm)
+
+		await runRole(deps, {
+			loadedGuild: guild,
+			depth: 0,
+			roleName: 'parent',
+			task: 'delegate',
+			involvement: 'collaborative',
+		})
+
+		const childMessages = defined(llm.calls[1], 'child call').messages
+		expect(childMessages[0]).toEqual({ role: 'system', content: 'prompt for child' })
+		expect(childMessages[1]).toEqual({ role: 'user', content: 'subtask' })
+		expect(childMessages.length).toBe(2)
+		expect(childMessages.some((m) => m.content.includes('Human involvement'))).toBe(false)
 	})
 })
 

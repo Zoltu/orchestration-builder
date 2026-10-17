@@ -1,7 +1,7 @@
-import { isEffortLevel, isLogLevel, isObject, isString } from './validation.js'
+import { isEffortLevel, isInvolvementLevel, isLogLevel, isObject, isString } from './validation.js'
 import { isRunIdShape } from './run-id.js'
 import { questionFromParkSummary } from './park-state.js'
-import type { EffortLevel, LogLevel, RunMeta } from './types.js'
+import type { EffortLevel, InvolvementLevel, LogLevel, RunMeta } from './types.js'
 
 // Pure queue logic and validation for the durable task queue (docs/queueing.md "The queue: storage, item model, state machine"). Every transformation is a whole-queue value: it takes a queue and returns a new one, so the scheduler's read-modify-write cycles stay free of hidden mutation. Persistence leaves live in persistence.ts; the orchestration that sequences these transformations lives in scheduler.ts.
 
@@ -14,6 +14,8 @@ export interface QueueItem {
 	task: string
 	// Optional per-item effort override for the item's run.
 	effort?: EffortLevel
+	// Optional per-item human-involvement override for the item's run.
+	involvement?: InvolvementLevel
 	// Optional logging-level override for the item's run.
 	logLevel?: LogLevel
 	// The run this item's dispatch continues: a parked run awaiting its answer, an errored run being retried, or a user-initiated Continue.
@@ -46,6 +48,7 @@ export function isQueueItem(value: unknown): value is QueueItem {
 	if (!isString(value.id) || value.id === '') return false
 	if (!isString(value.task) || value.task === '') return false
 	if (value.effort !== undefined && !isEffortLevel(value.effort)) return false
+	if (value.involvement !== undefined && !isInvolvementLevel(value.involvement)) return false
 	if (value.logLevel !== undefined && !isLogLevel(value.logLevel)) return false
 	if (value.continuesFrom !== undefined && !isRunIdShape(value.continuesFrom)) return false
 	if (!isString(value.status) || !queueItemStatuses.some((status) => status === value.status)) return false
@@ -74,6 +77,8 @@ export function normalizeNewItem(input: unknown, handles: { id: string; queuedAt
 	if (typeof task !== 'string' || task === '') return { ok: false, error: 'task must be a non-empty string' }
 	const effort = input['effort']
 	if (effort !== undefined && !isEffortLevel(effort)) return { ok: false, error: 'effort must be one of: quick, standard, thorough' }
+	const involvement = input['involvement']
+	if (involvement !== undefined && !isInvolvementLevel(involvement)) return { ok: false, error: 'involvement must be one of: autonomous, early-engagement, collaborative' }
 	const logLevel = input['logLevel']
 	if (logLevel !== undefined && !isLogLevel(logLevel)) return { ok: false, error: 'logLevel must be "full" or "standard"' }
 	const continuesFrom = input['continuesFrom']
@@ -82,6 +87,7 @@ export function normalizeNewItem(input: unknown, handles: { id: string; queuedAt
 		id: handles.id,
 		task,
 		...(effort !== undefined ? { effort } : {}),
+		...(involvement !== undefined ? { involvement } : {}),
 		...(logLevel !== undefined ? { logLevel } : {}),
 		...(continuesFrom !== undefined ? { continuesFrom } : {}),
 		status: 'waiting',
@@ -99,11 +105,12 @@ function findById(queue: TaskQueue, id: string): QueueItem | undefined {
 }
 
 // The operator-facing fields every lifecycle rebuild carries forward: identity, the per-run overrides, the queued-at stamp, and the recorded question and answer (a re-dispatched item's record of why it re-ran). Outcome fields (runId, resultSummary, error, settledAt) are never carried — they belong to the lifecycle stage that produced them.
-function carriedFields(item: QueueItem): Pick<QueueItem, 'id' | 'task' | 'queuedAt'> & { effort?: EffortLevel; logLevel?: LogLevel; question?: string; answer?: string } {
+function carriedFields(item: QueueItem): Pick<QueueItem, 'id' | 'task' | 'queuedAt'> & { effort?: EffortLevel; involvement?: InvolvementLevel; logLevel?: LogLevel; question?: string; answer?: string } {
 	return {
 		id: item.id,
 		task: item.task,
 		...(item.effort !== undefined ? { effort: item.effort } : {}),
+		...(item.involvement !== undefined ? { involvement: item.involvement } : {}),
 		...(item.logLevel !== undefined ? { logLevel: item.logLevel } : {}),
 		...(item.question !== undefined ? { question: item.question } : {}),
 		...(item.answer !== undefined ? { answer: item.answer } : {}),
@@ -150,14 +157,15 @@ export function requireWaitingItem(queue: TaskQueue, id: string): QueueMutation 
 	return { ok: true, queue, item: target }
 }
 
-// The PATCH endpoint's text/effort edit half: only a waiting item's task and effort are operator-editable (the dispatch may already be running otherwise). Fields absent from the edit carry forward.
-export function editWaitingItem(queue: TaskQueue, id: string, edit: { task?: string; effort?: EffortLevel }): QueueMutation {
+// The PATCH endpoint's text/effort/involvement edit half: only a waiting item's task, effort, and involvement are operator-editable (the dispatch may already be running otherwise). Fields absent from the edit carry forward.
+export function editWaitingItem(queue: TaskQueue, id: string, edit: { task?: string; effort?: EffortLevel; involvement?: InvolvementLevel }): QueueMutation {
 	const required = requireWaitingItem(queue, id)
 	if (!required.ok) return required
 	const edited: QueueItem = {
 		...required.item,
 		...(edit.task !== undefined ? { task: edit.task } : {}),
 		...(edit.effort !== undefined ? { effort: edit.effort } : {}),
+		...(edit.involvement !== undefined ? { involvement: edit.involvement } : {}),
 	}
 	return { ok: true, queue: withReplacedItem(queue, edited), item: edited }
 }
@@ -292,6 +300,7 @@ function settledItem(target: QueueItem, mapped: TerminalItemState, settledAt: st
 		id: target.id,
 		task: target.task,
 		...(target.effort !== undefined ? { effort: target.effort } : {}),
+		...(target.involvement !== undefined ? { involvement: target.involvement } : {}),
 		...(target.logLevel !== undefined ? { logLevel: target.logLevel } : {}),
 		queuedAt: target.queuedAt,
 	}

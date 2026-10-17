@@ -63,6 +63,7 @@ Deployment field overrides — each variable defaults to the deployment file's v
 | `ORCHESTRATOR_CONTEXT_PRESSURE_THRESHOLD` | `executor.contextPressureThreshold` | number in (0, 1) |
 | `ORCHESTRATOR_CONTEXT_HANDLER_ROLE` | `executor.contextHandlerRole` | non-empty string |
 | `ORCHESTRATOR_INQUIRY_HANDLER_ROLE` | `executor.inquiryHandlerRole` | non-empty string |
+| `ORCHESTRATOR_INVOLVEMENT` | `executor.defaultInvolvement` | `autonomous`, `early-engagement`, or `collaborative` |
 | `ORCHESTRATOR_INTERRUPT_HANDLER_ROLE` | `executor.interruptTriggers.handlerRole` | non-empty string |
 | `ORCHESTRATOR_INTERRUPT_EVERY_TOOL_CALLS` | `executor.interruptTriggers.everyToolCalls` | positive integer |
 | `ORCHESTRATOR_INTERRUPT_EVERY_TOKENS` | `executor.interruptTriggers.everyTokens` | positive integer |

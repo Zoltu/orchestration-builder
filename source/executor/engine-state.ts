@@ -13,7 +13,7 @@ import type { RoleRegistry } from './role-registry.js'
 import type { RoleSnapshotStore } from './role-snapshot.js'
 import type { RoleDelta } from './stream-channel.js'
 import type { ToolHandler } from './tool-dispatch.js'
-import type { EffortLevel, LogLevel, LogEvent, Message, ResultCard, RunContinuation, ToolCall } from './types.js'
+import type { EffortLevel, InvolvementLevel, LogLevel, LogEvent, Message, ResultCard, RunContinuation, ToolCall } from './types.js'
 
 // The tools that spawn a child role and suspend the caller mid-turn until it returns. They share the suspension bookkeeping (checkpoint.ts's pending frame and the engine's dispatch sequence), so the set is defined here where both the engine and the checkpoint guard can read it without a runtime cycle.
 export const SUSPENDING_CHILD_TOOLS: ReadonlySet<string> = new Set(['agent', 'continue_agent'])
@@ -45,6 +45,8 @@ export interface EngineContext {
 	task: string
 	// The run's effort, set only on the entry-role context by runExecutor. The agent spawn spreads the context to children, but the directive is gated on depth 0 below, so children never receive a global effort directive — the parent decides how to translate effort into delegation instructions.
 	effort?: EffortLevel
+	// The run's human-involvement level (docs/reference.md "Involvement channel"), set only on the entry-role context by runExecutor. Like effort it rides the context spread to children, but the directive is gated on depth 0 below, so children never receive a global involvement directive — the parent restates the policy in the tasks it delegates.
+	involvement?: InvolvementLevel
 	// The run's logging level (docs/reference.md "Logging level"), set on the entry-role context by runExecutor and inherited by children through the context spread. The engine reads it (the inquiry briefing's run-log note qualifies what the log carries); roles never see it. A context without the level reads as full detail.
 	logLevel?: LogLevel
 	// The prior run this run continues, set only on the entry-role context by runExecutor. Like effort, it rides the context spread to children but the briefing is gated on depth 0 in buildInitialHistory, so the continuation block appears only in the entry role's initial history — exactly once per run. Never set on resume: the composed history is already checkpointed, so re-deriving the briefing would duplicate it.

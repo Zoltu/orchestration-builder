@@ -16,6 +16,7 @@ function summary(id: string, overrides: Partial<RunSummaryEntity> = {}): RunSumm
 		status: 'success',
 		task: `task for ${id}`,
 		effort: 'standard',
+		involvement: 'early-engagement',
 		startTime: '2026-01-01T00:00:00.000Z',
 		endTime: '2026-01-01T00:01:00.000Z',
 		result: null,
@@ -39,6 +40,7 @@ describe('run-list collection guards', () => {
 		expect(runListDefinitions.runs.isEntity({ ...summary('run-1'), id: '' })).toBe(false)
 		expect(runListDefinitions.runs.isEntity({ ...summary('run-1'), status: 'bogus' })).toBe(false)
 		expect(runListDefinitions.runs.isEntity({ ...summary('run-1'), task: 7 })).toBe(false)
+		expect(runListDefinitions.runs.isEntity({ ...summary('run-1'), involvement: 7 })).toBe(false)
 		expect(runListDefinitions.runs.isEntity({ ...summary('run-1'), endTime: 7 })).toBe(false)
 		expect(runListDefinitions.runs.isEntity({ ...summary('run-1'), summary: 7 })).toBe(false)
 		expect(runListDefinitions.runs.isEntity({ ...summary('run-1'), result: { status: 'bogus', summary: 'x' } })).toBe(false)
@@ -59,6 +61,7 @@ describe('runSummary versionOf', () => {
 			['status', { ...base, status: 'error' }],
 			['task', { ...base, task: 'another task' }],
 			['effort', { ...base, effort: 'quick' }],
+			['involvement', { ...base, involvement: 'collaborative' }],
 			['startTime', { ...base, startTime: '2026-01-01T00:00:01.000Z' }],
 			['endTime', { ...base, endTime: '2026-01-01T00:02:00.000Z' }],
 			['result', { ...base, result: { status: 'success', summary: 'changed' } }],
@@ -93,6 +96,7 @@ describe('runSummariesFromReplicaState', () => {
 				status: 'error',
 				task: 'task for run-1',
 				effort: 'standard',
+				involvement: 'early-engagement',
 				startTime: '2026-01-01T00:00:00.000Z',
 				endTime: '2026-01-01T00:01:00.000Z',
 				result: { status: 'error', summary: 'failed' },

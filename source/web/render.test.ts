@@ -638,6 +638,14 @@ describe('formatLogEvent', () => {
 		expect(formatLogEvent(event('effort_set', {}))).toBe('effort set')
 	})
 
+	test('involvement_set renders the chosen level', () => {
+		expect(formatLogEvent(event('involvement_set', { involvement: 'collaborative' }))).toBe('involvement set (collaborative)')
+	})
+
+	test('involvement_set without an involvement value renders the bare action', () => {
+		expect(formatLogEvent(event('involvement_set', {}))).toBe('involvement set')
+	})
+
 	test('agent_call → parent · agent call → child', () => {
 		expect(formatLogEvent(event('agent_call', { parent: 'orchestrator', child: 'coder', depth: 1 }))).toBe('orchestrator · agent call → coder')
 	})
@@ -744,6 +752,20 @@ describe('renderRunView', () => {
 
 		const inProgress = parseRunSnapshot({ metaText: null, logText: '' })
 		expect(renderRunView(inProgress, { maxLogLines: 200 }).effort).toBeNull()
+	})
+
+	test('surfaces the run involvement from meta.involvement, or null when meta is absent or carries none', () => {
+		const withInvolvement = parseRunSnapshot({
+			metaText: JSON.stringify(sampleRunMeta({ involvement: 'collaborative' })),
+			logText: '',
+		})
+		expect(renderRunView(withInvolvement, { maxLogLines: 200 }).involvement).toBe('collaborative')
+
+		const withoutInvolvement = parseRunSnapshot({ metaText: JSON.stringify(sampleRunMeta()), logText: '' })
+		expect(renderRunView(withoutInvolvement, { maxLogLines: 200 }).involvement).toBeNull()
+
+		const inProgress = parseRunSnapshot({ metaText: null, logText: '' })
+		expect(renderRunView(inProgress, { maxLogLines: 200 }).involvement).toBeNull()
 	})
 
 	test('surfaces the run lineage from meta.continuesFrom, or null when absent or meta is missing', () => {
@@ -1332,6 +1354,7 @@ describe('renderRunSummary', () => {
 			status: 'success',
 			task: 'fix the bug',
 			effort: null,
+			involvement: null,
 			startTime: '2026-01-01T00:00:00.000Z',
 			endTime: '2026-01-01T00:01:00.000Z',
 			result: null,
@@ -1347,6 +1370,7 @@ describe('renderRunSummary', () => {
 			status: 'unknown',
 			task: null,
 			effort: null,
+			involvement: null,
 			startTime: null,
 			endTime: null,
 			result: null,
@@ -1365,6 +1389,12 @@ describe('renderRunSummary', () => {
 	test('carries the run effort from meta.effort', () => {
 		const meta = parseRunMeta(JSON.stringify(sampleRunMeta({ effort: 'thorough' })))
 		expect(renderRunSummary('r', meta, null).effort).toBe('thorough')
+	})
+
+	test('carries the run involvement from meta.involvement, or null when absent', () => {
+		const meta = parseRunMeta(JSON.stringify(sampleRunMeta({ involvement: 'collaborative' })))
+		expect(renderRunSummary('r', meta, null).involvement).toBe('collaborative')
+		expect(renderRunSummary('r', parseRunMeta(JSON.stringify(sampleRunMeta())), null).involvement).toBeNull()
 	})
 
 	test('passes the result card and run-level error through so the history view can browse outcomes', () => {
@@ -1393,16 +1423,16 @@ describe('renderRunSummary', () => {
 })
 
 describe('renderProjectSettings', () => {
-	test('returns both fields null when no default has been set', () => {
-		expect(renderProjectSettings({})).toEqual({ effort: null, logLevel: null })
+	test('returns all fields null when no default has been set', () => {
+		expect(renderProjectSettings({})).toEqual({ effort: null, involvement: null, logLevel: null })
 	})
 
 	test('returns the stored values when set', () => {
-		expect(renderProjectSettings({ effort: 'thorough', logLevel: 'standard' })).toEqual({ effort: 'thorough', logLevel: 'standard' })
+		expect(renderProjectSettings({ effort: 'thorough', involvement: 'collaborative', logLevel: 'standard' })).toEqual({ effort: 'thorough', involvement: 'collaborative', logLevel: 'standard' })
 	})
 
-	test('returns exactly the effort and logLevel fields in its output shape', () => {
-		expect(Object.keys(renderProjectSettings({ effort: 'quick', logLevel: 'full' }))).toEqual(['effort', 'logLevel'])
+	test('returns exactly the effort, involvement, and logLevel fields in its output shape', () => {
+		expect(Object.keys(renderProjectSettings({ effort: 'quick', involvement: 'autonomous', logLevel: 'full' }))).toEqual(['effort', 'involvement', 'logLevel'])
 	})
 })
 

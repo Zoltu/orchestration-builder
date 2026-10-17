@@ -2,7 +2,7 @@
 
 import type { PendingQuestion } from '../executor/human-backend.js'
 import { isObject, isRunMeta } from '../executor/validation.js'
-import type { DeploymentConfig, EffortLevel, ExecutorConfig, GuildConfig, LogEvent, LogLevel, ResultCard, RunMeta, ToolManifest, HumanFacingText, VisualizationConfig } from '../executor/types.js'
+import type { DeploymentConfig, EffortLevel, ExecutorConfig, GuildConfig, InvolvementLevel, LogEvent, LogLevel, ResultCard, RunMeta, ToolManifest, HumanFacingText, VisualizationConfig } from '../executor/types.js'
 import type { ProjectSettings, RunSnapshotRaw } from '../executor/persistence.js'
 import type { BuildInfo } from './build-info.js'
 
@@ -144,6 +144,10 @@ export function formatLogEvent(event: LogEvent): string {
 		case 'effort_set': {
 			const effort = stringField(payload, 'effort')
 			return effort === null ? 'effort set' : `effort set (${effort})`
+		}
+		case 'involvement_set': {
+			const involvement = stringField(payload, 'involvement')
+			return involvement === null ? 'involvement set' : `involvement set (${involvement})`
 		}
 		case 'agent_call': {
 			const parent = stringField(payload, 'parent')
@@ -742,6 +746,7 @@ export interface RunView {
 	runId: string | null
 	task: string | null
 	effort: EffortLevel | null
+	involvement: InvolvementLevel | null
 	startTime: string | null
 	endTime: string | null
 	result: ResultCard | null
@@ -784,6 +789,7 @@ export function renderRunView(snapshot: RunSnapshot, options: RenderRunViewOptio
 		runId: meta === null ? null : meta.runId,
 		task: meta === null ? null : meta.task,
 		effort: meta === null ? null : (meta.effort ?? null),
+		involvement: meta === null ? null : (meta.involvement ?? null),
 		startTime: meta === null ? null : meta.startTime,
 		endTime: meta === null ? null : (meta.endTime ?? null),
 		result: meta === null ? null : (meta.result ?? null),
@@ -806,6 +812,7 @@ export interface RunSummary {
 	status: RunMeta['status'] | 'unknown'
 	task: string | null
 	effort: EffortLevel | null
+	involvement: InvolvementLevel | null
 	startTime: string | null
 	endTime: string | null
 	// The result card and run-level error ride along so the history view's expanded rows can browse outcomes without a per-run fetch; both already live in meta.json, so this is a passthrough, not a derivation.
@@ -821,6 +828,7 @@ export function renderRunSummary(runId: string, meta: RunMeta | null, summary: s
 		status: meta === null ? 'unknown' : meta.status,
 		task: meta === null ? null : meta.task,
 		effort: meta === null ? null : (meta.effort ?? null),
+		involvement: meta === null ? null : (meta.involvement ?? null),
 		startTime: meta === null ? null : meta.startTime,
 		endTime: meta === null ? null : (meta.endTime ?? null),
 		result: meta === null ? null : (meta.result ?? null),
@@ -831,11 +839,12 @@ export function renderRunSummary(runId: string, meta: RunMeta | null, summary: s
 
 export interface ProjectSettingsView {
 	effort: EffortLevel | null
+	involvement: InvolvementLevel | null
 	logLevel: LogLevel | null
 }
 
 export function renderProjectSettings(settings: ProjectSettings): ProjectSettingsView {
-	return { effort: settings.effort ?? null, logLevel: settings.logLevel ?? null }
+	return { effort: settings.effort ?? null, involvement: settings.involvement ?? null, logLevel: settings.logLevel ?? null }
 }
 
 export interface ApiQuestion {

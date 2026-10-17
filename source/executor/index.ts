@@ -82,10 +82,12 @@ export type { GitExcludeFilesystem, GitExcludeResult } from './git-exclude.js'
 
 export { DEFAULT_EFFORT, effortDirective } from './effort.js'
 
+export { DEFAULT_INVOLVEMENT, involvementDirective } from './involvement.js'
+
 export { DEFAULT_LOG_LEVEL, applyLogLevel, isLogLevel } from './log-level.js'
 export type { LogLevel } from './log-level.js'
 
-export { isEffortLevel, isProjectSettings, isTerminalRunStatus, validateDeploymentFileConfig, validateDeploymentRoleReferences } from './validation.js'
+export { isEffortLevel, isInvolvementLevel, isProjectSettings, isTerminalRunStatus, validateDeploymentFileConfig, validateDeploymentRoleReferences } from './validation.js'
 
 export { createToolHandlers } from './tools.js'
 export type { NativeToolsConfig } from './tools.js'
@@ -154,4 +156,4 @@ export type {
 	WriteTaskQueue,
 } from './persistence.js'
 
-export type { DeploymentConfig, DeploymentFileConfig, LoggingConfig, ModelConfig, ResolvedModelConfig, RunContinuation, RunOptions, RunMeta, ResultCard, EffortLevel } from './types.js'
+export type { DeploymentConfig, DeploymentFileConfig, LoggingConfig, ModelConfig, ResolvedModelConfig, RunContinuation, RunOptions, RunMeta, ResultCard, EffortLevel, InvolvementLevel } from './types.js'
