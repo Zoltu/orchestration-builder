@@ -349,6 +349,16 @@ export function validateGuildConfig(value: unknown): asserts value is GuildConfi
 	}
 	ensure(isStringArray, value.tools, 'tools', 'expected an array of strings')
 	if (value.visualization !== undefined) validateVisualizationConfig(value.visualization, 'visualization')
+	if (value.visualization?.roleOrder !== undefined) {
+		const roleNames = new Set(Object.keys(value.roles))
+		for (let index = 0; index < value.visualization.roleOrder.length; index++) {
+			const name = value.visualization.roleOrder[index]
+			if (name === undefined) continue
+			if (!roleNames.has(name)) {
+				throw new ValidationError(`visualization.roleOrder[${index}]`, `references unknown role "${name}" (not declared in guild.json "roles")`)
+			}
+		}
+	}
 }
 
 const deploymentKeys: readonly string[] = ['model', 'executor', 'contextPolicy', 'logging']
@@ -394,6 +404,18 @@ function validateVisualizationConfig(value: unknown, path: string): asserts valu
 	}
 	if (value.workingTemplates !== undefined && !isRecordOfHumanFacingText(value.workingTemplates)) {
 		throw new ValidationError(`${path}.workingTemplates`, 'expected an object of HumanFacingText entries keyed by participant kind')
+	}
+	if (value.roleOrder !== undefined) {
+		if (!Array.isArray(value.roleOrder) || !value.roleOrder.every(isNonEmptyString)) {
+			throw new ValidationError(`${path}.roleOrder`, 'expected an array of non-empty role names')
+		}
+		const seenNames = new Set<string>()
+		for (let index = 0; index < value.roleOrder.length; index++) {
+			const name = value.roleOrder[index]
+			if (name === undefined) continue
+			if (seenNames.has(name)) throw new ValidationError(`${path}.roleOrder[${index}]`, `duplicate role name "${name}"`)
+			seenNames.add(name)
+		}
 	}
 }
 

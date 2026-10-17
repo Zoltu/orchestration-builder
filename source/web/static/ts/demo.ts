@@ -3,7 +3,7 @@
 // Each frame is the output of the real `deriveInteractionModel` adapter run server-side over the first `N` events of a fixture event stream (see `GET /api/demo/flow/:scenario/:frame`), fetched here over HTTP. The harness therefore exercises the identical `LogEvent → InteractionModel` path the product polls against a live run, so a behavior the demo shows is the behavior the product renders — the harness is a faithful poll simulator, not a hand-curated showcase. `scenarios.js` stays as the in-memory renderer test bed (its model-frame fixtures are consumed by `flow-view.test.ts` / `sequence-diagram.test.ts`); this harness consumes adapter output instead, so the adapter is exercised in the browser too.
 // The harness imports only its sibling static modules; it touches nothing in the product client (app.js).
 import { activeOperation, activeParticipant, activeStack, callChainOf, fateOf, isPaused, isTerminalStatus, observesOf, rolesOnlyModel, rolesOnlyParticipants, stacksOf } from './interaction-model.js'
-import { createLabelResolver, isLabelTier } from './labels.js'
+import { createLabelResolver, isLabelTier, isRoleOrder } from './labels.js'
 import { agentRoleNames, createRoleAccentResolver } from './role-accents.js'
 import { activeAskHumanCall, createColumnTracker, deriveCostStrip, deriveLifecycle, deriveNowCaption, renderFlowView } from './flow-view.js'
 import { renderSequenceView, sequenceActiveRowScrollTop } from './sequence-diagram.js'
@@ -73,6 +73,9 @@ let tier: LabelTier = 'detailed'
 
 // The per-role accent resolver is built once the scenario manifest list lands, over the union of every manifest's participants — the demo's full guild inventory, the analog of the app's /api/config role list — so a role's accent is stable across scenarios and frames. Until then it accents nothing.
 let roleAccents: RoleAccentResolver = createRoleAccentResolver([])
+
+// The demo harness sorts both views by the same role order the product client reads from `/api/config`; it starts empty (alphabetical fallback) and is filled once the config lands.
+let demoRoleOrder: readonly string[] = []
 
 // Frames themselves are not held locally — each is the adapter's output for an event-prefix, fetched on demand from /api/demo/flow/:scenario/:frame so the harness always renders adapter-derived models.
 let scenarios: DemoScenarioManifest[] = []
@@ -598,10 +601,10 @@ function renderFlowViewSvg(): Vnode | null {
 	const frame = resultAcknowledged ? acknowledgeFrame(baseFrame) : baseFrame
 	// On acknowledge, diff against the un-acknowledged frame so the returner's departure animates rather than the whole graph re-entering; otherwise diff against the last rendered frame so enter/depart animates across consecutive fetched frames.
 	const diffBase = resultAcknowledged ? baseFrame : previousFrame
-	const lifecycle = diffBase !== null ? deriveLifecycle(diffBase, frame) : undefined
+	const lifecycle = diffBase !== null ? deriveLifecycle(diffBase, frame, demoRoleOrder) : undefined
 	const cta = { onclick: openResultModal }
 	const question = { onclick: openQuestionModal }
-	return renderFlowView(domH, frame, labels, tier, roleAccents, lifecycle, cta, question, flowColumnTracker)
+	return renderFlowView(domH, frame, labels, tier, roleAccents, demoRoleOrder, lifecycle, cta, question, flowColumnTracker)
 }
 
 function renderSequenceViewSvg(): Vnode | null {
@@ -611,7 +614,7 @@ function renderSequenceViewSvg(): Vnode | null {
 	// The sequence view lays out a column per guild role plus the special human/tools columns from the first frame; the manifest carries the scenario's full participant set (every participant the run ever produces) so columns appear from frame 0 without peeking at a future frame. The roles-only toggle filters both the frame and the static set through the same shared helpers the product client consumes, so the tools column collapses with the tool rows.
 	const frame = rolesOnlyToggle.checked ? rolesOnlyModel(currentFrame) : currentFrame
 	const guildParticipants = rolesOnlyToggle.checked ? rolesOnlyParticipants(manifest.participants) : manifest.participants
-	return renderSequenceView(domH, frame, labels, tier, roleAccents, guildParticipants)
+	return renderSequenceView(domH, frame, labels, tier, roleAccents, demoRoleOrder, guildParticipants)
 }
 
 // Derives the terminal-result descriptor the modal renders. The demo frames carry no result/error text (the InteractionModel has no result field), so the summary is a fixed honest line keyed off the current frame's terminal status and the error block surfaces only on an error status — enough for the modal to read as a real result affordance without inventing scenario-specific prose. The current frame is terminal whenever the modal opens (openResultModal gates on isTerminalStatus), so its status is the run's terminal status.
@@ -940,6 +943,9 @@ Promise.all([
 	.then(([config, manifestList]) => {
 		if (!isScenarioManifestList(manifestList)) throw new Error('demo scenario list is not an array of valid scenario manifests')
 		labels = createLabelResolver(config)
+		const visualization = isObject(config) ? config['visualization'] : undefined
+		const roleOrder = isObject(visualization) ? visualization['roleOrder'] : undefined
+		if (isRoleOrder(roleOrder)) demoRoleOrder = roleOrder
 		scenarios = manifestList
 		roleAccents = createRoleAccentResolver(agentRoleNames(manifestList.flatMap((manifest) => manifest.participants)))
 		for (const [index, manifest] of scenarios.entries()) {

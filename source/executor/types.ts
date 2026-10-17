@@ -217,6 +217,8 @@ export interface VisualizationConfig {
 	operationTemplates: Record<OperationKind, Record<string, HumanFacingText>>
 	genericOperationTemplates: Record<OperationKind, HumanFacingText>
 	workingTemplates?: Record<string, HumanFacingText>
+	// The guild-declared display order for agent roles (docs/visualization.md "Participant ordering"). The executor never hard-codes role names: the views sort role participants by their index here, roles absent from the list sorting after every listed role by name. Names must be declared roles; validateGuildConfig cross-checks that.
+	roleOrder?: string[]
 }
 
 export interface ResultCard {

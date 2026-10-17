@@ -18,6 +18,7 @@ export interface StageMemoInputs {
 	labels: LabelResolver
 	tier: LabelTier
 	roleAccents: RoleAccentResolver
+	roleOrder: readonly string[]
 	guildParticipants: Participant[]
 	viewMode: StageViewMode
 	rolesOnly: boolean
@@ -31,6 +32,7 @@ export function buildStageMemoInputs(source: StageMemoInputs): StageMemoInputs {
 		labels: source.labels,
 		tier: source.tier,
 		roleAccents: source.roleAccents,
+		roleOrder: source.roleOrder,
 		guildParticipants: source.guildParticipants,
 		viewMode: source.viewMode,
 		rolesOnly: source.rolesOnly,
@@ -44,6 +46,7 @@ export function stageInputsEqual(a: StageMemoInputs, b: StageMemoInputs): boolea
 		&& a.labels === b.labels
 		&& a.tier === b.tier
 		&& a.roleAccents === b.roleAccents
+		&& a.roleOrder === b.roleOrder
 		&& a.guildParticipants === b.guildParticipants
 		&& a.viewMode === b.viewMode
 		&& a.rolesOnly === b.rolesOnly

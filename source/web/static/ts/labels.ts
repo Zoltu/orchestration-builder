@@ -46,6 +46,7 @@ export interface LabelConfig {
 		operationTemplates: Record<'call' | 'return' | 'observe' | 'terminate', Record<string, TieredLabel>>
 		genericOperationTemplates: Record<'call' | 'return' | 'observe' | 'terminate', TieredLabel>
 		workingTemplates?: Record<string, TieredLabel>
+		roleOrder?: string[]
 	}
 }
 
@@ -54,6 +55,18 @@ export interface LabelResolver {
 	resolveOperationLabel(operation: Operation, participantsById: ReadonlyMap<string, Participant>, tier: LabelTier, seed: number): string
 	resolveWorkingLabel(participant: Participant, tier: LabelTier, seed: number): string | null
 	hashString(value: string): number
+}
+
+// Narrows a config's visualization.roleOrder to a string array: a present list must be an array of non-empty, duplicate-free strings. Shared by the app's config ingress guard and the demo harness's config parse so both accept exactly the same role orders.
+export function isRoleOrder(value: unknown): value is string[] {
+	if (!Array.isArray(value)) return false
+	const seenNames = new Set<string>()
+	for (const name of value) {
+		if (typeof name !== 'string' || name === '') return false
+		if (seenNames.has(name)) return false
+		seenNames.add(name)
+	}
+	return true
 }
 
 // Ordered from most-precise to least-precise so the fallback walk goes toward less-precise tiers: a missing 'detailed' falls to 'friendly', a missing 'friendly' falls to 'whimsical', and a missing 'whimsical' has nothing less-precise to fall to (the caller supplies an ultimate fallback).

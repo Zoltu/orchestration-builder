@@ -1,6 +1,6 @@
 // Sequence view renderer over an InteractionModel.
 //
-// The view is a temporal layout: one column per role (grouped from the model's participants — human always first, then interrupt on first use, then roles in first-appearance order, then a single shared "tools" column that every tool routes to), with each operation drawn as a horizontal message on a vertical time axis whose row index is the operation's position in the timeline. A call/return between two distinct columns is a straight arrow landing on a terminal node on the destination's lifeline; a same-role cross-instance call (source and destination resolve to the same column) is the LoopbackEdge U-turn from svg-primitives so the out/turn/back legs read on a new line rather than as a zero-length arrow. observe renders as a static dashed cross-column line with no arrowhead and no terminal node — it is a reference, never an in-flight call, so it never activates a lifeline. terminate renders the same way as a static red dashed line, plus a single orange dashed marker on the target's lifeline, so a destructive revert likewise never activates the target.
+// The view is a temporal layout: one column per role (grouped from the model's participants — human always first, then interrupt on first use, then roles in the guild-declared order, then a single shared "tools" column that every tool routes to), with each operation drawn as a horizontal message on a vertical time axis whose row index is the operation's position in the timeline. A call/return between two distinct columns is a straight arrow landing on a terminal node on the destination's lifeline; a same-role cross-instance call (source and destination resolve to the same column) is the LoopbackEdge U-turn from svg-primitives so the out/turn/back legs read on a new line rather than as a zero-length arrow. observe renders as a static dashed cross-column line with no arrowhead and no terminal node — it is a reference, never an in-flight call, so it never activates a lifeline. terminate renders the same way as a static red dashed line, plus a single orange dashed marker on the target's lifeline, so a destructive revert likewise never activates the target.
 //
 // Each operation is exactly one row, in chronological order, across every scenario — nothing is dropped or phantom. The model already encodes each operation's lifecycle and outcome, so the static layout reads them directly: a return carries a source node on the callee's lifeline with its outcome color (success/error/terminated) — mirroring the flow view, which colors the returning (callee) node — and a terminated return's source node and incoming arrow carry the distinct warn-toned treatment so a leg abandoned mid-rewind reads as neither success nor failure. The active participant and the in-flight line are read off the model by the animation layer; this module renders the settled structure and carries `data-operation` on every message group so the inspector can resolve an operation's details markdown from the model without the view re-deriving it. Terminal nodes on the shared tools column carry the same violet kind tint the flow view stamps on its tool nodes (`seq-node--tool`, reading the same `--svg-tool-node-*` tokens), so the tool-vs-agent color association reads identically in both views; the status classes still win in the stylesheet.
 //
@@ -12,6 +12,7 @@ import { activeOperation, activeStack } from './interaction-model.js'
 import type { InteractionModel, Operation, Participant, ParticipantKind } from './interaction-model.js'
 import type { LabelResolver, LabelTier } from './labels.js'
 import type { RoleAccentResolver } from './role-accents.js'
+import { createParticipantComparator } from './participant-order.js'
 import { ATTR_OPERATION, ATTR_ROLE } from './inspector.js'
 import { LoopbackEdge } from './svg-primitives.js'
 import type { H, Vnode } from '../vendor/hyperapp.js'
@@ -57,16 +58,16 @@ interface SequenceColumn {
 	kind: ParticipantKind
 }
 
-// Derives the column set: human always first, then interrupt (only once an Interrupt participant has appeared in the current frame — the first-use rule), then every role the guild defines in definition order, then a single shared "tools" column. A role invoked multiple times (instance-per-invocation retries) collapses to a single column keyed by role, which is what makes a same-role cross-instance call resolve to one column and render as a loopback. Every tool routes to the one "tools" column so the role chain stays focal and the tool inventory does not fan out across the diagram. `guildParticipants` (optional) supplies the full participant set the guild defines so every role column and the tools column appear from frame 0 rather than growing as participants first appear; when absent the column set falls back to the roles and tools present in the current frame.
-function buildColumns(model: InteractionModel, guildParticipants: Participant[] | undefined): SequenceColumn[] {
+// Derives the column set: human always first, then interrupt (only once an Interrupt participant has appeared in the current frame — the first-use rule), then every role the guild defines, then a single shared "tools" column. A role invoked multiple times (instance-per-invocation retries) collapses to a single column keyed by role, which is what makes a same-role cross-instance call resolve to one column and render as a loopback. Every tool routes to the one "tools" column so the role chain stays focal and the tool inventory does not fan out across the diagram. `guildParticipants` (optional) supplies the full participant set the guild defines so every role column and the tools column appear from frame 0 rather than growing as participants first appear; when absent the column set falls back to the roles and tools present in the current frame. `roleOrder` is the guild-declared agent-role display order (guild.json visualization.roleOrder): the deduped role columns are sorted into it (participant-order.ts) so the sequence view and the flow view's top bar share one order; human, interrupt, and the shared tools column keep their fixed positions around the sorted roles.
+function buildColumns(model: InteractionModel, guildParticipants: Participant[] | undefined, roleOrder: readonly string[]): SequenceColumn[] {
 	const source = guildParticipants ?? model.participants
-	const roleColumns: string[] = []
+	const roleColumns: SequenceColumn[] = []
 	const seenRoles = new Set<string>()
 	let guildHasTool = false
 	for (const participant of source) {
 		if (participant.kind === 'role' && !seenRoles.has(participant.role)) {
 			seenRoles.add(participant.role)
-			roleColumns.push(participant.role)
+			roleColumns.push({ role: participant.role, kind: 'role' })
 		} else if (participant.kind === 'tool') {
 			guildHasTool = true
 		}
@@ -78,9 +79,10 @@ function buildColumns(model: InteractionModel, guildParticipants: Participant[] 
 			break
 		}
 	}
+	roleColumns.sort(createParticipantComparator(roleOrder))
 	const columns: SequenceColumn[] = [{ role: 'human', kind: 'human' }]
 	if (hasInterrupt) columns.push({ role: 'interrupt', kind: 'interrupt' })
-	for (const role of roleColumns) columns.push({ role, kind: 'role' })
+	for (const column of roleColumns) columns.push(column)
 	if (guildHasTool) columns.push({ role: 'tools', kind: 'tool' })
 	return columns
 }
@@ -200,9 +202,9 @@ function loopbackHitArea(h: H, columnX: number, rowY: number): Vnode {
 	return h('rect', { class: 'seq-hit-area', x: columnX, y: rowY - LOOPBACK_HEIGHT - ROW_HEIGHT / 2, width: 60 + TERMINAL_NODE_WIDTH, height: LOOPBACK_HEIGHT + ROW_HEIGHT }, [])
 }
 
-// Renders the sequence view as a single SVG sized to its laid-out content. Columns render as headers plus dashed vertical lifelines spanning the message area; operations render top-to-bottom by index, each as a horizontal arrow (or a loopback U-turn for a same-role cross-instance call, or a static dashed line for observe) landing on a terminal node on the destination's lifeline. The active operation's line carries the flowing/returning/error animation class and its destination node pulses; a return additionally carries a source node on the callee's lifeline with its outcome color. Every message group carries `data-operation` so the inspector resolves the operation's details markdown and label from the model without the view re-deriving or embedding them. `roleAccents` is the per-role accent resolver the hosts build from the guild's full role list (createRoleAccentResolver) — agent columns' terminal nodes take their role's accent, and a resolver that returns null for everything renders exactly the neutral look. `guildParticipants` (optional) supplies the full participant set the guild defines so every role column and the tools column appear from frame 0 rather than growing as participants first appear; when absent the column set falls back to the participants present in the current frame.
-export function renderSequenceView(h: H, model: InteractionModel, labels: LabelResolver, tier: LabelTier, roleAccents: RoleAccentResolver, guildParticipants?: Participant[]): Vnode {
-	const columns = buildColumns(model, guildParticipants)
+// Renders the sequence view as a single SVG sized to its laid-out content. Columns render as headers plus dashed vertical lifelines spanning the message area; operations render top-to-bottom by index, each as a horizontal arrow (or a loopback U-turn for a same-role cross-instance call, or a static dashed line for observe) landing on a terminal node on the destination's lifeline. The active operation's line carries the flowing/returning/error animation class and its destination node pulses; a return additionally carries a source node on the callee's lifeline with its outcome color. Every message group carries `data-operation` so the inspector resolves the operation's details markdown and label from the model without the view re-deriving or embedding them. `roleAccents` is the per-role accent resolver the hosts build from the guild's full role list (createRoleAccentResolver) — agent columns' terminal nodes take their role's accent, and a resolver that returns null for everything renders exactly the neutral look. `roleOrder` is the guild-declared agent-role display order (guild.json visualization.roleOrder), applied to the role columns by buildColumns so the view and the flow view's top bar share one order. `guildParticipants` (optional) supplies the full participant set the guild defines so every role column and the tools column appear from frame 0 rather than growing as participants first appear; when absent the column set falls back to the participants present in the current frame.
+export function renderSequenceView(h: H, model: InteractionModel, labels: LabelResolver, tier: LabelTier, roleAccents: RoleAccentResolver, roleOrder: readonly string[], guildParticipants?: Participant[]): Vnode {
+	const columns = buildColumns(model, guildParticipants, roleOrder)
 	const columnIndexByRole = new Map<string, number>()
 	columns.forEach((column, index) => columnIndexByRole.set(column.role, index))
 

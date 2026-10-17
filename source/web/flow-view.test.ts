@@ -77,8 +77,8 @@ function callOperation(id: string, stack: string, source: string, destination: s
 }
 
 // A fresh column tracker per render keeps every test order-independent: the high-water mark is caller-held state, so tests construct their own rather than sharing a module-level one. The default role-accent resolver accents nothing, so every existing assertion renders against today's neutral look; accent-specific tests opt into a real resolver.
-function render(model: InteractionModel, tier: LabelTier = 'detailed', roleAccents: (role: string) => string | null = nullRoleAccents, lifecycle?: ReturnType<typeof deriveLifecycle>): Vnode {
-	return renderFlowView(fakeH, model, labelsModule, tier, roleAccents, lifecycle, undefined, undefined, createColumnTracker())
+function render(model: InteractionModel, tier: LabelTier = 'detailed', roleAccents: (role: string) => string | null = nullRoleAccents, lifecycle?: ReturnType<typeof deriveLifecycle>, roleOrder: readonly string[] = []): Vnode {
+	return renderFlowView(fakeH, model, labelsModule, tier, roleAccents, roleOrder, lifecycle, undefined, undefined, createColumnTracker())
 }
 
 describe('renderFlowView — row projection', () => {
@@ -224,6 +224,72 @@ describe('renderFlowView — top-bar aggregation', () => {
 		const roles = groupsWithClass(view, 'flow-small-node').map((slot) => propString(slot.props, 'data-role'))
 		expect(roles).toEqual(expect.arrayContaining(['orchestrator', 'planner', 'coder', 'critic', 'read_file']))
 		expect(roles).not.toContain('human')
+	})
+})
+
+describe('renderFlowView — top-bar ordering', () => {
+	// Participants first-seen in a scrambled order (tools before roles, the interrupt in the middle) so the strip's order proves the comparator, not the model's participant order.
+	function orderModel(): InteractionModel {
+		return {
+			participants: [
+				participant('you', 'human', 'human'),
+				participant('readFile', 'read_file', 'tool'),
+				participant('coder', 'coder', 'role'),
+				participant('int', 'interrupt', 'interrupt'),
+				participant('orchestrator', 'orchestrator', 'role'),
+				participant('globFiles', 'glob_files', 'tool'),
+			],
+			operations: [],
+			status: 'running',
+		}
+	}
+
+	function topBarRoles(view: Vnode): string[] {
+		return groupsWithClass(view, 'flow-small-node').map((slot) => propString(slot.props, 'data-role') ?? '')
+	}
+
+	test('interrupt slots sort first, then roles, then tools', () => {
+		const view = render(orderModel())
+		expect(topBarRoles(view)).toEqual(['interrupt', 'coder', 'orchestrator', 'glob_files', 'read_file'])
+	})
+
+	test('roles sort by the guild-declared roleOrder', () => {
+		const view = render(orderModel(), 'detailed', nullRoleAccents, undefined, ['orchestrator', 'coder'])
+		expect(topBarRoles(view)).toEqual(['interrupt', 'orchestrator', 'coder', 'glob_files', 'read_file'])
+	})
+
+	test('tools sort alphabetically by name', () => {
+		// glob_files precedes read_file alphabetically even though read_file appears first in the model.
+		const view = render(orderModel())
+		const tools = topBarRoles(view).filter((role) => role === 'glob_files' || role === 'read_file')
+		expect(tools).toEqual(['glob_files', 'read_file'])
+	})
+
+	test('a departing role lands on its sorted slot index, matching the rendered strip', () => {
+		// Participants are listed coder-before-orchestrator, so first-seen order (interrupt, coder, orchestrator) differs from the roleOrder-sorted strip (interrupt, orchestrator, coder). coder departs for the slot the sorted strip paints (index 2), not its first-seen index 1, so the assertion pins that the departure index and the rendered positions agree.
+		const previous: InteractionModel = {
+			participants: [
+				participant('you', 'human', 'human'),
+				participant('int', 'interrupt', 'interrupt'),
+				participant('coder', 'coder', 'role'),
+				participant('orchestrator', 'orchestrator', 'role'),
+			],
+			operations: [callOperation('op1', 'root', 'orchestrator', 'coder')],
+			status: 'running',
+		}
+		const current: InteractionModel = {
+			participants: [
+				participant('you', 'human', 'human'),
+				participant('int', 'interrupt', 'interrupt'),
+				participant('coder', 'coder', 'role'),
+				participant('orchestrator', 'orchestrator', 'role'),
+			],
+			operations: [],
+			status: 'running',
+		}
+		const lifecycle = deriveLifecycle(previous, current, ['orchestrator', 'coder'])
+		const departed = defined(lifecycle.departing.find((entry) => entry.participantId === 'coder'), 'departed coder')
+		expect(departed.slotIndex).toBe(2)
 	})
 })
 
@@ -490,7 +556,7 @@ describe('renderFlowView — active participant highlight', () => {
 describe('deriveLifecycle — frame-diff node lifecycle', () => {
 	test('a null previous model animates nothing (first frame of a scenario)', () => {
 		const current = scenarioFrame('delegation-chain', 0)
-		const lifecycle = deriveLifecycle(null, current)
+		const lifecycle = deriveLifecycle(null, current, [])
 		expect(lifecycle.enteringIds.size).toBe(0)
 		expect(lifecycle.departing.length).toBe(0)
 	})
@@ -499,7 +565,7 @@ describe('deriveLifecycle — frame-diff node lifecycle', () => {
 		// retry-with-fresh-instance op3 transit → op3 working: coder-1's return settles, so the returner departs for the existing 'coder' top-bar slot (merged). Under the single invariant the returner is present only while its return is in_flight (transit), so the departure lands on the settling transition rather than on the next call; no participant enters on a settling transition. coder-2 enters later on op4's transit, covered by the row-projection test.
 		const previous = scenarioFrame('retry-with-fresh-instance', 4)
 		const current = scenarioFrame('retry-with-fresh-instance', 5)
-		const lifecycle = deriveLifecycle(previous, current)
+		const lifecycle = deriveLifecycle(previous, current, [])
 		expect(lifecycle.enteringIds.size).toBe(0)
 		expect(lifecycle.enteringIds.has('coder-2')).toBe(false)
 		expect(lifecycle.enteringIds.has('coder-1')).toBe(false)
@@ -509,8 +575,8 @@ describe('deriveLifecycle — frame-diff node lifecycle', () => {
 		// coder-1 lingered one column past the open chain's innermost node while its return was in transit, so its previous column is the chain length plus one (chain length 1 → column 2).
 		expect(departed.previousColumn).toBe(2)
 		expect(departed.merged).toBe(true)
-		// The 'coder' slot is the second slot in first-appearance order (orchestrator, coder); the human is the eternal root and never occupies a top-bar slot.
-		expect(departed.slotIndex).toBe(1)
+		// The 'coder' slot is the first in the default (empty roleOrder) alphabetical order (coder, orchestrator); the human is the eternal root and never occupies a top-bar slot.
+		expect(departed.slotIndex).toBe(0)
 	})
 
 	test('settling the terminal return (the See Result acknowledgment) departs the lingering returner; the human root never departs', () => {
@@ -524,7 +590,7 @@ describe('deriveLifecycle — frame-diff node lifecycle', () => {
 					: operation,
 			),
 		}
-		const lifecycle = deriveLifecycle(previous, current)
+		const lifecycle = deriveLifecycle(previous, current, [])
 		expect(lifecycle.enteringIds.size).toBe(0)
 		const departedIds = lifecycle.departing.map((entry) => entry.participantId).sort()
 		expect(departedIds).toEqual(['coder'])
@@ -543,7 +609,7 @@ describe('deriveLifecycle — frame-diff node lifecycle', () => {
 		// delegation-chain op1 working → op2 transit: planner enters; the rendered current frame wraps planner's node in the entering host so it scales/fades in.
 		const previous = scenarioFrame('delegation-chain', 1)
 		const current = scenarioFrame('delegation-chain', 2)
-		const lifecycle = deriveLifecycle(previous, current)
+		const lifecycle = deriveLifecycle(previous, current, [])
 		expect(lifecycle.enteringIds.has('planner')).toBe(true)
 		const view = render(current, 'detailed', nullRoleAccents, lifecycle)
 		const flowNodes = allByTag(view, 'g').filter((group) => (propString(group.props, 'class') ?? '').split(' ').includes('flow-node--entering-host'))
@@ -891,7 +957,7 @@ describe('renderFlowView — agent vs tool node distinction', () => {
 		// Settling the tool's return departs readFile for its slot; the overlay's traveling node must stay visually a tool.
 		const previous = mixedModel(true)
 		const current = mixedModel(false)
-		const lifecycle = deriveLifecycle(previous, current)
+		const lifecycle = deriveLifecycle(previous, current, [])
 		// The tool departs for its slot; the top bar already carried it (participants populate the strip regardless of rows), so the merge variant applies.
 		const departed = defined(lifecycle.departing.find((entry) => entry.participantId === 'readFile'), 'departed readFile')
 		expect(departed.merged).toBe(true)
@@ -1109,7 +1175,7 @@ describe('renderFlowView — per-role accents', () => {
 					: operation,
 			),
 		}
-		const lifecycle = deriveLifecycle(previous, current)
+		const lifecycle = deriveLifecycle(previous, current, [])
 		const view = render(current, 'detailed', accents, lifecycle)
 		const coderOverlay = defined(groupsWithClass(view, 'flow-node--departing').find((group) => propString(group.props, 'data-participant') === 'coder'), 'coderOverlay')
 		expect((propString(coderOverlay.props, 'class') ?? '').split(' ').includes('flow-node--accented')).toBe(true)

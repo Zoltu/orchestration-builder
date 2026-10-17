@@ -1446,10 +1446,10 @@ li:last-child {
 	stroke: var(--svg-tool-node-border);
 }
 
-/* Agent nodes with a per-role accent (the flow-node--accented modifier the flow view stamps from the guild's role list, the hue riding the --node-accent custom property set inline on the row host) tint the neutral node with their role's hue instead of the tool violet. The derivation needs no per-theme accent values: color-mix blends the one inline hue against the per-theme --svg-node-fill/--svg-node-border tokens, so each theme block's own values keep the wash and border calibrated. The mix percentages keep the accent a comparably low-weight identity tint as the tool wash, never a state. Declared BEFORE the status rules so an outcome stroke (success/error) or the active pulse still wins over the accent — identity is accent, status is state, the same ordering discipline as the tool tint above. */
+/* Agent nodes with a per-role accent (the flow-node--accented modifier the flow view stamps from the guild's role list, the color riding the --node-accent custom property set inline on the row host) tint the neutral node with their role's color instead of the tool violet. The derivation needs no per-theme accent values: color-mix blends the one inline color against the per-theme --svg-node-fill/--svg-node-border tokens, so each theme block's own values keep the wash and border calibrated. The mix percentages hold the accent as a clear identity tint — strong enough that distinct role colors separate at a glance, still short of a status fill. Declared BEFORE the status rules so an outcome stroke (success/error) or the active pulse still wins over the accent — identity is accent, status is state, the same ordering discipline as the tool tint above. */
 .flow-node--accented .graph-node-box {
-	fill: color-mix(in oklch, var(--node-accent) 14%, var(--svg-node-fill));
-	stroke: color-mix(in oklch, var(--node-accent) 60%, var(--svg-node-border));
+	fill: color-mix(in oklch, var(--node-accent) 24%, var(--svg-node-fill));
+	stroke: color-mix(in oklch, var(--node-accent) 70%, var(--svg-node-border));
 }
 
 /* Active/success/error states re-stroke the box so the node's status reads at a glance; the active state also pulses so the eye lands on the currently-running role. */
@@ -1612,15 +1612,15 @@ li:last-child {
 	font-variant-numeric: tabular-nums;
 }
 
-/* A tool type's slot carries the same violet as the main area's tool nodes (the flow-small-node--tool modifier, stamped from the slot's participant kind), so the agent-vs-tool distinction reads in the history strip too. An agent role's slot instead carries the role's accent (the flow-small-node--accented modifier, the hue riding the inline --node-accent custom property), derived with the same color-mix-against-the-per-theme-tokens rule as the main area's accented nodes so the strip's slots are identifiable at a glance. */
+/* A tool type's slot carries the same violet as the main area's tool nodes (the flow-small-node--tool modifier, stamped from the slot's participant kind), so the agent-vs-tool distinction reads in the history strip too. An agent role's slot instead carries the role's accent (the flow-small-node--accented modifier, the color riding the inline --node-accent custom property), derived with the same color-mix-against-the-per-theme-tokens rule as the main area's accented nodes so the strip's slots are identifiable at a glance. */
 .flow-small-node--tool .flow-small-node-box {
 	fill: var(--svg-tool-node-fill);
 	stroke: var(--svg-tool-node-border);
 }
 
 .flow-small-node--accented .flow-small-node-box {
-	fill: color-mix(in oklch, var(--node-accent) 14%, var(--svg-node-fill));
-	stroke: color-mix(in oklch, var(--node-accent) 60%, var(--svg-node-border));
+	fill: color-mix(in oklch, var(--node-accent) 24%, var(--svg-node-fill));
+	stroke: color-mix(in oklch, var(--node-accent) 70%, var(--svg-node-border));
 }
 
 /* --- Flow animation: node lifecycle + edge flow ----------------------------- */
@@ -2922,15 +2922,15 @@ li:last-child {
 	stroke-width: 1;
 }
 
-/* Tool columns' terminal nodes (the seq-node--tool modifier the view stamps from the participant kind — every tool routes to the shared tools column) read apart from agent columns, mirroring the flow view's graph-node--tool and drawing the same --svg-tool-node-* tokens so both views' tints stay one calibrated violet per theme block. An agent column's terminal node instead carries the role's accent (the seq-node--accented modifier, the hue riding the inline --node-accent custom property), derived with the same color-mix-against-the-per-theme-tokens rule as the flow view's accented nodes. Declared BEFORE the status rules so an outcome stroke (success/error/terminated) or the active pulse still wins over either tint — identity is accent, status is state. */
+/* Tool columns' terminal nodes (the seq-node--tool modifier the view stamps from the participant kind — every tool routes to the shared tools column) read apart from agent columns, mirroring the flow view's graph-node--tool and drawing the same --svg-tool-node-* tokens so both views' tints stay one calibrated violet per theme block. An agent column's terminal node instead carries the role's accent (the seq-node--accented modifier, the color riding the inline --node-accent custom property), derived with the same color-mix-against-the-per-theme-tokens rule as the flow view's accented nodes. Declared BEFORE the status rules so an outcome stroke (success/error/terminated) or the active pulse still wins over either tint — identity is accent, status is state. */
 .seq-node--tool .seq-node-box {
 	fill: var(--svg-tool-node-fill);
 	stroke: var(--svg-tool-node-border);
 }
 
 .seq-node--accented .seq-node-box {
-	fill: color-mix(in oklch, var(--node-accent) 14%, var(--svg-node-fill));
-	stroke: color-mix(in oklch, var(--node-accent) 60%, var(--svg-node-border));
+	fill: color-mix(in oklch, var(--node-accent) 24%, var(--svg-node-fill));
+	stroke: color-mix(in oklch, var(--node-accent) 70%, var(--svg-node-border));
 }
 
 .seq-node--active .seq-node-box {

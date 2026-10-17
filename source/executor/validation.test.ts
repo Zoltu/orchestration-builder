@@ -302,6 +302,53 @@ describe('validateGuildConfig concepts', () => {
 	})
 })
 
+describe('validateGuildConfig roleOrder', () => {
+	// A minimal valid visualization section so the roleOrder shape and cross-check are exercised without a full seed guild.
+	const validVisualization = {
+		pseudoRoleLabels: {},
+		operationTemplates: { call: {}, return: {}, observe: {}, terminate: {} },
+		genericOperationTemplates: {
+			call: { detailed: ['call'] },
+			return: { detailed: ['return'] },
+			observe: { detailed: ['observe'] },
+			terminate: { detailed: ['terminate'] },
+		},
+	}
+	const baseRoles = {
+		orchestrator: { systemPrompt: 'p', tools: ['finish'] },
+		coder: { systemPrompt: 'p', tools: ['finish'] },
+	}
+	function guild(roleOrder: unknown): unknown {
+		return { ...validGuild, roles: baseRoles, visualization: { ...validVisualization, roleOrder } }
+	}
+	test('a roleOrder naming declared roles passes', () => {
+		expect(() => validateGuildConfig(guild(['orchestrator', 'coder']))).not.toThrow()
+	})
+	test('an absent roleOrder passes', () => {
+		expect(() => validateGuildConfig({ ...validGuild, roles: baseRoles, visualization: validVisualization })).not.toThrow()
+	})
+	test('an empty roleOrder passes', () => {
+		expect(() => validateGuildConfig(guild([]))).not.toThrow()
+	})
+	test('a non-array roleOrder is rejected with the roleOrder path', () => {
+		expect(() => validateGuildConfig(guild('orchestrator'))).toThrow(ValidationError)
+		expect(() => validateGuildConfig(guild('orchestrator'))).toThrow(/visualization\.roleOrder/)
+	})
+	test('a non-string roleOrder element is rejected', () => {
+		expect(() => validateGuildConfig(guild(['orchestrator', 42]))).toThrow(/visualization\.roleOrder/)
+	})
+	test('an empty-string roleOrder element is rejected', () => {
+		expect(() => validateGuildConfig(guild(['orchestrator', '']))).toThrow(/visualization\.roleOrder/)
+	})
+	test('a duplicate roleOrder name is rejected with the element path', () => {
+		expect(() => validateGuildConfig(guild(['coder', 'coder']))).toThrow(/visualization\.roleOrder\[1\].*duplicate/)
+	})
+	test('a roleOrder naming an undeclared role is rejected with the element path', () => {
+		expect(() => validateGuildConfig(guild(['orchestrator', 'ghost']))).toThrow(ValidationError)
+		expect(() => validateGuildConfig(guild(['orchestrator', 'ghost']))).toThrow(/visualization\.roleOrder\[1\].*ghost/)
+	})
+})
+
 describe('validateDeploymentFileConfig throws ValidationError with a path-based message', () => {
 	test('passes on a valid DeploymentFileConfig', () => {
 		expect(() => validateDeploymentFileConfig(validDeployment)).not.toThrow()

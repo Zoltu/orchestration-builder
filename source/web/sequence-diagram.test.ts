@@ -70,13 +70,13 @@ function callOperation(id: string, stack: string, source: string, destination: s
 }
 
 // The default role-accent resolver accents nothing, so every existing assertion renders against today's neutral look; accent-specific tests opt into a real resolver.
-function render(model: InteractionModel, tier: LabelTier = 'detailed', roleAccents: (role: string) => string | null = nullRoleAccents): Vnode {
-	return renderSequenceView(fakeH, model, labelsModule, tier, roleAccents)
+function render(model: InteractionModel, tier: LabelTier = 'detailed', roleAccents: (role: string) => string | null = nullRoleAccents, roleOrder: readonly string[] = []): Vnode {
+	return renderSequenceView(fakeH, model, labelsModule, tier, roleAccents, roleOrder)
 }
 
 // Renders with the demo's static guild participant set so the column-set behavior the demo harness exercises (every guild role column present from frame 0) is asserted against the same data the harness passes.
-function renderWithGuild(model: InteractionModel, tier: LabelTier = 'detailed'): Vnode {
-	return renderSequenceView(fakeH, model, labelsModule, tier, nullRoleAccents, GUILD_PARTICIPANTS)
+function renderWithGuild(model: InteractionModel, tier: LabelTier = 'detailed', roleOrder: readonly string[] = []): Vnode {
+	return renderSequenceView(fakeH, model, labelsModule, tier, nullRoleAccents, roleOrder, GUILD_PARTICIPANTS)
 }
 
 function columnRoles(view: Vnode): string[] {
@@ -128,10 +128,10 @@ describe('renderSequenceView — columns', () => {
 	})
 
 	test('the column set matches the participants roles grouped human → interrupt → roles → tools', () => {
-		// deep-call-tree terminal transit frame: human, then the role chain in first-appearance order, then the single shared "tools" column last (every tool collapses to one lifeline).
+		// deep-call-tree terminal transit frame: human, then the agent roles in alphabetical order (the default empty roleOrder), then the single shared "tools" column last (every tool collapses to one lifeline).
 		const frame = scenarioFrame('deep-call-tree', 18)
 		const view = render(frame)
-		expect(columnRoles(view)).toEqual(['human', 'orchestrator', 'planner', 'coder', 'critic', 'tools'])
+		expect(columnRoles(view)).toEqual(['human', 'coder', 'critic', 'orchestrator', 'planner', 'tools'])
 	})
 
 	test('the canvas is at least 5 columns wide so few-participant frames do not zoom in', () => {
@@ -176,9 +176,15 @@ describe('renderSequenceView — columns', () => {
 	})
 
 	test('the static guild role set renders every guild role column from frame 0 even when no operation touches them', () => {
-		// The guild defines its roles statically, so every guild role column (and the tools column) appears from the very first frame of a run that touches only one role. A column with no messages represents a guild role the run simply did not invoke — not a role that will be called later.
+		// The guild defines its roles statically, so every guild role column (and the tools column) appears from the very first frame of a run that touches only one role. A column with no messages represents a guild role the run simply did not invoke — not a role that will be called later. With the default empty roleOrder the roles sort alphabetically.
 		const view = renderWithGuild(scenarioFrame('single-role-completion', 0))
-		expect(columnRoles(view)).toEqual(['human', 'orchestrator', 'planner', 'coder', 'critic', 'loop_detector', 'tools'])
+		expect(columnRoles(view)).toEqual(['human', 'coder', 'critic', 'loop_detector', 'orchestrator', 'planner', 'tools'])
+	})
+
+	test('a declared roleOrder orders the role columns, with unlisted roles sorting after the listed ones by name', () => {
+		// The static guild set carries orchestrator, planner, coder, critic, loop_detector; the declared order names planner first, then coder, leaving the rest unlisted (they sort after by name). Human stays first and the shared tools column stays last.
+		const view = renderWithGuild(scenarioFrame('single-role-completion', 0), 'detailed', ['planner', 'coder'])
+		expect(columnRoles(view)).toEqual(['human', 'planner', 'coder', 'critic', 'loop_detector', 'orchestrator', 'tools'])
 	})
 })
 
@@ -715,15 +721,15 @@ describe('renderSequenceView — roles-only filter', () => {
 			participant('guild:read_file', 'read_file', 'tool'),
 		]
 		return {
-			full: renderSequenceView(fakeH, model, labelsModule, 'detailed', nullRoleAccents, guild),
-			collapsed: renderSequenceView(fakeH, rolesOnlyModel(model), labelsModule, 'detailed', nullRoleAccents, rolesOnlyParticipants(guild)),
+			full: renderSequenceView(fakeH, model, labelsModule, 'detailed', nullRoleAccents, [], guild),
+			collapsed: renderSequenceView(fakeH, rolesOnlyModel(model), labelsModule, 'detailed', nullRoleAccents, [], rolesOnlyParticipants(guild)),
 		}
 	}
 
 	test('the columns collapse to the human plus the agent roles — no tools or interrupt column', () => {
 		const { full, collapsed } = filtered()
-		expect(columnRoles(full)).toEqual(['human', 'interrupt', 'orchestrator', 'coder', 'tools'])
-		expect(columnRoles(collapsed)).toEqual(['human', 'orchestrator', 'coder'])
+		expect(columnRoles(full)).toEqual(['human', 'interrupt', 'coder', 'orchestrator', 'tools'])
+		expect(columnRoles(collapsed)).toEqual(['human', 'coder', 'orchestrator'])
 	})
 
 	test('tool legs, observes, and interrupt-rooted rows drop; the agent call chain stays', () => {

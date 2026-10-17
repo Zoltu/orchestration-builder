@@ -510,6 +510,29 @@
 		"workingTemplates": {
 			"role": { "detailed": ["role {participantRole} is generating a response (streaming tokens)"], "friendly": ["{participant} is thinking"], "whimsical": ["{participant} is on the case", "{participant} is noodling on it", "{participant} is chewing it over"] },
 			"tool": { "detailed": ["tool {participantRole} is executing"], "friendly": ["{participant} is running"], "whimsical": ["{participant} is on the job", "{participant} is hard at work", "{participant} is grinding away"] }
-		}
+		},
+		"roleOrder": [
+			"orchestrator",
+			"planner",
+			"architecture_lead",
+			"style_lead",
+			"security_lead",
+			"acceptance_lead",
+			"coder",
+			"technical_writer",
+			"analyst",
+			"researcher",
+			"change_summarizer",
+			"architecture_reviewer",
+			"style_reviewer",
+			"security_reviewer",
+			"acceptance_reviewer",
+			"verifier",
+			"style_guide_author",
+			"loop_detector",
+			"context_manager",
+			"inquiry_responder",
+			"recovery"
+		]
 	}
 }

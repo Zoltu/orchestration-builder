@@ -6,7 +6,7 @@ import { createMarkdownRenderer } from './markdown-render.js'
 import { createColumnTracker, deriveCostStrip, deriveLifecycle, deriveNowCaption, renderFlowView } from './flow-view.js'
 import { renderSequenceView } from './sequence-diagram.js'
 import { createScrollFollower } from './scroll-follow.js'
-import { createLabelResolver, isLabelTier, TIER_VALUES } from './labels.js'
+import { createLabelResolver, isLabelTier, isRoleOrder, TIER_VALUES } from './labels.js'
 import { agentRoleNames, createRoleAccentResolver } from './role-accents.js'
 import { buildInfoFromConfig, formatBuildLabel } from './build-info.js'
 import { isTerminalStatus, rolesOnlyModel, rolesOnlyParticipants, secondsBetweenIso, withLiveElapsed } from './interaction-model.js'
@@ -246,8 +246,10 @@ export interface ApplicationState {
 	// The label resolver and guild participant inventory are built once from `/api/config` (GotConfig); null/empty until that single load completes. `build` rides the same load: the image's build identifier for the top bar, and stays null when running from source without a baked build-info.json.
 	labelResolver: LabelResolver | null
 	guildParticipants: Participant[]
-	// The per-role accent resolver (see role-accents.js), built from the same config fetch's full role list so a role's hue is stable for the page load and never shifts as roles appear mid-run; accents nothing until the config lands.
+	// The per-role accent resolver (see role-accents.js), built from the same config fetch's full role list so a role's color is stable for the page load and never shifts as roles appear mid-run; accents nothing until the config lands.
 	roleAccents: RoleAccentResolver
+	// The guild-declared agent-role display order (guild.json visualization.roleOrder), read from the same config fetch; empty until the config lands, in which case the views fall back to alphabetical role order. Both the flow view's top bar and the sequence view's role columns sort by it (participant-order.js).
+	roleOrder: string[]
 	build: BuildInfo | null
 	flowTier: LabelTier
 	flowViewMode: FlowViewMode
@@ -1033,7 +1035,7 @@ function DragEndQueueItem(state: ApplicationState): ApplicationState {
 	return state.draggingItemId === null ? state : { ...state, draggingItemId: null }
 }
 
-// The guild config is fetched exactly once on load and never polled, so this action runs a single time. The body is not retained in state; only the derived values the views need are kept — the label resolver the flow/sequence views localize through, the guild participant inventory the sequence view lays out columns from, the per-role accent resolver built over that same parse's agent roles (so a role's hue is fixed for the page load), and the build identifier the top bar stamps (null when the response carries none, e.g. running from source).
+// The guild config is fetched exactly once on load and never polled, so this action runs a single time. The body is not retained in state; only the derived values the views need are kept — the label resolver the flow/sequence views localize through, the guild participant inventory the sequence view lays out columns from, the per-role accent resolver built over that same parse's agent roles (so a role's color is fixed for the page load), the guild-declared role order the views sort participants by, and the build identifier the top bar stamps (null when the response carries none, e.g. running from source).
 function GotConfig(state: ApplicationState, payload: FetchResultPayload): ActionReturn {
 	const ok = payload.ok
 	const body = payload.body
@@ -1044,16 +1046,22 @@ function GotConfig(state: ApplicationState, payload: FetchResultPayload): Action
 		labelResolver: createLabelResolver(body),
 		guildParticipants: participants,
 		roleAccents: createRoleAccentResolver(agentRoleNames(participants)),
+		roleOrder: body.visualization?.roleOrder ?? [],
 		build: buildInfoFromConfig(body),
 	}
 }
 
-// The config's ingress guard, at the depth createLabelResolver consumes: the three label tables are objects when present, and the resolver itself tolerates their contents.
+// The config's ingress guard, at the depth createLabelResolver consumes: the three label tables are objects when present, and the resolver itself tolerates their contents. The visualization section's roleOrder is display data the views sort by, so it is shape-checked here via the shared isRoleOrder guard (an array of non-empty, duplicate-free strings when present) even though createLabelResolver ignores it; GotConfig then reads it straight off the narrowed type. A malformed roleOrder fails the whole config load, which is deliberate: the server validates the guild, so a bad list here means a broken deployment, not a value to paper over.
 function isLabelConfig(value: unknown): value is LabelConfig {
 	if (!isObject(value)) return false
 	if (value['roles'] !== undefined && !isObject(value['roles'])) return false
 	if (value['tools'] !== undefined && !isObject(value['tools'])) return false
-	if (value['visualization'] !== undefined && !isObject(value['visualization'])) return false
+	if (value['visualization'] !== undefined) {
+		const visualization = value['visualization']
+		if (!isObject(visualization)) return false
+		const roleOrder = visualization['roleOrder']
+		if (roleOrder !== undefined && !isRoleOrder(roleOrder)) return false
+	}
 	return true
 }
 
@@ -2581,18 +2589,18 @@ function SyncInspectorFollower(): NullPayloadEffect {
 // The stage builder. It receives exactly the stable memo inputs and returns the flow or sequence vnode; the module-level memo wraps it so a `now`-only tick reuses the same vnode and hyperapp's `oldVNode === newVNode` short-circuit skips the SVG diff. Live elapsed is hydrated once at build time — the intended tradeoff, where an open call's elapsed freezes between model changes while the cost strip and caption outside the memo keep ticking. It always returns a vnode, so the stage position is never null.
 function buildStageContent(inputs: StageMemoInputs): Vnode {
 	const model = withLiveElapsed(inputs.serverModel, Date.now())
-	const lifecycle = inputs.previousModel !== null ? deriveLifecycle(inputs.previousModel, model) : undefined
+	const lifecycle = inputs.previousModel !== null ? deriveLifecycle(inputs.previousModel, model, inputs.roleOrder) : undefined
 	// A needs_clarification run's question lives on its parked queue item, so its Respond CTA opens that item's answer modal; every other terminal status keeps the result modal. The status rides the memo's serverModel input, so a status change already rebuilds the stage — no new memo input is needed.
 	const cta = { onclick: model.status === 'needs_clarification' ? OpenParkedQuestion : OpenResultModal }
 	const question = { onclick: OpenQuestionModal }
 	// The roles-only toggle filters the sequence render only (model and static guild set alike, so the tools column collapses with the tool rows); the flow view keeps reading the full model — the filter is a lens on this one surface, not a change to the run.
 	const sequenceModel = inputs.rolesOnly === true ? rolesOnlyModel(model) : model
 	const sequenceGuildParticipants = inputs.rolesOnly === true ? rolesOnlyParticipants(inputs.guildParticipants) : inputs.guildParticipants
-	// The sequence view takes the guild's static participant set so every role column appears from the first frame; both views take the per-role accent resolver so agent nodes carry their role's hue.
+	// The sequence view takes the guild's static participant set so every role column appears from the first frame; both views take the per-role accent resolver so agent nodes carry their role's color.
 	if (inputs.viewMode === 'sequence') {
-		return h('div', { class: 'pb-sequence-scroll' }, [renderSequenceView(h, sequenceModel, inputs.labels, inputs.tier, inputs.roleAccents, sequenceGuildParticipants)])
+		return h('div', { class: 'pb-sequence-scroll' }, [renderSequenceView(h, sequenceModel, inputs.labels, inputs.tier, inputs.roleAccents, inputs.roleOrder, sequenceGuildParticipants)])
 	}
-	return renderFlowView(h, model, inputs.labels, inputs.tier, inputs.roleAccents, lifecycle, cta, question, flowColumnTracker)
+	return renderFlowView(h, model, inputs.labels, inputs.tier, inputs.roleAccents, inputs.roleOrder, lifecycle, cta, question, flowColumnTracker)
 }
 
 // The single memo instance for the stage. It caches the last vnode and the inputs it was built from, so the SAME vnode object is returned while the inputs are unchanged and hyperapp skips the diff. The cached vnode is mounted at exactly one keyed tree position (child 0 of `.pb-flow`, key 'watch-flow'), so it is never reused at two positions or after a position shift (see stage-memo.ts and AGENTS.md "Browser client sources are TypeScript").
@@ -2626,6 +2634,7 @@ function WatchScreen(state: ApplicationState): Vnode {
 		labels,
 		tier,
 		roleAccents: state.roleAccents,
+		roleOrder: state.roleOrder,
 		guildParticipants: state.guildParticipants,
 		viewMode: state.flowViewMode,
 		rolesOnly: state.sequenceRolesOnly,
@@ -2790,7 +2799,7 @@ function isApplicationState(value: unknown): value is ApplicationState {
 		'queueItems', 'justSubmittedItemId', 'pendingAddSelectionId', 'editingItemId', 'draggingItemId', 'queueAnswerPendingId', 'openQueueQuestionId',
 		'serverAvailable', 'versions', 'justSubmittedRunId', 'createSending', 'muted', 'shownQuestionIds', 'firstQuestionsPoll', 'pendingAnswerId',
 		'runEffort', 'savingEffort', 'runInvolvement', 'savingInvolvement', 'runLogLevel', 'savingLogLevel',
-		'flowModel', 'previousFlowModel', 'flowCollections', 'flowVersion', 'runListCollections', 'runListVersion', 'labelResolver', 'guildParticipants', 'roleAccents', 'build',
+		'flowModel', 'previousFlowModel', 'flowCollections', 'flowVersion', 'runListCollections', 'runListVersion', 'labelResolver', 'guildParticipants', 'roleAccents', 'roleOrder', 'build',
 		'flowTier', 'flowViewMode', 'sequenceRolesOnly', 'screen', 'expandedRowIds', 'continuation',
 		'resumingRunId', 'resumeSending', 'resumeNotice',
 		'questionModalOpen', 'resultModalOpen', 'resultShownForRun', 'interruptModalOpen',
@@ -2845,6 +2854,7 @@ app({
 			labelResolver: null,
 			guildParticipants: [],
 			roleAccents: createRoleAccentResolver([]),
+			roleOrder: [],
 			build: null,
 			flowTier: DEFAULT_FLOW_TIER,
 			flowViewMode: 'flow',

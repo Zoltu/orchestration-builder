@@ -16,6 +16,7 @@ function baseInputs(): StageMemoInputs {
 		labels: createLabelResolver({}),
 		tier: 'detailed',
 		roleAccents: nullRoleAccents,
+		roleOrder: ['orchestrator', 'coder'],
 		guildParticipants: [{ id: 'guild:coder', role: 'coder', kind: 'role' }],
 		viewMode: 'flow',
 		rolesOnly: false,
@@ -34,6 +35,7 @@ describe('buildStageMemoInputs', () => {
 			labels,
 			tier: 'detailed',
 			roleAccents: nullRoleAccents,
+			roleOrder: ['orchestrator', 'coder'],
 			guildParticipants,
 			viewMode: 'flow',
 			rolesOnly: false,
@@ -47,6 +49,7 @@ describe('buildStageMemoInputs', () => {
 		expect(first.labels).toBe(labels)
 		expect(first.tier).toBe('detailed')
 		expect(first.roleAccents).toBe(nullRoleAccents)
+		expect(first.roleOrder).toEqual(['orchestrator', 'coder'])
 		expect(first.guildParticipants).toBe(guildParticipants)
 		expect(first.viewMode).toBe('flow')
 		expect(first.rolesOnly).toBe(false)
@@ -56,6 +59,7 @@ describe('buildStageMemoInputs', () => {
 		expect(second.labels).toBe(first.labels)
 		expect(second.tier).toBe(first.tier)
 		expect(second.roleAccents).toBe(first.roleAccents)
+		expect(second.roleOrder).toBe(first.roleOrder)
 		expect(second.guildParticipants).toBe(first.guildParticipants)
 		expect(second.viewMode).toBe(first.viewMode)
 		expect(second.rolesOnly).toBe(first.rolesOnly)
@@ -68,6 +72,7 @@ describe('buildStageMemoInputs', () => {
 			labels: createLabelResolver({}),
 			tier: 'detailed',
 			roleAccents: nullRoleAccents,
+			roleOrder: [],
 			guildParticipants: [],
 			viewMode: 'sequence',
 			rolesOnly: true,
@@ -91,6 +96,7 @@ describe('stageInputsEqual', () => {
 			{ ...base, labels: createLabelResolver({}) },
 			{ ...base, tier: 'whimsical' },
 			{ ...base, roleAccents: () => null },
+			{ ...base, roleOrder: [] },
 			{ ...base, guildParticipants: [] },
 			{ ...base, viewMode: 'sequence' },
 			{ ...base, rolesOnly: true },

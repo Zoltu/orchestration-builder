@@ -55,6 +55,7 @@ import { activeOperation, activeParticipant, callChainOf, callMetricsByDestinati
 import type { InteractionModel, Operation, Participant, ParticipantKind, RunStatus } from './interaction-model.js'
 import type { LabelResolver, LabelTier } from './labels.js'
 import type { RoleAccentResolver } from './role-accents.js'
+import { createParticipantComparator } from './participant-order.js'
 import { ATTR_OPERATION, ATTR_PARTICIPANT, ATTR_ROLE } from './inspector.js'
 import { GraphEdge, GraphNode, NODE_HEIGHT, NODE_WIDTH, nodeAnchor } from './svg-primitives.js'
 import type { Anchor } from './svg-primitives.js'
@@ -475,10 +476,15 @@ function rowParticipantPositions(model: InteractionModel): Map<string, { rowInde
 	return positions
 }
 
-// Maps each role to its top-bar slot index in a model, by replaying projectTopBar. deriveLifecycle uses this to place a departing participant's destination on the current frame's top bar, so the travel lands on the slot the counter increment will read against.
-function topBarSlotIndexByRole(model: InteractionModel): Map<string, number> {
+// The top-bar slots in display order: projectTopBar returns first-seen order (memoized per model), and the copy is sorted with the guild's comparator so the strip, its pixel positions, and the departure targets all share one order without mutating the memoized array.
+function orderedTopBarSlots(model: InteractionModel, roleOrder: readonly string[]): TopBarSlot[] {
+	return projectTopBar(model).slice().sort(createParticipantComparator(roleOrder))
+}
+
+// Maps each role to its top-bar slot index in a model, by replaying the sorted orderedTopBarSlots. deriveLifecycle uses this to place a departing participant's destination on the current frame's top bar, so the travel lands on the slot the counter increment will read against. The sort is the same one renderFlowView applies, so a departure lands on the slot the strip paints.
+function topBarSlotIndexByRole(model: InteractionModel, roleOrder: readonly string[]): Map<string, number> {
 	const indexByRole = new Map<string, number>()
-	projectTopBar(model).forEach((slot, index) => indexByRole.set(slot.role, index))
+	orderedTopBarSlots(model, roleOrder).forEach((slot, index) => indexByRole.set(slot.role, index))
 	return indexByRole
 }
 
@@ -509,7 +515,7 @@ export interface FrameLifecycle {
 }
 
 // Diffs two consecutive InteractionModel frames into a node-lifecycle descriptor the renderer animates. `enteringIds` is the set of participant ids present in the current rows but absent from the previous rows; each renders a scale/fade-in. `departing` lists participants present in the previous rows but absent from the current rows, each carrying its previous row/column (so the renderer can place the travel origin) and its top-bar slot destination in the current frame (so the travel lands on the slot), plus `merged` when the role's slot already existed in the previous top bar (the counter increments) versus a fresh slot. Both positions live in the shared SVG coordinate space the renderer paints, so a departing node visibly travels to its slot. A null previousModel (the first frame of a scenario) animates nothing — the graph renders settled rather than every node fading in on each scenario select.
-export function deriveLifecycle(previousModel: InteractionModel | null | undefined, currentModel: InteractionModel): FrameLifecycle {
+export function deriveLifecycle(previousModel: InteractionModel | null | undefined, currentModel: InteractionModel, roleOrder: readonly string[]): FrameLifecycle {
 	const enteringIds = new Set<string>()
 	const departing: DepartingNode[] = []
 	if (previousModel === undefined || previousModel === null) {
@@ -520,7 +526,7 @@ export function deriveLifecycle(previousModel: InteractionModel | null | undefin
 	for (const participantId of currentPositions.keys()) {
 		if (!previousPositions.has(participantId)) enteringIds.add(participantId)
 	}
-	const currentSlotIndexByRole = topBarSlotIndexByRole(currentModel)
+	const currentSlotIndexByRole = topBarSlotIndexByRole(currentModel, roleOrder)
 	const previousTopBarRoles = topBarRoleSet(previousModel)
 	for (const [participantId, previousPos] of previousPositions) {
 		if (currentPositions.has(participantId)) continue
@@ -646,9 +652,9 @@ export interface QuestionControls {
 	onclick?: unknown
 }
 
-// Renders the flow view as a single SVG containing the history top bar, the observe cross-stack lines, the terminate cross-stack lines, the row stack, the departing overlay, the (on a terminal frame) result CTA, and (while an ask_human call is pending) the Question button overlay on the answerer node. Edges paint before nodes within each row so node boxes cover anchor overlap; observes and terminates sit behind the rows so node boxes cover their endpoints; the departing overlay paints last so the travel reads on top of the settled graph; the CTA and Question button paint after the rows so they sit above the graph. `lifecycle` (optional) carries the frame-diff entering/departing descriptor from deriveLifecycle; `cta` and `question` carry the harness state for the two overlay affordances — the view itself decides whether to render them by reading model.status and the active ask_human call. `columns` is the caller-held high-water-mark tracker from createColumnTracker. `roleAccents` is the per-role accent resolver the hosts build from the guild's full role list (createRoleAccentResolver) — agent nodes take their role's accent wherever they render (row nodes, the departing overlay, the top-bar slots), and a resolver that returns null for everything renders exactly the neutral look.
+// Renders the flow view as a single SVG containing the history top bar, the observe cross-stack lines, the terminate cross-stack lines, the row stack, the departing overlay, the (on a terminal frame) result CTA, and (while an ask_human call is pending) the Question button overlay on the answerer node. Edges paint before nodes within each row so node boxes cover anchor overlap; observes and terminates sit behind the rows so node boxes cover their endpoints; the departing overlay paints last so the travel reads on top of the settled graph; the CTA and Question button paint after the rows so they sit above the graph. `lifecycle` (optional) carries the frame-diff entering/departing descriptor from deriveLifecycle; `cta` and `question` carry the harness state for the two overlay affordances — the view itself decides whether to render them by reading model.status and the active ask_human call. `columns` is the caller-held high-water-mark tracker from createColumnTracker. `roleAccents` is the per-role accent resolver the hosts build from the guild's full role list (createRoleAccentResolver) — agent nodes take their role's accent wherever they render (row nodes, the departing overlay, the top-bar slots), and a resolver that returns null for everything renders exactly the neutral look. `roleOrder` is the guild-declared agent-role display order (guild.json visualization.roleOrder); the top-bar slots are sorted into it (participant-order.ts), so the strip's slot order, its pixel positions, and the departure targets all agree, and the sequence view's role columns sort the same way.
 // `lifecycle`, `cta`, and `question` are nullable-but-required parameters (not optional ones) so the positional call shape the hosts use — passing undefined for the affordances they omit — stays exactly the shape the types describe.
-export function renderFlowView(h: H, model: InteractionModel, labels: LabelResolver, tier: LabelTier, roleAccents: RoleAccentResolver, lifecycle: FrameLifecycle | undefined, cta: CtaControls | undefined, question: QuestionControls | undefined, columns: ColumnTracker): Vnode {
+export function renderFlowView(h: H, model: InteractionModel, labels: LabelResolver, tier: LabelTier, roleAccents: RoleAccentResolver, roleOrder: readonly string[], lifecycle: FrameLifecycle | undefined, cta: CtaControls | undefined, question: QuestionControls | undefined, columns: ColumnTracker): Vnode {
 	const stackIds = stacksOf(model)
 	const rows: RowProjection[] = []
 	for (const stackId of stackIds) {
@@ -656,7 +662,7 @@ export function renderFlowView(h: H, model: InteractionModel, labels: LabelResol
 		if (row !== null) rows.push(row)
 	}
 
-	const slots = projectTopBar(model)
+	const slots = orderedTopBarSlots(model, roleOrder)
 
 	const topBarHeightValue = topBarHeight(slots.length)
 	const mainYOffset = topBarHeightValue + (slots.length === 0 ? 0 : TOPBAR_GAP)
