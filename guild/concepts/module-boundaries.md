@@ -14,9 +14,11 @@ A contract nearly as complex as its implementation hides nothing and should be i
 ### Drawing boundaries
 
 Draw boundaries to maximize auditability, not to mirror change; a boundary is justified only when the resulting module is more auditable than the code left ungrouped.
+
 - **Split** when each part becomes a better black box — a simpler, independently trustable contract — even when the parts change together.
 - **Merge** when neither part is a good black box alone but their union is, even when they change independently.
 - **Change-coupling is not a criterion.** Two things that always change together still belong in separate modules when that is more auditable, and two things that change independently still belong in one module when that is more auditable.
+
 A split is not free: its interface is part of what an auditor must understand, and it pays only when its new surfaces, including the seam, are simpler than the complexity removed, with no duplicated hidden logic and no chatty seam.
 A contract must be stable and complete; an unstable surface forces re-audit, while churning internals behind a stable surface are irrelevant.
 Re-test each module after a split and keep splitting while the parts improve; a module hiding several independent capabilities is usually several modules.
