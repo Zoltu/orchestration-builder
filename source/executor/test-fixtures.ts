@@ -4,10 +4,12 @@ import type { HumanBackend } from './human-backend.js'
 import type { LoadedGuild } from './loader.js'
 import { createRunBaseTracker, type RunBaseTracker } from './base-state.js'
 import { createRunParkTracker, type RunParkTracker } from './park-state.js'
-import type { RoleRegistry } from './role-registry.js'
+import { createRoleRegistry, type RoleRegistry } from './role-registry.js'
 import type { RoleSnapshot, RoleSnapshotStore } from './role-snapshot.js'
-import type { SubprocessRunner } from './tools/subprocess-tool.js'
+import type { SubprocessRunner } from './subprocess.js'
 import type { GuildConfig, ToolManifest, ToolResult } from './types.js'
+import type { RoleState } from './state.js'
+import { createToolPlatform, type RunToolScope, type ToolPlatform } from './tools/index.js'
 
 export function defined<T>(value: T | undefined, label: string): T {
 	if (value === undefined) throw new Error(`${label} is missing`)
@@ -129,4 +131,60 @@ export function createFakeCheckpointRecorder(roleRegistry: RoleRegistry, context
 		baseTracker: baseTracker ?? createRunBaseTracker(),
 	})
 	return { recorder, checkpoints }
+}
+
+export interface FixtureToolPlatformInput {
+	workspaceRoot?: string
+	subprocessRunner?: SubprocessRunner
+}
+
+// A fixture must never reach a real subprocess: constructing the platform is safe, but dispatching run_shell, test, or typecheck reaches this runner and fails loudly instead of spawning.
+function createUnconfiguredSubprocessRunner(): SubprocessRunner {
+	return async () => {
+		throw new Error('subprocess not configured for this fixture tool platform; inject a scripted runner')
+	}
+}
+
+export function createFixtureToolPlatform(input: FixtureToolPlatformInput = {}): ToolPlatform {
+	const runId = 'run-19700101-000000'
+	const runsBaseDir = '/fixture/runs'
+	return createToolPlatform({
+		workspaceRoot: input.workspaceRoot ?? '/fixture/workspace',
+		defaultToolTimeoutSeconds: 30,
+		runsBaseDir,
+		runId,
+		logPath: `${runsBaseDir}/${runId}/log.jsonl`,
+	}, { subprocessRunner: input.subprocessRunner ?? createUnconfiguredSubprocessRunner() })
+}
+
+export function createEmptyRoleState(overrides: Partial<RoleState> = {}): RoleState {
+	return {
+		history: [],
+		lastPromptTokens: 0,
+		recentCompactionPromptTokens: [],
+		recentToolCalls: [],
+		toolCallCount: 0,
+		generatedTokens: 0,
+		contextExceededAttempts: 0,
+		loopCheckToolCallWatermark: 0,
+		loopCheckTokenWatermark: 0,
+		...overrides,
+	}
+}
+
+export function createFixtureRunScope(overrides: Partial<RunToolScope> = {}): RunToolScope {
+	return {
+		spawnAgent: async () => ({ status: 'success', summary: '' }),
+		continueAgent: async () => ({ status: 'success', summary: '' }),
+		roleState: createEmptyRoleState(),
+		humanBackend: stubHumanBackend,
+		roleRegistry: createRoleRegistry(),
+		ownRoleId: 'fixture-0-0',
+		appendLog: () => undefined,
+		parkTracker: createRunParkTracker(),
+		baseTracker: createRunBaseTracker(),
+		contextWindow: 1000,
+		manifestNames: new Set(),
+		...overrides,
+	}
 }

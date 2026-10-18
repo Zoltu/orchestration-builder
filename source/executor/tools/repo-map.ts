@@ -1,8 +1,9 @@
 import * as fs from 'node:fs'
 import * as path from 'node:path'
 import { createToolError } from '../errors.js'
-import type { ToolHandler } from '../tool-dispatch.js'
-import { nodePathFilesystem, resolveWithinWorkspace, wrapIoError } from './shared.js'
+import type { ToolHandler } from './tool-dispatch.js'
+import { wrapIoError } from './shared.js'
+import { nodePathFilesystem, resolveWithinWorkspace } from '../workspace-path.js'
 
 // The extractor is a heuristic scanner rather than a compiler parse: typescript is a dev-only dependency and node_modules is stripped from the deployed image, so the executor cannot use the compiler API at runtime. Declarations are found by tracking bracket depth over a copy of the source with comments and string/template/regex literals blanked to spaces; the mask stays index-aligned with the original text, which is where emitted signature text comes from. Output renders only export/async/static prefixes, omits method type parameters, and reduces variables with non-function initializers to a bare name.
 

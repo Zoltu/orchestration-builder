@@ -1,22 +1,21 @@
 import { createResultCard, createToolError } from './errors.js'
-import type { DiscardedRetrySpend, LlmUsage, LlmUsagePayload, Message, ResultCard, ToolCall, ToolManifest, ToolResult } from './types.js'
+import type { DiscardedRetrySpend, LlmUsage, LlmUsagePayload, Message, ResultCard, RoleDefinition, ToolCall, ToolManifest, ToolResult } from './types.js'
 import { isObject, isResultCard } from './validation.js'
 import { checkGlobalBudgets, checkRoleBudgets } from './budgets.js'
-import { createBuiltInToolHandlers, OBSERVATION_TOOL_NAMES } from './builtin-tools.js'
 import { buildInitialHistory, createContextManager, truncateToolOutput, type ContextManager } from './context/index.js'
-import { logEvent, SUSPENDING_CHILD_TOOLS, type EngineContext, type EngineDependencies, type ResumedRole, type RoleState, type SeededRole, type SuspendedTurn } from './engine-state.js'
+import { logEvent, type EngineContext, type EngineDependencies, type ResumedRole, type RoleState, type SeededRole, type SuspendedTurn } from './engine-state.js'
 import { isWriteCapableRole, parkCard } from './park-state.js'
 import { drainInterrupts } from './interrupt-engine.js'
 import type { LlmCallResult } from './llm.js'
 import { hashArguments, RECENT_TOOL_CALLS_LIMIT } from './role-inspection.js'
 import type { RoleRegistryEntry } from './role-registry.js'
 import { buildContinuationHistory, selectContinuableChild } from './role-snapshot.js'
-import { createToolDispatch, dispatchToolCall, type ToolDispatch, type ToolHandler } from './tool-dispatch.js'
+import type { RunToolScope, ToolPlatform } from './tool-platform-port.js'
 
 interface DispatchContext {
-	dispatch: ToolDispatch
-	allowedTools: string[]
-	manifestNames: string[]
+	toolPlatform: ToolPlatform
+	roleDefinition: RoleDefinition
+	scope: RunToolScope
 	maxToolOutputChars: number
 }
 
@@ -185,14 +184,14 @@ interface DispatchAndRecordArgs {
 }
 
 async function dispatchAndRecord({ deps, roleState, roleName, ownRoleId, dispatchCtx, toolCall }: DispatchAndRecordArgs): Promise<ResultCard | null> {
-	const result = await dispatchToolCall(dispatchCtx, toolCall)
-	return recordToolResult(deps, roleState, roleName, ownRoleId, dispatchCtx.maxToolOutputChars, toolCall, result)
+	const result = await dispatchCtx.toolPlatform.dispatch(dispatchCtx.roleDefinition, dispatchCtx.scope, toolCall)
+	return recordToolResult(deps, dispatchCtx.toolPlatform, roleState, roleName, ownRoleId, dispatchCtx.maxToolOutputChars, toolCall, result)
 }
 
 // Emits the observe event for a successful cross-role inspection, so the interaction model can draw the reference from the inspecting role to the suspended target it read. Self-inspection (targetRole absent or the caller's own id) is not an observation, and a target that is no longer registered cannot be drawn, so both are skipped.
-function maybeLogObservation(deps: EngineDependencies, ownRoleId: string, toolName: string, result: ToolResult): void {
+function maybeLogObservation(deps: EngineDependencies, toolPlatform: ToolPlatform, ownRoleId: string, toolName: string, result: ToolResult): void {
 	if (result.kind !== 'success') return
-	if (!OBSERVATION_TOOL_NAMES.has(toolName)) return
+	if (!toolPlatform.observesRole(toolName)) return
 	if (!isObject(result.data)) return
 	const targetRole = result.data['targetRole']
 	if (typeof targetRole !== 'string') return
@@ -203,7 +202,7 @@ function maybeLogObservation(deps: EngineDependencies, ownRoleId: string, toolNa
 }
 
 // Records a settled tool call: logs the call/result pair, appends the (truncated) tool message, and updates the counters. Shared by the live dispatch path and the resume path, which re-records a suspended child-spawning call's result from the checkpoint without re-dispatching it — so both paths apply exactly the same bookkeeping.
-function recordToolResult(deps: EngineDependencies, roleState: RoleState, roleName: string, ownRoleId: string, maxToolOutputChars: number, toolCall: ToolCall, result: ToolResult): ResultCard | null {
+function recordToolResult(deps: EngineDependencies, toolPlatform: ToolPlatform, roleState: RoleState, roleName: string, ownRoleId: string, maxToolOutputChars: number, toolCall: ToolCall, result: ToolResult): ResultCard | null {
 	if (result.kind === 'unknown_tool') {
 		logEvent(deps.appendLog, 'unknown_tool', { role: roleName, tool: toolCall.function.name })
 	} else if (result.kind === 'invalid_tool_call') {
@@ -211,7 +210,7 @@ function recordToolResult(deps: EngineDependencies, roleState: RoleState, roleNa
 	} else {
 		// tool_call carries the model's raw arguments string so the exact parameters are recoverable, and tool_result carries the full un-truncated ToolResult so a reviewer is not flying blind on what a tool actually returned. Truncation still applies only when the result is appended to the conversation below.
 		logEvent(deps.appendLog, 'tool_call', { role: roleName, tool: toolCall.function.name, arguments: toolCall.function.arguments })
-		maybeLogObservation(deps, ownRoleId, toolCall.function.name, result)
+		maybeLogObservation(deps, toolPlatform, ownRoleId, toolCall.function.name, result)
 		logEvent(deps.appendLog, 'tool_result', { role: roleName, tool: toolCall.function.name, kind: result.kind, result })
 	}
 
@@ -325,7 +324,7 @@ export async function runRole(deps: EngineDependencies, context: EngineContext, 
 		return childCard
 	}
 
-	const builtInHandlers = createBuiltInToolHandlers({
+	const runScope: RunToolScope = {
 		spawnAgent: async (childRoleName, childTask) => runChild(childRoleName, childTask),
 		continueAgent: async (childRoleName, comment, childRoleId) => {
 			const resolution = selectContinuableChild(deps.roleSnapshots.list(), {
@@ -347,21 +346,19 @@ export async function runRole(deps: EngineDependencies, context: EngineContext, 
 		},
 		roleState,
 		humanBackend: deps.humanBackend,
-		loadedGuild: guild,
 		roleRegistry: deps.roleRegistry,
 		ownRoleId: registryEntry.roleId,
 		appendLog: deps.appendLog,
 		parkTracker: deps.parkTracker,
-		handlerOf: context.handlerOf,
-	})
-
-	// Built-ins spread last: platform invariants (finish, agent, ask_human, the context tools) are not shadowable by an additional handler that happens to collide on a key.
-	const handlers: Record<string, ToolHandler> = { ...deps.additionalToolHandlers, ...builtInHandlers }
-	const dispatch = createToolDispatch(handlers)
+		baseTracker: deps.baseTracker,
+		...(context.handlerOf !== undefined ? { handlerOf: context.handlerOf } : {}),
+		contextWindow: guild.deployment.model.contextWindow,
+		manifestNames: new Set(Object.keys(guild.tools)),
+	}
 	const dispatchCtx: DispatchContext = {
-		dispatch,
-		allowedTools: roleDefinition.tools,
-		manifestNames: Object.keys(guild.tools),
+		toolPlatform: deps.toolPlatform,
+		roleDefinition,
+		scope: runScope,
 		maxToolOutputChars: guild.deployment.contextPolicy.maxToolOutputChars,
 	}
 
@@ -400,11 +397,11 @@ async function dispatchToolCallSequence(
 		// The park mark checked between dispatches is load-bearing (docs/queueing.md "Parking: the pre-write rule"): a batched ask_human + agent turn must not start the child after the park decision, or the run writes after the pre-write premise was decided. The mark is run-scoped, so a suspended ancestor unwinds here with the same platform-authored park card once its child's card has propagated up.
 		if (deps.parkTracker.parkedQuestion !== undefined) return parkCard(deps.parkTracker.parkedQuestion)
 		// A child-spawning dispatch suspends this role mid-turn until the child returns; record the suspension so a checkpoint taken while the child runs captures where this role resumes. Cleared once the dispatch settles.
-		if (SUSPENDING_CHILD_TOOLS.has(toolCall.function.name)) {
+		if (dispatchCtx.toolPlatform.suspendsChild(toolCall.function.name)) {
 			deps.checkpointRecorder.setPending(registryEntry.roleId, { toolCalls, childIndex: index })
 		}
 		const finalCard = await dispatchAndRecord({ deps, roleState, roleName: context.roleName, ownRoleId: registryEntry.roleId, dispatchCtx, toolCall })
-		if (SUSPENDING_CHILD_TOOLS.has(toolCall.function.name)) {
+		if (dispatchCtx.toolPlatform.suspendsChild(toolCall.function.name)) {
 			deps.checkpointRecorder.setPending(registryEntry.roleId, undefined)
 		}
 		if (finalCard !== null) return finalCard
@@ -420,7 +417,7 @@ async function completeSuspendedTurn(deps: EngineDependencies, context: EngineCo
 	const childCard = await suspendedTurn.resolveChildCard()
 	deps.checkpointRecorder.setPendingChildCard(registryEntry.roleId, childCard)
 	deps.checkpointRecorder.write()
-	recordToolResult(deps, roleState, context.roleName, registryEntry.roleId, dispatchCtx.maxToolOutputChars, childCall, { kind: 'success', data: childCard })
+	recordToolResult(deps, dispatchCtx.toolPlatform, roleState, context.roleName, registryEntry.roleId, dispatchCtx.maxToolOutputChars, childCall, { kind: 'success', data: childCard })
 	deps.checkpointRecorder.setPending(registryEntry.roleId, undefined)
 	if (resumeNote !== undefined) {
 		roleState.history.push({ role: 'user', content: resumeNote })

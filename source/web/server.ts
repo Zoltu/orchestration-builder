@@ -81,7 +81,7 @@ export function createServeAssetFile(): ServeAssetFile {
 	}
 }
 
-// The filesystem access the TypeScript-serving leaf reads; null is the "no source converted yet" signal that falls back to the real file. Injectable so the transpile pipeline is exercisable in-memory, mirroring PathFilesystem in executor/tools/shared.ts.
+// The filesystem access the TypeScript-serving leaf reads; null is the "no source converted yet" signal that falls back to the real file. Injectable so the transpile pipeline is exercisable in-memory, mirroring PathFilesystem in executor/workspace-path.ts.
 export interface TypeScriptSourceFilesystem {
 	readSource(sourcePath: string): string | null
 }

@@ -1,7 +1,8 @@
 import * as path from 'node:path'
 import { createToolError } from '../errors.js'
-import type { ToolHandler } from '../tool-dispatch.js'
-import { resolveToolTimeoutSeconds, shellArgv, truncateStreams, type SubprocessData, type SubprocessOutcome, type SubprocessRunner } from './subprocess-tool.js'
+import type { ToolHandler } from './tool-dispatch.js'
+import { resolveToolTimeoutSeconds, shellArgv, truncateStreams, type SubprocessData } from './subprocess-tool.js'
+import type { SubprocessOutcome, SubprocessRunner } from '../subprocess.js'
 
 export type RunShellData = SubprocessData
 

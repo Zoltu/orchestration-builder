@@ -8,35 +8,14 @@ import type { AppendLog } from './persistence.js'
 import type { ReadProjectDoc } from './project-docs.js'
 import type { RunBaseTracker } from './base-state.js'
 import type { RunParkTracker } from './park-state.js'
-import type { RecentToolCall } from './role-inspection.js'
 import type { RoleRegistry } from './role-registry.js'
 import type { RoleSnapshotStore } from './role-snapshot.js'
+import type { RoleState } from './state.js'
 import type { RoleDelta } from './stream-channel.js'
-import type { ToolHandler } from './tool-dispatch.js'
+import type { ToolPlatform } from './tool-platform-port.js'
 import type { EffortLevel, InvolvementLevel, LogLevel, LogEvent, Message, ResultCard, RunContinuation, ToolCall } from './types.js'
 
-// The tools that spawn a child role and suspend the caller mid-turn until it returns. They share the suspension bookkeeping (checkpoint.ts's pending frame and the engine's dispatch sequence), so the set is defined here where both the engine and the checkpoint guard can read it without a runtime cycle.
-export const SUSPENDING_CHILD_TOOLS: ReadonlySet<string> = new Set(['agent', 'continue_agent'])
-
-export interface RoleState {
-	history: Message[]
-	lastPromptTokens: number
-	recentCompactionPromptTokens: Array<number>
-	recentToolCalls: RecentToolCall[]
-	toolCallCount: number
-	generatedTokens: number
-	// Consecutive endpoint rejections for context size, reset on the first successful call. Bounds the compact-and-retry loop so a role whose request cannot be made to fit finishes with an error instead of retrying forever.
-	contextExceededAttempts: number
-	// The counts at which the last loop check fired; the next check fires when a count passes its watermark plus the (effort-scaled) threshold.
-	loopCheckToolCallWatermark: number
-	loopCheckTokenWatermark: number
-	// The request message count of the role's last logged llm_call: the conversation index the next llm_call's sent list starts from, so each event carries only the messages added since the previous one instead of the whole conversation (the delta protocol in docs/reference.md "Log events"). Undefined when there is no valid baseline — no llm_call logged yet, or a context edit or compaction rewrote the history out from under it — which makes the next emission a full snapshot.
-	logSentBaseline?: number
-	// Context-pressure handoff state, one-shot per role instance: set to 'pending' when reported usage crosses the threshold, flipped to 'sent' when the notice is appended at the next turn boundary, and never re-armed after that — the notice asks the role to write its handoff brief and finish.
-	contextPressureNotice?: 'pending' | 'sent'
-	// Set when a context-window rejection must be answered by the context handler: the rejection is detected mid-turn (in handleLlmResult), but a handler can only run at the safe point, so the rejection details park here until the next loop top. Cleared once the handler (or the naive fallback) has run.
-	contextCompactionPending?: { promptTokens: number; contextWindow: number }
-}
+export type { RoleState } from './state.js'
 
 export interface EngineContext {
 	loadedGuild: LoadedGuild
@@ -64,7 +43,7 @@ export interface EngineContext {
 export interface EngineDependencies {
 	llmCaller: LlmCaller
 	appendLog: AppendLog
-	additionalToolHandlers: Record<string, ToolHandler>
+	toolPlatform: ToolPlatform
 	humanBackend: HumanBackend
 	roleRegistry: RoleRegistry
 	interruptQueue: InterruptQueue

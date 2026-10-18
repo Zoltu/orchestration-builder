@@ -1,5 +1,5 @@
 import { createToolError } from '../errors.js'
-import type { ToolHandler } from '../tool-dispatch.js'
+import type { ToolHandler } from './tool-dispatch.js'
 import { parseKagiExtractMarkdown } from './kagi.js'
 
 export type Fetcher = (url: string, timeoutMs: number) => Promise<string>

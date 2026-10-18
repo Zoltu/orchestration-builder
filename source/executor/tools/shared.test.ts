@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import * as path from 'node:path'
-import { isOrchestrationPath, resolveWithinWorkspace, wrapIoError, type PathFilesystem } from './shared.ts'
+import { wrapIoError } from './shared.ts'
+import { isOrchestrationPath, resolveWithinWorkspace, type PathFilesystem } from '../workspace-path.ts'
 
 const ROOT = '/workspace'
 

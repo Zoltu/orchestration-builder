@@ -10,7 +10,7 @@ import { createFlowFeedResponder } from './web/static/ts/flow-feed/index.js'
 import { createRunListFeedResponder } from './web/static/ts/run-list-feed/index.js'
 import { createStreamHub } from './web/stream-hub.js'
 import { createTaskSummarizer, type TaskSummarizer } from './summarize.js'
-import { applyDeploymentOverride, applyLogLevel, createAppendLog, createBunSubprocessRunner, createDeleteCheckpoint, createDeltaChannel, createDockerSecretReader, createGuildLoader, createInterruptChannel, createInterruptQueue, createLlmCaller, createLlmFetch, createListRunIds, createModelInfoProbe, createPlanToolHandlers, createReadProjectDoc, createReadProjectSettings, createReadQueueText, createReadRunCheckpointById, createReadRunLogTextFrom, createReadRunMetaById, createReadRunPlanById, createReadRunSnapshotById, createReadRunSnapshotStats, createReadRunSummaryById, createReadRunSummaryStats, createReadWorkspaceGitState, createResumeErroredRun, createRoleSnapshotStore, createRunBaseTracker, createRunCheckpointExists, createRunDirectory, createRunDirectoryExists, createRunLogToolHandlers, createRunState, createRunSubmission, createSleep, createStyleGuideToolHandlers, createTaskQueue, createTimeoutScheduler, createToolHandlers, createWebHumanBackend, createWriteCheckpoint, createWriteMeta, createWriteProjectSettings, createWriteQueueText, createWriteRunSummary, ensureOrchestrationGitExcluded, entryFrameLogLevel, generateRunId, llmUsagePayload, LOG_FILE_NAME, MODEL_PROBE_TIMEOUT_MS, nodeGitExcludeFilesystem, parseModelInfo, reconcileRunsOnStartup, resolveDeploymentConfig, resolveDeploymentOverride, resolveKagiApiKey, resolveSecret, resumeExecutor, runExecutor, validateDeploymentFileConfig, validateDeploymentRoleReferences, ConfigurationError, ValidationError, type AppendLog, type DeltaChannel, type ExecutorDependencies, type InterruptChannel, type InvolvementLevel, type LoadedGuild, type LlmCaller, type LogLevel, type ModelApiProbe, type ResumeRun, type RunCheckpoint, type StartRun, type WebHumanBackend } from './executor/index.js'
+import { applyDeploymentOverride, applyLogLevel, createAppendLog, createBunSubprocessRunner, createDeleteCheckpoint, createDeltaChannel, createDockerSecretReader, createGuildLoader, createInterruptChannel, createInterruptQueue, createLlmCaller, createLlmFetch, createListRunIds, createModelInfoProbe, createReadProjectDoc, createReadProjectSettings, createReadQueueText, createReadRunCheckpointById, createReadRunLogTextFrom, createReadRunMetaById, createReadRunPlanById, createReadRunSnapshotById, createReadRunSnapshotStats, createReadRunSummaryById, createReadRunSummaryStats, createReadWorkspaceGitState, createResumeErroredRun, createRoleSnapshotStore, createRunBaseTracker, createRunCheckpointExists, createRunDirectory, createRunDirectoryExists, createRunState, createRunSubmission, createSleep, createTaskQueue, createTimeoutScheduler, createToolPlatform, createWebHumanBackend, createWriteCheckpoint, createWriteMeta, createWriteProjectSettings, createWriteQueueText, createWriteRunSummary, ensureOrchestrationGitExcluded, entryFrameLogLevel, generateRunId, llmUsagePayload, LOG_FILE_NAME, MODEL_PROBE_TIMEOUT_MS, nodeGitExcludeFilesystem, parseModelInfo, reconcileRunsOnStartup, resolveDeploymentConfig, resolveDeploymentOverride, resolveKagiApiKey, resolveSecret, resumeExecutor, runExecutor, validateDeploymentFileConfig, validateDeploymentRoleReferences, ConfigurationError, ValidationError, type AppendLog, type DeltaChannel, type ExecutorDependencies, type InterruptChannel, type InvolvementLevel, type LoadedGuild, type LlmCaller, type LogLevel, type ModelApiProbe, type ResumeRun, type RunCheckpoint, type StartRun, type WebHumanBackend } from './executor/index.js'
 
 const DEPLOYMENT_FILE_ENV_VAR = 'ORCHESTRATOR_DEPLOYMENT_FILE'
 const PORT_ENV_VAR = 'PORT'
@@ -76,19 +76,17 @@ async function withRunBindings<T>(config: {
 	runsBaseDir: string
 }, runId: string, logLevel: LogLevel, invoke: (dependencies: ExecutorDependencies) => Promise<T>): Promise<T> {
 	const baseTracker = createRunBaseTracker()
-	const readWorkspaceGitState = createReadWorkspaceGitState({ workspaceRoot: config.workspaceRootPath, runner: createBunSubprocessRunner() })
-	const additionalToolHandlers = {
-		...createToolHandlers({
-			workspaceRoot: config.workspaceRootPath,
-			defaultToolTimeoutSeconds: config.loadedGuild.deployment.executor.defaultToolTimeoutSeconds,
-			kagiApiKey: config.kagiApiKey,
-			baseTracker,
-		}),
-		// Plan, style-guide, and run-log handlers are bound per run because all live at fixed locations under this run's directory.
-		...createPlanToolHandlers({ runsBaseDir: config.runsBaseDir, runId, workspaceRoot: config.workspaceRootPath }),
-		...createStyleGuideToolHandlers({ runsBaseDir: config.runsBaseDir, runId, workspaceRoot: config.workspaceRootPath }),
-		...createRunLogToolHandlers({ logPath: path.join(config.runsBaseDir, runId, LOG_FILE_NAME) }),
-	}
+	const subprocessRunner = createBunSubprocessRunner()
+	const readWorkspaceGitState = createReadWorkspaceGitState({ workspaceRoot: config.workspaceRootPath, runner: subprocessRunner })
+	// The platform is constructed once per run with the run-bound artifact paths and the process's subprocess leaf; role definitions and per-invocation state, including the run's base tracker, arrive with each dispatch.
+	const toolPlatform = createToolPlatform({
+		workspaceRoot: config.workspaceRootPath,
+		defaultToolTimeoutSeconds: config.loadedGuild.deployment.executor.defaultToolTimeoutSeconds,
+		runsBaseDir: config.runsBaseDir,
+		runId,
+		logPath: path.join(config.runsBaseDir, runId, LOG_FILE_NAME),
+		kagiApiKey: config.kagiApiKey,
+	}, { subprocessRunner })
 	excludeOrchestrationFromGit(config.workspaceRootPath)
 	const appendLog = createAppendLog(runId, config.runsBaseDir)
 	// The run's logging level applies at the single write chokepoint: every event the executor and the human backend emit funnels through this wrapper, so the heavy bodies are dropped once here and no emitter needs to know the level (see docs/reference.md "Logging level").
@@ -108,7 +106,7 @@ async function withRunBindings<T>(config: {
 		writeMeta: createWriteMeta(runId, config.runsBaseDir),
 		writeCheckpoint: createWriteCheckpoint(runId, config.runsBaseDir),
 		deleteCheckpoint: createDeleteCheckpoint(runId, config.runsBaseDir),
-		additionalToolHandlers,
+		toolPlatform,
 		humanBackend: config.humanBackend,
 		interruptQueue,
 		publishDelta: (delta) => config.deltaChannel.publish(delta),

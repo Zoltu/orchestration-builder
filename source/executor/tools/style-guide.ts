@@ -4,7 +4,7 @@ import { truncateToolOutput } from '../context/index.js'
 import { createToolError } from '../errors.js'
 import { STYLE_GUIDE_FILE_NAME } from '../persistence.js'
 import { isRunIdShape } from '../run-id.js'
-import type { ToolHandler } from '../tool-dispatch.js'
+import type { ToolHandler } from './tool-dispatch.js'
 import { wrapIoError } from './shared.js'
 
 export interface StyleGuideToolConfig {

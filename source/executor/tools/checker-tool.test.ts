@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import { createCheckerTool, type CheckerCommandResult } from './checker-tool.ts'
-import { type SubprocessRunner } from './subprocess-tool.ts'
+import { type SubprocessRunner } from '../subprocess.ts'
 import { toolData } from '../test-fixtures.ts'
 import { isObject } from '../validation.ts'
 

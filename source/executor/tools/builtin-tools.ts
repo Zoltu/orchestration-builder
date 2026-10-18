@@ -1,16 +1,16 @@
-import { createToolError, isErrorKind } from './errors.js'
-import type { Message, ResultCard, ToolResult } from './types.js'
-import { stripReasoning } from './context/index.js'
-import { indexRoleMessages, readMessageWindow, searchRoleBlocks, MAX_SEARCH_MATCHES, RECENT_TOOL_CALLS_LIMIT, type InspectionField, type RecentToolCall } from './role-inspection.js'
-import type { InterruptActionKind, RoleRegistry, RoleRegistryEntry } from './role-registry.js'
-import { isObject } from './validation.js'
-import { optionalPositiveInt } from './tools/shared.js'
+import { createToolError, isErrorKind } from '../errors.js'
+import type { Message, ResultCard, ToolResult } from '../types.js'
+import { stripReasoning } from '../context/index.js'
+import { indexRoleMessages, readMessageWindow, searchRoleBlocks, MAX_SEARCH_MATCHES, RECENT_TOOL_CALLS_LIMIT, type InspectionField, type RecentToolCall } from '../role-inspection.js'
+import type { InterruptActionKind, RoleRegistry, RoleRegistryEntry } from '../role-registry.js'
+import { isObject } from '../validation.js'
+import { optionalPositiveInt } from './shared.js'
 import type { ToolHandler } from './tool-dispatch.js'
-import type { HumanBackend } from './human-backend.js'
-import type { LoadedGuild } from './loader.js'
-import { logEvent, type RoleState } from './engine-state.js'
-import type { AppendLog } from './persistence.js'
-import type { RunParkTracker } from './park-state.js'
+import type { HumanBackend } from '../human-backend.js'
+import { logEvent } from '../engine-state.js'
+import type { RoleState } from '../state.js'
+import type { AppendLog } from '../persistence.js'
+import type { RunParkTracker } from '../park-state.js'
 
 export interface BuiltInToolContext {
 	spawnAgent(roleName: string, task: string): Promise<ResultCard>
@@ -18,7 +18,7 @@ export interface BuiltInToolContext {
 	continueAgent(roleName: string, comment: string | undefined, roleId: string | undefined): Promise<ResultCard>
 	roleState: RoleState
 	humanBackend: HumanBackend
-	loadedGuild: LoadedGuild
+	contextWindow: number
 	roleRegistry: RoleRegistry
 	// The instance id of the role these handlers belong to. Cross-role tools reject a caller that targets itself: a caller is active, and cross-role targets must be suspended — self-edits go through the target-free self path.
 	ownRoleId: string
@@ -170,7 +170,7 @@ function createContextInfo(context: BuiltInToolContext): ToolHandler {
 		const target = resolveContextTarget(context, args)
 		if (!target.ok) return target.error
 		const state = target.state
-		const contextWindow = context.loadedGuild.deployment.model.contextWindow
+		const contextWindow = context.contextWindow
 		const messages = snapshotMessages(state.history)
 		const totalContentChars = messages.reduce((sum, m) => sum + m.contentChars + m.reasoningChars, 0)
 		const estimatedPromptTokens = Math.ceil(totalContentChars / 4)

@@ -1,6 +1,6 @@
-import type { ToolHandler } from '../tool-dispatch.js'
+import type { ToolHandler } from './tool-dispatch.js'
 import { createCheckerTool, type CheckerData } from './checker-tool.js'
-import type { SubprocessRunner } from './subprocess-tool.js'
+import type { SubprocessRunner } from '../subprocess.js'
 
 export type TestData = CheckerData
 

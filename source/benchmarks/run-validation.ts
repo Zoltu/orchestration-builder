@@ -1,6 +1,6 @@
 import * as fs from 'node:fs'
 import * as path from 'node:path'
-import { createBunSubprocessRunner, type SubprocessOutcome, type SubprocessRunner } from '../executor/tools/subprocess-tool.js'
+import { createBunSubprocessRunner, type SubprocessOutcome, type SubprocessRunner } from '../executor/subprocess.js'
 import type { BenchmarkRunOutput, ValidationSpec } from './validation.js'
 
 export type RunValidation = (workspacePath: string, spec: ValidationSpec) => Promise<BenchmarkRunOutput>

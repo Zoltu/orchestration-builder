@@ -5,16 +5,13 @@ import * as fs from 'node:fs'
 import * as path from 'node:path'
 import { parseEvalConfig, type EvalConfig } from '../benchmarks/validation.js'
 import { createRunBaseTracker } from '../executor/base-state.js'
-import { createBuiltInToolHandlers } from '../executor/builtin-tools.js'
 import { ERROR_KINDS } from '../executor/errors.js'
 import { composeRolePrompt, createGuildLoader, resolveConceptContents, SHARED_CONCEPTS_PREAMBLE, type LoadedGuildFiles } from '../executor/loader.js'
 import { LOG_FILE_NAME } from '../executor/persistence.js'
 import { createRunParkTracker } from '../executor/park-state.js'
 import { createRoleRegistry } from '../executor/role-registry.js'
-import { createToolHandlers } from '../executor/tools.js'
-import { createPlanToolHandlers } from '../executor/tools/plan.js'
-import { createStyleGuideToolHandlers } from '../executor/tools/style-guide.js'
-import { createRunLogToolHandlers } from '../executor/tools/run-log.js'
+import { createToolPlatform, type RunToolScope } from '../executor/tools/index.js'
+import { createBunSubprocessRunner } from '../executor/subprocess.js'
 import type { HumanFacingText, ToolManifest } from '../executor/types.js'
 import { isNonEmptyStringArray, validateToolManifest } from '../executor/validation.js'
 import { faviconHref } from '../web/static/ts/favicon.js'
@@ -568,16 +565,16 @@ function checkManifests(): void {
 	const duplicateNames = manifestNames.filter((name, index) => manifestNames.indexOf(name) !== index)
 	check(new Set(manifestNames).size === manifestNames.length, `guild/tools: duplicate manifest names: ${[...new Set(duplicateNames)].join(', ')}`)
 
-	// Plan, style-guide, and run-log handlers close over their run's directory (they are bound per run in the server), so the gate constructs them over fixture bindings it never invokes, solely to compare the full native handler table.
-	const nativeHandlers = {
-		...createToolHandlers({ workspaceRoot: manifestDir, defaultToolTimeoutSeconds: 30, baseTracker: createRunBaseTracker() }),
-		...createPlanToolHandlers({ runsBaseDir: manifestDir, runId: 'run-19700101-000000', workspaceRoot: repoRoot }),
-		...createStyleGuideToolHandlers({ runsBaseDir: manifestDir, runId: 'run-19700101-000000', workspaceRoot: repoRoot }),
-		...createRunLogToolHandlers({ logPath: path.join(manifestDir, LOG_FILE_NAME) }),
-	}
-	checkSameSet('native tool handler table', new Set(Object.keys(nativeHandlers)), nativeToolNames)
-	// Shape-only fixture: the handlers are compared by name and never invoked, so the guild stub only has to type-check.
-	const builtInHandlers = createBuiltInToolHandlers({
+	// The platform is the single composer of every tool family, so the gate builds it over fixture bindings it never invokes and compares the public handler-name surface rather than reassembling the families by hand.
+	const platform = createToolPlatform({
+		workspaceRoot: manifestDir,
+		defaultToolTimeoutSeconds: 30,
+		runsBaseDir: manifestDir,
+		runId: 'run-19700101-000000',
+		logPath: path.join(manifestDir, LOG_FILE_NAME),
+	}, { subprocessRunner: createBunSubprocessRunner() })
+	// Shape-only fixture: the handlers are compared by name and never invoked, so the role and scope only have to type-check.
+	const fixtureScope: RunToolScope = {
 		spawnAgent: async () => ({ status: 'success', summary: '' }),
 		continueAgent: async () => ({ status: 'success', summary: '' }),
 		roleState: {
@@ -592,25 +589,22 @@ function checkManifests(): void {
 			loopCheckTokenWatermark: 0,
 		},
 		humanBackend: { ask: async () => '' },
-		loadedGuild: {
-			config: { entryRole: '', roles: {}, tools: [] },
-			deployment: {
-				model: { name: '', apiBase: '', contextWindow: 1000, generation: {} },
-				executor: { maxAgentDepth: 8, defaultToolTimeoutSeconds: 30, maxCompactionAttempts: 5 },
-				contextPolicy: { maxToolOutputChars: 4000 },
-			},
-			prompts: {},
-			tools: {},
-		},
 		roleRegistry: createRoleRegistry(),
 		ownRoleId: 'fixture-0-0',
 		appendLog: () => undefined,
 		parkTracker: createRunParkTracker(),
-	})
-	checkSameSet('built-in tool handler table', new Set(Object.keys(builtInHandlers)), builtInToolNames)
+		baseTracker: createRunBaseTracker(),
+		contextWindow: 1000,
+		manifestNames: expectedToolNames,
+	}
+	const allHandlerNames = new Set(platform.handlerNames(fixtureScope))
+	const nativeHandlerNames = new Set([...allHandlerNames].filter((name) => !builtInToolNames.has(name)))
+	const builtInHandlerNames = new Set([...allHandlerNames].filter((name) => builtInToolNames.has(name)))
+	checkSameSet('native tool handler table', nativeHandlerNames, nativeToolNames)
+	checkSameSet('built-in tool handler table', builtInHandlerNames, builtInToolNames)
 	for (const manifest of manifests) {
-		if (nativeToolNames.has(manifest.name)) check(manifest.name in nativeHandlers, `guild/tools: native handler missing for "${manifest.name}"`)
-		if (builtInToolNames.has(manifest.name)) check(manifest.name in builtInHandlers, `guild/tools: built-in handler missing for "${manifest.name}"`)
+		if (nativeToolNames.has(manifest.name)) check(allHandlerNames.has(manifest.name), `guild/tools: native handler missing for "${manifest.name}"`)
+		if (builtInToolNames.has(manifest.name)) check(allHandlerNames.has(manifest.name), `guild/tools: built-in handler missing for "${manifest.name}"`)
 	}
 }
 

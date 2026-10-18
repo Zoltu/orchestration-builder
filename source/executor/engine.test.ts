@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 
-import type { ContextPolicy, DeploymentConfig, ExecutorConfig, GuildConfig, LogEvent, Message, ResolvedModelConfig, ResultCard, RoleDefinition, ToolCall, ToolManifest } from './types.js'
+import type { ContextPolicy, DeploymentConfig, ExecutorConfig, GuildConfig, LogEvent, Message, ResolvedModelConfig, ResultCard, RoleDefinition, ToolCall, ToolManifest, ToolResult } from './types.js'
 import { effortDirective } from './effort.ts'
 import { involvementDirective } from './involvement.ts'
 import { createContextPressureTracker } from './context/index.js'
@@ -14,12 +14,14 @@ import type { LoadedGuild } from './loader.ts'
 import type { AppendLog } from './persistence.ts'
 import { createRoleRegistry } from './role-registry.ts'
 import { isRunCheckpoint, type RunCheckpoint } from './checkpoint.ts'
-import { createFakeCheckpointRecorder, createFakeRoleSnapshotStore, recordingHumanBackend, stubHumanBackend, withTool, defined } from './test-fixtures.ts'
+import { createFakeCheckpointRecorder, createFakeRoleSnapshotStore, createFixtureToolPlatform, recordingHumanBackend, stubHumanBackend, withTool, defined } from './test-fixtures.ts'
 import { createRunBaseTracker } from './base-state.ts'
 import { createRunParkTracker, type RunParkTracker } from './park-state.ts'
 import type { RoleSnapshotStore } from './role-snapshot.ts'
 import type { RoleDelta } from './stream-channel.ts'
-import type { ToolHandler } from './tool-dispatch.ts'
+import type { ToolPlatform } from './tool-platform-port.ts'
+import { createToolError } from './errors.ts'
+import { isObject, safeJsonParse } from './validation.ts'
 
 function success(toolCalls: ToolCall[], opts: { content?: string; promptTokens?: number; completionTokens?: number; finishReason?: string } = {}): LlmCallResult {
 	const result: LlmCallResult = {
@@ -253,6 +255,35 @@ function continueAgentCard(events: LogEvent[]): ContinueAgentCardShape {
 	return { status }
 }
 
+// Wraps the real platform so a test can add a scripted tool while preserving the platform's gating and its rule that built-ins and native handlers are never shadowed. This keeps engine tests focused on orchestration without reopening the production platform to arbitrary handler maps.
+type FixtureToolHandler = (args: Record<string, unknown>) => ToolResult | Promise<ToolResult>
+
+function withExtraHandlers(platform: ToolPlatform, extra: Record<string, FixtureToolHandler>): ToolPlatform {
+	return {
+		handlerNames(runScope) {
+			return [...new Set([...Object.keys(extra), ...platform.handlerNames(runScope)])]
+		},
+		async dispatch(roleDefinition, runScope, call) {
+			const baseOwnsTool = platform.handlerNames(runScope).includes(call.function.name)
+			if (baseOwnsTool) return platform.dispatch(roleDefinition, runScope, call)
+			const handler = extra[call.function.name]
+			if (handler === undefined) return platform.dispatch(roleDefinition, runScope, call)
+			if (!runScope.manifestNames.has(call.function.name)) return createToolError('unknown_tool', `Tool ${call.function.name} is not registered in the Guild`)
+			if (!roleDefinition.tools.includes(call.function.name)) return createToolError('invalid_tool_call', `Tool ${call.function.name} not allowed for this role`)
+			const parsed = safeJsonParse(call.function.arguments)
+			if (!parsed.ok) return createToolError('invalid_arguments', 'arguments must be valid JSON')
+			if (!isObject(parsed.value)) return createToolError('invalid_arguments', 'arguments must be a JSON object')
+			return await handler(parsed.value)
+		},
+		suspendsChild(toolName) {
+			return platform.suspendsChild(toolName)
+		},
+		observesRole(toolName) {
+			return platform.observesRole(toolName)
+		},
+	}
+}
+
 function makeDeps(llm: LlmCaller): { deps: EngineDependencies; events: LogEvent[]; checkpoints: RunCheckpoint[]; parkTracker: RunParkTracker; roleSnapshots: RoleSnapshotStore } {
 	const { appendLog, events } = makeFakeAppendLog()
 	const roleRegistry = createRoleRegistry()
@@ -264,7 +295,7 @@ function makeDeps(llm: LlmCaller): { deps: EngineDependencies; events: LogEvent[
 	const deps: EngineDependencies = {
 		llmCaller: llm,
 		appendLog,
-		additionalToolHandlers: {},
+		toolPlatform: createFixtureToolPlatform(),
 		humanBackend: stubHumanBackend,
 		roleRegistry,
 		interruptQueue: createInterruptQueue(),
@@ -281,7 +312,7 @@ function makeDeps(llm: LlmCaller): { deps: EngineDependencies; events: LogEvent[
 
 function noOpPublishDelta(): void {}
 
-const echoHandler: ToolHandler = (args) => ({ kind: 'success', data: args })
+const echoHandler: FixtureToolHandler = (args) => ({ kind: 'success', data: args })
 
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -343,6 +374,35 @@ describe('runRole — acceptance criteria', () => {
 		expect(events.some((e) => e.type === 'llm_call')).toBe(true)
 		expect(events.some((e) => e.type === 'tool_call')).toBe(true)
 		expect(events.some((e) => e.type === 'tool_result')).toBe(true)
+	})
+
+	test('an invalid finish summary is rejected as a tool result and the role continues to a valid finish', async () => {
+		const guild = buildGuild(
+			{ main: { systemPrompt: 'p', tools: ['finish'] } },
+			'main',
+		)
+		const llm = new FakeLlm()
+		llm.responses = [
+			success([namedCall('bad_finish', 'finish', { status: 'success', summary: '   ' })]),
+			success([finishCall({ status: 'success', summary: 'done' })]),
+		]
+		const { deps, events } = makeDeps(llm)
+
+		const result = await runRole(deps, {
+			loadedGuild: guild,
+			depth: 0,
+			roleName: 'main',
+			task: 'do it',
+		})
+
+		expect(result).toEqual({ status: 'success', summary: 'done' })
+		expect(llm.calls.length).toBe(2)
+		const finishResults = events.filter((e) => e.type === 'tool_result' && payloadField(e, 'tool') === 'finish')
+		expect(finishResults.length).toBe(2)
+		const rejected = payloadField(defined(finishResults[0], 'rejected finish result'), 'result')
+		if (!isRecord(rejected)) throw new Error('expected the rejected finish tool result payload')
+		expect(rejected['kind']).toBe('invalid_arguments')
+		expect(rejected['message']).toBe('summary must be a non-empty string')
 	})
 
 	test('agent+finish role spawns a child role and returns its result card', async () => {
@@ -418,7 +478,7 @@ describe('runRole — acceptance criteria', () => {
 			},
 		)
 		const bigCall = (id: string): ToolCall => ({ id, type: 'function', function: { name: 'big', arguments: '{}' } })
-		const bigHandler: ToolHandler = () => ({ kind: 'success', data: { text: 'x'.repeat(2000) } })
+		const bigHandler: FixtureToolHandler = () => ({ kind: 'success', data: { text: 'x'.repeat(2000) } })
 		const llm = new FakeLlm()
 		llm.responses = [
 			success([bigCall('b1')]),
@@ -428,7 +488,7 @@ describe('runRole — acceptance criteria', () => {
 			success([finishCall({ status: 'success', summary: 'recovered' })]),
 		]
 		const { deps, events } = makeDeps(llm)
-		const depsWithBig: EngineDependencies = { ...deps, additionalToolHandlers: { big: bigHandler } }
+		const depsWithBig: EngineDependencies = { ...deps, toolPlatform: withExtraHandlers(deps.toolPlatform, { big: bigHandler }) }
 
 		const result = await runRole(depsWithBig, {
 			loadedGuild: guild,
@@ -533,7 +593,7 @@ describe('runRole — acceptance criteria', () => {
 			success([finishCall({ status: 'success', summary: 'recovered' })]),
 		]
 		const { deps } = makeDeps(llm)
-		const depsWithEcho: EngineDependencies = { ...deps, additionalToolHandlers: { echo: echoHandler } }
+		const depsWithEcho: EngineDependencies = { ...deps, toolPlatform: withExtraHandlers(deps.toolPlatform, { echo: echoHandler }) }
 
 		const result = await runRole(depsWithEcho, {
 			loadedGuild: guild,
@@ -833,9 +893,7 @@ describe('runRole — acceptance criteria', () => {
 		const { deps } = makeDeps(llm)
 		const depsWithEcho: EngineDependencies = {
 			...deps,
-			additionalToolHandlers: {
-				echo: echoHandler,
-			},
+			toolPlatform: withExtraHandlers(deps.toolPlatform, { echo: echoHandler }),
 		}
 
 		const result = await runRole(depsWithEcho, {
@@ -877,7 +935,7 @@ describe('runRole — acceptance criteria', () => {
 		]
 		const caller = createLlmCaller(baseModel, undefined, { llmFetch: wire.llmFetch, sleep: () => Promise.resolve(), scheduleTimeout: () => () => undefined })
 		const { deps } = makeDeps(caller)
-		const depsWithEcho: EngineDependencies = { ...deps, additionalToolHandlers: { echo: echoHandler } }
+		const depsWithEcho: EngineDependencies = { ...deps, toolPlatform: withExtraHandlers(deps.toolPlatform, { echo: echoHandler }) }
 
 		const result = await runRole(depsWithEcho, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'do it' })
 
@@ -926,7 +984,7 @@ describe('runRole — acceptance criteria', () => {
 		]
 		const caller = createLlmCaller(baseModel, undefined, { llmFetch: wire.llmFetch, sleep: () => Promise.resolve(), scheduleTimeout: () => () => undefined })
 		const { deps } = makeDeps(caller)
-		const depsWithEcho: EngineDependencies = { ...deps, additionalToolHandlers: { echo: echoHandler } }
+		const depsWithEcho: EngineDependencies = { ...deps, toolPlatform: withExtraHandlers(deps.toolPlatform, { echo: echoHandler }) }
 
 		const result = await runRole(depsWithEcho, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'do it' })
 
@@ -955,7 +1013,7 @@ describe('runRole — acceptance criteria', () => {
 			},
 		)
 		const bigCall = (id: string): ToolCall => ({ id, type: 'function', function: { name: 'big', arguments: '{}' } })
-		const bigHandler: ToolHandler = () => ({ kind: 'success', data: { text: 'x'.repeat(2000) } })
+		const bigHandler: FixtureToolHandler = () => ({ kind: 'success', data: { text: 'x'.repeat(2000) } })
 		const llm = new FakeLlm()
 		llm.responses = [
 			{ kind: 'success', content: '', reasoning: 'round one thinking', toolCalls: [bigCall('b1')], usage: { promptTokens: 10, completionTokens: 5 } },
@@ -964,7 +1022,7 @@ describe('runRole — acceptance criteria', () => {
 			success([finishCall({ status: 'success', summary: 'recovered' })]),
 		]
 		const { deps, events } = makeDeps(llm)
-		const depsWithBig: EngineDependencies = { ...deps, additionalToolHandlers: { big: bigHandler } }
+		const depsWithBig: EngineDependencies = { ...deps, toolPlatform: withExtraHandlers(deps.toolPlatform, { big: bigHandler }) }
 
 		const result = await runRole(depsWithBig, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'do it' })
 
@@ -999,7 +1057,7 @@ describe('runRole — acceptance criteria', () => {
 			type: 'function',
 			function: { name: 'big', arguments: '{}' },
 		}
-		const bigHandler: ToolHandler = () => ({ kind: 'success', data: { text: 'x'.repeat(200) } })
+		const bigHandler: FixtureToolHandler = () => ({ kind: 'success', data: { text: 'x'.repeat(200) } })
 		const llm = new FakeLlm()
 		llm.responses = [
 			success([bigCall]),
@@ -1008,7 +1066,7 @@ describe('runRole — acceptance criteria', () => {
 		const { deps } = makeDeps(llm)
 		const depsWithBig: EngineDependencies = {
 			...deps,
-			additionalToolHandlers: { big: bigHandler },
+			toolPlatform: withExtraHandlers(deps.toolPlatform, { big: bigHandler }),
 		}
 
 		await runRole(depsWithBig, {
@@ -1026,7 +1084,7 @@ describe('runRole — acceptance criteria', () => {
 	expect(content.startsWith('"')).toBe(false)
 })
 
-	test('an additionalToolHandlers entry under a built-in name does not shadow the built-in', async () => {
+	test('an extra handler under a built-in name does not shadow the built-in', async () => {
 		const guild = buildGuild(
 			{ main: { systemPrompt: 'p', tools: ['finish'] } },
 			'main',
@@ -1034,9 +1092,9 @@ describe('runRole — acceptance criteria', () => {
 		const llm = new FakeLlm()
 		llm.responses = [success([finishCall({ status: 'success', summary: 'built-in finish won' })])]
 		const { deps, events } = makeDeps(llm)
-		// The built-ins spread last over additionalToolHandlers, so this handler must never run: had it won, its non-ResultCard payload would not have finalized the role and FakeLlm would run out of responses.
-		const shadowingHandler: ToolHandler = () => ({ kind: 'success', data: { shadowed: true } })
-		const depsWithShadow: EngineDependencies = { ...deps, additionalToolHandlers: { finish: shadowingHandler } }
+		// The platform spreads built-ins last over any extra handler, so this handler must never run: had it won, its non-ResultCard payload would not have finalized the role and FakeLlm would run out of responses.
+		const shadowingHandler: FixtureToolHandler = () => ({ kind: 'success', data: { shadowed: true } })
+		const depsWithShadow: EngineDependencies = { ...deps, toolPlatform: withExtraHandlers(deps.toolPlatform, { finish: shadowingHandler }) }
 
 		const result = await runRole(depsWithShadow, {
 			loadedGuild: guild,
@@ -1278,7 +1336,7 @@ describe('runRole — rich LLM and tool payloads', () => {
 			type: 'function',
 			function: { name: 'big', arguments: '{"path":"x.txt"}' },
 		}
-		const bigHandler: ToolHandler = () => ({ kind: 'success', data: { text: 'x'.repeat(200) } })
+		const bigHandler: FixtureToolHandler = () => ({ kind: 'success', data: { text: 'x'.repeat(200) } })
 		const llm = new FakeLlm()
 		llm.responses = [
 			success([bigCall]),
@@ -1287,7 +1345,7 @@ describe('runRole — rich LLM and tool payloads', () => {
 		const { deps, events } = makeDeps(llm)
 		const depsWithBig: EngineDependencies = {
 			...deps,
-			additionalToolHandlers: { big: bigHandler },
+			toolPlatform: withExtraHandlers(deps.toolPlatform, { big: bigHandler }),
 		}
 
 		await runRole(depsWithBig, {
@@ -1626,13 +1684,13 @@ describe('runRole — interrupt platform', () => {
 		const { deps, events } = makeDeps(llm)
 		const depsWithEcho: EngineDependencies = {
 			...deps,
-			additionalToolHandlers: {
+			toolPlatform: withExtraHandlers(deps.toolPlatform, {
 				// The sub-coder's first tool call is where the operator's modification lands; the sub-coder's next turn top routes it.
 				echo: () => {
 					deps.interruptQueue.submit({ kind: 'plan_modification', message: 'use Postgres instead of SQLite' })
 					return { kind: 'success', data: {} }
 				},
-			},
+			}),
 		}
 
 		const result = await runRole(depsWithEcho, {
@@ -1684,13 +1742,13 @@ describe('runRole — interrupt platform', () => {
 		const { deps, events } = makeDeps(llm)
 		const depsWithEcho: EngineDependencies = {
 			...deps,
-			additionalToolHandlers: {
+			toolPlatform: withExtraHandlers(deps.toolPlatform, {
 				// The child's tool call is where the operator's question lands; the child's next turn top hands it to the handler.
 				echo: () => {
 					deps.interruptQueue.submit({ kind: 'inquiry', message: 'how is the run going?' })
 					return { kind: 'success', data: {} }
 				},
-			},
+			}),
 		}
 
 		const result = await runRole(depsWithEcho, {
@@ -1870,7 +1928,7 @@ describe('runRole — observe emission', () => {
 			success([finishCall({ status: 'success', summary: 'parent done' })]),
 		]
 		const { deps, events } = makeDeps(llm)
-		const depsWithEcho: EngineDependencies = { ...deps, additionalToolHandlers: { echo: echoHandler } }
+		const depsWithEcho: EngineDependencies = { ...deps, toolPlatform: withExtraHandlers(deps.toolPlatform, { echo: echoHandler }) }
 
 		await runRole(depsWithEcho, { loadedGuild: guild, depth: 0, roleName: 'parent', task: 'delegate' })
 
@@ -2437,7 +2495,7 @@ describe('run persistence and resumption', () => {
 			success([finishCall({ status: 'success', summary: 'parent done' })]),
 		]
 		const { deps, checkpoints } = makeDeps(llm)
-		const depsWithEcho: EngineDependencies = { ...deps, additionalToolHandlers: { echo: echoHandler } }
+		const depsWithEcho: EngineDependencies = { ...deps, toolPlatform: withExtraHandlers(deps.toolPlatform, { echo: echoHandler }) }
 		const card = await runRole(depsWithEcho, { loadedGuild: guild, depth: 0, roleName: 'orchestrator', task: 'do it' })
 		return { card, checkpoints }
 	}
@@ -2480,7 +2538,7 @@ describe('run persistence and resumption', () => {
 			success([finishCall({ status: 'success', summary: 'parent done' })]),
 		]
 		const { deps, events, checkpoints: resumedWrites } = makeDeps(llm)
-		const depsWithEcho: EngineDependencies = { ...deps, additionalToolHandlers: { echo: echoHandler } }
+		const depsWithEcho: EngineDependencies = { ...deps, toolPlatform: withExtraHandlers(deps.toolPlatform, { echo: echoHandler }) }
 
 		const card = await resumeRoleStack(runRole, depsWithEcho, guild, checkpoint)
 
@@ -2513,7 +2571,7 @@ describe('run persistence and resumption', () => {
 		const llm = new FakeLlm()
 		llm.responses = [success([finishCall({ status: 'success', summary: 'parent done' })])]
 		const { deps, events } = makeDeps(llm)
-		const depsWithEcho: EngineDependencies = { ...deps, additionalToolHandlers: { echo: echoHandler } }
+		const depsWithEcho: EngineDependencies = { ...deps, toolPlatform: withExtraHandlers(deps.toolPlatform, { echo: echoHandler }) }
 
 		const card = await resumeRoleStack(runRole, depsWithEcho, guild, checkpoint)
 
@@ -2537,7 +2595,7 @@ describe('run persistence and resumption', () => {
 			success([finishCall({ status: 'success', summary: 'parent done' })]),
 		]
 		const { deps, events } = makeDeps(llm)
-		const depsWithEcho: EngineDependencies = { ...deps, additionalToolHandlers: { echo: echoHandler } }
+		const depsWithEcho: EngineDependencies = { ...deps, toolPlatform: withExtraHandlers(deps.toolPlatform, { echo: echoHandler }) }
 
 		const card = await resumeRoleStack(runRole, depsWithEcho, guild, checkpoint)
 
@@ -2608,7 +2666,7 @@ describe('runRole — llm_call delta protocol', () => {
 			success([finishCall({ status: 'success', summary: 'done' })]),
 		]
 		const { deps, events } = makeDeps(llm)
-		const depsWithEcho: EngineDependencies = { ...deps, additionalToolHandlers: { echo: echoHandler } }
+		const depsWithEcho: EngineDependencies = { ...deps, toolPlatform: withExtraHandlers(deps.toolPlatform, { echo: echoHandler }) }
 
 		await runRole(depsWithEcho, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'do it' })
 
@@ -2656,7 +2714,7 @@ describe('runRole — llm_call delta protocol', () => {
 			success([finishCall({ status: 'success', summary: 'main done' })], { promptTokens: 100 }),
 		]
 		const { deps, events } = makeDeps(llm)
-		const depsWithEcho: EngineDependencies = { ...deps, additionalToolHandlers: { echo: echoHandler } }
+		const depsWithEcho: EngineDependencies = { ...deps, toolPlatform: withExtraHandlers(deps.toolPlatform, { echo: echoHandler }) }
 
 		await runRole(depsWithEcho, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'do it' })
 
@@ -2680,7 +2738,7 @@ describe('runRole — llm_call delta protocol', () => {
 			success([finishCall({ status: 'success', summary: 'done' })]),
 		]
 		const { deps, events } = makeDeps(llm)
-		const depsWithEcho: EngineDependencies = { ...deps, additionalToolHandlers: { echo: echoHandler } }
+		const depsWithEcho: EngineDependencies = { ...deps, toolPlatform: withExtraHandlers(deps.toolPlatform, { echo: echoHandler }) }
 
 		await runRole(depsWithEcho, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'do it' })
 
@@ -2701,7 +2759,7 @@ describe('runRole — llm_call delta protocol', () => {
 			{ contextPolicy: { maxToolOutputChars: 4000 } },
 		)
 		guild.tools['big'] = { name: 'big', description: 'returns a large payload', parameters: { type: 'object', properties: {} } }
-		const bigHandler: ToolHandler = () => ({ kind: 'success', data: { text: 'x'.repeat(2000) } })
+		const bigHandler: FixtureToolHandler = () => ({ kind: 'success', data: { text: 'x'.repeat(2000) } })
 		const llm = new FakeLlm()
 		llm.responses = [
 			success([bigCall('b1')]),
@@ -2711,7 +2769,7 @@ describe('runRole — llm_call delta protocol', () => {
 			success([finishCall({ status: 'success', summary: 'recovered' })]),
 		]
 		const { deps, events } = makeDeps(llm)
-		const depsWithBig: EngineDependencies = { ...deps, additionalToolHandlers: { big: bigHandler } }
+		const depsWithBig: EngineDependencies = { ...deps, toolPlatform: withExtraHandlers(deps.toolPlatform, { big: bigHandler }) }
 
 		await runRole(depsWithBig, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'do it' })
 
@@ -2740,7 +2798,7 @@ describe('runRole — llm_call delta protocol', () => {
 			success([finishCall({ status: 'success', summary: 'parent done' })]),
 		]
 		const uninterruptedDeps = makeDeps(uninterruptedLlm)
-		await runRole({ ...uninterruptedDeps.deps, additionalToolHandlers: { echo: echoHandler } }, { loadedGuild: guild, depth: 0, roleName: 'orchestrator', task: 'do it' })
+		await runRole({ ...uninterruptedDeps.deps, toolPlatform: withExtraHandlers(uninterruptedDeps.deps.toolPlatform, { echo: echoHandler }) }, { loadedGuild: guild, depth: 0, roleName: 'orchestrator', task: 'do it' })
 		const checkpoint = defined(uninterruptedDeps.checkpoints[2], 'checkpoint at the coder\u2019s second loop top')
 		expect(checkpoint.frames[1]?.roleName).toBe('coder')
 		// The coder's turn-1 request was [system, task], so its baseline is 2 — and the fake sink's JSON copy proves the field survives the checkpoint round-trip validation.
@@ -2753,7 +2811,7 @@ describe('runRole — llm_call delta protocol', () => {
 		]
 		const { deps, events } = makeDeps(resumedLlm)
 
-		await resumeRoleStack(runRole, { ...deps, additionalToolHandlers: { echo: echoHandler } }, guild, checkpoint)
+		await resumeRoleStack(runRole, { ...deps, toolPlatform: withExtraHandlers(deps.toolPlatform, { echo: echoHandler }) }, guild, checkpoint)
 
 		// The resumed coder's next request is its preserved 4-message conversation, logged as a delta from the preserved baseline — not a re-logged full snapshot.
 		const coderCalls = llmCallsOf(events, 'coder')
@@ -3052,7 +3110,7 @@ describe('runRole — usage accounting and retry spend', () => {
 			success([finishCall({ status: 'success', summary: 'done' })]),
 		]
 		const { deps, events, checkpoints } = makeDeps(llm)
-		const depsWithEcho: EngineDependencies = { ...deps, additionalToolHandlers: { echo: echoHandler } }
+		const depsWithEcho: EngineDependencies = { ...deps, toolPlatform: withExtraHandlers(deps.toolPlatform, { echo: echoHandler }) }
 
 		const result = await runRole(depsWithEcho, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'do it' })
 
@@ -3078,7 +3136,7 @@ describe('runRole — usage accounting and retry spend', () => {
 			success([finishCall({ status: 'success', summary: 'done' })]),
 		]
 		const { deps, events, checkpoints } = makeDeps(llm)
-		const depsWithEcho: EngineDependencies = { ...deps, additionalToolHandlers: { echo: echoHandler } }
+		const depsWithEcho: EngineDependencies = { ...deps, toolPlatform: withExtraHandlers(deps.toolPlatform, { echo: echoHandler }) }
 
 		await runRole(depsWithEcho, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'do it' })
 

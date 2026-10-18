@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { type SubprocessOutcome, type SubprocessRunner } from './subprocess-tool.ts'
+import { type SubprocessOutcome, type SubprocessRunner } from '../subprocess.ts'
 import { createRunShell, type RunShellData } from './run-shell.ts'
 import { toolData } from '../test-fixtures.ts'
 import { isObject } from '../validation.ts'

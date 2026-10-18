@@ -1,8 +1,8 @@
 import * as fs from 'node:fs'
 import * as path from 'node:path'
 import { createToolError } from '../errors.js'
-import type { ToolHandler } from '../tool-dispatch.js'
-import { isOrchestrationPath } from './shared.js'
+import type { ToolHandler } from './tool-dispatch.js'
+import { isOrchestrationPath } from '../workspace-path.js'
 
 // Only the dirent surface the walk consumes: fs.Dirent satisfies it structurally, and tests script it in memory.
 export interface WalkEntry {

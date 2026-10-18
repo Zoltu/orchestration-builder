@@ -5,7 +5,7 @@ import { createCheckpointRecorder, entryFrameLogLevel, type RunCheckpoint } from
 import { createContextPressureTracker } from './context/index.js'
 import type { RunBaseTracker } from './base-state.js'
 import { createRunParkTracker } from './park-state.js'
-import { EMPTY_TREE_HASH } from './tools/git.js'
+import { EMPTY_TREE_HASH } from './git-primitives.js'
 import { formatWorkspaceGitNotice, type ReadWorkspaceGitState } from './git-state.js'
 import { runRole } from './engine.js'
 import { logEvent, type EngineContext, type EngineDependencies } from './engine-state.js'
@@ -18,13 +18,13 @@ import type { ReadProjectDoc } from './project-docs.js'
 import { resumeRoleStack } from './resume.js'
 import { createRoleRegistry } from './role-registry.js'
 import type { RoleSnapshotStore } from './role-snapshot.js'
-import type { ToolHandler } from './tool-dispatch.js'
+import type { ToolPlatform } from './tool-platform-port.js'
 import type { RoleDelta } from './stream-channel.js'
 
 export interface ExecutorDependencies {
 	llmCaller: LlmCaller
 	appendLog: AppendLog
-	additionalToolHandlers: Record<string, ToolHandler>
+	toolPlatform: ToolPlatform
 	humanBackend: HumanBackend
 	// The service-bound, resolved guild (the LoadedGuild constructed at startup, deployment included); not the loader's file-shaped LoadGuild, which the startup path completes first. The name deliberately differs from LoadGuild: the loader reads files, this field carries the already-loaded guild.
 	loadedGuild: LoadedGuild
@@ -68,7 +68,7 @@ function buildEngineDependencies(deps: ExecutorDependencies, input: EngineDepend
 	return {
 		llmCaller: deps.llmCaller,
 		appendLog: deps.appendLog,
-		additionalToolHandlers: deps.additionalToolHandlers,
+		toolPlatform: deps.toolPlatform,
 		humanBackend: deps.humanBackend,
 		roleRegistry,
 		interruptQueue: deps.interruptQueue,

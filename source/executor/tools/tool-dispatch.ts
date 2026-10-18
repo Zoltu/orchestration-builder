@@ -1,6 +1,6 @@
-import { createToolError } from './errors.js'
-import { isObject, safeJsonParse } from './validation.js'
-import type { ToolCall, ToolResult } from './types.js'
+import { createToolError } from '../errors.js'
+import { isObject, safeJsonParse } from '../validation.js'
+import type { ToolCall, ToolResult } from '../types.js'
 
 export type ToolHandler = (args: Record<string, unknown>) => ToolResult | Promise<ToolResult>
 

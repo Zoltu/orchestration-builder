@@ -1,6 +1,6 @@
 import * as path from 'node:path'
-import { gitPrefix } from './tools/git.js'
-import type { SubprocessRunner } from './tools/subprocess-tool.js'
+import { gitPrefix } from './git-primitives.js'
+import type { SubprocessRunner } from './subprocess.js'
 
 export interface WorkspaceGitState {
 	isRepository: boolean

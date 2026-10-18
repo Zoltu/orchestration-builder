@@ -1,6 +1,6 @@
 import * as fs from 'node:fs'
 import { createToolError } from '../errors.js'
-import type { ToolHandler } from '../tool-dispatch.js'
+import type { ToolHandler } from './tool-dispatch.js'
 import type { ToolResult } from '../types.js'
 import { isObject } from '../validation.js'
 import { optionalNonNegativeInt, optionalPositiveInt, wrapIoError } from './shared.js'

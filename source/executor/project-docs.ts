@@ -1,6 +1,6 @@
 import * as fs from 'node:fs'
 import * as path from 'node:path'
-import { nodePathFilesystem, resolveWithinWorkspace } from './tools/shared.js'
+import { nodePathFilesystem, resolveWithinWorkspace } from './workspace-path.js'
 
 // The hard byte cap applied while reading a declared project document, so a path pointed at a huge file (or a device) cannot exhaust memory. The char cap is applied after decoding, so the two bounds together keep the injected block small no matter what the file holds.
 const PROJECT_DOC_BYTE_CAP = 256 * 1024

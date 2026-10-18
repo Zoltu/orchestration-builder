@@ -1,8 +1,9 @@
 import * as path from 'node:path'
 import { createToolError } from '../errors.js'
-import type { ToolHandler } from '../tool-dispatch.js'
+import type { ToolHandler } from './tool-dispatch.js'
 import type { ToolResult } from '../types.js'
-import { resolveToolTimeoutSeconds, shellArgv, truncateStreams, type SubprocessOutcome, type SubprocessRunner } from './subprocess-tool.js'
+import { resolveToolTimeoutSeconds, shellArgv, truncateStreams } from './subprocess-tool.js'
+import type { SubprocessOutcome, SubprocessRunner } from '../subprocess.js'
 
 export interface CheckerCommandResult {
 	command: string

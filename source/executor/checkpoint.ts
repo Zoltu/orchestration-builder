@@ -1,5 +1,5 @@
 import { isErrorKind } from './errors.js'
-import { SUSPENDING_CHILD_TOOLS } from './engine-state.js'
+import { suspendsChild } from './suspending-tools.js'
 import { DEFAULT_LOG_LEVEL } from './log-level.js'
 import type { ContextPressureTracker } from './context/index.js'
 import type { EngineContext, RoleState } from './engine-state.js'
@@ -90,7 +90,7 @@ function isPendingChildSuspension(value: unknown): value is PendingChildSuspensi
 	if (!isObject(value)) return false
 	if (!Array.isArray(value.toolCalls) || value.toolCalls.length === 0 || !value.toolCalls.every(isToolCall)) return false
 	if (!isNonNegativeInteger(value.childIndex) || value.childIndex >= value.toolCalls.length) return false
-	if (!SUSPENDING_CHILD_TOOLS.has(value.toolCalls[value.childIndex]?.function.name ?? '')) return false
+	if (!suspendsChild(value.toolCalls[value.childIndex]?.function.name ?? '')) return false
 	if (value.childCard !== undefined && !isResultCard(value.childCard)) return false
 	return true
 }

@@ -1,13 +1,13 @@
 import * as path from 'node:path'
 import { createToolError } from '../errors.js'
 import type { RunBaseTracker } from '../base-state.js'
-import type { ToolHandler } from '../tool-dispatch.js'
+import { EMPTY_TREE_HASH, gitPrefix } from '../git-primitives.js'
+import type { ToolHandler } from './tool-dispatch.js'
 import type { ToolResult } from '../types.js'
-import { optionalPositiveInt, ORCHESTRATION_DIR_NAME } from './shared.js'
-import { resolveToolTimeoutSeconds, truncateStreams, type SubprocessOutcome, type SubprocessRunner } from './subprocess-tool.js'
-
-// The hash of git's canonical empty tree, the comparison base for a repository whose HEAD is unborn: diffing against it shows every staged/committed path as added without requiring a commit to exist.
-export const EMPTY_TREE_HASH = '4b825dc642cb6eb9a060e54bf8d69288fbee4904'
+import { optionalPositiveInt } from './shared.js'
+import { ORCHESTRATION_DIR_NAME } from '../workspace-path.js'
+import { resolveToolTimeoutSeconds, truncateStreams } from './subprocess-tool.js'
+import type { SubprocessOutcome, SubprocessRunner } from '../subprocess.js'
 
 export interface GitToolsConfig {
 	workspaceRoot: string
@@ -24,11 +24,6 @@ interface GitOperationData {
 	stderr: string
 	// Present only on git_commit's "nothing to commit" success, explaining why a success was reported despite git declining the commit.
 	message?: string
-}
-
-// The fixed prefix silences the pager and repository hooks (including the fsmonitor hook) and pins identity/signing via `-c`, but it cannot stop a workspace repo's configured clean filter from running during `git add`, so staging a filtered path may still execute a workspace-chosen program.
-export function gitPrefix(): readonly string[] {
-	return ['git', '--no-pager', '-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false', '-c', 'user.name=Adaptive Orchestrator', '-c', 'user.email=orchestrator@localhost', '-c', 'commit.gpgsign=false']
 }
 
 function buildStatusArgv(): readonly string[] {

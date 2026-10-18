@@ -1,13 +1,11 @@
 import { describe, expect, test } from 'bun:test'
-import { createBuiltInToolHandlers, type BuiltInToolContext } from './builtin-tools.ts'
-import { createRoleRegistry, type RoleRegistry } from './role-registry.ts'
-import type { RoleState } from './engine-state.ts'
-import { createRunParkTracker } from './park-state.ts'
-import type { LoadedGuild } from './loader.ts'
-import { stubHumanBackend, toolData } from './test-fixtures.ts'
-import type { ToolHandler } from './tool-dispatch.ts'
-import type { LogEvent, Message, ToolResult } from './types.js'
-import { isObject } from './validation.ts'
+import { createRoleRegistry, type RoleRegistry } from '../role-registry.ts'
+import type { RoleState } from '../state.ts'
+import { createRunParkTracker } from '../park-state.ts'
+import { createFixtureRunScope, createFixtureToolPlatform, stubHumanBackend, toolData } from '../test-fixtures.ts'
+import type { RoleDefinition, LogEvent, Message, ToolCall, ToolResult } from '../types.js'
+import { isObject } from '../validation.ts'
+import type { RunToolScope } from './index.ts'
 
 function makeFakeAppendLog(): { appendLog: (event: LogEvent) => void } {
 	return { appendLog: () => undefined }
@@ -40,45 +38,45 @@ function fixtureRoleState(): RoleState {
 	}
 }
 
-// The handlers under test never invoke context_info, so the guild is a shape-only stub; the window value matches the one the previous extracted-field fixture carried.
-const stubGuild: LoadedGuild = {
-	config: { entryRole: 'main', roles: {}, tools: [] },
-	deployment: {
-		model: { name: 'm', apiBase: 'http://x', contextWindow: 1000, generation: {} },
-		executor: { maxAgentDepth: 8, defaultToolTimeoutSeconds: 30, maxCompactionAttempts: 5 },
-		contextPolicy: { maxToolOutputChars: 4000 },
-	},
-	prompts: {},
-	tools: {},
+const platform = createFixtureToolPlatform()
+
+const builtInRole: RoleDefinition = {
+	systemPrompt: '',
+	tools: ['trigger_interrupt', 'list_role_messages', 'read_message_window', 'search_role_blocks', 'recent_role_tool_calls', 'context_info', 'edit_context'],
 }
 
-function makeContext(): { context: BuiltInToolContext; registry: RoleRegistry; target: RoleState; callerState: RoleState } {
+function makeCall(name: string, args: Record<string, unknown>): ToolCall {
+	return { id: `call_${name}_1`, type: 'function', function: { name, arguments: JSON.stringify(args) } }
+}
+
+async function dispatch(scope: RunToolScope, name: string, args: Record<string, unknown>): Promise<ToolResult> {
+	return platform.dispatch(builtInRole, scope, makeCall(name, args))
+}
+
+function makeContext(): { context: RunToolScope; registry: RoleRegistry; target: RoleState; callerState: RoleState } {
 	const registry = createRoleRegistry()
 	const target = fixtureRoleState()
 	registry.register('coder', 1, undefined, target)
 	const callerState = fixtureRoleState()
 	registry.register('context_manager', 2, undefined, callerState)
 	const { appendLog } = makeFakeAppendLog()
-	const context: BuiltInToolContext = {
-		spawnAgent: async () => ({ status: 'success', summary: '' }),
-		continueAgent: async () => ({ status: 'success', summary: '' }),
+	const context = createFixtureRunScope({
 		roleState: callerState,
 		humanBackend: stubHumanBackend,
-		loadedGuild: stubGuild,
 		roleRegistry: registry,
 		ownRoleId: 'context_manager-2-2',
 		appendLog,
 		parkTracker: createRunParkTracker(),
 		// The caller stands in for a loop-check handler serving the coder instance: trigger_interrupt must accept that instance and no other.
 		handlerOf: 'coder-1-1',
-	}
+		manifestNames: new Set(builtInRole.tools),
+		contextWindow: 1000,
+	})
 	return { context, registry, target, callerState }
 }
 
-function handlerFor(handlers: Record<string, ToolHandler>, name: string): ToolHandler {
-	const handler = handlers[name]
-	if (handler === undefined) throw new Error(`missing built-in handler: ${name}`)
-	return handler
+function handlerFor(scope: RunToolScope, name: string): (args: Record<string, unknown>) => Promise<ToolResult> {
+	return (args) => dispatch(scope, name, args)
 }
 
 function isMessageIndexData(value: unknown): value is { messages: unknown[] } {
@@ -101,16 +99,14 @@ function isToolCallTraceData(value: unknown): value is { toolCalls: unknown[]; t
 describe('trigger_interrupt', () => {
 	test('records a continue action on the target registry entry', async () => {
 		const { context, registry } = makeContext()
-		const handlers = createBuiltInToolHandlers(context)
-		const result = await handlerFor(handlers, 'trigger_interrupt')({ targetRole: 'coder-1-1', action: 'continue', reason: '' })
+		const result = await handlerFor(context, 'trigger_interrupt')({ targetRole: 'coder-1-1', action: 'continue', reason: '' })
 		expect(result.kind).toBe('success')
 		expect(registry.lookup('coder-1-1')?.interruptAction).toEqual({ action: 'continue', reason: '' })
 	})
 
 	test('redirect injects the reason as a user message into the target history and records the action', async () => {
 		const { context, registry, target } = makeContext()
-		const handlers = createBuiltInToolHandlers(context)
-		const result = await handlerFor(handlers, 'trigger_interrupt')({ targetRole: 'coder-1-1', action: 'redirect', reason: 'stop; finish now' })
+		const result = await handlerFor(context, 'trigger_interrupt')({ targetRole: 'coder-1-1', action: 'redirect', reason: 'stop; finish now' })
 		expect(result.kind).toBe('success')
 		expect(registry.lookup('coder-1-1')?.interruptAction).toEqual({ action: 'redirect', reason: 'stop; finish now' })
 		const last = target.history[target.history.length - 1]
@@ -119,9 +115,8 @@ describe('trigger_interrupt', () => {
 
 	test('abort records the action without touching the target history', async () => {
 		const { context, registry, target } = makeContext()
-		const handlers = createBuiltInToolHandlers(context)
 		const before = target.history.length
-		const result = await handlerFor(handlers, 'trigger_interrupt')({ targetRole: 'coder-1-1', action: 'abort', reason: 'stuck' })
+		const result = await handlerFor(context, 'trigger_interrupt')({ targetRole: 'coder-1-1', action: 'abort', reason: 'stuck' })
 		expect(result.kind).toBe('success')
 		expect(registry.lookup('coder-1-1')?.interruptAction).toEqual({ action: 'abort', reason: 'stuck' })
 		expect(target.history.length).toBe(before)
@@ -129,10 +124,9 @@ describe('trigger_interrupt', () => {
 
 	test('rejects an unknown instance, a bad action, and a non-string reason', async () => {
 		const { context, registry } = makeContext()
-		const handlers = createBuiltInToolHandlers(context)
-		expect((await handlerFor(handlers, 'trigger_interrupt')({ targetRole: 'nope-9-9', action: 'continue', reason: '' })).kind).toBe('invalid_arguments')
-		expect((await handlerFor(handlers, 'trigger_interrupt')({ targetRole: 'coder-1-1', action: 'explode', reason: '' })).kind).toBe('invalid_arguments')
-		expect((await handlerFor(handlers, 'trigger_interrupt')({ targetRole: 'coder-1-1', action: 'abort', reason: 42 })).kind).toBe('invalid_arguments')
+		expect((await handlerFor(context, 'trigger_interrupt')({ targetRole: 'nope-9-9', action: 'continue', reason: '' })).kind).toBe('invalid_arguments')
+		expect((await handlerFor(context, 'trigger_interrupt')({ targetRole: 'coder-1-1', action: 'explode', reason: '' })).kind).toBe('invalid_arguments')
+		expect((await handlerFor(context, 'trigger_interrupt')({ targetRole: 'coder-1-1', action: 'abort', reason: 42 })).kind).toBe('invalid_arguments')
 		expect(registry.lookup('coder-1-1')?.interruptAction).toBeUndefined()
 	})
 
@@ -140,9 +134,8 @@ describe('trigger_interrupt', () => {
 		const { context, registry, target } = makeContext()
 		const other = fixtureRoleState()
 		registry.register('coder', 1, undefined, other)
-		const handlers = createBuiltInToolHandlers(context)
-		expect((await handlerFor(handlers, 'trigger_interrupt')({ targetRole: 'context_manager-2-2', action: 'abort', reason: 'stuck' })).kind).toBe('invalid_arguments')
-		expect((await handlerFor(handlers, 'trigger_interrupt')({ targetRole: 'coder-1-2', action: 'redirect', reason: 'stop' })).kind).toBe('invalid_arguments')
+		expect((await handlerFor(context, 'trigger_interrupt')({ targetRole: 'context_manager-2-2', action: 'abort', reason: 'stuck' })).kind).toBe('invalid_arguments')
+		expect((await handlerFor(context, 'trigger_interrupt')({ targetRole: 'coder-1-2', action: 'redirect', reason: 'stop' })).kind).toBe('invalid_arguments')
 		expect(registry.lookup('coder-1-1')?.interruptAction).toBeUndefined()
 		expect(registry.lookup('coder-1-2')?.interruptAction).toBeUndefined()
 		expect(registry.lookup('context_manager-2-2')?.interruptAction).toBeUndefined()
@@ -152,8 +145,8 @@ describe('trigger_interrupt', () => {
 
 	test('rejects every target when the invocation flags no instance', async () => {
 		const { context, registry } = makeContext()
-		const handlers = createBuiltInToolHandlers({ ...context, handlerOf: undefined })
-		const result = await handlerFor(handlers, 'trigger_interrupt')({ targetRole: 'coder-1-1', action: 'abort', reason: 'stuck' })
+		const scopelessContext = { ...context, handlerOf: undefined }
+		const result = await handlerFor(scopelessContext, 'trigger_interrupt')({ targetRole: 'coder-1-1', action: 'abort', reason: 'stuck' })
 		expect(result.kind).toBe('invalid_arguments')
 		expect(registry.lookup('coder-1-1')?.interruptAction).toBeUndefined()
 	})
@@ -162,8 +155,7 @@ describe('trigger_interrupt', () => {
 describe('inspection tools', () => {
 	test('list_role_messages returns the compact index of the target history', async () => {
 		const { context } = makeContext()
-		const handlers = createBuiltInToolHandlers(context)
-		const result = await handlerFor(handlers, 'list_role_messages')({ targetRole: 'coder-1-1' })
+		const result = await handlerFor(context, 'list_role_messages')({ targetRole: 'coder-1-1' })
 		expect(result.kind).toBe('success')
 		const data = toolData(result, isMessageIndexData)
 		expect(data.messages.length).toBe(4)
@@ -172,35 +164,32 @@ describe('inspection tools', () => {
 
 	test('read_message_window returns a bounded slice with the target instance id and rejects bad arguments', async () => {
 		const { context } = makeContext()
-		const handlers = createBuiltInToolHandlers(context)
-		const result = await handlerFor(handlers, 'read_message_window')({ targetRole: 'coder-1-1', index: 1, field: 'content', start: 0, end: 5 })
+		const result = await handlerFor(context, 'read_message_window')({ targetRole: 'coder-1-1', index: 1, field: 'content', start: 0, end: 5 })
 		expect(result.kind).toBe('success')
 		const data = toolData(result, isMessageWindowData)
 		expect(data.targetRole).toBe('coder-1-1')
 		expect(data.text).toBe('build')
 		expect(data.totalChars).toBe(15)
-		expect((await handlerFor(handlers, 'read_message_window')({ targetRole: 'coder-1-1', index: 99, field: 'content', start: 0, end: 5 })).kind).toBe('invalid_arguments')
-		expect((await handlerFor(handlers, 'read_message_window')({ targetRole: 'coder-1-1', index: 1, field: 'secrets', start: 0, end: 5 })).kind).toBe('invalid_arguments')
-		expect((await handlerFor(handlers, 'read_message_window')({ targetRole: 'coder-1-1', index: 1, field: 'content', start: -1, end: 5 })).kind).toBe('invalid_arguments')
-		expect((await handlerFor(handlers, 'read_message_window')({ targetRole: 'coder-1-1', index: 1, field: 'content', start: 5, end: 5 })).kind).toBe('invalid_arguments')
+		expect((await handlerFor(context, 'read_message_window')({ targetRole: 'coder-1-1', index: 99, field: 'content', start: 0, end: 5 })).kind).toBe('invalid_arguments')
+		expect((await handlerFor(context, 'read_message_window')({ targetRole: 'coder-1-1', index: 1, field: 'secrets', start: 0, end: 5 })).kind).toBe('invalid_arguments')
+		expect((await handlerFor(context, 'read_message_window')({ targetRole: 'coder-1-1', index: 1, field: 'content', start: -1, end: 5 })).kind).toBe('invalid_arguments')
+		expect((await handlerFor(context, 'read_message_window')({ targetRole: 'coder-1-1', index: 1, field: 'content', start: 5, end: 5 })).kind).toBe('invalid_arguments')
 	})
 
 	test('search_role_blocks finds matches across content and reasoning and rejects a bad regex', async () => {
 		const { context } = makeContext()
-		const handlers = createBuiltInToolHandlers(context)
-		const result = await handlerFor(handlers, 'search_role_blocks')({ targetRole: 'coder-1-1', pattern: 'same thought', kind: 'substring' })
+		const result = await handlerFor(context, 'search_role_blocks')({ targetRole: 'coder-1-1', pattern: 'same thought', kind: 'substring' })
 		expect(result.kind).toBe('success')
 		const data = toolData(result, isSearchMatchData)
 		expect(data.matches.length).toBe(2)
 		expect(data.matches[0]?.field).toBe('reasoning')
-		expect((await handlerFor(handlers, 'search_role_blocks')({ targetRole: 'coder-1-1', pattern: '([', kind: 'regex' })).kind).toBe('invalid_arguments')
-		expect((await handlerFor(handlers, 'search_role_blocks')({ targetRole: 'coder-1-1', pattern: '', kind: 'substring' })).kind).toBe('invalid_arguments')
+		expect((await handlerFor(context, 'search_role_blocks')({ targetRole: 'coder-1-1', pattern: '([', kind: 'regex' })).kind).toBe('invalid_arguments')
+		expect((await handlerFor(context, 'search_role_blocks')({ targetRole: 'coder-1-1', pattern: '', kind: 'substring' })).kind).toBe('invalid_arguments')
 	})
 
 	test('recent_role_tool_calls returns the bounded trace with the total count', async () => {
 		const { context } = makeContext()
-		const handlers = createBuiltInToolHandlers(context)
-		const result = await handlerFor(handlers, 'recent_role_tool_calls')({ targetRole: 'coder-1-1', limit: 2 })
+		const result = await handlerFor(context, 'recent_role_tool_calls')({ targetRole: 'coder-1-1', limit: 2 })
 		expect(result.kind).toBe('success')
 		const data = toolData(result, isToolCallTraceData)
 		expect(data.totalToolCalls).toBe(3)
@@ -212,11 +201,10 @@ describe('inspection tools', () => {
 
 	test('inspection tools reject an unknown target instance', async () => {
 		const { context } = makeContext()
-		const handlers = createBuiltInToolHandlers(context)
-		expect((await handlerFor(handlers, 'list_role_messages')({ targetRole: 'ghost-0-7' })).kind).toBe('invalid_arguments')
-		expect((await handlerFor(handlers, 'read_message_window')({ targetRole: 'ghost-0-7', index: 0, field: 'content', start: 0, end: 1 })).kind).toBe('invalid_arguments')
-		expect((await handlerFor(handlers, 'search_role_blocks')({ targetRole: 'ghost-0-7', pattern: 'x' })).kind).toBe('invalid_arguments')
-		expect((await handlerFor(handlers, 'recent_role_tool_calls')({ targetRole: 'ghost-0-7' })).kind).toBe('invalid_arguments')
+		expect((await handlerFor(context, 'list_role_messages')({ targetRole: 'ghost-0-7' })).kind).toBe('invalid_arguments')
+		expect((await handlerFor(context, 'read_message_window')({ targetRole: 'ghost-0-7', index: 0, field: 'content', start: 0, end: 1 })).kind).toBe('invalid_arguments')
+		expect((await handlerFor(context, 'search_role_blocks')({ targetRole: 'ghost-0-7', pattern: 'x' })).kind).toBe('invalid_arguments')
+		expect((await handlerFor(context, 'recent_role_tool_calls')({ targetRole: 'ghost-0-7' })).kind).toBe('invalid_arguments')
 	})
 })
 
@@ -229,8 +217,7 @@ function dataRecord(result: ToolResult): Record<string, unknown> {
 describe('cross-role context tools', () => {
 	test('edit_context with targetRole applies the operations to the target history and accounts the guard on the caller', async () => {
 		const { context, target, callerState } = makeContext()
-		const handlers = createBuiltInToolHandlers(context)
-		const result = await handlerFor(handlers, 'edit_context')({ targetRole: 'coder-1-1', operations: [{ op: 'drop', range: [2, 4] }] })
+		const result = await handlerFor(context, 'edit_context')({ targetRole: 'coder-1-1', operations: [{ op: 'drop', range: [2, 4] }] })
 		const data = dataRecord(result)
 		expect(data['targetRole']).toBe('coder-1-1')
 		expect(data['messageCount']).toBe(2)
@@ -244,22 +231,20 @@ describe('cross-role context tools', () => {
 
 	test('context_info with targetRole returns the target conversation; without it returns the caller\u2019s own', async () => {
 		const { context } = makeContext()
-		const handlers = createBuiltInToolHandlers(context)
-		const cross = dataRecord(await handlerFor(handlers, 'context_info')({ targetRole: 'coder-1-1' }))
+		const cross = dataRecord(await handlerFor(context, 'context_info')({ targetRole: 'coder-1-1' }))
 		expect(cross['targetRole']).toBe('coder-1-1')
 		const crossMessages = cross['messages']
 		expect(Array.isArray(crossMessages) && crossMessages.length === 4).toBe(true)
-		const self = dataRecord(await handlerFor(handlers, 'context_info')({}))
+		const self = dataRecord(await handlerFor(context, 'context_info')({}))
 		expect('targetRole' in self).toBe(false)
 	})
 
 	test('edit_context and context_info reject an unknown target instance and a self target', async () => {
 		const { context } = makeContext()
-		const handlers = createBuiltInToolHandlers(context)
-		expect((await handlerFor(handlers, 'edit_context')({ targetRole: 'ghost-0-7', operations: [] })).kind).toBe('invalid_arguments')
-		expect((await handlerFor(handlers, 'context_info')({ targetRole: 'ghost-0-7' })).kind).toBe('invalid_arguments')
-		expect((await handlerFor(handlers, 'edit_context')({ targetRole: 'context_manager-2-2', operations: [] })).kind).toBe('invalid_arguments')
-		expect((await handlerFor(handlers, 'context_info')({ targetRole: 'context_manager-2-2' })).kind).toBe('invalid_arguments')
+		expect((await handlerFor(context, 'edit_context')({ targetRole: 'ghost-0-7', operations: [] })).kind).toBe('invalid_arguments')
+		expect((await handlerFor(context, 'context_info')({ targetRole: 'ghost-0-7' })).kind).toBe('invalid_arguments')
+		expect((await handlerFor(context, 'edit_context')({ targetRole: 'context_manager-2-2', operations: [] })).kind).toBe('invalid_arguments')
+		expect((await handlerFor(context, 'context_info')({ targetRole: 'context_manager-2-2' })).kind).toBe('invalid_arguments')
 	})
 
 	test('every edit operation invalidates the target llm_call delta baseline so its next emission is a full snapshot', async () => {
@@ -270,7 +255,7 @@ describe('cross-role context tools', () => {
 		]) {
 			const { context, target } = makeContext()
 			target.logSentBaseline = 4
-			const result = await handlerFor(createBuiltInToolHandlers(context), 'edit_context')({ targetRole: 'coder-1-1', operations })
+			const result = await handlerFor(context, 'edit_context')({ targetRole: 'coder-1-1', operations })
 			expect(result.kind).toBe('success')
 			expect(target.logSentBaseline).toBeUndefined()
 		}
@@ -279,8 +264,7 @@ describe('cross-role context tools', () => {
 	test('a self edit invalidates the caller\u2019s own llm_call delta baseline', async () => {
 		const { context, callerState } = makeContext()
 		callerState.logSentBaseline = 4
-		const handlers = createBuiltInToolHandlers(context)
-		const result = await handlerFor(handlers, 'edit_context')({ operations: [{ op: 'replace', index: 2, content: 'rewritten' }] })
+		const result = await handlerFor(context, 'edit_context')({ operations: [{ op: 'replace', index: 2, content: 'rewritten' }] })
 		expect(result.kind).toBe('success')
 		expect(callerState.logSentBaseline).toBeUndefined()
 	})
@@ -288,9 +272,8 @@ describe('cross-role context tools', () => {
 	test('a rejected edit batch leaves the target history and llm_call delta baseline intact', async () => {
 		const { context, target } = makeContext()
 		target.logSentBaseline = 4
-		const handlers = createBuiltInToolHandlers(context)
 		// A batch that fails partway (the replace index is out of range) is rejected without applying anything: the history keeps all four messages and the baseline still reads 4, so the target's next emission remains a delta off its last logged request.
-		const result = await handlerFor(handlers, 'edit_context')({ targetRole: 'coder-1-1', operations: [{ op: 'drop', range: [2, 4] }, { op: 'replace', index: 99, content: 'nope' }] })
+		const result = await handlerFor(context, 'edit_context')({ targetRole: 'coder-1-1', operations: [{ op: 'drop', range: [2, 4] }, { op: 'replace', index: 99, content: 'nope' }] })
 		expect(result.kind).toBe('invalid_arguments')
 		expect(target.history.length).toBe(4)
 		expect(target.logSentBaseline).toBe(4)
@@ -298,8 +281,7 @@ describe('cross-role context tools', () => {
 
 	test('edit operations must not touch message indices 0 and 1, and a mixed batch rejects atomically', async () => {
 		const { context, target, callerState } = makeContext()
-		const handlers = createBuiltInToolHandlers(context)
-		const edit = handlerFor(handlers, 'edit_context')
+		const edit = handlerFor(context, 'edit_context')
 		expect((await edit({ targetRole: 'coder-1-1', operations: [{ op: 'drop', range: [0, 2] }] })).kind).toBe('invalid_arguments')
 		expect((await edit({ targetRole: 'coder-1-1', operations: [{ op: 'drop', range: [1, 3] }] })).kind).toBe('invalid_arguments')
 		expect((await edit({ targetRole: 'coder-1-1', operations: [{ op: 'replace', index: 0, content: 'x' }] })).kind).toBe('invalid_arguments')
@@ -315,8 +297,7 @@ describe('cross-role context tools', () => {
 
 	test('edit_context without targetRole edits the caller\u2019s own conversation and carries no targetRole field', async () => {
 		const { context, callerState } = makeContext()
-		const handlers = createBuiltInToolHandlers(context)
-		const result = await handlerFor(handlers, 'edit_context')({ operations: [{ op: 'drop', range: [2, 4] }] })
+		const result = await handlerFor(context, 'edit_context')({ operations: [{ op: 'drop', range: [2, 4] }] })
 		const data = dataRecord(result)
 		expect('targetRole' in data).toBe(false)
 		expect(data['messageCount']).toBe(2)

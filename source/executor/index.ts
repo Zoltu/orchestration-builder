@@ -85,10 +85,10 @@ export type { RunBaseTracker } from './base-state.js'
 export { createReadWorkspaceGitState, formatWorkspaceGitNotice } from './git-state.js'
 export type { ReadWorkspaceGitState, ReadWorkspaceGitStateConfig, WorkspaceGitState } from './git-state.js'
 
-export { EMPTY_TREE_HASH } from './tools/git.js'
+export { EMPTY_TREE_HASH } from './git-primitives.js'
 
-export { createBunSubprocessRunner } from './tools/subprocess-tool.js'
-export type { SubprocessRunner } from './tools/subprocess-tool.js'
+export { createBunSubprocessRunner } from './subprocess.js'
+export type { SubprocessRunner } from './subprocess.js'
 
 export { ensureOrchestrationGitExcluded, nodeGitExcludeFilesystem } from './git-exclude.js'
 export type { GitExcludeFilesystem, GitExcludeResult } from './git-exclude.js'
@@ -102,18 +102,12 @@ export type { LogLevel } from './log-level.js'
 
 export { isEffortLevel, isInvolvementLevel, isProjectSettings, isTerminalRunStatus, validateDeploymentFileConfig, validateDeploymentRoleReferences } from './validation.js'
 
-export { createToolHandlers } from './tools.js'
-export type { NativeToolsConfig } from './tools.js'
-
-export { createPlanToolHandlers } from './tools/plan.js'
-
-export { createStyleGuideToolHandlers } from './tools/style-guide.js'
-
-export { createRunLogToolHandlers } from './tools/run-log.js'
+export { createToolPlatform } from './tools/index.js'
+export type { RunToolScope, ToolPlatform, ToolPlatformConfig, ToolPlatformDependencies } from './tools/index.js'
 
 export { generateRunId } from './run-id.js'
 
-export { createDockerSecretReader, resolveKagiApiKey } from './tools/kagi.js'
+export { createDockerSecretReader, resolveKagiApiKey } from './secrets.js'
 
 export {
 	createRunDirectory,

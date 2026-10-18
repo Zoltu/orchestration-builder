@@ -3,13 +3,13 @@ import { describe, expect, test } from 'bun:test'
 import type { ContextPolicy, DeploymentConfig, ExecutorConfig, GuildConfig, LogEvent, ResolvedModelConfig, RoleDefinition, RunContinuation, RunMeta, ToolCall, ToolManifest } from './types.js'
 import { isRunCheckpoint, type RunCheckpoint } from './checkpoint.ts'
 import { createRunBaseTracker } from './base-state.ts'
-import { createGitTools, EMPTY_TREE_HASH } from './tools/git.ts'
+import { EMPTY_TREE_HASH } from './git-primitives.ts'
 import { resumeExecutor, runExecutor, type ExecutorDependencies } from './executor.ts'
 import { createInterruptQueue } from './interrupts.ts'
 import type { LlmCallResult, LlmCaller } from './llm.ts'
 import type { LoadedGuild } from './loader.ts'
 import type { AppendLog, DeleteCheckpoint, RunDirectory, WriteCheckpoint, WriteMeta } from './persistence.ts'
-import { createFakeRoleSnapshotStore, stubHumanBackend, recordingHumanBackend, defined, makeScriptedRunner } from './test-fixtures.ts'
+import { createFakeRoleSnapshotStore, createFixtureToolPlatform, stubHumanBackend, recordingHumanBackend, defined, makeScriptedRunner } from './test-fixtures.ts'
 
 function success(toolCalls: ToolCall[], opts: { content?: string } = {}): LlmCallResult {
 	return {
@@ -149,6 +149,7 @@ function buildLoadedGuild(roles: Record<string, RoleDefinition>, entryRole: stri
 }
 
 function makeDeps(llm: FakeLlm, persistence: FakePersistenceFns, loadedGuild: LoadedGuild): ExecutorDependencies {
+	const baseTracker = createRunBaseTracker()
 	return {
 		llmCaller: llm,
 		appendLog: persistence.appendLog,
@@ -156,14 +157,14 @@ function makeDeps(llm: FakeLlm, persistence: FakePersistenceFns, loadedGuild: Lo
 		writeMeta: persistence.writeMeta,
 		writeCheckpoint: persistence.writeCheckpoint,
 		deleteCheckpoint: persistence.deleteCheckpoint,
-		additionalToolHandlers: {},
+		toolPlatform: createFixtureToolPlatform(),
 		humanBackend: stubHumanBackend,
 		loadedGuild,
 		interruptQueue: createInterruptQueue(),
 		publishDelta: () => undefined,
 		roleSnapshots: createFakeRoleSnapshotStore(),
 		readProjectDoc: () => ({ kind: 'unavailable', reason: 'not used in these tests' }),
-		baseTracker: createRunBaseTracker(),
+		baseTracker,
 		readWorkspaceGitState: async () => ({ isRepository: false, unbornHead: false, uncommittedPaths: [] }),
 	}
 }
@@ -657,7 +658,6 @@ describe('runExecutor', () => {
 		}
 		const runner = makeScriptedRunner([{ exitCode: 0, stdout: 'moved-hash\n' }])
 		const baseTracker = createRunBaseTracker('initial-hash')
-		const gitTools = createGitTools({ workspaceRoot: '/fake/workspace', defaultToolTimeoutSeconds: 30, runner, ensureOrchestrationExcluded: () => {}, baseTracker })
 		const llm = new FakeLlm()
 		llm.responses = [
 			success([{ id: 'g1', type: 'function', function: { name: 'git_set_base', arguments: JSON.stringify({ ref: 'main' }) } }]),
@@ -666,7 +666,7 @@ describe('runExecutor', () => {
 		const persistence = makeFakePersistence()
 		const deps = makeDeps(llm, persistence, guild)
 		deps.baseTracker = baseTracker
-		deps.additionalToolHandlers = gitTools
+		deps.toolPlatform = createFixtureToolPlatform({ subprocessRunner: runner })
 
 		await runExecutor(deps, { runId: 'r-set-base', guildPath: '/guild', task: 'do it', effort: 'standard', involvement: 'early-engagement' })
 

@@ -1,5 +1,5 @@
 import { createToolError } from '../errors.js'
-import type { ToolHandler } from '../tool-dispatch.js'
+import type { ToolHandler } from './tool-dispatch.js'
 import { parseKagiSearchResults } from './kagi.js'
 
 export type KagiSearch = (query: string, limit: number, timeoutMs: number) => Promise<unknown>

@@ -1,6 +1,3 @@
-import * as fs from 'node:fs'
-import * as path from 'node:path'
-import { resolveSecret } from '../secrets.js'
 import { isObject } from '../validation.js'
 
 export interface KagiSearchResult {
@@ -108,19 +105,4 @@ async function readErrorMessage(response: Response): Promise<string | undefined>
 		return undefined
 	}
 	return extractKagiErrorMessage(body)
-}
-
-export function createDockerSecretReader(secretsDir: string): (name: string) => string | undefined {
-	return (name) => {
-		const secretPath = path.join(secretsDir, name)
-		if (!fs.existsSync(secretPath)) return undefined
-		const contents = fs.readFileSync(secretPath, 'utf8').trim()
-		if (contents === '') return undefined
-		return contents
-	}
-}
-
-export function resolveKagiApiKey(environment: Record<string, string | undefined>, readSecret: (name: string) => string | undefined): string | undefined {
-	// The Docker-secret channel keeps the plain secret name (kagi_api_key, so /run/secrets/kagi_api_key works); only the environment variable carries the ORCHESTRATOR_ prefix.
-	return resolveSecret('kagi_api_key', { environment, readDockerSecret: readSecret }, 'ORCHESTRATOR_KAGI_API_KEY')
 }

@@ -1,8 +1,9 @@
 import * as fs from 'node:fs'
 import * as path from 'node:path'
 import { createToolError } from '../errors.js'
-import type { ToolHandler } from '../tool-dispatch.js'
-import { nodePathFilesystem, resolveWithinWorkspace, wrapIoError } from './shared.js'
+import type { ToolHandler } from './tool-dispatch.js'
+import { wrapIoError } from './shared.js'
+import { nodePathFilesystem, resolveWithinWorkspace } from '../workspace-path.js'
 
 export interface WriteFileResult {
 	path: string

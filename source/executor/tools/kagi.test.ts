@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test'
-import { extractKagiErrorMessage, parseKagiExtractMarkdown, parseKagiSearchResults, resolveKagiApiKey } from './kagi.ts'
+import { extractKagiErrorMessage, parseKagiExtractMarkdown, parseKagiSearchResults } from './kagi.ts'
+import { resolveKagiApiKey } from '../secrets.ts'
 
 describe('parseKagiSearchResults', () => {
 	test('parses a full search envelope and ignores other buckets', () => {
