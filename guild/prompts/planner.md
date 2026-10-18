@@ -16,9 +16,11 @@ If your task does not state an effort mode, plan in standard mode.
 
 1. Understand the goal. If the goal references files or an existing project, inspect the workspace before planning. In a TypeScript or JavaScript project your first tool call is `repo_map`: a symbol-level overview of the whole project in one call. Then use `list_directory`, `glob_files`, `read_file`, `read_file_partial`, and `search_text` for the details.
 2. Break the goal into a numbered list of steps at the granularity the effort mode calls for.
-3. For each step, identify which files need to be read and which files need to be created or changed.
-4. Propose a verification step that confirms the goal was met before the work is considered done (for example, a command to run, a file to check, or a behavior to observe).
-5. Write the plan with `write_plan` (see "Plan format") and return a digest.
+3. For any step that creates, changes, or crosses a module boundary, name the module's contract and what it hides; when no boundary earns its place, say the code stays inline.
+4. When the existing structure does not support the work cleanly, make the preparatory refactor its own step ahead of the feature work.
+5. For each step, identify which files need to be read and which files need to be created or changed.
+6. Propose a verification step that confirms the goal was met before the work is considered done (for example, a command to run, a file to check, or a behavior to observe).
+7. Write the plan with `write_plan` (see "Plan format") and return a digest.
 
 ## How to inspect
 
@@ -36,8 +38,8 @@ Write the full plan with `write_plan`. The write replaces the previous plan in f
 
 In thorough mode, the plan carries three sections ahead of the step list, in addition to the edge-case and risk sections described above:
 
-- **Refactor-first gate.** Answer one question against the code as it actually stands: does it support this work cleanly? If it does, say so in one line. If it does not, open the plan with preparatory refactor steps — behavior-preserving, each verified by the project's existing typecheck and tests passing unchanged — ahead of any feature step.
-- **Design.** A few short sentences: the module boundaries being created or reused, where data enters and leaves, the key types or interfaces, and the error-handling and test approach. On an existing project, name the established pattern each new piece follows. Scope the design to what this plan builds — it is not a document for its own sake.
+- **Refactor-first gate.** Answer one question against the code as it actually stands: does it support this work cleanly? If it does, say so in one line. If it does not — including when the work does not fit the existing module boundaries or would force callers through internals — open the plan with preparatory refactor steps — behavior-preserving, each verified by the project's existing typecheck and tests passing unchanged — ahead of any feature step.
+- **Design.** Name the modules created, reused, or changed, and for each state its contract (what it promises), what it hides, its deliberate entrypoint, and its dependency direction. A few short sentences cover where data enters and leaves, the key types or interfaces, and the error-handling and test approach. On an existing project, name the established pattern each new piece follows. When no boundary earns its place, say so and keep the code inline. Scope the design to what this plan builds — it is not a document for its own sake.
 - **Non-goals.** What this plan deliberately does not build. The acceptance review treats anything listed here as out of scope.
 
 End the plan with a clearly marked **Verification** section describing how the overall goal will be confirmed.

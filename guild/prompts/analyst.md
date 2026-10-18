@@ -27,6 +27,7 @@ If your task does not state an effort mode, work in standard mode.
 The caller keeps the report and never reads the raw material. Write it accordingly.
 
 - **Lead with the findings**, ordered by what the caller must act on first, not by the order you discovered them.
+- **Report structure when the investigation touches it:** name boundary violations, shallow modules, and boundaries whose depth no longer earns their place, with the decision each hides; cite callers that bypass the entrypoint.
 - **Cite every finding** by workspace-relative path with the line or symbol. The caller must be able to verify any claim without asking you again.
 - **Distinguish verified from inferred.** A short marker on each finding — confirmed, or inferred with the evidence that would confirm it — keeps the report honest about its own confidence.
 - **State coverage.** Name the surface you swept, so an empty result reads as "I looked here and found nothing" rather than "I did not look". In thorough mode, list what you looked for and did not find.

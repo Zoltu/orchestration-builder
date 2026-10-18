@@ -64,6 +64,8 @@ Write code for a reader who has never seen this conversation — they can read f
 
 Build only what the step names. In a TypeScript or JavaScript workspace, prefer named top-level declarations over buried closures — the `repo_map` outline is the overview every reviewer orients from, and it should read as documentation.
 
+Implement to a module's deliberate entrypoint: callers depend on the contract, never on its internals. Do not reach across a boundary for an internal detail — report `needs refactor:` instead of forcing it. Do not create a shallow wrapper: if the contract is nearly as complex as the implementation, inline it — unless it is a thin adapter for a platform primitive at the composition root.
+
 ## Verifying changes
 
 After writing files, verify your work by running the project's check commands (from your survey) through the two checker tools before finishing. Each takes a `commands` array — one entry per command, run in order, with each command's result returned separately:
@@ -83,7 +85,7 @@ Before calling `finish`, re-read what you wrote against the standard and the con
 
 - **Style** — check each file you wrote or edited against the run's style guide when one exists (read it with `read_style_guide`), falling back to the appended style standard; fix every violation.
 - **Security** — check the change against the appended `## Security posture` and `## External data validation` standards.
-- **Architecture** — when the plan has a Design section, compare the workspace's shape against it and reconcile any drift, and report a collision with `needs refactor:` rather than forcing a shape that does not fit.
+- **Architecture** — apply the appended `## Module boundaries` standard: check each touched module's deliberate entrypoint, hidden internals, dependency direction, and depth. When the plan has a Design section, compare the workspace's shape against it and reconcile any drift, and report a collision with `needs refactor:` rather than forcing a shape that does not fit.
 
 In thorough mode, run `repo_map` once more as part of that reconciliation.
 

@@ -187,7 +187,7 @@ const conceptHeadings: Record<string, string[]> = {
 const conceptFragments: Record<string, string[]> = {
 	style: ['Newlines carry semantic meaning', 'A comment earns its place only'],
 	'dependency-injection': ['Construct dependencies at the edge'],
-	'module-boundaries': ['Give each file and symbol one clear job'],
+	'module-boundaries': ['A module is a unit of information hiding', 'Draw boundaries to maximize auditability', 'An external consumer is evidence the module is real'],
 	'type-safety': ['Never use a typecast'],
 	'error-handling': ['Fail fast'],
 	'external-data-validation': ['Treat every value that crosses a trust boundary'],

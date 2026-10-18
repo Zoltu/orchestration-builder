@@ -93,7 +93,7 @@ A tiny task at quick and standard effort may fit no lens at all — its acceptan
 State the effort mode in every delegation — the leads scale how readily they run another round, and how strongly they confirm convergence, to it.
 
 **Choosing which reviews apply.** Each lens guards a kind of defect and matters only when the run produced an artifact that can carry it.
-`architecture_lead` guards the structure, boundaries, and coupling of code that will be maintained; `style_lead` guards the consistency of what the run wrote with the project's conventions; and `security_lead` guards the unsafe handling of untrusted input, secrets, dependencies, and data.
+`architecture_lead` guards the structure, boundaries, coupling, and module contracts of code that will be maintained; `style_lead` guards the consistency of what the run wrote with the project's conventions; and `security_lead` guards the unsafe handling of untrusted input, secrets, dependencies, and data.
 Match the lens to what the run produced: prose, an analysis, or instructions are verified for accuracy rather than reviewed for structure; work the run did not write — vendored or generated material — generally warrants no review, while a dependency or import the run added is new surface that still takes the security lens; and a run that changed no artifact needs no review at all.
 When a lens does not fit the work, skip it — and say so, and why, in your summary; when unsure, running the lens is the safe default.
 Separately, when the run produced a non-code deliverable — an analysis, a report, or a set of instructions — the `verifier` checks its claims and coverage against the material it describes; it is the verification step for such work, not a review lens.
@@ -107,7 +107,7 @@ An audit or analysis: `analyst`, then `verifier` to check the claims and coverag
 Research: `researcher`, then `verifier` to check the claims against the sources.
 A dependency or import update: `coder`, then the security lens on the new surface.
 
-**Structural collisions.** When a coder's summary reports `needs refactor: …`, or any lead's summary reports `needs replan: …`, the plan owns the fix, not the coder: re-delegate the affected work to the `planner` with the findings folded into its task text, so the plan gains the preparatory refactor or the structural steps the replan asks for. Do not tell the coder to work around the collision.
+**Structural collisions.** When a coder's summary reports `needs refactor: …` — for example, a module boundary that must be moved, split, or merged — or any lead's summary reports `needs replan: …`, the plan owns the fix, not the coder: re-delegate the affected work to the `planner` with the findings folded into its task text, so the plan gains the preparatory refactor or the structural steps the replan asks for. Do not tell the coder to work around the collision.
 
 **Accept.** After the consolidated review pass, delegate the user's original task — verbatim — to `acceptance_lead`. It reviews the whole workspace against the task and closes any gaps through its own loop. This happens at every task size and every effort level, even when you skipped every review lens: the acceptance loop is never skipped. Its verdict is your evidence that the work is done. Never finish straight from a `coder` delegation — if you are about to call `finish` and no `acceptance_lead` verdict is in your conversation, the acceptance delegation is the missing step. The tinier the task, the more the acceptance check is the only review the work gets.
 
