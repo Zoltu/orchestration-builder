@@ -1,23 +1,20 @@
-import { createServerReplica } from './static/ts/entity-diff/index.js'
-import type { ServerReplica, ServerResponse } from './static/ts/entity-diff/index.js'
-import { flowDefinitions } from './static/ts/flow-collections.js'
-import type { FlowCollections, FlowReplicaState } from './static/ts/flow-collections.js'
+import { createServerReplica } from '../entity-diff/index.js'
+import type { ServerReplica } from '../entity-diff/index.js'
+import type { InteractionModel } from '../interaction-model.js'
+import { flowDefinitions, flowReplicaStateFromModel } from './replica.js'
+import type { FlowCollections } from './replica.js'
 
-export interface FlowReplicaRegistryOptions {
+export interface FlowFeedResponderOptions {
 	epoch: string
 	historyLimit: number
 	maxRuns: number
 }
 
-export type FlowEnvelopeFor = (runId: string, state: FlowReplicaState, have: string | null) => ServerResponse<FlowCollections>
+export type FlowFeedResponder = (runId: string, model: InteractionModel, have: string | null) => unknown
 
-export interface FlowReplicaRegistry {
-	envelopeFor: FlowEnvelopeFor
-}
-
-// A bounded, process-local store of the per-run server replicas behind the flow endpoint's entity-diff envelope. Each run gets its own replica so its delta history is isolated; the least-recently-used run is evicted past maxRuns, and an evicted run rebuilt on its next request starts from a fresh revision.
-export function createFlowReplicaRegistry(options: FlowReplicaRegistryOptions): FlowReplicaRegistry {
-	if (!Number.isInteger(options.maxRuns) || options.maxRuns < 1) throw new Error(`flow-replica-registry: maxRuns must be a positive integer, received ${String(options.maxRuns)}`)
+// A bounded, process-local store of the per-run server replicas behind the flow feed. Each run gets its own replica so its delta history is isolated; the least-recently-used run is evicted past maxRuns, and an evicted run rebuilt on its next request starts from a fresh revision.
+export function createFlowFeedResponder(options: FlowFeedResponderOptions): FlowFeedResponder {
+	if (!Number.isInteger(options.maxRuns) || options.maxRuns < 1) throw new Error(`flow-feed: maxRuns must be a positive integer, received ${String(options.maxRuns)}`)
 	const replicas = new Map<string, ServerReplica<FlowCollections>>()
 	let instanceSequence = 0
 
@@ -45,11 +42,9 @@ export function createFlowReplicaRegistry(options: FlowReplicaRegistryOptions): 
 		return replica
 	}
 
-	return {
-		envelopeFor(runId, state, have) {
-			const replica = getOrCreateReplica(runId)
-			replica.update(state)
-			return replica.respond(have)
-		},
+	return (runId, model, have) => {
+		const replica = getOrCreateReplica(runId)
+		replica.update(flowReplicaStateFromModel(model))
+		return replica.respond(have)
 	}
 }

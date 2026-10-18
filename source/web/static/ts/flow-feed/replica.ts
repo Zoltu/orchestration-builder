@@ -1,12 +1,12 @@
-import { defineCollection, reduceServerResponse } from './entity-diff/index.js'
-import type { CollectionDefinitions, EntityHasher, ReplicaState } from './entity-diff/index.js'
-import { isObject, isOperationMetricsRecord } from './guards.js'
-import type { InteractionModel, Operation, OperationKind, OperationLifecycle, OperationMetrics, OperationOutcome, Participant, ParticipantKind, RunStatus, StackRecord } from './interaction-model.js'
+import { defineCollection } from '../entity-diff/index.js'
+import type { CollectionDefinitions, ReplicaState } from '../entity-diff/index.js'
+import { isObject, isOperationMetricsRecord } from '../guards.js'
+import type { InteractionModel, Operation, OperationKind, OperationLifecycle, OperationMetrics, OperationOutcome, Participant, ParticipantKind, RunStatus, StackRecord } from '../interaction-model.js'
 
 // The run-status collection holds a single entity keyed by a fixed id, so the id is a constant rather than an instance key and the model's run status rides in a collection like every other field.
-export const RUN_STATUS_ENTITY_ID = 'run-status' as const
+const RUN_STATUS_ENTITY_ID = 'run-status' as const
 
-export interface RunStatusEntity {
+interface RunStatusEntity {
 	id: 'run-status'
 	status: RunStatus
 }
@@ -149,16 +149,12 @@ export function flowModelFromReplicaState(state: FlowReplicaState): InteractionM
 	}
 }
 
-// The outcome of reducing a flow endpoint envelope: the four entity-diff reactions plus the model reconstructed from the resulting state. A non-applying reaction carries a null model, and only the three applying reactions carry a version (a response the client cannot apply leaves the held version in place).
-export type FlowEnvelopeResult =
-	| { outcome: 'unchanged' | 'applied' | 'snapshot'; state: FlowReplicaState; version: string; model: InteractionModel }
-	| { outcome: 'needsSnapshot' | 'invalid'; state: FlowReplicaState; version: string | null; model: null }
-
-// Reduces one flow endpoint envelope against the replica the client holds and reconstructs the model the views read, so the poll action keeps one state/version/model triple instead of re-deriving the model at every call site. On needsSnapshot the server could not answer from the client's base, so the caller re-fetches without a `have` and the server replies with a full snapshot.
-export function applyFlowEnvelope(state: FlowReplicaState, version: string | null, raw: unknown, hasher: EntityHasher): FlowEnvelopeResult {
-	const reaction = reduceServerResponse(flowDefinitions, hasher, state, version, raw)
-	if (reaction.kind === 'unchanged') return { outcome: 'unchanged', state: reaction.state, version: reaction.version, model: flowModelFromReplicaState(reaction.state) }
-	if (reaction.kind === 'applied') return { outcome: 'applied', state: reaction.state, version: reaction.version, model: flowModelFromReplicaState(reaction.state) }
-	if (reaction.kind === 'snapshot') return { outcome: 'snapshot', state: reaction.state, version: reaction.version, model: flowModelFromReplicaState(reaction.state) }
-	return { outcome: reaction.kind, state: reaction.state, version: reaction.version, model: null }
+// The server replica consumes the derived model's collections plus the run status as the singleton run-status entity. entity-diff treats collections as unordered, so a client sorts by its own domain key after applying.
+export function flowReplicaStateFromModel(model: InteractionModel): FlowReplicaState {
+	return {
+		participants: model.participants,
+		operations: model.operations,
+		stacks: model.stacks ?? [],
+		runStatus: [{ id: RUN_STATUS_ENTITY_ID, status: model.status }],
+	}
 }

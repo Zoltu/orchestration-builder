@@ -11,12 +11,25 @@ import type { DeploymentConfig, EffortLevel, GuildConfig, InvolvementLevel, LogL
 import { parseLogEvents, parseRunMeta, type RunSnapshot } from '../run-log/index.js'
 import type { BuildInfo } from './build-info.ts'
 import { createRunListCache } from './run-list-cache.ts'
-import { flowModelFromReplicaState } from './static/ts/flow-collections.js'
-import { runSummariesFromReplicaState } from './static/ts/run-list-collections.js'
-import { createFlowReplicaRegistry, type FlowReplicaRegistryOptions } from './flow-replica-registry.ts'
-import { createRunListReplica } from './run-list-replica.ts'
+import { applyFlowFrame, createFlowFeedResponder, emptyFlowFeedState } from './static/ts/flow-feed/index.js'
+import type { FlowFeedResponderOptions } from './static/ts/flow-feed/index.js'
+import type { InteractionModel } from './static/ts/interaction-model.js'
+import { applyRunListFrame, createRunListFeedResponder, emptyRunListFeedState } from './static/ts/run-list-feed/index.js'
+import type { RunSummary } from './static/ts/run-list-feed/index.js'
 import { createRequestHandler, type RequestHandler } from './request-handler.ts'
 import { createServeStatic, createServeTypeScriptSource, resolveStaticAsset, resolveTypeScriptSourceAsset, type ServeAssetFile, type TypeScriptSourceFilesystem } from './server.ts'
+
+function flowModelFromFrame(frame: unknown): InteractionModel {
+	const result = applyFlowFrame(emptyFlowFeedState(), frame)
+	if (result.model === null) throw new Error(`expected a flow frame with a model, received ${result.outcome}`)
+	return result.model
+}
+
+function runSummariesFromFrame(frame: unknown): RunSummary[] {
+	const result = applyRunListFrame(emptyRunListFeedState(), frame)
+	if (result.summaries === null) throw new Error(`expected a run-list frame with summaries, received ${result.outcome}`)
+	return result.summaries
+}
 
 // A plain-object queue store standing in for the filesystem leaves, so the /api/queue route tests and the POST /api/runs enqueue path observe the queue's exact state.
 function createInMemoryQueueStore(initial: QueueItem[] = []): { readQueue: () => TaskQueue; writeQueue: (queue: TaskQueue) => void; snapshot: () => TaskQueue } {
@@ -495,7 +508,7 @@ interface HandlerHarness {
 
 // Builds a fresh handler whose startRun and resumeRun park on caller-controlled resolvers, so each test drives its own run lifecycle without touching shared state. The static leaf is a recording fake; every dependency is in-memory. runIdCollides makes runDirectoryExists report an existing directory for the generated id, exercising the submit-level run_id_collision refusal. build seeds the image build identifier GET /api/config surfaces (null, as from a source checkout, unless a test passes one). initialCheckpoints seeds the in-memory checkpoint store (raw state.json text by run id) the resume submission and the resumable flag read.
 // The queue store and the scheduler are wired exactly as serve.ts wires them: the handler's mutations and the POST /api/runs enqueue go through the same in-memory leaves, the scheduler dispatches through the submission, and a settled run promise maps its item and ticks onward.
-function createHandlerHarness(options: { runIdCollides?: boolean, build?: BuildInfo | null, initialQueueItems?: QueueItem[], initialCheckpoints?: Map<string, string>, flowReplicaOptions?: FlowReplicaRegistryOptions } = {}): HandlerHarness {
+function createHandlerHarness(options: { runIdCollides?: boolean, build?: BuildInfo | null, initialQueueItems?: QueueItem[], initialCheckpoints?: Map<string, string>, flowFeedOptions?: FlowFeedResponderOptions } = {}): HandlerHarness {
 	let resolveActive: (meta: RunMeta) => void = () => {}
 	let resolveResumed: (meta: RunMeta) => void = () => {}
 	let capturedEffort: EffortLevel | undefined
@@ -574,8 +587,8 @@ function createHandlerHarness(options: { runIdCollides?: boolean, build?: BuildI
 		readQueue: queue.readQueue,
 		writeQueue: queue.writeQueue,
 	})
-	const flowReplicaRegistry = createFlowReplicaRegistry(options.flowReplicaOptions ?? { epoch: 'test-epoch', historyLimit: 64, maxRuns: 8 })
-	const runListReplica = createRunListReplica({ epoch: 'test-epoch', historyLimit: 64 })
+	const flowFeedResponder = createFlowFeedResponder(options.flowFeedOptions ?? { epoch: 'test-epoch', historyLimit: 64, maxRuns: 8 })
+	const runListFeedResponder = createRunListFeedResponder({ epoch: 'test-epoch', historyLimit: 64 })
 	const handler = createRequestHandler(
 		{
 			guildConfig: sampleGuildConfig,
@@ -597,8 +610,8 @@ function createHandlerHarness(options: { runIdCollides?: boolean, build?: BuildI
 			runCheckpointExists: (runId) => checkpoints.has(runId),
 			tickScheduler: () => scheduler.tick(),
 			build: options.build ?? null,
-			flowEnvelopeFor: flowReplicaRegistry.envelopeFor,
-			runListEnvelopeFor: runListReplica.envelopeFor,
+			flowFeedResponder,
+			runListFeedResponder,
 		},
 		async (requestPath) => {
 			staticCalls.push(requestPath)
@@ -983,7 +996,7 @@ describe('GET /api/runs (list)', () => {
 		expect(response.headers.get('etag')).toBeNull()
 		const envelope = await response.json()
 		expect(envelope.kind).toBe('snapshot')
-		const list = runSummariesFromReplicaState(envelope.collections)
+		const list = runSummariesFromFrame(envelope)
 		expect(Array.isArray(list)).toBe(true)
 		expect(list.length).toBe(19)
 		expect(list.map((entry) => entry.runId)).toEqual([
@@ -1501,7 +1514,7 @@ describe('GET /api/runs/:id/flow', () => {
 		expect(response.headers.get('content-type')).toContain('application/json')
 		const envelope = await response.json()
 		expect(envelope.kind).toBe('snapshot')
-		const model = flowModelFromReplicaState(envelope.collections)
+		const model = flowModelFromFrame(envelope)
 		expect(model.status).toBe('success')
 		expect(model.participants.map((p: { role: string }) => p.role)).toEqual(['human', 'orchestrator', 'coder'])
 		expect(model.participants[0]).toEqual({ id: 'human:root', role: 'human', kind: 'human' })
@@ -1528,7 +1541,7 @@ describe('GET /api/runs/:id/flow', () => {
 		const { handler } = createHandlerHarness()
 		const response = await handler(get('/api/runs/run-interrupted/flow'))
 		expect(response.status).toBe(200)
-		const model = flowModelFromReplicaState((await response.json()).collections)
+		const model = flowModelFromFrame(await response.json())
 		expect(model.status).toBe('interrupted')
 	})
 
@@ -1537,7 +1550,7 @@ describe('GET /api/runs/:id/flow', () => {
 		const response = await handler(get('/api/runs/run-flow-details/flow'))
 		expect(response.status).toBe(200)
 		const envelope = await response.json()
-		const model = flowModelFromReplicaState(envelope.collections)
+		const model = flowModelFromFrame(envelope)
 		expect(model.operations.length).toBeGreaterThan(0)
 		for (const operation of model.operations) {
 			expect(operation).not.toHaveProperty('details')

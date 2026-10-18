@@ -6,8 +6,8 @@ import { createBootstrapFailureHandler } from './web/bootstrap-failure.js'
 import { createBuildInfoReader } from './web/build-info.js'
 import { createSnapshotCache } from './web/snapshot-cache.js'
 import { createRunListCache } from './web/run-list-cache.js'
-import { createFlowReplicaRegistry } from './web/flow-replica-registry.js'
-import { createRunListReplica } from './web/run-list-replica.js'
+import { createFlowFeedResponder } from './web/static/ts/flow-feed/index.js'
+import { createRunListFeedResponder } from './web/static/ts/run-list-feed/index.js'
 import { createStreamHub } from './web/stream-hub.js'
 import { createTaskSummarizer, type TaskSummarizer } from './summarize.js'
 import { applyDeploymentOverride, applyLogLevel, createAppendLog, createBunSubprocessRunner, createDeleteCheckpoint, createDeltaChannel, createDockerSecretReader, createGuildLoader, createInterruptChannel, createInterruptQueue, createLlmCaller, createLlmFetch, createListRunIds, createModelInfoProbe, createPlanToolHandlers, createReadProjectDoc, createReadProjectSettings, createReadQueue, createReadRunCheckpointById, createReadRunLogTextFrom, createReadRunMetaById, createReadRunPlanById, createReadRunSnapshotById, createReadRunSnapshotStats, createReadRunSummaryById, createReadRunSummaryStats, createReadWorkspaceGitState, createResumeErroredRun, createRoleSnapshotStore, createRunBaseTracker, createRunCheckpointExists, createRunDirectory, createRunDirectoryExists, createRunLogToolHandlers, createRunState, createRunSubmission, createSleep, createStyleGuideToolHandlers, createTaskScheduler, createTimeoutScheduler, createToolHandlers, createWebHumanBackend, createWriteCheckpoint, createWriteMeta, createWriteProjectSettings, createWriteQueue, createWriteRunSummary, ensureOrchestrationGitExcluded, entryFrameLogLevel, generateRunId, llmUsagePayload, LOG_FILE_NAME, MODEL_PROBE_TIMEOUT_MS, nodeGitExcludeFilesystem, parseModelInfo, reconcileRunsOnStartup, resolveDeploymentConfig, resolveDeploymentOverride, resolveKagiApiKey, resolveSecret, resumeExecutor, runExecutor, validateDeploymentFileConfig, validateDeploymentRoleReferences, ConfigurationError, ValidationError, type AppendLog, type DeltaChannel, type ExecutorDependencies, type InterruptChannel, type InvolvementLevel, type LoadedGuild, type LlmCaller, type LogLevel, type ModelApiProbe, type ResumeRun, type RunCheckpoint, type StartRun, type WebHumanBackend } from './executor/index.js'
@@ -386,10 +386,10 @@ async function serve(): Promise<void> {
 	// Boot order (docs/queueing.md "Dispatch and the scheduler"): reconciliation first, then exactly one scheduler tick. The tick repairs stale active items from their metas and dispatches the head waiting item — unless the resumed run holds the slot, in which case the dispatch restores the head and the resumed run's own settlement ticks onward.
 	await scheduler.tick()
 
-	// The flow replicas are process-local: the random epoch makes every revision this process issues distinct from a previous process's, so a browser holding a pre-restart revision is forced to resync by snapshot rather than reading a stale `unchanged`.
-	const flowReplicaRegistry = createFlowReplicaRegistry({ epoch: crypto.randomUUID(), historyLimit: FLOW_REPLICA_HISTORY_LIMIT, maxRuns: FLOW_REPLICA_MAX_RUNS })
-	// The run list is a single global collection, so one process-local replica serves it; the random epoch forces a pre-restart `have` to resync by snapshot.
-	const runListReplica = createRunListReplica({ epoch: crypto.randomUUID(), historyLimit: RUN_LIST_REPLICA_HISTORY_LIMIT })
+	// The flow feed responders are process-local: the random epoch makes every revision this process issues distinct from a previous process's, so a browser holding a pre-restart revision is forced to resync by snapshot rather than reading a stale `unchanged`.
+	const flowFeedResponder = createFlowFeedResponder({ epoch: crypto.randomUUID(), historyLimit: FLOW_REPLICA_HISTORY_LIMIT, maxRuns: FLOW_REPLICA_MAX_RUNS })
+	// The run list is a single global collection, so one process-local responder serves it; the random epoch forces a pre-restart `have` to resync by snapshot.
+	const runListFeedResponder = createRunListFeedResponder({ epoch: crypto.randomUUID(), historyLimit: RUN_LIST_REPLICA_HISTORY_LIMIT })
 
 	const webServer = createWebServer({
 		port,
@@ -414,8 +414,8 @@ async function serve(): Promise<void> {
 		runCheckpointExists,
 		tickScheduler: () => scheduler.tick(),
 		build: buildInfo,
-		flowEnvelopeFor: flowReplicaRegistry.envelopeFor,
-		runListEnvelopeFor: runListReplica.envelopeFor,
+		flowFeedResponder,
+		runListFeedResponder,
 	})
 	console.log(`Web UI ready: http://localhost:${webServer.port}`)
 

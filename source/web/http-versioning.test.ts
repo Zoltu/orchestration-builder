@@ -4,15 +4,27 @@ import type { RunState } from '../executor/run-state.ts'
 import type { ResumeErroredRun, RunSubmission } from '../executor/run-submission.ts'
 import type { TaskQueue } from '../executor/task-queue.ts'
 import type { DeploymentConfig, GuildConfig, RunMeta } from '../executor/types.ts'
-import { applyDelta, createEntityHasher } from './static/ts/entity-diff/index.js'
-import { flowDefinitions, flowModelFromReplicaState } from './static/ts/flow-collections.js'
-import { applyRunListEnvelope, emptyRunListReplicaState, runListDefinitions, runSummariesFromReplicaState } from './static/ts/run-list-collections.js'
+import { applyFlowFrame, createFlowFeedResponder, emptyFlowFeedState, flowFeedRevision } from './static/ts/flow-feed/index.js'
+import type { FlowFeedResponderOptions } from './static/ts/flow-feed/index.js'
+import type { InteractionModel } from './static/ts/interaction-model.js'
+import { applyRunListFrame, createRunListFeedResponder, emptyRunListFeedState, runListFeedRevision } from './static/ts/run-list-feed/index.js'
+import type { RunSummary } from './static/ts/run-list-feed/index.js'
 import { createRequestHandler, type RequestHandler } from './request-handler.ts'
 import { createRunListCache } from './run-list-cache.ts'
-import { createFlowReplicaRegistry, type FlowReplicaRegistryOptions } from './flow-replica-registry.ts'
-import { createRunListReplica } from './run-list-replica.ts'
 import { parseLogEvents, parseRunMeta } from '../run-log/index.js'
 import type { ReadRunSnapshot } from './snapshot-cache.ts'
+
+function flowModelFromFrame(frame: unknown): InteractionModel {
+	const result = applyFlowFrame(emptyFlowFeedState(), frame)
+	if (result.model === null) throw new Error(`expected a flow frame with a model, received ${result.outcome}`)
+	return result.model
+}
+
+function runSummariesFromFrame(frame: unknown): RunSummary[] {
+	const result = applyRunListFrame(emptyRunListFeedState(), frame)
+	if (result.summaries === null) throw new Error(`expected a run-list frame with summaries, received ${result.outcome}`)
+	return result.summaries
+}
 
 // A local, mutable stand-in for the on-disk run store: each test owns its own map, so nothing here touches the filesystem or shared module state.
 interface StoredRun {
@@ -66,7 +78,7 @@ interface VersioningHarness {
 	setInterruptPending: (pending: boolean) => void
 }
 
-function createVersioningHarness(initialRuns: Array<[string, StoredRun]>, flowReplicaOptions: FlowReplicaRegistryOptions = { epoch: 'versioning-epoch', historyLimit: 64, maxRuns: 8 }): VersioningHarness {
+function createVersioningHarness(initialRuns: Array<[string, StoredRun]>, flowFeedOptions: FlowFeedResponderOptions = { epoch: 'versioning-epoch', historyLimit: 64, maxRuns: 8 }): VersioningHarness {
 	const runs = new Map(initialRuns)
 	let activeRunId: string | undefined
 	let interruptPending = false
@@ -119,8 +131,8 @@ function createVersioningHarness(initialRuns: Array<[string, StoredRun]>, flowRe
 	const readQueue = () => emptyQueue
 	const writeQueue = () => {}
 	const resumeErroredRun: ResumeErroredRun = () => ({ ok: false, error: 'run_not_found' })
-	const flowReplicaRegistry = createFlowReplicaRegistry(flowReplicaOptions)
-	const runListReplica = createRunListReplica({ epoch: 'versioning-epoch', historyLimit: 64 })
+	const flowFeedResponder = createFlowFeedResponder(flowFeedOptions)
+	const runListFeedResponder = createRunListFeedResponder({ epoch: 'versioning-epoch', historyLimit: 64 })
 
 	const handler = createRequestHandler(
 		{
@@ -143,8 +155,8 @@ function createVersioningHarness(initialRuns: Array<[string, StoredRun]>, flowRe
 			runCheckpointExists,
 			tickScheduler: async () => {},
 			build: null,
-			flowEnvelopeFor: flowReplicaRegistry.envelopeFor,
-			runListEnvelopeFor: runListReplica.envelopeFor,
+			flowFeedResponder,
+			runListFeedResponder,
 		},
 		async () => new Response('static body'),
 	)
@@ -294,26 +306,31 @@ describe('flow-model envelope and run-list conditional requests', () => {
 		expect(snapshot.kind).toBe('snapshot')
 		expect(typeof snapshot.version).toBe('string')
 		expect(typeof snapshot.contentHash).toBe('string')
-		expect(flowModelFromReplicaState(snapshot.collections).operations.length).toBe(2)
+		const snapshotResult = applyFlowFrame(emptyFlowFeedState(), snapshot)
+		expect(snapshotResult.outcome).toBe('snapshot')
+		if (snapshotResult.model === null) throw new Error('expected the snapshot to produce a model')
+		expect(snapshotResult.model.operations.length).toBe(2)
+		const revision = flowFeedRevision(snapshotResult.state)
+		if (revision === null) throw new Error('expected the snapshot to produce a revision')
 
-		const unchanged = await handler(get(`/api/runs/run-1/flow?have=${encodeURIComponent(snapshot.version)}`))
-		expect(await unchanged.json()).toEqual({ kind: 'unchanged', version: snapshot.version })
+		const unchanged = await handler(get(`/api/runs/run-1/flow?have=${encodeURIComponent(revision)}`))
+		expect(await unchanged.json()).toEqual({ kind: 'unchanged', version: revision })
 
 		storedRunOrThrow(runs, 'run-1').logText += `\n${JSON.stringify({ timestamp: '2026-01-01T00:00:03.000Z', type: 'role_finished', payload: { role: 'worker', status: 'success' } })}`
-		const changed = await handler(get(`/api/runs/run-1/flow?have=${encodeURIComponent(snapshot.version)}`))
+		const changed = await handler(get(`/api/runs/run-1/flow?have=${encodeURIComponent(revision)}`))
 		const delta = await changed.json()
 		expect(delta.kind).toBe('delta')
-		expect(delta.base).toBe(snapshot.version)
-		expect(delta.next).not.toBe(snapshot.version)
+		expect(delta.base).toBe(revision)
+		expect(delta.next).not.toBe(revision)
 
-		const reaction = applyDelta(flowDefinitions, snapshot.collections, snapshot.version, delta)
-		expect(reaction.kind).toBe('applied')
-		if (reaction.kind !== 'applied') throw new Error('expected the delta to apply')
-		const reconstructed = flowModelFromReplicaState(reaction.state)
+		const applied = applyFlowFrame(snapshotResult.state, delta)
+		expect(applied.outcome).toBe('applied')
+		if (applied.model === null) throw new Error('expected the delta to produce a model')
+		const reconstructed = applied.model
 
 		const fresh = await (await handler(get('/api/runs/run-1/flow'))).json()
 		expect(fresh.kind).toBe('snapshot')
-		expect(flowModelFromReplicaState(fresh.collections)).toEqual(reconstructed)
+		expect(flowModelFromFrame(fresh)).toEqual(reconstructed)
 	})
 
 	test('an unknown or evicted have returns a snapshot', async () => {
@@ -369,45 +386,49 @@ describe('flow-model envelope and run-list conditional requests', () => {
 		expect(snapshot.kind).toBe('snapshot')
 		expect(typeof snapshot.version).toBe('string')
 		expect(typeof snapshot.contentHash).toBe('string')
-		expect(runSummariesFromReplicaState(snapshot.collections).map((summary) => summary.runId)).toEqual(['run-1'])
-		// The client helper must verify the server's snapshot content hash against the shared definitions, so the two sides agree on every entity version.
-		const applied = applyRunListEnvelope(emptyRunListReplicaState(), null, snapshot, createEntityHasher())
-		expect(applied.outcome).toBe('snapshot')
-		expect(applied.summaries?.map((summary) => summary.runId)).toEqual(['run-1'])
+		const snapshotResult = applyRunListFrame(emptyRunListFeedState(), snapshot)
+		expect(snapshotResult.outcome).toBe('snapshot')
+		if (snapshotResult.summaries === null) throw new Error('expected the snapshot to produce summaries')
+		expect(snapshotResult.summaries.map((summary) => summary.runId)).toEqual(['run-1'])
+		const revision = runListFeedRevision(snapshotResult.state)
+		if (revision === null) throw new Error('expected the snapshot to produce a revision')
 
-		const unchanged = await handler(get(`/api/runs?have=${encodeURIComponent(snapshot.version)}`))
-		expect(await unchanged.json()).toEqual({ kind: 'unchanged', version: snapshot.version })
+		const unchanged = await handler(get(`/api/runs?have=${encodeURIComponent(revision)}`))
+		expect(await unchanged.json()).toEqual({ kind: 'unchanged', version: revision })
 
 		const run = storedRunOrThrow(runs, 'run-1')
 		run.summaryText = 'a generated summary'
 		run.summaryMtimeMs = 2
-		const changed = await handler(get(`/api/runs?have=${encodeURIComponent(snapshot.version)}`))
+		const changed = await handler(get(`/api/runs?have=${encodeURIComponent(revision)}`))
 		const delta = await changed.json()
 		expect(delta.kind).toBe('delta')
-		expect(delta.base).toBe(snapshot.version)
-		expect(delta.next).not.toBe(snapshot.version)
+		expect(delta.base).toBe(revision)
+		expect(delta.next).not.toBe(revision)
 
-		const reaction = applyDelta(runListDefinitions, snapshot.collections, snapshot.version, delta)
-		expect(reaction.kind).toBe('applied')
-		if (reaction.kind !== 'applied') throw new Error('expected the delta to apply')
-		const reconstructed = runSummariesFromReplicaState(reaction.state)
+		const applied = applyRunListFrame(snapshotResult.state, delta)
+		expect(applied.outcome).toBe('applied')
+		if (applied.summaries === null) throw new Error('expected the delta to produce summaries')
+		const reconstructed = applied.summaries
 		expect(reconstructed[0]?.summary).toBe('a generated summary')
 
 		const fresh = await (await handler(get('/api/runs'))).json()
 		expect(fresh.kind).toBe('snapshot')
-		expect(runSummariesFromReplicaState(fresh.collections)).toEqual(reconstructed)
+		expect(runSummariesFromFrame(fresh)).toEqual(reconstructed)
 	})
 
 	test('adding a run yields a delta that carries the new run newest-first', async () => {
 		const { handler, runs } = createVersioningHarness([['run-1', storedRun('run-1')]])
 		const snapshot = await (await handler(get('/api/runs'))).json()
+		const snapshotResult = applyRunListFrame(emptyRunListFeedState(), snapshot)
+		const revision = runListFeedRevision(snapshotResult.state)
+		if (revision === null) throw new Error('expected the snapshot to produce a revision')
 		runs.set('run-2', storedRun('run-2'))
-		const delta = await (await handler(get(`/api/runs?have=${encodeURIComponent(snapshot.version)}`))).json()
+		const delta = await (await handler(get(`/api/runs?have=${encodeURIComponent(revision)}`))).json()
 		expect(delta.kind).toBe('delta')
-		const reaction = applyDelta(runListDefinitions, snapshot.collections, snapshot.version, delta)
-		expect(reaction.kind).toBe('applied')
-		if (reaction.kind !== 'applied') throw new Error('expected the delta to apply')
-		expect(runSummariesFromReplicaState(reaction.state).map((summary) => summary.runId)).toEqual(['run-2', 'run-1'])
+		const applied = applyRunListFrame(snapshotResult.state, delta)
+		expect(applied.outcome).toBe('applied')
+		if (applied.summaries === null) throw new Error('expected the delta to produce summaries')
+		expect(applied.summaries.map((summary) => summary.runId)).toEqual(['run-2', 'run-1'])
 	})
 
 	test('an unknown have returns a snapshot', async () => {

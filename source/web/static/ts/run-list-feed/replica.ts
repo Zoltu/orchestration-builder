@@ -1,7 +1,7 @@
-import { canonicalSerialize, defineCollection, reduceServerResponse } from './entity-diff/index.js'
-import type { CollectionDefinitions, EntityHasher, ReplicaState } from './entity-diff/index.js'
-import { isObject } from './guards.js'
-import type { RunStatus } from './interaction-model.js'
+import { canonicalSerialize, defineCollection } from '../entity-diff/index.js'
+import type { CollectionDefinitions, ReplicaState } from '../entity-diff/index.js'
+import { isObject } from '../guards.js'
+import type { RunStatus } from '../interaction-model.js'
 
 // The result card and run-level error a run summary carries, declared structurally here so this browser-pure module never imports the server render module (whose ResultCard is the same wire shape).
 export interface RunResultCard {
@@ -148,16 +148,24 @@ export function runSummariesFromReplicaState(state: RunListReplicaState): RunSum
 	return summaries
 }
 
-// The outcome of reducing a run-list endpoint envelope: the four entity-diff reactions plus the summaries reconstructed from the resulting state. A non-applying reaction carries null summaries, and only the three applying reactions carry a version (a response the client cannot apply leaves the held version in place).
-export type RunListEnvelopeResult =
-	| { outcome: 'unchanged' | 'applied' | 'snapshot'; state: RunListReplicaState; version: string; summaries: RunSummary[] }
-	| { outcome: 'needsSnapshot' | 'invalid'; state: RunListReplicaState; version: string | null; summaries: null }
+// Converts a summary to the entity-diff entity: the run id becomes the entity's `id` (the collection key) and the wire `runId` is restored on reconstruction.
+export function runSummaryEntityFor(summary: RunSummary): RunSummaryEntity {
+	return {
+		id: summary.runId,
+		status: summary.status,
+		task: summary.task,
+		effort: summary.effort,
+		involvement: summary.involvement,
+		startTime: summary.startTime,
+		endTime: summary.endTime,
+		result: summary.result,
+		error: summary.error,
+		summary: summary.summary,
+	}
+}
 
-// Reduces one run-list envelope against the replica the client holds and reconstructs the newest-first summaries, so the poll action keeps one state/version/summaries triple instead of re-deriving the list at every call site. On needsSnapshot the server could not answer from the client's base, so the caller re-fetches without a `have` and the server replies with a full snapshot.
-export function applyRunListEnvelope(state: RunListReplicaState, version: string | null, raw: unknown, hasher: EntityHasher): RunListEnvelopeResult {
-	const reaction = reduceServerResponse(runListDefinitions, hasher, state, version, raw)
-	if (reaction.kind === 'unchanged') return { outcome: 'unchanged', state: reaction.state, version: reaction.version, summaries: runSummariesFromReplicaState(reaction.state) }
-	if (reaction.kind === 'applied') return { outcome: 'applied', state: reaction.state, version: reaction.version, summaries: runSummariesFromReplicaState(reaction.state) }
-	if (reaction.kind === 'snapshot') return { outcome: 'snapshot', state: reaction.state, version: reaction.version, summaries: runSummariesFromReplicaState(reaction.state) }
-	return { outcome: reaction.kind, state: reaction.state, version: reaction.version, summaries: null }
+// The server replica receives the summaries in whatever order its reader produced them; this module owns the newest-first ordering, so it sorts by run id before building the entity collection.
+export function runListReplicaStateFromSummaries(summaries: readonly RunSummary[]): RunListReplicaState {
+	const entities = summaries.slice().sort((left, right) => (left.runId < right.runId ? 1 : left.runId > right.runId ? -1 : 0)).map(runSummaryEntityFor)
+	return { runs: entities }
 }
