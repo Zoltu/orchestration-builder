@@ -1,10 +1,10 @@
+import type { RoleRegistryEntry } from '../role-registry.js'
+import { logEvent, type EngineContext, type RoleState } from '../engine-state.js'
+import { createResultCard, createToolError } from '../errors.js'
+import type { AppendLog } from '../persistence.js'
+import type { ResultCard } from '../types.js'
 import { compactHistoryForContextBudget, type ContextCompactionReport } from './context-policy.js'
-import { effectiveContextBudget } from './context-pressure.js'
-import { createResultCard, createToolError } from './errors.js'
-import { runHandlerInterlude } from './interrupt-engine.js'
-import type { RoleRegistryEntry } from './role-registry.js'
-import { logEvent, type EngineContext, type EngineDependencies, type RoleState, type RunRole } from './engine-state.js'
-import type { ResultCard } from './types.js'
+import { effectiveContextBudget, type ContextPressureTracker } from './context-pressure.js'
 
 // The recovery loop for a context-window rejection: each rejection compacts with a fresh endpoint-reported token count, so the estimate recalibrates on every attempt. Three attempts give the estimate room to converge without letting a hopeless request spin.
 export const MAX_CONTEXT_RECOVERY_ATTEMPTS = 3
@@ -47,7 +47,7 @@ export function contextExceededCard(reason: string): { kind: 'finished'; card: R
 }
 
 // The naive in-place backstop for a context-window rejection: drop the oldest turns, truncate oversized surviving tool results, strip reasoning from the oldest survivors as a last resort, then resume with a platform notice (see compactHistoryForContextBudget). Returns the terminal card when even the undeletable remainder cannot fit, null when the compacted role may continue. Used directly when no context handler is configured, and as the fallback when the handler cannot do better.
-export function applyContextBackstop(roleState: RoleState, deps: EngineDependencies, context: EngineContext, rejection: { promptTokens: number; contextWindow: number }): ResultCard | null {
+export function applyContextBackstop(roleState: RoleState, context: EngineContext, rejection: { promptTokens: number; contextWindow: number }, dependencies: { appendLog: AppendLog }): ResultCard | null {
 	const report = compactHistoryForContextBudget(roleState.history, {
 		contextWindow: rejection.contextWindow,
 		promptTokens: rejection.promptTokens,
@@ -61,7 +61,7 @@ export function applyContextBackstop(roleState: RoleState, deps: EngineDependenc
 			error: createToolError('context_budget_exceeded', 'Context window exceeded and the conversation cannot be compacted enough to continue'),
 		})
 	}
-	logEvent(deps.appendLog, 'context_compacted', {
+	logEvent(dependencies.appendLog, 'context_compacted', {
 		role: context.roleName,
 		droppedMessages: report.droppedMessages,
 		truncatedToolMessages: report.truncatedToolMessages,
@@ -74,9 +74,9 @@ export function applyContextBackstop(roleState: RoleState, deps: EngineDependenc
 }
 
 // The effective budget a role's reported prompt size is measured against: the static math (window minus the reserved completion budget) tightened by whatever the run has learned from endpoint rejections.
-export function currentEffectiveBudget(context: EngineContext, deps: EngineDependencies): number {
+export function currentEffectiveBudget(context: EngineContext, tracker: ContextPressureTracker): number {
 	const modelConfig = context.loadedGuild.deployment.model
-	return effectiveContextBudget(modelConfig.contextWindow, modelConfig.generation.maxTokens ?? 0, deps.contextPressureTracker.learnedCeiling)
+	return effectiveContextBudget(modelConfig.contextWindow, modelConfig.generation.maxTokens ?? 0, tracker.learnedCeiling)
 }
 
 // The one-shot notice a role receives when its reported prompt size crosses the pressure threshold, asking it to hand off while it still has its full context — the working agent is the best-qualified summarizer of its own work, and a fresh small conversation is the cache-cheapest continuation. The entry role's own prompt teaches it to read the notice as "wrap the run toward a resumable checkpoint" instead, since no parent can re-spawn it.
@@ -89,19 +89,8 @@ export function contextPressureNotice(promptTokens: number, effectiveBudget: num
 	].join(' ')
 }
 
-// The context-compaction interlude (runHandlerInterlude in interrupt-engine.ts) for the two context triggers. The target always resumes afterwards: a successful handler leaves a compacted history; a failed one leaves the history untouched and the caller falls back (the handoff notice at depth 0, the naive backstop at the wall).
-export async function runContextManagerHandler(
-	runRole: RunRole,
-	deps: EngineDependencies,
-	context: EngineContext,
-	entry: RoleRegistryEntry,
-	trigger: 'context_pressure' | 'context_budget_exceeded',
-	reported: { promptTokens: number; budgetTokens: number },
-): Promise<ResultCard> {
-	const config = context.loadedGuild.deployment.executor
-	const handlerRole = config.contextHandlerRole
-	if (handlerRole === undefined) throw new Error('runContextManagerHandler called without executor.contextHandlerRole configured')
-	const task = trigger === 'context_pressure'
+export function contextHandlerTask(trigger: 'context_pressure' | 'context_budget_exceeded', context: EngineContext, entry: RoleRegistryEntry, reported: { promptTokens: number; budgetTokens: number }): string {
+	return trigger === 'context_pressure'
 		? [
 			`The platform flagged role instance "${entry.roleId}" (role "${context.roleName}"): its conversation crossed the context-pressure threshold (${reported.promptTokens} reported prompt tokens against an effective budget of ${reported.budgetTokens}).`,
 			`Compact its conversation now: inspect it with list_role_messages, read_message_window, and search_role_blocks, prune it with edit_context (targetRole "${entry.roleId}"), confirm the reduction with context_info (targetRole "${entry.roleId}"), then call finish.`,
@@ -112,12 +101,4 @@ export async function runContextManagerHandler(
 			`Compact its conversation now: inspect it with list_role_messages, read_message_window, and search_role_blocks, prune it with edit_context (targetRole "${entry.roleId}"), confirm the reduction with context_info (targetRole "${entry.roleId}"), then call finish.`,
 			'It resumes its work when you finish, so preserve what it needs to continue.',
 		].join(' ')
-	return runHandlerInterlude(runRole, deps, context, entry, config, handlerRole, trigger, task, {}, (handlerCard) => {
-		if (handlerCard.status === 'success') {
-			logEvent(deps.appendLog, 'interrupt_resolved', { trigger, handler: handlerRole, target: entry.roleId, action: 'compacted' })
-		} else {
-			logEvent(deps.appendLog, 'interrupt_resolved', { trigger, handler: handlerRole, target: entry.roleId, action: 'failed', handlerStatus: handlerCard.status })
-		}
-		return handlerCard
-	})
 }

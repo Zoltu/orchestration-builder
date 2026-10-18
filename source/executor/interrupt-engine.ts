@@ -1,4 +1,5 @@
 import { createResultCard, createToolError } from './errors.js'
+import { runHandlerInterlude } from './handler-interlude.js'
 import type { InterruptRequest } from './interrupts.js'
 import type { RoleRegistry, RoleRegistryEntry } from './role-registry.js'
 import { logEvent, type EngineContext, type EngineDependencies, type RoleState, type RunRole } from './engine-state.js'
@@ -72,35 +73,6 @@ function routeOperatorInterrupt(
 	return null
 }
 
-// The trigger vocabulary of the interrupt/interrupt_resolved event pair every handler interlude logs.
-export type InterludeTrigger = 'loop_check' | 'inquiry' | 'context_pressure' | 'context_budget_exceeded'
-
-// The shared handler interlude every handler invocation runs (the loop-check, inquiry, and context handlers): suspend the active role at the safe point, invoke the handler role against its frozen (registered) state, then apply the trigger's resolution step with the handler's finish card. The interrupt event lands immediately before the handler's role_start so the interaction model roots the handler under a fresh interrupt participant. The handler context is the target's context spread with handlerOf set to the target's instance id — the mark the drain point reads to exempt a handler from interrupt checking and operator-request draining, so a handler can never interrupt itself or consume operator requests meant for real work roles. The handler depth is one beneath the target clamped to maxAgentDepth: the interlude is platform infrastructure, not a delegation, so it must never trip the global depth budget itself. interruptDetails carries the trigger's extra interrupt event payload fields (the inquiry's verbatim question; nothing for the other triggers).
-export async function runHandlerInterlude<Resolution>(
-	runRole: RunRole,
-	deps: EngineDependencies,
-	context: EngineContext,
-	entry: RoleRegistryEntry,
-	config: ExecutorConfig,
-	handlerRole: string,
-	trigger: InterludeTrigger,
-	task: string,
-	interruptDetails: Record<string, unknown>,
-	resolve: (handlerCard: ResultCard) => Resolution,
-): Promise<Resolution> {
-	logEvent(deps.appendLog, 'interrupt', { trigger, handler: handlerRole, target: entry.roleId, ...interruptDetails })
-	const handlerCard = await runRole(deps, {
-		...context,
-		depth: Math.min(context.depth + 1, config.maxAgentDepth),
-		roleName: handlerRole,
-		task,
-		parent: context.roleName,
-		parentRoleId: entry.roleId,
-		handlerOf: entry.roleId,
-	})
-	return resolve(handlerCard)
-}
-
 // The loop-check interlude (runHandlerInterlude): the handler investigates the flagged instance and applies its trigger_interrupt action — continue resumes unchanged, redirect resumes with the handler's message already injected (by the tool) into the target's history, abort finishes the target with a loop_detected card.
 async function runInterruptHandler(
 	runRole: RunRole,
@@ -115,7 +87,7 @@ async function runInterruptHandler(
 		`It has made ${entry.roleState.toolCallCount} tool calls and generated ${entry.roleState.generatedTokens} tokens so far.`,
 		'Investigate whether it is stuck in a loop, then call trigger_interrupt with that role-instance id and your decision.',
 	].join(' ')
-	return runHandlerInterlude(runRole, deps, context, entry, config, handlerRole, 'loop_check', task, {}, (handlerCard) => {
+	return runHandlerInterlude({ appendLog: deps.appendLog, runRole: (handlerContext) => runRole(deps, handlerContext) }, context, entry, config, handlerRole, 'loop_check', task, {}, (handlerCard) => {
 		const action = entry.interruptAction
 		entry.interruptAction = undefined
 		if (action === undefined) {
@@ -168,7 +140,7 @@ async function runInquiryHandler(
 		finishedRolesNote,
 		'When you know the answer, call finish with status "success" and put the answer, in plain language, in the summary — the summary is shown to the operator as your answer. Do not modify the workspace or any role\'s conversation.',
 	].join('\n')
-	await runHandlerInterlude(runRole, deps, context, entry, config, handlerRole, 'inquiry', task, { message: request.message }, (handlerCard) => {
+	await runHandlerInterlude({ appendLog: deps.appendLog, runRole: (handlerContext) => runRole(deps, handlerContext) }, context, entry, config, handlerRole, 'inquiry', task, { message: request.message }, (handlerCard) => {
 		if (handlerCard.status === 'success') {
 			logEvent(deps.appendLog, 'interrupt_resolved', { trigger: 'inquiry', handler: handlerRole, target: entry.roleId, action: 'answered', summary: handlerCard.summary })
 		} else {

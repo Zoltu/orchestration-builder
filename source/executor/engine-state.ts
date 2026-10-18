@@ -1,5 +1,5 @@
 import type { CheckpointRecorder } from './checkpoint.js'
-import type { ContextPressureTracker } from './context-pressure.js'
+import type { ContextPressureTracker } from './context/index.js'
 import type { HumanBackend } from './human-backend.js'
 import type { InterruptQueue } from './interrupts.js'
 import type { LoadedGuild } from './loader.js'
@@ -57,7 +57,7 @@ export interface EngineContext {
 	parent?: string
 	// The calling role's instance id, omitted for the entry role. Lets the interrupt platform walk the live delegation chain (plan-modification routing).
 	parentRoleId?: string
-	// Set when this invocation is an interrupt handler serving the named target instance, by the shared handler interlude (runHandlerInterlude in interrupt-engine.ts): the drain point skips the handler so a handler can never interrupt itself or consume operator requests meant for real work roles.
+	// Set when this invocation is an interrupt handler serving the named target instance, by the shared handler interlude (runHandlerInterlude in handler-interlude.ts): the drain point skips the handler so a handler can never interrupt itself or consume operator requests meant for real work roles.
 	handlerOf?: string
 }
 

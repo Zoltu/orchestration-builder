@@ -1,7 +1,7 @@
 import { isErrorKind } from './errors.js'
 import { SUSPENDING_CHILD_TOOLS } from './engine-state.js'
 import { DEFAULT_LOG_LEVEL } from './log-level.js'
-import type { ContextPressureTracker } from './context-pressure.js'
+import type { ContextPressureTracker } from './context/index.js'
 import type { EngineContext, RoleState } from './engine-state.js'
 import { isMessage, isToolCall } from './message-validation.js'
 import type { RunBaseTracker } from './base-state.js'

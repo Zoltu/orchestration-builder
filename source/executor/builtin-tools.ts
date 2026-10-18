@@ -1,6 +1,6 @@
 import { createToolError, isErrorKind } from './errors.js'
 import type { Message, ResultCard, ToolResult } from './types.js'
-import { stripReasoning } from './context-policy.js'
+import { stripReasoning } from './context/index.js'
 import { indexRoleMessages, readMessageWindow, searchRoleBlocks, MAX_SEARCH_MATCHES, RECENT_TOOL_CALLS_LIMIT, type InspectionField, type RecentToolCall } from './role-inspection.js'
 import type { InterruptActionKind, RoleRegistry, RoleRegistryEntry } from './role-registry.js'
 import { isObject } from './validation.js'

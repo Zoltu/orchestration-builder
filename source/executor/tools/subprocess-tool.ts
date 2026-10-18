@@ -1,4 +1,4 @@
-import { truncateToolOutput } from '../context-policy.js'
+import { truncateToolOutput } from '../context/index.js'
 import { createToolError } from '../errors.js'
 import type { ToolResult } from '../types.js'
 

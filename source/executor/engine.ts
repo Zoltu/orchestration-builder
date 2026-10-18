@@ -3,10 +3,7 @@ import type { DiscardedRetrySpend, LlmUsage, LlmUsagePayload, Message, ResultCar
 import { isObject, isResultCard } from './validation.js'
 import { checkGlobalBudgets, checkRoleBudgets } from './budgets.js'
 import { createBuiltInToolHandlers, OBSERVATION_TOOL_NAMES } from './builtin-tools.js'
-import { buildInitialHistory } from './context-builder.js'
-import { applyContextBackstop, contextExceededCard, contextManagedNotice, contextPressureNotice, currentEffectiveBudget, MAX_CONTEXT_RECOVERY_ATTEMPTS, runContextManagerHandler } from './context-handoff.js'
-import { truncateToolOutput } from './context-policy.js'
-import { DEFAULT_CONTEXT_PRESSURE_THRESHOLD, recordContextRejection } from './context-pressure.js'
+import { buildInitialHistory, createContextManager, truncateToolOutput, type ContextManager } from './context/index.js'
 import { logEvent, SUSPENDING_CHILD_TOOLS, type EngineContext, type EngineDependencies, type ResumedRole, type RoleState, type SeededRole, type SuspendedTurn } from './engine-state.js'
 import { isWriteCapableRole, parkCard } from './park-state.js'
 import { drainInterrupts } from './interrupt-engine.js'
@@ -126,6 +123,7 @@ function handleLlmResult(
 	roleState: RoleState,
 	deps: EngineDependencies,
 	context: EngineContext,
+	contextManager: ContextManager,
 ): LlmResultHandling {
 	const config = context.loadedGuild.deployment.executor
 	if (llmResult.kind === 'llm_unavailable') {
@@ -140,42 +138,14 @@ function handleLlmResult(
 	}
 
 	if (llmResult.kind === 'context_budget_exceeded') {
-		recordContextRejection(deps.contextPressureTracker, llmResult.promptTokens)
-		logEvent(deps.appendLog, 'context_budget_exceeded', {
-			role: context.roleName,
-			promptTokens: llmResult.promptTokens,
-			contextWindow: llmResult.contextWindow,
-		})
-		roleState.contextExceededAttempts += 1
-		if (roleState.contextExceededAttempts > MAX_CONTEXT_RECOVERY_ATTEMPTS) {
-			return contextExceededCard(`Context window exceeded and ${MAX_CONTEXT_RECOVERY_ATTEMPTS} compaction attempts did not make the request fit`)
-		}
-		// With a context handler configured, the overflow is answered at the next turn boundary by suspending the role and letting the handler prune surgically — the rejection is detected mid-turn, but a handler can only run at the safe point. The naive backstop remains for handler-less configurations and as the fallback when the handler fails.
-		if (config.contextHandlerRole !== undefined) {
-			roleState.contextCompactionPending = { promptTokens: llmResult.promptTokens, contextWindow: llmResult.contextWindow }
-			return { kind: 'continue' }
-		}
-		const backstopCard = applyContextBackstop(roleState, deps, context, llmResult)
-		if (backstopCard !== null) return { kind: 'finished', card: backstopCard }
+		const decision = contextManager.observeRejection(roleState, llmResult)
+		if (decision.kind === 'finished') return { kind: 'finished', card: decision.card }
 		return { kind: 'continue' }
 	}
 
-	roleState.contextExceededAttempts = 0
 	// A success the endpoint answered without a usage report updates no accumulator: lastPromptTokens keeps reflecting the last reported conversation size (an absent report must not be able to masquerade as a zero-token conversation in the pressure check or context_info), no tokens are added to the generated total, and the pressure check is skipped — it reads real reported usage only. A reported zero is endpoint data and is recorded as one.
-	if (llmResult.usage !== undefined) {
-		roleState.lastPromptTokens = llmResult.usage.promptTokens
-		roleState.generatedTokens += llmResult.usage.completionTokens
-
-		// The proactive pressure check reads real reported usage only, and fires once per role instance: the flag moves pending → sent and never re-arms, so a role that keeps working after the notice is not re-noticed on every subsequent turn.
-		if (roleState.contextPressureNotice === undefined) {
-			const threshold = config.contextPressureThreshold ?? DEFAULT_CONTEXT_PRESSURE_THRESHOLD
-			const budget = currentEffectiveBudget(context, deps)
-			if (roleState.lastPromptTokens >= threshold * budget) {
-				roleState.contextPressureNotice = 'pending'
-				logEvent(deps.appendLog, 'context_pressure', { role: context.roleName, promptTokens: roleState.lastPromptTokens, effectiveBudget: budget })
-			}
-		}
-	}
+	// The proactive pressure check reads real reported usage only, and fires once per role instance: the flag moves pending → sent and never re-arms, so a role that keeps working after the notice is not re-noticed on every subsequent turn.
+	contextManager.observeSuccess(roleState, llmResult.usage)
 
 	const postCallBudgetError = checkRoleBudgets(roleState.recentCompactionPromptTokens, config)
 	if (postCallBudgetError !== null) {
@@ -470,6 +440,11 @@ async function executeRoleLoop(
 	resumeNote?: string,
 ): Promise<ResultCard> {
 	const config = context.loadedGuild.deployment.executor
+	const contextManager = createContextManager(context, {
+		appendLog: deps.appendLog,
+		contextPressureTracker: deps.contextPressureTracker,
+		runRole: (handlerContext) => runRole(deps, handlerContext),
+	})
 	// The note is delivered exactly once, at the resumed role's equivalent loop entry: inside the suspended-turn completion when there is one (its remaining calls may include the finish that terminates the role without a further LLM request), else at the loop top. Either way it lands after the previous turn's tool results and before the role's next decision, and the loop top's checkpoint write persists it like any other history message.
 	let noteToInject = resumeNote
 	if (suspendedTurn !== undefined) {
@@ -487,33 +462,8 @@ async function executeRoleLoop(
 		const interruptCard = await drainInterrupts(runRole, deps, context, roleState, registryEntry)
 		if (interruptCard !== null) return interruptCard
 
-		// A queued overflow compaction runs first: the role's last request was rejected for context size and cannot succeed until the handler shrinks the history (or the naive backstop does when the handler fails).
-		if (roleState.contextCompactionPending !== undefined) {
-			const pending = roleState.contextCompactionPending
-			roleState.contextCompactionPending = undefined
-			const handlerCard = await runContextManagerHandler(runRole, deps, context, registryEntry, 'context_budget_exceeded', { promptTokens: pending.promptTokens, budgetTokens: pending.contextWindow })
-			if (handlerCard.status === 'success') {
-				roleState.history.push({ role: 'user', content: contextManagedNotice('context_budget_exceeded', handlerCard.summary) })
-			} else {
-				const backstopCard = applyContextBackstop(roleState, deps, context, pending)
-				if (backstopCard !== null) return backstopCard
-			}
-		}
-
-		// The pressure response lands at a turn boundary — after the previous turn's tool results — never between an assistant tool_calls message and its tool results, which is a malformed request on strict endpoints. The entry role has no parent to hand off to, so with a context handler configured the platform compacts it instead of sending the handoff notice (falling back to the notice when the handler fails); child roles get the append-only notice, which preserves the endpoint's prefix cache.
-		if (roleState.contextPressureNotice === 'pending') {
-			roleState.contextPressureNotice = 'sent'
-			if (context.depth === 0 && config.contextHandlerRole !== undefined) {
-				const handlerCard = await runContextManagerHandler(runRole, deps, context, registryEntry, 'context_pressure', { promptTokens: roleState.lastPromptTokens, budgetTokens: currentEffectiveBudget(context, deps) })
-				if (handlerCard.status === 'success') {
-					roleState.history.push({ role: 'user', content: contextManagedNotice('context_pressure', handlerCard.summary) })
-				} else {
-					roleState.history.push({ role: 'user', content: contextPressureNotice(roleState.lastPromptTokens, currentEffectiveBudget(context, deps)) })
-				}
-			} else {
-				roleState.history.push({ role: 'user', content: contextPressureNotice(roleState.lastPromptTokens, currentEffectiveBudget(context, deps)) })
-			}
-		}
+		const contextDecision = await contextManager.resolveSafePoint(roleState, registryEntry)
+		if (contextDecision.kind === 'finished') return contextDecision.card
 
 		// The safe point: no LLM call is in flight and every queued platform mutation (drain, compaction, pressure notice) has been applied, so the checkpoint written here is the state a restart resumes from. Only the active leaf reaches this — suspended ancestors are captured through their registered frames.
 		deps.checkpointRecorder.write()
@@ -545,7 +495,7 @@ async function executeRoleLoop(
 			onDelta: (delta) => deps.publishDelta({ roleId: registryEntry.roleId, role: context.roleName, ...delta }),
 		})
 
-		const handling = handleLlmResult(llmResult, roleState, deps, context)
+		const handling = handleLlmResult(llmResult, roleState, deps, context, contextManager)
 		// llm_call is emitted after handleLlmResult so the received assistant response, finishReason, and per-call usage all land in one event. It is emitted only on the success paths (continue/tool_calls and success-finished): the llm_unavailable and context_budget_exceeded paths log their own dedicated events inside handleLlmResult and must not also emit a misleading llm_call.
 		if (llmResult.kind === 'success') {
 			// The discarded retry attempts' spend is logged ahead of the llm_call it belongs to: those attempts ran and were billed before the final one, and the llm_call's own usage stays the final attempt's so pressure/context semantics keep reflecting the live conversation size rather than a retry-inflated total.

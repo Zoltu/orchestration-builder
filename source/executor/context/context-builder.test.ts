@@ -1,12 +1,12 @@
 import { describe, expect, test } from 'bun:test'
-import type { Message } from './types.js'
-import type { EngineContext } from './engine-state.ts'
-import type { LoadedGuild } from './loader.ts'
-import type { ReadProjectDoc } from './project-docs.ts'
-import { buildInitialHistory } from './context-builder.ts'
-import { effortDirective } from './effort.ts'
-import { involvementDirective } from './involvement.ts'
-import { defined } from './test-fixtures.ts'
+import type { Message } from '../types.js'
+import type { EngineContext } from '../engine-state.ts'
+import type { LoadedGuild } from '../loader.ts'
+import type { ReadProjectDoc } from '../project-docs.ts'
+import { buildInitialHistory } from './index.js'
+import { effortDirective } from '../effort.ts'
+import { involvementDirective } from '../involvement.ts'
+import { defined } from '../test-fixtures.ts'
 
 const guild: LoadedGuild = {
 	config: { entryRole: 'main', roles: {}, tools: [] },

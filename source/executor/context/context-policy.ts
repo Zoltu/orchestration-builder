@@ -1,4 +1,4 @@
-import type { Message } from './types.js'
+import type { Message } from '../types.js'
 
 interface TruncatedOutput {
 	text: string

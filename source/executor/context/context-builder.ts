@@ -1,8 +1,8 @@
-import type { EngineContext } from './engine-state.js'
-import type { Message, RunContinuation } from './types.js'
-import { effortDirective } from './effort.js'
-import { involvementDirective } from './involvement.js'
-import { buildProjectContextBlock, type ReadProjectDoc } from './project-docs.js'
+import type { EngineContext } from '../engine-state.js'
+import type { Message, RunContinuation } from '../types.js'
+import { effortDirective } from '../effort.js'
+import { involvementDirective } from '../involvement.js'
+import { buildProjectContextBlock, type ReadProjectDoc } from '../project-docs.js'
 
 // The continuation block appended to the entry role's initial user message, below the operator's task and a blank line. The bracketed first line marks the block as platform-provided context, and the read_plan hint names the exact parameter so the Guild can pull the prior run's plan document; wording stays factual because the block must read coherently as conversation context, and it must stay inside the same user message — a second system message would break strict chat templates. The prior-run lines render when the run genuinely continues a prior run (runId present); the queue briefing lines render when the scheduler supplied them; a continuation with neither renders nothing.
 function continuationBriefing(continuation: RunContinuation): string {

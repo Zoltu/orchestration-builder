@@ -51,7 +51,7 @@ function formatProjectContextBlock(sections: readonly ProjectDocSection[]): stri
 	return lines.join('\n')
 }
 
-// Reads each declared document through the injected reader and renders the one labeled block context-builder.ts injects into the entry role's initial user message. The reader is injected so the sequencing is testable in memory; the leaf that actually touches the filesystem is createReadProjectDoc below.
+// Reads each declared document through the injected reader and renders the one labeled block context/context-builder.ts injects into the entry role's initial user message. The reader is injected so the sequencing is testable in memory; the leaf that actually touches the filesystem is createReadProjectDoc below.
 export function buildProjectContextBlock(projectDocs: readonly string[], dependencies: { readProjectDoc: ReadProjectDoc }): string {
 	const sections: ProjectDocSection[] = []
 	for (const docPath of projectDocs) {
