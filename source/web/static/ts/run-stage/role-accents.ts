@@ -8,9 +8,7 @@
 //
 // When a guild declares more roles than the palette has entries, the assignment extends deterministically: a color's hue is kept and its lightness (and slightly its chroma) steps down by a fixed amount per full cycle. The per-cycle shift keeps the reserved hues reserved but its floors would eventually fold two cycles onto one clamped color, so a colliding index then walks a deterministic (hue, lightness) lattice — skipping reserved hues and every already-assigned color — until it reaches a free color. The walk is bounded and throws with the offending role's name if it exhausts the lattice, so no two roles ever share a color.
 //
-// The module is browser-pure TypeScript and imports only the Participant type.
-
-import type { Participant } from './interaction-model.js'
+// The module is browser-pure TypeScript and imports nothing, so the accent assignment is a pure function of the role names alone.
 
 // The resolver's contract: a known agent role returns its accent color; anything else — a pseudo-role, a tool, a role outside the guild's config — returns null so callers fall back to the neutral look.
 export type RoleAccentResolver = (role: string) => string | null
@@ -138,7 +136,7 @@ function assignAccent(candidate: RoleAccentColor, usedAccents: ReadonlySet<strin
 }
 
 // Builds the accent resolver over the guild's full role list. Assignment is deterministic in the list alone: each role takes the palette color at its sorted position (walking on the rare collision), so the caller's role order and resolution order are irrelevant and a growing subset never shifts an already-seen role's color.
-export function createRoleAccentResolver(roleNames: string[]): RoleAccentResolver {
+export function createRoleAccentResolver(roleNames: readonly string[]): RoleAccentResolver {
 	const colorByRole = new Map<string, string>()
 	const usedAccents = new Set<string>()
 	const sortedUniqueNames = Array.from(new Set(roleNames)).sort()
@@ -150,14 +148,4 @@ export function createRoleAccentResolver(roleNames: string[]): RoleAccentResolve
 		colorByRole.set(name, accent)
 	}
 	return (role: string) => colorByRole.get(role) ?? null
-}
-
-// The agent role names a participant list carries, in first-appearance order — the input `createRoleAccentResolver` expects. Both hosts derive their participant lists from the guild's config (the app from `GET /api/config`, the demo harness from the scenario manifests), so building the resolver from this helper's output keeps the accent assignment on exactly the same parse the views' column sets come from.
-export function agentRoleNames(participants: ReadonlyArray<Participant>): string[] {
-	const names: string[] = []
-	for (const participant of participants) {
-		if (participant.kind !== 'role') continue
-		names.push(participant.role)
-	}
-	return names
 }

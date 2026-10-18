@@ -2,14 +2,14 @@
 //
 // The order is: `human` (sequence view only), then `interrupt`, then agent roles, then tools. Agent roles sort by a guild-declared `roleOrder` (guild.json `visualization.roleOrder`), a role the list does not name sorting after every listed role and breaking ties by name; tools sort alphabetically. The executor never hard-codes role names — the order is guild data, and this module only encodes the kind ranking and the comparator the views apply to it.
 //
-// The module is browser-pure TypeScript and imports only the ParticipantKind type from its sibling interaction-model.
+// The module is browser-pure TypeScript and imports only the ParticipantKind type from the shared interaction model.
 //
 // Integration contract for consumers: `roleOrder` is read-only and is not preserved (the comparator keeps its own index map), so a caller may hand in a fresh array per render without disturbing an earlier comparator.
 
-import type { ParticipantKind } from './interaction-model.js'
+import type { ParticipantKind } from '../interaction-model.js'
 
 // The shape the comparator orders: any participant-like value carrying a kind and a role. The flow view's TopBarSlot and the sequence view's SequenceColumn both satisfy it structurally.
-export interface OrderableParticipant {
+interface OrderableParticipant {
 	kind: ParticipantKind
 	role: string
 }

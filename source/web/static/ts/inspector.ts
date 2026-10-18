@@ -1,6 +1,6 @@
 // The run-view inspector shared by the product client (app.js) and the dev harness (demo.js): the data-attribute contract the view modules stamp onto nodes and edges, the hovered-element → inspector-target resolution, the grace-period dismiss timer, and the tooltip descriptor dispatch.
 //
-// The attribute names are exported as constants and consumed by flow-view.js / sequence-diagram.js where they stamp them, so the contract between what the views stamp and what the resolver reads is code rather than comments — renaming an attribute breaks both sides at import time instead of silently disabling hover in two clients.
+// The attribute names are exported as constants and consumed by the run-stage views where they stamp them, so the contract between what the views stamp and what the resolver reads is code rather than comments — renaming an attribute breaks both sides at import time instead of silently disabling hover in two clients.
 
 import { isObject } from './guards.js'
 import type { InteractionModel } from './interaction-model.js'

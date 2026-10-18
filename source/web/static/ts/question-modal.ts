@@ -2,7 +2,7 @@
 //
 // The modal is an overlay scoped to the run view (not `document.body`-wide): it covers the active run's flow area only, so the rest of the page stays usable while the modal is open. It renders the question text and its optional context as sanitized Markdown (via the `renderMarkdown` closure passed in, the same pipeline the product client uses) and the answer input is trusted operator input sent verbatim — never rendered back as Markdown from an untrusted source. See docs/security.md "Web client rendering pipeline".
 //
-// `h` and `renderMarkdown` are passed in rather than imported so the component stays free of hyperapp and showdown coupling and is exercisable in tests with fakes (mirroring flow-view.js and markdown.js). The submit handler is supplied by the caller: in the demo harness it advances the frame (the scenario's next frame models the answered state); in the product client it will POST to `/api/answer`.
+// `h` and `renderMarkdown` are passed in rather than imported so the component stays free of hyperapp and showdown coupling and is exercisable in tests with fakes (mirroring the run-stage views and markdown.js). The submit handler is supplied by the caller: in the demo harness it advances the frame (the scenario's next frame models the answered state); in the product client it will POST to `/api/answer`.
 
 import type { LooseH, Vnode, VnodeChildInput } from '../vendor/hyperapp.js'
 

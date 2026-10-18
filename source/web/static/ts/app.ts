@@ -3,13 +3,11 @@
 import { app, h } from '../vendor/hyperapp.js'
 import type { Vnode } from '../vendor/hyperapp.js'
 import { createMarkdownRenderer } from './markdown-render.js'
-import { createColumnTracker, deriveCostStrip, deriveLifecycle, deriveNowCaption, renderFlowView } from './flow-view.js'
-import { renderSequenceView } from './sequence-diagram.js'
+import { createRunStage } from './run-stage/index.js'
 import { createScrollFollower } from './scroll-follow.js'
 import { createLabelResolver, isLabelTier, isRoleOrder, TIER_VALUES } from './labels.js'
-import { agentRoleNames, createRoleAccentResolver } from './role-accents.js'
 import { buildInfoFromConfig, formatBuildLabel } from './build-info.js'
-import { isTerminalStatus, rolesOnlyModel, rolesOnlyParticipants, secondsBetweenIso, withLiveElapsed } from './interaction-model.js'
+import { isTerminalStatus, secondsBetweenIso, withLiveElapsed } from './interaction-model.js'
 import { deriveFaviconState, faviconHref } from './favicon.js'
 import { createTooltipDismiss, deriveTooltipDescriptor, isInFlightAskHuman, resolveInspectorScope, resolveTooltipTarget } from './inspector.js'
 import { operationIdsForTooltipDetails, tooltipStyle, Tooltip } from './tooltip.js'
@@ -22,7 +20,6 @@ import { createInspectorSession } from './turn-inspector/index.js'
 import { isObject } from './guards.js'
 import { applyFlowFrame, emptyFlowFeedState, flowFeedRevision } from './flow-feed/index.js'
 import { applyRunListFrame, emptyRunListFeedState, runListFeedRevision } from './run-list-feed/index.js'
-import { buildStageMemoInputs, createStageMemo } from './stage-memo.js'
 import { responseBelongsToSelection } from './stale-response.js'
 import { createStreamClient } from './stream-client.js'
 import { nextLivePartial } from './live-partial.js'
@@ -31,10 +28,9 @@ import type { InteractionModel, Participant, RunStatus } from './interaction-mod
 import type { FlowFeedState } from './flow-feed/index.js'
 import type { RunListFeedState, RunResultCard, RunSummary } from './run-list-feed/index.js'
 import type { LabelConfig, LabelResolver, LabelTier } from './labels.js'
-import type { RoleAccentResolver } from './role-accents.js'
 import type { FetchRequest, WireFetchRequest } from './turn-inspector/index.js'
 import type { LivePartial } from './live-partial.js'
-import type { StageMemoInputs } from './stage-memo.js'
+import type { RunStage } from './run-stage/index.js'
 import type { ElementRect, TooltipTarget } from './inspector.js'
 import type { OperationDetailsState } from './operation-details.js'
 import type { ScrollFollower } from './scroll-follow.js'
@@ -220,7 +216,7 @@ export interface ApplicationState {
 	savingInvolvement: boolean
 	runLogLevel: LogLevel | null
 	savingLogLevel: boolean
-	// The live InteractionModel the centerpiece renders, plus its previous frame for `deriveLifecycle`'s enter/depart diff. Both null until the first readable flow frame lands. The model is reconstructed from the opaque flow feed state on every apply, which also hides the replica revision behind `flowFeedRevision`.
+	// The live InteractionModel the centerpiece renders, plus its previous frame for the stage's enter/depart diff. Both null until the first readable flow frame lands. The model is reconstructed from the opaque flow feed state on every apply, which also hides the replica revision behind `flowFeedRevision`.
 	flowModel: InteractionModel | null
 	previousFlowModel: InteractionModel | null
 	flowFeed: FlowFeedState
@@ -229,10 +225,6 @@ export interface ApplicationState {
 	// The label resolver and guild participant inventory are built once from `/api/config` (GotConfig); null/empty until that single load completes. `build` rides the same load: the image's build identifier for the top bar, and stays null when running from source without a baked build-info.json.
 	labelResolver: LabelResolver | null
 	guildParticipants: Participant[]
-	// The per-role accent resolver (see role-accents.js), built from the same config fetch's full role list so a role's color is stable for the page load and never shifts as roles appear mid-run; accents nothing until the config lands.
-	roleAccents: RoleAccentResolver
-	// The guild-declared agent-role display order (guild.json visualization.roleOrder), read from the same config fetch; empty until the config lands, in which case the views fall back to alphabetical role order. Both the flow view's top bar and the sequence view's role columns sort by it (participant-order.js).
-	roleOrder: string[]
 	build: BuildInfo | null
 	flowTier: LabelTier
 	flowViewMode: FlowViewMode
@@ -415,10 +407,10 @@ function formatNumber(value: unknown): string {
 // The AudioContext is created lazily on first user interaction (browsers start it suspended until a gesture) and reused for every beep; it is module state, not app state, because it is an opaque resource with no place in the view.
 let audioContext: AudioContext | null = null
 
-// The caller-held column high-water mark for the flow view (see createColumnTracker): one per page load so the centerpiece's width stays stable as runs deepen and unwind. Held at module scope like audioContext — it is view-render memory, not app state, and retention across run switches is harmless (the stage simply stays as wide as the deepest run seen this page load).
-const flowColumnTracker = createColumnTracker()
+// The run stage owns the flow column high-water mark, the accent assignment, participant ordering, and the stage memo. It starts empty and is reconfigured in place when `/api/config` lands, so the centerpiece's width stays stable as runs deepen and unwind for the page-load lifetime even when the config fetch resolves after the first flow frame. Held at module scope like audioContext — it is view-render memory, not app state.
+let runStage: RunStage = createRunStage({ roleNames: [], roleOrder: [] })
 
-// The inspector's operation-details controller (see operation-details.js): key `<runId>|<operationId>`, states 'loading' | 'failed' | ready. The polled flow model ships no detail bodies (they can carry multi-megabyte tool arguments/results), so opening an inspector card fetches the ids its derivation may show from `api/runs/:id/flow?operation=<id>` exactly once per session and caches them. Operation ids are stable within a run (events only append), so an entry never goes stale; the run id in the key keeps a previous run's entries from answering for another run's same-numbered operation. Module scope like flowColumnTracker — cache memory, not app state. This host drives the controller through `begin` + `record*` because its fetches are hyperapp effects whose ok/fail actions must return fresh state to trigger the re-render, so no `onLanded` fan-out is wired.
+// The inspector's operation-details controller (see operation-details.js): key `<runId>|<operationId>`, states 'loading' | 'failed' | ready. The polled flow model ships no detail bodies (they can carry multi-megabyte tool arguments/results), so opening an inspector card fetches the ids its derivation may show from `api/runs/:id/flow?operation=<id>` exactly once per session and caches them. Operation ids are stable within a run (events only append), so an entry never goes stale; the run id in the key keeps a previous run's entries from answering for another run's same-numbered operation. Module scope like runStage — cache memory, not app state. This host drives the controller through `begin` + `record*` because its fetches are hyperapp effects whose ok/fail actions must return fresh state to trigger the re-render, so no `onLanded` fan-out is wired.
 const operationDetails = createOperationDetails({})
 
 // The LLM turn inspector's session (see turn-inspector/index.js): it owns the unscoped tail window, the per-instance scoped windows, the fetch decisions that page them, the turn/transcript derivations, and the per-turn wire-envelope cache. Module scope like operationDetails — inspection-session memory, not app state. The host only performs the requests it returns and passes the response back.
@@ -657,13 +649,13 @@ function PollSelectedRun(state: ApplicationState): ActionReturn {
 	]
 }
 
-// The live InteractionModel the flow/sequence views render, scoped to the run the poll fetched it for: the flow payload carries no run id of its own, so the selected run id is curried in when the effect is built (PollSelectedRun) and the response is dropped when it no longer matches the selection at application time — a late frame for run A must not render over run B's stage. The body is an entity-diff frame, so it is reduced against the opaque feed state the client holds and the model is reconstructed from the resulting state. The previous frame is kept so `deriveLifecycle` can diff entering/departing nodes; a 404 (the run directory exists but is not yet readable in the instant after submit) clears the feed and model so the centerpiece shows its placeholder until the first readable frame lands. Every path that changes the model also syncs the scroll followers: the model update grows (or clears) the sequence content after the view patch, and an open inspector modal's body element is replaced where the placeholder transitions to the model (the poll-time sync re-attaches its follower before the next content update can rely on it).
+// The live InteractionModel the flow/sequence views render, scoped to the run the poll fetched it for: the flow payload carries no run id of its own, so the selected run id is curried in when the effect is built (PollSelectedRun) and the response is dropped when it no longer matches the selection at application time — a late frame for run A must not render over run B's stage. The body is an entity-diff frame, so it is reduced against the opaque feed state the client holds and the model is reconstructed from the resulting state. The previous frame is kept so the stage can diff entering/departing nodes; a 404 (the run directory exists but is not yet readable in the instant after submit) clears the feed and model so the centerpiece shows its placeholder until the first readable frame lands. Every path that changes the model also syncs the scroll followers: the model update grows (or clears) the sequence content after the view patch, and an open inspector modal's body element is replaced where the placeholder transitions to the model (the poll-time sync re-attaches its follower before the next content update can rely on it).
 function GotFlowModel(runId: string) {
 	return function GotFlowModelForRun(state: ApplicationState, payload: FetchResultPayload): ActionReturn {
 		if (!responseBelongsToSelection(runId, state.selectedRunId)) return state
 		if (payload.status === 404) return [{ ...state, flowModel: null, previousFlowModel: null, flowFeed: emptyFlowFeedState(), serverAvailable: payload.ok }, SyncSequenceFollower(), SyncInspectorFollower()]
 		const result = applyFlowFrame(state.flowFeed, payload.body)
-		// An unchanged frame keeps the model and feed BY REFERENCE — reassigning them would break the WeakMap-keyed memoization in interaction-model.ts/flow-view.ts — so only server availability is refreshed and no follower sync is needed (nothing mounted changed).
+		// An unchanged frame keeps the model and feed BY REFERENCE — reassigning them would break the WeakMap-keyed memoization in interaction-model.ts and the run-stage renderers — so only server availability is refreshed and no follower sync is needed (nothing mounted changed).
 		if (result.outcome === 'unchanged') return { ...state, serverAvailable: true }
 		if (result.outcome === 'applied' || result.outcome === 'snapshot') {
 			return [{ ...state, flowFeed: result.state, previousFlowModel: state.flowModel, flowModel: result.model, serverAvailable: true }, SyncSequenceFollower(), SyncInspectorFollower()]
@@ -1011,12 +1003,13 @@ function GotConfig(state: ApplicationState, payload: FetchResultPayload): Action
 	const body = payload.body
 	if (!ok || !isLabelConfig(body)) return state
 	const participants = guildParticipantsFromConfig(body)
+	const roleNames = participants.filter((participant) => participant.kind === 'role').map((participant) => participant.role)
+	// Apply the config in place so the flow column high-water mark survives; the config fetch and the run poll are independent, so a first flow frame can land before this action.
+	runStage.configure({ roleNames, roleOrder: body.visualization?.roleOrder ?? [] })
 	return {
 		...state,
 		labelResolver: createLabelResolver(body),
 		guildParticipants: participants,
-		roleAccents: createRoleAccentResolver(agentRoleNames(participants)),
-		roleOrder: body.visualization?.roleOrder ?? [],
 		build: buildInfoFromConfig(body),
 	}
 }
@@ -2310,7 +2303,7 @@ function InterruptAnswerCardForRun(state: ApplicationState): Vnode | null {
 }
 
 function CostStrip(model: InteractionModel): Vnode {
-	const cost = deriveCostStrip(model)
+	const cost = runStage.cost(model)
 	return h('div', { class: 'pb-cost-strip' }, [
 		h('span', { class: 'pb-cost-item' }, `elapsed ${formatElapsed(cost.elapsedSeconds)}`),
 		h('span', { class: 'pb-cost-sep' }, '·'),
@@ -2423,26 +2416,6 @@ function SyncInspectorFollower(): NullPayloadEffect {
 	return [runSyncInspectorFollower, null]
 }
 
-// The stage builder. It receives exactly the stable memo inputs and returns the flow or sequence vnode; the module-level memo wraps it so a `now`-only tick reuses the same vnode and hyperapp's `oldVNode === newVNode` short-circuit skips the SVG diff. Live elapsed is hydrated once at build time — the intended tradeoff, where an open call's elapsed freezes between model changes while the cost strip and caption outside the memo keep ticking. It always returns a vnode, so the stage position is never null.
-function buildStageContent(inputs: StageMemoInputs): Vnode {
-	const model = withLiveElapsed(inputs.serverModel, Date.now())
-	const lifecycle = inputs.previousModel !== null ? deriveLifecycle(inputs.previousModel, model, inputs.roleOrder) : undefined
-	// A needs_clarification run's question lives on its parked queue item, so its Respond CTA opens that item's answer modal; every other terminal status keeps the result modal. The status rides the memo's serverModel input, so a status change already rebuilds the stage — no new memo input is needed.
-	const cta = { onclick: model.status === 'needs_clarification' ? OpenParkedQuestion : OpenResultModal }
-	const question = { onclick: OpenQuestionModal }
-	// The roles-only toggle filters the sequence render only (model and static guild set alike, so the tools column collapses with the tool rows); the flow view keeps reading the full model — the filter is a lens on this one surface, not a change to the run.
-	const sequenceModel = inputs.rolesOnly === true ? rolesOnlyModel(model) : model
-	const sequenceGuildParticipants = inputs.rolesOnly === true ? rolesOnlyParticipants(inputs.guildParticipants) : inputs.guildParticipants
-	// The sequence view takes the guild's static participant set so every role column appears from the first frame; both views take the per-role accent resolver so agent nodes carry their role's color.
-	if (inputs.viewMode === 'sequence') {
-		return h('div', { class: 'pb-sequence-scroll' }, [renderSequenceView(h, sequenceModel, inputs.labels, inputs.tier, inputs.roleAccents, inputs.roleOrder, sequenceGuildParticipants)])
-	}
-	return renderFlowView(h, model, inputs.labels, inputs.tier, inputs.roleAccents, inputs.roleOrder, lifecycle, cta, question, flowColumnTracker)
-}
-
-// The single memo instance for the stage. It caches the last vnode and the inputs it was built from, so the SAME vnode object is returned while the inputs are unchanged and hyperapp skips the diff. The cached vnode is mounted at exactly one keyed tree position (child 0 of `.pb-flow`, key 'watch-flow'), so it is never reused at two positions or after a position shift (see stage-memo.ts and AGENTS.md "Browser client sources are TypeScript").
-const stageMemo = createStageMemo(buildStageContent)
-
 // The watch screen fills the viewport below the top bar: a controls row, the flex-filling stage, and the now-caption. The Flow view (product surface) and the Sequence view (debug surface) are independent leaves over the same model; the toggle swaps which renders without a fetch. The sequence view mounts inside a vertical scroll container because its timeline grows long, while the flow view scales to the stage.
 function WatchScreen(state: ApplicationState): Vnode {
 	const labels = state.labelResolver
@@ -2464,27 +2437,35 @@ function WatchScreen(state: ApplicationState): Vnode {
 	// The polled flow payload is a pure function of stored data, so an open call's elapsedSeconds is null; fill it from this client's clock once here so StageControls and the now-caption read a live span through the same helpers. The stage below hydrates its own elapsed at build time and is memoized on the stable inputs only, so a `now`-only tick never rebuilds it.
 	const model = withLiveElapsed(serverModel, state.now)
 	const tier = state.flowTier
-	// The memo returns the cached vnode while the stable inputs are unchanged; it is mounted at exactly one keyed position — child 0 of the `.pb-flow` container keyed 'watch-flow' — and that key keeps the position stable while the container's unkeyed siblings (LineageLine, PlanSection) toggle in and out, so the cached vnode is only ever diffed against its own previous self. The reuse is safe because it never lands at two positions or after a position shift (see AGENTS.md "Browser client sources are TypeScript").
-	const stageContent = stageMemo(buildStageMemoInputs({
-		serverModel,
+	// The stage memo returns the cached vnode while the stable inputs are unchanged; it is mounted at exactly one keyed position — child 0 of the `.pb-flow` container keyed 'watch-flow', or child 0 of the sequence scroll wrapper in sequence mode — and that key keeps the position stable while the container's unkeyed siblings (LineageLine, PlanSection) toggle in and out, so the cached vnode is only ever diffed against its own previous self. The reuse is safe because it never lands at two positions or after a position shift (see run-stage/index.ts and docs/architecture.md "Web client").
+	// A needs_clarification run's question lives on its parked queue item, so its Respond CTA opens that item's answer modal; every other terminal status keeps the result modal. The status rides the model input, so a status change already rebuilds the stage.
+	const cta = { onclick: model.status === 'needs_clarification' ? OpenParkedQuestion : OpenResultModal }
+	const question = { onclick: OpenQuestionModal }
+	const stageContent = runStage.render(h, {
+		model: serverModel,
 		previousModel: state.previousFlowModel,
 		labels,
 		tier,
-		roleAccents: state.roleAccents,
-		roleOrder: state.roleOrder,
-		guildParticipants: state.guildParticipants,
 		viewMode: state.flowViewMode,
 		rolesOnly: state.sequenceRolesOnly,
-	}))
+		guildParticipants: state.guildParticipants,
+		cta,
+		question,
+		now: state.now,
+	})
+	// The sequence timeline mounts in a vertical scroll container because it grows long, while the flow view scales to the stage. The stage returns the SVG root so it stays host-neutral; this host is HTML, so it supplies the scroll wrapper here.
+	const stageView = state.flowViewMode === 'sequence'
+		? h('div', { class: 'pb-sequence-scroll' }, [stageContent])
+		: stageContent
 
-	const nowCaption = deriveNowCaption(model, labels, tier)
+	const nowCaption = runStage.nowCaption(model, labels, tier)
 
 	return h('section', { id: 'watch-screen' }, [
 		LineageLine(state),
 		StageControls(state, model),
 		// `.pb-flow` is the positioning context for the per-run-view modals (the question, result, and interrupt overlays are absolute inset 0 within it), so the modals cover the run view rather than the whole page. It is also the hover stage for the inspector: `mouseover`/`mouseleave`/`click` bubble here from every SVG child, so the inspector is wired once for both the flow and sequence views.
 		h('div', { key: 'watch-flow', class: 'pb-flow flow-stage', onmouseover: HoverRunView, onmouseleave: LeaveRunView, onclick: ClickRunView }, [
-			stageContent,
+			stageView,
 			QuestionModalForRun(state),
 			ResultModalForRun(state),
 			InterruptModalForRun(state),
@@ -2636,7 +2617,7 @@ function isApplicationState(value: unknown): value is ApplicationState {
 		'queueItems', 'justSubmittedItemId', 'pendingAddSelectionId', 'editingItemId', 'draggingItemId', 'queueAnswerPendingId', 'openQueueQuestionId',
 		'serverAvailable', 'versions', 'justSubmittedRunId', 'createSending', 'muted', 'shownQuestionIds', 'firstQuestionsPoll', 'pendingAnswerId',
 		'runEffort', 'savingEffort', 'runInvolvement', 'savingInvolvement', 'runLogLevel', 'savingLogLevel',
-		'flowModel', 'previousFlowModel', 'flowFeed', 'runListFeed', 'labelResolver', 'guildParticipants', 'roleAccents', 'roleOrder', 'build',
+		'flowModel', 'previousFlowModel', 'flowFeed', 'runListFeed', 'labelResolver', 'guildParticipants', 'build',
 		'flowTier', 'flowViewMode', 'sequenceRolesOnly', 'screen', 'expandedRowIds', 'continuation',
 		'resumingRunId', 'resumeSending', 'resumeNotice',
 		'questionModalOpen', 'resultModalOpen', 'resultShownForRun', 'interruptModalOpen',
@@ -2688,8 +2669,6 @@ app({
 			runListFeed: emptyRunListFeedState(),
 			labelResolver: null,
 			guildParticipants: [],
-			roleAccents: createRoleAccentResolver([]),
-			roleOrder: [],
 			build: null,
 			flowTier: DEFAULT_FLOW_TIER,
 			flowViewMode: 'flow',

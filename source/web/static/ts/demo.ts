@@ -1,12 +1,10 @@
 // Demo harness for the InteractionModel scenarios.
 // Renders the current frame two ways: the flow view SVG (the product surface) and a debug text view (the model's raw projection) that stays behind a toggle so the SVG can be cross-checked against the model's helpers during development.
-// Each frame is the output of the real `deriveInteractionModel` adapter run server-side over the first `N` events of a fixture event stream (see `GET /api/demo/flow/:scenario/:frame`), fetched here over HTTP. The harness therefore exercises the identical `LogEvent → InteractionModel` path the product polls against a live run, so a behavior the demo shows is the behavior the product renders — the harness is a faithful poll simulator, not a hand-curated showcase. `scenarios.js` stays as the in-memory renderer test bed (its model-frame fixtures are consumed by `flow-view.test.ts` / `sequence-diagram.test.ts`); this harness consumes adapter output instead, so the adapter is exercised in the browser too.
+// Each frame is the output of the real `deriveInteractionModel` adapter run server-side over the first `N` events of a fixture event stream (see `GET /api/demo/flow/:scenario/:frame`), fetched here over HTTP. The harness therefore exercises the identical `LogEvent → InteractionModel` path the product polls against a live run, so a behavior the demo shows is the behavior the product renders — the harness is a faithful poll simulator, not a hand-curated showcase. `scenarios.js` stays as the in-memory renderer test bed (its model-frame fixtures are consumed by `run-stage/flow-view.test.ts` / `run-stage/sequence-diagram.test.ts`); this harness consumes adapter output instead, so the adapter is exercised in the browser too.
 // The harness imports only its sibling static modules; it touches nothing in the product client (app.js).
-import { activeOperation, activeParticipant, activeStack, callChainOf, fateOf, isPaused, isTerminalStatus, observesOf, rolesOnlyModel, rolesOnlyParticipants, stacksOf } from './interaction-model.js'
+import { activeOperation, activeParticipant, activeStack, callChainOf, fateOf, isPaused, isTerminalStatus, observesOf, stacksOf } from './interaction-model.js'
 import { createLabelResolver, isLabelTier, isRoleOrder } from './labels.js'
-import { agentRoleNames, createRoleAccentResolver } from './role-accents.js'
-import { activeAskHumanCall, createColumnTracker, deriveCostStrip, deriveLifecycle, deriveNowCaption, renderFlowView } from './flow-view.js'
-import { renderSequenceView, sequenceActiveRowScrollTop } from './sequence-diagram.js'
+import { createRunStage, sequenceActiveRowScrollTop } from './run-stage/index.js'
 import { createMarkdownRenderer } from './markdown-render.js'
 import { createTooltipDismiss, deriveTooltipDescriptor, isInFlightAskHuman, resolveTooltipTarget } from './inspector.js'
 import { createOperationDetails } from './operation-details.js'
@@ -17,7 +15,7 @@ import { ResultModal } from './result-modal.js'
 import { QuestionModal } from './question-modal.js'
 import type { InteractionModel, Operation, Participant, RunStatus } from './interaction-model.js'
 import type { LabelResolver, LabelTier } from './labels.js'
-import type { RoleAccentResolver } from './role-accents.js'
+import type { RunStage } from './run-stage/index.js'
 import type { TooltipTarget } from './inspector.js'
 import type { OperationDetailsState } from './operation-details.js'
 import type { TerminalResult } from './result-modal.js'
@@ -71,22 +69,17 @@ function isScenarioManifestList(value: unknown): value is DemoScenarioManifest[]
 let labels: LabelResolver | null = null
 let tier: LabelTier = 'detailed'
 
-// The per-role accent resolver is built once the scenario manifest list lands, over the union of every manifest's participants — the demo's full guild inventory, the analog of the app's /api/config role list — so a role's accent is stable across scenarios and frames. Until then it accents nothing.
-let roleAccents: RoleAccentResolver = createRoleAccentResolver([])
-
-// The demo harness sorts both views by the same role order the product client reads from `/api/config`; it starts empty (alphabetical fallback) and is filled once the config lands.
-let demoRoleOrder: readonly string[] = []
+// The demo's run stage is built once the scenario manifest list and config land, over the union of every manifest's participants — the demo's full guild inventory, the analog of the app's /api/config role list — so a role's accent is stable across scenarios and frames. Until then it renders the neutral stage.
+let runStage: RunStage = createRunStage({ roleNames: [], roleOrder: [] })
 
 // Frames themselves are not held locally — each is the adapter's output for an event-prefix, fetched on demand from /api/demo/flow/:scenario/:frame so the harness always renders adapter-derived models.
 let scenarios: DemoScenarioManifest[] = []
 // The adapter-derived InteractionModel for the current scenario+frame, or null before the first frame loads (or while a fetch is in flight).
 // Every renderer reads this adapter-derived frame.
 let currentFrame: InteractionModel | null = null
-// The frame rendered before `currentFrame`, kept so `deriveLifecycle` can diff entering/departing participants across consecutive frames — the same role the product client's `previousFlowModel` plays.
+// The frame rendered before `currentFrame`, kept so the stage can diff entering/departing participants across consecutive frames — the same role the product client's `previousFlowModel` plays.
 // Reset to null on a scenario switch (the first frame of a scenario animates nothing).
 let previousFrame: InteractionModel | null = null
-// The caller-held column high-water mark for the flow view (see createColumnTracker): one per page load, so the stage width stays stable as scenarios deepen and unwind.
-const flowColumnTracker = createColumnTracker()
 
 // Looks up the demo chrome by id and checks its element kind; a missing or mismatched element is a broken page, so it throws with the id rather than handing undefined into the wiring.
 function requireElement<C>(id: string, constructorFunction: new () => C): C {
@@ -445,7 +438,7 @@ function openTooltip(target: TooltipTarget): void {
 // Sequence-view scroll state. The SVG renders at its natural full-content viewBox and lives inside a scroll container, so a long timeline scrolls vertically (the page wheel) rather than zooming; the container is the single piece of state the jump-to-active affordance needs.
 let activeSequenceContainer: HTMLElement | null = null
 
-// Centers the latest message row using the layout math owned by sequence-diagram.js, so the harness consumes the production calculation rather than re-deriving it from the view's private constants.
+// Centers the latest message row using the layout math owned by the run-stage module (`sequenceActiveRowScrollTop`), so the harness consumes the production calculation rather than re-deriving it from the view's private constants.
 function jumpSequenceViewToActive(container: HTMLElement): void {
 	if (currentFrame === null) return
 	const svg = container.firstElementChild
@@ -601,20 +594,36 @@ function renderFlowViewSvg(): Vnode | null {
 	const frame = resultAcknowledged ? acknowledgeFrame(baseFrame) : baseFrame
 	// On acknowledge, diff against the un-acknowledged frame so the returner's departure animates rather than the whole graph re-entering; otherwise diff against the last rendered frame so enter/depart animates across consecutive fetched frames.
 	const diffBase = resultAcknowledged ? baseFrame : previousFrame
-	const lifecycle = diffBase !== null ? deriveLifecycle(diffBase, frame, demoRoleOrder) : undefined
+	const manifest = scenarios[scenarioIndex]
 	const cta = { onclick: openResultModal }
 	const question = { onclick: openQuestionModal }
-	return renderFlowView(domH, frame, labels, tier, roleAccents, demoRoleOrder, lifecycle, cta, question, flowColumnTracker)
+	return runStage.render(domH, {
+		model: frame,
+		previousModel: diffBase,
+		labels,
+		tier,
+		viewMode: 'flow',
+		rolesOnly: false,
+		guildParticipants: manifest === undefined ? [] : manifest.participants,
+		cta,
+		question,
+	})
 }
 
 function renderSequenceViewSvg(): Vnode | null {
 	if (labels === null || currentFrame === null) return null
 	const manifest = scenarios[scenarioIndex]
 	if (manifest === undefined) return null
-	// The sequence view lays out a column per guild role plus the special human/tools columns from the first frame; the manifest carries the scenario's full participant set (every participant the run ever produces) so columns appear from frame 0 without peeking at a future frame. The roles-only toggle filters both the frame and the static set through the same shared helpers the product client consumes, so the tools column collapses with the tool rows.
-	const frame = rolesOnlyToggle.checked ? rolesOnlyModel(currentFrame) : currentFrame
-	const guildParticipants = rolesOnlyToggle.checked ? rolesOnlyParticipants(manifest.participants) : manifest.participants
-	return renderSequenceView(domH, frame, labels, tier, roleAccents, demoRoleOrder, guildParticipants)
+	// The sequence view lays out a column per guild role plus the special human/tools columns from the first frame; the manifest carries the scenario's full participant set (every participant the run ever produces) so columns appear from frame 0 without peeking at a future frame. The stage applies the roles-only lens to both the frame and the static set, so the tools column collapses with the tool rows.
+	return runStage.render(domH, {
+		model: currentFrame,
+		previousModel: previousFrame,
+		labels,
+		tier,
+		viewMode: 'sequence',
+		rolesOnly: rolesOnlyToggle.checked,
+		guildParticipants: manifest.participants,
+	})
 }
 
 // Derives the terminal-result descriptor the modal renders. The demo frames carry no result/error text (the InteractionModel has no result field), so the summary is a fixed honest line keyed off the current frame's terminal status and the error block surfaces only on an error status — enough for the modal to read as a real result affordance without inventing scenario-specific prose. The current frame is terminal whenever the modal opens (openResultModal gates on isTerminalStatus), so its status is the run's terminal status.
@@ -666,8 +675,8 @@ function paintFlowArea(): void {
 	if (svg !== null) {
 		flowContainer.insertBefore(hostElementOf(svg, 'the flow view'), nowCaption)
 	}
-	if (labels !== null) nowCaption.textContent = deriveNowCaption(frame, labels, tier)
-	const cost = deriveCostStrip(frame)
+	if (labels !== null) nowCaption.textContent = runStage.nowCaption(frame, labels, tier)
+	const cost = runStage.cost(frame)
 	costElapsed.textContent = `elapsed ${cost.elapsedSeconds}s`
 	costTokens.textContent = `${cost.tokens.toLocaleString()} tokens`
 }
@@ -686,8 +695,8 @@ function openQuestionModal(): void {
 	if (manifest === undefined) return
 	const frame = resolveActiveFrame()
 	if (frame === undefined) return
-	const askHumanCall = activeAskHumanCall(frame)
-	if (askHumanCall === undefined) return
+	const operation = activeOperation(frame)
+	if (operation === null || !isInFlightAskHuman(frame, operation.id)) return
 	const modal = QuestionModal(htmlH, {
 		question: { question: 'The run is waiting for your input.' },
 		runLabel: manifest.label,
@@ -699,8 +708,8 @@ function openQuestionModal(): void {
 	if (!(modalElement instanceof HTMLElement)) throw new Error('the question modal did not render an HTML element')
 	flowContainer.appendChild(modalElement)
 	questionModalNode = modalElement
-	questionModalOperationId = askHumanCall.id
-	fillQuestionModalWithDetails(manifest, askHumanCall.id)
+	questionModalOperationId = operation.id
+	fillQuestionModalWithDetails(manifest, operation.id)
 }
 
 // Fills the modal's question block from the ask call's details cache, fetching on a miss. A
@@ -761,11 +770,11 @@ function render(): void {
 	frameMeta.textContent = `${frameIndex + 1} / ${totalFrames}`
 	textView.textContent = renderTextView()
 	if (labels !== null) {
-		nowCaption.textContent = deriveNowCaption(frame, labels, tier)
+		nowCaption.textContent = runStage.nowCaption(frame, labels, tier)
 	} else {
 		nowCaption.textContent = ''
 	}
-	const cost = deriveCostStrip(frame)
+	const cost = runStage.cost(frame)
 	costElapsed.textContent = `elapsed ${cost.elapsedSeconds}s`
 	costTokens.textContent = `${cost.tokens.toLocaleString()} tokens`
 	// A tooltip opened on a previous frame's operation is stale once the frame advances, so it is dismissed with the rest of the stale DOM. The result modal and the acknowledge flag are frame/view-scoped too: a frame/view/tier change unmounts the modal and restores the lingering terminal leg, so reopening is a fresh click on the new frame's CTA. The acknowledge path (paintFlowArea) bypasses this so the modal survives the depart repaint.
@@ -945,9 +954,10 @@ Promise.all([
 		labels = createLabelResolver(config)
 		const visualization = isObject(config) ? config['visualization'] : undefined
 		const roleOrder = isObject(visualization) ? visualization['roleOrder'] : undefined
-		if (isRoleOrder(roleOrder)) demoRoleOrder = roleOrder
 		scenarios = manifestList
-		roleAccents = createRoleAccentResolver(agentRoleNames(manifestList.flatMap((manifest) => manifest.participants)))
+		const guildParticipants = manifestList.flatMap((manifest) => manifest.participants)
+		const roleNames = guildParticipants.filter((participant) => participant.kind === 'role').map((participant) => participant.role)
+		runStage = createRunStage({ roleNames, roleOrder: isRoleOrder(roleOrder) ? roleOrder : [] })
 		for (const [index, manifest] of scenarios.entries()) {
 			const option = document.createElement('option')
 			option.value = String(index)

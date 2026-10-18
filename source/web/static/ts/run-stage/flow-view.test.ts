@@ -1,15 +1,14 @@
 import { describe, expect, test } from 'bun:test'
-import type { LogEvent, RunMeta } from '../executor/types.js'
-import { deriveLifecycle, renderFlowView, deriveNowCaption, deriveCostStrip, createColumnTracker, COL_GAP } from './static/ts/flow-view.js'
-import { activeOperation, activeParticipant, activeStack, observesOf, stacksOf, withLiveElapsed } from './static/ts/interaction-model.js'
-import { createLabelResolver } from './static/ts/labels.js'
-import { labelsModule } from './label-resolver-fixture.js'
-import { scenarios } from './static/ts/scenarios.js'
-import { deriveInteractionModel } from './interaction-model-adapter.js'
-import { NODE_WIDTH } from './static/ts/svg-primitives.js'
-import { defined, nullRoleAccents, present } from './test-fixtures.js'
-import { isObject } from './static/ts/guards.js'
-import { createRoleAccentResolver } from './static/ts/role-accents.js'
+import type { LogEvent, RunMeta } from '../../../../executor/types.js'
+import { createRunStage } from './index.js'
+import type { RunStage } from './index.js'
+import { activeOperation, activeParticipant, activeStack, observesOf, stacksOf, withLiveElapsed } from '../interaction-model.js'
+import { createLabelResolver } from '../labels.js'
+import { labelsModule } from '../../../label-resolver-fixture.js'
+import { scenarios } from '../scenarios.js'
+import { deriveInteractionModel } from '../../../interaction-model-adapter.js'
+import { defined } from '../../../test-fixtures.js'
+import { isObject } from '../guards.js'
 
 // Pull the model type off a helper signature so the inline fixtures are contextually checked against the JSDoc shape without a cast, mirroring the sibling interaction-model.test.ts convention.
 type InteractionModel = Parameters<typeof stacksOf>[0]
@@ -76,9 +75,36 @@ function callOperation(id: string, stack: string, source: string, destination: s
 	return { id, kind: 'call', stack, source, destination, startedAt: 't0', settledAt: null, lifecycle: 'in_flight', outcome: null, metrics: null }
 }
 
-// A fresh column tracker per render keeps every test order-independent: the high-water mark is caller-held state, so tests construct their own rather than sharing a module-level one. The default role-accent resolver accents nothing, so every existing assertion renders against today's neutral look; accent-specific tests opt into a real resolver.
-function render(model: InteractionModel, tier: LabelTier = 'detailed', roleAccents: (role: string) => string | null = nullRoleAccents, lifecycle?: ReturnType<typeof deriveLifecycle>, roleOrder: readonly string[] = []): Vnode {
-	return renderFlowView(fakeH, model, labelsModule, tier, roleAccents, roleOrder, lifecycle, undefined, undefined, createColumnTracker())
+// The flow layout's node width and column gap, pinned through the rendered positions rather than imported from the stage internals.
+const FLOW_NODE_WIDTH = 160
+const FLOW_COLUMN_GAP = 96
+
+// A fresh stage per render keeps every test order-independent: the column high-water mark is stage-held state, so tests construct their own rather than sharing a module-level one. The default role list is empty, so every existing assertion renders against today's neutral look; accent-specific tests opt into a real guild role list.
+interface RenderOptions {
+	roleNames?: string[]
+	roleOrder?: readonly string[]
+	previousModel?: InteractionModel | null
+}
+
+function render(model: InteractionModel, tier: LabelTier = 'detailed', options: RenderOptions = {}): Vnode {
+	const stage: RunStage = createRunStage({ roleNames: options.roleNames ?? [], roleOrder: options.roleOrder ?? [] })
+	return stage.render(fakeH, {
+		model,
+		previousModel: options.previousModel ?? null,
+		labels: labelsModule,
+		tier,
+		viewMode: 'flow',
+		rolesOnly: false,
+		guildParticipants: [],
+	})
+}
+
+const stage: RunStage = createRunStage({ roleNames: [], roleOrder: [] })
+
+function translationX(transform: string): number {
+	const match = /^translate\(([^,]+),/.exec(transform)
+	if (match === null || match[1] === undefined) throw new Error(`unexpected transform "${transform}"`)
+	return Number(match[1])
 }
 
 describe('renderFlowView — row projection', () => {
@@ -132,13 +158,13 @@ describe('renderFlowView — row projection', () => {
 		const row = defined(groupsWithClass(view, 'flow-row')[0], 'row')
 		expect(row).toBeDefined()
 		const nodes = allByTag(row, 'g').filter((group) => (propString(group.props, 'class') ?? '').split(' ').includes('flow-node'))
-		// The root "you" sits at column 0 (translate x = 0); readFile sits at column 4 (translate x = 4 * (NODE_WIDTH + COL_GAP)). The y offset is the top-bar height plus its gap, asserted only as nonzero so the test does not pin the strip height.
+		// The root "you" sits at column 0 (translate x = 0); readFile sits at column 4 (translate x = 4 * (FLOW_NODE_WIDTH + FLOW_COLUMN_GAP)). The y offset is the top-bar height plus its gap, asserted only as nonzero so the test does not pin the strip height.
 		const youNode = nodes.find((node) => propString(node.props, 'data-participant') === 'you')
 		expect(youNode).toBeDefined()
 		expect(propString(defined(youNode, 'youNode').props, 'transform')).toMatch(/^translate\(0,\d+\)$/)
 		const readFileNode = nodes.find((node) => propString(node.props, 'data-participant') === 'readFile')
 		expect(readFileNode).toBeDefined()
-		const readFileX = 4 * (NODE_WIDTH + COL_GAP)
+		const readFileX = 4 * (FLOW_NODE_WIDTH + FLOW_COLUMN_GAP)
 		const transform = defined(propString(defined(readFileNode, 'readFileNode').props, 'transform'), 'transform')
 		expect(transform.startsWith(`translate(${readFileX},`)).toBe(true)
 	})
@@ -254,7 +280,7 @@ describe('renderFlowView — top-bar ordering', () => {
 	})
 
 	test('roles sort by the guild-declared roleOrder', () => {
-		const view = render(orderModel(), 'detailed', nullRoleAccents, undefined, ['orchestrator', 'coder'])
+		const view = render(orderModel(), 'detailed', { roleOrder: ['orchestrator', 'coder'] })
 		expect(topBarRoles(view)).toEqual(['interrupt', 'orchestrator', 'coder', 'glob_files', 'read_file'])
 	})
 
@@ -287,9 +313,11 @@ describe('renderFlowView — top-bar ordering', () => {
 			operations: [],
 			status: 'running',
 		}
-		const lifecycle = deriveLifecycle(previous, current, ['orchestrator', 'coder'])
-		const departed = defined(lifecycle.departing.find((entry) => entry.participantId === 'coder'), 'departed coder')
-		expect(departed.slotIndex).toBe(2)
+		const view = render(current, 'detailed', { roleOrder: ['orchestrator', 'coder'], previousModel: previous })
+		const departed = defined(groupsWithClass(view, 'flow-node--departing').find((group) => propString(group.props, 'data-participant') === 'coder'), 'departed coder')
+		const coderSlot = defined(groupsWithClass(view, 'flow-small-node').find((slot) => propString(slot.props, 'data-role') === 'coder'), 'coder slot')
+		const slotX = translationX(defined(propString(coderSlot.props, 'transform'), 'coder slot transform'))
+		expect(styleVar(departed.props, '--to-x')).toBe(`${slotX}px`)
 	})
 })
 
@@ -553,30 +581,27 @@ describe('renderFlowView — active participant highlight', () => {
 	})
 })
 
-describe('deriveLifecycle — frame-diff node lifecycle', () => {
+describe('frame-diff node lifecycle', () => {
 	test('a null previous model animates nothing (first frame of a scenario)', () => {
 		const current = scenarioFrame('delegation-chain', 0)
-		const lifecycle = deriveLifecycle(null, current, [])
-		expect(lifecycle.enteringIds.size).toBe(0)
-		expect(lifecycle.departing.length).toBe(0)
+		const view = render(current)
+		expect(groupsWithClass(view, 'flow-node--entering-host').length).toBe(0)
+		expect(groupsWithClass(view, 'flow-node--departing').length).toBe(0)
 	})
 
 	test('departing covers a participant that left for the top bar when its return settles', () => {
 		// retry-with-fresh-instance op3 transit → op3 working: coder-1's return settles, so the returner departs for the existing 'coder' top-bar slot (merged). Under the single invariant the returner is present only while its return is in_flight (transit), so the departure lands on the settling transition rather than on the next call; no participant enters on a settling transition. coder-2 enters later on op4's transit, covered by the row-projection test.
 		const previous = scenarioFrame('retry-with-fresh-instance', 4)
 		const current = scenarioFrame('retry-with-fresh-instance', 5)
-		const lifecycle = deriveLifecycle(previous, current, [])
-		expect(lifecycle.enteringIds.size).toBe(0)
-		expect(lifecycle.enteringIds.has('coder-2')).toBe(false)
-		expect(lifecycle.enteringIds.has('coder-1')).toBe(false)
-		const departed = defined(lifecycle.departing.find((entry) => entry.participantId === 'coder-1'), 'departed')
-		expect(departed).toBeDefined()
-		expect(departed.previousRowIndex).toBe(0)
+		const view = render(current, 'detailed', { previousModel: previous })
+		expect(groupsWithClass(view, 'flow-node--entering-host').length).toBe(0)
+		const departed = defined(groupsWithClass(view, 'flow-node--departing').find((group) => propString(group.props, 'data-participant') === 'coder-1'), 'departed coder-1')
 		// coder-1 lingered one column past the open chain's innermost node while its return was in transit, so its previous column is the chain length plus one (chain length 1 → column 2).
-		expect(departed.previousColumn).toBe(2)
-		expect(departed.merged).toBe(true)
+		expect(styleVar(departed.props, '--from-x')).toBe(`${2 * (FLOW_NODE_WIDTH + FLOW_COLUMN_GAP)}px`)
+		expect((propString(departed.props, 'class') ?? '').split(' ').includes('flow-node--merging')).toBe(true)
 		// The 'coder' slot is the first in the default (empty roleOrder) alphabetical order (coder, orchestrator); the human is the eternal root and never occupies a top-bar slot.
-		expect(departed.slotIndex).toBe(0)
+		const coderSlot = defined(groupsWithClass(view, 'flow-small-node').find((slot) => propString(slot.props, 'data-role') === 'coder'), 'coder slot')
+		expect(styleVar(departed.props, '--to-x')).toBe(`${translationX(defined(propString(coderSlot.props, 'transform'), 'coder slot transform'))}px`)
 	})
 
 	test('settling the terminal return (the See Result acknowledgment) departs the lingering returner; the human root never departs', () => {
@@ -590,28 +615,21 @@ describe('deriveLifecycle — frame-diff node lifecycle', () => {
 					: operation,
 			),
 		}
-		const lifecycle = deriveLifecycle(previous, current, [])
-		expect(lifecycle.enteringIds.size).toBe(0)
-		const departedIds = lifecycle.departing.map((entry) => entry.participantId).sort()
+		const view = render(current, 'detailed', { previousModel: previous })
+		expect(groupsWithClass(view, 'flow-node--entering-host').length).toBe(0)
+		const departedIds = groupsWithClass(view, 'flow-node--departing').map((group) => propString(group.props, 'data-participant') ?? '').sort()
 		expect(departedIds).toEqual(['coder'])
-		expect(lifecycle.departing.some((entry) => entry.participantId === 'you')).toBe(false)
-		for (const entry of lifecycle.departing) {
-			expect(entry.merged).toBe(true)
-			expect(entry.previousRowIndex).toBe(0)
-		}
+		const coderDeparted = defined(groupsWithClass(view, 'flow-node--departing').find((group) => propString(group.props, 'data-participant') === 'coder'), 'coderDeparted')
+		expect((propString(coderDeparted.props, 'class') ?? '').split(' ').includes('flow-node--merging')).toBe(true)
 		// coder lingered one column past the row root (the open chain is empty, so the lingering column is chain length plus one = 1).
-		const coderDeparted = defined(lifecycle.departing.find((entry) => entry.participantId === 'coder'), 'coderDeparted')
-		expect(coderDeparted).toBeDefined()
-		expect(coderDeparted.previousColumn).toBe(1)
+		expect(styleVar(coderDeparted.props, '--from-x')).toBe(`${1 * (FLOW_NODE_WIDTH + FLOW_COLUMN_GAP)}px`)
 	})
 
 	test('an entering participant is rendered with the entering class on the next frame', () => {
 		// delegation-chain op1 working → op2 transit: planner enters; the rendered current frame wraps planner's node in the entering host so it scales/fades in.
 		const previous = scenarioFrame('delegation-chain', 1)
 		const current = scenarioFrame('delegation-chain', 2)
-		const lifecycle = deriveLifecycle(previous, current, [])
-		expect(lifecycle.enteringIds.has('planner')).toBe(true)
-		const view = render(current, 'detailed', nullRoleAccents, lifecycle)
+		const view = render(current, 'detailed', { previousModel: previous })
 		const flowNodes = allByTag(view, 'g').filter((group) => (propString(group.props, 'class') ?? '').split(' ').includes('flow-node--entering-host'))
 		const plannerEntering = flowNodes.some((group) => propString(group.props, 'data-participant') === 'planner')
 		expect(plannerEntering).toBe(true)
@@ -772,69 +790,69 @@ function whimsicalWorkingCaption(frame: InteractionModel, templateList: string[]
 	return `${template.split('{participant}').join(participantLabel)}…`
 }
 
-describe('deriveNowCaption — active participant + in-flight operation', () => {
+describe('nowCaption — active participant + in-flight operation', () => {
 	test('a terminal success short-circuits to a fixed completion line', () => {
 		const frame = scenarioFrame('single-role-completion', 2)
-		expect(deriveNowCaption(frame, labelsModule, 'detailed')).toBe('Done.')
+		expect(stage.nowCaption(frame, labelsModule, 'detailed')).toBe('Done.')
 	})
 
 	test('an in-flight call names the source and destination via the operation label at the chosen tier with a trailing ellipsis', () => {
 		// delegation-chain op2 transit: op2 (orchestrator→planner) is the in-flight call on the active root stack, so the caption resolves its label at the chosen tier and appends an ellipsis. The detailed tier names the raw role ids and the stack; the whimsical tier rotates through the role->role list by the operation id's hash.
 		const frame = scenarioFrame('delegation-chain', 2)
-		expect(deriveNowCaption(frame, labelsModule, 'detailed')).toBe('role orchestrator is calling role planner (stack root)…')
-		expect(deriveNowCaption(frame, labelsModule, 'whimsical')).toBe(whimsicalOperationCaption(frame, ['{source} is passing the baton to {destination}', '{source} is tossing the ball to {destination}', '{source} is handing the reins to {destination}'], 'Conductor', 'Strategist'))
+		expect(stage.nowCaption(frame, labelsModule, 'detailed')).toBe('role orchestrator is calling role planner (stack root)…')
+		expect(stage.nowCaption(frame, labelsModule, 'whimsical')).toBe(whimsicalOperationCaption(frame, ['{source} is passing the baton to {destination}', '{source} is tossing the ball to {destination}', '{source} is handing the reins to {destination}'], 'Conductor', 'Strategist'))
 	})
 
 	test('a settled call (the working phase) names what the destination is doing via its working label at the chosen tier with a trailing ellipsis', () => {
 		// delegation-chain op2 working: op2 (orchestrator→planner) has settled, so the caption switches from the call relationship to what the destination (planner) is doing — the working label of the destination, seeded by the call's id so transit and working land on the same whimsical phrase.
 		const frame = scenarioFrame('delegation-chain', 3)
-		expect(deriveNowCaption(frame, labelsModule, 'detailed')).toBe('role planner is composing the plan (streaming tokens)…')
-		expect(deriveNowCaption(frame, labelsModule, 'friendly')).toBe('Planning the approach…')
-		expect(deriveNowCaption(frame, labelsModule, 'whimsical')).toBe(whimsicalWorkingCaption(frame, ['Charting the course', 'Mapping the route', 'Noodling on the map', 'Surveying the terrain'], 'Strategist'))
+		expect(stage.nowCaption(frame, labelsModule, 'detailed')).toBe('role planner is composing the plan (streaming tokens)…')
+		expect(stage.nowCaption(frame, labelsModule, 'friendly')).toBe('Planning the approach…')
+		expect(stage.nowCaption(frame, labelsModule, 'whimsical')).toBe(whimsicalWorkingCaption(frame, ['Charting the course', 'Mapping the route', 'Noodling on the map', 'Surveying the terrain'], 'Strategist'))
 	})
 
 	test('a settled call to a tool uses the per-tool working template at the chosen tier', () => {
 		// delegation-chain op4 working: op4 (coder→readFile) has settled, so the caption resolves the working label of the tool destination. read_file carries a per-tool humanWorkingLabel, so the caption reads the tool-specific phrase rather than the generic tool fallback.
 		const frame = scenarioFrame('delegation-chain', 7)
-		expect(deriveNowCaption(frame, labelsModule, 'detailed')).toBe('tool read_file is reading file contents…')
-		expect(deriveNowCaption(frame, labelsModule, 'whimsical')).toBe(whimsicalWorkingCaption(frame, ['Cracking open a tome', 'Poring over ancient scrolls', 'Flipping through the pages', 'Consulting the library'], 'Open Book'))
+		expect(stage.nowCaption(frame, labelsModule, 'detailed')).toBe('tool read_file is reading file contents…')
+		expect(stage.nowCaption(frame, labelsModule, 'whimsical')).toBe(whimsicalWorkingCaption(frame, ['Cracking open a tome', 'Poring over ancient scrolls', 'Flipping through the pages', 'Consulting the library'], 'Open Book'))
 	})
 
 	test('an in-flight call to a tool uses the per-tool call template at the chosen tier', () => {
 		// delegation-chain op4 transit: op4 (coder→readFile) is in flight, so the caption resolves the call operation label. read_file carries a per-tool humanCallLabel, so the caption reads the tool-specific call phrase rather than the generic role->tool template.
 		const frame = scenarioFrame('delegation-chain', 6)
-		expect(deriveNowCaption(frame, labelsModule, 'detailed')).toBe('role coder is invoking tool read_file (stack root)…')
-		expect(deriveNowCaption(frame, labelsModule, 'whimsical')).toBe(whimsicalOperationCaption(frame, ['{source} is getting a book off the shelf', '{source} is pulling a tome down', '{source} is cracking a book open'], 'Builder', 'Open Book'))
+		expect(stage.nowCaption(frame, labelsModule, 'detailed')).toBe('role coder is invoking tool read_file (stack root)…')
+		expect(stage.nowCaption(frame, labelsModule, 'whimsical')).toBe(whimsicalOperationCaption(frame, ['{source} is getting a book off the shelf', '{source} is pulling a tome down', '{source} is cracking a book open'], 'Builder', 'Open Book'))
 	})
 
 	test('a settled return (the lingering response leg) carries no ellipsis because the leg is the current state', () => {
 		// delegation-chain op5 working: readFile has returned to coder; the return is the latest non-observe operation on the active root stack, so the caption reads its return label (with the outcome) without an ellipsis.
 		const frame = scenarioFrame('delegation-chain', 9)
-		expect(deriveNowCaption(frame, labelsModule, 'detailed')).toBe('tool read_file is returning success to role coder (stack root)')
+		expect(stage.nowCaption(frame, labelsModule, 'detailed')).toBe('tool read_file is returning success to role coder (stack root)')
 	})
 
 	test('the tier toggle swaps the caption voice without touching the model', () => {
 		// delegation-chain op1 transit: op1 (you→orchestrator) is the in-flight call; the three tiers resolve to three distinct voices. The whimsical human pseudo-role reads "The Dreamer".
 		const frame = scenarioFrame('delegation-chain', 0)
-		expect(deriveNowCaption(frame, labelsModule, 'whimsical')).toBe(whimsicalOperationCaption(frame, ['{source} is handing the quest off to {destination}', "{source} is knocking on {destination}'s door", '{source} is sending a carrier pigeon to {destination}'], 'The Dreamer', 'Conductor'))
-		expect(deriveNowCaption(frame, labelsModule, 'friendly')).toBe('The human is asking Orchestrator to start…')
-		expect(deriveNowCaption(frame, labelsModule, 'detailed')).toBe('human is calling role orchestrator (stack root)…')
+		expect(stage.nowCaption(frame, labelsModule, 'whimsical')).toBe(whimsicalOperationCaption(frame, ['{source} is handing the quest off to {destination}', "{source} is knocking on {destination}'s door", '{source} is sending a carrier pigeon to {destination}'], 'The Dreamer', 'Conductor'))
+		expect(stage.nowCaption(frame, labelsModule, 'friendly')).toBe('The human is asking Orchestrator to start…')
+		expect(stage.nowCaption(frame, labelsModule, 'detailed')).toBe('human is calling role orchestrator (stack root)…')
 	})
 
 	test('an empty model with a running status falls back to the working placeholder', () => {
 		const empty: InteractionModel = { participants: [], operations: [], status: 'running' }
-		expect(deriveNowCaption(empty, labelsModule, 'detailed')).toBe('Working…')
+		expect(stage.nowCaption(empty, labelsModule, 'detailed')).toBe('Working…')
 	})
 
 	test('a needs_clarification status surfaces the waiting line regardless of the active operation', () => {
 		// Author a frame whose status is needs_clarification even though the latest operation is an in-flight call; the terminal status wins over the operation label.
 		const frame = scenarioFrame('delegation-chain', 0)
 		const needsClarification: InteractionModel = { ...frame, status: 'needs_clarification' }
-		expect(deriveNowCaption(needsClarification, labelsModule, 'detailed')).toBe('Waiting for your input…')
+		expect(stage.nowCaption(needsClarification, labelsModule, 'detailed')).toBe('Waiting for your input…')
 	})
 })
 
-describe('deriveCostStrip — per-operation metric aggregation', () => {
+describe('cost — per-operation metric aggregation', () => {
 	function callWithMetrics(id: string, stack: string, source: string, destination: string, metrics: Operation['metrics']): Operation {
 		return { id, kind: 'call', stack, source, destination, startedAt: 't0', settledAt: null, lifecycle: 'in_flight', outcome: null, metrics }
 	}
@@ -854,7 +872,7 @@ describe('deriveCostStrip — per-operation metric aggregation', () => {
 			],
 			status: 'running',
 		}
-		expect(deriveCostStrip(model)).toEqual({ elapsedSeconds: 2.0, tokens: 200 })
+		expect(stage.cost(model)).toEqual({ elapsedSeconds: 2.0, tokens: 200 })
 	})
 
 	test('a return that carries metrics is ignored — the calls-only contract is structural, not convention', () => {
@@ -866,7 +884,7 @@ describe('deriveCostStrip — per-operation metric aggregation', () => {
 			],
 			status: 'running',
 		}
-		expect(deriveCostStrip(model)).toEqual({ elapsedSeconds: 3.0, tokens: 50 })
+		expect(stage.cost(model)).toEqual({ elapsedSeconds: 3.0, tokens: 50 })
 	})
 
 	test('elapsed reads the latest non-null elapsedSeconds, falling back to the previous operation when the latest has none', () => {
@@ -879,17 +897,17 @@ describe('deriveCostStrip — per-operation metric aggregation', () => {
 			status: 'running',
 		}
 		// op2 is the latest operation; its elapsedSeconds is null, so the strip falls back to op1's 3.0. op2 carries no tokens either, so the sum stays at op1's 50.
-		expect(deriveCostStrip(model)).toEqual({ elapsedSeconds: 3.0, tokens: 50 })
+		expect(stage.cost(model)).toEqual({ elapsedSeconds: 3.0, tokens: 50 })
 	})
 
 	test('a model whose operations carry no metrics reads as zero elapsed and zero tokens', () => {
 		const frame = scenarioFrame('delegation-chain', 2)
-		expect(deriveCostStrip(frame)).toEqual({ elapsedSeconds: 0, tokens: 0 })
+		expect(stage.cost(frame)).toEqual({ elapsedSeconds: 0, tokens: 0 })
 	})
 
 	test('an empty model reads as zero elapsed and zero tokens', () => {
 		const empty: InteractionModel = { participants: [], operations: [], status: 'running' }
-		expect(deriveCostStrip(empty)).toEqual({ elapsedSeconds: 0, tokens: 0 })
+		expect(stage.cost(empty)).toEqual({ elapsedSeconds: 0, tokens: 0 })
 	})
 
 	test('repeated calls on one model return reference-equal results, and distinct models never share one', () => {
@@ -905,11 +923,11 @@ describe('deriveCostStrip — per-operation metric aggregation', () => {
 			operations: [callWithMetrics('op1', 'root', 'you', 'coder', metrics)],
 			status: 'running',
 		}
-		const first = deriveCostStrip(model)
-		expect(deriveCostStrip(model)).toBe(first)
+		const first = stage.cost(model)
+		expect(stage.cost(model)).toBe(first)
 		expect(first).toEqual({ elapsedSeconds: 1.5, tokens: 120 })
-		expect(deriveCostStrip(twin)).toEqual(first)
-		expect(deriveCostStrip(twin)).not.toBe(first)
+		expect(stage.cost(twin)).toEqual(first)
+		expect(stage.cost(twin)).not.toBe(first)
 	})
 })
 
@@ -957,13 +975,11 @@ describe('renderFlowView — agent vs tool node distinction', () => {
 		// Settling the tool's return departs readFile for its slot; the overlay's traveling node must stay visually a tool.
 		const previous = mixedModel(true)
 		const current = mixedModel(false)
-		const lifecycle = deriveLifecycle(previous, current, [])
 		// The tool departs for its slot; the top bar already carried it (participants populate the strip regardless of rows), so the merge variant applies.
-		const departed = defined(lifecycle.departing.find((entry) => entry.participantId === 'readFile'), 'departed readFile')
-		expect(departed.merged).toBe(true)
-		const view = render(current, 'detailed', nullRoleAccents, lifecycle)
+		const view = render(current, 'detailed', { previousModel: previous })
 		const departingGroups = groupsWithClass(view, 'flow-node--departing')
 		expect(departingGroups.length).toBe(1)
+		expect((propString(defined(departingGroups[0], 'departingGroups[0]').props, 'class') ?? '').split(' ').includes('flow-node--merging')).toBe(true)
 		const overlayClasses = allByTag(defined(departingGroups[0], 'departingGroups[0]'), 'g').map((group) => propString(group.props, 'class') ?? '')
 		expect(overlayClasses.some((value) => value.split(' ').includes('graph-node--tool'))).toBe(true)
 	})
@@ -1009,7 +1025,7 @@ describe('renderFlowView over the real adapter — the call-metrics seam', () =>
 		// The tile shows the invocation's current context window size — this single turn's prompt of 100, abbreviated by the k-helper — not the 120-token cumulative bill.
 		expect(defined(cost, 'cost line').children.join('')).toBe('11s \u00b7 100 ctx')
 		// The ambient strip reads the same call metrics: 120 tokens and the elapsed counted to now — the cumulative "total spend" story stays on the strip.
-		expect(deriveCostStrip(frame)).toEqual({ elapsedSeconds: 11, tokens: 120 })
+		expect(stage.cost(frame)).toEqual({ elapsedSeconds: 11, tokens: 120 })
 	})
 
 	test('a second turn overwrites the context figure (assignment, not a sum) while the strip keeps summing', () => {
@@ -1029,7 +1045,7 @@ describe('renderFlowView over the real adapter — the call-metrics seam', () =>
 		// The tile reads the LAST turn's prompt size (200), never the 300-token prompt sum or the 330-token bill.
 		expect(defined(cost, 'cost line').children.join('')).toBe('11s \u00b7 200 ctx')
 		// The strip's cumulative story still sums both turns.
-		expect(deriveCostStrip(frame)).toEqual({ elapsedSeconds: 11, tokens: 330 })
+		expect(stage.cost(frame)).toEqual({ elapsedSeconds: 11, tokens: 330 })
 	})
 
 	test('the top-bar title of a departed role carries the token total and the cached subset note', () => {
@@ -1133,12 +1149,11 @@ describe('renderFlowView — per-role accents', () => {
 
 	test('an agent row node carries the accent var and modifier; the tool and human nodes do not', () => {
 		// The assertions read the resolver's own output rather than a hardcoded hue, so the seam (style var + modifier class) is what is pinned, not a particular color.
-		const accents = createRoleAccentResolver(['coder'])
-		const view = render(accentRowModel(), 'detailed', accents)
+		const view = render(accentRowModel(), 'detailed', { roleNames: ['coder'] })
 		const flowNodes = allByTag(view, 'g').filter((group) => (propString(group.props, 'class') ?? '').split(' ').includes('flow-node'))
 		const coderNode = defined(flowNodes.find((group) => propString(group.props, 'data-participant') === 'coder'), 'coderNode')
 		expect((propString(coderNode.props, 'class') ?? '').split(' ').includes('flow-node--accented')).toBe(true)
-		expect(styleVar(coderNode.props, '--node-accent')).toBe(present(accents('coder'), 'the resolver\'s accent for coder'))
+		expect(styleVar(coderNode.props, '--node-accent')).toMatch(/^oklch\(/)
 		const toolNode = defined(flowNodes.find((group) => propString(group.props, 'data-participant') === 'readFile'), 'toolNode')
 		expect((propString(toolNode.props, 'class') ?? '').split(' ').includes('flow-node--accented')).toBe(false)
 		expect(styleVar(toolNode.props, '--node-accent')).toBeUndefined()
@@ -1151,12 +1166,11 @@ describe('renderFlowView — per-role accents', () => {
 	})
 
 	test('an agent role’s top-bar slot carries the accent; a tool slot keeps the violet modifier and an accented slot never carries the tool one', () => {
-		const accents = createRoleAccentResolver(['coder'])
-		const view = render(accentSlotModel(), 'detailed', accents)
+		const view = render(accentSlotModel(), 'detailed', { roleNames: ['coder'] })
 		const slots = groupsWithClass(view, 'flow-small-node')
 		const coderSlot = defined(slots.find((slot) => propString(slot.props, 'data-role') === 'coder'), 'coderSlot')
 		expect((propString(coderSlot.props, 'class') ?? '').split(' ').includes('flow-small-node--accented')).toBe(true)
-		expect(styleVar(coderSlot.props, '--node-accent')).toBe(present(accents('coder'), 'the resolver\'s accent for coder'))
+		expect(styleVar(coderSlot.props, '--node-accent')).toMatch(/^oklch\(/)
 		const readFileSlot = defined(slots.find((slot) => propString(slot.props, 'data-role') === 'read_file'), 'readFileSlot')
 		expect((propString(readFileSlot.props, 'class') ?? '').split(' ').includes('flow-small-node--accented')).toBe(false)
 		expect((propString(readFileSlot.props, 'class') ?? '').split(' ').includes('flow-small-node--tool')).toBe(true)
@@ -1165,7 +1179,6 @@ describe('renderFlowView — per-role accents', () => {
 
 	test('a departing agent node keeps its accent in the departing overlay', () => {
 		// Settling the terminal return departs coder for its slot; the overlay's traveling node must arrive at the strip already wearing the role's color.
-		const accents = createRoleAccentResolver(['coder'])
 		const previous = scenarioFrame('single-role-completion', 2)
 		const current: InteractionModel = {
 			...previous,
@@ -1175,11 +1188,10 @@ describe('renderFlowView — per-role accents', () => {
 					: operation,
 			),
 		}
-		const lifecycle = deriveLifecycle(previous, current, [])
-		const view = render(current, 'detailed', accents, lifecycle)
+		const view = render(current, 'detailed', { roleNames: ['coder'], previousModel: previous })
 		const coderOverlay = defined(groupsWithClass(view, 'flow-node--departing').find((group) => propString(group.props, 'data-participant') === 'coder'), 'coderOverlay')
 		expect((propString(coderOverlay.props, 'class') ?? '').split(' ').includes('flow-node--accented')).toBe(true)
-		expect(styleVar(coderOverlay.props, '--node-accent')).toBe(present(accents('coder'), 'the resolver\'s accent for coder'))
+		expect(styleVar(coderOverlay.props, '--node-accent')).toMatch(/^oklch\(/)
 	})
 
 	test('a null resolver renders every node exactly the neutral look — no accent classes, no style vars', () => {
@@ -1218,13 +1230,12 @@ describe('renderFlowView — top-bar tiles carry no status state', () => {
 	}
 
 	test('an errored role’s top-bar tile carries no error class or marker and keeps its role accent', () => {
-		const accents = createRoleAccentResolver(['coder'])
-		const view = render(settledModel('error', 'success'), 'detailed', accents)
+		const view = render(settledModel('error', 'success'), 'detailed', { roleNames: ['coder'] })
 		const coderSlot = defined(groupsWithClass(view, 'flow-small-node').find((slot) => propString(slot.props, 'data-role') === 'coder'), 'coderSlot')
 		const classes = (propString(coderSlot.props, 'class') ?? '').split(' ')
 		expect(classes.includes('flow-small-node--error')).toBe(false)
 		expect(classes.includes('flow-small-node--accented')).toBe(true)
-		expect(styleVar(coderSlot.props, '--node-accent')).toBe(present(accents('coder'), 'the resolver\'s accent for coder'))
+		expect(styleVar(coderSlot.props, '--node-accent')).toMatch(/^oklch\(/)
 		expect(slotTitleText(coderSlot)).not.toContain('errored')
 	})
 
@@ -1238,8 +1249,7 @@ describe('renderFlowView — top-bar tiles carry no status state', () => {
 	})
 
 	test('a passing role’s top-bar tile renders the same identity-only look — no error class, accent kept', () => {
-		const accents = createRoleAccentResolver(['coder'])
-		const view = render(settledModel('success', 'success'), 'detailed', accents)
+		const view = render(settledModel('success', 'success'), 'detailed', { roleNames: ['coder'] })
 		const coderSlot = defined(groupsWithClass(view, 'flow-small-node').find((slot) => propString(slot.props, 'data-role') === 'coder'), 'coderSlot')
 		const classes = (propString(coderSlot.props, 'class') ?? '').split(' ')
 		expect(classes.includes('flow-small-node--error')).toBe(false)

@@ -425,7 +425,7 @@ function isRolesOnlyKind(kind: ParticipantKind): boolean {
 }
 
 // Filters a participant list to the roles-only column set (agent roles plus the human), preserving order. Shared by the model filter below and by the callers that feed the sequence view its static guild participant inventory (whose tools would otherwise keep the tools column alive), so the kind rule lives in exactly one place. The array guard holds because the callers are plain-JS modules handing over whatever they hold.
-export function rolesOnlyParticipants(participants: Participant[]): Participant[] {
+export function rolesOnlyParticipants(participants: readonly Participant[]): Participant[] {
 	if (!Array.isArray(participants)) return []
 	return participants.filter((participant) => isRolesOnlyKind(participant.kind))
 }

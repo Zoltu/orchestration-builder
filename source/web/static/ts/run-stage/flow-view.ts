@@ -1,68 +1,37 @@
 // Flow-graph view renderer over an InteractionModel.
 //
-// The view projects the model to a stack-of-rows layout: one row per
-// non-terminated call stack (stacksOf) in push order, the main run at the top
-// and each preempting interrupt below it — rows never reorder as activity
-// moves; the active stack is conveyed by the pulsing node and marching lines,
-// not by row position. Each row lays its open call chain (callChainOf) left-to-right
-// by call depth, with the stack's root participant (the You root or an Interrupt
-// instance) at the leftmost column. A return whose source has departed the open
-// chain lingers as a node plus a return edge back to its caller until the
-// caller's next action — read straight off the operation list, never from a
-// stored lingering flag. observe operations cross from the active stack up into
-// a paused row as static dashed lines; terminate operations cross the same way
-// as static red dashed lines, with an orange dashed border on the target. A
-// top-bar strip aggregates every role/tool type that has ever run, with
-// invocation counts and cumulative metrics drawn from each instance's incoming
-// call operations (the only operations that carry metrics).
+// The view projects the model to a stack-of-rows layout: one row per non-terminated call stack (stacksOf) in push order, the main run at the top and each preempting interrupt below it — rows never reorder as activity moves; the active stack is conveyed by the pulsing node and marching lines, not by row position.
+// Each row lays its open call chain (callChainOf) left-to-right by call depth, with the stack's root participant (the You root or an Interrupt instance) at the leftmost column.
+// A return whose source has departed the open chain lingers as a node plus a return edge back to its caller until the caller's next action — read straight off the operation list, never from a stored lingering flag.
+// observe operations cross from the active stack up into a paused row as static dashed lines; terminate operations cross the same way as static red dashed lines, with an orange dashed border on the target.
+// A top-bar strip aggregates every role/tool type that has ever run, with invocation counts and cumulative metrics drawn from each instance's incoming call operations (the only operations that carry metrics).
 //
-// Animation is layered on top of the settled structure via class hooks the
-// existing CSS keyframes drive; the model carries no animation state. The
-// single invariant governs every motion class: a call/return edge animates iff
-// it is in_flight and its stack is not paused — paused stacks' lines are
-// frozen solid, and observe and terminate never animate. A call edge carries
-// 'flowing' only while its lifecycle is in_flight (settling to a solid static
-// stroke once the callee delegates or returns); a lingering return edge carries
-// 'returning' (or 'error' on a failed outcome) while in_flight, because a
-// return edge exists only while it is the current response leg in flight — and
-// a resolved stack is not paused (its chain is empty), so its final return leg
-// keeps marching in its outcome color until the next operation settles it. The
-// active participant (the destination of the active stack's current focus, via
-// activeParticipant) pulses; participants in paused stacks do not.
+// Animation is layered on top of the settled structure via class hooks the existing CSS keyframes drive; the model carries no animation state.
+// The single invariant governs every motion class: a call/return edge animates iff it is in_flight and its stack is not paused — paused stacks' lines are frozen solid, and observe and terminate never animate.
+// A call edge carries 'flowing' only while its lifecycle is in_flight (settling to a solid static stroke once the callee delegates or returns); a lingering return edge carries 'returning' (or 'error' on a failed outcome) while in_flight, because a return edge exists only while it is the current response leg in flight — and a resolved stack is not paused (its chain is empty), so its final return leg keeps marching in its outcome color until the next operation settles it.
+// The active participant (the destination of the active stack's current focus, via activeParticipant) pulses; participants in paused stacks do not.
 //
-// Frame-to-frame node lifecycle (entering/departing) is computed by
-// deriveLifecycle from two consecutive InteractionModel frames: entering
-// participants scale/fade in; a departing participant travels from its previous
-// row position to its role's top-bar slot, both in the shared SVG coordinate
-// space so the travel lands on the slot and reads as the counter incrementing.
-// The travel/shrink/fade keyframes are the existing flow-node-* rules; only the
-// from/to coordinates are passed in.
+// Frame-to-frame node lifecycle (entering/departing) is computed by deriveLifecycle from two consecutive InteractionModel frames: entering participants scale/fade in; a departing participant travels from its previous row position to its role's top-bar slot, both in the shared SVG coordinate space so the travel lands on the slot and reads as the counter incrementing.
+// The travel/shrink/fade keyframes are the existing flow-node-* rules; only the from/to coordinates are passed in.
 //
-// The terminal-result CTA is a view concern layered on model.status, not model
-// state: when the run reaches a terminal status the view renders a CTA node
-// whose tone follows the status and whose active/modal state is harness-managed.
+// The terminal-result CTA is a view concern layered on model.status, not model state: when the run reaches a terminal status the view renders a CTA node whose tone follows the status, and onclick is harness-managed.
 //
-// `h` is passed in rather than imported so the module stays free of hyperapp
-// coupling and the vnode shape is exercisable in tests with a fake `h`,
-// mirroring the existing SVG primitive convention. The label resolver is passed
-// in (rather than imported) alongside the selected tier so a caller can swap the
-// resolver or tier without the view reaching for globals; node prose is
-// localization, a view concern, and the model carries no prose. The module is
-// browser-pure TypeScript: it imports only its siblings and the vendored `h`
-// type, and touches no external system.
+// `h` is passed in rather than imported so the module stays free of hyperapp coupling and the vnode shape is exercisable in tests with a fake `h`, mirroring the existing SVG primitive convention.
+// The label resolver is passed in (rather than imported) alongside the selected tier so a caller can swap the resolver or tier without the view reaching for globals; node prose is localization, a view concern, and the model carries no prose.
+// The module is browser-pure TypeScript: it imports the shared interaction model, labels, and inspector attribute contract, its browser-safe siblings, and the vendored `h` type, and touches no external system.
 
-import { activeOperation, activeParticipant, callChainOf, callMetricsByDestination, isPaused, isTerminalStatus, observesOf, stacksOf, terminatesOf } from './interaction-model.js'
-import type { InteractionModel, Operation, Participant, ParticipantKind, RunStatus } from './interaction-model.js'
-import type { LabelResolver, LabelTier } from './labels.js'
+import { activeOperation, activeParticipant, callChainOf, callMetricsByDestination, isPaused, isTerminalStatus, observesOf, stacksOf, terminatesOf } from '../interaction-model.js'
+import type { InteractionModel, Operation, Participant, ParticipantKind, RunStatus } from '../interaction-model.js'
+import type { LabelResolver, LabelTier } from '../labels.js'
 import type { RoleAccentResolver } from './role-accents.js'
 import { createParticipantComparator } from './participant-order.js'
-import { ATTR_OPERATION, ATTR_PARTICIPANT, ATTR_ROLE } from './inspector.js'
+import { ATTR_OPERATION, ATTR_PARTICIPANT, ATTR_ROLE } from '../inspector.js'
 import { GraphEdge, GraphNode, NODE_HEIGHT, NODE_WIDTH, nodeAnchor } from './svg-primitives.js'
 import type { Anchor } from './svg-primitives.js'
-import type { H, Vnode } from '../vendor/hyperapp.js'
+import type { H, Vnode } from '../../vendor/hyperapp.js'
 
 // Horizontal gap between call-depth columns and vertical gap between rows. Generous horizontal spacing keeps the left-to-right call chain legible; the vertical gap separates the main run from each preempting interrupt stack.
-export const COL_GAP = 96
+const COL_GAP = 96
 const ROW_GAP = 104
 
 // Top-bar small-node dimensions and wrapping. Each history slot is a small square holding just its invocation count; the role/tool name and cumulative token/time details surface via the native SVG <title> hover so a long run's history stays a compact strip. They wrap into rows so a large guild's many role/tool types never overflow horizontally.
@@ -74,7 +43,7 @@ const TOP_BAR_PER_ROW = 14
 const DEFAULT_MIN_COLUMNS = 5
 
 // A caller-held high-water mark of the column count the flow view has rendered. A frame whose call chain is shallower than a previous frame still sizes to this width so nodes do not slide leftward when a deep delegation unwinds — a stable stage reads better than one that resizes per frame. The mark lives in an explicit tracker the caller creates and hands in (rather than module scope) so the view stays a pure function of its inputs: each client holds one tracker for the page-load lifetime, and each test constructs a fresh one, keeping renders order-independent.
-export interface ColumnTracker {
+interface ColumnTracker {
 	minColumns: number
 }
 
@@ -142,7 +111,7 @@ interface TopBarSlot {
 	hasMetrics: boolean
 }
 
-interface CostStrip {
+export interface CostStrip {
 	elapsedSeconds: number
 	tokens: number
 }
@@ -509,7 +478,7 @@ interface DepartingNode {
 }
 
 // The frame-diff descriptor deriveLifecycle produces and renderFlowView consumes: the participants entering the rows (scale/fade in) and those departing them for a top-bar slot.
-export interface FrameLifecycle {
+interface FrameLifecycle {
 	enteringIds: Set<string>
 	departing: DepartingNode[]
 }
@@ -548,20 +517,20 @@ export function deriveLifecycle(previousModel: InteractionModel | null | undefin
 	return { enteringIds, departing }
 }
 
-// The terminal-result call-to-action node renders on a terminal frame so the run offers a result affordance. The CTA is a view concern layered on model.status (never model state): the tone follows the status, and the active/modal state plus onclick are harness-managed. A layered "bezel + bevel + face" 3D button reads as pressable at a glance; the active state adds a glowing inner ring and a flowing You→CTA edge so the open-modal connection reads. The gradients are declared inline (stable ids) so the button is self-contained.
-function CtaNode(h: H, props: { label: string; active: boolean; tone: 'accent' | 'error'; x: number; y: number; onclick: unknown }): Vnode {
+// A hyperapp event handler as the stage forwards it: the stage never invokes the callback, so it does not name the host's action-state type. The `never` parameters keep every host handler assignable while still requiring a function, and the contract in index.ts documents when each affordance fires.
+export type ClickHandler = (state: never, event: Event) => unknown
+
+// The terminal-result call-to-action node renders on a terminal frame so the run offers a result affordance. The CTA is a view concern layered on model.status (never model state): the tone follows the status, and onclick is harness-managed. A layered "bezel + bevel + face" 3D button reads as pressable at a glance. The gradients are declared inline (stable ids) so the button is self-contained.
+function CtaNode(h: H, props: { label: string; tone: 'accent' | 'error'; x: number; y: number; onclick?: ClickHandler }): Vnode {
 	const label = props.label
-	const active = props.active === true
 	const tone = props.tone === 'error' ? 'error' : 'accent'
-	const classes = active ? 'flow-node flow-cta flow-cta--active' : 'flow-node flow-cta'
-	return h('g', { class: classes, transform: translate(props.x, props.y), onclick: props.onclick }, [
-		CtaButton(h, { label, active, tone }),
+	return h('g', { class: 'flow-node flow-cta', transform: translate(props.x, props.y), onclick: props.onclick }, [
+		CtaButton(h, { label, tone }),
 	])
 }
 
-function CtaButton(h: H, props: { label: string; active: boolean; tone: 'accent' | 'error' }): Vnode {
+function CtaButton(h: H, props: { label: string; tone: 'accent' | 'error' }): Vnode {
 	const label = props.label
-	const active = props.active === true
 	const tone = props.tone === 'error' ? 'error' : 'accent'
 	const bezelId = 'flow-cta-bezel'
 	const bevelId = 'flow-cta-bevel'
@@ -600,7 +569,6 @@ function CtaButton(h: H, props: { label: string; active: boolean; tone: 'accent'
 		h('rect', { class: 'flow-cta-face', x: insetFace, y: insetFace, width: NODE_WIDTH - 2 * insetFace, height: NODE_HEIGHT - 2 * insetFace, rx: 5, fill: `url(#${faceId})` }, []),
 		h('text', { class: 'flow-cta-label', x: NODE_WIDTH / 2, y: NODE_HEIGHT / 2 + 6, 'text-anchor': 'middle' }, [label]),
 	]
-	if (active) children.push(h('rect', { class: 'flow-cta-active-ring', 'data-tone': tone, x: insetFace, y: insetFace, width: NODE_WIDTH - 2 * insetFace, height: NODE_HEIGHT - 2 * insetFace, rx: 5 }, []))
 	return h('g', { class: 'flow-cta-button' }, children)
 }
 
@@ -612,7 +580,7 @@ function ctaDescriptorForStatus(status: RunStatus): { label: string; tone: 'acce
 }
 
 // The ask_human call, when its question is pending: the active operation is an in_flight call whose destination is a human participant (the answerer). A human never emits an operation that would advance the call to its working phase, so the call stays in transit until the user answers — the same single-transit-frame rule the terminal op follows, but the run is not terminal here. The Question affordance overlays the answerer node for the duration of this frame.
-export function activeAskHumanCall(model: InteractionModel): Operation | undefined {
+function activeAskHumanCall(model: InteractionModel): Operation | undefined {
 	const operation = activeOperation(model)
 	if (operation === null) return undefined
 	if (operation.kind !== 'call' || operation.lifecycle !== 'in_flight') return undefined
@@ -622,7 +590,7 @@ export function activeAskHumanCall(model: InteractionModel): Operation | undefin
 }
 
 // The "Question for Human" overlay button, rendered on the answerer node while the ask_human call is pending. Mirrors the terminal CTA — a standalone overlay button with no connecting edge, so it reads as an affordance rather than a graph node — but sits on the answerer (downstream of the asker) instead of the root. The label splits across three lines ("Question" / "for" / "Human") via stacked <tspan> elements so the three-word affordance reads at a glance within the node box.
-function QuestionButton(h: H, props: { x: number; y: number; onclick: unknown }): Vnode {
+function QuestionButton(h: H, props: { x: number; y: number; onclick: ClickHandler }): Vnode {
 	const centerX = NODE_WIDTH / 2
 	return h('g', { class: 'flow-node flow-question-button', transform: translate(props.x, props.y), onclick: props.onclick }, [
 		h('defs', {}, [
@@ -642,14 +610,13 @@ function QuestionButton(h: H, props: { x: number; y: number; onclick: unknown })
 	])
 }
 
-// The harness-state bags renderFlowView's optional CTA and Question parameters carry: the active flag and click handler for the terminal CTA, and the click handler for the pending-question overlay. The view itself decides whether to render either affordance by reading the model.
+// The harness-state bags renderFlowView's optional CTA and Question parameters carry: the click handler for the terminal CTA, and the click handler for the pending-question overlay. The view itself decides whether to render either affordance by reading the model, so a handler supplied for a frame that does not render its affordance is never called.
 export interface CtaControls {
-	active?: unknown
-	onclick?: unknown
+	onclick?: ClickHandler
 }
 
 export interface QuestionControls {
-	onclick?: unknown
+	onclick?: ClickHandler
 }
 
 // Renders the flow view as a single SVG containing the history top bar, the observe cross-stack lines, the terminate cross-stack lines, the row stack, the departing overlay, the (on a terminal frame) result CTA, and (while an ask_human call is pending) the Question button overlay on the answerer node. Edges paint before nodes within each row so node boxes cover anchor overlap; observes and terminates sit behind the rows so node boxes cover their endpoints; the departing overlay paints last so the travel reads on top of the settled graph; the CTA and Question button paint after the rows so they sit above the graph. `lifecycle` (optional) carries the frame-diff entering/departing descriptor from deriveLifecycle; `cta` and `question` carry the harness state for the two overlay affordances — the view itself decides whether to render them by reading model.status and the active ask_human call. `columns` is the caller-held high-water-mark tracker from createColumnTracker. `roleAccents` is the per-role accent resolver the hosts build from the guild's full role list (createRoleAccentResolver) — agent nodes take their role's accent wherever they render (row nodes, the departing overlay, the top-bar slots), and a resolver that returns null for everything renders exactly the neutral look. `roleOrder` is the guild-declared agent-role display order (guild.json visualization.roleOrder); the top-bar slots are sorted into it (participant-order.ts), so the strip's slot order, its pixel positions, and the departure targets all agree, and the sequence view's role columns sort the same way.
@@ -753,10 +720,9 @@ export function renderFlowView(h: H, model: InteractionModel, labels: LabelResol
 		...departingVnodes,
 	]
 	if (ctaLayout !== null && ctaDescriptor !== null) {
-		const isActive = cta !== undefined && cta !== null && cta.active === true
 		const onclick = cta !== undefined && cta !== null ? cta.onclick : undefined
 		// The CTA is a terminal action button, not a graph node with a relationship to another participant, so it carries no connecting edge. A line from the human's top-bar slot to the button read as a graph edge with no meaning; the button stands alone.
-		svgChildren.push(CtaNode(h, { label: ctaDescriptor.label, active: isActive, tone: ctaDescriptor.tone, x: ctaLayout.x, y: ctaLayout.y, onclick }))
+		svgChildren.push(CtaNode(h, { label: ctaDescriptor.label, tone: ctaDescriptor.tone, x: ctaLayout.x, y: ctaLayout.y, onclick }))
 	}
 
 	// The Question button overlays the answerer node while the ask_human call is pending. It carries no connecting edge (the CTA's no-connecting-edge rule applies to these overlay affordances alike); the onclick is harness-supplied so the view stays free of modal coupling.

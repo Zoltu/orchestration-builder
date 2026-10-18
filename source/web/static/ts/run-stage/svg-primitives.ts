@@ -4,10 +4,11 @@
 //
 // Colors reuse the project's --svg-* tokens via the existing graph-node and graph-edge CSS classes declared in stylesheets/styles.css, so the views follow the light/dark theme without adding CSS in this layer. Machine fields (labels, counters, costs) are SVG <text> textContent, never markup, so the textContent security invariant holds. No motion classes are emitted here: call and return edges render as settled strokes and the observe line is a distinct dashed static style; the flowing/returning motion classes are layered on top of these primitives by the animation layer, never by the primitives themselves.
 //
-// `h` is passed in rather than imported so the module stays free of hyperapp coupling and the vnode shape is exercisable in tests with a fake `h`. The props stay a plain record — the primitives receive fresh literals from the views and plain objects from the test harness — so each field read narrows with the same checks the layout needs, failing fast on structurally invalid values. The module is browser-pure TypeScript: it imports the shared record guard and the vendor `h` type only, and touches no external system.
+// `h` is passed in rather than imported so the module stays free of hyperapp coupling and the vnode shape is exercisable in tests with a fake `h`. The props stay a plain record — the primitives receive fresh literals from the views and plain objects from the test harness — so each field read narrows with the same checks the layout needs, failing fast on structurally invalid values. The module is browser-pure TypeScript: it imports the shared record guard, the shared token formatter, and the vendor `h` type only, and touches no external system.
 
-import { isObject } from './guards.js'
-import type { H, Vnode } from '../vendor/hyperapp.js'
+import { formatTokens } from '../format-tokens.js'
+import { isObject } from '../guards.js'
+import type { H, Vnode } from '../../vendor/hyperapp.js'
 
 export const NODE_WIDTH = 160
 export const NODE_HEIGHT = 64
@@ -80,12 +81,6 @@ function formatCost(costTime: unknown, costContextTokens: unknown): string | nul
 	if (costContextTokens !== undefined && costContextTokens !== null) parts.push(`${formatTokens(costContextTokens)} ctx`)
 	if (parts.length === 0) return null
 	return parts.join(' \u00b7 ')
-}
-
-// Formats a token count compactly: counts from 1000 up render in k with one decimal (1234 → "1.2k") and there is no larger unit, so a 262144-token context reads "262.1k". Exported because the tooltip card's token figures abbreviate the same way — one formatter so every token count the UI renders never drifts between surfaces.
-export function formatTokens(value: unknown): string {
-	if (typeof value === 'number' && value >= 1000) return `${Math.round(value / 100) / 10}k`
-	return String(value)
 }
 
 // A graph edge: a <path> between two face anchors, shaped by kind. A call bows horizontally between the side faces (caller right → callee left); a return bows downward between the bottom faces so the response leg sits below the forward call line and never overlaps it; an observe is a vertical line drawn dashed so a cross-stack observation reads as a static reference rather than an in-flight call. A terminate shares the observe's sideways-bowed cross-stack geometry; its red dashed stroke is applied by the flow view's CSS (the wrapper carries flow-edge--terminate), so the primitive carries no terminate-specific styling of its own. The state prop ('flowing' | 'returning' | 'error' | 'static') layers the matching motion class onto the path so the CSS drives the marching-ants animation; the primitive carries no animation logic of its own.

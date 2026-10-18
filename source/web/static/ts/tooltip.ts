@@ -11,7 +11,7 @@ import { callMetricsByDestination } from './interaction-model.js'
 import type { InteractionModel, Operation, Participant } from './interaction-model.js'
 import type { LabelResolver, LabelTier } from './labels.js'
 import type { OperationDetailsState } from './operation-details.js'
-import { formatTokens } from './svg-primitives.js'
+import { formatTokens } from './format-tokens.js'
 import type { LooseH, Vnode, VnodeChildInput } from '../vendor/hyperapp.js'
 
 // A labeled detail block, mirroring the `LogDetailSection` shape `formatLogDetailSections` (source/run-log/format/index.ts) produces: a machine label (`'arguments'`, `'result'`, `'summary'`, `'error'`, `'usage'`, …) and the raw content the tooltip then formats by kind.
