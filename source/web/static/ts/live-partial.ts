@@ -31,7 +31,16 @@ export function nextLivePartial(current: LivePartial | null, delta: unknown): Li
 	return { ...cleared, role: delta.role, content: cleared.content + delta.text }
 }
 
-// The partial as it should stand after a turn-list derivation: null when the accumulated instance no longer holds an in-flight turn — the inspector's `llm_call_start`/`llm_call` pairing (buildTurnIndex, inspector-modal.js) proves the turn completed, since an in-flight turn keeps its start unmatched in the log — or the partial itself when the role is still generating. Pairing matches the entry's `roleId` first (mirroring isLiveTurn in inspector-modal.js, so a same-named sibling's in-flight row never hosts another instance's stream); an entry or partial carrying no instance id — old logs, whose turn events predate per-instance ids — falls back to the role name. A non-array or malformed entry list reads as "nothing in flight" and clears, so a derivation that learned nothing never keeps a stale partial.
+// The one instance-matching rule the live partial and the inspector renderer share: an entry with its own instance id matches the partial's id when the partial carries one; an entry or partial without an instance id (old logs) falls back to the role name.
+export function livePartialMatchesRole(roleId: string, role: string, livePartial: { roleId: string | null; role: string } | null): boolean {
+	if (livePartial === null) return false
+	const entryHasOwnId = roleId !== role
+	const partialHasId = livePartial.roleId !== null && livePartial.roleId !== ''
+	if (entryHasOwnId && partialHasId) return roleId === livePartial.roleId
+	return role === livePartial.role
+}
+
+// The partial as it should stand after a turn-list derivation: null when the accumulated instance no longer holds an in-flight turn — the inspector's `llm_call_start`/`llm_call` pairing (buildTurnIndex, turn-inspector/turns.ts) proves the turn completed, since an in-flight turn keeps its start unmatched in the log — or the partial itself when the role is still generating. Pairing uses livePartialMatchesRole (the renderer applies the same rule through the turn-inspector module entrypoint), so a same-named sibling's in-flight row never hosts another instance's stream; an entry or partial carrying no instance id — old logs, whose turn events predate per-instance ids — falls back to the role name. A non-array or malformed entry list reads as "nothing in flight" and clears, so a derivation that learned nothing never keeps a stale partial.
 export function activeLivePartial(livePartial: LivePartial | null, entries: unknown): LivePartial | null {
 	if (livePartial === null) return null
 	if (!Array.isArray(entries)) return null
@@ -40,19 +49,13 @@ export function activeLivePartial(livePartial: LivePartial | null, entries: unkn
 		if (entry['kind'] !== 'in_flight') continue
 		const role = typeof entry['role'] === 'string' && entry['role'] !== '' ? entry['role'] : null
 		if (role === null) continue
-		const roleId = typeof entry['roleId'] === 'string' && entry['roleId'] !== '' ? entry['roleId'] : null
-		const entryHasOwnId = roleId !== null && roleId !== role
-		const partialHasId = livePartial.roleId !== null && livePartial.roleId !== ''
-		if (entryHasOwnId && partialHasId) {
-			if (roleId === livePartial.roleId) return livePartial
-			continue
-		}
-		if (role === livePartial.role) return livePartial
+		const roleId = typeof entry['roleId'] === 'string' && entry['roleId'] !== '' ? entry['roleId'] : role
+		if (livePartialMatchesRole(roleId, role, livePartial)) return livePartial
 	}
 	return null
 }
 
-// The partial as it should stand after a SCOPED window's turn-list derivation (one instance's server-filtered entries): null only when the entries hold a COMPLETED turn matching the partial's instance — positive evidence the poll recorded that turn's `llm_call` — and the partial itself otherwise. A scoped window cannot see other instances' turns, so a partial belonging to a different instance is merely absent here, not completed: clearing on absence would drop a stream that still renders in the scope the partial belongs to, and re-scoping back mid-turn would show the gapped text as continuous. Matching mirrors `activeLivePartial` (the entry's `roleId` first, the role name when either side carries no instance id); a non-array or malformed entry list proves nothing and keeps the partial.
+// The partial as it should stand after a SCOPED window's turn-list derivation (one instance's server-filtered entries): null only when the entries hold a COMPLETED turn matching the partial's instance — positive evidence the poll recorded that turn's `llm_call` — and the partial itself otherwise. A scoped window cannot see other instances' turns, so a partial belonging to a different instance is merely absent here, not completed: clearing on absence would drop a stream that still renders in the scope the partial belongs to, and re-scoping back mid-turn would show the gapped text as continuous. Matching uses the same livePartialMatchesRole rule as `activeLivePartial`; a non-array or malformed entry list proves nothing and keeps the partial.
 export function scopedActiveLivePartial(livePartial: LivePartial | null, entries: unknown): LivePartial | null {
 	if (livePartial === null) return null
 	if (!Array.isArray(entries)) return livePartial
@@ -61,14 +64,8 @@ export function scopedActiveLivePartial(livePartial: LivePartial | null, entries
 		if (entry['kind'] !== 'completed') continue
 		const role = typeof entry['role'] === 'string' && entry['role'] !== '' ? entry['role'] : null
 		if (role === null) continue
-		const roleId = typeof entry['roleId'] === 'string' && entry['roleId'] !== '' ? entry['roleId'] : null
-		const entryHasOwnId = roleId !== null && roleId !== role
-		const partialHasId = livePartial.roleId !== null && livePartial.roleId !== ''
-		if (entryHasOwnId && partialHasId) {
-			if (roleId === livePartial.roleId) return null
-			continue
-		}
-		if (role === livePartial.role) return null
+		const roleId = typeof entry['roleId'] === 'string' && entry['roleId'] !== '' ? entry['roleId'] : role
+		if (livePartialMatchesRole(roleId, role, livePartial)) return null
 	}
 	return livePartial
 }

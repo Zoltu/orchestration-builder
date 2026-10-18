@@ -1,8 +1,8 @@
-// The inspector transcript's per-turn wire-envelope session cache, shared shape with the operation-details controller (operation-details.js) but different semantics. The transcript renders each turn's NEW messages from the loaded log window's delta slices, while a turn's "on the wire" expander shows the complete request the model saw at that turn — the folded view the window endpoint reconstructs server-side (`GET /api/runs/:id/log?detail=<index>`). Those folded bodies are the largest material in the log, so the expander fetches on first open and caches per browser session here, keyed `<runId>|<eventIndex>`. Event indexes are stable within a run (the log is append-only), and the run id in the key keeps a previous run's entries from answering for another run's same-numbered event.
+// The turn inspector's per-turn wire-envelope session cache. The transcript renders each turn's NEW messages from the loaded log window's delta slices, while a turn's "on the wire" expander shows the complete request the model saw at that turn — the folded view the window endpoint reconstructs server-side (`GET /api/runs/:id/log?detail=<index>`). Those folded bodies are the largest material in the log, so the expander fetches on first open and caches per browser session here, keyed `<runId>|<eventIndex>`.
 //
-// Two deliberate departures from the operation-details controller: a failed landing evicts rather than caching — a cached failure would block the retry a reopen schedules forever, so one transient 500 cannot poison a turn for the session — and the cache is bounded, evicting its oldest entry past `maxEntries` since a long inspection session could otherwise accumulate one folded conversation per opened turn (an evicted expander re-fetches on reopen). A cached null — the endpoint's explicit "this event carries no detail sections" — is a valid ready state, so a body-less turn is fetched once like any other.
+// A failed landing evicts rather than caching — a cached failure would block the retry a reopen schedules forever — and the cache is bounded, evicting its oldest entry past `maxEntries`. A cached null — the endpoint's explicit "this event carries no detail sections" — is a valid ready state, so a body-less turn is fetched once like any other.
 
-import { isObject } from './guards.js'
+import { isObject } from '../guards.js'
 
 // The shipped cache bound: folded conversations ride the response whole, so the cache holds a bounded number of opened turns and re-fetches an evicted one on reopen.
 export const WIRE_DETAIL_CACHE_LIMIT = 100
@@ -17,9 +17,9 @@ export interface WireDetailSection {
 export type WireDetailState = { status: 'idle' } | { status: 'loading' } | { status: 'ready'; sections: WireDetailSection[] | null }
 
 export interface WireDetailsController {
-	// The cache's state for one turn; a miss reads as idle so the host can distinguish "not fetched" from "in flight".
+	// The cache's state for one turn; a miss reads as idle so the host can distinguish "not fetched" from "in flight". The cached state (and its sections) is returned by reference read-only: callers must not mutate it.
 	lookup(runId: string, eventIndex: number): WireDetailState
-	// Marks an uncached turn 'loading' synchronously (so the open's first render reads a defined state) and returns whether it started — the host builds exactly one fetch per true.
+	// Marks an uncached turn 'loading' synchronously and returns whether it started — the host builds exactly one fetch per true.
 	begin(runId: string, eventIndex: number): boolean
 	// Records a resolved fetch: an ok body carrying `detailSections` as an array (or an explicit null) reads ready; anything else evicts so reopening retries.
 	recordResponse(runId: string, eventIndex: number, ok: boolean, body: unknown): void
@@ -79,7 +79,7 @@ export function createWireDetails(options: WireDetailsOptions): WireDetailsContr
 	return { lookup, begin, recordResponse, recordFailure: evict }
 }
 
-// The shared read of a detail response body, identical across the wires: only an ok response carrying an object whose `detailSections` is an array (or an explicit null for "this event carries none") is ready; anything else returns undefined, which records the landing as an eviction — a failure must not block the reopen retry.
+// Only an ok response carrying an object whose `detailSections` is an array (or an explicit null for "this event carries none") is ready; anything else records an eviction so a failure never blocks the reopen retry.
 function readySectionsOf(ok: boolean, body: unknown): WireDetailSection[] | null | undefined {
 	if (!ok) return undefined
 	if (!isObject(body)) return undefined
