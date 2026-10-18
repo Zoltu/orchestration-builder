@@ -3,8 +3,7 @@ import { createWebHumanBackend, type WebHumanBackend } from '../executor/human-b
 import { createInterruptChannel, createInterruptQueue, type InterruptChannel } from '../executor/interrupts.ts'
 import { createRunState } from '../executor/run-state.ts'
 import { createResumeErroredRun, createRunSubmission, type ResumeRun, type RunSubmission, type StartRun } from '../executor/run-submission.ts'
-import { createTaskScheduler } from '../executor/scheduler.ts'
-import type { QueueItem, TaskQueue } from '../executor/task-queue.ts'
+import { createTaskQueue, type QueueItemView, type QueueView } from '../executor/queue/index.ts'
 import type { RunCheckpoint } from '../executor/checkpoint.ts'
 import type { ProjectSettings, ReadProjectSettings, WriteProjectSettings, RunSnapshotRaw, RunSnapshotStats, RunSummaryStats } from '../executor/persistence.ts'
 import type { DeploymentConfig, EffortLevel, GuildConfig, InvolvementLevel, LogLevel, RunContinuation, RunMeta } from '../executor/types.js'
@@ -31,19 +30,44 @@ function runSummariesFromFrame(frame: unknown): RunSummary[] {
 	return result.summaries
 }
 
-// A plain-object queue store standing in for the filesystem leaves, so the /api/queue route tests and the POST /api/runs enqueue path observe the queue's exact state.
-function createInMemoryQueueStore(initial: QueueItem[] = []): { readQueue: () => TaskQueue; writeQueue: (queue: TaskQueue) => void; snapshot: () => TaskQueue } {
-	let current: TaskQueue = { items: [...initial] }
+function isQueueItemShape(value: unknown): value is QueueItemView {
+	if (typeof value !== 'object' || value === null) return false
+	if (!('id' in value) || typeof value.id !== 'string') return false
+	if (!('task' in value) || typeof value.task !== 'string') return false
+	if (!('status' in value) || typeof value.status !== 'string') return false
+	if (!('queuedAt' in value) || typeof value.queuedAt !== 'string') return false
+	return true
+}
+
+function parseQueueText(text: string | null): QueueView {
+	if (text === null) return { items: [] }
+	const parsed: unknown = JSON.parse(text)
+	if (typeof parsed !== 'object' || parsed === null) throw new Error('the fake queue store holds a malformed queue')
+	if (!('items' in parsed) || !Array.isArray(parsed.items) || !parsed.items.every(isQueueItemShape)) throw new Error('the fake queue store holds a malformed queue')
+	return { items: parsed.items }
+}
+
+// A text-only queue store standing in for the filesystem leaves, so the /api/queue route tests and the POST /api/runs enqueue path observe the queue's exact state and write/submit ordering.
+function createInMemoryQueueStore(initial: QueueItemView[] = []): { store: { read: () => string | null; write: (contents: string) => void }; snapshot: () => QueueView; writes: string[]; events: string[] } {
+	let current: string | null = initial.length === 0 ? null : JSON.stringify({ items: initial })
+	const writes: string[] = []
+	const events: string[] = []
 	return {
-		readQueue: () => current,
-		writeQueue: (queue) => {
-			current = queue
+		store: {
+			read: () => current,
+			write: (contents) => {
+				current = contents
+				writes.push(contents)
+				events.push('queue.write')
+			},
 		},
-		snapshot: () => current,
+		snapshot: () => parseQueueText(current),
+		writes,
+		events,
 	}
 }
 
-function queueItem(id: string, task = 'fix the parser bug', overrides: Partial<QueueItem> = {}): QueueItem {
+function queueItem(id: string, task = 'fix the parser bug', overrides: Partial<QueueItemView> = {}): QueueItemView {
 	return {
 		id,
 		task,
@@ -489,8 +513,9 @@ snapshots.set('run-chain-failure', {
 interface HandlerHarness {
 	handler: RequestHandler
 	submission: RunSubmission
+	taskQueue: ReturnType<typeof createTaskQueue>
 	settings: InMemorySettings
-	queue: { readQueue: () => TaskQueue; writeQueue: (queue: TaskQueue) => void; snapshot: () => TaskQueue }
+	queue: { store: { read: () => string | null; write: (contents: string) => void }; snapshot: () => QueueView; writes: string[]; events: string[] }
 	interruptChannel: InterruptChannel
 	humanBackend: WebHumanBackend
 	staticCalls: string[]
@@ -508,7 +533,7 @@ interface HandlerHarness {
 
 // Builds a fresh handler whose startRun and resumeRun park on caller-controlled resolvers, so each test drives its own run lifecycle without touching shared state. The static leaf is a recording fake; every dependency is in-memory. runIdCollides makes runDirectoryExists report an existing directory for the generated id, exercising the submit-level run_id_collision refusal. build seeds the image build identifier GET /api/config surfaces (null, as from a source checkout, unless a test passes one). initialCheckpoints seeds the in-memory checkpoint store (raw state.json text by run id) the resume submission and the resumable flag read.
 // The queue store and the scheduler are wired exactly as serve.ts wires them: the handler's mutations and the POST /api/runs enqueue go through the same in-memory leaves, the scheduler dispatches through the submission, and a settled run promise maps its item and ticks onward.
-function createHandlerHarness(options: { runIdCollides?: boolean, build?: BuildInfo | null, initialQueueItems?: QueueItem[], initialCheckpoints?: Map<string, string>, flowFeedOptions?: FlowFeedResponderOptions } = {}): HandlerHarness {
+function createHandlerHarness(options: { runIdCollides?: boolean, build?: BuildInfo | null, initialQueueItems?: QueueItemView[], initialCheckpoints?: Map<string, string>, flowFeedOptions?: FlowFeedResponderOptions } = {}): HandlerHarness {
 	let resolveActive: (meta: RunMeta) => void = () => {}
 	let resolveResumed: (meta: RunMeta) => void = () => {}
 	let capturedEffort: EffortLevel | undefined
@@ -563,15 +588,17 @@ function createHandlerHarness(options: { runIdCollides?: boolean, build?: BuildI
 	let nextId = 0
 	const settings = createInMemorySettings()
 	const queue = createInMemoryQueueStore(options.initialQueueItems ?? [])
-	const submission = createRunSubmission({ onRunSettled: (meta) => scheduler.onRunSettled(meta), startRun, resumeRun, generateRunId: () => `test-run-${nextId++}`, runDirectoryExists: () => options.runIdCollides ?? false, readProjectSettings: settings.read })
-	// The scheduler references the submission and the submission's settlement hook references the scheduler; each closure captures the other's binding lazily, exactly as serve.ts composes them.
-	const scheduler = createTaskScheduler({
-		readQueue: queue.readQueue,
-		writeQueue: queue.writeQueue,
+	const submission = createRunSubmission({ onRunSettled: (meta) => taskQueue.onRunSettled(meta), startRun, resumeRun, generateRunId: () => `run-20260101-09${String(nextId++).padStart(4, '0')}`, runDirectoryExists: () => options.runIdCollides ?? false, readProjectSettings: settings.read })
+	// The queue module references the submission and the submission's settlement hook references the queue; each closure captures the other's binding lazily, exactly as serve.ts composes them.
+	const taskQueue = createTaskQueue({
+		queueStore: queue.store,
 		readRunMetaById: harnessReadRunMetaById,
 		listRunIds,
 		readRunListSummary,
-		submitRun: (queued) => submission.submit(queued.task, queued.effort, queued.involvement, queued.logLevel, queued.continuation),
+		submitRun: (queued) => {
+			queue.events.push('submitRun')
+			return submission.submit(queued.task, queued.effort, queued.involvement, queued.logLevel, queued.continuation)
+		},
 		hasActiveRun: () => submission.activeRunId() !== undefined,
 		sleep: async () => {},
 		now: () => new Date().toISOString(),
@@ -584,8 +611,7 @@ function createHandlerHarness(options: { runIdCollides?: boolean, build?: BuildI
 		runSubmission: submission,
 		readRunMetaById: harnessReadRunMetaById,
 		readCheckpointById: (runId) => checkpoints.get(runId) ?? null,
-		readQueue: queue.readQueue,
-		writeQueue: queue.writeQueue,
+		taskQueue,
 	})
 	const flowFeedResponder = createFlowFeedResponder(options.flowFeedOptions ?? { epoch: 'test-epoch', historyLimit: 64, maxRuns: 8 })
 	const runListFeedResponder = createRunListFeedResponder({ epoch: 'test-epoch', historyLimit: 64 })
@@ -604,11 +630,9 @@ function createHandlerHarness(options: { runIdCollides?: boolean, build?: BuildI
 			listRunIds,
 			readProjectSettings: settings.read,
 			writeProjectSettings: settings.write,
-			readQueue: queue.readQueue,
-			writeQueue: queue.writeQueue,
+			taskQueue,
 			resumeErroredRun,
 			runCheckpointExists: (runId) => checkpoints.has(runId),
-			tickScheduler: () => scheduler.tick(),
 			build: options.build ?? null,
 			flowFeedResponder,
 			runListFeedResponder,
@@ -621,6 +645,7 @@ function createHandlerHarness(options: { runIdCollides?: boolean, build?: BuildI
 	return {
 		handler,
 		submission,
+		taskQueue,
 		settings,
 		queue,
 		interruptChannel,
@@ -960,10 +985,10 @@ describe('GET /api/run alias', () => {
 		const response = await handler(get('/api/run'))
 		expect(response.status).toBe(200)
 		const view = await response.json()
-		expect(view.runId).toBe('test-run-0')
-		expect(view.task).toBe('task for test-run-0')
+		expect(view.runId).toBe('run-20260101-090000')
+		expect(view.task).toBe('task for run-20260101-090000')
 
-		resolveActive()(terminalMeta('test-run-0', 'bootstrap task'))
+		resolveActive()(terminalMeta('run-20260101-090000', 'bootstrap task'))
 		await submission.awaitActive()
 	})
 
@@ -977,13 +1002,13 @@ describe('GET /api/run alias', () => {
 	test('keeps surfacing the most recent run after it completes', async () => {
 		const { handler, submission, resolveActive } = createHandlerHarness()
 		submission.submit('bootstrap task')
-		resolveActive()(terminalMeta('test-run-0', 'bootstrap task'))
+		resolveActive()(terminalMeta('run-20260101-090000', 'bootstrap task'))
 		await submission.awaitActive()
 
 		const response = await handler(get('/api/run'))
 		expect(response.status).toBe(200)
 		const view = await response.json()
-		expect(view.runId).toBe('test-run-0')
+		expect(view.runId).toBe('run-20260101-090000')
 	})
 })
 
@@ -1612,7 +1637,7 @@ describe('GET /api/run/flow alias', () => {
 		const { handler, submission, resolveActive } = createHandlerHarness()
 		submission.submit('bootstrap task')
 		const activeId = submission.activeRunId()
-		expect(activeId).toBe('test-run-0')
+		expect(activeId).toBe('run-20260101-090000')
 
 		const aliasResponse = await handler(get('/api/run/flow'))
 		expect(aliasResponse.status).toBe(200)
@@ -1620,7 +1645,7 @@ describe('GET /api/run/flow alias', () => {
 		expect(byIdResponse.status).toBe(200)
 		expect(await aliasResponse.json()).toEqual(await byIdResponse.json())
 
-		resolveActive()(terminalMeta('test-run-0', 'bootstrap task'))
+		resolveActive()(terminalMeta('run-20260101-090000', 'bootstrap task'))
 		await submission.awaitActive()
 	})
 
@@ -1727,10 +1752,10 @@ describe('POST /api/runs', () => {
 		const response = await handler(post('/api/runs', JSON.stringify({ task: 'a new task' })))
 		expect(response.status).toBe(201)
 		const body = await response.json()
-		expect(body.runId).toBe('test-run-0')
-		expect(submission.activeRunId()).toBe('test-run-0')
+		expect(body.runId).toBe('run-20260101-090000')
+		expect(submission.activeRunId()).toBe('run-20260101-090000')
 
-		resolveActive()(terminalMeta('test-run-0', 'a new task'))
+		resolveActive()(terminalMeta('run-20260101-090000', 'a new task'))
 		await submission.awaitActive()
 	})
 
@@ -1741,7 +1766,7 @@ describe('POST /api/runs', () => {
 		expect(response.status).toBe(409)
 		expect(await response.json()).toEqual({ ok: false, error: 'run_in_progress' })
 
-		resolveActive()(terminalMeta('test-run-0', 'first'))
+		resolveActive()(terminalMeta('run-20260101-090000', 'first'))
 		await submission.awaitActive()
 	})
 
@@ -1789,7 +1814,7 @@ describe('POST /api/runs', () => {
 		// The request's effort is recorded on the enqueued item and threads into its run as the override.
 		expect(lastEffort()).toBe('thorough')
 
-		resolveActive()(terminalMeta('test-run-0', 'careful task'))
+		resolveActive()(terminalMeta('run-20260101-090000', 'careful task'))
 		await submission.awaitActive()
 	})
 
@@ -1800,7 +1825,7 @@ describe('POST /api/runs', () => {
 		expect(response.status).toBe(201)
 		expect(lastEffort()).toBe('quick')
 
-		resolveActive()(terminalMeta('test-run-0', 'defaulted task'))
+		resolveActive()(terminalMeta('run-20260101-090000', 'defaulted task'))
 		await submission.awaitActive()
 	})
 
@@ -1824,7 +1849,7 @@ describe('POST /api/runs', () => {
 		expect(response.status).toBe(201)
 		expect(lastLogLevel()).toBe('standard')
 
-		resolveActive()(terminalMeta('test-run-0', 'quiet task'))
+		resolveActive()(terminalMeta('run-20260101-090000', 'quiet task'))
 		await submission.awaitActive()
 	})
 
@@ -1835,7 +1860,7 @@ describe('POST /api/runs', () => {
 		expect(response.status).toBe(201)
 		expect(lastLogLevel()).toBe('standard')
 
-		resolveActive()(terminalMeta('test-run-0', 'defaulted task'))
+		resolveActive()(terminalMeta('run-20260101-090000', 'defaulted task'))
 		await submission.awaitActive()
 	})
 
@@ -1859,7 +1884,7 @@ describe('POST /api/runs', () => {
 		expect(response.status).toBe(201)
 		expect(lastInvolvement()).toBe('collaborative')
 
-		resolveActive()(terminalMeta('test-run-0', 'collaborative task'))
+		resolveActive()(terminalMeta('run-20260101-090000', 'collaborative task'))
 		await submission.awaitActive()
 	})
 
@@ -1870,7 +1895,7 @@ describe('POST /api/runs', () => {
 		expect(response.status).toBe(201)
 		expect(lastInvolvement()).toBe('autonomous')
 
-		resolveActive()(terminalMeta('test-run-0', 'defaulted task'))
+		resolveActive()(terminalMeta('run-20260101-090000', 'defaulted task'))
 		await submission.awaitActive()
 	})
 
@@ -1899,7 +1924,7 @@ describe('POST /api/runs', () => {
 		expect(continuation?.summary).toBe('prior run finished cleanly')
 		expect(Array.isArray(continuation?.briefing)).toBe(true)
 
-		resolveActive()(terminalMeta('test-run-0', 'pick up where that left off'))
+		resolveActive()(terminalMeta('run-20260101-090000', 'pick up where that left off'))
 		await submission.awaitActive()
 	})
 
@@ -1915,7 +1940,7 @@ describe('POST /api/runs', () => {
 		const items = queue.snapshot().items
 		expect(items[0]?.task).toBe('prior run task')
 
-		resolveActive()(terminalMeta('test-run-0', 'prior run task'))
+		resolveActive()(terminalMeta('run-20260101-090000', 'prior run task'))
 		await submission.awaitActive()
 	})
 
@@ -1925,7 +1950,7 @@ describe('POST /api/runs', () => {
 		expect(response.status).toBe(201)
 		expect(lastContinuation()?.task).toBe('prior run task')
 
-		resolveActive()(terminalMeta('test-run-0', 'prior run task'))
+		resolveActive()(terminalMeta('run-20260101-090000', 'prior run task'))
 		await submission.awaitActive()
 	})
 
@@ -1962,7 +1987,7 @@ describe('POST /api/runs', () => {
 		expect(continuation?.task).toBe('a fresh task')
 		expect(Array.isArray(continuation?.briefing)).toBe(true)
 
-		resolveActive()(terminalMeta('test-run-0', 'a fresh task'))
+		resolveActive()(terminalMeta('run-20260101-090000', 'a fresh task'))
 		await submission.awaitActive()
 	})
 
@@ -1991,19 +2016,48 @@ describe('POST /api/runs', () => {
 		const { handler, submission, queue, lastQueueTracked, resolveActive } = createHandlerHarness()
 		const response = await handler(post('/api/runs', JSON.stringify({ task: 'a new task' })))
 		expect(response.status).toBe(201)
-		expect(await response.json()).toEqual({ runId: 'test-run-0' })
+		expect(await response.json()).toEqual({ runId: 'run-20260101-090000' })
 		// The queue store saw the item, dispatched: active with the run id, recorded log-level absent when the request carried none.
 		const items = queue.snapshot().items
 		expect(items.length).toBe(1)
 		expect(items[0]?.status).toBe('active')
-		expect(items[0]?.runId).toBe('test-run-0')
+		expect(items[0]?.runId).toBe('run-20260101-090000')
 		expect(items[0]?.logLevel).toBeUndefined()
 		expect(items[0]?.continuesFrom).toBeUndefined()
 		// The dispatch marks the run queue-tracked — the bit that activates pre-write parking.
 		expect(lastQueueTracked()).toBe(true)
-		expect(submission.activeRunId()).toBe('test-run-0')
+		expect(submission.activeRunId()).toBe('run-20260101-090000')
 
-		resolveActive()(terminalMeta('test-run-0', 'a new task'))
+		resolveActive()(terminalMeta('run-20260101-090000', 'a new task'))
+		await submission.awaitActive()
+	})
+
+	test('the HTTP path keeps the crash-safe ordering: the dispatching marker is written before submitRun, then the runId is filled', async () => {
+		const { handler, submission, queue, resolveActive } = createHandlerHarness()
+		const response = await handler(post('/api/runs', JSON.stringify({ task: 'a new task' })))
+		expect(response.status).toBe(201)
+		// The fake store records its writes and the submit port records the submit, so this is the exact call order: head enqueue, dispatching marker, submitRun, accepted dispatch.
+		expect(queue.events).toEqual(['queue.write', 'queue.write', 'submitRun', 'queue.write'])
+		const written = queue.writes.map((text) => parseQueueText(text))
+		const marker = written[1]?.items[0]
+		expect(marker?.status).toBe('active')
+		expect(marker?.runId).toBeUndefined()
+		expect(written[2]?.items[0]?.runId).toBe('run-20260101-090000')
+
+		resolveActive()(terminalMeta('run-20260101-090000', 'a new task'))
+		await submission.awaitActive()
+	})
+
+	test('a boot-equivalent tick keeps the same ordering: marker write before submitRun, then the runId fill', async () => {
+		const { taskQueue, submission, queue, resolveActive } = createHandlerHarness({ initialQueueItems: [queueItem('seed', 'boot task')] })
+		await taskQueue.tick()
+		expect(queue.events).toEqual(['queue.write', 'submitRun', 'queue.write'])
+		const written = queue.writes.map((text) => parseQueueText(text))
+		expect(written[0]?.items[0]?.status).toBe('active')
+		expect(written[0]?.items[0]?.runId).toBeUndefined()
+		expect(written[1]?.items[0]?.runId).toBe('run-20260101-090000')
+
+		resolveActive()(terminalMeta('run-20260101-090000', 'boot task'))
 		await submission.awaitActive()
 	})
 
@@ -2017,7 +2071,7 @@ describe('POST /api/runs', () => {
 		expect(items[0]?.effort).toBe('thorough')
 		expect(items[0]?.involvement).toBe('collaborative')
 
-		resolveActive()(terminalMeta('test-run-0', 'quiet continuation'))
+		resolveActive()(terminalMeta('run-20260101-090000', 'quiet continuation'))
 		await submission.awaitActive()
 	})
 
@@ -2031,7 +2085,7 @@ describe('POST /api/runs', () => {
 		// Checked before enqueueing: the busy service's queue is untouched.
 		expect(queue.snapshot().items.length).toBe(1)
 
-		resolveActive()(terminalMeta('test-run-0', 'first'))
+		resolveActive()(terminalMeta('run-20260101-090000', 'first'))
 		await submission.awaitActive()
 	})
 
@@ -2048,17 +2102,17 @@ describe('POST /api/runs', () => {
 		const { handler, submission, queue, resolveActive } = createHandlerHarness({ initialQueueItems: [queueItem('seeded', 'the queued follow-up')] })
 		const response = await handler(post('/api/runs', JSON.stringify({ task: 'first task' })))
 		expect(response.status).toBe(201)
-		resolveActive()(terminalMeta('test-run-0', 'first task'))
+		resolveActive()(terminalMeta('run-20260101-090000', 'first task'))
 		await submission.awaitActive()
 		// The settlement hook mapped the first item done and the tick dispatched the seeded item, whose run now holds the slot.
 		const items = queue.snapshot().items
 		expect(items[0]?.status).toBe('done')
-		expect(items[0]?.runId).toBe('test-run-0')
+		expect(items[0]?.runId).toBe('run-20260101-090000')
 		expect(items[1]?.status).toBe('active')
-		expect(items[1]?.runId).toBe('test-run-1')
-		expect(submission.activeRunId()).toBe('test-run-1')
+		expect(items[1]?.runId).toBe('run-20260101-090001')
+		expect(submission.activeRunId()).toBe('run-20260101-090001')
 
-		resolveActive()(terminalMeta('test-run-1', 'the queued follow-up'))
+		resolveActive()(terminalMeta('run-20260101-090001', 'the queued follow-up'))
 		await submission.awaitActive()
 	})
 })
@@ -2092,10 +2146,10 @@ describe('/api/queue', () => {
 		const items = queue.snapshot().items
 		expect(items.map((item) => item.id)).toEqual(['ahead', created.id])
 		expect(items[0]?.status).toBe('active')
-		expect(items[0]?.runId).toBe('test-run-0')
-		expect(submission.activeRunId()).toBe('test-run-0')
+		expect(items[0]?.runId).toBe('run-20260101-090000')
+		expect(submission.activeRunId()).toBe('run-20260101-090000')
 
-		resolveActive()(terminalMeta('test-run-0', 'already waiting'))
+		resolveActive()(terminalMeta('run-20260101-090000', 'already waiting'))
 		await submission.awaitActive()
 	})
 
@@ -2132,6 +2186,18 @@ describe('/api/queue', () => {
 		const clamped = await handler(get('/api/queue'))
 		// Clamped into the waiting list's end; the non-waiting item keeps its file position.
 		expect((await clamped.json()).map((item: { id: string }) => item.id)).toEqual(['w1', 'w2', 'w3', 'd1'])
+	})
+
+	test('PATCH applies an edit and a reorder as one queue-module write, and an empty patch writes nothing', async () => {
+		const { handler, queue } = createHandlerHarness({ initialQueueItems: [queueItem('w1', 'original text'), queueItem('w2')] })
+		const edited = await handler(patch('/api/queue/w2', JSON.stringify({ task: 'edited text', position: 0 })))
+		expect(edited.status).toBe(200)
+		expect(queue.writes.length).toBe(1)
+		expect(queue.snapshot().items.map((item) => `${item.id}:${item.task}`)).toEqual(['w2:edited text', 'w1:original text'])
+
+		const empty = await handler(patch('/api/queue/w1', JSON.stringify({})))
+		expect(empty.status).toBe(200)
+		expect(queue.writes.length).toBe(1)
 	})
 
 	test('PATCH rejects a malformed body with 400, an unknown id with 404, and a non-waiting item with 409; an empty patch is a no-op on a waiting item', async () => {
@@ -2176,7 +2242,7 @@ describe('/api/queue', () => {
 	test('POST /:id/answer records the answer, fronts the item, and the tick dispatches it as a continuation of the parked run', async () => {
 		const { handler, submission, lastContinuation, queue, resolveActive } = createHandlerHarness({ initialQueueItems: [
 			queueItem('w1', 'already waiting'),
-			queueItem('n1', 'parked task', { status: 'needs_input', question: 'which database?', continuesFrom: 'run-20260101-000000', runId: 'run-2' }),
+			queueItem('n1', 'parked task', { status: 'needs_input', question: 'which database?', continuesFrom: 'run-20260101-000000', runId: 'run-20260101-000300' }),
 		] })
 		const response = await handler(post('/api/queue/n1/answer', JSON.stringify({ answer: 'postgres' })))
 		expect(response.status).toBe(200)
@@ -2189,14 +2255,14 @@ describe('/api/queue', () => {
 		const items = queue.snapshot().items
 		expect(items[0]?.id).toBe('n1')
 		expect(items[0]?.status).toBe('active')
-		expect(items[0]?.runId).toBe('test-run-0')
+		expect(items[0]?.runId).toBe('run-20260101-090000')
 		const continuation = lastContinuation()
 		expect(continuation?.runId).toBe('run-20260101-000000')
 		expect(continuation?.briefing).toContain('Resuming from your question: which database?')
 		expect(continuation?.briefing).toContain('The operator answered: postgres')
-		expect(submission.activeRunId()).toBe('test-run-0')
+		expect(submission.activeRunId()).toBe('run-20260101-090000')
 
-		resolveActive()(terminalMeta('test-run-0', 'parked task'))
+		resolveActive()(terminalMeta('run-20260101-090000', 'parked task'))
 		await submission.awaitActive()
 	})
 
@@ -2217,24 +2283,24 @@ describe('/api/queue', () => {
 
 	test('POST /:id/requeue returns an error item to waiting at the tail with its lineage re-pointed, and the tick dispatches it', async () => {
 		const { handler, submission, lastContinuation, queue, resolveActive } = createHandlerHarness({ initialQueueItems: [
-			queueItem('e1', 'the failed task', { status: 'error', runId: 'run-2', settledAt: '2026-01-01T00:01:00.000Z' }),
+			queueItem('e1', 'the failed task', { status: 'error', runId: 'run-20260101-000100', settledAt: '2026-01-01T00:01:00.000Z' }),
 		] })
 		const response = await handler(post('/api/queue/e1/requeue'))
 		expect(response.status).toBe(200)
 		const item = await response.json()
 		expect(item.status).toBe('waiting')
 		// The lineage re-points at the errored run, so the retry's continuation briefing carries the failure's outcome summary.
-		expect(item.continuesFrom).toBe('run-2')
+		expect(item.continuesFrom).toBe('run-20260101-000100')
 		const items = queue.snapshot().items
 		expect(items[0]?.id).toBe('e1')
 		expect(items[0]?.status).toBe('active')
 		const continuation = lastContinuation()
-		expect(continuation?.runId).toBe('run-2')
-		expect(continuation?.task).toBe('task for run-2')
-		expect(continuation?.summary).toBe('failed')
-		expect(submission.activeRunId()).toBe('test-run-0')
+		expect(continuation?.runId).toBe('run-20260101-000100')
+		expect(continuation?.task).toBe('task for run-20260101-000100')
+		expect(continuation?.summary).toBe('LLM unavailable: connection refused')
+		expect(submission.activeRunId()).toBe('run-20260101-090000')
 
-		resolveActive()(terminalMeta('test-run-0', 'the failed task'))
+		resolveActive()(terminalMeta('run-20260101-090000', 'the failed task'))
 		await submission.awaitActive()
 	})
 
@@ -2378,7 +2444,7 @@ describe('POST /api/runs/:id/interrupt', () => {
 		expect(terminal.status).toBe(200)
 		expect((await terminal.json()).interruptPending).toBe(false)
 
-		resolveActive()(terminalMeta('test-run-0', 'a task'))
+		resolveActive()(terminalMeta('run-20260101-090000', 'a task'))
 		await submission.awaitActive()
 	})
 
@@ -2394,7 +2460,7 @@ describe('POST /api/runs/:id/resume', () => {
 	const RESUMABLE_RUN = 'run-20260101-000100'
 	const NOTE = 'The operator resumed this run after a failure. Message from the operator: the endpoint is back; carry on'
 
-	function resumeHarness(initialQueueItems: QueueItem[] = []): ReturnType<typeof createHandlerHarness> {
+	function resumeHarness(initialQueueItems: QueueItemView[] = []): ReturnType<typeof createHandlerHarness> {
 		const checkpoints = new Map([[RESUMABLE_RUN, JSON.stringify(resumeCheckpoint(RESUMABLE_RUN))]])
 		return createHandlerHarness({ initialQueueItems, initialCheckpoints: checkpoints })
 	}

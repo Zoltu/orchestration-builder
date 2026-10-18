@@ -10,7 +10,7 @@ import { createFlowFeedResponder } from './web/static/ts/flow-feed/index.js'
 import { createRunListFeedResponder } from './web/static/ts/run-list-feed/index.js'
 import { createStreamHub } from './web/stream-hub.js'
 import { createTaskSummarizer, type TaskSummarizer } from './summarize.js'
-import { applyDeploymentOverride, applyLogLevel, createAppendLog, createBunSubprocessRunner, createDeleteCheckpoint, createDeltaChannel, createDockerSecretReader, createGuildLoader, createInterruptChannel, createInterruptQueue, createLlmCaller, createLlmFetch, createListRunIds, createModelInfoProbe, createPlanToolHandlers, createReadProjectDoc, createReadProjectSettings, createReadQueue, createReadRunCheckpointById, createReadRunLogTextFrom, createReadRunMetaById, createReadRunPlanById, createReadRunSnapshotById, createReadRunSnapshotStats, createReadRunSummaryById, createReadRunSummaryStats, createReadWorkspaceGitState, createResumeErroredRun, createRoleSnapshotStore, createRunBaseTracker, createRunCheckpointExists, createRunDirectory, createRunDirectoryExists, createRunLogToolHandlers, createRunState, createRunSubmission, createSleep, createStyleGuideToolHandlers, createTaskScheduler, createTimeoutScheduler, createToolHandlers, createWebHumanBackend, createWriteCheckpoint, createWriteMeta, createWriteProjectSettings, createWriteQueue, createWriteRunSummary, ensureOrchestrationGitExcluded, entryFrameLogLevel, generateRunId, llmUsagePayload, LOG_FILE_NAME, MODEL_PROBE_TIMEOUT_MS, nodeGitExcludeFilesystem, parseModelInfo, reconcileRunsOnStartup, resolveDeploymentConfig, resolveDeploymentOverride, resolveKagiApiKey, resolveSecret, resumeExecutor, runExecutor, validateDeploymentFileConfig, validateDeploymentRoleReferences, ConfigurationError, ValidationError, type AppendLog, type DeltaChannel, type ExecutorDependencies, type InterruptChannel, type InvolvementLevel, type LoadedGuild, type LlmCaller, type LogLevel, type ModelApiProbe, type ResumeRun, type RunCheckpoint, type StartRun, type WebHumanBackend } from './executor/index.js'
+import { applyDeploymentOverride, applyLogLevel, createAppendLog, createBunSubprocessRunner, createDeleteCheckpoint, createDeltaChannel, createDockerSecretReader, createGuildLoader, createInterruptChannel, createInterruptQueue, createLlmCaller, createLlmFetch, createListRunIds, createModelInfoProbe, createPlanToolHandlers, createReadProjectDoc, createReadProjectSettings, createReadQueueText, createReadRunCheckpointById, createReadRunLogTextFrom, createReadRunMetaById, createReadRunPlanById, createReadRunSnapshotById, createReadRunSnapshotStats, createReadRunSummaryById, createReadRunSummaryStats, createReadWorkspaceGitState, createResumeErroredRun, createRoleSnapshotStore, createRunBaseTracker, createRunCheckpointExists, createRunDirectory, createRunDirectoryExists, createRunLogToolHandlers, createRunState, createRunSubmission, createSleep, createStyleGuideToolHandlers, createTaskQueue, createTimeoutScheduler, createToolHandlers, createWebHumanBackend, createWriteCheckpoint, createWriteMeta, createWriteProjectSettings, createWriteQueueText, createWriteRunSummary, ensureOrchestrationGitExcluded, entryFrameLogLevel, generateRunId, llmUsagePayload, LOG_FILE_NAME, MODEL_PROBE_TIMEOUT_MS, nodeGitExcludeFilesystem, parseModelInfo, reconcileRunsOnStartup, resolveDeploymentConfig, resolveDeploymentOverride, resolveKagiApiKey, resolveSecret, resumeExecutor, runExecutor, validateDeploymentFileConfig, validateDeploymentRoleReferences, ConfigurationError, ValidationError, type AppendLog, type DeltaChannel, type ExecutorDependencies, type InterruptChannel, type InvolvementLevel, type LoadedGuild, type LlmCaller, type LogLevel, type ModelApiProbe, type ResumeRun, type RunCheckpoint, type StartRun, type WebHumanBackend } from './executor/index.js'
 
 const DEPLOYMENT_FILE_ENV_VAR = 'ORCHESTRATOR_DEPLOYMENT_FILE'
 const PORT_ENV_VAR = 'PORT'
@@ -307,9 +307,8 @@ async function serve(): Promise<void> {
 	const listRunIds = createListRunIds(runsBaseDir)
 	const readProjectSettings = createReadProjectSettings(workspaceRootPath)
 	const writeProjectSettings = createWriteProjectSettings(workspaceRootPath)
-	// The durable task queue's leaves (docs/queueing.md "The queue: storage, item model, state machine"): every mutation is an atomic whole-file write, so the queue survives restarts by construction.
-	const readQueue = createReadQueue(workspaceRootPath)
-	const writeQueue = createWriteQueue(workspaceRootPath)
+	// The durable task queue's text-only store (docs/queueing.md "The queue: storage, item model, state machine"): the module owns the JSON shape and the write leaf replaces the file atomically, so every mutation survives restarts by construction.
+	const queueStore = { read: createReadQueueText(workspaceRootPath), write: createWriteQueueText(workspaceRootPath) }
 	// The raw whole-file reader stays outside the per-poll path: the summarizer reads a finished run's whole log once per completion, which the snapshot cache (shaped for per-second polling) does not serve.
 	const readRawSnapshot = createReadRunSnapshotById(runsBaseDir)
 	const summarizer = createTaskSummarizer({
@@ -337,7 +336,7 @@ async function serve(): Promise<void> {
 	// The checkpoint reader serves startup reconciliation and the explicit error-resume submission alike; the exists-check is the cheap stat-only variant the run view's resumable flag reads.
 	const readRunCheckpointById = createReadRunCheckpointById(runsBaseDir)
 	const runCheckpointExists = createRunCheckpointExists(runsBaseDir)
-	// The settlement hook and the scheduler reference each other (a settlement ticks the scheduler; the scheduler's dispatch calls submission), so each closure captures the other's binding lazily — neither fires before both are constructed.
+	// The settlement hook and the queue module reference each other (a settlement ticks the queue; the queue's dispatch calls submission), so each closure captures the other's binding lazily — neither fires before both are constructed.
 	const runSubmission = createRunSubmission({
 		startRun,
 		resumeRun,
@@ -346,19 +345,11 @@ async function serve(): Promise<void> {
 		readProjectSettings,
 		deploymentInvolvement,
 		deploymentLogLevel,
-		onRunSettled: (meta) => scheduler.onRunSettled(meta),
+		onRunSettled: (meta) => taskQueue.onRunSettled(meta),
 	})
-	// The explicit resume of an error-ended run composes the same submission layer (and thereby the same run bindings, through resumeRun) with the run/checkpoint/queue leaves it validates against.
-	const resumeErroredRun = createResumeErroredRun({
-		runSubmission,
-		readRunMetaById,
-		readCheckpointById: readRunCheckpointById,
-		readQueue,
-		writeQueue,
-	})
-	const scheduler = createTaskScheduler({
-		readQueue,
-		writeQueue,
+	// The queue module owns the durable state machine, dispatch, settlement, and queue persistence; the composition root supplies only its configured leaves.
+	const taskQueue = createTaskQueue({
+		queueStore,
 		readRunMetaById,
 		listRunIds,
 		readRunListSummary,
@@ -366,6 +357,13 @@ async function serve(): Promise<void> {
 		hasActiveRun: () => runSubmission.activeRunId() !== undefined,
 		sleep: createSleep(),
 		now: () => new Date().toISOString(),
+	})
+	// The explicit resume of an error-ended run composes the same submission layer (and thereby the same run bindings, through resumeRun) with the run/checkpoint/queue operations it validates against.
+	const resumeErroredRun = createResumeErroredRun({
+		runSubmission,
+		readRunMetaById,
+		readCheckpointById: readRunCheckpointById,
+		taskQueue,
 	})
 
 	// Startup reconciliation runs before the server accepts submissions: a run left mid-flight by the previous process resumes from its checkpoint (under its original run id, through the same single-active-run slot), and every run that cannot be resumed is marked interrupted so the UI shows it as terminal rather than perpetually "in progress".
@@ -384,7 +382,7 @@ async function serve(): Promise<void> {
 	}
 
 	// Boot order (docs/queueing.md "Dispatch and the scheduler"): reconciliation first, then exactly one scheduler tick. The tick repairs stale active items from their metas and dispatches the head waiting item — unless the resumed run holds the slot, in which case the dispatch restores the head and the resumed run's own settlement ticks onward.
-	await scheduler.tick()
+	await taskQueue.tick()
 
 	// The flow feed responders are process-local: the random epoch makes every revision this process issues distinct from a previous process's, so a browser holding a pre-restart revision is forced to resync by snapshot rather than reading a stale `unchanged`.
 	const flowFeedResponder = createFlowFeedResponder({ epoch: crypto.randomUUID(), historyLimit: FLOW_REPLICA_HISTORY_LIMIT, maxRuns: FLOW_REPLICA_MAX_RUNS })
@@ -408,11 +406,9 @@ async function serve(): Promise<void> {
 		listRunIds,
 		readProjectSettings,
 		writeProjectSettings,
-		readQueue,
-		writeQueue,
+		taskQueue,
 		resumeErroredRun,
 		runCheckpointExists,
-		tickScheduler: () => scheduler.tick(),
 		build: buildInfo,
 		flowFeedResponder,
 		runListFeedResponder,
@@ -425,7 +421,7 @@ async function serve(): Promise<void> {
 	])
 
 	// Once shutdown begins, the scheduler's gate still maps settled items but starts no new run: a run finishing inside the drain would otherwise tick a fresh dispatch that the process then abandons at exit 130 — the durable head item simply dispatches on the next boot's tick (docs/queueing.md "Dispatch and the scheduler").
-	scheduler.observeShutdown()
+	taskQueue.observeShutdown()
 
 	if (reason.kind === 'fatal') {
 		await runSubmission.awaitActive()

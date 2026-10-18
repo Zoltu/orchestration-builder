@@ -57,11 +57,24 @@ export type { DeltaChannel, DeltaField, DeltaSubscriber, RoleDelta, RunDelta } f
 export { createRunSubmission, createResumeErroredRun } from './run-submission.js'
 export type { ResumeErroredRun, ResumeErroredRunDependencies, ResumeErroredRunRejection, ResumeErroredRunResult, ResumeRun, RunSubmission, RunSubmissionDependencies, StartRun, SubmitResult } from './run-submission.js'
 
-export { createTaskScheduler, COLLISION_RETRY_DELAY_MS, MAX_COLLISION_RETRIES } from './scheduler.js'
-export type { QueuedRunSubmission, SubmitQueuedRun, TaskScheduler, TaskSchedulerDependencies } from './scheduler.js'
-
-export { isQueueItem, isTaskQueue, normalizeNewItem, enqueueAtTail, enqueueAtHead, reorderWaitingItem, cancelWaitingItem, removeWaitingItem, requireWaitingItem, editWaitingItem, recordAnswer, requeueErrorItem, reactivateErrorItem, releaseToWaiting, dispatchingItem, withReplacedItem, mapSettledItemState, settleActiveItem, repairActiveItem, assembleBriefingLines, MAX_BRIEFING_RUN_LINES } from './task-queue.js'
-export type { ActiveItemRepair, BriefingInput, NewQueueItemResult, QueueItem, QueueItemStatus, QueueMutation, QueueMutationRejection, RunListEntry, SettlementOutcome, TaskQueue, TerminalItemState } from './task-queue.js'
+export { createTaskQueue } from './queue/index.js'
+export type {
+	QueueEnqueueOutcome,
+	QueueHandles,
+	QueueItemView,
+	QueueMutationOutcome,
+	QueuePatchInput,
+	QueuePlacement,
+	QueueSubmitOutcome,
+	QueueStore,
+	QueueView,
+	QueuedRunSubmission,
+	QueuedRunSubmitResult,
+	RunListEntry,
+	SubmitQueuedRun,
+	TaskQueueDependencies,
+	TaskQueueModule,
+} from './queue/index.js'
 
 export { createRunParkTracker, isWriteCapableRole, parkCard, parkSummary, questionFromParkSummary, PARK_SUMMARY_PREFIX, WRITE_CAPABLE_TOOL_NAMES } from './park-state.js'
 export type { RunParkTracker } from './park-state.js'
@@ -123,8 +136,8 @@ export {
 	createListRunIds,
 	createReadProjectSettings,
 	createWriteProjectSettings,
-	createReadQueue,
-	createWriteQueue,
+	createReadQueueText,
+	createWriteQueueText,
 	LOG_FILE_NAME,
 } from './persistence.js'
 export type {
@@ -152,8 +165,6 @@ export type {
 	ProjectSettings,
 	ReadProjectSettings,
 	WriteProjectSettings,
-	ReadTaskQueue,
-	WriteTaskQueue,
 } from './persistence.js'
 
 export type { DeploymentConfig, DeploymentFileConfig, LoggingConfig, ModelConfig, ResolvedModelConfig, RunContinuation, RunOptions, RunMeta, ResultCard, EffortLevel, InvolvementLevel } from './types.js'

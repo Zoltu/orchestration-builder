@@ -1,8 +1,8 @@
-import type { ListRunIds, ProjectSettings, ReadProjectSettings, ReadRunMetaById, ReadRunPlanById, ReadRunSnapshotStats, ReadTaskQueue, RunCheckpointExists, WriteProjectSettings, WriteTaskQueue } from '../executor/persistence.js'
+import type { ListRunIds, ProjectSettings, ReadProjectSettings, ReadRunMetaById, ReadRunPlanById, ReadRunSnapshotStats, RunCheckpointExists, WriteProjectSettings } from '../executor/persistence.js'
 import { isRunIdShape } from '../executor/run-id.js'
 import type { DeploymentConfig, EffortLevel, GuildConfig, InvolvementLevel, LogLevel, ToolManifest } from '../executor/types.js'
 import { isEffortLevel, isInvolvementLevel, isLogLevel, isObject, isTerminalRunStatus } from '../executor/validation.js'
-import { cancelWaitingItem, editWaitingItem, enqueueAtHead, enqueueAtTail, normalizeNewItem, recordAnswer, removeWaitingItem, reorderWaitingItem, requireWaitingItem, requeueErrorItem, type QueueItem, type QueueMutation } from '../executor/task-queue.js'
+import type { QueueMutationOutcome, TaskQueueModule } from '../executor/queue/index.js'
 import type { RunState } from '../executor/run-state.js'
 import type { ResumeErroredRun, RunSubmission } from '../executor/run-submission.js'
 import { formatLogAsText, formatLogDetailSections } from '../run-log/format/index.js'
@@ -39,15 +39,12 @@ export interface RequestHandlerConfig {
 	listRunIds: ListRunIds
 	readProjectSettings: ReadProjectSettings
 	writeProjectSettings: WriteProjectSettings
-	// The durable task queue's leaves (docs/queueing.md "The queue: storage, item model, state machine"): every /api/queue mutation is a whole-file read-modify-write through these.
-	readQueue: ReadTaskQueue
-	writeQueue: WriteTaskQueue
+	// The durable task queue module (docs/queueing.md "The queue: storage, item model, state machine"): every /api/queue mutation and the POST /api/runs dispatch go through its contract, so the scheduler's crash-safety ordering is never bypassed by a handler.
+	taskQueue: TaskQueueModule
 	// The explicit resume of an error-ended run (docs/queueing.md "Resume of an errored run"), composed in serve.ts over the submission layer and the run/checkpoint/queue leaves.
 	resumeErroredRun: ResumeErroredRun
 	// The bare existence check behind the run view's resumable flag: one stat per run-view request.
 	runCheckpointExists: RunCheckpointExists
-	// The scheduler's tick: queue mutations that could find the slot free (enqueue, answer, requeue) and the idle POST /api/runs path dispatch through it, so a free slot never sits idle behind a waiting item.
-	tickScheduler: () => Promise<void>
 	// The baked image build identifier, read once at startup (null without a baked build-info); surfaced through GET /api/config.
 	build: BuildInfo | null
 	// The flow endpoint's entity-diff responder: a per-run server replica (see flow-feed) answers the base flow route with `unchanged`/`delta`/`snapshot` instead of re-sending the whole model each poll.
@@ -304,7 +301,7 @@ function handleInterrupt(runState: RunState, runSubmission: RunSubmission, runId
 }
 
 // POST /api/runs keeps today's external contract exactly (docs/queueing.md "HTTP API") while every run becomes queue-tracked: the validated task is enqueued at the head of the durable queue and the scheduler — the only caller of submission — dispatches it within the same request when the slot is free, so the response is still 201 { runId }. The request's effort, involvement, logLevel, and continuesFrom are recorded on the item and thread into the dispatched run. When a run is in flight the request is refused with nothing enqueued, exactly today's 409.
-async function handleCreateRun(runSubmission: RunSubmission, readRunMetaById: ReadRunMetaById, readQueue: ReadTaskQueue, writeQueue: WriteTaskQueue, tickScheduler: () => Promise<void>, body: unknown): Promise<Response> {
+async function handleCreateRun(taskQueue: TaskQueueModule, readRunMetaById: ReadRunMetaById, body: unknown): Promise<Response> {
 	if (!isObject(body)) return json({ ok: false, error: 'invalid_body' }, 400)
 	const continuesFromValue = body['continuesFrom']
 	if (continuesFromValue !== undefined && !isRunIdShape(continuesFromValue)) return json({ ok: false, error: 'invalid_body' }, 400)
@@ -325,24 +322,14 @@ async function handleCreateRun(runSubmission: RunSubmission, readRunMetaById: Re
 	const logLevelValue = body['logLevel']
 	if (logLevelValue !== undefined && !isLogLevel(logLevelValue)) return json({ ok: false, error: 'invalid_body' }, 400)
 	const logLevelOverride: LogLevel | undefined = logLevelValue
-	// Checked before enqueueing so a busy service enqueues nothing, exactly as the 409 contract promises scripts.
-	if (runSubmission.activeRunId() !== undefined) return json({ ok: false, error: 'run_in_progress' }, 409)
-	const normalized = normalizeNewItem(
+	const result = await taskQueue.submitNow(
 		{ task, ...(effortOverride !== undefined ? { effort: effortOverride } : {}), ...(involvementOverride !== undefined ? { involvement: involvementOverride } : {}), ...(logLevelOverride !== undefined ? { logLevel: logLevelOverride } : {}), ...(continuesFromValue !== undefined ? { continuesFrom: continuesFromValue } : {}) },
 		{ id: crypto.randomUUID(), queuedAt: new Date().toISOString() },
 	)
-	// Unreachable for a well-formed prior meta; a prior meta whose task text is itself empty (a hand-edited file) is refused here instead of dispatching a taskless run.
-	if (!normalized.ok) return json({ ok: false, error: 'invalid_body' }, 400)
-	writeQueue(enqueueAtHead(readQueue(), normalized.item))
-	await tickScheduler()
-	const dispatched = readQueue().items.find((item) => item.id === normalized.item.id)
-	if (dispatched !== undefined && dispatched.runId !== undefined) return json({ runId: dispatched.runId }, 201)
-	// The dispatch did not take. A same-second collision retry that overlapped another request's dispatch can land here with the item restored waiting while a run is in flight: the loser's item stays queued at the head (the scheduler's rules dispatch it when the active run settles) and today's run_in_progress stands. A collision that exhausted the scheduler's retry budget leaves a waiting item with no run behind it — removed (only then), so the caller's resubmit behaves exactly as it does today.
-	if (runSubmission.activeRunId() !== undefined || dispatched === undefined || dispatched.status !== 'waiting') return json({ ok: false, error: 'run_in_progress' }, 409)
-	const removal = removeWaitingItem(readQueue(), normalized.item.id)
-	if (!removal.ok) return json({ ok: false, error: 'run_in_progress' }, 409)
-	writeQueue(removal.queue)
-	return json({ ok: false, error: 'run_id_collision' }, 409)
+	if (result.kind === 'invalid') return json({ ok: false, error: 'invalid_body' }, 400)
+	if (result.kind === 'busy') return json({ ok: false, error: 'run_in_progress' }, 409)
+	if (result.kind === 'collision') return json({ ok: false, error: 'run_id_collision' }, 409)
+	return json({ runId: result.runId }, 201)
 }
 
 // POST /api/runs/:id/resume carries an optional note, so unlike the other POST bodies an absent body is valid: an empty request body (no JSON at all) means "no note", while a present but unparseable body is malformed. A JSON null body reads as absent too.
@@ -376,28 +363,26 @@ function handleResumeErroredRun(resumeErroredRun: ResumeErroredRun, runId: strin
 // --- /api/queue (docs/queueing.md "HTTP API") --------------------------------
 
 // Maps a by-id queue transformation's refusal to the shared error semantics: an unknown id is 404, a status-forbidden operation is 409.
-function queueMutationResponse(result: QueueMutation): Response {
+function queueMutationResponse(result: QueueMutationOutcome): Response {
 	if (result.ok) return json(result.item)
 	if (result.reason === 'not_found') return json({ ok: false, error: 'not_found' }, 404)
 	return json({ ok: false, error: 'status_forbidden' }, 409)
 }
 
-function handleGetQueue(readQueue: ReadTaskQueue): Response {
-	return json(readQueue().items)
+function handleGetQueue(taskQueue: TaskQueueModule): Response {
+	return json(taskQueue.read().items)
 }
 
 // POST /api/queue always enqueues at the tail — never 409 — and ticks the scheduler, so an idle system dispatches the new task within the same request. Only task, effort, and involvement are read from the body: a queue-native item's logLevel resolves through the standard chain at dispatch (docs/queueing.md "The queue: storage, item model, state machine"), and other fields are lineage or outcome bookkeeping the platform owns.
-async function handleEnqueueTask(readQueue: ReadTaskQueue, writeQueue: WriteTaskQueue, tickScheduler: () => Promise<void>, body: unknown): Promise<Response> {
+async function handleEnqueueTask(taskQueue: TaskQueueModule, body: unknown): Promise<Response> {
 	if (!isObject(body)) return json({ ok: false, error: 'invalid_body' }, 400)
-	const normalized = normalizeNewItem({ task: body['task'], effort: body['effort'], involvement: body['involvement'] }, { id: crypto.randomUUID(), queuedAt: new Date().toISOString() })
-	if (!normalized.ok) return json({ ok: false, error: 'invalid_body' }, 400)
-	writeQueue(enqueueAtTail(readQueue(), normalized.item))
-	await tickScheduler()
-	return json(normalized.item, 201)
+	const result = await taskQueue.enqueue({ task: body['task'], effort: body['effort'], involvement: body['involvement'] }, { id: crypto.randomUUID(), queuedAt: new Date().toISOString() }, 'tail')
+	if (!result.ok) return json({ ok: false, error: 'invalid_body' }, 400)
+	return json(result.item, 201)
 }
 
 // PATCH edits task/effort/involvement and/or moves the item to a clamped 0-based position in the waiting list; waiting items only.
-function handlePatchQueueItem(readQueue: ReadTaskQueue, writeQueue: WriteTaskQueue, itemId: string, body: unknown): Response {
+function handlePatchQueueItem(taskQueue: TaskQueueModule, itemId: string, body: unknown): Response {
 	if (!isObject(body)) return json({ ok: false, error: 'invalid_body' }, 400)
 	const taskValue = body['task']
 	if (taskValue !== undefined && (typeof taskValue !== 'string' || taskValue === '')) return json({ ok: false, error: 'invalid_body' }, 400)
@@ -411,55 +396,29 @@ function handlePatchQueueItem(readQueue: ReadTaskQueue, writeQueue: WriteTaskQue
 	const positionValue = body['position']
 	if (positionValue !== undefined && !isQueuePosition(positionValue)) return json({ ok: false, error: 'invalid_body' }, 400)
 	const position: number | undefined = positionValue
-	let queue = readQueue()
-	let item: QueueItem | undefined
-	if (task !== undefined || effort !== undefined || involvement !== undefined) {
-		const edited = editWaitingItem(queue, itemId, { ...(task !== undefined ? { task } : {}), ...(effort !== undefined ? { effort } : {}), ...(involvement !== undefined ? { involvement } : {}) })
-		if (!edited.ok) return queueMutationResponse(edited)
-		queue = edited.queue
-		item = edited.item
-	}
-	if (position !== undefined) {
-		const reordered = reorderWaitingItem(queue, itemId, position)
-		if (!reordered.ok) return queueMutationResponse(reordered)
-		queue = reordered.queue
-		item = reordered.item
-	}
-	if (item === undefined) {
-		// An empty patch is a no-op that still addresses a real waiting item, so existence and status are validated without writing anything.
-		const required = requireWaitingItem(queue, itemId)
-		if (!required.ok) return queueMutationResponse(required)
-		return json(required.item)
-	}
-	writeQueue(queue)
-	return json(item)
+	const result = taskQueue.patch(itemId, {
+		...(task !== undefined ? { task } : {}),
+		...(effort !== undefined ? { effort } : {}),
+		...(involvement !== undefined ? { involvement } : {}),
+		...(position !== undefined ? { position } : {}),
+	})
+	return queueMutationResponse(result)
 }
 
-function handleDeleteQueueItem(readQueue: ReadTaskQueue, writeQueue: WriteTaskQueue, itemId: string): Response {
-	const result = cancelWaitingItem(readQueue(), itemId, new Date().toISOString())
-	if (!result.ok) return queueMutationResponse(result)
-	writeQueue(result.queue)
-	return json(result.item)
+function handleDeleteQueueItem(taskQueue: TaskQueueModule, itemId: string): Response {
+	return queueMutationResponse(taskQueue.cancel(itemId, new Date().toISOString()))
 }
 
 // The queue-native resume: the answer moves the needs_input item to the front of the waiting list and the tick dispatches it as a continuation of the parked run.
-async function handleAnswerQueueItem(readQueue: ReadTaskQueue, writeQueue: WriteTaskQueue, tickScheduler: () => Promise<void>, itemId: string, body: unknown): Promise<Response> {
+async function handleAnswerQueueItem(taskQueue: TaskQueueModule, itemId: string, body: unknown): Promise<Response> {
 	if (!isObject(body)) return json({ ok: false, error: 'invalid_body' }, 400)
 	const answerValue = body['answer']
 	if (typeof answerValue !== 'string') return json({ ok: false, error: 'invalid_body' }, 400)
-	const result = recordAnswer(readQueue(), itemId, answerValue)
-	if (!result.ok) return queueMutationResponse(result)
-	writeQueue(result.queue)
-	await tickScheduler()
-	return json(result.item)
+	return queueMutationResponse(await taskQueue.answer(itemId, answerValue))
 }
 
-async function handleRequeueQueueItem(readQueue: ReadTaskQueue, writeQueue: WriteTaskQueue, tickScheduler: () => Promise<void>, itemId: string): Promise<Response> {
-	const result = requeueErrorItem(readQueue(), itemId)
-	if (!result.ok) return queueMutationResponse(result)
-	writeQueue(result.queue)
-	await tickScheduler()
-	return json(result.item)
+async function handleRequeueQueueItem(taskQueue: TaskQueueModule, itemId: string): Promise<Response> {
+	return queueMutationResponse(await taskQueue.requeue(itemId))
 }
 
 // The PATCH position is a 0-based index into the waiting list (out-of-range values clamp server-side), so it must be a real JSON number — a numeric string or a fraction is a malformed body, not a position.
@@ -498,11 +457,9 @@ export function createRequestHandler(config: RequestHandlerConfig, serveStatic: 
 	const listRunIds = config.listRunIds
 	const readProjectSettings = config.readProjectSettings
 	const writeProjectSettings = config.writeProjectSettings
-	const readQueue = config.readQueue
-	const writeQueue = config.writeQueue
+	const taskQueue = config.taskQueue
 	const resumeErroredRun = config.resumeErroredRun
 	const runCheckpointExists = config.runCheckpointExists
-	const tickScheduler = config.tickScheduler
 	const flowFeedResponder = config.flowFeedResponder
 	const runListFeedResponder = config.runListFeedResponder
 
@@ -530,7 +487,7 @@ export function createRequestHandler(config: RequestHandlerConfig, serveStatic: 
 
 		if (request.method === 'GET') {
 			if (pathname === '/api/config') return json(renderConfig(guildConfig, deployment, config.tools, config.build))
-			if (pathname === '/api/queue') return handleGetQueue(readQueue)
+			if (pathname === '/api/queue') return handleGetQueue(taskQueue)
 			if (pathname === '/api/settings') return handleGetSettings(readProjectSettings)
 			if (pathname === '/api/run/flow') return handleActiveRunFlow(readRunSnapshot, readRunSnapshotStats, flowFeedResponder, runSubmission, url.searchParams)
 			if (pathname === '/api/run') return handleActiveRun(readRunSnapshot, readRunSnapshotStats, readRunPlanById, runCheckpointExists, runSubmission, runState)
@@ -573,12 +530,12 @@ export function createRequestHandler(config: RequestHandlerConfig, serveStatic: 
 			if (pathname === '/api/runs') {
 				const body = await readJsonBody(request)
 				if (body === undefined) return json({ ok: false, error: 'invalid_body' }, 400)
-				return handleCreateRun(runSubmission, readRunMetaById, readQueue, writeQueue, tickScheduler, body)
+				return handleCreateRun(taskQueue, readRunMetaById, body)
 			}
 			if (pathname === '/api/queue') {
 				const body = await readJsonBody(request)
 				if (body === undefined) return json({ ok: false, error: 'invalid_body' }, 400)
-				return handleEnqueueTask(readQueue, writeQueue, tickScheduler, body)
+				return handleEnqueueTask(taskQueue, body)
 			}
 			if (pathname.startsWith('/api/queue/')) {
 				const rest = decodePathSegment(pathname.slice('/api/queue/'.length))
@@ -587,12 +544,12 @@ export function createRequestHandler(config: RequestHandlerConfig, serveStatic: 
 					if (itemId !== '' && !itemId.includes('/')) {
 						const body = await readJsonBody(request)
 						if (body === undefined) return json({ ok: false, error: 'invalid_body' }, 400)
-						return handleAnswerQueueItem(readQueue, writeQueue, tickScheduler, itemId, body)
+						return handleAnswerQueueItem(taskQueue, itemId, body)
 					}
 				}
 				if (rest !== undefined && rest.endsWith('/requeue')) {
 					const itemId = rest.slice(0, rest.length - '/requeue'.length)
-					if (itemId !== '' && !itemId.includes('/')) return handleRequeueQueueItem(readQueue, writeQueue, tickScheduler, itemId)
+					if (itemId !== '' && !itemId.includes('/')) return handleRequeueQueueItem(taskQueue, itemId)
 				}
 			}
 			if (pathname.startsWith('/api/runs/') && pathname.endsWith('/interrupt')) {
@@ -623,7 +580,7 @@ export function createRequestHandler(config: RequestHandlerConfig, serveStatic: 
 				if (itemId === undefined || itemId === '' || itemId.includes('/')) return json({ ok: false, error: 'not_found' }, 404)
 				const body = await readJsonBody(request)
 				if (body === undefined) return json({ ok: false, error: 'invalid_body' }, 400)
-				return handlePatchQueueItem(readQueue, writeQueue, itemId, body)
+				return handlePatchQueueItem(taskQueue, itemId, body)
 			}
 		}
 
@@ -631,7 +588,7 @@ export function createRequestHandler(config: RequestHandlerConfig, serveStatic: 
 			if (pathname.startsWith('/api/queue/')) {
 				const itemId = decodePathSegment(pathname.slice('/api/queue/'.length))
 				if (itemId === undefined || itemId === '' || itemId.includes('/')) return json({ ok: false, error: 'not_found' }, 404)
-				return handleDeleteQueueItem(readQueue, writeQueue, itemId)
+				return handleDeleteQueueItem(taskQueue, itemId)
 			}
 		}
 

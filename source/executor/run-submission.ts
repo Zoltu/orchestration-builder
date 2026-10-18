@@ -4,8 +4,7 @@ import { DEFAULT_INVOLVEMENT } from './involvement.js'
 import { DEFAULT_LOG_LEVEL } from './log-level.js'
 import { isRunMeta, safeJsonParse } from './validation.js'
 import type { EffortLevel, InvolvementLevel, LogLevel, RunContinuation, RunMeta } from './types.js'
-import type { ReadProjectSettings, ReadRunCheckpointById, ReadRunMetaById, ReadTaskQueue, RunDirectoryExists, WriteTaskQueue } from './persistence.js'
-import { reactivateErrorItem } from './task-queue.js'
+import type { ReadProjectSettings, ReadRunCheckpointById, ReadRunMetaById, RunDirectoryExists } from './persistence.js'
 
 // Every fresh run is started through submit, and submit is called only by the scheduler's dispatch path (the queue is universal — docs/queueing.md "Dispatch and the scheduler"), so the submission layer marks every started run queue-tracked: the bit that gates the pre-write park (docs/queueing.md "Parking: the pre-write rule"). The mark does not survive a restart (it does not ride the checkpoint), so a boot-resumed run keeps today's blocking ask behavior.
 export type StartRun = (runId: string, task: string, effort: EffortLevel, involvement: InvolvementLevel, logLevel: LogLevel, continuation: RunContinuation | undefined, queueTracked: boolean) => Promise<RunMeta>
@@ -140,13 +139,17 @@ export type ResumeErroredRunResult =
 	| { ok: true; runId: string }
 	| { ok: false; error: ResumeErroredRunRejection }
 
+export interface ResumeErroredRunQueue {
+	reactivateErrorItem(runId: string): void
+}
+
 export interface ResumeErroredRunDependencies {
 	// The same single-slot submission layer every other run goes through: the resumed run occupies the slot under its own id, and its settlement ticks the scheduler exactly as a submitted run's would.
 	runSubmission: RunSubmission
 	readRunMetaById: ReadRunMetaById
 	readCheckpointById: ReadRunCheckpointById
-	readQueue: ReadTaskQueue
-	writeQueue: WriteTaskQueue
+	// The queue module's re-activation operation: the settled error item returns to the active slot under the resumed run id before the resume starts.
+	taskQueue: ResumeErroredRunQueue
 }
 
 export type ResumeErroredRun = (runId: string, note: string | undefined) => ResumeErroredRunResult
@@ -168,8 +171,7 @@ export function createResumeErroredRun(dependencies: ResumeErroredRunDependencie
 		// The directory name is the run's identity; a checkpoint naming a different run id is treated as corrupt, exactly as startup reconciliation treats one (a corrupt checkpoint is no checkpoint — the briefed continuation is the fallback).
 		if (checkpoint === null || checkpoint.runId !== runId) return { ok: false, error: 'checkpoint_missing' }
 		// The settled item returns to the active slot before the resume starts, in the same marker-then-submit order the dispatch path uses: the slot is filled synchronously by resume, so no scheduler tick can observe the item active against a still-error meta. A run with no matching error item (its record was requeued or cancelled) resumes regardless — the queue record does not gate the run.
-		const reactivation = reactivateErrorItem(dependencies.readQueue(), runId)
-		if (reactivation.ok) dependencies.writeQueue(reactivation.queue)
+		dependencies.taskQueue.reactivateErrorItem(runId)
 		dependencies.runSubmission.resume(checkpoint, note === undefined ? undefined : `${RESUME_NOTE_PREFIX}${note}`)
 		return { ok: true, runId: checkpoint.runId }
 	}

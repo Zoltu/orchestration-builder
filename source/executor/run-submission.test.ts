@@ -6,7 +6,7 @@ import type { ReadProjectSettings, ReadRunCheckpointById, ReadRunMetaById, RunDi
 import { DEFAULT_EFFORT } from './effort.ts'
 import { DEFAULT_INVOLVEMENT } from './involvement.ts'
 import { createResumeErroredRun, createRunSubmission, type ResumeErroredRunDependencies, type ResumeRun, type RunSubmission, type StartRun } from './run-submission.ts'
-import type { QueueItem, TaskQueue } from './task-queue.ts'
+import { createTaskQueue, type QueueItemView, type QueueView, type TaskQueueModule } from './queue/index.ts'
 import { defined, flushMicrotasks } from './test-fixtures.ts'
 
 function sampleMeta(runId: string): RunMeta {
@@ -272,15 +272,15 @@ describe('createRunSubmission resume', () => {
 	}
 
 	test('resume takes the active slot under the checkpoint run id and resolves awaitActive with the meta', async () => {
-		const checkpoint = sampleCheckpoint('run-9')
-		const resumeRun: ResumeRun = async () => sampleMeta('run-9')
+		const checkpoint = sampleCheckpoint('run-20260101-000009')
+		const resumeRun: ResumeRun = async () => sampleMeta('run-20260101-000009')
 		const submission = createRunSubmission({ onRunSettled: settleNothing, startRun: unusedStartRun, resumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings, runDirectoryExists: emptyRunsDir })
 
 		submission.resume(checkpoint)
 
-		expect(submission.activeRunId()).toBe('run-9')
-		expect(submission.lastRunId()).toBe('run-9')
-		expect(await submission.awaitActive()).toEqual(sampleMeta('run-9'))
+		expect(submission.activeRunId()).toBe('run-20260101-000009')
+		expect(submission.lastRunId()).toBe('run-20260101-000009')
+		expect(await submission.awaitActive()).toEqual(sampleMeta('run-20260101-000009'))
 		expect(submission.activeRunId()).toBeUndefined()
 	})
 
@@ -291,10 +291,10 @@ describe('createRunSubmission resume', () => {
 		})
 		const submission = createRunSubmission({ onRunSettled: settleNothing, startRun: unusedStartRun, resumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings, runDirectoryExists: emptyRunsDir })
 
-		submission.resume(sampleCheckpoint('run-9'))
+		submission.resume(sampleCheckpoint('run-20260101-000009'))
 
 		expect(submission.submit('new task')).toEqual({ ok: false, error: 'run_in_progress' })
-		resolveResume(sampleMeta('run-9'))
+		resolveResume(sampleMeta('run-20260101-000009'))
 		await submission.awaitActive()
 		expect(submission.submit('new task')).toEqual({ ok: true, runId: 'run-1' })
 	})
@@ -308,7 +308,7 @@ describe('createRunSubmission resume', () => {
 
 		submission.submit('do it')
 
-		expect(() => submission.resume(sampleCheckpoint('run-9'))).toThrow()
+		expect(() => submission.resume(sampleCheckpoint('run-20260101-000009'))).toThrow()
 		resolveRun(sampleMeta('run-1'))
 		await submission.awaitActive()
 	})
@@ -317,28 +317,28 @@ describe('createRunSubmission resume', () => {
 		const resumeRun: ResumeRun = () => Promise.reject(new Error('checkpoint unreadable'))
 		const submission = createRunSubmission({ onRunSettled: settleNothing, startRun: unusedStartRun, resumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings, runDirectoryExists: emptyRunsDir })
 
-		submission.resume(sampleCheckpoint('run-9'))
+		submission.resume(sampleCheckpoint('run-20260101-000009'))
 
 		const fatal = await submission.awaitFatalError()
 		expect(fatal.message).toBe('checkpoint unreadable')
 		expect(await submission.awaitActive()).toBeUndefined()
 		expect(submission.activeRunId()).toBeUndefined()
-		expect(submission.lastRunId()).toBe('run-9')
+		expect(submission.lastRunId()).toBe('run-20260101-000009')
 	})
 
 	test('resume threads the operator note through to resumeRun, and no note when none is given', async () => {
 		const notes: Array<string | undefined> = []
 		const resumeRun: ResumeRun = async (_checkpoint, resumeNote) => {
 			notes.push(resumeNote)
-			return sampleMeta('run-9')
+			return sampleMeta('run-20260101-000009')
 		}
 		const submission = createRunSubmission({ onRunSettled: settleNothing, startRun: unusedStartRun, resumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings, runDirectoryExists: emptyRunsDir })
 
-		submission.resume(sampleCheckpoint('run-9'), 'The operator resumed this run after a failure. Message from the operator: try again')
+		submission.resume(sampleCheckpoint('run-20260101-000009'), 'The operator resumed this run after a failure. Message from the operator: try again')
 		await submission.awaitActive()
 		expect(notes).toEqual(['The operator resumed this run after a failure. Message from the operator: try again'])
 
-		submission.resume(sampleCheckpoint('run-9'))
+		submission.resume(sampleCheckpoint('run-20260101-000009'))
 		await submission.awaitActive()
 		expect(notes[1]).toBeUndefined()
 	})
@@ -399,7 +399,7 @@ describe('createRunSubmission settlement hook', () => {
 
 	test('onRunSettled fires exactly once when a resumed run settles', async () => {
 		const settled: RunMeta[] = []
-		const resumeRun: ResumeRun = async () => sampleMeta('run-9')
+		const resumeRun: ResumeRun = async () => sampleMeta('run-20260101-000009')
 		const submission = createRunSubmission({
 			startRun: unusedStartRun,
 			resumeRun,
@@ -411,10 +411,10 @@ describe('createRunSubmission settlement hook', () => {
 			},
 		})
 
-		submission.resume(resumeCheckpoint('run-9'))
+		submission.resume(resumeCheckpoint('run-20260101-000009'))
 		await submission.awaitActive()
 
-		expect(settled).toEqual([sampleMeta('run-9')])
+		expect(settled).toEqual([sampleMeta('run-20260101-000009')])
 	})
 
 	test('onRunSettled never fires on the rejection branch — a rejected run promise is the fatal teardown path', async () => {
@@ -701,16 +701,53 @@ describe('createResumeErroredRun', () => {
 		}
 	}
 
-	// An in-memory queue store standing in for the filesystem leaves.
-	function createQueueStore(initial: QueueItem[] = []): { readQueue: () => TaskQueue; writeQueue: (queue: TaskQueue) => void; snapshot: () => TaskQueue } {
-		let current: TaskQueue = { items: [...initial] }
+	function isQueueItemShape(value: unknown): value is QueueItemView {
+		if (typeof value !== 'object' || value === null) return false
+		if (!('id' in value) || typeof value.id !== 'string') return false
+		if (!('task' in value) || typeof value.task !== 'string') return false
+		if (!('status' in value) || typeof value.status !== 'string') return false
+		if (!('queuedAt' in value) || typeof value.queuedAt !== 'string') return false
+		return true
+	}
+
+	function parseQueueText(text: string | null): QueueView {
+		if (text === null) return { items: [] }
+		const parsed: unknown = JSON.parse(text)
+		if (typeof parsed !== 'object' || parsed === null) throw new Error('the fake queue store holds a malformed queue')
+		if (!('items' in parsed) || !Array.isArray(parsed.items) || !parsed.items.every(isQueueItemShape)) throw new Error('the fake queue store holds a malformed queue')
+		return { items: parsed.items }
+	}
+
+	// An in-memory text store standing in for the filesystem leaves.
+	function createQueueStore(initial: QueueItemView[] = []): { store: { read: () => string | null; write: (contents: string) => void }; snapshot: () => QueueView } {
+		let current: string | null = initial.length === 0 ? null : JSON.stringify({ items: initial })
 		return {
-			readQueue: () => current,
-			writeQueue: (next) => {
-				current = next
+			store: {
+				read: () => current,
+				write: (contents) => {
+					current = contents
+				},
 			},
-			snapshot: () => current,
+			snapshot: () => parseQueueText(current),
 		}
+	}
+
+	// The real queue module over the in-memory store: the resume path only exercises its re-activation operation.
+	function createQueueModule(store: ReturnType<typeof createQueueStore>, submission: RunSubmission, readers: ReturnType<typeof createReaders>): TaskQueueModule {
+		return createTaskQueue({
+			queueStore: store.store,
+			readRunMetaById: readers.readRunMetaById,
+			listRunIds: () => [],
+			readRunListSummary: () => {
+				throw new Error('the resume path does not assemble a briefing')
+			},
+			submitRun: () => {
+				throw new Error('the resume path does not dispatch')
+			},
+			hasActiveRun: () => submission.activeRunId() !== undefined,
+			sleep: async () => {},
+			now: () => '2026-01-01T00:00:00.000Z',
+		})
 	}
 
 	function erroredMeta(runId: string): RunMeta {
@@ -725,11 +762,11 @@ describe('createResumeErroredRun', () => {
 		}
 	}
 
-	function erroredItem(): QueueItem {
-		return { id: 'item-1', task: 'do it', status: 'error', runId: 'run-9', queuedAt: '2026-01-01T00:00:00.000Z', settledAt: '2026-01-01T00:05:00.000Z', error: 'LLM unavailable: connection refused' }
+	function erroredItem(): QueueItemView {
+		return { id: 'item-1', task: 'do it', status: 'error', runId: 'run-20260101-000009', queuedAt: '2026-01-01T00:00:00.000Z', settledAt: '2026-01-01T00:05:00.000Z', error: 'LLM unavailable: connection refused' }
 	}
 
-	function createHarness(input: { metas: Map<string, string>; checkpoints: Map<string, string>; queue?: Array<QueueItem> }): { resumeErroredRun: ReturnType<typeof createResumeErroredRun>; submission: RunSubmission; queue: ReturnType<typeof createQueueStore>; resumedNotes: () => Array<string | undefined> } {
+	function createHarness(input: { metas: Map<string, string>; checkpoints: Map<string, string>; queue?: Array<QueueItemView> }): { resumeErroredRun: ReturnType<typeof createResumeErroredRun>; submission: RunSubmission; queue: ReturnType<typeof createQueueStore>; resumedNotes: () => Array<string | undefined> } {
 		const queue = createQueueStore(input.queue ?? [])
 		const readers = createReaders(input.metas, input.checkpoints)
 		let resumeNote: string | undefined
@@ -738,43 +775,43 @@ describe('createResumeErroredRun', () => {
 			return sampleMeta(checkpoint.runId)
 		}
 		const submission = createRunSubmission({ onRunSettled: settleNothing, startRun: unusedStartRun, resumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings, runDirectoryExists: emptyRunsDir })
-		const dependencies: ResumeErroredRunDependencies = { runSubmission: submission, readRunMetaById: readers.readRunMetaById, readCheckpointById: readers.readCheckpointById, readQueue: queue.readQueue, writeQueue: queue.writeQueue }
+		const dependencies: ResumeErroredRunDependencies = { runSubmission: submission, readRunMetaById: readers.readRunMetaById, readCheckpointById: readers.readCheckpointById, taskQueue: createQueueModule(queue, submission, readers) }
 		return { resumeErroredRun: createResumeErroredRun(dependencies), submission, queue, resumedNotes: () => [resumeNote] }
 	}
 
 	test('a happy resume re-activates the settled item, threads the framed note, and reports the same run id', async () => {
-		const metas = new Map([['run-9', JSON.stringify(erroredMeta('run-9'))]])
-		const checkpoints = new Map([['run-9', JSON.stringify(sampleCheckpoint('run-9'))]])
+		const metas = new Map([['run-20260101-000009', JSON.stringify(erroredMeta('run-20260101-000009'))]])
+		const checkpoints = new Map([['run-20260101-000009', JSON.stringify(sampleCheckpoint('run-20260101-000009'))]])
 		const harness = createHarness({ metas, checkpoints, queue: [erroredItem()] })
 
-		const result = harness.resumeErroredRun('run-9', 'the endpoint is back; carry on')
+		const result = harness.resumeErroredRun('run-20260101-000009', 'the endpoint is back; carry on')
 
-		expect(result).toEqual({ ok: true, runId: 'run-9' })
-		expect(harness.submission.activeRunId()).toBe('run-9')
+		expect(result).toEqual({ ok: true, runId: 'run-20260101-000009' })
+		expect(harness.submission.activeRunId()).toBe('run-20260101-000009')
 		const reactivated = harness.queue.snapshot().items.find((entry) => entry.id === 'item-1')
 		expect(reactivated?.status).toBe('active')
-		expect(reactivated?.runId).toBe('run-9')
+		expect(reactivated?.runId).toBe('run-20260101-000009')
 		expect(harness.resumedNotes()).toEqual(['The operator resumed this run after a failure. Message from the operator: the endpoint is back; carry on'])
 		await harness.submission.awaitActive()
 	})
 
 	test('a no-note resume injects nothing and still re-activates the item', async () => {
-		const metas = new Map([['run-9', JSON.stringify(erroredMeta('run-9'))]])
-		const checkpoints = new Map([['run-9', JSON.stringify(sampleCheckpoint('run-9'))]])
+		const metas = new Map([['run-20260101-000009', JSON.stringify(erroredMeta('run-20260101-000009'))]])
+		const checkpoints = new Map([['run-20260101-000009', JSON.stringify(sampleCheckpoint('run-20260101-000009'))]])
 		const harness = createHarness({ metas, checkpoints, queue: [erroredItem()] })
 
-		expect(harness.resumeErroredRun('run-9', undefined)).toEqual({ ok: true, runId: 'run-9' })
+		expect(harness.resumeErroredRun('run-20260101-000009', undefined)).toEqual({ ok: true, runId: 'run-20260101-000009' })
 		expect(harness.queue.snapshot().items.find((entry) => entry.id === 'item-1')?.status).toBe('active')
 		await harness.submission.awaitActive()
 		expect(harness.resumedNotes()).toEqual([undefined])
 	})
 
 	test('a run with no matching queue item still resumes — the queue record does not gate the run', async () => {
-		const metas = new Map([['run-9', JSON.stringify(erroredMeta('run-9'))]])
-		const checkpoints = new Map([['run-9', JSON.stringify(sampleCheckpoint('run-9'))]])
+		const metas = new Map([['run-20260101-000009', JSON.stringify(erroredMeta('run-20260101-000009'))]])
+		const checkpoints = new Map([['run-20260101-000009', JSON.stringify(sampleCheckpoint('run-20260101-000009'))]])
 		const harness = createHarness({ metas, checkpoints })
 
-		expect(harness.resumeErroredRun('run-9', undefined)).toEqual({ ok: true, runId: 'run-9' })
+		expect(harness.resumeErroredRun('run-20260101-000009', undefined)).toEqual({ ok: true, runId: 'run-20260101-000009' })
 		await harness.submission.awaitActive()
 	})
 
@@ -794,19 +831,19 @@ describe('createResumeErroredRun', () => {
 	})
 
 	test('rejects a missing or corrupt checkpoint with checkpoint_missing', async () => {
-		const metas = new Map([['run-9', JSON.stringify(erroredMeta('run-9'))]])
+		const metas = new Map([['run-20260101-000009', JSON.stringify(erroredMeta('run-20260101-000009'))]])
 		const checkpoints = new Map([['run-other', JSON.stringify(sampleCheckpoint('run-other'))]])
 		const harness = createHarness({ metas, checkpoints })
 
-		expect(harness.resumeErroredRun('run-9', undefined)).toEqual({ ok: false, error: 'checkpoint_missing' })
+		expect(harness.resumeErroredRun('run-20260101-000009', undefined)).toEqual({ ok: false, error: 'checkpoint_missing' })
 		// A corrupt checkpoint document is no checkpoint, same as boot reconciliation treats one.
-		const corrupt = new Map([['run-9', '{not json']])
+		const corrupt = new Map([['run-20260101-000009', '{not json']])
 		const corruptHarness = createHarness({ metas, checkpoints: corrupt })
-		expect(corruptHarness.resumeErroredRun('run-9', undefined)).toEqual({ ok: false, error: 'checkpoint_missing' })
+		expect(corruptHarness.resumeErroredRun('run-20260101-000009', undefined)).toEqual({ ok: false, error: 'checkpoint_missing' })
 		// A checkpoint naming a different run id than its directory is treated as corrupt too.
-		const misnamed = new Map([['run-9', JSON.stringify(sampleCheckpoint('run-other'))]])
+		const misnamed = new Map([['run-20260101-000009', JSON.stringify(sampleCheckpoint('run-other'))]])
 		const misnamedHarness = createHarness({ metas, checkpoints: misnamed })
-		expect(misnamedHarness.resumeErroredRun('run-9', undefined)).toEqual({ ok: false, error: 'checkpoint_missing' })
+		expect(misnamedHarness.resumeErroredRun('run-20260101-000009', undefined)).toEqual({ ok: false, error: 'checkpoint_missing' })
 	})
 
 	test('rejects while a run is active, before any queue or checkpoint read', async () => {
@@ -815,13 +852,13 @@ describe('createResumeErroredRun', () => {
 			resolveRun = resolve
 		})
 		const queue = createQueueStore([erroredItem()])
-		const metas = new Map([['run-9', JSON.stringify(erroredMeta('run-9'))]])
+		const metas = new Map([['run-20260101-000009', JSON.stringify(erroredMeta('run-20260101-000009'))]])
 		const readers = createReaders(metas, new Map())
 		const submission = createRunSubmission({ onRunSettled: settleNothing, startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings, runDirectoryExists: emptyRunsDir })
-		const resumeErroredRun = createResumeErroredRun({ runSubmission: submission, readRunMetaById: readers.readRunMetaById, readCheckpointById: readers.readCheckpointById, readQueue: queue.readQueue, writeQueue: queue.writeQueue })
+		const resumeErroredRun = createResumeErroredRun({ runSubmission: submission, readRunMetaById: readers.readRunMetaById, readCheckpointById: readers.readCheckpointById, taskQueue: createQueueModule(queue, submission, readers) })
 
 		submission.submit('first')
-		expect(resumeErroredRun('run-9', undefined)).toEqual({ ok: false, error: 'run_in_progress' })
+		expect(resumeErroredRun('run-20260101-000009', undefined)).toEqual({ ok: false, error: 'run_in_progress' })
 		expect(queue.snapshot().items.find((entry) => entry.id === 'item-1')?.status).toBe('error')
 
 		resolveRun(sampleMeta('run-1'))

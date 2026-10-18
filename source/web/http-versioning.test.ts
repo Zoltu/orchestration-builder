@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import type { ListRunIds, ProjectSettings, ReadProjectSettings, ReadRunMetaById, ReadRunPlanById, ReadRunSnapshotStats, ReadRunSummaryById, ReadRunSummaryStats, RunCheckpointExists, WriteProjectSettings } from '../executor/persistence.ts'
 import type { RunState } from '../executor/run-state.ts'
 import type { ResumeErroredRun, RunSubmission } from '../executor/run-submission.ts'
-import type { TaskQueue } from '../executor/task-queue.ts'
+import { createTaskQueue } from '../executor/queue/index.ts'
 import type { DeploymentConfig, GuildConfig, RunMeta } from '../executor/types.ts'
 import { applyFlowFrame, createFlowFeedResponder, emptyFlowFeedState, flowFeedRevision } from './static/ts/flow-feed/index.js'
 import type { FlowFeedResponderOptions } from './static/ts/flow-feed/index.js'
@@ -127,9 +127,16 @@ function createVersioningHarness(initialRuns: Array<[string, StoredRun]>, flowFe
 	const writeProjectSettings: WriteProjectSettings = (next) => {
 		settings = next
 	}
-	const emptyQueue: TaskQueue = { items: [] }
-	const readQueue = () => emptyQueue
-	const writeQueue = () => {}
+	const taskQueue = createTaskQueue({
+		queueStore: { read: () => null, write: () => {} },
+		readRunMetaById: readRunMetaById,
+		listRunIds,
+		readRunListSummary,
+		submitRun: () => ({ ok: false, error: 'run_in_progress' }),
+		hasActiveRun: () => activeRunId !== undefined,
+		sleep: async () => {},
+		now: () => '2026-01-01T00:00:00.000Z',
+	})
 	const resumeErroredRun: ResumeErroredRun = () => ({ ok: false, error: 'run_not_found' })
 	const flowFeedResponder = createFlowFeedResponder(flowFeedOptions)
 	const runListFeedResponder = createRunListFeedResponder({ epoch: 'versioning-epoch', historyLimit: 64 })
@@ -149,11 +156,9 @@ function createVersioningHarness(initialRuns: Array<[string, StoredRun]>, flowFe
 			listRunIds,
 			readProjectSettings,
 			writeProjectSettings,
-			readQueue,
-			writeQueue,
+			taskQueue,
 			resumeErroredRun,
 			runCheckpointExists,
-			tickScheduler: async () => {},
 			build: null,
 			flowFeedResponder,
 			runListFeedResponder,

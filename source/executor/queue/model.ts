@@ -1,43 +1,65 @@
-import { isEffortLevel, isInvolvementLevel, isLogLevel, isObject, isString } from './validation.js'
-import { isRunIdShape } from './run-id.js'
-import { questionFromParkSummary } from './park-state.js'
-import type { EffortLevel, InvolvementLevel, LogLevel, RunMeta } from './types.js'
+import { isEffortLevel, isInvolvementLevel, isLogLevel, isObject, isString } from '../validation.js'
+import { isRunIdShape } from '../run-id.js'
+import { questionFromParkSummary } from '../park-state.js'
+import type { EffortLevel, InvolvementLevel, LogLevel, RunMeta } from '../types.js'
 
-// Pure queue logic and validation for the durable task queue (docs/queueing.md "The queue: storage, item model, state machine"). Every transformation is a whole-queue value: it takes a queue and returns a new one, so the scheduler's read-modify-write cycles stay free of hidden mutation. Persistence leaves live in persistence.ts; the orchestration that sequences these transformations lives in scheduler.ts.
+// Pure queue logic and validation for the durable task queue (docs/queueing.md "The queue: storage, item model, state machine"). Every transformation is a whole-queue value: it takes a queue and returns a new one, so the module's read-modify-write cycles stay free of hidden mutation. Serialization and orchestration live in persistence.ts and task-queue.ts; only the read-only DTOs cross the module boundary.
 
-export type QueueItemStatus = 'waiting' | 'active' | 'needs_input' | 'done' | 'error' | 'cancelled'
+type QueueItemStatus = 'waiting' | 'active' | 'needs_input' | 'done' | 'error' | 'cancelled'
 
-export interface QueueItem {
+export interface QueueItemView {
 	// UUID (crypto.randomUUID), the item handle in the queue API.
-	id: string
+	readonly id: string
 	// The operator's task text, verbatim.
-	task: string
+	readonly task: string
 	// Optional per-item effort override for the item's run.
-	effort?: EffortLevel
+	readonly effort?: EffortLevel
 	// Optional per-item human-involvement override for the item's run.
-	involvement?: InvolvementLevel
+	readonly involvement?: InvolvementLevel
 	// Optional logging-level override for the item's run.
-	logLevel?: LogLevel
+	readonly logLevel?: LogLevel
 	// The run this item's dispatch continues: a parked run awaiting its answer, an errored run being retried, or a user-initiated Continue.
+	readonly continuesFrom?: string
+	readonly status: QueueItemStatus
+	// Set when the scheduler dispatches the item's run.
+	readonly runId?: string
+	readonly queuedAt: string
+	// Set when the item reaches done/error/cancelled.
+	readonly settledAt?: string
+	// needs_input: the recorded question.
+	readonly question?: string
+	// Set when the operator answers.
+	readonly answer?: string
+	// done/error: the terminal meta's result.summary.
+	readonly resultSummary?: string
+	// error: what the run said went wrong.
+	readonly error?: string
+}
+
+export interface QueueView {
+	// Head first: the scheduler dispatches the first waiting item.
+	readonly items: readonly QueueItemView[]
+}
+
+// The persisted shape stays private to the module: callers only ever see QueueItemView copies, so a mutation of a returned object cannot reach stored state.
+export interface QueueItem {
+	id: string
+	task: string
+	effort?: EffortLevel
+	involvement?: InvolvementLevel
+	logLevel?: LogLevel
 	continuesFrom?: string
 	status: QueueItemStatus
-	// Set when the scheduler dispatches the item's run.
 	runId?: string
 	queuedAt: string
-	// Set when the item reaches done/error/cancelled.
 	settledAt?: string
-	// needs_input: the recorded question.
 	question?: string
-	// Set when the operator answers.
 	answer?: string
-	// done/error: the terminal meta's result.summary.
 	resultSummary?: string
-	// error: what the run said went wrong.
 	error?: string
 }
 
 export interface TaskQueue {
-	// Head first: the scheduler dispatches the first waiting item.
 	items: QueueItem[]
 }
 
@@ -66,6 +88,14 @@ export function isTaskQueue(value: unknown): value is TaskQueue {
 	if (!isObject(value)) return false
 	if (!Array.isArray(value.items) || !value.items.every(isQueueItem)) return false
 	return true
+}
+
+export function toQueueItemView(item: QueueItem): QueueItemView {
+	return { ...item }
+}
+
+export function toQueueView(queue: TaskQueue): QueueView {
+	return { items: queue.items.map(toQueueItemView) }
 }
 
 export type NewQueueItemResult = { ok: true; item: QueueItem } | { ok: false; error: string }
@@ -354,13 +384,13 @@ export function repairActiveItem(item: QueueItem, meta: RunMeta | null, settledA
 	return { kind: 'released', item: releaseToWaiting(item) }
 }
 
-// The distilled run-list entry the briefing assembles from: the scheduler's readRunListSummary leaf returns it (the web run-list summary is structurally compatible, so serve.ts passes its reader directly).
+// The distilled run-list entry the briefing assembles from: the module's readRunListSummary leaf returns it (the web run-list summary is structurally compatible, so serve.ts passes its reader directly).
 export interface RunListEntry {
 	runId: string
 	task: string | null
 	status: RunMeta['status'] | 'unknown'
 	endTime: string | null
-	// The LLM-generated one-line summary; null when the summarizer has produced none (the scheduler composes the task-text fallback).
+	// The LLM-generated one-line summary; null when the summarizer has produced none (the module composes the task-text fallback).
 	summary: string | null
 }
 
