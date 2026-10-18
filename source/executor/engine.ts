@@ -37,7 +37,7 @@ function serializeToolResult(result: ToolResult, maxChars: number): string {
 	return truncateToolOutput(text, maxChars).text
 }
 
-// Builds the role_finished payload: the {role, status} base plus the instance id, depth, an optional parent, and the result-card summary/error so render.ts can build the parent→child tree and a reviewer reading only log.jsonl can see why a role finished (especially why it errored — without this, an erroring role's explanation lives only on the returned ResultCard / meta.json, never in the log stream).
+// Builds the role_finished payload: the {role, status} base plus the instance id, depth, an optional parent, and the result-card summary/error so source/run-log can build the parent→child tree and a reviewer reading only log.jsonl can see why a role finished (especially why it errored — without this, an erroring role's explanation lives only on the returned ResultCard / meta.json, never in the log stream).
 // The added fields are additive: existing readers that read only role/status keep working.
 function roleFinishedPayload(roleName: string, depth: number, card: ResultCard, parent: string | undefined, roleId: string): unknown {
 	const payload: Record<string, unknown> = { role: roleName, roleId, depth, status: card.status }
@@ -268,7 +268,7 @@ export async function runRole(deps: EngineDependencies, context: EngineContext, 
 		deps.checkpointRecorder.setPending(registryEntry.roleId, { toolCalls: resumed.suspendedTurn.toolCalls, childIndex: resumed.suspendedTurn.childIndex })
 	}
 
-	// role_start is emitted after the role definition is confirmed to exist and the instance is registered, so an unknown entry role still fires role_not_found without leaving an orphan role_start, and the event can carry the instance id the interrupt platform targets. The depth and optional parent let render.ts reconstruct the parent→child tree, and parentRoleId names the parent instance exactly so a client can walk the instance chain without guessing among same-named ancestors (the inspector's breadcrumb). A resumed role skips the event: its role_start is already in the log from before the restart.
+	// role_start is emitted after the role definition is confirmed to exist and the instance is registered, so an unknown entry role still fires role_not_found without leaving an orphan role_start, and the event can carry the instance id the interrupt platform targets. The depth and optional parent let source/run-log reconstruct the parent→child tree, and parentRoleId names the parent instance exactly so a client can walk the instance chain without guessing among same-named ancestors (the inspector's breadcrumb). A resumed role skips the event: its role_start is already in the log from before the restart.
 	if (resumed === undefined) {
 		const roleStartPayload: Record<string, unknown> = {
 			role: context.roleName,

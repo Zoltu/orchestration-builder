@@ -8,7 +8,7 @@ import type { QueueItem, TaskQueue } from '../executor/task-queue.ts'
 import type { RunCheckpoint } from '../executor/checkpoint.ts'
 import type { ProjectSettings, ReadProjectSettings, WriteProjectSettings, RunSnapshotRaw, RunSnapshotStats, RunSummaryStats } from '../executor/persistence.ts'
 import type { DeploymentConfig, EffortLevel, GuildConfig, InvolvementLevel, LogLevel, RunContinuation, RunMeta } from '../executor/types.js'
-import { parseRunSnapshot, type RunSnapshot } from './render.ts'
+import { parseLogEvents, parseRunMeta, type RunSnapshot } from '../run-log/index.js'
 import type { BuildInfo } from './build-info.ts'
 import { createRunListCache } from './run-list-cache.ts'
 import { flowModelFromReplicaState } from './static/ts/flow-collections.js'
@@ -522,7 +522,10 @@ function createHandlerHarness(options: { runIdCollides?: boolean, build?: BuildI
 		return { metaText: metaOverrides.get(runId) ?? base.metaText, logText: base.logText }
 	}
 	const harnessReadRunMetaById = (runId: string): string | null => harnessRawSnapshot(runId).metaText
-	const harnessReadRunSnapshot = (runId: string): RunSnapshot => parseRunSnapshot(harnessRawSnapshot(runId))
+	const harnessReadRunSnapshot = (runId: string): RunSnapshot => {
+		const raw = harnessRawSnapshot(runId)
+		return { meta: parseRunMeta(raw.metaText), logEvents: parseLogEvents(raw.logText) }
+	}
 	const harnessReadRunSnapshotStats = (runId: string): RunSnapshotStats => {
 		const raw = harnessRawSnapshot(runId)
 		return {

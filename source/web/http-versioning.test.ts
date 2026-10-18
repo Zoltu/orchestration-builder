@@ -11,7 +11,7 @@ import { createRequestHandler, type RequestHandler } from './request-handler.ts'
 import { createRunListCache } from './run-list-cache.ts'
 import { createFlowReplicaRegistry, type FlowReplicaRegistryOptions } from './flow-replica-registry.ts'
 import { createRunListReplica } from './run-list-replica.ts'
-import { parseRunSnapshot } from './render.ts'
+import { parseLogEvents, parseRunMeta } from '../run-log/index.js'
 import type { ReadRunSnapshot } from './snapshot-cache.ts'
 
 // A local, mutable stand-in for the on-disk run store: each test owns its own map, so nothing here touches the filesystem or shared module state.
@@ -81,7 +81,7 @@ function createVersioningHarness(initialRuns: Array<[string, StoredRun]>, flowRe
 	}
 	const readRunMetaById: ReadRunMetaById = (runId) => runs.get(runId)?.metaText ?? null
 	const readRunSummaryById: ReadRunSummaryById = (runId) => runs.get(runId)?.summaryText ?? null
-	const readRunSnapshot: ReadRunSnapshot = (runId) => parseRunSnapshot({ metaText: readRunMetaById(runId), logText: runs.get(runId)?.logText ?? '' })
+	const readRunSnapshot: ReadRunSnapshot = (runId) => ({ meta: parseRunMeta(readRunMetaById(runId)), logEvents: parseLogEvents(runs.get(runId)?.logText ?? '') })
 	const readRunPlanById: ReadRunPlanById = (runId) => runs.get(runId)?.plan ?? null
 	const runCheckpointExists: RunCheckpointExists = (runId) => runs.get(runId)?.checkpointExists ?? false
 	const listRunIds: ListRunIds = () => Array.from(runs.keys())

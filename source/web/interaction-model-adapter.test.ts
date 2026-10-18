@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import type { LogEvent, RunMeta } from '../executor/types.js'
-import type { RunSnapshot } from './render.js'
+import type { RunSnapshot } from '../run-log/index.js'
 import { deriveInteractionModel, deriveInteractionOperationDetail } from './interaction-model-adapter.js'
 import { activeParticipant, activeStack, callChainOf, fateOf, observesOf, stacksOf, terminatesOf } from './static/ts/interaction-model.js'
 import { defined, present } from './test-fixtures.js'
@@ -333,7 +333,7 @@ describe('deriveInteractionModel — per-invocation metrics', () => {
 			event('2026-01-01T00:00:00.000Z', 'role_start', { role: 'coder', depth: 0, task: 'work' }),
 			event('2026-01-01T00:00:01.000Z', 'llm_retry', { role: 'coder', roleId: 'coder-0-1', discardedAttempts: 1 }),
 			event('2026-01-01T00:00:02.000Z', 'llm_call', { role: 'coder', usage: { promptTokens: 10, completionTokens: 5, totalTokens: 15 } }),
-			// The summarizer is not a role turn: its spend is run-wide only (render.ts deriveBudgets), so it creates no participant and no operation here.
+			// The summarizer is not a role turn: its spend is run-wide only (source/run-log/derive/budget.ts deriveBudgets), so it creates no participant and no operation here.
 			event('2026-01-01T00:00:03.000Z', 'summarizer_llm_call', { usage: { promptTokens: 500, completionTokens: 30, totalTokens: 530 } }),
 		]
 		const model = deriveInteractionModel(snapshot(events, meta('running')))

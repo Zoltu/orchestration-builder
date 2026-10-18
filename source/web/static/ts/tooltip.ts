@@ -14,7 +14,7 @@ import type { OperationDetailsState } from './operation-details.js'
 import { formatTokens } from './svg-primitives.js'
 import type { LooseH, Vnode, VnodeChildInput } from '../vendor/hyperapp.js'
 
-// A labeled detail block, mirroring the `LogDetailSection` shape `formatLogDetailSections` (source/web/render.ts) produces: a machine label (`'arguments'`, `'result'`, `'summary'`, `'error'`, `'usage'`, …) and the raw content the tooltip then formats by kind.
+// A labeled detail block, mirroring the `LogDetailSection` shape `formatLogDetailSections` (source/run-log/format/index.ts) produces: a machine label (`'arguments'`, `'result'`, `'summary'`, `'error'`, `'usage'`, …) and the raw content the tooltip then formats by kind.
 export interface TooltipSection {
 	label: string
 	content?: unknown

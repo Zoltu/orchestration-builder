@@ -1,6 +1,6 @@
 import type { LogEvent, RunMeta } from '../executor/types.js'
 import { isObject } from '../executor/validation.js'
-import type { RunSnapshot } from './render.js'
+import type { RunSnapshot } from '../run-log/index.js'
 import { isTerminalStatus } from './static/ts/interaction-model.js'
 import type { InteractionModel, Operation, OperationOutcome, Participant, ParticipantKind, RunStatus, StackRecord } from './static/ts/interaction-model.js'
 
@@ -26,7 +26,7 @@ const MAIN_STACK = 'main'
 // tool_call/tool_result events are skipped so a delegation does not also spawn a redundant tool node.
 const CONTROL_TOOLS = new Set(['agent', 'continue_agent', 'ask_human', 'finish'])
 
-// Narrowing helpers mirror render.ts so the adapter reads LogEvent payloads the same way the
+// Narrowing helpers mirror the run-log derivation module so the adapter reads LogEvent payloads the same way the
 // run view does — every external payload is validated before use, never cast.
 function stringField(payload: unknown, field: string): string | null {
 	if (!isObject(payload)) return null
@@ -34,7 +34,7 @@ function stringField(payload: unknown, field: string): string | null {
 	return typeof value === 'string' ? value : null
 }
 
-// The full usage breakdown one usage-carrying event reports: the two reported counts plus their sum, and the cached-prompt subset (a subset of the prompt bill, not additive). A payload with neither a reported total nor a reportable prompt+completion pair has no usage; a present-but-partial usage object degrades its missing fields to 0 (endpoint-reported data), matching the run view's reader (render.ts usageOf). cachedPromptTokens is null when the usage object does not report it — the backend omits the field when unreported, and that absence must survive the fold so a null is never replaced by a fabricated zero.
+// The full usage breakdown one usage-carrying event reports: the two reported counts plus their sum, and the cached-prompt subset (a subset of the prompt bill, not additive). A payload with neither a reported total nor a reportable prompt+completion pair has no usage; a present-but-partial usage object degrades its missing fields to 0 (endpoint-reported data), matching the run view's reader (source/run-log/payload.ts usageOf). cachedPromptTokens is null when the usage object does not report it — the backend omits the field when unreported, and that absence must survive the fold so a null is never replaced by a fabricated zero.
 type UsageBreakdown = { promptTokens: number; completionTokens: number; totalTokens: number; cachedPromptTokens: number | null }
 
 function usageOf(payload: unknown): UsageBreakdown | null {
@@ -484,7 +484,7 @@ function deriveModel(snapshot: RunSnapshot): DerivedModel {
 				break
 			}
 			case 'summarizer_llm_call':
-				// Run-wide spend only (render.ts deriveBudgets sums it): the summarizer is not a role turn — it opens no call, creates no participant, and folds no flow metrics.
+				// Run-wide spend only (source/run-log/derive/budget.ts deriveBudgets sums it): the summarizer is not a role turn — it opens no call, creates no participant, and folds no flow metrics.
 				break
 			case 'llm_call_start': {
 				const role = stringField(event.payload, 'role')

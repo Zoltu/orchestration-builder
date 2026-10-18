@@ -53,7 +53,7 @@ export interface EngineContext {
 	continuation?: RunContinuation
 	// The one-line git notice describing the workspace's starting state (git-state.ts), set only on the entry-role context by runExecutor. Like effort and continuation it rides the context spread to children, but buildInitialHistory gates its injection on depth 0, so it appears once in the entry role's initial history and is never re-derived on resume. Undefined when there is nothing to say (no repository, or the read failed).
 	workspaceGitNotice?: string
-	// The calling role's name, omitted for the entry role at depth 0 so a reviewer can distinguish a root role from a child and render.ts can build the parent→child tree.
+	// The calling role's name, omitted for the entry role at depth 0 so a reviewer can distinguish a root role from a child and source/run-log can build the parent→child tree.
 	parent?: string
 	// The calling role's instance id, omitted for the entry role. Lets the interrupt platform walk the live delegation chain (plan-modification routing).
 	parentRoleId?: string

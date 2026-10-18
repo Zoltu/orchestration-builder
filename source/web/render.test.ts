@@ -1,28 +1,8 @@
 import { describe, expect, test } from 'bun:test'
-import type { RunSnapshotRaw } from '../executor/persistence.js'
 import type { PendingQuestion } from '../executor/human-backend.js'
-import type { DeploymentConfig, LogEvent, RunMeta, GuildConfig } from '../executor/types.js'
-import {
-	deriveBudgets,
-	deriveInterruptHistory,
-	deriveQuestionHistory,
-	deriveRoleActivity,
-	deriveRoleTree,
-	foldLlmCallSent,
-	formatLogDetailSections,
-	formatLogAsText,
-	formatLogEvent,
-	paginateLogEvents,
-	parseLogEvents,
-	parseRunMeta,
-	parseRunSnapshot,
-	renderConfig,
-	renderProjectSettings,
-	renderPendingQuestions,
-	renderRunSummary,
-	renderRunView,
-	toRecentLogEntry,
-} from './render.ts'
+import type { DeploymentConfig, GuildConfig, RunMeta } from '../executor/types.js'
+import { parseLogEvents, parseRunMeta, type RunSnapshot } from '../run-log/index.js'
+import { renderConfig, renderPendingQuestions, renderProjectSettings, renderRunSummary, renderRunView } from './render.ts'
 import { defined, present } from './test-fixtures.js'
 
 function logEvent(type: string, role: string, timestamp: string, extra: Record<string, unknown> = {}): string {
@@ -52,665 +32,13 @@ function sampleRunMeta(overrides: Partial<RunMeta> = {}): RunMeta {
 	}
 }
 
-describe('parseLogEvents', () => {
-	test('parses each valid jsonl line into a log event', () => {
-		const text = [
-			logEvent('llm_call', 'planner', '2026-01-01T00:00:01.000Z', { messageCount: 3 }),
-			logEvent('tool_call', 'planner', '2026-01-01T00:00:02.000Z', { tool: 'agent' }),
-			'',
-			logEvent('role_finished', 'planner', '2026-01-01T00:00:03.000Z', { status: 'success' }),
-		].join('\n')
-
-		const events = parseLogEvents(text)
-		expect(events.length).toBe(3)
-		expect(defined(events[0], 'events[0]').type).toBe('llm_call')
-		expect(defined(events[1], 'events[1]').type).toBe('tool_call')
-		expect(defined(events[2], 'events[2]').type).toBe('role_finished')
-	})
-
-	test('skips a malformed line without aborting the rest of the tail', () => {
-		const text = [
-			logEvent('llm_call', 'planner', '2026-01-01T00:00:01.000Z'),
-			'{ not valid json',
-			logEvent('tool_call', 'planner', '2026-01-01T00:00:02.000Z', { tool: 'finish' }),
-		].join('\n')
-
-		const events = parseLogEvents(text)
-		expect(events.length).toBe(2)
-		expect(defined(events[0], 'events[0]').type).toBe('llm_call')
-		expect(defined(events[1], 'events[1]').type).toBe('tool_call')
-	})
-
-	test('skips a line that is not a valid log event shape', () => {
-		const text = [
-			logEvent('llm_call', 'planner', '2026-01-01T00:00:01.000Z'),
-			JSON.stringify({ timestamp: '2026-01-01T00:00:02.000Z' }),
-		].join('\n')
-
-		const events = parseLogEvents(text)
-		expect(events.length).toBe(1)
-	})
-
-	test('returns an empty array for an empty log', () => {
-		expect(parseLogEvents('')).toEqual([])
-	})
-})
-
-describe('parseRunSnapshot', () => {
-	test('parses a present meta and the log events together', () => {
-		const raw: RunSnapshotRaw = {
-			metaText: JSON.stringify(sampleRunMeta()),
-			logText: logEvent('llm_call', 'planner', '2026-01-01T00:00:01.000Z'),
-		}
-
-		const snapshot = parseRunSnapshot(raw)
-		expect(snapshot.meta?.runId).toBe('run-1')
-		expect(snapshot.logEvents.length).toBe(1)
-	})
-
-	test('returns null meta when metaText is null (run in progress)', () => {
-		const snapshot = parseRunSnapshot({ metaText: null, logText: '' })
-		expect(snapshot.meta).toBeNull()
-		expect(snapshot.logEvents).toEqual([])
-	})
-
-	test('returns null meta when metaText is malformed', () => {
-		const snapshot = parseRunSnapshot({ metaText: '{ broken', logText: '' })
-		expect(snapshot.meta).toBeNull()
-	})
-
-	test('returns null meta when metaText is not a valid RunMeta', () => {
-		const snapshot = parseRunSnapshot({ metaText: JSON.stringify({ runId: 123 }), logText: '' })
-		expect(snapshot.meta).toBeNull()
-	})
-
-	test('returns null meta when the effort is not a tier string', () => {
-		expect(parseRunMeta(JSON.stringify({ ...sampleRunMeta(), effort: 4 }))).toBeNull()
-	})
-})
-
-describe('deriveRoleActivity', () => {
-	test('summarizes per-role counts and first/last seen timestamps', () => {
-		const events: LogEvent[] = [
-			{ timestamp: 't1', type: 'llm_call', payload: { role: 'planner' } },
-			{ timestamp: 't2', type: 'tool_call', payload: { role: 'planner', tool: 'agent' } },
-			{ timestamp: 't3', type: 'llm_call', payload: { role: 'coder' } },
-			{ timestamp: 't4', type: 'tool_call', payload: { role: 'coder', tool: 'finish' } },
-			{ timestamp: 't5', type: 'role_finished', payload: { role: 'planner', status: 'success' } },
-		]
-
-		const activity = deriveRoleActivity(events)
-		expect(activity.length).toBe(2)
-
-		const planner = defined(activity[0], 'activity[0]')
-		expect(planner.role).toBe('planner')
-		expect(planner.firstSeen).toBe('t1')
-		expect(planner.lastSeen).toBe('t5')
-		expect(planner.eventCount).toBe(3)
-		expect(planner.llmCalls).toBe(1)
-		expect(planner.toolCalls).toBe(1)
-		expect(planner.recentTools).toEqual(['agent'])
-		expect(planner.lastPromptTokens).toBeNull()
-
-		const coder = defined(activity[1], 'activity[1]')
-		expect(coder.role).toBe('coder')
-		expect(coder.llmCalls).toBe(1)
-		expect(coder.toolCalls).toBe(1)
-		expect(coder.recentTools).toEqual(['finish'])
-		expect(coder.lastPromptTokens).toBeNull()
-	})
-
-	test('recentTools keeps the last 3 distinct tools, most-recent-last, moving a repeat to the end', () => {
-		const events: LogEvent[] = [
-			{ timestamp: 't1', type: 'tool_call', payload: { role: 'coder', tool: 'read_file' } },
-			{ timestamp: 't2', type: 'tool_call', payload: { role: 'coder', tool: 'write_file' } },
-			{ timestamp: 't3', type: 'tool_call', payload: { role: 'coder', tool: 'read_file' } },
-			{ timestamp: 't4', type: 'tool_call', payload: { role: 'coder', tool: 'search_text' } },
-			{ timestamp: 't5', type: 'tool_call', payload: { role: 'coder', tool: 'glob_files' } },
-			{ timestamp: 't6', type: 'tool_call', payload: { role: 'coder', tool: 'write_file' } },
-		]
-
-		const [coder] = deriveRoleActivity(events)
-		expect(defined(coder, 'coder').recentTools).toEqual(['search_text', 'glob_files', 'write_file'])
-		expect(defined(coder, 'coder').toolCalls).toBe(6)
-	})
-
-	test('recentTools is empty when the role made no tool calls', () => {
-		const events: LogEvent[] = [
-			{ timestamp: 't1', type: 'llm_call', payload: { role: 'planner' } },
-		]
-		const [planner] = deriveRoleActivity(events)
-		expect(defined(planner, 'planner').recentTools).toEqual([])
-	})
-
-	test('lastPromptTokens tracks the most recent llm_call usage promptTokens for the role', () => {
-		const events: LogEvent[] = [
-			{ timestamp: 't1', type: 'llm_call', payload: { role: 'planner', usage: { promptTokens: 100, completionTokens: 20, totalTokens: 120, cachedPromptTokens: 40 } } },
-			{ timestamp: 't2', type: 'tool_call', payload: { role: 'planner', tool: 'read_file' } },
-			{ timestamp: 't3', type: 'llm_call', payload: { role: 'planner', usage: { promptTokens: 250, completionTokens: 30, totalTokens: 280 } } },
-		]
-		const [planner] = deriveRoleActivity(events)
-		// The last reported context window size is the full prompt bill (cached + uncached), not the uncached share.
-		expect(defined(planner, 'planner').lastPromptTokens).toBe(250)
-	})
-
-	test('lastPromptTokens stays null when an llm_call carries no usage', () => {
-		const events: LogEvent[] = [
-			{ timestamp: 't1', type: 'llm_call', payload: { role: 'planner' } },
-		]
-		const [planner] = deriveRoleActivity(events)
-		expect(defined(planner, 'planner').lastPromptTokens).toBeNull()
-	})
-
-	test('ignores events whose payload has no role', () => {
-		const events: LogEvent[] = [
-			{ timestamp: 't1', type: 'global_budget_exceeded', payload: { error: { kind: 'timeout' } } },
-			{ timestamp: 't2', type: 'llm_call', payload: { role: 'planner' } },
-		]
-
-		const activity = deriveRoleActivity(events)
-		expect(activity.length).toBe(1)
-		expect(defined(activity[0], 'activity[0]').role).toBe('planner')
-	})
-
-	test('returns an empty list when no roles appear in the log', () => {
-		expect(deriveRoleActivity([])).toEqual([])
-	})
-})
-
-describe('deriveRoleTree', () => {
-	function event(type: string, payload: unknown): LogEvent {
-		return { timestamp: 't', type, payload }
-	}
-
-	test('returns null when no role_start/role_finished/agent_call events are present (fallback to activity)', () => {
-		const events: LogEvent[] = [
-			event('llm_call', { role: 'planner' }),
-			event('tool_call', { role: 'planner', tool: 'finish' }),
-		]
-		expect(deriveRoleTree(events)).toBeNull()
-	})
-
-	test('an entry role with no parent is a single root node', () => {
-		const events: LogEvent[] = [
-			event('role_start', { role: 'orchestrator', depth: 0, task: 'do it' }),
-			event('role_finished', { role: 'orchestrator', depth: 0, status: 'success' }),
-		]
-		const tree = present(deriveRoleTree(events), 'tree')
-		expect(tree).not.toBeNull()
-		expect(tree.length).toBe(1)
-		expect(tree[0]).toEqual({
-			role: 'orchestrator',
-			depth: 0,
-			parent: null,
-			status: 'success',
-			summary: null,
-			active: false,
-			children: [],
-		})
-	})
-
-	test('a parent with multiple children links them in spawn order', () => {
-		const events: LogEvent[] = [
-			event('role_start', { role: 'orchestrator', depth: 0, task: 't' }),
-			event('agent_call', { parent: 'orchestrator', child: 'coder', depth: 1 }),
-			event('role_start', { role: 'coder', depth: 1, parent: 'orchestrator', task: 'code' }),
-			event('role_finished', { role: 'coder', depth: 1, status: 'success', parent: 'orchestrator' }),
-			event('agent_call', { parent: 'orchestrator', child: 'critic', depth: 1 }),
-			event('role_start', { role: 'critic', depth: 1, parent: 'orchestrator', task: 'review' }),
-			event('role_finished', { role: 'orchestrator', depth: 0, status: 'success' }),
-		]
-		const tree = present(deriveRoleTree(events), 'tree')
-		expect(tree).not.toBeNull()
-		expect(tree.length).toBe(1)
-		const root = defined(tree[0], 'tree[0]')
-		expect(root.role).toBe('orchestrator')
-		expect(root.children.length).toBe(2)
-		expect(defined(root.children[0], 'root.children[0]').role).toBe('coder')
-		expect(defined(root.children[1], 'root.children[1]').role).toBe('critic')
-		expect(defined(root.children[0], 'root.children[0]').parent).toBe('orchestrator')
-		expect(defined(root.children[0], 'root.children[0]').depth).toBe(1)
-		expect(defined(root.children[0], 'root.children[0]').status).toBe('success')
-		expect(defined(root.children[1], 'root.children[1]').status).toBeNull()
-	})
-
-	test('repeated sequential delegations to the same role are distinct nodes, each with its own status, not one merged node', () => {
-		const events: LogEvent[] = [
-			event('role_start', { role: 'orchestrator', depth: 0, task: 't' }),
-			event('role_start', { role: 'coder', depth: 1, parent: 'orchestrator', task: 'first' }),
-			event('role_finished', { role: 'coder', depth: 1, status: 'success', summary: 'first done', parent: 'orchestrator' }),
-			event('role_start', { role: 'coder', depth: 1, parent: 'orchestrator', task: 'second' }),
-			event('role_finished', { role: 'coder', depth: 1, status: 'error', summary: 'second failed', parent: 'orchestrator' }),
-			event('role_finished', { role: 'orchestrator', depth: 0, status: 'success' }),
-		]
-		const tree = present(deriveRoleTree(events), 'tree')
-		expect(tree).not.toBeNull()
-		const root = defined(tree[0], 'tree[0]')
-		expect(root.children.length).toBe(2)
-		expect(defined(root.children[0], 'root.children[0]').role).toBe('coder')
-		expect(defined(root.children[0], 'root.children[0]').status).toBe('success')
-		expect(defined(root.children[0], 'root.children[0]').summary).toBe('first done')
-		expect(defined(root.children[1], 'root.children[1]').role).toBe('coder')
-		expect(defined(root.children[1], 'root.children[1]').status).toBe('error')
-		expect(defined(root.children[1], 'root.children[1]').summary).toBe('second failed')
-	})
-
-	test('only the single currently-running invocation is active, even when the same role name recurs', () => {
-		const events: LogEvent[] = [
-			event('role_start', { role: 'orchestrator', depth: 0, task: 't' }),
-			event('role_start', { role: 'coder', depth: 1, parent: 'orchestrator', task: 'first' }),
-			event('role_finished', { role: 'coder', depth: 1, status: 'success', parent: 'orchestrator' }),
-			event('role_start', { role: 'coder', depth: 1, parent: 'orchestrator', task: 'second' }),
-		]
-		const tree = present(deriveRoleTree(events), 'tree')
-		expect(tree).not.toBeNull()
-		const root = defined(tree[0], 'tree[0]')
-		expect(root.active).toBe(false)
-		expect(defined(root.children[0], 'root.children[0]').active).toBe(false)
-		expect(defined(root.children[1], 'root.children[1]').active).toBe(true)
-	})
-
-	test('a child whose parent node never started becomes a root rather than being dropped', () => {
-		const events: LogEvent[] = [
-			event('role_start', { role: 'orphan', depth: 1, parent: 'missing-parent', task: 't' }),
-		]
-		const tree = present(deriveRoleTree(events), 'tree')
-		expect(tree).not.toBeNull()
-		expect(tree.length).toBe(1)
-		expect(defined(tree[0], 'tree[0]').role).toBe('orphan')
-		expect(defined(tree[0], 'tree[0]').active).toBe(true)
-	})
-
-	test('falls back to agent_call edges for a role_start that omitted parent (a log without parent fields)', () => {
-		const events: LogEvent[] = [
-			event('role_start', { role: 'orchestrator', depth: 0, task: 't' }),
-			event('agent_call', { parent: 'orchestrator', child: 'coder', depth: 1 }),
-			event('role_start', { role: 'coder', depth: 1, task: 'code' }),
-			event('role_finished', { role: 'coder', depth: 1, status: 'success' }),
-			event('role_finished', { role: 'orchestrator', depth: 0, status: 'success' }),
-		]
-		const tree = present(deriveRoleTree(events), 'tree')
-		expect(tree).not.toBeNull()
-		expect(tree.length).toBe(1)
-		const root = defined(tree[0], 'tree[0]')
-		expect(root.children.length).toBe(1)
-		expect(defined(root.children[0], 'root.children[0]').role).toBe('coder')
-		expect(defined(root.children[0], 'root.children[0]').parent).toBe('orchestrator')
-	})
-
-	test('does not throw on malformed payloads', () => {
-		const events: LogEvent[] = [
-			event('role_start', 'broken'),
-			event('role_start', { depth: 0 }),
-			event('agent_call', null),
-			event('role_finished', { role: 'x' }),
-		]
-		expect(deriveRoleTree(events)).toEqual([])
-	})
-})
-
-describe('formatLogDetailSections', () => {
-	function event(type: string, payload: unknown): LogEvent {
-		return { timestamp: 't', type, payload }
-	}
-
-	test('an llm_call with sent/received/finishReason/usage yields four paired sections', () => {
-		const sections = present(formatLogDetailSections(event('llm_call', {
-			role: 'coder',
-			messageCount: 2,
-			sent: [{ role: 'system', content: 'p' }, { role: 'user', content: 't' }],
-			received: { content: 'ok', toolCalls: [] },
-			finishReason: 'stop',
-			usage: { promptTokens: 10, completionTokens: 5, totalTokens: 15 },
-		})), 'sections')
-		expect(sections).not.toBeNull()
-		expect(sections.map((s) => s.label)).toEqual(['sent', 'received', 'finish reason', 'usage'])
-		expect(defined(sections[0], 'sections[0]').content).toEqual([{ role: 'system', content: 'p' }, { role: 'user', content: 't' }])
-		expect(defined(sections[2], 'sections[2]').content).toBe('stop')
-	})
-
-	test('an llm_call omitting finishReason omits the finish reason section', () => {
-		const sections = present(formatLogDetailSections(event('llm_call', {
-			role: 'coder',
-			sent: [{ role: 'user', content: 't' }],
-			received: { toolCalls: [] },
-			usage: { promptTokens: 10, completionTokens: 5, totalTokens: 15 },
-		})), 'sections')
-		expect(sections.map((s) => s.label)).toEqual(['sent', 'received', 'usage'])
-	})
-
-	test('a tool_call arguments and a tool_result full result each shape their paired fields', () => {
-		const callSections = present(formatLogDetailSections(event('tool_call', { role: 'coder', tool: 'write_file', arguments: '{"path":"x"}' })), 'callSections')
-		expect(callSections.map((s) => s.label)).toEqual(['arguments'])
-		expect(defined(callSections[0], 'callSections[0]').content).toBe('{"path":"x"}')
-
-		const resultSections = present(formatLogDetailSections(event('tool_result', { role: 'coder', tool: 'write_file', kind: 'success', result: { kind: 'success', data: { path: 'x', bytes: 4 } } })), 'resultSections')
-		expect(resultSections.map((s) => s.label)).toEqual(['result'])
-		expect(defined(resultSections[0], 'resultSections[0]').content).toEqual({ kind: 'success', data: { path: 'x', bytes: 4 } })
-	})
-
-	test('a tool_call carrying both arguments and a paired result yields both sections', () => {
-		const sections = present(formatLogDetailSections(event('tool_result', { role: 'coder', tool: 'write_file', kind: 'success', arguments: '{"path":"y"}', result: { kind: 'success', data: { path: 'y' } } })), 'sections')
-		expect(sections.map((s) => s.label)).toEqual(['arguments', 'result'])
-	})
-
-	test('a role_finished with summary and error yields paired sections', () => {
-		const sections = present(formatLogDetailSections(event('role_finished', { role: 'coder', status: 'error', summary: 'could not parse', error: { kind: 'invalid_arguments', message: 'bad json' } })), 'sections')
-		expect(sections).not.toBeNull()
-		expect(sections.map((s) => s.label)).toEqual(['summary', 'error'])
-		expect(defined(sections[0], 'sections[0]').content).toBe('could not parse')
-		expect(defined(sections[1], 'sections[1]').content).toEqual({ kind: 'invalid_arguments', message: 'bad json' })
-	})
-
-	test('returns null for an event type with no paired detail', () => {
-		// A role_finished carrying only status (no summary/error) has no paired detail.
-		expect(formatLogDetailSections(event('role_finished', { role: 'x', status: 'success' }))).toBeNull()
-		expect(formatLogDetailSections(event('llm_unavailable', { role: 'x', message: 'down' }))).toBeNull()
-	})
-
-	test('returns null for a malformed payload', () => {
-		expect(formatLogDetailSections(event('llm_call', 'broken'))).toBeNull()
-		expect(formatLogDetailSections(event('llm_call', null))).toBeNull()
-	})
-})
-
-describe('foldLlmCallSent', () => {
-	function event(type: string, payload: unknown): LogEvent {
-		return { timestamp: 't', type, payload }
-	}
-
-	function msg(role: string, content: string): { role: string; content: string } {
-		return { role, content }
-	}
-
-	// A role's logged chain: turn 1 the full request, later turns the delta slices the protocol prescribes.
-	function deltaChain(): LogEvent[] {
-		return [
-			event('role_start', { role: 'coder', roleId: 'coder-0-1' }),
-			event('llm_call', { role: 'coder', roleId: 'coder-0-1', messageCount: 2, sentFrom: 0, sent: [msg('system', 'p'), msg('user', 'task')] }),
-			event('tool_call', { role: 'coder', roleId: 'coder-0-1', tool: 'write_file' }),
-			event('llm_call', { role: 'coder', roleId: 'coder-0-1', messageCount: 4, sentFrom: 2, sent: [msg('assistant', 'turn one'), msg('tool', 'result one')] }),
-			event('llm_call', { role: 'coder', roleId: 'coder-0-1', messageCount: 5, sentFrom: 4, sent: [msg('assistant', 'turn two')] }),
-		]
-	}
-
-	test('a chain of deltas folds back into the full conversation of the turn', () => {
-		const events = deltaChain()
-		const folded = foldLlmCallSent(events, 4)
-		expect(folded).toEqual(event('llm_call', {
-			role: 'coder',
-			roleId: 'coder-0-1',
-			messageCount: 5,
-			sentFrom: 4,
-			sent: [msg('system', 'p'), msg('user', 'task'), msg('assistant', 'turn one'), msg('tool', 'result one'), msg('assistant', 'turn two')],
-		}))
-		// The input events are never mutated.
-		expect(events[4]?.payload).toEqual({ role: 'coder', roleId: 'coder-0-1', messageCount: 5, sentFrom: 4, sent: [msg('assistant', 'turn two')] })
-	})
-
-	test('the walk matches on role instance: a same-named child\u2019s interleaved events do not corrupt the parent\u2019s fold', () => {
-		// The depth guard is the only limit on spawning a same-named child, so the child's llm_call events (same role name, different instance) interleave between the parent's turns.
-		const events = [
-			event('role_start', { role: 'coder', roleId: 'coder-0-1', depth: 0 }),
-			event('llm_call', { role: 'coder', roleId: 'coder-0-1', messageCount: 2, sentFrom: 0, sent: [msg('system', 'parent prompt'), msg('user', 'parent task')] }),
-			event('role_start', { role: 'coder', roleId: 'coder-1-2', depth: 1, parent: 'coder' }),
-			event('llm_call', { role: 'coder', roleId: 'coder-1-2', messageCount: 2, sentFrom: 0, sent: [msg('system', 'child prompt'), msg('user', 'child task')] }),
-			event('llm_call', { role: 'coder', roleId: 'coder-1-2', messageCount: 4, sentFrom: 2, sent: [msg('assistant', 'child turn'), msg('tool', 'child result')] }),
-			event('role_finished', { role: 'coder', roleId: 'coder-1-2', status: 'success' }),
-			event('llm_call', { role: 'coder', roleId: 'coder-0-1', messageCount: 4, sentFrom: 2, sent: [msg('assistant', 'parent turn one'), msg('tool', 'parent result')] }),
-		]
-		expect(foldLlmCallSent(events, 6)).toEqual(event('llm_call', {
-			role: 'coder',
-			roleId: 'coder-0-1',
-			messageCount: 4,
-			sentFrom: 2,
-			sent: [msg('system', 'parent prompt'), msg('user', 'parent task'), msg('assistant', 'parent turn one'), msg('tool', 'parent result')],
-		}))
-	})
-
-	test('a prior event without roleId falls back to the role name', () => {
-		const events = [
-			event('llm_call', { role: 'coder', messageCount: 2, sent: [msg('system', 'p'), msg('user', 'task')] }),
-			event('llm_call', { role: 'coder', roleId: 'coder-0-1', messageCount: 4, sentFrom: 2, sent: [msg('assistant', 'turn one'), msg('tool', 'result one')] }),
-		]
-		expect(foldLlmCallSent(events, 1)).toEqual(event('llm_call', {
-			role: 'coder',
-			roleId: 'coder-0-1',
-			messageCount: 4,
-			sentFrom: 2,
-			sent: [msg('system', 'p'), msg('user', 'task'), msg('assistant', 'turn one'), msg('tool', 'result one')],
-		}))
-	})
-
-	test('the fold skips other roles and event types on the way back', () => {
-		const events = [
-			event('llm_call', { role: 'planner', roleId: 'planner-0-1', messageCount: 3, sentFrom: 1, sent: [msg('assistant', 'planner noise'), msg('tool', 'more noise')] }),
-			event('llm_call', { role: 'coder', roleId: 'coder-0-1', messageCount: 2, sentFrom: 0, sent: [msg('system', 'p'), msg('user', 'task')] }),
-			event('tool_result', { role: 'coder', roleId: 'coder-0-1', tool: 'write_file' }),
-			event('llm_call', { role: 'coder', roleId: 'coder-0-1', messageCount: 3, sentFrom: 2, sent: [msg('assistant', 'turn one')] }),
-		]
-		expect(foldLlmCallSent(events, 3)).toEqual(event('llm_call', { role: 'coder', roleId: 'coder-0-1', messageCount: 3, sentFrom: 2, sent: [msg('system', 'p'), msg('user', 'task'), msg('assistant', 'turn one')] }))
-	})
-
-	test('an event without sentFrom is a full snapshot that ends the walk', () => {
-		const events = [
-			event('llm_call', { role: 'coder', messageCount: 2, sent: [msg('system', 'p'), msg('user', 'task')] }),
-			event('llm_call', { role: 'coder', messageCount: 4, sentFrom: 2, sent: [msg('assistant', 'turn one'), msg('tool', 'result one')] }),
-		]
-		expect(foldLlmCallSent(events, 1)).toEqual(event('llm_call', { role: 'coder', messageCount: 4, sentFrom: 2, sent: [msg('system', 'p'), msg('user', 'task'), msg('assistant', 'turn one'), msg('tool', 'result one')] }))
-	})
-
-	test('a prune-then-grow sequence folds only the post-prune conversation', () => {
-		const events = [
-			event('llm_call', { role: 'coder', messageCount: 4, sentFrom: 0, sent: [msg('system', 'p'), msg('user', 'task'), msg('assistant', 'stale'), msg('tool', 'stale')] }),
-			// The context edit forced a full snapshot of the shrunken conversation; the next delta chains off it, not off the pre-prune history.
-			event('llm_call', { role: 'coder', messageCount: 3, sentFrom: 0, sent: [msg('system', 'p'), msg('user', 'task'), msg('user', '[Platform notice]')] }),
-			event('llm_call', { role: 'coder', messageCount: 5, sentFrom: 3, sent: [msg('assistant', 'fresh turn'), msg('tool', 'fresh result')] }),
-		]
-		expect(foldLlmCallSent(events, 2)).toEqual(event('llm_call', {
-			role: 'coder',
-			messageCount: 5,
-			sentFrom: 3,
-			sent: [msg('system', 'p'), msg('user', 'task'), msg('user', '[Platform notice]'), msg('assistant', 'fresh turn'), msg('tool', 'fresh result')],
-		}))
-	})
-
-	test('a replayed turn after a restart (same sentFrom) contributes nothing and the walk continues past it', () => {
-		const events = [
-			event('llm_call', { role: 'coder', messageCount: 2, sentFrom: 0, sent: [msg('system', 'p'), msg('user', 'task')] }),
-			// The straddling turn's first attempt, which never reached a checkpoint.
-			event('llm_call', { role: 'coder', messageCount: 3, sentFrom: 2, sent: [msg('assistant', 'crashed turn')] }),
-			event('run_resumed', { runId: 'run-1', resumedFrames: 1 }),
-			// The replay emits the same delta again.
-			event('llm_call', { role: 'coder', messageCount: 3, sentFrom: 2, sent: [msg('assistant', 'crashed turn')] }),
-		]
-		expect(foldLlmCallSent(events, 3)).toEqual(event('llm_call', { role: 'coder', messageCount: 3, sentFrom: 2, sent: [msg('system', 'p'), msg('user', 'task'), msg('assistant', 'crashed turn')] }))
-	})
-
-	test('a full snapshot (sentFrom 0) and a non-llm_call event pass through unchanged', () => {
-		const events = deltaChain()
-		const full = events[1]
-		if (full === undefined) throw new Error('missing full-snapshot event')
-		expect(foldLlmCallSent(events, 1)).toBe(full)
-		const start = events[0]
-		if (start === undefined) throw new Error('missing role_start event')
-		expect(foldLlmCallSent(events, 0)).toBe(start)
-	})
-
-	test('an llm_call without a sent body (the standard level) passes through unchanged', () => {
-		const events = [event('llm_call', { role: 'coder', messageCount: 4, sentFrom: 2, usage: { promptTokens: 10, completionTokens: 5 } })]
-		const bodyless = events[0]
-		if (bodyless === undefined) throw new Error('missing bodyless event')
-		expect(foldLlmCallSent(events, 0)).toBe(bodyless)
-	})
-})
-
-describe('formatLogEvent', () => {
-	function event(type: string, payload: unknown): LogEvent {
-		return { timestamp: 't', type, payload }
-	}
-
-	test('llm_call → role · llm call', () => {
-		expect(formatLogEvent(event('llm_call', { role: 'coder', messageCount: 3 }))).toBe('coder · llm call')
-	})
-
-	test('tool_call → role · tool', () => {
-		expect(formatLogEvent(event('tool_call', { role: 'coder', tool: 'write_file' }))).toBe('coder · write_file')
-	})
-
-	test('tool_result → role · tool result (kind)', () => {
-		expect(formatLogEvent(event('tool_result', { role: 'coder', tool: 'write_file', kind: 'success' }))).toBe('coder · write_file result (success)')
-	})
-
-	test('role_finished → role · finished (status)', () => {
-		expect(formatLogEvent(event('role_finished', { role: 'planner', status: 'success' }))).toBe('planner · finished (success)')
-	})
-
-	test('role_finished omits the summary from the one-line view to keep long model prose from widening the row', () => {
-		expect(formatLogEvent(event('role_finished', { role: 'coder', status: 'success', summary: 'wrote output.txt' }))).toBe('coder · finished (success)')
-	})
-
-	test('role_finished shows status only on error; the summary and error reach the raw detail sections instead', () => {
-		expect(formatLogEvent(event('role_finished', { role: 'coder', status: 'error', summary: 'could not parse the file', error: { kind: 'invalid_arguments', message: 'bad json' } }))).toBe('coder · finished (error)')
-	})
-
-	test('role_finished without status omits the parenthetical', () => {
-		expect(formatLogEvent(event('role_finished', { role: 'planner' }))).toBe('planner · finished')
-	})
-
-	test('implicit_finish → role · finished (implicit)', () => {
-		expect(formatLogEvent(event('implicit_finish', { role: 'coder', summary: 'done' }))).toBe('coder · finished (implicit)')
-	})
-
-	test('llm_unavailable → role · llm unavailable', () => {
-		expect(formatLogEvent(event('llm_unavailable', { role: 'coder', message: 'down' }))).toBe('coder · llm unavailable')
-	})
-
-	test('context_budget_exceeded → role · context budget exceeded', () => {
-		expect(formatLogEvent(event('context_budget_exceeded', { role: 'coder', promptTokens: 100, contextWindow: 50 }))).toBe('coder · context budget exceeded')
-	})
-
-	test('context_compacted → role · context compacted by platform', () => {
-		expect(formatLogEvent(event('context_compacted', { role: 'coder', droppedMessages: 4, truncatedToolMessages: 0, strippedReasoningMessages: 0, estimatedPromptTokens: 400, contextWindow: 1000 }))).toBe('coder · context compacted by platform')
-	})
-
-	test('context_pressure → role · context pressure — handoff notice sent', () => {
-		expect(formatLogEvent(event('context_pressure', { role: 'coder', promptTokens: 800, effectiveBudget: 900 }))).toBe('coder · context pressure — handoff notice sent')
-	})
-
-	test('role_budget_exceeded → role · role budget exceeded', () => {
-		expect(formatLogEvent(event('role_budget_exceeded', { role: 'coder', phase: 'post_llm', error: { kind: 'compaction_failed' } }))).toBe('coder · role budget exceeded')
-	})
-
-	test('global_budget_exceeded → role · global budget exceeded', () => {
-		expect(formatLogEvent(event('global_budget_exceeded', { role: 'coder', error: { kind: 'timeout' } }))).toBe('coder · global budget exceeded')
-	})
-
-	test('unknown_tool → role · unknown tool (tool)', () => {
-		expect(formatLogEvent(event('unknown_tool', { role: 'coder', tool: 'frobnicate' }))).toBe('coder · unknown tool (frobnicate)')
-	})
-
-	test('invalid_tool_call → role · invalid tool call (tool)', () => {
-		expect(formatLogEvent(event('invalid_tool_call', { role: 'coder', tool: 'write_file' }))).toBe('coder · invalid tool call (write_file)')
-	})
-
-	test('depth_exceeded → parent · depth exceeded (child at depth N)', () => {
-		expect(formatLogEvent(event('depth_exceeded', { parent: 'orchestrator', child: 'coder', depth: 8, error: { kind: 'agent_depth_exceeded' } }))).toBe('orchestrator · depth exceeded (coder at depth 8)')
-	})
-
-	test('role_not_found uses parent as the acting role when present', () => {
-		expect(formatLogEvent(event('role_not_found', { parent: 'orchestrator', roleName: 'missing' }))).toBe('orchestrator · role not found (missing)')
-	})
-
-	test('role_not_found without parent renders the bare detail', () => {
-		expect(formatLogEvent(event('role_not_found', { roleName: 'missing' }))).toBe('role not found (missing)')
-	})
-
-	test('role_start → role · role start', () => {
-		expect(formatLogEvent(event('role_start', { role: 'planner', depth: 0, task: 'do it' }))).toBe('planner · role start')
-	})
-
-	test('effort_set renders the chosen level', () => {
-		expect(formatLogEvent(event('effort_set', { effort: 'standard' }))).toBe('effort set (standard)')
-	})
-
-	test('effort_set without an effort value renders the bare action', () => {
-		expect(formatLogEvent(event('effort_set', {}))).toBe('effort set')
-	})
-
-	test('involvement_set renders the chosen level', () => {
-		expect(formatLogEvent(event('involvement_set', { involvement: 'collaborative' }))).toBe('involvement set (collaborative)')
-	})
-
-	test('involvement_set without an involvement value renders the bare action', () => {
-		expect(formatLogEvent(event('involvement_set', {}))).toBe('involvement set')
-	})
-
-	test('agent_call → parent · agent call → child', () => {
-		expect(formatLogEvent(event('agent_call', { parent: 'orchestrator', child: 'coder', depth: 1 }))).toBe('orchestrator · agent call → coder')
-	})
-
-	test('agent_call falls back to the payload role when parent is absent', () => {
-		expect(formatLogEvent(event('agent_call', { role: 'orchestrator', child: 'coder' }))).toBe('orchestrator · agent call → coder')
-	})
-
-	test('interrupt → interrupt (handler on target)', () => {
-		expect(formatLogEvent(event('interrupt', { trigger: 'loop_check', handler: 'loop_detector', target: 'coder-1-2' }))).toBe('interrupt (loop_detector on coder-1-2)')
-	})
-
-	test('interrupt without handler and target renders the bare type', () => {
-		expect(formatLogEvent(event('interrupt', { trigger: 'context_pressure' }))).toBe('interrupt')
-	})
-
-	test('interrupt_resolved → interrupt resolved (action on target)', () => {
-		expect(formatLogEvent(event('interrupt_resolved', { trigger: 'inquiry', action: 'answered', target: 'coder-1-2' }))).toBe('interrupt resolved (answered on coder-1-2)')
-	})
-
-	test('observe → role · observe (details)', () => {
-		expect(formatLogEvent(event('observe', { role: 'coder', roleId: 'coder-1-2', details: 'read_message_window' }))).toBe('coder · observe (read_message_window)')
-	})
-
-	test('observe without details renders the bare action', () => {
-		expect(formatLogEvent(event('observe', { role: 'coder' }))).toBe('coder · observe')
-	})
-
-	test('operator_notice → role · operator notice', () => {
-		expect(formatLogEvent(event('operator_notice', { role: 'orchestrator', roleId: 'orchestrator-0-1', message: 'winding down' }))).toBe('orchestrator · operator notice')
-	})
-
-	test('inquiry_dropped → inquiry dropped (reason)', () => {
-		expect(formatLogEvent(event('inquiry_dropped', { message: 'hello?', reason: 'no handler role configured' }))).toBe('inquiry dropped (no handler role configured)')
-	})
-
-	test('inquiry_dropped without a reason renders the bare action', () => {
-		expect(formatLogEvent(event('inquiry_dropped', { message: 'hello?' }))).toBe('inquiry dropped')
-	})
-
-	test('an operator_inquiry event renders as the operator inquiry label', () => {
-		expect(formatLogEvent(event('operator_inquiry', { role: 'orchestrator', roleId: 'orchestrator-0-1', message: 'status?' }))).toBe('orchestrator · operator inquiry')
-	})
-
-	test('an unknown event type with a role falls back to type · role', () => {
-		expect(formatLogEvent(event('something_new', { role: 'coder' }))).toBe('something_new · coder')
-	})
-
-	test('an unknown event type without a role renders the bare type', () => {
-		expect(formatLogEvent(event('something_new', { unrelated: true }))).toBe('something_new')
-	})
-
-	test('does not throw on a non-object payload', () => {
-		expect(formatLogEvent(event('llm_call', 'broken'))).toBe('llm call')
-		expect(formatLogEvent(event('tool_call', null))).toBe('tool call')
-	})
-
-	test('does not throw on an undefined payload', () => {
-		expect(formatLogEvent(event('role_finished', undefined))).toBe('finished')
-	})
-})
+function parseSnapshot(raw: { metaText: string | null, logText: string }): RunSnapshot {
+	return { meta: parseRunMeta(raw.metaText), logEvents: parseLogEvents(raw.logText) }
+}
 
 describe('renderRunView', () => {
 	test('shapes a completed run from its meta and log', () => {
-		const snapshot = parseRunSnapshot({
+		const snapshot = parseSnapshot({
 			metaText: JSON.stringify(sampleRunMeta()),
 			logText: [
 				logEvent('llm_call', 'planner', '2026-01-01T00:00:01.000Z'),
@@ -731,7 +59,7 @@ describe('renderRunView', () => {
 	})
 
 	test('reports unknown status when meta is absent (run in progress)', () => {
-		const snapshot = parseRunSnapshot({ metaText: null, logText: logEvent('llm_call', 'planner', 't1') })
+		const snapshot = parseSnapshot({ metaText: null, logText: logEvent('llm_call', 'planner', 't1') })
 		const view = renderRunView(snapshot, { maxLogLines: 200 })
 		expect(view.status).toBe('unknown')
 		expect(view.runId).toBeNull()
@@ -741,62 +69,62 @@ describe('renderRunView', () => {
 	})
 
 	test('surfaces the run effort from meta.effort, or null when meta is absent or carries no effort', () => {
-		const withEffort = parseRunSnapshot({
+		const withEffort = parseSnapshot({
 			metaText: JSON.stringify(sampleRunMeta({ effort: 'thorough' })),
 			logText: '',
 		})
 		expect(renderRunView(withEffort, { maxLogLines: 200 }).effort).toBe('thorough')
 
-		const withoutEffort = parseRunSnapshot({ metaText: JSON.stringify(sampleRunMeta()), logText: '' })
+		const withoutEffort = parseSnapshot({ metaText: JSON.stringify(sampleRunMeta()), logText: '' })
 		expect(renderRunView(withoutEffort, { maxLogLines: 200 }).effort).toBeNull()
 
-		const inProgress = parseRunSnapshot({ metaText: null, logText: '' })
+		const inProgress = parseSnapshot({ metaText: null, logText: '' })
 		expect(renderRunView(inProgress, { maxLogLines: 200 }).effort).toBeNull()
 	})
 
 	test('surfaces the run involvement from meta.involvement, or null when meta is absent or carries none', () => {
-		const withInvolvement = parseRunSnapshot({
+		const withInvolvement = parseSnapshot({
 			metaText: JSON.stringify(sampleRunMeta({ involvement: 'collaborative' })),
 			logText: '',
 		})
 		expect(renderRunView(withInvolvement, { maxLogLines: 200 }).involvement).toBe('collaborative')
 
-		const withoutInvolvement = parseRunSnapshot({ metaText: JSON.stringify(sampleRunMeta()), logText: '' })
+		const withoutInvolvement = parseSnapshot({ metaText: JSON.stringify(sampleRunMeta()), logText: '' })
 		expect(renderRunView(withoutInvolvement, { maxLogLines: 200 }).involvement).toBeNull()
 
-		const inProgress = parseRunSnapshot({ metaText: null, logText: '' })
+		const inProgress = parseSnapshot({ metaText: null, logText: '' })
 		expect(renderRunView(inProgress, { maxLogLines: 200 }).involvement).toBeNull()
 	})
 
 	test('surfaces the run lineage from meta.continuesFrom, or null when absent or meta is missing', () => {
-		const continuation = parseRunSnapshot({
+		const continuation = parseSnapshot({
 			metaText: JSON.stringify(sampleRunMeta({ continuesFrom: 'run-20260101-000000' })),
 			logText: '',
 		})
 		expect(renderRunView(continuation, { maxLogLines: 200 }).continuesFrom).toBe('run-20260101-000000')
 
-		const standalone = parseRunSnapshot({ metaText: JSON.stringify(sampleRunMeta()), logText: '' })
+		const standalone = parseSnapshot({ metaText: JSON.stringify(sampleRunMeta()), logText: '' })
 		expect(renderRunView(standalone, { maxLogLines: 200 }).continuesFrom).toBeNull()
 
-		const inProgress = parseRunSnapshot({ metaText: null, logText: '' })
+		const inProgress = parseSnapshot({ metaText: null, logText: '' })
 		expect(renderRunView(inProgress, { maxLogLines: 200 }).continuesFrom).toBeNull()
 	})
 
 	test('resumable is true only for an error meta the caller found a checkpoint file for', () => {
-		const errored = parseRunSnapshot({ metaText: JSON.stringify(sampleRunMeta({ status: 'error' })), logText: '' })
+		const errored = parseSnapshot({ metaText: JSON.stringify(sampleRunMeta({ status: 'error' })), logText: '' })
 		expect(renderRunView(errored, { maxLogLines: 200, checkpointExists: true }).resumable).toBe(true)
 		expect(renderRunView(errored, { maxLogLines: 200, checkpointExists: false }).resumable).toBe(false)
 		expect(renderRunView(errored, { maxLogLines: 200 }).resumable).toBe(false)
 
-		const succeeded = parseRunSnapshot({ metaText: JSON.stringify(sampleRunMeta()), logText: '' })
+		const succeeded = parseSnapshot({ metaText: JSON.stringify(sampleRunMeta()), logText: '' })
 		expect(renderRunView(succeeded, { maxLogLines: 200, checkpointExists: true }).resumable).toBe(false)
 
-		const missingMeta = parseRunSnapshot({ metaText: null, logText: '' })
+		const missingMeta = parseSnapshot({ metaText: null, logText: '' })
 		expect(renderRunView(missingMeta, { maxLogLines: 200, checkpointExists: true }).resumable).toBe(false)
 	})
 
 	test('carries the raw plan markdown through to the view, or null when the caller read none', () => {
-		const snapshot = parseRunSnapshot({ metaText: JSON.stringify(sampleRunMeta()), logText: '' })
+		const snapshot = parseSnapshot({ metaText: JSON.stringify(sampleRunMeta()), logText: '' })
 		expect(renderRunView(snapshot, { maxLogLines: 200, plan: '# Plan\n\nstep one' }).plan).toBe('# Plan\n\nstep one')
 		expect(renderRunView(snapshot, { maxLogLines: 200, plan: null }).plan).toBeNull()
 		expect(renderRunView(snapshot, { maxLogLines: 200 }).plan).toBeNull()
@@ -807,7 +135,7 @@ describe('renderRunView', () => {
 		for (let i = 0; i < 10; i++) {
 			lines.push(logEvent('llm_call', 'planner', `t${i}`))
 		}
-		const snapshot = parseRunSnapshot({ metaText: null, logText: lines.join('\n') })
+		const snapshot = parseSnapshot({ metaText: null, logText: lines.join('\n') })
 
 		const view = renderRunView(snapshot, { maxLogLines: 3 })
 		expect(view.recentLog.length).toBe(3)
@@ -816,7 +144,7 @@ describe('renderRunView', () => {
 	})
 
 	test('uses the full log when fewer than maxLogLines events exist', () => {
-		const snapshot = parseRunSnapshot({
+		const snapshot = parseSnapshot({
 			metaText: null,
 			logText: logEvent('llm_call', 'planner', 't1'),
 		})
@@ -825,7 +153,7 @@ describe('renderRunView', () => {
 	})
 
 	test('result is null when the meta has no result field', () => {
-		const snapshot = parseRunSnapshot({
+		const snapshot = parseSnapshot({
 			metaText: JSON.stringify(sampleRunMeta({ result: undefined })),
 			logText: '',
 		})
@@ -835,7 +163,7 @@ describe('renderRunView', () => {
 
 	test('the result card passes through verbatim, including an error card\u2019s technical detail', () => {
 		const card = { status: 'error' as const, summary: 'LLM unavailable: HTTP 402', error: { kind: 'llm_unavailable' as const, message: 'HTTP 402' }, detail: '{"error":"Insufficient credit"}' }
-		const snapshot = parseRunSnapshot({
+		const snapshot = parseSnapshot({
 			metaText: JSON.stringify(sampleRunMeta({ status: 'error', result: card })),
 			logText: '',
 		})
@@ -844,7 +172,7 @@ describe('renderRunView', () => {
 	})
 
 	test('recentLog entries carry the log-wide index and the one-line text, with no payload or detail sections', () => {
-		const snapshot = parseRunSnapshot({
+		const snapshot = parseSnapshot({
 			metaText: null,
 			logText: [
 				logEvent('llm_call', 'planner', 't1'),
@@ -869,26 +197,26 @@ describe('renderRunView', () => {
 		for (let i = 0; i < 10; i++) {
 			lines.push(logEvent('llm_call', 'planner', `t${i}`))
 		}
-		const snapshot = parseRunSnapshot({ metaText: null, logText: lines.join('\n') })
+		const snapshot = parseSnapshot({ metaText: null, logText: lines.join('\n') })
 
 		const view = renderRunView(snapshot, { maxLogLines: 3 })
 		expect(view.recentLog.map((entry) => entry.index)).toEqual([7, 8, 9])
 	})
 
 	test('error is null while a run is in progress', () => {
-		const snapshot = parseRunSnapshot({ metaText: null, logText: '' })
+		const snapshot = parseSnapshot({ metaText: null, logText: '' })
 		const view = renderRunView(snapshot, { maxLogLines: 200 })
 		expect(view.error).toBeNull()
 	})
 
 	test('error is null when a completed run has no error', () => {
-		const snapshot = parseRunSnapshot({ metaText: JSON.stringify(sampleRunMeta()), logText: '' })
+		const snapshot = parseSnapshot({ metaText: JSON.stringify(sampleRunMeta()), logText: '' })
 		const view = renderRunView(snapshot, { maxLogLines: 200 })
 		expect(view.error).toBeNull()
 	})
 
 	test('error surfaces the kind and message of a failed run', () => {
-		const snapshot = parseRunSnapshot({
+		const snapshot = parseSnapshot({
 			metaText: JSON.stringify(sampleRunMeta({
 				status: 'error',
 				error: { kind: 'llm_unavailable', message: 'connection refused' },
@@ -901,7 +229,7 @@ describe('renderRunView', () => {
 	})
 
 	test('currentActivity reflects the most recent event role and summary', () => {
-		const snapshot = parseRunSnapshot({
+		const snapshot = parseSnapshot({
 			metaText: null,
 			logText: [
 				logEvent('llm_call', 'planner', 't1'),
@@ -914,13 +242,13 @@ describe('renderRunView', () => {
 	})
 
 	test('currentActivity is null for an empty log', () => {
-		const snapshot = parseRunSnapshot({ metaText: null, logText: '' })
+		const snapshot = parseSnapshot({ metaText: null, logText: '' })
 		const view = renderRunView(snapshot, { maxLogLines: 200 })
 		expect(view.currentActivity).toBeNull()
 	})
 
 	test('roleTree is null when the log carries no role_start/role_finished/agent_call events', () => {
-		const snapshot = parseRunSnapshot({
+		const snapshot = parseSnapshot({
 			metaText: null,
 			logText: [
 				logEvent('llm_call', 'planner', 't1'),
@@ -933,7 +261,7 @@ describe('renderRunView', () => {
 	})
 
 	test('roleTree surfaces a parent→child tree when role_start/role_finished events are present', () => {
-		const snapshot = parseRunSnapshot({
+		const snapshot = parseSnapshot({
 			metaText: null,
 			logText: [
 				JSON.stringify({ timestamp: 't1', type: 'role_start', payload: { role: 'orchestrator', depth: 0, task: 't' } }),
@@ -954,7 +282,7 @@ describe('renderRunView', () => {
 	})
 
 	test('questionHistory pairs ask_human events with their human_answer events', () => {
-		const snapshot = parseRunSnapshot({
+		const snapshot = parseSnapshot({
 			metaText: null,
 			logText: [
 				askHumanEvent('q1', 'Which file?', 't1', 'src/index.ts'),
@@ -981,7 +309,7 @@ describe('renderRunView', () => {
 	})
 
 	test('questionHistory is empty for a log with no ask_human events', () => {
-		const snapshot = parseRunSnapshot({
+		const snapshot = parseSnapshot({
 			metaText: null,
 			logText: [
 				logEvent('llm_call', 'planner', 't1'),
@@ -995,7 +323,7 @@ describe('renderRunView', () => {
 
 	test('two renders of the same snapshot are deeply equal — the payload is clock-independent', () => {
 		// The run view feeds an ETag over stored data, so two derivations at different wall-clock moments must serialize identically.
-		const snapshot = parseRunSnapshot({
+		const snapshot = parseSnapshot({
 			metaText: JSON.stringify(sampleRunMeta({ startTime: '2026-01-01T00:00:00.000Z', endTime: '2026-01-01T00:01:00.000Z' })),
 			logText: [
 				logEvent('llm_call', 'planner', '2026-01-01T00:00:01.000Z'),
@@ -1006,341 +334,8 @@ describe('renderRunView', () => {
 		const second = renderRunView(snapshot, { maxLogLines: 200 })
 		expect(second).toEqual(first)
 		// An in-progress run (no stored endTime) reports null elapsed, not a clock-derived figure.
-		const inProgress = parseRunSnapshot({ metaText: JSON.stringify(sampleRunMeta({ startTime: '2026-01-01T00:00:00.000Z', endTime: undefined })), logText: '' })
+		const inProgress = parseSnapshot({ metaText: JSON.stringify(sampleRunMeta({ startTime: '2026-01-01T00:00:00.000Z', endTime: undefined })), logText: '' })
 		expect(renderRunView(inProgress, { maxLogLines: 200 }).budgets.elapsedSeconds).toBeNull()
-	})
-})
-
-describe('deriveQuestionHistory', () => {
-	test('pairs a single ask_human with its human_answer', () => {
-		const events: LogEvent[] = [
-			{ timestamp: 't1', type: 'ask_human', payload: { id: 'q1', question: 'Which file?' } },
-			{ timestamp: 't2', type: 'human_answer', payload: { id: 'q1', answer: 'src/index.ts' } },
-		]
-
-		expect(deriveQuestionHistory(events)).toEqual([
-			{ id: 'q1', question: 'Which file?', askedAt: 't1', answer: 'src/index.ts', answeredAt: 't2' },
-		])
-	})
-
-	test('pairs multiple questions with their answers out of order', () => {
-		const events: LogEvent[] = [
-			{ timestamp: 't1', type: 'ask_human', payload: { id: 'q1', question: 'first?' } },
-			{ timestamp: 't2', type: 'ask_human', payload: { id: 'q2', question: 'second?' } },
-			{ timestamp: 't3', type: 'human_answer', payload: { id: 'q2', answer: 'second answer' } },
-			{ timestamp: 't4', type: 'human_answer', payload: { id: 'q1', answer: 'first answer' } },
-		]
-
-		expect(deriveQuestionHistory(events)).toEqual([
-			{ id: 'q1', question: 'first?', askedAt: 't1', answer: 'first answer', answeredAt: 't4' },
-			{ id: 'q2', question: 'second?', askedAt: 't2', answer: 'second answer', answeredAt: 't3' },
-		])
-	})
-
-	test('leaves an unanswered question without an answer field', () => {
-		const events: LogEvent[] = [
-			{ timestamp: 't1', type: 'ask_human', payload: { id: 'q1', question: 'answered?' } },
-			{ timestamp: 't2', type: 'ask_human', payload: { id: 'q2', question: 'still pending?' } },
-			{ timestamp: 't3', type: 'human_answer', payload: { id: 'q1', answer: 'yes' } },
-		]
-
-		const history = deriveQuestionHistory(events)
-		expect(history.length).toBe(2)
-		expect(defined(history[0], 'history[0]').answer).toBe('yes')
-		expect(defined(history[0], 'history[0]').answeredAt).toBe('t3')
-		expect(defined(history[1], 'history[1]').answer).toBeUndefined()
-		expect(defined(history[1], 'history[1]').answeredAt).toBeUndefined()
-	})
-
-	test('preserves the context field when present', () => {
-		const events: LogEvent[] = [
-			{ timestamp: 't1', type: 'ask_human', payload: { id: 'q1', question: 'q', context: 'ctx' } },
-		]
-
-		expect(deriveQuestionHistory(events)).toEqual([
-			{ id: 'q1', question: 'q', context: 'ctx', askedAt: 't1' },
-		])
-	})
-
-	test('preserves ask order in the returned list', () => {
-		const events: LogEvent[] = [
-			{ timestamp: 't1', type: 'ask_human', payload: { id: 'q3', question: 'third?' } },
-			{ timestamp: 't2', type: 'ask_human', payload: { id: 'q1', question: 'first?' } },
-			{ timestamp: 't3', type: 'ask_human', payload: { id: 'q2', question: 'second?' } },
-		]
-
-		const history = deriveQuestionHistory(events)
-		expect(history.map((entry) => entry.id)).toEqual(['q3', 'q1', 'q2'])
-	})
-
-	test('ignores a human_answer with no matching ask_human', () => {
-		const events: LogEvent[] = [
-			{ timestamp: 't1', type: 'human_answer', payload: { id: 'orphan', answer: 'no question' } },
-			{ timestamp: 't2', type: 'ask_human', payload: { id: 'q1', question: 'q?' } },
-		]
-
-		expect(deriveQuestionHistory(events)).toEqual([
-			{ id: 'q1', question: 'q?', askedAt: 't2' },
-		])
-	})
-
-	test('does not throw on a malformed payload', () => {
-		const events: LogEvent[] = [
-			{ timestamp: 't1', type: 'ask_human', payload: null },
-			{ timestamp: 't2', type: 'ask_human', payload: { question: 123 } },
-			{ timestamp: 't3', type: 'human_answer', payload: 'broken' },
-			{ timestamp: 't4', type: 'ask_human', payload: { id: 'q1', question: 'ok?' } },
-		]
-
-		expect(deriveQuestionHistory(events)).toEqual([
-			{ id: 'q1', question: 'ok?', askedAt: 't4' },
-		])
-	})
-
-	test('returns an empty list for an empty log', () => {
-		expect(deriveQuestionHistory([])).toEqual([])
-	})
-})
-
-describe('deriveInterruptHistory', () => {
-	test('pairs an inquiry with the handler’s answered resolution', () => {
-		const events: LogEvent[] = [
-			{ timestamp: 't1', type: 'interrupt', payload: { trigger: 'inquiry', handler: 'inquiry_responder', target: 'coder-1-2', message: 'what are you doing?' } },
-			{ timestamp: 't2', type: 'interrupt_resolved', payload: { trigger: 'inquiry', handler: 'inquiry_responder', target: 'coder-1-2', action: 'answered', summary: 'I am writing the parser.' } },
-		]
-
-		expect(deriveInterruptHistory(events)).toEqual([
-			{ kind: 'inquiry', askedAt: 't1', role: 'inquiry_responder', message: 'what are you doing?', answer: 'I am writing the parser.', answeredAt: 't2', ended: false },
-		])
-	})
-
-	test('an unanswered inquiry stays waiting', () => {
-		const events: LogEvent[] = [
-			{ timestamp: 't1', type: 'interrupt', payload: { trigger: 'inquiry', handler: 'inquiry_responder', target: 'coder-1-2', message: 'status?' } },
-		]
-
-		expect(deriveInterruptHistory(events)).toEqual([
-			{ kind: 'inquiry', askedAt: 't1', role: 'inquiry_responder', message: 'status?', answer: null, answeredAt: null, ended: false },
-		])
-	})
-
-	test('a failed resolution marks the inquiry ended', () => {
-		const events: LogEvent[] = [
-			{ timestamp: 't1', type: 'interrupt', payload: { trigger: 'inquiry', handler: 'inquiry_responder', target: 'coder-1-2', message: 'status?' } },
-			{ timestamp: 't2', type: 'interrupt_resolved', payload: { trigger: 'inquiry', handler: 'inquiry_responder', target: 'coder-1-2', action: 'failed', handlerStatus: 'error', summary: 'the handler failed' } },
-		]
-
-		const entry = defined(deriveInterruptHistory(events)[0], 'entry')
-		if (entry.kind !== 'inquiry') throw new Error('expected inquiry')
-		expect(entry.answer).toBeNull()
-		expect(entry.answeredAt).toBeNull()
-		expect(entry.ended).toBe(true)
-	})
-
-	test('an answered action with an empty summary marks the inquiry ended rather than answered', () => {
-		const events: LogEvent[] = [
-			{ timestamp: 't1', type: 'interrupt', payload: { trigger: 'inquiry', handler: 'inquiry_responder', target: 'coder-1-2', message: 'status?' } },
-			{ timestamp: 't2', type: 'interrupt_resolved', payload: { trigger: 'inquiry', handler: 'inquiry_responder', target: 'coder-1-2', action: 'answered', summary: '' } },
-		]
-
-		const entry = defined(deriveInterruptHistory(events)[0], 'entry')
-		if (entry.kind !== 'inquiry') throw new Error('expected inquiry')
-		expect(entry.answer).toBeNull()
-		expect(entry.ended).toBe(true)
-	})
-
-	test('two inquiries pair with their resolutions oldest-first', () => {
-		const events: LogEvent[] = [
-			{ timestamp: 't1', type: 'interrupt', payload: { trigger: 'inquiry', handler: 'inquiry_responder', target: 'coder-1-2', message: 'first?' } },
-			{ timestamp: 't2', type: 'interrupt', payload: { trigger: 'inquiry', handler: 'inquiry_responder', target: 'coder-1-2', message: 'second?' } },
-			{ timestamp: 't3', type: 'interrupt_resolved', payload: { trigger: 'inquiry', action: 'answered', summary: 'answer one' } },
-			{ timestamp: 't4', type: 'interrupt_resolved', payload: { trigger: 'inquiry', action: 'answered', summary: 'answer two' } },
-		]
-
-		const history = deriveInterruptHistory(events)
-		expect(history.length).toBe(2)
-		const first = defined(history[0], 'history[0]')
-		const second = defined(history[1], 'history[1]')
-		if (first.kind !== 'inquiry' || second.kind !== 'inquiry') throw new Error('expected inquiries')
-		expect(first.answer).toBe('answer one')
-		expect(second.answer).toBe('answer two')
-	})
-
-	test('records a plan modification with its target and aborted list', () => {
-		const events: LogEvent[] = [
-			{ timestamp: 't1', type: 'plan_modification', payload: { target: 'planner-0-1', targetRole: 'planner', message: 'use Postgres', aborted: ['coder-1-2', 'sub-coder-2-3'] } },
-		]
-
-		expect(deriveInterruptHistory(events)).toEqual([
-			{ kind: 'plan_modification', askedAt: 't1', message: 'use Postgres', target: 'planner-0-1', targetRole: 'planner', aborted: ['coder-1-2', 'sub-coder-2-3'] },
-		])
-	})
-
-	test('ignores operator_inquiry events, non-inquiry triggers, and malformed payloads', () => {
-		const events: LogEvent[] = [
-			{ timestamp: 't1', type: 'operator_inquiry', payload: { role: 'coder', message: 'status?' } },
-			{ timestamp: 't2', type: 'interrupt', payload: null },
-			{ timestamp: 't3', type: 'interrupt', payload: { trigger: 'loop_check', handler: 'loop_detector', target: 'coder-1-2' } },
-			{ timestamp: 't4', type: 'interrupt', payload: { trigger: 'inquiry', handler: 'inquiry_responder', target: 'coder-1-2' } },
-			{ timestamp: 't5', type: 'interrupt_resolved', payload: { trigger: 'inquiry', action: 'answered', summary: 'orphaned resolution' } },
-			{ timestamp: 't6', type: 'plan_modification', payload: { message: 42 } },
-			{ timestamp: 't7', type: 'interrupt', payload: { trigger: 'inquiry', handler: 'inquiry_responder', target: 'coder-1-2', message: 'ok?' } },
-		]
-
-		expect(deriveInterruptHistory(events)).toEqual([
-			{ kind: 'inquiry', askedAt: 't7', role: 'inquiry_responder', message: 'ok?', answer: null, answeredAt: null, ended: false },
-		])
-	})
-
-	test('returns an empty list for a log without interrupt events', () => {
-		expect(deriveInterruptHistory([])).toEqual([])
-	})
-})
-
-describe('deriveBudgets', () => {
-	function llmCallEvent(role: string, timestamp: string, usage: { promptTokens: number; completionTokens: number; totalTokens: number; cachedPromptTokens?: number }): LogEvent {
-		return { timestamp, type: 'llm_call', payload: { role, usage } }
-	}
-
-	function toolCallEvent(role: string, timestamp: string, tool: string): LogEvent {
-		return { timestamp, type: 'tool_call', payload: { role, tool } }
-	}
-
-	test('derives elapsed time from meta.startTime to meta.endTime for a completed run', () => {
-		const meta = sampleRunMeta({ startTime: '2026-01-01T00:00:00.000Z', endTime: '2026-01-01T00:01:30.000Z' })
-		const budgets = deriveBudgets([], meta)
-		expect(budgets.elapsedSeconds).toBe(90)
-	})
-
-	test('reports null elapsed for an in-progress run (meta null) — a live figure is the client’s to compute', () => {
-		const logEvents: LogEvent[] = [
-			{ timestamp: '2026-01-01T00:00:00.000Z', type: 'llm_call', payload: { role: 'planner' } },
-			toolCallEvent('planner', '2026-01-01T00:00:10.000Z', 'read_file'),
-		]
-		const budgets = deriveBudgets(logEvents, null)
-		expect(budgets.elapsedSeconds).toBeNull()
-	})
-
-	test('reports null elapsed for a run whose meta carries no stored endTime', () => {
-		const meta = sampleRunMeta({ startTime: '2026-01-01T00:01:00.000Z', endTime: undefined })
-		const budgets = deriveBudgets([], meta)
-		expect(budgets.elapsedSeconds).toBeNull()
-	})
-
-	test('counts tool_call events across all roles', () => {
-		const meta = sampleRunMeta()
-		const logEvents: LogEvent[] = [
-			toolCallEvent('planner', 't1', 'agent'),
-			toolCallEvent('coder', 't2', 'write_file'),
-			toolCallEvent('coder', 't3', 'read_file'),
-			{ timestamp: 't4', type: 'tool_result', payload: { role: 'coder', tool: 'write_file', kind: 'success' } },
-		]
-		expect(deriveBudgets(logEvents, meta).toolCalls).toBe(3)
-	})
-
-	test('sums totalTokens from llm_call usage fields across roles', () => {
-		const meta = sampleRunMeta()
-		const logEvents: LogEvent[] = [
-			llmCallEvent('planner', 't1', { promptTokens: 100, completionTokens: 20, totalTokens: 120 }),
-			llmCallEvent('coder', 't2', { promptTokens: 200, completionTokens: 50, totalTokens: 250 }),
-		]
-		expect(deriveBudgets(logEvents, meta).tokensUsed).toBe(370)
-	})
-
-	test('returns null tokens when no llm_call event carries usage', () => {
-		const meta = sampleRunMeta()
-		const logEvents: LogEvent[] = [
-			{ timestamp: 't1', type: 'llm_call', payload: { role: 'planner' } },
-			toolCallEvent('planner', 't2', 'read_file'),
-		]
-		expect(deriveBudgets(logEvents, meta).tokensUsed).toBeNull()
-		expect(deriveBudgets(logEvents, meta).tokenBreakdown).toBeNull()
-	})
-
-	test('sums usage from the events that carry it and skips those that do not', () => {
-		const meta = sampleRunMeta()
-		const logEvents: LogEvent[] = [
-			{ timestamp: 't1', type: 'llm_call', payload: { role: 'planner' } },
-			llmCallEvent('coder', 't2', { promptTokens: 40, completionTokens: 10, totalTokens: 50 }),
-		]
-		expect(deriveBudgets(logEvents, meta).tokensUsed).toBe(50)
-	})
-
-	test('does not throw on a malformed llm_call payload', () => {
-		const meta = sampleRunMeta()
-		const logEvents: LogEvent[] = [
-			{ timestamp: 't1', type: 'llm_call', payload: 'broken' },
-			{ timestamp: 't2', type: 'llm_call', payload: { role: 'coder', usage: 'not-an-object' } },
-		]
-		expect(deriveBudgets(logEvents, meta).tokensUsed).toBeNull()
-	})
-
-	test('returns null elapsed and zero tool calls for an empty log with no meta', () => {
-		expect(deriveBudgets([], null)).toEqual({ elapsedSeconds: null, toolCalls: 0, tokensUsed: null, tokenBreakdown: null })
-	})
-
-	test('breaks tokens into prompt, cached prompt, and completion buckets', () => {
-		const meta = sampleRunMeta()
-		const logEvents: LogEvent[] = [
-			llmCallEvent('planner', 't1', { promptTokens: 100, completionTokens: 20, totalTokens: 120, cachedPromptTokens: 60 }),
-			llmCallEvent('coder', 't2', { promptTokens: 200, completionTokens: 50, totalTokens: 250 }),
-		]
-		expect(deriveBudgets(logEvents, meta).tokenBreakdown).toEqual({
-			promptTokens: 300,
-			cachedPromptTokens: 60,
-			completionTokens: 70,
-			totalTokens: 370,
-		})
-	})
-
-	test('cachedPromptTokens defaults to 0 when no call reports a cached share', () => {
-		const meta = sampleRunMeta()
-		const logEvents: LogEvent[] = [
-			llmCallEvent('planner', 't1', { promptTokens: 100, completionTokens: 20, totalTokens: 120 }),
-		]
-		const breakdown = present(deriveBudgets(logEvents, meta).tokenBreakdown, 'tokenBreakdown')
-		expect(breakdown.cachedPromptTokens).toBe(0)
-		expect(breakdown.promptTokens).toBe(100)
-	})
-
-	test('llm_retry usage is real spend and sums into the run-wide totals', () => {
-		const meta = sampleRunMeta()
-		const logEvents: LogEvent[] = [
-			{ timestamp: 't1', type: 'llm_retry', payload: { role: 'coder', roleId: 'coder-0-1', discardedAttempts: 2, usage: { promptTokens: 90, completionTokens: 10, totalTokens: 100 } } },
-			llmCallEvent('coder', 't2', { promptTokens: 100, completionTokens: 20, totalTokens: 120 }),
-		]
-		const budgets = deriveBudgets(logEvents, meta)
-		expect(budgets.tokensUsed).toBe(220)
-		const breakdown = present(budgets.tokenBreakdown, 'tokenBreakdown')
-		expect(breakdown.promptTokens).toBe(190)
-		expect(breakdown.completionTokens).toBe(30)
-	})
-
-	test('an llm_retry without a usage object contributes nothing', () => {
-		const meta = sampleRunMeta()
-		const logEvents: LogEvent[] = [
-			{ timestamp: 't1', type: 'llm_retry', payload: { role: 'coder', roleId: 'coder-0-1', discardedAttempts: 1 } },
-			llmCallEvent('coder', 't2', { promptTokens: 40, completionTokens: 10, totalTokens: 50 }),
-		]
-		expect(deriveBudgets(logEvents, meta).tokensUsed).toBe(50)
-	})
-
-	test('summarizer_llm_call usage sums into the run-wide totals without naming a role', () => {
-		const meta = sampleRunMeta()
-		const logEvents: LogEvent[] = [
-			{ timestamp: 't1', type: 'summarizer_llm_call', payload: { usage: { promptTokens: 500, completionTokens: 30, totalTokens: 530 } } },
-			llmCallEvent('coder', 't2', { promptTokens: 40, completionTokens: 10, totalTokens: 50 }),
-		]
-		expect(deriveBudgets(logEvents, meta).tokensUsed).toBe(580)
-	})
-
-	test('does not throw on a malformed llm_retry or summarizer_llm_call payload', () => {
-		const meta = sampleRunMeta()
-		const logEvents: LogEvent[] = [
-			{ timestamp: 't1', type: 'llm_retry', payload: 'broken' },
-			{ timestamp: 't2', type: 'summarizer_llm_call', payload: { usage: 'not-an-object' } },
-		]
-		expect(deriveBudgets(logEvents, meta).tokensUsed).toBeNull()
 	})
 })
 
@@ -1457,104 +452,6 @@ describe('renderPendingQuestions', () => {
 
 	test('returns an empty array for no pending questions', () => {
 		expect(renderPendingQuestions([])).toEqual([])
-	})
-})
-
-describe('toRecentLogEntry', () => {
-	test('pairs the log-wide index with the one-line rendering', () => {
-		const event: LogEvent = { timestamp: 't1', type: 'tool_call', payload: { role: 'coder', tool: 'write_file' } }
-		expect(toRecentLogEntry(event, 7)).toEqual({
-			index: 7,
-			timestamp: 't1',
-			type: 'tool_call',
-			text: 'coder · write_file',
-		})
-	})
-
-	test('carries no payload or detail sections — the poll path ships identities only', () => {
-		const event: LogEvent = { timestamp: 't1', type: 'tool_call', payload: { role: 'coder', tool: 'write_file', arguments: '{"path":"README.md"}' } }
-		const entry = toRecentLogEntry(event, 0)
-		expect(entry).not.toHaveProperty('payload')
-		expect(entry).not.toHaveProperty('detailSections')
-	})
-
-	test('renders the one-line text for a malformed payload', () => {
-		const event: LogEvent = { timestamp: 't1', type: 'llm_call', payload: 'broken' }
-		const entry = toRecentLogEntry(event, 3)
-		expect(entry.text).toBe('llm call')
-	})
-})
-
-describe('paginateLogEvents', () => {
-	function events(n: number): LogEvent[] {
-		const list: LogEvent[] = []
-		for (let i = 0; i < n; i++) list.push({ timestamp: `t${i}`, type: 'llm_call', payload: { role: 'planner' } })
-		return list
-	}
-
-	test('returns the first page with the full total and applied offset/limit', () => {
-		const page = paginateLogEvents(events(10), { offset: 0, limit: 3 })
-		expect(page.total).toBe(10)
-		expect(page.offset).toBe(0)
-		expect(page.limit).toBe(3)
-		expect(page.events.length).toBe(3)
-		expect(defined(page.events[0], 'page.events[0]').timestamp).toBe('t0')
-		expect(defined(page.events[2], 'page.events[2]').timestamp).toBe('t2')
-	})
-
-	test('returns a later page starting at offset', () => {
-		const page = paginateLogEvents(events(10), { offset: 5, limit: 3 })
-		expect(page.total).toBe(10)
-		expect(page.offset).toBe(5)
-		expect(page.events.length).toBe(3)
-		expect(defined(page.events[0], 'page.events[0]').timestamp).toBe('t5')
-		expect(defined(page.events[2], 'page.events[2]').timestamp).toBe('t7')
-	})
-
-	test('returns the partial final page when fewer than limit remain', () => {
-		const page = paginateLogEvents(events(10), { offset: 8, limit: 5 })
-		expect(page.total).toBe(10)
-		expect(page.events.length).toBe(2)
-		expect(defined(page.events[0], 'page.events[0]').timestamp).toBe('t8')
-		expect(defined(page.events[1], 'page.events[1]').timestamp).toBe('t9')
-	})
-
-	test('returns an empty page with the correct total when offset is past the end', () => {
-		const page = paginateLogEvents(events(10), { offset: 50, limit: 5 })
-		expect(page.total).toBe(10)
-		expect(page.offset).toBe(50)
-		expect(page.events).toEqual([])
-	})
-
-	test('returns an empty page for an empty log', () => {
-		const page = paginateLogEvents([], { offset: 0, limit: 5 })
-		expect(page.total).toBe(0)
-		expect(page.events).toEqual([])
-	})
-
-	test('returns the whole log when limit exceeds the count', () => {
-		const page = paginateLogEvents(events(3), { offset: 0, limit: 100 })
-		expect(page.total).toBe(3)
-		expect(page.events.length).toBe(3)
-	})
-})
-
-describe('formatLogAsText', () => {
-	test('renders one tab-separated line per event mirroring formatLogEvent', () => {
-		const events: LogEvent[] = [
-			{ timestamp: 't1', type: 'llm_call', payload: { role: 'planner' } },
-			{ timestamp: 't2', type: 'tool_call', payload: { role: 'planner', tool: 'agent' } },
-		]
-		expect(formatLogAsText(events)).toBe('t1\tllm_call\tplanner · llm call\nt2\ttool_call\tplanner · agent')
-	})
-
-	test('returns an empty string for an empty log', () => {
-		expect(formatLogAsText([])).toBe('')
-	})
-
-	test('does not throw on a malformed payload', () => {
-		const events: LogEvent[] = [{ timestamp: 't1', type: 'llm_call', payload: 'broken' }]
-		expect(formatLogAsText(events)).toBe('t1\tllm_call\tllm call')
 	})
 })
 

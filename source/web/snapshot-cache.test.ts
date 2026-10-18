@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import type { RunSnapshotStats } from '../executor/persistence.ts'
-import { formatLogEvent } from './render.ts'
+import { toRecentLogEntry } from '../run-log/format/index.js'
 import { createSnapshotCache } from './snapshot-cache.ts'
 import { defined } from './test-fixtures.js'
 
@@ -201,7 +201,7 @@ describe('createSnapshotCache', () => {
 		const bytesBefore = backend.logBytesRead()
 		const snapshot = read('run-1')
 		const event = defined(snapshot.logEvents[0], 'snapshot.logEvents[0]')
-		expect(formatLogEvent(event)).toBe('painter · role start')
+		expect(toRecentLogEntry(event, 0).text).toBe('painter · role start')
 		expect(backend.logReads()).toBe(2)
 		expect(backend.logBytesRead() - bytesBefore).toBe(rewritten.length)
 	})

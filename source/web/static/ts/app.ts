@@ -46,7 +46,7 @@ import type { BuildInfo } from './build-info.js'
 // --- Application state -----------------------------------------------------
 // The single state object every action threads. The wire shapes below mirror the server contracts (source/web/render.ts) but live here because the static bundle cannot import from the server modules; every field a poll fills in is re-guarded at its fetch's ingress action.
 
-// One interrupt-history entry in a run view (`InterruptHistoryEntry` in source/web/render.ts).
+// One interrupt-history entry in a run view (`InterruptHistoryEntry` in source/run-log/derive/index.ts).
 export interface InterruptInquiryEntry {
 	kind: 'inquiry'
 	askedAt: string
