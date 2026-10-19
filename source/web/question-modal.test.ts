@@ -135,4 +135,41 @@ describe('QuestionModal', () => {
 		const scoped: Vnode = QuestionModal(fakeH, { question, runLabel: 'run-1', renderMarkdown: fakeRenderMarkdown, onSubmit: () => undefined })
 		expect(scoped.props.class).toBe('question-modal-overlay')
 	})
+
+	test('renders no terminate button unless the caller supplies one', () => {
+		const modal: Vnode = QuestionModal(fakeH, { question, runLabel: 'run-1', renderMarkdown: fakeRenderMarkdown, onSubmit: () => undefined })
+		const form = defined(allByTag(modal, 'form').find((f) => f.props.class === 'question-modal-form'), 'form')
+		expect(byTag(form, 'button').some((button) => button.props.class === 'question-modal-terminate')).toBe(false)
+	})
+
+	test('renders a secondary terminate button that fires the supplied action', () => {
+		let terminations = 0
+		const onTerminate = () => {
+			terminations++
+		}
+		const modal: Vnode = QuestionModal(fakeH, { question, runLabel: 'run-1', renderMarkdown: fakeRenderMarkdown, onSubmit: () => undefined, onTerminate })
+		const form = defined(allByTag(modal, 'form').find((f) => f.props.class === 'question-modal-form'), 'form')
+		const terminate = defined(byTag(form, 'button').find((button) => button.props.class === 'question-modal-terminate'), 'terminate')
+		expect(terminate.props.type).toBe('button')
+		expect(terminate.props.disabled).toBe(false)
+		expect(terminate.children.join('')).toBe('Terminate task')
+		const onclick = terminate.props.onclick
+		if (typeof onclick !== 'function') throw new Error('expected a terminate click handler')
+		onclick()
+		expect(terminations).toBe(1)
+	})
+
+	test('answerPending disables the terminate button too', () => {
+		const modal: Vnode = QuestionModal(fakeH, { question, runLabel: 'run-1', renderMarkdown: fakeRenderMarkdown, onSubmit: () => undefined, onTerminate: () => undefined, answerPending: true })
+		const form = defined(allByTag(modal, 'form').find((f) => f.props.class === 'question-modal-form'), 'form')
+		const terminate = defined(byTag(form, 'button').find((button) => button.props.class === 'question-modal-terminate'), 'terminate')
+		expect(terminate.props.disabled).toBe(true)
+	})
+
+	test('terminatePending disables the terminate button while the request is in flight', () => {
+		const modal: Vnode = QuestionModal(fakeH, { question, runLabel: 'run-1', renderMarkdown: fakeRenderMarkdown, onSubmit: () => undefined, onTerminate: () => undefined, terminatePending: true })
+		const form = defined(allByTag(modal, 'form').find((f) => f.props.class === 'question-modal-form'), 'form')
+		const terminate = defined(byTag(form, 'button').find((button) => button.props.class === 'question-modal-terminate'), 'terminate')
+		expect(terminate.props.disabled).toBe(true)
+	})
 })

@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { createTaskQueue, type QueueItemView, type QueueView, type ResumeParkedRunResult } from './index.ts'
+import { createTaskQueue, type QueueItemView, type QueueView, type ResumeParkedRunResult, type TerminateParkedRunResult } from './index.ts'
 import { cancelWaitingItem, dispatchingItem, isQueueItem, pendingAnswerUndelivered, releaseToWaiting, toQueueItemView, type QueueItem } from './model.ts'
 import type { ParkedAsk } from '../park-state.js'
 import type { RunContinuation, RunMeta } from '../types.js'
@@ -105,9 +105,10 @@ interface QueueHarness {
 	written: () => QueueView[]
 	submitCalls: QueuedRunSubmission[]
 	resumeCalls: Array<{ runId: string; parkedAnswer: { question: string; answer: string; toolCallId: string } }>
+	terminateCalls: string[]
 }
 
-function makeQueue(options: { initial?: QueueSeedItem[], submitResults?: QueuedRunSubmitResult[], hasActiveRun?: () => boolean, metas?: Record<string, RunMeta>, runs?: RunListEntry[], parkedAsks?: Record<string, ParkedAsk | null>, resumeResults?: ResumeParkedRunResult[] } = {}): QueueHarness {
+function makeQueue(options: { initial?: QueueSeedItem[], submitResults?: QueuedRunSubmitResult[], hasActiveRun?: () => boolean, metas?: Record<string, RunMeta>, runs?: RunListEntry[], parkedAsks?: Record<string, ParkedAsk | null>, resumeResults?: ResumeParkedRunResult[], terminateResults?: TerminateParkedRunResult[] } = {}): QueueHarness {
 	const store = fakeQueueStore(options.initial ?? [])
 	const scripted = [...(options.submitResults ?? [])]
 	const submitCalls: QueuedRunSubmission[] = []
@@ -120,6 +121,8 @@ function makeQueue(options: { initial?: QueueSeedItem[], submitResults?: QueuedR
 	const runs = options.runs ?? []
 	const resumeScript = [...(options.resumeResults ?? [])]
 	const resumeCalls: Array<{ runId: string; parkedAnswer: { question: string; answer: string; toolCallId: string } }> = []
+	const terminateScript = [...(options.terminateResults ?? [])]
+	const terminateCalls: string[] = []
 	const queue = createTaskQueue({
 		queueStore: store.store,
 		readRunMetaById: (runId) => {
@@ -137,12 +140,16 @@ function makeQueue(options: { initial?: QueueSeedItem[], submitResults?: QueuedR
 			resumeCalls.push({ runId, parkedAnswer })
 			return resumeScript.shift() ?? { ok: false, error: 'checkpoint_missing' }
 		},
+		terminateParkedRun: (runId) => {
+			terminateCalls.push(runId)
+			return terminateScript.shift() ?? { ok: true, runId }
+		},
 		submitRun,
 		hasActiveRun: options.hasActiveRun ?? (() => false),
 		sleep: async () => {},
 		now: () => NOW,
 	})
-	return { queue, writes: store.writes, items: store.items, written: store.written, submitCalls, resumeCalls }
+	return { queue, writes: store.writes, items: store.items, written: store.written, submitCalls, resumeCalls, terminateCalls }
 }
 
 describe('enqueue', () => {
@@ -528,6 +535,28 @@ describe('answer', () => {
 		expect(await harness.queue.answer('item-1', 'a')).toEqual({ ok: false, reason: 'forbidden_status' })
 	})
 
+	test('an answer to an item whose run was terminated cancels the item without dispatching or resuming', async () => {
+		const parked = item({ status: 'needs_input', runId: 'run-20260101-003000', continuesFrom: 'run-20260101-000000', question: 'which database?' })
+		const harness = makeQueue({
+			initial: [parked],
+			metas: { 'run-20260101-003000': meta({ runId: 'run-20260101-003000', status: 'interrupted', endTime: '2026-01-01T02:00:00.000Z' }) },
+		})
+
+		const result = await harness.queue.answer('item-1', 'postgres')
+		expect(result.ok).toBe(true)
+		if (!result.ok) return
+		expect(result.item.status).toBe('cancelled')
+		// The cancellation is stamped at guard time, not with the preserved park time.
+		expect(result.item.settledAt).toBe(NOW)
+		expect(result.item.question).toBe('which database?')
+		expect(result.item.answer).toBeUndefined()
+		expect(result.item.runId).toBeUndefined()
+		expect(harness.submitCalls).toEqual([])
+		expect(harness.resumeCalls).toEqual([])
+		// The guard finishes the terminated run's checkpoint cleanup too.
+		expect(harness.terminateCalls).toEqual(['run-20260101-003000'])
+	})
+
 	test('dispatches the answered item as a continuation of the parked run on the tick', async () => {
 		const parked = item({ status: 'needs_input', runId: 'run-20260101-003000', continuesFrom: 'run-20260101-000000', question: 'which database?' })
 		const priorResult = { status: 'needs_clarification' as const, summary: 'waiting for an answer to: which database?', artifacts: ['notes.md'] }
@@ -619,5 +648,128 @@ describe('answer', () => {
 		if (typeof stored !== 'object' || stored === null) throw new Error('expected the stored item')
 		expect(Reflect.has(stored, 'resumeRunId')).toBe(false)
 		expect(Reflect.get(stored, 'answer')).toBe('postgres')
+	})
+})
+
+describe('boot repair for terminated parked items', () => {
+	const runId = 'run-20260101-003000'
+	const priorRunId = 'run-20260101-000000'
+
+	test('cancels a needs_input item whose run meta reads interrupted, finishing its checkpoint cleanup and keeping its question, answer, and lineage', async () => {
+		const harness = makeQueue({
+			initial: [item({ status: 'needs_input', runId, continuesFrom: priorRunId, question: 'which database?', answer: 'postgres' })],
+			metas: { [runId]: meta({ runId, status: 'interrupted', endTime: '2026-01-01T02:00:00.000Z' }) },
+		})
+
+		await harness.queue.tick()
+
+		const repaired = harness.items()[0]
+		expect(repaired?.status).toBe('cancelled')
+		// The cancellation is stamped at repair time, not with the preserved park time.
+		expect(repaired?.settledAt).toBe(NOW)
+		expect(repaired?.question).toBe('which database?')
+		expect(repaired?.answer).toBe('postgres')
+		expect(repaired?.continuesFrom).toBe(priorRunId)
+		expect(repaired?.runId).toBeUndefined()
+		expect(harness.submitCalls).toEqual([])
+		expect(harness.terminateCalls).toEqual([runId])
+	})
+
+	test('leaves a needs_clarification item untouched and ignores an interrupted lineage run when the item has no runId', async () => {
+		const stillParked = makeQueue({
+			initial: [item({ status: 'needs_input', runId, continuesFrom: priorRunId, question: 'which database?' })],
+			metas: { [runId]: meta({ runId, status: 'needs_clarification' }) },
+		})
+		await stillParked.queue.tick()
+		expect(stillParked.items()[0]?.status).toBe('needs_input')
+		expect(stillParked.terminateCalls).toEqual([])
+
+		const lineageOnly = makeQueue({
+			initial: [item({ status: 'needs_input', continuesFrom: priorRunId, question: 'which database?' })],
+			metas: { [priorRunId]: meta({ runId: priorRunId, status: 'interrupted' }) },
+		})
+		await lineageOnly.queue.tick()
+		expect(lineageOnly.items()[0]?.status).toBe('needs_input')
+		expect(lineageOnly.writes).toEqual([])
+		expect(lineageOnly.terminateCalls).toEqual([])
+	})
+})
+
+describe('terminate', () => {
+	const runId = 'run-20260101-003000'
+	const priorRunId = 'run-20260101-000000'
+
+	function parkedItem(overrides: Partial<QueueSeedItem> = {}): QueueSeedItem {
+		return {
+			...item({ status: 'needs_input', runId, continuesFrom: priorRunId, question: 'which database?', answer: 'postgres' }),
+			resumeRunId: priorRunId,
+			resumeToolCallId: 'ask_1',
+			...overrides,
+		}
+	}
+
+	test('cancels a needs_input item, terminals its parked run, and keeps the question, answer, and lineage', () => {
+		const harness = makeQueue({ initial: [parkedItem()] })
+		const result = harness.queue.terminate('item-1', '2026-01-01T04:00:00.000Z')
+
+		expect(result.ok).toBe(true)
+		if (!result.ok) return
+		expect(result.item.status).toBe('cancelled')
+		expect(result.item.settledAt).toBe('2026-01-01T04:00:00.000Z')
+		expect(result.item.question).toBe('which database?')
+		expect(result.item.answer).toBe('postgres')
+		expect(result.item.continuesFrom).toBe(priorRunId)
+		expect(result.item.runId).toBeUndefined()
+		expect(harness.terminateCalls).toEqual([runId])
+		// The parked run holds no slot, so termination never ticks.
+		expect(harness.submitCalls).toEqual([])
+		const written = harness.writes[0]
+		if (written === undefined) throw new Error('expected a queue write')
+		const stored: unknown = JSON.parse(written)
+		if (typeof stored !== 'object' || stored === null || !('items' in stored) || !Array.isArray(stored.items)) throw new Error('expected a stored queue')
+		expect(JSON.stringify(stored.items[0])).not.toContain('resumeRunId')
+		expect(JSON.stringify(stored.items[0])).not.toContain('resumeToolCallId')
+	})
+
+	test('uses only the item runId, never the continuesFrom lineage, and cancels without touching a run when runId is absent', () => {
+		const noRun = makeQueue({ initial: [parkedItem({ runId: undefined, resumeRunId: undefined, resumeToolCallId: undefined })] })
+		const result = noRun.queue.terminate('item-1', '2026-01-01T04:00:00.000Z')
+		expect(result.ok).toBe(true)
+		if (!result.ok) return
+		expect(result.item.status).toBe('cancelled')
+		expect(result.item.continuesFrom).toBe(priorRunId)
+		expect(noRun.terminateCalls).toEqual([])
+
+		const otherRun = 'run-20260101-004500'
+		const lineageOnly = makeQueue({ initial: [parkedItem({ runId: undefined, continuesFrom: otherRun, resumeRunId: undefined, resumeToolCallId: undefined })] })
+		lineageOnly.queue.terminate('item-1', '2026-01-01T04:00:00.000Z')
+		expect(lineageOnly.terminateCalls).toEqual([])
+	})
+
+	test('cancels the item even when the parked run is already gone or no longer parked', () => {
+		for (const error of ['not_found', 'not_parked'] as const) {
+			const harness = makeQueue({ initial: [parkedItem()], terminateResults: [{ ok: false, error }] })
+			const result = harness.queue.terminate('item-1', '2026-01-01T04:00:00.000Z')
+			expect(result.ok).toBe(true)
+			if (!result.ok) return
+			expect(result.item.status).toBe('cancelled')
+			expect(harness.terminateCalls).toEqual([runId])
+		}
+	})
+
+	test('refuses an unknown id and every non-needs_input status without touching the parked run', () => {
+		const harness = makeQueue({
+			initial: [
+				item(),
+				item({ id: 'active', status: 'active', runId }),
+				item({ id: 'done', status: 'done', settledAt: '2026-01-01T01:00:00.000Z' }),
+			],
+		})
+		expect(harness.queue.terminate('ghost', '2026-01-01T04:00:00.000Z')).toEqual({ ok: false, reason: 'not_found' })
+		for (const id of ['item-1', 'active', 'done']) {
+			expect(harness.queue.terminate(id, '2026-01-01T04:00:00.000Z')).toEqual({ ok: false, reason: 'forbidden_status' })
+		}
+		expect(harness.terminateCalls).toEqual([])
+		expect(harness.writes).toEqual([])
 	})
 })

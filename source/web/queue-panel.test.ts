@@ -25,6 +25,8 @@ describe('isQueueItemLike', () => {
 		expect(isQueueItemLike(item({ id: '' }))).toBe(false)
 		expect(isQueueItemLike(item({ task: '' }))).toBe(false)
 		expect(isQueueItemLike({ ...item(), status: 'dispatched' })).toBe(false)
+		expect(isQueueItemLike({ ...item(), runId: 42 })).toBe(false)
+		expect(isQueueItemLike({ ...item(), runId: '' })).toBe(false)
 	})
 })
 

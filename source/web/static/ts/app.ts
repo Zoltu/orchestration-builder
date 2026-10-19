@@ -189,10 +189,11 @@ export interface ApplicationState {
 	queueItems: QueueItemLike[]
 	justSubmittedItemId: string | null
 	pendingAddSelectionId: string | null
-	// The queue panel's row-level view state: the waiting item being inline-edited, the row being dragged, and the item whose answer is posting. `openQueueQuestionId` drives the app-shell question modal a needs_input row (or the watch screen's Respond CTA) opens, so a parked run's question is answerable from the history list.
+	// The queue panel's row-level view state: the waiting item being inline-edited, the row being dragged, and the item whose answer or termination is posting. `openQueueQuestionId` drives the app-shell question modal a needs_input row (or the watch screen's Respond CTA) opens, so a parked run's question is answerable from the history list.
 	editingItemId: string | null
 	draggingItemId: string | null
 	queueAnswerPendingId: string | null
+	queueTerminatePendingId: string | null
 	openQueueQuestionId: string | null
 	// The answered item whose resume has not been dispatched yet (the answer landed while another run was active, so the item is still waiting without a runId). The periodic queue poll watches it and re-engages the watch screen once the item finally resumes.
 	pendingResumeItemId: string | null
@@ -959,9 +960,41 @@ function ApplyAnsweredQueue(answeredItemId: string) {
 // A refused or failed mutation refetches too, so an optimistic update (a drag) reconciles with the server's order.
 function QueueMutationFailed(state: ApplicationState): ActionReturn {
 	return [
-		{ ...state, queueAnswerPendingId: null, serverAvailable: false },
+		{ ...state, queueAnswerPendingId: null, queueTerminatePendingId: null, serverAvailable: false },
 		Fetch({ url: 'api/queue', ok: GotQueue, fail: FetchFailed }),
 	]
+}
+
+// The parked row's and the parked-question modal's termination action. It stops propagation because the row's main area opens the question modal on click, then confirms before discarding the waiting run and its saved context. Only the item's own runId refreshes a selected run; continuesFrom is lineage, not the parked run.
+function TerminateQueueItem(itemId: string) {
+	return function TerminateQueueItemAction(state: ApplicationState, event: Event): ActionReturn {
+		event.stopPropagation()
+		if (state.queueTerminatePendingId !== null) return state
+		const item = state.queueItems.find((entry) => entry.id === itemId)
+		const runId = item !== undefined ? item.runId ?? null : null
+		if (!window.confirm('Terminate this task? The waiting run and its saved context will be discarded.')) return state
+		return [
+			{ ...state, queueTerminatePendingId: itemId, openQueueQuestionId: null },
+			Fetch({
+				url: `api/queue/${encodeURIComponent(itemId)}/terminate`,
+				init: { method: 'POST' },
+				ok: GotQueueAfterTerminate(runId),
+				fail: QueueMutationFailed,
+			}),
+		]
+	}
+}
+
+// The terminate POST resolved: the queue refetch drives the row and panel on both success and an HTTP refusal, so a race or an already-gone run reconciles instead of leaving a stale row. When the terminated run is the selected one, its view is reset to non-terminal so the per-run poll refetches the now-interrupted meta instead of staying parked; another run's selection is left alone.
+function GotQueueAfterTerminate(runId: string | null) {
+	return function GotQueueAfterTerminateForRun(state: ApplicationState, payload: FetchResultPayload): ActionReturn {
+		const cleared: ApplicationState = { ...state, queueTerminatePendingId: null, serverAvailable: true }
+		if (!payload.ok) return [cleared, Fetch({ url: 'api/queue', ok: GotQueue, fail: FetchFailed })]
+		const nextState = runId !== null && runId === state.selectedRunId
+			? { ...cleared, openQueueQuestionId: null, selectedRunStatus: 'unknown' as const, selectedRunView: null, resultModalOpen: false, resultShownForRun: null }
+			: { ...cleared, openQueueQuestionId: null }
+		return [nextState, Fetch({ url: 'api/queue', ok: GotQueue, fail: FetchFailed })]
+	}
 }
 
 // --- Queue drag-to-reorder ---------------------------------------------------
@@ -2098,6 +2131,9 @@ function QueueItemRow(state: ApplicationState, item: QueueItemLike): Vnode {
 		mainChildren.push(h('button', { type: 'button', class: 'rerun-button', title: 'Edit the task text', onclick: [StartItemEdit, item.id] }, 'Edit'))
 		mainChildren.push(h('button', { type: 'button', class: 'rerun-button', title: 'Remove the task from the queue', onclick: [RemoveQueueItem, item.id] }, 'Remove'))
 	}
+	if (needsInput) {
+		mainChildren.push(h('button', { type: 'button', class: 'rerun-button terminate-button', disabled: state.queueTerminatePendingId !== null, title: 'Terminate the waiting task and discard its saved context', onclick: TerminateQueueItem(item.id) }, 'Terminate'))
+	}
 	const children: Vnode[] = [
 		h('div', { class: 'history-row-main', onclick: needsInput ? [OpenQueueQuestion, item.id] : undefined }, mainChildren),
 		h('button', { type: 'button', class: 'history-expand', 'aria-expanded': expanded, title: expanded ? 'Hide details' : 'Show the full task and details', onclick: [ToggleRowExpanded, item.id] }, expanded ? 'less ▴' : 'details ▾'),
@@ -2563,7 +2599,9 @@ function QueueQuestionModalForApp(state: ApplicationState): Vnode | null {
 		renderMarkdown,
 		onSubmit: SubmitQueueAnswer(item.id),
 		onClose: CloseQueueQuestion,
+		onTerminate: TerminateQueueItem(item.id),
 		answerPending: state.queueAnswerPendingId === item.id,
+		terminatePending: state.queueTerminatePendingId !== null,
 		fixed: true,
 	})
 }
@@ -2649,7 +2687,7 @@ function isApplicationState(value: unknown): value is ApplicationState {
 	if (!isObject(value)) return false
 	const stateKeys: (keyof ApplicationState)[] = [
 		'summaries', 'selectedRunId', 'selectedRunView', 'selectedRunStatus', 'pendingQuestions',
-		'queueItems', 'justSubmittedItemId', 'pendingAddSelectionId', 'editingItemId', 'draggingItemId', 'queueAnswerPendingId', 'openQueueQuestionId', 'pendingResumeItemId',
+		'queueItems', 'justSubmittedItemId', 'pendingAddSelectionId', 'editingItemId', 'draggingItemId', 'queueAnswerPendingId', 'queueTerminatePendingId', 'openQueueQuestionId', 'pendingResumeItemId',
 		'serverAvailable', 'versions', 'justSubmittedRunId', 'createSending', 'muted', 'shownQuestionIds', 'firstQuestionsPoll', 'pendingAnswerId',
 		'runEffort', 'savingEffort', 'runInvolvement', 'savingInvolvement', 'runLogLevel', 'savingLogLevel',
 		'flowModel', 'previousFlowModel', 'flowFeed', 'runListFeed', 'labelResolver', 'guildParticipants', 'build',
@@ -2683,6 +2721,7 @@ app({
 			editingItemId: null,
 			draggingItemId: null,
 			queueAnswerPendingId: null,
+			queueTerminatePendingId: null,
 			openQueueQuestionId: null,
 			pendingResumeItemId: null,
 			serverAvailable: true,

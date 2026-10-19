@@ -150,6 +150,7 @@ function queueOver(store: ReturnType<typeof fakeQueueStore>, submit: ReturnType<
 			resumeCalls.push({ runId, parkedAnswer })
 			return resumeScript.shift() ?? { ok: false, error: 'checkpoint_missing' }
 		},
+		terminateParkedRun: () => ({ ok: false, error: 'not_found' }),
 		submitRun: submit.submitRun,
 		hasActiveRun,
 		sleep: sleep.sleep,
@@ -265,6 +266,7 @@ describe('createTaskQueue tick — dispatch', () => {
 			readRunListSummary: runList.readRunListSummary,
 			readParkedAskById: () => null,
 			resumeParkedRun: () => ({ ok: false, error: 'checkpoint_missing' }),
+			terminateParkedRun: () => ({ ok: false, error: 'not_found' }),
 			submitRun: submit.submitRun,
 			hasActiveRun: () => false,
 			sleep: sleep.sleep,
@@ -319,6 +321,7 @@ describe('createTaskQueue tick — submission threading', () => {
 			readRunListSummary: runList.readRunListSummary,
 			readParkedAskById: () => null,
 			resumeParkedRun: () => ({ ok: false, error: 'checkpoint_missing' }),
+			terminateParkedRun: () => ({ ok: false, error: 'not_found' }),
 			submitRun: submit.submitRun,
 			hasActiveRun: () => false,
 			sleep: sleep.sleep,

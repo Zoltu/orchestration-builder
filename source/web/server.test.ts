@@ -2,11 +2,12 @@ import { describe, expect, test } from 'bun:test'
 import { createWebHumanBackend, type WebHumanBackend } from '../executor/human-backend.ts'
 import { createInterruptChannel, createInterruptQueue, type InterruptChannel } from '../executor/interrupts.ts'
 import { createRunState } from '../executor/run-state.ts'
-import { createReadParkedAskById, createResumeErroredRun, createResumeParkedRun, createRunSubmission, type ResumeRun, type RunSubmission, type StartRun } from '../executor/run-submission.ts'
+import { createReadParkedAskById, createResumeErroredRun, createResumeParkedRun, createRunSubmission, createTerminateParkedRun, type ResumeRun, type RunSubmission, type StartRun } from '../executor/run-submission.ts'
 import { createTaskQueue, type QueueItemView, type QueueView } from '../executor/queue/index.ts'
 import type { RunCheckpoint } from '../executor/checkpoint.ts'
 import type { ProjectSettings, ReadProjectSettings, WriteProjectSettings, RunSnapshotRaw, RunSnapshotStats, RunSummaryStats } from '../executor/persistence.ts'
-import type { DeploymentConfig, EffortLevel, GuildConfig, InvolvementLevel, LogLevel, RunContinuation, RunMeta } from '../executor/types.js'
+import type { DeploymentConfig, EffortLevel, GuildConfig, InvolvementLevel, LogEvent, LogLevel, RunContinuation, RunMeta } from '../executor/types.js'
+import { isRunMeta } from '../executor/validation.ts'
 import { parseLogEvents, parseRunMeta, type RunSnapshot } from '../run-log/index.js'
 import type { BuildInfo } from './build-info.ts'
 import { createRunListCache } from './run-list-cache.ts'
@@ -534,6 +535,8 @@ interface HandlerHarness {
 	resumedCheckpoints: () => RunCheckpoint[]
 	resumedNotes: () => Array<string | undefined>
 	checkpoints: Map<string, string>
+	runMeta: (runId: string) => string | null
+	runLogs: Map<string, LogEvent[]>
 }
 
 // Builds a fresh handler whose startRun and resumeRun park on caller-controlled resolvers, so each test drives its own run lifecycle without touching shared state. The static leaf is a recording fake; every dependency is in-memory. runIdCollides makes runDirectoryExists report an existing directory for the generated id, exercising the submit-level run_id_collision refusal. build seeds the image build identifier GET /api/config surfaces (null, as from a source checkout, unless a test passes one). initialCheckpoints seeds the in-memory checkpoint store (raw state.json text by run id) the resume submission and the resumable flag read.
@@ -577,6 +580,7 @@ function createHandlerHarness(options: { runIdCollides?: boolean, build?: BuildI
 		}
 	}
 	const checkpoints = new Map<string, string>(options.initialCheckpoints ?? [])
+	const runLogs = new Map<string, LogEvent[]>()
 	const resumeRun: ResumeRun = (checkpoint, options) => {
 		resumed.push(checkpoint)
 		resumedNotes.push(options?.resumeNote)
@@ -598,6 +602,20 @@ function createHandlerHarness(options: { runIdCollides?: boolean, build?: BuildI
 	const readCheckpointById = (runId: string): string | null => checkpoints.get(runId) ?? null
 	const readParkedAskById = createReadParkedAskById(readCheckpointById)
 	const resumeParkedRun = createResumeParkedRun({ runSubmission: submission, readRunMetaById: harnessReadRunMetaById, readCheckpointById })
+	const terminateParkedRun = createTerminateParkedRun({
+		readRunMetaById: harnessReadRunMetaById,
+		writeMetaFor: (runId) => (meta) => {
+			metaOverrides.set(runId, JSON.stringify(meta))
+		},
+		deleteCheckpointFor: (runId) => () => {
+			checkpoints.delete(runId)
+		},
+		appendLogFor: (runId) => (event) => {
+			const events = runLogs.get(runId) ?? []
+			events.push(event)
+			runLogs.set(runId, events)
+		},
+	})
 	const taskQueue = createTaskQueue({
 		queueStore: queue.store,
 		readRunMetaById: harnessReadRunMetaById,
@@ -605,6 +623,7 @@ function createHandlerHarness(options: { runIdCollides?: boolean, build?: BuildI
 		readRunListSummary,
 		readParkedAskById,
 		resumeParkedRun,
+		terminateParkedRun,
 		submitRun: (queued) => {
 			queue.events.push('submitRun')
 			return submission.submit(queued.task, queued.effort, queued.involvement, queued.logLevel, queued.continuation)
@@ -671,6 +690,8 @@ function createHandlerHarness(options: { runIdCollides?: boolean, build?: BuildI
 		resumedCheckpoints: () => resumed,
 		resumedNotes: () => resumedNotes,
 		checkpoints,
+		runMeta: harnessReadRunMetaById,
+		runLogs,
 	}
 }
 
@@ -2305,11 +2326,159 @@ describe('/api/queue', () => {
 		expect(unknown.status).toBe(404)
 	})
 
+	test('POST /:id/terminate cancels the parked item, interrupts its run, and removes the checkpoint', async () => {
+		const runId = 'run-20260101-000500'
+		const checkpoints = new Map([[runId, JSON.stringify(parkedCheckpoint(runId))]])
+		const metas = new Map([[runId, JSON.stringify({
+			runId,
+			guildPath: 'guild',
+			task: 'parked task',
+			status: 'needs_clarification',
+			startTime: '2026-01-01T00:00:00.000Z',
+			endTime: '2026-01-01T00:01:00.000Z',
+			result: { status: 'needs_clarification', summary: 'waiting for an answer to: which database?' },
+		})]])
+		const harness = createHandlerHarness({
+			initialQueueItems: [queueItem('n1', 'parked task', { status: 'needs_input', question: 'which database?', runId, continuesFrom: runId })],
+			initialCheckpoints: checkpoints,
+			initialMetas: metas,
+		})
+
+		const response = await harness.handler(post('/api/queue/n1/terminate'))
+		expect(response.status).toBe(200)
+		const item = await response.json()
+		expect(item.id).toBe('n1')
+		expect(item.status).toBe('cancelled')
+		expect(item.question).toBe('which database?')
+		expect(item.runId).toBeUndefined()
+		expect(typeof item.settledAt).toBe('string')
+		expect(harness.checkpoints.has(runId)).toBe(false)
+		// Termination holds no active slot, so the item stays cancelled rather than being dispatched.
+		expect(harness.queue.snapshot().items[0]?.status).toBe('cancelled')
+		expect(harness.submission.activeRunId()).toBeUndefined()
+
+		const metaText = harness.runMeta(runId)
+		if (metaText === null) throw new Error('expected the terminated run meta')
+		const terminatedMeta: unknown = JSON.parse(metaText)
+		if (!isRunMeta(terminatedMeta)) throw new Error('expected a valid terminated run meta')
+		expect(terminatedMeta.status).toBe('interrupted')
+		expect(terminatedMeta.endTime).toBe('2026-01-01T00:01:00.000Z')
+		expect(terminatedMeta.error).toEqual({ kind: 'interrupted', message: 'The operator terminated this run while it was waiting for an answer.' })
+		const logs = harness.runLogs.get(runId) ?? []
+		expect(logs.map((event) => event.type)).toEqual(['run_terminated'])
+		expect(logs[0]?.timestamp).not.toBe(terminatedMeta.endTime)
+		expect(logs[0]?.payload).toEqual({ reason: 'operator', message: 'Terminated by the operator while waiting for an answer.' })
+	})
+
+	test('POST /:id/terminate still cancels the item when the run meta is already interrupted (a retry after a crash)', async () => {
+		const runId = 'run-20260101-000500'
+		const checkpoints = new Map([[runId, JSON.stringify(parkedCheckpoint(runId))]])
+		const metas = new Map([[runId, JSON.stringify({
+			runId,
+			guildPath: 'guild',
+			task: 'parked task',
+			status: 'interrupted',
+			startTime: '2026-01-01T00:00:00.000Z',
+			endTime: '2026-01-01T00:01:00.000Z',
+			error: { kind: 'interrupted', message: 'The operator terminated this run while it was waiting for an answer.' },
+		})]])
+		const harness = createHandlerHarness({
+			initialQueueItems: [queueItem('n1', 'parked task', { status: 'needs_input', question: 'which database?', runId })],
+			initialCheckpoints: checkpoints,
+			initialMetas: metas,
+		})
+
+		const response = await harness.handler(post('/api/queue/n1/terminate'))
+		expect(response.status).toBe(200)
+		const item = await response.json()
+		expect(item.status).toBe('cancelled')
+		// The retry still finishes the interrupted run's idempotent checkpoint cleanup.
+		expect(harness.checkpoints.has(runId)).toBe(false)
+		expect(harness.queue.snapshot().items[0]?.status).toBe('cancelled')
+	})
+
+	test('POST /:id/terminate still cancels the item when the checkpoint is already missing', async () => {
+		const runId = 'run-20260101-000500'
+		const metas = new Map([[runId, JSON.stringify({
+			runId,
+			guildPath: 'guild',
+			task: 'parked task',
+			status: 'needs_clarification',
+			startTime: '2026-01-01T00:00:00.000Z',
+			endTime: '2026-01-01T00:01:00.000Z',
+			result: { status: 'needs_clarification', summary: 'waiting for an answer to: which database?' },
+		})]])
+		const harness = createHandlerHarness({
+			initialQueueItems: [queueItem('n1', 'parked task', { status: 'needs_input', question: 'which database?', runId })],
+			initialMetas: metas,
+		})
+
+		const response = await harness.handler(post('/api/queue/n1/terminate'))
+		expect(response.status).toBe(200)
+		const item = await response.json()
+		expect(item.status).toBe('cancelled')
+		const metaText = harness.runMeta(runId)
+		if (metaText === null) throw new Error('expected the terminated run meta')
+		const terminatedMeta: unknown = JSON.parse(metaText)
+		if (!isRunMeta(terminatedMeta)) throw new Error('expected a valid terminated run meta')
+		expect(terminatedMeta.status).toBe('interrupted')
+	})
+
+	test('POST /:id/terminate rejects an unknown id with 404 and a non-needs_input item with 409', async () => {
+		const { handler } = createHandlerHarness({ initialQueueItems: [queueItem('w1'), queueItem('n1', 'parked task', { status: 'needs_input', question: 'which?' }), queueItem('d1', 'done task', { status: 'done', settledAt: '2026-01-01T00:01:00.000Z' })] })
+		const unknown = await handler(post('/api/queue/missing/terminate'))
+		expect(unknown.status).toBe(404)
+		expect(await unknown.json()).toEqual({ ok: false, error: 'not_found' })
+		const waiting = await handler(post('/api/queue/w1/terminate'))
+		expect(waiting.status).toBe(409)
+		expect(await waiting.json()).toEqual({ ok: false, error: 'status_forbidden' })
+		const done = await handler(post('/api/queue/d1/terminate'))
+		expect(done.status).toBe(409)
+	})
+
+	test('POST /:id/answer on an item whose run is already interrupted returns the cancelled item, discards the answer, and does not dispatch', async () => {
+		const runId = 'run-20260101-000500'
+		const checkpoints = new Map([[runId, JSON.stringify(parkedCheckpoint(runId))]])
+		const metas = new Map([[runId, JSON.stringify({
+			runId,
+			guildPath: 'guild',
+			task: 'parked task',
+			status: 'interrupted',
+			startTime: '2026-01-01T00:00:00.000Z',
+			endTime: '2026-01-01T00:01:00.000Z',
+			error: { kind: 'interrupted', message: 'The operator terminated this run while it was waiting for an answer.' },
+		})]])
+		const harness = createHandlerHarness({
+			initialQueueItems: [queueItem('n1', 'parked task', { status: 'needs_input', question: 'which database?', runId, continuesFrom: runId })],
+			initialCheckpoints: checkpoints,
+			initialMetas: metas,
+		})
+
+		const response = await harness.handler(post('/api/queue/n1/answer', JSON.stringify({ answer: 'postgres' })))
+		expect(response.status).toBe(200)
+		const item = await response.json()
+		expect(item.id).toBe('n1')
+		expect(item.status).toBe('cancelled')
+		expect(item.answer).toBeUndefined()
+		expect(item.question).toBe('which database?')
+		expect(item.runId).toBeUndefined()
+		expect(harness.checkpoints.has(runId)).toBe(false)
+		expect(harness.submission.activeRunId()).toBeUndefined()
+		expect(harness.queue.snapshot().items[0]?.status).toBe('cancelled')
+		expect(harness.queue.events).not.toContain('submitRun')
+		const logs = harness.runLogs.get(runId) ?? []
+		expect(logs.map((event) => event.type)).toEqual(['run_terminated'])
+	})
+
 	test('POST /:id/answer records the answer, fronts the item, and the tick dispatches it as a continuation of the parked run', async () => {
-		const { handler, submission, lastContinuation, queue, resolveActive } = createHandlerHarness({ initialQueueItems: [
-			queueItem('w1', 'already waiting'),
-			queueItem('n1', 'parked task', { status: 'needs_input', question: 'which database?', continuesFrom: 'run-20260101-000000', runId: 'run-20260101-000300' }),
-		] })
+		const { handler, submission, lastContinuation, queue, resolveActive } = createHandlerHarness({
+			initialQueueItems: [
+				queueItem('w1', 'already waiting'),
+				queueItem('n1', 'parked task', { status: 'needs_input', question: 'which database?', continuesFrom: 'run-20260101-000000', runId: 'run-20260101-000300' }),
+			],
+			// The parked run's meta is needs_clarification (a live park) while its checkpoint is missing, which exercises the legacy continuation fallback rather than the terminated-run answer guard.
+			initialMetas: new Map([['run-20260101-000300', JSON.stringify({ runId: 'run-20260101-000300', guildPath: 'guild', task: 'parked task', status: 'needs_clarification', startTime: '2026-01-01T00:00:00.000Z', endTime: '2026-01-01T00:01:00.000Z', result: { status: 'needs_clarification', summary: 'waiting for an answer to: which database?' } })]]),
+		})
 		const response = await handler(post('/api/queue/n1/answer', JSON.stringify({ answer: 'postgres' })))
 		expect(response.status).toBe(200)
 		const item = await response.json()

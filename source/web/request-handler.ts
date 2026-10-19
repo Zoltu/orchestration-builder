@@ -409,6 +409,11 @@ function handleDeleteQueueItem(taskQueue: TaskQueueModule, itemId: string): Resp
 	return queueMutationResponse(taskQueue.cancel(itemId, new Date().toISOString()))
 }
 
+// The operator's termination of a parked task: cancels the needs_input item and terminalizes its run with the checkpoint removed, so neither the queue nor a stale resume can answer it. No body is read.
+function handleTerminateQueueItem(taskQueue: TaskQueueModule, itemId: string): Response {
+	return queueMutationResponse(taskQueue.terminate(itemId, new Date().toISOString()))
+}
+
 // The queue-native resume: the answer moves the needs_input item to the front of the waiting list and the tick resumes the same parked run, delivering the answer as its ask_human tool result. A legacy item with no parked checkpoint falls back to the briefed continuation this route has always dispatched.
 async function handleAnswerQueueItem(taskQueue: TaskQueueModule, itemId: string, body: unknown): Promise<Response> {
 	if (!isObject(body)) return json({ ok: false, error: 'invalid_body' }, 400)
@@ -550,6 +555,10 @@ export function createRequestHandler(config: RequestHandlerConfig, serveStatic: 
 				if (rest !== undefined && rest.endsWith('/requeue')) {
 					const itemId = rest.slice(0, rest.length - '/requeue'.length)
 					if (itemId !== '' && !itemId.includes('/')) return handleRequeueQueueItem(taskQueue, itemId)
+				}
+				if (rest !== undefined && rest.endsWith('/terminate')) {
+					const itemId = rest.slice(0, rest.length - '/terminate'.length)
+					if (itemId !== '' && !itemId.includes('/')) return handleTerminateQueueItem(taskQueue, itemId)
 				}
 			}
 			if (pathname.startsWith('/api/runs/') && pathname.endsWith('/interrupt')) {

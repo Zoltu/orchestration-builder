@@ -278,7 +278,7 @@ export interface RunMeta {
 	logLevel?: LogLevel
 	// Set when this run continues a prior finished run: the prior run's id. The lineage is what a follow-on run uses to find the prior run's artifacts.
 	continuesFrom?: string
-	// 'interrupted' is terminal: the service stopped mid-run and the run could not (or was not chosen to) resume on restart — written by startup reconciliation so the UI stops showing the run as "in progress".
+	// 'interrupted' is terminal: the service stopped mid-run and the run could not (or was not chosen to) resume on restart, or the operator terminated a parked run. Startup reconciliation writes it for abandoned runs; the queue's terminate path writes it for a parked run and deletes the checkpoint.
 	status: 'running' | TerminalRunStatus
 	startTime: string
 	endTime?: string

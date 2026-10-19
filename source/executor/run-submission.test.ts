@@ -1,11 +1,12 @@
 import { describe, expect, test } from 'bun:test'
 import type { RunCheckpoint } from './checkpoint.ts'
 import { DEFAULT_LOG_LEVEL } from './log-level.ts'
-import type { EffortLevel, InvolvementLevel, LogLevel, RunContinuation, RunMeta } from './types.js'
+import type { EffortLevel, InvolvementLevel, LogEvent, LogLevel, RunContinuation, RunMeta } from './types.js'
 import type { ReadProjectSettings, ReadRunCheckpointById, ReadRunMetaById, RunDirectoryExists } from './persistence.ts'
 import { DEFAULT_EFFORT } from './effort.ts'
 import { DEFAULT_INVOLVEMENT } from './involvement.ts'
-import { createReadParkedAskById, createResumeErroredRun, createResumeParkedRun, createRunSubmission, type ResumeErroredRunDependencies, type ResumeRun, type RunSubmission, type StartRun } from './run-submission.ts'
+import { createReadParkedAskById, createResumeErroredRun, createResumeParkedRun, createRunSubmission, createTerminateParkedRun, type ResumeErroredRunDependencies, type ResumeRun, type RunSubmission, type StartRun } from './run-submission.ts'
+import { isRunMeta } from './validation.ts'
 import { createTaskQueue, type QueueItemView, type QueueView, type TaskQueueModule } from './queue/index.ts'
 import { defined, flushMicrotasks } from './test-fixtures.ts'
 
@@ -795,6 +796,7 @@ describe('createResumeErroredRun', () => {
 			},
 			readParkedAskById: () => null,
 			resumeParkedRun: () => ({ ok: false, error: 'checkpoint_missing' }),
+			terminateParkedRun: () => ({ ok: false, error: 'not_found' }),
 			submitRun: () => {
 				throw new Error('the resume path does not dispatch')
 			},
@@ -1033,5 +1035,118 @@ describe('createResumeParkedRun', () => {
 		expect(testHarness.submission.activeRunId()).toBe('run-1')
 		expect(testHarness.resumeCalls).toEqual([{ parkedAnswer: answer, queueTracked: true }])
 		await testHarness.submission.awaitActive()
+	})
+})
+
+describe('createTerminateParkedRun', () => {
+	function harness(input: { metas?: Map<string, string> } = {}): {
+		terminateParkedRun: ReturnType<typeof createTerminateParkedRun>
+		metas: Map<string, string>
+		deleted: string[]
+		logs: Array<{ runId: string; event: LogEvent }>
+	} {
+		const metas = new Map(input.metas ?? [])
+		const deleted: string[] = []
+		const logs: Array<{ runId: string; event: LogEvent }> = []
+		const terminateParkedRun = createTerminateParkedRun({
+			readRunMetaById: (runId) => metas.get(runId) ?? null,
+			writeMetaFor: (runId) => (meta) => {
+				metas.set(runId, JSON.stringify(meta))
+			},
+			deleteCheckpointFor: (runId) => () => {
+				deleted.push(runId)
+			},
+			appendLogFor: (runId) => (event) => {
+				logs.push({ runId, event })
+			},
+		})
+		return { terminateParkedRun, metas, deleted, logs }
+	}
+
+	function parkedMeta(runId: string): RunMeta {
+		return {
+			runId,
+			guildPath: 'guild',
+			benchmarkPath: 'bench',
+			task: 'do it',
+			effort: 'thorough',
+			involvement: 'collaborative',
+			logLevel: 'standard',
+			continuesFrom: 'run-20251231-000000',
+			status: 'needs_clarification',
+			startTime: '2026-01-01T00:00:00.000Z',
+			endTime: '2026-01-01T00:01:00.000Z',
+			result: { status: 'needs_clarification', summary: 'waiting for an answer to: which database?' },
+		}
+	}
+
+	test('marks a parked run interrupted, preserves its identity, deletes the checkpoint, and logs the operator action', () => {
+		const runId = 'run-20260101-000000'
+		const testHarness = harness({ metas: new Map([[runId, JSON.stringify(parkedMeta(runId))]]) })
+
+		expect(testHarness.terminateParkedRun(runId)).toEqual({ ok: true, runId })
+		expect(testHarness.deleted).toEqual([runId])
+		expect(testHarness.logs.length).toBe(1)
+		const log = testHarness.logs[0]
+		if (log === undefined) throw new Error('expected a termination log event')
+		expect(log.runId).toBe(runId)
+		expect(log.event.type).toBe('run_terminated')
+		expect(log.event.payload).toEqual({ reason: 'operator', message: 'Terminated by the operator while waiting for an answer.' })
+
+		const metaText = testHarness.metas.get(runId)
+		if (metaText === undefined) throw new Error('expected the terminated meta')
+		const parsed: unknown = JSON.parse(metaText)
+		if (!isRunMeta(parsed)) throw new Error('expected a valid run meta')
+		expect(parsed.status).toBe('interrupted')
+		expect(parsed.runId).toBe(runId)
+		expect(parsed.guildPath).toBe('guild')
+		expect(parsed.benchmarkPath).toBe('bench')
+		expect(parsed.task).toBe('do it')
+		expect(parsed.effort).toBe('thorough')
+		expect(parsed.involvement).toBe('collaborative')
+		expect(parsed.logLevel).toBe('standard')
+		expect(parsed.continuesFrom).toBe('run-20251231-000000')
+		expect(parsed.startTime).toBe('2026-01-01T00:00:00.000Z')
+		// Termination preserves the parked end time; the log event carries when the operator acted.
+		expect(parsed.endTime).toBe('2026-01-01T00:01:00.000Z')
+		expect(log.event.timestamp).not.toBe(parsed.endTime)
+		expect(parsed.result).toBeUndefined()
+		expect(parsed.error).toEqual({ kind: 'interrupted', message: 'The operator terminated this run while it was waiting for an answer.' })
+	})
+
+	test('an already-interrupted meta deletes the checkpoint and appends the audit event idempotently, reporting not_parked', () => {
+		const runId = 'run-20260101-000000'
+		const interrupted = { ...parkedMeta(runId), status: 'interrupted' as const, error: { kind: 'interrupted' as const, message: 'already terminated' } }
+		const testHarness = harness({ metas: new Map([[runId, JSON.stringify(interrupted)]]) })
+
+		expect(testHarness.terminateParkedRun(runId)).toEqual({ ok: false, error: 'not_parked' })
+		expect(testHarness.deleted).toEqual([runId])
+		const log = testHarness.logs[0]
+		if (log === undefined) throw new Error('expected a termination log event')
+		expect(log.runId).toBe(runId)
+		expect(log.event.type).toBe('run_terminated')
+		expect(log.event.payload).toEqual({ reason: 'operator', message: 'Terminated by the operator while waiting for an answer.' })
+		expect(testHarness.metas.get(runId)).toBe(JSON.stringify(interrupted))
+	})
+
+	test('rejects a missing or unparseable meta as not_found without touching anything', () => {
+		const missing = harness()
+		expect(missing.terminateParkedRun('run-1')).toEqual({ ok: false, error: 'not_found' })
+
+		const corrupt = harness({ metas: new Map([['run-1', '{not json']]) })
+		expect(corrupt.terminateParkedRun('run-1')).toEqual({ ok: false, error: 'not_found' })
+		expect(corrupt.deleted).toEqual([])
+		expect(corrupt.logs).toEqual([])
+	})
+
+	test('rejects success and error metas as not_parked without deleting their checkpoints', () => {
+		for (const status of ['success', 'error'] as const) {
+			const original = JSON.stringify({ ...sampleMeta('run-1'), status })
+			const testHarness = harness({ metas: new Map([['run-1', original]]) })
+			expect(testHarness.terminateParkedRun('run-1')).toEqual({ ok: false, error: 'not_parked' })
+			expect(testHarness.metas.get('run-1')).toBe(original)
+			expect(testHarness.deleted).toEqual([])
+			expect(testHarness.logs).toEqual([])
+		}
 	})
 })

@@ -34,6 +34,7 @@ export function isQueueItemLike(value: unknown): value is QueueItemLike {
 	if (!isObject(value)) return false
 	if (typeof value['id'] !== 'string' || value['id'] === '') return false
 	if (typeof value['task'] !== 'string' || value['task'] === '') return false
+	if (value['runId'] !== undefined && (typeof value['runId'] !== 'string' || value['runId'] === '')) return false
 	return QUEUE_ITEM_STATUSES.some((status) => status === value['status'])
 }
 

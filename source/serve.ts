@@ -10,7 +10,7 @@ import { createFlowFeedResponder } from './web/static/ts/flow-feed/index.js'
 import { createRunListFeedResponder } from './web/static/ts/run-list-feed/index.js'
 import { createStreamHub } from './web/stream-hub.js'
 import { createTaskSummarizer, type TaskSummarizer } from './summarize.js'
-import { applyDeploymentOverride, applyLogLevel, createAppendLog, createBunSubprocessRunner, createDeleteCheckpoint, createDeltaChannel, createDockerSecretReader, createGuildLoader, createInterruptChannel, createInterruptQueue, createLlmCaller, createLlmFetch, createListRunIds, createModelInfoProbe, createReadParkedAskById, createReadProjectDoc, createReadProjectSettings, createReadQueueText, createReadRunCheckpointById, createReadRunLogTextFrom, createReadRunMetaById, createReadRunPlanById, createReadRunSnapshotById, createReadRunSnapshotStats, createReadRunSummaryById, createReadRunSummaryStats, createReadWorkspaceGitState, createResumeErroredRun, createResumeParkedRun, createRoleSnapshotStore, createRunBaseTracker, createRunCheckpointExists, createRunDirectory, createRunDirectoryExists, createRunState, createRunSubmission, createSleep, createTaskQueue, createTimeoutScheduler, createToolPlatform, createWebHumanBackend, createWriteCheckpoint, createWriteMeta, createWriteProjectSettings, createWriteQueueText, createWriteRunSummary, ensureOrchestrationGitExcluded, entryFrameLogLevel, generateRunId, llmUsagePayload, LOG_FILE_NAME, MODEL_PROBE_TIMEOUT_MS, nodeGitExcludeFilesystem, parseModelInfo, reconcileRunsOnStartup, resolveDeploymentConfig, resolveDeploymentOverride, resolveKagiApiKey, resolveSecret, resumeExecutor, runExecutor, validateDeploymentFileConfig, validateDeploymentRoleReferences, ConfigurationError, ValidationError, type AppendLog, type DeltaChannel, type ExecutorDependencies, type InterruptChannel, type InvolvementLevel, type LoadedGuild, type LlmCaller, type LogLevel, type ModelApiProbe, type ResumeRun, type RunCheckpoint, type StartRun, type WebHumanBackend } from './executor/index.js'
+import { applyDeploymentOverride, applyLogLevel, createAppendLog, createBunSubprocessRunner, createDeleteCheckpoint, createDeltaChannel, createDockerSecretReader, createGuildLoader, createInterruptChannel, createInterruptQueue, createLlmCaller, createLlmFetch, createListRunIds, createModelInfoProbe, createReadParkedAskById, createReadProjectDoc, createReadProjectSettings, createReadQueueText, createReadRunCheckpointById, createReadRunLogTextFrom, createReadRunMetaById, createReadRunPlanById, createReadRunSnapshotById, createReadRunSnapshotStats, createReadRunSummaryById, createReadRunSummaryStats, createReadWorkspaceGitState, createResumeErroredRun, createResumeParkedRun, createRoleSnapshotStore, createRunBaseTracker, createRunCheckpointExists, createRunDirectory, createRunDirectoryExists, createRunState, createRunSubmission, createSleep, createTaskQueue, createTerminateParkedRun, createTimeoutScheduler, createToolPlatform, createWebHumanBackend, createWriteCheckpoint, createWriteMeta, createWriteProjectSettings, createWriteQueueText, createWriteRunSummary, ensureOrchestrationGitExcluded, entryFrameLogLevel, generateRunId, llmUsagePayload, LOG_FILE_NAME, MODEL_PROBE_TIMEOUT_MS, nodeGitExcludeFilesystem, parseModelInfo, reconcileRunsOnStartup, resolveDeploymentConfig, resolveDeploymentOverride, resolveKagiApiKey, resolveSecret, resumeExecutor, runExecutor, validateDeploymentFileConfig, validateDeploymentRoleReferences, ConfigurationError, ValidationError, type AppendLog, type DeltaChannel, type ExecutorDependencies, type InterruptChannel, type InvolvementLevel, type LoadedGuild, type LlmCaller, type LogLevel, type ModelApiProbe, type ResumeRun, type RunCheckpoint, type StartRun, type WebHumanBackend } from './executor/index.js'
 
 const DEPLOYMENT_FILE_ENV_VAR = 'ORCHESTRATOR_DEPLOYMENT_FILE'
 const PORT_ENV_VAR = 'PORT'
@@ -350,6 +350,13 @@ async function serve(): Promise<void> {
 	})
 	// The queue's same-run answer resume composes the submission layer over the same meta/checkpoint readers the error-resume uses.
 	const resumeParkedRun = createResumeParkedRun({ runSubmission, readRunMetaById, readCheckpointById: readRunCheckpointById })
+	// The operator-termination path marks the parked run interrupted, logs the action, and removes the checkpoint so the run can never be answered.
+	const terminateParkedRun = createTerminateParkedRun({
+		readRunMetaById,
+		writeMetaFor: (runId) => createWriteMeta(runId, runsBaseDir),
+		deleteCheckpointFor: (runId) => createDeleteCheckpoint(runId, runsBaseDir),
+		appendLogFor: (runId) => createAppendLog(runId, runsBaseDir),
+	})
 	// The queue module owns the durable state machine, dispatch, settlement, and queue persistence; the composition root supplies only its configured leaves.
 	const taskQueue = createTaskQueue({
 		queueStore,
@@ -358,6 +365,7 @@ async function serve(): Promise<void> {
 		readRunListSummary,
 		readParkedAskById,
 		resumeParkedRun,
+		terminateParkedRun,
 		submitRun: (submission) => runSubmission.submit(submission.task, submission.effort, submission.involvement, submission.logLevel, submission.continuation),
 		hasActiveRun: () => runSubmission.activeRunId() !== undefined,
 		sleep: createSleep(),

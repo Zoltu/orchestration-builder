@@ -21,7 +21,11 @@ export interface QuestionModalProps {
 	renderMarkdown: RenderMarkdown
 	onSubmit: unknown
 	onClose?: unknown
+	// The parked-question instance may offer termination beside Answer; a post-write blocking question cannot be terminated this way, so that instance omits it.
+	onTerminate?: unknown
 	answerPending?: boolean
+	// A termination request for this same item is in flight: disable the terminate control so it cannot fire twice while the queue reconciles.
+	terminatePending?: boolean
 	// When true the overlay covers the whole viewport (`position: fixed`) instead of being scoped to the run view's `.pb-flow` containing block. The queue-driven instance opens from the history screen, which has no run-view container to cover, so it needs the viewport-wide variant.
 	fixed?: boolean
 }
@@ -33,7 +37,9 @@ export function QuestionModal(h: LooseH, props: QuestionModalProps): Vnode {
 	const renderMarkdown = props.renderMarkdown
 	const onSubmit = props.onSubmit
 	const onClose = props.onClose
+	const onTerminate = props.onTerminate
 	const answerPending = props.answerPending === true
+	const terminatePending = props.terminatePending === true
 	const overlayClass = props.fixed === true ? 'question-modal-overlay question-modal-overlay--fixed' : 'question-modal-overlay'
 
 	const context = question.context !== undefined && typeof question.context === 'string' && question.context !== ''
@@ -53,6 +59,9 @@ export function QuestionModal(h: LooseH, props: QuestionModalProps): Vnode {
 			h('form', { class: 'question-modal-form', onsubmit: onSubmit }, [
 				h('textarea', { rows: '4', placeholder: 'your answer', autofocus: true, disabled: answerPending }),
 				h('button', { type: 'submit', disabled: answerPending }, 'Answer'),
+				onTerminate !== undefined
+					? h('button', { type: 'button', class: 'question-modal-terminate', disabled: answerPending || terminatePending, onclick: onTerminate }, 'Terminate task')
+					: null,
 			]),
 		]),
 	])

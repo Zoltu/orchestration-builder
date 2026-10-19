@@ -134,6 +134,7 @@ function createVersioningHarness(initialRuns: Array<[string, StoredRun]>, flowFe
 		readRunListSummary,
 		readParkedAskById: () => null,
 		resumeParkedRun: () => ({ ok: false, error: 'checkpoint_missing' }),
+		terminateParkedRun: () => ({ ok: false, error: 'not_found' }),
 		submitRun: () => ({ ok: false, error: 'run_in_progress' }),
 		hasActiveRun: () => activeRunId !== undefined,
 		sleep: async () => {},

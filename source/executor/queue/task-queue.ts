@@ -3,7 +3,7 @@ import type { ParkedAnswer, ParkedAsk } from '../park-state.js'
 import type { ListRunIds, ReadRunMetaById } from '../persistence.js'
 import { isRunMeta, isTerminalRunStatus, safeJsonParse } from '../validation.js'
 import type { EffortLevel, InvolvementLevel, LogLevel, RunContinuation, RunMeta } from '../types.js'
-import { assembleBriefingLines, cancelWaitingItem, dispatchingItem, editWaitingItem, enqueueAtHead, enqueueAtTail, normalizeNewItem, pendingAnswerUndelivered, reactivateErrorItem, recordAnswer, releaseToWaiting, removeWaitingItem, reorderWaitingItem, repairActiveItem, requireWaitingItem, requeueErrorItem, settleActiveItem, toQueueItemView, toQueueView, withReplacedItem, type QueueItem, type QueueItemView, type QueueMutation, type QueueView, type RunListEntry, type TaskQueue } from './model.js'
+import { assembleBriefingLines, cancelWaitingItem, dispatchingItem, editWaitingItem, enqueueAtHead, enqueueAtTail, normalizeNewItem, pendingAnswerUndelivered, reactivateErrorItem, recordAnswer, releaseToWaiting, removeWaitingItem, reorderWaitingItem, repairActiveItem, repairNeedsInputItem, requireWaitingItem, requeueErrorItem, settleActiveItem, terminateNeedsInputItem, toQueueItemView, toQueueView, withReplacedItem, type QueueItem, type QueueItemView, type QueueMutation, type QueueView, type RunListEntry, type TaskQueue } from './model.js'
 import { readQueue, writeQueue, type QueueStore } from './persistence.js'
 
 // The durable task queue module (docs/queueing.md "The queue: storage, item model, state machine" and "Dispatch and the scheduler"): the single public surface over the item model, the state machine, queue persistence, and the scheduler that dispatches queued tasks and settles their runs. HTTP handlers and the error-resume path call operations here rather than reading, mutating, and writing the queue file themselves, so the crash-safety ordering (dispatching marker before submit, boot repair, collision retry, settlement mapping) cannot be bypassed.
@@ -33,6 +33,13 @@ export type ResumeParkedRunResult =
 // The same-run answer resume: re-enters the parked run with the answer. The queue falls back to the legacy briefed dispatch on checkpoint_missing/not_parked.
 export type QueueResumeParkedRun = (runId: string, parkedAnswer: ParkedAnswer) => ResumeParkedRunResult
 
+export type TerminateParkedRunResult =
+	| { ok: true; runId: string }
+	| { ok: false; error: 'not_found' | 'not_parked' }
+
+// The operator-termination port: the submission layer's factory satisfies this shape structurally, and the queue cancels the item even when the run is already gone.
+export type TerminateParkedRun = (runId: string) => TerminateParkedRunResult
+
 // The configured leaves the composition root supplies; the module owns all queue logic and none has a default.
 export interface TaskQueueDependencies {
 	// The text-only persistence port; the module owns parsing, validation, malformed/missing tolerance, and serialization, while the write side replaces the file atomically.
@@ -46,6 +53,8 @@ export interface TaskQueueDependencies {
 	readParkedAskById: ReadParkedAskById
 	// The same-run answer resume, supplied by the submission layer: the queue decides when to re-enter a parked run and falls back to a briefed dispatch when it cannot.
 	resumeParkedRun: QueueResumeParkedRun
+	// The operator-termination operation for a parked run, supplied by the submission layer: it terminalizes the run and deletes its checkpoint, while the queue cancels the item even when the run is already gone.
+	terminateParkedRun: TerminateParkedRun
 	submitRun: SubmitQueuedRun
 	// The single-run-slot peek: when a run is active (the boot-resumed case) the tick is a true no-op — no dispatching-marker write, no submitRun probe — matching the design's "finds the slot busy and no-ops". The settlement hook's tick sees the slot already cleared.
 	hasActiveRun: () => boolean
@@ -94,10 +103,11 @@ export type QueueSubmitOutcome =
 // - submitNow(input, handles): the POST /api/runs path; refuses while a run is active with 'busy' before enqueueing, otherwise enqueues at the head and dispatches in the same call. A collision that exhausts the retry budget removes the just-created waiting item and returns 'collision'; a slot that becomes busy after the attempt keeps the item waiting and returns 'busy'.
 // - patch(id, patch): edits task/effort/involvement and/or reorders within the waiting list; unknown ids return 'not_found', non-waiting items 'forbidden_status'. An empty patch validates without writing.
 // - cancel(id, at): marks a waiting item cancelled with settledAt; unknown ids 'not_found', non-waiting items 'forbidden_status'.
-// - answer(id, answer): records an answer on a needs_input item, moves it to the front as waiting, and ticks; when the parked checkpoint still names this question, the item also records the run and tool call so the dispatch resumes the same run, otherwise it falls back to the legacy briefed continuation. Unknown ids 'not_found', other statuses 'forbidden_status'.
+// - terminate(id, at): cancels a needs_input item and, when it names a parked run, terminalizes that run and deletes its checkpoint; a run already gone ('not_found'/'not_parked') still cancels the item. Unknown ids 'not_found', other statuses 'forbidden_status'.
+// - answer(id, answer): records an answer on a needs_input item, moves it to the front as waiting, and ticks; when the parked checkpoint still names this question, the item also records the run and tool call so the dispatch resumes the same run, otherwise it falls back to the legacy briefed continuation. An item whose own run is already terminal but not parked (an operator termination) is cancelled, its checkpoint cleanup and audit append retried, and the answer discarded instead of dispatching. Unknown ids 'not_found', other statuses 'forbidden_status'.
 // - requeue(id): returns an error item to waiting at the tail with its lineage re-pointed at the errored run, then ticks; unknown ids 'not_found', other statuses 'forbidden_status'.
 // - reactivateErrorItem(runId): puts the error item for a resumed run back into the active slot under the same run id; returns 'not_found' when no error item names that run.
-// - tick(): repairs stale active items from their run metas, then dispatches the head waiting item unless a run is active or shutdown has been observed. An answered item resumes its parked run; when that run cannot be resumed the item falls back to the legacy briefed dispatch.
+// - tick(): repairs stale active items from their run metas and cancels needs_input items whose run was terminated before the queue write, then dispatches the head waiting item unless a run is active or shutdown has been observed. An answered item resumes its parked run; when that run cannot be resumed the item falls back to the legacy briefed dispatch.
 // - onRunSettled(meta): maps a settled run from its terminal meta, writes the mapping before ticking, and never settles an 'interrupted' meta (that item re-dispatches through boot repair). A needs_clarification settlement whose answer is still undelivered releases the item to waiting and ticks instead of settling, so the answer retries.
 // - observeShutdown(): closes the dispatch gate; settlements still map but no new run starts.
 export interface TaskQueueModule {
@@ -106,6 +116,7 @@ export interface TaskQueueModule {
 	submitNow(input: unknown, handles: QueueHandles): Promise<QueueSubmitOutcome>
 	patch(id: string, patch: QueuePatchInput): QueueMutationOutcome
 	cancel(id: string, at: string): QueueMutationOutcome
+	terminate(id: string, at: string): QueueMutationOutcome
 	answer(id: string, answer: string): Promise<QueueMutationOutcome>
 	requeue(id: string): Promise<QueueMutationOutcome>
 	reactivateErrorItem(runId: string): QueueMutationOutcome
@@ -159,10 +170,9 @@ export function createTaskQueue(dependencies: TaskQueueDependencies): TaskQueueM
 		return found
 	}
 
-	// Repairs every active item from its run's meta (docs/queueing.md state machine, the boot rows) and writes the queue when anything changed. Idempotent and cheap in steady state — a live run's item is untouched and no other item is ever active.
+	// Repairs every active item from its run's meta (docs/queueing.md state machine, the boot rows), and every needs_input item whose run was terminalized interrupted before its queue cancel landed, finishing that run's checkpoint/audit cleanup and writing when anything changed. Idempotent and cheap in steady state — a live run's item and a normally parked item are untouched.
 	function repairPass(): void {
 		const queue = readQueueState()
-		if (!queue.items.some((item) => item.status === 'active')) return
 		let resumedMeta: RunMeta | null | undefined
 		const scanResumed = (): RunMeta | null => {
 			if (resumedMeta === undefined) resumedMeta = findUniqueRunningMeta()
@@ -170,6 +180,15 @@ export function createTaskQueue(dependencies: TaskQueueDependencies): TaskQueueM
 		}
 		let changed = false
 		const items = queue.items.map((item) => {
+			if (item.status === 'needs_input' && item.runId !== undefined) {
+				const meta = parseRunMetaText(item.runId)
+				const repaired = repairNeedsInputItem(item, meta, dependencies.now())
+				if (repaired === null) return item
+				// The meta wrote interrupted before the checkpoint delete landed, so the retry finishes that cleanup before the queue records the cancellation.
+				dependencies.terminateParkedRun(item.runId)
+				changed = true
+				return repaired
+			}
 			if (item.status !== 'active') return item
 			const meta = item.runId !== undefined ? parseRunMetaText(item.runId) : scanResumed()
 			const parkedAsk = item.runId !== undefined ? dependencies.readParkedAskById(item.runId) : null
@@ -352,11 +371,35 @@ export function createTaskQueue(dependencies: TaskQueueDependencies): TaskQueueM
 			writeQueueState(result.queue)
 			return { ok: true, item: toQueueItemView(result.item) }
 		},
+		terminate(id, at) {
+			const queue = readQueueState()
+			const target = queue.items.find((item) => item.id === id)
+			if (target === undefined) return { ok: false, reason: 'not_found' }
+			if (target.status !== 'needs_input') return { ok: false, reason: 'forbidden_status' }
+			// Only the item's own run is terminalized: continuesFrom is lineage and may name another terminal run, and with no runId there is nothing to touch.
+			if (target.runId !== undefined) dependencies.terminateParkedRun(target.runId)
+			const result = terminateNeedsInputItem(queue, id, at)
+			if (!result.ok) return toMutationOutcome(result)
+			writeQueueState(result.queue)
+			return { ok: true, item: toQueueItemView(result.item) }
+		},
 		async answer(id, answer) {
 			const queue = readQueueState()
 			const target = queue.items.find((item) => item.id === id)
 			if (target === undefined) return { ok: false, reason: 'not_found' }
 			if (target.status !== 'needs_input') return { ok: false, reason: 'forbidden_status' }
+			// A run terminated between the queue's park write and this answer is terminal but not parked: the answer is discarded and the item cancelled, never dispatched as a new briefed run. A needs_clarification meta is the live park and answers normally.
+			if (target.runId !== undefined) {
+				const meta = parseRunMetaText(target.runId)
+				if (meta !== null && isTerminalRunStatus(meta.status) && meta.status !== 'needs_clarification') {
+					// The run was terminalized before this answer arrived, so finish its checkpoint/audit cleanup and discard the answer.
+					dependencies.terminateParkedRun(target.runId)
+					const result = terminateNeedsInputItem(queue, id, dependencies.now())
+					if (!result.ok) return toMutationOutcome(result)
+					writeQueueState(result.queue)
+					return { ok: true, item: toQueueItemView(result.item) }
+				}
+			}
 			const parkedRunId = target.runId ?? target.continuesFrom
 			const parkedAsk = parkedRunId !== undefined ? dependencies.readParkedAskById(parkedRunId) : null
 			// A legacy needs_input (no parked checkpoint, or a question that no longer matches one) keeps the briefed-continuation path; a live parked ask records the same-run resume pointers.

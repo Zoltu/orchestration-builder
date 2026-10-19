@@ -54,8 +54,8 @@ export type { InterruptChannel, InterruptQueue, InterruptRequest, InterruptSubmi
 export { createDeltaChannel } from './stream-channel.js'
 export type { DeltaChannel, DeltaField, DeltaSubscriber, RoleDelta, RunDelta } from './stream-channel.js'
 
-export { createRunSubmission, createResumeErroredRun, createReadParkedAskById, createResumeParkedRun } from './run-submission.js'
-export type { ReadParkedAskById, ResumeErroredRun, ResumeErroredRunDependencies, ResumeErroredRunRejection, ResumeErroredRunResult, ResumeParkedRun, ResumeParkedRunDependencies, ResumeParkedRunRejection, ResumeParkedRunResult, ResumeRun, ResumeRunInvocation, RunSubmission, RunSubmissionDependencies, StartRun, SubmitResult } from './run-submission.js'
+export { createRunSubmission, createResumeErroredRun, createReadParkedAskById, createResumeParkedRun, createTerminateParkedRun } from './run-submission.js'
+export type { ReadParkedAskById, ResumeErroredRun, ResumeErroredRunDependencies, ResumeErroredRunRejection, ResumeErroredRunResult, ResumeParkedRun, ResumeParkedRunDependencies, ResumeParkedRunRejection, ResumeParkedRunResult, ResumeRun, ResumeRunInvocation, RunSubmission, RunSubmissionDependencies, StartRun, SubmitResult, TerminateParkedRun, TerminateParkedRunDependencies, TerminateParkedRunRejection, TerminateParkedRunResult } from './run-submission.js'
 
 export { createTaskQueue } from './queue/index.js'
 export type {

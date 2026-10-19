@@ -268,6 +268,32 @@ export function cancelWaitingItem(queue: TaskQueue, id: string, settledAt: strin
 	return { ok: true, queue: withReplacedItem(queue, cancelled), item: cancelled }
 }
 
+// The operator's termination of a parked item: the record becomes cancelled like any other settled item, keeping its question and answer (and lineage) for audit while dropping the run and resume pointers, so a stale dispatch can never re-enter the run.
+export function terminateNeedsInputItem(queue: TaskQueue, id: string, settledAt: string): QueueMutation {
+	const target = findById(queue, id)
+	if (target === undefined) return { ok: false, reason: 'not_found' }
+	if (target.status !== 'needs_input') return { ok: false, reason: 'forbidden_status' }
+	const cancelled = cancelledItem(target, settledAt)
+	return { ok: true, queue: withReplacedItem(queue, cancelled), item: cancelled }
+}
+
+// The boot repair for the termination crash window: a needs_input item whose run was already terminalized interrupted but whose queue cancel never landed is cancelled on the next tick. Only a runId is consulted — continuesFrom is lineage and may name another terminal run — and every other status/meta combination is left untouched.
+export function repairNeedsInputItem(item: QueueItem, meta: RunMeta | null, settledAt: string): QueueItem | null {
+	if (item.status !== 'needs_input') return null
+	if (item.runId === undefined) return null
+	if (meta === null || meta.status !== 'interrupted') return null
+	return cancelledItem(item, settledAt)
+}
+
+function cancelledItem(target: QueueItem, settledAt: string): QueueItem {
+	return {
+		...carriedFields(target),
+		...(target.continuesFrom !== undefined ? { continuesFrom: target.continuesFrom } : {}),
+		status: 'cancelled',
+		settledAt,
+	}
+}
+
 // The POST /api/runs path's collision rollback: a run_id_collision that exhausted the scheduler's retry budget leaves the just-created head item waiting with no run behind it, and the item is dropped outright so the caller's resubmit behaves exactly as it does today. Only a still-waiting item is ever dropped — an item the tick dispatched (or a settled one's record) is left alone.
 export function removeWaitingItem(queue: TaskQueue, id: string): QueueMutation {
 	const required = requireWaitingItem(queue, id)
@@ -335,7 +361,7 @@ export interface TerminalItemState {
 	question?: string
 }
 
-// Maps a terminal run meta to the item state the settlement applies, exactly the live mapping (docs/queueing.md state machine): success → done, error → error, needs_clarification → needs_input. A meta that maps to no item state ('running' can never settle, and an 'interrupted' run means the service died — its item re-dispatches rather than settles) returns undefined.
+// Maps a terminal run meta to the item state the settlement applies, exactly the live mapping (docs/queueing.md state machine): success → done, error → error, needs_clarification → needs_input. A meta that maps to no item state ('running' can never settle, and an 'interrupted' run — abandoned by reconciliation or terminated by the operator — is repaired by boot/answer handling rather than settled) returns undefined.
 export function mapSettledItemState(meta: RunMeta): TerminalItemState | undefined {
 	if (meta.status === 'success') {
 		return { status: 'done', ...(meta.result?.summary !== undefined ? { resultSummary: meta.result.summary } : {}) }
@@ -408,7 +434,7 @@ export type ActiveItemRepair =
 
 // Boot repair for stale active items (docs/queueing.md state machine, the boot rows) — the terminal meta and the queue item are separate files with no cross-file atomicity, so a crash between the two writes leaves an active item needing repair:
 // - with a runId whose meta is terminal: settle from that meta, exactly the live mapping (the crash landed between the meta write and the settlement write).
-// - with a runId whose meta reads 'interrupted': the service died, not the task — release to waiting with the lineage re-pointed at the interrupted run for re-dispatch.
+// - with a runId whose meta reads 'interrupted': the run was abandoned (reconciliation) or terminated (operator), not the task — release to waiting with the lineage re-pointed at the interrupted run for re-dispatch; an operator termination normally lands on a needs_input item, which repairNeedsInputItem cancels instead.
 // - with a runId whose meta still reads 'running': the boot-resumed run's own item — untouched; its own settlement maps it.
 // - with a runId whose meta is unreadable (a phantom run directory): release to waiting rather than leave the item stuck active forever.
 // - with no runId (an orphaned dispatching marker): the run may or may not have started. The scheduler passes the boot-resumed run's meta (the unique 'running' meta) or null; the item binds to it when the task matches — identical task texts are interchangeable, since only the head is ever mid-dispatch — and returns to waiting otherwise.
