@@ -2,7 +2,7 @@
 //
 // The modal is an overlay scoped to the run view (not `document.body`-wide), mirroring the question modal: it covers the active run's flow area only, so the rest of the page stays usable while the modal is open. It renders the result summary as sanitized Markdown (via the `renderMarkdown` closure passed in, the same pipeline the product client uses), the artifacts list as plain text paths (a machine field, so they stay `textContent` and never flow through Markdown), and — on error — the raw error message as sanitized Markdown in a copyable block with honest framing, plus the error card's technical detail (a machine field) as collapsed preformatted text. The machine error `kind` is intentionally not surfaced to the user (it is an internal taxonomy a non-developer cannot act on); the "copy raw" button copies the full error object as JSON so the operator can hand it to support. The framing copy is fixed trusted text, not agent prose. See docs/security.md "Web client rendering pipeline".
 //
-// `h` and `renderMarkdown` are passed in rather than imported so the component stays free of hyperapp and showdown coupling and is exercisable in tests with fakes (mirroring question-modal.js and the run-stage views). The close and copy-raw handlers are supplied by the caller: in the demo harness `onClose` clears the modal-open flag and `onCopyRaw` writes the JSON to the clipboard; in the product client `onClose` will clear the flag and `onCopyRaw` will POST or clipboard the raw object. The optional `onContinue` and `onResume` affordances (error outcomes only) are supplied the same way; the demo harness omits both.
+// `h` and `renderMarkdown` are passed in rather than imported so the component stays free of hyperapp and showdown coupling and is exercisable in tests with fakes (mirroring question-modal.js and the run-stage views). The close and copy-raw handlers are supplied by the caller: in the demo harness `onClose` clears the modal-open flag and `onCopyRaw` writes the JSON to the clipboard; in the product client `onClose` will clear the flag and `onCopyRaw` will POST or clipboard the raw object. The optional `onContinue` and `onResume` affordances are supplied the same way; Continue applies to every terminal outcome, while Resume applies only to a resumable error. The demo harness omits both.
 
 import { isTerminalStatus } from './interaction-model.js'
 import { isObject } from './guards.js'
@@ -68,13 +68,18 @@ const ERROR_FRAMING = 'Something went wrong — here\u2019s what the system repo
 export interface ResultModalProps {
 	descriptor: TerminalResult
 	runLabel?: string | null
+	// The run id stamped on the recovery buttons' data-run-id attribute. The product host passes the viewed run's id explicitly; when absent (the demo harness and older callers), the run label stands in.
+	runId?: string | null
 	renderMarkdown: RenderMarkdown
 	onCopyRaw?: (rawJson: string) => void
 	onClose: unknown
-	// Optional Continue affordance for an errored run: when supplied (a hyperapp click action, like onClose), an error-status modal renders a Continue button that invokes it. The action reads the run id off the button's data-run-id attribute — the same contract the history row's Continue button uses — so the host can wire the very same continuation hand-off. The demo harness omits the prop, so its modals keep only Close.
+	// Optional Continue affordance for any terminal run: when supplied (a hyperapp click action, like onClose), the modal renders a Continue button that invokes it. A resumable error renders both Resume and Continue, with Resume first. The action reads the run id off the button's data-run-id attribute — the same contract the history row's Continue button uses — so the host can wire the very same continuation hand-off. The demo harness omits the prop, so its modals keep only Close.
 	onContinue?: unknown
-	// Optional Resume affordance for an errored run whose checkpoint makes a same-run resume possible: when supplied AND the descriptor is resumable, the Resume button replaces Continue — one primary recovery action, resume restarting the run in place from its full checkpointed context while continue is the briefed fallback for a run with no checkpoint. Same action contract as onContinue: a hyperapp click action reading the run id off the button's data-run-id attribute. The demo harness omits the prop.
+	// Optional Resume affordance for a resumable error: when supplied AND the descriptor is a resumable error, the modal renders a Resume button that restarts the run in place from its full checkpointed context. It is independent of Continue, which remains the briefed fallback whether or not a checkpoint exists. Same action contract as onContinue: a hyperapp click action reading the run id off the button's data-run-id attribute. The demo harness omits the prop.
 	onResume?: unknown
+	// When true, both recovery affordances render disabled with `recoveryDisabledReason` as their title: the host uses this while another run is genuinely active or a create/resume submission is in flight. Close stays enabled so the modal can always be dismissed.
+	recoveryDisabled?: boolean
+	recoveryDisabledReason?: string
 	// Optional technical meta line ({ text, title }) for advanced users — the product client derives it from the run view; the demo harness passes none. Rendered as muted microcopy, all textContent.
 	metaLine?: { text?: unknown; title?: unknown } | null
 }
@@ -83,11 +88,14 @@ export interface ResultModalProps {
 export function ResultModal(h: LooseH, props: ResultModalProps): Vnode {
 	const descriptor = props.descriptor
 	const runLabel = props.runLabel
+	const runId = props.runId ?? runLabel
 	const renderMarkdown = props.renderMarkdown
 	const onCopyRaw = props.onCopyRaw
 	const onClose = props.onClose
 	const onContinue = props.onContinue
 	const onResume = props.onResume
+	const recoveryDisabled = props.recoveryDisabled === true
+	const recoveryDisabledReason = typeof props.recoveryDisabledReason === 'string' ? props.recoveryDisabledReason : ''
 	const metaLine = props.metaLine
 
 	const status = descriptor.status
@@ -103,7 +111,7 @@ export function ResultModal(h: LooseH, props: ResultModalProps): Vnode {
 		h('p', { class: 'result-modal-heading' }, runLabel !== null && runLabel !== undefined && runLabel !== ''
 			? `Result \u00b7 ${runLabel}`
 			: 'Result'),
-		h('p', { class: `result-modal-status result-modal-status--${status}` }, statusLabel(status)),
+		h('p', { class: `result-modal-status result-modal-status--${status}` }, resultStatusLabel(status)),
 	]
 
 	if (metaLine !== null && metaLine !== undefined && typeof metaLine.text === 'string') {
@@ -149,13 +157,15 @@ export function ResultModal(h: LooseH, props: ResultModalProps): Vnode {
 		children.push(h('div', { class: 'result-modal-error' }, errorChildren))
 	}
 
-	// The action row: Close always; on an error outcome exactly one recovery affordance — Resume when the host supplies it and the descriptor is resumable (it replaces Continue, since a checkpointed run restarts in place), Continue when no checkpoint exists (the briefed-continuation fallback). Both stamp the run id the same way the history row's Continue button does (data-run-id), so the injected actions are the very same logic reading the same attribute.
-	const actions: Vnode[] = [h('button', { type: 'button', class: 'result-modal-close', onclick: onClose }, 'Close')]
+	// The action row: Resume (a resumable error with the capability), then Continue (any terminal outcome with the capability), then Close. Continue is independent of resume: a run with a checkpoint offers in-place resume first and the briefed continuation beside it. Both stamp the run id the same way the history row's Continue button does (data-run-id), so the injected actions are the very same logic reading the same attribute. The host disables both recovery buttons while another run is genuinely active or a submission is in flight, leaving Close usable.
+	const actions: Vnode[] = []
 	if (status === 'error' && resumable && onResume !== undefined) {
-		actions.unshift(h('button', { type: 'button', class: 'result-modal-resume', 'data-run-id': typeof runLabel === 'string' ? runLabel : '', onclick: onResume }, 'Resume'))
-	} else if (status === 'error' && onContinue !== undefined) {
-		actions.unshift(h('button', { type: 'button', class: 'result-modal-continue', 'data-run-id': typeof runLabel === 'string' ? runLabel : '', onclick: onContinue }, 'Continue'))
+		actions.push(h('button', { type: 'button', class: 'result-modal-resume', 'data-run-id': typeof runId === 'string' ? runId : '', disabled: recoveryDisabled, title: recoveryDisabled ? recoveryDisabledReason : '', onclick: onResume }, 'Resume'))
 	}
+	if (onContinue !== undefined) {
+		actions.push(h('button', { type: 'button', class: 'result-modal-continue', 'data-run-id': typeof runId === 'string' ? runId : '', disabled: recoveryDisabled, title: recoveryDisabled ? recoveryDisabledReason : '', onclick: onContinue }, 'Continue'))
+	}
+	actions.push(h('button', { type: 'button', class: 'result-modal-close', onclick: onClose }, 'Close'))
 	children.push(h('div', { class: 'result-modal-actions' }, actions))
 
 	return h('div', { class: 'result-modal-overlay' }, [
@@ -164,7 +174,8 @@ export function ResultModal(h: LooseH, props: ResultModalProps): Vnode {
 	])
 }
 
-function statusLabel(status: string): string {
+// The human status word for a terminal run, shared by the result modal and the continuation reference block so the two surfaces name an outcome identically.
+export function resultStatusLabel(status: string): string {
 	if (status === 'success') return 'Completed successfully'
 	if (status === 'error') return 'Completed with an error'
 	if (status === 'interrupted') return 'Interrupted'

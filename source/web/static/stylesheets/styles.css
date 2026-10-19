@@ -428,7 +428,7 @@ li:last-child {
 	opacity: 0.7;
 }
 
-/* The continuation chip rides above the compose textarea when the operator clicked Continue on a finished history row: it names the prior run and echoes its task and outcome so the follow-up is drafted against the right context. The accent border and tint mark it as attached context rather than form chrome, and the Cancel button stands apart on the right so returning to a plain new task is one obvious click. */
+/* The continuation chip rides above the compose textarea while the operator is resuming an errored run: it names the prior run and says the note is optional. The accent border and tint mark it as attached context rather than form chrome, and the Cancel button stands apart on the right so returning to a plain new task is one obvious click. */
 .continuation-chip {
 	display: flex;
 	align-items: flex-start;
@@ -453,13 +453,144 @@ li:last-child {
 	color: var(--color-accent);
 }
 
-.continuation-chip-task,
 .continuation-chip-outcome {
 	font-size: 0.8rem;
 	color: var(--color-text-muted);
-	overflow: hidden;
-	text-overflow: ellipsis;
-	white-space: nowrap;
+	white-space: pre-wrap;
+	overflow-wrap: anywhere;
+}
+
+/* The Compose continuation reference: the prior run's full task and terminal result as the labeled User/Assistant turns the new run receives. It is attached context rather than form chrome, so it wears the accent border and tint; the turns sit on the surface color and each carries its own left accent. Nothing here truncates or scrolls internally — the compose screen owns the scroll, because the operator needs the whole prior result to write a useful follow-up. */
+.continuation-reference {
+	display: flex;
+	flex-direction: column;
+	gap: var(--space-3);
+	min-width: 0;
+	padding: var(--space-3);
+	border: 1px solid var(--color-accent-border);
+	border-radius: var(--radius);
+	background: var(--color-accent-soft);
+}
+
+.continuation-reference-header {
+	display: flex;
+	align-items: flex-start;
+	justify-content: space-between;
+	gap: var(--space-3);
+}
+
+.continuation-reference-title {
+	margin: 0;
+	font-weight: 600;
+	font-size: 0.9rem;
+	color: var(--color-accent);
+	overflow-wrap: anywhere;
+}
+
+.continuation-reference-turns {
+	display: flex;
+	flex-direction: column;
+	gap: var(--space-3);
+	min-width: 0;
+}
+
+.continuation-reference-turn {
+	display: flex;
+	flex-direction: column;
+	gap: var(--space-2);
+	min-width: 0;
+	padding: var(--space-3);
+	border-left: 3px solid var(--color-accent);
+	border-radius: var(--radius-sm);
+	background: var(--color-surface);
+}
+
+.continuation-reference-label {
+	margin: 0;
+	font-size: 0.7rem;
+	font-weight: 600;
+	text-transform: uppercase;
+	letter-spacing: 0.04em;
+	color: var(--color-text-subtle);
+}
+
+.continuation-reference-status {
+	margin: 0;
+	font-size: 0.85rem;
+	font-weight: 600;
+	color: var(--color-text);
+}
+
+.continuation-reference-body {
+	min-width: 0;
+	overflow-wrap: anywhere;
+}
+
+.continuation-reference-body.markdown p {
+	margin: 0.3rem 0;
+}
+
+.continuation-reference-error {
+	color: var(--color-error);
+}
+
+.continuation-reference-artifacts-heading {
+	margin: 0 0 var(--space-1);
+	font-size: 0.75rem;
+	font-weight: 600;
+	text-transform: uppercase;
+	letter-spacing: 0.04em;
+	color: var(--color-text-subtle);
+}
+
+.continuation-reference-artifacts-list {
+	margin: 0;
+	padding: 0;
+	list-style: none;
+	display: flex;
+	flex-direction: column;
+	gap: var(--space-1);
+}
+
+.continuation-reference-artifact {
+	padding: 0;
+	border-bottom: none;
+	font-family: var(--font-mono);
+	font-size: 0.8rem;
+	color: var(--color-text);
+	overflow-wrap: anywhere;
+}
+
+.continuation-reference-detail {
+	margin: 0;
+}
+
+.continuation-reference-detail-summary {
+	cursor: pointer;
+	font-size: 0.8rem;
+	font-weight: 500;
+	color: var(--color-text-muted);
+	user-select: none;
+}
+
+.continuation-reference-detail-text {
+	margin: var(--space-2) 0 0;
+	padding: var(--space-2);
+	border: 1px solid var(--color-border);
+	border-radius: var(--radius-sm);
+	background: var(--color-surface-sunken);
+	font-family: var(--font-mono);
+	font-size: 0.8rem;
+	line-height: 1.4;
+	color: var(--color-text);
+	white-space: pre-wrap;
+	overflow-wrap: anywhere;
+}
+
+.continuation-reference-fallback {
+	margin: 0;
+	font-size: 0.85rem;
+	color: var(--color-text-muted);
 }
 
 /* The compose screen's notice for a refused resume (another run in flight, a missing checkpoint): muted microcopy under the submit button, so the reason sits where the click landed and the typed note stays in the box for a retry. Mirrors the interrupt form's notice styling. */

@@ -15,6 +15,8 @@ import { copyRawToClipboard } from './clipboard.js'
 import { QuestionModal } from './question-modal.js'
 import { createOperationDetails } from './operation-details.js'
 import { deriveTerminalResult, ResultModal } from './result-modal.js'
+import { ContinuationReference, selectContinuationReference } from './continuation-reference.js'
+import type { ContinuationReferenceData } from './continuation-reference.js'
 import { InspectorModal } from './inspector-modal.js'
 import { createInspectorSession } from './turn-inspector/index.js'
 import { isObject } from './guards.js'
@@ -156,13 +158,6 @@ export interface ApiQuestion {
 	askedAt: string
 }
 
-// The compose screen's continuation chip: the prior run's id (submitted as continuesFrom) plus the task and outcome summary it echoes.
-export interface Continuation {
-	runId: string
-	task: string
-	summary: string | null
-}
-
 // The one-time presentation of a newly-arrived interrupt answer.
 export interface InterruptAnswerCard {
 	question: string
@@ -234,9 +229,9 @@ export interface ApplicationState {
 	screen: Screen
 	// Per-row expansion for the merged history screen, keyed by run id or queue item id, so the full task/result of several rows can be open at once.
 	expandedRowIds: Record<string, boolean>
-	// The continuation pending on the compose screen, or null for a plain new task. Set by the History row's Continue button; cleared by the chip's Cancel and after a successful submit.
-	continuation: Continuation | null
-	// The errored run the compose screen is resuming, or null for a non-resume mode. Set by the result modal's Resume button (the same run restarts in place from its checkpoint, an optional note riding along); mutually exclusive with `continuation` — entering either mode clears the other. Cleared by the chip's Cancel and after a successful resume.
+	// The continuation pending on the compose screen, or null for a plain new task. Set by the History row's or result modal's Continue button; cleared by the reference block's Cancel and after a successful submit.
+	continuation: ContinuationReferenceData | null
+	// The errored run the compose screen is resuming, or null for a non-resume mode. Set by the result modal's Resume button (the same run restarts in place from its checkpoint, an optional note riding along); mutually exclusive with `continuation` — entering either mode clears the other. Cleared by the resume chip's Cancel and after a successful resume.
 	resumingRunId: string | null
 	// The resume request's in-flight flag (the submit button and the double-submit guard read it) and the one-line notice a refused or unreadable resume leaves on the compose screen. The notice clears on entry, cancel, and success.
 	resumeSending: boolean
@@ -1276,7 +1271,7 @@ function buildQueueTaskBody(task: string, runEffort: EffortLevel | null, runInvo
 }
 
 // effort, involvement, and logLevel are omitted when their selectors have not yet initialized (settings still loading), so the server applies its resolution chain rather than receiving a null. continuesFrom rides only when the compose screen is in continuation mode; a re-run passes null and submits a plain task.
-function buildRunBody(task: string, runEffort: EffortLevel | null, runInvolvement: InvolvementLevel | null, runLogLevel: LogLevel | null, continuation: Continuation | null): { task: string; effort?: EffortLevel; involvement?: InvolvementLevel; logLevel?: LogLevel; continuesFrom?: string } {
+function buildRunBody(task: string, runEffort: EffortLevel | null, runInvolvement: InvolvementLevel | null, runLogLevel: LogLevel | null, continuation: ContinuationReferenceData | null): { task: string; effort?: EffortLevel; involvement?: InvolvementLevel; logLevel?: LogLevel; continuesFrom?: string } {
 	const body: { task: string; effort?: EffortLevel; involvement?: InvolvementLevel; logLevel?: LogLevel; continuesFrom?: string } = { task }
 	if (isEffort(runEffort)) body.effort = runEffort
 	if (isInvolvement(runInvolvement)) body.involvement = runInvolvement
@@ -1310,28 +1305,26 @@ function RerunTask(state: ApplicationState, event: MouseEvent): ActionReturn {
 	]
 }
 
-// The prior run's outcome summary for the continuation chip, or null when the prior run has no result card to quote — the chip then omits the outcome line entirely (the server-side briefing handles the empty case on its own).
-function priorOutcomeOf(summary: RunSummary): string | null {
-	const result = summary.result
-	if (result === null || result === undefined) return null
-	if (typeof result.summary !== 'string' || result.summary === '') return null
-	return result.summary
-}
-
-// Continue switches the compose screen into continuation mode: a new run will anchor to the finished run's outcome via continuesFrom. Like RerunTask it reads the run id off the button (stopPropagation keeps the row's select handler out of the way), and it shares the re-run button's disabled condition so the one-task-at-a-time contract holds for continuations too. The prior task and outcome for the chip are read from the already-polled run list rather than data attributes, so nothing large rides the DOM.
+// Continue switches the compose screen into continuation mode: a new run will anchor to the finished run's outcome via continuesFrom. Like RerunTask it reads the run id off the button (stopPropagation keeps the row's select handler out of the way), and it shares the re-run button's disabled condition so the one-task-at-a-time contract holds for continuations too. The prior task and terminal result for the reference block are read by selectContinuationReference, which prefers a terminal selected view over a lagging run-list summary for the same id.
 function ContinueRun(state: ApplicationState, event: MouseEvent): ApplicationState {
 	event.stopPropagation()
-	if (state.justSubmittedRunId !== null || deriveActiveRunId(state.summaries) !== null) return state
+	if (state.justSubmittedRunId !== null || state.createSending || state.resumeSending) return state
 	const target = event.currentTarget
 	if (!(target instanceof Element)) return state
 	const runId = target.getAttribute('data-run-id')
 	if (typeof runId !== 'string' || runId === '') return state
-	const summary = state.summaries.find((entry) => entry.runId === runId)
-	if (summary === undefined) return state
+	const selectedView = state.selectedRunView
+	const selectedViewTerminal = selectedView !== null && selectedView.runId === runId && deriveTerminalResult(selectedView) !== undefined
+	const activeRunId = deriveActiveRunId(state.summaries)
+	// A stale list entry for the just-completed viewed run is not a genuine active run; the selected view's terminal status is the fresher evidence. Any other active id still refuses the continuation.
+	if (activeRunId !== null && activeRunId !== runId) return state
+	if (activeRunId === runId && !selectedViewTerminal) return state
+	const continuation = selectContinuationReference(runId, state.summaries, selectedView)
+	if (continuation === null) return state
 	return {
 		...state,
 		screen: 'compose',
-		continuation: { runId, task: typeof summary.task === 'string' ? summary.task : '', summary: priorOutcomeOf(summary) },
+		continuation,
 		// Continuation and resume are mutually exclusive compose modes: entering one leaves the other.
 		resumingRunId: null,
 		resumeNotice: null,
@@ -1994,7 +1987,7 @@ function HistoryRowDetails(summary: RunSummary): Vnode {
 
 // The merged history screen: the queued tasks the operator can still act on (waiting, active, needs_input) sit at the top in queue order, then the run browser below. Every row shares the same compact one-line UX — status, primary line, when, and a details expander — so a queued row and a finished run read as one list. The empty state appears only when neither the queued rows nor the run list has anything to show.
 function HistoryScreen(state: ApplicationState): Vnode {
-	const rerunDisabled = state.createSending || state.justSubmittedRunId !== null || deriveActiveRunId(state.summaries) !== null
+	const rerunDisabled = state.createSending || state.resumeSending || state.justSubmittedRunId !== null || deriveActiveRunId(state.summaries) !== null
 	const queued = deriveQueuedItems(state.queueItems)
 	const queuedItems = [...queued.waiting, ...queued.active, ...queued.needsInput]
 	const queuedRows = queuedItems.map((item) => QueueItemRow(state, item))
@@ -2137,18 +2130,11 @@ function LoggingLevelSelector(value: LogLevel, disabled: boolean, saving: boolea
 	])
 }
 
-// The continuation banner above the compose textarea: names the run being continued and echoes its task (and its outcome, when one exists) so the follow-up is drafted against the right context. Every dynamic string is a machine field rendered as text — never markup. Dismissing returns the form to a plain new task.
-function ContinuationChip(state: ApplicationState): Vnode | null {
+// The continuation reference above the compose textarea: the prior run's full task and terminal result as the labeled User/Assistant turns the server will inject. It is display-only — the textarea holds the follow-up and the submitted body carries only continuesFrom — and dismissing returns the form to a plain new task.
+function ContinuationReferenceBlock(state: ApplicationState): Vnode | null {
 	const continuation = state.continuation
 	if (continuation === null) return null
-	return h('div', { class: 'continuation-chip', 'aria-label': `Continuing run ${continuation.runId}` }, [
-		h('div', { class: 'continuation-chip-text' }, [
-			h('p', { class: 'continuation-chip-title' }, `Continuing run ${continuation.runId}`),
-			typeof continuation.task === 'string' && continuation.task !== '' ? h('p', { class: 'continuation-chip-task' }, taskFirstLine(continuation.task)) : null,
-			continuation.summary !== null ? h('p', { class: 'continuation-chip-outcome' }, `Prior outcome: ${continuation.summary}`) : null,
-		]),
-		h('button', { type: 'button', class: 'continuation-chip-dismiss', title: 'Discard the continuation and write a fresh task', onclick: CancelContinuation }, 'Cancel'),
-	])
+	return ContinuationReference(h, { continuation, renderMarkdown, onCancel: CancelContinuation })
 }
 
 // The resume banner above the compose textarea while the operator is resuming an errored run from its result modal: it names the run being restarted and says the note is optional — the run restarts from its checkpointed context either way. It reuses the continuation chip's styling (the same attached-context chrome for the compose form's two anchored modes) and the Cancel button returns the form to a plain new task.
@@ -2164,10 +2150,12 @@ function ResumeChip(state: ApplicationState): Vnode | null {
 	])
 }
 
-// The compose textarea's placeholder announces the form's mode: a resume note is optional (the run restarts with or without one), a plain task is required, and a blocked form says why it is waiting.
-function composePlaceholder(resuming: boolean, blocked: boolean): string {
+// The compose textarea's placeholder announces the form's mode: a resume note is optional (the run restarts with or without one), a continuation asks for the follow-up to the prior task, a plain task is required, and a blocked form says why it is waiting.
+function composePlaceholder(resuming: boolean, continuing: boolean, blocked: boolean): string {
 	if (blocked) return resuming ? 'a run is already in progress — the resume starts when it finishes' : 'a run is already in progress — a continuation starts when it finishes'
-	return resuming ? 'add an optional note for the resumed run (Markdown supported)' : 'describe a task (Markdown supported)'
+	if (resuming) return 'add an optional note for the resumed run (Markdown supported)'
+	if (continuing) return 'add your follow-up to the continued task (Markdown supported)'
+	return 'describe a task (Markdown supported)'
 }
 
 // The submit button's label tracks the same mode, with an in-flight resume or create named so the wait reads as progress rather than a dead button.
@@ -2177,11 +2165,15 @@ function composeSubmitLabel(resuming: boolean, sending: boolean, blocked: boolea
 	return resuming ? 'Resume run' : 'Add task'
 }
 
-// The compose screen is the hero when the service is idle — drafting a task is the primary activity when nothing is running, so the editor gets the whole stage. The submit path is the queue's universal add (the scheduler dispatches it at once when the system is idle, so the user-visible behavior of today's "start now" is preserved); in continuation mode the chip rides above the task field and the submit body carries continuesFrom — the only body that can — so a continuation stays disabled while a run is in flight rather than queueing without its lineage. In resume mode the chip names the errored run being restarted and the submit body is the optional note.
+// The compose screen is the hero when the service is idle — drafting a task is the primary activity when nothing is running, so the editor gets the whole stage. The submit path is the queue's universal add (the scheduler dispatches it at once when the system is idle, so the user-visible behavior of today's "start now" is preserved); in continuation mode the reference block rides above the task field and the submit body carries continuesFrom — the only body that can — so a continuation stays disabled while a run is in flight rather than queueing without its lineage. In resume mode the chip names the errored run being restarted and the submit body is the optional note.
 function ComposeScreen(state: ApplicationState): Vnode {
 	const resuming = state.resumingRunId !== null
-	// A continuation and a resume both submit to run-submission endpoints that hold the one-run-at-a-time slot, so either mode disables while a run is in flight (a plain task queues instead); a resume or a create already in flight disables until it lands.
-	const blocked = (state.continuation !== null || resuming) && deriveActiveRunId(state.summaries) !== null
+	// A continuation and a resume both submit to run-submission endpoints that hold the one-run-at-a-time slot, so either mode disables while a run is in flight (a plain task queues instead); a resume or a create already in flight disables until it lands. A stale list entry for the very run being continued or resumed is not a genuine active run when the selected view is already terminal.
+	const activeRunId = deriveActiveRunId(state.summaries)
+	const targetRunId = state.continuation !== null ? state.continuation.runId : state.resumingRunId
+	const selectedView = state.selectedRunView
+	const activeRunIsViewedTerminal = activeRunId !== null && activeRunId === targetRunId && selectedView !== null && selectedView.runId === activeRunId && deriveTerminalResult(selectedView) !== undefined
+	const blocked = (state.continuation !== null || resuming) && activeRunId !== null && !activeRunIsViewedTerminal
 	const disabled = blocked || state.resumeSending || state.createSending
 	const runEffort = isEffort(state.runEffort) ? state.runEffort : DEFAULT_EFFORT
 	const runInvolvement = isInvolvement(state.runInvolvement) ? state.runInvolvement : DEFAULT_INVOLVEMENT
@@ -2191,9 +2183,9 @@ function ComposeScreen(state: ApplicationState): Vnode {
 			h('h1', { class: 'compose-heading' }, state.summaries.length === 0 ? 'What should the orchestrator do?' : 'Add task'),
 			h('p', { class: 'compose-sub' }, 'Describe the task in plain language — Markdown works too. Tasks run one at a time; a task added while a run is in progress waits in the queue and starts when it finishes.'),
 			h('form', { class: { 'create-run-form': true, 'is-busy': disabled }, onsubmit: SubmitRun }, [
-				ContinuationChip(state),
+				ContinuationReferenceBlock(state),
 				ResumeChip(state),
-				h('textarea', { name: 'task', placeholder: composePlaceholder(resuming, blocked), autocomplete: 'off', disabled: blocked, onkeydown: TaskTextareaKeydown }),
+				h('textarea', { name: 'task', placeholder: composePlaceholder(resuming, state.continuation !== null, blocked), autocomplete: 'off', disabled: blocked, onkeydown: TaskTextareaKeydown }),
 				EffortLevelSelector(runEffort, disabled, state.savingEffort === true),
 				InvolvementLevelSelector(runInvolvement, disabled, state.savingInvolvement === true),
 				LoggingLevelSelector(runLogLevel, disabled, state.savingLogLevel === true),
@@ -2582,15 +2574,24 @@ function ResultModalForRun(state: ApplicationState): Vnode | null {
 	const descriptor = deriveTerminalResult(view)
 	if (descriptor === undefined) return null
 	const metaLine = resultMetaLine(view, state.now)
+	// The run list can lag the viewed run's completion, so a list entry naming the viewed run is not a genuine second active run. Any other active id, or an in-flight or just-landed submission, disables both recovery actions while leaving Close available.
+	const activeRunId = deriveActiveRunId(state.summaries)
+	const anotherRunActive = activeRunId !== null && activeRunId !== view.runId
+	const submissionInFlight = state.createSending || state.resumeSending || state.justSubmittedRunId !== null
+	const recoveryDisabled = anotherRunActive || submissionInFlight
+	const recoveryDisabledReason = anotherRunActive ? 'Another run is already in progress.' : submissionInFlight ? 'A submission is already in flight.' : ''
 	return ResultModal(h, {
 		descriptor,
 		runLabel: typeof view.runId === 'string' ? view.runId : null,
+		runId: view.runId,
 		metaLine,
 		renderMarkdown,
 		onCopyRaw: copyRawToClipboard,
 		onContinue: ContinueFromResultModal,
 		onResume: ResumeFromResultModal,
 		onClose: CloseResultModal,
+		recoveryDisabled,
+		recoveryDisabledReason,
 	})
 }
 

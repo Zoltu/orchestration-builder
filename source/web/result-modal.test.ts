@@ -375,14 +375,13 @@ describe('ResultModal', () => {
 		expect(closed).toBe(true)
 	})
 
-	test('an error modal renders a Continue button only when the host supplies the capability', () => {
-		// Without the prop — the demo harness's shape — the action row keeps only Close.
-		const withoutProp: Vnode = ResultModal(fakeH, { descriptor: errorDescriptor, runLabel: 'run-1', renderMarkdown: fakeRenderMarkdown, onCopyRaw: () => undefined, onClose: () => undefined })
+	test('a success modal renders Continue when the host supplies the capability and none when it does not', () => {
+		const withoutProp: Vnode = ResultModal(fakeH, { descriptor: successDescriptor, runLabel: 'run-1', renderMarkdown: fakeRenderMarkdown, onCopyRaw: () => undefined, onClose: () => undefined })
 		expect(allByTag(withoutProp, 'button').some((b) => b.props.class === 'result-modal-continue')).toBe(false)
 
 		let fired = false
 		const onContinue = () => { fired = true }
-		const withProp: Vnode = ResultModal(fakeH, { descriptor: errorDescriptor, runLabel: 'run-42', renderMarkdown: fakeRenderMarkdown, onCopyRaw: () => undefined, onContinue, onClose: () => undefined })
+		const withProp: Vnode = ResultModal(fakeH, { descriptor: successDescriptor, runLabel: 'run-42', renderMarkdown: fakeRenderMarkdown, onCopyRaw: () => undefined, onContinue, onClose: () => undefined })
 		const continueButton = defined(allByTag(withProp, 'button').find((b) => b.props.class === 'result-modal-continue'), 'continueButton')
 		// The run id rides the same data-run-id attribute the history row's Continue button uses, so the host wires one action for both.
 		expect(continueButton.props['data-run-id']).toBe('run-42')
@@ -393,9 +392,32 @@ describe('ResultModal', () => {
 		expect(fired).toBe(true)
 	})
 
-	test('a success modal renders no Continue button even when the host supplies the capability', () => {
-		const modal: Vnode = ResultModal(fakeH, { descriptor: successDescriptor, runLabel: 'run-1', renderMarkdown: fakeRenderMarkdown, onCopyRaw: () => undefined, onContinue: () => undefined, onClose: () => undefined })
-		expect(allByTag(modal, 'button').some((b) => b.props.class === 'result-modal-continue')).toBe(false)
+	test('interrupted and needs_clarification outcomes render Continue with the run id and action wired', () => {
+		const interruptedDescriptor = { status: 'interrupted' as const, summary: null, artifacts: [], error: { message: null, raw: null } }
+		let interruptedFired = false
+		const onInterruptedContinue = () => { interruptedFired = true }
+		const interrupted: Vnode = ResultModal(fakeH, { descriptor: interruptedDescriptor, runLabel: 'run-1', renderMarkdown: fakeRenderMarkdown, onContinue: onInterruptedContinue, onClose: () => undefined })
+		const interruptedButton = defined(allByTag(interrupted, 'button').find((b) => b.props.class === 'result-modal-continue'), 'interruptedContinue')
+		expect(interruptedButton.props['data-run-id']).toBe('run-1')
+		expect(interruptedButton.props.onclick).toBe(onInterruptedContinue)
+		actionProp(interruptedButton.props, 'onclick')(undefined)
+		expect(interruptedFired).toBe(true)
+
+		const clarificationDescriptor = { status: 'needs_clarification' as const, summary: 'Needs your input.', artifacts: [], error: null }
+		let clarificationFired = false
+		const onClarificationContinue = () => { clarificationFired = true }
+		const clarification: Vnode = ResultModal(fakeH, { descriptor: clarificationDescriptor, runLabel: 'run-2', renderMarkdown: fakeRenderMarkdown, onContinue: onClarificationContinue, onClose: () => undefined })
+		const clarificationButton = defined(allByTag(clarification, 'button').find((b) => b.props.class === 'result-modal-continue'), 'clarificationContinue')
+		expect(clarificationButton.props['data-run-id']).toBe('run-2')
+		expect(clarificationButton.props.onclick).toBe(onClarificationContinue)
+		actionProp(clarificationButton.props, 'onclick')(undefined)
+		expect(clarificationFired).toBe(true)
+	})
+
+	test('the Continue button renders only when the host supplies the capability', () => {
+		// Without the prop — the demo harness's shape — the action row keeps only Close.
+		const withoutProp: Vnode = ResultModal(fakeH, { descriptor: errorDescriptor, runLabel: 'run-1', renderMarkdown: fakeRenderMarkdown, onCopyRaw: () => undefined, onClose: () => undefined })
+		expect(allByTag(withoutProp, 'button').some((b) => b.props.class === 'result-modal-continue')).toBe(false)
 	})
 
 	// The Resume affordance: the primary recovery action for an errored run whose checkpoint survives. Same action contract as Continue — a hyperapp click action reading the run id off the button's data-run-id attribute.
@@ -413,25 +435,72 @@ describe('ResultModal', () => {
 		expect(allByTag(success, 'button').some((b) => b.props.class === 'result-modal-resume')).toBe(false)
 	})
 
-	test('the Resume button fires with the run id stamped on it and replaces Continue when resumable', () => {
-		let fired = false
-		const onResume = () => { fired = true }
-		const modal: Vnode = ResultModal(fakeH, { descriptor: resumableErrorDescriptor, runLabel: 'run-42', renderMarkdown: fakeRenderMarkdown, onContinue: () => undefined, onResume, onClose: () => undefined })
-		const resumeButton = defined(allByTag(modal, 'button').find((b) => b.props.class === 'result-modal-resume'), 'resumeButton')
-		// The run id rides the same data-run-id attribute the history row's Continue button uses.
+	test('a resumable error with both props renders Resume, Continue, Close in order and both recovery buttons fire', () => {
+		let resumed = false
+		let continued = false
+		const onResume = () => { resumed = true }
+		const onContinue = () => { continued = true }
+		const modal: Vnode = ResultModal(fakeH, { descriptor: resumableErrorDescriptor, runLabel: 'run-42', renderMarkdown: fakeRenderMarkdown, onContinue, onResume, onClose: () => undefined })
+		const actions = defined(allByTag(modal, 'div').find((d) => d.props.class === 'result-modal-actions'), 'actions')
+		const buttons = byTag(actions, 'button')
+		expect(buttons.map((button) => button.props.class)).toEqual(['result-modal-resume', 'result-modal-continue', 'result-modal-close'])
+		const resumeButton = defined(buttons[0], 'resumeButton')
+		const continueButton = defined(buttons[1], 'continueButton')
+		// Both recovery actions stamp the same run id the history row's Continue button uses.
 		expect(resumeButton.props['data-run-id']).toBe('run-42')
+		expect(continueButton.props['data-run-id']).toBe('run-42')
 		expect(resumeButton.props.onclick).toBe(onResume)
-		// Resumable means Resume REPLACES Continue: one primary recovery action.
-		expect(allByTag(modal, 'button').some((b) => b.props.class === 'result-modal-continue')).toBe(false)
-		expect(allByTag(modal, 'button').some((b) => b.props.class === 'result-modal-close')).toBe(true)
+		expect(continueButton.props.onclick).toBe(onContinue)
 		actionProp(resumeButton.props, 'onclick')(undefined)
-		expect(fired).toBe(true)
+		expect(resumed).toBe(true)
+		actionProp(continueButton.props, 'onclick')(undefined)
+		expect(continued).toBe(true)
 	})
 
-	test('Continue still renders when the errored run is not resumable', () => {
+	test('a non-resumable error with both props renders Continue but not Resume', () => {
 		const modal: Vnode = ResultModal(fakeH, { descriptor: errorDescriptor, runLabel: 'run-1', renderMarkdown: fakeRenderMarkdown, onContinue: () => undefined, onResume: () => undefined, onClose: () => undefined })
 		expect(allByTag(modal, 'button').some((b) => b.props.class === 'result-modal-continue')).toBe(true)
 		expect(allByTag(modal, 'button').some((b) => b.props.class === 'result-modal-resume')).toBe(false)
+	})
+
+	test('the recovery buttons render disabled with the host reason while Close stays available', () => {
+		const modal: Vnode = ResultModal(fakeH, {
+			descriptor: resumableErrorDescriptor,
+			runLabel: 'run-1',
+			renderMarkdown: fakeRenderMarkdown,
+			onContinue: () => undefined,
+			onResume: () => undefined,
+			onClose: () => undefined,
+			recoveryDisabled: true,
+			recoveryDisabledReason: 'Another run is already in progress.',
+		})
+		const actions = defined(allByTag(modal, 'div').find((d) => d.props.class === 'result-modal-actions'), 'actions')
+		const buttons = byTag(actions, 'button')
+		expect(buttons.map((button) => button.props.class)).toEqual(['result-modal-resume', 'result-modal-continue', 'result-modal-close'])
+		const resumeButton = defined(buttons[0], 'resumeButton')
+		const continueButton = defined(buttons[1], 'continueButton')
+		const closeButton = defined(buttons[2], 'closeButton')
+		expect(resumeButton.props.disabled).toBe(true)
+		expect(continueButton.props.disabled).toBe(true)
+		expect(resumeButton.props.title).toBe('Another run is already in progress.')
+		expect(continueButton.props.title).toBe('Another run is already in progress.')
+		expect(closeButton.props.disabled).toBeUndefined()
+	})
+
+	test('the explicit runId prop stamps the recovery buttons independently of the heading label', () => {
+		const modal: Vnode = ResultModal(fakeH, {
+			descriptor: resumableErrorDescriptor,
+			runLabel: 'displayed label',
+			runId: 'run-9',
+			renderMarkdown: fakeRenderMarkdown,
+			onContinue: () => undefined,
+			onResume: () => undefined,
+			onClose: () => undefined,
+		})
+		const resumeButton = defined(allByTag(modal, 'button').find((b) => b.props.class === 'result-modal-resume'), 'resumeButton')
+		const continueButton = defined(allByTag(modal, 'button').find((b) => b.props.class === 'result-modal-continue'), 'continueButton')
+		expect(resumeButton.props['data-run-id']).toBe('run-9')
+		expect(continueButton.props['data-run-id']).toBe('run-9')
 	})
 
 	test('demo-style usage with no recovery props is unchanged', () => {
