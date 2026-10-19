@@ -25,16 +25,26 @@ export interface QueueItemLike {
 	error?: string
 	// Set when the scheduler dispatches the item's run.
 	runId?: string
+	// The run this task continues, when it was submitted as a continuation.
+	continuesFrom?: string
+	// The paused run this waiting item will re-enter once its answer is processed.
+	resumesRunId?: string
 }
 
 const QUEUE_ITEM_STATUSES: readonly QueueItemStatus[] = ['waiting', 'active', 'needs_input', 'done', 'error', 'cancelled']
+
+function isOptionalNonEmptyString(value: unknown): boolean {
+	return value === undefined || (typeof value === 'string' && value !== '')
+}
 
 // The minimal shape the panel renders: any polled entry without it is dropped rather than half-rendered.
 export function isQueueItemLike(value: unknown): value is QueueItemLike {
 	if (!isObject(value)) return false
 	if (typeof value['id'] !== 'string' || value['id'] === '') return false
 	if (typeof value['task'] !== 'string' || value['task'] === '') return false
-	if (value['runId'] !== undefined && (typeof value['runId'] !== 'string' || value['runId'] === '')) return false
+	if (!isOptionalNonEmptyString(value['runId'])) return false
+	if (!isOptionalNonEmptyString(value['continuesFrom'])) return false
+	if (!isOptionalNonEmptyString(value['resumesRunId'])) return false
 	return QUEUE_ITEM_STATUSES.some((status) => status === value['status'])
 }
 
@@ -74,7 +84,7 @@ export function queueStatusLabel(status: string): string {
 	return QUEUE_STATUS_LABELS[status] ?? status
 }
 
-// The one truncation rule both row previews share: an already-trimmed line shortened to `limit` characters at the last space past `floor` (or at `limit` when no such space exists), with a trailing ellipsis when shortened. The caller picks the line and the limits; only the cap-and-ellipsis rule lives here.
+// The truncation rule the task preview uses: an already-trimmed line shortened to `limit` characters at the last space past `floor` (or at `limit` when no such space exists), with a trailing ellipsis when shortened. The caller picks the line and the limits; only the cap-and-ellipsis rule lives here.
 function capLineAtWordBoundary(line: string, limit: number, floor: number): string {
 	if (line.length <= limit) return line
 	const capped = line.slice(0, limit)
@@ -87,17 +97,17 @@ export function taskFirstLine(task: string): string {
 	return capLineAtWordBoundary((task.split('\n', 1)[0] ?? '').trim(), 100, 60)
 }
 
-// A short phrase previewing a needs_input question on its one-line row: the first non-empty line, trimmed, capped at a word boundary with a trailing ellipsis. A parked question is often multi-line, and the row ellipsizes anyway, so the first line is the meaningful preview; the modal shows the full question.
-export function questionSummary(question: string): string {
-	const firstLine = question.split('\n').map((line) => line.trim()).find((line) => line !== '') ?? ''
-	return capLineAtWordBoundary(firstLine, 72, 40)
+// The item's primary line: the task's first line, except for a settled done/error item whose result summary says what happened. A needs_input row names the task, never the question — the question lives in the expanded details and the answer modal. The merged history screen renders the returned string as a plain text span, so it is never Markdown.
+export function queueItemPrimaryText(item: QueueItemLike): string {
+	if ((item.status === 'done' || item.status === 'error') && typeof item.resultSummary === 'string' && item.resultSummary !== '') return item.resultSummary
+	return taskFirstLine(item.task)
 }
 
-// The item's primary line: the task's first line, except for a settled item with a result summary (what happened) or a needs_input item (a short preview of what the run asked — the full question opens in the modal). The merged history screen renders the returned string as a plain text span, so it is never Markdown.
-export function queueItemPrimaryText(item: QueueItemLike): string {
-	if (item.status === 'needs_input' && typeof item.question === 'string' && item.question.trim() !== '') return questionSummary(item.question)
-	if ((item.status === 'done' || item.status === 'error') && typeof item.resultSummary === 'string' && item.resultSummary !== '') return item.resultSummary
-	return item.task
+// Whether a parked item answers for the selected run: a modern item names it through runId, while a legacy item with no runId records the paused run in continuesFrom.
+export function matchesParkedRun(item: QueueItemLike, runId: string): boolean {
+	if (item.status !== 'needs_input') return false
+	if (typeof item.runId === 'string' && item.runId !== '') return item.runId === runId
+	return item.continuesFrom === runId
 }
 
 // The waiting-list index a drop should PATCH: the target row's index among the waiting items, excluding the dragged one (the server clamps out-of-range values). Dropping onto the dragged item itself — or onto a row that is not waiting — is no move at all, read as null.

@@ -79,7 +79,7 @@ workspace/                          # the user's project (mounted at /workspace)
 │       └── <run_id>/
 │           ├── meta.json           # run metadata, status, final result
 │           ├── log.jsonl           # event stream: llm calls, tool calls, errors
-│           ├── state.json          # checkpoint for restart resumption (deleted on completion; kept for error and parked runs)
+│           ├── state.json          # checkpoint for restart resumption (deleted on true completion; kept for error and every needs_clarification pause)
 │           ├── summary.txt         # LLM-generated one-line run summary (UI label; best-effort)
 │           ├── plan.md             # the run's plan document (write_plan/read_plan)
 │           ├── style-guide.md      # the run's style guide document (write_style_guide/read_style_guide)
@@ -118,6 +118,8 @@ Two consequences every change to `source/web/static/` must respect:
 
 - **Runtime guards are still required at every external ingress.** Types don't validate: every external value the browser modules read (fetch bodies, websocket messages, DOM events, `window.showdown`/`hljs` presence) goes through shape checks, and a type annotation never rejects a malformed payload — keep that discipline even where the module is TypeScript.
 - **Never share vnode objects across renders or tree positions.** hyperapp's differ mutates a vnode's `node` property in place, so a vnode object reused at two positions (e.g. a memo cache handing the same object out for repeated text) corrupts the mounted tree the next time positions shift — it throws `DOMException` mid-patch and every following render crashes. The markdown pipeline (`markdown-render.ts`) caches its sanitized neutral tree and rebuilds vnodes per call for exactly this reason; keep that shape for any future memoization.
+
+The History screen merges the queue and the run list into one row per task: queued `waiting`/`active`/`needs_input` rows come first, a queued row suppresses the run summary it represents (through its `runId`, its `resumesRunId`, or a legacy `needs_input` item's `continuesFrom`), and continuation lineage renders as a compact link in the row with the full `Continues run <id>` line in its expanded details. The result modal opens from the polled summary when the full run view has not loaded, shows a loading or retryable failed card around the fetch, dedupes repeated opens and retries, and drops the run view's ETag whenever the held payload no longer matches the selection so a 304 cannot strand an empty modal.
 
 ## Shared state sync: `entity-diff`
 

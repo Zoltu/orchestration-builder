@@ -19,6 +19,7 @@ function summary(runId: string, overrides: Partial<RunSummary> = {}): RunSummary
 		endTime: '2026-01-01T00:01:00.000Z',
 		result: null,
 		error: null,
+		continuesFrom: null,
 		summary: null,
 		...overrides,
 	}
@@ -35,6 +36,7 @@ function entity(runId: string, overrides: Partial<RunSummary> = {}): Record<stri
 		endTime: '2026-01-01T00:01:00.000Z',
 		result: null,
 		error: null,
+		continuesFrom: null,
 		summary: null,
 		...overrides,
 	}
@@ -135,11 +137,28 @@ describe('run-list feed change detection', () => {
 			['result', { ...base, result: { status: 'success', summary: 'changed' } }],
 			['result to null', { ...base, result: null }],
 			['error', { ...base, error: { kind: 'llm_unavailable', message: 'down' } }],
+			['continuesFrom', { ...base, continuesFrom: 'run-20251231-000000' }],
 			['summary', { ...base, summary: 'a generated summary' }],
 		]
 		for (const [name, variant] of variants) {
 			expect(frameKind(responder([variant], revision)), name).toBe('delta')
 		}
+	})
+
+	test('continuesFrom round-trips through a snapshot, and changing it produces a delta', () => {
+		const responder = createRunListFeedResponder({ epoch: 'e', historyLimit: 8 })
+		const base = summary('run-1', { continuesFrom: 'run-20251231-000000' })
+		const first = applyRunListFrame(emptyRunListFeedState(), responder([base], null))
+		if (first.summaries === null) throw new Error('expected the snapshot to produce summaries')
+		expect(first.summaries[0]?.continuesFrom).toBe('run-20251231-000000')
+		const revision = runListFeedRevision(first.state)
+		if (revision === null) throw new Error('expected a revision after a snapshot')
+
+		const changed = summary('run-1', { continuesFrom: 'run-20251230-000000' })
+		expect(frameKind(responder([changed], revision))).toBe('delta')
+		const applied = applyRunListFrame(first.state, responder([changed], revision))
+		if (applied.summaries === null) throw new Error('expected the delta to produce summaries')
+		expect(applied.summaries[0]?.continuesFrom).toBe('run-20251230-000000')
 	})
 
 	test('free-text separators cannot shift field boundaries into a collision', () => {
@@ -172,6 +191,7 @@ describe('run-list feed validation', () => {
 			['task', snapshotFrame([{ ...entity('run-1'), task: 7 }])],
 			['involvement', snapshotFrame([{ ...entity('run-1'), involvement: 7 }])],
 			['endTime', snapshotFrame([{ ...entity('run-1'), endTime: 7 }])],
+			['continuesFrom', snapshotFrame([{ ...entity('run-1'), continuesFrom: 7 }])],
 			['summary', snapshotFrame([{ ...entity('run-1'), summary: 7 }])],
 			['result status', snapshotFrame([{ ...entity('run-1'), result: { status: 'bogus', summary: 'x' } }])],
 			['result summary', snapshotFrame([{ ...entity('run-1'), result: { status: 'success' } }])],

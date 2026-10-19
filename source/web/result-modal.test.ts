@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { ResultModal, deriveTerminalResult } from './static/ts/result-modal.js'
+import { ResultModal, ResultPendingModal, deriveTerminalResult } from './static/ts/result-modal.js'
 import { actionProp, defined, present } from './test-fixtures.js'
 
 // The result-modal component is browser-pure JS, so its exports arrive with inferred JS types. The interfaces and fake `h`/`renderMarkdown` below carry the shape the tests assert against, mirroring question-modal.test.ts.
@@ -508,6 +508,46 @@ describe('ResultModal', () => {
 		expect(allByTag(modal, 'button').some((b) => b.props.class === 'result-modal-resume')).toBe(false)
 		expect(allByTag(modal, 'button').some((b) => b.props.class === 'result-modal-continue')).toBe(false)
 		expect(allByTag(modal, 'button').some((b) => b.props.class === 'result-modal-close')).toBe(true)
+	})
+})
+
+describe('ResultPendingModal', () => {
+	test('renders the shared overlay, backdrop, and card with the loading message and a close action', () => {
+		let closed = false
+		const onClose = () => { closed = true }
+		const modal: Vnode = ResultPendingModal(fakeH, { phase: 'loading', runLabel: 'run-1', onClose })
+		expect(modal.props.class).toBe('result-modal-overlay')
+		expect(byTag(modal, 'div').some((d) => d.props.class === 'result-modal-backdrop')).toBe(true)
+		const card = defined(byTag(modal, 'div').find((d) => d.props.class === 'result-modal-card result-modal-card--pending'), 'card')
+		const message = defined(allByTag(card, 'p').find((p) => p.props.class === 'result-modal-pending-message'), 'message')
+		expect(message.children.join('')).toBe('Loading the result\u2026')
+		const heading = defined(allByTag(card, 'p').find((p) => p.props.class === 'result-modal-heading'), 'heading')
+		expect(heading.children.join('')).toBe('Result \u00b7 run-1')
+		expect(allByTag(modal, 'button').some((button) => button.props.class === 'result-modal-retry')).toBe(false)
+		const close = defined(allByTag(modal, 'button').find((button) => button.props.class === 'result-modal-close'), 'close')
+		actionProp(close.props, 'onclick')(undefined)
+		expect(closed).toBe(true)
+	})
+
+	test('the failed phase shows the failure message and a Retry button wired to the handler', () => {
+		let retried = false
+		const onRetry = () => { retried = true }
+		const modal: Vnode = ResultPendingModal(fakeH, { phase: 'failed', runLabel: null, onRetry, onClose: () => undefined })
+		const message = defined(allByTag(modal, 'p').find((p) => p.props.class === 'result-modal-pending-message'), 'message')
+		expect(message.children.join('')).toBe('The result could not be loaded.')
+		const heading = defined(allByTag(modal, 'p').find((p) => p.props.class === 'result-modal-heading'), 'heading')
+		expect(heading.children.join('')).toBe('Result')
+		const retry = defined(allByTag(modal, 'button').find((button) => button.props.class === 'result-modal-retry'), 'retry')
+		actionProp(retry.props, 'onclick')(undefined)
+		expect(retried).toBe(true)
+		const buttons = allByTag(modal, 'button')
+		expect(buttons.map((button) => button.props.class)).toEqual(['result-modal-retry', 'result-modal-close'])
+	})
+
+	test('a failed phase without the retry capability renders only Close', () => {
+		const modal: Vnode = ResultPendingModal(fakeH, { phase: 'failed', onClose: () => undefined })
+		expect(allByTag(modal, 'button').some((button) => button.props.class === 'result-modal-retry')).toBe(false)
+		expect(allByTag(modal, 'button').some((button) => button.props.class === 'result-modal-close')).toBe(true)
 	})
 })
 

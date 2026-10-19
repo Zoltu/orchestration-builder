@@ -174,6 +174,34 @@ export function ResultModal(h: LooseH, props: ResultModalProps): Vnode {
 	])
 }
 
+// The pending card shown while the full run view is still arriving (or after it failed): the polled summary already has a result, so the CTA opens at once and this card explains the wait instead of doing nothing. Retry is offered only after a failed load.
+export interface ResultPendingModalProps {
+	phase: 'loading' | 'failed'
+	runLabel?: string | null
+	onRetry?: unknown
+	onClose: unknown
+}
+
+export function ResultPendingModal(h: LooseH, props: ResultPendingModalProps): Vnode {
+	const failed = props.phase === 'failed'
+	const runLabel = props.runLabel
+	const actions: Vnode[] = []
+	if (failed && props.onRetry !== undefined) {
+		actions.push(h('button', { type: 'button', class: 'result-modal-retry', onclick: props.onRetry }, 'Retry'))
+	}
+	actions.push(h('button', { type: 'button', class: 'result-modal-close', onclick: props.onClose }, 'Close'))
+	return h('div', { class: 'result-modal-overlay' }, [
+		h('div', { class: 'result-modal-backdrop', onclick: props.onClose }),
+		h('div', { class: 'result-modal-card result-modal-card--pending' }, [
+			h('p', { class: 'result-modal-heading' }, runLabel !== null && runLabel !== undefined && runLabel !== ''
+				? `Result \u00b7 ${runLabel}`
+				: 'Result'),
+			h('p', { class: 'result-modal-pending-message' }, failed ? 'The result could not be loaded.' : 'Loading the result\u2026'),
+			h('div', { class: 'result-modal-pending-actions' }, actions),
+		]),
+	])
+}
+
 // The human status word for a terminal run, shared by the result modal and the continuation reference block so the two surfaces name an outcome identically.
 export function resultStatusLabel(status: string): string {
 	if (status === 'success') return 'Completed successfully'

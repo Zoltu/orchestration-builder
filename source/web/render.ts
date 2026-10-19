@@ -83,6 +83,8 @@ export interface RunSummary {
 	// The result card and run-level error ride along so the history view's expanded rows can browse outcomes without a per-run fetch; both already live in meta.json, so this is a passthrough, not a derivation.
 	result: ResultCard | null
 	error: NonNullable<RunMeta['error']> | null
+	// The prior run's id when this run continues one (meta.continuesFrom), else null; history renders the summary's lineage line from it.
+	continuesFrom: string | null
 	// The LLM-generated one-line summary (summary.txt), when the summarizer has produced one; the client prefers it over the task first line and falls back when absent.
 	summary: string | null
 }
@@ -98,6 +100,7 @@ export function renderRunSummary(runId: string, meta: RunMeta | null, summary: s
 		endTime: meta === null ? null : (meta.endTime ?? null),
 		result: meta === null ? null : (meta.result ?? null),
 		error: meta === null ? null : (meta.error ?? null),
+		continuesFrom: meta === null ? null : (meta.continuesFrom ?? null),
 		summary,
 	}
 }

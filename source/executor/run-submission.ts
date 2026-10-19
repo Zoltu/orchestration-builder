@@ -2,7 +2,7 @@ import { isRunCheckpoint, type RunCheckpoint } from './checkpoint.js'
 import { DEFAULT_EFFORT } from './effort.js'
 import { DEFAULT_INVOLVEMENT } from './involvement.js'
 import { DEFAULT_LOG_LEVEL } from './log-level.js'
-import type { ParkedAnswer, ParkedAsk } from './park-state.js'
+import type { ParkedAnswer, PauseState } from './park-state.js'
 import { isRunMeta, safeJsonParse } from './validation.js'
 import type { EffortLevel, InvolvementLevel, LogEvent, LogLevel, RunContinuation, RunMeta } from './types.js'
 import type { AppendLog, DeleteCheckpoint, ReadProjectSettings, ReadRunCheckpointById, ReadRunMetaById, RunDirectoryExists, WriteMeta } from './persistence.js'
@@ -12,6 +12,7 @@ export type StartRun = (runId: string, task: string, effort: EffortLevel, involv
 export interface ResumeRunInvocation {
 	resumeNote?: string
 	parkedAnswer?: ParkedAnswer
+	clarificationAnswer?: { id: string; question: string; answer: string }
 	queueTracked?: boolean
 }
 export type ResumeRun = (checkpoint: RunCheckpoint, options?: ResumeRunInvocation) => Promise<RunMeta>
@@ -185,17 +186,24 @@ export function createResumeErroredRun(dependencies: ResumeErroredRunDependencie
 	}
 }
 
-export type ReadParkedAskById = (runId: string) => ParkedAsk | null
+export type ReadPauseStateById = (runId: string) => PauseState | null
 
-// Reads the parked ask a run's checkpoint carries, the queue answer path's only source of the tool-call id it must deliver into. A missing, corrupt, or misnamed checkpoint reads as absent.
-export function createReadParkedAskById(readCheckpointById: ReadRunCheckpointById): ReadParkedAskById {
+// Reads the pause a run's checkpoint carries: a parked ask (whose tool result the answer replaces) or a direct clarification finish (whose answer arrives as a note). A missing, corrupt, or misnamed checkpoint reads as absent.
+export function createReadPauseStateById(readCheckpointById: ReadRunCheckpointById): ReadPauseStateById {
 	return (runId) => {
 		const checkpointText = readCheckpointById(runId)
 		if (checkpointText === null) return null
 		const parsed = safeJsonParse(checkpointText)
 		if (!parsed.ok || !isRunCheckpoint(parsed.value)) return null
 		if (parsed.value.runId !== runId) return null
-		return parsed.value.parkedAsk ?? null
+		const parkedAsk = parsed.value.parkedAsk
+		if (parkedAsk !== undefined) return { kind: 'parked_ask', ask: parkedAsk }
+		const delivery = parsed.value.clarificationAnswer
+		return {
+			kind: 'clarification',
+			...(delivery !== undefined ? { deliveredAnswerId: delivery.id } : {}),
+			deliveredAnswerConsumed: delivery?.consumed === true,
+		}
 	}
 }
 
@@ -232,6 +240,41 @@ export function createResumeParkedRun(dependencies: ResumeParkedRunDependencies)
 		if (parkedAsk === undefined) return { ok: false, error: 'not_parked' }
 		if (parkedAsk.question !== parkedAnswer.question || parkedAsk.toolCallId !== parkedAnswer.toolCallId) return { ok: false, error: 'not_parked' }
 		dependencies.runSubmission.resume(checkpoint, { parkedAnswer, queueTracked: true })
+		return { ok: true, runId }
+	}
+}
+
+export type ResumeClarificationRunRejection = 'run_in_progress' | 'checkpoint_missing' | 'not_clarification'
+
+export type ResumeClarificationRunResult =
+	| { ok: true; runId: string }
+	| { ok: false; error: ResumeClarificationRunRejection }
+
+export type ResumeClarificationRun = (runId: string, clarificationAnswer: { id: string; question: string; answer: string }) => ResumeClarificationRunResult
+
+export interface ResumeClarificationRunDependencies {
+	runSubmission: RunSubmission
+	readRunMetaById: ReadRunMetaById
+	readCheckpointById: ReadRunCheckpointById
+}
+
+// The queue's same-run resume of a direct clarification finish (docs/queueing.md "Ordering, answers, and failure semantics"): there is no parked call to replace, so the answer re-enters the run under its own id as a framed operator note. A checkpoint carrying parkedAsk belongs to the parked-answer path and is rejected here. Every rejection is a value; the queue falls back to the legacy briefed dispatch when the pause can no longer be resumed.
+export function createResumeClarificationRun(dependencies: ResumeClarificationRunDependencies): ResumeClarificationRun {
+	return (runId, clarificationAnswer) => {
+		if (dependencies.runSubmission.activeRunId() !== undefined) return { ok: false, error: 'run_in_progress' }
+		const metaText = dependencies.readRunMetaById(runId)
+		if (metaText === null) return { ok: false, error: 'checkpoint_missing' }
+		const parsedMeta = safeJsonParse(metaText)
+		const meta = parsedMeta.ok && isRunMeta(parsedMeta.value) ? parsedMeta.value : null
+		if (meta === null) return { ok: false, error: 'checkpoint_missing' }
+		if (meta.status !== 'needs_clarification') return { ok: false, error: 'not_clarification' }
+		const checkpointText = dependencies.readCheckpointById(runId)
+		if (checkpointText === null) return { ok: false, error: 'checkpoint_missing' }
+		const parsedCheckpoint = safeJsonParse(checkpointText)
+		const checkpoint = parsedCheckpoint.ok && isRunCheckpoint(parsedCheckpoint.value) ? parsedCheckpoint.value : null
+		if (checkpoint === null || checkpoint.runId !== runId) return { ok: false, error: 'checkpoint_missing' }
+		if (checkpoint.parkedAsk !== undefined) return { ok: false, error: 'not_clarification' }
+		dependencies.runSubmission.resume(checkpoint, { clarificationAnswer, queueTracked: true })
 		return { ok: true, runId }
 	}
 }

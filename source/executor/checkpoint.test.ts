@@ -117,6 +117,21 @@ describe('isRunCheckpoint', () => {
 		expect(isRunCheckpoint(copy)).toBe(true)
 	})
 
+	test('accepts a clarification delivery record, its consumed flag, and coexistence with a parked ask', () => {
+		const delivered = sampleCheckpoint()
+		delivered.clarificationAnswer = { id: 'answer-1', question: 'which schema?', answer: 'v2' }
+		expect(isRunCheckpoint(delivered)).toBe(true)
+		delivered.clarificationAnswer = { id: 'answer-1', question: 'which schema?', answer: 'v2', consumed: true }
+		expect(isRunCheckpoint(delivered)).toBe(true)
+
+		const both = parkedCheckpoint()
+		both.clarificationAnswer = { id: 'answer-1', question: 'which schema?', answer: 'v2', consumed: true }
+		expect(isRunCheckpoint(both)).toBe(true)
+
+		const malformed: unknown = { ...delivered, clarificationAnswer: { id: 'answer-1', question: 'which schema?', answer: 'v2', consumed: false } }
+		expect(isRunCheckpoint(malformed)).toBe(false)
+	})
+
 	test('rejects non-objects, wrong versions, and missing frames', () => {
 		expect(isRunCheckpoint(null)).toBe(false)
 		expect(isRunCheckpoint('checkpoint')).toBe(false)

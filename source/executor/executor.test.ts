@@ -6,7 +6,7 @@ import { createRunBaseTracker } from './base-state.ts'
 import { EMPTY_TREE_HASH } from './git-primitives.ts'
 import { resumeExecutor, runExecutor, type ExecutorDependencies } from './executor.ts'
 import { createInterruptQueue } from './interrupts.ts'
-import type { LlmCallResult, LlmCaller } from './llm.ts'
+import type { LlmCallResult, LlmCaller, LlmRequest } from './llm.ts'
 import type { LoadedGuild } from './loader.ts'
 import type { AppendLog, DeleteCheckpoint, RunDirectory, WriteCheckpoint, WriteMeta } from './persistence.ts'
 import { createFakeRoleSnapshotStore, createFixtureToolPlatform, stubHumanBackend, recordingHumanBackend, defined, makeScriptedRunner } from './test-fixtures.ts'
@@ -24,8 +24,10 @@ function success(toolCalls: ToolCall[], opts: { content?: string } = {}): LlmCal
 class FakeLlm implements LlmCaller {
 	responses: LlmCallResult[] = []
 	calls = 0
-	async call(): Promise<LlmCallResult> {
+	requests: LlmRequest[] = []
+	async call(request: LlmRequest): Promise<LlmCallResult> {
 		this.calls++
+		this.requests.push(request)
 		if (this.responses.length === 0) {
 			throw new Error('FakeLlm ran out of responses')
 		}
@@ -768,6 +770,76 @@ describe('resumeExecutor', () => {
 		return { meta, checkpoints: persistence.state.checkpoints }
 	}
 
+	test('a batched agent plus direct clarification finish checkpoints the completed turn before the answer resume', async () => {
+		const guild = buildDelegationGuild()
+		const llm = new FakeLlm()
+		llm.responses = [
+			success([
+				agentToolCall('a1', 'coder', 'subtask'),
+				{ id: 'f1', type: 'function', function: { name: 'finish', arguments: JSON.stringify({ status: 'needs_clarification', summary: 'I need a decision on the schema' }) } },
+			]),
+			success([finishToolCall('f2', 'child done')]),
+		]
+		const persistence = makeFakePersistence()
+		const meta = await runExecutor(makeDeps(llm, persistence, guild), { runId: 'r-batched-clarification', guildPath: '/guild', task: 'do it', effort: 'standard', involvement: 'early-engagement' })
+
+		expect(meta.status).toBe('needs_clarification')
+		const checkpoint = persistence.state.checkpoints[persistence.state.checkpoints.length - 1]
+		if (checkpoint === undefined) throw new Error('expected a direct-finish checkpoint')
+		const root = checkpoint.frames[0]
+		if (root === undefined) throw new Error('expected the root frame')
+		expect(root.pending).toBeUndefined()
+		expect(root.roleState.history.at(-1)).toEqual({ role: 'tool', content: expect.any(String), tool_call_id: 'f1' })
+
+		const resumeLlm = new FakeLlm()
+		resumeLlm.responses = [success([finishToolCall('f3', 'answered and done')])]
+		const resumePersistence = makeFakePersistence()
+		const resumed = await resumeExecutor(makeDeps(resumeLlm, resumePersistence, guild), checkpoint, { guildPath: '/guild', clarificationAnswer: { id: 'answer-1', question: 'I need a decision on the schema', answer: 'use the v2 schema' } })
+
+		expect(resumed.status).toBe('success')
+		expect(resumeLlm.calls).toBe(1)
+		const firstResumeRequest = resumeLlm.requests[0]
+		if (firstResumeRequest === undefined) throw new Error('expected the resumed LLM call')
+		const note = firstResumeRequest.messages.find((message) => message.role === 'user' && message.content.includes('I need a decision on the schema'))
+		expect(note?.content).toContain('use the v2 schema')
+	})
+
+	test('a batched finish followed by an agent leaves the clean pre-turn checkpoint and the answer resume starts cleanly', async () => {
+		const guild = buildDelegationGuild()
+		const llm = new FakeLlm()
+		llm.responses = [
+			success([
+				{ id: 'f1', type: 'function', function: { name: 'finish', arguments: JSON.stringify({ status: 'needs_clarification', summary: 'I need a decision on the schema' }) } },
+				agentToolCall('a1', 'coder', 'subtask'),
+			]),
+		]
+		const persistence = makeFakePersistence()
+		const meta = await runExecutor(makeDeps(llm, persistence, guild), { runId: 'r-finish-then-agent', guildPath: '/guild', task: 'do it', effort: 'standard', involvement: 'early-engagement' })
+
+		expect(meta.status).toBe('needs_clarification')
+		const checkpoint = persistence.state.checkpoints[persistence.state.checkpoints.length - 1]
+		if (checkpoint === undefined) throw new Error('expected the pre-turn checkpoint')
+		const root = checkpoint.frames[0]
+		if (root === undefined) throw new Error('expected the root frame')
+		// The finish returned before the later agent call ran, so the malformed assistant turn must not be persisted.
+		expect(root.roleState.history.some((message) => message.role === 'assistant' && message.tool_calls !== undefined)).toBe(false)
+
+		const resumeLlm = new FakeLlm()
+		resumeLlm.responses = [success([finishToolCall('f2', 'answered and done')])]
+		const resumePersistence = makeFakePersistence()
+		const resumed = await resumeExecutor(makeDeps(resumeLlm, resumePersistence, guild), checkpoint, { guildPath: '/guild', clarificationAnswer: { id: 'answer-1', question: 'I need a decision on the schema', answer: 'use the v2 schema' } })
+
+		expect(resumed.status).toBe('success')
+		expect(resumeLlm.calls).toBe(1)
+		const request = resumeLlm.requests[0]
+		if (request === undefined) throw new Error('expected the resumed LLM call')
+		expect(request.messages.some((message) => message.role === 'assistant' && message.tool_calls?.some((call) => call.id === 'f1' || call.id === 'a1') === true)).toBe(false)
+		const lastMessage = request.messages[request.messages.length - 1]
+		expect(lastMessage?.role).toBe('user')
+		expect(lastMessage?.content).toContain('I need a decision on the schema')
+		expect(lastMessage?.content).toContain('use the v2 schema')
+	})
+
 	test('a resumed run completes with the uninterrupted result, preserving run identity and start time', async () => {
 		const uninterrupted = await driveUninterruptedRun()
 		// Writes: [orchestrator], [orchestrator+coder], [orchestrator with child card], [orchestrator]. Index 1 is the checkpoint taken while the coder was active.
@@ -965,7 +1037,7 @@ describe('resumeExecutor', () => {
 		expect(parked?.frames[0]?.roleState.history.at(-1)).toEqual({ role: 'tool', content: '{"question":"Which database?","parked":true}', tool_call_id: 'ask_1' })
 	})
 
-	test('a direct finish with needs_clarification deletes its checkpoint: there is nothing to resume', async () => {
+	test('a direct finish with needs_clarification keeps its checkpoint as a pause', async () => {
 		const guild = buildLoadedGuild({ main: { systemPrompt: 'p', tools: ['finish'] } }, 'main')
 		const llm = new FakeLlm()
 		llm.responses = [success([{ id: 'f1', type: 'function', function: { name: 'finish', arguments: JSON.stringify({ status: 'needs_clarification', summary: 'I need a decision on the schema' }) } }])]
@@ -975,7 +1047,125 @@ describe('resumeExecutor', () => {
 		const meta = await runExecutor(deps, { runId: 'r-direct', guildPath: '/guild', task: 'do it', effort: 'standard', involvement: 'early-engagement' })
 
 		expect(meta.status).toBe('needs_clarification')
-		expect(persistence.state.deleteCheckpointCalls).toBe(1)
+		expect(persistence.state.deleteCheckpointCalls).toBe(0)
+		const checkpoint = persistence.state.checkpoints[persistence.state.checkpoints.length - 1]
+		expect(checkpoint).toBeDefined()
+		expect(checkpoint?.parkedAsk).toBeUndefined()
+	})
+
+	test('answering a direct-finish clarification re-enters the same run with a note carrying both question and answer', async () => {
+		const guild = buildLoadedGuild({ main: { systemPrompt: 'p', tools: ['finish'] } }, 'main')
+		const llm = new FakeLlm()
+		llm.responses = [success([{ id: 'f1', type: 'function', function: { name: 'finish', arguments: JSON.stringify({ status: 'needs_clarification', summary: 'I need a decision on the schema' }) } }])]
+		const persistence = makeFakePersistence()
+		await runExecutor(makeDeps(llm, persistence, guild), { runId: 'r-direct-resume', guildPath: '/guild', task: 'do it', effort: 'standard', involvement: 'early-engagement' })
+		const checkpoint = persistence.state.checkpoints[persistence.state.checkpoints.length - 1]
+		if (checkpoint === undefined) throw new Error('expected a clarification checkpoint')
+
+		const resumeLlm = new FakeLlm()
+		resumeLlm.responses = [success([{ id: 'f2', type: 'function', function: { name: 'finish', arguments: JSON.stringify({ status: 'success', summary: 'built it' }) } }])]
+		const resumePersistence = makeFakePersistence()
+		const meta = await resumeExecutor(makeDeps(resumeLlm, resumePersistence, guild), checkpoint, { guildPath: '/guild', clarificationAnswer: { id: 'answer-1', question: 'I need a decision on the schema', answer: 'use the v2 schema' } })
+
+		expect(meta.runId).toBe('r-direct-resume')
+		expect(meta.status).toBe('success')
+		expect(resumePersistence.state.deleteCheckpointCalls).toBe(1)
+		const resumedHistory = resumePersistence.state.checkpoints.flatMap((written) => written.frames[0]?.roleState.history ?? [])
+		const note = resumedHistory.find((message) => message.role === 'user' && message.content.includes('I need a decision on the schema'))
+		expect(note?.content).toContain('use the v2 schema')
+		const answerEvent = resumePersistence.state.events.find((event) => event.type === 'human_answer')
+		expect(answerEvent?.payload).toEqual({ id: 'clarification', question: 'I need a decision on the schema', answer: 'use the v2 schema' })
+	})
+
+	test('a clarification answer is durably checkpointed before the running meta and a same-id retry does not append twice', async () => {
+		const guild = buildLoadedGuild({ main: { systemPrompt: 'p', tools: ['finish'] } }, 'main')
+		const firstLlm = new FakeLlm()
+		firstLlm.responses = [success([{ id: 'f1', type: 'function', function: { name: 'finish', arguments: JSON.stringify({ status: 'needs_clarification', summary: 'I need a decision on the schema' }) } }])]
+		const firstPersistence = makeFakePersistence()
+		await runExecutor(makeDeps(firstLlm, firstPersistence, guild), { runId: 'r-durable', guildPath: '/guild', task: 'do it', effort: 'standard', involvement: 'early-engagement' })
+		const pausedCheckpoint = firstPersistence.state.checkpoints[firstPersistence.state.checkpoints.length - 1]
+		if (pausedCheckpoint === undefined) throw new Error('expected a clarification checkpoint')
+
+		const clarificationAnswer = { id: 'answer-1', question: 'I need a decision on the schema', answer: 'use the v2 schema' }
+		const operations: string[] = []
+		const crashPersistence = makeFakePersistence()
+		const crashDeps = makeDeps(new FakeLlm(), crashPersistence, guild)
+		const writeCheckpoint = crashDeps.writeCheckpoint
+		crashDeps.writeCheckpoint = (written) => {
+			operations.push('checkpoint')
+			writeCheckpoint(written)
+		}
+		const writeMeta = crashDeps.writeMeta
+		crashDeps.writeMeta = (written) => {
+			operations.push(`meta:${written.status}`)
+			if (written.status === 'running') throw new Error('simulated crash after the durable checkpoint')
+			writeMeta(written)
+		}
+		await expect(resumeExecutor(crashDeps, pausedCheckpoint, { guildPath: '/guild', clarificationAnswer })).rejects.toThrow('simulated crash')
+		expect(operations).toEqual(['checkpoint', 'meta:running'])
+		const eventTypes = crashPersistence.state.events.map((event) => event.type)
+		expect(eventTypes.indexOf('run_resumed')).toBeLessThan(eventTypes.indexOf('human_answer'))
+		const durableCheckpoint = crashPersistence.state.checkpoints[crashPersistence.state.checkpoints.length - 1]
+		if (durableCheckpoint === undefined) throw new Error('expected the durable checkpoint')
+		expect(durableCheckpoint.clarificationAnswer).toEqual(clarificationAnswer)
+		const durableNotes = durableCheckpoint.frames.flatMap((frame) => frame.roleState.history).filter((message) => message.role === 'user' && message.content.includes('The operator answered: use the v2 schema'))
+		expect(durableNotes.length).toBe(1)
+
+		const retryLlm = new FakeLlm()
+		retryLlm.responses = [success([{ id: 'f2', type: 'function', function: { name: 'finish', arguments: JSON.stringify({ status: 'success', summary: 'built it' }) } }])]
+		const retryPersistence = makeFakePersistence()
+		const meta = await resumeExecutor(makeDeps(retryLlm, retryPersistence, guild), durableCheckpoint, { guildPath: '/guild', clarificationAnswer })
+
+		expect(meta.status).toBe('success')
+		const latestCheckpoint = retryPersistence.state.checkpoints[retryPersistence.state.checkpoints.length - 1]
+		if (latestCheckpoint === undefined) throw new Error('expected a resumed checkpoint')
+		const retriedNotes = latestCheckpoint.frames.flatMap((frame) => frame.roleState.history).filter((message) => message.role === 'user' && message.content.includes('The operator answered: use the v2 schema'))
+		expect(retriedNotes.length).toBe(1)
+		expect(latestCheckpoint.clarificationAnswer).toEqual({ ...clarificationAnswer, consumed: true })
+		// An idempotent replay does not log a second human_answer.
+		expect(retryPersistence.state.events.some((event) => event.type === 'human_answer')).toBe(false)
+	})
+
+	test('a boot resume after the running meta but before the first safe point keeps the note once and consumes it', async () => {
+		const guild = buildLoadedGuild({ main: { systemPrompt: 'p', tools: ['finish'] } }, 'main')
+		const firstLlm = new FakeLlm()
+		firstLlm.responses = [success([{ id: 'f1', type: 'function', function: { name: 'finish', arguments: JSON.stringify({ status: 'needs_clarification', summary: 'I need a decision on the schema' }) } }])]
+		const firstPersistence = makeFakePersistence()
+		await runExecutor(makeDeps(firstLlm, firstPersistence, guild), { runId: 'r-boot-clarification', guildPath: '/guild', task: 'do it', effort: 'standard', involvement: 'early-engagement' })
+		const pausedCheckpoint = firstPersistence.state.checkpoints[firstPersistence.state.checkpoints.length - 1]
+		if (pausedCheckpoint === undefined) throw new Error('expected a clarification checkpoint')
+		const clarificationAnswer = { id: 'answer-1', question: 'I need a decision on the schema', answer: 'use the v2 schema' }
+
+		const crashPersistence = makeFakePersistence()
+		const crashLlm = new FakeLlm()
+		crashLlm.responses = [success([{ id: 'f2', type: 'function', function: { name: 'finish', arguments: JSON.stringify({ status: 'success', summary: 'built it' }) } }])]
+		const crashDeps = makeDeps(crashLlm, crashPersistence, guild)
+		const writeCheckpoint = crashDeps.writeCheckpoint
+		let checkpointWrites = 0
+		crashDeps.writeCheckpoint = (written) => {
+			checkpointWrites += 1
+			if (checkpointWrites > 1) throw new Error('simulated crash at the first safe point')
+			writeCheckpoint(written)
+		}
+		await expect(resumeExecutor(crashDeps, pausedCheckpoint, { guildPath: '/guild', clarificationAnswer })).rejects.toThrow('simulated crash at the first safe point')
+		expect(crashPersistence.state.meta?.status).toBe('running')
+		const durableCheckpoint = crashPersistence.state.checkpoints[crashPersistence.state.checkpoints.length - 1]
+		if (durableCheckpoint === undefined) throw new Error('expected the durable checkpoint')
+		expect(durableCheckpoint.clarificationAnswer?.consumed).toBeUndefined()
+
+		// Startup reconciliation re-enters the running checkpoint with no answer option: the note is already in history and is only consumed.
+		const bootLlm = new FakeLlm()
+		bootLlm.responses = [success([{ id: 'f3', type: 'function', function: { name: 'finish', arguments: JSON.stringify({ status: 'success', summary: 'resumed and done' }) } }])]
+		const bootPersistence = makeFakePersistence()
+		const meta = await resumeExecutor(makeDeps(bootLlm, bootPersistence, guild), durableCheckpoint, { guildPath: '/guild' })
+
+		expect(meta.status).toBe('success')
+		const bootCheckpoint = bootPersistence.state.checkpoints[bootPersistence.state.checkpoints.length - 1]
+		if (bootCheckpoint === undefined) throw new Error('expected the boot-resumed checkpoint')
+		const notes = bootCheckpoint.frames.flatMap((frame) => frame.roleState.history).filter((message) => message.role === 'user' && message.content.includes('The operator answered: use the v2 schema'))
+		expect(notes.length).toBe(1)
+		expect(bootCheckpoint.clarificationAnswer).toEqual({ ...clarificationAnswer, consumed: true })
+		expect(bootPersistence.state.events.some((event) => event.type === 'human_answer')).toBe(false)
 	})
 
 	test('resuming a parked checkpoint with its answer delivers the answer and deletes the checkpoint on success', async () => {
@@ -1017,7 +1207,34 @@ describe('resumeExecutor', () => {
 		expect(reParked?.parkedAsk).toEqual({ roleId: 'main-0-1', toolCallId: 'ask_2', question: 'And the port?' })
 	})
 
-	test('an answer-resumed batched turn that directly finishes needs_clarification deletes the checkpoint and keeps the new question', async () => {
+	test('a consumed clarification answer coexists with a later parked ask and the parked answer still resumes', async () => {
+		const guild = buildParkGuild()
+		const directLlm = new FakeLlm()
+		directLlm.responses = [success([{ id: 'f1', type: 'function', function: { name: 'finish', arguments: JSON.stringify({ status: 'needs_clarification', summary: 'I need a decision on the schema' }) } }])]
+		const directPersistence = makeFakePersistence()
+		await runExecutor(makeDeps(directLlm, directPersistence, guild), { runId: 'r-both', guildPath: '/guild', task: 'do it', effort: 'standard', involvement: 'early-engagement' })
+		const directCheckpoint = directPersistence.state.checkpoints[directPersistence.state.checkpoints.length - 1]
+		if (directCheckpoint === undefined) throw new Error('expected a clarification checkpoint')
+
+		const clarificationLlm = new FakeLlm()
+		clarificationLlm.responses = [success([askToolCall('ask_1', 'Which database?')])]
+		const clarificationPersistence = makeFakePersistence()
+		const paused = await resumeExecutor(makeDeps(clarificationLlm, clarificationPersistence, guild), directCheckpoint, { guildPath: '/guild', clarificationAnswer: { id: 'answer-1', question: 'I need a decision on the schema', answer: 'use the v2 schema' }, queueTracked: true })
+		expect(paused.status).toBe('needs_clarification')
+		const both = clarificationPersistence.state.checkpoints.find((checkpoint) => checkpoint.parkedAsk?.toolCallId === 'ask_1')
+		if (both === undefined) throw new Error('expected a checkpoint carrying both pause fields')
+		expect(both.clarificationAnswer).toEqual({ id: 'answer-1', question: 'I need a decision on the schema', answer: 'use the v2 schema', consumed: true })
+		expect(both.parkedAsk).toEqual({ roleId: 'main-0-1', toolCallId: 'ask_1', question: 'Which database?' })
+
+		const parkedLlm = new FakeLlm()
+		parkedLlm.responses = [success([{ id: 'f2', type: 'function', function: { name: 'finish', arguments: JSON.stringify({ status: 'success', summary: 'built it' }) } }])]
+		const parkedPersistence = makeFakePersistence()
+		const meta = await resumeExecutor(makeDeps(parkedLlm, parkedPersistence, guild), both, { guildPath: '/guild', parkedAnswer: { question: 'Which database?', answer: 'postgres', toolCallId: 'ask_1' } })
+
+		expect(meta.status).toBe('success')
+	})
+
+	test('an answer-resumed batched turn that directly finishes needs_clarification keeps the checkpoint and the new question', async () => {
 		const guild = buildParkGuild()
 		const parkedLlm = new FakeLlm()
 		parkedLlm.responses = [success([askToolCall('ask_1', 'Which database?'), { id: 'f1', type: 'function', function: { name: 'finish', arguments: JSON.stringify({ status: 'needs_clarification', summary: 'I need a decision on the schema' }) } }])]
@@ -1033,7 +1250,9 @@ describe('resumeExecutor', () => {
 
 		expect(meta.status).toBe('needs_clarification')
 		expect(meta.result?.summary).toBe('I need a decision on the schema')
-		expect(resumePersistence.state.deleteCheckpointCalls).toBe(1)
+		expect(resumePersistence.state.deleteCheckpointCalls).toBe(0)
+		const paused = resumePersistence.state.checkpoints[resumePersistence.state.checkpoints.length - 1]
+		expect(paused?.parkedAsk).toBeUndefined()
 	})
 
 	test('an answer-resumed run that immediately errors keeps an unparked checkpoint the error resume can re-enter', async () => {
@@ -1084,6 +1303,9 @@ describe('resumeExecutor', () => {
 
 		const wrongCall = makeDeps(new FakeLlm(), makeFakePersistence(), guild)
 		await expect(resumeExecutor(wrongCall, checkpoint, { guildPath: '/guild', parkedAnswer: { question: 'Which database?', answer: 'postgres', toolCallId: 'other_call' } })).rejects.toThrow('does not match the parked call')
+
+		const wrongPath = makeDeps(new FakeLlm(), makeFakePersistence(), guild)
+		await expect(resumeExecutor(wrongPath, checkpoint, { guildPath: '/guild', clarificationAnswer: { id: 'answer-x', question: 'Which database?', answer: 'postgres' } })).rejects.toThrow('has a parked ask')
 	})
 
 	test('a boot-resumed run stays untracked: its pre-write ask blocks instead of parking', async () => {

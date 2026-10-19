@@ -5,7 +5,7 @@ import type { EffortLevel, InvolvementLevel, LogEvent, LogLevel, RunContinuation
 import type { ReadProjectSettings, ReadRunCheckpointById, ReadRunMetaById, RunDirectoryExists } from './persistence.ts'
 import { DEFAULT_EFFORT } from './effort.ts'
 import { DEFAULT_INVOLVEMENT } from './involvement.ts'
-import { createReadParkedAskById, createResumeErroredRun, createResumeParkedRun, createRunSubmission, createTerminateParkedRun, type ResumeErroredRunDependencies, type ResumeRun, type RunSubmission, type StartRun } from './run-submission.ts'
+import { createReadPauseStateById, createResumeClarificationRun, createResumeErroredRun, createResumeParkedRun, createRunSubmission, createTerminateParkedRun, type ResumeErroredRunDependencies, type ResumeRun, type RunSubmission, type StartRun } from './run-submission.ts'
 import { isRunMeta } from './validation.ts'
 import { createTaskQueue, type QueueItemView, type QueueView, type TaskQueueModule } from './queue/index.ts'
 import { defined, flushMicrotasks } from './test-fixtures.ts'
@@ -794,8 +794,9 @@ describe('createResumeErroredRun', () => {
 			readRunListSummary: () => {
 				throw new Error('the resume path does not assemble a briefing')
 			},
-			readParkedAskById: () => null,
+			readPauseStateById: () => null,
 			resumeParkedRun: () => ({ ok: false, error: 'checkpoint_missing' }),
+			resumeClarificationRun: () => ({ ok: false, error: 'checkpoint_missing' }),
 			terminateParkedRun: () => ({ ok: false, error: 'not_found' }),
 			submitRun: () => {
 				throw new Error('the resume path does not dispatch')
@@ -803,6 +804,7 @@ describe('createResumeErroredRun', () => {
 			hasActiveRun: () => submission.activeRunId() !== undefined,
 			sleep: async () => {},
 			now: () => '2026-01-01T00:00:00.000Z',
+			generateAnswerId: () => 'answer-1',
 		})
 	}
 
@@ -931,8 +933,8 @@ describe('createResumeErroredRun', () => {
 	})
 })
 
-describe('createReadParkedAskById', () => {
-	test('reads the parked ask from a matching checkpoint and treats every absent or corrupt shape as no ask', () => {
+describe('createReadPauseStateById', () => {
+	test('distinguishes a parked ask from a direct clarification pause and treats every absent or corrupt shape as no pause', () => {
 		const readCheckpointById: ReadRunCheckpointById = (runId) => {
 			if (runId === 'run-parked') return JSON.stringify(parkedCheckpointFor('run-parked'))
 			if (runId === 'run-unparked') {
@@ -940,17 +942,31 @@ describe('createReadParkedAskById', () => {
 				delete checkpoint.parkedAsk
 				return JSON.stringify(checkpoint)
 			}
+			if (runId === 'run-delivered') {
+				const checkpoint: RunCheckpoint = { ...parkedCheckpointFor('run-delivered') }
+				delete checkpoint.parkedAsk
+				checkpoint.clarificationAnswer = { id: 'answer-1', question: 'which database?', answer: 'postgres' }
+				return JSON.stringify(checkpoint)
+			}
+			if (runId === 'run-consumed') {
+				const checkpoint: RunCheckpoint = { ...parkedCheckpointFor('run-consumed') }
+				delete checkpoint.parkedAsk
+				checkpoint.clarificationAnswer = { id: 'answer-1', question: 'which database?', answer: 'postgres', consumed: true }
+				return JSON.stringify(checkpoint)
+			}
 			if (runId === 'run-corrupt') return '{not json'
 			if (runId === 'run-mismatched') return JSON.stringify(parkedCheckpointFor('run-other'))
 			return null
 		}
-		const readParkedAskById = createReadParkedAskById(readCheckpointById)
+		const readPauseStateById = createReadPauseStateById(readCheckpointById)
 
-		expect(readParkedAskById('run-parked')).toEqual({ roleId: 'main-0-1', toolCallId: 'ask_1', question: 'which database?' })
-		expect(readParkedAskById('run-unparked')).toBeNull()
-		expect(readParkedAskById('run-corrupt')).toBeNull()
-		expect(readParkedAskById('run-mismatched')).toBeNull()
-		expect(readParkedAskById('run-missing')).toBeNull()
+		expect(readPauseStateById('run-parked')).toEqual({ kind: 'parked_ask', ask: { roleId: 'main-0-1', toolCallId: 'ask_1', question: 'which database?' } })
+		expect(readPauseStateById('run-unparked')).toEqual({ kind: 'clarification', deliveredAnswerConsumed: false })
+		expect(readPauseStateById('run-delivered')).toEqual({ kind: 'clarification', deliveredAnswerId: 'answer-1', deliveredAnswerConsumed: false })
+		expect(readPauseStateById('run-consumed')).toEqual({ kind: 'clarification', deliveredAnswerId: 'answer-1', deliveredAnswerConsumed: true })
+		expect(readPauseStateById('run-corrupt')).toBeNull()
+		expect(readPauseStateById('run-mismatched')).toBeNull()
+		expect(readPauseStateById('run-missing')).toBeNull()
 	})
 })
 
@@ -1035,6 +1051,94 @@ describe('createResumeParkedRun', () => {
 		expect(testHarness.submission.activeRunId()).toBe('run-1')
 		expect(testHarness.resumeCalls).toEqual([{ parkedAnswer: answer, queueTracked: true }])
 		await testHarness.submission.awaitActive()
+	})
+})
+
+describe('createResumeClarificationRun', () => {
+	function clarificationMeta(runId: string): RunMeta {
+		return { ...sampleMeta(runId), status: 'needs_clarification', result: { status: 'needs_clarification', summary: 'I need a decision on the schema' } }
+	}
+
+	function directCheckpointFor(runId: string): RunCheckpoint {
+		const checkpoint: RunCheckpoint = { ...parkedCheckpointFor(runId) }
+		delete checkpoint.parkedAsk
+		return checkpoint
+	}
+
+	function harness(input: { metas?: Map<string, string>, checkpoints?: Map<string, string> } = {}): { resumeClarificationRun: ReturnType<typeof createResumeClarificationRun>; submission: RunSubmission; resumeCalls: Array<{ clarificationAnswer: unknown, queueTracked: boolean | undefined }> } {
+		const metas = input.metas ?? new Map()
+		const checkpoints = input.checkpoints ?? new Map()
+		const resumeCalls: Array<{ clarificationAnswer: unknown, queueTracked: boolean | undefined }> = []
+		const resumeRun: ResumeRun = async (checkpoint, options) => {
+			resumeCalls.push({ clarificationAnswer: options?.clarificationAnswer, queueTracked: options?.queueTracked })
+			return clarificationMeta(checkpoint.runId)
+		}
+		const submission = createRunSubmission({ onRunSettled: settleNothing, startRun: unusedStartRun, resumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings, runDirectoryExists: emptyRunsDir })
+		const resumeClarificationRun = createResumeClarificationRun({
+			runSubmission: submission,
+			readRunMetaById: (runId) => metas.get(runId) ?? null,
+			readCheckpointById: (runId) => checkpoints.get(runId) ?? null,
+		})
+		return { resumeClarificationRun, submission, resumeCalls }
+	}
+
+	const clarificationAnswer = { id: 'answer-1', question: 'I need a decision on the schema', answer: 'use the v2 schema' }
+
+	test('accepts a direct-finish checkpoint and resumes the same run with the framed answer and queue tracking', async () => {
+		const metas = new Map([['run-1', JSON.stringify(clarificationMeta('run-1'))]])
+		const checkpoints = new Map([['run-1', JSON.stringify(directCheckpointFor('run-1'))]])
+		const testHarness = harness({ metas, checkpoints })
+
+		expect(testHarness.resumeClarificationRun('run-1', clarificationAnswer)).toEqual({ ok: true, runId: 'run-1' })
+		expect(testHarness.submission.activeRunId()).toBe('run-1')
+		expect(testHarness.resumeCalls).toEqual([{ clarificationAnswer, queueTracked: true }])
+		await testHarness.submission.awaitActive()
+	})
+
+	test('rejects while a run is active', async () => {
+		let resolveRun: (meta: RunMeta) => void = () => {}
+		const resumeRun: ResumeRun = () => new Promise<RunMeta>((resolve) => {
+			resolveRun = resolve
+		})
+		const submission = createRunSubmission({ onRunSettled: settleNothing, startRun: unusedStartRun, resumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings, runDirectoryExists: emptyRunsDir })
+		const resumeClarificationRun = createResumeClarificationRun({ runSubmission: submission, readRunMetaById: () => null, readCheckpointById: () => null })
+
+		submission.resume(directCheckpointFor('run-active'))
+		expect(resumeClarificationRun('run-active', clarificationAnswer)).toEqual({ ok: false, error: 'run_in_progress' })
+		resolveRun(sampleMeta('run-active'))
+		await submission.awaitActive()
+	})
+
+	test('rejects a missing or unparseable meta with checkpoint_missing', () => {
+		const missing = harness()
+		expect(missing.resumeClarificationRun('run-1', clarificationAnswer)).toEqual({ ok: false, error: 'checkpoint_missing' })
+		const corrupt = harness({ metas: new Map([['run-1', '{not json']]) })
+		expect(corrupt.resumeClarificationRun('run-1', clarificationAnswer)).toEqual({ ok: false, error: 'checkpoint_missing' })
+	})
+
+	test('rejects a non-needs_clarification meta with not_clarification', () => {
+		const testHarness = harness({ metas: new Map([['run-1', JSON.stringify(sampleMeta('run-1'))]]) })
+		expect(testHarness.resumeClarificationRun('run-1', clarificationAnswer)).toEqual({ ok: false, error: 'not_clarification' })
+	})
+
+	test('rejects a missing, corrupt, or mismatched checkpoint with checkpoint_missing', () => {
+		const metas = new Map([['run-1', JSON.stringify(clarificationMeta('run-1'))]])
+		const missing = harness({ metas })
+		expect(missing.resumeClarificationRun('run-1', clarificationAnswer)).toEqual({ ok: false, error: 'checkpoint_missing' })
+		const corrupt = harness({ metas, checkpoints: new Map([['run-1', '{not json']]) })
+		expect(corrupt.resumeClarificationRun('run-1', clarificationAnswer)).toEqual({ ok: false, error: 'checkpoint_missing' })
+		const mismatched = harness({ metas, checkpoints: new Map([['run-1', JSON.stringify(directCheckpointFor('run-other'))]]) })
+		expect(mismatched.resumeClarificationRun('run-1', clarificationAnswer)).toEqual({ ok: false, error: 'checkpoint_missing' })
+	})
+
+	test('rejects a parked checkpoint, which belongs to the parked-answer path', () => {
+		const metas = new Map([['run-1', JSON.stringify(clarificationMeta('run-1'))]])
+		const checkpoints = new Map([['run-1', JSON.stringify(parkedCheckpointFor('run-1'))]])
+		const testHarness = harness({ metas, checkpoints })
+
+		expect(testHarness.resumeClarificationRun('run-1', clarificationAnswer)).toEqual({ ok: false, error: 'not_clarification' })
+		expect(testHarness.submission.activeRunId()).toBeUndefined()
+		expect(testHarness.resumeCalls).toEqual([])
 	})
 })
 

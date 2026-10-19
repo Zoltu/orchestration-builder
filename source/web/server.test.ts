@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import { createWebHumanBackend, type WebHumanBackend } from '../executor/human-backend.ts'
 import { createInterruptChannel, createInterruptQueue, type InterruptChannel } from '../executor/interrupts.ts'
 import { createRunState } from '../executor/run-state.ts'
-import { createReadParkedAskById, createResumeErroredRun, createResumeParkedRun, createRunSubmission, createTerminateParkedRun, type ResumeRun, type RunSubmission, type StartRun } from '../executor/run-submission.ts'
+import { createReadPauseStateById, createResumeClarificationRun, createResumeErroredRun, createResumeParkedRun, createRunSubmission, createTerminateParkedRun, type ResumeRun, type RunSubmission, type StartRun } from '../executor/run-submission.ts'
 import { createTaskQueue, type QueueItemView, type QueueView } from '../executor/queue/index.ts'
 import type { RunCheckpoint } from '../executor/checkpoint.ts'
 import type { ProjectSettings, ReadProjectSettings, WriteProjectSettings, RunSnapshotRaw, RunSnapshotStats, RunSummaryStats } from '../executor/persistence.ts'
@@ -414,6 +414,7 @@ snapshots.set('run-effort', {
 		status: 'success',
 		startTime: '2026-01-01T00:00:00.000Z',
 		endTime: '2026-01-01T00:01:00.000Z',
+		continuesFrom: 'run-20260101-000000',
 	}),
 	logText: [
 		JSON.stringify({ timestamp: '2026-01-01T00:00:00.000Z', type: 'effort_set', payload: { effort: 'thorough' } }),
@@ -600,8 +601,9 @@ function createHandlerHarness(options: { runIdCollides?: boolean, build?: BuildI
 	const submission = createRunSubmission({ onRunSettled: (meta) => taskQueue.onRunSettled(meta), startRun, resumeRun, generateRunId: () => `run-20260101-09${String(nextId++).padStart(4, '0')}`, runDirectoryExists: () => options.runIdCollides ?? false, readProjectSettings: settings.read })
 	// The queue module references the submission and the submission's settlement hook references the queue; each closure captures the other's binding lazily, exactly as serve.ts composes them.
 	const readCheckpointById = (runId: string): string | null => checkpoints.get(runId) ?? null
-	const readParkedAskById = createReadParkedAskById(readCheckpointById)
+	const readPauseStateById = createReadPauseStateById(readCheckpointById)
 	const resumeParkedRun = createResumeParkedRun({ runSubmission: submission, readRunMetaById: harnessReadRunMetaById, readCheckpointById })
+	const resumeClarificationRun = createResumeClarificationRun({ runSubmission: submission, readRunMetaById: harnessReadRunMetaById, readCheckpointById })
 	const terminateParkedRun = createTerminateParkedRun({
 		readRunMetaById: harnessReadRunMetaById,
 		writeMetaFor: (runId) => (meta) => {
@@ -621,8 +623,9 @@ function createHandlerHarness(options: { runIdCollides?: boolean, build?: BuildI
 		readRunMetaById: harnessReadRunMetaById,
 		listRunIds,
 		readRunListSummary,
-		readParkedAskById,
+		readPauseStateById,
 		resumeParkedRun,
+		resumeClarificationRun,
 		terminateParkedRun,
 		submitRun: (queued) => {
 			queue.events.push('submitRun')
@@ -631,6 +634,7 @@ function createHandlerHarness(options: { runIdCollides?: boolean, build?: BuildI
 		hasActiveRun: () => submission.activeRunId() !== undefined,
 		sleep: async () => {},
 		now: () => new Date().toISOString(),
+		generateAnswerId: () => 'answer-1',
 	})
 	const interruptChannel = createInterruptChannel()
 	const humanBackend = createWebHumanBackend()
@@ -1092,6 +1096,7 @@ describe('GET /api/runs (list)', () => {
 			endTime: '2026-01-01T00:02:00.000Z',
 			result: null,
 			error: { kind: 'interrupted', message: 'The service stopped while this run was in progress and it could not be resumed (no valid checkpoint).' },
+			continuesFrom: null,
 			summary: null,
 		})
 		expect(list).toContainEqual({
@@ -1104,6 +1109,7 @@ describe('GET /api/runs (list)', () => {
 			endTime: '2026-01-01T00:01:00.000Z',
 			result: null,
 			error: null,
+			continuesFrom: 'run-20260101-000000',
 			summary: null,
 		})
 		expect(list).toContainEqual({
@@ -1116,8 +1122,18 @@ describe('GET /api/runs (list)', () => {
 			endTime: '2026-01-01T00:01:00.000Z',
 			result: { status: 'error', summary: 'failed', artifacts: ['output.txt', 'logs/run.txt'] },
 			error: { kind: 'llm_unavailable', message: 'connection refused' },
+			continuesFrom: null,
 			summary: null,
 		})
+	})
+
+	test('carries a non-null continuesFrom on a continuation run entity', async () => {
+		const { handler } = createHandlerHarness()
+		const response = await handler(get('/api/runs'))
+		const envelope = await response.json()
+		const continuation = runSummariesFromFrame(envelope).find((entry) => entry.runId === 'run-effort')
+		if (continuation === undefined) throw new Error('expected the continuation fixture in the run list')
+		expect(continuation.continuesFrom).toBe('run-20260101-000000')
 	})
 })
 
@@ -2484,17 +2500,17 @@ describe('/api/queue', () => {
 		const item = await response.json()
 		expect(item.status).toBe('waiting')
 		expect(item.answer).toBe('postgres')
-		// The parked run's id is dropped from the waiting item; the lineage (continuesFrom) carries the resume.
+		// The paused run's id is dropped from the waiting item; the legacy fallback re-points the lineage at that run.
 		expect(item.runId).toBeUndefined()
-		// The answered item fronts the waiting list and the tick dispatched it (ahead of the earlier waiting item) as a continuation of the parked run.
+		// The answered item fronts the waiting list and the tick dispatched it (ahead of the earlier waiting item) as a continuation of the paused run.
 		const items = queue.snapshot().items
 		expect(items[0]?.id).toBe('n1')
 		expect(items[0]?.status).toBe('active')
 		expect(items[0]?.runId).toBe('run-20260101-090000')
 		const continuation = lastContinuation()
-		expect(continuation?.runId).toBe('run-20260101-000000')
-		expect(continuation?.status).toBe('success')
-		expect(continuation?.result).toEqual({ status: 'success', summary: 'prior run finished cleanly', artifacts: ['output/report.md', 'dist/app.js'] })
+		expect(continuation?.runId).toBe('run-20260101-000300')
+		expect(continuation?.status).toBe('needs_clarification')
+		expect(continuation?.result).toEqual({ status: 'needs_clarification', summary: 'waiting for an answer to: which database?' })
 		expect(continuation?.error).toBeUndefined()
 		expect(continuation?.briefing).toContain('Resuming from your question: which database?')
 		expect(continuation?.briefing).toContain('The operator answered: postgres')

@@ -8,7 +8,7 @@ export function isWriteCapableRole(toolNames: readonly string[]): boolean {
 	return toolNames.some((toolName) => WRITE_CAPABLE_TOOL_NAMES.has(toolName))
 }
 
-// The exact summary format of a platform-authored park card. The settlement hook and boot repair recover the question from a terminal meta's result summary by stripping this prefix; a summary without it is a directly-finished needs_clarification whose LLM-authored summary is stored verbatim as the question — both parse the same way and the distinction affects only the question text's cleanliness.
+// The exact summary format of a platform-authored park card. The settlement hook and boot repair recover the question from a terminal meta's result summary by stripping this prefix; a summary without it is a directly-finished needs_clarification whose LLM-authored summary is stored verbatim as the question. Both parse the same way, and the distinction also selects the answer-resume kind: a park replaces its tool result, a direct finish re-enters with a framed note.
 export const PARK_SUMMARY_PREFIX = 'waiting for an answer to: '
 
 export function parkSummary(question: string): string {
@@ -18,6 +18,14 @@ export function parkSummary(question: string): string {
 export function questionFromParkSummary(summary: string): string {
 	return summary.startsWith(PARK_SUMMARY_PREFIX) ? summary.slice(PARK_SUMMARY_PREFIX.length) : summary
 }
+
+// A direct finish's question is not necessarily in the checkpointed conversation — a checkpoint predating the finish turn describes a fresh direct finish — so the resume note carries both sides.
+export function clarificationAnswerNote(question: string, answer: string): string {
+	return `The run paused to ask the operator a question: ${question}\nThe operator answered: ${answer}`
+}
+
+// The two shapes of a paused checkpoint: a parked ask whose tool result the answer replaces, or a direct clarification finish whose answer arrives as a framed note. deliveredAnswerId/deliveredAnswerConsumed describe the clarification note already written into the checkpoint: consumed is set once the resumed run wrote its running meta, so an answer checkpointed but never started is still retried.
+export type PauseState = { kind: 'parked_ask'; ask: ParkedAsk } | { kind: 'clarification'; deliveredAnswerId?: string; deliveredAnswerConsumed?: boolean }
 
 // The parked question and the tool call it belongs to; both ride the checkpoint so the queue answer can resume the same run and deliver the answer as that call's tool result.
 export interface ParkedAsk {

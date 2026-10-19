@@ -26,6 +26,21 @@ type LlmResultHandling =
 
 type SuccessfulLlmCall = Extract<LlmCallResult, { kind: 'success' }>
 
+// True only when the turn is fully closed: the last history message answers the last tool call of the nearest preceding assistant tool-call message, and that call is finish. A finish followed by another batched call fails this: its later call has no tool result, and checkpointing that turn would persist an unanswered assistant message.
+function lastTurnEndsWithCompletedFinish(history: readonly Message[]): boolean {
+	const lastMessage = history[history.length - 1]
+	if (lastMessage === undefined || lastMessage.role !== 'tool') return false
+	for (let index = history.length - 2; index >= 0; index--) {
+		const message = history[index]
+		if (message === undefined) continue
+		if (message.role !== 'assistant' || message.tool_calls === undefined) continue
+		const lastCall = message.tool_calls[message.tool_calls.length - 1]
+		if (lastCall === undefined) return false
+		return lastCall.function.name === 'finish' && lastCall.id === lastMessage.tool_call_id
+	}
+	return false
+}
+
 function serializeToolResult(result: ToolResult, maxChars: number): string {
 	let text: string
 	if (result.kind === 'success') {
@@ -424,6 +439,8 @@ export async function runRole(deps: EngineDependencies, context: EngineContext, 
 	}
 
 	const finalCard = await executeRoleLoop(deps, context, roleState, registryEntry, allowedToolsManifests, dispatchCtx, resumed?.suspendedTurn, resumed?.resumeNote, resumed?.parkedAnswer)
+	// A direct clarification finish ends after the turn's tool calls are all recorded, but the last safe-point write predates them (a batched agent call still had a pending suspension). Write the completed root turn now, before the frame leaves the recorder, so the resume note lands after the tool results and the next LLM call gets a turn with the answer. Only a turn whose final tool call is the answered finish is safe to persist: a batched finish followed by another call leaves that call unanswered, so the clean pre-turn checkpoint stays in place. The parked path is excluded: its frozen checkpoint is captured at the park moment and must not be overwritten.
+	if (context.depth === 0 && finalCard.status === 'needs_clarification' && deps.parkTracker.parkedAsk === undefined && lastTurnEndsWithCompletedFinish(roleState.history)) deps.checkpointRecorder.write()
 	deps.roleRegistry.unregister(registryEntry.roleId)
 	deps.checkpointRecorder.unregisterFrame(registryEntry.roleId)
 	logEvent(deps.appendLog, 'role_finished', roleFinishedPayload(context.roleName, context.depth, finalCard, context.parent, registryEntry.roleId))
@@ -511,8 +528,8 @@ async function executeRoleLoop(
 	if (parkedAnswer !== undefined) {
 		deliverParkedAnswer(deps, roleState, parkedAnswer, dispatchCtx.maxToolOutputChars)
 		const continuedCard = await continueParkedTurn(deps, context, roleState, registryEntry, dispatchCtx, parkedAnswer.toolCallId)
-		// Only a completed turn boundary is safe to checkpoint: the remaining calls' results are recorded. A remaining call that parked again has frozen the recorder, so this write is a no-op and the new frozen checkpoint survives.
-		deps.checkpointRecorder.write()
+		// Only a completed turn boundary is safe to checkpoint: write when the continued turn has no finish card, or when its finish is the turn's last call and therefore has a recorded result. A later batched call after finish would be left unanswered, and a remaining call that parked again has frozen the recorder, so in both cases the existing checkpoint survives.
+		if (continuedCard === null || lastTurnEndsWithCompletedFinish(roleState.history)) deps.checkpointRecorder.write()
 		if (continuedCard !== null) return continuedCard
 	}
 	// The note is delivered exactly once, at the resumed role's equivalent loop entry: inside the suspended-turn completion when there is one (its remaining calls may include the finish that terminates the role without a further LLM request), else at the loop top. Either way it lands after the previous turn's tool results and before the role's next decision, and the loop top's checkpoint write persists it like any other history message.

@@ -354,6 +354,7 @@ describe('renderRunSummary', () => {
 			endTime: '2026-01-01T00:01:00.000Z',
 			result: null,
 			error: null,
+			continuesFrom: null,
 			summary: null,
 		})
 	})
@@ -370,6 +371,7 @@ describe('renderRunSummary', () => {
 			endTime: null,
 			result: null,
 			error: null,
+			continuesFrom: null,
 			summary: null,
 		})
 	})
@@ -390,6 +392,16 @@ describe('renderRunSummary', () => {
 		const meta = parseRunMeta(JSON.stringify(sampleRunMeta({ involvement: 'collaborative' })))
 		expect(renderRunSummary('r', meta, null).involvement).toBe('collaborative')
 		expect(renderRunSummary('r', parseRunMeta(JSON.stringify(sampleRunMeta())), null).involvement).toBeNull()
+	})
+
+	test('carries the run lineage from meta.continuesFrom, or null when absent or meta is missing', () => {
+		const continuation = parseRunMeta(JSON.stringify(sampleRunMeta({ continuesFrom: 'run-20260101-000000' })))
+		expect(renderRunSummary('r', continuation, null).continuesFrom).toBe('run-20260101-000000')
+
+		const standalone = parseRunMeta(JSON.stringify(sampleRunMeta()))
+		expect(renderRunSummary('r', standalone, null).continuesFrom).toBeNull()
+
+		expect(renderRunSummary('r', parseRunMeta(null), null).continuesFrom).toBeNull()
 	})
 
 	test('passes the result card and run-level error through so the history view can browse outcomes', () => {

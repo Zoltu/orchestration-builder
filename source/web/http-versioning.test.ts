@@ -132,13 +132,15 @@ function createVersioningHarness(initialRuns: Array<[string, StoredRun]>, flowFe
 		readRunMetaById: readRunMetaById,
 		listRunIds,
 		readRunListSummary,
-		readParkedAskById: () => null,
+		readPauseStateById: () => null,
 		resumeParkedRun: () => ({ ok: false, error: 'checkpoint_missing' }),
+		resumeClarificationRun: () => ({ ok: false, error: 'checkpoint_missing' }),
 		terminateParkedRun: () => ({ ok: false, error: 'not_found' }),
 		submitRun: () => ({ ok: false, error: 'run_in_progress' }),
 		hasActiveRun: () => activeRunId !== undefined,
 		sleep: async () => {},
 		now: () => '2026-01-01T00:00:00.000Z',
+		generateAnswerId: () => 'answer-1',
 	})
 	const resumeErroredRun: ResumeErroredRun = () => ({ ok: false, error: 'run_not_found' })
 	const flowFeedResponder = createFlowFeedResponder(flowFeedOptions)

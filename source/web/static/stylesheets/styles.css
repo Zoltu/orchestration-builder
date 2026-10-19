@@ -644,11 +644,22 @@ li:last-child {
 	background: var(--color-accent-soft);
 }
 
-.history-row-main {
-	flex: 1 1 auto;
+.history-row-title {
 	display: flex;
+	flex-wrap: nowrap;
 	align-items: center;
-	gap: var(--space-3);
+	gap: var(--space-2);
+	flex: 1 1 100%;
+	min-width: 0;
+}
+
+.history-row-main {
+	flex: 1 1 0;
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	column-gap: var(--space-3);
+	row-gap: var(--space-1);
 	min-width: 0;
 	cursor: pointer;
 	padding: var(--space-1) 0;
@@ -668,6 +679,57 @@ li:last-child {
 	font-size: 0.78rem;
 	color: var(--color-text-subtle);
 	white-space: nowrap;
+}
+
+.history-lineage {
+	flex: 0 1 auto;
+	min-width: 0;
+	max-width: 14rem;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	border: 1px solid var(--color-border);
+	border-radius: var(--radius-sm);
+	background: var(--color-surface);
+	color: var(--color-text-muted);
+	font-size: 0.72rem;
+	line-height: 1.4;
+	padding: 0 var(--space-1);
+	cursor: pointer;
+}
+
+.history-lineage:hover {
+	background: var(--color-accent-soft);
+	border-color: var(--color-accent);
+	color: var(--color-accent);
+}
+
+.history-lineage-missing {
+	cursor: default;
+	color: var(--color-text-subtle);
+}
+
+.history-lineage-missing:hover {
+	background: var(--color-surface);
+	border-color: var(--color-border);
+	color: var(--color-text-subtle);
+}
+
+/* The fixed badges and status share the nowrap title line, so they may shrink and ellipsize instead of pushing the details button onto a new line. */
+.history-row .run-effort-badge,
+.history-row .run-involvement-badge {
+	flex: 0 1 auto;
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.history-details-lineage {
+	margin: 0;
+	font-size: 0.78rem;
+	color: var(--color-text-muted);
+	overflow-wrap: anywhere;
 }
 
 .history-expand {
@@ -2574,6 +2636,34 @@ li:last-child {
 	box-shadow: 0 12px 32px rgba(16, 24, 40, 0.28), 0 0 0 4px var(--color-error-soft);
 }
 
+.result-modal-pending-message {
+	margin: var(--space-4) 0;
+	font-size: 1rem;
+	color: var(--color-text-muted);
+}
+
+.result-modal-pending-actions {
+	margin-top: auto;
+	padding-top: var(--space-5);
+	display: flex;
+	justify-content: center;
+	gap: var(--space-2);
+}
+
+.result-modal-retry {
+	padding: var(--space-2) var(--space-4);
+	border: 1px solid var(--color-accent);
+	border-radius: var(--radius-sm);
+	background: var(--color-surface);
+	color: var(--color-accent);
+	font-weight: 500;
+	cursor: pointer;
+}
+
+.result-modal-retry:hover {
+	background: var(--color-accent-soft);
+}
+
 .result-modal-heading {
 	margin: 0 0 var(--space-1);
 	font-size: 0.8rem;
@@ -3220,6 +3310,10 @@ li:last-child {
 
 .queue-row.is-waiting .history-row-main {
 	cursor: grab;
+}
+
+.queue-row.is-active .history-row-main {
+	cursor: pointer;
 }
 
 .queue-row.is-needs-input .history-row-main {

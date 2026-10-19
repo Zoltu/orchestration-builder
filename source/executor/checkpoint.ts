@@ -57,7 +57,16 @@ export interface RunCheckpoint {
 	baseHash?: string
 	// The parked ask this checkpoint was frozen for: the leaf role and the ask_human call whose result the queue answer will replace on resume (docs/queueing.md "Parking: the pre-write rule").
 	parkedAsk?: ParkedAsk
+	// The clarification answer already appended to the leaf history. The id makes delivery idempotent across a crash: a retry with the same id does not append the note again, and the queue compares it with the item's answer id to tell an undelivered answer from a re-pause. consumed is set once the resume wrote its running meta, so an answer that never started is retried.
+	clarificationAnswer?: ClarificationAnswerDelivery
 	frames: CheckpointFrame[]
+}
+
+export interface ClarificationAnswerDelivery {
+	id: string
+	question: string
+	answer: string
+	consumed?: true
 }
 
 function isParkedAsk(value: unknown): value is ParkedAsk {
@@ -65,6 +74,15 @@ function isParkedAsk(value: unknown): value is ParkedAsk {
 	if (!isString(value.roleId) || value.roleId === '') return false
 	if (!isString(value.toolCallId) || value.toolCallId === '') return false
 	if (!isString(value.question) || value.question === '') return false
+	return true
+}
+
+function isClarificationAnswerDelivery(value: unknown): value is ClarificationAnswerDelivery {
+	if (!isObject(value)) return false
+	if (!isString(value.id) || value.id === '') return false
+	if (!isString(value.question) || value.question === '') return false
+	if (!isString(value.answer)) return false
+	if (value.consumed !== undefined && value.consumed !== true) return false
 	return true
 }
 
@@ -142,6 +160,7 @@ export function isRunCheckpoint(value: unknown): value is RunCheckpoint {
 	if (value.writeCapableStarted !== undefined && value.writeCapableStarted !== true) return false
 	if (value.baseHash !== undefined && (!isString(value.baseHash) || value.baseHash === '')) return false
 	if (value.parkedAsk !== undefined && !isParkedAsk(value.parkedAsk)) return false
+	if (value.clarificationAnswer !== undefined && !isClarificationAnswerDelivery(value.clarificationAnswer)) return false
 	if (!Array.isArray(value.frames) || value.frames.length === 0) return false
 	if (!value.frames.every(isCheckpointFrame)) return false
 	const frames: CheckpointFrame[] = value.frames
@@ -220,6 +239,8 @@ export interface CheckpointRecorderDependencies {
 	parkTracker: RunParkTracker
 	// The run's base commit state: the hash rides the checkpoint so a restart keeps diffing against the same change set.
 	baseTracker: RunBaseTracker
+	// The clarification answer already appended on the resume path: later safe-point writes must preserve it so a re-pause still lets the queue recognize a delivered answer.
+	clarificationAnswer?: ClarificationAnswerDelivery
 }
 
 // The optional per-frame lineage source: a live context continuation on a fresh run, or the recorder's resume stamp when the context carries none. A continuation without a runId carries only the queue briefing — no lineage, so meta stays honest.
@@ -297,6 +318,7 @@ export function createCheckpointRecorder(dependencies: CheckpointRecorderDepende
 				...(dependencies.parkTracker.writeCapableStarted ? { writeCapableStarted: true } : {}),
 				...(dependencies.baseTracker.baseHash !== undefined ? { baseHash: dependencies.baseTracker.baseHash } : {}),
 				...(dependencies.parkTracker.parkedAsk !== undefined ? { parkedAsk: dependencies.parkTracker.parkedAsk } : {}),
+				...(dependencies.clarificationAnswer !== undefined ? { clarificationAnswer: dependencies.clarificationAnswer } : {}),
 				frames: ordered.map((frame) => serializeFrame(frame, dependencies.continuesFrom)),
 			}
 			dependencies.writeCheckpoint(checkpoint)

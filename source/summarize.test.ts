@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import type { LlmCallResult, LlmRequest, LlmUsage } from './executor/llm.js'
 import type { RunMeta } from './executor/types.js'
-import { createTaskSummarizer, type TaskSummarizerDependencies } from './summarize.js'
+import { createTaskSummarizer, shouldWriteCompletionSummary, type TaskSummarizerDependencies } from './summarize.js'
 import { defined, present } from './web/test-fixtures.js'
 
 function successResult(content: string | undefined, usage: LlmUsage = { promptTokens: 10, completionTokens: 5 }): LlmCallResult {
@@ -200,5 +200,14 @@ describe('summarizeRunCompletion', () => {
 		const harness = createHarness({ kind: 'llm_unavailable', message: 'connection refused' })
 		await createTaskSummarizer(harness.dependencies).summarizeRunCompletion(sampleMeta())
 		expect(harness.writes).toEqual([])
+	})
+})
+
+describe('shouldWriteCompletionSummary', () => {
+	test('gates the completion pass for a pause but not for a true completion or error', () => {
+		expect(shouldWriteCompletionSummary('needs_clarification')).toBe(false)
+		expect(shouldWriteCompletionSummary('success')).toBe(true)
+		expect(shouldWriteCompletionSummary('error')).toBe(true)
+		expect(shouldWriteCompletionSummary('interrupted')).toBe(true)
 	})
 })

@@ -17,7 +17,7 @@ export interface RunSummaryError {
 	message: string
 }
 
-// The run-list entity. entity-diff keys a collection by `id`, so the entity carries the run id as its `id`; `runSummariesFromReplicaState` restores the wire's `runId` field on reconstruction. Every field below can change while a run is in flight (a status flips, an end time lands, a result or error card appears, the generated summary arrives), so the versionOf covers all of them.
+// The run-list entity. entity-diff keys a collection by `id`, so the entity carries the run id as its `id`; `runSummariesFromReplicaState` restores the wire's `runId` field on reconstruction. Fields below can change while a run is in flight (a status flips, an end time lands, a result or error card appears, the generated summary arrives), so the versionOf covers all of them.
 export interface RunSummaryEntity {
 	id: string
 	status: RunStatus
@@ -28,6 +28,7 @@ export interface RunSummaryEntity {
 	endTime: string | null
 	result: RunResultCard | null
 	error: RunSummaryError | null
+	continuesFrom: string | null
 	summary: string | null
 }
 
@@ -42,6 +43,7 @@ export interface RunSummary {
 	endTime: string | null
 	result: RunResultCard | null
 	error: RunSummaryError | null
+	continuesFrom: string | null
 	summary: string | null
 }
 
@@ -111,13 +113,14 @@ function isRunSummaryEntity(value: unknown): value is RunSummaryEntity {
 	if (result !== null && !isResultCard(result)) return false
 	const error = value['error']
 	if (error !== null && !isRunSummaryError(error)) return false
+	if (!isNullableString(value['continuesFrom'])) return false
 	if (!isNullableString(value['summary'])) return false
 	return true
 }
 
 // A cheap change detector: it serializes the mutable fields (not the identity-bearing id) canonically, so a change to any field bumps the entity version while an unchanged entity is stable. canonicalSerialize escapes strings, so free-text task/summary content cannot shift field boundaries and collide two different summaries.
 function runSummaryVersionOf(summary: RunSummaryEntity): string {
-	return canonicalSerialize([summary.status, summary.task, summary.effort, summary.involvement, summary.startTime, summary.endTime, summary.result, summary.error, summary.summary])
+	return canonicalSerialize([summary.status, summary.task, summary.effort, summary.involvement, summary.startTime, summary.endTime, summary.result, summary.error, summary.continuesFrom, summary.summary])
 }
 
 export const runListDefinitions: CollectionDefinitions<RunListCollections> = {
@@ -142,6 +145,7 @@ export function runSummariesFromReplicaState(state: RunListReplicaState): RunSum
 		endTime: entity.endTime,
 		result: entity.result,
 		error: entity.error,
+		continuesFrom: entity.continuesFrom,
 		summary: entity.summary,
 	}))
 	summaries.sort((left, right) => (left.runId < right.runId ? 1 : left.runId > right.runId ? -1 : 0))
@@ -160,6 +164,7 @@ export function runSummaryEntityFor(summary: RunSummary): RunSummaryEntity {
 		endTime: summary.endTime,
 		result: summary.result,
 		error: summary.error,
+		continuesFrom: summary.continuesFrom,
 		summary: summary.summary,
 	}
 }

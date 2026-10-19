@@ -1,10 +1,10 @@
 import { DEFAULT_EFFORT } from './effort.js'
 import { DEFAULT_INVOLVEMENT } from './involvement.js'
 import type { ResultCard, RunContinuation, RunMeta, RunOptions } from './types.js'
-import { createCheckpointRecorder, entryFrameLogLevel, type RunCheckpoint } from './checkpoint.js'
+import { createCheckpointRecorder, entryFrameLogLevel, type ClarificationAnswerDelivery, type RunCheckpoint } from './checkpoint.js'
 import { createContextPressureTracker } from './context/index.js'
 import type { RunBaseTracker } from './base-state.js'
-import { createRunParkTracker, type ParkedAnswer, type ParkedAsk } from './park-state.js'
+import { clarificationAnswerNote, createRunParkTracker, type ParkedAnswer, type ParkedAsk } from './park-state.js'
 import { EMPTY_TREE_HASH } from './git-primitives.js'
 import { formatWorkspaceGitNotice, type ReadWorkspaceGitState } from './git-state.js'
 import { runRole } from './engine.js'
@@ -57,6 +57,7 @@ interface EngineDependencyInput {
 	queueTracked?: boolean
 	baseHash?: string
 	parkedAsk?: ParkedAsk
+	clarificationAnswer?: ClarificationAnswerDelivery
 }
 
 function buildEngineDependencies(deps: ExecutorDependencies, input: EngineDependencyInput): EngineDependencies {
@@ -81,7 +82,7 @@ function buildEngineDependencies(deps: ExecutorDependencies, input: EngineDepend
 		parkTracker,
 		baseTracker: deps.baseTracker,
 		// The run's lineage rides the recorder so checkpoints written after a resume keep stamping continuesFrom onto the entry frame — the live context does not carry it on the resume path. The logging level needs no such stamp: the entry context carries it and the recorder serializes from there.
-		checkpointRecorder: createCheckpointRecorder({ writeCheckpoint: deps.writeCheckpoint, runId: input.runId, startTime: input.startTime, roleRegistry, contextPressureTracker, parkTracker, baseTracker: deps.baseTracker, continuesFrom: input.continuesFrom }),
+		checkpointRecorder: createCheckpointRecorder({ writeCheckpoint: deps.writeCheckpoint, runId: input.runId, startTime: input.startTime, roleRegistry, contextPressureTracker, parkTracker, baseTracker: deps.baseTracker, continuesFrom: input.continuesFrom, ...(input.clarificationAnswer !== undefined ? { clarificationAnswer: input.clarificationAnswer } : {}) }),
 	}
 }
 
@@ -103,9 +104,9 @@ function composeRunMeta(options: RunOptions, startTime: string, status: RunMeta[
 	}
 }
 
-// A parked run keeps its frozen checkpoint so the queue answer can re-enter the same run; every other needs_clarification (a direct finish) has nothing to resume and deletes it. An error keeps its checkpoint for the explicit error-resume.
-function shouldKeepCheckpoint(status: RunMeta['status'], parkedAsk: ParkedAsk | undefined): boolean {
-	return status === 'error' || (status === 'needs_clarification' && parkedAsk !== undefined)
+// A needs_clarification terminal is always a pause — a parked ask or a direct finish — so its checkpoint is kept for the answer resume; an unwanted checkpoint is deleted only for true completions. An error keeps its checkpoint for the explicit error-resume.
+function shouldKeepCheckpoint(status: RunMeta['status']): boolean {
+	return status === 'error' || status === 'needs_clarification'
 }
 
 export async function runExecutor(deps: ExecutorDependencies, options: RunOptions): Promise<RunMeta> {
@@ -149,8 +150,8 @@ export async function runExecutor(deps: ExecutorDependencies, options: RunOption
 	const meta = composeRunMeta(options, startTime, result.status, result)
 
 	deps.writeMeta(meta)
-	// The terminal meta is the authoritative record, and the checkpoint is removed so a restart never considers resuming a finished run — except when the terminal status is 'error' (the operator can explicitly resume it with its full context, docs/queueing.md "Resume of an errored run") or a park (needs_clarification with a parkedAsk) that the queue answer re-enters. Startup reconciliation never auto-resumes either one: it considers only running metas.
-	if (!shouldKeepCheckpoint(result.status, engineDeps.parkTracker.parkedAsk)) deps.deleteCheckpoint()
+	// The terminal meta is the authoritative record, and the checkpoint is removed so a restart never considers resuming a finished run — except when the terminal status is 'error' (the operator can explicitly resume it with its full context, docs/queueing.md "Resume of an errored run") or a needs_clarification pause (a parked ask or a direct finish) that the queue answer re-enters. Startup reconciliation never auto-resumes either one: it considers only running metas.
+	if (!shouldKeepCheckpoint(result.status)) deps.deleteCheckpoint()
 
 	return meta
 }
@@ -162,6 +163,8 @@ export interface ResumeRunOptions {
 	operatorNote?: string
 	// The queue's answer to the parked ask, delivered into the existing ask_human tool result before the parked turn continues.
 	parkedAnswer?: ParkedAnswer
+	// The queue's answer to a direct-finish needs_clarification (no parkedAsk): delivered as a framed note that names both the question and the answer. The id makes delivery idempotent across a crash.
+	clarificationAnswer?: ClarificationAnswerDelivery
 	// Restored only by the queue's answer resume: it keeps the resumed run's park behavior live. Boot reconciliation and the explicit error-resume stay untracked, so their asks block on /api/answer.
 	queueTracked?: boolean
 }
@@ -171,6 +174,10 @@ export async function resumeExecutor(deps: ExecutorDependencies, checkpoint: Run
 	const entryFrame = checkpoint.frames[0]
 	if (entryFrame === undefined) throw new Error(`resumeExecutor: checkpoint for run ${checkpoint.runId} has no frames`)
 	const parkedAsk = checkpoint.parkedAsk
+	if (options.clarificationAnswer !== undefined) {
+		if (parkedAsk !== undefined) throw new Error(`resumeExecutor: run ${checkpoint.runId} has a parked ask and must be resumed through the parked-answer path`)
+		if (options.parkedAnswer !== undefined) throw new Error(`resumeExecutor: run ${checkpoint.runId} cannot receive both a parked answer and a clarification answer`)
+	}
 	if (parkedAsk !== undefined && options.parkedAnswer === undefined) throw new Error(`resumeExecutor: run ${checkpoint.runId} parked on "${parkedAsk.question}" and must be resumed with its answer`)
 	if (options.parkedAnswer !== undefined) {
 		if (parkedAsk === undefined) throw new Error(`resumeExecutor: run ${checkpoint.runId} has no parked ask for the supplied answer`)
@@ -201,24 +208,45 @@ export async function resumeExecutor(deps: ExecutorDependencies, checkpoint: Run
 	const loadedGuild = deps.loadedGuild
 
 	const startTime = checkpoint.startTime
+	const clarificationAnswer = options.clarificationAnswer
+	// The clarification answer is appended durably before the running meta: a crash after the meta would otherwise let reconciliation resume a checkpoint without the answer. The id makes a retry idempotent, and the note is then already in the restored history. A delivery record already on the checkpoint is also carried forward on boot and error resumes, so a consumed answer is not lost on their first safe-point write.
+	let deliveredAnswer = checkpoint.clarificationAnswer
+	let appendedThisResume = false
+	let resumeNote = options.operatorNote
+	if (clarificationAnswer !== undefined) {
+		if (deliveredAnswer?.id !== clarificationAnswer.id) {
+			const leafFrame = checkpoint.frames[checkpoint.frames.length - 1]
+			if (leafFrame === undefined) throw new Error(`resumeExecutor: checkpoint for run ${checkpoint.runId} has no leaf frame`)
+			leafFrame.roleState.history.push({ role: 'user', content: clarificationAnswerNote(clarificationAnswer.question, clarificationAnswer.answer) })
+			deliveredAnswer = { id: clarificationAnswer.id, question: clarificationAnswer.question, answer: clarificationAnswer.answer }
+			checkpoint.clarificationAnswer = deliveredAnswer
+			deps.writeCheckpoint(checkpoint)
+			appendedThisResume = true
+		}
+		resumeNote = undefined
+	}
 	// run_resumed marks the restart boundary in the log: events before it belong to the pre-restart process, events after it to the resumed run. Resumed roles do not re-emit role_start, so a reviewer can tell why. An explicit error-resume stamps the operator's note on the boundary so the log shows the human intervention as well.
 	logEvent(deps.appendLog, 'run_resumed', { runId: checkpoint.runId, resumedFrames: checkpoint.frames.length, ...(options.operatorNote !== undefined ? { operatorNote: options.operatorNote } : {}) })
+	// A clarification answer rides the same human_answer event as a parked answer, with a synthetic id. It is logged after the boundary and the durable write, and only when this resume actually appended the note — an idempotent replay has nothing new to log.
+	if (clarificationAnswer !== undefined && appendedThisResume) logEvent(deps.appendLog, 'human_answer', { id: 'clarification', question: clarificationAnswer.question, answer: clarificationAnswer.answer })
 	// Re-assert the running meta: the pre-restart write may never have landed, and the terminal meta overwrites it below either way. On an explicit error-resume this same write flips the run's terminal error meta back to running — the old error card belongs to the log, not the live meta.
 	deps.writeMeta(composeRunMeta(runOptions, startTime, 'running'))
-	const engineDeps = buildEngineDependencies(deps, { runId: checkpoint.runId, startTime, registryCounter: checkpoint.registryCounter, learnedContextCeiling: checkpoint.learnedContextCeiling, writeCapableStarted: checkpoint.writeCapableStarted, continuesFrom: entryFrame.continuesFrom, baseHash: checkpoint.baseHash, ...(options.parkedAnswer !== undefined && parkedAsk !== undefined ? { parkedAsk } : {}), ...(options.queueTracked === true ? { queueTracked: true } : {}) })
+	// Once the running meta is written the run has started and consumed the note; later recorder writes persist this so the queue can distinguish it from an answer checkpointed just before a crash.
+	if (deliveredAnswer !== undefined) deliveredAnswer.consumed = true
+	const engineDeps = buildEngineDependencies(deps, { runId: checkpoint.runId, startTime, registryCounter: checkpoint.registryCounter, learnedContextCeiling: checkpoint.learnedContextCeiling, writeCapableStarted: checkpoint.writeCapableStarted, continuesFrom: entryFrame.continuesFrom, baseHash: checkpoint.baseHash, ...(options.parkedAnswer !== undefined && parkedAsk !== undefined ? { parkedAsk } : {}), ...(deliveredAnswer !== undefined ? { clarificationAnswer: deliveredAnswer } : {}), ...(options.queueTracked === true ? { queueTracked: true } : {}) })
 	const result = await resumeRoleStack(
 		runRole,
 		engineDeps,
 		loadedGuild,
 		checkpoint,
-		{ resumeNote: options.operatorNote, parkedAnswer: options.parkedAnswer },
+		{ ...(resumeNote !== undefined ? { resumeNote } : {}), ...(options.parkedAnswer !== undefined ? { parkedAnswer: options.parkedAnswer } : {}) },
 	)
 
 	const meta = composeRunMeta(runOptions, startTime, result.status, result)
 
 	deps.writeMeta(meta)
-	// Same checkpoint rule as the fresh-run path: an error or a parked run stays resumable from its checkpoint, every other terminal status cleans up.
-	if (!shouldKeepCheckpoint(result.status, engineDeps.parkTracker.parkedAsk)) deps.deleteCheckpoint()
+	// Same checkpoint rule as the fresh-run path: an error or any needs_clarification pause stays resumable from its checkpoint, every other terminal status cleans up.
+	if (!shouldKeepCheckpoint(result.status)) deps.deleteCheckpoint()
 
 	return meta
 }

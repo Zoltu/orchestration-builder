@@ -14,7 +14,11 @@ import { operationIdsForTooltipDetails, tooltipStyle, Tooltip } from './tooltip.
 import { copyRawToClipboard } from './clipboard.js'
 import { QuestionModal } from './question-modal.js'
 import { createOperationDetails } from './operation-details.js'
-import { deriveTerminalResult, ResultModal } from './result-modal.js'
+import { deriveTerminalResult, ResultModal, ResultPendingModal } from './result-modal.js'
+import { deriveHistoryEntries, lineageLink, queueItemLineageLink, runPrimaryLabel, runSummaryIndex } from './run-history.js'
+import type { LineageLink } from './run-history.js'
+import { acceptedResultView, planResultOpen, planResultRetry, planRunViewRecovery, resultOffersContinue, selectResultSource, withoutVersion } from './result-access.js'
+import type { ResultLoadState } from './result-access.js'
 import { ContinuationReference, selectContinuationReference } from './continuation-reference.js'
 import type { ContinuationReferenceData } from './continuation-reference.js'
 import { InspectorModal } from './inspector-modal.js'
@@ -25,7 +29,7 @@ import { applyRunListFrame, emptyRunListFeedState, runListFeedRevision } from '.
 import { responseBelongsToSelection } from './stale-response.js'
 import { createStreamClient } from './stream-client.js'
 import { nextLivePartial } from './live-partial.js'
-import { backlogCount, deriveQueuedItems, deriveReorderPosition, isQueueItemLike, queueItemPrimaryText, queueStatusLabel, reorderWaitingItems, taskFirstLine } from './queue-panel.js'
+import { backlogCount, deriveReorderPosition, isQueueItemLike, matchesParkedRun, queueItemPrimaryText, queueStatusLabel, reorderWaitingItems } from './queue-panel.js'
 import type { InteractionModel, Participant, RunStatus } from './interaction-model.js'
 import type { FlowFeedState } from './flow-feed/index.js'
 import type { RunListFeedState, RunResultCard, RunSummary } from './run-list-feed/index.js'
@@ -243,6 +247,8 @@ export interface ApplicationState {
 	questionModalOpen: boolean
 	resultModalOpen: boolean
 	resultShownForRun: string | null
+	// The on-demand result load for the selected run: null when the modal renders a terminal descriptor, otherwise the phase of the summary fallback's full-view fetch.
+	resultLoad: ResultLoadState | null
 	interruptModalOpen: boolean
 	// The LLM turn inspector opens only from the stage controls; its log windows and derived transcript live in the module-scope session and reset on open and on run switch.
 	inspectorModalOpen: boolean
@@ -559,6 +565,10 @@ function storedVersionFor(versions: Record<string, string>, url: string): string
 	return versions[url] ?? null
 }
 
+function runViewUrl(runId: string): string {
+	return `api/runs/${encodeURIComponent(runId)}`
+}
+
 function Fetch(payload: FetchEffectPayload): FetchEffect {
 	return [runFetch, payload]
 }
@@ -632,7 +642,7 @@ function PollSelectedRun(state: ApplicationState): ActionReturn {
 	// Bail on a non-string id rather than fetching `/api/runs/undefined`; `selectedRunId` is null until a run is selected and can briefly be undefined across a state transition, so the guard keeps the poll from firing on an invalid id.
 	if (typeof state.selectedRunId !== 'string' || state.selectedRunId === '') return state
 	const runId = encodeURIComponent(state.selectedRunId)
-	const runUrl = `api/runs/${runId}`
+	const runUrl = runViewUrl(state.selectedRunId)
 	const flowUrl = `api/runs/${runId}/flow`
 	// The client's current flow revision rides as `have`; omitting it (no revision held yet) asks the server for a snapshot. The flow model is derived server-side from the full log (the truncated recentLog the run view carries is not enough to reconstruct the active path, lingering legs, or per-invocation costs), and entity-diff sends only the delta since that revision.
 	const flowRevision = flowFeedRevision(state.flowFeed)
@@ -732,8 +742,15 @@ function GotSelectedRun(curriedRunId: string) {
 		const status = payload.status
 		const ok = payload.ok
 		const body = payload.body
-		// A 304 carries no body and has ok === false, so it must be handled before the 404/`!ok` checks below: the view and status are unchanged, so keep both exactly and skip the completion transition, the interrupt/answer bookkeeping, and the follower sync.
-		if (status === 304) return { ...state, serverAvailable: true }
+		// A 304 carries no body and has ok === false, so it must be handled before the 404/`!ok` checks below: the view and status are unchanged, so keep both exactly and skip the completion transition, the interrupt/answer bookkeeping, and the follower sync. When the held view was cleared (or belongs to another run), the validator outlived its payload, so drop it and refetch unconditionally instead of leaving the screen blank.
+		if (status === 304) {
+			const recovery = planRunViewRecovery(state.selectedRunId, state.selectedRunView?.runId, runViewUrl(curriedRunId), state.versions)
+			if (recovery === null) return { ...state, serverAvailable: true }
+			return [
+				{ ...state, serverAvailable: true, versions: recovery.versions },
+				Fetch({ url: recovery.url, init: { cache: 'no-store' }, ok: GotSelectedRun(curriedRunId), fail: FetchFailed }),
+			]
+		}
 		if (status === 404) {
 			// The run directory is created early in execution but may not be readable in the instant after submit; the per-run subscription keeps polling until the view appears.
 			return [{ ...state, selectedRunStatus: 'unknown', serverAvailable: ok }, SyncSequenceFollower()]
@@ -991,7 +1008,7 @@ function GotQueueAfterTerminate(runId: string | null) {
 		const cleared: ApplicationState = { ...state, queueTerminatePendingId: null, serverAvailable: true }
 		if (!payload.ok) return [cleared, Fetch({ url: 'api/queue', ok: GotQueue, fail: FetchFailed })]
 		const nextState = runId !== null && runId === state.selectedRunId
-			? { ...cleared, openQueueQuestionId: null, selectedRunStatus: 'unknown' as const, selectedRunView: null, resultModalOpen: false, resultShownForRun: null }
+			? { ...cleared, openQueueQuestionId: null, selectedRunStatus: 'unknown' as const, selectedRunView: null, resultModalOpen: false, resultShownForRun: null, resultLoad: null }
 			: { ...cleared, openQueueQuestionId: null }
 		return [nextState, Fetch({ url: 'api/queue', ok: GotQueue, fail: FetchFailed })]
 	}
@@ -1222,6 +1239,8 @@ function resetRunView(state: ApplicationState, runId: string, status: RunStatus 
 		questionModalOpen: false,
 		resultModalOpen: false,
 		resultShownForRun: null,
+		resultLoad: null,
+		versions: withoutVersion(state.versions, runViewUrl(runId)),
 		tooltip: null,
 		interruptNotice: null,
 		interruptModalOpen: false,
@@ -1432,7 +1451,7 @@ function GotCreatedRun(state: ApplicationState, payload: FetchResultPayload): Ac
 	// Selecting the new run activates its per-run subscription; an immediate run-list fetch clears justSubmittedRunId as soon as the run appears. The continuation and the per-run modal/flow state are reset for the same reason SelectRun resets it — the composed run is on the server now, and a leftover chip would brief a stale lineage into the next task. The live partial clears with the rest (the stream subscription follows the new selection).
 	inspectorSession.close()
 	return [
-		{ ...state, screen: 'watch', continuation: null, justSubmittedRunId: createdRunId, createSending: false, selectedRunId: createdRunId, selectedRunView: null, selectedRunStatus: null, flowModel: null, previousFlowModel: null, flowFeed: emptyFlowFeedState(), questionModalOpen: false, resultModalOpen: false, resultShownForRun: null, tooltip: null, planExpanded: false, inspectorModalOpen: false, livePartial: null, serverAvailable: true },
+		{ ...state, screen: 'watch', continuation: null, justSubmittedRunId: createdRunId, createSending: false, selectedRunId: createdRunId, selectedRunView: null, selectedRunStatus: null, flowModel: null, previousFlowModel: null, flowFeed: emptyFlowFeedState(), questionModalOpen: false, resultModalOpen: false, resultShownForRun: null, resultLoad: null, versions: withoutVersion(state.versions, runViewUrl(createdRunId)), tooltip: null, planExpanded: false, inspectorModalOpen: false, livePartial: null, serverAvailable: true },
 		Fetch({ url: 'api/runs', ok: GotRunList, fail: FetchFailed }),
 	]
 }
@@ -1452,7 +1471,7 @@ function GotResumedRun(state: ApplicationState, payload: FetchResultPayload): Ac
 		if (isObject(body) && typeof body['runId'] === 'string' && body['runId'] === resumedRunId) {
 			inspectorSession.close()
 			return [
-				{ ...state, screen: 'watch', resumingRunId: null, resumeSending: false, resumeNotice: null, continuation: null, justSubmittedRunId: resumedRunId, selectedRunId: resumedRunId, selectedRunView: null, selectedRunStatus: null, flowModel: null, previousFlowModel: null, flowFeed: emptyFlowFeedState(), questionModalOpen: false, resultModalOpen: false, resultShownForRun: null, tooltip: null, planExpanded: false, inspectorModalOpen: false, livePartial: null, serverAvailable: true },
+				{ ...state, screen: 'watch', resumingRunId: null, resumeSending: false, resumeNotice: null, continuation: null, justSubmittedRunId: resumedRunId, selectedRunId: resumedRunId, selectedRunView: null, selectedRunStatus: null, flowModel: null, previousFlowModel: null, flowFeed: emptyFlowFeedState(), questionModalOpen: false, resultModalOpen: false, resultShownForRun: null, resultLoad: null, versions: withoutVersion(state.versions, runViewUrl(resumedRunId)), tooltip: null, planExpanded: false, inspectorModalOpen: false, livePartial: null, serverAvailable: true },
 				Fetch({ url: 'api/runs', ok: GotRunList, fail: FetchFailed }),
 			]
 		}
@@ -1615,12 +1634,54 @@ function DismissInterruptAnswer(state: ApplicationState): ApplicationState {
 }
 
 function OpenResultModal(state: ApplicationState): ActionReturn {
-	// A modal opening covers the run view; clear the inspector so the card does not linger beneath it.
-	return [{ ...state, resultModalOpen: true, tooltip: null }, CancelTooltipDismiss()]
+	// The modal already presents this selection's result (or its loading state); a repeated CTA click must not stack another fetch.
+	if (state.resultModalOpen) return state
+	const plan = planResultOpen(state.selectedRunId, state.selectedRunView, state.summaries, state.resultLoad)
+	if (plan === null) return state
+	if (plan.kind === 'immediate') {
+		const effects: EffectItem[] = [CancelTooltipDismiss()]
+		if (plan.backgroundFetch && plan.resultLoad !== null) effects.push(Fetch({ url: runViewUrl(plan.resultLoad.runId), init: { cache: 'no-store' }, ok: GotResultView(plan.resultLoad.runId), fail: ResultViewFailed(plan.resultLoad.runId) }))
+		// A modal opening covers the run view; clear the inspector so the card does not linger beneath it.
+		return [{ ...state, resultModalOpen: true, resultLoad: plan.resultLoad, tooltip: null }, ...effects]
+	}
+	const effects: EffectItem[] = [CancelTooltipDismiss()]
+	if (plan.kind === 'fetch') effects.push(Fetch({ url: runViewUrl(plan.resultLoad.runId), init: { cache: 'no-store' }, ok: GotResultView(plan.resultLoad.runId), fail: ResultViewFailed(plan.resultLoad.runId) }))
+	return [{ ...state, resultModalOpen: true, resultLoad: plan.resultLoad, tooltip: null }, ...effects]
+}
+
+// The on-demand full-view fetch behind the pending result modal: an unreadable or failed response parks the modal in its retryable failed phase, and a readable one fills the view state the terminal descriptor is derived from. A non-terminal body keeps the modal waiting, because the summary that opened it was terminal but the view has not caught up yet.
+function GotResultView(runId: string) {
+	return function GotResultViewForRun(state: ApplicationState, payload: FetchResultPayload): ActionReturn {
+		if (!responseBelongsToSelection(runId, state.selectedRunId)) return state
+		const body = payload.body
+		if (!payload.ok || body === null || !isReadableRunView(body)) {
+			return { ...state, serverAvailable: payload.ok, resultLoad: { runId, phase: 'failed' } }
+		}
+		if (!acceptedResultView(runId, state.selectedRunId, body.runId)) return state
+		const terminal = deriveTerminalResult(body) !== undefined
+		return { ...state, selectedRunView: body, selectedRunStatus: body.status, serverAvailable: true, versions: recordVersion(state.versions, payload), resultLoad: terminal ? null : state.resultLoad }
+	}
+}
+
+function ResultViewFailed(runId: string) {
+	return function ResultViewFailedForRun(state: ApplicationState): ApplicationState {
+		if (!responseBelongsToSelection(runId, state.selectedRunId)) return state
+		return { ...state, serverAvailable: false, resultLoad: { runId, phase: 'failed' } }
+	}
+}
+
+// Retry from the failed pending modal: the same unconditional fetch, skipped while the same run is already loading so repeated clicks collapse into one request.
+function RetryResultLoad(state: ApplicationState): ActionReturn {
+	const plan = planResultRetry(state.selectedRunId, state.resultLoad)
+	if (plan.kind === 'noop') return state
+	return [
+		{ ...state, resultLoad: plan.resultLoad },
+		Fetch({ url: runViewUrl(plan.resultLoad.runId), init: { cache: 'no-store' }, ok: GotResultView(plan.resultLoad.runId), fail: ResultViewFailed(plan.resultLoad.runId) }),
+	]
 }
 
 function CloseResultModal(state: ApplicationState): ApplicationState {
-	return { ...state, resultModalOpen: false }
+	return { ...state, resultModalOpen: false, resultLoad: null }
 }
 
 function OpenQuestionModal(state: ApplicationState): ActionReturn {
@@ -1645,7 +1706,7 @@ function CloseQueueQuestion(state: ApplicationState): ApplicationState {
 function OpenParkedQuestion(state: ApplicationState): ActionReturn {
 	const runId = state.selectedRunId
 	if (typeof runId === 'string' && runId !== '') {
-		const parked = state.queueItems.find((item) => item.status === 'needs_input' && item.runId === runId)
+		const parked = state.queueItems.find((item) => matchesParkedRun(item, runId))
 		if (parked !== undefined) return [{ ...state, openQueueQuestionId: parked.id, tooltip: null }, CancelTooltipDismiss()]
 	}
 	return OpenResultModal(state)
@@ -1928,14 +1989,6 @@ function StreamSubscription(runId: string): [typeof streamSubscriber, { runId: s
 
 // --- View ------------------------------------------------------------------
 
-// The primary label for a run where space is tight: the task's first line, capped at a word boundary so a long first line cannot stretch the top bar (see queue-panel.js taskFirstLine). History rows and the top bar both use it; the full task is one click away in the row's expanded details.
-// The primary label for a run: the LLM-generated one-line summary when the summarizer has produced one, otherwise the task's first line, otherwise the run id. History rows and the top bar share it.
-function runPrimaryLabel(summary: RunSummary): string {
-	if (typeof summary.summary === 'string' && summary.summary !== '') return summary.summary
-	if (typeof summary.task === 'string' && summary.task !== '') return taskFirstLine(summary.task)
-	return summary.runId
-}
-
 // The top bar's live status read: a server-unavailable warning, a clickable "a run is in progress" jump when nothing is selected, the viewed run's status, and a secondary jump pill when the user is browsing a historical run while another is live.
 function StatusPills(state: ApplicationState): Vnode[] {
 	const activeRunId = deriveActiveRunId(state.summaries)
@@ -2000,40 +2053,73 @@ function TopBar(state: ApplicationState): Vnode {
 	])
 }
 
-// The History screen is the full-screen run browser: compact one-line rows that stay legible no matter how large the underlying prompts and results are, with the full content one expand away. The row's primary line is the run's generated summary (or its task's first line when none exists yet); the expanded details carry the full task and, for terminal runs, the result summary or error — all agent prose through the sanitized Markdown pipeline except the primary line, which is textContent.
-function HistoryRow(state: ApplicationState, summary: RunSummary, rerunDisabled: boolean): Vnode {
+// The compact lineage badge in a row's title line, and the fuller line in its expanded details. Both select the parent run without also triggering the row's own select/open handler.
+function lineageTitle(link: LineageLink): string {
+	return `Continues run ${link.runId} — ${link.label}`
+}
+
+function LineageBadge(link: LineageLink): Vnode {
+	if (!link.available) return h('span', { class: 'history-lineage history-lineage-missing', title: lineageTitle(link) }, `↳ ${link.label}`)
+	return h('button', { type: 'button', class: 'history-lineage', title: lineageTitle(link), onclick: SelectLineage(link.runId) }, `↳ ${link.label}`)
+}
+
+function LineageDetailsLine(link: LineageLink): Vnode {
+	const parentId = link.available
+		? h('button', { type: 'button', class: 'history-lineage history-lineage-link', title: lineageTitle(link), onclick: SelectLineage(link.runId) }, link.runId)
+		: h('span', { class: 'history-lineage history-lineage-missing', title: lineageTitle(link) }, link.runId)
+	const children: (Vnode | string)[] = ['Continues run ', parentId]
+	if (link.available) children.push(` — ${link.label}`)
+	return h('p', { class: 'history-details-lineage' }, children)
+}
+
+function SelectLineage(runId: string) {
+	return function SelectLineageForRun(state: ApplicationState, event: MouseEvent): ActionReturn {
+		event.stopPropagation()
+		return SelectRun(state, runId)
+	}
+}
+
+// The History screen is the full-screen run browser: compact one-line rows that stay legible no matter how large the underlying prompts and results are, with the full content one expand away. A running or paused run is labelled by its task, while a finished run prefers its generated summary; the expanded details carry the full task and, for terminal runs, the result summary or error — all agent prose through the sanitized Markdown pipeline except the primary line, which is textContent.
+function HistoryRow(state: ApplicationState, summary: RunSummary, rerunDisabled: boolean, summariesById: Map<string, RunSummary>): Vnode {
 	const expanded = state.expandedRowIds[summary.runId] === true
+	const link = lineageLink(summary.continuesFrom, summariesById)
+	const canContinue = resultOffersContinue(summary.status)
 	return h('li', { key: summary.runId, class: { 'history-row': true, 'is-expanded': expanded, 'is-selected': summary.runId === state.selectedRunId } }, [
-		h('div', { class: 'history-row-main', onclick: [SelectRun, summary.runId], title: 'Watch this run' }, [
-			h('span', { class: `run-status run-status-${summary.status ?? 'unknown'}` }, statusLabel(summary.status)),
-			h('span', { class: 'history-primary' }, runPrimaryLabel(summary)),
-			isEffort(summary.effort)
-				? h('span', { class: 'run-effort-badge', title: effortDescription(summary.effort) }, `effort ${effortLabel(summary.effort)}`)
-				: null,
-			isInvolvement(summary.involvement)
-				? h('span', { class: 'run-involvement-badge', title: involvementDescription(summary.involvement) }, `involvement ${involvementLabel(summary.involvement)}`)
-				: null,
-			h('time', { class: 'history-when', title: summary.startTime ?? '' }, formatRelative(summary.startTime, state.now)),
-			// The re-run button shares the create form's disabled condition (a run is active or a submission is in flight) so the one-task-at-a-time contract holds identically for re-runs.
-			h('button', { type: 'button', class: 'rerun-button', 'data-task': summary.task ?? '', disabled: rerunDisabled || typeof summary.task !== 'string' || summary.task === '', onclick: RerunTask }, 're-run'),
-			// The Continue affordance exists only where it is valid: a terminal run has a settled outcome the new run can anchor to, while continuing a running one would be rejected by the create-run API anyway.
-			isTerminalStatus(summary.status)
-				? h('button', { type: 'button', class: 'continue-button', 'data-run-id': summary.runId, disabled: rerunDisabled, title: 'Start a new run continuing this one', onclick: ContinueRun }, 'Continue')
-				: null,
+		h('div', { class: 'history-row-title' }, [
+			h('div', { class: 'history-row-main', onclick: [SelectRun, summary.runId], title: 'Watch this run' }, [
+				h('span', { class: `run-status run-status-${summary.status ?? 'unknown'}` }, statusLabel(summary.status)),
+				h('span', { class: 'history-primary' }, runPrimaryLabel(summary)),
+				link === null ? null : LineageBadge(link),
+				isEffort(summary.effort)
+					? h('span', { class: 'run-effort-badge', title: effortDescription(summary.effort) }, `effort ${effortLabel(summary.effort)}`)
+					: null,
+				isInvolvement(summary.involvement)
+					? h('span', { class: 'run-involvement-badge', title: involvementDescription(summary.involvement) }, `involvement ${involvementLabel(summary.involvement)}`)
+					: null,
+				h('time', { class: 'history-when', title: summary.startTime ?? '' }, formatRelative(summary.startTime, state.now)),
+				// The re-run button shares the create form's disabled condition (a run is active or a submission is in flight) so the one-task-at-a-time contract holds identically for re-runs.
+				h('button', { type: 'button', class: 'rerun-button', 'data-task': summary.task ?? '', disabled: rerunDisabled || typeof summary.task !== 'string' || summary.task === '', onclick: RerunTask }, 're-run'),
+				// Continue is for a finished outcome only; a needs_clarification run is paused and awaits an answer rather than being continued as a new task.
+				canContinue
+					? h('button', { type: 'button', class: 'continue-button', 'data-run-id': summary.runId, disabled: rerunDisabled, title: 'Start a new run continuing this one', onclick: ContinueRun }, 'Continue')
+					: null,
+			]),
+			h('button', { type: 'button', class: 'history-expand', 'aria-expanded': expanded, title: expanded ? 'Hide details' : 'Show the full task and result', onclick: [ToggleRowExpanded, summary.runId] }, expanded ? 'less ▴' : 'details ▾'),
 		]),
-		h('button', { type: 'button', class: 'history-expand', 'aria-expanded': expanded, title: expanded ? 'Hide details' : 'Show the full task and result', onclick: [ToggleRowExpanded, summary.runId] }, expanded ? 'less ▴' : 'details ▾'),
-		expanded ? HistoryRowDetails(summary) : null,
+		expanded ? HistoryRowDetails(summary, summariesById) : null,
 	])
 }
 
-// The expanded details are where large prompts and results get their room: the exact run meta, the full task, and the terminal result or error, all rendered at full length inside the scrollable history view.
-function HistoryRowDetails(summary: RunSummary): Vnode {
+// The expanded details are where large prompts and results get their room: the exact run meta, the lineage, the full task, and the terminal result or error, all rendered at full length inside the scrollable history view.
+function HistoryRowDetails(summary: RunSummary, summariesById: Map<string, RunSummary>): Vnode {
 	const metaParts = [summary.runId]
 	if (isEffort(summary.effort)) metaParts.push(`effort ${effortLabel(summary.effort)}`)
 	if (isInvolvement(summary.involvement)) metaParts.push(`involvement ${involvementLabel(summary.involvement)}`)
 	if (typeof summary.startTime === 'string') metaParts.push(`started ${summary.startTime}`)
 	if (typeof summary.endTime === 'string') metaParts.push(`ended ${summary.endTime}`)
 	const children = [h('p', { class: 'history-details-meta' }, metaParts.join(' · '))]
+	const link = lineageLink(summary.continuesFrom, summariesById)
+	if (link !== null) children.push(LineageDetailsLine(link))
 	if (typeof summary.task === 'string' && summary.task !== '') {
 		children.push(h('p', { class: 'history-details-heading' }, 'Task'))
 		children.push(h('div', { class: 'markdown history-details-text' }, renderMarkdown(summary.task)))
@@ -2052,31 +2138,28 @@ function HistoryRowDetails(summary: RunSummary): Vnode {
 	return h('div', { class: 'history-details' }, children)
 }
 
-// The merged history screen: the queued tasks the operator can still act on (waiting, active, needs_input) sit at the top in queue order, then the run browser below. Every row shares the same compact one-line UX — status, primary line, when, and a details expander — so a queued row and a finished run read as one list. The empty state appears only when neither the queued rows nor the run list has anything to show.
+// The merged history screen: one row per task. Queued rows (waiting, active, needs_input) come first in queue order, and a run whose id a queued row already represents is suppressed, so a task stays a single entry through question and answer. Every row shares the same compact one-line UX — status, primary line, when, and a details expander — so a queued row and a finished run read as one list. The empty state appears only when there is nothing to show.
 function HistoryScreen(state: ApplicationState): Vnode {
 	const rerunDisabled = state.createSending || state.resumeSending || state.justSubmittedRunId !== null || deriveActiveRunId(state.summaries) !== null
-	const queued = deriveQueuedItems(state.queueItems)
-	const queuedItems = [...queued.waiting, ...queued.active, ...queued.needsInput]
-	const queuedRows = queuedItems.map((item) => QueueItemRow(state, item))
-	if (queuedRows.length === 0 && state.summaries.length === 0) {
+	const summariesById = runSummaryIndex(state.summaries)
+	const entries = deriveHistoryEntries(state.queueItems, state.summaries)
+	if (entries.length === 0) {
 		return h('section', { id: 'history-screen' }, [
 			h('div', { class: 'history-scroll' }, [
 				h('p', { class: 'history-empty' }, 'No runs yet — start a new task and it will appear here.'),
 			]),
 		])
 	}
+	const rows = entries.map((entry) => entry.kind === 'queued' ? QueueItemRow(state, entry.item, summariesById) : HistoryRow(state, entry.summary, rerunDisabled, summariesById))
 	return h('section', { id: 'history-screen' }, [
 		h('div', { class: 'history-scroll' }, [
-			h('ul', { id: 'history-list' }, [
-				...queuedRows,
-				...state.summaries.map((summary) => HistoryRow(state, summary, rerunDisabled)),
-			]),
+			h('ul', { id: 'history-list' }, rows),
 		]),
 	])
 }
 
 // --- Queued rows -------------------------------------------------------------
-// The queued rows sit at the top of the merged history screen (docs/queueing.md "UI interaction model"): waiting rows (draggable, editable, removable), the one active row (read-only), and the items waiting for an answer (their answer box inline on the row). Each row reuses the history row's compact markup and expander, so a queued task and a finished run read as one list. The expanded task and error render through the sanitized Markdown pipeline (docs/security.md "Web client rendering pipeline"); the primary line, ids, statuses, and timestamps stay textContent.
+// The queued rows sit at the top of the merged history screen (docs/queueing.md "UI interaction model"): waiting rows (draggable, editable, removable), the one active row (read-only), and the items waiting for an answer (their question and answer live in the answer modal). Each row reuses the history row's compact markup and expander, so a queued task and a finished run read as one list. The expanded task and error render through the sanitized Markdown pipeline (docs/security.md "Web client rendering pipeline"); the primary line, ids, statuses, and timestamps stay textContent.
 
 // The queue item's meta line in the expanded details: its run id once the scheduler has dispatched it. The queued time is already on the row's main line, so it is not repeated here.
 function QueueItemMeta(item: QueueItemLike): Vnode | null {
@@ -2095,15 +2178,21 @@ function QueueItemEditForm(_state: ApplicationState, item: QueueItemLike): Vnode
 	])
 }
 
-// The expanded details of a queued row: the queue meta, the full task (or the inline edit form while editing), the operator's earlier answer on a re-dispatched waiting item, and the run's error when the item failed. The task and error render through the sanitized Markdown pipeline. The needs_input answer box is not here — clicking the row's main area opens the question modal, so answering a blocking run needs no expansion.
-function QueueItemRowDetails(state: ApplicationState, item: QueueItemLike): Vnode {
+// The expanded details of a queued row: the queue meta, its lineage, the full task (or the inline edit form while editing), the parked question, the operator's earlier answer on a re-dispatched waiting item, and the run's error when the item failed. The task, question, and error render through the sanitized Markdown pipeline. The needs_input answer box is not here — clicking the row's main area opens the question modal, so answering a blocking run needs no expansion.
+function QueueItemRowDetails(state: ApplicationState, item: QueueItemLike, summariesById: Map<string, RunSummary>): Vnode {
 	const meta = QueueItemMeta(item)
 	const children: Vnode[] = meta === null ? [] : [meta]
+	const link = queueItemLineageLink(item, summariesById)
+	if (link !== null) children.push(LineageDetailsLine(link))
 	if (state.editingItemId === item.id) {
 		children.push(QueueItemEditForm(state, item))
 	} else {
 		children.push(h('p', { class: 'history-details-heading' }, 'Task'))
 		children.push(h('div', { class: 'markdown history-details-text' }, renderMarkdown(item.task)))
+	}
+	if (item.status === 'needs_input' && typeof item.question === 'string' && item.question !== '') {
+		children.push(h('p', { class: 'history-details-heading' }, 'Question'))
+		children.push(h('div', { class: 'markdown history-details-text' }, renderMarkdown(item.question)))
 	}
 	// A re-dispatched waiting item's record of why it ran again (the operator's previous answer) — operator input, rendered as text.
 	if (item.status === 'waiting' && typeof item.answer === 'string' && item.answer !== '') {
@@ -2116,15 +2205,20 @@ function QueueItemRowDetails(state: ApplicationState, item: QueueItemLike): Vnod
 	return h('div', { class: 'history-details' }, children)
 }
 
-// A queued row in the merged list: history-style markup with the queue status tone in place of the run status. The main area is not a run selector — the details expander is the only toggle — so the Edit and Remove buttons carry no click-bubbling hazard. A needs_input row's main area opens the question modal instead: its question is the parked run's, and the modal is the only place to answer it.
-function QueueItemRow(state: ApplicationState, item: QueueItemLike): Vnode {
+// A queued row in the merged list: history-style markup with the queue status tone in place of the run status. A needs_input row's main area opens the question modal (its question is the parked run's, and the modal is the only place to answer it); an active row selects its run, whose own history row is suppressed; a waiting row does not navigate.
+function QueueItemRow(state: ApplicationState, item: QueueItemLike, summariesById: Map<string, RunSummary>): Vnode {
 	const waiting = item.status === 'waiting'
+	const active = item.status === 'active'
 	const needsInput = item.status === 'needs_input'
 	const editing = waiting && state.editingItemId === item.id
 	const expanded = state.expandedRowIds[item.id] === true
-	const mainChildren: Vnode[] = [
+	const link = queueItemLineageLink(item, summariesById)
+	const runId = typeof item.runId === 'string' && item.runId !== '' ? item.runId : null
+	const mainOnclick = needsInput ? [OpenQueueQuestion, item.id] : active && runId !== null ? [SelectRun, runId] : undefined
+	const mainChildren: (Vnode | null)[] = [
 		h('span', { class: `run-status queue-status-${item.status}` }, queueStatusLabel(item.status)),
 		h('span', { class: 'history-primary' }, queueItemPrimaryText(item)),
+		link === null ? null : LineageBadge(link),
 		h('time', { class: 'history-when', title: item.queuedAt }, `queued ${formatRelative(item.queuedAt, state.now)}`),
 	]
 	if (waiting && !editing) {
@@ -2135,13 +2229,15 @@ function QueueItemRow(state: ApplicationState, item: QueueItemLike): Vnode {
 		mainChildren.push(h('button', { type: 'button', class: 'rerun-button terminate-button', disabled: state.queueTerminatePendingId !== null, title: 'Terminate the waiting task and discard its saved context', onclick: TerminateQueueItem(item.id) }, 'Terminate'))
 	}
 	const children: Vnode[] = [
-		h('div', { class: 'history-row-main', onclick: needsInput ? [OpenQueueQuestion, item.id] : undefined }, mainChildren),
-		h('button', { type: 'button', class: 'history-expand', 'aria-expanded': expanded, title: expanded ? 'Hide details' : 'Show the full task and details', onclick: [ToggleRowExpanded, item.id] }, expanded ? 'less ▴' : 'details ▾'),
+		h('div', { class: 'history-row-title' }, [
+			h('div', { class: 'history-row-main', onclick: mainOnclick }, mainChildren),
+			h('button', { type: 'button', class: 'history-expand', 'aria-expanded': expanded, title: expanded ? 'Hide details' : 'Show the full task and details', onclick: [ToggleRowExpanded, item.id] }, expanded ? 'less ▴' : 'details ▾'),
+		]),
 	]
-	if (expanded) children.push(QueueItemRowDetails(state, item))
+	if (expanded) children.push(QueueItemRowDetails(state, item, summariesById))
 	return h('li', {
 		key: item.id,
-		class: { 'history-row': true, 'queue-row': true, 'is-waiting': waiting, 'is-needs-input': needsInput, 'is-dragging': state.draggingItemId === item.id },
+		class: { 'history-row': true, 'queue-row': true, 'is-waiting': waiting, 'is-active': active, 'is-needs-input': needsInput, 'is-dragging': state.draggingItemId === item.id },
 		// Only waiting rows drag: a drag is a reorder, and the reorder endpoint takes waiting items only.
 		draggable: waiting && !editing,
 		'data-item-id': item.id,
@@ -2638,33 +2734,37 @@ function isTokenUsage(value: unknown): value is TokenUsage {
 	return typeof value['promptTokens'] === 'number' && typeof value['completionTokens'] === 'number' && typeof value['totalTokens'] === 'number' && typeof value['cachedPromptTokens'] === 'number'
 }
 
-// The terminal result the modal renders, derived from the live run view the per-run poll already fetches (the flow endpoint carries no result/error fields). The modal opens on a watched run's completion (GotSelectedRun) and re-opens via the flow view's CTA; the descriptor is undefined for a non-terminal run so the modal renders nothing then.
+// The result modal for the selected run: the live run view when it belongs to that run, otherwise the polled summary fallback. A terminal descriptor renders the result card at once; when neither source is terminal yet, the pending card reports the on-demand load and offers a retry after failure.
 function ResultModalForRun(state: ApplicationState): Vnode | null {
 	if (!state.resultModalOpen) return null
-	const view = state.selectedRunView
-	if (view === null) return null
-	const descriptor = deriveTerminalResult(view)
-	if (descriptor === undefined) return null
-	const metaLine = resultMetaLine(view, state.now)
-	// The run list can lag the viewed run's completion, so a list entry naming the viewed run is not a genuine second active run. Any other active id, or an in-flight or just-landed submission, disables both recovery actions while leaving Close available.
-	const activeRunId = deriveActiveRunId(state.summaries)
-	const anotherRunActive = activeRunId !== null && activeRunId !== view.runId
-	const submissionInFlight = state.createSending || state.resumeSending || state.justSubmittedRunId !== null
-	const recoveryDisabled = anotherRunActive || submissionInFlight
-	const recoveryDisabledReason = anotherRunActive ? 'Another run is already in progress.' : submissionInFlight ? 'A submission is already in flight.' : ''
-	return ResultModal(h, {
-		descriptor,
-		runLabel: typeof view.runId === 'string' ? view.runId : null,
-		runId: view.runId,
-		metaLine,
-		renderMarkdown,
-		onCopyRaw: copyRawToClipboard,
-		onContinue: ContinueFromResultModal,
-		onResume: ResumeFromResultModal,
-		onClose: CloseResultModal,
-		recoveryDisabled,
-		recoveryDisabledReason,
-	})
+	const selectedRunId = state.selectedRunId
+	if (selectedRunId === null || selectedRunId === '') return null
+	const source = selectResultSource(selectedRunId, state.selectedRunView, state.summaries)
+	const descriptor = source === null ? undefined : deriveTerminalResult(source.value)
+	if (source !== null && descriptor !== undefined) {
+		const metaLine = source.kind === 'view' ? resultMetaLine(source.value, state.now) : null
+		// The run list can lag the viewed run's completion, so a list entry naming the viewed run is not a genuine second active run. Any other active id, or an in-flight or just-landed submission, disables both recovery actions while leaving Close available.
+		const activeRunId = deriveActiveRunId(state.summaries)
+		const anotherRunActive = activeRunId !== null && activeRunId !== selectedRunId
+		const submissionInFlight = state.createSending || state.resumeSending || state.justSubmittedRunId !== null
+		const recoveryDisabled = anotherRunActive || submissionInFlight
+		const recoveryDisabledReason = anotherRunActive ? 'Another run is already in progress.' : submissionInFlight ? 'A submission is already in flight.' : ''
+		return ResultModal(h, {
+			descriptor,
+			runLabel: selectedRunId,
+			runId: selectedRunId,
+			metaLine,
+			renderMarkdown,
+			onCopyRaw: copyRawToClipboard,
+			onContinue: resultOffersContinue(descriptor.status) ? ContinueFromResultModal : undefined,
+			onResume: ResumeFromResultModal,
+			onClose: CloseResultModal,
+			recoveryDisabled,
+			recoveryDisabledReason,
+		})
+	}
+	const phase = state.resultLoad !== null && state.resultLoad.runId === selectedRunId ? state.resultLoad.phase : 'loading'
+	return ResultPendingModal(h, { phase, runLabel: selectedRunId, onRetry: RetryResultLoad, onClose: CloseResultModal })
 }
 
 // The screen switch. A zero-state service (no runs, nothing selected) shows the compose hero regardless of the stored screen — drafting the first task is the only meaningful activity then.
@@ -2693,7 +2793,7 @@ function isApplicationState(value: unknown): value is ApplicationState {
 		'flowModel', 'previousFlowModel', 'flowFeed', 'runListFeed', 'labelResolver', 'guildParticipants', 'build',
 		'flowTier', 'flowViewMode', 'sequenceRolesOnly', 'screen', 'expandedRowIds', 'continuation',
 		'resumingRunId', 'resumeSending', 'resumeNotice',
-		'questionModalOpen', 'resultModalOpen', 'resultShownForRun', 'interruptModalOpen',
+		'questionModalOpen', 'resultModalOpen', 'resultShownForRun', 'resultLoad', 'interruptModalOpen',
 		'inspectorModalOpen', 'planExpanded', 'livePartial', 'tooltip',
 		'interruptMode', 'interruptSending', 'interruptNotice', 'interruptAnswerCard', 'shownInterruptAnswerKeys', 'now',
 	]
@@ -2757,6 +2857,7 @@ app({
 			questionModalOpen: false,
 			resultModalOpen: false,
 			resultShownForRun: null,
+			resultLoad: null,
 			interruptModalOpen: false,
 			inspectorModalOpen: false,
 			planExpanded: false,

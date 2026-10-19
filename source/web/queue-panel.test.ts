@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { backlogCount, deriveQueuedItems, deriveReorderPosition, isQueueItemLike, queueItemPrimaryText, queueStatusLabel, questionSummary, reorderWaitingItems, taskFirstLine } from './static/ts/queue-panel.js'
+import { backlogCount, deriveQueuedItems, deriveReorderPosition, isQueueItemLike, matchesParkedRun, queueItemPrimaryText, queueStatusLabel, reorderWaitingItems, taskFirstLine } from './static/ts/queue-panel.js'
 
 // The fixture shape below mirrors the queue item's wire shape (docs/queueing.md "The queue: storage, item model, state machine") the tests build against, pulled off the module's API so the fixtures are checked against the module's own QueueItemLike, mirroring the sibling flow-view.test.ts convention.
 type QueueItemLike = Parameters<typeof queueItemPrimaryText>[0]
@@ -27,6 +27,14 @@ describe('isQueueItemLike', () => {
 		expect(isQueueItemLike({ ...item(), status: 'dispatched' })).toBe(false)
 		expect(isQueueItemLike({ ...item(), runId: 42 })).toBe(false)
 		expect(isQueueItemLike({ ...item(), runId: '' })).toBe(false)
+	})
+
+	test('accepts the optional lineage and resumed-run fields only as non-empty strings', () => {
+		expect(isQueueItemLike(item({ continuesFrom: 'run-parent', resumesRunId: 'run-paused' }))).toBe(true)
+		expect(isQueueItemLike({ ...item(), continuesFrom: '' })).toBe(false)
+		expect(isQueueItemLike({ ...item(), continuesFrom: 7 })).toBe(false)
+		expect(isQueueItemLike({ ...item(), resumesRunId: '' })).toBe(false)
+		expect(isQueueItemLike({ ...item(), resumesRunId: null })).toBe(false)
 	})
 })
 
@@ -86,40 +94,18 @@ describe('taskFirstLine', () => {
 	})
 })
 
-describe('questionSummary', () => {
-	test('returns the first non-empty line, trimmed', () => {
-		expect(questionSummary('which database?\nand which schema?')).toBe('which database?')
-		expect(questionSummary('\n\n   which database?  \n')).toBe('which database?')
-		expect(questionSummary('')).toBe('')
-		expect(questionSummary('   \n\t ')).toBe('')
-	})
-
-	test('caps a long line at a word boundary with a trailing ellipsis', () => {
-		const longSentence = `${'word '.repeat(20)}end`
-		const summary = questionSummary(longSentence)
-		expect(summary.endsWith('…')).toBe(true)
-		expect(summary.length).toBeLessThanOrEqual(73)
-		expect(summary.includes('  ')).toBe(false)
-	})
-
-	test('cuts at the last space when it falls past the floor', () => {
-		const withBoundary = `${'word '.repeat(10)}${'x'.repeat(30)}`
-		expect(questionSummary(withBoundary)).toBe(`${'word '.repeat(9)}word…`)
-	})
-
-	test('caps a long unbroken token at the limit', () => {
-		const longWord = 'x'.repeat(100)
-		expect(questionSummary(longWord)).toBe(`${longWord.slice(0, 72)}…`)
-	})
-})
-
 describe('queueItemPrimaryText', () => {
-	test('prefers a question preview for needs_input and the result summary for settled items', () => {
-		expect(queueItemPrimaryText(item({ status: 'needs_input', question: 'which database?\nwith which user?' }))).toBe('which database?')
-		expect(queueItemPrimaryText(item({ status: 'needs_input', question: '   \n  ' }))).toBe('fix the parser bug')
+	test('uses the result summary for a settled done/error item and the task first line for every other status', () => {
 		expect(queueItemPrimaryText(item({ status: 'done', resultSummary: 'fixed it', settledAt: '2026-01-01T00:01:00.000Z' }))).toBe('fixed it')
 		expect(queueItemPrimaryText(item({ status: 'error', resultSummary: 'blew up', settledAt: '2026-01-01T00:01:00.000Z' }))).toBe('blew up')
+		expect(queueItemPrimaryText(item({ status: 'needs_input', question: 'which database?\nwith which user?' }))).toBe('fix the parser bug')
+		expect(queueItemPrimaryText(item({ status: 'active', task: 'a running task\nsecond line' }))).toBe('a running task')
 		expect(queueItemPrimaryText(item())).toBe('fix the parser bug')
+	})
+
+	test('a needs_input item whose task is long still shows the bounded task line, never the question', () => {
+		const longTask = `${'t'.repeat(120)}\nquestion follows`
+		expect(queueItemPrimaryText(item({ status: 'needs_input', task: longTask, question: 'which database?' }))).toBe(`${'t'.repeat(100)}…`)
 	})
 })
 
@@ -139,5 +125,23 @@ describe('reorderWaitingItems', () => {
 		expect(reorderWaitingItems(items, 'a', 5).map((entry) => entry.id)).toEqual(['b', 'active', 'c', 'a'])
 		expect(reorderWaitingItems(items, 'a', 1).map((entry) => entry.id)).toEqual(['b', 'active', 'a', 'c'])
 		expect(reorderWaitingItems(items, 'active', 0).map((entry) => entry.id)).toEqual(['a', 'active', 'b', 'c'])
+	})
+})
+
+describe('matchesParkedRun', () => {
+	test('matches a modern needs_input item by its runId', () => {
+		expect(matchesParkedRun(item({ status: 'needs_input', runId: 'run-1' }), 'run-1')).toBe(true)
+		expect(matchesParkedRun(item({ status: 'needs_input', runId: 'run-1' }), 'run-2')).toBe(false)
+	})
+
+	test('matches a legacy needs_input item with no runId by its continuesFrom', () => {
+		expect(matchesParkedRun(item({ status: 'needs_input', continuesFrom: 'run-1' }), 'run-1')).toBe(true)
+		expect(matchesParkedRun(item({ status: 'needs_input', runId: '', continuesFrom: 'run-1' }), 'run-1')).toBe(true)
+		expect(matchesParkedRun(item({ status: 'needs_input', continuesFrom: 'run-1' }), 'run-2')).toBe(false)
+	})
+
+	test('never matches a non-parked item', () => {
+		expect(matchesParkedRun(item({ status: 'waiting', continuesFrom: 'run-1' }), 'run-1')).toBe(false)
+		expect(matchesParkedRun(item({ status: 'active', runId: 'run-1' }), 'run-1')).toBe(false)
 	})
 })
