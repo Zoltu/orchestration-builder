@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import type { RoleDefinition, ToolCall } from '../types.js'
 import { createFixtureRunScope, createFixtureToolPlatform } from '../test-fixtures.js'
+import { createToolDispatch } from './tool-dispatch.js'
 
 const role: RoleDefinition = { systemPrompt: '', tools: ['ask_human'] }
 
@@ -9,6 +10,21 @@ function makeCall(name: string, args: string): ToolCall {
 }
 
 describe('tool platform dispatch', () => {
+	test('passes the originating ToolCall as the handler second argument', async () => {
+		let observed: ToolCall | undefined
+		const dispatch = createToolDispatch({
+			echo: (_args, call) => {
+				observed = call
+				return { kind: 'success', data: null }
+			},
+		})
+		const call = makeCall('echo', '{"value":1}')
+
+		await dispatch.dispatch(call)
+
+		expect(observed).toEqual(call)
+	})
+
 	test('dispatches to a registered handler with parsed args', async () => {
 		const platform = createFixtureToolPlatform()
 		const scope = createFixtureRunScope({ manifestNames: new Set(['ask_human']) })

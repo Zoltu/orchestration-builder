@@ -4,7 +4,7 @@ import { isObject, isResultCard } from './validation.js'
 import { checkGlobalBudgets, checkRoleBudgets } from './budgets.js'
 import { buildInitialHistory, createContextManager, truncateToolOutput, type ContextManager } from './context/index.js'
 import { logEvent, type EngineContext, type EngineDependencies, type ResumedRole, type RoleState, type SeededRole, type SuspendedTurn } from './engine-state.js'
-import { isWriteCapableRole, parkCard } from './park-state.js'
+import { isWriteCapableRole, parkCard, type ParkedAnswer } from './park-state.js'
 import { drainInterrupts } from './interrupt-engine.js'
 import type { LlmCallResult } from './llm.js'
 import { hashArguments, RECENT_TOOL_CALLS_LIMIT } from './role-inspection.js'
@@ -230,6 +230,54 @@ function recordToolResult(deps: EngineDependencies, toolPlatform: ToolPlatform, 
 	return null
 }
 
+// Freezes the checkpoint at the park moment, before the mark unwinds the role: the ask's tool result was recorded live but not yet checkpointed (the checkpoint is written at the loop top, before the LLM call), and ancestor unwinds would otherwise overwrite it with a state that no longer has the parked turn. Only the parked role writes; every other frame's later write is suppressed by the freeze.
+function captureParkCheckpoint(deps: EngineDependencies, roleId: string): void {
+	if (deps.parkTracker.parkedAsk?.roleId !== roleId) return
+	// A suppressed write would leave the parked ask pointing at a non-leaf frame and freeze an unrelated checkpoint. Handler frames cannot park and the recorder is unfrozen for a re-park, so this is unreachable; fail loudly rather than persist an unresumable state.
+	if (!deps.checkpointRecorder.write()) throw new Error(`captureParkCheckpoint: could not write the parked checkpoint for role ${roleId}`)
+	deps.checkpointRecorder.freeze()
+}
+
+// Delivers the operator's answer into the parked ask_human tool result in place: only the last tool message changes, so the conversation prefix — and therefore the prompt cache — stays exactly as it was when the run parked.
+function deliverParkedAnswer(deps: EngineDependencies, roleState: RoleState, parkedAnswer: ParkedAnswer, maxToolOutputChars: number): void {
+	const history = roleState.history
+	let targetIndex = -1
+	for (let index = history.length - 1; index >= 0; index--) {
+		const message = history[index]
+		if (message === undefined) continue
+		if (message.role !== 'tool' || message.tool_call_id !== parkedAnswer.toolCallId) continue
+		targetIndex = index
+		break
+	}
+	if (targetIndex === -1) throw new Error(`deliverParkedAnswer: no tool result for parked call ${parkedAnswer.toolCallId} in the resumed role's history`)
+	if (targetIndex !== history.length - 1) throw new Error(`deliverParkedAnswer: the tool result for parked call ${parkedAnswer.toolCallId} is not the last message`)
+	const existing = history[targetIndex]
+	if (existing === undefined) throw new Error(`deliverParkedAnswer: parked call ${parkedAnswer.toolCallId} has no tool message`)
+	history[targetIndex] = {
+		...existing,
+		content: serializeToolResult({ kind: 'success', data: { question: parkedAnswer.question, answer: parkedAnswer.answer } }, maxToolOutputChars),
+	}
+	logEvent(deps.appendLog, 'human_answer', { id: parkedAnswer.toolCallId, question: parkedAnswer.question, answer: parkedAnswer.answer })
+	deps.parkTracker.parkedQuestion = undefined
+	deps.parkTracker.parkedAsk = undefined
+	// The frozen checkpoint still covers the mid-batch window; the caller writes the unparked state only once all remaining calls have results, so a crash here still retries delivery from the old parked checkpoint.
+	deps.checkpointRecorder.unfreeze()
+}
+
+// Continues the parked assistant turn after the answer: the calls after ask_human in the same batched turn dispatch exactly as the blocking path would, and a park among them re-parks normally.
+async function continueParkedTurn(deps: EngineDependencies, context: EngineContext, roleState: RoleState, registryEntry: RoleRegistryEntry, dispatchCtx: DispatchContext, toolCallId: string): Promise<ResultCard | null> {
+	const history = roleState.history
+	for (let index = history.length - 1; index >= 0; index--) {
+		const message = history[index]
+		if (message === undefined) continue
+		if (message.role !== 'assistant' || message.tool_calls === undefined) continue
+		const callIndex = message.tool_calls.findIndex((call) => call.id === toolCallId)
+		if (callIndex === -1) continue
+		return await dispatchToolCallSequence(deps, context, roleState, registryEntry, dispatchCtx, message.tool_calls, callIndex + 1)
+	}
+	throw new Error(`continueParkedTurn: no assistant message carries parked call ${toolCallId}`)
+}
+
 export async function runRole(deps: EngineDependencies, context: EngineContext, resumed?: ResumedRole, seeded?: SeededRole): Promise<ResultCard> {
 	const guild = context.loadedGuild
 	const roleDefinition = guild.config.roles[context.roleName]
@@ -362,7 +410,7 @@ export async function runRole(deps: EngineDependencies, context: EngineContext, 
 		maxToolOutputChars: guild.deployment.contextPolicy.maxToolOutputChars,
 	}
 
-	const finalCard = await executeRoleLoop(deps, context, roleState, registryEntry, allowedToolsManifests, dispatchCtx, resumed?.suspendedTurn, resumed?.resumeNote)
+	const finalCard = await executeRoleLoop(deps, context, roleState, registryEntry, allowedToolsManifests, dispatchCtx, resumed?.suspendedTurn, resumed?.resumeNote, resumed?.parkedAnswer)
 	deps.roleRegistry.unregister(registryEntry.roleId)
 	deps.checkpointRecorder.unregisterFrame(registryEntry.roleId)
 	logEvent(deps.appendLog, 'role_finished', roleFinishedPayload(context.roleName, context.depth, finalCard, context.parent, registryEntry.roleId))
@@ -394,8 +442,11 @@ async function dispatchToolCallSequence(
 	for (let index = startIndex; index < toolCalls.length; index++) {
 		const toolCall = toolCalls[index]
 		if (toolCall === undefined) continue
-		// The park mark checked between dispatches is load-bearing (docs/queueing.md "Parking: the pre-write rule"): a batched ask_human + agent turn must not start the child after the park decision, or the run writes after the pre-write premise was decided. The mark is run-scoped, so a suspended ancestor unwinds here with the same platform-authored park card once its child's card has propagated up.
-		if (deps.parkTracker.parkedQuestion !== undefined) return parkCard(deps.parkTracker.parkedQuestion)
+		// The park mark checked between dispatches is load-bearing (docs/queueing.md "Parking: the pre-write rule"): a batched ask_human + agent turn must not start the child after the park decision, or the run writes after the pre-write premise was decided. The mark is run-scoped, so a suspended ancestor unwinds here with the same platform-authored park card once its child's card has propagated up. The frozen park checkpoint is captured by the parked role before it unwinds.
+		if (deps.parkTracker.parkedQuestion !== undefined) {
+			captureParkCheckpoint(deps, registryEntry.roleId)
+			return parkCard(deps.parkTracker.parkedQuestion)
+		}
 		// A child-spawning dispatch suspends this role mid-turn until the child returns; record the suspension so a checkpoint taken while the child runs captures where this role resumes. Cleared once the dispatch settles.
 		if (dispatchCtx.toolPlatform.suspendsChild(toolCall.function.name)) {
 			deps.checkpointRecorder.setPending(registryEntry.roleId, { toolCalls, childIndex: index })
@@ -435,6 +486,7 @@ async function executeRoleLoop(
 	dispatchCtx: DispatchContext,
 	suspendedTurn?: SuspendedTurn,
 	resumeNote?: string,
+	parkedAnswer?: ParkedAnswer,
 ): Promise<ResultCard> {
 	const config = context.loadedGuild.deployment.executor
 	const contextManager = createContextManager(context, {
@@ -442,6 +494,14 @@ async function executeRoleLoop(
 		contextPressureTracker: deps.contextPressureTracker,
 		runRole: (handlerContext) => runRole(deps, handlerContext),
 	})
+	// The answer is delivered before any note or suspended-turn completion: it replaces the existing ask_human result in place and then continues that same assistant turn, so the conversation is exactly the blocking path's.
+	if (parkedAnswer !== undefined) {
+		deliverParkedAnswer(deps, roleState, parkedAnswer, dispatchCtx.maxToolOutputChars)
+		const continuedCard = await continueParkedTurn(deps, context, roleState, registryEntry, dispatchCtx, parkedAnswer.toolCallId)
+		// Only a completed turn boundary is safe to checkpoint: the remaining calls' results are recorded. A remaining call that parked again has frozen the recorder, so this write is a no-op and the new frozen checkpoint survives.
+		deps.checkpointRecorder.write()
+		if (continuedCard !== null) return continuedCard
+	}
 	// The note is delivered exactly once, at the resumed role's equivalent loop entry: inside the suspended-turn completion when there is one (its remaining calls may include the finish that terminates the role without a further LLM request), else at the loop top. Either way it lands after the previous turn's tool results and before the role's next decision, and the loop top's checkpoint write persists it like any other history message.
 	let noteToInject = resumeNote
 	if (suspendedTurn !== undefined) {
@@ -453,8 +513,11 @@ async function executeRoleLoop(
 		roleState.history.push({ role: 'user', content: noteToInject })
 	}
 	while (true) {
-		// The park mark unwinds the run at the loop top — the safe point before any further LLM request — with the platform-authored park card; the LLM is never asked to finish gracefully and never gets a turn to talk itself out of parking (docs/queueing.md "Parking: the pre-write rule").
-		if (deps.parkTracker.parkedQuestion !== undefined) return parkCard(deps.parkTracker.parkedQuestion)
+		// The park mark unwinds the run at the loop top — the safe point before any further LLM request — with the platform-authored park card; the LLM is never asked to finish gracefully and never gets a turn to talk itself out of parking (docs/queueing.md "Parking: the pre-write rule"). The frozen park checkpoint is captured here first so the answer can resume this exact turn.
+		if (deps.parkTracker.parkedQuestion !== undefined) {
+			captureParkCheckpoint(deps, registryEntry.roleId)
+			return parkCard(deps.parkTracker.parkedQuestion)
+		}
 
 		const interruptCard = await drainInterrupts(runRole, deps, context, roleState, registryEntry)
 		if (interruptCard !== null) return interruptCard

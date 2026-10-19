@@ -63,6 +63,30 @@ function checkpointFor(runId: string, startTime: string): RunCheckpoint {
 	}
 }
 
+function parkedCheckpointFor(runId: string, startTime: string): RunCheckpoint {
+	const checkpoint = checkpointFor(runId, startTime)
+	const entry = checkpoint.frames[0]
+	if (entry === undefined) throw new Error('checkpoint has no entry frame')
+	return {
+		...checkpoint,
+		parkedAsk: { roleId: 'main-0-1', toolCallId: 'ask_1', question: 'which database?' },
+		frames: [
+			{
+				...entry,
+				roleState: {
+					...entry.roleState,
+					history: [
+						{ role: 'system', content: 'prompt' },
+						{ role: 'user', content: 'task' },
+						{ role: 'assistant', content: '', tool_calls: [{ id: 'ask_1', type: 'function', function: { name: 'ask_human', arguments: '{"question":"which database?"}' } }] },
+						{ role: 'tool', content: '{"question":"which database?","parked":true}', tool_call_id: 'ask_1' },
+					],
+				},
+			},
+		],
+	}
+}
+
 interface Harness {
 	dependencies: StartupReconciliationDependencies
 	resumed: RunCheckpoint[]
@@ -209,5 +233,70 @@ describe('reconcileRunsOnStartup', () => {
 		expect(harness.resumed).toEqual([newer])
 		expect(report.interruptedRunIds).toEqual(['run-older'])
 		expect(harness.writtenMetas.get('run-older')?.[0]?.status).toBe('interrupted')
+	})
+
+	test('a parked checkpoint is not resumed: it is terminalized as needs_clarification with the park summary and left on disk', () => {
+		const checkpoint = parkedCheckpointFor('run-1', '2026-01-01T00:00:00.000Z')
+		const harness = makeHarness({
+			'run-1': {
+				metaText: JSON.stringify(runningMeta('run-1', '2026-01-01T00:00:00.000Z')),
+				checkpointText: JSON.stringify(checkpoint),
+			},
+		})
+
+		const report = reconcileRunsOnStartup(harness.dependencies)
+
+		expect(report.resumedRunId).toBeUndefined()
+		expect(report.parkedRunIds).toEqual(['run-1'])
+		expect(report.interruptedRunIds).toEqual([])
+		expect(harness.resumed).toEqual([])
+		// The reconciliation has no delete dependency: the checkpoint is left exactly as it was for the queue answer.
+		expect(harness.dependencies.readCheckpointById('run-1')).toBe(JSON.stringify(checkpoint))
+		const written = harness.writtenMetas.get('run-1')?.[0]
+		expect(written?.status).toBe('needs_clarification')
+		expect(written?.result).toEqual({ status: 'needs_clarification', summary: 'waiting for an answer to: which database?' })
+		expect(written?.task).toBe('task for run-1')
+		expect(written?.effort).toBe('standard')
+		expect(written?.involvement).toBe('early-engagement')
+		expect(written?.guildPath).toBe('guild')
+		expect(written?.startTime).toBe('2026-01-01T00:00:00.000Z')
+		expect(written?.endTime).toBeDefined()
+	})
+
+	test('a parked checkpoint whose meta never landed takes its identity from the entry frame', () => {
+		const checkpoint = parkedCheckpointFor('run-1', '2026-01-01T00:00:00.000Z')
+		const harness = makeHarness({ 'run-1': { checkpointText: JSON.stringify(checkpoint) } })
+
+		const report = reconcileRunsOnStartup(harness.dependencies)
+
+		expect(report.parkedRunIds).toEqual(['run-1'])
+		const written = harness.writtenMetas.get('run-1')?.[0]
+		expect(written?.task).toBe('task for run-1')
+		expect(written?.effort).toBe('standard')
+		expect(written?.involvement).toBe('early-engagement')
+		expect(written?.startTime).toBe('2026-01-01T00:00:00.000Z')
+		expect('guildPath' in (written ?? {})).toBe(false)
+	})
+
+	test('a parked run does not block a resumable run: the resumable run still resumes', () => {
+		const resumable = checkpointFor('run-resumable', '2026-01-01T00:00:00.000Z')
+		const parked = parkedCheckpointFor('run-parked', '2026-01-02T00:00:00.000Z')
+		const harness = makeHarness({
+			'run-resumable': {
+				metaText: JSON.stringify(runningMeta('run-resumable', '2026-01-01T00:00:00.000Z')),
+				checkpointText: JSON.stringify(resumable),
+			},
+			'run-parked': {
+				metaText: JSON.stringify(runningMeta('run-parked', '2026-01-02T00:00:00.000Z')),
+				checkpointText: JSON.stringify(parked),
+			},
+		})
+
+		const report = reconcileRunsOnStartup(harness.dependencies)
+
+		expect(report.resumedRunId).toBe('run-resumable')
+		expect(harness.resumed).toEqual([resumable])
+		expect(report.parkedRunIds).toEqual(['run-parked'])
+		expect(report.interruptedRunIds).toEqual([])
 	})
 })

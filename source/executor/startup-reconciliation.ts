@@ -1,4 +1,6 @@
-import { isRunCheckpoint, type RunCheckpoint } from './checkpoint.js'
+import { isRunCheckpoint, type CheckpointFrame, type RunCheckpoint } from './checkpoint.js'
+import { createResultCard } from './errors.js'
+import { parkSummary } from './park-state.js'
 import { isRunMeta } from './validation.js'
 import type { ListRunIds, ReadRunCheckpointById, ReadRunMetaById, WriteMeta } from './persistence.js'
 import type { RunMeta } from './types.js'
@@ -15,6 +17,8 @@ export interface StartupReconciliationDependencies {
 export interface ReconciliationReport {
 	resumedRunId?: string
 	interruptedRunIds: string[]
+	// Runs whose frozen checkpoint was parked: they are terminalized as needs_clarification and left on disk for the queue answer to re-enter.
+	parkedRunIds: string[]
 }
 
 function parseJson(text: string): unknown | undefined {
@@ -62,10 +66,34 @@ function markInterrupted(dependencies: StartupReconciliationDependencies, runId:
 	})
 }
 
-// Startup reconciliation: scans the runs directory for runs that never reached a terminal meta (no meta.json, or one still saying "running" — both mean the process died mid-run). A run with a valid checkpoint resumes; anything else is marked interrupted so its meta reads honestly. The one-task-at-a-time invariant admits at most one resume: the most recent resumable run wins and the rest are marked interrupted.
+// A parked checkpoint is frozen exactly where the parked turn stopped, so it must not be auto-resumed (no answer exists) and must not be discarded: terminalizing it as needs_clarification with the same park summary keeps the run honest while leaving the checkpoint for the queue's answer resume. Identity comes from the running meta when it landed, else the checkpoint's entry frame.
+function markParked(dependencies: StartupReconciliationDependencies, runId: string, meta: RunMeta | null, checkpoint: RunCheckpoint, question: string): void {
+	const endTime = new Date().toISOString()
+	const entryFrame: CheckpointFrame | undefined = checkpoint.frames[0]
+	const effort = meta?.effort ?? entryFrame?.effort
+	const involvement = meta?.involvement ?? entryFrame?.involvement
+	const logLevel = meta?.logLevel ?? entryFrame?.logLevel
+	const continuesFrom = meta?.continuesFrom ?? entryFrame?.continuesFrom
+	dependencies.writeMetaFor(runId)({
+		runId,
+		...(meta?.guildPath !== undefined ? { guildPath: meta.guildPath } : {}),
+		...(meta?.benchmarkPath !== undefined ? { benchmarkPath: meta.benchmarkPath } : {}),
+		task: meta?.task ?? entryFrame?.task ?? '(task unknown — run metadata was lost)',
+		...(effort !== undefined ? { effort } : {}),
+		...(involvement !== undefined ? { involvement } : {}),
+		...(logLevel !== undefined ? { logLevel } : {}),
+		...(continuesFrom !== undefined ? { continuesFrom } : {}),
+		status: 'needs_clarification',
+		startTime: meta?.startTime ?? checkpoint.startTime,
+		endTime,
+		result: createResultCard('needs_clarification', parkSummary(question)),
+	})
+}
+
+// Startup reconciliation: scans the runs directory for runs that never reached a terminal meta (no meta.json, or one still saying "running" — both mean the process died mid-run). A run with a valid, unparked checkpoint resumes; a parked checkpoint is terminalized as needs_clarification and left for the queue answer; anything else is marked interrupted so its meta reads honestly. The one-task-at-a-time invariant admits at most one resume: the most recent resumable run wins and the rest are marked interrupted.
 export function reconcileRunsOnStartup(dependencies: StartupReconciliationDependencies): ReconciliationReport {
 	const resumable: Array<{ runId: string; meta: RunMeta | null; checkpoint: RunCheckpoint }> = []
-	const report: ReconciliationReport = { interruptedRunIds: [] }
+	const report: ReconciliationReport = { interruptedRunIds: [], parkedRunIds: [] }
 
 	for (const runId of dependencies.listRunIds()) {
 		const meta = readMeta(dependencies.readRunMetaById, runId)
@@ -74,9 +102,14 @@ export function reconcileRunsOnStartup(dependencies: StartupReconciliationDepend
 		if (checkpoint === null) {
 			markInterrupted(dependencies, runId, meta, ABANDONED_MESSAGE)
 			report.interruptedRunIds.push(runId)
-		} else {
-			resumable.push({ runId, meta, checkpoint })
+			continue
 		}
+		if (checkpoint.parkedAsk !== undefined) {
+			markParked(dependencies, runId, meta, checkpoint, checkpoint.parkedAsk.question)
+			report.parkedRunIds.push(runId)
+			continue
+		}
+		resumable.push({ runId, meta, checkpoint })
 	}
 
 	resumable.sort((a, b) => {

@@ -5,12 +5,12 @@ import type { ContextPressureTracker } from './context/index.js'
 import type { EngineContext, RoleState } from './engine-state.js'
 import { isMessage, isToolCall } from './message-validation.js'
 import type { RunBaseTracker } from './base-state.js'
-import type { RunParkTracker } from './park-state.js'
+import type { ParkedAsk, RunParkTracker } from './park-state.js'
 import type { WriteCheckpoint } from './persistence.js'
 import type { RoleRegistry, RoleRegistryEntry } from './role-registry.js'
 import type { EffortLevel, InvolvementLevel, LogLevel, ResultCard, ToolCall } from './types.js'
 import { isRunIdShape } from './run-id.js'
-import { isEffortLevel, isInvolvementLevel, isLogLevel, isNonNegativeInteger, isNonNegativeNumber, isObject, isResultCard, isString } from './validation.js'
+import { isEffortLevel, isInvolvementLevel, isLogLevel, isNonNegativeInteger, isNonNegativeNumber, isObject, isResultCard, isString, safeJsonParse } from './validation.js'
 
 // The suspension point of a role paused mid-turn inside a child-spawning tool dispatch (agent or continue_agent): the turn's full tool-call list and the index of the child-spawning call it is waiting on. Once the child returns, its card is recorded here so a resume delivers the recorded card instead of re-running the child. Tool calls before childIndex are already recorded in the role's persisted history; calls after it are dispatched on resume.
 export interface PendingChildSuspension {
@@ -45,7 +45,7 @@ export function entryFrameLogLevel(entryFrame: CheckpointFrame | undefined): Log
 	return entryFrame?.logLevel ?? DEFAULT_LOG_LEVEL
 }
 
-// The runnable state of a run, persisted so a service restart can resume it. Written atomically (temp file + rename) at every leaf safe point and on every role_finished, so the on-disk checkpoint is never torn and never more than one turn stale. `registryCounter` lets the resumed run mint fresh role-instance ids without colliding with the preserved ones; `learnedContextCeiling` carries the run's context-wall knowledge so resumed roles keep the tightened pressure threshold; `writeCapableStarted` carries the pre-write park rule's flag so a restart cannot reset it and park a run whose writes happened before the restart (docs/queueing.md "Parking: the pre-write rule"); `baseHash` carries the run's base commit so a restart keeps diffing against the same change set.
+// The runnable state of a run, persisted so a service restart can resume it, so the queue answer can re-enter a parked run, and so the operator can explicitly resume an errored one. Written atomically (temp file + rename) at every leaf safe point and on every role_finished, then frozen once at a park, so the on-disk checkpoint is never torn and never more than one turn stale. `registryCounter` lets the resumed run mint fresh role-instance ids without colliding with the preserved ones; `learnedContextCeiling` carries the run's context-wall knowledge so resumed roles keep the tightened pressure threshold; `writeCapableStarted` carries the pre-write park rule's flag so a restart cannot reset it and park a run whose writes happened before the restart (docs/queueing.md "Parking: the pre-write rule"); `baseHash` carries the run's base commit so a restart keeps diffing against the same change set; `parkedAsk` identifies the parked turn the queue answer resumes.
 export interface RunCheckpoint {
 	version: 1
 	runId: string
@@ -54,7 +54,17 @@ export interface RunCheckpoint {
 	learnedContextCeiling?: number
 	writeCapableStarted?: boolean
 	baseHash?: string
+	// The parked ask this checkpoint was frozen for: the leaf role and the ask_human call whose result the queue answer will replace on resume (docs/queueing.md "Parking: the pre-write rule").
+	parkedAsk?: ParkedAsk
 	frames: CheckpointFrame[]
+}
+
+function isParkedAsk(value: unknown): value is ParkedAsk {
+	if (!isObject(value)) return false
+	if (!isString(value.roleId) || value.roleId === '') return false
+	if (!isString(value.toolCallId) || value.toolCallId === '') return false
+	if (!isString(value.question) || value.question === '') return false
+	return true
 }
 
 function isRecentToolCall(value: unknown): boolean {
@@ -124,6 +134,7 @@ export function isRunCheckpoint(value: unknown): value is RunCheckpoint {
 	if (value.learnedContextCeiling !== undefined && !isNonNegativeNumber(value.learnedContextCeiling)) return false
 	if (value.writeCapableStarted !== undefined && value.writeCapableStarted !== true) return false
 	if (value.baseHash !== undefined && (!isString(value.baseHash) || value.baseHash === '')) return false
+	if (value.parkedAsk !== undefined && !isParkedAsk(value.parkedAsk)) return false
 	if (!Array.isArray(value.frames) || value.frames.length === 0) return false
 	if (!value.frames.every(isCheckpointFrame)) return false
 	const frames: CheckpointFrame[] = value.frames
@@ -146,7 +157,29 @@ export function isRunCheckpoint(value: unknown): value is RunCheckpoint {
 			if (frame.parentRoleId !== parent.roleId) return false
 		}
 	}
-	return true
+	const parkedAsk = value.parkedAsk
+	if (parkedAsk === undefined) return true
+	const leaf = frames[frames.length - 1]
+	if (leaf === undefined) return false
+	if (parkedAsk.roleId !== leaf.roleId) return false
+	if (leaf.pending !== undefined) return false
+	const history = leaf.roleState.history
+	const last = history[history.length - 1]
+	if (last === undefined) return false
+	if (last.role !== 'tool' || last.tool_call_id !== parkedAsk.toolCallId) return false
+	let foundAskCall = false
+	for (const message of history) {
+		if (message.role !== 'assistant' || message.tool_calls === undefined) continue
+		for (const call of message.tool_calls) {
+			if (call.id !== parkedAsk.toolCallId) continue
+			foundAskCall = true
+			if (call.function.name !== 'ask_human') return false
+			const parsed = safeJsonParse(call.function.arguments)
+			if (!parsed.ok || !isObject(parsed.value)) return false
+			if (parsed.value['question'] !== parkedAsk.question) return false
+		}
+	}
+	return foundAskCall
 }
 
 export interface CheckpointRecorder {
@@ -154,7 +187,12 @@ export interface CheckpointRecorder {
 	unregisterFrame(roleId: string): void
 	setPending(roleId: string, pending: PendingChildSuspension | undefined): void
 	setPendingChildCard(roleId: string, card: ResultCard): void
-	write(): void
+	// Returns whether a checkpoint was actually written: false when frozen or while a handler frame suppresses writes.
+	write(): boolean
+	// Pins the parked turn's checkpoint: later writes would lose the ask result as ancestors unwind and finish, and the answer resume needs exactly that state. Idempotent.
+	freeze(): void
+	// Releases the pin when the answer resume replaces the parked turn's result, so the post-answer state can be checkpointed. Idempotent.
+	unfreeze(): void
 }
 
 interface RecorderFrame {
@@ -209,10 +247,11 @@ function serializeFrame(frame: RecorderFrame, resumeStamp: string | undefined): 
 	}
 }
 
-// The per-run recorder every engine frame reports into. Frames hold live references (the registry entry's roleState), so a write reads the current state — including compaction edits a context handler made to a suspended role — and the synchronous serialize+write leaves no mutation window. While a handler invocation is on the stack writes are suppressed (see CheckpointFrame), which also means a handler's own frames and pendings are never serialized. Frames are re-ordered by depth at write time because resume registers leaf-first.
+// The per-run recorder every engine frame reports into. Frames hold live references (the registry entry's roleState), so a write reads the current state — including compaction edits a context handler made to a suspended role — and the synchronous serialize+write leaves no mutation window. While a handler invocation is on the stack writes are suppressed (see CheckpointFrame), which also means a handler's own frames and pendings are never serialized; a freeze pins the park checkpoint so the unwinding ancestors cannot overwrite it. Frames are re-ordered by depth at write time because resume registers leaf-first.
 export function createCheckpointRecorder(dependencies: CheckpointRecorderDependencies): CheckpointRecorder {
 	const frames = new Map<string, RecorderFrame>()
 	let suspendedHandlerCount = 0
+	let frozen = false
 
 	function requireFrame(roleId: string): RecorderFrame {
 		const frame = frames.get(roleId)
@@ -239,7 +278,8 @@ export function createCheckpointRecorder(dependencies: CheckpointRecorderDepende
 			frame.pending = { ...frame.pending, childCard: card }
 		},
 		write() {
-			if (suspendedHandlerCount > 0) return
+			if (frozen) return false
+			if (suspendedHandlerCount > 0) return false
 			const ordered = [...frames.values()].sort((a, b) => a.context.depth - b.context.depth)
 			const checkpoint: RunCheckpoint = {
 				version: 1,
@@ -249,9 +289,17 @@ export function createCheckpointRecorder(dependencies: CheckpointRecorderDepende
 				...(dependencies.contextPressureTracker.learnedCeiling !== undefined ? { learnedContextCeiling: dependencies.contextPressureTracker.learnedCeiling } : {}),
 				...(dependencies.parkTracker.writeCapableStarted ? { writeCapableStarted: true } : {}),
 				...(dependencies.baseTracker.baseHash !== undefined ? { baseHash: dependencies.baseTracker.baseHash } : {}),
+				...(dependencies.parkTracker.parkedAsk !== undefined ? { parkedAsk: dependencies.parkTracker.parkedAsk } : {}),
 				frames: ordered.map((frame) => serializeFrame(frame, dependencies.continuesFrom)),
 			}
 			dependencies.writeCheckpoint(checkpoint)
+			return true
+		},
+		freeze() {
+			frozen = true
+		},
+		unfreeze() {
+			frozen = false
 		},
 	}
 }

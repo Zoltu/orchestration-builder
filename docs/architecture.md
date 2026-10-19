@@ -44,7 +44,7 @@ The Foundry reads the current Guild and recent run logs, prompts a large model t
 
 - **Single model on the executor.** The executor talks to exactly one OpenAI-compatible endpoint, using the streaming Responses API (`POST {apiBase}/responses`).
 - **Sequential.** Only one LLM request is in flight at a time. A run is a depth-first traversal of the role tree.
-- **One dispatched run plus a durable backlog.** The server runs one run at a time, dispatched from a durable task queue (`<workspace>/.orchestration/queue.json`): every task enters the queue, the scheduler dispatches the head waiting item whenever the run slot is free, and queued tasks survive restarts. See [`docs/queueing.md`](queueing.md).
+- **One dispatched run plus a durable backlog.** The server runs one run at a time, dispatched from a durable task queue (`<workspace>/.orchestration/queue.json`): every task enters the queue, the scheduler dispatches the head waiting item whenever the run slot is free, and queued tasks survive restarts. A run that asks before any write-capable role starts parks with a frozen checkpoint, and the operator's answer resumes that same run by delivering the answer as the existing `ask_human` tool result. See [`docs/queueing.md`](queueing.md).
 - **In-place workspace.** The executor modifies the mounted project directly, exactly as a developer would. Run bookkeeping goes under `<workspace>/.orchestration/`.
 - **No dependencies.** The executor uses only Bun built-ins and web-standard APIs. No npm packages.
 - **Large model in the Foundry only.** The Foundry may use a commercial API or another local model.
@@ -79,7 +79,7 @@ workspace/                          # the user's project (mounted at /workspace)
 │       └── <run_id>/
 │           ├── meta.json           # run metadata, status, final result
 │           ├── log.jsonl           # event stream: llm calls, tool calls, errors
-│           ├── state.json          # checkpoint for restart resumption (deleted on completion)
+│           ├── state.json          # checkpoint for restart resumption (deleted on completion; kept for error and parked runs)
 │           ├── summary.txt         # LLM-generated one-line run summary (UI label; best-effort)
 │           ├── plan.md             # the run's plan document (write_plan/read_plan)
 │           ├── style-guide.md      # the run's style guide document (write_style_guide/read_style_guide)

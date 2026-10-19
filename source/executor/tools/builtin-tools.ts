@@ -337,18 +337,20 @@ function createEditContext(context: BuiltInToolContext): ToolHandler {
 }
 
 function createAskHuman(context: BuiltInToolContext): ToolHandler {
-	return async (args) => {
+	return async (args, call) => {
 		const questionValue = args['question']
 		if (typeof questionValue !== 'string' || questionValue === '') {
 			return createToolError('invalid_arguments', 'question must be a non-empty string')
 		}
 		const contextValue = args['context']
 		const contextString = typeof contextValue === 'string' ? contextValue : undefined
-		// The pre-write park (docs/queueing.md "Parking: the pre-write rule"): before any write-capable role has started there is no workspace change to protect, so a queue-dispatched run parks instead of blocking the pipeline on one unanswered question — the human backend is never called (no pending question is registered), the event is emitted here so the run's own log stays a faithful record, and the recorded question marks the run to terminate at the next safe point. A run the queue does not track keeps today's blocking behavior: its parked question would be answerable through no endpoint.
-		if (context.parkTracker.queueTracked === true && !context.parkTracker.writeCapableStarted) {
+		// The pre-write park (docs/queueing.md "Parking: the pre-write rule"): before any write-capable role has started there is no workspace change to protect, so a queue-dispatched run parks instead of blocking the pipeline on one unanswered question — the human backend is never called (no pending question is registered), the event is emitted here so the run's own log stays a faithful record, and the recorded question marks the run to terminate at the next safe point. Handler frames must not park: their writes are suppressed while they run, so a parked ask there could never be checkpointed. A run the queue does not track keeps today's blocking behavior: its parked question would be answerable through no endpoint.
+		if (context.handlerOf === undefined && context.parkTracker.queueTracked === true && !context.parkTracker.writeCapableStarted) {
+			if (call === undefined) throw new Error('ask_human: a parked ask requires its tool call')
 			context.parkTracker.parkedQuestion = questionValue
+			context.parkTracker.parkedAsk = { roleId: context.ownRoleId, toolCallId: call.id, question: questionValue }
 			logEvent(context.appendLog, 'ask_human', {
-				id: crypto.randomUUID(),
+				id: call.id,
 				question: questionValue,
 				...(contextString !== undefined ? { context: contextString } : {}),
 				parked: true,

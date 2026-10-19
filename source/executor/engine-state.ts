@@ -7,7 +7,7 @@ import type { LlmCaller } from './llm.js'
 import type { AppendLog } from './persistence.js'
 import type { ReadProjectDoc } from './project-docs.js'
 import type { RunBaseTracker } from './base-state.js'
-import type { RunParkTracker } from './park-state.js'
+import type { ParkedAnswer, RunParkTracker } from './park-state.js'
 import type { RoleRegistry } from './role-registry.js'
 import type { RoleSnapshotStore } from './role-snapshot.js'
 import type { RoleState } from './state.js'
@@ -84,6 +84,8 @@ export interface ResumedRole {
 	planInjection?: string
 	// A framed operator note carried on an explicit resume of an errored run, set only on the re-entered leaf frame. The engine appends it to the restored history at the loop entry — after a suspended turn's tool result has been recorded — so the note rides the same persisted history every message uses and is part of the first LLM request without landing between an assistant tool_calls message and its tool result (a malformed request on strict endpoints).
 	resumeNote?: string
+	// The operator's answer to the parked ask this leaf resume re-enters: delivered as the existing ask_human tool result before the parked turn continues, so the conversation prefix stays byte-identical.
+	parkedAnswer?: ParkedAnswer
 	suspendedTurn?: SuspendedTurn
 }
 

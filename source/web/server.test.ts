@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import { createWebHumanBackend, type WebHumanBackend } from '../executor/human-backend.ts'
 import { createInterruptChannel, createInterruptQueue, type InterruptChannel } from '../executor/interrupts.ts'
 import { createRunState } from '../executor/run-state.ts'
-import { createResumeErroredRun, createRunSubmission, type ResumeRun, type RunSubmission, type StartRun } from '../executor/run-submission.ts'
+import { createReadParkedAskById, createResumeErroredRun, createResumeParkedRun, createRunSubmission, type ResumeRun, type RunSubmission, type StartRun } from '../executor/run-submission.ts'
 import { createTaskQueue, type QueueItemView, type QueueView } from '../executor/queue/index.ts'
 import type { RunCheckpoint } from '../executor/checkpoint.ts'
 import type { ProjectSettings, ReadProjectSettings, WriteProjectSettings, RunSnapshotRaw, RunSnapshotStats, RunSummaryStats } from '../executor/persistence.ts'
@@ -48,7 +48,12 @@ function parseQueueText(text: string | null): QueueView {
 }
 
 // A text-only queue store standing in for the filesystem leaves, so the /api/queue route tests and the POST /api/runs enqueue path observe the queue's exact state and write/submit ordering.
-function createInMemoryQueueStore(initial: QueueItemView[] = []): { store: { read: () => string | null; write: (contents: string) => void }; snapshot: () => QueueView; writes: string[]; events: string[] } {
+interface QueueSeedItem extends QueueItemView {
+	resumeRunId?: string
+	resumeToolCallId?: string
+}
+
+function createInMemoryQueueStore(initial: QueueSeedItem[] = []): { store: { read: () => string | null; write: (contents: string) => void }; snapshot: () => QueueView; writes: string[]; events: string[] } {
 	let current: string | null = initial.length === 0 ? null : JSON.stringify({ items: initial })
 	const writes: string[] = []
 	const events: string[] = []
@@ -533,7 +538,7 @@ interface HandlerHarness {
 
 // Builds a fresh handler whose startRun and resumeRun park on caller-controlled resolvers, so each test drives its own run lifecycle without touching shared state. The static leaf is a recording fake; every dependency is in-memory. runIdCollides makes runDirectoryExists report an existing directory for the generated id, exercising the submit-level run_id_collision refusal. build seeds the image build identifier GET /api/config surfaces (null, as from a source checkout, unless a test passes one). initialCheckpoints seeds the in-memory checkpoint store (raw state.json text by run id) the resume submission and the resumable flag read.
 // The queue store and the scheduler are wired exactly as serve.ts wires them: the handler's mutations and the POST /api/runs enqueue go through the same in-memory leaves, the scheduler dispatches through the submission, and a settled run promise maps its item and ticks onward.
-function createHandlerHarness(options: { runIdCollides?: boolean, build?: BuildInfo | null, initialQueueItems?: QueueItemView[], initialCheckpoints?: Map<string, string>, flowFeedOptions?: FlowFeedResponderOptions } = {}): HandlerHarness {
+function createHandlerHarness(options: { runIdCollides?: boolean, build?: BuildInfo | null, initialQueueItems?: QueueSeedItem[], initialCheckpoints?: Map<string, string>, initialMetas?: Map<string, string>, flowFeedOptions?: FlowFeedResponderOptions } = {}): HandlerHarness {
 	let resolveActive: (meta: RunMeta) => void = () => {}
 	let resolveResumed: (meta: RunMeta) => void = () => {}
 	let capturedEffort: EffortLevel | undefined
@@ -554,7 +559,7 @@ function createHandlerHarness(options: { runIdCollides?: boolean, build?: BuildI
 		})
 	}
 	// Metas a fake run start/resume has written, layered over the fixture snapshots: the real executor writes a running meta as its first act (and the resumed meta flip is what the UI reads), so the fake mirrors that write synchronously at call time — the same point the real writeMeta lands inside submission.resume.
-	const metaOverrides = new Map<string, string>()
+	const metaOverrides = new Map<string, string>(options.initialMetas ?? [])
 	const harnessRawSnapshot = (runId: string): RunSnapshotRaw => {
 		const base = rawSnapshotById(runId)
 		return { metaText: metaOverrides.get(runId) ?? base.metaText, logText: base.logText }
@@ -572,9 +577,9 @@ function createHandlerHarness(options: { runIdCollides?: boolean, build?: BuildI
 		}
 	}
 	const checkpoints = new Map<string, string>(options.initialCheckpoints ?? [])
-	const resumeRun: ResumeRun = (checkpoint, resumeNote) => {
+	const resumeRun: ResumeRun = (checkpoint, options) => {
 		resumed.push(checkpoint)
-		resumedNotes.push(resumeNote)
+		resumedNotes.push(options?.resumeNote)
 		metaOverrides.set(checkpoint.runId, JSON.stringify({ runId: checkpoint.runId, guildPath: 'guild', task: `task for ${checkpoint.runId}`, status: 'running', startTime: checkpoint.startTime }))
 		const runPromise = new Promise<RunMeta>((resolve) => {
 			resolveResumed = resolve
@@ -590,11 +595,16 @@ function createHandlerHarness(options: { runIdCollides?: boolean, build?: BuildI
 	const queue = createInMemoryQueueStore(options.initialQueueItems ?? [])
 	const submission = createRunSubmission({ onRunSettled: (meta) => taskQueue.onRunSettled(meta), startRun, resumeRun, generateRunId: () => `run-20260101-09${String(nextId++).padStart(4, '0')}`, runDirectoryExists: () => options.runIdCollides ?? false, readProjectSettings: settings.read })
 	// The queue module references the submission and the submission's settlement hook references the queue; each closure captures the other's binding lazily, exactly as serve.ts composes them.
+	const readCheckpointById = (runId: string): string | null => checkpoints.get(runId) ?? null
+	const readParkedAskById = createReadParkedAskById(readCheckpointById)
+	const resumeParkedRun = createResumeParkedRun({ runSubmission: submission, readRunMetaById: harnessReadRunMetaById, readCheckpointById })
 	const taskQueue = createTaskQueue({
 		queueStore: queue.store,
 		readRunMetaById: harnessReadRunMetaById,
 		listRunIds,
 		readRunListSummary,
+		readParkedAskById,
+		resumeParkedRun,
 		submitRun: (queued) => {
 			queue.events.push('submitRun')
 			return submission.submit(queued.task, queued.effort, queued.involvement, queued.logLevel, queued.continuation)
@@ -702,6 +712,30 @@ function resumeCheckpoint(runId: string): RunCheckpoint {
 					contextExceededAttempts: 0,
 					loopCheckToolCallWatermark: 0,
 					loopCheckTokenWatermark: 0,
+				},
+			},
+		],
+	}
+}
+
+function parkedCheckpoint(runId: string): RunCheckpoint {
+	const checkpoint = resumeCheckpoint(runId)
+	const entry = checkpoint.frames[0]
+	if (entry === undefined) throw new Error('checkpoint has no entry frame')
+	return {
+		...checkpoint,
+		parkedAsk: { roleId: 'orchestrator-0-1', toolCallId: 'ask_1', question: 'which database?' },
+		frames: [
+			{
+				...entry,
+				roleState: {
+					...entry.roleState,
+					history: [
+						{ role: 'system', content: 'prompt' },
+						{ role: 'user', content: 'task' },
+						{ role: 'assistant', content: '', tool_calls: [{ id: 'ask_1', type: 'function', function: { name: 'ask_human', arguments: '{"question":"which database?"}' } }] },
+						{ role: 'tool', content: '{"question":"which database?","parked":true}', tool_call_id: 'ask_1' },
+					],
 				},
 			},
 		],
@@ -2264,6 +2298,47 @@ describe('/api/queue', () => {
 
 		resolveActive()(terminalMeta('run-20260101-090000', 'parked task'))
 		await submission.awaitActive()
+	})
+
+	test('POST /:id/answer resumes the same parked run when its frozen checkpoint names the question', async () => {
+		const runId = 'run-20260101-000500'
+		const checkpoints = new Map([[runId, JSON.stringify(parkedCheckpoint(runId))]])
+		const metas = new Map([[runId, JSON.stringify({
+			runId,
+			guildPath: 'guild',
+			task: 'parked task',
+			status: 'needs_clarification',
+			startTime: '2026-01-01T00:00:00.000Z',
+			endTime: '2026-01-01T00:01:00.000Z',
+			result: { status: 'needs_clarification', summary: 'waiting for an answer to: which database?' },
+		})]])
+		const harness = createHandlerHarness({
+			initialQueueItems: [queueItem('n1', 'parked task', { status: 'needs_input', question: 'which database?', runId, continuesFrom: runId })],
+			initialCheckpoints: checkpoints,
+			initialMetas: metas,
+		})
+
+		const response = await harness.handler(post('/api/queue/n1/answer', JSON.stringify({ answer: 'postgres' })))
+		expect(response.status).toBe(200)
+		const item: unknown = await response.json()
+		if (typeof item !== 'object' || item === null) throw new Error('expected the answered item')
+		expect(Reflect.has(item, 'resumeRunId')).toBe(false)
+		expect(Reflect.has(item, 'resumeToolCallId')).toBe(false)
+
+		expect(harness.submission.activeRunId()).toBe(runId)
+		expect(harness.resumedCheckpoints().map((checkpoint) => checkpoint.runId)).toEqual([runId])
+		expect(harness.queue.snapshot().items[0]?.status).toBe('active')
+		expect(harness.queue.snapshot().items[0]?.runId).toBe(runId)
+
+		const list = await harness.handler(get('/api/queue'))
+		const body: unknown = await list.json()
+		if (!Array.isArray(body)) throw new Error('expected a queue array')
+		const listed = body[0]
+		if (typeof listed !== 'object' || listed === null) throw new Error('expected the listed item')
+		expect(Reflect.has(listed, 'resumeRunId')).toBe(false)
+
+		harness.resolveResumed()(terminalMeta(runId, 'parked task'))
+		await harness.submission.awaitActive()
 	})
 
 	test('POST /:id/answer rejects a malformed body with 400, an unknown id with 404, and a non-needs_input item with 409', async () => {

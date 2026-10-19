@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test'
-import type { Message, RoleDefinition, ToolCall, ToolResult } from '../types.js'
+import type { LogEvent, Message, RoleDefinition, ToolCall, ToolResult } from '../types.js'
 import type { RunToolScope } from './index.js'
+import { createRunParkTracker } from '../park-state.js'
 import { createEmptyRoleState, createFixtureRunScope, createFixtureToolPlatform, recordingHumanBackend } from '../test-fixtures.js'
 
 const platform = createFixtureToolPlatform()
@@ -121,6 +122,47 @@ describe('ask_human tool', () => {
 	test('rejects a missing question with invalid_arguments', async () => {
 		const result = await dispatch(scopeWith(), ['ask_human', 'finish'], 'ask_human', {})
 		expect(result.kind).toBe('invalid_arguments')
+	})
+
+	test('a queue-tracked pre-write ask records the parked call and logs the call id', async () => {
+		const parkTracker = createRunParkTracker(undefined, true)
+		const events: LogEvent[] = []
+		const scope = scopeWith({ parkTracker, appendLog: (event) => events.push(event) })
+
+		const result = await dispatch(scope, ['ask_human', 'finish'], 'ask_human', { question: 'Which database?' })
+
+		expect(result).toEqual({ kind: 'success', data: { question: 'Which database?', parked: true } })
+		expect(parkTracker.parkedQuestion).toBe('Which database?')
+		expect(parkTracker.parkedAsk).toEqual({ roleId: 'fixture-0-0', toolCallId: 'call_ask_human_1', question: 'Which database?' })
+		const askEvent = events.find((event) => event.type === 'ask_human')
+		expect(askEvent).toBeDefined()
+		if (askEvent === undefined) return
+		if (!isRecord(askEvent.payload)) throw new Error('expected an ask_human payload object')
+		expect(askEvent.payload['id']).toBe('call_ask_human_1')
+		expect(askEvent.payload['parked']).toBe(true)
+	})
+
+	test('a post-write, untracked, or handler-frame ask never records a parked call', async () => {
+		const cases = [
+			{ label: 'post-write', parkTracker: createRunParkTracker(true, true), handlerOf: undefined },
+			{ label: 'untracked', parkTracker: createRunParkTracker(), handlerOf: undefined },
+			{ label: 'handler', parkTracker: createRunParkTracker(undefined, true), handlerOf: 'target-0-1' },
+		]
+		for (const testCase of cases) {
+			const human = recordingHumanBackend()
+			const scope = scopeWith({
+				parkTracker: testCase.parkTracker,
+				humanBackend: human,
+				...(testCase.handlerOf !== undefined ? { handlerOf: testCase.handlerOf } : {}),
+			})
+
+			const result = await dispatch(scope, ['ask_human', 'finish'], 'ask_human', { question: 'Which database?' })
+
+			expect(result).toEqual({ kind: 'success', data: { question: 'Which database?', answer: 'use your best judgement' } })
+			expect(testCase.parkTracker.parkedQuestion).toBeUndefined()
+			expect(testCase.parkTracker.parkedAsk).toBeUndefined()
+			expect(human.questions.length).toBe(1)
+		}
 	})
 })
 

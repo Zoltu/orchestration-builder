@@ -1,8 +1,9 @@
 import type { Sleep } from '../llm.js'
+import type { ParkedAnswer, ParkedAsk } from '../park-state.js'
 import type { ListRunIds, ReadRunMetaById } from '../persistence.js'
 import { isRunMeta, isTerminalRunStatus, safeJsonParse } from '../validation.js'
 import type { EffortLevel, InvolvementLevel, LogLevel, RunContinuation, RunMeta } from '../types.js'
-import { assembleBriefingLines, cancelWaitingItem, dispatchingItem, editWaitingItem, enqueueAtHead, enqueueAtTail, normalizeNewItem, reactivateErrorItem, recordAnswer, releaseToWaiting, removeWaitingItem, reorderWaitingItem, repairActiveItem, requireWaitingItem, requeueErrorItem, settleActiveItem, toQueueItemView, toQueueView, withReplacedItem, type QueueItem, type QueueItemView, type QueueMutation, type QueueView, type RunListEntry, type TaskQueue } from './model.js'
+import { assembleBriefingLines, cancelWaitingItem, dispatchingItem, editWaitingItem, enqueueAtHead, enqueueAtTail, normalizeNewItem, pendingAnswerUndelivered, reactivateErrorItem, recordAnswer, releaseToWaiting, removeWaitingItem, reorderWaitingItem, repairActiveItem, requireWaitingItem, requeueErrorItem, settleActiveItem, toQueueItemView, toQueueView, withReplacedItem, type QueueItem, type QueueItemView, type QueueMutation, type QueueView, type RunListEntry, type TaskQueue } from './model.js'
 import { readQueue, writeQueue, type QueueStore } from './persistence.js'
 
 // The durable task queue module (docs/queueing.md "The queue: storage, item model, state machine" and "Dispatch and the scheduler"): the single public surface over the item model, the state machine, queue persistence, and the scheduler that dispatches queued tasks and settles their runs. HTTP handlers and the error-resume path call operations here rather than reading, mutating, and writing the queue file themselves, so the crash-safety ordering (dispatching marker before submit, boot repair, collision retry, settlement mapping) cannot be bypassed.
@@ -22,6 +23,16 @@ export type QueuedRunSubmitResult =
 
 export type SubmitQueuedRun = (submission: QueuedRunSubmission) => QueuedRunSubmitResult
 
+// The parked checkpoint reader: returns the ask a run's checkpoint is parked on, or null when the run has no parked checkpoint (delivered, missing, or corrupt).
+export type ReadParkedAskById = (runId: string) => ParkedAsk | null
+
+export type ResumeParkedRunResult =
+	| { ok: true; runId: string }
+	| { ok: false; error: 'run_in_progress' | 'checkpoint_missing' | 'not_parked' }
+
+// The same-run answer resume: re-enters the parked run with the answer. The queue falls back to the legacy briefed dispatch on checkpoint_missing/not_parked.
+export type QueueResumeParkedRun = (runId: string, parkedAnswer: ParkedAnswer) => ResumeParkedRunResult
+
 // The configured leaves the composition root supplies; the module owns all queue logic and none has a default.
 export interface TaskQueueDependencies {
 	// The text-only persistence port; the module owns parsing, validation, malformed/missing tolerance, and serialization, while the write side replaces the file atomically.
@@ -31,6 +42,10 @@ export interface TaskQueueDependencies {
 	listRunIds: ListRunIds
 	// The run-list summary reader: enumerates each run's one-line summary (null when the summarizer has produced none) alongside its task, which the briefing assembles from.
 	readRunListSummary: (runId: string) => RunListEntry
+	// The parked-checkpoint reader: answer uses it to learn the tool call the answer must replace, boot repair uses it to tell a delivered answer from an undelivered one, and settlement uses it to detect a re-park.
+	readParkedAskById: ReadParkedAskById
+	// The same-run answer resume, supplied by the submission layer: the queue decides when to re-enter a parked run and falls back to a briefed dispatch when it cannot.
+	resumeParkedRun: QueueResumeParkedRun
 	submitRun: SubmitQueuedRun
 	// The single-run-slot peek: when a run is active (the boot-resumed case) the tick is a true no-op — no dispatching-marker write, no submitRun probe — matching the design's "finds the slot busy and no-ops". The settlement hook's tick sees the slot already cleared.
 	hasActiveRun: () => boolean
@@ -79,11 +94,11 @@ export type QueueSubmitOutcome =
 // - submitNow(input, handles): the POST /api/runs path; refuses while a run is active with 'busy' before enqueueing, otherwise enqueues at the head and dispatches in the same call. A collision that exhausts the retry budget removes the just-created waiting item and returns 'collision'; a slot that becomes busy after the attempt keeps the item waiting and returns 'busy'.
 // - patch(id, patch): edits task/effort/involvement and/or reorders within the waiting list; unknown ids return 'not_found', non-waiting items 'forbidden_status'. An empty patch validates without writing.
 // - cancel(id, at): marks a waiting item cancelled with settledAt; unknown ids 'not_found', non-waiting items 'forbidden_status'.
-// - answer(id, answer): records an answer on a needs_input item, moves it to the front as waiting, and ticks; unknown ids 'not_found', other statuses 'forbidden_status'.
+// - answer(id, answer): records an answer on a needs_input item, moves it to the front as waiting, and ticks; when the parked checkpoint still names this question, the item also records the run and tool call so the dispatch resumes the same run, otherwise it falls back to the legacy briefed continuation. Unknown ids 'not_found', other statuses 'forbidden_status'.
 // - requeue(id): returns an error item to waiting at the tail with its lineage re-pointed at the errored run, then ticks; unknown ids 'not_found', other statuses 'forbidden_status'.
 // - reactivateErrorItem(runId): puts the error item for a resumed run back into the active slot under the same run id; returns 'not_found' when no error item names that run.
-// - tick(): repairs stale active items from their run metas, then dispatches the head waiting item unless a run is active or shutdown has been observed.
-// - onRunSettled(meta): maps a settled run from its terminal meta, writes the mapping before ticking, and never settles an 'interrupted' meta (that item re-dispatches through boot repair).
+// - tick(): repairs stale active items from their run metas, then dispatches the head waiting item unless a run is active or shutdown has been observed. An answered item resumes its parked run; when that run cannot be resumed the item falls back to the legacy briefed dispatch.
+// - onRunSettled(meta): maps a settled run from its terminal meta, writes the mapping before ticking, and never settles an 'interrupted' meta (that item re-dispatches through boot repair). A needs_clarification settlement whose answer is still undelivered releases the item to waiting and ticks instead of settling, so the answer retries.
 // - observeShutdown(): closes the dispatch gate; settlements still map but no new run starts.
 export interface TaskQueueModule {
 	read(): QueueView
@@ -157,8 +172,9 @@ export function createTaskQueue(dependencies: TaskQueueDependencies): TaskQueueM
 		const items = queue.items.map((item) => {
 			if (item.status !== 'active') return item
 			const meta = item.runId !== undefined ? parseRunMetaText(item.runId) : scanResumed()
+			const parkedAsk = item.runId !== undefined ? dependencies.readParkedAskById(item.runId) : null
 			const settledAt = meta?.endTime ?? dependencies.now()
-			const repair = repairActiveItem(item, meta, settledAt)
+			const repair = repairActiveItem(item, meta, settledAt, parkedAsk)
 			if (repair.item === item) return item
 			changed = true
 			return repair.item
@@ -200,13 +216,10 @@ export function createTaskQueue(dependencies: TaskQueueDependencies): TaskQueueM
 		return { task: item.task, ...overrides, continuation: { task: item.task, summary: '', briefing } }
 	}
 
-	// The dispatch cycles: write the dispatching marker (active, no runId), call submitRun, then fill the runId on acceptance, restore the item to waiting on run_in_progress, or sleep-and-retry on run_id_collision. Each write is a whole-file read-modify-write cycle; a collision sleep ends one cycle and the retry begins a fresh one that re-reads.
-	async function dispatchHead(): Promise<void> {
-		let view = readQueueState()
-		const head = view.items.find((item) => item.status === 'waiting')
-		if (head === undefined) return
+	// The legacy dispatch cycle shared by a first dispatch and an answer's fallback: write the dispatching marker (active, no runId), call submitRun, then fill the runId on acceptance, restore the item to waiting on run_in_progress, or sleep-and-retry on run_id_collision. Each write is a whole-file read-modify-write cycle; a collision sleep ends one cycle and the retry begins a fresh one that re-reads.
+	async function submitHead(item: QueueItem, view: TaskQueue): Promise<void> {
 		// The marker is written before submitRun so a crash after a successful submit leaves an active-without-id item the boot tick repairs by bind-or-release — never a stale waiting item that would re-dispatch behind its own duplicate.
-		const marker = dispatchingItem(head)
+		const marker = dispatchingItem(item)
 		writeQueueState(withReplacedItem(view, marker))
 		for (let attempt = 0; ; attempt++) {
 			const result = dependencies.submitRun(assembleSubmission(marker, view.items))
@@ -225,6 +238,48 @@ export function createTaskQueue(dependencies: TaskQueueDependencies): TaskQueueM
 			const current = view.items.find((item) => item.id === marker.id)
 			if (current === undefined || current.status !== 'active' || current.runId !== undefined) return
 		}
+	}
+
+	type ResumeAttempt =
+		| { kind: 'done' }
+		| { kind: 'released' }
+		| { kind: 'fallback'; item: QueueItem; view: TaskQueue }
+
+	// Re-enters the parked run the answered item points at, writing an active marker under that run's id first so a settlement arriving while the resume starts finds the item. When the run can no longer be resumed the marker is rewritten as waiting without the resume pointers, keeping the answer for the legacy briefed dispatch.
+	async function resumeAnsweredItem(item: QueueItem, view: TaskQueue): Promise<ResumeAttempt> {
+		const resumeRunId = item.resumeRunId
+		const resumeToolCallId = item.resumeToolCallId
+		const answer = item.answer
+		if (resumeRunId === undefined || resumeToolCallId === undefined || answer === undefined) return { kind: 'fallback', item, view }
+		const marker: QueueItem = { ...dispatchingItem(item), runId: resumeRunId }
+		writeQueueState(withReplacedItem(view, marker))
+		const result = dependencies.resumeParkedRun(resumeRunId, { question: item.question ?? '', answer, toolCallId: resumeToolCallId })
+		if (result.ok) return { kind: 'done' }
+		if (result.error === 'run_in_progress') {
+			writeQueueState(withReplacedItem(readQueueState(), releaseToWaiting(marker)))
+			return { kind: 'released' }
+		}
+		const current = readQueueState()
+		const currentItem = current.items.find((entry) => entry.id === item.id)
+		if (currentItem === undefined) return { kind: 'released' }
+		const waiting = releaseToWaiting(currentItem)
+		delete waiting.resumeRunId
+		delete waiting.resumeToolCallId
+		writeQueueState(withReplacedItem(current, waiting))
+		return { kind: 'fallback', item: waiting, view: current }
+	}
+
+	async function dispatchHead(): Promise<void> {
+		const view = readQueueState()
+		const head = view.items.find((item) => item.status === 'waiting')
+		if (head === undefined) return
+		if (head.resumeRunId !== undefined && head.resumeToolCallId !== undefined && head.answer !== undefined) {
+			const attempt = await resumeAnsweredItem(head, view)
+			if (attempt.kind === 'done' || attempt.kind === 'released') return
+			await submitHead(attempt.item, attempt.view)
+			return
+		}
+		await submitHead(head, view)
 	}
 
 	// One dispatch attempt: repair stale active items (the boot rows of the state machine), then dispatch the head waiting item — unless the slot is busy (a true no-op) or the shutdown gate is closed. Async only on the collision-retry path, whose sleep ends one read-modify-write cycle and whose retry begins a fresh one.
@@ -294,7 +349,15 @@ export function createTaskQueue(dependencies: TaskQueueDependencies): TaskQueueM
 			return { ok: true, item: toQueueItemView(result.item) }
 		},
 		async answer(id, answer) {
-			const result = recordAnswer(readQueueState(), id, answer)
+			const queue = readQueueState()
+			const target = queue.items.find((item) => item.id === id)
+			if (target === undefined) return { ok: false, reason: 'not_found' }
+			if (target.status !== 'needs_input') return { ok: false, reason: 'forbidden_status' }
+			const parkedRunId = target.runId ?? target.continuesFrom
+			const parkedAsk = parkedRunId !== undefined ? dependencies.readParkedAskById(parkedRunId) : null
+			// A legacy needs_input (no parked checkpoint, or a question that no longer matches one) keeps the briefed-continuation path; a live parked ask records the same-run resume pointers.
+			const resume = parkedRunId !== undefined && parkedAsk !== null && parkedAsk.question === target.question ? { runId: parkedRunId, toolCallId: parkedAsk.toolCallId } : undefined
+			const result = recordAnswer(queue, id, answer, resume)
 			if (!result.ok) return toMutationOutcome(result)
 			writeQueueState(result.queue)
 			await tick()
@@ -315,6 +378,13 @@ export function createTaskQueue(dependencies: TaskQueueDependencies): TaskQueueM
 		tick,
 		async onRunSettled(meta) {
 			const queue = readQueueState()
+			const target = queue.items.find((item) => item.status === 'active' && item.runId === meta.runId)
+			// A parked settlement whose answer is still undelivered (the frozen checkpoint still names the answered call and question) returns the answered item to waiting so the next tick retries it instead of settling to needs_input and dropping the answer.
+			if (target !== undefined && meta.status === 'needs_clarification' && pendingAnswerUndelivered(target, dependencies.readParkedAskById(meta.runId))) {
+				writeQueueState(withReplacedItem(queue, releaseToWaiting(target)))
+				await tick()
+				return
+			}
 			const settlement = settleActiveItem(queue, meta.runId, meta, dependencies.now())
 			if (settlement.kind === 'settled') writeQueueState(settlement.queue)
 			await tick()

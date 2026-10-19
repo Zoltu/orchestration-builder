@@ -1,6 +1,6 @@
 import { isEffortLevel, isInvolvementLevel, isLogLevel, isObject, isString } from '../validation.js'
 import { isRunIdShape } from '../run-id.js'
-import { questionFromParkSummary } from '../park-state.js'
+import { questionFromParkSummary, type ParkedAsk } from '../park-state.js'
 import type { EffortLevel, InvolvementLevel, LogLevel, RunMeta } from '../types.js'
 
 // Pure queue logic and validation for the durable task queue (docs/queueing.md "The queue: storage, item model, state machine"). Every transformation is a whole-queue value: it takes a queue and returns a new one, so the module's read-modify-write cycles stay free of hidden mutation. Serialization and orchestration live in persistence.ts and task-queue.ts; only the read-only DTOs cross the module boundary.
@@ -57,6 +57,9 @@ export interface QueueItem {
 	answer?: string
 	resultSummary?: string
 	error?: string
+	// The same-run answer resume's target: the parked run and the ask_human call whose result the answer replaces. Internal only — never projected into QueueItemView.
+	resumeRunId?: string
+	resumeToolCallId?: string
 }
 
 export interface TaskQueue {
@@ -81,6 +84,16 @@ export function isQueueItem(value: unknown): value is QueueItem {
 	if (value.answer !== undefined && !isString(value.answer)) return false
 	if (value.resultSummary !== undefined && !isString(value.resultSummary)) return false
 	if (value.error !== undefined && !isString(value.error)) return false
+	if (value.resumeRunId !== undefined) {
+		if (!isRunIdShape(value.resumeRunId)) return false
+		// The same-run pointer is a projection of the item's lineage, never an independent destination.
+		if (value.continuesFrom === undefined || value.continuesFrom !== value.resumeRunId) return false
+		if (value.resumeToolCallId === undefined) return false
+	}
+	if (value.resumeToolCallId !== undefined) {
+		if (!isString(value.resumeToolCallId) || value.resumeToolCallId === '') return false
+		if (value.resumeRunId === undefined) return false
+	}
 	return true
 }
 
@@ -90,8 +103,24 @@ export function isTaskQueue(value: unknown): value is TaskQueue {
 	return true
 }
 
+// Explicit projection, not a spread: the resume fields are internal dispatch bookkeeping and must never leak into an API response.
 export function toQueueItemView(item: QueueItem): QueueItemView {
-	return { ...item }
+	return {
+		id: item.id,
+		task: item.task,
+		...(item.effort !== undefined ? { effort: item.effort } : {}),
+		...(item.involvement !== undefined ? { involvement: item.involvement } : {}),
+		...(item.logLevel !== undefined ? { logLevel: item.logLevel } : {}),
+		...(item.continuesFrom !== undefined ? { continuesFrom: item.continuesFrom } : {}),
+		status: item.status,
+		...(item.runId !== undefined ? { runId: item.runId } : {}),
+		queuedAt: item.queuedAt,
+		...(item.settledAt !== undefined ? { settledAt: item.settledAt } : {}),
+		...(item.question !== undefined ? { question: item.question } : {}),
+		...(item.answer !== undefined ? { answer: item.answer } : {}),
+		...(item.resultSummary !== undefined ? { resultSummary: item.resultSummary } : {}),
+		...(item.error !== undefined ? { error: item.error } : {}),
+	}
 }
 
 export function toQueueView(queue: TaskQueue): QueueView {
@@ -154,6 +183,8 @@ export function releaseToWaiting(item: QueueItem, rePointedContinuesFrom?: strin
 	return {
 		...carriedFields(item),
 		...(continuesFrom !== undefined ? { continuesFrom } : {}),
+		...(item.resumeRunId !== undefined ? { resumeRunId: item.resumeRunId } : {}),
+		...(item.resumeToolCallId !== undefined ? { resumeToolCallId: item.resumeToolCallId } : {}),
 		status: 'waiting',
 	}
 }
@@ -163,6 +194,8 @@ export function dispatchingItem(item: QueueItem): QueueItem {
 	return {
 		...carriedFields(item),
 		...(item.continuesFrom !== undefined ? { continuesFrom: item.continuesFrom } : {}),
+		...(item.resumeRunId !== undefined ? { resumeRunId: item.resumeRunId } : {}),
+		...(item.resumeToolCallId !== undefined ? { resumeToolCallId: item.resumeToolCallId } : {}),
 		status: 'active',
 	}
 }
@@ -191,6 +224,8 @@ export function requireWaitingItem(queue: TaskQueue, id: string): QueueMutation 
 export function editWaitingItem(queue: TaskQueue, id: string, edit: { task?: string; effort?: EffortLevel; involvement?: InvolvementLevel }): QueueMutation {
 	const required = requireWaitingItem(queue, id)
 	if (!required.ok) return required
+	// A waiting answer is already bound to the parked run and the exact task/question it re-enters; editing those fields would be silently ignored by the resume, so reject it. Position-only reorder remains allowed.
+	if (required.item.resumeRunId !== undefined || required.item.resumeToolCallId !== undefined) return { ok: false, reason: 'forbidden_status' }
 	const edited: QueueItem = {
 		...required.item,
 		...(edit.task !== undefined ? { task: edit.task } : {}),
@@ -240,19 +275,29 @@ export function removeWaitingItem(queue: TaskQueue, id: string): QueueMutation {
 	return { ok: true, queue: { items: queue.items.filter((item) => item.id !== id) }, item: required.item }
 }
 
-export function recordAnswer(queue: TaskQueue, id: string, answer: string): QueueMutation {
+export function recordAnswer(queue: TaskQueue, id: string, answer: string, resume?: { runId: string; toolCallId: string }): QueueMutation {
 	const target = findById(queue, id)
 	if (target === undefined) return { ok: false, reason: 'not_found' }
 	if (target.status !== 'needs_input') return { ok: false, reason: 'forbidden_status' }
+	// The parked run's id is deliberately dropped from runId: the lineage (continuesFrom) carries the resume, and a waiting item showing an old run id misleads the UI into reading it as the run in flight. The internal resume pointer keeps the same id so the dispatch can re-enter that run, and the lineage is bound to it.
+	const lineage = resume !== undefined
+		? { continuesFrom: resume.runId, resumeRunId: resume.runId, resumeToolCallId: resume.toolCallId }
+		: target.continuesFrom !== undefined ? { continuesFrom: target.continuesFrom } : {}
 	const answered: QueueItem = {
 		...carriedFields(target),
-		...(target.continuesFrom !== undefined ? { continuesFrom: target.continuesFrom } : {}),
-		// The parked run's id is deliberately dropped: the lineage (continuesFrom) carries the resume, and a waiting item showing an old run id misleads the UI into reading it as the run in flight.
+		...lineage,
 		answer,
 		status: 'waiting',
 	}
 	// The answered item fronts the file so it is the next waiting item the scheduler dispatches — the queue-native resume.
 	return { ok: true, queue: { items: [answered, ...queue.items.filter((item) => item.id !== id)] }, item: answered }
+}
+
+// True when an answer was recorded for this item but has not been delivered into its parked run: the frozen checkpoint still names the same tool call and question. A missing checkpoint means the run reached a terminal that deleted it (delivered answer), and a re-park names a different call (delivered answer then a new ask); neither is undelivered.
+export function pendingAnswerUndelivered(item: QueueItem, parkedAsk: ParkedAsk | null): boolean {
+	if (item.resumeRunId === undefined || item.resumeToolCallId === undefined || item.answer === undefined) return false
+	if (parkedAsk === null) return false
+	return parkedAsk.toolCallId === item.resumeToolCallId && parkedAsk.question === item.question
 }
 
 // The re-queue action behind the UI's error triage: an error item returns to waiting at the tail with its lineage re-pointed at the errored run, so the retry's continuation briefing carries the failure's outcome summary.
@@ -367,11 +412,14 @@ export type ActiveItemRepair =
 // - with a runId whose meta still reads 'running': the boot-resumed run's own item — untouched; its own settlement maps it.
 // - with a runId whose meta is unreadable (a phantom run directory): release to waiting rather than leave the item stuck active forever.
 // - with no runId (an orphaned dispatching marker): the run may or may not have started. The scheduler passes the boot-resumed run's meta (the unique 'running' meta) or null; the item binds to it when the task matches — identical task texts are interchangeable, since only the head is ever mid-dispatch — and returns to waiting otherwise.
-export function repairActiveItem(item: QueueItem, meta: RunMeta | null, settledAt: string): ActiveItemRepair {
+// - an answered item whose run settled 'needs_clarification' before the answer was delivered (the frozen checkpoint still names the same call and question): release it to waiting so the answer retries instead of settling to needs_input and dropping it. A missing checkpoint means the answer was delivered and the run terminalized, so the normal mapping applies.
+export function repairActiveItem(item: QueueItem, meta: RunMeta | null, settledAt: string, parkedAsk: ParkedAsk | null): ActiveItemRepair {
 	const runId = item.runId
 	if (runId !== undefined) {
 		if (meta === null) return { kind: 'released', item: releaseToWaiting(item) }
 		if (meta.status === 'running') return { kind: 'untouched', item }
+		// Only a needs_clarification terminal can mean the answer is still undelivered: success/error prove the resumed run finished, and releasing those would rerun a done task. A re-park with a different call is delivered and settles normally.
+		if (meta.status === 'needs_clarification' && pendingAnswerUndelivered(item, parkedAsk)) return { kind: 'released', item: releaseToWaiting(item) }
 		if (meta.status === 'interrupted') return { kind: 'released', item: releaseToWaiting(item, runId) }
 		const mapped = mapSettledItemState(meta)
 		if (mapped === undefined) return { kind: 'untouched', item }

@@ -19,11 +19,26 @@ export function questionFromParkSummary(summary: string): string {
 	return summary.startsWith(PARK_SUMMARY_PREFIX) ? summary.slice(PARK_SUMMARY_PREFIX.length) : summary
 }
 
-// The run-scoped park state (docs/queueing.md "Parking: the pre-write rule"). writeCapableStarted flips once any write-capable role starts and never resets — it rides the checkpoint like learnedContextCeiling so a restart cannot reset it and park a run whose writes happened before the restart. parkedQuestion records the question of an in-progress park and doubles as the terminate mark the engine checks at every safe point; it deliberately does not ride the checkpoint, because a crash mid-park is resolved by the resumed run re-asking — and, the queue-tracking mark not riding the checkpoint either, blocking on /api/answer as any untracked run does. queueTracked is what activates the pre-write park: the dispatch path (the submission layer's submit — the scheduler is its only caller) sets it on every run dispatched from the task queue, because only such a run's parked question is answerable through the queue's answer endpoint; a run the queue does not track — a boot-resumed run — must never park, and its asks block exactly as they did before queueing, answerable through /api/answer.
+// The parked question and the tool call it belongs to; both ride the checkpoint so the queue answer can resume the same run and deliver the answer as that call's tool result.
+export interface ParkedAsk {
+	roleId: string
+	toolCallId: string
+	question: string
+}
+
+// The operator's answer to a parked ask, delivered into the existing ask_human tool result on resume.
+export interface ParkedAnswer {
+	question: string
+	answer: string
+	toolCallId: string
+}
+
+// The run-scoped park state (docs/queueing.md "Parking: the pre-write rule"). writeCapableStarted flips once any write-capable role starts and never resets — it rides the checkpoint like learnedContextCeiling so a restart cannot reset it and park a run whose writes happened before the restart. parkedAsk rides the checkpoint and identifies the parked tool call so an answer can resume the same run and replace that call's result; parkedQuestion is the terminate mark the engine checks at every safe point and deliberately does not ride the checkpoint. queueTracked is what activates the pre-write park: the dispatch path (the submission layer's submit — the scheduler is its only caller) sets it on every run dispatched from the task queue, because only such a run's parked question is answerable through the queue's answer endpoint; a run the queue does not track — a boot- or error-resumed run — must never park, and its asks block exactly as they did before queueing, answerable through /api/answer; the queue's answer resume is the one resume that restores the mark.
 export interface RunParkTracker {
 	writeCapableStarted: boolean
 	queueTracked?: boolean
 	parkedQuestion?: string
+	parkedAsk?: ParkedAsk
 }
 
 export function createRunParkTracker(writeCapableStarted?: boolean, queueTracked?: boolean): RunParkTracker {

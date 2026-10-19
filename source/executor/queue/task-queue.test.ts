@@ -1,5 +1,7 @@
 import { describe, expect, test } from 'bun:test'
-import { createTaskQueue, type QueueItemView, type QueueView } from './index.ts'
+import { createTaskQueue, type QueueItemView, type QueueView, type ResumeParkedRunResult } from './index.ts'
+import { cancelWaitingItem, dispatchingItem, isQueueItem, pendingAnswerUndelivered, releaseToWaiting, toQueueItemView, type QueueItem } from './model.ts'
+import type { ParkedAsk } from '../park-state.js'
 import type { RunMeta } from '../types.js'
 
 function item(overrides: Partial<QueueItemView> = {}): QueueItemView {
@@ -13,6 +15,11 @@ function item(overrides: Partial<QueueItemView> = {}): QueueItemView {
 }
 
 type QueuedRunSubmitResult = { ok: true; runId: string } | { ok: false; error: 'run_in_progress' | 'run_id_collision' }
+
+interface QueueSeedItem extends QueueItemView {
+	resumeRunId?: string
+	resumeToolCallId?: string
+}
 
 interface QueuedRunSubmission {
 	task: string
@@ -74,7 +81,7 @@ interface QueueStoreFake {
 	written: () => QueueView[]
 }
 
-function fakeQueueStore(initial: QueueItemView[] = []): QueueStoreFake {
+function fakeQueueStore(initial: QueueSeedItem[] = []): QueueStoreFake {
 	let current: string | null = initial.length === 0 ? null : JSON.stringify({ items: initial })
 	const writes: string[] = []
 	return {
@@ -97,9 +104,10 @@ interface QueueHarness {
 	items: () => readonly QueueItemView[]
 	written: () => QueueView[]
 	submitCalls: QueuedRunSubmission[]
+	resumeCalls: Array<{ runId: string; parkedAnswer: { question: string; answer: string; toolCallId: string } }>
 }
 
-function makeQueue(options: { initial?: QueueItemView[], submitResults?: QueuedRunSubmitResult[], hasActiveRun?: () => boolean, metas?: Record<string, RunMeta>, runs?: RunListEntry[] } = {}): QueueHarness {
+function makeQueue(options: { initial?: QueueSeedItem[], submitResults?: QueuedRunSubmitResult[], hasActiveRun?: () => boolean, metas?: Record<string, RunMeta>, runs?: RunListEntry[], parkedAsks?: Record<string, ParkedAsk | null>, resumeResults?: ResumeParkedRunResult[] } = {}): QueueHarness {
 	const store = fakeQueueStore(options.initial ?? [])
 	const scripted = [...(options.submitResults ?? [])]
 	const submitCalls: QueuedRunSubmission[] = []
@@ -110,6 +118,8 @@ function makeQueue(options: { initial?: QueueItemView[], submitResults?: QueuedR
 		return next
 	}
 	const runs = options.runs ?? []
+	const resumeScript = [...(options.resumeResults ?? [])]
+	const resumeCalls: Array<{ runId: string; parkedAnswer: { question: string; answer: string; toolCallId: string } }> = []
 	const queue = createTaskQueue({
 		queueStore: store.store,
 		readRunMetaById: (runId) => {
@@ -122,12 +132,17 @@ function makeQueue(options: { initial?: QueueItemView[], submitResults?: QueuedR
 			if (run === undefined) throw new Error(`run list has no entry for ${runId}`)
 			return run
 		},
+		readParkedAskById: (runId) => options.parkedAsks?.[runId] ?? null,
+		resumeParkedRun: (runId, parkedAnswer) => {
+			resumeCalls.push({ runId, parkedAnswer })
+			return resumeScript.shift() ?? { ok: false, error: 'checkpoint_missing' }
+		},
 		submitRun,
 		hasActiveRun: options.hasActiveRun ?? (() => false),
 		sleep: async () => {},
 		now: () => NOW,
 	})
-	return { queue, writes: store.writes, items: store.items, written: store.written, submitCalls }
+	return { queue, writes: store.writes, items: store.items, written: store.written, submitCalls, resumeCalls }
 }
 
 describe('enqueue', () => {
@@ -332,6 +347,22 @@ describe('patch', () => {
 		expect(harness.queue.patch('ghost', { task: 'x' })).toEqual({ ok: false, reason: 'not_found' })
 		expect(harness.queue.patch('item-1', { task: 'x' })).toEqual({ ok: false, reason: 'forbidden_status' })
 	})
+
+	test('rejects field edits on a waiting item bound to a same-run answer resume, while position-only reorder still works', () => {
+		const bound = {
+			...item({ id: 'bound', question: 'which database?', answer: 'postgres', continuesFrom: 'run-20260101-010000' }),
+			resumeRunId: 'run-20260101-010000',
+			resumeToolCallId: 'ask_1',
+		}
+		const other = item({ id: 'other' })
+		const harness = makeQueue({ initial: [bound, other] })
+
+		expect(harness.queue.patch('bound', { task: 'edited' })).toEqual({ ok: false, reason: 'forbidden_status' })
+		expect(harness.queue.patch('bound', { effort: 'quick' })).toEqual({ ok: false, reason: 'forbidden_status' })
+		const reordered = harness.queue.patch('bound', { position: 0 })
+		expect(reordered.ok).toBe(true)
+		expect(harness.items().map((entry) => entry.id)).toEqual(['bound', 'other'])
+	})
 })
 
 describe('cancel', () => {
@@ -415,6 +446,64 @@ describe('requeue and reactivate', () => {
 	})
 })
 
+describe('internal resume fields', () => {
+	function storedItem(overrides: Partial<QueueItem> = {}): QueueItem {
+		return {
+			id: 'item-1',
+			task: 'fix the parser bug',
+			status: 'waiting',
+			queuedAt: '2026-01-01T00:00:00.000Z',
+			continuesFrom: 'run-20260101-010000',
+			resumeRunId: 'run-20260101-010000',
+			resumeToolCallId: 'ask_1',
+			question: 'which database?',
+			...overrides,
+		}
+	}
+
+	test('validation accepts well-formed resume fields and rejects a bad run id or an empty tool call id', () => {
+		expect(isQueueItem(storedItem())).toBe(true)
+		expect(isQueueItem(storedItem({ resumeRunId: 'not-a-run-id', continuesFrom: 'not-a-run-id' }))).toBe(false)
+		expect(isQueueItem(storedItem({ resumeToolCallId: '' }))).toBe(false)
+		const malformed: unknown = { ...storedItem(), resumeToolCallId: 42 }
+		expect(isQueueItem(malformed)).toBe(false)
+	})
+
+	test('validation binds the resume run to the lineage and pairs both resume pointers', () => {
+		const missingLineage: unknown = { ...storedItem(), continuesFrom: undefined }
+		expect(isQueueItem(missingLineage)).toBe(false)
+		const mismatchedLineage: unknown = { ...storedItem(), continuesFrom: 'run-20260101-000000' }
+		expect(isQueueItem(mismatchedLineage)).toBe(false)
+		const withoutToolCall: unknown = { ...storedItem(), resumeToolCallId: undefined }
+		expect(isQueueItem(withoutToolCall)).toBe(false)
+		const withoutRun: unknown = { ...storedItem(), resumeRunId: undefined }
+		expect(isQueueItem(withoutRun)).toBe(false)
+	})
+
+	test('pendingAnswerUndelivered requires a live checkpoint naming the same call and question', () => {
+		const item = storedItem({ answer: 'postgres' })
+		expect(pendingAnswerUndelivered(item, { roleId: 'main-0-1', toolCallId: 'ask_1', question: 'which database?' })).toBe(true)
+		expect(pendingAnswerUndelivered(item, null)).toBe(false)
+		expect(pendingAnswerUndelivered(item, { roleId: 'main-0-1', toolCallId: 'ask_1', question: 'a different question' })).toBe(false)
+		expect(pendingAnswerUndelivered(item, { roleId: 'main-0-1', toolCallId: 'ask_2', question: 'which database?' })).toBe(false)
+	})
+
+	test('the view projection and lifecycle fields keep the pointers internal', () => {
+		const item = storedItem({ continuesFrom: 'run-20260101-000000', question: 'which database?', answer: 'postgres' })
+		const view: unknown = toQueueItemView(item)
+		if (typeof view !== 'object' || view === null) throw new Error('expected a view')
+		expect(Reflect.has(view, 'resumeRunId')).toBe(false)
+		expect(Reflect.has(view, 'resumeToolCallId')).toBe(false)
+
+		expect(releaseToWaiting(item).resumeToolCallId).toBe('ask_1')
+		expect(dispatchingItem(item).resumeToolCallId).toBe('ask_1')
+		const cancelled = cancelWaitingItem({ items: [item] }, item.id, '2026-01-01T01:00:00.000Z')
+		if (!cancelled.ok) throw new Error('expected the cancel to succeed')
+		expect(cancelled.item.resumeRunId).toBeUndefined()
+		expect(cancelled.item.resumeToolCallId).toBeUndefined()
+	})
+})
+
 describe('answer', () => {
 	test('records the answer and moves a needs_input item to the front of the queue as waiting', async () => {
 		const parked = item({ status: 'needs_input', runId: 'run-20260101-003000', continuesFrom: 'run-20260101-000000', question: 'which database?' })
@@ -452,5 +541,50 @@ describe('answer', () => {
 		expect(harness.submitCalls[0]?.task).toBe('fix the parser bug')
 		expect(harness.items()[0]?.id).toBe('item-1')
 		expect(harness.items()[0]?.runId).toBe('run-20260101-010000')
+	})
+
+	test('records the same-run resume pointers when the parked checkpoint still names the question', async () => {
+		const parked = item({ status: 'needs_input', runId: 'run-20260101-003000', continuesFrom: 'run-20260101-000000', question: 'which database?' })
+		const harness = makeQueue({
+			initial: [parked],
+			hasActiveRun: () => true,
+			parkedAsks: { 'run-20260101-003000': { roleId: 'main-0-1', toolCallId: 'ask_1', question: 'which database?' } },
+		})
+
+		await harness.queue.answer('item-1', 'postgres')
+
+		const stored: unknown = harness.items()[0]
+		if (typeof stored !== 'object' || stored === null) throw new Error('expected the stored item')
+		expect(Reflect.get(stored, 'resumeRunId')).toBe('run-20260101-003000')
+		expect(Reflect.get(stored, 'resumeToolCallId')).toBe('ask_1')
+		expect(Reflect.get(stored, 'continuesFrom')).toBe('run-20260101-003000')
+		expect(Reflect.get(stored, 'answer')).toBe('postgres')
+	})
+
+	test('the read projection never leaks the internal resume pointers', async () => {
+		const parked = item({ status: 'needs_input', runId: 'run-20260101-003000', continuesFrom: 'run-20260101-000000', question: 'which database?' })
+		const harness = makeQueue({
+			initial: [parked],
+			hasActiveRun: () => true,
+			parkedAsks: { 'run-20260101-003000': { roleId: 'main-0-1', toolCallId: 'ask_1', question: 'which database?' } },
+		})
+		await harness.queue.answer('item-1', 'postgres')
+
+		const viewItem: unknown = harness.queue.read().items[0]
+		if (typeof viewItem !== 'object' || viewItem === null) throw new Error('expected the viewed item')
+		expect(Reflect.has(viewItem, 'resumeRunId')).toBe(false)
+		expect(Reflect.has(viewItem, 'resumeToolCallId')).toBe(false)
+	})
+
+	test('records no resume pointers when no parked checkpoint matches the question', async () => {
+		const parked = item({ status: 'needs_input', runId: 'run-20260101-003000', question: 'which database?' })
+		const harness = makeQueue({ initial: [parked], hasActiveRun: () => true })
+
+		await harness.queue.answer('item-1', 'postgres')
+
+		const stored: unknown = harness.items()[0]
+		if (typeof stored !== 'object' || stored === null) throw new Error('expected the stored item')
+		expect(Reflect.has(stored, 'resumeRunId')).toBe(false)
+		expect(Reflect.get(stored, 'answer')).toBe('postgres')
 	})
 })

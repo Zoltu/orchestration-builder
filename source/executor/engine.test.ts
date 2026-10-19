@@ -2912,7 +2912,7 @@ describe('runRole — the pre-write park rule', () => {
 		)
 		const llm = new FakeLlm()
 		llm.responses = [success([askCall('Which database should I use?')])]
-		const { deps, events, parkTracker } = makeDeps(llm)
+		const { deps, events, parkTracker, checkpoints } = makeDeps(llm)
 		const human = recordingHumanBackend()
 		const depsWithHuman: EngineDependencies = { ...deps, humanBackend: human }
 		// The dispatch path marks a queue-dispatched run; only such a run parks (docs/queueing.md "Parking: the pre-write rule").
@@ -2932,12 +2932,17 @@ describe('runRole — the pre-write park rule', () => {
 		// No further LLM request after the mark is set: the run never gets a turn to talk itself out of parking.
 		expect(llm.calls.length).toBe(1)
 		expect(parkTracker.parkedQuestion).toBe('Which database should I use?')
+		// The frozen park checkpoint carries the ask and its tool result, ready for the answer resume.
+		const parkCheckpoint = checkpoints[checkpoints.length - 1]
+		expect(parkCheckpoint?.parkedAsk).toEqual({ roleId: 'main-0-1', toolCallId: 'ask_1', question: 'Which database should I use?' })
+		const parkedHistory = parkCheckpoint?.frames[0]?.roleState.history ?? []
+		expect(parkedHistory[parkedHistory.length - 1]).toEqual({ role: 'tool', content: '{"question":"Which database should I use?","parked":true}', tool_call_id: 'ask_1' })
 		// The run's own log stays a faithful record: the ask_human event fired with the pairing id, marked as parked.
 		const askEvent = events.find((e) => e.type === 'ask_human')
 		expect(askEvent).toBeDefined()
 		const askPayload = defined(askEvent, 'ask_human event').payload
 		expect(isRecord(askPayload) && askPayload['parked'] === true).toBe(true)
-		expect(isRecord(askPayload) && typeof askPayload['id'] === 'string' && askPayload['id'] !== '').toBe(true)
+		expect(isRecord(askPayload) && askPayload['id'] === 'ask_1').toBe(true)
 	})
 
 	test('a run the queue does not track blocks on a pre-write ask exactly as today: the backend receives the question and a pending question registers', async () => {
@@ -3060,7 +3065,7 @@ describe('runRole — the pre-write park rule', () => {
 			success([agentCall('coder', 'do the work')]),
 			success([askCall('Which database?')]),
 		]
-		const { deps, events, parkTracker } = makeDeps(llm)
+		const { deps, events, parkTracker, checkpoints } = makeDeps(llm)
 		parkTracker.queueTracked = true
 
 		const result = await runRole(deps, {
@@ -3072,10 +3077,212 @@ describe('runRole — the pre-write park rule', () => {
 
 		expect(result.status).toBe('needs_clarification')
 		expect(result.summary).toBe('waiting for an answer to: Which database?')
+		// The child parked while it was the leaf; its frozen checkpoint is the answer resume's re-entry point.
+		const parkCheckpoint = checkpoints[checkpoints.length - 1]
+		expect(parkCheckpoint?.parkedAsk).toEqual({ roleId: 'coder-1-2', toolCallId: 'ask_1', question: 'Which database?' })
+		expect(parkCheckpoint?.frames.map((frame) => frame.roleName)).toEqual(['parent', 'coder'])
 		// The child asked and parked; the parent finished with the same card without another LLM request.
 		expect(llm.calls.length).toBe(2)
 		const finishes = events.filter((e) => e.type === 'role_finished').map((e) => payloadField(e, 'status'))
 		expect(finishes).toEqual(['needs_clarification', 'needs_clarification'])
+	})
+
+	test('resuming a parked run delivers the answer into the same tool message, logs it, clears the park state, and sends it to the next request', async () => {
+		const guild = buildParkGuild({ main: { systemPrompt: 'p', tools: ['ask_human', 'finish'] } }, 'main')
+		const parkedLlm = new FakeLlm()
+		parkedLlm.responses = [success([askCall('Which database?')])]
+		const parked = makeDeps(parkedLlm)
+		parked.parkTracker.queueTracked = true
+		await runRole(parked.deps, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'do it' })
+		const checkpoint = parked.checkpoints[parked.checkpoints.length - 1]
+		if (checkpoint === undefined) throw new Error('expected a parked checkpoint')
+
+		const before = structuredClone(checkpoint.frames[0]?.roleState.history ?? [])
+		const resumeLlm = new FakeLlm()
+		resumeLlm.responses = [success([finishCall({ status: 'success', summary: 'built it' })])]
+		const resumed = makeDeps(resumeLlm)
+		resumed.parkTracker.queueTracked = true
+		resumed.parkTracker.parkedAsk = checkpoint.parkedAsk
+
+		const card = await resumeRoleStack(runRole, resumed.deps, guild, checkpoint, { parkedAnswer: { question: 'Which database?', answer: 'postgres', toolCallId: 'ask_1' } })
+
+		expect(card).toEqual({ status: 'success', summary: 'built it' })
+		const postCheckpoint = resumed.checkpoints[0]
+		const after = postCheckpoint?.frames[0]?.roleState.history ?? []
+		// Only the ask's tool result changes; the whole conversation prefix (and its prompt cache) is untouched.
+		expect(after.slice(0, before.length - 1)).toEqual(before.slice(0, before.length - 1))
+		expect(after[before.length - 1]).toEqual({ role: 'tool', content: '{"question":"Which database?","answer":"postgres"}', tool_call_id: 'ask_1' })
+		const answerEvent = resumed.events.find((event) => event.type === 'human_answer')
+		expect(answerEvent?.payload).toEqual({ id: 'ask_1', question: 'Which database?', answer: 'postgres' })
+		expect(resumed.parkTracker.parkedQuestion).toBeUndefined()
+		expect(resumed.parkTracker.parkedAsk).toBeUndefined()
+		const sent = resumeLlm.calls[0]?.messages ?? []
+		expect(sent.some((message) => message.role === 'tool' && message.content.includes('postgres'))).toBe(true)
+	})
+
+	test('a batched ask_human + agent turn dispatches the remaining calls after the answer', async () => {
+		const guild = buildParkGuild(
+			{
+				main: { systemPrompt: 'p', tools: ['ask_human', 'agent', 'finish'] },
+				coder: { systemPrompt: 'c', tools: ['finish'] },
+			},
+			'main',
+		)
+		const parkedLlm = new FakeLlm()
+		parkedLlm.responses = [success([askCall('Which database?'), agentCall('coder', 'do the work')])]
+		const parked = makeDeps(parkedLlm)
+		parked.parkTracker.queueTracked = true
+		await runRole(parked.deps, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'do it' })
+		const checkpoint = parked.checkpoints[parked.checkpoints.length - 1]
+		if (checkpoint === undefined) throw new Error('expected a parked checkpoint')
+		// The frozen checkpoint ends at the ask's tool result: the batch's agent call must not have dispatched.
+		const parkedToolMessages = checkpoint.frames[0]?.roleState.history.filter((message) => message.role === 'tool') ?? []
+		expect(parkedToolMessages).toEqual([{ role: 'tool', content: '{"question":"Which database?","parked":true}', tool_call_id: 'ask_1' }])
+
+		const resumeLlm = new FakeLlm()
+		resumeLlm.responses = [success([finishCall({ status: 'success', summary: 'child done' })]), success([finishCall({ status: 'success', summary: 'parent done' })])]
+		const resumed = makeDeps(resumeLlm)
+		resumed.parkTracker.queueTracked = true
+		resumed.parkTracker.parkedAsk = checkpoint.parkedAsk
+
+		const card = await resumeRoleStack(runRole, resumed.deps, guild, checkpoint, { parkedAnswer: { question: 'Which database?', answer: 'postgres', toolCallId: 'ask_1' } })
+
+		expect(card).toEqual({ status: 'success', summary: 'parent done' })
+		expect(resumed.events.some((event) => event.type === 'agent_call')).toBe(true)
+		expect(resumed.events.some((event) => event.type === 'role_start' && payloadField(event, 'role') === 'coder')).toBe(true)
+		expect(resumed.events.some((event) => event.type === 'human_answer')).toBe(true)
+	})
+
+	test('the unparked checkpoint is written only after the remaining call completes, and boot/error resumes re-enter a well-formed request', async () => {
+		const echoManifest: ToolManifest = { name: 'echo', description: 'Echoes its arguments.', parameters: { type: 'object', properties: {} } }
+		const guild = withTool(buildParkGuild({ main: { systemPrompt: 'p', tools: ['ask_human', 'echo', 'finish'] } }, 'main'), echoManifest)
+		const echoCall: ToolCall = { id: 'echo_1', type: 'function', function: { name: 'echo', arguments: '{"value":42}' } }
+		const parkedLlm = new FakeLlm()
+		parkedLlm.responses = [success([askCall('Which database?'), echoCall])]
+		const parked = makeDeps(parkedLlm)
+		parked.parkTracker.queueTracked = true
+		const parkedDeps: EngineDependencies = { ...parked.deps, toolPlatform: withExtraHandlers(parked.deps.toolPlatform, { echo: echoHandler }) }
+		await runRole(parkedDeps, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'do it' })
+		const checkpoint = parked.checkpoints[parked.checkpoints.length - 1]
+		if (checkpoint === undefined) throw new Error('expected a parked checkpoint')
+		expect(checkpoint.parkedAsk?.toolCallId).toBe('ask_1')
+		expect(checkpoint.frames[0]?.roleState.history.filter((message) => message.role === 'tool').map((message) => message.tool_call_id)).toEqual(['ask_1'])
+
+		const resumeLlm = new FakeLlm()
+		resumeLlm.responses = [success([finishCall({ status: 'success', summary: 'built it' })])]
+		const resumed = makeDeps(resumeLlm)
+		resumed.parkTracker.queueTracked = true
+		resumed.parkTracker.parkedAsk = checkpoint.parkedAsk
+		const resumedDeps: EngineDependencies = { ...resumed.deps, toolPlatform: withExtraHandlers(resumed.deps.toolPlatform, { echo: echoHandler }) }
+		const card = await resumeRoleStack(runRole, resumedDeps, guild, checkpoint, { parkedAnswer: { question: 'Which database?', answer: 'postgres', toolCallId: 'ask_1' } })
+
+		expect(card).toEqual({ status: 'success', summary: 'built it' })
+		const completed = resumed.checkpoints[0]
+		if (completed === undefined) throw new Error('expected the completed-turn checkpoint')
+		expect(completed.parkedAsk).toBeUndefined()
+		const completedTools = completed.frames[0]?.roleState.history.filter((message) => message.role === 'tool') ?? []
+		expect(completedTools.map((message) => message.tool_call_id)).toEqual(['ask_1', 'echo_1'])
+		expect(completedTools[1]?.content).toBe('{"value":42}')
+
+		const assertWellFormedToolCalls = (messages: Message[]): void => {
+			const unanswered = new Set<string>()
+			for (const message of messages) {
+				for (const call of message.tool_calls ?? []) unanswered.add(call.id)
+				if (message.role === 'tool' && message.tool_call_id !== undefined) unanswered.delete(message.tool_call_id)
+			}
+			expect([...unanswered]).toEqual([])
+		}
+
+		const bootLlm = new FakeLlm()
+		bootLlm.responses = [success([finishCall({ status: 'success', summary: 'boot done' })])]
+		const boot = makeDeps(bootLlm)
+		const bootDeps: EngineDependencies = { ...boot.deps, toolPlatform: withExtraHandlers(boot.deps.toolPlatform, { echo: echoHandler }) }
+		const bootCard = await resumeRoleStack(runRole, bootDeps, guild, structuredClone(completed))
+
+		expect(bootCard).toEqual({ status: 'success', summary: 'boot done' })
+		const bootMessages = bootLlm.calls[0]?.messages ?? []
+		assertWellFormedToolCalls(bootMessages)
+		expect(bootMessages.some((message) => message.role === 'tool' && message.tool_call_id === 'echo_1')).toBe(true)
+
+		const errorLlm = new FakeLlm()
+		errorLlm.responses = [success([finishCall({ status: 'success', summary: 'error resume done' })])]
+		const errorResume = makeDeps(errorLlm)
+		const errorDeps: EngineDependencies = { ...errorResume.deps, toolPlatform: withExtraHandlers(errorResume.deps.toolPlatform, { echo: echoHandler }) }
+		const errorCard = await resumeRoleStack(runRole, errorDeps, guild, structuredClone(completed), { resumeNote: 'The operator resumed this run after a failure. Message from the operator: carry on' })
+
+		expect(errorCard).toEqual({ status: 'success', summary: 'error resume done' })
+		assertWellFormedToolCalls(errorLlm.calls[0]?.messages ?? [])
+	})
+
+	test('a remaining call that spawns a child which parks keeps the new child park checkpoint', async () => {
+		const guild = buildParkGuild(
+			{
+				main: { systemPrompt: 'p', tools: ['ask_human', 'agent', 'finish'] },
+				coder: { systemPrompt: 'c', tools: ['ask_human', 'finish'] },
+			},
+			'main',
+		)
+		const parkedLlm = new FakeLlm()
+		parkedLlm.responses = [success([askCall('Which database?'), agentCall('coder', 'do the work')])]
+		const parked = makeDeps(parkedLlm)
+		parked.parkTracker.queueTracked = true
+		await runRole(parked.deps, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'do it' })
+		const checkpoint = parked.checkpoints[parked.checkpoints.length - 1]
+		if (checkpoint === undefined) throw new Error('expected a parked checkpoint')
+
+		const resumeLlm = new FakeLlm()
+		resumeLlm.responses = [success([{ id: 'ask_2', type: 'function', function: { name: 'ask_human', arguments: JSON.stringify({ question: 'And the port?' }) } }])]
+		const resumed = makeDeps(resumeLlm)
+		resumed.parkTracker.queueTracked = true
+		resumed.parkTracker.parkedAsk = checkpoint.parkedAsk
+		const card = await resumeRoleStack(runRole, resumed.deps, guild, checkpoint, { parkedAnswer: { question: 'Which database?', answer: 'postgres', toolCallId: 'ask_1' } })
+
+		expect(card.status).toBe('needs_clarification')
+		expect(card.summary).toBe('waiting for an answer to: And the port?')
+		const finalCheckpoint = resumed.checkpoints[resumed.checkpoints.length - 1]
+		expect(finalCheckpoint?.parkedAsk).toEqual({ roleId: 'coder-1-1', toolCallId: 'ask_2', question: 'And the port?' })
+		expect(finalCheckpoint?.frames.map((frame) => frame.roleName)).toEqual(['main', 'coder'])
+	})
+
+	test('an answer with the wrong tool call fails fast instead of writing a broken turn', async () => {
+		const guild = buildParkGuild({ main: { systemPrompt: 'p', tools: ['ask_human', 'finish'] } }, 'main')
+		const parkedLlm = new FakeLlm()
+		parkedLlm.responses = [success([askCall('Which database?')])]
+		const parked = makeDeps(parkedLlm)
+		parked.parkTracker.queueTracked = true
+		await runRole(parked.deps, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'do it' })
+		const checkpoint = parked.checkpoints[parked.checkpoints.length - 1]
+		if (checkpoint === undefined) throw new Error('expected a parked checkpoint')
+
+		const resumeLlm = new FakeLlm()
+		resumeLlm.responses = [success([finishCall({ status: 'success', summary: 'built it' })])]
+		const resumed = makeDeps(resumeLlm)
+		resumed.parkTracker.parkedAsk = checkpoint.parkedAsk
+
+		await expect(resumeRoleStack(runRole, resumed.deps, guild, checkpoint, { parkedAnswer: { question: 'Which database?', answer: 'postgres', toolCallId: 'other_call' } })).rejects.toThrow('no tool result for parked call other_call')
+	})
+
+	test('a re-park after an answer records the new tool call id', async () => {
+		const guild = buildParkGuild({ main: { systemPrompt: 'p', tools: ['ask_human', 'finish'] } }, 'main')
+		const parkedLlm = new FakeLlm()
+		parkedLlm.responses = [success([askCall('Which database?')])]
+		const parked = makeDeps(parkedLlm)
+		parked.parkTracker.queueTracked = true
+		await runRole(parked.deps, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'do it' })
+		const checkpoint = parked.checkpoints[parked.checkpoints.length - 1]
+		if (checkpoint === undefined) throw new Error('expected a parked checkpoint')
+
+		const reParkLlm = new FakeLlm()
+		reParkLlm.responses = [success([{ id: 'ask_2', type: 'function', function: { name: 'ask_human', arguments: JSON.stringify({ question: 'And the port?' }) } }])]
+		const resumed = makeDeps(reParkLlm)
+		resumed.parkTracker.queueTracked = true
+		resumed.parkTracker.parkedAsk = checkpoint.parkedAsk
+
+		const card = await resumeRoleStack(runRole, resumed.deps, guild, checkpoint, { parkedAnswer: { question: 'Which database?', answer: 'postgres', toolCallId: 'ask_1' } })
+
+		expect(card.status).toBe('needs_clarification')
+		const reParked = resumed.checkpoints.find((candidate) => candidate.parkedAsk?.toolCallId === 'ask_2')
+		expect(reParked?.parkedAsk).toEqual({ roleId: 'main-0-1', toolCallId: 'ask_2', question: 'And the port?' })
 	})
 })
 

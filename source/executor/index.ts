@@ -54,8 +54,8 @@ export type { InterruptChannel, InterruptQueue, InterruptRequest, InterruptSubmi
 export { createDeltaChannel } from './stream-channel.js'
 export type { DeltaChannel, DeltaField, DeltaSubscriber, RoleDelta, RunDelta } from './stream-channel.js'
 
-export { createRunSubmission, createResumeErroredRun } from './run-submission.js'
-export type { ResumeErroredRun, ResumeErroredRunDependencies, ResumeErroredRunRejection, ResumeErroredRunResult, ResumeRun, RunSubmission, RunSubmissionDependencies, StartRun, SubmitResult } from './run-submission.js'
+export { createRunSubmission, createResumeErroredRun, createReadParkedAskById, createResumeParkedRun } from './run-submission.js'
+export type { ReadParkedAskById, ResumeErroredRun, ResumeErroredRunDependencies, ResumeErroredRunRejection, ResumeErroredRunResult, ResumeParkedRun, ResumeParkedRunDependencies, ResumeParkedRunRejection, ResumeParkedRunResult, ResumeRun, ResumeRunInvocation, RunSubmission, RunSubmissionDependencies, StartRun, SubmitResult } from './run-submission.js'
 
 export { createTaskQueue } from './queue/index.js'
 export type {
@@ -77,7 +77,7 @@ export type {
 } from './queue/index.js'
 
 export { createRunParkTracker, isWriteCapableRole, parkCard, parkSummary, questionFromParkSummary, PARK_SUMMARY_PREFIX, WRITE_CAPABLE_TOOL_NAMES } from './park-state.js'
-export type { RunParkTracker } from './park-state.js'
+export type { ParkedAnswer, ParkedAsk, RunParkTracker } from './park-state.js'
 
 export { createRunBaseTracker } from './base-state.js'
 export type { RunBaseTracker } from './base-state.js'

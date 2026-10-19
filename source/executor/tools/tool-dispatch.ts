@@ -2,7 +2,8 @@ import { createToolError } from '../errors.js'
 import { isObject, safeJsonParse } from '../validation.js'
 import type { ToolCall, ToolResult } from '../types.js'
 
-export type ToolHandler = (args: Record<string, unknown>) => ToolResult | Promise<ToolResult>
+// call is the originating tool call; dispatch always supplies it, and an optional parameter keeps direct one-argument handler invocations (and one-parameter handler implementations) assignable.
+export type ToolHandler = (args: Record<string, unknown>, call?: ToolCall) => ToolResult | Promise<ToolResult>
 
 export interface ToolDispatch {
 	dispatch(call: ToolCall): Promise<ToolResult>
@@ -27,7 +28,7 @@ export function createToolDispatch(handlers: Record<string, ToolHandler>): ToolD
 		if (!isObject(parsed.value)) {
 			return createToolError('invalid_arguments', 'arguments must be a JSON object')
 		}
-		return await handler(parsed.value)
+		return await handler(parsed.value, call)
 	}
 	return { dispatch }
 }

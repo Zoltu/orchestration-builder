@@ -148,6 +148,21 @@ function buildLoadedGuild(roles: Record<string, RoleDefinition>, entryRole: stri
 	return { config, deployment, prompts, tools }
 }
 
+const askHumanManifest: ToolManifest = {
+	name: 'ask_human',
+	description: 'Ask a human a question.',
+	parameters: { type: 'object', required: ['question'], properties: { question: { type: 'string' } } },
+}
+
+function buildParkGuild(): LoadedGuild {
+	const guild = buildLoadedGuild({ main: { systemPrompt: 'p', tools: ['ask_human', 'finish'] } }, 'main')
+	return { ...guild, tools: { ...guild.tools, ask_human: askHumanManifest } }
+}
+
+function askToolCall(id: string, question: string): ToolCall {
+	return { id, type: 'function', function: { name: 'ask_human', arguments: JSON.stringify({ question }) } }
+}
+
 function makeDeps(llm: FakeLlm, persistence: FakePersistenceFns, loadedGuild: LoadedGuild): ExecutorDependencies {
 	const baseTracker = createRunBaseTracker()
 	return {
@@ -907,20 +922,10 @@ describe('resumeExecutor', () => {
 		expect(persistence.state.deleteCheckpointCalls).toBe(0)
 	})
 
-	test('a run that parks pre-write deletes its checkpoint — the answer flow continues it as a new run', async () => {
-		const askHumanManifest: ToolManifest = {
-			name: 'ask_human',
-			description: 'Ask a human a question.',
-			parameters: { type: 'object', required: ['question'], properties: { question: { type: 'string' } } },
-		}
-		const guild: LoadedGuild = {
-			config: { entryRole: 'main', roles: { main: { systemPrompt: 'p', tools: ['ask_human', 'finish'] } }, tools: [] },
-			deployment: { model: baseModel, executor: baseExecutor, contextPolicy: baseContextPolicy },
-			prompts: { main: 'prompt for main' },
-			tools: { finish: finishManifest, ask_human: askHumanManifest },
-		}
+	test('a run that parks pre-write keeps its frozen checkpoint for the queue answer', async () => {
+		const guild = buildParkGuild()
 		const llm = new FakeLlm()
-		llm.responses = [success([{ id: 'ask_1', type: 'function', function: { name: 'ask_human', arguments: JSON.stringify({ question: 'Which database?' }) } }])]
+		llm.responses = [success([askToolCall('ask_1', 'Which database?')])]
 		const persistence = makeFakePersistence()
 		const deps = makeDeps(llm, persistence, guild)
 
@@ -934,7 +939,176 @@ describe('resumeExecutor', () => {
 		})
 
 		expect(meta.status).toBe('needs_clarification')
+		expect(persistence.state.deleteCheckpointCalls).toBe(0)
+		const parked = persistence.state.checkpoints[persistence.state.checkpoints.length - 1]
+		expect(parked?.parkedAsk).toEqual({ roleId: 'main-0-1', toolCallId: 'ask_1', question: 'Which database?' })
+		expect(parked?.frames.map((frame) => frame.roleName)).toEqual(['main'])
+		expect(parked?.frames[0]?.roleState.history.at(-1)).toEqual({ role: 'tool', content: '{"question":"Which database?","parked":true}', tool_call_id: 'ask_1' })
+	})
+
+	test('a direct finish with needs_clarification deletes its checkpoint: there is nothing to resume', async () => {
+		const guild = buildLoadedGuild({ main: { systemPrompt: 'p', tools: ['finish'] } }, 'main')
+		const llm = new FakeLlm()
+		llm.responses = [success([{ id: 'f1', type: 'function', function: { name: 'finish', arguments: JSON.stringify({ status: 'needs_clarification', summary: 'I need a decision on the schema' }) } }])]
+		const persistence = makeFakePersistence()
+		const deps = makeDeps(llm, persistence, guild)
+
+		const meta = await runExecutor(deps, { runId: 'r-direct', guildPath: '/guild', task: 'do it', effort: 'standard', involvement: 'early-engagement' })
+
+		expect(meta.status).toBe('needs_clarification')
 		expect(persistence.state.deleteCheckpointCalls).toBe(1)
+	})
+
+	test('resuming a parked checkpoint with its answer delivers the answer and deletes the checkpoint on success', async () => {
+		const guild = buildParkGuild()
+		const parkedLlm = new FakeLlm()
+		parkedLlm.responses = [success([askToolCall('ask_1', 'Which database?')])]
+		const parkedPersistence = makeFakePersistence()
+		await runExecutor(makeDeps(parkedLlm, parkedPersistence, guild), { runId: 'r-answer', guildPath: '/guild', task: 'do it', effort: 'standard', involvement: 'early-engagement', queueTracked: true })
+		const checkpoint = parkedPersistence.state.checkpoints[parkedPersistence.state.checkpoints.length - 1]
+		if (checkpoint === undefined) throw new Error('expected a parked checkpoint')
+
+		const resumeLlm = new FakeLlm()
+		resumeLlm.responses = [success([{ id: 'f1', type: 'function', function: { name: 'finish', arguments: JSON.stringify({ status: 'success', summary: 'built it' }) } }])]
+		const resumePersistence = makeFakePersistence()
+		const meta = await resumeExecutor(makeDeps(resumeLlm, resumePersistence, guild), checkpoint, { guildPath: '/guild', benchmarkPath: '/bench', parkedAnswer: { question: 'Which database?', answer: 'postgres', toolCallId: 'ask_1' } })
+
+		expect(meta.status).toBe('success')
+		expect(resumePersistence.state.deleteCheckpointCalls).toBe(1)
+		expect(resumePersistence.state.events.some((event) => event.type === 'human_answer')).toBe(true)
+	})
+
+	test('a re-park after the answer keeps the new frozen checkpoint and restores queue tracking', async () => {
+		const guild = buildParkGuild()
+		const parkedLlm = new FakeLlm()
+		parkedLlm.responses = [success([askToolCall('ask_1', 'Which database?')])]
+		const parkedPersistence = makeFakePersistence()
+		await runExecutor(makeDeps(parkedLlm, parkedPersistence, guild), { runId: 'r-repark', guildPath: '/guild', task: 'do it', effort: 'standard', involvement: 'early-engagement', queueTracked: true })
+		const checkpoint = parkedPersistence.state.checkpoints[parkedPersistence.state.checkpoints.length - 1]
+		if (checkpoint === undefined) throw new Error('expected a parked checkpoint')
+
+		const resumeLlm = new FakeLlm()
+		resumeLlm.responses = [success([askToolCall('ask_2', 'And the port?')])]
+		const resumePersistence = makeFakePersistence()
+		const meta = await resumeExecutor(makeDeps(resumeLlm, resumePersistence, guild), checkpoint, { guildPath: '/guild', parkedAnswer: { question: 'Which database?', answer: 'postgres', toolCallId: 'ask_1' }, queueTracked: true })
+
+		expect(meta.status).toBe('needs_clarification')
+		expect(resumePersistence.state.deleteCheckpointCalls).toBe(0)
+		const reParked = resumePersistence.state.checkpoints.find((candidate) => candidate.parkedAsk?.toolCallId === 'ask_2')
+		expect(reParked?.parkedAsk).toEqual({ roleId: 'main-0-1', toolCallId: 'ask_2', question: 'And the port?' })
+	})
+
+	test('an answer-resumed batched turn that directly finishes needs_clarification deletes the checkpoint and keeps the new question', async () => {
+		const guild = buildParkGuild()
+		const parkedLlm = new FakeLlm()
+		parkedLlm.responses = [success([askToolCall('ask_1', 'Which database?'), { id: 'f1', type: 'function', function: { name: 'finish', arguments: JSON.stringify({ status: 'needs_clarification', summary: 'I need a decision on the schema' }) } }])]
+		const parkedPersistence = makeFakePersistence()
+		await runExecutor(makeDeps(parkedLlm, parkedPersistence, guild), { runId: 'r-direct-answer', guildPath: '/guild', task: 'do it', effort: 'standard', involvement: 'early-engagement', queueTracked: true })
+		const checkpoint = parkedPersistence.state.checkpoints[parkedPersistence.state.checkpoints.length - 1]
+		if (checkpoint === undefined) throw new Error('expected a parked checkpoint')
+		expect(checkpoint.parkedAsk?.toolCallId).toBe('ask_1')
+
+		const resumeLlm = new FakeLlm()
+		const resumePersistence = makeFakePersistence()
+		const meta = await resumeExecutor(makeDeps(resumeLlm, resumePersistence, guild), checkpoint, { guildPath: '/guild', parkedAnswer: { question: 'Which database?', answer: 'postgres', toolCallId: 'ask_1' } })
+
+		expect(meta.status).toBe('needs_clarification')
+		expect(meta.result?.summary).toBe('I need a decision on the schema')
+		expect(resumePersistence.state.deleteCheckpointCalls).toBe(1)
+	})
+
+	test('an answer-resumed run that immediately errors keeps an unparked checkpoint the error resume can re-enter', async () => {
+		const guild = buildParkGuild()
+		const parkedLlm = new FakeLlm()
+		parkedLlm.responses = [success([askToolCall('ask_1', 'Which database?'), { id: 'f1', type: 'function', function: { name: 'finish', arguments: JSON.stringify({ status: 'error', summary: 'the endpoint is down', error: { kind: 'llm_unavailable', message: 'connection refused' } }) } }])]
+		const parkedPersistence = makeFakePersistence()
+		await runExecutor(makeDeps(parkedLlm, parkedPersistence, guild), { runId: 'r-error-answer', guildPath: '/guild', task: 'do it', effort: 'standard', involvement: 'early-engagement', queueTracked: true })
+		const parkedCheckpoint = parkedPersistence.state.checkpoints[parkedPersistence.state.checkpoints.length - 1]
+		if (parkedCheckpoint === undefined) throw new Error('expected a parked checkpoint')
+		expect(parkedCheckpoint.parkedAsk?.toolCallId).toBe('ask_1')
+
+		const answerLlm = new FakeLlm()
+		const answerPersistence = makeFakePersistence()
+		const errored = await resumeExecutor(makeDeps(answerLlm, answerPersistence, guild), parkedCheckpoint, { guildPath: '/guild', parkedAnswer: { question: 'Which database?', answer: 'postgres', toolCallId: 'ask_1' } })
+
+		expect(errored.status).toBe('error')
+		expect(answerPersistence.state.deleteCheckpointCalls).toBe(0)
+		const errorCheckpoint = answerPersistence.state.checkpoints[answerPersistence.state.checkpoints.length - 1]
+		if (errorCheckpoint === undefined) throw new Error('expected the kept error checkpoint')
+		expect(errorCheckpoint.parkedAsk).toBeUndefined()
+		const toolMessages = errorCheckpoint.frames[0]?.roleState.history.filter((message) => message.role === 'tool') ?? []
+		expect(toolMessages.map((message) => message.tool_call_id)).toEqual(['ask_1', 'f1'])
+		expect(toolMessages[0]?.content).toBe('{"question":"Which database?","answer":"postgres"}')
+		expect(toolMessages[1]?.content).toContain('the endpoint is down')
+
+		const retryLlm = new FakeLlm()
+		retryLlm.responses = [success([{ id: 'f2', type: 'function', function: { name: 'finish', arguments: JSON.stringify({ status: 'success', summary: 'recovered' }) } }])]
+		const recovered = await resumeExecutor(makeDeps(retryLlm, makeFakePersistence(), guild), errorCheckpoint, { guildPath: '/guild', operatorNote: 'The operator resumed this run after a failure. Message from the operator: carry on' })
+
+		expect(recovered.status).toBe('success')
+	})
+
+	test('a parked checkpoint resumed without an answer, or with a mismatched one, fails fast', async () => {
+		const guild = buildParkGuild()
+		const parkedLlm = new FakeLlm()
+		parkedLlm.responses = [success([askToolCall('ask_1', 'Which database?')])]
+		const parkedPersistence = makeFakePersistence()
+		await runExecutor(makeDeps(parkedLlm, parkedPersistence, guild), { runId: 'r-mismatch', guildPath: '/guild', task: 'do it', effort: 'standard', involvement: 'early-engagement', queueTracked: true })
+		const checkpoint = parkedPersistence.state.checkpoints[parkedPersistence.state.checkpoints.length - 1]
+		if (checkpoint === undefined) throw new Error('expected a parked checkpoint')
+
+		const noAnswer = makeDeps(new FakeLlm(), makeFakePersistence(), guild)
+		await expect(resumeExecutor(noAnswer, checkpoint, { guildPath: '/guild' })).rejects.toThrow('must be resumed with its answer')
+
+		const wrongQuestion = makeDeps(new FakeLlm(), makeFakePersistence(), guild)
+		await expect(resumeExecutor(wrongQuestion, checkpoint, { guildPath: '/guild', parkedAnswer: { question: 'Something else?', answer: 'postgres', toolCallId: 'ask_1' } })).rejects.toThrow('does not match the parked question')
+
+		const wrongCall = makeDeps(new FakeLlm(), makeFakePersistence(), guild)
+		await expect(resumeExecutor(wrongCall, checkpoint, { guildPath: '/guild', parkedAnswer: { question: 'Which database?', answer: 'postgres', toolCallId: 'other_call' } })).rejects.toThrow('does not match the parked call')
+	})
+
+	test('a boot-resumed run stays untracked: its pre-write ask blocks instead of parking', async () => {
+		const guild = buildParkGuild()
+		const parkedLlm = new FakeLlm()
+		parkedLlm.responses = [success([askToolCall('ask_1', 'Which database?')])]
+		const parkedPersistence = makeFakePersistence()
+		await runExecutor(makeDeps(parkedLlm, parkedPersistence, guild), { runId: 'r-boot', guildPath: '/guild', task: 'do it', effort: 'standard', involvement: 'early-engagement', queueTracked: true })
+		const checkpoint = parkedPersistence.state.checkpoints[parkedPersistence.state.checkpoints.length - 1]
+		if (checkpoint === undefined) throw new Error('expected a parked checkpoint')
+		const { parkedAsk: _parkedAsk, ...unparkedCheckpoint } = checkpoint
+
+		const human = recordingHumanBackend()
+		const resumeLlm = new FakeLlm()
+		resumeLlm.responses = [success([askToolCall('ask_2', 'Which database?')]), success([{ id: 'f1', type: 'function', function: { name: 'finish', arguments: JSON.stringify({ status: 'success', summary: 'done' }) } }])]
+		const resumeDeps = makeDeps(resumeLlm, makeFakePersistence(), guild)
+		resumeDeps.humanBackend = human
+
+		const meta = await resumeExecutor(resumeDeps, unparkedCheckpoint, { guildPath: '/guild' })
+
+		expect(meta.status).toBe('success')
+		expect(human.questions).toEqual([{ question: 'Which database?', context: undefined }])
+	})
+
+	test('an error resume stays untracked: its pre-write ask blocks instead of parking', async () => {
+		const guild = buildParkGuild()
+		const parkedLlm = new FakeLlm()
+		parkedLlm.responses = [success([askToolCall('ask_1', 'Which database?')])]
+		const parkedPersistence = makeFakePersistence()
+		await runExecutor(makeDeps(parkedLlm, parkedPersistence, guild), { runId: 'r-error-resume', guildPath: '/guild', task: 'do it', effort: 'standard', involvement: 'early-engagement', queueTracked: true })
+		const checkpoint = parkedPersistence.state.checkpoints[parkedPersistence.state.checkpoints.length - 1]
+		if (checkpoint === undefined) throw new Error('expected a parked checkpoint')
+		const { parkedAsk: _parkedAsk, ...unparkedCheckpoint } = checkpoint
+
+		const human = recordingHumanBackend()
+		const resumeLlm = new FakeLlm()
+		resumeLlm.responses = [success([askToolCall('ask_2', 'Which database?')]), success([{ id: 'f1', type: 'function', function: { name: 'finish', arguments: JSON.stringify({ status: 'success', summary: 'done' }) } }])]
+		const resumeDeps = makeDeps(resumeLlm, makeFakePersistence(), guild)
+		resumeDeps.humanBackend = human
+
+		const meta = await resumeExecutor(resumeDeps, unparkedCheckpoint, { guildPath: '/guild', operatorNote: 'The operator resumed this run after a failure. Message from the operator: carry on' })
+
+		expect(meta.status).toBe('success')
+		expect(human.questions).toEqual([{ question: 'Which database?', context: undefined }])
 	})
 
 	test('a resumed run that ends in error also keeps its checkpoint, so it stays resumable', async () => {

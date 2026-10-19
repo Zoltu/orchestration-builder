@@ -43,6 +43,33 @@ function continueAgentToolCall(id: string = 'continue_1'): ToolCall {
 	}
 }
 
+function askToolCall(id: string = 'ask_1', question: string = 'which database?'): ToolCall {
+	return { id, type: 'function', function: { name: 'ask_human', arguments: JSON.stringify({ question }) } }
+}
+
+function parkedCheckpoint(): RunCheckpoint {
+	const checkpoint = sampleCheckpoint()
+	checkpoint.frames = [
+		{
+			roleId: 'main-0-1',
+			roleName: 'main',
+			depth: 0,
+			task: 'do it',
+			roleState: sampleRoleState({
+				history: [
+					{ role: 'system', content: 'prompt' },
+					{ role: 'user', content: 'do it' },
+					{ role: 'assistant', content: '', tool_calls: [askToolCall()] },
+					{ role: 'tool', content: '{"question":"which database?","parked":true}', tool_call_id: 'ask_1' },
+				],
+				toolCallCount: 1,
+			}),
+		},
+	]
+	checkpoint.parkedAsk = { roleId: 'main-0-1', toolCallId: 'ask_1', question: 'which database?' }
+	return checkpoint
+}
+
 function sampleCheckpoint(): RunCheckpoint {
 	return {
 		version: 1,
@@ -266,6 +293,78 @@ describe('isRunCheckpoint', () => {
 		expect(isRunCheckpoint(lying)).toBe(false)
 	})
 
+	test('accepts a well-formed parked ask and round-trips it through JSON', () => {
+		const checkpoint = parkedCheckpoint()
+		expect(isRunCheckpoint(checkpoint)).toBe(true)
+		const copy: unknown = JSON.parse(JSON.stringify(checkpoint))
+		expect(isRunCheckpoint(copy)).toBe(true)
+	})
+
+	test('rejects a malformed parked ask', () => {
+		for (const parkedAsk of [
+			{ roleId: '', toolCallId: 'ask_1', question: 'q' },
+			{ roleId: 'main-0-1', toolCallId: '', question: 'q' },
+			{ roleId: 'main-0-1', toolCallId: 'ask_1', question: '' },
+			{ roleId: 1, toolCallId: 'ask_1', question: 'q' },
+			{ roleId: 'main-0-1', question: 'q' },
+		]) {
+			expect(isRunCheckpoint({ ...parkedCheckpoint(), parkedAsk })).toBe(false)
+		}
+	})
+
+	test('rejects a parked ask whose role is not the leaf', () => {
+		const checkpoint = parkedCheckpoint()
+		checkpoint.parkedAsk = { roleId: 'someone-else', toolCallId: 'ask_1', question: 'which database?' }
+		expect(isRunCheckpoint(checkpoint)).toBe(false)
+	})
+
+	test('rejects a parked ask on a leaf with a pending suspension', () => {
+		const checkpoint = parkedCheckpoint()
+		const leaf = checkpoint.frames[0]
+		if (leaf === undefined) throw new Error('missing leaf')
+		leaf.pending = { toolCalls: [agentToolCall()], childIndex: 0, childCard: { status: 'success', summary: 'done' } }
+		expect(isRunCheckpoint(checkpoint)).toBe(false)
+	})
+
+	test('rejects a parked ask whose last message is not its tool result', () => {
+		const checkpoint = parkedCheckpoint()
+		const leaf = checkpoint.frames[0]
+		if (leaf === undefined) throw new Error('missing leaf')
+		leaf.roleState.history.push({ role: 'assistant', content: 'continued' })
+		expect(isRunCheckpoint(checkpoint)).toBe(false)
+	})
+
+	test('rejects a parked ask with no assistant tool call carrying its id', () => {
+		const checkpoint = parkedCheckpoint()
+		const leaf = checkpoint.frames[0]
+		if (leaf === undefined) throw new Error('missing leaf')
+		leaf.roleState.history = [
+			{ role: 'system', content: 'prompt' },
+			{ role: 'user', content: 'do it' },
+			{ role: 'tool', content: '{}', tool_call_id: 'ask_1' },
+		]
+		expect(isRunCheckpoint(checkpoint)).toBe(false)
+	})
+
+	test('rejects a parked ask whose matching call is not ask_human, asks another question, or has malformed arguments', () => {
+		const withAskCall = (call: ToolCall): RunCheckpoint => {
+			const checkpoint = parkedCheckpoint()
+			const leaf = checkpoint.frames[0]
+			if (leaf === undefined) throw new Error('missing leaf')
+			leaf.roleState.history = [
+				{ role: 'system', content: 'prompt' },
+				{ role: 'user', content: 'do it' },
+				{ role: 'assistant', content: '', tool_calls: [call] },
+				{ role: 'tool', content: '{}', tool_call_id: call.id },
+			]
+			return checkpoint
+		}
+
+		expect(isRunCheckpoint(withAskCall({ ...askToolCall(), function: { name: 'finish', arguments: '{"question":"which database?"}' } }))).toBe(false)
+		expect(isRunCheckpoint(withAskCall(askToolCall('ask_1', 'a different question')))).toBe(false)
+		expect(isRunCheckpoint(withAskCall({ ...askToolCall(), function: { name: 'ask_human', arguments: '{not json' } }))).toBe(false)
+	})
+
 	test('rejects a malformed logging level', () => {
 		const checkpoint = sampleCheckpoint()
 		const root = checkpoint.frames[0]
@@ -375,11 +474,11 @@ describe('createCheckpointRecorder', () => {
 		const handlerContext = frameContext('loop_detector', 1, { parent: 'main', parentRoleId: 'main-0-1', handlerOf: 'main-0-1' })
 		const handlerEntry = registry.register('loop_detector', 1, 'main-0-1', sampleRoleState())
 		recorder.registerFrame(handlerContext, handlerEntry)
-		recorder.write()
+		expect(recorder.write()).toBe(false)
 		expect(written.length).toBe(0)
 
 		recorder.unregisterFrame(handlerEntry.roleId)
-		recorder.write()
+		expect(recorder.write()).toBe(true)
 		expect(written.length).toBe(1)
 		expect(written[0]?.frames.map((frame: CheckpointFrame) => frame.roleName)).toEqual(['main'])
 	})
@@ -538,5 +637,58 @@ describe('createCheckpointRecorder', () => {
 		expect(isRunCheckpoint({ ...checkpoint, baseHash: 'abc123' })).toBe(true)
 		expect(isRunCheckpoint({ ...checkpoint, baseHash: '' })).toBe(false)
 		expect(isRunCheckpoint({ ...checkpoint, baseHash: 42 })).toBe(false)
+	})
+
+	test('serializes the parked ask from the tracker alongside the turn that produced it', () => {
+		const written: RunCheckpoint[] = []
+		const registry = createRoleRegistry()
+		const parkTracker = createRunParkTracker()
+		const recorder = createCheckpointRecorder({ parkTracker, baseTracker: createRunBaseTracker(), writeCheckpoint: (c) => written.push(c), runId: 'run-1', startTime: '2026-01-01T00:00:00.000Z', roleRegistry: registry, contextPressureTracker: createContextPressureTracker() })
+		const entry = registerRoot(recorder, registry)
+		entry.roleState.history = [
+			{ role: 'system', content: 'prompt' },
+			{ role: 'user', content: 'task' },
+			{ role: 'assistant', content: '', tool_calls: [askToolCall()] },
+			{ role: 'tool', content: '{"question":"which database?","parked":true}', tool_call_id: 'ask_1' },
+		]
+		parkTracker.parkedAsk = { roleId: entry.roleId, toolCallId: 'ask_1', question: 'which database?' }
+
+		recorder.write()
+
+		expect(written[0]?.parkedAsk).toEqual({ roleId: entry.roleId, toolCallId: 'ask_1', question: 'which database?' })
+	})
+
+	test('freeze pins the parked checkpoint: later writes are ignored and freezing again is a no-op', () => {
+		const written: RunCheckpoint[] = []
+		const registry = createRoleRegistry()
+		const recorder = createCheckpointRecorder({
+			parkTracker: createRunParkTracker(),
+			baseTracker: createRunBaseTracker(),
+			writeCheckpoint: (checkpoint) => {
+				const copy: unknown = JSON.parse(JSON.stringify(checkpoint))
+				if (!isRunCheckpoint(copy)) throw new Error('checkpoint recorder produced a checkpoint its own guard rejects')
+				written.push(copy)
+			},
+			runId: 'run-1',
+			startTime: '2026-01-01T00:00:00.000Z',
+			roleRegistry: registry,
+			contextPressureTracker: createContextPressureTracker(),
+		})
+		const entry = registerRoot(recorder, registry)
+
+		expect(recorder.write()).toBe(true)
+		recorder.freeze()
+		entry.roleState.toolCallCount = 99
+		expect(recorder.write()).toBe(false)
+		recorder.freeze()
+		expect(recorder.write()).toBe(false)
+
+		expect(written.length).toBe(1)
+		expect(written[0]?.frames[0]?.roleState.toolCallCount).toBe(0)
+
+		recorder.unfreeze()
+		expect(recorder.write()).toBe(true)
+		expect(written.length).toBe(2)
+		expect(written[1]?.frames[0]?.roleState.toolCallCount).toBe(99)
 	})
 })

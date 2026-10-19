@@ -5,7 +5,7 @@ import type { EffortLevel, InvolvementLevel, LogLevel, RunContinuation, RunMeta 
 import type { ReadProjectSettings, ReadRunCheckpointById, ReadRunMetaById, RunDirectoryExists } from './persistence.ts'
 import { DEFAULT_EFFORT } from './effort.ts'
 import { DEFAULT_INVOLVEMENT } from './involvement.ts'
-import { createResumeErroredRun, createRunSubmission, type ResumeErroredRunDependencies, type ResumeRun, type RunSubmission, type StartRun } from './run-submission.ts'
+import { createReadParkedAskById, createResumeErroredRun, createResumeParkedRun, createRunSubmission, type ResumeErroredRunDependencies, type ResumeRun, type RunSubmission, type StartRun } from './run-submission.ts'
 import { createTaskQueue, type QueueItemView, type QueueView, type TaskQueueModule } from './queue/index.ts'
 import { defined, flushMicrotasks } from './test-fixtures.ts'
 
@@ -18,6 +18,40 @@ function sampleMeta(runId: string): RunMeta {
 		status: 'success',
 		startTime: '2026-01-01T00:00:00.000Z',
 		endTime: '2026-01-01T00:01:00.000Z',
+	}
+}
+
+function parkedCheckpointFor(runId: string): RunCheckpoint {
+	return {
+		version: 1,
+		runId,
+		startTime: '2026-01-01T00:00:00.000Z',
+		registryCounter: 1,
+		parkedAsk: { roleId: 'main-0-1', toolCallId: 'ask_1', question: 'which database?' },
+		frames: [
+			{
+				roleId: 'main-0-1',
+				roleName: 'main',
+				depth: 0,
+				task: 'do it',
+				roleState: {
+					history: [
+						{ role: 'system', content: 'prompt' },
+						{ role: 'user', content: 'do it' },
+						{ role: 'assistant', content: '', tool_calls: [{ id: 'ask_1', type: 'function', function: { name: 'ask_human', arguments: '{"question":"which database?"}' } }] },
+						{ role: 'tool', content: '{"question":"which database?","parked":true}', tool_call_id: 'ask_1' },
+					],
+					lastPromptTokens: 0,
+					recentCompactionPromptTokens: [],
+					recentToolCalls: [],
+					toolCallCount: 1,
+					generatedTokens: 0,
+					contextExceededAttempts: 0,
+					loopCheckToolCallWatermark: 0,
+					loopCheckTokenWatermark: 0,
+				},
+			},
+		],
 	}
 }
 
@@ -328,19 +362,37 @@ describe('createRunSubmission resume', () => {
 
 	test('resume threads the operator note through to resumeRun, and no note when none is given', async () => {
 		const notes: Array<string | undefined> = []
-		const resumeRun: ResumeRun = async (_checkpoint, resumeNote) => {
-			notes.push(resumeNote)
+		const resumeRun: ResumeRun = async (_checkpoint, options) => {
+			notes.push(options?.resumeNote)
 			return sampleMeta('run-20260101-000009')
 		}
 		const submission = createRunSubmission({ onRunSettled: settleNothing, startRun: unusedStartRun, resumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings, runDirectoryExists: emptyRunsDir })
 
-		submission.resume(sampleCheckpoint('run-20260101-000009'), 'The operator resumed this run after a failure. Message from the operator: try again')
+		submission.resume(sampleCheckpoint('run-20260101-000009'), { resumeNote: 'The operator resumed this run after a failure. Message from the operator: try again' })
 		await submission.awaitActive()
 		expect(notes).toEqual(['The operator resumed this run after a failure. Message from the operator: try again'])
 
 		submission.resume(sampleCheckpoint('run-20260101-000009'))
 		await submission.awaitActive()
 		expect(notes[1]).toBeUndefined()
+	})
+
+	test('resume forwards the parked answer and the queue-tracked mark', async () => {
+		const seen: Array<{ parkedAnswer?: unknown; queueTracked?: boolean }> = []
+		const resumeRun: ResumeRun = async (_checkpoint, options) => {
+			seen.push({
+				...(options?.parkedAnswer !== undefined ? { parkedAnswer: options.parkedAnswer } : {}),
+				...(options?.queueTracked !== undefined ? { queueTracked: options.queueTracked } : {}),
+			})
+			return sampleMeta('run-20260101-000009')
+		}
+		const submission = createRunSubmission({ onRunSettled: settleNothing, startRun: unusedStartRun, resumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings, runDirectoryExists: emptyRunsDir })
+		const parkedAnswer = { question: 'which database?', answer: 'postgres', toolCallId: 'ask_1' }
+
+		submission.resume(sampleCheckpoint('run-20260101-000009'), { parkedAnswer, queueTracked: true })
+		await submission.awaitActive()
+
+		expect(seen).toEqual([{ parkedAnswer, queueTracked: true }])
 	})
 })
 
@@ -741,6 +793,8 @@ describe('createResumeErroredRun', () => {
 			readRunListSummary: () => {
 				throw new Error('the resume path does not assemble a briefing')
 			},
+			readParkedAskById: () => null,
+			resumeParkedRun: () => ({ ok: false, error: 'checkpoint_missing' }),
 			submitRun: () => {
 				throw new Error('the resume path does not dispatch')
 			},
@@ -770,8 +824,8 @@ describe('createResumeErroredRun', () => {
 		const queue = createQueueStore(input.queue ?? [])
 		const readers = createReaders(input.metas, input.checkpoints)
 		let resumeNote: string | undefined
-		const resumeRun: ResumeRun = async (checkpoint, note) => {
-			resumeNote = note
+		const resumeRun: ResumeRun = async (checkpoint, options) => {
+			resumeNote = options?.resumeNote
 			return sampleMeta(checkpoint.runId)
 		}
 		const submission = createRunSubmission({ onRunSettled: settleNothing, startRun: unusedStartRun, resumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings, runDirectoryExists: emptyRunsDir })
@@ -846,6 +900,15 @@ describe('createResumeErroredRun', () => {
 		expect(misnamedHarness.resumeErroredRun('run-20260101-000009', undefined)).toEqual({ ok: false, error: 'checkpoint_missing' })
 	})
 
+	test('rejects a parked checkpoint as checkpoint_missing — the error resume never re-enters a park', () => {
+		const metas = new Map([['run-20260101-000009', JSON.stringify(erroredMeta('run-20260101-000009'))]])
+		const checkpoints = new Map([['run-20260101-000009', JSON.stringify(parkedCheckpointFor('run-20260101-000009'))]])
+		const harness = createHarness({ metas, checkpoints })
+
+		expect(harness.resumeErroredRun('run-20260101-000009', undefined)).toEqual({ ok: false, error: 'checkpoint_missing' })
+		expect(harness.submission.activeRunId()).toBeUndefined()
+	})
+
 	test('rejects while a run is active, before any queue or checkpoint read', async () => {
 		let resolveRun: (meta: RunMeta) => void = () => {}
 		const startRun: StartRun = () => new Promise<RunMeta>((resolve) => {
@@ -863,5 +926,112 @@ describe('createResumeErroredRun', () => {
 
 		resolveRun(sampleMeta('run-1'))
 		await submission.awaitActive()
+	})
+})
+
+describe('createReadParkedAskById', () => {
+	test('reads the parked ask from a matching checkpoint and treats every absent or corrupt shape as no ask', () => {
+		const readCheckpointById: ReadRunCheckpointById = (runId) => {
+			if (runId === 'run-parked') return JSON.stringify(parkedCheckpointFor('run-parked'))
+			if (runId === 'run-unparked') {
+				const checkpoint: RunCheckpoint = { ...parkedCheckpointFor('run-unparked') }
+				delete checkpoint.parkedAsk
+				return JSON.stringify(checkpoint)
+			}
+			if (runId === 'run-corrupt') return '{not json'
+			if (runId === 'run-mismatched') return JSON.stringify(parkedCheckpointFor('run-other'))
+			return null
+		}
+		const readParkedAskById = createReadParkedAskById(readCheckpointById)
+
+		expect(readParkedAskById('run-parked')).toEqual({ roleId: 'main-0-1', toolCallId: 'ask_1', question: 'which database?' })
+		expect(readParkedAskById('run-unparked')).toBeNull()
+		expect(readParkedAskById('run-corrupt')).toBeNull()
+		expect(readParkedAskById('run-mismatched')).toBeNull()
+		expect(readParkedAskById('run-missing')).toBeNull()
+	})
+})
+
+describe('createResumeParkedRun', () => {
+	function parkedMeta(runId: string): RunMeta {
+		return { ...sampleMeta(runId), status: 'needs_clarification', result: { status: 'needs_clarification', summary: 'waiting for an answer to: which database?' } }
+	}
+
+	function harness(input: { metas?: Map<string, string>, checkpoints?: Map<string, string> } = {}): { resumeParkedRun: ReturnType<typeof createResumeParkedRun>; submission: RunSubmission; resumeCalls: Array<{ parkedAnswer: unknown, queueTracked: boolean | undefined }> } {
+		const metas = input.metas ?? new Map()
+		const checkpoints = input.checkpoints ?? new Map()
+		const resumeCalls: Array<{ parkedAnswer: unknown, queueTracked: boolean | undefined }> = []
+		const resumeRun: ResumeRun = async (checkpoint, options) => {
+			resumeCalls.push({ parkedAnswer: options?.parkedAnswer, queueTracked: options?.queueTracked })
+			return parkedMeta(checkpoint.runId)
+		}
+		const submission = createRunSubmission({ onRunSettled: settleNothing, startRun: unusedStartRun, resumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings, runDirectoryExists: emptyRunsDir })
+		const resumeParkedRun = createResumeParkedRun({
+			runSubmission: submission,
+			readRunMetaById: (runId) => metas.get(runId) ?? null,
+			readCheckpointById: (runId) => checkpoints.get(runId) ?? null,
+		})
+		return { resumeParkedRun, submission, resumeCalls }
+	}
+
+	const answer = { question: 'which database?', answer: 'postgres', toolCallId: 'ask_1' }
+
+	test('rejects while a run is active', async () => {
+		let resolveRun: (meta: RunMeta) => void = () => {}
+		const resumeRun: ResumeRun = () => new Promise<RunMeta>((resolve) => {
+			resolveRun = resolve
+		})
+		const submission = createRunSubmission({ onRunSettled: settleNothing, startRun: unusedStartRun, resumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings, runDirectoryExists: emptyRunsDir })
+		const resumeParkedRun = createResumeParkedRun({ runSubmission: submission, readRunMetaById: () => null, readCheckpointById: () => null })
+
+		submission.resume(parkedCheckpointFor('run-active'))
+		expect(resumeParkedRun('run-active', answer)).toEqual({ ok: false, error: 'run_in_progress' })
+		resolveRun(sampleMeta('run-active'))
+		await submission.awaitActive()
+	})
+
+	test('rejects a missing or unparseable meta with checkpoint_missing', () => {
+		const missing = harness()
+		expect(missing.resumeParkedRun('run-1', answer)).toEqual({ ok: false, error: 'checkpoint_missing' })
+		const corrupt = harness({ metas: new Map([['run-1', '{not json']]) })
+		expect(corrupt.resumeParkedRun('run-1', answer)).toEqual({ ok: false, error: 'checkpoint_missing' })
+	})
+
+	test('rejects a non-needs_clarification meta with not_parked', () => {
+		const testHarness = harness({ metas: new Map([['run-1', JSON.stringify(sampleMeta('run-1'))]]) })
+		expect(testHarness.resumeParkedRun('run-1', answer)).toEqual({ ok: false, error: 'not_parked' })
+	})
+
+	test('rejects a missing, corrupt, or mismatched checkpoint with checkpoint_missing', () => {
+		const metas = new Map([['run-1', JSON.stringify(parkedMeta('run-1'))]])
+		const missing = harness({ metas })
+		expect(missing.resumeParkedRun('run-1', answer)).toEqual({ ok: false, error: 'checkpoint_missing' })
+		const corrupt = harness({ metas, checkpoints: new Map([['run-1', '{not json']]) })
+		expect(corrupt.resumeParkedRun('run-1', answer)).toEqual({ ok: false, error: 'checkpoint_missing' })
+		const mismatched = harness({ metas, checkpoints: new Map([['run-1', JSON.stringify(parkedCheckpointFor('run-other'))]]) })
+		expect(mismatched.resumeParkedRun('run-1', answer)).toEqual({ ok: false, error: 'checkpoint_missing' })
+	})
+
+	test('rejects an unparked checkpoint or a mismatched question with not_parked', () => {
+		const metas = new Map([['run-1', JSON.stringify(parkedMeta('run-1'))]])
+		const unparkedCheckpoint = { ...parkedCheckpointFor('run-1') }
+		delete unparkedCheckpoint.parkedAsk
+		const unparked = harness({ metas, checkpoints: new Map([['run-1', JSON.stringify(unparkedCheckpoint)]]) })
+		expect(unparked.resumeParkedRun('run-1', answer)).toEqual({ ok: false, error: 'not_parked' })
+		const mismatched = harness({ metas, checkpoints: new Map([['run-1', JSON.stringify(parkedCheckpointFor('run-1'))]]) })
+		expect(mismatched.resumeParkedRun('run-1', { ...answer, question: 'something else?' })).toEqual({ ok: false, error: 'not_parked' })
+		const staleCall = harness({ metas, checkpoints: new Map([['run-1', JSON.stringify(parkedCheckpointFor('run-1'))]]) })
+		expect(staleCall.resumeParkedRun('run-1', { ...answer, toolCallId: 'ask_old' })).toEqual({ ok: false, error: 'not_parked' })
+	})
+
+	test('resumes the same run with the answer and the restored queue-tracked mark', async () => {
+		const metas = new Map([['run-1', JSON.stringify(parkedMeta('run-1'))]])
+		const checkpoints = new Map([['run-1', JSON.stringify(parkedCheckpointFor('run-1'))]])
+		const testHarness = harness({ metas, checkpoints })
+
+		expect(testHarness.resumeParkedRun('run-1', answer)).toEqual({ ok: true, runId: 'run-1' })
+		expect(testHarness.submission.activeRunId()).toBe('run-1')
+		expect(testHarness.resumeCalls).toEqual([{ parkedAnswer: answer, queueTracked: true }])
+		await testHarness.submission.awaitActive()
 	})
 })

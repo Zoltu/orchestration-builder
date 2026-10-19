@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test'
-import { createTaskQueue, type QueueItemView, type QueueView } from './index.ts'
+import { createTaskQueue, type QueueItemView, type QueueView, type ResumeParkedRunResult } from './index.ts'
+import type { ParkedAsk } from '../park-state.js'
 import type { RunContinuation, RunMeta } from '../types.js'
 
 type QueuedRunSubmitResult = { ok: true; runId: string } | { ok: false; error: 'run_in_progress' | 'run_id_collision' }
@@ -45,7 +46,7 @@ function parseQueueText(text: string | null): QueueView {
 }
 
 // The text-only queue store standing in for the filesystem leaves: writes are recorded as text so tests can assert the exact write sequence and decoded views.
-function fakeQueueStore(initial: QueueItemView[] = []): { store: { read: () => string | null; write: (contents: string) => void }; writes: string[]; items: () => readonly QueueItemView[]; written: () => QueueView[]; readCount: () => number } {
+function fakeQueueStore(initial: QueueSeedItem[] = []): { store: { read: () => string | null; write: (contents: string) => void }; writes: string[]; items: () => readonly QueueItemView[]; written: () => QueueView[]; readCount: () => number } {
 	let current: string | null = initial.length === 0 ? null : JSON.stringify({ items: initial })
 	let reads = 0
 	const writes: string[] = []
@@ -77,6 +78,11 @@ function fakeSubmit(scripted: QueuedRunSubmitResult[]): { submitRun: SubmitQueue
 		return next
 	}
 	return { calls, submitRun }
+}
+
+interface QueueSeedItem extends QueueItemView {
+	resumeRunId?: string
+	resumeToolCallId?: string
 }
 
 function waitingItem(overrides: Partial<QueueItemView> = {}): QueueItemView {
@@ -130,19 +136,26 @@ const NOW = '2026-01-01T03:00:00.000Z'
 const MAX_COLLISION_RETRIES = 3
 const COLLISION_RETRY_DELAY_MS = 1100
 
-function queueOver(store: ReturnType<typeof fakeQueueStore>, submit: ReturnType<typeof fakeSubmit>, metas: Record<string, RunMeta> = {}, runList: ReturnType<typeof fakeRunList> = fakeRunList(), hasActiveRun: () => boolean = () => false): { tick: () => Promise<void>; onRunSettled: (meta: RunMeta) => Promise<void>; observeShutdown: () => void } {
+function queueOver(store: ReturnType<typeof fakeQueueStore>, submit: ReturnType<typeof fakeSubmit>, metas: Record<string, RunMeta> = {}, runList: ReturnType<typeof fakeRunList> = fakeRunList(), hasActiveRun: () => boolean = () => false, parkedAsks: Record<string, ParkedAsk | null> = {}, resumeResults: ResumeParkedRunResult[] = []): { tick: () => Promise<void>; onRunSettled: (meta: RunMeta) => Promise<void>; observeShutdown: () => void; answer: (id: string, answer: string) => Promise<unknown>; resumeCalls: Array<{ runId: string; parkedAnswer: { question: string; answer: string; toolCallId: string } }> } {
 	const sleep = fakeSleep()
+	const resumeScript = [...resumeResults]
+	const resumeCalls: Array<{ runId: string; parkedAnswer: { question: string; answer: string; toolCallId: string } }> = []
 	const taskQueue = createTaskQueue({
 		queueStore: store.store,
 		readRunMetaById: fakeMetaReader(metas),
 		listRunIds: runList.listRunIds,
 		readRunListSummary: runList.readRunListSummary,
+		readParkedAskById: (runId) => parkedAsks[runId] ?? null,
+		resumeParkedRun: (runId, parkedAnswer) => {
+			resumeCalls.push({ runId, parkedAnswer })
+			return resumeScript.shift() ?? { ok: false, error: 'checkpoint_missing' }
+		},
 		submitRun: submit.submitRun,
 		hasActiveRun,
 		sleep: sleep.sleep,
 		now: () => NOW,
 	})
-	return { tick: () => taskQueue.tick(), onRunSettled: (meta) => taskQueue.onRunSettled(meta), observeShutdown: () => taskQueue.observeShutdown() }
+	return { tick: () => taskQueue.tick(), onRunSettled: (meta) => taskQueue.onRunSettled(meta), observeShutdown: () => taskQueue.observeShutdown(), answer: (id, answer) => taskQueue.answer(id, answer), resumeCalls }
 }
 
 function requireItem(items: readonly QueueItemView[], id: string): QueueItemView {
@@ -250,6 +263,8 @@ describe('createTaskQueue tick — dispatch', () => {
 			readRunMetaById: fakeMetaReader({}),
 			listRunIds: runList.listRunIds,
 			readRunListSummary: runList.readRunListSummary,
+			readParkedAskById: () => null,
+			resumeParkedRun: () => ({ ok: false, error: 'checkpoint_missing' }),
 			submitRun: submit.submitRun,
 			hasActiveRun: () => false,
 			sleep: sleep.sleep,
@@ -302,6 +317,8 @@ describe('createTaskQueue tick — submission threading', () => {
 			readRunMetaById: fakeMetaReader({}),
 			listRunIds: runList.listRunIds,
 			readRunListSummary: runList.readRunListSummary,
+			readParkedAskById: () => null,
+			resumeParkedRun: () => ({ ok: false, error: 'checkpoint_missing' }),
 			submitRun: submit.submitRun,
 			hasActiveRun: () => false,
 			sleep: sleep.sleep,
@@ -519,6 +536,199 @@ describe('createTaskQueue tick — boot repair', () => {
 
 		expect(submit.calls.length).toBe(1)
 		expect(requireItem(store.items(), 'item-1').status).toBe('waiting')
+	})
+})
+
+describe('createTaskQueue same-run answer resume', () => {
+	const parkedAsk: ParkedAsk = { roleId: 'main-0-1', toolCallId: 'ask_1', question: 'which database?' }
+
+	function answeredItem(overrides: Partial<QueueSeedItem> = {}): QueueSeedItem {
+		return {
+			...waitingItem({ continuesFrom: 'run-20260101-000500', question: 'which database?', answer: 'postgres', ...overrides }),
+			resumeRunId: 'run-20260101-000500',
+			resumeToolCallId: 'ask_1',
+		}
+	}
+
+	test('dispatches the answered item into the same run: active marker under the parked id, resume payload, no submitRun', async () => {
+		const store = fakeQueueStore([answeredItem()])
+		const submit = fakeSubmit([])
+		const harness = queueOver(store, submit, { 'run-20260101-000500': meta({ runId: 'run-20260101-000500', status: 'needs_clarification' }) }, fakeRunList(), () => false, { 'run-20260101-000500': parkedAsk }, [{ ok: true, runId: 'run-20260101-000500' }])
+
+		await harness.tick()
+
+		expect(harness.resumeCalls).toEqual([{ runId: 'run-20260101-000500', parkedAnswer: { question: 'which database?', answer: 'postgres', toolCallId: 'ask_1' } }])
+		expect(submit.calls.length).toBe(0)
+		const marker = requireItem(store.written()[0]?.items ?? [], 'item-1')
+		expect(marker.status).toBe('active')
+		expect(marker.runId).toBe('run-20260101-000500')
+		const stored: unknown = store.items()[0]
+		if (typeof stored !== 'object' || stored === null) throw new Error('expected the stored item')
+		expect(Reflect.get(stored, 'runId')).toBe('run-20260101-000500')
+		expect(Reflect.get(stored, 'resumeRunId')).toBe('run-20260101-000500')
+		expect(Reflect.get(stored, 'resumeToolCallId')).toBe('ask_1')
+	})
+
+	test('run_in_progress restores the answered item to waiting with its pointers intact', async () => {
+		const store = fakeQueueStore([answeredItem()])
+		const submit = fakeSubmit([])
+		const harness = queueOver(store, submit, { 'run-20260101-000500': meta({ runId: 'run-20260101-000500', status: 'needs_clarification' }) }, fakeRunList(), () => false, { 'run-20260101-000500': parkedAsk }, [{ ok: false, error: 'run_in_progress' }])
+
+		await harness.tick()
+
+		expect(harness.resumeCalls.length).toBe(1)
+		expect(submit.calls.length).toBe(0)
+		const restored: unknown = store.items()[0]
+		if (typeof restored !== 'object' || restored === null) throw new Error('expected the stored item')
+		expect(Reflect.get(restored, 'status')).toBe('waiting')
+		expect(Reflect.get(restored, 'answer')).toBe('postgres')
+		expect(Reflect.get(restored, 'resumeToolCallId')).toBe('ask_1')
+	})
+
+	for (const error of ['checkpoint_missing', 'not_parked'] as const) {
+		test(`${error} falls back to the legacy briefed dispatch with the question and answer`, async () => {
+			const store = fakeQueueStore([answeredItem()])
+			const submit = fakeSubmit([{ ok: true, runId: 'run-20260101-000600' }])
+			const harness = queueOver(store, submit, { 'run-20260101-000500': meta({ runId: 'run-20260101-000500', status: 'needs_clarification' }) }, fakeRunList(), () => false, { 'run-20260101-000500': parkedAsk }, [{ ok: false, error }])
+
+			await harness.tick()
+
+			expect(harness.resumeCalls.length).toBe(1)
+			expect(submit.calls.length).toBe(1)
+			const continuation = submit.calls[0]?.continuation
+			expect(continuation?.runId).toBe('run-20260101-000500')
+			expect(continuation?.briefing).toContain('The operator answered: postgres')
+			const dispatched: unknown = store.items()[0]
+			if (typeof dispatched !== 'object' || dispatched === null) throw new Error('expected the stored item')
+			expect(Reflect.get(dispatched, 'status')).toBe('active')
+			expect(Reflect.get(dispatched, 'runId')).toBe('run-20260101-000600')
+			expect(Reflect.has(dispatched, 'resumeRunId')).toBe(false)
+		})
+	}
+
+	test('an answer recorded while another run is active resumes after that run settles', async () => {
+		let busy = true
+		const store = fakeQueueStore([
+			waitingItem({ id: 'active', status: 'active', runId: 'run-20260101-000400' }),
+			{ ...waitingItem({ id: 'parked', status: 'needs_input', runId: 'run-20260101-000500', question: 'which database?' }) },
+		])
+		const submit = fakeSubmit([])
+		const harness = queueOver(store, submit, {
+			'run-20260101-000400': meta({ runId: 'run-20260101-000400', result: { status: 'success', summary: 'other done' } }),
+			'run-20260101-000500': meta({ runId: 'run-20260101-000500', status: 'needs_clarification' }),
+		}, fakeRunList(), () => busy, { 'run-20260101-000500': parkedAsk }, [{ ok: true, runId: 'run-20260101-000500' }])
+
+		await harness.answer('parked', 'postgres')
+		expect(harness.resumeCalls.length).toBe(0)
+		expect(requireItem(store.items(), 'parked').status).toBe('waiting')
+
+		busy = false
+		await harness.onRunSettled(meta({ runId: 'run-20260101-000400', result: { status: 'success', summary: 'other done' } }))
+
+		expect(harness.resumeCalls.length).toBe(1)
+		expect(requireItem(store.items(), 'active').status).toBe('done')
+		expect(requireItem(store.items(), 'parked').status).toBe('active')
+		expect(requireItem(store.items(), 'parked').runId).toBe('run-20260101-000500')
+	})
+
+	test('a re-park with a different tool call settles to needs_input with the new question and drops the old answer', async () => {
+		const store = fakeQueueStore([{ ...answeredItem({ status: 'active', runId: 'run-20260101-000500' }) }])
+		const submit = fakeSubmit([])
+		const harness = queueOver(store, submit, { 'run-20260101-000500': meta({ runId: 'run-20260101-000500', status: 'needs_clarification' }) }, fakeRunList(), () => false, {
+			'run-20260101-000500': { roleId: 'main-0-1', toolCallId: 'ask_new', question: 'and the port?' },
+		})
+
+		await harness.onRunSettled(meta({ runId: 'run-20260101-000500', status: 'needs_clarification', result: { status: 'needs_clarification', summary: 'waiting for an answer to: and the port?' } }))
+
+		const parked = requireItem(store.items(), 'item-1')
+		expect(parked.status).toBe('needs_input')
+		expect(parked.question).toBe('and the port?')
+		const stored: unknown = store.items()[0]
+		if (typeof stored !== 'object' || stored === null) throw new Error('expected the stored item')
+		expect(Reflect.has(stored, 'answer')).toBe(false)
+		expect(Reflect.has(stored, 'resumeRunId')).toBe(false)
+		expect(Reflect.has(stored, 'resumeToolCallId')).toBe(false)
+	})
+
+	test('a settlement that still names the answered tool call releases the item instead of settling it', async () => {
+		const store = fakeQueueStore([{ ...answeredItem({ status: 'active', runId: 'run-20260101-000500' }) }])
+		const submit = fakeSubmit([])
+		const harness = queueOver(store, submit, { 'run-20260101-000500': meta({ runId: 'run-20260101-000500', status: 'needs_clarification' }) }, fakeRunList(), () => true, { 'run-20260101-000500': parkedAsk })
+
+		await harness.onRunSettled(meta({ runId: 'run-20260101-000500', status: 'needs_clarification', result: { status: 'needs_clarification', summary: 'waiting for an answer to: which database?' } }))
+
+		const released = requireItem(store.items(), 'item-1')
+		expect(released.status).toBe('waiting')
+		expect(released.answer).toBe('postgres')
+		const stored: unknown = store.items()[0]
+		if (typeof stored !== 'object' || stored === null) throw new Error('expected the stored item')
+		expect(Reflect.get(stored, 'resumeRunId')).toBe('run-20260101-000500')
+		expect(Reflect.get(stored, 'resumeToolCallId')).toBe('ask_1')
+		expect(submit.calls.length).toBe(0)
+	})
+
+	test('an answer-resumed run that directly finishes needs_clarification settles needs_input with the new question', async () => {
+		const store = fakeQueueStore([{ ...answeredItem({ status: 'active', runId: 'run-20260101-000500' }) }])
+		const submit = fakeSubmit([])
+		// No parked checkpoint: a direct finish deletes it, proving the answer was delivered.
+		const harness = queueOver(store, submit, { 'run-20260101-000500': meta({ runId: 'run-20260101-000500', status: 'needs_clarification' }) }, fakeRunList(), () => true)
+
+		await harness.onRunSettled(meta({ runId: 'run-20260101-000500', status: 'needs_clarification', result: { status: 'needs_clarification', summary: 'waiting for an answer to: which scope should I use?' } }))
+
+		const parked = requireItem(store.items(), 'item-1')
+		expect(parked.status).toBe('needs_input')
+		expect(parked.question).toBe('which scope should I use?')
+		const stored: unknown = store.items()[0]
+		if (typeof stored !== 'object' || stored === null) throw new Error('expected the stored item')
+		expect(Reflect.has(stored, 'answer')).toBe(false)
+		expect(Reflect.has(stored, 'resumeRunId')).toBe(false)
+		expect(Reflect.has(stored, 'resumeToolCallId')).toBe(false)
+		expect(harness.resumeCalls.length).toBe(0)
+		expect(submit.calls.length).toBe(0)
+	})
+
+	test('boot repair releases an answered item whose parked checkpoint still names its call', async () => {
+		const store = fakeQueueStore([{ ...answeredItem({ status: 'active', runId: 'run-20260101-000500' }) }])
+		const submit = fakeSubmit([])
+		const harness = queueOver(store, submit, { 'run-20260101-000500': meta({ runId: 'run-20260101-000500', status: 'needs_clarification' }) }, fakeRunList(), () => true, { 'run-20260101-000500': parkedAsk })
+
+		await harness.tick()
+
+		const released = requireItem(store.items(), 'item-1')
+		expect(released.status).toBe('waiting')
+		expect(released.answer).toBe('postgres')
+		const stored: unknown = store.items()[0]
+		if (typeof stored !== 'object' || stored === null) throw new Error('expected the stored item')
+		expect(Reflect.get(stored, 'resumeRunId')).toBe('run-20260101-000500')
+		expect(Reflect.get(stored, 'resumeToolCallId')).toBe('ask_1')
+		expect(harness.resumeCalls.length).toBe(0)
+		expect(submit.calls.length).toBe(0)
+	})
+
+	test('an answered item whose run is still running is left untouched, not released', async () => {
+		const store = fakeQueueStore([{ ...answeredItem({ status: 'active', runId: 'run-20260101-000500' }) }])
+		const submit = fakeSubmit([])
+		const harness = queueOver(store, submit, { 'run-20260101-000500': meta({ runId: 'run-20260101-000500', status: 'running' }) }, fakeRunList(), () => true, { 'run-20260101-000500': parkedAsk })
+
+		await harness.tick()
+
+		const untouched = requireItem(store.items(), 'item-1')
+		expect(untouched.status).toBe('active')
+		expect(untouched.runId).toBe('run-20260101-000500')
+		expect(store.writes.length).toBe(0)
+	})
+
+	test('an answered item whose resumed run succeeded settles done even after the checkpoint is gone', async () => {
+		const store = fakeQueueStore([{ ...answeredItem({ status: 'active', runId: 'run-20260101-000500' }) }])
+		const submit = fakeSubmit([])
+		const harness = queueOver(store, submit, { 'run-20260101-000500': meta({ runId: 'run-20260101-000500', result: { status: 'success', summary: 'resumed and done' } }) }, fakeRunList(), () => true)
+
+		await harness.tick()
+
+		const settled = requireItem(store.items(), 'item-1')
+		expect(settled.status).toBe('done')
+		expect(settled.resultSummary).toBe('resumed and done')
+		expect(harness.resumeCalls.length).toBe(0)
 	})
 })
 
