@@ -155,7 +155,7 @@ snapshots.set('run-20260101-000000', {
 		status: 'success',
 		startTime: '2026-01-01T00:00:00.000Z',
 		endTime: '2026-01-01T00:01:00.000Z',
-		result: { status: 'success', summary: 'prior run finished cleanly' },
+		result: { status: 'success', summary: 'prior run finished cleanly', artifacts: ['output/report.md', 'dist/app.js'] },
 	}),
 	logText: '',
 })
@@ -1951,14 +1951,46 @@ describe('POST /api/runs', () => {
 		const { handler, submission, lastContinuation, resolveActive } = createHandlerHarness()
 		const response = await handler(post('/api/runs', JSON.stringify({ task: 'pick up where that left off', continuesFrom: 'run-20260101-000000' })))
 		expect(response.status).toBe(201)
-		// The item records the request's continuesFrom; the dispatching scheduler re-reads the prior run's terminal meta and assembles the continuation — the prior run's task and outcome summary plus the interim briefing (whose run lines carry the ids the stale-task fast path cites).
+		// The item records the request's continuesFrom; the dispatching scheduler re-reads the prior run's terminal meta and assembles the continuation — the prior run's task and full result plus the interim briefing (whose run lines carry the ids the stale-task fast path cites).
 		const continuation = lastContinuation()
 		expect(continuation?.runId).toBe('run-20260101-000000')
 		expect(continuation?.task).toBe('prior run task')
 		expect(continuation?.summary).toBe('prior run finished cleanly')
+		expect(continuation?.status).toBe('success')
+		expect(continuation?.result).toEqual({ status: 'success', summary: 'prior run finished cleanly', artifacts: ['output/report.md', 'dist/app.js'] })
+		expect(continuation?.error).toBeUndefined()
 		expect(Array.isArray(continuation?.briefing)).toBe(true)
 
 		resolveActive()(terminalMeta('run-20260101-090000', 'pick up where that left off'))
+		await submission.awaitActive()
+	})
+
+	test('threads the prior error result and run-level error into an error continuation', async () => {
+		const { handler, submission, lastContinuation, resolveActive } = createHandlerHarness()
+		const response = await handler(post('/api/runs', JSON.stringify({ task: 'retry after the failure', continuesFrom: 'run-20260101-000100' })))
+		expect(response.status).toBe(201)
+		const continuation = lastContinuation()
+		expect(continuation?.runId).toBe('run-20260101-000100')
+		expect(continuation?.task).toBe('task for run-20260101-000100')
+		expect(continuation?.status).toBe('error')
+		expect(continuation?.result).toEqual({ status: 'error', summary: 'LLM unavailable: connection refused' })
+		expect(continuation?.error).toEqual({ kind: 'llm_unavailable', message: 'connection refused' })
+
+		resolveActive()(terminalMeta('run-20260101-090000', 'retry after the failure'))
+		await submission.awaitActive()
+	})
+
+	test('threads an interrupted continuation with its status and run-level error and no result', async () => {
+		const { handler, submission, lastContinuation, resolveActive } = createHandlerHarness()
+		const response = await handler(post('/api/runs', JSON.stringify({ task: 'continue after the interruption', continuesFrom: 'run-20260101-000300' })))
+		expect(response.status).toBe(201)
+		const continuation = lastContinuation()
+		expect(continuation?.runId).toBe('run-20260101-000300')
+		expect(continuation?.status).toBe('interrupted')
+		expect(continuation?.result).toBeUndefined()
+		expect(continuation?.error).toEqual({ kind: 'interrupted', message: 'The service stopped while this run was in progress and it could not be resumed (no valid checkpoint).' })
+
+		resolveActive()(terminalMeta('run-20260101-090000', 'continue after the interruption'))
 		await submission.awaitActive()
 	})
 
@@ -2292,6 +2324,9 @@ describe('/api/queue', () => {
 		expect(items[0]?.runId).toBe('run-20260101-090000')
 		const continuation = lastContinuation()
 		expect(continuation?.runId).toBe('run-20260101-000000')
+		expect(continuation?.status).toBe('success')
+		expect(continuation?.result).toEqual({ status: 'success', summary: 'prior run finished cleanly', artifacts: ['output/report.md', 'dist/app.js'] })
+		expect(continuation?.error).toBeUndefined()
 		expect(continuation?.briefing).toContain('Resuming from your question: which database?')
 		expect(continuation?.briefing).toContain('The operator answered: postgres')
 		expect(submission.activeRunId()).toBe('run-20260101-090000')
@@ -2373,6 +2408,9 @@ describe('/api/queue', () => {
 		expect(continuation?.runId).toBe('run-20260101-000100')
 		expect(continuation?.task).toBe('task for run-20260101-000100')
 		expect(continuation?.summary).toBe('LLM unavailable: connection refused')
+		expect(continuation?.status).toBe('error')
+		expect(continuation?.result).toEqual({ status: 'error', summary: 'LLM unavailable: connection refused' })
+		expect(continuation?.error).toEqual({ kind: 'llm_unavailable', message: 'connection refused' })
 		expect(submission.activeRunId()).toBe('run-20260101-090000')
 
 		resolveActive()(terminalMeta('run-20260101-090000', 'the failed task'))

@@ -1,6 +1,6 @@
 import { createToolError, isErrorKind } from '../errors.js'
 import type { Message, ResultCard, ToolResult } from '../types.js'
-import { stripReasoning } from '../context/index.js'
+import { DEFAULT_PROTECTED_PREFIX_LENGTH, stripReasoning } from '../context/index.js'
 import { indexRoleMessages, readMessageWindow, searchRoleBlocks, MAX_SEARCH_MATCHES, RECENT_TOOL_CALLS_LIMIT, type InspectionField, type RecentToolCall } from '../role-inspection.js'
 import type { InterruptActionKind, RoleRegistry, RoleRegistryEntry } from '../role-registry.js'
 import { isObject } from '../validation.js'
@@ -8,7 +8,7 @@ import { optionalPositiveInt } from './shared.js'
 import type { ToolHandler } from './tool-dispatch.js'
 import type { HumanBackend } from '../human-backend.js'
 import { logEvent } from '../engine-state.js'
-import type { RoleState } from '../state.js'
+import type { ProtectedPrefixLength, RoleState } from '../state.js'
 import type { AppendLog } from '../persistence.js'
 import type { RunParkTracker } from '../park-state.js'
 
@@ -208,9 +208,11 @@ interface ReplaceOperation {
 
 type ContextEditOperation = DropOperation | StripReasoningOperation | ReplaceOperation
 
-// Message indices 0 (system prompt) and 1 (original task) are untouchable in every edit operation — the contract the context-manager prompt teaches, enforced here so a bad range cannot amputate the target's identity. Validation rejects the whole call atomically, before any operation applies.
-const PROTECTED_MESSAGE_COUNT = 2
-const PROTECTED_MESSAGES_MESSAGE = 'operations must not touch message index 0 (system prompt) or index 1 (original task)'
+// The protected prefix is untouchable in every edit operation — the contract the context-manager prompt teaches, enforced here so a bad range cannot amputate the target's identity or the prior-run turns the new task depends on. Validation rejects the whole call atomically, before any operation applies.
+function protectedPrefixDescription(prefixLength: number): string {
+	if (prefixLength === 4) return 'the system prompt (index 0), the prior-run reference turns (indices 1-2), and the current task (index 3)'
+	return 'the system prompt (index 0) and the current task (index 1)'
+}
 
 function validateRange(range: unknown): [number, number] | null {
 	if (!Array.isArray(range) || range.length !== 2) return null
@@ -232,7 +234,8 @@ function estimateHistoryTokens(history: Message[]): number {
 	return Math.ceil(chars / 4)
 }
 
-function applyEditOperations(history: Message[], operations: ContextEditOperation[]): { ok: true; history: Message[] } | { ok: false; error: ToolResult } {
+function applyEditOperations(history: Message[], operations: ContextEditOperation[], protectedPrefixLength: ProtectedPrefixLength): { ok: true; history: Message[] } | { ok: false; error: ToolResult } {
+	const protectedMessagesMessage = `operations must not touch the protected prefix: ${protectedPrefixDescription(protectedPrefixLength)}`
 	let next: Message[] = history.slice()
 	for (const op of operations) {
 		if (op.op === 'drop') {
@@ -240,8 +243,8 @@ function applyEditOperations(history: Message[], operations: ContextEditOperatio
 			if (range === null) {
 				return { ok: false, error: createToolError('invalid_arguments', 'drop.range must be [start, end] with non-negative integers') }
 			}
-			if (range[0] < PROTECTED_MESSAGE_COUNT) {
-				return { ok: false, error: createToolError('invalid_arguments', PROTECTED_MESSAGES_MESSAGE) }
+			if (range[0] < protectedPrefixLength) {
+				return { ok: false, error: createToolError('invalid_arguments', protectedMessagesMessage) }
 			}
 			const [start, end] = range
 			if (start >= next.length) continue
@@ -251,16 +254,16 @@ function applyEditOperations(history: Message[], operations: ContextEditOperatio
 			if (range === null) {
 				return { ok: false, error: createToolError('invalid_arguments', 'strip_reasoning.range must be [start, end] with non-negative integers') }
 			}
-			if (range[0] < PROTECTED_MESSAGE_COUNT) {
-				return { ok: false, error: createToolError('invalid_arguments', PROTECTED_MESSAGES_MESSAGE) }
+			if (range[0] < protectedPrefixLength) {
+				return { ok: false, error: createToolError('invalid_arguments', protectedMessagesMessage) }
 			}
 			next = stripReasoning(next, range[0], range[1])
 		} else if (op.op === 'replace') {
 			if (typeof op.index !== 'number' || !Number.isFinite(op.index) || op.index < 0) {
 				return { ok: false, error: createToolError('invalid_arguments', 'replace.index must be a non-negative number') }
 			}
-			if (op.index < PROTECTED_MESSAGE_COUNT) {
-				return { ok: false, error: createToolError('invalid_arguments', PROTECTED_MESSAGES_MESSAGE) }
+			if (op.index < protectedPrefixLength) {
+				return { ok: false, error: createToolError('invalid_arguments', protectedMessagesMessage) }
 			}
 			if (typeof op.content !== 'string') {
 				return { ok: false, error: createToolError('invalid_arguments', 'replace.content must be a string') }
@@ -312,7 +315,7 @@ function createEditContext(context: BuiltInToolContext): ToolHandler {
 				return createToolError('invalid_arguments', `Unknown operation: ${String(opValue)}`)
 			}
 		}
-		const applied = applyEditOperations(target.state.history, operations)
+		const applied = applyEditOperations(target.state.history, operations, target.state.protectedPrefixLength ?? DEFAULT_PROTECTED_PREFIX_LENGTH)
 		if (!applied.ok) return applied.error
 		target.state.history = applied.history
 		// The edit rewrote the target's history out from under its llm_call delta baseline — a replace would be invisible in a slice-based delta — so the target's next llm_call logs a full snapshot.

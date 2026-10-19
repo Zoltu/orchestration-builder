@@ -447,7 +447,7 @@ describe('runExecutor', () => {
 		expect(persistence.state.meta?.involvement).toBe('collaborative')
 	})
 
-	test('a continuation run writes continuesFrom into both metas and briefs the entry role once', async () => {
+	test('a continuation run writes continuesFrom into both metas and sends the four-message history', async () => {
 		const guild = buildLoadedGuild(
 			{ main: { systemPrompt: 'p', tools: ['finish'] } },
 			'main',
@@ -460,7 +460,13 @@ describe('runExecutor', () => {
 		}])]
 		const persistence = makeFakePersistence()
 		const deps = makeDeps(llm, persistence, guild)
-		const continuation = { runId: 'run-20260101-000000', task: 'prior task', summary: 'prior summary' }
+		const continuation = {
+			runId: 'run-20260101-000000',
+			task: 'prior task',
+			summary: 'prior summary',
+			status: 'success' as const,
+			result: { status: 'success' as const, summary: 'prior summary', artifacts: ['dist/app.js'] },
+		}
 
 		const meta = await runExecutor(deps, {
 			runId: 'r-cont',
@@ -476,22 +482,27 @@ describe('runExecutor', () => {
 		expect(persistence.state.meta?.continuesFrom).toBe('run-20260101-000000')
 		expect(persistence.state.metas.length).toBe(2)
 		expect(persistence.state.metas[0]?.continuesFrom).toBe('run-20260101-000000')
-		// The briefing is baked into the entry role's initial user message: the task stays the first line and the block follows after a blank line.
 		const llmCall = defined(persistence.state.events.find((e) => e.type === 'llm_call'), 'llm_call event')
 		const llmPayload = llmCall.payload
 		expect(isRecord(llmPayload)).toBe(true)
-		if (isRecord(llmPayload)) {
-			const sent = llmPayload['sent']
-			expect(Array.isArray(sent)).toBe(true)
-			if (Array.isArray(sent)) {
-				const userMessage = sent[1]
-				expect(isRecord(userMessage)).toBe(true)
-				if (isRecord(userMessage)) {
-					expect(userMessage['role']).toBe('user')
-					expect(userMessage['content']).toBe('do it again\n\n[This run continues run run-20260101-000000.] Prior task: prior task\nPrior outcome: prior summary\nThe prior run\'s plan document is available with the read_plan tool (runId: "run-20260101-000000").')
-				}
-			}
-		}
+		if (!isRecord(llmPayload)) return
+		const sent = llmPayload['sent']
+		expect(Array.isArray(sent)).toBe(true)
+		if (!Array.isArray(sent)) return
+		expect(sent.length).toBe(4)
+		const systemMessage = sent[0]
+		const priorTaskMessage = sent[1]
+		const priorResultMessage = sent[2]
+		const userMessage = sent[3]
+		expect(isRecord(systemMessage) && systemMessage['role'] === 'system').toBe(true)
+		expect(isRecord(priorTaskMessage) && priorTaskMessage['role'] === 'user').toBe(true)
+		expect(isRecord(priorTaskMessage) && priorTaskMessage['content']).toBe('prior task')
+		expect(isRecord(priorResultMessage) && priorResultMessage['role'] === 'assistant').toBe(true)
+		expect(isRecord(priorResultMessage) && priorResultMessage['content']).toBe('[Prior run result — status: success.]\n\nprior summary\n\nArtifacts:\n- dist/app.js')
+		expect(isRecord(userMessage)).toBe(true)
+		if (!isRecord(userMessage)) return
+		expect(userMessage['role']).toBe('user')
+		expect(userMessage['content']).toBe('do it again\n\n[This run continues run run-20260101-000000.] The prior run\'s plan document is available with the read_plan tool (runId: "run-20260101-000000").')
 	})
 
 	test('a run without a continuation writes no continuesFrom field', async () => {
@@ -800,6 +811,12 @@ describe('resumeExecutor', () => {
 		if (checkpoint === undefined) throw new Error('expected the mid-descent checkpoint')
 		// The pre-restart recorder wrote the lineage onto the entry frame from the entry context.
 		expect(checkpoint.frames[0]?.continuesFrom).toBe('run-20260101-000000')
+		// The restored history still opens with the four-message continuation prefix, and the explicit length rides the checkpoint.
+		const preResumeHistory = checkpoint.frames[0]?.roleState.history ?? []
+		expect(preResumeHistory.slice(0, 4).map((message) => message.role)).toEqual(['system', 'user', 'assistant', 'user'])
+		expect(preResumeHistory[1]?.content).toBe('prior task')
+		expect(preResumeHistory[2]?.content).toContain('prior summary')
+		expect(checkpoint.frames[0]?.roleState.protectedPrefixLength).toBe(4)
 
 		const guild = buildDelegationGuild()
 		const llm = new FakeLlm()
@@ -826,6 +843,8 @@ describe('resumeExecutor', () => {
 		const resumedCheckpoint = persistence.state.checkpoints[0]
 		if (resumedCheckpoint === undefined) throw new Error('expected a post-resume checkpoint')
 		expect(resumedCheckpoint.frames[0]?.roleState.history.filter(sentCarriesBriefing).length).toBe(1)
+		expect(resumedCheckpoint.frames[0]?.roleState.protectedPrefixLength).toBe(4)
+		expect(resumedCheckpoint.frames[0]?.roleState.history.slice(0, 4).map((message) => message.role)).toEqual(['system', 'user', 'assistant', 'user'])
 	})
 
 	test('lineage survives a second restart: post-resume checkpoints keep continuesFrom on the entry frame', async () => {

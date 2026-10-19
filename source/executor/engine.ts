@@ -2,7 +2,7 @@ import { createResultCard, createToolError } from './errors.js'
 import type { DiscardedRetrySpend, LlmUsage, LlmUsagePayload, Message, ResultCard, RoleDefinition, ToolCall, ToolManifest, ToolResult } from './types.js'
 import { isObject, isResultCard } from './validation.js'
 import { checkGlobalBudgets, checkRoleBudgets } from './budgets.js'
-import { buildInitialHistory, createContextManager, truncateToolOutput, type ContextManager } from './context/index.js'
+import { buildInitialHistory, createContextManager, DEFAULT_PROTECTED_PREFIX_LENGTH, hasContinuationPrefixShape, truncateToolOutput, type ContextManager } from './context/index.js'
 import { logEvent, type EngineContext, type EngineDependencies, type ResumedRole, type RoleState, type SeededRole, type SuspendedTurn } from './engine-state.js'
 import { isWriteCapableRole, parkCard, type ParkedAnswer } from './park-state.js'
 import { drainInterrupts } from './interrupt-engine.js'
@@ -294,16 +294,29 @@ export async function runRole(deps: EngineDependencies, context: EngineContext, 
 	// The pre-write rule (docs/queueing.md "Parking: the pre-write rule"): the run-scoped flag flips when a write-capable role starts and never resets. It is conservative by construction — a false positive merely degrades a later park to today's blocking behavior, while a false negative would park a run that has already written.
 	if (isWriteCapableRole(roleDefinition.tools)) deps.parkTracker.writeCapableStarted = true
 
-	const roleState: RoleState = resumed?.roleState ?? {
-		history: seeded !== undefined ? seeded.history : buildInitialHistory(systemPrompt, context, deps),
-		lastPromptTokens: 0,
-		recentCompactionPromptTokens: [],
-		recentToolCalls: [],
-		toolCallCount: 0,
-		generatedTokens: 0,
-		contextExceededAttempts: 0,
-		loopCheckToolCallWatermark: 0,
-		loopCheckTokenWatermark: 0,
+	let roleState: RoleState
+	if (resumed !== undefined) {
+		// Only a checkpoint written before the explicit field existed lacks a value. Recover the continuation prefix when the restored history has that exact shape (erring toward protection for an in-flight checkpoint), otherwise use the two-message default.
+		const restoredPrefixLength = resumed.roleState.protectedPrefixLength
+			?? (hasContinuationPrefixShape(resumed.roleState.history) ? 4 : DEFAULT_PROTECTED_PREFIX_LENGTH)
+		roleState = { ...resumed.roleState, protectedPrefixLength: restoredPrefixLength }
+	} else {
+		// A seeded child conversation is ordinary history even when its first turns happen to look like a continuation, so it always keeps the default prefix.
+		const initial = seeded !== undefined
+			? { history: seeded.history, protectedPrefixLength: DEFAULT_PROTECTED_PREFIX_LENGTH }
+			: buildInitialHistory(systemPrompt, context, deps)
+		roleState = {
+			history: initial.history,
+			protectedPrefixLength: initial.protectedPrefixLength,
+			lastPromptTokens: 0,
+			recentCompactionPromptTokens: [],
+			recentToolCalls: [],
+			toolCallCount: 0,
+			generatedTokens: 0,
+			contextExceededAttempts: 0,
+			loopCheckToolCallWatermark: 0,
+			loopCheckTokenWatermark: 0,
+		}
 	}
 
 	const registryEntry = deps.roleRegistry.register(context.roleName, context.depth, context.parentRoleId, roleState, resumed?.roleId)

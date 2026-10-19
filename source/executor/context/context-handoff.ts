@@ -3,7 +3,7 @@ import { logEvent, type EngineContext, type RoleState } from '../engine-state.js
 import { createResultCard, createToolError } from '../errors.js'
 import type { AppendLog } from '../persistence.js'
 import type { ResultCard } from '../types.js'
-import { compactHistoryForContextBudget, type ContextCompactionReport } from './context-policy.js'
+import { compactHistoryForContextBudget, DEFAULT_PROTECTED_PREFIX_LENGTH, type ContextCompactionReport } from './context-policy.js'
 import { effectiveContextBudget, type ContextPressureTracker } from './context-pressure.js'
 
 // The recovery loop for a context-window rejection: each rejection compacts with a fresh endpoint-reported token count, so the estimate recalibrates on every attempt. Three attempts give the estimate room to converge without letting a hopeless request spin.
@@ -20,7 +20,7 @@ function contextRecoveryNotice(llmResult: { promptTokens: number; contextWindow:
 	return [
 		`[Platform notice — context window exceeded] Your last request to the model was rejected because this conversation had grown past the model's context window${sizePart}.`,
 		`The platform compacted this conversation so work can continue: it dropped ${report.droppedMessages} older messages and truncated ${report.truncatedToolMessages} oversized tool results${reasoningPart} (the estimated prompt size is now ~${report.estimatedPromptTokens} tokens).`,
-		'Your system prompt, your original task, and your most recent messages are intact.',
+		'Your system prompt, your task (and any prior-run reference turns), and your most recent messages are intact.',
 		'Continue from your most recent state; re-read files or re-run commands if you need information that was removed.',
 		'If the task cannot be completed without the removed context, call finish with status "error" and error.kind "context_budget_exceeded" so the work can be re-delegated in smaller pieces.',
 	].join(' ')
@@ -52,6 +52,7 @@ export function applyContextBackstop(roleState: RoleState, context: EngineContex
 		contextWindow: rejection.contextWindow,
 		promptTokens: rejection.promptTokens,
 		targetFraction: CONTEXT_RECOVERY_TARGET_FRACTION,
+		protectedPrefixLength: roleState.protectedPrefixLength ?? DEFAULT_PROTECTED_PREFIX_LENGTH,
 	})
 	roleState.history = report.history
 	// The compaction rewrote the history out from under the llm_call delta baseline — truncation changes content without changing length, so the emission's length check cannot see it — forcing the role's next llm_call to log a full snapshot.

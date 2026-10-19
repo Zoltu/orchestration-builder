@@ -449,6 +449,8 @@ export interface BriefingInput {
 	queuedAt: string
 	items: QueueItem[]
 	runs: RunListEntry[]
+	// The run this dispatch continues, when any: its outcome is already carried as the new run's reference turns, so repeating it in the completed-run list would duplicate the prior task and summary.
+	excludeRunId?: string
 	// Present when the item is resuming from needs_input: the recorded question and the operator's answer.
 	question?: string
 	answer?: string
@@ -458,7 +460,7 @@ export interface BriefingInput {
 export function assembleBriefingLines(input: BriefingInput): string[] {
 	const lines = ['[Queued-task briefing — what happened while this task waited in the queue.]', `Queued at ${input.queuedAt}.`]
 	const completed = input.runs
-		.filter((run) => run.status !== 'running' && run.status !== 'unknown' && run.endTime !== null && run.endTime > input.queuedAt)
+		.filter((run) => run.runId !== input.excludeRunId && run.status !== 'running' && run.status !== 'unknown' && run.endTime !== null && run.endTime > input.queuedAt)
 		.slice()
 		.sort((a, b) => (a.endTime ?? '').localeCompare(b.endTime ?? ''))
 	const summarized = completed.slice(-MAX_BRIEFING_RUN_LINES)

@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import { createTaskQueue, type QueueItemView, type QueueView, type ResumeParkedRunResult } from './index.ts'
 import { cancelWaitingItem, dispatchingItem, isQueueItem, pendingAnswerUndelivered, releaseToWaiting, toQueueItemView, type QueueItem } from './model.ts'
 import type { ParkedAsk } from '../park-state.js'
-import type { RunMeta } from '../types.js'
+import type { RunContinuation, RunMeta } from '../types.js'
 
 function item(overrides: Partial<QueueItemView> = {}): QueueItemView {
 	return {
@@ -26,7 +26,7 @@ interface QueuedRunSubmission {
 	effort?: string
 	involvement?: string
 	logLevel?: string
-	continuation?: unknown
+	continuation?: RunContinuation
 }
 
 type SubmitQueuedRun = (submission: QueuedRunSubmission) => QueuedRunSubmitResult
@@ -530,17 +530,50 @@ describe('answer', () => {
 
 	test('dispatches the answered item as a continuation of the parked run on the tick', async () => {
 		const parked = item({ status: 'needs_input', runId: 'run-20260101-003000', continuesFrom: 'run-20260101-000000', question: 'which database?' })
+		const priorResult = { status: 'needs_clarification' as const, summary: 'waiting for an answer to: which database?', artifacts: ['notes.md'] }
 		const harness = makeQueue({
 			initial: [item({ id: 'other' }), parked],
 			submitResults: [{ ok: true, runId: 'run-20260101-010000' }],
-			metas: { 'run-20260101-000000': meta({ runId: 'run-20260101-000000', status: 'needs_clarification', result: { status: 'needs_clarification', summary: 'waiting for an answer to: which database?' } }) },
+			metas: { 'run-20260101-000000': meta({ runId: 'run-20260101-000000', status: 'needs_clarification', result: priorResult }) },
 		})
 		const result = await harness.queue.answer('item-1', 'postgres')
 		expect(result.ok).toBe(true)
 		expect(harness.submitCalls.length).toBe(1)
 		expect(harness.submitCalls[0]?.task).toBe('fix the parser bug')
+		const continuation = harness.submitCalls[0]?.continuation
+		expect(continuation?.status).toBe('needs_clarification')
+		expect(continuation?.result).toEqual(priorResult)
+		expect(continuation?.error).toBeUndefined()
 		expect(harness.items()[0]?.id).toBe('item-1')
 		expect(harness.items()[0]?.runId).toBe('run-20260101-010000')
+	})
+
+	test('carries the prior run-level error and no result for an interrupted continuation', async () => {
+		const harness = makeQueue({
+			initial: [item({ continuesFrom: 'run-20260101-000000' })],
+			submitResults: [{ ok: true, runId: 'run-20260101-010000' }],
+			metas: { 'run-20260101-000000': meta({ runId: 'run-20260101-000000', status: 'interrupted', task: 'interrupted task', error: { kind: 'interrupted', message: 'the service stopped' } }) },
+		})
+		await harness.queue.tick()
+		const continuation = harness.submitCalls[0]?.continuation
+		expect(continuation?.runId).toBe('run-20260101-000000')
+		expect(continuation?.task).toBe('interrupted task')
+		expect(continuation?.status).toBe('interrupted')
+		expect(continuation?.error).toEqual({ kind: 'interrupted', message: 'the service stopped' })
+		expect(continuation?.result).toBeUndefined()
+	})
+
+	test('a briefing-only dispatch carries no status, result, or error', async () => {
+		const harness = makeQueue({
+			initial: [item()],
+			submitResults: [{ ok: true, runId: 'run-20260101-010000' }],
+		})
+		await harness.queue.tick()
+		const continuation = harness.submitCalls[0]?.continuation
+		expect(continuation?.runId).toBeUndefined()
+		expect(continuation?.status).toBeUndefined()
+		expect(continuation?.result).toBeUndefined()
+		expect(continuation?.error).toBeUndefined()
 	})
 
 	test('records the same-run resume pointers when the parked checkpoint still names the question', async () => {

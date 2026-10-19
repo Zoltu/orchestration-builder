@@ -8,6 +8,6 @@
 // Invariant violations throw; a handler interlude requested without executor.contextHandlerRole configured is such a violation.
 // The handler interlude itself — depth clamp, handlerOf marking, and interrupt logging — is owned by handler-interlude.ts and is not reimplemented here.
 export { buildInitialHistory } from './context-builder.js'
-export { stripReasoning, truncateToolOutput } from './context-policy.js'
+export { DEFAULT_PROTECTED_PREFIX_LENGTH, hasContinuationPrefixShape, stripReasoning, truncateToolOutput, type ContextCompactionOptions } from './context-policy.js'
 export { createContextPressureTracker, type ContextPressureTracker } from './context-pressure.js'
 export { createContextManager, type ContextDecision, type ContextDependencies, type ContextManager, type ContextRejection } from './context-manager.js'

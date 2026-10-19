@@ -279,7 +279,33 @@ describe('cross-role context tools', () => {
 		expect(target.logSentBaseline).toBe(4)
 	})
 
-	test('edit operations must not touch message indices 0 and 1, and a mixed batch rejects atomically', async () => {
+	test('with a continuation-shaped target, indices 0-3 are protected and an edit at 4 succeeds', async () => {
+		const { context, target } = makeContext()
+		target.history = [
+			{ role: 'system', content: 'you are the coder' },
+			{ role: 'user', content: 'prior task' },
+			{ role: 'assistant', content: 'prior result' },
+			{ role: 'user', content: 'build the thing again' },
+			{ role: 'assistant', content: 'working on it', tool_calls: [{ id: 't1', type: 'function', function: { name: 'read_file', arguments: '{}' } }] },
+			{ role: 'tool', content: '{"kind":"success"}', tool_call_id: 't1' },
+		]
+		target.protectedPrefixLength = 4
+		const edit = handlerFor(context, 'edit_context')
+		expect((await edit({ targetRole: 'coder-1-1', operations: [{ op: 'drop', range: [0, 2] }] })).kind).toBe('invalid_arguments')
+		expect((await edit({ targetRole: 'coder-1-1', operations: [{ op: 'drop', range: [3, 5] }] })).kind).toBe('invalid_arguments')
+		expect((await edit({ targetRole: 'coder-1-1', operations: [{ op: 'replace', index: 1, content: 'x' }] })).kind).toBe('invalid_arguments')
+		expect((await edit({ targetRole: 'coder-1-1', operations: [{ op: 'replace', index: 3, content: 'x' }] })).kind).toBe('invalid_arguments')
+		expect((await edit({ targetRole: 'coder-1-1', operations: [{ op: 'strip_reasoning', range: [0, 4] }] })).kind).toBe('invalid_arguments')
+		// A batch that would succeed at index 4 but touches the prefix rejects without applying anything.
+		expect((await edit({ targetRole: 'coder-1-1', operations: [{ op: 'drop', range: [4, 6] }, { op: 'replace', index: 2, content: 'x' }] })).kind).toBe('invalid_arguments')
+		expect(target.history.length).toBe(6)
+		expect(target.history[2]?.content).toBe('prior result')
+		const result = await edit({ targetRole: 'coder-1-1', operations: [{ op: 'drop', range: [4, 6] }] })
+		expect(result.kind).toBe('success')
+		expect(target.history.map((message) => message.role)).toEqual(['system', 'user', 'assistant', 'user'])
+	})
+
+	test('edit operations must not touch the protected prefix, and a mixed batch rejects atomically', async () => {
 		const { context, target, callerState } = makeContext()
 		const edit = handlerFor(context, 'edit_context')
 		expect((await edit({ targetRole: 'coder-1-1', operations: [{ op: 'drop', range: [0, 2] }] })).kind).toBe('invalid_arguments')

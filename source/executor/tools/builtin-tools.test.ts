@@ -19,6 +19,17 @@ function historyWith(assistantReasoning?: string): Message[] {
 	]
 }
 
+function continuationHistory(): Message[] {
+	return [
+		{ role: 'system', content: 'you are the coder' },
+		{ role: 'user', content: 'prior task' },
+		{ role: 'assistant', content: 'prior result' },
+		{ role: 'user', content: 'build the thing again' },
+		{ role: 'assistant', content: 'working on it', tool_calls: [{ id: 't1', type: 'function', function: { name: 'read_file', arguments: '{}' } }] },
+		{ role: 'tool', content: '{"kind":"success"}', tool_call_id: 't1' },
+	]
+}
+
 function scopeWith(overrides: Partial<RunToolScope> = {}): RunToolScope {
 	return createFixtureRunScope({
 		manifestNames: new Set(['context_info', 'edit_context', 'ask_human', 'finish']),
@@ -92,6 +103,33 @@ describe('edit_context tool', () => {
 	test('rejects a drop.range that is not an array', async () => {
 		const result = await dispatch(scopeWith(), ['edit_context', 'finish'], 'edit_context', { operations: [{ op: 'drop', range: 'oops' }] })
 		expect(result.kind).toBe('invalid_arguments')
+	})
+
+	test('a continuation-shaped history reported as prefix four protects indices 0-3 and rejects a mixed batch atomically', async () => {
+		const roleState = createEmptyRoleState({ history: continuationHistory(), protectedPrefixLength: 4 })
+		const edit = (operations: unknown[]) => dispatch(scopeWith({ roleState }), ['edit_context', 'finish'], 'edit_context', { operations })
+		expect((await edit([{ op: 'drop', range: [0, 2] }])).kind).toBe('invalid_arguments')
+		expect((await edit([{ op: 'drop', range: [3, 5] }])).kind).toBe('invalid_arguments')
+		expect((await edit([{ op: 'replace', index: 1, content: 'x' }])).kind).toBe('invalid_arguments')
+		expect((await edit([{ op: 'replace', index: 3, content: 'x' }])).kind).toBe('invalid_arguments')
+		expect((await edit([{ op: 'strip_reasoning', range: [0, 4] }])).kind).toBe('invalid_arguments')
+		expect((await edit([{ op: 'drop', range: [4, 6] }, { op: 'replace', index: 2, content: 'x' }])).kind).toBe('invalid_arguments')
+		expect(roleState.history.length).toBe(6)
+		expect(roleState.history[2]?.content).toBe('prior result')
+	})
+
+	test('an operation starting at index 4 succeeds on a continuation-shaped history', async () => {
+		const roleState = createEmptyRoleState({ history: continuationHistory(), protectedPrefixLength: 4 })
+		const result = await dispatch(scopeWith({ roleState }), ['edit_context', 'finish'], 'edit_context', { operations: [{ op: 'drop', range: [4, 6] }] })
+		expect(result.kind).toBe('success')
+		expect(roleState.history.map((message) => message.role)).toEqual(['system', 'user', 'assistant', 'user'])
+	})
+
+	test('the same role shape without the explicit continuation prefix may be edited', async () => {
+		const roleState = createEmptyRoleState({ history: continuationHistory() })
+		const result = await dispatch(scopeWith({ roleState }), ['edit_context', 'finish'], 'edit_context', { operations: [{ op: 'drop', range: [2, 4] }] })
+		expect(result.kind).toBe('success')
+		expect(roleState.history.map((message) => message.role)).toEqual(['system', 'user', 'assistant', 'tool'])
 	})
 
 	test('tracks recentCompactionPromptTokens after each edit', async () => {

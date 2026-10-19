@@ -184,10 +184,11 @@ export function createTaskQueue(dependencies: TaskQueueDependencies): TaskQueueM
 
 	function assembleSubmission(item: QueueItem, queueItems: QueueItem[]): QueuedRunSubmission {
 		const runs = dependencies.listRunIds().map((runId) => dependencies.readRunListSummary(runId))
-		const briefing = assembleBriefingLines({
+		const composeBriefing = (excludeRunId?: string): string[] => assembleBriefingLines({
 			queuedAt: item.queuedAt,
 			items: queueItems,
 			runs,
+			...(excludeRunId !== undefined ? { excludeRunId } : {}),
 			...(item.question !== undefined ? { question: item.question } : {}),
 			...(item.answer !== undefined ? { answer: item.answer } : {}),
 		})
@@ -198,7 +199,7 @@ export function createTaskQueue(dependencies: TaskQueueDependencies): TaskQueueM
 		}
 		if (item.continuesFrom !== undefined) {
 			const priorMeta = parseRunMetaText(item.continuesFrom)
-			// Exactly the continuation assembly handleCreateRun does today: the prior run's task and result summary from its terminal meta. An unreadable or non-terminal prior meta degrades to a briefing-only dispatch rather than dropping the item's run.
+			// The prior run's terminal status, task, and full outcome carried from its meta. Only this branch renders reference turns, so only here is the continued run excluded from the briefing's completed-run lines. An unreadable or non-terminal prior meta degrades to a briefing-only dispatch rather than dropping the item's run.
 			if (priorMeta !== null && isTerminalRunStatus(priorMeta.status)) {
 				return {
 					task: item.task,
@@ -207,13 +208,16 @@ export function createTaskQueue(dependencies: TaskQueueDependencies): TaskQueueM
 						runId: item.continuesFrom,
 						task: priorMeta.task,
 						summary: priorMeta.result?.summary ?? '',
-						briefing,
+						status: priorMeta.status,
+						...(priorMeta.result !== undefined ? { result: priorMeta.result } : {}),
+						...(priorMeta.error !== undefined ? { error: priorMeta.error } : {}),
+						briefing: composeBriefing(item.continuesFrom),
 					},
 				}
 			}
 		}
-		// A first queue dispatch records no lineage because there is none — the continuation carries only the briefing, and runId stays unset so meta.continuesFrom stays honest.
-		return { task: item.task, ...overrides, continuation: { task: item.task, summary: '', briefing } }
+		// A first queue dispatch — or a degraded continuation whose prior meta is unreadable or non-terminal — records no lineage and carries only the briefing; without reference turns there is no reason to omit the continued run from the completed-run lines.
+		return { task: item.task, ...overrides, continuation: { task: item.task, summary: '', briefing: composeBriefing() } }
 	}
 
 	// The legacy dispatch cycle shared by a first dispatch and an answer's fallback: write the dispatching marker (active, no runId), call submitRun, then fill the runId on acceptance, restore the item to waiting on run_in_progress, or sleep-and-retry on run_id_collision. Each write is a whole-file read-modify-write cycle; a collision sleep ends one cycle and the retry begins a fresh one that re-reads.

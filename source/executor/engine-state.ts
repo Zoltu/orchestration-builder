@@ -15,7 +15,7 @@ import type { RoleDelta } from './stream-channel.js'
 import type { ToolPlatform } from './tool-platform-port.js'
 import type { EffortLevel, InvolvementLevel, LogLevel, LogEvent, Message, ResultCard, RunContinuation, ToolCall } from './types.js'
 
-export type { RoleState } from './state.js'
+export type { ProtectedPrefixLength, RoleState } from './state.js'
 
 export interface EngineContext {
 	loadedGuild: LoadedGuild
@@ -28,7 +28,7 @@ export interface EngineContext {
 	involvement?: InvolvementLevel
 	// The run's logging level (docs/reference.md "Logging level"), set on the entry-role context by runExecutor and inherited by children through the context spread. The engine reads it (the inquiry briefing's run-log note qualifies what the log carries); roles never see it. A context without the level reads as full detail.
 	logLevel?: LogLevel
-	// The prior run this run continues, set only on the entry-role context by runExecutor. Like effort, it rides the context spread to children but the briefing is gated on depth 0 in buildInitialHistory, so the continuation block appears only in the entry role's initial history — exactly once per run. Never set on resume: the composed history is already checkpointed, so re-deriving the briefing would duplicate it.
+	// The prior run this run continues, set only on the entry-role context by runExecutor. Like effort, it rides the context spread to children but buildInitialHistory gates it on depth 0, so the prior-run reference turns and the new user message's marker and briefing appear only in the entry role's initial history — exactly once per run. Never set on resume: the composed history is already checkpointed, so re-deriving it would duplicate it.
 	continuation?: RunContinuation
 	// The one-line git notice describing the workspace's starting state (git-state.ts), set only on the entry-role context by runExecutor. Like effort and continuation it rides the context spread to children, but buildInitialHistory gates its injection on depth 0, so it appears once in the entry role's initial history and is never re-derived on resume. Undefined when there is nothing to say (no repository, or the read failed).
 	workspaceGitNotice?: string

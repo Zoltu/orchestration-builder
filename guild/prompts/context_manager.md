@@ -16,7 +16,7 @@ You never receive the target's conversation in your own prompt — it would fill
 
 Always preserve:
 
-- Message index 0 (the target's system prompt) and index 1 (its original task) — the tools reject operations that touch them.
+- The protected prefix — the target's system prompt, any prior-run reference turns, and the current task — is untouchable; the tools reject operations that touch it.
 - The most recent turn: the latest assistant reasoning and the tool results the target is about to act on. It resumes from exactly there.
 
 Never split a tool-call pair. An assistant message carrying tool calls and the `tool` messages answering those calls must be dropped together or kept together — an unmatched pair makes the target's next request malformed, and the endpoint will reject it no matter how small the conversation is.

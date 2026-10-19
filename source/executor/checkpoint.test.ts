@@ -7,7 +7,7 @@ import { createContextPressureTracker } from './context/index.js'
 import type { EngineContext, RoleState } from './engine-state.ts'
 import type { LoadedGuild } from './loader.ts'
 import { createRoleRegistry, type RoleRegistry, type RoleRegistryEntry } from './role-registry.ts'
-import type { ToolCall } from './types.ts'
+import type { Message, ToolCall } from './types.ts'
 
 function sampleRoleState(overrides: Partial<RoleState> = {}): RoleState {
 	return {
@@ -144,6 +144,52 @@ describe('isRunCheckpoint', () => {
 			}
 		}
 		expect(isRunCheckpoint(withLeafHistory([{ role: 'ghost', content: 'boo' }]))).toBe(false)
+	})
+
+	test('accepts an absent protection prefix for legacy checkpoints and validates a present one against the history shape', () => {
+		const withRootRoleState = (overrides: { history?: Message[]; protectedPrefixLength?: unknown }) => {
+			const checkpoint = sampleCheckpoint()
+			return {
+				...checkpoint,
+				frames: checkpoint.frames.map((frame, index) => (index === 0 ? { ...frame, roleState: { ...frame.roleState, ...overrides } } : frame)),
+			}
+		}
+		const defaultHistory: Message[] = [{ role: 'system', content: 'sys' }, { role: 'user', content: 'task' }]
+		const continuationHistory: Message[] = [
+			{ role: 'system', content: 'sys' },
+			{ role: 'user', content: 'prior task' },
+			{ role: 'assistant', content: 'prior result' },
+			{ role: 'user', content: 'current task' },
+		]
+		const legacy = sampleCheckpoint()
+		const legacyLeaf = legacy.frames[1]
+		if (legacyLeaf === undefined) throw new Error('missing leaf')
+		delete legacyLeaf.roleState.protectedPrefixLength
+		expect(isRunCheckpoint(legacy)).toBe(true)
+		expect(isRunCheckpoint(withRootRoleState({ history: defaultHistory, protectedPrefixLength: 2 }))).toBe(true)
+		expect(isRunCheckpoint(withRootRoleState({ history: continuationHistory, protectedPrefixLength: 4 }))).toBe(true)
+		expect(isRunCheckpoint(withRootRoleState({ history: continuationHistory, protectedPrefixLength: 3 }))).toBe(false)
+		expect(isRunCheckpoint(withRootRoleState({ history: continuationHistory, protectedPrefixLength: 5 }))).toBe(false)
+		expect(isRunCheckpoint(withRootRoleState({ history: defaultHistory, protectedPrefixLength: 0 }))).toBe(false)
+		expect(isRunCheckpoint(withRootRoleState({ history: defaultHistory, protectedPrefixLength: 1 }))).toBe(false)
+		expect(isRunCheckpoint(withRootRoleState({ history: defaultHistory, protectedPrefixLength: 2.5 }))).toBe(false)
+		expect(isRunCheckpoint(withRootRoleState({ history: defaultHistory, protectedPrefixLength: '2' }))).toBe(false)
+		expect(isRunCheckpoint(withRootRoleState({ history: [{ role: 'user', content: 'task' }, { role: 'system', content: 'sys' }], protectedPrefixLength: 2 }))).toBe(false)
+		// Prefix 4 requires the continuation shape: the default two-message history, an empty synthesized assistant turn the wire mapping would drop, and a tool-call result turn all fail.
+		expect(isRunCheckpoint(withRootRoleState({ history: defaultHistory, protectedPrefixLength: 4 }))).toBe(false)
+		expect(isRunCheckpoint(withRootRoleState({
+			history: continuationHistory.map((message, index) => (index === 2 ? { ...message, content: '' } : message)),
+			protectedPrefixLength: 4,
+		}))).toBe(false)
+		expect(isRunCheckpoint(withRootRoleState({
+			history: [
+				{ role: 'system', content: 'sys' },
+				{ role: 'user', content: 'prior task' },
+				{ role: 'assistant', content: 'prior result', tool_calls: [agentToolCall()] },
+				{ role: 'user', content: 'current task' },
+			],
+			protectedPrefixLength: 4,
+		}))).toBe(false)
 	})
 
 	test('enforces the suspension invariant: non-leaf pending without a card, leaf pending only with a recorded card', () => {
@@ -439,6 +485,26 @@ describe('createCheckpointRecorder', () => {
 		const checkpoint = written[0]
 		expect(checkpoint?.frames[0]?.roleState.toolCallCount).toBe(7)
 		expect(checkpoint?.frames[0]?.roleState.history.length).toBe(3)
+	})
+
+	test('persists the explicit protected prefix and restores it through a JSON round-trip', () => {
+		const written: RunCheckpoint[] = []
+		const registry = createRoleRegistry()
+		const recorder = createCheckpointRecorder({ parkTracker: createRunParkTracker(), baseTracker: createRunBaseTracker(), writeCheckpoint: (c) => written.push(c), runId: 'run-1', startTime: '2026-01-01T00:00:00.000Z', roleRegistry: registry, contextPressureTracker: createContextPressureTracker() })
+		const entry = registerRoot(recorder, registry)
+		entry.roleState.history = [
+			{ role: 'system', content: 'prompt' },
+			{ role: 'user', content: 'prior task' },
+			{ role: 'assistant', content: 'prior result' },
+			{ role: 'user', content: 'new task' },
+		]
+		entry.roleState.protectedPrefixLength = 4
+		recorder.write()
+
+		const copy: unknown = JSON.parse(JSON.stringify(written[0]))
+		expect(isRunCheckpoint(copy)).toBe(true)
+		if (!isRunCheckpoint(copy)) return
+		expect(copy.frames[0]?.roleState.protectedPrefixLength).toBe(4)
 	})
 
 	test('pending suspension and child card are recorded on the frame and cleared', () => {

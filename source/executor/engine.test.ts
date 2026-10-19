@@ -14,7 +14,7 @@ import type { LoadedGuild } from './loader.ts'
 import type { AppendLog } from './persistence.ts'
 import { createRoleRegistry } from './role-registry.ts'
 import { isRunCheckpoint, type RunCheckpoint } from './checkpoint.ts'
-import { createFakeCheckpointRecorder, createFakeRoleSnapshotStore, createFixtureToolPlatform, recordingHumanBackend, stubHumanBackend, withTool, defined } from './test-fixtures.ts'
+import { createEmptyRoleState, createFakeCheckpointRecorder, createFakeRoleSnapshotStore, createFixtureToolPlatform, recordingHumanBackend, stubHumanBackend, withTool, defined } from './test-fixtures.ts'
 import { createRunBaseTracker } from './base-state.ts'
 import { createRunParkTracker, type RunParkTracker } from './park-state.ts'
 import type { RoleSnapshotStore } from './role-snapshot.ts'
@@ -374,6 +374,79 @@ describe('runRole — acceptance criteria', () => {
 		expect(events.some((e) => e.type === 'llm_call')).toBe(true)
 		expect(events.some((e) => e.type === 'tool_call')).toBe(true)
 		expect(events.some((e) => e.type === 'tool_result')).toBe(true)
+	})
+
+	test('records the protected prefix explicitly for fresh, continuation, and seeded histories', async () => {
+		const guild = buildGuild({ main: { systemPrompt: 'p', tools: ['finish'] } }, 'main')
+		const continuation = { runId: 'run-20260101-000000', task: 'prior task', summary: 'prior summary' }
+
+		const freshLlm = new FakeLlm()
+		freshLlm.responses = [success([finishCall({ status: 'success', summary: 'fresh' })])]
+		const fresh = makeDeps(freshLlm)
+		await runRole(fresh.deps, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'do it' })
+		expect(fresh.checkpoints[fresh.checkpoints.length - 1]?.frames[0]?.roleState.protectedPrefixLength).toBe(2)
+
+		const continuationLlm = new FakeLlm()
+		continuationLlm.responses = [success([finishCall({ status: 'success', summary: 'continued' })])]
+		const continued = makeDeps(continuationLlm)
+		await runRole(continued.deps, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'do it again', continuation })
+		expect(continued.checkpoints[continued.checkpoints.length - 1]?.frames[0]?.roleState.protectedPrefixLength).toBe(4)
+
+		const seededLlm = new FakeLlm()
+		seededLlm.responses = [success([finishCall({ status: 'success', summary: 'seeded' })])]
+		const seeded = makeDeps(seededLlm)
+		await runRole(seeded.deps, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'comment' }, undefined, {
+			history: [
+				{ role: 'system', content: 'sys' },
+				{ role: 'user', content: 'prior task' },
+				{ role: 'assistant', content: 'prior result' },
+				{ role: 'user', content: 'comment' },
+			],
+			continuedFrom: 'main-0-1',
+		})
+		expect(seeded.checkpoints[seeded.checkpoints.length - 1]?.frames[0]?.roleState.protectedPrefixLength).toBe(2)
+
+		const legacyResumeLlm = new FakeLlm()
+		legacyResumeLlm.responses = [success([finishCall({ status: 'success', summary: 'legacy' })])]
+		const legacyResume = makeDeps(legacyResumeLlm)
+		await runRole(legacyResume.deps, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'do it' }, {
+			roleId: 'main-0-1',
+			roleState: createEmptyRoleState({ history: [{ role: 'system', content: 'sys' }, { role: 'user', content: 'do it' }] }),
+		})
+		expect(legacyResume.checkpoints[legacyResume.checkpoints.length - 1]?.frames[0]?.roleState.protectedPrefixLength).toBe(2)
+
+		const legacyContinuationLlm = new FakeLlm()
+		legacyContinuationLlm.responses = [success([finishCall({ status: 'success', summary: 'legacy continuation' })])]
+		const legacyContinuation = makeDeps(legacyContinuationLlm)
+		await runRole(legacyContinuation.deps, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'do it again' }, {
+			roleId: 'main-0-1',
+			roleState: createEmptyRoleState({
+				history: [
+					{ role: 'system', content: 'sys' },
+					{ role: 'user', content: 'prior task' },
+					{ role: 'assistant', content: 'prior result' },
+					{ role: 'user', content: 'do it again' },
+				],
+			}),
+		})
+		expect(legacyContinuation.checkpoints[legacyContinuation.checkpoints.length - 1]?.frames[0]?.roleState.protectedPrefixLength).toBe(4)
+
+		const resumedContinuationLlm = new FakeLlm()
+		resumedContinuationLlm.responses = [success([finishCall({ status: 'success', summary: 'restored' })])]
+		const resumedContinuation = makeDeps(resumedContinuationLlm)
+		await runRole(resumedContinuation.deps, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'do it again' }, {
+			roleId: 'main-0-1',
+			roleState: createEmptyRoleState({
+				history: [
+					{ role: 'system', content: 'sys' },
+					{ role: 'user', content: 'prior task' },
+					{ role: 'assistant', content: 'prior result' },
+					{ role: 'user', content: 'do it again' },
+				],
+				protectedPrefixLength: 4,
+			}),
+		})
+		expect(resumedContinuation.checkpoints[resumedContinuation.checkpoints.length - 1]?.frames[0]?.roleState.protectedPrefixLength).toBe(4)
 	})
 
 	test('an invalid finish summary is rejected as a tool result and the role continues to a valid finish', async () => {

@@ -30,13 +30,25 @@ function threeTurnHistory(): Message[] {
 	]
 }
 
+function continuationHistory(): Message[] {
+	return [
+		{ role: 'system', content: pad(400) },
+		{ role: 'user', content: pad(400) },
+		{ role: 'assistant', content: pad(400) },
+		{ role: 'user', content: pad(400) },
+		...turnBlock('a'),
+		...turnBlock('b'),
+		...turnBlock('c'),
+	]
+}
+
 describe('compactHistoryForContextBudget', () => {
 	test('returns the history unchanged when it already fits', () => {
 		const history: Message[] = [
 			{ role: 'system', content: 'sys' },
 			{ role: 'user', content: 'task' },
 		]
-		const report = compactHistoryForContextBudget(history, { contextWindow: 100000, promptTokens: 0, targetFraction: 0.7 })
+		const report = compactHistoryForContextBudget(history, { contextWindow: 100000, promptTokens: 0, targetFraction: 0.7, protectedPrefixLength: 2 })
 		expect(report.fits).toBe(true)
 		expect(report.droppedMessages).toBe(0)
 		expect(report.truncatedToolMessages).toBe(0)
@@ -53,7 +65,7 @@ describe('compactHistoryForContextBudget', () => {
 			{ role: 'assistant', content: pad(100), reasoning: pad(300) },
 		]
 		// Reasoning is a last resort, so the reasoning-heavy a-turn can only lose its 5600 chars by being dropped whole: 6800 chars ≈ 1700 tokens over the 1200 target; after the drop, 1200 chars ≈ 300 tokens fits, and nothing else runs.
-		const report = compactHistoryForContextBudget(history, { contextWindow: 2000, promptTokens: 0, targetFraction: 0.6 })
+		const report = compactHistoryForContextBudget(history, { contextWindow: 2000, promptTokens: 0, targetFraction: 0.6, protectedPrefixLength: 2 })
 		expect(report.fits).toBe(true)
 		expect(report.droppedMessages).toBe(2)
 		expect(report.strippedReasoningMessages).toBe(0)
@@ -69,14 +81,14 @@ describe('compactHistoryForContextBudget', () => {
 			{ role: 'tool', content: pad(400), tool_call_id: 'a' },
 		]
 		// The a-turn is the protected most-recent turn and its assistant is the last one, so the only reasoning the strip pass could reach is exactly the reasoning that may not be stripped: nothing more can shrink, and the report says so instead of quietly deleting it.
-		const report = compactHistoryForContextBudget(history, { contextWindow: 2000, promptTokens: 0, targetFraction: 0.6 })
+		const report = compactHistoryForContextBudget(history, { contextWindow: 2000, promptTokens: 0, targetFraction: 0.6, protectedPrefixLength: 2 })
 		expect(report.fits).toBe(false)
 		expect(report.droppedMessages).toBe(0)
 		expect(report.strippedReasoningMessages).toBe(0)
 		expect(report.history[2]?.reasoning).toBe(pad(5000))
 	})
 
-	test('strips reasoning oldest-first and stops once the estimate fits', () => {
+	test('keeps reasoning on the protected prefix and the last assistant when the rest cannot shrink', () => {
 		const history: Message[] = [
 			{ role: 'system', content: pad(400), reasoning: pad(1000) },
 			{ role: 'user', content: pad(400), reasoning: pad(1000) },
@@ -88,68 +100,71 @@ describe('compactHistoryForContextBudget', () => {
 			{ role: 'tool', content: pad(500), tool_call_id: 'a' },
 			{ role: 'assistant', content: pad(100), reasoning: pad(4000) },
 		]
-		// After the drop pass exhausts the droppable turns, the only surviving assistant is the protected last one, so the strip pass can only ever reach reasoning on the messages it cannot drop — here the system prompt and the user task (Message carries reasoning on any role, and the estimate counts it on every message). Full history 7700 chars ≈ 1925 tokens over the 1500 target; dropping the a-turn leaves 6900 ≈ 1725, still over, and truncation has nothing to shrink. The pass takes the oldest reasoning first — the system message's — and 5900 chars ≈ 1475 fits, so the user task's and the last assistant's reasoning survive.
-		const report = compactHistoryForContextBudget(history, { contextWindow: 2500, promptTokens: 0, targetFraction: 0.6 })
-		expect(report.fits).toBe(true)
+		// Dropping the a-turn leaves the protected prefix and the last assistant; both keep their reasoning even though the estimate is still over target.
+		const report = compactHistoryForContextBudget(history, { contextWindow: 2500, promptTokens: 0, targetFraction: 0.6, protectedPrefixLength: 2 })
+		expect(report.fits).toBe(false)
 		expect(report.droppedMessages).toBe(2)
-		expect(report.truncatedToolMessages).toBe(0)
-		expect(report.strippedReasoningMessages).toBe(1)
-		expect(report.history[0]?.reasoning).toBeNull()
+		expect(report.strippedReasoningMessages).toBe(0)
+		expect(report.history[0]?.reasoning).toBe(pad(1000))
 		expect(report.history[1]?.reasoning).toBe(pad(1000))
 		expect(report.history[2]?.reasoning).toBe(pad(4000))
 	})
 
-	test('strips reasoning from every older message until the estimate fits', () => {
+	test('strips reasoning from a surviving tool result after the protected prefix', () => {
 		const history: Message[] = [
-			{ role: 'system', content: pad(400), reasoning: pad(1000) },
-			{ role: 'user', content: pad(400), reasoning: pad(1000) },
+			{ role: 'system', content: pad(400) },
+			{ role: 'user', content: pad(400) },
 			{
 				role: 'assistant',
 				content: pad(200),
 				tool_calls: [{ id: 'a', type: 'function', function: { name: pad(10), arguments: pad(90) } }],
 			},
-			{ role: 'tool', content: pad(500), tool_call_id: 'a' },
-			{ role: 'assistant', content: pad(100), reasoning: pad(4000) },
+			{ role: 'tool', content: pad(400), tool_call_id: 'a', reasoning: pad(5000) },
 		]
-		// A tighter 1320-token target needs both older reasonings: 6900 chars ≈ 1725 over, one strip leaves 5900 ≈ 1475 still over, two leave 4900 ≈ 1225 which fits. The last assistant message's reasoning is never reached.
-		const report = compactHistoryForContextBudget(history, { contextWindow: 2200, promptTokens: 0, targetFraction: 0.6 })
+		const report = compactHistoryForContextBudget(history, { contextWindow: 2000, promptTokens: 0, targetFraction: 0.6, protectedPrefixLength: 2 })
 		expect(report.fits).toBe(true)
-		expect(report.strippedReasoningMessages).toBe(2)
-		expect(report.history[0]?.reasoning).toBeNull()
-		expect(report.history[1]?.reasoning).toBeNull()
-		expect(report.history[2]?.reasoning).toBe(pad(4000))
-	})
-
-	test('reasoning exhausted before the estimate fits still reports fits false', () => {
-		const history: Message[] = [
-			{ role: 'system', content: pad(400), reasoning: pad(1000) },
-			{ role: 'user', content: pad(400), reasoning: pad(1000) },
-			{
-				role: 'assistant',
-				content: pad(200),
-				tool_calls: [{ id: 'a', type: 'function', function: { name: pad(10), arguments: pad(90) } }],
-			},
-			{ role: 'tool', content: pad(500), tool_call_id: 'a' },
-			{ role: 'assistant', content: pad(100), reasoning: pad(4000) },
-		]
-		// A 1200-token target is past everything the strip pass can reach: stripping both older reasonings leaves 4900 chars ≈ 1225, still over, with only the protected last assistant's reasoning left. The pass reports what it did and gives up.
-		const report = compactHistoryForContextBudget(history, { contextWindow: 2000, promptTokens: 0, targetFraction: 0.6 })
-		expect(report.fits).toBe(false)
-		expect(report.strippedReasoningMessages).toBe(2)
-		expect(report.history[2]?.reasoning).toBe(pad(4000))
+		expect(report.strippedReasoningMessages).toBe(1)
+		expect(report.history[2]?.content).toBe(pad(200))
+		expect(report.history[3]?.reasoning).toBeNull()
 	})
 
 	test('drops oldest turns first, preserving system, task, and the most recent turn', () => {
 		// 3200 chars ≈ 800 tokens vs target 500: dropping turn a (2400 chars ≈ 600) is not enough, dropping turn b too (1600 chars ≈ 400) fits.
-		const report = compactHistoryForContextBudget(threeTurnHistory(), { contextWindow: 1000, promptTokens: 0, targetFraction: 0.5 })
+		const report = compactHistoryForContextBudget(threeTurnHistory(), { contextWindow: 1000, promptTokens: 0, targetFraction: 0.5, protectedPrefixLength: 2 })
 		expect(report.fits).toBe(true)
 		expect(report.droppedMessages).toBe(4)
 		expect(report.estimatedPromptTokens).toBe(400)
 		expect(report.history.map((m) => m.tool_call_id ?? m.role)).toEqual(['system', 'user', 'assistant', 'c'])
 	})
 
+	test('a continuation-shaped history with an explicit prefix of two is ordinary history and may be dropped', () => {
+		const original = continuationHistory()
+		const report = compactHistoryForContextBudget(original, { contextWindow: 1000, promptTokens: 0, targetFraction: 0.5, protectedPrefixLength: 2 })
+		expect(report.fits).toBe(true)
+		expect(report.droppedMessages).toBe(6)
+		expect(report.history.slice(0, 2)).toEqual(original.slice(0, 2))
+		expect(report.history.map((message) => message.tool_call_id ?? message.role)).toEqual(['system', 'user', 'assistant', 'c'])
+	})
+
+	test('a continuation-shaped history keeps its four-message prefix and starts dropping at index 4', () => {
+		const original = continuationHistory()
+		const report = compactHistoryForContextBudget(original, { contextWindow: 1400, promptTokens: 0, targetFraction: 0.5, protectedPrefixLength: 4 })
+		expect(report.fits).toBe(true)
+		expect(report.droppedMessages).toBe(4)
+		expect(report.history.slice(0, 4)).toEqual(original.slice(0, 4))
+		expect(report.history.map((message) => message.tool_call_id ?? message.role)).toEqual(['system', 'user', 'assistant', 'user', 'assistant', 'c'])
+	})
+
+	test('a continuation-shaped history keeps the prefix even when the remainder cannot fit', () => {
+		const original = continuationHistory()
+		const report = compactHistoryForContextBudget(original, { contextWindow: 100, promptTokens: 0, targetFraction: 0.5, protectedPrefixLength: 4 })
+		expect(report.fits).toBe(false)
+		expect(report.history.slice(0, 4)).toEqual(original.slice(0, 4))
+		expect(report.history.length).toBe(6)
+	})
+
 	test('never leaves an orphan tool message or an unanswered tool call after dropping', () => {
-		const report = compactHistoryForContextBudget(threeTurnHistory(), { contextWindow: 1000, promptTokens: 0, targetFraction: 0.5 })
+		const report = compactHistoryForContextBudget(threeTurnHistory(), { contextWindow: 1000, promptTokens: 0, targetFraction: 0.5, protectedPrefixLength: 2 })
 		const history = report.history
 		for (let i = 0; i < history.length; i++) {
 			const message = history[i]
@@ -178,7 +193,7 @@ describe('compactHistoryForContextBudget', () => {
 			{ role: 'tool', content: pad(10000), tool_call_id: 'a' },
 		]
 		// A single turn is never dropped; the 10000-char tool result must shrink for the 1000-token target.
-		const report = compactHistoryForContextBudget(history, { contextWindow: 2000, promptTokens: 0, targetFraction: 0.5 })
+		const report = compactHistoryForContextBudget(history, { contextWindow: 2000, promptTokens: 0, targetFraction: 0.5, protectedPrefixLength: 2 })
 		expect(report.fits).toBe(true)
 		expect(report.droppedMessages).toBe(0)
 		expect(report.truncatedToolMessages).toBe(1)
@@ -200,7 +215,7 @@ describe('compactHistoryForContextBudget', () => {
 			},
 			{ role: 'tool', content: pad(2050), tool_call_id: 'a' },
 		]
-		const report = compactHistoryForContextBudget(history, { contextWindow: 100, promptTokens: 0, targetFraction: 0.5 })
+		const report = compactHistoryForContextBudget(history, { contextWindow: 100, promptTokens: 0, targetFraction: 0.5, protectedPrefixLength: 2 })
 		expect(report.fits).toBe(false)
 		expect(report.truncatedToolMessages).toBe(1)
 		expect(report.strippedReasoningMessages).toBe(0)
@@ -213,7 +228,7 @@ describe('compactHistoryForContextBudget', () => {
 			{ role: 'user', content: pad(100) },
 			{ role: 'assistant', content: pad(100) },
 		]
-		const report = compactHistoryForContextBudget(history, { contextWindow: 100, promptTokens: 0, targetFraction: 0.5 })
+		const report = compactHistoryForContextBudget(history, { contextWindow: 100, promptTokens: 0, targetFraction: 0.5, protectedPrefixLength: 2 })
 		expect(report.fits).toBe(false)
 		expect(report.droppedMessages).toBe(0)
 		expect(report.truncatedToolMessages).toBe(0)
@@ -222,7 +237,7 @@ describe('compactHistoryForContextBudget', () => {
 
 	test('calibrates the token estimate from the endpoint-reported prompt tokens', () => {
 		// Same history as the drop test, but the endpoint reports 3200 prompt tokens for 3200 chars (1 char/token instead of the default 4): even dropping both older turns leaves 1600 chars ≈ 1600 tokens over the 500 target.
-		const report = compactHistoryForContextBudget(threeTurnHistory(), { contextWindow: 1000, promptTokens: 3200, targetFraction: 0.5 })
+		const report = compactHistoryForContextBudget(threeTurnHistory(), { contextWindow: 1000, promptTokens: 3200, targetFraction: 0.5, protectedPrefixLength: 2 })
 		expect(report.fits).toBe(false)
 		expect(report.droppedMessages).toBe(4)
 		expect(report.strippedReasoningMessages).toBe(0)
@@ -350,7 +365,7 @@ describe('context manager compaction backstop', () => {
 		expect(observation.events.some((event) => event.type === 'context_compacted')).toBe(false)
 	})
 
-	test('strips reasoning oldest-first and stops once the estimate fits', () => {
+	test('keeps reasoning on the protected prefix and the last assistant', () => {
 		const history: Message[] = [
 			{ role: 'system', content: pad(400), reasoning: pad(1000) },
 			{ role: 'user', content: pad(400), reasoning: pad(1000) },
@@ -362,63 +377,34 @@ describe('context manager compaction backstop', () => {
 			{ role: 'tool', content: pad(500), tool_call_id: 'a' },
 			{ role: 'assistant', content: pad(100), reasoning: pad(4000) },
 		]
-		// After the drop pass exhausts the droppable turns, the only surviving assistant is the protected last one, so the strip pass can only ever reach reasoning on the messages it cannot drop — here the system prompt and the user task (Message carries reasoning on any role, and the estimate counts it on every message). Full history 7700 chars ≈ 1925 tokens over the 1500 target; dropping the a-turn leaves 6900 ≈ 1725, still over, and truncation has nothing to shrink. The pass takes the oldest reasoning first — the system message's — and 5900 chars ≈ 1475 fits, so the user task's and the last assistant's reasoning survive.
 		const observation = compactForTest(history, 1500)
-		expect(observation.decision.kind).toBe('continue')
-		const compacted = withoutRecoveryNotice(observation)
-		expect(compacted[0]?.reasoning).toBeNull()
-		expect(compacted[1]?.reasoning).toBe(pad(1000))
-		expect(compacted[2]?.reasoning).toBe(pad(4000))
-		const payload = compactedPayload(observation.events)
-		expect(payload['droppedMessages']).toBe(2)
-		expect(payload['truncatedToolMessages']).toBe(0)
-		expect(payload['strippedReasoningMessages']).toBe(1)
-	})
-
-	test('strips reasoning from every older message until the estimate fits', () => {
-		const history: Message[] = [
-			{ role: 'system', content: pad(400), reasoning: pad(1000) },
-			{ role: 'user', content: pad(400), reasoning: pad(1000) },
-			{
-				role: 'assistant',
-				content: pad(200),
-				tool_calls: [{ id: 'a', type: 'function', function: { name: pad(10), arguments: pad(90) } }],
-			},
-			{ role: 'tool', content: pad(500), tool_call_id: 'a' },
-			{ role: 'assistant', content: pad(100), reasoning: pad(4000) },
-		]
-		// A tighter 1320-token target needs both older reasonings: 6900 chars ≈ 1725 over, one strip leaves 5900 ≈ 1475 still over, two leave 4900 ≈ 1225 which fits. The last assistant message's reasoning is never reached.
-		const observation = compactForTest(history, 1320)
-		expect(observation.decision.kind).toBe('continue')
-		const compacted = withoutRecoveryNotice(observation)
-		expect(compacted[0]?.reasoning).toBeNull()
-		expect(compacted[1]?.reasoning).toBeNull()
-		expect(compacted[2]?.reasoning).toBe(pad(4000))
-		const payload = compactedPayload(observation.events)
-		expect(payload['droppedMessages']).toBe(2)
-		expect(payload['truncatedToolMessages']).toBe(0)
-		expect(payload['strippedReasoningMessages']).toBe(2)
-	})
-
-	test('reasoning exhausted before the estimate fits still fails to fit', () => {
-		const history: Message[] = [
-			{ role: 'system', content: pad(400), reasoning: pad(1000) },
-			{ role: 'user', content: pad(400), reasoning: pad(1000) },
-			{
-				role: 'assistant',
-				content: pad(200),
-				tool_calls: [{ id: 'a', type: 'function', function: { name: pad(10), arguments: pad(90) } }],
-			},
-			{ role: 'tool', content: pad(500), tool_call_id: 'a' },
-			{ role: 'assistant', content: pad(100), reasoning: pad(4000) },
-		]
-		// A 1200-token target is past everything the strip pass can reach: stripping both older reasonings leaves 4900 chars ≈ 1225, still over, with only the protected last assistant's reasoning left. The pass reports what it did and gives up.
-		const observation = compactForTest(history, 1200)
 		expect(observation.decision.kind).toBe('finished')
 		expect(observation.history.length).toBe(3)
-		expect(observation.history[0]?.reasoning).toBeNull()
-		expect(observation.history[1]?.reasoning).toBeNull()
+		expect(observation.history[0]?.reasoning).toBe(pad(1000))
+		expect(observation.history[1]?.reasoning).toBe(pad(1000))
 		expect(observation.history[2]?.reasoning).toBe(pad(4000))
+		expect(observation.events.some((event) => event.type === 'context_compacted')).toBe(false)
+	})
+
+	test('strips reasoning from a surviving tool result after the protected prefix', () => {
+		const history: Message[] = [
+			{ role: 'system', content: pad(400) },
+			{ role: 'user', content: pad(400) },
+			{
+				role: 'assistant',
+				content: pad(200),
+				tool_calls: [{ id: 'a', type: 'function', function: { name: pad(10), arguments: pad(90) } }],
+			},
+			{ role: 'tool', content: pad(400), tool_call_id: 'a', reasoning: pad(5000) },
+		]
+		const observation = compactForTest(history, 1200)
+		expect(observation.decision.kind).toBe('continue')
+		const compacted = withoutRecoveryNotice(observation)
+		expect(compacted[3]?.reasoning).toBeNull()
+		const payload = compactedPayload(observation.events)
+		expect(payload['droppedMessages']).toBe(0)
+		expect(payload['truncatedToolMessages']).toBe(0)
+		expect(payload['strippedReasoningMessages']).toBe(1)
 	})
 
 	test('drops oldest turns first, preserving system, task, and the most recent turn', () => {

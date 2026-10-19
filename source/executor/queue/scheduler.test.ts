@@ -331,6 +331,9 @@ describe('createTaskQueue tick — submission threading', () => {
 		expect(continuation).toBeDefined()
 		if (continuation === undefined) return
 		expect(continuation.runId).toBeUndefined()
+		expect(continuation.status).toBeUndefined()
+		expect(continuation.result).toBeUndefined()
+		expect(continuation.error).toBeUndefined()
 		expect(continuation.briefing).toBeDefined()
 		const briefing = continuation.briefing ?? []
 		expect(briefing.some((line) => line.startsWith('Queued at 2026-01-01T00:00:00.000Z'))).toBe(true)
@@ -339,6 +342,7 @@ describe('createTaskQueue tick — submission threading', () => {
 	})
 
 	test('an answered item dispatches at the front as a continuation of its parked run, with the question and answer in the briefing', async () => {
+		const priorResult = { status: 'needs_clarification' as const, summary: 'waiting for an answer to: which database?', artifacts: ['notes.md'] }
 		const store = fakeQueueStore([
 			waitingItem({ continuesFrom: 'run-20260101-003000', question: 'which database?', answer: 'postgres' }),
 		])
@@ -348,7 +352,7 @@ describe('createTaskQueue tick — submission threading', () => {
 				runId: 'run-20260101-003000',
 				task: 'pick a database',
 				status: 'needs_clarification',
-				result: { status: 'needs_clarification', summary: 'waiting for an answer to: which database?' },
+				result: priorResult,
 			}),
 		})
 
@@ -361,6 +365,9 @@ describe('createTaskQueue tick — submission threading', () => {
 		expect(continuation.runId).toBe('run-20260101-003000')
 		expect(continuation.task).toBe('pick a database')
 		expect(continuation.summary).toBe('waiting for an answer to: which database?')
+		expect(continuation.status).toBe('needs_clarification')
+		expect(continuation.result).toEqual(priorResult)
+		expect(continuation.error).toBeUndefined()
 		expect(continuation.briefing).toContain('Resuming from your question: which database?')
 		expect(continuation.briefing).toContain('The operator answered: postgres')
 	})
@@ -380,6 +387,9 @@ describe('createTaskQueue tick — submission threading', () => {
 		const continuation = submit.calls[0]?.continuation
 		expect(continuation?.runId).toBe('run-20260101-010000')
 		expect(continuation?.summary).toBe('')
+		expect(continuation?.status).toBe('interrupted')
+		expect(continuation?.error).toEqual({ kind: 'interrupted', message: 'the service stopped' })
+		expect(continuation?.result).toBeUndefined()
 		const requeued = requireItem(store.items(), 'item-1')
 		// The dispatching marker replaced the repaired item: waiting no more, with the runId filled on acceptance.
 		expect(requeued.status).toBe('active')
@@ -895,6 +905,49 @@ describe('createTaskQueue briefing', () => {
 		const briefing = submit.calls[0]?.continuation?.briefing ?? []
 		expect(briefing).toContain('Resuming from your question: which database?')
 		expect(briefing).toContain('The operator answered: postgres')
+	})
+
+	test('excludes the continued run from the completed-run briefing while carrying its result as reference turns', async () => {
+		const priorResult = { status: 'error' as const, summary: 'prior failed', artifacts: ['out.txt'] }
+		const store = fakeQueueStore([waitingItem({ continuesFrom: 'run-20260101-010000', question: 'which database?', answer: 'postgres' })])
+		const submit = fakeSubmit([{ ok: true, runId: 'run-20260101-040000' }])
+		const runList = fakeRunList()
+		runList.runs.push(
+			{ runId: 'run-20260101-010000', task: 'prior task', status: 'success', endTime: '2026-01-01T00:40:00.000Z', summary: 'prior summary' },
+			{ runId: 'run-20260101-020000', task: 'another task', status: 'success', endTime: '2026-01-01T02:00:00.000Z', summary: 'another summary' },
+		)
+		const { tick } = queueOver(store, submit, {
+			'run-20260101-010000': meta({ runId: 'run-20260101-010000', task: 'prior task', status: 'error', result: priorResult }),
+		}, runList)
+
+		await tick()
+
+		const continuation = submit.calls[0]?.continuation
+		expect(continuation?.result).toEqual(priorResult)
+		expect(continuation?.task).toBe('prior task')
+		const briefing = continuation?.briefing ?? []
+		expect(briefing.some((line) => line.includes('run-20260101-010000'))).toBe(false)
+		expect(briefing).toContain('- run-20260101-020000: another summary')
+		expect(briefing).toContain('Resuming from your question: which database?')
+		expect(briefing).toContain('The operator answered: postgres')
+	})
+
+	test('keeps the continued run in the briefing when a degraded prior meta carries no reference turns', async () => {
+		const store = fakeQueueStore([waitingItem({ continuesFrom: 'run-20260101-010000', question: 'which database?', answer: 'postgres' })])
+		const submit = fakeSubmit([{ ok: true, runId: 'run-20260101-040000' }])
+		const runList = fakeRunList()
+		runList.runs.push({ runId: 'run-20260101-010000', task: 'prior task', status: 'success', endTime: '2026-01-01T00:40:00.000Z', summary: 'prior summary' })
+		const { tick } = queueOver(store, submit, {
+			'run-20260101-010000': meta({ runId: 'run-20260101-010000', task: 'prior task', status: 'running' }),
+		}, runList)
+
+		await tick()
+
+		const continuation = submit.calls[0]?.continuation
+		expect(continuation?.runId).toBeUndefined()
+		expect(continuation?.result).toBeUndefined()
+		expect(continuation?.briefing).toContain('- run-20260101-010000: prior summary')
+		expect(continuation?.briefing).toContain('Resuming from your question: which database?')
 	})
 
 	test('keeps only the most recent runs when the history exceeds the cap', async () => {

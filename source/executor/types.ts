@@ -230,13 +230,20 @@ export interface ResultCard {
 	detail?: string
 }
 
-// The resolved prior-run lineage and briefing channel for a queue-dispatched run: a genuine continuation carries the prior run's id, operator task, and result summary (empty when the prior run finished without a result card); a first queue dispatch carries only the interim briefing, with runId omitted so meta.continuesFrom stays honest. The executor treats it as an opaque channel — it validates, persists the lineage in meta, and injects the briefing into the entry context; the Guild decides what the continuation means.
+// The resolved prior-run lineage and briefing channel for a queue-dispatched run: a genuine continuation carries the prior run's id, operator task, and full visible outcome; a first queue dispatch carries only the interim briefing, with runId omitted so meta.continuesFrom stays honest. The executor treats it as an opaque channel — it validates, persists the lineage in meta, and turns the outcome into the entry context's prior turns; the Guild decides what the continuation means.
 export interface RunContinuation {
 	// Present only when the run genuinely continues a prior run; absent for a first queue dispatch.
 	runId?: string
 	task: string
+	// The prior result summary, kept as the fallback for producers that predate the full outcome carrier; result/status/error carry the complete visible outcome when present.
 	summary: string
-	// The interim briefing lines about what happened while the task waited in the queue (docs/queueing.md "The interim briefing"), composed by the scheduler and rendered under the same depth-0 gate as the prior-run lines.
+	// The prior run's terminal status when the producer had it; older producers omit it and the result card (or the run-level error kind) still resolves the displayed status.
+	status?: TerminalRunStatus
+	// The prior run's full result card, so the synthesized assistant turn can render the summary, artifacts, and surfaced error message rather than only the summary; the raw technical detail is deliberately excluded from model history.
+	result?: ResultCard
+	// The prior run's run-level error (absent when the prior run finished cleanly), surfaced ahead of the result card's error message.
+	error?: { kind: ErrorKind; message: string }
+	// The interim briefing lines about what happened while the task waited in the queue (docs/queueing.md "The interim briefing"), composed by the scheduler and rendered in the new user message under the same depth-0 gate as the marker.
 	briefing?: string[]
 }
 
@@ -255,6 +262,8 @@ export interface RunOptions {
 	queueTracked?: boolean
 }
 
+export type TerminalRunStatus = 'success' | 'error' | 'needs_clarification' | 'interrupted'
+
 export interface RunMeta {
 	runId: string
 	// Optional so an interrupted meta composed from lost run data (the prior meta never landed) omits the field instead of pinning an empty-string sentinel; every other writer carries it from the run's options.
@@ -270,7 +279,7 @@ export interface RunMeta {
 	// Set when this run continues a prior finished run: the prior run's id. The lineage is what a follow-on run uses to find the prior run's artifacts.
 	continuesFrom?: string
 	// 'interrupted' is terminal: the service stopped mid-run and the run could not (or was not chosen to) resume on restart — written by startup reconciliation so the UI stops showing the run as "in progress".
-	status: 'running' | 'success' | 'error' | 'needs_clarification' | 'interrupted'
+	status: 'running' | TerminalRunStatus
 	startTime: string
 	endTime?: string
 	result?: ResultCard

@@ -183,7 +183,7 @@ export async function resumeExecutor(deps: ExecutorDependencies, checkpoint: Run
 	const effort = entryFrame.effort ?? DEFAULT_EFFORT
 	const involvement = entryFrame.involvement ?? DEFAULT_INVOLVEMENT
 	const logLevel = entryFrameLogLevel(entryFrame)
-	// The checkpoint carries the lineage id only (not the prior task/summary): on resume the entry role's history — the briefing included — is restored from the checkpoint verbatim, so the full continuation object is never recomposed and the empty task/summary here exist only so the metas keep the continuesFrom field.
+	// The checkpoint carries the lineage id only (not the prior task or outcome): on resume the entry role's history — the prior turns and the new user message included — is restored from the checkpoint verbatim, so the full outcome is not recomposed and the empty task/summary here exist only so the metas keep the continuesFrom field.
 	const continuation: RunContinuation | undefined = entryFrame.continuesFrom !== undefined ? { runId: entryFrame.continuesFrom, task: '', summary: '' } : undefined
 	const runOptions: RunOptions = {
 		runId: checkpoint.runId,

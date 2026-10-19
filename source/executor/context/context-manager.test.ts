@@ -316,6 +316,36 @@ describe('context handler interlude', () => {
 		expect(resolved?.payload).toEqual({ trigger: 'context_budget_exceeded', handler: 'context_manager', target: 'main-0-1', action: 'failed', handlerStatus: 'error' })
 	})
 
+	test('the naive backstop preserves a four-message continuation prefix and starts dropping at index four', async () => {
+		const context = contextFor(1000, 0, undefined, 'context_manager')
+		const manager = createContextManager(context, {
+			appendLog: () => {},
+			contextPressureTracker: createContextPressureTracker(),
+			runRole: async () => ({ status: 'error', summary: 'cannot compact' }),
+		})
+		const prefix: Message[] = [
+			{ role: 'system', content: 'sys' },
+			{ role: 'user', content: 'prior task' },
+			{ role: 'assistant', content: 'prior result' },
+			{ role: 'user', content: 'current task' },
+		]
+		const history: Message[] = [
+			...prefix,
+			{ role: 'assistant', content: 'a'.repeat(4000) },
+			{ role: 'user', content: 'b'.repeat(4000) },
+			{ role: 'assistant', content: 'recent' },
+		]
+		const roleState: RoleState = { ...roleStateFor(), history, protectedPrefixLength: 4 }
+		manager.observeRejection(roleState, { promptTokens: 9000, contextWindow: 1000 })
+		const decision = await manager.resolveSafePoint(roleState, entryFor(roleState))
+
+		expect(decision.kind).toBe('continue')
+		expect(roleState.history.slice(0, 4)).toEqual(prefix)
+		// Both old post-prefix turns were dropped, so the first surviving turn is the recent assistant and the notice follows it.
+		expect(roleState.history[4]?.content).toBe('recent')
+		expect(roleState.history[roleState.history.length - 1]?.content).toContain('[Platform notice — context window exceeded]')
+	})
+
 	test('throws when a pending compaction has no configured context handler', async () => {
 		const { manager } = managerFor(contextFor(1000))
 		const roleState = roleStateFor()

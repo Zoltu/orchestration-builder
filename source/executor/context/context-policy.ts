@@ -1,3 +1,4 @@
+import type { ProtectedPrefixLength } from '../state.js'
 import type { Message } from '../types.js'
 
 interface TruncatedOutput {
@@ -19,6 +20,21 @@ export function truncateToolOutput(text: string, maxChars: number): TruncatedOut
 	return { text: `${truncated}\n${marker}`, truncated: true, removedChars: removed }
 }
 
+// The opening messages every role keeps by default: the system prompt and the current task. An entry role whose history also carries the prior run's reference turns persists 4 explicitly, so neither compaction nor edit_context has to infer the shape from message roles — a seeded child conversation (always prefix 2, even when its first turns look like a continuation by role) and an ordinary turn sequence stay fully editable.
+export const DEFAULT_PROTECTED_PREFIX_LENGTH = 2 as const
+
+// The exact four-message opening a continuation history has, including a non-empty synthesized result whose wire mapping cannot be dropped. Used only to validate a persisted prefix of 4 and to upgrade a checkpoint written before the explicit field existed; it is never used to infer protection during normal operation.
+export function hasContinuationPrefixShape(history: Message[]): boolean {
+	if (history.length < 4) return false
+	if (history[0]?.role !== 'system') return false
+	if (history[1]?.role !== 'user') return false
+	const priorResult = history[2]
+	if (priorResult?.role !== 'assistant') return false
+	if (priorResult.content === '') return false
+	if (priorResult.tool_calls !== undefined && priorResult.tool_calls.length > 0) return false
+	return history[3]?.role === 'user'
+}
+
 export function stripReasoning(messages: Message[], startIndex?: number, endIndex?: number): Message[] {
 	const start = startIndex ?? 0
 	const end = endIndex ?? messages.length
@@ -30,12 +46,14 @@ export function stripReasoning(messages: Message[], startIndex?: number, endInde
 	})
 }
 
-interface ContextCompactionOptions {
+export interface ContextCompactionOptions {
 	contextWindow: number
 	// The prompt tokens the endpoint reported for the rejected request, used to calibrate the chars-per-token ratio against this exact conversation. 0 when the endpoint did not report a count, falling back to the default ratio.
 	promptTokens: number
 	// Fraction of the context window the compacted history should estimate under, leaving headroom for estimator error and the completion reservation.
 	targetFraction: number
+	// The role state's explicit protected prefix: 2 for the system prompt and current task, 4 when the entry role was seeded with prior-run reference turns.
+	protectedPrefixLength: ProtectedPrefixLength
 }
 
 export interface ContextCompactionReport {
@@ -45,7 +63,7 @@ export interface ContextCompactionReport {
 	// Messages whose reasoning the last-resort strip pass cleared (0 when the earlier steps already fit). The last assistant message's reasoning is never counted here because it is never stripped.
 	strippedReasoningMessages: number
 	estimatedPromptTokens: number
-	// False when even the undeletable remainder (system prompt, task, the protected most-recent turn) estimates over the target — retrying cannot help.
+	// False when even the undeletable remainder (the protected prefix and the protected most-recent turn) estimates over the target — retrying cannot help.
 	fits: boolean
 }
 
@@ -71,16 +89,16 @@ function totalChars(messages: Message[]): number {
 	return chars
 }
 
-// Indices 0 (system prompt) and 1 (original task) are never dropped, so blocks cover indices 2 and up. An assistant message carrying tool_calls is grouped with the tool-result messages that answer it: dropping must take the whole group or none of it, because an assistant tool_call without its results (or an orphan tool message) is a malformed request on OpenAI-compatible endpoints.
+// The protected prefix (the system prompt, the current task, and any continuation reference turns) is never dropped, so blocks cover the prefix onward. An assistant message carrying tool_calls is grouped with the tool-result messages that answer it: dropping must take the whole group or none of it, because an assistant tool_call without its results (or an orphan tool message) is a malformed request on OpenAI-compatible endpoints.
 interface HistoryBlock {
 	start: number
 	end: number
 	chars: number
 }
 
-function segmentBlocks(messages: Message[]): HistoryBlock[] {
+function segmentBlocks(messages: Message[], protectedPrefixLength: ProtectedPrefixLength): HistoryBlock[] {
 	const blocks: HistoryBlock[] = []
-	let index = 2
+	let index: number = protectedPrefixLength
 	while (index < messages.length) {
 		const message = messages[index]
 		if (message === undefined) break
@@ -99,17 +117,18 @@ function segmentBlocks(messages: Message[]): HistoryBlock[] {
 	return blocks
 }
 
-// The automatic compaction backstop: drop the oldest turns, truncate oversized surviving tool results, then — only when the estimate still will not fit — strip reasoning from the oldest survivors, never from the last assistant message. Reasoning is replayed to the wire every turn (see mapHistoryToResponsesInput), so stripping it rewrites what the model believes it decided; that cost is accepted only after dropping and truncating cannot fit, and shedding reasoning proactively remains the guild's deliberate choice via the edit_context strip_reasoning op.
+// The automatic compaction backstop: drop the oldest turns after the explicit protected prefix, truncate oversized surviving tool results, then — only when the estimate still will not fit — strip reasoning from the oldest survivors after the prefix, never from the last assistant message. Reasoning is replayed to the wire every turn (see mapHistoryToResponsesInput), so stripping it rewrites what the model believes it decided; that cost is accepted only after dropping and truncating cannot fit, and shedding reasoning proactively remains the guild's deliberate choice via the edit_context strip_reasoning op.
 export function compactHistoryForContextBudget(history: Message[], options: ContextCompactionOptions): ContextCompactionReport {
 	const targetTokens = Math.floor(options.contextWindow * options.targetFraction)
 	const charsPerToken = options.promptTokens > 0 ? totalChars(history) / options.promptTokens : DEFAULT_CHARS_PER_TOKEN
 	const estimateTokens = (chars: number): number => Math.ceil(chars / charsPerToken)
 
 	let droppedMessages = 0
-	const blocks = segmentBlocks(history)
+	const prefix = options.protectedPrefixLength
+	const blocks = segmentBlocks(history, prefix)
 	const charsBeforeDrop = totalChars(history)
 	let removedChars = 0
-	let dropBoundary = 2
+	let dropBoundary: number = prefix
 	// The most recent block is never dropped: it is the turn the role is about to continue from.
 	for (let blockIndex = 0; blockIndex < blocks.length - 1; blockIndex++) {
 		if (estimateTokens(charsBeforeDrop - removedChars) <= targetTokens) break
@@ -119,7 +138,7 @@ export function compactHistoryForContextBudget(history: Message[], options: Cont
 		droppedMessages += block.end - block.start
 		dropBoundary = block.end
 	}
-	let compacted = dropBoundary > 2 ? history.slice(0, 2).concat(history.slice(dropBoundary)) : history
+	let compacted = dropBoundary > prefix ? history.slice(0, prefix).concat(history.slice(dropBoundary)) : history
 
 	let truncatedToolMessages = 0
 	while (estimateTokens(totalChars(compacted)) > targetTokens) {
@@ -143,7 +162,7 @@ export function compactHistoryForContextBudget(history: Message[], options: Cont
 		truncatedToolMessages++
 	}
 
-	// Last resort, reached only when dropping and truncating leave the estimate over target: strip reasoning oldest-first, one message at a time, until the estimate fits or every strippable message is exhausted. The last assistant message keeps its reasoning — it is the decision the role is about to continue from, the same turn the drop pass protects.
+	// Last resort, reached only when dropping and truncating leave the estimate over target: strip reasoning oldest-first from the messages after the protected prefix, one message at a time, until the estimate fits or every strippable message is exhausted. The protected prefix keeps its reasoning, and the last assistant message keeps its reasoning — it is the decision the role is about to continue from.
 	let strippedReasoningMessages = 0
 	let lastAssistantIndex = -1
 	for (let i = compacted.length - 1; i >= 0; i--) {
@@ -152,7 +171,7 @@ export function compactHistoryForContextBudget(history: Message[], options: Cont
 			break
 		}
 	}
-	let stripIndex = 0
+	let stripIndex = prefix
 	while (estimateTokens(totalChars(compacted)) > targetTokens && stripIndex < compacted.length) {
 		const candidate = compacted[stripIndex]
 		if (stripIndex === lastAssistantIndex || candidate === undefined || candidate.reasoning === undefined || candidate.reasoning === null) {

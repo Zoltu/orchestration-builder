@@ -1,6 +1,7 @@
 import { isErrorKind } from './errors.js'
 import { suspendsChild } from './suspending-tools.js'
 import { DEFAULT_LOG_LEVEL } from './log-level.js'
+import { hasContinuationPrefixShape } from './context/context-policy.js'
 import type { ContextPressureTracker } from './context/index.js'
 import type { EngineContext, RoleState } from './engine-state.js'
 import { isMessage, isToolCall } from './message-validation.js'
@@ -78,6 +79,12 @@ function isRecentToolCall(value: unknown): boolean {
 function isRoleState(value: unknown): value is RoleState {
 	if (!isObject(value)) return false
 	if (!Array.isArray(value.history) || !value.history.every(isMessage)) return false
+	if (value.protectedPrefixLength !== undefined) {
+		if (value.protectedPrefixLength !== 2 && value.protectedPrefixLength !== 4) return false
+		if (value.history.length < 2) return false
+		if (value.history[0]?.role !== 'system' || value.history[1]?.role !== 'user') return false
+		if (value.protectedPrefixLength === 4 && !hasContinuationPrefixShape(value.history)) return false
+	}
 	if (!isNonNegativeNumber(value.lastPromptTokens)) return false
 	if (!Array.isArray(value.recentCompactionPromptTokens) || !value.recentCompactionPromptTokens.every(isNonNegativeNumber)) return false
 	if (!Array.isArray(value.recentToolCalls) || !value.recentToolCalls.every(isRecentToolCall)) return false
