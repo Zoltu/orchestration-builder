@@ -2717,7 +2717,7 @@ li:last-child {
 	cursor: pointer;
 }
 
-/* The error modal's Continue and Resume affordances: secondary buttons beside Close, so the run's failure reads as a waypoint — one click re-opens the compose screen (Continue, anchored to this run's outcome) or restarts the same run from its checkpoint (Resume, offered when the checkpoint makes a same-run resume possible). Both are the same kind of waypoint, so they share one rule list. */
+/* The terminal modal's Continue and Resume affordances: secondary buttons beside Close, so the run's outcome reads as a waypoint — one click re-opens the compose screen (Continue, anchored to this run's outcome) or restarts the same run from its checkpoint (Resume, offered when the checkpoint makes a same-run resume possible). Both are the same kind of waypoint, so they share one rule list; the host disables them while another run is genuinely active or a submission is in flight. */
 .result-modal-continue,
 .result-modal-resume {
 	padding: var(--space-2) var(--space-4);
@@ -2729,9 +2729,15 @@ li:last-child {
 	cursor: pointer;
 }
 
-.result-modal-continue:hover,
-.result-modal-resume:hover {
+.result-modal-continue:hover:not(:disabled),
+.result-modal-resume:hover:not(:disabled) {
 	background: var(--color-accent-soft);
+}
+
+.result-modal-continue:disabled,
+.result-modal-resume:disabled {
+	opacity: 0.5;
+	cursor: default;
 }
 
 /* The terminal-result call-to-action node, rendered as a layered 3D "bezel + bevel + face" button modeled on a classic chrome-rimmed pushbutton. Three stacked SVG rects read as a raised, chrome-rimmed solid object: a grey-gradient bezel (the brushed-metal rim), a radial-gradient inner bevel (the beveled edge), and the accent- or error-gradient face (the colored surface). A cast drop-shadow lifts the whole button off the surface; hover lifts it further; press sinks it (the button depresses). All within the same NODE_WIDTH × NODE_HEIGHT box, so layout is unchanged. The inactive (modal-closed) and active (modal-open) states share the same 3D body — the active state adds a glowing inner ring (accent blue for success, error red for a failed run) + a stronger pulse so the open-modal connection reads. The gradients are declared inline in the vnode; the rules below carry the label/cast/motion styling. */

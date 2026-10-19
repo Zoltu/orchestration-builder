@@ -20,7 +20,7 @@ function contextRecoveryNotice(llmResult: { promptTokens: number; contextWindow:
 	return [
 		`[Platform notice — context window exceeded] Your last request to the model was rejected because this conversation had grown past the model's context window${sizePart}.`,
 		`The platform compacted this conversation so work can continue: it dropped ${report.droppedMessages} older messages and truncated ${report.truncatedToolMessages} oversized tool results${reasoningPart} (the estimated prompt size is now ~${report.estimatedPromptTokens} tokens).`,
-		'Your system prompt, your task (and any prior-run reference turns), and your most recent messages are intact.',
+		'Your system prompt, your original task (and any prior-run reference turns), and your most recent messages are intact.',
 		'Continue from your most recent state; re-read files or re-run commands if you need information that was removed.',
 		'If the task cannot be completed without the removed context, call finish with status "error" and error.kind "context_budget_exceeded" so the work can be re-delegated in smaller pieces.',
 	].join(' ')
@@ -34,7 +34,7 @@ export function contextManagedNotice(trigger: 'context_pressure' | 'context_budg
 	return [
 		`[Platform notice — context compacted] The platform paused you and the context manager compacted this conversation because ${reason}.`,
 		`The context manager reports: ${summary}`,
-		'Your system prompt, your original task, and your most recent messages should be intact.',
+		'Your system prompt, your original task (and any prior-run reference turns), and your most recent messages should be intact.',
 		'Continue from your most recent state; re-read files or re-run commands if you need information that was removed.',
 	].join(' ')
 }

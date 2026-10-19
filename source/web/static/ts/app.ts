@@ -194,6 +194,8 @@ export interface ApplicationState {
 	draggingItemId: string | null
 	queueAnswerPendingId: string | null
 	openQueueQuestionId: string | null
+	// The answered item whose resume has not been dispatched yet (the answer landed while another run was active, so the item is still waiting without a runId). The periodic queue poll watches it and re-engages the watch screen once the item finally resumes.
+	pendingResumeItemId: string | null
 	serverAvailable: boolean
 	// The ETag validators for the versioned GET endpoints, keyed by request URL. Each poll echoes the stored value as If-None-Match; a 304 leaves the already-held payload untouched. Only the run view still rides this map: the flow model and the run list are entity-diff feeds whose opaque states carry their own replica revisions.
 	versions: Record<string, string>
@@ -811,9 +813,24 @@ function reduceQueue(state: ApplicationState, payload: FetchResultPayload): Appl
 	return { ...state, queueItems: items, serverAvailable: ok, justSubmittedItemId }
 }
 
-// The queue poll's ingress: reduce the payload, then repaint the favicon, so a poll that parks an item on a question (or clears one) turns the icon yellow (or back) without waiting for the run-list poll.
+// The queue poll's ingress: reduce the payload, then repaint the favicon, so a poll that parks an item on a question (or clears one) turns the icon yellow (or back) without waiting for the run-list poll. A deferred answer resume is watched here: once its item carries a run id — even when it was dispatched and finished between polls, since done/error items keep the run id — the watch screen re-engages on that run. Only a vanished or cancelled item, or a finished item with no recorded run, clears the field without selection.
 function GotQueue(state: ApplicationState, payload: FetchResultPayload): ActionReturn {
 	const nextState = reduceQueue(state, payload)
+	const pendingResumeItemId = nextState.pendingResumeItemId
+	if (pendingResumeItemId === null) return [nextState, UpdateFavicon(nextState)]
+	const item = nextState.queueItems.find((entry) => entry.id === pendingResumeItemId)
+	if (item === undefined || item.status === 'cancelled') {
+		const cleared = { ...nextState, pendingResumeItemId: null }
+		return [cleared, UpdateFavicon(cleared)]
+	}
+	if (typeof item.runId === 'string' && item.runId !== '') {
+		const cleared = { ...nextState, pendingResumeItemId: null }
+		return withFavicon(ReactivateRunForAnswer(cleared, item.runId))
+	}
+	if (item.status === 'done' || item.status === 'error') {
+		const cleared = { ...nextState, pendingResumeItemId: null }
+		return [cleared, UpdateFavicon(cleared)]
+	}
 	return [nextState, UpdateFavicon(nextState)]
 }
 
@@ -925,13 +942,17 @@ function GotQueueAfterAnswer(answeredItemId: string) {
 	}
 }
 
-// The answer's follow-up queue read, curried with the answered item's id: answering a parked item drops its old runId and fronts it for re-dispatch (recordAnswer), and the scheduler's tick then submits a NEW continuation run with a fresh runId. Once the refetched item carries that id the client selects it, so the watch screen leaves the old terminal needs_clarification run instead of showing a stale "Respond" CTA. When the slot was busy the item is still waiting with no runId, so the client stays put; the periodic queue poll then dispatches it in the background.
+// The answer's follow-up queue read, curried with the answered item's id. When the parked checkpoint still matches, the scheduler re-enters the SAME run id and the item's runId is already present in this read, so the watch screen is reactivated immediately (including when it is already the selected run: its terminal needs_clarification status is reset so the per-run poll and stream restart). The legacy no-checkpoint fallback submits a new briefed continuation with a fresh runId, which this same selection path handles. When the slot was busy the item is still waiting with no runId: the client records it in pendingResumeItemId and stays put, and GotQueue re-engages the watch screen when that item finally resumes.
 function ApplyAnsweredQueue(answeredItemId: string) {
 	return function ApplyAnsweredQueueForItem(state: ApplicationState, payload: FetchResultPayload): ActionReturn {
 		const queued = reduceQueue(state, payload)
 		const item = queued.queueItems.find((entry) => entry.id === answeredItemId)
-		if (item !== undefined && typeof item.runId === 'string' && item.runId !== '') return SelectRun(queued, item.runId)
-		return [queued, UpdateFavicon(queued)]
+		if (item !== undefined && typeof item.runId === 'string' && item.runId !== '') {
+			const cleared = { ...queued, pendingResumeItemId: null }
+			return withFavicon(ReactivateRunForAnswer(cleared, item.runId))
+		}
+		const deferred = { ...queued, pendingResumeItemId: answeredItemId }
+		return [deferred, UpdateFavicon(deferred)]
 	}
 }
 
@@ -1154,34 +1175,42 @@ function LogLevelSaveFailed(state: ApplicationState): ApplicationState {
 	return { ...state, savingLogLevel: false, serverAvailable: false }
 }
 
+// The per-run view state a switch resets: the flow model, its replica, its previous-frame diff, and the per-run modal/floating state all belong to the previously-selected run. Clearing the model unmounts the sequence container and the cleared inspector unmounts its modal body, so callers pair this with the two follower syncs; the live partial belongs to the previous run too (the stream subscription restarts onto the new selection).
+function resetRunView(state: ApplicationState, runId: string, status: RunStatus | null): ApplicationState {
+	return {
+		...state,
+		screen: 'watch',
+		selectedRunId: runId,
+		selectedRunView: null,
+		selectedRunStatus: status,
+		flowModel: null,
+		previousFlowModel: null,
+		flowFeed: emptyFlowFeedState(),
+		questionModalOpen: false,
+		resultModalOpen: false,
+		resultShownForRun: null,
+		tooltip: null,
+		interruptNotice: null,
+		interruptModalOpen: false,
+		interruptAnswerCard: null,
+		planExpanded: false,
+		inspectorModalOpen: false,
+		livePartial: null,
+	}
+}
+
 function SelectRun(state: ApplicationState, runId: string): ActionReturn {
 	if (runId === state.selectedRunId) return [{ ...state, screen: 'watch' }, SyncSequenceFollower(), SyncInspectorFollower()]
-	// The flow model, its replica, its previous-frame diff, and the per-run modal state belong to the previously-selected run; a switch clears them so the centerpiece shows the new run's first frame without a stale lifecycle diff or a leftover modal. Selecting a run always lands on the watch screen (history rows and the in-progress pill both go through here). Clearing the model unmounts the sequence container, so the switch syncs its scroll follower (the new run's first frame re-attaches it, pinned to the bottom), and the cleared inspector unmounts the modal body (its follower detaches the same way). The live partial belongs to the previous run too and clears with the rest (the stream subscription restarts onto the new selection).
+	// Selecting a run always lands on the watch screen (history rows and the in-progress pill both go through here).
 	inspectorSession.close()
-	return [
-		{
-			...state,
-			screen: 'watch',
-			selectedRunId: runId,
-			selectedRunView: null,
-			selectedRunStatus: null,
-			flowModel: null,
-			previousFlowModel: null,
-			flowFeed: emptyFlowFeedState(),
-			questionModalOpen: false,
-			resultModalOpen: false,
-			resultShownForRun: null,
-			tooltip: null,
-			interruptNotice: null,
-			interruptModalOpen: false,
-			interruptAnswerCard: null,
-			planExpanded: false,
-			inspectorModalOpen: false,
-			livePartial: null,
-		},
-		SyncSequenceFollower(),
-		SyncInspectorFollower(),
-	]
+	return [resetRunView(state, runId, null), SyncSequenceFollower(), SyncInspectorFollower()]
+}
+
+// Answering a parked question resumes the same run id rather than starting a new one. A different run goes through the normal switch; the same run must stay selected while its terminal needs_clarification status is reset to the non-terminal 'unknown', because the per-run poll and stream subscriptions are disabled on a terminal status. The status reset also clears resultShownForRun (through resetRunView), so the resumed run's eventual outcome opens the result modal again; the next poll's still-parked needs_clarification meta is not a completion transition from unknown, so it cannot reopen the old card.
+function ReactivateRunForAnswer(state: ApplicationState, runId: string): ActionReturn {
+	if (runId !== state.selectedRunId) return SelectRun(state, runId)
+	inspectorSession.close()
+	return [resetRunView(state, runId, 'unknown'), SyncSequenceFollower(), SyncInspectorFollower()]
 }
 
 function ToggleMute(state: ApplicationState, event: Event): ApplicationState {
@@ -2615,7 +2644,7 @@ function isApplicationState(value: unknown): value is ApplicationState {
 	if (!isObject(value)) return false
 	const stateKeys: (keyof ApplicationState)[] = [
 		'summaries', 'selectedRunId', 'selectedRunView', 'selectedRunStatus', 'pendingQuestions',
-		'queueItems', 'justSubmittedItemId', 'pendingAddSelectionId', 'editingItemId', 'draggingItemId', 'queueAnswerPendingId', 'openQueueQuestionId',
+		'queueItems', 'justSubmittedItemId', 'pendingAddSelectionId', 'editingItemId', 'draggingItemId', 'queueAnswerPendingId', 'openQueueQuestionId', 'pendingResumeItemId',
 		'serverAvailable', 'versions', 'justSubmittedRunId', 'createSending', 'muted', 'shownQuestionIds', 'firstQuestionsPoll', 'pendingAnswerId',
 		'runEffort', 'savingEffort', 'runInvolvement', 'savingInvolvement', 'runLogLevel', 'savingLogLevel',
 		'flowModel', 'previousFlowModel', 'flowFeed', 'runListFeed', 'labelResolver', 'guildParticipants', 'build',
@@ -2650,6 +2679,7 @@ app({
 			draggingItemId: null,
 			queueAnswerPendingId: null,
 			openQueueQuestionId: null,
+			pendingResumeItemId: null,
 			serverAvailable: true,
 			versions: {},
 			justSubmittedRunId: null,
