@@ -1200,7 +1200,12 @@ function resetRunView(state: ApplicationState, runId: string, status: RunStatus 
 }
 
 function SelectRun(state: ApplicationState, runId: string): ActionReturn {
-	if (runId === state.selectedRunId) return [{ ...state, screen: 'watch' }, SyncSequenceFollower(), SyncInspectorFollower()]
+	if (runId === state.selectedRunId) {
+		// A run can resume in place without this tab answering the question (another tab, the API, or an error resume). The run list then reports it non-terminal while the selected view still holds the old terminal status, which keeps the per-run poll and stream disabled; re-arm the same-id view so the operator can recover without switching runs or reloading.
+		const summary = state.summaries.find((entry) => entry.runId === runId)
+		if (summary !== undefined && !isTerminalStatus(summary.status)) return ReactivateRunForAnswer(state, runId)
+		return [{ ...state, screen: 'watch' }, SyncSequenceFollower(), SyncInspectorFollower()]
+	}
 	// Selecting a run always lands on the watch screen (history rows and the in-progress pill both go through here).
 	inspectorSession.close()
 	return [resetRunView(state, runId, null), SyncSequenceFollower(), SyncInspectorFollower()]
