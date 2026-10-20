@@ -5,9 +5,12 @@ import type { Vnode } from '../vendor/hyperapp.js'
 import { createMarkdownRenderer } from './markdown-render.js'
 import { createRunStage } from './run-stage/index.js'
 import { createScrollFollower } from './scroll-follow.js'
+import { createAnimationFrameCoalescer } from './animation-frame-coalescer.js'
+import { createPollFetcher } from './poll-fetch.js'
 import { createLabelResolver, isLabelTier, isRoleOrder, TIER_VALUES } from './labels.js'
 import { buildInfoFromConfig, formatBuildLabel } from './build-info.js'
 import { isTerminalStatus, secondsBetweenIso, withLiveElapsed } from './interaction-model.js'
+import { planSameRunView } from './run-selection.js'
 import { deriveFaviconState, faviconHref } from './favicon.js'
 import { createTooltipDismiss, deriveTooltipDescriptor, isInFlightAskHuman, resolveInspectorScope, resolveTooltipTarget } from './inspector.js'
 import { operationIdsForTooltipDetails, tooltipStyle, Tooltip } from './tooltip.js'
@@ -40,6 +43,7 @@ import type { RunStage } from './run-stage/index.js'
 import type { ElementRect, TooltipTarget } from './inspector.js'
 import type { OperationDetailsState } from './operation-details.js'
 import type { ScrollFollower } from './scroll-follow.js'
+import type { PollKey, PollResponse } from './poll-fetch.js'
 import type { QueueItemLike } from './queue-panel.js'
 import type { StreamClient, StreamDeltaMessage } from './stream-client.js'
 import type { BuildInfo } from './build-info.js'
@@ -234,6 +238,8 @@ export interface ApplicationState {
 	sequenceRolesOnly: boolean
 	// The visible screen: 'watch' (the flow/sequence stage), 'history' (the merged run browser and task queue), or 'compose' (the new-task hero). A zero-state service shows compose regardless (see Main).
 	screen: Screen
+	// Whether the browser tab is visible; polling subscriptions are withdrawn while hidden and an immediate refresh runs on return.
+	pageVisible: boolean
 	// Per-row expansion for the merged history screen, keyed by run id or queue item id, so the full task/result of several rows can be open at once.
 	expandedRowIds: Record<string, boolean>
 	// The continuation pending on the compose screen, or null for a plain new task. Set by the History row's or result modal's Continue button; cleared by the reference block's Cancel and after a successful submit.
@@ -295,6 +301,8 @@ export interface FetchEffectPayload {
 	init?: RequestInit
 	// The stored ETag to revalidate with, sent as If-None-Match; absent or empty means an unconditional request. Only the run view still carries it — the run list and flow model now sync through entity-diff.
 	ifNoneMatch?: string | null
+	// Set only by periodic polls: the guard key gives that poll single-flight, a bounded request timeout, and capped retry backoff.
+	pollKey?: PollKey
 	ok: Action<FetchResultPayload>
 	fail: Action<undefined>
 }
@@ -308,6 +316,13 @@ export type EffectItem = FetchEffect | NullPayloadEffect | FaviconEffect
 // --- Constants and formatting helpers --------------------------------------
 
 const POLL_INTERVAL_MS = 1000
+
+const POLL_KEY_RUN_LIST: PollKey = 'run-list'
+const POLL_KEY_QUESTIONS: PollKey = 'questions'
+const POLL_KEY_QUEUE: PollKey = 'queue'
+const POLL_KEY_SELECTED_RUN: PollKey = 'selected-run'
+const POLL_KEY_FLOW: PollKey = 'flow'
+const POLL_KEY_INSPECTOR_TAIL: PollKey = 'inspector-tail'
 
 const STATUS_LABELS: Record<string, string> = {
 	unknown: 'in progress',
@@ -519,8 +534,21 @@ function onEscapeKey(action: Action<undefined>): [typeof onEscapeKeySubscriber, 
 	return [onEscapeKeySubscriber, { action }]
 }
 
+// The visibility subscription stays mounted for the page's lifetime: it withdraws the polling subscriptions while the tab is hidden and tells the app to refresh when the tab returns.
+function onVisibilityChangeSubscriber(dispatch: Dispatch, payload: { action: Action<boolean> }): () => void {
+	const handler = (): void => {
+		dispatch(payload.action, document.visibilityState === 'visible')
+	}
+	document.addEventListener('visibilitychange', handler)
+	return () => document.removeEventListener('visibilitychange', handler)
+}
+
+function onVisibilityChange(action: Action<boolean>): [typeof onVisibilityChangeSubscriber, { action: Action<boolean> }] {
+	return [onVisibilityChangeSubscriber, { action }]
+}
+
 // --- Custom effects --------------------------------------------------------
-// @hyperapp/http is still "planned", so the fetch effecter is hand-written. It parses the body and dispatches straight from the promise callbacks: hyperapp coalesces renders itself behind its own render lock (../vendor/hyperapp.js), so a microtask dispatch cannot interleave with a render, while a requestAnimationFrame hop would delay every state update a frame and — in a hidden tab, where requestAnimationFrame never fires — strand every completed poll's parsed body in a pending callback until the tab resurfaced. The fail action fires on any network failure, including a dropped connection mid-body (the body read rejects, not the fetch itself); any HTTP response — even a 4xx/5xx — resolves the ok branch with its status.
+// @hyperapp/http is still "planned", so the fetch effecter is hand-written. It parses the body and dispatches straight from the promise callbacks: hyperapp coalesces renders itself behind its own render lock (../vendor/hyperapp.js), so a microtask dispatch cannot interleave with a render, while a requestAnimationFrame hop would delay every state update a frame and — in a hidden tab, where requestAnimationFrame never fires — strand every completed poll's parsed body in a pending callback until the tab resurfaced. The fail action fires on any network failure, including a dropped connection mid-body (the body read rejects, not the fetch itself); any HTTP response — even a 4xx/5xx — resolves the ok branch with its status. Poll fetches delegate their timeout, cancellation, and retry bookkeeping to pollFetcher, which settles only after the body read and dispatches nothing for an intentional cancellation.
 
 // Merges an If-None-Match validator into a request's headers without clobbering any header the caller set. A Headers instance normalizes the caller's headers (object, array, or Headers), and an absent or empty validator returns the init unchanged so unconditional requests keep their exact shape.
 function withIfNoneMatch(init: RequestInit | undefined, ifNoneMatch: string | null | undefined): RequestInit | undefined {
@@ -530,29 +558,72 @@ function withIfNoneMatch(init: RequestInit | undefined, ifNoneMatch: string | nu
 	return { ...init, headers, cache: 'no-store' }
 }
 
+// Merges the poll timeout's abort signal with any caller-supplied one so neither cancels the other.
+function withAbortSignal(init: RequestInit | undefined, signal: AbortSignal): RequestInit {
+	const existingSignal = init?.signal
+	if (existingSignal === undefined || existingSignal === null) return { ...init, signal }
+	return { ...init, signal: AbortSignal.any([existingSignal, signal]) }
+}
+
+function parseFetchBody(text: string): unknown {
+	if (text.length === 0) return null
+	try {
+		return JSON.parse(text)
+	} catch {
+		return text
+	}
+}
+
+function fetchPollResponse(url: string, init: RequestInit | undefined, signal: AbortSignal): Promise<PollResponse> {
+	return fetch(url, withAbortSignal(init, signal)).then((response) => ({
+		status: response.status,
+		ok: response.ok,
+		version: response.headers.get('etag'),
+		text: () => response.text(),
+	}))
+}
+
+// The guard arithmetic uses the monotonic clock so wall-clock adjustments cannot distort retry windows; Date.now() remains the display clock in Tick.
+const pollFetcher = createPollFetcher({
+	request: fetchPollResponse,
+	now: () => performance.now(),
+	createAbortController: () => new AbortController(),
+	scheduleTimeout: (callback, delayMs) => setTimeout(callback, delayMs),
+	cancelTimeout: (handle) => clearTimeout(handle),
+})
+
+function cancelRunScopedPolls(): void {
+	pollFetcher.cancel(POLL_KEY_SELECTED_RUN)
+	pollFetcher.cancel(POLL_KEY_FLOW)
+	pollFetcher.cancel(POLL_KEY_INSPECTOR_TAIL)
+}
+
 function runFetch(dispatch: Dispatch, payload: FetchEffectPayload): void {
-	fetch(payload.url, withIfNoneMatch(payload.init, payload.ifNoneMatch)).then(
-		(response) => {
-			const status = response.status
-			const ok = response.ok
-			const version = response.headers.get('etag')
-			response.text().then(
-				(text) => {
-					let body: unknown = null
-					if (text.length > 0) {
-						try {
-							body = JSON.parse(text)
-						} catch {
-							body = text
-						}
-					}
-					dispatch(payload.ok, { status, ok, body, version, url: payload.url })
-				},
-				() => dispatch(payload.fail),
-			)
-		},
-		() => dispatch(payload.fail),
-	)
+	const requestInit = withIfNoneMatch(payload.init, payload.ifNoneMatch)
+	const pollKey = payload.pollKey
+	if (pollKey === undefined) {
+		fetch(payload.url, requestInit).then(
+			(response) => {
+				const status = response.status
+				const ok = response.ok
+				const version = response.headers.get('etag')
+				response.text().then(
+					(text) => dispatch(payload.ok, { status, ok, body: parseFetchBody(text), version, url: payload.url }),
+					() => dispatch(payload.fail),
+				)
+			},
+			() => dispatch(payload.fail),
+		)
+		return
+	}
+	pollFetcher.start(pollKey, { url: payload.url, init: requestInit }).then((outcome) => {
+		if (outcome.kind === 'failed') {
+			dispatch(payload.fail)
+			return
+		}
+		if (outcome.kind !== 'response') return
+		dispatch(payload.ok, { status: outcome.status, ok: outcome.ok, body: parseFetchBody(outcome.bodyText), version: outcome.version, url: payload.url })
+	})
 }
 
 // Records a response's ETag under its request URL, returning a fresh map so the poll keys validators per URL. A response without an ETag (an unversioned endpoint, or a 304 whose validator the server omitted) leaves the map unchanged, so a previously stored token survives.
@@ -626,19 +697,25 @@ function withFavicon(result: ActionReturn): ActionReturn {
 // --- Actions ---------------------------------------------------------------
 // Actions are pure state transitions; side effects are returned as effect tuples alongside the next state. The polling action returns a fresh now so relative timestamps refresh every tick even when the server returns identical data.
 
+function hasPollableSelectedRun(state: ApplicationState): state is ApplicationState & { selectedRunId: string } {
+	return typeof state.selectedRunId === 'string' && state.selectedRunId !== '' && (state.selectedRunStatus === null || !isTerminalStatus(state.selectedRunStatus))
+}
+
 function Tick(state: ApplicationState): ActionReturn {
+	if (!state.pageVisible) return state
 	const runListRevision = runListFeedRevision(state.runListFeed)
 	return [
 		{ ...state, now: Date.now() },
 		// The run list is an entity-diff feed: the held revision rides as `have` (omitted on the first poll, which asks for a snapshot) and the response's own `unchanged` reply is the revalidation, so the fetch is uncacheable rather than ETag-versioned.
-		Fetch({ url: runListRevision === null ? 'api/runs' : `api/runs?have=${encodeURIComponent(runListRevision)}`, init: { cache: 'no-store' }, ok: GotRunList, fail: FetchFailed }),
+		Fetch({ url: runListRevision === null ? 'api/runs' : `api/runs?have=${encodeURIComponent(runListRevision)}`, init: { cache: 'no-store' }, ok: GotRunList, fail: FetchFailed, pollKey: POLL_KEY_RUN_LIST }),
 		// `api/questions` and `api/queue` carry no ETag, so their polls stay unconditional rather than replaying a validator the server never issued.
-		Fetch({ url: 'api/questions', ok: GotQuestions, fail: FetchFailed }),
-		Fetch({ url: 'api/queue', ok: GotQueue, fail: FetchFailed }),
+		Fetch({ url: 'api/questions', ok: GotQuestions, fail: FetchFailed, pollKey: POLL_KEY_QUESTIONS }),
+		Fetch({ url: 'api/queue', ok: GotQueue, fail: FetchFailed, pollKey: POLL_KEY_QUEUE }),
 	]
 }
 
 function PollSelectedRun(state: ApplicationState): ActionReturn {
+	if (!state.pageVisible) return state
 	// Bail on a non-string id rather than fetching `/api/runs/undefined`; `selectedRunId` is null until a run is selected and can briefly be undefined across a state transition, so the guard keeps the poll from firing on an invalid id.
 	if (typeof state.selectedRunId !== 'string' || state.selectedRunId === '') return state
 	const runId = encodeURIComponent(state.selectedRunId)
@@ -649,12 +726,35 @@ function PollSelectedRun(state: ApplicationState): ActionReturn {
 	const flowRequestUrl = flowRevision === null ? flowUrl : `${flowUrl}?have=${encodeURIComponent(flowRevision)}`
 	return [
 		state,
-		Fetch({ url: runUrl, ifNoneMatch: storedVersionFor(state.versions, runUrl), ok: GotSelectedRun(state.selectedRunId), fail: FetchFailed }),
+		Fetch({ url: runUrl, ifNoneMatch: storedVersionFor(state.versions, runUrl), ok: GotSelectedRun(state.selectedRunId), fail: FetchFailed, pollKey: POLL_KEY_SELECTED_RUN }),
 		// The flow fetch is uncacheable but carries no ETag: its entity-diff `have` revision is the revalidation, so it sets no-store directly rather than through withIfNoneMatch.
-		Fetch({ url: flowRequestUrl, init: { cache: 'no-store' }, ok: GotFlowModel(state.selectedRunId), fail: FetchFailed }),
+		Fetch({ url: flowRequestUrl, init: { cache: 'no-store' }, ok: GotFlowModel(state.selectedRunId), fail: FetchFailed, pollKey: POLL_KEY_FLOW }),
 		// While the inspector modal is open, the same poll also refreshes the log-window tail so in-flight turns appear when they complete (a null effect when closed — hyperapp ignores falsy effects).
 		InspectorTailRefresh(state),
 	]
+}
+
+function splitActionResult(result: ActionReturn): [ApplicationState, OptionalEffect[]] {
+	if (Array.isArray(result)) {
+		const [nextState, ...effects] = result
+		return [nextState, effects]
+	}
+	return [result, []]
+}
+
+function PageVisibilityChanged(state: ApplicationState, visible: boolean): ActionReturn {
+	if (visible === state.pageVisible) return state
+	if (!visible) {
+		pollFetcher.cancelAll()
+		return { ...state, pageVisible: false }
+	}
+	pollFetcher.cancelAll()
+	const [tickState, effects] = splitActionResult(Tick({ ...state, pageVisible: true }))
+	if (tickState.screen === 'watch' && hasPollableSelectedRun(tickState)) {
+		const [, pollEffects] = splitActionResult(PollSelectedRun(tickState))
+		effects.push(...pollEffects)
+	}
+	return [tickState, ...effects]
 }
 
 // The live InteractionModel the flow/sequence views render, scoped to the run the poll fetched it for: the flow payload carries no run id of its own, so the selected run id is curried in when the effect is built (PollSelectedRun) and the response is dropped when it no longer matches the selection at application time — a late frame for run A must not render over run B's stage. The body is an entity-diff frame, so it is reduced against the opaque feed state the client holds and the model is reconstructed from the resulting state. The previous frame is kept so the stage can diff entering/departing nodes; a 404 (the run directory exists but is not yet readable in the instant after submit) clears the feed and model so the centerpiece shows its placeholder until the first readable frame lands. Every path that changes the model also syncs the scroll followers: the model update grows (or clears) the sequence content after the view patch, and an open inspector modal's body element is replaced where the placeholder transitions to the model (the poll-time sync re-attaches its follower before the next content update can rely on it).
@@ -670,7 +770,7 @@ function GotFlowModel(runId: string) {
 		}
 		// A delta whose base the client no longer holds cannot be applied; re-fetching with no `have` asks the server for a full snapshot. The held feed and model stand until it lands.
 		if (result.outcome === 'needsSnapshot') {
-			return [{ ...state, serverAvailable: payload.ok }, Fetch({ url: `api/runs/${encodeURIComponent(runId)}/flow`, init: { cache: 'no-store' }, ok: GotFlowModel(runId), fail: FetchFailed })]
+			return [{ ...state, serverAvailable: payload.ok }, Fetch({ url: `api/runs/${encodeURIComponent(runId)}/flow`, init: { cache: 'no-store' }, ok: GotFlowModel(runId), fail: FetchFailed, pollKey: POLL_KEY_FLOW })]
 		}
 		// invalid: the frame failed validation, so the held feed and model stand, but the fetch result still updates server availability.
 		return { ...state, serverAvailable: payload.ok }
@@ -695,11 +795,17 @@ function GotRunList(state: ApplicationState, payload: FetchResultPayload): Actio
 				nextState.selectedRunStatus = null
 			}
 		}
+		// The per-run poll is off-duty off the watch screen, so the run list is the only status source there.
+		const selectedRunId = nextState.selectedRunId
+		if (nextState.screen !== 'watch' && selectedRunId !== null) {
+			const selectedSummary = result.summaries.find((summary) => summary.runId === selectedRunId)
+			if (selectedSummary !== undefined) nextState.selectedRunStatus = selectedSummary.status
+		}
 		return [nextState, UpdateFavicon(nextState)]
 	}
 	// A delta whose base the client no longer holds cannot be applied; re-fetching with no `have` asks the server for a full snapshot. The held replica and summaries stand until it lands.
 	if (result.outcome === 'needsSnapshot') {
-		return [{ ...state, serverAvailable: payload.ok }, Fetch({ url: 'api/runs', init: { cache: 'no-store' }, ok: GotRunList, fail: FetchFailed })]
+		return [{ ...state, serverAvailable: payload.ok }, Fetch({ url: 'api/runs', init: { cache: 'no-store' }, ok: GotRunList, fail: FetchFailed, pollKey: POLL_KEY_RUN_LIST })]
 	}
 	// invalid: the envelope failed validation, so the held replica and summaries stand, but the fetch result still updates server availability.
 	return { ...state, serverAvailable: payload.ok }
@@ -1251,23 +1357,42 @@ function resetRunView(state: ApplicationState, runId: string, status: RunStatus 
 	}
 }
 
+// A run switch cancels the old run's in-flight polls so a hung request cannot block the new selection's first poll behind its guard.
+function switchRunView(state: ApplicationState, runId: string, status: RunStatus | null): ApplicationState {
+	cancelRunScopedPolls()
+	return resetRunView(state, runId, status)
+}
+
 function SelectRun(state: ApplicationState, runId: string): ActionReturn {
 	if (runId === state.selectedRunId) {
 		// A run can resume in place without this tab answering the question (another tab, the API, or an error resume). The run list then reports it non-terminal while the selected view still holds the old terminal status, which keeps the per-run poll and stream disabled; re-arm the same-id view so the operator can recover without switching runs or reloading.
 		const summary = state.summaries.find((entry) => entry.runId === runId)
-		if (summary !== undefined && !isTerminalStatus(summary.status)) return ReactivateRunForAnswer(state, runId)
+		if (summary !== undefined) {
+			const plan = planSameRunView({
+				summaryStatus: summary.status,
+				currentStatus: state.selectedRunStatus,
+				heldViewStatus: state.selectedRunView === null ? null : state.selectedRunView.status,
+			})
+			if (plan === 'reactivate') return ReactivateRunForAnswer(state, runId)
+			// The per-run poll is off-duty off the watch screen, so a terminal summary can arrive while the held view or status is stale or absent. The first-read status is both pollable and unable to fabricate a completion transition, and the immediate poll avoids leaving the placeholder up for a full interval.
+			if (plan === 'refresh') {
+				inspectorSession.close()
+				const [pollState, effects] = splitActionResult(PollSelectedRun(switchRunView(state, runId, null)))
+				return [pollState, ...effects, SyncSequenceFollower(), SyncInspectorFollower()]
+			}
+		}
 		return [{ ...state, screen: 'watch' }, SyncSequenceFollower(), SyncInspectorFollower()]
 	}
 	// Selecting a run always lands on the watch screen (history rows and the in-progress pill both go through here).
 	inspectorSession.close()
-	return [resetRunView(state, runId, null), SyncSequenceFollower(), SyncInspectorFollower()]
+	return [switchRunView(state, runId, null), SyncSequenceFollower(), SyncInspectorFollower()]
 }
 
 // Answering a parked question resumes the same run id rather than starting a new one. A different run goes through the normal switch; the same run must stay selected while its terminal needs_clarification status is reset to the non-terminal 'unknown', because the per-run poll and stream subscriptions are disabled on a terminal status. The status reset also clears resultShownForRun (through resetRunView), so the resumed run's eventual outcome opens the result modal again; the next poll's still-parked needs_clarification meta is not a completion transition from unknown, so it cannot reopen the old card.
 function ReactivateRunForAnswer(state: ApplicationState, runId: string): ActionReturn {
 	if (runId !== state.selectedRunId) return SelectRun(state, runId)
 	inspectorSession.close()
-	return [resetRunView(state, runId, 'unknown'), SyncSequenceFollower(), SyncInspectorFollower()]
+	return [switchRunView(state, runId, 'unknown'), SyncSequenceFollower(), SyncInspectorFollower()]
 }
 
 function ToggleMute(state: ApplicationState, event: Event): ApplicationState {
@@ -1450,8 +1575,9 @@ function GotCreatedRun(state: ApplicationState, payload: FetchResultPayload): Ac
 	const createdRunId = body['runId']
 	// Selecting the new run activates its per-run subscription; an immediate run-list fetch clears justSubmittedRunId as soon as the run appears. The continuation and the per-run modal/flow state are reset for the same reason SelectRun resets it — the composed run is on the server now, and a leftover chip would brief a stale lineage into the next task. The live partial clears with the rest (the stream subscription follows the new selection).
 	inspectorSession.close()
+	const reset = switchRunView(state, createdRunId, null)
 	return [
-		{ ...state, screen: 'watch', continuation: null, justSubmittedRunId: createdRunId, createSending: false, selectedRunId: createdRunId, selectedRunView: null, selectedRunStatus: null, flowModel: null, previousFlowModel: null, flowFeed: emptyFlowFeedState(), questionModalOpen: false, resultModalOpen: false, resultShownForRun: null, resultLoad: null, versions: withoutVersion(state.versions, runViewUrl(createdRunId)), tooltip: null, planExpanded: false, inspectorModalOpen: false, livePartial: null, serverAvailable: true },
+		{ ...reset, continuation: null, justSubmittedRunId: createdRunId, createSending: false, serverAvailable: true },
 		Fetch({ url: 'api/runs', ok: GotRunList, fail: FetchFailed }),
 	]
 }
@@ -1470,8 +1596,9 @@ function GotResumedRun(state: ApplicationState, payload: FetchResultPayload): Ac
 		const body = payload.body
 		if (isObject(body) && typeof body['runId'] === 'string' && body['runId'] === resumedRunId) {
 			inspectorSession.close()
+			const reset = switchRunView(state, resumedRunId, null)
 			return [
-				{ ...state, screen: 'watch', resumingRunId: null, resumeSending: false, resumeNotice: null, continuation: null, justSubmittedRunId: resumedRunId, selectedRunId: resumedRunId, selectedRunView: null, selectedRunStatus: null, flowModel: null, previousFlowModel: null, flowFeed: emptyFlowFeedState(), questionModalOpen: false, resultModalOpen: false, resultShownForRun: null, resultLoad: null, versions: withoutVersion(state.versions, runViewUrl(resumedRunId)), tooltip: null, planExpanded: false, inspectorModalOpen: false, livePartial: null, serverAvailable: true },
+				{ ...reset, resumingRunId: null, resumeSending: false, resumeNotice: null, continuation: null, justSubmittedRunId: resumedRunId, serverAvailable: true },
 				Fetch({ url: 'api/runs', ok: GotRunList, fail: FetchFailed }),
 			]
 		}
@@ -1814,8 +1941,8 @@ function ClickRunView(state: ApplicationState, event: MouseEvent): ActionReturn 
 // The stage-controls "Inspect" button opens a modal over the run view that renders one agent instance's LLM turns as a continuous transcript (the per-instance-scoped transcript), derived straight from the windowed log endpoint's `llm_call` payloads — the story needs no per-turn detail fetches; each completed turn's collapsed "on the wire" expander separately fetches the turn's full folded request from the same endpoint's `?detail=` variant, once per session into the session's bounded wire cache. The session owns the explicit scope (null = auto — the most recently active instance in the loaded window), and the breadcrumb, instance dropdown, and each `agent` call's View affordance re-scope it. The data flow is plain effects and state: the log loads with a single cheap probe (`?limit=1`) that learns the log's `total`, then fetches the most recent window; "older turns" pages back; while the modal is open on an active run the 1s poll appends the log's tail so in-flight turns appear when they complete and the live partial swaps for the completed turn. A scope change fetches that instance's server-filtered window (`?instance=<roleId>`) into a per-scope window keyed by the scoped role id — the server sees the whole log, so the scope's own turns and its complete ancestor chain (the breadcrumb) load without paging back through the unscoped tail — while the unscoped tail window stays for the instance dropdown's wayfinding and the default scope.
 
 // One windowed-log landing: the session updates its window and returns any follow-up request (probe → window, gapped tail → resync) plus the live partial as the pairing leaves it. Every accepted landing also re-pins the transcript follower, so the initial window, an older splice, and a tail append all follow their new content in addition to the live-delta, wire-detail, open, and close syncs. A stale or ignored response leaves the app state untouched.
-function InspectorFetch(request: FetchRequest): FetchEffect {
-	return Fetch({ url: request.url, ok: InspectorLanded(request), fail: InspectorFetchFailed(request) })
+function InspectorFetch(request: FetchRequest, pollKey?: PollKey): FetchEffect {
+	return Fetch({ url: request.url, ok: InspectorLanded(request), fail: InspectorFetchFailed(request), pollKey })
 }
 
 function InspectorLanded(request: FetchRequest) {
@@ -1859,7 +1986,8 @@ function OpenInspectorModal(state: ApplicationState, payload: unknown): ActionRe
 }
 
 function CloseInspectorModal(state: ApplicationState): ActionReturn {
-	// Closing ends the inspection session (scope, per-scope windows, and loaded windows with it): reopening refetches from scratch, so no stale scope survives the close. The sync detaches the transcript follower the unmounted body leaves behind.
+	// Closing ends the inspection session (scope, per-scope windows, and loaded windows with it): reopening refetches from scratch, so no stale scope survives the close. A hung tail request is cancelled with it so its guard cannot skip the next session's first refresh; the sync detaches the transcript follower the unmounted body leaves behind.
+	pollFetcher.cancel(POLL_KEY_INSPECTOR_TAIL)
 	inspectorSession.close()
 	return [{ ...state, inspectorModalOpen: false }, SyncInspectorFollower()]
 }
@@ -1875,7 +2003,7 @@ function InspectorTailRefresh(state: ApplicationState): OptionalEffect {
 	if (!state.inspectorModalOpen) return null
 	const request = inspectorSession.tailRequest()
 	if (request === null) return null
-	return InspectorFetch(request)
+	return InspectorFetch(request, POLL_KEY_INSPECTOR_TAIL)
 }
 
 // Re-scopes the transcript to an instance. A first scope to an instance fetches its server-filtered window (the probe learns the filtered total, then the most recent window of the instance's own sequence loads), so the breadcrumb chain derives from the full log's ancestry and an old agent's turns load without paging back; an already-loaded scope is reused as-is (the poll's scoped tail refresh keeps a live run's window current) and a failed scope retries after leaving and returning. Setting the scope pushes the crumb on, and the ↑ parent affordance pops back.
@@ -2527,8 +2655,9 @@ function LineageLine(state: ApplicationState): Vnode | null {
 
 let sequenceFollower: ScrollFollower | null = null
 
-function runSyncSequenceFollower(_dispatch: Dispatch, _payload: null): void {
-	requestAnimationFrame(() => {
+const sequenceFollowerCoalescer = createAnimationFrameCoalescer(
+	(callback) => requestAnimationFrame(callback),
+	() => {
 		const container = document.querySelector('.pb-sequence-scroll')
 		if (!(container instanceof HTMLElement)) {
 			if (sequenceFollower !== null) {
@@ -2542,7 +2671,11 @@ function runSyncSequenceFollower(_dispatch: Dispatch, _payload: null): void {
 			sequenceFollower = createScrollFollower(container)
 		}
 		sequenceFollower.follow()
-	})
+	},
+)
+
+function runSyncSequenceFollower(_dispatch: Dispatch, _payload: null): void {
+	sequenceFollowerCoalescer.request()
 }
 
 function SyncSequenceFollower(): NullPayloadEffect {
@@ -2552,8 +2685,9 @@ function SyncSequenceFollower(): NullPayloadEffect {
 // The inspector modal's transcript body follows new content while the operator sits at its bottom — live partials, newly completed turns, tail refreshes, and wire expanders all grow it — the same follow-with-free-scroll contract the sequence container gets, through the same shared follower (see scroll-follow.js and runSyncSequenceFollower). The sync defers to its own requestAnimationFrame so the modal's patch has landed before it runs, attaches a fresh follower whenever the body element was replaced (modal open/close, screen swaps, the placeholder-to-model transition all remount it), detaches when the element is gone, and pins to the bottom on every wired update while still attached.
 let inspectorFollower: ScrollFollower | null = null
 
-function runSyncInspectorFollower(_dispatch: Dispatch, _payload: null): void {
-	requestAnimationFrame(() => {
+const inspectorFollowerCoalescer = createAnimationFrameCoalescer(
+	(callback) => requestAnimationFrame(callback),
+	() => {
 		const container = document.querySelector('.inspector-modal-body')
 		if (!(container instanceof HTMLElement)) {
 			if (inspectorFollower !== null) {
@@ -2567,7 +2701,11 @@ function runSyncInspectorFollower(_dispatch: Dispatch, _payload: null): void {
 			inspectorFollower = createScrollFollower(container)
 		}
 		inspectorFollower.follow()
-	})
+	},
+)
+
+function runSyncInspectorFollower(_dispatch: Dispatch, _payload: null): void {
+	inspectorFollowerCoalescer.request()
 }
 
 function SyncInspectorFollower(): NullPayloadEffect {
@@ -2780,7 +2918,7 @@ function view(state: ApplicationState): Vnode {
 }
 
 // --- App -------------------------------------------------------------------
-// The subscriptions array is fixed-size with stable positions: [0] always polls the run list, the pending questions, and the task queue every second; [1] polls the selected run's run view and flow model every second but only while one is selected and non-terminal (the deactivation on terminal status stops the polling); [2] primes the AudioContext on the first user interaction; [3] dismisses the inspector modal on Escape while it is open; [4] subscribes the live token stream to the selected run while the watch screen shows one that is selected and non-terminal (the same non-terminal guard [1] uses).
+// The subscriptions array is fixed-size with stable positions: [0] always polls the run list, the pending questions, and the task queue every second while the page is visible; [1] polls the selected run's run view and flow model every second but only on the watch screen, while the page is visible, and while the run is selected and non-terminal (the deactivation on terminal status stops the polling); [2] primes the AudioContext on the first user interaction; [3] dismisses the inspector modal on Escape while it is open; [4] subscribes the live token stream to the selected run while the watch screen shows one that is selected and non-terminal (the same non-terminal guard [1] uses); [5] tracks page visibility and refreshes immediately when the tab returns.
 
 // hyperapp re-enters `view` and `subscriptions` with the state it holds, but the vendored declaration types that re-entry as `unknown` (it is app-agnostic). The state provably stays an ApplicationState — init plants a checked literal and every action returns a checked transition — so this guard confirms the wiring rather than re-validating data, and a mismatch fails the mount instead of rendering garbage.
 function isApplicationState(value: unknown): value is ApplicationState {
@@ -2791,7 +2929,7 @@ function isApplicationState(value: unknown): value is ApplicationState {
 		'serverAvailable', 'versions', 'justSubmittedRunId', 'createSending', 'muted', 'shownQuestionIds', 'firstQuestionsPoll', 'pendingAnswerId',
 		'runEffort', 'savingEffort', 'runInvolvement', 'savingInvolvement', 'runLogLevel', 'savingLogLevel',
 		'flowModel', 'previousFlowModel', 'flowFeed', 'runListFeed', 'labelResolver', 'guildParticipants', 'build',
-		'flowTier', 'flowViewMode', 'sequenceRolesOnly', 'screen', 'expandedRowIds', 'continuation',
+		'flowTier', 'flowViewMode', 'sequenceRolesOnly', 'screen', 'pageVisible', 'expandedRowIds', 'continuation',
 		'resumingRunId', 'resumeSending', 'resumeNotice',
 		'questionModalOpen', 'resultModalOpen', 'resultShownForRun', 'resultLoad', 'interruptModalOpen',
 		'inspectorModalOpen', 'planExpanded', 'livePartial', 'tooltip',
@@ -2849,6 +2987,7 @@ app({
 			flowViewMode: 'flow',
 			sequenceRolesOnly: true,
 			screen: 'watch',
+			pageVisible: document.visibilityState === 'visible',
 			expandedRowIds: {},
 			continuation: null,
 			resumingRunId: null,
@@ -2881,12 +3020,13 @@ app({
 	subscriptions: (state) => {
 		if (!isApplicationState(state)) throw new Error('hyperapp re-entered with a state that is not an ApplicationState')
 		return [
-			onEvery(Tick, POLL_INTERVAL_MS),
+			state.pageVisible && onEvery(Tick, POLL_INTERVAL_MS),
 			// A null selectedRunStatus (a just-selected run whose first per-run poll has not landed) reads as non-terminal — the dynamic set lookup missed null — so the per-run poll and the stream stay live across a run switch until the first frame arrives.
-			typeof state.selectedRunId === 'string' && state.selectedRunId !== '' && (state.selectedRunStatus === null || !isTerminalStatus(state.selectedRunStatus)) && onEvery(PollSelectedRun, POLL_INTERVAL_MS),
+			state.pageVisible && state.screen === 'watch' && hasPollableSelectedRun(state) && onEvery(PollSelectedRun, POLL_INTERVAL_MS),
 			onFirstInteraction(PrimeAudio),
 			state.inspectorModalOpen === true && onEscapeKey(CloseInspectorModal),
-			state.screen === 'watch' && typeof state.selectedRunId === 'string' && state.selectedRunId !== '' && (state.selectedRunStatus === null || !isTerminalStatus(state.selectedRunStatus)) && StreamSubscription(state.selectedRunId),
+			state.screen === 'watch' && hasPollableSelectedRun(state) && StreamSubscription(state.selectedRunId),
+			onVisibilityChange(PageVisibilityChanged),
 		]
 	},
 	node: requireMountNode('app'),
