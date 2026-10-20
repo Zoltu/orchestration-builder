@@ -16,6 +16,8 @@ export interface ToolPlatformConfig {
 	runsBaseDir: string
 	runId: string
 	logPath: string
+	// Must match the engine's maxToolOutputChars so a write accepted within the delivery budget reads back whole.
+	maxToolOutputChars: number
 	kagiApiKey?: string
 }
 
@@ -25,8 +27,8 @@ export interface ToolPlatformDependencies {
 }
 
 export function createToolPlatform(config: ToolPlatformConfig, dependencies: ToolPlatformDependencies): ToolPlatform {
-	const planHandlers = createPlanToolHandlers({ runsBaseDir: config.runsBaseDir, runId: config.runId, workspaceRoot: config.workspaceRoot })
-	const styleGuideHandlers = createStyleGuideToolHandlers({ runsBaseDir: config.runsBaseDir, runId: config.runId, workspaceRoot: config.workspaceRoot })
+	const planHandlers = createPlanToolHandlers({ runsBaseDir: config.runsBaseDir, runId: config.runId, workspaceRoot: config.workspaceRoot, maxToolOutputChars: config.maxToolOutputChars })
+	const styleGuideHandlers = createStyleGuideToolHandlers({ runsBaseDir: config.runsBaseDir, runId: config.runId, workspaceRoot: config.workspaceRoot, maxToolOutputChars: config.maxToolOutputChars })
 	const runLogHandlers = createRunLogToolHandlers({ logPath: config.logPath })
 
 	function composeHandlers(runScope: RunToolScope): Record<string, ToolHandler> {

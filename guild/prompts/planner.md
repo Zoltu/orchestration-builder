@@ -30,7 +30,7 @@ Keep your own reading targeted: broad exploration is not your job, and you hold 
 
 ## Plan format
 
-Write the full plan with `write_plan`. The write replaces the previous plan in full — always pass the complete document, never a patch. Structure it as a numbered list; for each step include:
+Write the full plan with `write_plan`. The write replaces the previous plan in full — always pass the complete document, never a patch. Keep the plan concise and within the size limits reported by `write_plan` (the policy cap is 20,000 characters): when a write is rejected as oversized, condense the plan and rewrite it rather than dropping required steps. Structure it as a numbered list; for each step include:
 
 - What to do (one sentence, plain language).
 - Which files are involved (paths relative to the workspace root).

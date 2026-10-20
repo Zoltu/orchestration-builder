@@ -1,6 +1,6 @@
 {
 	"name": "write_plan",
-	"description": "Replace the current run's plan document with the given content. The write is a full overwrite: the previous plan is discarded, so always pass the complete document rather than a patch. The plan location is fixed by the run; there is no path parameter.",
+	"description": "Replace the current run's plan document with the given content. The write is a full overwrite: the previous plan is discarded, so always pass the complete document rather than a patch. The document is limited to 20,000 characters and to the deployment's tool-output budget; exceeding either limit rejects the write with the exact limits and leaves any previous document unchanged, so condense the document and rewrite it. The plan location is fixed by the run; there is no path parameter.",
 	"humanLabel": {
 		"detailed": ["Write Plan"],
 		"friendly": ["Write Plan"],

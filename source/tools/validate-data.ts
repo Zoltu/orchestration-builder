@@ -23,6 +23,9 @@ const manifestDir = path.join(guildDir, 'tools')
 const benchmarksDir = path.join(repoRoot, 'benchmarks')
 const indexHtmlPath = path.join(repoRoot, 'source', 'web', 'static', 'index.html')
 
+// The gate only compares handler names and never dispatches these handlers, so any positive value validates the wiring; this matches the bundled deployment.
+const GATE_MAX_TOOL_OUTPUT_CHARS = 50_000
+
 const failures: string[] = []
 
 function check(condition: boolean, message: string): void {
@@ -572,6 +575,7 @@ function checkManifests(): void {
 		runsBaseDir: manifestDir,
 		runId: 'run-19700101-000000',
 		logPath: path.join(manifestDir, LOG_FILE_NAME),
+		maxToolOutputChars: GATE_MAX_TOOL_OUTPUT_CHARS,
 	}, { subprocessRunner: createBunSubprocessRunner() })
 	// Shape-only fixture: the handlers are compared by name and never invoked, so the role and scope only have to type-check.
 	const fixtureScope: RunToolScope = {

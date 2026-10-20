@@ -1,6 +1,6 @@
 {
 	"name": "read_plan",
-	"description": "Read the plan document for a run. Returns the plan content plus a truncated flag and the total character count; content past the size cap is cut off with a truncation marker. By default reads the current run's plan; pass runId to read another run's plan. A run that has not written a plan returns an unavailable result.",
+	"description": "Read the plan document for a run. Returns the complete plan content. By default reads the current run's plan; pass runId to read another run's plan. A run that has not written a plan returns an unavailable result, and a stored plan too large to deliver whole returns an unavailable error explaining how to resolve it.",
 	"humanLabel": {
 		"detailed": ["Read Plan"],
 		"friendly": ["Read Plan"],

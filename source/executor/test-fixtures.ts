@@ -136,7 +136,10 @@ export function createFakeCheckpointRecorder(roleRegistry: RoleRegistry, context
 export interface FixtureToolPlatformInput {
 	workspaceRoot?: string
 	subprocessRunner?: SubprocessRunner
+	maxToolOutputChars?: number
 }
+
+const FIXTURE_MAX_TOOL_OUTPUT_CHARS = 50_000
 
 // A fixture must never reach a real subprocess: constructing the platform is safe, but dispatching run_shell, test, or typecheck reaches this runner and fails loudly instead of spawning.
 function createUnconfiguredSubprocessRunner(): SubprocessRunner {
@@ -154,6 +157,7 @@ export function createFixtureToolPlatform(input: FixtureToolPlatformInput = {}):
 		runsBaseDir,
 		runId,
 		logPath: `${runsBaseDir}/${runId}/log.jsonl`,
+		maxToolOutputChars: input.maxToolOutputChars ?? FIXTURE_MAX_TOOL_OUTPUT_CHARS,
 	}, { subprocessRunner: input.subprocessRunner ?? createUnconfiguredSubprocessRunner() })
 }
 

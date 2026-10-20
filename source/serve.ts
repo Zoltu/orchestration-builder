@@ -85,6 +85,7 @@ async function withRunBindings<T>(config: {
 		runsBaseDir: config.runsBaseDir,
 		runId,
 		logPath: path.join(config.runsBaseDir, runId, LOG_FILE_NAME),
+		maxToolOutputChars: config.loadedGuild.deployment.contextPolicy.maxToolOutputChars,
 		kagiApiKey: config.kagiApiKey,
 	}, { subprocessRunner })
 	excludeOrchestrationFromGit(config.workspaceRootPath)

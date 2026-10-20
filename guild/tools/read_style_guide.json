@@ -1,6 +1,6 @@
 {
 	"name": "read_style_guide",
-	"description": "Read the style guide document for a run. Returns the style guide content plus a truncated flag and the total character count; content past the size cap is cut off with a truncation marker. By default reads the current run's style guide; pass runId to read another run's style guide. A run that has not written a style guide returns an unavailable result.",
+	"description": "Read the style guide document for a run. Returns the complete style guide content. By default reads the current run's style guide; pass runId to read another run's style guide. A run that has not written a style guide returns an unavailable result, and a stored style guide too large to deliver whole returns an unavailable error explaining how to resolve it.",
 	"humanLabel": {
 		"detailed": ["Read Style Guide"],
 		"friendly": ["Read Style Guide"],

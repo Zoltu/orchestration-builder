@@ -225,10 +225,10 @@ Native tools are implemented in the executor and operate against the mounted wor
 
 - `read_file` — read file contents (supports partial reads)
 - `write_file` — write or overwrite a file
-- `read_plan` — read a run's plan document, capped with a truncation flag (the current run by default, or another run by `runId`)
-- `write_plan` — replace the current run's plan document in full (the location is fixed per run; no path parameter)
-- `read_style_guide` — read a run's style guide document, capped with a truncation flag and total character count (the current run by default, or another run by `runId`); a run that has not written one returns an `unavailable` result
-- `write_style_guide` — replace the current run's style guide document in full (the location is fixed per run; no path parameter)
+- `read_plan` — read a run's complete plan document (the current run by default, or another run by `runId`); a run that has not written one returns an `unavailable` result, and a stored document too large to deliver within `maxToolOutputChars` returns an `unavailable` error (documents written by this platform are capped at 20,000 characters and `maxToolOutputChars`, so they read back whole)
+- `write_plan` — replace the current run's plan document in full (the location is fixed per run; no path parameter); the document is limited to 20,000 characters and the deployment's `maxToolOutputChars`, and exceeding either rejects the write with the exact limits while leaving any previous document unchanged
+- `read_style_guide` — read a run's complete style guide document (the current run by default, or another run by `runId`); a run that has not written one returns an `unavailable` result, and a stored document too large to deliver within `maxToolOutputChars` returns an `unavailable` error (documents written by this platform are capped at 20,000 characters and `maxToolOutputChars`, so they read back whole)
+- `write_style_guide` — replace the current run's style guide document in full (the location is fixed per run; no path parameter); the document is limited to 20,000 characters and the deployment's `maxToolOutputChars`, and exceeding either rejects the write with the exact limits while leaving any previous document unchanged
 - `list_directory` — list directory entries
 - `repo_map` — symbol-level map of the workspace's TypeScript/JavaScript sources: one line per top-level declaration, grouped by file (tests, declaration files, vendored code, hidden directories, and build output excluded)
 - `run_shell` — run a shell command (via `sh -c`, with the workspace as the working directory)
@@ -475,7 +475,7 @@ Safety budgets enforced by the executor. `maxAgentDepth` guards unbounded agent 
 { "maxToolOutputChars": 4000 }
 ```
 
-Tool results longer than this are truncated inline. There is no automatic compaction threshold — roles use `context_info` and `edit_context` to manage context.
+Tool results longer than this are truncated inline. Run documents (plan and style guide) are write-capped to 20,000 characters and `maxToolOutputChars`, so a successful write reads back whole. There is no automatic compaction threshold — roles use `context_info` and `edit_context` to manage context.
 
 ### `logging`
 
