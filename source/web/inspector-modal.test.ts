@@ -269,6 +269,16 @@ describe('InspectorModal shell', () => {
 		expect(collectText(scopedEmpty)).not.toContain('No LLM turns logged')
 	})
 
+	test('a disconnected live stream with a non-terminal run renders the reconnect spinner above the transcript', () => {
+		const modal = renderModal({}, { liveStreamDisconnected: true })
+		const reconnect = defined(allByClass(modal, 'inspector-live-reconnect')[0], 'reconnect note')
+		expect(collectText(reconnect)).toContain('Live text reconnecting\u2026')
+		const indicator = allByClass(reconnect, 'loading-indicator')
+		expect(indicator).toHaveLength(1)
+		expect(defined(indicator[0], 'loading indicator').props.role).toBe('status')
+		expect(allByClass(renderModal(), 'inspector-live-reconnect')).toHaveLength(0)
+	})
+
 	test('the older-turns control appears only when older events exist and reflects the loading state', () => {
 		expect(allByClass(renderModal(), 'inspector-older')).toHaveLength(0)
 		const withOlder = renderModal({ hasOlder: true })
@@ -278,7 +288,7 @@ describe('InspectorModal shell', () => {
 		const loadingOlder = renderModal({ hasOlder: true, olderLoading: true })
 		const olderLoading = defined(allByClass(loadingOlder, 'inspector-older')[0], 'older loading button')
 		expect(olderLoading.props.disabled).toBe(true)
-		expect(collectText(olderLoading)).toContain('loading older turns\u2026')
+		expect(collectText(olderLoading)).toContain('Loading older turns\u2026')
 	})
 })
 
@@ -381,7 +391,7 @@ describe('InspectorModal transcript', () => {
 
 	test('the in-flight turn sits at the transcript bottom and hosts the matching live partial', () => {
 		const flightEvents = [...stitchEvents, startEvent(3, 'coder', 'coder-1')]
-		const partial = { roleId: 'coder-1', role: 'coder', reasoning: 'streamed thinking', content: 'streamed reply' }
+		const partial = { roleId: 'coder-1', role: 'coder', reasoning: 'streamed thinking', content: 'streamed reply', truncated: false }
 		const modal = renderView(sessionFor(flightEvents, { scopedRoleId: 'coder-1' }).view(), { livePartial: partial })
 		const sections = allByClass(modal, 'inspector-turn-section')
 		expect(sections).toHaveLength(3)
@@ -395,6 +405,17 @@ describe('InspectorModal transcript', () => {
 		const markers = allByTag(block, 'span').filter((node) => node.props.class === 'md-marker').map((node) => node.props['data-text'])
 		expect(markers).toContain('streamed thinking')
 		expect(markers).toContain('streamed reply')
+		expect(collectText(block)).not.toContain('truncated')
+	})
+
+	test('a truncated live partial renders the fixed note under the block', () => {
+		const flightEvents = [...stitchEvents, startEvent(3, 'coder', 'coder-1')]
+		const partial = { roleId: 'coder-1', role: 'coder', reasoning: '', content: 'streamed tail', truncated: true }
+		const modal = renderView(sessionFor(flightEvents, { scopedRoleId: 'coder-1' }).view(), { livePartial: partial })
+		const block = defined(allByClass(modal, 'inspector-live-partial')[0], 'live block')
+		const note = defined(allByClass(block, 'inspector-live-truncated-note')[0], 'truncated note')
+		expect(collectText(note)).toContain('The live preview is truncated')
+		expect(collectText(note)).toContain('full turn appears when it completes')
 	})
 
 	test('an absent, empty, or mismatched live partial renders no block, and a same-named sibling never hosts another instance\u0027s stream', () => {

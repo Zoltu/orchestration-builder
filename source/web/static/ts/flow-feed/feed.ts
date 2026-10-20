@@ -47,6 +47,12 @@ export function flowFeedRevision(state: FlowFeedState): string | null {
 	return stateData(state).revision
 }
 
+// Drops the held revision while keeping the replica and model, so the next poll asks for a snapshot without blanking the visible stage. This is how a resumed tab reconciles anything it missed while hidden.
+export function discardFlowRevision(state: FlowFeedState): FlowFeedState {
+	const current = stateData(state)
+	return flowFeedState(current.replica, null, current.model)
+}
+
 // Reduces one flow frame against the held replica and rebuilds the model the views read. An unchanged frame returns the same state and model references so the identity-keyed view memoization survives; a needsSnapshot frame is a typed outcome rather than a throw, leaving the held state in place for the host to re-fetch without `have`; an invalid frame likewise leaves the held state untouched.
 export function applyFlowFrame(state: FlowFeedState, raw: unknown): FlowFrameResult {
 	const current = stateData(state)

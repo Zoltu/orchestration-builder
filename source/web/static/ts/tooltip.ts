@@ -7,6 +7,7 @@
 // `h` and `renderMarkdown` are passed in rather than imported so the component stays free of hyperapp and showdown coupling and is exercisable in tests with fakes (mirroring question-modal.js / result-modal.js).
 
 import { isObject } from './guards.js'
+import { LoadingIndicator } from './loading-indicator.js'
 import { callMetricsByDestination } from './interaction-model.js'
 import type { InteractionModel, Operation, Participant } from './interaction-model.js'
 import type { LabelResolver, LabelTier } from './labels.js'
@@ -19,6 +20,7 @@ export interface TooltipSection {
 	label: string
 	content?: unknown
 	scalar?: unknown
+	loading?: boolean
 }
 
 // The descriptor a derivation returns: the card's heading and its labeled sections. An empty title with no sections is the "no card" answer the wiring dismisses on.
@@ -98,9 +100,12 @@ export function Tooltip(h: LooseH, props: TooltipProps): Vnode {
 	const children: Vnode[] = [h('p', { class: 'tooltip-heading' }, [title])]
 
 	for (const section of sections) {
+		const body = section.loading === true
+			? LoadingIndicator(h, 'Loading details\u2026', 'tooltip-loading')
+			: formatTooltipContent(h, renderMarkdown, section.content, section.scalar === true)
 		children.push(h('div', { class: 'tooltip-section' }, [
 			h('span', { class: 'tooltip-label' }, [section.label]),
-			formatTooltipContent(h, renderMarkdown, section.content, section.scalar === true),
+			body,
 		]))
 	}
 
@@ -199,13 +204,11 @@ function detailsStateOf(operationDetails: ((operationId: string) => OperationDet
 	return state
 }
 
-// The details section an operation contributes, or null when it contributes none: a pending or
-// failed fetch reads as "no details" (the loading state renders a scalar placeholder so an open
-// card visibly fills in rather than flickering).
+// The details section an operation contributes, or null when it contributes none: a pending fetch is marked loading so the card renders the shared spinner while it waits, and a failed fetch reads as "no details".
 function detailsSectionOf(operationDetails: ((operationId: string) => OperationDetailsState) | undefined, operationId: string): TooltipSection | null {
 	const state = detailsStateOf(operationDetails, operationId)
 	if (state === undefined) return null
-	if (state.status === 'loading') return { label: 'details', content: 'loading details…', scalar: true }
+	if (state.status === 'loading') return { label: 'details', loading: true }
 	if (state.status !== 'ready') return null
 	if (typeof state.details !== 'string' || state.details === '') return null
 	return { label: 'details', content: state.details }
@@ -318,7 +321,9 @@ export function deriveParticipantTooltip(model: InteractionModel, labels: LabelR
 	}
 	const section = sourceId !== null ? detailsSectionOf(operationDetails, sourceId) : null
 	if (section !== null) {
-		sections.push({ label: detailsLabelFor(participant, usedReturn), content: section.content, scalar: section.scalar === true })
+		const participantSection: TooltipSection = { label: detailsLabelFor(participant, usedReturn), content: section.content, scalar: section.scalar === true }
+		if (section.loading === true) participantSection.loading = true
+		sections.push(participantSection)
 	}
 	return { title, sections }
 }

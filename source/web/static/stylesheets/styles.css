@@ -3375,3 +3375,54 @@ li:last-child {
 	border-color: var(--color-accent);
 	color: var(--color-accent);
 }
+
+.loading-indicator {
+	display: inline-flex;
+	align-items: center;
+	gap: var(--space-2);
+	color: inherit;
+}
+
+.loading-spinner {
+	width: 0.9em;
+	height: 0.9em;
+	border: 2px solid currentColor;
+	border-right-color: transparent;
+	border-radius: 50%;
+	animation: loading-spinner-rotate 0.8s linear infinite;
+	flex: none;
+}
+
+@keyframes loading-spinner-rotate {
+	to {
+		transform: rotate(360deg);
+	}
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.loading-spinner {
+		animation: none;
+		border-right-color: currentColor;
+		opacity: 0.55;
+	}
+}
+
+.status-pill-refreshing {
+	display: inline-flex;
+	align-items: center;
+}
+
+.inspector-live-reconnect,
+.inspector-transcript-note {
+	margin: 0 0 var(--space-2);
+}
+
+.inspector-live-truncated-note {
+	margin: var(--space-2) 0 0;
+	color: var(--color-text-muted);
+	font-size: 0.85rem;
+}
+
+.tooltip-loading {
+	color: var(--color-text-muted);
+}

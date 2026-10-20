@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { applyFlowFrame, createFlowFeedResponder, emptyFlowFeedState, flowFeedRevision } from './index.js'
+import { applyFlowFrame, createFlowFeedResponder, discardFlowRevision, emptyFlowFeedState, flowFeedRevision } from './index.js'
 import type { InteractionModel, Operation, OperationMetrics, Participant, StackRecord } from '../interaction-model.js'
 
 function frameKind(value: unknown): string | null {
@@ -77,6 +77,19 @@ describe('flow feed round-trip', () => {
 		expect(unchanged.outcome).toBe('unchanged')
 		expect(unchanged.state).toBe(first.state)
 		expect(unchanged.model).toBe(first.model)
+	})
+
+	test('discarding the revision keeps the held replica but makes the next poll ask for a snapshot', () => {
+		const responder = createFlowFeedResponder({ epoch: 'e', historyLimit: 8, maxRuns: 4 })
+		const model = handModel()
+		const first = applyFlowFrame(emptyFlowFeedState(), responder('run-a', model, null))
+		const revision = flowFeedRevision(first.state)
+		if (revision === null) throw new Error('expected a revision after a snapshot')
+		const discarded = discardFlowRevision(first.state)
+		expect(flowFeedRevision(discarded)).toBeNull()
+		const resumed = applyFlowFrame(discarded, responder('run-a', model, flowFeedRevision(discarded)))
+		expect(resumed.outcome).toBe('snapshot')
+		expect(resumed.model).toEqual(model)
 	})
 
 	test('a changed model arrives as a delta and applies to the next model', () => {

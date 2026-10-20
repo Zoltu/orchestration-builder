@@ -8,6 +8,7 @@ import { createRunStage, sequenceActiveRowScrollTop } from './run-stage/index.js
 import { createMarkdownRenderer } from './markdown-render.js'
 import { createTooltipDismiss, deriveTooltipDescriptor, isInFlightAskHuman, resolveTooltipTarget } from './inspector.js'
 import { createOperationDetails } from './operation-details.js'
+import { LoadingIndicator } from './loading-indicator.js'
 import { isObject, isOperationMetricsRecord } from './guards.js'
 import { operationIdsForTooltipDetails, Tooltip, tooltipStyle } from './tooltip.js'
 import { copyRawToClipboard } from './clipboard.js'
@@ -330,7 +331,7 @@ function htmlH(tag: string, props: Record<string, unknown>, children: VnodeChild
 	return { tag, props, children: collected, element }
 }
 
-const renderMarkdown = createMarkdownRenderer(htmlH)
+const renderMarkdown = createMarkdownRenderer(htmlH, { maxEntries: 256, maxCharacters: 16_000_000 })
 
 // The inspector overlay: one positioned card mounted inside the run-view container (`flowContainer`), rebuilt per hover and anchored flush against the hovered node's rect.
 // The card is `pointer-events: auto` and `user-select: text` (stylesheets/styles.css) so the operator can move the pointer from the node into the card to select and copy its contents; a short grace period on leaving the node (or the card) keeps the card open while the pointer travels between them, and the card dismisses once the pointer is over neither.
@@ -342,13 +343,13 @@ const tooltipDismiss = createTooltipDismiss()
 
 // The operation-details controller, shared with the product client via operation-details.js: the
 // frame models ship no detail bodies, so opening a card fetches the ids its derivation may show
-// from the demo frame endpoint's ?operation= variant, once per scenario+operation per session.
-// Operation ids are stable across a scenario's frames (events only append), so an entry never goes
-// stale; the scenario id in the key keeps one scenario's entries from answering for another's
-// same-numbered operation. This host drives the controller through the promise-based `ensure` (the
-// product client, whose fetches are hyperapp effects, drives `begin` + `record*` instead), and the
-// landing fan-out is the onLanded callback below.
-const operationDetails = createOperationDetails({ fetchDetail: fetchDemoOperationDetail, onLanded: operationDetailsLanded })
+// from the demo frame endpoint's ?operation= variant. Operation ids are stable across a scenario's
+// frames (events only append), so a cached entry never goes stale; the scenario id in the key keeps
+// one scenario's entries from answering for another's same-numbered operation. The cache is a
+// bounded LRU, so an evicted id is fetched again the next time a surface asks. This host drives the
+// controller through the promise-based `ensure` (the product client, whose fetches are hyperapp
+// effects, drives `begin` + `record*` instead), and the landing fan-out is the onLanded callback below.
+const operationDetails = createOperationDetails({ fetchDetail: fetchDemoOperationDetail, onLanded: operationDetailsLanded }, { maxEntries: 512, maxCharacters: 32_000_000 })
 
 // The details fetch for one operation, resolved to the landing shape the controller records (`{ ok,
 // body }` with the body already parsed): a network failure or an unparseable body rejects, which the
@@ -403,6 +404,7 @@ function operationDetailsLanded(context: string, operationId: string): void {
 	if (questionModalOperationId !== operationId) return
 	const state = operationDetails.lookup(context, operationId)
 	if (state.status === 'ready') applyQuestionModalDetails(state.details)
+	else if (state.status === 'failed') showQuestionModalMessage(QUESTION_MODAL_FALLBACK)
 }
 
 function closeTooltip(): void {
@@ -418,15 +420,16 @@ function closeTooltip(): void {
 // The card is anchored to the target's snapshot rect (flush against it) and appended to the run-view container so a `mouseleave` on the container covers both the SVG and the card — moving from a node into the card keeps the card open. The target's details are fetched on demand if not cached; the first render shows the loading placeholder and the refill fills it in.
 function openTooltip(target: TooltipTarget): void {
 	if (labels === null || currentFrame === null) return
-	const descriptor = deriveTooltipDescriptor(currentFrame, labels, tier, target, operationDetailsLookup())
-	if (descriptor.title === '') return
 	// Reuse the open card when the pointer moves within the same target (a message path → its terminal node, or a node box → its cost figures) so the card does not flicker on every mouseover. The rect is unchanged for the same target, so the card stays put.
 	const key = `${target.kind}:${target.id}`
 	if (currentTooltipKey === key && currentTooltipNode !== null) {
 		return
 	}
 	closeTooltip()
+	// Begin the fetch before deriving the card, so a cold open reads its loading state just like the product host rather than deriving a failed lookup first.
 	fetchOperationDetails(target)
+	const descriptor = deriveTooltipDescriptor(currentFrame, labels, tier, target, operationDetailsLookup())
+	if (descriptor.title === '') return
 	const card = Tooltip(htmlH, { title: descriptor.title, sections: descriptor.sections, renderMarkdown, style: tooltipStyle(target.rect, { width: window.innerWidth, height: window.innerHeight }) })
 	const cardElement = hostElementOf(card, 'the tooltip card')
 	flowContainer.appendChild(cardElement)
@@ -688,7 +691,10 @@ function closeResultModal(): void {
 }
 
 // The question modal opens on an ask_human transit frame and stays open until the user answers or dismisses it. Like the result modal it is an HTML overlay sibling to the SVG, mounted without rebuilding the SVG so the marching-ants and enter animations do not replay. The Question affordance stays on the answerer node while the modal is dismissed, so the operator can re-open it by clicking the button again.
-// The question text is the ask call's details; the models carry no question text, so the modal opens with the waiting fallback and the details fetch fills the question block in when it lands (a failure leaves the fallback — graceful, like the inspector card).
+// The question text is the ask call's details; the models carry no question text, so the modal opens with the waiting fallback and the details fetch fills the question block in when it lands (a failure restores the fallback — graceful, like the inspector card).
+const QUESTION_MODAL_FALLBACK = 'The run is waiting for your input.'
+const QUESTION_MODAL_NO_DETAILS = 'No question details were logged for this operation.'
+
 function openQuestionModal(): void {
 	if (questionModalNode !== null) return
 	const manifest = scenarios[scenarioIndex]
@@ -698,7 +704,7 @@ function openQuestionModal(): void {
 	const operation = activeOperation(frame)
 	if (operation === null || !isInFlightAskHuman(frame, operation.id)) return
 	const modal = QuestionModal(htmlH, {
-		question: { question: 'The run is waiting for your input.' },
+		question: { question: QUESTION_MODAL_FALLBACK },
 		runLabel: manifest.label,
 		renderMarkdown,
 		onSubmit: submitQuestion,
@@ -714,10 +720,10 @@ function openQuestionModal(): void {
 
 // Fills the modal's question block from the ask call's details cache, fetching on a miss. A
 // 'loading' entry needs no work here: the in-flight fetch's landing (operationDetailsLanded) sees
-// the modal's registered operation id and applies the details when it resolves. A failure lands the
-// same way and applies nothing, so the waiting fallback stays — graceful, like the inspector card.
-// The fetch goes through the controller's ensure, whose dedup keeps a loading or failed entry from
-// re-fetching — a cached failure is final for the session, like the tooltip path's.
+// the modal's registered operation id and applies the details when it resolves. A failure restores
+// the waiting fallback, and a ready-but-empty answer shows a fixed no-details line, so the spinner
+// never outlives the fetch. The fetch goes through the controller's ensure, whose dedup keeps a
+// loading entry from being fetched twice; an evicted later miss fetches again, like the tooltip path's.
 function fillQuestionModalWithDetails(manifest: DemoScenarioManifest, operationId: string): void {
 	const cached = operationDetails.lookup(manifest.id, operationId)
 	if (cached.status === 'ready') {
@@ -725,13 +731,34 @@ function fillQuestionModalWithDetails(manifest: DemoScenarioManifest, operationI
 		return
 	}
 	operationDetails.ensure(manifest.id, [operationId])
+	// A miss becomes loading synchronously inside ensure; a previously cached failure stays failed and keeps the waiting fallback rather than spinning forever.
+	if (operationDetails.lookup(manifest.id, operationId).status === 'loading') showQuestionModalLoading()
 }
 
-// Swaps the open modal's question text for the fetched details markdown; nothing to do when the
-// operation carried no details or the modal has since closed.
+// The question modal's details-loading state: a spinner in the question block so the open modal visibly fills in instead of showing only the waiting fallback.
+function showQuestionModalLoading(): void {
+	if (questionModalNode === null) return
+	const block = questionModalNode.querySelector('.question-modal-question')
+	if (block === null) return
+	while (block.firstChild !== null) block.removeChild(block.firstChild)
+	block.appendChild(hostElementOf(LoadingIndicator(htmlH, 'Loading question details\u2026'), 'question details loading indicator'))
+}
+
+function showQuestionModalMessage(message: string): void {
+	if (questionModalNode === null) return
+	const block = questionModalNode.querySelector('.question-modal-question')
+	if (block === null) return
+	while (block.firstChild !== null) block.removeChild(block.firstChild)
+	block.appendChild(document.createTextNode(message))
+}
+
+// Swaps the open modal's question text for the fetched details markdown; a ready-but-empty answer restores a fixed no-details line rather than leaving the loading spinner.
 function applyQuestionModalDetails(details: unknown): void {
 	if (questionModalNode === null) return
-	if (typeof details !== 'string' || details === '') return
+	if (typeof details !== 'string' || details === '') {
+		showQuestionModalMessage(QUESTION_MODAL_NO_DETAILS)
+		return
+	}
 	const block = questionModalNode.querySelector('.question-modal-question')
 	if (block === null) return
 	while (block.firstChild !== null) block.removeChild(block.firstChild)

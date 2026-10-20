@@ -2,12 +2,19 @@
 
 import { isObject } from './guards.js'
 
-// The live partial as the app state holds it: the role instance it belongs to (`roleId`), the role's display name, and the accumulated text per turn-text field. A partial with no text in either field renders nothing.
+// The live preview is bounded separately from the full turn: the completed turn always arrives in full through the polled run log, while this ephemeral render input only needs enough recent text to follow the stream. A runaway generation must not grow browser state without bound, so each field is capped generously at ~60k tokens.
+export const LIVE_PARTIAL_MAX_CHARS = 250_000
+
+// Trimming to 90% of the cap leaves headroom for later deltas, so the common case appends cheaply instead of slicing the whole cap on every delta.
+const LIVE_PARTIAL_TRIM_CHARS = Math.floor(LIVE_PARTIAL_MAX_CHARS * 0.9)
+
+// The live partial as the app state holds it: the role instance it belongs to (`roleId`), the role's display name, and the accumulated text per turn-text field. A partial with no text in either field renders nothing. `truncated` records that a field was capped, and survives later appends until the turn switches or resets.
 export interface LivePartial {
 	roleId: string
 	role: string
 	reasoning: string
 	content: string
+	truncated: boolean
 }
 
 interface LiveDelta {
@@ -25,10 +32,28 @@ interface LiveDelta {
 export function nextLivePartial(current: LivePartial | null, delta: unknown): LivePartial | null {
 	if (!isLiveDelta(delta)) return current
 	const sameRole = current !== null && current.roleId === delta.roleId
-	const base = sameRole ? current : { roleId: delta.roleId, role: delta.role, reasoning: '', content: '' }
-	const cleared = delta.reset === true ? { ...base, reasoning: '', content: '' } : base
-	if (delta.field === 'reasoning') return { ...cleared, role: delta.role, reasoning: cleared.reasoning + delta.text }
-	return { ...cleared, role: delta.role, content: cleared.content + delta.text }
+	const base = sameRole ? current : { roleId: delta.roleId, role: delta.role, reasoning: '', content: '', truncated: false }
+	const cleared = delta.reset === true ? { ...base, reasoning: '', content: '', truncated: false } : base
+	if (delta.field === 'reasoning') {
+		const appended = appendCapped(cleared.reasoning, delta.text, cleared.truncated)
+		return { ...cleared, role: delta.role, reasoning: appended.text, truncated: appended.truncated }
+	}
+	const appended = appendCapped(cleared.content, delta.text, cleared.truncated)
+	return { ...cleared, role: delta.role, content: appended.text, truncated: appended.truncated }
+}
+
+// Appends within the per-field cap. An overshoot keeps the newest text (the tail) but trims to the lower hysteresis threshold, so the next deltas have room before another trim. A truncation once recorded stays recorded until the turn resets or switches.
+function appendCapped(current: string, addition: string, truncated: boolean): { text: string; truncated: boolean } {
+	const combined = current + addition
+	if (combined.length <= LIVE_PARTIAL_MAX_CHARS) return { text: combined, truncated }
+	let start = combined.length - LIVE_PARTIAL_TRIM_CHARS
+	// A surrogate pair split at the slice boundary would render as a broken character, so start from the next full code point.
+	if (isLowSurrogate(combined.charCodeAt(start))) start += 1
+	return { text: combined.slice(start), truncated: true }
+}
+
+function isLowSurrogate(codeUnit: number): boolean {
+	return codeUnit >= 0xDC00 && codeUnit <= 0xDFFF
 }
 
 // The one instance-matching rule the live partial and the inspector renderer share: an entry with its own instance id matches the partial's id when the partial carries one; an entry or partial without an instance id (old logs) falls back to the role name.

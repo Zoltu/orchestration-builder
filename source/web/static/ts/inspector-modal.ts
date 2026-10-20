@@ -5,6 +5,7 @@
 // The conversation opening (system prompt + task) is hoisted into one collapsed expander above the turns. Each turn then renders its new messages in order and its response — reasoning labeled 💭, all agent-authored prose through the sanitized Markdown pipeline. The `h` and `renderMarkdown` dependencies are passed in rather than imported so the component stays free of hyperapp and showdown coupling.
 
 import { isObject } from './guards.js'
+import { LoadingIndicator } from './loading-indicator.js'
 import { livePartialMatchesRole } from './turn-inspector/index.js'
 import type { LooseH, Vnode, VnodeChildInput } from '../vendor/hyperapp.js'
 import type {
@@ -147,8 +148,6 @@ const WIRE_LABEL = 'on the wire'
 // Fixed trusted copy for the expander's three non-section states (not agent prose, so none flows through Markdown). The idle state is only visible when a fetch has failed and been evicted (or the entry aged out of the cache) — an open expander never renders it otherwise, because the open marks the cache loading before the next render.
 const WIRE_RETRY_NOTICE = 'The full request could not be loaded — close and reopen this expander to retry.'
 
-const WIRE_LOADING_NOTE = 'Loading the full request\u2026'
-
 const WIRE_EMPTY_NOTICE = 'No request or response detail was logged for this turn.'
 
 // The expander's collapsed summary: the label plus the full request's message count when the turn's payload reports one — the count is known before any fetch, because it rides the turn's own `llm_call` payload.
@@ -245,7 +244,7 @@ function wireBodyNode(h: LooseH, renderMarkdown: RenderMarkdown, state: WireDeta
 		if (state.sections === null) return h('p', { class: 'inspector-wire-note' }, [WIRE_EMPTY_NOTICE])
 		return wireSectionsNode(h, renderMarkdown, state.sections)
 	}
-	if (state.status === 'loading') return h('p', { class: 'inspector-wire-note' }, [WIRE_LOADING_NOTE])
+	if (state.status === 'loading') return h('div', { class: 'inspector-wire-note' }, [LoadingIndicator(h, 'Loading the full request\u2026')])
 	return h('p', { class: 'inspector-wire-note' }, [WIRE_RETRY_NOTICE])
 }
 
@@ -266,6 +265,7 @@ export interface LivePartial {
 	role: string
 	reasoning: string
 	content: string
+	truncated: boolean
 }
 
 function livePartialForRender(value: unknown): LivePartial | null {
@@ -275,7 +275,7 @@ function livePartialForRender(value: unknown): LivePartial | null {
 	const roleId = typeof value['roleId'] === 'string' && value['roleId'] !== '' ? value['roleId'] : null
 	const reasoning = typeof value['reasoning'] === 'string' ? value['reasoning'] : ''
 	const content = typeof value['content'] === 'string' ? value['content'] : ''
-	return { roleId, role, reasoning, content }
+	return { roleId, role, reasoning, content, truncated: value['truncated'] === true }
 }
 
 // Whether the transcript turn is the in-flight turn the live partial belongs to. Matching uses the session's shared rule through the module entrypoint, so a same-named sibling instance's ghost turn (an unmatched start whose failure event has paged out of the loaded window) never hosts another instance's stream; turns whose id fell back to the role name (old logs) pair on the role name as before.
@@ -285,12 +285,15 @@ function isLiveTurn(turn: TranscriptTurn, livePartial: LivePartial | null): bool
 	return livePartialMatchesRole(turn.roleId, turn.role, livePartial)
 }
 
-// The live block at the in-flight turn: the streamed reasoning and response, each labeled like the transcript's response sections and rendered through the same sanitized Markdown pipeline. A field with no text yet renders nothing, and an all-empty partial renders no block at all — the app clears the partial when the socket drops, so a stale block never lingers.
+// The live block at the in-flight turn: the streamed reasoning and response, each labeled like the transcript's response sections and rendered through the same sanitized Markdown pipeline. A field with no text yet renders nothing, and an all-empty partial renders no block at all — the app clears the partial when the socket drops, so a stale block never lingers. A capped preview carries a fixed trusted note so the operator knows the completed turn will show the full text.
+const LIVE_PARTIAL_TRUNCATED_NOTE = 'The live preview is truncated; the full turn appears when it completes.'
+
 function livePartialNode(h: LooseH, renderMarkdown: RenderMarkdown, livePartial: LivePartial): Vnode | null {
 	const children: Vnode[] = []
 	if (livePartial.reasoning !== '') children.push(labeledSection(h, '\ud83d\udcad Reasoning', h('div', { class: 'inspector-reasoning markdown' }, renderMarkdown(livePartial.reasoning))))
 	if (livePartial.content !== '') children.push(labeledSection(h, 'Response', h('div', { class: 'inspector-prose markdown' }, renderMarkdown(livePartial.content))))
 	if (children.length === 0) return null
+	if (livePartial.truncated) children.push(h('p', { class: 'inspector-live-truncated-note' }, [LIVE_PARTIAL_TRUNCATED_NOTE]))
 	return h('div', { class: 'inspector-live-partial' }, children)
 }
 
@@ -373,6 +376,7 @@ export interface InspectorModalProps {
 	runLabel?: string | null
 	view: InspectorView
 	livePartial?: unknown
+	liveStreamDisconnected?: boolean
 	renderMarkdown: RenderMarkdown
 	onScopeInstance?: unknown
 	onLoadOlder?: unknown
@@ -391,16 +395,19 @@ export function InspectorModal(h: LooseH, props: InspectorModalProps): Vnode {
 	const onToggleWire = typeof props.onToggleWire === 'function' ? props.onToggleWire : null
 	const scopedRoleId = view.scopedRoleId
 	const livePartial = livePartialForRender(props.livePartial)
+	const liveStreamDisconnected = props.liveStreamDisconnected === true
 	const links: TranscriptLinks = { livePartial, onScopeInstance, wireDetail: view.wireDetail, childInstance: view.childInstance, onToggleWire }
 
 	const bodyChildren: Vnode[] = []
+	if (liveStreamDisconnected) bodyChildren.push(h('div', { class: 'inspector-live-reconnect' }, [LoadingIndicator(h, 'Live text reconnecting\u2026')]))
 	if (view.loadState === 'loading') {
-		bodyChildren.push(h('p', { class: 'inspector-transcript-note' }, ['Loading the run log\u2026']))
+		bodyChildren.push(h('div', { class: 'inspector-transcript-note' }, [LoadingIndicator(h, 'Loading the run log\u2026')]))
 	} else if (view.loadState === 'failed') {
 		bodyChildren.push(h('p', { class: 'inspector-transcript-note' }, ['The run log could not be loaded.']))
 	} else {
 		if (view.hasOlder) {
-			bodyChildren.push(h('button', { type: 'button', class: 'inspector-older', disabled: view.olderLoading, onclick: onLoadOlder }, view.olderLoading ? 'loading older turns\u2026' : 'Older turns'))
+			const olderLabel = view.olderLoading ? [LoadingIndicator(h, 'Loading older turns\u2026')] : ['Older turns']
+			bodyChildren.push(h('button', { type: 'button', class: 'inspector-older', disabled: view.olderLoading, onclick: onLoadOlder }, olderLabel))
 		}
 		if (view.transcript.length === 0) {
 			// Scoped and unscoped empties read differently: a scope with no turns in the loaded range is wayfinding (older turns may page back, another instance may hold them), not an empty log.

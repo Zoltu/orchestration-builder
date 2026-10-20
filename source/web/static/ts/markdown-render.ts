@@ -2,12 +2,22 @@
 //
 // Agent-authored prose (task, result summary, ask_human question text/context, error message) is Markdown the UI renders as formatted text rather than literal punctuation. `showdown` (window.showdown) turns it into HTML, `highlight.js` (window.hljs) highlights fenced code, that HTML is parsed into a neutral tree by `DOMParser`, and walked through the allowlist in `markdown.ts`. The sanitized neutral tree is memoized by text so a per-second poll does not re-run showdown/highlight.js on unchanged content; the hyperapp vnodes are then rebuilt from it on every call — they must never be cached, because hyperapp's differ assigns each vnode's `node` property in place, so a vnode object shared across tree positions (the same text can render in several turns) would have its `node` claimed by one position and left stale at the others; the next position shift (an inspector "Older turns" page prepend, a window resync, a turn completing) then makes the differ patch through the stale reference, which throws DOMException mid-patch and leaves the mounted tree corrupted.
 //
+// The memo is a bounded LRU: it evicts least-recently-used entries until both the entry count and the approximated input-character budget hold. The approximation counts the Markdown input's UTF-16 length (the expensive conversion's input), not the parsed tree's real size; it is a stable, cheap proxy that still prevents unbounded growth over a long session.
+//
 // This module is the browser-facing half of the pipeline: it touches the window globals (showdown, hljs) and the DOM (DOMParser), so it lives here rather than in `markdown.ts` (which is a pure transform over the neutral tree and imports nothing but the record guard). `h` is passed into the factory rather than imported so the pipeline is exercisable in tests with a fake `h` and so both the product client and the harness share one implementation. See docs/security.md "Web client rendering pipeline" for the threat model: the model is a trusted component and this is a defense-in-depth backstop against prompt injection, never the primary defense.
 
 import { sanitizeNodes, htmlNodesToVnodes } from './markdown.js'
 import type { HtmlNode, Hyperscript } from './markdown.js'
 
-const MARKDOWN_CACHE_MAX = 256
+export interface MarkdownRenderLimits {
+	maxEntries: number
+	maxCharacters: number
+}
+
+interface MarkdownCacheEntry {
+	nodes: HtmlNode[]
+	characters: number
+}
 
 // highlight.js returns already-HTML-escaped token spans (the code text is escaped inside the spans), so its output is embedded into the code block verbatim rather than escaped again. Any failure falls back to a manually escaped plain-text code block so rendering never breaks on a malformed input.
 function escapeHtmlForCode(value: string): string {
@@ -74,8 +84,10 @@ function childNodesToNodes(childNodes: NodeListOf<ChildNode>): HtmlNode[] {
 }
 
 // Builds a `renderMarkdown(text)` closure bound to the supplied `h`. A single showdown Converter is constructed lazily on first use and reused for every render; GFM tables and strikethrough are enabled and noHeaderId suppresses showdown's auto-generated heading ids (anchor links the UI does not need and that would only add attributes for the sanitizer to strip). Empty/absent input yields the em-dash placeholder the non-Markdown fields also use; if the vendored libraries are unavailable or showdown throws, the raw text is returned as a single text node so the field stays readable instead of blank. The memo holds the sanitized neutral tree (the expensive showdown/highlight/parse/sanitize result), never vnodes — see the module header for why shared vnode objects corrupt hyperapp's differ. The product is generic over the host's vnode product (see Hyperscript in markdown.ts): an array of the host's vnodes and strings.
-export function createMarkdownRenderer<V>(h: Hyperscript<V>): (text: string) => (V | string)[] {
-	const cache = new Map<string, HtmlNode[]>()
+export function createMarkdownRenderer<V>(h: Hyperscript<V>, limits: MarkdownRenderLimits): (text: string) => (V | string)[] {
+	if (!isPositiveInteger(limits.maxEntries) || !isPositiveInteger(limits.maxCharacters)) throw new Error('createMarkdownRenderer requires positive-integer cache limits')
+	const cache = new Map<string, MarkdownCacheEntry>()
+	let totalCharacters = 0
 	let converter: { makeHtml(text: string): unknown } | null = null
 
 	function ensureConverter() {
@@ -88,13 +100,25 @@ export function createMarkdownRenderer<V>(h: Hyperscript<V>): (text: string) => 
 		return converter
 	}
 
+	function evictToLimits(): void {
+		// Keep at least the entry just stored: a single input larger than the character budget is still worth caching rather than converting on every render.
+		while (cache.size > 1 && (cache.size > limits.maxEntries || totalCharacters > limits.maxCharacters)) {
+			const eldest = cache.keys().next()
+			if (eldest.done) return
+			const entry = cache.get(eldest.value)
+			cache.delete(eldest.value)
+			if (entry !== undefined) totalCharacters -= entry.characters
+		}
+	}
+
 	function textToVnodes(text: string): (V | string)[] {
 		const cachedTree = cache.get(text)
 		if (cachedTree !== undefined) {
 			// Re-insert on hit so the Map's insertion order tracks recency and eviction removes the least-recently-used entry, not the least-recently-inserted one.
 			cache.delete(text)
 			cache.set(text, cachedTree)
-			return htmlNodesToVnodes(cachedTree, h)
+			const cachedVnodes = htmlNodesToVnodes(cachedTree.nodes, h)
+			return cachedVnodes.length > 0 ? cachedVnodes : [text]
 		}
 		const activeConverter = ensureConverter()
 		if (activeConverter === null || typeof activeConverter.makeHtml !== 'function') return [text]
@@ -107,12 +131,10 @@ export function createMarkdownRenderer<V>(h: Hyperscript<V>): (text: string) => 
 		if (typeof html !== 'string') return [text]
 		const highlightedHtml = highlightCodeBlocks(html)
 		const sanitized = sanitizeNodes(parseHtmlToNodes(highlightedHtml))
-		cache.set(text, sanitized)
-		while (cache.size > MARKDOWN_CACHE_MAX) {
-			const eldest = cache.keys().next()
-			if (eldest.done) break
-			cache.delete(eldest.value)
-		}
+		const characters = text.length
+		cache.set(text, { nodes: sanitized, characters })
+		totalCharacters += characters
+		evictToLimits()
 		const vnodes = htmlNodesToVnodes(sanitized, h)
 		return vnodes.length > 0 ? vnodes : [text]
 	}
@@ -121,4 +143,8 @@ export function createMarkdownRenderer<V>(h: Hyperscript<V>): (text: string) => 
 		if (typeof text !== 'string' || text === '') return ['—']
 		return textToVnodes(text)
 	}
+}
+
+function isPositiveInteger(value: number): boolean {
+	return Number.isInteger(value) && value > 0
 }

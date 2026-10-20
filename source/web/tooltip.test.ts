@@ -254,6 +254,15 @@ describe('Tooltip', () => {
 		expect(byTag(defined(blocks[3], 'blocks[3]'), 'pre').find((p) => p.props.class === 'tooltip-json')).toBeDefined()
 	})
 
+	test('a loading section renders the shared spinner and status label instead of scalar text', () => {
+		const card: Vnode = Tooltip(fakeH, { title: 't', sections: [{ label: 'details', loading: true }], renderMarkdown: fakeRenderMarkdown })
+		const indicator = allByTag(card, 'span').find((span) => typeof span.props.class === 'string' && span.props.class.split(' ').includes('loading-indicator'))
+		expect(indicator).toBeDefined()
+		expect(defined(indicator, 'loading indicator').props.role).toBe('status')
+		const label = defined(allByTag(defined(indicator, 'loading indicator'), 'span').find((span) => span.props.class === 'loading-indicator-label'), 'loading label')
+		expect(textOf(label)).toContain('Loading details')
+	})
+
 	test('renders no buttons (the card is a read-only hover inspector)', () => {
 		const card: Vnode = Tooltip(fakeH, { title: 't', sections, renderMarkdown: fakeRenderMarkdown })
 		expect(allByTag(card, 'button').length).toBe(0)
@@ -385,10 +394,10 @@ describe('deriveOperationTooltip', () => {
 		expect(result.sections).toEqual([{ label: 'details', content: '```json\n{"content":"# Project"}\n```' }])
 	})
 
-	test('a loading lookup renders a scalar placeholder section; a failed or ready-null lookup yields a title-only card', () => {
+	test('a loading lookup renders a spinner section; a failed or ready-null lookup yields a title-only card', () => {
 		const model = delegationModel()
 		const loading = deriveOperationTooltip(model, labelsModule, TIER, 'op2', () => ({ status: 'loading' }))
-		expect(loading.sections).toEqual([{ label: 'details', content: 'loading details…', scalar: true }])
+		expect(loading.sections).toEqual([{ label: 'details', loading: true }])
 		const failed = deriveOperationTooltip(model, labelsModule, TIER, 'op2', () => ({ status: 'failed' }))
 		expect(failed.sections).toEqual([])
 		const empty = deriveOperationTooltip(model, labelsModule, TIER, 'op2', readyDetails({ op2: null }))
@@ -483,7 +492,9 @@ describe('deriveParticipantTooltip', () => {
 		// source renders its loading placeholder instead of falling back to the call.
 		const loading = deriveParticipantTooltip(model, labelsModule, TIER, 'role:coder:1', (operationId: string): DetailsState => operationId === 'op5' ? { status: 'loading' } : { status: 'failed' })
 		expect(loading.sections.map((s) => s.label)).toEqual(['kind', 'status', 'tokens', 'summary'])
-		expect(defined(loading.sections.find((s) => s.label === 'summary'), 'summary section').content).toBe('loading details…')
+		const loadingSection = defined(loading.sections.find((s) => s.label === 'summary'), 'summary section')
+		expect(loadingSection.loading).toBe(true)
+		expect(loadingSection.content).toBeUndefined()
 	})
 
 	test('the tokens section formats the k-abbreviated total with the cached subset nested in the input', () => {

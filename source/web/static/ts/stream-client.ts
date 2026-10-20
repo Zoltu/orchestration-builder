@@ -38,9 +38,16 @@ export interface StreamSocket {
 // Opens a socket and wires the handlers onto it, returning the minimal send/close handle the client drives.
 export type OpenSocket = (url: string, handlers: StreamSocketHandlers) => StreamSocket
 
-// The client handle: `subscribe` asks for one run's stream (a re-subscribe replaces the previous), `close` shuts the socket down and stops reconnecting for good.
+interface StreamConnectionState {
+	handle: StreamSocket | null
+	opened: boolean
+	tornDown: boolean
+}
+
+// The client handle: `subscribe` asks for one run's stream (a re-subscribe replaces the previous), `unsubscribe` closes the current connection but stays reusable, and `close` shuts the socket down and stops reconnecting for good.
 export interface StreamClient {
 	subscribe(runId: string): void
+	unsubscribe(): void
 	close(): void
 }
 
@@ -89,6 +96,7 @@ export function createStreamClient(options: StreamClientOptions): StreamClient {
 	const openSocket = options.openSocket ?? defaultOpenSocket
 
 	let socket: StreamSocket | null = null
+	let activeConnection: StreamConnectionState | null = null
 	let desiredRunId: string | null = null
 	let reconnectTimer: ReturnType<typeof setTimeout> | null = null
 	let backoffMs = INITIAL_BACKOFF_MS
@@ -116,6 +124,7 @@ export function createStreamClient(options: StreamClientOptions): StreamClient {
 
 	function scheduleReconnect(): void {
 		if (closedByHost) return
+		if (desiredRunId === null) return
 		cancelReconnect()
 		const delay = backoffMs
 		backoffMs = Math.min(backoffMs * 2, MAX_BACKOFF_MS)
@@ -152,23 +161,54 @@ export function createStreamClient(options: StreamClientOptions): StreamClient {
 	function connect(): void {
 		if (closedByHost) return
 		reconnectTimer = null
-		// Per-connection bookkeeping: `tornDown` folds close and error into one teardown (browsers fire an error before every close, so whichever arrives second is a no-op), and `handle` is captured before the factory returns so a synchronously-firing handler still reaches it.
-		const connection: { handle: StreamSocket | null; tornDown: boolean } = { handle: null, tornDown: false }
+		// Per-connection bookkeeping: `tornDown` folds close and error into one teardown (browsers fire an error before every close, so whichever arrives second is a no-op), and `opened` lets a synchronous open complete once the factory has returned its handle.
+		const connection: StreamConnectionState = { handle: null, opened: false, tornDown: false }
+		activeConnection = connection
+		const closeConnection = (): void => {
+			const target = connection.handle
+			if (target !== null) contain(() => target.close())
+		}
+		const finishOpen = (): void => {
+			if (connection.tornDown) return
+			const handle = connection.handle
+			if (handle === null) return
+			// A connection that is no longer the active one (unsubscribed, or superseded by a newer connect) must never become the socket.
+			if (activeConnection !== connection) {
+				connection.tornDown = true
+				closeConnection()
+				return
+			}
+			if (desiredRunId === null) {
+				connection.tornDown = true
+				activeConnection = null
+				if (socket === handle) socket = null
+				closeConnection()
+				return
+			}
+			const runId = desiredRunId
+			socket = handle
+			emitState('connected')
+			sendSubscribe(runId)
+		}
 		const markDown = (): void => {
 			if (connection.tornDown) return
 			connection.tornDown = true
-			if (socket === connection.handle) socket = null
+			// A close or error from a connection the client has already replaced (or deliberately closed) must not tear down the current connection or emit a second phase change.
+			if (activeConnection !== connection) return
+			activeConnection = null
+			socket = null
 			emitState('disconnected')
 			scheduleReconnect()
 		}
 		const handlers: StreamSocketHandlers = {
 			onOpen: () => {
-				if (connection.tornDown) return
-				socket = connection.handle
-				emitState('connected')
-				if (desiredRunId !== null) sendSubscribe(desiredRunId)
+				connection.opened = true
+				finishOpen()
 			},
 			onMessage: (raw) => {
+				if (connection.tornDown) return
+				// A late frame from a superseded connection belongs to no current subscription.
+				if (activeConnection !== connection) return
 				if (typeof raw === 'string') handleServerMessage(raw)
 			},
 			onClose: markDown,
@@ -181,7 +221,14 @@ export function createStreamClient(options: StreamClientOptions): StreamClient {
 			markDown()
 			return
 		}
-		if (!connection.tornDown && socket === null) socket = connection.handle
+		if (connection.tornDown) return
+		if (activeConnection !== connection) {
+			closeConnection()
+			return
+		}
+		socket = connection.handle
+		// A synchronous open ran before the factory returned its handle, so complete it now.
+		if (connection.opened) finishOpen()
 	}
 
 	return {
@@ -198,10 +245,20 @@ export function createStreamClient(options: StreamClientOptions): StreamClient {
 			}
 			sendSubscribe(runId)
 		},
+		unsubscribe(): void {
+			desiredRunId = null
+			cancelReconnect()
+			activeConnection = null
+			const target = socket
+			socket = null
+			if (target !== null) contain(() => target.close())
+			emitState('disconnected')
+		},
 		close(): void {
 			closedByHost = true
 			cancelReconnect()
 			desiredRunId = null
+			activeConnection = null
 			const target = socket
 			socket = null
 			if (target !== null) contain(() => target.close())

@@ -6,6 +6,7 @@
 
 import { isTerminalStatus } from './interaction-model.js'
 import { isObject } from './guards.js'
+import { LoadingIndicator } from './loading-indicator.js'
 import type { LooseH, Vnode, VnodeChildInput } from '../vendor/hyperapp.js'
 
 // The sanitized-Markdown renderer the component receives: the createMarkdownRenderer product in the hosts — generic over the host's vnode product, an array of host vnodes and strings, which is children input exactly as `LooseH` accepts it wherever the host's `h` builds the exchange shape — or a single-vnode fake in the tests.
@@ -196,7 +197,9 @@ export function ResultPendingModal(h: LooseH, props: ResultPendingModalProps): V
 			h('p', { class: 'result-modal-heading' }, runLabel !== null && runLabel !== undefined && runLabel !== ''
 				? `Result \u00b7 ${runLabel}`
 				: 'Result'),
-			h('p', { class: 'result-modal-pending-message' }, failed ? 'The result could not be loaded.' : 'Loading the result\u2026'),
+			failed
+				? h('p', { class: 'result-modal-pending-message' }, 'The result could not be loaded.')
+				: h('div', { class: 'result-modal-pending-message' }, [LoadingIndicator(h, 'Loading the result\u2026')]),
 			h('div', { class: 'result-modal-pending-actions' }, actions),
 		]),
 	])

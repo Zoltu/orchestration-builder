@@ -121,7 +121,7 @@ Two consequences every change to `source/web/static/` must respect:
 
 The History screen merges the queue and the run list into one row per task: queued `waiting`/`active`/`needs_input` rows come first, a queued row suppresses the run summary it represents (through its `runId`, its `resumesRunId`, or a legacy `needs_input` item's `continuesFrom`), and continuation lineage renders as a compact link in the row with the full `Continues run <id>` line in its expanded details. The result modal opens from the polled summary when the full run view has not loaded, shows a loading or retryable failed card around the fetch, dedupes repeated opens and retries, and drops the run view's ETag whenever the held payload no longer matches the selection so a 304 cannot strand an empty modal.
 
-Polling is visibility- and screen-aware: the run-list, question, and queue timers stop while the page is hidden, the per-run timer also stops off the watch screen, and hiding the page cancels in-flight polls. Returning to the tab triggers a best-effort immediate refresh.
+Polling is visibility- and screen-aware: the run-list, question, and queue timers stop while the page is hidden, the per-run timer also stops off the watch screen, and hiding the page cancels in-flight polls. Returning to the tab triggers a best-effort immediate refresh; on the watch screen it also discards the held flow revision so the next flow poll asks for a full snapshot instead of a delta based on a revision the hidden tab may have missed. The old model stays on screen while that snapshot loads, and the top bar shows a "Refreshing run view…" spinner until it lands (or the flow fetch fails).
 
 ## Shared state sync: `entity-diff`
 

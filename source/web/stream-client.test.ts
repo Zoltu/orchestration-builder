@@ -1,6 +1,6 @@
 import { describe, expect, test, vi } from 'bun:test'
 import { createStreamClient } from './static/ts/stream-client.js'
-import { nextLivePartial, activeLivePartial, scopedActiveLivePartial } from './static/ts/live-partial.js'
+import { nextLivePartial, activeLivePartial, scopedActiveLivePartial, LIVE_PARTIAL_MAX_CHARS } from './static/ts/live-partial.js'
 import { defined } from './test-fixtures.js'
 
 // The stream client is still browser-pure JS, so its exports arrive with inferred JSDoc types (the live-partial helpers it feeds are TypeScript at static/ts/live-partial.ts). The interfaces below carry the shapes the tests assert against, mirroring inspector-modal.test.ts.
@@ -250,6 +250,67 @@ describe('createStreamClient', () => {
 		}
 	})
 
+	test('unsubscribe closes the socket, reports disconnected, does not reconnect, and a later subscribe reconnects', () => {
+		vi.useFakeTimers()
+		try {
+			const { client, sockets, phases } = createClientHarness()
+			client.subscribe('run-1')
+			latestSocket(sockets).open()
+			expect(phases).toEqual(['connected'])
+			client.unsubscribe()
+			expect(latestSocket(sockets).closed).toBe(true)
+			expect(phases).toEqual(['connected', 'disconnected'])
+			// The close event from the socket unsubscribe closed cannot arm a new connection.
+			latestSocket(sockets).shutdown()
+			vi.runAllTimers()
+			expect(sockets).toHaveLength(1)
+			client.subscribe('run-2')
+			expect(sockets).toHaveLength(2)
+			latestSocket(sockets).open()
+			expect(latestSocket(sockets).sent).toEqual([JSON.stringify({ type: 'subscribe', runId: 'run-2' })])
+		} finally {
+			vi.useRealTimers()
+		}
+	})
+
+	test('unsubscribe before the socket opens closes the pending connection and leaves no duplicate', () => {
+		const { client, sockets, phases } = createClientHarness()
+		client.subscribe('run-1')
+		const pending = latestSocket(sockets)
+		client.unsubscribe()
+		expect(pending.closed).toBe(true)
+		expect(phases).toEqual(['disconnected'])
+		// A late open from the unsubscribed connection must not resurrect it or overwrite a newer socket.
+		pending.open()
+		expect(sockets).toHaveLength(1)
+		client.subscribe('run-2')
+		expect(sockets).toHaveLength(2)
+		const fresh = latestSocket(sockets)
+		fresh.open()
+		expect(fresh.sent).toEqual([JSON.stringify({ type: 'subscribe', runId: 'run-2' })])
+		expect(phases).toEqual(['disconnected', 'connected'])
+	})
+
+	test('a late message from a superseded connection is ignored', () => {
+		const { client, sockets, deltas } = createClientHarness()
+		client.subscribe('run-1')
+		const first = latestSocket(sockets)
+		first.open()
+		client.unsubscribe()
+		client.subscribe('run-2')
+		const second = latestSocket(sockets)
+		second.open()
+		first.message(JSON.stringify({ type: 'delta', runId: 'run-1', roleId: 'main-1', role: 'main', field: 'content', text: 'stale' }))
+		second.message(JSON.stringify({ type: 'delta', runId: 'run-2', roleId: 'main-2', role: 'main', field: 'content', text: 'fresh' }))
+		// A late open from the old connection also must not take over from the newer one.
+		first.open()
+		second.message(JSON.stringify({ type: 'delta', runId: 'run-2', roleId: 'main-2', role: 'main', field: 'content', text: 'still fresh' }))
+		expect(deltas).toEqual([
+			{ type: 'delta', runId: 'run-2', roleId: 'main-2', role: 'main', field: 'content', text: 'fresh' },
+			{ type: 'delta', runId: 'run-2', roleId: 'main-2', role: 'main', field: 'content', text: 'still fresh' },
+		])
+	})
+
 	test('socket errors tear the connection down and reconnect like closes', () => {
 		vi.useFakeTimers()
 		try {
@@ -344,29 +405,29 @@ describe('nextLivePartial', () => {
 
 	test('a first delta starts a fresh accumulation and appends its text', () => {
 		const next = nextLivePartial(null, delta({ text: 'Hello' }))
-		expect(next).toEqual({ roleId: 'main-1', role: 'main', reasoning: 'Hello', content: '' })
+		expect(next).toEqual({ roleId: 'main-1', role: 'main', reasoning: 'Hello', content: '', truncated: false })
 	})
 
 	test('deltas append per field independently', () => {
 		let partial = nextLivePartial(null, delta({ field: 'reasoning', text: 'think' }))
 		partial = nextLivePartial(partial, delta({ field: 'content', text: 'say' }))
 		partial = nextLivePartial(partial, delta({ field: 'reasoning', text: ' more' }))
-		expect(partial).toEqual({ roleId: 'main-1', role: 'main', reasoning: 'think more', content: 'say' })
+		expect(partial).toEqual({ roleId: 'main-1', role: 'main', reasoning: 'think more', content: 'say', truncated: false })
 	})
 
 	test('a delta from another role instance starts fresh (single-role accumulation)', () => {
-		const partial = nextLivePartial({ roleId: 'main-1', role: 'main', reasoning: 'old turn', content: 'old text' }, delta({ roleId: 'coder-2', role: 'coder', text: 'new' }))
-		expect(partial).toEqual({ roleId: 'coder-2', role: 'coder', reasoning: 'new', content: '' })
+		const partial = nextLivePartial({ roleId: 'main-1', role: 'main', reasoning: 'old turn', content: 'old text', truncated: false }, delta({ roleId: 'coder-2', role: 'coder', text: 'new' }))
+		expect(partial).toEqual({ roleId: 'coder-2', role: 'coder', reasoning: 'new', content: '', truncated: false })
 	})
 
 	test('a reset delta clears the accumulation before appending', () => {
 		let partial = nextLivePartial(null, delta({ field: 'content', text: 'wrong start' }))
 		partial = nextLivePartial(partial, delta({ field: 'content', text: 'retry', reset: true }))
-		expect(partial).toEqual({ roleId: 'main-1', role: 'main', reasoning: '', content: 'retry' })
+		expect(partial).toEqual({ roleId: 'main-1', role: 'main', reasoning: '', content: 'retry', truncated: false })
 	})
 
 	test('a malformed delta leaves the accumulation untouched', () => {
-		const current = { roleId: 'main-1', role: 'main', reasoning: 'kept', content: '' }
+		const current = { roleId: 'main-1', role: 'main', reasoning: 'kept', content: '', truncated: false }
 		expect(nextLivePartial(current, null)).toBe(current)
 		expect(nextLivePartial(current, 'broken')).toBe(current)
 		expect(nextLivePartial(current, { roleId: 'main-1', role: 'main', field: 'other', text: 'x' })).toBe(current)
@@ -375,8 +436,56 @@ describe('nextLivePartial', () => {
 	})
 })
 
+describe('live partial cap', () => {
+	const trimLength = Math.floor(LIVE_PARTIAL_MAX_CHARS * 0.9)
+
+	function delta(overrides: Partial<Omit<StreamDeltaMessage, 'type'>> = {}): StreamDeltaMessage {
+		return { type: 'delta', runId: 'run-1', roleId: 'main-1', role: 'main', field: 'content', text: 'x', ...overrides }
+	}
+
+	test('an oversized append trims to the hysteresis threshold, keeps the tail, and marks the partial truncated', () => {
+		const text = 'a'.repeat(LIVE_PARTIAL_MAX_CHARS) + 'TAIL'
+		const partial = nextLivePartial(null, delta({ text }))
+		if (partial === null) throw new Error('expected a partial')
+		expect(partial.content.length).toBe(trimLength)
+		expect(partial.content.endsWith('TAIL')).toBe(true)
+		expect(partial.reasoning).toBe('')
+		expect(partial.truncated).toBe(true)
+	})
+
+	test('the truncated flag survives later appends and each field stays capped', () => {
+		let partial = nextLivePartial(null, delta({ field: 'reasoning', text: 'b'.repeat(LIVE_PARTIAL_MAX_CHARS + 5) }))
+		partial = nextLivePartial(partial, delta({ field: 'reasoning', text: 'more' }))
+		if (partial === null) throw new Error('expected a partial')
+		expect(partial.truncated).toBe(true)
+		expect(partial.reasoning.length).toBe(trimLength + 4)
+		expect(partial.reasoning.endsWith('more')).toBe(true)
+	})
+
+	test('a trim boundary that splits a surrogate pair advances to a full code point', () => {
+		const text = 'a' + '\ud83d\ude00'.repeat(130_000) + 'z'
+		const partial = nextLivePartial(null, delta({ text }))
+		if (partial === null) throw new Error('expected a partial')
+		const firstCodeUnit = partial.content.charCodeAt(0)
+		expect(firstCodeUnit >= 0xDC00 && firstCodeUnit <= 0xDFFF).toBe(false)
+		expect(partial.content.codePointAt(0)).toBe(0x1F600)
+		expect(partial.content.endsWith('z')).toBe(true)
+		expect(partial.content.length).toBe(trimLength - 1)
+	})
+
+	test('a reset delta and a role switch both clear the truncated flag', () => {
+		const capped = nextLivePartial(null, delta({ text: 'c'.repeat(LIVE_PARTIAL_MAX_CHARS + 1) }))
+		const reset = nextLivePartial(capped, delta({ text: 'fresh', reset: true }))
+		expect(reset).toEqual({ roleId: 'main-1', role: 'main', reasoning: '', content: 'fresh', truncated: false })
+		const switched = nextLivePartial(capped, delta({ roleId: 'coder-2', role: 'coder', text: 'new' }))
+		if (switched === null) throw new Error('expected a partial')
+		expect(switched.truncated).toBe(false)
+		expect(switched.content).toBe('new')
+	})
+})
+
 describe('activeLivePartial', () => {
-	const partial = { roleId: 'coder-2', role: 'coder', reasoning: 'in progress', content: '' }
+	const partial = { roleId: 'coder-2', role: 'coder', reasoning: 'in progress', content: '', truncated: false }
 
 	test('kept while the role instance still holds an in-flight turn (roleId match)', () => {
 		const entries = [{ kind: 'completed', role: 'planner', roleId: 'planner-1' }, { kind: 'in_flight', role: 'coder', roleId: 'coder-2' }]
@@ -394,7 +503,7 @@ describe('activeLivePartial', () => {
 	})
 
 	test('either side lacking an instance id falls back to the role name (old logs)', () => {
-		const idlessPartial = { roleId: '', role: 'coder', reasoning: '', content: '' }
+		const idlessPartial = { roleId: '', role: 'coder', reasoning: '', content: '', truncated: false }
 		expect(activeLivePartial(idlessPartial, [{ kind: 'in_flight', role: 'coder', roleId: 'coder-2' }])).toBe(idlessPartial)
 		const fallbackEntries = [{ kind: 'in_flight', role: 'coder', roleId: 'coder' }]
 		expect(activeLivePartial(partial, fallbackEntries)).toBe(partial)
@@ -412,7 +521,7 @@ describe('activeLivePartial', () => {
 })
 
 describe('scopedActiveLivePartial', () => {
-	const partial = { roleId: 'coder-2', role: 'coder', reasoning: 'in progress', content: '' }
+	const partial = { roleId: 'coder-2', role: 'coder', reasoning: 'in progress', content: '', truncated: false }
 
 	test('cleared only when the scope holds the partial\u2019s own turn completed (roleId match)', () => {
 		expect(scopedActiveLivePartial(partial, [{ kind: 'in_flight', role: 'coder', roleId: 'coder-2' }])).toBe(partial)
@@ -431,7 +540,7 @@ describe('scopedActiveLivePartial', () => {
 	})
 
 	test('either side lacking an instance id falls back to the role name (old logs)', () => {
-		const idlessPartial = { roleId: '', role: 'coder', reasoning: '', content: '' }
+		const idlessPartial = { roleId: '', role: 'coder', reasoning: '', content: '', truncated: false }
 		expect(scopedActiveLivePartial(idlessPartial, [{ kind: 'completed', role: 'coder', roleId: 'coder-2' }])).toBeNull()
 		expect(scopedActiveLivePartial(partial, [{ kind: 'completed', role: 'coder', roleId: 'coder' }])).toBeNull()
 	})

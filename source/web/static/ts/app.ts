@@ -27,11 +27,12 @@ import type { ContinuationReferenceData } from './continuation-reference.js'
 import { InspectorModal } from './inspector-modal.js'
 import { createInspectorSession } from './turn-inspector/index.js'
 import { isObject } from './guards.js'
-import { applyFlowFrame, emptyFlowFeedState, flowFeedRevision } from './flow-feed/index.js'
+import { applyFlowFrame, discardFlowRevision, emptyFlowFeedState, flowFeedRevision } from './flow-feed/index.js'
 import { applyRunListFrame, emptyRunListFeedState, runListFeedRevision } from './run-list-feed/index.js'
 import { responseBelongsToSelection } from './stale-response.js'
 import { createStreamClient } from './stream-client.js'
 import { nextLivePartial } from './live-partial.js'
+import { LoadingIndicator } from './loading-indicator.js'
 import { backlogCount, deriveReorderPosition, isQueueItemLike, matchesParkedRun, queueItemPrimaryText, queueStatusLabel, reorderWaitingItems } from './queue-panel.js'
 import type { InteractionModel, Participant, RunStatus } from './interaction-model.js'
 import type { FlowFeedState } from './flow-feed/index.js'
@@ -228,6 +229,9 @@ export interface ApplicationState {
 	flowFeed: FlowFeedState
 	// The polled run-list feed state. The summaries are reconstructed newest-first from it on every apply, which also hides the replica revision behind `runListFeedRevision`.
 	runListFeed: RunListFeedState
+	// Whether the first run-list and queue polls have landed; the history empty state shows a loading indicator until both have.
+	runListLoaded: boolean
+	queueLoaded: boolean
 	// The label resolver and guild participant inventory are built once from `/api/config` (GotConfig); null/empty until that single load completes. `build` rides the same load: the image's build identifier for the top bar, and stays null when running from source without a baked build-info.json.
 	labelResolver: LabelResolver | null
 	guildParticipants: Participant[]
@@ -240,6 +244,8 @@ export interface ApplicationState {
 	screen: Screen
 	// Whether the browser tab is visible; polling subscriptions are withdrawn while hidden and an immediate refresh runs on return.
 	pageVisible: boolean
+	// True from a visibility resume until the next flow frame lands (or the flow fetch fails): the top bar shows a refreshing pill, and the old model stays visible while the snapshot loads.
+	flowRefreshPending: boolean
 	// Per-row expansion for the merged history screen, keyed by run id or queue item id, so the full task/result of several rows can be open at once.
 	expandedRowIds: Record<string, boolean>
 	// The continuation pending on the compose screen, or null for a plain new task. Set by the History row's or result modal's Continue button; cleared by the reference block's Cancel and after a successful submit.
@@ -262,6 +268,10 @@ export interface ApplicationState {
 	planExpanded: boolean
 	// The live token stream's ephemeral partial (see "Live token stream"): the in-flight reasoning/content the inspector modal renders under the matching in-flight row. Null whenever nothing is streaming or the stream is down; never an authority on run state.
 	livePartial: LivePartial | null
+	// The current websocket phase, so the inspector can show a reconnect indicator when live text is expected but the stream is down.
+	streamConnected: boolean
+	// True once any connection has succeeded; never reset on a run switch, so an endpoint that is blocked from the start never produces a permanent reconnecting spinner.
+	streamWasConnectedOnce: boolean
 	// The inspector descriptor over the run view: null when nothing is hovered. Cleared on `mouseleave` of the stage and on run switch; a stale id self-dismisses at render time.
 	tooltip: TooltipSnapshot | null
 	// Interrupt form state: the kind toggle, an in-flight send flag, and a one-line outcome notice. The answer card presents each newly-arrived interrupt answer once (keys run-scoped in shownInterruptAnswerKeys); a run's first read baselines its answered history so old runs never pop stale cards.
@@ -429,13 +439,13 @@ let audioContext: AudioContext | null = null
 // The run stage owns the flow column high-water mark, the accent assignment, participant ordering, and the stage memo. It starts empty and is reconfigured in place when `/api/config` lands, so the centerpiece's width stays stable as runs deepen and unwind for the page-load lifetime even when the config fetch resolves after the first flow frame. Held at module scope like audioContext — it is view-render memory, not app state.
 let runStage: RunStage = createRunStage({ roleNames: [], roleOrder: [] })
 
-// The inspector's operation-details controller (see operation-details.js): key `<runId>|<operationId>`, states 'loading' | 'failed' | ready. The polled flow model ships no detail bodies (they can carry multi-megabyte tool arguments/results), so opening an inspector card fetches the ids its derivation may show from `api/runs/:id/flow?operation=<id>` exactly once per session and caches them. Operation ids are stable within a run (events only append), so an entry never goes stale; the run id in the key keeps a previous run's entries from answering for another run's same-numbered operation. Module scope like runStage — cache memory, not app state. This host drives the controller through `begin` + `record*` because its fetches are hyperapp effects whose ok/fail actions must return fresh state to trigger the re-render, so no `onLanded` fan-out is wired.
-const operationDetails = createOperationDetails({})
+// The inspector's operation-details controller (see operation-details.js): key `<runId>|<operationId>`, states 'loading' | 'failed' | ready. The polled flow model ships no detail bodies (they can carry multi-megabyte tool arguments/results), so opening an inspector card fetches the ids its derivation may show from `api/runs/:id/flow?operation=<id>` and caches them in a bounded LRU. Operation ids are stable within a run (events only append), so a cached entry never goes stale; the run id in the key keeps a previous run's entries from answering for another run's same-numbered operation. An evicted id reads as failed and can be fetched again if a surface asks for it later. Module scope like runStage — cache memory, not app state. This host drives the controller through `begin` + `record*` because its fetches are hyperapp effects whose ok/fail actions must return fresh state to trigger the re-render, so no `onLanded` fan-out is wired.
+const operationDetails = createOperationDetails({}, { maxEntries: 512, maxCharacters: 32_000_000 })
 
 // The LLM turn inspector's session (see turn-inspector/index.js): it owns the unscoped tail window, the per-instance scoped windows, the fetch decisions that page them, the turn/transcript derivations, and the per-turn wire-envelope cache. Module scope like operationDetails — inspection-session memory, not app state. The host only performs the requests it returns and passes the response back.
 const inspectorSession = createInspectorSession()
 
-// The live-token-stream client (see stream-client.js and docs/reference.md "Live token stream"): module scope like the other session caches, created lazily by the stream subscription on the first watch-screen mount and left connected for the page's lifetime. The stream is an enhancement — the client is contained (never throws, shows no error surface), and the only state it feeds is the ephemeral `livePartial` the inspector modal's in-flight turn renders.
+// The live-token-stream client (see stream-client.js and docs/reference.md "Live token stream"): module scope like the other session caches, created lazily by the stream subscription on the first watch-screen mount. Leaving Watch (or the run becoming terminal) unsubscribes and closes the socket; returning reconnects rather than leaving a dormant connection open. The stream is an enhancement — the client is contained (never throws, shows no error surface), and the only state it feeds is the ephemeral `livePartial` the inspector modal's in-flight turn renders.
 let streamClient: StreamClient | null = null
 
 // ws vs wss follows the page's own protocol so a TLS deployment upgrades the stream with it.
@@ -487,7 +497,7 @@ function formatTokens(tokens: unknown): string {
 // --- Markdown rendering ----------------------------------------------------
 // Agent-authored prose is Markdown rendered as formatted text via the shared pipeline in `markdown-render.js` (showdown → highlight.js → sanitized vnodes). The renderer is constructed once against this module's `h` and reused everywhere prose appears; the implementation and its memoization live in the shared module so the demo harness renders Markdown through the identical sanitized path.
 
-const renderMarkdown = createMarkdownRenderer(h)
+const renderMarkdown = createMarkdownRenderer(h, { maxEntries: 256, maxCharacters: 16_000_000 })
 
 // The active run is the first non-terminal summary; derived in the view rather than stored, so it can never drift from the run list.
 function deriveActiveRunId(summaries: RunSummary[]): string | null {
@@ -728,7 +738,7 @@ function PollSelectedRun(state: ApplicationState): ActionReturn {
 		state,
 		Fetch({ url: runUrl, ifNoneMatch: storedVersionFor(state.versions, runUrl), ok: GotSelectedRun(state.selectedRunId), fail: FetchFailed, pollKey: POLL_KEY_SELECTED_RUN }),
 		// The flow fetch is uncacheable but carries no ETag: its entity-diff `have` revision is the revalidation, so it sets no-store directly rather than through withIfNoneMatch.
-		Fetch({ url: flowRequestUrl, init: { cache: 'no-store' }, ok: GotFlowModel(state.selectedRunId), fail: FetchFailed, pollKey: POLL_KEY_FLOW }),
+		Fetch({ url: flowRequestUrl, init: { cache: 'no-store' }, ok: GotFlowModel(state.selectedRunId), fail: FlowFetchFailed, pollKey: POLL_KEY_FLOW }),
 		// While the inspector modal is open, the same poll also refreshes the log-window tail so in-flight turns appear when they complete (a null effect when closed — hyperapp ignores falsy effects).
 		InspectorTailRefresh(state),
 	]
@@ -746,10 +756,18 @@ function PageVisibilityChanged(state: ApplicationState, visible: boolean): Actio
 	if (visible === state.pageVisible) return state
 	if (!visible) {
 		pollFetcher.cancelAll()
-		return { ...state, pageVisible: false }
+		return { ...state, pageVisible: false, flowRefreshPending: false }
 	}
 	pollFetcher.cancelAll()
-	const [tickState, effects] = splitActionResult(Tick({ ...state, pageVisible: true }))
+	// A hidden tab misses every flow delta. Drop the held revision (keeping the replica and model) so the resumed poll asks for a snapshot, and show the refreshing pill until that snapshot lands; the old stage stays visible meanwhile. A non-resuming tab — including one whose selected run has gone terminal — never leaves the resume flag up.
+	const resumingWatch = state.screen === 'watch' && hasPollableSelectedRun(state)
+	const resumedState = {
+		...state,
+		pageVisible: true,
+		flowFeed: resumingWatch ? discardFlowRevision(state.flowFeed) : state.flowFeed,
+		flowRefreshPending: resumingWatch,
+	}
+	const [tickState, effects] = splitActionResult(Tick(resumedState))
 	if (tickState.screen === 'watch' && hasPollableSelectedRun(tickState)) {
 		const [, pollEffects] = splitActionResult(PollSelectedRun(tickState))
 		effects.push(...pollEffects)
@@ -757,32 +775,44 @@ function PageVisibilityChanged(state: ApplicationState, visible: boolean): Actio
 	return [tickState, ...effects]
 }
 
-// The live InteractionModel the flow/sequence views render, scoped to the run the poll fetched it for: the flow payload carries no run id of its own, so the selected run id is curried in when the effect is built (PollSelectedRun) and the response is dropped when it no longer matches the selection at application time — a late frame for run A must not render over run B's stage. The body is an entity-diff frame, so it is reduced against the opaque feed state the client holds and the model is reconstructed from the resulting state. The previous frame is kept so the stage can diff entering/departing nodes; a 404 (the run directory exists but is not yet readable in the instant after submit) clears the feed and model so the centerpiece shows its placeholder until the first readable frame lands. Every path that changes the model also syncs the scroll followers: the model update grows (or clears) the sequence content after the view patch, and an open inspector modal's body element is replaced where the placeholder transitions to the model (the poll-time sync re-attaches its follower before the next content update can rely on it).
+// The live InteractionModel the flow/sequence views render, scoped to the run the poll fetched it for: the flow payload carries no run id of its own, so the selected run id is curried in when the effect is built (PollSelectedRun) and the response is dropped when it no longer matches the selection at application time — a late frame for run A must not render over run B's stage. The body is an entity-diff frame, so it is reduced against the opaque feed state the client holds and the model is reconstructed from the resulting state. The previous frame is kept so the stage can diff entering/departing nodes; a 404 (the run directory exists but is not yet readable in the instant after submit) clears the feed and model only when nothing is rendered yet, so a transient unreadable poll never blanks an already-visible stage. Every path that changes the model also syncs the scroll followers: the model update grows (or clears) the sequence content after the view patch, and an open inspector modal's body element is replaced where the placeholder transitions to the model (the poll-time sync re-attaches its follower before the next content update can rely on it).
 function GotFlowModel(runId: string) {
 	return function GotFlowModelForRun(state: ApplicationState, payload: FetchResultPayload): ActionReturn {
 		if (!responseBelongsToSelection(runId, state.selectedRunId)) return state
-		if (payload.status === 404) return [{ ...state, flowModel: null, previousFlowModel: null, flowFeed: emptyFlowFeedState(), serverAvailable: payload.ok }, SyncSequenceFollower(), SyncInspectorFollower()]
+		if (payload.status === 404) {
+			if (state.flowModel !== null) return { ...state, serverAvailable: payload.ok, flowRefreshPending: false }
+			return [{ ...state, flowModel: null, previousFlowModel: null, flowFeed: emptyFlowFeedState(), serverAvailable: payload.ok, flowRefreshPending: false }, SyncSequenceFollower(), SyncInspectorFollower()]
+		}
 		const result = applyFlowFrame(state.flowFeed, payload.body)
 		// An unchanged frame keeps the model and feed BY REFERENCE — reassigning them would break the WeakMap-keyed memoization in interaction-model.ts and the run-stage renderers — so only server availability is refreshed and no follower sync is needed (nothing mounted changed).
-		if (result.outcome === 'unchanged') return { ...state, serverAvailable: true }
+		if (result.outcome === 'unchanged') return { ...state, serverAvailable: true, flowRefreshPending: false }
 		if (result.outcome === 'applied' || result.outcome === 'snapshot') {
-			return [{ ...state, flowFeed: result.state, previousFlowModel: state.flowModel, flowModel: result.model, serverAvailable: true }, SyncSequenceFollower(), SyncInspectorFollower()]
+			return [{ ...state, flowFeed: result.state, previousFlowModel: state.flowModel, flowModel: result.model, serverAvailable: true, flowRefreshPending: false }, SyncSequenceFollower(), SyncInspectorFollower()]
 		}
 		// A delta whose base the client no longer holds cannot be applied; re-fetching with no `have` asks the server for a full snapshot. The held feed and model stand until it lands.
 		if (result.outcome === 'needsSnapshot') {
-			return [{ ...state, serverAvailable: payload.ok }, Fetch({ url: `api/runs/${encodeURIComponent(runId)}/flow`, init: { cache: 'no-store' }, ok: GotFlowModel(runId), fail: FetchFailed, pollKey: POLL_KEY_FLOW })]
+			return [{ ...state, serverAvailable: payload.ok }, Fetch({ url: `api/runs/${encodeURIComponent(runId)}/flow`, init: { cache: 'no-store' }, ok: GotFlowModel(runId), fail: FlowFetchFailed, pollKey: POLL_KEY_FLOW })]
 		}
 		// invalid: the frame failed validation, so the held feed and model stand, but the fetch result still updates server availability.
-		return { ...state, serverAvailable: payload.ok }
+		return { ...state, serverAvailable: payload.ok, flowRefreshPending: false }
 	}
 }
 
-// The run list arrives as an entity-diff frame, so it is reduced against the opaque feed state the client holds and the newest-first summaries are reconstructed from the resulting state. An unchanged frame keeps the summaries and feed BY REFERENCE (the history view's identity-keyed memoization relies on it); applied/snapshot store the new feed and the reconstructed summaries; a delta whose base the client no longer holds re-fetches with no `have` for a full snapshot; an invalid frame leaves the held state untouched.
+// The flow fetch's failure path (both the poll and the snapshot retry): clearing the resume indicator here means a network failure or timeout cannot leave the top bar spinning forever.
+function FlowFetchFailed(state: ApplicationState): ApplicationState {
+	return { ...state, serverAvailable: false, flowRefreshPending: false }
+}
+
+// The run list arrives as an entity-diff frame, so it is reduced against the opaque feed state the client holds and the newest-first summaries are reconstructed from the resulting state. An unchanged frame keeps the summaries and feed BY REFERENCE (the history view's identity-keyed memoization relies on it); applied/snapshot store the new feed and the reconstructed summaries; a delta whose base the client no longer holds re-fetches with no `have` for a full snapshot; an invalid frame leaves the held state untouched but marks the server unavailable.
 function GotRunList(state: ApplicationState, payload: FetchResultPayload): ActionReturn {
 	const result = applyRunListFrame(state.runListFeed, payload.body)
-	if (result.outcome === 'unchanged') return { ...state, serverAvailable: true }
+	if (result.outcome === 'unchanged') {
+		if (!payload.ok) return { ...state, serverAvailable: false }
+		return { ...state, serverAvailable: true, runListLoaded: true }
+	}
 	if (result.outcome === 'applied' || result.outcome === 'snapshot') {
-		const nextState = { ...state, runListFeed: result.state, summaries: result.summaries, serverAvailable: true }
+		if (!payload.ok) return { ...state, serverAvailable: false }
+		const nextState = { ...state, runListFeed: result.state, summaries: result.summaries, serverAvailable: true, runListLoaded: true }
 		if (nextState.justSubmittedRunId !== null && result.summaries.some((summary) => summary.runId === nextState.justSubmittedRunId)) {
 			nextState.justSubmittedRunId = null
 		}
@@ -805,10 +835,11 @@ function GotRunList(state: ApplicationState, payload: FetchResultPayload): Actio
 	}
 	// A delta whose base the client no longer holds cannot be applied; re-fetching with no `have` asks the server for a full snapshot. The held replica and summaries stand until it lands.
 	if (result.outcome === 'needsSnapshot') {
-		return [{ ...state, serverAvailable: payload.ok }, Fetch({ url: 'api/runs', init: { cache: 'no-store' }, ok: GotRunList, fail: FetchFailed, pollKey: POLL_KEY_RUN_LIST })]
+		if (!payload.ok) return { ...state, serverAvailable: false }
+		return [{ ...state, serverAvailable: true }, Fetch({ url: 'api/runs', init: { cache: 'no-store' }, ok: GotRunList, fail: FetchFailed, pollKey: POLL_KEY_RUN_LIST })]
 	}
-	// invalid: the envelope failed validation, so the held replica and summaries stand, but the fetch result still updates server availability.
-	return { ...state, serverAvailable: payload.ok }
+	// invalid: the envelope failed validation, so the held replica, summaries, and loaded flag stand, but the response is unusable and must not leave the history screen claiming a live server with nothing loaded.
+	return { ...state, serverAvailable: false }
 }
 
 // The newest interrupt-question answer the operator has not been shown yet, or null. Keys are run-scoped (`runId|askedAt`) so one map serves every run without per-run resets; a run's first read baselines its already-answered inquiries so opening an old run never pops stale answers.
@@ -928,13 +959,16 @@ function FetchFailed(state: ApplicationState): ApplicationState {
 
 function reduceQueue(state: ApplicationState, payload: FetchResultPayload): ApplicationState {
 	const ok = payload.ok
+	if (!ok) return { ...state, serverAvailable: false }
 	const body = payload.body
-	const items: QueueItemLike[] = ok && Array.isArray(body) ? body.filter(isQueueItemLike) : []
+	// A 2xx response whose body is not the queue array is unusable: keep the held items and loaded flag rather than presenting a malformed answer as an empty queue.
+	if (!Array.isArray(body)) return { ...state, serverAvailable: false }
+	const items: QueueItemLike[] = body.filter(isQueueItemLike)
 	// The add's post-response guard releases once the created item shows up in the polled queue — the same release GotRunList applies to justSubmittedRunId; a response that fails or omits the item keeps the guard up.
 	const justSubmittedItemId = state.justSubmittedItemId !== null && items.some((item) => item.id === state.justSubmittedItemId)
 		? null
 		: state.justSubmittedItemId
-	return { ...state, queueItems: items, serverAvailable: ok, justSubmittedItemId }
+	return { ...state, queueItems: items, serverAvailable: true, justSubmittedItemId, queueLoaded: true }
 }
 
 // The queue poll's ingress: reduce the payload, then repaint the favicon, so a poll that parks an item on a question (or clears one) turns the icon yellow (or back) without waiting for the run-list poll. A deferred answer resume is watched here: once its item carries a run id — even when it was dispatched and finished between polls, since done/error items keep the run id — the watch screen re-engages on that run. Only a vanished or cancelled item, or a finished item with no recorded run, clears the field without selection.
@@ -1173,7 +1207,8 @@ function DragEndQueueItem(state: ApplicationState): ApplicationState {
 function GotConfig(state: ApplicationState, payload: FetchResultPayload): ActionReturn {
 	const ok = payload.ok
 	const body = payload.body
-	if (!ok || !isLabelConfig(body)) return state
+	// A failed or malformed one-shot config load leaves any already-loaded config intact, but marks the server unavailable so the placeholder and warning reflect the real state.
+	if (!ok || !isLabelConfig(body)) return { ...state, serverAvailable: false }
 	const participants = guildParticipantsFromConfig(body)
 	const roleNames = participants.filter((participant) => participant.kind === 'role').map((participant) => participant.role)
 	// Apply the config in place so the flow column high-water mark survives; the config fetch and the run poll are independent, so a first flow frame can land before this action.
@@ -1342,6 +1377,7 @@ function resetRunView(state: ApplicationState, runId: string, status: RunStatus 
 		flowModel: null,
 		previousFlowModel: null,
 		flowFeed: emptyFlowFeedState(),
+		flowRefreshPending: false,
 		questionModalOpen: false,
 		resultModalOpen: false,
 		resultShownForRun: null,
@@ -2069,10 +2105,12 @@ function WireDetailFailed(request: WireFetchRequest) {
 function InspectorModalForRun(state: ApplicationState): Vnode | null {
 	if (!state.inspectorModalOpen) return null
 	const runId = state.selectedRunId
+	const liveStreamDisconnected = hasPollableSelectedRun(state) && state.streamWasConnectedOnce && !state.streamConnected
 	return InspectorModal(h, {
 		runLabel: typeof runId === 'string' ? runId : null,
 		view: inspectorSession.view(),
 		livePartial: state.livePartial,
+		liveStreamDisconnected,
 		renderMarkdown,
 		onToggleWire: ToggleWireDetail,
 		onScopeInstance: ScopeInspectorInstance,
@@ -2090,15 +2128,21 @@ function GotLiveDelta(state: ApplicationState, delta: StreamDeltaMessage): Actio
 	return [{ ...state, livePartial: nextLivePartial(state.livePartial, delta) }, SyncInspectorFollower()]
 }
 
-// Socket phase changes clear the partial. On a disconnect the text is stale (and would otherwise linger under the in-flight row); on a fresh connect the accumulation starts empty because deltas resume mid-turn with the middle lost, and showing a gapped text as if continuous would be wrong. Only live partial text is ever lost — the polled log is untouched, and no error surface exists anywhere.
+// Socket phase changes clear the partial. On a disconnect the text is stale (and would otherwise linger under the in-flight row); on a fresh connect the accumulation starts empty because deltas resume mid-turn with the middle lost, and showing a gapped text as if continuous would be wrong. Only live partial text is ever lost — the polled log is untouched, and no error surface exists anywhere. The phase also drives the inspector's reconnect indicator.
 function GotStreamState(state: ApplicationState, phase: 'connected' | 'disconnected'): ApplicationState {
 	if (phase !== 'connected' && phase !== 'disconnected') return state
-	if (state.livePartial === null) return state
-	return { ...state, livePartial: null }
+	const streamConnected = phase === 'connected'
+	const streamWasConnectedOnce = state.streamWasConnectedOnce || streamConnected
+	if (state.livePartial === null && state.streamConnected === streamConnected && state.streamWasConnectedOnce === streamWasConnectedOnce) return state
+	return { ...state, livePartial: null, streamConnected, streamWasConnectedOnce }
 }
 
-// The stream subscription is mounted only while the watch screen shows a selected, non-terminal run (the same non-terminal guard the polling subscription uses). The payload's runId is the only field that changes, so hyperapp restarts the subscription exactly when the selected run changes, and each start re-subscribes (the server replaces the previous subscription). Teardown deliberately leaves the socket connected — the simple lifecycle choice: screen switches cost no reconnect, and deltas that arrive while another screen is shown are dropped by the run filter in GotLiveDelta.
+// Hyperapp starts a replacement subscriber before calling the previous teardown. The generation token keeps that teardown from unsubscribing the connection the new subscriber just opened; only the current generation's teardown (leaving Watch, a terminal run, or an unmount) closes the socket.
+let streamSubscriptionGeneration = 0
+
+// The stream subscription is mounted only while the watch screen shows a selected, non-terminal run (the same non-terminal guard the polling subscription uses). The payload's runId is the only field that changes, so hyperapp restarts the subscription exactly when the selected run changes, and each start re-subscribes (the server replaces the previous subscription). Teardown unsubscribes only when it is still the newest subscription: leaving Watch or the run becoming terminal closes the socket, and returning reconnects through a fresh subscribe, so a background connection is never kept open for a screen that cannot show live text.
 function streamSubscriber(dispatch: Dispatch, payload: { runId: string }): () => void {
+	const generation = ++streamSubscriptionGeneration
 	if (streamClient === null) {
 		streamClient = createStreamClient({
 			url: streamSocketUrl(),
@@ -2107,8 +2151,11 @@ function streamSubscriber(dispatch: Dispatch, payload: { runId: string }): () =>
 		})
 	}
 	streamClient.subscribe(payload.runId)
-	// hyperapp's patchSubs calls the old subscriber's return value on every restart, so a teardown function must always be returned; the stream client deliberately outlives the subscription (page-lifetime client), so teardown is a no-op.
-	return () => {}
+	// hyperapp's patchSubs calls the old subscriber's return value on every restart, so a teardown function must always be returned.
+	return () => {
+		if (generation !== streamSubscriptionGeneration) return
+		if (streamClient !== null) streamClient.unsubscribe()
+	}
 }
 
 function StreamSubscription(runId: string): [typeof streamSubscriber, { runId: string }] {
@@ -2164,6 +2211,9 @@ function TopBar(state: ApplicationState): Vnode {
 	return h('header', { class: 'topbar' }, [
 		h('span', { class: 'topbar-wordmark' }, 'Adaptive Orchestrator'),
 		...StatusPills(state),
+		state.flowRefreshPending && state.screen === 'watch'
+			? h('span', { class: 'status-pill status-pill-refreshing' }, [LoadingIndicator(h, 'Refreshing run view…')])
+			: null,
 		ViewedRunLabel(state),
 		h('nav', { class: 'topbar-nav' }, [
 			// The compose screen is always reachable: with the queue universal, adding a task while a run is in flight queues it for its turn instead of being refused (docs/queueing.md "UI interaction model").
@@ -2272,10 +2322,13 @@ function HistoryScreen(state: ApplicationState): Vnode {
 	const summariesById = runSummaryIndex(state.summaries)
 	const entries = deriveHistoryEntries(state.queueItems, state.summaries)
 	if (entries.length === 0) {
+		const loaded = state.runListLoaded && state.queueLoaded
+		let empty: Vnode
+		if (loaded) empty = h('p', { class: 'history-empty' }, 'No runs yet — start a new task and it will appear here.')
+		else if (!state.serverAvailable) empty = h('p', { class: 'history-empty' }, 'Tasks could not be loaded.')
+		else empty = h('div', { class: 'history-empty' }, [LoadingIndicator(h, 'Loading tasks…')])
 		return h('section', { id: 'history-screen' }, [
-			h('div', { class: 'history-scroll' }, [
-				h('p', { class: 'history-empty' }, 'No runs yet — start a new task and it will appear here.'),
-			]),
+			h('div', { class: 'history-scroll' }, [empty]),
 		])
 	}
 	const rows = entries.map((entry) => entry.kind === 'queued' ? QueueItemRow(state, entry.item, summariesById) : HistoryRow(state, entry.summary, rerunDisabled, summariesById))
@@ -2718,15 +2771,34 @@ function WatchScreen(state: ApplicationState): Vnode {
 	const serverModel = state.flowModel
 	// Before the guild config or the first readable flow frame lands, the stage shows a placeholder rather than a half-built graph; both arrive within the first poll, so the placeholder is transient.
 	if (labels === null || serverModel === null) {
-		const message = state.selectedRunId === null
-			? 'Select a run to see its flow.'
-			: labels === null
-				? 'Loading run view…'
-				: 'Waiting for run activity…'
+		if (state.selectedRunId === null) {
+			return h('section', { id: 'watch-screen' }, [
+				LineageLine(state),
+				StageControls(state, null),
+				h('div', { key: 'watch-flow', class: 'pb-flow flow-stage' }, [h('p', { class: 'flow-empty' }, 'Select a run to see its flow.'), InspectorModalForRun(state)]),
+			])
+		}
+		if (!state.serverAvailable) {
+			const unavailable = labels === null ? 'Unable to load the run view.' : 'Run view unavailable.'
+			return h('section', { id: 'watch-screen' }, [
+				LineageLine(state),
+				StageControls(state, null),
+				h('div', { key: 'watch-flow', class: 'pb-flow flow-stage' }, [h('p', { class: 'flow-empty' }, unavailable), InspectorModalForRun(state)]),
+			])
+		}
+		const selectedStatus = state.selectedRunStatus
+		if (selectedStatus !== null && isTerminalStatus(selectedStatus)) {
+			return h('section', { id: 'watch-screen' }, [
+				LineageLine(state),
+				StageControls(state, null),
+				h('div', { key: 'watch-flow', class: 'pb-flow flow-stage' }, [h('p', { class: 'flow-empty' }, 'No flow activity is available for this run.'), InspectorModalForRun(state)]),
+			])
+		}
+		const loadingLabel = labels === null ? 'Loading run view…' : 'Waiting for run activity…'
 		return h('section', { id: 'watch-screen' }, [
 			LineageLine(state),
 			StageControls(state, null),
-			h('div', { key: 'watch-flow', class: 'pb-flow flow-stage' }, [h('p', { class: 'flow-empty' }, message), InspectorModalForRun(state)]),
+			h('div', { key: 'watch-flow', class: 'pb-flow flow-stage' }, [h('div', { class: 'flow-empty' }, [LoadingIndicator(h, loadingLabel)]), InspectorModalForRun(state)]),
 		])
 	}
 
@@ -2928,11 +3000,11 @@ function isApplicationState(value: unknown): value is ApplicationState {
 		'queueItems', 'justSubmittedItemId', 'pendingAddSelectionId', 'editingItemId', 'draggingItemId', 'queueAnswerPendingId', 'queueTerminatePendingId', 'openQueueQuestionId', 'pendingResumeItemId',
 		'serverAvailable', 'versions', 'justSubmittedRunId', 'createSending', 'muted', 'shownQuestionIds', 'firstQuestionsPoll', 'pendingAnswerId',
 		'runEffort', 'savingEffort', 'runInvolvement', 'savingInvolvement', 'runLogLevel', 'savingLogLevel',
-		'flowModel', 'previousFlowModel', 'flowFeed', 'runListFeed', 'labelResolver', 'guildParticipants', 'build',
-		'flowTier', 'flowViewMode', 'sequenceRolesOnly', 'screen', 'pageVisible', 'expandedRowIds', 'continuation',
+		'flowModel', 'previousFlowModel', 'flowFeed', 'runListFeed', 'runListLoaded', 'queueLoaded', 'labelResolver', 'guildParticipants', 'build',
+		'flowTier', 'flowViewMode', 'sequenceRolesOnly', 'screen', 'pageVisible', 'flowRefreshPending', 'expandedRowIds', 'continuation',
 		'resumingRunId', 'resumeSending', 'resumeNotice',
 		'questionModalOpen', 'resultModalOpen', 'resultShownForRun', 'resultLoad', 'interruptModalOpen',
-		'inspectorModalOpen', 'planExpanded', 'livePartial', 'tooltip',
+		'inspectorModalOpen', 'planExpanded', 'livePartial', 'streamConnected', 'streamWasConnectedOnce', 'tooltip',
 		'interruptMode', 'interruptSending', 'interruptNotice', 'interruptAnswerCard', 'shownInterruptAnswerKeys', 'now',
 	]
 	return stateKeys.every((key) => key in value)
@@ -2980,6 +3052,8 @@ app({
 			previousFlowModel: null,
 			flowFeed: emptyFlowFeedState(),
 			runListFeed: emptyRunListFeedState(),
+			runListLoaded: false,
+			queueLoaded: false,
 			labelResolver: null,
 			guildParticipants: [],
 			build: null,
@@ -2988,6 +3062,7 @@ app({
 			sequenceRolesOnly: true,
 			screen: 'watch',
 			pageVisible: document.visibilityState === 'visible',
+			flowRefreshPending: false,
 			expandedRowIds: {},
 			continuation: null,
 			resumingRunId: null,
@@ -3001,6 +3076,8 @@ app({
 			inspectorModalOpen: false,
 			planExpanded: false,
 			livePartial: null,
+			streamConnected: false,
+			streamWasConnectedOnce: false,
 			tooltip: null,
 			interruptMode: 'inquiry',
 			interruptSending: false,
