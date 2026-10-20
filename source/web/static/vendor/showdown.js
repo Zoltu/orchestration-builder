@@ -1,4 +1,5 @@
 ;/*! showdown v 2.1.0 - 21-04-2022 */
+/*! Locally patched: unhashHTMLSpans bounds placeholder expansion by the conversion's span count instead of a fixed 10, addressing the >10-expansion failure reported in showdownjs/showdown#678. See docs/security.md (Attack surface). */
 (function(){
 /**
  * Created by Tivie on 13-07-2015.
@@ -3607,14 +3608,14 @@ showdown.subParser('unhashHTMLSpans', function (text, options, globals) {
 
   for (var i = 0; i < globals.gHtmlSpans.length; ++i) {
     var repText = globals.gHtmlSpans[i],
-        // limiter to prevent infinite loop (assume 10 as limit for recurse)
+        // The counter tracks placeholder expansions, not nesting depth; one container may hold many inline elements (#678), so bound by the conversion's span count.
         limit = 0;
 
     while (/¨C(\d+)C/.test(repText)) {
       var num = RegExp.$1;
       repText = repText.replace('¨C' + num + 'C', globals.gHtmlSpans[num]);
-      if (limit === 10) {
-        console.error('maximum nesting of 10 spans reached!!!');
+      if (limit >= globals.gHtmlSpans.length) {
+        console.error('showdown placeholder expansion limit reached');
         break;
       }
       ++limit;
