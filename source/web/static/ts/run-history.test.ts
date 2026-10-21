@@ -87,14 +87,6 @@ describe('deriveHistoryEntries', () => {
 		expect(entries.map((entry) => entry.kind === 'queued' ? entry.item.id : entry.summary.runId)).toEqual(['a', 'b', 'c', 'run-free'])
 	})
 
-	test('a legacy needs_input item with no runId suppresses the paused run named by continuesFrom', () => {
-		const entries = deriveHistoryEntries(
-			[item({ id: 'legacy', status: 'needs_input', continuesFrom: 'run-paused' })],
-			[summary('run-paused', { status: 'needs_clarification' }), summary('run-older')],
-		)
-		expect(entries.map((entry) => entry.kind === 'queued' ? entry.item.id : entry.summary.runId)).toEqual(['legacy', 'run-older'])
-	})
-
 	test('a modern needs_input item keeps its real runId and its lineage parent visible', () => {
 		const entries = deriveHistoryEntries(
 			[item({ id: 'parked', status: 'needs_input', runId: 'run-paused', continuesFrom: 'run-parent' })],
@@ -161,16 +153,10 @@ describe('lineage lookup index', () => {
 })
 
 describe('queueItemLineageLink', () => {
-	test('suppresses a legacy self-reference to the item runId or resumesRunId', () => {
+	test('suppresses a self-reference to the item runId or resumesRunId', () => {
 		const index = runSummaryIndex([summary('run-self', { status: 'needs_clarification' })])
 		expect(queueItemLineageLink(item({ status: 'needs_input', runId: 'run-self', continuesFrom: 'run-self' }), index)).toBeNull()
 		expect(queueItemLineageLink(item({ status: 'waiting', resumesRunId: 'run-self', continuesFrom: 'run-self' }), index)).toBeNull()
-	})
-
-	test('suppresses a legacy needs_input item with no runId because continuesFrom names the paused run itself', () => {
-		const index = runSummaryIndex([summary('run-paused', { status: 'needs_clarification' })])
-		expect(queueItemLineageLink(item({ status: 'needs_input', continuesFrom: 'run-paused' }), index)).toBeNull()
-		expect(queueItemLineageLink(item({ status: 'needs_input', runId: '', continuesFrom: 'run-paused' }), index)).toBeNull()
 	})
 
 	test('keeps a genuine parent link and a missing-parent link', () => {

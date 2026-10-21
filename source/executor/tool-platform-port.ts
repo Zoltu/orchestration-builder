@@ -29,7 +29,7 @@ export interface ToolPlatform {
 	handlerNames(runScope: RunToolScope): readonly string[]
 	// Returns the unknown_tool / invalid_tool_call failure the dispatch would produce before any handler runs, or null when the call is dispatchable. The engine pre-checks with it so those diagnostics are not recorded as started invocations.
 	validateCall(roleDefinition: RoleDefinition, runScope: RunToolScope, call: ToolCall): ToolResult | null
-	dispatch(roleDefinition: RoleDefinition, runScope: RunToolScope, call: ToolCall, invocation?: ToolInvocation): Promise<ToolResult>
+	dispatch(roleDefinition: RoleDefinition, runScope: RunToolScope, call: ToolCall, invocation: ToolInvocation): Promise<ToolResult>
 	suspendsChild(toolName: string): boolean
 	observesRole(toolName: string): boolean
 }

@@ -1,5 +1,6 @@
 import * as fs from 'node:fs'
 import { createToolError } from '../errors.js'
+import { createReadRunFormat } from '../persistence.js'
 import type { ToolHandler } from './tool-dispatch.js'
 import type { ToolResult } from '../types.js'
 import { isObject } from '../validation.js'
@@ -7,6 +8,8 @@ import { optionalNonNegativeInt, optionalPositiveInt, wrapIoError } from './shar
 
 export interface RunLogToolConfig {
 	logPath: string
+	runsBaseDir: string
+	runId: string
 }
 
 // Pagination defaults and hard caps. Both tools return whole events, and llm_call payloads carry full conversations, so the caps are what keep one call from flooding the handler's context on a long run.
@@ -133,7 +136,9 @@ function readRunLogEntries(logPath: string): { ok: true; entries: RunLogEntry[] 
 }
 
 function createReadRunLog(config: RunLogToolConfig): ToolHandler {
+	const readRunFormat = createReadRunFormat(config.runsBaseDir)
 	return (args) => {
+		if (readRunFormat(config.runId) !== 'current') return createToolError('unavailable', 'this run format is not supported by the current build')
 		const offset = optionalNonNegativeInt(args['offset'], 0)
 		if (offset === null) return createToolError('invalid_arguments', 'offset must be a non-negative integer')
 		const limit = optionalPositiveInt(args['limit'], READ_RUN_LOG_DEFAULT_LIMIT)
@@ -145,7 +150,9 @@ function createReadRunLog(config: RunLogToolConfig): ToolHandler {
 }
 
 function createSearchRunLog(config: RunLogToolConfig): ToolHandler {
+	const readRunFormat = createReadRunFormat(config.runsBaseDir)
 	return (args) => {
+		if (readRunFormat(config.runId) !== 'current') return createToolError('unavailable', 'this run format is not supported by the current build')
 		const queryValue = args['query']
 		if (typeof queryValue !== 'string' || queryValue === '') {
 			return createToolError('invalid_arguments', 'query must be a non-empty string')

@@ -1,4 +1,5 @@
 import { isMessage } from './message-validation.js'
+import { classifyVersion, ROLE_SNAPSHOT_FORMAT_VERSION } from './orchestration-version.js'
 import type { Message } from './types.js'
 import { isNonNegativeInteger, isObject, isString } from './validation.js'
 
@@ -13,7 +14,7 @@ export interface RoleSnapshotInput {
 }
 
 export interface RoleSnapshot extends RoleSnapshotInput {
-	version: 1
+	version: typeof ROLE_SNAPSHOT_FORMAT_VERSION
 	runId: string
 }
 
@@ -33,7 +34,7 @@ export interface RoleSnapshotStore {
 
 export function isRoleSnapshot(value: unknown): value is RoleSnapshot {
 	if (!isObject(value)) return false
-	if (value.version !== 1) return false
+	if (classifyVersion(value, ROLE_SNAPSHOT_FORMAT_VERSION) !== 'current') return false
 	if (!isString(value.runId)) return false
 	if (!isString(value.roleId)) return false
 	if (!isString(value.roleName)) return false

@@ -300,11 +300,11 @@ function participant(id: string, role: string, kind: Participant['kind']): Parti
 }
 
 function callOperation(id: string, source: string, destination: string, metrics: Operation['metrics'] = null): Operation {
-	return { id, kind: 'call', stack: 'root', source, destination, startedAt: 't0', settledAt: null, lifecycle: 'in_flight', outcome: null, metrics }
+	return { id, kind: 'call', callId: id, stack: 'root', source, destination, startedAt: 't0', settledAt: null, lifecycle: 'in_flight', outcome: null, metrics }
 }
 
 function returnOperation(id: string, source: string, destination: string, outcome: Operation['outcome'], metrics: Operation['metrics']): Operation {
-	return { id, kind: 'return', stack: 'root', source, destination, startedAt: 't0', settledAt: null, lifecycle: 'settled', outcome, metrics }
+	return { id, kind: 'return', callId: id, stack: 'root', source, destination, startedAt: 't0', settledAt: null, lifecycle: 'settled', outcome, metrics }
 }
 
 // Call metrics in the adapter's wire shape: the reported counters plus the elapsed span. The cached count is a subset of the prompt bill, and lastPromptTokens mirrors the single-turn fold these fixtures represent (the last turn's prompt size).
@@ -672,11 +672,11 @@ describe('deriveRoleTooltip over the real adapter — the call-metrics seam', ()
 
 	test('a model derived through the real adapter aggregates tokens, the cached subset, and retry spend into the role tooltip', () => {
 		const events = [
-			logEvent(0, 'role_start', { role: 'coder', depth: 0, task: 'work' }),
+			logEvent(0, 'role_start', { role: 'coder', depth: 0, task: 'work', roleId: 'coder:1', callId: 'role:coder:1' }),
 			// The discarded retry attempt's spend is real spend and must land in the aggregate alongside the final attempt's llm_call usage.
-			logEvent(1, 'llm_retry', { role: 'coder', roleId: 'coder-0-1', discardedAttempts: 1, usage: { promptTokens: 50, completionTokens: 10, totalTokens: 60 } }),
-			logEvent(2, 'llm_call', { role: 'coder', usage: { promptTokens: 100, completionTokens: 20, totalTokens: 120, cachedPromptTokens: 40 } }),
-			logEvent(6, 'role_finished', { role: 'coder', depth: 0, status: 'success' }),
+			logEvent(1, 'llm_retry', { role: 'coder', roleId: 'coder:1', discardedAttempts: 1, usage: { promptTokens: 50, completionTokens: 10, totalTokens: 60 } }),
+			logEvent(2, 'llm_call', { role: 'coder', roleId: 'coder:1', usage: { promptTokens: 100, completionTokens: 20, totalTokens: 120, cachedPromptTokens: 40 } }),
+			logEvent(6, 'role_finished', { role: 'coder', callId: 'role:coder:1', depth: 0, status: 'success' }),
 		]
 		const model = deriveInteractionModel({ meta: { runId: 'seam', guildPath: 'g', benchmarkPath: 'b', task: 'work', status: 'success', startTime: events[0]?.timestamp ?? '' }, logEvents: events })
 		const result = deriveRoleTooltip(model, labelsModule, TIER, 'coder')

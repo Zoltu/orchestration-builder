@@ -61,7 +61,17 @@ describe('foldLlmCallSent', () => {
 		}))
 	})
 
-	test('a prior event without roleId falls back to the role name', () => {
+	test('a delta target without a usable roleId is malformed and returned unchanged', () => {
+		const events = [
+			event('llm_call', { role: 'coder', roleId: 'coder-0-1', messageCount: 2, sent: [msg('system', 'p'), msg('user', 'task')] }),
+			event('llm_call', { role: 'coder', messageCount: 4, sentFrom: 2, sent: [msg('assistant', 'turn one'), msg('tool', 'result one')] }),
+		]
+		const target = events[1]
+		if (target === undefined) throw new Error('missing target event')
+		expect(foldLlmCallSent(events, 1)).toBe(target)
+	})
+
+	test('a prior event without a usable roleId cannot participate in the fold', () => {
 		const events = [
 			event('llm_call', { role: 'coder', messageCount: 2, sent: [msg('system', 'p'), msg('user', 'task')] }),
 			event('llm_call', { role: 'coder', roleId: 'coder-0-1', messageCount: 4, sentFrom: 2, sent: [msg('assistant', 'turn one'), msg('tool', 'result one')] }),
@@ -71,7 +81,7 @@ describe('foldLlmCallSent', () => {
 			roleId: 'coder-0-1',
 			messageCount: 4,
 			sentFrom: 2,
-			sent: [msg('system', 'p'), msg('user', 'task'), msg('assistant', 'turn one'), msg('tool', 'result one')],
+			sent: [msg('assistant', 'turn one'), msg('tool', 'result one')],
 		}))
 	})
 
@@ -87,21 +97,22 @@ describe('foldLlmCallSent', () => {
 
 	test('an event without sentFrom is a full snapshot that ends the walk', () => {
 		const events = [
-			event('llm_call', { role: 'coder', messageCount: 2, sent: [msg('system', 'p'), msg('user', 'task')] }),
-			event('llm_call', { role: 'coder', messageCount: 4, sentFrom: 2, sent: [msg('assistant', 'turn one'), msg('tool', 'result one')] }),
+			event('llm_call', { role: 'coder', roleId: 'coder-0-1', messageCount: 2, sent: [msg('system', 'p'), msg('user', 'task')] }),
+			event('llm_call', { role: 'coder', roleId: 'coder-0-1', messageCount: 4, sentFrom: 2, sent: [msg('assistant', 'turn one'), msg('tool', 'result one')] }),
 		]
-		expect(foldLlmCallSent(events, 1)).toEqual(event('llm_call', { role: 'coder', messageCount: 4, sentFrom: 2, sent: [msg('system', 'p'), msg('user', 'task'), msg('assistant', 'turn one'), msg('tool', 'result one')] }))
+		expect(foldLlmCallSent(events, 1)).toEqual(event('llm_call', { role: 'coder', roleId: 'coder-0-1', messageCount: 4, sentFrom: 2, sent: [msg('system', 'p'), msg('user', 'task'), msg('assistant', 'turn one'), msg('tool', 'result one')] }))
 	})
 
 	test('a prune-then-grow sequence folds only the post-prune conversation', () => {
 		const events = [
-			event('llm_call', { role: 'coder', messageCount: 4, sentFrom: 0, sent: [msg('system', 'p'), msg('user', 'task'), msg('assistant', 'stale'), msg('tool', 'stale')] }),
+			event('llm_call', { role: 'coder', roleId: 'coder-0-1', messageCount: 4, sentFrom: 0, sent: [msg('system', 'p'), msg('user', 'task'), msg('assistant', 'stale'), msg('tool', 'stale')] }),
 			// The context edit forced a full snapshot of the shrunken conversation; the next delta chains off it, not off the pre-prune history.
-			event('llm_call', { role: 'coder', messageCount: 3, sentFrom: 0, sent: [msg('system', 'p'), msg('user', 'task'), msg('user', '[Platform notice]')] }),
-			event('llm_call', { role: 'coder', messageCount: 5, sentFrom: 3, sent: [msg('assistant', 'fresh turn'), msg('tool', 'fresh result')] }),
+			event('llm_call', { role: 'coder', roleId: 'coder-0-1', messageCount: 3, sentFrom: 0, sent: [msg('system', 'p'), msg('user', 'task'), msg('user', '[Platform notice]')] }),
+			event('llm_call', { role: 'coder', roleId: 'coder-0-1', messageCount: 5, sentFrom: 3, sent: [msg('assistant', 'fresh turn'), msg('tool', 'fresh result')] }),
 		]
 		expect(foldLlmCallSent(events, 2)).toEqual(event('llm_call', {
 			role: 'coder',
+			roleId: 'coder-0-1',
 			messageCount: 5,
 			sentFrom: 3,
 			sent: [msg('system', 'p'), msg('user', 'task'), msg('user', '[Platform notice]'), msg('assistant', 'fresh turn'), msg('tool', 'fresh result')],
@@ -110,14 +121,14 @@ describe('foldLlmCallSent', () => {
 
 	test('a replayed turn after a restart (same sentFrom) contributes nothing and the walk continues past it', () => {
 		const events = [
-			event('llm_call', { role: 'coder', messageCount: 2, sentFrom: 0, sent: [msg('system', 'p'), msg('user', 'task')] }),
+			event('llm_call', { role: 'coder', roleId: 'coder-0-1', messageCount: 2, sentFrom: 0, sent: [msg('system', 'p'), msg('user', 'task')] }),
 			// The straddling turn's first attempt, which never reached a checkpoint.
-			event('llm_call', { role: 'coder', messageCount: 3, sentFrom: 2, sent: [msg('assistant', 'crashed turn')] }),
+			event('llm_call', { role: 'coder', roleId: 'coder-0-1', messageCount: 3, sentFrom: 2, sent: [msg('assistant', 'crashed turn')] }),
 			event('run_resumed', { runId: 'run-1', resumedFrames: 1 }),
 			// The replay emits the same delta again.
-			event('llm_call', { role: 'coder', messageCount: 3, sentFrom: 2, sent: [msg('assistant', 'crashed turn')] }),
+			event('llm_call', { role: 'coder', roleId: 'coder-0-1', messageCount: 3, sentFrom: 2, sent: [msg('assistant', 'crashed turn')] }),
 		]
-		expect(foldLlmCallSent(events, 3)).toEqual(event('llm_call', { role: 'coder', messageCount: 3, sentFrom: 2, sent: [msg('system', 'p'), msg('user', 'task'), msg('assistant', 'crashed turn')] }))
+		expect(foldLlmCallSent(events, 3)).toEqual(event('llm_call', { role: 'coder', roleId: 'coder-0-1', messageCount: 3, sentFrom: 2, sent: [msg('system', 'p'), msg('user', 'task'), msg('assistant', 'crashed turn')] }))
 	})
 
 	test('a full snapshot (sentFrom 0) and a non-llm_call event pass through unchanged', () => {
@@ -131,7 +142,7 @@ describe('foldLlmCallSent', () => {
 	})
 
 	test('an llm_call without a sent body (the standard level) passes through unchanged', () => {
-		const events = [event('llm_call', { role: 'coder', messageCount: 4, sentFrom: 2, usage: { promptTokens: 10, completionTokens: 5 } })]
+		const events = [event('llm_call', { role: 'coder', roleId: 'coder-0-1', messageCount: 4, sentFrom: 2, usage: { promptTokens: 10, completionTokens: 5 } })]
 		const bodyless = events[0]
 		if (bodyless === undefined) throw new Error('missing bodyless event')
 		expect(foldLlmCallSent(events, 0)).toBe(bodyless)
@@ -225,12 +236,23 @@ describe('filterLogEventsForInstance', () => {
 		expect(filtered.some((entry) => entry.event.payload && typeof entry.event.payload === 'object' && 'roleId' in entry.event.payload && entry.event.payload.roleId === 'subcoder-2')).toBe(false)
 	})
 
-	test('falls back to the role name for turn events that carry no roleId', () => {
+	test('excludes turn events that carry no usable roleId', () => {
 		const events: LogEvent[] = [
 			event('llm_call', { role: 'coder' }),
+			event('llm_call_start', { role: 'coder' }),
 			event('llm_call', { role: 'planner' }),
 		]
-		expect(filterLogEventsForInstance(events, 'coder').map((entry) => entry.index)).toEqual([0])
+		expect(filterLogEventsForInstance(events, 'coder')).toEqual([])
+	})
+
+	test('matches the current instance roleId for turns and still matches turn failures by role name', () => {
+		const events: LogEvent[] = [
+			event('role_start', { role: 'coder', roleId: 'coder-1', depth: 1, parentRoleId: 'orchestrator-0' }),
+			event('llm_call', { role: 'coder', roleId: 'coder-1' }),
+			event('llm_unavailable', { role: 'coder', message: 'down' }),
+			event('llm_call', { role: 'coder', roleId: 'coder-2' }),
+		]
+		expect(filterLogEventsForInstance(events, 'coder-1').map((entry) => entry.index)).toEqual([0, 1, 2])
 	})
 
 	test('returns an empty list for an empty or unknown instance id', () => {

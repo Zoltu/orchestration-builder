@@ -414,7 +414,7 @@ function handleTerminateQueueItem(taskQueue: TaskQueueModule, itemId: string): R
 	return queueMutationResponse(taskQueue.terminate(itemId, new Date().toISOString()))
 }
 
-// The queue-native resume: the answer moves the needs_input item to the front of the waiting list and the tick resumes the same parked run, delivering the answer as its ask_human tool result. A legacy item with no parked checkpoint falls back to the briefed continuation this route has always dispatched.
+// The queue-native resume: the answer moves the needs_input item to the front of the waiting list and the tick resumes the same parked run, delivering the answer as its ask_human tool result. When the parked checkpoint is missing, the answer falls back to the briefed continuation this route has always dispatched.
 async function handleAnswerQueueItem(taskQueue: TaskQueueModule, itemId: string, body: unknown): Promise<Response> {
 	if (!isObject(body)) return json({ ok: false, error: 'invalid_body' }, 400)
 	const answerValue = body['answer']

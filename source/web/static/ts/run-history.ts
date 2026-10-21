@@ -8,7 +8,7 @@ export type HistoryEntry =
 	| { kind: 'queued'; item: QueueItemLike }
 	| { kind: 'run'; summary: RunSummary }
 
-// The single row per task: queued rows come first in display order, then the runs whose id no queued row already represents. A queued row represents both the run it is attached to (`runId`) and the paused run it will re-enter (`resumesRunId`), so an active, answered, or parked task never appears twice. A legacy needs_input item with no runId names its paused run through continuesFrom, so that id is suppressed too.
+// The single row per task: queued rows come first in display order, then the runs whose id no queued row already represents. A queued row represents both the run it is attached to (`runId`) and the paused run it will re-enter (`resumesRunId`), so an active, answered, or parked task never appears twice.
 export function deriveHistoryEntries(items: QueueItemLike[], summaries: RunSummary[]): HistoryEntry[] {
 	const queued = deriveQueuedItems(items)
 	const orderedItems = [...queued.waiting, ...queued.active, ...queued.needsInput]
@@ -16,7 +16,6 @@ export function deriveHistoryEntries(items: QueueItemLike[], summaries: RunSumma
 	for (const item of orderedItems) {
 		if (typeof item.runId === 'string' && item.runId !== '') representedRunIds.add(item.runId)
 		if (typeof item.resumesRunId === 'string' && item.resumesRunId !== '') representedRunIds.add(item.resumesRunId)
-		if (item.status === 'needs_input' && (typeof item.runId !== 'string' || item.runId === '') && typeof item.continuesFrom === 'string' && item.continuesFrom !== '') representedRunIds.add(item.continuesFrom)
 	}
 	const entries: HistoryEntry[] = orderedItems.map((item) => ({ kind: 'queued', item }))
 	for (const summary of summaries) {
@@ -60,11 +59,10 @@ export function lineageLink(continuesFrom: string | null | undefined, summaries:
 	return lineageLinkFromIndex(continuesFrom, summariesById)
 }
 
-// A queue item's lineage, suppressing a self-reference from legacy data: an old item may name its own dispatched or paused run in continuesFrom, which must not render as a link to itself. A legacy needs_input item with no runId stores the paused run itself in continuesFrom, so that value is not lineage either.
-export function queueItemLineageLink(item: Pick<QueueItemLike, 'status' | 'continuesFrom' | 'runId' | 'resumesRunId'>, summariesById: Map<string, RunSummary>): LineageLink | null {
+// A queue item's lineage, suppressing a self-reference: an item may name its own dispatched or paused run in continuesFrom, which must not render as a link to itself.
+export function queueItemLineageLink(item: Pick<QueueItemLike, 'continuesFrom' | 'runId' | 'resumesRunId'>, summariesById: Map<string, RunSummary>): LineageLink | null {
 	const continuesFrom = item.continuesFrom
 	if (typeof continuesFrom !== 'string' || continuesFrom === '') return null
-	if (item.status === 'needs_input' && (typeof item.runId !== 'string' || item.runId === '')) return null
 	if (continuesFrom === item.runId || continuesFrom === item.resumesRunId) return null
 	return lineageLinkFromIndex(continuesFrom, summariesById)
 }

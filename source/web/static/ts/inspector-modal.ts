@@ -278,11 +278,11 @@ function livePartialForRender(value: unknown): LivePartial | null {
 	return { roleId, role, reasoning, content, truncated: value['truncated'] === true }
 }
 
-// Whether the transcript turn is the in-flight turn the live partial belongs to. Matching uses the session's shared rule through the module entrypoint, so a same-named sibling instance's ghost turn (an unmatched start whose failure event has paged out of the loaded window) never hosts another instance's stream; turns whose id fell back to the role name (old logs) pair on the role name as before.
+// Whether the transcript turn is the in-flight turn the live partial belongs to. Matching uses the session's shared id-only rule through the module entrypoint, so a same-named sibling instance's ghost turn (an unmatched start whose failure event has paged out of the loaded window) never hosts another instance's stream.
 function isLiveTurn(turn: TranscriptTurn, livePartial: LivePartial | null): boolean {
 	if (livePartial === null) return false
 	if (turn.kind !== 'in_flight') return false
-	return livePartialMatchesRole(turn.roleId, turn.role, livePartial)
+	return livePartialMatchesRole(turn.roleId, livePartial)
 }
 
 // The live block at the in-flight turn: the streamed reasoning and response, each labeled like the transcript's response sections and rendered through the same sanitized Markdown pipeline. A field with no text yet renders nothing, and an all-empty partial renders no block at all — the app clears the partial when the socket drops, so a stale block never lingers. A capped preview carries a fixed trusted note so the operator knows the completed turn will show the full text.

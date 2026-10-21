@@ -28,11 +28,18 @@ export interface ToolPlatformDependencies {
 }
 
 export function createToolPlatform(config: ToolPlatformConfig, dependencies: ToolPlatformDependencies): ToolPlatform {
+	// handlerNames builds the same handler table as dispatch but never executes it, so it needs a well-formed invocation value without a real tool call behind it.
+	const inventoryInvocation: ToolInvocation = {
+		toolCall: { id: '', type: 'function', function: { name: '', arguments: '{}' } },
+		questionId: '',
+		callId: '',
+		parentCallId: '',
+	}
 	const planHandlers = createPlanToolHandlers({ runsBaseDir: config.runsBaseDir, runId: config.runId, workspaceRoot: config.workspaceRoot, maxToolOutputChars: config.maxToolOutputChars })
 	const styleGuideHandlers = createStyleGuideToolHandlers({ runsBaseDir: config.runsBaseDir, runId: config.runId, workspaceRoot: config.workspaceRoot, maxToolOutputChars: config.maxToolOutputChars })
-	const runLogHandlers = createRunLogToolHandlers({ logPath: config.logPath })
+	const runLogHandlers = createRunLogToolHandlers({ logPath: config.logPath, runsBaseDir: config.runsBaseDir, runId: config.runId })
 
-	function composeHandlers(runScope: RunToolScope, invocation: ToolInvocation | undefined): Record<string, ToolHandler> {
+	function composeHandlers(runScope: RunToolScope, invocation: ToolInvocation): Record<string, ToolHandler> {
 		const nativeHandlers = createNativeToolHandlers({
 			workspaceRoot: config.workspaceRoot,
 			defaultToolTimeoutSeconds: config.defaultToolTimeoutSeconds,
@@ -52,21 +59,21 @@ export function createToolPlatform(config: ToolPlatformConfig, dependencies: Too
 			appendLog: runScope.appendLog,
 			parkTracker: runScope.parkTracker,
 			...(runScope.handlerOf !== undefined ? { handlerOf: runScope.handlerOf } : {}),
-			...(invocation !== undefined ? { invocation } : {}),
+			invocation,
 		})
 		// Built-ins spread last: platform invariants (finish, agent, ask_human, the context tools) are not shadowable by a role's allowed set or by any native handler that happens to collide on a key.
 		return { ...nativeHandlers, ...planHandlers, ...styleGuideHandlers, ...runLogHandlers, ...builtInHandlers }
 	}
 
 	function handlerNames(runScope: RunToolScope): readonly string[] {
-		return Object.keys(composeHandlers(runScope, undefined))
+		return Object.keys(composeHandlers(runScope, inventoryInvocation))
 	}
 
 	function validateCall(roleDefinition: RoleDefinition, runScope: RunToolScope, call: ToolCall): ToolResult | null {
 		return validateToolCall({ allowedTools: roleDefinition.tools, manifestNames: [...runScope.manifestNames] }, call)
 	}
 
-	async function dispatch(roleDefinition: RoleDefinition, runScope: RunToolScope, call: ToolCall, invocation?: ToolInvocation): Promise<ToolResult> {
+	async function dispatch(roleDefinition: RoleDefinition, runScope: RunToolScope, call: ToolCall, invocation: ToolInvocation): Promise<ToolResult> {
 		const invalid = validateCall(roleDefinition, runScope, call)
 		if (invalid !== null) return invalid
 		const dispatchTool = createToolDispatch(composeHandlers(runScope, invocation))

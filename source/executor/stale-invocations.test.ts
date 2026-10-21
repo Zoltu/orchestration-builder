@@ -24,10 +24,10 @@ describe('planStaleInvocationTerminals', () => {
 		expect(terminals[2]?.payload).toMatchObject({ callId: 'interrupt:1', action: 'failed' })
 	})
 
-	test('closes an unanswered ask without inventing a role-history answer and skips legacy starts without ids', () => {
+	test('closes an unanswered ask without inventing a role-history answer and skips starts without an invocation id', () => {
 		const events: LogEvent[] = [
 			event('ask_human', { id: 'ask-1', callId: 'tool:ask-1', parentCallId: 'role:main-0-1', question: 'which?' }),
-			event('role_start', { role: 'legacy', roleId: 'legacy-0-1' }),
+			event('role_start', { role: 'detached', roleId: 'detached-0-1' }),
 		]
 
 		const terminals = planStaleInvocationTerminals(events, new Set(), new Set())

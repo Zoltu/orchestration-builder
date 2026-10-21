@@ -30,11 +30,11 @@ The executor provides the stage. The Guild is the script. The Foundry is the pla
 
 ## Data flow: a single run
 
-1. The user mounts a project at `/workspace` and submits a task through the web UI (or HTTP API).
+1. The user mounts a project at `/workspace` and submits a task through the web UI (or HTTP API). The executor creates `<workspace>/.orchestration/runs/<run_id>/` and writes its version-1 `manifest.json` before any other artifact.
 2. The executor loads the Guild and starts the entry role with the task; a run that continues a prior one first inserts that run's operator task and terminal result as reference turns (a user turn and an assistant turn) ahead of the new task's user message, so the entry role reads the prior outcome as conversation rather than as part of its own task. When the entry role declares `projectDocs`, their contents are injected into its initial user message as untrusted project reference material (see [`docs/security.md`](security.md) "Attack surface").
 3. The active role calls tools. Tool results are appended to the role's conversation. If the role calls `agent`, a child role runs to completion and returns a result card. If the role calls `ask_human`, the question surfaces in the web UI and the run pauses for an answer.
 4. The run ends when the entry role calls `finish` or a hard safety budget is exhausted.
-5. The executor writes `meta.json` and `log.jsonl` under `<workspace>/.orchestration/runs/<run_id>/`; the log is a durable invocation journal of identified starts and terminals, and `state.json` records the pending invocation at each dispatch so a restart can reconcile a call rather than leave it open. The workspace itself holds the final filesystem state — the executor modified it in place.
+5. The executor writes `meta.json` and `log.jsonl` under `<workspace>/.orchestration/runs/<run_id>/`, gated by the manifest written at creation; the log is a durable invocation journal of identified starts and terminals, and `state.json` (version 2) records the pending invocation at each dispatch so a restart can reconcile a call rather than leave it open. The workspace itself holds the final filesystem state — the executor modified it in place.
 
 ## Data flow: an optimization cycle
 
@@ -45,6 +45,7 @@ The Foundry reads the current Guild and recent run logs, prompts a large model t
 - **Single model on the executor.** The executor talks to exactly one OpenAI-compatible endpoint, using the streaming Responses API (`POST {apiBase}/responses`).
 - **Sequential.** Only one LLM request is in flight at a time. A run is a depth-first traversal of the role tree.
 - **Durable invocation journal.** Every role, tool, ask, and interrupt invocation carries a stable `callId` and parent, and the checkpoint records the pending invocation before dispatch, so a restart reconciles or replays an in-flight call instead of leaving it accidentally open. The run view projects this journal by identity rather than inferring parentage from event order. See [`docs/reference.md`](reference.md) "Run persistence and resumption" and [`docs/visualization.md`](visualization.md).
+- **Versioned persistence, no migration.** The run manifest (`1`), queue (`1`), settings (`1`), checkpoint (`2`), and role snapshots (`1`) each carry one integer version. The reader is always the latest build: unsupported or malformed data is unreadable and non-resumable, never migrated or auto-deleted, unsupported run directories are omitted from the web run list while startup reconciliation still sees them through the raw listing and marks a running one interrupted, and an unsupported queue or settings file reads as an empty queue or defaults. See [`docs/reference.md`](reference.md) "Format versions".
 - **One dispatched run plus a durable backlog.** The server runs one run at a time, dispatched from a durable task queue (`<workspace>/.orchestration/queue.json`): every task enters the queue, the scheduler dispatches the head waiting item whenever the run slot is free, and queued tasks survive restarts. A run that asks before any write-capable role starts parks with a frozen checkpoint, and the operator's answer resumes that same run by delivering the answer as the existing `ask_human` tool result. See [`docs/queueing.md`](queueing.md).
 - **In-place workspace.** The executor modifies the mounted project directly, exactly as a developer would. Run bookkeeping goes under `<workspace>/.orchestration/`.
 - **No dependencies.** The executor uses only Bun built-ins and web-standard APIs. No npm packages.
@@ -74,17 +75,18 @@ The deployment container is the security boundary; tools do not filter or allowl
 ```
 workspace/                          # the user's project (mounted at /workspace)
 ├── .orchestration/                 # orchestrator bookkeeping (can be ignored)
-│   ├── settings.json               # project-wide settings (the default effort, involvement, and logging level)
-│   ├── queue.json                  # the durable task queue (queued tasks and their outcomes)
+│   ├── settings.json               # version 1: project-wide settings (the default effort, involvement, and logging level)
+│   ├── queue.json                  # version 1: the durable task queue (queued tasks and their outcomes)
 │   └── runs/
 │       └── <run_id>/
+│           ├── manifest.json       # version 1: the run-format gate, written before any other artifact
 │           ├── meta.json           # run metadata, status, final result
 │           ├── log.jsonl           # event stream: llm calls, tool calls, errors
-│           ├── state.json          # checkpoint for restart resumption (deleted on true completion; kept for error and every needs_clarification pause)
+│           ├── state.json          # version 2 checkpoint for restart resumption (deleted on true completion; kept for error and every needs_clarification pause)
 │           ├── summary.txt         # LLM-generated one-line run summary (UI label; best-effort)
 │           ├── plan.md             # the run's plan document (write_plan/read_plan)
 │           ├── style-guide.md      # the run's style guide document (write_style_guide/read_style_guide)
-│           └── roles/              # finished child snapshots, one <roleId>.json each, written at role finish (makes continue_agent survive a restart)
+│           └── roles/              # version 1 finished child snapshots, one <roleId>.json each, written at role finish (makes continue_agent survive a restart)
 ├── (project files)
 guild/                              # bundled into the image at /app/guild/
 ├── guild.json                      # current baseline Guild
@@ -120,7 +122,7 @@ Two consequences every change to `source/web/static/` must respect:
 - **Runtime guards are still required at every external ingress.** Types don't validate: every external value the browser modules read (fetch bodies, websocket messages, DOM events, `window.showdown`/`hljs` presence) goes through shape checks, and a type annotation never rejects a malformed payload — keep that discipline even where the module is TypeScript.
 - **Never share vnode objects across renders or tree positions.** hyperapp's differ mutates a vnode's `node` property in place, so a vnode object reused at two positions (e.g. a memo cache handing the same object out for repeated text) corrupts the mounted tree the next time positions shift — it throws `DOMException` mid-patch and every following render crashes. The markdown pipeline (`markdown-render.ts`) caches its sanitized neutral tree and rebuilds vnodes per call for exactly this reason; keep that shape for any future memoization.
 
-The History screen merges the queue and the run list into one row per task: queued `waiting`/`active`/`needs_input` rows come first, a queued row suppresses the run summary it represents (through its `runId`, its `resumesRunId`, or a legacy `needs_input` item's `continuesFrom`), and continuation lineage renders as a compact link in the row with the full `Continues run <id>` line in its expanded details. The result modal opens from the polled summary when the full run view has not loaded, shows a loading or retryable failed card around the fetch, dedupes repeated opens and retries, and drops the run view's ETag whenever the held payload no longer matches the selection so a 304 cannot strand an empty modal.
+The History screen merges the queue and the run list into one row per task: queued `waiting`/`active`/`needs_input` rows come first, a queued row suppresses the run summary it represents (through its `runId` or its `resumesRunId`), and continuation lineage renders as a compact link in the row with the full `Continues run <id>` line in its expanded details. The result modal opens from the polled summary when the full run view has not loaded, shows a loading or retryable failed card around the fetch, dedupes repeated opens and retries, and drops the run view's ETag whenever the held payload no longer matches the selection so a 304 cannot strand an empty modal.
 
 Polling is visibility- and screen-aware: the run-list, question, and queue timers stop while the page is hidden, the per-run timer also stops off the watch screen, and hiding the page cancels in-flight polls. Returning to the tab triggers a best-effort immediate refresh; on the watch screen it also discards the held flow revision so the next flow poll asks for a full snapshot instead of a delta based on a revision the hidden tab may have missed. The old model stays on screen while that snapshot loads, and the top bar shows a "Refreshing run view…" spinner until it lands (or the flow fetch fails).
 

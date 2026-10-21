@@ -54,8 +54,8 @@ function storedRun(runId: string, status: RunMeta['status'] = 'success'): Stored
 // A log whose two role_start events produce two operations (op-1 and op-2) with text details, so the flow endpoint has a base model and two distinct operation details to address.
 function flowLogText(): string {
 	return [
-		JSON.stringify({ timestamp: '2026-01-01T00:00:01.000Z', type: 'role_start', payload: { role: 'planner', task: 'plan the work' } }),
-		JSON.stringify({ timestamp: '2026-01-01T00:00:02.000Z', type: 'role_start', payload: { role: 'worker', task: 'do the work' } }),
+		JSON.stringify({ timestamp: '2026-01-01T00:00:01.000Z', type: 'role_start', payload: { role: 'planner', roleId: 'planner:1', callId: 'role:planner:1', task: 'plan the work' } }),
+		JSON.stringify({ timestamp: '2026-01-01T00:00:02.000Z', type: 'role_start', payload: { role: 'worker', roleId: 'worker:1', callId: 'role:worker:1', task: 'do the work' } }),
 	].join('\n')
 }
 
@@ -326,7 +326,7 @@ describe('flow-model envelope and run-list conditional requests', () => {
 		const unchanged = await handler(get(`/api/runs/run-1/flow?have=${encodeURIComponent(revision)}`))
 		expect(await unchanged.json()).toEqual({ kind: 'unchanged', version: revision })
 
-		storedRunOrThrow(runs, 'run-1').logText += `\n${JSON.stringify({ timestamp: '2026-01-01T00:00:03.000Z', type: 'role_finished', payload: { role: 'worker', status: 'success' } })}`
+		storedRunOrThrow(runs, 'run-1').logText += `\n${JSON.stringify({ timestamp: '2026-01-01T00:00:03.000Z', type: 'role_finished', payload: { role: 'worker', callId: 'role:worker:1', status: 'success' } })}`
 		const changed = await handler(get(`/api/runs/run-1/flow?have=${encodeURIComponent(revision)}`))
 		const delta = await changed.json()
 		expect(delta.kind).toBe('delta')

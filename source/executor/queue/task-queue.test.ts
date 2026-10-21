@@ -83,7 +83,7 @@ interface QueueStoreFake {
 }
 
 function fakeQueueStore(initial: QueueSeedItem[] = []): QueueStoreFake {
-	let current: string | null = initial.length === 0 ? null : JSON.stringify({ items: initial })
+	let current: string | null = initial.length === 0 ? null : JSON.stringify({ version: 1, items: initial })
 	const writes: string[] = []
 	return {
 		store: {
@@ -108,6 +108,7 @@ interface QueueHarness {
 	resumeCalls: Array<{ runId: string; parkedAnswer: { question: string; answer: string; toolCallId: string } }>
 	clarificationResumeCalls: Array<{ runId: string; id: string; question: string; answer: string }>
 	terminateCalls: string[]
+	pauseReadCalls: string[]
 }
 
 type PauseSeed = ParkedAsk | 'clarification' | { kind: 'clarification'; deliveredAnswerId?: string; deliveredAnswerConsumed?: boolean } | null
@@ -136,6 +137,7 @@ function makeQueue(options: { initial?: QueueSeedItem[], submitResults?: QueuedR
 	const clarificationResumeCalls: Array<{ runId: string; id: string; question: string; answer: string }> = []
 	const terminateScript = [...(options.terminateResults ?? [])]
 	const terminateCalls: string[] = []
+	const pauseReadCalls: string[] = []
 	const queue = createTaskQueue({
 		queueStore: store.store,
 		readRunMetaById: (runId) => {
@@ -148,7 +150,10 @@ function makeQueue(options: { initial?: QueueSeedItem[], submitResults?: QueuedR
 			if (run === undefined) throw new Error(`run list has no entry for ${runId}`)
 			return run
 		},
-		readPauseStateById: (runId) => pauseStateOf(options.pauseStates?.[runId]),
+		readPauseStateById: (runId) => {
+			pauseReadCalls.push(runId)
+			return pauseStateOf(options.pauseStates?.[runId])
+		},
 		resumeParkedRun: (runId, parkedAnswer) => {
 			resumeCalls.push({ runId, parkedAnswer })
 			return resumeScript.shift() ?? { ok: false, error: 'checkpoint_missing' }
@@ -167,7 +172,7 @@ function makeQueue(options: { initial?: QueueSeedItem[], submitResults?: QueuedR
 		now: () => NOW,
 		generateAnswerId: () => 'answer-1',
 	})
-	return { queue, writes: store.writes, items: store.items, written: store.written, submitCalls, resumeCalls, clarificationResumeCalls, terminateCalls }
+	return { queue, writes: store.writes, items: store.items, written: store.written, submitCalls, resumeCalls, clarificationResumeCalls, terminateCalls, pauseReadCalls }
 }
 
 describe('enqueue', () => {
@@ -517,12 +522,12 @@ describe('internal resume fields', () => {
 
 	test('pendingAnswerUndelivered requires a live checkpoint naming the same call and question', () => {
 		const item = storedItem()
-		expect(pendingAnswerUndelivered(item, { kind: 'parked_ask', ask: { roleId: 'main-0-1', toolCallId: 'ask_1', question: 'which database?' } }, 'run-20260101-010000')).toBe(true)
+		expect(pendingAnswerUndelivered(item, { kind: 'parked_ask', ask: { roleId: 'main-0-1', toolCallId: 'ask_1', callId: 'tool:ask_1', questionId: 'ask_1', question: 'which database?' } }, 'run-20260101-010000')).toBe(true)
 		expect(pendingAnswerUndelivered(item, null, 'run-20260101-010000')).toBe(false)
-		expect(pendingAnswerUndelivered(item, { kind: 'parked_ask', ask: { roleId: 'main-0-1', toolCallId: 'ask_1', question: 'a different question' } }, 'run-20260101-010000')).toBe(false)
-		expect(pendingAnswerUndelivered(item, { kind: 'parked_ask', ask: { roleId: 'main-0-1', toolCallId: 'ask_2', question: 'which database?' } }, 'run-20260101-010000')).toBe(false)
+		expect(pendingAnswerUndelivered(item, { kind: 'parked_ask', ask: { roleId: 'main-0-1', toolCallId: 'ask_1', callId: 'tool:ask_1', questionId: 'ask_1', question: 'a different question' } }, 'run-20260101-010000')).toBe(false)
+		expect(pendingAnswerUndelivered(item, { kind: 'parked_ask', ask: { roleId: 'main-0-1', toolCallId: 'ask_2', callId: 'tool:ask_2', questionId: 'ask_2', question: 'which database?' } }, 'run-20260101-010000')).toBe(false)
 		// A fallback dispatch's new run is not the item's resume target.
-		expect(pendingAnswerUndelivered(item, { kind: 'parked_ask', ask: { roleId: 'main-0-1', toolCallId: 'ask_1', question: 'which database?' } }, 'run-20260101-999999')).toBe(false)
+		expect(pendingAnswerUndelivered(item, { kind: 'parked_ask', ask: { roleId: 'main-0-1', toolCallId: 'ask_1', callId: 'tool:ask_1', questionId: 'ask_1', question: 'which database?' } }, 'run-20260101-999999')).toBe(false)
 	})
 
 	test('pendingAnswerUndelivered handles a clarification pause by answer id, not question', () => {
@@ -539,11 +544,8 @@ describe('internal resume fields', () => {
 		expect(pendingAnswerUndelivered({ ...clarificationItem, answerId: undefined }, { kind: 'clarification' }, 'run-20260101-010000')).toBe(false)
 
 		// A clarification receipt is not the answer to a later parked ask with the same text.
-		const laterParkedAsk = { kind: 'parked_ask' as const, ask: { roleId: 'main-0-1', toolCallId: 'ask_2', question: 'which database?' } }
+		const laterParkedAsk = { kind: 'parked_ask' as const, ask: { roleId: 'main-0-1', toolCallId: 'ask_2', callId: 'tool:ask_2', questionId: 'ask_2', question: 'which database?' } }
 		expect(pendingAnswerUndelivered(clarificationItem, laterParkedAsk, 'run-20260101-010000')).toBe(false)
-		// Only a legacy item with neither a tool call nor an answer id falls back to the question.
-		const legacy = storedItem({ resumeToolCallId: undefined, answerId: undefined })
-		expect(pendingAnswerUndelivered(legacy, laterParkedAsk, 'run-20260101-010000')).toBe(true)
 	})
 
 	test('the view projection exposes only the resume run id and keeps the tool call internal', () => {
@@ -558,7 +560,7 @@ describe('internal resume fields', () => {
 		// The active marker carries the resume pointers (and the answer id) so a crash can still recognize the same parked call.
 		expect(dispatchingItem(item).resumeToolCallId).toBe('ask_1')
 		expect(dispatchingItem(item).answerId).toBe('answer-1')
-		const cancelled = cancelWaitingItem({ items: [item] }, item.id, '2026-01-01T01:00:00.000Z')
+		const cancelled = cancelWaitingItem({ version: 1, items: [item] }, item.id, '2026-01-01T01:00:00.000Z')
 		if (!cancelled.ok) throw new Error('expected the cancel to succeed')
 		expect(cancelled.item.resumeRunId).toBeUndefined()
 		expect(cancelled.item.resumeToolCallId).toBeUndefined()
@@ -576,11 +578,34 @@ describe('answer', () => {
 			expect(result.item.status).toBe('waiting')
 			expect(result.item.answer).toBe('postgres')
 			expect(result.item.question).toBe('which database?')
-			// A legacy fallback re-points lineage at the paused run so the briefed continuation names that attempt.
+			// A briefed fallback re-points lineage at the paused run so the continuation names that attempt.
 			expect(result.item.continuesFrom).toBe('run-20260101-003000')
 			expect(result.item.runId).toBeUndefined()
 		}
 		expect(harness.items().map((entry) => entry.id)).toEqual(['item-1', 'other'])
+	})
+
+	test('a needs_input item with no runId dispatches a briefed continuation from its lineage without reading pause state or resuming', async () => {
+		const parked = item({ status: 'needs_input', continuesFrom: 'run-20260101-000000', question: 'which database?' })
+		const priorResult = { status: 'success' as const, summary: 'prior run finished', artifacts: [] }
+		const harness = makeQueue({
+			initial: [parked],
+			submitResults: [{ ok: true, runId: 'run-20260101-010000' }],
+			metas: { 'run-20260101-000000': meta({ runId: 'run-20260101-000000', result: priorResult }) },
+			pauseStates: { 'run-20260101-000000': { roleId: 'main-0-1', toolCallId: 'ask_1', callId: 'tool:ask_1', questionId: 'ask_1', question: 'which database?' } },
+		})
+		const result = await harness.queue.answer('item-1', 'postgres')
+		expect(result.ok).toBe(true)
+		if (!result.ok) return
+		expect(result.item.continuesFrom).toBe('run-20260101-000000')
+		expect(result.item.resumesRunId).toBeUndefined()
+		expect(harness.pauseReadCalls).toEqual([])
+		expect(harness.resumeCalls).toEqual([])
+		expect(harness.clarificationResumeCalls).toEqual([])
+		expect(harness.submitCalls).toHaveLength(1)
+		const continuation = harness.submitCalls[0]?.continuation
+		expect(continuation?.runId).toBe('run-20260101-000000')
+		expect(continuation?.result).toEqual(priorResult)
 	})
 
 	test('rejects an unknown id and a non-needs_input target', async () => {
@@ -664,7 +689,7 @@ describe('answer', () => {
 		const harness = makeQueue({
 			initial: [parked],
 			hasActiveRun: () => true,
-			pauseStates: { 'run-20260101-003000': { roleId: 'main-0-1', toolCallId: 'ask_1', question: 'which database?' } },
+			pauseStates: { 'run-20260101-003000': { roleId: 'main-0-1', toolCallId: 'ask_1', callId: 'tool:ask_1', questionId: 'ask_1', question: 'which database?' } },
 		})
 
 		await harness.queue.answer('item-1', 'postgres')
@@ -704,7 +729,7 @@ describe('answer', () => {
 		const harness = makeQueue({
 			initial: [parked],
 			hasActiveRun: () => true,
-			pauseStates: { 'run-20260101-003000': { roleId: 'main-0-1', toolCallId: 'ask_1', question: 'which database?' } },
+			pauseStates: { 'run-20260101-003000': { roleId: 'main-0-1', toolCallId: 'ask_1', callId: 'tool:ask_1', questionId: 'ask_1', question: 'which database?' } },
 		})
 		await harness.queue.answer('item-1', 'postgres')
 

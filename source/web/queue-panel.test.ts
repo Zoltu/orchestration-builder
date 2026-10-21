@@ -44,7 +44,7 @@ describe('deriveQueuedItems', () => {
 			item({ id: 'a', status: 'done', settledAt: '2026-01-01T00:01:00.000Z' }),
 			item({ id: 'b' }),
 			{ id: 'malformed', task: '', status: 'waiting', queuedAt: '2026-01-01T00:00:00.000Z' },
-			item({ id: 'c', status: 'needs_input' }),
+			item({ id: 'c', status: 'needs_input', runId: 'run-c' }),
 			item({ id: 'd', status: 'active' }),
 			item({ id: 'e', status: 'cancelled', settledAt: '2026-01-01T00:02:00.000Z' }),
 			item({ id: 'f' }),
@@ -64,7 +64,7 @@ describe('backlogCount', () => {
 		expect(backlogCount([
 			item({ id: 'a' }),
 			item({ id: 'b', status: 'active' }),
-			item({ id: 'c', status: 'needs_input' }),
+			item({ id: 'c', status: 'needs_input', runId: 'run-c' }),
 			item({ id: 'd', status: 'done' }),
 		])).toBe(2)
 	})
@@ -98,14 +98,14 @@ describe('queueItemPrimaryText', () => {
 	test('uses the result summary for a settled done/error item and the task first line for every other status', () => {
 		expect(queueItemPrimaryText(item({ status: 'done', resultSummary: 'fixed it', settledAt: '2026-01-01T00:01:00.000Z' }))).toBe('fixed it')
 		expect(queueItemPrimaryText(item({ status: 'error', resultSummary: 'blew up', settledAt: '2026-01-01T00:01:00.000Z' }))).toBe('blew up')
-		expect(queueItemPrimaryText(item({ status: 'needs_input', question: 'which database?\nwith which user?' }))).toBe('fix the parser bug')
+		expect(queueItemPrimaryText(item({ status: 'needs_input', runId: 'run-c', question: 'which database?\nwith which user?' }))).toBe('fix the parser bug')
 		expect(queueItemPrimaryText(item({ status: 'active', task: 'a running task\nsecond line' }))).toBe('a running task')
 		expect(queueItemPrimaryText(item())).toBe('fix the parser bug')
 	})
 
 	test('a needs_input item whose task is long still shows the bounded task line, never the question', () => {
 		const longTask = `${'t'.repeat(120)}\nquestion follows`
-		expect(queueItemPrimaryText(item({ status: 'needs_input', task: longTask, question: 'which database?' }))).toBe(`${'t'.repeat(100)}…`)
+		expect(queueItemPrimaryText(item({ status: 'needs_input', runId: 'run-c', task: longTask, question: 'which database?' }))).toBe(`${'t'.repeat(100)}…`)
 	})
 })
 
@@ -129,15 +129,14 @@ describe('reorderWaitingItems', () => {
 })
 
 describe('matchesParkedRun', () => {
-	test('matches a modern needs_input item by its runId', () => {
+	test('matches a parked item by its runId', () => {
 		expect(matchesParkedRun(item({ status: 'needs_input', runId: 'run-1' }), 'run-1')).toBe(true)
 		expect(matchesParkedRun(item({ status: 'needs_input', runId: 'run-1' }), 'run-2')).toBe(false)
 	})
 
-	test('matches a legacy needs_input item with no runId by its continuesFrom', () => {
-		expect(matchesParkedRun(item({ status: 'needs_input', continuesFrom: 'run-1' }), 'run-1')).toBe(true)
-		expect(matchesParkedRun(item({ status: 'needs_input', runId: '', continuesFrom: 'run-1' }), 'run-1')).toBe(true)
-		expect(matchesParkedRun(item({ status: 'needs_input', continuesFrom: 'run-1' }), 'run-2')).toBe(false)
+	test('does not match a parked item without a runId, even when continuesFrom names the run', () => {
+		expect(matchesParkedRun(item({ status: 'needs_input', continuesFrom: 'run-1' }), 'run-1')).toBe(false)
+		expect(matchesParkedRun(item({ status: 'needs_input', runId: '', continuesFrom: 'run-1' }), 'run-1')).toBe(false)
 	})
 
 	test('never matches a non-parked item', () => {

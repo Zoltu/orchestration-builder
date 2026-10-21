@@ -24,11 +24,11 @@ function sampleMeta(runId: string): RunMeta {
 
 function parkedCheckpointFor(runId: string): RunCheckpoint {
 	return {
-		version: 1,
+		version: 2,
 		runId,
 		startTime: '2026-01-01T00:00:00.000Z',
 		registryCounter: 1,
-		parkedAsk: { roleId: 'main-0-1', toolCallId: 'ask_1', question: 'which database?' },
+		parkedAsk: { roleId: 'main-0-1', toolCallId: 'ask_1', callId: 'tool:ask_1', questionId: 'ask_1', question: 'which database?' },
 		frames: [
 			{
 				roleId: 'main-0-1',
@@ -36,6 +36,7 @@ function parkedCheckpointFor(runId: string): RunCheckpoint {
 				depth: 0,
 				task: 'do it',
 				roleState: {
+					protectedPrefixLength: 2,
 					history: [
 						{ role: 'system', content: 'prompt' },
 						{ role: 'user', content: 'do it' },
@@ -280,7 +281,7 @@ describe('createRunSubmission', () => {
 describe('createRunSubmission resume', () => {
 	function sampleCheckpoint(runId: string): RunCheckpoint {
 		return {
-			version: 1,
+			version: 2,
 			runId,
 			startTime: '2026-01-01T00:00:00.000Z',
 			registryCounter: 1,
@@ -291,7 +292,8 @@ describe('createRunSubmission resume', () => {
 					depth: 0,
 					task: 'do it',
 					roleState: {
-						history: [{ role: 'system', content: 'prompt' }],
+						protectedPrefixLength: 2,
+						history: [{ role: 'system', content: 'prompt' }, { role: 'user', content: 'do it' }],
 						lastPromptTokens: 0,
 						recentCompactionPromptTokens: [],
 						recentToolCalls: [],
@@ -400,7 +402,7 @@ describe('createRunSubmission resume', () => {
 describe('createRunSubmission settlement hook', () => {
 	function resumeCheckpoint(runId: string): RunCheckpoint {
 		return {
-			version: 1,
+			version: 2,
 			runId,
 			startTime: '2026-01-01T00:00:00.000Z',
 			registryCounter: 1,
@@ -411,7 +413,8 @@ describe('createRunSubmission settlement hook', () => {
 					depth: 0,
 					task: 'do it',
 					roleState: {
-						history: [{ role: 'system', content: 'prompt' }],
+						protectedPrefixLength: 2,
+						history: [{ role: 'system', content: 'prompt' }, { role: 'user', content: 'do it' }],
 						lastPromptTokens: 0,
 						recentCompactionPromptTokens: [],
 						recentToolCalls: [],
@@ -728,7 +731,7 @@ describe('createRunSubmission involvement resolution', () => {
 describe('createResumeErroredRun', () => {
 	function sampleCheckpoint(runId: string): RunCheckpoint {
 		return {
-			version: 1,
+			version: 2,
 			runId,
 			startTime: '2026-01-01T00:00:00.000Z',
 			registryCounter: 1,
@@ -739,7 +742,8 @@ describe('createResumeErroredRun', () => {
 					depth: 0,
 					task: 'do it',
 					roleState: {
-						history: [{ role: 'system', content: 'prompt' }],
+						protectedPrefixLength: 2,
+						history: [{ role: 'system', content: 'prompt' }, { role: 'user', content: 'do it' }],
 						lastPromptTokens: 0,
 						recentCompactionPromptTokens: [],
 						recentToolCalls: [],
@@ -773,7 +777,7 @@ describe('createResumeErroredRun', () => {
 
 	// An in-memory text store standing in for the filesystem leaves.
 	function createQueueStore(initial: QueueItemView[] = []): { store: { read: () => string | null; write: (contents: string) => void }; snapshot: () => QueueView } {
-		let current: string | null = initial.length === 0 ? null : JSON.stringify({ items: initial })
+		let current: string | null = initial.length === 0 ? null : JSON.stringify({ version: 1, items: initial })
 		return {
 			store: {
 				read: () => current,
@@ -972,7 +976,7 @@ describe('createReadPauseStateById', () => {
 		}
 		const readPauseStateById = createReadPauseStateById(readCheckpointById)
 
-		expect(readPauseStateById('run-parked')).toEqual({ kind: 'parked_ask', ask: { roleId: 'main-0-1', toolCallId: 'ask_1', question: 'which database?' } })
+		expect(readPauseStateById('run-parked')).toEqual({ kind: 'parked_ask', ask: { roleId: 'main-0-1', toolCallId: 'ask_1', callId: 'tool:ask_1', questionId: 'ask_1', question: 'which database?' } })
 		expect(readPauseStateById('run-unparked')).toEqual({ kind: 'clarification', deliveredAnswerConsumed: false })
 		expect(readPauseStateById('run-delivered')).toEqual({ kind: 'clarification', deliveredAnswerId: 'answer-1', deliveredAnswerConsumed: false })
 		expect(readPauseStateById('run-consumed')).toEqual({ kind: 'clarification', deliveredAnswerId: 'answer-1', deliveredAnswerConsumed: true })

@@ -62,6 +62,8 @@ function terminateOperation(id: string, stack: string, source: string, destinati
 // Builds the full Operation list for the first `count` specs by replaying them. A call is in_flight only while it is the innermost still-open call on its stack: once a nested call appears on the same stack the outer call is settled at that nested call's startedAt (the callee delegated), and once its matching return appears it is settled at that return's startedAt. The return's outcome is never mirrored onto the call — the contract is "outcome is returns only", so a view that needs a call's eventual outcome pairs the call with its closing return rather than reading a duplicated field. This is what lets a single per-stack invariant ("at most one in_flight operation per stack") hold for nested chains, paused stacks, and reactivated legs alike.
 function materializeOperations(specs: OperationSpec[], count: number): Operation[] {
 	const closingReturnByCallId = new Map<string, { settledAt: string; outcome: OperationOutcome | null }>()
+	const parentCallIdByCallId = new Map<string, string | undefined>()
+	const callIdByReturnId = new Map<string, string>()
 	const openCallIdsByStack = new Map<string, string[]>()
 	const openCallSpecsByStack = new Map<string, OperationSpec[]>()
 	for (let index = 0; index < count; index += 1) {
@@ -78,6 +80,8 @@ function materializeOperations(specs: OperationSpec[], count: number): Operation
 				openSpecChain = []
 				openCallSpecsByStack.set(spec.stack, openSpecChain)
 			}
+			const parentSpec = openSpecChain[openSpecChain.length - 1]
+			parentCallIdByCallId.set(spec.id, parentSpec === undefined ? undefined : parentSpec.id)
 			openChain.push(spec.id)
 			openSpecChain.push(spec)
 		} else if (spec.kind === 'return') {
@@ -88,7 +92,10 @@ function materializeOperations(specs: OperationSpec[], count: number): Operation
 			}
 			if (openSpecChain !== undefined && openSpecChain.length > 0) {
 				const callSpec = openSpecChain.pop()
-				if (callSpec !== undefined) closingReturnByCallId.set(callSpec.id, { settledAt: spec.startedAt, outcome: spec.outcome ?? null })
+				if (callSpec !== undefined) {
+					closingReturnByCallId.set(callSpec.id, { settledAt: spec.startedAt, outcome: spec.outcome ?? null })
+					callIdByReturnId.set(spec.id, callSpec.id)
+				}
 			}
 		} else if (spec.kind === 'terminate') {
 			// A terminate closes the targeted call (the open call whose destination it reverts) without a return carrying the killed result, so the call's lifecycle flips to settled and the chain pops immediately. Matching by destination across every stack mirrors openCallsByStack: a terminate's destination lives in a paused stack while the terminate itself is logged on the active stack.
@@ -152,12 +159,15 @@ function materializeOperations(specs: OperationSpec[], count: number): Operation
 				settledAt = delegationStartedAtByCallId.get(spec.id) ?? null
 				lifecycle = 'settled'
 			}
-			operations.push({ id: spec.id, kind: 'call', stack: spec.stack, source: spec.source, destination: spec.destination, startedAt: spec.startedAt, settledAt, lifecycle, outcome: null, metrics: null })
+			const call: Operation = { id: spec.id, kind: 'call', callId: spec.id, stack: spec.stack, source: spec.source, destination: spec.destination, startedAt: spec.startedAt, settledAt, lifecycle, outcome: null, metrics: null }
+			const parentCallId = parentCallIdByCallId.get(spec.id)
+			if (parentCallId !== undefined) call.parentCallId = parentCallId
+			operations.push(call)
 		} else if (spec.kind === 'return') {
-			operations.push({ id: spec.id, kind: 'return', stack: spec.stack, source: spec.source, destination: spec.destination, startedAt: spec.startedAt, settledAt: spec.settledAt ?? null, lifecycle: 'settled', outcome: spec.outcome ?? null, metrics: null })
+			operations.push({ id: spec.id, kind: 'return', callId: callIdByReturnId.get(spec.id) ?? spec.id, stack: spec.stack, source: spec.source, destination: spec.destination, startedAt: spec.startedAt, settledAt: spec.settledAt ?? null, lifecycle: 'settled', outcome: spec.outcome ?? null, metrics: null })
 		} else {
 			// observe and terminate are both instantaneous references logged on the active stack: settledAt === startedAt, lifecycle settled, outcome null. Neither opens or closes a call, so neither participates in the open-chain bookkeeping above.
-			operations.push({ id: spec.id, kind: spec.kind, stack: spec.stack, source: spec.source, destination: spec.destination, startedAt: spec.startedAt, settledAt: spec.startedAt, lifecycle: 'settled', outcome: null, metrics: null })
+			operations.push({ id: spec.id, kind: spec.kind, callId: spec.id, stack: spec.stack, source: spec.source, destination: spec.destination, startedAt: spec.startedAt, settledAt: spec.startedAt, lifecycle: 'settled', outcome: null, metrics: null })
 		}
 	}
 	return operations

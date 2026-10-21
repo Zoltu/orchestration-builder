@@ -173,7 +173,7 @@ function chainModel(depth: number): InteractionModel {
 	let source = 'human'
 	for (let index = 1; index <= depth; index++) {
 		const destination = `role-${index}`
-		operations.push({ id: `op-${index}`, kind: 'call' as const, stack: 'root', source, destination, startedAt: 't0', settledAt: null, lifecycle: 'in_flight' as const, outcome: null, metrics: null })
+		operations.push({ id: `op-${index}`, kind: 'call' as const, callId: `op-${index}`, stack: 'root', source, destination, startedAt: 't0', settledAt: null, lifecycle: 'in_flight' as const, outcome: null, metrics: null })
 		source = destination
 	}
 	return { participants, operations, status: 'running' }

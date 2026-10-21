@@ -1,5 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import type { RoleDefinition, ToolCall } from '../types.js'
+import type { ToolInvocation } from '../invocation.js'
+import type { ToolPlatform } from '../tool-platform-port.js'
 import { createFixtureRunScope, createFixtureToolPlatform } from '../test-fixtures.js'
 import { createToolDispatch } from './tool-dispatch.js'
 
@@ -7,6 +9,14 @@ const role: RoleDefinition = { systemPrompt: '', tools: ['ask_human'] }
 
 function makeCall(name: string, args: string): ToolCall {
 	return { id: '1', type: 'function', function: { name, arguments: args } }
+}
+
+function invocationFor(call: ToolCall): ToolInvocation {
+	return { toolCall: call, questionId: call.id, callId: `tool:${call.id}`, parentCallId: 'role:fixture-0-0' }
+}
+
+function dispatchTo(platform: ToolPlatform, roleDefinition: RoleDefinition, scope: ReturnType<typeof createFixtureRunScope>, call: ToolCall) {
+	return platform.dispatch(roleDefinition, scope, call, invocationFor(call))
 }
 
 describe('tool platform dispatch', () => {
@@ -28,28 +38,28 @@ describe('tool platform dispatch', () => {
 	test('dispatches to a registered handler with parsed args', async () => {
 		const platform = createFixtureToolPlatform()
 		const scope = createFixtureRunScope({ manifestNames: new Set(['ask_human']) })
-		const result = await platform.dispatch(role, scope, makeCall('ask_human', '{"question":"why?"}'))
+		const result = await dispatchTo(platform, role, scope, makeCall('ask_human', '{"question":"why?"}'))
 		expect(result).toEqual({ kind: 'success', data: { question: 'why?', answer: 'use your best judgement' } })
 	})
 
 	test('returns unknown_tool for a tool not registered in the Guild', async () => {
 		const platform = createFixtureToolPlatform()
 		const scope = createFixtureRunScope({ manifestNames: new Set() })
-		const result = await platform.dispatch(role, scope, makeCall('ask_human', '{}'))
+		const result = await dispatchTo(platform, role, scope, makeCall('ask_human', '{}'))
 		expect(result.kind).toBe('unknown_tool')
 	})
 
 	test('returns invalid_tool_call for a registered tool the role may not use', async () => {
 		const platform = createFixtureToolPlatform()
 		const scope = createFixtureRunScope({ manifestNames: new Set(['ask_human']) })
-		const result = await platform.dispatch({ systemPrompt: '', tools: [] }, scope, makeCall('ask_human', '{}'))
+		const result = await dispatchTo(platform, { systemPrompt: '', tools: [] }, scope, makeCall('ask_human', '{}'))
 		expect(result.kind).toBe('invalid_tool_call')
 	})
 
 	test('returns invalid_arguments when arguments are not valid JSON', async () => {
 		const platform = createFixtureToolPlatform()
 		const scope = createFixtureRunScope({ manifestNames: new Set(['ask_human']) })
-		const result = await platform.dispatch(role, scope, makeCall('ask_human', 'not json'))
+		const result = await dispatchTo(platform, role, scope, makeCall('ask_human', 'not json'))
 		expect(result.kind).toBe('invalid_arguments')
 	})
 
@@ -57,7 +67,7 @@ describe('tool platform dispatch', () => {
 		test(`returns invalid_arguments when arguments are ${encoded}, not an object`, async () => {
 			const platform = createFixtureToolPlatform()
 			const scope = createFixtureRunScope({ manifestNames: new Set(['ask_human']) })
-			const result = await platform.dispatch(role, scope, makeCall('ask_human', encoded))
+			const result = await dispatchTo(platform, role, scope, makeCall('ask_human', encoded))
 			expect(result.kind).toBe('invalid_arguments')
 		})
 	}
@@ -65,14 +75,14 @@ describe('tool platform dispatch', () => {
 	test('an empty argument object reaches the handler, which validates it', async () => {
 		const platform = createFixtureToolPlatform()
 		const scope = createFixtureRunScope({ manifestNames: new Set(['ask_human']) })
-		const result = await platform.dispatch(role, scope, makeCall('ask_human', '{}'))
+		const result = await dispatchTo(platform, role, scope, makeCall('ask_human', '{}'))
 		expect(result.kind).toBe('invalid_arguments')
 	})
 
 	test('supports async handlers', async () => {
 		const platform = createFixtureToolPlatform()
 		const scope = createFixtureRunScope({ manifestNames: new Set(['ask_human']) })
-		const result = await platform.dispatch(role, scope, makeCall('ask_human', '{"question":"async?"}'))
+		const result = await dispatchTo(platform, role, scope, makeCall('ask_human', '{"question":"async?"}'))
 		expect(result.kind).toBe('success')
 	})
 

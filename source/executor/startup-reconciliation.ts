@@ -2,13 +2,15 @@ import { isRunCheckpoint, type CheckpointFrame, type RunCheckpoint } from './che
 import { createResultCard } from './errors.js'
 import { parkSummary } from './park-state.js'
 import { isRunMeta } from './validation.js'
-import type { ListRunIds, ReadRunCheckpointById, ReadRunMetaById, WriteMeta } from './persistence.js'
+import type { ListRunIds, ReadRunCheckpointById, ReadRunFormat, ReadRunMetaTextById, WriteMeta } from './persistence.js'
+import type { VersionStatus } from './orchestration-version.js'
 import type { RunMeta } from './types.js'
 
 export interface StartupReconciliationDependencies {
 	listRunIds: ListRunIds
-	readRunMetaById: ReadRunMetaById
+	readRunMetaTextById: ReadRunMetaTextById
 	readCheckpointById: ReadRunCheckpointById
+	readRunFormat: ReadRunFormat
 	// A factory rather than a single leaf: reconciliation may need to write terminal metas for several abandoned runs.
 	writeMetaFor: (runId: string) => WriteMeta
 	resume: (checkpoint: RunCheckpoint) => void
@@ -29,8 +31,8 @@ function parseJson(text: string): unknown | undefined {
 	}
 }
 
-function readMeta(readRunMetaById: ReadRunMetaById, runId: string): RunMeta | null {
-	const metaText = readRunMetaById(runId)
+function readMeta(readRunMetaTextById: ReadRunMetaTextById, runId: string): RunMeta | null {
+	const metaText = readRunMetaTextById(runId)
 	if (metaText === null) return null
 	const parsed = parseJson(metaText)
 	return isRunMeta(parsed) ? parsed : null
@@ -49,6 +51,23 @@ function readCheckpoint(readCheckpointById: ReadRunCheckpointById, runId: string
 const ABANDONED_MESSAGE = 'The service stopped while this run was in progress and it could not be resumed (no valid checkpoint).'
 const SUPERSEDED_MESSAGE = 'The service restarted with multiple resumable runs; only the most recent was resumed (one task at a time).'
 
+function unsupportedFormatMessage(status: Exclude<VersionStatus, 'current'>): string {
+	switch (status) {
+		case 'malformed':
+			return 'The service stopped while this run was in progress and its run manifest is malformed, so the run could not be resumed.'
+		case 'missing':
+			return 'The service stopped while this run was in progress and its run manifest is missing, so the run format is unsupported and it could not be resumed.'
+		case 'old':
+			return 'The service stopped while this run was in progress and its run manifest is older than this build supports, so it could not be resumed.'
+		case 'newer':
+			return 'The service stopped while this run was in progress and its run manifest is newer than this build supports, so it could not be resumed.'
+		default: {
+			const exhaustive: never = status
+			return exhaustive
+		}
+	}
+}
+
 // Marks an abandoned run terminal so the UI stops showing it as "in progress". Fields from the existing meta are preserved when present; a run that died before its running meta landed omits the absent optional fields rather than pinning empty-string sentinels — the run directory and log still identify it.
 function markInterrupted(dependencies: StartupReconciliationDependencies, runId: string, meta: RunMeta | null, message: string): void {
 	const endTime = new Date().toISOString()
@@ -59,6 +78,8 @@ function markInterrupted(dependencies: StartupReconciliationDependencies, runId:
 		task: meta?.task ?? '(task unknown — run metadata was lost)',
 		...(meta?.effort !== undefined ? { effort: meta.effort } : {}),
 		...(meta?.involvement !== undefined ? { involvement: meta.involvement } : {}),
+		...(meta?.logLevel !== undefined ? { logLevel: meta.logLevel } : {}),
+		...(meta?.continuesFrom !== undefined ? { continuesFrom: meta.continuesFrom } : {}),
 		status: 'interrupted',
 		startTime: meta?.startTime ?? endTime,
 		endTime,
@@ -96,8 +117,14 @@ export function reconcileRunsOnStartup(dependencies: StartupReconciliationDepend
 	const report: ReconciliationReport = { interruptedRunIds: [], parkedRunIds: [] }
 
 	for (const runId of dependencies.listRunIds()) {
-		const meta = readMeta(dependencies.readRunMetaById, runId)
+		const meta = readMeta(dependencies.readRunMetaTextById, runId)
 		if (meta !== null && meta.status !== 'running') continue
+		const format = dependencies.readRunFormat(runId)
+		if (format !== 'current') {
+			markInterrupted(dependencies, runId, meta, unsupportedFormatMessage(format))
+			report.interruptedRunIds.push(runId)
+			continue
+		}
 		const checkpoint = readCheckpoint(dependencies.readCheckpointById, runId)
 		if (checkpoint === null) {
 			markInterrupted(dependencies, runId, meta, ABANDONED_MESSAGE)

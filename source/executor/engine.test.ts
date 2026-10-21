@@ -13,7 +13,7 @@ import { createLlmCaller } from './llm.ts'
 import type { LoadedGuild } from './loader.ts'
 import type { AppendLog } from './persistence.ts'
 import { createRoleRegistry } from './role-registry.ts'
-import { isRunCheckpoint, pendingIndex, type RunCheckpoint } from './checkpoint.ts'
+import { isRunCheckpoint, type RunCheckpoint } from './checkpoint.ts'
 import { createInvocationJournal } from './invocation.ts'
 import { createEmptyRoleState, createFakeCheckpointRecorder, createFakeRoleSnapshotStore, createFixtureToolPlatform, recordingHumanBackend, stubHumanBackend, withTool, defined } from './test-fixtures.ts'
 import { createRunBaseTracker } from './base-state.ts'
@@ -420,31 +420,6 @@ describe('runRole — acceptance criteria', () => {
 			continuedFrom: 'main-0-1',
 		})
 		expect(seeded.checkpoints[seeded.checkpoints.length - 1]?.frames[0]?.roleState.protectedPrefixLength).toBe(2)
-
-		const legacyResumeLlm = new FakeLlm()
-		legacyResumeLlm.responses = [success([finishCall({ status: 'success', summary: 'legacy' })])]
-		const legacyResume = makeDeps(legacyResumeLlm)
-		await runRole(legacyResume.deps, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'do it' }, {
-			roleId: 'main-0-1',
-			roleState: createEmptyRoleState({ history: [{ role: 'system', content: 'sys' }, { role: 'user', content: 'do it' }] }),
-		})
-		expect(legacyResume.checkpoints[legacyResume.checkpoints.length - 1]?.frames[0]?.roleState.protectedPrefixLength).toBe(2)
-
-		const legacyContinuationLlm = new FakeLlm()
-		legacyContinuationLlm.responses = [success([finishCall({ status: 'success', summary: 'legacy continuation' })])]
-		const legacyContinuation = makeDeps(legacyContinuationLlm)
-		await runRole(legacyContinuation.deps, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'do it again' }, {
-			roleId: 'main-0-1',
-			roleState: createEmptyRoleState({
-				history: [
-					{ role: 'system', content: 'sys' },
-					{ role: 'user', content: 'prior task' },
-					{ role: 'assistant', content: 'prior result' },
-					{ role: 'user', content: 'do it again' },
-				],
-			}),
-		})
-		expect(legacyContinuation.checkpoints[legacyContinuation.checkpoints.length - 1]?.frames[0]?.roleState.protectedPrefixLength).toBe(4)
 
 		const resumedContinuationLlm = new FakeLlm()
 		resumedContinuationLlm.responses = [success([finishCall({ status: 'success', summary: 'restored' })])]
@@ -2624,7 +2599,7 @@ describe('run persistence and resumption', () => {
 		const parent = checkpoint.frames[0]
 		const leaf = checkpoint.frames[1]
 		expect(parent?.roleName).toBe('orchestrator')
-		expect(parent?.pending?.toolCalls[parent.pending === undefined ? 0 : pendingIndex(parent.pending)]?.function.name).toBe('agent')
+		expect(parent?.pending?.toolCalls[parent.pending === undefined ? 0 : parent.pending.index]?.function.name).toBe('agent')
 		expect(parent?.pending?.childCard).toBeUndefined()
 		expect(leaf?.roleName).toBe('coder')
 		expect(leaf?.parentRoleId).toBe(parent?.roleId)
@@ -3734,7 +3709,7 @@ describe('runRole — continue_agent', () => {
 			return checkpoint.frames.some((frame) => {
 				const pending = frame.pending
 				if (pending === undefined) return false
-				if (pending.toolCalls[pendingIndex(pending)]?.function.name !== tool) return false
+				if (pending.toolCalls[pending.index]?.function.name !== tool) return false
 				return hasCard ? pending.childCard !== undefined : pending.childCard === undefined
 			})
 		})
@@ -3858,7 +3833,7 @@ describe('durable pending invocation reconciliation', () => {
 
 	function pendingCheckpoint(toolCall: ToolCall): RunCheckpoint {
 		return {
-			version: 1,
+			version: 2,
 			runId: 'test-run',
 			startTime: '2026-01-01T00:00:00.000Z',
 			registryCounter: 1,
@@ -4042,7 +4017,7 @@ describe('durable pending invocation reconciliation', () => {
 		expect(events.some((event) => event.type === 'unknown_tool')).toBe(true)
 		expect(events.some((event) => event.type === 'tool_call' && payloadField(event, 'callId') === 'tool:bad_allowed')).toBe(false)
 		expect(events.some((event) => event.type === 'tool_call' && payloadField(event, 'callId') === 'tool:bad_unknown')).toBe(false)
-		const invokedInvalid = checkpoints.some((checkpoint) => checkpoint.frames.some((frame) => frame.pending !== undefined && frame.pending.toolCalls[pendingIndex(frame.pending)]?.id.startsWith('bad_')))
+		const invokedInvalid = checkpoints.some((checkpoint) => checkpoint.frames.some((frame) => frame.pending !== undefined && frame.pending.toolCalls[frame.pending.index]?.id.startsWith('bad_')))
 		expect(invokedInvalid).toBe(false)
 	})
 
@@ -4050,7 +4025,7 @@ describe('durable pending invocation reconciliation', () => {
 		const guild = buildPendingGuild(['echo', 'finish'])
 		const calls = [echoCall('e1'), echoCall('e2')]
 		const checkpoint: RunCheckpoint = {
-			version: 1,
+			version: 2,
 			runId: 'test-run',
 			startTime: '2026-01-01T00:00:00.000Z',
 			registryCounter: 1,
@@ -4104,7 +4079,7 @@ describe('durable pending invocation reconciliation', () => {
 		const guild = buildPendingGuild(['echo', 'finish'])
 		const calls = [echoCall('e1'), echoCall('e2'), echoCall('e3')]
 		const checkpoint: RunCheckpoint = {
-			version: 1,
+			version: 2,
 			runId: 'test-run',
 			startTime: '2026-01-01T00:00:00.000Z',
 			registryCounter: 1,
@@ -4187,7 +4162,7 @@ describe('durable pending invocation reconciliation', () => {
 	test('stale handler and interrupt invocations are closed before the role loop re-enters', async () => {
 		const guild = buildPendingGuild(['finish'])
 		const checkpoint: RunCheckpoint = {
-			version: 1,
+			version: 2,
 			runId: 'test-run',
 			startTime: '2026-01-01T00:00:00.000Z',
 			registryCounter: 2,
@@ -4344,7 +4319,7 @@ describe('durable pending invocation reconciliation', () => {
 		const guild = buildPendingGuild(['echo', 'finish'])
 		const calls = [finishCall({ status: 'success', summary: 'already done' }), echoCall('e2')]
 		const checkpoint: RunCheckpoint = {
-			version: 1,
+			version: 2,
 			runId: 'test-run',
 			startTime: '2026-01-01T00:00:00.000Z',
 			registryCounter: 1,
@@ -4476,7 +4451,7 @@ describe('durable pending invocation reconciliation', () => {
 		const badFinish: ToolCall = { id: 'bad_finish', type: 'function', function: { name: 'finish', arguments: JSON.stringify({ status: 'success', summary: '' }) } }
 		const echo = echoCall('e1')
 		const checkpoint: RunCheckpoint = {
-			version: 1,
+			version: 2,
 			runId: 'test-run',
 			startTime: '2026-01-01T00:00:00.000Z',
 			registryCounter: 1,

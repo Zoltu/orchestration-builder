@@ -583,6 +583,7 @@ function checkManifests(): void {
 		continueAgent: async () => ({ status: 'success', summary: '' }),
 		roleState: {
 			history: [],
+			protectedPrefixLength: 2,
 			lastPromptTokens: 0,
 			recentCompactionPromptTokens: [],
 			recentToolCalls: [],

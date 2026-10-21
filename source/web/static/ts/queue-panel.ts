@@ -103,11 +103,11 @@ export function queueItemPrimaryText(item: QueueItemLike): string {
 	return taskFirstLine(item.task)
 }
 
-// Whether a parked item answers for the selected run: a modern item names it through runId, while a legacy item with no runId records the paused run in continuesFrom.
+// Whether a parked item answers for the selected run: a parked item names its paused run through runId.
 export function matchesParkedRun(item: QueueItemLike, runId: string): boolean {
 	if (item.status !== 'needs_input') return false
-	if (typeof item.runId === 'string' && item.runId !== '') return item.runId === runId
-	return item.continuesFrom === runId
+	if (typeof item.runId !== 'string' || item.runId === '') return false
+	return item.runId === runId
 }
 
 // The waiting-list index a drop should PATCH: the target row's index among the waiting items, excluding the dragged one (the server clamps out-of-range values). Dropping onto the dragged item itself — or onto a row that is not waiting — is no move at all, read as null.

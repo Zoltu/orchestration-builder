@@ -235,9 +235,9 @@ export interface RunContinuation {
 	// Present only when the run genuinely continues a prior run; absent for a first queue dispatch.
 	runId?: string
 	task: string
-	// The prior result summary, kept as the fallback for producers that predate the full outcome carrier; result/status/error carry the complete visible outcome when present.
+	// The prior result summary. It may be empty for a result-less terminal; result/status/error carry the complete visible outcome when present.
 	summary: string
-	// The prior run's terminal status when the producer had it; older producers omit it and the result card (or the run-level error kind) still resolves the displayed status.
+	// The prior run's terminal status, absent only for a briefing-only continuation; the result card (or the run-level error kind) still resolves the displayed status when present.
 	status?: TerminalRunStatus
 	// The prior run's full result card, so the synthesized assistant turn can render the summary, artifacts, and surfaced error message rather than only the summary; the raw technical detail is deliberately excluded from model history.
 	result?: ResultCard

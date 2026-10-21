@@ -47,7 +47,7 @@ function parseQueueText(text: string | null): QueueView {
 
 // The text-only queue store standing in for the filesystem leaves: writes are recorded as text so tests can assert the exact write sequence and decoded views.
 function fakeQueueStore(initial: QueueSeedItem[] = []): { store: { read: () => string | null; write: (contents: string) => void }; writes: string[]; items: () => readonly QueueItemView[]; written: () => QueueView[]; readCount: () => number } {
-	let current: string | null = initial.length === 0 ? null : JSON.stringify({ items: initial })
+	let current: string | null = initial.length === 0 ? null : JSON.stringify({ version: 1, items: initial })
 	let reads = 0
 	const writes: string[] = []
 	return {
@@ -574,7 +574,7 @@ describe('createTaskQueue tick — boot repair', () => {
 })
 
 describe('createTaskQueue same-run answer resume', () => {
-	const parkedAsk: ParkedAsk = { roleId: 'main-0-1', toolCallId: 'ask_1', question: 'which database?' }
+	const parkedAsk: ParkedAsk = { roleId: 'main-0-1', toolCallId: 'ask_1', callId: 'tool:ask_1', questionId: 'ask_1', question: 'which database?' }
 
 	function answeredItem(overrides: Partial<QueueSeedItem> = {}): QueueSeedItem {
 		return {
@@ -656,7 +656,7 @@ describe('createTaskQueue same-run answer resume', () => {
 		expect(harness.clarificationResumeCalls).toEqual([])
 	})
 
-	test('not_clarification falls back to the legacy briefed dispatch with the lineage re-pointed at the paused run', async () => {
+	test('not_clarification falls back to the briefed dispatch with the lineage re-pointed at the paused run', async () => {
 		const runId = 'run-20260101-000500'
 		const store = fakeQueueStore([{ ...waitingItem({ continuesFrom: 'run-20260101-000000', question: 'I need a decision on the schema', answer: 'use the v2 schema' }), resumeRunId: runId, answerId: 'answer-1' }])
 		const submit = fakeSubmit([{ ok: true, runId: 'run-20260101-000600' }])
@@ -676,7 +676,7 @@ describe('createTaskQueue same-run answer resume', () => {
 		expect(Reflect.get(dispatched, 'continuesFrom')).toBe(runId)
 	})
 
-	test('an answer with no pause state re-points lineage at the paused run for the legacy dispatch', async () => {
+	test('an answer with no pause state re-points lineage at the paused run for the briefed dispatch', async () => {
 		const runId = 'run-20260101-000500'
 		const store = fakeQueueStore([waitingItem({ status: 'needs_input', runId, continuesFrom: 'run-20260101-000000', question: 'which database?' })])
 		const submit = fakeSubmit([{ ok: true, runId: 'run-20260101-000600' }])
@@ -712,7 +712,7 @@ describe('createTaskQueue same-run answer resume', () => {
 	})
 
 	for (const error of ['checkpoint_missing', 'not_parked'] as const) {
-		test(`${error} falls back to the legacy briefed dispatch with the question and answer`, async () => {
+		test(`${error} falls back to the briefed dispatch with the question and answer`, async () => {
 			const store = fakeQueueStore([answeredItem()])
 			const submit = fakeSubmit([{ ok: true, runId: 'run-20260101-000600' }])
 			const harness = queueOver(store, submit, { 'run-20260101-000500': meta({ runId: 'run-20260101-000500', status: 'needs_clarification' }) }, fakeRunList(), () => false, { 'run-20260101-000500': parkedAsk }, [{ ok: false, error }])
@@ -761,7 +761,7 @@ describe('createTaskQueue same-run answer resume', () => {
 		const store = fakeQueueStore([activeAnsweredItem()])
 		const submit = fakeSubmit([])
 		const harness = queueOver(store, submit, { 'run-20260101-000500': meta({ runId: 'run-20260101-000500', status: 'needs_clarification' }) }, fakeRunList(), () => false, {
-			'run-20260101-000500': { roleId: 'main-0-1', toolCallId: 'ask_new', question: 'and the port?' },
+			'run-20260101-000500': { roleId: 'main-0-1', toolCallId: 'ask_new', callId: 'tool:ask_new', questionId: 'ask_new', question: 'and the port?' },
 		})
 
 		await harness.onRunSettled(meta({ runId: 'run-20260101-000500', status: 'needs_clarification', result: { status: 'needs_clarification', summary: 'waiting for an answer to: and the port?' } }))
@@ -780,7 +780,7 @@ describe('createTaskQueue same-run answer resume', () => {
 		const store = fakeQueueStore([activeAnsweredItem()])
 		const submit = fakeSubmit([])
 		const harness = queueOver(store, submit, { 'run-20260101-000500': meta({ runId: 'run-20260101-000500', status: 'needs_clarification' }) }, fakeRunList(), () => false, {
-			'run-20260101-000500': { roleId: 'main-0-1', toolCallId: 'ask_new', question: 'which database?' },
+			'run-20260101-000500': { roleId: 'main-0-1', toolCallId: 'ask_new', callId: 'tool:ask_new', questionId: 'ask_new', question: 'which database?' },
 		})
 
 		await harness.onRunSettled(meta({ runId: 'run-20260101-000500', status: 'needs_clarification', result: { status: 'needs_clarification', summary: 'waiting for an answer to: which database?' } }))
@@ -903,7 +903,7 @@ describe('createTaskQueue same-run answer resume', () => {
 		const question = 'which database?'
 		const store = fakeQueueStore([{ ...waitingItem({ status: 'active', runId: newRunId, continuesFrom: oldRunId, question, answer: 'the old answer' }), answerId: 'old-answer' }])
 		const submit = fakeSubmit([])
-		const harness = queueOver(store, submit, { [newRunId]: meta({ runId: newRunId, status: 'needs_clarification' }) }, fakeRunList(), () => true, { [newRunId]: { roleId: 'main-0-1', toolCallId: 'ask_2', question } })
+		const harness = queueOver(store, submit, { [newRunId]: meta({ runId: newRunId, status: 'needs_clarification' }) }, fakeRunList(), () => true, { [newRunId]: { roleId: 'main-0-1', toolCallId: 'ask_2', callId: 'tool:ask_2', questionId: 'ask_2', question } })
 
 		await harness.onRunSettled(meta({ runId: newRunId, status: 'needs_clarification', result: { status: 'needs_clarification', summary: `waiting for an answer to: ${question}` } }))
 
@@ -921,7 +921,7 @@ describe('createTaskQueue same-run answer resume', () => {
 		const question = 'which database?'
 		const store = fakeQueueStore([{ ...waitingItem({ status: 'active', runId, continuesFrom: 'run-20260101-000000', question, answer: 'the old clarification answer' }), resumeRunId: runId, answerId: 'answer-1' }])
 		const submit = fakeSubmit([])
-		const harness = queueOver(store, submit, { [runId]: meta({ runId, status: 'needs_clarification' }) }, fakeRunList(), () => true, { [runId]: { roleId: 'main-0-1', toolCallId: 'ask_1', question } })
+		const harness = queueOver(store, submit, { [runId]: meta({ runId, status: 'needs_clarification' }) }, fakeRunList(), () => true, { [runId]: { roleId: 'main-0-1', toolCallId: 'ask_1', callId: 'tool:ask_1', questionId: 'ask_1', question } })
 
 		await harness.onRunSettled(meta({ runId, status: 'needs_clarification', result: { status: 'needs_clarification', summary: `waiting for an answer to: ${question}` } }))
 

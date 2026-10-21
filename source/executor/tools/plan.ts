@@ -1,7 +1,7 @@
 import * as fs from 'node:fs'
 import * as path from 'node:path'
 import { createToolError } from '../errors.js'
-import { PLAN_FILE_NAME } from '../persistence.js'
+import { createReadRunFormat, PLAN_FILE_NAME } from '../persistence.js'
 import { isRunIdShape } from '../run-id.js'
 import { isRunDocumentContent, MAX_RUN_DOCUMENT_CHARS, runDocumentDeliveryProblem, runDocumentWriteProblem } from './run-document.js'
 import type { ToolHandler } from './tool-dispatch.js'
@@ -42,14 +42,16 @@ function createWritePlan(config: PlanToolConfig): ToolHandler {
 }
 
 function createReadPlan(config: PlanToolConfig): ToolHandler {
-	const currentRunPath = planPath(config.runsBaseDir, config.runId)
+	const readRunFormat = createReadRunFormat(config.runsBaseDir)
 	return (args) => {
 		const runIdValue = args['runId']
-		let targetPath = currentRunPath
+		let targetRunId = config.runId
 		if (runIdValue !== undefined) {
 			if (!isRunIdShape(runIdValue)) return createToolError('invalid_arguments', 'runId must look like "run-YYYYMMDD-HHMMSS"')
-			targetPath = planPath(config.runsBaseDir, runIdValue)
+			targetRunId = runIdValue
 		}
+		if (readRunFormat(targetRunId) !== 'current') return createToolError('unavailable', 'this run format is not supported by the current build')
+		const targetPath = planPath(config.runsBaseDir, targetRunId)
 		// A missing plan is a normal state (the planner may not have run yet), not an IO error, so it reads as "unavailable".
 		if (!fs.existsSync(targetPath)) return createToolError('unavailable', 'no plan has been written for this run')
 		let content: string

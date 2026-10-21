@@ -3,7 +3,7 @@ import { questionFromParkSummary, type ParkedAnswer, type PauseState } from '../
 import type { ListRunIds, ReadRunMetaById } from '../persistence.js'
 import { isRunMeta, isTerminalRunStatus, safeJsonParse } from '../validation.js'
 import type { EffortLevel, InvolvementLevel, LogLevel, RunContinuation, RunMeta } from '../types.js'
-import { assembleBriefingLines, cancelWaitingItem, dispatchingItem, editWaitingItem, enqueueAtHead, enqueueAtTail, normalizeNewItem, pendingAnswerUndelivered, reactivateErrorItem, recordAnswer, releaseToWaiting, removeWaitingItem, reorderWaitingItem, repairActiveItem, repairNeedsInputItem, requireWaitingItem, requeueErrorItem, restoreAnsweredToWaiting, settleActiveItem, terminateNeedsInputItem, toQueueItemView, toQueueView, withReplacedItem, type QueueItem, type QueueItemView, type QueueMutation, type QueueView, type RunListEntry, type TaskQueue } from './model.js'
+import { assembleBriefingLines, cancelWaitingItem, dispatchingItem, editWaitingItem, enqueueAtHead, enqueueAtTail, normalizeNewItem, pendingAnswerUndelivered, reactivateErrorItem, recordAnswer, releaseToWaiting, removeWaitingItem, reorderWaitingItem, repairActiveItem, repairNeedsInputItem, requireWaitingItem, requeueErrorItem, settleActiveItem, terminateNeedsInputItem, toQueueItemView, toQueueView, withReplacedItem, type QueueItem, type QueueItemView, type QueueMutation, type QueueView, type RunListEntry, type TaskQueue } from './model.js'
 import { readQueue, writeQueue, type QueueStore } from './persistence.js'
 
 // The durable task queue module (docs/queueing.md "The queue: storage, item model, state machine" and "Dispatch and the scheduler"): the single public surface over the item model, the state machine, queue persistence, and the scheduler that dispatches queued tasks and settles their runs. HTTP handlers and the error-resume path call operations here rather than reading, mutating, and writing the queue file themselves, so the crash-safety ordering (dispatching marker before submit, boot repair, collision retry, settlement mapping) cannot be bypassed.
@@ -30,14 +30,14 @@ export type ResumeParkedRunResult =
 	| { ok: true; runId: string }
 	| { ok: false; error: 'run_in_progress' | 'checkpoint_missing' | 'not_parked' }
 
-// The same-run answer resume: re-enters the parked run with the answer. The queue falls back to the legacy briefed dispatch on checkpoint_missing/not_parked.
+// The same-run answer resume: re-enters the parked run with the answer. The queue falls back to the briefed dispatch on checkpoint_missing/not_parked.
 export type QueueResumeParkedRun = (runId: string, parkedAnswer: ParkedAnswer) => ResumeParkedRunResult
 
 export type ResumeClarificationRunResult =
 	| { ok: true; runId: string }
 	| { ok: false; error: 'run_in_progress' | 'checkpoint_missing' | 'not_clarification' }
 
-// The same-run clarification resume: re-enters a direct-finish needs_clarification run with a framed question-and-answer note. The queue falls back to the legacy briefed dispatch on checkpoint_missing/not_clarification.
+// The same-run clarification resume: re-enters a direct-finish needs_clarification run with a framed question-and-answer note. The queue falls back to the briefed dispatch on checkpoint_missing/not_clarification.
 export type QueueResumeClarificationRun = (runId: string, clarificationAnswer: { id: string; question: string; answer: string }) => ResumeClarificationRunResult
 
 export type TerminateParkedRunResult =
@@ -115,10 +115,10 @@ export type QueueSubmitOutcome =
 // - patch(id, patch): edits task/effort/involvement and/or reorders within the waiting list; unknown ids return 'not_found', non-waiting items 'forbidden_status'. An empty patch validates without writing.
 // - cancel(id, at): marks a waiting item cancelled with settledAt; unknown ids 'not_found', non-waiting items 'forbidden_status'.
 // - terminate(id, at): cancels a needs_input item and, when it names a parked run, terminalizes that run and deletes its checkpoint; a run already gone ('not_found'/'not_parked') still cancels the item. Unknown ids 'not_found', other statuses 'forbidden_status'.
-// - answer(id, answer): records an answer (with a durable answer id) on a needs_input item, moves it to the front as waiting, and ticks; a parked checkpoint whose question still matches records the run and tool call, a clarification checkpoint whose meta question still matches records just the run, and either dispatch resumes the same run; an item with no matching checkpoint falls back to the legacy briefed continuation with its lineage re-pointed at the paused run. An item whose own run is already terminal but not paused (an operator termination) is cancelled, its checkpoint cleanup and audit append retried, and the answer discarded instead of dispatching. Unknown ids 'not_found', other statuses 'forbidden_status'.
+// - answer(id, answer): records an answer (with a durable answer id) on a needs_input item, moves it to the front as waiting, and ticks; a parked checkpoint whose question still matches records the run and tool call, a clarification checkpoint whose meta question still matches records just the run, and either dispatch resumes the same run; an item with no matching checkpoint falls back to the briefed continuation; its lineage is re-pointed at the paused run when that run is known, otherwise the item keeps its existing lineage. An item whose own run is already terminal but not paused (an operator termination) is cancelled, its checkpoint cleanup and audit append retried, and the answer discarded instead of dispatching. Unknown ids 'not_found', other statuses 'forbidden_status'.
 // - requeue(id): returns an error item to waiting at the tail with its lineage re-pointed at the errored run, then ticks; unknown ids 'not_found', other statuses 'forbidden_status'.
 // - reactivateErrorItem(runId): puts the error item for a resumed run back into the active slot under the same run id; returns 'not_found' when no error item names that run.
-// - tick(): repairs stale active items from their run metas and cancels needs_input items whose run was terminated before the queue write, then dispatches the head waiting item unless a run is active or shutdown has been observed. An answered item resumes its paused run through the parked-answer path when it carries a tool-call pointer, or the clarification-answer path otherwise; when that run cannot be resumed the item falls back to the legacy briefed dispatch with its lineage re-pointed at the unresumable run.
+// - tick(): repairs stale active items from their run metas and cancels needs_input items whose run was terminated before the queue write, then dispatches the head waiting item unless a run is active or shutdown has been observed. An answered item resumes its paused run through the parked-answer path when it carries a tool-call pointer, or the clarification-answer path otherwise; when that run cannot be resumed the item falls back to the briefed dispatch with its lineage re-pointed at the unresumable run.
 // - onRunSettled(meta): maps a settled run from its terminal meta, writes the mapping before ticking, and never settles an 'interrupted' meta (that item re-dispatches through boot repair). A needs_clarification settlement whose answer is still undelivered (either pause kind) releases the item to waiting and ticks instead of settling, so the answer retries.
 // - observeShutdown(): closes the dispatch gate; settlements still map but no new run starts.
 export interface TaskQueueModule {
@@ -209,7 +209,7 @@ export function createTaskQueue(dependencies: TaskQueueDependencies): TaskQueueM
 			changed = true
 			return repair.item
 		})
-		if (changed) writeQueueState({ items })
+		if (changed) writeQueueState({ ...queue, items })
 	}
 
 	function assembleSubmission(item: QueueItem, queueItems: QueueItem[]): QueuedRunSubmission {
@@ -250,7 +250,7 @@ export function createTaskQueue(dependencies: TaskQueueDependencies): TaskQueueM
 		return { task: item.task, ...overrides, continuation: { task: item.task, summary: '', briefing: composeBriefing() } }
 	}
 
-	// The legacy dispatch cycle shared by a first dispatch and an answer's fallback: write the dispatching marker (active, no runId), call submitRun, then fill the runId on acceptance, restore the item to waiting on run_in_progress, or sleep-and-retry on run_id_collision. Each write is a whole-file read-modify-write cycle; a collision sleep ends one cycle and the retry begins a fresh one that re-reads.
+	// The dispatch cycle shared by a first dispatch and an answer's fallback: write the dispatching marker (active, no runId), call submitRun, then fill the runId on acceptance, restore the item to waiting on run_in_progress, or sleep-and-retry on run_id_collision. Each write is a whole-file read-modify-write cycle; a collision sleep ends one cycle and the retry begins a fresh one that re-reads.
 	async function submitHead(item: QueueItem, view: TaskQueue): Promise<void> {
 		// The marker is written before submitRun so a crash after a successful submit leaves an active-without-id item the boot tick repairs by bind-or-release — never a stale waiting item that would re-dispatch behind its own duplicate.
 		const marker = dispatchingItem(item)
@@ -279,7 +279,7 @@ export function createTaskQueue(dependencies: TaskQueueDependencies): TaskQueueM
 		| { kind: 'released' }
 		| { kind: 'fallback'; item: QueueItem; view: TaskQueue }
 
-	// Rewrites an answered item as waiting for the legacy briefed dispatch: the resume pointers are dropped and the lineage is re-pointed at the run that could not be resumed, while the answer (and its id) stays for the briefing.
+	// Rewrites an answered item as waiting for the briefed dispatch: the resume pointers are dropped and the lineage is re-pointed at the run that could not be resumed, while the answer (and its id) stays for the briefing.
 	function fallbackFromAnsweredItem(item: QueueItem, resumeRunId: string): ResumeAttempt {
 		const current = readQueueState()
 		const currentItem = current.items.find((entry) => entry.id === item.id)
@@ -291,7 +291,7 @@ export function createTaskQueue(dependencies: TaskQueueDependencies): TaskQueueM
 		return { kind: 'fallback', item: waiting, view: current }
 	}
 
-	// Re-enters the paused run the answered item points at, writing an active marker under that run's id first so a settlement arriving while the resume starts finds the item. The tool-call pointer selects the parked-answer path; its absence selects the clarification-answer path. When the run can no longer be resumed the marker is rewritten as waiting without the resume pointers but with its lineage re-pointed at that run, keeping the answer for the legacy briefed dispatch.
+	// Re-enters the paused run the answered item points at, writing an active marker under that run's id first so a settlement arriving while the resume starts finds the item. The tool-call pointer selects the parked-answer path; its absence selects the clarification-answer path. When the run can no longer be resumed the marker is rewritten as waiting without the resume pointers but with its lineage re-pointed at that run, keeping the answer for the briefed dispatch.
 	async function resumeAnsweredItem(item: QueueItem, view: TaskQueue): Promise<ResumeAttempt> {
 		const resumeRunId = item.resumeRunId
 		const resumeToolCallId = item.resumeToolCallId
@@ -299,7 +299,7 @@ export function createTaskQueue(dependencies: TaskQueueDependencies): TaskQueueM
 		const answerId = item.answerId
 		const question = item.question
 		if (resumeRunId === undefined || answer === undefined) return { kind: 'fallback', item, view }
-		// A clarification resume cannot invent a blank question or answer id: release it to the legacy fallback instead.
+		// A clarification resume cannot invent a blank question or answer id: release it to the briefed fallback instead.
 		if (resumeToolCallId === undefined && (answerId === undefined || question === undefined)) return fallbackFromAnsweredItem(item, resumeRunId)
 		const marker: QueueItem = { ...dispatchingItem(item), runId: resumeRunId }
 		writeQueueState(withReplacedItem(view, marker))
@@ -424,10 +424,10 @@ export function createTaskQueue(dependencies: TaskQueueDependencies): TaskQueueM
 				writeQueueState(result.queue)
 				return { ok: true, item: toQueueItemView(result.item) }
 			}
-			const pausedRunId = target.runId ?? target.continuesFrom
-			const pausedMeta = pausedRunId === undefined ? null : pausedRunId === target.runId ? runMeta : parseRunMetaText(pausedRunId)
+			const pausedRunId = target.runId
+			const pausedMeta = runMeta
 			const pauseState = pausedRunId !== undefined ? dependencies.readPauseStateById(pausedRunId) : null
-			// A legacy needs_input (no matching checkpoint) keeps the briefed-continuation path. A parked ask whose question still matches records run id plus tool-call id; a clarification pause records just the run id when the meta still names this item's question.
+			// A needs_input with no matching checkpoint keeps the briefed-continuation path. A parked ask whose question still matches records run id plus tool-call id; a clarification pause records just the run id when the meta still names this item's question.
 			let resume: { runId: string; toolCallId?: string } | undefined
 			if (pausedRunId !== undefined && pauseState !== null) {
 				if (pauseState.kind === 'parked_ask' && pauseState.ask.question === target.question) resume = { runId: pausedRunId, toolCallId: pauseState.ask.toolCallId }
@@ -458,10 +458,10 @@ export function createTaskQueue(dependencies: TaskQueueDependencies): TaskQueueM
 		async onRunSettled(meta) {
 			const queue = readQueueState()
 			const target = queue.items.find((item) => item.status === 'active' && item.runId === meta.runId)
-			// A paused settlement whose answer is still undelivered for this exact run (the checkpoint still names the answered call, or has not yet recorded/consumed the clarification answer id) returns the answered item to waiting so the next tick retries it instead of settling to needs_input and dropping the answer. Legacy markers without pointers are reconstructed from the checkpoint.
+			// A paused settlement whose answer is still undelivered for this exact run (the checkpoint still names the answered call, or has not yet recorded/consumed the clarification answer id) returns the answered item to waiting so the next tick retries it instead of settling to needs_input and dropping the answer.
 			const pauseState = target !== undefined ? dependencies.readPauseStateById(meta.runId) : null
 			if (target !== undefined && meta.status === 'needs_clarification' && pendingAnswerUndelivered(target, pauseState, meta.runId)) {
-				const waiting = pauseState !== null ? restoreAnsweredToWaiting(target, meta.runId, pauseState) : releaseToWaiting(target)
+				const waiting = releaseToWaiting(target)
 				writeQueueState(withReplacedItem(queue, waiting))
 				await tick()
 				return

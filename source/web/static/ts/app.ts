@@ -1100,7 +1100,7 @@ function GotQueueAfterAnswer(answeredItemId: string) {
 	}
 }
 
-// The answer's follow-up queue read, curried with the answered item's id. When the parked checkpoint still matches, the scheduler re-enters the SAME run id and the item's runId is already present in this read, so the watch screen is reactivated immediately (including when it is already the selected run: its terminal needs_clarification status is reset so the per-run poll and stream restart). The legacy no-checkpoint fallback submits a new briefed continuation with a fresh runId, which this same selection path handles. When the slot was busy the item is still waiting with no runId: the client records it in pendingResumeItemId and stays put, and GotQueue re-engages the watch screen when that item finally resumes.
+// The answer's follow-up queue read, curried with the answered item's id. When the parked checkpoint still matches, the scheduler re-enters the SAME run id and the item's runId is already present in this read, so the watch screen is reactivated immediately (including when it is already the selected run: its terminal needs_clarification status is reset so the per-run poll and stream restart). The no-checkpoint fallback submits a new briefed continuation with a fresh runId, which this same selection path handles. When the slot was busy the item is still waiting with no runId: the client records it in pendingResumeItemId and stays put, and GotQueue re-engages the watch screen when that item finally resumes.
 function ApplyAnsweredQueue(answeredItemId: string) {
 	return function ApplyAnsweredQueueForItem(state: ApplicationState, payload: FetchResultPayload): ActionReturn {
 		const queued = reduceQueue(state, payload)

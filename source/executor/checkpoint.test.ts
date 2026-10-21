@@ -15,6 +15,7 @@ function sampleRoleState(overrides: Partial<RoleState> = {}): RoleState {
 			{ role: 'system', content: 'prompt' },
 			{ role: 'user', content: 'task' },
 		],
+		protectedPrefixLength: 2,
 		lastPromptTokens: 10,
 		recentCompactionPromptTokens: [],
 		recentToolCalls: [],
@@ -66,13 +67,13 @@ function parkedCheckpoint(): RunCheckpoint {
 			}),
 		},
 	]
-	checkpoint.parkedAsk = { roleId: 'main-0-1', toolCallId: 'ask_1', question: 'which database?' }
+	checkpoint.parkedAsk = { roleId: 'main-0-1', toolCallId: 'ask_1', callId: 'tool:ask_1', questionId: 'ask_1', question: 'which database?' }
 	return checkpoint
 }
 
 function sampleCheckpoint(): RunCheckpoint {
 	return {
-		version: 1,
+		version: 2,
 		runId: 'run-1',
 		startTime: '2026-01-01T00:00:00.000Z',
 		registryCounter: 2,
@@ -132,10 +133,13 @@ describe('isRunCheckpoint', () => {
 		expect(isRunCheckpoint(malformed)).toBe(false)
 	})
 
-	test('rejects non-objects, wrong versions, and missing frames', () => {
+	test('rejects non-objects, unsupported or malformed versions, and missing frames', () => {
 		expect(isRunCheckpoint(null)).toBe(false)
 		expect(isRunCheckpoint('checkpoint')).toBe(false)
-		expect(isRunCheckpoint({ ...sampleCheckpoint(), version: 2 })).toBe(false)
+		expect(isRunCheckpoint({ ...sampleCheckpoint(), version: 1 })).toBe(false)
+		expect(isRunCheckpoint({ ...sampleCheckpoint(), version: 3 })).toBe(false)
+		expect(isRunCheckpoint({ ...sampleCheckpoint(), version: 0 })).toBe(false)
+		expect(isRunCheckpoint({ ...sampleCheckpoint(), version: 1.5 })).toBe(false)
 		expect(isRunCheckpoint({ ...sampleCheckpoint(), frames: [] })).toBe(false)
 	})
 
@@ -161,7 +165,7 @@ describe('isRunCheckpoint', () => {
 		expect(isRunCheckpoint(withLeafHistory([{ role: 'ghost', content: 'boo' }]))).toBe(false)
 	})
 
-	test('accepts an absent protection prefix for legacy checkpoints and validates a present one against the history shape', () => {
+	test('requires the protection prefix and validates it against the history shape', () => {
 		const withRootRoleState = (overrides: { history?: Message[]; protectedPrefixLength?: unknown }) => {
 			const checkpoint = sampleCheckpoint()
 			return {
@@ -176,11 +180,11 @@ describe('isRunCheckpoint', () => {
 			{ role: 'assistant', content: 'prior result' },
 			{ role: 'user', content: 'current task' },
 		]
-		const legacy = sampleCheckpoint()
-		const legacyLeaf = legacy.frames[1]
-		if (legacyLeaf === undefined) throw new Error('missing leaf')
-		delete legacyLeaf.roleState.protectedPrefixLength
-		expect(isRunCheckpoint(legacy)).toBe(true)
+		const missingPrefix = sampleCheckpoint()
+		const missingPrefixLeaf = missingPrefix.frames[1]
+		if (missingPrefixLeaf === undefined) throw new Error('missing leaf')
+		Reflect.deleteProperty(missingPrefixLeaf.roleState, 'protectedPrefixLength')
+		expect(isRunCheckpoint(missingPrefix)).toBe(false)
 		expect(isRunCheckpoint(withRootRoleState({ history: defaultHistory, protectedPrefixLength: 2 }))).toBe(true)
 		expect(isRunCheckpoint(withRootRoleState({ history: continuationHistory, protectedPrefixLength: 4 }))).toBe(true)
 		expect(isRunCheckpoint(withRootRoleState({ history: continuationHistory, protectedPrefixLength: 3 }))).toBe(false)
@@ -207,18 +211,12 @@ describe('isRunCheckpoint', () => {
 		}))).toBe(false)
 	})
 
-	test('enforces the suspension invariant: a leaf may be dispatching a new-shape invocation, while non-leaf frames remain child suspensions', () => {
+	test('enforces the suspension invariant: a leaf may be dispatching an invocation, while non-leaf frames remain child suspensions', () => {
 		const pendingOnLeaf = sampleCheckpoint()
 		const leaf = pendingOnLeaf.frames[1]
 		if (leaf === undefined) throw new Error('missing leaf')
 		leaf.pending = { callId: 'tool:agent_1', parentCallId: 'role:coder-1-2', toolCalls: [agentToolCall()], index: 0 }
 		expect(isRunCheckpoint(pendingOnLeaf)).toBe(true)
-
-		const legacyOnLeaf = sampleCheckpoint()
-		const legacyLeaf = legacyOnLeaf.frames[1]
-		if (legacyLeaf === undefined) throw new Error('missing leaf')
-		legacyLeaf.pending = { toolCalls: [agentToolCall()], childIndex: 0 }
-		expect(isRunCheckpoint(legacyOnLeaf)).toBe(false)
 
 		const leafWithCard = sampleCheckpoint()
 		const singleFrame = leafWithCard.frames[0]
@@ -245,8 +243,10 @@ describe('isRunCheckpoint', () => {
 		const root = checkpoint.frames[0]
 		if (root === undefined || root.pending === undefined) throw new Error('missing pending')
 		root.pending = {
+			callId: 'tool:f1',
+			parentCallId: 'role:main-0-1',
 			toolCalls: [{ id: 'f1', type: 'function', function: { name: 'finish', arguments: '{}' } }],
-			childIndex: 0,
+			index: 0,
 		}
 		expect(isRunCheckpoint(checkpoint)).toBe(false)
 	})
@@ -255,7 +255,7 @@ describe('isRunCheckpoint', () => {
 		const checkpoint = sampleCheckpoint()
 		const root = checkpoint.frames[0]
 		if (root === undefined || root.pending === undefined) throw new Error('missing pending')
-		root.pending = { toolCalls: [continueAgentToolCall()], childIndex: 0 }
+		root.pending = { callId: 'tool:continue_1', parentCallId: 'role:main-0-1', toolCalls: [continueAgentToolCall()], index: 0 }
 		expect(isRunCheckpoint(checkpoint)).toBe(true)
 		const copy: unknown = JSON.parse(JSON.stringify(checkpoint))
 		expect(isRunCheckpoint(copy)).toBe(true)
@@ -297,7 +297,7 @@ describe('isRunCheckpoint', () => {
 		expect(isRunCheckpoint(checkpoint)).toBe(false)
 	})
 
-	test('rejects malformed new pending identity and index fields while keeping absent ones valid for legacy shapes', () => {
+	test('rejects malformed pending identity and index fields', () => {
 		const withLeafPending = (pending: unknown): unknown => {
 			const checkpoint = sampleCheckpoint()
 			return { ...checkpoint, frames: checkpoint.frames.map((frame, index) => (index === 1 ? { ...frame, pending } : frame)) }
@@ -312,15 +312,6 @@ describe('isRunCheckpoint', () => {
 		expect(isRunCheckpoint(withLeafPending({ parentCallId: 'role:coder-1-2', toolCalls: [readCall], index: 0 }))).toBe(false)
 		expect(isRunCheckpoint(withLeafPending({ callId: 'tool:read_1', toolCalls: [readCall], index: 0 }))).toBe(false)
 		expect(isRunCheckpoint(withLeafPending({ callId: 'tool:read_1', parentCallId: 'role:coder-1-2', toolCalls: [readCall], index: 0, childCard: { status: 'success', summary: 'x' } }))).toBe(false)
-		expect(isRunCheckpoint(withLeafPending({ callId: 'tool:read_1', parentCallId: 'role:coder-1-2', toolCalls: [readCall], index: 0, childIndex: 0 }))).toBe(false)
-	})
-
-	test('keeps reading the old pending shape as a legacy child suspension', () => {
-		const checkpoint = sampleCheckpoint()
-		const root = checkpoint.frames[0]
-		if (root === undefined) throw new Error('missing root')
-		root.pending = { toolCalls: [agentToolCall()], childIndex: 0 }
-		expect(isRunCheckpoint(checkpoint)).toBe(true)
 	})
 
 	test('rejects a stack that does not root at depth 0 or breaks the parent chain', () => {
@@ -460,7 +451,7 @@ describe('isRunCheckpoint', () => {
 
 	test('rejects a parked ask whose role is not the leaf', () => {
 		const checkpoint = parkedCheckpoint()
-		checkpoint.parkedAsk = { roleId: 'someone-else', toolCallId: 'ask_1', question: 'which database?' }
+		checkpoint.parkedAsk = { roleId: 'someone-else', toolCallId: 'ask_1', callId: 'tool:ask_1', questionId: 'ask_1', question: 'which database?' }
 		expect(isRunCheckpoint(checkpoint)).toBe(false)
 	})
 
@@ -468,7 +459,7 @@ describe('isRunCheckpoint', () => {
 		const checkpoint = parkedCheckpoint()
 		const leaf = checkpoint.frames[0]
 		if (leaf === undefined) throw new Error('missing leaf')
-		leaf.pending = { toolCalls: [agentToolCall()], childIndex: 0, childCard: { status: 'success', summary: 'done' } }
+		leaf.pending = { callId: 'tool:agent_1', parentCallId: 'role:main-0-1', toolCalls: [agentToolCall()], index: 0, childCard: { status: 'success', summary: 'done' } }
 		expect(isRunCheckpoint(checkpoint)).toBe(false)
 	})
 
@@ -613,7 +604,7 @@ describe('createCheckpointRecorder', () => {
 		const recorder = createCheckpointRecorder({ parkTracker: createRunParkTracker(), baseTracker: createRunBaseTracker(), writeCheckpoint: (c) => written.push(c), runId: 'run-1', startTime: '2026-01-01T00:00:00.000Z', roleRegistry: registry, contextPressureTracker: createContextPressureTracker() })
 		const entry = registerRoot(recorder, registry)
 
-		recorder.setPending(entry.roleId, { toolCalls: [agentToolCall()], childIndex: 0 })
+		recorder.setPending(entry.roleId, { callId: 'tool:agent_1', parentCallId: 'role:main-0-1', toolCalls: [agentToolCall()], index: 0 })
 		recorder.setPendingChildCard(entry.roleId, { status: 'success', summary: 'child done' })
 		recorder.write()
 		expect(written[0]?.frames[0]?.pending?.childCard).toEqual({ status: 'success', summary: 'child done' })
@@ -817,11 +808,11 @@ describe('createCheckpointRecorder', () => {
 			{ role: 'assistant', content: '', tool_calls: [askToolCall()] },
 			{ role: 'tool', content: '{"question":"which database?","parked":true}', tool_call_id: 'ask_1' },
 		]
-		parkTracker.parkedAsk = { roleId: entry.roleId, toolCallId: 'ask_1', question: 'which database?' }
+		parkTracker.parkedAsk = { roleId: entry.roleId, toolCallId: 'ask_1', callId: 'tool:ask_1', questionId: 'ask_1', question: 'which database?' }
 
 		recorder.write()
 
-		expect(written[0]?.parkedAsk).toEqual({ roleId: entry.roleId, toolCallId: 'ask_1', question: 'which database?' })
+		expect(written[0]?.parkedAsk).toEqual({ roleId: entry.roleId, toolCallId: 'ask_1', callId: 'tool:ask_1', questionId: 'ask_1', question: 'which database?' })
 	})
 
 	test('freeze pins the parked checkpoint: later writes are ignored and freezing again is a no-op', () => {

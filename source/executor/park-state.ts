@@ -32,9 +32,9 @@ export interface ParkedAsk {
 	roleId: string
 	// The model tool-call id used to locate the ask's history message and as the queue's answer handle.
 	toolCallId: string
-	// The invocation identity allocated for the ask; absent on legacy checkpoints.
-	callId?: string
-	questionId?: string
+	// The invocation identity allocated for the ask.
+	callId: string
+	questionId: string
 	question: string
 }
 

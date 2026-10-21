@@ -502,15 +502,14 @@ describe('activeLivePartial', () => {
 		expect(activeLivePartial(partial, entries)).toBeNull()
 	})
 
-	test('either side lacking an instance id falls back to the role name (old logs)', () => {
-		const idlessPartial = { roleId: '', role: 'coder', reasoning: '', content: '', truncated: false }
-		expect(activeLivePartial(idlessPartial, [{ kind: 'in_flight', role: 'coder', roleId: 'coder-2' }])).toBe(idlessPartial)
-		const fallbackEntries = [{ kind: 'in_flight', role: 'coder', roleId: 'coder' }]
-		expect(activeLivePartial(partial, fallbackEntries)).toBe(partial)
-	})
-
 	test('a partial whose role never appears in the list clears', () => {
 		expect(activeLivePartial(partial, [{ kind: 'in_flight', role: 'planner', roleId: 'planner-1' }])).toBeNull()
+	})
+
+	test('matching requires instance ids on both sides', () => {
+		const idlessPartial = { roleId: '', role: 'coder', reasoning: '', content: '', truncated: false }
+		expect(activeLivePartial(idlessPartial, [{ kind: 'in_flight', role: 'coder', roleId: 'coder-2' }])).toBeNull()
+		expect(activeLivePartial(partial, [{ kind: 'in_flight', role: 'coder' }])).toBeNull()
 	})
 
 	test('null stays null and malformed inputs clear rather than throw', () => {
@@ -539,15 +538,15 @@ describe('scopedActiveLivePartial', () => {
 		expect(scopedActiveLivePartial(partial, [{ kind: 'completed', role: 'coder', roleId: 'coder-9' }])).toBe(partial)
 	})
 
-	test('either side lacking an instance id falls back to the role name (old logs)', () => {
-		const idlessPartial = { roleId: '', role: 'coder', reasoning: '', content: '', truncated: false }
-		expect(scopedActiveLivePartial(idlessPartial, [{ kind: 'completed', role: 'coder', roleId: 'coder-2' }])).toBeNull()
-		expect(scopedActiveLivePartial(partial, [{ kind: 'completed', role: 'coder', roleId: 'coder' }])).toBeNull()
-	})
-
 	test('null stays null and malformed inputs prove nothing (the partial survives)', () => {
 		expect(scopedActiveLivePartial(null, [{ kind: 'completed', role: 'coder', roleId: 'coder-2' }])).toBeNull()
 		expect(scopedActiveLivePartial(partial, 'broken')).toBe(partial)
 		expect(scopedActiveLivePartial(partial, [null, 42, { kind: 'completed' }])).toBe(partial)
+	})
+
+	test('matching requires instance ids on both sides', () => {
+		const idlessPartial = { roleId: '', role: 'coder', reasoning: '', content: '', truncated: false }
+		expect(scopedActiveLivePartial(idlessPartial, [{ kind: 'completed', role: 'coder', roleId: 'coder-2' }])).toBe(idlessPartial)
+		expect(scopedActiveLivePartial(partial, [{ kind: 'completed', role: 'coder' }])).toBe(partial)
 	})
 })

@@ -9,7 +9,7 @@ export interface TurnUsage {
 	cachedPromptTokens?: number
 }
 
-// One LLM turn as the turn index derives it. `eventIndex` is the turn's identity in the log (a completed turn's `llm_call` event; an in-flight turn's `llm_call_start` event). `roleId` is the turn's role-instance id — the payload's `roleId` when present, else the role name (old logs' turn events carry no instance id), so an in-flight turn that completes keeps its instance and never jumps scope.
+// One LLM turn as the turn index derives it. `eventIndex` is the turn's identity in the log (a completed turn's `llm_call` event; an in-flight turn's `llm_call_start` event). `roleId` is the turn's role-instance id, read from the payload and required on current turn events.
 export interface TurnEntry {
 	kind: 'completed' | 'in_flight'
 	eventIndex: number
@@ -53,17 +53,34 @@ function readMessageCount(value: unknown): number | null {
 	return value
 }
 
-// An `llm_call_start` awaiting its matching `llm_call`, held per role name until pairing or failure closes the bracket.
+// An `llm_call_start` awaiting its matching `llm_call`, held by role instance id until pairing or a role failure closes the bracket. The same start is also tracked under its role name so a failure event, which carries no roleId, can close the newest open start for that role.
 interface OpenTurnStart {
 	eventIndex: number
 	timestamp: string | null
+	role: string
 	roleId: string
 }
 
-// Derives the turn index from a window of log events. An `llm_call` event becomes a completed entry; an `llm_call_start` becomes an in-flight entry unless a matching `llm_call` for the same role follows it, in which case they pair into one completed entry. Matching is LIFO per role name so the same-name nesting the executor allows pairs like brackets. An `llm_unavailable` or `context_budget_exceeded` event closes the same role's newest open start instead of leaving it matched to nothing. Entries come back in chronological order with 1-based `turnNumber`s; malformed rows are skipped.
+function appendOpenStart(openStartsByRoleId: Map<string, OpenTurnStart[]>, openStartsByRole: Map<string, OpenTurnStart[]>, start: OpenTurnStart): void {
+	const byId = openStartsByRoleId.get(start.roleId)
+	if (byId === undefined) openStartsByRoleId.set(start.roleId, [start])
+	else byId.push(start)
+	const byRole = openStartsByRole.get(start.role)
+	if (byRole === undefined) openStartsByRole.set(start.role, [start])
+	else byRole.push(start)
+}
+
+function removeOpenStart(openStarts: OpenTurnStart[] | undefined, start: OpenTurnStart): void {
+	if (openStarts === undefined) return
+	const index = openStarts.indexOf(start)
+	if (index >= 0) openStarts.splice(index, 1)
+}
+
+// Derives the turn index from a window of log events. An `llm_call` event becomes a completed entry; an `llm_call_start` becomes an in-flight entry unless a matching `llm_call` for the same role instance follows it, in which case they pair into one completed entry. Matching is LIFO per roleId so the same-name nesting the executor allows pairs like brackets. An `llm_unavailable` or `context_budget_exceeded` event carries only the role name and closes that role's newest open start instead of leaving it matched to nothing. Entries come back in chronological order with 1-based `turnNumber`s; turn events without a roleId are malformed and skipped.
 export function buildTurnIndex(logEvents: unknown): TurnEntry[] {
 	if (!Array.isArray(logEvents)) return []
-	const openStarts = new Map<string, OpenTurnStart[]>()
+	const openStartsByRoleId = new Map<string, OpenTurnStart[]>()
+	const openStartsByRole = new Map<string, OpenTurnStart[]>()
 	const entries: TurnEntry[] = []
 	for (const event of logEvents) {
 		if (!isObject(event)) continue
@@ -74,25 +91,23 @@ export function buildTurnIndex(logEvents: unknown): TurnEntry[] {
 		const role = typeof payload['role'] === 'string' && payload['role'] !== '' ? payload['role'] : null
 		if (role === null) continue
 		if (type === 'llm_unavailable' || type === 'context_budget_exceeded') {
-			const failed = openStarts.get(role)
-			if (failed !== undefined && failed.length > 0) failed.pop()
+			const failed = openStartsByRole.get(role)
+			const start = failed !== undefined && failed.length > 0 ? failed.pop() : undefined
+			if (start !== undefined) removeOpenStart(openStartsByRoleId.get(start.roleId), start)
 			continue
 		}
 		const eventIndex = readEventIndex(event['index'])
 		if (eventIndex === null) continue
+		const roleId = typeof payload['roleId'] === 'string' && payload['roleId'] !== '' ? payload['roleId'] : null
+		if (roleId === null) continue
 		const timestamp = typeof event['timestamp'] === 'string' ? event['timestamp'] : null
-		const roleId = typeof payload['roleId'] === 'string' && payload['roleId'] !== '' ? payload['roleId'] : role
 		if (type === 'llm_call_start') {
-			const open = openStarts.get(role)
-			if (open === undefined) {
-				openStarts.set(role, [{ eventIndex, timestamp, roleId }])
-			} else {
-				open.push({ eventIndex, timestamp, roleId })
-			}
+			appendOpenStart(openStartsByRoleId, openStartsByRole, { eventIndex, timestamp, role, roleId })
 			continue
 		}
-		const open = openStarts.get(role)
+		const open = openStartsByRoleId.get(roleId)
 		const start = open !== undefined && open.length > 0 ? open.pop() : undefined
+		if (start !== undefined) removeOpenStart(openStartsByRole.get(start.role), start)
 		entries.push({
 			kind: 'completed',
 			eventIndex,
@@ -107,14 +122,14 @@ export function buildTurnIndex(logEvents: unknown): TurnEntry[] {
 			levelHint: payloadLevelHint(payload),
 		})
 	}
-	for (const [role, open] of openStarts) {
+	for (const open of openStartsByRoleId.values()) {
 		for (const start of open) {
 			entries.push({
 				kind: 'in_flight',
 				eventIndex: start.eventIndex,
 				startEventIndex: null,
 				turnNumber: 0,
-				role,
+				role: start.role,
 				roleId: start.roleId,
 				messageCount: null,
 				timestamp: start.timestamp,

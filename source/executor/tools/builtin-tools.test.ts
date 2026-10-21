@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import type { LogEvent, Message, RoleDefinition, ToolCall, ToolResult } from '../types.js'
 import type { RunToolScope } from './index.js'
-import { createInvocationJournal } from '../invocation.js'
+import { createInvocationJournal, type ToolInvocation } from '../invocation.js'
 import { createRunParkTracker } from '../park-state.js'
 import { createEmptyRoleState, createFixtureRunScope, createFixtureToolPlatform, defined, recordingHumanBackend } from '../test-fixtures.js'
 
@@ -43,8 +43,13 @@ function makeCall(name: string, args: Record<string, unknown>): ToolCall {
 	return { id: `call_${name}_1`, type: 'function', function: { name, arguments: JSON.stringify(args) } }
 }
 
+function invocationFor(call: ToolCall): ToolInvocation {
+	return { toolCall: call, questionId: call.id, callId: `tool:${call.id}`, parentCallId: 'role:fixture-0-0' }
+}
+
 async function dispatch(scope: RunToolScope, tools: string[], name: string, args: Record<string, unknown>): Promise<ToolResult> {
-	return platform.dispatch(roleWith(tools), scope, makeCall(name, args))
+	const call = makeCall(name, args)
+	return platform.dispatch(roleWith(tools), scope, call, invocationFor(call))
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

@@ -1,7 +1,7 @@
 import * as fs from 'node:fs'
 import * as path from 'node:path'
 import { createToolError } from '../errors.js'
-import { STYLE_GUIDE_FILE_NAME } from '../persistence.js'
+import { createReadRunFormat, STYLE_GUIDE_FILE_NAME } from '../persistence.js'
 import { isRunIdShape } from '../run-id.js'
 import { isRunDocumentContent, MAX_RUN_DOCUMENT_CHARS, runDocumentDeliveryProblem, runDocumentWriteProblem } from './run-document.js'
 import type { ToolHandler } from './tool-dispatch.js'
@@ -42,14 +42,16 @@ function createWriteStyleGuide(config: StyleGuideToolConfig): ToolHandler {
 }
 
 function createReadStyleGuide(config: StyleGuideToolConfig): ToolHandler {
-	const currentRunPath = styleGuidePath(config.runsBaseDir, config.runId)
+	const readRunFormat = createReadRunFormat(config.runsBaseDir)
 	return (args) => {
 		const runIdValue = args['runId']
-		let targetPath = currentRunPath
+		let targetRunId = config.runId
 		if (runIdValue !== undefined) {
 			if (!isRunIdShape(runIdValue)) return createToolError('invalid_arguments', 'runId must look like "run-YYYYMMDD-HHMMSS"')
-			targetPath = styleGuidePath(config.runsBaseDir, runIdValue)
+			targetRunId = runIdValue
 		}
+		if (readRunFormat(targetRunId) !== 'current') return createToolError('unavailable', 'this run format is not supported by the current build')
+		const targetPath = styleGuidePath(config.runsBaseDir, targetRunId)
 		// A missing style guide is a normal state (the style lead may not have run yet), not an IO error, so it reads as "unavailable".
 		if (!fs.existsSync(targetPath)) return createToolError('unavailable', 'no style guide has been written for this run')
 		let content: string

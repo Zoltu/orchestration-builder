@@ -75,9 +75,8 @@ export interface EngineDependencies {
 export interface SuspendedTurn {
 	toolCalls: ToolCall[]
 	childIndex: number
-	// Present on a checkpoint written with invocation identity; absent on a legacy child suspension, whose terminal keeps the old unkeyed shape.
-	callId?: string
-	parentCallId?: string
+	callId: string
+	parentCallId: string
 	resolveChildCard: () => Promise<ResultCard>
 }
 

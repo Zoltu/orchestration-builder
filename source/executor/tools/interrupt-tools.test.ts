@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import { createRoleRegistry, type RoleRegistry } from '../role-registry.ts'
 import type { RoleState } from '../state.ts'
+import type { ToolInvocation } from '../invocation.ts'
 import { createRunParkTracker } from '../park-state.ts'
 import { createFixtureRunScope, createFixtureToolPlatform, stubHumanBackend, toolData } from '../test-fixtures.ts'
 import type { RoleDefinition, LogEvent, Message, ToolCall, ToolResult } from '../types.js'
@@ -23,6 +24,7 @@ function fixtureHistory(): Message[] {
 function fixtureRoleState(): RoleState {
 	return {
 		history: fixtureHistory(),
+		protectedPrefixLength: 2,
 		lastPromptTokens: 0,
 		recentCompactionPromptTokens: [],
 		recentToolCalls: [
@@ -49,8 +51,13 @@ function makeCall(name: string, args: Record<string, unknown>): ToolCall {
 	return { id: `call_${name}_1`, type: 'function', function: { name, arguments: JSON.stringify(args) } }
 }
 
+function invocationFor(call: ToolCall): ToolInvocation {
+	return { toolCall: call, questionId: call.id, callId: `tool:${call.id}`, parentCallId: 'role:fixture-0-0' }
+}
+
 async function dispatch(scope: RunToolScope, name: string, args: Record<string, unknown>): Promise<ToolResult> {
-	return platform.dispatch(builtInRole, scope, makeCall(name, args))
+	const call = makeCall(name, args)
+	return platform.dispatch(builtInRole, scope, call, invocationFor(call))
 }
 
 function makeContext(): { context: RunToolScope; registry: RoleRegistry; target: RoleState; callerState: RoleState } {

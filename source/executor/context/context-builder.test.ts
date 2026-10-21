@@ -213,7 +213,7 @@ describe('buildInitialHistory — prior result rendering', () => {
 		expect(defined(history[2], 'prior result turn').content).toBe('[Prior run result — status: interrupted.]\n\nError: The service stopped while this run was in progress.')
 	})
 
-	test('a legacy continuation without status, result, or error still renders a sensible result turn', () => {
+	test('a continuation without status, result, or error still renders a sensible result turn', () => {
 		const history = initialHistory('sys', contextFor({ continuation: { ...base, summary: '' } }))
 		expect(defined(history[2], 'prior result turn').content).toBe('[Prior run result — status: unknown.]\n\n(No result summary, artifacts, or error were recorded for the prior run.)')
 	})

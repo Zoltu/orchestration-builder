@@ -1,6 +1,7 @@
 import { isEffortLevel, isInvolvementLevel, isLogLevel, isObject, isString } from '../validation.js'
 import { isRunIdShape } from '../run-id.js'
 import { questionFromParkSummary, type PauseState } from '../park-state.js'
+import { QUEUE_FORMAT_VERSION } from '../orchestration-version.js'
 import type { EffortLevel, InvolvementLevel, LogLevel, RunMeta } from '../types.js'
 
 // Pure queue logic and validation for the durable task queue (docs/queueing.md "The queue: storage, item model, state machine"). Every transformation is a whole-queue value: it takes a queue and returns a new one, so the module's read-modify-write cycles stay free of hidden mutation. Serialization and orchestration live in persistence.ts and task-queue.ts; only the read-only DTOs cross the module boundary.
@@ -67,6 +68,7 @@ export interface QueueItem {
 }
 
 export interface TaskQueue {
+	version: typeof QUEUE_FORMAT_VERSION
 	items: QueueItem[]
 }
 
@@ -105,6 +107,7 @@ export function isQueueItem(value: unknown): value is QueueItem {
 
 export function isTaskQueue(value: unknown): value is TaskQueue {
 	if (!isObject(value)) return false
+	if (value.version !== QUEUE_FORMAT_VERSION) return false
 	if (!Array.isArray(value.items) || !value.items.every(isQueueItem)) return false
 	return true
 }
@@ -208,27 +211,16 @@ export function dispatchingItem(item: QueueItem): QueueItem {
 	}
 }
 
-// Returns an answered active marker to waiting with the resume pointers reconstructed from its paused run's checkpoint. Current markers carry the pointers themselves; this remains for legacy markers recorded before they did, so a retry still re-enters the same run.
-export function restoreAnsweredToWaiting(item: QueueItem, runId: string, pauseState: PauseState): QueueItem {
-	const waiting = releaseToWaiting(item)
-	if (pauseState.kind === 'clarification') {
-		// A clarification resume has no parked call; drop any stale tool-call pointer carried by a legacy marker.
-		delete waiting.resumeToolCallId
-		return { ...waiting, resumeRunId: runId }
-	}
-	return { ...waiting, resumeRunId: runId, resumeToolCallId: pauseState.ask.toolCallId }
-}
-
 export function withReplacedItem(queue: TaskQueue, item: QueueItem): TaskQueue {
-	return { items: queue.items.map((existing) => (existing.id === item.id ? item : existing)) }
+	return { version: QUEUE_FORMAT_VERSION, items: queue.items.map((existing) => (existing.id === item.id ? item : existing)) }
 }
 
 export function enqueueAtTail(queue: TaskQueue, item: QueueItem): TaskQueue {
-	return { items: [...queue.items, item] }
+	return { version: QUEUE_FORMAT_VERSION, items: [...queue.items, item] }
 }
 
 export function enqueueAtHead(queue: TaskQueue, item: QueueItem): TaskQueue {
-	return { items: [item, ...queue.items] }
+	return { version: QUEUE_FORMAT_VERSION, items: [item, ...queue.items] }
 }
 
 // The by-id guard behind every operator PATCH: the item must exist (404) and be waiting (409), whether or not the patch carries a field to apply.
@@ -270,7 +262,7 @@ export function reorderWaitingItem(queue: TaskQueue, id: string, position: numbe
 		if (next === undefined) throw new Error(`reorderWaitingItem: waiting-list bookkeeping lost item ${item.id}`)
 		return next
 	})
-	return { ok: true, queue: { items }, item: target }
+	return { ok: true, queue: { version: QUEUE_FORMAT_VERSION, items }, item: target }
 }
 
 // The DELETE endpoint's behavior: a waiting item is never dropped from the file — it is marked cancelled (with settledAt) so the UI can show recent outcomes.
@@ -317,14 +309,14 @@ function cancelledItem(target: QueueItem, settledAt: string): QueueItem {
 export function removeWaitingItem(queue: TaskQueue, id: string): QueueMutation {
 	const required = requireWaitingItem(queue, id)
 	if (!required.ok) return required
-	return { ok: true, queue: { items: queue.items.filter((item) => item.id !== id) }, item: required.item }
+	return { ok: true, queue: { version: QUEUE_FORMAT_VERSION, items: queue.items.filter((item) => item.id !== id) }, item: required.item }
 }
 
 export function recordAnswer(queue: TaskQueue, id: string, answer: string, answerId: string, resume?: { runId: string; toolCallId?: string }): QueueMutation {
 	const target = findById(queue, id)
 	if (target === undefined) return { ok: false, reason: 'not_found' }
 	if (target.status !== 'needs_input') return { ok: false, reason: 'forbidden_status' }
-	// The run id is dropped from runId (a waiting item showing an old run id would read as the run in flight) and carried by resumeRunId instead. A same-run resume preserves the item's lineage; a legacy fallback re-points it at the paused run so the briefed continuation names the right attempt. Only a parked ask adds the tool call whose result the answer replaces.
+	// The run id is dropped from runId (a waiting item showing an old run id would read as the run in flight) and carried by resumeRunId instead. A same-run resume preserves the item's lineage; a briefed fallback re-points it at the paused run so the continuation names the right attempt. Only a parked ask adds the tool call whose result the answer replaces.
 	const lineage = resume === undefined
 		? target.runId !== undefined
 			? { continuesFrom: target.runId }
@@ -342,20 +334,17 @@ export function recordAnswer(queue: TaskQueue, id: string, answer: string, answe
 		status: 'waiting',
 	}
 	// The answered item fronts the file so it is the next waiting item the scheduler dispatches — the queue-native resume.
-	return { ok: true, queue: { items: [answered, ...queue.items.filter((item) => item.id !== id)] }, item: answered }
+	return { ok: true, queue: { version: QUEUE_FORMAT_VERSION, items: [answered, ...queue.items.filter((item) => item.id !== id)] }, item: answered }
 }
 
 // True when an answer was recorded for this item but has not been delivered into its paused run. The item's resume target must be the run that just settled, so a fallback dispatch's new run can never consume an old answer. For a parked ask a matching tool call proves the same ask; a clarification receipt with no tool call belongs to an earlier pause, so a later parked ask is new. For a clarification pause the checkpoint records the delivered answer id and whether the resumed run consumed it: an id match that was never consumed (a crash before the running meta) is still undelivered, while a consumed match is a legitimate re-pause and settles normally. A missing checkpoint means the answer was delivered, so neither kind is undelivered.
 export function pendingAnswerUndelivered(item: QueueItem, pauseState: PauseState | null, runId: string): boolean {
 	if (item.answer === undefined) return false
-	const resumeTargetMatchesRun = item.resumeRunId !== undefined ? item.resumeRunId === runId : item.continuesFrom === runId
-	if (!resumeTargetMatchesRun) return false
+	if (item.resumeRunId !== runId) return false
 	if (pauseState === null) return false
 	if (pauseState.kind === 'parked_ask') {
-		if (item.resumeToolCallId !== undefined) return pauseState.ask.toolCallId === item.resumeToolCallId && pauseState.ask.question === item.question
-		// A clarification receipt (it has an answer id) is not the answer to this later ask, even when the text is identical.
-		if (item.answerId !== undefined) return false
-		return pauseState.ask.question === item.question
+		if (item.resumeToolCallId === undefined) return false
+		return pauseState.ask.toolCallId === item.resumeToolCallId && pauseState.ask.question === item.question
 	}
 	// A parked tool-call pointer never belongs to a clarification resume.
 	if (item.resumeToolCallId !== undefined) return false
@@ -376,7 +365,7 @@ export function requeueErrorItem(queue: TaskQueue, id: string): QueueMutation {
 		status: 'waiting',
 	}
 	// The errored entry is replaced by the requeued one at the tail, not duplicated.
-	return { ok: true, queue: enqueueAtTail({ items: queue.items.filter((existing) => existing.id !== id) }, requeued), item: requeued }
+	return { ok: true, queue: enqueueAtTail({ version: QUEUE_FORMAT_VERSION, items: queue.items.filter((existing) => existing.id !== id) }, requeued), item: requeued }
 }
 
 // The explicit error-resume's queue counterpart: the operator resumed an errored run from its checkpoint under the same run id, so the item settled to error for that run returns to the active slot under it — the queue panel tracks the live run instead of showing a stale error, and the resumed run's own settlement maps the item exactly as any active item's would (settleActiveItem matches on the run id). Outcome fields (settledAt, resultSummary, error) belong to the settled stage and are not carried, mirroring carriedFields; an unknown or non-error item leaves the queue untouched — the resume is driven by the run's meta and checkpoint, and an item whose record was requeued or cancelled does not bind.
@@ -484,8 +473,7 @@ export function repairActiveItem(item: QueueItem, meta: RunMeta | null, settledA
 		if (meta.status === 'running') return { kind: 'untouched', item }
 		// Only a needs_clarification terminal can mean the answer is still undelivered: success/error prove the resumed run finished, and releasing those would rerun a done task. A re-park (different call, or a clarification checkpoint that already records this answer id) is delivered and settles normally.
 		if (meta.status === 'needs_clarification' && pendingAnswerUndelivered(item, pauseState, runId)) {
-			const waiting = pauseState !== null ? restoreAnsweredToWaiting(item, runId, pauseState) : releaseToWaiting(item)
-			return { kind: 'released', item: waiting }
+			return { kind: 'released', item: releaseToWaiting(item) }
 		}
 		if (meta.status === 'interrupted') return { kind: 'released', item: releaseToWaiting(item, runId) }
 		const mapped = mapSettledItemState(meta)

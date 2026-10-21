@@ -41,6 +41,7 @@ function roleStateFor(): RoleState {
 			{ role: 'system', content: 'sys' },
 			{ role: 'user', content: 'task' },
 		],
+		protectedPrefixLength: 2,
 		lastPromptTokens: 0,
 		recentCompactionPromptTokens: [],
 		recentToolCalls: [],

@@ -5,7 +5,7 @@ import { createRunState } from '../executor/run-state.ts'
 import { createReadPauseStateById, createResumeClarificationRun, createResumeErroredRun, createResumeParkedRun, createRunSubmission, createTerminateParkedRun, type ResumeRun, type RunSubmission, type StartRun } from '../executor/run-submission.ts'
 import { createTaskQueue, type QueueItemView, type QueueView } from '../executor/queue/index.ts'
 import type { RunCheckpoint } from '../executor/checkpoint.ts'
-import type { ProjectSettings, ReadProjectSettings, WriteProjectSettings, RunSnapshotRaw, RunSnapshotStats, RunSummaryStats } from '../executor/persistence.ts'
+import { createListCurrentRunIds, type ListRunIds, type ProjectSettings, type ReadProjectSettings, type ReadRunFormat, type WriteProjectSettings, type RunSnapshotRaw, type RunSnapshotStats, type RunSummaryStats } from '../executor/persistence.ts'
 import type { DeploymentConfig, EffortLevel, GuildConfig, InvolvementLevel, LogEvent, LogLevel, RunContinuation, RunMeta } from '../executor/types.js'
 import { isRunMeta } from '../executor/validation.ts'
 import { parseLogEvents, parseRunMeta, type RunSnapshot } from '../run-log/index.js'
@@ -55,7 +55,7 @@ interface QueueSeedItem extends QueueItemView {
 }
 
 function createInMemoryQueueStore(initial: QueueSeedItem[] = []): { store: { read: () => string | null; write: (contents: string) => void }; snapshot: () => QueueView; writes: string[]; events: string[] } {
-	let current: string | null = initial.length === 0 ? null : JSON.stringify({ items: initial })
+	let current: string | null = initial.length === 0 ? null : JSON.stringify({ version: 1, items: initial })
 	const writes: string[] = []
 	const events: string[] = []
 	return {
@@ -96,8 +96,8 @@ function snapshotFor(runId: string, status: RunMeta['status'] = 'success', overr
 			...overrides,
 		}),
 		logText: [
-			JSON.stringify({ timestamp: '2026-01-01T00:00:01.000Z', type: 'llm_call', payload: { role: 'planner', usage: { promptTokens: 100, completionTokens: 20, totalTokens: 120 } } }),
-			JSON.stringify({ timestamp: '2026-01-01T00:00:02.000Z', type: 'role_finished', payload: { role: 'planner', status: 'success' } }),
+			JSON.stringify({ timestamp: '2026-01-01T00:00:01.000Z', type: 'llm_call', payload: { role: 'planner', roleId: 'planner:1', usage: { promptTokens: 100, completionTokens: 20, totalTokens: 120 } } }),
+			JSON.stringify({ timestamp: '2026-01-01T00:00:02.000Z', type: 'role_finished', payload: { role: 'planner', callId: 'role:planner:1', status: 'success' } }),
 		].join('\n'),
 	}
 }
@@ -119,10 +119,10 @@ const snapshots = new Map<string, RunSnapshotRaw>([
 			endTime: '2026-01-01T00:01:00.000Z',
 		}),
 		logText: [
-			JSON.stringify({ timestamp: '2026-01-01T00:00:01.000Z', type: 'llm_call', payload: { role: 'planner' } }),
-			JSON.stringify({ timestamp: '2026-01-01T00:00:02.000Z', type: 'ask_human', payload: { id: 'q1', question: 'Which framework?', context: 'src/index.ts' } }),
-			JSON.stringify({ timestamp: '2026-01-01T00:00:30.000Z', type: 'human_answer', payload: { id: 'q1', answer: 'react' } }),
-			JSON.stringify({ timestamp: '2026-01-01T00:00:31.000Z', type: 'ask_human', payload: { id: 'q2', question: 'Still unsure?' } }),
+			JSON.stringify({ timestamp: '2026-01-01T00:00:01.000Z', type: 'llm_call', payload: { role: 'planner', roleId: 'planner:1' } }),
+			JSON.stringify({ timestamp: '2026-01-01T00:00:02.000Z', type: 'ask_human', payload: { id: 'q1', question: 'Which framework?', context: 'src/index.ts', callId: 'tool:q1', parentCallId: 'role:planner:1' } }),
+			JSON.stringify({ timestamp: '2026-01-01T00:00:30.000Z', type: 'human_answer', payload: { id: 'q1', answer: 'react', callId: 'tool:q1' } }),
+			JSON.stringify({ timestamp: '2026-01-01T00:00:31.000Z', type: 'ask_human', payload: { id: 'q2', question: 'Still unsure?', callId: 'tool:q2', parentCallId: 'role:planner:1' } }),
 		].join('\n'),
 	}],
 	// A run startup reconciliation could not resume: terminal 'interrupted' meta with the reconciliation's error record.
@@ -138,8 +138,8 @@ const snapshots = new Map<string, RunSnapshotRaw>([
 			error: { kind: 'interrupted', message: 'The service stopped while this run was in progress and it could not be resumed (no valid checkpoint).' },
 		}),
 		logText: [
-			JSON.stringify({ timestamp: '2026-01-01T00:00:01.000Z', type: 'role_start', payload: { role: 'planner', roleId: 'planner-0-1', depth: 0, task: 'task for run-interrupted' } }),
-			JSON.stringify({ timestamp: '2026-01-01T00:00:02.000Z', type: 'llm_call', payload: { role: 'planner', usage: { promptTokens: 50, completionTokens: 10, totalTokens: 60 } } }),
+			JSON.stringify({ timestamp: '2026-01-01T00:00:01.000Z', type: 'role_start', payload: { role: 'planner', roleId: 'planner-0-1', callId: 'role:planner-0-1', depth: 0, task: 'task for run-interrupted' } }),
+			JSON.stringify({ timestamp: '2026-01-01T00:00:02.000Z', type: 'llm_call', payload: { role: 'planner', roleId: 'planner-0-1', usage: { promptTokens: 50, completionTokens: 10, totalTokens: 60 } } }),
 		].join('\n'),
 	}],
 	// A run still marked running, so the continuation API can exercise the "prior run must be terminal" rejection.
@@ -331,14 +331,14 @@ snapshots.set('run-tree', {
 		endTime: '2026-01-01T00:01:00.000Z',
 	}),
 	logText: [
-		JSON.stringify({ timestamp: '2026-01-01T00:00:01.000Z', type: 'role_start', payload: { role: 'orchestrator', depth: 0, task: 'task for run-tree' } }),
-		JSON.stringify({ timestamp: '2026-01-01T00:00:02.000Z', type: 'llm_call', payload: { role: 'orchestrator', messageCount: 2, sent: [{ role: 'system', content: 'p' }, { role: 'user', content: 'task for run-tree' }], received: { content: 'delegating', toolCalls: [{ id: 'c1', function: { name: 'agent', arguments: '{"role":"coder","task":"code"}' } }] }, finishReason: 'tool_calls', usage: { promptTokens: 50, completionTokens: 10, totalTokens: 60 } } }),
+		JSON.stringify({ timestamp: '2026-01-01T00:00:01.000Z', type: 'role_start', payload: { role: 'orchestrator', roleId: 'orchestrator:1', callId: 'role:orchestrator:1', depth: 0, task: 'task for run-tree' } }),
+		JSON.stringify({ timestamp: '2026-01-01T00:00:02.000Z', type: 'llm_call', payload: { role: 'orchestrator', roleId: 'orchestrator:1', messageCount: 2, sent: [{ role: 'system', content: 'p' }, { role: 'user', content: 'task for run-tree' }], received: { content: 'delegating', toolCalls: [{ id: 'c1', function: { name: 'agent', arguments: '{"role":"coder","task":"code"}' } }] }, finishReason: 'tool_calls', usage: { promptTokens: 50, completionTokens: 10, totalTokens: 60 } } }),
 		JSON.stringify({ timestamp: '2026-01-01T00:00:03.000Z', type: 'tool_call', payload: { role: 'orchestrator', tool: 'agent', arguments: '{"role":"coder","task":"code"}' } }),
 		JSON.stringify({ timestamp: '2026-01-01T00:00:04.000Z', type: 'agent_call', payload: { parent: 'orchestrator', child: 'coder', depth: 1 } }),
-		JSON.stringify({ timestamp: '2026-01-01T00:00:05.000Z', type: 'role_start', payload: { role: 'coder', depth: 1, parent: 'orchestrator', task: 'code' } }),
+		JSON.stringify({ timestamp: '2026-01-01T00:00:05.000Z', type: 'role_start', payload: { role: 'coder', roleId: 'coder:1', callId: 'role:coder:1', parentCallId: 'role:orchestrator:1', depth: 1, parent: 'orchestrator', task: 'code' } }),
 		JSON.stringify({ timestamp: '2026-01-01T00:00:06.000Z', type: 'tool_result', payload: { role: 'orchestrator', tool: 'agent', kind: 'success', result: { kind: 'success', data: { status: 'success', summary: 'coded' } } } }),
-		JSON.stringify({ timestamp: '2026-01-01T00:00:07.000Z', type: 'role_finished', payload: { role: 'coder', depth: 1, status: 'success', parent: 'orchestrator' } }),
-		JSON.stringify({ timestamp: '2026-01-01T00:00:08.000Z', type: 'role_finished', payload: { role: 'orchestrator', depth: 0, status: 'success' } }),
+		JSON.stringify({ timestamp: '2026-01-01T00:00:07.000Z', type: 'role_finished', payload: { role: 'coder', callId: 'role:coder:1', depth: 1, status: 'success', parent: 'orchestrator' } }),
+		JSON.stringify({ timestamp: '2026-01-01T00:00:08.000Z', type: 'role_finished', payload: { role: 'orchestrator', callId: 'role:orchestrator:1', depth: 0, status: 'success' } }),
 	].join('\n'),
 })
 
@@ -354,11 +354,11 @@ snapshots.set('run-delta', {
 		endTime: '2026-01-01T00:01:00.000Z',
 	}),
 	logText: [
-		JSON.stringify({ timestamp: '2026-01-01T00:00:01.000Z', type: 'role_start', payload: { role: 'coder', depth: 0, task: 'task for run-delta' } }),
-		JSON.stringify({ timestamp: '2026-01-01T00:00:02.000Z', type: 'llm_call', payload: { role: 'coder', messageCount: 2, sentFrom: 0, sent: [{ role: 'system', content: 'p' }, { role: 'user', content: 'task for run-delta' }], received: { content: 'working', toolCalls: [] }, usage: { promptTokens: 10, completionTokens: 5, totalTokens: 15 } } }),
-		JSON.stringify({ timestamp: '2026-01-01T00:00:03.000Z', type: 'llm_call', payload: { role: 'coder', messageCount: 4, sentFrom: 2, sent: [{ role: 'assistant', content: 'working', tool_calls: [{ id: 'c1', type: 'function', function: { name: 'write_file', arguments: '{"path":"x"}' } }] }, { role: 'tool', content: 'ok' }], received: { content: 'done', toolCalls: [] }, finishReason: 'stop', usage: { promptTokens: 30, completionTokens: 5, totalTokens: 35 } } }),
-		JSON.stringify({ timestamp: '2026-01-01T00:00:04.000Z', type: 'llm_call', payload: { role: 'coder', messageCount: 4, sentFrom: 0, sent: [{ role: 'system', content: 'p' }, { role: 'user', content: 'task for run-delta' }, { role: 'assistant', content: 'working', tool_calls: [{ id: 'c1', type: 'function', function: { name: 'write_file', arguments: '{"path":"x"}' } }] }, { role: 'tool', content: 'ok' }], received: { content: 'done', toolCalls: [] }, finishReason: 'stop', usage: { promptTokens: 30, completionTokens: 5, totalTokens: 35 } } }),
-		JSON.stringify({ timestamp: '2026-01-01T00:00:05.000Z', type: 'role_finished', payload: { role: 'coder', depth: 0, status: 'success' } }),
+		JSON.stringify({ timestamp: '2026-01-01T00:00:01.000Z', type: 'role_start', payload: { role: 'coder', roleId: 'coder:1', callId: 'role:coder:1', depth: 0, task: 'task for run-delta' } }),
+		JSON.stringify({ timestamp: '2026-01-01T00:00:02.000Z', type: 'llm_call', payload: { role: 'coder', roleId: 'coder:1', messageCount: 2, sentFrom: 0, sent: [{ role: 'system', content: 'p' }, { role: 'user', content: 'task for run-delta' }], received: { content: 'working', toolCalls: [] }, usage: { promptTokens: 10, completionTokens: 5, totalTokens: 15 } } }),
+		JSON.stringify({ timestamp: '2026-01-01T00:00:03.000Z', type: 'llm_call', payload: { role: 'coder', roleId: 'coder:1', messageCount: 4, sentFrom: 2, sent: [{ role: 'assistant', content: 'working', tool_calls: [{ id: 'c1', type: 'function', function: { name: 'write_file', arguments: '{"path":"x"}' } }] }, { role: 'tool', content: 'ok' }], received: { content: 'done', toolCalls: [] }, finishReason: 'stop', usage: { promptTokens: 30, completionTokens: 5, totalTokens: 35 } } }),
+		JSON.stringify({ timestamp: '2026-01-01T00:00:04.000Z', type: 'llm_call', payload: { role: 'coder', roleId: 'coder:1', messageCount: 4, sentFrom: 0, sent: [{ role: 'system', content: 'p' }, { role: 'user', content: 'task for run-delta' }, { role: 'assistant', content: 'working', tool_calls: [{ id: 'c1', type: 'function', function: { name: 'write_file', arguments: '{"path":"x"}' } }] }, { role: 'tool', content: 'ok' }], received: { content: 'done', toolCalls: [] }, finishReason: 'stop', usage: { promptTokens: 30, completionTokens: 5, totalTokens: 35 } } }),
+		JSON.stringify({ timestamp: '2026-01-01T00:00:05.000Z', type: 'role_finished', payload: { role: 'coder', callId: 'role:coder:1', depth: 0, status: 'success' } }),
 	].join('\n'),
 })
 
@@ -374,10 +374,10 @@ snapshots.set('run-flow-details', {
 		endTime: '2026-01-01T00:01:00.000Z',
 	}),
 	logText: [
-		JSON.stringify({ timestamp: '2026-01-01T00:00:01.000Z', type: 'role_start', payload: { role: 'coder', depth: 0, task: 'do the work' } }),
-		JSON.stringify({ timestamp: '2026-01-01T00:00:02.000Z', type: 'tool_call', payload: { role: 'coder', tool: 'read_file', arguments: '{"path":"README.md"}' } }),
-		JSON.stringify({ timestamp: '2026-01-01T00:00:03.000Z', type: 'tool_result', payload: { role: 'coder', tool: 'read_file', kind: 'success', result: { kind: 'success', data: { content: '# Project' } } } }),
-		JSON.stringify({ timestamp: '2026-01-01T00:00:04.000Z', type: 'role_finished', payload: { role: 'coder', depth: 0, status: 'success', summary: 'done' } }),
+		JSON.stringify({ timestamp: '2026-01-01T00:00:01.000Z', type: 'role_start', payload: { role: 'coder', roleId: 'coder:1', callId: 'role:coder:1', depth: 0, task: 'do the work' } }),
+		JSON.stringify({ timestamp: '2026-01-01T00:00:02.000Z', type: 'tool_call', payload: { role: 'coder', tool: 'read_file', callId: 'tool:read_file:1', parentCallId: 'role:coder:1', arguments: '{"path":"README.md"}' } }),
+		JSON.stringify({ timestamp: '2026-01-01T00:00:03.000Z', type: 'tool_result', payload: { role: 'coder', tool: 'read_file', callId: 'tool:read_file:1', kind: 'success', result: { kind: 'success', data: { content: '# Project' } } } }),
+		JSON.stringify({ timestamp: '2026-01-01T00:00:04.000Z', type: 'role_finished', payload: { role: 'coder', callId: 'role:coder:1', depth: 0, status: 'success', summary: 'done' } }),
 	].join('\n'),
 })
 
@@ -393,12 +393,12 @@ snapshots.set('run-retry', {
 		endTime: '2026-01-01T00:02:00.000Z',
 	}),
 	logText: [
-		JSON.stringify({ timestamp: '2026-01-01T00:00:01.000Z', type: 'role_start', payload: { role: 'orchestrator', depth: 0, task: 'task for run-retry' } }),
-		JSON.stringify({ timestamp: '2026-01-01T00:00:02.000Z', type: 'role_start', payload: { role: 'coder', depth: 1, parent: 'orchestrator', task: 'first attempt' } }),
-		JSON.stringify({ timestamp: '2026-01-01T00:00:03.000Z', type: 'role_finished', payload: { role: 'coder', depth: 1, status: 'error', summary: 'file not found', error: { kind: 'invalid_arguments', message: 'no such file' }, parent: 'orchestrator' } }),
-		JSON.stringify({ timestamp: '2026-01-01T00:00:04.000Z', type: 'role_start', payload: { role: 'coder', depth: 1, parent: 'orchestrator', task: 'second attempt' } }),
-		JSON.stringify({ timestamp: '2026-01-01T00:00:05.000Z', type: 'role_finished', payload: { role: 'coder', depth: 1, status: 'success', summary: 'wrote the file', parent: 'orchestrator' } }),
-		JSON.stringify({ timestamp: '2026-01-01T00:00:06.000Z', type: 'role_finished', payload: { role: 'orchestrator', depth: 0, status: 'success', summary: 'done after retry' } }),
+		JSON.stringify({ timestamp: '2026-01-01T00:00:01.000Z', type: 'role_start', payload: { role: 'orchestrator', roleId: 'orchestrator:1', callId: 'role:orchestrator:1', depth: 0, task: 'task for run-retry' } }),
+		JSON.stringify({ timestamp: '2026-01-01T00:00:02.000Z', type: 'role_start', payload: { role: 'coder', roleId: 'coder:1', callId: 'role:coder:1', parentCallId: 'role:orchestrator:1', depth: 1, parent: 'orchestrator', task: 'first attempt' } }),
+		JSON.stringify({ timestamp: '2026-01-01T00:00:03.000Z', type: 'role_finished', payload: { role: 'coder', callId: 'role:coder:1', depth: 1, status: 'error', summary: 'file not found', error: { kind: 'invalid_arguments', message: 'no such file' }, parent: 'orchestrator' } }),
+		JSON.stringify({ timestamp: '2026-01-01T00:00:04.000Z', type: 'role_start', payload: { role: 'coder', roleId: 'coder:2', callId: 'role:coder:2', parentCallId: 'role:orchestrator:1', depth: 1, parent: 'orchestrator', task: 'second attempt' } }),
+		JSON.stringify({ timestamp: '2026-01-01T00:00:05.000Z', type: 'role_finished', payload: { role: 'coder', callId: 'role:coder:2', depth: 1, status: 'success', summary: 'wrote the file', parent: 'orchestrator' } }),
+		JSON.stringify({ timestamp: '2026-01-01T00:00:06.000Z', type: 'role_finished', payload: { role: 'orchestrator', callId: 'role:orchestrator:1', depth: 0, status: 'success', summary: 'done after retry' } }),
 	].join('\n'),
 })
 
@@ -452,27 +452,6 @@ snapshots.set('run-chain', {
 		JSON.stringify({ timestamp: 't014', type: 'role_finished', payload: { role: 'coder', roleId: 'coder-2', depth: 1, status: 'success' } }),
 		JSON.stringify({ timestamp: 't015', type: 'llm_unavailable', payload: { role: 'orchestrator', message: 'endpoint down' } }),
 		JSON.stringify({ timestamp: 't016', type: 'role_finished', payload: { role: 'orchestrator', roleId: 'orchestrator-0', depth: 0, status: 'success' } }),
-	].join('\n'),
-})
-
-// An old-format log: the role_start events carry the parent ROLE name and depth but predate per-instance parent ids (no parentRoleId), so the ?instance= ancestry walk must fall back to the name-and-depth heuristic.
-snapshots.set('run-chain-legacy', {
-	metaText: JSON.stringify({
-		runId: 'run-chain-legacy',
-		guildPath: 'guild',
-		benchmarkPath: 'bench',
-		task: 'task for run-chain-legacy',
-		status: 'success',
-		startTime: '2026-01-01T00:00:00.000Z',
-		endTime: '2026-01-01T00:01:00.000Z',
-	}),
-	logText: [
-		JSON.stringify({ timestamp: 't000', type: 'role_start', payload: { role: 'orchestrator', roleId: 'orchestrator-0', depth: 0 } }),
-		JSON.stringify({ timestamp: 't001', type: 'llm_call', payload: { role: 'orchestrator', roleId: 'orchestrator-0' } }),
-		JSON.stringify({ timestamp: 't002', type: 'role_start', payload: { role: 'coder', roleId: 'coder-1', depth: 1, parent: 'orchestrator' } }),
-		JSON.stringify({ timestamp: 't003', type: 'llm_call', payload: { role: 'coder', roleId: 'coder-1' } }),
-		JSON.stringify({ timestamp: 't004', type: 'role_finished', payload: { role: 'coder', roleId: 'coder-1', depth: 1, status: 'success' } }),
-		JSON.stringify({ timestamp: 't005', type: 'role_finished', payload: { role: 'orchestrator', roleId: 'orchestrator-0', depth: 0, status: 'success' } }),
 	].join('\n'),
 })
 
@@ -542,7 +521,7 @@ interface HandlerHarness {
 
 // Builds a fresh handler whose startRun and resumeRun park on caller-controlled resolvers, so each test drives its own run lifecycle without touching shared state. The static leaf is a recording fake; every dependency is in-memory. runIdCollides makes runDirectoryExists report an existing directory for the generated id, exercising the submit-level run_id_collision refusal. build seeds the image build identifier GET /api/config surfaces (null, as from a source checkout, unless a test passes one). initialCheckpoints seeds the in-memory checkpoint store (raw state.json text by run id) the resume submission and the resumable flag read.
 // The queue store and the scheduler are wired exactly as serve.ts wires them: the handler's mutations and the POST /api/runs enqueue go through the same in-memory leaves, the scheduler dispatches through the submission, and a settled run promise maps its item and ticks onward.
-function createHandlerHarness(options: { runIdCollides?: boolean, build?: BuildInfo | null, initialQueueItems?: QueueSeedItem[], initialCheckpoints?: Map<string, string>, initialMetas?: Map<string, string>, flowFeedOptions?: FlowFeedResponderOptions } = {}): HandlerHarness {
+function createHandlerHarness(options: { runIdCollides?: boolean, build?: BuildInfo | null, initialQueueItems?: QueueSeedItem[], initialCheckpoints?: Map<string, string>, initialMetas?: Map<string, string>, flowFeedOptions?: FlowFeedResponderOptions, listRunIds?: ListRunIds, readRunFormat?: ReadRunFormat } = {}): HandlerHarness {
 	let resolveActive: (meta: RunMeta) => void = () => {}
 	let resolveResumed: (meta: RunMeta) => void = () => {}
 	let capturedEffort: EffortLevel | undefined
@@ -606,6 +585,7 @@ function createHandlerHarness(options: { runIdCollides?: boolean, build?: BuildI
 	const resumeClarificationRun = createResumeClarificationRun({ runSubmission: submission, readRunMetaById: harnessReadRunMetaById, readCheckpointById })
 	const terminateParkedRun = createTerminateParkedRun({
 		readRunMetaById: harnessReadRunMetaById,
+		readRunLogEvents: (runId) => runLogs.get(runId) ?? [],
 		writeMetaFor: (runId) => (meta) => {
 			metaOverrides.set(runId, JSON.stringify(meta))
 		},
@@ -618,10 +598,13 @@ function createHandlerHarness(options: { runIdCollides?: boolean, build?: BuildI
 			runLogs.set(runId, events)
 		},
 	})
+	const rawListRunIds = options.listRunIds ?? listRunIds
+	const readRunFormat = options.readRunFormat ?? (() => 'current')
+	const visibleListRunIds = createListCurrentRunIds(rawListRunIds, readRunFormat)
 	const taskQueue = createTaskQueue({
 		queueStore: queue.store,
 		readRunMetaById: harnessReadRunMetaById,
-		listRunIds,
+		listRunIds: rawListRunIds,
 		readRunListSummary,
 		readPauseStateById,
 		resumeParkedRun,
@@ -660,11 +643,11 @@ function createHandlerHarness(options: { runIdCollides?: boolean, build?: BuildI
 			readRunListSummary,
 			readRunPlanById,
 			readRunSnapshotStats: harnessReadRunSnapshotStats,
-			listRunIds,
 			readProjectSettings: settings.read,
 			writeProjectSettings: settings.write,
 			taskQueue,
 			resumeErroredRun,
+			listRunIds: visibleListRunIds,
 			runCheckpointExists: (runId) => checkpoints.has(runId),
 			build: options.build ?? null,
 			flowFeedResponder,
@@ -714,7 +697,7 @@ function terminalMeta(runId: string, task: string): RunMeta {
 // A minimal valid checkpoint for the resume tests: a single depth-0 frame (an active entry role).
 function resumeCheckpoint(runId: string): RunCheckpoint {
 	return {
-		version: 1,
+		version: 2,
 		runId,
 		startTime: '2026-01-01T00:00:00.000Z',
 		registryCounter: 1,
@@ -729,6 +712,7 @@ function resumeCheckpoint(runId: string): RunCheckpoint {
 						{ role: 'system', content: 'prompt' },
 						{ role: 'user', content: 'task' },
 					],
+					protectedPrefixLength: 2,
 					lastPromptTokens: 10,
 					recentCompactionPromptTokens: [],
 					recentToolCalls: [],
@@ -749,7 +733,7 @@ function parkedCheckpoint(runId: string): RunCheckpoint {
 	if (entry === undefined) throw new Error('checkpoint has no entry frame')
 	return {
 		...checkpoint,
-		parkedAsk: { roleId: 'orchestrator-0-1', toolCallId: 'ask_1', question: 'which database?' },
+		parkedAsk: { roleId: 'orchestrator-0-1', toolCallId: 'ask_1', callId: 'tool:ask_1', questionId: 'ask_1', question: 'which database?' },
 		frames: [
 			{
 				...entry,
@@ -1082,9 +1066,9 @@ describe('GET /api/runs (list)', () => {
 		expect(envelope.kind).toBe('snapshot')
 		const list = runSummariesFromFrame(envelope)
 		expect(Array.isArray(list)).toBe(true)
-		expect(list.length).toBe(19)
+		expect(list.length).toBe(18)
 		expect(list.map((entry) => entry.runId)).toEqual([
-			'run-tree', 'run-retry', 'run-long', 'run-interrupted', 'run-flow-details', 'run-effort', 'run-delta', 'run-chain-orphan', 'run-chain-legacy', 'run-chain-failure', 'run-chain', 'run-cached', 'run-active', 'run-3', 'run-20260101-000300', 'run-20260101-000100', 'run-20260101-000000', 'run-2', 'run-1',
+			'run-tree', 'run-retry', 'run-long', 'run-interrupted', 'run-flow-details', 'run-effort', 'run-delta', 'run-chain-orphan', 'run-chain-failure', 'run-chain', 'run-cached', 'run-active', 'run-3', 'run-20260101-000300', 'run-20260101-000100', 'run-20260101-000000', 'run-2', 'run-1',
 		])
 		expect(list).toContainEqual({
 			runId: 'run-interrupted',
@@ -1134,6 +1118,25 @@ describe('GET /api/runs (list)', () => {
 		const continuation = runSummariesFromFrame(envelope).find((entry) => entry.runId === 'run-effort')
 		if (continuation === undefined) throw new Error('expected the continuation fixture in the run list')
 		expect(continuation.continuesFrom).toBe('run-20260101-000000')
+	})
+
+	test('omits runs whose manifest is not current', async () => {
+		const formats = new Map<string, ReturnType<ReadRunFormat>>([
+			['run-gate-current', 'current'],
+			['run-gate-missing', 'missing'],
+			['run-gate-old', 'old'],
+			['run-gate-newer', 'newer'],
+			['run-gate-malformed', 'malformed'],
+		])
+		const { handler } = createHandlerHarness({
+			listRunIds: () => [...formats.keys()],
+			readRunFormat: (runId) => formats.get(runId) ?? 'missing',
+		})
+
+		const response = await handler(get('/api/runs'))
+		const envelope = await response.json()
+
+		expect(runSummariesFromFrame(envelope).map((entry) => entry.runId)).toEqual(['run-gate-current'])
 	})
 })
 
@@ -1562,15 +1565,6 @@ describe('GET /api/runs/:id/log', () => {
 		const response = await handler(get('/api/runs/run-chain/log?instance='))
 		const body = await response.json()
 		expect(body.total).toBe(17)
-	})
-
-	test('old logs without parentRoleId resolve ancestry by role name and depth', async () => {
-		const { handler } = createHandlerHarness()
-		const response = await handler(get('/api/runs/run-chain-legacy/log?instance=coder-1'))
-		const body = await response.json()
-		// The name-and-depth fallback finds orchestrator-0 (depth 0 === 1 − 1, latest earlier start), so the root's lifecycle joins the scoped set.
-		expect(body.total).toBe(5)
-		expect(body.events.map((event: { index: number }) => event.index)).toEqual([0, 2, 3, 4, 5])
 	})
 
 	test('a genuinely absent ancestor start ends the ancestry walk', async () => {
@@ -2224,14 +2218,14 @@ describe('/api/queue', () => {
 	test('GET returns the ordered item list with statuses, head first', async () => {
 		const { handler } = createHandlerHarness({ initialQueueItems: [
 			queueItem('w1', 'first waiting'),
-			queueItem('n1', 'needs answer', { status: 'needs_input', question: 'which database?', continuesFrom: 'run-20260101-000000' }),
+			queueItem('n1', 'needs answer', { status: 'needs_input', question: 'which database?', runId: 'run-20260101-000000', continuesFrom: 'run-20260101-000000' }),
 			queueItem('w2', 'second waiting'),
 		] })
 		const response = await handler(get('/api/queue'))
 		expect(response.status).toBe(200)
 		expect(await response.json()).toEqual([
 			{ id: 'w1', task: 'first waiting', status: 'waiting', queuedAt: '2026-01-01T00:00:00.000Z' },
-			{ id: 'n1', task: 'needs answer', status: 'needs_input', queuedAt: '2026-01-01T00:00:00.000Z', question: 'which database?', continuesFrom: 'run-20260101-000000' },
+			{ id: 'n1', task: 'needs answer', status: 'needs_input', queuedAt: '2026-01-01T00:00:00.000Z', question: 'which database?', runId: 'run-20260101-000000', continuesFrom: 'run-20260101-000000' },
 			{ id: 'w2', task: 'second waiting', status: 'waiting', queuedAt: '2026-01-01T00:00:00.000Z' },
 		])
 	})
@@ -2441,7 +2435,7 @@ describe('/api/queue', () => {
 	})
 
 	test('POST /:id/terminate rejects an unknown id with 404 and a non-needs_input item with 409', async () => {
-		const { handler } = createHandlerHarness({ initialQueueItems: [queueItem('w1'), queueItem('n1', 'parked task', { status: 'needs_input', question: 'which?' }), queueItem('d1', 'done task', { status: 'done', settledAt: '2026-01-01T00:01:00.000Z' })] })
+		const { handler } = createHandlerHarness({ initialQueueItems: [queueItem('w1'), queueItem('n1', 'parked task', { status: 'needs_input', question: 'which?', runId: 'run-20260101-000999' }), queueItem('d1', 'done task', { status: 'done', settledAt: '2026-01-01T00:01:00.000Z' })] })
 		const unknown = await handler(post('/api/queue/missing/terminate'))
 		expect(unknown.status).toBe(404)
 		expect(await unknown.json()).toEqual({ ok: false, error: 'not_found' })
@@ -2492,7 +2486,7 @@ describe('/api/queue', () => {
 				queueItem('w1', 'already waiting'),
 				queueItem('n1', 'parked task', { status: 'needs_input', question: 'which database?', continuesFrom: 'run-20260101-000000', runId: 'run-20260101-000300' }),
 			],
-			// The parked run's meta is needs_clarification (a live park) while its checkpoint is missing, which exercises the legacy continuation fallback rather than the terminated-run answer guard.
+			// The parked run's meta is needs_clarification (a live park) while its checkpoint is missing, which exercises the missing-checkpoint continuation fallback rather than the terminated-run answer guard.
 			initialMetas: new Map([['run-20260101-000300', JSON.stringify({ runId: 'run-20260101-000300', guildPath: 'guild', task: 'parked task', status: 'needs_clarification', startTime: '2026-01-01T00:00:00.000Z', endTime: '2026-01-01T00:01:00.000Z', result: { status: 'needs_clarification', summary: 'waiting for an answer to: which database?' } })]]),
 		})
 		const response = await handler(post('/api/queue/n1/answer', JSON.stringify({ answer: 'postgres' })))
@@ -2500,7 +2494,7 @@ describe('/api/queue', () => {
 		const item = await response.json()
 		expect(item.status).toBe('waiting')
 		expect(item.answer).toBe('postgres')
-		// The paused run's id is dropped from the waiting item; the legacy fallback re-points the lineage at that run.
+		// The paused run's id is dropped from the waiting item; the missing-checkpoint fallback re-points the lineage at that run.
 		expect(item.runId).toBeUndefined()
 		// The answered item fronts the waiting list and the tick dispatched it (ahead of the earlier waiting item) as a continuation of the paused run.
 		const items = queue.snapshot().items
@@ -2615,7 +2609,7 @@ describe('/api/queue', () => {
 describe('/api/questions and /api/answer', () => {
 	test('GET /api/questions returns the pending list and POST /api/answer resolves the ask', async () => {
 		const { handler, humanBackend } = createHandlerHarness()
-		const askPromise = humanBackend.ask('Which framework?', 'src/index.ts')
+		const askPromise = humanBackend.ask('Which framework?', { questionId: 'question-1', callId: 'tool:question-1', parentCallId: 'role:test-0-1' }, 'src/index.ts')
 
 		const response = await handler(get('/api/questions'))
 		expect(response.status).toBe(200)

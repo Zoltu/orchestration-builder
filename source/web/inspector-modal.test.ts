@@ -425,9 +425,6 @@ describe('InspectorModal transcript', () => {
 		expect(allByClass(renderView(view, { livePartial: { roleId: 'coder-1', role: 'coder', reasoning: '', content: '' } }), 'inspector-live-partial')).toHaveLength(0)
 		expect(allByClass(renderView(view, { livePartial: { roleId: 'coder-1-9', role: 'coder', reasoning: 'drifting', content: '' } }), 'inspector-live-partial')).toHaveLength(0)
 		expect(allByClass(renderView(view, { livePartial: 'broken' }), 'inspector-live-partial')).toHaveLength(0)
-		const fallbackEvents = [...stitchEvents, startEvent(3, 'coder')]
-		const fallback = renderView(sessionFor(fallbackEvents, { scopedRoleId: 'coder' }).view(), { livePartial: { roleId: 'coder-1', role: 'coder', reasoning: 'legacy', content: '' } })
-		expect(allByClass(fallback, 'inspector-live-partial')).toHaveLength(1)
 	})
 
 	test('a standard-level turn renders its header with the honest degraded notice, and the transcript stays navigable', () => {

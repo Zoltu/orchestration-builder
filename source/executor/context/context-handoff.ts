@@ -3,7 +3,7 @@ import { logEvent, type EngineContext, type RoleState } from '../engine-state.js
 import { createResultCard, createToolError } from '../errors.js'
 import type { AppendLog } from '../persistence.js'
 import type { ResultCard } from '../types.js'
-import { compactHistoryForContextBudget, DEFAULT_PROTECTED_PREFIX_LENGTH, type ContextCompactionReport } from './context-policy.js'
+import { compactHistoryForContextBudget, type ContextCompactionReport } from './context-policy.js'
 import { effectiveContextBudget, type ContextPressureTracker } from './context-pressure.js'
 
 // The recovery loop for a context-window rejection: each rejection compacts with a fresh endpoint-reported token count, so the estimate recalibrates on every attempt. Three attempts give the estimate room to converge without letting a hopeless request spin.
@@ -52,7 +52,7 @@ export function applyContextBackstop(roleState: RoleState, context: EngineContex
 		contextWindow: rejection.contextWindow,
 		promptTokens: rejection.promptTokens,
 		targetFraction: CONTEXT_RECOVERY_TARGET_FRACTION,
-		protectedPrefixLength: roleState.protectedPrefixLength ?? DEFAULT_PROTECTED_PREFIX_LENGTH,
+		protectedPrefixLength: roleState.protectedPrefixLength,
 	})
 	roleState.history = report.history
 	// The compaction rewrote the history out from under the llm_call delta baseline — truncation changes content without changing length, so the emission's length check cannot see it — forcing the role's next llm_call to log a full snapshot.

@@ -1637,7 +1637,7 @@ describe('resumeExecutor', () => {
 		// The error-run checkpoint shape where the root's interrupted turn was batched [agent, finish]: the child's card is recorded, and the turn's remaining call is the finish — the resumed role terminates without a further LLM request, so the loop-entry injection alone would silently drop the note.
 		const finishCall: ToolCall = { id: 'f1', type: 'function', function: { name: 'finish', arguments: JSON.stringify({ status: 'success', summary: 'wrapped up' }) } }
 		const checkpoint: RunCheckpoint = {
-			version: 1,
+			version: 2,
 			runId: 'r-batched',
 			startTime: '2026-01-01T00:00:00.000Z',
 			registryCounter: 1,
@@ -1648,6 +1648,7 @@ describe('resumeExecutor', () => {
 					depth: 0,
 					task: 'do it',
 					roleState: {
+						protectedPrefixLength: 2,
 						history: [
 							{ role: 'system', content: 'prompt' },
 							{ role: 'user', content: 'do it' },
@@ -1664,7 +1665,9 @@ describe('resumeExecutor', () => {
 					},
 					pending: {
 						toolCalls: [agentToolCall('a1', 'coder', 'subtask'), finishCall],
-						childIndex: 0,
+						index: 0,
+						callId: 'tool:a1',
+						parentCallId: 'role:orchestrator-0-1',
 						childCard: { status: 'success', summary: 'child done' },
 					},
 				},

@@ -1,4 +1,4 @@
-import { askHumanPayload, humanAnswerPayload, roleCallId, toolCallId } from './invocation.js'
+import { askHumanPayload, humanAnswerPayload } from './invocation.js'
 import type { AppendLog } from './persistence.js'
 
 export interface HumanAskInvocation {
@@ -25,9 +25,6 @@ export type AnswerSubmitResult =
 	| { kind: 'not_found' }
 
 export interface WebHumanBackend extends HumanBackend {
-	ask(question: string, invocation: HumanAskInvocation, context?: string): Promise<string>
-	// Compatibility for callers that predate invocation identity (the web server's direct test harness): the second argument is the context and the question gets a generated id. Executor asks always use the identity overload.
-	ask(question: string, context?: string): Promise<string>
 	submitAnswer(id: string, answer: string): AnswerSubmitResult
 	pendingQuestions(): PendingQuestion[]
 	bindRunLog(appendLog: AppendLog | null): void
@@ -49,17 +46,7 @@ export function createWebHumanBackend(): WebHumanBackend {
 		bindRunLog(appendLog) {
 			runLog = appendLog
 		},
-		ask(question: string, invocationOrContext?: HumanAskInvocation | string, maybeContext?: string): Promise<string> {
-			let invocation: HumanAskInvocation
-			let context: string | undefined
-			if (typeof invocationOrContext === 'string' || invocationOrContext === undefined) {
-				const id = crypto.randomUUID()
-				invocation = { questionId: id, callId: toolCallId(id), parentCallId: roleCallId('unattributed') }
-				context = invocationOrContext
-			} else {
-				invocation = invocationOrContext
-				context = maybeContext
-			}
+		ask(question: string, invocation: HumanAskInvocation, context?: string): Promise<string> {
 			const id = invocation.questionId
 			const askedAt = new Date().toISOString()
 			const pendingQuestion: PendingQuestion = {
@@ -105,9 +92,4 @@ export function createWebHumanBackend(): WebHumanBackend {
 			return Array.from(pending.values(), (entry) => entry.question)
 		},
 	}
-}
-
-// The tool platform builds the invocation identity for a blocking ask from the tool call and the asking role, so a direct platform dispatch (and a legacy caller that supplies no journal identity) still keys the question by the tool-call id.
-export function askInvocationFor(id: string, parentRoleId: string): HumanAskInvocation {
-	return { questionId: id, callId: toolCallId(id), parentCallId: roleCallId(parentRoleId) }
 }

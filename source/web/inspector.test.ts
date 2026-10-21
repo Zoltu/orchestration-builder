@@ -10,7 +10,7 @@ function participant(id: string, role: string, kind: 'human' | 'interrupt' | 'ro
 }
 
 function operation(id: string, kind: 'call' | 'return' | 'observe' | 'terminate', source: string, destination: string) {
-	return { id, kind, stack: 'main', source, destination, startedAt: 't0', settledAt: null, lifecycle: 'in_flight' as const, outcome: null, metrics: null }
+	return { id, kind, callId: id, stack: 'main', source, destination, startedAt: 't0', settledAt: null, lifecycle: 'in_flight' as const, outcome: null, metrics: null }
 }
 
 // The delegation story the click-through serves: human → orchestrator → coder, a tool leg, an ask_human answerer, and a second coder instance for the most-recent-instance rule.
@@ -49,13 +49,13 @@ describe('resolveInspectorScope — participant targets', () => {
 		expect(resolveInspectorScope(model(), { kind: 'participant', id: 'tool:read_file:1' })).toBeNull()
 	})
 
-	test('an agent node without an instance id falls back to the role name — the identity turn entries use on logs without per-instance ids', () => {
-		const legacy: InteractionModel = {
+	test('an agent node without an instance id is not a drill-in', () => {
+		const roleNameOnly: InteractionModel = {
 			participants: [participant('you', 'human', 'human'), participant('role:coder:1', 'coder', 'role')],
 			operations: [operation('op1', 'call', 'you', 'role:coder:1')],
 			status: 'running',
 		}
-		expect(resolveInspectorScope(legacy, { kind: 'participant', id: 'role:coder:1' })).toBe('coder')
+		expect(resolveInspectorScope(roleNameOnly, { kind: 'participant', id: 'role:coder:1' })).toBeNull()
 	})
 
 	test('a participant id the model no longer carries resolves to no scope', () => {

@@ -20,6 +20,7 @@ function operation(id: string, overrides: Partial<Operation> = {}): Operation {
 	return {
 		id,
 		kind: 'call',
+		callId: id,
 		stack: 'main',
 		source: 'human:root',
 		destination: 'role:coder:1',

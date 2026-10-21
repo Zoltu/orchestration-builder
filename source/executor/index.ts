@@ -13,7 +13,10 @@ export type { LlmUsagePayload, DiscardedRetrySpend } from './types.js'
 export { ConfigurationError, ValidationError } from './errors.js'
 
 export { createCheckpointRecorder, entryFrameLogLevel, isRunCheckpoint } from './checkpoint.js'
-export type { CheckpointFrame, CheckpointRecorder, CheckpointRecorderDependencies, PendingChildSuspension, PendingInvocation, PendingRecord, RunCheckpoint } from './checkpoint.js'
+export type { CheckpointFrame, CheckpointRecorder, CheckpointRecorderDependencies, PendingInvocation, RunCheckpoint } from './checkpoint.js'
+
+export { CHECKPOINT_FORMAT_VERSION, QUEUE_FORMAT_VERSION, ROLE_SNAPSHOT_FORMAT_VERSION, RUN_MANIFEST_VERSION, SETTINGS_FORMAT_VERSION, classifyVersion } from './orchestration-version.js'
+export type { VersionStatus } from './orchestration-version.js'
 
 export type { RoleSnapshotStore } from './role-snapshot.js'
 
@@ -117,16 +120,19 @@ export {
 	createWriteCheckpoint,
 	createDeleteCheckpoint,
 	createRoleSnapshotStore,
+	createReadRunFormat,
 	createReadRunCheckpointById,
 	createRunCheckpointExists,
 	createReadRunSnapshotById,
 	createReadRunMetaById,
+	createReadRunMetaTextById,
 	createWriteRunSummary,
 	createReadRunSummaryById,
 	createReadRunPlanById,
 	createReadRunSnapshotStats,
 	createReadRunLogTextFrom,
 	createReadRunSummaryStats,
+	createListCurrentRunIds,
 	createListRunIds,
 	createReadProjectSettings,
 	createWriteProjectSettings,
@@ -143,9 +149,11 @@ export type {
 	WriteCheckpoint,
 	DeleteCheckpoint,
 	ReadRunCheckpointById,
+	ReadRunFormat,
 	RunCheckpointExists,
 	ReadRunSnapshotById,
 	ReadRunMetaById,
+	ReadRunMetaTextById,
 	WriteRunSummary,
 	ReadRunSummaryById,
 	ReadRunPlanById,

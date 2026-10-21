@@ -19,9 +19,8 @@ interface WindowEvent {
 	payload: unknown
 }
 
-function startEvent(index: number, role: string, roleId?: string): WindowEvent {
-	const payload: Record<string, unknown> = { role }
-	if (roleId !== undefined) payload['roleId'] = roleId
+function startEvent(index: number, role: string, roleId = `${role}-1`): WindowEvent {
+	const payload: Record<string, unknown> = { role, roleId }
 	return { index, timestamp: `2026-01-01T00:00:${String(index % 60).padStart(2, '0')}Z`, type: 'llm_call_start', payload }
 }
 
@@ -140,7 +139,7 @@ describe('turn pairing and view scoping', () => {
 	})
 
 	test('an llm_call_start without a matching llm_call is in flight; a failure event closes it', () => {
-		const flight = sessionFor([startEvent(4, 'coder')], { scopedRoleId: 'coder' })
+		const flight = sessionFor([startEvent(4, 'coder')], { scopedRoleId: 'coder-1' })
 		const turns = transcriptOf(flight)
 		expect(turns).toHaveLength(1)
 		const turn = defined(turns[0], 'turns[0]')
@@ -155,21 +154,31 @@ describe('turn pairing and view scoping', () => {
 	test('same-name nesting pairs LIFO, and the failure closes the newest open start', () => {
 		const nested = sessionFor([startEvent(0, 'coder'), startEvent(1, 'coder'), callEvent(2, 'coder'), callEvent(3, 'coder')], { scopedRoleId: 'coder-1' })
 		expect(transcriptOf(nested).map((turn) => turn.eventIndex)).toEqual([2, 3])
-		const failed = sessionFor([startEvent(0, 'coder'), startEvent(1, 'coder'), turnFailureEvent(2, 'llm_unavailable', 'coder')], { scopedRoleId: 'coder' })
+		const failed = sessionFor([startEvent(0, 'coder'), startEvent(1, 'coder'), turnFailureEvent(2, 'llm_unavailable', 'coder')], { scopedRoleId: 'coder-1' })
 		const turns = transcriptOf(failed)
 		expect(turns).toHaveLength(1)
 		expect(defined(turns[0], 'turns[0]').eventIndex).toBe(0)
 	})
 
-	test('turn headers carry the payload roleId, falling back to the role name when absent', () => {
+	test('pairing is keyed by roleId, so a same-named sibling does not complete another instance start', () => {
+		const events = [startEvent(0, 'coder', 'coder-1'), callEvent(1, 'coder', { roleId: 'coder-2' })]
+		const first = transcriptOf(sessionFor(events, { scopedRoleId: 'coder-1' }))
+		expect(first.map((turn) => turn.kind)).toEqual(['in_flight'])
+		expect(defined(first[0], 'first[0]').roleId).toBe('coder-1')
+		const second = transcriptOf(sessionFor(events, { scopedRoleId: 'coder-2' }))
+		expect(second.map((turn) => turn.kind)).toEqual(['completed'])
+		expect(defined(second[0], 'second[0]').roleId).toBe('coder-2')
+	})
+
+	test('turn headers carry the payload roleId', () => {
 		const session = sessionFor([
 			startEvent(0, 'planner', 'planner-0-1'),
 			callEvent(3, 'planner', { roleId: 'planner-0-1' }),
-			startEvent(5, 'coder'),
+			startEvent(5, 'coder', 'coder-1'),
 			standardCallEvent(7, 'critic'),
 		])
-		expect(session.view().scopedRoleId).toBe('coder')
-		expect(sessionFor([startEvent(0, 'coder')], { scopedRoleId: 'coder' }).view().transcript[0]?.roleId).toBe('coder')
+		expect(session.view().scopedRoleId).toBe('coder-1')
+		expect(sessionFor([startEvent(0, 'coder', 'coder-1')], { scopedRoleId: 'coder-1' }).view().transcript[0]?.roleId).toBe('coder-1')
 		expect(sessionFor([standardCallEvent(7, 'critic')], { scopedRoleId: 'critic-1' }).view().transcript[0]?.roleId).toBe('critic-1')
 	})
 
@@ -184,14 +193,14 @@ describe('turn pairing and view scoping', () => {
 			{ index: '4', timestamp: 't', type: 'llm_call', payload: { role: 'planner' } },
 			{ index: -1, timestamp: 't', type: 'llm_call', payload: { role: 'planner' } },
 			startEvent(5, 'coder'),
-		], { scopedRoleId: 'coder' })
+		], { scopedRoleId: 'coder-1' })
 		const turns = transcriptOf(session)
 		expect(turns).toHaveLength(1)
 		expect(defined(turns[0], 'turns[0]').kind).toBe('in_flight')
 	})
 
 	test('a sparse completed llm_call and a failure with no open start leave the list honest', () => {
-		const sparse = sessionFor([{ index: 3, timestamp: 't', type: 'llm_call', payload: { role: 'planner' } }], { scopedRoleId: 'planner' })
+		const sparse = sessionFor([{ index: 3, timestamp: 't', type: 'llm_call', payload: { role: 'planner', roleId: 'planner-1' } }], { scopedRoleId: 'planner-1' })
 		const turn = defined(sparse.view().transcript[0], 'sparse turn')
 		expect(turn.kind).toBe('completed')
 		expect(turn.usage).toBeNull()
@@ -249,15 +258,15 @@ describe('instances and ancestry', () => {
 		expect(defined(instances[1], 'instances[1]')).toEqual({ roleId: 'coder-1', role: 'coder', parentRoleId: 'orchestrator-0', parentRole: 'orchestrator', live: false })
 	})
 
-	test('a role_finished without a role_start is still listed as a finished instance with no parent', () => {
+	test('a role_finished without a role_start adds a finished instance with no parent', () => {
 		const instances = sessionFor([roleFinishedEvent(1, 'planner-0-1', 'planner')]).view().instances
 		expect(instances).toEqual([{ roleId: 'planner-0-1', role: 'planner', parentRoleId: null, parentRole: null, live: false }])
 	})
 
-	test('turn events without a roleId ensure a role-name fallback instance whose live flag follows its newest turn', () => {
-		expect(sessionFor([startEvent(0, 'coder')]).view().instances).toEqual([{ roleId: 'coder', role: 'coder', parentRoleId: null, parentRole: null, live: true }])
-		expect(sessionFor([startEvent(0, 'coder'), callEvent(1, 'coder', { roleId: undefined })]).view().instances[0]?.live).toBe(false)
-		expect(sessionFor([callEvent(0, 'coder', { roleId: 'coder-1-9' })]).view().instances).toEqual([{ roleId: 'coder-1-9', role: 'coder', parentRoleId: null, parentRole: null, live: true }])
+	test('turn events with a roleId add a startless instance; events without one do not', () => {
+		expect(sessionFor([startEvent(0, 'coder', 'coder-1')]).view().instances).toEqual([{ roleId: 'coder-1', role: 'coder', parentRoleId: null, parentRole: null, live: true }])
+		expect(sessionFor([callEvent(0, 'coder', { roleId: 'coder-1-9' })]).view().instances).toEqual([{ roleId: 'coder-1-9', role: 'coder', parentRoleId: null, parentRole: null, live: false }])
+		expect(sessionFor([callEvent(0, 'coder', { roleId: undefined })]).view().instances).toEqual([])
 	})
 
 	test('walks a deep chain root-first through exact parent ids, ending at the root-most known start', () => {
@@ -274,20 +283,6 @@ describe('instances and ancestry', () => {
 		expect(sessionFor([defined(events[2], 'events[2]')], { scopedRoleId: 'coder-1-2' }).view().chain).toEqual([{ roleId: 'coder-1-2', role: 'coder' }])
 	})
 
-	test('old logs without parentRoleId fall back to the latest same-named start at depth − 1', () => {
-		const events = [
-			roleStartEvent(0, 'orchestrator-0', 'orchestrator', { depth: 0 }),
-			roleStartEvent(2, 'coder-1', 'coder', { depth: 1, parent: 'orchestrator' }),
-			roleStartEvent(5, 'coder-2', 'coder', { depth: 1, parent: 'orchestrator' }),
-			roleStartEvent(8, 'coder-2-4', 'coder', { depth: 2, parent: 'coder' }),
-		]
-		expect(sessionFor(events, { scopedRoleId: 'coder-2-4' }).view().chain).toEqual([
-			{ roleId: 'orchestrator-0', role: 'orchestrator' },
-			{ roleId: 'coder-2', role: 'coder' },
-			{ roleId: 'coder-2-4', role: 'coder' },
-		])
-	})
-
 	test('an instance with no role_start renders a lone crumb, and a malformed cycle ends the walk', () => {
 		const events = [roleStartEvent(0, 'orchestrator-0', 'orchestrator'), callEvent(9, 'coder', { roleId: 'coder-1-9' })]
 		expect(sessionFor(events, { scopedRoleId: 'coder-1-9' }).view().chain).toEqual([{ roleId: 'coder-1-9', role: 'coder' }])
@@ -298,7 +293,7 @@ describe('instances and ancestry', () => {
 		expect(sessionFor(cyclic, { scopedRoleId: 'a-0' }).view().chain).toEqual([{ roleId: 'b-0', role: 'b' }, { roleId: 'a-0', role: 'a' }])
 	})
 
-	test('childInstanceFor matches the first role_start after the turn by parent id, with the legacy role-name fallback', () => {
+	test('childInstanceFor matches the first role_start after the turn by parent id', () => {
 		const events = [
 			roleStartEvent(0, 'orchestrator-0', 'orchestrator', { depth: 0 }),
 			callEvent(1, 'orchestrator', { roleId: 'orchestrator-0' }),
@@ -309,12 +304,6 @@ describe('instances and ancestry', () => {
 		const session = sessionFor(events, { scopedRoleId: 'orchestrator-0' })
 		expect(session.view().childInstance(1)).toBe('coder-1')
 		expect(session.view().childInstance(2)).toBeNull()
-		const legacy = sessionFor([
-			roleStartEvent(0, 'orchestrator-0', 'orchestrator'),
-			callEvent(1, 'orchestrator', { roleId: 'orchestrator-0' }),
-			roleStartEvent(2, 'coder-1', 'coder', { depth: 1, parent: 'orchestrator' }),
-		], { scopedRoleId: 'orchestrator' })
-		expect(legacy.view().childInstance(1)).toBe('coder-1')
 	})
 
 	test('ambiguous child timing resolves by position, and malformed timing reads as no child', () => {
@@ -565,7 +554,7 @@ describe('log paging', () => {
 
 describe('scoping and per-scope windows', () => {
 	const tailWindow = [
-		startEvent(90, 'coder', 'coder-2'),
+		roleStartEvent(90, 'coder-2', 'coder'),
 		callEvent(91, 'coder', { roleId: 'coder-2' }),
 		roleStartEvent(92, 'coder-1-2', 'coder', { depth: 2, parent: 'coder', parentRoleId: 'coder-1' }),
 	]

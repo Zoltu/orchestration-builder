@@ -273,6 +273,7 @@ describe('context manager compaction backstop', () => {
 	function roleStateFor(history: Message[]): RoleState {
 		return {
 			history,
+			protectedPrefixLength: 2,
 			lastPromptTokens: 0,
 			recentCompactionPromptTokens: [],
 			recentToolCalls: [],

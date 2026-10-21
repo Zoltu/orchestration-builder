@@ -121,13 +121,11 @@ function operationByIdIn(operations: unknown[], operationId: string): Record<str
 	return undefined
 }
 
-// The scope id a participant contributes: the executor's instance id when the participant carries one (every `role_start` in a current log does), else the role name — which is the identity the modal's turn entries fall back to on logs without per-instance ids, so a role-name scope still lands on that role's turns there. Null when neither identity is a usable string.
+// The scope id a participant contributes: the executor's instance id (every `role_start` in a current log carries one). Null when the participant has no usable instance id.
 function instanceScopeIdOf(participant: Record<string, unknown>): string | null {
 	const roleId = participant['roleId']
-	if (typeof roleId === 'string' && roleId !== '') return roleId
-	const role = participant['role']
-	if (typeof role !== 'string' || role === '') return null
-	return role
+	if (typeof roleId !== 'string' || roleId === '') return null
+	return roleId
 }
 
 // Whether the participant is an agent role — the drill-in target kind. The human, interrupt, and tool participants have no LLM turns to inspect, so a click on them keeps the hover behavior.

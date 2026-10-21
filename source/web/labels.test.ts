@@ -107,7 +107,7 @@ const sampleConfig = {
 const labels = createLabelResolver(sampleConfig)
 
 function operation(id: string, kind: Operation['kind'], stack: string, source: string, destination: string, outcome: Operation['outcome'] = null): Operation {
-	return { id, kind, stack, source, destination, startedAt: 't0', settledAt: null, lifecycle: 'in_flight', outcome, metrics: null }
+	return { id, kind, callId: id, stack, source, destination, startedAt: 't0', settledAt: null, lifecycle: 'in_flight', outcome, metrics: null }
 }
 
 function indexParticipants(participants: Participant[]): ReadonlyMap<string, Participant> {

@@ -224,7 +224,7 @@ export interface ResumeParkedRunDependencies {
 	readCheckpointById: ReadRunCheckpointById
 }
 
-// The queue's same-run answer resume (docs/queueing.md "Ordering, answers, and failure semantics"): re-enters the parked run under its own id with the answer, restoring the queue-tracked mark so a later pre-write ask parks again instead of blocking. Every rejection is a value; the queue falls back to the legacy briefed dispatch when the checkpoint is gone or no longer parked.
+// The queue's same-run answer resume (docs/queueing.md "Ordering, answers, and failure semantics"): re-enters the parked run under its own id with the answer, restoring the queue-tracked mark so a later pre-write ask parks again instead of blocking. Every rejection is a value; the queue falls back to the briefed dispatch when the checkpoint is gone or no longer parked.
 export function createResumeParkedRun(dependencies: ResumeParkedRunDependencies): ResumeParkedRun {
 	return (runId, parkedAnswer) => {
 		if (dependencies.runSubmission.activeRunId() !== undefined) return { ok: false, error: 'run_in_progress' }
@@ -261,7 +261,7 @@ export interface ResumeClarificationRunDependencies {
 	readCheckpointById: ReadRunCheckpointById
 }
 
-// The queue's same-run resume of a direct clarification finish (docs/queueing.md "Ordering, answers, and failure semantics"): there is no parked call to replace, so the answer re-enters the run under its own id as a framed operator note. A checkpoint carrying parkedAsk belongs to the parked-answer path and is rejected here. Every rejection is a value; the queue falls back to the legacy briefed dispatch when the pause can no longer be resumed.
+// The queue's same-run resume of a direct clarification finish (docs/queueing.md "Ordering, answers, and failure semantics"): there is no parked call to replace, so the answer re-enters the run under its own id as a framed operator note. A checkpoint carrying parkedAsk belongs to the parked-answer path and is rejected here. Every rejection is a value; the queue falls back to the briefed dispatch when the pause can no longer be resumed.
 export function createResumeClarificationRun(dependencies: ResumeClarificationRunDependencies): ResumeClarificationRun {
 	return (runId, clarificationAnswer) => {
 		if (dependencies.runSubmission.activeRunId() !== undefined) return { ok: false, error: 'run_in_progress' }
@@ -292,8 +292,8 @@ export type TerminateParkedRun = (runId: string) => TerminateParkedRunResult
 
 export interface TerminateParkedRunDependencies {
 	readRunMetaById: ReadRunMetaById
-	// Supplied by the service so termination can close open invocations; legacy embedders that omit it keep the old termination behavior.
-	readRunLogEvents?: ReadRunLogEvents
+	// Supplied by the service so termination can close open invocations.
+	readRunLogEvents: ReadRunLogEvents
 	writeMetaFor: (runId: string) => WriteMeta
 	deleteCheckpointFor: (runId: string) => DeleteCheckpoint
 	appendLogFor: (runId: string) => AppendLog
@@ -312,9 +312,7 @@ function terminationLogEvent(timestamp: string): LogEvent {
 
 // Operator termination ends the run, so every invocation still open in its log — parked ask, paused roles, handler work — gets one interrupted terminal before the run_terminated event. The stale planner is the same idempotent pass resume uses; a missing or corrupt checkpoint simply leaves the log untouched.
 function closeOpenInvocationsOnTermination(dependencies: TerminateParkedRunDependencies, runId: string, timestamp: string): void {
-	const readRunLogEvents = dependencies.readRunLogEvents
-	if (readRunLogEvents === undefined) return
-	const events = readRunLogEvents(runId)
+	const events = dependencies.readRunLogEvents(runId)
 	const appendLog = dependencies.appendLogFor(runId)
 	for (const terminal of planStaleInvocationTerminals(events, new Set(), new Set())) {
 		appendLog({ timestamp, type: terminal.type, payload: terminal.payload })

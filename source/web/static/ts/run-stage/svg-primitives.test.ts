@@ -46,11 +46,11 @@ function participant(id: string, role: string, kind: Participant['kind']): Parti
 }
 
 function callOperation(id: string, source: string, destination: string, metrics: Operation['metrics'] = null): Operation {
-	return { id, kind: 'call', stack: 'root', source, destination, startedAt: 't0', settledAt: null, lifecycle: 'in_flight', outcome: null, metrics }
+	return { id, kind: 'call', callId: id, stack: 'root', source, destination, startedAt: 't0', settledAt: null, lifecycle: 'in_flight', outcome: null, metrics }
 }
 
-function returnOperation(id: string, source: string, destination: string, outcome: 'success' | 'error'): Operation {
-	return { id, kind: 'return', stack: 'root', source, destination, startedAt: 't1', settledAt: null, lifecycle: 'in_flight', outcome, metrics: null }
+function returnOperation(id: string, source: string, destination: string, outcome: 'success' | 'error', callId = 'op1'): Operation {
+	return { id, kind: 'return', callId, stack: 'root', source, destination, startedAt: 't1', settledAt: null, lifecycle: 'in_flight', outcome, metrics: null }
 }
 
 function coderModel(metrics: Operation['metrics'] = null): InteractionModel {

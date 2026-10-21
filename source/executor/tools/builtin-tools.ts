@@ -1,12 +1,12 @@
 import { createToolError, isErrorKind } from '../errors.js'
 import type { Message, ResultCard, ToolResult } from '../types.js'
-import { DEFAULT_PROTECTED_PREFIX_LENGTH, stripReasoning } from '../context/index.js'
+import { stripReasoning } from '../context/index.js'
 import { indexRoleMessages, readMessageWindow, searchRoleBlocks, MAX_SEARCH_MATCHES, RECENT_TOOL_CALLS_LIMIT, type InspectionField, type RecentToolCall } from '../role-inspection.js'
 import type { InterruptActionKind, RoleRegistry, RoleRegistryEntry } from '../role-registry.js'
 import { isObject } from '../validation.js'
 import { optionalPositiveInt } from './shared.js'
 import type { ToolHandler } from './tool-dispatch.js'
-import { askInvocationFor, type HumanBackend } from '../human-backend.js'
+import type { HumanBackend } from '../human-backend.js'
 import { askHumanPayload, type ToolInvocation } from '../invocation.js'
 import { logEvent } from '../engine-state.js'
 import type { ProtectedPrefixLength, RoleState } from '../state.js'
@@ -29,8 +29,8 @@ export interface BuiltInToolContext {
 	parkTracker: RunParkTracker
 	// The flagged instance this invocation serves as an interrupt handler (EngineContext.handlerOf), when the role runs as one. trigger_interrupt refuses any other target: only the flagged entry's interruptAction is consumed by the loop-check resolution, so a decision parked on another entry would sit unapplied and fire out of context at that entry's next loop check.
 	handlerOf?: string
-	// The identity the engine allocated for this dispatch. Direct platform dispatches omit it and the ask handler falls back to the tool call's own id.
-	invocation?: ToolInvocation
+	// The identity the engine allocated for this dispatch.
+	invocation: ToolInvocation
 }
 
 interface FinishValidationSuccess {
@@ -329,7 +329,7 @@ function createEditContext(context: BuiltInToolContext): ToolHandler {
 				return createToolError('invalid_arguments', `Unknown operation: ${String(opValue)}`)
 			}
 		}
-		const applied = applyEditOperations(target.state.history, operations, target.state.protectedPrefixLength ?? DEFAULT_PROTECTED_PREFIX_LENGTH)
+		const applied = applyEditOperations(target.state.history, operations, target.state.protectedPrefixLength)
 		if (!applied.ok) return applied.error
 		target.state.history = applied.history
 		// The edit rewrote the target's history out from under its llm_call delta baseline — a replace would be invisible in a slice-based delta — so the target's next llm_call logs a full snapshot.
@@ -362,7 +362,7 @@ function createAskHuman(context: BuiltInToolContext): ToolHandler {
 		const contextValue = args['context']
 		const contextString = typeof contextValue === 'string' ? contextValue : undefined
 		if (call === undefined) throw new Error('ask_human: the tool call is required to key the question')
-		const invocation = context.invocation ?? askInvocationFor(call.id, context.ownRoleId)
+		const invocation = context.invocation
 		// The pre-write park (docs/queueing.md "Parking: the pre-write rule"): before any write-capable role has started there is no workspace change to protect, so a queue-dispatched run parks instead of blocking the pipeline on one unanswered question — the human backend is never called (no pending question is registered), the event is emitted here so the run's own log stays a faithful record, and the recorded question marks the run to terminate at the next safe point. Handler frames must not park: their writes are suppressed while they run, so a parked ask there could never be checkpointed. A run the queue does not track keeps today's blocking behavior: its parked question would be answerable through no endpoint.
 		if (context.handlerOf === undefined && context.parkTracker.queueTracked === true && !context.parkTracker.writeCapableStarted) {
 			context.parkTracker.parkedQuestion = questionValue

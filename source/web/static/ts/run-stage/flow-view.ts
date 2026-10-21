@@ -2,7 +2,7 @@
 //
 // The view projects the model to a stack-of-rows layout: one row per non-terminated call stack (stacksOf) in push order, the main run at the top and each preempting interrupt below it — rows never reorder as activity moves; the active stack is conveyed by the pulsing node and marching lines, not by row position.
 // Each row lays its open invocations left-to-right by parent depth, with the stack's root participant (the You root or an Interrupt instance) at the leftmost column.
-// An id-keyed row derives every participant's column from its parent's depth plus one (never from its index in a reconstructed chain), so siblings share a column and are separated by a small deterministic vertical lane; a legacy row keeps the index-based chain projection unchanged.
+// An id-keyed row derives every participant's column from its parent's depth plus one (never from its index in a reconstructed chain), so siblings share a column and are separated by a small deterministic vertical lane.
 // A return whose source has departed the open chain lingers as a node plus a return edge back to its caller until the caller's next action — read straight off the operation list, never from a stored lingering flag.
 // observe operations cross from the active stack up into a paused row as static dashed lines; terminate operations cross the same way as static red dashed lines, with an orange dashed border on the target.
 // A top-bar strip aggregates every role/tool type that has ever run, with invocation counts and cumulative metrics drawn from each instance's incoming call operations (the only operations that carry metrics).
@@ -21,7 +21,7 @@
 // The label resolver is passed in (rather than imported) alongside the selected tier so a caller can swap the resolver or tier without the view reaching for globals; node prose is localization, a view concern, and the model carries no prose.
 // The module is browser-pure TypeScript: it imports the shared interaction model, labels, and inspector attribute contract, its browser-safe siblings, and the vendored `h` type, and touches no external system.
 
-import { activeOperation, activeParticipant, callChainOf, callMetricsByDestination, isPaused, isTerminalStatus, observesOf, openInvocationsOf, stacksOf, terminatesOf } from '../interaction-model.js'
+import { activeOperation, activeParticipant, callMetricsByDestination, isPaused, isTerminalStatus, observesOf, openInvocationsOf, stacksOf, terminatesOf } from '../interaction-model.js'
 import type { InteractionModel, Operation, Participant, ParticipantKind, RunStatus } from '../interaction-model.js'
 import type { LabelResolver, LabelTier } from '../labels.js'
 import type { RoleAccentResolver } from './role-accents.js'
@@ -97,7 +97,6 @@ function edgeAnimationState(operation: Operation, model: InteractionModel): Edge
 // Per-model memo for the renderer's whole-model derivations: the model object is never mutated in place and is replaced only when its data changes, so an unchanged poll keeps the same object by reference; each structure is computed once on first request and read by identity afterwards, and the WeakMap drops the entry with its model on run switch. The undefined slots mean "not derived yet"; a cached value is never mutated afterwards.
 interface FlowLookups {
 	lastCallOrReturnByStack: Map<string, Operation>
-	closedCallByReturnByStack: Map<string, Map<string, Operation>>
 	completionReturnBySource: Map<string, Operation>
 	stacksWithOperations: Set<string>
 	callByCallId: Map<string, Operation>
@@ -137,25 +136,23 @@ function derivedOf(model: InteractionModel): DerivedFlow {
 	return derived
 }
 
-// The per-stack and per-participant lookups the row projection and the cost reads need: the latest call-or-return per stack, the return id → closed call mapping per stack, the first completing return per participant source, and the set of stacks that carry any operation. One chronological pass computes all per-stack and per-participant lookups; the terminate handling mirrors openCallsByStack — a terminate pops the open call whose destination it targets wherever that call's stack lives, so every stack's open list is scanned, which lands the same pops per stack a per-stack replay would.
+// The per-stack and per-participant lookups the row projection and the cost reads need: the latest call-or-return per stack, the first completing return per participant source, and the set of stacks that carry any operation. One chronological pass computes all per-stack and per-participant lookups; the terminate handling mirrors identityGraphOf — a terminate removes the call whose destination it targets wherever that call's stack lives.
 function rowLookupsOf(model: InteractionModel): FlowLookups {
 	const derived = derivedOf(model)
 	if (derived.rows !== undefined) return derived.rows
 	const lastCallOrReturnByStack = new Map<string, Operation>()
-	const closedCallByReturnByStack = new Map<string, Map<string, Operation>>()
 	const completionReturnBySource = new Map<string, Operation>()
 	const stacksWithOperations = new Set<string>()
 	const callByCallId = new Map<string, Operation>()
 	const indexByCallKey = new Map<string, number>()
 	const openByStack = new Map<string, Operation[]>()
 	const seenReturnCallIds = new Set<string>()
-	const identity = hasCallIdentity(model)
 	let operationIndex = -1
 	for (const operation of model.operations) {
 		operationIndex += 1
 		stacksWithOperations.add(operation.stack)
 		if (operation.kind === 'call') {
-			if (operation.callId !== undefined && !callByCallId.has(operation.callId)) {
+			if (!callByCallId.has(operation.callId)) {
 				callByCallId.set(operation.callId, operation)
 				indexByCallKey.set(operation.callId, operationIndex)
 			}
@@ -167,29 +164,10 @@ function rowLookupsOf(model: InteractionModel): FlowLookups {
 			open.push(operation)
 			lastCallOrReturnByStack.set(operation.stack, operation)
 		} else if (operation.kind === 'return') {
-			// An id-keyed model ignores an unkeyed return, and only the first return for a callId is authoritative.
-			if (identity && operation.callId === undefined) continue
-			if (operation.callId !== undefined) {
-				if (seenReturnCallIds.has(operation.callId)) continue
-				seenReturnCallIds.add(operation.callId)
-			}
+			// Only the first return for a callId is authoritative.
+			if (seenReturnCallIds.has(operation.callId)) continue
+			seenReturnCallIds.add(operation.callId)
 			lastCallOrReturnByStack.set(operation.stack, operation)
-			let closed: Operation | undefined
-			if (operation.callId !== undefined) {
-				// An id-keyed return closes exactly the call it names, so the mapping survives siblings and is independent of stack order.
-				closed = callByCallId.get(operation.callId)
-			} else {
-				const open = openByStack.get(operation.stack)
-				closed = open === undefined ? undefined : open.pop()
-			}
-			if (closed !== undefined) {
-				let closedByReturn = closedCallByReturnByStack.get(closed.stack)
-				if (closedByReturn === undefined) {
-					closedByReturn = new Map()
-					closedCallByReturnByStack.set(closed.stack, closedByReturn)
-				}
-				closedByReturn.set(operation.id, closed)
-			}
 			// The completion return is the participant's first return (a retried role's later instances carry their own ids), so only the first return per source is recorded.
 			if (!completionReturnBySource.has(operation.source)) completionReturnBySource.set(operation.source, operation)
 		} else if (operation.kind === 'terminate') {
@@ -205,7 +183,7 @@ function rowLookupsOf(model: InteractionModel): FlowLookups {
 			}
 		}
 	}
-	const lookups: FlowLookups = { lastCallOrReturnByStack, closedCallByReturnByStack, completionReturnBySource, stacksWithOperations, callByCallId, indexByCallKey, depthByCallKey: new Map(), laneOffsetsByStack: new Map() }
+	const lookups: FlowLookups = { lastCallOrReturnByStack, completionReturnBySource, stacksWithOperations, callByCallId, indexByCallKey, depthByCallKey: new Map(), laneOffsetsByStack: new Map() }
 	derived.rows = lookups
 	return lookups
 }
@@ -213,7 +191,7 @@ function rowLookupsOf(model: InteractionModel): FlowLookups {
 interface RowParticipant {
 	id: string
 	column: number
-	// A deterministic vertical lane inside the row so open siblings sharing a column do not paint over each other. Zero on the legacy index-based projection.
+	// A deterministic vertical lane inside the row so open siblings sharing a column do not paint over each other.
 	offset: number
 	lingering: boolean
 }
@@ -259,13 +237,9 @@ function rowsHeight(rows: RowProjection[]): number {
 // The vertical step between sibling lanes: at least one node height plus a visible gap, so sibling nodes never paint over each other.
 const SIBLING_LANE_STEP = NODE_HEIGHT + 12
 
-function hasCallIdentity(model: InteractionModel): boolean {
-	return model.operations.some((operation) => operation.callId !== undefined)
-}
-
-// The destination column of a call in an id-keyed row: its parent's destination column plus one, or column 1 when it has no keyed parent on the stack (a root call, or an interrupt handler whose parent is the stack's root pseudo-invocation). The recursion follows parentCallId, never the operation order, so a stale sibling cannot become an ancestor. Depths are memoized in the per-model lookups.
+// The destination column of a call: its parent's destination column plus one, or column 1 when it has no keyed parent on the stack (a root call, or an interrupt handler whose parent is the stack's root pseudo-invocation). The recursion follows parentCallId, never the operation order, so a stale sibling cannot become an ancestor. Depths are memoized in the per-model lookups.
 function identityDepthOfCall(call: Operation, stackId: string, lookups: FlowLookups, seen: Set<string>): number {
-	const key = call.callId ?? call.id
+	const key = call.callId
 	const cached = lookups.depthByCallKey.get(key)
 	if (cached !== undefined) return cached
 	if (seen.has(key)) return 1
@@ -287,13 +261,13 @@ function identityLaneOffsets(stackId: string, openCalls: Operation[], lingeringR
 	const cached = lookups.laneOffsetsByStack.get(stackId)
 	if (cached !== undefined) return cached
 	const visible = openCalls.slice()
-	if (lingeringReturn !== undefined && lingeringReturn.callId !== undefined) {
+	if (lingeringReturn !== undefined) {
 		const closedCall = lookups.callByCallId.get(lingeringReturn.callId)
 		if (closedCall !== undefined && !visible.includes(closedCall)) visible.push(closedCall)
 	}
 	visible.sort((left, right) => {
-		const leftIndex = lookups.indexByCallKey.get(left.callId ?? left.id) ?? 0
-		const rightIndex = lookups.indexByCallKey.get(right.callId ?? right.id) ?? 0
+		const leftIndex = lookups.indexByCallKey.get(left.callId) ?? 0
+		const rightIndex = lookups.indexByCallKey.get(right.callId) ?? 0
 		return leftIndex - rightIndex
 	})
 	const offsets = new Map<string, number>()
@@ -303,21 +277,20 @@ function identityLaneOffsets(stackId: string, openCalls: Operation[], lingeringR
 		const siblingGroup = `${stackId}:${depth}`
 		const lane = counts.get(siblingGroup) ?? 0
 		counts.set(siblingGroup, lane + 1)
-		offsets.set(call.callId ?? call.id, lane * SIBLING_LANE_STEP)
+		offsets.set(call.callId, lane * SIBLING_LANE_STEP)
 	}
 	lookups.laneOffsetsByStack.set(stackId, offsets)
 	return offsets
 }
 
-// Projects a single stack to a row descriptor: the root participant, the participants to render, and the call and lingering-return edges between them. An id-keyed model uses the open invocation tree: every open call renders at its parent's depth plus one, sibling calls share a column and take deterministic vertical lanes, and each edge runs between the actual source and destination columns. A legacy model keeps the index-based chain projection unchanged. A return lingers only while it is in_flight (its transit phase); a stack whose open calls are empty but whose latest non-observe operation is an in_flight return renders that single lingering leg, with the return's caller as the row root.
+// Projects a single stack to a row descriptor: the root participant, the participants to render, and the call and lingering-return edges between them. Every open call renders at its parent's depth plus one, sibling calls share a column and take deterministic vertical lanes, and each edge runs between the actual source and destination columns. A return lingers only while it is in_flight (its transit phase); a stack whose open calls are empty but whose latest non-observe operation is an in_flight return renders that single lingering leg, with the return's caller as the row root.
 function projectRow(model: InteractionModel, stackId: string): RowProjection | null {
 	const lookups = rowLookupsOf(model)
 	const lastCallOrReturn = lookups.lastCallOrReturnByStack.get(stackId)
 	const lingeringReturn = lastCallOrReturn !== undefined && lastCallOrReturn.kind === 'return' && lastCallOrReturn.lifecycle === 'in_flight'
 		? lastCallOrReturn
 		: undefined
-	if (hasCallIdentity(model)) return projectIdentityRow(model, stackId, lookups, lingeringReturn)
-	return projectLegacyRow(model, stackId, lookups, lingeringReturn)
+	return projectIdentityRow(model, stackId, lookups, lingeringReturn)
 }
 
 function emptyStackRow(model: InteractionModel, stackId: string, lookups: FlowLookups): RowProjection | null {
@@ -349,12 +322,12 @@ function projectIdentityRow(model: InteractionModel, stackId: string, lookups: F
 	const openDestinationIds = new Set(openCalls.map((call) => call.destination))
 	for (const call of openCalls) {
 		const depth = identityDepthOfCall(call, stackId, lookups, new Set())
-		const key = call.callId ?? call.id
+		const key = call.callId
 		const destinationOffset = laneOffsetByKey.get(key) ?? 0
 		const sourceColumn = columnByParticipant.get(call.source) ?? Math.max(0, depth - 1)
 		const sourceCall = openCalls.find((candidate) => candidate.destination === call.source)
 			?? (call.parentCallId === undefined ? undefined : lookups.callByCallId.get(call.parentCallId))
-		const sourceOffset = offsetByParticipant.get(call.source) ?? (sourceCall === undefined ? 0 : laneOffsetByKey.get(sourceCall.callId ?? sourceCall.id) ?? 0)
+		const sourceOffset = offsetByParticipant.get(call.source) ?? (sourceCall === undefined ? 0 : laneOffsetByKey.get(sourceCall.callId) ?? 0)
 		// A closed caller is not resurrected as a node: its child's edge anchors at the caller's column, while only the stack root and still-open destinations render.
 		if (!columnByParticipant.has(call.source) && (call.source === rootId || openDestinationIds.has(call.source))) {
 			columnByParticipant.set(call.source, sourceColumn)
@@ -368,61 +341,19 @@ function projectIdentityRow(model: InteractionModel, stackId: string, lookups: F
 	}
 	const returnEdges: RowEdge[] = []
 	if (lingeringReturn !== undefined) {
-		const closedCall = lingeringReturn.callId === undefined ? undefined : lookups.callByCallId.get(lingeringReturn.callId)
+		const closedCall = lookups.callByCallId.get(lingeringReturn.callId)
 		if (closedCall !== undefined) {
 			const lingeringColumn = identityDepthOfCall(closedCall, stackId, lookups, new Set())
 			const callerColumn = columnByParticipant.get(lingeringReturn.destination) ?? Math.max(0, lingeringColumn - 1)
 			const callerCall = openCalls.find((candidate) => candidate.destination === lingeringReturn.destination)
 				?? (closedCall.parentCallId === undefined ? undefined : lookups.callByCallId.get(closedCall.parentCallId))
-			const callerOffset = offsetByParticipant.get(lingeringReturn.destination) ?? (callerCall === undefined ? 0 : laneOffsetByKey.get(callerCall.callId ?? callerCall.id) ?? 0)
-			const lingeringOffset = laneOffsetByKey.get(closedCall.callId ?? closedCall.id) ?? 0
+			const callerOffset = offsetByParticipant.get(lingeringReturn.destination) ?? (callerCall === undefined ? 0 : laneOffsetByKey.get(callerCall.callId) ?? 0)
+			const lingeringOffset = laneOffsetByKey.get(closedCall.callId) ?? 0
 			columnByParticipant.set(closedCall.destination, lingeringColumn)
 			participants.push({ id: closedCall.destination, column: lingeringColumn, offset: lingeringOffset, lingering: true })
 			returnEdges.push({ fromColumn: lingeringColumn, toColumn: callerColumn, fromOffset: lingeringOffset, toOffset: callerOffset, operation: lingeringReturn })
 		}
 	}
-	return { stackId, rootId, top: 0, participants, callEdges, returnEdges }
-}
-
-function projectLegacyRow(model: InteractionModel, stackId: string, lookups: FlowLookups, lingeringReturn: Operation | undefined): RowProjection | null {
-	const chain = callChainOf(model, stackId)
-	if (chain.length === 0 && lingeringReturn === undefined) return emptyStackRow(model, stackId, lookups)
-
-	// The row root is the open chain's first call source, or — when the chain is empty — the lingering return's caller (its destination), who is the stack's effective root while the last return leg is still in flight. The throw is the guard above's invariant: an empty chain reaches here only with a lingering return, which the guard already returned on.
-	let rootId: string
-	const rootCall = chain[0]
-	if (rootCall !== undefined) rootId = rootCall.source
-	else if (lingeringReturn !== undefined) rootId = lingeringReturn.destination
-	else throw new Error('projectRow invariant violated: a row was projected with neither an open call nor an in-flight return leg')
-
-	const columnByParticipant = new Map<string, number>()
-	columnByParticipant.set(rootId, 0)
-	const participants: RowParticipant[] = [{ id: rootId, column: 0, offset: 0, lingering: false }]
-	const callEdges: RowEdge[] = []
-	for (let index = 0; index < chain.length; index += 1) {
-		const call = chain[index]
-		if (call === undefined) continue
-		const sourceColumn = columnByParticipant.get(call.source) ?? index
-		const destinationColumn = index + 1
-		columnByParticipant.set(call.destination, destinationColumn)
-		participants.push({ id: call.destination, column: destinationColumn, offset: 0, lingering: false })
-		callEdges.push({ fromColumn: sourceColumn, toColumn: destinationColumn, fromOffset: 0, toOffset: 0, operation: call })
-	}
-
-	const closedByReturn = lookups.closedCallByReturnByStack.get(stackId)
-
-	const returnEdges: RowEdge[] = []
-	if (lingeringReturn !== undefined) {
-		const closedCall = closedByReturn?.get(lingeringReturn.id)
-		if (closedCall !== undefined) {
-			// The lingering leg renders only while the return is in transit (in_flight); once the return settles (working phase) the returner has departed and neither the node nor its response edge is drawn. The lingering source sat one column past the open chain's innermost node: it was the innermost call before its return popped it, so its depth is the current open chain length plus one.
-			const lingeringColumn = chain.length + 1
-			const callerColumn = columnByParticipant.get(lingeringReturn.destination) ?? 0
-			participants.push({ id: closedCall.destination, column: lingeringColumn, offset: 0, lingering: true })
-			returnEdges.push({ fromColumn: lingeringColumn, toColumn: callerColumn, fromOffset: 0, toOffset: 0, operation: lingeringReturn })
-		}
-	}
-
 	return { stackId, rootId, top: 0, participants, callEdges, returnEdges }
 }
 

@@ -1,8 +1,9 @@
 import * as fs from 'node:fs'
 import * as path from 'node:path'
 import type { RunCheckpoint } from './checkpoint.js'
+import { classifyVersion, ROLE_SNAPSHOT_FORMAT_VERSION, RUN_MANIFEST_VERSION, SETTINGS_FORMAT_VERSION, type VersionStatus } from './orchestration-version.js'
 import { isRoleSnapshot, type RoleSnapshot, type RoleSnapshotInput, type RoleSnapshotStore, type RoleSnapshotSummary } from './role-snapshot.js'
-import { isProjectSettings } from './validation.js'
+import { isProjectSettings, safeJsonParse } from './validation.js'
 import type { EffortLevel, InvolvementLevel, LogLevel, LogEvent, RunMeta } from './types.js'
 
 export type RunDirectory = () => string
@@ -10,14 +11,51 @@ export type AppendLog = (event: LogEvent) => void
 export type ReadRunLogEvents = (runId: string) => LogEvent[]
 export type WriteMeta = (meta: RunMeta) => void
 
+export const MANIFEST_FILE_NAME = 'manifest.json'
+
+function writeFileAtomically(targetPath: string, contents: string): void {
+	const tempPath = `${targetPath}.${process.pid}.tmp`
+	fs.writeFileSync(tempPath, contents)
+	fs.renameSync(tempPath, targetPath)
+}
+
+export function serializeRunManifest(): string {
+	return JSON.stringify({ version: RUN_MANIFEST_VERSION }, null, 2)
+}
+
 // A fresh run must never share a directory with an existing one: run ids have one-second resolution, so two runs submitted within the same second (possible when the previous run failed instantly) generate the same id, and silently recursing into the existing directory would interleave their logs and metas. The submission layer refuses taken ids up front (source/executor/run-submission.ts "submit"); this check is the start-of-run backstop, so an existing directory fails the run loudly instead of being reused.
 export function createRunDirectory(runId: string, baseDir: string): RunDirectory {
 	const runDir = path.resolve(baseDir, runId)
 	return () => {
 		if (fs.existsSync(runDir)) throw new Error(`run directory already exists for run ${runId}: ${runDir}`)
 		fs.mkdirSync(runDir, { recursive: true })
+		writeFileAtomically(path.resolve(runDir, MANIFEST_FILE_NAME), serializeRunManifest())
 		return runDir
 	}
+}
+
+export type ReadRunFormat = (runId: string) => VersionStatus
+
+export function classifyManifestText(text: string | null): VersionStatus {
+	if (text === null) return 'missing'
+	const parsed = safeJsonParse(text)
+	if (!parsed.ok) return 'malformed'
+	return classifyVersion(parsed.value, RUN_MANIFEST_VERSION)
+}
+
+// The run manifest is the format gate for every artifact in the directory. A missing or unsupported format makes the run unreadable to this build, while malformed text is distinguishable for reconciliation's report.
+export function createReadRunFormat(baseDir: string): ReadRunFormat {
+	return (runId: string) => {
+		const manifestPath = path.resolve(baseDir, runId, MANIFEST_FILE_NAME)
+		if (!fs.existsSync(manifestPath)) return 'missing'
+		return classifyManifestText(fs.readFileSync(manifestPath, 'utf8'))
+	}
+}
+
+function isCurrentRunFormat(baseDir: string, runId: string): boolean {
+	const manifestPath = path.resolve(baseDir, runId, MANIFEST_FILE_NAME)
+	if (!fs.existsSync(manifestPath)) return false
+	return classifyManifestText(fs.readFileSync(manifestPath, 'utf8')) === 'current'
 }
 
 export type RunDirectoryExists = (runId: string) => boolean
@@ -93,6 +131,7 @@ export function createRoleSnapshotStore(runId: string, baseDir: string): RoleSna
 	}
 
 	function read(roleId: string): RoleSnapshot | null {
+		if (!isCurrentRunFormat(baseDir, runId)) return null
 		const targetPath = snapshotPath(roleId)
 		if (!fs.existsSync(targetPath)) return null
 		let text: string
@@ -114,14 +153,13 @@ export function createRoleSnapshotStore(runId: string, baseDir: string): RoleSna
 		write(input: RoleSnapshotInput) {
 			fs.mkdirSync(rolesDir, { recursive: true })
 			const targetPath = snapshotPath(input.roleId)
-			const tempPath = `${targetPath}.${process.pid}.tmp`
-			const snapshot: RoleSnapshot = { version: 1, runId, ...input }
-			fs.writeFileSync(tempPath, JSON.stringify(snapshot))
-			fs.renameSync(tempPath, targetPath)
+			const snapshot: RoleSnapshot = { version: ROLE_SNAPSHOT_FORMAT_VERSION, runId, ...input }
+			writeFileAtomically(targetPath, JSON.stringify(snapshot))
 		},
 		read,
 		// Each snapshot file is parsed in full to project its summary: continuation is rare, so reading every body is acceptable, and a metadata index is the deferred optimization.
 		list(): RoleSnapshotSummary[] {
+			if (!isCurrentRunFormat(baseDir, runId)) return []
 			if (!fs.existsSync(rolesDir)) return []
 			const summaries: RoleSnapshotSummary[] = []
 			for (const entry of fs.readdirSync(rolesDir)) {
@@ -143,6 +181,7 @@ export function createRoleSnapshotStore(runId: string, baseDir: string): RoleSna
 
 export function createReadRunCheckpointById(baseDir: string): ReadRunCheckpointById {
 	return (runId: string) => {
+		if (!isCurrentRunFormat(baseDir, runId)) return null
 		const checkpointPath = path.resolve(baseDir, runId, CHECKPOINT_FILE_NAME)
 		return fs.existsSync(checkpointPath) ? fs.readFileSync(checkpointPath, 'utf8') : null
 	}
@@ -152,7 +191,7 @@ export type RunCheckpointExists = (runId: string) => boolean
 
 // Whether a run directory holds a checkpoint file, as a bare existence check: the run view's resumable flag consults it per poll, so it must not read (let alone parse) the checkpoint body the way createReadRunCheckpointById does.
 export function createRunCheckpointExists(baseDir: string): RunCheckpointExists {
-	return (runId) => fs.existsSync(path.resolve(baseDir, runId, CHECKPOINT_FILE_NAME))
+	return (runId) => isCurrentRunFormat(baseDir, runId) && fs.existsSync(path.resolve(baseDir, runId, CHECKPOINT_FILE_NAME))
 }
 
 export interface RunSnapshotRaw {
@@ -166,6 +205,7 @@ export type ReadRunSnapshotById = (runId: string) => RunSnapshotRaw
 // The single-active-run invariant is enforced at the submission layer, not here.
 export function createReadRunSnapshotById(baseDir: string): ReadRunSnapshotById {
 	return (runId: string) => {
+		if (!isCurrentRunFormat(baseDir, runId)) return { metaText: null, logText: '' }
 		const metaPath = path.resolve(baseDir, runId, META_FILE_NAME)
 		const logPath = path.resolve(baseDir, runId, LOG_FILE_NAME)
 		const metaText = fs.existsSync(metaPath) ? fs.readFileSync(metaPath, 'utf8') : null
@@ -175,12 +215,22 @@ export function createReadRunSnapshotById(baseDir: string): ReadRunSnapshotById 
 }
 
 export type ReadRunMetaById = (runId: string) => string | null
+export type ReadRunMetaTextById = (runId: string) => string | null
 
-// Reads only a run's meta.json. The run list renders one summary per run and never touches log events, so it reads the small meta file rather than every run's full (and ever-growing) log on every poll.
-export function createReadRunMetaById(baseDir: string): ReadRunMetaById {
+// Reads a run's meta.json text without consulting the run manifest. Startup reconciliation needs the existing meta to preserve its fields when it terminalizes an unsupported run; every reader that interprets or renders run state must use the manifest-gated createReadRunMetaById instead.
+export function createReadRunMetaTextById(baseDir: string): ReadRunMetaTextById {
 	return (runId: string) => {
 		const metaPath = path.resolve(baseDir, runId, META_FILE_NAME)
 		return fs.existsSync(metaPath) ? fs.readFileSync(metaPath, 'utf8') : null
+	}
+}
+
+// Reads only a current-format run's meta.json. The run list renders one summary per run and never touches log events, so it reads the small meta file rather than every run's full (and ever-growing) log on every poll.
+export function createReadRunMetaById(baseDir: string): ReadRunMetaById {
+	const readRunMetaTextById = createReadRunMetaTextById(baseDir)
+	return (runId: string) => {
+		if (!isCurrentRunFormat(baseDir, runId)) return null
+		return readRunMetaTextById(runId)
 	}
 }
 
@@ -200,6 +250,7 @@ export function createWriteRunSummary(runId: string, baseDir: string): WriteRunS
 
 export function createReadRunSummaryById(baseDir: string): ReadRunSummaryById {
 	return (runId: string) => {
+		if (!isCurrentRunFormat(baseDir, runId)) return null
 		const summaryPath = path.resolve(baseDir, runId, SUMMARY_FILE_NAME)
 		if (!fs.existsSync(summaryPath)) return null
 		const text = fs.readFileSync(summaryPath, 'utf8').trim()
@@ -217,6 +268,7 @@ export type ReadRunSummaryStats = (runId: string) => RunSummaryStats
 // Stats the two files a run-list summary is derived from without reading them, so the run-list cache revalidates each run per poll with two stat calls instead of two file reads plus a meta parse. summary.txt rides in the freshness key because the completion summary replaces the start one at a moment when meta.json does not change.
 export function createReadRunSummaryStats(baseDir: string): ReadRunSummaryStats {
 	return (runId: string) => {
+		if (!isCurrentRunFormat(baseDir, runId)) return { meta: null, summary: null }
 		const metaPath = path.resolve(baseDir, runId, META_FILE_NAME)
 		const summaryPath = path.resolve(baseDir, runId, SUMMARY_FILE_NAME)
 		return { meta: statOrNull(metaPath), summary: statOrNull(summaryPath) }
@@ -234,6 +286,7 @@ export const STYLE_GUIDE_FILE_NAME = 'style-guide.md'
 // Reads the run's plan document per request for the run view. Absence is normal (the planner may not have written one yet), and a read failure after the existence check (e.g. a permission or io error) degrades to "no plan" rather than failing the run view that serves it — a plan the UI cannot show must never 500 the view.
 export function createReadRunPlanById(baseDir: string): ReadRunPlanById {
 	return (runId: string) => {
+		if (!isCurrentRunFormat(baseDir, runId)) return null
 		const planPath = path.resolve(baseDir, runId, PLAN_FILE_NAME)
 		if (!fs.existsSync(planPath)) return null
 		let text: string
@@ -274,6 +327,7 @@ function statOrNull(filePath: string): RunSnapshotFileStat | null {
 // Stats a run's files without reading them. Size+mtime is the freshness key a snapshot cache validates against (the log is append-only, so every event changes its size), and a run with neither file is unknown — the cheap existence check the per-request handlers need before serving a snapshot.
 export function createReadRunSnapshotStats(baseDir: string): ReadRunSnapshotStats {
 	return (runId: string) => {
+		if (!isCurrentRunFormat(baseDir, runId)) return { meta: null, log: null }
 		const metaPath = path.resolve(baseDir, runId, META_FILE_NAME)
 		const logPath = path.resolve(baseDir, runId, LOG_FILE_NAME)
 		return { meta: statOrNull(metaPath), log: statOrNull(logPath) }
@@ -285,6 +339,7 @@ export type ReadRunLogTextFrom = (runId: string, byteOffset: number) => string
 // Reads a run's log.jsonl from a byte offset to the end of the file (offset 0 reads the whole log), so the snapshot cache re-reads only an active run's appended tail per poll instead of the whole ever-growing file. Stored offsets always fall just after a newline byte, which is never part of a multi-byte UTF-8 sequence, so reading from an offset cannot split a character.
 export function createReadRunLogTextFrom(baseDir: string): ReadRunLogTextFrom {
 	return (runId: string, byteOffset: number) => {
+		if (!isCurrentRunFormat(baseDir, runId)) return ''
 		const logPath = path.resolve(baseDir, runId, LOG_FILE_NAME)
 		if (!fs.existsSync(logPath)) return ''
 		const descriptor = fs.openSync(logPath, 'r')
@@ -309,6 +364,11 @@ export function createListRunIds(baseDir: string): ListRunIds {
 	}
 }
 
+// The run-list view hides directories this build cannot read: an unsupported or malformed manifest has no trustworthy meta or summary, and rendering it as an unknown in-progress run leaves the UI pulsing forever. Startup reconciliation and queue repair deliberately keep the raw listing.
+export function createListCurrentRunIds(listRunIds: ListRunIds, readRunFormat: ReadRunFormat): ListRunIds {
+	return () => listRunIds().filter((runId) => readRunFormat(runId) === 'current')
+}
+
 export interface ProjectSettings {
 	effort?: EffortLevel
 	// The project-wide default human-involvement level (docs/reference.md "Involvement channel"); absent means the deployment default applies.
@@ -326,6 +386,27 @@ function settingsFilePath(workspaceRoot: string): string {
 	return path.resolve(workspaceRoot, '.orchestration', SETTINGS_FILE_NAME)
 }
 
+function projectSettingsFields(value: ProjectSettings): ProjectSettings {
+	return {
+		...(value.effort !== undefined ? { effort: value.effort } : {}),
+		...(value.involvement !== undefined ? { involvement: value.involvement } : {}),
+		...(value.logLevel !== undefined ? { logLevel: value.logLevel } : {}),
+	}
+}
+
+export function parseProjectSettingsText(text: string | null): ProjectSettings {
+	if (text === null) return {}
+	const parsed = safeJsonParse(text)
+	if (!parsed.ok) return {}
+	if (classifyVersion(parsed.value, SETTINGS_FORMAT_VERSION) !== 'current') return {}
+	if (!isProjectSettings(parsed.value)) return {}
+	return projectSettingsFields(parsed.value)
+}
+
+export function serializeProjectSettings(settings: ProjectSettings): string {
+	return JSON.stringify({ version: SETTINGS_FORMAT_VERSION, ...projectSettingsFields(settings) }, null, 2)
+}
+
 export function createReadProjectSettings(workspaceRoot: string): ReadProjectSettings {
 	const filePath = settingsFilePath(workspaceRoot)
 	return () => {
@@ -336,13 +417,7 @@ export function createReadProjectSettings(workspaceRoot: string): ReadProjectSet
 		} catch {
 			return {}
 		}
-		let parsed: unknown
-		try {
-			parsed = JSON.parse(text)
-		} catch {
-			return {}
-		}
-		return isProjectSettings(parsed) ? parsed : {}
+		return parseProjectSettingsText(text)
 	}
 }
 
@@ -353,9 +428,7 @@ export function createWriteProjectSettings(workspaceRoot: string): WriteProjectS
 	return (settings) => {
 		const dir = path.dirname(filePath)
 		if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true })
-		const tempPath = `${filePath}.${process.pid}.tmp`
-		fs.writeFileSync(tempPath, JSON.stringify(settings, null, 2))
-		fs.renameSync(tempPath, filePath)
+		writeFileAtomically(filePath, serializeProjectSettings(settings))
 	}
 }
 

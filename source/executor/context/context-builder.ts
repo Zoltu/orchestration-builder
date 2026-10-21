@@ -12,7 +12,7 @@ function hasText(value: string | undefined): value is string {
 	return value !== undefined && value.trim() !== ''
 }
 
-// The status the prior run is shown with: the producer's terminal status wins, then the result card's status, then the run-level error kind distinguishes an interrupted run from any other failure. Older producers that carried neither status nor result nor error display as unknown rather than inventing an outcome.
+// The status the prior run is shown with: the terminal status wins, then the result card's status, then the run-level error kind distinguishes an interrupted run from any other failure. A continuation carrying none of them displays as unknown rather than inventing an outcome.
 function resolvePriorStatus(continuation: RunContinuation): TerminalRunStatus | 'unknown' {
 	if (continuation.status !== undefined) return continuation.status
 	if (continuation.result !== undefined) return continuation.result.status

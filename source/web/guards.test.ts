@@ -25,7 +25,7 @@ describe('isOperationMetricsRecord', () => {
 		expect(isOperationMetricsRecord(missing)).toBe(false)
 	})
 
-	test('still rejects malformed legacy counters and non-records', () => {
+	test('still rejects malformed counters and non-records', () => {
 		const base = { tokens: 1, promptTokens: 1, completionTokens: 1, cachedPromptTokens: null, lastPromptTokens: 1, elapsedSeconds: 1 }
 		expect(isOperationMetricsRecord({ ...base, tokens: NaN })).toBe(false)
 		expect(isOperationMetricsRecord({ ...base, elapsedSeconds: 'soon' })).toBe(false)

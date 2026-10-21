@@ -1,8 +1,9 @@
 import { describe, expect, test } from 'bun:test'
 
 import type { RunCheckpoint } from './checkpoint.ts'
-import type { ListRunIds, ReadRunCheckpointById, ReadRunMetaById, WriteMeta } from './persistence.ts'
+import type { ListRunIds, ReadRunCheckpointById, ReadRunMetaTextById, WriteMeta } from './persistence.ts'
 import { reconcileRunsOnStartup, type StartupReconciliationDependencies } from './startup-reconciliation.ts'
+import type { VersionStatus } from './orchestration-version.ts'
 import type { RunMeta } from './types.ts'
 
 function runningMeta(runId: string, startTime: string): RunMeta {
@@ -32,7 +33,7 @@ function terminalMeta(runId: string): RunMeta {
 
 function checkpointFor(runId: string, startTime: string): RunCheckpoint {
 	return {
-		version: 1,
+		version: 2,
 		runId,
 		startTime,
 		registryCounter: 1,
@@ -45,6 +46,7 @@ function checkpointFor(runId: string, startTime: string): RunCheckpoint {
 				effort: 'standard',
 				involvement: 'early-engagement',
 				roleState: {
+					protectedPrefixLength: 2,
 					history: [
 						{ role: 'system', content: 'prompt' },
 						{ role: 'user', content: 'task' },
@@ -69,7 +71,7 @@ function parkedCheckpointFor(runId: string, startTime: string): RunCheckpoint {
 	if (entry === undefined) throw new Error('checkpoint has no entry frame')
 	return {
 		...checkpoint,
-		parkedAsk: { roleId: 'main-0-1', toolCallId: 'ask_1', question: 'which database?' },
+		parkedAsk: { roleId: 'main-0-1', toolCallId: 'ask_1', callId: 'tool:ask_1', questionId: 'ask_1', question: 'which database?' },
 		frames: [
 			{
 				...entry,
@@ -91,15 +93,21 @@ interface Harness {
 	dependencies: StartupReconciliationDependencies
 	resumed: RunCheckpoint[]
 	writtenMetas: Map<string, RunMeta[]>
+	checkpointReads: string[]
 }
 
 // All leaves are in-memory fakes keyed by run id: metas and checkpoints are raw file text (or absent), and writeMetaFor records per run.
-function makeHarness(runs: Record<string, { metaText?: string | undefined; checkpointText?: string | undefined }>): Harness {
+function makeHarness(runs: Record<string, { metaText?: string | undefined; checkpointText?: string | undefined; format?: VersionStatus }>): Harness {
 	const resumed: RunCheckpoint[] = []
 	const writtenMetas = new Map<string, RunMeta[]>()
+	const checkpointReads: string[] = []
 	const listRunIds: ListRunIds = () => Object.keys(runs)
-	const readRunMetaById: ReadRunMetaById = (runId) => runs[runId]?.metaText ?? null
-	const readCheckpointById: ReadRunCheckpointById = (runId) => runs[runId]?.checkpointText ?? null
+	const readRunMetaTextById: ReadRunMetaTextById = (runId) => runs[runId]?.metaText ?? null
+	const readCheckpointById: ReadRunCheckpointById = (runId) => {
+		checkpointReads.push(runId)
+		return runs[runId]?.checkpointText ?? null
+	}
+	const readRunFormat = (runId: string): VersionStatus => runs[runId]?.format ?? 'current'
 	const writeMetaFor = (runId: string): WriteMeta => {
 		return (meta) => {
 			const list = writtenMetas.get(runId) ?? []
@@ -109,14 +117,15 @@ function makeHarness(runs: Record<string, { metaText?: string | undefined; check
 	}
 	const dependencies: StartupReconciliationDependencies = {
 		listRunIds,
-		readRunMetaById,
+		readRunMetaTextById,
 		readCheckpointById,
+		readRunFormat,
 		writeMetaFor,
 		resume: (checkpoint) => {
 			resumed.push(checkpoint)
 		},
 	}
-	return { dependencies, resumed, writtenMetas }
+	return { dependencies, resumed, writtenMetas, checkpointReads }
 }
 
 describe('reconcileRunsOnStartup', () => {
@@ -298,5 +307,86 @@ describe('reconcileRunsOnStartup', () => {
 		expect(harness.resumed).toEqual([resumable])
 		expect(report.parkedRunIds).toEqual(['run-parked'])
 		expect(report.interruptedRunIds).toEqual([])
+	})
+
+	test('an unsupported run manifest marks a non-terminal run interrupted without parsing its checkpoint', () => {
+		const cases: Array<{ format: VersionStatus; message: string }> = [
+			{ format: 'missing', message: 'run manifest is missing' },
+			{ format: 'old', message: 'run manifest is older than this build supports' },
+			{ format: 'newer', message: 'run manifest is newer than this build supports' },
+			{ format: 'malformed', message: 'run manifest is malformed' },
+		]
+		for (const testCase of cases) {
+			const harness = makeHarness({
+				'run-1': {
+					metaText: JSON.stringify(runningMeta('run-1', '2026-01-01T00:00:00.000Z')),
+					checkpointText: '{"version":2,"runId":"run-1","frames":',
+					format: testCase.format,
+				},
+			})
+
+			const report = reconcileRunsOnStartup(harness.dependencies)
+
+			expect(report.interruptedRunIds).toEqual(['run-1'])
+			expect(report.resumedRunId).toBeUndefined()
+			expect(harness.resumed).toEqual([])
+			expect(harness.checkpointReads).toEqual([])
+			const meta = harness.writtenMetas.get('run-1')?.[0]
+			expect(meta?.status).toBe('interrupted')
+			expect(meta?.error?.message).toContain(testCase.message)
+		}
+	})
+
+	test('an unsupported manifest preserves every existing meta field when terminalizing and never parses the checkpoint', () => {
+		const existingMeta = {
+			...runningMeta('run-1', '2026-01-01T00:00:00.000Z'),
+			logLevel: 'standard' as const,
+			continuesFrom: 'run-20251231-000000',
+		}
+		const harness = makeHarness({
+			'run-1': {
+				metaText: JSON.stringify(existingMeta),
+				// Corrupt on purpose: an unsupported run must be classified before the checkpoint is parsed.
+				checkpointText: '{"version":2,"runId":"run-1","frames":',
+				format: 'old',
+			},
+		})
+
+		const report = reconcileRunsOnStartup(harness.dependencies)
+
+		expect(report.interruptedRunIds).toEqual(['run-1'])
+		expect(report.resumedRunId).toBeUndefined()
+		expect(harness.resumed).toEqual([])
+		const written = harness.writtenMetas.get('run-1')?.[0]
+		expect(written).toMatchObject({
+			runId: 'run-1',
+			guildPath: existingMeta.guildPath,
+			benchmarkPath: existingMeta.benchmarkPath,
+			task: existingMeta.task,
+			effort: existingMeta.effort,
+			involvement: existingMeta.involvement,
+			logLevel: existingMeta.logLevel,
+			continuesFrom: existingMeta.continuesFrom,
+			status: 'interrupted',
+			startTime: existingMeta.startTime,
+		})
+		expect(written?.error?.kind).toBe('interrupted')
+	})
+
+	test('a current manifest still resumes a run with a valid checkpoint', () => {
+		const checkpoint = checkpointFor('run-1', '2026-01-01T00:00:00.000Z')
+		const harness = makeHarness({
+			'run-1': {
+				metaText: JSON.stringify(runningMeta('run-1', '2026-01-01T00:00:00.000Z')),
+				checkpointText: JSON.stringify(checkpoint),
+				format: 'current',
+			},
+		})
+
+		const report = reconcileRunsOnStartup(harness.dependencies)
+
+		expect(report.resumedRunId).toBe('run-1')
+		expect(harness.resumed).toEqual([checkpoint])
+		expect(harness.checkpointReads).toEqual(['run-1'])
 	})
 })

@@ -17,7 +17,7 @@ interface Participant {
 	id: string                // instance-scoped, unique per invocation — the flow-view node key
 	role: string              // role/tool name; 'human' or 'interrupt' for the pseudo-roles; the sequence-view column key
 	kind: 'human' | 'interrupt' | 'role' | 'tool'
-	roleId?: string           // the executor's role-instance id (role_start's roleId, e.g. "coder-1-2"); 'role'-kind participants only, when the producer carries it — the identity the LLM-turn inspector scopes to (see "View click-throughs")
+	roleId?: string           // the executor's role-instance id (role_start's roleId, e.g. "coder-1-2"); 'role'-kind participants only, and every current role_start carries it — the identity the LLM-turn inspector scopes to (see "View click-throughs")
 }
 
 interface Operation {
@@ -26,8 +26,8 @@ interface Operation {
 	stack: string             // call-stack id; the active stack is the one containing the latest operation
 	source: string            // participant id; for observe/terminate this may sit in a different (active) stack than destination
 	destination: string       // participant id; never equals source for call/return
-	callId?: string           // stable invocation id shared by a call and its matching return; absent on legacy operations
-	parentCallId?: string     // the invocation that caused this call; calls only; absent for a root call or on legacy operations
+	callId: string            // stable invocation id shared by a call and its matching return; observe and terminate carry their operation id
+	parentCallId?: string     // the invocation that caused this call; calls only; absent for a root call
 	startedAt: string
 	settledAt: string | null  // null while in_flight; equals startedAt for observe and terminate (both instantaneous)
 	lifecycle: 'in_flight' | 'settled'
@@ -57,10 +57,12 @@ interface StackRecord {
 }
 ```
 
-An operation is keyed by `callId` when the log carries invocation identity: a call is open until a return names the same id, and its parent is the call named by `parentCallId` — never the preceding event or the innermost open call.
+Every call and return is keyed by `callId`: a call is open until a return names the same id, and its parent is the call named by `parentCallId` — never the preceding event or the innermost open call.
+`observe` and `terminate` affect no invocation, so they carry their own operation id in `callId`.
 A duplicate start for an id is ignored, and the first terminal wins, so a second return for the same id is ignored.
 A terminal with no start is materialized by the adapter as a complete call and return at the terminal timestamp, anchored at the stack root, with no guessed parent.
-A model is read through the id-keyed path as soon as any operation carries a `callId`; the legacy path (LIFO replay and event-order parentage) is used for a log whose invocation starts carry no id.
+A model whose operations lack ids is malformed, and an invocation start missing its required `callId` or a nested call missing `parentCallId` is malformed and skipped.
+Unsupported or malformed runs never reach the adapter: the run manifest gates every run artifact before the flow endpoint reads a log, and the web run list omits those directories.
 
 A freshly preempted stack (an interrupt has landed but its first call has not) carries no operations yet, so operations alone cannot name it; the optional `stacks` records carry every pushed stack's id and root so the views can show the fresh stack and its root before its first operation lands. When `stacks` is absent (hand-authored models), the helpers derive stack structure from operations and a zero-operation stack renders nothing.
 
@@ -104,7 +106,7 @@ Invocation identity changes no pause semantics: a paused stack's in-flight opera
 - **Occur at any time, including mid-flight.** A paused stack may carry an `in_flight` operation; the view freezes its animation while the model keeps its `lifecycle` as `in_flight`.
 - **Unbounded and nest.** An interrupt can interrupt an interrupt. Each gets a unique `stack` id; activity follows the single invariant above (a fresh preemption is active on arrival; a resolved stack yields to the innermost stack with open work), and fates cascade when stacks resolve inward.
 - **The flow view renders each non-terminated stack as a row**: the main run (rooted at the human) is always the top row, and each preempting interrupt stack (rooted at an Interrupt instance, or at the human asker for an inquiry) sits below it in preemption order. Rows never reorder as activity moves — the active stack is conveyed by the pulsing node and marching lines, not by row position. `observe` and `terminate` lines cross from the active stack up into a paused row.
-- **The executor emits the `observe` operations.** A handler's read-only cross-role inspection tool logs an `observe` event between its `tool_call` and `tool_result` when it successfully reads a suspended instance, and the adapter draws it as a cross-row dashed line into the paused row (`terminate` remains a fixture-only kind — no executor tool emits it).
+- **The executor emits the `observe` operations.** A handler's read-only cross-role inspection tool logs an `observe` event between its `tool_call` and `tool_result` when it successfully reads a suspended instance, and the adapter matches it to the paused invocation by exact `roleId` and draws it as a cross-row dashed line into the paused row (`terminate` remains a fixture-only kind — no executor tool emits it, and its adapter matches by exact `roleId` when present or by role name only for a role-only event).
 - **A paused stack's fate is read off its own operations after the preemption point, not stored as a field** (`fateOf`): **resume** (the next op lands back on the old stack id), **rewind** (a run of `terminated` returns followed by a fresh `call` from an ancestor — backing out a leg and restarting it), or **terminate** (`terminated` returns all the way to the root). A stack with no open calls left is **terminated**; the active stack is **active**.
 - **The `interrupt` column/root appears only on first use.** A normal run with no interrupts is not cluttered with an interrupt lifeline. `human` is always present — every run starts with a human-submitted task.
 
@@ -157,13 +159,13 @@ The flow view's id-keyed row computes each call's column from its parent's depth
 Open siblings share a column and are placed in deterministic lanes per `(stack, depth)` over the visible open set (the open invocations plus the invocation closed by a lingering return), assigned in start order, so `finish`/retry siblings do not shift each other.
 A call edge runs from its actual source column to its destination column, not across unrelated nodes.
 Rows are stacked with cumulative tops: each row starts below the previous row's full height, including its tallest sibling lane, so a tall row pushes later rows down instead of overlapping them.
-The legacy row keeps its index-based chain projection unchanged.
+Every row uses this parent-depth projection; there is no index-based fallback.
 
 ### View click-throughs and the roles-only sequence filter
 
 Two affordances sit on top of the two views (the entry points that make the LLM-turn inspector reachable from the graphs):
 
-- **Click-through** — a *hover* shows the inspector card; a *click* on an agent drills in: clicking an agent's flow node, its top-bar slot, or a message/terminal node whose worker is an agent opens the inspect modal pre-scoped to that instance. The mapping from clicked target to the modal's scope identity is `resolveInspectorScope` (`source/web/static/ts/inspector.ts`): participant targets map through the participant's `roleId` (falling back to the role name, the identity turn entries use on logs without per-instance ids), role targets map to the role's most recent instance, and operation targets map to the worker the operation is about (destination for call/observe/terminate, the returning source for a return). Human/tool/interrupt targets are not drill-ins — their clicks keep the hover-card behavior, as do the in-flight `ask_human` row clicks that re-open the question modal. The click-through is app-only today: the inspect modal is mounted by `app.ts` alone (the demo harness has no run-log window to feed it — see "The demo page is a fixture transport, not a sandbox").
+- **Click-through** — a *hover* shows the inspector card; a *click* on an agent drills in: clicking an agent's flow node, its top-bar slot, or a message/terminal node whose worker is an agent opens the inspect modal pre-scoped to that instance. The mapping from clicked target to the modal's scope identity is `resolveInspectorScope` (`source/web/static/ts/inspector.ts`): participant targets map through the participant's `roleId`, a participant without a usable instance id contributes no scope, role targets map to the role's most recent instance, and operation targets map to the worker the operation is about (destination for call/observe/terminate, the returning source for a return). Human/tool/interrupt targets are not drill-ins — their clicks keep the hover-card behavior, as do the in-flight `ask_human` row clicks that re-open the question modal. The click-through is app-only today: the inspect modal is mounted by `app.ts` alone (the demo harness has no run-log window to feed it — see "The demo page is a fixture transport, not a sandbox").
 - **Roles-only sequence filter** — a toggle next to the flow/sequence view controls filters the sequence render to the agent roles plus the human: participants collapse via `rolesOnlyParticipants` and the frame via `rolesOnlyModel` (`source/web/static/ts/interaction-model.ts`), pure helpers both shells consume. An operation survives only when every participant it references survives, so tool call/return legs, tool-sourced `observe`/`terminate` rows, and synthetic-interrupt-rooted preemptions drop while the agent↔agent and agent↔human chains (including the `ask_human` exchange) stay readable. The filter is a lens on the one surface: the now caption, cost strip, and flow view keep reading the full model.
 
 ## Dev harness
@@ -197,7 +199,7 @@ No automated check guards this contract, and that is a considered decision: a me
 
 The backend adapter (`source/web/interaction-model-adapter.ts`) produces the `InteractionModel` from the executor's `LogEvent` stream and is the single place that knows the executor's event vocabulary. The product UI reads it live at `GET /api/runs/:id/flow` (and the `/api/run/flow` alias); the dev harness iterates against the same derivation by feeding fixture event streams through it (`GET /api/demo/flow/:scenario/:frame`). The live endpoint ships the model inside an entity-diff envelope (deltas with a snapshot fallback) rather than the raw model, so a steady poll transfers only the changed entities; the demo fixture route serves the model directly. The view modules never parse log events themselves, so a change to the executor's event vocabulary lands in exactly one place.
 
-With invocation identity the adapter builds an identity-keyed graph.
+The adapter builds an identity-keyed graph.
 A start event creates a participant and a call keyed by `callId`, parented to `parentCallId`; a terminal closes exactly the invocation its `callId` names.
 Role calls, tool calls, asks, and interrupts all participate: `role_start` is keyed `role:<roleId>` and parented to the caller role (or to the interrupt for a handler); `tool_call` is keyed `tool:<id>` and parented to the invoking role; `ask_human` is keyed `tool:<questionId>` and parented to the asking role; an `interrupt` is keyed `interrupt:<id>` and parented to the role it preempts, and its handler role is parented to that interrupt.
 For an identified start, parentage never comes from event order in this path.
@@ -205,9 +207,7 @@ A `role_finished` with `paused: true` is a pause marker and does not close the r
 A `needs_clarification` finish without `paused` is an ordinary terminal, so only a finish that actually pauses the run stays open.
 A terminal without a start materializes a complete call and return at the terminal timestamp from the stack root, without guessing a parent.
 
-When a mixed log omits an id or a parent, the adapter falls back only to bounded legacy behavior: matching an open role by instance id or name, an open tool by name, the nearest open role for an unidentified call, or the current frame's root.
-It never infers a parent from operation adjacency.
-A log with no `callId` on any invocation start uses the unchanged legacy walk.
+An invocation start missing its required `callId`, or a nested call missing its `parentCallId`, is malformed and skipped; parentage is never inferred from operation adjacency.
 
 An interrupt pushes a fresh stack rooted at an interrupt participant (or a human asker for an inquiry); the interrupt invocation itself has no call operation, so the handler's role call is the row's first edge.
 `interrupt_resolved` closes the invocation named by its `callId` and pops the stack when its root work has returned, removing the stack record when it never recorded an operation.

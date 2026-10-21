@@ -56,26 +56,24 @@ function isLowSurrogate(codeUnit: number): boolean {
 	return codeUnit >= 0xDC00 && codeUnit <= 0xDFFF
 }
 
-// The one instance-matching rule the live partial and the inspector renderer share: an entry with its own instance id matches the partial's id when the partial carries one; an entry or partial without an instance id (old logs) falls back to the role name.
-export function livePartialMatchesRole(roleId: string, role: string, livePartial: { roleId: string | null; role: string } | null): boolean {
+// The one instance-matching rule the live partial and the inspector renderer share: matching requires instance ids, so a same-named sibling's entry never matches another instance's partial.
+export function livePartialMatchesRole(roleId: string, livePartial: { roleId: string | null } | null): boolean {
 	if (livePartial === null) return false
-	const entryHasOwnId = roleId !== role
-	const partialHasId = livePartial.roleId !== null && livePartial.roleId !== ''
-	if (entryHasOwnId && partialHasId) return roleId === livePartial.roleId
-	return role === livePartial.role
+	if (roleId === '') return false
+	if (livePartial.roleId === null || livePartial.roleId === '') return false
+	return roleId === livePartial.roleId
 }
 
-// The partial as it should stand after a turn-list derivation: null when the accumulated instance no longer holds an in-flight turn — the inspector's `llm_call_start`/`llm_call` pairing (buildTurnIndex, turn-inspector/turns.ts) proves the turn completed, since an in-flight turn keeps its start unmatched in the log — or the partial itself when the role is still generating. Pairing uses livePartialMatchesRole (the renderer applies the same rule through the turn-inspector module entrypoint), so a same-named sibling's in-flight row never hosts another instance's stream; an entry or partial carrying no instance id — old logs, whose turn events predate per-instance ids — falls back to the role name. A non-array or malformed entry list reads as "nothing in flight" and clears, so a derivation that learned nothing never keeps a stale partial.
+// The partial as it should stand after a turn-list derivation: null when the accumulated instance no longer holds an in-flight turn — the inspector's `llm_call_start`/`llm_call` pairing (buildTurnIndex, turn-inspector/turns.ts) proves the turn completed, since an in-flight turn keeps its start unmatched in the log — or the partial itself when the role is still generating. Pairing uses livePartialMatchesRole (the renderer applies the same rule through the turn-inspector module entrypoint), so a same-named sibling's in-flight row never hosts another instance's stream. A non-array or malformed entry list reads as "nothing in flight" and clears, so a derivation that learned nothing never keeps a stale partial.
 export function activeLivePartial(livePartial: LivePartial | null, entries: unknown): LivePartial | null {
 	if (livePartial === null) return null
 	if (!Array.isArray(entries)) return null
 	for (const entry of entries) {
 		if (!isObject(entry)) continue
 		if (entry['kind'] !== 'in_flight') continue
-		const role = typeof entry['role'] === 'string' && entry['role'] !== '' ? entry['role'] : null
-		if (role === null) continue
-		const roleId = typeof entry['roleId'] === 'string' && entry['roleId'] !== '' ? entry['roleId'] : role
-		if (livePartialMatchesRole(roleId, role, livePartial)) return livePartial
+		const roleId = typeof entry['roleId'] === 'string' && entry['roleId'] !== '' ? entry['roleId'] : null
+		if (roleId === null) continue
+		if (livePartialMatchesRole(roleId, livePartial)) return livePartial
 	}
 	return null
 }
@@ -87,10 +85,9 @@ export function scopedActiveLivePartial(livePartial: LivePartial | null, entries
 	for (const entry of entries) {
 		if (!isObject(entry)) continue
 		if (entry['kind'] !== 'completed') continue
-		const role = typeof entry['role'] === 'string' && entry['role'] !== '' ? entry['role'] : null
-		if (role === null) continue
-		const roleId = typeof entry['roleId'] === 'string' && entry['roleId'] !== '' ? entry['roleId'] : role
-		if (livePartialMatchesRole(roleId, role, livePartial)) return null
+		const roleId = typeof entry['roleId'] === 'string' && entry['roleId'] !== '' ? entry['roleId'] : null
+		if (roleId === null) continue
+		if (livePartialMatchesRole(roleId, livePartial)) return null
 	}
 	return livePartial
 }

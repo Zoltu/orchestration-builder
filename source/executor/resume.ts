@@ -1,6 +1,6 @@
-import { pendingCallId, pendingIndex, pendingParentCallId, type PendingInvocation, type PendingRecord, type RunCheckpoint } from './checkpoint.js'
+import type { PendingInvocation, RunCheckpoint } from './checkpoint.js'
 import { logEvent, type EngineContext, type EngineDependencies, type RunRole, type SuspendedTurn } from './engine-state.js'
-import { roleCallId, toolCallId } from './invocation.js'
+import { roleCallId } from './invocation.js'
 import type { LoadedGuild } from './loader.js'
 import type { ParkedAnswer } from './park-state.js'
 import { planStaleInvocationTerminals } from './stale-invocations.js'
@@ -19,27 +19,24 @@ interface RestoredPending {
 	pendingInvocation?: PendingInvocation
 }
 
-// A pending record whose child is still below it (or whose child card was already recorded) is a child suspension; everything else on the leaf is an ordinary invocation to reconcile. A new-shape leaf record with no child below it covers the crash after the pending checkpoint but before the child registered, so it is replayed like any other pending invocation.
-function restorePending(frame: PendingRecord, index: number, frameCount: number, resolveChildCard: () => Promise<ResultCard>): RestoredPending {
-	const position = pendingIndex(frame)
-	const call = frame.toolCalls[position]
+// A pending record whose child is still below it (or whose child card was already recorded) is a child suspension; everything else on the leaf is an ordinary invocation to reconcile. A leaf record with no child below it covers the crash after the pending checkpoint but before the child registered, so it is replayed like any other pending invocation.
+function restorePending(frame: PendingInvocation, index: number, frameCount: number, resolveChildCard: () => Promise<ResultCard>): RestoredPending {
+	const call = frame.toolCalls[frame.index]
 	const childCall = call !== undefined && suspendsChild(call.function.name)
 	const childStillBelow = index < frameCount - 1
-	const callId = pendingCallId(frame)
-	const parentCallId = pendingParentCallId(frame)
 	const recordedCard = frame.childCard
 	if (recordedCard !== undefined || (childCall && childStillBelow)) {
 		return {
 			suspendedTurn: {
 				toolCalls: frame.toolCalls,
-				childIndex: position,
-				...(callId !== undefined && parentCallId !== undefined ? { callId, parentCallId } : {}),
+				childIndex: frame.index,
+				callId: frame.callId,
+				parentCallId: frame.parentCallId,
 				resolveChildCard: recordedCard !== undefined ? () => Promise.resolve(recordedCard) : resolveChildCard,
 			},
 		}
 	}
-	if ('index' in frame) return { pendingInvocation: frame }
-	throw new Error(`resumeRoleStack: legacy pending record on frame ${index} has no child frame to resume`)
+	return { pendingInvocation: frame }
 }
 
 // The resume driver: re-enters the checkpoint's role stack, letting the depth-first traversal continue. A frame with a pending child suspension resolves its child card lazily from inside the suspended turn — either the recorded card, or the next frame's own resume — so the stack re-forms in the same root-first order the live recursion produces. A leaf with an ordinary pending invocation re-enters at its loop top and reconciles it there, where the dispatch context exists.
@@ -57,11 +54,10 @@ export async function resumeRoleStack(runRole: RunRole, deps: EngineDependencies
 	const pendingCallIds = new Set<string>()
 	for (const frame of checkpoint.frames) {
 		if (frame.pending === undefined) continue
-		const callId = pendingCallId(frame.pending)
-		if (callId !== undefined) pendingCallIds.add(callId)
+		pendingCallIds.add(frame.pending.callId)
 	}
 	// A parked ask is intentionally open until the queue answer arrives; it is not a stale crash remnant.
-	if (checkpoint.parkedAsk !== undefined) pendingCallIds.add(checkpoint.parkedAsk.callId ?? toolCallId(checkpoint.parkedAsk.toolCallId))
+	if (checkpoint.parkedAsk !== undefined) pendingCallIds.add(checkpoint.parkedAsk.callId)
 	// Handler and interrupt invocations are not checkpointed (handler writes are suppressed), so a crash inside one leaves only its starts in the log. Close those before any role re-enters; the role loop never sees them as live work.
 	for (const terminal of planStaleInvocationTerminals(existingEvents, liveRoleCallIds, pendingCallIds)) {
 		logEvent(deps.appendLog, terminal.type, terminal.payload)
