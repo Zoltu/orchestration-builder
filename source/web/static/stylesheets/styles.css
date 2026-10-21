@@ -3092,6 +3092,7 @@ li:last-child {
 /* --- Sequence diagram view ------------------------------------------------- */
 /* The debug "Sequence" view: one column per role plus a Human and a single shared "tools" column, with each log event drawn as a horizontal message on a vertical time axis. It is a debug surface, so it grows long down the page; the SVG sizes to its viewBox and scales to the container width, and the host scroll container scrolls vertically for long timelines. Colors reuse the --svg-* tokens so the diagram follows the light/dark theme with the flow graph. */
 
+.sequence-view-header,
 .sequence-view-svg {
 	width: 100%;
 	height: auto;
@@ -3101,6 +3102,20 @@ li:last-child {
 	display: block;
 }
 
+/* The header is its own sticky SVG at the top of the scroll container, so the role labels stay visible while the body scrolls beneath it. It paints the stage background opaquely to cover the rows passing under it; the vertical padding is split so the header/body seam does not double. Its z-index must stay below the tooltip (15), answer card (18), and overlays (20) so they are never occluded. */
+.sequence-view-header {
+	position: sticky;
+	top: 0;
+	z-index: 1;
+	padding-bottom: 0;
+	background: var(--color-surface-sunken);
+}
+
+.sequence-view-svg {
+	padding-top: 0;
+}
+
+.sequence-view-header text,
 .sequence-view-svg text {
 	font-family: var(--font-body);
 	user-select: none;
@@ -3113,8 +3128,8 @@ li:last-child {
 	font-weight: 600;
 }
 
-.seq-column--tools .seq-column-label,
-.seq-column--human .seq-column-label {
+.seq-header-column--tool .seq-column-label,
+.seq-header-column--human .seq-column-label {
 	fill: var(--svg-node-sublabel);
 }
 
@@ -3242,6 +3257,7 @@ li:last-child {
 /* The sequence view lives in a vertical scroll container (long timelines scroll rather than zoom): the container is the navigation surface, and each message row and terminal node is an inspector target, so they carry a help cursor to signal hover-for-detail before the tooltip card materializes. */
 .pb-sequence-scroll {
 	cursor: default;
+	background: var(--color-surface-sunken);
 }
 
 .seq-message-group,

@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { createRunStage, sequenceActiveRowScrollTop } from './index.js'
+import { createRunStage, SEQUENCE_BODY_CLASS, SEQUENCE_HEADER_CLASS, SEQUENCE_SURFACE_CLASS, sequenceActiveRowScrollTop } from './index.js'
 import type { RunStage } from './index.js'
 import { activeOperation, activeStack, observesOf } from '../interaction-model.js'
 import { createLabelResolver } from '../labels.js'
@@ -81,18 +81,48 @@ interface RenderOptions {
 	rolesOnly?: boolean
 }
 
-// The default role list is empty, so every existing assertion renders against today's neutral look; accent-specific tests opt into a real guild role list. Passing the model's own participants as the guild inventory reproduces the old fallback when no static guild set is supplied.
-function render(model: InteractionModel, tier: LabelTier = 'detailed', options: RenderOptions = {}): Vnode {
+function sequenceStage(model: InteractionModel, tier: LabelTier, options: RenderOptions): { stage: RunStage; inputs: Parameters<RunStage['render']>[1] } {
 	const stage: RunStage = createRunStage({ roleNames: options.roleNames ?? [], roleOrder: options.roleOrder ?? [] })
-	return stage.render(fakeH, {
+	const inputs = {
 		model,
 		previousModel: null,
 		labels: labelsModule,
 		tier,
-		viewMode: 'sequence',
+		viewMode: 'sequence' as const,
 		rolesOnly: options.rolesOnly ?? false,
 		guildParticipants: options.guildParticipants ?? model.participants,
-	})
+	}
+	return { stage, inputs }
+}
+
+interface SequenceViewParts {
+	surface: Vnode
+	header: Vnode
+	body: Vnode
+}
+
+function directChildWithClass(view: Vnode, token: string): Vnode {
+	for (const child of view.children) {
+		if (!isVnode(child)) continue
+		const tokens = (propString(child.props, 'class') ?? '').split(' ')
+		if (tokens.includes(token)) return child
+	}
+	throw new Error(`view has no direct child with class ${token}`)
+}
+
+function renderParts(model: InteractionModel, tier: LabelTier = 'detailed', options: RenderOptions = {}): SequenceViewParts {
+	const { stage, inputs } = sequenceStage(model, tier, options)
+	const surface = stage.render(fakeH, inputs)
+	return {
+		surface,
+		header: directChildWithClass(surface, SEQUENCE_HEADER_CLASS),
+		body: directChildWithClass(surface, SEQUENCE_BODY_CLASS),
+	}
+}
+
+// The default role list is empty, so every existing assertion renders against today's neutral look; accent-specific tests opt into a real guild role list. Passing the model's own participants as the guild inventory reproduces the old fallback when no static guild set is supplied.
+function render(model: InteractionModel, tier: LabelTier = 'detailed', options: RenderOptions = {}): Vnode {
+	return renderParts(model, tier, options).body
 }
 
 // Renders with the demo's static guild participant set so the column-set behavior the demo harness exercises (every guild role column present from frame 0) is asserted against the same data the harness passes.
@@ -102,6 +132,48 @@ function renderWithGuild(model: InteractionModel, tier: LabelTier = 'detailed', 
 
 function columnRoles(view: Vnode): string[] {
 	return groupsWithClass(view, 'seq-column').map((column) => propString(column.props, 'data-role') ?? '')
+}
+
+function headerColumnGroups(header: Vnode): Vnode[] {
+	return groupsWithClass(header, 'seq-header-column')
+}
+
+function headerColumnRoles(header: Vnode): string[] {
+	return headerColumnGroups(header).map((column) => propString(column.props, 'data-column-role') ?? '')
+}
+
+function columnLabelTexts(header: Vnode): string[] {
+	return headerColumnGroups(header).map((column) => {
+		const text = allByTag(column, 'text')[0]
+		if (text === undefined) throw new Error('column has no label text')
+		return text.children.filter((child) => typeof child === 'string').join('')
+	})
+}
+
+function columnLabelPositions(header: Vnode): number[] {
+	return headerColumnGroups(header).map((column) => {
+		const text = allByTag(column, 'text')[0]
+		if (text === undefined) throw new Error('column has no label text')
+		const x = text.props['x']
+		if (typeof x !== 'number') throw new Error('column label has no numeric x')
+		return x
+	})
+}
+
+function lifelinePositions(view: Vnode): number[] {
+	return groupsWithClass(view, 'seq-column').map((column) => {
+		const line = allByTag(column, 'line')[0]
+		if (line === undefined) throw new Error('column has no lifeline')
+		const x = line.props['x1']
+		if (typeof x !== 'number') throw new Error('column lifeline has no numeric x1')
+		return x
+	})
+}
+
+function viewBox(view: Vnode): number[] {
+	const value = propString(view.props, 'viewBox')
+	if (value === undefined) throw new Error('view has no viewBox')
+	return value.split(' ').map(Number)
 }
 
 function messageGroups(view: Vnode): Vnode[] {
@@ -207,6 +279,93 @@ describe('renderSequenceView — columns', () => {
 		// The static guild set carries orchestrator, planner, coder, critic, loop_detector; the declared order names planner first, then coder, leaving the rest unlisted (they sort after by name). Human stays first and the shared tools column stays last.
 		const view = renderWithGuild(scenarioFrame('single-role-completion', 0), 'detailed', ['planner', 'coder'])
 		expect(columnRoles(view)).toEqual(['human', 'planner', 'coder', 'critic', 'loop_detector', 'orchestrator', 'tools'])
+	})
+})
+
+describe('renderSequenceView — pinned column header', () => {
+	test('the stage renders one surface wrapper holding the keyed header SVG then the body SVG', () => {
+		const { surface, header, body } = renderParts(scenarioFrame('deep-call-tree', 18))
+		expect(surface.tag).toBe('div')
+		expect(propString(surface.props, 'class')).toBe(SEQUENCE_SURFACE_CLASS)
+		const children = surface.children.filter(isVnode)
+		expect(children.length).toBe(2)
+		expect(children[0]).toBe(header)
+		expect(children[1]).toBe(body)
+		expect(propString(header.props, 'class')).toBe(SEQUENCE_HEADER_CLASS)
+		expect(propString(body.props, 'class')).toBe(SEQUENCE_BODY_CLASS)
+		expect(header.props['key']).toBe('header')
+		expect(body.props['key']).toBe('body')
+	})
+
+	test('the header carries one labeled entry per body column in the same role order', () => {
+		const { header, body } = renderParts(scenarioFrame('deep-call-tree', 18))
+		expect(headerColumnRoles(header)).toEqual(columnRoles(body))
+		expect(columnLabelTexts(header).length).toBe(columnRoles(body).length)
+		expect(columnLabelTexts(header).every((label) => label.length > 0)).toBe(true)
+	})
+
+	test('header group kind classes use the emitted participant kinds so stylesheet modifiers can match', () => {
+		const { header, body } = renderParts(scenarioFrame('deep-call-tree', 18))
+		const kinds = groupsWithClass(body, 'seq-column').map((column) => propString(column.props, 'data-kind'))
+		for (const [index, group] of headerColumnGroups(header).entries()) {
+			const kind = kinds[index]
+			if (kind === undefined) throw new Error(`body column ${index} has no kind`)
+			expect((propString(group.props, 'class') ?? '').split(' ')).toContain(`seq-header-column--${kind}`)
+		}
+		const groupForRole = (role: string): Vnode => {
+			const group = headerColumnGroups(header).find((entry) => propString(entry.props, 'data-column-role') === role)
+			if (group === undefined) throw new Error(`header has no group for role ${role}`)
+			return group
+		}
+		expect((propString(groupForRole('tools').props, 'class') ?? '').split(' ')).toContain('seq-header-column--tool')
+		expect((propString(groupForRole('human').props, 'class') ?? '').split(' ')).toContain('seq-header-column--human')
+	})
+
+	test('each header label sits at the x of its body lifeline', () => {
+		const { header, body } = renderParts(scenarioFrame('deep-call-tree', 18))
+		expect(columnLabelPositions(header)).toEqual(lifelinePositions(body))
+	})
+
+	test('each role has exactly one body data-role group, while header groups carry only the separate column-role identity', () => {
+		const { surface, header, body } = renderParts(scenarioFrame('deep-call-tree', 18))
+		const bodyRoles = columnRoles(body)
+		expect(bodyRoles.length).toBeGreaterThan(0)
+		expect(new Set(bodyRoles).size).toBe(bodyRoles.length)
+		expect(groupsWithClass(surface, 'seq-column').length).toBe(bodyRoles.length)
+		expect(groupsWithClass(header, 'seq-column')).toEqual([])
+		expect(headerColumnRoles(header)).toEqual(bodyRoles)
+		expect(new Set(headerColumnRoles(header)).size).toBe(bodyRoles.length)
+		for (const group of headerColumnGroups(header)) {
+			expect(propString(group.props, 'data-role')).toBeUndefined()
+			expect(propString(group.props, 'data-kind')).toBeUndefined()
+		}
+	})
+
+	test('the header viewBox width matches the body, and the body starts below the header band', () => {
+		const { header, body } = renderParts(scenarioFrame('deep-call-tree', 18))
+		const headerBox = viewBox(header)
+		const bodyBox = viewBox(body)
+		expect(headerBox[2]).toBe(bodyBox[2])
+		expect(headerBox[3]).toBe(HEADER_HEIGHT)
+		expect(bodyBox[1]).toBe(HEADER_HEIGHT)
+	})
+
+	test('alignment holds under roles-only filtering', () => {
+		const frame = scenarioFrame('detected-loop-interrupt', 4)
+		const options = { guildParticipants: GUILD_PARTICIPANTS, rolesOnly: true }
+		const { header, body } = renderParts(frame, 'detailed', options)
+		expect(columnRoles(body)).not.toContain('tools')
+		expect(headerColumnRoles(header)).toEqual(columnRoles(body))
+		expect(columnLabelPositions(header)).toEqual(lifelinePositions(body))
+	})
+
+	test('alignment holds with a declared roleOrder', () => {
+		const frame = scenarioFrame('single-role-completion', 0)
+		const options = { roleOrder: ['planner', 'coder'], guildParticipants: GUILD_PARTICIPANTS }
+		const { header, body } = renderParts(frame, 'detailed', options)
+		expect(columnRoles(body)).toEqual(['human', 'planner', 'coder', 'critic', 'loop_detector', 'orchestrator', 'tools'])
+		expect(headerColumnRoles(header)).toEqual(columnRoles(body))
+		expect(columnLabelPositions(header)).toEqual(lifelinePositions(body))
 	})
 })
 
@@ -765,22 +924,29 @@ describe('renderSequenceView — roles-only filter', () => {
 })
 
 describe('sequenceActiveRowScrollTop', () => {
-	test('centers the last row at the scale the container renders it', () => {
+	test('centers the last row below the pinned header at the scale the container renders the body', () => {
 		const operationCount = 4
-		const naturalHeight = HEADER_HEIGHT + operationCount * ROW_HEIGHT + BOTTOM_MARGIN
+		const bodyNaturalHeight = operationCount * ROW_HEIGHT + BOTTOM_MARGIN
 		const svgHeight = 600
-		const rowY = HEADER_HEIGHT + (operationCount - 1) * ROW_HEIGHT + ROW_HEIGHT / 2
-		const expected = (rowY / naturalHeight) * svgHeight - 300 / 2
-		expect(sequenceActiveRowScrollTop(operationCount, svgHeight, 300)).toBe(Math.max(0, expected))
+		const headerHeight = 80
+		const rowFromBodyTop = (operationCount - 1) * ROW_HEIGHT + ROW_HEIGHT / 2
+		const expected = headerHeight + (rowFromBodyTop / bodyNaturalHeight) * svgHeight - 300 / 2
+		expect(sequenceActiveRowScrollTop(operationCount, svgHeight, 300, headerHeight)).toBe(Math.max(0, expected))
+	})
+
+	test('the pinned header height increases the scroll offset', () => {
+		const withoutHeader = sequenceActiveRowScrollTop(10, 600, 300, 0)
+		const withHeader = sequenceActiveRowScrollTop(10, 600, 300, 80)
+		expect(withHeader - withoutHeader).toBe(80)
 	})
 
 	test('clamps at zero when the content is shorter than the container', () => {
-		expect(sequenceActiveRowScrollTop(2, 100, 400)).toBe(0)
+		expect(sequenceActiveRowScrollTop(2, 100, 400, 80)).toBe(0)
 	})
 
 	test('returns 0 for an empty timeline or an unsized svg', () => {
-		expect(sequenceActiveRowScrollTop(0, 600, 300)).toBe(0)
-		expect(sequenceActiveRowScrollTop(3, 0, 300)).toBe(0)
+		expect(sequenceActiveRowScrollTop(0, 600, 300, 80)).toBe(0)
+		expect(sequenceActiveRowScrollTop(3, 0, 300, 80)).toBe(0)
 	})
 })
 

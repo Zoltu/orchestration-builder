@@ -5,7 +5,7 @@
 // Public contract:
 // - `createRunStage({ roleNames, roleOrder })` closes over the guild's full agent-role list (for accent assignment), the guild-declared role order (for participant ordering), the flow column high-water mark, and the stage memo.
 // - `configure({ roleNames, roleOrder })` applies a guild config that arrived after construction in place: the accent resolver and ordering update, the flow column high-water mark is preserved, and the stage memo is reset because its output depends on the config. The app calls this when `/api/config` lands after the first flow frame rather than recreating the stage.
-// - `render(h, inputs)` returns the stage vnode for the current frame: the flow view's `<svg>` in flow mode and the sequence view's `<svg>` in sequence mode. The host supplies its own sequence scroll container; the stage deliberately returns the SVG root so an SVG-namespace host such as the demo can mount it directly. When every memo-visible input is unchanged it returns the SAME vnode object by reference; hyperapp's `oldVNode === newVNode` short-circuit then skips the DOM diff. Callers must mount that vnode at exactly ONE tree position and must not reuse it across positions, because hyperapp mutates vnode `node` in place. `h` is part of the memo key, so callers must pass the same `h` function across renders.
+// - `render(h, inputs)` returns the stage vnode for the current frame: the flow view's `<svg>` in flow mode, and the sequence surface's HTML wrapper in sequence mode. The surface is stable DOM: a `div` with the exported `SEQUENCE_SURFACE_CLASS`, whose keyed children are the header `<svg>` (`SEQUENCE_HEADER_CLASS`, key `header`) followed by the body `<svg>` (`SEQUENCE_BODY_CLASS`, key `body`). The host supplies the sequence scroll container; the stage owns the header/body pairing so a host cannot misalign them. When every memo-visible input is unchanged it returns the SAME vnode object by reference — for the sequence surface this covers both SVGs — and hyperapp's `oldVNode === newVNode` short-circuit then skips the DOM diff. Callers must mount that vnode at exactly ONE tree position and must not reuse it across positions, because hyperapp mutates vnode `node` in place. `h` is part of the memo key, so callers must pass the same `h` function across renders.
 // - `model`, its `participants`/`operations` arrays, and `guildParticipants` are immutable and reference-stable: the memo compares them by reference, so a caller that mutates an array in place or rebuilds it with equal contents will either miss an update or replay the SVG diff. Supply a new reference only when the data actually changed.
 // - `now` is an optional per-render millisecond timestamp (a number, not a clock function). Supply it from the first render onward: an open call's elapsed is hydrated only at build time, so a stage first rendered without `now` keeps its unhydrated elapsed until another memo-visible input changes. A changed `now` alone does not invalidate the memo, so a clock-only tick reuses the mounted vnode and does not replay the SVG diff.
 // - `rolesOnly` is a sequence-only lens: it filters both the model and the guild participant set, removing tools and interrupt-rooted rows; flow mode ignores it.
@@ -15,7 +15,7 @@
 //
 // The stage hides flow layout/top bar/lifecycle animation, sequence layout/columns, SVG primitives, stage memoization, participant ordering, and role accent assignment.
 
-import type { InteractionModel } from '../interaction-model.js'
+import type { InteractionModel, Participant } from '../interaction-model.js'
 import { rolesOnlyModel, rolesOnlyParticipants, withLiveElapsed } from '../interaction-model.js'
 import type { LabelResolver, LabelTier } from '../labels.js'
 import type { H, Vnode } from '../../vendor/hyperapp.js'
@@ -28,7 +28,7 @@ import type { StageRenderInputs } from './stage-memo.js'
 
 export type { StageRenderInputs, StageViewMode } from './stage-memo.js'
 export type { ClickHandler, CtaControls, QuestionControls } from './flow-view.js'
-export { sequenceActiveRowScrollTop } from './sequence-diagram.js'
+export { SEQUENCE_BODY_CLASS, SEQUENCE_HEADER_CLASS, SEQUENCE_SURFACE_CLASS, sequenceActiveRowScrollTop } from './sequence-diagram.js'
 
 export interface RunStageConfig {
 	roleNames: readonly string[]
@@ -54,14 +54,19 @@ export function createRunStage(config: RunStageConfig): RunStage {
 		return createStageMemo((h, inputs) => buildStageContent(h, inputs))
 	}
 
+	function sequenceViewInputs(inputs: StageRenderInputs): { model: InteractionModel; guildParticipants: readonly Participant[] } {
+		const model = inputs.now === undefined ? inputs.model : withLiveElapsed(inputs.model, inputs.now)
+		if (!inputs.rolesOnly) return { model, guildParticipants: inputs.guildParticipants }
+		return { model: rolesOnlyModel(model), guildParticipants: rolesOnlyParticipants(inputs.guildParticipants) }
+	}
+
 	function buildStageContent(h: H, inputs: StageRenderInputs): Vnode {
+		if (inputs.viewMode === 'sequence') {
+			const sequenceInputs = sequenceViewInputs(inputs)
+			return renderSequenceView(h, sequenceInputs.model, inputs.labels, inputs.tier, roleAccents, roleOrder, sequenceInputs.guildParticipants)
+		}
 		const model = inputs.now === undefined ? inputs.model : withLiveElapsed(inputs.model, inputs.now)
 		const lifecycle = inputs.previousModel !== null ? deriveLifecycle(inputs.previousModel, model, roleOrder) : undefined
-		if (inputs.viewMode === 'sequence') {
-			const sequenceModel = inputs.rolesOnly ? rolesOnlyModel(model) : model
-			const sequenceGuildParticipants = inputs.rolesOnly ? rolesOnlyParticipants(inputs.guildParticipants) : inputs.guildParticipants
-			return renderSequenceView(h, sequenceModel, inputs.labels, inputs.tier, roleAccents, roleOrder, sequenceGuildParticipants)
-		}
 		return renderFlowView(h, model, inputs.labels, inputs.tier, roleAccents, roleOrder, lifecycle, inputs.cta, inputs.question, columnTracker)
 	}
 

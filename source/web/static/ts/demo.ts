@@ -4,7 +4,7 @@
 // The harness imports only its sibling static modules; it touches nothing in the product client (app.js).
 import { activeOperation, activeParticipant, activeStack, callChainOf, fateOf, isPaused, isTerminalStatus, observesOf, stacksOf } from './interaction-model.js'
 import { createLabelResolver, isLabelTier, isRoleOrder } from './labels.js'
-import { createRunStage, sequenceActiveRowScrollTop } from './run-stage/index.js'
+import { createRunStage, SEQUENCE_BODY_CLASS, SEQUENCE_HEADER_CLASS, sequenceActiveRowScrollTop } from './run-stage/index.js'
 import { createMarkdownRenderer } from './markdown-render.js'
 import { createTooltipDismiss, deriveTooltipDescriptor, isInFlightAskHuman, resolveTooltipTarget } from './inspector.js'
 import { createOperationDetails } from './operation-details.js'
@@ -24,6 +24,7 @@ import type { Vnode, VnodeChild, VnodeChildInput } from '../vendor/hyperapp.js'
 
 const PLAY_INTERVAL_MS = 1000
 const SVG_NAMESPACE = 'http://www.w3.org/2000/svg'
+const HTML_NAMESPACE = 'http://www.w3.org/1999/xhtml'
 
 // One scenario manifest from the /api/demo/scenarios list: each entry carries the id, label, frame count, and the full participant set (the sequence view's static column source). The rows come from the first-party adapter endpoint and are re-guarded downstream where individual fields are read.
 interface DemoScenarioManifest {
@@ -107,7 +108,7 @@ flowContainer.className = 'pb-flow'
 flowContainer.style.marginTop = '1rem'
 textView.parentElement?.insertBefore(flowContainer, textView)
 
-// The sequence view renders inside a scroll container rather than the page itself so a long timeline scrolls vertically (wheel reaches the container) without zooming; the SVG keeps its natural full-content viewBox and the container scrolls it. The flow view mounts directly in the flow container because it never overflows.
+// The sequence view renders inside a scroll container rather than the page itself so a long timeline scrolls vertically (wheel reaches the container) without zooming; the surface holds a pinned header SVG and a body SVG whose viewBox starts at the header height, and the container scrolls the body. The flow view mounts directly in the flow container because it never overflows.
 const sequenceScrollContainer = document.createElement('div')
 sequenceScrollContainer.className = 'pb-sequence-scroll'
 sequenceScrollContainer.style.overflow = 'auto'
@@ -262,9 +263,10 @@ function hostElementOf(vnode: Vnode, what: string): Element {
 	return vnode.element
 }
 
-function domH(tag: string, props: Record<string, unknown>, children: VnodeChild[] = []): HostVnode {
-	const element = document.createElementNS(SVG_NAMESPACE, tag)
+function applyHostProperties(element: HTMLElement | SVGElement, props: Record<string, unknown>): void {
 	for (const [key, value] of Object.entries(props)) {
+		// `key` is a vnode identity marker, not a DOM attribute.
+		if (key === 'key') continue
 		// Boolean HTML/SVG attributes are present=true/absent=false, so a `false` value must skip the attribute rather than stringify it: setAttribute('disabled', 'false') still disables the element because the attribute exists. Skipping the false value leaves the attribute absent, which is the false state; a true value still stringifies to 'true', whose presence is the true state.
 		if (value === undefined || value === null || value === false) continue
 		if (key.startsWith('on') && isEventListener(value)) {
@@ -280,40 +282,58 @@ function domH(tag: string, props: Record<string, unknown>, children: VnodeChild[
 		}
 		element.setAttribute(key, String(value))
 	}
-	const collected: VnodeChild[] = []
-	for (const child of children) {
+}
+
+function createHostElement(tag: string, namespace: string): HTMLElement | SVGElement {
+	if (namespace === SVG_NAMESPACE) return document.createElementNS(SVG_NAMESPACE, tag)
+	if (namespace === HTML_NAMESPACE) return document.createElement(tag)
+	throw new Error(`domH cannot create "${tag}" in namespace "${namespace}"`)
+}
+
+function materializeHostElement(vnode: HostVnode, namespace: string): Element {
+	const childNamespace = vnode.tag === 'svg' ? SVG_NAMESPACE : namespace
+	const element = createHostElement(vnode.tag, childNamespace)
+	applyHostProperties(element, vnode.props)
+	for (const child of vnode.children) {
 		if (typeof child === 'string') {
 			element.appendChild(document.createTextNode(child))
-			collected.push(child)
 			continue
 		}
-		if (isHostVnode(child)) {
-			element.appendChild(child.element)
-			collected.push(child)
-		}
+		if (!isHostVnode(child)) throw new Error(`domH child "${child.tag}" is not a host vnode`)
+		element.appendChild(materializeHostElement(child, childNamespace))
 	}
-	return { tag, props, children: collected, element }
+	return element
+}
+
+function rootNamespaceForTag(tag: string): string {
+	if (tag === 'svg') return SVG_NAMESPACE
+	if (tag === 'div') return HTML_NAMESPACE
+	throw new Error(`domH cannot mount a root <${tag}>: expected <svg> or <div>`)
+}
+
+// The stage's sequence surface is an HTML div containing SVG children. Because `h` receives children already built, domH defers element creation to the root access and threads the namespace down: the HTML root starts in HTML, an `svg` tag switches its subtree to SVG, and descendants inherit it. An unknown root tag fails fast instead of silently producing the wrong namespace.
+function domH(tag: string, props: Record<string, unknown>, children: VnodeChild[] = []): HostVnode {
+	const collected: VnodeChild[] = []
+	for (const child of children) {
+		if (typeof child === 'string' || isHostVnode(child)) collected.push(child)
+	}
+	let element: Element | null = null
+	const vnode: HostVnode = {
+		tag,
+		props,
+		children: collected,
+		get element(): Element {
+			if (element === null) element = materializeHostElement(vnode, rootNamespaceForTag(tag))
+			return element
+		},
+	}
+	return vnode
 }
 
 // An HTML-producing `h` for the inspector card and the sanitized-Markdown vnodes it renders. The sequence view SVG cannot host HTML (the tooltip card is a positioned `<div>` carrying `<p>`/`<ul>`/`<pre>` from the markdown pipeline), so the inspector reuses tooltip.js with an HTML `h` rather than the SVG `domH` the views use. `on*` props wire event listeners and the `style` object is applied via CSSStyleDeclaration so positioning lands as real CSS rather than a stringified object, mirroring domH's handling. Children arrive in the LooseH convention — an array, a bare string, or absent — so a bare string iterates character-wise (each character becomes its own text node, this host's original DOM shape), and anything else that is not an array renders nothing.
 function htmlH(tag: string, props: Record<string, unknown>, children: VnodeChildInput = []): HostVnode {
 	const element = document.createElement(tag)
-	for (const [key, value] of Object.entries(props)) {
-		// Boolean HTML attributes are present=true/absent=false, so a `false` value must skip the attribute rather than stringify it: setAttribute('disabled', 'false') still disables the element because the attribute exists. Skipping the false value leaves the attribute absent (the false state); a true value still stringifies to 'true' (its presence is the true state).
-		if (value === undefined || value === null || value === false) continue
-		if (key.startsWith('on') && isEventListener(value)) {
-			element.addEventListener(key.slice(2), value)
-			continue
-		}
-		if (key === 'style' && isObject(value)) {
-			for (const [prop, propValue] of Object.entries(value)) {
-				if (propValue === undefined || propValue === null) continue
-				element.style.setProperty(prop, String(propValue))
-			}
-			continue
-		}
-		element.setAttribute(key, String(value))
-	}
+	applyHostProperties(element, props)
 	const collected: VnodeChild[] = []
 	const childList: Iterable<VnodeChildInput> = typeof children === 'string' ? children : Array.isArray(children) ? children : []
 	for (const child of childList) {
@@ -438,17 +458,19 @@ function openTooltip(target: TooltipTarget): void {
 	currentTooltipTarget = target
 }
 
-// Sequence-view scroll state. The SVG renders at its natural full-content viewBox and lives inside a scroll container, so a long timeline scrolls vertically (the page wheel) rather than zooming; the container is the single piece of state the jump-to-active affordance needs.
+// Sequence-view scroll state. The surface holds a pinned header SVG and a body SVG whose viewBox starts at the header height; the body lives inside a scroll container, so a long timeline scrolls vertically (the page wheel) rather than zooming. The container is the single piece of state the jump-to-active affordance needs.
 let activeSequenceContainer: HTMLElement | null = null
 
-// Centers the latest message row using the layout math owned by the run-stage module (`sequenceActiveRowScrollTop`), so the harness consumes the production calculation rather than re-deriving it from the view's private constants.
+// Centers the latest message row using the layout math owned by the run-stage module (`sequenceActiveRowScrollTop`), so the harness consumes the production calculation rather than re-deriving it from the view's private constants. The surface owns the header and body pairing; the body's rendered height excludes the header, whose rendered height is passed separately so the offset accounts for the band above it.
 function jumpSequenceViewToActive(container: HTMLElement): void {
 	if (currentFrame === null) return
-	const svg = container.firstElementChild
-	if (!(svg instanceof SVGSVGElement)) return
-	const rect = svg.getBoundingClientRect()
-	if (rect.height === 0) return
-	container.scrollTop = sequenceActiveRowScrollTop(currentFrame.operations.length, rect.height, container.clientHeight)
+	const header = container.querySelector(`.${SEQUENCE_HEADER_CLASS}`)
+	const body = container.querySelector(`.${SEQUENCE_BODY_CLASS}`)
+	if (!(body instanceof SVGSVGElement)) return
+	const bodyRect = body.getBoundingClientRect()
+	if (bodyRect.height === 0) return
+	const headerHeight = header instanceof SVGSVGElement ? header.getBoundingClientRect().height : 0
+	container.scrollTop = sequenceActiveRowScrollTop(currentFrame.operations.length, bodyRect.height, container.clientHeight, headerHeight)
 }
 
 // Wires the inspector (hover/click) to the run-view container once.
@@ -613,7 +635,7 @@ function renderFlowViewSvg(): Vnode | null {
 	})
 }
 
-function renderSequenceViewSvg(): Vnode | null {
+function renderSequenceSurface(): Vnode | null {
 	if (labels === null || currentFrame === null) return null
 	const manifest = scenarios[scenarioIndex]
 	if (manifest === undefined) return null
@@ -827,13 +849,13 @@ function render(): void {
 		pendingScrollIntent = 'preserve'
 		return
 	}
-	const svg = renderSequenceViewSvg()
-	if (svg === null) {
+	const surface = renderSequenceSurface()
+	if (surface === null) {
 		scenarioChanged = false
 		pendingScrollIntent = 'preserve'
 		return
 	}
-	sequenceScrollContainer.replaceChildren(hostElementOf(svg, 'the sequence view'))
+	sequenceScrollContainer.replaceChildren(hostElementOf(surface, 'the sequence view'))
 	flowContainer.insertBefore(sequenceScrollContainer, nowCaption)
 	wireSequenceInteractions(sequenceScrollContainer)
 	// Auto-open the question modal in the sequence view too, so a pending ask_human prompts the operator regardless of which view is active; re-opening after dismissal is via clicking the ask_human message row (wired in wireSequenceInteractions).

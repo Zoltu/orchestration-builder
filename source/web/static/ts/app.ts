@@ -2809,7 +2809,7 @@ function WatchScreen(state: ApplicationState): Vnode {
 	// A needs_clarification run's question lives on its parked queue item, so its Respond CTA opens that item's answer modal; every other terminal status keeps the result modal. The status rides the model input, so a status change already rebuilds the stage.
 	const cta = { onclick: model.status === 'needs_clarification' ? OpenParkedQuestion : OpenResultModal }
 	const question = { onclick: OpenQuestionModal }
-	const stageContent = runStage.render(h, {
+	const stageInputs = {
 		model: serverModel,
 		previousModel: state.previousFlowModel,
 		labels,
@@ -2820,8 +2820,9 @@ function WatchScreen(state: ApplicationState): Vnode {
 		cta,
 		question,
 		now: state.now,
-	})
-	// The sequence timeline mounts in a vertical scroll container because it grows long, while the flow view scales to the stage. The stage returns the SVG root so it stays host-neutral; this host is HTML, so it supplies the scroll wrapper here.
+	}
+	const stageContent = runStage.render(h, stageInputs)
+	// The sequence timeline mounts in a vertical scroll container because it grows long, while the flow view scales to the stage. The stage owns the sequence surface's header/body pairing; this host is HTML, so it supplies only the scroll wrapper.
 	const stageView = state.flowViewMode === 'sequence'
 		? h('div', { class: 'pb-sequence-scroll' }, [stageContent])
 		: stageContent

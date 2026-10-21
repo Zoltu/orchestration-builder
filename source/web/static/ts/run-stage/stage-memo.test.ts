@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { createRunStage } from './index.js'
+import { createRunStage, SEQUENCE_BODY_CLASS, SEQUENCE_HEADER_CLASS, SEQUENCE_SURFACE_CLASS } from './index.js'
 import type { RunStage, StageRenderInputs } from './index.js'
 import type { InteractionModel, Participant } from '../interaction-model.js'
 import { createLabelResolver } from '../labels.js'
@@ -56,6 +56,15 @@ describe('run stage memo', () => {
 		expect(ticked).toBe(first)
 	})
 
+	test('a changed clock alone reuses the mounted sequence surface, header and body included', () => {
+		const runStage = stage()
+		const inputs = { ...baseInputs(), viewMode: 'sequence' as const }
+		const first = runStage.render(fakeH, inputs)
+		const ticked = runStage.render(fakeH, { ...inputs, now: 1234 })
+
+		expect(ticked).toBe(first)
+	})
+
 	test('fresh affordance wrappers carrying the same handlers do not defeat the memo', () => {
 		const runStage = stage()
 		const inputs = baseInputs()
@@ -101,22 +110,29 @@ describe('run stage memo', () => {
 		}
 	})
 
-	test('both modes return an SVG root, so an SVG-namespace host can mount it directly', () => {
+	test('flow mode returns its SVG root; sequence mode returns the one surface wrapper', () => {
 		const runStage = stage()
 		const flow = runStage.render(fakeH, baseInputs())
 		expect(flow.tag).toBe('svg')
 		expect(flow.props['class']).toBe('flow-view-svg')
 		const sequence = runStage.render(fakeH, { ...baseInputs(), viewMode: 'sequence' })
-		expect(sequence.tag).toBe('svg')
-		expect(sequence.props['class']).toBe('sequence-view-svg')
+		expect(sequence.tag).toBe('div')
+		expect(sequence.props['class']).toBe(SEQUENCE_SURFACE_CLASS)
 	})
 
-	test('an HTML host wraps the sequence SVG itself rather than receiving a stage-owned wrapper', () => {
+	test('the sequence surface contains exactly one keyed header SVG followed by one body SVG', () => {
 		const runStage = stage()
 		const sequence = runStage.render(fakeH, { ...baseInputs(), viewMode: 'sequence' })
-		const hostView = fakeH('div', { class: 'pb-sequence-scroll' }, [sequence])
-		expect(hostView.children).toEqual([sequence])
-		expect(hostView.children[0]).toBe(sequence)
+		const header = sequence.children[0]
+		const body = sequence.children[1]
+		if (header === undefined || body === undefined || typeof header === 'string' || typeof body === 'string') throw new Error('the sequence surface did not render both SVGs')
+		expect(sequence.children.length).toBe(2)
+		expect(header.tag).toBe('svg')
+		expect(header.props['class']).toBe(SEQUENCE_HEADER_CLASS)
+		expect(header.props['key']).toBe('header')
+		expect(body.tag).toBe('svg')
+		expect(body.props['class']).toBe(SEQUENCE_BODY_CLASS)
+		expect(body.props['key']).toBe('body')
 	})
 
 	test('a different h rebuilds even when every data input is unchanged', () => {

@@ -25,6 +25,11 @@ import { ATTR_OPERATION, ATTR_ROLE } from '../inspector.js'
 import { LoopbackEdge } from './svg-primitives.js'
 import type { H, Vnode } from '../../vendor/hyperapp.js'
 
+// The stable class names of the sequence surface's parts. The renderer and hosts share these names so a host can locate the body without duplicating private DOM strings; the stylesheet must keep the same names.
+export const SEQUENCE_SURFACE_CLASS = 'sequence-view-surface'
+export const SEQUENCE_HEADER_CLASS = 'sequence-view-header'
+export const SEQUENCE_BODY_CLASS = 'sequence-view-svg'
+
 // Layout constants. Columns are evenly spaced on COLUMN_WIDTH centers; messages stack on ROW_HEIGHT centers below the header. The viewBox is sized to the laid-out content so the host container can scale it to fit its width and scroll vertically for long timelines.
 const COLUMN_WIDTH = 150
 const ROW_HEIGHT = 30
@@ -36,12 +41,12 @@ const BOTTOM_MARGIN = 24
 // The minimum number of columns the canvas is sized for, so a run with few participants does not zoom the diagram in to fill the container width (the same high-water mark the flow view applies to its columns).
 const MIN_COLUMNS = 5
 
-// The pixel `scrollTop` that centers the last operation's row in a scroll container of `containerClientHeight`, given the SVG's rendered height `svgHeight`. The SVG scales to the container width, so the row's fractional position in the natural viewBox maps to a pixel offset inside the container's scroll range. Shared by every host that auto-scrolls a sequence view to the latest row.
-export function sequenceActiveRowScrollTop(operationCount: number, svgHeight: number, containerClientHeight: number): number {
+// The pixel `scrollTop` that centers the last operation's row in a scroll container of `containerClientHeight`, given the body SVG's rendered height `svgHeight` and the pinned header's rendered height `headerHeight`. The body viewBox starts at HEADER_HEIGHT, so the row's fractional position in the natural body viewBox maps to a pixel offset below the header. Shared by every host that auto-scrolls a sequence view to the latest row.
+export function sequenceActiveRowScrollTop(operationCount: number, svgHeight: number, containerClientHeight: number, headerHeight: number): number {
 	if (operationCount <= 0 || svgHeight === 0) return 0
-	const naturalHeight = HEADER_HEIGHT + operationCount * ROW_HEIGHT + BOTTOM_MARGIN
-	const rowY = HEADER_HEIGHT + (operationCount - 1) * ROW_HEIGHT + ROW_HEIGHT / 2
-	return Math.max(0, (rowY / naturalHeight) * svgHeight - containerClientHeight / 2)
+	const bodyNaturalHeight = operationCount * ROW_HEIGHT + BOTTOM_MARGIN
+	const rowFromBodyTop = (operationCount - 1) * ROW_HEIGHT + ROW_HEIGHT / 2
+	return Math.max(0, headerHeight + (rowFromBodyTop / bodyNaturalHeight) * svgHeight - containerClientHeight / 2)
 }
 
 // Approximate average character width at the 12px column-label size, used only to size the side margins so the first and last column labels stay on the canvas while remaining centered on their lifelines.
@@ -64,6 +69,24 @@ function requireParticipant(participantsById: Map<string, Participant>, particip
 interface SequenceColumn {
 	role: string
 	kind: ParticipantKind
+}
+
+interface SequenceLayoutColumn {
+	column: SequenceColumn
+	x: number
+	label: string
+}
+
+interface SequenceColumnLayout {
+	columns: SequenceLayoutColumn[]
+	columnIndexByRole: Map<string, number>
+	columnX(index: number): number
+	width: number
+}
+
+interface SequenceBodyExtent {
+	height: number
+	lifelineBottom: number
 }
 
 // Derives the column set: human always first, then interrupt (only once an Interrupt participant has appeared in the current frame — the first-use rule), then every role the guild defines, then a single shared "tools" column. A role invoked multiple times (instance-per-invocation retries) collapses to a single column keyed by role, which is what makes a same-role cross-instance call resolve to one column and render as a loopback. Every tool routes to the one "tools" column so the role chain stays focal and the tool inventory does not fan out across the diagram. `guildParticipants` (optional) supplies the full participant set the guild defines so every role column and the tools column appear from frame 0 rather than growing as participants first appear; when absent the column set falls back to the roles and tools present in the current frame. `roleOrder` is the guild-declared agent-role display order (guild.json visualization.roleOrder): the deduped role columns are sorted into it (participant-order.ts) so the sequence view and the flow view's top bar share one order; human, interrupt, and the shared tools column keep their fixed positions around the sorted roles.
@@ -210,11 +233,48 @@ function loopbackHitArea(h: H, columnX: number, rowY: number): Vnode {
 	return h('rect', { class: 'seq-hit-area', x: columnX, y: rowY - LOOPBACK_HEIGHT - ROW_HEIGHT / 2, width: 60 + TERMINAL_NODE_WIDTH, height: LOOPBACK_HEIGHT + ROW_HEIGHT }, [])
 }
 
-// Renders the sequence view as a single SVG sized to its laid-out content. Columns render as headers plus dashed vertical lifelines spanning the message area; operations render top-to-bottom by index, each as a horizontal arrow (or a loopback U-turn for a same-role cross-instance call, or a static dashed line for observe) landing on a terminal node on the destination's lifeline. The active operation's line carries the flowing/returning/error animation class and its destination node pulses; a return additionally carries a source node on the callee's lifeline with its outcome color. Every message group carries `data-operation` so the inspector resolves the operation's details markdown and label from the model without the view re-deriving or embedding them. `roleAccents` is the per-role accent resolver the hosts build from the guild's full role list (createRoleAccentResolver) — agent columns' terminal nodes take their role's accent, and a resolver that returns null for everything renders exactly the neutral look. `roleOrder` is the guild-declared agent-role display order (guild.json visualization.roleOrder), applied to the role columns by buildColumns so the view and the flow view's top bar share one order. `guildParticipants` (optional) supplies the full participant set the guild defines so every role column and the tools column appear from frame 0 rather than growing as participants first appear; when absent the column set falls back to the participants present in the current frame.
-export function renderSequenceView(h: H, model: InteractionModel, labels: LabelResolver, tier: LabelTier, roleAccents: RoleAccentResolver, roleOrder: readonly string[], guildParticipants?: readonly Participant[]): Vnode {
+// Computes the column-only layout shared by the pinned header and the scrolling body. All labels resolve once here: the header renders every one, while the first and last size the side margins so edge labels do not overflow the viewBox. The body's vertical extent is computed separately because the header never needs it.
+function computeColumnLayout(model: InteractionModel, labels: LabelResolver, tier: LabelTier, roleOrder: readonly string[], guildParticipants?: readonly Participant[]): SequenceColumnLayout {
 	const columns = buildColumns(model, guildParticipants, roleOrder)
+	const columnLabels = columns.map((column) => resolveColumnLabel(model, column, labels, tier))
+	const firstLabel = columnLabels[0] ?? ''
+	const lastLabel = columnLabels[columnLabels.length - 1] ?? ''
+	const leftMargin = Math.max(LEFT_MARGIN, Math.ceil((firstLabel.length * LABEL_CHAR_WIDTH) / 2) + 6)
+	const rightMargin = Math.max(RIGHT_MARGIN, Math.ceil((lastLabel.length * LABEL_CHAR_WIDTH) / 2) + 6)
+	const columnX = (index: number): number => leftMargin + index * COLUMN_WIDTH
+	const lastColumnX = columns.length > 0 ? columnX(columns.length - 1) : leftMargin
+	const naturalWidth = lastColumnX + rightMargin
+	const minWidth = LEFT_MARGIN + (MIN_COLUMNS - 1) * COLUMN_WIDTH + RIGHT_MARGIN
+	const width = Math.max(naturalWidth, minWidth)
 	const columnIndexByRole = new Map<string, number>()
-	columns.forEach((column, index) => columnIndexByRole.set(column.role, index))
+	const layoutColumns = columns.map((column, index) => {
+		columnIndexByRole.set(column.role, index)
+		return { column, x: columnX(index), label: columnLabels[index] ?? '' }
+	})
+	return { columns: layoutColumns, columnIndexByRole, columnX, width }
+}
+
+// The body's vertical extent: operations stack on ROW_HEIGHT centers below the header, and the canvas ends after the bottom margin.
+function computeBodyExtent(operationCount: number): SequenceBodyExtent {
+	const lifelineBottom = HEADER_HEIGHT + operationCount * ROW_HEIGHT
+	return { height: lifelineBottom + BOTTOM_MARGIN, lifelineBottom }
+}
+
+// Renders the pinned column header as its own SVG so the scroll container can stick it above the body. It consumes only the column layout, so labels sit at the same x as the body's lifelines; the body's viewBox begins at HEADER_HEIGHT, which is the band this header occupies. Header groups carry their own class rather than the body's `seq-column`, keeping `seq-column`/`data-role` unique to lifeline groups.
+function renderSequenceHeader(h: H, layout: SequenceColumnLayout): Vnode {
+	const columnGroups = layout.columns.map(({ column, x, label }) => {
+		return h('g', { class: `seq-header-column seq-header-column--${column.kind}`, 'data-column-role': column.role }, [
+			h('text', { class: 'seq-column-label', x, y: HEADER_HEIGHT - 14, 'text-anchor': 'middle' }, [label]),
+		])
+	})
+	return h('svg', { key: 'header', class: SEQUENCE_HEADER_CLASS, viewBox: `0 0 ${layout.width} ${HEADER_HEIGHT}`, preserveAspectRatio: 'xMidYMid meet', xmlns: 'http://www.w3.org/2000/svg' }, [
+		h('g', { class: 'seq-columns' }, columnGroups),
+	])
+}
+
+// Renders the sequence body as a single SVG sized to its laid-out content. Its viewBox starts at HEADER_HEIGHT so the blank header band is removed from the body while every absolute row and lifeline coordinate stays unchanged. Columns render as dashed vertical lifelines spanning the message area; operations render top-to-bottom by index, each as a horizontal arrow (or a loopback U-turn for a same-role cross-instance call, or a static dashed line for observe) landing on a terminal node on the destination's lifeline. The active operation's line carries the flowing/returning/error animation class and its destination node pulses; a return additionally carries a source node on the callee's lifeline with its outcome color. Every message group carries `data-operation` so the inspector resolves the operation's details markdown and label from the model without the view re-deriving or embedding them. `roleAccents` is the per-role accent resolver the hosts build from the guild's full role list (createRoleAccentResolver) — agent columns' terminal nodes take their role's accent, and a resolver that returns null for everything renders exactly the neutral look.
+function renderSequenceBody(h: H, model: InteractionModel, labels: LabelResolver, tier: LabelTier, roleAccents: RoleAccentResolver, layout: SequenceColumnLayout, extent: SequenceBodyExtent): Vnode {
+	const columnIndexByRole = layout.columnIndexByRole
 
 	const participantsById = new Map<string, Participant>()
 	for (const participant of model.participants) participantsById.set(participant.id, participant)
@@ -222,21 +282,7 @@ export function renderSequenceView(h: H, model: InteractionModel, labels: LabelR
 	const activeOperationId = activeOperation(model)?.id ?? null
 
 	const operations = model.operations
-	const messageAreaHeight = operations.length * ROW_HEIGHT
-	const lifelineBottom = HEADER_HEIGHT + messageAreaHeight
-	// Resolve the edge column labels up front so the side margins fit them: a label centered on the first or last column would otherwise overflow the viewBox. Middle columns never need this because their labels are bracketed by neighbours.
-	const firstColumn = columns.length > 0 ? columns[0] : undefined
-	const lastColumn = columns.length > 0 ? columns[columns.length - 1] : undefined
-	const firstLabel = firstColumn !== undefined ? resolveColumnLabel(model, firstColumn, labels, tier) : ''
-	const lastLabel = lastColumn !== undefined ? resolveColumnLabel(model, lastColumn, labels, tier) : ''
-	const leftMargin = Math.max(LEFT_MARGIN, Math.ceil((firstLabel.length * LABEL_CHAR_WIDTH) / 2) + 6)
-	const rightMargin = Math.max(RIGHT_MARGIN, Math.ceil((lastLabel.length * LABEL_CHAR_WIDTH) / 2) + 6)
-	const columnX = (index: number) => leftMargin + index * COLUMN_WIDTH
-	const lastColumnX = columns.length > 0 ? columnX(columns.length - 1) : leftMargin
-	const naturalWidth = lastColumnX + rightMargin
-	const minWidth = LEFT_MARGIN + (MIN_COLUMNS - 1) * COLUMN_WIDTH + RIGHT_MARGIN
-	const width = Math.max(naturalWidth, minWidth)
-	const height = HEADER_HEIGHT + messageAreaHeight + BOTTOM_MARGIN
+	const lifelineBottom = extent.lifelineBottom
 
 	const defs = h('defs', {}, [
 		arrowMarker(h, 'seq-arrow-neutral', 'seq-arrowhead--neutral'),
@@ -247,11 +293,8 @@ export function renderSequenceView(h: H, model: InteractionModel, labels: LabelR
 		arrowMarker(h, 'seq-arrow-terminated-flowing', 'seq-arrowhead--terminated-flowing'),
 	])
 
-	const columnGroups = columns.map((column, index) => {
-		const x = columnX(index)
-		const label = resolveColumnLabel(model, column, labels, tier)
-		return h('g', { class: `seq-column seq-column--${column.kind}`, [ATTR_ROLE]: column.role, 'data-kind': column.kind }, [
-			h('text', { class: 'seq-column-label', x, y: HEADER_HEIGHT - 14, 'text-anchor': 'middle' }, [label]),
+	const columnGroups = layout.columns.map(({ column, x }) => {
+		return h('g', { class: 'seq-column', [ATTR_ROLE]: column.role, 'data-kind': column.kind }, [
 			h('line', { class: 'seq-lifeline', x1: x, y1: HEADER_HEIGHT, x2: x, y2: lifelineBottom }, []),
 		])
 	})
@@ -262,8 +305,8 @@ export function renderSequenceView(h: H, model: InteractionModel, labels: LabelR
 		const destinationParticipant = requireParticipant(participantsById, operation.destination)
 		const sourceColumnIndex = columnIndexForParticipant(sourceParticipant, columnIndexByRole)
 		const destinationColumnIndex = columnIndexForParticipant(destinationParticipant, columnIndexByRole)
-		const sourceX = columnX(sourceColumnIndex)
-		const destinationX = columnX(destinationColumnIndex)
+		const sourceX = layout.columnX(sourceColumnIndex)
+		const destinationX = layout.columnX(destinationColumnIndex)
 		const sameColumn = sourceColumnIndex === destinationColumnIndex
 		const label = labels.resolveOperationLabel(operation, participantsById, tier, labels.hashString(operation.id))
 		const animationState = messageAnimationState(operation, model, activeOperationId)
@@ -329,9 +372,19 @@ export function renderSequenceView(h: H, model: InteractionModel, labels: LabelR
 		])
 	})
 
-	return h('svg', { class: 'sequence-view-svg', viewBox: `0 0 ${width} ${height}`, preserveAspectRatio: 'xMidYMid meet', xmlns: 'http://www.w3.org/2000/svg' }, [
+	return h('svg', { key: 'body', class: SEQUENCE_BODY_CLASS, viewBox: `0 ${HEADER_HEIGHT} ${layout.width} ${extent.height - HEADER_HEIGHT}`, preserveAspectRatio: 'xMidYMid meet', xmlns: 'http://www.w3.org/2000/svg' }, [
 		defs,
 		h('g', { class: 'seq-columns' }, columnGroups),
 		h('g', { class: 'seq-messages' }, messageGroups),
+	])
+}
+
+// Renders the whole sequence surface as one memoizable vnode: the pinned header SVG followed by the scrolling body SVG. `roleAccents` is the per-role accent resolver the hosts build from the guild's full role list (createRoleAccentResolver) — agent columns' terminal nodes take their role's accent, and a resolver that returns null for everything renders exactly the neutral look. `roleOrder` is the guild-declared agent-role display order (guild.json visualization.roleOrder), applied to the role columns by buildColumns so the view and the flow view's top bar share one order. `guildParticipants` (optional) supplies the full participant set the guild defines so every role column and the tools column appear from frame 0 rather than growing as participants first appear; when absent the column set falls back to the participants present in the current frame.
+export function renderSequenceView(h: H, model: InteractionModel, labels: LabelResolver, tier: LabelTier, roleAccents: RoleAccentResolver, roleOrder: readonly string[], guildParticipants?: readonly Participant[]): Vnode {
+	const layout = computeColumnLayout(model, labels, tier, roleOrder, guildParticipants)
+	const extent = computeBodyExtent(model.operations.length)
+	return h('div', { class: SEQUENCE_SURFACE_CLASS }, [
+		renderSequenceHeader(h, layout),
+		renderSequenceBody(h, model, labels, tier, roleAccents, layout, extent),
 	])
 }
