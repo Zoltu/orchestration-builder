@@ -181,6 +181,7 @@ function makeDeps(llm: FakeLlm, persistence: FakePersistenceFns, loadedGuild: Lo
 		publishDelta: () => undefined,
 		roleSnapshots: createFakeRoleSnapshotStore(),
 		readProjectDoc: () => ({ kind: 'unavailable', reason: 'not used in these tests' }),
+		readRunLogEvents: () => persistence.state.events,
 		baseTracker,
 		readWorkspaceGitState: async () => ({ isRepository: false, unbornHead: false, uncommittedPaths: [] }),
 	}
@@ -770,6 +771,20 @@ describe('resumeExecutor', () => {
 		return { meta, checkpoints: persistence.state.checkpoints }
 	}
 
+	// The checkpoint taken at the coder's first safe point while its parent is suspended on the agent call: two frames, neither leaf pending.
+	function midDescentCheckpoint(checkpoints: RunCheckpoint[]): RunCheckpoint {
+		const checkpoint = checkpoints.find((candidate) => candidate.frames.length === 2 && candidate.frames[1]?.roleName === 'coder' && candidate.frames[1]?.pending === undefined)
+		if (checkpoint === undefined) throw new Error('expected the mid-descent checkpoint')
+		return checkpoint
+	}
+
+	// The checkpoint written on the parent after the child returned but before the agent result was cleared.
+	function postChildCheckpoint(checkpoints: RunCheckpoint[]): RunCheckpoint {
+		const checkpoint = checkpoints.find((candidate) => candidate.frames.length === 1 && candidate.frames[0]?.pending?.childCard !== undefined)
+		if (checkpoint === undefined) throw new Error('expected the post-child checkpoint')
+		return checkpoint
+	}
+
 	test('a batched agent plus direct clarification finish checkpoints the completed turn before the answer resume', async () => {
 		const guild = buildDelegationGuild()
 		const llm = new FakeLlm()
@@ -804,7 +819,7 @@ describe('resumeExecutor', () => {
 		expect(note?.content).toContain('use the v2 schema')
 	})
 
-	test('a batched finish followed by an agent leaves the clean pre-turn checkpoint and the answer resume starts cleanly', async () => {
+	test('a batched needs_clarification finish followed by another call completes the turn and a clarification answer reaches the LLM', async () => {
 		const guild = buildDelegationGuild()
 		const llm = new FakeLlm()
 		llm.responses = [
@@ -818,11 +833,15 @@ describe('resumeExecutor', () => {
 
 		expect(meta.status).toBe('needs_clarification')
 		const checkpoint = persistence.state.checkpoints[persistence.state.checkpoints.length - 1]
-		if (checkpoint === undefined) throw new Error('expected the pre-turn checkpoint')
+		if (checkpoint === undefined) throw new Error('expected the completed-turn checkpoint')
 		const root = checkpoint.frames[0]
 		if (root === undefined) throw new Error('expected the root frame')
-		// The finish returned before the later agent call ran, so the malformed assistant turn must not be persisted.
-		expect(root.roleState.history.some((message) => message.role === 'assistant' && message.tool_calls !== undefined)).toBe(false)
+		expect(root.pending).toBeUndefined()
+		const toolMessages = root.roleState.history.filter((message) => message.role === 'tool')
+		expect(toolMessages.map((message) => message.tool_call_id)).toEqual(['f1', 'a1'])
+		expect(toolMessages[1]?.content).toContain('Not executed because an earlier call in the batch ended the role.')
+
+		const bootCheckpoint = structuredClone(checkpoint)
 
 		const resumeLlm = new FakeLlm()
 		resumeLlm.responses = [success([finishToolCall('f2', 'answered and done')])]
@@ -833,17 +852,84 @@ describe('resumeExecutor', () => {
 		expect(resumeLlm.calls).toBe(1)
 		const request = resumeLlm.requests[0]
 		if (request === undefined) throw new Error('expected the resumed LLM call')
-		expect(request.messages.some((message) => message.role === 'assistant' && message.tool_calls?.some((call) => call.id === 'f1' || call.id === 'a1') === true)).toBe(false)
 		const lastMessage = request.messages[request.messages.length - 1]
 		expect(lastMessage?.role).toBe('user')
-		expect(lastMessage?.content).toContain('I need a decision on the schema')
 		expect(lastMessage?.content).toContain('use the v2 schema')
+
+		const bootLlm = new FakeLlm()
+		const bootMeta = await resumeExecutor(makeDeps(bootLlm, makeFakePersistence(), guild), bootCheckpoint, { guildPath: '/guild' })
+		expect(bootLlm.calls).toBe(0)
+		expect(bootMeta.status).toBe('needs_clarification')
+	})
+
+	test('a batched error finish followed by another call continues on an operator-note resume', async () => {
+		const guild = buildDelegationGuild()
+		const llm = new FakeLlm()
+		llm.responses = [
+			success([
+				{ id: 'f1', type: 'function', function: { name: 'finish', arguments: JSON.stringify({ status: 'error', summary: 'the endpoint is down', error: { kind: 'llm_unavailable', message: 'connection refused' } }) } },
+				agentToolCall('a1', 'coder', 'subtask'),
+			]),
+		]
+		const persistence = makeFakePersistence()
+		const meta = await runExecutor(makeDeps(llm, persistence, guild), { runId: 'r-error-finish-then-agent', guildPath: '/guild', task: 'do it', effort: 'standard', involvement: 'early-engagement' })
+		expect(meta.status).toBe('error')
+
+		const checkpoint = persistence.state.checkpoints[persistence.state.checkpoints.length - 1]
+		if (checkpoint === undefined) throw new Error('expected the completed-turn checkpoint')
+		expect(checkpoint.frames[0]?.pending).toBeUndefined()
+
+		const resumeLlm = new FakeLlm()
+		resumeLlm.responses = [success([finishToolCall('f2', 'recovered')])]
+		const resumed = await resumeExecutor(makeDeps(resumeLlm, makeFakePersistence(), guild), checkpoint, { guildPath: '/guild', operatorNote: 'The operator resumed this run after a failure. Message from the operator: try again' })
+
+		expect(resumed.status).toBe('success')
+		expect(resumeLlm.calls).toBe(1)
+		const lastMessage = resumeLlm.requests[0]?.messages.at(-1)
+		expect(lastMessage?.role).toBe('user')
+		expect(lastMessage?.content).toContain('try again')
+	})
+
+	test('a boot resume of a completed finish returns the card without an LLM call', async () => {
+		const guild = buildLoadedGuild({ main: { systemPrompt: 'p', tools: ['finish'] } }, 'main')
+		const llm = new FakeLlm()
+		llm.responses = [success([{ id: 'f1', type: 'function', function: { name: 'finish', arguments: JSON.stringify({ status: 'error', summary: 'the endpoint is down', error: { kind: 'llm_unavailable', message: 'connection refused' } }) } }])]
+		const persistence = makeFakePersistence()
+		await runExecutor(makeDeps(llm, persistence, guild), { runId: 'r-completed-finish', guildPath: '/guild', task: 'do it', effort: 'standard', involvement: 'early-engagement' })
+		const checkpoint = persistence.state.checkpoints[persistence.state.checkpoints.length - 1]
+		if (checkpoint === undefined) throw new Error('expected the completed-turn checkpoint')
+		expect(checkpoint.frames[0]?.pending).toBeUndefined()
+
+		const bootLlm = new FakeLlm()
+		const meta = await resumeExecutor(makeDeps(bootLlm, makeFakePersistence(), guild), checkpoint, { guildPath: '/guild' })
+
+		expect(bootLlm.calls).toBe(0)
+		expect(meta.status).toBe('error')
+		expect(meta.result?.summary).toBe('the endpoint is down')
+	})
+
+	test('an explicit error resume without a note reaches an LLM request', async () => {
+		const guild = buildLoadedGuild({ main: { systemPrompt: 'p', tools: ['finish'] } }, 'main')
+		const llm = new FakeLlm()
+		llm.responses = [success([{ id: 'f1', type: 'function', function: { name: 'finish', arguments: JSON.stringify({ status: 'error', summary: 'the endpoint is down', error: { kind: 'llm_unavailable', message: 'connection refused' } }) } }])]
+		const persistence = makeFakePersistence()
+		await runExecutor(makeDeps(llm, persistence, guild), { runId: 'r-explicit-resume', guildPath: '/guild', task: 'do it', effort: 'standard', involvement: 'early-engagement' })
+		const checkpoint = persistence.state.checkpoints[persistence.state.checkpoints.length - 1]
+		if (checkpoint === undefined) throw new Error('expected the completed-turn checkpoint')
+
+		const resumeLlm = new FakeLlm()
+		resumeLlm.responses = [success([finishToolCall('f2', 'recovered')])]
+		const meta = await resumeExecutor(makeDeps(resumeLlm, makeFakePersistence(), guild), checkpoint, { guildPath: '/guild', explicitResume: true })
+
+		expect(resumeLlm.calls).toBe(1)
+		expect(meta.status).toBe('success')
+		expect(meta.result?.summary).toBe('recovered')
 	})
 
 	test('a resumed run completes with the uninterrupted result, preserving run identity and start time', async () => {
 		const uninterrupted = await driveUninterruptedRun()
 		// Writes: [orchestrator], [orchestrator+coder], [orchestrator with child card], [orchestrator]. Index 1 is the checkpoint taken while the coder was active.
-		const checkpoint = uninterrupted.checkpoints[1]
+		const checkpoint = midDescentCheckpoint(uninterrupted.checkpoints)
 		if (checkpoint === undefined) throw new Error('expected the mid-descent checkpoint')
 
 		const guild = buildDelegationGuild()
@@ -879,7 +965,7 @@ describe('resumeExecutor', () => {
 	test('a resumed continuation run keeps continuesFrom in its metas without re-briefing the history', async () => {
 		const continuation = { runId: 'run-20260101-000000', task: 'prior task', summary: 'prior summary' }
 		const uninterrupted = await driveUninterruptedRun(continuation)
-		const checkpoint = uninterrupted.checkpoints[1]
+		const checkpoint = midDescentCheckpoint(uninterrupted.checkpoints)
 		if (checkpoint === undefined) throw new Error('expected the mid-descent checkpoint')
 		// The pre-restart recorder wrote the lineage onto the entry frame from the entry context.
 		expect(checkpoint.frames[0]?.continuesFrom).toBe('run-20260101-000000')
@@ -922,7 +1008,7 @@ describe('resumeExecutor', () => {
 	test('lineage survives a second restart: post-resume checkpoints keep continuesFrom on the entry frame', async () => {
 		const continuation = { runId: 'run-20260101-000000', task: 'prior task', summary: 'prior summary' }
 		const firstRun = await driveUninterruptedRun(continuation)
-		const firstCheckpoint = firstRun.checkpoints[1]
+		const firstCheckpoint = midDescentCheckpoint(firstRun.checkpoints)
 		if (firstCheckpoint === undefined) throw new Error('expected the mid-descent checkpoint')
 
 		// First restart: the resumed run's own checkpoints must re-stamp the lineage — their contexts carry no live continuation anymore.
@@ -955,7 +1041,7 @@ describe('resumeExecutor', () => {
 
 	test('the resumed registry is seeded past pre-restart ids so post-resume spawns cannot collide', async () => {
 		const uninterrupted = await driveUninterruptedRun()
-		const checkpoint = uninterrupted.checkpoints[1]
+		const checkpoint = midDescentCheckpoint(uninterrupted.checkpoints)
 		if (checkpoint === undefined) throw new Error('expected the mid-descent checkpoint')
 
 		const guild = buildDelegationGuild()
@@ -1032,7 +1118,7 @@ describe('resumeExecutor', () => {
 		expect(meta.status).toBe('needs_clarification')
 		expect(persistence.state.deleteCheckpointCalls).toBe(0)
 		const parked = persistence.state.checkpoints[persistence.state.checkpoints.length - 1]
-		expect(parked?.parkedAsk).toEqual({ roleId: 'main-0-1', toolCallId: 'ask_1', question: 'Which database?' })
+		expect(parked?.parkedAsk).toMatchObject({ roleId: 'main-0-1', toolCallId: 'ask_1', callId: 'tool:ask_1', questionId: 'ask_1', question: 'Which database?' })
 		expect(parked?.frames.map((frame) => frame.roleName)).toEqual(['main'])
 		expect(parked?.frames[0]?.roleState.history.at(-1)).toEqual({ role: 'tool', content: '{"question":"Which database?","parked":true}', tool_call_id: 'ask_1' })
 	})
@@ -1074,7 +1160,7 @@ describe('resumeExecutor', () => {
 		const note = resumedHistory.find((message) => message.role === 'user' && message.content.includes('I need a decision on the schema'))
 		expect(note?.content).toContain('use the v2 schema')
 		const answerEvent = resumePersistence.state.events.find((event) => event.type === 'human_answer')
-		expect(answerEvent?.payload).toEqual({ id: 'clarification', question: 'I need a decision on the schema', answer: 'use the v2 schema' })
+		expect(answerEvent?.payload).toEqual({ id: 'clarification', callId: 'tool:clarification', question: 'I need a decision on the schema', answer: 'use the v2 schema' })
 	})
 
 	test('a clarification answer is durably checkpointed before the running meta and a same-id retry does not append twice', async () => {
@@ -1204,7 +1290,7 @@ describe('resumeExecutor', () => {
 		expect(meta.status).toBe('needs_clarification')
 		expect(resumePersistence.state.deleteCheckpointCalls).toBe(0)
 		const reParked = resumePersistence.state.checkpoints.find((candidate) => candidate.parkedAsk?.toolCallId === 'ask_2')
-		expect(reParked?.parkedAsk).toEqual({ roleId: 'main-0-1', toolCallId: 'ask_2', question: 'And the port?' })
+		expect(reParked?.parkedAsk).toMatchObject({ roleId: 'main-0-1', toolCallId: 'ask_2', callId: 'tool:ask_2', questionId: 'ask_2', question: 'And the port?' })
 	})
 
 	test('a consumed clarification answer coexists with a later parked ask and the parked answer still resumes', async () => {
@@ -1224,7 +1310,7 @@ describe('resumeExecutor', () => {
 		const both = clarificationPersistence.state.checkpoints.find((checkpoint) => checkpoint.parkedAsk?.toolCallId === 'ask_1')
 		if (both === undefined) throw new Error('expected a checkpoint carrying both pause fields')
 		expect(both.clarificationAnswer).toEqual({ id: 'answer-1', question: 'I need a decision on the schema', answer: 'use the v2 schema', consumed: true })
-		expect(both.parkedAsk).toEqual({ roleId: 'main-0-1', toolCallId: 'ask_1', question: 'Which database?' })
+		expect(both.parkedAsk).toMatchObject({ roleId: 'main-0-1', toolCallId: 'ask_1', callId: 'tool:ask_1', questionId: 'ask_1', question: 'Which database?' })
 
 		const parkedLlm = new FakeLlm()
 		parkedLlm.responses = [success([{ id: 'f2', type: 'function', function: { name: 'finish', arguments: JSON.stringify({ status: 'success', summary: 'built it' }) } }])]
@@ -1354,7 +1440,7 @@ describe('resumeExecutor', () => {
 
 	test('a resumed run that ends in error also keeps its checkpoint, so it stays resumable', async () => {
 		const uninterrupted = await driveUninterruptedRun()
-		const checkpoint = uninterrupted.checkpoints[1]
+		const checkpoint = midDescentCheckpoint(uninterrupted.checkpoints)
 		if (checkpoint === undefined) throw new Error('expected the mid-descent checkpoint')
 
 		const guild = buildDelegationGuild()
@@ -1379,7 +1465,7 @@ describe('resumeExecutor', () => {
 
 	test('a resumed run keeps the logging level recorded on its checkpoint entry frame', async () => {
 		const uninterrupted = await driveUninterruptedRun()
-		const checkpoint = uninterrupted.checkpoints[1]
+		const checkpoint = midDescentCheckpoint(uninterrupted.checkpoints)
 		if (checkpoint === undefined) throw new Error('expected the mid-descent checkpoint')
 		const entryFrame = checkpoint.frames[0]
 		if (entryFrame === undefined) throw new Error('expected an entry frame')
@@ -1404,7 +1490,7 @@ describe('resumeExecutor', () => {
 
 	test('a checkpoint without a recorded logging level resumes at full detail', async () => {
 		const uninterrupted = await driveUninterruptedRun()
-		const checkpoint = uninterrupted.checkpoints[1]
+		const checkpoint = midDescentCheckpoint(uninterrupted.checkpoints)
 		if (checkpoint === undefined) throw new Error('expected the mid-descent checkpoint')
 		const entryFrame = checkpoint.frames[0]
 		if (entryFrame === undefined) throw new Error('expected an entry frame')
@@ -1427,7 +1513,7 @@ describe('resumeExecutor', () => {
 
 	test('an explicit resume stamps the operator note on run_resumed and into the resumed leaf history before its first LLM call', async () => {
 		const uninterrupted = await driveUninterruptedRun()
-		const checkpoint = uninterrupted.checkpoints[1]
+		const checkpoint = midDescentCheckpoint(uninterrupted.checkpoints)
 		if (checkpoint === undefined) throw new Error('expected the mid-descent checkpoint')
 
 		const guild = buildDelegationGuild()
@@ -1472,7 +1558,7 @@ describe('resumeExecutor', () => {
 	test('the operator note lands after a suspended turn\'s recorded tool result, never between the agent call and its result', async () => {
 		// The error-run checkpoint shape: the child already returned, so the root's suspension carries its recorded card and the resume re-enters the root alone.
 		const uninterrupted = await driveUninterruptedRun()
-		const checkpoint = uninterrupted.checkpoints[2]
+		const checkpoint = postChildCheckpoint(uninterrupted.checkpoints)
 		if (checkpoint === undefined) throw new Error('expected the post-child checkpoint')
 		expect(checkpoint.frames.length).toBe(1)
 		expect(checkpoint.frames[0]?.pending?.childCard).toBeDefined()
@@ -1596,19 +1682,19 @@ describe('resumeExecutor', () => {
 		expect(llm.calls).toBe(0)
 		expect(meta.status).toBe('success')
 		expect(meta.result).toEqual({ status: 'success', summary: 'wrapped up' })
-		// The checkpoint fixture's roleState is the live object the resumed engine mutated: the history must read agent tool_calls → tool result → note → finish result, well-formed throughout.
+		// The checkpoint fixture's roleState is the live object the resumed engine mutated: all tool results precede the note, so the assistant turn is closed before the note lands.
 		const frame = defined(checkpoint.frames[0], 'resumed frame')
 		const history = frame.roleState.history
 		expect(history.length).toBe(6)
 		const assistantMessage = history[2]
 		const agentResult = history[3]
-		const noteMessage = history[4]
-		const finishResult = history[5]
+		const finishResult = history[4]
+		const noteMessage = history[5]
 		expect(assistantMessage?.tool_calls?.length).toBe(2)
 		expect(agentResult?.role).toBe('tool')
+		expect(finishResult?.role).toBe('tool')
 		expect(noteMessage?.role).toBe('user')
 		expect(noteMessage?.content).toBe('The operator resumed this run after a failure. Message from the operator: the child already finished; wrap up')
-		expect(finishResult?.role).toBe('tool')
 	})
 
 	test('a twice-errored run stays resumable throughout and only its final success deletes the checkpoint', async () => {
@@ -1645,7 +1731,7 @@ describe('resumeExecutor', () => {
 		const secondResumeLlm = new FakeLlm()
 		secondResumeLlm.responses = [success([finishToolCall('f2', 'finally done')])]
 		const secondResumePersistence = makeFakePersistence()
-		const secondResumeMeta = await resumeExecutor(makeDeps(secondResumeLlm, secondResumePersistence, guild), secondCheckpoint, resumeOptions)
+		const secondResumeMeta = await resumeExecutor(makeDeps(secondResumeLlm, secondResumePersistence, guild), secondCheckpoint, { ...resumeOptions, operatorNote: 'The operator resumed this run again. Message from the operator: retry once more' })
 		expect(secondResumeMeta.status).toBe('success')
 		expect(secondResumeMeta.runId).toBe('r-twice')
 		expect(secondResumeMeta.startTime).toBe(originalMeta.startTime)
@@ -1654,7 +1740,7 @@ describe('resumeExecutor', () => {
 
 	test('resume restores the checkpoint base and never re-reads the workspace git state', async () => {
 		const uninterrupted = await driveUninterruptedRun()
-		const checkpoint = uninterrupted.checkpoints[1]
+		const checkpoint = midDescentCheckpoint(uninterrupted.checkpoints)
 		if (checkpoint === undefined) throw new Error('expected the mid-descent checkpoint')
 		checkpoint.baseHash = 'restored-hash'
 

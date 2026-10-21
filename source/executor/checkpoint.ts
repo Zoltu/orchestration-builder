@@ -13,14 +13,37 @@ import type { EffortLevel, InvolvementLevel, LogLevel, ResultCard, ToolCall } fr
 import { isRunIdShape } from './run-id.js'
 import { isEffortLevel, isInvolvementLevel, isLogLevel, isNonNegativeInteger, isNonNegativeNumber, isObject, isResultCard, isString, safeJsonParse } from './validation.js'
 
-// The suspension point of a role paused mid-turn inside a child-spawning tool dispatch (agent or continue_agent): the turn's full tool-call list and the index of the child-spawning call it is waiting on. Once the child returns, its card is recorded here so a resume delivers the recorded card instead of re-running the child. Tool calls before childIndex are already recorded in the role's persisted history; calls after it are dispatched on resume.
+// The invocation a role is paused on mid-turn: its stable call id and parent, the turn's full tool-call list, and the index of the call being dispatched. The record covers ordinary tools and child-spawning tools alike; child-spawning calls additionally record the child's card once it returns so a resume delivers the recorded card instead of re-running the child. Calls before index are already in the persisted history; calls after it dispatch on resume.
+export interface PendingInvocation {
+	toolCalls: ToolCall[]
+	index: number
+	callId?: string
+	parentCallId?: string
+	childCard?: ResultCard
+}
+
+// The pre-identity pending shape still read from old checkpoints. It only ever described a child-spawning call, so resume keeps treating it as the legacy child path.
 export interface PendingChildSuspension {
 	toolCalls: ToolCall[]
 	childIndex: number
 	childCard?: ResultCard
 }
 
-// One live role invocation on the depth-first stack. Frames serialize root-first; a non-leaf frame is always suspended on a child-spawning call whose child still runs below it, and the leaf is either the active role (no pending) or a parent whose child just returned (pending carrying the recorded child card). Handler invocations (loop-check and context handlers) never appear: writes are suppressed while a handler runs, so a handler interlude is atomic with respect to the checkpoint — either it completes and the post-drain write captures its effects, or the resume re-runs the drain from the pre-interlude checkpoint.
+export type PendingRecord = PendingInvocation | PendingChildSuspension
+
+export function pendingIndex(pending: PendingRecord): number {
+	return 'index' in pending ? pending.index : pending.childIndex
+}
+
+export function pendingCallId(pending: PendingRecord): string | undefined {
+	return 'callId' in pending ? pending.callId : undefined
+}
+
+export function pendingParentCallId(pending: PendingRecord): string | undefined {
+	return 'parentCallId' in pending ? pending.parentCallId : undefined
+}
+
+// One live role invocation on the depth-first stack. Frames serialize root-first; a non-leaf frame is always suspended on a child-spawning call whose child still runs below it, and the leaf is active (no pending), dispatching an invocation (pending without a card), or a parent whose child just returned (pending carrying the recorded child card). Handler invocations (loop-check and context handlers) never appear: writes are suppressed while a handler runs, so a handler interlude is atomic with respect to the checkpoint — either it completes and the post-drain write captures its effects, or the resume re-runs the drain from the pre-interlude checkpoint.
 export interface CheckpointFrame {
 	roleId: string
 	roleName: string
@@ -38,7 +61,7 @@ export interface CheckpointFrame {
 	planAbort?: boolean
 	planInjection?: string
 	roleState: RoleState
-	pending?: PendingChildSuspension
+	pending?: PendingRecord
 }
 
 // The logging level a resumed run runs at: the entry frame carries the run's resolved level (docs/reference.md "Logging level"), and a checkpoint whose entry frame carries no logLevel falls back to full detail. Both the resume executor (which writes the metas) and the serve-side resume wrapper (which filters the run's log) derive the level here, so the metas a run records and the log filtering around it cannot disagree.
@@ -46,7 +69,7 @@ export function entryFrameLogLevel(entryFrame: CheckpointFrame | undefined): Log
 	return entryFrame?.logLevel ?? DEFAULT_LOG_LEVEL
 }
 
-// The runnable state of a run, persisted so a service restart can resume it, so the queue answer can re-enter a parked run, and so the operator can explicitly resume an errored one. Written atomically (temp file + rename) at every leaf safe point and on every role_finished, then frozen once at a park, so the on-disk checkpoint is never torn and never more than one turn stale. `registryCounter` lets the resumed run mint fresh role-instance ids without colliding with the preserved ones; `learnedContextCeiling` carries the run's context-wall knowledge so resumed roles keep the tightened pressure threshold; `writeCapableStarted` carries the pre-write park rule's flag so a restart cannot reset it and park a run whose writes happened before the restart (docs/queueing.md "Parking: the pre-write rule"); `baseHash` carries the run's base commit so a restart keeps diffing against the same change set; `parkedAsk` identifies the parked turn the queue answer resumes.
+// The runnable state of a run, persisted so a service restart can resume it, so the queue answer can re-enter a parked run, and so the operator can explicitly resume an errored one. Written atomically (temp file + rename) at every leaf safe point, when a child card returns, before each dispatch (the pending invocation), and at a completed batch, then frozen once at a park, so the on-disk checkpoint is never torn and never leaves an in-flight invocation unnamed. `registryCounter` lets the resumed run mint fresh role-instance ids without colliding with the preserved ones; `learnedContextCeiling` carries the run's context-wall knowledge so resumed roles keep the tightened pressure threshold; `writeCapableStarted` carries the pre-write park rule's flag so a restart cannot reset it and park a run whose writes happened before the restart (docs/queueing.md "Parking: the pre-write rule"); `baseHash` carries the run's base commit so a restart keeps diffing against the same change set; `parkedAsk` identifies the parked turn the queue answer resumes.
 export interface RunCheckpoint {
 	version: 1
 	runId: string
@@ -72,7 +95,10 @@ export interface ClarificationAnswerDelivery {
 function isParkedAsk(value: unknown): value is ParkedAsk {
 	if (!isObject(value)) return false
 	if (!isString(value.roleId) || value.roleId === '') return false
-	if (!isString(value.toolCallId) || value.toolCallId === '') return false
+	// An empty model tool-call id is possible; the ask identity then lives in questionId/callId.
+	if (!isString(value.toolCallId)) return false
+	if (value.callId !== undefined && (!isString(value.callId) || value.callId === '')) return false
+	if (value.questionId !== undefined && (!isString(value.questionId) || value.questionId === '')) return false
 	if (!isString(value.question) || value.question === '') return false
 	return true
 }
@@ -121,12 +147,29 @@ function isRoleState(value: unknown): value is RoleState {
 	return true
 }
 
-function isPendingChildSuspension(value: unknown): value is PendingChildSuspension {
+function isPendingRecord(value: unknown): value is PendingRecord {
 	if (!isObject(value)) return false
 	if (!Array.isArray(value.toolCalls) || value.toolCalls.length === 0 || !value.toolCalls.every(isToolCall)) return false
-	if (!isNonNegativeInteger(value.childIndex) || value.childIndex >= value.toolCalls.length) return false
-	if (!suspendsChild(value.toolCalls[value.childIndex]?.function.name ?? '')) return false
+	const hasIndex = value.index !== undefined
+	const hasChildIndex = value.childIndex !== undefined
+	if (!hasIndex && !hasChildIndex) return false
+	if (hasIndex && hasChildIndex) return false
+	if (hasIndex && (!isNonNegativeInteger(value.index) || value.index >= value.toolCalls.length)) return false
+	if (hasChildIndex && (!isNonNegativeInteger(value.childIndex) || value.childIndex >= value.toolCalls.length)) return false
+	if (hasIndex) {
+		if (!isString(value.callId) || value.callId === '') return false
+		if (!isString(value.parentCallId) || value.parentCallId === '') return false
+	}
+	if (value.callId !== undefined && (!isString(value.callId) || value.callId === '')) return false
+	if (value.parentCallId !== undefined && (!isString(value.parentCallId) || value.parentCallId === '')) return false
 	if (value.childCard !== undefined && !isResultCard(value.childCard)) return false
+	const position = hasIndex && isNonNegativeInteger(value.index) ? value.index : value.childIndex
+	if (!isNonNegativeInteger(position)) return false
+	const indexedCall = value.toolCalls[position]
+	if (indexedCall === undefined) return false
+	// A card is only meaningful for a child-spawning call, and the old shape without an index only ever described one.
+	if (value.childCard !== undefined && !suspendsChild(indexedCall.function.name)) return false
+	if (!hasIndex && !suspendsChild(indexedCall.function.name)) return false
 	return true
 }
 
@@ -145,11 +188,11 @@ function isCheckpointFrame(value: unknown): value is CheckpointFrame {
 	if (value.planAbort !== undefined && value.planAbort !== true) return false
 	if (value.planInjection !== undefined && !isString(value.planInjection)) return false
 	if (!isRoleState(value.roleState)) return false
-	if (value.pending !== undefined && !isPendingChildSuspension(value.pending)) return false
+	if (value.pending !== undefined && !isPendingRecord(value.pending)) return false
 	return true
 }
 
-// Validates a checkpoint read from disk before any of it is trusted. Beyond the per-field shape, the structural invariants the recorder writes by construction are checked: a non-empty stack rooted at depth 0, each frame exactly one deeper than its parent with the parent's instance id as its own, and the suspension invariant — a non-leaf frame is suspended on a child still running below it (pending without a recorded card), while the leaf is either active (no pending) or a parent whose child just returned (pending with the recorded card, written on role_finished). A file failing these is treated as corrupt and the run reconciles to interrupted rather than resuming into a broken stack.
+// Validates a checkpoint read from disk before any of it is trusted. Beyond the per-field shape, the structural invariants the recorder writes by construction are checked: a non-empty stack rooted at depth 0, each frame exactly one deeper than its parent with the parent's instance id as its own, and the pending invariant — a non-leaf frame is suspended on a child-spawning call still running below it (pending without a recorded card); the leaf may be active (no pending), dispatching any invocation (pending without a card), or a parent whose child just returned (pending with the recorded card). A file failing these is treated as corrupt and the run reconciles to interrupted rather than resuming into a broken stack.
 export function isRunCheckpoint(value: unknown): value is RunCheckpoint {
 	if (!isObject(value)) return false
 	if (value.version !== 1) return false
@@ -171,10 +214,20 @@ export function isRunCheckpoint(value: unknown): value is RunCheckpoint {
 		if (frame === undefined) return false
 		const isLeaf = index === frames.length - 1
 		if (isLeaf) {
-			if (frame.pending !== undefined && frame.pending.childCard === undefined) return false
+			// A leaf may be suspended on any invocation while its tool runs (the checkpoint is written before dispatch), or carry the recorded card of a child that just returned. A legacy childIndex-only record is not resumable on a leaf because no child frame exists below it to resolve.
+			if (frame.pending !== undefined) {
+				if (frame.pending.childCard !== undefined) {
+					const indexedCall = frame.pending.toolCalls[pendingIndex(frame.pending)]
+					if (indexedCall === undefined || !suspendsChild(indexedCall.function.name)) return false
+				} else if (!('index' in frame.pending)) {
+					return false
+				}
+			}
 		} else {
 			if (frame.pending === undefined) return false
 			if (frame.pending.childCard !== undefined) return false
+			const indexedCall = frame.pending.toolCalls[pendingIndex(frame.pending)]
+			if (indexedCall === undefined || !suspendsChild(indexedCall.function.name)) return false
 		}
 		if (index > 0) {
 			const parent = frames[index - 1]
@@ -211,7 +264,7 @@ export function isRunCheckpoint(value: unknown): value is RunCheckpoint {
 export interface CheckpointRecorder {
 	registerFrame(context: EngineContext, entry: RoleRegistryEntry): void
 	unregisterFrame(roleId: string): void
-	setPending(roleId: string, pending: PendingChildSuspension | undefined): void
+	setPending(roleId: string, pending: PendingRecord | undefined): void
 	setPendingChildCard(roleId: string, card: ResultCard): void
 	// Returns whether a checkpoint was actually written: false when frozen or while a handler frame suppresses writes.
 	write(): boolean
@@ -224,7 +277,7 @@ export interface CheckpointRecorder {
 interface RecorderFrame {
 	context: EngineContext
 	entry: RoleRegistryEntry
-	pending?: PendingChildSuspension
+	pending?: PendingRecord
 }
 
 export interface CheckpointRecorderDependencies {

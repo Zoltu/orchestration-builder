@@ -92,7 +92,7 @@ function sampleCheckpoint(): RunCheckpoint {
 					],
 					toolCallCount: 1,
 				}),
-				pending: { toolCalls: [agentToolCall()], childIndex: 0 },
+				pending: { callId: 'tool:agent_1', parentCallId: 'role:main-0-1', toolCalls: [agentToolCall()], index: 0 },
 			},
 			{
 				roleId: 'coder-1-2',
@@ -207,12 +207,18 @@ describe('isRunCheckpoint', () => {
 		}))).toBe(false)
 	})
 
-	test('enforces the suspension invariant: non-leaf pending without a card, leaf pending only with a recorded card', () => {
+	test('enforces the suspension invariant: a leaf may be dispatching a new-shape invocation, while non-leaf frames remain child suspensions', () => {
 		const pendingOnLeaf = sampleCheckpoint()
 		const leaf = pendingOnLeaf.frames[1]
 		if (leaf === undefined) throw new Error('missing leaf')
-		leaf.pending = { toolCalls: [agentToolCall()], childIndex: 0 }
-		expect(isRunCheckpoint(pendingOnLeaf)).toBe(false)
+		leaf.pending = { callId: 'tool:agent_1', parentCallId: 'role:coder-1-2', toolCalls: [agentToolCall()], index: 0 }
+		expect(isRunCheckpoint(pendingOnLeaf)).toBe(true)
+
+		const legacyOnLeaf = sampleCheckpoint()
+		const legacyLeaf = legacyOnLeaf.frames[1]
+		if (legacyLeaf === undefined) throw new Error('missing leaf')
+		legacyLeaf.pending = { toolCalls: [agentToolCall()], childIndex: 0 }
+		expect(isRunCheckpoint(legacyOnLeaf)).toBe(false)
 
 		const leafWithCard = sampleCheckpoint()
 		const singleFrame = leafWithCard.frames[0]
@@ -253,6 +259,68 @@ describe('isRunCheckpoint', () => {
 		expect(isRunCheckpoint(checkpoint)).toBe(true)
 		const copy: unknown = JSON.parse(JSON.stringify(checkpoint))
 		expect(isRunCheckpoint(copy)).toBe(true)
+	})
+
+	test('accepts a new-shape ordinary pending invocation on the leaf and round-trips it through JSON', () => {
+		const checkpoint = sampleCheckpoint()
+		const leaf = checkpoint.frames[1]
+		if (leaf === undefined) throw new Error('missing leaf')
+		leaf.pending = {
+			callId: 'tool:read_1',
+			parentCallId: 'role:coder-1-2',
+			toolCalls: [{ id: 'read_1', type: 'function', function: { name: 'read_file', arguments: '{}' } }],
+			index: 0,
+		}
+		expect(isRunCheckpoint(checkpoint)).toBe(true)
+		const copy: unknown = JSON.parse(JSON.stringify(checkpoint))
+		expect(isRunCheckpoint(copy)).toBe(true)
+	})
+
+	test('accepts a new-shape child pending on a non-leaf frame with no recorded card', () => {
+		const checkpoint = sampleCheckpoint()
+		const root = checkpoint.frames[0]
+		if (root === undefined) throw new Error('missing root')
+		root.pending = { callId: 'tool:agent_1', parentCallId: 'role:main-0-1', toolCalls: [agentToolCall()], index: 0 }
+		expect(isRunCheckpoint(checkpoint)).toBe(true)
+	})
+
+	test('rejects a new-shape ordinary pending on a non-leaf frame', () => {
+		const checkpoint = sampleCheckpoint()
+		const root = checkpoint.frames[0]
+		if (root === undefined) throw new Error('missing root')
+		root.pending = {
+			callId: 'tool:read_1',
+			parentCallId: 'role:main-0-1',
+			toolCalls: [{ id: 'read_1', type: 'function', function: { name: 'read_file', arguments: '{}' } }],
+			index: 0,
+		}
+		expect(isRunCheckpoint(checkpoint)).toBe(false)
+	})
+
+	test('rejects malformed new pending identity and index fields while keeping absent ones valid for legacy shapes', () => {
+		const withLeafPending = (pending: unknown): unknown => {
+			const checkpoint = sampleCheckpoint()
+			return { ...checkpoint, frames: checkpoint.frames.map((frame, index) => (index === 1 ? { ...frame, pending } : frame)) }
+		}
+		const readCall = { id: 'read_1', type: 'function', function: { name: 'read_file', arguments: '{}' } }
+		expect(isRunCheckpoint(withLeafPending({ callId: '', parentCallId: 'role:coder-1-2', toolCalls: [readCall], index: 0 }))).toBe(false)
+		expect(isRunCheckpoint(withLeafPending({ callId: 'tool:read_1', parentCallId: '', toolCalls: [readCall], index: 0 }))).toBe(false)
+		expect(isRunCheckpoint(withLeafPending({ callId: 3, parentCallId: 'role:coder-1-2', toolCalls: [readCall], index: 0 }))).toBe(false)
+		expect(isRunCheckpoint(withLeafPending({ callId: 'tool:read_1', parentCallId: 'role:coder-1-2', toolCalls: [readCall], index: 1 }))).toBe(false)
+		expect(isRunCheckpoint(withLeafPending({ callId: 'tool:read_1', parentCallId: 'role:coder-1-2', toolCalls: [readCall], index: -1 }))).toBe(false)
+		expect(isRunCheckpoint(withLeafPending({ callId: 'tool:read_1', parentCallId: 'role:coder-1-2', toolCalls: [readCall] }))).toBe(false)
+		expect(isRunCheckpoint(withLeafPending({ parentCallId: 'role:coder-1-2', toolCalls: [readCall], index: 0 }))).toBe(false)
+		expect(isRunCheckpoint(withLeafPending({ callId: 'tool:read_1', toolCalls: [readCall], index: 0 }))).toBe(false)
+		expect(isRunCheckpoint(withLeafPending({ callId: 'tool:read_1', parentCallId: 'role:coder-1-2', toolCalls: [readCall], index: 0, childCard: { status: 'success', summary: 'x' } }))).toBe(false)
+		expect(isRunCheckpoint(withLeafPending({ callId: 'tool:read_1', parentCallId: 'role:coder-1-2', toolCalls: [readCall], index: 0, childIndex: 0 }))).toBe(false)
+	})
+
+	test('keeps reading the old pending shape as a legacy child suspension', () => {
+		const checkpoint = sampleCheckpoint()
+		const root = checkpoint.frames[0]
+		if (root === undefined) throw new Error('missing root')
+		root.pending = { toolCalls: [agentToolCall()], childIndex: 0 }
+		expect(isRunCheckpoint(checkpoint)).toBe(true)
 	})
 
 	test('rejects a stack that does not root at depth 0 or breaks the parent chain', () => {
@@ -364,13 +432,30 @@ describe('isRunCheckpoint', () => {
 	test('rejects a malformed parked ask', () => {
 		for (const parkedAsk of [
 			{ roleId: '', toolCallId: 'ask_1', question: 'q' },
-			{ roleId: 'main-0-1', toolCallId: '', question: 'q' },
+			{ roleId: 'main-0-1', toolCallId: 3, question: 'q' },
 			{ roleId: 'main-0-1', toolCallId: 'ask_1', question: '' },
 			{ roleId: 1, toolCallId: 'ask_1', question: 'q' },
 			{ roleId: 'main-0-1', question: 'q' },
+			{ roleId: 'main-0-1', toolCallId: 'ask_1', callId: '', question: 'q' },
+			{ roleId: 'main-0-1', toolCallId: 'ask_1', questionId: '', question: 'q' },
 		]) {
 			expect(isRunCheckpoint({ ...parkedCheckpoint(), parkedAsk })).toBe(false)
 		}
+	})
+
+	test('accepts an empty model tool-call id when the ask identity is carried explicitly', () => {
+		const checkpoint = parkedCheckpoint()
+		const leaf = checkpoint.frames[0]
+		if (leaf === undefined) throw new Error('missing leaf')
+		const emptyAsk = askToolCall('', 'which database?')
+		leaf.roleState.history = [
+			{ role: 'system', content: 'prompt' },
+			{ role: 'user', content: 'do it' },
+			{ role: 'assistant', content: '', tool_calls: [emptyAsk] },
+			{ role: 'tool', content: '{"question":"which database?","parked":true}', tool_call_id: '' },
+		]
+		checkpoint.parkedAsk = { roleId: 'main-0-1', toolCallId: '', callId: 'tool:generated-1', questionId: 'generated-1', question: 'which database?' }
+		expect(isRunCheckpoint(checkpoint)).toBe(true)
 	})
 
 	test('rejects a parked ask whose role is not the leaf', () => {

@@ -5,12 +5,15 @@ import { DEFAULT_LOG_LEVEL } from './log-level.js'
 import type { ParkedAnswer, PauseState } from './park-state.js'
 import { isRunMeta, safeJsonParse } from './validation.js'
 import type { EffortLevel, InvolvementLevel, LogEvent, LogLevel, RunContinuation, RunMeta } from './types.js'
-import type { AppendLog, DeleteCheckpoint, ReadProjectSettings, ReadRunCheckpointById, ReadRunMetaById, RunDirectoryExists, WriteMeta } from './persistence.js'
+import { planStaleInvocationTerminals } from './stale-invocations.js'
+import type { AppendLog, DeleteCheckpoint, ReadProjectSettings, ReadRunCheckpointById, ReadRunLogEvents, ReadRunMetaById, RunDirectoryExists, WriteMeta } from './persistence.js'
 
 // Every fresh run is started through submit, and submit is called only by the scheduler's dispatch path (the queue is universal — docs/queueing.md "Dispatch and the scheduler"), so the submission layer marks every started run queue-tracked: the bit that gates the pre-write park (docs/queueing.md "Parking: the pre-write rule"). The mark does not survive a restart (it does not ride the checkpoint), so a boot-resumed run keeps today's blocking ask behavior.
 export type StartRun = (runId: string, task: string, effort: EffortLevel, involvement: InvolvementLevel, logLevel: LogLevel, continuation: RunContinuation | undefined, queueTracked: boolean) => Promise<RunMeta>
 export interface ResumeRunInvocation {
 	resumeNote?: string
+	// Explicit operator-driven error resume; boot reconciliation leaves this unset.
+	explicitResume?: boolean
 	parkedAnswer?: ParkedAnswer
 	clarificationAnswer?: { id: string; question: string; answer: string }
 	queueTracked?: boolean
@@ -181,7 +184,7 @@ export function createResumeErroredRun(dependencies: ResumeErroredRunDependencie
 		if (checkpoint.parkedAsk !== undefined) return { ok: false, error: 'checkpoint_missing' }
 		// The settled item returns to the active slot before the resume starts, in the same marker-then-submit order the dispatch path uses: the slot is filled synchronously by resume, so no scheduler tick can observe the item active against a still-error meta. A run with no matching error item (its record was requeued or cancelled) resumes regardless — the queue record does not gate the run.
 		dependencies.taskQueue.reactivateErrorItem(runId)
-		dependencies.runSubmission.resume(checkpoint, { resumeNote: note === undefined ? undefined : `${RESUME_NOTE_PREFIX}${note}` })
+		dependencies.runSubmission.resume(checkpoint, { explicitResume: true, resumeNote: note === undefined ? undefined : `${RESUME_NOTE_PREFIX}${note}` })
 		return { ok: true, runId: checkpoint.runId }
 	}
 }
@@ -289,6 +292,8 @@ export type TerminateParkedRun = (runId: string) => TerminateParkedRunResult
 
 export interface TerminateParkedRunDependencies {
 	readRunMetaById: ReadRunMetaById
+	// Supplied by the service so termination can close open invocations; legacy embedders that omit it keep the old termination behavior.
+	readRunLogEvents?: ReadRunLogEvents
 	writeMetaFor: (runId: string) => WriteMeta
 	deleteCheckpointFor: (runId: string) => DeleteCheckpoint
 	appendLogFor: (runId: string) => AppendLog
@@ -305,6 +310,17 @@ function terminationLogEvent(timestamp: string): LogEvent {
 	}
 }
 
+// Operator termination ends the run, so every invocation still open in its log — parked ask, paused roles, handler work — gets one interrupted terminal before the run_terminated event. The stale planner is the same idempotent pass resume uses; a missing or corrupt checkpoint simply leaves the log untouched.
+function closeOpenInvocationsOnTermination(dependencies: TerminateParkedRunDependencies, runId: string, timestamp: string): void {
+	const readRunLogEvents = dependencies.readRunLogEvents
+	if (readRunLogEvents === undefined) return
+	const events = readRunLogEvents(runId)
+	const appendLog = dependencies.appendLogFor(runId)
+	for (const terminal of planStaleInvocationTerminals(events, new Set(), new Set())) {
+		appendLog({ timestamp, type: terminal.type, payload: terminal.payload })
+	}
+}
+
 // The operator's termination path for a parked run (docs/queueing.md "Parking: the pre-write rule"): the run is only parked while its meta reads needs_clarification, so anything else is left untouched for the caller to report. It writes the same interrupted shape reconciliation writes — a terminal meta with no result card — preserving the parked end time (the termination time rides the log event) and removes the checkpoint so no answer can re-enter the run. An already-interrupted meta means a previous attempt crashed between the meta write and the log append or the checkpoint delete, so this retry finishes that cleanup idempotently, accepting a duplicate log event; success/error metas keep their checkpoints.
 export function createTerminateParkedRun(dependencies: TerminateParkedRunDependencies): TerminateParkedRun {
 	return (runId) => {
@@ -314,7 +330,9 @@ export function createTerminateParkedRun(dependencies: TerminateParkedRunDepende
 		const meta = parsedMeta.ok && isRunMeta(parsedMeta.value) ? parsedMeta.value : null
 		if (meta === null) return { ok: false, error: 'not_found' }
 		if (meta.status === 'interrupted') {
-			dependencies.appendLogFor(runId)(terminationLogEvent(new Date().toISOString()))
+			const retryTerminatedAt = new Date().toISOString()
+			closeOpenInvocationsOnTermination(dependencies, runId, retryTerminatedAt)
+			dependencies.appendLogFor(runId)(terminationLogEvent(retryTerminatedAt))
 			dependencies.deleteCheckpointFor(runId)()
 			return { ok: false, error: 'not_parked' }
 		}
@@ -335,6 +353,7 @@ export function createTerminateParkedRun(dependencies: TerminateParkedRunDepende
 			endTime,
 			error: { kind: 'interrupted', message: 'The operator terminated this run while it was waiting for an answer.' },
 		})
+		closeOpenInvocationsOnTermination(dependencies, runId, terminatedAt)
 		dependencies.appendLogFor(runId)(terminationLogEvent(terminatedAt))
 		dependencies.deleteCheckpointFor(runId)()
 		return { ok: true, runId }

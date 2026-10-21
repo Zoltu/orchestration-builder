@@ -1,7 +1,16 @@
+import { askHumanPayload, humanAnswerPayload, roleCallId, toolCallId } from './invocation.js'
 import type { AppendLog } from './persistence.js'
 
+export interface HumanAskInvocation {
+	// The tool-call id the question is keyed by; the web API answers with this id.
+	questionId: string
+	callId: string
+	parentCallId: string
+}
+
+// The executor hands the implementation the identity the invocation journal already allocated. The implementation is responsible for logging ask_human when it starts waiting and human_answer when the answer arrives, using exactly the supplied questionId, callId, and parentCallId so the pair closes the same invocation.
 export interface HumanBackend {
-	ask(question: string, context?: string): Promise<string>
+	ask(question: string, invocation: HumanAskInvocation, context?: string): Promise<string>
 }
 
 export interface PendingQuestion {
@@ -16,6 +25,8 @@ export type AnswerSubmitResult =
 	| { kind: 'not_found' }
 
 export interface WebHumanBackend extends HumanBackend {
+	ask(question: string, invocation: HumanAskInvocation, context?: string): Promise<string>
+	// Compatibility for callers that predate invocation identity (the web server's direct test harness): the second argument is the context and the question gets a generated id. Executor asks always use the identity overload.
 	ask(question: string, context?: string): Promise<string>
 	submitAnswer(id: string, answer: string): AnswerSubmitResult
 	pendingQuestions(): PendingQuestion[]
@@ -24,6 +35,7 @@ export interface WebHumanBackend extends HumanBackend {
 
 interface PendingEntry {
 	question: PendingQuestion
+	callId: string
 	resolve: (answer: string) => void
 }
 
@@ -37,8 +49,18 @@ export function createWebHumanBackend(): WebHumanBackend {
 		bindRunLog(appendLog) {
 			runLog = appendLog
 		},
-		ask(question, context) {
-			const id = crypto.randomUUID()
+		ask(question: string, invocationOrContext?: HumanAskInvocation | string, maybeContext?: string): Promise<string> {
+			let invocation: HumanAskInvocation
+			let context: string | undefined
+			if (typeof invocationOrContext === 'string' || invocationOrContext === undefined) {
+				const id = crypto.randomUUID()
+				invocation = { questionId: id, callId: toolCallId(id), parentCallId: roleCallId('unattributed') }
+				context = invocationOrContext
+			} else {
+				invocation = invocationOrContext
+				context = maybeContext
+			}
+			const id = invocation.questionId
 			const askedAt = new Date().toISOString()
 			const pendingQuestion: PendingQuestion = {
 				id,
@@ -51,15 +73,17 @@ export function createWebHumanBackend(): WebHumanBackend {
 				log({
 					timestamp: askedAt,
 					type: 'ask_human',
-					payload: {
-						id,
+					payload: askHumanPayload({
+						questionId: id,
+						callId: invocation.callId,
+						parentCallId: invocation.parentCallId,
 						question,
 						...(context !== undefined ? { context } : {}),
-					},
+					}),
 				})
 			}
 			return new Promise<string>((resolve) => {
-				pending.set(id, { question: pendingQuestion, resolve })
+				pending.set(id, { question: pendingQuestion, callId: invocation.callId, resolve })
 			})
 		},
 		submitAnswer(id, answer) {
@@ -71,7 +95,7 @@ export function createWebHumanBackend(): WebHumanBackend {
 				log({
 					timestamp: new Date().toISOString(),
 					type: 'human_answer',
-					payload: { id, answer },
+					payload: humanAnswerPayload(id, entry.callId, answer),
 				})
 			}
 			entry.resolve(answer)
@@ -81,4 +105,9 @@ export function createWebHumanBackend(): WebHumanBackend {
 			return Array.from(pending.values(), (entry) => entry.question)
 		},
 	}
+}
+
+// The tool platform builds the invocation identity for a blocking ask from the tool call and the asking role, so a direct platform dispatch (and a legacy caller that supplies no journal identity) still keys the question by the tool-call id.
+export function askInvocationFor(id: string, parentRoleId: string): HumanAskInvocation {
+	return { questionId: id, callId: toolCallId(id), parentCallId: roleCallId(parentRoleId) }
 }

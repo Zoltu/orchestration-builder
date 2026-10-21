@@ -3,6 +3,7 @@ import type { EngineContext, RoleState } from '../engine-state.js'
 import type { LoadedGuild } from '../loader.js'
 import type { RoleRegistryEntry } from '../role-registry.js'
 import type { LogEvent, Message } from '../types.js'
+import { createInvocationJournal } from '../invocation.js'
 import { isObject } from '../validation.js'
 import { createContextManager, createContextPressureTracker, type ContextManager } from './index.js'
 
@@ -60,6 +61,7 @@ function managerFor(context: EngineContext, tracker = createContextPressureTrack
 	const manager = createContextManager(context, {
 		appendLog: (event) => events.push(event),
 		contextPressureTracker: tracker,
+		invocationJournal: createInvocationJournal((event) => events.push(event)),
 		runRole: async () => {
 			throw new Error('context handler invoked by a test that configured none')
 		},
@@ -158,6 +160,7 @@ describe('context handler interlude', () => {
 		const manager = createContextManager(context, {
 			appendLog: (event) => events.push(event),
 			contextPressureTracker: createContextPressureTracker(),
+			invocationJournal: createInvocationJournal((event) => events.push(event)),
 			runRole: async (handlerContext) => {
 				handlerContexts.push(handlerContext)
 				return { status: 'success', summary: 'trimmed the stale turn' }
@@ -179,9 +182,9 @@ describe('context handler interlude', () => {
 		expect(roleState.history[roleState.history.length - 1]?.content).toContain('[Platform notice — context compacted]')
 		expect(roleState.history[roleState.history.length - 1]?.content).toContain('trimmed the stale turn')
 		const interrupt = events.find((event) => event.type === 'interrupt')
-		expect(interrupt?.payload).toEqual({ trigger: 'context_pressure', handler: 'context_manager', target: 'main-0-1' })
+		expect(interrupt?.payload).toMatchObject({ trigger: 'context_pressure', handler: 'context_manager', target: 'main-0-1' })
 		const resolved = events.find((event) => event.type === 'interrupt_resolved')
-		expect(resolved?.payload).toEqual({ trigger: 'context_pressure', handler: 'context_manager', target: 'main-0-1', action: 'compacted' })
+		expect(resolved?.payload).toMatchObject({ trigger: 'context_pressure', handler: 'context_manager', target: 'main-0-1', action: 'compacted' })
 	})
 
 	test('falls back to the handoff notice when the handler fails', async () => {
@@ -189,6 +192,7 @@ describe('context handler interlude', () => {
 		const manager = createContextManager(context, {
 			appendLog: () => {},
 			contextPressureTracker: createContextPressureTracker(),
+			invocationJournal: createInvocationJournal(() => {}),
 			runRole: async () => ({ status: 'error', summary: 'cannot compact' }),
 		})
 		const roleState = roleStateFor()
@@ -206,6 +210,7 @@ describe('context handler interlude', () => {
 		const manager = createContextManager(context, {
 			appendLog: (event) => events.push(event),
 			contextPressureTracker: createContextPressureTracker(),
+			invocationJournal: createInvocationJournal((event) => events.push(event)),
 			runRole: async (handlerContext) => {
 				handlerContexts.push(handlerContext)
 				return { status: 'success', summary: 'pruned the rejected turn' }
@@ -230,9 +235,9 @@ describe('context handler interlude', () => {
 		expect(roleState.history[roleState.history.length - 1]?.content).toContain('[Platform notice — context compacted]')
 		expect(roleState.history[roleState.history.length - 1]?.content).toContain('pruned the rejected turn')
 		const interrupt = events.find((event) => event.type === 'interrupt')
-		expect(interrupt?.payload).toEqual({ trigger: 'context_budget_exceeded', handler: 'context_manager', target: 'main-0-1' })
+		expect(interrupt?.payload).toMatchObject({ trigger: 'context_budget_exceeded', handler: 'context_manager', target: 'main-0-1' })
 		const resolved = events.find((event) => event.type === 'interrupt_resolved')
-		expect(resolved?.payload).toEqual({ trigger: 'context_budget_exceeded', handler: 'context_manager', target: 'main-0-1', action: 'compacted' })
+		expect(resolved?.payload).toMatchObject({ trigger: 'context_budget_exceeded', handler: 'context_manager', target: 'main-0-1', action: 'compacted' })
 	})
 
 	test('runs a pending compaction before a pending pressure notice', async () => {
@@ -242,6 +247,7 @@ describe('context handler interlude', () => {
 		const manager = createContextManager(context, {
 			appendLog: (event) => events.push(event),
 			contextPressureTracker: createContextPressureTracker(),
+			invocationJournal: createInvocationJournal((event) => events.push(event)),
 			runRole: async (handlerContext) => {
 				handlerTasks.push(handlerContext.task)
 				const summary = handlerContext.task.includes('exceeding the context window') ? 'compacted overflow' : 'compacted pressure'
@@ -276,6 +282,7 @@ describe('context handler interlude', () => {
 		const manager = createContextManager(context, {
 			appendLog: () => {},
 			contextPressureTracker: createContextPressureTracker(),
+			invocationJournal: createInvocationJournal(() => {}),
 			runRole: async (handlerContext) => {
 				handlerContexts.push(handlerContext)
 				return { status: 'success', summary: 'clamped' }
@@ -295,6 +302,7 @@ describe('context handler interlude', () => {
 		const manager = createContextManager(context, {
 			appendLog: (event) => events.push(event),
 			contextPressureTracker: createContextPressureTracker(),
+			invocationJournal: createInvocationJournal((event) => events.push(event)),
 			runRole: async () => ({ status: 'error', summary: 'cannot compact' }),
 		})
 		const history: Message[] = [
@@ -313,7 +321,7 @@ describe('context handler interlude', () => {
 		expect(roleState.history[roleState.history.length - 1]?.content).toContain('[Platform notice — context window exceeded]')
 		expect(events.some((event) => event.type === 'context_compacted')).toBe(true)
 		const resolved = events.find((event) => event.type === 'interrupt_resolved')
-		expect(resolved?.payload).toEqual({ trigger: 'context_budget_exceeded', handler: 'context_manager', target: 'main-0-1', action: 'failed', handlerStatus: 'error' })
+		expect(resolved?.payload).toMatchObject({ trigger: 'context_budget_exceeded', handler: 'context_manager', target: 'main-0-1', action: 'failed', handlerStatus: 'error' })
 	})
 
 	test('the naive backstop preserves a four-message continuation prefix and starts dropping at index four', async () => {
@@ -321,6 +329,7 @@ describe('context handler interlude', () => {
 		const manager = createContextManager(context, {
 			appendLog: () => {},
 			contextPressureTracker: createContextPressureTracker(),
+			invocationJournal: createInvocationJournal(() => {}),
 			runRole: async () => ({ status: 'error', summary: 'cannot compact' }),
 		})
 		const prefix: Message[] = [

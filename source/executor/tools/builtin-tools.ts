@@ -6,7 +6,8 @@ import type { InterruptActionKind, RoleRegistry, RoleRegistryEntry } from '../ro
 import { isObject } from '../validation.js'
 import { optionalPositiveInt } from './shared.js'
 import type { ToolHandler } from './tool-dispatch.js'
-import type { HumanBackend } from '../human-backend.js'
+import { askInvocationFor, type HumanBackend } from '../human-backend.js'
+import { askHumanPayload, type ToolInvocation } from '../invocation.js'
 import { logEvent } from '../engine-state.js'
 import type { ProtectedPrefixLength, RoleState } from '../state.js'
 import type { AppendLog } from '../persistence.js'
@@ -28,6 +29,8 @@ export interface BuiltInToolContext {
 	parkTracker: RunParkTracker
 	// The flagged instance this invocation serves as an interrupt handler (EngineContext.handlerOf), when the role runs as one. trigger_interrupt refuses any other target: only the flagged entry's interruptAction is consumed by the loop-check resolution, so a decision parked on another entry would sit unapplied and fire out of context at that entry's next loop check.
 	handlerOf?: string
+	// The identity the engine allocated for this dispatch. Direct platform dispatches omit it and the ask handler falls back to the tool call's own id.
+	invocation?: ToolInvocation
 }
 
 interface FinishValidationSuccess {
@@ -40,26 +43,31 @@ interface FinishValidationError {
 	result: ToolResult
 }
 
-function validateFinishArgs(args: Record<string, unknown>): FinishValidationSuccess | FinishValidationError {
+export type FinishCardParseResult =
+	| { kind: 'success'; card: ResultCard }
+	| { kind: 'error'; message: string }
+
+// The shared finish-argument validation: the finish tool and a standard-level replay of an already-recorded finish both parse the same arguments, so a replayed card cannot disagree with the live one.
+export function parseFinishArguments(args: Record<string, unknown>): FinishCardParseResult {
 	const statusValue = args['status']
 	if (statusValue !== 'success' && statusValue !== 'error' && statusValue !== 'needs_clarification') {
-		return { kind: 'error', result: createToolError('invalid_arguments', 'status must be success, error, or needs_clarification') }
+		return { kind: 'error', message: 'status must be success, error, or needs_clarification' }
 	}
 
 	const summaryValue = args['summary']
 	if (typeof summaryValue !== 'string') {
-		return { kind: 'error', result: createToolError('invalid_arguments', 'summary must be a string') }
+		return { kind: 'error', message: 'summary must be a string' }
 	}
 	// A whitespace-only summary would finalize the role with a success card that says nothing, so it is rejected like a missing one.
 	if (summaryValue.trim() === '') {
-		return { kind: 'error', result: createToolError('invalid_arguments', 'summary must be a non-empty string') }
+		return { kind: 'error', message: 'summary must be a non-empty string' }
 	}
 
 	let artifactsValue: string[] | undefined
 	const artifactsRaw = args['artifacts']
 	if (artifactsRaw !== undefined) {
 		if (!Array.isArray(artifactsRaw) || !artifactsRaw.every((a): a is string => typeof a === 'string')) {
-			return { kind: 'error', result: createToolError('invalid_arguments', 'artifacts must be an array of strings') }
+			return { kind: 'error', message: 'artifacts must be an array of strings' }
 		}
 		artifactsValue = artifactsRaw
 	}
@@ -68,11 +76,11 @@ function validateFinishArgs(args: Record<string, unknown>): FinishValidationSucc
 	const errorRaw = args['error']
 	if (statusValue === 'error' && errorRaw !== undefined) {
 		if (!isObject(errorRaw)) {
-			return { kind: 'error', result: createToolError('invalid_arguments', 'error must be an object') }
+			return { kind: 'error', message: 'error must be an object' }
 		}
 		const errKindValue = errorRaw['kind']
 		if (!isErrorKind(errKindValue)) {
-			return { kind: 'error', result: createToolError('invalid_arguments', 'error.kind must be a valid ErrorKind') }
+			return { kind: 'error', message: 'error.kind must be a valid ErrorKind' }
 		}
 		const errMessageValue = errorRaw['message']
 		const errMessage = typeof errMessageValue === 'string' ? errMessageValue : undefined
@@ -87,6 +95,12 @@ function validateFinishArgs(args: Record<string, unknown>): FinishValidationSucc
 	}
 
 	return { kind: 'success', card }
+}
+
+function validateFinishArgs(args: Record<string, unknown>): FinishValidationSuccess | FinishValidationError {
+	const parsed = parseFinishArguments(args)
+	if (parsed.kind === 'error') return { kind: 'error', result: createToolError('invalid_arguments', parsed.message) }
+	return { kind: 'success', card: parsed.card }
 }
 
 interface AgentValidationSuccess {
@@ -347,20 +361,23 @@ function createAskHuman(context: BuiltInToolContext): ToolHandler {
 		}
 		const contextValue = args['context']
 		const contextString = typeof contextValue === 'string' ? contextValue : undefined
+		if (call === undefined) throw new Error('ask_human: the tool call is required to key the question')
+		const invocation = context.invocation ?? askInvocationFor(call.id, context.ownRoleId)
 		// The pre-write park (docs/queueing.md "Parking: the pre-write rule"): before any write-capable role has started there is no workspace change to protect, so a queue-dispatched run parks instead of blocking the pipeline on one unanswered question — the human backend is never called (no pending question is registered), the event is emitted here so the run's own log stays a faithful record, and the recorded question marks the run to terminate at the next safe point. Handler frames must not park: their writes are suppressed while they run, so a parked ask there could never be checkpointed. A run the queue does not track keeps today's blocking behavior: its parked question would be answerable through no endpoint.
 		if (context.handlerOf === undefined && context.parkTracker.queueTracked === true && !context.parkTracker.writeCapableStarted) {
-			if (call === undefined) throw new Error('ask_human: a parked ask requires its tool call')
 			context.parkTracker.parkedQuestion = questionValue
-			context.parkTracker.parkedAsk = { roleId: context.ownRoleId, toolCallId: call.id, question: questionValue }
-			logEvent(context.appendLog, 'ask_human', {
-				id: call.id,
+			context.parkTracker.parkedAsk = { roleId: context.ownRoleId, toolCallId: call.id, callId: invocation.callId, questionId: invocation.questionId, question: questionValue }
+			logEvent(context.appendLog, 'ask_human', askHumanPayload({
+				questionId: invocation.questionId,
+				callId: invocation.callId,
+				parentCallId: invocation.parentCallId,
 				question: questionValue,
 				...(contextString !== undefined ? { context: contextString } : {}),
 				parked: true,
-			})
+			}))
 			return { kind: 'success', data: { question: questionValue, parked: true } }
 		}
-		const answer = await context.humanBackend.ask(questionValue, contextString)
+		const answer = await context.humanBackend.ask(questionValue, invocation, contextString)
 		return { kind: 'success', data: { question: questionValue, answer } }
 	}
 }

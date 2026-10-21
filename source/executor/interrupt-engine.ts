@@ -87,15 +87,15 @@ async function runInterruptHandler(
 		`It has made ${entry.roleState.toolCallCount} tool calls and generated ${entry.roleState.generatedTokens} tokens so far.`,
 		'Investigate whether it is stuck in a loop, then call trigger_interrupt with that role-instance id and your decision.',
 	].join(' ')
-	return runHandlerInterlude({ appendLog: deps.appendLog, runRole: (handlerContext) => runRole(deps, handlerContext) }, context, entry, config, handlerRole, 'loop_check', task, {}, (handlerCard) => {
+	return runHandlerInterlude({ invocationJournal: deps.invocationJournal, runRole: (handlerContext) => runRole(deps, handlerContext) }, context, entry, config, handlerRole, 'loop_check', task, {}, (handlerCard, interruptCallId) => {
 		const action = entry.interruptAction
 		entry.interruptAction = undefined
 		if (action === undefined) {
 			// A handler that finishes without calling trigger_interrupt decides nothing; the target resumes unchanged. The handler's own outcome is logged for the reviewer.
-			logEvent(deps.appendLog, 'interrupt_resolved', { trigger: 'loop_check', handler: handlerRole, target: entry.roleId, action: 'continue', handlerStatus: handlerCard.status })
+			deps.invocationJournal.interruptFinished(interruptCallId, { trigger: 'loop_check', handler: handlerRole, target: entry.roleId, action: 'continue', handlerStatus: handlerCard.status })
 			return null
 		}
-		logEvent(deps.appendLog, 'interrupt_resolved', { trigger: 'loop_check', handler: handlerRole, target: entry.roleId, action: action.action })
+		deps.invocationJournal.interruptFinished(interruptCallId, { trigger: 'loop_check', handler: handlerRole, target: entry.roleId, action: action.action })
 		if (action.action === 'abort') {
 			const summary = action.reason !== '' ? action.reason : 'Aborted by the loop-check handler'
 			return createResultCard('error', summary, { error: createToolError('loop_detected', action.reason) })
@@ -140,11 +140,11 @@ async function runInquiryHandler(
 		finishedRolesNote,
 		'When you know the answer, call finish with status "success" and put the answer, in plain language, in the summary — the summary is shown to the operator as your answer. Do not modify the workspace or any role\'s conversation.',
 	].join('\n')
-	await runHandlerInterlude({ appendLog: deps.appendLog, runRole: (handlerContext) => runRole(deps, handlerContext) }, context, entry, config, handlerRole, 'inquiry', task, { message: request.message }, (handlerCard) => {
+	await runHandlerInterlude({ invocationJournal: deps.invocationJournal, runRole: (handlerContext) => runRole(deps, handlerContext) }, context, entry, config, handlerRole, 'inquiry', task, { message: request.message }, (handlerCard, interruptCallId) => {
 		if (handlerCard.status === 'success') {
-			logEvent(deps.appendLog, 'interrupt_resolved', { trigger: 'inquiry', handler: handlerRole, target: entry.roleId, action: 'answered', summary: handlerCard.summary })
+			deps.invocationJournal.interruptFinished(interruptCallId, { trigger: 'inquiry', handler: handlerRole, target: entry.roleId, action: 'answered', summary: handlerCard.summary })
 		} else {
-			logEvent(deps.appendLog, 'interrupt_resolved', { trigger: 'inquiry', handler: handlerRole, target: entry.roleId, action: 'failed', handlerStatus: handlerCard.status, summary: handlerCard.summary })
+			deps.invocationJournal.interruptFinished(interruptCallId, { trigger: 'inquiry', handler: handlerRole, target: entry.roleId, action: 'failed', handlerStatus: handlerCard.status, summary: handlerCard.summary })
 		}
 	})
 }

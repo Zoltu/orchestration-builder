@@ -1,6 +1,7 @@
 import type { RoleRegistryEntry } from '../role-registry.js'
 import { runHandlerInterlude } from '../handler-interlude.js'
 import { logEvent, type EngineContext, type RoleState } from '../engine-state.js'
+import type { InvocationJournal } from '../invocation.js'
 import type { AppendLog } from '../persistence.js'
 import type { LlmUsage, ResultCard } from '../types.js'
 import { applyContextBackstop, contextExceededCard, contextHandlerTask, contextManagedNotice, contextPressureNotice, currentEffectiveBudget, MAX_CONTEXT_RECOVERY_ATTEMPTS } from './context-handoff.js'
@@ -18,6 +19,7 @@ export type ContextDecision =
 export interface ContextDependencies {
 	appendLog: AppendLog
 	contextPressureTracker: ContextPressureTracker
+	invocationJournal: InvocationJournal
 	runRole: (context: EngineContext) => Promise<ResultCard>
 }
 
@@ -43,11 +45,11 @@ export function createContextManager(context: EngineContext, dependencies: Conte
 		const handlerRole = config.contextHandlerRole
 		if (handlerRole === undefined) throw new Error('context handler interlude requested without executor.contextHandlerRole configured')
 		const task = contextHandlerTask(trigger, context, entry, reported)
-		return runHandlerInterlude({ appendLog: dependencies.appendLog, runRole: dependencies.runRole }, context, entry, config, handlerRole, trigger, task, {}, (handlerCard) => {
+		return runHandlerInterlude({ invocationJournal: dependencies.invocationJournal, runRole: dependencies.runRole }, context, entry, config, handlerRole, trigger, task, {}, (handlerCard, interruptCallId) => {
 			if (handlerCard.status === 'success') {
-				logEvent(dependencies.appendLog, 'interrupt_resolved', { trigger, handler: handlerRole, target: entry.roleId, action: 'compacted' })
+				dependencies.invocationJournal.interruptFinished(interruptCallId, { trigger, handler: handlerRole, target: entry.roleId, action: 'compacted' })
 			} else {
-				logEvent(dependencies.appendLog, 'interrupt_resolved', { trigger, handler: handlerRole, target: entry.roleId, action: 'failed', handlerStatus: handlerCard.status })
+				dependencies.invocationJournal.interruptFinished(interruptCallId, { trigger, handler: handlerRole, target: entry.roleId, action: 'failed', handlerStatus: handlerCard.status })
 			}
 			return handlerCard
 		})

@@ -22,6 +22,8 @@ const fullToolResultPayload = {
 	role: 'coder',
 	tool: 'write_file',
 	kind: 'success',
+	callId: 'tool:call-1',
+	parentCallId: 'role:coder-1-2',
 	result: { kind: 'success', data: { path: 'x', bytes: 4 } },
 }
 
@@ -104,7 +106,7 @@ describe('applyLogLevel under standard: tool_result slimming', () => {
 		expect(slimmed).toEqual({
 			timestamp: '2026-01-01T00:00:00.000Z',
 			type: 'tool_result',
-			payload: { role: 'coder', tool: 'write_file', kind: 'success' },
+			payload: { role: 'coder', tool: 'write_file', kind: 'success', callId: 'tool:call-1', parentCallId: 'role:coder-1-2' },
 		})
 	})
 
@@ -179,6 +181,6 @@ describe('applyLogLevel never mutates its input', () => {
 		const slimmed = applyLogLevel(frozen, 'standard')
 
 		expect(frozen.payload).toEqual(fullToolResultPayload)
-		expect(slimmed.payload).toEqual({ role: 'coder', tool: 'write_file', kind: 'success' })
+		expect(slimmed.payload).toEqual({ role: 'coder', tool: 'write_file', kind: 'success', callId: 'tool:call-1', parentCallId: 'role:coder-1-2' })
 	})
 })

@@ -1,8 +1,9 @@
 import { describe, expect, test } from 'bun:test'
 import type { LogEvent, Message, RoleDefinition, ToolCall, ToolResult } from '../types.js'
 import type { RunToolScope } from './index.js'
+import { createInvocationJournal } from '../invocation.js'
 import { createRunParkTracker } from '../park-state.js'
-import { createEmptyRoleState, createFixtureRunScope, createFixtureToolPlatform, recordingHumanBackend } from '../test-fixtures.js'
+import { createEmptyRoleState, createFixtureRunScope, createFixtureToolPlatform, defined, recordingHumanBackend } from '../test-fixtures.js'
 
 const platform = createFixtureToolPlatform()
 
@@ -171,7 +172,7 @@ describe('ask_human tool', () => {
 
 		expect(result).toEqual({ kind: 'success', data: { question: 'Which database?', parked: true } })
 		expect(parkTracker.parkedQuestion).toBe('Which database?')
-		expect(parkTracker.parkedAsk).toEqual({ roleId: 'fixture-0-0', toolCallId: 'call_ask_human_1', question: 'Which database?' })
+		expect(parkTracker.parkedAsk).toMatchObject({ roleId: 'fixture-0-0', toolCallId: 'call_ask_human_1', callId: 'tool:call_ask_human_1', questionId: 'call_ask_human_1', question: 'Which database?' })
 		const askEvent = events.find((event) => event.type === 'ask_human')
 		expect(askEvent).toBeDefined()
 		if (askEvent === undefined) return
@@ -201,6 +202,23 @@ describe('ask_human tool', () => {
 			expect(testCase.parkTracker.parkedAsk).toBeUndefined()
 			expect(human.questions.length).toBe(1)
 		}
+	})
+
+	test('a parked ask with an empty model id records the allocated invocation identity', async () => {
+		const parkTracker = createRunParkTracker(undefined, true)
+		const events: LogEvent[] = []
+		const scope = scopeWith({ parkTracker, appendLog: (event) => events.push(event) })
+		const call: ToolCall = { id: '', type: 'function', function: { name: 'ask_human', arguments: JSON.stringify({ question: 'Which database?' }) } }
+		const journal = createInvocationJournal((event) => events.push(event))
+		const invocation = journal.allocateToolCall(call, 'fixture-0-0')
+		expect(invocation.questionId).not.toBe('')
+
+		const result = await platform.dispatch(roleWith(['ask_human', 'finish']), scope, call, invocation)
+
+		expect(result).toEqual({ kind: 'success', data: { question: 'Which database?', parked: true } })
+		expect(parkTracker.parkedAsk).toMatchObject({ roleId: 'fixture-0-0', toolCallId: '', callId: invocation.callId, questionId: invocation.questionId, question: 'Which database?' })
+		const askEvent = defined(events.find((event) => event.type === 'ask_human'), 'ask_human event')
+		expect(askEvent.payload).toMatchObject({ id: invocation.questionId, callId: invocation.callId, parentCallId: 'role:fixture-0-0', parked: true })
 	})
 })
 

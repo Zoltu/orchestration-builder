@@ -34,6 +34,12 @@ function stringField(payload: unknown, field: string): string | null {
 	return typeof value === 'string' ? value : null
 }
 
+// An empty identity string is absent, matching the journal's own id checks.
+function idField(payload: unknown, field: string): string | null {
+	const value = stringField(payload, field)
+	return value === null || value === '' ? null : value
+}
+
 // The full usage breakdown one usage-carrying event reports: the two reported counts plus their sum, and the cached-prompt subset (a subset of the prompt bill, not additive). A payload with neither a reported total nor a reportable prompt+completion pair has no usage; a present-but-partial usage object degrades its missing fields to 0 (endpoint-reported data), matching the run view's reader (source/run-log/payload.ts usageOf). cachedPromptTokens is null when the usage object does not report it — the backend omits the field when unreported, and that absence must survive the fold so a null is never replaced by a fabricated zero.
 type UsageBreakdown = { promptTokens: number; completionTokens: number; totalTokens: number; cachedPromptTokens: number | null }
 
@@ -145,12 +151,81 @@ interface DerivedModel {
 	detailSources: Map<string, OperationDetailSource>
 }
 
-function deriveModel(snapshot: RunSnapshot): DerivedModel {
-	const status = runStatusOf(snapshot.meta)
-	// A run that is running, waiting on a question (needs_clarification), or has no readable meta
-	// (unknown) still has something in flight at derivation time; a finished run (success/error) has settled.
+// Settles the recorded calls and returns and attaches the per-invocation metrics. Both the legacy walk and the identity-keyed walk feed the same record shapes here, so a terminal run freezes an open call at the run's stored end exactly the same way whichever path produced it.
+function finalizeModel(snapshot: RunSnapshot, status: RunStatus, participants: Participant[], operations: Operation[], detailSources: Map<string, OperationDetailSource>, stackRecords: StackRecord[], allCallRecords: OpenCallRecord[], allReturnRecords: ReturnRecord[]): DerivedModel {
 	const runActive = status === 'running' || status === 'needs_clarification' || status === 'unknown'
+	// The stored end of a terminal run: meta.endTime when present, else the last log event's timestamp. Read once here so neither the defensive settle nor the elapsed fallback consults the clock, keeping the payload a pure function of stored data.
+	const lastLogEvent = snapshot.logEvents.length > 0 ? snapshot.logEvents[snapshot.logEvents.length - 1] : undefined
+	const lastEventTimestamp = lastLogEvent === undefined ? null : lastLogEvent.timestamp
+	const terminalTime = snapshot.meta?.endTime ?? lastEventTimestamp
+	// Terminal is the client's own polling set (interaction-model.ts isTerminalStatus), the one app.ts reads to stop the per-run poll. Matching that set keeps the elapsed deterministic for exactly the runs whose client clock no longer advances the view; it includes needs_clarification, a run awaiting a human answer that is likewise not polled, so its open ask_human call must freeze too. runActive above deliberately stays as it is (needs_clarification still reads as in flight for lifecycle); only the elapsed is frozen here.
+	const runTerminal = isTerminalStatus(status)
 
+	for (const record of allCallRecords) {
+		const op = record.operation
+		if (record.returnTimestamp !== null) {
+			op.settledAt = record.returnTimestamp
+			op.lifecycle = 'settled'
+		} else if (record.turnStartedAt !== null) {
+			// The callee began its turn (llm_call_start) before delegating: that is the precise transit→working boundary.
+			// When no llm_call_start was logged, delegatedAt carries the turn-level boundary instead.
+			op.settledAt = record.turnStartedAt
+			op.lifecycle = 'settled'
+		} else if (record.delegatedAt !== null) {
+			op.settledAt = record.delegatedAt
+			op.lifecycle = 'settled'
+		} else if (runActive) {
+			op.settledAt = null
+			op.lifecycle = 'in_flight'
+		} else {
+			// A terminal run should have no open calls; defensively settle one that does at the run's stored end, or — when meta carries none — at the last log event, never at the wall clock, so the payload stays a pure function of stored data.
+			op.settledAt = terminalTime ?? op.startedAt
+			op.lifecycle = 'settled'
+		}
+		// The per-invocation span runs to the matching return; a call with no return on a terminal run spans to the run's stored end (terminalTime, the same value the defensive settle records), while a call still open on a non-terminal run has no stored end, so its elapsed is null and the client fills it from its own clock (withLiveElapsed).
+		const elapsed = record.returnTimestamp !== null
+			? secondsBetween(op.startedAt, record.returnTimestamp)
+			: runTerminal
+				? secondsBetween(op.startedAt, terminalTime ?? op.startedAt)
+				: null
+		op.metrics = { tokens: record.tokens, promptTokens: record.promptTokens, completionTokens: record.completionTokens, cachedPromptTokens: record.cachedPromptTokens, lastPromptTokens: record.lastPromptTokens, elapsedSeconds: elapsed }
+	}
+
+	for (const record of allReturnRecords) {
+		const op = record.operation
+		if (record.supersededAt !== null) {
+			op.settledAt = record.supersededAt
+			op.lifecycle = 'settled'
+		} else if (runActive) {
+			// The latest activity-affecting operation on the active stack is the lingering return leg.
+			op.settledAt = null
+			op.lifecycle = 'in_flight'
+		} else {
+			// A finished run has nothing in flight; the final return settles at its own timestamp.
+			op.settledAt = op.startedAt
+			op.lifecycle = 'settled'
+		}
+	}
+
+	return { model: { participants, operations, status, stacks: stackRecords }, detailSources }
+}
+
+function deriveModel(snapshot: RunSnapshot): DerivedModel {
+	if (hasIdentityStart(snapshot.logEvents)) return deriveIdentityModel(snapshot)
+	return deriveLegacyModel(snapshot)
+}
+
+// The id-based path is selected as soon as any invocation start carries a callId; a log with none is the unchanged legacy log.
+function hasIdentityStart(logEvents: LogEvent[]): boolean {
+	for (const event of logEvents) {
+		if (event.type !== 'role_start' && event.type !== 'tool_call' && event.type !== 'ask_human' && event.type !== 'interrupt') continue
+		if (idField(event.payload, 'callId') !== null) return true
+	}
+	return false
+}
+
+function deriveLegacyModel(snapshot: RunSnapshot): DerivedModel {
+	const status = runStatusOf(snapshot.meta)
 	const rootParticipant: Participant = { id: ROOT_HUMAN_ID, role: 'human', kind: 'human' }
 	const participants: Participant[] = [rootParticipant]
 	const registry = new Map<string, Participant>([[ROOT_HUMAN_ID, rootParticipant]])
@@ -572,60 +647,602 @@ function deriveModel(snapshot: RunSnapshot): DerivedModel {
 		}
 	}
 
-	// The stored end of a terminal run: meta.endTime when present, else the last log event's timestamp. Read once here so neither the defensive settle nor the elapsed fallback consults the clock, keeping the payload a pure function of stored data.
-	const lastLogEvent = snapshot.logEvents.length > 0 ? snapshot.logEvents[snapshot.logEvents.length - 1] : undefined
-	const lastEventTimestamp = lastLogEvent === undefined ? null : lastLogEvent.timestamp
-	const terminalTime = snapshot.meta?.endTime ?? lastEventTimestamp
-	// Terminal is the client's own polling set (interaction-model.ts isTerminalStatus), the one app.ts reads to stop the per-run poll. Matching that set keeps the elapsed deterministic for exactly the runs whose client clock no longer advances the view; it includes needs_clarification, a run awaiting a human answer that is likewise not polled, so its open ask_human call must freeze too. runActive above deliberately stays as it is (needs_clarification still reads as in flight for lifecycle); only the elapsed is frozen here.
-	const runTerminal = isTerminalStatus(status)
+	return finalizeModel(snapshot, status, participants, operations, detailSources, stackRecords, allCallRecords, allReturnRecords)
+}
 
-	for (const record of allCallRecords) {
-		const op = record.operation
-		if (record.returnTimestamp !== null) {
-			op.settledAt = record.returnTimestamp
-			op.lifecycle = 'settled'
-		} else if (record.turnStartedAt !== null) {
-			// The callee began its turn (llm_call_start) before delegating: that is the precise transit→working boundary.
-			// When no llm_call_start was logged, delegatedAt carries the turn-level boundary instead.
-			op.settledAt = record.turnStartedAt
-			op.lifecycle = 'settled'
-		} else if (record.delegatedAt !== null) {
-			op.settledAt = record.delegatedAt
-			op.lifecycle = 'settled'
-		} else if (runActive) {
-			op.settledAt = null
-			op.lifecycle = 'in_flight'
-		} else {
-			// A terminal run should have no open calls; defensively settle one that does at the run's stored end, or — when meta carries none — at the last log event, never at the wall clock, so the payload stays a pure function of stored data.
-			op.settledAt = terminalTime ?? op.startedAt
-			op.lifecycle = 'settled'
-		}
-		// The per-invocation span runs to the matching return; a call with no return on a terminal run spans to the run's stored end (terminalTime, the same value the defensive settle records), while a call still open on a non-terminal run has no stored end, so its elapsed is null and the client fills it from its own clock (withLiveElapsed).
-		const elapsed = record.returnTimestamp !== null
-			? secondsBetween(op.startedAt, record.returnTimestamp)
-			: runTerminal
-				? secondsBetween(op.startedAt, terminalTime ?? op.startedAt)
-				: null
-		op.metrics = { tokens: record.tokens, promptTokens: record.promptTokens, completionTokens: record.completionTokens, cachedPromptTokens: record.cachedPromptTokens, lastPromptTokens: record.lastPromptTokens, elapsedSeconds: elapsed }
+// The identity-keyed graph: invocations are keyed by their callId, parent links come from parentCallId, and a terminal closes exactly the invocation it names. A start without a terminal stays open; a terminal without a start materializes a complete call+return pair at the terminal timestamp from the stack root, without guessing a parent. Legacy events inside a mixed log degrade to the bounded fallbacks below (role/tool matching and the current frame's root), never to the old event-order parent inference.
+interface IdentityInvocation {
+	callId: string
+	record: OpenCallRecord | null
+	stackId: string
+	destinationId: string
+	destinationRole: string
+	destinationKind: ParticipantKind
+	parentCallId: string | null
+	questionId: string | null
+	isInterrupt: boolean
+	targetRoleId?: string
+	handlerRole?: string
+}
+
+function deriveIdentityModel(snapshot: RunSnapshot): DerivedModel {
+	const status = runStatusOf(snapshot.meta)
+	const rootParticipant: Participant = { id: ROOT_HUMAN_ID, role: 'human', kind: 'human' }
+	const participants: Participant[] = [rootParticipant]
+	const registry = new Map<string, Participant>([[ROOT_HUMAN_ID, rootParticipant]])
+	const operations: Operation[] = []
+	const detailSources = new Map<string, OperationDetailSource>()
+	const allCallRecords: OpenCallRecord[] = []
+	const allReturnRecords: ReturnRecord[] = []
+	const pendingResolvedReturns: ReturnRecord[] = []
+	const stackStack: StackFrame[] = [{ stackId: MAIN_STACK, rootId: ROOT_HUMAN_ID, openCalls: [], lingeringReturn: null }]
+	const stackRecords: StackRecord[] = [{ id: MAIN_STACK, root: ROOT_HUMAN_ID }]
+	const invocations = new Map<string, IdentityInvocation>()
+	let pendingInquiryMessage: string | null = null
+
+	const idCounters = new Map<string, number>()
+	function nextId(key: string): number {
+		const n = (idCounters.get(key) ?? 0) + 1
+		idCounters.set(key, n)
+		return n
 	}
 
-	for (const record of allReturnRecords) {
-		const op = record.operation
-		if (record.supersededAt !== null) {
-			op.settledAt = record.supersededAt
-			op.lifecycle = 'settled'
-		} else if (runActive) {
-			// The latest activity-affecting operation on the active stack is the lingering return leg.
-			op.settledAt = null
-			op.lifecycle = 'in_flight'
-		} else {
-			// A finished run has nothing in flight; the final return settles at its own timestamp.
-			op.settledAt = op.startedAt
-			op.lifecycle = 'settled'
+	let opCounter = 0
+	function opId(): string {
+		opCounter += 1
+		return `op-${opCounter}`
+	}
+
+	function addParticipant(id: string, role: string, kind: ParticipantKind, roleId?: string): void {
+		if (registry.has(id)) return
+		const participant: Participant = roleId === undefined ? { id, role, kind } : { id, role, kind, roleId }
+		participants.push(participant)
+		registry.set(id, participant)
+	}
+
+	function currentFrame(): StackFrame {
+		const frame = stackStack[stackStack.length - 1]
+		if (frame === undefined) throw new Error('interaction model invariant violated: the stack of stacks is empty')
+		return frame
+	}
+
+	function frameByStack(stackId: string): StackFrame | null {
+		for (const frame of stackStack) {
+			if (frame.stackId === stackId) return frame
+		}
+		return null
+	}
+
+	function settleLingering(timestamp: string): void {
+		const frame = currentFrame()
+		if (frame.lingeringReturn === null) return
+		frame.lingeringReturn.supersededAt = timestamp
+		frame.lingeringReturn = null
+	}
+
+	function settleResolvedLingering(timestamp: string): void {
+		for (const record of pendingResolvedReturns) record.supersededAt = timestamp
+		pendingResolvedReturns.length = 0
+	}
+
+	function settleLingeringIfCaller(role: string, timestamp: string): void {
+		const frame = currentFrame()
+		if (frame.lingeringReturn === null) return
+		if (frame.lingeringReturn.callerRole !== role) return
+		frame.lingeringReturn.supersededAt = timestamp
+		frame.lingeringReturn = null
+	}
+
+	function settlePreviousByDelegation(timestamp: string): void {
+		const frame = currentFrame()
+		const top = frame.openCalls[frame.openCalls.length - 1]
+		if (top === undefined) return
+		if (top.returnTimestamp === null && top.delegatedAt === null) top.delegatedAt = timestamp
+	}
+
+	function activeOpenRecord(): OpenCallRecord | null {
+		const frame = currentFrame()
+		return frame.openCalls[frame.openCalls.length - 1] ?? null
+	}
+
+	function sourceForParent(parentCallId: string | null): string {
+		if (parentCallId !== null) {
+			const parent = invocations.get(parentCallId)
+			if (parent !== undefined) return parent.destinationId
+			const participant = registry.get(parentCallId)
+			if (participant !== undefined) return participant.id
+		}
+		return currentFrame().rootId
+	}
+
+	function createCallRecord(event: LogEvent, callId: string, parentCallId: string | null, source: string, destinationId: string, destinationRole: string, destinationKind: ParticipantKind, questionId: string | null, detailSource: OperationDetailSource | null): OpenCallRecord {
+		const frame = currentFrame()
+		const callOperation: Operation = {
+			id: opId(),
+			kind: 'call',
+			callId,
+			stack: frame.stackId,
+			source,
+			destination: destinationId,
+			startedAt: event.timestamp,
+			settledAt: null,
+			lifecycle: 'in_flight',
+			outcome: null,
+			metrics: null,
+		}
+		if (parentCallId !== null) callOperation.parentCallId = parentCallId
+		operations.push(callOperation)
+		if (detailSource !== null) detailSources.set(callOperation.id, detailSource)
+		const record: OpenCallRecord = {
+			operation: callOperation,
+			destinationId,
+			destinationRole,
+			destinationKind,
+			questionId,
+			returnTimestamp: null,
+			delegatedAt: null,
+			turnStartedAt: null,
+			tokens: null,
+			promptTokens: null,
+			completionTokens: null,
+			cachedPromptTokens: null,
+			lastPromptTokens: null,
+		}
+		frame.openCalls.push(record)
+		allCallRecords.push(record)
+		return record
+	}
+
+	function registerInvocation(callId: string, record: OpenCallRecord | null, destinationId: string, destinationRole: string, destinationKind: ParticipantKind, parentCallId: string | null, questionId: string | null, isInterrupt: boolean): IdentityInvocation {
+		const invocation: IdentityInvocation = { callId, record, stackId: currentFrame().stackId, destinationId, destinationRole, destinationKind, parentCallId, questionId, isInterrupt }
+		invocations.set(callId, invocation)
+		return invocation
+	}
+
+	function startCall(event: LogEvent, callId: string, parentCallId: string | null, source: string, destinationId: string, destinationRole: string, destinationKind: ParticipantKind, questionId: string | null, detailSource: OperationDetailSource | null): void {
+		settleLingering(event.timestamp)
+		settleResolvedLingering(event.timestamp)
+		settlePreviousByDelegation(event.timestamp)
+		const record = createCallRecord(event, callId, parentCallId, source, destinationId, destinationRole, destinationKind, questionId, detailSource)
+		registerInvocation(callId, record, destinationId, destinationRole, destinationKind, parentCallId, questionId, false)
+	}
+
+	function popEmptyFrame(frame: StackFrame): void {
+		if (frame.stackId === MAIN_STACK) return
+		if (frame.openCalls.length !== 0) return
+		if (currentFrame() !== frame) return
+		const closed = stackStack.pop()
+		if (closed !== undefined && closed.lingeringReturn !== null) pendingResolvedReturns.push(closed.lingeringReturn)
+		removeEmptyStackRecord(frame.stackId)
+	}
+
+	function removeEmptyStackRecord(stackId: string): void {
+		// A resolved stack that never recorded an operation (an interrupt whose handler was never started) has no resolved-stack content to show; leaving its record would make the view treat it as freshly preempted forever.
+		if (operations.some((operation) => operation.stack === stackId)) return
+		const recordIndex = stackRecords.findIndex((record) => record.id === stackId)
+		if (recordIndex >= 0) stackRecords.splice(recordIndex, 1)
+	}
+
+	function recordReturnFor(record: OpenCallRecord, event: LogEvent, outcome: OperationOutcome, detailSource: OperationDetailSource | null): void {
+		settleLingering(event.timestamp)
+		settleResolvedLingering(event.timestamp)
+		const frame = frameByStack(record.operation.stack) ?? currentFrame()
+		const callerId = record.operation.source
+		const callerParticipant = registry.get(callerId)
+		const callerRole = callerParticipant === undefined ? null : callerParticipant.role
+		const returnOperation: Operation = {
+			id: opId(),
+			kind: 'return',
+			callId: record.operation.callId,
+			stack: record.operation.stack,
+			source: record.destinationId,
+			destination: callerId,
+			startedAt: event.timestamp,
+			settledAt: null,
+			lifecycle: 'in_flight',
+			outcome,
+			metrics: null,
+		}
+		operations.push(returnOperation)
+		if (detailSource !== null) detailSources.set(returnOperation.id, detailSource)
+		record.returnTimestamp = event.timestamp
+		const returnRecord: ReturnRecord = { operation: returnOperation, callerRole, supersededAt: null }
+		allReturnRecords.push(returnRecord)
+		frame.lingeringReturn = returnRecord
+	}
+
+	function closeInvocation(invocation: IdentityInvocation, event: LogEvent, outcome: OperationOutcome, detailSource: OperationDetailSource | null): void {
+		const record = invocation.record
+		if (record === null) return
+		// The first terminal wins: a duplicate terminal, or one arriving after a terminate closed the call, is ignored.
+		if (record.returnTimestamp !== null) return
+		recordReturnFor(record, event, outcome, detailSource)
+		const frame = frameByStack(record.operation.stack)
+		if (frame === null) return
+		removeOpenRecord(frame, record)
+		popEmptyFrame(frame)
+	}
+
+	function removeOpenRecord(frame: StackFrame, record: OpenCallRecord): void {
+		const index = frame.openCalls.indexOf(record)
+		if (index >= 0) frame.openCalls.splice(index, 1)
+	}
+
+	function findOpenInCurrentFrame(predicate: (record: OpenCallRecord) => boolean): OpenCallRecord | null {
+		const frame = currentFrame()
+		for (let index = frame.openCalls.length - 1; index >= 0; index -= 1) {
+			const record = frame.openCalls[index]
+			if (record === undefined) continue
+			if (predicate(record)) return record
+		}
+		return null
+	}
+
+	// The caller a legacy event belongs to: the nearest still-open role invocation, never the active leaf (which may be a tool). A tool started while a role is working belongs to that role, so consecutive unkeyed tool calls stay siblings instead of chaining to each other.
+	function nearestOpenRoleRecord(): OpenCallRecord | null {
+		return findOpenInCurrentFrame((record) => record.destinationKind === 'role')
+	}
+
+	function findOpenRoleRecord(role: string, roleId: string | null): OpenCallRecord | null {
+		if (roleId !== null) {
+			const byInstance = findOpenInCurrentFrame((record) => {
+				if (record.destinationKind !== 'role') return false
+				const participant = registry.get(record.destinationId)
+				return participant !== undefined && participant.roleId === roleId
+			})
+			if (byInstance !== null) return byInstance
+		}
+		return findOpenInCurrentFrame((record) => record.destinationKind === 'role' && record.destinationRole === role)
+	}
+
+	function invocationForRecord(record: OpenCallRecord): IdentityInvocation | null {
+		for (const invocation of invocations.values()) {
+			if (invocation.record === record) return invocation
+		}
+		return null
+	}
+
+	function participantForTarget(record: OpenCallRecord, role: string, roleId: string | null): boolean {
+		if (roleId !== null) {
+			const participant = registry.get(record.destinationId)
+			return participant !== undefined && participant.roleId === roleId
+		}
+		return record.destinationRole === role
+	}
+
+	function findTargetInPausedStack(role: string, roleId: string | null): { frame: StackFrame; record: OpenCallRecord } | null {
+		if (roleId !== null) {
+			const byInstance = findOpenCallInPausedStack((record) => participantForTarget(record, role, roleId))
+			if (byInstance !== null) return byInstance
+		}
+		return findOpenCallInPausedStack((record) => participantForTarget(record, role, null))
+	}
+
+	function findOpenCallInPausedStack(predicate: (record: OpenCallRecord) => boolean): { frame: StackFrame; record: OpenCallRecord } | null {
+		for (let index = stackStack.length - 2; index >= 0; index -= 1) {
+			const frame = stackStack[index]
+			if (frame === undefined) continue
+			for (let recordIndex = frame.openCalls.length - 1; recordIndex >= 0; recordIndex -= 1) {
+				const record = frame.openCalls[recordIndex]
+				if (record === undefined) continue
+				if (predicate(record)) return { frame, record }
+			}
+		}
+		return null
+	}
+
+	function materializeTerminal(event: LogEvent, callId: string, role: string, kind: ParticipantKind, outcome: OperationOutcome, detailSource: OperationDetailSource | null, questionId: string | null): void {
+		const destinationId = kind === 'human' ? `human:answerer:terminal:${nextId('terminal-answerer')}` : callId
+		addParticipant(destinationId, role, kind)
+		const record = createCallRecord(event, callId, null, currentFrame().rootId, destinationId, role, kind, questionId, null)
+		const invocation = registerInvocation(callId, record, destinationId, role, kind, null, questionId, false)
+		closeInvocation(invocation, event, outcome, detailSource)
+	}
+
+	function findRoleRecord(role: string, roleId: string | null): OpenCallRecord | null {
+		if (roleId !== null) {
+			const invocation = invocations.get(`role:${roleId}`)
+			if (invocation === undefined || invocation.record === null) return null
+			// Usage belongs only to an invocation still open in the current frame; a closed role's late llm_call must not mutate its history.
+			return findOpenInCurrentFrame((record) => record === invocation.record)
+		}
+		return findOpenInCurrentFrame((record) => record.destinationRole === role && record.destinationKind === 'role')
+	}
+
+	function foldUsage(record: OpenCallRecord, usage: UsageBreakdown): void {
+		record.tokens = (record.tokens ?? 0) + usage.totalTokens
+		record.promptTokens = (record.promptTokens ?? 0) + usage.promptTokens
+		record.completionTokens = (record.completionTokens ?? 0) + usage.completionTokens
+		record.lastPromptTokens = usage.promptTokens
+		if (usage.cachedPromptTokens !== null) record.cachedPromptTokens = (record.cachedPromptTokens ?? 0) + usage.cachedPromptTokens
+	}
+
+	for (const event of snapshot.logEvents) {
+		switch (event.type) {
+			case 'role_start': {
+				const role = stringField(event.payload, 'role')
+				if (role === null) break
+				const rawRoleId = stringField(event.payload, 'roleId')
+				const suppliedCallId = idField(event.payload, 'callId')
+				const callId = suppliedCallId ?? (rawRoleId !== null ? `role:${rawRoleId}` : `role:${role}:${nextId('role:' + role)}`)
+				if (invocations.has(callId)) break
+				const task = stringField(event.payload, 'task')
+				const detailText = pendingInquiryMessage ?? task
+				pendingInquiryMessage = null
+				addParticipant(callId, role, 'role', rawRoleId ?? undefined)
+				let parentCallId = idField(event.payload, 'parentCallId')
+				if (parentCallId === null) {
+					const parentRoleId = stringField(event.payload, 'parentRoleId')
+					if (parentRoleId !== null) {
+						const candidate = `role:${parentRoleId}`
+						if (invocations.has(candidate) || registry.has(candidate)) parentCallId = candidate
+					}
+				}
+				if (parentCallId === null) {
+					const nearestRole = nearestOpenRoleRecord()
+					parentCallId = nearestRole === null ? null : nearestRole.operation.callId ?? null
+				}
+				startCall(event, callId, parentCallId, sourceForParent(parentCallId), callId, role, 'role', null, detailText === null ? null : { kind: 'text', text: detailText })
+				break
+			}
+			case 'interrupt': {
+				const interruptNumber = nextId('interrupt')
+				const stackId = `interrupt-${interruptNumber}-stack`
+				const suppliedCallId = idField(event.payload, 'callId')
+				const callId = suppliedCallId ?? `interrupt:${interruptNumber}`
+				if (invocations.has(callId)) break
+				const trigger = stringField(event.payload, 'trigger')
+				const parentCallId = idField(event.payload, 'parentCallId')
+				let destinationId: string
+				if (trigger === 'inquiry') {
+					const askerId = `human:asker:${nextId('asker')}`
+					addParticipant(askerId, 'human', 'human')
+					destinationId = askerId
+					pendingInquiryMessage = stringField(event.payload, 'message')
+				} else {
+					addParticipant(callId, 'interrupt', 'interrupt')
+					destinationId = callId
+					pendingInquiryMessage = null
+				}
+				stackStack.push({ stackId, rootId: destinationId, openCalls: [], lingeringReturn: null })
+				stackRecords.push({ id: stackId, root: destinationId })
+				// The interrupt invocation is represented by the fresh stack root; the handler's role_start is its child. No call operation is emitted here, matching the visual contract that the handler call is the row's first edge.
+				const interruptInvocation = registerInvocation(callId, null, destinationId, trigger === 'inquiry' ? 'human' : 'interrupt', trigger === 'inquiry' ? 'human' : 'interrupt', parentCallId, null, true)
+				const targetRoleId = stringField(event.payload, 'target')
+				const handlerRole = stringField(event.payload, 'handler')
+				if (targetRoleId !== null) interruptInvocation.targetRoleId = targetRoleId
+				if (handlerRole !== null) interruptInvocation.handlerRole = handlerRole
+				break
+			}
+			case 'interrupt_resolved': {
+				const suppliedCallId = idField(event.payload, 'callId')
+				let invocation: IdentityInvocation | undefined
+				if (suppliedCallId !== null) {
+					invocation = invocations.get(suppliedCallId)
+				} else {
+					const targetRoleId = stringField(event.payload, 'target')
+					const handlerRole = stringField(event.payload, 'handler')
+					const unresolved: IdentityInvocation[] = []
+					for (const candidate of invocations.values()) {
+						if (candidate.isInterrupt) unresolved.push(candidate)
+					}
+					const targetMatches = targetRoleId === null ? unresolved : unresolved.filter((candidate) => candidate.targetRoleId === targetRoleId)
+					if (handlerRole !== null) {
+						const handlerMatches = targetMatches.filter((candidate) => candidate.handlerRole === handlerRole)
+						if (handlerMatches.length === 1) invocation = handlerMatches[0]
+						else if (targetMatches.length === 1) invocation = targetMatches[0]
+					} else if (targetRoleId !== null) {
+						if (targetMatches.length === 1) invocation = targetMatches[0]
+					} else if (unresolved.length === 1) {
+						invocation = unresolved[0]
+					}
+				}
+				if (invocation === undefined || !invocation.isInterrupt) break
+				const frame = frameByStack(invocation.stackId)
+				invocation.isInterrupt = false
+				if (frame !== null) {
+					if (currentFrame() === frame) popEmptyFrame(frame)
+					else removeEmptyStackRecord(frame.stackId)
+				}
+				break
+			}
+			case 'observe': {
+				const role = stringField(event.payload, 'role')
+				if (role === null) break
+				const roleId = stringField(event.payload, 'roleId')
+				const target = findTargetInPausedStack(role, roleId)
+				if (target === null) break
+				const active = activeOpenRecord()
+				const observeDetails = stringField(event.payload, 'details')
+				const observeOperation: Operation = {
+					id: opId(),
+					kind: 'observe',
+					stack: currentFrame().stackId,
+					source: active === null ? currentFrame().rootId : active.destinationId,
+					destination: target.record.destinationId,
+					startedAt: event.timestamp,
+					settledAt: event.timestamp,
+					lifecycle: 'settled',
+					outcome: null,
+					metrics: null,
+				}
+				operations.push(observeOperation)
+				if (observeDetails !== null) detailSources.set(observeOperation.id, { kind: 'text', text: observeDetails })
+				break
+			}
+			case 'terminate': {
+				const role = stringField(event.payload, 'role')
+				if (role === null) break
+				const roleId = stringField(event.payload, 'roleId')
+				const target = findTargetInPausedStack(role, roleId)
+				if (target === null) break
+				const active = activeOpenRecord()
+				const terminateDetails = stringField(event.payload, 'details')
+				const terminateOperation: Operation = {
+					id: opId(),
+					kind: 'terminate',
+					stack: currentFrame().stackId,
+					source: active === null ? currentFrame().rootId : active.destinationId,
+					destination: target.record.destinationId,
+					startedAt: event.timestamp,
+					settledAt: event.timestamp,
+					lifecycle: 'settled',
+					outcome: null,
+					metrics: null,
+				}
+				operations.push(terminateOperation)
+				if (terminateDetails !== null) detailSources.set(terminateOperation.id, { kind: 'text', text: terminateDetails })
+				target.record.returnTimestamp = event.timestamp
+				removeOpenRecord(target.frame, target.record)
+				break
+			}
+			case 'role_finished': {
+				const role = stringField(event.payload, 'role')
+				if (role === null) break
+				// A paused finish (parked ask or direct clarification) is a pause marker, not the role invocation's terminal.
+				if (isObject(event.payload) && event.payload['paused'] === true) break
+				const rawRoleId = stringField(event.payload, 'roleId')
+				const finishStatus = stringField(event.payload, 'status')
+				const summary = stringField(event.payload, 'summary')
+				const outcome: OperationOutcome = finishStatus === 'error' ? 'error' : 'success'
+				const detailSource = summary === null ? null : { kind: 'text' as const, text: summary }
+				const suppliedCallId = idField(event.payload, 'callId')
+				let invocation = suppliedCallId === null ? undefined : invocations.get(suppliedCallId)
+				if (invocation === undefined) {
+					// A terminal whose id differs from an old synthesized start adopts the matching open role by instance id, then by role name, before materializing anything new.
+					const matched = findOpenRoleRecord(role, rawRoleId)
+					if (matched !== null) {
+						const adopted = invocationForRecord(matched)
+						if (adopted !== null) invocation = adopted
+					}
+				}
+				if (invocation !== undefined) {
+					closeInvocation(invocation, event, outcome, detailSource)
+					break
+				}
+				const synthesized = suppliedCallId ?? (rawRoleId !== null ? `role:${rawRoleId}` : `role:${role}:${nextId('role:' + role)}`)
+				materializeTerminal(event, synthesized, role, 'role', outcome, detailSource, null)
+				break
+			}
+			case 'llm_call': {
+				const role = stringField(event.payload, 'role')
+				if (role === null) break
+				settleLingeringIfCaller(role, event.timestamp)
+				const usage = usageOf(event.payload)
+				if (usage === null) break
+				const record = findRoleRecord(role, stringField(event.payload, 'roleId'))
+				if (record !== null) foldUsage(record, usage)
+				break
+			}
+			case 'llm_retry': {
+				const role = stringField(event.payload, 'role')
+				if (role === null) break
+				const usage = usageOf(event.payload)
+				if (usage === null) break
+				const record = findRoleRecord(role, stringField(event.payload, 'roleId'))
+				if (record !== null) foldUsage(record, usage)
+				break
+			}
+			case 'summarizer_llm_call':
+				break
+			case 'llm_call_start': {
+				const role = stringField(event.payload, 'role')
+				if (role === null) break
+				const record = findRoleRecord(role, stringField(event.payload, 'roleId'))
+				if (record !== null && record.turnStartedAt === null) record.turnStartedAt = event.timestamp
+				break
+			}
+			case 'tool_call': {
+				const role = stringField(event.payload, 'role')
+				const tool = stringField(event.payload, 'tool')
+				if (role === null || tool === null) break
+				if (CONTROL_TOOLS.has(tool)) break
+				const suppliedCallId = idField(event.payload, 'callId')
+				const callId = suppliedCallId ?? `tool:${tool}:${nextId('tool:' + tool)}`
+				if (invocations.has(callId)) break
+				if (currentFrame().openCalls.length === 0) break
+				addParticipant(callId, tool, 'tool')
+				const parentCallId = idField(event.payload, 'parentCallId')
+				const parentRecord = parentCallId === null ? nearestOpenRoleRecord() : null
+				const source = parentCallId !== null ? sourceForParent(parentCallId) : (parentRecord === null ? currentFrame().rootId : parentRecord.destinationId)
+				const resolvedParent = parentCallId ?? (parentRecord === null ? null : parentRecord.operation.callId ?? null)
+				const argumentsValue = stringField(event.payload, 'arguments')
+				startCall(event, callId, resolvedParent, source, callId, tool, 'tool', null, argumentsValue === null ? null : { kind: 'arguments', arguments: argumentsValue })
+				break
+			}
+			case 'tool_result': {
+				const role = stringField(event.payload, 'role')
+				const tool = stringField(event.payload, 'tool')
+				if (role === null || tool === null) break
+				if (CONTROL_TOOLS.has(tool)) break
+				const kind = stringField(event.payload, 'kind')
+				const outcome: OperationOutcome = kind === 'success' ? 'success' : 'error'
+				const resultValue = isObject(event.payload) ? event.payload['result'] : undefined
+				const detailSource = resultValue === null || resultValue === undefined ? null : { kind: 'result' as const, result: resultValue }
+				const suppliedCallId = idField(event.payload, 'callId')
+				let invocation = suppliedCallId === null ? undefined : invocations.get(suppliedCallId)
+				if (invocation === undefined) {
+					// Unknown or absent id: adopt the nearest open tool of the same name before materializing a new call.
+					const matched = findOpenInCurrentFrame((record) => record.destinationRole === tool && record.destinationKind === 'tool')
+					if (matched !== null) {
+						const adopted = invocationForRecord(matched)
+						if (adopted !== null) invocation = adopted
+					}
+				}
+				if (invocation !== undefined) {
+					closeInvocation(invocation, event, outcome, detailSource)
+					break
+				}
+				const callId = suppliedCallId ?? `tool:${tool}:${nextId('tool:' + tool)}`
+				materializeTerminal(event, callId, tool, 'tool', outcome, detailSource, null)
+				break
+			}
+			case 'ask_human': {
+				const id = stringField(event.payload, 'id')
+				const question = stringField(event.payload, 'question')
+				if (id === null || question === null) break
+				if (currentFrame().openCalls.length === 0) break
+				const suppliedCallId = idField(event.payload, 'callId')
+				const callId = suppliedCallId ?? `tool:${id}`
+				if (invocations.has(callId)) break
+				const context = stringField(event.payload, 'context')
+				const answererId = `human:answerer:${nextId('answerer')}`
+				addParticipant(answererId, 'human', 'human')
+				const parentCallId = idField(event.payload, 'parentCallId')
+				const parentRecord = parentCallId === null ? nearestOpenRoleRecord() : null
+				const source = parentCallId !== null ? sourceForParent(parentCallId) : (parentRecord === null ? currentFrame().rootId : parentRecord.destinationId)
+				const resolvedParent = parentCallId ?? (parentRecord === null ? null : parentRecord.operation.callId ?? null)
+				const detailText = context === null ? question : `${question}\n\n*Context: ${context}*`
+				startCall(event, callId, resolvedParent, source, answererId, 'human', 'human', id, { kind: 'text', text: detailText })
+				break
+			}
+			case 'human_answer': {
+				const id = stringField(event.payload, 'id')
+				const answer = stringField(event.payload, 'answer')
+				if (id === null || answer === null) break
+				const suppliedCallId = idField(event.payload, 'callId')
+				let invocation = suppliedCallId === null ? undefined : invocations.get(suppliedCallId)
+				if (invocation === undefined) {
+					const matched = findOpenInCurrentFrame((record) => record.questionId === id)
+					if (matched !== null) {
+						const adopted = invocationForRecord(matched)
+						if (adopted !== null) invocation = adopted
+					}
+				}
+				if (invocation !== undefined) {
+					closeInvocation(invocation, event, 'success', { kind: 'text', text: answer })
+					break
+				}
+				const callId = suppliedCallId ?? `tool:${id}`
+				materializeTerminal(event, callId, 'human', 'human', 'success', { kind: 'text', text: answer }, id)
+				break
+			}
+			default:
+				break
 		}
 	}
 
-	return { model: { participants, operations, status, stacks: stackRecords }, detailSources }
+	return finalizeModel(snapshot, status, participants, operations, detailSources, stackRecords, allCallRecords, allReturnRecords)
 }
 
 export function deriveInteractionModel(snapshot: RunSnapshot): InteractionModel {

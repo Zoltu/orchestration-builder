@@ -10,7 +10,8 @@ import { createFlowFeedResponder } from './web/static/ts/flow-feed/index.js'
 import { createRunListFeedResponder } from './web/static/ts/run-list-feed/index.js'
 import { createStreamHub } from './web/stream-hub.js'
 import { createTaskSummarizer, shouldWriteCompletionSummary, type TaskSummarizer } from './summarize.js'
-import { applyDeploymentOverride, applyLogLevel, createAppendLog, createBunSubprocessRunner, createDeleteCheckpoint, createDeltaChannel, createDockerSecretReader, createGuildLoader, createInterruptChannel, createInterruptQueue, createLlmCaller, createLlmFetch, createListRunIds, createModelInfoProbe, createReadPauseStateById, createReadProjectDoc, createReadProjectSettings, createReadQueueText, createReadRunCheckpointById, createReadRunLogTextFrom, createReadRunMetaById, createReadRunPlanById, createReadRunSnapshotById, createReadRunSnapshotStats, createReadRunSummaryById, createReadRunSummaryStats, createReadWorkspaceGitState, createResumeClarificationRun, createResumeErroredRun, createResumeParkedRun, createRoleSnapshotStore, createRunBaseTracker, createRunCheckpointExists, createRunDirectory, createRunDirectoryExists, createRunState, createRunSubmission, createSleep, createTaskQueue, createTerminateParkedRun, createTimeoutScheduler, createToolPlatform, createWebHumanBackend, createWriteCheckpoint, createWriteMeta, createWriteProjectSettings, createWriteQueueText, createWriteRunSummary, ensureOrchestrationGitExcluded, entryFrameLogLevel, generateRunId, llmUsagePayload, LOG_FILE_NAME, MODEL_PROBE_TIMEOUT_MS, nodeGitExcludeFilesystem, parseModelInfo, reconcileRunsOnStartup, resolveDeploymentConfig, resolveDeploymentOverride, resolveKagiApiKey, resolveSecret, resumeExecutor, runExecutor, validateDeploymentFileConfig, validateDeploymentRoleReferences, ConfigurationError, ValidationError, type AppendLog, type DeltaChannel, type ExecutorDependencies, type InterruptChannel, type InvolvementLevel, type LoadedGuild, type LlmCaller, type LogLevel, type ModelApiProbe, type ResumeRun, type RunCheckpoint, type StartRun, type WebHumanBackend } from './executor/index.js'
+import { applyDeploymentOverride, applyLogLevel, createAppendLog, createBunSubprocessRunner, createDeleteCheckpoint, createDeltaChannel, createDockerSecretReader, createGuildLoader, createInterruptChannel, createInterruptQueue, createLlmCaller, createLlmFetch, createListRunIds, createModelInfoProbe, createReadPauseStateById, createReadProjectDoc, createReadProjectSettings, createReadQueueText, createReadRunCheckpointById, createReadRunLogTextFrom, createReadRunMetaById, createReadRunPlanById, createReadRunSnapshotById, createReadRunSnapshotStats, createReadRunSummaryById, createReadRunSummaryStats, createReadWorkspaceGitState, createResumeClarificationRun, createResumeErroredRun, createResumeParkedRun, createRoleSnapshotStore, createRunBaseTracker, createRunCheckpointExists, createRunDirectory, createRunDirectoryExists, createRunState, createRunSubmission, createSleep, createTaskQueue, createTerminateParkedRun, createTimeoutScheduler, createToolPlatform, createWebHumanBackend, createWriteCheckpoint, createWriteMeta, createWriteProjectSettings, createWriteQueueText, createWriteRunSummary, ensureOrchestrationGitExcluded, entryFrameLogLevel, generateRunId, llmUsagePayload, LOG_FILE_NAME, MODEL_PROBE_TIMEOUT_MS, nodeGitExcludeFilesystem, parseModelInfo, reconcileRunsOnStartup, resolveDeploymentConfig, resolveDeploymentOverride, resolveKagiApiKey, resolveSecret, resumeExecutor, runExecutor, validateDeploymentFileConfig, validateDeploymentRoleReferences, ConfigurationError, ValidationError, type AppendLog, type DeltaChannel, type ExecutorDependencies, type InterruptChannel, type InvolvementLevel, type LoadedGuild, type LlmCaller, type LogLevel, type ModelApiProbe, type ReadRunLogEvents, type ResumeRun, type RunCheckpoint, type StartRun, type WebHumanBackend } from './executor/index.js'
+import { parseLogEvents } from './run-log/parse.js'
 
 const DEPLOYMENT_FILE_ENV_VAR = 'ORCHESTRATOR_DEPLOYMENT_FILE'
 const PORT_ENV_VAR = 'PORT'
@@ -99,6 +100,9 @@ async function withRunBindings<T>(config: {
 	config.interruptChannel.bindQueue(interruptQueue)
 	// The delta channel is the third shared backend; bind the run id so the engine's stream deltas are stamped with it and fanned out to subscribed browsers by the stream hub.
 	config.deltaChannel.bindRun(runId)
+	const readRunLogTextFrom = createReadRunLogTextFrom(config.runsBaseDir)
+	// Resume reconciliation reads the run's existing events through the same full-text reader and parser the preview uses; only the executor's own log text is consulted, so no executor module imports the run-log layer.
+	const readRunLogEvents: ReadRunLogEvents = (targetRunId) => parseLogEvents(readRunLogTextFrom(targetRunId, 0))
 	const dependencies: ExecutorDependencies = {
 		llmCaller: config.llmCaller,
 		loadedGuild: config.loadedGuild,
@@ -113,6 +117,7 @@ async function withRunBindings<T>(config: {
 		publishDelta: (delta) => config.deltaChannel.publish(delta),
 		roleSnapshots: createRoleSnapshotStore(runId, config.runsBaseDir),
 		readProjectDoc: createReadProjectDoc(config.workspaceRootPath),
+		readRunLogEvents,
 		baseTracker,
 		readWorkspaceGitState,
 	}
@@ -181,6 +186,7 @@ function createResumeRun(config: RunServiceConfig): ResumeRun {
 			...(options?.parkedAnswer !== undefined ? { parkedAnswer: options.parkedAnswer } : {}),
 			...(options?.clarificationAnswer !== undefined ? { clarificationAnswer: options.clarificationAnswer } : {}),
 			...(options?.queueTracked === true ? { queueTracked: true } : {}),
+			...(options?.explicitResume === true ? { explicitResume: true } : {}),
 		}))
 		runPromise.then(
 			(meta) => {
@@ -362,6 +368,7 @@ async function serve(): Promise<void> {
 	// The operator-termination path marks the parked run interrupted, logs the action, and removes the checkpoint so the run can never be answered.
 	const terminateParkedRun = createTerminateParkedRun({
 		readRunMetaById,
+		readRunLogEvents: (targetRunId) => parseLogEvents(createReadRunLogTextFrom(runsBaseDir)(targetRunId, 0)),
 		writeMetaFor: (runId) => createWriteMeta(runId, runsBaseDir),
 		deleteCheckpointFor: (runId) => createDeleteCheckpoint(runId, runsBaseDir),
 		appendLogFor: (runId) => createAppendLog(runId, runsBaseDir),

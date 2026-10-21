@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import type { EngineContext, RoleState } from '../engine-state.js'
 import type { LoadedGuild } from '../loader.js'
+import { createInvocationJournal } from '../invocation.js'
 import type { LogEvent, Message } from '../types.js'
 import { isObject } from '../validation.js'
 import { createContextManager, createContextPressureTracker, type ContextDecision } from './index.js'
@@ -295,6 +296,7 @@ describe('context manager compaction backstop', () => {
 		const manager = createContextManager(contextFor(contextWindow), {
 			appendLog: (event) => events.push(event),
 			contextPressureTracker: createContextPressureTracker(),
+			invocationJournal: createInvocationJournal((event) => events.push(event)),
 			runRole: async () => {
 				throw new Error('context handler invoked without executor.contextHandlerRole configured')
 			},

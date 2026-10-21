@@ -30,7 +30,11 @@ export type PauseState = { kind: 'parked_ask'; ask: ParkedAsk } | { kind: 'clari
 // The parked question and the tool call it belongs to; both ride the checkpoint so the queue answer can resume the same run and deliver the answer as that call's tool result.
 export interface ParkedAsk {
 	roleId: string
+	// The model tool-call id used to locate the ask's history message and as the queue's answer handle.
 	toolCallId: string
+	// The invocation identity allocated for the ask; absent on legacy checkpoints.
+	callId?: string
+	questionId?: string
 	question: string
 }
 

@@ -1,10 +1,11 @@
-import type { CheckpointRecorder } from './checkpoint.js'
+import type { CheckpointRecorder, PendingInvocation } from './checkpoint.js'
 import type { ContextPressureTracker } from './context/index.js'
 import type { HumanBackend } from './human-backend.js'
 import type { InterruptQueue } from './interrupts.js'
+import type { InvocationJournal } from './invocation.js'
 import type { LoadedGuild } from './loader.js'
 import type { LlmCaller } from './llm.js'
-import type { AppendLog } from './persistence.js'
+import type { AppendLog, ReadRunLogEvents } from './persistence.js'
 import type { ReadProjectDoc } from './project-docs.js'
 import type { RunBaseTracker } from './base-state.js'
 import type { ParkedAnswer, RunParkTracker } from './park-state.js'
@@ -36,6 +37,8 @@ export interface EngineContext {
 	parent?: string
 	// The calling role's instance id, omitted for the entry role. Lets the interrupt platform walk the live delegation chain (plan-modification routing).
 	parentRoleId?: string
+	// The parent invocation's call id when it is not the caller role's own role call — an interrupt handler is rooted at the interrupt invocation, not at the role it serves.
+	parentCallId?: string
 	// Set when this invocation is an interrupt handler serving the named target instance, by the shared handler interlude (runHandlerInterlude in handler-interlude.ts): the drain point skips the handler so a handler can never interrupt itself or consume operator requests meant for real work roles.
 	handlerOf?: string
 }
@@ -43,7 +46,12 @@ export interface EngineContext {
 export interface EngineDependencies {
 	llmCaller: LlmCaller
 	appendLog: AppendLog
+	// The run whose log this engine writes; resume reconciliation reads it to find a terminal already written before a crash.
+	runId: string
+	readRunLogEvents: ReadRunLogEvents
 	toolPlatform: ToolPlatform
+	// The run's invocation journal: all role, tool, ask, and interrupt lifecycle events are written through it so ids stay consistent and duplicate starts/terminals are ignored.
+	invocationJournal: InvocationJournal
 	humanBackend: HumanBackend
 	roleRegistry: RoleRegistry
 	interruptQueue: InterruptQueue
@@ -67,6 +75,9 @@ export interface EngineDependencies {
 export interface SuspendedTurn {
 	toolCalls: ToolCall[]
 	childIndex: number
+	// Present on a checkpoint written with invocation identity; absent on a legacy child suspension, whose terminal keeps the old unkeyed shape.
+	callId?: string
+	parentCallId?: string
 	resolveChildCard: () => Promise<ResultCard>
 }
 
@@ -87,6 +98,10 @@ export interface ResumedRole {
 	// The operator's answer to the parked ask this leaf resume re-enters: delivered as the existing ask_human tool result before the parked turn continues, so the conversation prefix stays byte-identical.
 	parkedAnswer?: ParkedAnswer
 	suspendedTurn?: SuspendedTurn
+	// An ordinary pending invocation (or a child invocation whose child never registered) restored from the checkpoint; the role loop reconciles it before its next turn.
+	pendingInvocation?: PendingInvocation
+	// True only for the operator-driven error resume: it forces a fresh LLM turn even when the restored history ends with a completed finish.
+	explicitResume?: boolean
 }
 
 // The engine's runRole turn loop, threaded in by the engine so the interrupt and resume modules can drive role turns without importing the turn loop at runtime (the engine imports these modules).

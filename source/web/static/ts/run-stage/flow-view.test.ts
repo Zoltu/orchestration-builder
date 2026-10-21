@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import type { LogEvent, RunMeta } from '../../../../executor/types.js'
 import { createRunStage } from './index.js'
 import type { RunStage } from './index.js'
+import { deriveLifecycle } from './flow-view.js'
 import { activeOperation, activeParticipant, activeStack, observesOf, stacksOf, withLiveElapsed } from '../interaction-model.js'
 import { createLabelResolver } from '../labels.js'
 import { labelsModule } from '../../../label-resolver-fixture.js'
@@ -1255,5 +1256,424 @@ describe('renderFlowView — top-bar tiles carry no status state', () => {
 		expect(classes.includes('flow-small-node--error')).toBe(false)
 		expect(classes.includes('flow-small-node--accented')).toBe(true)
 		expect(slotTitleText(coderSlot)).not.toContain('errored')
+	})
+})
+
+describe('renderFlowView — id-keyed parent-depth layout and siblings', () => {
+	function identityCall(id: string, callId: string, source: string, destination: string, parentCallId?: string): Operation {
+		const operation: Operation = { id, kind: 'call', callId, stack: 'main', source, destination, startedAt: `t-${id}`, settledAt: null, lifecycle: 'in_flight', outcome: null, metrics: null }
+		if (parentCallId !== undefined) operation.parentCallId = parentCallId
+		return operation
+	}
+
+	function sixSiblingModel(): InteractionModel {
+		const operations: Operation[] = [
+			identityCall('op1', 'role:orchestrator-0-1', 'human:root', 'role:orchestrator-0-1'),
+			identityCall('op2', 'role:technical-writer-1-1', 'role:orchestrator-0-1', 'role:technical-writer-1-1', 'role:orchestrator-0-1'),
+		]
+		for (let index = 1; index <= 6; index += 1) {
+			operations.push(identityCall(`tool-${index}`, `tool:search-${index}`, 'role:technical-writer-1-1', `tool:search-${index}`, 'role:technical-writer-1-1'))
+		}
+		operations.push(identityCall('arch', 'role:architecture-lead-1-1', 'role:technical-writer-1-1', 'role:architecture-lead-1-1', 'role:technical-writer-1-1'))
+		return {
+			participants: [
+				participant('human:root', 'human', 'human'),
+				participant('role:orchestrator-0-1', 'orchestrator', 'role'),
+				participant('role:technical-writer-1-1', 'technical_writer', 'role'),
+				...Array.from({ length: 6 }, (_, index) => participant(`tool:search-${index + 1}`, 'search_text', 'tool')),
+				participant('role:architecture-lead-1-1', 'architecture_lead', 'role'),
+			],
+			operations,
+			status: 'running',
+			stacks: [{ id: 'main', root: 'human:root' }],
+		}
+	}
+
+	function rowNodes(row: Vnode): Vnode[] {
+		return allByTag(row, 'g').filter((group) => (propString(group.props, 'class') ?? '').split(' ').includes('flow-node'))
+	}
+
+	function nodeX(row: Vnode, participantId: string): number {
+		const node = rowNodes(row).find((candidate) => propString(candidate.props, 'data-participant') === participantId)
+		const transform = defined(propString(defined(node, participantId).props, 'transform'), 'transform')
+		return translationX(transform)
+	}
+
+	test('six sibling tools and a sibling role share their true parent depth, not a new column per sibling', () => {
+		const model = sixSiblingModel()
+		const view = render(model)
+		const row = defined(groupsWithClass(view, 'flow-row')[0], 'row')
+		const writerX = 2 * (FLOW_NODE_WIDTH + FLOW_COLUMN_GAP)
+		const siblingX = 3 * (FLOW_NODE_WIDTH + FLOW_COLUMN_GAP)
+		expect(nodeX(row, 'role:technical-writer-1-1')).toBe(writerX)
+		for (let index = 1; index <= 6; index += 1) {
+			expect(nodeX(row, `tool:search-${index}`)).toBe(siblingX)
+		}
+		// The architecture lead is a sibling of the tools, not their descendant: it must not be shifted right.
+		expect(nodeX(row, 'role:architecture-lead-1-1')).toBe(siblingX)
+		expect(rowNodes(row).every((node) => translationX(defined(propString(node.props, 'transform'), 'transform')) <= siblingX)).toBe(true)
+	})
+
+	test('sibling call edges run from the writer column to the shared sibling column and never across an unrelated node', () => {
+		const view = render(sixSiblingModel())
+		const row = defined(groupsWithClass(view, 'flow-row')[0], 'row')
+		const writerRightAnchor = 2 * (FLOW_NODE_WIDTH + FLOW_COLUMN_GAP) + FLOW_NODE_WIDTH
+		const siblingLeftAnchor = 3 * (FLOW_NODE_WIDTH + FLOW_COLUMN_GAP)
+		const callEdges = allByTag(row, 'g').filter((group) => (propString(group.props, 'class') ?? '').split(' ').includes('flow-edge--call'))
+		expect(callEdges).toHaveLength(9)
+		let siblingEdges = 0
+		for (const edge of callEdges) {
+			const path = allByTag(edge, 'path')[0]
+			const pathData = defined(path === undefined ? undefined : propString(path.props, 'd'), 'edge path')
+			const start = /^M ([\d.]+) /.exec(pathData)
+			const end = / ([\d.]+) [\d.]+$/.exec(pathData)
+			expect(start).not.toBeNull()
+			expect(end).not.toBeNull()
+			if (start === null || end === null) continue
+			const fromX = Number(start[1])
+			const toX = Number(end[1])
+			expect(toX).toBeLessThanOrEqual(siblingLeftAnchor)
+			if (fromX === writerRightAnchor) {
+				siblingEdges += 1
+				expect(toX).toBe(siblingLeftAnchor)
+			}
+		}
+		expect(siblingEdges).toBe(7)
+	})
+})
+
+describe('renderFlowView — adapter-built torn sibling regression', () => {
+	function at(seconds: number): string {
+		return new Date(Date.UTC(2026, 0, 1, 0, 0, seconds)).toISOString()
+	}
+
+	function eventAt(seconds: number, type: string, payload: unknown): LogEvent {
+		return { timestamp: at(seconds), type, payload }
+	}
+
+	function tornWriterModel(): InteractionModel {
+		const events: LogEvent[] = [
+			eventAt(0, 'role_start', { role: 'orchestrator', roleId: 'orchestrator-0-1', callId: 'role:orchestrator-0-1', depth: 0, task: 'task' }),
+			eventAt(1, 'role_start', { role: 'technical_writer', roleId: 'technical-writer-1-1', callId: 'role:technical-writer-1-1', parentCallId: 'role:orchestrator-0-1', depth: 1, task: 'write' }),
+		]
+		for (let index = 1; index <= 6; index += 1) {
+			events.push(eventAt(index + 1, 'tool_call', { role: 'technical_writer', tool: 'search_text', callId: `tool:search-${index}`, parentCallId: 'role:technical-writer-1-1', arguments: '{}' }))
+		}
+		events.push(eventAt(8, 'role_finished', { role: 'technical_writer', roleId: 'technical-writer-1-1', callId: 'role:technical-writer-1-1', status: 'success', summary: 'done' }))
+		events.push(eventAt(9, 'role_start', { role: 'architecture_lead', roleId: 'architecture-lead-1-1', callId: 'role:architecture-lead-1-1', parentCallId: 'role:orchestrator-0-1', depth: 1, task: 'review' }))
+		return deriveInteractionModel({ meta: { runId: 'torn', guildPath: 'g', benchmarkPath: 'b', task: 'task', status: 'running', startTime: at(0) }, logEvents: events })
+	}
+
+	interface Box {
+		id: string
+		x: number
+		y: number
+	}
+
+	function boxesOf(row: Vnode): Box[] {
+		const boxes: Box[] = []
+		const nodes = allByTag(row, 'g').filter((group) => (propString(group.props, 'class') ?? '').split(' ').includes('flow-node'))
+		for (const node of nodes) {
+			const participantId = propString(node.props, 'data-participant')
+			const transform = propString(node.props, 'transform')
+			if (participantId === undefined || transform === undefined) continue
+			const match = /^translate\(([-\d.]+),([-\d.]+)\)$/.exec(transform)
+			if (match === null || match[1] === undefined || match[2] === undefined) continue
+			boxes.push({ id: participantId, x: Number(match[1]), y: Number(match[2]) })
+		}
+		return boxes
+	}
+
+	function pointInBox(x: number, y: number, box: Box): boolean {
+		return x > box.x + 0.5 && x < box.x + FLOW_NODE_WIDTH - 0.5 && y > box.y + 0.5 && y < box.y + 64 - 0.5
+	}
+
+	test('a returned writer leaves the sibling role at the writer column, with no resurrected writer and no overlapped siblings', () => {
+		const model = tornWriterModel()
+		const view = render(model)
+		const row = defined(groupsWithClass(view, 'flow-row')[0], 'row')
+		const boxes = boxesOf(row)
+		const writerColumnX = 2 * (FLOW_NODE_WIDTH + FLOW_COLUMN_GAP)
+		const toolsColumnX = 3 * (FLOW_NODE_WIDTH + FLOW_COLUMN_GAP)
+		const lead = boxes.find((box) => box.id === 'role:architecture-lead-1-1')
+		expect(lead).toBeDefined()
+		expect(defined(lead, 'lead').x).toBe(writerColumnX)
+		// The writer is closed, so its column holds exactly the sibling role; the closed caller is not resurrected as a node.
+		expect(boxes.filter((box) => box.x === writerColumnX)).toHaveLength(1)
+		const tools = boxes.filter((box) => box.x === toolsColumnX)
+		expect(tools).toHaveLength(6)
+		for (let left = 0; left < tools.length; left += 1) {
+			for (let right = left + 1; right < tools.length; right += 1) {
+				const a = defined(tools[left], 'tools[left]')
+				const b = defined(tools[right], 'tools[right]')
+				expect(Math.abs(a.y - b.y)).toBeGreaterThanOrEqual(64 + 12)
+			}
+		}
+	})
+
+	test('no call edge samples inside an unrelated rendered node box', () => {
+		const model = tornWriterModel()
+		const view = render(model)
+		const row = defined(groupsWithClass(view, 'flow-row')[0], 'row')
+		const boxes = boxesOf(row)
+		const operationsById = new Map(model.operations.map((operation) => [operation.id, operation]))
+		const callEdges = allByTag(row, 'g').filter((group) => (propString(group.props, 'class') ?? '').split(' ').includes('flow-edge--call'))
+		expect(callEdges.length).toBeGreaterThan(0)
+		for (const edge of callEdges) {
+			const operationId = propString(edge.props, 'data-operation')
+			const path = allByTag(edge, 'path')[0]
+			const pathData = path === undefined ? undefined : propString(path.props, 'd')
+			if (operationId === undefined || pathData === undefined) throw new Error('edge is missing its operation or path')
+			const operation = operationsById.get(operationId)
+			if (operation === undefined) throw new Error(`unknown edge operation ${operationId}`)
+			const numbers = (pathData.match(/[-\d.]+/g) ?? []).map(Number)
+			if (numbers.length < 8) throw new Error(`unexpected path ${pathData}`)
+			const [fromX, fromY, c1x, c1y, c2x, c2y, toX, toY] = numbers
+			if (fromX === undefined || fromY === undefined || c1x === undefined || c1y === undefined || c2x === undefined || c2y === undefined || toX === undefined || toY === undefined) {
+				throw new Error(`unexpected path ${pathData}`)
+			}
+			for (let step = 0; step <= 24; step += 1) {
+				const t = step / 24
+				const inverse = 1 - t
+				const x = inverse * inverse * inverse * fromX + 3 * inverse * inverse * t * c1x + 3 * inverse * t * t * c2x + t * t * t * toX
+				const y = inverse * inverse * inverse * fromY + 3 * inverse * inverse * t * c1y + 3 * inverse * t * t * c2y + t * t * t * toY
+				for (const box of boxes) {
+					if (box.id === operation.source) continue
+					if (box.id === operation.destination) continue
+					if (!pointInBox(x, y, box)) continue
+					throw new Error(`edge ${operationId} crosses unrelated node ${box.id} at (${x}, ${y})`)
+				}
+			}
+		}
+	})
+})
+
+describe('renderFlowView — sibling lanes for lingering returns and departures', () => {
+	function idCall(id: string, callId: string, source: string, destination: string, parentCallId?: string): Operation {
+		const operation: Operation = { id, kind: 'call', callId, stack: 'main', source, destination, startedAt: `t-${id}`, settledAt: null, lifecycle: 'in_flight', outcome: null, metrics: null }
+		if (parentCallId !== undefined) operation.parentCallId = parentCallId
+		return operation
+	}
+
+	function laneModel(returnLifecycle: 'in_flight' | 'settled' | null): InteractionModel {
+		const operations: Operation[] = [
+			idCall('op1', 'c1', 'you', 'orch'),
+			idCall('op3', 'c3', 'orch', 'tool-b', 'c1'),
+			idCall('op2', 'c2', 'orch', 'tool-a', 'c1'),
+		]
+		if (returnLifecycle !== null) {
+			operations.push({ id: 'ret2', kind: 'return', callId: 'c2', stack: 'main', source: 'tool-a', destination: 'orch', startedAt: 't-ret', settledAt: returnLifecycle === 'settled' ? 't-ret' : null, lifecycle: returnLifecycle, outcome: 'success', metrics: null })
+		}
+		return {
+			participants: [
+				participant('you', 'human', 'human'),
+				participant('orch', 'orchestrator', 'role'),
+				participant('tool-b', 'read_file', 'tool'),
+				participant('tool-a', 'search_text', 'tool'),
+			],
+			operations,
+			status: 'running',
+			stacks: [{ id: 'main', root: 'you' }],
+		}
+	}
+
+	function nodePosition(row: Vnode, participantId: string): { x: number; y: number } {
+		const node = allByTag(row, 'g').find((group) => (propString(group.props, 'class') ?? '').split(' ').includes('flow-node') && propString(group.props, 'data-participant') === participantId)
+		const transform = defined(propString(defined(node, participantId).props, 'transform'), 'transform')
+		const match = /^translate\(([-\d.]+),([-\d.]+)\)$/.exec(transform)
+		if (match === null || match[1] === undefined || match[2] === undefined) throw new Error(`unexpected transform ${transform}`)
+		return { x: Number(match[1]), y: Number(match[2]) }
+	}
+
+	test('a lingering return node uses the lane it had as a sibling', () => {
+		const view = render(laneModel('in_flight'))
+		const row = defined(groupsWithClass(view, 'flow-row')[0], 'row')
+		const lingering = nodePosition(row, 'tool-a')
+		const openSibling = nodePosition(row, 'tool-b')
+		expect(lingering.x).toBe(openSibling.x)
+		expect(lingering.y - openSibling.y).toBe(64 + 12)
+	})
+
+	test('a departing sibling animates from its lane, not lane zero', () => {
+		const lifecycle = deriveLifecycle(laneModel(null), laneModel('settled'), [])
+		const departing = lifecycle.departing.find((entry) => entry.participantId === 'tool-a')
+		expect(departing).toBeDefined()
+		expect(defined(departing, 'departing').previousOffset).toBe(64 + 12)
+	})
+})
+
+describe('renderFlowView — visible-set lanes, cumulative rows, and identity resolution', () => {
+	function idCall(id: string, callId: string, source: string, destination: string, parentCallId?: string): Operation {
+		const operation: Operation = { id, kind: 'call', callId, stack: 'main', source, destination, startedAt: `t-${id}`, settledAt: null, lifecycle: 'in_flight', outcome: null, metrics: null }
+		if (parentCallId !== undefined) operation.parentCallId = parentCallId
+		return operation
+	}
+
+	function idReturn(id: string, callId: string, source: string, destination: string, lifecycle: 'in_flight' | 'settled'): Operation {
+		return { id, kind: 'return', callId, stack: 'main', source, destination, startedAt: `t-${id}`, settledAt: lifecycle === 'settled' ? `t-${id}` : null, lifecycle, outcome: 'success', metrics: null }
+	}
+
+	function nodePosition(row: Vnode, participantId: string): { x: number; y: number } {
+		const node = allByTag(row, 'g').find((group) => (propString(group.props, 'class') ?? '').split(' ').includes('flow-node') && propString(group.props, 'data-participant') === participantId)
+		const transform = defined(propString(defined(node, participantId).props, 'transform'), 'transform')
+		const match = /^translate\(([-\d.]+),([-\d.]+)\)$/.exec(transform)
+		if (match === null || match[1] === undefined || match[2] === undefined) throw new Error(`unexpected transform ${transform}`)
+		return { x: Number(match[1]), y: Number(match[2]) }
+	}
+
+	function pathOf(edge: Vnode): string {
+		const path = allByTag(edge, 'path')[0]
+		return defined(path === undefined ? undefined : propString(path.props, 'd'), 'edge path')
+	}
+
+	function endpoints(pathData: string): { fromX: number; fromY: number; toX: number; toY: number } {
+		const numbers = (pathData.match(/[-\d.]+/g) ?? []).map(Number)
+		if (numbers.length < 8) throw new Error(`unexpected path ${pathData}`)
+		const [fromX, fromY, , , , , toX, toY] = numbers
+		if (fromX === undefined || fromY === undefined || toX === undefined || toY === undefined) throw new Error(`unexpected path ${pathData}`)
+		return { fromX, fromY, toX, toY }
+	}
+
+	test('completed siblings do not push a later open sibling down: it renders at lane zero', () => {
+		const participants: Participant[] = [participant('you', 'human', 'human'), participant('orch', 'orchestrator', 'role')]
+		const operations: Operation[] = [idCall('op0', 'c1', 'you', 'orch')]
+		for (let index = 1; index <= 20; index += 1) {
+			participants.push(participant(`tool-${index}`, 'read_file', 'tool'))
+			operations.push(idCall(`call-${index}`, `c${index + 1}`, 'orch', `tool-${index}`, 'c1'))
+			operations.push(idReturn(`return-${index}`, `c${index + 1}`, `tool-${index}`, 'orch', 'settled'))
+		}
+		participants.push(participant('tool-open', 'read_file', 'tool'))
+		operations.push(idCall('call-open', 'c-open', 'orch', 'tool-open', 'c1'))
+		const model: InteractionModel = { participants, operations, status: 'running', stacks: [{ id: 'main', root: 'you' }] }
+		const row = defined(groupsWithClass(render(model), 'flow-row')[0], 'row')
+		const orch = nodePosition(row, 'orch')
+		const openTool = nodePosition(row, 'tool-open')
+		expect(openTool.x).toBe(orch.x + FLOW_NODE_WIDTH + FLOW_COLUMN_GAP)
+		expect(openTool.y).toBe(orch.y)
+	})
+
+	test('two open branches at the same depth share the lane space without overlapping', () => {
+		const participants: Participant[] = [
+			participant('you', 'human', 'human'),
+			participant('orch', 'orchestrator', 'role'),
+			participant('writer', 'technical_writer', 'role'),
+		]
+		const operations: Operation[] = [
+			idCall('op1', 'c1', 'you', 'orch'),
+			idCall('op2', 'c2', 'orch', 'writer', 'c1'),
+		]
+		for (let index = 1; index <= 6; index += 1) {
+			participants.push(participant(`writer-tool-${index}`, 'search_text', 'tool'))
+			operations.push(idCall(`writer-tool-call-${index}`, `wc${index}`, 'writer', `writer-tool-${index}`, 'c2'))
+		}
+		participants.push(participant('lead', 'architecture_lead', 'role'), participant('lead-tool', 'read_file', 'tool'))
+		operations.push(idCall('lead-call', 'c3', 'orch', 'lead', 'c1'))
+		operations.push(idCall('lead-tool-call', 'lt1', 'lead', 'lead-tool', 'c3'))
+		const model: InteractionModel = { participants, operations, status: 'running', stacks: [{ id: 'main', root: 'you' }] }
+		const row = defined(groupsWithClass(render(model), 'flow-row')[0], 'row')
+		const depthThree = [1, 2, 3, 4, 5, 6].map((index) => nodePosition(row, `writer-tool-${index}`)).concat([nodePosition(row, 'lead-tool')])
+		const firstDepthThree = defined(depthThree[0], 'depthThree[0]')
+		for (const candidate of depthThree) {
+			expect(candidate.x).toBe(firstDepthThree.x)
+		}
+		for (let left = 0; left < depthThree.length; left += 1) {
+			for (let right = left + 1; right < depthThree.length; right += 1) {
+				const a = defined(depthThree[left], 'left')
+				const b = defined(depthThree[right], 'right')
+				expect(Math.abs(a.y - b.y)).toBeGreaterThanOrEqual(64)
+			}
+		}
+	})
+
+	test('a tall main row pushes the interrupt row down and keeps cross-row anchors correct', () => {
+		const participants: Participant[] = [
+			participant('you', 'human', 'human'),
+			participant('orch', 'orchestrator', 'role'),
+			participant('writer', 'technical_writer', 'role'),
+			participant('coder', 'coder', 'role'),
+			participant('int', 'interrupt', 'interrupt'),
+			participant('handler', 'loop_detector', 'role'),
+		]
+		const mainOperations: Operation[] = [
+			idCall('op1', 'c1', 'you', 'orch'),
+			idCall('op2', 'c2', 'orch', 'writer', 'c1'),
+		]
+		for (let index = 1; index <= 6; index += 1) {
+			participants.push(participant(`tool-${index}`, 'search_text', 'tool'))
+			mainOperations.push(idCall(`tool-call-${index}`, `tc${index}`, 'writer', `tool-${index}`, 'c2'))
+		}
+		mainOperations.push(idCall('coder-call', 'c3', 'orch', 'coder', 'c1'))
+		mainOperations.push(idReturn('coder-return', 'c3', 'coder', 'orch', 'in_flight'))
+		const interruptCall: Operation = { id: 'int-call', kind: 'call', callId: 'i1', stack: 'int-stack', source: 'int', destination: 'handler', startedAt: 't-int', settledAt: null, lifecycle: 'in_flight', outcome: null, metrics: null }
+		const observe: Operation = { id: 'observe', kind: 'observe', stack: 'int-stack', source: 'handler', destination: 'coder', startedAt: 't-observe', settledAt: 't-observe', lifecycle: 'settled', outcome: null, metrics: null }
+		const terminate: Operation = { id: 'terminate', kind: 'terminate', stack: 'int-stack', source: 'handler', destination: 'coder', startedAt: 't-terminate', settledAt: 't-terminate', lifecycle: 'settled', outcome: null, metrics: null }
+		const model: InteractionModel = {
+			participants,
+			operations: [...mainOperations, interruptCall, observe, terminate],
+			status: 'running',
+			stacks: [{ id: 'main', root: 'you' }, { id: 'int-stack', root: 'int' }],
+		}
+		const view = render(model)
+		const mainRow = defined(groupsWithClass(view, 'flow-row').find((row) => propString(row.props, 'data-stack') === 'main'), 'main row')
+		const interruptRow = defined(groupsWithClass(view, 'flow-row').find((row) => propString(row.props, 'data-stack') === 'int-stack'), 'interrupt row')
+		const mainNodes = [1, 2, 3, 4, 5, 6].map((index) => nodePosition(mainRow, `tool-${index}`))
+		const mainBottom = Math.max(...mainNodes.map((node) => node.y)) + 64
+		const handlerPosition = nodePosition(interruptRow, 'handler')
+		expect(handlerPosition.y).toBeGreaterThanOrEqual(mainBottom)
+		for (const kind of ['observe', 'terminate']) {
+			const edge = groupsWithClass(view, `flow-edge--${kind}`)[0]
+			const points = endpoints(pathOf(defined(edge, `${kind} edge`)))
+			expect(points.fromX).toBe(handlerPosition.x + FLOW_NODE_WIDTH / 2)
+			expect(points.fromY).toBe(handlerPosition.y)
+			const coderPosition = nodePosition(mainRow, 'coder')
+			expect(points.toX).toBe(coderPosition.x + FLOW_NODE_WIDTH / 2)
+			expect(points.toY).toBe(coderPosition.y + 64)
+		}
+	})
+
+	test('a closed caller edge uses its source call lane even when participant ids differ from call ids', () => {
+		const model: InteractionModel = {
+			participants: [
+				participant('you', 'human', 'human'),
+				participant('role-a-node', 'role_a', 'role'),
+				participant('role-b-node', 'role_b', 'role'),
+				participant('tool-node', 'read_file', 'tool'),
+			],
+			operations: [
+				idCall('op-c0', 'c0', 'you', 'role-a-node'),
+				idCall('op-c1', 'c1', 'you', 'role-b-node'),
+				idCall('op-c2', 'c2', 'role-b-node', 'tool-node', 'c1'),
+			],
+			status: 'running',
+			stacks: [{ id: 'main', root: 'you' }],
+		}
+		const row = defined(groupsWithClass(render(model), 'flow-row')[0], 'row')
+		const roleB = nodePosition(row, 'role-b-node')
+		const edge = allByTag(row, 'g').find((group) => (propString(group.props, 'class') ?? '').split(' ').includes('flow-edge--call') && propString(group.props, 'data-operation') === 'op-c2')
+		const points = endpoints(pathOf(defined(edge, 'edge')))
+		// roleB sits in lane 1 (76px); the child edge must leave its right face, not lane zero.
+		expect(points.fromX).toBe(roleB.x + FLOW_NODE_WIDTH)
+		expect(points.fromY).toBe(roleB.y + 32)
+	})
+
+	test('a duplicate return never renders as the lingering leg', () => {
+		const model: InteractionModel = {
+			participants: [
+				participant('you', 'human', 'human'),
+				participant('orch', 'orchestrator', 'role'),
+				participant('tool', 'read_file', 'tool'),
+			],
+			operations: [
+				idCall('op1', 'c1', 'you', 'orch'),
+				idCall('op2', 'c2', 'orch', 'tool', 'c1'),
+				idReturn('first-return', 'c2', 'tool', 'orch', 'in_flight'),
+				idReturn('duplicate-return', 'c2', 'tool', 'orch', 'in_flight'),
+			],
+			status: 'running',
+			stacks: [{ id: 'main', root: 'you' }],
+		}
+		const view = render(model)
+		const returnEdges = groupsWithClass(view, 'flow-edge--return')
+		expect(returnEdges.map((edge) => propString(edge.props, 'data-operation'))).toEqual(['first-return'])
 	})
 })

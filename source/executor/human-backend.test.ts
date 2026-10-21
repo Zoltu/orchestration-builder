@@ -1,8 +1,16 @@
 import { describe, expect, test } from 'bun:test'
 import type { LogEvent } from './types.js'
-import { createWebHumanBackend } from './human-backend.ts'
+import { createWebHumanBackend, type HumanAskInvocation } from './human-backend.ts'
 import { defined, flushMicrotasks } from './test-fixtures.ts'
 import { isObject } from './validation.ts'
+
+let invocationCounter = 0
+
+function askInvocation(): HumanAskInvocation {
+	invocationCounter += 1
+	const questionId = `question-${invocationCounter}`
+	return { questionId, callId: `tool:${questionId}`, parentCallId: 'role:main-0-1' }
+}
 
 describe('createWebHumanBackend', () => {
 	test('returns a backend with an ask function', () => {
@@ -12,7 +20,7 @@ describe('createWebHumanBackend', () => {
 
 	test('ask registers a pending question and resolves with the answer submitted for its id', async () => {
 		const backend = createWebHumanBackend()
-		const promise = backend.ask('Which framework?')
+		const promise = backend.ask('Which framework?', askInvocation())
 
 		const pending = backend.pendingQuestions()
 		expect(pending.length).toBe(1)
@@ -27,7 +35,7 @@ describe('createWebHumanBackend', () => {
 
 	test('ask carries the question text and optional context into the pending list', () => {
 		const backend = createWebHumanBackend()
-		backend.ask('Which file?', 'src/index.ts')
+		backend.ask('Which file?', askInvocation(), 'src/index.ts')
 
 		const question = defined(backend.pendingQuestions()[0], 'first pending question')
 		expect(question.question).toBe('Which file?')
@@ -39,7 +47,7 @@ describe('createWebHumanBackend', () => {
 
 	test('ask without context omits the context field from the pending question', () => {
 		const backend = createWebHumanBackend()
-		backend.ask('Just a question')
+		backend.ask('Just a question', askInvocation())
 
 		const question = defined(backend.pendingQuestions()[0], 'first pending question')
 		expect(question.context).toBeUndefined()
@@ -48,7 +56,7 @@ describe('createWebHumanBackend', () => {
 	test('an unanswered question stays pending and does not resolve on its own', async () => {
 		const backend = createWebHumanBackend()
 		let resolved = false
-		const promise = backend.ask('Will I time out?').then(() => {
+		const promise = backend.ask('Will I time out?', askInvocation()).then(() => {
 			resolved = true
 		})
 
@@ -73,7 +81,7 @@ describe('createWebHumanBackend', () => {
 
 	test('submitAnswer removes the question so a second submit for the same id is not_found', async () => {
 		const backend = createWebHumanBackend()
-		const promise = backend.ask('q')
+		const promise = backend.ask('q', askInvocation())
 
 		const question = defined(backend.pendingQuestions()[0], 'first pending question')
 		const first = backend.submitAnswer(question.id, 'a')
@@ -87,8 +95,8 @@ describe('createWebHumanBackend', () => {
 
 	test('multiple pending questions resolve independently to their own answers', async () => {
 		const backend = createWebHumanBackend()
-		const firstPromise = backend.ask('first?')
-		const secondPromise = backend.ask('second?')
+		const firstPromise = backend.ask('first?', askInvocation())
+		const secondPromise = backend.ask('second?', askInvocation())
 
 		const pending = backend.pendingQuestions()
 		expect(pending.length).toBe(2)
@@ -104,8 +112,8 @@ describe('createWebHumanBackend', () => {
 
 	test('each pending question gets a unique id', () => {
 		const backend = createWebHumanBackend()
-		backend.ask('one?')
-		backend.ask('two?')
+		backend.ask('one?', askInvocation())
+		backend.ask('two?', askInvocation())
 
 		const pending = backend.pendingQuestions()
 		const ids = pending.map((q) => q.id)
@@ -114,10 +122,10 @@ describe('createWebHumanBackend', () => {
 
 	test('pendingQuestions returns a fresh array reflecting current state each call', () => {
 		const backend = createWebHumanBackend()
-		backend.ask('q1')
+		backend.ask('q1', askInvocation())
 
 		const first = backend.pendingQuestions()
-		backend.ask('q2')
+		backend.ask('q2', askInvocation())
 
 		const second = backend.pendingQuestions()
 		expect(first.length).toBe(1)
@@ -126,7 +134,7 @@ describe('createWebHumanBackend', () => {
 
 	test('the resolved answer is a string, matching the result shape seen by the model', async () => {
 		const backend = createWebHumanBackend()
-		const promise = backend.ask('q')
+		const promise = backend.ask('q', askInvocation())
 		const question = defined(backend.pendingQuestions()[0], 'first pending question')
 		backend.submitAnswer(question.id, 'web answer')
 
@@ -147,7 +155,7 @@ describe('createWebHumanBackend run-log binding', () => {
 		const log = capturingLog()
 		backend.bindRunLog(log.append)
 
-		backend.ask('Which file?', 'src/index.ts')
+		backend.ask('Which file?', askInvocation(), 'src/index.ts')
 
 		expect(log.events.length).toBe(1)
 		const askEvent = defined(log.events[0], 'ask_human event')
@@ -156,6 +164,8 @@ describe('createWebHumanBackend run-log binding', () => {
 		const askPayload = askEvent.payload
 		if (!isObject(askPayload)) throw new Error('expected the ask_human payload to be an object')
 		expect(typeof askPayload['id']).toBe('string')
+		expect(askPayload['callId']).toBe(`tool:${String(askPayload['id'])}`)
+		expect(askPayload['parentCallId']).toBe('role:main-0-1')
 		expect(typeof askEvent.timestamp).toBe('string')
 	})
 
@@ -164,7 +174,7 @@ describe('createWebHumanBackend run-log binding', () => {
 		const log = capturingLog()
 		backend.bindRunLog(log.append)
 
-		backend.ask('just a question')
+		backend.ask('just a question', askInvocation())
 
 		expect(defined(log.events[0], 'ask_human event').payload).not.toHaveProperty('context')
 	})
@@ -174,14 +184,14 @@ describe('createWebHumanBackend run-log binding', () => {
 		const log = capturingLog()
 		backend.bindRunLog(log.append)
 
-		const promise = backend.ask('Which framework?')
+		const promise = backend.ask('Which framework?', askInvocation())
 		const id = defined(backend.pendingQuestions()[0], 'first pending question').id
 		backend.submitAnswer(id, 'react')
 		await promise
 
 		const answerEvent = defined(log.events.find((event) => event.type === 'human_answer'), 'human_answer event')
 		expect(answerEvent).toBeDefined()
-		expect(answerEvent.payload).toEqual({ id, answer: 'react' })
+		expect(answerEvent.payload).toEqual({ id, callId: `tool:${id}`, answer: 'react' })
 	})
 
 	test('the ask_human and human_answer events share the same id so history can pair them', async () => {
@@ -189,7 +199,7 @@ describe('createWebHumanBackend run-log binding', () => {
 		const log = capturingLog()
 		backend.bindRunLog(log.append)
 
-		const promise = backend.ask('q?')
+		const promise = backend.ask('q?', askInvocation())
 		const id = defined(backend.pendingQuestions()[0], 'first pending question').id
 		backend.submitAnswer(id, 'a')
 		await promise
@@ -199,6 +209,8 @@ describe('createWebHumanBackend run-log binding', () => {
 		if (!isObject(askEvent.payload) || !isObject(answerEvent.payload)) throw new Error('expected the human events to carry object payloads')
 		expect(askEvent.payload['id']).toBe(id)
 		expect(answerEvent.payload['id']).toBe(id)
+		expect(askEvent.payload['callId']).toBe(answerEvent.payload['callId'])
+		expect(askEvent.payload['callId']).toBe(`tool:${id}`)
 	})
 
 	test('submitAnswer for an unknown id does not log a human_answer event', () => {
@@ -214,7 +226,7 @@ describe('createWebHumanBackend run-log binding', () => {
 	test('does not log anything when no run log is bound', async () => {
 		const backend = createWebHumanBackend()
 
-		const promise = backend.ask('q?')
+		const promise = backend.ask('q?', askInvocation())
 		const id = defined(backend.pendingQuestions()[0], 'first pending question').id
 		backend.submitAnswer(id, 'a')
 		await promise
@@ -228,7 +240,7 @@ describe('createWebHumanBackend run-log binding', () => {
 		backend.bindRunLog(log.append)
 		backend.bindRunLog(null)
 
-		backend.ask('q?')
+		backend.ask('q?', askInvocation())
 
 		expect(log.events).toEqual([])
 	})

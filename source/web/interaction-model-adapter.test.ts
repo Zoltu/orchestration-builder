@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import type { LogEvent, RunMeta } from '../executor/types.js'
 import type { RunSnapshot } from '../run-log/index.js'
 import { deriveInteractionModel, deriveInteractionOperationDetail } from './interaction-model-adapter.js'
-import { activeParticipant, activeStack, callChainOf, fateOf, observesOf, stacksOf, terminatesOf } from './static/ts/interaction-model.js'
+import { activeParticipant, activeStack, callChainOf, fateOf, observesOf, openInvocationsOf, stacksOf, terminatesOf } from './static/ts/interaction-model.js'
 import { defined, present } from './test-fixtures.js'
 
 // The helpers arrive typed from the module's JSDoc; the adapter's InteractionModel is
@@ -912,5 +912,376 @@ describe('deriveInteractionModel — clock independence', () => {
 		// The run is terminal for the client's polling set, so the question's elapsed is frozen at the stored end even though the call stays in flight awaiting an answer.
 		expect(askCall.lifecycle).toBe('in_flight')
 		expect(askCall.metrics?.elapsedSeconds).toBe(10)
+	})
+})
+
+describe('deriveInteractionModel — identity-keyed invocation lifecycle', () => {
+	function roleStart(timestamp: string, role: string, callId: string, parentCallId?: string): LogEvent {
+		const payload: Record<string, unknown> = { role, callId, roleId: callId.replace(/^role:/, ''), task: `${role} task` }
+		if (parentCallId !== undefined) payload['parentCallId'] = parentCallId
+		return event(timestamp, 'role_start', payload)
+	}
+
+	test('explicit ids parent a child role under its caller role invocation', () => {
+		const events = [
+			roleStart('t0', 'orchestrator', 'role:orchestrator-0-1'),
+			roleStart('t1', 'coder', 'role:coder-1-2', 'role:orchestrator-0-1'),
+		]
+		const model = deriveInteractionModel(snapshot(events, meta('running')))
+		const orchestratorCall = defined(model.operations.find((operation) => operation.callId === 'role:orchestrator-0-1' && operation.kind === 'call'), 'orchestratorCall')
+		const coderCall = defined(model.operations.find((operation) => operation.callId === 'role:coder-1-2' && operation.kind === 'call'), 'coderCall')
+		expect(orchestratorCall.source).toBe('human:root')
+		expect(orchestratorCall.parentCallId).toBeUndefined()
+		expect(coderCall.source).toBe('role:orchestrator-0-1')
+		expect(coderCall.parentCallId).toBe('role:orchestrator-0-1')
+		expect(coderCall.stack).toBe('main')
+		expect(callChainOf(model, 'main').map((operation) => operation.callId)).toEqual(['role:orchestrator-0-1', 'role:coder-1-2'])
+		assertHelpersSensible(model)
+	})
+
+	test('sibling tool calls keep their own parent and the active path excludes the earlier sibling', () => {
+		const events = [
+			roleStart('t0', 'coder', 'role:coder-0-1'),
+			event('t1', 'tool_call', { role: 'coder', tool: 'read_file', callId: 'tool:tc-1', parentCallId: 'role:coder-0-1', arguments: '{}' }),
+			event('t2', 'tool_call', { role: 'coder', tool: 'search_text', callId: 'tool:tc-2', parentCallId: 'role:coder-0-1', arguments: '{}' }),
+		]
+		const model = deriveInteractionModel(snapshot(events, meta('running')))
+		const toolCalls = model.operations.filter((operation) => operation.kind === 'call' && operation.callId !== 'role:coder-0-1')
+		expect(toolCalls).toHaveLength(2)
+		for (const call of toolCalls) {
+			expect(call.parentCallId).toBe('role:coder-0-1')
+			expect(call.source).toBe('role:coder-0-1')
+		}
+		expect(openInvocationsOf(model, 'main').map((operation) => operation.callId)).toEqual(['role:coder-0-1', 'tool:tc-1', 'tool:tc-2'])
+		expect(callChainOf(model, 'main').map((operation) => operation.callId)).toEqual(['role:coder-0-1', 'tool:tc-2'])
+		expect(activeParticipant(model)).toBe('tool:tc-2')
+		assertHelpersSensible(model)
+	})
+
+	test('a start with no terminal stays open', () => {
+		const events = [
+			roleStart('t0', 'coder', 'role:coder-0-1'),
+			event('t1', 'tool_call', { role: 'coder', tool: 'read_file', callId: 'tool:tc-1', parentCallId: 'role:coder-0-1', arguments: '{}' }),
+		]
+		const model = deriveInteractionModel(snapshot(events, meta('running')))
+		const toolCall = defined(model.operations.find((operation) => operation.callId === 'tool:tc-1'), 'toolCall')
+		expect(toolCall.lifecycle).toBe('in_flight')
+		expect(openInvocationsOf(model, 'main')).toHaveLength(2)
+		assertHelpersSensible(model)
+	})
+
+	test('a duplicate terminal is ignored — the first terminal wins', () => {
+		const events = [
+			roleStart('t0', 'coder', 'role:coder-0-1'),
+			event('t1', 'tool_call', { role: 'coder', tool: 'read_file', callId: 'tool:tc-1', parentCallId: 'role:coder-0-1', arguments: '{}' }),
+			event('t2', 'tool_result', { role: 'coder', tool: 'read_file', callId: 'tool:tc-1', kind: 'success', result: { ok: true } }),
+			event('t3', 'tool_result', { role: 'coder', tool: 'read_file', callId: 'tool:tc-1', kind: 'error', result: { ok: false } }),
+		]
+		const model = deriveInteractionModel(snapshot(events, meta('running')))
+		const returns = model.operations.filter((operation) => operation.kind === 'return' && operation.callId === 'tool:tc-1')
+		expect(returns).toHaveLength(1)
+		expect(defined(returns[0], 'returns[0]').startedAt).toBe('t2')
+		expect(defined(returns[0], 'returns[0]').outcome).toBe('success')
+		expect(openInvocationsOf(model, 'main').map((operation) => operation.callId)).toEqual(['role:coder-0-1'])
+		assertHelpersSensible(model)
+	})
+
+	test('a terminal with no start materializes a closed call+return with no guessed parent', () => {
+		const events = [
+			roleStart('t0', 'coder', 'role:coder-0-1'),
+			event('t1', 'tool_result', { role: 'coder', tool: 'read_file', callId: 'tool:orphan', kind: 'error' }),
+		]
+		const model = deriveInteractionModel(snapshot(events, meta('running')))
+		const materialized = model.operations.filter((operation) => operation.callId === 'tool:orphan')
+		expect(materialized.map((operation) => operation.kind)).toEqual(['call', 'return'])
+		expect(defined(materialized[0], 'materialized call').parentCallId).toBeUndefined()
+		expect(defined(materialized[0], 'materialized call').source).toBe('human:root')
+		expect(defined(materialized[0], 'materialized call').startedAt).toBe('t1')
+		expect(defined(materialized[1], 'materialized return').startedAt).toBe('t1')
+		expect(defined(materialized[1], 'materialized return').outcome).toBe('error')
+		assertHelpersSensible(model)
+	})
+
+	test('a duplicate start for the same callId keeps the first participant and call', () => {
+		const events = [
+			roleStart('t0', 'coder', 'role:coder-0-1'),
+			roleStart('t1', 'coder', 'role:coder-0-1'),
+		]
+		const model = deriveInteractionModel(snapshot(events, meta('running')))
+		expect(model.participants.filter((participant) => participant.id === 'role:coder-0-1')).toHaveLength(1)
+		expect(model.operations.filter((operation) => operation.callId === 'role:coder-0-1')).toHaveLength(1)
+		expect(defined(model.operations[0], 'model.operations[0]').startedAt).toBe('t0')
+		assertHelpersSensible(model)
+	})
+
+	test('an interrupt stack uses the interrupt callId as the handler parent and pops on the handler terminal', () => {
+		const events = [
+			roleStart('t0', 'orchestrator', 'role:orchestrator-0-1'),
+			event('t1', 'interrupt', { trigger: 'loop_check', handler: 'loop_detector', target: 'orchestrator-0-1', callId: 'interrupt:abc', parentCallId: 'role:orchestrator-0-1' }),
+			roleStart('t2', 'loop_detector', 'role:loop-1-1', 'interrupt:abc'),
+			event('t3', 'role_finished', { role: 'loop_detector', callId: 'role:loop-1-1', status: 'success', summary: 'clear' }),
+			event('t4', 'interrupt_resolved', { trigger: 'loop_check', handler: 'loop_detector', target: 'orchestrator-0-1', callId: 'interrupt:abc' }),
+			event('t5', 'role_finished', { role: 'orchestrator', callId: 'role:orchestrator-0-1', status: 'success', summary: 'done' }),
+		]
+		const model = deriveInteractionModel(snapshot(events, meta('success')))
+		const handlerCall = defined(model.operations.find((operation) => operation.callId === 'role:loop-1-1' && operation.kind === 'call'), 'handlerCall')
+		expect(handlerCall.source).toBe('interrupt:abc')
+		expect(handlerCall.parentCallId).toBe('interrupt:abc')
+		expect(handlerCall.stack).toBe('interrupt-1-stack')
+		expect(model.stacks?.[1]?.root).toBe('interrupt:abc')
+		expect(stacksOf(model)).toEqual([])
+		assertHelpersSensible(model)
+	})
+
+	test('a standard-level tool_result without a result body still closes by callId', () => {
+		const events = [
+			roleStart('t0', 'coder', 'role:coder-0-1'),
+			event('t1', 'tool_call', { role: 'coder', tool: 'read_file', callId: 'tool:tc-1', parentCallId: 'role:coder-0-1', arguments: '{}' }),
+			event('t2', 'tool_result', { role: 'coder', tool: 'read_file', callId: 'tool:tc-1', kind: 'success' }),
+		]
+		const model = deriveInteractionModel(snapshot(events, meta('running')))
+		const ret = defined(model.operations.find((operation) => operation.kind === 'return' && operation.callId === 'tool:tc-1'), 'ret')
+		expect(ret.outcome).toBe('success')
+		expect(detailOf(events, meta('running'), ret.id)).toBeNull()
+		expect(openInvocationsOf(model, 'main').map((operation) => operation.callId)).toEqual(['role:coder-0-1'])
+		assertHelpersSensible(model)
+	})
+
+	test('ask_human and human_answer pair by the question callId', () => {
+		const events = [
+			roleStart('t0', 'orchestrator', 'role:orchestrator-0-1'),
+			event('t1', 'ask_human', { id: 'q1', question: 'Which framework?', callId: 'tool:q1', parentCallId: 'role:orchestrator-0-1' }),
+			event('t2', 'human_answer', { id: 'q1', answer: 'react', callId: 'tool:q1' }),
+		]
+		const model = deriveInteractionModel(snapshot(events, meta('running')))
+		const ask = defined(model.operations.find((operation) => operation.callId === 'tool:q1' && operation.kind === 'call'), 'ask')
+		const answer = defined(model.operations.find((operation) => operation.callId === 'tool:q1' && operation.kind === 'return'), 'answer')
+		expect(ask.parentCallId).toBe('role:orchestrator-0-1')
+		expect(answer.source).toBe(ask.destination)
+		expect(detailOf(events, meta('running'), answer.id)).toBe('react')
+		assertHelpersSensible(model)
+	})
+
+	test('a mixed log degrades old events to stable ids without guessing the new parent', () => {
+		const events = [
+			event('t0', 'role_start', { role: 'orchestrator', roleId: 'orchestrator-0-1', depth: 0, task: 'old prefix' }),
+			event('t1', 'tool_call', { role: 'orchestrator', tool: 'read_file', arguments: '{}' }),
+			roleStart('t2', 'coder', 'role:coder-1-2', 'role:orchestrator-0-1'),
+		]
+		const model = deriveInteractionModel(snapshot(events, meta('running')))
+		const legacyRoleCall = defined(model.operations.find((operation) => operation.kind === 'call' && operation.callId === 'role:orchestrator-0-1'), 'legacyRoleCall')
+		const legacyToolCall = defined(model.operations.find((operation) => operation.kind === 'call' && operation.destination.startsWith('tool:')), 'legacyToolCall')
+		const coderCall = defined(model.operations.find((operation) => operation.callId === 'role:coder-1-2' && operation.kind === 'call'), 'coderCall')
+		expect(legacyToolCall.parentCallId).toBe('role:orchestrator-0-1')
+		expect(legacyToolCall.source).toBe(legacyRoleCall.destination)
+		expect(coderCall.parentCallId).toBe('role:orchestrator-0-1')
+		expect(coderCall.source).toBe('role:orchestrator-0-1')
+		assertHelpersSensible(model)
+	})
+})
+
+describe('deriveInteractionModel — id-keyed metrics, terminals, and mixed-log adoption', () => {
+	function idRoleStart(timestamp: string, role: string, roleId: string, parentCallId?: string): LogEvent {
+		const payload: Record<string, unknown> = { role, roleId, callId: `role:${roleId}`, task: `${role} task` }
+		if (parentCallId !== undefined) payload['parentCallId'] = parentCallId
+		return event(timestamp, 'role_start', payload)
+	}
+
+	test('retry spend and lastPromptTokens fold into the id-keyed role invocation, not a sibling tool', () => {
+		const events = [
+			idRoleStart('t0', 'coder', 'coder-0-1'),
+			event('t1', 'llm_retry', { role: 'coder', roleId: 'coder-0-1', discardedAttempts: 1, usage: { promptTokens: 90, completionTokens: 10, totalTokens: 100 } }),
+			event('t2', 'llm_call', { role: 'coder', roleId: 'coder-0-1', usage: { promptTokens: 100, completionTokens: 20, totalTokens: 120, cachedPromptTokens: 40 } }),
+			event('t3', 'llm_call', { role: 'coder', roleId: 'coder-0-1', usage: { promptTokens: 200, completionTokens: 10, totalTokens: 210 } }),
+			event('t4', 'tool_call', { role: 'coder', tool: 'read_file', callId: 'tool:tc-1', parentCallId: 'role:coder-0-1', arguments: '{}' }),
+		]
+		const model = deriveInteractionModel(snapshot(events, meta('running')))
+		const roleCall = defined(model.operations.find((operation) => operation.callId === 'role:coder-0-1' && operation.kind === 'call'), 'roleCall')
+		const toolCall = defined(model.operations.find((operation) => operation.callId === 'tool:tc-1' && operation.kind === 'call'), 'toolCall')
+		expect(roleCall.metrics?.tokens).toBe(430)
+		expect(roleCall.metrics?.promptTokens).toBe(390)
+		expect(roleCall.metrics?.completionTokens).toBe(40)
+		expect(roleCall.metrics?.cachedPromptTokens).toBe(40)
+		expect(roleCall.metrics?.lastPromptTokens).toBe(200)
+		expect(toolCall.metrics?.tokens).toBeNull()
+		assertHelpersSensible(model)
+	})
+
+	test('a duplicate role_finished is ignored after the first terminal', () => {
+		const events = [
+			idRoleStart('t0', 'coder', 'coder-0-1'),
+			event('t1', 'role_finished', { role: 'coder', roleId: 'coder-0-1', callId: 'role:coder-0-1', status: 'success', summary: 'done' }),
+			event('t2', 'role_finished', { role: 'coder', roleId: 'coder-0-1', callId: 'role:coder-0-1', status: 'error', summary: 'duplicate' }),
+		]
+		const model = deriveInteractionModel(snapshot(events, meta('success')))
+		const returns = model.operations.filter((operation) => operation.kind === 'return' && operation.callId === 'role:coder-0-1')
+		expect(returns).toHaveLength(1)
+		expect(defined(returns[0], 'returns[0]').startedAt).toBe('t1')
+		expect(defined(returns[0], 'returns[0]').outcome).toBe('success')
+		expect(model.participants.filter((participant) => participant.role === 'coder')).toHaveLength(1)
+		assertHelpersSensible(model)
+	})
+
+	test('a role terminal with no start materializes a closed pair without a parent', () => {
+		const events = [
+			idRoleStart('t0', 'orchestrator', 'orchestrator-0-1'),
+			event('t1', 'role_finished', { role: 'ghost', roleId: 'ghost-9-9', callId: 'role:ghost-9-9', status: 'error', summary: 'lost' }),
+		]
+		const model = deriveInteractionModel(snapshot(events, meta('running')))
+		const ghost = model.operations.filter((operation) => operation.callId === 'role:ghost-9-9')
+		expect(ghost.map((operation) => operation.kind)).toEqual(['call', 'return'])
+		expect(defined(ghost[0], 'ghost call').parentCallId).toBeUndefined()
+		expect(defined(ghost[0], 'ghost call').source).toBe('human:root')
+		expect(defined(ghost[1], 'ghost return').outcome).toBe('error')
+		assertHelpersSensible(model)
+	})
+
+	test('id-keyed observe and terminate select the paused target by roleId, not just role name', () => {
+		const events = [
+			idRoleStart('t0', 'orchestrator', 'orchestrator-0-1'),
+			idRoleStart('t1', 'coder', 'coder-1-1', 'role:orchestrator-0-1'),
+			idRoleStart('t2', 'coder', 'coder-1-2', 'role:orchestrator-0-1'),
+			event('t3', 'interrupt', { trigger: 'loop_check', handler: 'loop_detector', target: 'coder-1-1', callId: 'interrupt:abc', parentCallId: 'role:coder-1-1' }),
+			idRoleStart('t4', 'loop_detector', 'loop-1-1', 'interrupt:abc'),
+			event('t5', 'observe', { role: 'coder', roleId: 'coder-1-1', details: 'peek one' }),
+			event('t6', 'tool_call', { role: 'loop_detector', tool: 'rewind_stack', callId: 'tool:rewind-1', parentCallId: 'role:loop-1-1', arguments: '{}' }),
+			event('t7', 'terminate', { role: 'coder', roleId: 'coder-1-1', details: 'revert one' }),
+		]
+		const model = deriveInteractionModel(snapshot(events, meta('running')))
+		const observe = defined(observesOf(model)[0], 'observe')
+		expect(observe.destination).toBe('role:coder-1-1')
+		const terminate = defined(terminatesOf(model)[0], 'terminate')
+		expect(terminate.destination).toBe('role:coder-1-1')
+		const mainChain = callChainOf(model, 'main').map((operation) => operation.callId)
+		expect(mainChain).not.toContain('role:coder-1-1')
+		expect(mainChain).toContain('role:coder-1-2')
+		assertHelpersSensible(model)
+	})
+
+	test('two unclosed legacy tools parent to the open role, and a keyed terminal adopts the synthesized role start', () => {
+		const events = [
+			idRoleStart('t0', 'orchestrator', 'orchestrator-0-1'),
+			event('t1', 'role_start', { role: 'coder', roleId: 'coder-0-1', depth: 1, task: 'old prefix' }),
+			event('t2', 'tool_call', { role: 'coder', tool: 'read_file', arguments: '{}' }),
+			event('t3', 'tool_call', { role: 'coder', tool: 'search_text', arguments: '{}' }),
+			event('t4', 'role_finished', { role: 'coder', roleId: 'coder-0-1', callId: 'role:new-writer-id', status: 'success', summary: 'done' }),
+		]
+		const model = deriveInteractionModel(snapshot(events, meta('running')))
+		const coderCalls = model.operations.filter((operation) => operation.kind === 'call' && operation.destination === 'role:coder-0-1')
+		expect(coderCalls).toHaveLength(1)
+		expect(model.participants.filter((participant) => participant.role === 'coder')).toHaveLength(1)
+		const tools = model.operations.filter((operation) => operation.kind === 'call' && operation.destination.startsWith('tool:'))
+		expect(tools).toHaveLength(2)
+		for (const tool of tools) {
+			expect(tool.parentCallId).toBe('role:coder-0-1')
+			expect(tool.source).toBe('role:coder-0-1')
+		}
+		expect(defined(tools[0], 'tools[0]').parentCallId).not.toBe(defined(tools[1], 'tools[1]').callId)
+		const coderReturn = model.operations.find((operation) => operation.kind === 'return' && operation.callId === 'role:coder-0-1')
+		expect(coderReturn).toBeDefined()
+		assertHelpersSensible(model)
+	})
+})
+
+describe('deriveInteractionModel — interrupt-frame materialization', () => {
+	test('a terminal-without-start on a fresh interrupt stack materializes and pops the empty frame', () => {
+		const events = [
+			event('t0', 'role_start', { role: 'orchestrator', roleId: 'orchestrator-0-1', callId: 'role:orchestrator-0-1', task: 'task' }),
+			event('t1', 'interrupt', { trigger: 'loop_check', handler: 'loop_detector', target: 'orchestrator-0-1', callId: 'interrupt:abc', parentCallId: 'role:orchestrator-0-1' }),
+			event('t2', 'role_finished', { role: 'loop_detector', roleId: 'loop-1-1', callId: 'role:loop-1-1', status: 'success', summary: 'done' }),
+			event('t3', 'tool_call', { role: 'orchestrator', tool: 'read_file', callId: 'tool:tc-1', parentCallId: 'role:orchestrator-0-1', arguments: '{}' }),
+		]
+		const model = deriveInteractionModel(snapshot(events, meta('running')))
+		const ghost = model.operations.filter((operation) => operation.callId === 'role:loop-1-1')
+		expect(ghost.map((operation) => operation.kind)).toEqual(['call', 'return'])
+		expect(defined(ghost[0], 'ghost call').stack).toBe('interrupt-1-stack')
+		expect(stacksOf(model)).toEqual(['main'])
+		assertHelpersSensible(model)
+	})
+})
+
+describe('deriveInteractionModel — resolved interrupt records, pause markers, and id hygiene', () => {
+	function startRole(timestamp: string, role: string, roleId: string, parentCallId?: string): LogEvent {
+		const payload: Record<string, unknown> = { role, roleId, callId: `role:${roleId}`, task: `${role} task` }
+		if (parentCallId !== undefined) payload['parentCallId'] = parentCallId
+		return event(timestamp, 'role_start', payload)
+	}
+
+	test('interrupt + role_not_found + interrupt_resolved leaves no ghost stack record', () => {
+		const events = [
+			startRole('t0', 'orchestrator', 'orchestrator-0-1'),
+			event('t1', 'interrupt', { trigger: 'loop_check', handler: 'loop_detector', target: 'orchestrator-0-1', callId: 'interrupt:one', parentCallId: 'role:orchestrator-0-1' }),
+			event('t2', 'role_not_found', { role: 'loop_detector', roleId: 'loop-1-1' }),
+			event('t3', 'interrupt_resolved', { trigger: 'loop_check', handler: 'loop_detector', target: 'orchestrator-0-1', callId: 'interrupt:one', action: 'failed' }),
+		]
+		const model = deriveInteractionModel(snapshot(events, meta('running')))
+		expect(model.stacks?.map((record) => record.id)).toEqual(['main'])
+		expect(activeStack(model)).toBe('main')
+		expect(activeParticipant(model)).toBe('role:orchestrator-0-1')
+		expect(stacksOf(model)).toEqual(['main'])
+	})
+
+	test('interrupt + interrupt_resolved alone leaves no ghost stack record', () => {
+		const events = [
+			startRole('t0', 'orchestrator', 'orchestrator-0-1'),
+			event('t1', 'interrupt', { trigger: 'loop_check', handler: 'loop_detector', target: 'orchestrator-0-1', callId: 'interrupt:one', parentCallId: 'role:orchestrator-0-1' }),
+			event('t2', 'interrupt_resolved', { trigger: 'loop_check', handler: 'loop_detector', target: 'orchestrator-0-1', callId: 'interrupt:one', action: 'continue' }),
+		]
+		const model = deriveInteractionModel(snapshot(events, meta('running')))
+		expect(model.stacks?.map((record) => record.id)).toEqual(['main'])
+		expect(stacksOf(model)).toEqual(['main'])
+		expect(activeParticipant(model)).toBe('role:orchestrator-0-1')
+	})
+
+	test('nested interrupt_resolved without callId prefers the target match instead of popping the last frame', () => {
+		const events = [
+			startRole('t0', 'orchestrator', 'orchestrator-0-1'),
+			event('t1', 'interrupt', { trigger: 'loop_check', handler: 'outer_handler', target: 'orchestrator-0-1', callId: 'interrupt:one', parentCallId: 'role:orchestrator-0-1' }),
+			event('t2', 'interrupt', { trigger: 'loop_check', handler: 'inner_handler', target: 'other-0-1', callId: 'interrupt:two', parentCallId: 'role:orchestrator-0-1' }),
+			event('t3', 'interrupt_resolved', { trigger: 'loop_check', handler: 'outer_handler', target: 'orchestrator-0-1', action: 'continue' }),
+		]
+		const model = deriveInteractionModel(snapshot(events, meta('running')))
+		// The target names the outer interrupt, which is not the current top frame: selecting it must not pop the inner frame.
+		expect(activeStack(model)).toBe('interrupt-2-stack')
+		expect(activeParticipant(model)).toBe('interrupt:two')
+		expect(model.stacks?.map((record) => record.id)).toEqual(['main', 'interrupt-2-stack'])
+	})
+
+	test('a paused role_finished is a pause marker, and a later finish is the terminal', () => {
+		const events = [
+			startRole('t0', 'coder', 'coder-0-1'),
+			event('t1', 'role_finished', { role: 'coder', roleId: 'coder-0-1', callId: 'role:coder-0-1', status: 'success', summary: 'paused', paused: true }),
+			startRole('t2', 'coder', 'coder-0-1'),
+			event('t3', 'role_finished', { role: 'coder', roleId: 'coder-0-1', callId: 'role:coder-0-1', status: 'success', summary: 'done' }),
+		]
+		const model = deriveInteractionModel(snapshot(events, meta('success')))
+		const returns = model.operations.filter((operation) => operation.kind === 'return' && operation.callId === 'role:coder-0-1')
+		expect(returns).toHaveLength(1)
+		expect(defined(returns[0], 'returns[0]').startedAt).toBe('t3')
+		expect(model.participants.filter((participant) => participant.id === 'role:coder-0-1')).toHaveLength(1)
+	})
+
+	test('a late llm_call does not fold into a closed role invocation', () => {
+		const events = [
+			startRole('t0', 'coder', 'coder-0-1'),
+			event('t1', 'llm_call', { role: 'coder', roleId: 'coder-0-1', usage: { promptTokens: 10, completionTokens: 5, totalTokens: 15 } }),
+			event('t2', 'role_finished', { role: 'coder', roleId: 'coder-0-1', callId: 'role:coder-0-1', status: 'success', summary: 'done' }),
+			event('t3', 'llm_call', { role: 'coder', roleId: 'coder-0-1', usage: { promptTokens: 900, completionTokens: 100, totalTokens: 1000 } }),
+		]
+		const model = deriveInteractionModel(snapshot(events, meta('success')))
+		const call = defined(model.operations.find((operation) => operation.kind === 'call' && operation.callId === 'role:coder-0-1'), 'call')
+		expect(call.metrics?.tokens).toBe(15)
+	})
+
+	test('an empty callId or parentCallId is treated as absent', () => {
+		const events = [
+			startRole('t0', 'orchestrator', 'orchestrator-0-1'),
+			event('t1', 'role_start', { role: 'coder', roleId: 'coder-0-1', callId: '', parentCallId: '', task: 'old style' }),
+		]
+		const model = deriveInteractionModel(snapshot(events, meta('running')))
+		const coderCall = defined(model.operations.find((operation) => operation.kind === 'call' && operation.destination === 'role:coder-0-1'), 'coderCall')
+		expect(coderCall.callId).toBe('role:coder-0-1')
+		expect(coderCall.parentCallId).toBe('role:orchestrator-0-1')
+		expect(model.participants.every((participant) => participant.id !== '')).toBe(true)
 	})
 })

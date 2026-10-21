@@ -1,16 +1,19 @@
-import { createResultCard, createToolError } from './errors.js'
-import type { DiscardedRetrySpend, LlmUsage, LlmUsagePayload, Message, ResultCard, RoleDefinition, ToolCall, ToolManifest, ToolResult } from './types.js'
-import { isObject, isResultCard } from './validation.js'
+import { createResultCard, createToolError, isErrorKind } from './errors.js'
+import type { DiscardedRetrySpend, LlmUsage, LlmUsagePayload, LogEvent, Message, ResultCard, RoleDefinition, ToolCall, ToolManifest, ToolResult } from './types.js'
+import { isObject, isResultCard, safeJsonParse } from './validation.js'
 import { checkGlobalBudgets, checkRoleBudgets } from './budgets.js'
 import { buildInitialHistory, createContextManager, DEFAULT_PROTECTED_PREFIX_LENGTH, hasContinuationPrefixShape, truncateToolOutput, type ContextManager } from './context/index.js'
 import { logEvent, type EngineContext, type EngineDependencies, type ResumedRole, type RoleState, type SeededRole, type SuspendedTurn } from './engine-state.js'
 import { isWriteCapableRole, parkCard, type ParkedAnswer } from './park-state.js'
 import { drainInterrupts } from './interrupt-engine.js'
 import type { LlmCallResult } from './llm.js'
+import { humanAnswerPayload, roleCallId, toolCallId, type ToolInvocation } from './invocation.js'
 import { hashArguments, RECENT_TOOL_CALLS_LIMIT } from './role-inspection.js'
 import type { RoleRegistryEntry } from './role-registry.js'
 import { buildContinuationHistory, selectContinuableChild } from './role-snapshot.js'
 import type { RunToolScope, ToolPlatform } from './tool-platform-port.js'
+import { parseFinishArguments } from './tools/builtin-tools.js'
+import { pendingCallId, pendingIndex, pendingParentCallId, type PendingInvocation } from './checkpoint.js'
 
 interface DispatchContext {
 	toolPlatform: ToolPlatform
@@ -26,19 +29,43 @@ type LlmResultHandling =
 
 type SuccessfulLlmCall = Extract<LlmCallResult, { kind: 'success' }>
 
-// True only when the turn is fully closed: the last history message answers the last tool call of the nearest preceding assistant tool-call message, and that call is finish. A finish followed by another batched call fails this: its later call has no tool result, and checkpointing that turn would persist an unanswered assistant message.
-function lastTurnEndsWithCompletedFinish(history: readonly Message[]): boolean {
-	const lastMessage = history[history.length - 1]
-	if (lastMessage === undefined || lastMessage.role !== 'tool') return false
-	for (let index = history.length - 2; index >= 0; index--) {
+// Recovers the card a fully answered finish turn already carries, so a boot or completed-checkpoint resume returns it instead of asking the LLM to repeat a decision that is already durable. The finish need not be the last call: every call in the last assistant tool-call message must have a consecutive tool result, with nothing after the results (a user note means the turn has moved on).
+function completedFinishCard(history: readonly Message[]): ResultCard | null {
+	let assistantIndex = -1
+	for (let index = history.length - 1; index >= 0; index--) {
 		const message = history[index]
-		if (message === undefined) continue
-		if (message.role !== 'assistant' || message.tool_calls === undefined) continue
-		const lastCall = message.tool_calls[message.tool_calls.length - 1]
-		if (lastCall === undefined) return false
-		return lastCall.function.name === 'finish' && lastCall.id === lastMessage.tool_call_id
+		if (message === undefined || message.role !== 'assistant' || message.tool_calls === undefined || message.tool_calls.length === 0) continue
+		assistantIndex = index
+		break
 	}
-	return false
+	if (assistantIndex === -1) return null
+	const assistantMessage = history[assistantIndex]
+	if (assistantMessage === undefined || assistantMessage.tool_calls === undefined) return null
+	const results = new Map<string, Message>()
+	let index = assistantIndex + 1
+	while (index < history.length) {
+		const message = history[index]
+		if (message === undefined || message.role !== 'tool' || message.tool_call_id === undefined) break
+		results.set(message.tool_call_id, message)
+		index++
+	}
+	// Anything after the results means the turn is no longer the history's completed tail.
+	if (index !== history.length) return null
+	for (const call of assistantMessage.tool_calls) {
+		if (!results.has(call.id)) return null
+	}
+	const finishCalls = assistantMessage.tool_calls.filter((call) => call.function.name === 'finish')
+	for (const finishCall of finishCalls) {
+		const finishMessage = results.get(finishCall.id)
+		if (finishMessage === undefined) continue
+		const parsed = safeJsonParse(finishMessage.content)
+		if (!parsed.ok) throw new Error('resume: a completed finish turn has an unparseable tool result')
+		if (isResultCard(parsed.value)) return parsed.value
+		// A rejected finish (invalid arguments, unknown tool, ...) is ordinary non-terminal history; keep scanning the batch's other finish calls.
+		if (isToolResultValue(parsed.value)) continue
+		throw new Error('resume: a finish tool result is neither a ResultCard nor a ToolResult')
+	}
+	return null
 }
 
 function serializeToolResult(result: ToolResult, maxChars: number): string {
@@ -49,16 +76,6 @@ function serializeToolResult(result: ToolResult, maxChars: number): string {
 		text = JSON.stringify({ kind: result.kind, message: result.message, details: result.details })
 	}
 	return truncateToolOutput(text, maxChars).text
-}
-
-// Builds the role_finished payload: the {role, status} base plus the instance id, depth, an optional parent, and the result-card summary/error so source/run-log can build the parent→child tree and a reviewer reading only log.jsonl can see why a role finished (especially why it errored — without this, an erroring role's explanation lives only on the returned ResultCard / meta.json, never in the log stream).
-// The added fields are additive: existing readers that read only role/status keep working.
-function roleFinishedPayload(roleName: string, depth: number, card: ResultCard, parent: string | undefined, roleId: string): unknown {
-	const payload: Record<string, unknown> = { role: roleName, roleId, depth, status: card.status }
-	if (card.summary !== '') payload['summary'] = card.summary
-	if (card.error !== undefined) payload['error'] = card.error
-	if (parent !== undefined) payload['parent'] = parent
-	return payload
 }
 
 // Shapes a sent message for the llm_call payload: role and content only, plus tool_calls on assistant messages so the message list reflects the full prior turn.
@@ -189,20 +206,6 @@ function handleLlmResult(
 	return { kind: 'tool_calls', toolCalls: llmResult.toolCalls }
 }
 
-interface DispatchAndRecordArgs {
-	deps: EngineDependencies
-	roleState: RoleState
-	roleName: string
-	ownRoleId: string
-	dispatchCtx: DispatchContext
-	toolCall: ToolCall
-}
-
-async function dispatchAndRecord({ deps, roleState, roleName, ownRoleId, dispatchCtx, toolCall }: DispatchAndRecordArgs): Promise<ResultCard | null> {
-	const result = await dispatchCtx.toolPlatform.dispatch(dispatchCtx.roleDefinition, dispatchCtx.scope, toolCall)
-	return recordToolResult(deps, dispatchCtx.toolPlatform, roleState, roleName, ownRoleId, dispatchCtx.maxToolOutputChars, toolCall, result)
-}
-
 // Emits the observe event for a successful cross-role inspection, so the interaction model can draw the reference from the inspecting role to the suspended target it read. Self-inspection (targetRole absent or the caller's own id) is not an observation, and a target that is no longer registered cannot be drawn, so both are skipped.
 function maybeLogObservation(deps: EngineDependencies, toolPlatform: ToolPlatform, ownRoleId: string, toolName: string, result: ToolResult): void {
 	if (result.kind !== 'success') return
@@ -216,33 +219,203 @@ function maybeLogObservation(deps: EngineDependencies, toolPlatform: ToolPlatfor
 	logEvent(deps.appendLog, 'observe', { role: target.roleName, roleId: targetRole, details: toolName })
 }
 
-// Records a settled tool call: logs the call/result pair, appends the (truncated) tool message, and updates the counters. Shared by the live dispatch path and the resume path, which re-records a suspended child-spawning call's result from the checkpoint without re-dispatching it — so both paths apply exactly the same bookkeeping.
-function recordToolResult(deps: EngineDependencies, toolPlatform: ToolPlatform, roleState: RoleState, roleName: string, ownRoleId: string, maxToolOutputChars: number, toolCall: ToolCall, result: ToolResult): ResultCard | null {
-	if (result.kind === 'unknown_tool') {
-		logEvent(deps.appendLog, 'unknown_tool', { role: roleName, tool: toolCall.function.name })
-	} else if (result.kind === 'invalid_tool_call') {
-		logEvent(deps.appendLog, 'invalid_tool_call', { role: roleName, tool: toolCall.function.name })
+function isToolResultValue(value: unknown): value is ToolResult {
+	if (!isObject(value)) return false
+	if (value['kind'] === 'success') return true
+	return isErrorKind(value['kind'])
+}
+
+function payloadRecord(event: LogEvent): Record<string, unknown> | undefined {
+	return isObject(event.payload) ? event.payload : undefined
+}
+
+function findTerminalEvent(events: readonly LogEvent[], type: string, callId: string): LogEvent | undefined {
+	for (const event of events) {
+		if (event.type !== type) continue
+		const payload = payloadRecord(event)
+		if (payload !== undefined && payload['callId'] === callId) return event
+	}
+	return undefined
+}
+
+// A standard-level log drops a tool_result's body but keeps its kind and identity, so a resumed call whose terminal is already durable is restored with a clearly marked placeholder. A finish result is reconstructed from the call's own arguments, because losing that card would turn a completed role into a placeholder success. Any other terminal with neither a body nor a valid kind is corrupt, not a success, so it fails fast rather than inventing an outcome.
+function replayToolResult(event: LogEvent, toolCall: ToolCall): ToolResult {
+	const payload = payloadRecord(event)
+	const rawResult = payload?.['result']
+	if (isToolResultValue(rawResult)) return rawResult
+	const message = 'The tool result body was not retained at standard logging; the invocation completed before the restart.'
+	const kind = payload?.['kind']
+	if (toolCall.function.name === 'finish') {
+		// The standard level keeps the kind but drops the body. A failed finish must stay a failure placeholder; only a successful finish is reconstructed from its arguments.
+		if (kind === 'success') {
+			const parsedArguments = safeJsonParse(toolCall.function.arguments)
+			if (!parsedArguments.ok || !isObject(parsedArguments.value)) throw new Error(`resume: finish call ${toolCall.id} has unparseable arguments`)
+			const parsedCard = parseFinishArguments(parsedArguments.value)
+			if (parsedCard.kind === 'error') throw new Error(`resume: finish call ${toolCall.id} cannot be recovered: ${parsedCard.message}`)
+			return { kind: 'success', data: parsedCard.card }
+		}
+		if (isErrorKind(kind)) return { kind, message }
+		throw new Error(`resume: finish tool_result ${String(payload?.['callId'])} carries neither a result body nor a valid kind`)
+	}
+	if (kind === 'success') return { kind: 'success', data: { note: message } }
+	if (isErrorKind(kind)) return { kind, message }
+	throw new Error(`resume: tool_result ${String(payload?.['callId'])} carries neither a result body nor a valid kind`)
+}
+
+function questionFromToolCall(toolCall: ToolCall): string {
+	const parsed = safeJsonParse(toolCall.function.arguments)
+	if (!parsed.ok || !isObject(parsed.value)) return ''
+	const question = parsed.value['question']
+	return typeof question === 'string' ? question : ''
+}
+
+function replayAskResult(event: LogEvent, toolCall: ToolCall): ToolResult {
+	const payload = payloadRecord(event)
+	const answer = payload?.['answer']
+	if (typeof answer !== 'string') throw new Error(`resume: human_answer ${String(payload?.['callId'])} carries no answer`)
+	const question = typeof payload?.['question'] === 'string' ? payload['question'] : questionFromToolCall(toolCall)
+	return { kind: 'success', data: { question, answer } }
+}
+
+function isParkedAskResult(result: ToolResult): boolean {
+	if (result.kind !== 'success' || !isObject(result.data)) return false
+	return result.data['parked'] === true
+}
+
+// Reconciles the invocation a checkpoint caught mid-dispatch. If its terminal is already in the log, the result is appended to the restored history without re-dispatching or rewriting the terminal; otherwise the call is replayed under the recorded id. A pending ask follows the same rule with human_answer as its terminal, re-asking when no answer was durable.
+async function reconcilePendingInvocation(deps: EngineDependencies, context: EngineContext, roleState: RoleState, registryEntry: RoleRegistryEntry, dispatchCtx: DispatchContext, pending: PendingInvocation, resumeNote: string | undefined): Promise<ResultCard | null> {
+	const index = pendingIndex(pending)
+	const toolCall = pending.toolCalls[index]
+	if (toolCall === undefined) throw new Error(`resume: pending invocation index ${index} is out of range in a validated checkpoint`)
+	const callId = pendingCallId(pending)
+	const parentCallId = pendingParentCallId(pending)
+	if (callId === undefined || parentCallId === undefined) throw new Error('resume: a non-legacy pending invocation must carry callId and parentCallId')
+	const invocation = deps.invocationJournal.adoptToolCall(toolCall, callId, parentCallId)
+	const isAsk = toolCall.function.name === 'ask_human'
+	const events = deps.readRunLogEvents(deps.runId)
+	const terminal = isAsk
+		? findTerminalEvent(events, 'human_answer', callId)
+		: findTerminalEvent(events, 'tool_result', callId)
+
+	let finalCard: ResultCard | null = null
+	if (terminal !== undefined) {
+		const result = isAsk ? replayAskResult(terminal, toolCall) : replayToolResult(terminal, toolCall)
+		finalCard = recordToolResult(deps, dispatchCtx.toolPlatform, roleState, context.roleName, registryEntry.roleId, dispatchCtx.maxToolOutputChars, toolCall, result, { invocation, replayed: true })
 	} else {
-		// tool_call carries the model's raw arguments string so the exact parameters are recoverable, and tool_result carries the full un-truncated ToolResult so a reviewer is not flying blind on what a tool actually returned. Truncation still applies only when the result is appended to the conversation below.
-		logEvent(deps.appendLog, 'tool_call', { role: roleName, tool: toolCall.function.name, arguments: toolCall.function.arguments })
-		maybeLogObservation(deps, toolPlatform, ownRoleId, toolCall.function.name, result)
-		logEvent(deps.appendLog, 'tool_result', { role: roleName, tool: toolCall.function.name, kind: result.kind, result })
+		if (!isAsk) deps.invocationJournal.toolStarted(invocation, context.roleName)
+		const result = await dispatchCtx.toolPlatform.dispatch(dispatchCtx.roleDefinition, dispatchCtx.scope, toolCall, invocation)
+		if (isAsk) {
+			if (result.kind === 'success') {
+				deps.invocationJournal.markStarted(callId)
+				if (!isParkedAskResult(result)) deps.invocationJournal.markTerminal(callId)
+			} else if (!deps.invocationJournal.hasStarted(callId)) {
+				deps.invocationJournal.toolStarted(invocation, context.roleName)
+				deps.invocationJournal.toolFinished(invocation, context.roleName, result)
+			} else {
+				// A started ask that fails without parking (e.g. the handler rejects the replayed arguments) still needs exactly one terminal.
+				deps.invocationJournal.toolFinished(invocation, context.roleName, result)
+			}
+		}
+		finalCard = recordToolResult(deps, dispatchCtx.toolPlatform, roleState, context.roleName, registryEntry.roleId, dispatchCtx.maxToolOutputChars, toolCall, result, { invocation })
 	}
 
-	roleState.history.push({
-		role: 'tool',
-		content: serializeToolResult(result, maxToolOutputChars),
-		tool_call_id: toolCall.id,
-	})
+	const hasRemainingCalls = index + 1 < pending.toolCalls.length
+	if (finalCard !== null) {
+		deps.checkpointRecorder.setPending(registryEntry.roleId, undefined)
+		// The replay must leave a fully answered turn on disk, even when no note is being delivered; otherwise a later resume sees the finish and later calls unanswered.
+		if (hasRemainingCalls) closeUnexecutedCalls(deps, roleState, context, registryEntry, dispatchCtx, pending.toolCalls, index + 1)
+		deps.checkpointRecorder.write()
+		if (resumeNote === undefined) return finalCard
+		// A resume delivering an answer or operator note must proceed to a fresh LLM turn, not return the old card.
+		roleState.history.push({ role: 'user', content: resumeNote })
+		return null
+	}
 
-	roleState.toolCallCount += 1
-	roleState.recentToolCalls.push({ tool: toolCall.function.name, argsHash: hashArguments(toolCall.function.arguments), resultKind: result.kind })
-	if (roleState.recentToolCalls.length > RECENT_TOOL_CALLS_LIMIT) roleState.recentToolCalls.shift()
+	if (!hasRemainingCalls) deps.checkpointRecorder.write()
+	const remainingCard = hasRemainingCalls
+		? await dispatchToolCallSequence(deps, context, roleState, registryEntry, dispatchCtx, pending.toolCalls, index + 1)
+		: null
+	// The note lands only after every remaining result, never between an assistant tool_calls message and its tool results. A remaining final card that is a completed finish still leaves a closed turn, so the note can follow it; any other early terminal is skipped.
+	if (resumeNote !== undefined && (remainingCard === null || completedFinishCard(roleState.history) !== null)) roleState.history.push({ role: 'user', content: resumeNote })
+	return remainingCard
+}
+
+interface RecordToolResultOptions {
+	invocation?: ToolInvocation
+	// True when replaying a terminal already present in the log: bookkeeping is applied, but no event is written a second time.
+	replayed?: boolean
+}
+
+// Records a settled tool call: writes its lifecycle event, appends the (truncated) tool message, and updates the counters. The live path passes the journal invocation so only the terminal is written here (the start was already journaled before dispatch); a replayed resume passes replayed so the terminal stays exactly once. ask_human is skipped here because its ask_human/human_answer pair is its lifecycle.
+function recordToolResult(deps: EngineDependencies, toolPlatform: ToolPlatform, roleState: RoleState, roleName: string, ownRoleId: string, maxToolOutputChars: number, toolCall: ToolCall, result: ToolResult, options: RecordToolResultOptions): ResultCard | null {
+	if (options.replayed !== true) {
+		const diagnostic = result.kind === 'unknown_tool' || result.kind === 'invalid_tool_call'
+		if (result.kind === 'unknown_tool') {
+			logEvent(deps.appendLog, 'unknown_tool', { role: roleName, tool: toolCall.function.name })
+		} else if (result.kind === 'invalid_tool_call') {
+			logEvent(deps.appendLog, 'invalid_tool_call', { role: roleName, tool: toolCall.function.name })
+		} else if (toolCall.function.name === 'ask_human') {
+			// The ask handler/backend already wrote ask_human and human_answer with the invocation ids; a generic tool pair here would give the ask two competing lifecycles.
+		} else if (options.invocation !== undefined) {
+			maybeLogObservation(deps, toolPlatform, ownRoleId, toolCall.function.name, result)
+			deps.invocationJournal.toolFinished(options.invocation, roleName, result)
+		} else {
+			// Legacy resume path for a checkpoint with no invocation identity: keep the historical unkeyed pair.
+			logEvent(deps.appendLog, 'tool_call', { role: roleName, tool: toolCall.function.name, arguments: toolCall.function.arguments })
+			maybeLogObservation(deps, toolPlatform, ownRoleId, toolCall.function.name, result)
+			logEvent(deps.appendLog, 'tool_result', { role: roleName, tool: toolCall.function.name, kind: result.kind, result })
+		}
+		// A resumed pending call can fail validation (its tool left the Guild) after its start was already written; close that started invocation even though the failure is diagnostic-only for a fresh dispatch.
+		if (diagnostic && options.invocation !== undefined && deps.invocationJournal.hasStarted(options.invocation.callId)) {
+			deps.invocationJournal.toolFinished(options.invocation, roleName, result)
+		}
+	}
+
+	appendToolMessage(roleState, toolCall, result, maxToolOutputChars)
 
 	if (toolCall.function.name === 'finish' && result.kind === 'success' && isResultCard(result.data)) {
 		return result.data
 	}
 	return null
+}
+
+function appendToolMessage(roleState: RoleState, toolCall: ToolCall, result: ToolResult, maxToolOutputChars: number): void {
+	roleState.history.push({
+		role: 'tool',
+		content: serializeToolResult(result, maxToolOutputChars),
+		tool_call_id: toolCall.id,
+	})
+	roleState.toolCallCount += 1
+	roleState.recentToolCalls.push({ tool: toolCall.function.name, argsHash: hashArguments(toolCall.function.arguments), resultKind: result.kind })
+	if (roleState.recentToolCalls.length > RECENT_TOOL_CALLS_LIMIT) roleState.recentToolCalls.shift()
+}
+
+// Closes calls an earlier final card prevented from running. Each gets its own interrupted lifecycle and tool message so the assistant turn is fully answered before the completed checkpoint is written.
+function closeUnexecutedCalls(deps: EngineDependencies, roleState: RoleState, context: EngineContext, registryEntry: RoleRegistryEntry, dispatchCtx: DispatchContext, toolCalls: ToolCall[], startIndex: number): void {
+	const message = 'Not executed because an earlier call in the batch ended the role.'
+	const result: ToolResult = { kind: 'interrupted', message }
+	const interruptedContent = serializeToolResult(result, dispatchCtx.maxToolOutputChars)
+	// Reconciliation can retry after a crash that already appended some forced results. Count existing interrupted messages by id+content, not just id: two later calls may legitimately reuse one model id and each still needs its own lifecycle.
+	const existing = new Map<string, number>()
+	for (const historyMessage of roleState.history) {
+		if (historyMessage.role !== 'tool' || historyMessage.tool_call_id === undefined) continue
+		const key = `${historyMessage.tool_call_id}\u0000${historyMessage.content}`
+		existing.set(key, (existing.get(key) ?? 0) + 1)
+	}
+	for (let index = startIndex; index < toolCalls.length; index++) {
+		const toolCall = toolCalls[index]
+		if (toolCall === undefined) continue
+		const key = `${toolCall.id}\u0000${interruptedContent}`
+		const remaining = existing.get(key) ?? 0
+		if (remaining > 0) {
+			existing.set(key, remaining - 1)
+			continue
+		}
+		const invocation = deps.invocationJournal.allocateToolCall(toolCall, registryEntry.roleId)
+		deps.invocationJournal.toolStarted(invocation, context.roleName)
+		deps.invocationJournal.toolFinished(invocation, context.roleName, result)
+		appendToolMessage(roleState, toolCall, result, dispatchCtx.maxToolOutputChars)
+	}
 }
 
 // Freezes the checkpoint at the park moment, before the mark unwinds the role: the ask's tool result was recorded live but not yet checkpointed (the checkpoint is written at the loop top, before the LLM call), and ancestor unwinds would otherwise overwrite it with a state that no longer has the parked turn. Only the parked role writes; every other frame's later write is suppressed by the freeze.
@@ -272,7 +445,16 @@ function deliverParkedAnswer(deps: EngineDependencies, roleState: RoleState, par
 		...existing,
 		content: serializeToolResult({ kind: 'success', data: { question: parkedAnswer.question, answer: parkedAnswer.answer } }, maxToolOutputChars),
 	}
-	logEvent(deps.appendLog, 'human_answer', { id: parkedAnswer.toolCallId, question: parkedAnswer.question, answer: parkedAnswer.answer })
+	const parkedAsk = deps.parkTracker.parkedAsk
+	const callId = parkedAsk?.callId ?? toolCallId(parkedAnswer.toolCallId)
+	const questionId = parkedAsk?.questionId ?? parkedAnswer.toolCallId
+	// Delivery is retried from the frozen checkpoint after a crash, so a human_answer already made durable must not be emitted again.
+	const alreadyAnswered = findTerminalEvent(deps.readRunLogEvents(deps.runId), 'human_answer', callId) !== undefined
+	if (!alreadyAnswered) logEvent(deps.appendLog, 'human_answer', humanAnswerPayload(questionId, callId, parkedAnswer.answer, parkedAnswer.question))
+	if (!deps.invocationJournal.hasTerminal(callId)) {
+		deps.invocationJournal.markStarted(callId)
+		deps.invocationJournal.markTerminal(callId)
+	}
 	deps.parkTracker.parkedQuestion = undefined
 	deps.parkTracker.parkedAsk = undefined
 	// The frozen checkpoint still covers the mid-batch window; the caller writes the unparked state only once all remaining calls have results, so a crash here still retries delivery from the old parked checkpoint.
@@ -338,23 +520,31 @@ export async function runRole(deps: EngineDependencies, context: EngineContext, 
 	if (resumed?.planAbort === true) registryEntry.planAbort = true
 	if (resumed?.planInjection !== undefined) registryEntry.planInjection = resumed.planInjection
 	deps.checkpointRecorder.registerFrame(context, registryEntry)
-	// A role resumed mid-suspension restores its pending marker so checkpoints taken while the resumed child runs capture the suspension exactly as the live dispatch path does.
+	// A role resumed mid-suspension restores its pending marker so checkpoints taken while the resumed child runs capture the suspension exactly as the live dispatch path does. A legacy suspension keeps its old shape; a new one carries the invocation identity.
 	if (resumed?.suspendedTurn !== undefined) {
-		deps.checkpointRecorder.setPending(registryEntry.roleId, { toolCalls: resumed.suspendedTurn.toolCalls, childIndex: resumed.suspendedTurn.childIndex })
+		deps.checkpointRecorder.setPending(
+			registryEntry.roleId,
+			resumed.suspendedTurn.callId !== undefined && resumed.suspendedTurn.parentCallId !== undefined
+				? { toolCalls: resumed.suspendedTurn.toolCalls, index: resumed.suspendedTurn.childIndex, callId: resumed.suspendedTurn.callId, parentCallId: resumed.suspendedTurn.parentCallId }
+				: { toolCalls: resumed.suspendedTurn.toolCalls, childIndex: resumed.suspendedTurn.childIndex },
+		)
 	}
+	if (resumed?.pendingInvocation !== undefined) deps.checkpointRecorder.setPending(registryEntry.roleId, resumed.pendingInvocation)
 
-	// role_start is emitted after the role definition is confirmed to exist and the instance is registered, so an unknown entry role still fires role_not_found without leaving an orphan role_start, and the event can carry the instance id the interrupt platform targets. The depth and optional parent let source/run-log reconstruct the parent→child tree, and parentRoleId names the parent instance exactly so a client can walk the instance chain without guessing among same-named ancestors (the inspector's breadcrumb). A resumed role skips the event: its role_start is already in the log from before the restart.
+	// role_start is emitted after the role definition is confirmed to exist and the instance is registered, so an unknown entry role still fires role_not_found without leaving an orphan role_start, and the event can carry the instance id the interrupt platform targets. The depth and optional parent let source/run-log reconstruct the parent→child tree, parentRoleId names the parent instance exactly, and parentCallId carries the invocation that caused this role (a normal caller role or an interrupt). A resumed role skips the event: its role_start is already in the log from before the restart, so its role id is seeded as started to allow the single terminal.
 	if (resumed === undefined) {
-		const roleStartPayload: Record<string, unknown> = {
-			role: context.roleName,
+		deps.invocationJournal.roleStarted({
+			roleName: context.roleName,
 			roleId: registryEntry.roleId,
 			depth: context.depth,
 			task: context.task,
-		}
-		if (context.parent !== undefined) roleStartPayload['parent'] = context.parent
-		if (context.parentRoleId !== undefined) roleStartPayload['parentRoleId'] = context.parentRoleId
-		if (seeded !== undefined) roleStartPayload['continuedFrom'] = seeded.continuedFrom
-		logEvent(deps.appendLog, 'role_start', roleStartPayload)
+			...(context.parent !== undefined ? { parent: context.parent } : {}),
+			...(context.parentRoleId !== undefined ? { parentRoleId: context.parentRoleId } : {}),
+			...(context.parentCallId !== undefined ? { parentCallId: context.parentCallId } : {}),
+			...(seeded !== undefined ? { continuedFrom: seeded.continuedFrom } : {}),
+		})
+	} else {
+		deps.invocationJournal.seedStartedCallIds([roleCallId(registryEntry.roleId)])
 	}
 
 	const allowedToolsManifests: ToolManifest[] = []
@@ -379,21 +569,19 @@ export async function runRole(deps: EngineDependencies, context: EngineContext, 
 				error: createToolError('unknown_tool', `Unknown role: ${childRoleName}`),
 			})
 		}
-		// agent_call logs the parent→child edge with depth before the child runs, so the parent→child linkage is recoverable even from a caller that does not read role_start.
+		// agent_call is a diagnostic parent→child edge with depth, logged before the child runs; it carries no invocation ids because role_start/role_finished and the tool lifecycle are the authoritative identified events.
 		logEvent(deps.appendLog, 'agent_call', { parent: context.roleName, child: childRoleName, depth: context.depth + 1 })
-		const childCard = await runRole(
-			deps,
-			{
-				...context,
-				depth: context.depth + 1,
-				roleName: childRoleName,
-				task: childTask,
-				parent: context.roleName,
-				parentRoleId: registryEntry.roleId,
-			},
-			undefined,
-			seed,
-		)
+		// A delegated child is parented to this role instance's invocation, but it keeps the handler mark: the whole handler subtree is atomic with respect to checkpoint writes and must not park.
+		const delegatedContext: EngineContext = {
+			...context,
+			depth: context.depth + 1,
+			roleName: childRoleName,
+			task: childTask,
+			parent: context.roleName,
+			parentRoleId: registryEntry.roleId,
+			parentCallId: roleCallId(registryEntry.roleId),
+		}
+		const childCard = await runRole(deps, delegatedContext, undefined, seed)
 		// The child is done: record its card on this frame's pending suspension and checkpoint, so a restart here resumes by delivering the recorded card instead of re-running the child. The card is delivered to the conversation by recordToolResult after this handler returns.
 		deps.checkpointRecorder.setPendingChildCard(registryEntry.roleId, childCard)
 		deps.checkpointRecorder.write()
@@ -438,12 +626,19 @@ export async function runRole(deps: EngineDependencies, context: EngineContext, 
 		maxToolOutputChars: guild.deployment.contextPolicy.maxToolOutputChars,
 	}
 
-	const finalCard = await executeRoleLoop(deps, context, roleState, registryEntry, allowedToolsManifests, dispatchCtx, resumed?.suspendedTurn, resumed?.resumeNote, resumed?.parkedAnswer)
-	// A direct clarification finish ends after the turn's tool calls are all recorded, but the last safe-point write predates them (a batched agent call still had a pending suspension). Write the completed root turn now, before the frame leaves the recorder, so the resume note lands after the tool results and the next LLM call gets a turn with the answer. Only a turn whose final tool call is the answered finish is safe to persist: a batched finish followed by another call leaves that call unanswered, so the clean pre-turn checkpoint stays in place. The parked path is excluded: its frozen checkpoint is captured at the park moment and must not be overwritten.
-	if (context.depth === 0 && finalCard.status === 'needs_clarification' && deps.parkTracker.parkedAsk === undefined && lastTurnEndsWithCompletedFinish(roleState.history)) deps.checkpointRecorder.write()
+	const finalCard = await executeRoleLoop(deps, context, roleState, registryEntry, allowedToolsManifests, dispatchCtx, resumed?.suspendedTurn, resumed?.resumeNote, resumed?.parkedAnswer, resumed?.pendingInvocation, resumed?.explicitResume)
+	// A finish terminal ends the turn; its dispatch closes any later calls and persists the fully answered turn. Write once more here when the card is a durable terminal, so an error or clarification resume sees a completed conversation. The parked path is excluded: its frozen checkpoint is captured at the park moment and must not be overwritten.
+	if (context.depth === 0 && (finalCard.status === 'error' || finalCard.status === 'needs_clarification') && deps.parkTracker.parkedAsk === undefined && completedFinishCard(roleState.history) !== null) deps.checkpointRecorder.write()
 	deps.roleRegistry.unregister(registryEntry.roleId)
 	deps.checkpointRecorder.unregisterFrame(registryEntry.roleId)
-	logEvent(deps.appendLog, 'role_finished', roleFinishedPayload(context.roleName, context.depth, finalCard, context.parent, registryEntry.roleId))
+	deps.invocationJournal.roleFinished({
+		roleName: context.roleName,
+		roleId: registryEntry.roleId,
+		depth: context.depth,
+		card: finalCard,
+		...(context.parent !== undefined ? { parent: context.parent } : {}),
+		pausesRun: finalCard.status === 'needs_clarification' && (context.depth === 0 || deps.parkTracker.parkedAsk !== undefined),
+	})
 	// A finished child is persisted so its parent can later continue it as a new seeded instance, across a restart. Only children qualify (a root has no parent to continue it) and handler instances are excluded — they are platform-invoked and never a parent's delegation.
 	if (context.parentRoleId !== undefined && context.handlerOf === undefined) {
 		deps.roleSnapshots.write({
@@ -474,36 +669,75 @@ async function dispatchToolCallSequence(
 		if (toolCall === undefined) continue
 		// The park mark checked between dispatches is load-bearing (docs/queueing.md "Parking: the pre-write rule"): a batched ask_human + agent turn must not start the child after the park decision, or the run writes after the pre-write premise was decided. The mark is run-scoped, so a suspended ancestor unwinds here with the same platform-authored park card once its child's card has propagated up. The frozen park checkpoint is captured by the parked role before it unwinds.
 		if (deps.parkTracker.parkedQuestion !== undefined) {
+			// The just-finished call is already in history; the parked checkpoint is the durable boundary and must not carry a pending marker.
+			deps.checkpointRecorder.setPending(registryEntry.roleId, undefined)
 			captureParkCheckpoint(deps, registryEntry.roleId)
 			return parkCard(deps.parkTracker.parkedQuestion)
 		}
-		// A child-spawning dispatch suspends this role mid-turn until the child returns; record the suspension so a checkpoint taken while the child runs captures where this role resumes. Cleared once the dispatch settles.
-		if (dispatchCtx.toolPlatform.suspendsChild(toolCall.function.name)) {
-			deps.checkpointRecorder.setPending(registryEntry.roleId, { toolCalls, childIndex: index })
+		// Unknown and not-allowed names keep today's diagnostic-only logging and are not invocations, so they are rejected before any pending record or start event exists.
+		const invalid = dispatchCtx.toolPlatform.validateCall(dispatchCtx.roleDefinition, dispatchCtx.scope, toolCall)
+		if (invalid !== null) {
+			const finalCard = recordToolResult(deps, dispatchCtx.toolPlatform, roleState, context.roleName, registryEntry.roleId, dispatchCtx.maxToolOutputChars, toolCall, invalid, {})
+			if (finalCard !== null) return finalCard
+			if (index + 1 >= toolCalls.length) {
+				deps.checkpointRecorder.setPending(registryEntry.roleId, undefined)
+				deps.checkpointRecorder.write()
+			}
+			continue
 		}
-		const finalCard = await dispatchAndRecord({ deps, roleState, roleName: context.roleName, ownRoleId: registryEntry.roleId, dispatchCtx, toolCall })
-		if (dispatchCtx.toolPlatform.suspendsChild(toolCall.function.name)) {
+		const invocation = deps.invocationJournal.allocateToolCall(toolCall, registryEntry.roleId)
+		const isAsk = toolCall.function.name === 'ask_human'
+		// The pre-dispatch checkpoint is the durable point for every call. It is deliberately not overwritten after a non-final result: the on-disk state keeps the call pending so a crash replays it and then continues at the next call.
+		const pending: PendingInvocation = { callId: invocation.callId, parentCallId: invocation.parentCallId, toolCalls, index }
+		deps.checkpointRecorder.setPending(registryEntry.roleId, pending)
+		deps.checkpointRecorder.write()
+		if (!isAsk) deps.invocationJournal.toolStarted(invocation, context.roleName)
+		const result = await dispatchCtx.toolPlatform.dispatch(dispatchCtx.roleDefinition, dispatchCtx.scope, toolCall, invocation)
+		if (isAsk) {
+			if (result.kind === 'success') {
+				// The ask handler/backend wrote ask_human (and later human_answer); mirror the lifecycle into the journal so a later duplicate cannot re-close it.
+				deps.invocationJournal.markStarted(invocation.callId)
+				if (!isParkedAskResult(result)) deps.invocationJournal.markTerminal(invocation.callId)
+			} else if (!deps.invocationJournal.hasStarted(invocation.callId)) {
+				// The handler rejected before it emitted ask_human (e.g. malformed arguments). Give the invocation a visible, closed generic lifecycle instead of leaving nothing in the log.
+				deps.invocationJournal.toolStarted(invocation, context.roleName)
+				deps.invocationJournal.toolFinished(invocation, context.roleName, result)
+			}
+		}
+		const finalCard = recordToolResult(deps, dispatchCtx.toolPlatform, roleState, context.roleName, registryEntry.roleId, dispatchCtx.maxToolOutputChars, toolCall, result, { invocation })
+		const hasLaterCalls = index + 1 < toolCalls.length
+		if (finalCard !== null) {
+			// The role is ending, so the later calls must not run. Close them explicitly and persist the fully answered turn; a crash after this point must not resume with unanswered calls.
+			if (hasLaterCalls) closeUnexecutedCalls(deps, roleState, context, registryEntry, dispatchCtx, toolCalls, index + 1)
 			deps.checkpointRecorder.setPending(registryEntry.roleId, undefined)
+			deps.checkpointRecorder.write()
+			return finalCard
 		}
-		if (finalCard !== null) return finalCard
+		if (!hasLaterCalls) {
+			deps.checkpointRecorder.setPending(registryEntry.roleId, undefined)
+			deps.checkpointRecorder.write()
+		}
 	}
 	return null
 }
 
 // Completes a resumed role's suspended turn: the child card is resolved (re-running the child frame's resume when the checkpoint has no recorded card), checkpointed onto the pending suspension exactly as the live role_finished path does, and recorded as the child-spawning call's tool result — the agent_call event and the child's events are already in the log from the live dispatch. The turn's remaining tool calls then dispatch normally.
-// resumeNote is delivered at this walk's equivalent loop entry — after the recorded tool result, before the remaining calls execute — so a turn whose remaining calls include finish still carries the note in its conversation even though no further LLM request happens; the ordering rule holds (never between an assistant tool_calls message and its tool results). Undefined for boot reconciliation.
+// resumeNote is delivered only after every remaining tool result of the batch, so it can never land between an assistant tool_calls message and its results. A remaining completed finish still leaves a closed turn, so the note follows it; any other early terminal is skipped. Undefined for boot reconciliation.
 async function completeSuspendedTurn(deps: EngineDependencies, context: EngineContext, roleState: RoleState, registryEntry: RoleRegistryEntry, dispatchCtx: DispatchContext, suspendedTurn: SuspendedTurn, resumeNote?: string): Promise<ResultCard | null> {
 	const childCall = suspendedTurn.toolCalls[suspendedTurn.childIndex]
 	if (childCall === undefined) throw new Error(`completeSuspendedTurn: childIndex ${suspendedTurn.childIndex} out of range in a validated checkpoint`)
 	const childCard = await suspendedTurn.resolveChildCard()
 	deps.checkpointRecorder.setPendingChildCard(registryEntry.roleId, childCard)
 	deps.checkpointRecorder.write()
-	recordToolResult(deps, dispatchCtx.toolPlatform, roleState, context.roleName, registryEntry.roleId, dispatchCtx.maxToolOutputChars, childCall, { kind: 'success', data: childCard })
+	const invocation = suspendedTurn.callId !== undefined && suspendedTurn.parentCallId !== undefined
+		? deps.invocationJournal.adoptToolCall(childCall, suspendedTurn.callId, suspendedTurn.parentCallId)
+		: undefined
+	if (invocation !== undefined) deps.invocationJournal.toolStarted(invocation, context.roleName)
+	recordToolResult(deps, dispatchCtx.toolPlatform, roleState, context.roleName, registryEntry.roleId, dispatchCtx.maxToolOutputChars, childCall, { kind: 'success', data: childCard }, invocation !== undefined ? { invocation } : {})
 	deps.checkpointRecorder.setPending(registryEntry.roleId, undefined)
-	if (resumeNote !== undefined) {
-		roleState.history.push({ role: 'user', content: resumeNote })
-	}
-	return dispatchToolCallSequence(deps, context, roleState, registryEntry, dispatchCtx, suspendedTurn.toolCalls, suspendedTurn.childIndex + 1)
+	const remainingCard = await dispatchToolCallSequence(deps, context, roleState, registryEntry, dispatchCtx, suspendedTurn.toolCalls, suspendedTurn.childIndex + 1)
+	if (resumeNote !== undefined && (remainingCard === null || completedFinishCard(roleState.history) !== null)) roleState.history.push({ role: 'user', content: resumeNote })
+	return remainingCard
 }
 
 // The role's turn loop, extracted from runRole so every exit emits exactly one role_finished at the runRole call site, guaranteeing the role_start/role_finished pairing regardless of which budget or finish path terminates the role.
@@ -517,23 +751,36 @@ async function executeRoleLoop(
 	suspendedTurn?: SuspendedTurn,
 	resumeNote?: string,
 	parkedAnswer?: ParkedAnswer,
+	pendingInvocation?: PendingInvocation,
+	explicitResume?: boolean,
 ): Promise<ResultCard> {
 	const config = context.loadedGuild.deployment.executor
 	const contextManager = createContextManager(context, {
 		appendLog: deps.appendLog,
 		contextPressureTracker: deps.contextPressureTracker,
+		invocationJournal: deps.invocationJournal,
 		runRole: (handlerContext) => runRole(deps, handlerContext),
 	})
+	// A fully answered finish turn is already the role's outcome. A boot resume returns it without another LLM call; a resume carrying a note or answer must continue instead, because that note is appended to history before this point (or injected by the reconciliation below).
+	if (pendingInvocation === undefined && suspendedTurn === undefined && parkedAnswer === undefined && resumeNote === undefined && explicitResume !== true) {
+		const completedCard = completedFinishCard(roleState.history)
+		if (completedCard !== null) return completedCard
+	}
 	// The answer is delivered before any note or suspended-turn completion: it replaces the existing ask_human result in place and then continues that same assistant turn, so the conversation is exactly the blocking path's.
 	if (parkedAnswer !== undefined) {
 		deliverParkedAnswer(deps, roleState, parkedAnswer, dispatchCtx.maxToolOutputChars)
 		const continuedCard = await continueParkedTurn(deps, context, roleState, registryEntry, dispatchCtx, parkedAnswer.toolCallId)
 		// Only a completed turn boundary is safe to checkpoint: write when the continued turn has no finish card, or when its finish is the turn's last call and therefore has a recorded result. A later batched call after finish would be left unanswered, and a remaining call that parked again has frozen the recorder, so in both cases the existing checkpoint survives.
-		if (continuedCard === null || lastTurnEndsWithCompletedFinish(roleState.history)) deps.checkpointRecorder.write()
+		if (continuedCard === null || completedFinishCard(roleState.history) !== null) deps.checkpointRecorder.write()
 		if (continuedCard !== null) return continuedCard
 	}
-	// The note is delivered exactly once, at the resumed role's equivalent loop entry: inside the suspended-turn completion when there is one (its remaining calls may include the finish that terminates the role without a further LLM request), else at the loop top. Either way it lands after the previous turn's tool results and before the role's next decision, and the loop top's checkpoint write persists it like any other history message.
+	// The note is delivered exactly once, at the resumed role's equivalent loop entry: inside pending/suspended-turn completion when there is one (its remaining calls may include the finish that terminates the role without a further LLM request), else at the loop top. Either way it lands after the previous turn's tool results and before the role's next decision, and the loop top's checkpoint write persists it like any other history message.
 	let noteToInject = resumeNote
+	if (pendingInvocation !== undefined) {
+		const reconciledCard = await reconcilePendingInvocation(deps, context, roleState, registryEntry, dispatchCtx, pendingInvocation, noteToInject)
+		noteToInject = undefined
+		if (reconciledCard !== null) return reconciledCard
+	}
 	if (suspendedTurn !== undefined) {
 		const completedCard = await completeSuspendedTurn(deps, context, roleState, registryEntry, dispatchCtx, suspendedTurn, noteToInject)
 		noteToInject = undefined

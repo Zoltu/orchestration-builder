@@ -19,7 +19,7 @@ const LLM_CALL_KEPT_FIELDS: readonly string[] = ['role', 'roleId', 'messageCount
 const LLM_RETRY_KEPT_FIELDS: readonly string[] = ['role', 'roleId', 'discardedAttempts', 'usage']
 // The summarizer's usage event is written by the service wiring outside the run's filter chokepoint, but it is listed here so its token fields are declared kept should it ever flow through the filter; its payload carries nothing else.
 const SUMMARIZER_LLM_CALL_KEPT_FIELDS: readonly string[] = ['usage']
-const TOOL_RESULT_KEPT_FIELDS: readonly string[] = ['role', 'tool', 'kind']
+const TOOL_RESULT_KEPT_FIELDS: readonly string[] = ['role', 'tool', 'kind', 'callId', 'parentCallId']
 
 const KEPT_FIELDS_BY_EVENT_TYPE: Partial<Record<string, readonly string[]>> = {
 	llm_call: LLM_CALL_KEPT_FIELDS,

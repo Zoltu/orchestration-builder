@@ -1,6 +1,6 @@
 import { createCheckpointRecorder, isRunCheckpoint, type CheckpointRecorder, type RunCheckpoint } from './checkpoint.js'
 import type { ContextPressureTracker } from './context/index.js'
-import type { HumanBackend } from './human-backend.js'
+import type { HumanAskInvocation, HumanBackend } from './human-backend.js'
 import type { LoadedGuild } from './loader.js'
 import { createRunBaseTracker, type RunBaseTracker } from './base-state.js'
 import { createRunParkTracker, type RunParkTracker } from './park-state.js'
@@ -71,7 +71,8 @@ export function recordingHumanBackend(): RecordingHumanBackend {
 	const questions: Array<{ question: string; context?: string }> = []
 	return {
 		questions,
-		ask: async (question, context) => {
+		ask: async (question: string, invocationOrContext?: HumanAskInvocation | string, maybeContext?: string): Promise<string> => {
+			const context = typeof invocationOrContext === 'string' ? invocationOrContext : maybeContext
 			questions.push({ question, context })
 			return 'use your best judgement'
 		},

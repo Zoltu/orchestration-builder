@@ -824,17 +824,19 @@ describe('createResumeErroredRun', () => {
 		return { id: 'item-1', task: 'do it', status: 'error', runId: 'run-20260101-000009', queuedAt: '2026-01-01T00:00:00.000Z', settledAt: '2026-01-01T00:05:00.000Z', error: 'LLM unavailable: connection refused' }
 	}
 
-	function createHarness(input: { metas: Map<string, string>; checkpoints: Map<string, string>; queue?: Array<QueueItemView> }): { resumeErroredRun: ReturnType<typeof createResumeErroredRun>; submission: RunSubmission; queue: ReturnType<typeof createQueueStore>; resumedNotes: () => Array<string | undefined> } {
+	function createHarness(input: { metas: Map<string, string>; checkpoints: Map<string, string>; queue?: Array<QueueItemView> }): { resumeErroredRun: ReturnType<typeof createResumeErroredRun>; submission: RunSubmission; queue: ReturnType<typeof createQueueStore>; resumedNotes: () => Array<string | undefined>; resumedExplicit: () => Array<boolean | undefined> } {
 		const queue = createQueueStore(input.queue ?? [])
 		const readers = createReaders(input.metas, input.checkpoints)
 		let resumeNote: string | undefined
+		let explicitResume: boolean | undefined
 		const resumeRun: ResumeRun = async (checkpoint, options) => {
 			resumeNote = options?.resumeNote
+			explicitResume = options?.explicitResume
 			return sampleMeta(checkpoint.runId)
 		}
 		const submission = createRunSubmission({ onRunSettled: settleNothing, startRun: unusedStartRun, resumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings, runDirectoryExists: emptyRunsDir })
 		const dependencies: ResumeErroredRunDependencies = { runSubmission: submission, readRunMetaById: readers.readRunMetaById, readCheckpointById: readers.readCheckpointById, taskQueue: createQueueModule(queue, submission, readers) }
-		return { resumeErroredRun: createResumeErroredRun(dependencies), submission, queue, resumedNotes: () => [resumeNote] }
+		return { resumeErroredRun: createResumeErroredRun(dependencies), submission, queue, resumedNotes: () => [resumeNote], resumedExplicit: () => [explicitResume] }
 	}
 
 	test('a happy resume re-activates the settled item, threads the framed note, and reports the same run id', async () => {
@@ -862,6 +864,16 @@ describe('createResumeErroredRun', () => {
 		expect(harness.queue.snapshot().items.find((entry) => entry.id === 'item-1')?.status).toBe('active')
 		await harness.submission.awaitActive()
 		expect(harness.resumedNotes()).toEqual([undefined])
+	})
+
+	test('every explicit error resume is marked explicit even without a note', async () => {
+		const metas = new Map([['run-20260101-000009', JSON.stringify(erroredMeta('run-20260101-000009'))]])
+		const checkpoints = new Map([['run-20260101-000009', JSON.stringify(sampleCheckpoint('run-20260101-000009'))]])
+		const harness = createHarness({ metas, checkpoints })
+
+		harness.resumeErroredRun('run-20260101-000009', undefined)
+		await harness.submission.awaitActive()
+		expect(harness.resumedExplicit()).toEqual([true])
 	})
 
 	test('a run with no matching queue item still resumes — the queue record does not gate the run', async () => {
@@ -1143,17 +1155,19 @@ describe('createResumeClarificationRun', () => {
 })
 
 describe('createTerminateParkedRun', () => {
-	function harness(input: { metas?: Map<string, string> } = {}): {
+	function harness(input: { metas?: Map<string, string>; logsByRun?: Map<string, LogEvent[]> } = {}): {
 		terminateParkedRun: ReturnType<typeof createTerminateParkedRun>
 		metas: Map<string, string>
 		deleted: string[]
 		logs: Array<{ runId: string; event: LogEvent }>
 	} {
 		const metas = new Map(input.metas ?? [])
+		const logsByRun = new Map(input.logsByRun ?? [])
 		const deleted: string[] = []
 		const logs: Array<{ runId: string; event: LogEvent }> = []
 		const terminateParkedRun = createTerminateParkedRun({
 			readRunMetaById: (runId) => metas.get(runId) ?? null,
+			readRunLogEvents: (runId) => logsByRun.get(runId) ?? [],
 			writeMetaFor: (runId) => (meta) => {
 				metas.set(runId, JSON.stringify(meta))
 			},
@@ -1252,5 +1266,21 @@ describe('createTerminateParkedRun', () => {
 			expect(testHarness.deleted).toEqual([])
 			expect(testHarness.logs).toEqual([])
 		}
+	})
+
+	test('termination closes open invocations from the log even when the checkpoint is gone', () => {
+		const runId = 'run-20260101-000009'
+		const existing: LogEvent[] = [
+			{ timestamp: 't1', type: 'role_start', payload: { role: 'main', roleId: 'main-0-1', callId: 'role:main-0-1', depth: 0 } },
+			{ timestamp: 't2', type: 'ask_human', payload: { id: 'ask-1', callId: 'tool:ask-1', parentCallId: 'role:main-0-1', question: 'which?' } },
+		]
+		const testHarness = harness({
+			metas: new Map([[runId, JSON.stringify(parkedMeta(runId))]]),
+			logsByRun: new Map([[runId, existing]]),
+		})
+
+		expect(testHarness.terminateParkedRun(runId)).toEqual({ ok: true, runId })
+		expect(testHarness.logs.map((log) => log.event.type)).toEqual(['human_answer', 'role_finished', 'run_terminated'])
+		expect(testHarness.logs[1]?.event.payload).toMatchObject({ callId: 'role:main-0-1', status: 'error', error: { kind: 'interrupted' } })
 	})
 })

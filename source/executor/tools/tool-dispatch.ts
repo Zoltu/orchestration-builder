@@ -33,12 +33,18 @@ export function createToolDispatch(handlers: Record<string, ToolHandler>): ToolD
 	return { dispatch }
 }
 
-export async function dispatchToolCall(config: DispatchToolCallConfig, call: ToolCall): Promise<ToolResult> {
+export function validateToolCall(config: Pick<DispatchToolCallConfig, 'allowedTools' | 'manifestNames'>, call: ToolCall): ToolResult | null {
 	if (!config.manifestNames.includes(call.function.name)) {
 		return createToolError('unknown_tool', `Tool ${call.function.name} is not registered in the Guild`)
 	}
 	if (!config.allowedTools.includes(call.function.name)) {
 		return createToolError('invalid_tool_call', `Tool ${call.function.name} not allowed for this role`)
 	}
+	return null
+}
+
+export async function dispatchToolCall(config: DispatchToolCallConfig, call: ToolCall): Promise<ToolResult> {
+	const invalid = validateToolCall(config, call)
+	if (invalid !== null) return invalid
 	return await config.dispatch.dispatch(call)
 }

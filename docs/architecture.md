@@ -34,7 +34,7 @@ The executor provides the stage. The Guild is the script. The Foundry is the pla
 2. The executor loads the Guild and starts the entry role with the task; a run that continues a prior one first inserts that run's operator task and terminal result as reference turns (a user turn and an assistant turn) ahead of the new task's user message, so the entry role reads the prior outcome as conversation rather than as part of its own task. When the entry role declares `projectDocs`, their contents are injected into its initial user message as untrusted project reference material (see [`docs/security.md`](security.md) "Attack surface").
 3. The active role calls tools. Tool results are appended to the role's conversation. If the role calls `agent`, a child role runs to completion and returns a result card. If the role calls `ask_human`, the question surfaces in the web UI and the run pauses for an answer.
 4. The run ends when the entry role calls `finish` or a hard safety budget is exhausted.
-5. The executor writes `meta.json` and `log.jsonl` under `<workspace>/.orchestration/runs/<run_id>/`. The workspace itself holds the final filesystem state — the executor modified it in place.
+5. The executor writes `meta.json` and `log.jsonl` under `<workspace>/.orchestration/runs/<run_id>/`; the log is a durable invocation journal of identified starts and terminals, and `state.json` records the pending invocation at each dispatch so a restart can reconcile a call rather than leave it open. The workspace itself holds the final filesystem state — the executor modified it in place.
 
 ## Data flow: an optimization cycle
 
@@ -44,6 +44,7 @@ The Foundry reads the current Guild and recent run logs, prompts a large model t
 
 - **Single model on the executor.** The executor talks to exactly one OpenAI-compatible endpoint, using the streaming Responses API (`POST {apiBase}/responses`).
 - **Sequential.** Only one LLM request is in flight at a time. A run is a depth-first traversal of the role tree.
+- **Durable invocation journal.** Every role, tool, ask, and interrupt invocation carries a stable `callId` and parent, and the checkpoint records the pending invocation before dispatch, so a restart reconciles or replays an in-flight call instead of leaving it accidentally open. The run view projects this journal by identity rather than inferring parentage from event order. See [`docs/reference.md`](reference.md) "Run persistence and resumption" and [`docs/visualization.md`](visualization.md).
 - **One dispatched run plus a durable backlog.** The server runs one run at a time, dispatched from a durable task queue (`<workspace>/.orchestration/queue.json`): every task enters the queue, the scheduler dispatches the head waiting item whenever the run slot is free, and queued tasks survive restarts. A run that asks before any write-capable role starts parks with a frozen checkpoint, and the operator's answer resumes that same run by delivering the answer as the existing `ask_human` tool result. See [`docs/queueing.md`](queueing.md).
 - **In-place workspace.** The executor modifies the mounted project directly, exactly as a developer would. Run bookkeeping goes under `<workspace>/.orchestration/`.
 - **No dependencies.** The executor uses only Bun built-ins and web-standard APIs. No npm packages.

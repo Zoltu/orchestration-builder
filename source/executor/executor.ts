@@ -9,11 +9,12 @@ import { EMPTY_TREE_HASH } from './git-primitives.js'
 import { formatWorkspaceGitNotice, type ReadWorkspaceGitState } from './git-state.js'
 import { runRole } from './engine.js'
 import { logEvent, type EngineContext, type EngineDependencies } from './engine-state.js'
+import { createInvocationJournal, humanAnswerPayload, toolCallId } from './invocation.js'
 import type { HumanBackend } from './human-backend.js'
 import type { InterruptQueue } from './interrupts.js'
 import type { LlmCaller } from './llm.js'
 import type { LoadedGuild } from './loader.js'
-import type { AppendLog, DeleteCheckpoint, RunDirectory, WriteCheckpoint, WriteMeta } from './persistence.js'
+import type { AppendLog, DeleteCheckpoint, ReadRunLogEvents, RunDirectory, WriteCheckpoint, WriteMeta } from './persistence.js'
 import type { ReadProjectDoc } from './project-docs.js'
 import { resumeRoleStack } from './resume.js'
 import { createRoleRegistry } from './role-registry.js'
@@ -40,6 +41,8 @@ export interface ExecutorDependencies {
 	roleSnapshots: RoleSnapshotStore
 	// The leaf that reads a role's declared projectDocs from the workspace (project-docs.ts), closed over the workspace root by the service. Rides into EngineDependencies so buildInitialHistory can inject the entry role's project-context block at run start.
 	readProjectDoc: ReadProjectDoc
+	// The run's existing log events, read at resume so a pending invocation whose terminal was already durable is reconciled without re-dispatching or duplicating the terminal.
+	readRunLogEvents: ReadRunLogEvents
 	// The run-scoped base commit state, created by the caller so the service can share it with the git tool handlers; runExecutor records the starting base and resumeExecutor restores it from the checkpoint.
 	baseTracker: RunBaseTracker
 	// The leaf that reads the workspace's git state once at run start (git-state.ts), closed over the workspace root by the service. runExecutor uses it to record the base and build the entry role's git notice.
@@ -71,7 +74,10 @@ function buildEngineDependencies(deps: ExecutorDependencies, input: EngineDepend
 	return {
 		llmCaller: deps.llmCaller,
 		appendLog: deps.appendLog,
+		runId: input.runId,
+		readRunLogEvents: deps.readRunLogEvents,
 		toolPlatform: deps.toolPlatform,
+		invocationJournal: createInvocationJournal(deps.appendLog),
 		humanBackend: deps.humanBackend,
 		roleRegistry,
 		interruptQueue: deps.interruptQueue,
@@ -167,6 +173,8 @@ export interface ResumeRunOptions {
 	clarificationAnswer?: ClarificationAnswerDelivery
 	// Restored only by the queue's answer resume: it keeps the resumed run's park behavior live. Boot reconciliation and the explicit error-resume stay untracked, so their asks block on /api/answer.
 	queueTracked?: boolean
+	// Set only by the operator-driven error resume, never by boot reconciliation: an explicit resume must continue to a fresh LLM turn even when the checkpoint already ends with a completed finish.
+	explicitResume?: boolean
 }
 
 // Resumes a run from its checkpoint after a service restart. The run's identity (run id, task, effort, involvement, log level, start time) comes from the checkpoint — the meta keeps the original startTime so elapsed-time accounting survives the restart. The stack is reconstructed by resumeRoleStack and the run continues from the suspended leaf.
@@ -228,7 +236,7 @@ export async function resumeExecutor(deps: ExecutorDependencies, checkpoint: Run
 	// run_resumed marks the restart boundary in the log: events before it belong to the pre-restart process, events after it to the resumed run. Resumed roles do not re-emit role_start, so a reviewer can tell why. An explicit error-resume stamps the operator's note on the boundary so the log shows the human intervention as well.
 	logEvent(deps.appendLog, 'run_resumed', { runId: checkpoint.runId, resumedFrames: checkpoint.frames.length, ...(options.operatorNote !== undefined ? { operatorNote: options.operatorNote } : {}) })
 	// A clarification answer rides the same human_answer event as a parked answer, with a synthetic id. It is logged after the boundary and the durable write, and only when this resume actually appended the note — an idempotent replay has nothing new to log.
-	if (clarificationAnswer !== undefined && appendedThisResume) logEvent(deps.appendLog, 'human_answer', { id: 'clarification', question: clarificationAnswer.question, answer: clarificationAnswer.answer })
+	if (clarificationAnswer !== undefined && appendedThisResume) logEvent(deps.appendLog, 'human_answer', humanAnswerPayload('clarification', toolCallId('clarification'), clarificationAnswer.answer, clarificationAnswer.question))
 	// Re-assert the running meta: the pre-restart write may never have landed, and the terminal meta overwrites it below either way. On an explicit error-resume this same write flips the run's terminal error meta back to running — the old error card belongs to the log, not the live meta.
 	deps.writeMeta(composeRunMeta(runOptions, startTime, 'running'))
 	// Once the running meta is written the run has started and consumed the note; later recorder writes persist this so the queue can distinguish it from an answer checkpointed just before a crash.
@@ -239,7 +247,7 @@ export async function resumeExecutor(deps: ExecutorDependencies, checkpoint: Run
 		engineDeps,
 		loadedGuild,
 		checkpoint,
-		{ ...(resumeNote !== undefined ? { resumeNote } : {}), ...(options.parkedAnswer !== undefined ? { parkedAnswer: options.parkedAnswer } : {}) },
+		{ ...(resumeNote !== undefined ? { resumeNote } : {}), ...(options.parkedAnswer !== undefined ? { parkedAnswer: options.parkedAnswer } : {}), ...(options.explicitResume === true ? { explicitResume: true } : {}) },
 	)
 
 	const meta = composeRunMeta(runOptions, startTime, result.status, result)

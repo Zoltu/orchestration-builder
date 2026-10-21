@@ -13,7 +13,8 @@ import { createLlmCaller } from './llm.ts'
 import type { LoadedGuild } from './loader.ts'
 import type { AppendLog } from './persistence.ts'
 import { createRoleRegistry } from './role-registry.ts'
-import { isRunCheckpoint, type RunCheckpoint } from './checkpoint.ts'
+import { isRunCheckpoint, pendingIndex, type RunCheckpoint } from './checkpoint.ts'
+import { createInvocationJournal } from './invocation.ts'
 import { createEmptyRoleState, createFakeCheckpointRecorder, createFakeRoleSnapshotStore, createFixtureToolPlatform, recordingHumanBackend, stubHumanBackend, withTool, defined } from './test-fixtures.ts'
 import { createRunBaseTracker } from './base-state.ts'
 import { createRunParkTracker, type RunParkTracker } from './park-state.ts'
@@ -263,11 +264,17 @@ function withExtraHandlers(platform: ToolPlatform, extra: Record<string, Fixture
 		handlerNames(runScope) {
 			return [...new Set([...Object.keys(extra), ...platform.handlerNames(runScope)])]
 		},
-		async dispatch(roleDefinition, runScope, call) {
+		validateCall(roleDefinition, runScope, call) {
+			if (platform.handlerNames(runScope).includes(call.function.name)) return platform.validateCall(roleDefinition, runScope, call)
+			if (!runScope.manifestNames.has(call.function.name)) return createToolError('unknown_tool', `Tool ${call.function.name} is not registered in the Guild`)
+			if (!roleDefinition.tools.includes(call.function.name)) return createToolError('invalid_tool_call', `Tool ${call.function.name} not allowed for this role`)
+			return null
+		},
+		async dispatch(roleDefinition, runScope, call, invocation) {
 			const baseOwnsTool = platform.handlerNames(runScope).includes(call.function.name)
-			if (baseOwnsTool) return platform.dispatch(roleDefinition, runScope, call)
+			if (baseOwnsTool) return platform.dispatch(roleDefinition, runScope, call, invocation)
 			const handler = extra[call.function.name]
-			if (handler === undefined) return platform.dispatch(roleDefinition, runScope, call)
+			if (handler === undefined) return platform.dispatch(roleDefinition, runScope, call, invocation)
 			if (!runScope.manifestNames.has(call.function.name)) return createToolError('unknown_tool', `Tool ${call.function.name} is not registered in the Guild`)
 			if (!roleDefinition.tools.includes(call.function.name)) return createToolError('invalid_tool_call', `Tool ${call.function.name} not allowed for this role`)
 			const parsed = safeJsonParse(call.function.arguments)
@@ -295,6 +302,9 @@ function makeDeps(llm: LlmCaller): { deps: EngineDependencies; events: LogEvent[
 	const deps: EngineDependencies = {
 		llmCaller: llm,
 		appendLog,
+		runId: 'test-run',
+		readRunLogEvents: () => events,
+		invocationJournal: createInvocationJournal(appendLog),
 		toolPlatform: createFixtureToolPlatform(),
 		humanBackend: stubHumanBackend,
 		roleRegistry,
@@ -372,8 +382,13 @@ describe('runRole — acceptance criteria', () => {
 		expect(llm.calls.length).toBe(1)
 		expect(events.some((e) => e.type === 'role_finished')).toBe(true)
 		expect(events.some((e) => e.type === 'llm_call')).toBe(true)
-		expect(events.some((e) => e.type === 'tool_call')).toBe(true)
-		expect(events.some((e) => e.type === 'tool_result')).toBe(true)
+		const toolCallEvent = defined(events.find((e) => e.type === 'tool_call'), 'tool_call event')
+		const toolResultEvent = defined(events.find((e) => e.type === 'tool_result'), 'tool_result event')
+		expect(payloadField(toolCallEvent, 'callId')).toBe('tool:finish_1')
+		expect(payloadField(toolCallEvent, 'parentCallId')).toBe('role:main-0-1')
+		expect(payloadField(toolResultEvent, 'callId')).toBe('tool:finish_1')
+		const roleFinished = defined(events.find((e) => e.type === 'role_finished'), 'role_finished event')
+		expect(payloadField(roleFinished, 'callId')).toBe('role:main-0-1')
 	})
 
 	test('records the protected prefix explicitly for fresh, continuation, and seeded histories', async () => {
@@ -1547,12 +1562,23 @@ describe('runRole — interrupt platform', () => {
 		expect(payloadField(interruptEvent, 'target')).toBe('main-0-1')
 		const resolved = events.find((e) => e.type === 'interrupt_resolved')
 		expect(payloadField(defined(resolved, 'interrupt_resolved event'), 'action')).toBe('abort')
+		const interruptCallId = payloadField(interruptEvent, 'callId')
+		expect(typeof interruptCallId).toBe('string')
+		expect(payloadField(interruptEvent, 'parentCallId')).toBe('role:main-0-1')
+		expect(payloadField(defined(resolved, 'interrupt_resolved event'), 'callId')).toBe(interruptCallId)
 		// The detector ran as a role nested under the target and finished before the target's role_finished.
 		const detectorStart = events.find((e) => e.type === 'role_start' && payloadField(e, 'role') === 'loop_detector')
 		expect(detectorStart).toBeDefined()
 		expect(payloadField(defined(detectorStart, 'loop_detector role_start event'), 'parent')).toBe('main')
+		expect(payloadField(defined(detectorStart, 'loop_detector role_start event'), 'parentCallId')).toBe(interruptCallId)
 		const finishOrder = events.filter((e) => e.type === 'role_finished').map((e) => payloadField(e, 'role'))
 		expect(finishOrder).toEqual(['loop_detector', 'main'])
+		// Role identity is carried on start and finish, and the entry role has no parent call.
+		const mainStart = events.find((e) => e.type === 'role_start' && payloadField(e, 'role') === 'main')
+		expect(payloadField(defined(mainStart, 'main role_start event'), 'callId')).toBe('role:main-0-1')
+		expect(payloadField(defined(mainStart, 'main role_start event'), 'parentCallId')).toBeUndefined()
+		const mainFinish = events.find((e) => e.type === 'role_finished' && payloadField(e, 'role') === 'main')
+		expect(payloadField(defined(mainFinish, 'main role_finished event'), 'callId')).toBe('role:main-0-1')
 	})
 
 	test('(b) the handler redirects: the reason is injected as a user message and the target resumes', async () => {
@@ -2573,22 +2599,32 @@ describe('run persistence and resumption', () => {
 		return { card, checkpoints }
 	}
 
-	function requireCheckpoint(checkpoints: RunCheckpoint[], index: number): RunCheckpoint {
-		const checkpoint = checkpoints[index]
-		if (checkpoint === undefined) throw new Error(`expected checkpoint ${index} among ${checkpoints.length} writes`)
+	function findCheckpoint(checkpoints: RunCheckpoint[], predicate: (checkpoint: RunCheckpoint) => boolean): RunCheckpoint {
+		const checkpoint = checkpoints.find(predicate)
+		if (checkpoint === undefined) throw new Error(`no checkpoint matched among ${checkpoints.length} writes`)
 		return checkpoint
+	}
+
+	// The checkpoint after the child's ordinary echo settled but while the child still runs: the parent suspension is durable and the leaf's history already carries the echo result.
+	function checkpointAfterChildEcho(checkpoints: RunCheckpoint[]): RunCheckpoint {
+		return findCheckpoint(checkpoints, (checkpoint) =>
+			checkpoint.frames.length === 2 &&
+			checkpoint.frames[0]?.pending !== undefined &&
+			checkpoint.frames[0]?.pending?.childCard === undefined &&
+			checkpoint.frames[1]?.pending === undefined &&
+			checkpoint.frames[1]?.roleState.toolCallCount === 1,
+		)
 	}
 
 	test('a checkpoint taken while the child runs captures the suspended parent chain and the leaf state', async () => {
 		const { checkpoints } = await driveUninterruptedRun()
-		// Writes: [orchestrator], [orchestrator+coder], [orchestrator+coder after echo], [orchestrator with child card], [orchestrator].
-		const checkpoint = requireCheckpoint(checkpoints, 2)
+		const checkpoint = checkpointAfterChildEcho(checkpoints)
 
 		expect(checkpoint.frames.length).toBe(2)
 		const parent = checkpoint.frames[0]
 		const leaf = checkpoint.frames[1]
 		expect(parent?.roleName).toBe('orchestrator')
-		expect(parent?.pending?.toolCalls[parent.pending.childIndex]?.function.name).toBe('agent')
+		expect(parent?.pending?.toolCalls[parent.pending === undefined ? 0 : pendingIndex(parent.pending)]?.function.name).toBe('agent')
 		expect(parent?.pending?.childCard).toBeUndefined()
 		expect(leaf?.roleName).toBe('coder')
 		expect(leaf?.parentRoleId).toBe(parent?.roleId)
@@ -2600,7 +2636,7 @@ describe('run persistence and resumption', () => {
 
 	test('a run resumed at the suspended leaf continues the descent and produces the uninterrupted result', async () => {
 		const uninterrupted = await driveUninterruptedRun()
-		const checkpoint = requireCheckpoint(uninterrupted.checkpoints, 2)
+		const checkpoint = checkpointAfterChildEcho(uninterrupted.checkpoints)
 		const parentRoleId = checkpoint.frames[0]?.roleId
 		const leafRoleId = checkpoint.frames[1]?.roleId
 
@@ -2636,7 +2672,7 @@ describe('run persistence and resumption', () => {
 
 	test('a checkpoint with a recorded child card resumes without re-running the child', async () => {
 		const { checkpoints } = await driveUninterruptedRun()
-		const checkpoint = requireCheckpoint(checkpoints, 3)
+		const checkpoint = findCheckpoint(checkpoints, (candidate) => candidate.frames.length === 1 && candidate.frames[0]?.pending?.childCard !== undefined)
 		expect(checkpoint.frames.length).toBe(1)
 		expect(checkpoint.frames[0]?.pending?.childCard).toEqual({ status: 'success', summary: 'child done' })
 
@@ -2657,7 +2693,7 @@ describe('run persistence and resumption', () => {
 
 	test('roles spawned after a resume mint fresh ids that cannot collide with preserved ones', async () => {
 		const { checkpoints } = await driveUninterruptedRun()
-		const checkpoint = requireCheckpoint(checkpoints, 2)
+		const checkpoint = checkpointAfterChildEcho(checkpoints)
 
 		const guild = buildDelegationGuild()
 		const llm = new FakeLlm()
@@ -2872,7 +2908,10 @@ describe('runRole — llm_call delta protocol', () => {
 		]
 		const uninterruptedDeps = makeDeps(uninterruptedLlm)
 		await runRole({ ...uninterruptedDeps.deps, toolPlatform: withExtraHandlers(uninterruptedDeps.deps.toolPlatform, { echo: echoHandler }) }, { loadedGuild: guild, depth: 0, roleName: 'orchestrator', task: 'do it' })
-		const checkpoint = defined(uninterruptedDeps.checkpoints[2], 'checkpoint at the coder\u2019s second loop top')
+		const checkpoint = defined(
+			uninterruptedDeps.checkpoints.find((candidate) => candidate.frames.length === 2 && candidate.frames[1]?.roleState.logSentBaseline === 2),
+			'checkpoint at the coder\u2019s second loop top',
+		)
 		expect(checkpoint.frames[1]?.roleName).toBe('coder')
 		// The coder's turn-1 request was [system, task], so its baseline is 2 — and the fake sink's JSON copy proves the field survives the checkpoint round-trip validation.
 		expect(checkpoint.frames[1]?.roleState.logSentBaseline).toBe(2)
@@ -3007,7 +3046,7 @@ describe('runRole — the pre-write park rule', () => {
 		expect(parkTracker.parkedQuestion).toBe('Which database should I use?')
 		// The frozen park checkpoint carries the ask and its tool result, ready for the answer resume.
 		const parkCheckpoint = checkpoints[checkpoints.length - 1]
-		expect(parkCheckpoint?.parkedAsk).toEqual({ roleId: 'main-0-1', toolCallId: 'ask_1', question: 'Which database should I use?' })
+		expect(parkCheckpoint?.parkedAsk).toMatchObject({ roleId: 'main-0-1', toolCallId: 'ask_1', callId: 'tool:ask_1', questionId: 'ask_1', question: 'Which database should I use?' })
 		const parkedHistory = parkCheckpoint?.frames[0]?.roleState.history ?? []
 		expect(parkedHistory[parkedHistory.length - 1]).toEqual({ role: 'tool', content: '{"question":"Which database should I use?","parked":true}', tool_call_id: 'ask_1' })
 		// The run's own log stays a faithful record: the ask_human event fired with the pairing id, marked as parked.
@@ -3152,12 +3191,50 @@ describe('runRole — the pre-write park rule', () => {
 		expect(result.summary).toBe('waiting for an answer to: Which database?')
 		// The child parked while it was the leaf; its frozen checkpoint is the answer resume's re-entry point.
 		const parkCheckpoint = checkpoints[checkpoints.length - 1]
-		expect(parkCheckpoint?.parkedAsk).toEqual({ roleId: 'coder-1-2', toolCallId: 'ask_1', question: 'Which database?' })
+		expect(parkCheckpoint?.parkedAsk).toMatchObject({ roleId: 'coder-1-2', toolCallId: 'ask_1', callId: 'tool:ask_1', questionId: 'ask_1', question: 'Which database?' })
 		expect(parkCheckpoint?.frames.map((frame) => frame.roleName)).toEqual(['parent', 'coder'])
 		// The child asked and parked; the parent finished with the same card without another LLM request.
 		expect(llm.calls.length).toBe(2)
 		const finishes = events.filter((e) => e.type === 'role_finished').map((e) => payloadField(e, 'status'))
 		expect(finishes).toEqual(['needs_clarification', 'needs_clarification'])
+	})
+
+	test('a nested parked run emits its true final terminals after the answer resume, not the pause events', async () => {
+		const guild = buildParkGuild(
+			{
+				parent: { systemPrompt: 'p', tools: ['agent', 'finish'] },
+				coder: { systemPrompt: 'c', tools: ['ask_human', 'finish'] },
+			},
+			'parent',
+		)
+		const parkedLlm = new FakeLlm()
+		parkedLlm.responses = [
+			success([agentCall('coder', 'do the work')]),
+			success([askCall('Which database?')]),
+		]
+		const parked = makeDeps(parkedLlm)
+		parked.parkTracker.queueTracked = true
+		await runRole(parked.deps, { loadedGuild: guild, depth: 0, roleName: 'parent', task: 'do it' })
+		const checkpoint = parked.checkpoints[parked.checkpoints.length - 1]
+		if (checkpoint === undefined) throw new Error('expected the parked checkpoint')
+
+		const resumeLlm = new FakeLlm()
+		resumeLlm.responses = [
+			success([finishCall({ status: 'success', summary: 'child answered' })]),
+			success([finishCall({ status: 'success', summary: 'parent answered' })]),
+		]
+		const resumed = makeDeps(resumeLlm)
+		resumed.parkTracker.queueTracked = true
+		resumed.parkTracker.parkedAsk = checkpoint.parkedAsk
+
+		const card = await resumeRoleStack(runRole, resumed.deps, guild, checkpoint, { parkedAnswer: { question: 'Which database?', answer: 'postgres', toolCallId: 'ask_1' } })
+
+		expect(card).toEqual({ status: 'success', summary: 'parent answered' })
+		const realFinishes = resumed.events.filter((event) => event.type === 'role_finished' && payloadField(event, 'paused') !== true)
+		expect(realFinishes.map((event) => payloadField(event, 'role'))).toEqual(['coder', 'parent'])
+		expect(realFinishes.map((event) => payloadField(event, 'status'))).toEqual(['success', 'success'])
+		expect(resumed.events.filter((event) => event.type === 'role_finished' && payloadField(event, 'role') === 'coder').length).toBe(1)
+		expect(resumed.events.filter((event) => event.type === 'role_finished' && payloadField(event, 'role') === 'parent').length).toBe(1)
 	})
 
 	test('resuming a parked run delivers the answer into the same tool message, logs it, clears the park state, and sends it to the next request', async () => {
@@ -3186,7 +3263,7 @@ describe('runRole — the pre-write park rule', () => {
 		expect(after.slice(0, before.length - 1)).toEqual(before.slice(0, before.length - 1))
 		expect(after[before.length - 1]).toEqual({ role: 'tool', content: '{"question":"Which database?","answer":"postgres"}', tool_call_id: 'ask_1' })
 		const answerEvent = resumed.events.find((event) => event.type === 'human_answer')
-		expect(answerEvent?.payload).toEqual({ id: 'ask_1', question: 'Which database?', answer: 'postgres' })
+		expect(answerEvent?.payload).toEqual({ id: 'ask_1', callId: 'tool:ask_1', question: 'Which database?', answer: 'postgres' })
 		expect(resumed.parkTracker.parkedQuestion).toBeUndefined()
 		expect(resumed.parkTracker.parkedAsk).toBeUndefined()
 		const sent = resumeLlm.calls[0]?.messages ?? []
@@ -3250,7 +3327,7 @@ describe('runRole — the pre-write park rule', () => {
 		const card = await resumeRoleStack(runRole, resumedDeps, guild, checkpoint, { parkedAnswer: { question: 'Which database?', answer: 'postgres', toolCallId: 'ask_1' } })
 
 		expect(card).toEqual({ status: 'success', summary: 'built it' })
-		const completed = resumed.checkpoints[0]
+		const completed = resumed.checkpoints.find((candidate) => candidate.frames[0]?.roleState.history.some((message) => message.role === 'tool' && message.tool_call_id === 'echo_1'))
 		if (completed === undefined) throw new Error('expected the completed-turn checkpoint')
 		expect(completed.parkedAsk).toBeUndefined()
 		const completedTools = completed.frames[0]?.roleState.history.filter((message) => message.role === 'tool') ?? []
@@ -3313,7 +3390,7 @@ describe('runRole — the pre-write park rule', () => {
 		expect(card.status).toBe('needs_clarification')
 		expect(card.summary).toBe('waiting for an answer to: And the port?')
 		const finalCheckpoint = resumed.checkpoints[resumed.checkpoints.length - 1]
-		expect(finalCheckpoint?.parkedAsk).toEqual({ roleId: 'coder-1-1', toolCallId: 'ask_2', question: 'And the port?' })
+		expect(finalCheckpoint?.parkedAsk).toMatchObject({ roleId: 'coder-1-1', toolCallId: 'ask_2', callId: 'tool:ask_2', questionId: 'ask_2', question: 'And the port?' })
 		expect(finalCheckpoint?.frames.map((frame) => frame.roleName)).toEqual(['main', 'coder'])
 	})
 
@@ -3355,7 +3432,7 @@ describe('runRole — the pre-write park rule', () => {
 
 		expect(card.status).toBe('needs_clarification')
 		const reParked = resumed.checkpoints.find((candidate) => candidate.parkedAsk?.toolCallId === 'ask_2')
-		expect(reParked?.parkedAsk).toEqual({ roleId: 'main-0-1', toolCallId: 'ask_2', question: 'And the port?' })
+		expect(reParked?.parkedAsk).toMatchObject({ roleId: 'main-0-1', toolCallId: 'ask_2', callId: 'tool:ask_2', questionId: 'ask_2', question: 'And the port?' })
 	})
 })
 
@@ -3652,14 +3729,15 @@ describe('runRole — continue_agent', () => {
 
 	// Finds the first checkpoint holding a pending suspension on the named tool, either while its child still runs (no recorded card) or after the child returned (recorded card).
 	function findPendingCheckpoint(checkpoints: RunCheckpoint[], tool: string, hasCard: boolean): RunCheckpoint {
-		const match = checkpoints.find((checkpoint) =>
-			checkpoint.frames.some((frame) => {
+		const match = checkpoints.find((checkpoint) => {
+			if (!hasCard && checkpoint.frames.length < 2) return false
+			return checkpoint.frames.some((frame) => {
 				const pending = frame.pending
 				if (pending === undefined) return false
-				if (pending.toolCalls[pending.childIndex]?.function.name !== tool) return false
+				if (pending.toolCalls[pendingIndex(pending)]?.function.name !== tool) return false
 				return hasCard ? pending.childCard !== undefined : pending.childCard === undefined
-			}),
-		)
+			})
+		})
 		if (match === undefined) throw new Error(`no checkpoint pending on ${tool} with hasCard=${hasCard}`)
 		return match
 	}
@@ -3749,5 +3827,701 @@ describe('runRole — continue_agent', () => {
 		})
 
 		expect(roleSnapshots.list()).toEqual([])
+	})
+})
+
+describe('durable pending invocation reconciliation', () => {
+	const echoManifest: ToolManifest = {
+		name: 'echo',
+		description: 'Echoes its arguments.',
+		parameters: { type: 'object', properties: {} },
+	}
+
+	const pendingAskManifest: ToolManifest = {
+		name: 'ask_human',
+		description: 'Ask a human a question.',
+		parameters: { type: 'object', required: ['question'], properties: { question: { type: 'string' } } },
+	}
+
+	function echoCall(id: string): ToolCall {
+		return { id, type: 'function', function: { name: 'echo', arguments: '{"value":7}' } }
+	}
+
+	function askCall(id: string, question: string): ToolCall {
+		return { id, type: 'function', function: { name: 'ask_human', arguments: JSON.stringify({ question }) } }
+	}
+
+	function buildPendingGuild(tools: string[]): LoadedGuild {
+		const guild = buildGuild({ main: { systemPrompt: 'p', tools } }, 'main')
+		return withTool(withTool(guild, echoManifest), pendingAskManifest)
+	}
+
+	function pendingCheckpoint(toolCall: ToolCall): RunCheckpoint {
+		return {
+			version: 1,
+			runId: 'test-run',
+			startTime: '2026-01-01T00:00:00.000Z',
+			registryCounter: 1,
+			frames: [{
+				roleId: 'main-0-1',
+				roleName: 'main',
+				depth: 0,
+				task: 'do it',
+				roleState: createEmptyRoleState({
+					history: [
+						{ role: 'system', content: 'prompt' },
+						{ role: 'user', content: 'do it' },
+						{ role: 'assistant', content: '', tool_calls: [toolCall] },
+					],
+				}),
+				pending: { callId: `tool:${toolCall.id}`, parentCallId: 'role:main-0-1', toolCalls: [toolCall], index: 0 },
+			}],
+		}
+	}
+
+	function startEvent(callId: string, tool: string): LogEvent {
+		return { timestamp: 't1', type: 'tool_call', payload: { role: 'main', tool, arguments: '{"value":7}', callId, parentCallId: 'role:main-0-1' } }
+	}
+
+	function terminalEvent(callId: string, tool: string, result?: ToolResult): LogEvent {
+		return { timestamp: 't2', type: 'tool_result', payload: { role: 'main', tool, kind: 'success', callId, ...(result !== undefined ? { result } : {}) } }
+	}
+
+	test('a live ordinary tool records a pending invocation with its identity before dispatch', async () => {
+		const guild = buildPendingGuild(['echo', 'finish'])
+		const llm = new FakeLlm()
+		llm.responses = [success([echoCall('e1')]), success([finishCall({ status: 'success', summary: 'done' })])]
+		const { deps, checkpoints } = makeDeps(llm)
+		const depsWithEcho: EngineDependencies = { ...deps, toolPlatform: withExtraHandlers(deps.toolPlatform, { echo: echoHandler }) }
+
+		await runRole(depsWithEcho, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'do it' })
+
+		const pendingRecord = checkpoints
+			.flatMap((checkpoint) => checkpoint.frames)
+			.map((frame) => frame.pending)
+			.find((pending) => pending !== undefined && 'index' in pending && pending.callId === 'tool:e1')
+		expect(pendingRecord).toEqual({
+			callId: 'tool:e1',
+			parentCallId: 'role:main-0-1',
+			toolCalls: [echoCall('e1')],
+			index: 0,
+		})
+	})
+
+	test('a crash after the start but before the terminal replays the call, writes one terminal, and appends one result', async () => {
+		const guild = buildPendingGuild(['echo', 'finish'])
+		const checkpoint = pendingCheckpoint(echoCall('e1'))
+		const llm = new FakeLlm()
+		llm.responses = [success([finishCall({ status: 'success', summary: 'done' })])]
+		const { deps, events } = makeDeps(llm)
+		events.push(startEvent('tool:e1', 'echo'))
+		let echoCalls = 0
+		const depsWithEcho: EngineDependencies = {
+			...deps,
+			toolPlatform: withExtraHandlers(deps.toolPlatform, {
+				echo: () => {
+					echoCalls += 1
+					return { kind: 'success', data: { value: 7 } }
+				},
+			}),
+		}
+
+		const card = await resumeRoleStack(runRole, depsWithEcho, guild, checkpoint)
+
+		expect(card).toEqual({ status: 'success', summary: 'done' })
+		expect(echoCalls).toBe(1)
+		expect(events.filter((event) => event.type === 'tool_call' && payloadField(event, 'callId') === 'tool:e1').length).toBe(1)
+		expect(events.filter((event) => event.type === 'tool_result' && payloadField(event, 'callId') === 'tool:e1').length).toBe(1)
+		const frame = defined(checkpoint.frames[0], 'restored frame')
+		expect(frame.roleState.history.filter((message) => message.role === 'tool' && message.tool_call_id === 'e1').length).toBe(1)
+	})
+
+	test('a crash after the terminal but before the clear appends the recorded result once without re-dispatching', async () => {
+		const guild = buildPendingGuild(['echo', 'finish'])
+		const checkpoint = pendingCheckpoint(echoCall('e1'))
+		const llm = new FakeLlm()
+		llm.responses = [success([finishCall({ status: 'success', summary: 'done' })])]
+		const { deps, events } = makeDeps(llm)
+		events.push(startEvent('tool:e1', 'echo'), terminalEvent('tool:e1', 'echo', { kind: 'success', data: { value: 7 } }))
+		let echoCalls = 0
+		const depsWithEcho: EngineDependencies = {
+			...deps,
+			toolPlatform: withExtraHandlers(deps.toolPlatform, {
+				echo: () => {
+					echoCalls += 1
+					return { kind: 'success', data: { value: 7 } }
+				},
+			}),
+		}
+
+		const card = await resumeRoleStack(runRole, depsWithEcho, guild, checkpoint)
+
+		expect(card).toEqual({ status: 'success', summary: 'done' })
+		expect(echoCalls).toBe(0)
+		expect(events.filter((event) => event.type === 'tool_result' && payloadField(event, 'callId') === 'tool:e1').length).toBe(1)
+		const frame = defined(checkpoint.frames[0], 'restored frame')
+		const toolMessage = frame.roleState.history.find((message) => message.role === 'tool' && message.tool_call_id === 'e1')
+		expect(toolMessage?.content).toBe('{"value":7}')
+	})
+
+	test('under standard logging an existing terminal without its body restores a clear placeholder', async () => {
+		const guild = buildPendingGuild(['echo', 'finish'])
+		const checkpoint = pendingCheckpoint(echoCall('e1'))
+		const llm = new FakeLlm()
+		llm.responses = [success([finishCall({ status: 'success', summary: 'done' })])]
+		const { deps, events } = makeDeps(llm)
+		events.push(startEvent('tool:e1', 'echo'), terminalEvent('tool:e1', 'echo'))
+		const depsWithEcho: EngineDependencies = { ...deps, toolPlatform: withExtraHandlers(deps.toolPlatform, { echo: echoHandler }) }
+
+		await resumeRoleStack(runRole, depsWithEcho, guild, checkpoint)
+
+		const frame = defined(checkpoint.frames[0], 'restored frame')
+		const toolMessage = frame.roleState.history.find((message) => message.role === 'tool' && message.tool_call_id === 'e1')
+		expect(toolMessage?.content).toContain('not retained at standard logging')
+	})
+
+	test('a pending ask with a durable human_answer restores the pair without re-asking or duplicating the terminal', async () => {
+		const guild = buildPendingGuild(['ask_human', 'finish'])
+		const checkpoint = pendingCheckpoint(askCall('ask_1', 'which?'))
+		const llm = new FakeLlm()
+		llm.responses = [success([finishCall({ status: 'success', summary: 'done' })])]
+		const { deps, events } = makeDeps(llm)
+		const human = recordingHumanBackend()
+		events.push(
+			{ timestamp: 't1', type: 'ask_human', payload: { id: 'ask_1', callId: 'tool:ask_1', parentCallId: 'role:main-0-1', question: 'which?' } },
+			{ timestamp: 't2', type: 'human_answer', payload: { id: 'ask_1', callId: 'tool:ask_1', question: 'which?', answer: 'this one' } },
+		)
+
+		const card = await resumeRoleStack(runRole, { ...deps, humanBackend: human }, guild, checkpoint)
+
+		expect(card).toEqual({ status: 'success', summary: 'done' })
+		expect(human.questions).toEqual([])
+		expect(events.filter((event) => event.type === 'human_answer').length).toBe(1)
+		const frame = defined(checkpoint.frames[0], 'restored frame')
+		const toolMessage = frame.roleState.history.find((message) => message.role === 'tool' && message.tool_call_id === 'ask_1')
+		expect(toolMessage?.content).toBe('{"question":"which?","answer":"this one"}')
+		expect(frame.roleState.history.some((message) => message.role === 'assistant')).toBe(true)
+	})
+
+	test('a pending ask without a human_answer re-asks and appends the new answer', async () => {
+		const guild = buildPendingGuild(['ask_human', 'finish'])
+		const checkpoint = pendingCheckpoint(askCall('ask_1', 'which?'))
+		const llm = new FakeLlm()
+		llm.responses = [success([finishCall({ status: 'success', summary: 'done' })])]
+		const { deps } = makeDeps(llm)
+		const human = recordingHumanBackend()
+
+		const card = await resumeRoleStack(runRole, { ...deps, humanBackend: human }, guild, checkpoint)
+
+		expect(card).toEqual({ status: 'success', summary: 'done' })
+		expect(human.questions).toEqual([{ question: 'which?', context: undefined }])
+		const frame = defined(checkpoint.frames[0], 'restored frame')
+		const toolMessage = frame.roleState.history.find((message) => message.role === 'tool' && message.tool_call_id === 'ask_1')
+		expect(toolMessage?.content).toContain('use your best judgement')
+	})
+
+	test('invalid and unknown tools still emit only their diagnostics and no invocation lifecycle', async () => {
+		const guild = withTool(buildGuild({ main: { systemPrompt: 'p', tools: ['finish'] } }, 'main'), {
+			name: 'read_file',
+			description: 'Read a file.',
+			parameters: { type: 'object', properties: { path: { type: 'string' } } },
+		})
+		const llm = new FakeLlm()
+		llm.responses = [
+			success([
+				{ id: 'bad_allowed', type: 'function', function: { name: 'read_file', arguments: '{}' } },
+				{ id: 'bad_unknown', type: 'function', function: { name: 'missing_tool', arguments: '{}' } },
+			]),
+			success([finishCall({ status: 'success', summary: 'done' })]),
+		]
+		const { deps, events, checkpoints } = makeDeps(llm)
+
+		await runRole(deps, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'do it' })
+
+		expect(events.some((event) => event.type === 'invalid_tool_call')).toBe(true)
+		expect(events.some((event) => event.type === 'unknown_tool')).toBe(true)
+		expect(events.some((event) => event.type === 'tool_call' && payloadField(event, 'callId') === 'tool:bad_allowed')).toBe(false)
+		expect(events.some((event) => event.type === 'tool_call' && payloadField(event, 'callId') === 'tool:bad_unknown')).toBe(false)
+		const invokedInvalid = checkpoints.some((checkpoint) => checkpoint.frames.some((frame) => frame.pending !== undefined && frame.pending.toolCalls[pendingIndex(frame.pending)]?.id.startsWith('bad_')))
+		expect(invokedInvalid).toBe(false)
+	})
+
+	test('a two-call turn that crashed after call 1 resumes without an incomplete turn and with one result per call', async () => {
+		const guild = buildPendingGuild(['echo', 'finish'])
+		const calls = [echoCall('e1'), echoCall('e2')]
+		const checkpoint: RunCheckpoint = {
+			version: 1,
+			runId: 'test-run',
+			startTime: '2026-01-01T00:00:00.000Z',
+			registryCounter: 1,
+			frames: [{
+				roleId: 'main-0-1',
+				roleName: 'main',
+				depth: 0,
+				task: 'do it',
+				roleState: createEmptyRoleState({
+					history: [
+						{ role: 'system', content: 'prompt' },
+						{ role: 'user', content: 'do it' },
+						{ role: 'assistant', content: '', tool_calls: calls },
+						{ role: 'tool', content: '{"value":7}', tool_call_id: 'e1' },
+					],
+				}),
+				pending: { callId: 'tool:e2', parentCallId: 'role:main-0-1', toolCalls: calls, index: 1 },
+			}],
+		}
+		const llm = new FakeLlm()
+		llm.responses = [success([finishCall({ status: 'success', summary: 'done' })])]
+		const { deps, events } = makeDeps(llm)
+		events.push(startEvent('tool:e1', 'echo'), terminalEvent('tool:e1', 'echo', { kind: 'success', data: { value: 7 } }), startEvent('tool:e2', 'echo'))
+		let echoCalls = 0
+		const depsWithEcho: EngineDependencies = {
+			...deps,
+			toolPlatform: withExtraHandlers(deps.toolPlatform, {
+				echo: () => {
+					echoCalls += 1
+					return { kind: 'success', data: { value: 7 } }
+				},
+			}),
+		}
+
+		const card = await resumeRoleStack(runRole, depsWithEcho, guild, checkpoint)
+
+		expect(card).toEqual({ status: 'success', summary: 'done' })
+		expect(echoCalls).toBe(1)
+		expect(events.filter((event) => event.type === 'tool_result' && payloadField(event, 'callId') === 'tool:e1').length).toBe(1)
+		expect(events.filter((event) => event.type === 'tool_result' && payloadField(event, 'callId') === 'tool:e2').length).toBe(1)
+		const frame = defined(checkpoint.frames[0], 'restored frame')
+		expect(frame.roleState.history.filter((message) => message.role === 'tool' && message.tool_call_id === 'e1').length).toBe(1)
+		expect(frame.roleState.history.filter((message) => message.role === 'tool' && message.tool_call_id === 'e2').length).toBe(1)
+		const firstRequest = defined(llm.calls[0], 'first post-resume request')
+		const answerIds = new Set(firstRequest.messages.filter((message) => message.role === 'tool').map((message) => message.tool_call_id))
+		expect(answerIds.has('e1')).toBe(true)
+		expect(answerIds.has('e2')).toBe(true)
+	})
+
+	test('a multi-call error-resume note lands after every remaining tool result', async () => {
+		const guild = buildPendingGuild(['echo', 'finish'])
+		const calls = [echoCall('e1'), echoCall('e2'), echoCall('e3')]
+		const checkpoint: RunCheckpoint = {
+			version: 1,
+			runId: 'test-run',
+			startTime: '2026-01-01T00:00:00.000Z',
+			registryCounter: 1,
+			frames: [{
+				roleId: 'main-0-1',
+				roleName: 'main',
+				depth: 0,
+				task: 'do it',
+				roleState: createEmptyRoleState({
+					history: [
+						{ role: 'system', content: 'prompt' },
+						{ role: 'user', content: 'do it' },
+						{ role: 'assistant', content: '', tool_calls: calls },
+						{ role: 'tool', content: '{"value":7}', tool_call_id: 'e1' },
+					],
+				}),
+				pending: { callId: 'tool:e2', parentCallId: 'role:main-0-1', toolCalls: calls, index: 1 },
+			}],
+		}
+		const llm = new FakeLlm()
+		llm.responses = [success([finishCall({ status: 'success', summary: 'done' })])]
+		const { deps, events } = makeDeps(llm)
+		events.push(startEvent('tool:e1', 'echo'), terminalEvent('tool:e1', 'echo', { kind: 'success', data: { value: 7 } }), startEvent('tool:e2', 'echo'), terminalEvent('tool:e2', 'echo', { kind: 'success', data: { value: 7 } }))
+		const depsWithEcho: EngineDependencies = { ...deps, toolPlatform: withExtraHandlers(deps.toolPlatform, { echo: echoHandler }) }
+
+		await resumeRoleStack(runRole, depsWithEcho, guild, checkpoint, { resumeNote: 'carry on after restart' })
+
+		const frame = defined(checkpoint.frames[0], 'restored frame')
+		const history = frame.roleState.history
+		const noteIndex = history.findIndex((message) => message.role === 'user' && message.content === 'carry on after restart')
+		const e3Index = history.findIndex((message) => message.role === 'tool' && message.tool_call_id === 'e3')
+		expect(noteIndex).toBeGreaterThan(e3Index)
+	})
+
+	test('an invalid ask emits a visible generic tool lifecycle without an ask_human event', async () => {
+		const guild = buildPendingGuild(['ask_human', 'finish'])
+		const llm = new FakeLlm()
+		llm.responses = [
+			success([{ id: 'ask_bad', type: 'function', function: { name: 'ask_human', arguments: '{}' } }]),
+			success([finishCall({ status: 'success', summary: 'done' })]),
+		]
+		const { deps, events } = makeDeps(llm)
+
+		const card = await runRole(deps, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'do it' })
+
+		expect(card).toEqual({ status: 'success', summary: 'done' })
+		expect(events.some((event) => event.type === 'ask_human')).toBe(false)
+		expect(events.filter((event) => event.type === 'tool_call' && payloadField(event, 'callId') === 'tool:ask_bad').length).toBe(1)
+		const terminal = events.find((event) => event.type === 'tool_result' && payloadField(event, 'callId') === 'tool:ask_bad')
+		expect(payloadField(defined(terminal, 'ask terminal'), 'kind')).toBe('invalid_arguments')
+	})
+
+	test('a resume whose pending tool was removed from the Guild closes the started invocation with a terminal', async () => {
+		const guild = buildGuild({ main: { systemPrompt: 'p', tools: ['finish'] } }, 'main')
+		const checkpoint = pendingCheckpoint(echoCall('e1'))
+		const llm = new FakeLlm()
+		llm.responses = [success([finishCall({ status: 'success', summary: 'done' })])]
+		const { deps, events } = makeDeps(llm)
+		events.push(startEvent('tool:e1', 'echo'))
+
+		const card = await resumeRoleStack(runRole, deps, guild, checkpoint)
+
+		expect(card).toEqual({ status: 'success', summary: 'done' })
+		expect(events.some((event) => event.type === 'unknown_tool')).toBe(true)
+		const terminal = events.find((event) => event.type === 'tool_result' && payloadField(event, 'callId') === 'tool:e1')
+		expect(payloadField(defined(terminal, 'resume terminal'), 'kind')).toBe('unknown_tool')
+	})
+
+	test('a standard terminal with neither a result body nor a valid kind fails fast', async () => {
+		const guild = buildPendingGuild(['echo', 'finish'])
+		const checkpoint = pendingCheckpoint(echoCall('e1'))
+		const llm = new FakeLlm()
+		llm.responses = [success([finishCall({ status: 'success', summary: 'done' })])]
+		const { deps, events } = makeDeps(llm)
+		events.push(startEvent('tool:e1', 'echo'), { timestamp: 't2', type: 'tool_result', payload: { role: 'main', tool: 'echo', callId: 'tool:e1' } })
+
+		await expect(resumeRoleStack(runRole, deps, guild, checkpoint)).rejects.toThrow('neither a result body nor a valid kind')
+	})
+
+	test('stale handler and interrupt invocations are closed before the role loop re-enters', async () => {
+		const guild = buildPendingGuild(['finish'])
+		const checkpoint: RunCheckpoint = {
+			version: 1,
+			runId: 'test-run',
+			startTime: '2026-01-01T00:00:00.000Z',
+			registryCounter: 2,
+			frames: [{
+				roleId: 'main-0-1',
+				roleName: 'main',
+				depth: 0,
+				task: 'do it',
+				roleState: createEmptyRoleState({ history: [{ role: 'system', content: 'prompt' }, { role: 'user', content: 'do it' }] }),
+			}],
+		}
+		const llm = new FakeLlm()
+		llm.responses = [success([finishCall({ status: 'success', summary: 'done' })])]
+		const { deps, events } = makeDeps(llm)
+		events.push(
+			{ timestamp: 't1', type: 'role_start', payload: { role: 'main', roleId: 'main-0-1', callId: 'role:main-0-1', depth: 0 } },
+			{ timestamp: 't2', type: 'interrupt', payload: { trigger: 'loop_check', handler: 'detector', target: 'main-0-1', callId: 'interrupt:1', parentCallId: 'role:main-0-1' } },
+			{ timestamp: 't3', type: 'role_start', payload: { role: 'detector', roleId: 'detector-1-2', callId: 'role:detector-1-2', depth: 1, parent: 'main' } },
+			{ timestamp: 't4', type: 'tool_call', payload: { role: 'detector', tool: 'recent_role_tool_calls', callId: 'tool:handler-1', parentCallId: 'role:detector-1-2' } },
+		)
+
+		await resumeRoleStack(runRole, deps, guild, checkpoint)
+
+		expect(events.filter((event) => event.type === 'interrupt').length).toBe(1)
+		expect(events.filter((event) => event.type === 'interrupt_resolved').length).toBe(1)
+		expect(events.filter((event) => event.type === 'role_start' && payloadField(event, 'role') === 'detector').length).toBe(1)
+		expect(events.filter((event) => event.type === 'role_finished' && payloadField(event, 'role') === 'detector').length).toBe(1)
+		expect(events.filter((event) => event.type === 'tool_result' && payloadField(event, 'callId') === 'tool:handler-1').length).toBe(1)
+	})
+
+	test('a handler-delegated child is parented to the handler role call and does not inherit handlerOf', async () => {
+		const guild = withTool(
+			buildGuild(
+				{
+					main: { systemPrompt: 'm', tools: ['echo', 'finish'] },
+					detector: { systemPrompt: 'd', tools: ['agent', 'finish'] },
+					coder: { systemPrompt: 'c', tools: ['finish'] },
+				},
+				'main',
+				{ executor: { ...baseExecutor, interruptTriggers: { handlerRole: 'detector', everyToolCalls: 1, everyTokens: 100000 } } },
+			),
+			echoManifest,
+		)
+		const llm = new FakeLlm()
+		llm.responses = [
+			success([echoCall('e1'), echoCall('e2')]),
+			success([agentCall('coder', 'subtask')]),
+			success([finishCall({ status: 'success', summary: 'child done' })]),
+			success([finishCall({ status: 'success', summary: 'handler done' })]),
+			success([finishCall({ status: 'success', summary: 'main done' })]),
+		]
+		const { deps, events } = makeDeps(llm)
+		const depsWithEcho: EngineDependencies = { ...deps, toolPlatform: withExtraHandlers(deps.toolPlatform, { echo: echoHandler }) }
+
+		const card = await runRole(depsWithEcho, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'do it' })
+
+		expect(card.summary).toBe('main done')
+		const detectorStart = events.find((event) => event.type === 'role_start' && payloadField(event, 'role') === 'detector')
+		const detectorRoleId = payloadField(defined(detectorStart, 'detector start'), 'roleId')
+		expect(typeof detectorRoleId).toBe('string')
+		const childStart = events.find((event) => event.type === 'role_start' && payloadField(event, 'role') === 'coder')
+		expect(payloadField(defined(childStart, 'child start'), 'parentRoleId')).toBe(detectorRoleId)
+		expect(payloadField(defined(childStart, 'child start'), 'parentCallId')).toBe(`role:${String(detectorRoleId)}`)
+		const childFinish = events.find((event) => event.type === 'role_finished' && payloadField(event, 'role') === 'coder')
+		expect(payloadField(defined(childFinish, 'child finish'), 'callId')).toBe(`role:${String(payloadField(defined(childStart, 'child start'), 'roleId'))}`)
+	})
+
+	test('an invalid last call clears the pending marker so resume has one result per call', async () => {
+		const guild = buildPendingGuild(['echo', 'finish'])
+		const llm = new FakeLlm()
+		llm.responses = [
+			success([echoCall('e1'), { id: 'bad_1', type: 'function', function: { name: 'missing_tool', arguments: '{}' } }]),
+			success([finishCall({ status: 'success', summary: 'done' })]),
+		]
+		const { deps, checkpoints } = makeDeps(llm)
+		const depsWithEcho: EngineDependencies = { ...deps, toolPlatform: withExtraHandlers(deps.toolPlatform, { echo: echoHandler }) }
+
+		await runRole(depsWithEcho, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'do it' })
+
+		const checkpoint = checkpoints.find((candidate) => {
+			const frame = candidate.frames[0]
+			if (frame === undefined || frame.pending !== undefined) return false
+			const ids = frame.roleState.history.filter((message) => message.role === 'tool').map((message) => message.tool_call_id)
+			return ids.length === 2 && ids[0] === 'e1' && ids[1] === 'bad_1'
+		})
+		if (checkpoint === undefined) throw new Error('expected the safe-point checkpoint after the invalid last call')
+
+		const resumeLlm = new FakeLlm()
+		resumeLlm.responses = [success([finishCall({ status: 'success', summary: 'resumed done' })])]
+		const resumed = makeDeps(resumeLlm)
+		await resumeRoleStack(runRole, { ...resumed.deps, toolPlatform: withExtraHandlers(resumed.deps.toolPlatform, { echo: echoHandler }) }, guild, structuredClone(checkpoint))
+
+		const toolIds = defined(checkpoint.frames[0], 'restored frame').roleState.history.filter((message) => message.role === 'tool').map((message) => message.tool_call_id)
+		expect(toolIds).toEqual(['e1', 'bad_1'])
+		const diagnosticMessages = defined(checkpoint.frames[0], 'restored frame').roleState.history.filter((message) => message.role === 'tool' && message.tool_call_id === 'bad_1')
+		expect(diagnosticMessages.length).toBe(1)
+	})
+
+	test('a standard-level pending finish replays its ResultCard from the call arguments and ends the role', async () => {
+		const guild = buildPendingGuild(['finish'])
+		const card = { status: 'success' as const, summary: 'finished cleanly', artifacts: ['out.txt'] }
+		const finish = finishCall(card)
+		const checkpoint = pendingCheckpoint(finish)
+		const llm = new FakeLlm()
+		const { deps, events } = makeDeps(llm)
+		events.push(startEvent('tool:finish_1', 'finish'), terminalEvent('tool:finish_1', 'finish'))
+
+		const resumed = await resumeRoleStack(runRole, deps, guild, checkpoint)
+
+		expect(resumed).toEqual(card)
+		expect(llm.calls.length).toBe(0)
+		const frame = defined(checkpoint.frames[0], 'restored frame')
+		const finishMessage = frame.roleState.history.find((message) => message.role === 'tool' && message.tool_call_id === 'finish_1')
+		expect(finishMessage?.content).toContain('finished cleanly')
+	})
+
+	test('a handler-delegated child inherits handlerOf, so a pre-write ask cannot park', async () => {
+		const guild = withTool(
+			buildGuild(
+				{
+					main: { systemPrompt: 'm', tools: ['echo', 'finish'] },
+					detector: { systemPrompt: 'd', tools: ['agent', 'finish'] },
+					coder: { systemPrompt: 'c', tools: ['ask_human', 'finish'] },
+				},
+				'main',
+				{ executor: { ...baseExecutor, interruptTriggers: { handlerRole: 'detector', everyToolCalls: 1, everyTokens: 100000 } } },
+			),
+			echoManifest,
+		)
+		const withAsk = withTool(guild, pendingAskManifest)
+		const llm = new FakeLlm()
+		llm.responses = [
+			success([echoCall('e1'), echoCall('e2')]),
+			success([agentCall('coder', 'subtask')]),
+			success([askCall('ask_child', 'Which database?')]),
+			success([finishCall({ status: 'success', summary: 'child done' })]),
+			success([finishCall({ status: 'success', summary: 'handler done' })]),
+			success([finishCall({ status: 'success', summary: 'main done' })]),
+		]
+		const { deps } = makeDeps(llm)
+		const human = recordingHumanBackend()
+		deps.parkTracker.queueTracked = true
+		const depsWithEcho: EngineDependencies = { ...deps, humanBackend: human, toolPlatform: withExtraHandlers(deps.toolPlatform, { echo: echoHandler }) }
+
+		const card = await runRole(depsWithEcho, { loadedGuild: withAsk, depth: 0, roleName: 'main', task: 'do it' })
+
+		expect(card.summary).toBe('main done')
+		expect(human.questions).toEqual([{ question: 'Which database?', context: undefined }])
+		expect(deps.parkTracker.parkedAsk).toBeUndefined()
+		expect(deps.parkTracker.parkedQuestion).toBeUndefined()
+	})
+
+	test('a no-note reconciliation of a pending finish closes later calls and writes the completed checkpoint', async () => {
+		const guild = buildPendingGuild(['echo', 'finish'])
+		const calls = [finishCall({ status: 'success', summary: 'already done' }), echoCall('e2')]
+		const checkpoint: RunCheckpoint = {
+			version: 1,
+			runId: 'test-run',
+			startTime: '2026-01-01T00:00:00.000Z',
+			registryCounter: 1,
+			frames: [{
+				roleId: 'main-0-1',
+				roleName: 'main',
+				depth: 0,
+				task: 'do it',
+				roleState: createEmptyRoleState({
+					history: [
+						{ role: 'system', content: 'prompt' },
+						{ role: 'user', content: 'do it' },
+						{ role: 'assistant', content: '', tool_calls: calls },
+					],
+				}),
+				pending: { callId: 'tool:finish_1', parentCallId: 'role:main-0-1', toolCalls: calls, index: 0 },
+			}],
+		}
+		const llm = new FakeLlm()
+		const { deps, events, checkpoints } = makeDeps(llm)
+		events.push(startEvent('tool:finish_1', 'finish'), { timestamp: 't2', type: 'tool_result', payload: { role: 'main', tool: 'finish', kind: 'success', callId: 'tool:finish_1', result: { kind: 'success', data: { status: 'success', summary: 'already done' } } } })
+
+		const card = await resumeRoleStack(runRole, deps, guild, checkpoint)
+
+		expect(card).toEqual({ status: 'success', summary: 'already done' })
+		expect(llm.calls.length).toBe(0)
+		const frame = defined(checkpoint.frames[0], 'restored frame')
+		const toolMessages = frame.roleState.history.filter((message) => message.role === 'tool')
+		expect(toolMessages.map((message) => message.tool_call_id)).toEqual(['finish_1', 'e2'])
+		expect(toolMessages[1]?.content).toContain('Not executed because an earlier call in the batch ended the role.')
+		expect(checkpoints.some((written) => written.frames[0]?.pending === undefined && written.frames[0]?.roleState.history.some((message) => message.role === 'tool' && message.tool_call_id === 'e2'))).toBe(true)
+	})
+
+	test('a standard-level invalid finish terminal is a placeholder failure, not a reconstruction attempt', async () => {
+		const guild = buildPendingGuild(['finish'])
+		const checkpoint = pendingCheckpoint(finishCall({ status: 'success', summary: 'never accepted' }))
+		const llm = new FakeLlm()
+		llm.responses = [success([finishCall({ status: 'success', summary: 'recovered' })])]
+		const { deps, events } = makeDeps(llm)
+		events.push(startEvent('tool:finish_1', 'finish'), { timestamp: 't2', type: 'tool_result', payload: { role: 'main', tool: 'finish', kind: 'invalid_arguments', callId: 'tool:finish_1' } })
+
+		const card = await resumeRoleStack(runRole, deps, guild, checkpoint)
+
+		expect(card).toEqual({ status: 'success', summary: 'recovered' })
+		expect(llm.calls.length).toBe(1)
+	})
+
+	test('a child needs_clarification card that does not pause the run is a normal role terminal', async () => {
+		const guild = buildGuild(
+			{
+				parent: { systemPrompt: 'p', tools: ['agent', 'finish'] },
+				child: { systemPrompt: 'c', tools: ['finish'] },
+			},
+			'parent',
+		)
+		const llm = new FakeLlm()
+		llm.responses = [
+			success([agentCall('child', 'subtask')]),
+			success([finishCall({ status: 'needs_clarification', summary: 'child needs a decision' })]),
+			success([finishCall({ status: 'success', summary: 'parent done' })]),
+		]
+		const { deps, events } = makeDeps(llm)
+
+		const card = await runRole(deps, { loadedGuild: guild, depth: 0, roleName: 'parent', task: 'do it' })
+
+		expect(card.summary).toBe('parent done')
+		const childFinish = events.find((event) => event.type === 'role_finished' && payloadField(event, 'role') === 'child')
+		expect(payloadField(defined(childFinish, 'child finish'), 'status')).toBe('needs_clarification')
+		expect(payloadField(defined(childFinish, 'child finish'), 'paused')).toBeUndefined()
+	})
+
+	test('a handler needs_clarification card closes normally and resolves its interrupt', async () => {
+		const guild = buildGuild(
+			{
+				main: { systemPrompt: 'm', tools: ['echo', 'finish'] },
+				detector: { systemPrompt: 'd', tools: ['finish'] },
+			},
+			'main',
+			{ executor: { ...baseExecutor, interruptTriggers: { handlerRole: 'detector', everyToolCalls: 1, everyTokens: 100000 } } },
+		)
+		const llm = new FakeLlm()
+		llm.responses = [
+			success([echoCall('e1'), echoCall('e2')]),
+			success([finishCall({ status: 'needs_clarification', summary: 'handler uncertain' })]),
+			success([finishCall({ status: 'success', summary: 'main done' })]),
+		]
+		const { deps, events } = makeDeps(llm)
+		const depsWithEcho: EngineDependencies = { ...deps, toolPlatform: withExtraHandlers(deps.toolPlatform, { echo: echoHandler }) }
+
+		const card = await runRole(depsWithEcho, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'do it' })
+
+		expect(card.summary).toBe('main done')
+		const detectorFinish = events.find((event) => event.type === 'role_finished' && payloadField(event, 'role') === 'detector')
+		expect(payloadField(defined(detectorFinish, 'detector finish'), 'paused')).toBeUndefined()
+		expect(events.filter((event) => event.type === 'interrupt_resolved').length).toBe(1)
+	})
+
+	test('a root direct clarification still marks its role_finished as paused', async () => {
+		const guild = buildPendingGuild(['finish'])
+		const llm = new FakeLlm()
+		llm.responses = [success([finishCall({ status: 'needs_clarification', summary: 'need a decision' })])]
+		const { deps, events } = makeDeps(llm)
+
+		const card = await runRole(deps, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'do it' })
+
+		expect(card.status).toBe('needs_clarification')
+		const finish = events.find((event) => event.type === 'role_finished')
+		expect(payloadField(defined(finish, 'role finish'), 'paused')).toBe(true)
+	})
+
+	test('a live batch with a rejected finish before a real finish does not crash the completed-turn check', async () => {
+		const guild = buildPendingGuild(['finish'])
+		const llm = new FakeLlm()
+		llm.responses = [success([
+			{ id: 'bad_finish', type: 'function', function: { name: 'finish', arguments: JSON.stringify({ status: 'success', summary: '' }) } },
+			finishCall({ status: 'error', summary: 'the endpoint is down' }),
+		])]
+		const { deps, events } = makeDeps(llm)
+
+		const card = await runRole(deps, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'do it' })
+
+		expect(card.status).toBe('error')
+		expect(card.summary).toBe('the endpoint is down')
+		expect(events.filter((event) => event.type === 'role_finished').length).toBe(1)
+	})
+
+	test('boot resume of a rejected finish followed by another call continues instead of crashing', async () => {
+		const guild = buildPendingGuild(['echo', 'finish'])
+		const badFinish: ToolCall = { id: 'bad_finish', type: 'function', function: { name: 'finish', arguments: JSON.stringify({ status: 'success', summary: '' }) } }
+		const echo = echoCall('e1')
+		const checkpoint: RunCheckpoint = {
+			version: 1,
+			runId: 'test-run',
+			startTime: '2026-01-01T00:00:00.000Z',
+			registryCounter: 1,
+			frames: [{
+				roleId: 'main-0-1',
+				roleName: 'main',
+				depth: 0,
+				task: 'do it',
+				roleState: createEmptyRoleState({
+					history: [
+						{ role: 'system', content: 'prompt' },
+						{ role: 'user', content: 'do it' },
+						{ role: 'assistant', content: '', tool_calls: [badFinish, echo] },
+						{ role: 'tool', content: '{"kind":"invalid_arguments","message":"summary must be a non-empty string"}', tool_call_id: 'bad_finish' },
+						{ role: 'tool', content: '{"value":7}', tool_call_id: 'e1' },
+					],
+				}),
+			}],
+		}
+		const llm = new FakeLlm()
+		llm.responses = [success([finishCall({ status: 'success', summary: 'continued' })])]
+		const { deps } = makeDeps(llm)
+
+		const card = await resumeRoleStack(runRole, deps, guild, checkpoint)
+
+		expect(card).toEqual({ status: 'success', summary: 'continued' })
+		expect(llm.calls.length).toBe(1)
+	})
+
+	test('prevented calls sharing a model id each get their own interrupted result', async () => {
+		const guild = buildPendingGuild(['echo', 'finish'])
+		const llm = new FakeLlm()
+		llm.responses = [success([
+			finishCall({ status: 'success', summary: 'done' }),
+			echoCall('same_id'),
+			echoCall('same_id'),
+		])]
+		const { deps, checkpoints } = makeDeps(llm)
+
+		await runRole(deps, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'do it' })
+
+		const checkpoint = checkpoints[checkpoints.length - 1]
+		if (checkpoint === undefined) throw new Error('expected the completed-turn checkpoint')
+		const frame = defined(checkpoint.frames[0], 'completed frame')
+		const interrupted = frame.roleState.history.filter((message) => message.role === 'tool' && message.tool_call_id === 'same_id' && message.content.includes('Not executed because an earlier call'))
+		expect(interrupted.length).toBe(2)
 	})
 })

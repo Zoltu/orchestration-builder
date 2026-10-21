@@ -1,8 +1,16 @@
 import { describe, expect, test } from 'bun:test'
-import { createWebHumanBackend } from './human-backend.ts'
+import { createWebHumanBackend, type HumanAskInvocation } from './human-backend.ts'
 import { createInterruptChannel, createInterruptQueue } from './interrupts.ts'
 import { createRunState, type RunState } from './run-state.ts'
 import { defined } from './test-fixtures.ts'
+
+let invocationCounter = 0
+
+function askInvocation(): HumanAskInvocation {
+	invocationCounter += 1
+	const questionId = `run-state-question-${invocationCounter}`
+	return { questionId, callId: `tool:${questionId}`, parentCallId: 'role:main-0-1' }
+}
 
 function makeRunState() {
 	const humanBackend = createWebHumanBackend()
@@ -14,7 +22,7 @@ function makeRunState() {
 describe('createRunState', () => {
 	test('pendingQuestions delegates to the web human backend', () => {
 		const { humanBackend, runState } = makeRunState()
-		humanBackend.ask('hello?', 'context')
+		humanBackend.ask('hello?', askInvocation(), 'context')
 
 		const pending = runState.pendingQuestions()
 		expect(pending.length).toBe(1)
@@ -24,7 +32,7 @@ describe('createRunState', () => {
 	test('submitAnswer delegates to the web human backend and resolves the parked promise', async () => {
 		const { humanBackend, runState } = makeRunState()
 
-		const promise = humanBackend.ask('which?')
+		const promise = humanBackend.ask('which?', askInvocation())
 		const [question] = runState.pendingQuestions()
 
 		const result = runState.submitAnswer(defined(question, 'pending question').id, 'this one')
@@ -41,7 +49,7 @@ describe('createRunState', () => {
 
 	test('pendingQuestions returns isolated copies that cannot mutate backend state', () => {
 		const { humanBackend, runState } = makeRunState()
-		humanBackend.ask('original?')
+		humanBackend.ask('original?', askInvocation())
 
 		const snapshot = runState.pendingQuestions()
 		defined(snapshot[0], 'snapshot question').question = 'tampered'

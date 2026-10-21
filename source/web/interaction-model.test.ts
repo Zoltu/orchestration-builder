@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import {
+	activeOperation,
 	activeParticipant,
 	activeStack,
 	callChainOf,
@@ -7,6 +8,7 @@ import {
 	fateOf,
 	isPaused,
 	observesOf,
+	openInvocationsOf,
 	rolesOnlyModel,
 	rolesOnlyParticipants,
 	secondsBetweenIso,
@@ -637,5 +639,216 @@ describe('withLiveElapsed', () => {
 			status: 'running',
 		}
 		expect(withLiveElapsed(model, Date.parse('2026-01-01T00:00:07.000Z'))).toBe(model)
+	})
+})
+
+describe('InteractionModel — id-keyed invocation tree', () => {
+	function idCall(id: string, callId: string, source: string, destination: string, parentCallId?: string): InteractionModel['operations'][number] {
+		const operation: InteractionModel['operations'][number] = { id, kind: 'call', callId, stack: 'root', source, destination, startedAt: `t-${id}`, settledAt: null, lifecycle: 'in_flight', outcome: null, metrics: null }
+		if (parentCallId !== undefined) operation.parentCallId = parentCallId
+		return operation
+	}
+
+	function idReturn(id: string, callId: string, source: string, destination: string): InteractionModel['operations'][number] {
+		return { id, kind: 'return', callId, stack: 'root', source, destination, startedAt: `t-${id}`, settledAt: 't', lifecycle: 'settled', outcome: 'success', metrics: null }
+	}
+
+	function participantsOf(): InteractionModel['participants'] {
+		return [
+			{ id: 'you', role: 'human', kind: 'human' },
+			{ id: 'orch', role: 'orchestrator', kind: 'role' },
+			{ id: 'tool-a', role: 'read_file', kind: 'tool' },
+			{ id: 'role-b', role: 'coder', kind: 'role' },
+			{ id: 'tool-c', role: 'search_text', kind: 'tool' },
+		]
+	}
+
+	test('the active chain follows parentCallId and excludes open siblings', () => {
+		const model: InteractionModel = {
+			participants: participantsOf(),
+			operations: [
+				idCall('op1', 'c1', 'you', 'orch'),
+				idCall('op2', 'c2', 'orch', 'tool-a', 'c1'),
+				idCall('op3', 'c3', 'orch', 'role-b', 'c1'),
+				idCall('op4', 'c4', 'role-b', 'tool-c', 'c3'),
+			],
+			status: 'running',
+		}
+		expect(openInvocationsOf(model, 'root').map((operation) => operation.callId)).toEqual(['c1', 'c2', 'c3', 'c4'])
+		expect(callChainOf(model, 'root').map((operation) => operation.callId)).toEqual(['c1', 'c3', 'c4'])
+		expect(activeParticipant(model)).toBe('tool-c')
+		expect(isPaused(model, 'root')).toBe(false)
+	})
+
+	test('a return closes exactly the callId it names, leaving a later sibling open', () => {
+		const model: InteractionModel = {
+			participants: participantsOf(),
+			operations: [
+				idCall('op1', 'c1', 'you', 'orch'),
+				idCall('op2', 'c2', 'orch', 'tool-a', 'c1'),
+				idCall('op3', 'c3', 'orch', 'role-b', 'c1'),
+				idReturn('op4', 'c2', 'tool-a', 'orch'),
+			],
+			status: 'running',
+		}
+		expect(openInvocationsOf(model, 'root').map((operation) => operation.callId)).toEqual(['c1', 'c3'])
+		expect(callChainOf(model, 'root').map((operation) => operation.callId)).toEqual(['c1', 'c3'])
+		expect(activeParticipant(model)).toBe('role-b')
+	})
+
+	test('a duplicate start is ignored and a return with no matching start closes nothing', () => {
+		const model: InteractionModel = {
+			participants: participantsOf(),
+			operations: [
+				idCall('op1', 'c1', 'you', 'orch'),
+				idCall('op2', 'c2', 'orch', 'tool-a', 'c1'),
+				idCall('op3', 'c2', 'orch', 'role-b', 'c1'),
+				idReturn('op4', 'missing', 'tool-c', 'role-b'),
+			],
+			status: 'running',
+		}
+		expect(openInvocationsOf(model, 'root').map((operation) => operation.callId)).toEqual(['c1', 'c2'])
+		expect(openInvocationsOf(model, 'root')[1]?.destination).toBe('tool-a')
+		expect(callChainOf(model, 'root').map((operation) => operation.callId)).toEqual(['c1', 'c2'])
+	})
+
+	test('an interrupt stack keys its handler under the interrupt invocation across stacks', () => {
+		const model: InteractionModel = {
+			participants: [
+				{ id: 'you', role: 'human', kind: 'human' },
+				{ id: 'orch', role: 'orchestrator', kind: 'role' },
+				{ id: 'int', role: 'interrupt', kind: 'interrupt' },
+				{ id: 'handler', role: 'loop_detector', kind: 'role' },
+			],
+			operations: [
+				idCall('op1', 'c1', 'you', 'orch'),
+				{ id: 'op2', kind: 'call', callId: 'c2', parentCallId: 'interrupt:1', stack: 'int-stack', source: 'int', destination: 'handler', startedAt: 't2', settledAt: null, lifecycle: 'in_flight', outcome: null, metrics: null },
+			],
+			status: 'running',
+			stacks: [
+				{ id: 'root', root: 'you' },
+				{ id: 'int-stack', root: 'int' },
+			],
+		}
+		expect(stacksOf(model)).toEqual(['root', 'int-stack'])
+		expect(activeStack(model)).toBe('int-stack')
+		expect(callChainOf(model, 'int-stack').map((operation) => operation.callId)).toEqual(['c2'])
+		expect(openInvocationsOf(model, 'root').map((operation) => operation.callId)).toEqual(['c1'])
+	})
+
+	test('a legacy model keeps the LIFO replay for both helpers', () => {
+		const model: InteractionModel = {
+			participants: [
+				{ id: 'you', role: 'human', kind: 'human' },
+				{ id: 'orch', role: 'orchestrator', kind: 'role' },
+				{ id: 'tool', role: 'read_file', kind: 'tool' },
+			],
+			operations: [
+				{ id: 'op1', kind: 'call', stack: 'root', source: 'you', destination: 'orch', startedAt: 't0', settledAt: null, lifecycle: 'in_flight', outcome: null, metrics: null },
+				{ id: 'op2', kind: 'call', stack: 'root', source: 'orch', destination: 'tool', startedAt: 't1', settledAt: null, lifecycle: 'in_flight', outcome: null, metrics: null },
+				{ id: 'op3', kind: 'return', stack: 'root', source: 'tool', destination: 'orch', startedAt: 't2', settledAt: 't2', lifecycle: 'settled', outcome: 'success', metrics: null },
+			],
+			status: 'running',
+		}
+		expect(openInvocationsOf(model, 'root').map((operation) => operation.id)).toEqual(['op1'])
+		expect(callChainOf(model, 'root').map((operation) => operation.id)).toEqual(['op1'])
+	})
+})
+
+describe('InteractionModel — closed parents and active returns', () => {
+	test('a closed parent is not carried into the open chain of its still-open child', () => {
+		const model: InteractionModel = {
+			participants: [
+				{ id: 'you', role: 'human', kind: 'human' },
+				{ id: 'orch', role: 'orchestrator', kind: 'role' },
+				{ id: 'coder', role: 'coder', kind: 'role' },
+			],
+			operations: [
+				{ id: 'op1', kind: 'call', callId: 'c1', stack: 'root', source: 'you', destination: 'orch', startedAt: 't0', settledAt: null, lifecycle: 'in_flight', outcome: null, metrics: null },
+				{ id: 'op2', kind: 'call', callId: 'c2', parentCallId: 'c1', stack: 'root', source: 'orch', destination: 'coder', startedAt: 't1', settledAt: null, lifecycle: 'in_flight', outcome: null, metrics: null },
+				{ id: 'op3', kind: 'return', callId: 'c1', stack: 'root', source: 'orch', destination: 'you', startedAt: 't2', settledAt: 't2', lifecycle: 'settled', outcome: 'success', metrics: null },
+			],
+			status: 'running',
+		}
+		expect(callChainOf(model, 'root').map((operation) => operation.callId)).toEqual(['c2'])
+		expect(activeOperation(model)?.id).toBe('op2')
+	})
+
+	test('an id-keyed return on the active path stays the active operation after a role finishes', () => {
+		const model: InteractionModel = {
+			participants: [
+				{ id: 'you', role: 'human', kind: 'human' },
+				{ id: 'orch', role: 'orchestrator', kind: 'role' },
+				{ id: 'coder', role: 'coder', kind: 'role' },
+			],
+			operations: [
+				{ id: 'op1', kind: 'call', callId: 'c1', stack: 'root', source: 'you', destination: 'orch', startedAt: 't0', settledAt: null, lifecycle: 'in_flight', outcome: null, metrics: null },
+				{ id: 'op2', kind: 'call', callId: 'c2', parentCallId: 'c1', stack: 'root', source: 'orch', destination: 'coder', startedAt: 't1', settledAt: null, lifecycle: 'in_flight', outcome: null, metrics: null },
+				{ id: 'op3', kind: 'return', callId: 'c2', stack: 'root', source: 'coder', destination: 'orch', startedAt: 't2', settledAt: null, lifecycle: 'in_flight', outcome: 'success', metrics: null },
+			],
+			status: 'running',
+		}
+		expect(activeOperation(model)?.id).toBe('op3')
+		expect(activeParticipant(model)).toBe('orch')
+	})
+
+	test('a sibling return that started before the active leaf does not steal the focus', () => {
+		const model: InteractionModel = {
+			participants: [
+				{ id: 'you', role: 'human', kind: 'human' },
+				{ id: 'orch', role: 'orchestrator', kind: 'role' },
+				{ id: 'tool-a', role: 'read_file', kind: 'tool' },
+				{ id: 'tool-b', role: 'search_text', kind: 'tool' },
+			],
+			operations: [
+				{ id: 'op1', kind: 'call', callId: 'c1', stack: 'root', source: 'you', destination: 'orch', startedAt: 't0', settledAt: null, lifecycle: 'in_flight', outcome: null, metrics: null },
+				{ id: 'op2', kind: 'call', callId: 'c2', parentCallId: 'c1', stack: 'root', source: 'orch', destination: 'tool-a', startedAt: 't1', settledAt: null, lifecycle: 'in_flight', outcome: null, metrics: null },
+				{ id: 'op3', kind: 'call', callId: 'c3', parentCallId: 'c1', stack: 'root', source: 'orch', destination: 'tool-b', startedAt: 't2', settledAt: null, lifecycle: 'in_flight', outcome: null, metrics: null },
+				{ id: 'op4', kind: 'return', callId: 'c2', stack: 'root', source: 'tool-a', destination: 'orch', startedAt: 't3', settledAt: null, lifecycle: 'in_flight', outcome: 'success', metrics: null },
+			],
+			status: 'running',
+		}
+		expect(activeOperation(model)?.id).toBe('op3')
+		expect(activeParticipant(model)).toBe('tool-b')
+	})
+
+	test('an unkeyed return is ignored once the model is id-keyed', () => {
+		const model: InteractionModel = {
+			participants: [
+				{ id: 'you', role: 'human', kind: 'human' },
+				{ id: 'orch', role: 'orchestrator', kind: 'role' },
+				{ id: 'tool', role: 'read_file', kind: 'tool' },
+			],
+			operations: [
+				{ id: 'op1', kind: 'call', callId: 'c1', stack: 'root', source: 'you', destination: 'orch', startedAt: 't0', settledAt: null, lifecycle: 'in_flight', outcome: null, metrics: null },
+				{ id: 'op2', kind: 'call', callId: 'c2', parentCallId: 'c1', stack: 'root', source: 'orch', destination: 'tool', startedAt: 't1', settledAt: null, lifecycle: 'in_flight', outcome: null, metrics: null },
+				{ id: 'op3', kind: 'return', stack: 'root', source: 'tool', destination: 'orch', startedAt: 't2', settledAt: 't2', lifecycle: 'settled', outcome: 'success', metrics: null },
+			],
+			status: 'running',
+		}
+		expect(openInvocationsOf(model, 'root').map((operation) => operation.callId)).toEqual(['c1', 'c2'])
+		expect(callChainOf(model, 'root').map((operation) => operation.callId)).toEqual(['c1', 'c2'])
+	})
+})
+
+describe('InteractionModel — duplicate returns keep the first terminal', () => {
+	test('the view helpers ignore a later return with the same callId', () => {
+		const model: InteractionModel = {
+			participants: [
+				{ id: 'you', role: 'human', kind: 'human' },
+				{ id: 'orch', role: 'orchestrator', kind: 'role' },
+				{ id: 'tool', role: 'read_file', kind: 'tool' },
+			],
+			operations: [
+				{ id: 'op1', kind: 'call', callId: 'c1', stack: 'root', source: 'you', destination: 'orch', startedAt: 't0', settledAt: null, lifecycle: 'in_flight', outcome: null, metrics: null },
+				{ id: 'op2', kind: 'call', callId: 'c2', parentCallId: 'c1', stack: 'root', source: 'orch', destination: 'tool', startedAt: 't1', settledAt: null, lifecycle: 'in_flight', outcome: null, metrics: null },
+				{ id: 'op3', kind: 'return', callId: 'c2', stack: 'root', source: 'tool', destination: 'orch', startedAt: 't2', settledAt: null, lifecycle: 'in_flight', outcome: 'success', metrics: null },
+				{ id: 'op4', kind: 'return', callId: 'c2', stack: 'root', source: 'tool', destination: 'orch', startedAt: 't3', settledAt: 't3', lifecycle: 'settled', outcome: 'error', metrics: null },
+			],
+			status: 'running',
+		}
+		expect(activeOperation(model)?.id).toBe('op3')
+		expect(openInvocationsOf(model, 'root').map((operation) => operation.callId)).toEqual(['c1'])
+		expect(stacksOf(model)).toEqual(['root'])
 	})
 })

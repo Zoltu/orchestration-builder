@@ -5,6 +5,7 @@ import type { RunParkTracker } from './park-state.js'
 import type { RoleRegistry } from './role-registry.js'
 import type { RoleState } from './state.js'
 import type { ResultCard, RoleDefinition, ToolCall, ToolResult } from './types.js'
+import type { ToolInvocation } from './invocation.js'
 
 // The per-invocation state a role's tools need. The guild-derived values are passed per call rather than captured at construction so one platform can serve every role and guild in a run, including the offline fixture guild validate-data builds.
 export interface RunToolScope {
@@ -26,7 +27,9 @@ export interface RunToolScope {
 export interface ToolPlatform {
 	// Returns the tool names the platform would dispatch for this scope without executing any handler; the offline data gate uses it to compare handler tables against the Guild manifests.
 	handlerNames(runScope: RunToolScope): readonly string[]
-	dispatch(roleDefinition: RoleDefinition, runScope: RunToolScope, call: ToolCall): Promise<ToolResult>
+	// Returns the unknown_tool / invalid_tool_call failure the dispatch would produce before any handler runs, or null when the call is dispatchable. The engine pre-checks with it so those diagnostics are not recorded as started invocations.
+	validateCall(roleDefinition: RoleDefinition, runScope: RunToolScope, call: ToolCall): ToolResult | null
+	dispatch(roleDefinition: RoleDefinition, runScope: RunToolScope, call: ToolCall, invocation?: ToolInvocation): Promise<ToolResult>
 	suspendsChild(toolName: string): boolean
 	observesRole(toolName: string): boolean
 }

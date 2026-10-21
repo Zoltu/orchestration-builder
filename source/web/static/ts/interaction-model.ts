@@ -6,6 +6,8 @@
 //
 // Interrupts spawn fresh call stacks rooted at a fresh Interrupt participant instance (instance-per-interrupt, like every role). A paused stack's fate (resuming / rewinding / terminating / terminated / active) is read off its own operations after the preemption point, never stored as a field — see fateOf.
 //
+// Invocations are keyed by identity when the log carries callId: a call is open until a return names the same callId, parent links follow parentCallId, and callChainOf is the path from the stack root to the most recently started open leaf (siblings stay out of it, while openInvocationsOf returns them all). A legacy log without callIds keeps the original LIFO replay as a bounded compatibility path; new behavior belongs only to the id-keyed tree.
+//
 // The module is browser-pure TypeScript (served statically and imported by the view modules) and imports nothing. The exported types are the contract the server-side adapter (source/web/interaction-model-adapter.ts) and the view modules' tests consume.
 //
 // The model carries no detail bodies: an operation's per-call markdown (task text, tool arguments/results, summaries) is fetched on demand from the run's details endpoint when the inspector opens, not shipped with every polled frame.
@@ -51,6 +53,10 @@ export interface OperationMetrics {
 export interface Operation {
 	id: string
 	kind: OperationKind
+	// The stable invocation identity the log's callId field names, when the producer carries it. Calls and their closing returns share it, so a return closes exactly the call it names rather than the most recent open call. Absent on legacy operations.
+	callId?: string
+	// The invocation that caused this call (the log's parentCallId field). Calls only; a root call has none. Absent on legacy operations.
+	parentCallId?: string
 	// The call-stack id this operation belongs to. The active stack is the stack of the latest operation.
 	stack: string
 	// The participant id the operation originates from. For 'observe' and 'terminate' this may sit in a different (active) stack than destination — a tool in the active stack reaches across into a paused stack.
@@ -96,6 +102,18 @@ interface DerivedStack {
 	stackIds: string[] | undefined
 	records: StackRecord[] | undefined
 	callMetrics: Map<string, OperationMetrics> | undefined
+	identity: boolean | undefined
+	identityGraph: IdentityGraph | undefined
+}
+
+// The id-keyed model of a log written with invocation identities: the open calls per stack (siblings included), the active path per stack (root to the most recently started open leaf, following parentCallId), and the call lookup the path walk needs. Built once per model; a legacies-only model never constructs it.
+interface IdentityGraph {
+	openByStack: Map<string, Operation[]>
+	chainByStack: Map<string, Operation[]>
+	callByKey: Map<string, Operation>
+	parentOfKey: Map<string, string | undefined>
+	indexByKey: Map<string, number>
+	ignoredReturnIds: Set<string>
 }
 
 // The helpers re-derive the same whole-model structures (the open-call replay, the derived stack records, the active stack, the row list) several times per poll; the model object is never mutated in place and is replaced only when its data changes, so an unchanged poll keeps the same object by reference and a WeakMap keyed on model identity caches each structure on first request: every helper reads the same derivation instead of replaying the operation list per call, and an entry is dropped with its model on run switch. The undefined slots mean "not derived yet"; a cached value is never mutated afterwards, so readers may hold it without copying.
@@ -104,9 +122,135 @@ const derivedByModel = new WeakMap<object, DerivedStack>()
 function derivedOf(model: InteractionModel): DerivedStack {
 	let derived = derivedByModel.get(model)
 	if (derived !== undefined) return derived
-	derived = { chains: undefined, active: undefined, stackIds: undefined, records: undefined, callMetrics: undefined }
+	derived = { chains: undefined, active: undefined, stackIds: undefined, records: undefined, callMetrics: undefined, identity: undefined, identityGraph: undefined }
 	derivedByModel.set(model, derived)
 	return derived
+}
+
+// A model is id-keyed as soon as any operation carries a callId. Once that is true the whole model is read through the id path: calls are keyed by callId and a return must carry the callId it closes. An unkeyed return in such a model cannot be matched to an invocation and is ignored (the adapter assigns ids to every return it emits); there is no per-operation LIFO fallback inside an id-keyed model.
+function usesIdentity(model: InteractionModel): boolean {
+	const derived = derivedOf(model)
+	if (derived.identity !== undefined) return derived.identity
+	derived.identity = model.operations.some((operation) => operation.callId !== undefined)
+	return derived.identity
+}
+
+function operationKey(operation: Operation): string {
+	return operation.callId ?? operation.id
+}
+
+function removeOpenCall(openCalls: Operation[], key: string): void {
+	const index = openCalls.findIndex((call) => operationKey(call) === key)
+	if (index >= 0) openCalls.splice(index, 1)
+}
+
+// Builds the id-keyed open-call tree and the active path per stack. A call is open while no return carries its callId; the first return wins, so a duplicate terminal is ignored. A terminate removes the call whose destination it targets, exactly as the legacy replay does. The active path starts at the most recently started open leaf (an open call with no open child) and walks parentCallId back to the stack root, so siblings never enter it.
+function identityGraphOf(model: InteractionModel): IdentityGraph {
+	const derived = derivedOf(model)
+	if (derived.identityGraph !== undefined) return derived.identityGraph
+	const openByStack = new Map<string, Operation[]>()
+	const callByKey = new Map<string, Operation>()
+	const parentOfKey = new Map<string, string | undefined>()
+	const callIndexByKey = new Map<string, number>()
+	const closedKeys = new Set<string>()
+	const ignoredReturnIds = new Set<string>()
+	model.operations.forEach((operation, index) => {
+		if (operation.kind === 'call') {
+			const key = operationKey(operation)
+			// A duplicate start for the same callId is ignored: the first start owns the invocation.
+			if (callByKey.has(key)) return
+			callByKey.set(key, operation)
+			callIndexByKey.set(key, index)
+			parentOfKey.set(key, operation.parentCallId)
+			if (closedKeys.has(key)) return
+			let open = openByStack.get(operation.stack)
+			if (open === undefined) {
+				open = []
+				openByStack.set(operation.stack, open)
+			}
+			open.push(operation)
+			return
+		}
+		if (operation.kind === 'return') {
+			if (operation.callId === undefined) return
+			if (closedKeys.has(operation.callId)) {
+				ignoredReturnIds.add(operation.id)
+				return
+			}
+			closedKeys.add(operation.callId)
+			const call = callByKey.get(operation.callId)
+			if (call === undefined) return
+			let open = openByStack.get(call.stack)
+			if (open === undefined) {
+				open = []
+				openByStack.set(call.stack, open)
+			}
+			removeOpenCall(open, operation.callId)
+			return
+		}
+		if (operation.kind === 'terminate') {
+			for (const open of openByStack.values()) {
+				let removed = false
+				for (let candidateIndex = open.length - 1; candidateIndex >= 0; candidateIndex -= 1) {
+					const candidate = open[candidateIndex]
+					if (candidate === undefined) continue
+					if (candidate.destination !== operation.destination) continue
+					open.splice(candidateIndex, 1)
+					removed = true
+					break
+				}
+				if (removed) break
+			}
+		}
+	})
+	const chainByStack = new Map<string, Operation[]>()
+	for (const [stackId, openCalls] of openByStack) {
+		chainByStack.set(stackId, activeChainOfStack(stackId, openCalls, callByKey, parentOfKey, callIndexByKey))
+	}
+	const graph: IdentityGraph = { openByStack, chainByStack, callByKey, parentOfKey, indexByKey: callIndexByKey, ignoredReturnIds }
+	derived.identityGraph = graph
+	return graph
+}
+
+function activeChainOfStack(stackId: string, openCalls: Operation[], callByKey: Map<string, Operation>, parentOfKey: Map<string, string | undefined>, callIndexByKey: Map<string, number>): Operation[] {
+	const openKeys = new Set(openCalls.map(operationKey))
+	let active: Operation | undefined
+	let activeIndex = -1
+	for (const call of openCalls) {
+		const key = operationKey(call)
+		let hasOpenChild = false
+		for (const candidateKey of openKeys) {
+			if (parentOfKey.get(candidateKey) === key) {
+				hasOpenChild = true
+				break
+			}
+		}
+		if (hasOpenChild) continue
+		const index = callIndexByKey.get(key) ?? -1
+		if (index <= activeIndex) continue
+		active = call
+		activeIndex = index
+	}
+	// A cycle or malformed tree can leave every open call with a child; the latest open call is still the most useful focus.
+	if (active === undefined) active = openCalls[openCalls.length - 1]
+	if (active === undefined) return []
+	const chain: Operation[] = []
+	const seen = new Set<string>()
+	let current: Operation | undefined = active
+	while (current !== undefined) {
+		const key = operationKey(current)
+		if (seen.has(key)) break
+		seen.add(key)
+		chain.push(current)
+		const parentKey = parentOfKey.get(key)
+		if (parentKey === undefined) break
+		// A closed parent is not part of the open path: stop rather than carrying a stale ancestor into the chain.
+		if (!openKeys.has(parentKey)) break
+		const parent = callByKey.get(parentKey)
+		if (parent === undefined || parent.stack !== stackId) break
+		current = parent
+	}
+	return chain.reverse()
 }
 
 // The stack records the helpers read: the model's own records when present, else a derivation from operations (first-appearance order; the root is the stack's first operation's source, which for any well-formed model is its root call's source). A zero-operation stack exists only in the model's own records — operations cannot name it.
@@ -169,18 +313,41 @@ export function activeOperation(model: InteractionModel): Operation | null {
 	if (stack === null) return null
 	// The open chain is independent of where the scan below stops, so it is read once from the memoized replay and the scan selects against it, instead of rebuilding the chain for every candidate.
 	const chain = callChainOf(model, stack)
+	const identity = usesIdentity(model)
+	const graph = identity ? identityGraphOf(model) : null
+	const chainCallIds = new Set<string>()
+	if (identity) {
+		for (const call of chain) {
+			if (call.callId !== undefined) chainCallIds.add(call.callId)
+		}
+	}
+	const activeLeaf = chain[chain.length - 1]
+	const activeLeafIndex = activeLeaf === undefined || activeLeaf.callId === undefined || graph === null ? -1 : (graph.indexByKey.get(activeLeaf.callId) ?? -1)
 	for (let index = model.operations.length - 1; index >= 0; index -= 1) {
 		const operation = model.operations[index]
 		if (operation === undefined) continue
 		if (operation.stack !== stack) continue
 		if (operation.kind === 'observe' || operation.kind === 'terminate') continue
-		if (operation.kind === 'return') return operation
+		if (operation.kind === 'return') {
+			if (identity && graph !== null && graph.ignoredReturnIds.has(operation.id)) continue
+			if (!identity || graph === null) return operation
+			const callId = operation.callId
+			if (callId === undefined) continue
+			// A return focuses the active path when it closed the path itself, the root, or the leaf the path just moved back from (a call started after the now-active leaf). An unrelated sibling that started earlier stays out of focus.
+			if (chainCallIds.has(callId)) return operation
+			if (chain.length === 0) return operation
+			const closed = graph.callByKey.get(callId)
+			const closedIndex = graph.indexByKey.get(callId) ?? -1
+			if (closed === undefined) continue
+			if (closedIndex > activeLeafIndex) return operation
+			continue
+		}
 		for (const call of chain) {
 			if (call.id === operation.id) return operation
 		}
-		return chain[chain.length - 1] ?? null
+		if (!identity) return chain[chain.length - 1] ?? null
 	}
-	return null
+	return chain[chain.length - 1] ?? null
 }
 
 // Returns the destination of the active stack's current focus (see activeOperation), or null when there is no active stack. A freshly preempted stack has no call or return yet: its root is the current worker while the preempting party readies its first act.
@@ -193,10 +360,14 @@ export function activeParticipant(model: InteractionModel): string | null {
 	return record === undefined ? null : record.root
 }
 
-// Replays the operations in order to track the open call chain per stack id: a 'call' pushes onto its stack's chain, a 'return' pops the most recent open call on its own stack, and a 'terminate' closes the targeted call without handing off activity — it pops the open call whose destination matches the terminate's destination, so the node is removed immediately (the next frame the call is absent from the chain) and no separate 'terminated' return is needed for that call. A return closes a call regardless of outcome (a 'terminated' return pops just like a 'success' return), so the chain reflects "still open" rather than "still succeeding". 'observe' is ignored — it never enters a call chain. A terminate's destination lives in a different (paused) stack than the terminate itself (a tool in the active stack reaches across into a paused stack), so the match is by destination across every chain rather than by the terminate's own stack.
+// Returns the open calls per stack id. An id-keyed model (any operation carries a callId) uses the identity graph: a call is open while no return names its callId, siblings stay siblings, and a terminate removes the call whose destination it targets. A legacy model replays the operations in order: a 'call' pushes onto its stack's chain, a 'return' pops the most recent open call on its own stack, and a 'terminate' pops the open call whose destination matches the terminate's destination (the next frame the call is absent from the chain, and no separate 'terminated' return is needed for that call). A return closes a call regardless of outcome, so the chain reflects "still open" rather than "still succeeding". 'observe' is ignored — it never enters a call chain. A terminate's destination lives in a different (paused) stack than the terminate itself, so the match is by destination across every chain rather than by the terminate's own stack.
 function openCallsByStack(model: InteractionModel): Map<string, Operation[]> {
 	const derived = derivedOf(model)
 	if (derived.chains !== undefined) return derived.chains
+	if (usesIdentity(model)) {
+		derived.chains = identityGraphOf(model).openByStack
+		return derived.chains
+	}
 	const chains = new Map<string, Operation[]>()
 	for (const operation of model.operations) {
 		if (operation.kind === 'call') {
@@ -231,11 +402,14 @@ function openCallsByStack(model: InteractionModel): Map<string, Operation[]> {
 
 // The latest activity-affecting operation on a stack (a 'call' or 'return'), or undefined when the stack carries only observes/terminates (or nothing). stacksOf uses this to detect a lingering in_flight return leg on an otherwise-empty stack, and the flow view's row projection uses the same rule to decide whether the stack still renders a row. observe and terminate are skipped because neither affects activity, so an operation of theirs logged after an in_flight return must not hide the lingering return leg (a terminate closes its own targeted call but does not settle the active stack's in_flight return).
 function latestActivityOperationOnStack(model: InteractionModel, stackId: string): Operation | undefined {
+	const identity = usesIdentity(model)
+	const ignoredReturns = identity ? identityGraphOf(model).ignoredReturnIds : null
 	for (let index = model.operations.length - 1; index >= 0; index -= 1) {
 		const operation = model.operations[index]
 		if (operation === undefined) continue
 		if (operation.stack !== stackId) continue
 		if (operation.kind === 'observe' || operation.kind === 'terminate') continue
+		if (ignoredReturns !== null && ignoredReturns.has(operation.id)) continue
 		return operation
 	}
 	return undefined
@@ -275,11 +449,23 @@ export function stacksOf(model: InteractionModel): string[] {
 	return open
 }
 
-// Returns the open call chain of a stack in call order (outermost first), for the flow view's active-path projection. Calls whose return has already appeared are absent, as are calls closed by a terminate (a terminate pops the open call whose destination it targets). 'observe' never appears here.
+// Returns the active call path of a stack in call order (outermost first): for an id-keyed model, the path from the stack root to the most recently started open leaf, following parentCallId, so siblings are excluded even while open; for a legacy model, the open call chain (which is the same LIFO replay that path replaces). Calls whose return has already appeared are absent, as are calls closed by a terminate. 'observe' never appears here.
 export function callChainOf(model: InteractionModel, stackId: string): Operation[] {
+	if (usesIdentity(model)) {
+		const chain = identityGraphOf(model).chainByStack.get(stackId)
+		if (chain === undefined) return []
+		return chain.slice()
+	}
 	const chain = openCallsByStack(model).get(stackId)
 	if (chain === undefined) return []
 	return chain.slice()
+}
+
+// Returns every open call on a stack in start order, siblings included. The flow view renders these (a sibling is a real node beside its parent's other children, not an ancestor of the next call); callChainOf remains the narrower active path.
+export function openInvocationsOf(model: InteractionModel, stackId: string): Operation[] {
+	const calls = openCallsByStack(model).get(stackId)
+	if (calls === undefined) return []
+	return calls.slice()
 }
 
 // Sums the per-call metrics by destination participant id — the callee's own cost for each invocation. The backend adapter attaches metrics to call operations only (a call's metrics accumulate its destination's LLM spend while the call is open, discarded retry attempts included) and carries none on returns, so every per-participant cost read — flow-node cost lines, the top-bar strip, the role tooltips — reads the incoming call, never the return, and a read that pairs both would double count. Each adapter call targets a distinct participant instance (instance-per-invocation), so the map holds one entry per participant in practice; the sum keeps hand-authored models that point several calls at one participant honest. Each counter sums its non-null contributions and stays null when no call reported that counter — except lastPromptTokens, whose assignment semantics take the latest reported value (the destination's current context window size), never a sum.
