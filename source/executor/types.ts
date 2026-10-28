@@ -189,6 +189,9 @@ export type LlmCallResult =
 	// detail is the endpoint's raw error-response body (bounded; absent when the failure produced no response body, e.g. a connect error), kept out of the message so the human-readable surfaces stay concise while the payload stays reviewable.
 	| { kind: 'llm_unavailable'; message: string; detail?: string }
 
+// The retry-relevant categories of a model-provider failure. A transient failure may be retried; billing, auth, and request_rejected failures are permanent for the current request and must not be retried.
+export type ProviderFailureCategory = 'transient' | 'billing' | 'auth' | 'request_rejected'
+
 export type ErrorKind =
 	| 'invalid_tool_call'
 	| 'unknown_tool'

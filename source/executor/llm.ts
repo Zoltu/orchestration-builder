@@ -1,5 +1,6 @@
 import type { LlmCallResult, LlmRequest, LlmUsage, ResolvedModelConfig } from './types.js'
 import { createResponsesStreamAccumulator, createSseLineAssembler, mapHistoryToResponsesInput, mapTerminalResponseToCallResult, mapToolManifestsToResponsesTools, OversizedSseLineError, parseSseDataPayload, streamDeltaOf, type ResponsesStreamSnapshot, type SseDataPayload } from './llm-sse.js'
+import { classifyProviderFailure, hasBillingSignature, type ProviderFailureClassification } from './provider-failure.js'
 import { asRecord, isObject, safeJsonParse } from './validation.js'
 
 // The shared LLM wire types live in types.ts (see it for the definitions); re-exported here so every import site keeps its path.
@@ -21,7 +22,8 @@ export interface LlmFetchRequest {
 
 export type LlmStreamResponse =
 	| { kind: 'stream'; status: number; stream: ReadableStream<Uint8Array> }
-	| { kind: 'http_error'; status: number; errorBody: string }
+	// Header names are lowercased at the leaf boundary, so consumers read them by their wire name (e.g. headers['retry-after']).
+	| { kind: 'http_error'; status: number; errorBody: string; headers: Record<string, string> }
 
 export type LlmFetch = (request: LlmFetchRequest) => Promise<LlmStreamResponse>
 
@@ -35,7 +37,11 @@ export function createLlmFetch(): LlmFetch {
 		})
 		// A 2xx without a body stream cannot drive a turn, so it is classified with the error bodies and reported as an unavailable endpoint rather than guessed into a success.
 		if (!response.ok || response.body === null) {
-			return { kind: 'http_error', status: response.status, errorBody: await response.text() }
+			const headers: Record<string, string> = {}
+			response.headers.forEach((value, name) => {
+				headers[name.toLowerCase()] = value
+			})
+			return { kind: 'http_error', status: response.status, errorBody: await response.text(), headers }
 		}
 		return { kind: 'stream', status: response.status, stream: response.body }
 	}
@@ -61,6 +67,8 @@ export interface LlmCallerDependencies {
 	llmFetch: LlmFetch
 	sleep: Sleep
 	scheduleTimeout: ScheduleTimeout
+	random: () => number
+	now: () => number
 }
 
 type ParsedSuccess = Extract<LlmCallResult, { kind: 'success' }>
@@ -72,6 +80,9 @@ type ParsedClassification =
 
 // The bound on the error-response body preserved as an llm_unavailable result's detail: a provider error body can be an arbitrarily large HTML or JSON page, and the diagnostic value sits in its first lines. A truncated copy carries an explicit marker so a reader can tell.
 const MAX_ERROR_DETAIL_CHARS = 2000
+const MAX_INLINE_RETRY_WAIT_MS = 5_000
+const BASE_BACKOFF_MS = 200
+const MAX_BACKOFF_MS = 5_000
 
 // The error body is machine data for the technical-details view (and copy-raw), never rendered prose, so it is trimmed but otherwise verbatim.
 function boundedErrorDetail(errorBody: string): string | undefined {
@@ -81,9 +92,16 @@ function boundedErrorDetail(errorBody: string): string | undefined {
 	return `${trimmed.slice(0, MAX_ERROR_DETAIL_CHARS)}… [truncated]`
 }
 
-// Exponential backoff between retry attempts, scaled off the 1-based attempt number.
-function backoffMs(attempt: number): number {
-	return Math.pow(2, attempt) * 100
+// Full-jitter exponential backoff: the cap grows with the 1-based attempt number, while the injected random source spreads retries so a fleet does not synchronize its reconnect storm.
+function backoffMs(attempt: number, random: () => number): number {
+	return random() * Math.min(MAX_BACKOFF_MS, BASE_BACKOFF_MS * Math.pow(2, attempt - 1))
+}
+
+function providerFailureResult(classification: ProviderFailureClassification, attempts: number, detail: string | undefined, note?: string): LlmCallResult {
+	let message = classification.message
+	if (classification.category === 'transient' && attempts > 1) message += ` after ${attempts} attempts`
+	if (note !== undefined) message += `. ${note}`
+	return { kind: 'llm_unavailable', message, ...(detail !== undefined ? { detail } : {}) }
 }
 
 // A completed stream can still be degenerate: a thinking model can burn the entire completion budget on reasoning before any content is emitted. Classifying after the terminal mapping routes these to the retry loop or an immediate failure instead of a silent empty turn.
@@ -112,6 +130,8 @@ const CONTEXT_ERROR_KEYWORDS: readonly string[] = [
 // A keyword gate over statuses 400/413/429, extended for the Responses-era error shapes: the structured prompt_tokens paths come first, then the count embedded in error.message, then PPQ's nested upstream error under error.metadata.raw.
 export function detectContextBudgetExceeded(status: number, errorBody: string, contextWindow: number): LlmCallResult | undefined {
 	if (status !== 400 && status !== 413 && status !== 429) return undefined
+	// A 429 quota body can also contain generic context phrases ("token limit"), so billing must be classified before the context scan can claim it. Other 4xx statuses are not billing statuses, so their bodies must not suppress a genuine context-overflow signal.
+	if (status === 429 && hasBillingSignature(errorBody)) return undefined
 	const lowered = errorBody.toLowerCase()
 	let looksLikeContext = false
 	for (const keyword of CONTEXT_ERROR_KEYWORDS) {
@@ -343,17 +363,14 @@ export function createLlmCaller(model: ResolvedModelConfig, apiKey: string | und
 			let response: LlmStreamResponse
 			try {
 				response = await dependencies.llmFetch({ url: `${model.apiBase}/responses`, method: 'POST', headers, body: JSON.stringify(body), signal: connectController.signal })
-			} catch (error) {
-				// An aborted fetch is the connect timeout firing, not a plain network failure, so the retry message names the bound that tripped.
-				if (connectController.signal.aborted) {
-					lastError = `no response headers within ${LLM_CONNECT_TIMEOUT_MS}ms`
-				} else {
-					lastError = error instanceof Error ? error.message : String(error)
-				}
+			} catch {
+				// The transport error's own text can carry a host or URL, so the UI-facing message stays platform-authored; only the connect timeout bound is named because it is our own diagnostic.
+				const classification = classifyProviderFailure({ transport: true }, dependencies.now())
 				if (attempt >= maxAttempts) {
-					return { kind: 'llm_unavailable', message: `Network error after ${attempt} attempts: ${lastError}` }
+					const note = connectController.signal.aborted ? `The connection timed out after ${LLM_CONNECT_TIMEOUT_MS}ms.` : undefined
+					return providerFailureResult(classification, attempt, undefined, note)
 				}
-				await dependencies.sleep(backoffMs(attempt))
+				await dependencies.sleep(backoffMs(attempt, dependencies.random))
 				continue
 			} finally {
 				cancelConnectTimeout()
@@ -362,16 +379,22 @@ export function createLlmCaller(model: ResolvedModelConfig, apiKey: string | und
 			if (response.kind === 'http_error') {
 				const contextExceeded = detectContextBudgetExceeded(response.status, response.errorBody, model.contextWindow)
 				if (contextExceeded !== undefined) return contextExceeded
-				// The status stays in the message (the human-readable surfaces quote it verbatim); the response body rides separately as the bounded detail the error card renders as technical details.
+				const failure = classifyProviderFailure({
+					status: response.status,
+					retryAfterHeader: response.headers['retry-after'],
+					errorBody: response.errorBody,
+					transport: false,
+				}, dependencies.now())
+				// The response body rides separately as the bounded detail the error card renders as technical details; it never enters the platform-authored message.
 				const detail = boundedErrorDetail(response.errorBody)
-				if (response.status >= 500 || response.status === 429) {
-					if (attempt >= maxAttempts) {
-						return { kind: 'llm_unavailable', message: `HTTP ${response.status}`, ...(detail !== undefined ? { detail } : {}) }
-					}
-					await dependencies.sleep(backoffMs(attempt))
-					continue
+				if (failure.category !== 'transient') return providerFailureResult(failure, attempt, detail)
+				if (failure.retryAfterMs !== undefined && failure.retryAfterMs > MAX_INLINE_RETRY_WAIT_MS) {
+					return providerFailureResult(failure, attempt, detail, `The provider asked to retry after ${failure.retryAfterMs}ms, which exceeds the inline wait limit.`)
 				}
-				return { kind: 'llm_unavailable', message: `HTTP ${response.status}`, ...(detail !== undefined ? { detail } : {}) }
+				if (attempt >= maxAttempts) return providerFailureResult(failure, attempt, detail)
+				const delay = failure.retryAfterMs !== undefined ? failure.retryAfterMs : backoffMs(attempt, dependencies.random)
+				await dependencies.sleep(delay)
+				continue
 			}
 
 			const consumed = await consumeResponsesStream(response.stream, { idleTimeoutMs: LLM_STREAM_IDLE_TIMEOUT_MS, scheduleTimeout: dependencies.scheduleTimeout, onDelta: emitAttemptDelta })
@@ -381,7 +404,7 @@ export function createLlmCaller(model: ResolvedModelConfig, apiKey: string | und
 				if (attempt >= maxAttempts) {
 					return { kind: 'llm_unavailable', message: lastError }
 				}
-				await dependencies.sleep(backoffMs(attempt))
+				await dependencies.sleep(backoffMs(attempt, dependencies.random))
 				continue
 			}
 			const result = consumed
@@ -412,7 +435,7 @@ export function createLlmCaller(model: ResolvedModelConfig, apiKey: string | und
 			if (attempt >= maxAttempts) {
 				return { kind: 'llm_unavailable', message: lastError }
 			}
-			await dependencies.sleep(backoffMs(attempt))
+			await dependencies.sleep(backoffMs(attempt, dependencies.random))
 		}
 
 		return { kind: 'llm_unavailable', message: `Max retries exceeded: ${lastError ?? 'unknown'}` }

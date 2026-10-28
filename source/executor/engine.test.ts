@@ -78,7 +78,7 @@ class FakeWire {
 	llmFetch: LlmFetch = (request) => {
 		this.requests.push(request)
 		const next = this.responses.shift()
-		if (next === undefined) return Promise.resolve({ kind: 'http_error', status: 500, errorBody: 'unscripted response' })
+		if (next === undefined) return Promise.resolve({ kind: 'http_error', status: 500, errorBody: 'unscripted response', headers: {} })
 		return Promise.resolve(next)
 	}
 }
@@ -996,7 +996,7 @@ describe('runRole — acceptance criteria', () => {
 				{ type: 'message', content: [{ type: 'output_text', text: 'done' }] },
 			])),
 		]
-		const caller = createLlmCaller(baseModel, undefined, { llmFetch: wire.llmFetch, sleep: () => Promise.resolve(), scheduleTimeout: () => () => undefined })
+		const caller = createLlmCaller(baseModel, undefined, { llmFetch: wire.llmFetch, sleep: () => Promise.resolve(), scheduleTimeout: () => () => undefined, random: () => 1, now: () => 0 })
 		const { deps } = makeDeps(caller)
 		const depsWithEcho: EngineDependencies = { ...deps, toolPlatform: withExtraHandlers(deps.toolPlatform, { echo: echoHandler }) }
 
@@ -1045,7 +1045,7 @@ describe('runRole — acceptance criteria', () => {
 				{ type: 'message', content: [{ type: 'output_text', text: 'done' }] },
 			])),
 		]
-		const caller = createLlmCaller(baseModel, undefined, { llmFetch: wire.llmFetch, sleep: () => Promise.resolve(), scheduleTimeout: () => () => undefined })
+		const caller = createLlmCaller(baseModel, undefined, { llmFetch: wire.llmFetch, sleep: () => Promise.resolve(), scheduleTimeout: () => () => undefined, random: () => 1, now: () => 0 })
 		const { deps } = makeDeps(caller)
 		const depsWithEcho: EngineDependencies = { ...deps, toolPlatform: withExtraHandlers(deps.toolPlatform, { echo: echoHandler }) }
 
@@ -3553,7 +3553,7 @@ describe('runRole — usage accounting and retry spend', () => {
 			streamOf([new TextEncoder().encode(`data: ${JSON.stringify({ type: 'response.completed', response: { status: 'completed', output: [], usage: { input_tokens: 100, output_tokens: 0 } } })}\n\n`)]),
 			streamOf(sseChunks([{ type: 'message', content: [{ type: 'output_text', text: 'done' }] }])),
 		]
-		const caller = createLlmCaller(baseModel, undefined, { llmFetch: wire.llmFetch, sleep: () => Promise.resolve(), scheduleTimeout: () => () => undefined })
+		const caller = createLlmCaller(baseModel, undefined, { llmFetch: wire.llmFetch, sleep: () => Promise.resolve(), scheduleTimeout: () => () => undefined, random: () => 1, now: () => 0 })
 		const { deps, events } = makeDeps(caller)
 
 		const result = await runRole(deps, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'do it' })

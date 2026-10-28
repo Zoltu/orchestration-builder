@@ -303,7 +303,7 @@ async function serve(): Promise<void> {
 		throw error
 	}
 
-	const llmCaller = createLlmCaller(guild.deployment.model, apiKey, { llmFetch: createLlmFetch(), sleep: createSleep(), scheduleTimeout: createTimeoutScheduler() })
+	const llmCaller = createLlmCaller(guild.deployment.model, apiKey, { llmFetch: createLlmFetch(), sleep: createSleep(), scheduleTimeout: createTimeoutScheduler(), random: Math.random, now: Date.now })
 
 	const webHumanBackend = createWebHumanBackend()
 	const interruptChannel = createInterruptChannel()
