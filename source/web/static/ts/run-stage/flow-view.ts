@@ -21,7 +21,7 @@
 // The label resolver is passed in (rather than imported) alongside the selected tier so a caller can swap the resolver or tier without the view reaching for globals; node prose is localization, a view concern, and the model carries no prose.
 // The module is browser-pure TypeScript: it imports the shared interaction model, labels, and inspector attribute contract, its browser-safe siblings, and the vendored `h` type, and touches no external system.
 
-import { activeOperation, activeParticipant, callMetricsByDestination, isPaused, isTerminalStatus, observesOf, openInvocationsOf, stacksOf, terminatesOf } from '../interaction-model.js'
+import { activeOperation, activeParticipant, callMetricsByDestination, isPaused, isSuspendedStatus, isTerminalStatus, observesOf, openInvocationsOf, stacksOf, terminatesOf } from '../interaction-model.js'
 import type { InteractionModel, Operation, Participant, ParticipantKind, RunStatus } from '../interaction-model.js'
 import type { LabelResolver, LabelTier } from '../labels.js'
 import type { RoleAccentResolver } from './role-accents.js'
@@ -86,6 +86,7 @@ type EdgeAnimationState = 'static' | 'flowing' | 'returning' | 'error' | 'termin
 
 function edgeAnimationState(operation: Operation, model: InteractionModel): EdgeAnimationState {
 	if (operation.kind === 'observe' || operation.kind === 'terminate') return 'static'
+	if (isSuspendedStatus(model.status)) return 'static'
 	if (isPaused(model, operation.stack)) return 'static'
 	if (operation.lifecycle === 'settled') return 'static'
 	if (operation.kind === 'call') return 'flowing'
@@ -620,20 +621,20 @@ export function deriveLifecycle(previousModel: InteractionModel | null | undefin
 export type ClickHandler = (state: never, event: Event) => unknown
 
 // The terminal-result call-to-action node renders on a terminal frame so the run offers a result affordance. The CTA is a view concern layered on model.status (never model state): the tone follows the status, and onclick is harness-managed. A layered "bezel + bevel + face" 3D button reads as pressable at a glance. The gradients are declared inline (stable ids) so the button is self-contained.
-function CtaNode(h: H, props: { label: string; tone: 'accent' | 'error'; x: number; y: number; onclick?: ClickHandler }): Vnode {
+function CtaNode(h: H, props: { label: string; tone: 'accent' | 'error' | 'warning'; x: number; y: number; onclick?: ClickHandler }): Vnode {
 	const label = props.label
-	const tone = props.tone === 'error' ? 'error' : 'accent'
+	const tone: 'accent' | 'error' | 'warning' = props.tone === 'error' ? 'error' : props.tone === 'warning' ? 'warning' : 'accent'
 	return h('g', { class: 'flow-node flow-cta', transform: translate(props.x, props.y), onclick: props.onclick }, [
 		CtaButton(h, { label, tone }),
 	])
 }
 
-function CtaButton(h: H, props: { label: string; tone: 'accent' | 'error' }): Vnode {
+function CtaButton(h: H, props: { label: string; tone: 'accent' | 'error' | 'warning' }): Vnode {
 	const label = props.label
-	const tone = props.tone === 'error' ? 'error' : 'accent'
+	const tone: 'accent' | 'error' | 'warning' = props.tone === 'error' ? 'error' : props.tone === 'warning' ? 'warning' : 'accent'
 	const bezelId = 'flow-cta-bezel'
 	const bevelId = 'flow-cta-bevel'
-	const faceId = tone === 'error' ? 'flow-cta-face-error' : 'flow-cta-face-grad'
+	const faceId = tone === 'error' ? 'flow-cta-face-error' : tone === 'warning' ? 'flow-cta-face-warning' : 'flow-cta-face-grad'
 	const insetBevel = 2
 	const insetFace = 5
 	const children: Vnode[] = [
@@ -656,12 +657,19 @@ function CtaButton(h: H, props: { label: string; tone: 'accent' | 'error' }): Vn
 					h('stop', { offset: '52%', 'stop-color': '#cf222e' }, []),
 					h('stop', { offset: '100%', 'stop-color': '#a31515' }, []),
 				])
-				: h('linearGradient', { id: faceId, x1: '0', y1: '0', x2: '0', y2: '1' }, [
-					h('stop', { offset: '0%', 'stop-color': '#5aa9ff' }, []),
-					h('stop', { offset: '48%', 'stop-color': '#2b7de9' }, []),
-					h('stop', { offset: '52%', 'stop-color': '#1f6feb' }, []),
-					h('stop', { offset: '100%', 'stop-color': '#155abf' }, []),
-				]),
+				: tone === 'warning'
+					? h('linearGradient', { id: faceId, x1: '0', y1: '0', x2: '0', y2: '1' }, [
+						h('stop', { offset: '0%', 'stop-color': '#ffd36b' }, []),
+						h('stop', { offset: '48%', 'stop-color': '#f0b429' }, []),
+						h('stop', { offset: '52%', 'stop-color': '#d29922' }, []),
+						h('stop', { offset: '100%', 'stop-color': '#9e6a03' }, []),
+					])
+					: h('linearGradient', { id: faceId, x1: '0', y1: '0', x2: '0', y2: '1' }, [
+						h('stop', { offset: '0%', 'stop-color': '#5aa9ff' }, []),
+						h('stop', { offset: '48%', 'stop-color': '#2b7de9' }, []),
+						h('stop', { offset: '52%', 'stop-color': '#1f6feb' }, []),
+						h('stop', { offset: '100%', 'stop-color': '#155abf' }, []),
+					]),
 		]),
 		h('rect', { class: 'flow-cta-bezel', x: 0, y: 0, width: NODE_WIDTH, height: NODE_HEIGHT, rx: 9, fill: `url(#${bezelId})` }, []),
 		h('rect', { class: 'flow-cta-bevel', x: insetBevel, y: insetBevel, width: NODE_WIDTH - 2 * insetBevel, height: NODE_HEIGHT - 2 * insetBevel, rx: 7, fill: `url(#${bevelId})` }, []),
@@ -671,10 +679,11 @@ function CtaButton(h: H, props: { label: string; tone: 'accent' | 'error' }): Vn
 	return h('g', { class: 'flow-cta-button' }, children)
 }
 
-// Maps a terminal run status to the CTA's label and tone. A needs_clarification run is waiting on the human, so it reads as an accent (not an error); a failed or interrupted run is error-toned; success is accent.
-function ctaDescriptorForStatus(status: RunStatus): { label: string; tone: 'accent' | 'error' } {
+// Maps a terminal or suspended run status to the CTA's label and tone. A needs_clarification run is waiting on the human, so it reads as an accent (not an error); a suspended run is a warning-toned pause that opens the pause card rather than a result; a failed or interrupted run is error-toned; success is accent.
+function ctaDescriptorForStatus(status: RunStatus): { label: string; tone: 'accent' | 'error' | 'warning' } {
 	if (status === 'error' || status === 'interrupted') return { label: 'See error', tone: 'error' }
 	if (status === 'needs_clarification') return { label: 'Respond', tone: 'accent' }
+	if (status === 'suspended') return { label: 'Suspended', tone: 'warning' }
 	return { label: 'See result', tone: 'accent' }
 }
 
@@ -748,7 +757,7 @@ export function renderFlowView(h: H, model: InteractionModel, labels: LabelResol
 		}
 	}
 
-	const activeParticipantId = activeParticipant(model)
+	const activeParticipantId = isSuspendedStatus(model.status) ? null : activeParticipant(model)
 	const enteringIds = lifecycle !== undefined ? lifecycle.enteringIds : EMPTY_SET
 	const terminateTargetIds = terminateTargetIdsIn(model, rowLayout)
 
@@ -792,9 +801,9 @@ export function renderFlowView(h: H, model: InteractionModel, labels: LabelResol
 		])
 	}) : []
 
-	const showCta = isTerminalStatus(model.status)
+	const showCta = isTerminalStatus(model.status) || isSuspendedStatus(model.status)
 	let ctaLayout: Anchor | null = null
-	let ctaDescriptor: { label: string; tone: 'accent' | 'error' } | null = null
+	let ctaDescriptor: { label: string; tone: 'accent' | 'error' | 'warning' } | null = null
 	if (showCta) {
 		ctaLayout = { x: 0, y: mainYOffset }
 		ctaDescriptor = ctaDescriptorForStatus(model.status)
@@ -852,6 +861,7 @@ export function deriveNowCaption(model: InteractionModel, labels: LabelResolver,
 	if (status === 'error') return 'The run stopped with an error.'
 	if (status === 'interrupted') return 'The run was interrupted.'
 	if (status === 'needs_clarification') return 'Waiting for your input…'
+	if (isSuspendedStatus(status)) return 'Suspended — resume when ready.'
 	const operation = activeOperation(model)
 	if (operation === null) return 'Working…'
 	const participantsById = new Map<string, Participant>()

@@ -24,7 +24,22 @@ export type OperationLifecycle = 'in_flight' | 'settled'
 export type OperationOutcome = 'success' | 'error' | 'terminated'
 
 // Mirrors the executor RunMeta status with an 'unknown' fallback for a malformed or absent meta read.
-export type RunStatus = 'running' | 'success' | 'error' | 'needs_clarification' | 'interrupted' | 'unknown'
+export type RunStatus = 'running' | 'suspended' | 'success' | 'error' | 'needs_clarification' | 'interrupted' | 'unknown'
+
+// The cause of a suspended pause, mirroring the executor's SuspensionCategory. The UI renders fixed copy per category and never the provider's endpoint, credentials, model, or response body.
+export type SuspensionCategory = 'transient' | 'billing' | 'auth' | 'request_rejected' | 'unknown'
+
+export type ResumePolicy = 'auto' | 'operator'
+
+// The operator-safe suspension record a suspended run meta carries. `message` is platform-authored; the pause card uses the category's fixed copy instead of rendering provider detail.
+export interface SuspensionRecord {
+	category: SuspensionCategory
+	resumePolicy: ResumePolicy
+	message: string
+	suspendedAt: string
+	autoResumeAfter?: string
+	resumeAttempts?: number
+}
 
 export interface Participant {
 	// Instance-scoped, unique per invocation — the flow-view node key. A role invoked twice carries two participants with distinct ids.
@@ -94,6 +109,21 @@ const TERMINAL_STATUSES: ReadonlySet<string> = new Set(['success', 'error', 'nee
 // Returns whether a run status is terminal — the run will produce no more activity, so clients stop polling it and the result affordance may open. Shared by every client surface (product client, dev harness, view modules) so the terminal set is defined once, next to the RunStatus type it reads.
 export function isTerminalStatus(status: string): boolean {
 	return TERMINAL_STATUSES.has(status)
+}
+
+// A suspended run is a durable pause, not a terminal outcome: it has a resume/terminate path and no result card. Keeping this distinct from isTerminalStatus keeps result surfaces from treating a pause as a finished run.
+export function isSuspendedStatus(status: string): boolean {
+	return status === 'suspended'
+}
+
+// Only a running run has live activity (tokens, flow motion, a per-run stream). A pause, a terminal outcome, and the unknown shape all read as not live here.
+export function isLiveStatus(status: string): boolean {
+	return status === 'running'
+}
+
+// A run whose per-run poll and stream may stop while the run-list, queue, and health polls continue: terminal outcomes and the suspended pause. A null status (a just-selected run whose first read has not landed) is not settled.
+export function isSettledForPolling(status: string): boolean {
+	return isTerminalStatus(status) || isSuspendedStatus(status)
 }
 
 interface DerivedStack {

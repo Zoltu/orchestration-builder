@@ -5,6 +5,8 @@ import { createInvocationJournal } from '../invocation.js'
 import type { LogEvent, Message } from '../types.js'
 import { isObject } from '../validation.js'
 import { createContextManager, createContextPressureTracker, type ContextDecision } from './index.js'
+import { createNoopCheckpointRecorder } from '../test-fixtures.js'
+import { createInterruptQueue } from '../interrupts.js'
 import { compactHistoryForContextBudget } from './context-policy.js'
 
 const pad = (size: number): string => 'x'.repeat(size)
@@ -298,6 +300,8 @@ describe('context manager compaction backstop', () => {
 			appendLog: (event) => events.push(event),
 			contextPressureTracker: createContextPressureTracker(),
 			invocationJournal: createInvocationJournal((event) => events.push(event)),
+			checkpointRecorder: createNoopCheckpointRecorder(),
+			interruptQueue: createInterruptQueue(),
 			runRole: async () => {
 				throw new Error('context handler invoked without executor.contextHandlerRole configured')
 			},

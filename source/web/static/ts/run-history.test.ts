@@ -25,6 +25,7 @@ function summary(runId: string, overrides: Partial<RunSummary> = {}): RunSummary
 		result: null,
 		error: null,
 		continuesFrom: null,
+		suspension: null,
 		summary: null,
 		...overrides,
 	}
@@ -167,5 +168,22 @@ describe('queueItemLineageLink', () => {
 
 	test('returns null without a continuesFrom id', () => {
 		expect(queueItemLineageLink(item(), new Map())).toBeNull()
+	})
+})
+
+describe('suspended history rows', () => {
+	test('a suspended queue item is ordered before waiting work and suppresses its run row', () => {
+		const entries = deriveHistoryEntries(
+			[
+				item({ id: 'waiting', status: 'waiting' }),
+				item({ id: 'suspended', status: 'suspended', runId: 'run-s' }),
+			],
+			[summary('run-s', { status: 'suspended', suspension: { category: 'billing', resumePolicy: 'operator', message: 'Top up.', suspendedAt: '2026-01-01T00:02:00.000Z' } }), summary('run-old')],
+		)
+		expect(entries.map((entry) => entry.kind === 'queued' ? entry.item.id : entry.summary.runId)).toEqual(['suspended', 'waiting', 'run-old'])
+	})
+
+	test('a suspended run row labels the task first line, not stale summary prose', () => {
+		expect(runPrimaryLabel(summary('run-1', { status: 'suspended', task: 'waiting on credit\nmore', summary: 'stale completion' }))).toBe('waiting on credit')
 	})
 })

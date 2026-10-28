@@ -2,8 +2,10 @@ import type { RoleRegistryEntry } from '../role-registry.js'
 import { runHandlerInterlude } from '../handler-interlude.js'
 import { logEvent, type EngineContext, type RoleState } from '../engine-state.js'
 import type { InvocationJournal } from '../invocation.js'
+import type { CheckpointRecorder } from '../checkpoint.js'
+import type { InterruptQueue } from '../interrupts.js'
 import type { AppendLog } from '../persistence.js'
-import type { LlmUsage, ResultCard } from '../types.js'
+import type { LlmUsage, ResultCard, RoleOutcome, SuspensionRecord } from '../types.js'
 import { applyContextBackstop, contextExceededCard, contextHandlerTask, contextManagedNotice, contextPressureNotice, currentEffectiveBudget, MAX_CONTEXT_RECOVERY_ATTEMPTS } from './context-handoff.js'
 import { DEFAULT_CONTEXT_PRESSURE_THRESHOLD, recordContextRejection, type ContextPressureTracker } from './context-pressure.js'
 
@@ -15,12 +17,15 @@ export interface ContextRejection {
 export type ContextDecision =
 	| { kind: 'continue' }
 	| { kind: 'finished'; card: ResultCard }
+	| { kind: 'suspended'; suspension: SuspensionRecord }
 
 export interface ContextDependencies {
 	appendLog: AppendLog
 	contextPressureTracker: ContextPressureTracker
 	invocationJournal: InvocationJournal
-	runRole: (context: EngineContext) => Promise<ResultCard>
+	checkpointRecorder: CheckpointRecorder
+	interruptQueue: InterruptQueue
+	runRole: (context: EngineContext) => Promise<RoleOutcome>
 }
 
 export interface ContextManager {
@@ -41,18 +46,20 @@ export function createContextManager(context: EngineContext, dependencies: Conte
 		roleState.history.push({ role: 'user', content })
 	}
 
-	async function runContextHandler(entry: RoleRegistryEntry, trigger: 'context_pressure' | 'context_budget_exceeded', reported: { promptTokens: number; budgetTokens: number }): Promise<ResultCard> {
+	async function runContextHandler(entry: RoleRegistryEntry, trigger: 'context_pressure' | 'context_budget_exceeded', reported: { promptTokens: number; budgetTokens: number }, apply: (handlerCard: ResultCard) => ContextDecision): Promise<ContextDecision> {
 		const handlerRole = config.contextHandlerRole
 		if (handlerRole === undefined) throw new Error('context handler interlude requested without executor.contextHandlerRole configured')
 		const task = contextHandlerTask(trigger, context, entry, reported)
-		return runHandlerInterlude({ invocationJournal: dependencies.invocationJournal, runRole: dependencies.runRole }, context, entry, config, handlerRole, trigger, task, {}, (handlerCard, interruptCallId) => {
+		const interlude = await runHandlerInterlude({ invocationJournal: dependencies.invocationJournal, checkpointRecorder: dependencies.checkpointRecorder, interruptQueue: dependencies.interruptQueue, runRole: dependencies.runRole }, context, entry, config, handlerRole, trigger, task, {}, (handlerCard, interruptCallId) => {
 			if (handlerCard.status === 'success') {
 				dependencies.invocationJournal.interruptFinished(interruptCallId, { trigger, handler: handlerRole, target: entry.roleId, action: 'compacted' })
 			} else {
 				dependencies.invocationJournal.interruptFinished(interruptCallId, { trigger, handler: handlerRole, target: entry.roleId, action: 'failed', handlerStatus: handlerCard.status })
 			}
-			return handlerCard
+			return apply(handlerCard)
 		})
+		if (interlude.kind === 'suspended') return interlude
+		return interlude.resolution
 	}
 
 	function observeSuccess(roleState: RoleState, usage: LlmUsage | undefined): void {
@@ -92,27 +99,31 @@ export function createContextManager(context: EngineContext, dependencies: Conte
 		// A queued overflow compaction runs first: the role's last request was rejected for context size and cannot succeed until the handler shrinks the history (or the naive backstop does when the handler fails).
 		if (roleState.contextCompactionPending !== undefined) {
 			const pending = roleState.contextCompactionPending
-			roleState.contextCompactionPending = undefined
-			const handlerCard = await runContextHandler(entry, 'context_budget_exceeded', { promptTokens: pending.promptTokens, budgetTokens: pending.contextWindow })
-			if (handlerCard.status === 'success') {
-				appendUserNotice(roleState, contextManagedNotice('context_budget_exceeded', handlerCard.summary))
-			} else {
+			const decision = await runContextHandler(entry, 'context_budget_exceeded', { promptTokens: pending.promptTokens, budgetTokens: pending.contextWindow }, (handlerCard) => {
+				roleState.contextCompactionPending = undefined
+				if (handlerCard.status === 'success') {
+					appendUserNotice(roleState, contextManagedNotice('context_budget_exceeded', handlerCard.summary))
+					return { kind: 'continue' }
+				}
 				const backstopCard = applyContextBackstop(roleState, context, pending, dependencies)
-				if (backstopCard !== null) return { kind: 'finished', card: backstopCard }
-			}
+				return backstopCard === null ? { kind: 'continue' } : { kind: 'finished', card: backstopCard }
+			})
+			if (decision.kind === 'suspended') return decision
+			if (decision.kind === 'finished') return decision
 		}
 
 		// The pressure response lands at a turn boundary — after the previous turn's tool results — never between an assistant tool_calls message and its tool results, which is a malformed request on strict endpoints. The entry role has no parent to hand off to, so with a context handler configured the platform compacts it instead of sending the handoff notice (falling back to the notice when the handler fails); child roles get the append-only notice, which preserves the endpoint's prefix cache.
 		if (roleState.contextPressureNotice === 'pending') {
-			roleState.contextPressureNotice = 'sent'
 			if (context.depth === 0 && config.contextHandlerRole !== undefined) {
-				const handlerCard = await runContextHandler(entry, 'context_pressure', { promptTokens: roleState.lastPromptTokens, budgetTokens: effectiveBudget() })
-				if (handlerCard.status === 'success') {
-					appendUserNotice(roleState, contextManagedNotice('context_pressure', handlerCard.summary))
-				} else {
-					appendUserNotice(roleState, contextPressureNotice(roleState.lastPromptTokens, effectiveBudget()))
-				}
+				const decision = await runContextHandler(entry, 'context_pressure', { promptTokens: roleState.lastPromptTokens, budgetTokens: effectiveBudget() }, (handlerCard) => {
+					roleState.contextPressureNotice = 'sent'
+					if (handlerCard.status === 'success') appendUserNotice(roleState, contextManagedNotice('context_pressure', handlerCard.summary))
+					else appendUserNotice(roleState, contextPressureNotice(roleState.lastPromptTokens, effectiveBudget()))
+					return { kind: 'continue' }
+				})
+				if (decision.kind === 'suspended') return decision
 			} else {
+				roleState.contextPressureNotice = 'sent'
 				appendUserNotice(roleState, contextPressureNotice(roleState.lastPromptTokens, effectiveBudget()))
 			}
 		}

@@ -188,9 +188,26 @@ export type LlmCallResult =
 	| { kind: 'context_budget_exceeded'; promptTokens: number; contextWindow: number }
 	// detail is the endpoint's raw error-response body (bounded; absent when the failure produced no response body, e.g. a connect error), kept out of the message so the human-readable surfaces stay concise while the payload stays reviewable.
 	| { kind: 'llm_unavailable'; message: string; detail?: string }
+	// A failure of the execution substrate itself: the endpoint could not be reached, answered with an error status, or collapsed its stream. It never becomes a ResultCard; the engine suspends the run at its last durable replay point. detail is log-only and never enters the suspension record.
+	| { kind: 'provider_failure'; category: SuspensionCategory; message: string; httpStatus?: number; retryAfterMs?: number; attempts: number; partialOutput: boolean; detail?: string }
 
 // The retry-relevant categories of a model-provider failure. A transient failure may be retried; billing, auth, and request_rejected failures are permanent for the current request and must not be retried.
 export type ProviderFailureCategory = 'transient' | 'billing' | 'auth' | 'request_rejected'
+
+export type SuspensionCategory = ProviderFailureCategory | 'unknown'
+
+export type ResumePolicy = 'auto' | 'operator'
+
+// The structured, operator-safe reason a run is paused. message is platform-authored copy; provider bodies, URLs, and credentials never reach this record.
+export interface SuspensionRecord {
+	category: SuspensionCategory
+	resumePolicy: ResumePolicy
+	message: string
+	suspendedAt: string
+	autoResumeAfter?: string
+	// Cumulative automatic-resume count, retained even when the policy is downgraded to operator so the cap cannot reset on a later manual resume.
+	resumeAttempts?: number
+}
 
 export type ErrorKind =
 	| 'invalid_tool_call'
@@ -210,6 +227,15 @@ export type ErrorKind =
 export type ToolResult =
 	| { kind: 'success'; data?: unknown }
 	| { kind: ErrorKind; message?: string; details?: unknown }
+
+// The outcome of a role invocation: an ordinary result card, or the run-level suspension a provider failure raises. A suspension is not a card and must never be appended to a parent's history. The role boundary tags its ordinary outcome 'card' because the payload is a ResultCard; the tool boundary tags its ordinary outcome 'result' because the payload is a ToolResult. Both share the 'suspended' tag so the suspension channel is unmistakable at either boundary.
+export type RoleOutcome =
+	| { kind: 'card'; card: ResultCard }
+	| { kind: 'suspended'; suspension: SuspensionRecord }
+
+export type ToolExecutionOutcome =
+	| { kind: 'result'; result: ToolResult }
+	| { kind: 'suspended'; suspension: SuspensionRecord }
 
 export type OperationKind = 'call' | 'return' | 'observe' | 'terminate'
 
@@ -267,6 +293,9 @@ export interface RunOptions {
 
 export type TerminalRunStatus = 'success' | 'error' | 'needs_clarification' | 'interrupted'
 
+// suspended is a resumable pause, not a terminal outcome: it is deliberately excluded from TerminalRunStatus so continuations, settlement, and result surfaces cannot treat it as a finished task.
+export type RunStatus = 'running' | 'suspended' | TerminalRunStatus
+
 export interface RunMeta {
 	runId: string
 	// Optional so an interrupted meta composed from lost run data (the prior meta never landed) omits the field instead of pinning an empty-string sentinel; every other writer carries it from the run's options.
@@ -282,7 +311,9 @@ export interface RunMeta {
 	// Set when this run continues a prior finished run: the prior run's id. The lineage is what a follow-on run uses to find the prior run's artifacts.
 	continuesFrom?: string
 	// 'interrupted' is terminal: the service stopped mid-run and the run could not (or was not chosen to) resume on restart, or the operator terminated a parked run. Startup reconciliation writes it for abandoned runs; the queue's terminate path writes it for a parked run and deletes the checkpoint.
-	status: 'running' | TerminalRunStatus
+	status: RunStatus
+	// Present only while status is 'suspended'; absent on running and terminal metas. A suspended meta carries no endTime, result, or task error.
+	suspension?: SuspensionRecord
 	startTime: string
 	endTime?: string
 	result?: ResultCard

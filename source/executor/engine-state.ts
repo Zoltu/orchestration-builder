@@ -1,4 +1,4 @@
-import type { CheckpointRecorder, PendingInvocation } from './checkpoint.js'
+import type { CheckpointRecorder, PendingInterlude, PendingInvocation } from './checkpoint.js'
 import type { ContextPressureTracker } from './context/index.js'
 import type { HumanBackend } from './human-backend.js'
 import type { InterruptQueue } from './interrupts.js'
@@ -14,7 +14,7 @@ import type { RoleSnapshotStore } from './role-snapshot.js'
 import type { RoleState } from './state.js'
 import type { RoleDelta } from './stream-channel.js'
 import type { ToolPlatform } from './tool-platform-port.js'
-import type { EffortLevel, InvolvementLevel, LogLevel, LogEvent, Message, ResultCard, RunContinuation, ToolCall } from './types.js'
+import type { RoleOutcome, EffortLevel, InvolvementLevel, LogLevel, LogEvent, Message, RunContinuation, SuspensionRecord, ToolCall } from './types.js'
 
 export type { ProtectedPrefixLength, RoleState } from './state.js'
 
@@ -69,6 +69,8 @@ export interface EngineDependencies {
 	roleSnapshots: RoleSnapshotStore
 	// The leaf that reads a role's declared projectDocs from the workspace at run start (project-docs.ts); buildInitialHistory injects the bounded block into the entry role's depth-0 initial user message, so it is read once and rides the checkpoint thereafter.
 	readProjectDoc: ReadProjectDoc
+	// The suspension the run is resuming from, when any; a re-suspension carries its attempt count forward.
+	priorSuspension?: SuspensionRecord
 }
 
 // The turn a resumed role was suspended in: the full tool-call list, the index of the child-spawning call it was waiting on, and a resolver for the child card. The resolver either returns the checkpoint's recorded card or re-enters the child frame's own resume — invoked from inside the parent's suspended turn so parents register root-first exactly as in live execution.
@@ -77,7 +79,7 @@ export interface SuspendedTurn {
 	childIndex: number
 	callId: string
 	parentCallId: string
-	resolveChildCard: () => Promise<ResultCard>
+	resolveChildCard: () => Promise<RoleOutcome>
 }
 
 // The seed for a role instance continued from a finished child: the conversation it starts from and the id of the instance it continues. The new instance gets a fresh roleId and normal role_start/role_finished events; only its initial history is inherited.
@@ -99,12 +101,14 @@ export interface ResumedRole {
 	suspendedTurn?: SuspendedTurn
 	// An ordinary pending invocation (or a child invocation whose child never registered) restored from the checkpoint; the role loop reconciles it before its next turn.
 	pendingInvocation?: PendingInvocation
+	// The handler interlude a suspension interrupted. Resume re-establishes it on the leaf so the normal trigger path (or an operator request) re-runs from the pre-interlude checkpoint.
+	pendingInterlude?: PendingInterlude
 	// True only for the operator-driven error resume: it forces a fresh LLM turn even when the restored history ends with a completed finish.
 	explicitResume?: boolean
 }
 
 // The engine's runRole turn loop, threaded in by the engine so the interrupt and resume modules can drive role turns without importing the turn loop at runtime (the engine imports these modules).
-export type RunRole = (deps: EngineDependencies, context: EngineContext, resumed?: ResumedRole, seeded?: SeededRole) => Promise<ResultCard>
+export type RunRole = (deps: EngineDependencies, context: EngineContext, resumed?: ResumedRole, seeded?: SeededRole) => Promise<RoleOutcome>
 
 export function logEvent(appendLog: AppendLog, type: string, payload: unknown): void {
 	const event: LogEvent = {

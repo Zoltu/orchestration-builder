@@ -24,7 +24,7 @@ The Foundry uses CLI args (not environment variables) because it is a batch tool
 8. **Promote** — write the new baseline Guild.
 9. **Repeat** until a guardrail fires.
 
-A cycle that produces an accepted branch promotes it. A cycle with no improvement increments the plateau counter. A regression in the merged candidate prevents promotion.
+A cycle that produces an accepted branch promotes it. A cycle with no improvement increments the plateau counter. A regression in the merged candidate prevents promotion, and a candidate with any invalid (suspended) evaluation cannot be promoted until that benchmark is rerun after resume. An outage therefore halts promotion rather than corrupting the comparison or firing a regression/plateau signal.
 
 ## Configuration
 
@@ -88,7 +88,7 @@ Each hypothesis becomes a branch under `data/foundry/branches/<branch_id>/`. Bra
 
 ## Scoring
 
-Each run produces a `RunScore` (pass/fail, adjusted score, tokens, ask count, context-pressure count, error count). Runs are aggregated per-branch into a `BranchScore` (per-benchmark win/loss/partial counts, overall pass rate, adjusted score, regression flag, improvement flag).
+Each run produces a `RunScore` with an `outcome` of `pass`, `fail`, or `invalid`, plus its adjusted score, tokens, ask count, context-pressure count, and error count. Runs are aggregated per-branch into a `BranchScore` (per-benchmark win/loss/partial counts, overall pass rate, adjusted score, `invalidCount`, regression flag, improvement flag). These score types and their invalid handling are requirements for the out-of-tree Foundry program, not behavior implemented by this repository.
 
 The adjusted score formula:
 
@@ -96,13 +96,15 @@ The adjusted score formula:
 adjustedScore = (pass ? 1.0 : 0.0) - humanQuestionPenalty * askHumanCount
 ```
 
-A branch is flagged as improved only if its adjusted pass rate exceeds the baseline by `evaluation.improvementMargin` across repetitions. A branch is flagged as regressing if any baseline-passing benchmark regresses. The margin prevents the Foundry from chasing noise.
+The Foundry must treat a run suspended by a provider outage as **invalid**, not a pass or a failure: the provider stopped it before it could be judged, so it has no verdict. Its tokens and wall time still count toward the branch's cost, and `invalidCount` records it, but it is excluded from the pass-rate denominator and contributes no adjusted score. The in-repo suite runner (`source/benchmarks/run-suite.ts`) already produces the matching suite-level entry — `status: "invalid"` with the reason "run suspended by provider outage", keeping the run's tokens and wall time for cost and skipping workspace validation — but the Foundry owns the `RunScore`/`BranchScore` aggregation and promotion gate.
+
+The Foundry must flag a branch as improved only if its adjusted pass rate exceeds the baseline by `evaluation.improvementMargin` across repetitions, and as regressing if any baseline-passing benchmark regresses. A branch with any invalid evaluation must **not be eligible for promotion** — it is neither improved nor regressed until the paused runs are resumed and the benchmark is retried — so a provider outage cannot corrupt optimization or make "suspend everything" look like a high pass rate. The margin prevents the Foundry from chasing noise.
 
 Validation reuses `source/benchmarks/validation.ts` — the same helpers the benchmark harness uses. The Foundry does not duplicate validation logic.
 
 ## Evaluation
 
-`evaluateBranch` runs each benchmark in the suite `repetitionsPerBenchmark` times against the branch Guild via the executor service. After each run, it validates the final workspace and collects a `RunRecord` (status, tokens, ask count, context events, errors, wall time, run id, final workspace path). Results are written to `data/foundry/branches/<branch_id>/results/<benchmark>.json` (per-benchmark) and a branch-level `results.json`.
+`evaluateBranch` (the out-of-tree Foundry implementation) runs each benchmark in the suite `repetitionsPerBenchmark` times against the branch Guild via the executor service. After each run, it validates the final workspace and collects a `RunRecord` (status, tokens, ask count, context events, errors, wall time, run id, final workspace path). A run that ends `suspended` must be recorded invalid instead: validation is skipped because the workspace is only a partial attempt, the run keeps its tokens and wall time for cost, and the branch is marked ineligible for promotion until the benchmark is retried after resume. Results are written to `data/foundry/branches/<branch_id>/results/<benchmark>.json` (per-benchmark) and a branch-level `results.json`.
 
 The run-submission lifecycle handles container/temp teardown on both success and error (teardown order matters: stop the container before deleting the temp). A run that does not terminate hits a configurable timeout and is still torn down.
 
@@ -110,7 +112,7 @@ The run-submission lifecycle handles container/temp teardown on both success and
 
 Branches are classified: **rejected** (no improvement or worse), **accepted** (clear improvement, no conflict), **conflicting** (improves but edits the same files as another accepted branch).
 
-Conflicting branches are merged by the large model. The Foundry provides the common ancestor, labeled diffs (baseline → A, baseline → B), and experimental results. The model produces merged file contents. The merged candidate is re-evaluated for regression by the loop (not by the merge module). If the merge introduces malformed JSON, schema violations, or regressions, the candidate is rejected.
+Conflicting branches are merged by the large model. The Foundry provides the common ancestor, labeled diffs (baseline → A, baseline → B), and experimental results. The model produces merged file contents. The merged candidate is re-evaluated for regression by the loop (not by the merge module). If the merge introduces malformed JSON, schema violations, or regressions, the candidate is rejected; if any evaluation is invalid because a run was suspended, promotion must wait for a retry after the provider recovers.
 
 ## Guardrails
 
@@ -124,7 +126,7 @@ No-op detection (wording-only changes) is a discard rule, not a termination reas
 
 ## Promotion and rollback
 
-`promote.ts` is the sole writer of `guild/guild.json`. It writes the new baseline, copies the previous baseline to `data/foundry/history/<timestamp>/`, and provides rollback. Baseline writes are serialized (v1 assumes a single Foundry process). Promotion never overwrites history. The final merged candidate is promoted only after being evaluated against all benchmarks in the suite, not just the ones individual branches targeted.
+`promote.ts` is the sole writer of `guild/guild.json`. It writes the new baseline, copies the previous baseline to `data/foundry/history/<timestamp>/`, and provides rollback. Baseline writes are serialized (v1 assumes a single Foundry process). Promotion never overwrites history. The final merged candidate is promoted only after being evaluated against all benchmarks in the suite, not just the ones individual branches targeted, and only when no evaluation is invalid and no regression is present; that gating is a required Foundry behavior, not part of this repository.
 
 ## Human simulation
 

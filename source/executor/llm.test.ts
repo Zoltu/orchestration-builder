@@ -162,9 +162,19 @@ describe('createLlmCaller pre-stream retry classification', () => {
 		const wire = createFakeWire([new Error('connection refused'), new Error('connection refused'), new Error('connection refused')])
 		const caller = createLlmCaller(MODEL, API_KEY, { llmFetch: wire.llmFetch, sleep: wire.sleep, scheduleTimeout: wire.scheduleTimeout, random: wire.random, now: wire.now })
 		const result = await caller.call({ messages: [] })
-		expect(result).toEqual({ kind: 'llm_unavailable', message: 'The model provider could not be reached after 3 attempts' })
+		expect(result).toMatchObject({ kind: 'provider_failure', message: 'The model provider could not be reached after 3 attempts' })
 		expect(wire.requests).toHaveLength(3)
 		expect(wire.sleeps).toEqual([200, 400])
+	})
+
+	test('a connect failure keeps raw transport text out of the platform message', async () => {
+		const wire = createFakeWire([new Error('connect ECONNREFUSED https://private.example/v1/responses'), new Error('connect ECONNREFUSED https://private.example/v1/responses'), new Error('connect ECONNREFUSED https://private.example/v1/responses')])
+		const caller = createLlmCaller(MODEL, API_KEY, { llmFetch: wire.llmFetch, sleep: wire.sleep, scheduleTimeout: wire.scheduleTimeout, random: wire.random, now: wire.now })
+		const result = await caller.call({ messages: [] })
+		if (result.kind !== 'provider_failure') throw new Error(`expected provider_failure, got `)
+		expect(result.message).toBe('The model provider could not be reached after 3 attempts')
+		expect(result.message).not.toContain('private.example')
+		expect(result.detail).toContain('https://private.example/v1/responses')
 	})
 
 	test('a 5xx is retried with exponential backoff and eventually succeeds', async () => {
@@ -180,7 +190,7 @@ describe('createLlmCaller pre-stream retry classification', () => {
 		const wire = createFakeWire([errorResponse(500, 'one'), errorResponse(500, 'two'), errorResponse(500, 'three')])
 		const caller = createLlmCaller(MODEL, API_KEY, { llmFetch: wire.llmFetch, sleep: wire.sleep, scheduleTimeout: wire.scheduleTimeout, random: wire.random, now: wire.now })
 		const result = await caller.call({ messages: [] })
-		expect(result).toEqual({ kind: 'llm_unavailable', message: 'The model provider is temporarily unavailable (HTTP 500) after 3 attempts', detail: 'three' })
+		expect(result).toMatchObject({ kind: 'provider_failure', message: 'The model provider is temporarily unavailable (HTTP 500) after 3 attempts', detail: 'three' })
 		expect(wire.requests).toHaveLength(3)
 	})
 
@@ -196,7 +206,7 @@ describe('createLlmCaller pre-stream retry classification', () => {
 		const wire = createFakeWire([errorResponse(400, 'bad request: invalid tool schema')])
 		const caller = createLlmCaller(MODEL, API_KEY, { llmFetch: wire.llmFetch, sleep: wire.sleep, scheduleTimeout: wire.scheduleTimeout, random: wire.random, now: wire.now })
 		const result = await caller.call({ messages: [] })
-		expect(result).toEqual({ kind: 'llm_unavailable', message: 'The model provider rejected the request (HTTP 400)', detail: 'bad request: invalid tool schema' })
+		expect(result).toMatchObject({ kind: 'provider_failure', message: 'The model provider rejected the request (HTTP 400)', detail: 'bad request: invalid tool schema' })
 		expect(wire.requests).toHaveLength(1)
 		expect(wire.sleeps).toHaveLength(0)
 	})
@@ -206,8 +216,8 @@ describe('createLlmCaller pre-stream retry classification', () => {
 		const wire = createFakeWire([errorResponse(402, body)])
 		const caller = createLlmCaller(MODEL, API_KEY, { llmFetch: wire.llmFetch, sleep: wire.sleep, scheduleTimeout: wire.scheduleTimeout, random: wire.random, now: wire.now })
 		const result = await caller.call({ messages: [] })
-		expect(result).toEqual({ kind: 'llm_unavailable', message: 'The model provider reports insufficient quota or credit (HTTP 402)', detail: body })
-		if (result.kind !== 'llm_unavailable') throw new Error(`expected llm_unavailable, got ${result.kind}`)
+		expect(result).toMatchObject({ kind: 'provider_failure', message: 'The model provider reports insufficient quota or credit (HTTP 402)', detail: body })
+		if (result.kind !== 'provider_failure') throw new Error(`expected provider_failure, got ${result.kind}`)
 		expect(result.message).toContain('HTTP 402')
 		expect(result.message).not.toContain('Insufficient credit on credit id')
 		expect(result.detail).toContain('Insufficient credit')
@@ -219,8 +229,8 @@ describe('createLlmCaller pre-stream retry classification', () => {
 		const wire = createFakeWire([errorResponse(401, 'invalid api key sk-secret')])
 		const caller = createLlmCaller(MODEL, API_KEY, { llmFetch: wire.llmFetch, sleep: wire.sleep, scheduleTimeout: wire.scheduleTimeout, random: wire.random, now: wire.now })
 		const result = await caller.call({ messages: [] })
-		expect(result).toEqual({ kind: 'llm_unavailable', message: 'The model provider rejected the credentials or access (HTTP 401)', detail: 'invalid api key sk-secret' })
-		if (result.kind !== 'llm_unavailable') throw new Error(`expected llm_unavailable, got ${result.kind}`)
+		expect(result).toMatchObject({ kind: 'provider_failure', message: 'The model provider rejected the credentials or access (HTTP 401)', detail: 'invalid api key sk-secret' })
+		if (result.kind !== 'provider_failure') throw new Error(`expected provider_failure, got ${result.kind}`)
 		expect(result.message).not.toContain('sk-secret')
 		expect(wire.requests).toHaveLength(1)
 		expect(wire.sleeps).toHaveLength(0)
@@ -230,7 +240,7 @@ describe('createLlmCaller pre-stream retry classification', () => {
 		const wire = createFakeWire([errorResponse(403, 'forbidden')])
 		const caller = createLlmCaller(MODEL, API_KEY, { llmFetch: wire.llmFetch, sleep: wire.sleep, scheduleTimeout: wire.scheduleTimeout, random: wire.random, now: wire.now })
 		const result = await caller.call({ messages: [] })
-		expect(result).toEqual({ kind: 'llm_unavailable', message: 'The model provider rejected the credentials or access (HTTP 403)', detail: 'forbidden' })
+		expect(result).toMatchObject({ kind: 'provider_failure', message: 'The model provider rejected the credentials or access (HTTP 403)', detail: 'forbidden' })
 		expect(wire.requests).toHaveLength(1)
 		expect(wire.sleeps).toHaveLength(0)
 	})
@@ -240,7 +250,7 @@ describe('createLlmCaller pre-stream retry classification', () => {
 		const wire = createFakeWire([errorResponse(403, body)])
 		const caller = createLlmCaller(MODEL, API_KEY, { llmFetch: wire.llmFetch, sleep: wire.sleep, scheduleTimeout: wire.scheduleTimeout, random: wire.random, now: wire.now })
 		const result = await caller.call({ messages: [] })
-		expect(result).toEqual({ kind: 'llm_unavailable', message: 'The model provider reports insufficient quota or credit (HTTP 403)', detail: body })
+		expect(result).toMatchObject({ kind: 'provider_failure', message: 'The model provider reports insufficient quota or credit (HTTP 403)', detail: body })
 		expect(wire.requests).toHaveLength(1)
 		expect(wire.sleeps).toHaveLength(0)
 	})
@@ -250,7 +260,7 @@ describe('createLlmCaller pre-stream retry classification', () => {
 		const wire = createFakeWire([errorResponse(429, body)])
 		const caller = createLlmCaller(MODEL, API_KEY, { llmFetch: wire.llmFetch, sleep: wire.sleep, scheduleTimeout: wire.scheduleTimeout, random: wire.random, now: wire.now })
 		const result = await caller.call({ messages: [] })
-		expect(result).toEqual({ kind: 'llm_unavailable', message: 'The model provider reports insufficient quota or credit (HTTP 429)', detail: body })
+		expect(result).toMatchObject({ kind: 'provider_failure', message: 'The model provider reports insufficient quota or credit (HTTP 429)', detail: body })
 		expect(wire.requests).toHaveLength(1)
 		expect(wire.sleeps).toHaveLength(0)
 	})
@@ -260,7 +270,7 @@ describe('createLlmCaller pre-stream retry classification', () => {
 		const wire = createFakeWire([errorResponse(429, body)])
 		const caller = createLlmCaller(MODEL, API_KEY, { llmFetch: wire.llmFetch, sleep: wire.sleep, scheduleTimeout: wire.scheduleTimeout, random: wire.random, now: wire.now })
 		const result = await caller.call({ messages: [] })
-		expect(result).toEqual({ kind: 'llm_unavailable', message: 'The model provider reports insufficient quota or credit (HTTP 429)', detail: body })
+		expect(result).toMatchObject({ kind: 'provider_failure', message: 'The model provider reports insufficient quota or credit (HTTP 429)', detail: body })
 		expect(wire.requests).toHaveLength(1)
 		expect(wire.sleeps).toHaveLength(0)
 	})
@@ -279,7 +289,7 @@ describe('createLlmCaller pre-stream retry classification', () => {
 		const wire = createFakeWire([errorResponse(200, ''), errorResponse(200, ''), errorResponse(200, '')])
 		const caller = createLlmCaller(MODEL, API_KEY, { llmFetch: wire.llmFetch, sleep: wire.sleep, scheduleTimeout: wire.scheduleTimeout, random: wire.random, now: wire.now })
 		const result = await caller.call({ messages: [] })
-		expect(result).toEqual({ kind: 'llm_unavailable', message: 'The model provider returned an empty or unreadable response (HTTP 200) after 3 attempts' })
+		expect(result).toMatchObject({ kind: 'provider_failure', message: 'The model provider returned an empty or unreadable response (HTTP 200) after 3 attempts' })
 		expect(wire.requests).toHaveLength(3)
 		expect(wire.sleeps).toEqual([200, 400])
 	})
@@ -288,7 +298,7 @@ describe('createLlmCaller pre-stream retry classification', () => {
 		const wire = createFakeWire([errorResponse(402, 'payment required', { 'retry-after': '1' })])
 		const caller = createLlmCaller(MODEL, API_KEY, { llmFetch: wire.llmFetch, sleep: wire.sleep, scheduleTimeout: wire.scheduleTimeout, random: wire.random, now: wire.now })
 		const result = await caller.call({ messages: [] })
-		expect(result).toEqual({ kind: 'llm_unavailable', message: 'The model provider reports insufficient quota or credit (HTTP 402)', detail: 'payment required' })
+		expect(result).toMatchObject({ kind: 'provider_failure', message: 'The model provider reports insufficient quota or credit (HTTP 402)', detail: 'payment required' })
 		expect(wire.requests).toHaveLength(1)
 		expect(wire.sleeps).toHaveLength(0)
 	})
@@ -315,8 +325,8 @@ describe('createLlmCaller pre-stream retry classification', () => {
 		const wire = createFakeWire([errorResponse(429, 'rate limited', { 'retry-after': '60' }), streamResponse(happyPathChunks())])
 		const caller = createLlmCaller(MODEL, API_KEY, { llmFetch: wire.llmFetch, sleep: wire.sleep, scheduleTimeout: wire.scheduleTimeout, random: wire.random, now: wire.now })
 		const result = await caller.call({ messages: [] })
-		expect(result).toEqual({
-			kind: 'llm_unavailable',
+		expect(result).toMatchObject({
+			kind: 'provider_failure',
 			message: 'The model provider is rate limiting requests (HTTP 429). The provider asked to retry after 60000ms, which exceeds the inline wait limit.',
 			detail: 'rate limited',
 		})
@@ -342,21 +352,21 @@ describe('createLlmCaller pre-stream retry classification', () => {
 		expect(wire.sleeps).toEqual([200])
 	})
 
-	test('a zero Retry-After is honored as an immediate retry', async () => {
+	test('a zero Retry-After is floored so it cannot spin immediately', async () => {
 		const wire = createFakeWire([errorResponse(429, 'rate limited', { 'retry-after': '0' }), streamResponse(happyPathChunks())])
 		const caller = createLlmCaller(MODEL, API_KEY, { llmFetch: wire.llmFetch, sleep: wire.sleep, scheduleTimeout: wire.scheduleTimeout, random: wire.random, now: wire.now })
 		const result = await caller.call({ messages: [] })
 		expect(result.kind).toBe('success')
 		expect(wire.requests).toHaveLength(2)
-		expect(wire.sleeps).toEqual([0])
+		expect(wire.sleeps).toEqual([100])
 	})
 
 	test('an HTTP-date Retry-After over the cap stops immediately', async () => {
 		const wire = createFakeWire([errorResponse(429, 'rate limited', { 'retry-after': new Date(NOW + 60_000).toUTCString() }), streamResponse(happyPathChunks())])
 		const caller = createLlmCaller(MODEL, API_KEY, { llmFetch: wire.llmFetch, sleep: wire.sleep, scheduleTimeout: wire.scheduleTimeout, random: wire.random, now: wire.now })
 		const result = await caller.call({ messages: [] })
-		expect(result).toEqual({
-			kind: 'llm_unavailable',
+		expect(result).toMatchObject({
+			kind: 'provider_failure',
 			message: 'The model provider is rate limiting requests (HTTP 429). The provider asked to retry after 60000ms, which exceeds the inline wait limit.',
 			detail: 'rate limited',
 		})
@@ -368,8 +378,8 @@ describe('createLlmCaller pre-stream retry classification', () => {
 		const wire = createFakeWire([errorResponse(500, 'one'), errorResponse(429, 'rate limited', { 'retry-after': '60' }), streamResponse(happyPathChunks())])
 		const caller = createLlmCaller(MODEL, API_KEY, { llmFetch: wire.llmFetch, sleep: wire.sleep, scheduleTimeout: wire.scheduleTimeout, random: wire.random, now: wire.now })
 		const result = await caller.call({ messages: [] })
-		expect(result).toEqual({
-			kind: 'llm_unavailable',
+		expect(result).toMatchObject({
+			kind: 'provider_failure',
 			message: 'The model provider is rate limiting requests (HTTP 429) after 2 attempts. The provider asked to retry after 60000ms, which exceeds the inline wait limit.',
 			detail: 'rate limited',
 		})
@@ -382,14 +392,14 @@ describe('createLlmCaller pre-stream retry classification', () => {
 		const caller = createLlmCaller(MODEL, API_KEY, { llmFetch: wire.llmFetch, sleep: wire.sleep, scheduleTimeout: wire.scheduleTimeout, random: wire.random, now: wire.now })
 		const result = await caller.call({ messages: [] })
 		expect(result.kind).toBe('success')
-		expect(wire.sleeps).toEqual([50, 300])
+		expect(wire.sleeps).toEqual([100, 300])
 	})
 
 	test('an error body past the detail cap is truncated with an explicit marker', async () => {
 		const wire = createFakeWire([errorResponse(402, 'x'.repeat(3000))])
 		const caller = createLlmCaller(MODEL, API_KEY, { llmFetch: wire.llmFetch, sleep: wire.sleep, scheduleTimeout: wire.scheduleTimeout, random: wire.random, now: wire.now })
 		const result = await caller.call({ messages: [] })
-		if (result.kind !== 'llm_unavailable') throw new Error(`expected llm_unavailable, got ${result.kind}`)
+		if (result.kind !== 'provider_failure') throw new Error(`expected provider_failure, got ${result.kind}`)
 		expect(result.detail).toBeDefined()
 		expect(result.detail?.length).toBeLessThan(3000)
 		expect(result.detail?.endsWith('… [truncated]')).toBe(true)
@@ -399,7 +409,7 @@ describe('createLlmCaller pre-stream retry classification', () => {
 		const wire = createFakeWire([errorResponse(402, '')])
 		const caller = createLlmCaller(MODEL, API_KEY, { llmFetch: wire.llmFetch, sleep: wire.sleep, scheduleTimeout: wire.scheduleTimeout, random: wire.random, now: wire.now })
 		const result = await caller.call({ messages: [] })
-		expect(result).toEqual({ kind: 'llm_unavailable', message: 'The model provider reports insufficient quota or credit (HTTP 402)' })
+		expect(result).toMatchObject({ kind: 'provider_failure', message: 'The model provider reports insufficient quota or credit (HTTP 402)' })
 	})
 
 	test('a 400 whose plain body reports the context overflow is context_budget_exceeded with the endpoint prompt tokens', async () => {
@@ -463,7 +473,7 @@ describe('createLlmCaller stream consumption', () => {
 		]))])
 		const caller = createLlmCaller(MODEL, API_KEY, { llmFetch: wire.llmFetch, sleep: wire.sleep, scheduleTimeout: wire.scheduleTimeout, random: wire.random, now: wire.now })
 		const result = await caller.call({ messages: [] })
-		expect(result).toEqual({ kind: 'llm_unavailable', message: 'SSE stream ended without a terminal event (no deltas received)' })
+		expect(result).toMatchObject({ kind: 'provider_failure', message: 'SSE stream ended without a terminal event (no deltas received)' })
 		expect(wire.requests).toHaveLength(1)
 		expect(wire.sleeps).toHaveLength(0)
 	})
@@ -481,7 +491,7 @@ describe('createLlmCaller stream consumption', () => {
 		expect(wire.sleeps).toHaveLength(0)
 	})
 
-	test('a mid-stream error payload is llm_unavailable with the error message and never retried', async () => {
+	test('a mid-stream error payload is a provider failure with the error message and is not retried', async () => {
 		const wire = createFakeWire([streamResponse(encodedChunks([
 			dataLine({ type: 'output_text.delta', item_id: 'm1', delta: 'partial' }),
 			dataLine({ error: { message: 'generation failed' } }),
@@ -489,30 +499,51 @@ describe('createLlmCaller stream consumption', () => {
 		const caller = createLlmCaller(MODEL, API_KEY, { llmFetch: wire.llmFetch, sleep: wire.sleep, scheduleTimeout: wire.scheduleTimeout, random: wire.random, now: wire.now })
 		const result = await caller.call({ messages: [] })
 		// The stream error's raw payload rides as the detail, so the body behind the extracted message stays reviewable.
-		expect(result).toEqual({ kind: 'llm_unavailable', message: 'SSE stream error: generation failed (deltas received for 1 item(s))', detail: '{"error":{"message":"generation failed"}}' })
+		expect(result).toMatchObject({ kind: 'provider_failure', message: 'SSE stream reported an error (deltas received for 1 item(s))', detail: '{"error":{"message":"generation failed"}}' })
 		expect(wire.requests).toHaveLength(1)
 		expect(wire.sleeps).toHaveLength(0)
 	})
 
-	test('a mid-stream error payload without a message still surfaces the payload as the detail', async () => {
+	test('an in-band authentication_error classifies as auth and is not retried', async () => {
 		const wire = createFakeWire([streamResponse(encodedChunks([
+			dataLine({ type: 'error', error: { type: 'authentication_error', message: 'bad key' } }),
+		]))])
+		const caller = createLlmCaller(MODEL, API_KEY, { llmFetch: wire.llmFetch, sleep: wire.sleep, scheduleTimeout: wire.scheduleTimeout, random: wire.random, now: wire.now })
+		const result = await caller.call({ messages: [] })
+		expect(result).toMatchObject({ kind: 'provider_failure', category: 'auth', httpStatus: 401 })
+		expect(wire.requests).toHaveLength(1)
+	})
+
+	test('an in-band invalid_request_error classifies as request_rejected', async () => {
+		const wire = createFakeWire([streamResponse(encodedChunks([
+			dataLine({ error: { type: 'invalid_request_error', message: 'bad schema' } }),
+		]))])
+		const caller = createLlmCaller(MODEL, API_KEY, { llmFetch: wire.llmFetch, sleep: wire.sleep, scheduleTimeout: wire.scheduleTimeout, random: wire.random, now: wire.now })
+		const result = await caller.call({ messages: [] })
+		expect(result).toMatchObject({ kind: 'provider_failure', category: 'request_rejected', httpStatus: 400 })
+		expect(wire.requests).toHaveLength(1)
+	})
+
+	test('an in-band SSE 402 error classifies as billing after deltas and is not retried', async () => {
+		const wire = createFakeWire([streamResponse(encodedChunks([
+			dataLine({ type: 'output_text.delta', item_id: 'm1', delta: 'partial' }),
 			dataLine({ error: { code: 402, cause: 'insufficient credit' } }),
 		]))])
 		const caller = createLlmCaller(MODEL, API_KEY, { llmFetch: wire.llmFetch, sleep: wire.sleep, scheduleTimeout: wire.scheduleTimeout, random: wire.random, now: wire.now })
 		const result = await caller.call({ messages: [] })
-		expect(result).toEqual({ kind: 'llm_unavailable', message: 'SSE stream error: stream error without a message (no deltas received)', detail: '{"error":{"code":402,"cause":"insufficient credit"}}' })
+		expect(result).toMatchObject({ kind: 'provider_failure', category: 'billing', httpStatus: 402, partialOutput: true, message: 'The model provider reports insufficient quota or credit (HTTP 402)', detail: '{"error":{"code":402,"cause":"insufficient credit"}}' })
 		expect(wire.requests).toHaveLength(1)
 		expect(wire.sleeps).toHaveLength(0)
 	})
 
-	test('a stream that ends without a terminal event is llm_unavailable with the accumulated state and never retried', async () => {
+	test('a stream that ends without a terminal event is a provider failure with the accumulated state and is not retried', async () => {
 		const wire = createFakeWire([streamResponse(encodedChunks([
 			dataLine({ type: 'response.created' }),
 			dataLine({ type: 'reasoning_text.delta', item_id: 'r1', delta: 'cut off mid-thought' }),
 		]))])
 		const caller = createLlmCaller(MODEL, API_KEY, { llmFetch: wire.llmFetch, sleep: wire.sleep, scheduleTimeout: wire.scheduleTimeout, random: wire.random, now: wire.now })
 		const result = await caller.call({ messages: [] })
-		expect(result).toEqual({ kind: 'llm_unavailable', message: 'SSE stream ended without a terminal event (deltas received for 1 item(s))' })
+		expect(result).toMatchObject({ kind: 'provider_failure', message: 'SSE stream ended without a terminal event (deltas received for 1 item(s))' })
 		expect(wire.requests).toHaveLength(1)
 		expect(wire.sleeps).toHaveLength(0)
 	})
@@ -521,7 +552,7 @@ describe('createLlmCaller stream consumption', () => {
 		const wire = createFakeWire([streamResponse(encodedChunks(['hello\n\n', ': keep-alive\n\n', 'event: ping\n\n']))])
 		const caller = createLlmCaller(MODEL, API_KEY, { llmFetch: wire.llmFetch, sleep: wire.sleep, scheduleTimeout: wire.scheduleTimeout, random: wire.random, now: wire.now })
 		const result = await caller.call({ messages: [] })
-		expect(result).toEqual({ kind: 'llm_unavailable', message: 'SSE stream ended without a terminal event (no deltas received)' })
+		expect(result).toMatchObject({ kind: 'provider_failure', message: 'SSE stream ended without a terminal event (no deltas received)' })
 		expect(wire.requests).toHaveLength(1)
 		expect(wire.sleeps).toHaveLength(0)
 	})
@@ -542,27 +573,46 @@ describe('createLlmCaller stream consumption', () => {
 		expect(result.content).toBe('héllo')
 	})
 
-	test('a stream whose read rejects mid-consumption maps to llm_unavailable instead of throwing', async () => {
+	test('a stream whose read rejects mid-consumption maps to provider_failure instead of throwing', async () => {
 		// The source errors after the first chunk, so the second read() rejects. An errored stream's cancel() rejects too (the streams spec routes cancel on an errored stream to the stored error), so this also proves the guarded cancel cannot mask the mapped result with an unhandled rejection.
-		const stream = new ReadableStream<Uint8Array>({
+		const failingStream = (): ReadableStream<Uint8Array> => new ReadableStream<Uint8Array>({
 			start(controller) {
 				controller.enqueue(new TextEncoder().encode(dataLine({ type: 'output_text.delta', item_id: 'm1', delta: 'partial' })))
+				controller.error(new Error('connection reset at https://private.example/v1/responses'))
+			},
+		})
+		const wire = createFakeWire([{ kind: 'stream', status: 200, stream: failingStream() }, { kind: 'stream', status: 200, stream: failingStream() }, { kind: 'stream', status: 200, stream: failingStream() }])
+		const caller = createLlmCaller(MODEL, API_KEY, { llmFetch: wire.llmFetch, sleep: wire.sleep, scheduleTimeout: wire.scheduleTimeout, random: wire.random, now: wire.now })
+		const result = await caller.call({ messages: [] })
+		if (result.kind !== 'provider_failure') throw new Error(`expected provider_failure, got ${result.kind}`)
+		expect(result.message).toContain('SSE stream read failed')
+		expect(result.message).not.toContain('connection reset')
+		expect(result.message).not.toContain('private.example')
+		expect(result.detail).toContain('connection reset at https://private.example/v1/responses')
+		// Buffered stream content never leaks into the failure message.
+		expect(result.message).not.toContain('partial')
+		expect(result.detail).not.toContain('partial')
+		expect(wire.requests).toHaveLength(3)
+		expect(wire.sleeps).toEqual([200, 400])
+	})
+
+	test('keepalive bytes without parsed deltas still allow a no-output retry', async () => {
+		// Received transport bytes are not model output: a crash after only keepalive/non-SSE lines must retry like a failed connect instead of suspending for partial output.
+		const failingStream = (): ReadableStream<Uint8Array> => new ReadableStream<Uint8Array>({
+			start(controller) {
+				controller.enqueue(new TextEncoder().encode(': keep-alive\n\nhello\n\n'))
 				controller.error(new Error('connection reset'))
 			},
 		})
-		const wire = createFakeWire([{ kind: 'stream', status: 200, stream }])
+		const wire = createFakeWire([{ kind: 'stream', status: 200, stream: failingStream() }, { kind: 'stream', status: 200, stream: failingStream() }, { kind: 'stream', status: 200, stream: failingStream() }])
 		const caller = createLlmCaller(MODEL, API_KEY, { llmFetch: wire.llmFetch, sleep: wire.sleep, scheduleTimeout: wire.scheduleTimeout, random: wire.random, now: wire.now })
 		const result = await caller.call({ messages: [] })
-		if (result.kind !== 'llm_unavailable') throw new Error(`expected llm_unavailable, got ${result.kind}`)
-		expect(result.message).toContain('SSE stream read failed')
-		expect(result.message).toContain('connection reset')
-		// Buffered stream content never leaks into the failure message.
-		expect(result.message).not.toContain('partial')
-		expect(wire.requests).toHaveLength(1)
-		expect(wire.sleeps).toHaveLength(0)
+		expect(result).toMatchObject({ kind: 'provider_failure', category: 'transient', attempts: 3, partialOutput: false })
+		expect(wire.requests).toHaveLength(3)
+		expect(wire.sleeps).toEqual([200, 400])
 	})
 
-	test('an unterminated over-cap line maps to llm_unavailable instead of throwing and cancels the reader', async () => {
+	test('an unterminated over-cap line maps to a provider failure instead of throwing and cancels the reader', async () => {
 		let cancelled = false
 		// The trailing chunk keeps the stream undrained when the failure lands, so the reader's cancel reaches the underlying source.
 		const wire = createFakeWire([streamResponse([
@@ -573,8 +623,8 @@ describe('createLlmCaller stream consumption', () => {
 		})])
 		const caller = createLlmCaller(MODEL, API_KEY, { llmFetch: wire.llmFetch, sleep: wire.sleep, scheduleTimeout: wire.scheduleTimeout, random: wire.random, now: wire.now })
 		const result = await caller.call({ messages: [] })
-		if (result.kind !== 'llm_unavailable') throw new Error(`expected llm_unavailable, got ${result.kind}`)
-		expect(result.message).toContain('SSE protocol failure')
+		if (result.kind !== 'provider_failure') throw new Error(`expected provider_failure, got ${result.kind}`)
+		expect(result.message).toBe('SSE protocol failure (no terminal event observed; no deltas received)')
 		expect(result.message).not.toContain('xxxxx')
 		expect(cancelled).toBe(true)
 		expect(wire.requests).toHaveLength(1)
@@ -590,7 +640,7 @@ describe('createLlmCaller stream consumption', () => {
 		])])
 		const caller = createLlmCaller(MODEL, API_KEY, { llmFetch: wire.llmFetch, sleep: wire.sleep, scheduleTimeout: wire.scheduleTimeout, random: wire.random, now: wire.now })
 		const result = await caller.call({ messages: [] })
-		expect(result).toEqual({ kind: 'llm_unavailable', message: 'SSE stream ended without a terminal event (no deltas received)' })
+		expect(result).toMatchObject({ kind: 'provider_failure', message: 'SSE stream ended without a terminal event (no deltas received)' })
 	})
 })
 
@@ -902,7 +952,7 @@ describe('detectContextBudgetExceeded', () => {
 })
 
 describe('createLlmCaller stall timeouts', () => {
-	test('a connect timeout aborts the stalled request and is retried with backoff until llm_unavailable', async () => {
+	test('a connect timeout aborts the stalled request and is retried with backoff until the provider suspends', async () => {
 		const requests: LlmFetchRequest[] = []
 		const sleeps: number[] = []
 		// A real fetch rejects when its signal aborts, so the fake mirrors that contract: it pends until the caller's connect timer fires and then rejects with the platform's AbortError shape.
@@ -933,12 +983,12 @@ describe('createLlmCaller stall timeouts', () => {
 		}
 		const caller = createLlmCaller(MODEL, API_KEY, { llmFetch, sleep, scheduleTimeout, random: () => 1, now: () => NOW })
 		const result = await caller.call({ messages: [] })
-		expect(result).toEqual({ kind: 'llm_unavailable', message: 'The model provider could not be reached after 3 attempts. The connection timed out after 30000ms.' })
+		expect(result).toMatchObject({ kind: 'provider_failure', message: 'The model provider could not be reached after 3 attempts. The connection timed out after 30000ms.' })
 		expect(requests).toHaveLength(3)
 		expect(sleeps).toEqual([200, 400])
 	})
 
-	test('a mid-stream idle timeout aborts the stalled read, releases the reader, and is retried with backoff until llm_unavailable', async () => {
+	test('a mid-stream idle timeout aborts the stalled read, releases the reader, and is retried with backoff until the provider suspends', async () => {
 		const encoder = new TextEncoder()
 		let cancellations = 0
 		// One chunk, then the source goes silent and never closes: the second read is where the stream is wedged.
@@ -957,7 +1007,7 @@ describe('createLlmCaller stall timeouts', () => {
 		])
 		const caller = createLlmCaller(MODEL, API_KEY, { llmFetch: wire.llmFetch, sleep: wire.sleep, scheduleTimeout: wire.scheduleTimeout, random: wire.random, now: wire.now })
 		const result = await caller.call({ messages: [] })
-		expect(result).toEqual({ kind: 'llm_unavailable', message: 'no bytes arrived within 120000ms' })
+		expect(result).toMatchObject({ kind: 'provider_failure', message: 'no bytes arrived within 120000ms' })
 		expect(wire.requests).toHaveLength(3)
 		expect(wire.sleeps).toEqual([200, 400])
 		expect(wire.timersFired()).toBe(3)

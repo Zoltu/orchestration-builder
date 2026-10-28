@@ -33,7 +33,11 @@ export { createReadProjectDoc } from './project-docs.js'
 export type { ReadProjectDoc, ReadProjectDocResult } from './project-docs.js'
 
 export { createModelInfoProbe, MODEL_PROBE_TIMEOUT_MS } from './model-probe.js'
-export type { ModelProbeResult } from './model-probe.js'
+
+export type { HealthView, ProviderHealth } from './provider-health.js'
+
+export { createObservedLlmCaller, createProviderAutoResumeCoordinator, createProviderRecovery } from './provider-recovery.js'
+export type { ProviderAutoResumeCoordinator, ProviderAutoResumeDependencies, ProviderRecovery, ProviderRecoveryDependencies } from './provider-recovery.js'
 
 // resolveModelConfig is deliberately not re-exported here: its callers all go through resolveDeploymentConfig, and the model-level entry point is exercised directly against model-resolution.ts by its tests.
 export { parseModelInfo, resolveDeploymentConfig } from './model-resolution.js'
@@ -57,8 +61,8 @@ export type { InterruptChannel, InterruptQueue, InterruptRequest, InterruptSubmi
 export { createDeltaChannel } from './stream-channel.js'
 export type { DeltaChannel, DeltaField, DeltaSubscriber, RoleDelta, RunDelta } from './stream-channel.js'
 
-export { createRunSubmission, createResumeErroredRun, createReadPauseStateById, createResumeParkedRun, createResumeClarificationRun, createTerminateParkedRun } from './run-submission.js'
-export type { ReadPauseStateById, ResumeClarificationRun, ResumeClarificationRunDependencies, ResumeClarificationRunRejection, ResumeClarificationRunResult, ResumeErroredRun, ResumeErroredRunDependencies, ResumeErroredRunRejection, ResumeErroredRunResult, ResumeParkedRun, ResumeParkedRunDependencies, ResumeParkedRunRejection, ResumeParkedRunResult, ResumeRun, ResumeRunInvocation, RunSubmission, RunSubmissionDependencies, StartRun, SubmitResult, TerminateParkedRun, TerminateParkedRunDependencies, TerminateParkedRunRejection, TerminateParkedRunResult } from './run-submission.js'
+export { createRunSubmission, createResumeErroredOrSuspendedRun, createReadPauseStateById, createResumeParkedRun, createResumeClarificationRun, createTerminatePausedRun } from './run-submission.js'
+export type { ReadPauseStateById, ResumeClarificationRun, ResumeClarificationRunDependencies, ResumeClarificationRunRejection, ResumeClarificationRunResult, ResumeErroredOrSuspendedRun, ResumeErroredOrSuspendedRunDependencies, ResumeErroredOrSuspendedRunRejection, ResumeErroredOrSuspendedRunResult, ResumeParkedRun, ResumeParkedRunDependencies, ResumeParkedRunRejection, ResumeParkedRunResult, ResumeRun, ResumeRunInvocation, RunSubmission, RunSubmissionDependencies, StartRun, SubmitResult, TerminatePausedRun, TerminatePausedRunDependencies, TerminatePausedRunRejection, TerminatePausedRunResult } from './run-submission.js'
 
 export { createTaskQueue } from './queue/index.js'
 export type {
@@ -103,7 +107,7 @@ export { DEFAULT_INVOLVEMENT, involvementDirective } from './involvement.js'
 export { DEFAULT_LOG_LEVEL, applyLogLevel, isLogLevel } from './log-level.js'
 export type { LogLevel } from './log-level.js'
 
-export { isEffortLevel, isInvolvementLevel, isProjectSettings, isTerminalRunStatus, validateDeploymentFileConfig, validateDeploymentRoleReferences } from './validation.js'
+export { isEffortLevel, isInvolvementLevel, isProjectSettings, isTerminalRunStatus, validateDeploymentFileConfig, validateDeploymentRoleReferences, validateHandlerRolesAreReadOnly } from './validation.js'
 
 export { createToolPlatform } from './tools/index.js'
 export type { RunToolScope, ToolPlatform, ToolPlatformConfig, ToolPlatformDependencies } from './tools/index.js'

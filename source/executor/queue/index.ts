@@ -16,8 +16,8 @@ export type {
 	SubmitQueuedRun,
 	TaskQueueDependencies,
 	TaskQueueModule,
-	TerminateParkedRun,
-	TerminateParkedRunResult,
+	TerminatePausedRun,
+	TerminatePausedRunResult,
 } from './task-queue.js'
 
 export type { QueueStore } from './persistence.js'

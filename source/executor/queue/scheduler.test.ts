@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import { createTaskQueue, type QueueItemView, type QueueView, type ResumeClarificationRunResult, type ResumeParkedRunResult } from './index.ts'
 import type { ParkedAsk, PauseState } from '../park-state.js'
 import type { RunContinuation, RunMeta } from '../types.js'
+import { SUPERSEDED_SUSPENDED_RUN_MESSAGE } from '../suspension.js'
 
 type QueuedRunSubmitResult = { ok: true; runId: string } | { ok: false; error: 'run_in_progress' | 'run_id_collision' }
 
@@ -107,6 +108,22 @@ function meta(overrides: Partial<RunMeta> = {}): RunMeta {
 	}
 }
 
+const SUSPENDED_AT = '2026-01-01T02:00:00.000Z'
+
+function suspendedMeta(runId: string): RunMeta {
+	return {
+		runId,
+		task: 'fix the parser bug',
+		status: 'suspended',
+		startTime: '2026-01-01T00:30:00.000Z',
+		suspension: { category: 'billing', resumePolicy: 'operator', message: 'Top up and resume.', suspendedAt: SUSPENDED_AT },
+	}
+}
+
+function suspendedItem(overrides: Partial<QueueItemView> = {}): QueueItemView {
+	return waitingItem({ status: 'suspended', runId: 'run-20260101-010000', suspendedAt: SUSPENDED_AT, ...overrides })
+}
+
 // Fake run-meta reader over an in-memory record; ids absent from the record read as null (no run directory).
 function fakeMetaReader(metas: Record<string, RunMeta>): (runId: string) => string | null {
 	return (runId) => {
@@ -146,10 +163,25 @@ function pauseStateOf(seed: PauseSeed | undefined): PauseState | null {
 	return { kind: 'parked_ask', ask: seed }
 }
 
-function queueOver(store: ReturnType<typeof fakeQueueStore>, submit: ReturnType<typeof fakeSubmit>, metas: Record<string, RunMeta> = {}, runList: ReturnType<typeof fakeRunList> = fakeRunList(), hasActiveRun: () => boolean = () => false, pauseStates: Record<string, PauseSeed> = {}, resumeResults: ResumeParkedRunResult[] = [], clarificationResumeResults: ResumeClarificationRunResult[] = []): { tick: () => Promise<void>; onRunSettled: (meta: RunMeta) => Promise<void>; observeShutdown: () => void; answer: (id: string, answer: string) => Promise<unknown>; resumeCalls: Array<{ runId: string; parkedAnswer: { question: string; answer: string; toolCallId: string } }>; clarificationResumeCalls: Array<{ runId: string; id: string; question: string; answer: string }> } {
+interface QueueOverOptions {
+	metas?: Record<string, RunMeta>
+	runList?: ReturnType<typeof fakeRunList>
+	hasActiveRun?: () => boolean
+	pauseStates?: Record<string, PauseSeed>
+	resumeResults?: ResumeParkedRunResult[]
+	clarificationResumeResults?: ResumeClarificationRunResult[]
+	hasSuspendedRun?: () => boolean
+	canDispatch?: () => boolean
+}
+
+function queueOver(store: ReturnType<typeof fakeQueueStore>, submit: ReturnType<typeof fakeSubmit>, options: QueueOverOptions = {}): { tick: () => Promise<void>; onRunSettled: (meta: RunMeta) => Promise<void>; observeShutdown: () => void; answer: (id: string, answer: string) => Promise<unknown>; resumeCalls: Array<{ runId: string; parkedAnswer: { question: string; answer: string; toolCallId: string } }>; clarificationResumeCalls: Array<{ runId: string; id: string; question: string; answer: string }> } {
 	const sleep = fakeSleep()
-	const resumeScript = [...resumeResults]
-	const clarificationScript = [...clarificationResumeResults]
+	const metas = options.metas ?? {}
+	const runList = options.runList ?? fakeRunList()
+	const hasActiveRun = options.hasActiveRun ?? (() => false)
+	const pauseStates = options.pauseStates ?? {}
+	const resumeScript = [...(options.resumeResults ?? [])]
+	const clarificationScript = [...(options.clarificationResumeResults ?? [])]
 	const resumeCalls: Array<{ runId: string; parkedAnswer: { question: string; answer: string; toolCallId: string } }> = []
 	const clarificationResumeCalls: Array<{ runId: string; id: string; question: string; answer: string }> = []
 	const taskQueue = createTaskQueue({
@@ -166,9 +198,12 @@ function queueOver(store: ReturnType<typeof fakeQueueStore>, submit: ReturnType<
 			clarificationResumeCalls.push({ runId, ...clarificationAnswer })
 			return clarificationScript.shift() ?? { ok: true, runId }
 		},
-		terminateParkedRun: () => ({ ok: false, error: 'not_found' }),
+		terminatePausedRun: () => ({ ok: false, error: 'not_found' }),
 		submitRun: submit.submitRun,
 		hasActiveRun,
+		hasSuspendedRun: options.hasSuspendedRun ?? (() => store.items().some((entry) => entry.status === 'suspended')),
+		canDispatch: options.canDispatch ?? (() => true),
+		ensureProviderProbe: () => {},
 		sleep: sleep.sleep,
 		now: () => NOW,
 		generateAnswerId: () => 'answer-1',
@@ -208,7 +243,9 @@ describe('createTaskQueue tick — dispatch', () => {
 		])
 		const submit = fakeSubmit([])
 		const { tick } = queueOver(store, submit, {
-			'run-20260101-010000': meta({ status: 'running' }),
+			metas: {
+				'run-20260101-010000': meta({ status: 'running' }),
+			},
 		})
 
 		await tick()
@@ -284,9 +321,12 @@ describe('createTaskQueue tick — dispatch', () => {
 			readPauseStateById: () => null,
 			resumeParkedRun: () => ({ ok: false, error: 'checkpoint_missing' }),
 			resumeClarificationRun: () => ({ ok: false, error: 'checkpoint_missing' }),
-			terminateParkedRun: () => ({ ok: false, error: 'not_found' }),
+			terminatePausedRun: () => ({ ok: false, error: 'not_found' }),
 			submitRun: submit.submitRun,
 			hasActiveRun: () => false,
+			hasSuspendedRun: () => false,
+			canDispatch: () => true,
+		ensureProviderProbe: () => {},
 			sleep: sleep.sleep,
 			now: () => NOW,
 		generateAnswerId: () => 'answer-1',
@@ -341,9 +381,12 @@ describe('createTaskQueue tick — submission threading', () => {
 			readPauseStateById: () => null,
 			resumeParkedRun: () => ({ ok: false, error: 'checkpoint_missing' }),
 			resumeClarificationRun: () => ({ ok: false, error: 'checkpoint_missing' }),
-			terminateParkedRun: () => ({ ok: false, error: 'not_found' }),
+			terminatePausedRun: () => ({ ok: false, error: 'not_found' }),
 			submitRun: submit.submitRun,
 			hasActiveRun: () => false,
+			hasSuspendedRun: () => false,
+			canDispatch: () => true,
+		ensureProviderProbe: () => {},
 			sleep: sleep.sleep,
 			now: () => NOW,
 		generateAnswerId: () => 'answer-1',
@@ -372,12 +415,14 @@ describe('createTaskQueue tick — submission threading', () => {
 		])
 		const submit = fakeSubmit([{ ok: true, runId: 'run-20260101-010000' }])
 		const { tick } = queueOver(store, submit, {
-			'run-20260101-003000': meta({
+			metas: {
+				'run-20260101-003000': meta({
 				runId: 'run-20260101-003000',
 				task: 'pick a database',
 				status: 'needs_clarification',
 				result: priorResult,
-			}),
+				}),
+			},
 		})
 
 		await tick()
@@ -402,7 +447,9 @@ describe('createTaskQueue tick — submission threading', () => {
 		])
 		const submit = fakeSubmit([{ ok: true, runId: 'run-20260101-010001' }])
 		const { tick } = queueOver(store, submit, {
-			'run-20260101-010000': meta({ status: 'interrupted', error: { kind: 'interrupted', message: 'the service stopped' } }),
+			metas: {
+				'run-20260101-010000': meta({ status: 'interrupted', error: { kind: 'interrupted', message: 'the service stopped' } }),
+			},
 		})
 
 		await tick()
@@ -419,6 +466,24 @@ describe('createTaskQueue tick — submission threading', () => {
 		expect(requeued.status).toBe('active')
 		expect(requeued.runId).toBe('run-20260101-010001')
 	})
+
+	test('a superseded suspended run\u2019s active item is cancelled instead of re-dispatched', async () => {
+		const runId = 'run-20260101-010000'
+		const store = fakeQueueStore([waitingItem({ id: 'superseded', status: 'active', runId })])
+		const submit = fakeSubmit([{ ok: true, runId: 'run-20260101-010001' }])
+		const { tick } = queueOver(store, submit, {
+			metas: {
+				[runId]: meta({ runId, status: 'interrupted', error: { kind: 'interrupted', message: SUPERSEDED_SUSPENDED_RUN_MESSAGE } }),
+			},
+		})
+
+		await tick()
+
+		expect(submit.calls.length).toBe(0)
+		const cancelled = requireItem(store.items(), 'superseded')
+		expect(cancelled.status).toBe('cancelled')
+		expect(cancelled.settledAt).toBe('2026-01-01T00:40:00.000Z')
+	})
 })
 
 describe('createTaskQueue tick — boot repair', () => {
@@ -429,7 +494,9 @@ describe('createTaskQueue tick — boot repair', () => {
 		])
 		const submit = fakeSubmit([{ ok: true, runId: 'run-20260101-010001' }])
 		const { tick } = queueOver(store, submit, {
-			'run-20260101-010000': meta({ result: { status: 'success', summary: 'fixed it' }, endTime: '2026-01-01T00:40:00.000Z' }),
+			metas: {
+				'run-20260101-010000': meta({ result: { status: 'success', summary: 'fixed it' }, endTime: '2026-01-01T00:40:00.000Z' }),
+			},
 		})
 
 		await tick()
@@ -451,8 +518,11 @@ describe('createTaskQueue tick — boot repair', () => {
 		const runList = fakeRunList()
 		runList.runs.push({ runId: 'run-20260101-010000', task: 'fix the parser bug', status: 'running', endTime: null, summary: null })
 		const { tick } = queueOver(store, submit, {
-			'run-20260101-010000': meta({ status: 'running' }),
-		}, runList)
+			metas: {
+				'run-20260101-010000': meta({ status: 'running' }),
+			},
+			runList: runList,
+		})
 
 		await tick()
 
@@ -470,8 +540,11 @@ describe('createTaskQueue tick — boot repair', () => {
 		const runList = fakeRunList()
 		runList.runs.push({ runId: 'run-20260101-010000', task: 'a different task', status: 'running', endTime: null, summary: null })
 		const { tick } = queueOver(store, submit, {
-			'run-20260101-010000': meta({ status: 'running', task: 'a different task' }),
-		}, runList)
+			metas: {
+				'run-20260101-010000': meta({ status: 'running', task: 'a different task' }),
+			},
+			runList: runList,
+		})
 
 		await tick()
 
@@ -499,8 +572,11 @@ describe('createTaskQueue tick — boot repair', () => {
 		const runList = fakeRunList()
 		runList.runs.push({ runId: 'run-20260101-010000', task: 'fix the parser bug', status: 'running', endTime: null, summary: null })
 		const { tick } = queueOver(store, submit, {
-			'run-20260101-010000': meta({ status: 'running' }),
-		}, runList)
+			metas: {
+				'run-20260101-010000': meta({ status: 'running' }),
+			},
+			runList: runList,
+		})
 
 		await tick()
 
@@ -517,8 +593,12 @@ describe('createTaskQueue tick — boot repair', () => {
 		])
 		const submit = fakeSubmit([])
 		const { tick } = queueOver(store, submit, {
-			'run-20260101-010000': meta({ status: 'interrupted', error: { kind: 'interrupted', message: 'the service stopped' } }),
-		}, fakeRunList(), () => true)
+			metas: {
+				'run-20260101-010000': meta({ status: 'interrupted', error: { kind: 'interrupted', message: 'the service stopped' } }),
+			},
+			runList: fakeRunList(),
+			hasActiveRun: () => true,
+		})
 
 		await tick()
 
@@ -536,7 +616,11 @@ describe('createTaskQueue tick — boot repair', () => {
 			waitingItem({ status: 'active', runId: 'run-20260101-010000', question: 'which database?', answer: 'postgres' }),
 		])
 		const submit = fakeSubmit([])
-		const { tick } = queueOver(store, submit, {}, fakeRunList(), () => true)
+		const { tick } = queueOver(store, submit, {
+			metas: {},
+			runList: fakeRunList(),
+			hasActiveRun: () => true,
+		})
 
 		await tick()
 
@@ -552,7 +636,11 @@ describe('createTaskQueue tick — boot repair', () => {
 	test('the boot tick with a resumed run holding the slot is a true no-op: no marker write, no submit probe', async () => {
 		const store = fakeQueueStore([waitingItem()])
 		const submit = fakeSubmit([])
-		const { tick } = queueOver(store, submit, {}, fakeRunList(), () => true)
+		const { tick } = queueOver(store, submit, {
+			metas: {},
+			runList: fakeRunList(),
+			hasActiveRun: () => true,
+		})
 
 		await tick()
 
@@ -569,6 +657,147 @@ describe('createTaskQueue tick — boot repair', () => {
 		await tick()
 
 		expect(submit.calls.length).toBe(1)
+		expect(requireItem(store.items(), 'item-1').status).toBe('waiting')
+	})
+})
+
+describe('createTaskQueue tick — suspended boot repair and priority', () => {
+	test('an active item whose meta is suspended becomes suspended, preserving the run and pause stamp', async () => {
+		const store = fakeQueueStore([
+			waitingItem({ status: 'active', runId: 'run-20260101-010000' }),
+			waitingItem({ id: 'next' }),
+		])
+		const submit = fakeSubmit([])
+		const { tick } = queueOver(store, submit, {
+			metas: {
+				'run-20260101-010000': suspendedMeta('run-20260101-010000'),
+			},
+		})
+
+		await tick()
+
+		const paused = requireItem(store.items(), 'item-1')
+		expect(paused.status).toBe('suspended')
+		expect(paused.runId).toBe('run-20260101-010000')
+		expect(paused.suspendedAt).toBe(SUSPENDED_AT)
+		expect(submit.calls.length).toBe(0)
+		expect(requireItem(store.items(), 'next').status).toBe('waiting')
+	})
+
+	test('a suspended item whose meta is suspended is left untouched and blocks the waiting item', async () => {
+		const original = suspendedItem()
+		const store = fakeQueueStore([original, waitingItem({ id: 'next' })])
+		const submit = fakeSubmit([])
+		const { tick } = queueOver(store, submit, {
+			metas: {
+				'run-20260101-010000': suspendedMeta('run-20260101-010000'),
+			},
+		})
+
+		await tick()
+
+		expect(store.items()).toEqual([original, waitingItem({ id: 'next' })])
+		expect(store.writes.length).toBe(0)
+		expect(submit.calls.length).toBe(0)
+	})
+
+	test('a suspended item whose meta is running is rebound to the active slot', async () => {
+		const store = fakeQueueStore([suspendedItem()])
+		const submit = fakeSubmit([])
+		const { tick } = queueOver(store, submit, {
+			metas: {
+				'run-20260101-010000': meta({ status: 'running' }),
+			},
+		})
+
+		await tick()
+
+		const active = requireItem(store.items(), 'item-1')
+		expect(active.status).toBe('active')
+		expect(active.runId).toBe('run-20260101-010000')
+		expect(active.suspendedAt).toBeUndefined()
+		expect(submit.calls.length).toBe(0)
+	})
+
+	test('a suspended item whose meta is terminal settles from the meta', async () => {
+		const store = fakeQueueStore([suspendedItem()])
+		const submit = fakeSubmit([])
+		const { tick } = queueOver(store, submit, {
+			metas: {
+				'run-20260101-010000': meta({ status: 'success', result: { status: 'success', summary: 'fixed it' }, endTime: '2026-01-01T02:05:00.000Z' }),
+			},
+		})
+
+		await tick()
+
+		const settled = requireItem(store.items(), 'item-1')
+		expect(settled.status).toBe('done')
+		expect(settled.resultSummary).toBe('fixed it')
+		expect(settled.settledAt).toBe('2026-01-01T02:05:00.000Z')
+		expect(submit.calls.length).toBe(0)
+	})
+
+	test('a suspended item whose meta is missing is cancelled, never dispatched', async () => {
+		const store = fakeQueueStore([suspendedItem()])
+		const submit = fakeSubmit([])
+		const { tick } = queueOver(store, submit)
+
+		await tick()
+
+		const cancelled = requireItem(store.items(), 'item-1')
+		expect(cancelled.status).toBe('cancelled')
+		expect(cancelled.settledAt).toBe(NOW)
+		expect(submit.calls.length).toBe(0)
+	})
+
+	test('a suspended item whose meta is unreadable is cancelled, never dispatched', async () => {
+		const store = fakeQueueStore([suspendedItem()])
+		const submit = fakeSubmit([])
+		// A suspended meta without its suspension record fails validation, exactly like a torn meta file.
+		const broken: RunMeta = { runId: 'run-20260101-010000', task: 'fix the parser bug', status: 'suspended', startTime: '2026-01-01T00:30:00.000Z' }
+		const { tick } = queueOver(store, submit, {
+			metas: { 'run-20260101-010000': broken },
+		})
+
+		await tick()
+
+		const cancelled = requireItem(store.items(), 'item-1')
+		expect(cancelled.status).toBe('cancelled')
+		expect(submit.calls.length).toBe(0)
+	})
+
+	test('a suspended item outranks every waiting item even when the submission slot is not seeded', async () => {
+		const store = fakeQueueStore([suspendedItem(), waitingItem({ id: 'next' })])
+		const submit = fakeSubmit([])
+		const { tick } = queueOver(store, submit, {
+			metas: {
+				'run-20260101-010000': suspendedMeta('run-20260101-010000'),
+			},
+		})
+
+		await tick()
+
+		expect(submit.calls.length).toBe(0)
+		expect(requireItem(store.items(), 'next').status).toBe('waiting')
+	})
+
+	test('the submission-level suspended run blocks dispatch even with no suspended item in the file', async () => {
+		const store = fakeQueueStore([waitingItem()])
+		const submit = fakeSubmit([])
+		const { tick } = queueOver(store, submit, {
+			metas: {},
+			runList: fakeRunList(),
+			hasActiveRun: () => false,
+			pauseStates: {},
+			resumeResults: [],
+			clarificationResumeResults: [],
+			hasSuspendedRun: () => true,
+		})
+
+		await tick()
+
+		expect(submit.calls.length).toBe(0)
+		expect(store.writes.length).toBe(0)
 		expect(requireItem(store.items(), 'item-1').status).toBe('waiting')
 	})
 })
@@ -592,7 +821,13 @@ describe('createTaskQueue same-run answer resume', () => {
 	test('dispatches the answered item into the same run: active marker under the parked id, resume payload, no submitRun', async () => {
 		const store = fakeQueueStore([answeredItem()])
 		const submit = fakeSubmit([])
-		const harness = queueOver(store, submit, { 'run-20260101-000500': meta({ runId: 'run-20260101-000500', status: 'needs_clarification' }) }, fakeRunList(), () => false, { 'run-20260101-000500': parkedAsk }, [{ ok: true, runId: 'run-20260101-000500' }])
+		const harness = queueOver(store, submit, {
+			metas: { 'run-20260101-000500': meta({ runId: 'run-20260101-000500', status: 'needs_clarification' }) },
+			runList: fakeRunList(),
+			hasActiveRun: () => false,
+			pauseStates: { 'run-20260101-000500': parkedAsk },
+			resumeResults: [{ ok: true, runId: 'run-20260101-000500' }],
+		})
 
 		await harness.tick()
 
@@ -615,7 +850,12 @@ describe('createTaskQueue same-run answer resume', () => {
 		const runId = 'run-20260101-000500'
 		const store = fakeQueueStore([waitingItem({ status: 'needs_input', runId, continuesFrom: 'run-20260101-000000', question: 'I need a decision on the schema' })])
 		const submit = fakeSubmit([])
-		const harness = queueOver(store, submit, { [runId]: meta({ runId, status: 'needs_clarification', result: { status: 'needs_clarification', summary: 'I need a decision on the schema' } }) }, fakeRunList(), () => busy, { [runId]: 'clarification' })
+		const harness = queueOver(store, submit, {
+			metas: { [runId]: meta({ runId, status: 'needs_clarification', result: { status: 'needs_clarification', summary: 'I need a decision on the schema' } }) },
+			runList: fakeRunList(),
+			hasActiveRun: () => busy,
+			pauseStates: { [runId]: 'clarification' },
+		})
 
 		await harness.answer('item-1', 'use the v2 schema')
 
@@ -644,7 +884,12 @@ describe('createTaskQueue same-run answer resume', () => {
 		const runId = 'run-20260101-000500'
 		const store = fakeQueueStore([waitingItem({ status: 'needs_input', runId, continuesFrom: 'run-20260101-000000', question: 'the old question' })])
 		const submit = fakeSubmit([])
-		const harness = queueOver(store, submit, { [runId]: meta({ runId, status: 'needs_clarification', result: { status: 'needs_clarification', summary: 'a different question now' } }) }, fakeRunList(), () => true, { [runId]: 'clarification' })
+		const harness = queueOver(store, submit, {
+			metas: { [runId]: meta({ runId, status: 'needs_clarification', result: { status: 'needs_clarification', summary: 'a different question now' } }) },
+			runList: fakeRunList(),
+			hasActiveRun: () => true,
+			pauseStates: { [runId]: 'clarification' },
+		})
 
 		await harness.answer('item-1', 'the answer')
 
@@ -660,7 +905,14 @@ describe('createTaskQueue same-run answer resume', () => {
 		const runId = 'run-20260101-000500'
 		const store = fakeQueueStore([{ ...waitingItem({ continuesFrom: 'run-20260101-000000', question: 'I need a decision on the schema', answer: 'use the v2 schema' }), resumeRunId: runId, answerId: 'answer-1' }])
 		const submit = fakeSubmit([{ ok: true, runId: 'run-20260101-000600' }])
-		const harness = queueOver(store, submit, { [runId]: meta({ runId, status: 'needs_clarification', result: { status: 'needs_clarification', summary: 'I need a decision on the schema' } }) }, fakeRunList(), () => false, { [runId]: 'clarification' }, [], [{ ok: false, error: 'not_clarification' }])
+		const harness = queueOver(store, submit, {
+			metas: { [runId]: meta({ runId, status: 'needs_clarification', result: { status: 'needs_clarification', summary: 'I need a decision on the schema' } }) },
+			runList: fakeRunList(),
+			hasActiveRun: () => false,
+			pauseStates: { [runId]: 'clarification' },
+			resumeResults: [],
+			clarificationResumeResults: [{ ok: false, error: 'not_clarification' }],
+		})
 
 		await harness.tick()
 
@@ -680,7 +932,9 @@ describe('createTaskQueue same-run answer resume', () => {
 		const runId = 'run-20260101-000500'
 		const store = fakeQueueStore([waitingItem({ status: 'needs_input', runId, continuesFrom: 'run-20260101-000000', question: 'which database?' })])
 		const submit = fakeSubmit([{ ok: true, runId: 'run-20260101-000600' }])
-		const harness = queueOver(store, submit, { [runId]: meta({ runId, status: 'needs_clarification' }) })
+		const harness = queueOver(store, submit, {
+			metas: { [runId]: meta({ runId, status: 'needs_clarification' }) },
+		})
 
 		await harness.answer('item-1', 'postgres')
 
@@ -698,7 +952,13 @@ describe('createTaskQueue same-run answer resume', () => {
 	test('run_in_progress restores the answered item to waiting with its pointers intact', async () => {
 		const store = fakeQueueStore([answeredItem()])
 		const submit = fakeSubmit([])
-		const harness = queueOver(store, submit, { 'run-20260101-000500': meta({ runId: 'run-20260101-000500', status: 'needs_clarification' }) }, fakeRunList(), () => false, { 'run-20260101-000500': parkedAsk }, [{ ok: false, error: 'run_in_progress' }])
+		const harness = queueOver(store, submit, {
+			metas: { 'run-20260101-000500': meta({ runId: 'run-20260101-000500', status: 'needs_clarification' }) },
+			runList: fakeRunList(),
+			hasActiveRun: () => false,
+			pauseStates: { 'run-20260101-000500': parkedAsk },
+			resumeResults: [{ ok: false, error: 'run_in_progress' }],
+		})
 
 		await harness.tick()
 
@@ -715,7 +975,13 @@ describe('createTaskQueue same-run answer resume', () => {
 		test(`${error} falls back to the briefed dispatch with the question and answer`, async () => {
 			const store = fakeQueueStore([answeredItem()])
 			const submit = fakeSubmit([{ ok: true, runId: 'run-20260101-000600' }])
-			const harness = queueOver(store, submit, { 'run-20260101-000500': meta({ runId: 'run-20260101-000500', status: 'needs_clarification' }) }, fakeRunList(), () => false, { 'run-20260101-000500': parkedAsk }, [{ ok: false, error }])
+			const harness = queueOver(store, submit, {
+				metas: { 'run-20260101-000500': meta({ runId: 'run-20260101-000500', status: 'needs_clarification' }) },
+				runList: fakeRunList(),
+				hasActiveRun: () => false,
+				pauseStates: { 'run-20260101-000500': parkedAsk },
+				resumeResults: [{ ok: false, error }],
+			})
 
 			await harness.tick()
 
@@ -740,9 +1006,15 @@ describe('createTaskQueue same-run answer resume', () => {
 		])
 		const submit = fakeSubmit([])
 		const harness = queueOver(store, submit, {
-			'run-20260101-000400': meta({ runId: 'run-20260101-000400', result: { status: 'success', summary: 'other done' } }),
-			'run-20260101-000500': meta({ runId: 'run-20260101-000500', status: 'needs_clarification' }),
-		}, fakeRunList(), () => busy, { 'run-20260101-000500': parkedAsk }, [{ ok: true, runId: 'run-20260101-000500' }])
+			metas: {
+				'run-20260101-000400': meta({ runId: 'run-20260101-000400', result: { status: 'success', summary: 'other done' } }),
+				'run-20260101-000500': meta({ runId: 'run-20260101-000500', status: 'needs_clarification' }),
+			},
+			runList: fakeRunList(),
+			hasActiveRun: () => busy,
+			pauseStates: { 'run-20260101-000500': parkedAsk },
+			resumeResults: [{ ok: true, runId: 'run-20260101-000500' }],
+		})
 
 		await harness.answer('parked', 'postgres')
 		expect(harness.resumeCalls.length).toBe(0)
@@ -760,8 +1032,13 @@ describe('createTaskQueue same-run answer resume', () => {
 	test('a re-park with a different tool call settles to needs_input with the new question and drops the old answer', async () => {
 		const store = fakeQueueStore([activeAnsweredItem()])
 		const submit = fakeSubmit([])
-		const harness = queueOver(store, submit, { 'run-20260101-000500': meta({ runId: 'run-20260101-000500', status: 'needs_clarification' }) }, fakeRunList(), () => false, {
+		const harness = queueOver(store, submit, {
+			metas: { 'run-20260101-000500': meta({ runId: 'run-20260101-000500', status: 'needs_clarification' }) },
+			runList: fakeRunList(),
+			hasActiveRun: () => false,
+			pauseStates: {
 			'run-20260101-000500': { roleId: 'main-0-1', toolCallId: 'ask_new', callId: 'tool:ask_new', questionId: 'ask_new', question: 'and the port?' },
+			},
 		})
 
 		await harness.onRunSettled(meta({ runId: 'run-20260101-000500', status: 'needs_clarification', result: { status: 'needs_clarification', summary: 'waiting for an answer to: and the port?' } }))
@@ -779,8 +1056,13 @@ describe('createTaskQueue same-run answer resume', () => {
 	test('a same-question re-park with a different tool call is delivered, not redelivered, because the active marker keeps the old call id', async () => {
 		const store = fakeQueueStore([activeAnsweredItem()])
 		const submit = fakeSubmit([])
-		const harness = queueOver(store, submit, { 'run-20260101-000500': meta({ runId: 'run-20260101-000500', status: 'needs_clarification' }) }, fakeRunList(), () => false, {
+		const harness = queueOver(store, submit, {
+			metas: { 'run-20260101-000500': meta({ runId: 'run-20260101-000500', status: 'needs_clarification' }) },
+			runList: fakeRunList(),
+			hasActiveRun: () => false,
+			pauseStates: {
 			'run-20260101-000500': { roleId: 'main-0-1', toolCallId: 'ask_new', callId: 'tool:ask_new', questionId: 'ask_new', question: 'which database?' },
+			},
 		})
 
 		await harness.onRunSettled(meta({ runId: 'run-20260101-000500', status: 'needs_clarification', result: { status: 'needs_clarification', summary: 'waiting for an answer to: which database?' } }))
@@ -795,7 +1077,12 @@ describe('createTaskQueue same-run answer resume', () => {
 	test('a settlement that still names the answered tool call releases the item instead of settling it', async () => {
 		const store = fakeQueueStore([activeAnsweredItem()])
 		const submit = fakeSubmit([])
-		const harness = queueOver(store, submit, { 'run-20260101-000500': meta({ runId: 'run-20260101-000500', status: 'needs_clarification' }) }, fakeRunList(), () => true, { 'run-20260101-000500': parkedAsk })
+		const harness = queueOver(store, submit, {
+			metas: { 'run-20260101-000500': meta({ runId: 'run-20260101-000500', status: 'needs_clarification' }) },
+			runList: fakeRunList(),
+			hasActiveRun: () => true,
+			pauseStates: { 'run-20260101-000500': parkedAsk },
+		})
 
 		await harness.onRunSettled(meta({ runId: 'run-20260101-000500', status: 'needs_clarification', result: { status: 'needs_clarification', summary: 'waiting for an answer to: which database?' } }))
 
@@ -813,7 +1100,11 @@ describe('createTaskQueue same-run answer resume', () => {
 		const store = fakeQueueStore([activeAnsweredItem()])
 		const submit = fakeSubmit([])
 		// No pause state is available, so the settlement maps to needs_input with the new question and drops the old answer.
-		const harness = queueOver(store, submit, { 'run-20260101-000500': meta({ runId: 'run-20260101-000500', status: 'needs_clarification' }) }, fakeRunList(), () => true)
+		const harness = queueOver(store, submit, {
+			metas: { 'run-20260101-000500': meta({ runId: 'run-20260101-000500', status: 'needs_clarification' }) },
+			runList: fakeRunList(),
+			hasActiveRun: () => true,
+		})
 
 		await harness.onRunSettled(meta({ runId: 'run-20260101-000500', status: 'needs_clarification', result: { status: 'needs_clarification', summary: 'waiting for an answer to: which scope should I use?' } }))
 
@@ -834,7 +1125,12 @@ describe('createTaskQueue same-run answer resume', () => {
 		const question = 'I need a decision on the schema'
 		const store = fakeQueueStore([{ ...waitingItem({ status: 'active', runId, continuesFrom: 'run-20260101-000000', question, answer: 'use the v2 schema' }), resumeRunId: runId, answerId: 'answer-1' }])
 		const submit = fakeSubmit([])
-		const harness = queueOver(store, submit, { [runId]: meta({ runId, status: 'needs_clarification', result: { status: 'needs_clarification', summary: question } }) }, fakeRunList(), () => true, { [runId]: { kind: 'clarification', deliveredAnswerId: 'answer-1', deliveredAnswerConsumed: true } })
+		const harness = queueOver(store, submit, {
+			metas: { [runId]: meta({ runId, status: 'needs_clarification', result: { status: 'needs_clarification', summary: question } }) },
+			runList: fakeRunList(),
+			hasActiveRun: () => true,
+			pauseStates: { [runId]: { kind: 'clarification', deliveredAnswerId: 'answer-1', deliveredAnswerConsumed: true } },
+		})
 
 		await harness.onRunSettled(meta({ runId, status: 'needs_clarification', result: { status: 'needs_clarification', summary: question } }))
 
@@ -856,7 +1152,12 @@ describe('createTaskQueue same-run answer resume', () => {
 		const store = fakeQueueStore([{ ...waitingItem({ status: 'active', runId, continuesFrom: 'run-20260101-000000', question, answer: 'use the v2 schema' }), resumeRunId: runId, answerId: 'answer-1' }])
 		const submit = fakeSubmit([])
 		let busy = true
-		const harness = queueOver(store, submit, { [runId]: meta({ runId, status: 'needs_clarification', result: { status: 'needs_clarification', summary: question } }) }, fakeRunList(), () => busy, { [runId]: { kind: 'clarification', deliveredAnswerId: 'answer-1', deliveredAnswerConsumed: false } })
+		const harness = queueOver(store, submit, {
+			metas: { [runId]: meta({ runId, status: 'needs_clarification', result: { status: 'needs_clarification', summary: question } }) },
+			runList: fakeRunList(),
+			hasActiveRun: () => busy,
+			pauseStates: { [runId]: { kind: 'clarification', deliveredAnswerId: 'answer-1', deliveredAnswerConsumed: false } },
+		})
 
 		await harness.tick()
 
@@ -884,7 +1185,12 @@ describe('createTaskQueue same-run answer resume', () => {
 		const question = 'the new question'
 		const store = fakeQueueStore([{ ...waitingItem({ status: 'active', runId: newRunId, continuesFrom: oldRunId, question, answer: 'the old answer' }), answerId: 'old-answer' }])
 		const submit = fakeSubmit([])
-		const harness = queueOver(store, submit, { [newRunId]: meta({ runId: newRunId, status: 'needs_clarification', result: { status: 'needs_clarification', summary: question } }) }, fakeRunList(), () => true, { [newRunId]: { kind: 'clarification', deliveredAnswerId: 'old-answer', deliveredAnswerConsumed: false } })
+		const harness = queueOver(store, submit, {
+			metas: { [newRunId]: meta({ runId: newRunId, status: 'needs_clarification', result: { status: 'needs_clarification', summary: question } }) },
+			runList: fakeRunList(),
+			hasActiveRun: () => true,
+			pauseStates: { [newRunId]: { kind: 'clarification', deliveredAnswerId: 'old-answer', deliveredAnswerConsumed: false } },
+		})
 
 		await harness.onRunSettled(meta({ runId: newRunId, status: 'needs_clarification', result: { status: 'needs_clarification', summary: question } }))
 
@@ -903,7 +1209,12 @@ describe('createTaskQueue same-run answer resume', () => {
 		const question = 'which database?'
 		const store = fakeQueueStore([{ ...waitingItem({ status: 'active', runId: newRunId, continuesFrom: oldRunId, question, answer: 'the old answer' }), answerId: 'old-answer' }])
 		const submit = fakeSubmit([])
-		const harness = queueOver(store, submit, { [newRunId]: meta({ runId: newRunId, status: 'needs_clarification' }) }, fakeRunList(), () => true, { [newRunId]: { roleId: 'main-0-1', toolCallId: 'ask_2', callId: 'tool:ask_2', questionId: 'ask_2', question } })
+		const harness = queueOver(store, submit, {
+			metas: { [newRunId]: meta({ runId: newRunId, status: 'needs_clarification' }) },
+			runList: fakeRunList(),
+			hasActiveRun: () => true,
+			pauseStates: { [newRunId]: { roleId: 'main-0-1', toolCallId: 'ask_2', callId: 'tool:ask_2', questionId: 'ask_2', question } },
+		})
 
 		await harness.onRunSettled(meta({ runId: newRunId, status: 'needs_clarification', result: { status: 'needs_clarification', summary: `waiting for an answer to: ${question}` } }))
 
@@ -921,7 +1232,12 @@ describe('createTaskQueue same-run answer resume', () => {
 		const question = 'which database?'
 		const store = fakeQueueStore([{ ...waitingItem({ status: 'active', runId, continuesFrom: 'run-20260101-000000', question, answer: 'the old clarification answer' }), resumeRunId: runId, answerId: 'answer-1' }])
 		const submit = fakeSubmit([])
-		const harness = queueOver(store, submit, { [runId]: meta({ runId, status: 'needs_clarification' }) }, fakeRunList(), () => true, { [runId]: { roleId: 'main-0-1', toolCallId: 'ask_1', callId: 'tool:ask_1', questionId: 'ask_1', question } })
+		const harness = queueOver(store, submit, {
+			metas: { [runId]: meta({ runId, status: 'needs_clarification' }) },
+			runList: fakeRunList(),
+			hasActiveRun: () => true,
+			pauseStates: { [runId]: { roleId: 'main-0-1', toolCallId: 'ask_1', callId: 'tool:ask_1', questionId: 'ask_1', question } },
+		})
 
 		await harness.onRunSettled(meta({ runId, status: 'needs_clarification', result: { status: 'needs_clarification', summary: `waiting for an answer to: ${question}` } }))
 
@@ -937,7 +1253,12 @@ describe('createTaskQueue same-run answer resume', () => {
 	test('boot repair releases an answered item whose parked checkpoint still names its call', async () => {
 		const store = fakeQueueStore([activeAnsweredItem()])
 		const submit = fakeSubmit([])
-		const harness = queueOver(store, submit, { 'run-20260101-000500': meta({ runId: 'run-20260101-000500', status: 'needs_clarification' }) }, fakeRunList(), () => true, { 'run-20260101-000500': parkedAsk })
+		const harness = queueOver(store, submit, {
+			metas: { 'run-20260101-000500': meta({ runId: 'run-20260101-000500', status: 'needs_clarification' }) },
+			runList: fakeRunList(),
+			hasActiveRun: () => true,
+			pauseStates: { 'run-20260101-000500': parkedAsk },
+		})
 
 		await harness.tick()
 
@@ -955,7 +1276,12 @@ describe('createTaskQueue same-run answer resume', () => {
 	test('an answered item whose run is still running is left untouched, not released', async () => {
 		const store = fakeQueueStore([activeAnsweredItem()])
 		const submit = fakeSubmit([])
-		const harness = queueOver(store, submit, { 'run-20260101-000500': meta({ runId: 'run-20260101-000500', status: 'running' }) }, fakeRunList(), () => true, { 'run-20260101-000500': parkedAsk })
+		const harness = queueOver(store, submit, {
+			metas: { 'run-20260101-000500': meta({ runId: 'run-20260101-000500', status: 'running' }) },
+			runList: fakeRunList(),
+			hasActiveRun: () => true,
+			pauseStates: { 'run-20260101-000500': parkedAsk },
+		})
 
 		await harness.tick()
 
@@ -968,7 +1294,11 @@ describe('createTaskQueue same-run answer resume', () => {
 	test('an answered item whose resumed run succeeded settles done even after the checkpoint is gone', async () => {
 		const store = fakeQueueStore([activeAnsweredItem()])
 		const submit = fakeSubmit([])
-		const harness = queueOver(store, submit, { 'run-20260101-000500': meta({ runId: 'run-20260101-000500', result: { status: 'success', summary: 'resumed and done' } }) }, fakeRunList(), () => true)
+		const harness = queueOver(store, submit, {
+			metas: { 'run-20260101-000500': meta({ runId: 'run-20260101-000500', result: { status: 'success', summary: 'resumed and done' } }) },
+			runList: fakeRunList(),
+			hasActiveRun: () => true,
+		})
 
 		await harness.tick()
 
@@ -987,7 +1317,9 @@ describe('createTaskQueue onRunSettled', () => {
 		])
 		const submit = fakeSubmit([{ ok: true, runId: 'run-20260101-010001' }])
 		const { onRunSettled } = queueOver(store, submit, {
-			'run-20260101-010000': meta({ status: 'error', result: { status: 'error', summary: 'could not fix', error: { kind: 'loop_detected', message: 'the test suite hangs' } } }),
+			metas: {
+				'run-20260101-010000': meta({ status: 'error', result: { status: 'error', summary: 'could not fix', error: { kind: 'loop_detected', message: 'the test suite hangs' } } }),
+			},
 		})
 
 		await onRunSettled(meta({ status: 'error', result: { status: 'error', summary: 'could not fix', error: { kind: 'loop_detected', message: 'the test suite hangs' } } }))
@@ -1017,13 +1349,38 @@ describe('createTaskQueue onRunSettled', () => {
 		expect(settled.settledAt).toBe(NOW)
 	})
 
+	test('a suspended meta maps the active item to suspended and does not tick or dispatch waiting work', async () => {
+		const store = fakeQueueStore([
+			waitingItem({ status: 'active', runId: 'run-20260101-010000' }),
+			waitingItem({ id: 'next' }),
+		])
+		const submit = fakeSubmit([])
+		const { onRunSettled } = queueOver(store, submit)
+
+		await onRunSettled(suspendedMeta('run-20260101-010000'))
+
+		const paused = requireItem(store.items(), 'item-1')
+		expect(paused.status).toBe('suspended')
+		expect(paused.runId).toBe('run-20260101-010000')
+		expect(paused.suspendedAt).toBe(SUSPENDED_AT)
+		expect(paused.settledAt).toBeUndefined()
+		expect(paused.resultSummary).toBeUndefined()
+		expect(paused.error).toBeUndefined()
+		// The mapping is the only write: no settlement tick ran, so the next waiting item was never dispatched.
+		expect(store.writes.length).toBe(1)
+		expect(submit.calls.length).toBe(0)
+		expect(requireItem(store.items(), 'next').status).toBe('waiting')
+	})
+
 	test('a re-park preserves the item\u2019s original lineage instead of re-pointing it at the attempt', async () => {
 		const store = fakeQueueStore([
 			waitingItem({ status: 'active', runId: 'run-20260101-010000', continuesFrom: 'run-20260101-003000' }),
 		])
 		const submit = fakeSubmit([])
 		const { onRunSettled } = queueOver(store, submit, {
-			'run-20260101-010000': meta({ status: 'needs_clarification' }),
+			metas: {
+				'run-20260101-010000': meta({ status: 'needs_clarification' }),
+			},
 		})
 
 		await onRunSettled(meta({
@@ -1045,8 +1402,12 @@ describe('createTaskQueue onRunSettled', () => {
 		const submit = fakeSubmit([])
 		// The run's own meta still reads running, so the settlement tick's repair leaves the item alone and this isolates the settlement mapping's refusal.
 		const { onRunSettled } = queueOver(store, submit, {
-			'run-20260101-010000': meta({ status: 'running' }),
-		}, fakeRunList(), () => true)
+			metas: {
+				'run-20260101-010000': meta({ status: 'running' }),
+			},
+			runList: fakeRunList(),
+			hasActiveRun: () => true,
+		})
 
 		await onRunSettled(meta({ status: 'interrupted', error: { kind: 'interrupted', message: 'the service stopped' } }))
 
@@ -1106,7 +1467,10 @@ describe('createTaskQueue briefing', () => {
 			{ runId: 'run-20251231-000000', task: 'before queueing', status: 'success', endTime: '2025-12-31T00:00:00.000Z', summary: 'before the item was queued' },
 			{ runId: 'run-20260101-030000', task: 'in flight', status: 'running', endTime: null, summary: null },
 		)
-		const { tick } = queueOver(store, submit, {}, runList)
+		const { tick } = queueOver(store, submit, {
+			metas: {},
+			runList: runList,
+		})
 
 		await tick()
 
@@ -1154,8 +1518,11 @@ describe('createTaskQueue briefing', () => {
 			{ runId: 'run-20260101-020000', task: 'another task', status: 'success', endTime: '2026-01-01T02:00:00.000Z', summary: 'another summary' },
 		)
 		const { tick } = queueOver(store, submit, {
-			'run-20260101-010000': meta({ runId: 'run-20260101-010000', task: 'prior task', status: 'error', result: priorResult }),
-		}, runList)
+			metas: {
+				'run-20260101-010000': meta({ runId: 'run-20260101-010000', task: 'prior task', status: 'error', result: priorResult }),
+			},
+			runList: runList,
+		})
 
 		await tick()
 
@@ -1175,8 +1542,11 @@ describe('createTaskQueue briefing', () => {
 		const runList = fakeRunList()
 		runList.runs.push({ runId: 'run-20260101-010000', task: 'prior task', status: 'success', endTime: '2026-01-01T00:40:00.000Z', summary: 'prior summary' })
 		const { tick } = queueOver(store, submit, {
-			'run-20260101-010000': meta({ runId: 'run-20260101-010000', task: 'prior task', status: 'running' }),
-		}, runList)
+			metas: {
+				'run-20260101-010000': meta({ runId: 'run-20260101-010000', task: 'prior task', status: 'running' }),
+			},
+			runList: runList,
+		})
 
 		await tick()
 
@@ -1200,7 +1570,10 @@ describe('createTaskQueue briefing', () => {
 				summary: `summary ${index}`,
 			})
 		}
-		const { tick } = queueOver(store, submit, {}, runList)
+		const { tick } = queueOver(store, submit, {
+			metas: {},
+			runList: runList,
+		})
 
 		await tick()
 

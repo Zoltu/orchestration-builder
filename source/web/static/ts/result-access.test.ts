@@ -157,6 +157,7 @@ describe('resultOffersContinue', () => {
 
 	test('does not offer Continue for a paused or non-terminal run', () => {
 		expect(resultOffersContinue('needs_clarification')).toBe(false)
+		expect(resultOffersContinue('suspended')).toBe(false)
 		expect(resultOffersContinue('running')).toBe(false)
 		expect(resultOffersContinue('unknown')).toBe(false)
 	})

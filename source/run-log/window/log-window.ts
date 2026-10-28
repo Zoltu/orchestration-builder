@@ -94,6 +94,14 @@ function instanceStartsOf(events: LogEvent[]): Map<string, InstanceStartRecord> 
 	return starts
 }
 
+// The instance-scoped projection is for the turn inspector, not the raw log: a provider_failure's detail is raw provider text, so the scoped row keeps its category/message but drops that body.
+function withoutProviderFailureDetail(event: LogEvent): LogEvent {
+	if (!isObject(event.payload) || !('detail' in event.payload)) return event
+	const payload = { ...event.payload }
+	delete payload['detail']
+	return { ...event, payload }
+}
+
 // The parent start for one walked instance, or null when the chain ends. A start names its parent instance through parentRoleId; without one the chain ends. A named parent whose start is absent from the log ends the walk: the server sees the full log, so an unresolved id is a genuinely torn or foreign log, and the chain renders as far as it is known. A cycle in a malformed log ends the walk too.
 function resolveParentStart(start: InstanceStartRecord, starts: Map<string, InstanceStartRecord>, visited: Set<string>): InstanceStartRecord | null {
 	if (start.parentRoleId === null) return null
@@ -101,7 +109,7 @@ function resolveParentStart(start: InstanceStartRecord, starts: Map<string, Inst
 	return starts.get(start.parentRoleId) ?? null
 }
 
-// Filters the log to one agent instance's view for `GET /api/runs/:id/log?instance=<roleId>`: the instance's own turns (`llm_call`/`llm_call_start`, matched strictly on the payload's roleId; an event without one is malformed and excluded), its role-named turn-failure events (`llm_unavailable`/`context_budget_exceeded` carry no roleId; single-flight execution makes the role-name match unambiguous, and the client's turn pairing closes a failed turn's bracket on them, so omitting them would render a failed turn as eternally in flight), its own `role_start`/`role_finished` lifecycle, and the lifecycle of its ancestor chain walked through `parentRoleId` to the root — the server sees the full log, so ancestry is always resolvable from it, which is the whole point of scoping server-side. Children are deliberately not included: the scoped transcript is the instance's own story, and the client's child-instance affordances read the unscoped tail window it keeps alongside. An id that names nothing yields an empty list, which the endpoint serves as a 200 with total 0 rather than a 404 so a stale client scope renders an empty transcript instead of an error. Cost is linear in the log: one pass builds the start map, the chain walk is bounded by the chain's depth, and one pass filters.
+// Filters the log to one agent instance's view for `GET /api/runs/:id/log?instance=<roleId>`: the instance's own turns (`llm_call`/`llm_call_start`, matched strictly on the payload's roleId; an event without one is malformed and excluded), its `provider_failure` suspension event (matched strictly on roleId so another same-named instance cannot close this instance's turn), its role-named turn-failure events (`llm_unavailable`/`context_budget_exceeded` carry no roleId; single-flight execution makes the role-name match unambiguous, and the client's turn pairing closes a failed turn's bracket on them, so omitting them would render a failed turn as eternally in flight), its own `role_start`/`role_finished` lifecycle, and the lifecycle of its ancestor chain walked through `parentRoleId` to the root — the server sees the full log, so ancestry is always resolvable from it, which is the whole point of scoping server-side. Children are deliberately not included: the scoped transcript is the instance's own story, and the client's child-instance affordances read the unscoped tail window it keeps alongside. An id that names nothing yields an empty list, which the endpoint serves as a 200 with total 0 rather than a 404 so a stale client scope renders an empty transcript instead of an error. Cost is linear in the log: one pass builds the start map, the chain walk is bounded by the chain's depth, and one pass filters.
 export function filterLogEventsForInstance(events: LogEvent[], instanceId: string): IndexedLogEvent[] {
 	if (instanceId === '') return []
 	const starts = instanceStartsOf(events)
@@ -126,6 +134,9 @@ export function filterLogEventsForInstance(events: LogEvent[], instanceId: strin
 			if (event.type === 'llm_call' || event.type === 'llm_call_start') {
 				const roleId = payloadString(payload, 'roleId')
 				if (roleId === instanceId) filtered.push({ event, index })
+			} else if (event.type === 'provider_failure') {
+				const roleId = payloadString(payload, 'roleId')
+				if (roleId === instanceId) filtered.push({ event: withoutProviderFailureDetail(event), index })
 			} else if (event.type === 'llm_unavailable' || event.type === 'context_budget_exceeded') {
 				if (payloadString(payload, 'role') === ownRoleName) filtered.push({ event, index })
 			} else if (event.type === 'role_start' || event.type === 'role_finished') {

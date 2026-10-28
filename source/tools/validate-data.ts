@@ -579,8 +579,8 @@ function checkManifests(): void {
 	}, { subprocessRunner: createBunSubprocessRunner() })
 	// Shape-only fixture: the handlers are compared by name and never invoked, so the role and scope only have to type-check.
 	const fixtureScope: RunToolScope = {
-		spawnAgent: async () => ({ status: 'success', summary: '' }),
-		continueAgent: async () => ({ status: 'success', summary: '' }),
+		spawnAgent: async () => ({ kind: 'card', card: { status: 'success', summary: '' } }),
+		continueAgent: async () => ({ kind: 'card', card: { status: 'success', summary: '' } }),
 		roleState: {
 			history: [],
 			protectedPrefixLength: 2,

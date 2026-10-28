@@ -10,7 +10,7 @@ import { createFlowFeedResponder } from './web/static/ts/flow-feed/index.js'
 import { createRunListFeedResponder } from './web/static/ts/run-list-feed/index.js'
 import { createStreamHub } from './web/stream-hub.js'
 import { createTaskSummarizer, shouldWriteCompletionSummary, type TaskSummarizer } from './summarize.js'
-import { applyDeploymentOverride, applyLogLevel, createAppendLog, createBunSubprocessRunner, createDeleteCheckpoint, createDeltaChannel, createDockerSecretReader, createGuildLoader, createInterruptChannel, createInterruptQueue, createLlmCaller, createLlmFetch, createListCurrentRunIds, createListRunIds, createModelInfoProbe, createReadPauseStateById, createReadProjectDoc, createReadProjectSettings, createReadQueueText, createReadRunCheckpointById, createReadRunFormat, createReadRunLogTextFrom, createReadRunMetaById, createReadRunMetaTextById, createReadRunPlanById, createReadRunSnapshotById, createReadRunSnapshotStats, createReadRunSummaryById, createReadRunSummaryStats, createReadWorkspaceGitState, createResumeClarificationRun, createResumeErroredRun, createResumeParkedRun, createRoleSnapshotStore, createRunBaseTracker, createRunCheckpointExists, createRunDirectory, createRunDirectoryExists, createRunState, createRunSubmission, createSleep, createTaskQueue, createTerminateParkedRun, createTimeoutScheduler, createToolPlatform, createWebHumanBackend, createWriteCheckpoint, createWriteMeta, createWriteProjectSettings, createWriteQueueText, createWriteRunSummary, ensureOrchestrationGitExcluded, entryFrameLogLevel, generateRunId, llmUsagePayload, LOG_FILE_NAME, MODEL_PROBE_TIMEOUT_MS, nodeGitExcludeFilesystem, parseModelInfo, reconcileRunsOnStartup, resolveDeploymentConfig, resolveDeploymentOverride, resolveKagiApiKey, resolveSecret, resumeExecutor, runExecutor, validateDeploymentFileConfig, validateDeploymentRoleReferences, ConfigurationError, ValidationError, type AppendLog, type DeltaChannel, type ExecutorDependencies, type InterruptChannel, type InvolvementLevel, type LoadedGuild, type LlmCaller, type LogLevel, type ModelApiProbe, type ReadRunLogEvents, type ResumeRun, type RunCheckpoint, type StartRun, type WebHumanBackend } from './executor/index.js'
+import { applyDeploymentOverride, applyLogLevel, createAppendLog, createBunSubprocessRunner, createDeleteCheckpoint, createDeltaChannel, createDockerSecretReader, createGuildLoader, createInterruptChannel, createInterruptQueue, createLlmCaller, createLlmFetch, createListCurrentRunIds, createListRunIds, createModelInfoProbe, createObservedLlmCaller, createProviderAutoResumeCoordinator, createProviderRecovery, createReadPauseStateById, createReadProjectDoc, createReadProjectSettings, createReadQueueText, createReadRunCheckpointById, createReadRunFormat, createReadRunLogTextFrom, createReadRunMetaById, createReadRunMetaTextById, createReadRunPlanById, createReadRunSnapshotById, createReadRunSnapshotStats, createReadRunSummaryById, createReadRunSummaryStats, createReadWorkspaceGitState, createResumeClarificationRun, createResumeErroredOrSuspendedRun, createResumeParkedRun, createRoleSnapshotStore, createRunBaseTracker, createRunCheckpointExists, createRunDirectory, createRunDirectoryExists, createRunState, createRunSubmission, createSleep, createTaskQueue, createTerminatePausedRun, createTimeoutScheduler, createToolPlatform, createWebHumanBackend, createWriteCheckpoint, createWriteMeta, createWriteProjectSettings, createWriteQueueText, createWriteRunSummary, ensureOrchestrationGitExcluded, entryFrameLogLevel, generateRunId, llmUsagePayload, LOG_FILE_NAME, MODEL_PROBE_TIMEOUT_MS, nodeGitExcludeFilesystem, parseModelInfo, reconcileRunsOnStartup, resolveDeploymentConfig, resolveDeploymentOverride, resolveKagiApiKey, resolveSecret, resumeExecutor, runExecutor, validateDeploymentFileConfig, validateDeploymentRoleReferences, validateHandlerRolesAreReadOnly, ConfigurationError, ValidationError, type AppendLog, type DeltaChannel, type ExecutorDependencies, type InterruptChannel, type InvolvementLevel, type LoadedGuild, type LlmCaller, type LogLevel, type ModelApiProbe, type ProviderHealth, type ReadRunLogEvents, type ResumeRun, type RunCheckpoint, type StartRun, type WebHumanBackend } from './executor/index.js'
 import { parseLogEvents } from './run-log/parse.js'
 
 const DEPLOYMENT_FILE_ENV_VAR = 'ORCHESTRATOR_DEPLOYMENT_FILE'
@@ -187,6 +187,7 @@ function createResumeRun(config: RunServiceConfig): ResumeRun {
 			...(options?.clarificationAnswer !== undefined ? { clarificationAnswer: options.clarificationAnswer } : {}),
 			...(options?.queueTracked === true ? { queueTracked: true } : {}),
 			...(options?.explicitResume === true ? { explicitResume: true } : {}),
+			...(options?.priorSuspension !== undefined ? { priorSuspension: options.priorSuspension } : {}),
 		}))
 		runPromise.then(
 			(meta) => {
@@ -264,6 +265,7 @@ async function serve(): Promise<void> {
 		const mergedDeployment = applyDeploymentOverride(loadedGuildFiles.deployment, resolveDeploymentOverride(Bun.env))
 		validateDeploymentFileConfig(mergedDeployment)
 		validateDeploymentRoleReferences(mergedDeployment, roleNames)
+		validateHandlerRolesAreReadOnly(loadedGuildFiles.config.roles, mergedDeployment.executor)
 		deploymentInvolvement = mergedDeployment.executor.defaultInvolvement
 		deploymentLogLevel = mergedDeployment.logging?.level
 
@@ -303,7 +305,24 @@ async function serve(): Promise<void> {
 		throw error
 	}
 
+	const initialHealthAt = new Date().toISOString()
+	const initialProviderHealth: ProviderHealth = { state: 'unknown', category: 'unknown', since: initialHealthAt, lastCheckedAt: initialHealthAt, consecutiveFailures: 0 }
+	// The recovery bridge owns the one gate, monitor, and suspended-run binding for the process; run submission and the queue read it rather than keeping their own copies.
+	const readRunMetaTextById = createReadRunMetaTextById(runsBaseDir)
+	const readRunCheckpointById = createReadRunCheckpointById(runsBaseDir)
+	const probeProvider = createModelInfoProbe(guild.deployment.model.apiBase, apiKey, MODEL_PROBE_TIMEOUT_MS)
+	const providerRecovery = createProviderRecovery({
+		initialHealth: initialProviderHealth,
+		probeModel: probeProvider,
+		scheduleTimeout: createTimeoutScheduler(),
+		now: () => new Date().toISOString(),
+		random: Math.random,
+		readRunMetaTextById,
+		readRunCheckpointTextById: readRunCheckpointById,
+	})
 	const llmCaller = createLlmCaller(guild.deployment.model, apiKey, { llmFetch: createLlmFetch(), sleep: createSleep(), scheduleTimeout: createTimeoutScheduler(), random: Math.random, now: Date.now })
+	// Only role calls reach the gate: the summarizer keeps the raw caller so a failed label can never mark the provider unhealthy or suspend unrelated work (docs/reference.md "Provider health gate").
+	const roleLlmCaller = createObservedLlmCaller(llmCaller, (result) => providerRecovery.observeRoleCall(result))
 
 	const webHumanBackend = createWebHumanBackend()
 	const interruptChannel = createInterruptChannel()
@@ -312,7 +331,6 @@ async function serve(): Promise<void> {
 	const streamHub = createStreamHub(deltaChannel)
 	const runState = createRunState({ humanBackend: webHumanBackend, interruptChannel })
 	const readRunSnapshotStats = createReadRunSnapshotStats(runsBaseDir)
-	const readRunMetaTextById = createReadRunMetaTextById(runsBaseDir)
 	const readRunMetaById = createReadRunMetaById(runsBaseDir)
 	const readRunSnapshot = createSnapshotCache({ readStats: readRunSnapshotStats, readMetaText: readRunMetaById, readLogTextFrom: createReadRunLogTextFrom(runsBaseDir) }, SNAPSHOT_CACHE_MAX_ENTRIES)
 	const readRunSummaryStats = createReadRunSummaryStats(runsBaseDir)
@@ -336,7 +354,7 @@ async function serve(): Promise<void> {
 
 	const runConfig = {
 		loadedGuild: guild,
-		llmCaller,
+		llmCaller: roleLlmCaller,
 		humanBackend: webHumanBackend,
 		interruptChannel,
 		deltaChannel,
@@ -348,14 +366,13 @@ async function serve(): Promise<void> {
 	}
 	const startRun = createStartRun(runConfig)
 	const resumeRun = createResumeRun(runConfig)
-	// The checkpoint reader serves startup reconciliation, the explicit error-resume submission, and both queue answer resumes alike; the exists-check is the cheap stat-only variant the run view's resumable flag reads.
-	const readRunCheckpointById = createReadRunCheckpointById(runsBaseDir)
+	// The checkpoint reader serves startup reconciliation, the explicit error-or-suspended resume submission, and both queue answer resumes alike; the exists-check is the cheap stat-only variant the run view's resumable flag reads.
 	const readRunFormat = createReadRunFormat(runsBaseDir)
 	const listCurrentRunIds = createListCurrentRunIds(listRunIds, readRunFormat)
 	const readPauseStateById = createReadPauseStateById(readRunCheckpointById)
 	const runCheckpointExists = createRunCheckpointExists(runsBaseDir)
-	// The settlement hook and the queue module reference each other (a settlement ticks the queue; the queue's dispatch calls submission), so each closure captures the other's binding lazily — neither fires before both are constructed.
 	const runSubmission = createRunSubmission({
+		providerSuspension: providerRecovery,
 		startRun,
 		resumeRun,
 		generateRunId: () => generateRunId(new Date()),
@@ -365,16 +382,17 @@ async function serve(): Promise<void> {
 		deploymentLogLevel,
 		onRunSettled: (meta) => taskQueue.onRunSettled(meta),
 	})
-	// The queue's two same-run answer resumes compose the submission layer over the same meta/checkpoint readers the error-resume uses.
+	// The queue's two same-run answer resumes compose the submission layer over the same meta/checkpoint readers the explicit error-or-suspended resume uses.
 	const resumeParkedRun = createResumeParkedRun({ runSubmission, readRunMetaById, readCheckpointById: readRunCheckpointById })
 	const resumeClarificationRun = createResumeClarificationRun({ runSubmission, readRunMetaById, readCheckpointById: readRunCheckpointById })
-	// The operator-termination path marks the parked run interrupted, logs the action, and removes the checkpoint so the run can never be answered.
-	const terminateParkedRun = createTerminateParkedRun({
+	// The operator-termination path marks the parked or suspended run interrupted, logs the action, and removes the checkpoint so the run can never be answered or resumed.
+	const terminatePausedRun = createTerminatePausedRun({
 		readRunMetaById,
 		readRunLogEvents: (targetRunId) => parseLogEvents(createReadRunLogTextFrom(runsBaseDir)(targetRunId, 0)),
 		writeMetaFor: (runId) => createWriteMeta(runId, runsBaseDir),
 		deleteCheckpointFor: (runId) => createDeleteCheckpoint(runId, runsBaseDir),
 		appendLogFor: (runId) => createAppendLog(runId, runsBaseDir),
+		clearSuspendedRun: (runId) => runSubmission.clearSuspendedRun(runId),
 	})
 	// The queue module owns the durable state machine, dispatch, settlement, and queue persistence; the composition root supplies only its configured leaves.
 	const taskQueue = createTaskQueue({
@@ -385,20 +403,32 @@ async function serve(): Promise<void> {
 		readPauseStateById,
 		resumeParkedRun,
 		resumeClarificationRun,
-		terminateParkedRun,
+		terminatePausedRun,
 		submitRun: (submission) => runSubmission.submit(submission.task, submission.effort, submission.involvement, submission.logLevel, submission.continuation),
 		hasActiveRun: () => runSubmission.activeRunId() !== undefined,
+		hasSuspendedRun: () => providerRecovery.hasSuspendedRun(),
+		canDispatch: () => providerRecovery.canDispatch(),
+		ensureProviderProbe: () => providerRecovery.ensureProbing(),
 		sleep: createSleep(),
 		now: () => new Date().toISOString(),
 		generateAnswerId: () => crypto.randomUUID(),
 	})
-	// The explicit resume of an error-ended run composes the same submission layer (and thereby the same run bindings, through resumeRun) with the run/checkpoint/queue operations it validates against.
-	const resumeErroredRun = createResumeErroredRun({
+	// The explicit resume of an error-ended or suspended run composes the same submission layer (and thereby the same run bindings, through resumeRun) with the run/checkpoint/queue operations it validates against.
+	const resumeErroredOrSuspendedRun = createResumeErroredOrSuspendedRun({
 		runSubmission,
 		readRunMetaById,
 		readCheckpointById: readRunCheckpointById,
 		taskQueue,
 	})
+	// The coordinator owns the one automatic-resume decision: a successful probe asks it to re-enter a due auto suspension even when the queue has no item. The resume operation owns the cleanup of an unresumable pause, then the coordinator lets the scheduler dispatch again.
+	const providerAutoResume = createProviderAutoResumeCoordinator({
+		recovery: providerRecovery,
+		resumeSuspendedRun: (runId) => resumeErroredOrSuspendedRun(runId, undefined),
+		onDispatch: () => {
+			void taskQueue.tick()
+		},
+	})
+	providerRecovery.setAutoResumeHandler((at) => providerAutoResume.handleHealthy(at))
 
 	// Startup reconciliation runs before the server accepts submissions: a run left mid-flight by the previous process resumes from its checkpoint (under its original run id, through the same single-active-run slot), and every run that cannot be resumed is marked interrupted so the UI shows it as terminal rather than perpetually "in progress".
 	const reconciliation = reconcileRunsOnStartup({
@@ -418,8 +448,18 @@ async function serve(): Promise<void> {
 	for (const runId of reconciliation.parkedRunIds) {
 		console.log(`Left parked run ${runId} waiting for its queue answer`)
 	}
+	for (const runId of reconciliation.suspendedRunIds) {
+		console.log(`Left suspended run ${runId} waiting to be resumed or terminated`)
+	}
+	// The suspended run has no live settlement to fill the submission layer's priority slot, so boot seeds it: every new task refusal and the boot tick then see the pause before any waiting item can start.
+	const suspendedRunId = reconciliation.suspendedRunIds[0]
+	if (suspendedRunId !== undefined) {
+		runSubmission.adoptSuspendedRun(suspendedRunId)
+		// Load the reported suspension into the gate and start probing; the monitor honors autoResumeAfter, so boot never re-issues the interrupted call before its backoff.
+		providerRecovery.hydrateSuspension(suspendedRunId)
+	}
 
-	// Boot order (docs/queueing.md "Dispatch and the scheduler"): reconciliation first, then exactly one scheduler tick. The tick repairs stale active items from their metas and dispatches the head waiting item — unless the resumed run holds the slot, in which case the dispatch restores the head and the resumed run's own settlement ticks onward.
+	// Boot order (docs/queueing.md "Dispatch and the scheduler"): reconciliation first, then exactly one scheduler tick. The tick repairs stale active and suspended items from their metas and dispatches the head waiting item — unless the resumed run holds the slot or a suspended run retains priority, in which case the dispatch restores the head and the run's own settlement ticks onward.
 	await taskQueue.tick()
 
 	// The flow feed responders are process-local: the random epoch makes every revision this process issues distinct from a previous process's, so a browser holding a pre-restart revision is forced to resync by snapshot rather than reading a stale `unchanged`.
@@ -445,8 +485,9 @@ async function serve(): Promise<void> {
 		readProjectSettings,
 		writeProjectSettings,
 		taskQueue,
-		resumeErroredRun,
+		resumeErroredOrSuspendedRun,
 		runCheckpointExists,
+		readHealth: () => providerRecovery.readHealth(),
 		build: buildInfo,
 		flowFeedResponder,
 		runListFeedResponder,

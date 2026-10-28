@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test'
-import { createTaskQueue, type QueueItemView, type QueueView, type ResumeClarificationRunResult, type ResumeParkedRunResult, type TerminateParkedRunResult } from './index.ts'
-import { cancelWaitingItem, dispatchingItem, isQueueItem, pendingAnswerUndelivered, releaseToWaiting, toQueueItemView, type QueueItem } from './model.ts'
+import { createTaskQueue, type QueueItemView, type QueueView, type ResumeClarificationRunResult, type ResumeParkedRunResult, type TerminatePausedRunResult } from './index.ts'
+import { cancelWaitingItem, dispatchingItem, isQueueItem, pendingAnswerUndelivered, releaseToWaiting, suspendActiveItem, toQueueItemView, type QueueItem } from './model.ts'
+import { readQueue, writeQueue } from './persistence.ts'
 import type { ParkedAsk, PauseState } from '../park-state.js'
 import type { RunContinuation, RunMeta } from '../types.js'
 
@@ -74,6 +75,21 @@ function meta(overrides: Partial<RunMeta> = {}): RunMeta {
 }
 
 const NOW = '2026-01-01T03:00:00.000Z'
+const SUSPENDED_AT = '2026-01-01T02:00:00.000Z'
+
+function suspendedMeta(runId: string): RunMeta {
+	return {
+		runId,
+		task: 'fix the parser bug',
+		status: 'suspended',
+		startTime: '2026-01-01T00:30:00.000Z',
+		suspension: { category: 'billing', resumePolicy: 'operator', message: 'Top up and resume.', suspendedAt: SUSPENDED_AT },
+	}
+}
+
+function suspendedItem(overrides: Partial<QueueItemView> = {}): QueueItemView {
+	return item({ status: 'suspended', runId: 'run-20260101-010000', suspendedAt: SUSPENDED_AT, ...overrides })
+}
 
 interface QueueStoreFake {
 	store: { read: () => string | null; write: (contents: string) => void }
@@ -120,7 +136,7 @@ function pauseStateOf(seed: PauseSeed | undefined): PauseState | null {
 	return { kind: 'parked_ask', ask: seed }
 }
 
-function makeQueue(options: { initial?: QueueSeedItem[], submitResults?: QueuedRunSubmitResult[], hasActiveRun?: () => boolean, metas?: Record<string, RunMeta>, runs?: RunListEntry[], pauseStates?: Record<string, PauseSeed>, resumeResults?: ResumeParkedRunResult[], clarificationResumeResults?: ResumeClarificationRunResult[], terminateResults?: TerminateParkedRunResult[] } = {}): QueueHarness {
+function makeQueue(options: { initial?: QueueSeedItem[], submitResults?: QueuedRunSubmitResult[], hasActiveRun?: () => boolean, hasSuspendedRun?: () => boolean, canDispatch?: () => boolean, ensureProviderProbe?: () => void, metas?: Record<string, RunMeta>, runs?: RunListEntry[], pauseStates?: Record<string, PauseSeed>, resumeResults?: ResumeParkedRunResult[], clarificationResumeResults?: ResumeClarificationRunResult[], terminateResults?: TerminatePausedRunResult[] } = {}): QueueHarness {
 	const store = fakeQueueStore(options.initial ?? [])
 	const scripted = [...(options.submitResults ?? [])]
 	const submitCalls: QueuedRunSubmission[] = []
@@ -162,12 +178,15 @@ function makeQueue(options: { initial?: QueueSeedItem[], submitResults?: QueuedR
 			clarificationResumeCalls.push({ runId, ...clarificationAnswer })
 			return clarificationScript.shift() ?? { ok: true, runId }
 		},
-		terminateParkedRun: (runId) => {
+		terminatePausedRun: (runId) => {
 			terminateCalls.push(runId)
 			return terminateScript.shift() ?? { ok: true, runId }
 		},
 		submitRun,
 		hasActiveRun: options.hasActiveRun ?? (() => false),
+		hasSuspendedRun: options.hasSuspendedRun ?? (() => store.items().some((entry) => entry.status === 'suspended')),
+		canDispatch: options.canDispatch ?? (() => true),
+		ensureProviderProbe: options.ensureProviderProbe ?? (() => {}),
 		sleep: async () => {},
 		now: () => NOW,
 		generateAnswerId: () => 'answer-1',
@@ -292,6 +311,88 @@ describe('submitNow', () => {
 		const result = await harness.queue.submitNow({ task: 'a task' }, handles)
 		expect(result).toEqual({ kind: 'busy' })
 		expect(harness.items().map((entry) => entry.id)).toEqual(['new-item'])
+	})
+})
+
+describe('suspended priority', () => {
+	const handles = { id: 'new-item', queuedAt: '2026-01-01T00:00:00.000Z' }
+
+	test('submitNow refuses with run_suspended before enqueueing anything', async () => {
+		const harness = makeQueue({ hasSuspendedRun: () => true })
+		const result = await harness.queue.submitNow({ task: 'new task' }, handles)
+		expect(result).toEqual({ kind: 'run_suspended' })
+		expect(harness.items()).toEqual([])
+		expect(harness.writes.length).toBe(0)
+	})
+
+	test('a suspended item in the file also refuses submitNow even when the submission slot is not seeded', async () => {
+		const harness = makeQueue({
+			initial: [suspendedItem()],
+			metas: { 'run-20260101-010000': suspendedMeta('run-20260101-010000') },
+		})
+		const result = await harness.queue.submitNow({ task: 'new task' }, handles)
+		expect(result).toEqual({ kind: 'run_suspended' })
+		expect(harness.items().map((entry) => entry.id)).toEqual(['item-1'])
+		expect(harness.writes.length).toBe(0)
+		expect(harness.submitCalls.length).toBe(0)
+	})
+
+	test('enqueue may add a waiting item while suspended, but the tick dispatches nothing', async () => {
+		const harness = makeQueue({
+			initial: [suspendedItem()],
+			metas: { 'run-20260101-010000': suspendedMeta('run-20260101-010000') },
+		})
+		const result = await harness.queue.enqueue({ task: 'new task' }, handles, 'tail')
+		expect(result.ok).toBe(true)
+		expect(harness.items().map((entry) => entry.status)).toEqual(['suspended', 'waiting'])
+		expect(harness.submitCalls.length).toBe(0)
+		expect(harness.writes.length).toBe(1)
+	})
+
+	test('a new waiting item and a start-now request cannot start behind a suspended run', async () => {
+		const harness = makeQueue({
+			initial: [suspendedItem()],
+			metas: { 'run-20260101-010000': suspendedMeta('run-20260101-010000') },
+			hasSuspendedRun: () => true,
+		})
+		await harness.queue.enqueue({ task: 'first waiting task' }, handles, 'tail')
+		const startNow = await harness.queue.submitNow({ task: 'start now' }, { id: 'new-item-2', queuedAt: NOW })
+		expect(startNow).toEqual({ kind: 'run_suspended' })
+		expect(harness.submitCalls.length).toBe(0)
+		expect(harness.items().map((entry) => entry.status)).toEqual(['suspended', 'waiting'])
+	})
+
+	test('discardSuspendedRun terminalizes the run and cancels its suspended item', () => {
+		const runId = 'run-20260101-010000'
+		const harness = makeQueue({
+			initial: [suspendedItem()],
+			metas: { [runId]: suspendedMeta(runId) },
+			terminateResults: [{ ok: true, runId }],
+		})
+		harness.queue.discardSuspendedRun(runId)
+		expect(harness.terminateCalls).toEqual([runId])
+		const item = harness.items()[0]
+		expect(item?.status).toBe('cancelled')
+		expect(item?.suspendedAt).toBeUndefined()
+	})
+})
+
+describe('persistence compatibility', () => {
+	test('a suspended item round-trips through the queue file', () => {
+		const store = fakeQueueStore([suspendedItem()])
+		const first = readQueue(store.store)
+		expect(first.items[0]?.status).toBe('suspended')
+		expect(first.items[0]?.suspendedAt).toBe(SUSPENDED_AT)
+
+		writeQueue(store.store, first)
+		const second = readQueue(store.store)
+		expect(second).toEqual(first)
+	})
+
+	test('an old queue file without a suspended item still reads', () => {
+		const store = fakeQueueStore([item()])
+		const queue = readQueue(store.store)
+		expect(queue.items).toEqual([item()])
 	})
 })
 
@@ -808,9 +909,9 @@ describe('terminate', () => {
 		}
 	}
 
-	test('cancels a needs_input item, terminals its parked run, and keeps the question, answer, and lineage', () => {
+	test('cancels a needs_input item, terminals its parked run, and keeps the question, answer, and lineage', async () => {
 		const harness = makeQueue({ initial: [parkedItem()] })
-		const result = harness.queue.terminate('item-1', '2026-01-01T04:00:00.000Z')
+		const result = await harness.queue.terminate('item-1', '2026-01-01T04:00:00.000Z')
 
 		expect(result.ok).toBe(true)
 		if (!result.ok) return
@@ -821,7 +922,7 @@ describe('terminate', () => {
 		expect(result.item.continuesFrom).toBe(priorRunId)
 		expect(result.item.runId).toBeUndefined()
 		expect(harness.terminateCalls).toEqual([runId])
-		// The parked run holds no slot, so termination never ticks.
+		// The item is cancelled before the post-termination tick; with no waiting work that tick dispatches nothing.
 		expect(harness.submitCalls).toEqual([])
 		const written = harness.writes[0]
 		if (written === undefined) throw new Error('expected a queue write')
@@ -831,9 +932,71 @@ describe('terminate', () => {
 		expect(JSON.stringify(stored.items[0])).not.toContain('resumeToolCallId')
 	})
 
-	test('uses only the item runId, never the continuesFrom lineage, and cancels without touching a run when runId is absent', () => {
+	test('cancels a suspended item and terminals its suspended run through the same port', async () => {
+		const harness = makeQueue({ initial: [suspendedItem({ continuesFrom: priorRunId })] })
+		const result = await harness.queue.terminate('item-1', '2026-01-01T04:00:00.000Z')
+
+		expect(result.ok).toBe(true)
+		if (!result.ok) return
+		expect(result.item.status).toBe('cancelled')
+		expect(result.item.settledAt).toBe('2026-01-01T04:00:00.000Z')
+		expect(result.item.suspendedAt).toBeUndefined()
+		expect(result.item.continuesFrom).toBe(priorRunId)
+		expect(result.item.runId).toBeUndefined()
+		expect(harness.terminateCalls).toEqual(['run-20260101-010000'])
+		expect(harness.submitCalls).toEqual([])
+	})
+
+	test('a suspended item whose run was interrupted is cancelled and no longer blocks waiting work', async () => {
+		const runId = 'run-20260101-010000'
+		const interrupted = { ...meta({ runId }), status: 'interrupted' as const, endTime: '2026-01-01T01:00:00.000Z', error: { kind: 'interrupted' as const, message: 'checkpoint missing' } }
+		const harness = makeQueue({
+			initial: [suspendedItem({ runId }), item({ id: 'item-2' })],
+			metas: { [runId]: interrupted },
+			submitResults: [{ ok: true, runId: 'run-20260101-000001' }],
+		})
+
+		await harness.queue.tick()
+
+		expect(harness.items().find((entry) => entry.id === 'item-1')?.status).toBe('cancelled')
+		expect(harness.submitCalls).toHaveLength(1)
+	})
+
+	test('terminating a suspended run ticks the scheduler so waiting work dispatches', async () => {
+		const harness = makeQueue({
+			initial: [suspendedItem(), item({ id: 'item-2' })],
+			submitResults: [{ ok: true, runId: 'run-20260101-000001' }],
+		})
+
+		await harness.queue.terminate('item-1', '2026-01-01T04:00:00.000Z')
+
+		expect(harness.submitCalls).toHaveLength(1)
+		expect(harness.submitCalls[0]?.task).toBe('fix the parser bug')
+	})
+
+	test('the run-level termination works with no queue item, cancels one when present, and ticks', async () => {
+		const runId = 'run-20260101-010000'
+		const noItem = makeQueue({
+			initial: [item({ id: 'item-2' })],
+			terminateResults: [{ ok: true, runId }],
+			submitResults: [{ ok: true, runId: 'run-20260101-000001' }],
+		})
+		expect(await noItem.queue.terminateSuspendedRun(runId, NOW)).toEqual({ ok: true, runId })
+		expect(noItem.terminateCalls).toEqual([runId])
+		expect(noItem.submitCalls).toHaveLength(1)
+
+		const withItem = makeQueue({
+			initial: [suspendedItem({ runId })],
+			terminateResults: [{ ok: true, runId }],
+		})
+		expect(await withItem.queue.terminateSuspendedRun(runId, NOW)).toEqual({ ok: true, runId })
+		expect(withItem.items()[0]?.status).toBe('cancelled')
+		expect(withItem.submitCalls).toEqual([])
+	})
+
+	test('uses only the item runId, never the continuesFrom lineage, and cancels without touching a run when runId is absent', async () => {
 		const noRun = makeQueue({ initial: [parkedItem({ runId: undefined, resumeRunId: undefined, resumeToolCallId: undefined })] })
-		const result = noRun.queue.terminate('item-1', '2026-01-01T04:00:00.000Z')
+		const result = await noRun.queue.terminate('item-1', '2026-01-01T04:00:00.000Z')
 		expect(result.ok).toBe(true)
 		if (!result.ok) return
 		expect(result.item.status).toBe('cancelled')
@@ -842,14 +1005,14 @@ describe('terminate', () => {
 
 		const otherRun = 'run-20260101-004500'
 		const lineageOnly = makeQueue({ initial: [parkedItem({ runId: undefined, continuesFrom: otherRun, resumeRunId: undefined, resumeToolCallId: undefined })] })
-		lineageOnly.queue.terminate('item-1', '2026-01-01T04:00:00.000Z')
+		await lineageOnly.queue.terminate('item-1', '2026-01-01T04:00:00.000Z')
 		expect(lineageOnly.terminateCalls).toEqual([])
 	})
 
-	test('cancels the item even when the parked run is already gone or no longer parked', () => {
-		for (const error of ['not_found', 'not_parked'] as const) {
+	test('cancels the item even when the parked run is already gone or no longer parked', async () => {
+		for (const error of ['not_found', 'not_paused'] as const) {
 			const harness = makeQueue({ initial: [parkedItem()], terminateResults: [{ ok: false, error }] })
-			const result = harness.queue.terminate('item-1', '2026-01-01T04:00:00.000Z')
+			const result = await harness.queue.terminate('item-1', '2026-01-01T04:00:00.000Z')
 			expect(result.ok).toBe(true)
 			if (!result.ok) return
 			expect(result.item.status).toBe('cancelled')
@@ -857,7 +1020,7 @@ describe('terminate', () => {
 		}
 	})
 
-	test('refuses an unknown id and every non-needs_input status without touching the parked run', () => {
+	test('refuses an unknown id and every unsupported status without touching the paused run', async () => {
 		const harness = makeQueue({
 			initial: [
 				item(),
@@ -865,11 +1028,74 @@ describe('terminate', () => {
 				item({ id: 'done', status: 'done', settledAt: '2026-01-01T01:00:00.000Z' }),
 			],
 		})
-		expect(harness.queue.terminate('ghost', '2026-01-01T04:00:00.000Z')).toEqual({ ok: false, reason: 'not_found' })
+		expect(await harness.queue.terminate('ghost', '2026-01-01T04:00:00.000Z')).toEqual({ ok: false, reason: 'not_found' })
 		for (const id of ['item-1', 'active', 'done']) {
-			expect(harness.queue.terminate(id, '2026-01-01T04:00:00.000Z')).toEqual({ ok: false, reason: 'forbidden_status' })
+			expect(await harness.queue.terminate(id, '2026-01-01T04:00:00.000Z')).toEqual({ ok: false, reason: 'forbidden_status' })
 		}
 		expect(harness.terminateCalls).toEqual([])
 		expect(harness.writes).toEqual([])
+	})
+})
+
+describe('suspendActiveItem', () => {
+	test('reports a suspension outcome distinct from a settlement', () => {
+		const queue = {
+			version: 1 as const,
+			items: [{ id: 'item-1', task: 'paused', status: 'active' as const, runId: 'run-1', queuedAt: '2026-01-01T00:00:00.000Z' }],
+		}
+		const outcome = suspendActiveItem(queue, 'run-1', '2026-01-01T00:01:00.000Z')
+		expect(outcome.kind).toBe('suspended')
+		if (outcome.kind !== 'suspended') return
+		expect(outcome.item.status).toBe('suspended')
+		expect(outcome.item.suspendedAt).toBe('2026-01-01T00:01:00.000Z')
+		expect(outcome.item.settledAt).toBeUndefined()
+	})
+})
+
+describe('provider gate dispatch gating', () => {
+	const handles = { id: 'new-item', queuedAt: '2026-01-01T00:00:00.000Z' }
+
+	test('an unhealthy gate leaves a waiting item undispatched and keeps enqueue available', async () => {
+		const harness = makeQueue({ canDispatch: () => false })
+		const enqueued = await harness.queue.enqueue({ task: 'waits for the provider' }, handles, 'tail')
+		expect(enqueued.ok).toBe(true)
+		expect(harness.items()).toHaveLength(1)
+		expect(harness.items()[0]?.status).toBe('waiting')
+		expect(harness.submitCalls.length).toBe(0)
+		expect(harness.writes.length).toBe(1)
+	})
+
+	test('start-now reports provider_unavailable while the gate is unhealthy and nothing is suspended', async () => {
+		const harness = makeQueue({ canDispatch: () => false })
+		const result = await harness.queue.submitNow({ task: 'start now' }, handles)
+		expect(result).toEqual({ kind: 'provider_unavailable' })
+		expect(harness.items()).toEqual([])
+		expect(harness.writes.length).toBe(0)
+	})
+
+	test('run_suspended wins over provider_unavailable when a paused run holds priority', async () => {
+		const harness = makeQueue({
+			initial: [suspendedItem()],
+			metas: { 'run-20260101-010000': suspendedMeta('run-20260101-010000') },
+			canDispatch: () => false,
+		})
+		const result = await harness.queue.submitNow({ task: 'start now' }, handles)
+		expect(result).toEqual({ kind: 'run_suspended' })
+		expect(harness.items().map((entry) => entry.id)).toEqual(['item-1'])
+	})
+
+	test('blocked waiting work asks the recovery owner to start probing', async () => {
+		let probeRequests = 0
+		const harness = makeQueue({ canDispatch: () => false, ensureProviderProbe: () => { probeRequests++ } })
+		const result = await harness.queue.enqueue({ task: 'waits for the provider' }, handles, 'tail')
+		expect(result.ok).toBe(true)
+		expect(probeRequests).toBe(1)
+	})
+
+	test('an idle unhealthy gate with no waiting work does not start probing', async () => {
+		let probeRequests = 0
+		const harness = makeQueue({ canDispatch: () => false, ensureProviderProbe: () => { probeRequests++ } })
+		await harness.queue.tick()
+		expect(probeRequests).toBe(0)
 	})
 })

@@ -49,7 +49,9 @@ function invocationFor(call: ToolCall): ToolInvocation {
 
 async function dispatch(scope: RunToolScope, tools: string[], name: string, args: Record<string, unknown>): Promise<ToolResult> {
 	const call = makeCall(name, args)
-	return platform.dispatch(roleWith(tools), scope, call, invocationFor(call))
+	const outcome = await platform.dispatch(roleWith(tools), scope, call, invocationFor(call))
+	if (outcome.kind === 'suspended') throw new Error('unexpected suspension in a non-spawning tool test')
+	return outcome.result
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -218,7 +220,9 @@ describe('ask_human tool', () => {
 		const invocation = journal.allocateToolCall(call, 'fixture-0-0')
 		expect(invocation.questionId).not.toBe('')
 
-		const result = await platform.dispatch(roleWith(['ask_human', 'finish']), scope, call, invocation)
+		const outcome = await platform.dispatch(roleWith(['ask_human', 'finish']), scope, call, invocation)
+		if (outcome.kind === 'suspended') throw new Error('unexpected suspension')
+		const result = outcome.result
 
 		expect(result).toEqual({ kind: 'success', data: { question: 'Which database?', parked: true } })
 		expect(parkTracker.parkedAsk).toMatchObject({ roleId: 'fixture-0-0', toolCallId: '', callId: invocation.callId, questionId: invocation.questionId, question: 'Which database?' })

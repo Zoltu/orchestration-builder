@@ -62,7 +62,7 @@ function usageOf(payload: unknown): UsageBreakdown | null {
 
 function runStatusOf(meta: RunMeta | null): RunStatus {
 	if (meta === null) return 'unknown'
-	if (meta.status === 'running' || meta.status === 'success' || meta.status === 'error' || meta.status === 'needs_clarification' || meta.status === 'interrupted') {
+	if (meta.status === 'running' || meta.status === 'suspended' || meta.status === 'success' || meta.status === 'error' || meta.status === 'needs_clarification' || meta.status === 'interrupted') {
 		return meta.status
 	}
 	return 'unknown'

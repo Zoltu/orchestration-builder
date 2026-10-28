@@ -255,6 +255,26 @@ describe('filterLogEventsForInstance', () => {
 		expect(filterLogEventsForInstance(events, 'coder-1').map((entry) => entry.index)).toEqual([0, 1, 2])
 	})
 
+	test('keeps a provider_failure for the exact instance so its in-flight turn can close', () => {
+		const events: LogEvent[] = [
+			event('role_start', { role: 'coder', roleId: 'coder-1', depth: 1, parentRoleId: 'orchestrator-0' }),
+			event('llm_call_start', { role: 'coder', roleId: 'coder-1' }),
+			event('provider_failure', { role: 'coder', roleId: 'coder-1', category: 'billing', attempts: 1, partialOutput: false, message: 'HTTP 402' }),
+			event('provider_failure', { role: 'coder', roleId: 'coder-2', category: 'billing', attempts: 1, partialOutput: false, message: 'HTTP 402' }),
+		]
+		expect(filterLogEventsForInstance(events, 'coder-1').map((entry) => entry.index)).toEqual([0, 1, 2])
+	})
+
+	test('strips provider_failure detail from the instance projection while keeping its category and message', () => {
+		const events: LogEvent[] = [
+			event('provider_failure', { role: 'coder', roleId: 'coder-1', category: 'billing', message: 'HTTP 402', detail: '{"error":"sk-secret provider body"}' }),
+		]
+		const filtered = filterLogEventsForInstance(events, 'coder-1')
+		const projected = filtered[0]?.event.payload
+		expect(projected).not.toHaveProperty('detail')
+		expect(projected).toMatchObject({ category: 'billing', message: 'HTTP 402' })
+	})
+
 	test('returns an empty list for an empty or unknown instance id', () => {
 		expect(filterLogEventsForInstance(ancestryLog(), '')).toEqual([])
 		expect(filterLogEventsForInstance(ancestryLog(), 'missing-9')).toEqual([])

@@ -15,7 +15,7 @@ import type { AppendLog } from './persistence.ts'
 import { createRoleRegistry } from './role-registry.ts'
 import { isRunCheckpoint, type RunCheckpoint } from './checkpoint.ts'
 import { createInvocationJournal } from './invocation.ts'
-import { createEmptyRoleState, createFakeCheckpointRecorder, createFakeRoleSnapshotStore, createFixtureToolPlatform, recordingHumanBackend, stubHumanBackend, withTool, defined } from './test-fixtures.ts'
+import { createEmptyRoleState, createFakeCheckpointRecorder, createFakeRoleSnapshotStore, createFixtureToolPlatform, createProviderFailure as providerFailure, recordingHumanBackend, stubHumanBackend, withTool, defined } from './test-fixtures.ts'
 import { createRunBaseTracker } from './base-state.ts'
 import { createRunParkTracker, type RunParkTracker } from './park-state.ts'
 import type { RoleSnapshotStore } from './role-snapshot.ts'
@@ -23,6 +23,18 @@ import type { RoleDelta } from './stream-channel.ts'
 import type { ToolPlatform } from './tool-platform-port.ts'
 import { createToolError } from './errors.ts'
 import { isObject, safeJsonParse } from './validation.ts'
+
+async function runRoleCard(...args: Parameters<typeof runRole>): Promise<ResultCard> {
+	const outcome = await runRole(...args)
+	if (outcome.kind === 'suspended') throw new Error('unexpected suspension outside a suspension test')
+	return outcome.card
+}
+
+async function resumeRoleStackCard(...args: Parameters<typeof resumeRoleStack>): Promise<ResultCard> {
+	const outcome = await resumeRoleStack(...args)
+	if (outcome.kind === 'suspended') throw new Error('unexpected suspension outside a suspension test')
+	return outcome.card
+}
 
 function success(toolCalls: ToolCall[], opts: { content?: string; promptTokens?: number; completionTokens?: number; finishReason?: string } = {}): LlmCallResult {
 	const result: LlmCallResult = {
@@ -43,7 +55,7 @@ function contextExceeded(promptTokens = 999, contextWindow = 100): LlmCallResult
 	return { kind: 'context_budget_exceeded', promptTokens, contextWindow }
 }
 
-function llmUnavailable(message = 'test'): LlmCallResult {
+function llmUnavailable(message = 'empty response (no content, no tool calls)'): LlmCallResult {
 	return { kind: 'llm_unavailable', message }
 }
 
@@ -275,12 +287,12 @@ function withExtraHandlers(platform: ToolPlatform, extra: Record<string, Fixture
 			if (baseOwnsTool) return platform.dispatch(roleDefinition, runScope, call, invocation)
 			const handler = extra[call.function.name]
 			if (handler === undefined) return platform.dispatch(roleDefinition, runScope, call, invocation)
-			if (!runScope.manifestNames.has(call.function.name)) return createToolError('unknown_tool', `Tool ${call.function.name} is not registered in the Guild`)
-			if (!roleDefinition.tools.includes(call.function.name)) return createToolError('invalid_tool_call', `Tool ${call.function.name} not allowed for this role`)
+			if (!runScope.manifestNames.has(call.function.name)) return { kind: 'result', result: createToolError('unknown_tool', `Tool ${call.function.name} is not registered in the Guild`) }
+			if (!roleDefinition.tools.includes(call.function.name)) return { kind: 'result', result: createToolError('invalid_tool_call', `Tool ${call.function.name} not allowed for this role`) }
 			const parsed = safeJsonParse(call.function.arguments)
-			if (!parsed.ok) return createToolError('invalid_arguments', 'arguments must be valid JSON')
-			if (!isObject(parsed.value)) return createToolError('invalid_arguments', 'arguments must be a JSON object')
-			return await handler(parsed.value)
+			if (!parsed.ok) return { kind: 'result', result: createToolError('invalid_arguments', 'arguments must be valid JSON') }
+			if (!isObject(parsed.value)) return { kind: 'result', result: createToolError('invalid_arguments', 'arguments must be a JSON object') }
+			return { kind: 'result', result: await handler(parsed.value) }
 		},
 		suspendsChild(toolName) {
 			return platform.suspendsChild(toolName)
@@ -291,9 +303,9 @@ function withExtraHandlers(platform: ToolPlatform, extra: Record<string, Fixture
 	}
 }
 
-function makeDeps(llm: LlmCaller): { deps: EngineDependencies; events: LogEvent[]; checkpoints: RunCheckpoint[]; parkTracker: RunParkTracker; roleSnapshots: RoleSnapshotStore } {
+function makeDeps(llm: LlmCaller, registryCounter = 0): { deps: EngineDependencies; events: LogEvent[]; checkpoints: RunCheckpoint[]; parkTracker: RunParkTracker; roleSnapshots: RoleSnapshotStore } {
 	const { appendLog, events } = makeFakeAppendLog()
-	const roleRegistry = createRoleRegistry()
+	const roleRegistry = createRoleRegistry(registryCounter)
 	const contextPressureTracker = createContextPressureTracker()
 	const parkTracker = createRunParkTracker()
 	const baseTracker = createRunBaseTracker()
@@ -371,7 +383,7 @@ describe('runRole — acceptance criteria', () => {
 		llm.responses = [success([finishCall({ status: 'success', summary: 'Done' })])]
 		const { deps, events } = makeDeps(llm)
 
-		const result = await runRole(deps, {
+		const result = await runRoleCard(deps, {
 			loadedGuild: guild,
 			depth: 0,
 			roleName: 'main',
@@ -398,19 +410,19 @@ describe('runRole — acceptance criteria', () => {
 		const freshLlm = new FakeLlm()
 		freshLlm.responses = [success([finishCall({ status: 'success', summary: 'fresh' })])]
 		const fresh = makeDeps(freshLlm)
-		await runRole(fresh.deps, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'do it' })
+		await runRoleCard(fresh.deps, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'do it' })
 		expect(fresh.checkpoints[fresh.checkpoints.length - 1]?.frames[0]?.roleState.protectedPrefixLength).toBe(2)
 
 		const continuationLlm = new FakeLlm()
 		continuationLlm.responses = [success([finishCall({ status: 'success', summary: 'continued' })])]
 		const continued = makeDeps(continuationLlm)
-		await runRole(continued.deps, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'do it again', continuation })
+		await runRoleCard(continued.deps, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'do it again', continuation })
 		expect(continued.checkpoints[continued.checkpoints.length - 1]?.frames[0]?.roleState.protectedPrefixLength).toBe(4)
 
 		const seededLlm = new FakeLlm()
 		seededLlm.responses = [success([finishCall({ status: 'success', summary: 'seeded' })])]
 		const seeded = makeDeps(seededLlm)
-		await runRole(seeded.deps, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'comment' }, undefined, {
+		await runRoleCard(seeded.deps, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'comment' }, undefined, {
 			history: [
 				{ role: 'system', content: 'sys' },
 				{ role: 'user', content: 'prior task' },
@@ -424,7 +436,7 @@ describe('runRole — acceptance criteria', () => {
 		const resumedContinuationLlm = new FakeLlm()
 		resumedContinuationLlm.responses = [success([finishCall({ status: 'success', summary: 'restored' })])]
 		const resumedContinuation = makeDeps(resumedContinuationLlm)
-		await runRole(resumedContinuation.deps, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'do it again' }, {
+		await runRoleCard(resumedContinuation.deps, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'do it again' }, {
 			roleId: 'main-0-1',
 			roleState: createEmptyRoleState({
 				history: [
@@ -451,7 +463,7 @@ describe('runRole — acceptance criteria', () => {
 		]
 		const { deps, events } = makeDeps(llm)
 
-		const result = await runRole(deps, {
+		const result = await runRoleCard(deps, {
 			loadedGuild: guild,
 			depth: 0,
 			roleName: 'main',
@@ -484,7 +496,7 @@ describe('runRole — acceptance criteria', () => {
 		]
 		const { deps, events } = makeDeps(llm)
 
-		const result = await runRole(deps, {
+		const result = await runRoleCard(deps, {
 			loadedGuild: guild,
 			depth: 0,
 			roleName: 'parent',
@@ -509,7 +521,7 @@ describe('runRole — acceptance criteria', () => {
 		]
 		const { deps, events } = makeDeps(llm)
 
-		const result = await runRole(deps, {
+		const result = await runRoleCard(deps, {
 			loadedGuild: guild,
 			depth: 0,
 			roleName: 'main',
@@ -553,7 +565,7 @@ describe('runRole — acceptance criteria', () => {
 		const { deps, events } = makeDeps(llm)
 		const depsWithBig: EngineDependencies = { ...deps, toolPlatform: withExtraHandlers(deps.toolPlatform, { big: bigHandler }) }
 
-		const result = await runRole(depsWithBig, {
+		const result = await runRoleCard(depsWithBig, {
 			loadedGuild: guild,
 			depth: 0,
 			roleName: 'main',
@@ -591,7 +603,7 @@ describe('runRole — acceptance criteria', () => {
 		]
 		const { deps, events } = makeDeps(llm)
 
-		const result = await runRole(deps, {
+		const result = await runRoleCard(deps, {
 			loadedGuild: guild,
 			depth: 0,
 			roleName: 'main',
@@ -614,7 +626,7 @@ describe('runRole — acceptance criteria', () => {
 		llm.responses = [contextExceeded(1_000_000, 100)]
 		const { deps } = makeDeps(llm)
 
-		const result = await runRole(deps, {
+		const result = await runRoleCard(deps, {
 			loadedGuild: guild,
 			depth: 0,
 			roleName: 'main',
@@ -658,7 +670,7 @@ describe('runRole — acceptance criteria', () => {
 		const { deps } = makeDeps(llm)
 		const depsWithEcho: EngineDependencies = { ...deps, toolPlatform: withExtraHandlers(deps.toolPlatform, { echo: echoHandler }) }
 
-		const result = await runRole(depsWithEcho, {
+		const result = await runRoleCard(depsWithEcho, {
 			loadedGuild: guild,
 			depth: 0,
 			roleName: 'main',
@@ -688,7 +700,7 @@ describe('runRole — acceptance criteria', () => {
 		]
 		const { deps, events } = makeDeps(llm)
 
-		const result = await runRole(deps, {
+		const result = await runRoleCard(deps, {
 			loadedGuild: guild,
 			depth: 0,
 			roleName: 'main',
@@ -713,7 +725,7 @@ describe('runRole — acceptance criteria', () => {
 		]
 		const { deps, events } = makeDeps(llm)
 
-		const result = await runRole(deps, {
+		const result = await runRoleCard(deps, {
 			loadedGuild: guild,
 			depth: 0,
 			roleName: 'main',
@@ -735,7 +747,7 @@ describe('runRole — acceptance criteria', () => {
 		llm.responses = [success([], { content: 'all done' })]
 		const { deps, events } = makeDeps(llm)
 
-		const result = await runRole(deps, {
+		const result = await runRoleCard(deps, {
 			loadedGuild: guild,
 			depth: 0,
 			roleName: 'main',
@@ -767,7 +779,7 @@ describe('runRole — acceptance criteria', () => {
 		]
 		const { deps, events } = makeDeps(llm)
 
-		const result = await runRole(deps, {
+		const result = await runRoleCard(deps, {
 			loadedGuild: guild,
 			depth: 0,
 			roleName: 'grandparent',
@@ -784,16 +796,16 @@ describe('runRole — acceptance criteria', () => {
 	}
 	})
 
-	test('LLM unavailable returns ResultCard with llm_unavailable error', async () => {
+	test('a model-output failure returns a ResultCard with llm_unavailable error', async () => {
 		const guild = buildGuild(
 			{ main: { systemPrompt: 'p', tools: ['finish'] } },
 			'main',
 		)
 		const llm = new FakeLlm()
-		llm.responses = [llmUnavailable('connection refused')]
+		llm.responses = [llmUnavailable()]
 		const { deps } = makeDeps(llm)
 
-		const result = await runRole(deps, {
+		const result = await runRoleCard(deps, {
 			loadedGuild: guild,
 			depth: 0,
 			roleName: 'main',
@@ -808,29 +820,27 @@ describe('runRole — acceptance criteria', () => {
 		expect(result.detail).toBeUndefined()
 	})
 
-	test('LLM unavailable carries the endpoint error body as the card detail', async () => {
+	test('a provider failure detail stays in the log and out of the suspension record', async () => {
 		const guild = buildGuild(
 			{ main: { systemPrompt: 'p', tools: ['finish'] } },
 			'main',
 		)
 		const llm = new FakeLlm()
-		llm.responses = [{ kind: 'llm_unavailable', message: 'HTTP 402', detail: '{"error":"Insufficient credit. Please top up."}' }]
-		const { deps } = makeDeps(llm)
+		llm.responses = [{ ...providerFailure('billing'), detail: '{"error":"Insufficient credit. Please top up."}' }]
+		const { deps, events } = makeDeps(llm)
 
-		const result = await runRole(deps, {
+		const outcome = await runRole(deps, {
 			loadedGuild: guild,
 			depth: 0,
 			roleName: 'main',
 			task: 'do it',
 		})
 
-		expect(result.status).toBe('error')
-		expect(result.summary).toBe('LLM unavailable: HTTP 402')
-		expect(result.detail).toBe('{"error":"Insufficient credit. Please top up."}')
-		if (result.error) {
-			expect(result.error.kind).toBe('llm_unavailable')
-			expect(result.error.message).toBe('HTTP 402')
-		}
+		expect(outcome.kind).toBe('suspended')
+		if (outcome.kind !== 'suspended') throw new Error('expected a suspension')
+		expect('detail' in outcome.suspension).toBe(false)
+		const failureEvent = defined(events.find((event) => event.type === 'provider_failure'), 'provider_failure event')
+		expect(payloadField(failureEvent, 'detail')).toBe('{"error":"Insufficient credit. Please top up."}')
 	})
 
 	test('unknown role returns an error ResultCard', async () => {
@@ -841,7 +851,7 @@ describe('runRole — acceptance criteria', () => {
 		const llm = new FakeLlm()
 		const { deps } = makeDeps(llm)
 
-		const result = await runRole(deps, {
+		const result = await runRoleCard(deps, {
 			loadedGuild: guild,
 			depth: 0,
 			roleName: 'nonexistent',
@@ -862,7 +872,7 @@ describe('runRole — acceptance criteria', () => {
 		llm.responses = [success([finishCall({ status: 'success', summary: 'done' })])]
 		const { deps, events } = makeDeps(llm)
 
-		await runRole(deps, {
+		await runRoleCard(deps, {
 			loadedGuild: guild,
 			depth: 0,
 			roleName: 'main',
@@ -892,7 +902,7 @@ describe('runRole — acceptance criteria', () => {
 		]
 		const { deps } = makeDeps(llm)
 
-		const result = await runRole(deps, {
+		const result = await runRoleCard(deps, {
 			loadedGuild: guild,
 			depth: 0,
 			roleName: 'parent',
@@ -917,7 +927,7 @@ describe('runRole — acceptance criteria', () => {
 		]
 		const { deps, events } = makeDeps(llm)
 
-		const result = await runRole(deps, {
+		const result = await runRoleCard(deps, {
 			loadedGuild: guild,
 			depth: 0,
 			roleName: 'parent',
@@ -959,7 +969,7 @@ describe('runRole — acceptance criteria', () => {
 			toolPlatform: withExtraHandlers(deps.toolPlatform, { echo: echoHandler }),
 		}
 
-		const result = await runRole(depsWithEcho, {
+		const result = await runRoleCard(depsWithEcho, {
 			loadedGuild: guild,
 			depth: 0,
 			roleName: 'main',
@@ -1000,7 +1010,7 @@ describe('runRole — acceptance criteria', () => {
 		const { deps } = makeDeps(caller)
 		const depsWithEcho: EngineDependencies = { ...deps, toolPlatform: withExtraHandlers(deps.toolPlatform, { echo: echoHandler }) }
 
-		const result = await runRole(depsWithEcho, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'do it' })
+		const result = await runRoleCard(depsWithEcho, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'do it' })
 
 		expect(result.status).toBe('success')
 		expect(wire.requests.length).toBe(2)
@@ -1049,7 +1059,7 @@ describe('runRole — acceptance criteria', () => {
 		const { deps } = makeDeps(caller)
 		const depsWithEcho: EngineDependencies = { ...deps, toolPlatform: withExtraHandlers(deps.toolPlatform, { echo: echoHandler }) }
 
-		const result = await runRole(depsWithEcho, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'do it' })
+		const result = await runRoleCard(depsWithEcho, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'do it' })
 
 		expect(result.status).toBe('success')
 		expect(wire.requests.length).toBe(3)
@@ -1087,7 +1097,7 @@ describe('runRole — acceptance criteria', () => {
 		const { deps, events } = makeDeps(llm)
 		const depsWithBig: EngineDependencies = { ...deps, toolPlatform: withExtraHandlers(deps.toolPlatform, { big: bigHandler }) }
 
-		const result = await runRole(depsWithBig, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'do it' })
+		const result = await runRoleCard(depsWithBig, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'do it' })
 
 		expect(result).toEqual({ status: 'success', summary: 'recovered' })
 		const compactedEvent = events.find((e) => e.type === 'context_compacted')
@@ -1132,7 +1142,7 @@ describe('runRole — acceptance criteria', () => {
 			toolPlatform: withExtraHandlers(deps.toolPlatform, { big: bigHandler }),
 		}
 
-		await runRole(depsWithBig, {
+		await runRoleCard(depsWithBig, {
 			loadedGuild: guild,
 			depth: 0,
 			roleName: 'main',
@@ -1159,7 +1169,7 @@ describe('runRole — acceptance criteria', () => {
 		const shadowingHandler: FixtureToolHandler = () => ({ kind: 'success', data: { shadowed: true } })
 		const depsWithShadow: EngineDependencies = { ...deps, toolPlatform: withExtraHandlers(deps.toolPlatform, { finish: shadowingHandler }) }
 
-		const result = await runRole(depsWithShadow, {
+		const result = await runRoleCard(depsWithShadow, {
 			loadedGuild: guild,
 			depth: 0,
 			roleName: 'main',
@@ -1186,7 +1196,7 @@ describe('runRole — role-tree log events', () => {
 		llm.responses = [success([finishCall({ status: 'success', summary: 'done' })])]
 		const { deps, events } = makeDeps(llm)
 
-		await runRole(deps, {
+		await runRoleCard(deps, {
 			loadedGuild: guild,
 			depth: 0,
 			roleName: 'main',
@@ -1226,7 +1236,7 @@ describe('runRole — role-tree log events', () => {
 		]
 		const { deps, events } = makeDeps(llm)
 
-		await runRole(deps, {
+		await runRoleCard(deps, {
 			loadedGuild: guild,
 			depth: 0,
 			roleName: 'parent',
@@ -1273,7 +1283,7 @@ describe('runRole — role-tree log events', () => {
 		]
 		const { deps, events } = makeDeps(llm)
 
-		await runRole(deps, {
+		await runRoleCard(deps, {
 			loadedGuild: guild,
 			depth: 0,
 			roleName: 'parent',
@@ -1300,7 +1310,7 @@ describe('runRole — rich LLM and tool payloads', () => {
 		llm.responses = [success([finish], { content: 'the answer', finishReason: 'tool_calls', promptTokens: 42, completionTokens: 7 })]
 		const { deps, events } = makeDeps(llm)
 
-		await runRole(deps, {
+		await runRoleCard(deps, {
 			loadedGuild: guild,
 			depth: 0,
 			roleName: 'main',
@@ -1336,16 +1346,16 @@ describe('runRole — rich LLM and tool payloads', () => {
 		expect(usage.totalTokens).toBe(49)
 	})
 
-	test('llm_call is not emitted on the llm_unavailable path', async () => {
+	test('llm_call is not emitted on the model-output failure path', async () => {
 		const guild = buildGuild(
 			{ main: { systemPrompt: 'p', tools: ['finish'] } },
 			'main',
 		)
 		const llm = new FakeLlm()
-		llm.responses = [llmUnavailable('connection refused')]
+		llm.responses = [llmUnavailable()]
 		const { deps, events } = makeDeps(llm)
 
-		await runRole(deps, {
+		await runRoleCard(deps, {
 			loadedGuild: guild,
 			depth: 0,
 			roleName: 'main',
@@ -1368,7 +1378,7 @@ describe('runRole — rich LLM and tool payloads', () => {
 		]
 		const { deps, events } = makeDeps(llm)
 
-		await runRole(deps, {
+		await runRoleCard(deps, {
 			loadedGuild: guild,
 			depth: 0,
 			roleName: 'main',
@@ -1411,7 +1421,7 @@ describe('runRole — rich LLM and tool payloads', () => {
 			toolPlatform: withExtraHandlers(deps.toolPlatform, { big: bigHandler }),
 		}
 
-		await runRole(depsWithBig, {
+		await runRoleCard(depsWithBig, {
 			loadedGuild: guild,
 			depth: 0,
 			roleName: 'main',
@@ -1518,7 +1528,7 @@ describe('runRole — interrupt platform', () => {
 		]
 		const { deps, events } = makeDeps(llm)
 
-		const result = await runRole(deps, {
+		const result = await runRoleCard(deps, {
 			loadedGuild: guild,
 			depth: 0,
 			roleName: 'main',
@@ -1569,7 +1579,7 @@ describe('runRole — interrupt platform', () => {
 		]
 		const { deps, events } = makeDeps(llm)
 
-		const result = await runRole(deps, {
+		const result = await runRoleCard(deps, {
 			loadedGuild: guild,
 			depth: 0,
 			roleName: 'main',
@@ -1596,7 +1606,7 @@ describe('runRole — interrupt platform', () => {
 		]
 		const { deps, events } = makeDeps(llm)
 
-		const result = await runRole(deps, {
+		const result = await runRoleCard(deps, {
 			loadedGuild: guild,
 			depth: 0,
 			roleName: 'main',
@@ -1621,7 +1631,7 @@ describe('runRole — interrupt platform', () => {
 		const { deps, events } = makeDeps(llm)
 		deps.interruptQueue.submit({ kind: 'inquiry', message: 'what are you working on?' })
 
-		const result = await runRole(deps, {
+		const result = await runRoleCard(deps, {
 			loadedGuild: guild,
 			depth: 0,
 			roleName: 'main',
@@ -1672,7 +1682,7 @@ describe('runRole — interrupt platform', () => {
 		const { deps } = makeDeps(llm)
 		deps.interruptQueue.submit({ kind: 'inquiry', message: 'what files changed?' })
 
-		await runRole(deps, {
+		await runRoleCard(deps, {
 			loadedGuild: guild,
 			depth: 0,
 			roleName: 'main',
@@ -1693,7 +1703,7 @@ describe('runRole — interrupt platform', () => {
 		const { deps, events } = makeDeps(llm)
 		deps.interruptQueue.submit({ kind: 'inquiry', message: 'anyone there?' })
 
-		const result = await runRole(deps, {
+		const result = await runRoleCard(deps, {
 			loadedGuild: guild,
 			depth: 0,
 			roleName: 'main',
@@ -1718,7 +1728,7 @@ describe('runRole — interrupt platform', () => {
 		const { deps, events } = makeDeps(llm)
 		deps.interruptQueue.submit({ kind: 'notice', message: 'wrap up soon' })
 
-		const result = await runRole(deps, {
+		const result = await runRoleCard(deps, {
 			loadedGuild: guild,
 			depth: 0,
 			roleName: 'main',
@@ -1767,7 +1777,7 @@ describe('runRole — interrupt platform', () => {
 			}),
 		}
 
-		const result = await runRole(depsWithEcho, {
+		const result = await runRoleCard(depsWithEcho, {
 			loadedGuild: guild,
 			depth: 0,
 			roleName: 'planner',
@@ -1825,7 +1835,7 @@ describe('runRole — interrupt platform', () => {
 			}),
 		}
 
-		const result = await runRole(depsWithEcho, {
+		const result = await runRoleCard(depsWithEcho, {
 			loadedGuild: guild,
 			depth: 0,
 			roleName: 'parent',
@@ -1879,7 +1889,7 @@ describe('runRole — interrupt platform', () => {
 		]
 		const depsWithSubmittingLlm: EngineDependencies = { ...deps, llmCaller: submittingLlm }
 
-		const result = await runRole(depsWithSubmittingLlm, {
+		const result = await runRoleCard(depsWithSubmittingLlm, {
 			loadedGuild: guild,
 			depth: 0,
 			roleName: 'main',
@@ -1912,7 +1922,7 @@ describe('runRole — interrupt platform', () => {
 		]
 		const { deps, events } = makeDeps(llm)
 
-		const result = await runRole(deps, {
+		const result = await runRoleCard(deps, {
 			loadedGuild: guild,
 			depth: 0,
 			roleName: 'main',
@@ -1958,7 +1968,7 @@ describe('runRole — observe emission', () => {
 		]
 		const { deps, events } = makeDeps(llm)
 
-		await runRole(deps, { loadedGuild: guild, depth: 0, roleName: 'parent', task: 'delegate' })
+		await runRoleCard(deps, { loadedGuild: guild, depth: 0, roleName: 'parent', task: 'delegate' })
 
 		const callIndex = events.findIndex((e) => e.type === 'tool_call' && payloadField(e, 'tool') === 'list_role_messages')
 		const observeIndex = events.findIndex((e) => e.type === 'observe')
@@ -1985,7 +1995,7 @@ describe('runRole — observe emission', () => {
 		]
 		const { deps, events } = makeDeps(llm)
 
-		await runRole(deps, { loadedGuild: guild, depth: 0, roleName: 'parent', task: 'delegate' })
+		await runRoleCard(deps, { loadedGuild: guild, depth: 0, roleName: 'parent', task: 'delegate' })
 
 		expect(events.some((e) => e.type === 'observe')).toBe(false)
 		const selfListing = events.find((e) => e.type === 'tool_result' && payloadField(e, 'tool') === 'list_role_messages')
@@ -2004,7 +2014,7 @@ describe('runRole — observe emission', () => {
 		const { deps, events } = makeDeps(llm)
 		const depsWithEcho: EngineDependencies = { ...deps, toolPlatform: withExtraHandlers(deps.toolPlatform, { echo: echoHandler }) }
 
-		await runRole(depsWithEcho, { loadedGuild: guild, depth: 0, roleName: 'parent', task: 'delegate' })
+		await runRoleCard(depsWithEcho, { loadedGuild: guild, depth: 0, roleName: 'parent', task: 'delegate' })
 
 		expect(events.some((e) => e.type === 'observe')).toBe(false)
 	})
@@ -2020,7 +2030,7 @@ describe('runRole — observe emission', () => {
 		]
 		const { deps, events } = makeDeps(llm)
 
-		await runRole(deps, { loadedGuild: guild, depth: 0, roleName: 'parent', task: 'delegate' })
+		await runRoleCard(deps, { loadedGuild: guild, depth: 0, roleName: 'parent', task: 'delegate' })
 
 		expect(events.some((e) => e.type === 'observe')).toBe(false)
 		// The real built-in rejects an unregistered instance, so the stale-target skip rides the failure path: no observe, and the tool_result carries the rejection.
@@ -2053,7 +2063,7 @@ describe('runRole — context pressure handoff', () => {
 		]
 		const { deps, events } = makeDeps(llm)
 
-		const result = await runRole(deps, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'do it' })
+		const result = await runRoleCard(deps, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'do it' })
 
 		expect(result.status).toBe('success')
 		const pressureEvents = events.filter((e) => e.type === 'context_pressure')
@@ -2092,7 +2102,7 @@ describe('runRole — context pressure handoff', () => {
 		]
 		const { deps, events } = makeDeps(llm)
 
-		const result = await runRole(deps, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'do it' })
+		const result = await runRoleCard(deps, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'do it' })
 
 		expect(result.status).toBe('success')
 		expect(events.filter((e) => e.type === 'context_pressure').length).toBe(1)
@@ -2109,7 +2119,7 @@ describe('runRole — context pressure handoff', () => {
 		]
 		const { deps, events } = makeDeps(llm)
 
-		await runRole(deps, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'do it' })
+		await runRoleCard(deps, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'do it' })
 
 		const pressureEvents = events.filter((e) => e.type === 'context_pressure')
 		expect(pressureEvents.length).toBe(1)
@@ -2136,7 +2146,7 @@ describe('runRole — context pressure handoff', () => {
 		]
 		const { deps, events } = makeDeps(llm)
 
-		const result = await runRole(deps, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'delegate' })
+		const result = await runRoleCard(deps, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'delegate' })
 
 		expect(result.status).toBe('success')
 		const pressureEvents = events.filter((e) => e.type === 'context_pressure')
@@ -2165,7 +2175,7 @@ describe('runRole — context pressure handoff', () => {
 		]
 		const { deps, events } = makeDeps(llm)
 
-		const result = await runRole(deps, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'delegate' })
+		const result = await runRoleCard(deps, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'delegate' })
 
 		expect(result).toEqual({ status: 'success', summary: 're-spawned and done' })
 		const agentResult = events.find((e) => e.type === 'tool_result' && payloadField(e, 'tool') === 'agent')
@@ -2216,7 +2226,7 @@ describe('runRole — context manager routing', () => {
 		]
 		const { deps, events } = makeDeps(llm)
 
-		const result = await runRole(deps, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'do it' })
+		const result = await runRoleCard(deps, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'do it' })
 
 		expect(result).toEqual({ status: 'success', summary: 'main done' })
 		expect(events.some((e) => e.type === 'context_pressure')).toBe(true)
@@ -2254,7 +2264,7 @@ describe('runRole — context manager routing', () => {
 		]
 		const { deps, events } = makeDeps(llm)
 
-		const result = await runRole(deps, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'delegate' })
+		const result = await runRoleCard(deps, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'delegate' })
 
 		expect(result.status).toBe('success')
 		expect(events.some((e) => e.type === 'role_start' && payloadField(e, 'role') === 'context_manager')).toBe(false)
@@ -2276,7 +2286,7 @@ describe('runRole — context manager routing', () => {
 		]
 		const { deps, events } = makeDeps(llm)
 
-		const result = await runRole(deps, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'do it' })
+		const result = await runRoleCard(deps, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'do it' })
 
 		expect(result.status).toBe('success')
 		expect(events.filter((e) => e.type === 'interrupt').length).toBe(1)
@@ -2293,7 +2303,7 @@ describe('runRole — context manager routing', () => {
 		]
 		const { deps, events } = makeDeps(llm)
 
-		const result = await runRole(deps, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'do it' })
+		const result = await runRoleCard(deps, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'do it' })
 
 		expect(result.status).toBe('success')
 		const resolved = events.find((e) => e.type === 'interrupt_resolved')
@@ -2315,7 +2325,7 @@ describe('runRole — context manager routing', () => {
 		]
 		const { deps, events } = makeDeps(llm)
 
-		const result = await runRole(deps, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'do it' })
+		const result = await runRoleCard(deps, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'do it' })
 
 		expect(result).toEqual({ status: 'success', summary: 'recovered' })
 		expect(events.some((e) => e.type === 'context_compacted')).toBe(false)
@@ -2341,7 +2351,7 @@ describe('runRole — context manager routing', () => {
 		]
 		const { deps, events } = makeDeps(llm)
 
-		const result = await runRole(deps, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'do it' })
+		const result = await runRoleCard(deps, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'do it' })
 
 		expect(result).toEqual({ status: 'success', summary: 'recovered' })
 		expect(events.some((e) => e.type === 'context_compacted')).toBe(true)
@@ -2363,7 +2373,7 @@ describe('runRole — context manager routing', () => {
 		]
 		const { deps, events } = makeDeps(llm)
 
-		const result = await runRole(deps, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'do it' })
+		const result = await runRoleCard(deps, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'do it' })
 
 		expect(result.status).toBe('error')
 		expect(result.error?.kind).toBe('context_budget_exceeded')
@@ -2382,7 +2392,7 @@ describe('runRole effort directive injection', () => {
 		llm.responses = [success([finishCall({ status: 'success', summary: 'Done' })])]
 		const { deps } = makeDeps(llm)
 
-		await runRole(deps, {
+		await runRoleCard(deps, {
 			loadedGuild: guild,
 			depth: 0,
 			roleName: 'main',
@@ -2408,7 +2418,7 @@ describe('runRole effort directive injection', () => {
 		llm.responses = [success([finishCall({ status: 'success', summary: 'Done' })])]
 		const { deps } = makeDeps(llm)
 
-		await runRole(deps, {
+		await runRoleCard(deps, {
 			loadedGuild: guild,
 			depth: 0,
 			roleName: 'main',
@@ -2437,7 +2447,7 @@ describe('runRole effort directive injection', () => {
 		]
 		const { deps } = makeDeps(llm)
 
-		await runRole(deps, {
+		await runRoleCard(deps, {
 			loadedGuild: guild,
 			depth: 0,
 			roleName: 'parent',
@@ -2464,7 +2474,7 @@ describe('runRole involvement directive injection', () => {
 		llm.responses = [success([finishCall({ status: 'success', summary: 'Done' })])]
 		const { deps } = makeDeps(llm)
 
-		await runRole(deps, {
+		await runRoleCard(deps, {
 			loadedGuild: guild,
 			depth: 0,
 			roleName: 'main',
@@ -2490,7 +2500,7 @@ describe('runRole involvement directive injection', () => {
 		llm.responses = [success([finishCall({ status: 'success', summary: 'Done' })])]
 		const { deps } = makeDeps(llm)
 
-		await runRole(deps, {
+		await runRoleCard(deps, {
 			loadedGuild: guild,
 			depth: 0,
 			roleName: 'main',
@@ -2518,7 +2528,7 @@ describe('runRole involvement directive injection', () => {
 		]
 		const { deps } = makeDeps(llm)
 
-		await runRole(deps, {
+		await runRoleCard(deps, {
 			loadedGuild: guild,
 			depth: 0,
 			roleName: 'parent',
@@ -2570,7 +2580,7 @@ describe('run persistence and resumption', () => {
 		]
 		const { deps, checkpoints } = makeDeps(llm)
 		const depsWithEcho: EngineDependencies = { ...deps, toolPlatform: withExtraHandlers(deps.toolPlatform, { echo: echoHandler }) }
-		const card = await runRole(depsWithEcho, { loadedGuild: guild, depth: 0, roleName: 'orchestrator', task: 'do it' })
+		const card = await runRoleCard(depsWithEcho, { loadedGuild: guild, depth: 0, roleName: 'orchestrator', task: 'do it' })
 		return { card, checkpoints }
 	}
 
@@ -2624,7 +2634,7 @@ describe('run persistence and resumption', () => {
 		const { deps, events, checkpoints: resumedWrites } = makeDeps(llm)
 		const depsWithEcho: EngineDependencies = { ...deps, toolPlatform: withExtraHandlers(deps.toolPlatform, { echo: echoHandler }) }
 
-		const card = await resumeRoleStack(runRole, depsWithEcho, guild, checkpoint)
+		const card = await resumeRoleStackCard(runRole, depsWithEcho, guild, checkpoint)
 
 		expect(card).toEqual(uninterrupted.card)
 		// Exactly two turns happen after the resume: the coder's finish and the orchestrator's follow-up — no earlier turn is replayed.
@@ -2657,7 +2667,7 @@ describe('run persistence and resumption', () => {
 		const { deps, events } = makeDeps(llm)
 		const depsWithEcho: EngineDependencies = { ...deps, toolPlatform: withExtraHandlers(deps.toolPlatform, { echo: echoHandler }) }
 
-		const card = await resumeRoleStack(runRole, depsWithEcho, guild, checkpoint)
+		const card = await resumeRoleStackCard(runRole, depsWithEcho, guild, checkpoint)
 
 		expect(card).toEqual({ status: 'success', summary: 'parent done' })
 		// One turn only: the orchestrator's follow-up. The finished child is not re-run.
@@ -2681,7 +2691,7 @@ describe('run persistence and resumption', () => {
 		const { deps, events } = makeDeps(llm)
 		const depsWithEcho: EngineDependencies = { ...deps, toolPlatform: withExtraHandlers(deps.toolPlatform, { echo: echoHandler }) }
 
-		const card = await resumeRoleStack(runRole, depsWithEcho, guild, checkpoint)
+		const card = await resumeRoleStackCard(runRole, depsWithEcho, guild, checkpoint)
 
 		expect(card.status).toBe('success')
 		// The coder spawned after the resume is a fresh instance, so it mints a new id (the test registry starts at 0 and restored registrations do not advance it) and emits role_start — resumed roles do not.
@@ -2752,7 +2762,7 @@ describe('runRole — llm_call delta protocol', () => {
 		const { deps, events } = makeDeps(llm)
 		const depsWithEcho: EngineDependencies = { ...deps, toolPlatform: withExtraHandlers(deps.toolPlatform, { echo: echoHandler }) }
 
-		await runRole(depsWithEcho, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'do it' })
+		await runRoleCard(depsWithEcho, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'do it' })
 
 		const llmCalls = llmCallsOf(events, 'main')
 		expect(llmCalls.length).toBe(3)
@@ -2800,7 +2810,7 @@ describe('runRole — llm_call delta protocol', () => {
 		const { deps, events } = makeDeps(llm)
 		const depsWithEcho: EngineDependencies = { ...deps, toolPlatform: withExtraHandlers(deps.toolPlatform, { echo: echoHandler }) }
 
-		await runRole(depsWithEcho, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'do it' })
+		await runRoleCard(depsWithEcho, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'do it' })
 
 		const mainCalls = llmCallsOf(events, 'main')
 		expect(mainCalls.length).toBe(2)
@@ -2824,7 +2834,7 @@ describe('runRole — llm_call delta protocol', () => {
 		const { deps, events } = makeDeps(llm)
 		const depsWithEcho: EngineDependencies = { ...deps, toolPlatform: withExtraHandlers(deps.toolPlatform, { echo: echoHandler }) }
 
-		await runRole(depsWithEcho, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'do it' })
+		await runRoleCard(depsWithEcho, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'do it' })
 
 		const llmCalls = llmCallsOf(events, 'main')
 		expect(llmCalls.length).toBe(3)
@@ -2855,7 +2865,7 @@ describe('runRole — llm_call delta protocol', () => {
 		const { deps, events } = makeDeps(llm)
 		const depsWithBig: EngineDependencies = { ...deps, toolPlatform: withExtraHandlers(deps.toolPlatform, { big: bigHandler }) }
 
-		await runRole(depsWithBig, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'do it' })
+		await runRoleCard(depsWithBig, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'do it' })
 
 		const llmCalls = llmCallsOf(events, 'main')
 		expect(llmCalls.length).toBe(4)
@@ -2882,7 +2892,7 @@ describe('runRole — llm_call delta protocol', () => {
 			success([finishCall({ status: 'success', summary: 'parent done' })]),
 		]
 		const uninterruptedDeps = makeDeps(uninterruptedLlm)
-		await runRole({ ...uninterruptedDeps.deps, toolPlatform: withExtraHandlers(uninterruptedDeps.deps.toolPlatform, { echo: echoHandler }) }, { loadedGuild: guild, depth: 0, roleName: 'orchestrator', task: 'do it' })
+		await runRoleCard({ ...uninterruptedDeps.deps, toolPlatform: withExtraHandlers(uninterruptedDeps.deps.toolPlatform, { echo: echoHandler }) }, { loadedGuild: guild, depth: 0, roleName: 'orchestrator', task: 'do it' })
 		const checkpoint = defined(
 			uninterruptedDeps.checkpoints.find((candidate) => candidate.frames.length === 2 && candidate.frames[1]?.roleState.logSentBaseline === 2),
 			'checkpoint at the coder\u2019s second loop top',
@@ -2898,7 +2908,7 @@ describe('runRole — llm_call delta protocol', () => {
 		]
 		const { deps, events } = makeDeps(resumedLlm)
 
-		await resumeRoleStack(runRole, { ...deps, toolPlatform: withExtraHandlers(deps.toolPlatform, { echo: echoHandler }) }, guild, checkpoint)
+		await resumeRoleStackCard(runRole, { ...deps, toolPlatform: withExtraHandlers(deps.toolPlatform, { echo: echoHandler }) }, guild, checkpoint)
 
 		// The resumed coder's next request is its preserved 4-message conversation, logged as a delta from the preserved baseline — not a re-logged full snapshot.
 		const coderCalls = llmCallsOf(events, 'coder')
@@ -2925,7 +2935,7 @@ describe('runRole — streamed delta publishing', () => {
 		const published: RoleDelta[] = []
 		const depsWithTap: EngineDependencies = { ...deps, publishDelta: (delta) => published.push(delta) }
 
-		const result = await runRole(depsWithTap, {
+		const result = await runRoleCard(depsWithTap, {
 			loadedGuild: guild,
 			depth: 0,
 			roleName: 'main',
@@ -2958,7 +2968,7 @@ describe('runRole — streamed delta publishing', () => {
 		const published: RoleDelta[] = []
 		const depsWithTap: EngineDependencies = { ...deps, publishDelta: (delta) => published.push(delta) }
 
-		const result = await runRole(depsWithTap, {
+		const result = await runRoleCard(depsWithTap, {
 			loadedGuild: guild,
 			depth: 0,
 			roleName: 'orchestrator',
@@ -3005,7 +3015,7 @@ describe('runRole — the pre-write park rule', () => {
 		// The dispatch path marks a queue-dispatched run; only such a run parks (docs/queueing.md "Parking: the pre-write rule").
 		parkTracker.queueTracked = true
 
-		const result = await runRole(depsWithHuman, {
+		const result = await runRoleCard(depsWithHuman, {
 			loadedGuild: guild,
 			depth: 0,
 			roleName: 'main',
@@ -3046,7 +3056,7 @@ describe('runRole — the pre-write park rule', () => {
 		const human = recordingHumanBackend()
 		const depsWithHuman: EngineDependencies = { ...deps, humanBackend: human }
 
-		const result = await runRole(depsWithHuman, {
+		const result = await runRoleCard(depsWithHuman, {
 			loadedGuild: guild,
 			depth: 0,
 			roleName: 'main',
@@ -3073,7 +3083,7 @@ describe('runRole — the pre-write park rule', () => {
 		const { deps, events, parkTracker } = makeDeps(llm)
 		parkTracker.queueTracked = true
 
-		const result = await runRole(deps, {
+		const result = await runRoleCard(deps, {
 			loadedGuild: guild,
 			depth: 0,
 			roleName: 'main',
@@ -3104,7 +3114,7 @@ describe('runRole — the pre-write park rule', () => {
 		// Tracked and post-write: the write-capability half of the gate is what keeps this ask blocking.
 		parkTracker.queueTracked = true
 
-		const result = await runRole(depsWithHuman, {
+		const result = await runRoleCard(depsWithHuman, {
 			loadedGuild: guild,
 			depth: 0,
 			roleName: 'main',
@@ -3127,7 +3137,7 @@ describe('runRole — the pre-write park rule', () => {
 		llm.responses = [success([finishCall({ status: 'success', summary: 'done' })])]
 		const { deps, checkpoints, parkTracker } = makeDeps(llm)
 
-		await runRole(deps, {
+		await runRoleCard(deps, {
 			loadedGuild: guild,
 			depth: 0,
 			roleName: 'main',
@@ -3155,7 +3165,7 @@ describe('runRole — the pre-write park rule', () => {
 		const { deps, events, parkTracker, checkpoints } = makeDeps(llm)
 		parkTracker.queueTracked = true
 
-		const result = await runRole(deps, {
+		const result = await runRoleCard(deps, {
 			loadedGuild: guild,
 			depth: 0,
 			roleName: 'parent',
@@ -3189,7 +3199,7 @@ describe('runRole — the pre-write park rule', () => {
 		]
 		const parked = makeDeps(parkedLlm)
 		parked.parkTracker.queueTracked = true
-		await runRole(parked.deps, { loadedGuild: guild, depth: 0, roleName: 'parent', task: 'do it' })
+		await runRoleCard(parked.deps, { loadedGuild: guild, depth: 0, roleName: 'parent', task: 'do it' })
 		const checkpoint = parked.checkpoints[parked.checkpoints.length - 1]
 		if (checkpoint === undefined) throw new Error('expected the parked checkpoint')
 
@@ -3202,7 +3212,7 @@ describe('runRole — the pre-write park rule', () => {
 		resumed.parkTracker.queueTracked = true
 		resumed.parkTracker.parkedAsk = checkpoint.parkedAsk
 
-		const card = await resumeRoleStack(runRole, resumed.deps, guild, checkpoint, { parkedAnswer: { question: 'Which database?', answer: 'postgres', toolCallId: 'ask_1' } })
+		const card = await resumeRoleStackCard(runRole, resumed.deps, guild, checkpoint, { parkedAnswer: { question: 'Which database?', answer: 'postgres', toolCallId: 'ask_1' } })
 
 		expect(card).toEqual({ status: 'success', summary: 'parent answered' })
 		const realFinishes = resumed.events.filter((event) => event.type === 'role_finished' && payloadField(event, 'paused') !== true)
@@ -3218,7 +3228,7 @@ describe('runRole — the pre-write park rule', () => {
 		parkedLlm.responses = [success([askCall('Which database?')])]
 		const parked = makeDeps(parkedLlm)
 		parked.parkTracker.queueTracked = true
-		await runRole(parked.deps, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'do it' })
+		await runRoleCard(parked.deps, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'do it' })
 		const checkpoint = parked.checkpoints[parked.checkpoints.length - 1]
 		if (checkpoint === undefined) throw new Error('expected a parked checkpoint')
 
@@ -3229,7 +3239,7 @@ describe('runRole — the pre-write park rule', () => {
 		resumed.parkTracker.queueTracked = true
 		resumed.parkTracker.parkedAsk = checkpoint.parkedAsk
 
-		const card = await resumeRoleStack(runRole, resumed.deps, guild, checkpoint, { parkedAnswer: { question: 'Which database?', answer: 'postgres', toolCallId: 'ask_1' } })
+		const card = await resumeRoleStackCard(runRole, resumed.deps, guild, checkpoint, { parkedAnswer: { question: 'Which database?', answer: 'postgres', toolCallId: 'ask_1' } })
 
 		expect(card).toEqual({ status: 'success', summary: 'built it' })
 		const postCheckpoint = resumed.checkpoints[0]
@@ -3257,7 +3267,7 @@ describe('runRole — the pre-write park rule', () => {
 		parkedLlm.responses = [success([askCall('Which database?'), agentCall('coder', 'do the work')])]
 		const parked = makeDeps(parkedLlm)
 		parked.parkTracker.queueTracked = true
-		await runRole(parked.deps, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'do it' })
+		await runRoleCard(parked.deps, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'do it' })
 		const checkpoint = parked.checkpoints[parked.checkpoints.length - 1]
 		if (checkpoint === undefined) throw new Error('expected a parked checkpoint')
 		// The frozen checkpoint ends at the ask's tool result: the batch's agent call must not have dispatched.
@@ -3270,7 +3280,7 @@ describe('runRole — the pre-write park rule', () => {
 		resumed.parkTracker.queueTracked = true
 		resumed.parkTracker.parkedAsk = checkpoint.parkedAsk
 
-		const card = await resumeRoleStack(runRole, resumed.deps, guild, checkpoint, { parkedAnswer: { question: 'Which database?', answer: 'postgres', toolCallId: 'ask_1' } })
+		const card = await resumeRoleStackCard(runRole, resumed.deps, guild, checkpoint, { parkedAnswer: { question: 'Which database?', answer: 'postgres', toolCallId: 'ask_1' } })
 
 		expect(card).toEqual({ status: 'success', summary: 'parent done' })
 		expect(resumed.events.some((event) => event.type === 'agent_call')).toBe(true)
@@ -3287,7 +3297,7 @@ describe('runRole — the pre-write park rule', () => {
 		const parked = makeDeps(parkedLlm)
 		parked.parkTracker.queueTracked = true
 		const parkedDeps: EngineDependencies = { ...parked.deps, toolPlatform: withExtraHandlers(parked.deps.toolPlatform, { echo: echoHandler }) }
-		await runRole(parkedDeps, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'do it' })
+		await runRoleCard(parkedDeps, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'do it' })
 		const checkpoint = parked.checkpoints[parked.checkpoints.length - 1]
 		if (checkpoint === undefined) throw new Error('expected a parked checkpoint')
 		expect(checkpoint.parkedAsk?.toolCallId).toBe('ask_1')
@@ -3299,7 +3309,7 @@ describe('runRole — the pre-write park rule', () => {
 		resumed.parkTracker.queueTracked = true
 		resumed.parkTracker.parkedAsk = checkpoint.parkedAsk
 		const resumedDeps: EngineDependencies = { ...resumed.deps, toolPlatform: withExtraHandlers(resumed.deps.toolPlatform, { echo: echoHandler }) }
-		const card = await resumeRoleStack(runRole, resumedDeps, guild, checkpoint, { parkedAnswer: { question: 'Which database?', answer: 'postgres', toolCallId: 'ask_1' } })
+		const card = await resumeRoleStackCard(runRole, resumedDeps, guild, checkpoint, { parkedAnswer: { question: 'Which database?', answer: 'postgres', toolCallId: 'ask_1' } })
 
 		expect(card).toEqual({ status: 'success', summary: 'built it' })
 		const completed = resumed.checkpoints.find((candidate) => candidate.frames[0]?.roleState.history.some((message) => message.role === 'tool' && message.tool_call_id === 'echo_1'))
@@ -3322,7 +3332,7 @@ describe('runRole — the pre-write park rule', () => {
 		bootLlm.responses = [success([finishCall({ status: 'success', summary: 'boot done' })])]
 		const boot = makeDeps(bootLlm)
 		const bootDeps: EngineDependencies = { ...boot.deps, toolPlatform: withExtraHandlers(boot.deps.toolPlatform, { echo: echoHandler }) }
-		const bootCard = await resumeRoleStack(runRole, bootDeps, guild, structuredClone(completed))
+		const bootCard = await resumeRoleStackCard(runRole, bootDeps, guild, structuredClone(completed))
 
 		expect(bootCard).toEqual({ status: 'success', summary: 'boot done' })
 		const bootMessages = bootLlm.calls[0]?.messages ?? []
@@ -3333,7 +3343,7 @@ describe('runRole — the pre-write park rule', () => {
 		errorLlm.responses = [success([finishCall({ status: 'success', summary: 'error resume done' })])]
 		const errorResume = makeDeps(errorLlm)
 		const errorDeps: EngineDependencies = { ...errorResume.deps, toolPlatform: withExtraHandlers(errorResume.deps.toolPlatform, { echo: echoHandler }) }
-		const errorCard = await resumeRoleStack(runRole, errorDeps, guild, structuredClone(completed), { resumeNote: 'The operator resumed this run after a failure. Message from the operator: carry on' })
+		const errorCard = await resumeRoleStackCard(runRole, errorDeps, guild, structuredClone(completed), { resumeNote: 'The operator resumed this run after a failure. Message from the operator: carry on' })
 
 		expect(errorCard).toEqual({ status: 'success', summary: 'error resume done' })
 		assertWellFormedToolCalls(errorLlm.calls[0]?.messages ?? [])
@@ -3351,7 +3361,7 @@ describe('runRole — the pre-write park rule', () => {
 		parkedLlm.responses = [success([askCall('Which database?'), agentCall('coder', 'do the work')])]
 		const parked = makeDeps(parkedLlm)
 		parked.parkTracker.queueTracked = true
-		await runRole(parked.deps, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'do it' })
+		await runRoleCard(parked.deps, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'do it' })
 		const checkpoint = parked.checkpoints[parked.checkpoints.length - 1]
 		if (checkpoint === undefined) throw new Error('expected a parked checkpoint')
 
@@ -3360,7 +3370,7 @@ describe('runRole — the pre-write park rule', () => {
 		const resumed = makeDeps(resumeLlm)
 		resumed.parkTracker.queueTracked = true
 		resumed.parkTracker.parkedAsk = checkpoint.parkedAsk
-		const card = await resumeRoleStack(runRole, resumed.deps, guild, checkpoint, { parkedAnswer: { question: 'Which database?', answer: 'postgres', toolCallId: 'ask_1' } })
+		const card = await resumeRoleStackCard(runRole, resumed.deps, guild, checkpoint, { parkedAnswer: { question: 'Which database?', answer: 'postgres', toolCallId: 'ask_1' } })
 
 		expect(card.status).toBe('needs_clarification')
 		expect(card.summary).toBe('waiting for an answer to: And the port?')
@@ -3375,7 +3385,7 @@ describe('runRole — the pre-write park rule', () => {
 		parkedLlm.responses = [success([askCall('Which database?')])]
 		const parked = makeDeps(parkedLlm)
 		parked.parkTracker.queueTracked = true
-		await runRole(parked.deps, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'do it' })
+		await runRoleCard(parked.deps, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'do it' })
 		const checkpoint = parked.checkpoints[parked.checkpoints.length - 1]
 		if (checkpoint === undefined) throw new Error('expected a parked checkpoint')
 
@@ -3393,7 +3403,7 @@ describe('runRole — the pre-write park rule', () => {
 		parkedLlm.responses = [success([askCall('Which database?')])]
 		const parked = makeDeps(parkedLlm)
 		parked.parkTracker.queueTracked = true
-		await runRole(parked.deps, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'do it' })
+		await runRoleCard(parked.deps, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'do it' })
 		const checkpoint = parked.checkpoints[parked.checkpoints.length - 1]
 		if (checkpoint === undefined) throw new Error('expected a parked checkpoint')
 
@@ -3403,7 +3413,7 @@ describe('runRole — the pre-write park rule', () => {
 		resumed.parkTracker.queueTracked = true
 		resumed.parkTracker.parkedAsk = checkpoint.parkedAsk
 
-		const card = await resumeRoleStack(runRole, resumed.deps, guild, checkpoint, { parkedAnswer: { question: 'Which database?', answer: 'postgres', toolCallId: 'ask_1' } })
+		const card = await resumeRoleStackCard(runRole, resumed.deps, guild, checkpoint, { parkedAnswer: { question: 'Which database?', answer: 'postgres', toolCallId: 'ask_1' } })
 
 		expect(card.status).toBe('needs_clarification')
 		const reParked = resumed.checkpoints.find((candidate) => candidate.parkedAsk?.toolCallId === 'ask_2')
@@ -3444,7 +3454,7 @@ describe('runRole — usage accounting and retry spend', () => {
 		const { deps, events, checkpoints } = makeDeps(llm)
 		const depsWithEcho: EngineDependencies = { ...deps, toolPlatform: withExtraHandlers(deps.toolPlatform, { echo: echoHandler }) }
 
-		const result = await runRole(depsWithEcho, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'do it' })
+		const result = await runRoleCard(depsWithEcho, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'do it' })
 
 		expect(result).toEqual({ status: 'success', summary: 'done' })
 		const llmCalls = events.filter((e) => e.type === 'llm_call')
@@ -3470,15 +3480,14 @@ describe('runRole — usage accounting and retry spend', () => {
 		const { deps, events, checkpoints } = makeDeps(llm)
 		const depsWithEcho: EngineDependencies = { ...deps, toolPlatform: withExtraHandlers(deps.toolPlatform, { echo: echoHandler }) }
 
-		await runRole(depsWithEcho, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'do it' })
+		await runRoleCard(depsWithEcho, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'do it' })
 
 		const firstCall = defined(events.find((e) => e.type === 'llm_call'), 'first llm_call')
 		expect(usagePayloadOf(firstCall)).toEqual({ promptTokens: 0, completionTokens: 7, totalTokens: 7 })
 		// A real 0 must still be recorded as 0, and the reported completions still accumulate.
-		const secondLoopTop = defined(checkpoints[1], 'checkpoint at the second loop top')
-		const roleState = defined(secondLoopTop.frames[0], 'entry frame').roleState
-		expect(roleState.lastPromptTokens).toBe(0)
-		expect(roleState.generatedTokens).toBe(7)
+		const stateAfterZeroUsage = defined(checkpoints.map((checkpoint) => checkpoint.frames[0]?.roleState).find((state) => state?.generatedTokens === 7), 'checkpoint after the zero-usage turn')
+		expect(stateAfterZeroUsage.lastPromptTokens).toBe(0)
+		expect(stateAfterZeroUsage.generatedTokens).toBe(7)
 	})
 
 	test('a success carrying discarded retry spend emits llm_retry ahead of the llm_call, whose usage stays the final attempt\u2019s', async () => {
@@ -3496,7 +3505,7 @@ describe('runRole — usage accounting and retry spend', () => {
 		llm.responses = [retriedSuccess]
 		const { deps, events } = makeDeps(llm)
 
-		await runRole(deps, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'do it' })
+		await runRoleCard(deps, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'do it' })
 
 		const retryEvents = events.filter((e) => e.type === 'llm_retry')
 		expect(retryEvents.length).toBe(1)
@@ -3517,7 +3526,7 @@ describe('runRole — usage accounting and retry spend', () => {
 		llm.responses = [success([finishCall({ status: 'success', summary: 'done' })])]
 		const { deps, events } = makeDeps(llm)
 
-		await runRole(deps, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'do it' })
+		await runRoleCard(deps, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'do it' })
 
 		expect(events.some((e) => e.type === 'llm_retry')).toBe(false)
 	})
@@ -3538,7 +3547,7 @@ describe('runRole — usage accounting and retry spend', () => {
 		llm.responses = [retriedSuccess]
 		const { deps, events } = makeDeps(llm)
 
-		await runRole(deps, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'do it' })
+		await runRoleCard(deps, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'do it' })
 
 		const retryEvent = defined(events.find((e) => e.type === 'llm_retry'), 'llm_retry event')
 		expect(payloadField(retryEvent, 'discardedAttempts')).toBe(2)
@@ -3556,7 +3565,7 @@ describe('runRole — usage accounting and retry spend', () => {
 		const caller = createLlmCaller(baseModel, undefined, { llmFetch: wire.llmFetch, sleep: () => Promise.resolve(), scheduleTimeout: () => () => undefined, random: () => 1, now: () => 0 })
 		const { deps, events } = makeDeps(caller)
 
-		const result = await runRole(deps, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'do it' })
+		const result = await runRoleCard(deps, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'do it' })
 
 		expect(result.status).toBe('success')
 		expect(wire.requests.length).toBe(2)
@@ -3583,7 +3592,7 @@ describe('runRole — continue_agent', () => {
 		]
 		const { deps, events } = makeDeps(llm)
 
-		const result = await runRole(deps, { loadedGuild: guild, depth: 0, roleName: 'parent', task: 'delegate' })
+		const result = await runRoleCard(deps, { loadedGuild: guild, depth: 0, roleName: 'parent', task: 'delegate' })
 
 		expect(result).toEqual({ status: 'success', summary: 'parent done' })
 		expect(llm.calls.length).toBe(5)
@@ -3627,7 +3636,7 @@ describe('runRole — continue_agent', () => {
 		]
 		const { deps } = makeDeps(llm)
 
-		const result = await runRole(deps, { loadedGuild: guild, depth: 0, roleName: 'parent', task: 'delegate' })
+		const result = await runRoleCard(deps, { loadedGuild: guild, depth: 0, roleName: 'parent', task: 'delegate' })
 
 		expect(result).toEqual({ status: 'success', summary: 'parent done' })
 		const continuedCall = defined(llm.calls[3], 'continued child call')
@@ -3646,7 +3655,7 @@ describe('runRole — continue_agent', () => {
 		]
 		const { deps, events } = makeDeps(llm)
 
-		const result = await runRole(deps, { loadedGuild: guild, depth: 0, roleName: 'parent', task: 'delegate' })
+		const result = await runRoleCard(deps, { loadedGuild: guild, depth: 0, roleName: 'parent', task: 'delegate' })
 
 		expect(result).toEqual({ status: 'success', summary: 'parent done' })
 		const card = continueAgentCard(events)
@@ -3664,7 +3673,7 @@ describe('runRole — continue_agent', () => {
 		const { deps, events, roleSnapshots } = makeDeps(llm)
 		roleSnapshots.write({ roleId: 'child-1-2', roleName: 'child', depth: 1, task: 'subtask', parentRoleId: 'other-0-9', finishedAt: '2026-01-01T00:00:00.000Z', history: [] })
 
-		const result = await runRole(deps, { loadedGuild: guild, depth: 0, roleName: 'parent', task: 'delegate' })
+		const result = await runRoleCard(deps, { loadedGuild: guild, depth: 0, roleName: 'parent', task: 'delegate' })
 
 		expect(result).toEqual({ status: 'success', summary: 'parent done' })
 		expect(continueAgentCard(events).status).toBe('error')
@@ -3680,7 +3689,7 @@ describe('runRole — continue_agent', () => {
 		const { deps, events, roleSnapshots } = makeDeps(llm)
 		roleSnapshots.write({ roleId: 'child-1-2', roleName: 'child', depth: 1, task: 'subtask', parentRoleId: 'parent-0-1', finishedAt: '2026-01-01T00:00:00.000Z', history: [] })
 
-		const result = await runRole(deps, { loadedGuild: guild, depth: 0, roleName: 'parent', task: 'delegate' })
+		const result = await runRoleCard(deps, { loadedGuild: guild, depth: 0, roleName: 'parent', task: 'delegate' })
 
 		expect(result).toEqual({ status: 'success', summary: 'parent done' })
 		expect(continueAgentCard(events).status).toBe('error')
@@ -3698,7 +3707,7 @@ describe('runRole — continue_agent', () => {
 			success([finishCall({ status: 'success', summary: 'parent done' })]),
 		]
 		const { deps, checkpoints } = makeDeps(llm)
-		const card = await runRole(deps, { loadedGuild: guild, depth: 0, roleName: 'parent', task: 'delegate' })
+		const card = await runRoleCard(deps, { loadedGuild: guild, depth: 0, roleName: 'parent', task: 'delegate' })
 		return { card, checkpoints }
 	}
 
@@ -3738,7 +3747,7 @@ describe('runRole — continue_agent', () => {
 		llm.responses = [success([finishCall({ status: 'success', summary: 'parent done' })])]
 		const { deps, events } = makeDeps(llm)
 
-		const card = await resumeRoleStack(runRole, deps, guild, withCard)
+		const card = await resumeRoleStackCard(runRole, deps, guild, withCard)
 
 		expect(card).toEqual({ status: 'success', summary: 'parent done' })
 		// One turn only: the parent's follow-up. The finished continued child is not re-run.
@@ -3776,7 +3785,7 @@ describe('runRole — continue_agent', () => {
 		]
 		const { deps, roleSnapshots } = makeDeps(llm)
 
-		await runRole(deps, { loadedGuild: guild, depth: 0, roleName: 'parent', task: 'delegate' })
+		await runRoleCard(deps, { loadedGuild: guild, depth: 0, roleName: 'parent', task: 'delegate' })
 
 		// The entry role (parent) has no parent to continue it, so only the child is stored.
 		const summaries = roleSnapshots.list()
@@ -3791,7 +3800,7 @@ describe('runRole — continue_agent', () => {
 		llm.responses = [success([finishCall({ status: 'success', summary: 'handler done' })])]
 		const { deps, roleSnapshots } = makeDeps(llm)
 
-		await runRole(deps, {
+		await runRoleCard(deps, {
 			loadedGuild: guild,
 			depth: 1,
 			roleName: 'child',
@@ -3869,7 +3878,7 @@ describe('durable pending invocation reconciliation', () => {
 		const { deps, checkpoints } = makeDeps(llm)
 		const depsWithEcho: EngineDependencies = { ...deps, toolPlatform: withExtraHandlers(deps.toolPlatform, { echo: echoHandler }) }
 
-		await runRole(depsWithEcho, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'do it' })
+		await runRoleCard(depsWithEcho, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'do it' })
 
 		const pendingRecord = checkpoints
 			.flatMap((checkpoint) => checkpoint.frames)
@@ -3901,7 +3910,7 @@ describe('durable pending invocation reconciliation', () => {
 			}),
 		}
 
-		const card = await resumeRoleStack(runRole, depsWithEcho, guild, checkpoint)
+		const card = await resumeRoleStackCard(runRole, depsWithEcho, guild, checkpoint)
 
 		expect(card).toEqual({ status: 'success', summary: 'done' })
 		expect(echoCalls).toBe(1)
@@ -3929,7 +3938,7 @@ describe('durable pending invocation reconciliation', () => {
 			}),
 		}
 
-		const card = await resumeRoleStack(runRole, depsWithEcho, guild, checkpoint)
+		const card = await resumeRoleStackCard(runRole, depsWithEcho, guild, checkpoint)
 
 		expect(card).toEqual({ status: 'success', summary: 'done' })
 		expect(echoCalls).toBe(0)
@@ -3948,7 +3957,7 @@ describe('durable pending invocation reconciliation', () => {
 		events.push(startEvent('tool:e1', 'echo'), terminalEvent('tool:e1', 'echo'))
 		const depsWithEcho: EngineDependencies = { ...deps, toolPlatform: withExtraHandlers(deps.toolPlatform, { echo: echoHandler }) }
 
-		await resumeRoleStack(runRole, depsWithEcho, guild, checkpoint)
+		await resumeRoleStackCard(runRole, depsWithEcho, guild, checkpoint)
 
 		const frame = defined(checkpoint.frames[0], 'restored frame')
 		const toolMessage = frame.roleState.history.find((message) => message.role === 'tool' && message.tool_call_id === 'e1')
@@ -3967,7 +3976,7 @@ describe('durable pending invocation reconciliation', () => {
 			{ timestamp: 't2', type: 'human_answer', payload: { id: 'ask_1', callId: 'tool:ask_1', question: 'which?', answer: 'this one' } },
 		)
 
-		const card = await resumeRoleStack(runRole, { ...deps, humanBackend: human }, guild, checkpoint)
+		const card = await resumeRoleStackCard(runRole, { ...deps, humanBackend: human }, guild, checkpoint)
 
 		expect(card).toEqual({ status: 'success', summary: 'done' })
 		expect(human.questions).toEqual([])
@@ -3986,7 +3995,7 @@ describe('durable pending invocation reconciliation', () => {
 		const { deps } = makeDeps(llm)
 		const human = recordingHumanBackend()
 
-		const card = await resumeRoleStack(runRole, { ...deps, humanBackend: human }, guild, checkpoint)
+		const card = await resumeRoleStackCard(runRole, { ...deps, humanBackend: human }, guild, checkpoint)
 
 		expect(card).toEqual({ status: 'success', summary: 'done' })
 		expect(human.questions).toEqual([{ question: 'which?', context: undefined }])
@@ -4011,7 +4020,7 @@ describe('durable pending invocation reconciliation', () => {
 		]
 		const { deps, events, checkpoints } = makeDeps(llm)
 
-		await runRole(deps, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'do it' })
+		await runRoleCard(deps, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'do it' })
 
 		expect(events.some((event) => event.type === 'invalid_tool_call')).toBe(true)
 		expect(events.some((event) => event.type === 'unknown_tool')).toBe(true)
@@ -4060,7 +4069,7 @@ describe('durable pending invocation reconciliation', () => {
 			}),
 		}
 
-		const card = await resumeRoleStack(runRole, depsWithEcho, guild, checkpoint)
+		const card = await resumeRoleStackCard(runRole, depsWithEcho, guild, checkpoint)
 
 		expect(card).toEqual({ status: 'success', summary: 'done' })
 		expect(echoCalls).toBe(1)
@@ -4105,7 +4114,7 @@ describe('durable pending invocation reconciliation', () => {
 		events.push(startEvent('tool:e1', 'echo'), terminalEvent('tool:e1', 'echo', { kind: 'success', data: { value: 7 } }), startEvent('tool:e2', 'echo'), terminalEvent('tool:e2', 'echo', { kind: 'success', data: { value: 7 } }))
 		const depsWithEcho: EngineDependencies = { ...deps, toolPlatform: withExtraHandlers(deps.toolPlatform, { echo: echoHandler }) }
 
-		await resumeRoleStack(runRole, depsWithEcho, guild, checkpoint, { resumeNote: 'carry on after restart' })
+		await resumeRoleStackCard(runRole, depsWithEcho, guild, checkpoint, { resumeNote: 'carry on after restart' })
 
 		const frame = defined(checkpoint.frames[0], 'restored frame')
 		const history = frame.roleState.history
@@ -4123,7 +4132,7 @@ describe('durable pending invocation reconciliation', () => {
 		]
 		const { deps, events } = makeDeps(llm)
 
-		const card = await runRole(deps, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'do it' })
+		const card = await runRoleCard(deps, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'do it' })
 
 		expect(card).toEqual({ status: 'success', summary: 'done' })
 		expect(events.some((event) => event.type === 'ask_human')).toBe(false)
@@ -4140,7 +4149,7 @@ describe('durable pending invocation reconciliation', () => {
 		const { deps, events } = makeDeps(llm)
 		events.push(startEvent('tool:e1', 'echo'))
 
-		const card = await resumeRoleStack(runRole, deps, guild, checkpoint)
+		const card = await resumeRoleStackCard(runRole, deps, guild, checkpoint)
 
 		expect(card).toEqual({ status: 'success', summary: 'done' })
 		expect(events.some((event) => event.type === 'unknown_tool')).toBe(true)
@@ -4184,7 +4193,7 @@ describe('durable pending invocation reconciliation', () => {
 			{ timestamp: 't4', type: 'tool_call', payload: { role: 'detector', tool: 'recent_role_tool_calls', callId: 'tool:handler-1', parentCallId: 'role:detector-1-2' } },
 		)
 
-		await resumeRoleStack(runRole, deps, guild, checkpoint)
+		await resumeRoleStackCard(runRole, deps, guild, checkpoint)
 
 		expect(events.filter((event) => event.type === 'interrupt').length).toBe(1)
 		expect(events.filter((event) => event.type === 'interrupt_resolved').length).toBe(1)
@@ -4217,7 +4226,7 @@ describe('durable pending invocation reconciliation', () => {
 		const { deps, events } = makeDeps(llm)
 		const depsWithEcho: EngineDependencies = { ...deps, toolPlatform: withExtraHandlers(deps.toolPlatform, { echo: echoHandler }) }
 
-		const card = await runRole(depsWithEcho, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'do it' })
+		const card = await runRoleCard(depsWithEcho, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'do it' })
 
 		expect(card.summary).toBe('main done')
 		const detectorStart = events.find((event) => event.type === 'role_start' && payloadField(event, 'role') === 'detector')
@@ -4240,7 +4249,7 @@ describe('durable pending invocation reconciliation', () => {
 		const { deps, checkpoints } = makeDeps(llm)
 		const depsWithEcho: EngineDependencies = { ...deps, toolPlatform: withExtraHandlers(deps.toolPlatform, { echo: echoHandler }) }
 
-		await runRole(depsWithEcho, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'do it' })
+		await runRoleCard(depsWithEcho, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'do it' })
 
 		const checkpoint = checkpoints.find((candidate) => {
 			const frame = candidate.frames[0]
@@ -4253,7 +4262,7 @@ describe('durable pending invocation reconciliation', () => {
 		const resumeLlm = new FakeLlm()
 		resumeLlm.responses = [success([finishCall({ status: 'success', summary: 'resumed done' })])]
 		const resumed = makeDeps(resumeLlm)
-		await resumeRoleStack(runRole, { ...resumed.deps, toolPlatform: withExtraHandlers(resumed.deps.toolPlatform, { echo: echoHandler }) }, guild, structuredClone(checkpoint))
+		await resumeRoleStackCard(runRole, { ...resumed.deps, toolPlatform: withExtraHandlers(resumed.deps.toolPlatform, { echo: echoHandler }) }, guild, structuredClone(checkpoint))
 
 		const toolIds = defined(checkpoint.frames[0], 'restored frame').roleState.history.filter((message) => message.role === 'tool').map((message) => message.tool_call_id)
 		expect(toolIds).toEqual(['e1', 'bad_1'])
@@ -4270,7 +4279,7 @@ describe('durable pending invocation reconciliation', () => {
 		const { deps, events } = makeDeps(llm)
 		events.push(startEvent('tool:finish_1', 'finish'), terminalEvent('tool:finish_1', 'finish'))
 
-		const resumed = await resumeRoleStack(runRole, deps, guild, checkpoint)
+		const resumed = await resumeRoleStackCard(runRole, deps, guild, checkpoint)
 
 		expect(resumed).toEqual(card)
 		expect(llm.calls.length).toBe(0)
@@ -4307,7 +4316,7 @@ describe('durable pending invocation reconciliation', () => {
 		deps.parkTracker.queueTracked = true
 		const depsWithEcho: EngineDependencies = { ...deps, humanBackend: human, toolPlatform: withExtraHandlers(deps.toolPlatform, { echo: echoHandler }) }
 
-		const card = await runRole(depsWithEcho, { loadedGuild: withAsk, depth: 0, roleName: 'main', task: 'do it' })
+		const card = await runRoleCard(depsWithEcho, { loadedGuild: withAsk, depth: 0, roleName: 'main', task: 'do it' })
 
 		expect(card.summary).toBe('main done')
 		expect(human.questions).toEqual([{ question: 'Which database?', context: undefined }])
@@ -4342,7 +4351,7 @@ describe('durable pending invocation reconciliation', () => {
 		const { deps, events, checkpoints } = makeDeps(llm)
 		events.push(startEvent('tool:finish_1', 'finish'), { timestamp: 't2', type: 'tool_result', payload: { role: 'main', tool: 'finish', kind: 'success', callId: 'tool:finish_1', result: { kind: 'success', data: { status: 'success', summary: 'already done' } } } })
 
-		const card = await resumeRoleStack(runRole, deps, guild, checkpoint)
+		const card = await resumeRoleStackCard(runRole, deps, guild, checkpoint)
 
 		expect(card).toEqual({ status: 'success', summary: 'already done' })
 		expect(llm.calls.length).toBe(0)
@@ -4361,7 +4370,7 @@ describe('durable pending invocation reconciliation', () => {
 		const { deps, events } = makeDeps(llm)
 		events.push(startEvent('tool:finish_1', 'finish'), { timestamp: 't2', type: 'tool_result', payload: { role: 'main', tool: 'finish', kind: 'invalid_arguments', callId: 'tool:finish_1' } })
 
-		const card = await resumeRoleStack(runRole, deps, guild, checkpoint)
+		const card = await resumeRoleStackCard(runRole, deps, guild, checkpoint)
 
 		expect(card).toEqual({ status: 'success', summary: 'recovered' })
 		expect(llm.calls.length).toBe(1)
@@ -4383,7 +4392,7 @@ describe('durable pending invocation reconciliation', () => {
 		]
 		const { deps, events } = makeDeps(llm)
 
-		const card = await runRole(deps, { loadedGuild: guild, depth: 0, roleName: 'parent', task: 'do it' })
+		const card = await runRoleCard(deps, { loadedGuild: guild, depth: 0, roleName: 'parent', task: 'do it' })
 
 		expect(card.summary).toBe('parent done')
 		const childFinish = events.find((event) => event.type === 'role_finished' && payloadField(event, 'role') === 'child')
@@ -4409,7 +4418,7 @@ describe('durable pending invocation reconciliation', () => {
 		const { deps, events } = makeDeps(llm)
 		const depsWithEcho: EngineDependencies = { ...deps, toolPlatform: withExtraHandlers(deps.toolPlatform, { echo: echoHandler }) }
 
-		const card = await runRole(depsWithEcho, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'do it' })
+		const card = await runRoleCard(depsWithEcho, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'do it' })
 
 		expect(card.summary).toBe('main done')
 		const detectorFinish = events.find((event) => event.type === 'role_finished' && payloadField(event, 'role') === 'detector')
@@ -4423,7 +4432,7 @@ describe('durable pending invocation reconciliation', () => {
 		llm.responses = [success([finishCall({ status: 'needs_clarification', summary: 'need a decision' })])]
 		const { deps, events } = makeDeps(llm)
 
-		const card = await runRole(deps, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'do it' })
+		const card = await runRoleCard(deps, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'do it' })
 
 		expect(card.status).toBe('needs_clarification')
 		const finish = events.find((event) => event.type === 'role_finished')
@@ -4439,7 +4448,7 @@ describe('durable pending invocation reconciliation', () => {
 		])]
 		const { deps, events } = makeDeps(llm)
 
-		const card = await runRole(deps, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'do it' })
+		const card = await runRoleCard(deps, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'do it' })
 
 		expect(card.status).toBe('error')
 		expect(card.summary).toBe('the endpoint is down')
@@ -4475,7 +4484,7 @@ describe('durable pending invocation reconciliation', () => {
 		llm.responses = [success([finishCall({ status: 'success', summary: 'continued' })])]
 		const { deps } = makeDeps(llm)
 
-		const card = await resumeRoleStack(runRole, deps, guild, checkpoint)
+		const card = await resumeRoleStackCard(runRole, deps, guild, checkpoint)
 
 		expect(card).toEqual({ status: 'success', summary: 'continued' })
 		expect(llm.calls.length).toBe(1)
@@ -4491,7 +4500,7 @@ describe('durable pending invocation reconciliation', () => {
 		])]
 		const { deps, checkpoints } = makeDeps(llm)
 
-		await runRole(deps, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'do it' })
+		await runRoleCard(deps, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'do it' })
 
 		const checkpoint = checkpoints[checkpoints.length - 1]
 		if (checkpoint === undefined) throw new Error('expected the completed-turn checkpoint')
@@ -4499,4 +4508,414 @@ describe('durable pending invocation reconciliation', () => {
 		const interrupted = frame.roleState.history.filter((message) => message.role === 'tool' && message.tool_call_id === 'same_id' && message.content.includes('Not executed because an earlier call'))
 		expect(interrupted.length).toBe(2)
 	})
+})
+
+describe('runRole — provider failure suspensions', () => {
+	test('an HTTP 402 at the entry role classifies as a billing suspension', async () => {
+		const guild = buildGuild({ main: { systemPrompt: 'p', tools: ['finish'] } }, 'main')
+		const wire = new FakeWire()
+		wire.responses = [{ kind: 'http_error', status: 402, errorBody: '{"error":"Insufficient credit"}', headers: {} }]
+		const caller = createLlmCaller(baseModel, undefined, { llmFetch: wire.llmFetch, sleep: () => Promise.resolve(), scheduleTimeout: () => () => undefined, random: () => 1, now: () => 0 })
+		const { deps, events } = makeDeps(caller)
+
+		const outcome = await runRole(deps, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'do it' })
+
+		expect(outcome.kind).toBe('suspended')
+		if (outcome.kind !== 'suspended') throw new Error('expected a suspension')
+		expect(outcome.suspension.category).toBe('billing')
+		const failureEvent = defined(events.find((event) => event.type === 'provider_failure'), 'provider_failure event')
+		expect(payloadField(failureEvent, 'roleId')).toBe('main-0-1')
+		expect(events.some((event) => event.type === 'role_finished')).toBe(false)
+	})
+
+	const echoManifest: ToolManifest = { name: 'echo', description: 'Echoes its arguments.', parameters: { type: 'object', properties: {} } }
+
+	function echoCall(id: string): ToolCall {
+		return { id, type: 'function', function: { name: 'echo', arguments: '{}' } }
+	}
+
+	test('a provider failure at the entry role suspends without a card, role_finished, or tool result', async () => {
+		const guild = buildGuild({ main: { systemPrompt: 'p', tools: ['finish'] } }, 'main')
+		const llm = new FakeLlm()
+		llm.responses = [providerFailure('billing')]
+		const { deps, events } = makeDeps(llm)
+
+		const outcome = await runRole(deps, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'do it' })
+
+		expect(outcome.kind).toBe('suspended')
+		if (outcome.kind !== 'suspended') throw new Error('expected a suspension')
+		expect(outcome.suspension.category).toBe('billing')
+		expect(outcome.suspension.resumePolicy).toBe('operator')
+		expect(events.some((event) => event.type === 'role_finished')).toBe(false)
+		expect(events.some((event) => event.type === 'llm_unavailable')).toBe(false)
+		expect(events.some((event) => event.type === 'tool_result')).toBe(false)
+		const failureEvent = defined(events.find((event) => event.type === 'provider_failure'), 'provider_failure event')
+		expect(payloadField(failureEvent, 'message')).toBe('The model provider failed')
+		expect(payloadField(failureEvent, 'detail')).toBeUndefined()
+	})
+
+	test('a provider failure in a delegated child suspends without delivering a card to the parent', async () => {
+		const guild = withTool(buildGuild({ parent: { systemPrompt: 'p', tools: ['agent', 'finish'] }, child: { systemPrompt: 'c', tools: ['finish'] } }, 'parent'), echoManifest)
+		const llm = new FakeLlm()
+		llm.responses = [success([agentCall('child', 'sub')]), providerFailure('billing')]
+		const { deps, events } = makeDeps(llm)
+
+		const outcome = await runRole(deps, { loadedGuild: guild, depth: 0, roleName: 'parent', task: 'delegate' })
+
+		expect(outcome.kind).toBe('suspended')
+		expect(events.some((event) => event.type === 'tool_result' && payloadField(event, 'tool') === 'agent')).toBe(false)
+		expect(events.some((event) => event.type === 'role_finished')).toBe(false)
+		expect(events.some((event) => event.type === 'provider_failure')).toBe(true)
+	})
+
+	test('a provider failure in a continue_agent child suspends without a parent card', async () => {
+		const guild = continueAgentGuild()
+		const llm = new FakeLlm()
+		llm.responses = [
+			success([agentCall('child', 'first')]),
+			success([finishCall({ status: 'success', summary: 'child done' })]),
+			success([continueAgentCall('child', 'again')]),
+			providerFailure('transient'),
+		]
+		const { deps, events } = makeDeps(llm)
+
+		const outcome = await runRole(deps, { loadedGuild: guild, depth: 0, roleName: 'parent', task: 'delegate' })
+
+		expect(outcome.kind).toBe('suspended')
+		expect(events.some((event) => event.type === 'tool_result' && payloadField(event, 'tool') === 'continue_agent')).toBe(false)
+		expect(events.some((event) => event.type === 'role_finished' && payloadField(event, 'role') === 'parent')).toBe(false)
+	})
+
+	test('a provider failure in a loop-check handler suspends with a durable pending interlude that replays on resume', async () => {
+		const guild = withTool(
+			buildGuild(
+				{ main: { systemPrompt: 'p', tools: ['echo', 'finish'] }, handler: { systemPrompt: 'h', tools: ['finish'] } },
+				'main',
+				{ executor: { ...baseExecutor, interruptTriggers: { handlerRole: 'handler', everyToolCalls: 1, everyTokens: 1_000_000 } } },
+			),
+			echoManifest,
+		)
+		const llm = new FakeLlm()
+		llm.responses = [success([echoCall('e1'), echoCall('e2')]), providerFailure('billing')]
+		const { deps, events, checkpoints } = makeDeps(llm)
+		const depsWithEcho: EngineDependencies = { ...deps, toolPlatform: withExtraHandlers(deps.toolPlatform, { echo: echoHandler }) }
+
+		const outcome = await runRole(depsWithEcho, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'do it' })
+
+		expect(outcome.kind).toBe('suspended')
+		const pendingCheckpoint = defined(checkpoints.filter((checkpoint) => checkpoint.pendingInterlude !== undefined).at(-1), 'checkpoint with a pending interlude')
+		const pending = pendingCheckpoint
+		expect(pending.registryCounter).toBeGreaterThan(1)
+		expect(pending.pendingInterlude?.trigger).toBe('loop_check')
+		expect(pending.pendingInterlude?.targetRoleId).toBe('main-0-1')
+
+		llm.responses = [success([finishCall({ status: 'success', summary: 'handler done' })]), success([finishCall({ status: 'success', summary: 'main done' })])]
+		const resumedHarness = makeDeps(llm, pending.registryCounter)
+		const resumedDeps = { ...resumedHarness.deps, readRunLogEvents: () => events, toolPlatform: withExtraHandlers(resumedHarness.deps.toolPlatform, { echo: echoHandler }) }
+		const resumed = await resumeRoleStackCard(runRole, resumedDeps, guild, pending)
+		expect(resumed).toEqual({ status: 'success', summary: 'main done' })
+		expect(resumedHarness.events.filter((event) => event.type === 'interrupt').length).toBe(1)
+		const oldHandlerStart = defined(events.find((event) => event.type === 'role_start' && payloadField(event, 'role') === 'handler'), 'first handler role_start')
+		const oldHandlerId = payloadField(oldHandlerStart, 'roleId')
+		if (typeof oldHandlerId !== 'string') throw new Error('expected the first handler role id')
+		const newHandlerStart = defined(resumedHarness.events.find((event) => event.type === 'role_start' && payloadField(event, 'role') === 'handler'), 'replayed handler role_start')
+		const newHandlerId = payloadField(newHandlerStart, 'roleId')
+		if (typeof newHandlerId !== 'string') throw new Error('expected the replayed handler role id')
+		expect(newHandlerId).not.toBe(oldHandlerId)
+		expect(resumedHarness.events.some((event) => event.type === 'role_finished' && payloadField(event, 'roleId') === newHandlerId)).toBe(true)
+	})
+
+	test('a crash before the clearing write replays the pending interlude', async () => {
+		const guild = withTool(
+			buildGuild(
+				{ main: { systemPrompt: 'p', tools: ['echo', 'finish'] }, handler: { systemPrompt: 'h', tools: ['finish'] } },
+				'main',
+				{ executor: { ...baseExecutor, interruptTriggers: { handlerRole: 'handler', everyToolCalls: 1, everyTokens: 1_000_000 } } },
+			),
+			echoManifest,
+		)
+		const llm = new FakeLlm()
+		llm.responses = [success([echoCall('e1'), echoCall('e2')]), providerFailure('billing')]
+		const { deps, events, checkpoints } = makeDeps(llm)
+		const depsWithEcho: EngineDependencies = { ...deps, toolPlatform: withExtraHandlers(deps.toolPlatform, { echo: echoHandler }) }
+		await runRole(depsWithEcho, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'do it' })
+		const checkpoint = defined(checkpoints.filter((entry) => entry.pendingInterlude !== undefined).at(-1), 'pending checkpoint')
+
+		llm.responses = [success([finishCall({ status: 'success', summary: 'handler replayed' })]), success([finishCall({ status: 'success', summary: 'main done after crash' })])]
+		const resumedHarness = makeDeps(llm, checkpoint.registryCounter)
+		const resumedDeps = { ...resumedHarness.deps, readRunLogEvents: () => events, toolPlatform: withExtraHandlers(resumedHarness.deps.toolPlatform, { echo: echoHandler }) }
+		const resumed = await resumeRoleStackCard(runRole, resumedDeps, guild, checkpoint)
+
+		expect(resumed).toEqual({ status: 'success', summary: 'main done after crash' })
+		expect(resumedHarness.events.filter((event) => event.type === 'interrupt').length).toBe(1)
+	})
+
+	test('the successful replay checkpoint clears the pending interlude and persists the trigger state', async () => {
+		const guild = withTool(
+			buildGuild(
+				{ main: { systemPrompt: 'p', tools: ['echo', 'finish'] }, handler: { systemPrompt: 'h', tools: ['finish'] } },
+				'main',
+				{ executor: { ...baseExecutor, interruptTriggers: { handlerRole: 'handler', everyToolCalls: 1, everyTokens: 1_000_000 } } },
+			),
+			echoManifest,
+		)
+		const llm = new FakeLlm()
+		llm.responses = [success([echoCall('e1'), echoCall('e2')]), providerFailure('billing')]
+		const { deps, events, checkpoints } = makeDeps(llm)
+		const depsWithEcho: EngineDependencies = { ...deps, toolPlatform: withExtraHandlers(deps.toolPlatform, { echo: echoHandler }) }
+		await runRole(depsWithEcho, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'do it' })
+		const suspendedCheckpoint = defined(checkpoints.filter((entry) => entry.pendingInterlude !== undefined).at(-1), 'pending checkpoint')
+
+		llm.responses = [success([finishCall({ status: 'success', summary: 'handler replayed' })]), success([finishCall({ status: 'success', summary: 'main done' })])]
+		const resumedHarness = makeDeps(llm, suspendedCheckpoint.registryCounter)
+		const resumedDeps = { ...resumedHarness.deps, readRunLogEvents: () => events, toolPlatform: withExtraHandlers(resumedHarness.deps.toolPlatform, { echo: echoHandler }) }
+		await resumeRoleStackCard(runRole, resumedDeps, guild, suspendedCheckpoint)
+		const cleared = defined(resumedHarness.checkpoints.filter((entry) => entry.pendingInterlude === undefined).at(-1), 'cleared checkpoint')
+		expect(cleared.pendingInterlude).toBeUndefined()
+		expect(cleared.frames[0]?.roleState.loopCheckToolCallWatermark).toBe(2)
+
+		const againHarness = makeDeps(llm, cleared.registryCounter)
+		const againDeps = { ...againHarness.deps, readRunLogEvents: () => resumedHarness.events, toolPlatform: withExtraHandlers(againHarness.deps.toolPlatform, { echo: echoHandler }) }
+		const again = await resumeRoleStackCard(runRole, againDeps, guild, cleared)
+		expect(again).toEqual({ status: 'success', summary: 'main done' })
+		expect(againHarness.events.filter((event) => event.type === 'interrupt').length).toBe(0)
+	})
+
+	test('a model-output empty completion still becomes an ordinary error card', async () => {
+		const guild = buildGuild({ main: { systemPrompt: 'p', tools: ['finish'] } }, 'main')
+		const llm = new FakeLlm()
+		llm.responses = [{ kind: 'llm_unavailable', message: 'empty response (no content, no tool calls)' }]
+		const { deps } = makeDeps(llm)
+
+		const outcome = await runRole(deps, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'do it' })
+
+		expect(outcome.kind).toBe('card')
+		if (outcome.kind !== 'card') throw new Error('expected a card')
+		expect(outcome.card.status).toBe('error')
+		expect(outcome.card.error?.kind).toBe('llm_unavailable')
+	})
+
+	test('an inquiry handler suspension preserves operator requests queued behind it', async () => {
+		const guild = buildGuild(
+			{ main: { systemPrompt: 'p', tools: ['echo', 'finish'] }, handler: { systemPrompt: 'h', tools: ['finish'] } },
+			'main',
+			{ executor: { ...baseExecutor, inquiryHandlerRole: 'handler' } },
+		)
+		const llm = new FakeLlm()
+		llm.responses = [providerFailure('billing')]
+		const { deps, events, checkpoints } = makeDeps(llm)
+		const depsWithEcho: EngineDependencies = { ...deps, toolPlatform: withExtraHandlers(deps.toolPlatform, { echo: echoHandler }) }
+		deps.interruptQueue.submit({ kind: 'inquiry', message: 'what changed?' })
+		deps.interruptQueue.submit({ kind: 'notice', message: 'queued behind the handler' })
+		await runRole(depsWithEcho, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'do it' })
+		const pending = defined(checkpoints.filter((entry) => entry.pendingInterlude !== undefined).at(-1)?.pendingInterlude, 'pending interlude')
+		expect(pending.pendingOperatorRequests).toEqual([{ kind: 'notice', message: 'queued behind the handler' }])
+
+		llm.responses = [success([finishCall({ status: 'success', summary: 'the answer' })]), success([echoCall('e1')]), success([finishCall({ status: 'success', summary: 'main done' })])]
+		const resumedHarness = makeDeps(llm)
+		const resumedDeps = { ...resumedHarness.deps, readRunLogEvents: () => events, toolPlatform: withExtraHandlers(resumedHarness.deps.toolPlatform, { echo: echoHandler }) }
+		await resumeRoleStackCard(runRole, resumedDeps, guild, defined(checkpoints.filter((entry) => entry.pendingInterlude !== undefined).at(-1), 'pending checkpoint'))
+		expect(resumedHarness.events.some((event) => event.type === 'operator_notice' && payloadField(event, 'message') === 'queued behind the handler')).toBe(true)
+	})
+
+	test('a nested context handler inside a handler keeps the outer pending interlude', async () => {
+		const guild = withTool(
+			buildGuild(
+				{
+					main: { systemPrompt: 'p', tools: ['echo', 'finish'] },
+					handler: { systemPrompt: 'h', tools: ['echo', 'finish'] },
+					context: { systemPrompt: 'c', tools: ['finish'] },
+				},
+				'main',
+				{ executor: { ...baseExecutor, contextHandlerRole: 'context', interruptTriggers: { handlerRole: 'handler', everyToolCalls: 1, everyTokens: 1_000_000 } } },
+			),
+			echoManifest,
+		)
+		const llm = new FakeLlm()
+		llm.responses = [
+			success([echoCall('e1'), echoCall('e2')]),
+			success([echoCall('h1')]),
+			{ kind: 'context_budget_exceeded', promptTokens: 32_000, contextWindow: 32_768 },
+			providerFailure('billing'),
+		]
+		const { deps, events, checkpoints } = makeDeps(llm)
+		const depsWithEcho: EngineDependencies = { ...deps, toolPlatform: withExtraHandlers(deps.toolPlatform, { echo: echoHandler }) }
+
+		const outcome = await runRole(depsWithEcho, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'do it' })
+
+		expect(outcome.kind).toBe('suspended')
+		expect(events.some((event) => event.type === 'role_start' && payloadField(event, 'role') === 'context')).toBe(true)
+		const pending = defined(checkpoints.filter((entry) => entry.pendingInterlude !== undefined).at(-1)?.pendingInterlude, 'outer pending interlude')
+		expect(pending.trigger).toBe('loop_check')
+	})
+
+	test('an inquiry handler suspension replays the inquiry on resume', async () => {
+		const guild = buildGuild(
+			{ main: { systemPrompt: 'p', tools: ['finish'] }, handler: { systemPrompt: 'h', tools: ['finish'] } },
+			'main',
+			{ executor: { ...baseExecutor, inquiryHandlerRole: 'handler' } },
+		)
+		const llm = new FakeLlm()
+		llm.responses = [providerFailure('billing')]
+		const { deps, events, checkpoints } = makeDeps(llm)
+		deps.interruptQueue.submit({ kind: 'inquiry', message: 'what changed?' })
+		const outcome = await runRole(deps, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'do it' })
+		expect(outcome.kind).toBe('suspended')
+		const checkpoint = defined(checkpoints.filter((entry) => entry.pendingInterlude !== undefined).at(-1), 'pending checkpoint')
+		expect(checkpoint.pendingInterlude?.trigger).toBe('inquiry')
+
+		llm.responses = [success([finishCall({ status: 'success', summary: 'the answer' })]), success([finishCall({ status: 'success', summary: 'main done' })])]
+		const resumedHarness = makeDeps(llm)
+		const resumedDeps = { ...resumedHarness.deps, readRunLogEvents: () => events }
+		const resumed = await resumeRoleStackCard(runRole, resumedDeps, guild, checkpoint)
+		expect(resumed).toEqual({ status: 'success', summary: 'main done' })
+		expect(resumedHarness.events.filter((event) => event.type === 'interrupt').length).toBe(1)
+	})
+
+	test('a context-pressure handler suspension replays on resume', async () => {
+		const guild = buildGuild(
+			{ main: { systemPrompt: 'p', tools: ['echo', 'finish'] }, context: { systemPrompt: 'c', tools: ['finish'] } },
+			'main',
+			{ executor: { ...baseExecutor, contextHandlerRole: 'context', contextPressureThreshold: 0.0001 } },
+		)
+		const llm = new FakeLlm()
+		llm.responses = [success([echoCall('e1')], { promptTokens: 100 }), providerFailure('billing')]
+		const { deps, events, checkpoints } = makeDeps(llm)
+		const depsWithEcho: EngineDependencies = { ...deps, toolPlatform: withExtraHandlers(deps.toolPlatform, { echo: echoHandler }) }
+		const outcome = await runRole(depsWithEcho, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'do it' })
+		expect(outcome.kind).toBe('suspended')
+		const checkpoint = defined(checkpoints.filter((entry) => entry.pendingInterlude !== undefined).at(-1), 'pending checkpoint')
+		expect(checkpoint.pendingInterlude?.trigger).toBe('context_pressure')
+
+		llm.responses = [success([finishCall({ status: 'success', summary: 'compacted' })]), success([finishCall({ status: 'success', summary: 'main done' })])]
+		const resumedHarness = makeDeps(llm)
+		const resumedDeps = { ...resumedHarness.deps, readRunLogEvents: () => events, toolPlatform: withExtraHandlers(resumedHarness.deps.toolPlatform, { echo: echoHandler }) }
+		const resumed = await resumeRoleStackCard(runRole, resumedDeps, guild, checkpoint)
+		expect(resumed).toEqual({ status: 'success', summary: 'main done' })
+	})
+
+	test('a context-budget handler suspension replays on resume', async () => {
+		const guild = buildGuild(
+			{ main: { systemPrompt: 'p', tools: ['echo', 'finish'] }, context: { systemPrompt: 'c', tools: ['finish'] } },
+			'main',
+			{ executor: { ...baseExecutor, contextHandlerRole: 'context' } },
+		)
+		const llm = new FakeLlm()
+		llm.responses = [
+			success([echoCall('e1')]),
+			{ kind: 'context_budget_exceeded', promptTokens: 32_000, contextWindow: 32_768 },
+			providerFailure('billing'),
+		]
+		const { deps, events, checkpoints } = makeDeps(llm)
+		const depsWithEcho: EngineDependencies = { ...deps, toolPlatform: withExtraHandlers(deps.toolPlatform, { echo: echoHandler }) }
+		const outcome = await runRole(depsWithEcho, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'do it' })
+		expect(outcome.kind).toBe('suspended')
+		const checkpoint = defined(checkpoints.filter((entry) => entry.pendingInterlude !== undefined).at(-1), 'pending checkpoint')
+		expect(checkpoint.pendingInterlude?.trigger).toBe('context_budget_exceeded')
+
+		llm.responses = [success([finishCall({ status: 'success', summary: 'compacted' })]), success([finishCall({ status: 'success', summary: 'main done' })])]
+		const resumedHarness = makeDeps(llm)
+		const resumedDeps = { ...resumedHarness.deps, readRunLogEvents: () => events, toolPlatform: withExtraHandlers(resumedHarness.deps.toolPlatform, { echo: echoHandler }) }
+		const resumed = await resumeRoleStackCard(runRole, resumedDeps, guild, checkpoint)
+		expect(resumed).toEqual({ status: 'success', summary: 'main done' })
+	})
+
+	test('a child suspension resumes the child with the same messages and records the agent result once', async () => {
+		const guild = withTool(buildGuild({ parent: { systemPrompt: 'p', tools: ['agent', 'finish'] }, child: { systemPrompt: 'c', tools: ['finish'] } }, 'parent'), echoManifest)
+		const llm = new FakeLlm()
+		llm.responses = [success([agentCall('child', 'sub')]), providerFailure('billing')]
+		const { deps, events, checkpoints } = makeDeps(llm)
+		const outcome = await runRole(deps, { loadedGuild: guild, depth: 0, roleName: 'parent', task: 'delegate' })
+		expect(outcome.kind).toBe('suspended')
+		const childMessages = llm.calls[1]?.messages.map((message) => message.content)
+		const checkpoint = defined(checkpoints[checkpoints.length - 1], 'suspension checkpoint')
+		expect(checkpoint.frames).toHaveLength(2)
+
+		llm.responses = [success([finishCall({ status: 'success', summary: 'child done' })]), success([finishCall({ status: 'success', summary: 'parent done' })])]
+		const resumedHarness = makeDeps(llm)
+		const resumedDeps = { ...resumedHarness.deps, readRunLogEvents: () => events }
+		const resumed = await resumeRoleStackCard(runRole, resumedDeps, guild, checkpoint)
+		expect(resumed).toEqual({ status: 'success', summary: 'parent done' })
+		expect(llm.calls[2]?.messages.map((message) => message.content)).toEqual(childMessages)
+		expect(resumedHarness.events.filter((event) => event.type === 'tool_result' && payloadField(event, 'tool') === 'agent')).toHaveLength(1)
+	})
+
+	test('a dropped inquiry clears the pending interlude so a later resume cannot replay it', async () => {
+		const initialGuild = buildGuild(
+			{ main: { systemPrompt: 'p', tools: ['finish'] }, handler: { systemPrompt: 'h', tools: ['finish'] } },
+			'main',
+			{ executor: { ...baseExecutor, inquiryHandlerRole: 'handler' } },
+		)
+		const llm = new FakeLlm()
+		llm.responses = [providerFailure('billing')]
+		const { deps, events, checkpoints } = makeDeps(llm)
+		deps.interruptQueue.submit({ kind: 'inquiry', message: 'what changed?' })
+		await runRole(deps, { loadedGuild: initialGuild, depth: 0, roleName: 'main', task: 'do it' })
+		const checkpoint = defined(checkpoints.filter((entry) => entry.pendingInterlude !== undefined).at(-1), 'pending checkpoint')
+
+		const resumeGuild = buildGuild({ main: { systemPrompt: 'p', tools: ['finish'] } }, 'main')
+		llm.responses = [success([finishCall({ status: 'success', summary: 'main done' })])]
+		const resumedHarness = makeDeps(llm, checkpoint.registryCounter)
+		const resumedDeps = { ...resumedHarness.deps, readRunLogEvents: () => events }
+		const resumed = await resumeRoleStackCard(runRole, resumedDeps, resumeGuild, checkpoint)
+
+		expect(resumed).toEqual({ status: 'success', summary: 'main done' })
+		expect(resumedHarness.events.some((event) => event.type === 'inquiry_dropped')).toBe(true)
+		expect(resumedHarness.checkpoints.at(-1)?.pendingInterlude).toBeUndefined()
+	})
+
+	test('operator requests arriving while the handler runs are captured at suspension write time', async () => {
+		const guild = withTool(
+			buildGuild(
+				{ main: { systemPrompt: 'p', tools: ['echo', 'finish'] }, handler: { systemPrompt: 'h', tools: ['finish'] } },
+				'main',
+				{ executor: { ...baseExecutor, interruptTriggers: { handlerRole: 'handler', everyToolCalls: 1, everyTokens: 1_000_000 } } },
+			),
+			echoManifest,
+		)
+		const baseLlm = new FakeLlm()
+		baseLlm.responses = [success([echoCall('e1'), echoCall('e2')]), providerFailure('billing')]
+		let interruptQueue: ReturnType<typeof createInterruptQueue> | undefined
+		const caller: LlmCaller = {
+			async call(request) {
+				const result = await baseLlm.call(request)
+				if (baseLlm.calls.length === 2) interruptQueue?.submit({ kind: 'notice', message: 'arrived during the handler' })
+				return result
+			},
+		}
+		const { deps, checkpoints } = makeDeps(caller)
+		interruptQueue = deps.interruptQueue
+		const depsWithEcho: EngineDependencies = { ...deps, toolPlatform: withExtraHandlers(deps.toolPlatform, { echo: echoHandler }) }
+
+		await runRole(depsWithEcho, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'do it' })
+
+		const pending = defined(checkpoints.filter((entry) => entry.pendingInterlude !== undefined).at(-1)?.pendingInterlude, 'pending interlude')
+		expect(pending.pendingOperatorRequests).toEqual([{ kind: 'notice', message: 'arrived during the handler' }])
+	})
+
+	test('a restored context interlude resolves before draining newly queued operator requests', async () => {
+		const guild = buildGuild(
+			{ main: { systemPrompt: 'p', tools: ['echo', 'finish'] }, context: { systemPrompt: 'c', tools: ['finish'] } },
+			'main',
+			{ executor: { ...baseExecutor, contextHandlerRole: 'context', contextPressureThreshold: 0.0001 } },
+		)
+		const llm = new FakeLlm()
+		llm.responses = [success([echoCall('e1')], { promptTokens: 100 }), providerFailure('billing')]
+		const { deps, events, checkpoints } = makeDeps(llm)
+		const depsWithEcho: EngineDependencies = { ...deps, toolPlatform: withExtraHandlers(deps.toolPlatform, { echo: echoHandler }) }
+		await runRole(depsWithEcho, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'do it' })
+		const checkpoint = defined(checkpoints.filter((entry) => entry.pendingInterlude !== undefined).at(-1), 'pending checkpoint')
+
+		llm.responses = [success([finishCall({ status: 'success', summary: 'compacted' })]), success([echoCall('e2')]), success([finishCall({ status: 'success', summary: 'main done' })])]
+		const resumedHarness = makeDeps(llm, checkpoint.registryCounter)
+		const resumedDeps = { ...resumedHarness.deps, readRunLogEvents: () => events, toolPlatform: withExtraHandlers(resumedHarness.deps.toolPlatform, { echo: echoHandler }) }
+		resumedDeps.interruptQueue.submit({ kind: 'notice', message: 'queued during replay' })
+		await resumeRoleStackCard(runRole, resumedDeps, guild, checkpoint)
+
+		const handlerStart = resumedHarness.events.findIndex((event) => event.type === 'role_start' && payloadField(event, 'role') === 'context')
+		const notice = resumedHarness.events.findIndex((event) => event.type === 'operator_notice')
+		expect(handlerStart).toBeGreaterThanOrEqual(0)
+		expect(notice).toBeGreaterThan(handlerStart)
+	})
+
 })

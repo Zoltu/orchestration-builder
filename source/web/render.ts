@@ -1,7 +1,8 @@
 // View rendering for the web API. Log parsing and derivation live in the run-log modules, which this module imports and consumes.
 
 import type { PendingQuestion } from '../executor/human-backend.js'
-import type { DeploymentConfig, EffortLevel, ExecutorConfig, GuildConfig, InvolvementLevel, LogLevel, ResultCard, RunMeta, ToolManifest, HumanFacingText, VisualizationConfig } from '../executor/types.js'
+import type { DeploymentConfig, EffortLevel, ExecutorConfig, GuildConfig, InvolvementLevel, LogLevel, ResultCard, RunMeta, SuspensionRecord, ToolManifest, HumanFacingText, VisualizationConfig } from '../executor/types.js'
+import type { HealthView } from '../executor/index.js'
 import type { ProjectSettings } from '../executor/persistence.js'
 import { deriveBudgets, deriveCurrentActivity, deriveInterruptHistory, deriveQuestionHistory, deriveRoleActivity, deriveRoleTree } from '../run-log/derive/index.js'
 import type { Budgets, CurrentActivity, InterruptHistoryEntry, QuestionHistoryEntry, RoleActivity, RoleTreeNode } from '../run-log/derive/index.js'
@@ -20,9 +21,13 @@ export interface RunView {
 	endTime: string | null
 	result: ResultCard | null
 	error: NonNullable<RunMeta['error']> | null
+	// Present only while the run is suspended; the pause card renders its category copy and suspendedAt, never a result card.
+	suspension: SuspensionRecord | null
+	// The coarse provider health snapshot carried by the run view; the client may render it without a separate health poll. Never contains endpoint, credential, model, header, request, or provider body.
+	providerHealth: HealthView | null
 	// The prior run's id when this run continues one (meta.continuesFrom), else null; the client renders the run view's lineage line from it.
 	continuesFrom: string | null
-	// Whether the operator can explicitly resume this run from its checkpoint: a terminal error meta plus a checkpoint file on disk (the caller stats for it). False for every other status and for an error run whose checkpoint is gone — those continue only through the briefed-continuation flow.
+	// Whether the operator can explicitly resume this run from its checkpoint: an error terminal or a suspended pause plus a checkpoint file on disk (the caller stats for it). False for every other status and when the checkpoint is gone.
 	resumable: boolean
 	// The run's raw plan Markdown (plan.md), read per request by the caller; never derived from the cached snapshot, which carries only meta and log text.
 	plan: string | null
@@ -41,6 +46,8 @@ export interface RenderRunViewOptions {
 	plan?: string | null
 	// Whether a checkpoint file exists for this run, read per request by the caller; omitted reads as false.
 	checkpointExists?: boolean
+	// The coarse provider health snapshot the caller read for this request; omitted reads as absent.
+	providerHealth?: HealthView | null
 }
 
 export function renderRunView(snapshot: RunSnapshot, options: RenderRunViewOptions): RunView {
@@ -59,8 +66,10 @@ export function renderRunView(snapshot: RunSnapshot, options: RenderRunViewOptio
 		endTime: meta === null ? null : (meta.endTime ?? null),
 		result: meta === null ? null : (meta.result ?? null),
 		error: meta === null ? null : (meta.error ?? null),
+		suspension: meta === null ? null : (meta.suspension ?? null),
+		providerHealth: options.providerHealth ?? null,
 		continuesFrom: meta === null ? null : (meta.continuesFrom ?? null),
-		resumable: meta !== null && meta.status === 'error' && options.checkpointExists === true,
+		resumable: meta !== null && (meta.status === 'error' || meta.status === 'suspended') && options.checkpointExists === true,
 		plan: options.plan ?? null,
 		roles: deriveRoleActivity(snapshot.logEvents),
 		roleTree: deriveRoleTree(snapshot.logEvents),
@@ -85,6 +94,8 @@ export interface RunSummary {
 	error: NonNullable<RunMeta['error']> | null
 	// The prior run's id when this run continues one (meta.continuesFrom), else null; history renders the summary's lineage line from it.
 	continuesFrom: string | null
+	// Present only while the run is suspended, so history rows and the banner can render the pause without a per-run fetch.
+	suspension: SuspensionRecord | null
 	// The LLM-generated one-line summary (summary.txt), when the summarizer has produced one; the client prefers it over the task first line and falls back when absent.
 	summary: string | null
 }
@@ -101,6 +112,7 @@ export function renderRunSummary(runId: string, meta: RunMeta | null, summary: s
 		result: meta === null ? null : (meta.result ?? null),
 		error: meta === null ? null : (meta.error ?? null),
 		continuesFrom: meta === null ? null : (meta.continuesFrom ?? null),
+		suspension: meta === null ? null : (meta.suspension ?? null),
 		summary,
 	}
 }

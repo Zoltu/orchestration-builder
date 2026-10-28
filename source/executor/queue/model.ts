@@ -1,12 +1,13 @@
 import { isEffortLevel, isInvolvementLevel, isLogLevel, isObject, isString } from '../validation.js'
 import { isRunIdShape } from '../run-id.js'
 import { questionFromParkSummary, type PauseState } from '../park-state.js'
+import { isSupersededSuspendedRun } from '../suspension.js'
 import { QUEUE_FORMAT_VERSION } from '../orchestration-version.js'
 import type { EffortLevel, InvolvementLevel, LogLevel, RunMeta } from '../types.js'
 
 // Pure queue logic and validation for the durable task queue (docs/queueing.md "The queue: storage, item model, state machine"). Every transformation is a whole-queue value: it takes a queue and returns a new one, so the module's read-modify-write cycles stay free of hidden mutation. Serialization and orchestration live in persistence.ts and task-queue.ts; only the read-only DTOs cross the module boundary.
 
-type QueueItemStatus = 'waiting' | 'active' | 'needs_input' | 'done' | 'error' | 'cancelled'
+type QueueItemStatus = 'waiting' | 'active' | 'suspended' | 'needs_input' | 'done' | 'error' | 'cancelled'
 
 export interface QueueItemView {
 	// UUID (crypto.randomUUID), the item handle in the queue API.
@@ -24,6 +25,8 @@ export interface QueueItemView {
 	readonly status: QueueItemStatus
 	// Set when the scheduler dispatches the item's run.
 	readonly runId?: string
+	// Set while the item's run is suspended: when the pause began.
+	readonly suspendedAt?: string
 	// The run a waiting answered item re-enters: a parked run or a direct clarification finish. The tool-call id, when present, stays internal.
 	readonly resumesRunId?: string
 	readonly queuedAt: string
@@ -55,6 +58,7 @@ export interface QueueItem {
 	status: QueueItemStatus
 	runId?: string
 	queuedAt: string
+	suspendedAt?: string
 	settledAt?: string
 	question?: string
 	answer?: string
@@ -72,7 +76,7 @@ export interface TaskQueue {
 	items: QueueItem[]
 }
 
-const queueItemStatuses: readonly QueueItemStatus[] = ['waiting', 'active', 'needs_input', 'done', 'error', 'cancelled']
+const queueItemStatuses: readonly QueueItemStatus[] = ['waiting', 'active', 'suspended', 'needs_input', 'done', 'error', 'cancelled']
 
 export function isQueueItem(value: unknown): value is QueueItem {
 	if (!isObject(value)) return false
@@ -85,6 +89,7 @@ export function isQueueItem(value: unknown): value is QueueItem {
 	if (!isString(value.status) || !queueItemStatuses.some((status) => status === value.status)) return false
 	if (value.runId !== undefined && !isRunIdShape(value.runId)) return false
 	if (!isString(value.queuedAt)) return false
+	if (value.suspendedAt !== undefined && !isString(value.suspendedAt)) return false
 	if (value.settledAt !== undefined && !isString(value.settledAt)) return false
 	if (value.question !== undefined && !isString(value.question)) return false
 	if (value.answer !== undefined && !isString(value.answer)) return false
@@ -101,6 +106,20 @@ export function isQueueItem(value: unknown): value is QueueItem {
 		if (!isString(value.resumeToolCallId) || value.resumeToolCallId === '') return false
 		// A parked-ask pointer only ever accompanies a run target; a clarification resume has a run id but no tool call.
 		if (value.resumeRunId === undefined) return false
+	}
+	if (value.status === 'suspended') {
+		// A suspension keeps the run id and pause time and nothing from a settled or parked lifecycle: the run meta is the single source of truth for the cause.
+		if (value.runId === undefined) return false
+		if (value.suspendedAt === undefined) return false
+		if (value.settledAt !== undefined) return false
+		if (value.resultSummary !== undefined) return false
+		if (value.error !== undefined) return false
+		if (value.question !== undefined) return false
+		if (value.answer !== undefined) return false
+		if (value.resumeRunId !== undefined) return false
+		if (value.resumeToolCallId !== undefined) return false
+	} else if (value.suspendedAt !== undefined) {
+		return false
 	}
 	return true
 }
@@ -125,6 +144,7 @@ export function toQueueItemView(item: QueueItem): QueueItemView {
 		...(item.runId !== undefined ? { runId: item.runId } : {}),
 		...(item.resumeRunId !== undefined ? { resumesRunId: item.resumeRunId } : {}),
 		queuedAt: item.queuedAt,
+		...(item.suspendedAt !== undefined ? { suspendedAt: item.suspendedAt } : {}),
 		...(item.settledAt !== undefined ? { settledAt: item.settledAt } : {}),
 		...(item.question !== undefined ? { question: item.question } : {}),
 		...(item.answer !== undefined ? { answer: item.answer } : {}),
@@ -288,6 +308,15 @@ export function terminateNeedsInputItem(queue: TaskQueue, id: string, settledAt:
 	return { ok: true, queue: withReplacedItem(queue, cancelled), item: cancelled }
 }
 
+// The operator's termination of a suspended item: like a parked item, the record becomes cancelled with its lineage preserved, so a stale dispatch can never re-enter the terminated run.
+export function terminateSuspendedItem(queue: TaskQueue, id: string, settledAt: string): QueueMutation {
+	const target = findById(queue, id)
+	if (target === undefined) return { ok: false, reason: 'not_found' }
+	if (target.status !== 'suspended') return { ok: false, reason: 'forbidden_status' }
+	const cancelled = cancelledItem(target, settledAt)
+	return { ok: true, queue: withReplacedItem(queue, cancelled), item: cancelled }
+}
+
 // The boot repair for the termination crash window: a needs_input item whose run was already terminalized interrupted but whose queue cancel never landed is cancelled on the next tick. Only a runId is consulted — continuesFrom is lineage and may name another terminal run — and every other status/meta combination is left untouched.
 export function repairNeedsInputItem(item: QueueItem, meta: RunMeta | null, settledAt: string): QueueItem | null {
 	if (item.status !== 'needs_input') return null
@@ -381,6 +410,19 @@ export function reactivateErrorItem(queue: TaskQueue, runId: string): QueueMutat
 	return { ok: true, queue: withReplacedItem(queue, reactivated), item: reactivated }
 }
 
+// The suspended resume's queue counterpart: the item returns to the active slot under the same run id and drops its pause stamp, so the resumed run's own settlement maps it exactly as any active item's would.
+export function reactivateSuspendedItem(queue: TaskQueue, runId: string): QueueMutation {
+	const target = queue.items.find((item) => item.status === 'suspended' && item.runId === runId)
+	if (target === undefined) return { ok: false, reason: 'not_found' }
+	const reactivated: QueueItem = {
+		...carriedFields(target),
+		...(target.continuesFrom !== undefined ? { continuesFrom: target.continuesFrom } : {}),
+		status: 'active',
+		runId,
+	}
+	return { ok: true, queue: withReplacedItem(queue, reactivated), item: reactivated }
+}
+
 export interface TerminalItemState {
 	status: 'done' | 'error' | 'needs_input'
 	resultSummary?: string
@@ -410,6 +452,7 @@ export function mapSettledItemState(meta: RunMeta): TerminalItemState | undefine
 
 export type SettlementOutcome =
 	| { kind: 'settled'; queue: TaskQueue; item: QueueItem }
+	| { kind: 'suspended'; queue: TaskQueue; item: QueueItem }
 	| { kind: 'unknown_run' }
 	| { kind: 'not_settleable' }
 
@@ -421,6 +464,29 @@ export function settleActiveItem(queue: TaskQueue, runId: string, meta: RunMeta,
 	if (mapped === undefined) return { kind: 'not_settleable' }
 	const item = settledItem(target, mapped, settledAt, runId)
 	return { kind: 'settled', queue: withReplacedItem(queue, item), item }
+}
+
+// Applies a suspension to the active item the paused run belongs to (matched by runId), preserving the run id and lineage while dropping every settled or parked field: the cause lives in the run meta, not the queue item.
+export function suspendActiveItem(queue: TaskQueue, runId: string, suspendedAt: string): SettlementOutcome {
+	const target = queue.items.find((item) => item.status === 'active' && item.runId === runId)
+	if (target === undefined) return { kind: 'unknown_run' }
+	const item = suspendedItem(target, suspendedAt, runId)
+	return { kind: 'suspended', queue: withReplacedItem(queue, item), item }
+}
+
+function suspendedItem(target: QueueItem, suspendedAt: string, runId: string): QueueItem {
+	return {
+		id: target.id,
+		task: target.task,
+		...(target.effort !== undefined ? { effort: target.effort } : {}),
+		...(target.involvement !== undefined ? { involvement: target.involvement } : {}),
+		...(target.logLevel !== undefined ? { logLevel: target.logLevel } : {}),
+		...(target.continuesFrom !== undefined ? { continuesFrom: target.continuesFrom } : {}),
+		status: 'suspended',
+		runId,
+		queuedAt: target.queuedAt,
+		suspendedAt,
+	}
 }
 
 function settledItem(target: QueueItem, mapped: TerminalItemState, settledAt: string, runId: string): QueueItem {
@@ -453,38 +519,58 @@ function settledItem(target: QueueItem, mapped: TerminalItemState, settledAt: st
 	}
 }
 
-export type ActiveItemRepair =
-	| { kind: 'settled'; item: QueueItem }
-	| { kind: 'released'; item: QueueItem }
-	| { kind: 'bound'; item: QueueItem }
-	| { kind: 'untouched'; item: QueueItem }
-
 // Boot repair for stale active items (docs/queueing.md state machine, the boot rows) — the terminal meta and the queue item are separate files with no cross-file atomicity, so a crash between the two writes leaves an active item needing repair:
 // - with a runId whose meta is terminal: settle from that meta, exactly the live mapping (the crash landed between the meta write and the settlement write).
-// - with a runId whose meta reads 'interrupted': the run was abandoned (reconciliation) or terminated (operator), not the task — release to waiting with the lineage re-pointed at the interrupted run for re-dispatch; an operator termination normally lands on a needs_input item, which repairNeedsInputItem cancels instead.
+// - with a runId whose meta reads 'interrupted': a superseded suspended run is cancelled so it cannot re-dispatch as a new continuation; any other interrupted run was abandoned or terminated by the operator, not the task, so its item returns to waiting with the lineage re-pointed at the interrupted run. An operator termination normally lands on a needs_input item, which repairNeedsInputItem cancels instead.
 // - with a runId whose meta still reads 'running': the boot-resumed run's own item — untouched; its own settlement maps it.
 // - with a runId whose meta is unreadable (a phantom run directory): release to waiting rather than leave the item stuck active forever.
 // - with no runId (an orphaned dispatching marker): the run may or may not have started. The scheduler passes the boot-resumed run's meta (the unique 'running' meta) or null; the item binds to it when the task matches — identical task texts are interchangeable, since only the head is ever mid-dispatch — and returns to waiting otherwise.
 // - an answered item whose run settled 'needs_clarification' before the answer was delivered (the checkpoint still names the same tool call and question, or for a clarification pause the meta still names the answered question): release it to waiting so the answer retries instead of settling to needs_input and dropping it. A missing checkpoint means the answer was delivered and the run terminalized, so the normal mapping applies.
-export function repairActiveItem(item: QueueItem, meta: RunMeta | null, settledAt: string, pauseState: PauseState | null): ActiveItemRepair {
+export function repairActiveItem(item: QueueItem, meta: RunMeta | null, settledAt: string, pauseState: PauseState | null): QueueItem | null {
 	const runId = item.runId
 	if (runId !== undefined) {
-		if (meta === null) return { kind: 'released', item: releaseToWaiting(item) }
-		if (meta.status === 'running') return { kind: 'untouched', item }
+		if (meta === null) return releaseToWaiting(item)
+		if (meta.status === 'running') return null
+		// The suspended meta landed but the queue write did not: preserve the run binding and pause stamp instead of treating the pause as a stale work item.
+		if (meta.status === 'suspended') return suspendedItem(item, meta.suspension?.suspendedAt ?? settledAt, runId)
 		// Only a needs_clarification terminal can mean the answer is still undelivered: success/error prove the resumed run finished, and releasing those would rerun a done task. A re-park (different call, or a clarification checkpoint that already records this answer id) is delivered and settles normally.
 		if (meta.status === 'needs_clarification' && pendingAnswerUndelivered(item, pauseState, runId)) {
-			return { kind: 'released', item: releaseToWaiting(item) }
+			return releaseToWaiting(item)
 		}
-		if (meta.status === 'interrupted') return { kind: 'released', item: releaseToWaiting(item, runId) }
+		if (meta.status === 'interrupted') return isSupersededSuspendedRun(meta) ? cancelledItem(item, meta.endTime ?? settledAt) : releaseToWaiting(item, runId)
 		const mapped = mapSettledItemState(meta)
-		if (mapped === undefined) return { kind: 'untouched', item }
+		if (mapped === undefined) return null
 		// The settled time is the run's own endTime — when it actually finished — not the boot that noticed.
-		return { kind: 'settled', item: settledItem(item, mapped, meta.endTime ?? settledAt, runId) }
+		return settledItem(item, mapped, meta.endTime ?? settledAt, runId)
 	}
 	if (meta !== null && meta.status === 'running' && meta.task === item.task) {
-		return { kind: 'bound', item: { ...carriedFields(item), ...(item.continuesFrom !== undefined ? { continuesFrom: item.continuesFrom } : {}), status: 'active', runId: meta.runId } }
+		return { ...carriedFields(item), ...(item.continuesFrom !== undefined ? { continuesFrom: item.continuesFrom } : {}), status: 'active', runId: meta.runId }
 	}
-	return { kind: 'released', item: releaseToWaiting(item) }
+	return releaseToWaiting(item)
+}
+
+// Boot repair for suspended items (the queue rows of the suspended state machine): the meta and the item are separate files, so a crash can leave either side one step behind.
+// - a suspended meta keeps the item suspended (the normal durable pause).
+// - a running meta means the run was resumed just before the crash: bind the item back to the active slot so its own settlement maps it.
+// - a terminal meta means the crash landed after resume and settlement: settle from the meta exactly as the live mapping would.
+// - an interrupted meta, or a missing/unreadable meta, leaves no resumable run: cancel the item rather than dispatch a task whose run is gone.
+export function repairSuspendedItem(item: QueueItem, meta: RunMeta | null, settledAt: string): QueueItem | null {
+	if (item.status !== 'suspended') return null
+	const runId = item.runId
+	if (runId === undefined) return cancelledItem(item, settledAt)
+	if (meta === null) return cancelledItem(item, settledAt)
+	if (meta.status === 'suspended') return null
+	if (meta.status === 'running') {
+		return {
+			...carriedFields(item),
+			...(item.continuesFrom !== undefined ? { continuesFrom: item.continuesFrom } : {}),
+			status: 'active',
+			runId,
+		}
+	}
+	const mapped = mapSettledItemState(meta)
+	if (mapped === undefined) return cancelledItem(item, settledAt)
+	return settledItem(item, mapped, meta.endTime ?? settledAt, runId)
 }
 
 // The distilled run-list entry the briefing assembles from: the module's readRunListSummary leaf returns it (the web run-list summary is structurally compatible, so serve.ts passes its reader directly).

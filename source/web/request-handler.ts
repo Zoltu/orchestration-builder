@@ -1,10 +1,11 @@
 import type { ListRunIds, ProjectSettings, ReadProjectSettings, ReadRunMetaById, ReadRunPlanById, ReadRunSnapshotStats, RunCheckpointExists, WriteProjectSettings } from '../executor/persistence.js'
+import type { HealthView } from '../executor/index.js'
 import { isRunIdShape } from '../executor/run-id.js'
 import type { DeploymentConfig, EffortLevel, GuildConfig, InvolvementLevel, LogLevel, ToolManifest } from '../executor/types.js'
 import { isEffortLevel, isInvolvementLevel, isLogLevel, isObject, isTerminalRunStatus } from '../executor/validation.js'
 import type { QueueMutationOutcome, TaskQueueModule } from '../executor/queue/index.js'
 import type { RunState } from '../executor/run-state.js'
-import type { ResumeErroredRun, RunSubmission } from '../executor/run-submission.js'
+import type { ResumeErroredOrSuspendedRun, RunSubmission } from '../executor/run-submission.js'
 import { formatLogAsText, formatLogDetailSections } from '../run-log/format/index.js'
 import { filterLogEventsForInstance, foldLlmCallSent, paginateLogEvents } from '../run-log/window/index.js'
 import { parseRunMeta } from '../run-log/index.js'
@@ -41,12 +42,14 @@ export interface RequestHandlerConfig {
 	writeProjectSettings: WriteProjectSettings
 	// The durable task queue module (docs/queueing.md "The queue: storage, item model, state machine"): every /api/queue mutation and the POST /api/runs dispatch go through its contract, so the scheduler's crash-safety ordering is never bypassed by a handler.
 	taskQueue: TaskQueueModule
-	// The explicit resume of an error-ended run (docs/queueing.md "Resume of an errored run"), composed in serve.ts over the submission layer and the run/checkpoint/queue leaves.
-	resumeErroredRun: ResumeErroredRun
+	// The explicit resume of an error-ended or suspended run (docs/queueing.md "Resume of an errored or suspended run"), composed in serve.ts over the submission layer and the run/checkpoint/queue leaves.
+	resumeErroredOrSuspendedRun: ResumeErroredOrSuspendedRun
 	// The bare existence check behind the run view's resumable flag: one stat per run-view request.
 	runCheckpointExists: RunCheckpointExists
 	// The baked image build identifier, read once at startup (null without a baked build-info); surfaced through GET /api/config.
 	build: BuildInfo | null
+	// The coarse provider health reader for GET /api/health. It is a plain function over the gate, never the gate itself, and carries no endpoint, credential, model, header, request, or provider body.
+	readHealth: () => HealthView
 	// The flow endpoint's entity-diff responder: a per-run server replica (see flow-feed) answers the base flow route with `unchanged`/`delta`/`snapshot` instead of re-sending the whole model each poll.
 	flowFeedResponder: FlowFeedResponder
 	// The run-list endpoint's entity-diff responder: a single server replica (see run-list-feed) answers GET /api/runs with `unchanged`/`delta`/`snapshot` instead of re-sending the whole list each poll.
@@ -95,10 +98,10 @@ function jsonNoStore(payload: unknown): Response {
 	})
 }
 
-function handleActiveRun(readRunSnapshot: ReadRunSnapshot, readRunSnapshotStats: ReadRunSnapshotStats, readRunPlanById: ReadRunPlanById, runCheckpointExists: RunCheckpointExists, runSubmission: RunSubmission, runState: RunState): Response {
+function handleActiveRun(readRunSnapshot: ReadRunSnapshot, readRunSnapshotStats: ReadRunSnapshotStats, readRunPlanById: ReadRunPlanById, runCheckpointExists: RunCheckpointExists, readHealth: () => HealthView, runSubmission: RunSubmission, runState: RunState): Response {
 	const runId = runSubmission.lastRunId()
 	if (runId === undefined) return json({ ok: false, error: 'no_run' }, 404)
-	const view = runViewFor(readRunSnapshot, readRunSnapshotStats, readRunPlanById, runCheckpointExists, runId)
+	const view = runViewFor(readRunSnapshot, readRunSnapshotStats, readRunPlanById, runCheckpointExists, readHealth, runId)
 	if (view === null) return json({ ok: false, error: 'not_found' }, 404)
 	return json({ ...view, interruptPending: runState.interruptPending() })
 }
@@ -116,6 +119,7 @@ function handleGetRunByIdVersioned(request: Request, runId: string, dependencies
 	runState: RunState
 	activeRunId: () => string | undefined
 	readRunSnapshot: ReadRunSnapshot
+	readHealth: () => HealthView
 }): Response {
 	const inputs = gatherRunViewInputs(dependencies, runId)
 	if (inputs === null) return json({ ok: false, error: 'not_found' }, 404)
@@ -224,11 +228,11 @@ function handleGetRunFlowVersioned(request: Request, runId: string, query: URLSe
 	return jsonNoStore(dependencies.flowFeedResponder(runId, buildFlowModel(inputs, dependencies), query.get('have')))
 }
 
-function runViewFor(readRunSnapshot: ReadRunSnapshot, readRunSnapshotStats: ReadRunSnapshotStats, readRunPlanById: ReadRunPlanById, runCheckpointExists: RunCheckpointExists, runId: string): ReturnType<typeof renderRunView> | null {
+function runViewFor(readRunSnapshot: ReadRunSnapshot, readRunSnapshotStats: ReadRunSnapshotStats, readRunPlanById: ReadRunPlanById, runCheckpointExists: RunCheckpointExists, readHealth: () => HealthView, runId: string): ReturnType<typeof renderRunView> | null {
 	if (!isKnownRun(readRunSnapshotStats, runId)) return null
 	const snapshot = readRunSnapshot(runId)
 	// The plan is read per request rather than riding the snapshot cache: it is a separate document the run may gain mid-flight, and the file is small enough that re-reading is free.
-	return renderRunView(snapshot, { maxLogLines: MAX_LOG_LINES, plan: readRunPlanById(runId), checkpointExists: runCheckpointExists(runId) })
+	return renderRunView(snapshot, { maxLogLines: MAX_LOG_LINES, plan: readRunPlanById(runId), checkpointExists: runCheckpointExists(runId), providerHealth: readHealth() })
 }
 
 // Feeds the scenario's first `frameIndex + 1` events through the real adapter — the same derivation the product's `/api/runs/:id/flow` runs — so the demo harness exercises the product's `LogEvent → InteractionModel` path rather than authored model frames. `?operation=<id>` resolves one operation's details the same way the product's flow endpoint does, so the harness's inspector fetches on demand like the product client.
@@ -266,9 +270,10 @@ function handleListRuns(query: URLSearchParams, dependencies: {
 	listRunIds: ListRunIds
 	readRunListSummary: ReadRunListSummary
 	runListFeedResponder: RunListFeedResponder
+	readHealth: () => HealthView
 }): Response {
 	const summaries = dependencies.listRunIds().map((runId) => dependencies.readRunListSummary(runId))
-	return jsonNoStore(dependencies.runListFeedResponder(summaries, query.get('have')))
+	return jsonNoStore(dependencies.runListFeedResponder(summaries, dependencies.readHealth(), query.get('have')))
 }
 
 function handleAnswer(runState: RunState, body: unknown): Response {
@@ -300,7 +305,7 @@ function handleInterrupt(runState: RunState, runSubmission: RunSubmission, runId
 	return json({ ok: false, error: 'run_not_active' }, 409)
 }
 
-// POST /api/runs keeps today's external contract exactly (docs/queueing.md "HTTP API") while every run becomes queue-tracked: the validated task is enqueued at the head of the durable queue and the scheduler — the only caller of submission — dispatches it within the same request when the slot is free, so the response is still 201 { runId }. The request's effort, involvement, logLevel, and continuesFrom are recorded on the item and thread into the dispatched run. When a run is in flight the request is refused with nothing enqueued, exactly today's 409.
+// POST /api/runs keeps today's external contract exactly (docs/queueing.md "HTTP API") while every run becomes queue-tracked: the validated task is enqueued at the head of the durable queue and the scheduler — the only caller of submission — dispatches it within the same request when the slot is free, so the response is still 201 { runId }. The request's effort, involvement, logLevel, and continuesFrom are recorded on the item and thread into the dispatched run. When a run is in flight or suspended the request is refused with nothing enqueued, exactly today's 409.
 async function handleCreateRun(taskQueue: TaskQueueModule, readRunMetaById: ReadRunMetaById, body: unknown): Promise<Response> {
 	if (!isObject(body)) return json({ ok: false, error: 'invalid_body' }, 400)
 	const continuesFromValue = body['continuesFrom']
@@ -328,6 +333,8 @@ async function handleCreateRun(taskQueue: TaskQueueModule, readRunMetaById: Read
 	)
 	if (result.kind === 'invalid') return json({ ok: false, error: 'invalid_body' }, 400)
 	if (result.kind === 'busy') return json({ ok: false, error: 'run_in_progress' }, 409)
+	if (result.kind === 'run_suspended') return json({ ok: false, error: 'run_suspended' }, 409)
+	if (result.kind === 'provider_unavailable') return json({ ok: false, error: 'provider_unavailable' }, 409)
 	if (result.kind === 'collision') return json({ ok: false, error: 'run_id_collision' }, 409)
 	return json({ runId: result.runId }, 201)
 }
@@ -350,14 +357,15 @@ async function parseResumeBody(request: Request): Promise<{ ok: true; note?: str
 	return { ok: true, note: noteValue }
 }
 
-// The explicit resume of an error-ended run: same-run-id continuation from the kept checkpoint (docs/queueing.md "Resume of an errored run"). Status codes follow the API's conventions — an unknown run is 404, a state conflict (not errored, no checkpoint, run in flight) is 409 — and the checkpoint-missing conflict names the briefed-continuation alternative, which stays the fallback for runs without a checkpoint.
-function handleResumeErroredRun(resumeErroredRun: ResumeErroredRun, runId: string, note: string | undefined): Response {
-	const result = resumeErroredRun(runId, note)
+// The explicit resume of an error-ended or suspended run: same-run-id continuation from the kept checkpoint (docs/queueing.md "Resume of an errored or suspended run" and the suspended resume). Status codes follow the API's conventions — an unknown run is 404, a state conflict (wrong status, no checkpoint, run in flight) is 409 — and the checkpoint-missing conflict names the briefed-continuation alternative, which stays the fallback for runs without a checkpoint.
+function handleResumeErroredOrSuspendedRun(resumeErroredOrSuspendedRun: ResumeErroredOrSuspendedRun, runId: string, note: string | undefined): Response {
+	const result = resumeErroredOrSuspendedRun(runId, note)
 	if (result.ok) return json({ runId: result.runId }, 201)
 	if (result.error === 'run_not_found') return json({ ok: false, error: 'not_found' }, 404)
 	if (result.error === 'run_in_progress') return json({ ok: false, error: 'run_in_progress' }, 409)
+	if (result.error === 'run_suspended') return json({ ok: false, error: 'run_suspended' }, 409)
 	if (result.error === 'checkpoint_missing') return json({ ok: false, error: 'checkpoint_missing', message: 'This run has no resumable checkpoint. Continue it as a new run instead: POST /api/runs with "continuesFrom" set to this run id.' }, 409)
-	return json({ ok: false, error: 'run_not_errored' }, 409)
+	return json({ ok: false, error: 'run_not_resumable' }, 409)
 }
 
 // --- /api/queue (docs/queueing.md "HTTP API") --------------------------------
@@ -409,9 +417,22 @@ function handleDeleteQueueItem(taskQueue: TaskQueueModule, itemId: string): Resp
 	return queueMutationResponse(taskQueue.cancel(itemId, new Date().toISOString()))
 }
 
-// The operator's termination of a parked task: cancels the needs_input item and terminalizes its run with the checkpoint removed, so neither the queue nor a stale resume can answer it. No body is read.
-function handleTerminateQueueItem(taskQueue: TaskQueueModule, itemId: string): Response {
-	return queueMutationResponse(taskQueue.terminate(itemId, new Date().toISOString()))
+// The operator's termination of a parked or suspended task: cancels the needs_input or suspended item and terminalizes its run with the checkpoint removed, so neither the queue nor a stale answer or resume can re-enter it. No body is read.
+async function handleTerminateQueueItem(taskQueue: TaskQueueModule, itemId: string): Promise<Response> {
+	return queueMutationResponse(await taskQueue.terminate(itemId, new Date().toISOString()))
+}
+
+// The run-level termination for a suspended run: addresses the run rather than a queue item, so a pause whose item was lost can still be ended. Status gating is the run meta's: unknown is 404, an active run is 409 run_in_progress, and any status other than suspended is 409 run_not_suspended. The queue half cancels a suspended item if one exists and ticks after the pause is released.
+async function handleTerminateSuspendedRun(taskQueue: TaskQueueModule, runSubmission: RunSubmission, readRunMetaById: ReadRunMetaById, runId: string): Promise<Response> {
+	if (runSubmission.activeRunId() !== undefined) return json({ ok: false, error: 'run_in_progress' }, 409)
+	const meta = parseRunMeta(readRunMetaById(runId))
+	if (meta === null) return json({ ok: false, error: 'not_found' }, 404)
+	if (meta.status === 'running') return json({ ok: false, error: 'run_in_progress' }, 409)
+	if (meta.status !== 'suspended') return json({ ok: false, error: 'run_not_suspended' }, 409)
+	const result = await taskQueue.terminateSuspendedRun(runId, new Date().toISOString())
+	if (result.ok) return json({ runId: result.runId }, 200)
+	if (result.error === 'not_found') return json({ ok: false, error: 'not_found' }, 404)
+	return json({ ok: false, error: 'run_not_suspended' }, 409)
 }
 
 // The queue-native resume: the answer moves the needs_input item to the front of the waiting list and the tick resumes the same parked run, delivering the answer as its ask_human tool result. When the parked checkpoint is missing, the answer falls back to the briefed continuation this route has always dispatched.
@@ -463,10 +484,11 @@ export function createRequestHandler(config: RequestHandlerConfig, serveStatic: 
 	const readProjectSettings = config.readProjectSettings
 	const writeProjectSettings = config.writeProjectSettings
 	const taskQueue = config.taskQueue
-	const resumeErroredRun = config.resumeErroredRun
+	const resumeErroredOrSuspendedRun = config.resumeErroredOrSuspendedRun
 	const runCheckpointExists = config.runCheckpointExists
 	const flowFeedResponder = config.flowFeedResponder
 	const runListFeedResponder = config.runListFeedResponder
+	const readHealth = config.readHealth
 
 	// The leaf set the two versioned poll endpoints share; each named handler accepts the subset it directly uses, so the superset is assignable structurally.
 	const versionedDependencies = {
@@ -477,6 +499,7 @@ export function createRequestHandler(config: RequestHandlerConfig, serveStatic: 
 		runState,
 		activeRunId: runSubmission.activeRunId,
 		flowFeedResponder,
+		readHealth,
 	}
 
 	// The run list's leaves: unlike the versioned endpoints it derives no version token server-side (the feed's revision is the revalidation), so it needs only the run-id listing, the summary reader, and its responder.
@@ -484,6 +507,7 @@ export function createRequestHandler(config: RequestHandlerConfig, serveStatic: 
 		listRunIds,
 		readRunListSummary,
 		runListFeedResponder,
+		readHealth,
 	}
 
 	return async (request) => {
@@ -492,10 +516,11 @@ export function createRequestHandler(config: RequestHandlerConfig, serveStatic: 
 
 		if (request.method === 'GET') {
 			if (pathname === '/api/config') return json(renderConfig(guildConfig, deployment, config.tools, config.build))
+			if (pathname === '/api/health') return jsonNoStore(readHealth())
 			if (pathname === '/api/queue') return handleGetQueue(taskQueue)
 			if (pathname === '/api/settings') return handleGetSettings(readProjectSettings)
 			if (pathname === '/api/run/flow') return handleActiveRunFlow(readRunSnapshot, readRunSnapshotStats, flowFeedResponder, runSubmission, url.searchParams)
-			if (pathname === '/api/run') return handleActiveRun(readRunSnapshot, readRunSnapshotStats, readRunPlanById, runCheckpointExists, runSubmission, runState)
+			if (pathname === '/api/run') return handleActiveRun(readRunSnapshot, readRunSnapshotStats, readRunPlanById, runCheckpointExists, readHealth, runSubmission, runState)
 			if (pathname === '/api/runs') return handleListRuns(url.searchParams, runListDependencies)
 			if (pathname.startsWith('/api/runs/')) {
 				const rest = decodePathSegment(pathname.slice('/api/runs/'.length))
@@ -574,7 +599,12 @@ export function createRequestHandler(config: RequestHandlerConfig, serveStatic: 
 				if (runId === undefined || runId === '' || runId.includes('/') || !isRunIdShape(runId)) return json({ ok: false, error: 'not_found' }, 404)
 				const body = await parseResumeBody(request)
 				if (!body.ok) return json({ ok: false, error: 'invalid_body' }, 400)
-				return handleResumeErroredRun(resumeErroredRun, runId, body.note)
+				return handleResumeErroredOrSuspendedRun(resumeErroredOrSuspendedRun, runId, body.note)
+			}
+			if (pathname.startsWith('/api/runs/') && pathname.endsWith('/terminate')) {
+				const runId = decodePathSegment(pathname.slice('/api/runs/'.length, pathname.length - '/terminate'.length))
+				if (runId === undefined || runId === '' || runId.includes('/') || !isRunIdShape(runId)) return json({ ok: false, error: 'not_found' }, 404)
+				return handleTerminateSuspendedRun(taskQueue, runSubmission, readRunMetaById, runId)
 			}
 			if (pathname === '/api/answer') {
 				const body = await readJsonBody(request)

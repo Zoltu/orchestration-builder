@@ -4,6 +4,8 @@ import type { LoadedGuild } from '../loader.js'
 import type { RoleRegistryEntry } from '../role-registry.js'
 import type { LogEvent, Message } from '../types.js'
 import { createInvocationJournal } from '../invocation.js'
+import { createNoopCheckpointRecorder } from '../test-fixtures.js'
+import { createInterruptQueue } from '../interrupts.js'
 import { isObject } from '../validation.js'
 import { createContextManager, createContextPressureTracker, type ContextManager } from './index.js'
 
@@ -63,6 +65,8 @@ function managerFor(context: EngineContext, tracker = createContextPressureTrack
 		appendLog: (event) => events.push(event),
 		contextPressureTracker: tracker,
 		invocationJournal: createInvocationJournal((event) => events.push(event)),
+		checkpointRecorder: createNoopCheckpointRecorder(),
+		interruptQueue: createInterruptQueue(),
 		runRole: async () => {
 			throw new Error('context handler invoked by a test that configured none')
 		},
@@ -162,9 +166,11 @@ describe('context handler interlude', () => {
 			appendLog: (event) => events.push(event),
 			contextPressureTracker: createContextPressureTracker(),
 			invocationJournal: createInvocationJournal((event) => events.push(event)),
+			checkpointRecorder: createNoopCheckpointRecorder(),
+			interruptQueue: createInterruptQueue(),
 			runRole: async (handlerContext) => {
 				handlerContexts.push(handlerContext)
-				return { status: 'success', summary: 'trimmed the stale turn' }
+				return { kind: 'card', card: { status: 'success', summary: 'trimmed the stale turn' } }
 			},
 		})
 		const roleState = roleStateFor()
@@ -194,7 +200,9 @@ describe('context handler interlude', () => {
 			appendLog: () => {},
 			contextPressureTracker: createContextPressureTracker(),
 			invocationJournal: createInvocationJournal(() => {}),
-			runRole: async () => ({ status: 'error', summary: 'cannot compact' }),
+			checkpointRecorder: createNoopCheckpointRecorder(),
+			interruptQueue: createInterruptQueue(),
+			runRole: async () => ({ kind: 'card', card: { status: 'error', summary: 'cannot compact' } }),
 		})
 		const roleState = roleStateFor()
 		manager.observeSuccess(roleState, { promptTokens: 800, completionTokens: 0 })
@@ -212,9 +220,11 @@ describe('context handler interlude', () => {
 			appendLog: (event) => events.push(event),
 			contextPressureTracker: createContextPressureTracker(),
 			invocationJournal: createInvocationJournal((event) => events.push(event)),
+			checkpointRecorder: createNoopCheckpointRecorder(),
+			interruptQueue: createInterruptQueue(),
 			runRole: async (handlerContext) => {
 				handlerContexts.push(handlerContext)
-				return { status: 'success', summary: 'pruned the rejected turn' }
+				return { kind: 'card', card: { status: 'success', summary: 'pruned the rejected turn' } }
 			},
 		})
 		const roleState = roleStateFor()
@@ -249,10 +259,12 @@ describe('context handler interlude', () => {
 			appendLog: (event) => events.push(event),
 			contextPressureTracker: createContextPressureTracker(),
 			invocationJournal: createInvocationJournal((event) => events.push(event)),
+			checkpointRecorder: createNoopCheckpointRecorder(),
+			interruptQueue: createInterruptQueue(),
 			runRole: async (handlerContext) => {
 				handlerTasks.push(handlerContext.task)
 				const summary = handlerContext.task.includes('exceeding the context window') ? 'compacted overflow' : 'compacted pressure'
-				return { status: 'success', summary }
+				return { kind: 'card', card: { status: 'success', summary } }
 			},
 		})
 		const roleState = roleStateFor()
@@ -284,9 +296,11 @@ describe('context handler interlude', () => {
 			appendLog: () => {},
 			contextPressureTracker: createContextPressureTracker(),
 			invocationJournal: createInvocationJournal(() => {}),
+			checkpointRecorder: createNoopCheckpointRecorder(),
+			interruptQueue: createInterruptQueue(),
 			runRole: async (handlerContext) => {
 				handlerContexts.push(handlerContext)
-				return { status: 'success', summary: 'clamped' }
+				return { kind: 'card', card: { status: 'success', summary: 'clamped' } }
 			},
 		})
 		const roleState = roleStateFor()
@@ -304,7 +318,9 @@ describe('context handler interlude', () => {
 			appendLog: (event) => events.push(event),
 			contextPressureTracker: createContextPressureTracker(),
 			invocationJournal: createInvocationJournal((event) => events.push(event)),
-			runRole: async () => ({ status: 'error', summary: 'cannot compact' }),
+			checkpointRecorder: createNoopCheckpointRecorder(),
+			interruptQueue: createInterruptQueue(),
+			runRole: async () => ({ kind: 'card', card: { status: 'error', summary: 'cannot compact' } }),
 		})
 		const history: Message[] = [
 			{ role: 'system', content: 'sys' },
@@ -331,7 +347,9 @@ describe('context handler interlude', () => {
 			appendLog: () => {},
 			contextPressureTracker: createContextPressureTracker(),
 			invocationJournal: createInvocationJournal(() => {}),
-			runRole: async () => ({ status: 'error', summary: 'cannot compact' }),
+			checkpointRecorder: createNoopCheckpointRecorder(),
+			interruptQueue: createInterruptQueue(),
+			runRole: async () => ({ kind: 'card', card: { status: 'error', summary: 'cannot compact' } }),
 		})
 		const prefix: Message[] = [
 			{ role: 'system', content: 'sys' },

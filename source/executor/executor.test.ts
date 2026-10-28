@@ -9,7 +9,7 @@ import { createInterruptQueue } from './interrupts.ts'
 import type { LlmCallResult, LlmCaller, LlmRequest } from './llm.ts'
 import type { LoadedGuild } from './loader.ts'
 import type { AppendLog, DeleteCheckpoint, RunDirectory, WriteCheckpoint, WriteMeta } from './persistence.ts'
-import { createFakeRoleSnapshotStore, createFixtureToolPlatform, stubHumanBackend, recordingHumanBackend, defined, makeScriptedRunner } from './test-fixtures.ts'
+import { createFakeRoleSnapshotStore, createFixtureToolPlatform, createProviderFailure as providerFailure, stubHumanBackend, recordingHumanBackend, defined, makeScriptedRunner } from './test-fixtures.ts'
 
 function success(toolCalls: ToolCall[], opts: { content?: string } = {}): LlmCallResult {
 	return {
@@ -192,6 +192,81 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 describe('runExecutor', () => {
+	test('a provider failure writes a suspended meta and keeps the checkpoint', async () => {
+		const guild = buildLoadedGuild({ main: { systemPrompt: 'p', tools: ['finish'] } }, 'main')
+		const llm = new FakeLlm()
+		llm.responses = [providerFailure()]
+		const persistence = makeFakePersistence()
+		const deps = makeDeps(llm, persistence, guild)
+
+		const meta = await runExecutor(deps, { runId: 'r-suspended', guildPath: '/guild', task: 'do it', effort: 'standard', involvement: 'early-engagement' })
+
+		expect(meta.status).toBe('suspended')
+		expect(meta.suspension?.category).toBe('billing')
+		expect(meta.suspension?.resumePolicy).toBe('operator')
+		expect(meta.endTime).toBeUndefined()
+		expect(meta.result).toBeUndefined()
+		expect(meta.error).toBeUndefined()
+		expect(persistence.state.deleteCheckpointCalls).toBe(0)
+		expect(persistence.state.checkpoints.length).toBeGreaterThan(0)
+	})
+
+	test('a re-suspension carries the prior auto-resume attempt count forward', async () => {
+		const guild = buildLoadedGuild({ main: { systemPrompt: 'p', tools: ['finish'] } }, 'main')
+		const llm = new FakeLlm()
+		llm.responses = [providerFailure('transient')]
+		const persistence = makeFakePersistence()
+		const deps = makeDeps(llm, persistence, guild)
+
+		const first = await runExecutor(deps, { runId: 'r-resuspend', guildPath: '/guild', task: 'do it', effort: 'standard', involvement: 'early-engagement' })
+		expect(first.suspension?.resumeAttempts).toBe(1)
+		const checkpoint = defined(persistence.state.checkpoints[persistence.state.checkpoints.length - 1], 'first suspension checkpoint')
+
+		llm.responses = [providerFailure('transient')]
+		const second = await resumeExecutor(deps, checkpoint, { guildPath: '/guild', priorSuspension: first.suspension })
+		expect(second.status).toBe('suspended')
+		expect(second.suspension?.resumeAttempts).toBe(2)
+	})
+
+	test('the checkpoint suspension record is written before the meta and cleared on resume', async () => {
+		const guild = buildLoadedGuild({ main: { systemPrompt: 'p', tools: ['finish'] } }, 'main')
+		const llm = new FakeLlm()
+		llm.responses = [providerFailure('transient')]
+		const persistence = makeFakePersistence()
+		const deps = makeDeps(llm, persistence, guild)
+
+		const first = await runExecutor(deps, { runId: 'r-crash-window', guildPath: '/guild', task: 'do it', effort: 'standard', involvement: 'early-engagement' })
+		const suspensionCheckpoints = persistence.state.checkpoints.filter((checkpoint) => checkpoint.suspension !== undefined)
+		expect(suspensionCheckpoints).toHaveLength(1)
+		expect(suspensionCheckpoints[0]?.suspension?.resumeAttempts).toBe(1)
+		const checkpoint = defined(persistence.state.checkpoints[persistence.state.checkpoints.length - 1], 'suspension checkpoint')
+
+		llm.responses = [success([{ id: 'f1', type: 'function', function: { name: 'finish', arguments: JSON.stringify({ status: 'success', summary: 'recovered' }) } }])]
+		const meta = await resumeExecutor(deps, checkpoint, { guildPath: '/guild', priorSuspension: first.suspension })
+		expect(meta.status).toBe('success')
+		expect(persistence.state.checkpoints.at(-1)?.suspension).toBeUndefined()
+	})
+
+	test('a resume from a suspended checkpoint writes running without a suspension and then completes', async () => {
+		const guild = buildLoadedGuild({ main: { systemPrompt: 'p', tools: ['finish'] } }, 'main')
+		const llm = new FakeLlm()
+		llm.responses = [providerFailure()]
+		const persistence = makeFakePersistence()
+		const deps = makeDeps(llm, persistence, guild)
+
+		await runExecutor(deps, { runId: 'r-resume-suspended', guildPath: '/guild', task: 'do it', effort: 'standard', involvement: 'early-engagement' })
+		const checkpoint = defined(persistence.state.checkpoints[persistence.state.checkpoints.length - 1], 'suspended checkpoint')
+
+		llm.responses = [success([{ id: 'f1', type: 'function', function: { name: 'finish', arguments: JSON.stringify({ status: 'success', summary: 'recovered' }) } }])]
+		const meta = await resumeExecutor(deps, checkpoint, { guildPath: '/guild' })
+
+		expect(meta.status).toBe('success')
+		expect(meta.suspension).toBeUndefined()
+		expect(meta.result?.summary).toBe('recovered')
+		const runningWithSuspension = persistence.state.metas.filter((written) => written.status === 'running' && written.suspension !== undefined)
+		expect(runningWithSuspension).toHaveLength(0)
+	})
+
 	test('happy path: creates run dir, loads Guild, runs entry, writes meta', async () => {
 		const guild = buildLoadedGuild(
 			{ main: { systemPrompt: 'p', tools: ['finish'] } },

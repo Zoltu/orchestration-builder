@@ -56,7 +56,8 @@ export function parseSseDataPayload(line: string): SseDataPayload {
 	if (payload === '[DONE]') return { kind: 'done' }
 	const parsed = safeJsonParse(payload)
 	if (!parsed.ok || !isObject(parsed.value)) return { kind: 'skip' }
-	// A Responses event always carries a string type; a bare {"error": ...} line (llama.cpp's mid-stream failure shape) has none, so type wins when both are somehow present.
+	// A Responses event always carries a string type; an explicit error type is the provider's in-band failure shape, and a bare {"error": ...} line (llama.cpp's mid-stream failure shape) has no type at all.
+	if (parsed.value['type'] === 'error') return { kind: 'error', value: parsed.value }
 	if (typeof parsed.value['type'] === 'string') return { kind: 'event', value: parsed.value }
 	if ('error' in parsed.value) return { kind: 'error', value: parsed.value }
 	return { kind: 'skip' }

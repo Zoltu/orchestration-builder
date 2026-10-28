@@ -2,6 +2,7 @@
 
 import type { ReadRunPlanById, ReadRunSnapshotStats, RunCheckpointExists } from '../executor/persistence.js'
 import type { RunState } from '../executor/run-state.js'
+import type { HealthView } from '../executor/index.js'
 import type { InteractionModel, InteractionOperationDetail } from './interaction-model-adapter.js'
 import { deriveInteractionModel, deriveInteractionOperationDetail } from './interaction-model-adapter.js'
 import { renderRunView, type RunView } from './render.js'
@@ -20,6 +21,8 @@ export type RunViewInputs = {
 	plan: string | null
 	checkpointExists: boolean
 	interruptPending: boolean
+	// The same snapshot feeds both the version token and the payload, so a health change between the two reads cannot make the ETag describe a different banner.
+	providerHealth: HealthView
 }
 
 export interface RunViewWithInterrupt extends RunView {
@@ -34,6 +37,7 @@ export function gatherRunViewInputs(
 		runCheckpointExists: RunCheckpointExists
 		runState: RunState
 		activeRunId: () => string | undefined
+		readHealth: () => HealthView
 	},
 	runId: string,
 ): RunViewInputs | null {
@@ -46,11 +50,12 @@ export function gatherRunViewInputs(
 		plan: dependencies.readRunPlanById(runId),
 		checkpointExists: dependencies.runCheckpointExists(runId),
 		interruptPending: dependencies.activeRunId() === runId && dependencies.runState.interruptPending(),
+		providerHealth: dependencies.readHealth(),
 	}
 }
 
 export function buildRunView(inputs: RunViewInputs, dependencies: { readRunSnapshot: ReadRunSnapshot }): RunViewWithInterrupt {
-	const view = renderRunView(dependencies.readRunSnapshot(inputs.runId), { maxLogLines: MAX_LOG_LINES, plan: inputs.plan, checkpointExists: inputs.checkpointExists })
+	const view = renderRunView(dependencies.readRunSnapshot(inputs.runId), { maxLogLines: MAX_LOG_LINES, plan: inputs.plan, checkpointExists: inputs.checkpointExists, providerHealth: inputs.providerHealth })
 	return { ...view, interruptPending: inputs.interruptPending }
 }
 

@@ -110,7 +110,7 @@ describe('renderRunView', () => {
 		expect(renderRunView(inProgress, { maxLogLines: 200 }).continuesFrom).toBeNull()
 	})
 
-	test('resumable is true only for an error meta the caller found a checkpoint file for', () => {
+	test('resumable is true for an error meta the caller found a checkpoint file for', () => {
 		const errored = parseSnapshot({ metaText: JSON.stringify(sampleRunMeta({ status: 'error' })), logText: '' })
 		expect(renderRunView(errored, { maxLogLines: 200, checkpointExists: true }).resumable).toBe(true)
 		expect(renderRunView(errored, { maxLogLines: 200, checkpointExists: false }).resumable).toBe(false)
@@ -121,6 +121,20 @@ describe('renderRunView', () => {
 
 		const missingMeta = parseSnapshot({ metaText: null, logText: '' })
 		expect(renderRunView(missingMeta, { maxLogLines: 200, checkpointExists: true }).resumable).toBe(false)
+	})
+
+	test('resumable is also true for a suspended meta with a checkpoint', () => {
+		const suspended = parseSnapshot({
+			metaText: JSON.stringify({
+				...sampleRunMeta(),
+				status: 'suspended',
+				endTime: undefined,
+				suspension: { category: 'billing', resumePolicy: 'operator', message: 'Top up and resume.', suspendedAt: '2026-01-01T00:02:00.000Z' },
+			}),
+			logText: '',
+		})
+		expect(renderRunView(suspended, { maxLogLines: 200, checkpointExists: true }).resumable).toBe(true)
+		expect(renderRunView(suspended, { maxLogLines: 200, checkpointExists: false }).resumable).toBe(false)
 	})
 
 	test('carries the raw plan markdown through to the view, or null when the caller read none', () => {
@@ -355,6 +369,7 @@ describe('renderRunSummary', () => {
 			result: null,
 			error: null,
 			continuesFrom: null,
+			suspension: null,
 			summary: null,
 		})
 	})
@@ -372,6 +387,7 @@ describe('renderRunSummary', () => {
 			result: null,
 			error: null,
 			continuesFrom: null,
+			suspension: null,
 			summary: null,
 		})
 	})
@@ -599,5 +615,35 @@ describe('renderConfig', () => {
 	test('reports build as null when the process has none', () => {
 		const view = renderConfig(sampleGuildConfig(), sampleDeployment(), {}, null)
 		expect(view.build).toBeNull()
+	})
+})
+
+describe('suspended fields in the run views', () => {
+	const suspension = { category: 'billing' as const, resumePolicy: 'operator' as const, message: 'Top up.', suspendedAt: '2026-01-01T00:02:00.000Z' }
+	const providerHealth = { provider: { state: 'unavailable' as const, category: 'billing' as const, since: '2026-01-01T00:00:00.000Z', lastCheckedAt: '2026-01-01T00:01:00.000Z', consecutiveFailures: 2 }, suspendedRunId: 'run-1', resumePolicy: 'operator' as const }
+
+	test('renderRunView carries the suspension record and the supplied health view', () => {
+		const snapshot = parseSnapshot({
+			metaText: JSON.stringify({ ...sampleRunMeta(), status: 'suspended', endTime: undefined, suspension }),
+			logText: '',
+		})
+		const view = renderRunView(snapshot, { maxLogLines: 200, checkpointExists: true, providerHealth })
+		expect(view.status).toBe('suspended')
+		expect(view.suspension).toEqual(suspension)
+		expect(view.endTime).toBeNull()
+		expect(view.result).toBeNull()
+		expect(view.error).toBeNull()
+		expect(view.resumable).toBe(true)
+		expect(view.providerHealth).toEqual(providerHealth)
+		expect(renderRunView(snapshot, { maxLogLines: 200 }).providerHealth).toBeNull()
+	})
+
+	test('renderRunSummary carries the suspension so history and the banner need no per-run fetch', () => {
+		const meta = parseRunMeta(JSON.stringify({ ...sampleRunMeta(), status: 'suspended', endTime: undefined, suspension }))
+		const summary = renderRunSummary('run-1', meta, null)
+		expect(summary.status).toBe('suspended')
+		expect(summary.suspension).toEqual(suspension)
+		const terminal = renderRunSummary('run-2', parseRunMeta(JSON.stringify(sampleRunMeta())), null)
+		expect(terminal.suspension).toBeNull()
 	})
 })

@@ -19,6 +19,23 @@ describe('deriveFaviconState', () => {
 		expect(deriveFaviconState([{ status: 'unknown' }], [])).toBe('working')
 	})
 
+	test('reads pending-input for operator-policy suspensions and waiting for an auto pause', () => {
+		expect(deriveFaviconState([{ status: 'suspended', suspension: { category: 'billing', resumePolicy: 'operator' } }], [])).toBe('pending-input')
+		expect(deriveFaviconState([{ status: 'suspended', suspension: { category: 'auth', resumePolicy: 'operator' } }], [])).toBe('pending-input')
+		expect(deriveFaviconState([{ status: 'suspended', suspension: { category: 'request_rejected', resumePolicy: 'operator' } }], [])).toBe('pending-input')
+		expect(deriveFaviconState([{ status: 'suspended', suspension: { category: 'unknown', resumePolicy: 'operator' } }], [])).toBe('pending-input')
+		expect(deriveFaviconState([{ status: 'suspended', suspension: { category: 'transient', resumePolicy: 'auto' } }], [])).toBe('waiting')
+	})
+
+	test('a transient pause downgraded to operator by the attempt cap reads as pending-input', () => {
+		expect(deriveFaviconState([{ status: 'suspended', suspension: { category: 'transient', resumePolicy: 'operator' } }], [])).toBe('pending-input')
+	})
+
+	test('a suspended run is never counted as a working run', () => {
+		expect(deriveFaviconState([{ status: 'suspended', suspension: { category: 'transient', resumePolicy: 'auto' } }, { status: 'success' }], [])).toBe('waiting')
+		expect(deriveFaviconState([{ status: 'suspended', suspension: { category: 'billing', resumePolicy: 'operator' } }, { status: 'success' }], [])).toBe('pending-input')
+	})
+
 	test('reads complete once every run is terminal', () => {
 		expect(deriveFaviconState([{ status: 'success' }, { status: 'error' }, { status: 'needs_clarification' }, { status: 'interrupted' }], [])).toBe('complete')
 	})
@@ -31,6 +48,11 @@ describe('deriveFaviconState', () => {
 	test('reads pending-input for a parked needs_input queue item even while a run is in progress and no question is pending', () => {
 		expect(deriveFaviconState([{ status: 'running' }], [], [queueItem({ status: 'needs_input' })])).toBe('pending-input')
 		expect(deriveFaviconState([], [], [queueItem({ status: 'needs_input' })])).toBe('pending-input')
+	})
+
+	test('a suspended queue item is operator-needed until a run summary reveals an auto policy', () => {
+		expect(deriveFaviconState([], [], [queueItem({ status: 'suspended' })])).toBe('pending-input')
+		expect(deriveFaviconState([{ status: 'suspended', suspension: { category: 'transient', resumePolicy: 'auto' } }], [], [queueItem({ status: 'suspended' })])).toBe('waiting')
 	})
 
 	test('a queue item that is not needs_input does not force pending-input', () => {
@@ -73,15 +95,15 @@ describe('faviconHref', () => {
 	})
 
 	test('the three states share the shape and differ only in the fill color', () => {
-		const bodies = (['pending-input', 'working', 'complete'] as const).map((state) => decodeURIComponent(faviconHref(state).slice('data:image/svg+xml,'.length)))
+		const bodies = (['pending-input', 'working', 'waiting', 'complete'] as const).map((state) => decodeURIComponent(faviconHref(state).slice('data:image/svg+xml,'.length)))
 		const colors = bodies.map((body) => body.match(/fill="([^"]+)"/)?.[1])
-		expect(colors).toEqual(['#f6d32d', '#c01c28', '#26a269'])
+		expect(colors).toEqual(['#f6d32d', '#c01c28', '#e5a50a', '#26a269'])
 		const shapes = bodies.map((body) => body.replace(/fill="[^"]+"/, 'fill="COLOR"'))
 		expect(new Set(shapes).size).toBe(1)
 	})
 
 	test('escapes the fill color so the URI carries no fragment', () => {
-		for (const state of ['pending-input', 'working', 'complete'] as const satisfies readonly FaviconState[]) {
+		for (const state of ['pending-input', 'working', 'waiting', 'complete'] as const satisfies readonly FaviconState[]) {
 			expect(faviconHref(state).includes('#')).toBe(false)
 		}
 	})

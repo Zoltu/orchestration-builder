@@ -3,7 +3,7 @@
 import { isObject } from './guards.js'
 
 // The queue item statuses (the wire contract, docs/queueing.md "The queue: storage, item model, state machine").
-type QueueItemStatus = 'waiting' | 'active' | 'needs_input' | 'done' | 'error' | 'cancelled'
+type QueueItemStatus = 'waiting' | 'active' | 'suspended' | 'needs_input' | 'done' | 'error' | 'cancelled'
 
 // The subset of a queue item the panel reads (the wire shape, docs/queueing.md "The queue: storage, item model, state machine").
 export interface QueueItemLike {
@@ -15,6 +15,8 @@ export interface QueueItemLike {
 	queuedAt: string
 	// Set when the item reaches done/error/cancelled.
 	settledAt?: string
+	// suspended: when the paused run entered its suspension.
+	suspendedAt?: string
 	// needs_input: the recorded question.
 	question?: string
 	// Set when the operator answers.
@@ -31,7 +33,7 @@ export interface QueueItemLike {
 	resumesRunId?: string
 }
 
-const QUEUE_ITEM_STATUSES: readonly QueueItemStatus[] = ['waiting', 'active', 'needs_input', 'done', 'error', 'cancelled']
+const QUEUE_ITEM_STATUSES: readonly QueueItemStatus[] = ['waiting', 'active', 'suspended', 'needs_input', 'done', 'error', 'cancelled']
 
 function isOptionalNonEmptyString(value: unknown): boolean {
 	return value === undefined || (typeof value === 'string' && value !== '')
@@ -49,31 +51,34 @@ export function isQueueItemLike(value: unknown): value is QueueItemLike {
 }
 
 export interface QueuedItems {
+	suspended: QueueItemLike[]
 	waiting: QueueItemLike[]
 	active: QueueItemLike[]
 	needsInput: QueueItemLike[]
 }
 
-// The queued rows the merged history screen shows above the run list, in display order: the waiting items head-first (the order they will run in), then the one active item, then the items parked on a question. Settled items (done/error/cancelled) get no row here — their runs carry the outcome in the history list below.
+// The queued rows the merged history screen shows above the run list, in display order: the suspended pause first (it outranks all waiting work), then the waiting items head-first (the order they will run in), then the one active item, then the items parked on a question. Settled items (done/error/cancelled) get no row here — their runs carry the outcome in the history list below.
 export function deriveQueuedItems(items: unknown[]): QueuedItems {
-	const queued: QueuedItems = { waiting: [], active: [], needsInput: [] }
+	const queued: QueuedItems = { suspended: [], waiting: [], active: [], needsInput: [] }
 	for (const item of items) {
 		if (!isQueueItemLike(item)) continue
-		if (item.status === 'waiting') queued.waiting.push(item)
+		if (item.status === 'suspended') queued.suspended.push(item)
+		else if (item.status === 'waiting') queued.waiting.push(item)
 		else if (item.status === 'active') queued.active.push(item)
 		else if (item.status === 'needs_input') queued.needsInput.push(item)
 	}
 	return queued
 }
 
-// The nav button's live count: the tasks that are not running yet and not finished — the backlog the operator can still act on.
+// The nav button's live count: the tasks that are not running yet and not finished — the backlog the operator can still act on. A suspended pause is backlog too: it blocks dispatch until resumed or terminated.
 export function backlogCount(items: QueueItemLike[]): number {
-	return items.filter((item) => item.status === 'waiting' || item.status === 'needs_input').length
+	return items.filter((item) => item.status === 'waiting' || item.status === 'needs_input' || item.status === 'suspended').length
 }
 
 const QUEUE_STATUS_LABELS: Record<string, string> = {
 	waiting: 'waiting',
 	active: 'running',
+	suspended: 'suspended',
 	needs_input: 'needs your answer',
 	done: 'done',
 	error: 'error',

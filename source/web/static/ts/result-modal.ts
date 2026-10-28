@@ -4,7 +4,7 @@
 //
 // `h` and `renderMarkdown` are passed in rather than imported so the component stays free of hyperapp and showdown coupling and is exercisable in tests with fakes (mirroring question-modal.js and the run-stage views). The close and copy-raw handlers are supplied by the caller: in the demo harness `onClose` clears the modal-open flag and `onCopyRaw` writes the JSON to the clipboard; in the product client `onClose` will clear the flag and `onCopyRaw` will POST or clipboard the raw object. The optional `onContinue` and `onResume` affordances are supplied the same way; Continue applies to every terminal outcome, while Resume applies only to a resumable error. The demo harness omits both.
 
-import { isTerminalStatus } from './interaction-model.js'
+import { isSuspendedStatus, isTerminalStatus } from './interaction-model.js'
 import { isObject } from './guards.js'
 import { LoadingIndicator } from './loading-indicator.js'
 import type { LooseH, Vnode, VnodeChildInput } from '../vendor/hyperapp.js'
@@ -33,7 +33,8 @@ export interface TerminalResult {
 export function deriveTerminalResult(runView: unknown): TerminalResult | undefined {
 	if (!isObject(runView)) return undefined
 	const status = runView['status']
-	if (typeof status !== 'string' || !isTerminalStatus(status)) return undefined
+	if (typeof status !== 'string' || isSuspendedStatus(status)) return undefined
+	if (!isTerminalStatus(status)) return undefined
 
 	const result = isObject(runView['result']) ? runView['result'] : null
 	const runError = isObject(runView['error']) ? runView['error'] : null

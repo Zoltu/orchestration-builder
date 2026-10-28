@@ -1,6 +1,6 @@
 import type { LlmCallResult, LlmRequest, LlmUsage, ResolvedModelConfig } from './types.js'
 import { createResponsesStreamAccumulator, createSseLineAssembler, mapHistoryToResponsesInput, mapTerminalResponseToCallResult, mapToolManifestsToResponsesTools, OversizedSseLineError, parseSseDataPayload, streamDeltaOf, type ResponsesStreamSnapshot, type SseDataPayload } from './llm-sse.js'
-import { classifyProviderFailure, hasBillingSignature, type ProviderFailureClassification } from './provider-failure.js'
+import { classifyProviderFailure, classifyStreamProviderFailure, hasBillingSignature, type ProviderFailureClassification } from './provider-failure.js'
 import { asRecord, isObject, safeJsonParse } from './validation.js'
 
 // The shared LLM wire types live in types.ts (see it for the definitions); re-exported here so every import site keeps its path.
@@ -78,11 +78,12 @@ type ParsedClassification =
 	| { kind: 'fail_immediately'; message: string }
 	| { kind: 'fail_retryable'; message: string }
 
-// The bound on the error-response body preserved as an llm_unavailable result's detail: a provider error body can be an arbitrarily large HTML or JSON page, and the diagnostic value sits in its first lines. A truncated copy carries an explicit marker so a reader can tell.
+// The bound on the error-response body preserved as a provider_failure result's log-only detail: a provider error body can be an arbitrarily large HTML or JSON page, and the diagnostic value sits in its first lines. A truncated copy carries an explicit marker so a reader can tell.
 const MAX_ERROR_DETAIL_CHARS = 2000
 const MAX_INLINE_RETRY_WAIT_MS = 5_000
 const BASE_BACKOFF_MS = 200
 const MAX_BACKOFF_MS = 5_000
+const MIN_RETRY_DELAY_MS = 100
 
 // The error body is machine data for the technical-details view (and copy-raw), never rendered prose, so it is trimmed but otherwise verbatim.
 function boundedErrorDetail(errorBody: string): string | undefined {
@@ -94,14 +95,34 @@ function boundedErrorDetail(errorBody: string): string | undefined {
 
 // Full-jitter exponential backoff: the cap grows with the 1-based attempt number, while the injected random source spreads retries so a fleet does not synchronize its reconnect storm.
 function backoffMs(attempt: number, random: () => number): number {
-	return random() * Math.min(MAX_BACKOFF_MS, BASE_BACKOFF_MS * Math.pow(2, attempt - 1))
+	return Math.max(MIN_RETRY_DELAY_MS, random() * Math.min(MAX_BACKOFF_MS, BASE_BACKOFF_MS * Math.pow(2, attempt - 1)))
 }
 
-function providerFailureResult(classification: ProviderFailureClassification, attempts: number, detail: string | undefined, note?: string): LlmCallResult {
+interface ProviderFailureOptions {
+	classification: ProviderFailureClassification
+	attempts: number
+	detail?: string
+	partialOutput: boolean
+	note?: string
+	appendAttempts?: boolean
+}
+
+function providerFailureResult(options: ProviderFailureOptions): LlmCallResult {
+	const { classification, attempts, detail, partialOutput, note, appendAttempts = true } = options
 	let message = classification.message
-	if (classification.category === 'transient' && attempts > 1) message += ` after ${attempts} attempts`
+	if (appendAttempts && classification.category === 'transient' && attempts > 1) message += ` after ${attempts} attempts`
 	if (note !== undefined) message += `. ${note}`
-	return { kind: 'llm_unavailable', message, ...(detail !== undefined ? { detail } : {}) }
+	const result: Extract<LlmCallResult, { kind: 'provider_failure' }> = {
+		kind: 'provider_failure',
+		category: classification.category,
+		message,
+		attempts,
+		partialOutput,
+	}
+	if (classification.httpStatus !== undefined) result.httpStatus = classification.httpStatus
+	if (classification.retryAfterMs !== undefined) result.retryAfterMs = classification.retryAfterMs
+	if (detail !== undefined) result.detail = detail
+	return result
 }
 
 // A completed stream can still be degenerate: a thinking model can burn the entire completion budget on reasoning before any content is emitted. Classifying after the terminal mapping routes these to the retry loop or an immediate failure instead of a silent empty turn.
@@ -198,7 +219,7 @@ function promptTokensFromMetadataRaw(errorRecord: Record<string, unknown>): numb
 // Stream-phase failures never retry (a fresh attempt would re-bill reasoning and risk duplicate tool calls), so the message carries what the accumulated state can tell a reviewer: the observed terminal kind and whether any deltas landed before the failure.
 function streamFailureMessage(snapshot: ResponsesStreamSnapshot): string {
 	const deltaDetail = snapshot.items.size === 0 ? 'no deltas received' : `deltas received for ${snapshot.items.size} item(s)`
-	if (snapshot.terminal === 'error') return `SSE stream error: ${snapshot.error ?? 'unknown stream error'} (${deltaDetail})`
+	if (snapshot.terminal === 'error') return `SSE stream reported an error (${deltaDetail})`
 	return `SSE stream ended without a terminal event (${deltaDetail})`
 }
 
@@ -206,9 +227,13 @@ function streamFailureMessage(snapshot: ResponsesStreamSnapshot): string {
 function streamCrashMessage(error: unknown, snapshot: ResponsesStreamSnapshot): string {
 	const terminalDetail = snapshot.terminal === 'none' ? 'no terminal event observed' : `terminal ${snapshot.terminal} observed`
 	const deltaDetail = snapshot.items.size === 0 ? 'no deltas received' : `deltas received for ${snapshot.items.size} item(s)`
-	if (error instanceof OversizedSseLineError) return `SSE protocol failure: ${error.message}; ${terminalDetail}; ${deltaDetail}`
-	const reason = error instanceof Error ? error.message : String(error)
-	return `SSE stream read failed: ${reason} (${terminalDetail}, ${deltaDetail})`
+	if (error instanceof OversizedSseLineError) return `SSE protocol failure (${terminalDetail}; ${deltaDetail})`
+	return `SSE stream read failed (${terminalDetail}, ${deltaDetail})`
+}
+
+// The raw runtime text behind a stream crash is log-only: a read error can name a host or URL, so it rides the bounded detail rather than the platform message.
+function streamCrashDetail(error: unknown): string | undefined {
+	return boundedErrorDetail(error instanceof Error ? error.message : String(error))
 }
 
 // A mid-stream error event's raw payload is preserved (bounded) as the detail: the extracted message text can omit fields a support reader needs (an error code, a nested cause), and some payloads carry no message at all.
@@ -217,8 +242,10 @@ function streamErrorDetail(snapshot: ResponsesStreamSnapshot): string | undefine
 	return boundedErrorDetail(JSON.stringify(snapshot.errorPayload))
 }
 
+type StreamProviderFailure = { kind: 'stream_provider_failure'; message: string; detail?: string; partialOutput: boolean; retryable: boolean; classification?: ProviderFailureClassification }
+
 // The idle timeout's outcome: a transport-liveness failure the caller retries like a failed connect, surfaced as its own variant because every LlmCallResult kind ends the retry loop.
-type StreamIdleTimeout = { kind: 'stream_idle_timeout'; message: string }
+type StreamIdleTimeout = { kind: 'stream_idle_timeout'; message: string; partialOutput: boolean }
 
 class LlmStreamIdleTimeoutError extends Error {
 	constructor(idleTimeoutMs: number) {
@@ -246,8 +273,8 @@ function readWithIdleTimeout(reader: ReadableStreamDefaultReader<Uint8Array>, id
 	})
 }
 
-// Folds one 2xx SSE stream to its mapped call result. Reading stops at the first terminal marker — the [DONE] sentinel or an accumulated terminal event — and the reader is cancelled so the underlying connection is released without draining the tail. Each read is raced against an idle timeout that resets on every delivered chunk, so a stalled stream is cut without an overall deadline on a slow-but-flowing one. An idle timeout is returned as the stream_idle_timeout outcome for the caller's retry loop; every other stream-phase failure (a rejected read, an over-cap line) maps to llm_unavailable instead of escaping: a throw out of here would reach run submission's fatal path and kill the run. The optional onDelta fires after accumulator.apply for each recognized payload-text delta, in stream order.
-async function consumeResponsesStream(stream: ReadableStream<Uint8Array>, options: { idleTimeoutMs: number; scheduleTimeout: ScheduleTimeout; onDelta?: (delta: { field: 'reasoning' | 'content'; text: string }) => void }): Promise<LlmCallResult | StreamIdleTimeout> {
+// Folds one 2xx SSE stream to its mapped call result. Reading stops at the first terminal marker — the [DONE] sentinel or an accumulated terminal event — and the reader is cancelled so the underlying connection is released without draining the tail. Each read is raced against an idle timeout that resets on every delivered chunk, so a stalled stream is cut without an overall deadline on a slow-but-flowing one. An idle timeout is returned as the stream_idle_timeout outcome for the caller's retry loop; every other stream-phase failure (a rejected read, an over-cap line) maps to a provider failure instead of escaping: a throw out of here would reach run submission's fatal path and kill the run. The optional onDelta fires after accumulator.apply for each recognized payload-text delta, in stream order.
+async function consumeResponsesStream(stream: ReadableStream<Uint8Array>, options: { idleTimeoutMs: number; scheduleTimeout: ScheduleTimeout; onDelta?: (delta: { field: 'reasoning' | 'content'; text: string }) => void }): Promise<LlmCallResult | StreamIdleTimeout | StreamProviderFailure> {
 	const decoder = new TextDecoder()
 	const assembler = createSseLineAssembler()
 	const accumulator = createResponsesStreamAccumulator()
@@ -290,9 +317,11 @@ async function consumeResponsesStream(stream: ReadableStream<Uint8Array>, option
 			for (const line of assembler.finish()) applyPayload(parseSseDataPayload(line))
 		}
 	} catch (error) {
-		// The idle timeout is a liveness failure the caller retries, not a stream collapse, so it is surfaced as its own outcome rather than folded into an llm_unavailable result.
-		if (error instanceof LlmStreamIdleTimeoutError) return { kind: 'stream_idle_timeout', message: error.message }
-		return { kind: 'llm_unavailable', message: streamCrashMessage(error, accumulator.snapshot()) }
+		// The idle timeout is a liveness failure the caller retries, not a stream collapse, so it is surfaced as its own outcome rather than folded into a provider failure.
+		const snapshot = accumulator.snapshot()
+		if (error instanceof LlmStreamIdleTimeoutError) return { kind: 'stream_idle_timeout', message: error.message, partialOutput: snapshot.items.size > 0 }
+		const detail = streamCrashDetail(error)
+		return { kind: 'stream_provider_failure', message: streamCrashMessage(error, snapshot), partialOutput: snapshot.items.size > 0, retryable: !(error instanceof OversizedSseLineError), ...(detail !== undefined ? { detail } : {}) }
 	} finally {
 		// Cancel on every exit path so the connection is released. Cancel is called on a body that may have failed mid-write, so its own rejection is swallowed here to keep it from replacing (and masking) the mapped result.
 		await reader.cancel().catch(() => undefined)
@@ -301,10 +330,10 @@ async function consumeResponsesStream(stream: ReadableStream<Uint8Array>, option
 	const snapshot = accumulator.snapshot()
 	if (snapshot.terminal === 'none' || snapshot.terminal === 'error') {
 		const detail = streamErrorDetail(snapshot)
-		return { kind: 'llm_unavailable', message: streamFailureMessage(snapshot), ...(detail !== undefined ? { detail } : {}) }
+		return { kind: 'stream_provider_failure', message: streamFailureMessage(snapshot), partialOutput: snapshot.items.size > 0, retryable: false, ...(detail !== undefined ? { detail } : {}), ...(snapshot.terminal === 'error' ? { classification: classifyStreamProviderFailure(snapshot.errorPayload ?? {}) } : {}) }
 	}
 	// markTerminal only records a terminal together with its response payload, so this guard is unreachable by construction; the type still allows the absence and the failure mode is a silent crash if it were ignored.
-	if (snapshot.response === undefined) return { kind: 'llm_unavailable', message: `SSE stream terminal ${snapshot.terminal} carried no response payload` }
+	if (snapshot.response === undefined) return { kind: 'stream_provider_failure', message: `SSE stream terminal ${snapshot.terminal} carried no response payload`, partialOutput: snapshot.items.size > 0, retryable: false }
 	return mapTerminalResponseToCallResult(snapshot.response)
 }
 
@@ -363,12 +392,12 @@ export function createLlmCaller(model: ResolvedModelConfig, apiKey: string | und
 			let response: LlmStreamResponse
 			try {
 				response = await dependencies.llmFetch({ url: `${model.apiBase}/responses`, method: 'POST', headers, body: JSON.stringify(body), signal: connectController.signal })
-			} catch {
-				// The transport error's own text can carry a host or URL, so the UI-facing message stays platform-authored; only the connect timeout bound is named because it is our own diagnostic.
+			} catch (error) {
+				// The transport error's own text can carry a host or URL, so the UI-facing message stays platform-authored; only the bounded raw text rides the detail.
 				const classification = classifyProviderFailure({ transport: true }, dependencies.now())
 				if (attempt >= maxAttempts) {
 					const note = connectController.signal.aborted ? `The connection timed out after ${LLM_CONNECT_TIMEOUT_MS}ms.` : undefined
-					return providerFailureResult(classification, attempt, undefined, note)
+					return providerFailureResult({ classification, attempts: attempt, partialOutput: false, detail: streamCrashDetail(error), note })
 				}
 				await dependencies.sleep(backoffMs(attempt, dependencies.random))
 				continue
@@ -387,22 +416,33 @@ export function createLlmCaller(model: ResolvedModelConfig, apiKey: string | und
 				}, dependencies.now())
 				// The response body rides separately as the bounded detail the error card renders as technical details; it never enters the platform-authored message.
 				const detail = boundedErrorDetail(response.errorBody)
-				if (failure.category !== 'transient') return providerFailureResult(failure, attempt, detail)
+				if (failure.category !== 'transient') return providerFailureResult({ classification: failure, attempts: attempt, detail, partialOutput: false })
 				if (failure.retryAfterMs !== undefined && failure.retryAfterMs > MAX_INLINE_RETRY_WAIT_MS) {
-					return providerFailureResult(failure, attempt, detail, `The provider asked to retry after ${failure.retryAfterMs}ms, which exceeds the inline wait limit.`)
+					return providerFailureResult({ classification: failure, attempts: attempt, detail, partialOutput: false, note: `The provider asked to retry after ${failure.retryAfterMs}ms, which exceeds the inline wait limit.` })
 				}
-				if (attempt >= maxAttempts) return providerFailureResult(failure, attempt, detail)
-				const delay = failure.retryAfterMs !== undefined ? failure.retryAfterMs : backoffMs(attempt, dependencies.random)
+				if (attempt >= maxAttempts) return providerFailureResult({ classification: failure, attempts: attempt, detail, partialOutput: false })
+				const delay = failure.retryAfterMs !== undefined ? Math.max(MIN_RETRY_DELAY_MS, failure.retryAfterMs) : backoffMs(attempt, dependencies.random)
 				await dependencies.sleep(delay)
 				continue
 			}
 
 			const consumed = await consumeResponsesStream(response.stream, { idleTimeoutMs: LLM_STREAM_IDLE_TIMEOUT_MS, scheduleTimeout: dependencies.scheduleTimeout, onDelta: emitAttemptDelta })
-			// An idle timeout is a transport-liveness failure like a failed connect, so it is retried with backoff instead of ending the loop the way every other stream failure does; the fold already released the reader on its exit path.
+			// An idle timeout is a transport-liveness failure like a failed connect. Once deltas have landed, a retry could duplicate generation and bill it again, so the run suspends instead; before any delta it is retried with backoff like a failed connect.
 			if (consumed.kind === 'stream_idle_timeout') {
 				lastError = consumed.message
-				if (attempt >= maxAttempts) {
-					return { kind: 'llm_unavailable', message: lastError }
+				const classification = { ...classifyProviderFailure({ transport: true }, dependencies.now()), message: consumed.message }
+				if (consumed.partialOutput || attempt >= maxAttempts) {
+					return providerFailureResult({ classification, attempts: attempt, partialOutput: consumed.partialOutput, appendAttempts: false })
+				}
+				await dependencies.sleep(backoffMs(attempt, dependencies.random))
+				continue
+			}
+			// A stream collapse before any delta is retried like a failed connect; after a delta it suspends immediately so the replay can never duplicate tool calls or re-bill a partial generation.
+			if (consumed.kind === 'stream_provider_failure') {
+				const baseClassification = consumed.classification ?? classifyProviderFailure({ transport: true }, dependencies.now())
+				const classification = { ...baseClassification, message: baseClassification.category === 'transient' ? consumed.message : baseClassification.message }
+				if (!consumed.retryable || consumed.partialOutput || attempt >= maxAttempts) {
+					return providerFailureResult({ classification, attempts: attempt, detail: consumed.detail, partialOutput: consumed.partialOutput, appendAttempts: false })
 				}
 				await dependencies.sleep(backoffMs(attempt, dependencies.random))
 				continue

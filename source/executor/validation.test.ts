@@ -10,6 +10,7 @@ import {
 	isTerminalRunStatus,
 	validateDeploymentFileConfig,
 	validateDeploymentRoleReferences,
+	validateHandlerRolesAreReadOnly,
 	validateGuildConfig,
 	validateToolManifest,
 } from './validation.ts'
@@ -73,6 +74,19 @@ describe('boolean guards', () => {
 			error: { kind: 'interrupted', message: 'lost' },
 		})).toBe(true)
 	})
+	test('isRunMeta accepts a suspended meta only with a valid suspension record', () => {
+		const suspension = { category: 'billing' as const, resumePolicy: 'operator' as const, message: 'Top up.', suspendedAt: '2026-01-01T00:00:00.000Z' }
+		expect(isRunMeta({ runId: 'r', task: 't', status: 'suspended', startTime: 'now', suspension })).toBe(true)
+		expect(isRunMeta({ runId: 'r', task: 't', status: 'suspended', startTime: 'now' })).toBe(false)
+		expect(isRunMeta({ runId: 'r', task: 't', status: 'suspended', startTime: 'now', suspension, endTime: 'later' })).toBe(false)
+		expect(isRunMeta({ runId: 'r', task: 't', status: 'running', startTime: 'now', suspension })).toBe(false)
+		expect(isRunMeta({ runId: 'r', task: 't', status: 'suspended', startTime: 'now', suspension: { ...suspension, resumePolicy: 'auto' } })).toBe(false)
+		expect(isRunMeta({ runId: 'r', task: 't', status: 'suspended', startTime: 'now', suspension: { ...suspension, category: 'transient', resumeAttempts: 6 } })).toBe(true)
+		expect(isRunMeta({ runId: 'r', task: 't', status: 'suspended', startTime: 'now', suspension: { ...suspension, resumeAttempts: 2 } })).toBe(true)
+		expect(isRunMeta({ runId: 'r', task: 't', status: 'suspended', startTime: 'now', suspension: { ...suspension, resumeAttempts: -1 } })).toBe(false)
+		expect(isRunMeta({ runId: 'r', task: 't', status: 'suspended', startTime: 'now', suspension: { ...suspension, autoResumeAfter: '2026-01-01T00:00:05.000Z' } })).toBe(false)
+	})
+
 	test('isRunMeta accepts an optional effort and rejects an invalid one', () => {
 		const base = {
 			runId: 'r',
@@ -623,5 +637,51 @@ describe('validateDeploymentRoleReferences', () => {
 	test('accepts interrupt triggers without a planOwnerRole', () => {
 		const deployment = validDeploymentFor({ interruptTriggers: { handlerRole: 'loop_detector', everyToolCalls: 1, everyTokens: 1 } })
 		expect(() => validateDeploymentRoleReferences(deployment, roleNames)).not.toThrow()
+	})
+})
+
+describe('handler role read-only validation', () => {
+	const validTools = ['read_file', 'context_info', 'edit_context', 'write_plan', 'trigger_interrupt', 'finish']
+	const roles = {
+		clean: { systemPrompt: 'c', tools: validTools },
+	}
+	const executor = (handlerRole: string) => ({
+		maxAgentDepth: 8,
+		defaultToolTimeoutSeconds: 30,
+		maxCompactionAttempts: 5,
+		contextHandlerRole: handlerRole,
+		inquiryHandlerRole: 'clean',
+		interruptTriggers: { handlerRole: 'clean', everyToolCalls: 10, everyTokens: 100 },
+	})
+
+	test('accepts a handler role holding only conversation, plan, and interrupt tools', () => {
+		expect(() => validateHandlerRolesAreReadOnly(roles, executor('clean'))).not.toThrow()
+	})
+
+	test('rejects direct workspace writers and checker tools', () => {
+		for (const tool of ['write_file', 'run_shell', 'typecheck', 'test']) {
+			const withTool = { ...roles, bad: { systemPrompt: 'b', tools: [tool] } }
+			expect(() => validateHandlerRolesAreReadOnly(withTool, executor('bad'))).toThrow('must not hold handler-forbidden tool')
+		}
+	})
+
+	test('rejects every git-mutating tool, including git_set_base', () => {
+		for (const tool of ['git_init', 'git_commit', 'git_branch', 'git_set_base']) {
+			const withTool = { ...roles, bad: { systemPrompt: 'b', tools: [tool] } }
+			expect(() => validateHandlerRolesAreReadOnly(withTool, executor('bad'))).toThrow('must not hold handler-forbidden tool')
+		}
+	})
+
+	test('rejects delegation tools that could spawn a writer', () => {
+		for (const tool of ['agent', 'continue_agent']) {
+			const withTool = { ...roles, bad: { systemPrompt: 'b', tools: [tool] } }
+			expect(() => validateHandlerRolesAreReadOnly(withTool, executor('bad'))).toThrow('must not hold handler-forbidden tool')
+		}
+	})
+
+	test('applies the same check to the inquiry and interrupt handler roles', () => {
+		const withTool = { ...roles, bad: { systemPrompt: 'b', tools: ['agent'] } }
+		expect(() => validateHandlerRolesAreReadOnly(withTool, { ...executor('clean'), inquiryHandlerRole: 'bad' })).toThrow('must not hold handler-forbidden tool')
+		expect(() => validateHandlerRolesAreReadOnly(withTool, { ...executor('clean'), interruptTriggers: { handlerRole: 'bad', everyToolCalls: 10, everyTokens: 100 } })).toThrow('must not hold handler-forbidden tool')
 	})
 })

@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import type { RoleDefinition, ToolCall } from '../types.js'
+import type { RoleDefinition, ToolCall, ToolResult } from '../types.js'
 import type { ToolInvocation } from '../invocation.js'
 import type { ToolPlatform } from '../tool-platform-port.js'
 import { createFixtureRunScope, createFixtureToolPlatform } from '../test-fixtures.js'
@@ -15,11 +15,24 @@ function invocationFor(call: ToolCall): ToolInvocation {
 	return { toolCall: call, questionId: call.id, callId: `tool:${call.id}`, parentCallId: 'role:fixture-0-0' }
 }
 
-function dispatchTo(platform: ToolPlatform, roleDefinition: RoleDefinition, scope: ReturnType<typeof createFixtureRunScope>, call: ToolCall) {
-	return platform.dispatch(roleDefinition, scope, call, invocationFor(call))
+async function dispatchTo(platform: ToolPlatform, roleDefinition: RoleDefinition, scope: ReturnType<typeof createFixtureRunScope>, call: ToolCall): Promise<ToolResult> {
+	const outcome = await platform.dispatch(roleDefinition, scope, call, invocationFor(call))
+	if (outcome.kind === 'suspended') throw new Error('unexpected suspension')
+	return outcome.result
 }
 
 describe('tool platform dispatch', () => {
+	test('normalizes an ordinary handler result into the result variant', async () => {
+		const dispatch = createToolDispatch({ echo: () => ({ kind: 'success', data: 'ok' }) })
+		await expect(dispatch.dispatch(makeCall('echo', '{}'))).resolves.toEqual({ kind: 'result', result: { kind: 'success', data: 'ok' } })
+	})
+
+	test('passes a child suspension through without wrapping it', async () => {
+		const suspension = { category: 'billing' as const, resumePolicy: 'operator' as const, message: 'Top up.', suspendedAt: '2026-01-01T00:00:00.000Z' }
+		const dispatch = createToolDispatch({ agent: () => ({ kind: 'suspended', suspension }) })
+		await expect(dispatch.dispatch(makeCall('agent', '{}'))).resolves.toEqual({ kind: 'suspended', suspension })
+	})
+
 	test('passes the originating ToolCall as the handler second argument', async () => {
 		let observed: ToolCall | undefined
 		const dispatch = createToolDispatch({

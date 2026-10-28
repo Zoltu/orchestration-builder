@@ -7,7 +7,7 @@ import { createRunParkTracker, type RunParkTracker } from './park-state.js'
 import { createRoleRegistry, type RoleRegistry } from './role-registry.js'
 import type { RoleSnapshot, RoleSnapshotStore } from './role-snapshot.js'
 import type { SubprocessRunner } from './subprocess.js'
-import type { GuildConfig, ToolManifest, ToolResult } from './types.js'
+import type { GuildConfig, LlmCallResult, SuspensionCategory, ToolManifest, ToolResult } from './types.js'
 import type { RoleState } from './state.js'
 import { createToolPlatform, type RunToolScope, type ToolPlatform } from './tools/index.js'
 
@@ -179,8 +179,8 @@ export function createEmptyRoleState(overrides: Partial<RoleState> = {}): RoleSt
 
 export function createFixtureRunScope(overrides: Partial<RunToolScope> = {}): RunToolScope {
 	return {
-		spawnAgent: async () => ({ status: 'success', summary: '' }),
-		continueAgent: async () => ({ status: 'success', summary: '' }),
+		spawnAgent: async () => ({ kind: 'card', card: { status: 'success', summary: '' } }),
+		continueAgent: async () => ({ kind: 'card', card: { status: 'success', summary: '' } }),
 		roleState: createEmptyRoleState(),
 		humanBackend: stubHumanBackend,
 		roleRegistry: createRoleRegistry(),
@@ -192,4 +192,26 @@ export function createFixtureRunScope(overrides: Partial<RunToolScope> = {}): Ru
 		manifestNames: new Set(),
 		...overrides,
 	}
+}
+
+export function createNoopCheckpointRecorder(): CheckpointRecorder {
+	return {
+		registerFrame: () => undefined,
+		unregisterFrame: () => undefined,
+		setPending: () => undefined,
+		setPendingChildCard: () => undefined,
+		setPendingInterlude: () => undefined,
+		setPendingOperatorRequests: () => undefined,
+		setSuspension: () => undefined,
+		hasActiveHandler: () => false,
+		pendingInterludeTrigger: () => undefined,
+		write: () => true,
+		writeSuspension: () => true,
+		freeze: () => undefined,
+		unfreeze: () => undefined,
+	}
+}
+
+export function createProviderFailure(category: SuspensionCategory = 'billing', overrides: Partial<Extract<LlmCallResult, { kind: 'provider_failure' }>> = {}): Extract<LlmCallResult, { kind: 'provider_failure' }> {
+	return { kind: 'provider_failure', category, message: 'The model provider failed', attempts: 1, partialOutput: false, ...overrides }
 }

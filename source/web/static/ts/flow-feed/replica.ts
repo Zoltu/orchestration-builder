@@ -35,7 +35,7 @@ function isOperationOutcome(value: unknown): value is OperationOutcome {
 }
 
 function isRunStatus(value: unknown): value is RunStatus {
-	return value === 'running' || value === 'success' || value === 'error' || value === 'needs_clarification' || value === 'interrupted' || value === 'unknown'
+	return value === 'running' || value === 'suspended' || value === 'success' || value === 'error' || value === 'needs_clarification' || value === 'interrupted' || value === 'unknown'
 }
 
 function isParticipant(value: unknown): value is Participant {

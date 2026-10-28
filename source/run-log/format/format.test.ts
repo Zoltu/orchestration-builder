@@ -122,6 +122,11 @@ describe('toRecentLogEntry one-line text', () => {
 		expect(renderedText(event('llm_unavailable', { role: 'coder', message: 'down' }))).toBe('coder · llm unavailable')
 	})
 
+	test('provider_failure shows the category and platform message, never the provider detail body', () => {
+		expect(renderedText(event('provider_failure', { role: 'coder', roleId: 'coder-1', category: 'billing', attempts: 1, partialOutput: false, message: 'The model provider reports insufficient quota or credit (HTTP 402)', detail: '{"error":"sk-secret request body"}' }))).toBe('coder · provider failure (billing): The model provider reports insufficient quota or credit (HTTP 402)')
+		expect(renderedText(event('provider_failure', { role: 'coder', roleId: 'coder-1', category: 'transient', attempts: 3, partialOutput: true, detail: 'provider body only' }))).toBe('coder · provider failure (transient)')
+	})
+
 	test('context_budget_exceeded → role · context budget exceeded', () => {
 		expect(renderedText(event('context_budget_exceeded', { role: 'coder', promptTokens: 100, contextWindow: 50 }))).toBe('coder · context budget exceeded')
 	})

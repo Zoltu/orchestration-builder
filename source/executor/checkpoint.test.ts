@@ -118,6 +118,45 @@ describe('isRunCheckpoint', () => {
 		expect(isRunCheckpoint(copy)).toBe(true)
 	})
 
+	test('accepts a persisted suspension only when its record is valid', () => {
+		const withSuspension = sampleCheckpoint()
+		withSuspension.suspension = { category: 'transient', resumePolicy: 'auto', message: 'Retry later.', suspendedAt: '2026-01-01T00:00:00.000Z', autoResumeAfter: '2026-01-01T00:00:05.000Z', resumeAttempts: 2 }
+		expect(isRunCheckpoint(withSuspension)).toBe(true)
+
+		const mismatchedPolicy: unknown = { ...withSuspension, suspension: { ...withSuspension.suspension, resumePolicy: 'operator' } }
+		expect(isRunCheckpoint(mismatchedPolicy)).toBe(false)
+		const badTimestamp: unknown = { ...withSuspension, suspension: { ...withSuspension.suspension, suspendedAt: 'not-a-date' } }
+		expect(isRunCheckpoint(badTimestamp)).toBe(false)
+		const emptyMessage: unknown = { ...withSuspension, suspension: { ...withSuspension.suspension, message: '' } }
+		expect(isRunCheckpoint(emptyMessage)).toBe(false)
+		const earlyAutoResume: unknown = { ...withSuspension, suspension: { ...withSuspension.suspension, autoResumeAfter: '2025-12-31T23:59:59.000Z' } }
+		expect(isRunCheckpoint(earlyAutoResume)).toBe(false)
+	})
+
+	test('accepts a pending interlude on the leaf and rejects malformed or contradictory records', () => {
+		const withInterlude = sampleCheckpoint()
+		withInterlude.pendingInterlude = {
+			targetRoleId: 'coder-1-2',
+			trigger: 'inquiry',
+			details: { message: 'what changed?' },
+			pendingOperatorRequests: [],
+		}
+		expect(isRunCheckpoint(withInterlude)).toBe(true)
+		expect(isRunCheckpoint(JSON.parse(JSON.stringify(withInterlude)))).toBe(true)
+
+		const wrongTarget: unknown = { ...withInterlude, pendingInterlude: { ...withInterlude.pendingInterlude, targetRoleId: 'ghost-0-9' } }
+		expect(isRunCheckpoint(wrongTarget)).toBe(false)
+
+		const missingMessage: unknown = { ...withInterlude, pendingInterlude: { ...withInterlude.pendingInterlude, details: {} } }
+		expect(isRunCheckpoint(missingMessage)).toBe(false)
+
+		const unknownTrigger: unknown = { ...withInterlude, pendingInterlude: { ...withInterlude.pendingInterlude, trigger: 'unknown' } }
+		expect(isRunCheckpoint(unknownTrigger)).toBe(false)
+
+		const parked: unknown = { ...parkedCheckpoint(), pendingInterlude: withInterlude.pendingInterlude }
+		expect(isRunCheckpoint(parked)).toBe(false)
+	})
+
 	test('accepts a clarification delivery record, its consumed flag, and coexistence with a parked ask', () => {
 		const delivered = sampleCheckpoint()
 		delivered.clarificationAnswer = { id: 'answer-1', question: 'which schema?', answer: 'v2' }

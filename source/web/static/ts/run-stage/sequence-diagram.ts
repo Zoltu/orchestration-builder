@@ -16,7 +16,7 @@
 // `h` is passed in rather than imported so the module stays free of hyperapp coupling and the vnode shape is exercisable in tests with a fake `h`, mirroring the sibling flow-view convention.
 // The label resolver is passed in alongside the selected tier so a caller can swap the resolver or tier without the view reaching for globals; node prose is localization, a view concern, and the model carries no prose.
 
-import { activeOperation, activeStack } from '../interaction-model.js'
+import { activeOperation, activeStack, isSuspendedStatus } from '../interaction-model.js'
 import type { InteractionModel, Operation, Participant, ParticipantKind } from '../interaction-model.js'
 import type { LabelResolver, LabelTier } from '../labels.js'
 import type { RoleAccentResolver } from './role-accents.js'
@@ -147,6 +147,7 @@ type MessageAnimationState = 'static' | 'flowing' | 'returning' | 'error' | 'ter
 function messageAnimationState(operation: Operation, model: InteractionModel, activeOperationId: string | null): MessageAnimationState {
 	if (operation.kind === 'observe' || operation.kind === 'terminate') return 'static'
 	if (operation.id !== activeOperationId) return 'static'
+	if (isSuspendedStatus(model.status)) return 'static'
 	if (operation.stack !== activeStack(model)) return 'static'
 	if (operation.lifecycle === 'settled') return 'static'
 	if (operation.kind === 'call') return 'flowing'
@@ -279,7 +280,7 @@ function renderSequenceBody(h: H, model: InteractionModel, labels: LabelResolver
 	const participantsById = new Map<string, Participant>()
 	for (const participant of model.participants) participantsById.set(participant.id, participant)
 
-	const activeOperationId = activeOperation(model)?.id ?? null
+	const activeOperationId = isSuspendedStatus(model.status) ? null : activeOperation(model)?.id ?? null
 
 	const operations = model.operations
 	const lifelineBottom = extent.lifelineBottom

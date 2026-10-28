@@ -3,6 +3,7 @@ import { runHandlerInterlude } from './handler-interlude.js'
 import type { InterruptRequest } from './interrupts.js'
 import type { RoleRegistry, RoleRegistryEntry } from './role-registry.js'
 import { logEvent, type EngineContext, type EngineDependencies, type RoleState, type RunRole } from './engine-state.js'
+import type { RoleOutcome } from './types.js'
 import type { EffortLevel, ExecutorConfig, ResultCard } from './types.js'
 
 // The marker prefix the orchestrator/planner prompts teach roles to recognize. A notice goes to the run's entry role (the chain root) as run-wide information to act on directly; a plan modification arrives only after active sub-work beneath the plan owner was aborted and asks the owner to re-plan around the change. An operator inquiry is never injected — it is answered by a fresh handler role (runInquiryHandler).
@@ -81,13 +82,15 @@ async function runInterruptHandler(
 	entry: RoleRegistryEntry,
 	handlerRole: string,
 	config: ExecutorConfig,
-): Promise<ResultCard | null> {
+): Promise<RoleOutcome | null> {
 	const task = [
 		`The platform flagged role instance "${entry.roleId}" (role "${context.roleName}") for a loop check.`,
 		`It has made ${entry.roleState.toolCallCount} tool calls and generated ${entry.roleState.generatedTokens} tokens so far.`,
 		'Investigate whether it is stuck in a loop, then call trigger_interrupt with that role-instance id and your decision.',
 	].join(' ')
-	return runHandlerInterlude({ invocationJournal: deps.invocationJournal, runRole: (handlerContext) => runRole(deps, handlerContext) }, context, entry, config, handlerRole, 'loop_check', task, {}, (handlerCard, interruptCallId) => {
+	const interlude = await runHandlerInterlude({ invocationJournal: deps.invocationJournal, checkpointRecorder: deps.checkpointRecorder, interruptQueue: deps.interruptQueue, runRole: (handlerContext) => runRole(deps, handlerContext) }, context, entry, config, handlerRole, 'loop_check', task, {}, (handlerCard, interruptCallId) => {
+		entry.roleState.loopCheckToolCallWatermark = entry.roleState.toolCallCount
+		entry.roleState.loopCheckTokenWatermark = entry.roleState.generatedTokens
 		const action = entry.interruptAction
 		entry.interruptAction = undefined
 		if (action === undefined) {
@@ -102,9 +105,12 @@ async function runInterruptHandler(
 		}
 		return null
 	})
+	if (interlude.kind === 'suspended') return interlude
+	const abortCard = interlude.resolution
+	return abortCard === null ? null : { kind: 'card', card: abortCard }
 }
 
-// The inquiry interlude (runHandlerInterlude): the configured inquiry handler is a fresh agent that was never given the run's conversations — the briefing lists the live (suspended) instances root first and points at the run-log tools and the workspace for researching roles that already finished. Its finish-card summary is the answer shown to the operator. The target always resumes afterwards, whatever the handler did — a question never finishes a run.
+// The inquiry interlude (runHandlerInterlude): the configured inquiry handler is a fresh agent that was never given the run's conversations — the briefing lists the live (suspended) instances root first and points at the run-log tools and the workspace for researching roles that already finished. Its finish-card summary is the answer shown to the operator. The target resumes afterwards unless the handler's own provider call suspends the run; a question never finishes a run.
 async function runInquiryHandler(
 	runRole: RunRole,
 	deps: EngineDependencies,
@@ -112,12 +118,16 @@ async function runInquiryHandler(
 	entry: RoleRegistryEntry,
 	config: ExecutorConfig,
 	request: InterruptRequest,
-): Promise<void> {
+): Promise<RoleOutcome | null> {
 	const handlerRole = config.inquiryHandlerRole
 	if (handlerRole === undefined) {
 		// A run without an inquiry handler drops the question rather than dying over it: the operator gets no answer, but the work continues.
 		logEvent(deps.appendLog, 'inquiry_dropped', { message: request.message, reason: 'executor.inquiryHandlerRole is not configured' })
-		return
+		if (!deps.checkpointRecorder.hasActiveHandler()) {
+			deps.checkpointRecorder.setPendingInterlude(undefined)
+			if (!deps.checkpointRecorder.write()) throw new Error('inquiry dropped: could not clear the pending interlude')
+		}
+		return null
 	}
 	// The chain from the draining leaf IS the entire live role set in this sequential engine; chainFromEntry is leaf-first, so reverse it for the root-first briefing list.
 	const liveInstances = chainFromEntry(deps.roleRegistry, entry).reverse()
@@ -140,16 +150,18 @@ async function runInquiryHandler(
 		finishedRolesNote,
 		'When you know the answer, call finish with status "success" and put the answer, in plain language, in the summary — the summary is shown to the operator as your answer. Do not modify the workspace or any role\'s conversation.',
 	].join('\n')
-	await runHandlerInterlude({ invocationJournal: deps.invocationJournal, runRole: (handlerContext) => runRole(deps, handlerContext) }, context, entry, config, handlerRole, 'inquiry', task, { message: request.message }, (handlerCard, interruptCallId) => {
+	const interlude = await runHandlerInterlude({ invocationJournal: deps.invocationJournal, checkpointRecorder: deps.checkpointRecorder, interruptQueue: deps.interruptQueue, runRole: (handlerContext) => runRole(deps, handlerContext) }, context, entry, config, handlerRole, 'inquiry', task, { message: request.message }, (handlerCard, interruptCallId) => {
 		if (handlerCard.status === 'success') {
 			deps.invocationJournal.interruptFinished(interruptCallId, { trigger: 'inquiry', handler: handlerRole, target: entry.roleId, action: 'answered', summary: handlerCard.summary })
 		} else {
 			deps.invocationJournal.interruptFinished(interruptCallId, { trigger: 'inquiry', handler: handlerRole, target: entry.roleId, action: 'failed', handlerStatus: handlerCard.status, summary: handlerCard.summary })
 		}
 	})
+	if (interlude.kind === 'suspended') return interlude
+	return null
 }
 
-// The platform's single safe point, run at the top of every turn: no LLM call is in flight here, so suspending or unwinding the role cannot tear a turn. Returns a ResultCard when the role must finish, or null to continue the turn.
+// The platform's single safe point, run at the top of every turn: no LLM call is in flight here, so suspending or unwinding the role cannot tear a turn. Returns a card outcome when the role must finish, a suspension when the handler itself is suspended, or null to continue.
 // Order: marks set by an earlier routing first, then (for non-handler roles only) the loop-check cadence, then one queued operator request.
 export async function drainInterrupts(
 	runRole: RunRole,
@@ -157,16 +169,20 @@ export async function drainInterrupts(
 	context: EngineContext,
 	roleState: RoleState,
 	entry: RoleRegistryEntry,
-): Promise<ResultCard | null> {
+): Promise<RoleOutcome | null> {
 	const config = context.loadedGuild.deployment.executor
 	if (entry.planAbort === true) {
-		return interruptedCard('Aborted by an operator plan modification')
+		return { kind: 'card', card: interruptedCard('Aborted by an operator plan modification') }
 	}
 	if (entry.planInjection !== undefined) {
 		const message = entry.planInjection
 		entry.planInjection = undefined
 		roleState.history.push({ role: 'user', content: planModificationMessage(message) })
 	}
+
+	// A restored context interlude must resolve before any other trigger or newly queued operator request; otherwise the compaction can be deferred or skipped. Inquiry and loop-check pending records resolve through their normal paths below.
+	const pendingTrigger = deps.checkpointRecorder.pendingInterludeTrigger()
+	if (pendingTrigger === 'context_pressure' || pendingTrigger === 'context_budget_exceeded') return null
 
 	if (context.handlerOf !== undefined) return null
 
@@ -180,10 +196,9 @@ export async function drainInterrupts(
 		const fireOnToolCalls = roleState.toolCallCount >= roleState.loopCheckToolCallWatermark + toolCallThreshold
 		const fireOnTokens = roleState.generatedTokens >= roleState.loopCheckTokenWatermark + tokenThreshold
 		if (fireOnToolCalls || fireOnTokens) {
-			roleState.loopCheckToolCallWatermark = roleState.toolCallCount
-			roleState.loopCheckTokenWatermark = roleState.generatedTokens
-			const abortCard = await runInterruptHandler(runRole, deps, context, entry, triggers.handlerRole, config)
-			if (abortCard !== null) return abortCard
+			const abortOutcome = await runInterruptHandler(runRole, deps, context, entry, triggers.handlerRole, config)
+			if (abortOutcome?.kind === 'suspended') return abortOutcome
+			if (abortOutcome !== null) return abortOutcome
 		}
 	}
 
@@ -191,11 +206,11 @@ export async function drainInterrupts(
 	if (request !== undefined) {
 		// An inquiry is answered by a fresh handler role against the suspended chain, never injected into a working role's history; the run continues whatever the handler did.
 		if (request.kind === 'inquiry') {
-			await runInquiryHandler(runRole, deps, context, entry, config, request)
-			return null
+			const inquiryOutcome = await runInquiryHandler(runRole, deps, context, entry, config, request)
+			return inquiryOutcome
 		}
 		const routedCard = routeOperatorInterrupt(deps, roleState, entry, config, request)
-		if (routedCard !== null) return routedCard
+		if (routedCard !== null) return { kind: 'card', card: routedCard }
 	}
 	return null
 }

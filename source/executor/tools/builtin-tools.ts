@@ -1,11 +1,11 @@
 import { createToolError, isErrorKind } from '../errors.js'
-import type { Message, ResultCard, ToolResult } from '../types.js'
+import type { RoleOutcome, Message, ResultCard, ToolResult } from '../types.js'
 import { stripReasoning } from '../context/index.js'
 import { indexRoleMessages, readMessageWindow, searchRoleBlocks, MAX_SEARCH_MATCHES, RECENT_TOOL_CALLS_LIMIT, type InspectionField, type RecentToolCall } from '../role-inspection.js'
 import type { InterruptActionKind, RoleRegistry, RoleRegistryEntry } from '../role-registry.js'
 import { isObject } from '../validation.js'
 import { optionalPositiveInt } from './shared.js'
-import type { ToolHandler } from './tool-dispatch.js'
+import type { AnyToolHandler, ToolHandler } from './tool-dispatch.js'
 import type { HumanBackend } from '../human-backend.js'
 import { askHumanPayload, type ToolInvocation } from '../invocation.js'
 import { logEvent } from '../engine-state.js'
@@ -14,9 +14,9 @@ import type { AppendLog } from '../persistence.js'
 import type { RunParkTracker } from '../park-state.js'
 
 export interface BuiltInToolContext {
-	spawnAgent(roleName: string, task: string): Promise<ResultCard>
+	spawnAgent(roleName: string, task: string): Promise<RoleOutcome>
 	// Continues a finished child as a new instance seeded from its persisted conversation. comment, when present, is appended to the seed; roleId disambiguates among several finished instances of the same role name.
-	continueAgent(roleName: string, comment: string | undefined, roleId: string | undefined): Promise<ResultCard>
+	continueAgent(roleName: string, comment: string | undefined, roleId: string | undefined): Promise<RoleOutcome>
 	roleState: RoleState
 	humanBackend: HumanBackend
 	contextWindow: number
@@ -535,7 +535,7 @@ function createRecentRoleToolCalls(context: BuiltInToolContext): ToolHandler {
 // Only the read-only inspection tools count as observations for the engine's observe event; edit_context mutates its target and never emits one. Living beside the handler map it mirrors keeps the names from drifting apart.
 export const OBSERVATION_TOOL_NAMES: ReadonlySet<string> = new Set(['list_role_messages', 'read_message_window', 'search_role_blocks', 'recent_role_tool_calls', 'context_info'])
 
-export function createBuiltInToolHandlers(context: BuiltInToolContext): Record<string, ToolHandler> {
+export function createBuiltInToolHandlers(context: BuiltInToolContext): Record<string, AnyToolHandler> {
 	return {
 		finish: (args) => {
 			const validation = validateFinishArgs(args)
@@ -544,15 +544,17 @@ export function createBuiltInToolHandlers(context: BuiltInToolContext): Record<s
 		},
 		agent: async (args) => {
 			const validation = validateAgentArgs(args)
-			if (validation.kind === 'error') return validation.result
-			const card = await context.spawnAgent(validation.roleName, validation.task)
-			return { kind: 'success', data: card }
+			if (validation.kind === 'error') return { kind: 'result', result: validation.result }
+			const outcome = await context.spawnAgent(validation.roleName, validation.task)
+			if (outcome.kind === 'suspended') return outcome
+			return { kind: 'result', result: { kind: 'success', data: outcome.card } }
 		},
 		continue_agent: async (args) => {
 			const validation = validateContinueAgentArgs(args)
-			if (validation.kind === 'error') return validation.result
-			const card = await context.continueAgent(validation.roleName, validation.comment, validation.roleId)
-			return { kind: 'success', data: card }
+			if (validation.kind === 'error') return { kind: 'result', result: validation.result }
+			const outcome = await context.continueAgent(validation.roleName, validation.comment, validation.roleId)
+			if (outcome.kind === 'suspended') return outcome
+			return { kind: 'result', result: { kind: 'success', data: outcome.card } }
 		},
 		context_info: createContextInfo(context),
 		edit_context: createEditContext(context),

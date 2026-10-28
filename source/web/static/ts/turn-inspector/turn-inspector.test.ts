@@ -52,6 +52,10 @@ function turnFailureEvent(index: number, type: 'llm_unavailable' | 'context_budg
 	return { index, timestamp: `2026-01-01T00:00:${String(index % 60).padStart(2, '0')}Z`, type, payload }
 }
 
+function providerFailureEvent(index: number, role: string, roleId = `${role}-1`): WindowEvent {
+	return { index, timestamp: `2026-01-01T00:00:${String(index % 60).padStart(2, '0')}Z`, type: 'provider_failure', payload: { role, roleId, category: 'billing', attempts: 1, partialOutput: false, message: 'The model provider reports insufficient quota or credit (HTTP 402)' } }
+}
+
 function roleStartEvent(index: number, roleId: string, role: string, extras: Record<string, unknown> = {}): WindowEvent {
 	return { index, timestamp: `2026-01-01T00:00:${String(index % 60).padStart(2, '0')}Z`, type: 'role_start', payload: { role, roleId, depth: 0, task: 't', ...extras } }
 }
@@ -149,6 +153,30 @@ describe('turn pairing and view scoping', () => {
 		expect(turn.bodyLevel).toBeNull()
 		expect(sessionFor([startEvent(0, 'coder', 'coder-1'), turnFailureEvent(1, 'llm_unavailable', 'coder')]).view().transcript).toEqual([])
 		expect(sessionFor([startEvent(0, 'coder', 'coder-1'), turnFailureEvent(1, 'context_budget_exceeded', 'coder')]).view().transcript).toEqual([])
+		expect(sessionFor([startEvent(0, 'coder', 'coder-1'), providerFailureEvent(1, 'coder', 'coder-1')]).view().transcript).toEqual([])
+	})
+
+	test('provider_failure closes the exact in-flight instance and leaves a same-named sibling open', () => {
+		const events = [startEvent(0, 'coder', 'coder-1'), startEvent(1, 'coder', 'coder-2'), providerFailureEvent(2, 'coder', 'coder-1')]
+		expect(transcriptOf(sessionFor(events, { scopedRoleId: 'coder-1' }))).toEqual([])
+		const sibling = transcriptOf(sessionFor(events, { scopedRoleId: 'coder-2' }))
+		expect(sibling.map((turn) => turn.kind)).toEqual(['in_flight'])
+		expect(defined(sibling[0], 'sibling[0]').eventIndex).toBe(1)
+	})
+
+	test('a resume replay after a provider failure pairs the fresh start and call without reviving the failed turn', () => {
+		const events = [
+			startEvent(0, 'coder', 'coder-1'),
+			providerFailureEvent(1, 'coder', 'coder-1'),
+			{ index: 2, timestamp: '2026-01-01T00:00:02Z', type: 'run_resumed', payload: { runId: 'run-1', resumedFrames: 1 } },
+			startEvent(3, 'coder', 'coder-1'),
+			callEvent(4, 'coder', { roleId: 'coder-1' }),
+		]
+		const turns = transcriptOf(sessionFor(events, { scopedRoleId: 'coder-1' }))
+		expect(turns).toHaveLength(1)
+		const turn = defined(turns[0], 'turns[0]')
+		expect(turn.kind).toBe('completed')
+		expect(turn.eventIndex).toBe(4)
 	})
 
 	test('same-name nesting pairs LIFO, and the failure closes the newest open start', () => {

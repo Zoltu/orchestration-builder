@@ -1,13 +1,13 @@
 import { suspendsChild } from '../suspending-tools.js'
 import type { RunToolScope, ToolPlatform } from '../tool-platform-port.js'
-import type { RoleDefinition, ToolCall, ToolResult } from '../types.js'
+import type { RoleDefinition, ToolCall, ToolExecutionOutcome, ToolResult } from '../types.js'
 import type { ToolInvocation } from '../invocation.js'
 import { createBuiltInToolHandlers, OBSERVATION_TOOL_NAMES } from './builtin-tools.js'
 import { createNativeToolHandlers } from './native-tools.js'
 import { createPlanToolHandlers } from './plan.js'
 import { createRunLogToolHandlers } from './run-log.js'
 import { createStyleGuideToolHandlers } from './style-guide.js'
-import { createToolDispatch, dispatchToolCall, validateToolCall, type ToolHandler } from './tool-dispatch.js'
+import { createToolDispatch, dispatchToolCall, validateToolCall, type AnyToolHandler } from './tool-dispatch.js'
 import type { Fetcher } from './fetch-url.js'
 import type { SubprocessRunner } from '../subprocess.js'
 
@@ -39,7 +39,7 @@ export function createToolPlatform(config: ToolPlatformConfig, dependencies: Too
 	const styleGuideHandlers = createStyleGuideToolHandlers({ runsBaseDir: config.runsBaseDir, runId: config.runId, workspaceRoot: config.workspaceRoot, maxToolOutputChars: config.maxToolOutputChars })
 	const runLogHandlers = createRunLogToolHandlers({ logPath: config.logPath, runsBaseDir: config.runsBaseDir, runId: config.runId })
 
-	function composeHandlers(runScope: RunToolScope, invocation: ToolInvocation): Record<string, ToolHandler> {
+	function composeHandlers(runScope: RunToolScope, invocation: ToolInvocation): Record<string, AnyToolHandler> {
 		const nativeHandlers = createNativeToolHandlers({
 			workspaceRoot: config.workspaceRoot,
 			defaultToolTimeoutSeconds: config.defaultToolTimeoutSeconds,
@@ -73,9 +73,9 @@ export function createToolPlatform(config: ToolPlatformConfig, dependencies: Too
 		return validateToolCall({ allowedTools: roleDefinition.tools, manifestNames: [...runScope.manifestNames] }, call)
 	}
 
-	async function dispatch(roleDefinition: RoleDefinition, runScope: RunToolScope, call: ToolCall, invocation: ToolInvocation): Promise<ToolResult> {
+	async function dispatch(roleDefinition: RoleDefinition, runScope: RunToolScope, call: ToolCall, invocation: ToolInvocation): Promise<ToolExecutionOutcome> {
 		const invalid = validateCall(roleDefinition, runScope, call)
-		if (invalid !== null) return invalid
+		if (invalid !== null) return { kind: 'result', result: invalid }
 		const dispatchTool = createToolDispatch(composeHandlers(runScope, invocation))
 		return dispatchToolCall(
 			{

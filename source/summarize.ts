@@ -26,9 +26,9 @@ export interface TaskSummarizer {
 const SUMMARY_WORD_BUDGET = 15
 const SUMMARY_CHAR_CAP = 140
 
-// A needs_clarification settlement is a pause, not a completion: the start summary stays the task label instead of being replaced by the question. Error resumes still summarize.
+// A needs_clarification settlement is a pause, not a completion: the start summary stays the task label instead of being replaced by the question. A suspended run likewise keeps its task label because it has not finished. Error resumes still summarize.
 export function shouldWriteCompletionSummary(status: RunMeta['status']): boolean {
-	return status !== 'needs_clarification'
+	return status !== 'needs_clarification' && status !== 'suspended'
 }
 
 const START_SYSTEM_PROMPT = `You summarize tasks for a run-history list. Reply with exactly one line of at most ${SUMMARY_WORD_BUDGET} words describing what the user wants, in plain language. No preamble, no quotes, no Markdown.`

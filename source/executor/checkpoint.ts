@@ -7,12 +7,13 @@ import type { EngineContext, RoleState } from './engine-state.js'
 import { isMessage, isToolCall } from './message-validation.js'
 import type { RunBaseTracker } from './base-state.js'
 import type { ParkedAsk, RunParkTracker } from './park-state.js'
+import type { InterruptRequest } from './interrupts.js'
 import type { WriteCheckpoint } from './persistence.js'
 import type { RoleRegistry, RoleRegistryEntry } from './role-registry.js'
-import type { EffortLevel, InvolvementLevel, LogLevel, ResultCard, ToolCall } from './types.js'
+import type { EffortLevel, InvolvementLevel, LogLevel, ResultCard, SuspensionRecord, ToolCall } from './types.js'
 import { isRunIdShape } from './run-id.js'
 import { classifyVersion, CHECKPOINT_FORMAT_VERSION } from './orchestration-version.js'
-import { isEffortLevel, isInvolvementLevel, isLogLevel, isNonNegativeInteger, isNonNegativeNumber, isObject, isResultCard, isString, safeJsonParse } from './validation.js'
+import { isEffortLevel, isInvolvementLevel, isLogLevel, isNonNegativeInteger, isNonNegativeNumber, isObject, isResultCard, isString, isSuspensionRecord, safeJsonParse } from './validation.js'
 
 // The invocation a role is paused on mid-turn: its stable call id and parent, the turn's full tool-call list, and the index of the call being dispatched. The record covers ordinary tools and child-spawning tools alike; child-spawning calls additionally record the child's card once it returns so a resume delivers the recorded card instead of re-running the child. Calls before index are already in the persisted history; calls after it dispatch on resume.
 export interface PendingInvocation {
@@ -23,7 +24,20 @@ export interface PendingInvocation {
 	childCard?: ResultCard
 }
 
-// One live role invocation on the depth-first stack. Frames serialize root-first; a non-leaf frame is always suspended on a child-spawning call whose child still runs below it, and the leaf is active (no pending), dispatching an invocation (pending without a card), or a parent whose child just returned (pending carrying the recorded child card). Handler invocations (loop-check and context handlers) never appear: writes are suppressed while a handler runs, so a handler interlude is atomic with respect to the checkpoint — either it completes and the post-drain write captures its effects, or the resume re-runs the drain from the pre-interlude checkpoint.
+const INTERLUDE_TRIGGERS = ['loop_check', 'inquiry', 'context_pressure', 'context_budget_exceeded'] as const
+
+export type InterludeTrigger = (typeof INTERLUDE_TRIGGERS)[number]
+
+// The handler interlude a suspension interrupted. It is written before the handler runs, so the on-disk checkpoint plus this intent is enough to re-run the interlude from the target's pre-interlude state. Replay uses the trigger, target role, inquiry message, and queued operator requests; handler role and task are re-derived by the normal trigger path.
+export interface PendingInterlude {
+	targetRoleId: string
+	trigger: InterludeTrigger
+	details: Record<string, unknown>
+	// Operator requests still queued when the handler started; they ride the pending interlude so a provider suspension cannot lose them.
+	pendingOperatorRequests: InterruptRequest[]
+}
+
+// One live role invocation on the depth-first stack. Frames serialize root-first; a non-leaf frame is always suspended on a child-spawning call whose child still runs below it, and the leaf is active (no pending), dispatching an invocation (pending without a card), or a parent whose child just returned (pending carrying the recorded child card). Handler frames never appear: writes are suppressed while a handler runs. A suspension inside one is represented by pendingInterlude on the pre-interlude frame stack; the suspension checkpoint advances the registry counter past the failed handler subtree so its replay receives fresh ids.
 export interface CheckpointFrame {
 	roleId: string
 	roleName: string
@@ -49,7 +63,7 @@ export function entryFrameLogLevel(entryFrame: CheckpointFrame | undefined): Log
 	return entryFrame?.logLevel ?? DEFAULT_LOG_LEVEL
 }
 
-// The runnable state of a run, persisted so a service restart can resume it, so the queue answer can re-enter a parked run, and so the operator can explicitly resume an errored one. Written atomically (temp file + rename) at every leaf safe point, when a child card returns, before each dispatch (the pending invocation), and at a completed batch, then frozen once at a park, so the on-disk checkpoint is never torn and never leaves an in-flight invocation unnamed. `registryCounter` lets the resumed run mint fresh role-instance ids without colliding with the preserved ones; `learnedContextCeiling` carries the run's context-wall knowledge so resumed roles keep the tightened pressure threshold; `writeCapableStarted` carries the pre-write park rule's flag so a restart cannot reset it and park a run whose writes happened before the restart (docs/queueing.md "Parking: the pre-write rule"); `baseHash` carries the run's base commit so a restart keeps diffing against the same change set; `parkedAsk` identifies the parked turn the queue answer resumes.
+// The runnable state of a run, persisted so a service restart can resume it, so the queue answer can re-enter a parked run, and so the operator can explicitly resume an errored one. Written atomically (temp file + rename) at every leaf safe point, when a child card returns, before each dispatch (the pending invocation), and at a completed batch, then frozen once at a park, so the on-disk checkpoint is never torn and never leaves an in-flight invocation unnamed. `registryCounter` lets the resumed run mint fresh role-instance ids without colliding with the preserved ones; `learnedContextCeiling` carries the run's context-wall knowledge so resumed roles keep the tightened pressure threshold; `writeCapableStarted` carries the pre-write park rule's flag so a restart cannot reset it and park a run whose writes happened before the restart (docs/queueing.md "Parking: the pre-write rule"); `baseHash` carries the run's base commit so a restart keeps diffing against the same change set; `parkedAsk` identifies the parked turn the queue answer resumes; `pendingInterlude` marks a handler interlude whose replay is still owed.
 export interface RunCheckpoint {
 	version: typeof CHECKPOINT_FORMAT_VERSION
 	runId: string
@@ -62,6 +76,10 @@ export interface RunCheckpoint {
 	parkedAsk?: ParkedAsk
 	// The clarification answer already appended to the leaf history. The id makes delivery idempotent across a crash: a retry with the same id does not append the note again, and the queue compares it with the item's answer id to tell an undelivered answer from a re-pause. consumed is set once the resume wrote its running meta, so an answer that never started is retried.
 	clarificationAnswer?: ClarificationAnswerDelivery
+	// Present while a handler interlude is in flight. Its presence means a suspension or crash inside the handler; resume re-runs the interlude from the pre-interlude frame state.
+	pendingInterlude?: PendingInterlude
+	// The suspension the run has already decided to enter. Written with the suspension checkpoint before the suspended meta lands, so a crash in that window is still recognized as a suspension by startup reconciliation.
+	suspension?: SuspensionRecord
 	frames: CheckpointFrame[]
 }
 
@@ -89,6 +107,29 @@ function isClarificationAnswerDelivery(value: unknown): value is ClarificationAn
 	if (!isString(value.question) || value.question === '') return false
 	if (!isString(value.answer)) return false
 	if (value.consumed !== undefined && value.consumed !== true) return false
+	return true
+}
+
+function isInterludeTrigger(value: unknown): value is InterludeTrigger {
+	return typeof value === 'string' && INTERLUDE_TRIGGERS.some((trigger) => trigger === value)
+}
+
+function isInterruptRequest(value: unknown): value is InterruptRequest {
+	if (!isObject(value)) return false
+	if (value.kind !== 'inquiry' && value.kind !== 'plan_modification' && value.kind !== 'notice') return false
+	return isString(value.message) && value.message !== ''
+}
+
+function isPendingInterlude(value: unknown): value is PendingInterlude {
+	if (!isObject(value)) return false
+	if (!isString(value.targetRoleId) || value.targetRoleId === '') return false
+	if (!isInterludeTrigger(value.trigger)) return false
+	if (!isObject(value.details)) return false
+	if (!Array.isArray(value.pendingOperatorRequests) || !value.pendingOperatorRequests.every(isInterruptRequest)) return false
+	if (value.trigger === 'inquiry') {
+		const message = value.details['message']
+		if (!isString(message) || message === '') return false
+	}
 	return true
 }
 
@@ -197,10 +238,17 @@ export function isRunCheckpoint(value: unknown): value is RunCheckpoint {
 			if (frame.parentRoleId !== parent.roleId) return false
 		}
 	}
-	const parkedAsk = value.parkedAsk
-	if (parkedAsk === undefined) return true
 	const leaf = frames[frames.length - 1]
 	if (leaf === undefined) return false
+	if (value.pendingInterlude !== undefined) {
+		if (!isPendingInterlude(value.pendingInterlude)) return false
+		if (value.parkedAsk !== undefined) return false
+		if (value.pendingInterlude.targetRoleId !== leaf.roleId) return false
+		if (leaf.pending !== undefined) return false
+	}
+	if (value.suspension !== undefined && !isSuspensionRecord(value.suspension)) return false
+	const parkedAsk = value.parkedAsk
+	if (parkedAsk === undefined) return true
 	if (parkedAsk.roleId !== leaf.roleId) return false
 	if (leaf.pending !== undefined) return false
 	const history = leaf.roleState.history
@@ -227,8 +275,15 @@ export interface CheckpointRecorder {
 	unregisterFrame(roleId: string): void
 	setPending(roleId: string, pending: PendingInvocation | undefined): void
 	setPendingChildCard(roleId: string, card: ResultCard): void
+	setPendingInterlude(interlude: PendingInterlude | undefined): void
+	setPendingOperatorRequests(requests: InterruptRequest[]): void
+	setSuspension(record: SuspensionRecord | undefined): void
+	hasActiveHandler(): boolean
+	pendingInterludeTrigger(): InterludeTrigger | undefined
 	// Returns whether a checkpoint was actually written: false when frozen or while a handler frame suppresses writes.
 	write(): boolean
+	// Persists the current stack and registry counter around a provider suspension, excluding handler frames (which are replayed, not resumed) and ignoring handler write suppression. This is the checkpoint that advances the counter past the failed handler subtree so its replay receives fresh ids.
+	writeSuspension(): boolean
 	// Pins the parked turn's checkpoint: later writes would lose the ask result as ancestors unwind and finish, and the answer resume needs exactly that state. Idempotent.
 	freeze(): void
 	// Releases the pin when the answer resume replaces the parked turn's result, so the post-answer state can be checkpointed. Idempotent.
@@ -289,11 +344,44 @@ function serializeFrame(frame: RecorderFrame, resumeStamp: string | undefined): 
 	}
 }
 
-// The per-run recorder every engine frame reports into. Frames hold live references (the registry entry's roleState), so a write reads the current state — including compaction edits a context handler made to a suspended role — and the synchronous serialize+write leaves no mutation window. While a handler invocation is on the stack writes are suppressed (see CheckpointFrame), which also means a handler's own frames and pendings are never serialized; a freeze pins the park checkpoint so the unwinding ancestors cannot overwrite it. Frames are re-ordered by depth at write time because resume registers leaf-first.
+// The per-run recorder every engine frame reports into. Frames hold live references (the registry entry's roleState), so a write reads the current state — including compaction edits a context handler made to a suspended role — and the synchronous serialize+write leaves no mutation window. While a handler invocation is on the stack ordinary writes are suppressed (see CheckpointFrame), so handler frames are never serialized; a suspension write deliberately bypasses suppression to persist the pending interlude and the advanced registry counter, excluding handler frames; a freeze pins the park checkpoint so the unwinding ancestors cannot overwrite it. Frames are re-ordered by depth at write time because resume registers leaf-first.
 export function createCheckpointRecorder(dependencies: CheckpointRecorderDependencies): CheckpointRecorder {
 	const frames = new Map<string, RecorderFrame>()
+	let pendingInterlude: PendingInterlude | undefined
+	let suspension: SuspensionRecord | undefined
+	let preInterludeFrames: CheckpointFrame[] | undefined
 	let suspendedHandlerCount = 0
 	let frozen = false
+
+	function cloneFrames(frames: CheckpointFrame[]): CheckpointFrame[] {
+		const copy: unknown = JSON.parse(JSON.stringify(frames))
+		if (!Array.isArray(copy) || !copy.every(isCheckpointFrame)) throw new Error('checkpoint recorder: could not snapshot the pre-interlude frames')
+		return copy
+	}
+
+	function writeCheckpoint(mode: 'ordinary' | 'suspension'): boolean {
+		if (frozen) return false
+		if (mode === 'ordinary' && suspendedHandlerCount > 0) return false
+		const ordered = [...frames.values()].filter((frame) => mode === 'ordinary' || frame.context.handlerOf === undefined).sort((a, b) => a.context.depth - b.context.depth)
+		const checkpoint: RunCheckpoint = {
+			version: CHECKPOINT_FORMAT_VERSION,
+			runId: dependencies.runId,
+			startTime: dependencies.startTime,
+			registryCounter: dependencies.roleRegistry.counter(),
+			...(dependencies.contextPressureTracker.learnedCeiling !== undefined ? { learnedContextCeiling: dependencies.contextPressureTracker.learnedCeiling } : {}),
+			...(dependencies.parkTracker.writeCapableStarted ? { writeCapableStarted: true } : {}),
+			...(dependencies.baseTracker.baseHash !== undefined ? { baseHash: dependencies.baseTracker.baseHash } : {}),
+			...(dependencies.parkTracker.parkedAsk !== undefined ? { parkedAsk: dependencies.parkTracker.parkedAsk } : {}),
+			...(dependencies.clarificationAnswer !== undefined ? { clarificationAnswer: dependencies.clarificationAnswer } : {}),
+			...(pendingInterlude !== undefined ? { pendingInterlude } : {}),
+			...(suspension !== undefined ? { suspension } : {}),
+			frames: mode === 'suspension' && pendingInterlude !== undefined && preInterludeFrames !== undefined ? preInterludeFrames : ordered.map((frame) => serializeFrame(frame, dependencies.continuesFrom)),
+		}
+		if (pendingInterlude === undefined) preInterludeFrames = undefined
+		else if (mode === 'ordinary') preInterludeFrames = cloneFrames(checkpoint.frames)
+		dependencies.writeCheckpoint(checkpoint)
+		return true
+	}
 
 	function requireFrame(roleId: string): RecorderFrame {
 		const frame = frames.get(roleId)
@@ -319,24 +407,26 @@ export function createCheckpointRecorder(dependencies: CheckpointRecorderDepende
 			if (frame.pending === undefined) throw new Error(`checkpoint recorder: role instance "${roleId}" recorded a child card with no pending child suspension`)
 			frame.pending = { ...frame.pending, childCard: card }
 		},
+		setPendingInterlude(interlude) {
+			pendingInterlude = interlude
+		},
+		setPendingOperatorRequests(requests) {
+			if (pendingInterlude !== undefined) pendingInterlude = { ...pendingInterlude, pendingOperatorRequests: requests }
+		},
+		setSuspension(record) {
+			suspension = record
+		},
+		hasActiveHandler() {
+			return suspendedHandlerCount > 0
+		},
+		pendingInterludeTrigger() {
+			return pendingInterlude?.trigger
+		},
 		write() {
-			if (frozen) return false
-			if (suspendedHandlerCount > 0) return false
-			const ordered = [...frames.values()].sort((a, b) => a.context.depth - b.context.depth)
-			const checkpoint: RunCheckpoint = {
-				version: CHECKPOINT_FORMAT_VERSION,
-				runId: dependencies.runId,
-				startTime: dependencies.startTime,
-				registryCounter: dependencies.roleRegistry.counter(),
-				...(dependencies.contextPressureTracker.learnedCeiling !== undefined ? { learnedContextCeiling: dependencies.contextPressureTracker.learnedCeiling } : {}),
-				...(dependencies.parkTracker.writeCapableStarted ? { writeCapableStarted: true } : {}),
-				...(dependencies.baseTracker.baseHash !== undefined ? { baseHash: dependencies.baseTracker.baseHash } : {}),
-				...(dependencies.parkTracker.parkedAsk !== undefined ? { parkedAsk: dependencies.parkTracker.parkedAsk } : {}),
-				...(dependencies.clarificationAnswer !== undefined ? { clarificationAnswer: dependencies.clarificationAnswer } : {}),
-				frames: ordered.map((frame) => serializeFrame(frame, dependencies.continuesFrom)),
-			}
-			dependencies.writeCheckpoint(checkpoint)
-			return true
+			return writeCheckpoint('ordinary')
+		},
+		writeSuspension() {
+			return writeCheckpoint('suspension')
 		},
 		freeze() {
 			frozen = true

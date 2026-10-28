@@ -9,7 +9,7 @@ import { createAnimationFrameCoalescer } from './animation-frame-coalescer.js'
 import { createPollFetcher } from './poll-fetch.js'
 import { createLabelResolver, isLabelTier, isRoleOrder, TIER_VALUES } from './labels.js'
 import { buildInfoFromConfig, formatBuildLabel } from './build-info.js'
-import { isTerminalStatus, secondsBetweenIso, withLiveElapsed } from './interaction-model.js'
+import { isLiveStatus, isSettledForPolling, isSuspendedStatus, isTerminalStatus, secondsBetweenIso, withLiveElapsed } from './interaction-model.js'
 import { planSameRunView } from './run-selection.js'
 import { deriveFaviconState, faviconHref } from './favicon.js'
 import { createTooltipDismiss, deriveTooltipDescriptor, isInFlightAskHuman, resolveInspectorScope, resolveTooltipTarget } from './inspector.js'
@@ -18,6 +18,8 @@ import { copyRawToClipboard } from './clipboard.js'
 import { QuestionModal } from './question-modal.js'
 import { createOperationDetails } from './operation-details.js'
 import { deriveTerminalResult, ResultModal, ResultPendingModal } from './result-modal.js'
+import { deriveSuspendedCard, resumeFailureCopy, SuspendedCard, suspendedTerminateTarget, terminateFailureCopy } from './suspended-card.js'
+import { deriveHealthBanner, HealthBanner } from './health-banner.js'
 import { deriveHistoryEntries, lineageLink, queueItemLineageLink, runPrimaryLabel, runSummaryIndex } from './run-history.js'
 import type { LineageLink } from './run-history.js'
 import { acceptedResultView, planResultOpen, planResultRetry, planRunViewRecovery, resultOffersContinue, selectResultSource, withoutVersion } from './result-access.js'
@@ -34,9 +36,9 @@ import { createStreamClient } from './stream-client.js'
 import { nextLivePartial } from './live-partial.js'
 import { LoadingIndicator } from './loading-indicator.js'
 import { backlogCount, deriveReorderPosition, isQueueItemLike, matchesParkedRun, queueItemPrimaryText, queueStatusLabel, reorderWaitingItems } from './queue-panel.js'
-import type { InteractionModel, Participant, RunStatus } from './interaction-model.js'
+import type { InteractionModel, Participant, RunStatus, SuspensionRecord } from './interaction-model.js'
 import type { FlowFeedState } from './flow-feed/index.js'
-import type { RunListFeedState, RunResultCard, RunSummary } from './run-list-feed/index.js'
+import type { HealthView, RunListFeedState, RunResultCard, RunSummary } from './run-list-feed/index.js'
 import type { LabelConfig, LabelResolver, LabelTier } from './labels.js'
 import type { FetchRequest, WireFetchRequest } from './turn-inspector/index.js'
 import type { LivePartial } from './live-partial.js'
@@ -87,8 +89,12 @@ export interface RunView {
 	endTime: string | null
 	result: RunResultCard | null
 	error?: unknown
+	// Present only while the run is suspended; the pause card renders its category copy and suspendedAt, never a result card.
+	suspension: SuspensionRecord | null
+	// The coarse provider health snapshot carried by the run view; the banner may read it without a separate health poll.
+	providerHealth: HealthView | null
 	continuesFrom: string | null
-	// Whether the operator can explicitly resume this errored run from its kept checkpoint (terminal error meta plus a checkpoint on disk — `resumable` in source/web/render.ts). Present on run-view endpoints only, never on run-list summaries; the modal's Resume gating consumes it through the raw-body read in deriveTerminalResult, so the typed field mirrors the contract rather than gating reads.
+	// Whether the operator can explicitly resume this errored or suspended run from its kept checkpoint (terminal error or suspended meta plus a checkpoint on disk — `resumable` in source/web/render.ts). Present on run-view endpoints only, never on run-list summaries; the modal's Resume gating consumes it through the raw-body read in deriveTerminalResult, so the typed field mirrors the contract rather than gating reads.
 	resumable: boolean
 	plan: string | null
 	roles: RoleActivity[]
@@ -194,6 +200,8 @@ export interface ApplicationState {
 	selectedRunView: RunView | null
 	selectedRunStatus: RunStatus | null
 	pendingQuestions: ApiQuestion[]
+	// The coarse provider health carried by the run-list feed; null until the first run-list snapshot lands. It drives the persistent banner without a second poll.
+	providerHealth: HealthView | null
 	// The polled task queue (docs/queueing.md "UI interaction model"), head first. The add-flow's ids: justSubmittedItemId dedups a second add once the add's response has landed, until the item shows up in the polled queue; pendingAddSelectionId is consumed once by the very next queue read to jump to the new run's watch screen when the scheduler dispatched it within the add request.
 	queueItems: QueueItemLike[]
 	justSubmittedItemId: string | null
@@ -259,6 +267,10 @@ export interface ApplicationState {
 	questionModalOpen: boolean
 	resultModalOpen: boolean
 	resultShownForRun: string | null
+	// The pause card is deliberately separate from the result modal: a suspended run has no terminal result. suspendedActionNotice carries the typed resume/terminate refusal for the card and the global notice strip. resumeRunPendingId is the run id whose direct (non-compose) resume is in flight, so every Resume now button disables once one is sending.
+	suspendedModalOpen: boolean
+	suspendedActionNotice: string | null
+	resumeRunPendingId: string | null
 	// The on-demand result load for the selected run: null when the modal renders a terminal descriptor, otherwise the phase of the summary fallback's full-view fetch.
 	resultLoad: ResultLoadState | null
 	interruptModalOpen: boolean
@@ -337,6 +349,7 @@ const POLL_KEY_INSPECTOR_TAIL: PollKey = 'inspector-tail'
 const STATUS_LABELS: Record<string, string> = {
 	unknown: 'in progress',
 	running: 'running',
+	suspended: 'suspended',
 	success: 'success',
 	error: 'error',
 	needs_clarification: 'needs clarification',
@@ -499,9 +512,9 @@ function formatTokens(tokens: unknown): string {
 
 const renderMarkdown = createMarkdownRenderer(h, { maxEntries: 256, maxCharacters: 16_000_000 })
 
-// The active run is the first non-terminal summary; derived in the view rather than stored, so it can never drift from the run list.
+// The live run is the first summary that is not settled for polling: running or unknown. A suspended pause, like a terminal outcome, is excluded, so the UI never says a suspended run is in progress. Derived in the view rather than stored, so it can never drift from the run list.
 function deriveActiveRunId(summaries: RunSummary[]): string | null {
-	const active = summaries.find((summary) => !isTerminalStatus(summary.status))
+	const active = summaries.find((summary) => isLiveStatus(summary.status) || summary.status === 'unknown')
 	return active === undefined ? null : active.runId
 }
 
@@ -708,7 +721,7 @@ function withFavicon(result: ActionReturn): ActionReturn {
 // Actions are pure state transitions; side effects are returned as effect tuples alongside the next state. The polling action returns a fresh now so relative timestamps refresh every tick even when the server returns identical data.
 
 function hasPollableSelectedRun(state: ApplicationState): state is ApplicationState & { selectedRunId: string } {
-	return typeof state.selectedRunId === 'string' && state.selectedRunId !== '' && (state.selectedRunStatus === null || !isTerminalStatus(state.selectedRunStatus))
+	return typeof state.selectedRunId === 'string' && state.selectedRunId !== '' && (state.selectedRunStatus === null || !isSettledForPolling(state.selectedRunStatus))
 }
 
 function Tick(state: ApplicationState): ActionReturn {
@@ -808,11 +821,11 @@ function GotRunList(state: ApplicationState, payload: FetchResultPayload): Actio
 	const result = applyRunListFrame(state.runListFeed, payload.body)
 	if (result.outcome === 'unchanged') {
 		if (!payload.ok) return { ...state, serverAvailable: false }
-		return { ...state, serverAvailable: true, runListLoaded: true }
+		return { ...state, providerHealth: result.health, serverAvailable: true, runListLoaded: true }
 	}
 	if (result.outcome === 'applied' || result.outcome === 'snapshot') {
 		if (!payload.ok) return { ...state, serverAvailable: false }
-		const nextState = { ...state, runListFeed: result.state, summaries: result.summaries, serverAvailable: true, runListLoaded: true }
+		const nextState = { ...state, runListFeed: result.state, summaries: result.summaries, providerHealth: result.health, serverAvailable: true, runListLoaded: true }
 		if (nextState.justSubmittedRunId !== null && result.summaries.some((summary) => summary.runId === nextState.justSubmittedRunId)) {
 			nextState.justSubmittedRunId = null
 		}
@@ -829,7 +842,11 @@ function GotRunList(state: ApplicationState, payload: FetchResultPayload): Actio
 		const selectedRunId = nextState.selectedRunId
 		if (nextState.screen !== 'watch' && selectedRunId !== null) {
 			const selectedSummary = result.summaries.find((summary) => summary.runId === selectedRunId)
-			if (selectedSummary !== undefined) nextState.selectedRunStatus = selectedSummary.status
+			if (selectedSummary !== undefined) {
+				nextState.selectedRunStatus = selectedSummary.status
+				// A pause or terminal outcome ends the in-flight turn the stream was showing; the server's log remains authoritative.
+				if (isSettledForPolling(selectedSummary.status)) nextState.livePartial = null
+			}
 		}
 		return [nextState, UpdateFavicon(nextState)]
 	}
@@ -915,7 +932,7 @@ function GotSelectedRun(curriedRunId: string) {
 		}
 		// A completion transition resets the inspector's scope to auto, so the next open lands on the most recently active instance (here, the finishing one) instead of whatever the operator had scoped to during the run.
 		if (isCompletionTransition) inspectorSession.scope(null)
-		return [{ ...state, selectedRunView: body, selectedRunStatus: body.status, resultModalOpen, resultShownForRun, interruptAnswerCard, shownInterruptAnswerKeys, serverAvailable: true, livePartial: isTerminalStatus(body.status) ? null : state.livePartial, versions: recordVersion(state.versions, payload) }, SyncSequenceFollower()]
+		return [{ ...state, selectedRunView: body, selectedRunStatus: body.status, resultModalOpen, resultShownForRun, interruptAnswerCard, shownInterruptAnswerKeys, serverAvailable: true, providerHealth: body.providerHealth ?? state.providerHealth, livePartial: isSettledForPolling(body.status) ? null : state.livePartial, versions: recordVersion(state.versions, payload) }, SyncSequenceFollower()]
 	}
 }
 
@@ -1146,12 +1163,61 @@ function TerminateQueueItem(itemId: string) {
 function GotQueueAfterTerminate(runId: string | null) {
 	return function GotQueueAfterTerminateForRun(state: ApplicationState, payload: FetchResultPayload): ActionReturn {
 		const cleared: ApplicationState = { ...state, queueTerminatePendingId: null, serverAvailable: true }
-		if (!payload.ok) return [cleared, Fetch({ url: 'api/queue', ok: GotQueue, fail: FetchFailed })]
+		const effects: OptionalEffect[] = [
+			Fetch({ url: 'api/queue', ok: GotQueue, fail: FetchFailed }),
+			Fetch({ url: 'api/runs', ok: GotRunList, fail: FetchFailed }),
+		]
+		if (!payload.ok) return [cleared, ...effects]
 		const nextState = runId !== null && runId === state.selectedRunId
-			? { ...cleared, openQueueQuestionId: null, selectedRunStatus: 'unknown' as const, selectedRunView: null, resultModalOpen: false, resultShownForRun: null, resultLoad: null }
-			: { ...cleared, openQueueQuestionId: null }
-		return [nextState, Fetch({ url: 'api/queue', ok: GotQueue, fail: FetchFailed })]
+			? { ...cleared, openQueueQuestionId: null, suspendedModalOpen: false, selectedRunStatus: 'unknown' as const, selectedRunView: null, resultModalOpen: false, resultShownForRun: null, resultLoad: null }
+			: { ...cleared, openQueueQuestionId: null, suspendedModalOpen: false }
+		return [nextState, ...effects]
 	}
+}
+
+// The pause card's and history row's Terminate run action addresses the run itself, so it still works when the suspended item was lost; a queue row passes its item id and keeps the queue-native path. The host confirms because termination discards the saved checkpoint. A typed refusal lands in suspendedActionNotice and both polls refresh the stale state.
+function TerminateSuspendedRun(runId: string, itemId: string | null = null) {
+	return function TerminateSuspendedRunAction(state: ApplicationState, event: Event): ActionReturn {
+		event.stopPropagation()
+		if (state.queueTerminatePendingId !== null || state.resumeRunPendingId !== null) return state
+		if (!window.confirm('Terminate this suspended run? Its saved context will be discarded.')) return state
+		const target = suspendedTerminateTarget(runId, itemId)
+		return [
+			{ ...state, queueTerminatePendingId: target.pendingId, suspendedActionNotice: null },
+			Fetch({
+				url: target.url,
+				init: { method: 'POST' },
+				ok: GotSuspendedTerminate(runId),
+				fail: SuspendedTerminateFailed,
+			}),
+		]
+	}
+}
+
+function GotSuspendedTerminate(runId: string) {
+	return function GotSuspendedTerminateForRun(state: ApplicationState, payload: FetchResultPayload): ActionReturn {
+		const cleared: ApplicationState = { ...state, queueTerminatePendingId: null, serverAvailable: true }
+		const effects: OptionalEffect[] = [
+			Fetch({ url: 'api/queue', ok: GotQueue, fail: FetchFailed }),
+			Fetch({ url: 'api/runs', ok: GotRunList, fail: FetchFailed }),
+		]
+		if (!payload.ok) {
+			return [{ ...cleared, suspendedActionNotice: terminateFailureCopy(payload.body, payload.status) }, ...effects]
+		}
+		if (runId === state.selectedRunId) {
+			const nextState: ApplicationState = { ...cleared, suspendedModalOpen: false, suspendedActionNotice: null, openQueueQuestionId: null, selectedRunStatus: 'unknown', selectedRunView: null, resultModalOpen: false, resultShownForRun: null, resultLoad: null }
+			return [nextState, ...effects]
+		}
+		return [{ ...cleared, suspendedModalOpen: false, suspendedActionNotice: null, openQueueQuestionId: null }, ...effects]
+	}
+}
+
+function SuspendedTerminateFailed(state: ApplicationState): ActionReturn {
+	return [
+		{ ...state, queueTerminatePendingId: null, suspendedActionNotice: 'The server could not be reached.', serverAvailable: false },
+		Fetch({ url: 'api/queue', ok: GotQueue, fail: FetchFailed }),
+		Fetch({ url: 'api/runs', ok: GotRunList, fail: FetchFailed }),
+	]
 }
 
 // --- Queue drag-to-reorder ---------------------------------------------------
@@ -1381,6 +1447,9 @@ function resetRunView(state: ApplicationState, runId: string, status: RunStatus 
 		questionModalOpen: false,
 		resultModalOpen: false,
 		resultShownForRun: null,
+		suspendedModalOpen: false,
+		suspendedActionNotice: null,
+		resumeRunPendingId: null,
 		resultLoad: null,
 		versions: withoutVersion(state.versions, runViewUrl(runId)),
 		tooltip: null,
@@ -1401,7 +1470,7 @@ function switchRunView(state: ApplicationState, runId: string, status: RunStatus
 
 function SelectRun(state: ApplicationState, runId: string): ActionReturn {
 	if (runId === state.selectedRunId) {
-		// A run can resume in place without this tab answering the question (another tab, the API, or an error resume). The run list then reports it non-terminal while the selected view still holds the old terminal status, which keeps the per-run poll and stream disabled; re-arm the same-id view so the operator can recover without switching runs or reloading.
+		// A run can resume in place without this tab answering the question (another tab, the API, or an error-or-suspended resume). The run list then reports it non-terminal while the selected view still holds the old terminal status, which keeps the per-run poll and stream disabled; re-arm the same-id view so the operator can recover without switching runs or reloading.
 		const summary = state.summaries.find((entry) => entry.runId === runId)
 		if (summary !== undefined) {
 			const plan = planSameRunView({
@@ -1644,20 +1713,63 @@ function GotResumedRun(state: ApplicationState, payload: FetchResultPayload): Ac
 	return { ...state, resumeSending: false, resumeNotice: resumeFailureNotice(payload) }
 }
 
-// The compose-screen notice for a refused resume, keyed off the resume endpoint's statuses (source/web/request-handler.ts handleResumeErroredRun). Network failures never reach here — the fail action (ResumeFailed) covers them.
+// The compose-screen notice for a refused resume, keyed off the resume endpoint's statuses (source/web/request-handler.ts handleResumeErroredOrSuspendedRun). Network failures never reach here — the fail action (ResumeFailed) covers them.
 function resumeFailureNotice(payload: FetchResultPayload): string {
-	if (payload.status === 404) return 'The run could not be found — it may have been removed.'
-	if (payload.status === 409) {
-		const error = isObject(payload.body) ? payload.body['error'] : undefined
-		if (error === 'run_in_progress') return 'Another run is in progress — resume this one after it finishes.'
-		if (error === 'checkpoint_missing') return 'This run has no resumable checkpoint — continue it as a new run instead.'
-		return 'The run is no longer waiting to be resumed — it may already be running again.'
-	}
-	return 'The resume was rejected.'
+	return resumeFailureCopy(payload.body, payload.status)
 }
 
 function ResumeFailed(state: ApplicationState): ApplicationState {
 	return { ...state, resumeSending: false, resumeNotice: 'The server could not be reached.', serverAvailable: false }
+}
+
+// The direct Resume now path used by the pause card, history rows, and queue rows: no compose note, just the same-run resume POST. A success switches to the resumed run and refreshes both the run list and queue; a typed refusal lands in suspendedActionNotice while both polls refresh the stale state.
+function ResumeSuspendedRunNow(runId: string) {
+	return function ResumeSuspendedRunNowAction(state: ApplicationState, event: Event): ActionReturn {
+		event.stopPropagation()
+		if (state.resumeRunPendingId !== null || state.resumeSending || state.createSending) return state
+		return [
+			{ ...state, resumeRunPendingId: runId, suspendedActionNotice: null },
+			Fetch({
+				url: `api/runs/${encodeURIComponent(runId)}/resume`,
+				init: { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({}) },
+				ok: GotSuspendedResume(runId),
+				fail: SuspendedResumeFailed,
+			}),
+		]
+	}
+}
+
+function GotSuspendedResume(runId: string) {
+	return function GotSuspendedResumeForRun(state: ApplicationState, payload: FetchResultPayload): ActionReturn {
+		const cleared: ApplicationState = { ...state, resumeRunPendingId: null, serverAvailable: true }
+		const body = payload.body
+		if (payload.status === 201 && isObject(body) && typeof body['runId'] === 'string' && body['runId'] === runId) {
+			inspectorSession.close()
+			const reset = switchRunView(cleared, runId, null)
+			return [
+				{ ...reset, suspendedModalOpen: false, suspendedActionNotice: null, continuation: null, resumingRunId: null, resumeSending: false, resumeNotice: null, justSubmittedRunId: runId },
+				Fetch({ url: 'api/runs', ok: GotRunList, fail: FetchFailed }),
+				Fetch({ url: 'api/queue', ok: GotQueue, fail: FetchFailed }),
+			]
+		}
+		return [
+			{ ...cleared, suspendedActionNotice: resumeFailureCopy(payload.body, payload.status) },
+			Fetch({ url: 'api/runs', ok: GotRunList, fail: FetchFailed }),
+			Fetch({ url: 'api/queue', ok: GotQueue, fail: FetchFailed }),
+		]
+	}
+}
+
+function SuspendedResumeFailed(state: ApplicationState): ActionReturn {
+	return [
+		{ ...state, resumeRunPendingId: null, suspendedActionNotice: 'The server could not be reached.', serverAvailable: false },
+		Fetch({ url: 'api/runs', ok: GotRunList, fail: FetchFailed }),
+		Fetch({ url: 'api/queue', ok: GotQueue, fail: FetchFailed }),
+	]
+}
+
+function DismissSuspendedActionNotice(state: ApplicationState): ApplicationState {
+	return { ...state, suspendedActionNotice: null }
 }
 
 function SubmitAnswer(questionId: string) {
@@ -1799,17 +1911,18 @@ function DismissInterruptAnswer(state: ApplicationState): ApplicationState {
 function OpenResultModal(state: ApplicationState): ActionReturn {
 	// The modal already presents this selection's result (or its loading state); a repeated CTA click must not stack another fetch.
 	if (state.resultModalOpen) return state
-	const plan = planResultOpen(state.selectedRunId, state.selectedRunView, state.summaries, state.resultLoad)
-	if (plan === null) return state
+	const current: ApplicationState = state.suspendedModalOpen ? { ...state, suspendedModalOpen: false } : state
+	const plan = planResultOpen(current.selectedRunId, current.selectedRunView, current.summaries, current.resultLoad)
+	if (plan === null) return current
 	if (plan.kind === 'immediate') {
 		const effects: EffectItem[] = [CancelTooltipDismiss()]
 		if (plan.backgroundFetch && plan.resultLoad !== null) effects.push(Fetch({ url: runViewUrl(plan.resultLoad.runId), init: { cache: 'no-store' }, ok: GotResultView(plan.resultLoad.runId), fail: ResultViewFailed(plan.resultLoad.runId) }))
 		// A modal opening covers the run view; clear the inspector so the card does not linger beneath it.
-		return [{ ...state, resultModalOpen: true, resultLoad: plan.resultLoad, tooltip: null }, ...effects]
+		return [{ ...current, resultModalOpen: true, resultLoad: plan.resultLoad, tooltip: null }, ...effects]
 	}
 	const effects: EffectItem[] = [CancelTooltipDismiss()]
 	if (plan.kind === 'fetch') effects.push(Fetch({ url: runViewUrl(plan.resultLoad.runId), init: { cache: 'no-store' }, ok: GotResultView(plan.resultLoad.runId), fail: ResultViewFailed(plan.resultLoad.runId) }))
-	return [{ ...state, resultModalOpen: true, resultLoad: plan.resultLoad, tooltip: null }, ...effects]
+	return [{ ...current, resultModalOpen: true, resultLoad: plan.resultLoad, tooltip: null }, ...effects]
 }
 
 // The on-demand full-view fetch behind the pending result modal: an unreadable or failed response parks the modal in its retryable failed phase, and a readable one fills the view state the terminal descriptor is derived from. A non-terminal body keeps the modal waiting, because the summary that opened it was terminal but the view has not caught up yet.
@@ -1845,6 +1958,15 @@ function RetryResultLoad(state: ApplicationState): ActionReturn {
 
 function CloseResultModal(state: ApplicationState): ApplicationState {
 	return { ...state, resultModalOpen: false, resultLoad: null }
+}
+
+// The pause card is a separate surface from the result modal: a suspended run has no result descriptor, so its CTA opens this card instead. Opening it covers the run view and clears the inspector like the other overlays.
+function OpenSuspendedModal(state: ApplicationState): ActionReturn {
+	return [{ ...state, suspendedModalOpen: true, resultModalOpen: false, resultLoad: null, suspendedActionNotice: null, tooltip: null }, CancelTooltipDismiss()]
+}
+
+function CloseSuspendedModal(state: ApplicationState): ApplicationState {
+	return { ...state, suspendedModalOpen: false }
 }
 
 function OpenQuestionModal(state: ApplicationState): ActionReturn {
@@ -2231,6 +2353,24 @@ function TopBar(state: ApplicationState): Vnode {
 	])
 }
 
+// The persistent provider-health banner rides the run-list feed's health singleton, so it appears above every screen without a second poll. The derivation renders fixed copy only; no provider endpoint, credential, model, header, request, or body reaches the DOM.
+function ProviderHealthBannerForState(state: ApplicationState): Vnode | null {
+	const health = state.providerHealth ?? (state.selectedRunView === null ? null : state.selectedRunView.providerHealth)
+	const descriptor = deriveHealthBanner(health)
+	if (descriptor === null) return null
+	return HealthBanner(h, { descriptor })
+}
+
+// The typed resume/terminate refusal surface. It sits above the content so a failure from the pause card, a history row, or a queue row is visible wherever the operator acted; Dismiss clears it.
+function SuspendedActionNoticeForState(state: ApplicationState): Vnode | null {
+	const notice = state.suspendedActionNotice
+	if (typeof notice !== 'string' || notice === '') return null
+	return h('div', { class: 'suspended-action-notice', role: 'alert' }, [
+		h('span', { class: 'suspended-action-notice-text' }, notice),
+		h('button', { type: 'button', class: 'suspended-action-notice-dismiss', title: 'Dismiss this notice', onclick: DismissSuspendedActionNotice }, 'Dismiss'),
+	])
+}
+
 // The compact lineage badge in a row's title line, and the fuller line in its expanded details. Both select the parent run without also triggering the row's own select/open handler.
 function lineageTitle(link: LineageLink): string {
 	return `Continues run ${link.runId} — ${link.label}`
@@ -2262,26 +2402,34 @@ function HistoryRow(state: ApplicationState, summary: RunSummary, rerunDisabled:
 	const expanded = state.expandedRowIds[summary.runId] === true
 	const link = lineageLink(summary.continuesFrom, summariesById)
 	const canContinue = resultOffersContinue(summary.status)
-	return h('li', { key: summary.runId, class: { 'history-row': true, 'is-expanded': expanded, 'is-selected': summary.runId === state.selectedRunId } }, [
+	const suspended = isSuspendedStatus(summary.status)
+	const resumePending = state.resumeRunPendingId !== null
+	const terminatePending = state.queueTerminatePendingId !== null
+	const rowChildren: (Vnode | null)[] = [
+		h('span', { class: `run-status run-status-${summary.status ?? 'unknown'}` }, statusLabel(summary.status)),
+		h('span', { class: 'history-primary' }, runPrimaryLabel(summary)),
+		link === null ? null : LineageBadge(link),
+		isEffort(summary.effort)
+			? h('span', { class: 'run-effort-badge', title: effortDescription(summary.effort) }, `effort ${effortLabel(summary.effort)}`)
+			: null,
+		isInvolvement(summary.involvement)
+			? h('span', { class: 'run-involvement-badge', title: involvementDescription(summary.involvement) }, `involvement ${involvementLabel(summary.involvement)}`)
+			: null,
+		h('time', { class: 'history-when', title: summary.startTime ?? '' }, formatRelative(summary.startTime, state.now)),
+	]
+	if (suspended) {
+		// A suspended row has a resume/terminate path, not a re-run or continuation path. Terminate is confirmed by its action because it discards the checkpoint.
+		rowChildren.push(h('button', { type: 'button', class: 'suspended-resume-button', 'data-run-id': summary.runId, disabled: resumePending || terminatePending, title: 'Resume this suspended run from its saved checkpoint', onclick: ResumeSuspendedRunNow(summary.runId) }, resumePending ? 'Resuming…' : 'Resume'))
+		rowChildren.push(h('button', { type: 'button', class: 'suspended-terminate-button', 'data-run-id': summary.runId, disabled: terminatePending || resumePending, title: 'Terminate this run and discard its saved context', onclick: TerminateSuspendedRun(summary.runId) }, 'Terminate'))
+	} else {
+		// The re-run button shares the create form's disabled condition (a run is active or a submission is in flight) so the one-task-at-a-time contract holds identically for re-runs.
+		rowChildren.push(h('button', { type: 'button', class: 'rerun-button', 'data-task': summary.task ?? '', disabled: rerunDisabled || typeof summary.task !== 'string' || summary.task === '', onclick: RerunTask }, 're-run'))
+		// Continue is for a finished outcome only; a needs_clarification run is paused and awaits an answer rather than being continued as a new task.
+		if (canContinue) rowChildren.push(h('button', { type: 'button', class: 'continue-button', 'data-run-id': summary.runId, disabled: rerunDisabled, title: 'Start a new run continuing this one', onclick: ContinueRun }, 'Continue'))
+	}
+	return h('li', { key: summary.runId, class: { 'history-row': true, 'is-expanded': expanded, 'is-selected': summary.runId === state.selectedRunId, 'is-suspended': suspended } }, [
 		h('div', { class: 'history-row-title' }, [
-			h('div', { class: 'history-row-main', onclick: [SelectRun, summary.runId], title: 'Watch this run' }, [
-				h('span', { class: `run-status run-status-${summary.status ?? 'unknown'}` }, statusLabel(summary.status)),
-				h('span', { class: 'history-primary' }, runPrimaryLabel(summary)),
-				link === null ? null : LineageBadge(link),
-				isEffort(summary.effort)
-					? h('span', { class: 'run-effort-badge', title: effortDescription(summary.effort) }, `effort ${effortLabel(summary.effort)}`)
-					: null,
-				isInvolvement(summary.involvement)
-					? h('span', { class: 'run-involvement-badge', title: involvementDescription(summary.involvement) }, `involvement ${involvementLabel(summary.involvement)}`)
-					: null,
-				h('time', { class: 'history-when', title: summary.startTime ?? '' }, formatRelative(summary.startTime, state.now)),
-				// The re-run button shares the create form's disabled condition (a run is active or a submission is in flight) so the one-task-at-a-time contract holds identically for re-runs.
-				h('button', { type: 'button', class: 'rerun-button', 'data-task': summary.task ?? '', disabled: rerunDisabled || typeof summary.task !== 'string' || summary.task === '', onclick: RerunTask }, 're-run'),
-				// Continue is for a finished outcome only; a needs_clarification run is paused and awaits an answer rather than being continued as a new task.
-				canContinue
-					? h('button', { type: 'button', class: 'continue-button', 'data-run-id': summary.runId, disabled: rerunDisabled, title: 'Start a new run continuing this one', onclick: ContinueRun }, 'Continue')
-					: null,
-			]),
+			h('div', { class: 'history-row-main', onclick: [SelectRun, summary.runId], title: 'Watch this run' }, rowChildren),
 			h('button', { type: 'button', class: 'history-expand', 'aria-expanded': expanded, title: expanded ? 'Hide details' : 'Show the full task and result', onclick: [ToggleRowExpanded, summary.runId] }, expanded ? 'less ▴' : 'details ▾'),
 		]),
 		expanded ? HistoryRowDetails(summary, summariesById) : null,
@@ -2301,6 +2449,12 @@ function HistoryRowDetails(summary: RunSummary, summariesById: Map<string, RunSu
 	if (typeof summary.task === 'string' && summary.task !== '') {
 		children.push(h('p', { class: 'history-details-heading' }, 'Task'))
 		children.push(h('div', { class: 'markdown history-details-text' }, renderMarkdown(summary.task)))
+	}
+	const suspension = deriveSuspendedCard(summary)
+	if (suspension !== undefined) {
+		children.push(h('p', { class: 'history-details-heading' }, 'Suspended'))
+		children.push(h('p', { class: 'history-details-suspension' }, suspension.cause))
+		children.push(h('p', { class: 'history-details-suspension-time' }, `Suspended since ${suspension.suspendedAt}`))
 	}
 	const resultSummary = summary.result !== null && summary.result !== undefined && typeof summary.result.summary === 'string' && summary.result.summary !== '' ? summary.result.summary : null
 	if (resultSummary !== null) {
@@ -2379,6 +2533,10 @@ function QueueItemRowDetails(state: ApplicationState, item: QueueItemLike, summa
 	if (item.status === 'waiting' && typeof item.answer === 'string' && item.answer !== '') {
 		children.push(h('p', { class: 'queue-item-answer' }, `Your earlier answer: ${item.answer}`))
 	}
+	if (item.status === 'suspended' && typeof item.suspendedAt === 'string' && item.suspendedAt !== '') {
+		children.push(h('p', { class: 'history-details-heading' }, 'Suspended'))
+		children.push(h('p', { class: 'history-details-suspension-time' }, `Suspended since ${item.suspendedAt}`))
+	}
 	if (typeof item.error === 'string' && item.error !== '') {
 		children.push(h('p', { class: 'history-details-heading' }, 'Error'))
 		children.push(h('div', { class: 'markdown history-details-error' }, renderMarkdown(item.error)))
@@ -2386,16 +2544,17 @@ function QueueItemRowDetails(state: ApplicationState, item: QueueItemLike, summa
 	return h('div', { class: 'history-details' }, children)
 }
 
-// A queued row in the merged list: history-style markup with the queue status tone in place of the run status. A needs_input row's main area opens the question modal (its question is the parked run's, and the modal is the only place to answer it); an active row selects its run, whose own history row is suppressed; a waiting row does not navigate.
+// A queued row in the merged list: history-style markup with the queue status tone in place of the run status. A needs_input row's main area opens the question modal (its question is the parked run's, and the modal is the only place to answer it); an active or suspended row selects its run, whose own history row is suppressed; a waiting row does not navigate. Only waiting rows are editable/removable/draggable; a suspended row offers Resume and Terminate instead.
 function QueueItemRow(state: ApplicationState, item: QueueItemLike, summariesById: Map<string, RunSummary>): Vnode {
 	const waiting = item.status === 'waiting'
 	const active = item.status === 'active'
+	const suspended = item.status === 'suspended'
 	const needsInput = item.status === 'needs_input'
 	const editing = waiting && state.editingItemId === item.id
 	const expanded = state.expandedRowIds[item.id] === true
 	const link = queueItemLineageLink(item, summariesById)
 	const runId = typeof item.runId === 'string' && item.runId !== '' ? item.runId : null
-	const mainOnclick = needsInput ? [OpenQueueQuestion, item.id] : active && runId !== null ? [SelectRun, runId] : undefined
+	const mainOnclick = needsInput ? [OpenQueueQuestion, item.id] : (active || suspended) && runId !== null ? [SelectRun, runId] : undefined
 	const mainChildren: (Vnode | null)[] = [
 		h('span', { class: `run-status queue-status-${item.status}` }, queueStatusLabel(item.status)),
 		h('span', { class: 'history-primary' }, queueItemPrimaryText(item)),
@@ -2409,6 +2568,12 @@ function QueueItemRow(state: ApplicationState, item: QueueItemLike, summariesByI
 	if (needsInput) {
 		mainChildren.push(h('button', { type: 'button', class: 'rerun-button terminate-button', disabled: state.queueTerminatePendingId !== null, title: 'Terminate the waiting task and discard its saved context', onclick: TerminateQueueItem(item.id) }, 'Terminate'))
 	}
+	if (suspended && runId !== null) {
+		const resumePending = state.resumeRunPendingId !== null
+		const terminatePending = state.queueTerminatePendingId !== null
+		mainChildren.push(h('button', { type: 'button', class: 'suspended-resume-button', 'data-run-id': runId, disabled: resumePending || terminatePending, title: 'Resume this suspended run from its saved checkpoint', onclick: ResumeSuspendedRunNow(runId) }, resumePending ? 'Resuming…' : 'Resume'))
+		mainChildren.push(h('button', { type: 'button', class: 'suspended-terminate-button', 'data-run-id': runId, disabled: terminatePending || resumePending, title: 'Terminate this run and discard its saved context', onclick: TerminateSuspendedRun(runId, item.id) }, 'Terminate'))
+	}
 	const children: Vnode[] = [
 		h('div', { class: 'history-row-title' }, [
 			h('div', { class: 'history-row-main', onclick: mainOnclick }, mainChildren),
@@ -2418,7 +2583,7 @@ function QueueItemRow(state: ApplicationState, item: QueueItemLike, summariesByI
 	if (expanded) children.push(QueueItemRowDetails(state, item, summariesById))
 	return h('li', {
 		key: item.id,
-		class: { 'history-row': true, 'queue-row': true, 'is-waiting': waiting, 'is-active': active, 'is-needs-input': needsInput, 'is-dragging': state.draggingItemId === item.id },
+		class: { 'history-row': true, 'queue-row': true, 'is-waiting': waiting, 'is-active': active, 'is-suspended': suspended, 'is-needs-input': needsInput, 'is-dragging': state.draggingItemId === item.id },
 		// Only waiting rows drag: a drag is a reorder, and the reorder endpoint takes waiting items only.
 		draggable: waiting && !editing,
 		'data-item-id': item.id,
@@ -2787,6 +2952,20 @@ function WatchScreen(state: ApplicationState): Vnode {
 			])
 		}
 		const selectedStatus = state.selectedRunStatus
+		if (selectedStatus !== null && isSuspendedStatus(selectedStatus)) {
+			return h('section', { id: 'watch-screen' }, [
+				LineageLine(state),
+				StageControls(state, null),
+				h('div', { key: 'watch-flow', class: 'pb-flow flow-stage' }, [
+					h('div', { class: 'flow-empty' }, [
+						h('p', {}, 'This run is suspended.'),
+						h('button', { type: 'button', class: 'suspended-open-button', onclick: OpenSuspendedModal }, 'View suspension'),
+					]),
+					SuspendedCardForRun(state),
+					InspectorModalForRun(state),
+				]),
+			])
+		}
 		if (selectedStatus !== null && isTerminalStatus(selectedStatus)) {
 			return h('section', { id: 'watch-screen' }, [
 				LineageLine(state),
@@ -2806,8 +2985,8 @@ function WatchScreen(state: ApplicationState): Vnode {
 	const model = withLiveElapsed(serverModel, state.now)
 	const tier = state.flowTier
 	// The stage memo returns the cached vnode while the stable inputs are unchanged; it is mounted at exactly one keyed position — child 0 of the `.pb-flow` container keyed 'watch-flow', or child 0 of the sequence scroll wrapper in sequence mode — and that key keeps the position stable while the container's unkeyed siblings (LineageLine, PlanSection) toggle in and out, so the cached vnode is only ever diffed against its own previous self. The reuse is safe because it never lands at two positions or after a position shift (see run-stage/index.ts and docs/architecture.md "Web client").
-	// A needs_clarification run's question lives on its parked queue item, so its Respond CTA opens that item's answer modal; every other terminal status keeps the result modal. The status rides the model input, so a status change already rebuilds the stage.
-	const cta = { onclick: model.status === 'needs_clarification' ? OpenParkedQuestion : OpenResultModal }
+	// A needs_clarification run's question lives on its parked queue item, so its Respond CTA opens that item's answer modal; a suspended run opens the pause card; every other terminal status keeps the result modal. The status rides the model input, so a status change already rebuilds the stage.
+	const cta = { onclick: model.status === 'needs_clarification' ? OpenParkedQuestion : isSuspendedStatus(model.status) ? OpenSuspendedModal : OpenResultModal }
 	const question = { onclick: OpenQuestionModal }
 	const stageInputs = {
 		model: serverModel,
@@ -2837,6 +3016,7 @@ function WatchScreen(state: ApplicationState): Vnode {
 			stageView,
 			QuestionModalForRun(state),
 			ResultModalForRun(state),
+			SuspendedCardForRun(state),
 			InterruptModalForRun(state),
 			InspectorModalForRun(state),
 			InterruptAnswerCardForRun(state),
@@ -2910,6 +3090,28 @@ function QueueQuestionModalForApp(state: ApplicationState): Vnode | null {
 		answerPending: state.queueAnswerPendingId === item.id,
 		terminatePending: state.queueTerminatePendingId !== null,
 		fixed: true,
+	})
+}
+
+// The pause card for the selected run. It is driven by the same result-source selector as the result modal, so a suspended summary opens even before the richer run view lands; the card's own derivation refuses any non-suspended status, which keeps terminal outcomes on the result path.
+function SuspendedCardForRun(state: ApplicationState): Vnode | null {
+	if (!state.suspendedModalOpen) return null
+	const selectedRunId = state.selectedRunId
+	if (selectedRunId === null || selectedRunId === '') return null
+	const source = selectResultSource(selectedRunId, state.selectedRunView, state.summaries)
+	if (source === null) return null
+	const descriptor = deriveSuspendedCard(source.value)
+	if (descriptor === undefined) return null
+	return SuspendedCard(h, {
+		descriptor,
+		runLabel: selectedRunId,
+		runId: selectedRunId,
+		notice: state.suspendedActionNotice,
+		resumePending: state.resumeRunPendingId !== null,
+		terminatePending: state.queueTerminatePendingId !== null,
+		onResume: ResumeSuspendedRunNow(selectedRunId),
+		onTerminate: TerminateSuspendedRun(selectedRunId),
+		onClose: CloseSuspendedModal,
 	})
 }
 
@@ -2987,24 +3189,24 @@ function Main(state: ApplicationState): Vnode {
 }
 
 function view(state: ApplicationState): Vnode {
-	return h('div', { class: 'app-shell' }, [TopBar(state), Main(state), QueueQuestionModalForApp(state)])
+	return h('div', { class: 'app-shell' }, [TopBar(state), ProviderHealthBannerForState(state), SuspendedActionNoticeForState(state), Main(state), QueueQuestionModalForApp(state)])
 }
 
 // --- App -------------------------------------------------------------------
-// The subscriptions array is fixed-size with stable positions: [0] always polls the run list, the pending questions, and the task queue every second while the page is visible; [1] polls the selected run's run view and flow model every second but only on the watch screen, while the page is visible, and while the run is selected and non-terminal (the deactivation on terminal status stops the polling); [2] primes the AudioContext on the first user interaction; [3] dismisses the inspector modal on Escape while it is open; [4] subscribes the live token stream to the selected run while the watch screen shows one that is selected and non-terminal (the same non-terminal guard [1] uses); [5] tracks page visibility and refreshes immediately when the tab returns.
+// The subscriptions array is fixed-size with stable positions: [0] always polls the run list (which now also carries provider health), the pending questions, and the task queue every second while the page is visible; [1] polls the selected run's run view and flow model every second but only on the watch screen, while the page is visible, and while the run is selected and not settled for polling (terminal or suspended stop it); [2] primes the AudioContext on the first user interaction; [3] dismisses the inspector modal on Escape while it is open; [4] subscribes the live token stream to the selected run under the same settled-for-polling guard [1] uses, so a suspended run keeps no stream open; [5] tracks page visibility and refreshes immediately when the tab returns.
 
 // hyperapp re-enters `view` and `subscriptions` with the state it holds, but the vendored declaration types that re-entry as `unknown` (it is app-agnostic). The state provably stays an ApplicationState — init plants a checked literal and every action returns a checked transition — so this guard confirms the wiring rather than re-validating data, and a mismatch fails the mount instead of rendering garbage.
 function isApplicationState(value: unknown): value is ApplicationState {
 	if (!isObject(value)) return false
 	const stateKeys: (keyof ApplicationState)[] = [
-		'summaries', 'selectedRunId', 'selectedRunView', 'selectedRunStatus', 'pendingQuestions',
+		'summaries', 'selectedRunId', 'selectedRunView', 'selectedRunStatus', 'pendingQuestions', 'providerHealth',
 		'queueItems', 'justSubmittedItemId', 'pendingAddSelectionId', 'editingItemId', 'draggingItemId', 'queueAnswerPendingId', 'queueTerminatePendingId', 'openQueueQuestionId', 'pendingResumeItemId',
 		'serverAvailable', 'versions', 'justSubmittedRunId', 'createSending', 'muted', 'shownQuestionIds', 'firstQuestionsPoll', 'pendingAnswerId',
 		'runEffort', 'savingEffort', 'runInvolvement', 'savingInvolvement', 'runLogLevel', 'savingLogLevel',
 		'flowModel', 'previousFlowModel', 'flowFeed', 'runListFeed', 'runListLoaded', 'queueLoaded', 'labelResolver', 'guildParticipants', 'build',
 		'flowTier', 'flowViewMode', 'sequenceRolesOnly', 'screen', 'pageVisible', 'flowRefreshPending', 'expandedRowIds', 'continuation',
 		'resumingRunId', 'resumeSending', 'resumeNotice',
-		'questionModalOpen', 'resultModalOpen', 'resultShownForRun', 'resultLoad', 'interruptModalOpen',
+		'questionModalOpen', 'resultModalOpen', 'resultShownForRun', 'suspendedModalOpen', 'suspendedActionNotice', 'resumeRunPendingId', 'resultLoad', 'interruptModalOpen',
 		'inspectorModalOpen', 'planExpanded', 'livePartial', 'streamConnected', 'streamWasConnectedOnce', 'tooltip',
 		'interruptMode', 'interruptSending', 'interruptNotice', 'interruptAnswerCard', 'shownInterruptAnswerKeys', 'now',
 	]
@@ -3026,6 +3228,7 @@ app({
 			selectedRunView: null,
 			selectedRunStatus: null,
 			pendingQuestions: [],
+			providerHealth: null,
 			queueItems: [],
 			justSubmittedItemId: null,
 			pendingAddSelectionId: null,
@@ -3072,6 +3275,9 @@ app({
 			questionModalOpen: false,
 			resultModalOpen: false,
 			resultShownForRun: null,
+			suspendedModalOpen: false,
+			suspendedActionNotice: null,
+			resumeRunPendingId: null,
 			resultLoad: null,
 			interruptModalOpen: false,
 			inspectorModalOpen: false,

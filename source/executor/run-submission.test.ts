@@ -1,11 +1,11 @@
 import { describe, expect, test } from 'bun:test'
 import type { RunCheckpoint } from './checkpoint.ts'
 import { DEFAULT_LOG_LEVEL } from './log-level.ts'
-import type { EffortLevel, InvolvementLevel, LogEvent, LogLevel, RunContinuation, RunMeta } from './types.js'
+import type { EffortLevel, InvolvementLevel, LogEvent, LogLevel, RunContinuation, RunMeta, SuspensionRecord } from './types.js'
 import type { ReadProjectSettings, ReadRunCheckpointById, ReadRunMetaById, RunDirectoryExists } from './persistence.ts'
 import { DEFAULT_EFFORT } from './effort.ts'
 import { DEFAULT_INVOLVEMENT } from './involvement.ts'
-import { createReadPauseStateById, createResumeClarificationRun, createResumeErroredRun, createResumeParkedRun, createRunSubmission, createTerminateParkedRun, type ResumeErroredRunDependencies, type ResumeRun, type RunSubmission, type StartRun } from './run-submission.ts'
+import { createReadPauseStateById, createResumeClarificationRun, createResumeErroredOrSuspendedRun, createResumeParkedRun, createRunSubmission, createTerminatePausedRun, type ProviderSuspensionOwner, type ResumeErroredOrSuspendedRunDependencies, type ResumeRun, type RunSubmission, type StartRun } from './run-submission.ts'
 import { isRunMeta } from './validation.ts'
 import { createTaskQueue, type QueueItemView, type QueueView, type TaskQueueModule } from './queue/index.ts'
 import { defined, flushMicrotasks } from './test-fixtures.ts'
@@ -71,6 +71,23 @@ const unusedResumeRun: ResumeRun = async () => sampleMeta('resumed')
 // The resume tests' stand-in for startRun, which they never drive.
 const unusedStartRun: StartRun = async (runId) => sampleMeta(runId)
 
+// The real provider-recovery owner owns the suspended-run binding; this in-memory stand-in gives each submission its own copy for the slot and release assertions.
+function providerSuspensionForTest(): ProviderSuspensionOwner {
+	let suspendedRunId: string | undefined
+	return {
+		suspendedRunId: () => suspendedRunId,
+		adoptSuspendedRun: (runId) => {
+			suspendedRunId = runId
+		},
+		noticeSuspension: (meta) => {
+			if (meta.status === 'suspended') suspendedRunId = meta.runId
+		},
+		releaseSuspension: (runId) => {
+			if (suspendedRunId === runId) suspendedRunId = undefined
+		},
+	}
+}
+
 describe('createRunSubmission', () => {
 	test('submit accepts a task, starts the run, and returns its id', async () => {
 		let startedRunId: string | undefined
@@ -78,7 +95,9 @@ describe('createRunSubmission', () => {
 			startedRunId = runId
 			return sampleMeta(runId)
 		}
-		const submission = createRunSubmission({ onRunSettled: settleNothing, startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings, runDirectoryExists: emptyRunsDir })
+		const submission = createRunSubmission({
+			providerSuspension: providerSuspensionForTest(),
+			onRunSettled: settleNothing, startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings, runDirectoryExists: emptyRunsDir })
 
 		const result = submission.submit('do it')
 		expect(result).toEqual({ ok: true, runId: 'run-1' })
@@ -94,7 +113,9 @@ describe('createRunSubmission', () => {
 			marks.push(queueTracked)
 			return sampleMeta('run-1')
 		}
-		const submission = createRunSubmission({ onRunSettled: settleNothing, startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings, runDirectoryExists: emptyRunsDir })
+		const submission = createRunSubmission({
+			providerSuspension: providerSuspensionForTest(),
+			onRunSettled: settleNothing, startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings, runDirectoryExists: emptyRunsDir })
 
 		// The queue is universal and the scheduler is submit's only caller, so every submission is a queue dispatch.
 		submission.submit('do it')
@@ -109,7 +130,9 @@ describe('createRunSubmission', () => {
 		})
 		const ids = ['run-1', 'run-2']
 		let next = 0
-		const submission = createRunSubmission({ onRunSettled: settleNothing, startRun, resumeRun: unusedResumeRun, generateRunId: () => defined(ids[next++], 'run id'), readProjectSettings: emptySettings, runDirectoryExists: emptyRunsDir })
+		const submission = createRunSubmission({
+			providerSuspension: providerSuspensionForTest(),
+			onRunSettled: settleNothing, startRun, resumeRun: unusedResumeRun, generateRunId: () => defined(ids[next++], 'run id'), readProjectSettings: emptySettings, runDirectoryExists: emptyRunsDir })
 
 		const first = submission.submit('first')
 		expect(first).toEqual({ ok: true, runId: 'run-1' })
@@ -122,6 +145,36 @@ describe('createRunSubmission', () => {
 		await submission.awaitActive()
 	})
 
+	test('a boot-adopted suspended run keeps its record and refuses submissions until cleared', async () => {
+		const startRun: StartRun = async (runId) => sampleMeta(runId)
+		const submission = createRunSubmission({
+			providerSuspension: providerSuspensionForTest(),
+			onRunSettled: settleNothing, startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings, runDirectoryExists: emptyRunsDir })
+
+		submission.adoptSuspendedRun('run-20260101-000009')
+
+		expect(submission.suspendedRunId()).toBe('run-20260101-000009')
+		expect(submission.lastRunId()).toBe('run-20260101-000009')
+		expect(submission.activeRunId()).toBeUndefined()
+		expect(submission.submit('new task')).toEqual({ ok: false, error: 'run_suspended' })
+
+		submission.clearSuspendedRun('run-20260101-000009')
+		expect(submission.submit('new task')).toEqual({ ok: true, runId: 'run-1' })
+		await submission.awaitActive()
+	})
+
+	test('clearing a different run never clears the suspended gate', async () => {
+		const startRun: StartRun = async (runId) => sampleMeta(runId)
+		const submission = createRunSubmission({
+			providerSuspension: providerSuspensionForTest(),
+			onRunSettled: settleNothing, startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings, runDirectoryExists: emptyRunsDir })
+		submission.adoptSuspendedRun('run-B')
+		submission.clearSuspendedRun('run-A')
+		expect(submission.suspendedRunId()).toBe('run-B')
+		submission.clearSuspendedRun('run-B')
+		expect(submission.suspendedRunId()).toBeUndefined()
+	})
+
 	test('submit refuses a run id whose directory already exists instead of sharing it', async () => {
 		let started = 0
 		const startRun: StartRun = async (runId) => {
@@ -129,7 +182,9 @@ describe('createRunSubmission', () => {
 			return sampleMeta(runId)
 		}
 		// Run ids have one-second resolution, so a previous run that failed instantly can still own the directory the fresh id maps to.
-		const submission = createRunSubmission({ onRunSettled: settleNothing, startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', runDirectoryExists: () => true, readProjectSettings: emptySettings })
+		const submission = createRunSubmission({
+			providerSuspension: providerSuspensionForTest(),
+			onRunSettled: settleNothing, startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', runDirectoryExists: () => true, readProjectSettings: emptySettings })
 
 		expect(submission.submit('do it')).toEqual({ ok: false, error: 'run_id_collision' })
 		expect(started).toBe(0)
@@ -139,7 +194,9 @@ describe('createRunSubmission', () => {
 	test('a collision refusal does not consume the run, so the same id is started once its directory is free', async () => {
 		let directoryTaken = true
 		const startRun: StartRun = async (runId) => sampleMeta(runId)
-		const submission = createRunSubmission({ onRunSettled: settleNothing, startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', runDirectoryExists: () => directoryTaken, readProjectSettings: emptySettings })
+		const submission = createRunSubmission({
+			providerSuspension: providerSuspensionForTest(),
+			onRunSettled: settleNothing, startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', runDirectoryExists: () => directoryTaken, readProjectSettings: emptySettings })
 
 		expect(submission.submit('do it')).toEqual({ ok: false, error: 'run_id_collision' })
 
@@ -155,7 +212,9 @@ describe('createRunSubmission', () => {
 		})
 		const ids = ['run-1', 'run-2']
 		let next = 0
-		const submission = createRunSubmission({ onRunSettled: settleNothing, startRun, resumeRun: unusedResumeRun, generateRunId: () => defined(ids[next++], 'run id'), readProjectSettings: emptySettings, runDirectoryExists: emptyRunsDir })
+		const submission = createRunSubmission({
+			providerSuspension: providerSuspensionForTest(),
+			onRunSettled: settleNothing, startRun, resumeRun: unusedResumeRun, generateRunId: () => defined(ids[next++], 'run id'), readProjectSettings: emptySettings, runDirectoryExists: emptyRunsDir })
 
 		submission.submit('first')
 		expect(submission.activeRunId()).toBe('run-1')
@@ -177,7 +236,9 @@ describe('createRunSubmission', () => {
 		})
 		const ids = ['run-1', 'run-2']
 		let next = 0
-		const submission = createRunSubmission({ onRunSettled: settleNothing, startRun, resumeRun: unusedResumeRun, generateRunId: () => defined(ids[next++], 'run id'), readProjectSettings: emptySettings, runDirectoryExists: emptyRunsDir })
+		const submission = createRunSubmission({
+			providerSuspension: providerSuspensionForTest(),
+			onRunSettled: settleNothing, startRun, resumeRun: unusedResumeRun, generateRunId: () => defined(ids[next++], 'run id'), readProjectSettings: emptySettings, runDirectoryExists: emptyRunsDir })
 
 		submission.submit('first')
 		resolveRun(sampleMeta('run-1'))
@@ -195,7 +256,9 @@ describe('createRunSubmission', () => {
 	test('awaitActive resolves with the run meta for the active run', async () => {
 		const meta = sampleMeta('run-1')
 		const startRun: StartRun = async () => meta
-		const submission = createRunSubmission({ onRunSettled: settleNothing, startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings, runDirectoryExists: emptyRunsDir })
+		const submission = createRunSubmission({
+			providerSuspension: providerSuspensionForTest(),
+			onRunSettled: settleNothing, startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings, runDirectoryExists: emptyRunsDir })
 
 		submission.submit('do it')
 		expect(await submission.awaitActive()).toEqual(meta)
@@ -203,7 +266,9 @@ describe('createRunSubmission', () => {
 
 	test('awaitActive resolves with undefined when no run has been started', async () => {
 		const startRun: StartRun = async () => sampleMeta('run-1')
-		const submission = createRunSubmission({ onRunSettled: settleNothing, startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings, runDirectoryExists: emptyRunsDir })
+		const submission = createRunSubmission({
+			providerSuspension: providerSuspensionForTest(),
+			onRunSettled: settleNothing, startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings, runDirectoryExists: emptyRunsDir })
 
 		expect(await submission.awaitActive()).toBeUndefined()
 	})
@@ -211,7 +276,9 @@ describe('createRunSubmission', () => {
 	test('awaitActive still returns the completed run meta after it has already been awaited', async () => {
 		const meta = sampleMeta('run-1')
 		const startRun: StartRun = async () => meta
-		const submission = createRunSubmission({ onRunSettled: settleNothing, startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings, runDirectoryExists: emptyRunsDir })
+		const submission = createRunSubmission({
+			providerSuspension: providerSuspensionForTest(),
+			onRunSettled: settleNothing, startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings, runDirectoryExists: emptyRunsDir })
 
 		submission.submit('do it')
 		const first = await submission.awaitActive()
@@ -224,8 +291,11 @@ describe('createRunSubmission', () => {
 	test('a hand-written fake can satisfy the RunSubmission contract', () => {
 		const fake: RunSubmission = {
 			submit: () => ({ ok: false, error: 'run_in_progress' }),
-			resume: () => {},
+			resume: () => ({ ok: true }),
 			activeRunId: () => undefined,
+			suspendedRunId: () => undefined,
+			adoptSuspendedRun: () => {},
+			clearSuspendedRun: () => {},
 			lastRunId: () => undefined,
 			awaitActive: () => Promise.resolve(undefined),
 			awaitFatalError: () => new Promise<Error>(() => {}),
@@ -238,7 +308,9 @@ describe('createRunSubmission', () => {
 
 	test('a fatal startRun rejection clears the active slot and resolves awaitFatalError', async () => {
 		const startRun: StartRun = () => Promise.reject(new Error('disk full'))
-		const submission = createRunSubmission({ onRunSettled: settleNothing, startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings, runDirectoryExists: emptyRunsDir })
+		const submission = createRunSubmission({
+			providerSuspension: providerSuspensionForTest(),
+			onRunSettled: settleNothing, startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings, runDirectoryExists: emptyRunsDir })
 
 		submission.submit('do it')
 
@@ -252,7 +324,9 @@ describe('createRunSubmission', () => {
 
 	test('a non-Error rejection is normalized to an Error in awaitFatalError', async () => {
 		const startRun: StartRun = () => Promise.reject('bare string rejection')
-		const submission = createRunSubmission({ onRunSettled: settleNothing, startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings, runDirectoryExists: emptyRunsDir })
+		const submission = createRunSubmission({
+			providerSuspension: providerSuspensionForTest(),
+			onRunSettled: settleNothing, startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings, runDirectoryExists: emptyRunsDir })
 
 		submission.submit('do it')
 
@@ -265,7 +339,9 @@ describe('createRunSubmission', () => {
 
 	test('a successful run never resolves awaitFatalError', async () => {
 		const startRun: StartRun = async () => sampleMeta('run-1')
-		const submission = createRunSubmission({ onRunSettled: settleNothing, startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings, runDirectoryExists: emptyRunsDir })
+		const submission = createRunSubmission({
+			providerSuspension: providerSuspensionForTest(),
+			onRunSettled: settleNothing, startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings, runDirectoryExists: emptyRunsDir })
 
 		submission.submit('do it')
 		await submission.awaitActive()
@@ -311,7 +387,9 @@ describe('createRunSubmission resume', () => {
 	test('resume takes the active slot under the checkpoint run id and resolves awaitActive with the meta', async () => {
 		const checkpoint = sampleCheckpoint('run-20260101-000009')
 		const resumeRun: ResumeRun = async () => sampleMeta('run-20260101-000009')
-		const submission = createRunSubmission({ onRunSettled: settleNothing, startRun: unusedStartRun, resumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings, runDirectoryExists: emptyRunsDir })
+		const submission = createRunSubmission({
+			providerSuspension: providerSuspensionForTest(),
+			onRunSettled: settleNothing, startRun: unusedStartRun, resumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings, runDirectoryExists: emptyRunsDir })
 
 		submission.resume(checkpoint)
 
@@ -326,7 +404,9 @@ describe('createRunSubmission resume', () => {
 		const resumeRun: ResumeRun = () => new Promise<RunMeta>((resolve) => {
 			resolveResume = resolve
 		})
-		const submission = createRunSubmission({ onRunSettled: settleNothing, startRun: unusedStartRun, resumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings, runDirectoryExists: emptyRunsDir })
+		const submission = createRunSubmission({
+			providerSuspension: providerSuspensionForTest(),
+			onRunSettled: settleNothing, startRun: unusedStartRun, resumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings, runDirectoryExists: emptyRunsDir })
 
 		submission.resume(sampleCheckpoint('run-20260101-000009'))
 
@@ -341,7 +421,9 @@ describe('createRunSubmission resume', () => {
 		const startRun: StartRun = () => new Promise<RunMeta>((resolve) => {
 			resolveRun = resolve
 		})
-		const submission = createRunSubmission({ onRunSettled: settleNothing, startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings, runDirectoryExists: emptyRunsDir })
+		const submission = createRunSubmission({
+			providerSuspension: providerSuspensionForTest(),
+			onRunSettled: settleNothing, startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings, runDirectoryExists: emptyRunsDir })
 
 		submission.submit('do it')
 
@@ -352,7 +434,9 @@ describe('createRunSubmission resume', () => {
 
 	test('a resumeRun rejection clears the active slot and resolves awaitFatalError', async () => {
 		const resumeRun: ResumeRun = () => Promise.reject(new Error('checkpoint unreadable'))
-		const submission = createRunSubmission({ onRunSettled: settleNothing, startRun: unusedStartRun, resumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings, runDirectoryExists: emptyRunsDir })
+		const submission = createRunSubmission({
+			providerSuspension: providerSuspensionForTest(),
+			onRunSettled: settleNothing, startRun: unusedStartRun, resumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings, runDirectoryExists: emptyRunsDir })
 
 		submission.resume(sampleCheckpoint('run-20260101-000009'))
 
@@ -369,7 +453,9 @@ describe('createRunSubmission resume', () => {
 			notes.push(options?.resumeNote)
 			return sampleMeta('run-20260101-000009')
 		}
-		const submission = createRunSubmission({ onRunSettled: settleNothing, startRun: unusedStartRun, resumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings, runDirectoryExists: emptyRunsDir })
+		const submission = createRunSubmission({
+			providerSuspension: providerSuspensionForTest(),
+			onRunSettled: settleNothing, startRun: unusedStartRun, resumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings, runDirectoryExists: emptyRunsDir })
 
 		submission.resume(sampleCheckpoint('run-20260101-000009'), { resumeNote: 'The operator resumed this run after a failure. Message from the operator: try again' })
 		await submission.awaitActive()
@@ -389,7 +475,9 @@ describe('createRunSubmission resume', () => {
 			})
 			return sampleMeta('run-20260101-000009')
 		}
-		const submission = createRunSubmission({ onRunSettled: settleNothing, startRun: unusedStartRun, resumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings, runDirectoryExists: emptyRunsDir })
+		const submission = createRunSubmission({
+			providerSuspension: providerSuspensionForTest(),
+			onRunSettled: settleNothing, startRun: unusedStartRun, resumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings, runDirectoryExists: emptyRunsDir })
 		const parkedAnswer = { question: 'which database?', answer: 'postgres', toolCallId: 'ask_1' }
 
 		submission.resume(sampleCheckpoint('run-20260101-000009'), { parkedAnswer, queueTracked: true })
@@ -434,6 +522,7 @@ describe('createRunSubmission settlement hook', () => {
 		const slotContents: Array<string | undefined> = []
 		const startRun: StartRun = async (runId) => sampleMeta(runId)
 		const submission = createRunSubmission({
+			providerSuspension: providerSuspensionForTest(),
 			startRun,
 			resumeRun: unusedResumeRun,
 			generateRunId: () => 'run-1',
@@ -453,10 +542,46 @@ describe('createRunSubmission settlement hook', () => {
 		expect(slotContents).toEqual([undefined])
 	})
 
+	test('a suspended settlement claims the priority slot before clearing the active slot and refuses new submits', async () => {
+		const suspended: RunMeta = {
+			runId: 'run-1',
+			task: 'do it',
+			status: 'suspended',
+			startTime: '2026-01-01T00:00:00.000Z',
+			suspension: { category: 'billing', resumePolicy: 'operator', message: 'Top up.', suspendedAt: '2026-01-01T00:01:00.000Z' },
+		}
+		const observed: Array<{ suspended: string | undefined; active: string | undefined }> = []
+		const startRun: StartRun = async () => suspended
+		const submission = createRunSubmission({
+			providerSuspension: providerSuspensionForTest(),
+			startRun,
+			resumeRun: unusedResumeRun,
+			generateRunId: () => 'run-1',
+			readProjectSettings: emptySettings,
+			runDirectoryExists: emptyRunsDir,
+			onRunSettled: async () => {
+				observed.push({ suspended: submission.suspendedRunId(), active: submission.activeRunId() })
+			},
+		})
+
+		submission.submit('do it')
+		await submission.awaitActive()
+
+		// The hook sees the suspended id already claimed and the active slot already free, so a tick cannot slip between the two.
+		expect(observed).toEqual([{ suspended: 'run-1', active: undefined }])
+		expect(submission.suspendedRunId()).toBe('run-1')
+		expect(submission.submit('another task')).toEqual({ ok: false, error: 'run_suspended' })
+
+		submission.clearSuspendedRun('run-1')
+		expect(submission.submit('another task')).toEqual({ ok: true, runId: 'run-1' })
+		await submission.awaitActive()
+	})
+
 	test('onRunSettled fires exactly once when a resumed run settles', async () => {
 		const settled: RunMeta[] = []
 		const resumeRun: ResumeRun = async () => sampleMeta('run-20260101-000009')
 		const submission = createRunSubmission({
+			providerSuspension: providerSuspensionForTest(),
 			startRun: unusedStartRun,
 			resumeRun,
 			generateRunId: () => 'run-1',
@@ -477,6 +602,7 @@ describe('createRunSubmission settlement hook', () => {
 		const settled: RunMeta[] = []
 		const startRun: StartRun = () => Promise.reject(new Error('disk full'))
 		const submission = createRunSubmission({
+			providerSuspension: providerSuspensionForTest(),
 			startRun,
 			resumeRun: unusedResumeRun,
 			generateRunId: () => 'run-1',
@@ -507,7 +633,9 @@ describe('createRunSubmission effort resolution', () => {
 
 	test('a per-run override is threaded into startRun', async () => {
 		const { startRun, captured } = captureEffort()
-		const submission = createRunSubmission({ onRunSettled: settleNothing, startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings, runDirectoryExists: emptyRunsDir })
+		const submission = createRunSubmission({
+			providerSuspension: providerSuspensionForTest(),
+			onRunSettled: settleNothing, startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings, runDirectoryExists: emptyRunsDir })
 
 		submission.submit('do it', 'thorough')
 		await submission.awaitActive()
@@ -517,7 +645,9 @@ describe('createRunSubmission effort resolution', () => {
 	test('the project default is applied when no override is given', async () => {
 		const { startRun, captured } = captureEffort()
 		const projectSettings: ReadProjectSettings = () => ({ effort: 'thorough' })
-		const submission = createRunSubmission({ onRunSettled: settleNothing, startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: projectSettings, runDirectoryExists: emptyRunsDir })
+		const submission = createRunSubmission({
+			providerSuspension: providerSuspensionForTest(),
+			onRunSettled: settleNothing, startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: projectSettings, runDirectoryExists: emptyRunsDir })
 
 		submission.submit('do it')
 		await submission.awaitActive()
@@ -527,7 +657,9 @@ describe('createRunSubmission effort resolution', () => {
 	test('a per-run override wins over the project default', async () => {
 		const { startRun, captured } = captureEffort()
 		const projectSettings: ReadProjectSettings = () => ({ effort: 'thorough' })
-		const submission = createRunSubmission({ onRunSettled: settleNothing, startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: projectSettings, runDirectoryExists: emptyRunsDir })
+		const submission = createRunSubmission({
+			providerSuspension: providerSuspensionForTest(),
+			onRunSettled: settleNothing, startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: projectSettings, runDirectoryExists: emptyRunsDir })
 
 		submission.submit('do it', 'quick')
 		await submission.awaitActive()
@@ -536,7 +668,9 @@ describe('createRunSubmission effort resolution', () => {
 
 	test('DEFAULT_EFFORT applies when neither override nor project setting fixes the effort', async () => {
 		const { startRun, captured } = captureEffort()
-		const submission = createRunSubmission({ onRunSettled: settleNothing, startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings, runDirectoryExists: emptyRunsDir })
+		const submission = createRunSubmission({
+			providerSuspension: providerSuspensionForTest(),
+			onRunSettled: settleNothing, startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings, runDirectoryExists: emptyRunsDir })
 
 		submission.submit('do it')
 		await submission.awaitActive()
@@ -556,7 +690,9 @@ describe('createRunSubmission continuation passthrough', () => {
 
 	test('submit threads the continuation through to startRun', async () => {
 		const { startRun, captured } = captureContinuation()
-		const submission = createRunSubmission({ onRunSettled: settleNothing, startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings, runDirectoryExists: emptyRunsDir })
+		const submission = createRunSubmission({
+			providerSuspension: providerSuspensionForTest(),
+			onRunSettled: settleNothing, startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings, runDirectoryExists: emptyRunsDir })
 		const continuation = { runId: 'run-20260101-000000', task: 'prior task', summary: 'prior summary' }
 
 		submission.submit('do it', undefined, undefined, undefined, continuation)
@@ -566,7 +702,9 @@ describe('createRunSubmission continuation passthrough', () => {
 
 	test('submit threads no continuation when none is given', async () => {
 		const { startRun, captured } = captureContinuation()
-		const submission = createRunSubmission({ onRunSettled: settleNothing, startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings, runDirectoryExists: emptyRunsDir })
+		const submission = createRunSubmission({
+			providerSuspension: providerSuspensionForTest(),
+			onRunSettled: settleNothing, startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings, runDirectoryExists: emptyRunsDir })
 
 		submission.submit('do it')
 		await submission.awaitActive()
@@ -586,7 +724,9 @@ describe('createRunSubmission log level resolution', () => {
 
 	test('a per-run override is threaded into startRun', async () => {
 		const { startRun, captured } = captureLogLevel()
-		const submission = createRunSubmission({ onRunSettled: settleNothing, startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings, runDirectoryExists: emptyRunsDir })
+		const submission = createRunSubmission({
+			providerSuspension: providerSuspensionForTest(),
+			onRunSettled: settleNothing, startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings, runDirectoryExists: emptyRunsDir })
 
 		submission.submit('do it', undefined, undefined, 'standard')
 		await submission.awaitActive()
@@ -596,7 +736,9 @@ describe('createRunSubmission log level resolution', () => {
 	test('the project default is applied when no override is given', async () => {
 		const { startRun, captured } = captureLogLevel()
 		const projectSettings: ReadProjectSettings = () => ({ logLevel: 'standard' })
-		const submission = createRunSubmission({ onRunSettled: settleNothing, startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: projectSettings, runDirectoryExists: emptyRunsDir })
+		const submission = createRunSubmission({
+			providerSuspension: providerSuspensionForTest(),
+			onRunSettled: settleNothing, startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: projectSettings, runDirectoryExists: emptyRunsDir })
 
 		submission.submit('do it')
 		await submission.awaitActive()
@@ -606,7 +748,9 @@ describe('createRunSubmission log level resolution', () => {
 	test('a per-run override wins over the project default', async () => {
 		const { startRun, captured } = captureLogLevel()
 		const projectSettings: ReadProjectSettings = () => ({ logLevel: 'standard' })
-		const submission = createRunSubmission({ onRunSettled: settleNothing, startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: projectSettings, runDirectoryExists: emptyRunsDir })
+		const submission = createRunSubmission({
+			providerSuspension: providerSuspensionForTest(),
+			onRunSettled: settleNothing, startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: projectSettings, runDirectoryExists: emptyRunsDir })
 
 		submission.submit('do it', undefined, undefined, 'full')
 		await submission.awaitActive()
@@ -615,7 +759,9 @@ describe('createRunSubmission log level resolution', () => {
 
 	test('the deployment default applies when neither override nor project setting fixes the level', async () => {
 		const { startRun, captured } = captureLogLevel()
-		const submission = createRunSubmission({ onRunSettled: settleNothing, startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings, runDirectoryExists: emptyRunsDir, deploymentLogLevel: 'standard' })
+		const submission = createRunSubmission({
+			providerSuspension: providerSuspensionForTest(),
+			onRunSettled: settleNothing, startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings, runDirectoryExists: emptyRunsDir, deploymentLogLevel: 'standard' })
 
 		submission.submit('do it')
 		await submission.awaitActive()
@@ -625,7 +771,9 @@ describe('createRunSubmission log level resolution', () => {
 	test('the project setting wins over the deployment default', async () => {
 		const { startRun, captured } = captureLogLevel()
 		const projectSettings: ReadProjectSettings = () => ({ logLevel: 'full' })
-		const submission = createRunSubmission({ onRunSettled: settleNothing, startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: projectSettings, runDirectoryExists: emptyRunsDir, deploymentLogLevel: 'standard' })
+		const submission = createRunSubmission({
+			providerSuspension: providerSuspensionForTest(),
+			onRunSettled: settleNothing, startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: projectSettings, runDirectoryExists: emptyRunsDir, deploymentLogLevel: 'standard' })
 
 		submission.submit('do it')
 		await submission.awaitActive()
@@ -634,7 +782,9 @@ describe('createRunSubmission log level resolution', () => {
 
 	test('a per-run override wins over the deployment default', async () => {
 		const { startRun, captured } = captureLogLevel()
-		const submission = createRunSubmission({ onRunSettled: settleNothing, startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings, runDirectoryExists: emptyRunsDir, deploymentLogLevel: 'standard' })
+		const submission = createRunSubmission({
+			providerSuspension: providerSuspensionForTest(),
+			onRunSettled: settleNothing, startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings, runDirectoryExists: emptyRunsDir, deploymentLogLevel: 'standard' })
 
 		submission.submit('do it', undefined, undefined, 'full')
 		await submission.awaitActive()
@@ -643,7 +793,9 @@ describe('createRunSubmission log level resolution', () => {
 
 	test('DEFAULT_LOG_LEVEL applies when nothing in the chain fixes the level', async () => {
 		const { startRun, captured } = captureLogLevel()
-		const submission = createRunSubmission({ onRunSettled: settleNothing, startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings, runDirectoryExists: emptyRunsDir })
+		const submission = createRunSubmission({
+			providerSuspension: providerSuspensionForTest(),
+			onRunSettled: settleNothing, startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings, runDirectoryExists: emptyRunsDir })
 
 		submission.submit('do it')
 		await submission.awaitActive()
@@ -663,7 +815,9 @@ describe('createRunSubmission involvement resolution', () => {
 
 	test('a per-run override is threaded into startRun', async () => {
 		const { startRun, captured } = captureInvolvement()
-		const submission = createRunSubmission({ onRunSettled: settleNothing, startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings, runDirectoryExists: emptyRunsDir })
+		const submission = createRunSubmission({
+			providerSuspension: providerSuspensionForTest(),
+			onRunSettled: settleNothing, startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings, runDirectoryExists: emptyRunsDir })
 
 		submission.submit('do it', undefined, 'collaborative')
 		await submission.awaitActive()
@@ -673,7 +827,9 @@ describe('createRunSubmission involvement resolution', () => {
 	test('the project default is applied when no override is given', async () => {
 		const { startRun, captured } = captureInvolvement()
 		const projectSettings: ReadProjectSettings = () => ({ involvement: 'collaborative' })
-		const submission = createRunSubmission({ onRunSettled: settleNothing, startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: projectSettings, runDirectoryExists: emptyRunsDir })
+		const submission = createRunSubmission({
+			providerSuspension: providerSuspensionForTest(),
+			onRunSettled: settleNothing, startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: projectSettings, runDirectoryExists: emptyRunsDir })
 
 		submission.submit('do it')
 		await submission.awaitActive()
@@ -683,7 +839,9 @@ describe('createRunSubmission involvement resolution', () => {
 	test('a per-run override wins over the project default', async () => {
 		const { startRun, captured } = captureInvolvement()
 		const projectSettings: ReadProjectSettings = () => ({ involvement: 'collaborative' })
-		const submission = createRunSubmission({ onRunSettled: settleNothing, startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: projectSettings, runDirectoryExists: emptyRunsDir })
+		const submission = createRunSubmission({
+			providerSuspension: providerSuspensionForTest(),
+			onRunSettled: settleNothing, startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: projectSettings, runDirectoryExists: emptyRunsDir })
 
 		submission.submit('do it', undefined, 'autonomous')
 		await submission.awaitActive()
@@ -692,7 +850,9 @@ describe('createRunSubmission involvement resolution', () => {
 
 	test('the deployment default applies when neither override nor project setting fixes the level', async () => {
 		const { startRun, captured } = captureInvolvement()
-		const submission = createRunSubmission({ onRunSettled: settleNothing, startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings, runDirectoryExists: emptyRunsDir, deploymentInvolvement: 'collaborative' })
+		const submission = createRunSubmission({
+			providerSuspension: providerSuspensionForTest(),
+			onRunSettled: settleNothing, startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings, runDirectoryExists: emptyRunsDir, deploymentInvolvement: 'collaborative' })
 
 		submission.submit('do it')
 		await submission.awaitActive()
@@ -702,7 +862,9 @@ describe('createRunSubmission involvement resolution', () => {
 	test('the project setting wins over the deployment default', async () => {
 		const { startRun, captured } = captureInvolvement()
 		const projectSettings: ReadProjectSettings = () => ({ involvement: 'autonomous' })
-		const submission = createRunSubmission({ onRunSettled: settleNothing, startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: projectSettings, runDirectoryExists: emptyRunsDir, deploymentInvolvement: 'collaborative' })
+		const submission = createRunSubmission({
+			providerSuspension: providerSuspensionForTest(),
+			onRunSettled: settleNothing, startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: projectSettings, runDirectoryExists: emptyRunsDir, deploymentInvolvement: 'collaborative' })
 
 		submission.submit('do it')
 		await submission.awaitActive()
@@ -711,7 +873,9 @@ describe('createRunSubmission involvement resolution', () => {
 
 	test('a per-run override wins over the deployment default', async () => {
 		const { startRun, captured } = captureInvolvement()
-		const submission = createRunSubmission({ onRunSettled: settleNothing, startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings, runDirectoryExists: emptyRunsDir, deploymentInvolvement: 'collaborative' })
+		const submission = createRunSubmission({
+			providerSuspension: providerSuspensionForTest(),
+			onRunSettled: settleNothing, startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings, runDirectoryExists: emptyRunsDir, deploymentInvolvement: 'collaborative' })
 
 		submission.submit('do it', undefined, 'autonomous')
 		await submission.awaitActive()
@@ -720,7 +884,9 @@ describe('createRunSubmission involvement resolution', () => {
 
 	test('DEFAULT_INVOLVEMENT applies when nothing in the chain fixes the level', async () => {
 		const { startRun, captured } = captureInvolvement()
-		const submission = createRunSubmission({ onRunSettled: settleNothing, startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings, runDirectoryExists: emptyRunsDir })
+		const submission = createRunSubmission({
+			providerSuspension: providerSuspensionForTest(),
+			onRunSettled: settleNothing, startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings, runDirectoryExists: emptyRunsDir })
 
 		submission.submit('do it')
 		await submission.awaitActive()
@@ -728,7 +894,7 @@ describe('createRunSubmission involvement resolution', () => {
 	})
 })
 
-describe('createResumeErroredRun', () => {
+describe('createResumeErroredOrSuspendedRun', () => {
 	function sampleCheckpoint(runId: string): RunCheckpoint {
 		return {
 			version: 2,
@@ -801,11 +967,14 @@ describe('createResumeErroredRun', () => {
 			readPauseStateById: () => null,
 			resumeParkedRun: () => ({ ok: false, error: 'checkpoint_missing' }),
 			resumeClarificationRun: () => ({ ok: false, error: 'checkpoint_missing' }),
-			terminateParkedRun: () => ({ ok: false, error: 'not_found' }),
+			terminatePausedRun: () => ({ ok: false, error: 'not_found' }),
 			submitRun: () => {
 				throw new Error('the resume path does not dispatch')
 			},
 			hasActiveRun: () => submission.activeRunId() !== undefined,
+			hasSuspendedRun: () => submission.suspendedRunId() !== undefined,
+			canDispatch: () => true,
+		ensureProviderProbe: () => {},
 			sleep: async () => {},
 			now: () => '2026-01-01T00:00:00.000Z',
 			generateAnswerId: () => 'answer-1',
@@ -828,19 +997,34 @@ describe('createResumeErroredRun', () => {
 		return { id: 'item-1', task: 'do it', status: 'error', runId: 'run-20260101-000009', queuedAt: '2026-01-01T00:00:00.000Z', settledAt: '2026-01-01T00:05:00.000Z', error: 'LLM unavailable: connection refused' }
 	}
 
-	function createHarness(input: { metas: Map<string, string>; checkpoints: Map<string, string>; queue?: Array<QueueItemView> }): { resumeErroredRun: ReturnType<typeof createResumeErroredRun>; submission: RunSubmission; queue: ReturnType<typeof createQueueStore>; resumedNotes: () => Array<string | undefined>; resumedExplicit: () => Array<boolean | undefined> } {
+	function createHarness(input: { metas: Map<string, string>; checkpoints: Map<string, string>; queue?: Array<QueueItemView> }): { resumeErroredOrSuspendedRun: ReturnType<typeof createResumeErroredOrSuspendedRun>; submission: RunSubmission; taskQueue: TaskQueueModule; queue: ReturnType<typeof createQueueStore>; resumedNotes: () => Array<string | undefined>; resumedExplicit: () => Array<boolean | undefined>; resumedPriorSuspensions: () => Array<SuspensionRecord | undefined> } {
 		const queue = createQueueStore(input.queue ?? [])
 		const readers = createReaders(input.metas, input.checkpoints)
 		let resumeNote: string | undefined
 		let explicitResume: boolean | undefined
+		let priorSuspension: SuspensionRecord | undefined
 		const resumeRun: ResumeRun = async (checkpoint, options) => {
 			resumeNote = options?.resumeNote
 			explicitResume = options?.explicitResume
+			priorSuspension = options?.priorSuspension
 			return sampleMeta(checkpoint.runId)
 		}
-		const submission = createRunSubmission({ onRunSettled: settleNothing, startRun: unusedStartRun, resumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings, runDirectoryExists: emptyRunsDir })
-		const dependencies: ResumeErroredRunDependencies = { runSubmission: submission, readRunMetaById: readers.readRunMetaById, readCheckpointById: readers.readCheckpointById, taskQueue: createQueueModule(queue, submission, readers) }
-		return { resumeErroredRun: createResumeErroredRun(dependencies), submission, queue, resumedNotes: () => [resumeNote], resumedExplicit: () => [explicitResume] }
+		const submission = createRunSubmission({
+			providerSuspension: providerSuspensionForTest(),
+			onRunSettled: settleNothing, startRun: unusedStartRun, resumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings, runDirectoryExists: emptyRunsDir })
+		const taskQueue = createQueueModule(queue, submission, readers)
+		const dependencies: ResumeErroredOrSuspendedRunDependencies = { runSubmission: submission, readRunMetaById: readers.readRunMetaById, readCheckpointById: readers.readCheckpointById, taskQueue }
+		return { resumeErroredOrSuspendedRun: createResumeErroredOrSuspendedRun(dependencies), submission, taskQueue, queue, resumedNotes: () => [resumeNote], resumedExplicit: () => [explicitResume], resumedPriorSuspensions: () => [priorSuspension] }
+	}
+
+	const suspension: SuspensionRecord = { category: 'billing', resumePolicy: 'operator', message: 'Top up and resume the run.', suspendedAt: '2026-01-01T00:02:00.000Z' }
+
+	function suspendedMeta(runId: string): RunMeta {
+		return { runId, task: 'do it', status: 'suspended', startTime: '2026-01-01T00:00:00.000Z', suspension }
+	}
+
+	function suspendedItem(): QueueItemView {
+		return { id: 'item-1', task: 'do it', status: 'suspended', runId: 'run-20260101-000009', queuedAt: '2026-01-01T00:00:00.000Z', suspendedAt: suspension.suspendedAt }
 	}
 
 	test('a happy resume re-activates the settled item, threads the framed note, and reports the same run id', async () => {
@@ -848,7 +1032,7 @@ describe('createResumeErroredRun', () => {
 		const checkpoints = new Map([['run-20260101-000009', JSON.stringify(sampleCheckpoint('run-20260101-000009'))]])
 		const harness = createHarness({ metas, checkpoints, queue: [erroredItem()] })
 
-		const result = harness.resumeErroredRun('run-20260101-000009', 'the endpoint is back; carry on')
+		const result = harness.resumeErroredOrSuspendedRun('run-20260101-000009', 'the endpoint is back; carry on')
 
 		expect(result).toEqual({ ok: true, runId: 'run-20260101-000009' })
 		expect(harness.submission.activeRunId()).toBe('run-20260101-000009')
@@ -864,10 +1048,70 @@ describe('createResumeErroredRun', () => {
 		const checkpoints = new Map([['run-20260101-000009', JSON.stringify(sampleCheckpoint('run-20260101-000009'))]])
 		const harness = createHarness({ metas, checkpoints, queue: [erroredItem()] })
 
-		expect(harness.resumeErroredRun('run-20260101-000009', undefined)).toEqual({ ok: true, runId: 'run-20260101-000009' })
+		expect(harness.resumeErroredOrSuspendedRun('run-20260101-000009', undefined)).toEqual({ ok: true, runId: 'run-20260101-000009' })
 		expect(harness.queue.snapshot().items.find((entry) => entry.id === 'item-1')?.status).toBe('active')
 		await harness.submission.awaitActive()
 		expect(harness.resumedNotes()).toEqual([undefined])
+	})
+
+	test('a suspended resume re-activates the item, clears the priority slot, and passes the prior suspension', async () => {
+		const runId = 'run-20260101-000009'
+		const metas = new Map([[runId, JSON.stringify(suspendedMeta(runId))]])
+		const checkpoints = new Map([[runId, JSON.stringify(sampleCheckpoint(runId))]])
+		const harness = createHarness({ metas, checkpoints, queue: [suspendedItem()] })
+
+		expect(harness.resumeErroredOrSuspendedRun(runId, undefined)).toEqual({ ok: true, runId })
+
+		expect(harness.submission.activeRunId()).toBe(runId)
+		expect(harness.submission.suspendedRunId()).toBeUndefined()
+		const reactivated = harness.queue.snapshot().items.find((entry) => entry.id === 'item-1')
+		expect(reactivated?.status).toBe('active')
+		expect(reactivated?.runId).toBe(runId)
+		expect(reactivated?.suspendedAt).toBeUndefined()
+		expect(harness.resumedNotes()).toEqual([undefined])
+		expect(harness.resumedExplicit()).toEqual([true])
+		expect(harness.resumedPriorSuspensions()).toEqual([suspension])
+
+		await harness.submission.awaitActive()
+		await harness.taskQueue.onRunSettled(sampleMeta(runId))
+		expect(harness.queue.snapshot().items.find((entry) => entry.id === 'item-1')?.status).toBe('done')
+	})
+
+	test('a suspended resume accepts an optional note with the suspended-specific prefix', async () => {
+		const runId = 'run-20260101-000009'
+		const metas = new Map([[runId, JSON.stringify(suspendedMeta(runId))]])
+		const checkpoints = new Map([[runId, JSON.stringify(sampleCheckpoint(runId))]])
+		const harness = createHarness({ metas, checkpoints, queue: [suspendedItem()] })
+
+		expect(harness.resumeErroredOrSuspendedRun(runId, 'credit is topped up')).toEqual({ ok: true, runId })
+		expect(harness.resumedNotes()).toEqual(['The operator resumed this suspended run. Message from the operator: credit is topped up'])
+		expect(harness.resumedPriorSuspensions()).toEqual([suspension])
+		await harness.submission.awaitActive()
+	})
+
+	test('a suspended resume with a missing or corrupt checkpoint releases the pause and cancels its item', () => {
+		const runId = 'run-20260101-000009'
+		const metas = new Map([[runId, JSON.stringify(suspendedMeta(runId))]])
+		for (const checkpoints of [new Map(), new Map([[runId, '{not json']])]) {
+			const harness = createHarness({ metas, checkpoints, queue: [suspendedItem()] })
+			harness.submission.adoptSuspendedRun(runId)
+
+			expect(harness.resumeErroredOrSuspendedRun(runId, undefined)).toEqual({ ok: false, error: 'checkpoint_missing' })
+			expect(harness.submission.activeRunId()).toBeUndefined()
+			expect(harness.submission.suspendedRunId()).toBeUndefined()
+			expect(harness.queue.snapshot().items.find((entry) => entry.id === 'item-1')?.status).toBe('cancelled')
+		}
+	})
+
+	test('a suspended resume with the wrong status is refused without touching the item', () => {
+		const runId = 'run-20260101-000009'
+		const metas = new Map([[runId, JSON.stringify(sampleMeta(runId))]])
+		const checkpoints = new Map([[runId, JSON.stringify(sampleCheckpoint(runId))]])
+		const harness = createHarness({ metas, checkpoints, queue: [suspendedItem()] })
+
+		expect(harness.resumeErroredOrSuspendedRun(runId, undefined)).toEqual({ ok: false, error: 'run_not_resumable' })
+		expect(harness.queue.snapshot().items.find((entry) => entry.id === 'item-1')?.status).toBe('suspended')
+		expect(harness.submission.activeRunId()).toBeUndefined()
 	})
 
 	test('every explicit error resume is marked explicit even without a note', async () => {
@@ -875,7 +1119,7 @@ describe('createResumeErroredRun', () => {
 		const checkpoints = new Map([['run-20260101-000009', JSON.stringify(sampleCheckpoint('run-20260101-000009'))]])
 		const harness = createHarness({ metas, checkpoints })
 
-		harness.resumeErroredRun('run-20260101-000009', undefined)
+		harness.resumeErroredOrSuspendedRun('run-20260101-000009', undefined)
 		await harness.submission.awaitActive()
 		expect(harness.resumedExplicit()).toEqual([true])
 	})
@@ -885,7 +1129,7 @@ describe('createResumeErroredRun', () => {
 		const checkpoints = new Map([['run-20260101-000009', JSON.stringify(sampleCheckpoint('run-20260101-000009'))]])
 		const harness = createHarness({ metas, checkpoints })
 
-		expect(harness.resumeErroredRun('run-20260101-000009', undefined)).toEqual({ ok: true, runId: 'run-20260101-000009' })
+		expect(harness.resumeErroredOrSuspendedRun('run-20260101-000009', undefined)).toEqual({ ok: true, runId: 'run-20260101-000009' })
 		await harness.submission.awaitActive()
 	})
 
@@ -897,9 +1141,9 @@ describe('createResumeErroredRun', () => {
 		const checkpoints = new Map([['run-success', JSON.stringify(sampleCheckpoint('run-success'))]])
 		const harness = createHarness({ metas, checkpoints, queue: [erroredItem()] })
 
-		expect(harness.resumeErroredRun('ghost', undefined)).toEqual({ ok: false, error: 'run_not_found' })
-		expect(harness.resumeErroredRun('run-success', undefined)).toEqual({ ok: false, error: 'run_not_errored' })
-		expect(harness.resumeErroredRun('run-running', undefined)).toEqual({ ok: false, error: 'run_not_errored' })
+		expect(harness.resumeErroredOrSuspendedRun('ghost', undefined)).toEqual({ ok: false, error: 'run_not_found' })
+		expect(harness.resumeErroredOrSuspendedRun('run-success', undefined)).toEqual({ ok: false, error: 'run_not_resumable' })
+		expect(harness.resumeErroredOrSuspendedRun('run-running', undefined)).toEqual({ ok: false, error: 'run_not_resumable' })
 		expect(harness.queue.snapshot().items.find((entry) => entry.id === 'item-1')?.status).toBe('error')
 		expect(harness.submission.activeRunId()).toBeUndefined()
 	})
@@ -909,15 +1153,15 @@ describe('createResumeErroredRun', () => {
 		const checkpoints = new Map([['run-other', JSON.stringify(sampleCheckpoint('run-other'))]])
 		const harness = createHarness({ metas, checkpoints })
 
-		expect(harness.resumeErroredRun('run-20260101-000009', undefined)).toEqual({ ok: false, error: 'checkpoint_missing' })
+		expect(harness.resumeErroredOrSuspendedRun('run-20260101-000009', undefined)).toEqual({ ok: false, error: 'checkpoint_missing' })
 		// A corrupt checkpoint document is no checkpoint, same as boot reconciliation treats one.
 		const corrupt = new Map([['run-20260101-000009', '{not json']])
 		const corruptHarness = createHarness({ metas, checkpoints: corrupt })
-		expect(corruptHarness.resumeErroredRun('run-20260101-000009', undefined)).toEqual({ ok: false, error: 'checkpoint_missing' })
+		expect(corruptHarness.resumeErroredOrSuspendedRun('run-20260101-000009', undefined)).toEqual({ ok: false, error: 'checkpoint_missing' })
 		// A checkpoint naming a different run id than its directory is treated as corrupt too.
 		const misnamed = new Map([['run-20260101-000009', JSON.stringify(sampleCheckpoint('run-other'))]])
 		const misnamedHarness = createHarness({ metas, checkpoints: misnamed })
-		expect(misnamedHarness.resumeErroredRun('run-20260101-000009', undefined)).toEqual({ ok: false, error: 'checkpoint_missing' })
+		expect(misnamedHarness.resumeErroredOrSuspendedRun('run-20260101-000009', undefined)).toEqual({ ok: false, error: 'checkpoint_missing' })
 	})
 
 	test('rejects a parked checkpoint as checkpoint_missing — the error resume never re-enters a park', () => {
@@ -925,7 +1169,7 @@ describe('createResumeErroredRun', () => {
 		const checkpoints = new Map([['run-20260101-000009', JSON.stringify(parkedCheckpointFor('run-20260101-000009'))]])
 		const harness = createHarness({ metas, checkpoints })
 
-		expect(harness.resumeErroredRun('run-20260101-000009', undefined)).toEqual({ ok: false, error: 'checkpoint_missing' })
+		expect(harness.resumeErroredOrSuspendedRun('run-20260101-000009', undefined)).toEqual({ ok: false, error: 'checkpoint_missing' })
 		expect(harness.submission.activeRunId()).toBeUndefined()
 	})
 
@@ -937,16 +1181,56 @@ describe('createResumeErroredRun', () => {
 		const queue = createQueueStore([erroredItem()])
 		const metas = new Map([['run-20260101-000009', JSON.stringify(erroredMeta('run-20260101-000009'))]])
 		const readers = createReaders(metas, new Map())
-		const submission = createRunSubmission({ onRunSettled: settleNothing, startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings, runDirectoryExists: emptyRunsDir })
-		const resumeErroredRun = createResumeErroredRun({ runSubmission: submission, readRunMetaById: readers.readRunMetaById, readCheckpointById: readers.readCheckpointById, taskQueue: createQueueModule(queue, submission, readers) })
+		const submission = createRunSubmission({
+			providerSuspension: providerSuspensionForTest(),
+			onRunSettled: settleNothing, startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings, runDirectoryExists: emptyRunsDir })
+		const resumeErroredOrSuspendedRun = createResumeErroredOrSuspendedRun({ runSubmission: submission, readRunMetaById: readers.readRunMetaById, readCheckpointById: readers.readCheckpointById, taskQueue: createQueueModule(queue, submission, readers) })
 
 		submission.submit('first')
-		expect(resumeErroredRun('run-20260101-000009', undefined)).toEqual({ ok: false, error: 'run_in_progress' })
+		expect(resumeErroredOrSuspendedRun('run-20260101-000009', undefined)).toEqual({ ok: false, error: 'run_in_progress' })
 		expect(queue.snapshot().items.find((entry) => entry.id === 'item-1')?.status).toBe('error')
 
 		resolveRun(sampleMeta('run-1'))
 		await submission.awaitActive()
 	})
+	test('a resume of another run is refused while a suspended run holds the gate', async () => {
+		const suspendedRunId = 'run-20260101-000009'
+		const erroredRunId = 'run-20260101-000010'
+		const metas = new Map([
+			[suspendedRunId, JSON.stringify(suspendedMeta(suspendedRunId))],
+			[erroredRunId, JSON.stringify(erroredMeta(erroredRunId))],
+		])
+		const checkpoints = new Map([
+			[suspendedRunId, JSON.stringify(sampleCheckpoint(suspendedRunId))],
+			[erroredRunId, JSON.stringify(sampleCheckpoint(erroredRunId))],
+		])
+		const harness = createHarness({
+			metas,
+			checkpoints,
+			queue: [
+				{ id: 'item-b', task: 'do it', status: 'suspended', runId: suspendedRunId, queuedAt: '2026-01-01T00:00:00.000Z', suspendedAt: suspension.suspendedAt },
+				{ id: 'item-a', task: 'do it', status: 'error', runId: erroredRunId, queuedAt: '2026-01-01T00:00:00.000Z', settledAt: '2026-01-01T00:05:00.000Z' },
+			],
+		})
+		harness.submission.adoptSuspendedRun(suspendedRunId)
+
+		expect(harness.resumeErroredOrSuspendedRun(erroredRunId, undefined)).toEqual({ ok: false, error: 'run_suspended' })
+		expect(harness.submission.activeRunId()).toBeUndefined()
+		expect(harness.submission.suspendedRunId()).toBe(suspendedRunId)
+		expect(harness.queue.snapshot().items.find((entry) => entry.id === 'item-a')?.status).toBe('error')
+	})
+
+	test('resuming the run that holds the suspended gate succeeds and clears it', async () => {
+		const runId = 'run-20260101-000009'
+		const metas = new Map([[runId, JSON.stringify(suspendedMeta(runId))]])
+		const checkpoints = new Map([[runId, JSON.stringify(sampleCheckpoint(runId))]])
+		const harness = createHarness({ metas, checkpoints, queue: [suspendedItem()] })
+		harness.submission.adoptSuspendedRun(runId)
+
+		expect(harness.resumeErroredOrSuspendedRun(runId, undefined)).toEqual({ ok: true, runId })
+		expect(harness.submission.activeRunId()).toBe(runId)
+		expect(harness.submission.suspendedRunId()).toBeUndefined()
+		await harness.submission.awaitActive()
 })
 
 describe('createReadPauseStateById', () => {
@@ -999,7 +1283,9 @@ describe('createResumeParkedRun', () => {
 			resumeCalls.push({ parkedAnswer: options?.parkedAnswer, queueTracked: options?.queueTracked })
 			return parkedMeta(checkpoint.runId)
 		}
-		const submission = createRunSubmission({ onRunSettled: settleNothing, startRun: unusedStartRun, resumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings, runDirectoryExists: emptyRunsDir })
+		const submission = createRunSubmission({
+			providerSuspension: providerSuspensionForTest(),
+			onRunSettled: settleNothing, startRun: unusedStartRun, resumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings, runDirectoryExists: emptyRunsDir })
 		const resumeParkedRun = createResumeParkedRun({
 			runSubmission: submission,
 			readRunMetaById: (runId) => metas.get(runId) ?? null,
@@ -1015,7 +1301,9 @@ describe('createResumeParkedRun', () => {
 		const resumeRun: ResumeRun = () => new Promise<RunMeta>((resolve) => {
 			resolveRun = resolve
 		})
-		const submission = createRunSubmission({ onRunSettled: settleNothing, startRun: unusedStartRun, resumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings, runDirectoryExists: emptyRunsDir })
+		const submission = createRunSubmission({
+			providerSuspension: providerSuspensionForTest(),
+			onRunSettled: settleNothing, startRun: unusedStartRun, resumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings, runDirectoryExists: emptyRunsDir })
 		const resumeParkedRun = createResumeParkedRun({ runSubmission: submission, readRunMetaById: () => null, readCheckpointById: () => null })
 
 		submission.resume(parkedCheckpointFor('run-active'))
@@ -1089,7 +1377,9 @@ describe('createResumeClarificationRun', () => {
 			resumeCalls.push({ clarificationAnswer: options?.clarificationAnswer, queueTracked: options?.queueTracked })
 			return clarificationMeta(checkpoint.runId)
 		}
-		const submission = createRunSubmission({ onRunSettled: settleNothing, startRun: unusedStartRun, resumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings, runDirectoryExists: emptyRunsDir })
+		const submission = createRunSubmission({
+			providerSuspension: providerSuspensionForTest(),
+			onRunSettled: settleNothing, startRun: unusedStartRun, resumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings, runDirectoryExists: emptyRunsDir })
 		const resumeClarificationRun = createResumeClarificationRun({
 			runSubmission: submission,
 			readRunMetaById: (runId) => metas.get(runId) ?? null,
@@ -1116,7 +1406,9 @@ describe('createResumeClarificationRun', () => {
 		const resumeRun: ResumeRun = () => new Promise<RunMeta>((resolve) => {
 			resolveRun = resolve
 		})
-		const submission = createRunSubmission({ onRunSettled: settleNothing, startRun: unusedStartRun, resumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings, runDirectoryExists: emptyRunsDir })
+		const submission = createRunSubmission({
+			providerSuspension: providerSuspensionForTest(),
+			onRunSettled: settleNothing, startRun: unusedStartRun, resumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings, runDirectoryExists: emptyRunsDir })
 		const resumeClarificationRun = createResumeClarificationRun({ runSubmission: submission, readRunMetaById: () => null, readCheckpointById: () => null })
 
 		submission.resume(directCheckpointFor('run-active'))
@@ -1158,18 +1450,22 @@ describe('createResumeClarificationRun', () => {
 	})
 })
 
-describe('createTerminateParkedRun', () => {
+	})
+
+describe('createTerminatePausedRun', () => {
 	function harness(input: { metas?: Map<string, string>; logsByRun?: Map<string, LogEvent[]> } = {}): {
-		terminateParkedRun: ReturnType<typeof createTerminateParkedRun>
+		terminatePausedRun: ReturnType<typeof createTerminatePausedRun>
 		metas: Map<string, string>
 		deleted: string[]
 		logs: Array<{ runId: string; event: LogEvent }>
+		clearedSuspendedRun: () => number
 	} {
 		const metas = new Map(input.metas ?? [])
 		const logsByRun = new Map(input.logsByRun ?? [])
 		const deleted: string[] = []
 		const logs: Array<{ runId: string; event: LogEvent }> = []
-		const terminateParkedRun = createTerminateParkedRun({
+		let clearedSuspendedRun = 0
+		const terminatePausedRun = createTerminatePausedRun({
 			readRunMetaById: (runId) => metas.get(runId) ?? null,
 			readRunLogEvents: (runId) => logsByRun.get(runId) ?? [],
 			writeMetaFor: (runId) => (meta) => {
@@ -1181,8 +1477,11 @@ describe('createTerminateParkedRun', () => {
 			appendLogFor: (runId) => (event) => {
 				logs.push({ runId, event })
 			},
+			clearSuspendedRun: (runId) => {
+				if (runId !== undefined) clearedSuspendedRun += 1
+			},
 		})
-		return { terminateParkedRun, metas, deleted, logs }
+		return { terminatePausedRun, metas, deleted, logs, clearedSuspendedRun: () => clearedSuspendedRun }
 	}
 
 	function parkedMeta(runId: string): RunMeta {
@@ -1202,11 +1501,54 @@ describe('createTerminateParkedRun', () => {
 		}
 	}
 
+	function suspendedMeta(runId: string): RunMeta {
+		return {
+			runId,
+			guildPath: 'guild',
+			benchmarkPath: 'bench',
+			task: 'do it',
+			effort: 'thorough',
+			involvement: 'collaborative',
+			logLevel: 'standard',
+			continuesFrom: 'run-20251231-000000',
+			status: 'suspended',
+			startTime: '2026-01-01T00:00:00.000Z',
+			suspension: { category: 'billing', resumePolicy: 'operator', message: 'Top up and resume.', suspendedAt: '2026-01-01T00:02:00.000Z' },
+		}
+	}
+
+	test('terminates a suspended run with the operator reason, deletes the checkpoint, and clears the priority slot', () => {
+		const runId = 'run-20260101-000000'
+		const testHarness = harness({ metas: new Map([[runId, JSON.stringify(suspendedMeta(runId))]]) })
+
+		expect(testHarness.terminatePausedRun(runId)).toEqual({ ok: true, runId })
+		expect(testHarness.deleted).toEqual([runId])
+		expect(testHarness.clearedSuspendedRun()).toBe(1)
+		const log = testHarness.logs[0]
+		if (log === undefined) throw new Error('expected a termination log event')
+		expect(log.event.type).toBe('run_terminated')
+		expect(log.event.payload).toEqual({ reason: 'operator', message: 'Terminated by the operator while the run was suspended.' })
+
+		const metaText = testHarness.metas.get(runId)
+		if (metaText === undefined) throw new Error('expected the terminated meta')
+		const parsed: unknown = JSON.parse(metaText)
+		if (!isRunMeta(parsed)) throw new Error('expected a valid run meta')
+		expect(parsed.status).toBe('interrupted')
+		expect(parsed.runId).toBe(runId)
+		expect(parsed.task).toBe('do it')
+		expect(parsed.continuesFrom).toBe('run-20251231-000000')
+		expect(parsed.startTime).toBe('2026-01-01T00:00:00.000Z')
+		expect(parsed.endTime).toBe(log.event.timestamp)
+		expect(parsed.suspension).toBeUndefined()
+		expect(parsed.result).toBeUndefined()
+		expect(parsed.error).toEqual({ kind: 'interrupted', message: 'The operator terminated this suspended run.' })
+	})
+
 	test('marks a parked run interrupted, preserves its identity, deletes the checkpoint, and logs the operator action', () => {
 		const runId = 'run-20260101-000000'
 		const testHarness = harness({ metas: new Map([[runId, JSON.stringify(parkedMeta(runId))]]) })
 
-		expect(testHarness.terminateParkedRun(runId)).toEqual({ ok: true, runId })
+		expect(testHarness.terminatePausedRun(runId)).toEqual({ ok: true, runId })
 		expect(testHarness.deleted).toEqual([runId])
 		expect(testHarness.logs.length).toBe(1)
 		const log = testHarness.logs[0]
@@ -1236,12 +1578,12 @@ describe('createTerminateParkedRun', () => {
 		expect(parsed.error).toEqual({ kind: 'interrupted', message: 'The operator terminated this run while it was waiting for an answer.' })
 	})
 
-	test('an already-interrupted meta deletes the checkpoint and appends the audit event idempotently, reporting not_parked', () => {
+	test('an already-interrupted meta deletes the checkpoint and appends the audit event idempotently, reporting not_paused', () => {
 		const runId = 'run-20260101-000000'
 		const interrupted = { ...parkedMeta(runId), status: 'interrupted' as const, error: { kind: 'interrupted' as const, message: 'already terminated' } }
 		const testHarness = harness({ metas: new Map([[runId, JSON.stringify(interrupted)]]) })
 
-		expect(testHarness.terminateParkedRun(runId)).toEqual({ ok: false, error: 'not_parked' })
+		expect(testHarness.terminatePausedRun(runId)).toEqual({ ok: false, error: 'not_paused' })
 		expect(testHarness.deleted).toEqual([runId])
 		const log = testHarness.logs[0]
 		if (log === undefined) throw new Error('expected a termination log event')
@@ -1251,21 +1593,42 @@ describe('createTerminateParkedRun', () => {
 		expect(testHarness.metas.get(runId)).toBe(JSON.stringify(interrupted))
 	})
 
-	test('rejects a missing or unparseable meta as not_found without touching anything', () => {
+	test('terminating an interrupted run does not clear another run suspended gate', () => {
+		const runId = 'run-20260101-000000'
+		let suspendedGate = 'run-other'
+		const terminatedMeta = { ...parkedMeta(runId), status: 'interrupted' as const, error: { kind: 'interrupted' as const, message: 'already terminated' } }
+		const terminate = createTerminatePausedRun({
+			readRunMetaById: (id) => (id === runId ? JSON.stringify(terminatedMeta) : null),
+			readRunLogEvents: () => [],
+			writeMetaFor: () => () => {},
+			deleteCheckpointFor: () => () => {},
+			appendLogFor: () => () => {},
+			clearSuspendedRun: (id) => {
+				if (suspendedGate === id) suspendedGate = ''
+			},
+		})
+
+		expect(terminate(runId)).toEqual({ ok: false, error: 'not_paused' })
+		expect(suspendedGate).toBe('run-other')
+	})
+
+	test('rejects a missing or unparseable meta as not_found but still clears the suspended priority slot', () => {
 		const missing = harness()
-		expect(missing.terminateParkedRun('run-1')).toEqual({ ok: false, error: 'not_found' })
+		expect(missing.terminatePausedRun('run-1')).toEqual({ ok: false, error: 'not_found' })
+		expect(missing.clearedSuspendedRun()).toBe(1)
 
 		const corrupt = harness({ metas: new Map([['run-1', '{not json']]) })
-		expect(corrupt.terminateParkedRun('run-1')).toEqual({ ok: false, error: 'not_found' })
+		expect(corrupt.terminatePausedRun('run-1')).toEqual({ ok: false, error: 'not_found' })
+		expect(corrupt.clearedSuspendedRun()).toBe(1)
 		expect(corrupt.deleted).toEqual([])
 		expect(corrupt.logs).toEqual([])
 	})
 
-	test('rejects success and error metas as not_parked without deleting their checkpoints', () => {
+	test('rejects success and error metas as not_paused without deleting their checkpoints', () => {
 		for (const status of ['success', 'error'] as const) {
 			const original = JSON.stringify({ ...sampleMeta('run-1'), status })
 			const testHarness = harness({ metas: new Map([['run-1', original]]) })
-			expect(testHarness.terminateParkedRun('run-1')).toEqual({ ok: false, error: 'not_parked' })
+			expect(testHarness.terminatePausedRun('run-1')).toEqual({ ok: false, error: 'not_paused' })
 			expect(testHarness.metas.get('run-1')).toBe(original)
 			expect(testHarness.deleted).toEqual([])
 			expect(testHarness.logs).toEqual([])
@@ -1283,7 +1646,7 @@ describe('createTerminateParkedRun', () => {
 			logsByRun: new Map([[runId, existing]]),
 		})
 
-		expect(testHarness.terminateParkedRun(runId)).toEqual({ ok: true, runId })
+		expect(testHarness.terminatePausedRun(runId)).toEqual({ ok: true, runId })
 		expect(testHarness.logs.map((log) => log.event.type)).toEqual(['human_answer', 'role_finished', 'run_terminated'])
 		expect(testHarness.logs[1]?.event.payload).toMatchObject({ callId: 'role:main-0-1', status: 'error', error: { kind: 'interrupted' } })
 	})

@@ -772,6 +772,19 @@ describe('renderFlowView — terminal CTA', () => {
 		// The CTA carries no connecting edge — it is a standalone button, not a graph node with a relationship.
 		expect(allByTag(terminalView, 'g').filter((group) => (propString(group.props, 'class') ?? '').split(' ').includes('flow-cta-edge')).length).toBe(0)
 	})
+
+	test('a suspended run renders a warning-toned Suspended CTA and freezes its in-flight edges', () => {
+		const running = scenarioFrame('delegation-chain', 0)
+		const suspended: InteractionModel = { ...running, status: 'suspended' }
+		const view = render(suspended)
+		const ctaNodes = allByTag(view, 'g').filter((group) => (propString(group.props, 'class') ?? '').split(' ').includes('flow-cta'))
+		expect(ctaNodes.length).toBe(1)
+		const cta = defined(ctaNodes[0], 'ctaNodes[0]')
+		const label = allByTag(cta, 'text').find((node) => (propString(node.props, 'class') ?? '').split(' ').includes('flow-cta-label'))
+		if (label === undefined) throw new Error('expected the CTA label')
+		expect(label.children.join('')).toBe('Suspended')
+		expect(pathHasClass(pathForOperation(view, 'op1'), 'graph-edge--flowing')).toBe(false)
+	})
 })
 
 // The whimsical caption phrases rotate by a deterministic hash of the active operation id. These helpers independently interpolate the configured whimsical list with the same seed deriveNowCaption uses (hashString of the active operation id), so the assertion verifies the resolver's interpolation + rotation end-to-end rather than re-deriving the caption through the resolver itself. The detailed and friendly tiers hold single phrases, so their captions are asserted exactly and pin the whimsical prose.

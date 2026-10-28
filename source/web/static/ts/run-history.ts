@@ -8,10 +8,10 @@ export type HistoryEntry =
 	| { kind: 'queued'; item: QueueItemLike }
 	| { kind: 'run'; summary: RunSummary }
 
-// The single row per task: queued rows come first in display order, then the runs whose id no queued row already represents. A queued row represents both the run it is attached to (`runId`) and the paused run it will re-enter (`resumesRunId`), so an active, answered, or parked task never appears twice.
+// The single row per task: queued rows come first in display order (a suspended pause outranks waiting work), then the runs whose id no queued row already represents. A queued row represents both the run it is attached to (`runId`) and the paused run it will re-enter (`resumesRunId`), so an active, answered, suspended, or parked task never appears twice.
 export function deriveHistoryEntries(items: QueueItemLike[], summaries: RunSummary[]): HistoryEntry[] {
 	const queued = deriveQueuedItems(items)
-	const orderedItems = [...queued.waiting, ...queued.active, ...queued.needsInput]
+	const orderedItems = [...queued.suspended, ...queued.waiting, ...queued.active, ...queued.needsInput]
 	const representedRunIds = new Set<string>()
 	for (const item of orderedItems) {
 		if (typeof item.runId === 'string' && item.runId !== '') representedRunIds.add(item.runId)
@@ -25,10 +25,10 @@ export function deriveHistoryEntries(items: QueueItemLike[], summaries: RunSumma
 	return entries
 }
 
-// The row's primary label: a running or paused run names the task it is working on, because its generated summary and any result card describe an earlier state. A finished run prefers its generated summary, then the task, then the id.
+// The row's primary label: a running, suspended, or parked run names the task it is working on, because its generated summary and any result card describe an earlier state. A finished run prefers its generated summary, then the task, then the id.
 export function runPrimaryLabel(summary: RunSummary): string {
 	const taskLine = typeof summary.task === 'string' && summary.task !== '' ? taskFirstLine(summary.task) : ''
-	if (summary.status === 'running' || summary.status === 'needs_clarification') return taskLine !== '' ? taskLine : summary.runId
+	if (summary.status === 'running' || summary.status === 'suspended' || summary.status === 'needs_clarification') return taskLine !== '' ? taskLine : summary.runId
 	if (typeof summary.summary === 'string' && summary.summary !== '') return summary.summary
 	return taskLine !== '' ? taskLine : summary.runId
 }

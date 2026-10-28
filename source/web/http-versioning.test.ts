@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import type { ListRunIds, ProjectSettings, ReadProjectSettings, ReadRunMetaById, ReadRunPlanById, ReadRunSnapshotStats, ReadRunSummaryById, ReadRunSummaryStats, RunCheckpointExists, WriteProjectSettings } from '../executor/persistence.ts'
 import type { RunState } from '../executor/run-state.ts'
-import type { ResumeErroredRun, RunSubmission } from '../executor/run-submission.ts'
+import type { ResumeErroredOrSuspendedRun, RunSubmission } from '../executor/run-submission.ts'
 import { createTaskQueue } from '../executor/queue/index.ts'
 import type { DeploymentConfig, GuildConfig, RunMeta } from '../executor/types.ts'
 import { applyFlowFrame, createFlowFeedResponder, emptyFlowFeedState, flowFeedRevision } from './static/ts/flow-feed/index.js'
@@ -115,8 +115,11 @@ function createVersioningHarness(initialRuns: Array<[string, StoredRun]>, flowFe
 	}
 	const runSubmission: RunSubmission = {
 		submit: () => ({ ok: false, error: 'run_in_progress' }),
-		resume: () => {},
+		resume: () => ({ ok: true }),
 		activeRunId: () => activeRunId,
+		suspendedRunId: () => undefined,
+		adoptSuspendedRun: () => {},
+		clearSuspendedRun: () => {},
 		lastRunId: () => undefined,
 		awaitActive: async () => undefined,
 		awaitFatalError: () => new Promise<Error>(() => {}),
@@ -135,14 +138,17 @@ function createVersioningHarness(initialRuns: Array<[string, StoredRun]>, flowFe
 		readPauseStateById: () => null,
 		resumeParkedRun: () => ({ ok: false, error: 'checkpoint_missing' }),
 		resumeClarificationRun: () => ({ ok: false, error: 'checkpoint_missing' }),
-		terminateParkedRun: () => ({ ok: false, error: 'not_found' }),
+		terminatePausedRun: () => ({ ok: false, error: 'not_found' }),
 		submitRun: () => ({ ok: false, error: 'run_in_progress' }),
 		hasActiveRun: () => activeRunId !== undefined,
+		hasSuspendedRun: () => false,
+		canDispatch: () => true,
+		ensureProviderProbe: () => {},
 		sleep: async () => {},
 		now: () => '2026-01-01T00:00:00.000Z',
 		generateAnswerId: () => 'answer-1',
 	})
-	const resumeErroredRun: ResumeErroredRun = () => ({ ok: false, error: 'run_not_found' })
+	const resumeErroredOrSuspendedRun: ResumeErroredOrSuspendedRun = () => ({ ok: false, error: 'run_not_found' })
 	const flowFeedResponder = createFlowFeedResponder(flowFeedOptions)
 	const runListFeedResponder = createRunListFeedResponder({ epoch: 'versioning-epoch', historyLimit: 64 })
 
@@ -162,11 +168,12 @@ function createVersioningHarness(initialRuns: Array<[string, StoredRun]>, flowFe
 			readProjectSettings,
 			writeProjectSettings,
 			taskQueue,
-			resumeErroredRun,
+			resumeErroredOrSuspendedRun,
 			runCheckpointExists,
 			build: null,
 			flowFeedResponder,
 			runListFeedResponder,
+			readHealth: () => ({ provider: { state: 'unknown', category: 'unknown', since: '2026-01-01T00:00:00.000Z', lastCheckedAt: '2026-01-01T00:00:00.000Z', consecutiveFailures: 0 }, suspendedRunId: null, resumePolicy: null }),
 		},
 		async () => new Response('static body'),
 	)

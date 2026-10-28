@@ -3,7 +3,7 @@ import { questionFromParkSummary, type ParkedAnswer, type PauseState } from '../
 import type { ListRunIds, ReadRunMetaById } from '../persistence.js'
 import { isRunMeta, isTerminalRunStatus, safeJsonParse } from '../validation.js'
 import type { EffortLevel, InvolvementLevel, LogLevel, RunContinuation, RunMeta } from '../types.js'
-import { assembleBriefingLines, cancelWaitingItem, dispatchingItem, editWaitingItem, enqueueAtHead, enqueueAtTail, normalizeNewItem, pendingAnswerUndelivered, reactivateErrorItem, recordAnswer, releaseToWaiting, removeWaitingItem, reorderWaitingItem, repairActiveItem, repairNeedsInputItem, requireWaitingItem, requeueErrorItem, settleActiveItem, terminateNeedsInputItem, toQueueItemView, toQueueView, withReplacedItem, type QueueItem, type QueueItemView, type QueueMutation, type QueueView, type RunListEntry, type TaskQueue } from './model.js'
+import { assembleBriefingLines, cancelWaitingItem, dispatchingItem, editWaitingItem, enqueueAtHead, enqueueAtTail, normalizeNewItem, pendingAnswerUndelivered, reactivateErrorItem, reactivateSuspendedItem, recordAnswer, releaseToWaiting, removeWaitingItem, reorderWaitingItem, repairActiveItem, repairNeedsInputItem, repairSuspendedItem, requireWaitingItem, requeueErrorItem, settleActiveItem, suspendActiveItem, terminateNeedsInputItem, terminateSuspendedItem, toQueueItemView, toQueueView, withReplacedItem, type QueueItem, type QueueItemView, type QueueMutation, type QueueView, type RunListEntry, type TaskQueue } from './model.js'
 import { readQueue, writeQueue, type QueueStore } from './persistence.js'
 
 // The durable task queue module (docs/queueing.md "The queue: storage, item model, state machine" and "Dispatch and the scheduler"): the single public surface over the item model, the state machine, queue persistence, and the scheduler that dispatches queued tasks and settles their runs. HTTP handlers and the error-resume path call operations here rather than reading, mutating, and writing the queue file themselves, so the crash-safety ordering (dispatching marker before submit, boot repair, collision retry, settlement mapping) cannot be bypassed.
@@ -19,7 +19,7 @@ export interface QueuedRunSubmission {
 
 export type QueuedRunSubmitResult =
 	| { ok: true; runId: string }
-	| { ok: false; error: 'run_in_progress' | 'run_id_collision' }
+	| { ok: false; error: 'run_in_progress' | 'run_suspended' | 'run_id_collision' }
 
 export type SubmitQueuedRun = (submission: QueuedRunSubmission) => QueuedRunSubmitResult
 
@@ -28,24 +28,24 @@ export type ReadPauseStateById = (runId: string) => PauseState | null
 
 export type ResumeParkedRunResult =
 	| { ok: true; runId: string }
-	| { ok: false; error: 'run_in_progress' | 'checkpoint_missing' | 'not_parked' }
+	| { ok: false; error: 'run_in_progress' | 'run_suspended' | 'checkpoint_missing' | 'not_parked' }
 
 // The same-run answer resume: re-enters the parked run with the answer. The queue falls back to the briefed dispatch on checkpoint_missing/not_parked.
 export type QueueResumeParkedRun = (runId: string, parkedAnswer: ParkedAnswer) => ResumeParkedRunResult
 
 export type ResumeClarificationRunResult =
 	| { ok: true; runId: string }
-	| { ok: false; error: 'run_in_progress' | 'checkpoint_missing' | 'not_clarification' }
+	| { ok: false; error: 'run_in_progress' | 'run_suspended' | 'checkpoint_missing' | 'not_clarification' }
 
 // The same-run clarification resume: re-enters a direct-finish needs_clarification run with a framed question-and-answer note. The queue falls back to the briefed dispatch on checkpoint_missing/not_clarification.
 export type QueueResumeClarificationRun = (runId: string, clarificationAnswer: { id: string; question: string; answer: string }) => ResumeClarificationRunResult
 
-export type TerminateParkedRunResult =
+export type TerminatePausedRunResult =
 	| { ok: true; runId: string }
-	| { ok: false; error: 'not_found' | 'not_parked' }
+	| { ok: false; error: 'not_found' | 'not_paused' }
 
 // The operator-termination port: the submission layer's factory satisfies this shape structurally, and the queue cancels the item even when the run is already gone.
-export type TerminateParkedRun = (runId: string) => TerminateParkedRunResult
+export type TerminatePausedRun = (runId: string, reason?: string) => TerminatePausedRunResult
 
 // The configured leaves the composition root supplies; the module owns all queue logic and none has a default.
 export interface TaskQueueDependencies {
@@ -63,10 +63,16 @@ export interface TaskQueueDependencies {
 	// The same-run clarification-answer resume, supplied by the submission layer: it re-enters a direct-finish needs_clarification run and falls back like the parked path when it cannot.
 	resumeClarificationRun: QueueResumeClarificationRun
 	// The operator-termination operation for a parked run, supplied by the submission layer: it terminalizes the run and deletes its checkpoint, while the queue cancels the item even when the run is already gone.
-	terminateParkedRun: TerminateParkedRun
+	terminatePausedRun: TerminatePausedRun
 	submitRun: SubmitQueuedRun
 	// The single-run-slot peek: when a run is active (the boot-resumed case) the tick is a true no-op — no dispatching-marker write, no submitRun probe — matching the design's "finds the slot busy and no-ops". The settlement hook's tick sees the slot already cleared.
 	hasActiveRun: () => boolean
+	// The recovery owner's suspended-run binding: the paused run has priority over every waiting item, so no tick may dispatch until it is resumed or terminated, even if the queue file lost the suspended item.
+	hasSuspendedRun: () => boolean
+	// The provider gate's dispatch permission. Waiting work never starts while the provider is unavailable; an inconclusive gate state still permits dispatch because it carries no evidence of failure.
+	canDispatch: () => boolean
+	// Starts the provider probe when blocked waiting work exists and no suspension is bound; the recovery owner owns the probe lifecycle.
+	ensureProviderProbe: () => void
 	sleep: Sleep
 	now: () => string
 	// Mints the durable identity of a recorded answer; injected so tests control it and the composition root owns the random source.
@@ -101,25 +107,30 @@ export type QueueEnqueueOutcome =
 	| { ok: true; item: QueueItemView }
 	| { ok: false; reason: 'invalid_body' }
 
-// The submit-now result by kind: 'invalid' writes nothing; 'busy' leaves a new item queued when the slot was taken mid-dispatch; 'dispatched' carries the accepted run id; 'collision' means the retry budget was exhausted and the just-created item was removed.
+// The submit-now result by kind: 'invalid' writes nothing; 'busy' leaves a new item queued when the slot was taken mid-dispatch; 'run_suspended' refuses a start while a paused run has priority; 'dispatched' carries the accepted run id; 'collision' means the retry budget was exhausted and the just-created item was removed.
 export type QueueSubmitOutcome =
 	| { kind: 'dispatched'; runId: string }
 	| { kind: 'busy' }
+	| { kind: 'run_suspended' }
+	| { kind: 'provider_unavailable' }
 	| { kind: 'collision' }
 	| { kind: 'invalid' }
 
 // The public contract. Every read returns freshly cloned read-only DTOs, never module-owned arrays or objects.
 // - read(): the current file-order items, head first.
 // - enqueue(input, handles, placement): validates an operator body, writes a new waiting item at the head or tail, then ticks the scheduler; a malformed body writes nothing and returns 'invalid_body'.
-// - submitNow(input, handles): the POST /api/runs path; refuses while a run is active with 'busy' before enqueueing, otherwise enqueues at the head and dispatches in the same call. A collision that exhausts the retry budget removes the just-created waiting item and returns 'collision'; a slot that becomes busy after the attempt keeps the item waiting and returns 'busy'.
+// - submitNow(input, handles): the POST /api/runs path; refuses while a run is active with 'busy', while a paused run has priority with 'run_suspended', or while the provider gate blocks dispatch with 'provider_unavailable' before enqueueing; otherwise it enqueues at the head and dispatches in the same call. A collision that exhausts the retry budget removes the just-created waiting item and returns 'collision'; a slot that becomes busy after the attempt keeps the item waiting and returns 'busy'.
 // - patch(id, patch): edits task/effort/involvement and/or reorders within the waiting list; unknown ids return 'not_found', non-waiting items 'forbidden_status'. An empty patch validates without writing.
 // - cancel(id, at): marks a waiting item cancelled with settledAt; unknown ids 'not_found', non-waiting items 'forbidden_status'.
-// - terminate(id, at): cancels a needs_input item and, when it names a parked run, terminalizes that run and deletes its checkpoint; a run already gone ('not_found'/'not_parked') still cancels the item. Unknown ids 'not_found', other statuses 'forbidden_status'.
+// - terminate(id, at): cancels a needs_input or suspended item and, when it names the corresponding run, terminalizes that run and deletes its checkpoint; a run already gone ('not_found'/'not_paused') still cancels the item. Unknown ids 'not_found', other statuses 'forbidden_status'.
 // - answer(id, answer): records an answer (with a durable answer id) on a needs_input item, moves it to the front as waiting, and ticks; a parked checkpoint whose question still matches records the run and tool call, a clarification checkpoint whose meta question still matches records just the run, and either dispatch resumes the same run; an item with no matching checkpoint falls back to the briefed continuation; its lineage is re-pointed at the paused run when that run is known, otherwise the item keeps its existing lineage. An item whose own run is already terminal but not paused (an operator termination) is cancelled, its checkpoint cleanup and audit append retried, and the answer discarded instead of dispatching. Unknown ids 'not_found', other statuses 'forbidden_status'.
 // - requeue(id): returns an error item to waiting at the tail with its lineage re-pointed at the errored run, then ticks; unknown ids 'not_found', other statuses 'forbidden_status'.
 // - reactivateErrorItem(runId): puts the error item for a resumed run back into the active slot under the same run id; returns 'not_found' when no error item names that run.
-// - tick(): repairs stale active items from their run metas and cancels needs_input items whose run was terminated before the queue write, then dispatches the head waiting item unless a run is active or shutdown has been observed. An answered item resumes its paused run through the parked-answer path when it carries a tool-call pointer, or the clarification-answer path otherwise; when that run cannot be resumed the item falls back to the briefed dispatch with its lineage re-pointed at the unresumable run.
-// - onRunSettled(meta): maps a settled run from its terminal meta, writes the mapping before ticking, and never settles an 'interrupted' meta (that item re-dispatches through boot repair). A needs_clarification settlement whose answer is still undelivered (either pause kind) releases the item to waiting and ticks instead of settling, so the answer retries.
+// - reactivateSuspendedItem(runId): puts the suspended item for a resumed run back into the active slot under the same run id; returns 'not_found' when no suspended item names that run.
+// - terminateSuspendedRun(runId, at): the run-level operator termination; terminalizes a suspended run, cancels any suspended item bound to it, and ticks so waiting work can dispatch once the pause is released.
+// - discardSuspendedRun(runId, reason?): terminalizes the run and cancels its suspended item when resume can never succeed, then ticks dispatch.
+// - tick(): repairs stale active and suspended items from their run metas and cancels needs_input items whose run was terminated before the queue write. The recovery owner's suspended run blocks every waiting item; automatic resume belongs to the provider-recovery coordinator, not the queue. With no suspension, the head waiting item dispatches only while the provider gate permits dispatch. An answered item resumes its paused run through the parked-answer path when it carries a tool-call pointer, or the clarification-answer path otherwise; when that run cannot be resumed the item falls back to the briefed dispatch with its lineage re-pointed at the unresumable run.
+// - onRunSettled(meta): maps a settled run from its terminal meta, writes the mapping before ticking, and never settles an 'interrupted' meta (that item re-dispatches through boot repair). A suspended meta maps the active item to suspended without ticking, because the paused run retains priority. A needs_clarification settlement whose answer is still undelivered (either pause kind) releases the item to waiting and ticks instead of settling, so the answer retries.
 // - observeShutdown(): closes the dispatch gate; settlements still map but no new run starts.
 export interface TaskQueueModule {
 	read(): QueueView
@@ -127,10 +138,15 @@ export interface TaskQueueModule {
 	submitNow(input: unknown, handles: QueueHandles): Promise<QueueSubmitOutcome>
 	patch(id: string, patch: QueuePatchInput): QueueMutationOutcome
 	cancel(id: string, at: string): QueueMutationOutcome
-	terminate(id: string, at: string): QueueMutationOutcome
+	terminate(id: string, at: string): Promise<QueueMutationOutcome>
 	answer(id: string, answer: string): Promise<QueueMutationOutcome>
 	requeue(id: string): Promise<QueueMutationOutcome>
 	reactivateErrorItem(runId: string): QueueMutationOutcome
+	reactivateSuspendedItem(runId: string): QueueMutationOutcome
+	// The run-level termination path: terminalizes the suspended run even when no queue item exists, cancels any suspended item bound to it, and ticks after the pause is released. Status gating lives in the caller; the result is the termination operation's own.
+	terminateSuspendedRun(runId: string, at: string): Promise<TerminatePausedRunResult>
+	// Cancels the suspended item for a run whose automatic resume can never succeed; the recovery coordinator has already released the pause and terminalizes the run through terminatePausedRun.
+	discardSuspendedRun(runId: string, reason?: string): void
 	tick(): Promise<void>
 	onRunSettled(meta: RunMeta): Promise<void>
 	observeShutdown(): void
@@ -181,7 +197,16 @@ export function createTaskQueue(dependencies: TaskQueueDependencies): TaskQueueM
 		return found
 	}
 
-	// Repairs every active item from its run's meta (docs/queueing.md state machine, the boot rows), and every needs_input item whose run was terminalized interrupted before its queue cancel landed, finishing that run's checkpoint/audit cleanup and writing when anything changed. Idempotent and cheap in steady state — a live run's item and a normally parked item are untouched.
+	// Cancels the suspended item bound to a run, if the queue still has one. The run-level termination path and the automatic-resume discard both need this queue-side half; a lost item is not an error, because the run meta is the source of truth for the pause.
+	function cancelSuspendedItemForRun(runId: string, at: string): void {
+		const queue = readQueueState()
+		const target = queue.items.find((item) => item.status === 'suspended' && item.runId === runId)
+		if (target === undefined) return
+		const result = terminateSuspendedItem(queue, target.id, at)
+		if (result.ok) writeQueueState(result.queue)
+	}
+
+	// Repairs every active and suspended item from its run's meta (docs/queueing.md state machine, the boot rows), and every needs_input item whose run was terminalized interrupted before its queue cancel landed, finishing that run's checkpoint/audit cleanup and writing when anything changed. Idempotent and cheap in steady state — a live or normally suspended run's item and a normally parked item are untouched.
 	function repairPass(): void {
 		const queue = readQueueState()
 		let resumedMeta: RunMeta | null | undefined
@@ -196,7 +221,15 @@ export function createTaskQueue(dependencies: TaskQueueDependencies): TaskQueueM
 				const repaired = repairNeedsInputItem(item, meta, dependencies.now())
 				if (repaired === null) return item
 				// The meta wrote interrupted before the checkpoint delete landed, so the retry finishes that cleanup before the queue records the cancellation.
-				dependencies.terminateParkedRun(item.runId)
+				dependencies.terminatePausedRun(item.runId)
+				changed = true
+				return repaired
+			}
+			if (item.status === 'suspended') {
+				const meta = item.runId !== undefined ? parseRunMetaText(item.runId) : null
+				const settledAt = meta?.endTime ?? dependencies.now()
+				const repaired = repairSuspendedItem(item, meta, settledAt)
+				if (repaired === null) return item
 				changed = true
 				return repaired
 			}
@@ -205,9 +238,9 @@ export function createTaskQueue(dependencies: TaskQueueDependencies): TaskQueueM
 			const pauseState = item.runId !== undefined ? dependencies.readPauseStateById(item.runId) : null
 			const settledAt = meta?.endTime ?? dependencies.now()
 			const repair = repairActiveItem(item, meta, settledAt, pauseState)
-			if (repair.item === item) return item
+			if (repair === null) return item
 			changed = true
-			return repair.item
+			return repair
 		})
 		if (changed) writeQueueState({ ...queue, items })
 	}
@@ -261,8 +294,8 @@ export function createTaskQueue(dependencies: TaskQueueDependencies): TaskQueueM
 				writeQueueState(withReplacedItem(view, { ...marker, runId: result.runId }))
 				return
 			}
-			// The slot is taken (a run is already going): restore the item to waiting in the same synchronous cycle — the marker was already written, so leaving it as-is would orphan it as active-without-id until boot repair.
-			if (result.error === 'run_in_progress' || attempt >= MAX_COLLISION_RETRIES) {
+			// The slot is taken (a run is already going or a suspended run has priority): restore the item to waiting in the same synchronous cycle — the marker was already written, so leaving it as-is would orphan it as active-without-id until boot repair.
+			if (result.error === 'run_in_progress' || result.error === 'run_suspended' || attempt >= MAX_COLLISION_RETRIES) {
 				writeQueueState(withReplacedItem(view, releaseToWaiting(marker)))
 				return
 			}
@@ -311,7 +344,7 @@ export function createTaskQueue(dependencies: TaskQueueDependencies): TaskQueueM
 			result = dependencies.resumeClarificationRun(resumeRunId, { id: answerId, question, answer })
 		}
 		if (result.ok) return { kind: 'done' }
-		if (result.error === 'run_in_progress') {
+		if (result.error === 'run_in_progress' || result.error === 'run_suspended') {
 			writeQueueState(withReplacedItem(readQueueState(), releaseToWaiting(marker)))
 			return { kind: 'released' }
 		}
@@ -331,10 +364,14 @@ export function createTaskQueue(dependencies: TaskQueueDependencies): TaskQueueM
 		await submitHead(head, view)
 	}
 
-	// One dispatch attempt: repair stale active items (the boot rows of the state machine), then dispatch the head waiting item — unless the slot is busy (a true no-op) or the shutdown gate is closed. Async only on the collision-retry path, whose sleep ends one read-modify-write cycle and whose retry begins a fresh one.
+	// One dispatch attempt: repair stale active and suspended items (the boot rows of the state machine). A suspension keeps every waiting item blocked; the recovery coordinator owns automatic resume and reports health changes that call this tick. With no suspension, waiting work dispatches only while the provider gate permits. Async only on the collision-retry path, whose sleep ends one read-modify-write cycle and whose retry begins a fresh one.
 	const tick = async (): Promise<void> => {
 		repairPass()
-		if (shutdownObserved || dependencies.hasActiveRun()) return
+		if (shutdownObserved || dependencies.hasActiveRun() || dependencies.hasSuspendedRun()) return
+		if (!dependencies.canDispatch()) {
+			if (readQueueState().items.some((item) => item.status === 'waiting')) dependencies.ensureProviderProbe()
+			return
+		}
 		await dispatchHead()
 	}
 
@@ -349,8 +386,10 @@ export function createTaskQueue(dependencies: TaskQueueDependencies): TaskQueueM
 			return { ok: true, item: toQueueItemView(normalized.item) }
 		},
 		async submitNow(input, handles) {
-			// Checked before enqueueing so a busy service enqueues nothing, exactly as the 409 contract promises scripts.
+			// Checked before enqueueing so a busy service enqueues nothing, exactly as the 409 contract promises scripts. A suspended run outranks waiting work, so a start-now request is refused until it is resumed or terminated.
 			if (dependencies.hasActiveRun()) return { kind: 'busy' }
+			if (dependencies.hasSuspendedRun()) return { kind: 'run_suspended' }
+			if (!dependencies.canDispatch()) return { kind: 'provider_unavailable' }
 			const normalized = normalizeNewItem(input, handles)
 			if (!normalized.ok) return { kind: 'invalid' }
 			writeQueueState(enqueueAtHead(readQueueState(), normalized.item))
@@ -397,16 +436,17 @@ export function createTaskQueue(dependencies: TaskQueueDependencies): TaskQueueM
 			writeQueueState(result.queue)
 			return { ok: true, item: toQueueItemView(result.item) }
 		},
-		terminate(id, at) {
+		async terminate(id, at) {
 			const queue = readQueueState()
 			const target = queue.items.find((item) => item.id === id)
 			if (target === undefined) return { ok: false, reason: 'not_found' }
-			if (target.status !== 'needs_input') return { ok: false, reason: 'forbidden_status' }
+			if (target.status !== 'needs_input' && target.status !== 'suspended') return { ok: false, reason: 'forbidden_status' }
 			// Only the item's own run is terminalized: continuesFrom is lineage and may name another terminal run, and with no runId there is nothing to touch.
-			if (target.runId !== undefined) dependencies.terminateParkedRun(target.runId)
-			const result = terminateNeedsInputItem(queue, id, at)
+			if (target.runId !== undefined) dependencies.terminatePausedRun(target.runId)
+			const result = target.status === 'suspended' ? terminateSuspendedItem(queue, id, at) : terminateNeedsInputItem(queue, id, at)
 			if (!result.ok) return toMutationOutcome(result)
 			writeQueueState(result.queue)
+			await tick()
 			return { ok: true, item: toQueueItemView(result.item) }
 		},
 		async answer(id, answer) {
@@ -418,7 +458,7 @@ export function createTaskQueue(dependencies: TaskQueueDependencies): TaskQueueM
 			const runMeta = target.runId !== undefined ? parseRunMetaText(target.runId) : null
 			if (target.runId !== undefined && runMeta !== null && isTerminalRunStatus(runMeta.status) && runMeta.status !== 'needs_clarification') {
 				// The run was terminalized before this answer arrived, so finish its checkpoint/audit cleanup and discard the answer.
-				dependencies.terminateParkedRun(target.runId)
+				dependencies.terminatePausedRun(target.runId)
 				const result = terminateNeedsInputItem(queue, id, dependencies.now())
 				if (!result.ok) return toMutationOutcome(result)
 				writeQueueState(result.queue)
@@ -454,9 +494,32 @@ export function createTaskQueue(dependencies: TaskQueueDependencies): TaskQueueM
 			if (result.ok) writeQueueState(result.queue)
 			return toMutationOutcome(result)
 		},
+		reactivateSuspendedItem(runId) {
+			const result = reactivateSuspendedItem(readQueueState(), runId)
+			if (result.ok) writeQueueState(result.queue)
+			return toMutationOutcome(result)
+		},
+		async terminateSuspendedRun(runId, at) {
+			const result = dependencies.terminatePausedRun(runId)
+			cancelSuspendedItemForRun(runId, at)
+			await tick()
+			return result
+		},
+		discardSuspendedRun(runId, reason) {
+			dependencies.terminatePausedRun(runId, reason)
+			cancelSuspendedItemForRun(runId, dependencies.now())
+			void tick()
+		},
 		tick,
 		async onRunSettled(meta) {
 			const queue = readQueueState()
+			// A suspension is a pause, not a task outcome: map the active item to suspended and stop. The tick is deliberately skipped — the suspended run has priority and nothing may dispatch until it is resumed or terminated.
+			if (meta.status === 'suspended') {
+				const suspendedAt = meta.suspension?.suspendedAt ?? dependencies.now()
+				const suspension = suspendActiveItem(queue, meta.runId, suspendedAt)
+				if (suspension.kind === 'suspended') writeQueueState(suspension.queue)
+				return
+			}
 			const target = queue.items.find((item) => item.status === 'active' && item.runId === meta.runId)
 			// A paused settlement whose answer is still undelivered for this exact run (the checkpoint still names the answered call, or has not yet recorded/consumed the clarification answer id) returns the answered item to waiting so the next tick retries it instead of settling to needs_input and dropping the answer.
 			const pauseState = target !== undefined ? dependencies.readPauseStateById(meta.runId) : null

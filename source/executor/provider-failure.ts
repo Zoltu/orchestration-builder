@@ -135,3 +135,40 @@ export function classifyProviderFailure(signal: ProviderFailureSignal, nowMs: nu
 	if (retryAfterMs !== undefined) classification.retryAfterMs = retryAfterMs
 	return classification
 }
+
+// An in-band SSE error payload can carry the provider's numeric status, textual error type, or billing signature. Classify it like an HTTP error so a mid-stream 402/auth/request-rejection does not become a retryable transport failure.
+export function classifyStreamProviderFailure(payload: Record<string, unknown>): ProviderFailureClassification {
+	const body = JSON.stringify(payload)
+	const errorRecord = asRecord(payload['error'])
+	for (const candidate of [payload, errorRecord]) {
+		if (candidate === undefined) continue
+		for (const field of ['status', 'status_code', 'code']) {
+			const value = candidate[field]
+			if (typeof value === 'number' && Number.isInteger(value)) return classifyProviderFailure({ status: value, errorBody: body, transport: false }, 0)
+			if (typeof value === 'string' && /^\d{3}$/.test(value)) return classifyProviderFailure({ status: Number(value), errorBody: body, transport: false }, 0)
+		}
+	}
+	const textualCode = streamErrorCode(payload)
+	if (textualCode !== undefined) {
+		if (textualCode === 'authentication_error' || textualCode === 'invalid_api_key' || textualCode === 'unauthorized') return classifyProviderFailure({ status: 401, errorBody: body, transport: false }, 0)
+		if (textualCode === 'permission_error' || textualCode === 'forbidden') return classifyProviderFailure({ status: 403, errorBody: body, transport: false }, 0)
+		if (textualCode === 'invalid_request_error' || textualCode === 'bad_request') return classifyProviderFailure({ status: 400, errorBody: body, transport: false }, 0)
+		if (textualCode === 'not_found_error') return classifyProviderFailure({ status: 404, errorBody: body, transport: false }, 0)
+	}
+	if (hasBillingSignature(body)) return classifyProviderFailure({ status: 402, errorBody: body, transport: false }, 0)
+	if (textualCode === 'rate_limit_error') return classifyProviderFailure({ status: 429, errorBody: body, transport: false }, 0)
+	if (textualCode === 'server_error') return classifyProviderFailure({ status: 500, errorBody: body, transport: false }, 0)
+	return classifyProviderFailure({ transport: true }, 0)
+}
+
+function streamErrorCode(payload: Record<string, unknown>): string | undefined {
+	const errorRecord = asRecord(payload['error'])
+	for (const candidate of [payload, errorRecord]) {
+		if (candidate === undefined) continue
+		for (const field of ['type', 'code']) {
+			const value = candidate[field]
+			if (typeof value === 'string' && value.toLowerCase() !== 'error') return value.toLowerCase()
+		}
+	}
+	return undefined
+}

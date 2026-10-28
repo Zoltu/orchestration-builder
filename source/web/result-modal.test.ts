@@ -62,6 +62,11 @@ describe('deriveTerminalResult', () => {
 		expect(deriveTerminalResult({ status: 'running' })).toBeUndefined()
 	})
 
+	test('never derives a terminal result for a suspended run, even when it carries a result-shaped card', () => {
+		expect(deriveTerminalResult({ status: 'suspended', suspension: { category: 'billing', resumePolicy: 'operator', message: 'Top up.', suspendedAt: '2026-01-01T00:02:00.000Z' }, resumable: true })).toBeUndefined()
+		expect(deriveTerminalResult({ status: 'suspended', result: { status: 'success', summary: 'stale card' } })).toBeUndefined()
+	})
+
 	test('returns undefined for a malformed run view', () => {
 		expect(deriveTerminalResult(null)).toBeUndefined()
 		expect(deriveTerminalResult(undefined)).toBeUndefined()

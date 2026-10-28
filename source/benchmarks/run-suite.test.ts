@@ -111,7 +111,7 @@ describe('runSuite', () => {
 		expect(state.readDirs).toEqual(['/suite/alpha', '/suite/beta'])
 		expect(state.runRequests).toHaveLength(2)
 		expect(state.validatedWorkspaces).toEqual(['/tmp/workspaces/alpha', '/tmp/workspaces/beta'])
-		expect(summary.totals).toEqual({ pass: 2, fail: 0, error: 0, total: 2 })
+		expect(summary.totals).toEqual({ pass: 2, fail: 0, error: 0, invalid: 0, total: 2 })
 		expect(summary.results.map((r) => r.status)).toEqual(['pass', 'pass'])
 		expect(state.written).not.toBeNull()
 		const written = state.written
@@ -132,7 +132,7 @@ describe('runSuite', () => {
 
 		const summary = await runSuite(deps, baseOptions)
 
-		expect(summary.totals).toEqual({ pass: 1, fail: 1, error: 0, total: 2 })
+		expect(summary.totals).toEqual({ pass: 1, fail: 1, error: 0, invalid: 0, total: 2 })
 		const alpha = summary.results.find((r) => r.benchmark === 'alpha')
 		expect(alpha?.status).toBe('fail')
 		expect(alpha?.reasons.length).toBeGreaterThan(0)
@@ -143,15 +143,40 @@ describe('runSuite', () => {
 		const { deps, state } = makeFakeDeps({
 			alpha: { evalConfig: evalConfig('coding'), outcome: outcome('alpha', { status: 'error' }) },
 			beta: { evalConfig: evalConfig('coding'), outcome: outcome('beta', { status: 'needs_clarification' }) },
+			gamma: { evalConfig: evalConfig('coding'), outcome: outcome('gamma', { status: 'interrupted' }) },
 		})
 
 		const summary = await runSuite(deps, baseOptions)
 
-		expect(summary.totals).toEqual({ pass: 0, fail: 0, error: 2, total: 2 })
+		expect(summary.totals).toEqual({ pass: 0, fail: 0, error: 3, invalid: 0, total: 3 })
 		expect(summary.results.every((r) => r.status === 'error')).toBe(true)
 		expect(state.validatedWorkspaces).toEqual([])
 		const alpha = summary.results.find((r) => r.benchmark === 'alpha')
 		expect(alpha?.reasons).toContain('run ended with status: error')
+	})
+
+	test('marks a suspended run invalid, keeps its cost, counts it separately, and skips validation', async () => {
+		const { deps, state } = makeFakeDeps({
+			alpha: {
+				evalConfig: evalConfig('coding'),
+				outcome: outcome('alpha', {
+					status: 'suspended',
+					tokens: { promptTokens: 900, completionTokens: 40 },
+					wallTimeSeconds: 17,
+				}),
+			},
+			beta: { evalConfig: evalConfig('coding'), outcome: outcome('beta') },
+		})
+
+		const summary = await runSuite(deps, baseOptions)
+
+		expect(summary.totals).toEqual({ pass: 1, fail: 0, error: 0, invalid: 1, total: 2 })
+		const alpha = summary.results.find((r) => r.benchmark === 'alpha')
+		expect(alpha?.status).toBe('invalid')
+		expect(alpha?.reasons).toEqual(['run suspended by provider outage'])
+		expect(alpha?.tokens).toEqual({ promptTokens: 900, completionTokens: 40 })
+		expect(alpha?.wallTimeSeconds).toBe(17)
+		expect(state.validatedWorkspaces).toEqual(['/tmp/workspaces/beta'])
 	})
 
 	test('passes through tokens and wall time from the runner', async () => {
@@ -202,7 +227,7 @@ describe('runSuite', () => {
 	test('produces an empty summary for an empty suite', async () => {
 		const { deps, state } = makeFakeDeps({})
 		const summary = await runSuite(deps, baseOptions)
-		expect(summary.totals).toEqual({ pass: 0, fail: 0, error: 0, total: 0 })
+		expect(summary.totals).toEqual({ pass: 0, fail: 0, error: 0, invalid: 0, total: 0 })
 		expect(summary.results).toEqual([])
 		expect(state.written?.summary).toBe(summary)
 	})

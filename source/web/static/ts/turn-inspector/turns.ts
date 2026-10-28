@@ -53,7 +53,7 @@ function readMessageCount(value: unknown): number | null {
 	return value
 }
 
-// An `llm_call_start` awaiting its matching `llm_call`, held by role instance id until pairing or a role failure closes the bracket. The same start is also tracked under its role name so a failure event, which carries no roleId, can close the newest open start for that role.
+// An `llm_call_start` awaiting its matching `llm_call`, held by role instance id until pairing or a role failure closes the bracket. The same start is also tracked under its role name so a failure event without a roleId (`llm_unavailable`/`context_budget_exceeded`) can close the newest open start for that role; `provider_failure` carries a roleId and closes the exact instance.
 interface OpenTurnStart {
 	eventIndex: number
 	timestamp: string | null
@@ -76,7 +76,7 @@ function removeOpenStart(openStarts: OpenTurnStart[] | undefined, start: OpenTur
 	if (index >= 0) openStarts.splice(index, 1)
 }
 
-// Derives the turn index from a window of log events. An `llm_call` event becomes a completed entry; an `llm_call_start` becomes an in-flight entry unless a matching `llm_call` for the same role instance follows it, in which case they pair into one completed entry. Matching is LIFO per roleId so the same-name nesting the executor allows pairs like brackets. An `llm_unavailable` or `context_budget_exceeded` event carries only the role name and closes that role's newest open start instead of leaving it matched to nothing. Entries come back in chronological order with 1-based `turnNumber`s; turn events without a roleId are malformed and skipped.
+// Derives the turn index from a window of log events. An `llm_call` event becomes a completed entry; an `llm_call_start` becomes an in-flight entry unless a matching `llm_call` for the same role instance follows it, in which case they pair into one completed entry. Matching is LIFO per roleId so the same-name nesting the executor allows pairs like brackets. A `provider_failure` carries a roleId and closes that exact instance's newest open start; an `llm_unavailable` or `context_budget_exceeded` carries only the role name and closes that role's newest open start. Either way the failed turn is not left matched to nothing. Entries come back in chronological order with 1-based `turnNumber`s; turn events without a roleId are malformed and skipped.
 export function buildTurnIndex(logEvents: unknown): TurnEntry[] {
 	if (!Array.isArray(logEvents)) return []
 	const openStartsByRoleId = new Map<string, OpenTurnStart[]>()
@@ -85,14 +85,15 @@ export function buildTurnIndex(logEvents: unknown): TurnEntry[] {
 	for (const event of logEvents) {
 		if (!isObject(event)) continue
 		const type = event['type']
-		if (type !== 'llm_call' && type !== 'llm_call_start' && type !== 'llm_unavailable' && type !== 'context_budget_exceeded') continue
+		if (type !== 'llm_call' && type !== 'llm_call_start' && type !== 'llm_unavailable' && type !== 'context_budget_exceeded' && type !== 'provider_failure') continue
 		const payload = event['payload']
 		if (!isObject(payload)) continue
 		const role = typeof payload['role'] === 'string' && payload['role'] !== '' ? payload['role'] : null
 		if (role === null) continue
-		if (type === 'llm_unavailable' || type === 'context_budget_exceeded') {
-			const failed = openStartsByRole.get(role)
-			const start = failed !== undefined && failed.length > 0 ? failed.pop() : undefined
+		if (type === 'llm_unavailable' || type === 'context_budget_exceeded' || type === 'provider_failure') {
+			const failureRoleId = typeof payload['roleId'] === 'string' && payload['roleId'] !== '' ? payload['roleId'] : null
+			const open = failureRoleId !== null ? openStartsByRoleId.get(failureRoleId) : openStartsByRole.get(role)
+			const start = open !== undefined && open.length > 0 ? open.pop() : undefined
 			if (start !== undefined) removeOpenStart(openStartsByRoleId.get(start.roleId), start)
 			continue
 		}

@@ -1,13 +1,13 @@
 import type { PendingInvocation, RunCheckpoint } from './checkpoint.js'
 import { logEvent, type EngineContext, type EngineDependencies, type RunRole, type SuspendedTurn } from './engine-state.js'
+import type { RoleOutcome } from './types.js'
 import { roleCallId } from './invocation.js'
 import type { LoadedGuild } from './loader.js'
 import type { ParkedAnswer } from './park-state.js'
 import { planStaleInvocationTerminals } from './stale-invocations.js'
 import { suspendsChild } from './suspending-tools.js'
-import type { ResultCard } from './types.js'
 
-// What a resume injects into the re-entered leaf: the framed note of an error resume and/or the queue's answer to a parked ask.
+// What a resume injects into the re-entered leaf: the framed note of an error-or-suspended resume and/or the queue's answer to a parked ask.
 export interface ResumeRoleStackOptions {
 	resumeNote?: string
 	parkedAnswer?: ParkedAnswer
@@ -20,7 +20,7 @@ interface RestoredPending {
 }
 
 // A pending record whose child is still below it (or whose child card was already recorded) is a child suspension; everything else on the leaf is an ordinary invocation to reconcile. A leaf record with no child below it covers the crash after the pending checkpoint but before the child registered, so it is replayed like any other pending invocation.
-function restorePending(frame: PendingInvocation, index: number, frameCount: number, resolveChildCard: () => Promise<ResultCard>): RestoredPending {
+function restorePending(frame: PendingInvocation, index: number, frameCount: number, resolveChildCard: () => Promise<RoleOutcome>): RestoredPending {
 	const call = frame.toolCalls[frame.index]
 	const childCall = call !== undefined && suspendsChild(call.function.name)
 	const childStillBelow = index < frameCount - 1
@@ -32,7 +32,7 @@ function restorePending(frame: PendingInvocation, index: number, frameCount: num
 				childIndex: frame.index,
 				callId: frame.callId,
 				parentCallId: frame.parentCallId,
-				resolveChildCard: recordedCard !== undefined ? () => Promise.resolve(recordedCard) : resolveChildCard,
+				resolveChildCard: recordedCard !== undefined ? () => Promise.resolve({ kind: 'card', card: recordedCard }) : resolveChildCard,
 			},
 		}
 	}
@@ -41,8 +41,8 @@ function restorePending(frame: PendingInvocation, index: number, frameCount: num
 
 // The resume driver: re-enters the checkpoint's role stack, letting the depth-first traversal continue. A frame with a pending child suspension resolves its child card lazily from inside the suspended turn — either the recorded card, or the next frame's own resume — so the stack re-forms in the same root-first order the live recursion produces. A leaf with an ordinary pending invocation re-enters at its loop top and reconciles it there, where the dispatch context exists.
 // runRole is threaded in by the engine so this module can drive role turns without importing the turn loop at runtime (the executor composes the two).
-// resumeNote rides an explicit resume of an errored run and is carried only by the leaf frame — the role whose loop entry precedes the run's first post-resume LLM call. parkedAnswer likewise rides only the leaf, the role that parked. Both are undefined for boot reconciliation.
-export async function resumeRoleStack(runRole: RunRole, deps: EngineDependencies, loadedGuild: LoadedGuild, checkpoint: RunCheckpoint, options?: ResumeRoleStackOptions): Promise<ResultCard> {
+// resumeNote rides an explicit resume of an errored or suspended run and is carried only by the leaf frame — the role whose loop entry precedes the run's first post-resume LLM call. parkedAnswer likewise rides only the leaf, the role that parked. Both are undefined for boot reconciliation.
+export async function resumeRoleStack(runRole: RunRole, deps: EngineDependencies, loadedGuild: LoadedGuild, checkpoint: RunCheckpoint, options?: ResumeRoleStackOptions): Promise<RoleOutcome> {
 	const resumeNote = options?.resumeNote
 	const parkedAnswer = options?.parkedAnswer
 	const explicitResume = options?.explicitResume
@@ -69,7 +69,7 @@ export async function resumeRoleStack(runRole: RunRole, deps: EngineDependencies
 	}
 	// The run's logging level is run-scoped and rides the entry frame alone (see checkpoint.ts serializeFrame); every resumed context re-threads it so engine-side readers — the inquiry briefing's run-log note — see the level no matter which frame re-enters.
 	const runLogLevel = checkpoint.frames[0]?.logLevel
-	const resumeAt = async (index: number): Promise<ResultCard> => {
+	const resumeAt = async (index: number): Promise<RoleOutcome> => {
 		const frame = checkpoint.frames[index]
 		if (frame === undefined) throw new Error(`resumeRoleStack: frame ${index} missing from a checkpoint with ${checkpoint.frames.length} frames`)
 		const restored = frame.pending !== undefined
@@ -96,6 +96,7 @@ export async function resumeRoleStack(runRole: RunRole, deps: EngineDependencies
 			...(explicitResume === true ? { explicitResume: true } : {}),
 			...(restored.suspendedTurn !== undefined ? { suspendedTurn: restored.suspendedTurn } : {}),
 			...(restored.pendingInvocation !== undefined ? { pendingInvocation: restored.pendingInvocation } : {}),
+			...(index === checkpoint.frames.length - 1 && checkpoint.pendingInterlude !== undefined ? { pendingInterlude: checkpoint.pendingInterlude } : {}),
 		})
 	}
 	return resumeAt(0)

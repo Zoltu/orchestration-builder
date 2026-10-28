@@ -2,7 +2,7 @@ import * as fs from 'node:fs'
 import * as path from 'node:path'
 import { ValidationError } from './errors.js'
 import type { DeploymentConfig, DeploymentFileConfig, GuildConfig, ToolManifest } from './types.js'
-import { validateDeploymentFileConfig, validateDeploymentRoleReferences, validateGuildConfig, validateToolManifest } from './validation.js'
+import { validateDeploymentFileConfig, validateDeploymentRoleReferences, validateGuildConfig, validateHandlerRolesAreReadOnly, validateToolManifest } from './validation.js'
 
 // What the loader reads from the files (role prompts composed with their declared concepts): the deployment is still file-shaped, so model.name and model.contextWindow may be absent and the consumer completes them (resolveDeploymentConfig) into a LoadedGuild before the executor sees them.
 export interface LoadedGuildFiles {
@@ -83,6 +83,7 @@ export function createGuildLoader(deploymentFilePath: string): LoadGuild {
 		validateDeploymentFileConfig(deployment)
 		const roleNames = new Set(Object.keys(config.roles))
 		validateDeploymentRoleReferences(deployment, roleNames)
+		validateHandlerRolesAreReadOnly(config.roles, deployment.executor)
 		const prompts: Record<string, string> = {}
 		for (const [roleName, role] of Object.entries(config.roles)) {
 			const promptPath = path.join(guildDir, role.systemPrompt)

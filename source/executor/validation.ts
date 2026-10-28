@@ -1,4 +1,5 @@
 import { isErrorKind, ValidationError } from './errors.js'
+import { isSuspendedStatus } from './suspension.js'
 import { isLogLevel } from './log-level.js'
 import { isRunIdShape } from './run-id.js'
 import type {
@@ -17,6 +18,8 @@ import type {
 	ResultCard,
 	RoleDefinition,
 	RunMeta,
+	SuspensionCategory,
+	SuspensionRecord,
 	TerminalRunStatus,
 	ToolManifest,
 	ToolParameter,
@@ -105,7 +108,31 @@ function isHumanFacingText(value: unknown): value is HumanFacingText {
 
 const resultCardStatuses: readonly ResultCard['status'][] = ['success', 'error', 'needs_clarification']
 
-const runMetaStatuses: readonly RunMeta['status'][] = ['running', 'success', 'error', 'needs_clarification', 'interrupted']
+const runMetaStatuses: readonly RunMeta['status'][] = ['running', 'suspended', 'success', 'error', 'needs_clarification', 'interrupted']
+
+const suspensionCategories: readonly SuspensionCategory[] = ['transient', 'billing', 'auth', 'request_rejected', 'unknown']
+
+function isIsoTimestamp(value: unknown): value is string {
+	if (!isString(value)) return false
+	if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$/.test(value)) return false
+	return !Number.isNaN(Date.parse(value))
+}
+
+export function isSuspensionRecord(value: unknown): value is SuspensionRecord {
+	if (!isObject(value)) return false
+	if (!isString(value.category) || !suspensionCategories.some((category) => category === value.category)) return false
+	if (value.resumePolicy !== 'auto' && value.resumePolicy !== 'operator') return false
+	// Only a transient failure may auto-resume; an operator policy is valid for every category, including a transient suspension downgraded after the automatic-attempt cap.
+	if (value.resumePolicy === 'auto' && value.category !== 'transient') return false
+	if (!isString(value.message) || value.message === '') return false
+	if (!isIsoTimestamp(value.suspendedAt)) return false
+	if (value.autoResumeAfter !== undefined) {
+		if (value.resumePolicy !== 'auto' || !isIsoTimestamp(value.autoResumeAfter)) return false
+		if (Date.parse(value.autoResumeAfter) < Date.parse(value.suspendedAt)) return false
+	}
+	if (value.resumeAttempts !== undefined && !isNonNegativeInteger(value.resumeAttempts)) return false
+	return true
+}
 
 // A continuation must anchor to a settled prior run: 'running' means the prior run is still in flight (or the service died mid-run without reconciliation), and continuing it would brief the new run from an outcome that does not exist yet.
 export const TERMINAL_RUN_STATUSES: readonly TerminalRunStatus[] = ['success', 'error', 'needs_clarification', 'interrupted']
@@ -203,6 +230,12 @@ export function isRunMeta(value: unknown): value is RunMeta {
 		if (!isObject(value.error)) return false
 		if (!isErrorKind(value.error.kind)) return false
 		if (!isString(value.error.message)) return false
+	}
+	if (isSuspendedStatus(value.status)) {
+		if (!isSuspensionRecord(value.suspension)) return false
+		if (value.endTime !== undefined || value.result !== undefined || value.error !== undefined) return false
+	} else if (value.suspension !== undefined) {
+		return false
 	}
 	return true
 }
@@ -456,5 +489,35 @@ export function validateToolManifest(value: unknown, expectedPropertyTypes?: Rea
 	}
 	if (value.humanWorkingLabel !== undefined && !isHumanFacingText(value.humanWorkingLabel)) {
 		throw new ValidationError('humanWorkingLabel', 'expected an object with detailed (a non-empty string array), optional whimsical and friendly (non-empty string arrays)')
+	}
+}
+
+// Handler roles are interlude observers, not workers: a provider suspension replays the interlude from its pre-interlude checkpoint, so any tool that mutates the workspace, repository metadata, durable run bookkeeping, or spawns arbitrary (possibly writing) roles could apply its effect twice. Conversation, plan, and interrupt tools remain allowed. git_set_base is included because it mutates durable run bookkeeping even though it does not touch the working tree.
+const HANDLER_FORBIDDEN_TOOL_NAMES: ReadonlySet<string> = new Set([
+	'write_file',
+	'run_shell',
+	'typecheck',
+	'test',
+	'git_init',
+	'git_commit',
+	'git_branch',
+	'git_set_base',
+	'agent',
+	'continue_agent',
+])
+export function validateHandlerRolesAreReadOnly(roles: GuildConfig['roles'], executor: ExecutorConfig): void {
+	const checks: Array<{ path: string; roleName: string | undefined }> = [
+		{ path: 'executor.contextHandlerRole', roleName: executor.contextHandlerRole },
+		{ path: 'executor.inquiryHandlerRole', roleName: executor.inquiryHandlerRole },
+		{ path: 'executor.interruptTriggers.handlerRole', roleName: executor.interruptTriggers?.handlerRole },
+	]
+	for (const check of checks) {
+		if (check.roleName === undefined) continue
+		const role = roles[check.roleName]
+		if (role === undefined) continue
+		for (const toolName of role.tools) {
+			if (!HANDLER_FORBIDDEN_TOOL_NAMES.has(toolName)) continue
+			throw new ValidationError(check.path, `handler role "${check.roleName}" must not hold handler-forbidden tool "${toolName}"`)
+		}
 	}
 }

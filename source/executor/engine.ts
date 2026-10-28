@@ -1,5 +1,5 @@
 import { createResultCard, createToolError, isErrorKind } from './errors.js'
-import type { DiscardedRetrySpend, LlmUsage, LlmUsagePayload, LogEvent, Message, ResultCard, RoleDefinition, ToolCall, ToolManifest, ToolResult } from './types.js'
+import type { DiscardedRetrySpend, LlmUsage, LlmUsagePayload, LogEvent, Message, ResultCard, RoleDefinition, RoleOutcome, SuspensionRecord, ToolCall, ToolManifest, ToolResult } from './types.js'
 import { isObject, isResultCard, safeJsonParse } from './validation.js'
 import { checkGlobalBudgets, checkRoleBudgets } from './budgets.js'
 import { buildInitialHistory, createContextManager, DEFAULT_PROTECTED_PREFIX_LENGTH, truncateToolOutput, type ContextManager } from './context/index.js'
@@ -13,7 +13,8 @@ import type { RoleRegistryEntry } from './role-registry.js'
 import { buildContinuationHistory, selectContinuableChild } from './role-snapshot.js'
 import type { RunToolScope, ToolPlatform } from './tool-platform-port.js'
 import { parseFinishArguments } from './tools/builtin-tools.js'
-import type { PendingInvocation } from './checkpoint.js'
+import type { PendingInterlude, PendingInvocation } from './checkpoint.js'
+import { suspensionFromFailure } from './suspension.js'
 
 interface DispatchContext {
 	toolPlatform: ToolPlatform
@@ -26,6 +27,7 @@ type LlmResultHandling =
 	| { kind: 'continue' }
 	| { kind: 'finished'; card: ResultCard }
 	| { kind: 'tool_calls'; toolCalls: ToolCall[] }
+	| { kind: 'suspended'; suspension: SuspensionRecord }
 
 type SuccessfulLlmCall = Extract<LlmCallResult, { kind: 'success' }>
 
@@ -155,8 +157,25 @@ function handleLlmResult(
 	deps: EngineDependencies,
 	context: EngineContext,
 	contextManager: ContextManager,
+	roleId: string,
 ): LlmResultHandling {
 	const config = context.loadedGuild.deployment.executor
+	if (llmResult.kind === 'provider_failure') {
+		// The provider body is log-only diagnostic data. The suspension record deliberately carries the platform-authored category copy instead.
+		logEvent(deps.appendLog, 'provider_failure', {
+			role: context.roleName,
+			roleId,
+			category: llmResult.category,
+			...(llmResult.httpStatus !== undefined ? { httpStatus: llmResult.httpStatus } : {}),
+			attempts: llmResult.attempts,
+			partialOutput: llmResult.partialOutput,
+			...(llmResult.detail !== undefined ? { detail: llmResult.detail } : { message: llmResult.message }),
+		})
+		const suspension = suspensionFromFailure(llmResult, new Date().toISOString(), deps.priorSuspension)
+		deps.checkpointRecorder.setSuspension(suspension)
+		return { kind: 'suspended', suspension }
+	}
+
 	if (llmResult.kind === 'llm_unavailable') {
 		logEvent(deps.appendLog, 'llm_unavailable', { role: context.roleName, message: llmResult.message })
 		return {
@@ -283,7 +302,7 @@ function isParkedAskResult(result: ToolResult): boolean {
 }
 
 // Reconciles the invocation a checkpoint caught mid-dispatch. If its terminal is already in the log, the result is appended to the restored history without re-dispatching or rewriting the terminal; otherwise the call is replayed under the recorded id. A pending ask follows the same rule with human_answer as its terminal, re-asking when no answer was durable.
-async function reconcilePendingInvocation(deps: EngineDependencies, context: EngineContext, roleState: RoleState, registryEntry: RoleRegistryEntry, dispatchCtx: DispatchContext, pending: PendingInvocation, resumeNote: string | undefined): Promise<ResultCard | null> {
+async function reconcilePendingInvocation(deps: EngineDependencies, context: EngineContext, roleState: RoleState, registryEntry: RoleRegistryEntry, dispatchCtx: DispatchContext, pending: PendingInvocation, resumeNote: string | undefined): Promise<RoleOutcome | null> {
 	const index = pending.index
 	const toolCall = pending.toolCalls[index]
 	if (toolCall === undefined) throw new Error(`resume: pending invocation index ${index} is out of range in a validated checkpoint`)
@@ -301,7 +320,9 @@ async function reconcilePendingInvocation(deps: EngineDependencies, context: Eng
 		finalCard = recordToolResult(deps, dispatchCtx.toolPlatform, roleState, context.roleName, registryEntry.roleId, dispatchCtx.maxToolOutputChars, toolCall, result, { invocation, replayed: true })
 	} else {
 		if (!isAsk) deps.invocationJournal.toolStarted(invocation, context.roleName)
-		const result = await dispatchCtx.toolPlatform.dispatch(dispatchCtx.roleDefinition, dispatchCtx.scope, toolCall, invocation)
+		const toolOutcome = await dispatchCtx.toolPlatform.dispatch(dispatchCtx.roleDefinition, dispatchCtx.scope, toolCall, invocation)
+		if (toolOutcome.kind === 'suspended') return toolOutcome
+		const result = toolOutcome.result
 		if (isAsk) {
 			if (result.kind === 'success') {
 				deps.invocationJournal.markStarted(callId)
@@ -323,7 +344,7 @@ async function reconcilePendingInvocation(deps: EngineDependencies, context: Eng
 		// The replay must leave a fully answered turn on disk, even when no note is being delivered; otherwise a later resume sees the finish and later calls unanswered.
 		if (hasRemainingCalls) closeUnexecutedCalls(deps, roleState, context, registryEntry, dispatchCtx, pending.toolCalls, index + 1)
 		deps.checkpointRecorder.write()
-		if (resumeNote === undefined) return finalCard
+		if (resumeNote === undefined) return { kind: 'card', card: finalCard }
 		// A resume delivering an answer or operator note must proceed to a fresh LLM turn, not return the old card.
 		roleState.history.push({ role: 'user', content: resumeNote })
 		return null
@@ -334,7 +355,7 @@ async function reconcilePendingInvocation(deps: EngineDependencies, context: Eng
 		? await dispatchToolCallSequence(deps, context, roleState, registryEntry, dispatchCtx, pending.toolCalls, index + 1)
 		: null
 	// The note lands only after every remaining result, never between an assistant tool_calls message and its tool results. A remaining final card that is a completed finish still leaves a closed turn, so the note can follow it; any other early terminal is skipped.
-	if (resumeNote !== undefined && (remainingCard === null || completedFinishCard(roleState.history) !== null)) roleState.history.push({ role: 'user', content: resumeNote })
+	if (resumeNote !== undefined && (remainingCard === null || (remainingCard.kind === 'card' && completedFinishCard(roleState.history) !== null))) roleState.history.push({ role: 'user', content: resumeNote })
 	return remainingCard
 }
 
@@ -458,7 +479,7 @@ function deliverParkedAnswer(deps: EngineDependencies, roleState: RoleState, par
 }
 
 // Continues the parked assistant turn after the answer: the calls after ask_human in the same batched turn dispatch exactly as the blocking path would, and a park among them re-parks normally.
-async function continueParkedTurn(deps: EngineDependencies, context: EngineContext, roleState: RoleState, registryEntry: RoleRegistryEntry, dispatchCtx: DispatchContext, toolCallId: string): Promise<ResultCard | null> {
+async function continueParkedTurn(deps: EngineDependencies, context: EngineContext, roleState: RoleState, registryEntry: RoleRegistryEntry, dispatchCtx: DispatchContext, toolCallId: string): Promise<RoleOutcome | null> {
 	const history = roleState.history
 	for (let index = history.length - 1; index >= 0; index--) {
 		const message = history[index]
@@ -471,15 +492,15 @@ async function continueParkedTurn(deps: EngineDependencies, context: EngineConte
 	throw new Error(`continueParkedTurn: no assistant message carries parked call ${toolCallId}`)
 }
 
-export async function runRole(deps: EngineDependencies, context: EngineContext, resumed?: ResumedRole, seeded?: SeededRole): Promise<ResultCard> {
+export async function runRole(deps: EngineDependencies, context: EngineContext, resumed?: ResumedRole, seeded?: SeededRole): Promise<RoleOutcome> {
 	const guild = context.loadedGuild
 	const roleDefinition = guild.config.roles[context.roleName]
 
 	if (roleDefinition === undefined) {
 		logEvent(deps.appendLog, 'role_not_found', { roleName: context.roleName })
-		return createResultCard('error', `Unknown role: ${context.roleName}`, {
+		return { kind: 'card', card: createResultCard('error', `Unknown role: ${context.roleName}`, {
 			error: createToolError('unknown_tool', `Unknown role: ${context.roleName}`),
-		})
+		}) }
 	}
 
 	const systemPrompt = guild.prompts[context.roleName] ?? ''
@@ -549,22 +570,22 @@ export async function runRole(deps: EngineDependencies, context: EngineContext, 
 	}
 
 	// The shared child-spawn body behind both agent and continue_agent: budget and role checks, the agent_call edge, the child turn, and the pending-card checkpoint. The two tools differ only in the seed the child starts from.
-	const runChild = async (childRoleName: string, childTask: string, seed?: SeededRole): Promise<ResultCard> => {
+	const runChild = async (childRoleName: string, childTask: string, seed?: SeededRole): Promise<RoleOutcome> => {
 		const depthCheck = checkGlobalBudgets(context.depth + 1, guild.deployment.executor)
 		if (depthCheck !== null) {
 			logEvent(deps.appendLog, 'depth_exceeded', { parent: context.roleName, child: childRoleName, depth: context.depth + 1, error: depthCheck })
-			return createResultCard('error', 'Depth budget exceeded', { error: depthCheck })
+			return { kind: 'card', card: createResultCard('error', 'Depth budget exceeded', { error: depthCheck }) }
 		}
 		const childDefinition = guild.config.roles[childRoleName]
 		if (childDefinition === undefined) {
 			logEvent(deps.appendLog, 'role_not_found', { parent: context.roleName, roleName: childRoleName })
-			return createResultCard('error', `Unknown role: ${childRoleName}`, {
+			return { kind: 'card', card: createResultCard('error', `Unknown role: ${childRoleName}`, {
 				error: createToolError('unknown_tool', `Unknown role: ${childRoleName}`),
-			})
+			}) }
 		}
 		// agent_call is a diagnostic parent→child edge with depth, logged before the child runs; it carries no invocation ids because role_start/role_finished and the tool lifecycle are the authoritative identified events.
 		logEvent(deps.appendLog, 'agent_call', { parent: context.roleName, child: childRoleName, depth: context.depth + 1 })
-		// A delegated child is parented to this role instance's invocation, but it keeps the handler mark: the whole handler subtree is atomic with respect to checkpoint writes and must not park.
+		// A delegated child is parented to this role instance's invocation, but it keeps the handler mark: the whole handler subtree is atomic with respect to ordinary checkpoint writes and must not park; a provider suspension writes a dedicated suspension checkpoint that excludes handler frames.
 		const delegatedContext: EngineContext = {
 			...context,
 			depth: context.depth + 1,
@@ -574,11 +595,14 @@ export async function runRole(deps: EngineDependencies, context: EngineContext, 
 			parentRoleId: registryEntry.roleId,
 			parentCallId: roleCallId(registryEntry.roleId),
 		}
-		const childCard = await runRole(deps, delegatedContext, undefined, seed)
+		const childOutcome = await runRole(deps, delegatedContext, undefined, seed)
+		// A suspended child has no card to deliver: return the suspension without recording a child card or writing a checkpoint, so the child frame remains the replay point.
+		if (childOutcome.kind === 'suspended') return childOutcome
 		// The child is done: record its card on this frame's pending suspension and checkpoint, so a restart here resumes by delivering the recorded card instead of re-running the child. The card is delivered to the conversation by recordToolResult after this handler returns.
+		const childCard = childOutcome.card
 		deps.checkpointRecorder.setPendingChildCard(registryEntry.roleId, childCard)
 		deps.checkpointRecorder.write()
-		return childCard
+		return childOutcome
 	}
 
 	const runScope: RunToolScope = {
@@ -591,12 +615,12 @@ export async function runRole(deps: EngineDependencies, context: EngineContext, 
 			})
 			if (!resolution.ok) {
 				const message = resolution.reason === 'unknown_id' ? `No finished child of this role with instance id ${childRoleId}` : `No finished child named ${childRoleName} to continue`
-				return createResultCard('error', message, { error: createToolError('invalid_arguments', message) })
+				return { kind: 'card', card: createResultCard('error', message, { error: createToolError('invalid_arguments', message) }) }
 			}
 			const snapshot = deps.roleSnapshots.read(resolution.roleId)
 			if (snapshot === null) {
 				const message = `Finished child snapshot ${resolution.roleId} could not be read`
-				return createResultCard('error', message, { error: createToolError('unavailable', message) })
+				return { kind: 'card', card: createResultCard('error', message, { error: createToolError('unavailable', message) }) }
 			}
 			const history = buildContinuationHistory(snapshot.history, comment)
 			return runChild(snapshot.roleName, snapshot.task, { history, continuedFrom: snapshot.roleId })
@@ -619,7 +643,14 @@ export async function runRole(deps: EngineDependencies, context: EngineContext, 
 		maxToolOutputChars: guild.deployment.contextPolicy.maxToolOutputChars,
 	}
 
-	const finalCard = await executeRoleLoop(deps, context, roleState, registryEntry, allowedToolsManifests, dispatchCtx, resumed?.suspendedTurn, resumed?.resumeNote, resumed?.parkedAnswer, resumed?.pendingInvocation, resumed?.explicitResume)
+	const outcome = await executeRoleLoop(deps, context, roleState, registryEntry, allowedToolsManifests, dispatchCtx, resumed?.suspendedTurn, resumed?.resumeNote, resumed?.parkedAnswer, resumed?.pendingInvocation, resumed?.pendingInterlude, resumed?.explicitResume)
+	// A suspension is not a role terminal: the frame stays registered conceptually and the on-disk checkpoint is the replay point, so no final card, role_finished, or child snapshot may be written for it. The suspension write persists the current registry counter (past any failed handler subtree) and the pending interlude.
+	if (outcome.kind === 'suspended') {
+		deps.checkpointRecorder.setPendingOperatorRequests(deps.interruptQueue.pendingRequests())
+		if (!deps.checkpointRecorder.writeSuspension()) throw new Error('runRole: could not write the suspension checkpoint')
+		return outcome
+	}
+	const finalCard = outcome.card
 	// A finish terminal ends the turn; its dispatch closes any later calls and persists the fully answered turn. Write once more here when the card is a durable terminal, so an error or clarification resume sees a completed conversation. The parked path is excluded: its frozen checkpoint is captured at the park moment and must not be overwritten.
 	if (context.depth === 0 && (finalCard.status === 'error' || finalCard.status === 'needs_clarification') && deps.parkTracker.parkedAsk === undefined && completedFinishCard(roleState.history) !== null) deps.checkpointRecorder.write()
 	deps.roleRegistry.unregister(registryEntry.roleId)
@@ -644,7 +675,7 @@ export async function runRole(deps: EngineDependencies, context: EngineContext, 
 			history: roleState.history,
 		})
 	}
-	return finalCard
+	return outcome
 }
 
 // Dispatches a turn's tool calls in order, tracking child-spawning suspensions on the checkpoint recorder so a checkpoint taken while a child runs captures where this role resumes. Shared by the live turn path (starting at 0) and the resumed-suspension path (starting after the child-spawning call, whose result the resume already recorded).
@@ -656,7 +687,7 @@ async function dispatchToolCallSequence(
 	dispatchCtx: DispatchContext,
 	toolCalls: ToolCall[],
 	startIndex: number,
-): Promise<ResultCard | null> {
+): Promise<RoleOutcome | null> {
 	for (let index = startIndex; index < toolCalls.length; index++) {
 		const toolCall = toolCalls[index]
 		if (toolCall === undefined) continue
@@ -665,13 +696,13 @@ async function dispatchToolCallSequence(
 			// The just-finished call is already in history; the parked checkpoint is the durable boundary and must not carry a pending marker.
 			deps.checkpointRecorder.setPending(registryEntry.roleId, undefined)
 			captureParkCheckpoint(deps, registryEntry.roleId)
-			return parkCard(deps.parkTracker.parkedQuestion)
+			return { kind: 'card', card: parkCard(deps.parkTracker.parkedQuestion) }
 		}
 		// Unknown and not-allowed names keep today's diagnostic-only logging and are not invocations, so they are rejected before any pending record or start event exists.
 		const invalid = dispatchCtx.toolPlatform.validateCall(dispatchCtx.roleDefinition, dispatchCtx.scope, toolCall)
 		if (invalid !== null) {
 			const finalCard = recordToolResult(deps, dispatchCtx.toolPlatform, roleState, context.roleName, registryEntry.roleId, dispatchCtx.maxToolOutputChars, toolCall, invalid, {})
-			if (finalCard !== null) return finalCard
+			if (finalCard !== null) return { kind: 'card', card: finalCard }
 			if (index + 1 >= toolCalls.length) {
 				deps.checkpointRecorder.setPending(registryEntry.roleId, undefined)
 				deps.checkpointRecorder.write()
@@ -685,7 +716,9 @@ async function dispatchToolCallSequence(
 		deps.checkpointRecorder.setPending(registryEntry.roleId, pending)
 		deps.checkpointRecorder.write()
 		if (!isAsk) deps.invocationJournal.toolStarted(invocation, context.roleName)
-		const result = await dispatchCtx.toolPlatform.dispatch(dispatchCtx.roleDefinition, dispatchCtx.scope, toolCall, invocation)
+		const toolOutcome = await dispatchCtx.toolPlatform.dispatch(dispatchCtx.roleDefinition, dispatchCtx.scope, toolCall, invocation)
+		if (toolOutcome.kind === 'suspended') return toolOutcome
+		const result = toolOutcome.result
 		if (isAsk) {
 			if (result.kind === 'success') {
 				// The ask handler/backend wrote ask_human (and later human_answer); mirror the lifecycle into the journal so a later duplicate cannot re-close it.
@@ -704,7 +737,7 @@ async function dispatchToolCallSequence(
 			if (hasLaterCalls) closeUnexecutedCalls(deps, roleState, context, registryEntry, dispatchCtx, toolCalls, index + 1)
 			deps.checkpointRecorder.setPending(registryEntry.roleId, undefined)
 			deps.checkpointRecorder.write()
-			return finalCard
+			return { kind: 'card', card: finalCard }
 		}
 		if (!hasLaterCalls) {
 			deps.checkpointRecorder.setPending(registryEntry.roleId, undefined)
@@ -716,10 +749,12 @@ async function dispatchToolCallSequence(
 
 // Completes a resumed role's suspended turn: the child card is resolved (re-running the child frame's resume when the checkpoint has no recorded card), checkpointed onto the pending suspension exactly as the live role_finished path does, and recorded as the child-spawning call's tool result — the agent_call event and the child's events are already in the log from the live dispatch. The turn's remaining tool calls then dispatch normally.
 // resumeNote is delivered only after every remaining tool result of the batch, so it can never land between an assistant tool_calls message and its results. A remaining completed finish still leaves a closed turn, so the note follows it; any other early terminal is skipped. Undefined for boot reconciliation.
-async function completeSuspendedTurn(deps: EngineDependencies, context: EngineContext, roleState: RoleState, registryEntry: RoleRegistryEntry, dispatchCtx: DispatchContext, suspendedTurn: SuspendedTurn, resumeNote?: string): Promise<ResultCard | null> {
+async function completeSuspendedTurn(deps: EngineDependencies, context: EngineContext, roleState: RoleState, registryEntry: RoleRegistryEntry, dispatchCtx: DispatchContext, suspendedTurn: SuspendedTurn, resumeNote?: string): Promise<RoleOutcome | null> {
 	const childCall = suspendedTurn.toolCalls[suspendedTurn.childIndex]
 	if (childCall === undefined) throw new Error(`completeSuspendedTurn: childIndex ${suspendedTurn.childIndex} out of range in a validated checkpoint`)
-	const childCard = await suspendedTurn.resolveChildCard()
+	const childOutcome = await suspendedTurn.resolveChildCard()
+	if (childOutcome.kind === 'suspended') return childOutcome
+	const childCard = childOutcome.card
 	deps.checkpointRecorder.setPendingChildCard(registryEntry.roleId, childCard)
 	deps.checkpointRecorder.write()
 	const invocation = deps.invocationJournal.adoptToolCall(childCall, suspendedTurn.callId, suspendedTurn.parentCallId)
@@ -727,11 +762,11 @@ async function completeSuspendedTurn(deps: EngineDependencies, context: EngineCo
 	recordToolResult(deps, dispatchCtx.toolPlatform, roleState, context.roleName, registryEntry.roleId, dispatchCtx.maxToolOutputChars, childCall, { kind: 'success', data: childCard }, { invocation })
 	deps.checkpointRecorder.setPending(registryEntry.roleId, undefined)
 	const remainingCard = await dispatchToolCallSequence(deps, context, roleState, registryEntry, dispatchCtx, suspendedTurn.toolCalls, suspendedTurn.childIndex + 1)
-	if (resumeNote !== undefined && (remainingCard === null || completedFinishCard(roleState.history) !== null)) roleState.history.push({ role: 'user', content: resumeNote })
+	if (resumeNote !== undefined && (remainingCard === null || (remainingCard.kind === 'card' && completedFinishCard(roleState.history) !== null))) roleState.history.push({ role: 'user', content: resumeNote })
 	return remainingCard
 }
 
-// The role's turn loop, extracted from runRole so every exit emits exactly one role_finished at the runRole call site, guaranteeing the role_start/role_finished pairing regardless of which budget or finish path terminates the role.
+// The role's turn loop, extracted from runRole so every card exit emits exactly one role_finished at the runRole call site, guaranteeing the role_start/role_finished pairing regardless of which budget or finish path terminates the role. A suspension is not a terminal and emits no role_finished.
 async function executeRoleLoop(
 	deps: EngineDependencies,
 	context: EngineContext,
@@ -743,19 +778,22 @@ async function executeRoleLoop(
 	resumeNote?: string,
 	parkedAnswer?: ParkedAnswer,
 	pendingInvocation?: PendingInvocation,
+	pendingInterlude?: PendingInterlude,
 	explicitResume?: boolean,
-): Promise<ResultCard> {
+): Promise<RoleOutcome> {
 	const config = context.loadedGuild.deployment.executor
 	const contextManager = createContextManager(context, {
 		appendLog: deps.appendLog,
 		contextPressureTracker: deps.contextPressureTracker,
 		invocationJournal: deps.invocationJournal,
+		checkpointRecorder: deps.checkpointRecorder,
+		interruptQueue: deps.interruptQueue,
 		runRole: (handlerContext) => runRole(deps, handlerContext),
 	})
 	// A fully answered finish turn is already the role's outcome. A boot resume returns it without another LLM call; a resume carrying a note or answer must continue instead, because that note is appended to history before this point (or injected by the reconciliation below).
 	if (pendingInvocation === undefined && suspendedTurn === undefined && parkedAnswer === undefined && resumeNote === undefined && explicitResume !== true) {
 		const completedCard = completedFinishCard(roleState.history)
-		if (completedCard !== null) return completedCard
+		if (completedCard !== null) return { kind: 'card', card: completedCard }
 	}
 	// The answer is delivered before any note or suspended-turn completion: it replaces the existing ask_human result in place and then continues that same assistant turn, so the conversation is exactly the blocking path's.
 	if (parkedAnswer !== undefined) {
@@ -780,18 +818,30 @@ async function executeRoleLoop(
 	if (noteToInject !== undefined) {
 		roleState.history.push({ role: 'user', content: noteToInject })
 	}
+	// A pending interlude is always replayed: the checkpoint that clears it is written only after the handler effects and trigger state advance, so its presence proves the interlude did not complete durably. The current inquiry is resubmitted and the operator requests that were queued behind it are restored.
+	if (pendingInterlude !== undefined) {
+		deps.checkpointRecorder.setPendingInterlude(pendingInterlude)
+		if (pendingInterlude.trigger === 'inquiry') {
+			const message = pendingInterlude.details['message']
+			if (typeof message !== 'string' || message === '') throw new Error(`resume: pending interlude has no inquiry message`)
+			deps.interruptQueue.submit({ kind: 'inquiry', message })
+		}
+		// Requests that were still queued behind the suspended handler ride the checkpoint; restoring them keeps a long operator backlog alive across the replay.
+		for (const request of pendingInterlude.pendingOperatorRequests) deps.interruptQueue.submit(request)
+	}
 	while (true) {
 		// The park mark unwinds the run at the loop top — the safe point before any further LLM request — with the platform-authored park card; the LLM is never asked to finish gracefully and never gets a turn to talk itself out of parking (docs/queueing.md "Parking: the pre-write rule"). The frozen park checkpoint is captured here first so the answer can resume this exact turn.
 		if (deps.parkTracker.parkedQuestion !== undefined) {
 			captureParkCheckpoint(deps, registryEntry.roleId)
-			return parkCard(deps.parkTracker.parkedQuestion)
+			return { kind: 'card', card: parkCard(deps.parkTracker.parkedQuestion) }
 		}
 
-		const interruptCard = await drainInterrupts(runRole, deps, context, roleState, registryEntry)
-		if (interruptCard !== null) return interruptCard
+		const interruptOutcome = await drainInterrupts(runRole, deps, context, roleState, registryEntry)
+		if (interruptOutcome !== null) return interruptOutcome
 
 		const contextDecision = await contextManager.resolveSafePoint(roleState, registryEntry)
-		if (contextDecision.kind === 'finished') return contextDecision.card
+		if (contextDecision.kind === 'suspended') return contextDecision
+		if (contextDecision.kind === 'finished') return { kind: 'card', card: contextDecision.card }
 
 		// The safe point: no LLM call is in flight and every queued platform mutation (drain, compaction, pressure notice) has been applied, so the checkpoint written here is the state a restart resumes from. Only the active leaf reaches this — suspended ancestors are captured through their registered frames.
 		deps.checkpointRecorder.write()
@@ -799,20 +849,20 @@ async function executeRoleLoop(
 		const globalError = checkGlobalBudgets(context.depth, config)
 		if (globalError !== null) {
 			logEvent(deps.appendLog, 'global_budget_exceeded', { role: context.roleName, error: globalError })
-			return createResultCard('error', 'Global budget exceeded', { error: globalError })
+			return { kind: 'card', card: createResultCard('error', 'Global budget exceeded', { error: globalError }) }
 		}
 
 		const roleError = checkRoleBudgets(roleState.recentCompactionPromptTokens, config)
 		if (roleError !== null) {
 			logEvent(deps.appendLog, 'role_budget_exceeded', { role: context.roleName, error: roleError })
-			return createResultCard('error', 'Role budget exceeded', { error: roleError })
+			return { kind: 'card', card: createResultCard('error', 'Role budget exceeded', { error: roleError }) }
 		}
 
 		// The request snapshots the history (shallow copy — the engine never mutates message objects in place): the caller and its transport must observe exactly the messages sent, even though the history array keeps growing as turns append.
 		const messages = [...roleState.history]
 
 		// llm_call_start marks the turn in flight the moment the request is dispatched, so the flow view can end the call's transit phase (flowing edge → solid) when the callee begins working rather than when the response completes.
-		// It fires on every turn, including the paths that later fail (llm_unavailable / context_budget_exceeded): the turn started even if it never completed.
+		// It fires on every turn, including the paths that later fail (provider_failure, llm_unavailable, or context_budget_exceeded): the turn started even if it never completed.
 		// roleId rides along so a client can attribute the in-flight turn to the role instance (the inspector's per-instance turn list); the full turn lands in llm_call once the response arrives.
 		logEvent(deps.appendLog, 'llm_call_start', { role: context.roleName, roleId: registryEntry.roleId })
 
@@ -823,8 +873,8 @@ async function executeRoleLoop(
 			onDelta: (delta) => deps.publishDelta({ roleId: registryEntry.roleId, role: context.roleName, ...delta }),
 		})
 
-		const handling = handleLlmResult(llmResult, roleState, deps, context, contextManager)
-		// llm_call is emitted after handleLlmResult so the received assistant response, finishReason, and per-call usage all land in one event. It is emitted only on the success paths (continue/tool_calls and success-finished): the llm_unavailable and context_budget_exceeded paths log their own dedicated events inside handleLlmResult and must not also emit a misleading llm_call.
+		const handling = handleLlmResult(llmResult, roleState, deps, context, contextManager, registryEntry.roleId)
+		// llm_call is emitted after handleLlmResult so the received assistant response, finishReason, and per-call usage all land in one event. It is emitted only on the success paths (continue/tool_calls and success-finished): the provider_failure, llm_unavailable, and context_budget_exceeded paths log their own dedicated events inside handleLlmResult and must not also emit a misleading llm_call.
 		if (llmResult.kind === 'success') {
 			// The discarded retry attempts' spend is logged ahead of the llm_call it belongs to: those attempts ran and were billed before the final one, and the llm_call's own usage stays the final attempt's so pressure/context semantics keep reflecting the live conversation size rather than a retry-inflated total.
 			if (llmResult.discardedRetrySpend !== undefined) {
@@ -837,7 +887,8 @@ async function executeRoleLoop(
 			roleState.logSentBaseline = messages.length
 		}
 		if (handling.kind === 'continue') continue
-		if (handling.kind === 'finished') return handling.card
+		if (handling.kind === 'suspended') return handling
+		if (handling.kind === 'finished') return { kind: 'card', card: handling.card }
 
 		const finalCard = await dispatchToolCallSequence(deps, context, roleState, registryEntry, dispatchCtx, handling.toolCalls, 0)
 		if (finalCard !== null) return finalCard

@@ -206,6 +206,7 @@ describe('summarizeRunCompletion', () => {
 describe('shouldWriteCompletionSummary', () => {
 	test('gates the completion pass for a pause but not for a true completion or error', () => {
 		expect(shouldWriteCompletionSummary('needs_clarification')).toBe(false)
+		expect(shouldWriteCompletionSummary('suspended')).toBe(false)
 		expect(shouldWriteCompletionSummary('success')).toBe(true)
 		expect(shouldWriteCompletionSummary('error')).toBe(true)
 		expect(shouldWriteCompletionSummary('interrupted')).toBe(true)

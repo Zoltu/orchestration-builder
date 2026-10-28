@@ -26,6 +26,13 @@ function formatLogEvent(event: LogEvent): string {
 			return withRole(role, 'finished (implicit)')
 		case 'llm_unavailable':
 			return withRole(role, 'llm unavailable')
+		case 'provider_failure': {
+			const category = stringField(payload, 'category')
+			const message = stringField(payload, 'message')
+			const categoryPart = category !== null ? ` (${category})` : ''
+			// Only the platform-authored message may reach a row; the provider body lives in detail and stays out of every summary surface.
+			return withRole(role, message !== null ? `provider failure${categoryPart}: ${message}` : `provider failure${categoryPart}`)
+		}
 		case 'context_budget_exceeded':
 			return withRole(role, 'context budget exceeded')
 		case 'context_compacted':

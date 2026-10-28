@@ -12,6 +12,8 @@ export interface InterruptQueue {
 	submit(request: InterruptRequest): void
 	drain(): InterruptRequest | undefined
 	pending(): boolean
+	// Snapshot of the requests still waiting, in order, for durable capture around a handler interlude.
+	pendingRequests(): InterruptRequest[]
 }
 
 export function createInterruptQueue(): InterruptQueue {
@@ -25,6 +27,9 @@ export function createInterruptQueue(): InterruptQueue {
 		},
 		pending() {
 			return requests.length > 0
+		},
+		pendingRequests() {
+			return requests.map((request) => ({ ...request }))
 		},
 	}
 }

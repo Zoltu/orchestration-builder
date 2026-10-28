@@ -39,7 +39,7 @@ describe('isQueueItemLike', () => {
 })
 
 describe('deriveQueuedItems', () => {
-	test('groups the polled items into the three queued groups in display order and drops the settled and malformed ones', () => {
+	test('groups the polled items into the four queued groups in display order and drops the settled and malformed ones', () => {
 		const queued = deriveQueuedItems([
 			item({ id: 'a', status: 'done', settledAt: '2026-01-01T00:01:00.000Z' }),
 			item({ id: 'b' }),
@@ -49,13 +49,14 @@ describe('deriveQueuedItems', () => {
 			item({ id: 'e', status: 'cancelled', settledAt: '2026-01-01T00:02:00.000Z' }),
 			item({ id: 'f' }),
 		])
+		expect(queued.suspended).toEqual([])
 		expect(queued.waiting.map((entry) => entry.id)).toEqual(['b', 'f'])
 		expect(queued.active.map((entry) => entry.id)).toEqual(['d'])
 		expect(queued.needsInput.map((entry) => entry.id)).toEqual(['c'])
 	})
 
-	test('an empty queue yields three empty groups', () => {
-		expect(deriveQueuedItems([])).toEqual({ waiting: [], active: [], needsInput: [] })
+	test('an empty queue yields four empty groups', () => {
+		expect(deriveQueuedItems([])).toEqual({ suspended: [], waiting: [], active: [], needsInput: [] })
 	})
 })
 
@@ -74,6 +75,7 @@ describe('queueStatusLabel', () => {
 	test('maps every status to its display label and falls back to the raw status', () => {
 		expect(queueStatusLabel('waiting')).toBe('waiting')
 		expect(queueStatusLabel('active')).toBe('running')
+		expect(queueStatusLabel('suspended')).toBe('suspended')
 		expect(queueStatusLabel('needs_input')).toBe('needs your answer')
 		expect(queueStatusLabel('mysterious')).toBe('mysterious')
 	})
@@ -142,5 +144,37 @@ describe('matchesParkedRun', () => {
 	test('never matches a non-parked item', () => {
 		expect(matchesParkedRun(item({ status: 'waiting', continuesFrom: 'run-1' }), 'run-1')).toBe(false)
 		expect(matchesParkedRun(item({ status: 'active', runId: 'run-1' }), 'run-1')).toBe(false)
+	})
+})
+
+describe('suspended queue rows', () => {
+	test('groups suspended items before waiting and keeps needs_input unchanged', () => {
+		const queued = deriveQueuedItems([
+			item({ id: 'waiting', status: 'waiting' }),
+			item({ id: 'suspended', status: 'suspended', runId: 'run-s', suspendedAt: '2026-01-01T00:02:00.000Z' }),
+			item({ id: 'needs', status: 'needs_input', runId: 'run-n' }),
+		])
+		expect(queued.suspended.map((entry) => entry.id)).toEqual(['suspended'])
+		expect(queued.waiting.map((entry) => entry.id)).toEqual(['waiting'])
+		expect(queued.needsInput.map((entry) => entry.id)).toEqual(['needs'])
+	})
+
+	test('counts a suspended pause in the backlog because it blocks dispatch', () => {
+		expect(backlogCount([
+			item({ id: 'a' }),
+			item({ id: 'b', status: 'suspended', runId: 'run-b' }),
+			item({ id: 'c', status: 'active' }),
+		])).toBe(2)
+	})
+
+	test('a suspended row is not a reorder source or target', () => {
+		const items = [
+			item({ id: 'a', status: 'waiting' }),
+			item({ id: 's', status: 'suspended', runId: 'run-s' }),
+			item({ id: 'b', status: 'waiting' }),
+		]
+		expect(deriveReorderPosition(items, 'a', 's')).toBeNull()
+		expect(reorderWaitingItems(items, 's', 0)).toBe(items)
+		expect(reorderWaitingItems(items, 'a', 1).map((entry) => entry.id)).toEqual(['b', 's', 'a'])
 	})
 })

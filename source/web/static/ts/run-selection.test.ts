@@ -7,6 +7,12 @@ describe('planSameRunView', () => {
 		expect(planSameRunView({ summaryStatus: 'unknown', currentStatus: null, heldViewStatus: null })).toBe('reactivate')
 	})
 
+	test('shows a held suspended pause and refreshes a stale one instead of reactivating it', () => {
+		expect(planSameRunView({ summaryStatus: 'suspended', currentStatus: 'suspended', heldViewStatus: 'suspended' })).toBe('show')
+		expect(planSameRunView({ summaryStatus: 'suspended', currentStatus: null, heldViewStatus: null })).toBe('refresh')
+		expect(planSameRunView({ summaryStatus: 'suspended', currentStatus: 'running', heldViewStatus: 'running' })).toBe('refresh')
+	})
+
 	test('refreshes when the held view status is stale', () => {
 		expect(planSameRunView({ summaryStatus: 'success', currentStatus: 'success', heldViewStatus: 'running' })).toBe('refresh')
 		expect(planSameRunView({ summaryStatus: 'error', currentStatus: 'error', heldViewStatus: 'success' })).toBe('refresh')
