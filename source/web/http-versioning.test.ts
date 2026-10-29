@@ -164,6 +164,8 @@ function createVersioningHarness(initialRuns: Array<[string, StoredRun]>, flowFe
 			readRunListSummary,
 			readRunPlanById,
 			readRunSnapshotStats,
+			readTaskThread: () => null,
+			requestTaskThreadSummary: () => ({ state: 'none', summary: null }),
 			listRunIds,
 			readProjectSettings,
 			writeProjectSettings,

@@ -1448,23 +1448,6 @@ li:last-child {
 	gap: var(--space-2) var(--space-3);
 }
 
-/* The lineage line at the top of the run view: a quiet text button that jumps to the run this run continued. It reads as navigation rather than a run control, so it wears the muted text style and only gains the accent on hover. */
-.run-lineage {
-	flex: 0 0 auto;
-	border: none;
-	background: none;
-	padding: 0;
-	font-family: var(--font-body);
-	font-size: 0.8rem;
-	color: var(--color-text-muted);
-	cursor: pointer;
-	text-align: left;
-}
-
-.run-lineage:hover {
-	color: var(--color-accent);
-}
-
 /* The dev harness's `margin-left: auto` (on `.pb-view-toggle` below) is neutralized here so the two controls sit at the row's start rather than the toggle pushing the tier control to the far edge. */
 #watch-screen .pb-view-toggle {
 	margin-left: 0;
@@ -1568,6 +1551,501 @@ li:last-child {
 	max-height: 40vh;
 	overflow: auto;
 	font-size: 0.9rem;
+}
+
+/* --- Task identity header -------------------------------------------------- */
+/* The header is the first child of the Watch screen and stays compact enough that the flex-filling stage keeps the screen's focus. Its generated or deterministic title is plain text, and the lineage/human chips wrap rather than pushing the controls row off-screen. */
+.task-identity-header {
+	flex: 0 0 auto;
+	display: flex;
+	flex-direction: column;
+	gap: var(--space-2);
+	padding: var(--space-3) var(--space-4);
+	border: 1px solid var(--color-border);
+	border-radius: var(--radius);
+	background: var(--color-surface);
+}
+
+.task-identity-head {
+	display: flex;
+	align-items: flex-start;
+	flex-wrap: wrap;
+	gap: var(--space-2) var(--space-4);
+}
+
+.task-identity-title-block {
+	flex: 1 1 16rem;
+	min-width: 0;
+}
+
+.task-identity-title {
+	margin: 0;
+	font-size: 1.05rem;
+	font-weight: 600;
+	line-height: 1.3;
+	overflow-wrap: anywhere;
+	display: -webkit-box;
+	-webkit-line-clamp: 2;
+	-webkit-box-orient: vertical;
+	overflow: hidden;
+	max-height: 2.6em;
+}
+
+.task-identity-title--fallback {
+	color: var(--color-text-muted);
+}
+
+.task-identity-description {
+	margin: var(--space-1) 0 0;
+	font-size: 0.85rem;
+	line-height: 1.4;
+	color: var(--color-text-muted);
+	overflow-wrap: anywhere;
+}
+
+.task-identity-actions {
+	display: flex;
+	align-items: center;
+	flex-wrap: wrap;
+	gap: var(--space-2);
+	margin-left: auto;
+}
+
+.task-identity-summarizing {
+	font-size: 0.75rem;
+	font-weight: 600;
+	color: var(--color-accent);
+	white-space: nowrap;
+}
+
+.task-identity-history-button,
+.task-identity-human-chip {
+	border: 1px solid var(--color-border-strong);
+	border-radius: var(--radius-sm);
+	background: var(--color-surface);
+	color: var(--color-text);
+	font-family: var(--font-body);
+	font-size: 0.8rem;
+	cursor: pointer;
+}
+
+.task-identity-history-button {
+	padding: 0.25rem var(--space-3);
+	font-weight: 500;
+	white-space: nowrap;
+}
+
+.task-identity-history-button:hover,
+.task-identity-human-chip:hover {
+	background: var(--color-accent-soft);
+	border-color: var(--color-accent);
+	color: var(--color-accent);
+}
+
+.task-identity-tasks {
+	display: flex;
+	flex-direction: column;
+	gap: var(--space-1);
+	font-size: 0.82rem;
+}
+
+.task-identity-task {
+	margin: 0;
+	display: flex;
+	flex-wrap: wrap;
+	gap: var(--space-1) var(--space-2);
+	min-width: 0;
+}
+
+.task-identity-task-label {
+	flex: 0 0 auto;
+	font-weight: 600;
+	color: var(--color-text-subtle);
+	text-transform: uppercase;
+	letter-spacing: 0.04em;
+	font-size: 0.68rem;
+	line-height: 1.7;
+}
+
+.task-identity-task-text {
+	flex: 1 1 12rem;
+	min-width: 0;
+	overflow-wrap: anywhere;
+	display: -webkit-box;
+	-webkit-line-clamp: 2;
+	-webkit-box-orient: vertical;
+	overflow: hidden;
+	line-height: 1.4;
+	max-height: 2.8em;
+}
+
+.task-identity-human-row {
+	min-width: 0;
+}
+
+.task-identity-human-chip {
+	display: inline-flex;
+	align-items: baseline;
+	gap: var(--space-2);
+	max-width: 100%;
+	padding: var(--space-1) var(--space-3);
+	text-align: left;
+}
+
+.task-identity-human-label {
+	flex: 0 0 auto;
+	font-size: 0.72rem;
+	font-weight: 600;
+	color: var(--color-accent);
+}
+
+.task-identity-human-text {
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.task-identity-lineage {
+	display: flex;
+	flex-wrap: wrap;
+	gap: var(--space-2);
+}
+
+.task-identity-chip {
+	padding: 0.05rem var(--space-2);
+	border: 1px solid var(--color-border);
+	border-radius: 999px;
+	background: var(--color-surface-sunken);
+	color: var(--color-text-muted);
+	font-size: 0.72rem;
+	white-space: nowrap;
+}
+
+.task-identity-chip--warning {
+	border-color: var(--color-warn);
+	background: rgba(240, 180, 41, 0.12);
+	color: var(--color-text);
+}
+
+/* --- Task history drawer --------------------------------------------------- */
+/* The drawer is an app-shell overlay rather than a run-view modal, so it can open over the Watch, History, or Compose screen. It is a full-height panel with its own scroll region; the backdrop and Close button share the same dismissal action, and Escape is wired by the app. */
+.task-history-overlay {
+	position: fixed;
+	inset: 0;
+	z-index: 70;
+	display: flex;
+	justify-content: flex-end;
+}
+
+.task-history-backdrop {
+	position: absolute;
+	inset: 0;
+	background: rgba(13, 17, 23, 0.55);
+	backdrop-filter: blur(2px);
+	cursor: pointer;
+}
+
+.task-history-drawer {
+	position: relative;
+	display: flex;
+	flex-direction: column;
+	width: min(46rem, 100%);
+	height: 100%;
+	background: var(--color-surface);
+	border-left: 1px solid var(--color-border-strong);
+	box-shadow: -12px 0 32px rgba(16, 24, 40, 0.28);
+}
+
+.task-history-head {
+	flex: 0 0 auto;
+	display: flex;
+	align-items: flex-start;
+	justify-content: space-between;
+	gap: var(--space-3);
+	padding: var(--space-4);
+	border-bottom: 1px solid var(--color-border);
+}
+
+.task-history-heading-block {
+	min-width: 0;
+}
+
+.task-history-heading {
+	margin: 0;
+	font-size: 0.85rem;
+	font-weight: 600;
+	text-transform: uppercase;
+	letter-spacing: 0.04em;
+	color: var(--color-accent);
+}
+
+.task-history-run-id {
+	margin: var(--space-1) 0 0;
+	font-family: var(--font-mono);
+	font-size: 0.72rem;
+	color: var(--color-text-subtle);
+	overflow-wrap: anywhere;
+}
+
+.task-history-close {
+	flex: 0 0 auto;
+	padding: var(--space-2) var(--space-4);
+	border: none;
+	border-radius: var(--radius-sm);
+	background: var(--color-accent);
+	color: #ffffff;
+	font-weight: 500;
+	cursor: pointer;
+}
+
+.task-history-close:hover {
+	filter: brightness(1.08);
+}
+
+.task-history-body {
+	flex: 1 1 auto;
+	min-height: 0;
+	overflow: auto;
+	padding: var(--space-4);
+	display: flex;
+	flex-direction: column;
+	gap: var(--space-4);
+}
+
+.task-history-state {
+	margin: 0;
+	color: var(--color-text-muted);
+	font-size: 0.9rem;
+}
+
+.task-history-state--error {
+	padding: var(--space-3);
+	border: 1px solid var(--color-error);
+	border-radius: var(--radius-sm);
+	background: var(--color-error-soft);
+	color: var(--color-error);
+}
+
+.task-history-retry,
+.task-history-summary-retry {
+	margin-top: var(--space-2);
+	padding: var(--space-1) var(--space-3);
+	border: 1px solid var(--color-border-strong);
+	border-radius: var(--radius-sm);
+	background: var(--color-surface);
+	color: var(--color-text);
+	font: inherit;
+	cursor: pointer;
+}
+
+.task-history-retry:hover,
+.task-history-summary-retry:hover {
+	border-color: var(--color-accent);
+	color: var(--color-accent);
+}
+
+.task-history-summary-status {
+	margin: 0;
+	display: flex;
+	align-items: center;
+	flex-wrap: wrap;
+	gap: var(--space-2);
+	font-size: 0.8rem;
+	color: var(--color-text-muted);
+}
+
+.task-history-summary-status--failed {
+	color: var(--color-error);
+}
+
+.task-history-summary-retry {
+	margin-top: 0;
+}
+
+.task-history-notice {
+	margin: 0;
+	padding: var(--space-2) var(--space-3);
+	border: 1px dashed var(--color-border-strong);
+	border-radius: var(--radius-sm);
+	background: var(--color-surface-raised);
+	color: var(--color-text-muted);
+	font-size: 0.8rem;
+}
+
+.task-history-notice--warning {
+	border-color: var(--color-warn);
+	color: var(--color-text);
+}
+
+.task-history-run {
+	display: flex;
+	flex-direction: column;
+	gap: var(--space-2);
+}
+
+.task-history-run-heading {
+	display: flex;
+	align-items: baseline;
+	flex-wrap: wrap;
+	gap: var(--space-2);
+	padding-bottom: var(--space-1);
+	border-bottom: 1px solid var(--color-border);
+}
+
+.task-history-run-index {
+	font-size: 0.72rem;
+	font-weight: 600;
+	text-transform: uppercase;
+	letter-spacing: 0.04em;
+	color: var(--color-text-subtle);
+}
+
+.task-history-run-heading .task-history-run-id {
+	margin: 0;
+	font-size: 0.72rem;
+}
+
+.task-history-run-tag {
+	padding: 0 var(--space-2);
+	border: 1px solid var(--color-border);
+	border-radius: 999px;
+	font-size: 0.65rem;
+	text-transform: uppercase;
+	letter-spacing: 0.04em;
+	color: var(--color-text-subtle);
+}
+
+.task-history-run-tag--current {
+	border-color: var(--color-accent);
+	color: var(--color-accent);
+}
+
+.task-history-entries {
+	list-style: none;
+	margin: 0;
+	padding: 0;
+	display: flex;
+	flex-direction: column;
+	gap: var(--space-2);
+}
+
+.task-history-entry {
+	padding: var(--space-2) var(--space-3);
+	border: 1px solid var(--color-border);
+	border-left-width: 3px;
+	border-radius: var(--radius-sm);
+	background: var(--color-surface);
+	min-width: 0;
+}
+
+.task-history-entry--human {
+	margin-left: var(--space-5);
+	border-left-color: var(--color-accent);
+	background: var(--color-accent-soft);
+}
+
+.task-history-entry--orchestrator {
+	margin-right: var(--space-5);
+	border-left-color: var(--color-border-strong);
+	background: var(--color-surface-raised);
+}
+
+.task-history-entry--system {
+	border-left-color: var(--color-warn);
+	background: var(--color-surface-sunken);
+}
+
+.task-history-entry--system-resume {
+	border-left-color: var(--color-success);
+}
+
+.task-history-entry--system-failure,
+.task-history-entry--system-termination {
+	border-left-color: var(--color-error);
+	background: var(--color-error-soft);
+}
+
+.task-history-entry--system-pause,
+.task-history-entry--system-suspension {
+	border-left-color: var(--color-warn);
+}
+
+.task-history-entry-meta {
+	display: flex;
+	align-items: baseline;
+	flex-wrap: wrap;
+	gap: var(--space-1) var(--space-2);
+	margin-bottom: var(--space-1);
+}
+
+.task-history-entry-label {
+	font-size: 0.78rem;
+	font-weight: 600;
+	overflow-wrap: anywhere;
+}
+
+.task-history-entry-actor,
+.task-history-entry-status,
+.task-history-entry-outcome,
+.task-history-entry-time {
+	font-size: 0.68rem;
+	color: var(--color-text-subtle);
+}
+
+.task-history-entry-actor {
+	font-weight: 600;
+	text-transform: uppercase;
+	letter-spacing: 0.04em;
+}
+
+.task-history-entry-status,
+.task-history-entry-outcome {
+	padding: 0 var(--space-1);
+	border: 1px solid var(--color-border);
+	border-radius: 999px;
+}
+
+.task-history-entry-time {
+	margin-left: auto;
+	font-family: var(--font-mono);
+	overflow-wrap: anywhere;
+}
+
+.task-history-entry-text,
+.task-history-entry-context {
+	font-size: 0.88rem;
+	overflow-wrap: anywhere;
+}
+
+.task-history-entry-text.markdown > *:first-child,
+.task-history-entry-context.markdown > *:first-child {
+	margin-top: 0;
+}
+
+.task-history-entry-text.markdown > *:last-child,
+.task-history-entry-context.markdown > *:last-child {
+	margin-bottom: 0;
+}
+
+.task-history-entry-context {
+	margin-top: var(--space-1);
+	padding-top: var(--space-1);
+	border-top: 1px dashed var(--color-border);
+	color: var(--color-text-muted);
+}
+
+.task-history-entry-text--system,
+.task-history-entry-context--system {
+	margin: 0;
+	white-space: pre-wrap;
+}
+
+.task-history-entry-truncated {
+	margin: var(--space-1) 0 0;
+	font-size: 0.72rem;
+	color: var(--color-text-subtle);
+	font-style: italic;
 }
 
 .flow-tier-control {

@@ -258,6 +258,29 @@ export function createReadRunSummaryById(baseDir: string): ReadRunSummaryById {
 	}
 }
 
+export type ReadTaskThreadSummaryTextById = (runId: string) => string | null
+export type WriteTaskThreadSummaryTextById = (runId: string, text: string) => void
+
+export const TASK_THREAD_SUMMARY_FILE_NAME = 'thread-summary.json'
+
+// The task-thread summary artifact is a small versioned JSON document owned by the task-thread summary module; this leaf reads its raw text and writes it atomically, leaving parsing and validation to that module.
+export function createReadTaskThreadSummaryTextById(baseDir: string): ReadTaskThreadSummaryTextById {
+	return (runId) => {
+		if (!isCurrentRunFormat(baseDir, runId)) return null
+		const summaryPath = path.resolve(baseDir, runId, TASK_THREAD_SUMMARY_FILE_NAME)
+		if (!fs.existsSync(summaryPath)) return null
+		return fs.readFileSync(summaryPath, 'utf8')
+	}
+}
+
+export function createWriteTaskThreadSummaryTextById(baseDir: string): WriteTaskThreadSummaryTextById {
+	return (runId, text) => {
+		const runDir = path.resolve(baseDir, runId)
+		fs.mkdirSync(runDir, { recursive: true })
+		writeFileAtomically(path.resolve(runDir, TASK_THREAD_SUMMARY_FILE_NAME), text)
+	}
+}
+
 export interface RunSummaryStats {
 	meta: RunSnapshotFileStat | null
 	summary: RunSnapshotFileStat | null

@@ -19,6 +19,7 @@ import { DEMO_SCENARIOS, deriveDemoFrameModel, deriveDemoFrameOperationDetail, f
 import type { ReadRunSnapshot } from './snapshot-cache.js'
 import { deriveVersion, type VersionToken } from './version.js'
 import { buildFlowModel, buildFlowOperationDetail, buildRunView, gatherFlowInputs, gatherRunViewInputs, MAX_LOG_LINES } from './versioned-views.js'
+import type { TaskThreadResponse, TaskThreadSummarySnapshot } from '../task-thread/index.js'
 
 // The log window endpoint's paging defaults and cap: a 1s poll that wants a compact identity view
 // fetches 50 rows, and no single request may be tricked (or misconfigured) into serializing the
@@ -37,6 +38,8 @@ export interface RequestHandlerConfig {
 	readRunListSummary: ReadRunListSummary
 	readRunPlanById: ReadRunPlanById
 	readRunSnapshotStats: ReadRunSnapshotStats
+	readTaskThread: (runId: string) => TaskThreadResponse | null
+	requestTaskThreadSummary: (runId: string) => TaskThreadSummarySnapshot
 	listRunIds: ListRunIds
 	readProjectSettings: ReadProjectSettings
 	writeProjectSettings: WriteProjectSettings
@@ -91,9 +94,9 @@ function jsonVersioned(payload: unknown, version: VersionToken): Response {
 }
 
 // The base flow envelope is uncacheable but unversioned: it carries no ETag (the envelope's own `unchanged` reply is the revalidation), yet the browser must not heuristically cache the polled JSON, so it sends the same no-store the versioned JSON does.
-function jsonNoStore(payload: unknown): Response {
+function jsonNoStore(payload: unknown, status = 200): Response {
 	return new Response(JSON.stringify(payload), {
-		status: 200,
+		status,
 		headers: { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' },
 	})
 }
@@ -183,6 +186,11 @@ function parseStrictNonNegativeInt(value: string): number | undefined {
 	return parsed
 }
 
+// The thread routes resolve a path id to a run directory, so they require the canonical run-id shape before any reader or writer sees it; an encoded slash or traversal decoding to a non-run-id 404s.
+function isSafeThreadRunId(value: string | undefined): value is string {
+	return value !== undefined && isRunIdShape(value)
+}
+
 // Strict variant for path identities: a segment that does not decode (a stray '%', a truncated escape, a lone surrogate) names a path that cannot exist, so the caller gets the same 404 as any other unknown id rather than a URIError escaping the fetch handler. decodeURIComponent signals malformed input only by throwing, so catching here is the check, not flow control.
 function decodePathSegment(segment: string): string | undefined {
 	try {
@@ -263,6 +271,18 @@ function handleDemoScenarios(): Response {
 function isKnownRun(readRunSnapshotStats: ReadRunSnapshotStats, runId: string): boolean {
 	const stats = readRunSnapshotStats(runId)
 	return stats.meta !== null || stats.log !== null
+}
+
+function handleGetTaskThread(runId: string, readTaskThread: (runId: string) => TaskThreadResponse | null): Response {
+	const thread = readTaskThread(runId)
+	if (thread === null) return jsonNoStore({ ok: false, error: 'not_found' }, 404)
+	return jsonNoStore(thread)
+}
+
+function handleRequestTaskThreadSummary(readRunSnapshotStats: ReadRunSnapshotStats, requestTaskThreadSummary: (runId: string) => TaskThreadSummarySnapshot, runId: string): Response {
+	if (!isKnownRun(readRunSnapshotStats, runId)) return jsonNoStore({ ok: false, error: 'not_found' }, 404)
+	const summary = requestTaskThreadSummary(runId)
+	return jsonNoStore(summary, 202)
 }
 
 // GET /api/runs ships an entity-diff frame keyed off the client's `have` revision instead of the whole list with an ETag: a steady poll transfers only the changed runs. The responder owns the newest-first collection order; entity-diff treats collections as unordered and the client sorts on apply regardless.
@@ -480,6 +500,8 @@ export function createRequestHandler(config: RequestHandlerConfig, serveStatic: 
 	const readRunListSummary = config.readRunListSummary
 	const readRunPlanById = config.readRunPlanById
 	const readRunSnapshotStats = config.readRunSnapshotStats
+	const readTaskThread = config.readTaskThread
+	const requestTaskThreadSummary = config.requestTaskThreadSummary
 	const listRunIds = config.listRunIds
 	const readProjectSettings = config.readProjectSettings
 	const writeProjectSettings = config.writeProjectSettings
@@ -524,8 +546,11 @@ export function createRequestHandler(config: RequestHandlerConfig, serveStatic: 
 			if (pathname === '/api/runs') return handleListRuns(url.searchParams, runListDependencies)
 			if (pathname.startsWith('/api/runs/')) {
 				const rest = decodePathSegment(pathname.slice('/api/runs/'.length))
-				if (rest === undefined) return json({ ok: false, error: 'not_found' }, 404)
-				// Match a /log or /flow suffix before the bare :id route so /api/runs/<id>/log and /api/runs/<id>/flow reach their endpoints rather than being swallowed as a run id of "<id>/log" or "<id>/flow".
+				if (rest === undefined) {
+					if (pathname.endsWith('/thread') || pathname.endsWith('/thread/summary')) return jsonNoStore({ ok: false, error: 'not_found' }, 404)
+					return json({ ok: false, error: 'not_found' }, 404)
+				}
+				// Match /log, /flow, or /thread before the bare :id route so they reach their endpoints rather than being swallowed as a run id of "<id>/log", "<id>/flow", or "<id>/thread".
 				const slashIndex = rest.lastIndexOf('/')
 				if (slashIndex >= 0) {
 					const suffix = rest.slice(slashIndex + 1)
@@ -533,6 +558,10 @@ export function createRequestHandler(config: RequestHandlerConfig, serveStatic: 
 					if (runId !== '') {
 						if (suffix === 'log') return runLogPage(readRunSnapshot, readRunSnapshotStats, runId, url.searchParams)
 						if (suffix === 'flow') return handleGetRunFlowVersioned(request, runId, url.searchParams, versionedDependencies)
+						if (suffix === 'thread') {
+							if (!isSafeThreadRunId(runId)) return jsonNoStore({ ok: false, error: 'not_found' }, 404)
+							return handleGetTaskThread(runId, readTaskThread)
+						}
 					}
 				}
 				return handleGetRunByIdVersioned(request, rest, versionedDependencies)
@@ -585,6 +614,11 @@ export function createRequestHandler(config: RequestHandlerConfig, serveStatic: 
 					const itemId = rest.slice(0, rest.length - '/terminate'.length)
 					if (itemId !== '' && !itemId.includes('/')) return handleTerminateQueueItem(taskQueue, itemId)
 				}
+			}
+			if (pathname.startsWith('/api/runs/') && pathname.endsWith('/thread/summary')) {
+				const runId = decodePathSegment(pathname.slice('/api/runs/'.length, pathname.length - '/thread/summary'.length))
+				if (!isSafeThreadRunId(runId)) return jsonNoStore({ ok: false, error: 'not_found' }, 404)
+				return handleRequestTaskThreadSummary(readRunSnapshotStats, requestTaskThreadSummary, runId)
 			}
 			if (pathname.startsWith('/api/runs/') && pathname.endsWith('/interrupt')) {
 				const runId = decodePathSegment(pathname.slice('/api/runs/'.length, pathname.length - '/interrupt'.length))

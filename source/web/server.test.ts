@@ -11,6 +11,8 @@ import type { HealthView } from '../executor/index.js'
 import { isRunMeta } from '../executor/validation.ts'
 import { parseLogEvents, parseRunMeta, type RunSnapshot } from '../run-log/index.js'
 import type { BuildInfo } from './build-info.ts'
+import type { TaskThreadResponse, TaskThreadSummarySnapshot } from '../task-thread/index.ts'
+import type { TaskSummary } from '../task-thread/summary.ts'
 import { createRunListCache } from './run-list-cache.ts'
 import { applyFlowFrame, createFlowFeedResponder, emptyFlowFeedState } from './static/ts/flow-feed/index.js'
 import type { FlowFeedResponderOptions } from './static/ts/flow-feed/index.js'
@@ -538,7 +540,7 @@ function createTestProviderSuspension(): { suspendedRunId(): string | undefined,
 	}
 }
 
-function createHandlerHarness(options: { runIdCollides?: boolean, build?: BuildInfo | null, initialQueueItems?: QueueSeedItem[], initialCheckpoints?: Map<string, string>, initialMetas?: Map<string, string>, flowFeedOptions?: FlowFeedResponderOptions, listRunIds?: ListRunIds, readRunFormat?: ReadRunFormat, canDispatch?: () => boolean, health?: HealthView } = {}): HandlerHarness {
+function createHandlerHarness(options: { runIdCollides?: boolean, build?: BuildInfo | null, initialQueueItems?: QueueSeedItem[], initialCheckpoints?: Map<string, string>, initialMetas?: Map<string, string>, flowFeedOptions?: FlowFeedResponderOptions, listRunIds?: ListRunIds, readRunFormat?: ReadRunFormat, canDispatch?: () => boolean, health?: HealthView, readTaskThread?: (runId: string) => TaskThreadResponse | null, requestTaskThreadSummary?: (runId: string) => TaskThreadSummarySnapshot } = {}): HandlerHarness {
 	let resolveActive: (meta: RunMeta) => void = () => {}
 	let resolveResumed: (meta: RunMeta) => void = () => {}
 	let capturedEffort: EffortLevel | undefined
@@ -665,6 +667,8 @@ function createHandlerHarness(options: { runIdCollides?: boolean, build?: BuildI
 			readRunListSummary,
 			readRunPlanById,
 			readRunSnapshotStats: harnessReadRunSnapshotStats,
+			readTaskThread: options.readTaskThread ?? (() => null),
+			requestTaskThreadSummary: options.requestTaskThreadSummary ?? (() => ({ state: 'none', summary: null })),
 			readProjectSettings: settings.read,
 			writeProjectSettings: settings.write,
 			taskQueue,
@@ -781,6 +785,37 @@ function get(path: string): Request {
 // body is optional because POST /api/queue/:id/requeue carries no body.
 function post(path: string, body?: string): Request {
 	return new Request(`http://handler.test${path}`, { method: 'POST', headers: { 'content-type': 'application/json' }, ...(body !== undefined ? { body } : {}) })
+}
+
+function taskThreadResponse(runId: string): TaskThreadResponse {
+	return {
+		formatVersion: 1,
+		runId,
+		identity: {
+			runId,
+			status: 'success',
+			title: 'Fix the parser',
+			description: 'Fix the parser.',
+			currentTask: null,
+			originalTask: null,
+			lineage: {
+				rootRunId: runId,
+				parentRunId: null,
+				continuationCount: 0,
+				resumeCount: 0,
+				resumeCountComplete: true,
+				depth: 0,
+				complete: true,
+				missingParentRunId: null,
+				truncatedReason: null,
+			},
+			latestHumanEvent: null,
+		},
+		entries: [],
+		summary: null,
+		summaryState: 'none',
+		truncated: { entries: false, text: false, lineage: false },
+	}
 }
 
 function put(path: string, body: string): Request {
@@ -1359,6 +1394,114 @@ describe('GET /api/runs/:id', () => {
 		const withoutInvolvement = await handler(get('/api/runs/run-1'))
 		expect(withoutInvolvement.status).toBe(200)
 		expect((await withoutInvolvement.json()).involvement).toBeNull()
+	})
+})
+
+describe('GET /api/runs/:id/thread', () => {
+	test('returns the reader response with no-store', async () => {
+		const thread = taskThreadResponse('run-20260101-000200')
+		const { handler } = createHandlerHarness({ readTaskThread: (runId) => runId === 'run-20260101-000200' ? thread : null })
+		const response = await handler(get('/api/runs/run-20260101-000200/thread'))
+		expect(response.status).toBe(200)
+		expect(response.headers.get('cache-control')).toBe('no-store')
+		expect(await response.json()).toEqual(thread)
+	})
+
+	test('returns 404 for an unknown run or a null reader result', async () => {
+		const { handler } = createHandlerHarness({ readTaskThread: () => null })
+		const response = await handler(get('/api/runs/run-19990101-000000/thread'))
+		expect(response.status).toBe(404)
+		expect(response.headers.get('cache-control')).toBe('no-store')
+		expect(await response.json()).toEqual({ ok: false, error: 'not_found' })
+	})
+
+	test('rejects traversal-shaped run ids before reading', async () => {
+		let readerCalls = 0
+		const { handler } = createHandlerHarness({
+			readTaskThread: () => {
+				readerCalls++
+				return taskThreadResponse('run-20260101-000200')
+			},
+		})
+		const response = await handler(get('/api/runs/..%2Frun-20260101-000200/thread'))
+		expect(response.status).toBe(404)
+		expect(response.headers.get('cache-control')).toBe('no-store')
+		expect(readerCalls).toBe(0)
+	})
+
+	test('a malformed percent-encoding on the thread path is a no-store 404', async () => {
+		const { handler } = createHandlerHarness()
+		const response = await handler(get('/api/runs/%/thread'))
+		expect(response.status).toBe(404)
+		expect(response.headers.get('cache-control')).toBe('no-store')
+	})
+
+	test('does not trigger summary generation on GET', async () => {
+		let summaryRequests = 0
+		const thread = taskThreadResponse('run-20260101-000200')
+		const { handler } = createHandlerHarness({
+			readTaskThread: () => thread,
+			requestTaskThreadSummary: () => {
+				summaryRequests++
+				return { state: 'pending', summary: null }
+			},
+		})
+		const response = await handler(get('/api/runs/run-20260101-000200/thread'))
+		expect(response.status).toBe(200)
+		expect(summaryRequests).toBe(0)
+	})
+})
+
+describe('POST /api/runs/:id/thread/summary', () => {
+	test('queues generation and returns the current state with 202', async () => {
+		let requestedRunId: string | null = null
+		const { handler } = createHandlerHarness({
+			requestTaskThreadSummary: (runId) => {
+				requestedRunId = runId
+				return { state: 'pending', summary: null }
+			},
+		})
+		const response = await handler(post('/api/runs/run-20260101-000000/thread/summary'))
+		expect(response.status).toBe(202)
+		expect(response.headers.get('cache-control')).toBe('no-store')
+		expect(await response.json()).toEqual({ state: 'pending', summary: null })
+		expect(requestedRunId === 'run-20260101-000000').toBe(true)
+	})
+
+	test('returns a ready state with 202', async () => {
+		const summary: TaskSummary = { formatVersion: 1, runId: 'run-20260101-000000', fingerprint: 'fingerprint', title: 'Ready title', description: 'Ready description.', generatedAt: '2026-01-01T00:00:00.000Z' }
+		const { handler } = createHandlerHarness({ requestTaskThreadSummary: () => ({ state: 'ready', summary }) })
+		const response = await handler(post('/api/runs/run-20260101-000000/thread/summary'))
+		expect(response.status).toBe(202)
+		expect(await response.json()).toEqual({ state: 'ready', summary })
+	})
+
+	test('rejects traversal-shaped run ids before triggering generation', async () => {
+		let summaryRequests = 0
+		const { handler } = createHandlerHarness({
+			requestTaskThreadSummary: () => {
+				summaryRequests++
+				return { state: 'pending', summary: null }
+			},
+		})
+		const response = await handler(post('/api/runs/..%2Frun-20260101-000000/thread/summary'))
+		expect(response.status).toBe(404)
+		expect(response.headers.get('cache-control')).toBe('no-store')
+		expect(summaryRequests).toBe(0)
+	})
+
+	test('returns 404 for an unknown run without triggering generation', async () => {
+		let summaryRequests = 0
+		const { handler } = createHandlerHarness({
+			requestTaskThreadSummary: () => {
+				summaryRequests++
+				return { state: 'pending', summary: null }
+			},
+		})
+		const response = await handler(post('/api/runs/run-19990101-000000/thread/summary'))
+		expect(response.status).toBe(404)
+		expect(response.headers.get('cache-control')).toBe('no-store')
+		expect(summaryRequests).toBe(0)
 	})
 })
 

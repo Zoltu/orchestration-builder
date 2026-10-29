@@ -21,6 +21,9 @@ import { createOperationDetails } from './operation-details.js'
 import { deriveTerminalResult, ResultModal, ResultPendingModal } from './result-modal.js'
 import { deriveSuspendedCard, resumeFailureCopy, SuspendedCard, suspendedTerminateTarget, terminateFailureCopy } from './suspended-card.js'
 import { deriveHealthBanner, HealthBanner } from './health-banner.js'
+import { applyTaskThreadSummarySnapshot, createTaskHistoryDrawerRenderer, deriveTaskIdentityHeader, isCurrentTaskThreadResponse, isCurrentTaskThreadSummaryResponse, isTaskThreadResponse, isTaskThreadSummarySnapshot, nextTaskThreadSummaryAutoRetry, planTaskThreadSummary, shouldApplyTaskThreadSummaryFailure, shouldRefreshTaskThread, shouldRetryTaskThread404, TaskIdentityHeader, taskThreadFingerprint, taskThreadRefreshSignal, taskThreadSummaryIsForHeldThread, taskThreadSummaryMatches, taskThreadSummaryUrl, taskThreadUrl, TASK_THREAD_REFRESH_DEBOUNCE_MS, TASK_THREAD_SUMMARY_MAX_REFETCHES, TASK_THREAD_SUMMARY_REFETCH_DELAY_MS, TASK_THREAD_SUMMARY_RETRY_COOLDOWN_MS } from './task-identity/index.js'
+import type { TaskThreadLoadState, TaskThreadResponse } from './task-identity/index.js'
+import { topmostAppOverlay } from './overlay-priority.js'
 import { deriveHistoryEntries, lineageLink, queueItemLineageLink, runPrimaryLabel, runSummaryIndex } from './run-history.js'
 import type { LineageLink } from './run-history.js'
 import { acceptedResultView, planResultOpen, planResultRetry, planRunViewRecovery, resultOffersContinue, selectResultSource, withoutVersion } from './result-access.js'
@@ -273,6 +276,24 @@ export interface ApplicationState {
 	inspectorModalOpen: boolean
 	// The plan disclosure under the stage: collapsed by default, reset with the other per-run view state on a run switch.
 	planExpanded: boolean
+	// The selected run's task thread (GET /api/runs/:id/thread): the header's identity source and the drawer's content. The load state tracks the request without hiding a held thread; the trigger key dedupes summary POSTs for one thread snapshot.
+	taskThread: TaskThreadResponse | null
+	taskThreadLoad: TaskThreadLoadState
+	taskThreadDrawerOpen: boolean
+	taskThreadRequestToken: number
+	taskThreadSignal: string | null
+	taskThreadRefreshScheduled: boolean
+	taskThreadTransientRetries: number
+	taskThreadSummaryRequestToken: number
+	taskThreadSummaryTriggerKey: string | null
+	taskThreadSummaryFailedKey: string | null
+	taskThreadSummaryRetryAt: number | null
+	taskThreadSummaryPendingKey: string | null
+	taskThreadSummaryRefetchCount: number
+	taskThreadSummaryPending: boolean
+	taskThreadSummaryRequestFailed: boolean
+	taskThreadSummaryAutoRetryKey: string | null
+	taskThreadSummaryAutoRetryCount: number
 	// The live token stream's ephemeral partial (see "Live token stream"): the in-flight reasoning/content the inspector modal renders under the matching in-flight row. Null whenever nothing is streaming or the stream is down; never an authority on run state.
 	livePartial: LivePartial | null
 	// The current websocket phase, so the inspector can show a reconnect indicator when live text is expected but the stream is down.
@@ -327,8 +348,10 @@ export interface FetchEffectPayload {
 export type FetchEffect = [EffectRunner<FetchEffectPayload>, FetchEffectPayload]
 export type NullPayloadEffect = [EffectRunner<null>, null]
 export type FaviconEffect = [EffectRunner<ApplicationState>, ApplicationState]
+export type TaskThreadRefetchEffect = [EffectRunner<{ runId: string }>, { runId: string }]
+export type TaskThreadTimedRefetchEffect = [EffectRunner<{ runId: string; delayMs: number }>, { runId: string; delayMs: number }]
 
-export type EffectItem = FetchEffect | NullPayloadEffect | FaviconEffect
+export type EffectItem = FetchEffect | NullPayloadEffect | FaviconEffect | TaskThreadRefetchEffect | TaskThreadTimedRefetchEffect
 
 // --- Constants and formatting helpers --------------------------------------
 
@@ -452,6 +475,9 @@ const operationDetails = createOperationDetails({}, { maxEntries: 512, maxCharac
 
 // The LLM turn inspector's session (see turn-inspector/index.js): it owns the unscoped tail window, the per-instance scoped windows, the fetch decisions that page them, the turn/transcript derivations, and the per-turn wire-envelope cache. Module scope like operationDetails — inspection-session memory, not app state. The host only performs the requests it returns and passes the response back.
 const inspectorSession = createInspectorSession()
+
+// The open task-history drawer's memo: its vnode is rebuilt only when the thread, load flags, summary flags, or handlers change, so a now-only tick cannot re-render every Markdown turn in the drawer.
+const taskHistoryDrawerRenderer = createTaskHistoryDrawerRenderer()
 
 // The live-token-stream client (see stream-client.js and docs/reference.md "Live token stream"): module scope like the other session caches, created lazily by the stream subscription on the first watch-screen mount. Leaving Watch (or the run becoming terminal) unsubscribes and closes the socket; returning reconnects rather than leaving a dormant connection open. The stream is an enhancement — the client is contained (never throws, shows no error surface), and the only state it feeds is the ephemeral `livePartial` the inspector modal's in-flight turn renders.
 let streamClient: StreamClient | null = null
@@ -876,12 +902,15 @@ function GotRunList(state: ApplicationState, payload: FetchResultPayload): Actio
 			nextState.justSubmittedRunId = null
 		}
 		// Auto-select the newest run when nothing is selected so the user lands on live activity.
+		let autoSelectedRunId: string | null = null
 		if (nextState.selectedRunId === null && result.summaries.length > 0) {
 			const newest = result.summaries[0]
 			if (newest !== undefined) {
 				nextState.selectedRunId = newest.runId
 				nextState.selectedRunView = null
 				nextState.selectedRunStatus = null
+				nextState.taskThreadLoad = 'loading'
+				autoSelectedRunId = newest.runId
 			}
 		}
 		// The per-run poll is off-duty off the watch screen, so the run list is the only status source there.
@@ -895,7 +924,11 @@ function GotRunList(state: ApplicationState, payload: FetchResultPayload): Actio
 			}
 		}
 		const prompted = autoOpenQuestionPrompt(nextState)
-		return [prompted, UpdateFavicon(prompted)]
+		if (autoSelectedRunId !== null) {
+			const [threadState, threadEffects] = splitActionResult(FetchTaskThread(autoSelectedRunId)(prompted))
+			return [threadState, UpdateFavicon(threadState), ...threadEffects]
+		}
+		return withTaskThreadRefreshResult([prompted, UpdateFavicon(prompted)])
 	}
 	// A delta whose base the client no longer holds cannot be applied; re-fetching with no `have` asks the server for a full snapshot. The held replica and summaries stand until it lands.
 	if (result.outcome === 'needsSnapshot') {
@@ -979,7 +1012,8 @@ function GotSelectedRun(curriedRunId: string) {
 		}
 		// A completion transition resets the inspector's scope to auto, so the next open lands on the most recently active instance (here, the finishing one) instead of whatever the operator had scoped to during the run.
 		if (isCompletionTransition) inspectorSession.scope(null)
-		return [{ ...state, selectedRunView: body, selectedRunStatus: body.status, resultModalOpen, resultShownForRun, interruptAnswerCard, shownInterruptAnswerKeys, serverAvailable: true, providerHealth: body.providerHealth ?? state.providerHealth, livePartial: isSettledForPolling(body.status) ? null : state.livePartial, versions: recordVersion(state.versions, payload) }, SyncSequenceFollower()]
+		const selectedState: ApplicationState = { ...state, selectedRunView: body, selectedRunStatus: body.status, resultModalOpen, resultShownForRun, interruptAnswerCard, shownInterruptAnswerKeys, serverAvailable: true, providerHealth: body.providerHealth ?? state.providerHealth, livePartial: isSettledForPolling(body.status) ? null : state.livePartial, versions: recordVersion(state.versions, payload) }
+		return withTaskThreadRefreshResult([selectedState, SyncSequenceFollower()])
 	}
 }
 
@@ -1008,10 +1042,8 @@ function GotQuestions(state: ApplicationState, payload: FetchResultPayload): Act
 	}
 	// The prompt controller owns opening, including the first poll; `hasNew` only decides whether to beep (the first poll baselines alerts without sounding one). Falsy effects are ignored by hyperapp, so the conditional inlines cleanly.
 	const prompted = autoOpenQuestionPrompt(nextState)
-	if (hasNew) {
-		return [prompted, UpdateFavicon(prompted), state.muted ? null : PlayBeep()]
-	}
-	return [prompted, UpdateFavicon(prompted)]
+	if (hasNew) return withTaskThreadRefreshResult([prompted, UpdateFavicon(prompted), state.muted ? null : PlayBeep()])
+	return withTaskThreadRefreshResult([prompted, UpdateFavicon(prompted)])
 }
 
 function FetchFailed(state: ApplicationState): ApplicationState {
@@ -1041,23 +1073,23 @@ function GotQueue(state: ApplicationState, payload: FetchResultPayload): ActionR
 	const pendingResumeItemId = nextState.pendingResumeItemId
 	if (pendingResumeItemId === null) {
 		const prompted = autoOpenQuestionPrompt(nextState)
-		return [prompted, UpdateFavicon(prompted)]
+		return withTaskThreadRefreshResult([prompted, UpdateFavicon(prompted)])
 	}
 	const item = nextState.queueItems.find((entry) => entry.id === pendingResumeItemId)
 	if (item === undefined || item.status === 'cancelled') {
 		const cleared = autoOpenQuestionPrompt({ ...nextState, pendingResumeItemId: null })
-		return [cleared, UpdateFavicon(cleared)]
+		return withTaskThreadRefreshResult([cleared, UpdateFavicon(cleared)])
 	}
 	if (typeof item.runId === 'string' && item.runId !== '') {
 		const cleared = { ...nextState, pendingResumeItemId: null }
-		return withFavicon(ReactivateRunForAnswer(cleared, item.runId))
+		return withTaskThreadRefreshResult(withFavicon(ReactivateRunForAnswer(cleared, item.runId)))
 	}
 	if (item.status === 'done' || item.status === 'error') {
 		const cleared = autoOpenQuestionPrompt({ ...nextState, pendingResumeItemId: null })
-		return [cleared, UpdateFavicon(cleared)]
+		return withTaskThreadRefreshResult([cleared, UpdateFavicon(cleared)])
 	}
 	const prompted = autoOpenQuestionPrompt(nextState)
-	return [prompted, UpdateFavicon(prompted)]
+	return withTaskThreadRefreshResult([prompted, UpdateFavicon(prompted)])
 }
 
 // The queue add resolved: the created item's id is remembered so the follow-up queue read can see whether the scheduler dispatched it within the same request (the idle case) — the operator then lands on the new run's watch screen exactly as a start-now submit always has. The poll's own queue reads deliberately do not consume this selection: a task added while a run is in flight dispatches much later, and jumping then would yank the operator off whatever they are reading.
@@ -1191,7 +1223,7 @@ function ApplyAnsweredQueue(answeredItemId: string) {
 		const item = queued.queueItems.find((entry) => entry.id === answeredItemId)
 		if (item !== undefined && typeof item.runId === 'string' && item.runId !== '') {
 			const cleared = { ...queued, pendingResumeItemId: null }
-			return withFavicon(ReactivateRunForAnswer(cleared, item.runId))
+			return withTaskThreadRefreshResult(withFavicon(ReactivateRunForAnswer(cleared, item.runId)))
 		}
 		const deferred = autoOpenQuestionPrompt({ ...queued, pendingResumeItemId: answeredItemId })
 		return [deferred, UpdateFavicon(deferred)]
@@ -1548,6 +1580,23 @@ function resetRunView(state: ApplicationState, runId: string, status: RunStatus 
 		planExpanded: false,
 		inspectorModalOpen: false,
 		livePartial: null,
+		taskThread: null,
+		taskThreadLoad: 'idle',
+		taskThreadDrawerOpen: false,
+		taskThreadRequestToken: state.taskThreadRequestToken,
+		taskThreadSignal: null,
+		taskThreadRefreshScheduled: false,
+		taskThreadTransientRetries: 0,
+		taskThreadSummaryRequestToken: state.taskThreadSummaryRequestToken,
+		taskThreadSummaryTriggerKey: null,
+		taskThreadSummaryFailedKey: null,
+		taskThreadSummaryRetryAt: null,
+		taskThreadSummaryPendingKey: null,
+		taskThreadSummaryRefetchCount: 0,
+		taskThreadSummaryPending: false,
+		taskThreadSummaryRequestFailed: false,
+		taskThreadSummaryAutoRetryKey: null,
+		taskThreadSummaryAutoRetryCount: 0,
 	}
 }
 
@@ -1558,6 +1607,378 @@ function switchRunView(state: ApplicationState, runId: string, status: RunStatus
 	// Suppression survives a same-run refresh or answer-driven reactivation; only an actual selection change clears the keys.
 	if (runId === state.selectedRunId) return reset
 	return { ...reset, questionPromptSuppressedKeys: [] }
+}
+
+function runTaskThreadRefetch(dispatch: Dispatch, payload: { runId: string }): void {
+	setTimeout(() => dispatch(FetchTaskThread(payload.runId)), TASK_THREAD_SUMMARY_REFETCH_DELAY_MS)
+}
+
+function TaskThreadRefetch(runId: string): TaskThreadRefetchEffect {
+	return [runTaskThreadRefetch, { runId }]
+}
+
+function runTaskThreadTimedRefetch(dispatch: Dispatch, payload: { runId: string; delayMs: number }): void {
+	setTimeout(() => dispatch(FetchTaskThread(payload.runId)), payload.delayMs)
+}
+
+function TaskThreadTimedRefetch(runId: string, delayMs: number): TaskThreadTimedRefetchEffect {
+	return [runTaskThreadTimedRefetch, { runId, delayMs }]
+}
+
+function runTaskThreadRefreshDebounced(dispatch: Dispatch, payload: { runId: string }): void {
+	setTimeout(() => dispatch(RefreshTaskThreadAfterSignal, payload.runId), TASK_THREAD_REFRESH_DEBOUNCE_MS)
+}
+
+function TaskThreadRefreshDebounced(runId: string): TaskThreadRefetchEffect {
+	return [runTaskThreadRefreshDebounced, { runId }]
+}
+
+function RefreshTaskThreadAfterSignal(state: ApplicationState, runId: string): ActionReturn {
+	if (state.selectedRunId !== runId) return state
+	return FetchTaskThread(runId)({ ...state, taskThreadRefreshScheduled: false })
+}
+
+function taskThreadCurrentSignal(state: ApplicationState): string {
+	const selectedRunId = state.selectedRunId
+	const view = state.selectedRunView !== null && state.selectedRunView.runId === selectedRunId ? state.selectedRunView : null
+	const prompt = deriveCurrentQuestionPrompt(state)
+	return taskThreadRefreshSignal({
+		runId: selectedRunId,
+		status: state.selectedRunStatus,
+		result: view === null ? null : view.result,
+		interrupts: view === null ? null : view.interrupts,
+		questionKey: prompt === null ? null : prompt.key,
+	})
+}
+
+function withTaskThreadRefresh(next: ApplicationState): [ApplicationState, OptionalEffect[]] {
+	const runId = next.selectedRunId
+	if (next.screen !== 'watch') return [next, []]
+	const signal = taskThreadCurrentSignal(next)
+	if (!shouldRefreshTaskThread(next.taskThreadSignal, signal, runId)) return [next, []]
+	const marked = { ...next, taskThreadSignal: signal }
+	if (runId === null || runId === '' || next.taskThreadRefreshScheduled) return [marked, []]
+	return [{ ...marked, taskThreadRefreshScheduled: true }, [TaskThreadRefreshDebounced(runId)]]
+}
+
+function withTaskThreadRefreshResult(result: ActionReturn): ActionReturn {
+	const [next, effects] = splitActionResult(result)
+	const [refreshed, refreshEffects] = withTaskThreadRefresh(next)
+	return [refreshed, ...effects, ...refreshEffects]
+}
+
+function FetchTaskThread(runId: string) {
+	return function FetchTaskThreadForRun(state: ApplicationState): ActionReturn {
+		if (state.selectedRunId !== runId) return state
+		const requestToken = state.taskThreadRequestToken + 1
+		return [
+			{ ...state, taskThreadLoad: 'loading', taskThreadRequestToken: requestToken, taskThreadSignal: taskThreadCurrentSignal(state) },
+			Fetch({ url: taskThreadUrl(runId), init: { cache: 'no-store' }, ok: GotTaskThread(runId, requestToken), fail: TaskThreadFetchFailed(runId, requestToken) }),
+		]
+	}
+}
+
+function taskThreadSummaryFailureState(state: ApplicationState, thread: TaskThreadResponse | null, fallbackKey: string | null): ApplicationState {
+	const key = thread === null ? fallbackKey : taskThreadFingerprint(thread)
+	const sameFailure = key !== null && state.taskThreadSummaryFailedKey === key
+	const retryAt = sameFailure && state.taskThreadSummaryRetryAt !== null ? state.taskThreadSummaryRetryAt : Date.now() + TASK_THREAD_SUMMARY_RETRY_COOLDOWN_MS
+	return {
+		...state,
+		taskThread: thread === null ? state.taskThread : applyTaskThreadSummarySnapshot(thread, { state: 'failed', summary: null }),
+		taskThreadSummaryTriggerKey: null,
+		taskThreadSummaryFailedKey: key,
+		taskThreadSummaryRetryAt: retryAt,
+		taskThreadSummaryPendingKey: null,
+		taskThreadSummaryRefetchCount: 0,
+		taskThreadSummaryPending: false,
+		taskThreadSummaryRequestFailed: true,
+	}
+}
+
+function taskThreadSummaryFailureResult(state: ApplicationState, thread: TaskThreadResponse | null, fallbackKey: string | null, runId: string): ActionReturn {
+	const key = thread === null ? fallbackKey : taskThreadFingerprint(thread)
+	const retry = nextTaskThreadSummaryAutoRetry({ failedKey: key, previousKey: state.taskThreadSummaryAutoRetryKey, previousCount: state.taskThreadSummaryAutoRetryCount })
+	const failed = {
+		...taskThreadSummaryFailureState(state, thread, fallbackKey),
+		taskThreadSummaryAutoRetryKey: retry.key,
+		taskThreadSummaryAutoRetryCount: retry.count,
+	}
+	return [failed, retry.shouldSchedule ? TaskThreadTimedRefetch(runId, TASK_THREAD_SUMMARY_RETRY_COOLDOWN_MS + 1000) : null]
+}
+
+function GotTaskThread(runId: string, requestToken: number) {
+	return function GotTaskThreadForRun(state: ApplicationState, payload: FetchResultPayload): ActionReturn {
+		if (!isCurrentTaskThreadResponse({ requestToken, currentToken: state.taskThreadRequestToken, runId, selectedRunId: state.selectedRunId })) return state
+		const body = payload.body
+		if (!payload.ok || !isTaskThreadResponse(body) || body.runId !== runId) {
+			if (shouldRetryTaskThread404(payload.status, state.taskThreadTransientRetries)) {
+				return [
+					{ ...state, taskThreadLoad: 'loading', taskThreadTransientRetries: state.taskThreadTransientRetries + 1 },
+					TaskThreadRefetch(runId),
+				]
+			}
+			const pendingSummary = state.taskThreadSummaryPending || (state.taskThread !== null && state.taskThread.runId === runId && state.taskThread.summaryState === 'pending')
+			return { ...state, taskThreadLoad: 'error', taskThreadSummaryPending: false, taskThreadSummaryRequestFailed: state.taskThreadSummaryRequestFailed || pendingSummary }
+		}
+		const nextState: ApplicationState = {
+			...state,
+			taskThread: body,
+			taskThreadLoad: 'ready',
+			taskThreadTransientRetries: 0,
+		}
+		if (body.summaryState === 'failed') return taskThreadSummaryFailureResult(nextState, body, null, runId)
+		if (body.summaryState === 'ready') {
+			return {
+				...nextState,
+				taskThreadSummaryTriggerKey: null,
+				taskThreadSummaryFailedKey: null,
+				taskThreadSummaryRetryAt: null,
+				taskThreadSummaryPendingKey: null,
+				taskThreadSummaryRefetchCount: 0,
+				taskThreadSummaryPending: false,
+				taskThreadSummaryRequestFailed: false,
+				taskThreadSummaryAutoRetryKey: null,
+				taskThreadSummaryAutoRetryCount: 0,
+			}
+		}
+		const plan = planTaskThreadSummary({
+			thread: body,
+			failedKey: state.taskThreadSummaryFailedKey,
+			retryAt: state.taskThreadSummaryRetryAt,
+			now: Date.now(),
+			pendingRefetches: state.taskThreadSummaryRefetchCount,
+		})
+		const effects: OptionalEffect[] = []
+		let triggerKey = state.taskThreadSummaryTriggerKey
+		let failedKey = state.taskThreadSummaryFailedKey
+		let retryAt = state.taskThreadSummaryRetryAt
+		let pendingKey = state.taskThreadSummaryPendingKey
+		let refetchCount = state.taskThreadSummaryRefetchCount
+		let autoRetryKey = state.taskThreadSummaryAutoRetryKey
+		let autoRetryCount = state.taskThreadSummaryAutoRetryCount
+		let summaryRequestToken = state.taskThreadSummaryRequestToken
+		let summaryPending = body.summaryState === 'pending'
+		let requestFailed = state.taskThreadSummaryRequestFailed
+		if (body.summaryState === 'pending') {
+			failedKey = null
+			retryAt = null
+			const key = taskThreadFingerprint(body)
+			if (pendingKey !== key) {
+				pendingKey = key
+				refetchCount = 0
+			}
+			if (plan.kind === 'refetch') {
+				refetchCount += 1
+				requestFailed = false
+				effects.push(TaskThreadRefetch(runId))
+			} else if (plan.kind === 'timed-out') {
+				summaryPending = false
+				requestFailed = true
+			}
+		} else if (plan.kind === 'trigger') {
+			triggerKey = plan.key
+			failedKey = null
+			retryAt = null
+			pendingKey = null
+			refetchCount = 0
+			if (plan.key !== autoRetryKey) {
+				autoRetryKey = null
+				autoRetryCount = 0
+			}
+			summaryRequestToken += 1
+			summaryPending = true
+			requestFailed = false
+			effects.push(Fetch({
+				url: taskThreadSummaryUrl(runId),
+				init: { method: 'POST' },
+				ok: GotTaskThreadSummary(runId, summaryRequestToken, plan.key),
+				fail: TaskThreadSummaryFailed(runId, summaryRequestToken, plan.key),
+			}))
+		} else {
+			summaryPending = false
+		}
+		return [{
+			...nextState,
+			taskThreadSummaryRequestToken: summaryRequestToken,
+			taskThreadSummaryTriggerKey: triggerKey,
+			taskThreadSummaryFailedKey: failedKey,
+			taskThreadSummaryRetryAt: retryAt,
+			taskThreadSummaryPendingKey: pendingKey,
+			taskThreadSummaryRefetchCount: refetchCount,
+			taskThreadSummaryPending: summaryPending,
+			taskThreadSummaryRequestFailed: requestFailed,
+			taskThreadSummaryAutoRetryKey: autoRetryKey,
+			taskThreadSummaryAutoRetryCount: autoRetryCount,
+		}, ...effects]
+	}
+}
+
+function GotTaskThreadSummary(runId: string, requestToken: number, triggerKey: string) {
+	return function GotTaskThreadSummaryForRun(state: ApplicationState, payload: FetchResultPayload): ActionReturn {
+		if (!isCurrentTaskThreadSummaryResponse({
+			requestToken,
+			currentToken: state.taskThreadSummaryRequestToken,
+			triggerKey,
+			currentTriggerKey: state.taskThreadSummaryTriggerKey,
+			runId,
+			selectedRunId: state.selectedRunId,
+		})) return state
+		const snapshot = payload.body
+		const heldThread = state.taskThread !== null && state.taskThread.runId === runId ? state.taskThread : null
+		if (!payload.ok || !isTaskThreadSummarySnapshot(snapshot)) {
+			if (!shouldApplyTaskThreadSummaryFailure({
+				requestToken,
+				currentToken: state.taskThreadSummaryRequestToken,
+				triggerKey,
+				currentTriggerKey: state.taskThreadSummaryTriggerKey,
+				runId,
+				selectedRunId: state.selectedRunId,
+				heldThread,
+			})) return state
+			return taskThreadSummaryFailureResult(state, heldThread, triggerKey, runId)
+		}
+		if (snapshot.state === 'ready') {
+			if (heldThread === null || snapshot.summary === null || !taskThreadSummaryMatches(heldThread, snapshot.summary)) {
+				return { ...state, taskThreadSummaryPending: false }
+			}
+			return {
+				...state,
+				taskThread: applyTaskThreadSummarySnapshot(heldThread, snapshot),
+				taskThreadSummaryTriggerKey: null,
+				taskThreadSummaryFailedKey: null,
+				taskThreadSummaryRetryAt: null,
+				taskThreadSummaryPendingKey: null,
+				taskThreadSummaryRefetchCount: 0,
+				taskThreadSummaryPending: false,
+				taskThreadSummaryRequestFailed: false,
+				taskThreadSummaryAutoRetryKey: null,
+				taskThreadSummaryAutoRetryCount: 0,
+			}
+		}
+		if (snapshot.state === 'failed') {
+			if (!shouldApplyTaskThreadSummaryFailure({
+				requestToken,
+				currentToken: state.taskThreadSummaryRequestToken,
+				triggerKey,
+				currentTriggerKey: state.taskThreadSummaryTriggerKey,
+				runId,
+				selectedRunId: state.selectedRunId,
+				heldThread,
+			})) return state
+			return taskThreadSummaryFailureResult(state, heldThread, triggerKey, runId)
+		}
+		if (!taskThreadSummaryIsForHeldThread(triggerKey, heldThread)) return state
+		const effects: OptionalEffect[] = []
+		let refetchCount = state.taskThreadSummaryRefetchCount
+		let pendingKey = state.taskThreadSummaryPendingKey
+		if (snapshot.state === 'pending' && heldThread !== null) {
+			const key = taskThreadFingerprint(heldThread)
+			if (pendingKey !== key) {
+				pendingKey = key
+				refetchCount = 0
+			}
+			if (refetchCount < TASK_THREAD_SUMMARY_MAX_REFETCHES) {
+				refetchCount += 1
+				effects.push(TaskThreadRefetch(runId))
+			} else {
+				return [{
+					...state,
+					taskThread: applyTaskThreadSummarySnapshot(heldThread, snapshot),
+					taskThreadSummaryPendingKey: pendingKey,
+					taskThreadSummaryRefetchCount: refetchCount,
+					taskThreadSummaryPending: false,
+					taskThreadSummaryRequestFailed: true,
+				}]
+			}
+		}
+		return [{
+			...state,
+			taskThread: heldThread === null ? state.taskThread : applyTaskThreadSummarySnapshot(heldThread, snapshot),
+			taskThreadSummaryFailedKey: null,
+			taskThreadSummaryRetryAt: null,
+			taskThreadSummaryPendingKey: pendingKey,
+			taskThreadSummaryRefetchCount: refetchCount,
+			taskThreadSummaryPending: snapshot.state === 'pending',
+			taskThreadSummaryRequestFailed: false,
+		}, ...effects]
+	}
+}
+
+function TaskThreadFetchFailed(runId: string, requestToken: number) {
+	return function TaskThreadFetchFailedForRun(state: ApplicationState): ApplicationState {
+		if (!isCurrentTaskThreadResponse({ requestToken, currentToken: state.taskThreadRequestToken, runId, selectedRunId: state.selectedRunId })) return state
+		const pendingSummary = state.taskThreadSummaryPending || (state.taskThread !== null && state.taskThread.runId === runId && state.taskThread.summaryState === 'pending')
+		return { ...state, taskThreadLoad: 'error', taskThreadSummaryPending: false, taskThreadSummaryRequestFailed: state.taskThreadSummaryRequestFailed || pendingSummary }
+	}
+}
+
+function TaskThreadSummaryFailed(runId: string, requestToken: number, triggerKey: string) {
+	return function TaskThreadSummaryFailedForRun(state: ApplicationState): ActionReturn {
+		const heldThread = state.taskThread !== null && state.taskThread.runId === runId ? state.taskThread : null
+		if (!shouldApplyTaskThreadSummaryFailure({
+			requestToken,
+			currentToken: state.taskThreadSummaryRequestToken,
+			triggerKey,
+			currentTriggerKey: state.taskThreadSummaryTriggerKey,
+			runId,
+			selectedRunId: state.selectedRunId,
+			heldThread,
+		})) return state
+		return taskThreadSummaryFailureResult(state, heldThread, triggerKey, runId)
+	}
+}
+
+function RetryTaskThreadLoad(state: ApplicationState): ActionReturn {
+	const runId = state.selectedRunId
+	if (runId === null || runId === '') return state
+	return FetchTaskThread(runId)(state)
+}
+
+function RetryTaskThreadSummary(state: ApplicationState): ActionReturn {
+	const runId = state.selectedRunId
+	if (runId === null || runId === '') return state
+	const thread = state.taskThread !== null && state.taskThread.runId === runId ? state.taskThread : null
+	if (thread === null) return state
+	const key = taskThreadFingerprint(thread)
+	const requestToken = state.taskThreadSummaryRequestToken + 1
+	return [
+		{
+			...state,
+			taskThreadSummaryRequestToken: requestToken,
+			taskThreadSummaryTriggerKey: key,
+			taskThreadSummaryFailedKey: null,
+			taskThreadSummaryRetryAt: null,
+			taskThreadSummaryPendingKey: null,
+			taskThreadSummaryRefetchCount: 0,
+			taskThreadSummaryPending: true,
+			taskThreadSummaryRequestFailed: false,
+			taskThreadSummaryAutoRetryKey: null,
+			taskThreadSummaryAutoRetryCount: 0,
+		},
+		Fetch({ url: taskThreadSummaryUrl(runId), init: { method: 'POST' }, ok: GotTaskThreadSummary(runId, requestToken, key), fail: TaskThreadSummaryFailed(runId, requestToken, key) }),
+	]
+}
+
+function OpenTaskThreadDrawer(state: ApplicationState): ActionReturn {
+	return [{ ...state, taskThreadDrawerOpen: true, tooltip: null }, CancelTooltipDismiss()]
+}
+
+function CloseTaskThreadDrawer(state: ApplicationState): ApplicationState {
+	if (!state.taskThreadDrawerOpen) return state
+	return { ...state, taskThreadDrawerOpen: false }
+}
+
+function CloseTopmostAppOverlay(state: ApplicationState): ActionReturn {
+	const overlay = topmostAppOverlay({ taskHistory: state.taskThreadDrawerOpen, questionPrompt: state.questionPromptOpenKey !== null, inspector: state.inspectorModalOpen })
+	if (overlay === 'task-history') return CloseTaskThreadDrawer(state)
+	if (overlay === 'question-prompt') return CloseQuestionPrompt(state)
+	if (overlay === 'inspector') return CloseInspectorModal(state)
+	return state
+}
+
+// The latest-human chip always opens the full thread: the latest human event is an answer or note, so it names no still-addressable queue prompt.
+function OpenTaskIdentityLatestHuman(state: ApplicationState): ActionReturn {
+	return OpenTaskThreadDrawer(state)
 }
 
 function SelectRun(state: ApplicationState, runId: string): ActionReturn {
@@ -1576,15 +1997,18 @@ function SelectRun(state: ApplicationState, runId: string): ActionReturn {
 				inspectorSession.close()
 				const refreshed = switchRunView(state, runId, null)
 				const [pollState, effects] = splitActionResult(PollSelectedRun(refreshed))
-				return [autoOpenQuestionPrompt(pollState), ...effects, SyncSequenceFollower(), SyncInspectorFollower()]
+				const [threadState, threadEffects] = splitActionResult(FetchTaskThread(runId)(pollState))
+				return [autoOpenQuestionPrompt(threadState), ...effects, ...threadEffects, SyncSequenceFollower(), SyncInspectorFollower()]
 			}
 		}
 		const prompted = autoOpenQuestionPrompt({ ...state, screen: 'watch' })
-		return [prompted, SyncSequenceFollower(), SyncInspectorFollower()]
+		const [threadState, threadEffects] = splitActionResult(FetchTaskThread(runId)(prompted))
+		return [threadState, ...threadEffects, SyncSequenceFollower(), SyncInspectorFollower()]
 	}
 	// Selecting a run always lands on the watch screen (history rows and the in-progress pill both go through here); the switch clears any open/suppressed prompt before the new selection's own prompt may auto-open.
 	inspectorSession.close()
-	return [autoOpenQuestionPrompt(switchRunView(state, runId, null)), SyncSequenceFollower(), SyncInspectorFollower()]
+	const [switchedState, switchedEffects] = splitActionResult(FetchTaskThread(runId)(autoOpenQuestionPrompt(switchRunView(state, runId, null))))
+	return [switchedState, ...switchedEffects, SyncSequenceFollower(), SyncInspectorFollower()]
 }
 
 // Answering a parked question resumes the same run id rather than starting a new one. A different run goes through the normal switch; the same run must stay selected while its terminal needs_clarification status is reset to the non-terminal 'unknown', because the per-run poll and stream subscriptions are disabled on a terminal status. The status reset also clears resultShownForRun (through resetRunView), so the resumed run's eventual outcome opens the result modal again; the next poll's still-parked needs_clarification meta is not a completion transition from unknown, so it cannot reopen the old card.
@@ -1593,7 +2017,8 @@ function ReactivateRunForAnswer(state: ApplicationState, runId: string): ActionR
 	inspectorSession.close()
 	const refreshed = switchRunView(state, runId, 'unknown')
 	// Answering a parked prompt reactivates the same run, not a run switch, so its suppression survives and a late queue read cannot reopen it.
-	return [autoOpenQuestionPrompt(refreshed), SyncSequenceFollower(), SyncInspectorFollower()]
+	const [threadState, threadEffects] = splitActionResult(FetchTaskThread(runId)(autoOpenQuestionPrompt(refreshed)))
+	return [threadState, ...threadEffects, SyncSequenceFollower(), SyncInspectorFollower()]
 }
 
 function ToggleMute(state: ApplicationState, event: Event): ApplicationState {
@@ -1777,10 +2202,9 @@ function GotCreatedRun(state: ApplicationState, payload: FetchResultPayload): Ac
 	// Selecting the new run activates its per-run subscription; an immediate run-list fetch clears justSubmittedRunId as soon as the run appears. The continuation and the per-run modal/flow state are reset for the same reason SelectRun resets it — the composed run is on the server now, and a leftover chip would brief a stale lineage into the next task. The live partial clears with the rest (the stream subscription follows the new selection).
 	inspectorSession.close()
 	const reset = switchRunView(state, createdRunId, null)
-	return [
-		{ ...reset, continuation: null, justSubmittedRunId: createdRunId, createSending: false, serverAvailable: true },
-		Fetch({ url: 'api/runs', ok: GotRunList, fail: FetchFailed }),
-	]
+	const selected: ApplicationState = { ...reset, continuation: null, justSubmittedRunId: createdRunId, createSending: false, serverAvailable: true }
+	const [threadState, threadEffects] = splitActionResult(FetchTaskThread(createdRunId)(selected))
+	return [threadState, Fetch({ url: 'api/runs', ok: GotRunList, fail: FetchFailed }), ...threadEffects]
 }
 
 // A fail action of the create POST's own rather than the shared FetchFailed: only the create's failure may release the in-flight guard — a poll or config fetch failing must not.
@@ -1798,10 +2222,9 @@ function GotResumedRun(state: ApplicationState, payload: FetchResultPayload): Ac
 		if (isObject(body) && typeof body['runId'] === 'string' && body['runId'] === resumedRunId) {
 			inspectorSession.close()
 			const reset = switchRunView(state, resumedRunId, null)
-			return [
-				{ ...reset, resumingRunId: null, resumeSending: false, resumeNotice: null, continuation: null, justSubmittedRunId: resumedRunId, serverAvailable: true },
-				Fetch({ url: 'api/runs', ok: GotRunList, fail: FetchFailed }),
-			]
+			const selected: ApplicationState = { ...reset, resumingRunId: null, resumeSending: false, resumeNotice: null, continuation: null, justSubmittedRunId: resumedRunId, serverAvailable: true }
+			const [threadState, threadEffects] = splitActionResult(FetchTaskThread(resumedRunId)(selected))
+			return [threadState, Fetch({ url: 'api/runs', ok: GotRunList, fail: FetchFailed }), ...threadEffects]
 		}
 		// A 201 that does not confirm the same run id is not a landing to act on: keep the mode (and the note) so the operator can retry, with the oddity said plainly.
 		return { ...state, resumeSending: false, resumeNotice: 'The server confirmed the resume but the response could not be read — check History before resuming again.' }
@@ -1842,11 +2265,9 @@ function GotSuspendedResume(runId: string) {
 		if (payload.status === 201 && isObject(body) && typeof body['runId'] === 'string' && body['runId'] === runId) {
 			inspectorSession.close()
 			const reset = switchRunView(cleared, runId, null)
-			return [
-				{ ...reset, suspendedModalOpen: false, suspendedActionNotice: null, continuation: null, resumingRunId: null, resumeSending: false, resumeNotice: null, justSubmittedRunId: runId },
-				Fetch({ url: 'api/runs', ok: GotRunList, fail: FetchFailed }),
-				Fetch({ url: 'api/queue', ok: GotQueue, fail: FetchFailed }),
-			]
+			const selected: ApplicationState = { ...reset, suspendedModalOpen: false, suspendedActionNotice: null, continuation: null, resumingRunId: null, resumeSending: false, resumeNotice: null, justSubmittedRunId: runId }
+			const [threadState, threadEffects] = splitActionResult(FetchTaskThread(runId)(selected))
+			return [threadState, Fetch({ url: 'api/runs', ok: GotRunList, fail: FetchFailed }), Fetch({ url: 'api/queue', ok: GotQueue, fail: FetchFailed }), ...threadEffects]
 		}
 		return [
 			{ ...cleared, suspendedActionNotice: resumeFailureCopy(payload.body, payload.status) },
@@ -1899,7 +2320,10 @@ function AnswerSent(promptKey: string) {
 		}
 		// Refresh the pending list immediately so the answered question disappears without waiting for the next tick. An answered question ends a `needs_clarification` wait, which is a terminal status that deactivated the per-run poll; resetting the status to the non-terminal `unknown` reactivates that poll so the run view and flow model resume as the run continues, and completion can later fire the result modal. The next poll repopulates the real status from the run meta. The handled key stays suppressed, so a response that still carries the question cannot reopen the modal after this success clears the open key.
 		const reactivated: ApplicationState = { ...state, pendingAnswerId: null, questionPromptOpenKey: settled.openKey, questionPromptSuppressedKeys: settled.suppressedKeys, selectedRunStatus: 'unknown', serverAvailable: true }
-		return [reactivated, Fetch({ url: 'api/questions', ok: GotQuestions, fail: FetchFailed })]
+		const runId = state.selectedRunId
+		if (runId === null || runId === '') return [reactivated, Fetch({ url: 'api/questions', ok: GotQuestions, fail: FetchFailed })]
+		const [threadState, threadEffects] = splitActionResult(FetchTaskThread(runId)(reactivated))
+		return [threadState, Fetch({ url: 'api/questions', ok: GotQuestions, fail: FetchFailed }), ...threadEffects]
 	}
 }
 
@@ -1940,9 +2364,13 @@ function SubmitInterrupt(state: ApplicationState, event: Event): ActionReturn {
 	]
 }
 
-function InterruptResponded(state: ApplicationState, payload: FetchResultPayload): ApplicationState {
+function InterruptResponded(state: ApplicationState, payload: FetchResultPayload): ActionReturn {
 	if (payload.status === 202) {
-		return { ...state, interruptSending: false, interruptNotice: 'Interrupt sent — it lands at the run\u2019s next safe point; the response appears in the Interrupts list.' }
+		const sent: ApplicationState = { ...state, interruptSending: false, interruptNotice: 'Interrupt sent — it lands at the run\u2019s next safe point; the response appears in the Interrupts list.' }
+		const runId = state.selectedRunId
+		if (runId === null || runId === '') return sent
+		const [threadState, threadEffects] = splitActionResult(FetchTaskThread(runId)(sent))
+		return [threadState, ...threadEffects]
 	}
 	if (payload.status === 409) {
 		return { ...state, interruptSending: false, interruptNotice: 'The run is no longer active — the interrupt was not sent.' }
@@ -2985,12 +3413,55 @@ function PlanSection(state: ApplicationState): Vnode | null {
 	])
 }
 
-// The run's lineage: a run that continued a prior finished run names it here, and clicking jumps to the prior run's view through the same SelectRun path the history rows and status pills use. The id is a machine field rendered as text; a run without lineage renders nothing.
-function LineageLine(state: ApplicationState): Vnode | null {
+function firstNonEmptyLine(text: string): string | null {
+	for (const line of text.split('\n')) {
+		const trimmed = line.trim()
+		if (trimmed !== '') return trimmed
+	}
+	return null
+}
+
+// The header's fallback source while the thread is loading or unreadable: the selected run view's task first, then the run-list label, then the run id. The bar never renders blank.
+function taskIdentityFallback(state: ApplicationState): { title: string; description: string | null } {
+	const selectedRunId = state.selectedRunId
+	if (selectedRunId === null || selectedRunId === '') return { title: 'No run selected', description: null }
 	const view = state.selectedRunView
-	if (view === null) return null
-	if (typeof view.continuesFrom !== 'string' || view.continuesFrom === '') return null
-	return h('button', { type: 'button', class: 'run-lineage', title: 'View the run this run continues', onclick: [SelectRun, view.continuesFrom] }, `Continues run ${view.continuesFrom}`)
+	if (view !== null && view.runId === selectedRunId && typeof view.task === 'string') {
+		const taskTitle = firstNonEmptyLine(view.task)
+		if (taskTitle !== null) return { title: taskTitle, description: null }
+	}
+	const summary = state.summaries.find((entry) => entry.runId === selectedRunId)
+	if (summary !== undefined) return { title: runPrimaryLabel(summary), description: null }
+	return { title: selectedRunId, description: null }
+}
+
+function TaskIdentityHeaderForRun(state: ApplicationState): Vnode {
+	const thread = state.taskThread !== null && state.taskThread.runId === state.selectedRunId ? state.taskThread : null
+	const descriptor = deriveTaskIdentityHeader({
+		thread,
+		fallback: taskIdentityFallback(state),
+		summaryRequestPending: state.taskThreadSummaryPending,
+		summaryRequestFailed: state.taskThreadSummaryRequestFailed,
+	})
+	return TaskIdentityHeader(h, { descriptor, onOpenHistory: OpenTaskThreadDrawer, onLatestHuman: OpenTaskIdentityLatestHuman, historyEnabled: state.selectedRunId !== null && state.selectedRunId !== '' })
+}
+
+function TaskHistoryDrawerForState(state: ApplicationState): Vnode | null {
+	if (!state.taskThreadDrawerOpen) {
+		taskHistoryDrawerRenderer.clear()
+		return null
+	}
+	const thread = state.taskThread !== null && state.taskThread.runId === state.selectedRunId ? state.taskThread : null
+	return taskHistoryDrawerRenderer.render(h, {
+		thread,
+		loadState: state.taskThreadLoad,
+		renderMarkdown,
+		onClose: CloseTaskThreadDrawer,
+		onRetryLoad: RetryTaskThreadLoad,
+		onRetrySummary: RetryTaskThreadSummary,
+		summaryRequestPending: state.taskThreadSummaryPending,
+		summaryRequestFailed: state.taskThreadSummaryRequestFailed,
+	})
 }
 
 // --- Sequence-view scroll following ----------------------------------------
@@ -3063,7 +3534,7 @@ function WatchScreen(state: ApplicationState): Vnode {
 	if (labels === null || serverModel === null) {
 		if (state.selectedRunId === null) {
 			return h('section', { id: 'watch-screen' }, [
-				LineageLine(state),
+				TaskIdentityHeaderForRun(state),
 				StageControls(state, null),
 				h('div', { key: 'watch-flow', class: 'pb-flow flow-stage' }, [h('p', { class: 'flow-empty' }, 'Select a run to see its flow.'), InspectorModalForRun(state)]),
 			])
@@ -3071,7 +3542,7 @@ function WatchScreen(state: ApplicationState): Vnode {
 		if (!state.serverAvailable) {
 			const unavailable = labels === null ? 'Unable to load the run view.' : 'Run view unavailable.'
 			return h('section', { id: 'watch-screen' }, [
-				LineageLine(state),
+				TaskIdentityHeaderForRun(state),
 				StageControls(state, null),
 				h('div', { key: 'watch-flow', class: 'pb-flow flow-stage' }, [h('p', { class: 'flow-empty' }, unavailable), InspectorModalForRun(state)]),
 			])
@@ -3079,7 +3550,7 @@ function WatchScreen(state: ApplicationState): Vnode {
 		const selectedStatus = state.selectedRunStatus
 		if (selectedStatus !== null && isSuspendedStatus(selectedStatus)) {
 			return h('section', { id: 'watch-screen' }, [
-				LineageLine(state),
+				TaskIdentityHeaderForRun(state),
 				StageControls(state, null),
 				h('div', { key: 'watch-flow', class: 'pb-flow flow-stage' }, [
 					h('div', { class: 'flow-empty' }, [
@@ -3093,14 +3564,14 @@ function WatchScreen(state: ApplicationState): Vnode {
 		}
 		if (selectedStatus !== null && isTerminalStatus(selectedStatus)) {
 			return h('section', { id: 'watch-screen' }, [
-				LineageLine(state),
+				TaskIdentityHeaderForRun(state),
 				StageControls(state, null),
 				h('div', { key: 'watch-flow', class: 'pb-flow flow-stage' }, [h('p', { class: 'flow-empty' }, 'No flow activity is available for this run.'), InspectorModalForRun(state)]),
 			])
 		}
 		const loadingLabel = labels === null ? 'Loading run view…' : 'Waiting for run activity…'
 		return h('section', { id: 'watch-screen' }, [
-			LineageLine(state),
+			TaskIdentityHeaderForRun(state),
 			StageControls(state, null),
 			h('div', { key: 'watch-flow', class: 'pb-flow flow-stage' }, [h('div', { class: 'flow-empty' }, [LoadingIndicator(h, loadingLabel)]), InspectorModalForRun(state)]),
 		])
@@ -3109,7 +3580,7 @@ function WatchScreen(state: ApplicationState): Vnode {
 	// The polled flow payload is a pure function of stored data, so an open call's elapsedSeconds is null; fill it from this client's clock once here so StageControls and the now-caption read a live span through the same helpers. The stage below hydrates its own elapsed at build time and is memoized on the stable inputs only, so a `now`-only tick never rebuilds it.
 	const model = withLiveElapsed(serverModel, state.now)
 	const tier = state.flowTier
-	// The stage memo returns the cached vnode while the stable inputs are unchanged; it is mounted at exactly one keyed position — child 0 of the `.pb-flow` container keyed 'watch-flow', or child 0 of the sequence scroll wrapper in sequence mode — and that key keeps the position stable while the container's unkeyed siblings (LineageLine, PlanSection) toggle in and out, so the cached vnode is only ever diffed against its own previous self. The reuse is safe because it never lands at two positions or after a position shift (see run-stage/index.ts and docs/architecture.md "Web client").
+	// The stage memo returns the cached vnode while the stable inputs are unchanged; it is mounted at exactly one keyed position — child 0 of the `.pb-flow` container keyed 'watch-flow', or child 0 of the sequence scroll wrapper in sequence mode — and that key keeps the position stable while the container's unkeyed siblings (TaskIdentityHeaderForRun, PlanSection) toggle in and out, so the cached vnode is only ever diffed against its own previous self. The reuse is safe because it never lands at two positions or after a position shift (see run-stage/index.ts and docs/architecture.md "Web client").
 	// A needs_clarification run's question lives on its parked queue item, so its Respond CTA opens that item's answer modal; a suspended run opens the pause card; every other terminal status keeps the result modal. The status rides the model input, so a status change already rebuilds the stage.
 	const cta = { onclick: model.status === 'needs_clarification' ? OpenParkedQuestion : isSuspendedStatus(model.status) ? OpenSuspendedModal : OpenResultModal }
 	// The stage gets a Question affordance only while a derived prompt exists for the watched run; the model's lingering ask alone must not keep an orange button alive after an answer was deferred.
@@ -3135,7 +3606,7 @@ function WatchScreen(state: ApplicationState): Vnode {
 	const nowCaption = runStage.nowCaption(model, labels, tier)
 
 	return h('section', { id: 'watch-screen' }, [
-		LineageLine(state),
+		TaskIdentityHeaderForRun(state),
 		StageControls(state, model),
 		// `.pb-flow` is the positioning context for the per-run-view modals (the result and interrupt overlays are absolute inset 0 within it), so those modals cover the run view rather than the whole page. It is also the hover stage for the inspector: `mouseover`/`mouseleave`/`click` bubble here from every SVG child, so the inspector is wired once for both the flow and sequence views.
 		h('div', { key: 'watch-flow', class: 'pb-flow flow-stage', onmouseover: HoverRunView, onmouseleave: LeaveRunView, onclick: ClickRunView }, [
@@ -3318,11 +3789,11 @@ function Main(state: ApplicationState): Vnode {
 }
 
 function view(state: ApplicationState): Vnode {
-	return h('div', { class: 'app-shell' }, [TopBar(state), ProviderHealthBannerForState(state), SuspendedActionNoticeForState(state), Main(state), QuestionPromptModalForApp(state)])
+	return h('div', { class: 'app-shell' }, [TopBar(state), ProviderHealthBannerForState(state), SuspendedActionNoticeForState(state), Main(state), QuestionPromptModalForApp(state), TaskHistoryDrawerForState(state)])
 }
 
 // --- App -------------------------------------------------------------------
-// The subscriptions array is fixed-size with stable positions: [0] always polls the run list (which now also carries provider health), the pending questions, and the task queue every second while the page is visible; [1] polls the selected run's run view and flow model every second but only on the watch screen, while the page is visible, and while the run is selected and not settled for polling (terminal or suspended stop it); [2] primes the AudioContext on the first user interaction; [3] dismisses the inspector modal on Escape while it is open; [4] dismisses the question prompt on Escape while it is open; [5] subscribes the live token stream to the selected run under the same settled-for-polling guard [1] uses, so a suspended run keeps no stream open; [6] tracks page visibility and refreshes immediately when the tab returns.
+// The subscriptions array is fixed-size with stable positions: [0] always polls the run list (which now also carries provider health), the pending questions, and the task queue every second while the page is visible; [1] polls the selected run's run view and flow model every second but only on the watch screen, while the page is visible, and while the run is selected and not settled for polling (terminal or suspended stop it); [2] primes the AudioContext on the first user interaction; [3] dismisses the topmost app overlay on Escape while any is open (task-history drawer, then question prompt, then inspector); [4] subscribes the live token stream to the selected run under the same settled-for-polling guard [1] uses, so a suspended run keeps no stream open; [5] tracks page visibility and refreshes immediately when the tab returns.
 
 // hyperapp re-enters `view` and `subscriptions` with the state it holds, but the vendored declaration types that re-entry as `unknown` (it is app-agnostic). The state provably stays an ApplicationState — init plants a checked literal and every action returns a checked transition — so this guard confirms the wiring rather than re-validating data, and a mismatch fails the mount instead of rendering garbage.
 function isApplicationState(value: unknown): value is ApplicationState {
@@ -3336,7 +3807,7 @@ function isApplicationState(value: unknown): value is ApplicationState {
 		'flowTier', 'flowViewMode', 'sequenceRolesOnly', 'screen', 'pageVisible', 'flowRefreshPending', 'expandedRowIds', 'continuation',
 		'resumingRunId', 'resumeSending', 'resumeNotice',
 		'questionPromptOpenKey', 'questionPromptSuppressedKeys', 'resultModalOpen', 'resultShownForRun', 'suspendedModalOpen', 'suspendedActionNotice', 'resumeRunPendingId', 'resultLoad', 'interruptModalOpen',
-		'inspectorModalOpen', 'planExpanded', 'livePartial', 'streamConnected', 'streamWasConnectedOnce', 'tooltip',
+		'inspectorModalOpen', 'planExpanded', 'taskThread', 'taskThreadLoad', 'taskThreadDrawerOpen', 'taskThreadRequestToken', 'taskThreadSignal', 'taskThreadRefreshScheduled', 'taskThreadTransientRetries', 'taskThreadSummaryRequestToken', 'taskThreadSummaryTriggerKey', 'taskThreadSummaryFailedKey', 'taskThreadSummaryRetryAt', 'taskThreadSummaryPendingKey', 'taskThreadSummaryRefetchCount', 'taskThreadSummaryPending', 'taskThreadSummaryRequestFailed', 'taskThreadSummaryAutoRetryKey', 'taskThreadSummaryAutoRetryCount', 'livePartial', 'streamConnected', 'streamWasConnectedOnce', 'tooltip',
 		'interruptMode', 'interruptSending', 'interruptNotice', 'interruptAnswerCard', 'shownInterruptAnswerKeys', 'now',
 	]
 	return stateKeys.every((key) => key in value)
@@ -3411,6 +3882,23 @@ app({
 			interruptModalOpen: false,
 			inspectorModalOpen: false,
 			planExpanded: false,
+			taskThread: null,
+			taskThreadLoad: 'idle',
+			taskThreadDrawerOpen: false,
+			taskThreadRequestToken: 0,
+			taskThreadSignal: null,
+			taskThreadRefreshScheduled: false,
+			taskThreadTransientRetries: 0,
+			taskThreadSummaryRequestToken: 0,
+			taskThreadSummaryTriggerKey: null,
+			taskThreadSummaryFailedKey: null,
+			taskThreadSummaryRetryAt: null,
+			taskThreadSummaryPendingKey: null,
+			taskThreadSummaryRefetchCount: 0,
+			taskThreadSummaryPending: false,
+			taskThreadSummaryRequestFailed: false,
+			taskThreadSummaryAutoRetryKey: null,
+			taskThreadSummaryAutoRetryCount: 0,
 			livePartial: null,
 			streamConnected: false,
 			streamWasConnectedOnce: false,
@@ -3437,8 +3925,7 @@ app({
 			// A null selectedRunStatus (a just-selected run whose first per-run poll has not landed) reads as non-terminal — the dynamic set lookup missed null — so the per-run poll and the stream stay live across a run switch until the first frame arrives.
 			state.pageVisible && state.screen === 'watch' && hasPollableSelectedRun(state) && onEvery(PollSelectedRun, POLL_INTERVAL_MS),
 			onFirstInteraction(PrimeAudio),
-			state.inspectorModalOpen === true && onEscapeKey(CloseInspectorModal),
-			state.questionPromptOpenKey !== null && onEscapeKey(CloseQuestionPrompt),
+			(state.taskThreadDrawerOpen || state.questionPromptOpenKey !== null || state.inspectorModalOpen) && onEscapeKey(CloseTopmostAppOverlay),
 			state.screen === 'watch' && hasPollableSelectedRun(state) && StreamSubscription(state.selectedRunId),
 			onVisibilityChange(PageVisibilityChanged),
 		]

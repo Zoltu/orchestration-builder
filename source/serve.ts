@@ -10,8 +10,9 @@ import { createFlowFeedResponder } from './web/static/ts/flow-feed/index.js'
 import { createRunListFeedResponder } from './web/static/ts/run-list-feed/index.js'
 import { createStreamHub } from './web/stream-hub.js'
 import { createTaskSummarizer, shouldWriteCompletionSummary, type TaskSummarizer } from './summarize.js'
-import { applyDeploymentOverride, applyLogLevel, createAppendLog, createBunSubprocessRunner, createDeleteCheckpoint, createDeltaChannel, createDockerSecretReader, createGuildLoader, createInterruptChannel, createInterruptQueue, createLlmCaller, createLlmFetch, createListCurrentRunIds, createListRunIds, createModelInfoProbe, createObservedLlmCaller, createProviderAutoResumeCoordinator, createProviderRecovery, createReadPauseStateById, createReadProjectDoc, createReadProjectSettings, createReadQueueText, createReadRunCheckpointById, createReadRunFormat, createReadRunLogTextFrom, createReadRunMetaById, createReadRunMetaTextById, createReadRunPlanById, createReadRunSnapshotById, createReadRunSnapshotStats, createReadRunSummaryById, createReadRunSummaryStats, createReadWorkspaceGitState, createResumeClarificationRun, createResumeErroredOrSuspendedRun, createResumeParkedRun, createRoleSnapshotStore, createRunBaseTracker, createRunCheckpointExists, createRunDirectory, createRunDirectoryExists, createRunState, createRunSubmission, createSleep, createTaskQueue, createTerminatePausedRun, createTimeoutScheduler, createToolPlatform, createWebHumanBackend, createWriteCheckpoint, createWriteMeta, createWriteProjectSettings, createWriteQueueText, createWriteRunSummary, ensureOrchestrationGitExcluded, entryFrameLogLevel, generateRunId, llmUsagePayload, LOG_FILE_NAME, MODEL_PROBE_TIMEOUT_MS, nodeGitExcludeFilesystem, parseModelInfo, reconcileRunsOnStartup, resolveDeploymentConfig, resolveDeploymentOverride, resolveKagiApiKey, resolveSecret, resumeExecutor, runExecutor, validateDeploymentFileConfig, validateDeploymentRoleReferences, validateHandlerRolesAreReadOnly, ConfigurationError, ValidationError, type AppendLog, type DeltaChannel, type ExecutorDependencies, type InterruptChannel, type InvolvementLevel, type LoadedGuild, type LlmCaller, type LogLevel, type ModelApiProbe, type ProviderHealth, type ReadRunLogEvents, type ResumeRun, type RunCheckpoint, type StartRun, type WebHumanBackend } from './executor/index.js'
+import { applyDeploymentOverride, applyLogLevel, createAppendLog, createBunSubprocessRunner, createDeleteCheckpoint, createDeltaChannel, createDockerSecretReader, createGuildLoader, createInterruptChannel, createInterruptQueue, createLlmCaller, createLlmFetch, createListCurrentRunIds, createListRunIds, createModelInfoProbe, createObservedLlmCaller, createProviderAutoResumeCoordinator, createProviderRecovery, createReadPauseStateById, createReadProjectDoc, createReadProjectSettings, createReadQueueText, createReadRunCheckpointById, createReadRunFormat, createReadRunLogTextFrom, createReadRunMetaById, createReadRunMetaTextById, createReadRunPlanById, createReadRunSnapshotById, createReadRunSnapshotStats, createReadRunSummaryById, createReadTaskThreadSummaryTextById, createWriteTaskThreadSummaryTextById, createReadRunSummaryStats, createReadWorkspaceGitState, createResumeClarificationRun, createResumeErroredOrSuspendedRun, createResumeParkedRun, createRoleSnapshotStore, createRunBaseTracker, createRunCheckpointExists, createRunDirectory, createRunDirectoryExists, createRunState, createRunSubmission, createSleep, createTaskQueue, createTerminatePausedRun, createTimeoutScheduler, createToolPlatform, createWebHumanBackend, createWriteCheckpoint, createWriteMeta, createWriteProjectSettings, createWriteQueueText, createWriteRunSummary, ensureOrchestrationGitExcluded, entryFrameLogLevel, generateRunId, llmUsagePayload, LOG_FILE_NAME, MODEL_PROBE_TIMEOUT_MS, nodeGitExcludeFilesystem, parseModelInfo, reconcileRunsOnStartup, resolveDeploymentConfig, resolveDeploymentOverride, resolveKagiApiKey, resolveSecret, resumeExecutor, runExecutor, validateDeploymentFileConfig, validateDeploymentRoleReferences, validateHandlerRolesAreReadOnly, ConfigurationError, ValidationError, type AppendLog, type DeltaChannel, type ExecutorDependencies, type InterruptChannel, type InvolvementLevel, type LoadedGuild, type LlmCaller, type LogLevel, type ModelApiProbe, type ProviderHealth, type ReadRunLogEvents, type ResumeRun, type RunCheckpoint, type StartRun, type WebHumanBackend } from './executor/index.js'
 import { parseLogEvents } from './run-log/parse.js'
+import { createTaskThreadCoreReader, createTaskThreadReader, createTaskThreadSummarizer } from './task-thread/index.js'
 
 const DEPLOYMENT_FILE_ENV_VAR = 'ORCHESTRATOR_DEPLOYMENT_FILE'
 const PORT_ENV_VAR = 'PORT'
@@ -413,6 +414,29 @@ async function serve(): Promise<void> {
 		now: () => new Date().toISOString(),
 		generateAnswerId: () => crypto.randomUUID(),
 	})
+	const readTaskThreadLogTextFrom = createReadRunLogTextFrom(runsBaseDir)
+	const readTaskThreadLogText = (runId: string, byteOffset: number): string => readTaskThreadLogTextFrom(runId, byteOffset)
+	const readTaskThreadCore = createTaskThreadCoreReader({
+		readRunMetaTextById: readRunMetaById,
+		readRunLogTextFromById: readTaskThreadLogText,
+		readRunSnapshotStats,
+		readQueueItems: () => taskQueue.read().items,
+	})
+	const taskThreadSummarizer = createTaskThreadSummarizer({
+		readThread: (runId) => {
+			const core = readTaskThreadCore(runId)
+			return core === null ? null : { identity: core.identity, entries: core.entries }
+		},
+		readSummaryText: createReadTaskThreadSummaryTextById(runsBaseDir),
+		writeSummaryText: createWriteTaskThreadSummaryTextById(runsBaseDir),
+		callLlm: (request) => llmCaller.call(request),
+		recordLlmUsage: (runId, usage) => createAppendLog(runId, runsBaseDir)({ timestamp: new Date().toISOString(), type: 'summarizer_llm_call', payload: { usage: llmUsagePayload(usage) } }),
+		now: () => new Date().toISOString(),
+	})
+	const readTaskThread = createTaskThreadReader({
+		readTaskThreadCore,
+		peekSummary: (runId, identity, entries) => taskThreadSummarizer.peek(runId, identity, entries),
+	})
 	// The explicit resume of an error-ended or suspended run composes the same submission layer (and thereby the same run bindings, through resumeRun) with the run/checkpoint/queue operations it validates against.
 	const resumeErroredOrSuspendedRun = createResumeErroredOrSuspendedRun({
 		runSubmission,
@@ -481,6 +505,11 @@ async function serve(): Promise<void> {
 		readRunListSummary,
 		readRunPlanById,
 		readRunSnapshotStats,
+		readTaskThread,
+		requestTaskThreadSummary: (runId) => {
+			const result = taskThreadSummarizer.request(runId)
+			return { state: result.state, summary: result.summary }
+		},
 		listRunIds: listCurrentRunIds,
 		readProjectSettings,
 		writeProjectSettings,

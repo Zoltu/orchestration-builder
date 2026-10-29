@@ -132,6 +132,8 @@ export {
 	createReadRunMetaTextById,
 	createWriteRunSummary,
 	createReadRunSummaryById,
+	createReadTaskThreadSummaryTextById,
+	createWriteTaskThreadSummaryTextById,
 	createReadRunPlanById,
 	createReadRunSnapshotStats,
 	createReadRunLogTextFrom,
@@ -143,6 +145,7 @@ export {
 	createReadQueueText,
 	createWriteQueueText,
 	LOG_FILE_NAME,
+	TASK_THREAD_SUMMARY_FILE_NAME,
 } from './persistence.js'
 export type {
 	RunDirectory,
@@ -160,6 +163,8 @@ export type {
 	ReadRunMetaTextById,
 	WriteRunSummary,
 	ReadRunSummaryById,
+	ReadTaskThreadSummaryTextById,
+	WriteTaskThreadSummaryTextById,
 	ReadRunPlanById,
 	ReadRunSnapshotStats,
 	ReadRunLogTextFrom,
