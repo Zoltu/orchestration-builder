@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { createRunStage, SEQUENCE_BODY_CLASS, SEQUENCE_HEADER_CLASS, SEQUENCE_SURFACE_CLASS, sequenceActiveRowScrollTop } from './index.js'
+import { createRunStage, SEQUENCE_BODY_CLASS, SEQUENCE_HEADER_CLASS, SEQUENCE_QUESTION_BAR_CLASS, SEQUENCE_QUESTION_BUTTON_CLASS, SEQUENCE_QUESTION_STAGE_CLASS, SEQUENCE_QUESTION_STAGE_WITH_BAR_CLASS, SEQUENCE_SURFACE_CLASS, sequenceActiveRowScrollTop } from './index.js'
 import type { RunStage } from './index.js'
 import { activeOperation, activeStack, observesOf } from '../interaction-model.js'
 import { createLabelResolver } from '../labels.js'
@@ -13,6 +13,7 @@ type InteractionModel = Parameters<typeof observesOf>[0]
 type Participant = InteractionModel['participants'][number]
 type Operation = InteractionModel['operations'][number]
 type LabelTier = Parameters<ReturnType<typeof createLabelResolver>['resolveParticipantLabel']>[1]
+type QuestionControls = NonNullable<Parameters<RunStage['render']>[1]['question']>
 
 // A fake `h` capturing the tag, props, and children of every vnode so the layout assertions walk a plain object tree rather than real DOM, mirroring the sibling test convention.
 interface Vnode {
@@ -79,6 +80,7 @@ interface RenderOptions {
 	roleOrder?: readonly string[]
 	guildParticipants?: Participant[]
 	rolesOnly?: boolean
+	question?: QuestionControls
 }
 
 function sequenceStage(model: InteractionModel, tier: LabelTier, options: RenderOptions): { stage: RunStage; inputs: Parameters<RunStage['render']>[1] } {
@@ -91,6 +93,7 @@ function sequenceStage(model: InteractionModel, tier: LabelTier, options: Render
 		viewMode: 'sequence' as const,
 		rolesOnly: options.rolesOnly ?? false,
 		guildParticipants: options.guildParticipants ?? model.participants,
+		question: options.question,
 	}
 	return { stage, inputs }
 }
@@ -112,12 +115,18 @@ function directChildWithClass(view: Vnode, token: string): Vnode {
 
 function renderParts(model: InteractionModel, tier: LabelTier = 'detailed', options: RenderOptions = {}): SequenceViewParts {
 	const { stage, inputs } = sequenceStage(model, tier, options)
-	const surface = stage.render(fakeH, inputs)
+	const stageRoot = stage.render(fakeH, inputs)
+	const surface = directChildWithClass(stageRoot, SEQUENCE_SURFACE_CLASS)
 	return {
 		surface,
 		header: directChildWithClass(surface, SEQUENCE_HEADER_CLASS),
 		body: directChildWithClass(surface, SEQUENCE_BODY_CLASS),
 	}
+}
+
+function renderStageRoot(model: InteractionModel, tier: LabelTier = 'detailed', options: RenderOptions = {}): Vnode {
+	const { stage, inputs } = sequenceStage(model, tier, options)
+	return stage.render(fakeH, inputs)
 }
 
 // The default role list is empty, so every existing assertion renders against today's neutral look; accent-specific tests opt into a real guild role list. Passing the model's own participants as the guild inventory reproduces the old fallback when no static guild set is supplied.
@@ -366,6 +375,86 @@ describe('renderSequenceView — pinned column header', () => {
 		expect(columnRoles(body)).toEqual(['human', 'planner', 'coder', 'critic', 'loop_detector', 'orchestrator', 'tools'])
 		expect(headerColumnRoles(header)).toEqual(columnRoles(body))
 		expect(columnLabelPositions(header)).toEqual(lifelinePositions(body))
+	})
+})
+
+describe('renderSequenceView — pending question affordance', () => {
+	function pendingQuestionFrame(): InteractionModel {
+		return scenarioFrame('pending-question', 2)
+	}
+
+	function questionButton(root: Vnode): Vnode | undefined {
+		return allByTag(root, 'button').find((button) => (propString(button.props, 'class') ?? '').split(' ').includes(SEQUENCE_QUESTION_BUTTON_CLASS))
+	}
+
+	test('the sequence stage keeps a stable wrapper and toggles only the question bar', () => {
+		const withoutHandler = renderStageRoot(pendingQuestionFrame())
+		expect(propString(withoutHandler.props, 'class')).toBe(SEQUENCE_QUESTION_STAGE_CLASS)
+		const surfaceWithoutBar = directChildWithClass(withoutHandler, SEQUENCE_SURFACE_CLASS)
+		expect(withoutHandler.children.filter(isVnode)).toEqual([surfaceWithoutBar])
+		expect(questionButton(withoutHandler)).toBeUndefined()
+
+		const withHandler = renderStageRoot(pendingQuestionFrame(), 'detailed', { question: { onclick: () => undefined } })
+		expect(propString(withHandler.props, 'class')).toBe(`${SEQUENCE_QUESTION_STAGE_CLASS} ${SEQUENCE_QUESTION_STAGE_WITH_BAR_CLASS}`)
+		const surface = directChildWithClass(withHandler, SEQUENCE_SURFACE_CLASS)
+		const bar = directChildWithClass(withHandler, SEQUENCE_QUESTION_BAR_CLASS)
+		expect(withHandler.children.filter(isVnode)).toEqual([surface, bar])
+		const button = defined(questionButton(withHandler), 'questionButton')
+		expect(bar.children.filter(isVnode)).toEqual([button])
+		expect(button.tag).toBe('button')
+		expect(button.props['type']).toBe('button')
+		expect(button.children.join('')).toBe('Question for Human')
+
+		const promptWithoutAsk = renderStageRoot(scenarioFrame('pending-question', 0), 'detailed', { question: { onclick: () => undefined } })
+		expect(questionButton(promptWithoutAsk)).toBeDefined()
+		expect(propString(promptWithoutAsk.props, 'class')).toBe(`${SEQUENCE_QUESTION_STAGE_CLASS} ${SEQUENCE_QUESTION_STAGE_WITH_BAR_CLASS}`)
+		const surfaceWithPrompt = directChildWithClass(promptWithoutAsk, SEQUENCE_SURFACE_CLASS)
+		expect(promptWithoutAsk.children.filter(isVnode)[0]).toBe(surfaceWithPrompt)
+	})
+
+	test('the Question button routes to question.onclick and stops propagation before the inspector path', () => {
+		let questionClicks = 0
+		let stoppedClicks = 0
+		const root = renderStageRoot(pendingQuestionFrame(), 'detailed', { question: { onclick: () => { questionClicks += 1 } } })
+		const button = defined(questionButton(root), 'questionButton')
+		const onclick = button.props['onclick']
+		if (typeof onclick !== 'function') throw new Error('expected the Question button click handler')
+		onclick(undefined, { stopPropagation: () => { stoppedClicks += 1 }, preventDefault: () => undefined, key: '', type: 'click' })
+		expect(questionClicks).toBe(1)
+		expect(stoppedClicks).toBe(1)
+		expect(button.props['data-operation']).toBeUndefined()
+	})
+
+	test('the Question button activates on Enter and Space while other keys return the state unchanged', () => {
+		let questionClicks = 0
+		let stoppedKeys = 0
+		let preventDefaults = 0
+		const state = { route: 'sequence-question-test' }
+		const root = renderStageRoot(pendingQuestionFrame(), 'detailed', { question: { onclick: () => { questionClicks += 1 } } })
+		const button = defined(questionButton(root), 'questionButton')
+		const onkeydown = button.props['onkeydown']
+		if (typeof onkeydown !== 'function') throw new Error('expected the Question button keydown handler')
+		const event = (key: string) => ({ key, type: 'keydown', preventDefault: () => { preventDefaults += 1 }, stopPropagation: () => { stoppedKeys += 1 } })
+
+		expect(onkeydown(state, event('a'))).toBe(state)
+		expect(onkeydown(state, event('Tab'))).toBe(state)
+		expect(questionClicks).toBe(0)
+		expect(preventDefaults).toBe(0)
+		expect(stoppedKeys).toBe(0)
+
+		onkeydown(state, event('Enter'))
+		onkeydown(state, event(' '))
+		expect(questionClicks).toBe(2)
+		expect(preventDefaults).toBe(2)
+		expect(stoppedKeys).toBe(2)
+	})
+
+	test('the sequence surface and its in-flight ask_human row remain available beside the stage button', () => {
+		const root = renderStageRoot(pendingQuestionFrame(), 'detailed', { question: { onclick: () => undefined } })
+		const body = defined(allByTag(root, 'svg').find((svg) => propString(svg.props, 'class') === SEQUENCE_BODY_CLASS), 'sequenceBody')
+		const askRow = defined(messageGroupForOperation(body, 'op2'), 'askRow')
+		expect(propString(askRow.props, 'data-kind')).toBe('call')
+		expect(propString(askRow.props, 'data-destination-role')).toBe('human')
 	})
 })
 

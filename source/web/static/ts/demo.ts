@@ -7,6 +7,7 @@ import { createLabelResolver, isLabelTier, isRoleOrder } from './labels.js'
 import { createRunStage, SEQUENCE_BODY_CLASS, SEQUENCE_HEADER_CLASS, sequenceActiveRowScrollTop } from './run-stage/index.js'
 import { createMarkdownRenderer } from './markdown-render.js'
 import { createTooltipDismiss, deriveTooltipDescriptor, isInFlightAskHuman, resolveTooltipTarget } from './inspector.js'
+import { deriveActiveQuestionControls } from './question-affordance.js'
 import { createOperationDetails } from './operation-details.js'
 import { LoadingIndicator } from './loading-indicator.js'
 import { isObject, isOperationMetricsRecord } from './guards.js'
@@ -479,7 +480,7 @@ function jumpSequenceViewToActive(container: HTMLElement): void {
 //  - `mouseover` over a node/edge: open/switch the card to it (anchored to its rect), canceling any pending dismiss.
 //  - `mouseover` over empty run-view area: schedule a grace-period dismiss — if the pointer reaches the card (or a new node) before it fires, the dismiss is canceled; otherwise the card dismisses once the pointer is over neither.
 //  - `mouseleave` on the container: schedule a grace-period dismiss (the pointer left the run view).
-//  - `click` on an in-flight `ask_human` row: re-open the question modal (the sequence view's re-entry affordance); every other click falls through to the hover path.
+//  - `click` on an in-flight `ask_human` row: re-open the question modal as a secondary shortcut alongside the stage Question button; every other click falls through to the hover path.
 // The product client's click also drills into the LLM-turn inspector modal (app.js ClickRunView via resolveInspectorScope); that modal is app-only — the harness has no run-log window to feed it, and building a fixture-log transport plus a second inspector controller would reimplement shell behavior the demo contract forbids — so a click here stays a tooltip affordance.
 function wireRunViewInteractions(): void {
 	const openAt = (event: Event): void => {
@@ -621,7 +622,7 @@ function renderFlowViewSvg(): Vnode | null {
 	const diffBase = resultAcknowledged ? baseFrame : previousFrame
 	const manifest = scenarios[scenarioIndex]
 	const cta = { onclick: openResultModal }
-	const question = { onclick: openQuestionModal }
+	const question = deriveActiveQuestionControls(frame, openQuestionModal)
 	return runStage.render(domH, {
 		model: frame,
 		previousModel: diffBase,
@@ -648,6 +649,7 @@ function renderSequenceSurface(): Vnode | null {
 		viewMode: 'sequence',
 		rolesOnly: rolesOnlyToggle.checked,
 		guildParticipants: manifest.participants,
+		question: deriveActiveQuestionControls(currentFrame, openQuestionModal),
 	})
 }
 
@@ -858,7 +860,7 @@ function render(): void {
 	sequenceScrollContainer.replaceChildren(hostElementOf(surface, 'the sequence view'))
 	flowContainer.insertBefore(sequenceScrollContainer, nowCaption)
 	wireSequenceInteractions(sequenceScrollContainer)
-	// Auto-open the question modal in the sequence view too, so a pending ask_human prompts the operator regardless of which view is active; re-opening after dismissal is via clicking the ask_human message row (wired in wireSequenceInteractions).
+	// Auto-open the question modal in the sequence view too, so a pending ask_human prompts the operator regardless of which view is active; after dismissal the stage Question button or an ask_human message-row click re-opens it (the row click is wired in wireSequenceInteractions).
 	openQuestionModal()
 	// scenarioChanged must be cleared before applySequenceScroll so a scenario switch still resets to top (scenarioChanged catches it first), but a normal frame advance does not hit the reset-to-top branch.
 	scenarioChanged = false

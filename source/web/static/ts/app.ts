@@ -16,6 +16,7 @@ import { createTooltipDismiss, deriveTooltipDescriptor, isInFlightAskHuman, reso
 import { operationIdsForTooltipDetails, tooltipStyle, Tooltip } from './tooltip.js'
 import { copyRawToClipboard } from './clipboard.js'
 import { QuestionModal } from './question-modal.js'
+import { deriveQueueRowQuestionPrompt, deriveQuestionPrompt, readPendingQuestions, reconcileQuestionPromptOpenKey, resolveQuestionPromptForKey, rollbackQuestionPromptHandling, settleLiveAnswerPrompt, shouldAutoOpenQuestionPrompt, suppressQuestionPromptKey } from './question-prompt.js'
 import { createOperationDetails } from './operation-details.js'
 import { deriveTerminalResult, ResultModal, ResultPendingModal } from './result-modal.js'
 import { deriveSuspendedCard, resumeFailureCopy, SuspendedCard, suspendedTerminateTarget, terminateFailureCopy } from './suspended-card.js'
@@ -48,6 +49,7 @@ import type { OperationDetailsState } from './operation-details.js'
 import type { ScrollFollower } from './scroll-follow.js'
 import type { PollKey, PollResponse } from './poll-fetch.js'
 import type { QueueItemLike } from './queue-panel.js'
+import type { PendingQuestion, QuestionPrompt } from './question-prompt.js'
 import type { StreamClient, StreamDeltaMessage } from './stream-client.js'
 import type { BuildInfo } from './build-info.js'
 
@@ -165,14 +167,6 @@ export interface TokenUsage {
 	totalTokens: number
 }
 
-// One pending question (GET /api/questions, `renderPendingQuestions` server-side).
-export interface ApiQuestion {
-	id: string
-	question: string
-	context?: string
-	askedAt: string
-}
-
 // The one-time presentation of a newly-arrived interrupt answer.
 export interface InterruptAnswerCard {
 	question: string
@@ -199,19 +193,18 @@ export interface ApplicationState {
 	selectedRunId: string | null
 	selectedRunView: RunView | null
 	selectedRunStatus: RunStatus | null
-	pendingQuestions: ApiQuestion[]
+	pendingQuestions: PendingQuestion[]
 	// The coarse provider health carried by the run-list feed; null until the first run-list snapshot lands. It drives the persistent banner without a second poll.
 	providerHealth: HealthView | null
 	// The polled task queue (docs/queueing.md "UI interaction model"), head first. The add-flow's ids: justSubmittedItemId dedups a second add once the add's response has landed, until the item shows up in the polled queue; pendingAddSelectionId is consumed once by the very next queue read to jump to the new run's watch screen when the scheduler dispatched it within the add request.
 	queueItems: QueueItemLike[]
 	justSubmittedItemId: string | null
 	pendingAddSelectionId: string | null
-	// The queue panel's row-level view state: the waiting item being inline-edited, the row being dragged, and the item whose answer or termination is posting. `openQueueQuestionId` drives the app-shell question modal a needs_input row (or the watch screen's Respond CTA) opens, so a parked run's question is answerable from the history list.
+	// The queue panel's row-level view state: the waiting item being inline-edited, the row being dragged, and the item whose answer or termination is posting.
 	editingItemId: string | null
 	draggingItemId: string | null
 	queueAnswerPendingId: string | null
 	queueTerminatePendingId: string | null
-	openQueueQuestionId: string | null
 	// The answered item whose resume has not been dispatched yet (the answer landed while another run was active, so the item is still waiting without a runId). The periodic queue poll watches it and re-engages the watch screen once the item finally resumes.
 	pendingResumeItemId: string | null
 	serverAvailable: boolean
@@ -263,8 +256,10 @@ export interface ApplicationState {
 	// The resume request's in-flight flag (the submit button and the double-submit guard read it) and the one-line notice a refused or unreadable resume leaves on the compose screen. The notice clears on entry, cancel, and success.
 	resumeSending: boolean
 	resumeNotice: string | null
-	// Per-run-view modal state. The question modal opens on a new pending question; the result modal opens on a watched run's completion. `resultShownForRun` dedups the auto-open across the polls that follow a completion. The interrupt modal opens only from the stage controls.
-	questionModalOpen: boolean
+	// The single question-prompt controller. `questionPromptOpenKey` is the prompt currently shown (live or parked); `questionPromptSuppressedKeys` is the bounded set of keys the operator dismissed or the app handled (answer in flight or landed, termination), so a refetched still-pending prompt does not reopen while a different key can still auto-open.
+	questionPromptOpenKey: string | null
+	questionPromptSuppressedKeys: string[]
+	// Per-run-view modal state. The result modal opens on a watched run's completion; `resultShownForRun` dedups the auto-open across the polls that follow a completion. The interrupt modal opens only from the stage controls.
 	resultModalOpen: boolean
 	resultShownForRun: string | null
 	// The pause card is deliberately separate from the result modal: a suspended run has no terminal result. suspendedActionNotice carries the typed resume/terminate refusal for the card and the global notice strip. resumeRunPendingId is the run id whose direct (non-compose) resume is in flight, so every Resume now button disables once one is sending.
@@ -516,6 +511,57 @@ const renderMarkdown = createMarkdownRenderer(h, { maxEntries: 256, maxCharacter
 function deriveActiveRunId(summaries: RunSummary[]): string | null {
 	const active = summaries.find((summary) => isLiveStatus(summary.status) || summary.status === 'unknown')
 	return active === undefined ? null : active.runId
+}
+
+// The one prompt the selected run is currently waiting on, from the same derivation every surface reads.
+function deriveCurrentQuestionPrompt(state: ApplicationState): QuestionPrompt | null {
+	return deriveQuestionPrompt({
+		pendingQuestions: state.pendingQuestions,
+		queueItems: state.queueItems,
+		selectedRunId: state.selectedRunId,
+		activeRunId: deriveActiveRunId(state.summaries),
+	})
+}
+
+// Resolves the open key to the prompt the app-shell modal renders, without re-deriving from the selection: a queue row may open a parked prompt for another run.
+function deriveOpenQuestionPrompt(state: ApplicationState): QuestionPrompt | null {
+	const key = state.questionPromptOpenKey
+	if (key === null) return null
+	return resolveQuestionPromptForKey({
+		pendingQuestions: state.pendingQuestions,
+		queueItems: state.queueItems,
+		activeRunId: deriveActiveRunId(state.summaries),
+		key,
+	})
+}
+
+// The automatic half of the controller: opens the current prompt when it is eligible for the selected run on the watch screen and has not already been opened, dismissed, answered, or terminated. Every ingress that can make a prompt appear runs this after updating its source.
+function autoOpenQuestionPrompt(state: ApplicationState): ApplicationState {
+	const activeRunId = deriveActiveRunId(state.summaries)
+	const openKey = reconcileQuestionPromptOpenKey({
+		openKey: state.questionPromptOpenKey,
+		pendingQuestions: state.pendingQuestions,
+		queueItems: state.queueItems,
+		activeRunId,
+	})
+	const reconciled = openKey === state.questionPromptOpenKey ? state : { ...state, questionPromptOpenKey: openKey }
+	const prompt = deriveCurrentQuestionPrompt(reconciled)
+	if (prompt === null) return reconciled
+	const shouldOpen = shouldAutoOpenQuestionPrompt({
+		prompt,
+		screen: reconciled.screen,
+		selectedRunId: reconciled.selectedRunId,
+		openKey: reconciled.questionPromptOpenKey,
+		suppressedKeys: reconciled.questionPromptSuppressedKeys,
+	})
+	if (!shouldOpen) return reconciled
+	return { ...reconciled, questionPromptOpenKey: prompt.key }
+}
+
+// Rolls a failed answer/terminate back out of the suppression set and reopens its prompt if nothing else was open.
+function rollbackFailedQuestionPrompt(state: ApplicationState, promptKey: string): ApplicationState {
+	const rolled = rollbackQuestionPromptHandling({ promptKey, openKey: state.questionPromptOpenKey, suppressedKeys: state.questionPromptSuppressedKeys })
+	return { ...state, questionPromptOpenKey: rolled.openKey, questionPromptSuppressedKeys: rolled.suppressedKeys }
 }
 
 // --- Custom subscriptions --------------------------------------------------
@@ -793,8 +839,8 @@ function GotFlowModel(runId: string) {
 	return function GotFlowModelForRun(state: ApplicationState, payload: FetchResultPayload): ActionReturn {
 		if (!responseBelongsToSelection(runId, state.selectedRunId)) return state
 		if (payload.status === 404) {
-			if (state.flowModel !== null) return { ...state, serverAvailable: payload.ok, flowRefreshPending: false }
-			return [{ ...state, flowModel: null, previousFlowModel: null, flowFeed: emptyFlowFeedState(), serverAvailable: payload.ok, flowRefreshPending: false }, SyncSequenceFollower(), SyncInspectorFollower()]
+			if (state.flowModel !== null) return { ...state, serverAvailable: true, flowRefreshPending: false }
+			return [{ ...state, flowModel: null, previousFlowModel: null, flowFeed: emptyFlowFeedState(), serverAvailable: true, flowRefreshPending: false }, SyncSequenceFollower(), SyncInspectorFollower()]
 		}
 		const result = applyFlowFrame(state.flowFeed, payload.body)
 		// An unchanged frame keeps the model and feed BY REFERENCE — reassigning them would break the WeakMap-keyed memoization in interaction-model.ts and the run-stage renderers — so only server availability is refreshed and no follower sync is needed (nothing mounted changed).
@@ -804,10 +850,10 @@ function GotFlowModel(runId: string) {
 		}
 		// A delta whose base the client no longer holds cannot be applied; re-fetching with no `have` asks the server for a full snapshot. The held feed and model stand until it lands.
 		if (result.outcome === 'needsSnapshot') {
-			return [{ ...state, serverAvailable: payload.ok }, Fetch({ url: `api/runs/${encodeURIComponent(runId)}/flow`, init: { cache: 'no-store' }, ok: GotFlowModel(runId), fail: FlowFetchFailed, pollKey: POLL_KEY_FLOW })]
+			return [{ ...state, serverAvailable: true }, Fetch({ url: `api/runs/${encodeURIComponent(runId)}/flow`, init: { cache: 'no-store' }, ok: GotFlowModel(runId), fail: FlowFetchFailed, pollKey: POLL_KEY_FLOW })]
 		}
 		// invalid: the frame failed validation, so the held feed and model stand, but the fetch result still updates server availability.
-		return { ...state, serverAvailable: payload.ok, flowRefreshPending: false }
+		return { ...state, serverAvailable: true, flowRefreshPending: false }
 	}
 }
 
@@ -820,11 +866,11 @@ function FlowFetchFailed(state: ApplicationState): ApplicationState {
 function GotRunList(state: ApplicationState, payload: FetchResultPayload): ActionReturn {
 	const result = applyRunListFrame(state.runListFeed, payload.body)
 	if (result.outcome === 'unchanged') {
-		if (!payload.ok) return { ...state, serverAvailable: false }
+		if (!payload.ok) return { ...state, serverAvailable: true }
 		return { ...state, providerHealth: result.health, serverAvailable: true, runListLoaded: true }
 	}
 	if (result.outcome === 'applied' || result.outcome === 'snapshot') {
-		if (!payload.ok) return { ...state, serverAvailable: false }
+		if (!payload.ok) return { ...state, serverAvailable: true }
 		const nextState = { ...state, runListFeed: result.state, summaries: result.summaries, providerHealth: result.health, serverAvailable: true, runListLoaded: true }
 		if (nextState.justSubmittedRunId !== null && result.summaries.some((summary) => summary.runId === nextState.justSubmittedRunId)) {
 			nextState.justSubmittedRunId = null
@@ -848,11 +894,12 @@ function GotRunList(state: ApplicationState, payload: FetchResultPayload): Actio
 				if (isSettledForPolling(selectedSummary.status)) nextState.livePartial = null
 			}
 		}
-		return [nextState, UpdateFavicon(nextState)]
+		const prompted = autoOpenQuestionPrompt(nextState)
+		return [prompted, UpdateFavicon(prompted)]
 	}
 	// A delta whose base the client no longer holds cannot be applied; re-fetching with no `have` asks the server for a full snapshot. The held replica and summaries stand until it lands.
 	if (result.outcome === 'needsSnapshot') {
-		if (!payload.ok) return { ...state, serverAvailable: false }
+		if (!payload.ok) return { ...state, serverAvailable: true }
 		return [{ ...state, serverAvailable: true }, Fetch({ url: 'api/runs', init: { cache: 'no-store' }, ok: GotRunList, fail: FetchFailed, pollKey: POLL_KEY_RUN_LIST })]
 	}
 	// invalid: the envelope failed validation, so the held replica, summaries, and loaded flag stand, but the response is unusable and must not leave the history screen claiming a live server with nothing loaded.
@@ -907,7 +954,7 @@ function GotSelectedRun(curriedRunId: string) {
 		}
 		if (status === 404) {
 			// The run directory is created early in execution but may not be readable in the instant after submit; the per-run subscription keeps polling until the view appears.
-			return [{ ...state, selectedRunStatus: 'unknown', serverAvailable: ok }, SyncSequenceFollower()]
+			return [{ ...state, selectedRunStatus: 'unknown', serverAvailable: true }, SyncSequenceFollower()]
 		}
 		if (!ok || body === null || !isReadableRunView(body)) return state
 		if (!responseBelongsToSelection(body.runId, state.selectedRunId)) return state
@@ -937,13 +984,14 @@ function GotSelectedRun(curriedRunId: string) {
 }
 
 function GotQuestions(state: ApplicationState, payload: FetchResultPayload): ActionReturn {
-	const ok = payload.ok
-	const body = payload.body
-	const questions: ApiQuestion[] = ok && Array.isArray(body) ? body : []
+	const polledQuestions = readPendingQuestions(payload.ok, payload.body)
+	const usablePoll = polledQuestions !== null
+	// A failed or non-array poll retains the held list: a transport failure must not read as "no questions" and clear the operator's prompt.
+	const questions: PendingQuestion[] = polledQuestions === null ? state.pendingQuestions : polledQuestions
 	const currentIds: Record<string, boolean> = {}
 	for (const question of questions) currentIds[question.id] = true
 	let hasNew = false
-	if (!state.firstQuestionsPoll) {
+	if (usablePoll && !state.firstQuestionsPoll) {
 		for (const id of Object.keys(currentIds)) {
 			if (!state.shownQuestionIds[id]) {
 				hasNew = true
@@ -954,17 +1002,16 @@ function GotQuestions(state: ApplicationState, payload: FetchResultPayload): Act
 	const nextState = {
 		...state,
 		pendingQuestions: questions,
-		shownQuestionIds: currentIds,
-		firstQuestionsPoll: false,
-		serverAvailable: ok,
-		// A genuinely new question opens the per-run-view modal so it is unmissable; dismissing it leaves the flow view's Question affordance on the answerer node for re-entry. The modal is view-side state, not model state: the live model's ask_human call is what the flow view renders, this only gates the overlay.
-		questionModalOpen: hasNew ? true : state.questionModalOpen,
+		shownQuestionIds: usablePoll ? currentIds : state.shownQuestionIds,
+		firstQuestionsPoll: usablePoll ? false : state.firstQuestionsPoll,
+		serverAvailable: true,
 	}
-	// Beep on a genuinely new question unless muted; the modal itself opens via questionModalOpen above. Falsy effects are ignored by hyperapp, so the conditional inlines cleanly.
+	// The prompt controller owns opening, including the first poll; `hasNew` only decides whether to beep (the first poll baselines alerts without sounding one). Falsy effects are ignored by hyperapp, so the conditional inlines cleanly.
+	const prompted = autoOpenQuestionPrompt(nextState)
 	if (hasNew) {
-		return [nextState, UpdateFavicon(nextState), state.muted ? null : PlayBeep()]
+		return [prompted, UpdateFavicon(prompted), state.muted ? null : PlayBeep()]
 	}
-	return [nextState, UpdateFavicon(nextState)]
+	return [prompted, UpdateFavicon(prompted)]
 }
 
 function FetchFailed(state: ApplicationState): ApplicationState {
@@ -976,10 +1023,10 @@ function FetchFailed(state: ApplicationState): ApplicationState {
 
 function reduceQueue(state: ApplicationState, payload: FetchResultPayload): ApplicationState {
 	const ok = payload.ok
-	if (!ok) return { ...state, serverAvailable: false }
+	if (!ok) return { ...state, serverAvailable: true }
 	const body = payload.body
 	// A 2xx response whose body is not the queue array is unusable: keep the held items and loaded flag rather than presenting a malformed answer as an empty queue.
-	if (!Array.isArray(body)) return { ...state, serverAvailable: false }
+	if (!Array.isArray(body)) return { ...state, serverAvailable: true }
 	const items: QueueItemLike[] = body.filter(isQueueItemLike)
 	// The add's post-response guard releases once the created item shows up in the polled queue — the same release GotRunList applies to justSubmittedRunId; a response that fails or omits the item keeps the guard up.
 	const justSubmittedItemId = state.justSubmittedItemId !== null && items.some((item) => item.id === state.justSubmittedItemId)
@@ -992,10 +1039,13 @@ function reduceQueue(state: ApplicationState, payload: FetchResultPayload): Appl
 function GotQueue(state: ApplicationState, payload: FetchResultPayload): ActionReturn {
 	const nextState = reduceQueue(state, payload)
 	const pendingResumeItemId = nextState.pendingResumeItemId
-	if (pendingResumeItemId === null) return [nextState, UpdateFavicon(nextState)]
+	if (pendingResumeItemId === null) {
+		const prompted = autoOpenQuestionPrompt(nextState)
+		return [prompted, UpdateFavicon(prompted)]
+	}
 	const item = nextState.queueItems.find((entry) => entry.id === pendingResumeItemId)
 	if (item === undefined || item.status === 'cancelled') {
-		const cleared = { ...nextState, pendingResumeItemId: null }
+		const cleared = autoOpenQuestionPrompt({ ...nextState, pendingResumeItemId: null })
 		return [cleared, UpdateFavicon(cleared)]
 	}
 	if (typeof item.runId === 'string' && item.runId !== '') {
@@ -1003,10 +1053,11 @@ function GotQueue(state: ApplicationState, payload: FetchResultPayload): ActionR
 		return withFavicon(ReactivateRunForAnswer(cleared, item.runId))
 	}
 	if (item.status === 'done' || item.status === 'error') {
-		const cleared = { ...nextState, pendingResumeItemId: null }
+		const cleared = autoOpenQuestionPrompt({ ...nextState, pendingResumeItemId: null })
 		return [cleared, UpdateFavicon(cleared)]
 	}
-	return [nextState, UpdateFavicon(nextState)]
+	const prompted = autoOpenQuestionPrompt(nextState)
+	return [prompted, UpdateFavicon(prompted)]
 }
 
 // The queue add resolved: the created item's id is remembered so the follow-up queue read can see whether the scheduler dispatched it within the same request (the idle case) — the operator then lands on the new run's watch screen exactly as a start-now submit always has. The poll's own queue reads deliberately do not consume this selection: a task added while a run is in flight dispatches much later, and jumping then would yank the operator off whatever they are reading.
@@ -1014,7 +1065,7 @@ function GotQueuedTask(state: ApplicationState, payload: FetchResultPayload): Ac
 	const ok = payload.ok
 	const body = payload.body
 	// A refused or unreadable add still ends the in-flight window: the guard releases so the operator can retry.
-	if (!ok || !isObject(body) || typeof body['id'] !== 'string' || body['id'] === '') return { ...state, createSending: false, serverAvailable: ok }
+	if (!ok || !isObject(body) || typeof body['id'] !== 'string' || body['id'] === '') return { ...state, createSending: false, serverAvailable: true }
 	return [
 		{ ...state, justSubmittedItemId: body['id'], pendingAddSelectionId: body['id'], createSending: false, serverAvailable: true },
 		Fetch({ url: 'api/queue', ok: GotQueueAfterAdd, fail: FetchFailed }),
@@ -1077,7 +1128,7 @@ function RemoveQueueItem(state: ApplicationState, itemId: unknown): ActionReturn
 	]
 }
 
-function SubmitQueueAnswer(itemId: string) {
+function SubmitQueueAnswer(itemId: string, promptKey: string) {
 	return function SubmitAnswerForQueueItem(state: ApplicationState, event: Event): ActionReturn {
 		event.preventDefault()
 		const target = event.target
@@ -1087,13 +1138,14 @@ function SubmitQueueAnswer(itemId: string) {
 		const answer = textarea.value
 		if (answer === '') return state
 		return [
-			{ ...state, queueAnswerPendingId: itemId },
+			// Suppress this key from the moment the request leaves: a queue read that still reports the item needs_input must not reopen the modal under the operator.
+			{ ...state, queueAnswerPendingId: itemId, questionPromptSuppressedKeys: suppressQuestionPromptKey(state.questionPromptSuppressedKeys, promptKey) },
 			Fetch({
 				url: `api/queue/${encodeURIComponent(itemId)}/answer`,
 				init: { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ answer }) },
 				// The answer handler is bound to this item's id at request time, so the mutation kind is fixed when the request leaves rather than inferred from shared state when the response lands (a concurrent edit or a dismissed modal must not reroute it).
-				ok: GotQueueAfterAnswer(itemId),
-				fail: QueueMutationFailed,
+				ok: GotQueueAfterAnswer(itemId, promptKey),
+				fail: QueueAnswerFailed(promptKey),
 			}),
 		]
 	}
@@ -1108,11 +1160,26 @@ function QueueMutated(state: ApplicationState, payload: FetchResultPayload): Act
 	]
 }
 
-// The answer POST's response handler, curried with the answered item's id at request time: a refused answer still ends the in-flight window, and an accepted one clears the app-shell question modal's id and refetches the queue so ApplyAnsweredQueue can select the run the answer dispatched.
-function GotQueueAfterAnswer(answeredItemId: string) {
+// A failed parked answer ends the in-flight window, rolls back the attempted suppression, reopens the prompt, and surfaces the error.
+function QueueAnswerFailed(promptKey: string) {
+	return function QueueAnswerFailedForPrompt(state: ApplicationState): ActionReturn {
+		const rolled = rollbackFailedQuestionPrompt(state, promptKey)
+		return [
+			{ ...rolled, queueAnswerPendingId: null, serverAvailable: false },
+			Fetch({ url: 'api/queue', ok: GotQueue, fail: FetchFailed }),
+		]
+	}
+}
+
+// The answer POST's response handler, curried with the answered item's id and prompt key at request time: a refused answer still ends the in-flight window and leaves the modal open for a retry, while an accepted one clears the open key (the suppressed key keeps a stale still-pending read from reopening it) and refetches the queue so ApplyAnsweredQueue can select the run the answer dispatched.
+function GotQueueAfterAnswer(answeredItemId: string, promptKey: string) {
 	return function GotQueueAfterAnswerForItem(state: ApplicationState, payload: FetchResultPayload): ActionReturn {
-		if (!payload.ok) return { ...state, queueAnswerPendingId: null, serverAvailable: true }
-		const nextState = { ...state, queueAnswerPendingId: null, openQueueQuestionId: null, serverAvailable: true }
+		if (!payload.ok) {
+			const rolled = rollbackFailedQuestionPrompt(state, promptKey)
+			return { ...rolled, queueAnswerPendingId: null, serverAvailable: true }
+		}
+		const openKey = state.questionPromptOpenKey === promptKey ? null : state.questionPromptOpenKey
+		const nextState = { ...state, queueAnswerPendingId: null, questionPromptOpenKey: openKey, serverAvailable: true }
 		return [nextState, Fetch({ url: 'api/queue', ok: ApplyAnsweredQueue(answeredItemId), fail: FetchFailed })]
 	}
 }
@@ -1126,7 +1193,7 @@ function ApplyAnsweredQueue(answeredItemId: string) {
 			const cleared = { ...queued, pendingResumeItemId: null }
 			return withFavicon(ReactivateRunForAnswer(cleared, item.runId))
 		}
-		const deferred = { ...queued, pendingResumeItemId: answeredItemId }
+		const deferred = autoOpenQuestionPrompt({ ...queued, pendingResumeItemId: answeredItemId })
 		return [deferred, UpdateFavicon(deferred)]
 	}
 }
@@ -1147,31 +1214,49 @@ function TerminateQueueItem(itemId: string) {
 		const item = state.queueItems.find((entry) => entry.id === itemId)
 		const runId = item !== undefined ? item.runId ?? null : null
 		if (!window.confirm('Terminate this task? The waiting run and its saved context will be discarded.')) return state
+		const prompt = item === undefined ? null : deriveQueueRowQuestionPrompt({ item, activeRunId: deriveActiveRunId(state.summaries) })
+		const promptKey = prompt === null ? null : prompt.key
+		const suppressedKeys = promptKey === null ? state.questionPromptSuppressedKeys : suppressQuestionPromptKey(state.questionPromptSuppressedKeys, promptKey)
 		return [
-			{ ...state, queueTerminatePendingId: itemId, openQueueQuestionId: null },
+			// A terminated prompt must not reopen if the next queue read still carries the item.
+			{ ...state, queueTerminatePendingId: itemId, questionPromptOpenKey: null, questionPromptSuppressedKeys: suppressedKeys },
 			Fetch({
 				url: `api/queue/${encodeURIComponent(itemId)}/terminate`,
 				init: { method: 'POST' },
-				ok: GotQueueAfterTerminate(runId),
-				fail: QueueMutationFailed,
+				ok: GotQueueAfterTerminate(runId, promptKey),
+				fail: TerminateQueueFailed(promptKey),
 			}),
 		]
 	}
 }
 
 // The terminate POST resolved: the queue refetch drives the row and panel on both success and an HTTP refusal, so a race or an already-gone run reconciles instead of leaving a stale row. When the terminated run is the selected one, its view is reset to non-terminal so the per-run poll refetches the now-interrupted meta instead of staying parked; another run's selection is left alone.
-function GotQueueAfterTerminate(runId: string | null) {
+function GotQueueAfterTerminate(runId: string | null, promptKey: string | null) {
 	return function GotQueueAfterTerminateForRun(state: ApplicationState, payload: FetchResultPayload): ActionReturn {
 		const cleared: ApplicationState = { ...state, queueTerminatePendingId: null, serverAvailable: true }
 		const effects: OptionalEffect[] = [
 			Fetch({ url: 'api/queue', ok: GotQueue, fail: FetchFailed }),
 			Fetch({ url: 'api/runs', ok: GotRunList, fail: FetchFailed }),
 		]
-		if (!payload.ok) return [cleared, ...effects]
+		if (!payload.ok) {
+			const failed = promptKey === null ? { ...cleared, serverAvailable: true } : { ...rollbackFailedQuestionPrompt(cleared, promptKey), serverAvailable: true }
+			return [failed, ...effects]
+		}
 		const nextState = runId !== null && runId === state.selectedRunId
-			? { ...cleared, openQueueQuestionId: null, suspendedModalOpen: false, selectedRunStatus: 'unknown' as const, selectedRunView: null, resultModalOpen: false, resultShownForRun: null, resultLoad: null }
-			: { ...cleared, openQueueQuestionId: null, suspendedModalOpen: false }
+			? { ...cleared, suspendedModalOpen: false, selectedRunStatus: 'unknown' as const, selectedRunView: null, resultModalOpen: false, resultShownForRun: null, resultLoad: null }
+			: { ...cleared, suspendedModalOpen: false }
 		return [nextState, ...effects]
+	}
+}
+
+// A failed terminate request rolls the attempted suppression back and reopens the still-parked prompt, then reconciles the queue.
+function TerminateQueueFailed(promptKey: string | null) {
+	return function TerminateQueueFailedForPrompt(state: ApplicationState): ActionReturn {
+		const rolled = promptKey === null ? state : rollbackFailedQuestionPrompt(state, promptKey)
+		return [
+			{ ...rolled, queueTerminatePendingId: null, serverAvailable: false },
+			Fetch({ url: 'api/queue', ok: GotQueue, fail: FetchFailed }),
+		]
 	}
 }
 
@@ -1204,11 +1289,14 @@ function GotSuspendedTerminate(runId: string) {
 		if (!payload.ok) {
 			return [{ ...cleared, suspendedActionNotice: terminateFailureCopy(payload.body, payload.status) }, ...effects]
 		}
+		// A terminated suspended run must not leave its prompt answerable; close and suppress the open key exactly as a queue-item termination does.
+		const terminatedPrompt = state.questionPromptOpenKey === null ? state : CloseQuestionPrompt(state)
+		const terminated: ApplicationState = { ...terminatedPrompt, queueTerminatePendingId: null, serverAvailable: true }
 		if (runId === state.selectedRunId) {
-			const nextState: ApplicationState = { ...cleared, suspendedModalOpen: false, suspendedActionNotice: null, openQueueQuestionId: null, selectedRunStatus: 'unknown', selectedRunView: null, resultModalOpen: false, resultShownForRun: null, resultLoad: null }
+			const nextState: ApplicationState = { ...terminated, suspendedModalOpen: false, suspendedActionNotice: null, selectedRunStatus: 'unknown', selectedRunView: null, resultModalOpen: false, resultShownForRun: null, resultLoad: null }
 			return [nextState, ...effects]
 		}
-		return [{ ...cleared, suspendedModalOpen: false, suspendedActionNotice: null, openQueueQuestionId: null }, ...effects]
+		return [{ ...terminated, suspendedModalOpen: false, suspendedActionNotice: null }, ...effects]
 	}
 }
 
@@ -1273,8 +1361,9 @@ function DragEndQueueItem(state: ApplicationState): ApplicationState {
 function GotConfig(state: ApplicationState, payload: FetchResultPayload): ActionReturn {
 	const ok = payload.ok
 	const body = payload.body
-	// A failed or malformed one-shot config load leaves any already-loaded config intact, but marks the server unavailable so the placeholder and warning reflect the real state.
-	if (!ok || !isLabelConfig(body)) return { ...state, serverAvailable: false }
+	// An HTTP refusal leaves any already-loaded config intact while keeping the reachable server marked available; a malformed body also keeps the config but marks the server unavailable so the placeholder and warning reflect a broken deployment.
+	if (!ok) return { ...state, serverAvailable: true }
+	if (!isLabelConfig(body)) return { ...state, serverAvailable: false }
 	const participants = guildParticipantsFromConfig(body)
 	const roleNames = participants.filter((participant) => participant.kind === 'role').map((participant) => participant.role)
 	// Apply the config in place so the flow column high-water mark survives; the config fetch and the run poll are independent, so a first flow frame can land before this action.
@@ -1305,7 +1394,7 @@ function isLabelConfig(value: unknown): value is LabelConfig {
 function GotSettings(state: ApplicationState, payload: FetchResultPayload): ActionReturn {
 	const ok = payload.ok
 	const body = payload.body
-	if (state.runEffort !== null && state.runInvolvement !== null && state.runLogLevel !== null) return { ...state, serverAvailable: ok }
+	if (state.runEffort !== null && state.runInvolvement !== null && state.runLogLevel !== null) return { ...state, serverAvailable: true }
 	const record = ok && isObject(body) ? body : null
 	const effort = record !== null && isEffort(record['effort']) ? record['effort'] : null
 	const involvement = record !== null && isInvolvement(record['involvement']) ? record['involvement'] : null
@@ -1315,7 +1404,7 @@ function GotSettings(state: ApplicationState, payload: FetchResultPayload): Acti
 		runEffort: state.runEffort !== null ? state.runEffort : (effort !== null ? effort : DEFAULT_EFFORT),
 		runInvolvement: state.runInvolvement !== null ? state.runInvolvement : (involvement !== null ? involvement : DEFAULT_INVOLVEMENT),
 		runLogLevel: state.runLogLevel !== null ? state.runLogLevel : (logLevel !== null ? logLevel : DEFAULT_LOG_LEVEL),
-		serverAvailable: ok,
+		serverAvailable: true,
 	}
 }
 
@@ -1444,7 +1533,7 @@ function resetRunView(state: ApplicationState, runId: string, status: RunStatus 
 		previousFlowModel: null,
 		flowFeed: emptyFlowFeedState(),
 		flowRefreshPending: false,
-		questionModalOpen: false,
+		questionPromptOpenKey: null,
 		resultModalOpen: false,
 		resultShownForRun: null,
 		suspendedModalOpen: false,
@@ -1465,7 +1554,10 @@ function resetRunView(state: ApplicationState, runId: string, status: RunStatus 
 // A run switch cancels the old run's in-flight polls so a hung request cannot block the new selection's first poll behind its guard.
 function switchRunView(state: ApplicationState, runId: string, status: RunStatus | null): ApplicationState {
 	cancelRunScopedPolls()
-	return resetRunView(state, runId, status)
+	const reset = resetRunView(state, runId, status)
+	// Suppression survives a same-run refresh or answer-driven reactivation; only an actual selection change clears the keys.
+	if (runId === state.selectedRunId) return reset
+	return { ...reset, questionPromptSuppressedKeys: [] }
 }
 
 function SelectRun(state: ApplicationState, runId: string): ActionReturn {
@@ -1482,22 +1574,26 @@ function SelectRun(state: ApplicationState, runId: string): ActionReturn {
 			// The per-run poll is off-duty off the watch screen, so a terminal summary can arrive while the held view or status is stale or absent. The first-read status is both pollable and unable to fabricate a completion transition, and the immediate poll avoids leaving the placeholder up for a full interval.
 			if (plan === 'refresh') {
 				inspectorSession.close()
-				const [pollState, effects] = splitActionResult(PollSelectedRun(switchRunView(state, runId, null)))
-				return [pollState, ...effects, SyncSequenceFollower(), SyncInspectorFollower()]
+				const refreshed = switchRunView(state, runId, null)
+				const [pollState, effects] = splitActionResult(PollSelectedRun(refreshed))
+				return [autoOpenQuestionPrompt(pollState), ...effects, SyncSequenceFollower(), SyncInspectorFollower()]
 			}
 		}
-		return [{ ...state, screen: 'watch' }, SyncSequenceFollower(), SyncInspectorFollower()]
+		const prompted = autoOpenQuestionPrompt({ ...state, screen: 'watch' })
+		return [prompted, SyncSequenceFollower(), SyncInspectorFollower()]
 	}
-	// Selecting a run always lands on the watch screen (history rows and the in-progress pill both go through here).
+	// Selecting a run always lands on the watch screen (history rows and the in-progress pill both go through here); the switch clears any open/suppressed prompt before the new selection's own prompt may auto-open.
 	inspectorSession.close()
-	return [switchRunView(state, runId, null), SyncSequenceFollower(), SyncInspectorFollower()]
+	return [autoOpenQuestionPrompt(switchRunView(state, runId, null)), SyncSequenceFollower(), SyncInspectorFollower()]
 }
 
 // Answering a parked question resumes the same run id rather than starting a new one. A different run goes through the normal switch; the same run must stay selected while its terminal needs_clarification status is reset to the non-terminal 'unknown', because the per-run poll and stream subscriptions are disabled on a terminal status. The status reset also clears resultShownForRun (through resetRunView), so the resumed run's eventual outcome opens the result modal again; the next poll's still-parked needs_clarification meta is not a completion transition from unknown, so it cannot reopen the old card.
 function ReactivateRunForAnswer(state: ApplicationState, runId: string): ActionReturn {
 	if (runId !== state.selectedRunId) return SelectRun(state, runId)
 	inspectorSession.close()
-	return [switchRunView(state, runId, 'unknown'), SyncSequenceFollower(), SyncInspectorFollower()]
+	const refreshed = switchRunView(state, runId, 'unknown')
+	// Answering a parked prompt reactivates the same run, not a run switch, so its suppression survives and a late queue read cannot reopen it.
+	return [autoOpenQuestionPrompt(refreshed), SyncSequenceFollower(), SyncInspectorFollower()]
 }
 
 function ToggleMute(state: ApplicationState, event: Event): ApplicationState {
@@ -1772,7 +1868,7 @@ function DismissSuspendedActionNotice(state: ApplicationState): ApplicationState
 	return { ...state, suspendedActionNotice: null }
 }
 
-function SubmitAnswer(questionId: string) {
+function SubmitAnswer(questionId: string, promptKey: string) {
 	return function SubmitAnswerForQuestion(state: ApplicationState, event: Event): ActionReturn {
 		event.preventDefault()
 		const target = event.target
@@ -1782,25 +1878,36 @@ function SubmitAnswer(questionId: string) {
 		const answer = textarea.value
 		if (answer === '') return state
 		return [
+			// Keep the prompt open and un-suppressed while the request is in flight; the response settles it (success suppresses and clears, failure leaves it open for retry).
 			{ ...state, pendingAnswerId: questionId },
 			Fetch({
 				url: 'api/answer',
 				init: { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id: questionId, answer }) },
-				ok: AnswerSent,
-				fail: AnswerFailed,
+				ok: AnswerSent(promptKey),
+				fail: AnswerFailed(promptKey),
 			}),
 		]
 	}
 }
 
-function AnswerSent(state: ApplicationState): ActionReturn {
-	// Refresh the pending list immediately so the answered question disappears without waiting for the next tick. An answered question ends a `needs_clarification` wait, which is a terminal status that deactivated the per-run poll; resetting the status to the non-terminal 'unknown' reactivates that poll so the run view and flow model resume as the run continues, and completion can later fire the result modal. The next poll repopulates the real status from the run's meta.
-	const reactivated: ApplicationState = { ...state, pendingAnswerId: null, selectedRunStatus: 'unknown', serverAvailable: true }
-	return [reactivated, Fetch({ url: 'api/questions', ok: GotQuestions, fail: FetchFailed })]
+function AnswerSent(promptKey: string) {
+	return function AnswerSentForPrompt(state: ApplicationState, payload: FetchResultPayload): ActionReturn {
+		const settled = settleLiveAnswerPrompt({ promptKey, ok: payload.ok, openKey: state.questionPromptOpenKey, suppressedKeys: state.questionPromptSuppressedKeys })
+		// A refused answer leaves the prompt open and un-suppressed so the operator can retry; only a successful response clears and suppresses it.
+		if (!payload.ok) {
+			return { ...state, pendingAnswerId: null, questionPromptOpenKey: settled.openKey, questionPromptSuppressedKeys: settled.suppressedKeys, serverAvailable: true }
+		}
+		// Refresh the pending list immediately so the answered question disappears without waiting for the next tick. An answered question ends a `needs_clarification` wait, which is a terminal status that deactivated the per-run poll; resetting the status to the non-terminal `unknown` reactivates that poll so the run view and flow model resume as the run continues, and completion can later fire the result modal. The next poll repopulates the real status from the run meta. The handled key stays suppressed, so a response that still carries the question cannot reopen the modal after this success clears the open key.
+		const reactivated: ApplicationState = { ...state, pendingAnswerId: null, questionPromptOpenKey: settled.openKey, questionPromptSuppressedKeys: settled.suppressedKeys, selectedRunStatus: 'unknown', serverAvailable: true }
+		return [reactivated, Fetch({ url: 'api/questions', ok: GotQuestions, fail: FetchFailed })]
+	}
 }
 
-function AnswerFailed(state: ApplicationState): ApplicationState {
-	return { ...state, pendingAnswerId: null, serverAvailable: false }
+function AnswerFailed(promptKey: string) {
+	return function AnswerFailedForPrompt(state: ApplicationState): ApplicationState {
+		const rolled = rollbackFailedQuestionPrompt(state, promptKey)
+		return { ...rolled, pendingAnswerId: null, serverAvailable: false }
+	}
 }
 
 // --- Interrupt form ----------------------------------------------------------
@@ -1852,7 +1959,7 @@ function PrimeAudio(state: ApplicationState): ActionReturn {
 }
 
 // --- Flow / Sequence view controls ----------------------------------------
-// The centerpiece's view-mode (Flow vs Sequence) and label tier are pure view state; a swap re-renders the views through the same resolver and model without fetching. The modals are view-side state layered on the live model: the result modal opens on completion (GotSelectedRun) or the flow view's CTA, the question modal opens on a new pending question (GotQuestions) or the flow view's Question affordance.
+// The centerpiece's view-mode (Flow vs Sequence) and label tier are pure view state; a swap re-renders the views through the same resolver and model without fetching. The modals are view-side state layered on the live model: the result modal opens on completion (GotSelectedRun) or the flow view's CTA, the question modal opens on a new pending question (GotQuestions) or the flow/sequence Question affordance.
 
 function SetFlowViewMode(state: ApplicationState, mode: unknown): ActionReturn {
 	if (mode !== 'flow' && mode !== 'sequence') return state
@@ -1882,7 +1989,11 @@ function SetScreen(state: ApplicationState, screen: unknown): ActionReturn {
 	if (screen !== 'watch' && screen !== 'history' && screen !== 'compose') return state
 	// Leaving the watch screen unmounts the sequence container (the follower must detach) and returning to it remounts a fresh one; the swap syncs the follower either way.
 	// Modal state is deliberately kept alive across the swap: returning to watch restores the session's modal state (an open inspector, its loaded window and scope) instead of a fresh view. The unmounted inspector body detaches its follower the same way, and returning to watch re-attaches it pinned.
-	return [{ ...state, screen }, SyncSequenceFollower(), SyncInspectorFollower()]
+	// The prompt auto-opens only on Watch; History and Compose never auto-open one, though an explicitly opened queue row still shows it.
+	const nextScreen: Screen = screen
+	const switched: ApplicationState = { ...state, screen: nextScreen }
+	const next = nextScreen === 'watch' ? autoOpenQuestionPrompt(switched) : switched
+	return [next, SyncSequenceFollower(), SyncInspectorFollower()]
 }
 
 // The merged history screen keys one expansion map for both row kinds: a run id or a queue item id.
@@ -1931,7 +2042,7 @@ function GotResultView(runId: string) {
 		if (!responseBelongsToSelection(runId, state.selectedRunId)) return state
 		const body = payload.body
 		if (!payload.ok || body === null || !isReadableRunView(body)) {
-			return { ...state, serverAvailable: payload.ok, resultLoad: { runId, phase: 'failed' } }
+			return { ...state, serverAvailable: true, resultLoad: { runId, phase: 'failed' } }
 		}
 		if (!acceptedResultView(runId, state.selectedRunId, body.runId)) return state
 		const terminal = deriveTerminalResult(body) !== undefined
@@ -1969,22 +2080,33 @@ function CloseSuspendedModal(state: ApplicationState): ApplicationState {
 	return { ...state, suspendedModalOpen: false }
 }
 
-function OpenQuestionModal(state: ApplicationState): ActionReturn {
-	return [{ ...state, questionModalOpen: true, tooltip: null }, CancelTooltipDismiss()]
+// The unified opener every prompt affordance calls, carrying the key of the prompt it resolved for its context. CTAs on the selected run resolve the current prompt; a queue row resolves its own parked item.
+function OpenQuestionPrompt(state: ApplicationState, key: unknown): ActionReturn {
+	if (typeof key !== 'string' || key === '') return state
+	return [{ ...state, questionPromptOpenKey: key, tooltip: null }, CancelTooltipDismiss()]
 }
 
-function CloseQuestionModal(state: ApplicationState): ApplicationState {
-	return { ...state, questionModalOpen: false }
+function OpenCurrentQuestionPrompt(state: ApplicationState): ActionReturn {
+	const prompt = deriveCurrentQuestionPrompt(state)
+	if (prompt === null) return state
+	return OpenQuestionPrompt(state, prompt.key)
 }
 
-// Opens the app-shell question modal for a parked queue item. The id is stored unvalidated; the render finds the item and gates on its needs_input status, so a stale id renders nothing rather than a modal for a settled item.
-function OpenQueueQuestion(state: ApplicationState, itemId: unknown): ApplicationState {
+// Closing by backdrop suppresses this prompt's key so the next poll cannot reopen it; another prompt key may still auto-open.
+function CloseQuestionPrompt(state: ApplicationState): ApplicationState {
+	const openKey = state.questionPromptOpenKey
+	if (openKey === null) return state
+	return { ...state, questionPromptOpenKey: null, questionPromptSuppressedKeys: suppressQuestionPromptKey(state.questionPromptSuppressedKeys, openKey) }
+}
+
+// A queue row resolves its own item's parked prompt, so a needs_input row remains answerable even when another run is selected. The render resolves the open key back to the same item and gates on its needs_input status, so a settled item closes the modal on the next queue read.
+function OpenQueueQuestion(state: ApplicationState, itemId: unknown): ActionReturn {
 	if (typeof itemId !== 'string' || itemId === '') return state
-	return { ...state, openQueueQuestionId: itemId }
-}
-
-function CloseQueueQuestion(state: ApplicationState): ApplicationState {
-	return { ...state, openQueueQuestionId: null }
+	const item = state.queueItems.find((entry) => entry.id === itemId)
+	if (item === undefined) return state
+	const prompt = deriveQueueRowQuestionPrompt({ item, activeRunId: deriveActiveRunId(state.summaries) })
+	if (prompt === null) return state
+	return OpenQuestionPrompt(state, prompt.key)
 }
 
 // The watch screen's terminal CTA for a parked run: a needs_clarification run's question is its result summary and lives on the queue item, so the Respond button opens that item's answer modal when one matches the selected run. A run with no matching queue item (or a different terminal status) falls back to the result modal, which is where the CTA historically led.
@@ -1992,7 +2114,10 @@ function OpenParkedQuestion(state: ApplicationState): ActionReturn {
 	const runId = state.selectedRunId
 	if (typeof runId === 'string' && runId !== '') {
 		const parked = state.queueItems.find((item) => matchesParkedRun(item, runId))
-		if (parked !== undefined) return [{ ...state, openQueueQuestionId: parked.id, tooltip: null }, CancelTooltipDismiss()]
+		if (parked !== undefined) {
+			const prompt = deriveQueueRowQuestionPrompt({ item: parked, activeRunId: deriveActiveRunId(state.summaries) })
+			if (prompt !== null) return OpenQuestionPrompt(state, prompt.key)
+		}
 	}
 	return OpenResultModal(state)
 }
@@ -2076,7 +2201,7 @@ function LeaveRunView(state: ApplicationState): ActionReturn {
 	return [state, ScheduleTooltipDismiss()]
 }
 
-// Clicking an in-flight `ask_human` row re-opens the question modal: the sequence view has no Question-button overlay like the flow view, so the message row itself is the re-entry affordance after a dismiss. A click on an agent's node/slot/message is the drill-in: it opens the inspector modal pre-scoped to that instance (resolveInspectorScope maps the clicked target to the instance id the modal scopes to), and the modal open clears the tooltip so the card does not linger over it.
+// Clicking an in-flight `ask_human` row re-opens the question modal as a secondary shortcut alongside the sequence stage's Question button. A click on an agent's node/slot/message is the drill-in: it opens the inspector modal pre-scoped to that instance (resolveInspectorScope maps the clicked target to the instance id the modal scopes to), and the modal open clears the tooltip so the card does not linger over it.
 // Every other click — human/tool/interrupt targets, unknown ids — falls through to the hover path so the click still opens the inspector card at the clicked node, mirroring the dev harness. Hover keeps showing the card exactly as before; the drill-in is the click's job.
 // Clicking inside the card (to select text or press a copy affordance) falls through to the hover path's "over the card" branch, which keeps the card open.
 function ClickRunView(state: ApplicationState, event: MouseEvent): ActionReturn {
@@ -2085,8 +2210,8 @@ function ClickRunView(state: ApplicationState, event: MouseEvent): ActionReturn 
 	}
 	const target = resolveTooltipTarget(event)
 	if (target !== null && target.kind === 'operation' && state.flowModel !== null && isInFlightAskHuman(state.flowModel, target.id)) {
-		// Open the modal and dismiss the inspector so the card does not linger over the modal.
-		return [{ ...state, questionModalOpen: true, tooltip: null }, CancelTooltipDismiss()]
+		// Open the live prompt and dismiss the inspector so the card does not linger over the modal.
+		return OpenCurrentQuestionPrompt(state)
 	}
 	if (target !== null && state.flowModel !== null) {
 		const scopeId = resolveInspectorScope(state.flowModel, target)
@@ -2987,7 +3112,8 @@ function WatchScreen(state: ApplicationState): Vnode {
 	// The stage memo returns the cached vnode while the stable inputs are unchanged; it is mounted at exactly one keyed position — child 0 of the `.pb-flow` container keyed 'watch-flow', or child 0 of the sequence scroll wrapper in sequence mode — and that key keeps the position stable while the container's unkeyed siblings (LineageLine, PlanSection) toggle in and out, so the cached vnode is only ever diffed against its own previous self. The reuse is safe because it never lands at two positions or after a position shift (see run-stage/index.ts and docs/architecture.md "Web client").
 	// A needs_clarification run's question lives on its parked queue item, so its Respond CTA opens that item's answer modal; a suspended run opens the pause card; every other terminal status keeps the result modal. The status rides the model input, so a status change already rebuilds the stage.
 	const cta = { onclick: model.status === 'needs_clarification' ? OpenParkedQuestion : isSuspendedStatus(model.status) ? OpenSuspendedModal : OpenResultModal }
-	const question = { onclick: OpenQuestionModal }
+	// The stage gets a Question affordance only while a derived prompt exists for the watched run; the model's lingering ask alone must not keep an orange button alive after an answer was deferred.
+	const question = deriveCurrentQuestionPrompt(state) === null ? undefined : { onclick: OpenCurrentQuestionPrompt }
 	const stageInputs = {
 		model: serverModel,
 		previousModel: state.previousFlowModel,
@@ -3011,10 +3137,9 @@ function WatchScreen(state: ApplicationState): Vnode {
 	return h('section', { id: 'watch-screen' }, [
 		LineageLine(state),
 		StageControls(state, model),
-		// `.pb-flow` is the positioning context for the per-run-view modals (the question, result, and interrupt overlays are absolute inset 0 within it), so the modals cover the run view rather than the whole page. It is also the hover stage for the inspector: `mouseover`/`mouseleave`/`click` bubble here from every SVG child, so the inspector is wired once for both the flow and sequence views.
+		// `.pb-flow` is the positioning context for the per-run-view modals (the result and interrupt overlays are absolute inset 0 within it), so those modals cover the run view rather than the whole page. It is also the hover stage for the inspector: `mouseover`/`mouseleave`/`click` bubble here from every SVG child, so the inspector is wired once for both the flow and sequence views.
 		h('div', { key: 'watch-flow', class: 'pb-flow flow-stage', onmouseover: HoverRunView, onmouseleave: LeaveRunView, onclick: ClickRunView }, [
 			stageView,
-			QuestionModalForRun(state),
 			ResultModalForRun(state),
 			SuspendedCardForRun(state),
 			InterruptModalForRun(state),
@@ -3058,36 +3183,40 @@ function operationDetailsLookup(runId: string | null): (operationId: string) => 
 	return (operationId) => operationDetails.lookup(runId ?? '', operationId)
 }
 
-// The pending question the modal renders. The live `/api/questions` poll is the source, so the modal is driven by live data, and the answer form posts to `/api/answer` via the existing SubmitAnswer path. The first pending question is the active one; the modal opens when one arrives (GotQuestions) and re-opens via the flow view's Question affordance.
-function QuestionModalForRun(state: ApplicationState): Vnode | null {
-	if (!state.questionModalOpen) return null
-	const question = state.pendingQuestions[0]
-	if (question === undefined) return null
-	const runLabel = state.selectedRunView !== null && typeof state.selectedRunView.runId === 'string' ? state.selectedRunView.runId : null
+// The one prompt modal, mounted at the app shell rather than inside WatchScreen so it also shows for parked needs_clarification runs and for any WatchScreen early-return branch. The open key resolves back to its prompt independently of the selection, so a queue row can open another run's parked item; the live and parked instances reuse the same QuestionModal component with their own submit route.
+function QuestionPromptModalForApp(state: ApplicationState): Vnode | null {
+	const prompt = deriveOpenQuestionPrompt(state)
+	if (prompt === null) return null
+	if (prompt.kind === 'live') return LiveQuestionModalForPrompt(state, prompt)
+	return ParkedQuestionModalForPrompt(state, prompt)
+}
+
+// The live prompt uses the prompt's own question/context, not a fresh read of pendingQuestions[0] that a poll could have replaced under the open modal.
+function LiveQuestionModalForPrompt(state: ApplicationState, prompt: Extract<QuestionPrompt, { kind: 'live' }>): Vnode {
 	return QuestionModal(h, {
-		question: { question: question.question, context: question.context },
-		runLabel,
+		question: { question: prompt.question, context: prompt.context },
+		runLabel: prompt.runId,
 		renderMarkdown,
-		onSubmit: SubmitAnswer(question.id),
-		onClose: CloseQuestionModal,
-		answerPending: state.pendingAnswerId === question.id,
+		onSubmit: SubmitAnswer(prompt.questionId, prompt.key),
+		onClose: CloseQuestionPrompt,
+		answerPending: state.pendingAnswerId === prompt.questionId,
+		fixed: true,
 	})
 }
 
-// The app-shell question modal for a parked queue item, driven by `openQueueQuestionId`. It renders nothing unless the id resolves to a current needs_input item, so an answered (or removed) item closes the modal the moment the queue poll updates. It is the `fixed` overlay variant because the history screen has no run-view container to scope it to. The item's own status gates it, so no explicit close is needed on answer success beyond the id clear in GotQueueAfterAnswer.
-function QueueQuestionModalForApp(state: ApplicationState): Vnode | null {
-	const itemId = state.openQueueQuestionId
-	if (itemId === null) return null
-	const item = state.queueItems.find((entry) => entry.id === itemId)
+// The parked prompt resolves the item named by its key and gates on that item's current needs_input status, so an answered or removed item closes the modal on the next queue read instead of falling back to some other parked row.
+function ParkedQuestionModalForPrompt(state: ApplicationState, prompt: Extract<QuestionPrompt, { kind: 'parked' }>): Vnode | null {
+	const item = state.queueItems.find((entry) => entry.id === prompt.queueItemId)
 	if (item === undefined || item.status !== 'needs_input') return null
+	const question = typeof item.question === 'string' && item.question !== '' ? item.question : prompt.question
 	return QuestionModal(h, {
-		question: { question: typeof item.question === 'string' ? item.question : '' },
-		runLabel: item.runId ?? null,
+		question: { question },
+		runLabel: prompt.runId,
 		renderMarkdown,
-		onSubmit: SubmitQueueAnswer(item.id),
-		onClose: CloseQueueQuestion,
-		onTerminate: TerminateQueueItem(item.id),
-		answerPending: state.queueAnswerPendingId === item.id,
+		onSubmit: SubmitQueueAnswer(prompt.queueItemId, prompt.key),
+		onClose: CloseQuestionPrompt,
+		onTerminate: TerminateQueueItem(prompt.queueItemId),
+		answerPending: state.queueAnswerPendingId === prompt.queueItemId,
 		terminatePending: state.queueTerminatePendingId !== null,
 		fixed: true,
 	})
@@ -3189,24 +3318,24 @@ function Main(state: ApplicationState): Vnode {
 }
 
 function view(state: ApplicationState): Vnode {
-	return h('div', { class: 'app-shell' }, [TopBar(state), ProviderHealthBannerForState(state), SuspendedActionNoticeForState(state), Main(state), QueueQuestionModalForApp(state)])
+	return h('div', { class: 'app-shell' }, [TopBar(state), ProviderHealthBannerForState(state), SuspendedActionNoticeForState(state), Main(state), QuestionPromptModalForApp(state)])
 }
 
 // --- App -------------------------------------------------------------------
-// The subscriptions array is fixed-size with stable positions: [0] always polls the run list (which now also carries provider health), the pending questions, and the task queue every second while the page is visible; [1] polls the selected run's run view and flow model every second but only on the watch screen, while the page is visible, and while the run is selected and not settled for polling (terminal or suspended stop it); [2] primes the AudioContext on the first user interaction; [3] dismisses the inspector modal on Escape while it is open; [4] subscribes the live token stream to the selected run under the same settled-for-polling guard [1] uses, so a suspended run keeps no stream open; [5] tracks page visibility and refreshes immediately when the tab returns.
+// The subscriptions array is fixed-size with stable positions: [0] always polls the run list (which now also carries provider health), the pending questions, and the task queue every second while the page is visible; [1] polls the selected run's run view and flow model every second but only on the watch screen, while the page is visible, and while the run is selected and not settled for polling (terminal or suspended stop it); [2] primes the AudioContext on the first user interaction; [3] dismisses the inspector modal on Escape while it is open; [4] dismisses the question prompt on Escape while it is open; [5] subscribes the live token stream to the selected run under the same settled-for-polling guard [1] uses, so a suspended run keeps no stream open; [6] tracks page visibility and refreshes immediately when the tab returns.
 
 // hyperapp re-enters `view` and `subscriptions` with the state it holds, but the vendored declaration types that re-entry as `unknown` (it is app-agnostic). The state provably stays an ApplicationState — init plants a checked literal and every action returns a checked transition — so this guard confirms the wiring rather than re-validating data, and a mismatch fails the mount instead of rendering garbage.
 function isApplicationState(value: unknown): value is ApplicationState {
 	if (!isObject(value)) return false
 	const stateKeys: (keyof ApplicationState)[] = [
 		'summaries', 'selectedRunId', 'selectedRunView', 'selectedRunStatus', 'pendingQuestions', 'providerHealth',
-		'queueItems', 'justSubmittedItemId', 'pendingAddSelectionId', 'editingItemId', 'draggingItemId', 'queueAnswerPendingId', 'queueTerminatePendingId', 'openQueueQuestionId', 'pendingResumeItemId',
+		'queueItems', 'justSubmittedItemId', 'pendingAddSelectionId', 'editingItemId', 'draggingItemId', 'queueAnswerPendingId', 'queueTerminatePendingId', 'pendingResumeItemId',
 		'serverAvailable', 'versions', 'justSubmittedRunId', 'createSending', 'muted', 'shownQuestionIds', 'firstQuestionsPoll', 'pendingAnswerId',
 		'runEffort', 'savingEffort', 'runInvolvement', 'savingInvolvement', 'runLogLevel', 'savingLogLevel',
 		'flowModel', 'previousFlowModel', 'flowFeed', 'runListFeed', 'runListLoaded', 'queueLoaded', 'labelResolver', 'guildParticipants', 'build',
 		'flowTier', 'flowViewMode', 'sequenceRolesOnly', 'screen', 'pageVisible', 'flowRefreshPending', 'expandedRowIds', 'continuation',
 		'resumingRunId', 'resumeSending', 'resumeNotice',
-		'questionModalOpen', 'resultModalOpen', 'resultShownForRun', 'suspendedModalOpen', 'suspendedActionNotice', 'resumeRunPendingId', 'resultLoad', 'interruptModalOpen',
+		'questionPromptOpenKey', 'questionPromptSuppressedKeys', 'resultModalOpen', 'resultShownForRun', 'suspendedModalOpen', 'suspendedActionNotice', 'resumeRunPendingId', 'resultLoad', 'interruptModalOpen',
 		'inspectorModalOpen', 'planExpanded', 'livePartial', 'streamConnected', 'streamWasConnectedOnce', 'tooltip',
 		'interruptMode', 'interruptSending', 'interruptNotice', 'interruptAnswerCard', 'shownInterruptAnswerKeys', 'now',
 	]
@@ -3236,7 +3365,6 @@ app({
 			draggingItemId: null,
 			queueAnswerPendingId: null,
 			queueTerminatePendingId: null,
-			openQueueQuestionId: null,
 			pendingResumeItemId: null,
 			serverAvailable: true,
 			versions: {},
@@ -3272,7 +3400,8 @@ app({
 			resumingRunId: null,
 			resumeSending: false,
 			resumeNotice: null,
-			questionModalOpen: false,
+			questionPromptOpenKey: null,
+			questionPromptSuppressedKeys: [],
 			resultModalOpen: false,
 			resultShownForRun: null,
 			suspendedModalOpen: false,
@@ -3309,6 +3438,7 @@ app({
 			state.pageVisible && state.screen === 'watch' && hasPollableSelectedRun(state) && onEvery(PollSelectedRun, POLL_INTERVAL_MS),
 			onFirstInteraction(PrimeAudio),
 			state.inspectorModalOpen === true && onEscapeKey(CloseInspectorModal),
+			state.questionPromptOpenKey !== null && onEscapeKey(CloseQuestionPrompt),
 			state.screen === 'watch' && hasPollableSelectedRun(state) && StreamSubscription(state.selectedRunId),
 			onVisibilityChange(PageVisibilityChanged),
 		]

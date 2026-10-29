@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import type { LogEvent, RunMeta } from '../../../../executor/types.js'
-import { createRunStage } from './index.js'
+import { createRunStage, FLOW_QUESTION_BAR_CLASS, FLOW_QUESTION_BUTTON_CLASS } from './index.js'
 import type { RunStage } from './index.js'
 import { deriveLifecycle } from './flow-view.js'
 import { activeOperation, activeParticipant, activeStack, observesOf, stacksOf, withLiveElapsed } from '../interaction-model.js'
@@ -16,6 +16,8 @@ type InteractionModel = Parameters<typeof stacksOf>[0]
 type Participant = InteractionModel['participants'][number]
 type Operation = InteractionModel['operations'][number]
 type LabelTier = Parameters<ReturnType<typeof createLabelResolver>['resolveParticipantLabel']>[1]
+type CtaControls = NonNullable<Parameters<RunStage['render']>[1]['cta']>
+type QuestionControls = NonNullable<Parameters<RunStage['render']>[1]['question']>
 
 // A fake `h` capturing the tag, props, and children of every vnode so the layout assertions walk a plain object tree rather than real DOM.
 interface Vnode {
@@ -85,6 +87,8 @@ interface RenderOptions {
 	roleNames?: string[]
 	roleOrder?: readonly string[]
 	previousModel?: InteractionModel | null
+	cta?: CtaControls
+	question?: QuestionControls
 }
 
 function render(model: InteractionModel, tier: LabelTier = 'detailed', options: RenderOptions = {}): Vnode {
@@ -97,6 +101,8 @@ function render(model: InteractionModel, tier: LabelTier = 'detailed', options: 
 		viewMode: 'flow',
 		rolesOnly: false,
 		guildParticipants: [],
+		cta: options.cta,
+		question: options.question,
 	})
 }
 
@@ -784,6 +790,117 @@ describe('renderFlowView — terminal CTA', () => {
 		if (label === undefined) throw new Error('expected the CTA label')
 		expect(label.children.join('')).toBe('Suspended')
 		expect(pathHasClass(pathForOperation(view, 'op1'), 'graph-edge--flowing')).toBe(false)
+	})
+})
+
+describe('renderFlowView — pending question affordance', () => {
+	function pendingQuestionFrame(): InteractionModel {
+		return scenarioFrame('pending-question', 2)
+	}
+
+	test('the Question button appears only while an ask_human call is pending and a question handler is supplied', () => {
+		const withHandler = render(pendingQuestionFrame(), 'detailed', { question: { onclick: () => undefined } })
+		const buttons = groupsWithClass(withHandler, 'flow-question-button')
+		expect(buttons.length).toBe(1)
+		const button = defined(buttons[0], 'buttons[0]')
+		expect(button.props['role']).toBe('button')
+		expect(button.props['tabindex']).toBe(0)
+		expect(button.props['aria-label']).toBe('Question for Human')
+		const label = allByTag(button, 'tspan').map((span) => span.children.join('')).join('')
+		expect(label).toBe('QuestionforHuman')
+
+		const withoutPending = render(scenarioFrame('pending-question', 0), 'detailed', { question: { onclick: () => undefined } })
+		expect(groupsWithClass(withoutPending, 'flow-question-button').length).toBe(0)
+
+		const withoutHandler = render(pendingQuestionFrame())
+		expect(groupsWithClass(withoutHandler, 'flow-question-button').length).toBe(0)
+	})
+
+	test('the Question button invokes question.onclick and stops the click before the stage inspector sees it', () => {
+		let questionClicks = 0
+		let stoppedClicks = 0
+		const view = render(pendingQuestionFrame(), 'detailed', { question: { onclick: () => { questionClicks += 1 } } })
+		const button = defined(groupsWithClass(view, 'flow-question-button')[0], 'questionButton')
+		const onclick = button.props['onclick']
+		if (typeof onclick !== 'function') throw new Error('expected the Question button click handler')
+		onclick(undefined, { stopPropagation: () => { stoppedClicks += 1 }, preventDefault: () => undefined, key: '', type: 'click' })
+		expect(questionClicks).toBe(1)
+		expect(stoppedClicks).toBe(1)
+	})
+
+	test('Enter and Space activate the Question button, while other keys return the state unchanged', () => {
+		let questionClicks = 0
+		let preventDefaults = 0
+		let stoppedKeys = 0
+		const state = { route: 'question-test' }
+		const view = render(pendingQuestionFrame(), 'detailed', { question: { onclick: () => { questionClicks += 1 } } })
+		const button = defined(groupsWithClass(view, 'flow-question-button')[0], 'questionButton')
+		const onkeydown = button.props['onkeydown']
+		if (typeof onkeydown !== 'function') throw new Error('expected the Question button keydown handler')
+		const event = (key: string) => ({ key, type: 'keydown', preventDefault: () => { preventDefaults += 1 }, stopPropagation: () => { stoppedKeys += 1 } })
+
+		expect(onkeydown(state, event('a'))).toBe(state)
+		expect(onkeydown(state, event('Tab'))).toBe(state)
+		expect(questionClicks).toBe(0)
+		expect(preventDefaults).toBe(0)
+		expect(stoppedKeys).toBe(0)
+
+		onkeydown(state, event('Enter'))
+		expect(questionClicks).toBe(1)
+		expect(preventDefaults).toBe(1)
+		expect(stoppedKeys).toBe(1)
+
+		onkeydown(state, event(' '))
+		expect(questionClicks).toBe(2)
+		expect(preventDefaults).toBe(2)
+		expect(stoppedKeys).toBe(2)
+	})
+
+	test('a prompt suppresses every generic CTA, while a suspended run without a prompt keeps its CTA', () => {
+		const pending = pendingQuestionFrame()
+		const view = render(pending, 'detailed', { cta: { onclick: () => undefined }, question: { onclick: () => undefined } })
+		expect(groupsWithClass(view, 'flow-cta').length).toBe(0)
+		expect(groupsWithClass(view, 'flow-question-button').length).toBe(1)
+
+		const suspended: InteractionModel = { ...pending, status: 'suspended' }
+		const suspendedWithPrompt = render(suspended, 'detailed', { cta: { onclick: () => undefined }, question: { onclick: () => undefined } })
+		expect(groupsWithClass(suspendedWithPrompt, 'flow-cta').length).toBe(0)
+
+		const suspendedWithoutPrompt = render(suspended, 'detailed', { cta: { onclick: () => undefined } })
+		expect(groupsWithClass(suspendedWithoutPrompt, 'flow-cta').length).toBe(1)
+	})
+
+	test('an in-flight ask without a derived prompt leaves no dead Question button and keeps the Respond CTA', () => {
+		const view = render(pendingQuestionFrame(), 'detailed', { cta: { onclick: () => undefined } })
+		expect(groupsWithClass(view, 'flow-question-button').length).toBe(0)
+		expect(groupsWithClass(view, 'flow-cta').length).toBe(1)
+	})
+
+	test('a prompt with no locatable active ask falls back to a stage question bar and suppresses the CTA', () => {
+		const terminalFrame: InteractionModel = { ...scenarioFrame('pending-question', 3), status: 'success' }
+		const view = render(terminalFrame, 'detailed', { cta: { onclick: () => undefined }, question: { onclick: () => undefined } })
+		const bar = allByTag(view, 'div').find((node) => (propString(node.props, 'class') ?? '').split(' ').includes(FLOW_QUESTION_BAR_CLASS))
+		expect(bar).toBeDefined()
+		const button = allByTag(view, 'button').find((node) => (propString(node.props, 'class') ?? '').split(' ').includes(FLOW_QUESTION_BUTTON_CLASS))
+		expect(button).toBeDefined()
+		expect(groupsWithClass(view, 'flow-question-button').length).toBe(0)
+		expect(groupsWithClass(view, 'flow-cta').length).toBe(0)
+	})
+
+	test('human participant nodes stay hover-inspectable and are never rendered as buttons', () => {
+		const view = render(pendingQuestionFrame(), 'detailed', { question: { onclick: () => undefined } })
+		const humanNodes = allByTag(view, 'g').filter((group) => {
+			const classes = (propString(group.props, 'class') ?? '').split(' ')
+			if (!classes.includes('flow-node')) return false
+			return group.props['data-kind'] === 'human'
+		})
+		expect(humanNodes.length).toBeGreaterThan(0)
+		for (const node of humanNodes) {
+			expect(node.props['role']).toBeUndefined()
+			expect(node.props['tabindex']).toBeUndefined()
+			expect(node.props['onclick']).toBeUndefined()
+			expect((propString(node.props, 'class') ?? '').split(' ').includes('flow-question-button')).toBe(false)
+		}
 	})
 })
 

@@ -1,6 +1,6 @@
-// Per-run-view modal for a pending `ask_human` question.
+// Modal for a pending live or parked `ask_human` question.
 //
-// The modal is an overlay scoped to the run view (not `document.body`-wide): it covers the active run's flow area only, so the rest of the page stays usable while the modal is open. It renders the question text and its optional context as sanitized Markdown (via the `renderMarkdown` closure passed in, the same pipeline the product client uses) and the answer input is trusted operator input sent verbatim — never rendered back as Markdown from an untrusted source. See docs/security.md "Web client rendering pipeline".
+// The overlay is either scoped to the run view (absolute inset 0 within `.pb-flow`) or viewport-wide through `fixed`; the app-shell prompt controller uses the fixed variant so live and parked prompts render on every screen and before WatchScreen's placeholder/terminal early returns. It renders the question text and its optional context as sanitized Markdown (via the `renderMarkdown` closure passed in, the same pipeline the product client uses) and the answer input is trusted operator input sent verbatim — never rendered back as Markdown from an untrusted source. See docs/security.md "Web client rendering pipeline".
 //
 // `h` and `renderMarkdown` are passed in rather than imported so the component stays free of hyperapp and showdown coupling and is exercisable in tests with fakes (mirroring the run-stage views and markdown.js). The submit handler is supplied by the caller: in the demo harness it advances the frame (the scenario's next frame models the answered state); in the product client it will POST to `/api/answer`.
 
@@ -8,6 +8,8 @@ import type { LooseH, Vnode, VnodeChildInput } from '../vendor/hyperapp.js'
 
 // The sanitized-Markdown renderer the component receives: the createMarkdownRenderer product in the hosts — generic over the host's vnode product, an array of host vnodes and strings, which is children input exactly as `LooseH` accepts it wherever the host's `h` builds the exchange shape — or a single-vnode fake in the tests.
 type RenderMarkdown = (text: string) => VnodeChildInput
+
+const QUESTION_MODAL_HEADING_ID = 'question-modal-heading'
 
 // The pending question the modal renders: the ask_human call's question text plus its optional context. The model's other fields (id, askedAt) are the producer's bookkeeping and are not read here.
 export interface PendingQuestion {
@@ -26,11 +28,11 @@ export interface QuestionModalProps {
 	answerPending?: boolean
 	// A termination request for this same item is in flight: disable the terminate control so it cannot fire twice while the queue reconciles.
 	terminatePending?: boolean
-	// When true the overlay covers the whole viewport (`position: fixed`) instead of being scoped to the run view's `.pb-flow` containing block. The queue-driven instance opens from the history screen, which has no run-view container to cover, so it needs the viewport-wide variant.
+	// When true the overlay covers the whole viewport (`position: fixed`) instead of being scoped to the run view's `.pb-flow` containing block. The app-shell prompt controller mounts the modal outside that container on every screen, so it uses the viewport-wide variant for both live and parked prompts.
 	fixed?: boolean
 }
 
-// The modal overlay: a backdrop over the run view plus a centered card carrying the question, its context, and the answer form. The card names which run is asking (`runLabel`). The answer textarea carries `autofocus` so the operator can type immediately without hunting for focus; `answerPending` disables the form while a submit is in flight (the product client's POST path; the harness answers instantly). `onClose` is wired to the backdrop click so the operator can dismiss a pending question without answering it — the Question affordance stays on the answerer node so the modal is re-openable, mirroring the result modal's dismiss path.
+// The modal overlay: a backdrop over the run view plus a centered card carrying the question, its context, and the answer form. The card names which run is asking (`runLabel`). The answer textarea carries `autofocus` so the operator can type immediately without hunting for focus; `answerPending` disables the form while a submit is in flight (the product client's POST path; the harness answers instantly). `onClose` is wired to the backdrop click, an explicit Close button, and Escape on the dialog so the operator can dismiss a pending question without answering it — the Question affordance stays on the answerer node so the modal is re-openable, mirroring the result modal's dismiss path.
 export function QuestionModal(h: LooseH, props: QuestionModalProps): Vnode {
 	const question = props.question
 	const runLabel = props.runLabel
@@ -46,10 +48,24 @@ export function QuestionModal(h: LooseH, props: QuestionModalProps): Vnode {
 		? question.context
 		: null
 
+	const onKeydown = (state: unknown, event: Event): unknown => {
+		if (!('key' in event) || event['key'] !== 'Escape') return state
+		event.preventDefault()
+		event.stopPropagation()
+		return onClose
+	}
+
 	return h('div', { class: overlayClass }, [
 		h('div', { class: 'question-modal-backdrop', onclick: onClose }),
-		h('div', { class: 'question-modal-card', id: 'question-modal-card' }, [
-			h('p', { class: 'question-modal-heading' }, runLabel !== null && runLabel !== undefined && runLabel !== ''
+		h('div', {
+			class: 'question-modal-card',
+			id: 'question-modal-card',
+			role: 'dialog',
+			'aria-modal': 'true',
+			'aria-labelledby': QUESTION_MODAL_HEADING_ID,
+			onkeydown: onKeydown,
+		}, [
+			h('p', { class: 'question-modal-heading', id: QUESTION_MODAL_HEADING_ID }, runLabel !== null && runLabel !== undefined && runLabel !== ''
 				? `Question from ${runLabel}`
 				: 'Question'),
 			h('div', { class: 'question-modal-question markdown' }, renderMarkdown(question.question)),
@@ -62,6 +78,7 @@ export function QuestionModal(h: LooseH, props: QuestionModalProps): Vnode {
 				onTerminate !== undefined
 					? h('button', { type: 'button', class: 'question-modal-terminate', disabled: answerPending || terminatePending, onclick: onTerminate }, 'Terminate task')
 					: null,
+				h('button', { type: 'button', class: 'question-modal-close', onclick: onClose }, 'Close'),
 			]),
 		]),
 	])

@@ -2941,12 +2941,18 @@ li:last-child {
 /* --- Question button (pending ask_human affordance) ------------------------- */
 /* The Question button overlays the answerer node while an ask_human call is pending, mirroring the CTA's button-like treatment so it reads as a pressable affordance the operator clicks to (re-)open the question modal. The layered bezel + gradient face + 3-line label give it the same 3D pressable feel as the See Result CTA; hover lifts and active depresses so the interaction is obvious even after the modal is dismissed. */
 
-.flow-question-button {
+/* The generic `.flow-node { cursor: help }` rule would otherwise win on specificity, leaving this affordance looking inspectable rather than pressable; the two-class selector keeps it a pointer and hit-active. */
+.flow-node.flow-question-button {
 	cursor: pointer;
+	pointer-events: auto;
 }
 
 .flow-question-button-bezel {
 	fill: #b35e0a;
+}
+
+.flow-question-button-hit {
+	pointer-events: all;
 }
 
 .flow-question-button-face {
@@ -2961,16 +2967,97 @@ li:last-child {
 	transform: translateY(1px);
 }
 
+.flow-question-button:focus-visible {
+	outline: none;
+}
+
+.flow-question-button:focus-visible .flow-question-button-bezel {
+	stroke: var(--color-accent);
+	stroke-width: 3;
+}
+
 .flow-question-button-label {
 	fill: #fff;
 	font-weight: 700;
 	font-size: 12px;
 }
 
+/* The stage-level pending-question bar is a compact row above the SVG, reusing the flow Question button's orange bezel/face language. In sequence mode the bar and column header both stick within the scroll container, and the bar reserves its own track so the header starts below it; in flow mode it is the fallback when a prompt exists but no locatable ask can carry the SVG overlay. The button's own stopPropagation keeps it out of the host's delegated inspector click path. */
+.sequence-question-stage, .flow-question-stage {
+	--sequence-question-bar-height: 2.75rem;
+	position: relative;
+	display: flex;
+	flex-direction: column;
+}
+
+.flow-question-stage {
+	flex: 1 1 auto;
+	min-height: 0;
+}
+
+.flow-question-stage > .flow-view-svg {
+	flex: 1 1 auto;
+	min-height: 0;
+}
+
+.sequence-question-bar, .flow-question-bar {
+	position: sticky;
+	top: 0;
+	z-index: 2;
+	height: var(--sequence-question-bar-height);
+	display: flex;
+	align-items: center;
+	justify-content: flex-end;
+	padding: 0 var(--space-3);
+	background: var(--color-surface-sunken);
+	border-bottom: 1px solid var(--color-border);
+}
+
+/* The sequence surface stays the wrapper's first child so a bar toggle never shifts or recreates it; the bar is appended after it and ordered visually above the canvas. */
+.sequence-question-bar {
+	order: -1;
+}
+
+.sequence-question-stage--with-bar .sequence-view-header {
+	top: var(--sequence-question-bar-height);
+}
+
+.sequence-question-button, .flow-question-bar-button {
+	display: block;
+	padding: var(--space-1) var(--space-3);
+	border: 1px solid #b35e0a;
+	border-radius: var(--radius-sm);
+	background: linear-gradient(180deg, #f0a93c 0%, #e0821a 50%, #b35e0a 100%);
+	color: #fff;
+	font: inherit;
+	font-weight: 700;
+	white-space: nowrap;
+	cursor: pointer;
+	box-shadow: 0 2px 1px rgba(0, 0, 0, 0.35), 0 4px 6px rgba(179, 94, 10, 0.32);
+	transition: transform 0.1s ease, box-shadow 0.12s ease;
+}
+
+.sequence-question-button:hover, .flow-question-bar-button:hover {
+	transform: translateY(-1px);
+	box-shadow: 0 2px 1px rgba(0, 0, 0, 0.4), 0 7px 12px rgba(179, 94, 10, 0.5);
+}
+
+.sequence-question-button:active, .flow-question-bar-button:active {
+	transform: translateY(1px);
+	box-shadow: 0 1px 0 rgba(0, 0, 0, 0.45), 0 1px 2px rgba(179, 94, 10, 0.2);
+}
+
+.sequence-question-button:focus-visible, .flow-question-bar-button:focus-visible {
+	outline: 2px solid var(--color-accent);
+	outline-offset: 2px;
+}
+
 @media (prefers-reduced-motion: reduce) {
 	.flow-question-button-face,
 	.flow-question-button:hover .flow-question-button-face,
-	.flow-question-button:active .flow-question-button-face {
+	.flow-question-button:active .flow-question-button-face,
+	.sequence-question-button,
+	.flow-question-bar-button {
 		transform: none;
 		transition: none;
 	}

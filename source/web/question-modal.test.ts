@@ -173,3 +173,59 @@ describe('QuestionModal', () => {
 		expect(terminate.props.disabled).toBe(true)
 	})
 })
+
+describe('QuestionModal accessibility', () => {
+	const question = { id: 'q1', question: 'Which CI provider should I target?', context: '.github/workflows/', askedAt: 't1' }
+
+	test('the card is a labelled modal dialog', () => {
+		const modal: Vnode = QuestionModal(fakeH, { question, runLabel: 'run-1', renderMarkdown: fakeRenderMarkdown, onSubmit: () => undefined })
+		const card = defined(allByTag(modal, 'div').find((d) => d.props.class === 'question-modal-card'), 'card')
+		const heading = defined(allByTag(modal, 'p').find((p) => p.props.class === 'question-modal-heading'), 'heading')
+		expect(card.props['role']).toBe('dialog')
+		expect(card.props['aria-modal']).toBe('true')
+		expect(typeof heading.props['id']).toBe('string')
+		expect(card.props['aria-labelledby']).toBe(heading.props['id'])
+	})
+
+	test('an explicit Close button invokes the supplied close action and keeps its type as button', () => {
+		let closes = 0
+		const onClose = () => {
+			closes++
+		}
+		const modal: Vnode = QuestionModal(fakeH, { question, runLabel: 'run-1', renderMarkdown: fakeRenderMarkdown, onSubmit: () => undefined, onClose })
+		const form = defined(allByTag(modal, 'form').find((f) => f.props.class === 'question-modal-form'), 'form')
+		const close = defined(byTag(form, 'button').find((button) => button.props.class === 'question-modal-close'), 'close')
+		expect(close.props['type']).toBe('button')
+		expect(close.children.join('')).toBe('Close')
+		const onclick = close.props['onclick']
+		if (typeof onclick !== 'function') throw new Error('expected a close click handler')
+		onclick()
+		expect(closes).toBe(1)
+	})
+
+	test('Escape returns the close action, while ordinary keys return the incoming state untouched', () => {
+		const onClose = () => undefined
+		const modal: Vnode = QuestionModal(fakeH, { question, runLabel: 'run-1', renderMarkdown: fakeRenderMarkdown, onSubmit: () => undefined, onClose })
+		const card = defined(allByTag(modal, 'div').find((d) => d.props.class === 'question-modal-card'), 'card')
+		const onkeydown = card.props['onkeydown']
+		if (typeof onkeydown !== 'function') throw new Error('expected a dialog keydown handler')
+		let preventDefaults = 0
+		let stoppedPropagations = 0
+		const event = (key: string) => ({
+			key,
+			preventDefault: () => {
+				preventDefaults++
+			},
+			stopPropagation: () => {
+				stoppedPropagations++
+			},
+		})
+		const incomingState = { marker: 'unchanged' }
+		expect(onkeydown(incomingState, event('a'))).toBe(incomingState)
+		expect(preventDefaults).toBe(0)
+		expect(stoppedPropagations).toBe(0)
+		expect(onkeydown(incomingState, event('Escape'))).toBe(onClose)
+		expect(preventDefaults).toBe(1)
+		expect(stoppedPropagations).toBe(1)
+	})
+})

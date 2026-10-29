@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { createRunStage, SEQUENCE_BODY_CLASS, SEQUENCE_HEADER_CLASS, SEQUENCE_SURFACE_CLASS } from './index.js'
+import { createRunStage, SEQUENCE_BODY_CLASS, SEQUENCE_HEADER_CLASS, SEQUENCE_QUESTION_STAGE_CLASS, SEQUENCE_SURFACE_CLASS } from './index.js'
 import type { RunStage, StageRenderInputs } from './index.js'
 import type { InteractionModel, Participant } from '../interaction-model.js'
 import { createLabelResolver } from '../labels.js'
@@ -29,7 +29,6 @@ function baseInputs(): StageRenderInputs {
 		rolesOnly: false,
 		guildParticipants: [{ id: 'guild:coder', role: 'coder', kind: 'role' }],
 		cta: { onclick: () => undefined },
-		question: { onclick: () => undefined },
 	}
 }
 
@@ -110,23 +109,28 @@ describe('run stage memo', () => {
 		}
 	})
 
-	test('flow mode returns its SVG root; sequence mode returns the one surface wrapper', () => {
+	test('flow mode returns its SVG root; sequence mode returns the stable stage wrapper around the surface', () => {
 		const runStage = stage()
 		const flow = runStage.render(fakeH, baseInputs())
 		expect(flow.tag).toBe('svg')
 		expect(flow.props['class']).toBe('flow-view-svg')
 		const sequence = runStage.render(fakeH, { ...baseInputs(), viewMode: 'sequence' })
 		expect(sequence.tag).toBe('div')
-		expect(sequence.props['class']).toBe(SEQUENCE_SURFACE_CLASS)
+		expect(sequence.props['class']).toBe(SEQUENCE_QUESTION_STAGE_CLASS)
+		const surface = sequence.children[0]
+		if (surface === undefined || typeof surface === 'string') throw new Error('the sequence stage did not render its surface')
+		expect(surface.props['class']).toBe(SEQUENCE_SURFACE_CLASS)
 	})
 
 	test('the sequence surface contains exactly one keyed header SVG followed by one body SVG', () => {
 		const runStage = stage()
-		const sequence = runStage.render(fakeH, { ...baseInputs(), viewMode: 'sequence' })
-		const header = sequence.children[0]
-		const body = sequence.children[1]
+		const wrapper = runStage.render(fakeH, { ...baseInputs(), viewMode: 'sequence' })
+		const surface = wrapper.children[0]
+		if (surface === undefined || typeof surface === 'string') throw new Error('the sequence stage did not render its surface')
+		const header = surface.children[0]
+		const body = surface.children[1]
 		if (header === undefined || body === undefined || typeof header === 'string' || typeof body === 'string') throw new Error('the sequence surface did not render both SVGs')
-		expect(sequence.children.length).toBe(2)
+		expect(surface.children.length).toBe(2)
 		expect(header.tag).toBe('svg')
 		expect(header.props['class']).toBe(SEQUENCE_HEADER_CLASS)
 		expect(header.props['key']).toBe('header')

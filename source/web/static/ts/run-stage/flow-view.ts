@@ -27,6 +27,8 @@ import type { LabelResolver, LabelTier } from '../labels.js'
 import type { RoleAccentResolver } from './role-accents.js'
 import { createParticipantComparator } from './participant-order.js'
 import { ATTR_OPERATION, ATTR_PARTICIPANT, ATTR_ROLE } from '../inspector.js'
+import { createQuestionActivationHandlers } from '../question-affordance.js'
+import type { QuestionActivationHandler } from '../question-affordance.js'
 import { GraphEdge, GraphNode, NODE_HEIGHT, NODE_WIDTH, nodeAnchor } from './svg-primitives.js'
 import type { Anchor } from './svg-primitives.js'
 import type { H, Vnode } from '../../vendor/hyperapp.js'
@@ -618,7 +620,7 @@ export function deriveLifecycle(previousModel: InteractionModel | null | undefin
 }
 
 // A hyperapp event handler as the stage forwards it: the stage never invokes the callback, so it does not name the host's action-state type. The `never` parameters keep every host handler assignable while still requiring a function, and the contract in index.ts documents when each affordance fires.
-export type ClickHandler = (state: never, event: Event) => unknown
+export type ClickHandler = QuestionActivationHandler
 
 // The terminal-result call-to-action node renders on a terminal frame so the run offers a result affordance. The CTA is a view concern layered on model.status (never model state): the tone follows the status, and onclick is harness-managed. A layered "bezel + bevel + face" 3D button reads as pressable at a glance. The gradients are declared inline (stable ids) so the button is self-contained.
 function CtaNode(h: H, props: { label: string; tone: 'accent' | 'error' | 'warning'; x: number; y: number; onclick?: ClickHandler }): Vnode {
@@ -687,7 +689,7 @@ function ctaDescriptorForStatus(status: RunStatus): { label: string; tone: 'acce
 	return { label: 'See result', tone: 'accent' }
 }
 
-// The ask_human call, when its question is pending: the active operation is an in_flight call whose destination is a human participant (the answerer). A human never emits an operation that would advance the call to its working phase, so the call stays in transit until the user answers — the same single-transit-frame rule the terminal op follows, but the run is not terminal here. The Question affordance overlays the answerer node for the duration of this frame.
+// The ask_human call, when its question is pending: the active operation is an in_flight call whose destination is a human participant (the answerer). A human never emits an operation that would advance the call to its working phase, so the call stays in transit until the user answers — the same single-transit-frame rule the terminal op follows, but the run is not terminal here. The flow view overlays its Question button on the answerer node, and the stage raises the sequence view's stage-level button, for the duration of this frame.
 function activeAskHumanCall(model: InteractionModel): Operation | undefined {
 	const operation = activeOperation(model)
 	if (operation === null) return undefined
@@ -697,10 +699,20 @@ function activeAskHumanCall(model: InteractionModel): Operation | undefined {
 	return operation
 }
 
+function projectedRowsFor(model: InteractionModel): RowProjection[] {
+	const projectedRows: RowProjection[] = []
+	for (const stackId of stacksOf(model)) {
+		const row = projectRow(model, stackId)
+		if (row !== null) projectedRows.push(row)
+	}
+	return projectedRows
+}
+
 // The "Question for Human" overlay button, rendered on the answerer node while the ask_human call is pending. Mirrors the terminal CTA — a standalone overlay button with no connecting edge, so it reads as an affordance rather than a graph node — but sits on the answerer (downstream of the asker) instead of the root. The label splits across three lines ("Question" / "for" / "Human") via stacked <tspan> elements so the three-word affordance reads at a glance within the node box.
 function QuestionButton(h: H, props: { x: number; y: number; onclick: ClickHandler }): Vnode {
 	const centerX = NODE_WIDTH / 2
-	return h('g', { class: 'flow-node flow-question-button', transform: translate(props.x, props.y), onclick: props.onclick }, [
+	const { onclick, onkeydown } = createQuestionActivationHandlers(props.onclick)
+	return h('g', { class: 'flow-node flow-question-button', transform: translate(props.x, props.y), role: 'button', tabindex: 0, 'aria-label': 'Question for Human', onclick, onkeydown }, [
 		h('defs', {}, [
 			h('linearGradient', { id: 'flow-question-face', x1: '0', y1: '0', x2: '0', y2: '1' }, [
 				h('stop', { offset: '0%', 'stop-color': '#f0a93c' }, []),
@@ -715,6 +727,7 @@ function QuestionButton(h: H, props: { x: number; y: number; onclick: ClickHandl
 			h('tspan', { x: centerX, dy: 16 }, ['for']),
 			h('tspan', { x: centerX, dy: 16 }, ['Human']),
 		]),
+		h('rect', { class: 'flow-question-button-hit', x: 0, y: 0, width: NODE_WIDTH, height: NODE_HEIGHT, rx: 9, fill: 'transparent' }, []),
 	])
 }
 
@@ -727,16 +740,16 @@ export interface QuestionControls {
 	onclick?: ClickHandler
 }
 
-// Renders the flow view as a single SVG containing the history top bar, the observe cross-stack lines, the terminate cross-stack lines, the row stack, the departing overlay, the (on a terminal frame) result CTA, and (while an ask_human call is pending) the Question button overlay on the answerer node. Edges paint before nodes within each row so node boxes cover anchor overlap; observes and terminates sit behind the rows so node boxes cover their endpoints; the departing overlay paints last so the travel reads on top of the settled graph; the CTA and Question button paint after the rows so they sit above the graph. `lifecycle` (optional) carries the frame-diff entering/departing descriptor from deriveLifecycle; `cta` and `question` carry the harness state for the two overlay affordances — the view itself decides whether to render them by reading model.status and the active ask_human call. `columns` is the caller-held high-water-mark tracker from createColumnTracker. `roleAccents` is the per-role accent resolver the hosts build from the guild's full role list (createRoleAccentResolver) — agent nodes take their role's accent wherever they render (row nodes, the departing overlay, the top-bar slots), and a resolver that returns null for everything renders exactly the neutral look. `roleOrder` is the guild-declared agent-role display order (guild.json visualization.roleOrder); the top-bar slots are sorted into it (participant-order.ts), so the strip's slot order, its pixel positions, and the departure targets all agree, and the sequence view's role columns sort the same way.
+// The flow view's public result for stage composition: the rendered SVG plus whether the orange in-row overlay actually rendered (a prompt exists and the answerer landed in a row). The stage reads that placement bit to add its fallback bar without re-projecting the model.
+export interface FlowViewRenderResult {
+	view: Vnode
+	questionOverlayVisible: boolean
+}
+
+// Renders the flow view as a single SVG containing the history top bar, the observe cross-stack lines, the terminate cross-stack lines, the row stack, the departing overlay, the (on a terminal or suspended frame with no prompt) result CTA, and (while a prompt exists and the ask_human answerer is locatable) the Question button overlay on the answerer node. Edges paint before nodes within each row so node boxes cover anchor overlap; observes and terminates sit behind the rows so node boxes cover their endpoints; the departing overlay paints last so the travel reads on top of the settled graph; the CTA and Question button paint after the rows so they sit above the graph. `lifecycle` (optional) carries the frame-diff entering/departing descriptor from deriveLifecycle; `cta` and `question` carry the harness state for the two overlay affordances — the view itself decides whether to render them by reading model.status and the active ask_human call. `columns` is the caller-held high-water-mark tracker from createColumnTracker. `roleAccents` is the per-role accent resolver the hosts build from the guild's full role list (createRoleAccentResolver) — agent nodes take their role's accent wherever they render (row nodes, the departing overlay, the top-bar slots), and a resolver that returns null for everything renders exactly the neutral look. `roleOrder` is the guild-declared agent-role display order (guild.json visualization.roleOrder); the top-bar slots are sorted into it (participant-order.ts), so the strip's slot order, its pixel positions, and the departure targets all agree, and the sequence view's role columns sort the same way.
 // `lifecycle`, `cta`, and `question` are nullable-but-required parameters (not optional ones) so the positional call shape the hosts use — passing undefined for the affordances they omit — stays exactly the shape the types describe.
-export function renderFlowView(h: H, model: InteractionModel, labels: LabelResolver, tier: LabelTier, roleAccents: RoleAccentResolver, roleOrder: readonly string[], lifecycle: FrameLifecycle | undefined, cta: CtaControls | undefined, question: QuestionControls | undefined, columns: ColumnTracker): Vnode {
-	const stackIds = stacksOf(model)
-	const projectedRows: RowProjection[] = []
-	for (const stackId of stackIds) {
-		const row = projectRow(model, stackId)
-		if (row !== null) projectedRows.push(row)
-	}
-	const rows = assignRowTops(projectedRows)
+export function renderFlowViewWithQuestionPlacement(h: H, model: InteractionModel, labels: LabelResolver, tier: LabelTier, roleAccents: RoleAccentResolver, roleOrder: readonly string[], lifecycle: FrameLifecycle | undefined, cta: CtaControls | undefined, question: QuestionControls | undefined, columns: ColumnTracker): FlowViewRenderResult {
+	const rows = assignRowTops(projectedRowsFor(model))
 
 	const slots = orderedTopBarSlots(model, roleOrder)
 
@@ -801,7 +814,12 @@ export function renderFlowView(h: H, model: InteractionModel, labels: LabelResol
 		])
 	}) : []
 
-	const showCta = isTerminalStatus(model.status) || isSuspendedStatus(model.status)
+	// A prompt is the single primary answer action, so it suppresses the generic terminal/suspended CTA even when the flow model cannot carry the orange overlay and the stage falls back to its question bar. Without a prompt the ask alone must not leave a dead button, so the CTA stays.
+	const askHumanCall = activeAskHumanCall(model)
+	const questionOnClick = question !== undefined && question !== null && typeof question.onclick === 'function' ? question.onclick : null
+	const answererPosition = questionOnClick !== null && askHumanCall !== undefined ? rowLayout.get(askHumanCall.destination) : undefined
+	const showOverlayQuestion = questionOnClick !== null && answererPosition !== undefined
+	const showCta = questionOnClick === null && (isTerminalStatus(model.status) || isSuspendedStatus(model.status))
 	let ctaLayout: Anchor | null = null
 	let ctaDescriptor: { label: string; tone: 'accent' | 'error' | 'warning' } | null = null
 	if (showCta) {
@@ -834,16 +852,13 @@ export function renderFlowView(h: H, model: InteractionModel, labels: LabelResol
 		svgChildren.push(CtaNode(h, { label: ctaDescriptor.label, tone: ctaDescriptor.tone, x: ctaLayout.x, y: ctaLayout.y, onclick }))
 	}
 
-	// The Question button overlays the answerer node while the ask_human call is pending. It carries no connecting edge (the CTA's no-connecting-edge rule applies to these overlay affordances alike); the onclick is harness-supplied so the view stays free of modal coupling.
-	const askHumanCall = activeAskHumanCall(model)
-	if (askHumanCall !== undefined && question !== undefined && question !== null && typeof question.onclick === 'function') {
-		const answererPosition = rowLayout.get(askHumanCall.destination)
-		if (answererPosition !== undefined) {
-			svgChildren.push(QuestionButton(h, { x: answererPosition.x, y: answererPosition.y, onclick: question.onclick }))
-		}
+	// The Question button overlays the answerer node only when a prompt exists and the active ask is locatable. It carries no connecting edge (the CTA's no-connecting-edge rule applies to these overlay affordances alike); the onclick is harness-supplied so the view stays free of modal coupling.
+	if (questionOnClick !== null && answererPosition !== undefined) {
+		svgChildren.push(QuestionButton(h, { x: answererPosition.x, y: answererPosition.y, onclick: questionOnClick }))
 	}
 
-	return h('svg', { class: 'flow-view-svg', viewBox: `0 0 ${width} ${height}`, preserveAspectRatio: 'xMidYMid meet', xmlns: 'http://www.w3.org/2000/svg' }, svgChildren)
+	const view = h('svg', { class: 'flow-view-svg', viewBox: `0 0 ${width} ${height}`, preserveAspectRatio: 'xMidYMid meet', xmlns: 'http://www.w3.org/2000/svg' }, svgChildren)
+	return { view, questionOverlayVisible: showOverlayQuestion }
 }
 
 // A reusable empty set so the no-lifecycle path avoids allocating a Set per render.
