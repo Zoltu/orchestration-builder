@@ -24,8 +24,9 @@ const SUSPENDED_AUTO_MESSAGE = 'Run suspended \u2014 retrying automatically.'
 const SUSPENDED_OPERATOR_MESSAGE = 'Run suspended \u2014 resume when ready.'
 const DISPATCH_PAUSED_MESSAGE = 'Dispatch paused until the provider is healthy.'
 
-// Maps the coarse health snapshot to one fixed message. The category wins when it names a provider problem, so a billing or auth pause always says what the operator must do. The suspended-run policy, not the category alone, decides whether a transient pause retries automatically: the attempt cap downgrades it to an operator decision while keeping the transient category. Copy mentions a suspended run only when the view names one. An unknown or absent view renders no banner.
-export function deriveHealthBanner(value: unknown): HealthBannerDescriptor | null {
+// Maps the coarse health snapshot to one fixed message. The category wins when it names a provider problem, so a billing or auth pause always says what the operator must do. The suspended-run policy, not the category alone, decides whether a transient pause retries automatically: the attempt cap downgrades it to an operator decision while keeping the transient category. Copy mentions a suspended run only when the view names one. An operator pause never binds provider health, so it suppresses the banner entirely even if a stale provider problem is still being reported. An unknown or absent view renders no banner.
+export function deriveHealthBanner(value: unknown, operatorPaused = false): HealthBannerDescriptor | null {
+	if (operatorPaused) return null
 	if (!isHealthView(value)) return null
 	const health: HealthView = value
 	const provider = health.provider

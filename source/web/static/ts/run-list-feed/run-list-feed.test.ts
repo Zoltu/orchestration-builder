@@ -21,6 +21,7 @@ function summary(runId: string, overrides: Partial<RunSummary> = {}): RunSummary
 		error: null,
 		continuesFrom: null,
 		suspension: null,
+		pause: null,
 		summary: null,
 		...overrides,
 	}
@@ -39,6 +40,7 @@ function entity(runId: string, overrides: Partial<RunSummary> = {}): Record<stri
 		error: null,
 		continuesFrom: null,
 		suspension: null,
+		pause: null,
 		summary: null,
 		...overrides,
 	}
@@ -148,6 +150,7 @@ describe('run-list feed change detection', () => {
 			['result to null', { ...base, result: null }],
 			['error', { ...base, error: { kind: 'llm_unavailable', message: 'down' } }],
 			['continuesFrom', { ...base, continuesFrom: 'run-20251231-000000' }],
+			['pause', { ...base, status: 'suspended', pause: { message: 'The operator paused this run.', pausedAt: '2026-01-01T00:02:00.000Z' } }],
 			['summary', { ...base, summary: 'a generated summary' }],
 		]
 		for (const [name, variant] of variants) {
@@ -202,6 +205,8 @@ describe('run-list feed validation', () => {
 			['involvement', snapshotFrame([{ ...entity('run-1'), involvement: 7 }])],
 			['endTime', snapshotFrame([{ ...entity('run-1'), endTime: 7 }])],
 			['continuesFrom', snapshotFrame([{ ...entity('run-1'), continuesFrom: 7 }])],
+			['pause message', snapshotFrame([{ ...entity('run-1'), pause: { message: 7, pausedAt: '2026-01-01T00:02:00.000Z' } }])],
+			['pause timestamp', snapshotFrame([{ ...entity('run-1'), pause: { message: 'Paused.', pausedAt: 7 } }])],
 			['summary', snapshotFrame([{ ...entity('run-1'), summary: 7 }])],
 			['result status', snapshotFrame([{ ...entity('run-1'), result: { status: 'bogus', summary: 'x' } }])],
 			['result summary', snapshotFrame([{ ...entity('run-1'), result: { status: 'success' } }])],
@@ -225,6 +230,16 @@ describe('run-list feed validation', () => {
 		const result = applyRunListFrame(emptyRunListFeedState(), responder([valid], health, null))
 		expect(result.outcome).toBe('snapshot')
 		expect(result.summaries).toEqual([valid])
+	})
+
+	test('accepts and round-trips an operator pause record without a suspension', () => {
+		const responder = createRunListFeedResponder({ epoch: 'e', historyLimit: 8 })
+		const pause = { message: 'The operator paused this run.', pausedAt: '2026-01-01T00:02:00.000Z' }
+		const paused = summary('run-1', { status: 'suspended', suspension: null, pause })
+		const result = applyRunListFrame(emptyRunListFeedState(), responder([paused], health, null))
+		expect(result.outcome).toBe('snapshot')
+		expect(result.summaries?.[0]?.pause).toEqual(pause)
+		expect(result.summaries?.[0]?.suspension).toBeNull()
 	})
 
 	test('rejects a snapshot whose content hash does not match its contents', () => {

@@ -137,6 +137,15 @@ describe('renderRunView', () => {
 		expect(renderRunView(suspended, { maxLogLines: 200, checkpointExists: false }).resumable).toBe(false)
 	})
 
+	test('exposes an operator pause alongside suspension and keeps a paused run resumable with its checkpoint', () => {
+		const pause = { message: 'The operator paused this run.', pausedAt: '2026-01-01T00:02:00.000Z' }
+		const paused = parseSnapshot({ metaText: JSON.stringify({ ...sampleRunMeta(), status: 'suspended', endTime: undefined, suspension: undefined, pause }), logText: '' })
+		const view = renderRunView(paused, { maxLogLines: 200, checkpointExists: true })
+		expect(view.pause).toEqual(pause)
+		expect(view.suspension).toBeNull()
+		expect(view.resumable).toBe(true)
+	})
+
 	test('carries the raw plan markdown through to the view, or null when the caller read none', () => {
 		const snapshot = parseSnapshot({ metaText: JSON.stringify(sampleRunMeta()), logText: '' })
 		expect(renderRunView(snapshot, { maxLogLines: 200, plan: '# Plan\n\nstep one' }).plan).toBe('# Plan\n\nstep one')
@@ -370,6 +379,7 @@ describe('renderRunSummary', () => {
 			error: null,
 			continuesFrom: null,
 			suspension: null,
+			pause: null,
 			summary: null,
 		})
 	})
@@ -388,6 +398,7 @@ describe('renderRunSummary', () => {
 			error: null,
 			continuesFrom: null,
 			suspension: null,
+			pause: null,
 			summary: null,
 		})
 	})

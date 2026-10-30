@@ -61,8 +61,11 @@ interface EntryDraft {
 	textTruncated?: boolean
 }
 
-const RESUME_NOTE_PREFIX = 'The operator resumed this run after a failure. Message from the operator: '
-const SUSPENDED_RESUME_NOTE_PREFIX = 'The operator resumed this suspended run. Message from the operator: '
+// Every resume note, whatever the prior run status, ends its platform framing with this stable separator; parsing it locally avoids importing the executor's orchestration constants.
+const OPERATOR_NOTE_SEPARATOR = 'Message from the operator: '
+
+// The task thread shows fixed platform copy rather than the stored pause.message, and owning the text locally keeps the thread module from importing the executor upward.
+const OPERATOR_PAUSE_DISPLAY_TEXT = 'The operator paused this run.'
 
 function makeEntry(runId: string, sequence: number, draft: EntryDraft): TaskThreadEntry {
 	return {
@@ -160,9 +163,9 @@ function lastRootTerminalFinish(events: readonly LogEvent[], rootStart: RootStar
 }
 
 function stripResumeNoteFraming(note: string): string {
-	if (note.startsWith(RESUME_NOTE_PREFIX)) return note.slice(RESUME_NOTE_PREFIX.length).trim()
-	if (note.startsWith(SUSPENDED_RESUME_NOTE_PREFIX)) return note.slice(SUSPENDED_RESUME_NOTE_PREFIX.length).trim()
-	return note.trim()
+	const separatorIndex = note.indexOf(OPERATOR_NOTE_SEPARATOR)
+	if (separatorIndex < 0) return note.trim()
+	return note.slice(separatorIndex + OPERATOR_NOTE_SEPARATOR.length).trim()
 }
 
 function deriveQueuedContinuesFrom(runId: string, queueItems: readonly QueueItemView[]): string | null {
@@ -398,6 +401,38 @@ function appendPause(entries: TaskThreadEntry[], runId: string, meta: RunMeta | 
 		text: 'Run paused awaiting an answer.',
 		systemKind: 'pause',
 		source: 'meta',
+	})
+}
+
+function appendOperatorPause(entries: TaskThreadEntry[], runId: string, meta: RunMeta | null, events: readonly LogEvent[]): void {
+	if (meta !== null && meta.status === 'suspended' && meta.pause !== undefined) {
+		pushEntry(entries, runId, {
+			id: `operator-pause:${runId}`,
+			timestamp: meta.pause.pausedAt,
+			kind: 'system',
+			actor: 'system',
+			label: 'Paused',
+			text: OPERATOR_PAUSE_DISPLAY_TEXT,
+			systemKind: 'operator_pause',
+			source: 'meta',
+		})
+		return
+	}
+	if (meta !== null) return
+	let lastPauseEvent: LogEvent | null = null
+	for (const event of events) {
+		if (event.type === 'run_paused') lastPauseEvent = event
+	}
+	if (lastPauseEvent === null) return
+	const pausedAt = isObject(lastPauseEvent.payload) ? stringField(lastPauseEvent.payload, 'pausedAt') : null
+	pushEntry(entries, runId, {
+		id: `operator-pause:${runId}`,
+		timestamp: pausedAt ?? lastPauseEvent.timestamp,
+		kind: 'system',
+		actor: 'system',
+		label: 'Paused',
+		text: OPERATOR_PAUSE_DISPLAY_TEXT,
+		systemKind: 'operator_pause',
 	})
 }
 
@@ -637,6 +672,7 @@ export function deriveRunThreadFacts(input: TaskThreadRunInput): RunThreadFacts 
 	appendClarifications(entries, input.runId, input.events, meta, rootStart, questionHistory)
 	appendQueueQuestion(entries, input.runId, meta, input.queueItems)
 	appendPause(entries, input.runId, meta, input.events)
+	appendOperatorPause(entries, input.runId, meta, input.events)
 	const resumeCount = appendResumeHistory(entries, input.runId, input.events)
 	appendInterruptHistory(entries, input.runId, input.events)
 	appendNotices(entries, input.runId, input.events)

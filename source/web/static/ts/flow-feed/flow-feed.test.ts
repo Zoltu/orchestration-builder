@@ -152,6 +152,19 @@ describe('flow feed round-trip', () => {
 		expect(result.model).toEqual(empty)
 	})
 
+	test('an optional operator pause record round-trips with the run status', () => {
+		const responder = createFlowFeedResponder({ epoch: 'e', historyLimit: 8, maxRuns: 4 })
+		const pause = { message: 'The operator paused this run.', pausedAt: '2026-01-01T00:02:00.000Z' }
+		const model: InteractionModel = { ...handModel(), status: 'suspended', pause }
+		const result = applyFlowFrame(emptyFlowFeedState(), responder('run-a', model, null))
+		expect(result.outcome).toBe('snapshot')
+		expect(result.model?.pause).toEqual(pause)
+		const revision = flowFeedRevision(result.state)
+		if (revision === null) throw new Error('expected a revision after a snapshot')
+		const unchanged = applyFlowFrame(result.state, responder('run-a', model, revision))
+		expect(unchanged.outcome).toBe('unchanged')
+	})
+
 	test('a delta that removes the run-status singleton reconstructs status unknown', () => {
 		const responder = createFlowFeedResponder({ epoch: 'e', historyLimit: 8, maxRuns: 4 })
 		const first = applyFlowFrame(emptyFlowFeedState(), responder('run-a', handModel(), null))
@@ -220,6 +233,7 @@ describe('flow feed change detection', () => {
 			['participant roleId', { ...base, participants: [baseParticipants[0] ?? participant('human:root', 'human', 'human'), participant('role:coder:1', 'coder', 'role', 'coder-1-2'), ...baseParticipants.slice(2)] }],
 			['stack root', { ...base, stacks: [stack('main', 'interrupt:1')] }],
 			['run status', { ...base, status: 'running' }],
+			['run status pause', { ...base, status: 'suspended', pause: { message: 'The operator paused this run.', pausedAt: '2026-01-01T00:02:00.000Z' } }],
 			['operation kind', { ...base, operations: [operation('op-1', { kind: 'return', metrics: baseMetrics }), ...baseOperations.slice(1)] }],
 			['operation stack', { ...base, operations: [operation('op-1', { stack: 'interrupt-1-stack', metrics: baseMetrics }), ...baseOperations.slice(1)] }],
 			['operation source', { ...base, operations: [operation('op-1', { source: 'role:planner:2', metrics: baseMetrics }), ...baseOperations.slice(1)] }],
@@ -258,6 +272,7 @@ describe('flow feed validation', () => {
 			['stack root', snapshotFrame({ ...emptyCollections(), stacks: [{ id: 'main' }] })],
 			['run status id', snapshotFrame({ ...emptyCollections(), runStatus: [{ id: 'other', status: 'running' }] })],
 			['run status value', snapshotFrame({ ...emptyCollections(), runStatus: [{ id: 'run-status', status: 'bogus' }] })],
+			['run status pause', snapshotFrame({ ...emptyCollections(), runStatus: [{ id: 'run-status', status: 'suspended', pause: { message: 7, pausedAt: '2026-01-01T00:02:00.000Z' } }] })],
 		]
 		for (const [name, frame] of malformed) {
 			const result = applyFlowFrame(emptyFlowFeedState(), frame)

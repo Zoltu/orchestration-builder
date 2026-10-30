@@ -60,6 +60,7 @@ const TASK_THREAD_EVENT_MARKERS = [
 	'"type":"operator_notice"',
 	'"type":"provider_failure"',
 	'"type":"run_terminated"',
+	'"type":"run_paused"',
 ] as const
 
 const MAX_CACHED_RELEVANT_EVENTS = 200

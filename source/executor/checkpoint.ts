@@ -10,10 +10,10 @@ import type { ParkedAsk, RunParkTracker } from './park-state.js'
 import type { InterruptRequest } from './interrupts.js'
 import type { WriteCheckpoint } from './persistence.js'
 import type { RoleRegistry, RoleRegistryEntry } from './role-registry.js'
-import type { EffortLevel, InvolvementLevel, LogLevel, ResultCard, SuspensionRecord, ToolCall } from './types.js'
+import type { EffortLevel, InvolvementLevel, LogLevel, OperatorPauseRecord, ResultCard, SuspensionRecord, ToolCall } from './types.js'
 import { isRunIdShape } from './run-id.js'
 import { classifyVersion, CHECKPOINT_FORMAT_VERSION } from './orchestration-version.js'
-import { isEffortLevel, isInvolvementLevel, isLogLevel, isNonNegativeInteger, isNonNegativeNumber, isObject, isResultCard, isString, isSuspensionRecord, safeJsonParse } from './validation.js'
+import { isEffortLevel, isInvolvementLevel, isLogLevel, isNonNegativeInteger, isNonNegativeNumber, isObject, isOperatorPauseRecord, isResultCard, isString, isSuspensionRecord, safeJsonParse } from './validation.js'
 
 // The invocation a role is paused on mid-turn: its stable call id and parent, the turn's full tool-call list, and the index of the call being dispatched. The record covers ordinary tools and child-spawning tools alike; child-spawning calls additionally record the child's card once it returns so a resume delivers the recorded card instead of re-running the child. Calls before index are already in the persisted history; calls after it dispatch on resume.
 export interface PendingInvocation {
@@ -80,6 +80,8 @@ export interface RunCheckpoint {
 	pendingInterlude?: PendingInterlude
 	// The suspension the run has already decided to enter. Written with the suspension checkpoint before the suspended meta lands, so a crash in that window is still recognized as a suspension by startup reconciliation.
 	suspension?: SuspensionRecord
+	// The operator pause the run has already decided to enter, mutually exclusive with suspension. Written before the suspended meta lands so boot materializes the pause rather than resuming.
+	pause?: OperatorPauseRecord
 	frames: CheckpointFrame[]
 }
 
@@ -247,6 +249,11 @@ export function isRunCheckpoint(value: unknown): value is RunCheckpoint {
 		if (leaf.pending !== undefined) return false
 	}
 	if (value.suspension !== undefined && !isSuspensionRecord(value.suspension)) return false
+	if (value.pause !== undefined && !isOperatorPauseRecord(value.pause)) return false
+	if (value.pause !== undefined && value.suspension !== undefined) return false
+	if (value.pause !== undefined && value.parkedAsk !== undefined) return false
+	if (value.pause !== undefined && value.pendingInterlude !== undefined) return false
+	if (value.pause !== undefined && leaf.pending !== undefined) return false
 	const parkedAsk = value.parkedAsk
 	if (parkedAsk === undefined) return true
 	if (parkedAsk.roleId !== leaf.roleId) return false
@@ -278,12 +285,15 @@ export interface CheckpointRecorder {
 	setPendingInterlude(interlude: PendingInterlude | undefined): void
 	setPendingOperatorRequests(requests: InterruptRequest[]): void
 	setSuspension(record: SuspensionRecord | undefined): void
+	setOperatorPause(record: OperatorPauseRecord | undefined): void
 	hasActiveHandler(): boolean
 	pendingInterludeTrigger(): InterludeTrigger | undefined
 	// Returns whether a checkpoint was actually written: false when frozen or while a handler frame suppresses writes.
 	write(): boolean
 	// Persists the current stack and registry counter around a provider suspension, excluding handler frames (which are replayed, not resumed) and ignoring handler write suppression. This is the checkpoint that advances the counter past the failed handler subtree so its replay receives fresh ids.
 	writeSuspension(): boolean
+	// Persists the current stack and registry counter around an operator pause, with the same handler-exclusion rule as a suspension.
+	writePause(): boolean
 	// Pins the parked turn's checkpoint: later writes would lose the ask result as ancestors unwind and finish, and the answer resume needs exactly that state. Idempotent.
 	freeze(): void
 	// Releases the pin when the answer resume replaces the parked turn's result, so the post-answer state can be checkpointed. Idempotent.
@@ -349,6 +359,7 @@ export function createCheckpointRecorder(dependencies: CheckpointRecorderDepende
 	const frames = new Map<string, RecorderFrame>()
 	let pendingInterlude: PendingInterlude | undefined
 	let suspension: SuspensionRecord | undefined
+	let pause: OperatorPauseRecord | undefined
 	let preInterludeFrames: CheckpointFrame[] | undefined
 	let suspendedHandlerCount = 0
 	let frozen = false
@@ -359,7 +370,7 @@ export function createCheckpointRecorder(dependencies: CheckpointRecorderDepende
 		return copy
 	}
 
-	function writeCheckpoint(mode: 'ordinary' | 'suspension'): boolean {
+	function writeCheckpoint(mode: 'ordinary' | 'suspension' | 'pause'): boolean {
 		if (frozen) return false
 		if (mode === 'ordinary' && suspendedHandlerCount > 0) return false
 		const ordered = [...frames.values()].filter((frame) => mode === 'ordinary' || frame.context.handlerOf === undefined).sort((a, b) => a.context.depth - b.context.depth)
@@ -375,7 +386,8 @@ export function createCheckpointRecorder(dependencies: CheckpointRecorderDepende
 			...(dependencies.clarificationAnswer !== undefined ? { clarificationAnswer: dependencies.clarificationAnswer } : {}),
 			...(pendingInterlude !== undefined ? { pendingInterlude } : {}),
 			...(suspension !== undefined ? { suspension } : {}),
-			frames: mode === 'suspension' && pendingInterlude !== undefined && preInterludeFrames !== undefined ? preInterludeFrames : ordered.map((frame) => serializeFrame(frame, dependencies.continuesFrom)),
+			...(pause !== undefined ? { pause } : {}),
+			frames: (mode === 'suspension' || mode === 'pause') && pendingInterlude !== undefined && preInterludeFrames !== undefined ? preInterludeFrames : ordered.map((frame) => serializeFrame(frame, dependencies.continuesFrom)),
 		}
 		if (pendingInterlude === undefined) preInterludeFrames = undefined
 		else if (mode === 'ordinary') preInterludeFrames = cloneFrames(checkpoint.frames)
@@ -416,6 +428,9 @@ export function createCheckpointRecorder(dependencies: CheckpointRecorderDepende
 		setSuspension(record) {
 			suspension = record
 		},
+		setOperatorPause(record) {
+			pause = record
+		},
 		hasActiveHandler() {
 			return suspendedHandlerCount > 0
 		},
@@ -427,6 +442,9 @@ export function createCheckpointRecorder(dependencies: CheckpointRecorderDepende
 		},
 		writeSuspension() {
 			return writeCheckpoint('suspension')
+		},
+		writePause() {
+			return writeCheckpoint('pause')
 		},
 		freeze() {
 			frozen = true

@@ -1,9 +1,10 @@
-import type { ListRunIds, ProjectSettings, ReadProjectSettings, ReadRunMetaById, ReadRunPlanById, ReadRunSnapshotStats, RunCheckpointExists, WriteProjectSettings } from '../executor/persistence.js'
+import type { DeletePauseRequest, ListRunIds, ProjectSettings, ReadProjectSettings, ReadRunMetaById, ReadRunPlanById, ReadRunSnapshotStats, RunCheckpointExists, WritePauseRequest, WriteProjectSettings } from '../executor/persistence.js'
 import type { HealthView } from '../executor/index.js'
+import { operatorPauseFromRequestedAt, type OperatorPauseChannel } from '../executor/operator-pause.js'
 import { isRunIdShape } from '../executor/run-id.js'
 import type { DeploymentConfig, EffortLevel, GuildConfig, InvolvementLevel, LogLevel, ToolManifest } from '../executor/types.js'
 import { isEffortLevel, isInvolvementLevel, isLogLevel, isObject, isTerminalRunStatus } from '../executor/validation.js'
-import type { QueueMutationOutcome, TaskQueueModule } from '../executor/queue/index.js'
+import type { QueueItemView, QueueMutationOutcome, TaskQueueModule } from '../executor/queue/index.js'
 import type { RunState } from '../executor/run-state.js'
 import type { ResumeErroredOrSuspendedRun, RunSubmission } from '../executor/run-submission.js'
 import { formatLogAsText, formatLogDetailSections } from '../run-log/format/index.js'
@@ -49,6 +50,10 @@ export interface RequestHandlerConfig {
 	resumeErroredOrSuspendedRun: ResumeErroredOrSuspendedRun
 	// The bare existence check behind the run view's resumable flag: one stat per run-view request.
 	runCheckpointExists: RunCheckpointExists
+	// The durable pause marker writer, its cleanup, and the live request channel behind POST /api/runs/:id/pause.
+	writePauseRequest: WritePauseRequest
+	deletePauseRequest: DeletePauseRequest
+	operatorPauseChannel: OperatorPauseChannel
 	// The baked image build identifier, read once at startup (null without a baked build-info); surfaced through GET /api/config.
 	build: BuildInfo | null
 	// The coarse provider health reader for GET /api/health. It is a plain function over the gate, never the gate itself, and carries no endpoint, credential, model, header, request, or provider body.
@@ -325,6 +330,23 @@ function handleInterrupt(runState: RunState, runSubmission: RunSubmission, runId
 	return json({ ok: false, error: 'run_not_active' }, 409)
 }
 
+// POST /api/runs/:id/pause applies only to the one active run, matching the interrupt route's run_not_active convention. The durable marker is written before the in-memory signal, so an accepted 202 survives a crash; the writer keeps the first request's timestamp, so a repeat before the safe point is idempotent. A run that settles between the active check and the submit leaves nothing to pause, so the marker is deleted rather than left to pause a later boot.
+function handlePauseRun(runSubmission: RunSubmission, readRunMetaById: ReadRunMetaById, writePauseRequest: WritePauseRequest, deletePauseRequest: DeletePauseRequest, operatorPauseChannel: OperatorPauseChannel, runId: string): Response {
+	if (runSubmission.activeRunId() !== runId) {
+		const meta = parseRunMeta(readRunMetaById(runId))
+		if (meta !== null && meta.status === 'suspended' && meta.pause !== undefined) return json({ ok: true }, 202)
+		return json({ ok: false, error: 'run_not_active' }, 409)
+	}
+	const writeResult = writePauseRequest(runId, new Date().toISOString())
+	if (!writeResult.ok) {
+		return json({ ok: false, error: 'pause_write_failed', message: 'The pause request could not be saved, so the run was not asked to pause.' }, 500)
+	}
+	const result = operatorPauseChannel.submit(operatorPauseFromRequestedAt(writeResult.requestedAt))
+	if (result === 'accepted') return json({ ok: true }, 202)
+	deletePauseRequest(runId)
+	return json({ ok: false, error: 'run_not_active' }, 409)
+}
+
 // POST /api/runs keeps today's external contract exactly (docs/queueing.md "HTTP API") while every run becomes queue-tracked: the validated task is enqueued at the head of the durable queue and the scheduler — the only caller of submission — dispatches it within the same request when the slot is free, so the response is still 201 { runId }. The request's effort, involvement, logLevel, and continuesFrom are recorded on the item and thread into the dispatched run. When a run is in flight or suspended the request is refused with nothing enqueued, exactly today's 409.
 async function handleCreateRun(taskQueue: TaskQueueModule, readRunMetaById: ReadRunMetaById, body: unknown): Promise<Response> {
 	if (!isObject(body)) return json({ ok: false, error: 'invalid_body' }, 400)
@@ -354,6 +376,7 @@ async function handleCreateRun(taskQueue: TaskQueueModule, readRunMetaById: Read
 	if (result.kind === 'invalid') return json({ ok: false, error: 'invalid_body' }, 400)
 	if (result.kind === 'busy') return json({ ok: false, error: 'run_in_progress' }, 409)
 	if (result.kind === 'run_suspended') return json({ ok: false, error: 'run_suspended' }, 409)
+	if (result.kind === 'run_paused') return json({ ok: false, error: 'run_paused' }, 409)
 	if (result.kind === 'provider_unavailable') return json({ ok: false, error: 'provider_unavailable' }, 409)
 	if (result.kind === 'collision') return json({ ok: false, error: 'run_id_collision' }, 409)
 	return json({ runId: result.runId }, 201)
@@ -384,7 +407,9 @@ function handleResumeErroredOrSuspendedRun(resumeErroredOrSuspendedRun: ResumeEr
 	if (result.error === 'run_not_found') return json({ ok: false, error: 'not_found' }, 404)
 	if (result.error === 'run_in_progress') return json({ ok: false, error: 'run_in_progress' }, 409)
 	if (result.error === 'run_suspended') return json({ ok: false, error: 'run_suspended' }, 409)
+	if (result.error === 'run_paused') return json({ ok: false, error: 'run_paused' }, 409)
 	if (result.error === 'checkpoint_missing') return json({ ok: false, error: 'checkpoint_missing', message: 'This run has no resumable checkpoint. Continue it as a new run instead: POST /api/runs with "continuesFrom" set to this run id.' }, 409)
+	if (result.error === 'pause_intent_clear_failed') return json({ ok: false, error: 'pause_intent_clear_failed', message: 'The pause request could not be cleared, so the run was not resumed.' }, 500)
 	return json({ ok: false, error: 'run_not_resumable' }, 409)
 }
 
@@ -397,8 +422,18 @@ function queueMutationResponse(result: QueueMutationOutcome): Response {
 	return json({ ok: false, error: 'status_forbidden' }, 409)
 }
 
-function handleGetQueue(taskQueue: TaskQueueModule): Response {
-	return json(taskQueue.read().items)
+// A suspended item carries only its run id and pause time; the run meta is the source of truth for the pause cause, so project its optional pause record at the HTTP boundary rather than persisting a second copy in the queue.
+function projectQueuePause(items: readonly QueueItemView[], readRunMetaById: ReadRunMetaById): QueueItemView[] {
+	return items.map((item) => {
+		if (item.status !== 'suspended' || item.runId === undefined) return item
+		const meta = parseRunMeta(readRunMetaById(item.runId))
+		if (meta === null || meta.status !== 'suspended' || meta.pause === undefined) return item
+		return { ...item, pause: meta.pause }
+	})
+}
+
+function handleGetQueue(taskQueue: TaskQueueModule, readRunMetaById: ReadRunMetaById): Response {
+	return json(projectQueuePause(taskQueue.read().items, readRunMetaById))
 }
 
 // POST /api/queue always enqueues at the tail — never 409 — and ticks the scheduler, so an idle system dispatches the new task within the same request. Only task, effort, and involvement are read from the body: a queue-native item's logLevel resolves through the standard chain at dispatch (docs/queueing.md "The queue: storage, item model, state machine"), and other fields are lineage or outcome bookkeeping the platform owns.
@@ -508,6 +543,9 @@ export function createRequestHandler(config: RequestHandlerConfig, serveStatic: 
 	const taskQueue = config.taskQueue
 	const resumeErroredOrSuspendedRun = config.resumeErroredOrSuspendedRun
 	const runCheckpointExists = config.runCheckpointExists
+	const writePauseRequest = config.writePauseRequest
+	const deletePauseRequest = config.deletePauseRequest
+	const operatorPauseChannel = config.operatorPauseChannel
 	const flowFeedResponder = config.flowFeedResponder
 	const runListFeedResponder = config.runListFeedResponder
 	const readHealth = config.readHealth
@@ -539,7 +577,7 @@ export function createRequestHandler(config: RequestHandlerConfig, serveStatic: 
 		if (request.method === 'GET') {
 			if (pathname === '/api/config') return json(renderConfig(guildConfig, deployment, config.tools, config.build))
 			if (pathname === '/api/health') return jsonNoStore(readHealth())
-			if (pathname === '/api/queue') return handleGetQueue(taskQueue)
+			if (pathname === '/api/queue') return handleGetQueue(taskQueue, readRunMetaById)
 			if (pathname === '/api/settings') return handleGetSettings(readProjectSettings)
 			if (pathname === '/api/run/flow') return handleActiveRunFlow(readRunSnapshot, readRunSnapshotStats, flowFeedResponder, runSubmission, url.searchParams)
 			if (pathname === '/api/run') return handleActiveRun(readRunSnapshot, readRunSnapshotStats, readRunPlanById, runCheckpointExists, readHealth, runSubmission, runState)
@@ -626,6 +664,11 @@ export function createRequestHandler(config: RequestHandlerConfig, serveStatic: 
 				const body = await readJsonBody(request)
 				if (body === undefined) return json({ ok: false, error: 'invalid_body' }, 400)
 				return handleInterrupt(runState, runSubmission, runId, body)
+			}
+			if (pathname.startsWith('/api/runs/') && pathname.endsWith('/pause')) {
+				const runId = decodePathSegment(pathname.slice('/api/runs/'.length, pathname.length - '/pause'.length))
+				if (runId === undefined || runId === '' || runId.includes('/') || !isRunIdShape(runId)) return json({ ok: false, error: 'not_found' }, 404)
+				return handlePauseRun(runSubmission, readRunMetaById, writePauseRequest, deletePauseRequest, operatorPauseChannel, runId)
 			}
 			if (pathname.startsWith('/api/runs/') && pathname.endsWith('/resume')) {
 				const runId = decodePathSegment(pathname.slice('/api/runs/'.length, pathname.length - '/resume'.length))

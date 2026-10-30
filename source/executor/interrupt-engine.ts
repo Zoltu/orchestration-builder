@@ -105,7 +105,7 @@ async function runInterruptHandler(
 		}
 		return null
 	})
-	if (interlude.kind === 'suspended') return interlude
+	if (interlude.kind === 'suspended' || interlude.kind === 'operator_paused') return interlude
 	const abortCard = interlude.resolution
 	return abortCard === null ? null : { kind: 'card', card: abortCard }
 }
@@ -157,7 +157,7 @@ async function runInquiryHandler(
 			deps.invocationJournal.interruptFinished(interruptCallId, { trigger: 'inquiry', handler: handlerRole, target: entry.roleId, action: 'failed', handlerStatus: handlerCard.status, summary: handlerCard.summary })
 		}
 	})
-	if (interlude.kind === 'suspended') return interlude
+	if (interlude.kind === 'suspended' || interlude.kind === 'operator_paused') return interlude
 	return null
 }
 
@@ -197,7 +197,7 @@ export async function drainInterrupts(
 		const fireOnTokens = roleState.generatedTokens >= roleState.loopCheckTokenWatermark + tokenThreshold
 		if (fireOnToolCalls || fireOnTokens) {
 			const abortOutcome = await runInterruptHandler(runRole, deps, context, entry, triggers.handlerRole, config)
-			if (abortOutcome?.kind === 'suspended') return abortOutcome
+			if (abortOutcome?.kind === 'suspended' || abortOutcome?.kind === 'operator_paused') return abortOutcome
 			if (abortOutcome !== null) return abortOutcome
 		}
 	}

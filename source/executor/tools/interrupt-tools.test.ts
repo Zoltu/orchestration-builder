@@ -58,7 +58,7 @@ function invocationFor(call: ToolCall): ToolInvocation {
 async function dispatch(scope: RunToolScope, name: string, args: Record<string, unknown>): Promise<ToolResult> {
 	const call = makeCall(name, args)
 	const outcome = await platform.dispatch(builtInRole, scope, call, invocationFor(call))
-	if (outcome.kind === 'suspended') throw new Error('unexpected suspension in a non-spawning tool test')
+	if (outcome.kind === 'suspended' || outcome.kind === 'operator_paused') throw new Error('unexpected pause in a non-spawning tool test')
 	return outcome.result
 }
 

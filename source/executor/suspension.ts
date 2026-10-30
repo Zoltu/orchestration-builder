@@ -11,7 +11,7 @@ export const MAX_AUTO_RESUME_ATTEMPTS = 5
 // The one result shape for re-entering a suspended run, shared by the explicit-resume operation and the automatic-resume coordinator.
 export type SuspendedRunResumeResult =
 	| { ok: true; runId: string }
-	| { ok: false; error: 'run_not_found' | 'run_not_resumable' | 'run_suspended' | 'checkpoint_missing' | 'run_in_progress' }
+	| { ok: false; error: 'run_not_found' | 'run_not_resumable' | 'run_suspended' | 'run_paused' | 'checkpoint_missing' | 'run_in_progress' | 'pause_intent_clear_failed' }
 
 // The platform-authored reason written when startup finds more than one suspended run and keeps only the newest. The queue's boot repair uses this exact mark to cancel the superseded run's item instead of re-dispatching it as a new task.
 export const SUPERSEDED_SUSPENDED_RUN_MESSAGE = 'The service restarted with multiple suspended runs; only the most recent was kept, so this run was superseded.'

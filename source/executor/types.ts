@@ -198,6 +198,12 @@ export type SuspensionCategory = ProviderFailureCategory | 'unknown'
 
 export type ResumePolicy = 'auto' | 'operator'
 
+// The operator-initiated pause record. message is platform-authored copy; it never carries provider text.
+export interface OperatorPauseRecord {
+	message: string
+	pausedAt: string
+}
+
 // The structured, operator-safe reason a run is paused. message is platform-authored copy; provider bodies, URLs, and credentials never reach this record.
 export interface SuspensionRecord {
 	category: SuspensionCategory
@@ -232,10 +238,12 @@ export type ToolResult =
 export type RoleOutcome =
 	| { kind: 'card'; card: ResultCard }
 	| { kind: 'suspended'; suspension: SuspensionRecord }
+	| { kind: 'operator_paused'; pause: OperatorPauseRecord }
 
 export type ToolExecutionOutcome =
 	| { kind: 'result'; result: ToolResult }
 	| { kind: 'suspended'; suspension: SuspensionRecord }
+	| { kind: 'operator_paused'; pause: OperatorPauseRecord }
 
 export type OperationKind = 'call' | 'return' | 'observe' | 'terminate'
 
@@ -312,8 +320,9 @@ export interface RunMeta {
 	continuesFrom?: string
 	// 'interrupted' is terminal: the service stopped mid-run and the run could not (or was not chosen to) resume on restart, or the operator terminated a parked run. Startup reconciliation writes it for abandoned runs; the queue's terminate path writes it for a parked run and deletes the checkpoint.
 	status: RunStatus
-	// Present only while status is 'suspended'; absent on running and terminal metas. A suspended meta carries no endTime, result, or task error.
+	// Present only while status is 'suspended'; absent on running and terminal metas. A suspended meta carries exactly one of suspension (provider) or pause (operator), no endTime, result, or task error.
 	suspension?: SuspensionRecord
+	pause?: OperatorPauseRecord
 	startTime: string
 	endTime?: string
 	result?: ResultCard

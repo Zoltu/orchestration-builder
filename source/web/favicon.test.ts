@@ -31,6 +31,10 @@ describe('deriveFaviconState', () => {
 		expect(deriveFaviconState([{ status: 'suspended', suspension: { category: 'transient', resumePolicy: 'operator' } }], [])).toBe('pending-input')
 	})
 
+	test('an operator pause without a suspension record reads as pending-input', () => {
+		expect(deriveFaviconState([{ status: 'suspended', pause: { message: 'The operator paused this run.', pausedAt: '2026-01-01T00:02:00.000Z' } }], [])).toBe('pending-input')
+	})
+
 	test('a suspended run is never counted as a working run', () => {
 		expect(deriveFaviconState([{ status: 'suspended', suspension: { category: 'transient', resumePolicy: 'auto' } }, { status: 'success' }], [])).toBe('waiting')
 		expect(deriveFaviconState([{ status: 'suspended', suspension: { category: 'billing', resumePolicy: 'operator' } }, { status: 'success' }], [])).toBe('pending-input')

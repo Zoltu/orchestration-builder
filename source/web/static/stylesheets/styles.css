@@ -214,6 +214,17 @@ body {
 	text-decoration: underline;
 }
 
+.status-pill-dismiss {
+	margin-left: var(--space-1);
+	padding: 0;
+	border: 0;
+	background: transparent;
+	color: inherit;
+	font: inherit;
+	text-decoration: underline;
+	cursor: pointer;
+}
+
 /* The viewed run's identity: a primary line (the task's first line) and microcopy (run id, effort, relative start). It shrinks before the nav does so a long first line ellipsizes rather than wrapping the bar. */
 .topbar-run {
 	display: flex;

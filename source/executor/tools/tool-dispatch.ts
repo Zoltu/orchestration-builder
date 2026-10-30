@@ -34,7 +34,7 @@ export function createToolDispatch(handlers: Record<string, AnyToolHandler>): To
 			return { kind: 'result', result: createToolError('invalid_arguments', 'arguments must be a JSON object') }
 		}
 		const outcome = await handler(parsed.value, call)
-		if (outcome.kind === 'suspended' || outcome.kind === 'result') return outcome
+		if (outcome.kind === 'suspended' || outcome.kind === 'operator_paused' || outcome.kind === 'result') return outcome
 		return { kind: 'result', result: outcome }
 	}
 	return { dispatch }

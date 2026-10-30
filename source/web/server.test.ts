@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import { createWebHumanBackend, type WebHumanBackend } from '../executor/human-backend.ts'
 import { createInterruptChannel, createInterruptQueue, type InterruptChannel } from '../executor/interrupts.ts'
+import { createOperatorPauseChannel } from '../executor/operator-pause.ts'
 import { createRunState } from '../executor/run-state.ts'
 import { createReadPauseStateById, createResumeClarificationRun, createResumeErroredOrSuspendedRun, createResumeParkedRun, createRunSubmission, createTerminatePausedRun, type ResumeRun, type RunSubmission, type StartRun } from '../executor/run-submission.ts'
 import { createTaskQueue, type QueueItemView, type QueueView } from '../executor/queue/index.ts'
@@ -8,7 +9,7 @@ import type { RunCheckpoint } from '../executor/checkpoint.ts'
 import { createListCurrentRunIds, type ListRunIds, type ProjectSettings, type ReadProjectSettings, type ReadRunFormat, type WriteProjectSettings, type RunSnapshotRaw, type RunSnapshotStats, type RunSummaryStats } from '../executor/persistence.ts'
 import type { DeploymentConfig, EffortLevel, GuildConfig, InvolvementLevel, LogEvent, LogLevel, RunContinuation, RunMeta } from '../executor/types.js'
 import type { HealthView } from '../executor/index.js'
-import { isRunMeta } from '../executor/validation.ts'
+import { isObject, isRunMeta } from '../executor/validation.ts'
 import { parseLogEvents, parseRunMeta, type RunSnapshot } from '../run-log/index.js'
 import type { BuildInfo } from './build-info.ts'
 import type { TaskThreadResponse, TaskThreadSummarySnapshot } from '../task-thread/index.ts'
@@ -524,10 +525,9 @@ interface HandlerHarness {
 
 // Builds a fresh handler whose startRun and resumeRun park on caller-controlled resolvers, so each test drives its own run lifecycle without touching shared state. The static leaf is a recording fake; every dependency is in-memory. runIdCollides makes runDirectoryExists report an existing directory for the generated id, exercising the submit-level run_id_collision refusal. build seeds the image build identifier GET /api/config surfaces (null, as from a source checkout, unless a test passes one). initialCheckpoints seeds the in-memory checkpoint store (raw state.json text by run id) the resume submission and the resumable flag read.
 // The queue store and the scheduler are wired exactly as serve.ts wires them: the handler's mutations and the POST /api/runs enqueue go through the same in-memory leaves, the scheduler dispatches through the submission, and a settled run promise maps its item and ticks onward.
-function createTestProviderSuspension(): { suspendedRunId(): string | undefined, adoptSuspendedRun(runId: string): void, noticeSuspension(meta: RunMeta): void, releaseSuspension(runId: string): void } {
+function createTestProviderSuspension(): { adoptSuspendedRun(runId: string): void, noticeSuspension(meta: RunMeta): void, releaseSuspension(runId: string): void } {
 	let suspendedRunId: string | undefined
 	return {
-		suspendedRunId: () => suspendedRunId,
 		adoptSuspendedRun: (runId) => {
 			suspendedRunId = runId
 		},
@@ -540,7 +540,7 @@ function createTestProviderSuspension(): { suspendedRunId(): string | undefined,
 	}
 }
 
-function createHandlerHarness(options: { runIdCollides?: boolean, build?: BuildInfo | null, initialQueueItems?: QueueSeedItem[], initialCheckpoints?: Map<string, string>, initialMetas?: Map<string, string>, flowFeedOptions?: FlowFeedResponderOptions, listRunIds?: ListRunIds, readRunFormat?: ReadRunFormat, canDispatch?: () => boolean, health?: HealthView, readTaskThread?: (runId: string) => TaskThreadResponse | null, requestTaskThreadSummary?: (runId: string) => TaskThreadSummarySnapshot } = {}): HandlerHarness {
+function createHandlerHarness(options: { runIdCollides?: boolean, build?: BuildInfo | null, initialQueueItems?: QueueSeedItem[], initialCheckpoints?: Map<string, string>, initialMetas?: Map<string, string>, flowFeedOptions?: FlowFeedResponderOptions, listRunIds?: ListRunIds, readRunFormat?: ReadRunFormat, canDispatch?: () => boolean, health?: HealthView, readTaskThread?: (runId: string) => TaskThreadResponse | null, requestTaskThreadSummary?: (runId: string) => TaskThreadSummarySnapshot, deletePauseRequest?: () => boolean } = {}): HandlerHarness {
 	let resolveActive: (meta: RunMeta) => void = () => {}
 	let resolveResumed: (meta: RunMeta) => void = () => {}
 	let capturedEffort: EffortLevel | undefined
@@ -601,8 +601,8 @@ function createHandlerHarness(options: { runIdCollides?: boolean, build?: BuildI
 	// The queue module references the submission and the submission's settlement hook references the queue; each closure captures the other's binding lazily, exactly as serve.ts composes them.
 	const readCheckpointById = (runId: string): string | null => checkpoints.get(runId) ?? null
 	const readPauseStateById = createReadPauseStateById(readCheckpointById)
-	const resumeParkedRun = createResumeParkedRun({ runSubmission: submission, readRunMetaById: harnessReadRunMetaById, readCheckpointById })
-	const resumeClarificationRun = createResumeClarificationRun({ runSubmission: submission, readRunMetaById: harnessReadRunMetaById, readCheckpointById })
+	const resumeParkedRun = createResumeParkedRun({ runSubmission: submission, readRunMetaById: harnessReadRunMetaById, readCheckpointById, deletePauseRequest: () => true })
+	const resumeClarificationRun = createResumeClarificationRun({ runSubmission: submission, readRunMetaById: harnessReadRunMetaById, readCheckpointById, deletePauseRequest: () => true })
 	const terminatePausedRun = createTerminatePausedRun({
 		readRunMetaById: harnessReadRunMetaById,
 		readRunLogEvents: (runId) => runLogs.get(runId) ?? [],
@@ -617,7 +617,7 @@ function createHandlerHarness(options: { runIdCollides?: boolean, build?: BuildI
 			events.push(event)
 			runLogs.set(runId, events)
 		},
-		clearSuspendedRun: (runId) => submission.clearSuspendedRun(runId),
+		clearPausedRun: (runId) => submission.clearPausedRun(runId),
 	})
 	const rawListRunIds = options.listRunIds ?? listRunIds
 	const readRunFormat = options.readRunFormat ?? (() => 'current')
@@ -636,7 +636,8 @@ function createHandlerHarness(options: { runIdCollides?: boolean, build?: BuildI
 			return submission.submit(queued.task, queued.effort, queued.involvement, queued.logLevel, queued.continuation)
 		},
 		hasActiveRun: () => submission.activeRunId() !== undefined,
-		hasSuspendedRun: () => providerSuspension.suspendedRunId() !== undefined,
+		hasSuspendedRun: () => submission.pausedRunId() !== undefined,
+		pausedRunKind: () => submission.pausedRunKind(),
 		canDispatch: options.canDispatch ?? (() => true),
 		ensureProviderProbe: () => {},
 		sleep: async () => {},
@@ -644,6 +645,7 @@ function createHandlerHarness(options: { runIdCollides?: boolean, build?: BuildI
 		generateAnswerId: () => 'answer-1',
 	})
 	const interruptChannel = createInterruptChannel()
+	const operatorPauseChannel = createOperatorPauseChannel()
 	const humanBackend = createWebHumanBackend()
 	const staticCalls: string[] = []
 	// The explicit error-resume submission, composed over the fakes exactly as serve.ts composes it over the real leaves.
@@ -651,6 +653,7 @@ function createHandlerHarness(options: { runIdCollides?: boolean, build?: BuildI
 		runSubmission: submission,
 		readRunMetaById: harnessReadRunMetaById,
 		readCheckpointById: (runId) => checkpoints.get(runId) ?? null,
+		deletePauseRequest: options.deletePauseRequest ?? (() => true),
 		taskQueue,
 	})
 	const flowFeedResponder = createFlowFeedResponder(options.flowFeedOptions ?? { epoch: 'test-epoch', historyLimit: 64, maxRuns: 8 })
@@ -675,6 +678,9 @@ function createHandlerHarness(options: { runIdCollides?: boolean, build?: BuildI
 			resumeErroredOrSuspendedRun,
 			listRunIds: visibleListRunIds,
 			runCheckpointExists: (runId) => checkpoints.has(runId),
+			writePauseRequest: () => ({ ok: true, requestedAt: '2026-01-01T00:00:00.000Z' }),
+			deletePauseRequest: options.deletePauseRequest ?? (() => true),
+			operatorPauseChannel,
 			build: options.build ?? null,
 			flowFeedResponder,
 			runListFeedResponder,
@@ -1140,6 +1146,7 @@ describe('GET /api/runs (list)', () => {
 			error: { kind: 'interrupted', message: 'The service stopped while this run was in progress and it could not be resumed (no valid checkpoint).' },
 			continuesFrom: null,
 			suspension: null,
+			pause: null,
 			summary: null,
 		})
 		expect(list).toContainEqual({
@@ -1154,6 +1161,7 @@ describe('GET /api/runs (list)', () => {
 			error: null,
 			continuesFrom: 'run-20260101-000000',
 			suspension: null,
+			pause: null,
 			summary: null,
 		})
 		expect(list).toContainEqual({
@@ -1168,6 +1176,7 @@ describe('GET /api/runs (list)', () => {
 			error: { kind: 'llm_unavailable', message: 'connection refused' },
 			continuesFrom: null,
 			suspension: null,
+			pause: null,
 			summary: null,
 		})
 	})
@@ -2014,6 +2023,14 @@ describe('POST /api/runs', () => {
 		expect(await response.json()).toEqual({ ok: false, error: 'run_suspended' })
 	})
 
+	test('rejects a submit while an operator pause holds priority with 409 run_paused', async () => {
+		const { handler, submission } = createHandlerHarness()
+		submission.adoptOperatorPausedRun('run-20260101-000500')
+		const response = await handler(post('/api/runs', JSON.stringify({ task: 'second' })))
+		expect(response.status).toBe(409)
+		expect(await response.json()).toEqual({ ok: false, error: 'run_paused' })
+	})
+
 	test('rejects a submit whose generated id collides with an existing run directory with 409 run_id_collision', async () => {
 		const { handler, submission } = createHandlerHarness({ runIdCollides: true })
 		const response = await handler(post('/api/runs', JSON.stringify({ task: 'a colliding task' })))
@@ -2409,6 +2426,29 @@ describe('/api/queue', () => {
 		])
 	})
 
+	test('GET projects an operator pause from the run meta onto a suspended item and leaves provider suspensions without one', async () => {
+		const operatorRunId = 'run-20260101-000500'
+		const providerRunId = 'run-20260101-000501'
+		const pause = { message: 'The operator paused this run.', pausedAt: '2026-01-01T00:02:00.000Z' }
+		const { handler } = createHandlerHarness({
+			initialQueueItems: [
+				queueItem('operator', 'paused task', { status: 'suspended', runId: operatorRunId, suspendedAt: pause.pausedAt }),
+				queueItem('provider', 'suspended task', { status: 'suspended', runId: providerRunId, suspendedAt: '2026-01-01T00:03:00.000Z' }),
+			],
+			initialMetas: new Map([
+				[operatorRunId, JSON.stringify({ runId: operatorRunId, task: 'paused task', status: 'suspended', startTime: '2026-01-01T00:00:00.000Z', pause })],
+				[providerRunId, JSON.stringify({ runId: providerRunId, task: 'suspended task', status: 'suspended', startTime: '2026-01-01T00:00:00.000Z', suspension: { category: 'billing', resumePolicy: 'operator', message: 'Top up.', suspendedAt: '2026-01-01T00:03:00.000Z' } })],
+			]),
+		})
+
+		const items: unknown = await (await handler(get('/api/queue'))).json()
+		if (!Array.isArray(items)) throw new Error('expected a queue array')
+		const operator = items.find((item) => isObject(item) && item['id'] === 'operator')
+		const provider = items.find((item) => isObject(item) && item['id'] === 'provider')
+		expect(isObject(operator) ? operator['pause'] : undefined).toEqual(pause)
+		expect(isObject(provider) ? provider['pause'] : undefined).toBeUndefined()
+	})
+
 	test('POST enqueues at the tail with 201 and the created item, and the tick dispatches an idle system', async () => {
 		const { handler, submission, queue, resolveActive } = createHandlerHarness({ initialQueueItems: [queueItem('ahead', 'already waiting')] })
 		const response = await handler(post('/api/queue', JSON.stringify({ task: 'a queued task', effort: 'quick', involvement: 'autonomous' })))
@@ -2586,7 +2626,7 @@ describe('/api/queue', () => {
 		expect(item.suspendedAt).toBeUndefined()
 		expect(typeof item.settledAt).toBe('string')
 		expect(harness.checkpoints.has(runId)).toBe(false)
-		expect(harness.submission.suspendedRunId()).toBeUndefined()
+		expect(harness.submission.pausedRunId()).toBeUndefined()
 
 		const metaText = harness.runMeta(runId)
 		if (metaText === null) throw new Error('expected the terminated run meta')
@@ -2615,7 +2655,7 @@ describe('/api/queue', () => {
 		expect(response.status).toBe(200)
 		expect(await response.json()).toEqual({ runId })
 		expect(harness.checkpoints.has(runId)).toBe(false)
-		expect(harness.submission.suspendedRunId()).toBeUndefined()
+		expect(harness.submission.pausedRunId()).toBeUndefined()
 
 		const metaText = harness.runMeta(runId)
 		if (metaText === null) throw new Error('expected the terminated run meta')
@@ -2649,7 +2689,7 @@ describe('/api/queue', () => {
 		const response = await harness.handler(post(`/api/runs/${runId}/terminate`))
 		expect(response.status).toBe(200)
 		expect(harness.checkpoints.has(runId)).toBe(false)
-		expect(harness.submission.suspendedRunId()).toBeUndefined()
+		expect(harness.submission.pausedRunId()).toBeUndefined()
 		const item = harness.queue.snapshot().items.find((entry) => entry.id === 's1')
 		expect(item?.status).toBe('cancelled')
 		expect(item?.runId).toBeUndefined()
@@ -3108,7 +3148,7 @@ describe('POST /api/runs/:id/resume', () => {
 		expect(response.status).toBe(201)
 		expect(await response.json()).toEqual({ runId: RESUMABLE_RUN })
 		expect(harness.submission.activeRunId()).toBe(RESUMABLE_RUN)
-		expect(harness.submission.suspendedRunId()).toBeUndefined()
+		expect(harness.submission.pausedRunId()).toBeUndefined()
 		expect(harness.resumedNotes()).toEqual(['The operator resumed this suspended run. Message from the operator: credit is back'])
 		const item = harness.queue.snapshot().items.find((entry) => entry.id === 'item-suspended')
 		expect(item?.status).toBe('active')
@@ -3118,6 +3158,63 @@ describe('POST /api/runs/:id/resume', () => {
 		harness.resolveResumed()(terminalMeta(RESUMABLE_RUN, `task for ${RESUMABLE_RUN}`))
 		await harness.submission.awaitActive()
 		expect(harness.queue.snapshot().items.find((entry) => entry.id === 'item-suspended')?.status).toBe('done')
+	})
+
+	test('an operator-pause resume whose marker cannot be cleared returns a safe 500 and does not start the run', async () => {
+		const checkpoints = new Map([[RESUMABLE_RUN, JSON.stringify(resumeCheckpoint(RESUMABLE_RUN))]])
+		const metas = new Map([[RESUMABLE_RUN, JSON.stringify({
+			runId: RESUMABLE_RUN,
+			guildPath: 'guild',
+			task: `task for ${RESUMABLE_RUN}`,
+			status: 'suspended',
+			startTime: '2026-01-01T00:00:00.000Z',
+			pause: { message: 'The operator paused this run.', pausedAt: '2026-01-01T00:02:00.000Z' },
+		})]])
+		const harness = createHandlerHarness({
+			initialQueueItems: [queueItem('item-paused', `task for ${RESUMABLE_RUN}`, { status: 'suspended', runId: RESUMABLE_RUN, suspendedAt: '2026-01-01T00:02:00.000Z' })],
+			initialCheckpoints: checkpoints,
+			initialMetas: metas,
+			deletePauseRequest: () => false,
+		})
+		harness.submission.adoptOperatorPausedRun(RESUMABLE_RUN)
+
+		const response = await harness.handler(post(`/api/runs/${RESUMABLE_RUN}/resume`))
+		const body: unknown = await response.json()
+
+		expect(response.status).toBe(500)
+		expect(body).toMatchObject({ ok: false, error: 'pause_intent_clear_failed' })
+		expect(JSON.stringify(body)).not.toContain(RESUMABLE_RUN)
+		expect(harness.submission.activeRunId()).toBeUndefined()
+		expect(harness.submission.pausedRunId()).toBe(RESUMABLE_RUN)
+		expect(harness.queue.snapshot().items.find((entry) => entry.id === 'item-paused')?.status).toBe('suspended')
+	})
+
+	test('an error resume whose marker cannot be cleared returns a safe 500 and does not start the run', async () => {
+		const errorMeta: RunMeta = {
+			runId: RESUMABLE_RUN,
+			guildPath: 'guild',
+			task: `task for ${RESUMABLE_RUN}`,
+			status: 'error',
+			startTime: '2026-01-01T00:00:00.000Z',
+			endTime: '2026-01-01T00:02:00.000Z',
+			result: { status: 'error', summary: 'failed' },
+			error: { kind: 'llm_unavailable', message: 'failed' },
+		}
+		const harness = createHandlerHarness({
+			initialQueueItems: [queueItem('item-error', `task for ${RESUMABLE_RUN}`, { status: 'error', runId: RESUMABLE_RUN, settledAt: '2026-01-01T00:02:00.000Z' })],
+			initialCheckpoints: new Map([[RESUMABLE_RUN, JSON.stringify(resumeCheckpoint(RESUMABLE_RUN))]]),
+			initialMetas: new Map([[RESUMABLE_RUN, JSON.stringify(errorMeta)]]),
+			deletePauseRequest: () => false,
+		})
+
+		const response = await harness.handler(post(`/api/runs/${RESUMABLE_RUN}/resume`))
+		const body: unknown = await response.json()
+
+		expect(response.status).toBe(500)
+		expect(body).toMatchObject({ ok: false, error: 'pause_intent_clear_failed' })
+		expect(JSON.stringify(body)).not.toContain(RESUMABLE_RUN)
+		expect(harness.submission.activeRunId()).toBeUndefined()
+		expect(harness.queue.snapshot().items.find((entry) => entry.id === 'item-error')?.status).toBe('error')
 	})
 
 	test('a suspended resume whose checkpoint is missing terminalizes the run, releases the pause, and cancels its item', async () => {
@@ -3139,7 +3236,7 @@ describe('POST /api/runs/:id/resume', () => {
 		const response = await harness.handler(post(`/api/runs/${runId}/resume`))
 		expect(response.status).toBe(409)
 		expect((await response.json()).error).toBe('checkpoint_missing')
-		expect(harness.submission.suspendedRunId()).toBeUndefined()
+		expect(harness.submission.pausedRunId()).toBeUndefined()
 		expect(harness.queue.snapshot().items.find((entry) => entry.id === 'item-suspended')?.status).toBe('cancelled')
 		const metaText = harness.runMeta(runId)
 		if (metaText === null) throw new Error('expected the interrupted run meta')
@@ -3189,7 +3286,7 @@ describe('POST /api/runs/:id/resume', () => {
 		expect(response.status).toBe(409)
 		expect(await response.json()).toEqual({ ok: false, error: 'run_suspended' })
 		expect(harness.submission.activeRunId()).toBeUndefined()
-		expect(harness.submission.suspendedRunId()).toBe(RESUMABLE_RUN)
+		expect(harness.submission.pausedRunId()).toBe(RESUMABLE_RUN)
 		expect(harness.queue.snapshot().items.find((entry) => entry.id === 'item-error')?.status).toBe('error')
 	})
 
@@ -3516,7 +3613,7 @@ describe('provider-gated starts', () => {
 		expect(response.status).toBe(201)
 		expect(await response.json()).toEqual({ runId })
 		expect(harness.submission.activeRunId()).toBe(runId)
-		expect(harness.submission.suspendedRunId()).toBeUndefined()
+		expect(harness.submission.pausedRunId()).toBeUndefined()
 
 		harness.resolveResumed()(terminalMeta(runId, `task for ${runId}`))
 		await harness.submission.awaitActive()

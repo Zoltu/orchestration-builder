@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 
 import { QUEUE_FORMAT_VERSION, RUN_MANIFEST_VERSION, SETTINGS_FORMAT_VERSION, type VersionStatus } from './orchestration-version.ts'
-import { classifyManifestText, createListCurrentRunIds, parseProjectSettingsText, serializeProjectSettings, serializeRunManifest, type ListRunIds, type ReadRunFormat } from './persistence.ts'
+import { classifyManifestText, createListCurrentRunIds, parsePauseRequestText, parseProjectSettingsText, PAUSE_REQUEST_MAX_BYTES, serializeProjectSettings, serializeRunManifest, type ListRunIds, type ReadRunFormat } from './persistence.ts'
 import { readQueue, writeQueue, type QueueStore } from './queue/persistence.ts'
 import type { QueueItem } from './queue/model.ts'
 
@@ -84,6 +84,18 @@ describe('task queue document', () => {
 		writeQueue(store, { version: QUEUE_FORMAT_VERSION, items: [item('a')] })
 		expect(store.writes).toHaveLength(1)
 		expect(JSON.parse(store.writes[0] ?? '')).toEqual({ version: QUEUE_FORMAT_VERSION, items: [item('a')] })
+	})
+})
+
+describe('pause request marker', () => {
+	test('reads a valid intent and treats absent, malformed, or oversized markers as absent', () => {
+		const intent = { version: 1 as const, requestedAt: '2026-01-01T00:02:00.000Z' }
+		expect(parsePauseRequestText(JSON.stringify(intent))).toEqual(intent)
+		expect(parsePauseRequestText(null)).toBeNull()
+		expect(parsePauseRequestText('{not json')).toBeNull()
+		expect(parsePauseRequestText(JSON.stringify({ version: 1, requestedAt: 'not a timestamp' }))).toBeNull()
+		const padding = 'x'.repeat(PAUSE_REQUEST_MAX_BYTES)
+		expect(parsePauseRequestText(`${JSON.stringify(intent)}${padding}`)).toBeNull()
 	})
 })
 

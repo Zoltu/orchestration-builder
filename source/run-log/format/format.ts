@@ -24,6 +24,8 @@ function formatLogEvent(event: LogEvent): string {
 		}
 		case 'implicit_finish':
 			return withRole(role, 'finished (implicit)')
+		case 'run_paused':
+			return withRole(role, 'run paused by the operator')
 		case 'llm_unavailable':
 			return withRole(role, 'llm unavailable')
 		case 'provider_failure': {

@@ -1250,6 +1250,16 @@ describe('deriveInteractionModel — resolved interrupt records, pause markers, 
 		expect(model.participants.filter((participant) => participant.id === 'role:coder-0-1')).toHaveLength(1)
 	})
 
+	test('carries the operator pause record from the meta and omits it for a provider suspension', () => {
+		const pause = { message: 'The operator paused this run.', pausedAt: '2026-01-01T00:02:00.000Z' }
+		const operatorPaused: RunMeta = { ...meta('suspended'), pause }
+		const operatorModel = deriveInteractionModel(snapshot([], operatorPaused))
+		expect(operatorModel.pause).toEqual(pause)
+		const providerSuspended: RunMeta = { ...meta('suspended'), suspension: { category: 'billing', resumePolicy: 'operator', message: 'Top up.', suspendedAt: '2026-01-01T00:02:00.000Z' } }
+		const providerModel = deriveInteractionModel(snapshot([], providerSuspended))
+		expect(providerModel.pause).toBeUndefined()
+	})
+
 	test('a late llm_call does not fold into a closed role invocation', () => {
 		const events = [
 			startRole('t0', 'coder', 'coder-0-1'),

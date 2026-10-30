@@ -80,6 +80,21 @@ describe('deriveSuspendedCard', () => {
 		expect(deriveSuspendedCard('suspended')).toBeUndefined()
 	})
 
+	test('builds operator copy from the pause record, never provider copy or the raw message', () => {
+		const pause = { message: 'Raw platform message', pausedAt: '2026-01-01T00:02:00.000Z' }
+		const descriptor = deriveSuspendedCard({ status: 'suspended', pause, resumable: true })
+		if (descriptor === undefined) throw new Error('expected an operator pause descriptor')
+		expect(descriptor.kind).toBe('operator')
+		expect(descriptor.category).toBeNull()
+		expect(descriptor.suspendedAt).toBe('2026-01-01T00:02:00.000Z')
+		expect(descriptor.cause).toContain('paused by the operator')
+		expect(descriptor.cause).toContain('model is idle')
+		expect(descriptor.cause).not.toContain('Raw platform message')
+		for (const forbidden of ['provider', 'credit', 'credential', 'health']) {
+			expect(descriptor.cause.toLowerCase()).not.toContain(forbidden)
+		}
+	})
+
 	test('a summary without the run-view checkpoint probe leaves Resume enabled; an explicit false disables it', () => {
 		const summary = deriveSuspendedCard({ status: 'suspended', suspension })
 		if (summary === undefined) throw new Error('expected a suspended descriptor')
@@ -113,6 +128,22 @@ describe('SuspendedCard', () => {
 		expect(terminate.props.onclick).toBe(onTerminate)
 	})
 
+	test('renders the operator pause card with paused copy and the same resume/terminate actions', () => {
+		const pause = { message: 'The operator paused this run.', pausedAt: '2026-01-01T00:02:00.000Z' }
+		const descriptor = deriveSuspendedCard({ status: 'suspended', pause, resumable: true })
+		if (descriptor === undefined) throw new Error('expected an operator pause descriptor')
+		const modal: Vnode = SuspendedCard(fakeH, { descriptor, runLabel: 'run-1', runId: 'run-1', onResume: () => undefined, onTerminate: () => undefined, onClose: () => undefined })
+		const text = allText(modal)
+		expect(text).toContain('Run paused')
+		expect(text).toContain('Paused since 2026-01-01T00:02:00.000Z')
+		expect(text).toContain('model is idle')
+		for (const forbidden of ['provider', 'credit', 'credential', 'health']) {
+			expect(text.toLowerCase()).not.toContain(forbidden)
+		}
+		expect(allByTag(modal, 'button').some((button) => button.props.class === 'suspended-card-resume')).toBe(true)
+		expect(allByTag(modal, 'button').some((button) => button.props.class === 'suspended-card-terminate')).toBe(true)
+	})
+
 	test('disables Resume when the checkpoint is gone and never renders result/error surfaces', () => {
 		const descriptor = deriveSuspendedCard({ status: 'suspended', suspension, resumable: false })
 		if (descriptor === undefined) throw new Error('expected a suspended descriptor')
@@ -141,6 +172,7 @@ describe('SuspendedCard', () => {
 describe('typed suspended action failures', () => {
 	test('resume failures map every endpoint rejection to accurate copy', () => {
 		expect(resumeFailureCopy({ error: 'run_suspended' }, 409)).toContain('Another run is suspended')
+		expect(resumeFailureCopy({ error: 'run_paused' }, 409)).toContain('Another run is paused by the operator')
 		expect(resumeFailureCopy({ error: 'run_not_suspended' }, 409)).toContain('nothing to resume')
 		expect(resumeFailureCopy({ error: 'run_not_resumable' }, 409)).toContain('no longer in a state that can be resumed')
 		expect(resumeFailureCopy({ error: 'checkpoint_missing' }, 409)).toContain('no saved checkpoint')
@@ -149,6 +181,8 @@ describe('typed suspended action failures', () => {
 		expect(resumeFailureCopy({ error: 'run_in_progress' }, 409)).toContain('Another run is in progress')
 		expect(resumeFailureCopy({}, 409)).toContain('no longer waiting to be resumed')
 		expect(resumeFailureCopy({}, 500)).toBe('The resume was rejected.')
+		expect(resumeFailureCopy({ error: 'pause_intent_clear_failed' }, 500)).toContain('pause request could not be cleared')
+		expect(resumeFailureCopy({ error: 'pause_intent_clear_failed', message: 'The pause request could not be cleared, so the run was not resumed.' }, 500)).toBe('The pause request could not be cleared, so the run was not resumed.')
 		expect(resumeFailureCopy({}, 404)).toContain('could not be found')
 	})
 

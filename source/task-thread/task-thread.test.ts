@@ -226,6 +226,33 @@ describe('ordering and dedupe', () => {
 		expect(JSON.stringify(derived.entries)).not.toContain('RAW SECRET BODY')
 	})
 
+	test('represents an operator pause as its own system kind with fixed platform copy, never the stored message', () => {
+		const pause = { message: 'Agent-written platform wording', pausedAt: T2 }
+		const facts = factsFor(RUN_A, [
+			roleStart(T0, 'task'),
+			event('run_paused', { role: 'main', roleId: 'main-0-1', pausedAt: T2 }, T2),
+		], { status: 'suspended', pause, endTime: undefined })
+		const derived = deriveFrom(facts, [])
+		const pauses = derived.entries.filter((entry) => entry.systemKind === 'operator_pause')
+		expect(pauses.length).toBe(1)
+		expect(pauses[0]?.text).toBe('The operator paused this run.')
+		expect(pauses[0]?.text).not.toContain('Agent-written')
+		expect(pauses[0]?.timestamp).toBe(T2)
+		expect(derived.identity.status).toBe('suspended')
+		expect(derived.entries.some((entry) => entry.systemKind === 'pause')).toBe(false)
+	})
+
+	test('falls back to the run_paused log event when a pause meta is unavailable', () => {
+		const derived = deriveFrom(factsWithoutMeta(RUN_A, [
+			roleStart(T0, 'task'),
+			event('run_paused', { role: 'main', roleId: 'main-0-1', pausedAt: T2 }, T2),
+		]), [])
+		const pauses = derived.entries.filter((entry) => entry.systemKind === 'operator_pause')
+		expect(pauses.length).toBe(1)
+		expect(pauses[0]?.text).toBe('The operator paused this run.')
+		expect(derived.identity.status).toBe('suspended')
+	})
+
 	test('dedupes repeated run_resumed and run_terminated events', () => {
 		const facts = factsFor(RUN_A, [
 			roleStart(T0, 'task'),

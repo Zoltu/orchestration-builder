@@ -7,7 +7,7 @@ import { isRunMeta, safeJsonParse } from './validation.js'
 import type { EffortLevel, InvolvementLevel, LogEvent, LogLevel, RunContinuation, RunMeta, SuspensionRecord } from './types.js'
 import type { SuspendedRunResumeResult } from './suspension.js'
 import { planStaleInvocationTerminals } from './stale-invocations.js'
-import type { AppendLog, DeleteCheckpoint, ReadProjectSettings, ReadRunCheckpointById, ReadRunLogEvents, ReadRunMetaById, RunDirectoryExists, WriteMeta } from './persistence.js'
+import type { AppendLog, DeleteCheckpoint, DeletePauseRequest, ReadProjectSettings, ReadRunCheckpointById, ReadRunLogEvents, ReadRunMetaById, RunDirectoryExists, WriteMeta } from './persistence.js'
 
 // Every fresh run is started through submit, and submit is called only by the scheduler's dispatch path (the queue is universal — docs/queueing.md "Dispatch and the scheduler"), so the submission layer marks every started run queue-tracked: the bit that gates the pre-write park (docs/queueing.md "Parking: the pre-write rule"). The mark does not survive a restart (it does not ride the checkpoint), so a boot-resumed run keeps today's blocking ask behavior.
 export type StartRun = (runId: string, task: string, effort: EffortLevel, involvement: InvolvementLevel, logLevel: LogLevel, continuation: RunContinuation | undefined, queueTracked: boolean) => Promise<RunMeta>
@@ -23,9 +23,8 @@ export interface ResumeRunInvocation {
 }
 export type ResumeRun = (checkpoint: RunCheckpoint, options?: ResumeRunInvocation) => Promise<RunMeta>
 
-// The provider-recovery owner is the single authority for the suspended run id and its binding: submission reads it before starting work and reports a new suspension before clearing the active slot.
+// The provider-recovery owner is the provider-side authority for a provider suspension: submission reports a new provider suspension before clearing the active slot, and a provider resume or termination releases it there.
 export interface ProviderSuspensionOwner {
-	suspendedRunId(): string | undefined
 	adoptSuspendedRun(runId: string): void
 	noticeSuspension(meta: RunMeta): void
 	releaseSuspension(runId: string): void
@@ -47,26 +46,32 @@ export interface RunSubmissionDependencies {
 	onRunSettled: (meta: RunMeta) => Promise<void>
 }
 
+export type PausedRunKind = 'provider' | 'operator'
+
 export type SubmitResult =
 	| { ok: true; runId: string }
-	| { ok: false; error: 'run_in_progress' | 'run_suspended' }
+	| { ok: false; error: 'run_in_progress' | 'run_suspended' | 'run_paused' }
 	| { ok: false; error: 'run_id_collision' }
 
-// resume starts only the suspended run itself while a pause is active: a workspace-sharing second run can never start until that pause is resumed or terminated.
+// resume starts only the paused run itself: a workspace-sharing second run can never start until that pause is resumed or terminated.
 export type ResumeStartResult =
 	| { ok: true }
-	| { ok: false; error: 'run_suspended' }
+	| { ok: false; error: 'run_suspended' | 'run_paused' }
 
 export interface RunSubmission {
 	submit(task: string, effortOverride?: EffortLevel, involvementOverride?: InvolvementLevel, logLevelOverride?: LogLevel, continuation?: RunContinuation): SubmitResult
 	// The startup-reconciliation and explicit-resume path: re-enters a checkpointed run under its original run id. The caller guarantees no run is active; a resume while active is a bug and fails fast. The options carry the framed operator note of an error-resume, the queue's answer to a parked ask, and the queue-tracked mark the answer resume restores.
 	resume(checkpoint: RunCheckpoint, options?: ResumeRunInvocation): ResumeStartResult
 	activeRunId(): string | undefined
-	// The paused run that outranks every waiting item: set synchronously when a suspended meta settles and cleared by resume or termination.
-	suspendedRunId(): string | undefined
-	// Boot reconciliation preserves the suspended run's record by seeding the slot it would otherwise have no live settlement to fill.
+	// The paused run that outranks every waiting item: set synchronously when a suspended meta settles and cleared by resume or termination, for either a provider suspension or an operator pause.
+	pausedRunId(): string | undefined
+	// The kind of the paused run, so a refusal names a provider suspension or an operator pause distinctly.
+	pausedRunKind(): PausedRunKind | undefined
+	// Boot reconciliation preserves the provider-suspended run's record by seeding the closed provider gate and the general paused-run binding.
 	adoptSuspendedRun(runId: string): void
-	clearSuspendedRun(runId: string): void
+	// Boot reconciliation adopts an operator-paused run into the priority binding without touching provider health.
+	adoptOperatorPausedRun(runId: string): void
+	clearPausedRun(runId: string): void
 	lastRunId(): string | undefined
 	awaitActive(): Promise<RunMeta | undefined>
 	awaitFatalError(): Promise<Error>
@@ -77,6 +82,7 @@ export interface RunSubmission {
 export function createRunSubmission(dependencies: RunSubmissionDependencies): RunSubmission {
 	let activeRunId: string | undefined
 	let lastRunId: string | undefined
+	let pausedRun: { runId: string; kind: PausedRunKind } | undefined
 	let activePromise: Promise<RunMeta | undefined> = Promise.resolve(undefined)
 	let fatalErrorResolve: ((error: Error) => void) | undefined
 	const fatalErrorPromise = new Promise<Error>((resolve) => {
@@ -99,6 +105,13 @@ export function createRunSubmission(dependencies: RunSubmissionDependencies): Ru
 		return DEFAULT_INVOLVEMENT
 	}
 
+	function releasePausedRun(runId: string): void {
+		if (pausedRun?.runId !== runId) return
+		const releasedKind = pausedRun.kind
+		pausedRun = undefined
+		if (releasedKind === 'provider') dependencies.providerSuspension.releaseSuspension(runId)
+	}
+
 	// The log-level chain (docs/reference.md "Logging level"): per-run override, then the project default, then the deployment default, then "full".
 	function resolveLogLevel(override: LogLevel | undefined): LogLevel {
 		if (override !== undefined) return override
@@ -115,7 +128,14 @@ export function createRunSubmission(dependencies: RunSubmissionDependencies): Ru
 		activePromise = promise.then(
 			async (meta) => {
 				// A suspended settlement must claim the priority slot synchronously, before the active slot clears: any tick that interleaves between the two would otherwise dispatch waiting work into a service that still has a paused run.
-				if (meta.status === 'suspended') dependencies.providerSuspension.noticeSuspension(meta)
+				if (meta.status === 'suspended') {
+					if (meta.pause !== undefined) {
+						pausedRun = { runId: meta.runId, kind: 'operator' }
+					} else {
+						dependencies.providerSuspension.noticeSuspension(meta)
+						pausedRun = { runId: meta.runId, kind: 'provider' }
+					}
+				}
 				activeRunId = undefined
 				await dependencies.onRunSettled(meta)
 				return meta
@@ -132,7 +152,8 @@ export function createRunSubmission(dependencies: RunSubmissionDependencies): Ru
 	return {
 		submit(task, effortOverride, involvementOverride, logLevelOverride, continuation) {
 			if (activeRunId !== undefined) return { ok: false, error: 'run_in_progress' }
-			if (dependencies.providerSuspension.suspendedRunId() !== undefined) return { ok: false, error: 'run_suspended' }
+			if (pausedRun?.kind === 'provider') return { ok: false, error: 'run_suspended' }
+			if (pausedRun?.kind === 'operator') return { ok: false, error: 'run_paused' }
 			const runId = dependencies.generateRunId()
 			// Regeneration cannot produce a different id until the second ticks over (one-second resolution), so a taken id refuses the submission outright; the caller can simply retry. The run-start backstop is createRunDirectory, which fails loudly on an existing directory.
 			if (dependencies.runDirectoryExists(runId)) return { ok: false, error: 'run_id_collision' }
@@ -145,24 +166,36 @@ export function createRunSubmission(dependencies: RunSubmissionDependencies): Ru
 		resume(checkpoint, options) {
 			if (activeRunId !== undefined) throw new Error(`resume called while run ${activeRunId} is active`)
 			// A pause is released only by resuming the paused run itself; another run must wait for resume or termination.
-			const suspendedRunId = dependencies.providerSuspension.suspendedRunId()
-			if (suspendedRunId !== undefined && suspendedRunId !== checkpoint.runId) return { ok: false, error: 'run_suspended' }
-			if (suspendedRunId === checkpoint.runId) dependencies.providerSuspension.releaseSuspension(checkpoint.runId)
+			if (pausedRun !== undefined && pausedRun.runId !== checkpoint.runId) return { ok: false, error: pausedRun.kind === 'provider' ? 'run_suspended' : 'run_paused' }
+			releasePausedRun(checkpoint.runId)
+			// The paused-run mirror can be missing after a crash while the provider gate still names this run, so release the provider binding defensively; a release for a different run is a no-op.
+			dependencies.providerSuspension.releaseSuspension(checkpoint.runId)
 			track(checkpoint.runId, dependencies.resumeRun(checkpoint, options))
 			return { ok: true }
 		},
 		activeRunId() {
 			return activeRunId
 		},
-		suspendedRunId() {
-			return dependencies.providerSuspension.suspendedRunId()
+		pausedRunId() {
+			return pausedRun?.runId
+		},
+		pausedRunKind() {
+			return pausedRun?.kind
 		},
 		adoptSuspendedRun(runId) {
 			dependencies.providerSuspension.adoptSuspendedRun(runId)
+			pausedRun = { runId, kind: 'provider' }
 			lastRunId = runId
 		},
-		clearSuspendedRun(runId) {
-			dependencies.providerSuspension.releaseSuspension(runId)
+		adoptOperatorPausedRun(runId) {
+			pausedRun = { runId, kind: 'operator' }
+			lastRunId = runId
+		},
+		clearPausedRun(runId) {
+			const heldKind = pausedRun?.runId === runId ? pausedRun.kind : undefined
+			releasePausedRun(runId)
+			// Preserve the release for a provider binding seeded directly into recovery (an older boot path); an operator pause never touches provider health.
+			if (heldKind !== 'operator') dependencies.providerSuspension.releaseSuspension(runId)
 		},
 		lastRunId() {
 			return lastRunId
@@ -180,6 +213,8 @@ export function createRunSubmission(dependencies: RunSubmissionDependencies): Ru
 const RESUME_NOTE_PREFIX = 'The operator resumed this run after a failure. Message from the operator: '
 // A suspended run's note names the pause rather than a failure: the operator cleared the provider cause (credit, credentials, or health) and the run continues.
 const SUSPENDED_RESUME_NOTE_PREFIX = 'The operator resumed this suspended run. Message from the operator: '
+// An operator pause resumes through its own wording, so the log and task thread do not mistake it for a provider recovery.
+const PAUSED_RESUME_NOTE_PREFIX = 'The operator resumed this paused run. Message from the operator: '
 
 export type ResumeErroredOrSuspendedRunRejection = Extract<SuspendedRunResumeResult, { ok: false }>['error']
 
@@ -196,26 +231,28 @@ export interface ResumeErroredOrSuspendedRunDependencies {
 	runSubmission: RunSubmission
 	readRunMetaById: ReadRunMetaById
 	readCheckpointById: ReadRunCheckpointById
+	// The durable pause marker: every explicit resume clears it before starting, so a crash mid-resume cannot materialize a fresh pause from the stale intent.
+	deletePauseRequest: DeletePauseRequest
 	// The queue module's re-activation operation: after the resume fills the active slot under the run id, the settled error item returns to that slot under the same id.
 	taskQueue: ResumeErroredOrSuspendedRunQueue
 }
 
 export type ResumeErroredOrSuspendedRun = (runId: string, note: string | undefined) => ResumeErroredOrSuspendedRunResult
 
-// The explicit resume from a checkpoint (docs/queueing.md "Resume of an errored or suspended run"): the operator-driven path that re-enters either an error terminal or a suspended pause (the queue answer is the corresponding path for a parked needs_clarification), and startup reconciliation never touches either meta. The run keeps its own run id, start time, effort, involvement, and log level (they live in the checkpoint, and the resume path re-asserts the running meta from them); the optional note rides into the restored conversation; and after the resume fills the active slot, the queue item settled to error or suspended for this run is re-activated so the panel tracks the live run. A suspended resume additionally clears the suspension priority and passes the prior record into the executor for attempt accounting. Every rejection is a value, so the HTTP layer maps codes to statuses. This operation is the one owner of an unresumable suspended run's cleanup: it releases the pause and discards the run and its suspended item so an automatic or explicit resume cannot leave a pause blocking the queue.
+// The explicit resume from a checkpoint (docs/queueing.md "Resume of an errored or suspended run"): the operator-driven path that re-enters either an error terminal or a suspended pause (the queue answer is the corresponding path for a parked needs_clarification), and startup reconciliation never touches either meta. The run keeps its own run id, start time, effort, involvement, and log level (they live in the checkpoint, and the resume path re-asserts the running meta from them); the optional note rides into the restored conversation; and after the resume fills the active slot, the queue item settled to error or suspended for this run is re-activated so the panel tracks the live run. A provider-suspension resume clears the provider priority and passes the prior suspension into the executor for attempt accounting; an operator-pause resume clears the operator binding and does not pass a provider record. Every explicit resume clears the durable pause marker before starting, so a stale intent cannot pause the run after a later crash. Every rejection is a value, so the HTTP layer maps codes to statuses. This operation is the one owner of an unresumable suspended run's cleanup: it releases the pause and discards the run and its suspended item so an automatic or explicit resume cannot leave a pause blocking the queue.
 const SUSPENDED_CHECKPOINT_MISSING_REASON = 'The suspended run could not be resumed because its checkpoint is missing or corrupt, so it was interrupted.'
 const SUSPENDED_UNRESUMABLE_REASON = 'The suspended run is no longer resumable, so it was interrupted.'
 
 export function createResumeErroredOrSuspendedRun(dependencies: ResumeErroredOrSuspendedRunDependencies): ResumeErroredOrSuspendedRun {
 	return (runId, note) => {
 		const rejectSuspendedRun = (error: 'checkpoint_missing' | 'run_not_resumable' | 'run_not_found'): ResumeErroredOrSuspendedRunResult => {
-			dependencies.runSubmission.clearSuspendedRun(runId)
+			dependencies.runSubmission.clearPausedRun(runId)
 			const reason = error === 'checkpoint_missing' ? SUSPENDED_CHECKPOINT_MISSING_REASON : SUSPENDED_UNRESUMABLE_REASON
 			dependencies.taskQueue.discardSuspendedRun(runId, reason)
 			return { ok: false, error }
 		}
 		if (dependencies.runSubmission.activeRunId() !== undefined) return { ok: false, error: 'run_in_progress' }
-		const boundSuspendedRun = dependencies.runSubmission.suspendedRunId() === runId
+		const boundSuspendedRun = dependencies.runSubmission.pausedRunId() === runId
 		const metaText = dependencies.readRunMetaById(runId)
 		if (metaText === null) return boundSuspendedRun ? rejectSuspendedRun('run_not_found') : { ok: false, error: 'run_not_found' }
 		const parsedMeta = safeJsonParse(metaText)
@@ -231,13 +268,16 @@ export function createResumeErroredOrSuspendedRun(dependencies: ResumeErroredOrS
 		if (checkpoint === null || checkpoint.runId !== runId) return meta.status === 'suspended' ? rejectSuspendedCheckpoint() : { ok: false, error: 'checkpoint_missing' }
 		// A parked checkpoint belongs to the queue's answer resume, never the explicit resume: the run did not fail or suspend, and re-entering it without an answer would fail fast in resumeExecutor.
 		if (checkpoint.parkedAsk !== undefined) return meta.status === 'suspended' ? rejectSuspendedCheckpoint() : { ok: false, error: 'checkpoint_missing' }
+		// Every explicit resume clears the durable marker before starting: a stale intent left beside an error resume would otherwise pause the run after a later crash.
+		if (!dependencies.deletePauseRequest(runId)) return { ok: false, error: 'pause_intent_clear_failed' }
 		if (meta.status === 'suspended') {
 			// The run meta is the source of truth for the pause cause; the checkpoint copy covers a crash in the meta-write window.
 			const priorSuspension = meta.suspension ?? checkpoint.suspension
+			const priorPause = meta.pause ?? checkpoint.pause
 			const start = dependencies.runSubmission.resume(checkpoint, {
 				explicitResume: true,
-				...(note !== undefined ? { resumeNote: `${SUSPENDED_RESUME_NOTE_PREFIX}${note}` } : {}),
-				...(priorSuspension !== undefined ? { priorSuspension } : {}),
+				...(note !== undefined ? { resumeNote: priorPause !== undefined ? `${PAUSED_RESUME_NOTE_PREFIX}${note}` : `${SUSPENDED_RESUME_NOTE_PREFIX}${note}` } : {}),
+				...(priorPause === undefined && priorSuspension !== undefined ? { priorSuspension } : {}),
 			})
 			if (!start.ok) return start
 			dependencies.taskQueue.reactivateSuspendedItem(runId)
@@ -261,6 +301,8 @@ export function createReadPauseStateById(readCheckpointById: ReadRunCheckpointBy
 		const parsed = safeJsonParse(checkpointText)
 		if (!parsed.ok || !isRunCheckpoint(parsed.value)) return null
 		if (parsed.value.runId !== runId) return null
+		// An operator pause or a provider suspension is not an answerable pause: only a parked ask or a direct clarification finish qualifies.
+		if (parsed.value.pause !== undefined || parsed.value.suspension !== undefined) return null
 		const parkedAsk = parsed.value.parkedAsk
 		if (parkedAsk !== undefined) return { kind: 'parked_ask', ask: parkedAsk }
 		const delivery = parsed.value.clarificationAnswer
@@ -272,7 +314,7 @@ export function createReadPauseStateById(readCheckpointById: ReadRunCheckpointBy
 	}
 }
 
-export type ResumeParkedRunRejection = 'run_in_progress' | 'run_suspended' | 'checkpoint_missing' | 'not_parked'
+export type ResumeParkedRunRejection = 'run_in_progress' | 'run_suspended' | 'run_paused' | 'checkpoint_missing' | 'not_parked'
 
 export type ResumeParkedRunResult =
 	| { ok: true; runId: string }
@@ -284,12 +326,16 @@ export interface ResumeParkedRunDependencies {
 	runSubmission: RunSubmission
 	readRunMetaById: ReadRunMetaById
 	readCheckpointById: ReadRunCheckpointById
+	// Best-effort stale marker cleanup at the start of the answer resume; a parked checkpoint cannot be operator-paused, so a failed delete does not block the resume.
+	deletePauseRequest: DeletePauseRequest
 }
 
 // The queue's same-run answer resume (docs/queueing.md "Ordering, answers, and failure semantics"): re-enters the parked run under its own id with the answer, restoring the queue-tracked mark so a later pre-write ask parks again instead of blocking. Every rejection is a value; the queue falls back to the briefed dispatch when the checkpoint is gone or no longer parked.
 export function createResumeParkedRun(dependencies: ResumeParkedRunDependencies): ResumeParkedRun {
 	return (runId, parkedAnswer) => {
 		if (dependencies.runSubmission.activeRunId() !== undefined) return { ok: false, error: 'run_in_progress' }
+		// A stale intent beside the parked checkpoint must not pause the run after a later crash; the delete is best-effort because a parked run cannot be operator-paused.
+		dependencies.deletePauseRequest(runId)
 		const metaText = dependencies.readRunMetaById(runId)
 		if (metaText === null) return { ok: false, error: 'checkpoint_missing' }
 		const parsedMeta = safeJsonParse(metaText)
@@ -310,7 +356,7 @@ export function createResumeParkedRun(dependencies: ResumeParkedRunDependencies)
 	}
 }
 
-export type ResumeClarificationRunRejection = 'run_in_progress' | 'run_suspended' | 'checkpoint_missing' | 'not_clarification'
+export type ResumeClarificationRunRejection = 'run_in_progress' | 'run_suspended' | 'run_paused' | 'checkpoint_missing' | 'not_clarification'
 
 export type ResumeClarificationRunResult =
 	| { ok: true; runId: string }
@@ -322,12 +368,16 @@ export interface ResumeClarificationRunDependencies {
 	runSubmission: RunSubmission
 	readRunMetaById: ReadRunMetaById
 	readCheckpointById: ReadRunCheckpointById
+	// Best-effort stale marker cleanup at the start of the answer resume; a clarification checkpoint cannot be operator-paused, so a failed delete does not block the resume.
+	deletePauseRequest: DeletePauseRequest
 }
 
 // The queue's same-run resume of a direct clarification finish (docs/queueing.md "Ordering, answers, and failure semantics"): there is no parked call to replace, so the answer re-enters the run under its own id as a framed operator note. A checkpoint carrying parkedAsk belongs to the parked-answer path and is rejected here. Every rejection is a value; the queue falls back to the briefed dispatch when the pause can no longer be resumed.
 export function createResumeClarificationRun(dependencies: ResumeClarificationRunDependencies): ResumeClarificationRun {
 	return (runId, clarificationAnswer) => {
 		if (dependencies.runSubmission.activeRunId() !== undefined) return { ok: false, error: 'run_in_progress' }
+		// A stale intent beside the clarification checkpoint must not pause the run after a later crash; the delete is best-effort because a clarification pause cannot be operator-paused.
+		dependencies.deletePauseRequest(runId)
 		const metaText = dependencies.readRunMetaById(runId)
 		if (metaText === null) return { ok: false, error: 'checkpoint_missing' }
 		const parsedMeta = safeJsonParse(metaText)
@@ -361,8 +411,8 @@ export interface TerminatePausedRunDependencies {
 	writeMetaFor: (runId: string) => WriteMeta
 	deleteCheckpointFor: (runId: string) => DeleteCheckpoint
 	appendLogFor: (runId: string) => AppendLog
-	// Clears the submission layer's suspended-run priority; termination of a suspended run must let the next tick dispatch waiting work.
-	clearSuspendedRun: (runId: string) => void
+	// Clears the submission layer's general paused-run binding; termination of a paused run must let the next tick dispatch waiting work.
+	clearPausedRun: (runId: string) => void
 }
 
 function terminationLogEvent(timestamp: string, message: string): LogEvent {
@@ -390,18 +440,18 @@ export function createTerminatePausedRun(dependencies: TerminatePausedRunDepende
 	return (runId, reason) => {
 		const metaText = dependencies.readRunMetaById(runId)
 		if (metaText === null) {
-			dependencies.clearSuspendedRun(runId)
+			dependencies.clearPausedRun(runId)
 			return { ok: false, error: 'not_found' }
 		}
 		const parsedMeta = safeJsonParse(metaText)
 		const meta = parsedMeta.ok && isRunMeta(parsedMeta.value) ? parsedMeta.value : null
 		if (meta === null) {
-			dependencies.clearSuspendedRun(runId)
+			dependencies.clearPausedRun(runId)
 			return { ok: false, error: 'not_found' }
 		}
 		if (meta.status === 'interrupted') {
 			const retryTerminatedAt = new Date().toISOString()
-			dependencies.clearSuspendedRun(runId)
+			dependencies.clearPausedRun(runId)
 			closeOpenInvocationsOnTermination(dependencies, runId, retryTerminatedAt)
 			dependencies.appendLogFor(runId)(terminationLogEvent(retryTerminatedAt, 'Terminated by the operator while waiting for an answer.'))
 			dependencies.deleteCheckpointFor(runId)()
@@ -409,10 +459,11 @@ export function createTerminatePausedRun(dependencies: TerminatePausedRunDepende
 		}
 		if (meta.status !== 'needs_clarification' && meta.status !== 'suspended') return { ok: false, error: 'not_paused' }
 		const suspended = meta.status === 'suspended'
+		const operatorPaused = meta.pause !== undefined
 		const terminatedAt = new Date().toISOString()
 		const endTime = meta.endTime ?? terminatedAt
-		const errorMessage = reason ?? (suspended ? 'The operator terminated this suspended run.' : 'The operator terminated this run while it was waiting for an answer.')
-		const logMessage = reason ?? (suspended ? 'Terminated by the operator while the run was suspended.' : 'Terminated by the operator while waiting for an answer.')
+		const errorMessage = reason ?? (operatorPaused ? 'The operator terminated this paused run.' : suspended ? 'The operator terminated this suspended run.' : 'The operator terminated this run while it was waiting for an answer.')
+		const logMessage = reason ?? (operatorPaused ? 'Terminated by the operator while the run was paused.' : suspended ? 'Terminated by the operator while the run was suspended.' : 'Terminated by the operator while waiting for an answer.')
 		dependencies.writeMetaFor(runId)({
 			runId,
 			...(meta.guildPath !== undefined ? { guildPath: meta.guildPath } : {}),
@@ -427,7 +478,7 @@ export function createTerminatePausedRun(dependencies: TerminatePausedRunDepende
 			endTime,
 			error: { kind: 'interrupted', message: errorMessage },
 		})
-		if (suspended) dependencies.clearSuspendedRun(runId)
+		if (suspended) dependencies.clearPausedRun(runId)
 		closeOpenInvocationsOnTermination(dependencies, runId, terminatedAt)
 		dependencies.appendLogFor(runId)(terminationLogEvent(terminatedAt, logMessage))
 		dependencies.deleteCheckpointFor(runId)()

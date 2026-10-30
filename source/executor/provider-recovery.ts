@@ -64,7 +64,7 @@ export interface ProviderRecoveryDependencies {
 	readRunCheckpointTextById: (runId: string) => string | null
 }
 
-// The process-wide bridge between run durability and provider health. It is the single owner of the suspended run binding and of the gate/monitor lifecycle: submission and the queue read it instead of keeping their own copies, and releaseSuspension is the one place a resume or termination releases the pause.
+// The process-wide bridge between run durability and provider health. It owns the provider-suspension binding and the gate/monitor lifecycle; the submission layer separately owns the overall paused-run binding (provider or operator), and releaseSuspension is the one place a resume or termination releases a provider pause.
 export interface ProviderRecovery {
 	observeRoleCall(result: LlmCallResult): void
 	adoptSuspendedRun(runId: string): void
@@ -72,7 +72,6 @@ export interface ProviderRecovery {
 	hydrateSuspension(runId: string): boolean
 	releaseSuspension(runId: string): boolean
 	suspendedRunId(): string | undefined
-	hasSuspendedRun(): boolean
 	canDispatch(): boolean
 	mayAutoResume(runId: string, at: string): boolean
 	readHealth(): HealthView
@@ -133,9 +132,6 @@ export function createProviderRecovery(dependencies: ProviderRecoveryDependencie
 		},
 		suspendedRunId() {
 			return gate.suspendedRunId()
-		},
-		hasSuspendedRun() {
-			return gate.suspendedRunId() !== undefined
 		},
 		canDispatch() {
 			return gate.canDispatch()

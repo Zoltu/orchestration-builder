@@ -281,7 +281,7 @@ function derivedStatusFromEntries(entries: readonly TaskThreadEntry[]): TaskIden
 			continue
 		}
 		if (entry.kind !== 'system') continue
-		if (entry.systemKind === 'suspension') status = 'suspended'
+		if (entry.systemKind === 'suspension' || entry.systemKind === 'operator_pause') status = 'suspended'
 		if (entry.systemKind === 'pause') status = 'needs_clarification'
 		if (entry.systemKind === 'failure' || entry.systemKind === 'termination') status = 'interrupted'
 		if (entry.systemKind === 'resume') status = 'running'

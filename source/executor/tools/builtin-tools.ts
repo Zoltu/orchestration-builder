@@ -546,14 +546,14 @@ export function createBuiltInToolHandlers(context: BuiltInToolContext): Record<s
 			const validation = validateAgentArgs(args)
 			if (validation.kind === 'error') return { kind: 'result', result: validation.result }
 			const outcome = await context.spawnAgent(validation.roleName, validation.task)
-			if (outcome.kind === 'suspended') return outcome
+			if (outcome.kind === 'suspended' || outcome.kind === 'operator_paused') return outcome
 			return { kind: 'result', result: { kind: 'success', data: outcome.card } }
 		},
 		continue_agent: async (args) => {
 			const validation = validateContinueAgentArgs(args)
 			if (validation.kind === 'error') return { kind: 'result', result: validation.result }
 			const outcome = await context.continueAgent(validation.roleName, validation.comment, validation.roleId)
-			if (outcome.kind === 'suspended') return outcome
+			if (outcome.kind === 'suspended' || outcome.kind === 'operator_paused') return outcome
 			return { kind: 'result', result: { kind: 'success', data: outcome.card } }
 		},
 		context_info: createContextInfo(context),

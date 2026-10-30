@@ -3,6 +3,7 @@
 // State priority: a pending question means the operator is needed, so 'pending-input' wins even while a run is mid-flight — a needs_clarification run is non-terminal, so both signals typically hold at once. A parked needs_input queue item is the same signal for a run whose question lives on the queue item rather than in `/api/questions`. Any summary whose status is not a known terminal status counts as in progress, including 'unknown': that is a run whose meta.json could not be read, which the rest of the UI also renders as "in progress" and keeps polling. A suspended summary is classified by its resume policy instead: an auto pause waits for automatic recovery, while an operator pause needs a decision. With no pending questions, no parked queue item, and no non-terminal summary — including the no-runs-yet initial state — the favicon reads 'complete'.
 
 import { isTerminalStatus } from './interaction-model.js'
+import { isOperatorPauseRecord } from './run-pause.js'
 
 // 'pending-input' (yellow) — at least one pending question awaits an operator answer, or an operator-policy suspension needs a decision; 'working' (red) — a run is in progress and no question is pending; 'waiting' (amber) — an auto-resume provider pause holds a run and automatic recovery is expected; 'complete' (green) — nothing in progress and nothing pending, or the initial idle state.
 export type FaviconState = 'pending-input' | 'working' | 'waiting' | 'complete'
@@ -22,14 +23,16 @@ const FAVICON_SVG_TEMPLATE = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0
 interface StatusCarrier {
 	status: unknown
 	suspension?: unknown
+	pause?: unknown
 }
 
 function admitsStatus(value: unknown): value is StatusCarrier {
 	return typeof value === 'object' && value !== null
 }
 
-// A suspended summary's resume policy decides the tone: an auto pause retries automatically (waiting), while an operator pause needs a decision even when its category is transient (the attempt cap downgrades the policy, not the category). A malformed or absent record reads as the operator-needed case so the tab never implies automatic recovery it cannot prove.
+// A suspended summary's resume policy decides the tone: an operator pause record always needs a decision, while a provider suspension retries automatically only under an auto policy. A malformed or absent record reads as the operator-needed case so the tab never implies automatic recovery it cannot prove.
 function suspendedResumePolicy(value: StatusCarrier): string {
+	if (isOperatorPauseRecord(value.pause)) return 'operator'
 	const suspension = value.suspension
 	if (typeof suspension !== 'object' || suspension === null) return 'operator'
 	if (!('resumePolicy' in suspension)) return 'operator'

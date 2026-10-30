@@ -250,6 +250,21 @@ describe('isRunCheckpoint', () => {
 		}))).toBe(false)
 	})
 
+	test('accepts an operator pause only when it is valid, alone, and the leaf has no pending invocation', () => {
+		const pause = { message: 'The operator paused this run.', pausedAt: '2026-01-01T00:00:00.000Z' }
+		expect(isRunCheckpoint({ ...sampleCheckpoint(), pause })).toBe(true)
+		expect(isRunCheckpoint({ ...sampleCheckpoint(), pause: { ...pause, message: '' } })).toBe(false)
+		expect(isRunCheckpoint({ ...sampleCheckpoint(), pause: { ...pause, pausedAt: 'not-a-date' } })).toBe(false)
+		const suspended = sampleCheckpoint()
+		suspended.suspension = { category: 'billing', resumePolicy: 'operator', message: 'Top up.', suspendedAt: '2026-01-01T00:00:00.000Z' }
+		expect(isRunCheckpoint({ ...suspended, pause })).toBe(false)
+		const base = sampleCheckpoint()
+		const root = base.frames[0]
+		if (root === undefined) throw new Error('sample checkpoint has no root frame')
+		const withPending: RunCheckpoint = { ...base, pause, frames: [{ ...root, pending: { toolCalls: [agentToolCall()], index: 0, callId: 'tool:agent_1', parentCallId: 'role:main-0-1' } }] }
+		expect(isRunCheckpoint(withPending)).toBe(false)
+	})
+
 	test('enforces the suspension invariant: a leaf may be dispatching an invocation, while non-leaf frames remain child suspensions', () => {
 		const pendingOnLeaf = sampleCheckpoint()
 		const leaf = pendingOnLeaf.frames[1]

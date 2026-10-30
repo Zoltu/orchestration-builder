@@ -4,16 +4,22 @@ import { isObject } from './guards.js'
 import { isSuspendedStatus } from './interaction-model.js'
 import type { SuspensionCategory, SuspensionRecord } from './interaction-model.js'
 import { isSuspensionRecord } from './run-list-feed/index.js'
+import { isOperatorPauseRecord } from './run-pause.js'
 import type { LooseH, Vnode } from '../vendor/hyperapp.js'
+
+export type SuspendedCardKind = 'operator' | 'provider'
 
 export interface SuspendedCardDescriptor {
 	status: 'suspended'
-	category: SuspensionCategory
+	kind: SuspendedCardKind
+	category: SuspensionCategory | null
 	resumePolicy: 'auto' | 'operator'
 	suspendedAt: string
 	resumable: boolean
 	cause: string
 }
+
+const OPERATOR_PAUSE_COPY = 'This run is paused by the operator. The model is idle; resume when you are ready.'
 
 const CATEGORY_COPY: Record<SuspensionCategory, string> = {
 	billing: 'The model provider needs credit. Top up the account, then resume this run.',
@@ -34,16 +40,29 @@ function categoryOf(value: unknown): SuspensionCategory {
 	return 'unknown'
 }
 
-// Builds the pause descriptor from a run view or a run summary. A non-suspended status, or a body with no suspension record, yields undefined so the result-modal path keeps exclusive ownership of terminal outcomes. `resumable` defaults to true when the source cannot prove otherwise (a run-list summary carries no checkpoint probe); an explicit false from the run view disables Resume.
+// Builds the pause descriptor from a run view or a run summary. A non-suspended status, or a body with neither a pause nor a suspension record, yields undefined so the result-modal path keeps exclusive ownership of terminal outcomes. `resumable` defaults to true when the source cannot prove otherwise (a run-list summary carries no checkpoint probe); an explicit false from the run view disables Resume.
 export function deriveSuspendedCard(runView: unknown): SuspendedCardDescriptor | undefined {
 	if (!isObject(runView)) return undefined
 	const status = runView['status']
 	if (typeof status !== 'string' || !isSuspendedStatus(status)) return undefined
+	const pause = runView['pause']
+	if (isOperatorPauseRecord(pause)) {
+		return {
+			status: 'suspended',
+			kind: 'operator',
+			category: null,
+			resumePolicy: 'operator',
+			suspendedAt: pause.pausedAt,
+			resumable: runView['resumable'] !== false,
+			cause: OPERATOR_PAUSE_COPY,
+		}
+	}
 	const suspension = runView['suspension']
 	if (!isSuspensionRecord(suspension)) return undefined
 	const record: SuspensionRecord = suspension
 	return {
 		status: 'suspended',
+		kind: 'provider',
 		category: record.category,
 		resumePolicy: record.resumePolicy,
 		suspendedAt: record.suspendedAt,
@@ -56,8 +75,15 @@ export function deriveSuspendedCard(runView: unknown): SuspendedCardDescriptor |
 export function resumeFailureCopy(body: unknown, status: number): string {
 	if (status === 404) return 'The run could not be found \u2014 it may have been removed.'
 	const error = isObject(body) ? body['error'] : undefined
+	if (status === 500) {
+		const message = isObject(body) ? body['message'] : undefined
+		if (typeof message === 'string' && message !== '') return message
+		if (error === 'pause_intent_clear_failed') return 'The pause request could not be cleared, so the run was not resumed.'
+		return 'The resume was rejected.'
+	}
 	if (status !== 409) return 'The resume was rejected.'
 	if (error === 'run_suspended') return 'Another run is suspended \u2014 resume or terminate it first.'
+	if (error === 'run_paused') return 'Another run is paused by the operator \u2014 resume or terminate it first.'
 	if (error === 'run_not_suspended') return 'This run is not suspended, so there is nothing to resume.'
 	if (error === 'run_not_resumable') return 'This run is no longer in a state that can be resumed \u2014 it may already be running again.'
 	if (error === 'checkpoint_missing') return 'This run has no saved checkpoint, so it was terminated. Start a new run continuing it.'
@@ -101,13 +127,16 @@ export function SuspendedCard(h: LooseH, props: SuspendedCardProps): Vnode {
 	const terminatePending = props.terminatePending === true
 	const resumeDisabled = resumePending || terminatePending || !descriptor.resumable
 	const terminateDisabled = terminatePending || resumePending
+	const operatorPaused = descriptor.kind === 'operator'
+	const heading = operatorPaused ? 'Run paused' : 'Run suspended'
+	const statusText = operatorPaused ? 'Paused' : 'Suspended'
 	const children: Vnode[] = [
 		h('p', { class: 'suspended-card-heading' }, runLabel !== null && runLabel !== undefined && runLabel !== ''
-			? `Run suspended \u00b7 ${runLabel}`
-			: 'Run suspended'),
-		h('p', { class: 'suspended-card-status' }, 'Suspended'),
+			? `${heading} \u00b7 ${runLabel}`
+			: heading),
+		h('p', { class: 'suspended-card-status' }, statusText),
 		h('p', { class: 'suspended-card-cause' }, descriptor.cause),
-		h('p', { class: 'suspended-card-since' }, `Suspended since ${descriptor.suspendedAt}`),
+		h('p', { class: 'suspended-card-since' }, `${statusText} since ${descriptor.suspendedAt}`),
 	]
 	if (!descriptor.resumable) {
 		children.push(h('p', { class: 'suspended-card-note' }, 'This run has no saved checkpoint to resume from.'))

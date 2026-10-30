@@ -207,7 +207,7 @@ function finalizeModel(snapshot: RunSnapshot, status: RunStatus, participants: P
 		}
 	}
 
-	return { model: { participants, operations, status, stacks: stackRecords }, detailSources }
+	return { model: { participants, operations, status, ...(status === 'suspended' && snapshot.meta?.pause !== undefined ? { pause: snapshot.meta.pause } : {}), stacks: stackRecords }, detailSources }
 }
 
 function deriveModel(snapshot: RunSnapshot): DerivedModel {

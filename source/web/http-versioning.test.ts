@@ -10,6 +10,7 @@ import type { InteractionModel } from './static/ts/interaction-model.js'
 import { applyRunListFrame, createRunListFeedResponder, emptyRunListFeedState, runListFeedRevision } from './static/ts/run-list-feed/index.js'
 import type { RunSummary } from './static/ts/run-list-feed/index.js'
 import { createRequestHandler, type RequestHandler } from './request-handler.ts'
+import { createOperatorPauseChannel, createOperatorPauseQueue } from '../executor/operator-pause.ts'
 import { createRunListCache } from './run-list-cache.ts'
 import { parseLogEvents, parseRunMeta } from '../run-log/index.js'
 import type { ReadRunSnapshot } from './snapshot-cache.ts'
@@ -76,12 +77,24 @@ interface VersioningHarness {
 	runs: Map<string, StoredRun>
 	setActiveRunId: (runId: string | undefined) => void
 	setInterruptPending: (pending: boolean) => void
+	setPauseWriteResult: (result: boolean) => void
+	pauseWrites: string[]
+	pauseRequestedAt: () => string | undefined
+	pauseDeletes: string[]
+	unbindPauseChannel: () => void
 }
 
 function createVersioningHarness(initialRuns: Array<[string, StoredRun]>, flowFeedOptions: FlowFeedResponderOptions = { epoch: 'versioning-epoch', historyLimit: 64, maxRuns: 8 }): VersioningHarness {
 	const runs = new Map(initialRuns)
 	let activeRunId: string | undefined
 	let interruptPending = false
+	let pauseWriteResult = true
+	let pauseRequestedAt = '2026-01-01T00:00:00.000Z'
+	const pauseWrites: string[] = []
+	const pauseDeletes: string[] = []
+	const operatorPauseChannel = createOperatorPauseChannel()
+	const operatorPauseQueue = createOperatorPauseQueue()
+	operatorPauseChannel.bindQueue(operatorPauseQueue)
 
 	const readRunSnapshotStats: ReadRunSnapshotStats = (runId) => {
 		const run = runs.get(runId)
@@ -117,9 +130,11 @@ function createVersioningHarness(initialRuns: Array<[string, StoredRun]>, flowFe
 		submit: () => ({ ok: false, error: 'run_in_progress' }),
 		resume: () => ({ ok: true }),
 		activeRunId: () => activeRunId,
-		suspendedRunId: () => undefined,
+		pausedRunId: () => undefined,
+		pausedRunKind: () => undefined,
 		adoptSuspendedRun: () => {},
-		clearSuspendedRun: () => {},
+		adoptOperatorPausedRun: () => {},
+		clearPausedRun: () => {},
 		lastRunId: () => undefined,
 		awaitActive: async () => undefined,
 		awaitFatalError: () => new Promise<Error>(() => {}),
@@ -142,6 +157,7 @@ function createVersioningHarness(initialRuns: Array<[string, StoredRun]>, flowFe
 		submitRun: () => ({ ok: false, error: 'run_in_progress' }),
 		hasActiveRun: () => activeRunId !== undefined,
 		hasSuspendedRun: () => false,
+		pausedRunKind: () => undefined,
 		canDispatch: () => true,
 		ensureProviderProbe: () => {},
 		sleep: async () => {},
@@ -172,6 +188,16 @@ function createVersioningHarness(initialRuns: Array<[string, StoredRun]>, flowFe
 			taskQueue,
 			resumeErroredOrSuspendedRun,
 			runCheckpointExists,
+			writePauseRequest: (runId) => {
+				if (!pauseWriteResult) return { ok: false }
+				pauseWrites.push(runId)
+				return { ok: true, requestedAt: pauseRequestedAt }
+			},
+			deletePauseRequest: (runId) => {
+				pauseDeletes.push(runId)
+				return true
+			},
+			operatorPauseChannel,
 			build: null,
 			flowFeedResponder,
 			runListFeedResponder,
@@ -189,6 +215,13 @@ function createVersioningHarness(initialRuns: Array<[string, StoredRun]>, flowFe
 		setInterruptPending: (pending) => {
 			interruptPending = pending
 		},
+		setPauseWriteResult: (result) => {
+			pauseWriteResult = result
+		},
+		pauseWrites,
+		pauseRequestedAt: () => operatorPauseQueue.consume()?.pausedAt,
+		pauseDeletes,
+		unbindPauseChannel: () => operatorPauseChannel.bindQueue(null),
 	}
 }
 
@@ -454,5 +487,96 @@ describe('flow-model envelope and run-list conditional requests', () => {
 		const { handler } = createVersioningHarness([['run-1', storedRun('run-1')]])
 		const unknown = await (await handler(get('/api/runs?have=not-a-revision'))).json()
 		expect(unknown.kind).toBe('snapshot')
+	})
+})
+
+function post(path: string): Request {
+	return new Request(`http://handler.test${path}`, { method: 'POST' })
+}
+
+describe('POST /api/runs/:id/pause', () => {
+	test('accepts a pause for the active run and writes the durable marker before signaling', async () => {
+		const harness = createVersioningHarness([['run-20260101-000000', storedRun('run-20260101-000000', 'running')]])
+		harness.setActiveRunId('run-20260101-000000')
+
+		const response = await harness.handler(post('/api/runs/run-20260101-000000/pause'))
+
+		expect(response.status).toBe(202)
+		expect(await response.json()).toEqual({ ok: true })
+		expect(harness.pauseWrites).toEqual(['run-20260101-000000'])
+		expect(harness.pauseRequestedAt()).toBe('2026-01-01T00:00:00.000Z')
+	})
+
+	test('signals the live channel with the writer-returned timestamp, not the request time', async () => {
+		const harness = createVersioningHarness([['run-20260101-000000', storedRun('run-20260101-000000', 'running')]])
+		harness.setActiveRunId('run-20260101-000000')
+
+		const response = await harness.handler(post('/api/runs/run-20260101-000000/pause'))
+
+		expect(response.status).toBe(202)
+		expect(harness.pauseRequestedAt()).toBe('2026-01-01T00:00:00.000Z')
+	})
+
+	test('a run that settles before the channel submit deletes the stale marker and refuses', async () => {
+		const harness = createVersioningHarness([['run-20260101-000000', storedRun('run-20260101-000000', 'running')]])
+		harness.setActiveRunId('run-20260101-000000')
+		harness.unbindPauseChannel()
+
+		const response = await harness.handler(post('/api/runs/run-20260101-000000/pause'))
+
+		expect(response.status).toBe(409)
+		expect(await response.json()).toEqual({ ok: false, error: 'run_not_active' })
+		expect(harness.pauseWrites).toEqual(['run-20260101-000000'])
+		expect(harness.pauseDeletes).toEqual(['run-20260101-000000'])
+	})
+
+	test('a repeat pause request is idempotent 202', async () => {
+		const harness = createVersioningHarness([['run-20260101-000000', storedRun('run-20260101-000000', 'running')]])
+		harness.setActiveRunId('run-20260101-000000')
+
+		const first = await harness.handler(post('/api/runs/run-20260101-000000/pause'))
+		const second = await harness.handler(post('/api/runs/run-20260101-000000/pause'))
+
+		expect(first.status).toBe(202)
+		expect(second.status).toBe(202)
+		expect(await second.json()).toEqual({ ok: true })
+	})
+
+	test('a run that is already operator-paused repeats as 202 without signaling again', async () => {
+		const paused = storedRun('run-20260101-000000', 'suspended')
+		paused.metaText = JSON.stringify({ runId: 'run-20260101-000000', task: 'do it', status: 'suspended', startTime: '2026-01-01T00:00:00.000Z', pause: { message: 'The operator paused this run.', pausedAt: '2026-01-01T00:02:00.000Z' } })
+		const harness = createVersioningHarness([['run-20260101-000000', paused]])
+
+		const response = await harness.handler(post('/api/runs/run-20260101-000000/pause'))
+
+		expect(response.status).toBe(202)
+		expect(await response.json()).toEqual({ ok: true })
+		expect(harness.pauseWrites).toEqual([])
+		expect(harness.pauseRequestedAt()).toBeUndefined()
+	})
+
+	test('an unknown or non-active run is refused with run_not_active', async () => {
+		const harness = createVersioningHarness([['run-20260101-000000', storedRun('run-20260101-000000', 'running')]])
+		harness.setActiveRunId('run-20260101-000100')
+
+		const response = await harness.handler(post('/api/runs/run-20260101-000000/pause'))
+
+		expect(response.status).toBe(409)
+		expect(await response.json()).toEqual({ ok: false, error: 'run_not_active' })
+		expect(harness.pauseWrites).toEqual([])
+	})
+
+	test('a marker write failure returns a safe 500 and does not signal the run', async () => {
+		const harness = createVersioningHarness([['run-20260101-000000', storedRun('run-20260101-000000', 'running')]])
+		harness.setActiveRunId('run-20260101-000000')
+		harness.setPauseWriteResult(false)
+
+		const response = await harness.handler(post('/api/runs/run-20260101-000000/pause'))
+		const body: unknown = await response.json()
+
+		expect(response.status).toBe(500)
+		expect(body).toMatchObject({ ok: false, error: 'pause_write_failed' })
+		expect(JSON.stringify(body)).not.toContain('run-20260101-000000')
+		expect(harness.pauseRequestedAt()).toBeUndefined()
 	})
 })

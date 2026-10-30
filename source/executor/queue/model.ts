@@ -3,7 +3,7 @@ import { isRunIdShape } from '../run-id.js'
 import { questionFromParkSummary, type PauseState } from '../park-state.js'
 import { isSupersededSuspendedRun } from '../suspension.js'
 import { QUEUE_FORMAT_VERSION } from '../orchestration-version.js'
-import type { EffortLevel, InvolvementLevel, LogLevel, RunMeta } from '../types.js'
+import type { EffortLevel, InvolvementLevel, LogLevel, OperatorPauseRecord, RunMeta } from '../types.js'
 
 // Pure queue logic and validation for the durable task queue (docs/queueing.md "The queue: storage, item model, state machine"). Every transformation is a whole-queue value: it takes a queue and returns a new one, so the module's read-modify-write cycles stay free of hidden mutation. Serialization and orchestration live in persistence.ts and task-queue.ts; only the read-only DTOs cross the module boundary.
 
@@ -27,6 +27,8 @@ export interface QueueItemView {
 	readonly runId?: string
 	// Set while the item's run is suspended: when the pause began.
 	readonly suspendedAt?: string
+	// Projected from the run meta at the HTTP boundary for a suspended item, so the row can name the pause kind before the run summary arrives.
+	readonly pause?: OperatorPauseRecord
 	// The run a waiting answered item re-enters: a parked run or a direct clarification finish. The tool-call id, when present, stays internal.
 	readonly resumesRunId?: string
 	readonly queuedAt: string
@@ -532,7 +534,7 @@ export function repairActiveItem(item: QueueItem, meta: RunMeta | null, settledA
 		if (meta === null) return releaseToWaiting(item)
 		if (meta.status === 'running') return null
 		// The suspended meta landed but the queue write did not: preserve the run binding and pause stamp instead of treating the pause as a stale work item.
-		if (meta.status === 'suspended') return suspendedItem(item, meta.suspension?.suspendedAt ?? settledAt, runId)
+		if (meta.status === 'suspended') return suspendedItem(item, meta.suspension?.suspendedAt ?? meta.pause?.pausedAt ?? settledAt, runId)
 		// Only a needs_clarification terminal can mean the answer is still undelivered: success/error prove the resumed run finished, and releasing those would rerun a done task. A re-park (different call, or a clarification checkpoint that already records this answer id) is delivered and settles normally.
 		if (meta.status === 'needs_clarification' && pendingAnswerUndelivered(item, pauseState, runId)) {
 			return releaseToWaiting(item)

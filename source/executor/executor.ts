@@ -1,6 +1,6 @@
 import { DEFAULT_EFFORT } from './effort.js'
 import { DEFAULT_INVOLVEMENT } from './involvement.js'
-import type { ResultCard, RunContinuation, RunMeta, RunOptions, SuspensionRecord } from './types.js'
+import type { OperatorPauseRecord, ResultCard, RunContinuation, RunMeta, RunOptions, SuspensionRecord } from './types.js'
 import { createCheckpointRecorder, entryFrameLogLevel, type ClarificationAnswerDelivery, type RunCheckpoint } from './checkpoint.js'
 import { createContextPressureTracker } from './context/index.js'
 import type { RunBaseTracker } from './base-state.js'
@@ -12,6 +12,7 @@ import { logEvent, type EngineContext, type EngineDependencies } from './engine-
 import { createInvocationJournal, humanAnswerPayload, toolCallId } from './invocation.js'
 import type { HumanBackend } from './human-backend.js'
 import type { InterruptQueue } from './interrupts.js'
+import type { OperatorPauseQueue } from './operator-pause.js'
 import type { LlmCaller } from './llm.js'
 import type { LoadedGuild } from './loader.js'
 import type { AppendLog, DeleteCheckpoint, ReadRunLogEvents, RunDirectory, WriteCheckpoint, WriteMeta } from './persistence.js'
@@ -35,6 +36,10 @@ export interface ExecutorDependencies {
 	deleteCheckpoint: DeleteCheckpoint
 	// The run's interrupt queue, created by the caller so the service API can submit operator interrupts while the run is in flight; the engine drains it at turn boundaries. The role registry is run-internal and created here.
 	interruptQueue: InterruptQueue
+	// The run's operator-pause request channel, created by the caller and bound to the shared pause channel while the run is active.
+	operatorPauseQueue: OperatorPauseQueue
+	// Best-effort cleanup of the durable pause-request marker after every settlement, so a stale intent cannot pause a later run.
+	deletePauseRequest: () => void
 	// The run-scoped streaming-delta publisher, provided by the caller (bound to the shared delta channel in serve.ts); the engine stamps every streamed text delta with the publishing role. Required like the rest of the run-scoped leaves.
 	publishDelta: (delta: RoleDelta) => void
 	// The per-run store of finished child conversations, so a parent can continue a finished child as a new seeded instance.
@@ -82,6 +87,7 @@ function buildEngineDependencies(deps: ExecutorDependencies, input: EngineDepend
 		humanBackend: deps.humanBackend,
 		roleRegistry,
 		interruptQueue: deps.interruptQueue,
+		operatorPauseQueue: deps.operatorPauseQueue,
 		contextPressureTracker,
 		publishDelta: deps.publishDelta,
 		roleSnapshots: deps.roleSnapshots,
@@ -95,7 +101,7 @@ function buildEngineDependencies(deps: ExecutorDependencies, input: EngineDepend
 }
 
 // The one composer for the executor's meta writes: identity fields map from the run's options (the optional ones spread only when present), the caller pins the status and start time, and a terminal write passes the result card, which fixes the end time at composition. The running writes and the terminal write all compose here so the optional-field mapping is spelled once.
-function composeRunMeta(options: RunOptions, startTime: string, status: RunMeta['status'], result?: ResultCard, suspension?: SuspensionRecord): RunMeta {
+function composeRunMeta(options: RunOptions, startTime: string, status: RunMeta['status'], result?: ResultCard, suspension?: SuspensionRecord, pause?: OperatorPauseRecord): RunMeta {
 	return {
 		runId: options.runId,
 		guildPath: options.guildPath,
@@ -108,6 +114,7 @@ function composeRunMeta(options: RunOptions, startTime: string, status: RunMeta[
 		...(options.continuation?.runId !== undefined ? { continuesFrom: options.continuation.runId } : {}),
 		status,
 		...(suspension !== undefined ? { suspension } : {}),
+		...(pause !== undefined ? { pause } : {}),
 		startTime,
 		...(result === undefined ? {} : { endTime: new Date().toISOString(), result }),
 	}
@@ -158,9 +165,12 @@ export async function runExecutor(deps: ExecutorDependencies, options: RunOption
 
 	const meta = outcome.kind === 'suspended'
 		? composeRunMeta(options, startTime, 'suspended', undefined, outcome.suspension)
-		: composeRunMeta(options, startTime, outcome.card.status, outcome.card)
+		: outcome.kind === 'operator_paused'
+			? composeRunMeta(options, startTime, 'suspended', undefined, undefined, outcome.pause)
+			: composeRunMeta(options, startTime, outcome.card.status, outcome.card)
 
 	deps.writeMeta(meta)
+	deps.deletePauseRequest()
 	// The terminal meta is the authoritative record, and the checkpoint is removed so a restart never considers resuming a finished run — except when the terminal status is 'error' (the operator can explicitly resume it with its full context, docs/queueing.md "Resume of an errored or suspended run"), a needs_clarification pause (a parked ask or a direct finish) that the queue answer re-enters, or a suspension whose checkpoint is kept for provider recovery. Startup reconciliation auto-resumes only running metas and transient checkpoint suspensions; operator-resume suspensions are materialized as suspended.
 	if (!shouldKeepCheckpoint(meta.status)) deps.deleteCheckpoint()
 
@@ -246,6 +256,11 @@ export async function resumeExecutor(deps: ExecutorDependencies, checkpoint: Run
 		checkpoint.suspension = undefined
 		deps.writeCheckpoint(checkpoint)
 	}
+	// The pause copy covers a crash in the meta-write window; clear it before the running meta lands so a resumed run is not mistaken for a still-paused one.
+	if (checkpoint.pause !== undefined) {
+		checkpoint.pause = undefined
+		deps.writeCheckpoint(checkpoint)
+	}
 	// run_resumed marks the restart boundary in the log: events before it belong to the pre-restart process, events after it to the resumed run. Resumed roles do not re-emit role_start, so a reviewer can tell why. An explicit error-or-suspended resume stamps the operator's note on the boundary so the log shows the human intervention as well.
 	logEvent(deps.appendLog, 'run_resumed', { runId: checkpoint.runId, resumedFrames: checkpoint.frames.length, ...(options.operatorNote !== undefined ? { operatorNote: options.operatorNote } : {}) })
 	// A clarification answer rides the same human_answer event as a parked answer, with a synthetic id. It is logged after the boundary and the durable write, and only when this resume actually appended the note — an idempotent replay has nothing new to log.
@@ -265,9 +280,12 @@ export async function resumeExecutor(deps: ExecutorDependencies, checkpoint: Run
 
 	const meta = result.kind === 'suspended'
 		? composeRunMeta(runOptions, startTime, 'suspended', undefined, result.suspension)
-		: composeRunMeta(runOptions, startTime, result.card.status, result.card)
+		: result.kind === 'operator_paused'
+			? composeRunMeta(runOptions, startTime, 'suspended', undefined, undefined, result.pause)
+			: composeRunMeta(runOptions, startTime, result.card.status, result.card)
 
 	deps.writeMeta(meta)
+	deps.deletePauseRequest()
 	// Same checkpoint rule as the fresh-run path: an error, a needs_clarification pause, or a suspended outcome stays resumable from its checkpoint; every other terminal status cleans up.
 	if (!shouldKeepCheckpoint(meta.status)) deps.deleteCheckpoint()
 

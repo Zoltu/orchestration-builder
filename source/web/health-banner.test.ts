@@ -22,6 +22,11 @@ describe('deriveHealthBanner', () => {
 		expect(deriveHealthBanner(health())).toBeNull()
 	})
 
+	test('an operator pause suppresses the provider banner even when health is unhealthy', () => {
+		expect(deriveHealthBanner(health({ state: 'unavailable', category: 'billing' }, null, null), true)).toBeNull()
+		expect(deriveHealthBanner(health({ state: 'degraded', category: 'transient' }, null, null), true)).toBeNull()
+	})
+
 	test('a healthy provider with an operator suspension says the run can be resumed', () => {
 		expect(deriveHealthBanner(health({}, 'run-1', 'operator'))).toEqual({ tone: 'info', message: 'Run suspended \u2014 resume when ready.' })
 	})

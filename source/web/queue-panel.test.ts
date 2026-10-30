@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { backlogCount, deriveQueuedItems, deriveReorderPosition, isQueueItemLike, matchesParkedRun, queueItemPrimaryText, queueStatusLabel, reorderWaitingItems, taskFirstLine } from './static/ts/queue-panel.js'
+import { backlogCount, deriveQueuedItems, deriveReorderPosition, isQueueItemLike, matchesParkedRun, queueItemPrimaryText, queueRowPauseKind, queueStatusLabel, reorderWaitingItems, taskFirstLine } from './static/ts/queue-panel.js'
 
 // The fixture shape below mirrors the queue item's wire shape (docs/queueing.md "The queue: storage, item model, state machine") the tests build against, pulled off the module's API so the fixtures are checked against the module's own QueueItemLike, mirroring the sibling flow-view.test.ts convention.
 type QueueItemLike = Parameters<typeof queueItemPrimaryText>[0]
@@ -35,6 +35,13 @@ describe('isQueueItemLike', () => {
 		expect(isQueueItemLike({ ...item(), continuesFrom: 7 })).toBe(false)
 		expect(isQueueItemLike({ ...item(), resumesRunId: '' })).toBe(false)
 		expect(isQueueItemLike({ ...item(), resumesRunId: null })).toBe(false)
+	})
+
+	test('accepts an optional well-formed pause record and rejects a malformed one', () => {
+		const pause = { message: 'The operator paused this run.', pausedAt: '2026-01-01T00:02:00.000Z' }
+		expect(isQueueItemLike(item({ status: 'suspended', runId: 'run-s', pause }))).toBe(true)
+		expect(isQueueItemLike({ ...item(), pause: { message: 7, pausedAt: '2026-01-01T00:02:00.000Z' } })).toBe(false)
+		expect(isQueueItemLike({ ...item(), pause: { message: 'Paused.', pausedAt: null } })).toBe(false)
 	})
 })
 
@@ -78,6 +85,19 @@ describe('queueStatusLabel', () => {
 		expect(queueStatusLabel('suspended')).toBe('suspended')
 		expect(queueStatusLabel('needs_input')).toBe('needs your answer')
 		expect(queueStatusLabel('mysterious')).toBe('mysterious')
+	})
+
+	test('an operator-paused row reads Paused while a provider suspension reads Suspended', () => {
+		expect(queueStatusLabel('suspended', 'operator')).toBe('paused')
+		expect(queueStatusLabel('suspended', 'provider')).toBe('suspended')
+	})
+
+	test('a suspended row takes its pause kind from the item record or the matching run summary', () => {
+		const pause = { message: 'The operator paused this run.', pausedAt: '2026-01-01T00:02:00.000Z' }
+		const pausedItem = item({ status: 'suspended', runId: 'run-s', pause })
+		expect(queueRowPauseKind(pausedItem, undefined)).toBe('operator')
+		expect(queueRowPauseKind(item({ status: 'suspended', runId: 'run-s' }), { status: 'suspended', pause })).toBe('operator')
+		expect(queueRowPauseKind(item({ status: 'suspended', runId: 'run-s' }), { status: 'suspended', suspension: { category: 'billing' } })).toBe('provider')
 	})
 })
 

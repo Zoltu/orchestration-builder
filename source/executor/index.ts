@@ -58,11 +58,14 @@ export type { RunState } from './run-state.js'
 export { createInterruptChannel, createInterruptQueue } from './interrupts.js'
 export type { InterruptChannel, InterruptQueue, InterruptRequest, InterruptSubmitResult } from './interrupts.js'
 
+export { createOperatorPauseChannel, createOperatorPauseQueue, OPERATOR_PAUSE_MESSAGE, operatorPauseFromIntent, operatorPauseFromRequestedAt, PAUSE_REQUEST_FILE_NAME, PAUSE_REQUEST_FORMAT_VERSION } from './operator-pause.js'
+export type { OperatorPauseChannel, OperatorPauseQueue, PauseIntent, PauseSubmitResult } from './operator-pause.js'
+
 export { createDeltaChannel } from './stream-channel.js'
 export type { DeltaChannel, DeltaField, DeltaSubscriber, RoleDelta, RunDelta } from './stream-channel.js'
 
 export { createRunSubmission, createResumeErroredOrSuspendedRun, createReadPauseStateById, createResumeParkedRun, createResumeClarificationRun, createTerminatePausedRun } from './run-submission.js'
-export type { ReadPauseStateById, ResumeClarificationRun, ResumeClarificationRunDependencies, ResumeClarificationRunRejection, ResumeClarificationRunResult, ResumeErroredOrSuspendedRun, ResumeErroredOrSuspendedRunDependencies, ResumeErroredOrSuspendedRunRejection, ResumeErroredOrSuspendedRunResult, ResumeParkedRun, ResumeParkedRunDependencies, ResumeParkedRunRejection, ResumeParkedRunResult, ResumeRun, ResumeRunInvocation, RunSubmission, RunSubmissionDependencies, StartRun, SubmitResult, TerminatePausedRun, TerminatePausedRunDependencies, TerminatePausedRunRejection, TerminatePausedRunResult } from './run-submission.js'
+export type { ReadPauseStateById, ResumeClarificationRun, ResumeClarificationRunDependencies, ResumeClarificationRunRejection, ResumeClarificationRunResult, ResumeErroredOrSuspendedRun, ResumeErroredOrSuspendedRunDependencies, ResumeErroredOrSuspendedRunRejection, ResumeErroredOrSuspendedRunResult, ResumeParkedRun, ResumeParkedRunDependencies, ResumeParkedRunRejection, ResumeParkedRunResult, ResumeRun, ResumeRunInvocation, RunSubmission, RunSubmissionDependencies, PausedRunKind, StartRun, SubmitResult, TerminatePausedRun, TerminatePausedRunDependencies, TerminatePausedRunRejection, TerminatePausedRunResult } from './run-submission.js'
 
 export { createTaskQueue } from './queue/index.js'
 export type {
@@ -123,6 +126,9 @@ export {
 	createWriteMeta,
 	createWriteCheckpoint,
 	createDeleteCheckpoint,
+	createDeletePauseRequest,
+	createReadPauseRequestById,
+	createWritePauseRequest,
 	createRoleSnapshotStore,
 	createReadRunFormat,
 	createReadRunCheckpointById,
@@ -156,6 +162,9 @@ export type {
 	WriteCheckpoint,
 	DeleteCheckpoint,
 	ReadRunCheckpointById,
+	ReadPauseRequestById,
+	WritePauseRequest,
+	DeletePauseRequest,
 	ReadRunFormat,
 	RunCheckpointExists,
 	ReadRunSnapshotById,
@@ -179,4 +188,4 @@ export type {
 	WriteProjectSettings,
 } from './persistence.js'
 
-export type { DeploymentConfig, DeploymentFileConfig, LoggingConfig, ModelConfig, ResolvedModelConfig, RunContinuation, RunOptions, RunMeta, ResultCard, EffortLevel, InvolvementLevel } from './types.js'
+export type { DeploymentConfig, DeploymentFileConfig, LoggingConfig, ModelConfig, ResolvedModelConfig, RunContinuation, RunOptions, RunMeta, ResultCard, EffortLevel, InvolvementLevel, OperatorPauseRecord, SuspensionRecord } from './types.js'

@@ -203,10 +203,12 @@ export function createNoopCheckpointRecorder(): CheckpointRecorder {
 		setPendingInterlude: () => undefined,
 		setPendingOperatorRequests: () => undefined,
 		setSuspension: () => undefined,
+		setOperatorPause: () => undefined,
 		hasActiveHandler: () => false,
 		pendingInterludeTrigger: () => undefined,
 		write: () => true,
 		writeSuspension: () => true,
+		writePause: () => true,
 		freeze: () => undefined,
 		unfreeze: () => undefined,
 	}

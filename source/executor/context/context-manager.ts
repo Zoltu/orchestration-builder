@@ -5,7 +5,7 @@ import type { InvocationJournal } from '../invocation.js'
 import type { CheckpointRecorder } from '../checkpoint.js'
 import type { InterruptQueue } from '../interrupts.js'
 import type { AppendLog } from '../persistence.js'
-import type { LlmUsage, ResultCard, RoleOutcome, SuspensionRecord } from '../types.js'
+import type { LlmUsage, OperatorPauseRecord, ResultCard, RoleOutcome, SuspensionRecord } from '../types.js'
 import { applyContextBackstop, contextExceededCard, contextHandlerTask, contextManagedNotice, contextPressureNotice, currentEffectiveBudget, MAX_CONTEXT_RECOVERY_ATTEMPTS } from './context-handoff.js'
 import { DEFAULT_CONTEXT_PRESSURE_THRESHOLD, recordContextRejection, type ContextPressureTracker } from './context-pressure.js'
 
@@ -18,6 +18,7 @@ export type ContextDecision =
 	| { kind: 'continue' }
 	| { kind: 'finished'; card: ResultCard }
 	| { kind: 'suspended'; suspension: SuspensionRecord }
+	| { kind: 'operator_paused'; pause: OperatorPauseRecord }
 
 export interface ContextDependencies {
 	appendLog: AppendLog
@@ -58,7 +59,7 @@ export function createContextManager(context: EngineContext, dependencies: Conte
 			}
 			return apply(handlerCard)
 		})
-		if (interlude.kind === 'suspended') return interlude
+		if (interlude.kind === 'suspended' || interlude.kind === 'operator_paused') return interlude
 		return interlude.resolution
 	}
 
@@ -108,7 +109,7 @@ export function createContextManager(context: EngineContext, dependencies: Conte
 				const backstopCard = applyContextBackstop(roleState, context, pending, dependencies)
 				return backstopCard === null ? { kind: 'continue' } : { kind: 'finished', card: backstopCard }
 			})
-			if (decision.kind === 'suspended') return decision
+			if (decision.kind === 'suspended' || decision.kind === 'operator_paused') return decision
 			if (decision.kind === 'finished') return decision
 		}
 
@@ -121,7 +122,7 @@ export function createContextManager(context: EngineContext, dependencies: Conte
 					else appendUserNotice(roleState, contextPressureNotice(roleState.lastPromptTokens, effectiveBudget()))
 					return { kind: 'continue' }
 				})
-				if (decision.kind === 'suspended') return decision
+				if (decision.kind === 'suspended' || decision.kind === 'operator_paused') return decision
 			} else {
 				roleState.contextPressureNotice = 'sent'
 				appendUserNotice(roleState, contextPressureNotice(roleState.lastPromptTokens, effectiveBudget()))

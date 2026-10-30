@@ -2,7 +2,7 @@ import type { RoleRegistryEntry } from './role-registry.js'
 import type { EngineContext } from './engine-state.js'
 import type { RoleOutcome } from './types.js'
 import type { InvocationJournal } from './invocation.js'
-import type { ExecutorConfig, ResultCard, SuspensionRecord } from './types.js'
+import type { ExecutorConfig, OperatorPauseRecord, ResultCard, SuspensionRecord } from './types.js'
 import type { CheckpointRecorder, InterludeTrigger } from './checkpoint.js'
 import type { InterruptQueue } from './interrupts.js'
 
@@ -16,6 +16,7 @@ export interface HandlerInterludeDependencies {
 export type HandlerInterludeOutcome<Resolution> =
 	| { kind: 'resolved'; resolution: Resolution }
 	| { kind: 'suspended'; suspension: SuspensionRecord }
+	| { kind: 'operator_paused'; pause: OperatorPauseRecord }
 
 // The shared handler interlude every handler invocation runs (the loop-check, inquiry, and context handlers): suspend the active role at the safe point, invoke the handler role against its frozen (registered) state, then apply the trigger's resolution step with the handler's finish card.
 // The interrupt event lands immediately before the handler's role_start so the interaction model roots the handler under a fresh interrupt participant; the handler role_start's parentCallId is that interrupt call, while an ordinary child role is parented to its caller role.
@@ -56,7 +57,7 @@ export async function runHandlerInterlude<Resolution>(
 		parentCallId: interrupt.callId,
 		handlerOf: entry.roleId,
 	})
-	if (handlerOutcome.kind === 'suspended') return handlerOutcome
+	if (handlerOutcome.kind === 'suspended' || handlerOutcome.kind === 'operator_paused') return handlerOutcome
 	const resolution = resolve(handlerOutcome.card, interrupt.callId)
 	if (!nested) {
 		dependencies.checkpointRecorder.setPendingInterlude(undefined)

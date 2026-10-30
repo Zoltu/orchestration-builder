@@ -34,6 +34,7 @@ export type TaskSystemKind =
 	| 'pause'
 	| 'resume'
 	| 'suspension'
+	| 'operator_pause'
 	| 'failure'
 	| 'termination'
 	| 'notice'
@@ -144,6 +145,7 @@ export const TASK_SYSTEM_KINDS: readonly TaskSystemKind[] = [
 	'pause',
 	'resume',
 	'suspension',
+	'operator_pause',
 	'failure',
 	'termination',
 	'notice',

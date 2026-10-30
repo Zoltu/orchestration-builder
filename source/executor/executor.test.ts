@@ -6,6 +6,7 @@ import { createRunBaseTracker } from './base-state.ts'
 import { EMPTY_TREE_HASH } from './git-primitives.ts'
 import { resumeExecutor, runExecutor, type ExecutorDependencies } from './executor.ts'
 import { createInterruptQueue } from './interrupts.ts'
+import { createOperatorPauseQueue } from './operator-pause.ts'
 import type { LlmCallResult, LlmCaller, LlmRequest } from './llm.ts'
 import type { LoadedGuild } from './loader.ts'
 import type { AppendLog, DeleteCheckpoint, RunDirectory, WriteCheckpoint, WriteMeta } from './persistence.ts'
@@ -178,6 +179,8 @@ function makeDeps(llm: FakeLlm, persistence: FakePersistenceFns, loadedGuild: Lo
 		humanBackend: stubHumanBackend,
 		loadedGuild,
 		interruptQueue: createInterruptQueue(),
+		operatorPauseQueue: createOperatorPauseQueue(),
+		deletePauseRequest: () => undefined,
 		publishDelta: () => undefined,
 		roleSnapshots: createFakeRoleSnapshotStore(),
 		readProjectDoc: () => ({ kind: 'unavailable', reason: 'not used in these tests' }),
@@ -209,6 +212,79 @@ describe('runExecutor', () => {
 		expect(meta.error).toBeUndefined()
 		expect(persistence.state.deleteCheckpointCalls).toBe(0)
 		expect(persistence.state.checkpoints.length).toBeGreaterThan(0)
+	})
+
+	test('an operator pause writes a suspended meta with the pause record, keeps the checkpoint, and clears the durable marker', async () => {
+		const guild = buildLoadedGuild({ main: { systemPrompt: 'p', tools: ['finish'] } }, 'main')
+		const llm = new FakeLlm()
+		llm.responses = [success([{ id: 'f1', type: 'function', function: { name: 'finish', arguments: JSON.stringify({ status: 'success', summary: 'never called' }) } }])]
+		const persistence = makeFakePersistence()
+		const deps = makeDeps(llm, persistence, guild)
+		let deletedMarkers = 0
+		deps.deletePauseRequest = () => {
+			deletedMarkers++
+		}
+		const pause = { message: 'The operator paused this run.', pausedAt: '2026-01-01T00:05:00.000Z' }
+		deps.operatorPauseQueue.request(pause)
+
+		const meta = await runExecutor(deps, { runId: 'r-paused', guildPath: '/guild', task: 'do it', effort: 'standard', involvement: 'early-engagement' })
+
+		expect(meta.status).toBe('suspended')
+		expect(meta.pause).toEqual(pause)
+		expect(meta.suspension).toBeUndefined()
+		expect(meta.endTime).toBeUndefined()
+		expect(meta.result).toBeUndefined()
+		expect(meta.error).toBeUndefined()
+		expect(persistence.state.deleteCheckpointCalls).toBe(0)
+		expect(persistence.state.checkpoints[persistence.state.checkpoints.length - 1]?.pause).toEqual(pause)
+		expect(deletedMarkers).toBe(1)
+		expect(llm.calls).toBe(0)
+	})
+
+	test('a terminal settlement clears a stale durable pause intent without pausing the run', async () => {
+		const guild = buildLoadedGuild({ main: { systemPrompt: 'p', tools: ['finish'] } }, 'main')
+		const llm = new FakeLlm()
+		llm.responses = [success([{ id: 'f1', type: 'function', function: { name: 'finish', arguments: JSON.stringify({ status: 'success', summary: 'done' }) } }])]
+		const persistence = makeFakePersistence()
+		const deps = makeDeps(llm, persistence, guild)
+		let deletedMarkers = 0
+		deps.deletePauseRequest = () => {
+			deletedMarkers++
+		}
+
+		const meta = await runExecutor(deps, { runId: 'r-stale-intent', guildPath: '/guild', task: 'do it', effort: 'standard', involvement: 'early-engagement' })
+
+		expect(meta.status).toBe('success')
+		expect(meta.pause).toBeUndefined()
+		expect(deletedMarkers).toBe(1)
+	})
+
+	test('resuming an operator-paused run clears the checkpoint pause, injects the pause note, and does not replay tools', async () => {
+		const guild = buildLoadedGuild({ main: { systemPrompt: 'p', tools: ['finish'] } }, 'main')
+		const llm = new FakeLlm()
+		llm.responses = [success([{ id: 'f1', type: 'function', function: { name: 'finish', arguments: JSON.stringify({ status: 'success', summary: 'never called' }) } }])]
+		const persistence = makeFakePersistence()
+		const deps = makeDeps(llm, persistence, guild)
+		const pause = { message: 'The operator paused this run.', pausedAt: '2026-01-01T00:05:00.000Z' }
+		deps.operatorPauseQueue.request(pause)
+		await runExecutor(deps, { runId: 'r-paused-resume', guildPath: '/guild', task: 'do it', effort: 'standard', involvement: 'early-engagement' })
+		const checkpoint = defined(persistence.state.checkpoints[persistence.state.checkpoints.length - 1], 'pause checkpoint')
+		expect(checkpoint.pause).toEqual(pause)
+
+		let deletedMarkers = 0
+		deps.deletePauseRequest = () => {
+			deletedMarkers++
+		}
+		llm.responses = [success([{ id: 'f2', type: 'function', function: { name: 'finish', arguments: JSON.stringify({ status: 'success', summary: 'resumed' }) } }])]
+		const meta = await resumeExecutor(deps, checkpoint, { guildPath: '/guild', operatorNote: 'The operator resumed this paused run. Message from the operator: carry on' })
+
+		expect(meta.status).toBe('success')
+		expect(meta.pause).toBeUndefined()
+		expect(meta.suspension).toBeUndefined()
+		expect(llm.calls).toBe(1)
+		expect(persistence.state.metas.filter((written) => written.status === 'running' && (written.pause !== undefined || written.suspension !== undefined))).toHaveLength(0)
+		expect(persistence.state.checkpoints.at(-1)?.pause).toBeUndefined()
+		expect(deletedMarkers).toBe(1)
 	})
 
 	test('a re-suspension carries the prior auto-resume attempt count forward', async () => {

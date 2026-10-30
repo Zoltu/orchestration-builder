@@ -24,6 +24,7 @@ export type TaskSystemKind =
 	| 'pause'
 	| 'resume'
 	| 'suspension'
+	| 'operator_pause'
 	| 'failure'
 	| 'termination'
 	| 'notice'
@@ -147,7 +148,7 @@ const TASK_THREAD_ENTRY_KINDS: readonly TaskThreadEntryKind[] = [
 
 const TASK_THREAD_ACTORS: readonly TaskThreadActor[] = ['human', 'orchestrator', 'system']
 const TASK_THREAD_ENTRY_SOURCES: readonly TaskThreadEntrySource[] = ['log', 'meta', 'queue']
-const TASK_SYSTEM_KINDS: readonly TaskSystemKind[] = ['pause', 'resume', 'suspension', 'failure', 'termination', 'notice']
+const TASK_SYSTEM_KINDS: readonly TaskSystemKind[] = ['pause', 'resume', 'suspension', 'operator_pause', 'failure', 'termination', 'notice']
 const TASK_THREAD_OUTCOMES: readonly TaskThreadOutcome[] = ['answered', 'waiting', 'failed', 'dropped']
 const TASK_LINEAGE_TRUNCATED_REASONS: readonly TaskLineageTruncatedReason[] = ['missing_parent', 'malformed_parent', 'cycle', 'depth']
 const TASK_IDENTITY_STATUSES: readonly TaskIdentityStatus[] = ['running', 'suspended', 'success', 'error', 'needs_clarification', 'interrupted', 'unknown']

@@ -10,6 +10,8 @@ import { createPollFetcher } from './poll-fetch.js'
 import { createLabelResolver, isLabelTier, isRoleOrder, TIER_VALUES } from './labels.js'
 import { buildInfoFromConfig, formatBuildLabel } from './build-info.js'
 import { isLiveStatus, isSettledForPolling, isSuspendedStatus, isTerminalStatus, secondsBetweenIso, withLiveElapsed } from './interaction-model.js'
+import { derivePauseTargetRunId, deriveRunPauseKind, deriveSuspendedStatusLabel, pauseFailureCopy, resolvePausePendingRunId } from './run-pause.js'
+import type { RunPauseKind } from './run-pause.js'
 import { planSameRunView } from './run-selection.js'
 import { deriveFaviconState, faviconHref } from './favicon.js'
 import { createTooltipDismiss, deriveTooltipDescriptor, isInFlightAskHuman, resolveInspectorScope, resolveTooltipTarget } from './inspector.js'
@@ -39,8 +41,8 @@ import { responseBelongsToSelection } from './stale-response.js'
 import { createStreamClient } from './stream-client.js'
 import { nextLivePartial } from './live-partial.js'
 import { LoadingIndicator } from './loading-indicator.js'
-import { backlogCount, deriveReorderPosition, isQueueItemLike, matchesParkedRun, queueItemPrimaryText, queueStatusLabel, reorderWaitingItems } from './queue-panel.js'
-import type { InteractionModel, Participant, RunStatus, SuspensionRecord } from './interaction-model.js'
+import { backlogCount, deriveReorderPosition, isQueueItemLike, matchesParkedRun, queueItemPrimaryText, queueRowPauseKind, queueStatusLabel, reorderWaitingItems } from './queue-panel.js'
+import type { InteractionModel, OperatorPauseRecord, Participant, RunStatus, SuspensionRecord } from './interaction-model.js'
 import type { FlowFeedState } from './flow-feed/index.js'
 import type { HealthView, RunListFeedState, RunResultCard, RunSummary } from './run-list-feed/index.js'
 import type { LabelConfig, LabelResolver, LabelTier } from './labels.js'
@@ -96,6 +98,8 @@ export interface RunView {
 	error?: unknown
 	// Present only while the run is suspended; the pause card renders its category copy and suspendedAt, never a result card.
 	suspension: SuspensionRecord | null
+	// Present only while the run is operator-paused; the pause card renders fixed operator-pause copy and pausedAt instead of provider copy, never the stored pause.message.
+	pause: OperatorPauseRecord | null
 	// The coarse provider health snapshot carried by the run view; the banner may read it without a separate health poll.
 	providerHealth: HealthView | null
 	continuesFrom: string | null
@@ -269,6 +273,9 @@ export interface ApplicationState {
 	suspendedModalOpen: boolean
 	suspendedActionNotice: string | null
 	resumeRunPendingId: string | null
+	// The run whose pause request has been accepted but not yet observed as suspended, so the top bar can show its pending state and refuse repeat clicks. pauseRequestNotice is the compact refusal shown beside it.
+	pauseRequestPendingRunId: string | null
+	pauseRequestNotice: string | null
 	// The on-demand result load for the selected run: null when the modal renders a terminal descriptor, otherwise the phase of the summary fallback's full-view fetch.
 	resultLoad: ResultLoadState | null
 	interruptModalOpen: boolean
@@ -537,6 +544,35 @@ const renderMarkdown = createMarkdownRenderer(h, { maxEntries: 256, maxCharacter
 function deriveActiveRunId(summaries: RunSummary[]): string | null {
 	const active = summaries.find((summary) => isLiveStatus(summary.status) || summary.status === 'unknown')
 	return active === undefined ? null : active.runId
+}
+
+// The selected run's pause kind prefers the fresher run-list summary and falls back to the held run view, so the top bar labels a pause before and after the richer view lands.
+function deriveSelectedRunPauseKind(state: ApplicationState): RunPauseKind {
+	const summary = state.summaries.find((entry) => entry.runId === state.selectedRunId)
+	const summaryKind = deriveRunPauseKind(summary)
+	if (summaryKind !== 'none') return summaryKind
+	if (state.selectedRunView?.runId !== state.selectedRunId) return 'none'
+	return deriveRunPauseKind(state.selectedRunView)
+}
+
+function deriveSelectedRunStatus(state: ApplicationState): RunStatus | null {
+	const summary = state.summaries.find((entry) => entry.runId === state.selectedRunId)
+	// The run list is what ends a pause request's pending state, so its suspended status outranks a still-running held view for this label.
+	if (summary !== undefined && isSuspendedStatus(summary.status)) return 'suspended'
+	if (state.selectedRunStatus !== null) return state.selectedRunStatus
+	return summary === undefined ? null : summary.status
+}
+
+// A suspended row or pill reads Paused only for an operator pause; provider suspensions keep Suspended.
+function deriveRunLabel(run: { status: unknown; pause?: unknown; suspension?: unknown }): string {
+	const status = typeof run.status === 'string' ? run.status : null
+	const suspendedLabel = deriveSuspendedStatusLabel(status, deriveRunPauseKind(run))
+	return suspendedLabel ?? statusLabel(status)
+}
+
+function derivePauseEligibility(state: ApplicationState): { runId: string | null; pending: boolean } {
+	const pending = state.pauseRequestPendingRunId !== null
+	return { runId: derivePauseTargetRunId(state.summaries, state.pauseRequestPendingRunId), pending }
 }
 
 // The one prompt the selected run is currently waiting on, from the same derivation every surface reads.
@@ -901,6 +937,7 @@ function GotRunList(state: ApplicationState, payload: FetchResultPayload): Actio
 		if (nextState.justSubmittedRunId !== null && result.summaries.some((summary) => summary.runId === nextState.justSubmittedRunId)) {
 			nextState.justSubmittedRunId = null
 		}
+		nextState.pauseRequestPendingRunId = resolvePausePendingRunId(state.pauseRequestPendingRunId, result.summaries)
 		// Auto-select the newest run when nothing is selected so the user lands on live activity.
 		let autoSelectedRunId: string | null = null
 		if (nextState.selectedRunId === null && result.summaries.length > 0) {
@@ -998,6 +1035,10 @@ function GotSelectedRun(curriedRunId: string) {
 		const runId = typeof body.runId === 'string' ? body.runId : state.selectedRunId
 		const resultModalOpen = isCompletionTransition && state.resultShownForRun !== runId ? true : state.resultModalOpen
 		const resultShownForRun = isCompletionTransition ? runId : state.resultShownForRun
+		// An operator pause that lands while this run is being watched opens the pause card immediately; selecting an already-paused historical run leaves it one click away.
+		const isOperatorPauseTransition = deriveRunPauseKind(body) === 'operator' && (previousStatus === 'running' || previousStatus === 'unknown')
+		const suspendedModalOpen = isOperatorPauseTransition ? true : state.suspendedModalOpen
+		const pauseRequestPendingRunId = state.pauseRequestPendingRunId === body.runId && body.status === 'suspended' ? null : state.pauseRequestPendingRunId
 		const interrupts = Array.isArray(body.interrupts) ? body.interrupts : []
 		const shownInterruptAnswerKeys = { ...state.shownInterruptAnswerKeys }
 		let interruptAnswerCard = state.interruptAnswerCard
@@ -1012,7 +1053,7 @@ function GotSelectedRun(curriedRunId: string) {
 		}
 		// A completion transition resets the inspector's scope to auto, so the next open lands on the most recently active instance (here, the finishing one) instead of whatever the operator had scoped to during the run.
 		if (isCompletionTransition) inspectorSession.scope(null)
-		const selectedState: ApplicationState = { ...state, selectedRunView: body, selectedRunStatus: body.status, resultModalOpen, resultShownForRun, interruptAnswerCard, shownInterruptAnswerKeys, serverAvailable: true, providerHealth: body.providerHealth ?? state.providerHealth, livePartial: isSettledForPolling(body.status) ? null : state.livePartial, versions: recordVersion(state.versions, payload) }
+		const selectedState: ApplicationState = { ...state, selectedRunView: body, selectedRunStatus: body.status, resultModalOpen, resultShownForRun, suspendedModalOpen, suspendedActionNotice: isOperatorPauseTransition ? null : state.suspendedActionNotice, pauseRequestPendingRunId, interruptAnswerCard, shownInterruptAnswerKeys, serverAvailable: true, providerHealth: body.providerHealth ?? state.providerHealth, livePartial: isSettledForPolling(body.status) ? null : state.livePartial, versions: recordVersion(state.versions, payload) }
 		return withTaskThreadRefreshResult([selectedState, SyncSequenceFollower()])
 	}
 }
@@ -1048,6 +1089,48 @@ function GotQuestions(state: ApplicationState, payload: FetchResultPayload): Act
 
 function FetchFailed(state: ApplicationState): ApplicationState {
 	return { ...state, serverAvailable: false }
+}
+
+// --- Operator pause ----------------------------------------------------------
+// The pause request lands at the run's next safe turn boundary, so the accepted response only starts the pending state; the run list or the run view ends it when the pause is actually visible.
+
+function RequestPause(state: ApplicationState): ActionReturn {
+	const eligibility = derivePauseEligibility(state)
+	if (eligibility.runId === null) return state
+	const runId = eligibility.runId
+	return [
+		{ ...state, pauseRequestPendingRunId: runId, pauseRequestNotice: null },
+		Fetch({
+			url: `api/runs/${encodeURIComponent(runId)}/pause`,
+			init: { method: 'POST' },
+			ok: GotPauseRequest(runId),
+			fail: PauseRequestFailed(runId),
+		}),
+	]
+}
+
+function GotPauseRequest(runId: string) {
+	return function GotPauseRequestForRun(state: ApplicationState, payload: FetchResultPayload): ActionReturn {
+		if (state.pauseRequestPendingRunId !== runId) return state
+		if (!payload.ok) {
+			return { ...state, pauseRequestPendingRunId: null, pauseRequestNotice: pauseFailureCopy(payload.body, payload.status), serverAvailable: true }
+		}
+		return [
+			{ ...state, serverAvailable: true },
+			Fetch({ url: 'api/runs', init: { cache: 'no-store' }, ok: GotRunList, fail: FetchFailed }),
+		]
+	}
+}
+
+function PauseRequestFailed(runId: string) {
+	return function PauseRequestFailedForRun(state: ApplicationState): ApplicationState {
+		if (state.pauseRequestPendingRunId !== runId) return state
+		return { ...state, pauseRequestPendingRunId: null, pauseRequestNotice: 'The server could not be reached, so the pause request was not sent.', serverAvailable: false }
+	}
+}
+
+function DismissPauseRequestNotice(state: ApplicationState): ApplicationState {
+	return state.pauseRequestNotice === null ? state : { ...state, pauseRequestNotice: null }
 }
 
 // --- Queue panel actions -----------------------------------------------------
@@ -1292,12 +1375,24 @@ function TerminateQueueFailed(promptKey: string | null) {
 	}
 }
 
+// The pause kind for a run the operator acts on, preferring the queue item's projected pause record so a queue-row action names the pause before the run-list poll catches up, then the fresher run-list summary, then the held run view.
+function pauseKindForRun(state: ApplicationState, runId: string): RunPauseKind {
+	const summary = state.summaries.find((candidate) => candidate.runId === runId)
+	const queueItem = state.queueItems.find((candidate) => candidate.runId === runId && candidate.status === 'suspended')
+	const queueKind = queueItem === undefined ? 'none' : queueRowPauseKind(queueItem, summary)
+	if (queueKind !== 'none') return queueKind
+	if (summary !== undefined) return deriveRunPauseKind(summary)
+	if (state.selectedRunView?.runId === runId) return deriveRunPauseKind(state.selectedRunView)
+	return 'none'
+}
+
 // The pause card's and history row's Terminate run action addresses the run itself, so it still works when the suspended item was lost; a queue row passes its item id and keeps the queue-native path. The host confirms because termination discards the saved checkpoint. A typed refusal lands in suspendedActionNotice and both polls refresh the stale state.
 function TerminateSuspendedRun(runId: string, itemId: string | null = null) {
 	return function TerminateSuspendedRunAction(state: ApplicationState, event: Event): ActionReturn {
 		event.stopPropagation()
 		if (state.queueTerminatePendingId !== null || state.resumeRunPendingId !== null) return state
-		if (!window.confirm('Terminate this suspended run? Its saved context will be discarded.')) return state
+		const pauseLabel = pauseKindForRun(state, runId) === 'operator' ? 'paused' : 'suspended'
+		if (!window.confirm(`Terminate this ${pauseLabel} run? Its saved context will be discarded.`)) return state
 		const target = suspendedTerminateTarget(runId, itemId)
 		return [
 			{ ...state, queueTerminatePendingId: target.pendingId, suspendedActionNotice: null },
@@ -2852,7 +2947,10 @@ function StatusPills(state: ApplicationState): Vnode[] {
 		const message = state.summaries.length === 0 ? 'idle' : 'no run selected'
 		return [h('span', { class: 'status-pill' }, message)]
 	}
-	const pills = [h('span', { class: `status-pill status-pill-${state.selectedRunStatus ?? 'unknown'}` }, statusLabel(state.selectedRunStatus))]
+	const selectedStatus = deriveSelectedRunStatus(state)
+	const selectedPauseKind = deriveSelectedRunPauseKind(state)
+	const selectedLabel = deriveSuspendedStatusLabel(selectedStatus, selectedPauseKind) ?? statusLabel(selectedStatus)
+	const pills = [h('span', { class: `status-pill status-pill-${selectedStatus ?? 'unknown'}` }, selectedLabel)]
 	if (activeRunId !== null && activeRunId !== state.selectedRunId) {
 		pills.push(h('span', { class: 'status-pill status-pill-live status-pill-clickable', onclick: [SelectRun, activeRunId] }, 'a run is in progress — view'))
 	}
@@ -2883,9 +2981,21 @@ function BuildLabel(build: BuildInfo | null): Vnode | null {
 
 function TopBar(state: ApplicationState): Vnode {
 	const backlog = backlogCount(state.queueItems)
+	const pauseEligibility = derivePauseEligibility(state)
+	const showPause = pauseEligibility.runId !== null || pauseEligibility.pending
+	const pauseNotice = state.pauseRequestNotice
 	return h('header', { class: 'topbar' }, [
 		h('span', { class: 'topbar-wordmark' }, 'Adaptive Orchestrator'),
 		...StatusPills(state),
+		showPause
+			? h('button', { type: 'button', class: 'nav-button topbar-pause-button', disabled: pauseEligibility.pending, title: pauseEligibility.pending ? 'The pause request lands at the next safe turn boundary' : 'Pause the running run at its next safe turn boundary', onclick: RequestPause }, pauseEligibility.pending ? 'Pause requested…' : 'Pause')
+			: null,
+		pauseNotice !== null
+			? h('span', { class: 'status-pill status-pill-warn', role: 'alert' }, [
+				pauseNotice,
+				h('button', { type: 'button', class: 'status-pill-dismiss', title: 'Dismiss this notice', onclick: DismissPauseRequestNotice }, 'Dismiss'),
+			])
+			: null,
 		state.flowRefreshPending && state.screen === 'watch'
 			? h('span', { class: 'status-pill status-pill-refreshing' }, [LoadingIndicator(h, 'Refreshing run view…')])
 			: null,
@@ -2909,7 +3019,9 @@ function TopBar(state: ApplicationState): Vnode {
 // The persistent provider-health banner rides the run-list feed's health singleton, so it appears above every screen without a second poll. The derivation renders fixed copy only; no provider endpoint, credential, model, header, request, or body reaches the DOM.
 function ProviderHealthBannerForState(state: ApplicationState): Vnode | null {
 	const health = state.providerHealth ?? (state.selectedRunView === null ? null : state.selectedRunView.providerHealth)
-	const descriptor = deriveHealthBanner(health)
+	// Only the currently watched run's operator pause suppresses the banner; a paused run elsewhere in history must not hide a genuine provider outage.
+	const operatorPaused = deriveSelectedRunPauseKind(state) === 'operator'
+	const descriptor = deriveHealthBanner(health, operatorPaused)
 	if (descriptor === null) return null
 	return HealthBanner(h, { descriptor })
 }
@@ -2956,10 +3068,11 @@ function HistoryRow(state: ApplicationState, summary: RunSummary, rerunDisabled:
 	const link = lineageLink(summary.continuesFrom, summariesById)
 	const canContinue = resultOffersContinue(summary.status)
 	const suspended = isSuspendedStatus(summary.status)
+	const operatorPaused = deriveRunPauseKind(summary) === 'operator'
 	const resumePending = state.resumeRunPendingId !== null
 	const terminatePending = state.queueTerminatePendingId !== null
 	const rowChildren: (Vnode | null)[] = [
-		h('span', { class: `run-status run-status-${summary.status ?? 'unknown'}` }, statusLabel(summary.status)),
+		h('span', { class: `run-status run-status-${summary.status ?? 'unknown'}` }, deriveRunLabel(summary)),
 		h('span', { class: 'history-primary' }, runPrimaryLabel(summary)),
 		link === null ? null : LineageBadge(link),
 		isEffort(summary.effort)
@@ -2972,15 +3085,16 @@ function HistoryRow(state: ApplicationState, summary: RunSummary, rerunDisabled:
 	]
 	if (suspended) {
 		// A suspended row has a resume/terminate path, not a re-run or continuation path. Terminate is confirmed by its action because it discards the checkpoint.
-		rowChildren.push(h('button', { type: 'button', class: 'suspended-resume-button', 'data-run-id': summary.runId, disabled: resumePending || terminatePending, title: 'Resume this suspended run from its saved checkpoint', onclick: ResumeSuspendedRunNow(summary.runId) }, resumePending ? 'Resuming…' : 'Resume'))
-		rowChildren.push(h('button', { type: 'button', class: 'suspended-terminate-button', 'data-run-id': summary.runId, disabled: terminatePending || resumePending, title: 'Terminate this run and discard its saved context', onclick: TerminateSuspendedRun(summary.runId) }, 'Terminate'))
+		const resumeTitle = operatorPaused ? 'Resume this paused run from its saved checkpoint' : 'Resume this suspended run from its saved checkpoint'
+		rowChildren.push(h('button', { type: 'button', class: 'suspended-resume-button', 'data-run-id': summary.runId, disabled: resumePending || terminatePending, title: resumeTitle, onclick: ResumeSuspendedRunNow(summary.runId) }, resumePending ? 'Resuming…' : 'Resume'))
+		rowChildren.push(h('button', { type: 'button', class: 'suspended-terminate-button', 'data-run-id': summary.runId, disabled: terminatePending || resumePending, title: `Terminate this ${operatorPaused ? 'paused' : 'suspended'} run and discard its saved context`, onclick: TerminateSuspendedRun(summary.runId) }, 'Terminate'))
 	} else {
 		// The re-run button shares the create form's disabled condition (a run is active or a submission is in flight) so the one-task-at-a-time contract holds identically for re-runs.
 		rowChildren.push(h('button', { type: 'button', class: 'rerun-button', 'data-task': summary.task ?? '', disabled: rerunDisabled || typeof summary.task !== 'string' || summary.task === '', onclick: RerunTask }, 're-run'))
 		// Continue is for a finished outcome only; a needs_clarification run is paused and awaits an answer rather than being continued as a new task.
 		if (canContinue) rowChildren.push(h('button', { type: 'button', class: 'continue-button', 'data-run-id': summary.runId, disabled: rerunDisabled, title: 'Start a new run continuing this one', onclick: ContinueRun }, 'Continue'))
 	}
-	return h('li', { key: summary.runId, class: { 'history-row': true, 'is-expanded': expanded, 'is-selected': summary.runId === state.selectedRunId, 'is-suspended': suspended } }, [
+	return h('li', { key: summary.runId, class: { 'history-row': true, 'is-expanded': expanded, 'is-selected': summary.runId === state.selectedRunId, 'is-suspended': suspended, 'is-paused': operatorPaused } }, [
 		h('div', { class: 'history-row-title' }, [
 			h('div', { class: 'history-row-main', onclick: [SelectRun, summary.runId], title: 'Watch this run' }, rowChildren),
 			h('button', { type: 'button', class: 'history-expand', 'aria-expanded': expanded, title: expanded ? 'Hide details' : 'Show the full task and result', onclick: [ToggleRowExpanded, summary.runId] }, expanded ? 'less ▴' : 'details ▾'),
@@ -3005,9 +3119,10 @@ function HistoryRowDetails(summary: RunSummary, summariesById: Map<string, RunSu
 	}
 	const suspension = deriveSuspendedCard(summary)
 	if (suspension !== undefined) {
-		children.push(h('p', { class: 'history-details-heading' }, 'Suspended'))
+		const pauseLabel = suspension.kind === 'operator' ? 'Paused' : 'Suspended'
+		children.push(h('p', { class: 'history-details-heading' }, pauseLabel))
 		children.push(h('p', { class: 'history-details-suspension' }, suspension.cause))
-		children.push(h('p', { class: 'history-details-suspension-time' }, `Suspended since ${suspension.suspendedAt}`))
+		children.push(h('p', { class: 'history-details-suspension-time' }, `${pauseLabel} since ${suspension.suspendedAt}`))
 	}
 	const resultSummary = summary.result !== null && summary.result !== undefined && typeof summary.result.summary === 'string' && summary.result.summary !== '' ? summary.result.summary : null
 	if (resultSummary !== null) {
@@ -3086,9 +3201,18 @@ function QueueItemRowDetails(state: ApplicationState, item: QueueItemLike, summa
 	if (item.status === 'waiting' && typeof item.answer === 'string' && item.answer !== '') {
 		children.push(h('p', { class: 'queue-item-answer' }, `Your earlier answer: ${item.answer}`))
 	}
-	if (item.status === 'suspended' && typeof item.suspendedAt === 'string' && item.suspendedAt !== '') {
-		children.push(h('p', { class: 'history-details-heading' }, 'Suspended'))
-		children.push(h('p', { class: 'history-details-suspension-time' }, `Suspended since ${item.suspendedAt}`))
+	if (item.status === 'suspended') {
+		const summary = typeof item.runId === 'string' && item.runId !== '' ? summariesById.get(item.runId) : undefined
+		const descriptor = deriveSuspendedCard(item) ?? (summary === undefined ? undefined : deriveSuspendedCard(summary))
+		if (descriptor !== undefined) {
+			const pauseLabel = descriptor.kind === 'operator' ? 'Paused' : 'Suspended'
+			children.push(h('p', { class: 'history-details-heading' }, pauseLabel))
+			children.push(h('p', { class: 'history-details-suspension' }, descriptor.cause))
+			children.push(h('p', { class: 'history-details-suspension-time' }, `${pauseLabel} since ${descriptor.suspendedAt}`))
+		} else if (typeof item.suspendedAt === 'string' && item.suspendedAt !== '') {
+			children.push(h('p', { class: 'history-details-heading' }, 'Suspended'))
+			children.push(h('p', { class: 'history-details-suspension-time' }, `Suspended since ${item.suspendedAt}`))
+		}
 	}
 	if (typeof item.error === 'string' && item.error !== '') {
 		children.push(h('p', { class: 'history-details-heading' }, 'Error'))
@@ -3107,9 +3231,12 @@ function QueueItemRow(state: ApplicationState, item: QueueItemLike, summariesByI
 	const expanded = state.expandedRowIds[item.id] === true
 	const link = queueItemLineageLink(item, summariesById)
 	const runId = typeof item.runId === 'string' && item.runId !== '' ? item.runId : null
+	const summary = runId === null ? undefined : summariesById.get(runId)
+	const pauseKind = queueRowPauseKind(item, summary)
+	const operatorPaused = pauseKind === 'operator'
 	const mainOnclick = needsInput ? [OpenQueueQuestion, item.id] : (active || suspended) && runId !== null ? [SelectRun, runId] : undefined
 	const mainChildren: (Vnode | null)[] = [
-		h('span', { class: `run-status queue-status-${item.status}` }, queueStatusLabel(item.status)),
+		h('span', { class: `run-status queue-status-${item.status}` }, queueStatusLabel(item.status, pauseKind)),
 		h('span', { class: 'history-primary' }, queueItemPrimaryText(item)),
 		link === null ? null : LineageBadge(link),
 		h('time', { class: 'history-when', title: item.queuedAt }, `queued ${formatRelative(item.queuedAt, state.now)}`),
@@ -3124,8 +3251,9 @@ function QueueItemRow(state: ApplicationState, item: QueueItemLike, summariesByI
 	if (suspended && runId !== null) {
 		const resumePending = state.resumeRunPendingId !== null
 		const terminatePending = state.queueTerminatePendingId !== null
-		mainChildren.push(h('button', { type: 'button', class: 'suspended-resume-button', 'data-run-id': runId, disabled: resumePending || terminatePending, title: 'Resume this suspended run from its saved checkpoint', onclick: ResumeSuspendedRunNow(runId) }, resumePending ? 'Resuming…' : 'Resume'))
-		mainChildren.push(h('button', { type: 'button', class: 'suspended-terminate-button', 'data-run-id': runId, disabled: terminatePending || resumePending, title: 'Terminate this run and discard its saved context', onclick: TerminateSuspendedRun(runId, item.id) }, 'Terminate'))
+		const resumeTitle = operatorPaused ? 'Resume this paused run from its saved checkpoint' : 'Resume this suspended run from its saved checkpoint'
+		mainChildren.push(h('button', { type: 'button', class: 'suspended-resume-button', 'data-run-id': runId, disabled: resumePending || terminatePending, title: resumeTitle, onclick: ResumeSuspendedRunNow(runId) }, resumePending ? 'Resuming…' : 'Resume'))
+		mainChildren.push(h('button', { type: 'button', class: 'suspended-terminate-button', 'data-run-id': runId, disabled: terminatePending || resumePending, title: `Terminate this ${operatorPaused ? 'paused' : 'suspended'} run and discard its saved context`, onclick: TerminateSuspendedRun(runId, item.id) }, 'Terminate'))
 	}
 	const children: Vnode[] = [
 		h('div', { class: 'history-row-title' }, [
@@ -3136,7 +3264,7 @@ function QueueItemRow(state: ApplicationState, item: QueueItemLike, summariesByI
 	if (expanded) children.push(QueueItemRowDetails(state, item, summariesById))
 	return h('li', {
 		key: item.id,
-		class: { 'history-row': true, 'queue-row': true, 'is-waiting': waiting, 'is-active': active, 'is-suspended': suspended, 'is-needs-input': needsInput, 'is-dragging': state.draggingItemId === item.id },
+		class: { 'history-row': true, 'queue-row': true, 'is-waiting': waiting, 'is-active': active, 'is-suspended': suspended, 'is-paused': operatorPaused, 'is-needs-input': needsInput, 'is-dragging': state.draggingItemId === item.id },
 		// Only waiting rows drag: a drag is a reorder, and the reorder endpoint takes waiting items only.
 		draggable: waiting && !editing,
 		'data-item-id': item.id,
@@ -3547,15 +3675,16 @@ function WatchScreen(state: ApplicationState): Vnode {
 				h('div', { key: 'watch-flow', class: 'pb-flow flow-stage' }, [h('p', { class: 'flow-empty' }, unavailable), InspectorModalForRun(state)]),
 			])
 		}
-		const selectedStatus = state.selectedRunStatus
+		const selectedStatus = deriveSelectedRunStatus(state)
 		if (selectedStatus !== null && isSuspendedStatus(selectedStatus)) {
+			const operatorPaused = deriveSelectedRunPauseKind(state) === 'operator'
 			return h('section', { id: 'watch-screen' }, [
 				TaskIdentityHeaderForRun(state),
 				StageControls(state, null),
 				h('div', { key: 'watch-flow', class: 'pb-flow flow-stage' }, [
 					h('div', { class: 'flow-empty' }, [
-						h('p', {}, 'This run is suspended.'),
-						h('button', { type: 'button', class: 'suspended-open-button', onclick: OpenSuspendedModal }, 'View suspension'),
+						h('p', {}, operatorPaused ? 'This run is paused by the operator. The model is idle until you resume it.' : 'This run is suspended.'),
+						h('button', { type: 'button', class: 'suspended-open-button', onclick: OpenSuspendedModal }, operatorPaused ? 'View pause' : 'View suspension'),
 					]),
 					SuspendedCardForRun(state),
 					InspectorModalForRun(state),
@@ -3806,7 +3935,7 @@ function isApplicationState(value: unknown): value is ApplicationState {
 		'flowModel', 'previousFlowModel', 'flowFeed', 'runListFeed', 'runListLoaded', 'queueLoaded', 'labelResolver', 'guildParticipants', 'build',
 		'flowTier', 'flowViewMode', 'sequenceRolesOnly', 'screen', 'pageVisible', 'flowRefreshPending', 'expandedRowIds', 'continuation',
 		'resumingRunId', 'resumeSending', 'resumeNotice',
-		'questionPromptOpenKey', 'questionPromptSuppressedKeys', 'resultModalOpen', 'resultShownForRun', 'suspendedModalOpen', 'suspendedActionNotice', 'resumeRunPendingId', 'resultLoad', 'interruptModalOpen',
+		'questionPromptOpenKey', 'questionPromptSuppressedKeys', 'resultModalOpen', 'resultShownForRun', 'suspendedModalOpen', 'suspendedActionNotice', 'resumeRunPendingId', 'pauseRequestPendingRunId', 'pauseRequestNotice', 'resultLoad', 'interruptModalOpen',
 		'inspectorModalOpen', 'planExpanded', 'taskThread', 'taskThreadLoad', 'taskThreadDrawerOpen', 'taskThreadRequestToken', 'taskThreadSignal', 'taskThreadRefreshScheduled', 'taskThreadTransientRetries', 'taskThreadSummaryRequestToken', 'taskThreadSummaryTriggerKey', 'taskThreadSummaryFailedKey', 'taskThreadSummaryRetryAt', 'taskThreadSummaryPendingKey', 'taskThreadSummaryRefetchCount', 'taskThreadSummaryPending', 'taskThreadSummaryRequestFailed', 'taskThreadSummaryAutoRetryKey', 'taskThreadSummaryAutoRetryCount', 'livePartial', 'streamConnected', 'streamWasConnectedOnce', 'tooltip',
 		'interruptMode', 'interruptSending', 'interruptNotice', 'interruptAnswerCard', 'shownInterruptAnswerKeys', 'now',
 	]
@@ -3878,6 +4007,8 @@ app({
 			suspendedModalOpen: false,
 			suspendedActionNotice: null,
 			resumeRunPendingId: null,
+			pauseRequestPendingRunId: null,
+			pauseRequestNotice: null,
 			resultLoad: null,
 			interruptModalOpen: false,
 			inspectorModalOpen: false,

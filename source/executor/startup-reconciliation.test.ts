@@ -5,6 +5,7 @@ import type { ListRunIds, ReadRunCheckpointById, ReadRunMetaTextById, WriteMeta 
 import { reconcileRunsOnStartup, type StartupReconciliationDependencies } from './startup-reconciliation.ts'
 import type { VersionStatus } from './orchestration-version.ts'
 import type { RunMeta } from './types.ts'
+import type { PauseIntent } from './operator-pause.ts'
 import { defined } from './test-fixtures.ts'
 
 function runningMeta(runId: string, startTime: string): RunMeta {
@@ -86,6 +87,71 @@ function suspendedCheckpointFor(runId: string, policy: 'auto' | 'operator', atte
 	return checkpoint
 }
 
+function operatorSuspendedMeta(runId: string): RunMeta {
+	return {
+		runId,
+		guildPath: 'guild',
+		benchmarkPath: 'bench',
+		task: `task for ${runId}`,
+		status: 'suspended',
+		pause: { message: 'The operator paused this run.', pausedAt: '2026-01-01T00:00:00.000Z' },
+		startTime: '2026-01-01T00:00:00.000Z',
+	}
+}
+
+function checkpointWithPendingChildFor(runId: string, startTime: string): RunCheckpoint {
+	const checkpoint = checkpointFor(runId, startTime)
+	const parent = checkpoint.frames[0]
+	if (parent === undefined) throw new Error('checkpoint has no entry frame')
+	return {
+		...checkpoint,
+		frames: [
+			{
+				...parent,
+				roleId: 'orchestrator-0-1',
+				roleName: 'orchestrator',
+				pending: {
+					toolCalls: [{ id: 'agent_1', type: 'function', function: { name: 'agent', arguments: '{"role":"coder","task":"subtask"}' } }],
+					index: 0,
+					callId: 'tool:agent_1',
+					parentCallId: 'role:orchestrator-0-1',
+				},
+			},
+			{
+				roleId: 'coder-0-2',
+				roleName: 'coder',
+				depth: 1,
+				task: 'subtask',
+				parent: 'orchestrator',
+				parentRoleId: 'orchestrator-0-1',
+				roleState: {
+					protectedPrefixLength: 2,
+					history: [
+						{ role: 'system', content: 'coder prompt' },
+						{ role: 'user', content: 'subtask' },
+						{ role: 'assistant', content: '', tool_calls: [{ id: 'e1', type: 'function', function: { name: 'echo', arguments: '{"id":"e1"}' } }] },
+						{ role: 'tool', content: '{"id":"e1"}', tool_call_id: 'e1' },
+					],
+					lastPromptTokens: 10,
+					recentCompactionPromptTokens: [],
+					recentToolCalls: [],
+					toolCallCount: 1,
+					generatedTokens: 5,
+					contextExceededAttempts: 0,
+					loopCheckToolCallWatermark: 0,
+					loopCheckTokenWatermark: 0,
+				},
+			},
+		],
+	}
+}
+
+function pausedCheckpointFor(runId: string, startTime: string): RunCheckpoint {
+	const checkpoint = checkpointFor(runId, startTime)
+	checkpoint.pause = { message: 'The operator paused this run.', pausedAt: '2026-01-01T00:02:00.000Z' }
+	return checkpoint
+}
+
 function parkedCheckpointFor(runId: string, startTime: string): RunCheckpoint {
 	const checkpoint = checkpointFor(runId, startTime)
 	const entry = checkpoint.frames[0]
@@ -115,13 +181,16 @@ interface Harness {
 	resumed: RunCheckpoint[]
 	writtenMetas: Map<string, RunMeta[]>
 	checkpointReads: string[]
+	deletedPauseRequests: string[]
+	runs: () => Record<string, { pauseRequest?: PauseIntent | null | undefined }>
 }
 
 // All leaves are in-memory fakes keyed by run id: metas and checkpoints are raw file text (or absent), and writeMetaFor records per run.
-function makeHarness(runs: Record<string, { metaText?: string | undefined; checkpointText?: string | undefined; format?: VersionStatus }>): Harness {
+function makeHarness(runs: Record<string, { metaText?: string | undefined; checkpointText?: string | undefined; format?: VersionStatus; pauseRequest?: PauseIntent | null | undefined }>): Harness {
 	const resumed: RunCheckpoint[] = []
 	const writtenMetas = new Map<string, RunMeta[]>()
 	const checkpointReads: string[] = []
+	const deletedPauseRequests: string[] = []
 	const listRunIds: ListRunIds = () => Object.keys(runs)
 	const readRunMetaTextById: ReadRunMetaTextById = (runId) => runs[runId]?.metaText ?? null
 	const readCheckpointById: ReadRunCheckpointById = (runId) => {
@@ -141,12 +210,18 @@ function makeHarness(runs: Record<string, { metaText?: string | undefined; check
 		readRunMetaTextById,
 		readCheckpointById,
 		readRunFormat,
+		readPauseRequestById: (runId) => runs[runId]?.pauseRequest ?? null,
+		deletePauseRequest: (runId) => {
+			deletedPauseRequests.push(runId)
+			const run = runs[runId]
+			if (run !== undefined) delete run.pauseRequest
+		},
 		writeMetaFor,
 		resume: (checkpoint) => {
 			resumed.push(checkpoint)
 		},
 	}
-	return { dependencies, resumed, writtenMetas, checkpointReads }
+	return { dependencies, resumed, writtenMetas, checkpointReads, deletedPauseRequests, runs: () => runs }
 }
 
 describe('reconcileRunsOnStartup', () => {
@@ -162,10 +237,11 @@ describe('reconcileRunsOnStartup', () => {
 	})
 
 	test.each(['billing', 'auth', 'request_rejected'] as const)('a running meta whose checkpoint carries an operator %s suspension is materialized as suspended', (category) => {
-		const checkpoint = suspendedCheckpointFor('run-1', 'operator', 2, category)
+		const runId = 'run-20260101-000000'
+		const checkpoint = suspendedCheckpointFor(runId, 'operator', 2, category)
 		const harness = makeHarness({
-			'run-1': {
-				metaText: JSON.stringify(runningMeta('run-1', '2026-01-01T00:00:00.000Z')),
+			[runId]: {
+				metaText: JSON.stringify(runningMeta(runId, '2026-01-01T00:00:00.000Z')),
 				checkpointText: JSON.stringify(checkpoint),
 			},
 		})
@@ -173,19 +249,20 @@ describe('reconcileRunsOnStartup', () => {
 		const report = reconcileRunsOnStartup(harness.dependencies)
 
 		expect(report.resumedRunId).toBeUndefined()
-		expect(report.suspendedRunIds).toEqual(['run-1'])
+		expect(report.suspendedRunIds).toEqual([runId])
 		expect(harness.resumed).toEqual([])
-		const written = defined(harness.writtenMetas.get('run-1')?.[0], 'suspended meta')
+		const written = defined(harness.writtenMetas.get(runId)?.[0], 'suspended meta')
 		expect(written.status).toBe('suspended')
 		expect(written.suspension?.category).toBe(category)
 		expect(written.suspension?.resumeAttempts).toBeUndefined()
 	})
 
 	test('a running meta with a transient checkpoint suspension is materialized as suspended, not resumed', () => {
-		const checkpoint = suspendedCheckpointFor('run-1', 'auto', 3)
+		const runId = 'run-20260101-000001'
+		const checkpoint = suspendedCheckpointFor(runId, 'auto', 3)
 		const harness = makeHarness({
-			'run-1': {
-				metaText: JSON.stringify(runningMeta('run-1', '2026-01-01T00:00:00.000Z')),
+			[runId]: {
+				metaText: JSON.stringify(runningMeta(runId, '2026-01-01T00:00:00.000Z')),
 				checkpointText: JSON.stringify(checkpoint),
 			},
 		})
@@ -193,18 +270,19 @@ describe('reconcileRunsOnStartup', () => {
 		const report = reconcileRunsOnStartup(harness.dependencies)
 
 		expect(report.resumedRunId).toBeUndefined()
-		expect(report.suspendedRunIds).toEqual(['run-1'])
+		expect(report.suspendedRunIds).toEqual([runId])
 		expect(harness.resumed).toEqual([])
-		const written = defined(harness.writtenMetas.get('run-1')?.[0], 'suspended meta')
+		const written = defined(harness.writtenMetas.get(runId)?.[0], 'suspended meta')
 		expect(written.status).toBe('suspended')
 		expect(written.suspension?.resumeAttempts).toBe(3)
 	})
 
 	test('a suspended run is left suspended rather than resumed or interrupted', () => {
+		const runId = 'run-20260101-000001'
 		const harness = makeHarness({
-			'run-1': {
-				metaText: JSON.stringify(suspendedMeta('run-1')),
-				checkpointText: JSON.stringify(checkpointFor('run-1', '2026-01-01T00:00:00.000Z')),
+			[runId]: {
+				metaText: JSON.stringify(suspendedMeta(runId)),
+				checkpointText: JSON.stringify(checkpointFor(runId, '2026-01-01T00:00:00.000Z')),
 			},
 		})
 
@@ -212,7 +290,7 @@ describe('reconcileRunsOnStartup', () => {
 
 		expect(report.resumedRunId).toBeUndefined()
 		expect(report.interruptedRunIds).toEqual([])
-		expect(report.suspendedRunIds).toEqual(['run-1'])
+		expect(report.suspendedRunIds).toEqual([runId])
 		expect(harness.resumed).toEqual([])
 		expect(harness.writtenMetas.size).toBe(0)
 	})
@@ -256,12 +334,14 @@ describe('reconcileRunsOnStartup', () => {
 	})
 
 	test('the newest suspended run wins when a durable suspended meta and a transient checkpoint suspension both exist', () => {
-		const suspended = suspendedMeta('run-suspended')
-		const transientCheckpoint = suspendedCheckpointFor('run-transient', 'auto', 1)
+		const suspendedRunId = 'run-20260101-000000'
+		const transientRunId = 'run-20260102-000000'
+		const suspended = suspendedMeta(suspendedRunId)
+		const transientCheckpoint = suspendedCheckpointFor(transientRunId, 'auto', 1)
 		const harness = makeHarness({
-			'run-suspended': { metaText: JSON.stringify(suspended), checkpointText: JSON.stringify(checkpointFor('run-suspended', suspended.startTime)) },
-			'run-transient': {
-				metaText: JSON.stringify(runningMeta('run-transient', '2026-01-02T00:00:00.000Z')),
+			[suspendedRunId]: { metaText: JSON.stringify(suspended), checkpointText: JSON.stringify(checkpointFor(suspendedRunId, suspended.startTime)) },
+			[transientRunId]: {
+				metaText: JSON.stringify(runningMeta(transientRunId, '2026-01-02T00:00:00.000Z')),
 				checkpointText: JSON.stringify(transientCheckpoint),
 			},
 		})
@@ -269,34 +349,301 @@ describe('reconcileRunsOnStartup', () => {
 		const report = reconcileRunsOnStartup(harness.dependencies)
 
 		expect(report.resumedRunId).toBeUndefined()
-		expect(report.suspendedRunIds).toEqual(['run-transient'])
-		expect(report.interruptedRunIds).toEqual(['run-suspended'])
+		expect(report.suspendedRunIds).toEqual([transientRunId])
+		expect(report.interruptedRunIds).toEqual([suspendedRunId])
 		expect(harness.resumed).toEqual([])
-		const interrupted = defined(harness.writtenMetas.get('run-suspended')?.[0], 'interrupted meta')
+		const interrupted = defined(harness.writtenMetas.get(suspendedRunId)?.[0], 'interrupted meta')
 		expect(interrupted.status).toBe('interrupted')
-		const materialized = defined(harness.writtenMetas.get('run-transient')?.[0], 'suspended meta')
+		const materialized = defined(harness.writtenMetas.get(transientRunId)?.[0], 'suspended meta')
 		expect(materialized.status).toBe('suspended')
 	})
 
 	test('multiple suspended runs keep the newest and interrupt the rest', () => {
-		const older = suspendedMeta('run-older')
-		const newer = suspendedMeta('run-newer')
+		const olderRunId = 'run-20260101-000001'
+		const newerRunId = 'run-20260102-000002'
+		const older = suspendedMeta(olderRunId)
+		const newer = suspendedMeta(newerRunId)
 		older.startTime = '2026-01-01T00:00:00.000Z'
 		newer.startTime = '2026-01-02T00:00:00.000Z'
 		const harness = makeHarness({
-			'run-older': { metaText: JSON.stringify(older), checkpointText: JSON.stringify(checkpointFor('run-older', older.startTime)) },
-			'run-newer': { metaText: JSON.stringify(newer), checkpointText: JSON.stringify(checkpointFor('run-newer', newer.startTime)) },
+			[olderRunId]: { metaText: JSON.stringify(older), checkpointText: JSON.stringify(checkpointFor(olderRunId, older.startTime)) },
+			[newerRunId]: { metaText: JSON.stringify(newer), checkpointText: JSON.stringify(checkpointFor(newerRunId, newer.startTime)) },
 		})
 
 		const report = reconcileRunsOnStartup(harness.dependencies)
 
-		expect(report.suspendedRunIds).toEqual(['run-newer'])
-		expect(report.interruptedRunIds).toEqual(['run-older'])
+		expect(report.suspendedRunIds).toEqual([newerRunId])
+		expect(report.interruptedRunIds).toEqual([olderRunId])
 		expect(harness.resumed).toEqual([])
-		const written = defined(harness.writtenMetas.get('run-older')?.[0], 'interrupted meta')
+		const written = defined(harness.writtenMetas.get(olderRunId)?.[0], 'interrupted meta')
 		expect(written.status).toBe('interrupted')
 		expect(written.suspension).toBeUndefined()
-		expect(harness.writtenMetas.get('run-newer')).toBeUndefined()
+		expect(harness.writtenMetas.get(newerRunId)).toBeUndefined()
+	})
+
+	test('a running run with a durable pause intent is materialized as operator-paused instead of resumed', () => {
+		const runId = 'run-20260101-000000'
+		const checkpoint = checkpointFor(runId, '2026-01-01T00:00:00.000Z')
+		const harness = makeHarness({
+			[runId]: {
+				metaText: JSON.stringify(runningMeta(runId, '2026-01-01T00:00:00.000Z')),
+				checkpointText: JSON.stringify(checkpoint),
+				pauseRequest: { version: 1, requestedAt: '2026-01-01T00:02:00.000Z' },
+			},
+		})
+
+		const report = reconcileRunsOnStartup(harness.dependencies)
+
+		expect(report.resumedRunId).toBeUndefined()
+		expect(report.operatorPausedRunIds).toEqual([runId])
+		expect(report.suspendedRunIds).toEqual([])
+		expect(harness.resumed).toEqual([])
+		const written = defined(harness.writtenMetas.get(runId)?.[0], 'operator-paused meta')
+		expect(written.status).toBe('suspended')
+		expect(written.pause?.pausedAt).toBe('2026-01-01T00:02:00.000Z')
+		expect(written.suspension).toBeUndefined()
+	})
+
+	test('a running run with a checkpoint pause is materialized as operator-paused', () => {
+		const runId = 'run-20260101-000000'
+		const harness = makeHarness({
+			[runId]: {
+				metaText: JSON.stringify(runningMeta(runId, '2026-01-01T00:00:00.000Z')),
+				checkpointText: JSON.stringify(pausedCheckpointFor(runId, '2026-01-01T00:00:00.000Z')),
+			},
+		})
+
+		const report = reconcileRunsOnStartup(harness.dependencies)
+
+		expect(report.resumedRunId).toBeUndefined()
+		expect(report.operatorPausedRunIds).toEqual([runId])
+		expect(harness.resumed).toEqual([])
+		const written = defined(harness.writtenMetas.get(runId)?.[0], 'operator-paused meta')
+		expect(written.status).toBe('suspended')
+		expect(written.pause?.pausedAt).toBe('2026-01-01T00:02:00.000Z')
+	})
+
+	test('a provider checkpoint suspension wins over a pause intent and clears the intent', () => {
+		const runId = 'run-20260101-000000'
+		const checkpoint = suspendedCheckpointFor(runId, 'operator')
+		const harness = makeHarness({
+			[runId]: {
+				metaText: JSON.stringify(runningMeta(runId, '2026-01-01T00:00:00.000Z')),
+				checkpointText: JSON.stringify(checkpoint),
+				pauseRequest: { version: 1, requestedAt: '2026-01-01T00:02:00.000Z' },
+			},
+		})
+
+		const report = reconcileRunsOnStartup(harness.dependencies)
+
+		expect(report.resumedRunId).toBeUndefined()
+		expect(report.suspendedRunIds).toEqual([runId])
+		expect(report.operatorPausedRunIds).toEqual([])
+		expect(harness.runs()[runId]?.pauseRequest).toBeUndefined()
+		const written = defined(harness.writtenMetas.get(runId)?.[0], 'provider-suspended meta')
+		expect(written.suspension?.category).toBe('billing')
+		expect(written.pause).toBeUndefined()
+	})
+
+	test('a parked checkpoint wins over a pause intent and clears the intent', () => {
+		const runId = 'run-20260101-000000'
+		const checkpoint = parkedCheckpointFor(runId, '2026-01-01T00:00:00.000Z')
+		const harness = makeHarness({
+			[runId]: {
+				metaText: JSON.stringify(runningMeta(runId, '2026-01-01T00:00:00.000Z')),
+				checkpointText: JSON.stringify(checkpoint),
+				pauseRequest: { version: 1, requestedAt: '2026-01-01T00:02:00.000Z' },
+			},
+		})
+
+		const report = reconcileRunsOnStartup(harness.dependencies)
+
+		expect(report.parkedRunIds).toEqual([runId])
+		expect(report.operatorPausedRunIds).toEqual([])
+		expect(harness.runs()[runId]?.pauseRequest).toBeUndefined()
+	})
+
+	test('a non-canonical run with a pause intent is interrupted rather than paused or resumed, and the marker is deleted', () => {
+		const runId = 'run-legacy'
+		const checkpoint = checkpointFor(runId, '2026-01-01T00:00:00.000Z')
+		const harness = makeHarness({
+			[runId]: {
+				metaText: JSON.stringify(runningMeta(runId, '2026-01-01T00:00:00.000Z')),
+				checkpointText: JSON.stringify(checkpoint),
+				pauseRequest: { version: 1, requestedAt: '2026-01-01T00:02:00.000Z' },
+			},
+		})
+
+		const report = reconcileRunsOnStartup(harness.dependencies)
+
+		expect(report.resumedRunId).toBeUndefined()
+		expect(report.operatorPausedRunIds).toEqual([])
+		expect(report.interruptedRunIds).toEqual([runId])
+		expect(harness.resumed).toEqual([])
+		expect(harness.runs()[runId]?.pauseRequest).toBeUndefined()
+		const written = defined(harness.writtenMetas.get(runId)?.[0], 'interrupted meta')
+		expect(written.status).toBe('interrupted')
+		expect(written.pause).toBeUndefined()
+		expect(written.error?.message).toContain('not a valid run id')
+	})
+
+	test('a non-canonical durable operator pause is interrupted rather than adopted, and the marker is deleted', () => {
+		const runId = 'run-legacy'
+		const checkpoint = checkpointFor(runId, '2026-01-01T00:00:00.000Z')
+		const harness = makeHarness({
+			[runId]: {
+				metaText: JSON.stringify(operatorSuspendedMeta(runId)),
+				checkpointText: JSON.stringify(checkpoint),
+				pauseRequest: { version: 1, requestedAt: '2026-01-01T00:02:00.000Z' },
+			},
+		})
+
+		const report = reconcileRunsOnStartup(harness.dependencies)
+
+		expect(report.operatorPausedRunIds).toEqual([])
+		expect(report.suspendedRunIds).toEqual([])
+		expect(report.resumedRunId).toBeUndefined()
+		expect(report.interruptedRunIds).toEqual([runId])
+		expect(harness.resumed).toEqual([])
+		expect(harness.runs()[runId]?.pauseRequest).toBeUndefined()
+		const written = defined(harness.writtenMetas.get(runId)?.[0], 'interrupted meta')
+		expect(written.status).toBe('interrupted')
+		expect(written.pause).toBeUndefined()
+		expect(written.error?.message).toContain('not a valid run id')
+	})
+
+	test('a non-canonical durable provider suspension is interrupted rather than adopted, and the marker is deleted', () => {
+		const runId = 'run-legacy'
+		const checkpoint = checkpointFor(runId, '2026-01-01T00:00:00.000Z')
+		const harness = makeHarness({
+			[runId]: {
+				metaText: JSON.stringify(suspendedMeta(runId)),
+				checkpointText: JSON.stringify(checkpoint),
+				pauseRequest: { version: 1, requestedAt: '2026-01-01T00:02:00.000Z' },
+			},
+		})
+
+		const report = reconcileRunsOnStartup(harness.dependencies)
+
+		expect(report.operatorPausedRunIds).toEqual([])
+		expect(report.suspendedRunIds).toEqual([])
+		expect(report.resumedRunId).toBeUndefined()
+		expect(report.interruptedRunIds).toEqual([runId])
+		expect(harness.resumed).toEqual([])
+		expect(harness.runs()[runId]?.pauseRequest).toBeUndefined()
+		const written = defined(harness.writtenMetas.get(runId)?.[0], 'interrupted meta')
+		expect(written.status).toBe('interrupted')
+		expect(written.suspension).toBeUndefined()
+		expect(written.error?.message).toContain('not a valid run id')
+	})
+
+	test('a non-canonical running run with a checkpoint suspension is interrupted rather than materialized or adopted, and the marker is deleted', () => {
+		const runId = 'run-legacy'
+		const checkpoint = suspendedCheckpointFor(runId, 'operator', 1, 'billing')
+		const harness = makeHarness({
+			[runId]: {
+				metaText: JSON.stringify(runningMeta(runId, '2026-01-01T00:00:00.000Z')),
+				checkpointText: JSON.stringify(checkpoint),
+				pauseRequest: null,
+			},
+		})
+
+		const report = reconcileRunsOnStartup(harness.dependencies)
+
+		expect(report.operatorPausedRunIds).toEqual([])
+		expect(report.suspendedRunIds).toEqual([])
+		expect(report.resumedRunId).toBeUndefined()
+		expect(report.interruptedRunIds).toEqual([runId])
+		expect(harness.resumed).toEqual([])
+		expect(harness.deletedPauseRequests).toEqual([runId])
+		const written = defined(harness.writtenMetas.get(runId)?.[0], 'interrupted meta')
+		expect(written.status).toBe('interrupted')
+		expect(written.suspension).toBeUndefined()
+		expect(written.error?.message).toContain('not a valid run id')
+	})
+
+	test('a non-canonical running run with a checkpoint pause is interrupted rather than materialized or adopted, and the marker is deleted', () => {
+		const runId = 'run-legacy'
+		const checkpoint = pausedCheckpointFor(runId, '2026-01-01T00:00:00.000Z')
+		const harness = makeHarness({
+			[runId]: {
+				metaText: JSON.stringify(runningMeta(runId, '2026-01-01T00:00:00.000Z')),
+				checkpointText: JSON.stringify(checkpoint),
+				pauseRequest: null,
+			},
+		})
+
+		const report = reconcileRunsOnStartup(harness.dependencies)
+
+		expect(report.operatorPausedRunIds).toEqual([])
+		expect(report.suspendedRunIds).toEqual([])
+		expect(report.resumedRunId).toBeUndefined()
+		expect(report.interruptedRunIds).toEqual([runId])
+		expect(harness.resumed).toEqual([])
+		expect(harness.deletedPauseRequests).toEqual([runId])
+		const written = defined(harness.writtenMetas.get(runId)?.[0], 'interrupted meta')
+		expect(written.status).toBe('interrupted')
+		expect(written.pause).toBeUndefined()
+		expect(written.error?.message).toContain('not a valid run id')
+	})
+
+	test('a durable pause intent with an in-flight child call materializes the pause instead of resuming', () => {
+		const runId = 'run-20260101-000000'
+		const checkpoint = checkpointWithPendingChildFor(runId, '2026-01-01T00:00:00.000Z')
+		const harness = makeHarness({
+			[runId]: {
+				metaText: JSON.stringify(runningMeta(runId, '2026-01-01T00:00:00.000Z')),
+				checkpointText: JSON.stringify(checkpoint),
+				pauseRequest: { version: 1, requestedAt: '2026-01-01T00:02:00.000Z' },
+			},
+		})
+
+		const report = reconcileRunsOnStartup(harness.dependencies)
+
+		expect(report.resumedRunId).toBeUndefined()
+		expect(report.operatorPausedRunIds).toEqual([runId])
+		expect(report.interruptedRunIds).toEqual([])
+		expect(harness.resumed).toEqual([])
+		const written = defined(harness.writtenMetas.get(runId)?.[0], 'operator-paused meta')
+		expect(written.status).toBe('suspended')
+		expect(written.pause?.pausedAt).toBe('2026-01-01T00:02:00.000Z')
+	})
+
+	test('an invalid or missing pause intent is ignored and the run resumes', () => {
+		const checkpoint = checkpointFor('run-1', '2026-01-01T00:00:00.000Z')
+		const harness = makeHarness({
+			'run-1': {
+				metaText: JSON.stringify(runningMeta('run-1', '2026-01-01T00:00:00.000Z')),
+				checkpointText: JSON.stringify(checkpoint),
+				pauseRequest: null,
+			},
+		})
+
+		const report = reconcileRunsOnStartup(harness.dependencies)
+
+		expect(report.resumedRunId).toBe('run-1')
+		expect(report.operatorPausedRunIds).toEqual([])
+		expect(harness.resumed).toEqual([checkpoint])
+	})
+
+	test('the newest operator pause wins over an older provider suspension', () => {
+		const providerRunId = 'run-20260101-000001'
+		const operatorRunId = 'run-20260102-000002'
+		const older = suspendedMeta(providerRunId)
+		older.startTime = '2026-01-01T00:00:00.000Z'
+		const newer = operatorSuspendedMeta(operatorRunId)
+		newer.startTime = '2026-01-02T00:00:00.000Z'
+		const harness = makeHarness({
+			[providerRunId]: { metaText: JSON.stringify(older), checkpointText: JSON.stringify(checkpointFor(providerRunId, older.startTime)) },
+			[operatorRunId]: { metaText: JSON.stringify(newer), checkpointText: JSON.stringify(checkpointFor(operatorRunId, newer.startTime)) },
+		})
+
+		const report = reconcileRunsOnStartup(harness.dependencies)
+
+		expect(report.operatorPausedRunIds).toEqual([operatorRunId])
+		expect(report.suspendedRunIds).toEqual([])
+		expect(report.interruptedRunIds).toEqual([providerRunId])
+		expect(harness.resumed).toEqual([])
 	})
 
 	test('a run with a running meta and a valid checkpoint resumes from it', () => {

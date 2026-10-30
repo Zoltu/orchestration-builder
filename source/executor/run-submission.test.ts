@@ -75,7 +75,6 @@ const unusedStartRun: StartRun = async (runId) => sampleMeta(runId)
 function providerSuspensionForTest(): ProviderSuspensionOwner {
 	let suspendedRunId: string | undefined
 	return {
-		suspendedRunId: () => suspendedRunId,
 		adoptSuspendedRun: (runId) => {
 			suspendedRunId = runId
 		},
@@ -153,12 +152,12 @@ describe('createRunSubmission', () => {
 
 		submission.adoptSuspendedRun('run-20260101-000009')
 
-		expect(submission.suspendedRunId()).toBe('run-20260101-000009')
+		expect(submission.pausedRunId()).toBe('run-20260101-000009')
 		expect(submission.lastRunId()).toBe('run-20260101-000009')
 		expect(submission.activeRunId()).toBeUndefined()
 		expect(submission.submit('new task')).toEqual({ ok: false, error: 'run_suspended' })
 
-		submission.clearSuspendedRun('run-20260101-000009')
+		submission.clearPausedRun('run-20260101-000009')
 		expect(submission.submit('new task')).toEqual({ ok: true, runId: 'run-1' })
 		await submission.awaitActive()
 	})
@@ -169,10 +168,115 @@ describe('createRunSubmission', () => {
 			providerSuspension: providerSuspensionForTest(),
 			onRunSettled: settleNothing, startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings, runDirectoryExists: emptyRunsDir })
 		submission.adoptSuspendedRun('run-B')
-		submission.clearSuspendedRun('run-A')
-		expect(submission.suspendedRunId()).toBe('run-B')
-		submission.clearSuspendedRun('run-B')
-		expect(submission.suspendedRunId()).toBeUndefined()
+		submission.clearPausedRun('run-A')
+		expect(submission.pausedRunId()).toBe('run-B')
+		submission.clearPausedRun('run-B')
+		expect(submission.pausedRunId()).toBeUndefined()
+	})
+
+	test('an operator-paused settlement claims priority, refuses new runs with run_paused, and leaves provider health untouched', async () => {
+		let healthNoticeCalls = 0
+		let providerSuspendedRunId: string | undefined
+		const providerSuspension: ProviderSuspensionOwner = {
+			adoptSuspendedRun: (runId) => {
+				providerSuspendedRunId = runId
+			},
+			noticeSuspension: (meta) => {
+				healthNoticeCalls++
+				if (meta.status === 'suspended') providerSuspendedRunId = meta.runId
+			},
+			releaseSuspension: (runId) => {
+				if (providerSuspendedRunId === runId) providerSuspendedRunId = undefined
+			},
+		}
+		const pause = { message: 'The operator paused this run.', pausedAt: '2026-01-01T00:05:00.000Z' }
+		const startRun: StartRun = async (runId) => ({ ...sampleMeta(runId), status: 'suspended', pause })
+		const submission = createRunSubmission({
+			providerSuspension,
+			onRunSettled: settleNothing, startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings, runDirectoryExists: emptyRunsDir })
+
+		submission.submit('do it')
+		await submission.awaitActive()
+
+		expect(submission.pausedRunId()).toBe('run-1')
+		expect(submission.pausedRunKind()).toBe('operator')
+		expect(providerSuspendedRunId).toBeUndefined()
+		expect(healthNoticeCalls).toBe(0)
+		expect(submission.submit('another task')).toEqual({ ok: false, error: 'run_paused' })
+
+		submission.clearPausedRun('run-1')
+		expect(submission.pausedRunId()).toBeUndefined()
+		expect(providerSuspendedRunId).toBeUndefined()
+		expect(healthNoticeCalls).toBe(0)
+	})
+
+	test('an operator-pause settlement never notices or hydrates a provider suspension', async () => {
+		let noticeCalls = 0
+		let hydrateCalls = 0
+		const providerSuspension = {
+			adoptSuspendedRun: () => {},
+			noticeSuspension: () => {
+				noticeCalls++
+			},
+			releaseSuspension: () => {},
+			hydrateSuspension: () => {
+				hydrateCalls++
+				return true
+			},
+		}
+		const pause = { message: 'The operator paused this run.', pausedAt: '2026-01-01T00:05:00.000Z' }
+		const startRun: StartRun = async (runId) => ({ ...sampleMeta(runId), status: 'suspended', pause })
+		const submission = createRunSubmission({
+			providerSuspension,
+			onRunSettled: settleNothing, startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings, runDirectoryExists: emptyRunsDir })
+
+		submission.submit('do it')
+		await submission.awaitActive()
+
+		expect(submission.pausedRunKind()).toBe('operator')
+		expect(noticeCalls).toBe(0)
+		expect(hydrateCalls).toBe(0)
+	})
+
+	test('resuming an operator-paused run releases its binding without touching provider recovery', async () => {
+		let healthNoticeCalls = 0
+		const providerSuspension: ProviderSuspensionOwner = {
+			adoptSuspendedRun: () => {},
+			noticeSuspension: () => {
+				healthNoticeCalls++
+			},
+			releaseSuspension: () => {},
+		}
+		const checkpoint: RunCheckpoint = { version: 2, runId: 'run-1', startTime: '2026-01-01T00:00:00.000Z', registryCounter: 1, frames: [{ roleId: 'main-0-1', roleName: 'main', depth: 0, task: 'do it', roleState: { protectedPrefixLength: 2, history: [{ role: 'system', content: 'prompt' }, { role: 'user', content: 'do it' }], lastPromptTokens: 0, recentCompactionPromptTokens: [], recentToolCalls: [], toolCallCount: 0, generatedTokens: 0, contextExceededAttempts: 0, loopCheckToolCallWatermark: 0, loopCheckTokenWatermark: 0 } }] }
+		const submission = createRunSubmission({
+			providerSuspension,
+			onRunSettled: settleNothing, startRun: unusedStartRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings, runDirectoryExists: emptyRunsDir })
+		submission.adoptOperatorPausedRun('run-1')
+
+		expect(submission.resume({ ...checkpoint, runId: 'run-2' })).toEqual({ ok: false, error: 'run_paused' })
+		expect(submission.pausedRunId()).toBe('run-1')
+		expect(submission.resume(checkpoint)).toEqual({ ok: true })
+		expect(submission.pausedRunId()).toBeUndefined()
+		expect(healthNoticeCalls).toBe(0)
+		await submission.awaitActive()
+	})
+
+	test('clearing an operator pause never releases a different provider suspension binding', () => {
+		const providerSuspension: ProviderSuspensionOwner = {
+			adoptSuspendedRun: () => {},
+			noticeSuspension: () => {},
+			releaseSuspension: () => {},
+		}
+		const submission = createRunSubmission({
+			providerSuspension,
+			onRunSettled: settleNothing, startRun: unusedStartRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings, runDirectoryExists: emptyRunsDir })
+		submission.adoptSuspendedRun('provider-run')
+		submission.adoptOperatorPausedRun('operator-run')
+
+		expect(submission.pausedRunId()).toBe('operator-run')
+		expect(submission.pausedRunKind()).toBe('operator')
+		submission.clearPausedRun('provider-run')
+		expect(submission.pausedRunId()).toBe('operator-run')
 	})
 
 	test('submit refuses a run id whose directory already exists instead of sharing it', async () => {
@@ -293,9 +397,11 @@ describe('createRunSubmission', () => {
 			submit: () => ({ ok: false, error: 'run_in_progress' }),
 			resume: () => ({ ok: true }),
 			activeRunId: () => undefined,
-			suspendedRunId: () => undefined,
+			pausedRunId: () => undefined,
+			pausedRunKind: () => undefined,
 			adoptSuspendedRun: () => {},
-			clearSuspendedRun: () => {},
+			adoptOperatorPausedRun: () => {},
+			clearPausedRun: () => {},
 			lastRunId: () => undefined,
 			awaitActive: () => Promise.resolve(undefined),
 			awaitFatalError: () => new Promise<Error>(() => {}),
@@ -397,6 +503,25 @@ describe('createRunSubmission resume', () => {
 		expect(submission.lastRunId()).toBe('run-20260101-000009')
 		expect(await submission.awaitActive()).toEqual(sampleMeta('run-20260101-000009'))
 		expect(submission.activeRunId()).toBeUndefined()
+	})
+
+	test('resume defensively releases a provider binding even when the paused-run mirror is missing', async () => {
+		const releasedRunIds: string[] = []
+		const providerSuspension: ProviderSuspensionOwner = {
+			adoptSuspendedRun: () => {},
+			noticeSuspension: () => {},
+			releaseSuspension: (runId) => {
+				releasedRunIds.push(runId)
+			},
+		}
+		const checkpoint = sampleCheckpoint('run-20260101-000009')
+		const submission = createRunSubmission({
+			providerSuspension,
+			onRunSettled: settleNothing, startRun: unusedStartRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings, runDirectoryExists: emptyRunsDir })
+
+		expect(submission.resume(checkpoint)).toEqual({ ok: true })
+		expect(releasedRunIds).toEqual(['run-20260101-000009'])
+		await submission.awaitActive()
 	})
 
 	test('submit rejects while a resumed run is active', async () => {
@@ -560,7 +685,7 @@ describe('createRunSubmission settlement hook', () => {
 			readProjectSettings: emptySettings,
 			runDirectoryExists: emptyRunsDir,
 			onRunSettled: async () => {
-				observed.push({ suspended: submission.suspendedRunId(), active: submission.activeRunId() })
+				observed.push({ suspended: submission.pausedRunId(), active: submission.activeRunId() })
 			},
 		})
 
@@ -569,10 +694,10 @@ describe('createRunSubmission settlement hook', () => {
 
 		// The hook sees the suspended id already claimed and the active slot already free, so a tick cannot slip between the two.
 		expect(observed).toEqual([{ suspended: 'run-1', active: undefined }])
-		expect(submission.suspendedRunId()).toBe('run-1')
+		expect(submission.pausedRunId()).toBe('run-1')
 		expect(submission.submit('another task')).toEqual({ ok: false, error: 'run_suspended' })
 
-		submission.clearSuspendedRun('run-1')
+		submission.clearPausedRun('run-1')
 		expect(submission.submit('another task')).toEqual({ ok: true, runId: 'run-1' })
 		await submission.awaitActive()
 	})
@@ -972,7 +1097,8 @@ describe('createResumeErroredOrSuspendedRun', () => {
 				throw new Error('the resume path does not dispatch')
 			},
 			hasActiveRun: () => submission.activeRunId() !== undefined,
-			hasSuspendedRun: () => submission.suspendedRunId() !== undefined,
+			hasSuspendedRun: () => submission.pausedRunId() !== undefined,
+			pausedRunKind: () => submission.pausedRunKind(),
 			canDispatch: () => true,
 		ensureProviderProbe: () => {},
 			sleep: async () => {},
@@ -997,12 +1123,14 @@ describe('createResumeErroredOrSuspendedRun', () => {
 		return { id: 'item-1', task: 'do it', status: 'error', runId: 'run-20260101-000009', queuedAt: '2026-01-01T00:00:00.000Z', settledAt: '2026-01-01T00:05:00.000Z', error: 'LLM unavailable: connection refused' }
 	}
 
-	function createHarness(input: { metas: Map<string, string>; checkpoints: Map<string, string>; queue?: Array<QueueItemView> }): { resumeErroredOrSuspendedRun: ReturnType<typeof createResumeErroredOrSuspendedRun>; submission: RunSubmission; taskQueue: TaskQueueModule; queue: ReturnType<typeof createQueueStore>; resumedNotes: () => Array<string | undefined>; resumedExplicit: () => Array<boolean | undefined>; resumedPriorSuspensions: () => Array<SuspensionRecord | undefined> } {
+	function createHarness(input: { metas: Map<string, string>; checkpoints: Map<string, string>; queue?: Array<QueueItemView> }): { resumeErroredOrSuspendedRun: ReturnType<typeof createResumeErroredOrSuspendedRun>; submission: RunSubmission; taskQueue: TaskQueueModule; queue: ReturnType<typeof createQueueStore>; resumedNotes: () => Array<string | undefined>; resumedExplicit: () => Array<boolean | undefined>; resumedPriorSuspensions: () => Array<SuspensionRecord | undefined>; setDeletePauseResult: (result: boolean) => void; deletedPauseRequests: () => string[] } {
 		const queue = createQueueStore(input.queue ?? [])
 		const readers = createReaders(input.metas, input.checkpoints)
 		let resumeNote: string | undefined
 		let explicitResume: boolean | undefined
 		let priorSuspension: SuspensionRecord | undefined
+		let deletePauseSucceeds = true
+		const deletedPauseRequests: string[] = []
 		const resumeRun: ResumeRun = async (checkpoint, options) => {
 			resumeNote = options?.resumeNote
 			explicitResume = options?.explicitResume
@@ -1013,8 +1141,29 @@ describe('createResumeErroredOrSuspendedRun', () => {
 			providerSuspension: providerSuspensionForTest(),
 			onRunSettled: settleNothing, startRun: unusedStartRun, resumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings, runDirectoryExists: emptyRunsDir })
 		const taskQueue = createQueueModule(queue, submission, readers)
-		const dependencies: ResumeErroredOrSuspendedRunDependencies = { runSubmission: submission, readRunMetaById: readers.readRunMetaById, readCheckpointById: readers.readCheckpointById, taskQueue }
-		return { resumeErroredOrSuspendedRun: createResumeErroredOrSuspendedRun(dependencies), submission, taskQueue, queue, resumedNotes: () => [resumeNote], resumedExplicit: () => [explicitResume], resumedPriorSuspensions: () => [priorSuspension] }
+		const dependencies: ResumeErroredOrSuspendedRunDependencies = {
+			runSubmission: submission,
+			readRunMetaById: readers.readRunMetaById,
+			readCheckpointById: readers.readCheckpointById,
+			deletePauseRequest: (runId) => {
+				deletedPauseRequests.push(runId)
+				return deletePauseSucceeds
+			},
+			taskQueue,
+		}
+		return {
+			resumeErroredOrSuspendedRun: createResumeErroredOrSuspendedRun(dependencies),
+			submission,
+			taskQueue,
+			queue,
+			resumedNotes: () => [resumeNote],
+			resumedExplicit: () => [explicitResume],
+			resumedPriorSuspensions: () => [priorSuspension],
+			setDeletePauseResult: (result) => {
+				deletePauseSucceeds = result
+			},
+			deletedPauseRequests: () => deletedPauseRequests,
+		}
 	}
 
 	const suspension: SuspensionRecord = { category: 'billing', resumePolicy: 'operator', message: 'Top up and resume the run.', suspendedAt: '2026-01-01T00:02:00.000Z' }
@@ -1040,6 +1189,7 @@ describe('createResumeErroredOrSuspendedRun', () => {
 		expect(reactivated?.status).toBe('active')
 		expect(reactivated?.runId).toBe('run-20260101-000009')
 		expect(harness.resumedNotes()).toEqual(['The operator resumed this run after a failure. Message from the operator: the endpoint is back; carry on'])
+		expect(harness.deletedPauseRequests()).toEqual(['run-20260101-000009'])
 		await harness.submission.awaitActive()
 	})
 
@@ -1063,7 +1213,7 @@ describe('createResumeErroredOrSuspendedRun', () => {
 		expect(harness.resumeErroredOrSuspendedRun(runId, undefined)).toEqual({ ok: true, runId })
 
 		expect(harness.submission.activeRunId()).toBe(runId)
-		expect(harness.submission.suspendedRunId()).toBeUndefined()
+		expect(harness.submission.pausedRunId()).toBeUndefined()
 		const reactivated = harness.queue.snapshot().items.find((entry) => entry.id === 'item-1')
 		expect(reactivated?.status).toBe('active')
 		expect(reactivated?.runId).toBe(runId)
@@ -1089,6 +1239,91 @@ describe('createResumeErroredOrSuspendedRun', () => {
 		await harness.submission.awaitActive()
 	})
 
+	test('an operator-paused run resumes with the paused-run note, releases the operator binding, and passes no prior suspension', async () => {
+		const runId = 'run-20260101-000009'
+		const pause = { message: 'The operator paused this run.', pausedAt: '2026-01-01T00:02:00.000Z' }
+		const pausedMeta: RunMeta = { runId, task: 'do it', status: 'suspended', startTime: '2026-01-01T00:00:00.000Z', pause }
+		const metas = new Map([[runId, JSON.stringify(pausedMeta)]])
+		const checkpoints = new Map([[runId, JSON.stringify(sampleCheckpoint(runId))]])
+		const harness = createHarness({ metas, checkpoints, queue: [{ id: 'item-1', task: 'do it', status: 'suspended', runId, queuedAt: '2026-01-01T00:00:00.000Z', suspendedAt: pause.pausedAt }] })
+		harness.submission.adoptOperatorPausedRun(runId)
+
+		expect(harness.resumeErroredOrSuspendedRun(runId, 'carry on')).toEqual({ ok: true, runId })
+		expect(harness.resumedNotes()).toEqual(['The operator resumed this paused run. Message from the operator: carry on'])
+		expect(harness.resumedPriorSuspensions()).toEqual([undefined])
+		expect(harness.submission.pausedRunId()).toBeUndefined()
+		expect(harness.queue.snapshot().items.find((entry) => entry.id === 'item-1')?.status).toBe('active')
+		await harness.submission.awaitActive()
+	})
+
+	test('an operator-pause resume clears the durable marker before starting', async () => {
+		const runId = 'run-20260101-000009'
+		const pause = { message: 'The operator paused this run.', pausedAt: '2026-01-01T00:02:00.000Z' }
+		const pausedMeta: RunMeta = { runId, task: 'do it', status: 'suspended', startTime: '2026-01-01T00:00:00.000Z', pause }
+		const metas = new Map([[runId, JSON.stringify(pausedMeta)]])
+		const checkpoints = new Map([[runId, JSON.stringify(sampleCheckpoint(runId))]])
+		const harness = createHarness({ metas, checkpoints, queue: [{ id: 'item-1', task: 'do it', status: 'suspended', runId, queuedAt: '2026-01-01T00:00:00.000Z', suspendedAt: pause.pausedAt }] })
+		harness.submission.adoptOperatorPausedRun(runId)
+
+		expect(harness.resumeErroredOrSuspendedRun(runId, undefined)).toEqual({ ok: true, runId })
+		expect(harness.deletedPauseRequests()).toEqual([runId])
+		await harness.submission.awaitActive()
+	})
+
+	test('an operator-pause resume fails without starting when the durable marker cannot be cleared', () => {
+		const runId = 'run-20260101-000009'
+		const pause = { message: 'The operator paused this run.', pausedAt: '2026-01-01T00:02:00.000Z' }
+		const pausedMeta: RunMeta = { runId, task: 'do it', status: 'suspended', startTime: '2026-01-01T00:00:00.000Z', pause }
+		const metas = new Map([[runId, JSON.stringify(pausedMeta)]])
+		const checkpoints = new Map([[runId, JSON.stringify(sampleCheckpoint(runId))]])
+		const harness = createHarness({ metas, checkpoints, queue: [{ id: 'item-1', task: 'do it', status: 'suspended', runId, queuedAt: '2026-01-01T00:00:00.000Z', suspendedAt: pause.pausedAt }] })
+		harness.submission.adoptOperatorPausedRun(runId)
+		harness.setDeletePauseResult(false)
+
+		expect(harness.resumeErroredOrSuspendedRun(runId, undefined)).toEqual({ ok: false, error: 'pause_intent_clear_failed' })
+		expect(harness.submission.activeRunId()).toBeUndefined()
+		expect(harness.submission.pausedRunId()).toBe(runId)
+		expect(harness.queue.snapshot().items.find((entry) => entry.id === 'item-1')?.status).toBe('suspended')
+	})
+
+	test('a provider-suspension resume also clears the durable pause marker before starting', async () => {
+		const runId = 'run-20260101-000009'
+		const metas = new Map([[runId, JSON.stringify(suspendedMeta(runId))]])
+		const checkpoints = new Map([[runId, JSON.stringify(sampleCheckpoint(runId))]])
+		const harness = createHarness({ metas, checkpoints, queue: [suspendedItem()] })
+		harness.submission.adoptSuspendedRun(runId)
+
+		expect(harness.resumeErroredOrSuspendedRun(runId, undefined)).toEqual({ ok: true, runId })
+		expect(harness.deletedPauseRequests()).toEqual([runId])
+		await harness.submission.awaitActive()
+	})
+
+	test('an error resume fails without starting when the durable marker cannot be cleared', () => {
+		const runId = 'run-20260101-000009'
+		const metas = new Map([[runId, JSON.stringify(erroredMeta(runId))]])
+		const checkpoints = new Map([[runId, JSON.stringify(sampleCheckpoint(runId))]])
+		const harness = createHarness({ metas, checkpoints, queue: [erroredItem()] })
+		harness.setDeletePauseResult(false)
+
+		expect(harness.resumeErroredOrSuspendedRun(runId, undefined)).toEqual({ ok: false, error: 'pause_intent_clear_failed' })
+		expect(harness.submission.activeRunId()).toBeUndefined()
+		expect(harness.queue.snapshot().items.find((entry) => entry.id === 'item-1')?.status).toBe('error')
+	})
+
+	test('a provider-suspension resume fails without starting when the durable marker cannot be cleared', () => {
+		const runId = 'run-20260101-000009'
+		const metas = new Map([[runId, JSON.stringify(suspendedMeta(runId))]])
+		const checkpoints = new Map([[runId, JSON.stringify(sampleCheckpoint(runId))]])
+		const harness = createHarness({ metas, checkpoints, queue: [suspendedItem()] })
+		harness.submission.adoptSuspendedRun(runId)
+		harness.setDeletePauseResult(false)
+
+		expect(harness.resumeErroredOrSuspendedRun(runId, undefined)).toEqual({ ok: false, error: 'pause_intent_clear_failed' })
+		expect(harness.submission.activeRunId()).toBeUndefined()
+		expect(harness.submission.pausedRunId()).toBe(runId)
+		expect(harness.queue.snapshot().items.find((entry) => entry.id === 'item-1')?.status).toBe('suspended')
+	})
+
 	test('a suspended resume with a missing or corrupt checkpoint releases the pause and cancels its item', () => {
 		const runId = 'run-20260101-000009'
 		const metas = new Map([[runId, JSON.stringify(suspendedMeta(runId))]])
@@ -1098,7 +1333,7 @@ describe('createResumeErroredOrSuspendedRun', () => {
 
 			expect(harness.resumeErroredOrSuspendedRun(runId, undefined)).toEqual({ ok: false, error: 'checkpoint_missing' })
 			expect(harness.submission.activeRunId()).toBeUndefined()
-			expect(harness.submission.suspendedRunId()).toBeUndefined()
+			expect(harness.submission.pausedRunId()).toBeUndefined()
 			expect(harness.queue.snapshot().items.find((entry) => entry.id === 'item-1')?.status).toBe('cancelled')
 		}
 	})
@@ -1184,7 +1419,7 @@ describe('createResumeErroredOrSuspendedRun', () => {
 		const submission = createRunSubmission({
 			providerSuspension: providerSuspensionForTest(),
 			onRunSettled: settleNothing, startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings, runDirectoryExists: emptyRunsDir })
-		const resumeErroredOrSuspendedRun = createResumeErroredOrSuspendedRun({ runSubmission: submission, readRunMetaById: readers.readRunMetaById, readCheckpointById: readers.readCheckpointById, taskQueue: createQueueModule(queue, submission, readers) })
+		const resumeErroredOrSuspendedRun = createResumeErroredOrSuspendedRun({ runSubmission: submission, readRunMetaById: readers.readRunMetaById, readCheckpointById: readers.readCheckpointById, deletePauseRequest: () => true, taskQueue: createQueueModule(queue, submission, readers) })
 
 		submission.submit('first')
 		expect(resumeErroredOrSuspendedRun('run-20260101-000009', undefined)).toEqual({ ok: false, error: 'run_in_progress' })
@@ -1216,7 +1451,7 @@ describe('createResumeErroredOrSuspendedRun', () => {
 
 		expect(harness.resumeErroredOrSuspendedRun(erroredRunId, undefined)).toEqual({ ok: false, error: 'run_suspended' })
 		expect(harness.submission.activeRunId()).toBeUndefined()
-		expect(harness.submission.suspendedRunId()).toBe(suspendedRunId)
+		expect(harness.submission.pausedRunId()).toBe(suspendedRunId)
 		expect(harness.queue.snapshot().items.find((entry) => entry.id === 'item-a')?.status).toBe('error')
 	})
 
@@ -1229,7 +1464,7 @@ describe('createResumeErroredOrSuspendedRun', () => {
 
 		expect(harness.resumeErroredOrSuspendedRun(runId, undefined)).toEqual({ ok: true, runId })
 		expect(harness.submission.activeRunId()).toBe(runId)
-		expect(harness.submission.suspendedRunId()).toBeUndefined()
+		expect(harness.submission.pausedRunId()).toBeUndefined()
 		await harness.submission.awaitActive()
 })
 
@@ -1254,6 +1489,18 @@ describe('createReadPauseStateById', () => {
 				checkpoint.clarificationAnswer = { id: 'answer-1', question: 'which database?', answer: 'postgres', consumed: true }
 				return JSON.stringify(checkpoint)
 			}
+			if (runId === 'run-operator-paused') {
+				const checkpoint: RunCheckpoint = { ...parkedCheckpointFor('run-operator-paused') }
+				delete checkpoint.parkedAsk
+				checkpoint.pause = { message: 'The operator paused this run.', pausedAt: '2026-01-01T00:02:00.000Z' }
+				return JSON.stringify(checkpoint)
+			}
+			if (runId === 'run-provider-suspended') {
+				const checkpoint: RunCheckpoint = { ...parkedCheckpointFor('run-provider-suspended') }
+				delete checkpoint.parkedAsk
+				checkpoint.suspension = { category: 'billing', resumePolicy: 'operator', message: 'Top up.', suspendedAt: '2026-01-01T00:02:00.000Z' }
+				return JSON.stringify(checkpoint)
+			}
 			if (runId === 'run-corrupt') return '{not json'
 			if (runId === 'run-mismatched') return JSON.stringify(parkedCheckpointFor('run-other'))
 			return null
@@ -1264,6 +1511,8 @@ describe('createReadPauseStateById', () => {
 		expect(readPauseStateById('run-unparked')).toEqual({ kind: 'clarification', deliveredAnswerConsumed: false })
 		expect(readPauseStateById('run-delivered')).toEqual({ kind: 'clarification', deliveredAnswerId: 'answer-1', deliveredAnswerConsumed: false })
 		expect(readPauseStateById('run-consumed')).toEqual({ kind: 'clarification', deliveredAnswerId: 'answer-1', deliveredAnswerConsumed: true })
+		expect(readPauseStateById('run-operator-paused')).toBeNull()
+		expect(readPauseStateById('run-provider-suspended')).toBeNull()
 		expect(readPauseStateById('run-corrupt')).toBeNull()
 		expect(readPauseStateById('run-mismatched')).toBeNull()
 		expect(readPauseStateById('run-missing')).toBeNull()
@@ -1275,10 +1524,11 @@ describe('createResumeParkedRun', () => {
 		return { ...sampleMeta(runId), status: 'needs_clarification', result: { status: 'needs_clarification', summary: 'waiting for an answer to: which database?' } }
 	}
 
-	function harness(input: { metas?: Map<string, string>, checkpoints?: Map<string, string> } = {}): { resumeParkedRun: ReturnType<typeof createResumeParkedRun>; submission: RunSubmission; resumeCalls: Array<{ parkedAnswer: unknown, queueTracked: boolean | undefined }> } {
+	function harness(input: { metas?: Map<string, string>, checkpoints?: Map<string, string>, deletePauseSucceeds?: boolean } = {}): { resumeParkedRun: ReturnType<typeof createResumeParkedRun>; submission: RunSubmission; resumeCalls: Array<{ parkedAnswer: unknown, queueTracked: boolean | undefined }>; deletedPauseRequests: string[] } {
 		const metas = input.metas ?? new Map()
 		const checkpoints = input.checkpoints ?? new Map()
 		const resumeCalls: Array<{ parkedAnswer: unknown, queueTracked: boolean | undefined }> = []
+		const deletedPauseRequests: string[] = []
 		const resumeRun: ResumeRun = async (checkpoint, options) => {
 			resumeCalls.push({ parkedAnswer: options?.parkedAnswer, queueTracked: options?.queueTracked })
 			return parkedMeta(checkpoint.runId)
@@ -1290,8 +1540,12 @@ describe('createResumeParkedRun', () => {
 			runSubmission: submission,
 			readRunMetaById: (runId) => metas.get(runId) ?? null,
 			readCheckpointById: (runId) => checkpoints.get(runId) ?? null,
+			deletePauseRequest: (runId) => {
+				deletedPauseRequests.push(runId)
+				return input.deletePauseSucceeds ?? true
+			},
 		})
-		return { resumeParkedRun, submission, resumeCalls }
+		return { resumeParkedRun, submission, resumeCalls, deletedPauseRequests }
 	}
 
 	const answer = { question: 'which database?', answer: 'postgres', toolCallId: 'ask_1' }
@@ -1304,7 +1558,7 @@ describe('createResumeParkedRun', () => {
 		const submission = createRunSubmission({
 			providerSuspension: providerSuspensionForTest(),
 			onRunSettled: settleNothing, startRun: unusedStartRun, resumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings, runDirectoryExists: emptyRunsDir })
-		const resumeParkedRun = createResumeParkedRun({ runSubmission: submission, readRunMetaById: () => null, readCheckpointById: () => null })
+		const resumeParkedRun = createResumeParkedRun({ runSubmission: submission, readRunMetaById: () => null, readCheckpointById: () => null, deletePauseRequest: () => true })
 
 		submission.resume(parkedCheckpointFor('run-active'))
 		expect(resumeParkedRun('run-active', answer)).toEqual({ ok: false, error: 'run_in_progress' })
@@ -1354,6 +1608,18 @@ describe('createResumeParkedRun', () => {
 		expect(testHarness.resumeParkedRun('run-1', answer)).toEqual({ ok: true, runId: 'run-1' })
 		expect(testHarness.submission.activeRunId()).toBe('run-1')
 		expect(testHarness.resumeCalls).toEqual([{ parkedAnswer: answer, queueTracked: true }])
+		expect(testHarness.deletedPauseRequests).toEqual(['run-1'])
+		await testHarness.submission.awaitActive()
+	})
+
+	test('clears a stale pause marker best-effort even when the delete fails', async () => {
+		const metas = new Map([['run-1', JSON.stringify(parkedMeta('run-1'))]])
+		const checkpoints = new Map([['run-1', JSON.stringify(parkedCheckpointFor('run-1'))]])
+		const testHarness = harness({ metas, checkpoints, deletePauseSucceeds: false })
+
+		expect(testHarness.resumeParkedRun('run-1', answer)).toEqual({ ok: true, runId: 'run-1' })
+		expect(testHarness.deletedPauseRequests).toEqual(['run-1'])
+		expect(testHarness.resumeCalls).toEqual([{ parkedAnswer: answer, queueTracked: true }])
 		await testHarness.submission.awaitActive()
 	})
 })
@@ -1369,10 +1635,11 @@ describe('createResumeClarificationRun', () => {
 		return checkpoint
 	}
 
-	function harness(input: { metas?: Map<string, string>, checkpoints?: Map<string, string> } = {}): { resumeClarificationRun: ReturnType<typeof createResumeClarificationRun>; submission: RunSubmission; resumeCalls: Array<{ clarificationAnswer: unknown, queueTracked: boolean | undefined }> } {
+	function harness(input: { metas?: Map<string, string>, checkpoints?: Map<string, string>, deletePauseSucceeds?: boolean } = {}): { resumeClarificationRun: ReturnType<typeof createResumeClarificationRun>; submission: RunSubmission; resumeCalls: Array<{ clarificationAnswer: unknown, queueTracked: boolean | undefined }>; deletedPauseRequests: string[] } {
 		const metas = input.metas ?? new Map()
 		const checkpoints = input.checkpoints ?? new Map()
 		const resumeCalls: Array<{ clarificationAnswer: unknown, queueTracked: boolean | undefined }> = []
+		const deletedPauseRequests: string[] = []
 		const resumeRun: ResumeRun = async (checkpoint, options) => {
 			resumeCalls.push({ clarificationAnswer: options?.clarificationAnswer, queueTracked: options?.queueTracked })
 			return clarificationMeta(checkpoint.runId)
@@ -1384,8 +1651,12 @@ describe('createResumeClarificationRun', () => {
 			runSubmission: submission,
 			readRunMetaById: (runId) => metas.get(runId) ?? null,
 			readCheckpointById: (runId) => checkpoints.get(runId) ?? null,
+			deletePauseRequest: (runId) => {
+				deletedPauseRequests.push(runId)
+				return input.deletePauseSucceeds ?? true
+			},
 		})
-		return { resumeClarificationRun, submission, resumeCalls }
+		return { resumeClarificationRun, submission, resumeCalls, deletedPauseRequests }
 	}
 
 	const clarificationAnswer = { id: 'answer-1', question: 'I need a decision on the schema', answer: 'use the v2 schema' }
@@ -1398,6 +1669,18 @@ describe('createResumeClarificationRun', () => {
 		expect(testHarness.resumeClarificationRun('run-1', clarificationAnswer)).toEqual({ ok: true, runId: 'run-1' })
 		expect(testHarness.submission.activeRunId()).toBe('run-1')
 		expect(testHarness.resumeCalls).toEqual([{ clarificationAnswer, queueTracked: true }])
+		expect(testHarness.deletedPauseRequests).toEqual(['run-1'])
+		await testHarness.submission.awaitActive()
+	})
+
+	test('clears a stale pause marker best-effort even when the delete fails', async () => {
+		const metas = new Map([['run-1', JSON.stringify(clarificationMeta('run-1'))]])
+		const checkpoints = new Map([['run-1', JSON.stringify(directCheckpointFor('run-1'))]])
+		const testHarness = harness({ metas, checkpoints, deletePauseSucceeds: false })
+
+		expect(testHarness.resumeClarificationRun('run-1', clarificationAnswer)).toEqual({ ok: true, runId: 'run-1' })
+		expect(testHarness.deletedPauseRequests).toEqual(['run-1'])
+		expect(testHarness.resumeCalls).toEqual([{ clarificationAnswer, queueTracked: true }])
 		await testHarness.submission.awaitActive()
 	})
 
@@ -1409,7 +1692,7 @@ describe('createResumeClarificationRun', () => {
 		const submission = createRunSubmission({
 			providerSuspension: providerSuspensionForTest(),
 			onRunSettled: settleNothing, startRun: unusedStartRun, resumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings, runDirectoryExists: emptyRunsDir })
-		const resumeClarificationRun = createResumeClarificationRun({ runSubmission: submission, readRunMetaById: () => null, readCheckpointById: () => null })
+		const resumeClarificationRun = createResumeClarificationRun({ runSubmission: submission, readRunMetaById: () => null, readCheckpointById: () => null, deletePauseRequest: () => true })
 
 		submission.resume(directCheckpointFor('run-active'))
 		expect(resumeClarificationRun('run-active', clarificationAnswer)).toEqual({ ok: false, error: 'run_in_progress' })
@@ -1477,7 +1760,7 @@ describe('createTerminatePausedRun', () => {
 			appendLogFor: (runId) => (event) => {
 				logs.push({ runId, event })
 			},
-			clearSuspendedRun: (runId) => {
+			clearPausedRun: (runId) => {
 				if (runId !== undefined) clearedSuspendedRun += 1
 			},
 		})
@@ -1544,6 +1827,25 @@ describe('createTerminatePausedRun', () => {
 		expect(parsed.error).toEqual({ kind: 'interrupted', message: 'The operator terminated this suspended run.' })
 	})
 
+	test('terminates an operator-paused run with paused copy distinct from a provider suspension', () => {
+		const runId = 'run-20260101-000000'
+		const pausedMeta: RunMeta = { ...suspendedMeta(runId), pause: { message: 'The operator paused this run.', pausedAt: '2026-01-01T00:02:00.000Z' } }
+		delete pausedMeta.suspension
+		const testHarness = harness({ metas: new Map([[runId, JSON.stringify(pausedMeta)]]) })
+
+		expect(testHarness.terminatePausedRun(runId)).toEqual({ ok: true, runId })
+		expect(testHarness.deleted).toEqual([runId])
+		expect(testHarness.clearedSuspendedRun()).toBe(1)
+		const log = testHarness.logs[0]
+		if (log === undefined) throw new Error('expected a termination log event')
+		expect(log.event.payload).toEqual({ reason: 'operator', message: 'Terminated by the operator while the run was paused.' })
+		const metaText = testHarness.metas.get(runId)
+		if (metaText === undefined) throw new Error('expected the terminated meta')
+		const parsed: unknown = JSON.parse(metaText)
+		if (!isRunMeta(parsed)) throw new Error('expected a valid run meta')
+		expect(parsed.error).toEqual({ kind: 'interrupted', message: 'The operator terminated this paused run.' })
+	})
+
 	test('marks a parked run interrupted, preserves its identity, deletes the checkpoint, and logs the operator action', () => {
 		const runId = 'run-20260101-000000'
 		const testHarness = harness({ metas: new Map([[runId, JSON.stringify(parkedMeta(runId))]]) })
@@ -1603,7 +1905,7 @@ describe('createTerminatePausedRun', () => {
 			writeMetaFor: () => () => {},
 			deleteCheckpointFor: () => () => {},
 			appendLogFor: () => () => {},
-			clearSuspendedRun: (id) => {
+			clearPausedRun: (id) => {
 				if (suspendedGate === id) suspendedGate = ''
 			},
 		})

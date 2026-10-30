@@ -2,6 +2,7 @@ import type { CheckpointRecorder, PendingInterlude, PendingInvocation } from './
 import type { ContextPressureTracker } from './context/index.js'
 import type { HumanBackend } from './human-backend.js'
 import type { InterruptQueue } from './interrupts.js'
+import type { OperatorPauseQueue } from './operator-pause.js'
 import type { InvocationJournal } from './invocation.js'
 import type { LoadedGuild } from './loader.js'
 import type { LlmCaller } from './llm.js'
@@ -55,6 +56,8 @@ export interface EngineDependencies {
 	humanBackend: HumanBackend
 	roleRegistry: RoleRegistry
 	interruptQueue: InterruptQueue
+	// The run's operator-pause request channel: the engine consumes a request at the loop-top safe point and turns it into an operator_paused outcome.
+	operatorPauseQueue: OperatorPauseQueue
 	// The run's learned context ceiling, shared across roles so one role's wall-hit tightens every role's pressure threshold. Created per run by runExecutor.
 	contextPressureTracker: ContextPressureTracker
 	// The run's checkpoint recorder, created per run by runExecutor; every frame registers on start and the leaf writes the role stack at each safe point so a service restart can resume the run.

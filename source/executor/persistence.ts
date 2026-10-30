@@ -4,6 +4,7 @@ import type { RunCheckpoint } from './checkpoint.js'
 import { classifyVersion, ROLE_SNAPSHOT_FORMAT_VERSION, RUN_MANIFEST_VERSION, SETTINGS_FORMAT_VERSION, type VersionStatus } from './orchestration-version.js'
 import { isRoleSnapshot, type RoleSnapshot, type RoleSnapshotInput, type RoleSnapshotStore, type RoleSnapshotSummary } from './role-snapshot.js'
 import { isProjectSettings, safeJsonParse } from './validation.js'
+import { isPauseIntent, PAUSE_REQUEST_FILE_NAME, PAUSE_REQUEST_FORMAT_VERSION, type PauseIntent } from './operator-pause.js'
 import type { EffortLevel, InvolvementLevel, LogLevel, LogEvent, RunMeta } from './types.js'
 
 export type RunDirectory = () => string
@@ -486,5 +487,68 @@ export function createWriteQueueText(workspaceRoot: string): WriteQueueText {
 		const tempPath = `${filePath}.${process.pid}.tmp`
 		fs.writeFileSync(tempPath, contents)
 		fs.renameSync(tempPath, filePath)
+	}
+}
+
+export type ReadPauseRequestById = (runId: string) => PauseIntent | null
+export type WritePauseRequestResult = { ok: true; requestedAt: string } | { ok: false }
+export type WritePauseRequest = (runId: string, requestedAt: string) => WritePauseRequestResult
+export type DeletePauseRequest = (runId: string) => boolean
+
+// The marker is tiny platform bookkeeping; a larger file is foreign or corrupt and reads as absent so a runaway document cannot be parsed into a pause.
+export const PAUSE_REQUEST_MAX_BYTES = 8 * 1024
+
+// The durable operator-pause marker is advisory bookkeeping: an absent, malformed, or foreign marker reads as absent and never fails a run.
+export function parsePauseRequestText(text: string | null): PauseIntent | null {
+	if (text === null) return null
+	if (Buffer.byteLength(text, 'utf8') > PAUSE_REQUEST_MAX_BYTES) return null
+	const parsed = safeJsonParse(text)
+	return parsed.ok && isPauseIntent(parsed.value) ? parsed.value : null
+}
+
+export function createReadPauseRequestById(baseDir: string): ReadPauseRequestById {
+	return (runId) => {
+		const markerPath = path.resolve(baseDir, runId, PAUSE_REQUEST_FILE_NAME)
+		if (!fs.existsSync(markerPath)) return null
+		let text: string
+		try {
+			// The stat and read share one guard: a marker removed or replaced between existsSync and statSync is absent bookkeeping, not a boot failure.
+			if (fs.statSync(markerPath).size > PAUSE_REQUEST_MAX_BYTES) return null
+			text = fs.readFileSync(markerPath, 'utf8')
+		} catch {
+			return null
+		}
+		return parsePauseRequestText(text)
+	}
+}
+
+// Writes the marker atomically before the live pause signal is sent. The first valid request wins: a repeat keeps the original timestamp so a live pause and a boot-materialized pause cannot disagree. A failed write is reported so the HTTP layer can refuse the request instead of accepting a pause it cannot honor across a crash.
+export function createWritePauseRequest(baseDir: string): WritePauseRequest {
+	const readPauseRequest = createReadPauseRequestById(baseDir)
+	return (runId, requestedAt) => {
+		const existing = readPauseRequest(runId)
+		if (existing !== null) return { ok: true, requestedAt: existing.requestedAt }
+		const markerPath = path.resolve(baseDir, runId, PAUSE_REQUEST_FILE_NAME)
+		const intent: PauseIntent = { version: PAUSE_REQUEST_FORMAT_VERSION, requestedAt }
+		try {
+			fs.mkdirSync(path.dirname(markerPath), { recursive: true })
+			writeFileAtomically(markerPath, JSON.stringify(intent))
+			return { ok: true, requestedAt }
+		} catch {
+			return { ok: false }
+		}
+	}
+}
+
+// Best-effort cleanup: the marker is advisory, so a failed delete must not fail a settlement or a boot reconciliation. The boolean lets the operator resume refuse to start while a stale intent would still materialize a pause after a crash.
+export function createDeletePauseRequest(baseDir: string): DeletePauseRequest {
+	return (runId) => {
+		const markerPath = path.resolve(baseDir, runId, PAUSE_REQUEST_FILE_NAME)
+		try {
+			if (fs.existsSync(markerPath)) fs.unlinkSync(markerPath)
+			return true
+		} catch {
+			return false
+		}
 	}
 }

@@ -41,6 +41,12 @@ export interface SuspensionRecord {
 	resumeAttempts?: number
 }
 
+// The operator-initiated pause record a suspended run meta carries instead of a suspension. `message` is platform-authored; the pause card uses fixed operator copy rather than this field.
+export interface OperatorPauseRecord {
+	message: string
+	pausedAt: string
+}
+
 export interface Participant {
 	// Instance-scoped, unique per invocation — the flow-view node key. A role invoked twice carries two participants with distinct ids.
 	id: string
@@ -99,6 +105,8 @@ export interface InteractionModel {
 	// Chronological; the index is the sequence-view row.
 	operations: Operation[]
 	status: RunStatus
+	// The operator pause record when the suspended status is an operator pause; absent or null for provider suspensions and every non-suspended status.
+	pause?: OperatorPauseRecord | null
 	// Stack roots in push order (oldest first), emitted by producers that track stack pushes (the backend adapter). A freshly preempted stack has no operations yet, so operations alone cannot name it. When absent (hand-authored models), the helpers derive stack structure from operations and a zero-operation stack renders nothing.
 	stacks?: StackRecord[]
 }

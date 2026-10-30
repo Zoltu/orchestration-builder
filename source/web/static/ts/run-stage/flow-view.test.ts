@@ -791,6 +791,18 @@ describe('renderFlowView — terminal CTA', () => {
 		expect(label.children.join('')).toBe('Suspended')
 		expect(pathHasClass(pathForOperation(view, 'op1'), 'graph-edge--flowing')).toBe(false)
 	})
+
+	test('an operator-paused run renders a View pause CTA and keeps the warning tone', () => {
+		const running = scenarioFrame('delegation-chain', 0)
+		const paused: InteractionModel = { ...running, status: 'suspended', pause: { message: 'The operator paused this run.', pausedAt: '2026-01-01T00:02:00.000Z' } }
+		const view = render(paused)
+		const ctaNodes = allByTag(view, 'g').filter((group) => (propString(group.props, 'class') ?? '').split(' ').includes('flow-cta'))
+		expect(ctaNodes.length).toBe(1)
+		const cta = defined(ctaNodes[0], 'ctaNodes[0]')
+		const label = allByTag(cta, 'text').find((node) => (propString(node.props, 'class') ?? '').split(' ').includes('flow-cta-label'))
+		if (label === undefined) throw new Error('expected the CTA label')
+		expect(label.children.join('')).toBe('View pause')
+	})
 })
 
 describe('renderFlowView — pending question affordance', () => {
@@ -980,6 +992,14 @@ describe('nowCaption — active participant + in-flight operation', () => {
 		const frame = scenarioFrame('delegation-chain', 0)
 		const needsClarification: InteractionModel = { ...frame, status: 'needs_clarification' }
 		expect(stage.nowCaption(needsClarification, labelsModule, 'detailed')).toBe('Waiting for your input…')
+	})
+
+	test('a suspended status distinguishes a provider suspension from an operator pause', () => {
+		const frame = scenarioFrame('delegation-chain', 0)
+		const suspended: InteractionModel = { ...frame, status: 'suspended' }
+		expect(stage.nowCaption(suspended, labelsModule, 'detailed')).toBe('Suspended — resume when ready.')
+		const paused: InteractionModel = { ...suspended, pause: { message: 'ignored stored copy', pausedAt: '2026-01-01T00:02:00.000Z' } }
+		expect(stage.nowCaption(paused, labelsModule, 'detailed')).toBe('Paused — resume when ready.')
 	})
 })
 

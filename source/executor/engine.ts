@@ -321,7 +321,7 @@ async function reconcilePendingInvocation(deps: EngineDependencies, context: Eng
 	} else {
 		if (!isAsk) deps.invocationJournal.toolStarted(invocation, context.roleName)
 		const toolOutcome = await dispatchCtx.toolPlatform.dispatch(dispatchCtx.roleDefinition, dispatchCtx.scope, toolCall, invocation)
-		if (toolOutcome.kind === 'suspended') return toolOutcome
+		if (toolOutcome.kind === 'suspended' || toolOutcome.kind === 'operator_paused') return toolOutcome
 		const result = toolOutcome.result
 		if (isAsk) {
 			if (result.kind === 'success') {
@@ -597,7 +597,7 @@ export async function runRole(deps: EngineDependencies, context: EngineContext, 
 		}
 		const childOutcome = await runRole(deps, delegatedContext, undefined, seed)
 		// A suspended child has no card to deliver: return the suspension without recording a child card or writing a checkpoint, so the child frame remains the replay point.
-		if (childOutcome.kind === 'suspended') return childOutcome
+		if (childOutcome.kind === 'suspended' || childOutcome.kind === 'operator_paused') return childOutcome
 		// The child is done: record its card on this frame's pending suspension and checkpoint, so a restart here resumes by delivering the recorded card instead of re-running the child. The card is delivered to the conversation by recordToolResult after this handler returns.
 		const childCard = childOutcome.card
 		deps.checkpointRecorder.setPendingChildCard(registryEntry.roleId, childCard)
@@ -648,6 +648,10 @@ export async function runRole(deps: EngineDependencies, context: EngineContext, 
 	if (outcome.kind === 'suspended') {
 		deps.checkpointRecorder.setPendingOperatorRequests(deps.interruptQueue.pendingRequests())
 		if (!deps.checkpointRecorder.writeSuspension()) throw new Error('runRole: could not write the suspension checkpoint')
+		return outcome
+	}
+	if (outcome.kind === 'operator_paused') {
+		if (!deps.checkpointRecorder.writePause()) throw new Error('runRole: could not write the operator-pause checkpoint')
 		return outcome
 	}
 	const finalCard = outcome.card
@@ -717,7 +721,7 @@ async function dispatchToolCallSequence(
 		deps.checkpointRecorder.write()
 		if (!isAsk) deps.invocationJournal.toolStarted(invocation, context.roleName)
 		const toolOutcome = await dispatchCtx.toolPlatform.dispatch(dispatchCtx.roleDefinition, dispatchCtx.scope, toolCall, invocation)
-		if (toolOutcome.kind === 'suspended') return toolOutcome
+		if (toolOutcome.kind === 'suspended' || toolOutcome.kind === 'operator_paused') return toolOutcome
 		const result = toolOutcome.result
 		if (isAsk) {
 			if (result.kind === 'success') {
@@ -753,7 +757,7 @@ async function completeSuspendedTurn(deps: EngineDependencies, context: EngineCo
 	const childCall = suspendedTurn.toolCalls[suspendedTurn.childIndex]
 	if (childCall === undefined) throw new Error(`completeSuspendedTurn: childIndex ${suspendedTurn.childIndex} out of range in a validated checkpoint`)
 	const childOutcome = await suspendedTurn.resolveChildCard()
-	if (childOutcome.kind === 'suspended') return childOutcome
+	if (childOutcome.kind === 'suspended' || childOutcome.kind === 'operator_paused') return childOutcome
 	const childCard = childOutcome.card
 	deps.checkpointRecorder.setPendingChildCard(registryEntry.roleId, childCard)
 	deps.checkpointRecorder.write()
@@ -840,11 +844,21 @@ async function executeRoleLoop(
 		if (interruptOutcome !== null) return interruptOutcome
 
 		const contextDecision = await contextManager.resolveSafePoint(roleState, registryEntry)
-		if (contextDecision.kind === 'suspended') return contextDecision
+		if (contextDecision.kind === 'suspended' || contextDecision.kind === 'operator_paused') return contextDecision
 		if (contextDecision.kind === 'finished') return { kind: 'card', card: contextDecision.card }
 
 		// The safe point: no LLM call is in flight and every queued platform mutation (drain, compaction, pressure notice) has been applied, so the checkpoint written here is the state a restart resumes from. Only the active leaf reaches this — suspended ancestors are captured through their registered frames.
 		deps.checkpointRecorder.write()
+
+		// An operator pause takes effect here, after the turn's whole tool batch and before the next LLM request. A handler never consumes it: the pause waits until the interlude resolves and control returns to a real work role.
+		if (context.handlerOf === undefined) {
+			const pause = deps.operatorPauseQueue.consume()
+			if (pause !== undefined) {
+				deps.checkpointRecorder.setOperatorPause(pause)
+				logEvent(deps.appendLog, 'run_paused', { role: context.roleName, roleId: registryEntry.roleId, pausedAt: pause.pausedAt })
+				return { kind: 'operator_paused', pause }
+			}
+		}
 
 		const globalError = checkGlobalBudgets(context.depth, config)
 		if (globalError !== null) {

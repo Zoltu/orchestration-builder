@@ -10,7 +10,7 @@ import { createFlowFeedResponder } from './web/static/ts/flow-feed/index.js'
 import { createRunListFeedResponder } from './web/static/ts/run-list-feed/index.js'
 import { createStreamHub } from './web/stream-hub.js'
 import { createTaskSummarizer, shouldWriteCompletionSummary, type TaskSummarizer } from './summarize.js'
-import { applyDeploymentOverride, applyLogLevel, createAppendLog, createBunSubprocessRunner, createDeleteCheckpoint, createDeltaChannel, createDockerSecretReader, createGuildLoader, createInterruptChannel, createInterruptQueue, createLlmCaller, createLlmFetch, createListCurrentRunIds, createListRunIds, createModelInfoProbe, createObservedLlmCaller, createProviderAutoResumeCoordinator, createProviderRecovery, createReadPauseStateById, createReadProjectDoc, createReadProjectSettings, createReadQueueText, createReadRunCheckpointById, createReadRunFormat, createReadRunLogTextFrom, createReadRunMetaById, createReadRunMetaTextById, createReadRunPlanById, createReadRunSnapshotById, createReadRunSnapshotStats, createReadRunSummaryById, createReadTaskThreadSummaryTextById, createWriteTaskThreadSummaryTextById, createReadRunSummaryStats, createReadWorkspaceGitState, createResumeClarificationRun, createResumeErroredOrSuspendedRun, createResumeParkedRun, createRoleSnapshotStore, createRunBaseTracker, createRunCheckpointExists, createRunDirectory, createRunDirectoryExists, createRunState, createRunSubmission, createSleep, createTaskQueue, createTerminatePausedRun, createTimeoutScheduler, createToolPlatform, createWebHumanBackend, createWriteCheckpoint, createWriteMeta, createWriteProjectSettings, createWriteQueueText, createWriteRunSummary, ensureOrchestrationGitExcluded, entryFrameLogLevel, generateRunId, llmUsagePayload, LOG_FILE_NAME, MODEL_PROBE_TIMEOUT_MS, nodeGitExcludeFilesystem, parseModelInfo, reconcileRunsOnStartup, resolveDeploymentConfig, resolveDeploymentOverride, resolveKagiApiKey, resolveSecret, resumeExecutor, runExecutor, validateDeploymentFileConfig, validateDeploymentRoleReferences, validateHandlerRolesAreReadOnly, ConfigurationError, ValidationError, type AppendLog, type DeltaChannel, type ExecutorDependencies, type InterruptChannel, type InvolvementLevel, type LoadedGuild, type LlmCaller, type LogLevel, type ModelApiProbe, type ProviderHealth, type ReadRunLogEvents, type ResumeRun, type RunCheckpoint, type StartRun, type WebHumanBackend } from './executor/index.js'
+import { applyDeploymentOverride, applyLogLevel, createAppendLog, createBunSubprocessRunner, createDeleteCheckpoint, createDeletePauseRequest, createDeltaChannel, createDockerSecretReader, createGuildLoader, createInterruptChannel, createInterruptQueue, createLlmCaller, createLlmFetch, createListCurrentRunIds, createListRunIds, createModelInfoProbe, createObservedLlmCaller, createOperatorPauseChannel, createOperatorPauseQueue, createProviderAutoResumeCoordinator, createProviderRecovery, createReadPauseRequestById, createReadPauseStateById, createReadProjectDoc, createReadProjectSettings, createReadQueueText, createReadRunCheckpointById, createReadRunFormat, createReadRunLogTextFrom, createReadRunMetaById, createReadRunMetaTextById, createReadRunPlanById, createReadRunSnapshotById, createReadRunSnapshotStats, createReadRunSummaryById, createReadTaskThreadSummaryTextById, createWriteTaskThreadSummaryTextById, createReadRunSummaryStats, createReadWorkspaceGitState, createResumeClarificationRun, createResumeErroredOrSuspendedRun, createResumeParkedRun, createRoleSnapshotStore, createRunBaseTracker, createRunCheckpointExists, createRunDirectory, createRunDirectoryExists, createRunState, createRunSubmission, createSleep, createTaskQueue, createTerminatePausedRun, createTimeoutScheduler, createToolPlatform, createWebHumanBackend, createWriteCheckpoint, createWriteMeta, createWritePauseRequest, createWriteProjectSettings, createWriteQueueText, createWriteRunSummary, ensureOrchestrationGitExcluded, entryFrameLogLevel, generateRunId, llmUsagePayload, LOG_FILE_NAME, MODEL_PROBE_TIMEOUT_MS, nodeGitExcludeFilesystem, parseModelInfo, reconcileRunsOnStartup, resolveDeploymentConfig, resolveDeploymentOverride, resolveKagiApiKey, resolveSecret, resumeExecutor, runExecutor, validateDeploymentFileConfig, validateDeploymentRoleReferences, validateHandlerRolesAreReadOnly, ConfigurationError, ValidationError, type AppendLog, type DeltaChannel, type ExecutorDependencies, type InterruptChannel, type InvolvementLevel, type LoadedGuild, type LlmCaller, type LogLevel, type ModelApiProbe, type OperatorPauseChannel, type ProviderHealth, type ReadRunLogEvents, type ResumeRun, type RunCheckpoint, type StartRun, type WebHumanBackend } from './executor/index.js'
 import { parseLogEvents } from './run-log/parse.js'
 import { createTaskThreadCoreReader, createTaskThreadReader, createTaskThreadSummarizer } from './task-thread/index.js'
 
@@ -71,6 +71,7 @@ async function withRunBindings<T>(config: {
 	llmCaller: LlmCaller
 	humanBackend: WebHumanBackend
 	interruptChannel: InterruptChannel
+	operatorPauseChannel: OperatorPauseChannel
 	deltaChannel: DeltaChannel
 	kagiApiKey: string | undefined
 	guildPath: string
@@ -99,9 +100,13 @@ async function withRunBindings<T>(config: {
 	// The interrupt channel is likewise shared; bind the run's fresh queue so operator interrupts submitted mid-run reach the engine's drain.
 	const interruptQueue = createInterruptQueue()
 	config.interruptChannel.bindQueue(interruptQueue)
+	// The operator-pause channel is bound to this run's fresh request queue, so the HTTP pause operation writes the durable marker and then signals the live engine.
+	const operatorPauseQueue = createOperatorPauseQueue()
+	config.operatorPauseChannel.bindQueue(operatorPauseQueue)
 	// The delta channel is the third shared backend; bind the run id so the engine's stream deltas are stamped with it and fanned out to subscribed browsers by the stream hub.
 	config.deltaChannel.bindRun(runId)
 	const readRunLogTextFrom = createReadRunLogTextFrom(config.runsBaseDir)
+	const deletePauseRequest = createDeletePauseRequest(config.runsBaseDir)
 	// Resume reconciliation reads the run's existing events through the same full-text reader and parser the preview uses; only the executor's own log text is consulted, so no executor module imports the run-log layer.
 	const readRunLogEvents: ReadRunLogEvents = (targetRunId) => parseLogEvents(readRunLogTextFrom(targetRunId, 0))
 	const dependencies: ExecutorDependencies = {
@@ -115,6 +120,8 @@ async function withRunBindings<T>(config: {
 		toolPlatform,
 		humanBackend: config.humanBackend,
 		interruptQueue,
+		operatorPauseQueue,
+		deletePauseRequest: () => deletePauseRequest(runId),
 		publishDelta: (delta) => config.deltaChannel.publish(delta),
 		roleSnapshots: createRoleSnapshotStore(runId, config.runsBaseDir),
 		readProjectDoc: createReadProjectDoc(config.workspaceRootPath),
@@ -128,6 +135,7 @@ async function withRunBindings<T>(config: {
 		config.deltaChannel.bindRun(null)
 		config.humanBackend.bindRunLog(null)
 		config.interruptChannel.bindQueue(null)
+		config.operatorPauseChannel.bindQueue(null)
 	}
 }
 
@@ -145,6 +153,7 @@ interface RunServiceConfig {
 	llmCaller: LlmCaller
 	humanBackend: WebHumanBackend
 	interruptChannel: InterruptChannel
+	operatorPauseChannel: OperatorPauseChannel
 	deltaChannel: DeltaChannel
 	summarizer: TaskSummarizer
 	kagiApiKey: string | undefined
@@ -308,7 +317,7 @@ async function serve(): Promise<void> {
 
 	const initialHealthAt = new Date().toISOString()
 	const initialProviderHealth: ProviderHealth = { state: 'unknown', category: 'unknown', since: initialHealthAt, lastCheckedAt: initialHealthAt, consecutiveFailures: 0 }
-	// The recovery bridge owns the one gate, monitor, and suspended-run binding for the process; run submission and the queue read it rather than keeping their own copies.
+	// The submission layer owns the general paused-run binding (a provider suspension or an operator pause); provider recovery owns only provider suspensions and health, so the queue and the run list read each owner rather than a shared copy.
 	const readRunMetaTextById = createReadRunMetaTextById(runsBaseDir)
 	const readRunCheckpointById = createReadRunCheckpointById(runsBaseDir)
 	const probeProvider = createModelInfoProbe(guild.deployment.model.apiBase, apiKey, MODEL_PROBE_TIMEOUT_MS)
@@ -327,6 +336,8 @@ async function serve(): Promise<void> {
 
 	const webHumanBackend = createWebHumanBackend()
 	const interruptChannel = createInterruptChannel()
+	// The operator-pause channel mirrors the interrupt channel: bound per run, it carries a pause request from the HTTP path to the engine's safe point.
+	const operatorPauseChannel = createOperatorPauseChannel()
 	// The delta channel and its browser-facing hub are the third shared-backend pair: the channel is bound per run in withRunBindings, and the hub fans each stamped delta out to the websocket sockets subscribed to that run (see source/web/stream-hub.ts).
 	const deltaChannel = createDeltaChannel()
 	const streamHub = createStreamHub(deltaChannel)
@@ -358,6 +369,7 @@ async function serve(): Promise<void> {
 		llmCaller: roleLlmCaller,
 		humanBackend: webHumanBackend,
 		interruptChannel,
+		operatorPauseChannel,
 		deltaChannel,
 		summarizer,
 		kagiApiKey,
@@ -371,6 +383,8 @@ async function serve(): Promise<void> {
 	const readRunFormat = createReadRunFormat(runsBaseDir)
 	const listCurrentRunIds = createListCurrentRunIds(listRunIds, readRunFormat)
 	const readPauseStateById = createReadPauseStateById(readRunCheckpointById)
+	const readPauseRequestById = createReadPauseRequestById(runsBaseDir)
+	const writePauseRequest = createWritePauseRequest(runsBaseDir)
 	const runCheckpointExists = createRunCheckpointExists(runsBaseDir)
 	const runSubmission = createRunSubmission({
 		providerSuspension: providerRecovery,
@@ -384,8 +398,8 @@ async function serve(): Promise<void> {
 		onRunSettled: (meta) => taskQueue.onRunSettled(meta),
 	})
 	// The queue's two same-run answer resumes compose the submission layer over the same meta/checkpoint readers the explicit error-or-suspended resume uses.
-	const resumeParkedRun = createResumeParkedRun({ runSubmission, readRunMetaById, readCheckpointById: readRunCheckpointById })
-	const resumeClarificationRun = createResumeClarificationRun({ runSubmission, readRunMetaById, readCheckpointById: readRunCheckpointById })
+	const resumeParkedRun = createResumeParkedRun({ runSubmission, readRunMetaById, readCheckpointById: readRunCheckpointById, deletePauseRequest: createDeletePauseRequest(runsBaseDir) })
+	const resumeClarificationRun = createResumeClarificationRun({ runSubmission, readRunMetaById, readCheckpointById: readRunCheckpointById, deletePauseRequest: createDeletePauseRequest(runsBaseDir) })
 	// The operator-termination path marks the parked or suspended run interrupted, logs the action, and removes the checkpoint so the run can never be answered or resumed.
 	const terminatePausedRun = createTerminatePausedRun({
 		readRunMetaById,
@@ -393,7 +407,7 @@ async function serve(): Promise<void> {
 		writeMetaFor: (runId) => createWriteMeta(runId, runsBaseDir),
 		deleteCheckpointFor: (runId) => createDeleteCheckpoint(runId, runsBaseDir),
 		appendLogFor: (runId) => createAppendLog(runId, runsBaseDir),
-		clearSuspendedRun: (runId) => runSubmission.clearSuspendedRun(runId),
+		clearPausedRun: (runId) => runSubmission.clearPausedRun(runId),
 	})
 	// The queue module owns the durable state machine, dispatch, settlement, and queue persistence; the composition root supplies only its configured leaves.
 	const taskQueue = createTaskQueue({
@@ -407,7 +421,8 @@ async function serve(): Promise<void> {
 		terminatePausedRun,
 		submitRun: (submission) => runSubmission.submit(submission.task, submission.effort, submission.involvement, submission.logLevel, submission.continuation),
 		hasActiveRun: () => runSubmission.activeRunId() !== undefined,
-		hasSuspendedRun: () => providerRecovery.hasSuspendedRun(),
+		hasSuspendedRun: () => runSubmission.pausedRunId() !== undefined,
+		pausedRunKind: () => runSubmission.pausedRunKind(),
 		canDispatch: () => providerRecovery.canDispatch(),
 		ensureProviderProbe: () => providerRecovery.ensureProbing(),
 		sleep: createSleep(),
@@ -442,6 +457,7 @@ async function serve(): Promise<void> {
 		runSubmission,
 		readRunMetaById,
 		readCheckpointById: readRunCheckpointById,
+		deletePauseRequest: createDeletePauseRequest(runsBaseDir),
 		taskQueue,
 	})
 	// The coordinator owns the one automatic-resume decision: a successful probe asks it to re-enter a due auto suspension even when the queue has no item. The resume operation owns the cleanup of an unresumable pause, then the coordinator lets the scheduler dispatch again.
@@ -460,6 +476,8 @@ async function serve(): Promise<void> {
 		readRunMetaTextById,
 		readCheckpointById: readRunCheckpointById,
 		readRunFormat,
+		readPauseRequestById,
+		deletePauseRequest: createDeletePauseRequest(runsBaseDir),
 		writeMetaFor: (runId) => createWriteMeta(runId, runsBaseDir),
 		resume: (checkpoint: RunCheckpoint) => runSubmission.resume(checkpoint),
 	})
@@ -475,12 +493,20 @@ async function serve(): Promise<void> {
 	for (const runId of reconciliation.suspendedRunIds) {
 		console.log(`Left suspended run ${runId} waiting to be resumed or terminated`)
 	}
-	// The suspended run has no live settlement to fill the submission layer's priority slot, so boot seeds it: every new task refusal and the boot tick then see the pause before any waiting item can start.
+	for (const runId of reconciliation.operatorPausedRunIds) {
+		console.log(`Left operator-paused run ${runId} waiting to be resumed or terminated`)
+	}
+	// The paused run has no live settlement to fill the submission layer's priority slot, so boot seeds it: every new task refusal and the boot tick then see the pause before any waiting item can start.
 	const suspendedRunId = reconciliation.suspendedRunIds[0]
 	if (suspendedRunId !== undefined) {
 		runSubmission.adoptSuspendedRun(suspendedRunId)
 		// Load the reported suspension into the gate and start probing; the monitor honors autoResumeAfter, so boot never re-issues the interrupted call before its backoff.
 		providerRecovery.hydrateSuspension(suspendedRunId)
+	}
+	const operatorPausedRunId = reconciliation.operatorPausedRunIds[0]
+	if (operatorPausedRunId !== undefined) {
+		// An operator pause holds the slot but says nothing about provider health, so it is adopted only into the submission binding.
+		runSubmission.adoptOperatorPausedRun(operatorPausedRunId)
 	}
 
 	// Boot order (docs/queueing.md "Dispatch and the scheduler"): reconciliation first, then exactly one scheduler tick. The tick repairs stale active and suspended items from their metas and dispatches the head waiting item — unless the resumed run holds the slot or a suspended run retains priority, in which case the dispatch restores the head and the run's own settlement ticks onward.
@@ -516,6 +542,9 @@ async function serve(): Promise<void> {
 		taskQueue,
 		resumeErroredOrSuspendedRun,
 		runCheckpointExists,
+		writePauseRequest,
+		deletePauseRequest: createDeletePauseRequest(runsBaseDir),
+		operatorPauseChannel,
 		readHealth: () => providerRecovery.readHealth(),
 		build: buildInfo,
 		flowFeedResponder,

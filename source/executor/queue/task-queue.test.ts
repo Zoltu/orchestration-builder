@@ -136,7 +136,7 @@ function pauseStateOf(seed: PauseSeed | undefined): PauseState | null {
 	return { kind: 'parked_ask', ask: seed }
 }
 
-function makeQueue(options: { initial?: QueueSeedItem[], submitResults?: QueuedRunSubmitResult[], hasActiveRun?: () => boolean, hasSuspendedRun?: () => boolean, canDispatch?: () => boolean, ensureProviderProbe?: () => void, metas?: Record<string, RunMeta>, runs?: RunListEntry[], pauseStates?: Record<string, PauseSeed>, resumeResults?: ResumeParkedRunResult[], clarificationResumeResults?: ResumeClarificationRunResult[], terminateResults?: TerminatePausedRunResult[] } = {}): QueueHarness {
+function makeQueue(options: { initial?: QueueSeedItem[], submitResults?: QueuedRunSubmitResult[], hasActiveRun?: () => boolean, hasSuspendedRun?: () => boolean, pausedRunKind?: () => 'provider' | 'operator' | undefined, canDispatch?: () => boolean, ensureProviderProbe?: () => void, metas?: Record<string, RunMeta>, runs?: RunListEntry[], pauseStates?: Record<string, PauseSeed>, resumeResults?: ResumeParkedRunResult[], clarificationResumeResults?: ResumeClarificationRunResult[], terminateResults?: TerminatePausedRunResult[] } = {}): QueueHarness {
 	const store = fakeQueueStore(options.initial ?? [])
 	const scripted = [...(options.submitResults ?? [])]
 	const submitCalls: QueuedRunSubmission[] = []
@@ -185,6 +185,7 @@ function makeQueue(options: { initial?: QueueSeedItem[], submitResults?: QueuedR
 		submitRun,
 		hasActiveRun: options.hasActiveRun ?? (() => false),
 		hasSuspendedRun: options.hasSuspendedRun ?? (() => store.items().some((entry) => entry.status === 'suspended')),
+		pausedRunKind: options.pausedRunKind ?? (() => undefined),
 		canDispatch: options.canDispatch ?? (() => true),
 		ensureProviderProbe: options.ensureProviderProbe ?? (() => {}),
 		sleep: async () => {},
@@ -321,6 +322,14 @@ describe('suspended priority', () => {
 		const harness = makeQueue({ hasSuspendedRun: () => true })
 		const result = await harness.queue.submitNow({ task: 'new task' }, handles)
 		expect(result).toEqual({ kind: 'run_suspended' })
+		expect(harness.items()).toEqual([])
+		expect(harness.writes.length).toBe(0)
+	})
+
+	test('submitNow refuses with run_paused while an operator pause holds priority', async () => {
+		const harness = makeQueue({ hasSuspendedRun: () => true, pausedRunKind: () => 'operator' })
+		const result = await harness.queue.submitNow({ task: 'new task' }, handles)
+		expect(result).toEqual({ kind: 'run_paused' })
 		expect(harness.items()).toEqual([])
 		expect(harness.writes.length).toBe(0)
 	})
@@ -851,6 +860,33 @@ describe('answer', () => {
 		if (typeof stored !== 'object' || stored === null) throw new Error('expected the stored item')
 		expect(Reflect.has(stored, 'resumeRunId')).toBe(false)
 		expect(Reflect.get(stored, 'answer')).toBe('postgres')
+	})
+})
+
+describe('boot repair for an operator-suspended run', () => {
+	test('maps an active item whose run meta carries an operator pause to suspended and holds dispatch priority', async () => {
+		const runId = 'run-20260101-003000'
+		const pause = { message: 'The operator paused this run.', pausedAt: SUSPENDED_AT }
+		const operatorSuspendedMeta: RunMeta = {
+			runId,
+			task: 'fix the parser bug',
+			status: 'suspended',
+			startTime: '2026-01-01T00:30:00.000Z',
+			pause,
+		}
+		const harness = makeQueue({
+			initial: [item({ status: 'active', runId }), item({ id: 'item-2', task: 'waiting work' })],
+			metas: { [runId]: operatorSuspendedMeta },
+		})
+
+		await harness.queue.tick()
+
+		const repaired = harness.items().find((entry) => entry.id === 'item-1')
+		expect(repaired?.status).toBe('suspended')
+		expect(repaired?.runId).toBe(runId)
+		expect(repaired?.suspendedAt).toBe(pause.pausedAt)
+		expect(harness.items().find((entry) => entry.id === 'item-2')?.status).toBe('waiting')
+		expect(harness.submitCalls).toEqual([])
 	})
 })
 

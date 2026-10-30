@@ -87,6 +87,7 @@ describe('task-thread wire guards', () => {
 	test('accepts a queue-derived question and a system marker with its system kind', () => {
 		expect(isTaskThreadResponse(thread({ entries: [entry({ kind: 'question', outcome: 'waiting', queueItemId: 'item-1', source: 'queue' })] }))).toBe(true)
 		expect(isTaskThreadResponse(thread({ entries: [entry({ kind: 'system', actor: 'system', systemKind: 'failure' })] }))).toBe(true)
+		expect(isTaskThreadResponse(thread({ entries: [entry({ kind: 'system', actor: 'system', systemKind: 'operator_pause' })] }))).toBe(true)
 	})
 
 	test('summary snapshots require a summary only in the ready state', () => {

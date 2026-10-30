@@ -371,6 +371,7 @@ describe('provider auto-resume coordinator', () => {
 			runSubmission: submission,
 			readRunMetaById: (runId) => metas.get(runId) ?? null,
 			readCheckpointById: () => null,
+			deletePauseRequest: () => true,
 			taskQueue: {
 				reactivateErrorItem: () => {},
 				reactivateSuspendedItem: () => {},

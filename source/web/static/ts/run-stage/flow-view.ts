@@ -681,11 +681,11 @@ function CtaButton(h: H, props: { label: string; tone: 'accent' | 'error' | 'war
 	return h('g', { class: 'flow-cta-button' }, children)
 }
 
-// Maps a terminal or suspended run status to the CTA's label and tone. A needs_clarification run is waiting on the human, so it reads as an accent (not an error); a suspended run is a warning-toned pause that opens the pause card rather than a result; a failed or interrupted run is error-toned; success is accent.
-function ctaDescriptorForStatus(status: RunStatus): { label: string; tone: 'accent' | 'error' | 'warning' } {
+// Maps a terminal or suspended run status to the CTA's label and tone. A needs_clarification run is waiting on the human, so it reads as an accent (not an error); a suspended run is a warning-toned pause that opens the pause card rather than a result, and an operator pause names itself Paused rather than Suspended; a failed or interrupted run is error-toned; success is accent.
+function ctaDescriptorForStatus(status: RunStatus, operatorPaused: boolean): { label: string; tone: 'accent' | 'error' | 'warning' } {
 	if (status === 'error' || status === 'interrupted') return { label: 'See error', tone: 'error' }
 	if (status === 'needs_clarification') return { label: 'Respond', tone: 'accent' }
-	if (status === 'suspended') return { label: 'Suspended', tone: 'warning' }
+	if (status === 'suspended') return operatorPaused ? { label: 'View pause', tone: 'warning' } : { label: 'Suspended', tone: 'warning' }
 	return { label: 'See result', tone: 'accent' }
 }
 
@@ -824,7 +824,7 @@ export function renderFlowViewWithQuestionPlacement(h: H, model: InteractionMode
 	let ctaDescriptor: { label: string; tone: 'accent' | 'error' | 'warning' } | null = null
 	if (showCta) {
 		ctaLayout = { x: 0, y: mainYOffset }
-		ctaDescriptor = ctaDescriptorForStatus(model.status)
+		ctaDescriptor = ctaDescriptorForStatus(model.status, model.pause !== undefined && model.pause !== null)
 	}
 
 	const currentColumnCount = rows.reduce((max, row) => {
@@ -876,7 +876,7 @@ export function deriveNowCaption(model: InteractionModel, labels: LabelResolver,
 	if (status === 'error') return 'The run stopped with an error.'
 	if (status === 'interrupted') return 'The run was interrupted.'
 	if (status === 'needs_clarification') return 'Waiting for your input…'
-	if (isSuspendedStatus(status)) return 'Suspended — resume when ready.'
+	if (isSuspendedStatus(status)) return model.pause !== undefined && model.pause !== null ? 'Paused — resume when ready.' : 'Suspended — resume when ready.'
 	const operation = activeOperation(model)
 	if (operation === null) return 'Working…'
 	const participantsById = new Map<string, Participant>()

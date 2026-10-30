@@ -171,6 +171,7 @@ interface QueueOverOptions {
 	resumeResults?: ResumeParkedRunResult[]
 	clarificationResumeResults?: ResumeClarificationRunResult[]
 	hasSuspendedRun?: () => boolean
+	pausedRunKind?: () => 'provider' | 'operator' | undefined
 	canDispatch?: () => boolean
 }
 
@@ -202,6 +203,7 @@ function queueOver(store: ReturnType<typeof fakeQueueStore>, submit: ReturnType<
 		submitRun: submit.submitRun,
 		hasActiveRun,
 		hasSuspendedRun: options.hasSuspendedRun ?? (() => store.items().some((entry) => entry.status === 'suspended')),
+		pausedRunKind: options.pausedRunKind ?? (() => undefined),
 		canDispatch: options.canDispatch ?? (() => true),
 		ensureProviderProbe: () => {},
 		sleep: sleep.sleep,
@@ -325,6 +327,7 @@ describe('createTaskQueue tick — dispatch', () => {
 			submitRun: submit.submitRun,
 			hasActiveRun: () => false,
 			hasSuspendedRun: () => false,
+			pausedRunKind: () => undefined,
 			canDispatch: () => true,
 		ensureProviderProbe: () => {},
 			sleep: sleep.sleep,
@@ -385,6 +388,7 @@ describe('createTaskQueue tick — submission threading', () => {
 			submitRun: submit.submitRun,
 			hasActiveRun: () => false,
 			hasSuspendedRun: () => false,
+			pausedRunKind: () => undefined,
 			canDispatch: () => true,
 		ensureProviderProbe: () => {},
 			sleep: sleep.sleep,
@@ -1347,6 +1351,24 @@ describe('createTaskQueue onRunSettled', () => {
 		expect(settled.status).toBe('done')
 		expect(settled.resultSummary).toBe('fixed it')
 		expect(settled.settledAt).toBe(NOW)
+	})
+
+	test('an operator pause maps the active item to suspended with its own pause time and skips the tick', async () => {
+		const store = fakeQueueStore([
+			waitingItem({ status: 'active', runId: 'run-20260101-010000' }),
+			waitingItem({ id: 'next' }),
+		])
+		const submit = fakeSubmit([])
+		const { onRunSettled } = queueOver(store, submit)
+		const pausedAt = '2026-01-01T03:00:00.000Z'
+
+		await onRunSettled(meta({ status: 'suspended', endTime: undefined, pause: { message: 'The operator paused this run.', pausedAt } }))
+
+		const paused = requireItem(store.items(), 'item-1')
+		expect(paused.status).toBe('suspended')
+		expect(paused.suspendedAt).toBe(pausedAt)
+		expect(store.writes.length).toBe(1)
+		expect(submit.calls.length).toBe(0)
 	})
 
 	test('a suspended meta maps the active item to suspended and does not tick or dispatch waiting work', async () => {

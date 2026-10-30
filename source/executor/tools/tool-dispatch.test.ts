@@ -17,7 +17,7 @@ function invocationFor(call: ToolCall): ToolInvocation {
 
 async function dispatchTo(platform: ToolPlatform, roleDefinition: RoleDefinition, scope: ReturnType<typeof createFixtureRunScope>, call: ToolCall): Promise<ToolResult> {
 	const outcome = await platform.dispatch(roleDefinition, scope, call, invocationFor(call))
-	if (outcome.kind === 'suspended') throw new Error('unexpected suspension')
+	if (outcome.kind === 'suspended' || outcome.kind === 'operator_paused') throw new Error('unexpected pause')
 	return outcome.result
 }
 

@@ -1,7 +1,8 @@
 import { defineCollection } from '../entity-diff/index.js'
 import type { CollectionDefinitions, ReplicaState } from '../entity-diff/index.js'
 import { isObject, isOperationMetricsRecord } from '../guards.js'
-import type { InteractionModel, Operation, OperationKind, OperationLifecycle, OperationMetrics, OperationOutcome, Participant, ParticipantKind, RunStatus, StackRecord } from '../interaction-model.js'
+import type { InteractionModel, Operation, OperationKind, OperationLifecycle, OperationMetrics, OperationOutcome, OperatorPauseRecord, Participant, ParticipantKind, RunStatus, StackRecord } from '../interaction-model.js'
+import { isOperatorPauseRecord } from '../run-pause.js'
 
 // The run-status collection holds a single entity keyed by a fixed id, so the id is a constant rather than an instance key and the model's run status rides in a collection like every other field.
 const RUN_STATUS_ENTITY_ID = 'run-status' as const
@@ -9,6 +10,8 @@ const RUN_STATUS_ENTITY_ID = 'run-status' as const
 interface RunStatusEntity {
 	id: 'run-status'
 	status: RunStatus
+	// The server flow projection carries the operator pause record alongside status, shaped like the run-list summary; a model with no pause omits it.
+	pause?: OperatorPauseRecord | null
 }
 
 export interface FlowCollections {
@@ -77,6 +80,8 @@ function isRunStatusEntity(value: unknown): value is RunStatusEntity {
 	if (!isObject(value)) return false
 	if (value['id'] !== RUN_STATUS_ENTITY_ID) return false
 	if (!isRunStatus(value['status'])) return false
+	const pause = value['pause']
+	if (pause !== undefined && pause !== null && !isOperatorPauseRecord(pause)) return false
 	return true
 }
 
@@ -90,7 +95,7 @@ function stackVersionOf(stack: StackRecord): string {
 }
 
 function runStatusVersionOf(runStatus: RunStatusEntity): string {
-	return runStatus.status
+	return JSON.stringify([runStatus.status, runStatus.pause ?? null])
 }
 
 // An operation is the only mutable flow entity — a call's lifecycle, settle time, and metrics all change as its return folds in — so its version captures every mutable field, including all six metrics counters, in one cheap pipe-joined string. A null counter is spelled out so it cannot collide with a numeric value.
@@ -141,20 +146,24 @@ export function emptyFlowReplicaState(): FlowReplicaState {
 export function flowModelFromReplicaState(state: FlowReplicaState): InteractionModel {
 	const runStatusEntity = state.runStatus[0]
 	const status: RunStatus = runStatusEntity === undefined ? 'unknown' : runStatusEntity.status
-	return {
+	const model: InteractionModel = {
 		participants: state.participants,
 		operations: state.operations,
 		status,
 		stacks: state.stacks,
 	}
+	if (runStatusEntity !== undefined && runStatusEntity.pause !== undefined && runStatusEntity.pause !== null) model.pause = runStatusEntity.pause
+	return model
 }
 
 // The server replica consumes the derived model's collections plus the run status as the singleton run-status entity. entity-diff treats collections as unordered, so a client sorts by its own domain key after applying.
 export function flowReplicaStateFromModel(model: InteractionModel): FlowReplicaState {
+	const runStatus: RunStatusEntity = { id: RUN_STATUS_ENTITY_ID, status: model.status }
+	if (model.pause !== undefined && model.pause !== null) runStatus.pause = model.pause
 	return {
 		participants: model.participants,
 		operations: model.operations,
 		stacks: model.stacks ?? [],
-		runStatus: [{ id: RUN_STATUS_ENTITY_ID, status: model.status }],
+		runStatus: [runStatus],
 	}
 }

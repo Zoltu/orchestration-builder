@@ -8,6 +8,7 @@ import { runRole } from './engine.ts'
 import type { EngineDependencies } from './engine-state.ts'
 import { resumeRoleStack } from './resume.ts'
 import { createInterruptQueue } from './interrupts.ts'
+import { createOperatorPauseQueue } from './operator-pause.ts'
 import type { LlmCallResult, LlmCaller, LlmFetch, LlmFetchRequest, LlmRequest, LlmStreamDelta, LlmStreamResponse } from './llm.ts'
 import { createLlmCaller } from './llm.ts'
 import type { LoadedGuild } from './loader.ts'
@@ -26,13 +27,13 @@ import { isObject, safeJsonParse } from './validation.ts'
 
 async function runRoleCard(...args: Parameters<typeof runRole>): Promise<ResultCard> {
 	const outcome = await runRole(...args)
-	if (outcome.kind === 'suspended') throw new Error('unexpected suspension outside a suspension test')
+	if (outcome.kind === 'suspended' || outcome.kind === 'operator_paused') throw new Error('unexpected pause outside a pause test')
 	return outcome.card
 }
 
 async function resumeRoleStackCard(...args: Parameters<typeof resumeRoleStack>): Promise<ResultCard> {
 	const outcome = await resumeRoleStack(...args)
-	if (outcome.kind === 'suspended') throw new Error('unexpected suspension outside a suspension test')
+	if (outcome.kind === 'suspended' || outcome.kind === 'operator_paused') throw new Error('unexpected pause outside a pause test')
 	return outcome.card
 }
 
@@ -321,6 +322,7 @@ function makeDeps(llm: LlmCaller, registryCounter = 0): { deps: EngineDependenci
 		humanBackend: stubHumanBackend,
 		roleRegistry,
 		interruptQueue: createInterruptQueue(),
+		operatorPauseQueue: createOperatorPauseQueue(),
 		contextPressureTracker,
 		checkpointRecorder: sink.recorder,
 		parkTracker,
@@ -4508,6 +4510,200 @@ describe('durable pending invocation reconciliation', () => {
 		const interrupted = frame.roleState.history.filter((message) => message.role === 'tool' && message.tool_call_id === 'same_id' && message.content.includes('Not executed because an earlier call'))
 		expect(interrupted.length).toBe(2)
 	})
+})
+
+describe('runRole — operator pause', () => {
+	const pause = { message: 'The operator paused this run.', pausedAt: '2026-01-01T00:05:00.000Z' }
+
+	test('a request before the first LLM call pauses at the safe point without a role_finished or pending invocation', async () => {
+		const guild = buildGuild({ main: { systemPrompt: 'p', tools: ['finish'] } }, 'main')
+		const llm = new FakeLlm()
+		llm.responses = [success([finishCall({ status: 'success', summary: 'never called' })])]
+		const harness = makeDeps(llm)
+		harness.deps.operatorPauseQueue.request(pause)
+
+		const outcome = await runRole(harness.deps, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'do it' })
+
+		expect(outcome.kind).toBe('operator_paused')
+		if (outcome.kind !== 'operator_paused') throw new Error('expected an operator pause')
+		expect(outcome.pause).toEqual(pause)
+		expect(llm.calls.length).toBe(0)
+		expect(harness.events.some((event) => event.type === 'role_finished')).toBe(false)
+		const pausedEvent = defined(harness.events.find((event) => event.type === 'run_paused'), 'run_paused event')
+		expect(payloadField(pausedEvent, 'role')).toBe('main')
+		expect(payloadField(pausedEvent, 'roleId')).toBe('main-0-1')
+		expect(payloadField(pausedEvent, 'pausedAt')).toBe(pause.pausedAt)
+		const checkpoint = harness.checkpoints[harness.checkpoints.length - 1]
+		if (checkpoint === undefined) throw new Error('expected a pause checkpoint')
+		expect(checkpoint.pause).toEqual(pause)
+		expect(checkpoint.suspension).toBeUndefined()
+		expect(checkpoint.frames[0]?.pending).toBeUndefined()
+	})
+
+	test('a request made mid-turn waits for the whole tool batch and issues no further LLM call', async () => {
+		const guild = withTool(buildGuild({ main: { systemPrompt: 'p', tools: ['echo', 'finish'] } }, 'main'), { name: 'echo', description: 'Echoes its arguments.', parameters: { type: 'object', properties: {} } })
+		const llm = new FakeLlm()
+		const harness = makeDeps(llm)
+		const pausingEcho = (args: Record<string, unknown>): ToolResult => {
+			if (args['pause'] === true) harness.deps.operatorPauseQueue.request(pause)
+			return { kind: 'success', data: args }
+		}
+		const deps = { ...harness.deps, toolPlatform: withExtraHandlers(harness.deps.toolPlatform, { echo: pausingEcho }) }
+		llm.responses = [success([namedCall('e1', 'echo', { pause: true }), namedCall('e2', 'echo', {})])]
+
+		const outcome = await runRole(deps, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'do it' })
+
+		expect(outcome.kind).toBe('operator_paused')
+		expect(llm.calls.length).toBe(1)
+		const checkpoint = harness.checkpoints[harness.checkpoints.length - 1]
+		if (checkpoint === undefined) throw new Error('expected a pause checkpoint')
+		expect(checkpoint.frames[0]?.roleState.history.filter((message) => message.role === 'tool').map((message) => message.tool_call_id)).toEqual(['e1', 'e2'])
+		expect(checkpoint.frames[0]?.pending).toBeUndefined()
+	})
+
+	test('a resume from a mid-batch pause checkpoint does not re-execute completed tools and issues the next LLM call', async () => {
+		const guild = withTool(buildGuild({ main: { systemPrompt: 'p', tools: ['echo', 'finish'] } }, 'main'), { name: 'echo', description: 'Echoes its arguments.', parameters: { type: 'object', properties: {} } })
+		const llm = new FakeLlm()
+		const harness = makeDeps(llm)
+		const toolCalls: string[] = []
+		const pausingEcho = (args: Record<string, unknown>): ToolResult => {
+			const id = typeof args['id'] === 'string' ? args['id'] : ''
+			toolCalls.push(id)
+			if (id === 'e2') harness.deps.operatorPauseQueue.request(pause)
+			return { kind: 'success', data: args }
+		}
+		const deps = { ...harness.deps, toolPlatform: withExtraHandlers(harness.deps.toolPlatform, { echo: pausingEcho }) }
+		llm.responses = [success([namedCall('e1', 'echo', { id: 'e1' }), namedCall('e2', 'echo', { id: 'e2' })])]
+
+		const outcome = await runRole(deps, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'do it' })
+
+		expect(outcome.kind).toBe('operator_paused')
+		expect(toolCalls).toEqual(['e1', 'e2'])
+		expect(llm.calls.length).toBe(1)
+		const checkpoint = defined(harness.checkpoints[harness.checkpoints.length - 1], 'pause checkpoint')
+
+		const resumeLlm = new FakeLlm()
+		resumeLlm.responses = [success([finishCall({ status: 'success', summary: 'resumed' })])]
+		const resumed = makeDeps(resumeLlm)
+		let resumedToolCalls = 0
+		const countingEcho = (args: Record<string, unknown>): ToolResult => {
+			resumedToolCalls++
+			return { kind: 'success', data: args }
+		}
+		await resumeRoleStackCard(runRole, { ...resumed.deps, toolPlatform: withExtraHandlers(resumed.deps.toolPlatform, { echo: countingEcho }) }, guild, checkpoint)
+
+		expect(resumedToolCalls).toBe(0)
+		expect(resumeLlm.calls.length).toBe(1)
+		const sentToolResults = resumeLlm.calls[0]?.messages.filter((message) => message.role === 'tool').map((message) => message.tool_call_id)
+		expect(sentToolResults).toEqual(['e1', 'e2'])
+	})
+
+	test('a pause with an in-flight child call resumes the pending call without replaying completed tools', async () => {
+		const echoManifest: ToolManifest = { name: 'echo', description: 'Echoes its arguments.', parameters: { type: 'object', properties: {} } }
+		const guild = withTool(buildGuild({
+			orchestrator: { systemPrompt: 'p', tools: ['agent', 'finish'] },
+			coder: { systemPrompt: 'c', tools: ['echo', 'finish'] },
+		}, 'orchestrator'), echoManifest)
+		const llm = new FakeLlm()
+		const harness = makeDeps(llm)
+		let echoCalls = 0
+		const pausingEcho = (args: Record<string, unknown>): ToolResult => {
+			echoCalls++
+			harness.deps.operatorPauseQueue.request(pause)
+			return { kind: 'success', data: args }
+		}
+		const deps = { ...harness.deps, toolPlatform: withExtraHandlers(harness.deps.toolPlatform, { echo: pausingEcho }) }
+		llm.responses = [success([agentCall('coder', 'subtask')]), success([namedCall('e1', 'echo', { id: 'e1' })])]
+
+		const outcome = await runRole(deps, { loadedGuild: guild, depth: 0, roleName: 'orchestrator', task: 'do it' })
+
+		expect(outcome.kind).toBe('operator_paused')
+		expect(echoCalls).toBe(1)
+		const checkpoint = defined(harness.checkpoints[harness.checkpoints.length - 1], 'pause checkpoint')
+		expect(checkpoint.frames.length).toBe(2)
+		expect(checkpoint.frames[0]?.pending?.toolCalls[0]?.function.name).toBe('agent')
+		expect(checkpoint.frames[0]?.pending?.childCard).toBeUndefined()
+		expect(checkpoint.frames[1]?.roleName).toBe('coder')
+		expect(checkpoint.frames[1]?.pending).toBeUndefined()
+
+		const resumeLlm = new FakeLlm()
+		resumeLlm.responses = [
+			success([finishCall({ status: 'success', summary: 'child done' })]),
+			success([finishCall({ status: 'success', summary: 'parent done' })]),
+		]
+		const resumed = makeDeps(resumeLlm)
+		let resumedEchoCalls = 0
+		const countingEcho = (args: Record<string, unknown>): ToolResult => {
+			resumedEchoCalls++
+			return { kind: 'success', data: args }
+		}
+		await resumeRoleStackCard(runRole, { ...resumed.deps, toolPlatform: withExtraHandlers(resumed.deps.toolPlatform, { echo: countingEcho }) }, guild, checkpoint)
+
+		expect(resumedEchoCalls).toBe(0)
+		expect(resumeLlm.calls.length).toBe(2)
+	})
+
+	test('a provider failure wins over a queued pause request', async () => {
+		const guild = buildGuild({ main: { systemPrompt: 'p', tools: ['finish'] } }, 'main')
+		const base = new FakeLlm()
+		base.responses = [providerFailure('billing')]
+		let harness: ReturnType<typeof makeDeps> | undefined
+		const caller: LlmCaller = {
+			async call(request) {
+				if (harness !== undefined) harness.deps.operatorPauseQueue.request(pause)
+				return await base.call(request)
+			},
+		}
+		harness = makeDeps(caller)
+
+		const outcome = await runRole(harness.deps, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'do it' })
+
+		expect(outcome.kind).toBe('suspended')
+		expect(harness.events.some((event) => event.type === 'run_paused')).toBe(false)
+	})
+
+	test('a park mark wins over a queued pause request at the safe point', async () => {
+		const guild = buildGuild({ main: { systemPrompt: 'p', tools: ['finish'] } }, 'main')
+		const llm = new FakeLlm()
+		const harness = makeDeps(llm)
+		harness.deps.operatorPauseQueue.request(pause)
+		harness.parkTracker.parkedQuestion = 'Which database?'
+
+		const outcome = await runRole(harness.deps, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'do it' })
+
+		expect(outcome.kind).toBe('card')
+		expect(llm.calls.length).toBe(0)
+		expect(harness.events.some((event) => event.type === 'run_paused')).toBe(false)
+	})
+
+	test('a pause requested during a handler interlude waits until the handler resolves, then pauses the target', async () => {
+		const guild = buildGuild({
+			main: { systemPrompt: 'p', tools: ['finish'] },
+			handler: { systemPrompt: 'h', tools: ['finish'] },
+		}, 'main', { executor: { ...baseExecutor, inquiryHandlerRole: 'handler' } })
+		const base = new FakeLlm()
+		base.responses = [success([finishCall({ status: 'success', summary: 'handler answered' })])]
+		let harness: ReturnType<typeof makeDeps> | undefined
+		const caller: LlmCaller = {
+			async call(request) {
+				const result = await base.call(request)
+				if (base.calls.length === 1 && harness !== undefined) harness.deps.operatorPauseQueue.request(pause)
+				return result
+			},
+		}
+		harness = makeDeps(caller)
+		harness.deps.interruptQueue.submit({ kind: 'inquiry', message: 'what is happening?' })
+
+		const outcome = await runRole(harness.deps, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'do it' })
+
+		expect(outcome.kind).toBe('operator_paused')
+		expect(base.calls.length).toBe(1)
+		expect(harness.events.some((event) => event.type === 'run_paused' && payloadField(event, 'role') === 'handler')).toBe(false)
+		const pausedEvent = defined(harness.events.find((event) => event.type === 'run_paused'), 'run_paused event')
+		expect(payloadField(pausedEvent, 'role')).toBe('main')
+		expect(harness.checkpoints[harness.checkpoints.length - 1]?.pendingInterlude).toBeUndefined()
+	})
+
 })
 
 describe('runRole — provider failure suspensions', () => {

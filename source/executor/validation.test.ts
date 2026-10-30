@@ -87,6 +87,17 @@ describe('boolean guards', () => {
 		expect(isRunMeta({ runId: 'r', task: 't', status: 'suspended', startTime: 'now', suspension: { ...suspension, autoResumeAfter: '2026-01-01T00:00:05.000Z' } })).toBe(false)
 	})
 
+	test('isRunMeta accepts exactly one pause cause on a suspended meta and none otherwise', () => {
+		const suspension = { category: 'billing' as const, resumePolicy: 'operator' as const, message: 'Top up.', suspendedAt: '2026-01-01T00:00:00.000Z' }
+		const pause = { message: 'The operator paused this run.', pausedAt: '2026-01-01T00:00:00.000Z' }
+		expect(isRunMeta({ runId: 'r', task: 't', status: 'suspended', startTime: 'now', pause })).toBe(true)
+		expect(isRunMeta({ runId: 'r', task: 't', status: 'suspended', startTime: 'now', suspension, pause })).toBe(false)
+		expect(isRunMeta({ runId: 'r', task: 't', status: 'suspended', startTime: 'now', pause: { ...pause, message: '' } })).toBe(false)
+		expect(isRunMeta({ runId: 'r', task: 't', status: 'suspended', startTime: 'now', pause: { ...pause, pausedAt: 'not-a-date' } })).toBe(false)
+		expect(isRunMeta({ runId: 'r', task: 't', status: 'running', startTime: 'now', pause })).toBe(false)
+		expect(isRunMeta({ runId: 'r', task: 't', status: 'success', startTime: 'now', endTime: 'later', pause })).toBe(false)
+	})
+
 	test('isRunMeta accepts an optional effort and rejects an invalid one', () => {
 		const base = {
 			runId: 'r',

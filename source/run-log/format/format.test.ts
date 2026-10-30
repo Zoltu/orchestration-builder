@@ -110,6 +110,10 @@ describe('toRecentLogEntry one-line text', () => {
 		expect(renderedText(event('role_finished', { role: 'coder', status: 'error', summary: 'could not parse the file', error: { kind: 'invalid_arguments', message: 'bad json' } }))).toBe('coder · finished (error)')
 	})
 
+	test('run_paused renders as an operator pause row', () => {
+		expect(renderedText(event('run_paused', { role: 'planner', roleId: 'planner-1', pausedAt: '2026-01-01T00:00:00.000Z' }))).toBe('planner · run paused by the operator')
+	})
+
 	test('role_finished without status omits the parenthetical', () => {
 		expect(renderedText(event('role_finished', { role: 'planner' }))).toBe('planner · finished')
 	})

@@ -15,6 +15,7 @@ import type {
 	LoggingConfig,
 	ModelConfig,
 	OperationKind,
+	OperatorPauseRecord,
 	ResultCard,
 	RoleDefinition,
 	RunMeta,
@@ -116,6 +117,13 @@ function isIsoTimestamp(value: unknown): value is string {
 	if (!isString(value)) return false
 	if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$/.test(value)) return false
 	return !Number.isNaN(Date.parse(value))
+}
+
+export function isOperatorPauseRecord(value: unknown): value is OperatorPauseRecord {
+	if (!isObject(value)) return false
+	if (!isString(value.message) || value.message === '') return false
+	if (!isIsoTimestamp(value.pausedAt)) return false
+	return true
 }
 
 export function isSuspensionRecord(value: unknown): value is SuspensionRecord {
@@ -232,9 +240,13 @@ export function isRunMeta(value: unknown): value is RunMeta {
 		if (!isString(value.error.message)) return false
 	}
 	if (isSuspendedStatus(value.status)) {
-		if (!isSuspensionRecord(value.suspension)) return false
+		const hasSuspension = value.suspension !== undefined
+		const hasPause = value.pause !== undefined
+		if (hasSuspension === hasPause) return false
+		if (hasSuspension && !isSuspensionRecord(value.suspension)) return false
+		if (hasPause && !isOperatorPauseRecord(value.pause)) return false
 		if (value.endTime !== undefined || value.result !== undefined || value.error !== undefined) return false
-	} else if (value.suspension !== undefined) {
+	} else if (value.suspension !== undefined || value.pause !== undefined) {
 		return false
 	}
 	return true

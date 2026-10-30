@@ -1,7 +1,8 @@
 import { canonicalSerialize, defineCollection } from '../entity-diff/index.js'
 import type { CollectionDefinitions, ReplicaState } from '../entity-diff/index.js'
 import { isObject } from '../guards.js'
-import type { ResumePolicy, RunStatus, SuspensionRecord } from '../interaction-model.js'
+import type { OperatorPauseRecord, ResumePolicy, RunStatus, SuspensionRecord } from '../interaction-model.js'
+import { isOperatorPauseRecord } from '../run-pause.js'
 
 // The result card and run-level error a run summary carries, declared structurally here so this browser-pure module never imports the server render module (whose ResultCard is the same wire shape).
 export interface RunResultCard {
@@ -30,6 +31,7 @@ export interface RunSummaryEntity {
 	error: RunSummaryError | null
 	continuesFrom: string | null
 	suspension: SuspensionRecord | null
+	pause?: OperatorPauseRecord | null
 	summary: string | null
 }
 
@@ -46,6 +48,7 @@ export interface RunSummary {
 	error: RunSummaryError | null
 	continuesFrom: string | null
 	suspension: SuspensionRecord | null
+	pause: OperatorPauseRecord | null
 	summary: string | null
 }
 
@@ -168,6 +171,8 @@ function isRunSummaryEntity(value: unknown): value is RunSummaryEntity {
 	if (!isNullableString(value['continuesFrom'])) return false
 	const suspension = value['suspension']
 	if (suspension !== null && !isSuspensionRecord(suspension)) return false
+	const pause = value['pause']
+	if (pause !== undefined && pause !== null && !isOperatorPauseRecord(pause)) return false
 	if (!isNullableString(value['summary'])) return false
 	return true
 }
@@ -214,7 +219,7 @@ export function isHealthView(value: unknown): value is HealthView {
 
 // A cheap change detector: it serializes the mutable fields (not the identity-bearing id) canonically, so a change to any field bumps the entity version while an unchanged entity is stable. canonicalSerialize escapes strings, so free-text task/summary content cannot shift field boundaries and collide two different summaries.
 function runSummaryVersionOf(summary: RunSummaryEntity): string {
-	return canonicalSerialize([summary.status, summary.task, summary.effort, summary.involvement, summary.startTime, summary.endTime, summary.result, summary.error, summary.continuesFrom, summary.suspension, summary.summary])
+	return canonicalSerialize([summary.status, summary.task, summary.effort, summary.involvement, summary.startTime, summary.endTime, summary.result, summary.error, summary.continuesFrom, summary.suspension, summary.pause ?? null, summary.summary])
 }
 
 function providerHealthVersionOf(health: ProviderHealthEntity): string {
@@ -246,6 +251,7 @@ export function runSummariesFromReplicaState(state: RunListReplicaState): RunSum
 		error: entity.error,
 		continuesFrom: entity.continuesFrom,
 		suspension: entity.suspension,
+		pause: entity.pause ?? null,
 		summary: entity.summary,
 	}))
 	summaries.sort((left, right) => (left.runId < right.runId ? 1 : left.runId > right.runId ? -1 : 0))
@@ -273,6 +279,7 @@ export function runSummaryEntityFor(summary: RunSummary): RunSummaryEntity {
 		error: summary.error,
 		continuesFrom: summary.continuesFrom,
 		suspension: summary.suspension,
+		pause: summary.pause,
 		summary: summary.summary,
 	}
 }

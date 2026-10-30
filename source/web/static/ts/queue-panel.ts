@@ -1,6 +1,9 @@
 // Pure logic for the queue rows the merged history screen shows (docs/queueing.md "UI interaction model"): grouping the polled items into the queued groups, the display labels, the drag-reorder position arithmetic, and the shape guard the poll filters its response through. No rendering happens here — the screen component in app.js turns these derivations into vnodes — so every decision is unit-testable in memory against plain objects.
 
 import { isObject } from './guards.js'
+import type { OperatorPauseRecord } from './interaction-model.js'
+import { deriveRunPauseKind, deriveSuspendedStatusLabel, isOperatorPauseRecord, readOperatorPauseRecord } from './run-pause.js'
+import type { RunPauseKind } from './run-pause.js'
 
 // The queue item statuses (the wire contract, docs/queueing.md "The queue: storage, item model, state machine").
 type QueueItemStatus = 'waiting' | 'active' | 'suspended' | 'needs_input' | 'done' | 'error' | 'cancelled'
@@ -17,6 +20,8 @@ export interface QueueItemLike {
 	settledAt?: string
 	// suspended: when the paused run entered its suspension.
 	suspendedAt?: string
+	// Optional operator pause record when a projection includes it; the run summary is the current source for the kind.
+	pause?: OperatorPauseRecord | null
 	// needs_input: the recorded question.
 	question?: string
 	// Set when the operator answers.
@@ -47,6 +52,8 @@ export function isQueueItemLike(value: unknown): value is QueueItemLike {
 	if (!isOptionalNonEmptyString(value['runId'])) return false
 	if (!isOptionalNonEmptyString(value['continuesFrom'])) return false
 	if (!isOptionalNonEmptyString(value['resumesRunId'])) return false
+	const pause = value['pause']
+	if (pause !== undefined && pause !== null && !isOperatorPauseRecord(pause)) return false
 	return QUEUE_ITEM_STATUSES.some((status) => status === value['status'])
 }
 
@@ -78,15 +85,25 @@ export function backlogCount(items: QueueItemLike[]): number {
 const QUEUE_STATUS_LABELS: Record<string, string> = {
 	waiting: 'waiting',
 	active: 'running',
-	suspended: 'suspended',
 	needs_input: 'needs your answer',
 	done: 'done',
 	error: 'error',
 	cancelled: 'cancelled',
 }
 
-export function queueStatusLabel(status: string): string {
+export function queueStatusLabel(status: string, pauseKind: RunPauseKind = 'none'): string {
+	const suspendedLabel = deriveSuspendedStatusLabel(status, pauseKind)
+	if (suspendedLabel !== null) return suspendedLabel
 	return QUEUE_STATUS_LABELS[status] ?? status
+}
+
+// A suspended row takes its kind from the item's own optional pause record first, then the matching run summary, so a projection that carries either identifies an operator pause.
+export function queueRowPauseKind(item: QueueItemLike, summary: unknown): RunPauseKind {
+	if (item.status !== 'suspended') return 'none'
+	if (readOperatorPauseRecord(item) !== null) return 'operator'
+	const summaryKind = deriveRunPauseKind(summary)
+	if (summaryKind !== 'none') return summaryKind
+	return deriveRunPauseKind(item)
 }
 
 // The truncation rule the task preview uses: an already-trimmed line shortened to `limit` characters at the last space past `floor` (or at `limit` when no such space exists), with a trailing ellipsis when shortened. The caller picks the line and the limits; only the cap-and-ellipsis rule lives here.

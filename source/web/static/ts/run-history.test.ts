@@ -26,6 +26,7 @@ function summary(runId: string, overrides: Partial<RunSummary> = {}): RunSummary
 		error: null,
 		continuesFrom: null,
 		suspension: null,
+		pause: null,
 		summary: null,
 		...overrides,
 	}
