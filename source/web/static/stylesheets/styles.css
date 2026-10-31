@@ -355,7 +355,8 @@ li:last-child {
 	display: flex;
 	flex-direction: column;
 	align-items: center;
-	padding: var(--space-6) var(--space-5);
+	/* A scroll container's bottom padding is not guaranteed to be included once its content overflows, so the form's last child carries the bottom gap instead. */
+	padding: var(--space-6) var(--space-5) 0;
 }
 
 .compose-hero {
@@ -384,6 +385,11 @@ li:last-child {
 	gap: var(--space-3);
 	flex: 1 1 auto;
 	min-height: 0;
+}
+
+/* The trailing gap sits on the last child because both the scroll container and this height-constrained form can drop their own bottom padding when content overflows; the sum keeps the submit controls' 1rem gap folded in. */
+.create-run-form > :last-child {
+	padding-bottom: calc(var(--space-4) + var(--space-6));
 }
 
 .create-run-form textarea {
@@ -1266,6 +1272,13 @@ li:last-child {
 	font-size: 0.78rem;
 	color: var(--color-text-subtle);
 	font-style: italic;
+}
+
+/* The notes reserve their line box even when empty so the transient `saving…` text does not change the form height and shift the cards below the flexing textarea; `1.5em` matches the inherited line height at this font size. */
+.effort-note,
+.involvement-note,
+.logging-level-note {
+	min-height: 1.5em;
 }
 
 .run-effort-badge {
