@@ -1,6 +1,6 @@
 {
 	"name": "search_text",
-	"description": "Search the contents of text files in the workspace for lines matching a regular expression. Returns matching lines with their file path and 1-based line number. Searches all searchable files unless paths are given.",
+	"description": "Search the contents of text files in the workspace for lines matching a regular expression. Returns matching lines with their file path and 1-based line number. Searches all searchable files unless paths are given. Extremely long lines are truncated before matching, and returned match text is truncated to keep results bounded.",
 	"humanLabel": {
 		"detailed": ["Search Text"],
 		"friendly": ["Find Text"],

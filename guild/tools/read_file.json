@@ -1,6 +1,6 @@
 {
 	"name": "read_file",
-	"description": "Read the full text contents of a file inside the workspace. Returns the file content as a string.",
+	"description": "Read the full text contents of a file inside the workspace. Returns the file content as a string. Files larger than 4 MiB are rejected; use read_file_partial to read them in line windows.",
 	"humanLabel": {
 		"detailed": ["Read File"],
 		"friendly": ["Read"],

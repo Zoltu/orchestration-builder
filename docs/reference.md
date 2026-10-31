@@ -266,7 +266,9 @@ A run whose log does not exist yet returns an `unavailable` result from both.
 
 Native tools are implemented in the executor and operate against the mounted workspace. Paths are canonicalized and rejected if they resolve outside the workspace. A typical seed Guild includes:
 
-- `read_file` — read file contents (supports partial reads)
+- `read_file` — read file contents (supports partial reads; files larger than 4 MiB are rejected, so use `read_file_partial` for them)
+- `read_file_partial` — read a line window from a file, streaming the file rather than loading it whole; returned content is capped at about 200,000 characters and a truncated line ends with `…`
+- `search_text` — search text files for a regular expression; extremely long lines are truncated before matching, and each returned match's text is capped at 2,000 characters plus `…`
 - `write_file` — write or overwrite a file
 - `read_plan` — read a run's complete plan document (the current run by default, or another run by `runId`); a run that has not written one returns an `unavailable` result, and a stored document too large to deliver within `maxToolOutputChars` returns an `unavailable` error (documents written by this platform are capped at 20,000 characters and `maxToolOutputChars`, so they read back whole)
 - `write_plan` — replace the current run's plan document in full (the location is fixed per run; no path parameter); the document is limited to 20,000 characters and the deployment's `maxToolOutputChars`, and exceeding either rejects the write with the exact limits while leaving any previous document unchanged

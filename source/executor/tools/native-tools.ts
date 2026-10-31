@@ -2,6 +2,7 @@ import type { RunBaseTracker } from '../base-state.js'
 import type { ToolHandler } from './tool-dispatch.js'
 import { ensureOrchestrationGitExcluded, nodeGitExcludeFilesystem } from '../git-exclude.js'
 import { createFetchUrl, type Fetcher } from './fetch-url.js'
+import { createFileLines, createNodeFileChunks } from './file-lines.js'
 import { createGitTools } from './git.js'
 import { createGlobFiles, nodeGlobFilesystem } from './glob-files.js'
 import { createKagiClient } from './kagi.js'
@@ -10,12 +11,13 @@ import { createReadFile } from './read-file.js'
 import { createReadFilePartial } from './read-file-partial.js'
 import { createRepoMap } from './repo-map.js'
 import { createRunShell } from './run-shell.js'
-import { createSearchText } from './search-text.js'
+import { createSearchText, nodeSearchFilesystem } from './search-text.js'
 import { createTest } from './test.js'
 import type { SubprocessRunner } from '../subprocess.js'
 import { createTypecheck } from './typecheck.js'
 import { createWebSearch } from './web-search.js'
 import { createWriteFile } from './write-file.js'
+import { nodePathFilesystem } from '../workspace-path.js'
 
 export interface NativeToolsConfig {
 	workspaceRoot: string
@@ -31,8 +33,9 @@ export function createNativeToolHandlers(config: NativeToolsConfig): Record<stri
 	const list = createListDirectory(config.workspaceRoot)
 	const glob = createGlobFiles(config.workspaceRoot, nodeGlobFilesystem)
 	const read = createReadFile(config.workspaceRoot)
-	const readPartial = createReadFilePartial(config.workspaceRoot)
-	const search = createSearchText(config.workspaceRoot)
+	const fileLines = createFileLines(createNodeFileChunks())
+	const readPartial = createReadFilePartial(config.workspaceRoot, { fileLines, pathFilesystem: nodePathFilesystem })
+	const search = createSearchText(config.workspaceRoot, { fileLines, filesystem: nodeSearchFilesystem, pathFilesystem: nodePathFilesystem })
 	const write = createWriteFile(config.workspaceRoot)
 	const repoMap = createRepoMap(config.workspaceRoot)
 	const timeoutMs = config.defaultToolTimeoutSeconds * 1000
