@@ -267,7 +267,7 @@ describe('createSearchText streaming', () => {
 		const result = await handler({ pattern: 'match', paths: ['binary.txt'] })
 		if (result.kind !== 'invalid_arguments') throw new Error(`expected invalid_arguments, got ${result.kind}`)
 		expect(result.message).toContain('binary')
-		expect(result.message).toContain('run_shell')
+		expect(result.message).toContain('not designed for binary search')
 	})
 
 	test('skips an explicit path whose stat fails', async () => {

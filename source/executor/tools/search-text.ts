@@ -322,7 +322,7 @@ export function createSearchText(workspaceRoot: string, dependencies: SearchText
 					} else if (kind === 'file') {
 						const result = await collectFile(resolution.path.absolute)
 						if (result.kind === 'binary') {
-							return createToolError('invalid_arguments', `${path.relative(resolvedRoot, resolution.path.absolute)} appears to be binary; search_text is a line-oriented text search. Use run_shell with strings or grep -a to search binary files.`)
+							return createToolError('invalid_arguments', `${path.relative(resolvedRoot, resolution.path.absolute)} appears to be binary; search_text is a line-oriented text search and is not designed for binary search.`)
 						}
 						matches.push(...result.matches)
 					}
