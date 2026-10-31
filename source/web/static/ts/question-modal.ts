@@ -74,11 +74,13 @@ export function QuestionModal(h: LooseH, props: QuestionModalProps): Vnode {
 				: null,
 			h('form', { class: 'question-modal-form', onsubmit: onSubmit }, [
 				h('textarea', { rows: '4', placeholder: 'your answer', autofocus: true, disabled: answerPending }),
-				h('button', { type: 'submit', disabled: answerPending }, 'Answer'),
-				onTerminate !== undefined
-					? h('button', { type: 'button', class: 'question-modal-terminate', disabled: answerPending || terminatePending, onclick: onTerminate }, 'Terminate task')
-					: null,
-				h('button', { type: 'button', class: 'question-modal-close', onclick: onClose }, 'Close'),
+				h('div', { class: 'question-modal-actions' }, [
+					h('button', { type: 'submit', disabled: answerPending }, 'Answer'),
+					onTerminate !== undefined
+						? h('button', { type: 'button', class: 'question-modal-terminate', disabled: answerPending || terminatePending, onclick: onTerminate }, 'Terminate task')
+						: null,
+					h('button', { type: 'button', class: 'question-modal-close', onclick: onClose }, 'Close'),
+				]),
 			]),
 		]),
 	])
