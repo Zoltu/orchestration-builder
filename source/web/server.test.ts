@@ -597,7 +597,7 @@ function createHandlerHarness(options: { runIdCollides?: boolean, build?: BuildI
 	const settings = createInMemorySettings()
 	const queue = createInMemoryQueueStore(options.initialQueueItems ?? [])
 	const providerSuspension = createTestProviderSuspension()
-	const submission = createRunSubmission({ providerSuspension, onRunSettled: (meta) => taskQueue.onRunSettled(meta), startRun, resumeRun, generateRunId: () => `run-20260101-09${String(nextId++).padStart(4, '0')}`, runDirectoryExists: () => options.runIdCollides ?? false, readProjectSettings: settings.read })
+	const submission = createRunSubmission({ providerSuspension, onRunSettled: (meta) => taskQueue.onRunSettled(meta), startRun, resumeRun, generateRunId: () => `run-20260101-09${String(nextId++).padStart(4, '0')}`, runDirectoryExists: () => options.runIdCollides ?? false, readProjectSettings: settings.read, notifyStateChanged: () => {} })
 	// The queue module references the submission and the submission's settlement hook references the queue; each closure captures the other's binding lazily, exactly as serve.ts composes them.
 	const readCheckpointById = (runId: string): string | null => checkpoints.get(runId) ?? null
 	const readPauseStateById = createReadPauseStateById(readCheckpointById)
@@ -618,12 +618,14 @@ function createHandlerHarness(options: { runIdCollides?: boolean, build?: BuildI
 			runLogs.set(runId, events)
 		},
 		clearPausedRun: (runId) => submission.clearPausedRun(runId),
+		notifyStateChanged: () => {},
 	})
 	const rawListRunIds = options.listRunIds ?? listRunIds
 	const readRunFormat = options.readRunFormat ?? (() => 'current')
 	const visibleListRunIds = createListCurrentRunIds(rawListRunIds, readRunFormat)
 	const taskQueue = createTaskQueue({
 		queueStore: queue.store,
+		notifyStateChanged: () => {},
 		readRunMetaById: harnessReadRunMetaById,
 		listRunIds: rawListRunIds,
 		readRunListSummary,
@@ -646,7 +648,7 @@ function createHandlerHarness(options: { runIdCollides?: boolean, build?: BuildI
 	})
 	const interruptChannel = createInterruptChannel()
 	const operatorPauseChannel = createOperatorPauseChannel()
-	const humanBackend = createWebHumanBackend()
+	const humanBackend = createWebHumanBackend({ notifyStateChanged: () => {} })
 	const staticCalls: string[] = []
 	// The explicit error-resume submission, composed over the fakes exactly as serve.ts composes it over the real leaves.
 	const resumeErroredOrSuspendedRun = createResumeErroredOrSuspendedRun({

@@ -366,6 +366,7 @@ describe('provider auto-resume coordinator', () => {
 			generateRunId: () => 'run-new',
 			readProjectSettings: () => ({}),
 			runDirectoryExists: () => false,
+			notifyStateChanged: () => {},
 		})
 		const resumeErroredOrSuspendedRun = createResumeErroredOrSuspendedRun({
 			runSubmission: submission,

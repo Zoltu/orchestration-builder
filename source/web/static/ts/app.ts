@@ -486,13 +486,30 @@ const inspectorSession = createInspectorSession()
 // The open task-history drawer's memo: its vnode is rebuilt only when the thread, load flags, summary flags, or handlers change, so a now-only tick cannot re-render every Markdown turn in the drawer.
 const taskHistoryDrawerRenderer = createTaskHistoryDrawerRenderer()
 
-// The live-token-stream client (see stream-client.js and docs/reference.md "Live token stream"): module scope like the other session caches, created lazily by the stream subscription on the first watch-screen mount. Leaving Watch (or the run becoming terminal) unsubscribes and closes the socket; returning reconnects rather than leaving a dormant connection open. The stream is an enhancement — the client is contained (never throws, shows no error surface), and the only state it feeds is the ephemeral `livePartial` the inspector modal's in-flight turn renders.
+// The live-token-stream client (see stream-client.js and docs/reference.md "Live token stream"): module scope like the other session caches, created once by the permanent state-watching subscription and shared with the per-run subscription. State watching keeps the socket open on every screen, so a hidden tab still receives invalidation signals; leaving Watch clears the client's run subscription and it ignores any deltas the server still sends for it, while returning re-subscribes on the same socket. The stream is an enhancement — the client is contained (never throws, shows no error surface).
 let streamClient: StreamClient | null = null
 
 // ws vs wss follows the page's own protocol so a TLS deployment upgrades the stream with it.
 function streamSocketUrl(): string {
 	const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
 	return `${protocol}//${window.location.host}/ws/stream`
+}
+
+// One client serves the app's whole lifetime: the permanent state subscription creates it, and the per-run subscription reuses it.
+function ensureStreamClient(dispatch: Dispatch): StreamClient {
+	if (streamClient !== null) return streamClient
+	const client = createStreamClient({
+		url: streamSocketUrl(),
+		onDelta: (delta) => dispatch(GotLiveDelta, delta),
+		onStateInvalidated: () => dispatch(RefreshGlobalStateIfHidden),
+		onStateChange: (phase) => {
+			dispatch(GotStreamState, phase)
+			// A reconnect may have missed invalidations; reconcile the hidden tab's favicon sources before the next visible poll. Visible tabs poll every second already.
+			if (phase === 'connected') dispatch(RefreshGlobalStateIfHidden)
+		},
+	})
+	streamClient = client
+	return client
 }
 
 function ensureAudioContext(): AudioContext | null {
@@ -678,6 +695,17 @@ function onVisibilityChange(action: Action<boolean>): [typeof onVisibilityChange
 	return [onVisibilityChangeSubscriber, { action }]
 }
 
+// The permanent state subscription keeps the shared socket open on every screen, including a hidden tab that has withdrawn its polls, so state-invalidation broadcasts can still refresh the favicon sources.
+function stateWatchSubscriber(dispatch: Dispatch, _payload: null): () => void {
+	const client = ensureStreamClient(dispatch)
+	client.watchState()
+	return () => client.unwatchState()
+}
+
+function StateWatchSubscription(): [typeof stateWatchSubscriber, null] {
+	return [stateWatchSubscriber, null]
+}
+
 // --- Custom effects --------------------------------------------------------
 // @hyperapp/http is still "planned", so the fetch effecter is hand-written. It parses the body and dispatches straight from the promise callbacks: hyperapp coalesces renders itself behind its own render lock (../vendor/hyperapp.js), so a microtask dispatch cannot interleave with a render, while a requestAnimationFrame hop would delay every state update a frame and — in a hidden tab, where requestAnimationFrame never fires — strand every completed poll's parsed body in a pending callback until the tab resurfaced. The fail action fires on any network failure, including a dropped connection mid-body (the body read rejects, not the fetch itself); any HTTP response — even a 4xx/5xx — resolves the ok branch with its status. Poll fetches delegate their timeout, cancellation, and retry bookkeeping to pollFetcher, which settles only after the body read and dispatches nothing for an intentional cancellation.
 
@@ -832,17 +860,27 @@ function hasPollableSelectedRun(state: ApplicationState): state is ApplicationSt
 	return typeof state.selectedRunId === 'string' && state.selectedRunId !== '' && (state.selectedRunStatus === null || !isSettledForPolling(state.selectedRunStatus))
 }
 
-function Tick(state: ApplicationState): ActionReturn {
-	if (!state.pageVisible) return state
+// The global poll's three reads, shared by the visible Tick and the hidden invalidation refresh so both use the same feed revision and poll keys.
+function globalStateFetches(state: ApplicationState): [FetchEffect, FetchEffect, FetchEffect] {
 	const runListRevision = runListFeedRevision(state.runListFeed)
 	return [
-		{ ...state, now: Date.now() },
 		// The run list is an entity-diff feed: the held revision rides as `have` (omitted on the first poll, which asks for a snapshot) and the response's own `unchanged` reply is the revalidation, so the fetch is uncacheable rather than ETag-versioned.
 		Fetch({ url: runListRevision === null ? 'api/runs' : `api/runs?have=${encodeURIComponent(runListRevision)}`, init: { cache: 'no-store' }, ok: GotRunList, fail: FetchFailed, pollKey: POLL_KEY_RUN_LIST }),
 		// `api/questions` and `api/queue` carry no ETag, so their polls stay unconditional rather than replaying a validator the server never issued.
 		Fetch({ url: 'api/questions', ok: GotQuestions, fail: FetchFailed, pollKey: POLL_KEY_QUESTIONS }),
 		Fetch({ url: 'api/queue', ok: GotQueue, fail: FetchFailed, pollKey: POLL_KEY_QUEUE }),
 	]
+}
+
+function Tick(state: ApplicationState): ActionReturn {
+	if (!state.pageVisible) return state
+	return [{ ...state, now: Date.now() }, ...globalStateFetches(state)]
+}
+
+// A state-invalidation broadcast or a reconnect only needs a refresh while hidden: a visible tab polls these same sources every second.
+function RefreshGlobalStateIfHidden(state: ApplicationState): ActionReturn {
+	if (state.pageVisible) return state
+	return [state, ...globalStateFetches(state)]
 }
 
 function PollSelectedRun(state: ApplicationState): ActionReturn {
@@ -929,7 +967,9 @@ function GotRunList(state: ApplicationState, payload: FetchResultPayload): Actio
 	const result = applyRunListFrame(state.runListFeed, payload.body)
 	if (result.outcome === 'unchanged') {
 		if (!payload.ok) return { ...state, serverAvailable: true }
-		return { ...state, providerHealth: result.health, serverAvailable: true, runListLoaded: true }
+		const nextState = { ...state, providerHealth: result.health, serverAvailable: true, runListLoaded: true }
+		if (!nextState.pageVisible) return [nextState, UpdateFavicon(nextState)]
+		return nextState
 	}
 	if (result.outcome === 'applied' || result.outcome === 'snapshot') {
 		if (!payload.ok) return { ...state, serverAvailable: true }
@@ -938,6 +978,12 @@ function GotRunList(state: ApplicationState, payload: FetchResultPayload): Actio
 			nextState.justSubmittedRunId = null
 		}
 		nextState.pauseRequestPendingRunId = resolvePausePendingRunId(state.pauseRequestPendingRunId, result.summaries)
+		// A hidden invalidation refresh may update the feed-derived data and favicon, but selection, prompts, and task-thread work wait for the visible Tick.
+		if (!nextState.pageVisible) {
+			// Keeping the hidden pass's new feed state would make the next visible Tick send its revision as `have` and receive `unchanged`, so the deferred visible reconciliation would never run. Discard the whole feed (replica and revision) while retaining the summaries to force that poll to request a full snapshot.
+			const quietState = { ...nextState, runListFeed: emptyRunListFeedState() }
+			return [quietState, UpdateFavicon(quietState)]
+		}
 		// Auto-select the newest run when nothing is selected so the user lands on live activity.
 		let autoSelectedRunId: string | null = null
 		if (nextState.selectedRunId === null && result.summaries.length > 0) {
@@ -970,7 +1016,9 @@ function GotRunList(state: ApplicationState, payload: FetchResultPayload): Actio
 	// A delta whose base the client no longer holds cannot be applied; re-fetching with no `have` asks the server for a full snapshot. The held replica and summaries stand until it lands.
 	if (result.outcome === 'needsSnapshot') {
 		if (!payload.ok) return { ...state, serverAvailable: true }
-		return [{ ...state, serverAvailable: true }, Fetch({ url: 'api/runs', init: { cache: 'no-store' }, ok: GotRunList, fail: FetchFailed, pollKey: POLL_KEY_RUN_LIST })]
+		// A hidden pass discards the unusable feed state (replica and revision) too, so even a failed refetch leaves the next visible Tick asking for a full snapshot.
+		const heldState = state.pageVisible ? state : { ...state, runListFeed: emptyRunListFeedState() }
+		return [{ ...heldState, serverAvailable: true }, Fetch({ url: 'api/runs', init: { cache: 'no-store' }, ok: GotRunList, fail: FetchFailed, pollKey: POLL_KEY_RUN_LIST })]
 	}
 	// invalid: the envelope failed validation, so the held replica, summaries, and loaded flag stand, but the response is unusable and must not leave the history screen claiming a live server with nothing loaded.
 	return { ...state, serverAvailable: false }
@@ -1063,6 +1111,11 @@ function GotQuestions(state: ApplicationState, payload: FetchResultPayload): Act
 	const usablePoll = polledQuestions !== null
 	// A failed or non-array poll retains the held list: a transport failure must not read as "no questions" and clear the operator's prompt.
 	const questions: PendingQuestion[] = polledQuestions === null ? state.pendingQuestions : polledQuestions
+	// A hidden invalidation refresh updates the data and favicon only; leaving the shown set and first-poll baseline untouched lets the next visible Tick alert and auto-open normally.
+	if (!state.pageVisible) {
+		const hiddenState = { ...state, pendingQuestions: questions, serverAvailable: true }
+		return [hiddenState, UpdateFavicon(hiddenState)]
+	}
 	const currentIds: Record<string, boolean> = {}
 	for (const question of questions) currentIds[question.id] = true
 	let hasNew = false
@@ -1153,6 +1206,8 @@ function reduceQueue(state: ApplicationState, payload: FetchResultPayload): Appl
 // The queue poll's ingress: reduce the payload, then repaint the favicon, so a poll that parks an item on a question (or clears one) turns the icon yellow (or back) without waiting for the run-list poll. A deferred answer resume is watched here: once its item carries a run id — even when it was dispatched and finished between polls, since done/error items keep the run id — the watch screen re-engages on that run. Only a vanished or cancelled item, or a finished item with no recorded run, clears the field without selection.
 function GotQueue(state: ApplicationState, payload: FetchResultPayload): ActionReturn {
 	const nextState = reduceQueue(state, payload)
+	// A hidden invalidation refresh updates the queue and favicon only; pending-resume resolution, prompt changes, selection, and task-thread work wait for the visible Tick.
+	if (!nextState.pageVisible) return [nextState, UpdateFavicon(nextState)]
 	const pendingResumeItemId = nextState.pendingResumeItemId
 	if (pendingResumeItemId === null) {
 		const prompted = autoOpenQuestionPrompt(nextState)
@@ -2253,7 +2308,7 @@ function ContinueRun(state: ApplicationState, event: MouseEvent): ApplicationSta
 	if (activeRunId === runId && !selectedViewTerminal) return state
 	const continuation = selectContinuationReference(runId, state.summaries, selectedView)
 	if (continuation === null) return state
-	return {
+	return ClearLivePartial({
 		...state,
 		screen: 'compose',
 		continuation,
@@ -2261,7 +2316,7 @@ function ContinueRun(state: ApplicationState, event: MouseEvent): ApplicationSta
 		resumingRunId: null,
 		resumeNotice: null,
 		resumeSending: false,
-	}
+	})
 }
 
 function CancelContinuation(state: ApplicationState): ApplicationState {
@@ -2280,7 +2335,7 @@ function ResumeFromResultModal(state: ApplicationState, event: MouseEvent): Appl
 	event.stopPropagation()
 	const runId = dataAttributeOf(event, 'data-run-id')
 	if (runId === null) return state
-	return { ...state, screen: 'compose', resultModalOpen: false, resumingRunId: runId, resumeNotice: null, resumeSending: false, continuation: null }
+	return ClearLivePartial({ ...state, screen: 'compose', resultModalOpen: false, resumingRunId: runId, resumeNotice: null, resumeSending: false, continuation: null })
 }
 
 // Cancels resume mode. The in-flight flag clears with the mode: a response landing after the cancel finds no resume mode (GotResumedRun bails) and must not leave the form stuck disabled.
@@ -2514,7 +2569,7 @@ function SetScreen(state: ApplicationState, screen: unknown): ActionReturn {
 	// Modal state is deliberately kept alive across the swap: returning to watch restores the session's modal state (an open inspector, its loaded window and scope) instead of a fresh view. The unmounted inspector body detaches its follower the same way, and returning to watch re-attaches it pinned.
 	// The prompt auto-opens only on Watch; History and Compose never auto-open one, though an explicitly opened queue row still shows it.
 	const nextScreen: Screen = screen
-	const switched: ApplicationState = { ...state, screen: nextScreen }
+	const switched: ApplicationState = nextScreen === 'watch' ? { ...state, screen: nextScreen } : ClearLivePartial({ ...state, screen: nextScreen })
 	const next = nextScreen === 'watch' ? autoOpenQuestionPrompt(switched) : switched
 	return [next, SyncSequenceFollower(), SyncInspectorFollower()]
 }
@@ -2892,6 +2947,12 @@ function InspectorModalForRun(state: ApplicationState): Vnode | null {
 // --- Live token stream (enhancement) ----------------------------------------
 // The websocket deltas fold into `livePartial` — the ephemeral in-flight partial the inspector modal renders under the matching in-flight row. The polled run log stays the sole authority for turn history and run state; this only feeds live text, and every path that could leave the partial stale clears it.
 
+// The client ignores deltas once the run subscription is cleared, but a partial accumulated before leaving Watch still lives in app state; drop it explicitly when Watch is left (and a run switch resets the view) so returning starts clean.
+function ClearLivePartial(state: ApplicationState): ApplicationState {
+	if (state.livePartial === null) return state
+	return { ...state, livePartial: null }
+}
+
 function GotLiveDelta(state: ApplicationState, delta: StreamDeltaMessage): ActionReturn {
 	// Deltas flow only for the active run; a historical selection (or no selection) ignores them. Each delta grows the modal's in-flight section, so the transcript follower syncs with the partial too (a no-op while the modal is closed — the sync finds no body element).
 	if (state.selectedRunId === null || delta.runId !== state.selectedRunId) return state
@@ -2910,21 +2971,15 @@ function GotStreamState(state: ApplicationState, phase: 'connected' | 'disconnec
 // Hyperapp starts a replacement subscriber before calling the previous teardown. The generation token keeps that teardown from unsubscribing the connection the new subscriber just opened; only the current generation's teardown (leaving Watch, a terminal run, or an unmount) closes the socket.
 let streamSubscriptionGeneration = 0
 
-// The stream subscription is mounted only while the watch screen shows a selected, non-terminal run (the same non-terminal guard the polling subscription uses). The payload's runId is the only field that changes, so hyperapp restarts the subscription exactly when the selected run changes, and each start re-subscribes (the server replaces the previous subscription). Teardown unsubscribes only when it is still the newest subscription: leaving Watch or the run becoming terminal closes the socket, and returning reconnects through a fresh subscribe, so a background connection is never kept open for a screen that cannot show live text.
+// The stream subscription is mounted only while the watch screen shows a selected, non-terminal run (the same non-terminal guard the polling subscription uses). The payload's runId is the only field that changes, so hyperapp restarts the subscription exactly when the selected run changes, and each start re-subscribes (the server replaces the previous subscription). Teardown unsubscribes only when it is still the newest subscription: leaving Watch or the run becoming terminal clears the run subscription while the permanent state-watching subscription keeps the socket alive.
 function streamSubscriber(dispatch: Dispatch, payload: { runId: string }): () => void {
 	const generation = ++streamSubscriptionGeneration
-	if (streamClient === null) {
-		streamClient = createStreamClient({
-			url: streamSocketUrl(),
-			onDelta: (delta) => dispatch(GotLiveDelta, delta),
-			onStateChange: (phase) => dispatch(GotStreamState, phase),
-		})
-	}
-	streamClient.subscribe(payload.runId)
+	const client = ensureStreamClient(dispatch)
+	client.subscribe(payload.runId)
 	// hyperapp's patchSubs calls the old subscriber's return value on every restart, so a teardown function must always be returned.
 	return () => {
 		if (generation !== streamSubscriptionGeneration) return
-		if (streamClient !== null) streamClient.unsubscribe()
+		client.unsubscribe()
 	}
 }
 
@@ -3922,7 +3977,7 @@ function view(state: ApplicationState): Vnode {
 }
 
 // --- App -------------------------------------------------------------------
-// The subscriptions array is fixed-size with stable positions: [0] always polls the run list (which now also carries provider health), the pending questions, and the task queue every second while the page is visible; [1] polls the selected run's run view and flow model every second but only on the watch screen, while the page is visible, and while the run is selected and not settled for polling (terminal or suspended stop it); [2] primes the AudioContext on the first user interaction; [3] dismisses the topmost app overlay on Escape while any is open (task-history drawer, then question prompt, then inspector); [4] subscribes the live token stream to the selected run under the same settled-for-polling guard [1] uses, so a suspended run keeps no stream open; [5] tracks page visibility and refreshes immediately when the tab returns.
+// The subscriptions array is fixed-size with stable positions: [0] always polls the run list (which now also carries provider health), the pending questions, and the task queue every second while the page is visible; [1] polls the selected run's run view and flow model every second but only on the watch screen, while the page is visible, and while the run is selected and not settled for polling (terminal or suspended stop it); [2] primes the AudioContext on the first user interaction; [3] dismisses the topmost app overlay on Escape while any is open (task-history drawer, then question prompt, then inspector); [4] subscribes the live token stream to the selected run under the same settled-for-polling guard [1] uses, so a suspended run keeps no stream open; [5] tracks page visibility and refreshes immediately when the tab returns; [6] permanently watches state invalidation on the shared socket on every screen, including a hidden tab.
 
 // hyperapp re-enters `view` and `subscriptions` with the state it holds, but the vendored declaration types that re-entry as `unknown` (it is app-agnostic). The state provably stays an ApplicationState — init plants a checked literal and every action returns a checked transition — so this guard confirms the wiring rather than re-validating data, and a mismatch fails the mount instead of rendering garbage.
 function isApplicationState(value: unknown): value is ApplicationState {
@@ -4059,6 +4114,7 @@ app({
 			(state.taskThreadDrawerOpen || state.questionPromptOpenKey !== null || state.inspectorModalOpen) && onEscapeKey(CloseTopmostAppOverlay),
 			state.screen === 'watch' && hasPollableSelectedRun(state) && StreamSubscription(state.selectedRunId),
 			onVisibilityChange(PageVisibilityChanged),
+			StateWatchSubscription(),
 		]
 	},
 	node: requireMountNode('app'),

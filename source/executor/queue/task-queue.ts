@@ -51,6 +51,8 @@ export type TerminatePausedRun = (runId: string, reason?: string) => TerminatePa
 export interface TaskQueueDependencies {
 	// The text-only persistence port; the module owns parsing, validation, malformed/missing tolerance, and serialization, while the write side replaces the file atomically.
 	queueStore: QueueStore
+	// Announces a successful queue write so the browser can refetch the state feeding its favicon; it is called from the single write chokepoint, never for a validation failure or a no-op refusal.
+	notifyStateChanged: () => void
 	// The run-meta reader leaf (the raw meta.json text): boot repair of stale active items and continuation assembly from the parked or errored run's meta both parse through it.
 	readRunMetaById: ReadRunMetaById
 	listRunIds: ListRunIds
@@ -174,6 +176,7 @@ export function createTaskQueue(dependencies: TaskQueueDependencies): TaskQueueM
 
 	function writeQueueState(queue: TaskQueue): void {
 		writeQueue(dependencies.queueStore, queue)
+		dependencies.notifyStateChanged()
 	}
 
 	function read(): QueueView {

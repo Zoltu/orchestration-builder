@@ -10,7 +10,7 @@ import { createFlowFeedResponder } from './web/static/ts/flow-feed/index.js'
 import { createRunListFeedResponder } from './web/static/ts/run-list-feed/index.js'
 import { createStreamHub } from './web/stream-hub.js'
 import { createTaskSummarizer, shouldWriteCompletionSummary, type TaskSummarizer } from './summarize.js'
-import { applyDeploymentOverride, applyLogLevel, createAppendLog, createBunSubprocessRunner, createDeleteCheckpoint, createDeletePauseRequest, createDeltaChannel, createDockerSecretReader, createGuildLoader, createInterruptChannel, createInterruptQueue, createLlmCaller, createLlmFetch, createListCurrentRunIds, createListRunIds, createModelInfoProbe, createObservedLlmCaller, createOperatorPauseChannel, createOperatorPauseQueue, createProviderAutoResumeCoordinator, createProviderRecovery, createReadPauseRequestById, createReadPauseStateById, createReadProjectDoc, createReadProjectSettings, createReadQueueText, createReadRunCheckpointById, createReadRunFormat, createReadRunLogTextFrom, createReadRunMetaById, createReadRunMetaTextById, createReadRunPlanById, createReadRunSnapshotById, createReadRunSnapshotStats, createReadRunSummaryById, createReadTaskThreadSummaryTextById, createWriteTaskThreadSummaryTextById, createReadRunSummaryStats, createReadWorkspaceGitState, createResumeClarificationRun, createResumeErroredOrSuspendedRun, createResumeParkedRun, createRoleSnapshotStore, createRunBaseTracker, createRunCheckpointExists, createRunDirectory, createRunDirectoryExists, createRunState, createRunSubmission, createSleep, createTaskQueue, createTerminatePausedRun, createTimeoutScheduler, createToolPlatform, createWebHumanBackend, createWriteCheckpoint, createWriteMeta, createWritePauseRequest, createWriteProjectSettings, createWriteQueueText, createWriteRunSummary, ensureOrchestrationGitExcluded, entryFrameLogLevel, generateRunId, llmUsagePayload, LOG_FILE_NAME, MODEL_PROBE_TIMEOUT_MS, nodeGitExcludeFilesystem, parseModelInfo, reconcileRunsOnStartup, resolveDeploymentConfig, resolveDeploymentOverride, resolveKagiApiKey, resolveSecret, resumeExecutor, runExecutor, validateDeploymentFileConfig, validateDeploymentRoleReferences, validateHandlerRolesAreReadOnly, ConfigurationError, ValidationError, type AppendLog, type DeltaChannel, type ExecutorDependencies, type InterruptChannel, type InvolvementLevel, type LoadedGuild, type LlmCaller, type LogLevel, type ModelApiProbe, type OperatorPauseChannel, type ProviderHealth, type ReadRunLogEvents, type ResumeRun, type RunCheckpoint, type StartRun, type WebHumanBackend } from './executor/index.js'
+import { applyDeploymentOverride, applyLogLevel, createAppendLog, createBunSubprocessRunner, createDeleteCheckpoint, createDeletePauseRequest, createDeltaChannel, createDockerSecretReader, createGuildLoader, createInterruptChannel, createInterruptQueue, createLlmCaller, createLlmFetch, createListCurrentRunIds, createListRunIds, createModelInfoProbe, createObservedLlmCaller, createOperatorPauseChannel, createOperatorPauseQueue, createProviderAutoResumeCoordinator, createProviderRecovery, createReadPauseRequestById, createReadPauseStateById, createReadProjectDoc, createReadProjectSettings, createReadQueueText, createReadRunCheckpointById, createReadRunFormat, createReadRunLogTextFrom, createReadRunMetaById, createReadRunMetaTextById, createReadRunPlanById, createReadRunSnapshotById, createReadRunSnapshotStats, createReadRunSummaryById, createReadTaskThreadSummaryTextById, createWriteTaskThreadSummaryTextById, createReadRunSummaryStats, createReadWorkspaceGitState, createResumeClarificationRun, createResumeErroredOrSuspendedRun, createResumeParkedRun, createRoleSnapshotStore, createRunBaseTracker, createRunCheckpointExists, createRunDirectory, createRunDirectoryExists, createRunState, createRunSubmission, createSleep, createStateInvalidationChannel, createTaskQueue, createTerminatePausedRun, createTimeoutScheduler, createToolPlatform, createWebHumanBackend, createWriteCheckpoint, createWriteMeta, createWritePauseRequest, createWriteProjectSettings, createWriteQueueText, createWriteRunSummary, ensureOrchestrationGitExcluded, entryFrameLogLevel, generateRunId, llmUsagePayload, LOG_FILE_NAME, MODEL_PROBE_TIMEOUT_MS, nodeGitExcludeFilesystem, parseModelInfo, reconcileRunsOnStartup, resolveDeploymentConfig, resolveDeploymentOverride, resolveKagiApiKey, resolveSecret, resumeExecutor, runExecutor, validateDeploymentFileConfig, validateDeploymentRoleReferences, validateHandlerRolesAreReadOnly, ConfigurationError, ValidationError, type AppendLog, type DeltaChannel, type ExecutorDependencies, type InterruptChannel, type InvolvementLevel, type LoadedGuild, type LlmCaller, type LogLevel, type ModelApiProbe, type OperatorPauseChannel, type ProviderHealth, type ReadRunLogEvents, type ResumeRun, type RunCheckpoint, type StartRun, type WebHumanBackend } from './executor/index.js'
 import { parseLogEvents } from './run-log/parse.js'
 import { createTaskThreadCoreReader, createTaskThreadReader, createTaskThreadSummarizer } from './task-thread/index.js'
 
@@ -334,13 +334,18 @@ async function serve(): Promise<void> {
 	// Only role calls reach the gate: the summarizer keeps the raw caller so a failed label can never mark the provider unhealthy or suspend unrelated work (docs/reference.md "Provider health gate").
 	const roleLlmCaller = createObservedLlmCaller(llmCaller, (result) => providerRecovery.observeRoleCall(result))
 
-	const webHumanBackend = createWebHumanBackend()
+	// The state-invalidation channel is the one service-wide "refetch the favicon state" pulse: the state-owning factories announce successful mutations through it, and the stream hub sends a content-free message to every connected socket (see source/web/stream-hub.ts).
+	const stateInvalidationChannel = createStateInvalidationChannel()
+	const notifyStateChanged = () => {
+		stateInvalidationChannel.publish()
+	}
+	const webHumanBackend = createWebHumanBackend({ notifyStateChanged })
 	const interruptChannel = createInterruptChannel()
 	// The operator-pause channel mirrors the interrupt channel: bound per run, it carries a pause request from the HTTP path to the engine's safe point.
 	const operatorPauseChannel = createOperatorPauseChannel()
 	// The delta channel and its browser-facing hub are the third shared-backend pair: the channel is bound per run in withRunBindings, and the hub fans each stamped delta out to the websocket sockets subscribed to that run (see source/web/stream-hub.ts).
 	const deltaChannel = createDeltaChannel()
-	const streamHub = createStreamHub(deltaChannel)
+	const streamHub = createStreamHub(deltaChannel, stateInvalidationChannel)
 	const runState = createRunState({ humanBackend: webHumanBackend, interruptChannel })
 	const readRunSnapshotStats = createReadRunSnapshotStats(runsBaseDir)
 	const readRunMetaById = createReadRunMetaById(runsBaseDir)
@@ -396,6 +401,7 @@ async function serve(): Promise<void> {
 		deploymentInvolvement,
 		deploymentLogLevel,
 		onRunSettled: (meta) => taskQueue.onRunSettled(meta),
+		notifyStateChanged,
 	})
 	// The queue's two same-run answer resumes compose the submission layer over the same meta/checkpoint readers the explicit error-or-suspended resume uses.
 	const resumeParkedRun = createResumeParkedRun({ runSubmission, readRunMetaById, readCheckpointById: readRunCheckpointById, deletePauseRequest: createDeletePauseRequest(runsBaseDir) })
@@ -408,10 +414,12 @@ async function serve(): Promise<void> {
 		deleteCheckpointFor: (runId) => createDeleteCheckpoint(runId, runsBaseDir),
 		appendLogFor: (runId) => createAppendLog(runId, runsBaseDir),
 		clearPausedRun: (runId) => runSubmission.clearPausedRun(runId),
+		notifyStateChanged,
 	})
 	// The queue module owns the durable state machine, dispatch, settlement, and queue persistence; the composition root supplies only its configured leaves.
 	const taskQueue = createTaskQueue({
 		queueStore,
+		notifyStateChanged,
 		readRunMetaById,
 		listRunIds,
 		readRunListSummary,

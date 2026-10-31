@@ -13,7 +13,7 @@ function askInvocation(): HumanAskInvocation {
 }
 
 function makeRunState() {
-	const humanBackend = createWebHumanBackend()
+	const humanBackend = createWebHumanBackend({ notifyStateChanged: () => {} })
 	const interruptChannel = createInterruptChannel()
 	const runState = createRunState({ humanBackend, interruptChannel })
 	return { humanBackend, interruptChannel, runState }

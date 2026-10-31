@@ -30,6 +30,10 @@ export interface WebHumanBackend extends HumanBackend {
 	bindRunLog(appendLog: AppendLog | null): void
 }
 
+export interface WebHumanBackendDependencies {
+	notifyStateChanged: () => void
+}
+
 interface PendingEntry {
 	question: PendingQuestion
 	callId: string
@@ -38,7 +42,7 @@ interface PendingEntry {
 
 // The backend is shared across the whole service — the web API's submitAnswer must resolve the promise the executor's ask is awaiting — so the active run's log is bound per-run rather than captured at construction.
 // ask and submitAnswer only ever run while a run is active, so the bound log is always the right one when non-null; when null (no run bound, e.g. in unit tests) the log events are skipped.
-export function createWebHumanBackend(): WebHumanBackend {
+export function createWebHumanBackend(dependencies: WebHumanBackendDependencies): WebHumanBackend {
 	const pending = new Map<string, PendingEntry>()
 	let runLog: AppendLog | null = null
 
@@ -69,9 +73,11 @@ export function createWebHumanBackend(): WebHumanBackend {
 					}),
 				})
 			}
-			return new Promise<string>((resolve) => {
+			const answerPromise = new Promise<string>((resolve) => {
 				pending.set(id, { question: pendingQuestion, callId: invocation.callId, resolve })
 			})
+			dependencies.notifyStateChanged()
+			return answerPromise
 		},
 		submitAnswer(id, answer) {
 			const entry = pending.get(id)
@@ -86,6 +92,7 @@ export function createWebHumanBackend(): WebHumanBackend {
 				})
 			}
 			entry.resolve(answer)
+			dependencies.notifyStateChanged()
 			return { kind: 'resolved', question: entry.question }
 		},
 		pendingQuestions() {

@@ -146,6 +146,7 @@ function createVersioningHarness(initialRuns: Array<[string, StoredRun]>, flowFe
 		settings = next
 	}
 	const taskQueue = createTaskQueue({
+		notifyStateChanged: () => {},
 		queueStore: { read: () => null, write: () => {} },
 		readRunMetaById: readRunMetaById,
 		listRunIds,

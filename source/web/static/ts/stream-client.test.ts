@@ -1,9 +1,9 @@
 import { describe, expect, test, vi } from 'bun:test'
-import { createStreamClient } from './static/ts/stream-client.js'
-import { nextLivePartial, activeLivePartial, scopedActiveLivePartial, LIVE_PARTIAL_MAX_CHARS } from './static/ts/live-partial.js'
-import { defined } from './test-fixtures.js'
+import { createStreamClient } from './stream-client.js'
+import { nextLivePartial, activeLivePartial, scopedActiveLivePartial, LIVE_PARTIAL_MAX_CHARS } from './live-partial.js'
+import { defined } from '../../test-fixtures.js'
 
-// The stream client is still browser-pure JS, so its exports arrive with inferred JSDoc types (the live-partial helpers it feeds are TypeScript at static/ts/live-partial.ts). The interfaces below carry the shapes the tests assert against, mirroring inspector-modal.test.ts.
+// The stream client and the live-partial helpers it feeds are browser-pure TypeScript modules. The interfaces below carry the shapes the tests assert against, mirroring inspector-modal.test.ts.
 
 /** The handler set the fake records from the socket factory (stream-client.js's `StreamSocketHandlers`). */
 interface StreamSocketHandlers {
@@ -24,12 +24,15 @@ interface StreamDeltaMessage {
 	reset?: boolean
 }
 
-/** A fake connection: records sends, exposes the handlers as drivable events, and satisfies the factory's send/close handle. */
+type FakeSocketReadyState = 'connecting' | 'open' | 'closed'
+
+/** A fake connection: models CONNECTING/OPEN/CLOSED readiness, records sends, exposes the handlers as drivable events, and satisfies the factory's send/close handle. */
 interface FakeSocket {
 	send(text: string): void
 	close(): void
 	url: string
 	handlers: StreamSocketHandlers
+	readyState: FakeSocketReadyState
 	sent: string[]
 	closed: boolean
 	open(): void
@@ -42,21 +45,28 @@ interface FakeSocket {
 function createFakeSocket(url: string, handlers: StreamSocketHandlers, failSends: { value: boolean }): FakeSocket {
 	const sent: string[] = []
 	let closed = false
+	let readyState: FakeSocketReadyState = 'connecting'
 	return {
 		url,
 		handlers,
 		sent,
+		get readyState() {
+			return readyState
+		},
 		get closed() {
 			return closed
 		},
 		send(text: string) {
+			if (readyState !== 'open') throw new Error('socket is still connecting')
 			if (failSends.value) throw new Error('socket died')
 			sent.push(text)
 		},
 		close() {
 			closed = true
+			readyState = 'closed'
 		},
 		open() {
+			readyState = 'open'
 			handlers.onOpen()
 		},
 		message(raw: string) {
@@ -66,6 +76,7 @@ function createFakeSocket(url: string, handlers: StreamSocketHandlers, failSends
 			handlers.onError()
 		},
 		shutdown() {
+			readyState = 'closed'
 			handlers.onClose()
 		},
 		setFailSends(fail: boolean) {
@@ -74,9 +85,10 @@ function createFakeSocket(url: string, handlers: StreamSocketHandlers, failSends
 	}
 }
 
-// The harness: a client over a fake socket factory that records every connection, plus the captured deltas and socket phases.
-function createClientHarness(options: { onDelta?: (delta: StreamDeltaMessage) => void, onStateChange?: (state: 'connected' | 'disconnected') => void } = {}) {
+// The harness: a client over a fake socket factory that records every connection, plus the captured deltas, invalidations, and socket phases.
+function createClientHarness(options: { onDelta?: (delta: StreamDeltaMessage) => void, onStateInvalidated?: () => void, onStateChange?: (state: 'connected' | 'disconnected') => void } = {}) {
 	const deltas: StreamDeltaMessage[] = []
+	const invalidations: number[] = []
 	const phases: Array<'connected' | 'disconnected'> = []
 	const sockets: FakeSocket[] = []
 	const failSends = { value: false }
@@ -88,10 +100,11 @@ function createClientHarness(options: { onDelta?: (delta: StreamDeltaMessage) =>
 	const client = createStreamClient({
 		url: 'ws://localhost:8080/ws/stream',
 		onDelta: options.onDelta ?? ((delta) => deltas.push(delta)),
+		onStateInvalidated: options.onStateInvalidated ?? (() => invalidations.push(1)),
 		onStateChange: options.onStateChange ?? ((phase) => phases.push(phase)),
 		openSocket,
 	})
-	return { client, sockets, deltas, phases, setFailSends: (fail: boolean) => { failSends.value = fail } }
+	return { client, sockets, deltas, invalidations, phases, setFailSends: (fail: boolean) => { failSends.value = fail } }
 }
 
 function latestSocket(sockets: FakeSocket[]): FakeSocket {
@@ -289,6 +302,242 @@ describe('createStreamClient', () => {
 		fresh.open()
 		expect(fresh.sent).toEqual([JSON.stringify({ type: 'subscribe', runId: 'run-2' })])
 		expect(phases).toEqual(['disconnected', 'connected'])
+	})
+
+	test('watchState connects immediately, stays open without a run, and sends no subscribe', () => {
+		const { client, sockets, phases } = createClientHarness()
+		client.watchState()
+		expect(sockets).toHaveLength(1)
+		const socket = latestSocket(sockets)
+		socket.open()
+		expect(socket.closed).toBe(false)
+		expect(socket.sent).toEqual([])
+		expect(phases).toEqual(['connected'])
+		// Idempotent: a second watch neither reconnects nor reopens.
+		client.watchState()
+		expect(sockets).toHaveLength(1)
+		expect(phases).toEqual(['connected'])
+	})
+
+	test('a state-invalidation message reaches onStateInvalidated', () => {
+		const { client, sockets, invalidations } = createClientHarness()
+		client.watchState()
+		const socket = latestSocket(sockets)
+		socket.open()
+		socket.message(JSON.stringify({ type: 'state_invalidated' }))
+		socket.message(JSON.stringify({ type: 'state_invalidated' }))
+		expect(invalidations).toHaveLength(2)
+	})
+
+	test('malformed, unknown, ack, and delta messages never invoke onStateInvalidated', () => {
+		const { client, sockets, invalidations, deltas } = createClientHarness()
+		client.watchState()
+		const socket = latestSocket(sockets)
+		socket.open()
+		client.subscribe('run-1')
+		for (const raw of [
+			'not json',
+			'null',
+			'[]',
+			'"state_invalidated"',
+			JSON.stringify({ type: 7 }),
+			JSON.stringify({ type: 'unknown' }),
+			JSON.stringify({ type: 'subscribed', runId: 'run-1' }),
+			JSON.stringify({ type: 'delta', runId: 'run-1', roleId: 'r', role: 'main', field: 'content', text: 'x' }),
+		]) {
+			expect(() => socket.message(raw)).not.toThrow()
+		}
+		expect(invalidations).toEqual([])
+		expect(deltas).toHaveLength(1)
+	})
+
+	test('subscribe after watchState uses the same socket', () => {
+		const { client, sockets } = createClientHarness()
+		client.watchState()
+		const socket = latestSocket(sockets)
+		socket.open()
+		expect(socket.sent).toEqual([])
+		client.subscribe('run-1')
+		expect(sockets).toHaveLength(1)
+		expect(socket.sent).toEqual([JSON.stringify({ type: 'subscribe', runId: 'run-1' })])
+	})
+
+	test('subscribe while the socket is still CONNECTING defers delivery until open', () => {
+		const { client, sockets } = createClientHarness()
+		client.watchState()
+		const socket = latestSocket(sockets)
+		expect(socket.readyState).toBe('connecting')
+		client.subscribe('run-1')
+		expect(socket.sent).toEqual([])
+		expect(socket.closed).toBe(false)
+		client.subscribe('run-2')
+		expect(socket.sent).toEqual([])
+		expect(sockets).toHaveLength(1)
+		socket.open()
+		expect(socket.sent).toEqual([JSON.stringify({ type: 'subscribe', runId: 'run-2' })])
+	})
+
+	test('a subscribe from the connected callback becomes the latest desired run', () => {
+		let client: ReturnType<typeof createStreamClient> | null = null
+		const harness = createClientHarness({
+			onStateChange: (phase) => {
+				if (phase === 'connected' && client !== null) client.subscribe('run-new')
+			},
+		})
+		client = harness.client
+		client.subscribe('run-old')
+		const socket = latestSocket(harness.sockets)
+		socket.open()
+		expect(socket.sent).toEqual([JSON.stringify({ type: 'subscribe', runId: 'run-new' })])
+	})
+
+	test('a delta for the cleared run is ignored after unsubscribe while state watching', () => {
+		const { client, sockets, deltas } = createClientHarness()
+		client.watchState()
+		const socket = latestSocket(sockets)
+		socket.open()
+		client.subscribe('run-1')
+		expect(socket.sent).toEqual([JSON.stringify({ type: 'subscribe', runId: 'run-1' })])
+		client.unsubscribe()
+		socket.message(JSON.stringify({ type: 'delta', runId: 'run-1', roleId: 'main-1', role: 'main', field: 'content', text: 'stale' }))
+		expect(deltas).toEqual([])
+		client.subscribe('run-2')
+		socket.message(JSON.stringify({ type: 'delta', runId: 'run-1', roleId: 'main-1', role: 'main', field: 'content', text: 'stale' }))
+		socket.message(JSON.stringify({ type: 'delta', runId: 'run-2', roleId: 'main-2', role: 'main', field: 'content', text: 'fresh' }))
+		expect(deltas).toEqual([{ type: 'delta', runId: 'run-2', roleId: 'main-2', role: 'main', field: 'content', text: 'fresh' }])
+	})
+
+	test('unsubscribe while state watching keeps the socket, reports no disconnect, and keeps reconnecting run-less', () => {
+		vi.useFakeTimers()
+		try {
+			const { client, sockets, phases } = createClientHarness()
+			client.watchState()
+			const socket = latestSocket(sockets)
+			socket.open()
+			client.subscribe('run-1')
+			expect(socket.sent).toEqual([JSON.stringify({ type: 'subscribe', runId: 'run-1' })])
+			client.unsubscribe()
+			expect(socket.closed).toBe(false)
+			expect(phases).toEqual(['connected'])
+			socket.shutdown()
+			expect(phases).toEqual(['connected', 'disconnected'])
+			vi.advanceTimersByTime(500)
+			expect(sockets).toHaveLength(2)
+			const reconnected = latestSocket(sockets)
+			reconnected.open()
+			expect(reconnected.sent).toEqual([])
+			expect(phases).toEqual(['connected', 'disconnected', 'connected'])
+		} finally {
+			vi.useRealTimers()
+		}
+	})
+
+	test('unwatchState closes only after the run subscription is also cleared', () => {
+		const { client, sockets, phases } = createClientHarness()
+		client.watchState()
+		client.subscribe('run-1')
+		const socket = latestSocket(sockets)
+		socket.open()
+		client.unwatchState()
+		expect(socket.closed).toBe(false)
+		expect(phases).toEqual(['connected'])
+		client.unsubscribe()
+		expect(socket.closed).toBe(true)
+		expect(phases).toEqual(['connected', 'disconnected'])
+	})
+
+	test('unwatchState with no run closes the socket and stops reconnecting', () => {
+		vi.useFakeTimers()
+		try {
+			const { client, sockets, phases } = createClientHarness()
+			client.watchState()
+			const socket = latestSocket(sockets)
+			socket.open()
+			client.unwatchState()
+			expect(socket.closed).toBe(true)
+			expect(phases).toEqual(['connected', 'disconnected'])
+			socket.shutdown()
+			vi.runAllTimers()
+			expect(sockets).toHaveLength(1)
+		} finally {
+			vi.useRealTimers()
+		}
+	})
+
+	test('a successful state-only open resets the reconnect backoff without an ack', () => {
+		vi.useFakeTimers()
+		try {
+			const { client, sockets } = createClientHarness()
+			client.watchState()
+			// Two failed state-only connections move the ladder to a 2s wait…
+			latestSocket(sockets).shutdown()
+			vi.advanceTimersByTime(500)
+			latestSocket(sockets).shutdown()
+			vi.advanceTimersByTime(1000)
+			// …the third opens (no ack will ever arrive)…
+			const recovered = latestSocket(sockets)
+			recovered.open()
+			recovered.shutdown()
+			// …so the next retry waits 500ms again, not 2000ms.
+			vi.advanceTimersByTime(499)
+			expect(sockets).toHaveLength(3)
+			vi.advanceTimersByTime(1)
+			expect(sockets).toHaveLength(4)
+		} finally {
+			vi.useRealTimers()
+		}
+	})
+
+	test('close stops state watching and the run subscription for good', () => {
+		vi.useFakeTimers()
+		try {
+			const { client, sockets } = createClientHarness()
+			client.watchState()
+			const socket = latestSocket(sockets)
+			socket.open()
+			client.close()
+			expect(socket.closed).toBe(true)
+			socket.shutdown()
+			vi.runAllTimers()
+			expect(sockets).toHaveLength(1)
+			client.watchState()
+			client.subscribe('run-1')
+			vi.runAllTimers()
+			expect(sockets).toHaveLength(1)
+		} finally {
+			vi.useRealTimers()
+		}
+	})
+
+	test('a throwing onStateInvalidated callback never escapes the client', () => {
+		const { client, sockets } = createClientHarness({
+			onStateInvalidated: () => { throw new Error('host bug') },
+		})
+		client.watchState()
+		const socket = latestSocket(sockets)
+		socket.open()
+		expect(() => socket.message(JSON.stringify({ type: 'state_invalidated' }))).not.toThrow()
+		// The client remains usable afterwards.
+		expect(() => socket.message(JSON.stringify({ type: 'state_invalidated' }))).not.toThrow()
+	})
+
+	test('a state-invalidation message from a superseded connection is ignored', () => {
+		vi.useFakeTimers()
+		try {
+			const { client, sockets, invalidations } = createClientHarness()
+			client.watchState()
+			const stale = latestSocket(sockets)
+			stale.shutdown()
+			vi.advanceTimersByTime(500)
+			const fresh = latestSocket(sockets)
+			fresh.open()
+			stale.message(JSON.stringify({ type: 'state_invalidated' }))
+			expect(invalidations).toEqual([])
+			fresh.message(JSON.stringify({ type: 'state_invalidated' }))
+			expect(invalidations).toHaveLength(1)
+		} finally {
+			vi.useRealTimers()
+		}
 	})
 
 	test('a late message from a superseded connection is ignored', () => {

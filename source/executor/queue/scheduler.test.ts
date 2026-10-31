@@ -186,6 +186,7 @@ function queueOver(store: ReturnType<typeof fakeQueueStore>, submit: ReturnType<
 	const resumeCalls: Array<{ runId: string; parkedAnswer: { question: string; answer: string; toolCallId: string } }> = []
 	const clarificationResumeCalls: Array<{ runId: string; id: string; question: string; answer: string }> = []
 	const taskQueue = createTaskQueue({
+		notifyStateChanged: () => {},
 		queueStore: store.store,
 		readRunMetaById: fakeMetaReader(metas),
 		listRunIds: runList.listRunIds,
@@ -316,6 +317,7 @@ describe('createTaskQueue tick — dispatch', () => {
 		const sleep = fakeSleep()
 		const runList = fakeRunList()
 		const taskQueue = createTaskQueue({
+		notifyStateChanged: () => {},
 			queueStore: store.store,
 			readRunMetaById: fakeMetaReader({}),
 			listRunIds: runList.listRunIds,
@@ -377,6 +379,7 @@ describe('createTaskQueue tick — submission threading', () => {
 		)
 		const sleep = fakeSleep()
 		const taskQueue = createTaskQueue({
+		notifyStateChanged: () => {},
 			queueStore: store.store,
 			readRunMetaById: fakeMetaReader({}),
 			listRunIds: runList.listRunIds,

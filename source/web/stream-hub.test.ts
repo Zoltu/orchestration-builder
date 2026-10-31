@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import { createDeltaChannel, type DeltaChannel } from '../executor/stream-channel.ts'
+import { createStateInvalidationChannel, type StateInvalidationChannel } from '../executor/state-invalidation-channel.ts'
 import { asRecord } from '../executor/validation.ts'
 import { createStreamHub, type StreamHub, type StreamSocket } from './stream-hub.ts'
 
@@ -28,9 +29,10 @@ function subscribeMessage(runId: string): string {
 }
 
 // Composes the hub over a real channel (the wiring serve.ts builds): the hub is constructed on the channel, so publishing through it exercises the hub's one channel subscriber.
-function createHubHarness(): { channel: DeltaChannel, hub: StreamHub } {
+function createHubHarness(): { channel: DeltaChannel, stateInvalidationChannel: StateInvalidationChannel, hub: StreamHub } {
 	const channel = createDeltaChannel()
-	return { channel, hub: createStreamHub(channel) }
+	const stateInvalidationChannel = createStateInvalidationChannel()
+	return { channel, stateInvalidationChannel, hub: createStreamHub(channel, stateInvalidationChannel) }
 }
 
 function parseWireMessage(text: string): Record<string, unknown> {
@@ -213,5 +215,71 @@ describe('createStreamHub', () => {
 		channel.bindRun('run-1')
 		channel.publish({ roleId: 'r', role: 'main', field: 'content', text: 'new viewer' })
 		expect(parseWireMessage(second.sent[1] ?? '')).toEqual({ type: 'delta', runId: 'run-1', roleId: 'r', role: 'main', field: 'content', text: 'new viewer' })
+	})
+})
+
+describe('createStreamHub state invalidation', () => {
+	test('an unsubscribed socket receives the content-free invalidation message', () => {
+		const { stateInvalidationChannel, hub } = createHubHarness()
+		const socket = createFakeSocket()
+		hub.onOpen(socket)
+
+		stateInvalidationChannel.publish()
+
+		expect(socket.sent.map(parseWireMessage)).toEqual([{ type: 'state_invalidated' }])
+	})
+
+	test('a subscribed socket receives both the invalidation and its run delta', () => {
+		const { channel, stateInvalidationChannel, hub } = createHubHarness()
+		const socket = createFakeSocket()
+		hub.onOpen(socket)
+		hub.onMessage(socket, subscribeMessage('run-1'))
+
+		stateInvalidationChannel.publish()
+		channel.bindRun('run-1')
+		channel.publish({ roleId: 'r', role: 'main', field: 'content', text: 'streamed' })
+
+		expect(socket.sent.map(parseWireMessage)).toEqual([
+			{ type: 'subscribed', runId: 'run-1' },
+			{ type: 'state_invalidated' },
+			{ type: 'delta', runId: 'run-1', roleId: 'r', role: 'main', field: 'content', text: 'streamed' },
+		])
+	})
+
+	test('a closed socket stops receiving invalidations', () => {
+		const { stateInvalidationChannel, hub } = createHubHarness()
+		const socket = createFakeSocket()
+		hub.onOpen(socket)
+		hub.onClose(socket)
+
+		stateInvalidationChannel.publish()
+
+		expect(socket.sent).toEqual([])
+	})
+
+	test('a throwing socket is dropped while the others still receive the invalidation', () => {
+		const { stateInvalidationChannel, hub } = createHubHarness()
+		const dead = createFakeSocket()
+		const survivor = createFakeSocket()
+		hub.onOpen(dead)
+		hub.onOpen(survivor)
+		dead.setFailSends(true)
+
+		expect(() => stateInvalidationChannel.publish()).not.toThrow()
+		expect(survivor.sent.map(parseWireMessage)).toEqual([{ type: 'state_invalidated' }])
+
+		dead.setFailSends(false)
+		stateInvalidationChannel.publish()
+		expect(dead.sent).toEqual([])
+		expect(survivor.sent.map(parseWireMessage)).toEqual([
+			{ type: 'state_invalidated' },
+			{ type: 'state_invalidated' },
+		])
+	})
+
+	test('publishing with no open sockets does not throw', () => {
+		const { stateInvalidationChannel } = createHubHarness()
+
+		expect(() => stateInvalidationChannel.publish()).not.toThrow()
 	})
 })

@@ -65,6 +65,9 @@ const emptyRunsDir: RunDirectoryExists = () => false
 // The settlement hook most tests never observe; the hook tests below record with their own.
 const settleNothing = async (): Promise<void> => {}
 
+// Most tests do not assert on state invalidation; the notification tests below supply their own recorder.
+const notifyNothing = (): void => {}
+
 // Most tests exercise submit(); this stand-in satisfies the dependency where resume is not under test.
 const unusedResumeRun: ResumeRun = async () => sampleMeta('resumed')
 
@@ -95,6 +98,7 @@ describe('createRunSubmission', () => {
 			return sampleMeta(runId)
 		}
 		const submission = createRunSubmission({
+			notifyStateChanged: notifyNothing,
 			providerSuspension: providerSuspensionForTest(),
 			onRunSettled: settleNothing, startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings, runDirectoryExists: emptyRunsDir })
 
@@ -113,6 +117,7 @@ describe('createRunSubmission', () => {
 			return sampleMeta('run-1')
 		}
 		const submission = createRunSubmission({
+			notifyStateChanged: notifyNothing,
 			providerSuspension: providerSuspensionForTest(),
 			onRunSettled: settleNothing, startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings, runDirectoryExists: emptyRunsDir })
 
@@ -130,6 +135,7 @@ describe('createRunSubmission', () => {
 		const ids = ['run-1', 'run-2']
 		let next = 0
 		const submission = createRunSubmission({
+			notifyStateChanged: notifyNothing,
 			providerSuspension: providerSuspensionForTest(),
 			onRunSettled: settleNothing, startRun, resumeRun: unusedResumeRun, generateRunId: () => defined(ids[next++], 'run id'), readProjectSettings: emptySettings, runDirectoryExists: emptyRunsDir })
 
@@ -147,6 +153,7 @@ describe('createRunSubmission', () => {
 	test('a boot-adopted suspended run keeps its record and refuses submissions until cleared', async () => {
 		const startRun: StartRun = async (runId) => sampleMeta(runId)
 		const submission = createRunSubmission({
+			notifyStateChanged: notifyNothing,
 			providerSuspension: providerSuspensionForTest(),
 			onRunSettled: settleNothing, startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings, runDirectoryExists: emptyRunsDir })
 
@@ -165,6 +172,7 @@ describe('createRunSubmission', () => {
 	test('clearing a different run never clears the suspended gate', async () => {
 		const startRun: StartRun = async (runId) => sampleMeta(runId)
 		const submission = createRunSubmission({
+			notifyStateChanged: notifyNothing,
 			providerSuspension: providerSuspensionForTest(),
 			onRunSettled: settleNothing, startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings, runDirectoryExists: emptyRunsDir })
 		submission.adoptSuspendedRun('run-B')
@@ -192,6 +200,7 @@ describe('createRunSubmission', () => {
 		const pause = { message: 'The operator paused this run.', pausedAt: '2026-01-01T00:05:00.000Z' }
 		const startRun: StartRun = async (runId) => ({ ...sampleMeta(runId), status: 'suspended', pause })
 		const submission = createRunSubmission({
+			notifyStateChanged: notifyNothing,
 			providerSuspension,
 			onRunSettled: settleNothing, startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings, runDirectoryExists: emptyRunsDir })
 
@@ -227,6 +236,7 @@ describe('createRunSubmission', () => {
 		const pause = { message: 'The operator paused this run.', pausedAt: '2026-01-01T00:05:00.000Z' }
 		const startRun: StartRun = async (runId) => ({ ...sampleMeta(runId), status: 'suspended', pause })
 		const submission = createRunSubmission({
+			notifyStateChanged: notifyNothing,
 			providerSuspension,
 			onRunSettled: settleNothing, startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings, runDirectoryExists: emptyRunsDir })
 
@@ -249,6 +259,7 @@ describe('createRunSubmission', () => {
 		}
 		const checkpoint: RunCheckpoint = { version: 2, runId: 'run-1', startTime: '2026-01-01T00:00:00.000Z', registryCounter: 1, frames: [{ roleId: 'main-0-1', roleName: 'main', depth: 0, task: 'do it', roleState: { protectedPrefixLength: 2, history: [{ role: 'system', content: 'prompt' }, { role: 'user', content: 'do it' }], lastPromptTokens: 0, recentCompactionPromptTokens: [], recentToolCalls: [], toolCallCount: 0, generatedTokens: 0, contextExceededAttempts: 0, loopCheckToolCallWatermark: 0, loopCheckTokenWatermark: 0 } }] }
 		const submission = createRunSubmission({
+			notifyStateChanged: notifyNothing,
 			providerSuspension,
 			onRunSettled: settleNothing, startRun: unusedStartRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings, runDirectoryExists: emptyRunsDir })
 		submission.adoptOperatorPausedRun('run-1')
@@ -268,6 +279,7 @@ describe('createRunSubmission', () => {
 			releaseSuspension: () => {},
 		}
 		const submission = createRunSubmission({
+			notifyStateChanged: notifyNothing,
 			providerSuspension,
 			onRunSettled: settleNothing, startRun: unusedStartRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings, runDirectoryExists: emptyRunsDir })
 		submission.adoptSuspendedRun('provider-run')
@@ -287,6 +299,7 @@ describe('createRunSubmission', () => {
 		}
 		// Run ids have one-second resolution, so a previous run that failed instantly can still own the directory the fresh id maps to.
 		const submission = createRunSubmission({
+			notifyStateChanged: notifyNothing,
 			providerSuspension: providerSuspensionForTest(),
 			onRunSettled: settleNothing, startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', runDirectoryExists: () => true, readProjectSettings: emptySettings })
 
@@ -299,6 +312,7 @@ describe('createRunSubmission', () => {
 		let directoryTaken = true
 		const startRun: StartRun = async (runId) => sampleMeta(runId)
 		const submission = createRunSubmission({
+			notifyStateChanged: notifyNothing,
 			providerSuspension: providerSuspensionForTest(),
 			onRunSettled: settleNothing, startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', runDirectoryExists: () => directoryTaken, readProjectSettings: emptySettings })
 
@@ -317,6 +331,7 @@ describe('createRunSubmission', () => {
 		const ids = ['run-1', 'run-2']
 		let next = 0
 		const submission = createRunSubmission({
+			notifyStateChanged: notifyNothing,
 			providerSuspension: providerSuspensionForTest(),
 			onRunSettled: settleNothing, startRun, resumeRun: unusedResumeRun, generateRunId: () => defined(ids[next++], 'run id'), readProjectSettings: emptySettings, runDirectoryExists: emptyRunsDir })
 
@@ -341,6 +356,7 @@ describe('createRunSubmission', () => {
 		const ids = ['run-1', 'run-2']
 		let next = 0
 		const submission = createRunSubmission({
+			notifyStateChanged: notifyNothing,
 			providerSuspension: providerSuspensionForTest(),
 			onRunSettled: settleNothing, startRun, resumeRun: unusedResumeRun, generateRunId: () => defined(ids[next++], 'run id'), readProjectSettings: emptySettings, runDirectoryExists: emptyRunsDir })
 
@@ -361,6 +377,7 @@ describe('createRunSubmission', () => {
 		const meta = sampleMeta('run-1')
 		const startRun: StartRun = async () => meta
 		const submission = createRunSubmission({
+			notifyStateChanged: notifyNothing,
 			providerSuspension: providerSuspensionForTest(),
 			onRunSettled: settleNothing, startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings, runDirectoryExists: emptyRunsDir })
 
@@ -371,6 +388,7 @@ describe('createRunSubmission', () => {
 	test('awaitActive resolves with undefined when no run has been started', async () => {
 		const startRun: StartRun = async () => sampleMeta('run-1')
 		const submission = createRunSubmission({
+			notifyStateChanged: notifyNothing,
 			providerSuspension: providerSuspensionForTest(),
 			onRunSettled: settleNothing, startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings, runDirectoryExists: emptyRunsDir })
 
@@ -381,6 +399,7 @@ describe('createRunSubmission', () => {
 		const meta = sampleMeta('run-1')
 		const startRun: StartRun = async () => meta
 		const submission = createRunSubmission({
+			notifyStateChanged: notifyNothing,
 			providerSuspension: providerSuspensionForTest(),
 			onRunSettled: settleNothing, startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings, runDirectoryExists: emptyRunsDir })
 
@@ -415,6 +434,7 @@ describe('createRunSubmission', () => {
 	test('a fatal startRun rejection clears the active slot and resolves awaitFatalError', async () => {
 		const startRun: StartRun = () => Promise.reject(new Error('disk full'))
 		const submission = createRunSubmission({
+			notifyStateChanged: notifyNothing,
 			providerSuspension: providerSuspensionForTest(),
 			onRunSettled: settleNothing, startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings, runDirectoryExists: emptyRunsDir })
 
@@ -431,6 +451,7 @@ describe('createRunSubmission', () => {
 	test('a non-Error rejection is normalized to an Error in awaitFatalError', async () => {
 		const startRun: StartRun = () => Promise.reject('bare string rejection')
 		const submission = createRunSubmission({
+			notifyStateChanged: notifyNothing,
 			providerSuspension: providerSuspensionForTest(),
 			onRunSettled: settleNothing, startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings, runDirectoryExists: emptyRunsDir })
 
@@ -446,6 +467,7 @@ describe('createRunSubmission', () => {
 	test('a successful run never resolves awaitFatalError', async () => {
 		const startRun: StartRun = async () => sampleMeta('run-1')
 		const submission = createRunSubmission({
+			notifyStateChanged: notifyNothing,
 			providerSuspension: providerSuspensionForTest(),
 			onRunSettled: settleNothing, startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings, runDirectoryExists: emptyRunsDir })
 
@@ -494,6 +516,7 @@ describe('createRunSubmission resume', () => {
 		const checkpoint = sampleCheckpoint('run-20260101-000009')
 		const resumeRun: ResumeRun = async () => sampleMeta('run-20260101-000009')
 		const submission = createRunSubmission({
+			notifyStateChanged: notifyNothing,
 			providerSuspension: providerSuspensionForTest(),
 			onRunSettled: settleNothing, startRun: unusedStartRun, resumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings, runDirectoryExists: emptyRunsDir })
 
@@ -516,6 +539,7 @@ describe('createRunSubmission resume', () => {
 		}
 		const checkpoint = sampleCheckpoint('run-20260101-000009')
 		const submission = createRunSubmission({
+			notifyStateChanged: notifyNothing,
 			providerSuspension,
 			onRunSettled: settleNothing, startRun: unusedStartRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings, runDirectoryExists: emptyRunsDir })
 
@@ -530,6 +554,7 @@ describe('createRunSubmission resume', () => {
 			resolveResume = resolve
 		})
 		const submission = createRunSubmission({
+			notifyStateChanged: notifyNothing,
 			providerSuspension: providerSuspensionForTest(),
 			onRunSettled: settleNothing, startRun: unusedStartRun, resumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings, runDirectoryExists: emptyRunsDir })
 
@@ -547,6 +572,7 @@ describe('createRunSubmission resume', () => {
 			resolveRun = resolve
 		})
 		const submission = createRunSubmission({
+			notifyStateChanged: notifyNothing,
 			providerSuspension: providerSuspensionForTest(),
 			onRunSettled: settleNothing, startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings, runDirectoryExists: emptyRunsDir })
 
@@ -560,6 +586,7 @@ describe('createRunSubmission resume', () => {
 	test('a resumeRun rejection clears the active slot and resolves awaitFatalError', async () => {
 		const resumeRun: ResumeRun = () => Promise.reject(new Error('checkpoint unreadable'))
 		const submission = createRunSubmission({
+			notifyStateChanged: notifyNothing,
 			providerSuspension: providerSuspensionForTest(),
 			onRunSettled: settleNothing, startRun: unusedStartRun, resumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings, runDirectoryExists: emptyRunsDir })
 
@@ -579,6 +606,7 @@ describe('createRunSubmission resume', () => {
 			return sampleMeta('run-20260101-000009')
 		}
 		const submission = createRunSubmission({
+			notifyStateChanged: notifyNothing,
 			providerSuspension: providerSuspensionForTest(),
 			onRunSettled: settleNothing, startRun: unusedStartRun, resumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings, runDirectoryExists: emptyRunsDir })
 
@@ -601,6 +629,7 @@ describe('createRunSubmission resume', () => {
 			return sampleMeta('run-20260101-000009')
 		}
 		const submission = createRunSubmission({
+			notifyStateChanged: notifyNothing,
 			providerSuspension: providerSuspensionForTest(),
 			onRunSettled: settleNothing, startRun: unusedStartRun, resumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings, runDirectoryExists: emptyRunsDir })
 		const parkedAnswer = { question: 'which database?', answer: 'postgres', toolCallId: 'ask_1' }
@@ -647,6 +676,7 @@ describe('createRunSubmission settlement hook', () => {
 		const slotContents: Array<string | undefined> = []
 		const startRun: StartRun = async (runId) => sampleMeta(runId)
 		const submission = createRunSubmission({
+			notifyStateChanged: notifyNothing,
 			providerSuspension: providerSuspensionForTest(),
 			startRun,
 			resumeRun: unusedResumeRun,
@@ -678,6 +708,7 @@ describe('createRunSubmission settlement hook', () => {
 		const observed: Array<{ suspended: string | undefined; active: string | undefined }> = []
 		const startRun: StartRun = async () => suspended
 		const submission = createRunSubmission({
+			notifyStateChanged: notifyNothing,
 			providerSuspension: providerSuspensionForTest(),
 			startRun,
 			resumeRun: unusedResumeRun,
@@ -702,10 +733,47 @@ describe('createRunSubmission settlement hook', () => {
 		await submission.awaitActive()
 	})
 
+	test('an operator-paused suspended settlement publishes once after onRunSettled completes', async () => {
+		const events: string[] = []
+		const pause = { message: 'The operator paused this run.', pausedAt: '2026-01-01T00:01:00.000Z' }
+		const suspended: RunMeta = {
+			runId: 'run-1',
+			task: 'do it',
+			status: 'suspended',
+			startTime: '2026-01-01T00:00:00.000Z',
+			pause,
+		}
+		const startRun: StartRun = async () => suspended
+		const submission = createRunSubmission({
+			providerSuspension: providerSuspensionForTest(),
+			startRun,
+			resumeRun: unusedResumeRun,
+			generateRunId: () => 'run-1',
+			readProjectSettings: emptySettings,
+			runDirectoryExists: emptyRunsDir,
+			onRunSettled: async () => {
+				events.push('settled:start')
+				await Promise.resolve()
+				events.push('settled:end')
+			},
+			notifyStateChanged: () => {
+				events.push('notified')
+			},
+		})
+
+		submission.submit('do it')
+		await submission.awaitActive()
+
+		expect(events).toEqual(['notified', 'settled:start', 'settled:end', 'notified'])
+		expect(submission.pausedRunId()).toBe('run-1')
+		expect(submission.pausedRunKind()).toBe('operator')
+	})
+
 	test('onRunSettled fires exactly once when a resumed run settles', async () => {
 		const settled: RunMeta[] = []
 		const resumeRun: ResumeRun = async () => sampleMeta('run-20260101-000009')
 		const submission = createRunSubmission({
+			notifyStateChanged: notifyNothing,
 			providerSuspension: providerSuspensionForTest(),
 			startRun: unusedStartRun,
 			resumeRun,
@@ -727,6 +795,7 @@ describe('createRunSubmission settlement hook', () => {
 		const settled: RunMeta[] = []
 		const startRun: StartRun = () => Promise.reject(new Error('disk full'))
 		const submission = createRunSubmission({
+			notifyStateChanged: notifyNothing,
 			providerSuspension: providerSuspensionForTest(),
 			startRun,
 			resumeRun: unusedResumeRun,
@@ -759,6 +828,7 @@ describe('createRunSubmission effort resolution', () => {
 	test('a per-run override is threaded into startRun', async () => {
 		const { startRun, captured } = captureEffort()
 		const submission = createRunSubmission({
+			notifyStateChanged: notifyNothing,
 			providerSuspension: providerSuspensionForTest(),
 			onRunSettled: settleNothing, startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings, runDirectoryExists: emptyRunsDir })
 
@@ -771,6 +841,7 @@ describe('createRunSubmission effort resolution', () => {
 		const { startRun, captured } = captureEffort()
 		const projectSettings: ReadProjectSettings = () => ({ effort: 'thorough' })
 		const submission = createRunSubmission({
+			notifyStateChanged: notifyNothing,
 			providerSuspension: providerSuspensionForTest(),
 			onRunSettled: settleNothing, startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: projectSettings, runDirectoryExists: emptyRunsDir })
 
@@ -783,6 +854,7 @@ describe('createRunSubmission effort resolution', () => {
 		const { startRun, captured } = captureEffort()
 		const projectSettings: ReadProjectSettings = () => ({ effort: 'thorough' })
 		const submission = createRunSubmission({
+			notifyStateChanged: notifyNothing,
 			providerSuspension: providerSuspensionForTest(),
 			onRunSettled: settleNothing, startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: projectSettings, runDirectoryExists: emptyRunsDir })
 
@@ -794,6 +866,7 @@ describe('createRunSubmission effort resolution', () => {
 	test('DEFAULT_EFFORT applies when neither override nor project setting fixes the effort', async () => {
 		const { startRun, captured } = captureEffort()
 		const submission = createRunSubmission({
+			notifyStateChanged: notifyNothing,
 			providerSuspension: providerSuspensionForTest(),
 			onRunSettled: settleNothing, startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings, runDirectoryExists: emptyRunsDir })
 
@@ -816,6 +889,7 @@ describe('createRunSubmission continuation passthrough', () => {
 	test('submit threads the continuation through to startRun', async () => {
 		const { startRun, captured } = captureContinuation()
 		const submission = createRunSubmission({
+			notifyStateChanged: notifyNothing,
 			providerSuspension: providerSuspensionForTest(),
 			onRunSettled: settleNothing, startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings, runDirectoryExists: emptyRunsDir })
 		const continuation = { runId: 'run-20260101-000000', task: 'prior task', summary: 'prior summary' }
@@ -828,6 +902,7 @@ describe('createRunSubmission continuation passthrough', () => {
 	test('submit threads no continuation when none is given', async () => {
 		const { startRun, captured } = captureContinuation()
 		const submission = createRunSubmission({
+			notifyStateChanged: notifyNothing,
 			providerSuspension: providerSuspensionForTest(),
 			onRunSettled: settleNothing, startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings, runDirectoryExists: emptyRunsDir })
 
@@ -850,6 +925,7 @@ describe('createRunSubmission log level resolution', () => {
 	test('a per-run override is threaded into startRun', async () => {
 		const { startRun, captured } = captureLogLevel()
 		const submission = createRunSubmission({
+			notifyStateChanged: notifyNothing,
 			providerSuspension: providerSuspensionForTest(),
 			onRunSettled: settleNothing, startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings, runDirectoryExists: emptyRunsDir })
 
@@ -862,6 +938,7 @@ describe('createRunSubmission log level resolution', () => {
 		const { startRun, captured } = captureLogLevel()
 		const projectSettings: ReadProjectSettings = () => ({ logLevel: 'standard' })
 		const submission = createRunSubmission({
+			notifyStateChanged: notifyNothing,
 			providerSuspension: providerSuspensionForTest(),
 			onRunSettled: settleNothing, startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: projectSettings, runDirectoryExists: emptyRunsDir })
 
@@ -874,6 +951,7 @@ describe('createRunSubmission log level resolution', () => {
 		const { startRun, captured } = captureLogLevel()
 		const projectSettings: ReadProjectSettings = () => ({ logLevel: 'standard' })
 		const submission = createRunSubmission({
+			notifyStateChanged: notifyNothing,
 			providerSuspension: providerSuspensionForTest(),
 			onRunSettled: settleNothing, startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: projectSettings, runDirectoryExists: emptyRunsDir })
 
@@ -885,6 +963,7 @@ describe('createRunSubmission log level resolution', () => {
 	test('the deployment default applies when neither override nor project setting fixes the level', async () => {
 		const { startRun, captured } = captureLogLevel()
 		const submission = createRunSubmission({
+			notifyStateChanged: notifyNothing,
 			providerSuspension: providerSuspensionForTest(),
 			onRunSettled: settleNothing, startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings, runDirectoryExists: emptyRunsDir, deploymentLogLevel: 'standard' })
 
@@ -897,6 +976,7 @@ describe('createRunSubmission log level resolution', () => {
 		const { startRun, captured } = captureLogLevel()
 		const projectSettings: ReadProjectSettings = () => ({ logLevel: 'full' })
 		const submission = createRunSubmission({
+			notifyStateChanged: notifyNothing,
 			providerSuspension: providerSuspensionForTest(),
 			onRunSettled: settleNothing, startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: projectSettings, runDirectoryExists: emptyRunsDir, deploymentLogLevel: 'standard' })
 
@@ -908,6 +988,7 @@ describe('createRunSubmission log level resolution', () => {
 	test('a per-run override wins over the deployment default', async () => {
 		const { startRun, captured } = captureLogLevel()
 		const submission = createRunSubmission({
+			notifyStateChanged: notifyNothing,
 			providerSuspension: providerSuspensionForTest(),
 			onRunSettled: settleNothing, startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings, runDirectoryExists: emptyRunsDir, deploymentLogLevel: 'standard' })
 
@@ -919,6 +1000,7 @@ describe('createRunSubmission log level resolution', () => {
 	test('DEFAULT_LOG_LEVEL applies when nothing in the chain fixes the level', async () => {
 		const { startRun, captured } = captureLogLevel()
 		const submission = createRunSubmission({
+			notifyStateChanged: notifyNothing,
 			providerSuspension: providerSuspensionForTest(),
 			onRunSettled: settleNothing, startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings, runDirectoryExists: emptyRunsDir })
 
@@ -941,6 +1023,7 @@ describe('createRunSubmission involvement resolution', () => {
 	test('a per-run override is threaded into startRun', async () => {
 		const { startRun, captured } = captureInvolvement()
 		const submission = createRunSubmission({
+			notifyStateChanged: notifyNothing,
 			providerSuspension: providerSuspensionForTest(),
 			onRunSettled: settleNothing, startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings, runDirectoryExists: emptyRunsDir })
 
@@ -953,6 +1036,7 @@ describe('createRunSubmission involvement resolution', () => {
 		const { startRun, captured } = captureInvolvement()
 		const projectSettings: ReadProjectSettings = () => ({ involvement: 'collaborative' })
 		const submission = createRunSubmission({
+			notifyStateChanged: notifyNothing,
 			providerSuspension: providerSuspensionForTest(),
 			onRunSettled: settleNothing, startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: projectSettings, runDirectoryExists: emptyRunsDir })
 
@@ -965,6 +1049,7 @@ describe('createRunSubmission involvement resolution', () => {
 		const { startRun, captured } = captureInvolvement()
 		const projectSettings: ReadProjectSettings = () => ({ involvement: 'collaborative' })
 		const submission = createRunSubmission({
+			notifyStateChanged: notifyNothing,
 			providerSuspension: providerSuspensionForTest(),
 			onRunSettled: settleNothing, startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: projectSettings, runDirectoryExists: emptyRunsDir })
 
@@ -976,6 +1061,7 @@ describe('createRunSubmission involvement resolution', () => {
 	test('the deployment default applies when neither override nor project setting fixes the level', async () => {
 		const { startRun, captured } = captureInvolvement()
 		const submission = createRunSubmission({
+			notifyStateChanged: notifyNothing,
 			providerSuspension: providerSuspensionForTest(),
 			onRunSettled: settleNothing, startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings, runDirectoryExists: emptyRunsDir, deploymentInvolvement: 'collaborative' })
 
@@ -988,6 +1074,7 @@ describe('createRunSubmission involvement resolution', () => {
 		const { startRun, captured } = captureInvolvement()
 		const projectSettings: ReadProjectSettings = () => ({ involvement: 'autonomous' })
 		const submission = createRunSubmission({
+			notifyStateChanged: notifyNothing,
 			providerSuspension: providerSuspensionForTest(),
 			onRunSettled: settleNothing, startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: projectSettings, runDirectoryExists: emptyRunsDir, deploymentInvolvement: 'collaborative' })
 
@@ -999,6 +1086,7 @@ describe('createRunSubmission involvement resolution', () => {
 	test('a per-run override wins over the deployment default', async () => {
 		const { startRun, captured } = captureInvolvement()
 		const submission = createRunSubmission({
+			notifyStateChanged: notifyNothing,
 			providerSuspension: providerSuspensionForTest(),
 			onRunSettled: settleNothing, startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings, runDirectoryExists: emptyRunsDir, deploymentInvolvement: 'collaborative' })
 
@@ -1010,6 +1098,7 @@ describe('createRunSubmission involvement resolution', () => {
 	test('DEFAULT_INVOLVEMENT applies when nothing in the chain fixes the level', async () => {
 		const { startRun, captured } = captureInvolvement()
 		const submission = createRunSubmission({
+			notifyStateChanged: notifyNothing,
 			providerSuspension: providerSuspensionForTest(),
 			onRunSettled: settleNothing, startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings, runDirectoryExists: emptyRunsDir })
 
@@ -1083,6 +1172,7 @@ describe('createResumeErroredOrSuspendedRun', () => {
 	// The real queue module over the in-memory store: the resume path only exercises its re-activation operation.
 	function createQueueModule(store: ReturnType<typeof createQueueStore>, submission: RunSubmission, readers: ReturnType<typeof createReaders>): TaskQueueModule {
 		return createTaskQueue({
+			notifyStateChanged: notifyNothing,
 			queueStore: store.store,
 			readRunMetaById: readers.readRunMetaById,
 			listRunIds: () => [],
@@ -1138,6 +1228,7 @@ describe('createResumeErroredOrSuspendedRun', () => {
 			return sampleMeta(checkpoint.runId)
 		}
 		const submission = createRunSubmission({
+			notifyStateChanged: notifyNothing,
 			providerSuspension: providerSuspensionForTest(),
 			onRunSettled: settleNothing, startRun: unusedStartRun, resumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings, runDirectoryExists: emptyRunsDir })
 		const taskQueue = createQueueModule(queue, submission, readers)
@@ -1417,6 +1508,7 @@ describe('createResumeErroredOrSuspendedRun', () => {
 		const metas = new Map([['run-20260101-000009', JSON.stringify(erroredMeta('run-20260101-000009'))]])
 		const readers = createReaders(metas, new Map())
 		const submission = createRunSubmission({
+			notifyStateChanged: notifyNothing,
 			providerSuspension: providerSuspensionForTest(),
 			onRunSettled: settleNothing, startRun, resumeRun: unusedResumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings, runDirectoryExists: emptyRunsDir })
 		const resumeErroredOrSuspendedRun = createResumeErroredOrSuspendedRun({ runSubmission: submission, readRunMetaById: readers.readRunMetaById, readCheckpointById: readers.readCheckpointById, deletePauseRequest: () => true, taskQueue: createQueueModule(queue, submission, readers) })
@@ -1534,6 +1626,7 @@ describe('createResumeParkedRun', () => {
 			return parkedMeta(checkpoint.runId)
 		}
 		const submission = createRunSubmission({
+			notifyStateChanged: notifyNothing,
 			providerSuspension: providerSuspensionForTest(),
 			onRunSettled: settleNothing, startRun: unusedStartRun, resumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings, runDirectoryExists: emptyRunsDir })
 		const resumeParkedRun = createResumeParkedRun({
@@ -1556,6 +1649,7 @@ describe('createResumeParkedRun', () => {
 			resolveRun = resolve
 		})
 		const submission = createRunSubmission({
+			notifyStateChanged: notifyNothing,
 			providerSuspension: providerSuspensionForTest(),
 			onRunSettled: settleNothing, startRun: unusedStartRun, resumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings, runDirectoryExists: emptyRunsDir })
 		const resumeParkedRun = createResumeParkedRun({ runSubmission: submission, readRunMetaById: () => null, readCheckpointById: () => null, deletePauseRequest: () => true })
@@ -1645,6 +1739,7 @@ describe('createResumeClarificationRun', () => {
 			return clarificationMeta(checkpoint.runId)
 		}
 		const submission = createRunSubmission({
+			notifyStateChanged: notifyNothing,
 			providerSuspension: providerSuspensionForTest(),
 			onRunSettled: settleNothing, startRun: unusedStartRun, resumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings, runDirectoryExists: emptyRunsDir })
 		const resumeClarificationRun = createResumeClarificationRun({
@@ -1690,6 +1785,7 @@ describe('createResumeClarificationRun', () => {
 			resolveRun = resolve
 		})
 		const submission = createRunSubmission({
+			notifyStateChanged: notifyNothing,
 			providerSuspension: providerSuspensionForTest(),
 			onRunSettled: settleNothing, startRun: unusedStartRun, resumeRun, generateRunId: () => 'run-1', readProjectSettings: emptySettings, runDirectoryExists: emptyRunsDir })
 		const resumeClarificationRun = createResumeClarificationRun({ runSubmission: submission, readRunMetaById: () => null, readCheckpointById: () => null, deletePauseRequest: () => true })
@@ -1742,13 +1838,18 @@ describe('createTerminatePausedRun', () => {
 		deleted: string[]
 		logs: Array<{ runId: string; event: LogEvent }>
 		clearedSuspendedRun: () => number
+		notifications: () => number
 	} {
 		const metas = new Map(input.metas ?? [])
 		const logsByRun = new Map(input.logsByRun ?? [])
 		const deleted: string[] = []
 		const logs: Array<{ runId: string; event: LogEvent }> = []
 		let clearedSuspendedRun = 0
+		let notificationCount = 0
 		const terminatePausedRun = createTerminatePausedRun({
+			notifyStateChanged: () => {
+				notificationCount += 1
+			},
 			readRunMetaById: (runId) => metas.get(runId) ?? null,
 			readRunLogEvents: (runId) => logsByRun.get(runId) ?? [],
 			writeMetaFor: (runId) => (meta) => {
@@ -1764,7 +1865,7 @@ describe('createTerminatePausedRun', () => {
 				if (runId !== undefined) clearedSuspendedRun += 1
 			},
 		})
-		return { terminatePausedRun, metas, deleted, logs, clearedSuspendedRun: () => clearedSuspendedRun }
+		return { terminatePausedRun, metas, deleted, logs, clearedSuspendedRun: () => clearedSuspendedRun, notifications: () => notificationCount }
 	}
 
 	function parkedMeta(runId: string): RunMeta {
@@ -1900,6 +2001,7 @@ describe('createTerminatePausedRun', () => {
 		let suspendedGate = 'run-other'
 		const terminatedMeta = { ...parkedMeta(runId), status: 'interrupted' as const, error: { kind: 'interrupted' as const, message: 'already terminated' } }
 		const terminate = createTerminatePausedRun({
+			notifyStateChanged: notifyNothing,
 			readRunMetaById: (id) => (id === runId ? JSON.stringify(terminatedMeta) : null),
 			readRunLogEvents: () => [],
 			writeMetaFor: () => () => {},
@@ -1951,5 +2053,149 @@ describe('createTerminatePausedRun', () => {
 		expect(testHarness.terminatePausedRun(runId)).toEqual({ ok: true, runId })
 		expect(testHarness.logs.map((log) => log.event.type)).toEqual(['human_answer', 'role_finished', 'run_terminated'])
 		expect(testHarness.logs[1]?.event.payload).toMatchObject({ callId: 'role:main-0-1', status: 'error', error: { kind: 'interrupted' } })
+	})
+
+	test('a successful termination publishes once after the checkpoint cleanup', () => {
+		const runId = 'run-20260101-000000'
+		const testHarness = harness({ metas: new Map([[runId, JSON.stringify(parkedMeta(runId))]]) })
+
+		expect(testHarness.terminatePausedRun(runId)).toEqual({ ok: true, runId })
+		expect(testHarness.deleted).toEqual([runId])
+		expect(testHarness.notifications()).toBe(1)
+	})
+
+	test('not_found and not_paused outcomes do not publish', () => {
+		const missing = harness()
+		expect(missing.terminatePausedRun('run-1')).toEqual({ ok: false, error: 'not_found' })
+		expect(missing.notifications()).toBe(0)
+
+		const settled = harness({ metas: new Map([['run-1', JSON.stringify(sampleMeta('run-1'))]]) })
+		expect(settled.terminatePausedRun('run-1')).toEqual({ ok: false, error: 'not_paused' })
+		expect(settled.notifications()).toBe(0)
+	})
+
+	test('an interrupted retry cleans up idempotently without publishing', () => {
+		const runId = 'run-20260101-000000'
+		const interrupted = { ...parkedMeta(runId), status: 'interrupted' as const, error: { kind: 'interrupted' as const, message: 'already terminated' } }
+		const testHarness = harness({ metas: new Map([[runId, JSON.stringify(interrupted)]]) })
+
+		expect(testHarness.terminatePausedRun(runId)).toEqual({ ok: false, error: 'not_paused' })
+		expect(testHarness.deleted).toEqual([runId])
+		expect(testHarness.notifications()).toBe(0)
+	})
+})
+
+describe('createRunSubmission state invalidation', () => {
+	function checkpointFor(runId: string): RunCheckpoint {
+		return {
+			version: 2,
+			runId,
+			startTime: '2026-01-01T00:00:00.000Z',
+			registryCounter: 1,
+			frames: [],
+		}
+	}
+
+	test('submit publishes once after the active slot is taken', async () => {
+		let notifications = 0
+		let resolveRun: (meta: RunMeta) => void = () => {}
+		const startRun: StartRun = () => new Promise<RunMeta>((resolve) => {
+			resolveRun = resolve
+		})
+		const submission = createRunSubmission({
+			providerSuspension: providerSuspensionForTest(),
+			onRunSettled: settleNothing,
+			startRun,
+			resumeRun: unusedResumeRun,
+			generateRunId: () => 'run-1',
+			readProjectSettings: emptySettings,
+			runDirectoryExists: emptyRunsDir,
+			notifyStateChanged: () => {
+				notifications += 1
+			},
+		})
+
+		submission.submit('do it')
+
+		expect(submission.activeRunId()).toBe('run-1')
+		expect(notifications).toBe(1)
+		resolveRun(sampleMeta('run-1'))
+		await submission.awaitActive()
+	})
+
+	test('resume publishes once after the active slot is taken', async () => {
+		let notifications = 0
+		let resolveRun: (meta: RunMeta) => void = () => {}
+		const resumeRun: ResumeRun = () => new Promise<RunMeta>((resolve) => {
+			resolveRun = resolve
+		})
+		const submission = createRunSubmission({
+			providerSuspension: providerSuspensionForTest(),
+			onRunSettled: settleNothing,
+			startRun: unusedStartRun,
+			resumeRun,
+			generateRunId: () => 'run-1',
+			readProjectSettings: emptySettings,
+			runDirectoryExists: emptyRunsDir,
+			notifyStateChanged: () => {
+				notifications += 1
+			},
+		})
+
+		submission.resume(checkpointFor('run-20260101-000009'))
+
+		expect(submission.activeRunId()).toBe('run-20260101-000009')
+		expect(notifications).toBe(1)
+		resolveRun(sampleMeta('run-20260101-000009'))
+		await submission.awaitActive()
+	})
+
+	test('a fulfilled settlement publishes after onRunSettled returns', async () => {
+		const events: string[] = []
+		const startRun: StartRun = async (runId) => sampleMeta(runId)
+		const submission = createRunSubmission({
+			providerSuspension: providerSuspensionForTest(),
+			startRun,
+			resumeRun: unusedResumeRun,
+			generateRunId: () => 'run-1',
+			readProjectSettings: emptySettings,
+			runDirectoryExists: emptyRunsDir,
+			onRunSettled: async () => {
+				events.push('settled')
+			},
+			notifyStateChanged: () => {
+				events.push('notified')
+			},
+		})
+
+		submission.submit('do it')
+		await submission.awaitActive()
+
+		expect(events).toEqual(['notified', 'settled', 'notified'])
+	})
+
+	test('a rejected run promise does not publish a settlement', async () => {
+		let notifications = 0
+		const startRun: StartRun = () => Promise.reject(new Error('disk full'))
+		const submission = createRunSubmission({
+			providerSuspension: providerSuspensionForTest(),
+			startRun,
+			resumeRun: unusedResumeRun,
+			generateRunId: () => 'run-1',
+			readProjectSettings: emptySettings,
+			runDirectoryExists: emptyRunsDir,
+			onRunSettled: settleNothing,
+			notifyStateChanged: () => {
+				notifications += 1
+			},
+		})
+
+		submission.submit('do it')
+		const notificationsAfterStart = notifications
+		await submission.awaitFatalError()
+		await flushMicrotasks()
+
+		expect(notificationsAfterStart).toBe(1)
+		expect(notifications).toBe(notificationsAfterStart)
 	})
 })

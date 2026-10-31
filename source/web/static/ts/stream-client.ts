@@ -1,8 +1,10 @@
-// Browser-side client for the live token stream: the single websocket endpoint `GET /ws/stream` (upgraded by source/web/server.ts, fanned out by stream-hub.ts) carries the active run's ephemeral in-flight partials. The client owns the whole connection lifecycle — connect, subscribe on open, tolerant parse, reconnect with capped backoff, close — behind two calls, so its host (app.js) never touches a socket.
+// Browser-side client for the live token stream: the single websocket endpoint `GET /ws/stream` (upgraded by source/web/server.ts, fanned out by stream-hub.ts) carries the active run's ephemeral in-flight partials and broadcasts state-invalidation signals to every connected socket. The client owns the whole connection lifecycle — connect, subscribe on open, tolerant parse, reconnect with capped backoff, close — so its host (app.js) never touches a socket.
 //
-// The stream is an enhancement, so this module must never throw into its host: socket construction, socket sends, and host callbacks are all contained, and a malformed server message is dropped rather than surfaced. When the socket is absent, rejected, or dies mid-stream, the host simply sees no deltas — only live partial text is ever lost, and the polled run log stays the sole authority for run state (see docs/reference.md "Live token stream").
+// The stream is an enhancement, so this module must never throw into its host: socket construction, socket sends, and host callbacks are all contained, and a malformed server message is dropped rather than surfaced. When the socket is absent, rejected, or dies mid-stream, the host sees no deltas and misses invalidation signals until a reconnect; only live partial text is lost in the meantime, and the polled run log stays the sole authority for run state (see docs/reference.md "Live token stream").
 //
-// Reconnect policy: the first retry waits 500ms and each further wait doubles up to a cap of 8s; a `subscribed` ack — proof the server is alive and the subscription landed — resets the wait to the start. A re-subscribe while connected sends the new run id immediately (the server replaces the subscription); a re-subscribe while down only updates the desired run, which the next connection sends on open.
+// A connection is wanted while a run is subscribed or state watching is on. State watching keeps the socket (and its retry loop) alive without a run subscription, so the host can receive state-invalidation signals on every screen — notably for a hidden tab, which polls no run list while hidden.
+//
+// Reconnect policy: the first retry waits 500ms and each further wait doubles up to a cap of 8s; any successful open — proof the server is alive — resets the wait to the start, and a `subscribed` ack keeps it there. A re-subscribe while connected sends the new run id immediately (the server replaces the subscription); a re-subscribe while down only updates the desired run, which the next connection sends on open.
 
 import { isObject } from './guards.js'
 
@@ -41,13 +43,17 @@ export type OpenSocket = (url: string, handlers: StreamSocketHandlers) => Stream
 interface StreamConnectionState {
 	handle: StreamSocket | null
 	opened: boolean
+	// True while the connected callback runs, so a subscribe made from it is delivered once by finishOpen instead of sending immediately and again on the re-read.
+	announcingOpen: boolean
 	tornDown: boolean
 }
 
-// The client handle: `subscribe` asks for one run's stream (a re-subscribe replaces the previous), `unsubscribe` closes the current connection but stays reusable, and `close` shuts the socket down and stops reconnecting for good.
+// The client handle: `subscribe` asks for one run's stream (a re-subscribe replaces the previous), `unsubscribe` stops delivering that run's deltas and prevents a resubscribe but stays reusable, `watchState`/`unwatchState` keep a run-less socket alive for state-invalidation signals, and `close` shuts the socket down and stops reconnecting for good. While state watching, the server-side subscription may outlive `unsubscribe`; the client simply ignores its deltas until the next subscribe replaces it.
 export interface StreamClient {
 	subscribe(runId: string): void
 	unsubscribe(): void
+	watchState(): void
+	unwatchState(): void
 	close(): void
 }
 
@@ -56,6 +62,8 @@ export interface StreamClientOptions {
 	url: string
 	// Called with each well-formed delta message.
 	onDelta: (delta: StreamDeltaMessage) => void
+	// Called for each well-formed state-invalidation broadcast.
+	onStateInvalidated?: () => void
 	// Socket lifecycle phases: `connected` when a socket opens, `disconnected` when one closes or errors.
 	onStateChange?: (state: 'connected' | 'disconnected') => void
 	// The socket factory; defaults to the native WebSocket.
@@ -88,19 +96,30 @@ function isSubscribedMessage(value: unknown): boolean {
 	return isObject(value) && value['type'] === 'subscribed' && typeof value['runId'] === 'string'
 }
 
+// The state-invalidation guard: `{"type":"state_invalidated"}`. The server broadcasts it to every socket whether or not that socket subscribed to a run.
+function isStateInvalidatedMessage(value: unknown): boolean {
+	return isObject(value) && value['type'] === 'state_invalidated'
+}
+
 // Creates the stream client. All failures — socket construction, sends, host callbacks, malformed messages — are contained; the client degrades to silence and keeps its retry loop alive instead of throwing into the host.
 export function createStreamClient(options: StreamClientOptions): StreamClient {
 	const url = options.url
 	const onDelta = options.onDelta
+	const onStateInvalidated = options.onStateInvalidated
 	const onStateChange = options.onStateChange
 	const openSocket = options.openSocket ?? defaultOpenSocket
 
 	let socket: StreamSocket | null = null
 	let activeConnection: StreamConnectionState | null = null
 	let desiredRunId: string | null = null
+	let stateWatching = false
 	let reconnectTimer: ReturnType<typeof setTimeout> | null = null
 	let backoffMs = INITIAL_BACKOFF_MS
 	let closedByHost = false
+
+	function wantsConnection(): boolean {
+		return desiredRunId !== null || stateWatching
+	}
 
 	// Containment for the two ways the outside world can throw through this module: a host callback with a bug, and a socket call on a connection that died without its close event arriving. Both are swallowed by design — the stream is best-effort in both directions (mirroring the hub's sendBestEffort) and must never break its host.
 	function contain(sideEffect: () => void): void {
@@ -124,7 +143,7 @@ export function createStreamClient(options: StreamClientOptions): StreamClient {
 
 	function scheduleReconnect(): void {
 		if (closedByHost) return
-		if (desiredRunId === null) return
+		if (!wantsConnection()) return
 		cancelReconnect()
 		const delay = backoffMs
 		backoffMs = Math.min(backoffMs * 2, MAX_BACKOFF_MS)
@@ -144,7 +163,25 @@ export function createStreamClient(options: StreamClientOptions): StreamClient {
 			backoffMs = INITIAL_BACKOFF_MS
 			return
 		}
-		if (isDeltaMessage(parsed)) contain(() => onDelta(parsed))
+		if (isStateInvalidatedMessage(parsed)) {
+			if (onStateInvalidated !== undefined) contain(onStateInvalidated)
+			return
+		}
+		if (isDeltaMessage(parsed)) {
+			// State watching can keep the socket open after `unsubscribe`, and the server may still fan out the old subscription's deltas; only the currently desired run may reach the host.
+			if (desiredRunId === null || parsed.runId !== desiredRunId) return
+			contain(() => onDelta(parsed))
+		}
+	}
+
+	// Closes the live socket, cancels any armed retry, and reports the phase change. Used only when the connection is no longer wanted.
+	function disconnect(): void {
+		cancelReconnect()
+		activeConnection = null
+		const target = socket
+		socket = null
+		if (target !== null) contain(() => target.close())
+		emitState('disconnected')
 	}
 
 	// Best-effort send (mirroring the hub's sendBestEffort): a throwing send means the socket died, so it is closed to let the close event tear the connection down and hand control to the retry loop.
@@ -160,9 +197,10 @@ export function createStreamClient(options: StreamClientOptions): StreamClient {
 
 	function connect(): void {
 		if (closedByHost) return
+		if (!wantsConnection()) return
 		reconnectTimer = null
 		// Per-connection bookkeeping: `tornDown` folds close and error into one teardown (browsers fire an error before every close, so whichever arrives second is a no-op), and `opened` lets a synchronous open complete once the factory has returned its handle.
-		const connection: StreamConnectionState = { handle: null, opened: false, tornDown: false }
+		const connection: StreamConnectionState = { handle: null, opened: false, announcingOpen: false, tornDown: false }
 		activeConnection = connection
 		const closeConnection = (): void => {
 			const target = connection.handle
@@ -178,17 +216,24 @@ export function createStreamClient(options: StreamClientOptions): StreamClient {
 				closeConnection()
 				return
 			}
-			if (desiredRunId === null) {
+			if (!wantsConnection()) {
 				connection.tornDown = true
 				activeConnection = null
 				if (socket === handle) socket = null
 				closeConnection()
 				return
 			}
-			const runId = desiredRunId
+			// Any successful open proves the server is reachable, so a state-only connection recovers its backoff without waiting for an ack it will never receive.
+			backoffMs = INITIAL_BACKOFF_MS
 			socket = handle
+			connection.announcingOpen = true
 			emitState('connected')
-			sendSubscribe(runId)
+			connection.announcingOpen = false
+			// A callback may have torn this connection down or started a newer one; that newer path owns delivery.
+			if (activeConnection !== connection) return
+			// Re-read after the callback: a host may subscribe during the connected notification, and that newer run id must win.
+			const runId = desiredRunId
+			if (runId !== null) sendSubscribe(runId)
 		}
 		const markDown = (): void => {
 			if (connection.tornDown) return
@@ -243,19 +288,31 @@ export function createStreamClient(options: StreamClientOptions): StreamClient {
 				if (reconnectTimer === null) connect()
 				return
 			}
+			// A socket can exist before its open event while CONNECTING, and a subscribe made from the connected callback is delivered by finishOpen. Both defer to finishOpen, which sends the latest desired run once the open lands.
+			if (activeConnection === null || !activeConnection.opened || activeConnection.announcingOpen) return
 			sendSubscribe(runId)
 		},
 		unsubscribe(): void {
 			desiredRunId = null
-			cancelReconnect()
-			activeConnection = null
-			const target = socket
-			socket = null
-			if (target !== null) contain(() => target.close())
-			emitState('disconnected')
+			if (stateWatching) return
+			disconnect()
+		},
+		watchState(): void {
+			if (closedByHost) return
+			stateWatching = true
+			if (socket !== null) return
+			if (reconnectTimer !== null) return
+			connect()
+		},
+		unwatchState(): void {
+			if (!stateWatching) return
+			stateWatching = false
+			if (desiredRunId !== null) return
+			disconnect()
 		},
 		close(): void {
 			closedByHost = true
+			stateWatching = false
 			cancelReconnect()
 			desiredRunId = null
 			activeConnection = null

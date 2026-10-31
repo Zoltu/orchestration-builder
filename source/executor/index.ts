@@ -50,7 +50,7 @@ export { resolveSecret } from './secrets.js'
 export type { SecretChannels } from './secrets.js'
 
 export { createWebHumanBackend } from './human-backend.js'
-export type { HumanBackend, WebHumanBackend } from './human-backend.js'
+export type { HumanBackend, WebHumanBackend, WebHumanBackendDependencies } from './human-backend.js'
 
 export { createRunState } from './run-state.js'
 export type { RunState } from './run-state.js'
@@ -63,6 +63,9 @@ export type { OperatorPauseChannel, OperatorPauseQueue, PauseIntent, PauseSubmit
 
 export { createDeltaChannel } from './stream-channel.js'
 export type { DeltaChannel, DeltaField, DeltaSubscriber, RoleDelta, RunDelta } from './stream-channel.js'
+
+export { createStateInvalidationChannel } from './state-invalidation-channel.js'
+export type { StateInvalidationChannel, StateInvalidationSubscriber } from './state-invalidation-channel.js'
 
 export { createRunSubmission, createResumeErroredOrSuspendedRun, createReadPauseStateById, createResumeParkedRun, createResumeClarificationRun, createTerminatePausedRun } from './run-submission.js'
 export type { ReadPauseStateById, ResumeClarificationRun, ResumeClarificationRunDependencies, ResumeClarificationRunRejection, ResumeClarificationRunResult, ResumeErroredOrSuspendedRun, ResumeErroredOrSuspendedRunDependencies, ResumeErroredOrSuspendedRunRejection, ResumeErroredOrSuspendedRunResult, ResumeParkedRun, ResumeParkedRunDependencies, ResumeParkedRunRejection, ResumeParkedRunResult, ResumeRun, ResumeRunInvocation, RunSubmission, RunSubmissionDependencies, PausedRunKind, StartRun, SubmitResult, TerminatePausedRun, TerminatePausedRunDependencies, TerminatePausedRunRejection, TerminatePausedRunResult } from './run-submission.js'

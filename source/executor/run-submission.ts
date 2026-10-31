@@ -44,6 +44,8 @@ export interface RunSubmissionDependencies {
 	deploymentLogLevel?: LogLevel
 	// The queue's settlement hook (docs/queueing.md "Dispatch and the scheduler"): awaited once after the active slot clears on a fulfilled run promise, so it maps the settled run's item and ticks the scheduler while the slot is free. Never invoked on the rejection branch — a rejected run promise is the fatal teardown path, not a settlement.
 	onRunSettled: (meta: RunMeta) => Promise<void>
+	// Announces a run start, a run resume, and a fulfilled settlement so the browser can refetch the state feeding its favicon. A rejected run promise never produces a settlement notification: its rejection is the fatal teardown path.
+	notifyStateChanged: () => void
 }
 
 export type PausedRunKind = 'provider' | 'operator'
@@ -138,6 +140,7 @@ export function createRunSubmission(dependencies: RunSubmissionDependencies): Ru
 				}
 				activeRunId = undefined
 				await dependencies.onRunSettled(meta)
+				dependencies.notifyStateChanged()
 				return meta
 			},
 			(error) => {
@@ -161,6 +164,7 @@ export function createRunSubmission(dependencies: RunSubmissionDependencies): Ru
 			const involvement = resolveInvolvement(involvementOverride)
 			const logLevel = resolveLogLevel(logLevelOverride)
 			track(runId, dependencies.startRun(runId, task, effort, involvement, logLevel, continuation, true))
+			dependencies.notifyStateChanged()
 			return { ok: true, runId }
 		},
 		resume(checkpoint, options) {
@@ -171,6 +175,7 @@ export function createRunSubmission(dependencies: RunSubmissionDependencies): Ru
 			// The paused-run mirror can be missing after a crash while the provider gate still names this run, so release the provider binding defensively; a release for a different run is a no-op.
 			dependencies.providerSuspension.releaseSuspension(checkpoint.runId)
 			track(checkpoint.runId, dependencies.resumeRun(checkpoint, options))
+			dependencies.notifyStateChanged()
 			return { ok: true }
 		},
 		activeRunId() {
@@ -413,6 +418,8 @@ export interface TerminatePausedRunDependencies {
 	appendLogFor: (runId: string) => AppendLog
 	// Clears the submission layer's general paused-run binding; termination of a paused run must let the next tick dispatch waiting work.
 	clearPausedRun: (runId: string) => void
+	// Announces a completed termination so the browser can refetch the state feeding its favicon; a refusal or an idempotent retry does not notify.
+	notifyStateChanged: () => void
 }
 
 function terminationLogEvent(timestamp: string, message: string): LogEvent {
@@ -482,6 +489,7 @@ export function createTerminatePausedRun(dependencies: TerminatePausedRunDepende
 		closeOpenInvocationsOnTermination(dependencies, runId, terminatedAt)
 		dependencies.appendLogFor(runId)(terminationLogEvent(terminatedAt, logMessage))
 		dependencies.deleteCheckpointFor(runId)()
+		dependencies.notifyStateChanged()
 		return { ok: true, runId }
 	}
 }

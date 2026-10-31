@@ -125,6 +125,7 @@ interface QueueHarness {
 	clarificationResumeCalls: Array<{ runId: string; id: string; question: string; answer: string }>
 	terminateCalls: string[]
 	pauseReadCalls: string[]
+	notifications: () => number
 }
 
 type PauseSeed = ParkedAsk | 'clarification' | { kind: 'clarification'; deliveredAnswerId?: string; deliveredAnswerConsumed?: boolean } | null
@@ -154,8 +155,12 @@ function makeQueue(options: { initial?: QueueSeedItem[], submitResults?: QueuedR
 	const terminateScript = [...(options.terminateResults ?? [])]
 	const terminateCalls: string[] = []
 	const pauseReadCalls: string[] = []
+	let notificationCount = 0
 	const queue = createTaskQueue({
 		queueStore: store.store,
+		notifyStateChanged: () => {
+			notificationCount += 1
+		},
 		readRunMetaById: (runId) => {
 			const meta = options.metas?.[runId]
 			return meta === undefined ? null : JSON.stringify(meta)
@@ -192,7 +197,7 @@ function makeQueue(options: { initial?: QueueSeedItem[], submitResults?: QueuedR
 		now: () => NOW,
 		generateAnswerId: () => 'answer-1',
 	})
-	return { queue, writes: store.writes, items: store.items, written: store.written, submitCalls, resumeCalls, clarificationResumeCalls, terminateCalls, pauseReadCalls }
+	return { queue, writes: store.writes, items: store.items, written: store.written, submitCalls, resumeCalls, clarificationResumeCalls, terminateCalls, pauseReadCalls, notifications: () => notificationCount }
 }
 
 describe('enqueue', () => {
@@ -1133,5 +1138,62 @@ describe('provider gate dispatch gating', () => {
 		const harness = makeQueue({ canDispatch: () => false, ensureProviderProbe: () => { probeRequests++ } })
 		await harness.queue.tick()
 		expect(probeRequests).toBe(0)
+	})
+})
+
+describe('state invalidation notifications', () => {
+	const handles = { id: 'notify-item', queuedAt: '2026-01-01T00:00:00.000Z' }
+
+	test('a successful enqueue publishes once', async () => {
+		const harness = makeQueue({ hasActiveRun: () => true })
+
+		await harness.queue.enqueue({ task: 'fix the parser bug' }, handles, 'tail')
+
+		expect(harness.notifications()).toBe(1)
+	})
+
+	test('an internal scheduler dispatch publishes for each queue write it performs', async () => {
+		const harness = makeQueue({ initial: [item()], submitResults: [{ ok: true, runId: 'run-20260101-010000' }] })
+
+		await harness.queue.tick()
+
+		expect(harness.items()[0]?.runId).toBe('run-20260101-010000')
+		expect(harness.notifications()).toBe(2)
+	})
+
+	test('a malformed enqueue writes nothing and does not publish', async () => {
+		const harness = makeQueue()
+
+		expect((await harness.queue.enqueue({}, handles, 'tail')).ok).toBe(false)
+
+		expect(harness.writes.length).toBe(0)
+		expect(harness.notifications()).toBe(0)
+	})
+
+	test('an empty patch does not publish but an edit does', () => {
+		const harness = makeQueue({ initial: [item()] })
+
+		expect(harness.queue.patch('item-1', {})).toEqual({ ok: true, item: item() })
+		expect(harness.notifications()).toBe(0)
+
+		expect(harness.queue.patch('item-1', { task: 'edited' }).ok).toBe(true)
+		expect(harness.notifications()).toBe(1)
+	})
+
+	test('a refused mutation does not publish', () => {
+		const harness = makeQueue({ initial: [item({ status: 'active' })] })
+
+		expect(harness.queue.cancel('ghost', NOW)).toEqual({ ok: false, reason: 'not_found' })
+		expect(harness.queue.cancel('item-1', NOW)).toEqual({ ok: false, reason: 'forbidden_status' })
+
+		expect(harness.notifications()).toBe(0)
+	})
+
+	test('a busy submit-now refusal does not publish', async () => {
+		const harness = makeQueue({ hasActiveRun: () => true })
+
+		expect(await harness.queue.submitNow({ task: 'new task' }, handles)).toEqual({ kind: 'busy' })
+
+		expect(harness.notifications()).toBe(0)
 	})
 })

@@ -1,5 +1,6 @@
 // The websocket-side fan-out for the executor's DeltaChannel (source/executor/stream-channel.ts): the hub holds the socket↔run subscription relation and registers exactly one channel subscriber that turns each RunDelta into a JSON wire message for the sockets subscribed to that delta's runId. It is written against a minimal socket interface rather than Bun's, so the routing, parsing, and containment logic is fully testable in-memory; source/web/server.ts supplies the Bun sockets and this module never imports Bun.
 import type { DeltaChannel, RunDelta } from '../executor/stream-channel.js'
+import type { StateInvalidationChannel } from '../executor/state-invalidation-channel.js'
 import { asRecord, safeJsonParse } from '../executor/validation.js'
 
 // The minimal socket surface the hub needs, satisfied structurally by Bun's ServerWebSocket (send of a string, close) — the glue in server.ts passes sockets through without adapting them.
@@ -34,7 +35,9 @@ function serializeDelta(delta: RunDelta): string {
 	return JSON.stringify({ type: 'delta', ...delta })
 }
 
-export function createStreamHub(channel: DeltaChannel): StreamHub {
+const STATE_INVALIDATED_MESSAGE = JSON.stringify({ type: 'state_invalidated' })
+
+export function createStreamHub(channel: DeltaChannel, stateInvalidationChannel: StateInvalidationChannel): StreamHub {
 	// Both directions of the socket↔run relation, kept in step by drop() and onMessage; a socket holds at most one run subscription (a re-subscribe replaces the previous, see onMessage) and a run may fan out to several sockets.
 	const runsBySocket = new Map<StreamSocket, Set<string>>()
 	const socketsByRun = new Map<string, Set<StreamSocket>>()
@@ -69,6 +72,11 @@ export function createStreamHub(channel: DeltaChannel): StreamHub {
 		if (recipients === undefined) return
 		const message = serializeDelta(delta)
 		for (const socket of recipients) sendBestEffort(socket, message)
+	})
+
+	// Invalidation is connection-scoped, not run-scoped: every opened socket receives it, whether or not it subscribed to a run. Deleting a dead socket during iteration is safe — the removed element is simply not visited again.
+	stateInvalidationChannel.subscribe(() => {
+		for (const socket of runsBySocket.keys()) sendBestEffort(socket, STATE_INVALIDATED_MESSAGE)
 	})
 
 	return {
