@@ -33,9 +33,10 @@ export function createNativeToolHandlers(config: NativeToolsConfig): Record<stri
 	const list = createListDirectory(config.workspaceRoot)
 	const glob = createGlobFiles(config.workspaceRoot, nodeGlobFilesystem)
 	const read = createReadFile(config.workspaceRoot)
-	const fileLines = createFileLines(createNodeFileChunks())
+	const fileChunks = createNodeFileChunks()
+	const fileLines = createFileLines(fileChunks)
 	const readPartial = createReadFilePartial(config.workspaceRoot, { fileLines, pathFilesystem: nodePathFilesystem })
-	const search = createSearchText(config.workspaceRoot, { fileLines, filesystem: nodeSearchFilesystem, pathFilesystem: nodePathFilesystem })
+	const search = createSearchText(config.workspaceRoot, { fileChunks, filesystem: nodeSearchFilesystem, pathFilesystem: nodePathFilesystem })
 	const write = createWriteFile(config.workspaceRoot)
 	const repoMap = createRepoMap(config.workspaceRoot)
 	const timeoutMs = config.defaultToolTimeoutSeconds * 1000
