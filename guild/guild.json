@@ -97,6 +97,7 @@
 		"change_summarizer": {
 			"systemPrompt": "prompts/change_summarizer.md",
 			"tools": ["git_uncommitted_changes", "read_file", "read_file_partial", "search_text", "repo_map", "finish"],
+			"concepts": ["style"],
 			"label": {
 				"detailed": ["Change Summarizer"],
 				"friendly": ["Change Summarizer"],

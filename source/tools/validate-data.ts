@@ -157,6 +157,7 @@ const expectedRoleConcepts: Record<string, string[]> = {
 	style_lead: ['style'],
 	style_reviewer: ['style'],
 	style_guide_author: ['style'],
+	change_summarizer: ['style'],
 	planner: ['module-boundaries', 'error-handling', 'external-data-validation', 'testability', 'verification-and-evidence', 'security-posture', 'privacy-posture'],
 	architecture_lead: ['dependency-injection', 'module-boundaries', 'type-safety', 'error-handling', 'external-data-validation', 'testability', 'verification-and-evidence', 'security-posture', 'privacy-posture'],
 	architecture_reviewer: ['dependency-injection', 'module-boundaries', 'type-safety', 'error-handling', 'external-data-validation', 'testability', 'verification-and-evidence', 'security-posture', 'privacy-posture'],
@@ -294,7 +295,7 @@ function checkComposedConceptPrompt(loaded: LoadedGuildFiles): void {
 		const noConceptPreambleCount = (loaded.prompts[name] ?? '').split(SHARED_CONCEPTS_PREAMBLE).length - 1
 		check(noConceptPreambleCount === 0, `guild: role "${name}" declares no concepts, so its composed prompt must not carry the shared concepts preamble (found ${noConceptPreambleCount})`)
 	}
-	for (const name of ['coder', 'style_lead', 'style_reviewer', 'style_guide_author']) {
+	for (const name of ['coder', 'style_lead', 'style_reviewer', 'style_guide_author', 'change_summarizer']) {
 		const composedPrompt = loaded.prompts[name] ?? ''
 		for (const removedRule of removedInlineStyleRules) {
 			check(!composedPrompt.includes(removedRule), `guild: the composed ${name} prompt still duplicates the removed inline style rule "${removedRule}"`)
