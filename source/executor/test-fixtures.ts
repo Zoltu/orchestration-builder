@@ -64,15 +64,19 @@ export const stubHumanBackend: HumanBackend = {
 }
 
 export interface RecordingHumanBackend extends HumanBackend {
-	questions: Array<{ question: string; context?: string }>
+	questions: Array<{ question: string; context?: string; assistantFallback?: string }>
 }
 
 export function recordingHumanBackend(): RecordingHumanBackend {
-	const questions: Array<{ question: string; context?: string }> = []
+	const questions: Array<{ question: string; context?: string; assistantFallback?: string }> = []
 	return {
 		questions,
-		ask: async (question: string, _invocation, context?: string): Promise<string> => {
-			questions.push({ question, context })
+		ask: async (question: string, _invocation, presentation): Promise<string> => {
+			questions.push({
+				question,
+				context: presentation.context,
+				...(presentation.assistantFallback !== undefined ? { assistantFallback: presentation.assistantFallback } : {}),
+			})
 			return 'use your best judgement'
 		},
 	}

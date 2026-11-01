@@ -36,6 +36,9 @@ export interface QueueItemView {
 	readonly settledAt?: string
 	// needs_input: the recorded question.
 	readonly question?: string
+	// needs_input: the operator-facing presentation recorded with the question (explicit context or the visible assistant fallback).
+	readonly context?: string
+	readonly assistantFallback?: string
 	// Set when the operator answers.
 	readonly answer?: string
 	// done/error: the terminal meta's result.summary.
@@ -63,6 +66,9 @@ export interface QueueItem {
 	suspendedAt?: string
 	settledAt?: string
 	question?: string
+	// The question's operator-facing presentation, populated only while the item is needs_input.
+	context?: string
+	assistantFallback?: string
 	answer?: string
 	// The durable identity of the recorded answer. It rides the item through dispatch and is compared with the checkpoint's deliveredAnswerId; it is never projected into QueueItemView.
 	answerId?: string
@@ -94,6 +100,8 @@ export function isQueueItem(value: unknown): value is QueueItem {
 	if (value.suspendedAt !== undefined && !isString(value.suspendedAt)) return false
 	if (value.settledAt !== undefined && !isString(value.settledAt)) return false
 	if (value.question !== undefined && !isString(value.question)) return false
+	if (value.context !== undefined && !isString(value.context)) return false
+	if (value.assistantFallback !== undefined && !isString(value.assistantFallback)) return false
 	if (value.answer !== undefined && !isString(value.answer)) return false
 	if (value.answerId !== undefined && (!isString(value.answerId) || value.answerId === '')) return false
 	if (value.resultSummary !== undefined && !isString(value.resultSummary)) return false
@@ -117,6 +125,8 @@ export function isQueueItem(value: unknown): value is QueueItem {
 		if (value.resultSummary !== undefined) return false
 		if (value.error !== undefined) return false
 		if (value.question !== undefined) return false
+		if (value.context !== undefined) return false
+		if (value.assistantFallback !== undefined) return false
 		if (value.answer !== undefined) return false
 		if (value.resumeRunId !== undefined) return false
 		if (value.resumeToolCallId !== undefined) return false
@@ -149,6 +159,8 @@ export function toQueueItemView(item: QueueItem): QueueItemView {
 		...(item.suspendedAt !== undefined ? { suspendedAt: item.suspendedAt } : {}),
 		...(item.settledAt !== undefined ? { settledAt: item.settledAt } : {}),
 		...(item.question !== undefined ? { question: item.question } : {}),
+		...(item.context !== undefined ? { context: item.context } : {}),
+		...(item.assistantFallback !== undefined ? { assistantFallback: item.assistantFallback } : {}),
 		...(item.answer !== undefined ? { answer: item.answer } : {}),
 		...(item.resultSummary !== undefined ? { resultSummary: item.resultSummary } : {}),
 		...(item.error !== undefined ? { error: item.error } : {}),
@@ -458,13 +470,22 @@ export type SettlementOutcome =
 	| { kind: 'unknown_run' }
 	| { kind: 'not_settleable' }
 
+// The operator-facing presentation a parked ask contributes to its needs_input item. A direct clarification finish has no ask presentation, and an old checkpoint without these fields contributes nothing.
+function needsInputPresentation(pauseState: PauseState | null): { context?: string; assistantFallback?: string } {
+	if (pauseState === null || pauseState.kind !== 'parked_ask') return {}
+	return {
+		...(pauseState.ask.context !== undefined ? { context: pauseState.ask.context } : {}),
+		...(pauseState.ask.assistantFallback !== undefined ? { assistantFallback: pauseState.ask.assistantFallback } : {}),
+	}
+}
+
 // Applies the settlement mapping to the active item a settled run belongs to (matched by runId). needs_input keeps the item unsettled (it waits for an answer) and preserves its existing continuesFrom lineage; the resume target is carried by runId and later resumeRunId, not by re-pointing lineage.
-export function settleActiveItem(queue: TaskQueue, runId: string, meta: RunMeta, settledAt: string): SettlementOutcome {
+export function settleActiveItem(queue: TaskQueue, runId: string, meta: RunMeta, settledAt: string, pauseState: PauseState | null): SettlementOutcome {
 	const target = queue.items.find((item) => item.status === 'active' && item.runId === runId)
 	if (target === undefined) return { kind: 'unknown_run' }
 	const mapped = mapSettledItemState(meta)
 	if (mapped === undefined) return { kind: 'not_settleable' }
-	const item = settledItem(target, mapped, settledAt, runId)
+	const item = settledItem(target, mapped, settledAt, runId, pauseState)
 	return { kind: 'settled', queue: withReplacedItem(queue, item), item }
 }
 
@@ -491,7 +512,7 @@ function suspendedItem(target: QueueItem, suspendedAt: string, runId: string): Q
 	}
 }
 
-function settledItem(target: QueueItem, mapped: TerminalItemState, settledAt: string, runId: string): QueueItem {
+function settledItem(target: QueueItem, mapped: TerminalItemState, settledAt: string, runId: string, pauseState: PauseState | null): QueueItem {
 	const base = {
 		id: target.id,
 		task: target.task,
@@ -501,13 +522,15 @@ function settledItem(target: QueueItem, mapped: TerminalItemState, settledAt: st
 		queuedAt: target.queuedAt,
 	}
 	if (mapped.status === 'needs_input') {
-		// The item's existing lineage is preserved; the resume target is carried by runId (and later resumeRunId). A re-park replaces the question and leaves no stale answer.
+		// The item's existing lineage is preserved; the resume target is carried by runId (and later resumeRunId). A re-park replaces the question and presentation and leaves no stale answer.
+		const presentation = needsInputPresentation(pauseState)
 		return {
 			...base,
 			...(target.continuesFrom !== undefined ? { continuesFrom: target.continuesFrom } : {}),
 			status: 'needs_input',
 			runId,
 			...(mapped.question !== undefined ? { question: mapped.question } : {}),
+			...presentation,
 		}
 	}
 	return {
@@ -543,7 +566,7 @@ export function repairActiveItem(item: QueueItem, meta: RunMeta | null, settledA
 		const mapped = mapSettledItemState(meta)
 		if (mapped === undefined) return null
 		// The settled time is the run's own endTime — when it actually finished — not the boot that noticed.
-		return settledItem(item, mapped, meta.endTime ?? settledAt, runId)
+		return settledItem(item, mapped, meta.endTime ?? settledAt, runId, pauseState)
 	}
 	if (meta !== null && meta.status === 'running' && meta.task === item.task) {
 		return { ...carriedFields(item), ...(item.continuesFrom !== undefined ? { continuesFrom: item.continuesFrom } : {}), status: 'active', runId: meta.runId }
@@ -556,7 +579,7 @@ export function repairActiveItem(item: QueueItem, meta: RunMeta | null, settledA
 // - a running meta means the run was resumed just before the crash: bind the item back to the active slot so its own settlement maps it.
 // - a terminal meta means the crash landed after resume and settlement: settle from the meta exactly as the live mapping would.
 // - an interrupted meta, or a missing/unreadable meta, leaves no resumable run: cancel the item rather than dispatch a task whose run is gone.
-export function repairSuspendedItem(item: QueueItem, meta: RunMeta | null, settledAt: string): QueueItem | null {
+export function repairSuspendedItem(item: QueueItem, meta: RunMeta | null, settledAt: string, pauseState: PauseState | null): QueueItem | null {
 	if (item.status !== 'suspended') return null
 	const runId = item.runId
 	if (runId === undefined) return cancelledItem(item, settledAt)
@@ -572,7 +595,7 @@ export function repairSuspendedItem(item: QueueItem, meta: RunMeta | null, settl
 	}
 	const mapped = mapSettledItemState(meta)
 	if (mapped === undefined) return cancelledItem(item, settledAt)
-	return settledItem(item, mapped, meta.endTime ?? settledAt, runId)
+	return settledItem(item, mapped, meta.endTime ?? settledAt, runId, pauseState)
 }
 
 // The distilled run-list entry the briefing assembles from: the module's readRunListSummary leaf returns it (the web run-list summary is structurally compatible, so serve.ts passes its reader directly).

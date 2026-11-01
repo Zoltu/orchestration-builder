@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import type { LogEvent } from './types.js'
-import { createWebHumanBackend, type HumanAskInvocation } from './human-backend.ts'
+import { createWebHumanBackend, selectHumanQuestionPresentation, type HumanAskInvocation } from './human-backend.ts'
 import { defined, flushMicrotasks } from './test-fixtures.ts'
 import { isObject } from './validation.ts'
 
@@ -26,7 +26,7 @@ describe('createWebHumanBackend', () => {
 
 	test('ask registers a pending question and resolves with the answer submitted for its id', async () => {
 		const backend = createBackend()
-		const promise = backend.ask('Which framework?', askInvocation())
+		const promise = backend.ask('Which framework?', askInvocation(), {})
 
 		const pending = backend.pendingQuestions()
 		expect(pending.length).toBe(1)
@@ -41,7 +41,7 @@ describe('createWebHumanBackend', () => {
 
 	test('ask carries the question text and optional context into the pending list', () => {
 		const backend = createBackend()
-		backend.ask('Which file?', askInvocation(), 'src/index.ts')
+		backend.ask('Which file?', askInvocation(), { context: 'src/index.ts' })
 
 		const question = defined(backend.pendingQuestions()[0], 'first pending question')
 		expect(question.question).toBe('Which file?')
@@ -53,7 +53,7 @@ describe('createWebHumanBackend', () => {
 
 	test('ask without context omits the context field from the pending question', () => {
 		const backend = createBackend()
-		backend.ask('Just a question', askInvocation())
+		backend.ask('Just a question', askInvocation(), {})
 
 		const question = defined(backend.pendingQuestions()[0], 'first pending question')
 		expect(question.context).toBeUndefined()
@@ -62,7 +62,7 @@ describe('createWebHumanBackend', () => {
 	test('an unanswered question stays pending and does not resolve on its own', async () => {
 		const backend = createBackend()
 		let resolved = false
-		const promise = backend.ask('Will I time out?', askInvocation()).then(() => {
+		const promise = backend.ask('Will I time out?', askInvocation(), {}).then(() => {
 			resolved = true
 		})
 
@@ -87,7 +87,7 @@ describe('createWebHumanBackend', () => {
 
 	test('submitAnswer removes the question so a second submit for the same id is not_found', async () => {
 		const backend = createBackend()
-		const promise = backend.ask('q', askInvocation())
+		const promise = backend.ask('q', askInvocation(), {})
 
 		const question = defined(backend.pendingQuestions()[0], 'first pending question')
 		const first = backend.submitAnswer(question.id, 'a')
@@ -101,8 +101,8 @@ describe('createWebHumanBackend', () => {
 
 	test('multiple pending questions resolve independently to their own answers', async () => {
 		const backend = createBackend()
-		const firstPromise = backend.ask('first?', askInvocation())
-		const secondPromise = backend.ask('second?', askInvocation())
+		const firstPromise = backend.ask('first?', askInvocation(), {})
+		const secondPromise = backend.ask('second?', askInvocation(), {})
 
 		const pending = backend.pendingQuestions()
 		expect(pending.length).toBe(2)
@@ -118,8 +118,8 @@ describe('createWebHumanBackend', () => {
 
 	test('each pending question gets a unique id', () => {
 		const backend = createBackend()
-		backend.ask('one?', askInvocation())
-		backend.ask('two?', askInvocation())
+		backend.ask('one?', askInvocation(), {})
+		backend.ask('two?', askInvocation(), {})
 
 		const pending = backend.pendingQuestions()
 		const ids = pending.map((q) => q.id)
@@ -128,10 +128,10 @@ describe('createWebHumanBackend', () => {
 
 	test('pendingQuestions returns a fresh array reflecting current state each call', () => {
 		const backend = createBackend()
-		backend.ask('q1', askInvocation())
+		backend.ask('q1', askInvocation(), {})
 
 		const first = backend.pendingQuestions()
-		backend.ask('q2', askInvocation())
+		backend.ask('q2', askInvocation(), {})
 
 		const second = backend.pendingQuestions()
 		expect(first.length).toBe(1)
@@ -140,13 +140,83 @@ describe('createWebHumanBackend', () => {
 
 	test('the resolved answer is a string, matching the result shape seen by the model', async () => {
 		const backend = createBackend()
-		const promise = backend.ask('q', askInvocation())
+		const promise = backend.ask('q', askInvocation(), {})
 		const question = defined(backend.pendingQuestions()[0], 'first pending question')
 		backend.submitAnswer(question.id, 'web answer')
 
 		const answer = await promise
 		expect(typeof answer).toBe('string')
 		expect(answer).toBe('web answer')
+	})
+})
+
+describe('selectHumanQuestionPresentation', () => {
+	test('an explicit non-blank context wins over assistant content', () => {
+		expect(selectHumanQuestionPresentation('the explicit context', 'the assistant text')).toEqual({ context: 'the explicit context' })
+	})
+
+	test('non-blank assistant content becomes the fallback when there is no explicit context', () => {
+		expect(selectHumanQuestionPresentation(undefined, 'the assistant text')).toEqual({ assistantFallback: 'the assistant text' })
+	})
+
+	test('whitespace-only context and assistant content count as absent', () => {
+		expect(selectHumanQuestionPresentation('   \n\t', '  ')).toEqual({})
+		expect(selectHumanQuestionPresentation('   ', 'visible text')).toEqual({ assistantFallback: 'visible text' })
+	})
+
+	test('an empty or non-string context is absent', () => {
+		expect(selectHumanQuestionPresentation('', 'visible text')).toEqual({ assistantFallback: 'visible text' })
+		expect(selectHumanQuestionPresentation(42, 'visible text')).toEqual({ assistantFallback: 'visible text' })
+		expect(selectHumanQuestionPresentation({ text: 'not a string' }, undefined)).toEqual({})
+	})
+
+	test('keeps the chosen value in full without truncation', () => {
+		const longContext = `context-${'x'.repeat(100_000)}`
+		const longAssistantText = `assistant-${'y'.repeat(100_000)}`
+		expect(selectHumanQuestionPresentation(longContext, longAssistantText)).toEqual({ context: longContext })
+		expect(selectHumanQuestionPresentation(undefined, longAssistantText)).toEqual({ assistantFallback: longAssistantText })
+	})
+})
+
+describe('createWebHumanBackend presentation', () => {
+	test('carries assistantFallback into the pending question when no context is supplied', () => {
+		const backend = createBackend()
+		backend.ask('Which file?', askInvocation(), { assistantFallback: 'I will change the parser.' })
+
+		const question = defined(backend.pendingQuestions()[0], 'first pending question')
+		expect(question.context).toBeUndefined()
+		expect(question.assistantFallback).toBe('I will change the parser.')
+	})
+
+	test('keeps the fallback out of the ask_human log payload', () => {
+		const backend = createBackend()
+		const events: LogEvent[] = []
+		backend.bindRunLog((event) => { events.push(event) })
+		backend.ask('Which file?', askInvocation(), { assistantFallback: 'I will change the parser.' })
+
+		const askEvent = defined(events[0], 'ask_human event')
+		expect(askEvent.payload).not.toHaveProperty('assistantFallback')
+		expect(askEvent.payload).not.toHaveProperty('context')
+	})
+
+	test('an explicit context is logged and carried in the pending question', () => {
+		const backend = createBackend()
+		const events: LogEvent[] = []
+		backend.bindRunLog((event) => { events.push(event) })
+		backend.ask('Which file?', askInvocation(), { context: 'src/index.ts' })
+
+		const question = defined(backend.pendingQuestions()[0], 'first pending question')
+		expect(question.context).toBe('src/index.ts')
+		expect(question.assistantFallback).toBeUndefined()
+		expect(defined(events[0], 'ask_human event').payload).toMatchObject({ context: 'src/index.ts' })
+	})
+
+	test('keeps a long fallback in full in the pending question', () => {
+		const backend = createBackend()
+		const longFallback = 'assistant-'.repeat(20_000)
+		backend.ask('Which file?', askInvocation(), { assistantFallback: longFallback })
+
+		expect(defined(backend.pendingQuestions()[0], 'first pending question').assistantFallback).toBe(longFallback)
 	})
 })
 
@@ -161,7 +231,7 @@ describe('createWebHumanBackend run-log binding', () => {
 		const log = capturingLog()
 		backend.bindRunLog(log.append)
 
-		backend.ask('Which file?', askInvocation(), 'src/index.ts')
+		backend.ask('Which file?', askInvocation(), { context: 'src/index.ts' })
 
 		expect(log.events.length).toBe(1)
 		const askEvent = defined(log.events[0], 'ask_human event')
@@ -180,7 +250,7 @@ describe('createWebHumanBackend run-log binding', () => {
 		const log = capturingLog()
 		backend.bindRunLog(log.append)
 
-		backend.ask('just a question', askInvocation())
+		backend.ask('just a question', askInvocation(), {})
 
 		expect(defined(log.events[0], 'ask_human event').payload).not.toHaveProperty('context')
 	})
@@ -190,7 +260,7 @@ describe('createWebHumanBackend run-log binding', () => {
 		const log = capturingLog()
 		backend.bindRunLog(log.append)
 
-		const promise = backend.ask('Which framework?', askInvocation())
+		const promise = backend.ask('Which framework?', askInvocation(), {})
 		const id = defined(backend.pendingQuestions()[0], 'first pending question').id
 		backend.submitAnswer(id, 'react')
 		await promise
@@ -205,7 +275,7 @@ describe('createWebHumanBackend run-log binding', () => {
 		const log = capturingLog()
 		backend.bindRunLog(log.append)
 
-		const promise = backend.ask('q?', askInvocation())
+		const promise = backend.ask('q?', askInvocation(), {})
 		const id = defined(backend.pendingQuestions()[0], 'first pending question').id
 		backend.submitAnswer(id, 'a')
 		await promise
@@ -232,7 +302,7 @@ describe('createWebHumanBackend run-log binding', () => {
 	test('does not log anything when no run log is bound', async () => {
 		const backend = createBackend()
 
-		const promise = backend.ask('q?', askInvocation())
+		const promise = backend.ask('q?', askInvocation(), {})
 		const id = defined(backend.pendingQuestions()[0], 'first pending question').id
 		backend.submitAnswer(id, 'a')
 		await promise
@@ -246,7 +316,7 @@ describe('createWebHumanBackend run-log binding', () => {
 		backend.bindRunLog(log.append)
 		backend.bindRunLog(null)
 
-		backend.ask('q?', askInvocation())
+		backend.ask('q?', askInvocation(), {})
 
 		expect(log.events).toEqual([])
 	})
@@ -263,7 +333,7 @@ describe('createWebHumanBackend state invalidation', () => {
 			},
 		})
 
-		backend.ask('Which framework?', askInvocation())
+		backend.ask('Which framework?', askInvocation(), {})
 
 		expect(notifications).toBe(1)
 		expect(pendingCountAtNotification).toBe(1)
@@ -273,7 +343,7 @@ describe('createWebHumanBackend state invalidation', () => {
 	test('a successful answer publishes after it resolves', async () => {
 		let notifications = 0
 		const backend = createWebHumanBackend({ notifyStateChanged: () => { notifications += 1 } })
-		const promise = backend.ask('Which framework?', askInvocation())
+		const promise = backend.ask('Which framework?', askInvocation(), {})
 		const id = defined(backend.pendingQuestions()[0], 'first pending question').id
 		notifications = 0
 

@@ -100,6 +100,8 @@ function isParkedAsk(value: unknown): value is ParkedAsk {
 	if (!isString(value.callId) || value.callId === '') return false
 	if (!isString(value.questionId) || value.questionId === '') return false
 	if (!isString(value.question) || value.question === '') return false
+	if (value.context !== undefined && !isString(value.context)) return false
+	if (value.assistantFallback !== undefined && !isString(value.assistantFallback)) return false
 	return true
 }
 

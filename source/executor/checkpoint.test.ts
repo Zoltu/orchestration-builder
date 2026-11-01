@@ -7,6 +7,7 @@ import { createContextPressureTracker } from './context/index.js'
 import type { EngineContext, RoleState } from './engine-state.ts'
 import type { LoadedGuild } from './loader.ts'
 import { createRoleRegistry, type RoleRegistry, type RoleRegistryEntry } from './role-registry.ts'
+import { defined } from './test-fixtures.ts'
 import type { Message, ToolCall } from './types.ts'
 
 function sampleRoleState(overrides: Partial<RoleState> = {}): RoleState {
@@ -472,6 +473,29 @@ describe('isRunCheckpoint', () => {
 		expect(isRunCheckpoint(checkpoint)).toBe(true)
 		const copy: unknown = JSON.parse(JSON.stringify(checkpoint))
 		expect(isRunCheckpoint(copy)).toBe(true)
+	})
+
+	test('accepts a parked ask presentation with context or assistant fallback in full', () => {
+		const withContext = parkedCheckpoint()
+		withContext.parkedAsk = { ...defined(withContext.parkedAsk, 'parked ask'), context: `context-${'x'.repeat(20_000)}` }
+		expect(isRunCheckpoint(withContext)).toBe(true)
+		expect(isRunCheckpoint(JSON.parse(JSON.stringify(withContext)))).toBe(true)
+
+		const withFallback = parkedCheckpoint()
+		withFallback.parkedAsk = { ...defined(withFallback.parkedAsk, 'parked ask'), assistantFallback: `assistant-${'y'.repeat(20_000)}` }
+		expect(isRunCheckpoint(withFallback)).toBe(true)
+		const copy: unknown = JSON.parse(JSON.stringify(withFallback))
+		if (!isRunCheckpoint(copy)) throw new Error('expected the copied checkpoint to validate')
+		expect(copy.parkedAsk?.assistantFallback).toBe(withFallback.parkedAsk.assistantFallback)
+	})
+
+	test('rejects a parked ask with a non-string presentation field', () => {
+		for (const parkedAsk of [
+			{ roleId: 'main-0-1', toolCallId: 'ask_1', callId: 'tool:ask_1', questionId: 'ask_1', question: 'which database?', context: 42 },
+			{ roleId: 'main-0-1', toolCallId: 'ask_1', callId: 'tool:ask_1', questionId: 'ask_1', question: 'which database?', assistantFallback: ['not a string'] },
+		]) {
+			expect(isRunCheckpoint({ ...parkedCheckpoint(), parkedAsk })).toBe(false)
+		}
 	})
 
 	test('rejects a malformed parked ask', () => {

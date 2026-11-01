@@ -1,6 +1,6 @@
 // Modal for a pending live or parked `ask_human` question.
 //
-// The overlay is either scoped to the run view (absolute inset 0 within `.pb-flow`) or viewport-wide through `fixed`; the app-shell prompt controller uses the fixed variant so live and parked prompts render on every screen and before WatchScreen's placeholder/terminal early returns. It renders the question text and its optional context as sanitized Markdown (via the `renderMarkdown` closure passed in, the same pipeline the product client uses) and the answer input is trusted operator input sent verbatim — never rendered back as Markdown from an untrusted source. See docs/security.md "Web client rendering pipeline".
+// The overlay is either scoped to the run view (absolute inset 0 within `.pb-flow`) or viewport-wide through `fixed`; the app-shell prompt controller uses the fixed variant so live and parked prompts render on every screen and before WatchScreen's placeholder/terminal early returns. It renders the question text and its optional context as sanitized Markdown (via the `renderMarkdown` closure passed in, the same pipeline the product client uses) and the answer input is trusted operator input sent verbatim — never rendered back as Markdown from an untrusted source. When no explicit context was supplied, it renders the same turn's visible assistant text under a fixed label instead, again through the sanitized pipeline. See docs/security.md "Web client rendering pipeline".
 //
 // `h` and `renderMarkdown` are passed in rather than imported so the component stays free of hyperapp and showdown coupling and is exercisable in tests with fakes (mirroring the run-stage views and markdown.js). The submit handler is supplied by the caller: in the demo harness it advances the frame (the scenario's next frame models the answered state); in the product client it will POST to `/api/answer`.
 
@@ -11,10 +11,17 @@ type RenderMarkdown = (text: string) => VnodeChildInput
 
 const QUESTION_MODAL_HEADING_ID = 'question-modal-heading'
 
-// The pending question the modal renders: the ask_human call's question text plus its optional context. The model's other fields (id, askedAt) are the producer's bookkeeping and are not read here.
+const ASSISTANT_FALLBACK_LABEL = 'Previous assistant message (no context was provided)'
+
+// The pending question the modal renders: the ask_human call's question text plus its optional context or assistant fallback. The model's other fields (id, askedAt) are the producer's bookkeeping and are not read here.
 export interface PendingQuestion {
 	question: string
 	context?: unknown
+	assistantFallback?: unknown
+}
+
+function nonBlankString(value: unknown): string | null {
+	return typeof value === 'string' && value.trim() !== '' ? value : null
 }
 
 export interface QuestionModalProps {
@@ -44,9 +51,8 @@ export function QuestionModal(h: LooseH, props: QuestionModalProps): Vnode {
 	const terminatePending = props.terminatePending === true
 	const overlayClass = props.fixed === true ? 'question-modal-overlay question-modal-overlay--fixed' : 'question-modal-overlay'
 
-	const context = question.context !== undefined && typeof question.context === 'string' && question.context !== ''
-		? question.context
-		: null
+	const context = nonBlankString(question.context)
+	const assistantFallback = context === null ? nonBlankString(question.assistantFallback) : null
 
 	const onKeydown = (state: unknown, event: Event): unknown => {
 		if (!('key' in event) || event['key'] !== 'Escape') return state
@@ -71,6 +77,12 @@ export function QuestionModal(h: LooseH, props: QuestionModalProps): Vnode {
 			h('div', { class: 'question-modal-question markdown' }, renderMarkdown(question.question)),
 			context !== null
 				? h('div', { class: 'question-modal-context question-context markdown' }, renderMarkdown(context))
+				: null,
+			assistantFallback !== null
+				? h('div', { class: 'question-modal-fallback' }, [
+					h('p', { class: 'question-modal-fallback-label' }, ASSISTANT_FALLBACK_LABEL),
+					h('div', { class: 'question-modal-fallback-content question-context markdown' }, renderMarkdown(assistantFallback)),
+				])
 				: null,
 			h('form', { class: 'question-modal-form', onsubmit: onSubmit }, [
 				h('textarea', { rows: '4', placeholder: 'your answer', autofocus: true, disabled: answerPending }),

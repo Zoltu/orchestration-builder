@@ -489,6 +489,13 @@ describe('renderPendingQuestions', () => {
 		expect(shaped[0]).not.toHaveProperty('context')
 	})
 
+	test('includes assistantFallback when present and omits it when undefined', () => {
+		const withFallback = renderPendingQuestions([{ id: 'q1', question: 'q?', assistantFallback: 'Earlier answer', askedAt: 't1' }])
+		expect(withFallback[0]).toEqual({ id: 'q1', question: 'q?', assistantFallback: 'Earlier answer', askedAt: 't1' })
+		const withoutFallback = renderPendingQuestions([{ id: 'q2', question: 'q?', askedAt: 't2' }])
+		expect(withoutFallback[0]).not.toHaveProperty('assistantFallback')
+	})
+
 	test('returns an empty array for no pending questions', () => {
 		expect(renderPendingQuestions([])).toEqual([])
 	})

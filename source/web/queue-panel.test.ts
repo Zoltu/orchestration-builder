@@ -43,6 +43,13 @@ describe('isQueueItemLike', () => {
 		expect(isQueueItemLike({ ...item(), pause: { message: 7, pausedAt: '2026-01-01T00:02:00.000Z' } })).toBe(false)
 		expect(isQueueItemLike({ ...item(), pause: { message: 'Paused.', pausedAt: null } })).toBe(false)
 	})
+
+	test('accepts optional question, context, and assistant fallback strings and rejects non-string values', () => {
+		expect(isQueueItemLike(item({ status: 'needs_input', runId: 'run-c', question: 'which database?', context: 'a context', assistantFallback: 'a fallback' }))).toBe(true)
+		expect(isQueueItemLike({ ...item(), question: 7 })).toBe(false)
+		expect(isQueueItemLike({ ...item(), context: ['not', 'a', 'string'] })).toBe(false)
+		expect(isQueueItemLike({ ...item(), assistantFallback: null })).toBe(false)
+	})
 })
 
 describe('deriveQueuedItems', () => {
@@ -64,6 +71,11 @@ describe('deriveQueuedItems', () => {
 
 	test('an empty queue yields four empty groups', () => {
 		expect(deriveQueuedItems([])).toEqual({ suspended: [], waiting: [], active: [], needsInput: [] })
+	})
+
+	test('a parked item keeps its question, context, and assistant fallback through the guard and projection', () => {
+		const queued = deriveQueuedItems([item({ id: 'parked', status: 'needs_input', runId: 'run-p', question: 'which database?', context: 'a context', assistantFallback: 'a fallback' })])
+		expect(queued.needsInput[0]).toMatchObject({ id: 'parked', question: 'which database?', context: 'a context', assistantFallback: 'a fallback' })
 	})
 })
 

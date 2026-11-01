@@ -2416,14 +2416,14 @@ describe('/api/queue', () => {
 	test('GET returns the ordered item list with statuses, head first', async () => {
 		const { handler } = createHandlerHarness({ initialQueueItems: [
 			queueItem('w1', 'first waiting'),
-			queueItem('n1', 'needs answer', { status: 'needs_input', question: 'which database?', runId: 'run-20260101-000000', continuesFrom: 'run-20260101-000000' }),
+			queueItem('n1', 'needs answer', { status: 'needs_input', question: 'which database?', context: 'the schema in docs/schema.md', assistantFallback: 'I was checking the migration setup.', runId: 'run-20260101-000000', continuesFrom: 'run-20260101-000000' }),
 			queueItem('w2', 'second waiting'),
 		] })
 		const response = await handler(get('/api/queue'))
 		expect(response.status).toBe(200)
 		expect(await response.json()).toEqual([
 			{ id: 'w1', task: 'first waiting', status: 'waiting', queuedAt: '2026-01-01T00:00:00.000Z' },
-			{ id: 'n1', task: 'needs answer', status: 'needs_input', queuedAt: '2026-01-01T00:00:00.000Z', question: 'which database?', runId: 'run-20260101-000000', continuesFrom: 'run-20260101-000000' },
+			{ id: 'n1', task: 'needs answer', status: 'needs_input', queuedAt: '2026-01-01T00:00:00.000Z', question: 'which database?', context: 'the schema in docs/schema.md', assistantFallback: 'I was checking the migration setup.', runId: 'run-20260101-000000', continuesFrom: 'run-20260101-000000' },
 			{ id: 'w2', task: 'second waiting', status: 'waiting', queuedAt: '2026-01-01T00:00:00.000Z' },
 		])
 	})
@@ -2959,7 +2959,7 @@ describe('/api/queue', () => {
 describe('/api/questions and /api/answer', () => {
 	test('GET /api/questions returns the pending list and POST /api/answer resolves the ask', async () => {
 		const { handler, humanBackend } = createHandlerHarness()
-		const askPromise = humanBackend.ask('Which framework?', { questionId: 'question-1', callId: 'tool:question-1', parentCallId: 'role:test-0-1' }, 'src/index.ts')
+		const askPromise = humanBackend.ask('Which framework?', { questionId: 'question-1', callId: 'tool:question-1', parentCallId: 'role:test-0-1' }, { context: 'src/index.ts' })
 
 		const response = await handler(get('/api/questions'))
 		expect(response.status).toBe(200)
@@ -2979,6 +2979,28 @@ describe('/api/questions and /api/answer', () => {
 		const afterResponse = await handler(get('/api/questions'))
 		const afterQuestions = await afterResponse.json()
 		expect(afterQuestions).toEqual([])
+	})
+
+	test('GET /api/questions carries assistantFallback when present and omits it otherwise', async () => {
+		const { handler, humanBackend } = createHandlerHarness()
+		const fallbackAsk = humanBackend.ask('Which framework?', { questionId: 'question-fallback', callId: 'tool:question-fallback', parentCallId: 'role:test-0-1' }, { assistantFallback: 'I was comparing the two frameworks.' })
+		const plainAsk = humanBackend.ask('Any preference?', { questionId: 'question-plain', callId: 'tool:question-plain', parentCallId: 'role:test-0-1' }, {})
+
+		const response = await handler(get('/api/questions'))
+		expect(response.status).toBe(200)
+		const questions: unknown = await response.json()
+		if (!Array.isArray(questions)) throw new Error('expected a questions array')
+		const withFallback = questions.find((question) => question.id === 'question-fallback')
+		const withoutFallback = questions.find((question) => question.id === 'question-plain')
+		if (withFallback === undefined || withoutFallback === undefined) throw new Error('expected both pending questions')
+		expect(withFallback.assistantFallback).toBe('I was comparing the two frameworks.')
+		expect(withFallback).not.toHaveProperty('context')
+		expect(withoutFallback).not.toHaveProperty('assistantFallback')
+
+		await handler(post('/api/answer', JSON.stringify({ id: 'question-fallback', answer: 'react' })))
+		await handler(post('/api/answer', JSON.stringify({ id: 'question-plain', answer: 'none' })))
+		expect(await fallbackAsk).toBe('react')
+		expect(await plainAsk).toBe('none')
 	})
 
 	test('POST /api/answer for an unknown id returns 404 not_found', async () => {

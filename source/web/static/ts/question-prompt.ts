@@ -7,6 +7,7 @@ export interface LiveQuestion {
 	id: string
 	question: string
 	context?: string
+	assistantFallback?: string
 }
 
 // The `/api/questions` wire entry: a live question plus the producer's asked-at bookkeeping. A malformed entry is dropped at ingress rather than reaching `live:${undefined}`.
@@ -19,6 +20,8 @@ export interface ParkedQueueItem {
 	runId?: string
 	status: string
 	question?: string
+	context?: string
+	assistantFallback?: string
 }
 
 export type QuestionPrompt =
@@ -29,6 +32,7 @@ export type QuestionPrompt =
 		questionId: string
 		question: string
 		context?: string
+		assistantFallback?: string
 	}
 	| {
 		kind: 'parked'
@@ -36,6 +40,8 @@ export type QuestionPrompt =
 		runId: string
 		queueItemId: string
 		question: string
+		context?: string
+		assistantFallback?: string
 	}
 
 export interface DeriveQuestionPromptInput {
@@ -65,13 +71,14 @@ export interface ResolveQuestionPromptForKeyInput {
 
 const QUESTION_PROMPT_SUPPRESSED_KEY_LIMIT = 32
 
-// The ingress guard for GET /api/questions: identity, question, and askedAt must be non-empty strings, and context when present must be a string. A malformed entry is dropped rather than stored as a live prompt with an undefined key.
+// The ingress guard for GET /api/questions: identity, question, and askedAt must be non-empty strings, and context and assistantFallback when present must be strings. A malformed entry is dropped rather than stored as a live prompt with an undefined key.
 export function isPendingQuestion(value: unknown): value is PendingQuestion {
 	if (!isObject(value)) return false
 	if (typeof value['id'] !== 'string' || value['id'] === '') return false
 	if (typeof value['question'] !== 'string' || value['question'] === '') return false
 	if (typeof value['askedAt'] !== 'string' || value['askedAt'] === '') return false
 	if (value['context'] !== undefined && typeof value['context'] !== 'string') return false
+	if (value['assistantFallback'] !== undefined && typeof value['assistantFallback'] !== 'string') return false
 	return true
 }
 
@@ -99,10 +106,15 @@ function hashQuestionText(text: string): string {
 
 function liveQuestionPrompt(question: LiveQuestion, activeRunId: string): QuestionPrompt {
 	const key = `live:${activeRunId}:${question.id}`
-	if (question.context === undefined) {
-		return { kind: 'live', key, runId: activeRunId, questionId: question.id, question: question.question }
+	return {
+		kind: 'live',
+		key,
+		runId: activeRunId,
+		questionId: question.id,
+		question: question.question,
+		...(question.context !== undefined ? { context: question.context } : {}),
+		...(question.assistantFallback !== undefined ? { assistantFallback: question.assistantFallback } : {}),
 	}
-	return { kind: 'live', key, runId: activeRunId, questionId: question.id, question: question.question, context: question.context }
 }
 
 function deriveLiveQuestionPrompt(pendingQuestions: readonly LiveQuestion[], selectedRunId: string | null, activeRunId: string | null): QuestionPrompt | null {
@@ -117,9 +129,17 @@ function parkedQuestionPrompt(item: ParkedQueueItem): QuestionPrompt | null {
 	if (item.status !== 'needs_input') return null
 	if (typeof item.question !== 'string' || item.question === '') return null
 	if (typeof item.runId !== 'string' || item.runId === '') return null
-	// The question identity keeps a re-park on the same item from reusing the suppressed key of the previous question; the same question re-parking keeps the same key and stays suppressed.
+	// The question identity keeps a re-park on the same item from reusing the suppressed key of the previous question; the same question re-parking keeps the same key and stays suppressed. Context and fallback never enter the key, so a presentation refresh cannot reopen a handled prompt.
 	const key = `parked:${item.id}:${item.question.length}:${hashQuestionText(item.question)}`
-	return { kind: 'parked', key, runId: item.runId, queueItemId: item.id, question: item.question }
+	return {
+		kind: 'parked',
+		key,
+		runId: item.runId,
+		queueItemId: item.id,
+		question: item.question,
+		...(item.context !== undefined ? { context: item.context } : {}),
+		...(item.assistantFallback !== undefined ? { assistantFallback: item.assistantFallback } : {}),
+	}
 }
 
 function deriveParkedQuestionPrompt(queueItems: readonly ParkedQueueItem[], selectedRunId: string | null, activeRunId: string | null): QuestionPrompt | null {

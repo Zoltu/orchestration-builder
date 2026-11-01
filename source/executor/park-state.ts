@@ -36,6 +36,9 @@ export interface ParkedAsk {
 	callId: string
 	questionId: string
 	question: string
+	// The operator-facing presentation recorded with the question: the model's explicit context, or the visible assistant text of the same turn when no context was supplied.
+	context?: string
+	assistantFallback?: string
 }
 
 // The operator's answer to a parked ask, delivered into the existing ask_human tool result on resume.

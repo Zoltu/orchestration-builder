@@ -233,8 +233,9 @@ export function createTaskQueue(dependencies: TaskQueueDependencies): TaskQueueM
 			}
 			if (item.status === 'suspended') {
 				const meta = item.runId !== undefined ? parseRunMetaText(item.runId) : null
+				const pauseState = meta?.status === 'needs_clarification' && item.runId !== undefined ? dependencies.readPauseStateById(item.runId) : null
 				const settledAt = meta?.endTime ?? dependencies.now()
-				const repaired = repairSuspendedItem(item, meta, settledAt)
+				const repaired = repairSuspendedItem(item, meta, settledAt, pauseState)
 				if (repaired === null) return item
 				changed = true
 				return repaired
@@ -535,7 +536,7 @@ export function createTaskQueue(dependencies: TaskQueueDependencies): TaskQueueM
 				await tick()
 				return
 			}
-			const settlement = settleActiveItem(queue, meta.runId, meta, dependencies.now())
+			const settlement = settleActiveItem(queue, meta.runId, meta, dependencies.now(), pauseState)
 			if (settlement.kind === 'settled') writeQueueState(settlement.queue)
 			await tick()
 		},

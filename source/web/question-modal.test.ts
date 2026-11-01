@@ -92,6 +92,55 @@ describe('QuestionModal', () => {
 		expect(contextDiv).toBeUndefined()
 	})
 
+	test('explicit context wins when both context and fallback are present', () => {
+		const both = { id: 'q1', question: 'which CI?', context: 'explicit context', assistantFallback: 'fallback text', askedAt: 't1' }
+		const modal: Vnode = QuestionModal(fakeH, { question: both, runLabel: 'run-1', renderMarkdown: fakeRenderMarkdown, onSubmit: () => undefined })
+		const contextDiv = defined(allByTag(modal, 'div').find((d) => d.props.class === 'question-modal-context question-context markdown'), 'contextDiv')
+		expect(defined(byTag(contextDiv, 'span')[0], 'marker').props['data-text']).toBe('explicit context')
+		expect(allByTag(modal, 'div').find((d) => d.props.class === 'question-modal-fallback')).toBeUndefined()
+	})
+
+	test('renders the fallback with its fixed label when context is absent', () => {
+		const fallbackOnly = { id: 'q1', question: 'which CI?', assistantFallback: 'the previous assistant message', askedAt: 't1' }
+		const modal: Vnode = QuestionModal(fakeH, { question: fallbackOnly, runLabel: 'run-1', renderMarkdown: fakeRenderMarkdown, onSubmit: () => undefined })
+		const fallback = defined(allByTag(modal, 'div').find((d) => d.props.class === 'question-modal-fallback'), 'fallback')
+		const label = defined(byTag(fallback, 'p').find((p) => p.props.class === 'question-modal-fallback-label'), 'label')
+		expect(label.children.join('')).toBe('Previous assistant message (no context was provided)')
+		const content = defined(byTag(fallback, 'div').find((d) => d.props.class === 'question-modal-fallback-content question-context markdown'), 'content')
+		expect(defined(byTag(content, 'span')[0], 'marker').props['data-text']).toBe('the previous assistant message')
+		expect(allByTag(modal, 'div').find((d) => d.props.class === 'question-modal-context question-context markdown')).toBeUndefined()
+	})
+
+	test('renders the fallback when context is blank', () => {
+		const blankContext = { id: 'q1', question: 'which CI?', context: '   ', assistantFallback: 'fallback after blank context', askedAt: 't1' }
+		const modal: Vnode = QuestionModal(fakeH, { question: blankContext, runLabel: 'run-1', renderMarkdown: fakeRenderMarkdown, onSubmit: () => undefined })
+		const fallback = defined(allByTag(modal, 'div').find((d) => d.props.class === 'question-modal-fallback'), 'fallback')
+		const content = defined(byTag(fallback, 'div').find((d) => d.props.class === 'question-modal-fallback-content question-context markdown'), 'content')
+		expect(defined(byTag(content, 'span')[0], 'marker').props['data-text']).toBe('fallback after blank context')
+	})
+
+	test('renders no context or fallback block when neither is present or both are blank', () => {
+		const plain = { question: 'which CI?' }
+		const blank = { question: 'which CI?', context: '   ', assistantFallback: '  ' }
+		for (const question of [plain, blank]) {
+			const modal: Vnode = QuestionModal(fakeH, { question, runLabel: 'run-1', renderMarkdown: fakeRenderMarkdown, onSubmit: () => undefined })
+			expect(allByTag(modal, 'div').find((d) => d.props.class === 'question-modal-context question-context markdown')).toBeUndefined()
+			expect(allByTag(modal, 'div').find((d) => d.props.class === 'question-modal-fallback')).toBeUndefined()
+		}
+	})
+
+	test('passes a very long fallback through whole with no truncation or ellipsis', () => {
+		const longFallback = `${'assistant text '.repeat(4000)}END`
+		const modal: Vnode = QuestionModal(fakeH, { question: { question: 'which CI?', assistantFallback: longFallback }, runLabel: 'run-1', renderMarkdown: fakeRenderMarkdown, onSubmit: () => undefined })
+		const fallback = defined(allByTag(modal, 'div').find((d) => d.props.class === 'question-modal-fallback'), 'fallback')
+		const content = defined(byTag(fallback, 'div').find((d) => d.props.class === 'question-modal-fallback-content question-context markdown'), 'content')
+		const renderedText = defined(byTag(content, 'span')[0], 'marker').props['data-text']
+		if (typeof renderedText !== 'string') throw new Error('expected the fallback text to reach the renderer')
+		expect(renderedText).toBe(longFallback)
+		expect(renderedText.length).toBe(longFallback.length)
+		expect(renderedText.includes('…')).toBe(false)
+	})
+
 	test('the heading names which run is asking', () => {
 		const modal: Vnode = QuestionModal(fakeH, { question, runLabel: 'run-2026-1', renderMarkdown: fakeRenderMarkdown, onSubmit: () => undefined })
 		const heading = defined(allByTag(modal, 'p').find((p) => p.props.class === 'question-modal-heading'), 'heading')

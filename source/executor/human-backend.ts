@@ -8,15 +8,28 @@ export interface HumanAskInvocation {
 	parentCallId: string
 }
 
+// What the operator sees alongside the question: the model's explicit context when it supplied one, otherwise the visible assistant text of the same LLM turn. A blank value is absent, and reasoning is never part of this shape.
+export interface HumanQuestionPresentation {
+	context?: string
+	assistantFallback?: string
+}
+
+export function selectHumanQuestionPresentation(explicitContext: unknown, assistantContent: string | undefined): HumanQuestionPresentation {
+	if (typeof explicitContext === 'string' && explicitContext.trim() !== '') return { context: explicitContext }
+	if (typeof assistantContent === 'string' && assistantContent.trim() !== '') return { assistantFallback: assistantContent }
+	return {}
+}
+
 // The executor hands the implementation the identity the invocation journal already allocated. The implementation is responsible for logging ask_human when it starts waiting and human_answer when the answer arrives, using exactly the supplied questionId, callId, and parentCallId so the pair closes the same invocation.
 export interface HumanBackend {
-	ask(question: string, invocation: HumanAskInvocation, context?: string): Promise<string>
+	ask(question: string, invocation: HumanAskInvocation, presentation: HumanQuestionPresentation): Promise<string>
 }
 
 export interface PendingQuestion {
 	id: string
 	question: string
 	context?: string
+	assistantFallback?: string
 	askedAt: string
 }
 
@@ -50,13 +63,14 @@ export function createWebHumanBackend(dependencies: WebHumanBackendDependencies)
 		bindRunLog(appendLog) {
 			runLog = appendLog
 		},
-		ask(question: string, invocation: HumanAskInvocation, context?: string): Promise<string> {
+		ask(question: string, invocation: HumanAskInvocation, presentation: HumanQuestionPresentation): Promise<string> {
 			const id = invocation.questionId
 			const askedAt = new Date().toISOString()
 			const pendingQuestion: PendingQuestion = {
 				id,
 				question,
-				...(context !== undefined ? { context } : {}),
+				...(presentation.context !== undefined ? { context: presentation.context } : {}),
+				...(presentation.assistantFallback !== undefined ? { assistantFallback: presentation.assistantFallback } : {}),
 				askedAt,
 			}
 			const log = runLog
@@ -69,7 +83,7 @@ export function createWebHumanBackend(dependencies: WebHumanBackendDependencies)
 						callId: invocation.callId,
 						parentCallId: invocation.parentCallId,
 						question,
-						...(context !== undefined ? { context } : {}),
+						...(presentation.context !== undefined ? { context: presentation.context } : {}),
 					}),
 				})
 			}

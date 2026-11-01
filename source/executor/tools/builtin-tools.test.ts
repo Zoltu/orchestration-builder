@@ -165,6 +165,18 @@ describe('ask_human tool', () => {
 		expect(human.questions).toEqual([{ question: 'q', context: 'c' }])
 	})
 
+	test('passes the assistant turn content as the fallback when no context is provided', async () => {
+		const human = recordingHumanBackend()
+		const scope = scopeWith({ humanBackend: human })
+		const call = makeCall('ask_human', { question: 'What language?' })
+		const invocation: ToolInvocation = { ...invocationFor(call), assistantContent: 'I will pick the runtime based on your answer.' }
+
+		const outcome = await platform.dispatch(roleWith(['ask_human', 'finish']), scope, call, invocation)
+		if (outcome.kind === 'suspended' || outcome.kind === 'operator_paused') throw new Error('unexpected pause')
+		expect(outcome.result.kind).toBe('success')
+		expect(human.questions).toEqual([{ question: 'What language?', context: undefined, assistantFallback: 'I will pick the runtime based on your answer.' }])
+	})
+
 	test('rejects a missing question with invalid_arguments', async () => {
 		const result = await dispatch(scopeWith(), ['ask_human', 'finish'], 'ask_human', {})
 		expect(result.kind).toBe('invalid_arguments')
@@ -209,6 +221,50 @@ describe('ask_human tool', () => {
 			expect(testCase.parkTracker.parkedAsk).toBeUndefined()
 			expect(human.questions.length).toBe(1)
 		}
+	})
+
+	test('a parked ask records the assistant turn content as its fallback and keeps it out of the ask event', async () => {
+		const parkTracker = createRunParkTracker(undefined, true)
+		const events: LogEvent[] = []
+		const scope = scopeWith({ parkTracker, appendLog: (event) => events.push(event) })
+		const call = makeCall('ask_human', { question: 'Which database?' })
+		const journal = createInvocationJournal(() => {})
+		const invocation = journal.allocateToolCall(call, 'fixture-0-0', 'I need the database before writing migrations.')
+
+		const outcome = await platform.dispatch(roleWith(['ask_human', 'finish']), scope, call, invocation)
+		if (outcome.kind === 'suspended' || outcome.kind === 'operator_paused') throw new Error('unexpected pause')
+
+		expect(outcome.result).toEqual({ kind: 'success', data: { question: 'Which database?', parked: true } })
+		expect(parkTracker.parkedAsk).toMatchObject({
+			roleId: 'fixture-0-0',
+			toolCallId: 'call_ask_human_1',
+			callId: 'tool:call_ask_human_1',
+			questionId: 'call_ask_human_1',
+			question: 'Which database?',
+			assistantFallback: 'I need the database before writing migrations.',
+		})
+		const askEvent = defined(events.find((event) => event.type === 'ask_human'), 'ask_human event')
+		expect(askEvent.payload).not.toHaveProperty('assistantFallback')
+		expect(askEvent.payload).not.toHaveProperty('context')
+	})
+
+	test('a parked ask treats whitespace-only context as absent and omits it from the ask event', async () => {
+		const parkTracker = createRunParkTracker(undefined, true)
+		const events: LogEvent[] = []
+		const scope = scopeWith({ parkTracker, appendLog: (event) => events.push(event) })
+		const call = makeCall('ask_human', { question: 'Which database?', context: '   \n\t' })
+		const journal = createInvocationJournal(() => {})
+		const invocation = journal.allocateToolCall(call, 'fixture-0-0', 'I need the database before writing migrations.')
+
+		const outcome = await platform.dispatch(roleWith(['ask_human', 'finish']), scope, call, invocation)
+		if (outcome.kind === 'suspended' || outcome.kind === 'operator_paused') throw new Error('unexpected pause')
+
+		expect(outcome.result).toEqual({ kind: 'success', data: { question: 'Which database?', parked: true } })
+		expect(parkTracker.parkedAsk?.context).toBeUndefined()
+		expect(parkTracker.parkedAsk?.assistantFallback).toBe('I need the database before writing migrations.')
+		const askEvent = defined(events.find((event) => event.type === 'ask_human'), 'ask_human event')
+		expect(askEvent.payload).not.toHaveProperty('context')
+		expect(askEvent.payload).not.toHaveProperty('assistantFallback')
 	})
 
 	test('a parked ask with an empty model id records the allocated invocation identity', async () => {

@@ -744,6 +744,25 @@ describe('createTaskQueue tick — suspended boot repair and priority', () => {
 		expect(submit.calls.length).toBe(0)
 	})
 
+	test('a suspended item whose meta settled needs_clarification copies the parked presentation', async () => {
+		const runId = 'run-20260101-010000'
+		const question = 'which database?'
+		const store = fakeQueueStore([suspendedItem({ runId })])
+		const submit = fakeSubmit([])
+		const { tick } = queueOver(store, submit, {
+			metas: { [runId]: meta({ runId, status: 'needs_clarification', result: { status: 'needs_clarification', summary: `waiting for an answer to: ${question}` } }) },
+			pauseStates: { [runId]: { roleId: 'main-0-1', toolCallId: 'ask_1', callId: 'tool:ask_1', questionId: 'ask_1', question, assistantFallback: 'visible assistant text' } },
+		})
+
+		await tick()
+
+		const repaired = requireItem(store.items(), 'item-1')
+		expect(repaired.status).toBe('needs_input')
+		expect(repaired.question).toBe(question)
+		expect(repaired.assistantFallback).toBe('visible assistant text')
+		expect(submit.calls.length).toBe(0)
+	})
+
 	test('a suspended item whose meta is missing is cancelled, never dispatched', async () => {
 		const store = fakeQueueStore([suspendedItem()])
 		const submit = fakeSubmit([])
@@ -1419,6 +1438,83 @@ describe('createTaskQueue onRunSettled', () => {
 		expect(parked.continuesFrom).toBe('run-20260101-003000')
 		expect(parked.settledAt).toBeUndefined()
 		// Nothing else is waiting, so no dispatch followed the park.
+		expect(submit.calls.length).toBe(0)
+	})
+
+	test('a parked settlement copies the pause presentation onto the needs_input item in full', async () => {
+		const runId = 'run-20260101-010000'
+		const question = 'which database?'
+		const longFallback = `I need this before writing migrations. ${'y'.repeat(20_000)}`
+		const store = fakeQueueStore([waitingItem({ status: 'active', runId })])
+		const submit = fakeSubmit([])
+		const { onRunSettled } = queueOver(store, submit, {
+			metas: { [runId]: meta({ runId, status: 'needs_clarification' }) },
+			pauseStates: { [runId]: { roleId: 'main-0-1', toolCallId: 'ask_1', callId: 'tool:ask_1', questionId: 'ask_1', question, assistantFallback: longFallback } },
+		})
+
+		await onRunSettled(meta({ runId, status: 'needs_clarification', result: { status: 'needs_clarification', summary: `waiting for an answer to: ${question}` } }))
+
+		const parked = requireItem(store.items(), 'item-1')
+		expect(parked.status).toBe('needs_input')
+		expect(parked.question).toBe(question)
+		expect(parked.context).toBeUndefined()
+		expect(parked.assistantFallback).toBe(longFallback)
+		expect(requireItem(store.written()[0]?.items ?? [], 'item-1').assistantFallback).toBe(longFallback)
+	})
+
+	test('a re-park replaces the previous presentation with the new pause state', async () => {
+		const runId = 'run-20260101-010000'
+		const question = 'and the port?'
+		const store = fakeQueueStore([waitingItem({ status: 'active', runId, context: 'stale context', assistantFallback: 'stale fallback' })])
+		const submit = fakeSubmit([])
+		const { onRunSettled } = queueOver(store, submit, {
+			metas: { [runId]: meta({ runId, status: 'needs_clarification' }) },
+			pauseStates: { [runId]: { roleId: 'main-0-1', toolCallId: 'ask_2', callId: 'tool:ask_2', questionId: 'ask_2', question, context: 'new context' } },
+		})
+
+		await onRunSettled(meta({ runId, status: 'needs_clarification', result: { status: 'needs_clarification', summary: `waiting for an answer to: ${question}` } }))
+
+		const parked = requireItem(store.items(), 'item-1')
+		expect(parked.status).toBe('needs_input')
+		expect(parked.context).toBe('new context')
+		expect(parked.assistantFallback).toBeUndefined()
+	})
+
+	test('a direct clarification settlement drops any previous presentation', async () => {
+		const runId = 'run-20260101-010000'
+		const store = fakeQueueStore([waitingItem({ status: 'active', runId, context: 'stale context', assistantFallback: 'stale fallback' })])
+		const submit = fakeSubmit([])
+		const { onRunSettled } = queueOver(store, submit, {
+			metas: { [runId]: meta({ runId, status: 'needs_clarification' }) },
+			pauseStates: { [runId]: 'clarification' },
+		})
+
+		await onRunSettled(meta({ runId, status: 'needs_clarification', result: { status: 'needs_clarification', summary: 'I need a decision on the schema' } }))
+
+		const parked = requireItem(store.items(), 'item-1')
+		expect(parked.status).toBe('needs_input')
+		expect(parked.context).toBeUndefined()
+		expect(parked.assistantFallback).toBeUndefined()
+	})
+
+	test('boot repair of a crash-parked active item copies the pause presentation', async () => {
+		const runId = 'run-20260101-010000'
+		const question = 'which database?'
+		const store = fakeQueueStore([waitingItem({ status: 'active', runId })])
+		const submit = fakeSubmit([])
+		const harness = queueOver(store, submit, {
+			metas: { [runId]: meta({ runId, status: 'needs_clarification', result: { status: 'needs_clarification', summary: `waiting for an answer to: ${question}` } }) },
+			pauseStates: { [runId]: { roleId: 'main-0-1', toolCallId: 'ask_1', callId: 'tool:ask_1', questionId: 'ask_1', question, context: 'explicit context' } },
+			hasActiveRun: () => true,
+		})
+
+		await harness.tick()
+
+		const repaired = requireItem(store.items(), 'item-1')
+		expect(repaired.status).toBe('needs_input')
+		expect(repaired.question).toBe(question)
+		expect(repaired.context).toBe('explicit context')
+		expect(repaired.assistantFallback).toBeUndefined()
 		expect(submit.calls.length).toBe(0)
 	})
 

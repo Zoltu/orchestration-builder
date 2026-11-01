@@ -202,6 +202,8 @@ Do **not** ask a question when:
 
 When the involvement policy allows a question and you do ask, use a single, non-technical question and offer your best guess so the user can simply confirm. The `ask_human` call waits for the user's answer and returns it to your conversation: continue from the answer — proceed with the work, or finish normally when it is done. Reserve `finish` with `status: "needs_clarification"` for when you cannot ask through `ask_human`, or the answer you got still does not unblock the run — and put what is missing in the summary.
 
+The human sees the question and its `context`, not the conversation around them. Put the goal, the findings or decisions that led here, the options, and your recommended default in `context`, and write the question to stand alone. Do not leave necessary context only in your preceding assistant prose: that prose can appear on the question card only as a safety-net fallback when `context` is omitted, so never rely on it.
+
 ## Finishing
 
 When you call `finish`:

@@ -2507,6 +2507,18 @@ li:last-child {
 	margin: 0.2rem 0;
 }
 
+/* The fallback block mirrors the context aside but names its source with a fixed, trusted label; its content keeps the shared muted Markdown treatment and flows with the card's own scroll rather than a nested one. */
+.question-modal-fallback {
+	margin-top: var(--space-2);
+}
+
+.question-modal-fallback-label {
+	margin: 0 0 var(--space-1);
+	font-size: 0.75rem;
+	font-weight: 500;
+	color: var(--color-text-muted);
+}
+
 .question-modal-form {
 	display: flex;
 	flex-direction: column;

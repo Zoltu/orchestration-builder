@@ -22,7 +22,7 @@ function makeRunState() {
 describe('createRunState', () => {
 	test('pendingQuestions delegates to the web human backend', () => {
 		const { humanBackend, runState } = makeRunState()
-		humanBackend.ask('hello?', askInvocation(), 'context')
+		humanBackend.ask('hello?', askInvocation(), { context: 'context' })
 
 		const pending = runState.pendingQuestions()
 		expect(pending.length).toBe(1)
@@ -32,7 +32,7 @@ describe('createRunState', () => {
 	test('submitAnswer delegates to the web human backend and resolves the parked promise', async () => {
 		const { humanBackend, runState } = makeRunState()
 
-		const promise = humanBackend.ask('which?', askInvocation())
+		const promise = humanBackend.ask('which?', askInvocation(), {})
 		const [question] = runState.pendingQuestions()
 
 		const result = runState.submitAnswer(defined(question, 'pending question').id, 'this one')
@@ -49,7 +49,7 @@ describe('createRunState', () => {
 
 	test('pendingQuestions returns isolated copies that cannot mutate backend state', () => {
 		const { humanBackend, runState } = makeRunState()
-		humanBackend.ask('original?', askInvocation())
+		humanBackend.ask('original?', askInvocation(), {})
 
 		const snapshot = runState.pendingQuestions()
 		defined(snapshot[0], 'snapshot question').question = 'tampered'

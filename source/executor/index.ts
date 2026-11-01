@@ -49,8 +49,8 @@ export type { ContextPolicyOverride, DeploymentOverride, ExecutorOverride, Gener
 export { resolveSecret } from './secrets.js'
 export type { SecretChannels } from './secrets.js'
 
-export { createWebHumanBackend } from './human-backend.js'
-export type { HumanBackend, WebHumanBackend, WebHumanBackendDependencies } from './human-backend.js'
+export { createWebHumanBackend, selectHumanQuestionPresentation } from './human-backend.js'
+export type { HumanBackend, HumanQuestionPresentation, PendingQuestion, WebHumanBackend, WebHumanBackendDependencies } from './human-backend.js'
 
 export { createRunState } from './run-state.js'
 export type { RunState } from './run-state.js'

@@ -24,6 +24,9 @@ export interface QueueItemLike {
 	pause?: OperatorPauseRecord | null
 	// needs_input: the recorded question.
 	question?: string
+	// needs_input: the operator-facing presentation recorded with the question (explicit context or the visible assistant fallback).
+	context?: string
+	assistantFallback?: string
 	// Set when the operator answers.
 	answer?: string
 	// done/error: the terminal run's result summary.
@@ -44,6 +47,10 @@ function isOptionalNonEmptyString(value: unknown): boolean {
 	return value === undefined || (typeof value === 'string' && value !== '')
 }
 
+function isOptionalString(value: unknown): boolean {
+	return value === undefined || typeof value === 'string'
+}
+
 // The minimal shape the panel renders: any polled entry without it is dropped rather than half-rendered.
 export function isQueueItemLike(value: unknown): value is QueueItemLike {
 	if (!isObject(value)) return false
@@ -52,6 +59,9 @@ export function isQueueItemLike(value: unknown): value is QueueItemLike {
 	if (!isOptionalNonEmptyString(value['runId'])) return false
 	if (!isOptionalNonEmptyString(value['continuesFrom'])) return false
 	if (!isOptionalNonEmptyString(value['resumesRunId'])) return false
+	if (!isOptionalString(value['question'])) return false
+	if (!isOptionalString(value['context'])) return false
+	if (!isOptionalString(value['assistantFallback'])) return false
 	const pause = value['pause']
 	if (pause !== undefined && pause !== null && !isOperatorPauseRecord(pause)) return false
 	return QUEUE_ITEM_STATUSES.some((status) => status === value['status'])

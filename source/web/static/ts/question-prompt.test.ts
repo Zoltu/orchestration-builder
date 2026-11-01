@@ -56,6 +56,12 @@ describe('deriveQuestionPrompt live source', () => {
 		expect(prompt.context).toBe('Extra context')
 	})
 
+	test('carries the live question assistant fallback when present', () => {
+		const prompt = requireLivePrompt(deriveQuestionPrompt({ pendingQuestions: [liveQuestion({ assistantFallback: 'Earlier assistant text' })], queueItems: [], selectedRunId: 'run-1', activeRunId: 'run-1' }))
+		expect(prompt.assistantFallback).toBe('Earlier assistant text')
+		expect(prompt.context).toBeUndefined()
+	})
+
 	test('returns no prompt when the selected run is not the active run', () => {
 		const prompt = deriveQuestionPrompt({ pendingQuestions: [liveQuestion()], queueItems: [], selectedRunId: 'run-old', activeRunId: 'run-active' })
 		expect(prompt).toBeNull()
@@ -81,6 +87,12 @@ describe('deriveQuestionPrompt parked source', () => {
 		expect(prompt.queueItemId).toBe('queue-1')
 		expect(prompt.question).toBe('Which path?')
 		expect(prompt.runId).toBe('run-1')
+	})
+
+	test('carries the parked item context and assistant fallback when present', () => {
+		const prompt = requireParkedPrompt(deriveQuestionPrompt({ pendingQuestions: [], queueItems: [parkedItem({ context: 'Parked context', assistantFallback: 'Parked fallback' })], selectedRunId: 'run-1', activeRunId: null }))
+		expect(prompt.context).toBe('Parked context')
+		expect(prompt.assistantFallback).toBe('Parked fallback')
 	})
 
 	test('skips queue items that do not match the selected run', () => {
@@ -217,6 +229,12 @@ describe('deriveQueueRowQuestionPrompt', () => {
 		expect(direct.question).toBe('Which path?')
 	})
 
+	test('carries the parked item context and assistant fallback', () => {
+		const prompt = requireParkedPrompt(deriveItemPrompt(parkedItem({ context: 'Row context', assistantFallback: 'Row fallback' })))
+		expect(prompt.context).toBe('Row context')
+		expect(prompt.assistantFallback).toBe('Row fallback')
+	})
+
 	test('rejects an item that is not parked on a question or has no run id', () => {
 		expect(deriveItemPrompt(parkedItem({ status: 'waiting' }))).toBeNull()
 		expect(deriveItemPrompt(parkedItem({ question: undefined }))).toBeNull()
@@ -274,6 +292,14 @@ describe('parked question identity', () => {
 		const second = requireParkedPrompt(deriveItemPrompt(parkedItem({ id: 'queue-2', question: 'Which path?' })))
 		expect(second.key).not.toBe(first.key)
 	})
+
+	test('the parked key depends only on the question text, not context or fallback', () => {
+		const bare = requireParkedPrompt(deriveItemPrompt(parkedItem({ question: 'Which path?' })))
+		const withContext = requireParkedPrompt(deriveItemPrompt(parkedItem({ question: 'Which path?', context: 'A context' })))
+		const withFallback = requireParkedPrompt(deriveItemPrompt(parkedItem({ question: 'Which path?', assistantFallback: 'A fallback' })))
+		expect(withContext.key).toBe(bare.key)
+		expect(withFallback.key).toBe(bare.key)
+	})
 })
 
 describe('suppressed question keys', () => {
@@ -318,6 +344,8 @@ describe('isPendingQuestion', () => {
 	test('accepts a complete live question with or without context', () => {
 		expect(isPendingQuestion({ id: 'q1', question: 'Proceed?', askedAt: 't1' })).toBe(true)
 		expect(isPendingQuestion({ id: 'q1', question: 'Proceed?', context: 'details', askedAt: 't1' })).toBe(true)
+		expect(isPendingQuestion({ id: 'q1', question: 'Proceed?', assistantFallback: 'earlier text', askedAt: 't1' })).toBe(true)
+		expect(isPendingQuestion({ id: 'q1', question: 'Proceed?', context: 'details', assistantFallback: 'earlier text', askedAt: 't1' })).toBe(true)
 	})
 
 	test('rejects malformed entries before they can form a live key', () => {
@@ -329,6 +357,8 @@ describe('isPendingQuestion', () => {
 		expect(isPendingQuestion({ id: 'q1', question: 'Proceed?', askedAt: '' })).toBe(false)
 		expect(isPendingQuestion({ id: 'q1', question: 'Proceed?' })).toBe(false)
 		expect(isPendingQuestion({ id: 'q1', question: 'Proceed?', context: 7, askedAt: 't1' })).toBe(false)
+		expect(isPendingQuestion({ id: 'q1', question: 'Proceed?', assistantFallback: 7, askedAt: 't1' })).toBe(false)
+		expect(isPendingQuestion({ id: 'q1', question: 'Proceed?', assistantFallback: ['text'], askedAt: 't1' })).toBe(false)
 	})
 })
 

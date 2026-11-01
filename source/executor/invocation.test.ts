@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import {
 	askHumanPayload,
+	assistantContentForToolCallBatch,
 	createInvocationJournal,
 	humanAnswerPayload,
 	interruptResolvedPayload,
@@ -13,7 +14,7 @@ import {
 	type ToolInvocation,
 } from './invocation.ts'
 import { defined } from './test-fixtures.ts'
-import type { LogEvent, ToolCall } from './types.ts'
+import type { LogEvent, Message, ToolCall } from './types.ts'
 import { isObject } from './validation.ts'
 
 function toolCall(id: string, name: string = 'read_file'): ToolCall {
@@ -67,6 +68,55 @@ describe('invocation id builders and payloads', () => {
 		expect(askHumanPayload({ questionId: 'ask-1', callId: 'tool:ask-1', parentCallId: 'role:main-0-1', question: 'why?', parked: true })).toEqual({ id: 'ask-1', callId: 'tool:ask-1', parentCallId: 'role:main-0-1', question: 'why?', parked: true })
 		expect(humanAnswerPayload('ask-1', 'tool:ask-1', 'because')).toEqual({ id: 'ask-1', callId: 'tool:ask-1', answer: 'because' })
 		expect(interruptResolvedPayload('interrupt:abc', { action: 'continue' })).toEqual({ action: 'continue', callId: 'interrupt:abc' })
+	})
+})
+
+describe('assistantContentForToolCallBatch', () => {
+	test('returns the visible assistant content, never reasoning', () => {
+		const call = toolCall('ask_1', 'ask_human')
+		const history: Message[] = [
+			{ role: 'system', content: 'prompt' },
+			{ role: 'assistant', content: 'I should ask the operator.', reasoning: 'private chain of thought', tool_calls: [call] },
+		]
+		expect(assistantContentForToolCallBatch(history, [call])).toBe('I should ask the operator.')
+	})
+
+	test('matches the whole batch, not a single reused id', () => {
+		const first = toolCall('reused', 'ask_human')
+		const second: ToolCall = { id: 'reused', type: 'function', function: { name: 'ask_human', arguments: '{"question":"and the port?"}' } }
+		const history: Message[] = [
+			{ role: 'assistant', content: 'first turn', tool_calls: [first] },
+			{ role: 'tool', content: '{}', tool_call_id: 'reused' },
+			{ role: 'assistant', content: 'second turn', tool_calls: [second] },
+		]
+		expect(assistantContentForToolCallBatch(history, [second])).toBe('second turn')
+		expect(assistantContentForToolCallBatch(history, [{ ...second, function: { name: 'ask_human', arguments: '{"question":"different"}' } }])).toBeUndefined()
+	})
+
+	test('requires the full ordered tool-call array, including duplicate ids', () => {
+		const first = toolCall('dup', 'ask_human')
+		const second: ToolCall = { id: 'dup', type: 'function', function: { name: 'ask_human', arguments: '{"question":"second"}' } }
+		const history: Message[] = [
+			{ role: 'assistant', content: 'batched ask', tool_calls: [first, second] },
+		]
+		expect(assistantContentForToolCallBatch(history, [first, second])).toBe('batched ask')
+		expect(assistantContentForToolCallBatch(history, [second, first])).toBeUndefined()
+		expect(assistantContentForToolCallBatch(history, [first])).toBeUndefined()
+		expect(assistantContentForToolCallBatch(history, [first, second, toolCall('extra')])).toBeUndefined()
+	})
+
+	test('searches assistant messages rather than assuming the last history message', () => {
+		const call = toolCall('ask_1', 'ask_human')
+		const history: Message[] = [
+			{ role: 'assistant', content: 'the turn that asked', tool_calls: [call] },
+			{ role: 'tool', content: '{}', tool_call_id: 'ask_1' },
+			{ role: 'assistant', content: 'a later turn with another call', tool_calls: [toolCall('other')] },
+		]
+		expect(assistantContentForToolCallBatch(history, [call])).toBe('the turn that asked')
+	})
+
+	test('returns undefined when no assistant message carries the batch', () => {
+		expect(assistantContentForToolCallBatch([{ role: 'user', content: 'hello' }], [toolCall('ask_1')])).toBeUndefined()
 	})
 })
 

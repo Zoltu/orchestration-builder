@@ -7,7 +7,7 @@ import { logEvent, type EngineContext, type EngineDependencies, type ResumedRole
 import { isWriteCapableRole, parkCard, type ParkedAnswer } from './park-state.js'
 import { drainInterrupts } from './interrupt-engine.js'
 import type { LlmCallResult } from './llm.js'
-import { humanAnswerPayload, roleCallId, type ToolInvocation } from './invocation.js'
+import { assistantContentForToolCallBatch, humanAnswerPayload, roleCallId, type ToolInvocation } from './invocation.js'
 import { hashArguments, RECENT_TOOL_CALLS_LIMIT } from './role-inspection.js'
 import type { RoleRegistryEntry } from './role-registry.js'
 import { buildContinuationHistory, selectContinuableChild } from './role-snapshot.js'
@@ -26,7 +26,7 @@ interface DispatchContext {
 type LlmResultHandling =
 	| { kind: 'continue' }
 	| { kind: 'finished'; card: ResultCard }
-	| { kind: 'tool_calls'; toolCalls: ToolCall[] }
+	| { kind: 'tool_calls'; toolCalls: ToolCall[]; assistantContent?: string }
 	| { kind: 'suspended'; suspension: SuspensionRecord }
 
 type SuccessfulLlmCall = Extract<LlmCallResult, { kind: 'success' }>
@@ -222,7 +222,7 @@ function handleLlmResult(
 		}
 	}
 
-	return { kind: 'tool_calls', toolCalls: llmResult.toolCalls }
+	return { kind: 'tool_calls', toolCalls: llmResult.toolCalls, ...(llmResult.content !== undefined ? { assistantContent: llmResult.content } : {}) }
 }
 
 // Emits the observe event for a successful cross-role inspection, so the interaction model can draw the reference from the inspecting role to the suspended target it read. Self-inspection (targetRole absent or the caller's own id) is not an observation, and a target that is no longer registered cannot be drawn, so both are skipped.
@@ -306,7 +306,8 @@ async function reconcilePendingInvocation(deps: EngineDependencies, context: Eng
 	const index = pending.index
 	const toolCall = pending.toolCalls[index]
 	if (toolCall === undefined) throw new Error(`resume: pending invocation index ${index} is out of range in a validated checkpoint`)
-	const invocation = deps.invocationJournal.adoptToolCall(toolCall, pending.callId, pending.parentCallId)
+	const assistantContent = assistantContentForToolCallBatch(roleState.history, pending.toolCalls)
+	const invocation = deps.invocationJournal.adoptToolCall(toolCall, pending.callId, pending.parentCallId, assistantContent)
 	const callId = pending.callId
 	const isAsk = toolCall.function.name === 'ask_human'
 	const events = deps.readRunLogEvents(deps.runId)
@@ -352,7 +353,7 @@ async function reconcilePendingInvocation(deps: EngineDependencies, context: Eng
 
 	if (!hasRemainingCalls) deps.checkpointRecorder.write()
 	const remainingCard = hasRemainingCalls
-		? await dispatchToolCallSequence(deps, context, roleState, registryEntry, dispatchCtx, pending.toolCalls, index + 1)
+		? await dispatchToolCallSequence(deps, context, roleState, registryEntry, dispatchCtx, pending.toolCalls, index + 1, assistantContent)
 		: null
 	// The note lands only after every remaining result, never between an assistant tool_calls message and its tool results. A remaining final card that is a completed finish still leaves a closed turn, so the note can follow it; any other early terminal is skipped.
 	if (resumeNote !== undefined && (remainingCard === null || (remainingCard.kind === 'card' && completedFinishCard(roleState.history) !== null))) roleState.history.push({ role: 'user', content: resumeNote })
@@ -479,6 +480,7 @@ function deliverParkedAnswer(deps: EngineDependencies, roleState: RoleState, par
 }
 
 // Continues the parked assistant turn after the answer: the calls after ask_human in the same batched turn dispatch exactly as the blocking path would, and a park among them re-parks normally.
+// The bare tool-call id is safe here because the frozen checkpoint ends at that call's tool result and validation requires every assistant call carrying the id to be the parked ask with the same question; searching backward therefore finds the captured turn itself, not an earlier reuse. A pending replay has no such pinned position, so it instead matches the complete batch.
 async function continueParkedTurn(deps: EngineDependencies, context: EngineContext, roleState: RoleState, registryEntry: RoleRegistryEntry, dispatchCtx: DispatchContext, toolCallId: string): Promise<RoleOutcome | null> {
 	const history = roleState.history
 	for (let index = history.length - 1; index >= 0; index--) {
@@ -487,7 +489,7 @@ async function continueParkedTurn(deps: EngineDependencies, context: EngineConte
 		if (message.role !== 'assistant' || message.tool_calls === undefined) continue
 		const callIndex = message.tool_calls.findIndex((call) => call.id === toolCallId)
 		if (callIndex === -1) continue
-		return await dispatchToolCallSequence(deps, context, roleState, registryEntry, dispatchCtx, message.tool_calls, callIndex + 1)
+		return await dispatchToolCallSequence(deps, context, roleState, registryEntry, dispatchCtx, message.tool_calls, callIndex + 1, message.content)
 	}
 	throw new Error(`continueParkedTurn: no assistant message carries parked call ${toolCallId}`)
 }
@@ -691,6 +693,7 @@ async function dispatchToolCallSequence(
 	dispatchCtx: DispatchContext,
 	toolCalls: ToolCall[],
 	startIndex: number,
+	assistantContent?: string,
 ): Promise<RoleOutcome | null> {
 	for (let index = startIndex; index < toolCalls.length; index++) {
 		const toolCall = toolCalls[index]
@@ -713,7 +716,7 @@ async function dispatchToolCallSequence(
 			}
 			continue
 		}
-		const invocation = deps.invocationJournal.allocateToolCall(toolCall, registryEntry.roleId)
+		const invocation = deps.invocationJournal.allocateToolCall(toolCall, registryEntry.roleId, assistantContent)
 		const isAsk = toolCall.function.name === 'ask_human'
 		// The pre-dispatch checkpoint is the durable point for every call. It is deliberately not overwritten after a non-final result: the on-disk state keeps the call pending so a crash replays it and then continues at the next call.
 		const pending: PendingInvocation = { callId: invocation.callId, parentCallId: invocation.parentCallId, toolCalls, index }
@@ -761,11 +764,12 @@ async function completeSuspendedTurn(deps: EngineDependencies, context: EngineCo
 	const childCard = childOutcome.card
 	deps.checkpointRecorder.setPendingChildCard(registryEntry.roleId, childCard)
 	deps.checkpointRecorder.write()
-	const invocation = deps.invocationJournal.adoptToolCall(childCall, suspendedTurn.callId, suspendedTurn.parentCallId)
+	const assistantContent = assistantContentForToolCallBatch(roleState.history, suspendedTurn.toolCalls)
+	const invocation = deps.invocationJournal.adoptToolCall(childCall, suspendedTurn.callId, suspendedTurn.parentCallId, assistantContent)
 	deps.invocationJournal.toolStarted(invocation, context.roleName)
 	recordToolResult(deps, dispatchCtx.toolPlatform, roleState, context.roleName, registryEntry.roleId, dispatchCtx.maxToolOutputChars, childCall, { kind: 'success', data: childCard }, { invocation })
 	deps.checkpointRecorder.setPending(registryEntry.roleId, undefined)
-	const remainingCard = await dispatchToolCallSequence(deps, context, roleState, registryEntry, dispatchCtx, suspendedTurn.toolCalls, suspendedTurn.childIndex + 1)
+	const remainingCard = await dispatchToolCallSequence(deps, context, roleState, registryEntry, dispatchCtx, suspendedTurn.toolCalls, suspendedTurn.childIndex + 1, assistantContent)
 	if (resumeNote !== undefined && (remainingCard === null || (remainingCard.kind === 'card' && completedFinishCard(roleState.history) !== null))) roleState.history.push({ role: 'user', content: resumeNote })
 	return remainingCard
 }
@@ -904,7 +908,7 @@ async function executeRoleLoop(
 		if (handling.kind === 'suspended') return handling
 		if (handling.kind === 'finished') return { kind: 'card', card: handling.card }
 
-		const finalCard = await dispatchToolCallSequence(deps, context, roleState, registryEntry, dispatchCtx, handling.toolCalls, 0)
+		const finalCard = await dispatchToolCallSequence(deps, context, roleState, registryEntry, dispatchCtx, handling.toolCalls, 0, handling.assistantContent)
 		if (finalCard !== null) return finalCard
 	}
 }

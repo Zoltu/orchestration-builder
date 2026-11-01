@@ -1,5 +1,5 @@
 import type { AppendLog } from './persistence.js'
-import type { LogEvent, ResultCard, ToolCall, ToolResult } from './types.js'
+import type { LogEvent, Message, ResultCard, ToolCall, ToolResult } from './types.js'
 import { isObject } from './validation.js'
 
 const ROLE_CALL_PREFIX = 'role:'
@@ -24,6 +24,33 @@ export interface ToolInvocation {
 	questionId: string
 	callId: string
 	parentCallId: string
+	// The visible text of the assistant turn that requested this call; an ask_human uses it as its fallback presentation when the model supplied no explicit context.
+	assistantContent?: string
+}
+
+function sameToolCallBatch(left: readonly ToolCall[], right: readonly ToolCall[]): boolean {
+	if (left.length !== right.length) return false
+	for (let index = 0; index < left.length; index++) {
+		const leftCall = left[index]
+		const rightCall = right[index]
+		if (leftCall === undefined || rightCall === undefined) return false
+		if (leftCall.id !== rightCall.id) return false
+		if (leftCall.type !== rightCall.type) return false
+		if (leftCall.function.name !== rightCall.function.name) return false
+		if (leftCall.function.arguments !== rightCall.function.arguments) return false
+	}
+	return true
+}
+
+// The assistant content is not checkpointed with a pending invocation: it is already in the persisted conversation, so replay recovers it by matching the turn's complete tool-call batch rather than a bare id (model ids may be empty or reused) or the last message (batched turns and later results make position ambiguous).
+export function assistantContentForToolCallBatch(history: readonly Message[], toolCalls: readonly ToolCall[]): string | undefined {
+	for (let index = history.length - 1; index >= 0; index--) {
+		const message = history[index]
+		if (message === undefined || message.role !== 'assistant' || message.tool_calls === undefined) continue
+		if (!sameToolCallBatch(message.tool_calls, toolCalls)) continue
+		return message.content
+	}
+	return undefined
 }
 
 export interface InterruptInvocation {
@@ -159,8 +186,8 @@ const START_EVENT_TYPES: ReadonlySet<string> = new Set(['role_start', 'tool_call
 const TERMINAL_EVENT_TYPES: ReadonlySet<string> = new Set(['role_finished', 'tool_result', 'human_answer', 'interrupt_resolved'])
 
 export interface InvocationJournal {
-	allocateToolCall(toolCall: ToolCall, parentRoleId: string): ToolInvocation
-	adoptToolCall(toolCall: ToolCall, callId: string, parentCallId: string): ToolInvocation
+	allocateToolCall(toolCall: ToolCall, parentRoleId: string, assistantContent?: string): ToolInvocation
+	adoptToolCall(toolCall: ToolCall, callId: string, parentCallId: string, assistantContent?: string): ToolInvocation
 	roleStarted(input: RoleStartInput): string
 	roleFinished(input: RoleFinishedInput): boolean
 	toolStarted(invocation: ToolInvocation, roleName: string): boolean
@@ -193,7 +220,7 @@ export function createInvocationJournal(appendLog: AppendLog): InvocationJournal
 		terminated.add(callId)
 	}
 
-	function allocateToolCall(toolCall: ToolCall, parentRoleId: string): ToolInvocation {
+	function allocateToolCall(toolCall: ToolCall, parentRoleId: string, assistantContent?: string): ToolInvocation {
 		let questionId = toolCall.id
 		if (questionId === '' || usedToolIds.has(questionId)) {
 			do {
@@ -207,13 +234,14 @@ export function createInvocationJournal(appendLog: AppendLog): InvocationJournal
 			questionId,
 			callId: toolCallId(questionId),
 			parentCallId: roleCallId(parentRoleId),
+			...(assistantContent !== undefined ? { assistantContent } : {}),
 		}
 	}
 
-	function adoptToolCall(toolCall: ToolCall, callId: string, parentCallId: string): ToolInvocation {
+	function adoptToolCall(toolCall: ToolCall, callId: string, parentCallId: string, assistantContent?: string): ToolInvocation {
 		const questionId = callId.startsWith(TOOL_CALL_PREFIX) ? callId.slice(TOOL_CALL_PREFIX.length) : callId
 		usedToolIds.add(questionId)
-		return { toolCall, questionId, callId, parentCallId }
+		return { toolCall, questionId, callId, parentCallId, ...(assistantContent !== undefined ? { assistantContent } : {}) }
 	}
 
 	return {

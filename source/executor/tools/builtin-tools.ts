@@ -6,7 +6,7 @@ import type { InterruptActionKind, RoleRegistry, RoleRegistryEntry } from '../ro
 import { isObject } from '../validation.js'
 import { optionalPositiveInt } from './shared.js'
 import type { AnyToolHandler, ToolHandler } from './tool-dispatch.js'
-import type { HumanBackend } from '../human-backend.js'
+import { selectHumanQuestionPresentation, type HumanBackend } from '../human-backend.js'
 import { askHumanPayload, type ToolInvocation } from '../invocation.js'
 import { logEvent } from '../engine-state.js'
 import type { ProtectedPrefixLength, RoleState } from '../state.js'
@@ -360,24 +360,24 @@ function createAskHuman(context: BuiltInToolContext): ToolHandler {
 			return createToolError('invalid_arguments', 'question must be a non-empty string')
 		}
 		const contextValue = args['context']
-		const contextString = typeof contextValue === 'string' ? contextValue : undefined
 		if (call === undefined) throw new Error('ask_human: the tool call is required to key the question')
 		const invocation = context.invocation
+		const presentation = selectHumanQuestionPresentation(contextValue, invocation.assistantContent)
 		// The pre-write park (docs/queueing.md "Parking: the pre-write rule"): before any write-capable role has started there is no workspace change to protect, so a queue-dispatched run parks instead of blocking the pipeline on one unanswered question — the human backend is never called (no pending question is registered), the event is emitted here so the run's own log stays a faithful record, and the recorded question marks the run to terminate at the next safe point. Handler frames must not park: their writes are suppressed while they run, so a parked ask there could never be checkpointed. A run the queue does not track keeps today's blocking behavior: its parked question would be answerable through no endpoint.
 		if (context.handlerOf === undefined && context.parkTracker.queueTracked === true && !context.parkTracker.writeCapableStarted) {
 			context.parkTracker.parkedQuestion = questionValue
-			context.parkTracker.parkedAsk = { roleId: context.ownRoleId, toolCallId: call.id, callId: invocation.callId, questionId: invocation.questionId, question: questionValue }
+			context.parkTracker.parkedAsk = { roleId: context.ownRoleId, toolCallId: call.id, callId: invocation.callId, questionId: invocation.questionId, question: questionValue, ...presentation }
 			logEvent(context.appendLog, 'ask_human', askHumanPayload({
 				questionId: invocation.questionId,
 				callId: invocation.callId,
 				parentCallId: invocation.parentCallId,
 				question: questionValue,
-				...(contextString !== undefined ? { context: contextString } : {}),
+				...(presentation.context !== undefined ? { context: presentation.context } : {}),
 				parked: true,
 			}))
 			return { kind: 'success', data: { question: questionValue, parked: true } }
 		}
-		const answer = await context.humanBackend.ask(questionValue, invocation, contextString)
+		const answer = await context.humanBackend.ask(questionValue, invocation, presentation)
 		return { kind: 'success', data: { question: questionValue, answer } }
 	}
 }

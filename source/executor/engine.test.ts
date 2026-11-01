@@ -37,11 +37,11 @@ async function resumeRoleStackCard(...args: Parameters<typeof resumeRoleStack>):
 	return outcome.card
 }
 
-function success(toolCalls: ToolCall[], opts: { content?: string; promptTokens?: number; completionTokens?: number; finishReason?: string } = {}): LlmCallResult {
+function success(toolCalls: ToolCall[], opts: { content?: string; reasoning?: string | null; promptTokens?: number; completionTokens?: number; finishReason?: string } = {}): LlmCallResult {
 	const result: LlmCallResult = {
 		kind: 'success',
 		content: opts.content ?? '',
-		reasoning: null,
+		reasoning: opts.reasoning !== undefined ? opts.reasoning : null,
 		toolCalls,
 		usage: {
 			promptTokens: opts.promptTokens ?? 10,
@@ -2678,6 +2678,57 @@ describe('run persistence and resumption', () => {
 		expect(agentResult).toBeDefined()
 	})
 
+	test('a suspended turn recovers its assistant content for a remaining ask_human fallback', async () => {
+		const askManifest: ToolManifest = {
+			name: 'ask_human',
+			description: 'Ask a human a question.',
+			parameters: { type: 'object', required: ['question'], properties: { question: { type: 'string' } } },
+		}
+		const guild = withTool(buildGuild({
+			orchestrator: { systemPrompt: 'p', tools: ['agent', 'ask_human', 'finish'] },
+			coder: { systemPrompt: 'c', tools: ['finish'] },
+		}, 'orchestrator'), askManifest)
+		const childCall = agentCall('coder', 'subtask')
+		const remainingAsk: ToolCall = { id: 'ask_2', type: 'function', function: { name: 'ask_human', arguments: JSON.stringify({ question: 'Which database?' }) } }
+		const visibleContent = 'The child is done; I need the database before I continue.'
+		const checkpoint: RunCheckpoint = {
+			version: 2,
+			runId: 'test-run',
+			startTime: '2026-01-01T00:00:00.000Z',
+			registryCounter: 1,
+			frames: [{
+				roleId: 'orchestrator-0-1',
+				roleName: 'orchestrator',
+				depth: 0,
+				task: 'do it',
+				roleState: createEmptyRoleState({
+					history: [
+						{ role: 'system', content: 'prompt' },
+						{ role: 'user', content: 'do it' },
+						{ role: 'assistant', content: visibleContent, reasoning: 'private reasoning that must not leak', tool_calls: [childCall, remainingAsk] },
+					],
+				}),
+				pending: {
+					toolCalls: [childCall, remainingAsk],
+					index: 0,
+					callId: 'tool:agent_1',
+					parentCallId: 'role:orchestrator-0-1',
+					childCard: { status: 'success', summary: 'child done' },
+				},
+			}],
+		}
+		const llm = new FakeLlm()
+		llm.responses = [success([finishCall({ status: 'success', summary: 'done' })])]
+		const { deps } = makeDeps(llm)
+		const human = recordingHumanBackend()
+
+		const card = await resumeRoleStackCard(runRole, { ...deps, humanBackend: human }, guild, checkpoint)
+
+		expect(card).toEqual({ status: 'success', summary: 'done' })
+		expect(human.questions).toEqual([{ question: 'Which database?', context: undefined, assistantFallback: visibleContent }])
+		expect(human.questions[0]?.assistantFallback).not.toContain('private reasoning')
+	})
+
 	test('roles spawned after a resume mint fresh ids that cannot collide with preserved ones', async () => {
 		const { checkpoints } = await driveUninterruptedRun()
 		const checkpoint = checkpointAfterChildEcho(checkpoints)
@@ -2996,8 +3047,8 @@ describe('runRole — the pre-write park rule', () => {
 		},
 	}
 
-	function askCall(question: string): ToolCall {
-		return { id: 'ask_1', type: 'function', function: { name: 'ask_human', arguments: JSON.stringify({ question }) } }
+	function askCall(question: string, id: string = 'ask_1'): ToolCall {
+		return { id, type: 'function', function: { name: 'ask_human', arguments: JSON.stringify({ question }) } }
 	}
 
 	function buildParkGuild(roles: Record<string, RoleDefinition>, entryRole: string): LoadedGuild {
@@ -3381,6 +3432,30 @@ describe('runRole — the pre-write park rule', () => {
 		expect(finalCheckpoint?.frames.map((frame) => frame.roleName)).toEqual(['main', 'coder'])
 	})
 
+	test('a remaining ask_human in a parked batch receives the original turn content as its fallback', async () => {
+		const guild = buildParkGuild({ main: { systemPrompt: 'p', tools: ['ask_human', 'finish'] } }, 'main')
+		const visibleContent = 'I need both answers before I change the schema.'
+		const parkedLlm = new FakeLlm()
+		parkedLlm.responses = [success([askCall('Which database?', 'ask_1'), askCall('Which region?', 'ask_2')], { content: visibleContent, reasoning: 'private reasoning that must not leak' })]
+		const parked = makeDeps(parkedLlm)
+		parked.parkTracker.queueTracked = true
+		await runRoleCard(parked.deps, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'do it' })
+		const checkpoint = parked.checkpoints[parked.checkpoints.length - 1]
+		if (checkpoint === undefined) throw new Error('expected a parked checkpoint')
+		expect(checkpoint.parkedAsk?.assistantFallback).toBe(visibleContent)
+
+		const resumed = makeDeps(new FakeLlm())
+		resumed.parkTracker.queueTracked = true
+		resumed.parkTracker.parkedAsk = checkpoint.parkedAsk
+		const card = await resumeRoleStackCard(runRole, resumed.deps, guild, checkpoint, { parkedAnswer: { question: 'Which database?', answer: 'postgres', toolCallId: 'ask_1' } })
+
+		expect(card.status).toBe('needs_clarification')
+		expect(card.summary).toBe('waiting for an answer to: Which region?')
+		const reParked = resumed.checkpoints.find((candidate) => candidate.parkedAsk?.toolCallId === 'ask_2')
+		expect(reParked?.parkedAsk?.assistantFallback).toBe(visibleContent)
+		expect(reParked?.parkedAsk?.assistantFallback).not.toContain('private reasoning')
+	})
+
 	test('an answer with the wrong tool call fails fast instead of writing a broken turn', async () => {
 		const guild = buildParkGuild({ main: { systemPrompt: 'p', tools: ['ask_human', 'finish'] } }, 'main')
 		const parkedLlm = new FakeLlm()
@@ -3420,6 +3495,74 @@ describe('runRole — the pre-write park rule', () => {
 		expect(card.status).toBe('needs_clarification')
 		const reParked = resumed.checkpoints.find((candidate) => candidate.parkedAsk?.toolCallId === 'ask_2')
 		expect(reParked?.parkedAsk).toMatchObject({ roleId: 'main-0-1', toolCallId: 'ask_2', callId: 'tool:ask_2', questionId: 'ask_2', question: 'And the port?' })
+	})
+
+	test('a parked ask without explicit context records the visible assistant content as its fallback, never its reasoning', async () => {
+		const guild = buildParkGuild({ main: { systemPrompt: 'p', tools: ['ask_human', 'finish'] } }, 'main')
+		const llm = new FakeLlm()
+		const visibleContent = `I need the database before I can proceed. ${'x'.repeat(20_000)}`
+		llm.responses = [success([askCall('Which database?')], { content: visibleContent, reasoning: 'private reasoning that must not leak' })]
+		const { deps, parkTracker, checkpoints } = makeDeps(llm)
+		parkTracker.queueTracked = true
+
+		await runRoleCard(deps, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'do it' })
+
+		const checkpoint = checkpoints[checkpoints.length - 1]
+		expect(checkpoint?.parkedAsk?.assistantFallback).toBe(visibleContent)
+		expect(checkpoint?.parkedAsk?.context).toBeUndefined()
+		expect(checkpoint?.parkedAsk?.assistantFallback).not.toContain('private reasoning')
+	})
+
+	test('a live blocking ask receives the visible assistant content as its fallback', async () => {
+		const guild = buildParkGuild({ main: { systemPrompt: 'p', tools: ['ask_human', 'finish'] } }, 'main')
+		const llm = new FakeLlm()
+		llm.responses = [
+			success([askCall('Which database?')], { content: 'I will switch the storage layer.', reasoning: 'hidden reasoning' }),
+			success([finishCall({ status: 'success', summary: 'done' })]),
+		]
+		const { deps } = makeDeps(llm)
+		const human = recordingHumanBackend()
+		const depsWithHuman: EngineDependencies = { ...deps, humanBackend: human }
+
+		await runRoleCard(depsWithHuman, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'do it' })
+
+		expect(human.questions).toEqual([{ question: 'Which database?', context: undefined, assistantFallback: 'I will switch the storage layer.' }])
+	})
+
+	test('an explicit context wins over the assistant fallback for a live ask', async () => {
+		const guild = buildParkGuild({ main: { systemPrompt: 'p', tools: ['ask_human', 'finish'] } }, 'main')
+		const llm = new FakeLlm()
+		const withContext: ToolCall = { id: 'ask_1', type: 'function', function: { name: 'ask_human', arguments: JSON.stringify({ question: 'Which database?', context: 'the staging cluster is ready' }) } }
+		llm.responses = [
+			success([withContext], { content: 'visible assistant text' }),
+			success([finishCall({ status: 'success', summary: 'done' })]),
+		]
+		const { deps } = makeDeps(llm)
+		const human = recordingHumanBackend()
+		const depsWithHuman: EngineDependencies = { ...deps, humanBackend: human }
+
+		await runRoleCard(depsWithHuman, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'do it' })
+
+		expect(human.questions).toEqual([{ question: 'Which database?', context: 'the staging cluster is ready' }])
+	})
+
+	test('a batched ask turn gives every ask the same visible assistant content', async () => {
+		const guild = buildParkGuild({ main: { systemPrompt: 'p', tools: ['ask_human', 'finish'] } }, 'main')
+		const llm = new FakeLlm()
+		llm.responses = [
+			success([askCall('Which database?', 'ask_1'), askCall('Which region?', 'ask_2')], { content: 'Both answers are needed before I write anything.' }),
+			success([finishCall({ status: 'success', summary: 'done' })]),
+		]
+		const { deps } = makeDeps(llm)
+		const human = recordingHumanBackend()
+		const depsWithHuman: EngineDependencies = { ...deps, humanBackend: human }
+
+		await runRoleCard(depsWithHuman, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'do it' })
+
+		expect(human.questions).toEqual([
+			{ question: 'Which database?', context: undefined, assistantFallback: 'Both answers are needed before I write anything.' },
+			{ question: 'Which region?', context: undefined, assistantFallback: 'Both answers are needed before I write anything.' },
+		])
 	})
 })
 
@@ -3842,7 +3985,7 @@ describe('durable pending invocation reconciliation', () => {
 		return withTool(withTool(guild, echoManifest), pendingAskManifest)
 	}
 
-	function pendingCheckpoint(toolCall: ToolCall): RunCheckpoint {
+	function pendingCheckpoint(toolCall: ToolCall, assistantContent = ''): RunCheckpoint {
 		return {
 			version: 2,
 			runId: 'test-run',
@@ -3857,7 +4000,7 @@ describe('durable pending invocation reconciliation', () => {
 					history: [
 						{ role: 'system', content: 'prompt' },
 						{ role: 'user', content: 'do it' },
-						{ role: 'assistant', content: '', tool_calls: [toolCall] },
+						{ role: 'assistant', content: assistantContent, tool_calls: [toolCall] },
 					],
 				}),
 				pending: { callId: `tool:${toolCall.id}`, parentCallId: 'role:main-0-1', toolCalls: [toolCall], index: 0 },
@@ -4004,6 +4147,21 @@ describe('durable pending invocation reconciliation', () => {
 		const frame = defined(checkpoint.frames[0], 'restored frame')
 		const toolMessage = frame.roleState.history.find((message) => message.role === 'tool' && message.tool_call_id === 'ask_1')
 		expect(toolMessage?.content).toContain('use your best judgement')
+	})
+
+	test('a replayed pending ask recovers the same assistant turn content as its fallback', async () => {
+		const guild = buildPendingGuild(['ask_human', 'finish'])
+		const assistantContent = 'I need the target before I can continue.'
+		const checkpoint = pendingCheckpoint(askCall('ask_1', 'which?'), assistantContent)
+		const llm = new FakeLlm()
+		llm.responses = [success([finishCall({ status: 'success', summary: 'done' })])]
+		const { deps } = makeDeps(llm)
+		const human = recordingHumanBackend()
+
+		const card = await resumeRoleStackCard(runRole, { ...deps, humanBackend: human }, guild, checkpoint)
+
+		expect(card).toEqual({ status: 'success', summary: 'done' })
+		expect(human.questions).toEqual([{ question: 'which?', context: undefined, assistantFallback: assistantContent }])
 	})
 
 	test('invalid and unknown tools still emit only their diagnostics and no invocation lifecycle', async () => {

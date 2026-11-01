@@ -635,6 +635,24 @@ describe('internal resume fields', () => {
 		expect(isQueueItem(notWaiting)).toBe(false)
 	})
 
+	test('validation accepts an old needs_input item without presentation fields and optional string fields on a new one', () => {
+		const oldNeedsInput = item({ status: 'needs_input', question: 'which database?' })
+		expect(isQueueItem(oldNeedsInput)).toBe(true)
+
+		const longContext = `context-${'x'.repeat(20_000)}`
+		const longFallback = `assistant-${'y'.repeat(20_000)}`
+		expect(isQueueItem({ ...oldNeedsInput, context: longContext })).toBe(true)
+		expect(isQueueItem({ ...oldNeedsInput, assistantFallback: longFallback })).toBe(true)
+
+		expect(isQueueItem({ ...oldNeedsInput, context: 42 })).toBe(false)
+		expect(isQueueItem({ ...oldNeedsInput, assistantFallback: { text: 'not a string' } })).toBe(false)
+	})
+
+	test('a suspended item rejects question presentation fields', () => {
+		expect(isQueueItem({ ...item({ status: 'suspended', runId: 'run-20260101-010000', suspendedAt: SUSPENDED_AT }), context: 'c' })).toBe(false)
+		expect(isQueueItem({ ...item({ status: 'suspended', runId: 'run-20260101-010000', suspendedAt: SUSPENDED_AT }), assistantFallback: 'f' })).toBe(false)
+	})
+
 	test('pendingAnswerUndelivered requires a live checkpoint naming the same call and question', () => {
 		const item = storedItem()
 		expect(pendingAnswerUndelivered(item, { kind: 'parked_ask', ask: { roleId: 'main-0-1', toolCallId: 'ask_1', callId: 'tool:ask_1', questionId: 'ask_1', question: 'which database?' } }, 'run-20260101-010000')).toBe(true)
@@ -680,6 +698,29 @@ describe('internal resume fields', () => {
 		expect(cancelled.item.resumeRunId).toBeUndefined()
 		expect(cancelled.item.resumeToolCallId).toBeUndefined()
 	})
+
+	test('the view projection includes context and assistantFallback for a needs_input item', () => {
+		const parked: QueueItem = {
+			id: 'item-1',
+			task: 'fix the parser bug',
+			status: 'needs_input',
+			queuedAt: '2026-01-01T00:00:00.000Z',
+			question: 'which database?',
+			context: 'explicit context',
+			assistantFallback: 'assistant fallback',
+		}
+
+		const view: unknown = toQueueItemView(parked)
+		if (typeof view !== 'object' || view === null) throw new Error('expected a view')
+		expect(Reflect.get(view, 'context')).toBe('explicit context')
+		expect(Reflect.get(view, 'assistantFallback')).toBe('assistant fallback')
+
+		const withoutPresentation: QueueItem = { id: 'item-2', task: 'fix the parser bug', status: 'needs_input', queuedAt: '2026-01-01T00:00:00.000Z', question: 'which database?' }
+		const bareView: unknown = toQueueItemView(withoutPresentation)
+		if (typeof bareView !== 'object' || bareView === null) throw new Error('expected a view')
+		expect(Reflect.has(bareView, 'context')).toBe(false)
+		expect(Reflect.has(bareView, 'assistantFallback')).toBe(false)
+	})
 })
 
 describe('answer', () => {
@@ -698,6 +739,19 @@ describe('answer', () => {
 			expect(result.item.runId).toBeUndefined()
 		}
 		expect(harness.items().map((entry) => entry.id)).toEqual(['item-1', 'other'])
+	})
+
+	test('answering a needs_input item drops its presentation fields', async () => {
+		const parked = item({ status: 'needs_input', runId: 'run-20260101-003000', question: 'which database?', context: 'explicit context', assistantFallback: 'assistant fallback' })
+		const harness = makeQueue({ initial: [parked], hasActiveRun: () => true })
+
+		await harness.queue.answer('item-1', 'postgres')
+
+		const stored: unknown = harness.items()[0]
+		expect(isQueueItem(stored)).toBe(true)
+		if (typeof stored !== 'object' || stored === null) throw new Error('expected the stored item')
+		expect(Reflect.has(stored, 'context')).toBe(false)
+		expect(Reflect.has(stored, 'assistantFallback')).toBe(false)
 	})
 
 	test('a needs_input item with no runId dispatches a briefed continuation from its lineage without reading pause state or resuming', async () => {
@@ -945,7 +999,7 @@ describe('terminate', () => {
 
 	function parkedItem(overrides: Partial<QueueSeedItem> = {}): QueueSeedItem {
 		return {
-			...item({ status: 'needs_input', runId, continuesFrom: priorRunId, question: 'which database?', answer: 'postgres' }),
+			...item({ status: 'needs_input', runId, continuesFrom: priorRunId, question: 'which database?', context: 'explicit context', assistantFallback: 'assistant fallback', answer: 'postgres' }),
 			...overrides,
 		}
 	}
@@ -960,6 +1014,8 @@ describe('terminate', () => {
 		expect(result.item.settledAt).toBe('2026-01-01T04:00:00.000Z')
 		expect(result.item.question).toBe('which database?')
 		expect(result.item.answer).toBe('postgres')
+		expect(result.item.context).toBeUndefined()
+		expect(result.item.assistantFallback).toBeUndefined()
 		expect(result.item.continuesFrom).toBe(priorRunId)
 		expect(result.item.runId).toBeUndefined()
 		expect(harness.terminateCalls).toEqual([runId])

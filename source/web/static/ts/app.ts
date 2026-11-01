@@ -3846,10 +3846,10 @@ function QuestionPromptModalForApp(state: ApplicationState): Vnode | null {
 	return ParkedQuestionModalForPrompt(state, prompt)
 }
 
-// The live prompt uses the prompt's own question/context, not a fresh read of pendingQuestions[0] that a poll could have replaced under the open modal.
+// The live prompt uses the prompt's own question/context/fallback, not a fresh read of pendingQuestions[0] that a poll could have replaced under the open modal.
 function LiveQuestionModalForPrompt(state: ApplicationState, prompt: Extract<QuestionPrompt, { kind: 'live' }>): Vnode {
 	return QuestionModal(h, {
-		question: { question: prompt.question, context: prompt.context },
+		question: { question: prompt.question, context: prompt.context, assistantFallback: prompt.assistantFallback },
 		runLabel: prompt.runId,
 		renderMarkdown,
 		onSubmit: SubmitAnswer(prompt.questionId, prompt.key),
@@ -3865,7 +3865,7 @@ function ParkedQuestionModalForPrompt(state: ApplicationState, prompt: Extract<Q
 	if (item === undefined || item.status !== 'needs_input') return null
 	const question = typeof item.question === 'string' && item.question !== '' ? item.question : prompt.question
 	return QuestionModal(h, {
-		question: { question },
+		question: { question, context: prompt.context, assistantFallback: prompt.assistantFallback },
 		runLabel: prompt.runId,
 		renderMarkdown,
 		onSubmit: SubmitQueueAnswer(prompt.queueItemId, prompt.key),

@@ -137,6 +137,7 @@ export interface ApiQuestion {
 	id: string
 	question: string
 	context?: string
+	assistantFallback?: string
 	askedAt: string
 }
 
@@ -148,6 +149,7 @@ export function renderPendingQuestions(questions: PendingQuestion[]): ApiQuestio
 			askedAt: question.askedAt,
 		}
 		if (question.context !== undefined) shaped.context = question.context
+		if (question.assistantFallback !== undefined) shaped.assistantFallback = question.assistantFallback
 		return shaped
 	})
 }
