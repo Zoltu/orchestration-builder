@@ -344,7 +344,6 @@ li:last-child {
 	margin-top: var(--space-1);
 	font-size: 0.85rem;
 	color: var(--color-text-muted);
-	white-space: pre-wrap;
 }
 
 /* The compose screen is the hero when the service is idle: drafting a task is the primary activity when nothing runs, so the editor gets a centered column and a tall field. The form itself is a vertical stack: a large multiline task editor, the effort-level radio cards, then a controls row with the submit button. Enter inserts a newline and Tab inserts a tab character (handled in app.js), so submission is the button or Ctrl/Cmd+Enter — the task is free-form Markdown a user may draft at length. */
@@ -1306,6 +1305,7 @@ li:last-child {
 	color: inherit;
 	line-height: 1.5;
 	overflow-wrap: anywhere;
+	white-space: normal;
 }
 
 .markdown > *:first-child {
@@ -2483,7 +2483,7 @@ li:last-child {
 
 .question-modal-card {
 	position: relative;
-	width: min(34rem, calc(100% - 2 * var(--space-5)));
+	width: calc(100% - 2 * var(--space-5));
 	max-height: calc(100% - 2 * var(--space-5));
 	overflow: auto;
 	padding: var(--space-5);
@@ -2626,7 +2626,7 @@ li:last-child {
 
 .interrupt-modal-card {
 	position: relative;
-	width: min(38rem, calc(100% - 2 * var(--space-5)));
+	width: calc(100% - 2 * var(--space-5));
 	max-height: calc(100% - 2 * var(--space-5));
 	overflow: auto;
 	padding: var(--space-5);
@@ -2685,7 +2685,7 @@ li:last-child {
 
 .inspector-modal-card {
 	position: relative;
-	width: min(64rem, calc(100% - 2 * var(--space-5)));
+	width: calc(100% - 2 * var(--space-5));
 	height: min(48rem, calc(100% - 2 * var(--space-5)));
 	display: flex;
 	flex-direction: column;
@@ -4170,7 +4170,7 @@ li:last-child {
 	display: flex;
 	align-items: center;
 	justify-content: center;
-	padding: var(--space-4);
+	padding: var(--space-5);
 }
 
 .suspended-card-backdrop {
@@ -4182,7 +4182,7 @@ li:last-child {
 .suspended-card {
 	position: relative;
 	z-index: 1;
-	width: min(34rem, 100%);
+	width: 100%;
 	max-height: 100%;
 	overflow: auto;
 	padding: var(--space-5);
