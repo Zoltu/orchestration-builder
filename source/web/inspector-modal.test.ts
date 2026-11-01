@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import { InspectorModal } from './static/ts/inspector-modal.js'
+import { createCopyingMarkdownRenderer } from './static/ts/markdown-copy.js'
 import { createInspectorSession } from './static/ts/turn-inspector/index.js'
 import type { FetchRequest, InspectorSession, InspectorView } from './static/ts/turn-inspector/index.js'
 import { actionProp, defined, present } from './test-fixtures.js'
@@ -312,6 +313,20 @@ describe('InspectorModal transcript', () => {
 		const markers = allByTag(opening, 'span').filter((node) => node.props.class === 'md-marker').map((node) => node.props['data-text'])
 		expect(markers).toContain('system prompt text')
 		expect(markers).toContain('the task text')
+	})
+
+	test('a copy-wrapped Markdown renderer adds Copy Markdown buttons inside the transcript', () => {
+		const renderMarkdown = createCopyingMarkdownRenderer(fakeH, fakeRenderMarkdown, () => undefined)
+		const modal = InspectorModal(fakeH, {
+			runLabel: 'run-2026',
+			view: sessionFor(stitchEvents, { scopedRoleId: 'coder-1' }).view(),
+			livePartial: null,
+			renderMarkdown,
+			onScopeInstance: () => undefined,
+			onLoadOlder: () => undefined,
+			onClose: () => undefined,
+		})
+		expect(allByClass(modal, 'markdown-copy-button').length).toBeGreaterThan(0)
 	})
 
 	test('each turn renders its new messages and its response, with reasoning labeled through the Markdown pipeline, and nothing repeats', () => {

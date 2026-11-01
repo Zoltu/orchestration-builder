@@ -3,6 +3,7 @@
 import { app, h } from '../vendor/hyperapp.js'
 import type { Vnode } from '../vendor/hyperapp.js'
 import { createMarkdownRenderer } from './markdown-render.js'
+import { createCopyingMarkdownRenderer } from './markdown-copy.js'
 import { createRunStage } from './run-stage/index.js'
 import { createScrollFollower } from './scroll-follow.js'
 import { createAnimationFrameCoalescer } from './animation-frame-coalescer.js'
@@ -16,7 +17,7 @@ import { planSameRunView } from './run-selection.js'
 import { deriveFaviconState, faviconHref } from './favicon.js'
 import { createTooltipDismiss, deriveTooltipDescriptor, isInFlightAskHuman, resolveInspectorScope, resolveTooltipTarget } from './inspector.js'
 import { operationIdsForTooltipDetails, tooltipStyle, Tooltip } from './tooltip.js'
-import { copyRawToClipboard } from './clipboard.js'
+import { copyRawToClipboard, copyTextToClipboard } from './clipboard.js'
 import { QuestionModal } from './question-modal.js'
 import { deriveQueueRowQuestionPrompt, deriveQuestionPrompt, readPendingQuestions, reconcileQuestionPromptOpenKey, resolveQuestionPromptForKey, rollbackQuestionPromptHandling, settleLiveAnswerPrompt, shouldAutoOpenQuestionPrompt, suppressQuestionPromptKey } from './question-prompt.js'
 import { createOperationDetails } from './operation-details.js'
@@ -555,7 +556,8 @@ function formatTokens(tokens: unknown): string {
 // --- Markdown rendering ----------------------------------------------------
 // Agent-authored prose is Markdown rendered as formatted text via the shared pipeline in `markdown-render.js` (showdown → highlight.js → sanitized vnodes). The renderer is constructed once against this module's `h` and reused everywhere prose appears; the implementation and its memoization live in the shared module so the demo harness renders Markdown through the identical sanitized path.
 
-const renderMarkdown = createMarkdownRenderer(h, { maxEntries: 256, maxCharacters: 16_000_000 })
+const baseRenderMarkdown = createMarkdownRenderer(h, { maxEntries: 256, maxCharacters: 16_000_000 })
+const renderMarkdown = createCopyingMarkdownRenderer(h, baseRenderMarkdown, copyTextToClipboard)
 
 // The live run is the first summary that is not settled for polling: running or unknown. A suspended pause, like a terminal outcome, is excluded, so the UI never says a suspended run is in progress. Derived in the view rather than stored, so it can never drift from the run list.
 function deriveActiveRunId(summaries: RunSummary[]): string | null {

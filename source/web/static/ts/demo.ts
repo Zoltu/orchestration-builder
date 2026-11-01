@@ -6,13 +6,14 @@ import { activeOperation, activeParticipant, activeStack, callChainOf, fateOf, i
 import { createLabelResolver, isLabelTier, isRoleOrder } from './labels.js'
 import { createRunStage, SEQUENCE_BODY_CLASS, SEQUENCE_HEADER_CLASS, sequenceActiveRowScrollTop } from './run-stage/index.js'
 import { createMarkdownRenderer } from './markdown-render.js'
+import { createCopyingMarkdownRenderer } from './markdown-copy.js'
 import { createTooltipDismiss, deriveTooltipDescriptor, isInFlightAskHuman, resolveTooltipTarget } from './inspector.js'
 import { deriveActiveQuestionControls } from './question-affordance.js'
 import { createOperationDetails } from './operation-details.js'
 import { LoadingIndicator } from './loading-indicator.js'
 import { isObject, isOperationMetricsRecord } from './guards.js'
 import { operationIdsForTooltipDetails, Tooltip, tooltipStyle } from './tooltip.js'
-import { copyRawToClipboard } from './clipboard.js'
+import { copyRawToClipboard, copyTextToClipboard } from './clipboard.js'
 import { ResultModal } from './result-modal.js'
 import { QuestionModal } from './question-modal.js'
 import type { InteractionModel, Operation, Participant, RunStatus } from './interaction-model.js'
@@ -352,7 +353,8 @@ function htmlH(tag: string, props: Record<string, unknown>, children: VnodeChild
 	return { tag, props, children: collected, element }
 }
 
-const renderMarkdown = createMarkdownRenderer(htmlH, { maxEntries: 256, maxCharacters: 16_000_000 })
+const baseRenderMarkdown = createMarkdownRenderer(htmlH, { maxEntries: 256, maxCharacters: 16_000_000 })
+const renderMarkdown = createCopyingMarkdownRenderer(htmlH, baseRenderMarkdown, copyTextToClipboard)
 
 // The inspector overlay: one positioned card mounted inside the run-view container (`flowContainer`), rebuilt per hover and anchored flush against the hovered node's rect.
 // The card is `pointer-events: auto` and `user-select: text` (stylesheets/styles.css) so the operator can move the pointer from the node into the card to select and copy its contents; a short grace period on leaving the node (or the card) keeps the card open while the pointer travels between them, and the card dismisses once the pointer is over neither.
