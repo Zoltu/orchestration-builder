@@ -1,6 +1,6 @@
 {
 	"name": "search_text",
-	"description": "Line-oriented search of text files in the workspace for lines matching a regular expression. Returns matches with their file path and 1-based line number. Searches all searchable files unless paths are given. Large files without newlines are scanned in overlapping segments, and matches on very long lines report a bounded context snippet rather than the whole line; returned match text is capped at 2,000 characters, with a trailing ellipsis when truncated. On very long lines, matches longer than the 64 KiB segment overlap, or greedy matches that span an overlap boundary, may behave differently or be missed. This is NOT a binary search tool: files containing NUL bytes are skipped in directory walks, and an explicitly named binary file returns an error.",
+	"description": "Line-oriented, case-sensitive search of the workspace for lines matching a JavaScript regular expression. Searches every regular file regardless of extension, including dotfiles and extensionless names such as Dockerfile. Directory walks skip .git, .orchestration, node_modules, vendor, dist, build, out, and coverage by directory name at any depth; an explicitly named directory root bypasses its own default name, except the top-level .orchestration directory, which path resolution refuses, while its descendants still apply the default exclusions; explicitly named files bypass directory exclusions but still honor include/exclude. Binary detection is a heuristic, not a guarantee: a file is treated as binary when a NUL byte is found in the content read, and the scan stops at the first NUL, so a NUL later than where scanning stopped may not be seen. Directory walks skip binary files; an explicitly named binary file returns an error. Optional include/exclude glob arrays use * (within one segment), ** (any depth), ?, and {a,b}. An include pattern without / matches a file basename at any depth, while one with / matches the full workspace-relative path; a file must match at least one include pattern when include is supplied. An exclude pattern without / matches any path segment and prunes matching directories, while one with / matches the full workspace-relative path; default exclusions always apply in addition to exclude. Every supplied path is resolved and stat'ed before any search begins, and a missing, invalid, escaping, forbidden, or non-file/non-directory path returns an error without searching anything. Success data is { matches, truncated, truncatedReason }: matches are capped at 100 per file and 1,000 total, truncated is true when either cap is reached (a reached cap means more matches may exist; it does not prove any were omitted), and truncatedReason is \"per-file\", \"total\", or null (total takes precedence). Returned match text is capped at 2,000 characters with a trailing ellipsis. Large files without newlines are scanned in overlapping segments; very long lines report a bounded context snippet, and matches longer than the 64 KiB overlap or greedy matches spanning an overlap boundary may behave differently or be missed. Walked directory and file symlinks are not followed; explicitly named symlinks resolve through the workspace path check.",
 	"humanLabel": {
 		"detailed": ["Search Text"],
 		"friendly": ["Find Text"],
@@ -33,7 +33,21 @@
 			},
 			"paths": {
 				"type": "array",
-				"description": "Optional list of workspace-relative paths to search. A path may be a file or a directory (searched recursively). If omitted, the whole workspace is searched.",
+				"description": "Optional non-empty list of non-empty workspace-relative paths to search. A path may be a file or a directory (searched recursively); a path inside the top-level .orchestration directory is refused. Every path is validated before searching begins; a missing or invalid path returns an error and nothing is searched. If omitted, the whole workspace is searched.",
+				"items": {
+					"type": "string"
+				}
+			},
+			"include": {
+				"type": "array",
+				"description": "Optional glob patterns; when supplied, a file must match at least one. A pattern without \"/\" matches the file basename at any depth, e.g. \"*.mts\"; a pattern with \"/\" matches the full workspace-relative path, e.g. \"src/**/*.mts\".",
+				"items": {
+					"type": "string"
+				}
+			},
+			"exclude": {
+				"type": "array",
+				"description": "Optional glob patterns, same syntax as include. A pattern without \"/\" matches any path segment and prunes matching directories at any depth, e.g. \"node_modules\"; a pattern with \"/\" matches the full workspace-relative path, e.g. \"src/fixtures/**\". Default excluded directories always apply in addition.",
 				"items": {
 					"type": "string"
 				}

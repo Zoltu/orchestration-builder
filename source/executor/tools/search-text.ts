@@ -4,7 +4,8 @@ import { createToolError } from '../errors.js'
 import type { ToolHandler } from './tool-dispatch.js'
 import type { FileChunks } from './file-lines.js'
 import { wrapIoError } from './shared.js'
-import { isOrchestrationPath, type PathFilesystem, resolveWithinWorkspace } from '../workspace-path.js'
+import { type PathFilesystem, resolveWithinWorkspace } from '../workspace-path.js'
+import { compileGlobMatchers, compileGlobPattern, matchesGlobPath, matchesGlobSegment, type GlobMatchers } from './glob-pattern.js'
 
 export interface SearchMatch {
 	path: string
@@ -12,7 +13,14 @@ export interface SearchMatch {
 	text: string
 }
 
-const DEFAULT_EXTENSIONS = new Set(['.txt', '.md', '.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs', '.json', '.py', '.rs', '.go', '.java', '.c', '.h', '.cpp', '.hpp', '.yaml', '.yml', '.toml', '.cfg', '.ini', '.sh', '.html', '.css', '.xml'])
+export interface SearchTextResult {
+	matches: SearchMatch[]
+	// A reached cap means more matches may exist; it does not prove any were omitted.
+	truncated: boolean
+	truncatedReason: 'per-file' | 'total' | null
+}
+
+const DEFAULT_EXCLUDED_DIRECTORY_NAMES = new Set(['.git', '.orchestration', 'node_modules', 'vendor', 'dist', 'build', 'out', 'coverage'])
 
 const MAX_MATCHES_PER_FILE = 100
 
@@ -31,11 +39,6 @@ const MAX_MATCH_TEXT_CHARS = 2000
 const NUL_CHARACTER = '\u0000'
 
 const NEWLINE_CHARACTER = '\n'
-
-function isSearchable(filePath: string): boolean {
-	const extension = path.extname(filePath).toLowerCase()
-	return DEFAULT_EXTENSIONS.has(extension)
-}
 
 export interface SearchDirectoryEntry {
 	name: string
@@ -65,24 +68,67 @@ export interface SearchTextDependencies {
 	pathFilesystem: PathFilesystem
 }
 
-async function* walkSearchableFiles(root: string, baseDirectory: string, filesystem: SearchFilesystem): AsyncGenerator<string, void, void> {
+interface SearchTarget {
+	kind: 'file' | 'directory'
+	absolute: string
+	relative: string
+}
+
+// A pattern without "/" names a basename at any depth; a pattern with "/" names the whole workspace-relative path.
+interface IncludeMatchers {
+	pathMatchers: RegExp[]
+	basenameMatchers: RegExp[]
+}
+
+function compileIncludeMatchers(patterns: readonly string[]): IncludeMatchers {
+	const matchers: IncludeMatchers = { pathMatchers: [], basenameMatchers: [] }
+	for (const pattern of patterns) {
+		const regex = compileGlobPattern(pattern)
+		if (pattern.includes('/')) matchers.pathMatchers.push(regex)
+		else matchers.basenameMatchers.push(regex)
+	}
+	return matchers
+}
+
+function isIncluded(relativePath: string, matchers: IncludeMatchers | null): boolean {
+	if (matchers === null) return true
+	for (const regex of matchers.pathMatchers) {
+		if (regex.test(relativePath)) return true
+	}
+	const segments = relativePath.split('/')
+	const basename = segments[segments.length - 1] ?? ''
+	return matchers.basenameMatchers.some((regex) => regex.test(basename))
+}
+
+function parsePatternList(value: unknown): string[] | null {
+	if (!Array.isArray(value)) return null
+	const patterns: string[] = []
+	for (const entry of value) {
+		if (typeof entry !== 'string' || entry === '') return null
+		patterns.push(entry)
+	}
+	return patterns
+}
+
+function workspaceRelativePath(root: string, target: string): string {
+	return path.relative(root, target).split(path.sep).join('/')
+}
+
+function shouldSearchFile(relativePath: string, includeMatchers: IncludeMatchers | null, excludeMatchers: GlobMatchers): boolean {
+	if (matchesGlobPath(relativePath, excludeMatchers)) return false
+	return isIncluded(relativePath, includeMatchers)
+}
+
+async function* walkFiles(baseDirectory: string, filesystem: SearchFilesystem, excludeMatchers: GlobMatchers): AsyncGenerator<string, void, void> {
 	for (const entry of filesystem.listEntries(baseDirectory)) {
 		const fullPath = path.join(baseDirectory, entry.name)
 		if (entry.isDirectory()) {
-			// The executor's bookkeeping directory is invisible to the walk the same way it is to the path-resolution chokepoint; a nested project/.orchestration/ has a different relative path and stays searchable.
-			if (isOrchestrationPath(path.relative(root, fullPath).split(path.sep).join('/'))) continue
-			yield* walkSearchableFiles(root, fullPath, filesystem)
+			if (DEFAULT_EXCLUDED_DIRECTORY_NAMES.has(entry.name)) continue
+			if (matchesGlobSegment(entry.name, excludeMatchers)) continue
+			yield* walkFiles(fullPath, filesystem, excludeMatchers)
 			continue
 		}
-		if (entry.isFile() && isSearchable(fullPath)) yield fullPath
-	}
-}
-
-function compileRegex(pattern: string): RegExp {
-	try {
-		return new RegExp(pattern)
-	} catch {
-		return new RegExp(pattern.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+		if (entry.isFile()) yield fullPath
 	}
 }
 
@@ -106,6 +152,7 @@ function buildContextText(buffer: string, bufferStart: number, matchIndex: numbe
 interface MatchesScanResult {
 	kind: 'matches'
 	matches: SearchMatch[]
+	reachedCap: boolean
 }
 
 interface BinaryScanResult {
@@ -255,24 +302,25 @@ async function scanFileContent(chunks: AsyncIterable<string>, relativePath: stri
 
 	for await (const chunk of chunks) {
 		if (chunk.length === 0) continue
+		// A NUL byte anywhere in the read content is the binary heuristic; stopping here keeps the rest of the file unread.
 		if (chunk.includes(NUL_CHARACTER)) return { kind: 'binary' }
 		sawInput = true
 		let start = 0
 		while (start < chunk.length) {
 			const newlineIndex = chunk.indexOf(NEWLINE_CHARACTER, start)
 			if (newlineIndex === -1) {
-				if (appendLinePiece(chunk.slice(start))) return { kind: 'matches', matches }
+				if (appendLinePiece(chunk.slice(start))) return { kind: 'matches', matches, reachedCap: true }
 				break
 			}
-			if (appendLinePiece(chunk.slice(start, newlineIndex))) return { kind: 'matches', matches }
-			if (finishLine()) return { kind: 'matches', matches }
+			if (appendLinePiece(chunk.slice(start, newlineIndex))) return { kind: 'matches', matches, reachedCap: true }
+			if (finishLine()) return { kind: 'matches', matches, reachedCap: true }
 			start = newlineIndex + 1
 		}
 	}
 	if (sawInput && finishLine()) {
-		return { kind: 'matches', matches }
+		return { kind: 'matches', matches, reachedCap: true }
 	}
-	return { kind: 'matches', matches }
+	return { kind: 'matches', matches, reachedCap: false }
 }
 
 export function createSearchText(workspaceRoot: string, dependencies: SearchTextDependencies): ToolHandler {
@@ -282,65 +330,120 @@ export function createSearchText(workspaceRoot: string, dependencies: SearchText
 		if (typeof patternValue !== 'string' || patternValue === '') {
 			return createToolError('invalid_arguments', 'pattern must be a non-empty string')
 		}
-		const regex = compileRegex(patternValue)
-		const matches: SearchMatch[] = []
-		const collectFile = async (target: string): Promise<FileScanResult> => {
-			const remainingTotal = MAX_TOTAL_MATCHES - matches.length
-			if (remainingTotal <= 0) return { kind: 'matches', matches: [] }
-			const perFileLimit = Math.min(MAX_MATCHES_PER_FILE, remainingTotal)
+		let regex: RegExp
+		try {
+			regex = new RegExp(patternValue)
+		} catch (error) {
+			const message = error instanceof Error ? error.message : 'invalid regular expression'
+			return createToolError('invalid_arguments', `Invalid pattern: ${message}`)
+		}
+		let includeMatchers: IncludeMatchers | null = null
+		const includeValue = args['include']
+		if (includeValue !== undefined) {
+			const patterns = parsePatternList(includeValue)
+			if (patterns === null) return createToolError('invalid_arguments', 'include must be an array of non-empty strings')
 			try {
-				return await scanFileContent(dependencies.fileChunks.readChunks(target), path.relative(resolvedRoot, target), regex, perFileLimit)
-			} catch {
-				// A file that vanished or cannot be read contributes nothing, matching the previous whole-file read behavior.
-				return { kind: 'matches', matches: [] }
+				includeMatchers = compileIncludeMatchers(patterns)
+			} catch (error) {
+				const message = error instanceof Error ? error.message : 'invalid glob'
+				return createToolError('invalid_arguments', `Invalid include pattern: ${message}`)
 			}
 		}
-		const appendWalkFile = async (target: string): Promise<void> => {
-			const result = await collectFile(target)
-			if (result.kind === 'matches') matches.push(...result.matches)
+		let excludeMatchers = compileGlobMatchers([])
+		const excludeValue = args['exclude']
+		if (excludeValue !== undefined) {
+			const patterns = parsePatternList(excludeValue)
+			if (patterns === null) return createToolError('invalid_arguments', 'exclude must be an array of non-empty strings')
+			try {
+				excludeMatchers = compileGlobMatchers(patterns)
+			} catch (error) {
+				const message = error instanceof Error ? error.message : 'invalid glob'
+				return createToolError('invalid_arguments', `Invalid exclude pattern: ${message}`)
+			}
 		}
+
+		const targets: SearchTarget[] = []
 		const pathsValue = args['paths']
 		if (pathsValue !== undefined) {
-			if (!Array.isArray(pathsValue) || !pathsValue.every((candidate): candidate is string => typeof candidate === 'string')) {
-				return createToolError('invalid_arguments', 'paths must be an array of strings')
+			if (!Array.isArray(pathsValue)) return createToolError('invalid_arguments', 'paths must be an array of strings')
+			if (pathsValue.length === 0) return createToolError('invalid_arguments', 'paths must be a non-empty array of strings')
+			for (const rawPath of pathsValue) {
+				if (typeof rawPath !== 'string') return createToolError('invalid_arguments', 'paths must be an array of strings')
+				if (rawPath === '') return createToolError('invalid_arguments', 'paths must not contain an empty string')
+				const resolution = resolveWithinWorkspace(rawPath, resolvedRoot, dependencies.pathFilesystem)
+				if (!resolution.ok) return resolution.error
+				let kind: 'file' | 'directory' | 'other' | 'missing'
+				try {
+					kind = dependencies.filesystem.statKind(resolution.path.absolute)
+				} catch (error) {
+					return wrapIoError(error, `Cannot inspect path: ${rawPath}`)
+				}
+				if (kind === 'missing') return createToolError('invalid_arguments', `Path does not exist: ${rawPath}`)
+				if (kind === 'other') return createToolError('invalid_arguments', `Path is not a regular file or directory: ${rawPath}`)
+				targets.push({ kind, absolute: resolution.path.absolute, relative: workspaceRelativePath(resolvedRoot, resolution.path.absolute) })
 			}
+		}
+
+		const matches: SearchMatch[] = []
+		let truncatedReason: SearchTextResult['truncatedReason'] = null
+		const markTruncated = (reason: 'per-file' | 'total'): void => {
+			if (reason === 'total') {
+				truncatedReason = 'total'
+				return
+			}
+			if (truncatedReason === null) truncatedReason = 'per-file'
+		}
+		const absorbMatches = (result: MatchesScanResult): void => {
+			matches.push(...result.matches)
+			if (matches.length >= MAX_TOTAL_MATCHES) markTruncated('total')
+			else if (result.reachedCap) markTruncated('per-file')
+		}
+		const collectFile = async (target: string): Promise<FileScanResult> => {
+			const remainingTotal = MAX_TOTAL_MATCHES - matches.length
+			if (remainingTotal <= 0) return { kind: 'matches', matches: [], reachedCap: false }
+			const perFileLimit = Math.min(MAX_MATCHES_PER_FILE, remainingTotal)
 			try {
-				for (const rawPath of pathsValue) {
-					const resolution = resolveWithinWorkspace(rawPath, resolvedRoot, dependencies.pathFilesystem)
-					if (!resolution.ok) return resolution.error
-					let kind: 'file' | 'directory' | 'other' | 'missing'
-					try {
-						kind = dependencies.filesystem.statKind(resolution.path.absolute)
-					} catch {
+				return await scanFileContent(dependencies.fileChunks.readChunks(target), workspaceRelativePath(resolvedRoot, target), regex, perFileLimit)
+			} catch {
+				// A file that vanished or cannot be read contributes nothing, matching the previous whole-file read behavior.
+				return { kind: 'matches', matches: [], reachedCap: false }
+			}
+		}
+		const searchDirectory = async (root: string): Promise<void> => {
+			for await (const target of walkFiles(root, dependencies.filesystem, excludeMatchers)) {
+				if (matches.length >= MAX_TOTAL_MATCHES) {
+					markTruncated('total')
+					return
+				}
+				const relativePath = workspaceRelativePath(resolvedRoot, target)
+				if (!shouldSearchFile(relativePath, includeMatchers, excludeMatchers)) continue
+				const result = await collectFile(target)
+				if (result.kind === 'matches') absorbMatches(result)
+				if (matches.length >= MAX_TOTAL_MATCHES) return
+			}
+		}
+
+		try {
+			if (targets.length === 0) {
+				await searchDirectory(resolvedRoot)
+			} else {
+				for (const target of targets) {
+					if (target.kind === 'directory') {
+						await searchDirectory(target.absolute)
 						continue
 					}
-					if (kind === 'directory') {
-						for await (const target of walkSearchableFiles(resolvedRoot, resolution.path.absolute, dependencies.filesystem)) {
-							await appendWalkFile(target)
-							if (matches.length >= MAX_TOTAL_MATCHES) break
-						}
-					} else if (kind === 'file') {
-						const result = await collectFile(resolution.path.absolute)
-						if (result.kind === 'binary') {
-							return createToolError('invalid_arguments', `${path.relative(resolvedRoot, resolution.path.absolute)} appears to be binary; search_text is a line-oriented text search and is not designed for binary search.`)
-						}
-						matches.push(...result.matches)
+					if (!shouldSearchFile(target.relative, includeMatchers, excludeMatchers)) continue
+					const result = await collectFile(target.absolute)
+					if (result.kind === 'binary') {
+						return createToolError('invalid_arguments', `${target.relative} appears to be binary; search_text is a line-oriented text search and is not designed for binary search.`)
 					}
+					absorbMatches(result)
 					if (matches.length >= MAX_TOTAL_MATCHES) break
 				}
-			} catch (error) {
-				return wrapIoError(error, 'Cannot search workspace')
-			}
-			return { kind: 'success', data: matches }
-		}
-		try {
-			for await (const target of walkSearchableFiles(resolvedRoot, resolvedRoot, dependencies.filesystem)) {
-				await appendWalkFile(target)
-				if (matches.length >= MAX_TOTAL_MATCHES) break
 			}
 		} catch (error) {
 			return wrapIoError(error, 'Cannot search workspace')
 		}
-		return { kind: 'success', data: matches }
+		return { kind: 'success', data: { matches, truncated: truncatedReason !== null, truncatedReason } }
 	}
 }

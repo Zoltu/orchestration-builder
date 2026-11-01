@@ -101,7 +101,7 @@ const expectedSignatures: ExpectedSignature[] = [
 	{ file: 'glob_files.json', required: ['pattern'], properties: ['pattern', 'exclude'] },
 	{ file: 'read_file.json', required: ['path'], properties: ['path'] },
 	{ file: 'read_file_partial.json', required: ['path', 'offset', 'limit'], properties: ['path', 'offset', 'limit'] },
-	{ file: 'search_text.json', required: ['pattern'], properties: ['pattern', 'paths'] },
+	{ file: 'search_text.json', required: ['pattern'], properties: ['pattern', 'paths', 'include', 'exclude'] },
 	{ file: 'write_file.json', required: ['path', 'content'], properties: ['path', 'content'] },
 	{ file: 'read_plan.json', required: [], properties: ['runId'] },
 	{ file: 'write_plan.json', required: ['content'], properties: ['content'] },
