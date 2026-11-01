@@ -1,7 +1,9 @@
 // The task-history drawer: the app-shell modal that shows the human↔orchestrator thread grouped by run from root to current. Human and orchestrator turns render their prose through the caller's sanitized Markdown renderer; system markers and every machine field (labels, timestamps, run ids, statuses) stay plain text. Only task-thread entries are rendered, so reasoning, tool, and subagent traffic cannot leak in through this surface.
 
 import type { LooseH, Vnode, VnodeChildInput } from '../../vendor/hyperapp.js'
-import type { TaskThreadEntry, TaskThreadResponse } from './wire.js'
+import { effortDescription, effortLabel, involvementDescription, involvementLabel } from '../run-levels.js'
+import type { EffortLevel, InvolvementLevel } from '../run-levels.js'
+import type { TaskThreadEntry, TaskThreadResponse, TaskThreadRunInfo } from './wire.js'
 import type { TaskThreadLoadState } from './state.js'
 
 type RenderMarkdown = (text: string) => VnodeChildInput
@@ -11,6 +13,8 @@ const TASK_HISTORY_HEADING_ID = 'task-history-heading'
 export interface TaskHistoryRunGroup {
 	runId: string
 	entries: TaskThreadEntry[]
+	effort: EffortLevel | null
+	involvement: InvolvementLevel | null
 	isRoot: boolean
 	isCurrent: boolean
 }
@@ -43,6 +47,8 @@ function groupTaskThreadEntries(thread: TaskThreadResponse): TaskHistoryRunGroup
 	if (thread.entries.length === 0) return []
 	const groups: TaskHistoryRunGroup[] = []
 	const indexByRun = new Map<string, number>()
+	const runInfoByRun = new Map<string, TaskThreadRunInfo>()
+	for (const run of thread.runs ?? []) runInfoByRun.set(run.runId, run)
 	for (const entry of thread.entries) {
 		const existingIndex = indexByRun.get(entry.runId)
 		if (existingIndex !== undefined) {
@@ -51,7 +57,8 @@ function groupTaskThreadEntries(thread: TaskThreadResponse): TaskHistoryRunGroup
 			continue
 		}
 		indexByRun.set(entry.runId, groups.length)
-		groups.push({ runId: entry.runId, entries: [entry], isRoot: false, isCurrent: false })
+		const runInfo = runInfoByRun.get(entry.runId)
+		groups.push({ runId: entry.runId, entries: [entry], effort: runInfo?.effort ?? null, involvement: runInfo?.involvement ?? null, isRoot: false, isCurrent: false })
 	}
 	moveGroup(groups, thread.identity.lineage.rootRunId, 'first')
 	moveGroup(groups, thread.runId, 'last')
@@ -101,6 +108,9 @@ function RunGroup(h: LooseH, group: TaskHistoryRunGroup, index: number, total: n
 	const tags: Vnode[] = []
 	if (group.isRoot) tags.push(h('span', { class: 'task-history-run-tag' }, 'root'))
 	if (group.isCurrent) tags.push(h('span', { class: 'task-history-run-tag task-history-run-tag--current' }, 'current'))
+	const levels: Vnode[] = []
+	if (group.effort !== null) levels.push(h('span', { class: 'run-effort-badge', title: effortDescription(group.effort) }, `effort ${effortLabel(group.effort)}`))
+	if (group.involvement !== null) levels.push(h('span', { class: 'run-involvement-badge', title: involvementDescription(group.involvement) }, `involvement ${involvementLabel(group.involvement)}`))
 	const entries: Vnode[] = group.entries.map((entry) => h('li', { class: entryClassName(entry), id: `task-history-entry-${entry.id}`, 'data-entry-id': entry.id, 'data-system-kind': entry.systemKind ?? '' }, [
 		entryMeta(h, entry),
 		...entryBody(h, entry, renderMarkdown),
@@ -110,6 +120,7 @@ function RunGroup(h: LooseH, group: TaskHistoryRunGroup, index: number, total: n
 			h('span', { class: 'task-history-run-index' }, `Run ${index + 1} of ${total}`),
 			h('span', { class: 'task-history-run-id' }, group.runId),
 			...tags,
+			...levels,
 		]),
 		h('ol', { class: 'task-history-entries' }, entries),
 	])

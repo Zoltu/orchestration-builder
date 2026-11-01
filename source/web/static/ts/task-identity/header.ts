@@ -1,6 +1,7 @@
 // The task-identity header above the Watch stage. It renders the generated summary when one is ready, the deterministic identity otherwise, and a fallback label while the thread is loading or unreadable so the bar is never blank. All fields are plain text nodes; no prose from the thread goes through an HTML path here.
 
 import type { LooseH, Vnode } from '../../vendor/hyperapp.js'
+import { effortDescription, effortLabel, involvementDescription, involvementLabel, isEffort, isInvolvement } from '../run-levels.js'
 import type { TaskLineage, TaskThreadResponse } from './wire.js'
 
 export const TASK_IDENTITY_FALLBACK_TITLE_MAX_CHARS = 160
@@ -21,9 +22,16 @@ export interface TaskIdentityHeaderWarning {
 	title: string
 }
 
+export interface TaskIdentityLevelDisplay {
+	label: string
+	description: string
+}
+
 export interface TaskIdentityHeaderDescriptor {
 	title: string
 	description: string
+	effort: TaskIdentityLevelDisplay | null
+	involvement: TaskIdentityLevelDisplay | null
 	currentTask: string | null
 	originalTask: string | null
 	continuationCount: number
@@ -37,6 +45,8 @@ export interface TaskIdentityHeaderDescriptor {
 export interface TaskIdentityHeaderInput {
 	thread: TaskThreadResponse | null
 	fallback: TaskIdentityFallback
+	effort: string | null
+	involvement: string | null
 	summaryRequestPending: boolean
 	summaryRequestFailed: boolean
 }
@@ -87,13 +97,27 @@ function latestHumanChip(thread: TaskThreadResponse): TaskIdentityHumanChip | nu
 	}
 }
 
+function effortDisplay(value: string | null): TaskIdentityLevelDisplay | null {
+	if (!isEffort(value)) return null
+	return { label: effortLabel(value), description: effortDescription(value) }
+}
+
+function involvementDisplay(value: string | null): TaskIdentityLevelDisplay | null {
+	if (!isInvolvement(value)) return null
+	return { label: involvementLabel(value), description: involvementDescription(value) }
+}
+
 export function deriveTaskIdentityHeader(input: TaskIdentityHeaderInput): TaskIdentityHeaderDescriptor {
 	const thread = input.thread
+	const effort = effortDisplay(input.effort)
+	const involvement = involvementDisplay(input.involvement)
 	if (thread === null) {
 		const title = clampTitle(nonBlank(input.fallback.title) ?? 'No run selected')
 		return {
 			title,
 			description: nonBlank(input.fallback.description) ?? '',
+			effort,
+			involvement,
 			currentTask: null,
 			originalTask: null,
 			continuationCount: 0,
@@ -116,6 +140,8 @@ export function deriveTaskIdentityHeader(input: TaskIdentityHeaderInput): TaskId
 	return {
 		title,
 		description,
+		effort,
+		involvement,
 		currentTask,
 		originalTask,
 		continuationCount: identity.lineage.continuationCount,
@@ -143,6 +169,10 @@ export function TaskIdentityHeader(h: LooseH, props: TaskIdentityHeaderProps): V
 	if (descriptor.description !== '') {
 		titleBlockChildren.push(h('p', { class: 'task-identity-description' }, descriptor.description))
 	}
+	const levelChildren: Vnode[] = []
+	if (descriptor.effort !== null) levelChildren.push(h('span', { class: 'run-effort-badge', title: descriptor.effort.description }, `effort ${descriptor.effort.label}`))
+	if (descriptor.involvement !== null) levelChildren.push(h('span', { class: 'run-involvement-badge', title: descriptor.involvement.description }, `involvement ${descriptor.involvement.label}`))
+	if (levelChildren.length > 0) titleBlockChildren.push(h('div', { class: 'task-identity-levels' }, levelChildren))
 	const actionChildren: Vnode[] = []
 	if (descriptor.summaryPending) {
 		actionChildren.push(h('span', { class: 'task-identity-summarizing', role: 'status' }, 'Summarizing\u2026'))

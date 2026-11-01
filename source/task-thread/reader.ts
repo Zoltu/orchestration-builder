@@ -12,7 +12,7 @@ import {
 	TASK_THREAD_MAX_LINEAGE_RUNS,
 	TASK_THREAD_MAX_TEXT_CHARS,
 } from './model.js'
-import type { TaskIdentity, TaskThreadEntry, TaskThreadResponse } from './model.js'
+import type { TaskIdentity, TaskThreadEntry, TaskThreadResponse, TaskThreadRunInfo } from './model.js'
 import { deriveRunThreadFacts } from './derive.js'
 import type { RunThreadFacts } from './derive.js'
 import { deriveTaskThread } from './identity.js'
@@ -27,6 +27,7 @@ export interface TaskThreadCore {
 	runId: string
 	identity: TaskIdentity
 	entries: TaskThreadEntry[]
+	runs: TaskThreadRunInfo[]
 	truncated: {
 		entries: boolean
 		text: boolean
@@ -144,6 +145,14 @@ function threadOptions(): Parameters<typeof deriveTaskThread>[2] {
 	}
 }
 
+function taskThreadRunInfo(facts: RunThreadFacts): TaskThreadRunInfo {
+	return {
+		runId: facts.runId,
+		effort: facts.meta?.effort ?? null,
+		involvement: facts.meta?.involvement ?? null,
+	}
+}
+
 export function createTaskThreadCoreReader(dependencies: TaskThreadCoreReaderDependencies): (runId: string) => TaskThreadCore | null {
 	const options = threadOptions()
 	const cache = new Map<string, CachedRunSources>()
@@ -226,6 +235,7 @@ export function createTaskThreadCoreReader(dependencies: TaskThreadCoreReaderDep
 			runId,
 			identity: derived.identity,
 			entries: derived.entries,
+			runs: derived.runs.map(taskThreadRunInfo),
 			truncated: { ...derived.truncated, entries: derived.truncated.entries || eventsTruncated },
 		}
 	}
@@ -241,6 +251,7 @@ export function createTaskThreadReader(dependencies: TaskThreadReaderDependencie
 			runId,
 			identity: core.identity,
 			entries: core.entries,
+			runs: core.runs,
 			summary: summary.summary,
 			summaryState: summary.state,
 			truncated: core.truncated,

@@ -744,6 +744,17 @@ describe('model guards', () => {
 		expect(isTaskThreadResponse({ ...response, identity: { ...response.identity, runId: RUN_B } })).toBe(false)
 	})
 
+	test('accepts optional per-run levels and rejects malformed runs', () => {
+		const response = validResponse()
+		expect(isTaskThreadResponse({ ...response, runs: [{ runId: RUN_A, effort: 'thorough', involvement: 'collaborative' }] })).toBe(true)
+		expect(isTaskThreadResponse({ ...response, runs: [{ runId: RUN_A, effort: null, involvement: null }] })).toBe(true)
+		expect(isTaskThreadResponse({ ...response, runs: [{ runId: RUN_A, effort: 'Quick', involvement: null }] })).toBe(false)
+		expect(isTaskThreadResponse({ ...response, runs: [{ runId: RUN_A, effort: null, involvement: 'sometimes' }] })).toBe(false)
+		expect(isTaskThreadResponse({ ...response, runs: 'not-an-array' })).toBe(false)
+		expect(isTaskThreadResponse({ ...response, runs: [{ effort: 'quick', involvement: null }] })).toBe(false)
+		expect(isTaskThreadResponse({ ...response, runs: [{ runId: '', effort: 'quick', involvement: null }] })).toBe(false)
+	})
+
 	test('rejects malformed entries and illegal field combinations', () => {
 		const response = validResponse()
 		const first = defined(response.entries[0], 'response.entries[0]')

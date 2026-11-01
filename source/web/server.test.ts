@@ -820,6 +820,7 @@ function taskThreadResponse(runId: string): TaskThreadResponse {
 			latestHumanEvent: null,
 		},
 		entries: [],
+		runs: [{ runId, effort: 'thorough', involvement: 'collaborative' }],
 		summary: null,
 		summaryState: 'none',
 		truncated: { entries: false, text: false, lineage: false },
@@ -1415,7 +1416,9 @@ describe('GET /api/runs/:id/thread', () => {
 		const response = await handler(get('/api/runs/run-20260101-000200/thread'))
 		expect(response.status).toBe(200)
 		expect(response.headers.get('cache-control')).toBe('no-store')
-		expect(await response.json()).toEqual(thread)
+		const body = await response.json()
+		expect(body).toEqual(thread)
+		expect(body.runs).toEqual([{ runId: 'run-20260101-000200', effort: 'thorough', involvement: 'collaborative' }])
 	})
 
 	test('returns 404 for an unknown run or a null reader result', async () => {

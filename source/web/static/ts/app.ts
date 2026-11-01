@@ -36,6 +36,8 @@ import type { ContinuationReferenceData } from './continuation-reference.js'
 import { InspectorModal } from './inspector-modal.js'
 import { createInspectorSession } from './turn-inspector/index.js'
 import { isObject } from './guards.js'
+import { DEFAULT_EFFORT, DEFAULT_INVOLVEMENT, EFFORT_OPTIONS, effortDescription, effortLabel, INVOLVEMENT_OPTIONS, involvementDescription, involvementLabel, isEffort, isInvolvement, selectRunLevels } from './run-levels.js'
+import type { EffortLevel, InvolvementLevel } from './run-levels.js'
 import { applyFlowFrame, discardFlowRevision, emptyFlowFeedState, flowFeedRevision } from './flow-feed/index.js'
 import { applyRunListFrame, emptyRunListFeedState, runListFeedRevision } from './run-list-feed/index.js'
 import { responseBelongsToSelection } from './stale-response.js'
@@ -189,8 +191,6 @@ export interface TooltipSnapshot {
 	rect: ElementRect
 }
 
-export type EffortLevel = 'quick' | 'standard' | 'thorough'
-export type InvolvementLevel = 'autonomous' | 'early-engagement' | 'collaborative'
 export type LogLevel = 'full' | 'standard'
 export type InterruptMode = 'inquiry' | 'plan_modification'
 export type FlowViewMode = 'flow' | 'sequence'
@@ -383,50 +383,6 @@ const STATUS_LABELS: Record<string, string> = {
 }
 
 const SERVER_UNAVAILABLE_MESSAGE = 'server unavailable — it may have shut down'
-
-// The effort channel's three levels. The wire strings are the contract (see docs/reference.md "Effort channel"): state, API bodies, and run metadata carry them verbatim, so there is no mapping table — display capitalization is a UI concern only and the executor never reads it. The per-option descriptions are the single copy of what each level means; the compose screen's selector (EffortLevelSelector) and the history badge's hover title both render from this list.
-const DEFAULT_EFFORT: EffortLevel = 'standard'
-const EFFORT_OPTIONS: { value: EffortLevel; description: string; recommended?: boolean }[] = [
-	{ value: 'quick', description: 'The fastest, lightest pass. Good for small fixes and simple tasks.' },
-	{ value: 'standard', description: 'Careful work at a reasonable pace. The right choice for most tasks.', recommended: true },
-	{ value: 'thorough', description: 'The slowest, most meticulous pass. Best for large or important projects.' },
-]
-
-function isEffort(value: unknown): value is EffortLevel {
-	return EFFORT_OPTIONS.some((option) => option.value === value)
-}
-
-function effortLabel(effort: unknown): string {
-	if (!isEffort(effort)) return '—'
-	return effort.charAt(0).toUpperCase() + effort.slice(1)
-}
-
-function effortDescription(effort: unknown): string {
-	const option = EFFORT_OPTIONS.find((entry) => entry.value === effort)
-	return option !== undefined ? option.description : ''
-}
-
-// The human-involvement channel's three levels (see docs/reference.md "Involvement channel"). The wire strings are the contract; the per-option descriptions are the single copy of what each level means, rendered by the compose screen's selector and the history badge's hover title.
-const DEFAULT_INVOLVEMENT: InvolvementLevel = 'early-engagement'
-const INVOLVEMENT_OPTIONS: { value: InvolvementLevel; description: string }[] = [
-	{ value: 'autonomous', description: 'Makes reasonable choices and works without checking in.' },
-	{ value: 'early-engagement', description: 'Clarifies up front, then works on its own.' },
-	{ value: 'collaborative', description: 'Checks in with you as it goes.' },
-]
-
-function isInvolvement(value: unknown): value is InvolvementLevel {
-	return INVOLVEMENT_OPTIONS.some((option) => option.value === value)
-}
-
-function involvementLabel(involvement: unknown): string {
-	if (!isInvolvement(involvement)) return '—'
-	return involvement === 'early-engagement' ? 'Early engagement' : involvement.charAt(0).toUpperCase() + involvement.slice(1)
-}
-
-function involvementDescription(involvement: unknown): string {
-	const option = INVOLVEMENT_OPTIONS.find((entry) => entry.value === involvement)
-	return option !== undefined ? option.description : ''
-}
 
 // The logging-level channel's two levels (see docs/reference.md "Logging level"). The wire strings are the contract — API bodies and settings carry them verbatim. Under `standard` the run log still receives every event, but the heavy bodies (each llm_call's sent conversation and received response, each tool_result's full result) are dropped, which keeps long runs' log files small at the cost of the raw-detail toggle showing fewer bodies.
 const DEFAULT_LOG_LEVEL: LogLevel = 'full'
@@ -3622,9 +3578,13 @@ function taskIdentityFallback(state: ApplicationState): { title: string; descrip
 
 function TaskIdentityHeaderForRun(state: ApplicationState): Vnode {
 	const thread = state.taskThread !== null && state.taskThread.runId === state.selectedRunId ? state.taskThread : null
+	const threadRun = thread === null ? null : thread.runs?.find((entry) => entry.runId === state.selectedRunId) ?? null
+	const levels = selectRunLevels(state.selectedRunId, state.selectedRunView, state.summaries, threadRun)
 	const descriptor = deriveTaskIdentityHeader({
 		thread,
 		fallback: taskIdentityFallback(state),
+		effort: levels.effort,
+		involvement: levels.involvement,
 		summaryRequestPending: state.taskThreadSummaryPending,
 		summaryRequestFailed: state.taskThreadSummaryRequestFailed,
 	})

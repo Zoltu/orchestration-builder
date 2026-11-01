@@ -115,30 +115,50 @@ function thread(identityOverrides: Partial<TaskIdentity> = {}, overrides: Partia
 
 const fallback = { title: 'Fallback title', description: 'Fallback description' }
 
+interface HeaderInputOverrides {
+	thread: TaskThreadResponse | null
+	fallback: { title: string; description: string | null }
+	summaryRequestPending: boolean
+	summaryRequestFailed: boolean
+	effort?: string | null
+	involvement?: string | null
+}
+
+function deriveHeader(overrides: HeaderInputOverrides): ReturnType<typeof deriveTaskIdentityHeader> {
+	return deriveTaskIdentityHeader({
+		thread: overrides.thread,
+		fallback: overrides.fallback,
+		effort: overrides.effort ?? null,
+		involvement: overrides.involvement ?? null,
+		summaryRequestPending: overrides.summaryRequestPending,
+		summaryRequestFailed: overrides.summaryRequestFailed,
+	})
+}
+
 describe('deriveTaskIdentityHeader', () => {
 	test('falls back to the selected run label while the thread is absent, never rendering blank', () => {
-		const descriptor = deriveTaskIdentityHeader({ thread: null, fallback, summaryRequestPending: false, summaryRequestFailed: false })
+		const descriptor = deriveHeader({ thread: null, fallback, summaryRequestPending: false, summaryRequestFailed: false })
 		expect(descriptor.title).toBe('Fallback title')
 		expect(descriptor.description).toBe('Fallback description')
 		expect(descriptor.usingFallback).toBe(true)
-		expect(deriveTaskIdentityHeader({ thread: null, fallback: { title: '', description: null }, summaryRequestPending: false, summaryRequestFailed: false }).title).toBe('No run selected')
+		expect(deriveHeader({ thread: null, fallback: { title: '', description: null }, summaryRequestPending: false, summaryRequestFailed: false }).title).toBe('No run selected')
 	})
 
 	test('uses the generated summary title and description only when ready', () => {
 		const summary = { formatVersion: 1 as const, runId: 'run-1', fingerprint: 'fp', title: 'Generated title', description: 'Generated description.', generatedAt: '2026-01-01T00:00:00.000Z' }
-		const ready = deriveTaskIdentityHeader({ thread: thread({}, { summary, summaryState: 'ready' }), fallback, summaryRequestPending: false, summaryRequestFailed: false })
+		const ready = deriveHeader({ thread: thread({}, { summary, summaryState: 'ready' }), fallback, summaryRequestPending: false, summaryRequestFailed: false })
 		expect(ready.title).toBe('Generated title')
 		expect(ready.description).toBe('Generated description.')
-		const failed = deriveTaskIdentityHeader({ thread: thread({}, { summary, summaryState: 'failed' }), fallback, summaryRequestPending: false, summaryRequestFailed: false })
+		const failed = deriveHeader({ thread: thread({}, { summary, summaryState: 'failed' }), fallback, summaryRequestPending: false, summaryRequestFailed: false })
 		expect(failed.title).toBe('Fix the parser')
 		expect(failed.description).toBe('Fix the parser.')
 	})
 
 	test('shows the original task only when it differs from the current task', () => {
-		const same = deriveTaskIdentityHeader({ thread: thread(), fallback, summaryRequestPending: false, summaryRequestFailed: false })
+		const same = deriveHeader({ thread: thread(), fallback, summaryRequestPending: false, summaryRequestFailed: false })
 		expect(same.currentTask).toBe('Fix the parser')
 		expect(same.originalTask).toBeNull()
-		const different = deriveTaskIdentityHeader({
+		const different = deriveHeader({
 			thread: thread({
 				currentTask: { runId: 'run-2', text: 'Now add tests', at: '2026-01-01T00:00:00.000Z', source: 'meta' },
 				originalTask: { runId: 'run-1', text: 'Fix the parser', at: '2026-01-01T00:00:00.000Z', source: 'meta' },
@@ -151,7 +171,7 @@ describe('deriveTaskIdentityHeader', () => {
 	})
 
 	test('carries lineage counts and warns when the lineage is incomplete or truncated', () => {
-		const descriptor = deriveTaskIdentityHeader({
+		const descriptor = deriveHeader({
 			thread: thread({
 				lineage: {
 					rootRunId: 'run-root',
@@ -174,9 +194,24 @@ describe('deriveTaskIdentityHeader', () => {
 		expect(descriptor.lineageWarning === null ? '' : descriptor.lineageWarning.title).toContain('run-missing')
 	})
 
+	test('exposes effort and involvement display objects and omits absent or invalid levels', () => {
+		const descriptor = deriveHeader({
+			thread: thread(),
+			fallback,
+			effort: 'thorough',
+			involvement: 'collaborative',
+			summaryRequestPending: false, summaryRequestFailed: false,
+		})
+		expect(descriptor.effort).toEqual({ label: 'Thorough', description: 'The slowest, most meticulous pass. Best for large or important projects.' })
+		expect(descriptor.involvement).toEqual({ label: 'Collaborative', description: 'Checks in with you as it goes.' })
+		const absent = deriveHeader({ thread: thread(), fallback, effort: 'not-a-level', involvement: 'not-a-level', summaryRequestPending: false, summaryRequestFailed: false })
+		expect(absent.effort).toBeNull()
+		expect(absent.involvement).toBeNull()
+	})
+
 	test('builds the latest-human chip from a human answer', () => {
 		const latestEntry = entry({ id: 'answer-1', kind: 'answer', actor: 'human', label: 'Answer', text: 'Use PostgreSQL' })
-		const descriptor = deriveTaskIdentityHeader({
+		const descriptor = deriveHeader({
 			thread: thread({ latestHumanEvent: { entryId: 'answer-1', kind: 'answer', label: 'Answer', text: 'Use PostgreSQL', timestamp: latestEntry.timestamp, runId: 'run-1' } }, { entries: [latestEntry] }),
 			fallback,
 			summaryRequestPending: false, summaryRequestFailed: false,
@@ -185,9 +220,9 @@ describe('deriveTaskIdentityHeader', () => {
 	})
 
 	test('marks the summary pending while the trigger or the server reports pending', () => {
-		expect(deriveTaskIdentityHeader({ thread: thread(), fallback, summaryRequestPending: true, summaryRequestFailed: false }).summaryPending).toBe(true)
-		expect(deriveTaskIdentityHeader({ thread: thread({}, { summaryState: 'pending' }), fallback, summaryRequestPending: false, summaryRequestFailed: false }).summaryPending).toBe(true)
-		expect(deriveTaskIdentityHeader({ thread: thread({}, { summaryState: 'pending' }), fallback, summaryRequestPending: false, summaryRequestFailed: true }).summaryPending).toBe(false)
+		expect(deriveHeader({ thread: thread(), fallback, summaryRequestPending: true, summaryRequestFailed: false }).summaryPending).toBe(true)
+		expect(deriveHeader({ thread: thread({}, { summaryState: 'pending' }), fallback, summaryRequestPending: false, summaryRequestFailed: false }).summaryPending).toBe(true)
+		expect(deriveHeader({ thread: thread({}, { summaryState: 'pending' }), fallback, summaryRequestPending: false, summaryRequestFailed: true }).summaryPending).toBe(false)
 	})
 })
 
@@ -195,7 +230,7 @@ describe('TaskIdentityHeader', () => {
 	test('renders the title, tasks, lineage chips, latest-human chip, and Tasks history button as text', () => {
 		const latestEntry = entry({ id: 'a-entry', kind: 'answer', actor: 'human', label: 'Answer', text: 'Use PostgreSQL' })
 		const data = thread({ latestHumanEvent: { entryId: 'a-entry', kind: 'answer', label: 'Answer', text: 'Use PostgreSQL', timestamp: latestEntry.timestamp, runId: 'run-1' } }, { entries: [latestEntry] })
-		const descriptor = deriveTaskIdentityHeader({ thread: data, fallback, summaryRequestPending: false, summaryRequestFailed: false })
+		const descriptor = deriveHeader({ thread: data, fallback, effort: 'thorough', involvement: 'collaborative', summaryRequestPending: false, summaryRequestFailed: false })
 		const view = TaskIdentityHeader(fakeH, { descriptor, onOpenHistory: 'history', onLatestHuman: 'latest' })
 		const text = allText(view)
 		expect(text).toContain('Fix the parser')
@@ -203,14 +238,31 @@ describe('TaskIdentityHeader', () => {
 		expect(text).toContain('0 continuations')
 		expect(text).toContain('0 resumes')
 		expect(text).toContain('Use PostgreSQL')
+		expect(text).toContain('effort Thorough')
+		expect(text).toContain('involvement Collaborative')
+		const badges = allByTag(view, 'span').filter((span) => span.props.class === 'run-effort-badge' || span.props.class === 'run-involvement-badge')
+		expect(badges.map((badge) => badge.props.title)).toEqual(['The slowest, most meticulous pass. Best for large or important projects.', 'Checks in with you as it goes.'])
 		const buttons = allByTag(view, 'button')
 		expect(buttons.some((button) => button.props.class === 'task-identity-history-button')).toBe(true)
 		const latest = buttons.find((button) => button.props.class === 'task-identity-human-chip')
 		expect(latest === undefined ? null : latest.props.onclick).toBe('latest')
 	})
 
+	test('renders the selected run levels while the thread is still loading', () => {
+		const descriptor = deriveHeader({ thread: null, fallback, effort: 'quick', involvement: 'autonomous', summaryRequestPending: false, summaryRequestFailed: false })
+		const view = TaskIdentityHeader(fakeH, { descriptor, onOpenHistory: 'history' })
+		const levels = allByTag(view, 'div').find((node) => node.props.class === 'task-identity-levels')
+		expect(levels === undefined ? [] : allByTag(levels, 'span').map((span) => allText(span))).toEqual(['effort Quick', 'involvement Autonomous'])
+	})
+
+	test('omits absent levels without an empty levels row', () => {
+		const descriptor = deriveHeader({ thread: thread(), fallback, effort: null, involvement: null, summaryRequestPending: false, summaryRequestFailed: false })
+		const view = TaskIdentityHeader(fakeH, { descriptor, onOpenHistory: 'history' })
+		expect(allByTag(view, 'div').some((node) => node.props.class === 'task-identity-levels')).toBe(false)
+	})
+
 	test('hides the Tasks history button when no run is selected', () => {
-		const descriptor = deriveTaskIdentityHeader({ thread: null, fallback: { title: 'No run selected', description: null }, summaryRequestPending: false, summaryRequestFailed: false })
+		const descriptor = deriveHeader({ thread: null, fallback: { title: 'No run selected', description: null }, summaryRequestPending: false, summaryRequestFailed: false })
 		const view = TaskIdentityHeader(fakeH, { descriptor, onOpenHistory: 'history', historyEnabled: false })
 		expect(allByTag(view, 'button').some((button) => button.props.class === 'task-identity-history-button')).toBe(false)
 	})
@@ -219,7 +271,7 @@ describe('TaskIdentityHeader', () => {
 describe('fallback title clamping', () => {
 	test('clamps a long loading/error fallback title like the deterministic title', () => {
 		const longTask = 'x'.repeat(TASK_IDENTITY_FALLBACK_TITLE_MAX_CHARS + 80)
-		const descriptor = deriveTaskIdentityHeader({ thread: null, fallback: { title: longTask, description: null }, summaryRequestPending: false, summaryRequestFailed: false })
+		const descriptor = deriveHeader({ thread: null, fallback: { title: longTask, description: null }, summaryRequestPending: false, summaryRequestFailed: false })
 		expect(descriptor.title.length).toBe(TASK_IDENTITY_FALLBACK_TITLE_MAX_CHARS)
 		expect(descriptor.title.endsWith('\u2026')).toBe(true)
 	})

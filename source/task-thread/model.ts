@@ -1,5 +1,5 @@
-import type { RunMeta, TerminalRunStatus } from '../executor/types.js'
-import { isNonNegativeInteger, isObject, TERMINAL_RUN_STATUSES } from '../executor/validation.js'
+import type { EffortLevel, InvolvementLevel, RunMeta, TerminalRunStatus } from '../executor/types.js'
+import { isEffortLevel, isInvolvementLevel, isNonNegativeInteger, isObject, TERMINAL_RUN_STATUSES } from '../executor/validation.js'
 import { isTaskSummary, isTaskSummaryState } from './summary.js'
 import type { TaskSummary, TaskSummaryState } from './summary.js'
 
@@ -111,11 +111,18 @@ export interface TaskIdentity {
 	latestHumanEvent: TaskLatestHumanEvent | null
 }
 
+export interface TaskThreadRunInfo {
+	runId: string
+	effort: EffortLevel | null
+	involvement: InvolvementLevel | null
+}
+
 export interface TaskThreadResponse {
 	formatVersion: typeof TASK_THREAD_FORMAT_VERSION
 	runId: string
 	identity: TaskIdentity
 	entries: TaskThreadEntry[]
+	runs?: TaskThreadRunInfo[]
 	summary: TaskSummary | null
 	summaryState: TaskSummaryState
 	truncated: {
@@ -311,6 +318,14 @@ export function isTaskIdentity(value: unknown): value is TaskIdentity {
 	return true
 }
 
+function isTaskThreadRunInfo(value: unknown): value is TaskThreadRunInfo {
+	if (!isObject(value)) return false
+	if (!isNonEmptyString(value.runId)) return false
+	if (value.effort !== null && !isEffortLevel(value.effort)) return false
+	if (value.involvement !== null && !isInvolvementLevel(value.involvement)) return false
+	return true
+}
+
 export function isTaskThreadResponse(value: unknown): value is TaskThreadResponse {
 	if (!isObject(value)) return false
 	if (value.formatVersion !== TASK_THREAD_FORMAT_VERSION) return false
@@ -318,6 +333,7 @@ export function isTaskThreadResponse(value: unknown): value is TaskThreadRespons
 	if (!isTaskIdentity(value.identity)) return false
 	if (value.identity.runId !== value.runId) return false
 	if (!Array.isArray(value.entries) || !value.entries.every(isTaskThreadEntry)) return false
+	if (value.runs !== undefined && (!Array.isArray(value.runs) || !value.runs.every(isTaskThreadRunInfo))) return false
 	if (value.summary !== null) {
 		if (!isTaskSummary(value.summary)) return false
 		if (value.summary.runId !== value.runId) return false

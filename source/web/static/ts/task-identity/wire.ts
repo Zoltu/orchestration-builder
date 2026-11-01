@@ -1,6 +1,8 @@
 // Wire shapes for GET /api/runs/:id/thread and POST /api/runs/:id/thread/summary. The static bundle cannot import the server's task-thread module, so the client keeps its own validating mirror of that contract at the fetch ingress.
 
 import { isObject } from '../guards.js'
+import { isEffort, isInvolvement } from '../run-levels.js'
+import type { EffortLevel, InvolvementLevel } from '../run-levels.js'
 
 export const TASK_THREAD_FORMAT_VERSION = 1
 export const TASK_SUMMARY_FORMAT_VERSION = 1
@@ -115,11 +117,18 @@ export interface TaskSummary {
 	generatedAt: string
 }
 
+export interface TaskThreadRunInfo {
+	runId: string
+	effort: EffortLevel | null
+	involvement: InvolvementLevel | null
+}
+
 export interface TaskThreadResponse {
 	formatVersion: typeof TASK_THREAD_FORMAT_VERSION
 	runId: string
 	identity: TaskIdentity
 	entries: TaskThreadEntry[]
+	runs?: TaskThreadRunInfo[]
 	summary: TaskSummary | null
 	summaryState: TaskSummaryState
 	truncated: {
@@ -309,6 +318,14 @@ export function isTaskSummary(value: unknown): value is TaskSummary {
 	return true
 }
 
+function isTaskThreadRunInfo(value: unknown): value is TaskThreadRunInfo {
+	if (!isObject(value)) return false
+	if (!isNonEmptyString(value['runId'])) return false
+	if (value['effort'] !== null && !isEffort(value['effort'])) return false
+	if (value['involvement'] !== null && !isInvolvement(value['involvement'])) return false
+	return true
+}
+
 export function isTaskThreadResponse(value: unknown): value is TaskThreadResponse {
 	if (!isObject(value)) return false
 	if (value['formatVersion'] !== TASK_THREAD_FORMAT_VERSION) return false
@@ -317,6 +334,8 @@ export function isTaskThreadResponse(value: unknown): value is TaskThreadRespons
 	if (value['identity']['runId'] !== value['runId']) return false
 	const entries = value['entries']
 	if (!Array.isArray(entries) || !entries.every(isTaskThreadEntry)) return false
+	const runs = value['runs']
+	if (runs !== undefined && (!Array.isArray(runs) || !runs.every(isTaskThreadRunInfo))) return false
 	if (value['summary'] !== null) {
 		if (!isTaskSummary(value['summary'])) return false
 		if (value['summary']['runId'] !== value['runId']) return false

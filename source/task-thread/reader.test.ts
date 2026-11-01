@@ -130,6 +130,40 @@ describe('createTaskThreadReader', () => {
 		expect(harness.peekCalls[0]?.runId).toBe(RUN_A)
 	})
 
+	test('carries each lineage run its own effort and involvement', () => {
+		const metas = new Map([
+			[RUN_A, metaText(RUN_A, { effort: 'quick', involvement: 'autonomous' })],
+			[RUN_B, metaText(RUN_B, { continuesFrom: RUN_A, effort: 'thorough', involvement: 'collaborative' })],
+		])
+		const harness = createHarness({
+			metas,
+			logs: new Map([[RUN_A, logLine(roleStart('Parent'))], [RUN_B, logLine(roleStart('Child'))]]),
+		})
+		const response = harness.reader(RUN_B)
+		if (response === null) throw new Error('expected a response')
+		expect(response.runs).toEqual([
+			{ runId: RUN_A, effort: 'quick', involvement: 'autonomous' },
+			{ runId: RUN_B, effort: 'thorough', involvement: 'collaborative' },
+		])
+	})
+
+	test('reports null levels for a run whose meta omits them', () => {
+		const metas = new Map([
+			[RUN_A, metaText(RUN_A)],
+			[RUN_B, metaText(RUN_B, { continuesFrom: RUN_A })],
+		])
+		const harness = createHarness({
+			metas,
+			logs: new Map([[RUN_A, logLine(roleStart('Parent'))], [RUN_B, logLine(roleStart('Child'))]]),
+		})
+		const response = harness.reader(RUN_B)
+		if (response === null) throw new Error('expected a response')
+		expect(response.runs).toEqual([
+			{ runId: RUN_A, effort: null, involvement: null },
+			{ runId: RUN_B, effort: null, involvement: null },
+		])
+	})
+
 	test('walks a parent chain root-first and reports a missing parent', () => {
 		const metas = new Map([[RUN_B, metaText(RUN_B, { continuesFrom: RUN_A })]])
 		const harness = createHarness({

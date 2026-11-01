@@ -97,6 +97,12 @@ describe('taskThreadFingerprint', () => {
 		const fixture = thread()
 		expect(taskThreadFingerprint(fixture)).toBe(serverThreadFingerprint(fixture.identity, fixture.entries))
 	})
+
+	test('ignores the optional per-run levels so cached summaries stay valid', () => {
+		const withoutRuns = thread()
+		const withRuns = thread({ runs: [{ runId: 'run-1', effort: 'thorough', involvement: 'collaborative' }] })
+		expect(taskThreadFingerprint(withRuns)).toBe(taskThreadFingerprint(withoutRuns))
+	})
 })
 
 describe('planTaskThreadSummary', () => {

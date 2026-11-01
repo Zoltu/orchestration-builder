@@ -73,6 +73,25 @@ function renderedRunIds(target: TaskThreadResponse): string[] {
 		})
 }
 
+function runSection(view: Vnode, runId: string): Vnode | undefined {
+	return allByTag(view, 'section').find((section) => {
+		if (section.props.class !== 'task-history-run') return false
+		return allByTag(section, 'span').some((span) => span.props.class === 'task-history-run-id' && allText(span) === runId)
+	})
+}
+
+function runBadges(section: Vnode): string[] {
+	return allByTag(section, 'span')
+		.filter((span) => span.props.class === 'run-effort-badge' || span.props.class === 'run-involvement-badge')
+		.map((span) => allText(span))
+}
+
+function runTags(section: Vnode): string[] {
+	return allByTag(section, 'span')
+		.filter((span) => typeof span.props.class === 'string' && span.props.class.startsWith('task-history-run-tag'))
+		.map((span) => allText(span))
+}
+
 function entry(overrides: Partial<TaskThreadEntry> = {}): TaskThreadEntry {
 	return {
 		id: 'entry-1',
@@ -150,6 +169,64 @@ describe('groupTaskThreadEntries', () => {
 		]))).toEqual(['run-root', 'run-current'])
 		const firstRun = allByTag(view, 'section').find((section) => section.props.class === 'task-history-run')
 		expect(firstRun === undefined ? 0 : allByTag(firstRun, 'li').length).toBe(2)
+	})
+
+	test('attaches each run its own levels because continuations can change them', () => {
+		const data = thread([
+			entry({ id: 'root-1', sequence: 0, runId: 'run-root' }),
+			entry({ id: 'current-1', sequence: 1, runId: 'run-current' }),
+		], {
+			runs: [
+				{ runId: 'run-root', effort: 'quick', involvement: 'autonomous' },
+				{ runId: 'run-current', effort: 'thorough', involvement: 'collaborative' },
+			],
+		})
+		const view = renderDrawer({
+			thread: data,
+			loadState: 'ready',
+			renderMarkdown: markers([]),
+			onClose: 'close',
+		})
+		expect(renderedRunIds(data)).toEqual(['run-root', 'run-current'])
+		const root = runSection(view, 'run-root')
+		const current = runSection(view, 'run-current')
+		expect(root === undefined ? [] : runBadges(root)).toEqual(['effort Quick', 'involvement Autonomous'])
+		expect(current === undefined ? [] : runBadges(current)).toEqual(['effort Thorough', 'involvement Collaborative'])
+		expect(root === undefined ? [] : runTags(root)).toEqual(['root'])
+		expect(current === undefined ? [] : runTags(current)).toEqual(['current'])
+	})
+
+	test('omits absent levels and shows no badges for a run without metadata', () => {
+		const view = renderDrawer({
+			thread: thread([
+				entry({ id: 'root-1', sequence: 0, runId: 'run-root' }),
+				entry({ id: 'current-1', sequence: 1, runId: 'run-current' }),
+			], {
+				runs: [
+					{ runId: 'run-root', effort: 'quick', involvement: null },
+				],
+			}),
+			loadState: 'ready',
+			renderMarkdown: markers([]),
+			onClose: 'close',
+		})
+		const root = runSection(view, 'run-root')
+		const current = runSection(view, 'run-current')
+		expect(root === undefined ? [] : runBadges(root)).toEqual(['effort Quick'])
+		expect(current === undefined ? [] : runBadges(current)).toEqual([])
+	})
+
+	test('renders no run badges when the thread carries no runs field', () => {
+		const view = renderDrawer({
+			thread: thread([
+				entry({ id: 'root-1', sequence: 0, runId: 'run-root' }),
+				entry({ id: 'current-1', sequence: 1, runId: 'run-current' }),
+			]),
+			loadState: 'ready',
+			renderMarkdown: markers([]),
+			onClose: 'close',
+		})
+		expect(allByTag(view, 'span').some((span) => span.props.class === 'run-effort-badge' || span.props.class === 'run-involvement-badge')).toBe(false)
 	})
 })
 

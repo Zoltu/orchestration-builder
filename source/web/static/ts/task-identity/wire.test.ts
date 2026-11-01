@@ -62,6 +62,16 @@ describe('task-thread wire guards', () => {
 		expect(isTaskThreadResponse(thread())).toBe(true)
 	})
 
+	test('accepts optional per-run levels and rejects malformed runs', () => {
+		expect(isTaskThreadResponse(thread({ runs: [{ runId: 'run-1', effort: 'thorough', involvement: 'collaborative' }] }))).toBe(true)
+		expect(isTaskThreadResponse(thread({ runs: [{ runId: 'run-1', effort: null, involvement: null }] }))).toBe(true)
+		expect(isTaskThreadResponse({ ...thread(), runs: [{ runId: 'run-1', effort: 'Quick', involvement: null }] })).toBe(false)
+		expect(isTaskThreadResponse({ ...thread(), runs: [{ runId: 'run-1', effort: null, involvement: 'sometimes' }] })).toBe(false)
+		expect(isTaskThreadResponse({ ...thread(), runs: 'not-an-array' })).toBe(false)
+		expect(isTaskThreadResponse({ ...thread(), runs: [{ effort: 'quick', involvement: null }] })).toBe(false)
+		expect(isTaskThreadResponse({ ...thread(), runs: [{ runId: '', effort: 'quick', involvement: null }] })).toBe(false)
+	})
+
 	test('rejects an unknown format version, run id mismatch, or malformed summary state', () => {
 		expect(isTaskThreadResponse({ ...thread(), formatVersion: 2 })).toBe(false)
 		const mismatch = thread()
