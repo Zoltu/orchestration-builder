@@ -20,6 +20,42 @@
 	--color-error-soft: #fff1f0;
 	--color-warn: #f0b429;
 	--color-code-text: #24292e;
+	/* Highlight.js token colors. These mirror the vendored GitHub Light theme so one mapping layer serves both themes; the dark blocks override the same variables for the dark code surfaces. */
+	--hljs-text: #24292e;
+	--hljs-keyword: #d73a49;
+	--hljs-doctag: #d73a49;
+	--hljs-type: #d73a49;
+	--hljs-template: #d73a49;
+	--hljs-title: #6f42c1;
+	--hljs-title-class: #6f42c1;
+	--hljs-attr: #005cc5;
+	--hljs-attribute: #005cc5;
+	--hljs-literal: #005cc5;
+	--hljs-meta: #005cc5;
+	--hljs-number: #005cc5;
+	--hljs-operator: #005cc5;
+	--hljs-variable: #005cc5;
+	--hljs-selector-attr: #005cc5;
+	--hljs-selector-class: #005cc5;
+	--hljs-selector-id: #005cc5;
+	--hljs-regexp: #032f62;
+	--hljs-string: #032f62;
+	--hljs-built-in: #e36209;
+	--hljs-symbol: #e36209;
+	--hljs-comment: #6a737d;
+	--hljs-code: #6a737d;
+	--hljs-formula: #6a737d;
+	--hljs-name: #22863a;
+	--hljs-quote: #22863a;
+	--hljs-selector-tag: #22863a;
+	--hljs-selector-pseudo: #22863a;
+	--hljs-subst: #24292e;
+	--hljs-section: #005cc5;
+	--hljs-bullet: #735c0f;
+	--hljs-addition: #22863a;
+	--hljs-addition-bg: #f0fff4;
+	--hljs-deletion: #b31d28;
+	--hljs-deletion-bg: #ffeef0;
 	/* SVG primitive tokens. The flow graph is hand-rolled SVG whose fills and strokes read these tokens so the graph follows the light/dark theme with the rest of the page. They are derived from the surface/accent/signal tokens above rather than hardcoded so the two palettes stay calibrated together. */
 	--svg-node-fill: var(--color-surface);
 	--svg-node-border: var(--color-border-strong);
@@ -70,6 +106,42 @@
 		--color-error-soft: rgba(248, 81, 73, 0.14);
 		--color-warn: #d29922;
 		--color-code-text: #c9d1d9;
+		/* Catppuccin Mocha-derived syntax colors, split so JSON keys, strings, numbers, and literals stay distinct on the dark code surface. */
+		--hljs-text: #e6edf3;
+		--hljs-keyword: #cba6f7;
+		--hljs-doctag: #f38ba8;
+		--hljs-type: #f9e2af;
+		--hljs-template: #f2cdcd;
+		--hljs-title: #89b4fa;
+		--hljs-title-class: #f9e2af;
+		--hljs-attr: #89b4fa;
+		--hljs-attribute: #a6e3a1;
+		--hljs-literal: #cba6f7;
+		--hljs-meta: #fab387;
+		--hljs-number: #fab387;
+		--hljs-operator: #89dceb;
+		--hljs-variable: #cba6f7;
+		--hljs-selector-attr: #cba6f7;
+		--hljs-selector-class: #94e2d5;
+		--hljs-selector-id: #89b4fa;
+		--hljs-regexp: #f5c2e7;
+		--hljs-string: #a6e3a1;
+		--hljs-built-in: #f38ba8;
+		--hljs-symbol: #f2cdcd;
+		--hljs-comment: #9399b2;
+		--hljs-code: #a6e3a1;
+		--hljs-formula: #94e2d5;
+		--hljs-name: #cba6f7;
+		--hljs-quote: #a6e3a1;
+		--hljs-selector-tag: #f9e2af;
+		--hljs-selector-pseudo: #94e2d5;
+		--hljs-subst: #a6adc8;
+		--hljs-section: #89b4fa;
+		--hljs-bullet: #94e2d5;
+		--hljs-addition: #a6e3a1;
+		--hljs-addition-bg: rgba(166, 227, 161, 0.15);
+		--hljs-deletion: #f38ba8;
+		--hljs-deletion-bg: rgba(243, 139, 168, 0.15);
 		--svg-node-fill: var(--color-surface);
 		--svg-node-border: var(--color-border-strong);
 		--svg-node-label: var(--color-text);
@@ -107,6 +179,42 @@
 	--color-error-soft: rgba(248, 81, 73, 0.14);
 	--color-warn: #d29922;
 	--color-code-text: #c9d1d9;
+	/* Catppuccin Mocha-derived syntax colors, split so JSON keys, strings, numbers, and literals stay distinct on the dark code surface. */
+	--hljs-text: #e6edf3;
+	--hljs-keyword: #cba6f7;
+	--hljs-doctag: #f38ba8;
+	--hljs-type: #f9e2af;
+	--hljs-template: #f2cdcd;
+	--hljs-title: #89b4fa;
+	--hljs-title-class: #f9e2af;
+	--hljs-attr: #89b4fa;
+	--hljs-attribute: #a6e3a1;
+	--hljs-literal: #cba6f7;
+	--hljs-meta: #fab387;
+	--hljs-number: #fab387;
+	--hljs-operator: #89dceb;
+	--hljs-variable: #cba6f7;
+	--hljs-selector-attr: #cba6f7;
+	--hljs-selector-class: #94e2d5;
+	--hljs-selector-id: #89b4fa;
+	--hljs-regexp: #f5c2e7;
+	--hljs-string: #a6e3a1;
+	--hljs-built-in: #f38ba8;
+	--hljs-symbol: #f2cdcd;
+	--hljs-comment: #9399b2;
+	--hljs-code: #a6e3a1;
+	--hljs-formula: #94e2d5;
+	--hljs-name: #cba6f7;
+	--hljs-quote: #a6e3a1;
+	--hljs-selector-tag: #f9e2af;
+	--hljs-selector-pseudo: #94e2d5;
+	--hljs-subst: #a6adc8;
+	--hljs-section: #89b4fa;
+	--hljs-bullet: #94e2d5;
+	--hljs-addition: #a6e3a1;
+	--hljs-addition-bg: rgba(166, 227, 161, 0.15);
+	--hljs-deletion: #f38ba8;
+	--hljs-deletion-bg: rgba(243, 139, 168, 0.15);
 	--svg-node-fill: var(--color-surface);
 	--svg-node-border: var(--color-border-strong);
 	--svg-node-label: var(--color-text);
@@ -4289,4 +4397,157 @@ li:last-child {
 	margin: 0;
 	color: var(--color-text-muted);
 	font-size: 0.85rem;
+}
+
+/* Highlight.js token mapping. The vendored theme is light-only; these variables mirror it in light mode and switch to the dark palette above. The groups are split more finely than the vendor theme so JSON keys, strings, numbers, and literals stay distinguishable. */
+.hljs {
+	color: var(--hljs-text);
+	background: transparent;
+}
+
+.hljs-doctag {
+	color: var(--hljs-doctag);
+}
+
+.hljs-keyword,
+.hljs-meta .hljs-keyword,
+.hljs-variable.language_ {
+	color: var(--hljs-keyword);
+}
+
+.hljs-type {
+	color: var(--hljs-type);
+}
+
+.hljs-template-tag,
+.hljs-template-variable {
+	color: var(--hljs-template);
+}
+
+.hljs-title,
+.hljs-title.function_ {
+	color: var(--hljs-title);
+}
+
+.hljs-title.class_,
+.hljs-title.class_.inherited__ {
+	color: var(--hljs-title-class);
+}
+
+.hljs-attr {
+	color: var(--hljs-attr);
+}
+
+.hljs-attribute {
+	color: var(--hljs-attribute);
+}
+
+.hljs-literal {
+	color: var(--hljs-literal);
+}
+
+.hljs-meta {
+	color: var(--hljs-meta);
+}
+
+.hljs-number {
+	color: var(--hljs-number);
+}
+
+.hljs-operator {
+	color: var(--hljs-operator);
+}
+
+.hljs-variable {
+	color: var(--hljs-variable);
+}
+
+.hljs-selector-attr {
+	color: var(--hljs-selector-attr);
+}
+
+.hljs-selector-class {
+	color: var(--hljs-selector-class);
+}
+
+.hljs-selector-id {
+	color: var(--hljs-selector-id);
+}
+
+.hljs-regexp {
+	color: var(--hljs-regexp);
+}
+
+.hljs-string,
+.hljs-meta .hljs-string {
+	color: var(--hljs-string);
+}
+
+.hljs-built_in {
+	color: var(--hljs-built-in);
+}
+
+.hljs-symbol {
+	color: var(--hljs-symbol);
+}
+
+.hljs-comment {
+	color: var(--hljs-comment);
+}
+
+.hljs-code {
+	color: var(--hljs-code);
+}
+
+.hljs-formula {
+	color: var(--hljs-formula);
+}
+
+.hljs-name {
+	color: var(--hljs-name);
+}
+
+.hljs-quote {
+	color: var(--hljs-quote);
+}
+
+.hljs-selector-tag {
+	color: var(--hljs-selector-tag);
+}
+
+.hljs-selector-pseudo {
+	color: var(--hljs-selector-pseudo);
+}
+
+.hljs-subst {
+	color: var(--hljs-subst);
+}
+
+.hljs-section {
+	color: var(--hljs-section);
+	font-weight: bold;
+}
+
+.hljs-bullet {
+	color: var(--hljs-bullet);
+}
+
+.hljs-addition {
+	color: var(--hljs-addition);
+	background-color: var(--hljs-addition-bg);
+}
+
+.hljs-deletion {
+	color: var(--hljs-deletion);
+	background-color: var(--hljs-deletion-bg);
+}
+
+.hljs-emphasis {
+	color: var(--hljs-text);
+	font-style: italic;
+}
+
+.hljs-strong {
+	color: var(--hljs-text);
+	font-weight: bold;
 }
