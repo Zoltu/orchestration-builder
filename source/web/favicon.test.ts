@@ -1,8 +1,15 @@
 import { describe, expect, test } from 'bun:test'
-import { deriveFaviconState, faviconHref } from './static/ts/favicon.js'
+import { deriveFaviconState as deriveFaviconStateAt, faviconHref } from './static/ts/favicon.js'
 
 // Pull the favicon types off helper signatures so the fixtures are contextually checked against the JSDoc shape without a cast, mirroring the sibling labels.test.ts convention.
 type FaviconState = Parameters<typeof faviconHref>[0]
+
+const FAVICON_TEST_NOW = Date.parse('2026-01-01T00:10:00.000Z')
+
+// Every test supplies a fixed clock; the production caller passes its own state.now.
+function deriveFaviconState(summaries?: unknown[], pendingQuestions?: unknown[], queueItems?: unknown[], nowMs: number = FAVICON_TEST_NOW): FaviconState {
+	return deriveFaviconStateAt(summaries, pendingQuestions, queueItems, nowMs)
+}
 
 // A realistic queue-item fixture. The favicon's own admitsStatus guard only requires an object with a status field, so the extra fields are present for realism rather than necessity.
 function queueItem(overrides: { id?: string; task?: string; status?: string; queuedAt?: string } = {}): Record<string, string> {
@@ -110,5 +117,39 @@ describe('faviconHref', () => {
 		for (const state of ['pending-input', 'working', 'waiting', 'complete'] as const satisfies readonly FaviconState[]) {
 			expect(faviconHref(state).includes('#')).toBe(false)
 		}
+	})
+})
+
+describe('deriveFaviconState effective suspension policy', () => {
+	const now = Date.parse('2026-01-01T00:10:00.000Z')
+
+	test('a novel incident waits before its escalation deadline and becomes pending-input after it', () => {
+		const before = { status: 'suspended', suspension: { category: 'novel', disposition: 'novel', resumePolicy: 'auto', escalateAfter: '2026-01-01T00:15:00.000Z' } }
+		const after = { status: 'suspended', suspension: { category: 'novel', disposition: 'novel', resumePolicy: 'auto', escalateAfter: '2026-01-01T00:05:00.000Z' } }
+		expect(deriveFaviconState([before], [], [], now)).toBe('waiting')
+		expect(deriveFaviconState([after], [], [], now)).toBe('pending-input')
+	})
+
+	test('a human disposition reads pending-input and a recoverable one reads waiting regardless of persisted policy wording', () => {
+		expect(deriveFaviconState([{ status: 'suspended', suspension: { category: 'billing', disposition: 'human', resumePolicy: 'operator' } }], [], [], now)).toBe('pending-input')
+		expect(deriveFaviconState([{ status: 'suspended', suspension: { category: 'transient', disposition: 'recoverable', resumePolicy: 'auto' } }], [], [], now)).toBe('waiting')
+	})
+
+	test('a legacy novel record without a disposition derives from its category before and after the deadline', () => {
+		const before = { status: 'suspended', suspension: { category: 'novel', resumePolicy: 'auto', escalateAfter: '2026-01-01T00:15:00.000Z' } }
+		const after = { status: 'suspended', suspension: { category: 'novel', resumePolicy: 'auto', escalateAfter: '2026-01-01T00:05:00.000Z' } }
+		expect(deriveFaviconState([before], [], [], now)).toBe('waiting')
+		expect(deriveFaviconState([after], [], [], now)).toBe('pending-input')
+	})
+})
+
+describe('deriveFaviconState inherited escalation deadline', () => {
+	const now = Date.parse('2026-01-01T00:10:00.000Z')
+
+	test('a recoverable incident waits before its inherited deadline and becomes pending-input after it', () => {
+		const before = { status: 'suspended', suspension: { category: 'transient', disposition: 'recoverable', resumePolicy: 'auto', escalateAfter: '2026-01-01T00:15:00.000Z' } }
+		const after = { status: 'suspended', suspension: { category: 'transient', disposition: 'recoverable', resumePolicy: 'auto', escalateAfter: '2026-01-01T00:05:00.000Z' } }
+		expect(deriveFaviconState([before], [], [], now)).toBe('waiting')
+		expect(deriveFaviconState([after], [], [], now)).toBe('pending-input')
 	})
 })

@@ -638,7 +638,7 @@ describe('renderConfig', () => {
 
 describe('suspended fields in the run views', () => {
 	const suspension = { category: 'billing' as const, resumePolicy: 'operator' as const, message: 'Top up.', suspendedAt: '2026-01-01T00:02:00.000Z' }
-	const providerHealth = { provider: { state: 'unavailable' as const, category: 'billing' as const, since: '2026-01-01T00:00:00.000Z', lastCheckedAt: '2026-01-01T00:01:00.000Z', consecutiveFailures: 2 }, suspendedRunId: 'run-1', resumePolicy: 'operator' as const }
+	const providerHealth = { provider: { state: 'unavailable' as const, category: 'billing' as const, since: '2026-01-01T00:00:00.000Z', lastCheckedAt: '2026-01-01T00:01:00.000Z', consecutiveFailures: 2 }, suspendedRunId: 'run-1', resumePolicy: 'operator' as const, disposition: 'human' as const, escalateAfter: null, escalated: false }
 
 	test('renderRunView carries the suspension record and the supplied health view', () => {
 		const snapshot = parseSnapshot({

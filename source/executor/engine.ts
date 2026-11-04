@@ -171,7 +171,7 @@ function handleLlmResult(
 			partialOutput: llmResult.partialOutput,
 			...(llmResult.detail !== undefined ? { detail: llmResult.detail } : { message: llmResult.message }),
 		})
-		const suspension = suspensionFromFailure(llmResult, new Date().toISOString(), deps.priorSuspension)
+		const suspension = suspensionFromFailure(llmResult, new Date().toISOString(), deps.suspensionIncident.priorSuspension)
 		deps.checkpointRecorder.setSuspension(suspension)
 		return { kind: 'suspended', suspension }
 	}
@@ -193,6 +193,8 @@ function handleLlmResult(
 		return { kind: 'continue' }
 	}
 
+	// A successful call ends the prior suspension incident: a later failure starts a fresh attempt count and novel deadline rather than inheriting an unrelated pause's history.
+	deps.suspensionIncident.priorSuspension = undefined
 	// A success the endpoint answered without a usage report updates no accumulator: lastPromptTokens keeps reflecting the last reported conversation size (an absent report must not be able to masquerade as a zero-token conversation in the pressure check or context_info), no tokens are added to the generated total, and the pressure check is skipped — it reads real reported usage only. A reported zero is endpoint data and is recorded as one.
 	// The proactive pressure check reads real reported usage only, and fires once per role instance: the flag moves pending → sent and never re-arms, so a role that keeps working after the notice is not re-noticed on every subsequent turn.
 	contextManager.observeSuccess(roleState, llmResult.usage)

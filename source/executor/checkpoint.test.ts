@@ -134,6 +134,25 @@ describe('isRunCheckpoint', () => {
 		expect(isRunCheckpoint(earlyAutoResume)).toBe(false)
 	})
 
+	test('round-trips the novel disposition and escalation deadline', () => {
+		const withNovel = sampleCheckpoint()
+		withNovel.suspension = {
+			category: 'novel',
+			disposition: 'novel',
+			resumePolicy: 'auto',
+			message: 'Unexpected.',
+			suspendedAt: '2026-01-01T00:00:00.000Z',
+			autoResumeAfter: '2026-01-01T00:00:05.000Z',
+			escalateAfter: '2026-01-01T00:15:00.000Z',
+			resumeAttempts: 3,
+		}
+		const copy: unknown = JSON.parse(JSON.stringify(withNovel))
+		expect(isRunCheckpoint(copy)).toBe(true)
+		if (!isRunCheckpoint(copy)) throw new Error('expected a valid checkpoint')
+		expect(copy.suspension?.disposition).toBe('novel')
+		expect(copy.suspension?.escalateAfter).toBe('2026-01-01T00:15:00.000Z')
+	})
+
 	test('accepts a pending interlude on the leaf and rejects malformed or contradictory records', () => {
 		const withInterlude = sampleCheckpoint()
 		withInterlude.pendingInterlude = {

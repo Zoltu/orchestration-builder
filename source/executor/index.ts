@@ -34,10 +34,12 @@ export type { ReadProjectDoc, ReadProjectDocResult } from './project-docs.js'
 
 export { createModelInfoProbe, MODEL_PROBE_TIMEOUT_MS } from './model-probe.js'
 
-export type { HealthView, ProviderHealth } from './provider-health.js'
+export { createCompletionHealthProbe, HEALTH_PROBE_TIMEOUT_MS } from './health-probe.js'
+
+export type { HealthView, ProviderHealth, ProviderProbeResult } from './provider-health.js'
 
 export { createObservedLlmCaller, createProviderAutoResumeCoordinator, createProviderRecovery } from './provider-recovery.js'
-export type { ProviderAutoResumeCoordinator, ProviderAutoResumeDependencies, ProviderRecovery, ProviderRecoveryDependencies } from './provider-recovery.js'
+export type { ProviderAutoResumeCoordinator, ProviderAutoResumeDependencies, ProviderProbeFailure, ProviderRecovery, ProviderRecoveryDependencies } from './provider-recovery.js'
 
 // resolveModelConfig is deliberately not re-exported here: its callers all go through resolveDeploymentConfig, and the model-level entry point is exercised directly against model-resolution.ts by its tests.
 export { parseModelInfo, resolveDeploymentConfig } from './model-resolution.js'
@@ -67,8 +69,8 @@ export type { DeltaChannel, DeltaField, DeltaSubscriber, RoleDelta, RunDelta } f
 export { createStateInvalidationChannel } from './state-invalidation-channel.js'
 export type { StateInvalidationChannel, StateInvalidationSubscriber } from './state-invalidation-channel.js'
 
-export { createRunSubmission, createResumeErroredOrSuspendedRun, createReadPauseStateById, createResumeParkedRun, createResumeClarificationRun, createTerminatePausedRun } from './run-submission.js'
-export type { ReadPauseStateById, ResumeClarificationRun, ResumeClarificationRunDependencies, ResumeClarificationRunRejection, ResumeClarificationRunResult, ResumeErroredOrSuspendedRun, ResumeErroredOrSuspendedRunDependencies, ResumeErroredOrSuspendedRunRejection, ResumeErroredOrSuspendedRunResult, ResumeParkedRun, ResumeParkedRunDependencies, ResumeParkedRunRejection, ResumeParkedRunResult, ResumeRun, ResumeRunInvocation, RunSubmission, RunSubmissionDependencies, PausedRunKind, StartRun, SubmitResult, TerminatePausedRun, TerminatePausedRunDependencies, TerminatePausedRunRejection, TerminatePausedRunResult } from './run-submission.js'
+export { createRunSubmission, createResumeErroredOrSuspendedRun, createResumeSuspendedRunAutomatically, createReadPauseStateById, createResumeParkedRun, createResumeClarificationRun, createTerminatePausedRun } from './run-submission.js'
+export type { ReadPauseStateById, ResumeClarificationRun, ResumeClarificationRunDependencies, ResumeClarificationRunRejection, ResumeClarificationRunResult, ResumeErroredOrSuspendedRun, ResumeErroredOrSuspendedRunDependencies, ResumeErroredOrSuspendedRunRejection, ResumeErroredOrSuspendedRunResult, ResumeParkedRun, ResumeParkedRunDependencies, ResumeParkedRunRejection, ResumeParkedRunResult, ResumeRun, ResumeRunInvocation, ResumeSuspendedRunAutomatically, RunSubmission, RunSubmissionDependencies, PausedRunKind, StartRun, SubmitResult, TerminatePausedRun, TerminatePausedRunDependencies, TerminatePausedRunRejection, TerminatePausedRunResult } from './run-submission.js'
 
 export { createTaskQueue } from './queue/index.js'
 export type {
@@ -146,6 +148,7 @@ export {
 	createReadRunPlanById,
 	createReadRunSnapshotStats,
 	createReadRunLogTextFrom,
+	createReadRunLogTail,
 	createReadRunSummaryStats,
 	createListCurrentRunIds,
 	createListRunIds,
@@ -180,6 +183,7 @@ export type {
 	ReadRunPlanById,
 	ReadRunSnapshotStats,
 	ReadRunLogTextFrom,
+	ReadRunLogTail,
 	RunSummaryStats,
 	ReadRunSummaryStats,
 	RunSnapshotStats,

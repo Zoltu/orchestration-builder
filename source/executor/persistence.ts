@@ -4,6 +4,7 @@ import type { RunCheckpoint } from './checkpoint.js'
 import { classifyVersion, ROLE_SNAPSHOT_FORMAT_VERSION, RUN_MANIFEST_VERSION, SETTINGS_FORMAT_VERSION, type VersionStatus } from './orchestration-version.js'
 import { isRoleSnapshot, type RoleSnapshot, type RoleSnapshotInput, type RoleSnapshotStore, type RoleSnapshotSummary } from './role-snapshot.js'
 import { isProjectSettings, safeJsonParse } from './validation.js'
+import { planTailRead, trimTailText } from '../run-log/tail.js'
 import { isPauseIntent, PAUSE_REQUEST_FILE_NAME, PAUSE_REQUEST_FORMAT_VERSION, type PauseIntent } from './operator-pause.js'
 import type { EffortLevel, InvolvementLevel, LogLevel, LogEvent, RunMeta } from './types.js'
 
@@ -373,6 +374,28 @@ export function createReadRunLogTextFrom(baseDir: string): ReadRunLogTextFrom {
 			const buffer = Buffer.alloc(size - byteOffset)
 			const bytesRead = fs.readSync(descriptor, buffer, 0, buffer.length, byteOffset)
 			return buffer.toString('utf8', 0, bytesRead)
+		} finally {
+			fs.closeSync(descriptor)
+		}
+	}
+}
+
+export type ReadRunLogTail = (runId: string, maxBytes: number) => string | null
+
+// Reads at most maxBytes + 1 bytes from the end of a run's log, for on-demand diagnostics that must not allocate a whole ever-growing log. The plan reads one byte before the window so a line boundary is preserved, then trims only a genuinely partial leading line; an unknown run or absent log is null.
+export function createReadRunLogTail(baseDir: string): ReadRunLogTail {
+	return (runId, maxBytes) => {
+		if (!isCurrentRunFormat(baseDir, runId)) return null
+		const logPath = path.resolve(baseDir, runId, LOG_FILE_NAME)
+		if (!fs.existsSync(logPath)) return null
+		const descriptor = fs.openSync(logPath, 'r')
+		try {
+			const plan = planTailRead(fs.fstatSync(descriptor).size, maxBytes)
+			if (plan.length === 0) return ''
+			const buffer = Buffer.alloc(plan.length)
+			const bytesRead = fs.readSync(descriptor, buffer, 0, buffer.length, plan.start)
+			const text = buffer.toString('utf8', 0, bytesRead)
+			return trimTailText(text, plan.dropLeadingPartialLine)
 		} finally {
 			fs.closeSync(descriptor)
 		}

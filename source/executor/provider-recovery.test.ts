@@ -4,7 +4,8 @@ import type { ModelProbeResult } from './model-probe.ts'
 import type { LlmCallResult, LlmRequest, RunMeta, SuspensionRecord } from './types.ts'
 import { createObservedLlmCaller, createProviderAutoResumeCoordinator, createProviderOutcomeObserver, createProviderRecovery } from './provider-recovery.ts'
 import type { ProviderHealth } from './provider-health.ts'
-import { createResumeErroredOrSuspendedRun, createRunSubmission } from './run-submission.js'
+import { createResumeErroredOrSuspendedRun, createResumeSuspendedRunAutomatically, createRunSubmission, type ResumeRunInvocation } from './run-submission.js'
+import { suspensionFromFailure } from './suspension.js'
 
 const START = '2026-01-01T00:00:00.000Z'
 
@@ -65,8 +66,8 @@ function successProbe(): ModelProbeResult {
 	return { ok: true, body: { data: [] }, status: 200 }
 }
 
-function failureProbe(status = 503): ModelProbeResult {
-	return { ok: false, reason: `HTTP ${status}`, transport: false, status }
+function failureProbe(status = 503, detail?: string): ModelProbeResult {
+	return { ok: false, reason: `HTTP ${status}`, transport: false, status, ...(detail !== undefined ? { detail } : {}) }
 }
 
 function createHarness(metas: Map<string, string> = new Map(), checkpoints: Map<string, string> = new Map(), probes: Array<ModelProbeResult | Error> = [], health: Partial<ProviderHealth> = {}) {
@@ -76,7 +77,7 @@ function createHarness(metas: Map<string, string> = new Map(), checkpoints: Map<
 	const scripted = [...probes]
 	const recovery = createProviderRecovery({
 		initialHealth: initialHealth(health),
-		probeModel: async () => {
+		probeProvider: async () => {
 			const next = scripted.shift()
 			if (next === undefined) throw new Error('unscripted probe')
 			if (next instanceof Error) throw next
@@ -157,6 +158,50 @@ describe('provider recovery binding', () => {
 		expect(harness.recovery.mayAutoResume('run-1', at(5))).toBe(true)
 	})
 
+	test('a legacy capped transient record hydrates as a human decision and never auto-resumes', () => {
+		const legacy: SuspensionRecord = {
+			category: 'transient',
+			resumePolicy: 'operator',
+			message: 'The old attempt cap left this run for the operator.',
+			suspendedAt: START,
+			resumeAttempts: 6,
+		}
+		const harness = createHarness(new Map([['run-1', JSON.stringify(suspendedMeta('run-1', legacy))]]))
+		expect(harness.recovery.hydrateSuspension('run-1')).toBe(true)
+		const health = harness.recovery.readHealth()
+		expect(health.disposition).toBe('human')
+		expect(health.resumePolicy).toBe('operator')
+		expect(harness.recovery.mayAutoResume('run-1', at(10))).toBe(false)
+		expect(harness.pending()).toBeUndefined()
+	})
+
+	test('a recoverable suspension carrying an incident deadline stops probing and declines auto-resume at the deadline', async () => {
+		const record: SuspensionRecord = {
+			category: 'transient',
+			disposition: 'recoverable',
+			resumePolicy: 'auto',
+			message: 'Retry later.',
+			suspendedAt: START,
+			escalateAfter: at(10),
+		}
+		const harness = createHarness(new Map([['run-1', JSON.stringify(suspendedMeta('run-1', record))]]), new Map(), [successProbe()])
+		expect(harness.recovery.hydrateSuspension('run-1')).toBe(true)
+		expect(harness.recovery.mayAutoResume('run-1', at(9))).toBe(false)
+
+		harness.advance(5_000)
+		await harness.fire()
+		expect(harness.pending()?.milliseconds).toBe(5_000)
+		harness.advance(5_000)
+		await harness.fire()
+
+		const health = harness.recovery.readHealth()
+		expect(health.escalated).toBe(true)
+		expect(health.disposition).toBe('recoverable')
+		expect(health.resumePolicy).toBe('operator')
+		expect(harness.recovery.mayAutoResume('run-1', at(10))).toBe(false)
+		expect(harness.pending()).toBeUndefined()
+	})
+
 	test('a 2xx probe with no metadata still marks the provider healthy', async () => {
 		const harness = createHarness(new Map(), new Map(), [{ ok: true, status: 200 }])
 		harness.recovery.noticeSuspension(suspendedMeta('run-1', transientSuspension()))
@@ -173,11 +218,10 @@ describe('provider recovery binding', () => {
 		expect(harness.recovery.mayAutoResume('run-2', at(10))).toBe(false)
 	})
 
-	test('an operator suspension stays bound and never auto-resumes even after a healthy probe', async () => {
+	test('a human suspension stays bound, never probes, and never auto-resumes', async () => {
 		const harness = createHarness(new Map(), new Map(), [successProbe()])
 		harness.recovery.noticeSuspension(suspendedMeta('run-1', operatorSuspension('auth')))
-		harness.advance(5_000)
-		await harness.fire()
+		expect(harness.pending()).toBeUndefined()
 		expect(harness.recovery.suspendedRunId()).toBe('run-1')
 		expect(harness.recovery.mayAutoResume('run-1', at(10))).toBe(false)
 	})
@@ -217,7 +261,7 @@ describe('provider recovery binding', () => {
 		expect(harness.pending()).toBeUndefined()
 	})
 
-	test.each([404, 405] as const)('a %i probe after a degraded release still wakes dispatch', async (status) => {
+	test.each([404, 405] as const)('a %i probe after a degraded release stays unavailable and does not wake dispatch', async (status) => {
 		const harness = createHarness(new Map(), new Map(), [failureProbe(), failureProbe(status)])
 		let recoveredDispatches = 0
 		harness.recovery.setAutoResumeHandler(() => {
@@ -230,9 +274,10 @@ describe('provider recovery binding', () => {
 		const delay = harness.pending()?.milliseconds ?? 0
 		harness.advance(delay)
 		await harness.fire()
-		expect(harness.recovery.readHealth().provider.state).toBe('unknown')
-		expect(harness.recovery.canDispatch()).toBe(true)
-		expect(recoveredDispatches).toBe(1)
+		expect(harness.recovery.readHealth().provider.state).toBe('unavailable')
+		expect(harness.recovery.readHealth().provider.category).toBe('request_rejected')
+		expect(harness.recovery.canDispatch()).toBe(false)
+		expect(recoveredDispatches).toBe(0)
 	})
 
 	test('an idle unhealthy gate keeps probing, recovers, and permits dispatch without a queue mutation', async () => {
@@ -273,6 +318,36 @@ describe('provider recovery binding', () => {
 		expect(harness.delays[harness.delays.length - 1]).toBe(5_000)
 	})
 
+	test('the last probe failure is retained in memory with its bounded detail', async () => {
+		const harness = createHarness(new Map(), new Map(), [failureProbe(503, 'upstream unavailable')])
+		harness.recovery.noticeSuspension(suspendedMeta('run-1', transientSuspension()))
+		harness.advance(5_000)
+		await harness.fire()
+		expect(harness.recovery.readLastProbeFailure()).toEqual({ at: at(5), category: 'transient', httpStatus: 503, detail: 'upstream unavailable' })
+	})
+
+	test('a successful probe clears the retained failure', async () => {
+		const harness = createHarness(new Map(), new Map(), [failureProbe(503, 'upstream unavailable'), successProbe()])
+		harness.recovery.noticeSuspension(suspendedMeta('run-1', transientSuspension({ autoResumeAfter: at(60) })))
+		harness.advance(5_000)
+		await harness.fire()
+		expect(harness.recovery.readLastProbeFailure()?.detail).toBe('upstream unavailable')
+		const delay = harness.pending()?.milliseconds ?? 0
+		harness.advance(delay)
+		await harness.fire()
+		expect(harness.recovery.readLastProbeFailure()).toBeUndefined()
+	})
+
+	test('a new suspension binding clears the previous incident failure', async () => {
+		const harness = createHarness(new Map(), new Map(), [failureProbe(503, 'upstream unavailable')])
+		harness.recovery.noticeSuspension(suspendedMeta('run-1', transientSuspension()))
+		harness.advance(5_000)
+		await harness.fire()
+		expect(harness.recovery.readLastProbeFailure()).toBeDefined()
+		harness.recovery.noticeSuspension(suspendedMeta('run-2', transientSuspension()))
+		expect(harness.recovery.readLastProbeFailure()).toBeUndefined()
+	})
+
 	test('readHealth is the coarse gate snapshot', () => {
 		const harness = createHarness()
 		harness.recovery.noticeSuspension(suspendedMeta('run-1', transientSuspension()))
@@ -306,6 +381,136 @@ describe('provider auto-resume coordinator', () => {
 		expect(dispatches).toBe(1)
 	})
 
+	test('a recoverable suspension resumes regardless of how many attempts came before', async () => {
+		const harness = createHarness(new Map(), new Map(), [successProbe()])
+		const resumed: string[] = []
+		const coordinator = createProviderAutoResumeCoordinator({
+			recovery: harness.recovery,
+			resumeSuspendedRun: (runId) => {
+				resumed.push(runId)
+				return { ok: true, runId }
+			},
+			onDispatch: () => {},
+		})
+		harness.recovery.setAutoResumeHandler((at) => coordinator.handleHealthy(at))
+		harness.recovery.noticeSuspension(suspendedMeta('run-1', transientSuspension({ resumeAttempts: 100 })))
+		harness.advance(5_000)
+		await harness.fire()
+		expect(resumed).toEqual(['run-1'])
+	})
+
+	test('a novel suspension resumes before its deadline but not after it', async () => {
+		const before = createHarness(new Map(), new Map([['run-1', JSON.stringify(suspendedMeta('run-1', transientSuspension()))]]), [successProbe()])
+		const resumedBefore: string[] = []
+		const beforeCoordinator = createProviderAutoResumeCoordinator({
+			recovery: before.recovery,
+			resumeSuspendedRun: (runId) => {
+				resumedBefore.push(runId)
+				return { ok: true, runId }
+			},
+			onDispatch: () => {},
+		})
+		before.recovery.setAutoResumeHandler((at) => beforeCoordinator.handleHealthy(at))
+		const novelBefore: SuspensionRecord = {
+			category: 'novel',
+			disposition: 'novel',
+			resumePolicy: 'auto',
+			message: 'Unexpected.',
+			suspendedAt: START,
+			escalateAfter: at(10),
+		}
+		before.recovery.noticeSuspension(suspendedMeta('run-1', novelBefore))
+		before.advance(5_000)
+		await before.fire()
+		expect(resumedBefore).toEqual(['run-1'])
+
+		const after = createHarness(new Map(), new Map(), [successProbe()])
+		const resumedAfter: string[] = []
+		const afterCoordinator = createProviderAutoResumeCoordinator({
+			recovery: after.recovery,
+			resumeSuspendedRun: (runId) => {
+				resumedAfter.push(runId)
+				return { ok: true, runId }
+			},
+			onDispatch: () => {},
+		})
+		after.recovery.setAutoResumeHandler((at) => afterCoordinator.handleHealthy(at))
+		const novelAfter: SuspensionRecord = {
+			category: 'novel',
+			disposition: 'novel',
+			resumePolicy: 'auto',
+			message: 'Unexpected.',
+			suspendedAt: START,
+			escalateAfter: at(1),
+		}
+		after.recovery.noticeSuspension(suspendedMeta('run-1', novelAfter))
+		after.advance(5_000)
+		await after.fire()
+		expect(resumedAfter).toEqual([])
+	})
+
+	test('an automatic resume carries the novel incident into a failed retry re-suspension', async () => {
+		const runId = 'run-1'
+		const novel: SuspensionRecord = {
+			category: 'novel',
+			disposition: 'novel',
+			resumePolicy: 'auto',
+			message: 'Unexpected.',
+			suspendedAt: START,
+			escalateAfter: at(900),
+			resumeAttempts: 3,
+		}
+		const metas = new Map([[runId, JSON.stringify(suspendedMeta(runId, novel))]])
+		const checkpoints = new Map([[runId, JSON.stringify(checkpointWithSuspension(runId, novel))]])
+		const harness = createHarness(metas, checkpoints, [successProbe()])
+		let resumedOptions: ResumeRunInvocation | undefined
+		const submission = createRunSubmission({
+			providerSuspension: harness.recovery,
+			onRunSettled: async () => {},
+			startRun: async () => {
+				throw new Error('the automatic resume never starts a fresh run')
+			},
+			resumeRun: async (checkpoint, options) => {
+				resumedOptions = options
+				return suspendedMeta(checkpoint.runId, novel)
+			},
+			generateRunId: () => 'run-new',
+			readProjectSettings: () => ({}),
+			runDirectoryExists: () => false,
+			notifyStateChanged: () => {},
+		})
+		const resumeAutomatically = createResumeSuspendedRunAutomatically({
+			runSubmission: submission,
+			readRunMetaById: (id) => metas.get(id) ?? null,
+			readCheckpointById: (id) => checkpoints.get(id) ?? null,
+			deletePauseRequest: () => true,
+			taskQueue: {
+				reactivateErrorItem: () => {},
+				reactivateSuspendedItem: () => {},
+				discardSuspendedRun: () => {},
+			},
+		})
+		const coordinator = createProviderAutoResumeCoordinator({
+			recovery: harness.recovery,
+			resumeSuspendedRun: (id) => resumeAutomatically(id),
+			onDispatch: () => {},
+		})
+		harness.recovery.setAutoResumeHandler((at) => coordinator.handleHealthy(at))
+		harness.recovery.noticeSuspension(suspendedMeta(runId, novel))
+		harness.advance(5_000)
+		await harness.fire()
+
+		expect(resumedOptions?.freshIncident).toBeUndefined()
+		expect(resumedOptions?.priorSuspension).toEqual(novel)
+		const retry = suspensionFromFailure(
+			{ kind: 'provider_failure', category: 'novel', message: 'retry failed', attempts: 1, partialOutput: false },
+			at(6),
+			resumedOptions?.priorSuspension,
+		)
+		expect(retry.escalateAfter).toBe(novel.escalateAfter)
+		expect(retry.resumeAttempts).toBe(4)
+	})
+
 	test('an operator suspension is never resumed automatically', async () => {
 		const harness = createHarness(new Map(), new Map(), [successProbe()])
 		const resumed: string[] = []
@@ -319,9 +524,9 @@ describe('provider auto-resume coordinator', () => {
 		})
 		harness.recovery.setAutoResumeHandler((at) => coordinator.handleHealthy(at))
 		harness.recovery.noticeSuspension(suspendedMeta('run-1', operatorSuspension('billing')))
-		harness.advance(5_000)
-		await harness.fire()
+		coordinator.handleHealthy(at(10))
 		expect(resumed).toEqual([])
+		expect(harness.pending()).toBeUndefined()
 	})
 
 	test('an unresumable auto run leaves cleanup to the resume operation and lets dispatch continue', async () => {

@@ -95,7 +95,7 @@ function buildEngineDependencies(deps: ExecutorDependencies, input: EngineDepend
 		parkTracker,
 		baseTracker: deps.baseTracker,
 		// The run's lineage rides the recorder so checkpoints written after a resume keep stamping continuesFrom onto the entry frame — the live context does not carry it on the resume path. The logging level needs no such stamp: the entry context carries it and the recorder serializes from there.
-		...(input.priorSuspension !== undefined ? { priorSuspension: input.priorSuspension } : {}),
+		suspensionIncident: { ...(input.priorSuspension !== undefined ? { priorSuspension: input.priorSuspension } : {}) },
 		checkpointRecorder: createCheckpointRecorder({ writeCheckpoint: deps.writeCheckpoint, runId: input.runId, startTime: input.startTime, roleRegistry, contextPressureTracker, parkTracker, baseTracker: deps.baseTracker, continuesFrom: input.continuesFrom, ...(input.clarificationAnswer !== undefined ? { clarificationAnswer: input.clarificationAnswer } : {}) }),
 	}
 }
@@ -190,6 +190,8 @@ export interface ResumeRunOptions {
 	queueTracked?: boolean
 	// The suspension the run is resuming from; carried into the engine so a re-suspension increments its attempt count.
 	priorSuspension?: SuspensionRecord
+	// Set only by an explicit operator resume from a provider suspension: the operator's action starts a fresh incident, so neither the old attempt count nor a novel deadline is inherited.
+	freshIncident?: boolean
 	// Set only by the operator-driven error-or-suspended resume, never by boot reconciliation: an explicit resume must continue to a fresh LLM turn even when the checkpoint already ends with a completed finish.
 	explicitResume?: boolean
 }
@@ -233,7 +235,7 @@ export async function resumeExecutor(deps: ExecutorDependencies, checkpoint: Run
 	const loadedGuild = deps.loadedGuild
 
 	const startTime = checkpoint.startTime
-	const priorSuspension = options.priorSuspension ?? checkpoint.suspension
+	const priorSuspension = options.freshIncident === true ? undefined : options.priorSuspension ?? checkpoint.suspension
 	const clarificationAnswer = options.clarificationAnswer
 	// The clarification answer is appended durably before the running meta: a crash after the meta would otherwise let reconciliation resume a checkpoint without the answer. The id makes a retry idempotent, and the note is then already in the restored history. A delivery record already on the checkpoint is also carried forward on boot and error-or-suspended resumes, so a consumed answer is not lost on their first safe-point write.
 	let deliveredAnswer = checkpoint.clarificationAnswer

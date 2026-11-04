@@ -38,9 +38,9 @@ async function flushMicrotasks(): Promise<void> {
 }
 
 function createMonitorHarness(health: ProviderHealth, results: Array<ProviderProbeResult | Error>, randomValues: number[] = [1]) {
-	const gate = createProviderGate(health)
-	const delays: number[] = []
 	let currentMs = Date.parse(START)
+	const gate = createProviderGate(health, () => new Date(currentMs).toISOString())
+	const delays: number[] = []
 	let pending: { callback: () => void; milliseconds: number } | undefined
 	let randomIndex = 0
 	let healthyCalls = 0
@@ -96,11 +96,11 @@ function createMonitorHarness(health: ProviderHealth, results: Array<ProviderPro
 }
 
 function createDeferredHarness(health: ProviderHealth, randomValues: number[] = [1]) {
-	const gate = createProviderGate(health)
+	let currentMs = Date.parse(START)
+	const gate = createProviderGate(health, () => new Date(currentMs).toISOString())
 	const delays: number[] = []
 	const resolvers: Array<(result: ProviderProbeResult) => void> = []
 	let probeCalls = 0
-	let currentMs = Date.parse(START)
 	let pending: { callback: () => void; milliseconds: number } | undefined
 	let randomIndex = 0
 	let healthyCalls = 0
@@ -163,7 +163,7 @@ function createDeferredHarness(health: ProviderHealth, randomValues: number[] = 
 
 describe('ProviderGate state transitions', () => {
 	test('a transient failure is degraded and repeated failures keep the state start time', () => {
-		const gate = createProviderGate(initialHealth())
+		const gate = createProviderGate(initialHealth(), () => START)
 		gate.observeFailure({ category: 'transient' }, at(1))
 		const first = gate.snapshot().provider
 		expect(first.state).toBe('degraded')
@@ -183,7 +183,7 @@ describe('ProviderGate state transitions', () => {
 	})
 
 	test.each(['billing', 'auth', 'request_rejected'] as const)('%s is unavailable', (category) => {
-		const gate = createProviderGate(initialHealth())
+		const gate = createProviderGate(initialHealth(), () => START)
 		gate.observeFailure({ category }, at(1))
 		const snapshot = gate.snapshot().provider
 		expect(snapshot.state).toBe('unavailable')
@@ -192,7 +192,7 @@ describe('ProviderGate state transitions', () => {
 	})
 
 	test('an unknown failure is unknown and remains dispatchable', () => {
-		const gate = createProviderGate(initialHealth())
+		const gate = createProviderGate(initialHealth(), () => START)
 		gate.observeFailure({ category: 'unknown' }, at(1))
 		const snapshot = gate.snapshot().provider
 		expect(snapshot.state).toBe('unknown')
@@ -201,7 +201,7 @@ describe('ProviderGate state transitions', () => {
 	})
 
 	test('success resets failures and clears the probe schedule', () => {
-		const gate = createProviderGate(initialHealth())
+		const gate = createProviderGate(initialHealth(), () => START)
 		gate.observeFailure({ category: 'transient' }, at(1), at(11))
 		gate.observeSuccess(at(2))
 		const snapshot = gate.snapshot().provider
@@ -215,7 +215,7 @@ describe('ProviderGate state transitions', () => {
 	})
 
 	test('a healthy-to-healthy success keeps the state start time but refreshes the success timestamp', () => {
-		const gate = createProviderGate(initialHealth({ since: at(3) }))
+		const gate = createProviderGate(initialHealth({ since: at(3) }), () => START)
 		gate.observeSuccess(at(9))
 		const snapshot = gate.snapshot().provider
 		expect(snapshot.since).toBe(at(3))
@@ -223,7 +223,7 @@ describe('ProviderGate state transitions', () => {
 	})
 
 	test('dispatch is permitted only while healthy or unknown', () => {
-		const gate = createProviderGate(initialHealth())
+		const gate = createProviderGate(initialHealth(), () => START)
 		expect(gate.canDispatch()).toBe(true)
 		gate.observeFailure({ category: 'unknown' }, at(1))
 		expect(gate.canDispatch()).toBe(true)
@@ -236,7 +236,7 @@ describe('ProviderGate state transitions', () => {
 	})
 
 	test('the snapshot exposes only coarse fields', () => {
-		const gate = createProviderGate(initialHealth())
+		const gate = createProviderGate(initialHealth(), () => START)
 		gate.observeFailure({ category: 'billing' }, at(1))
 		const allowed = ['state', 'category', 'since', 'lastCheckedAt', 'lastSuccessAt', 'consecutiveFailures', 'nextProbeAt']
 		expect(Object.keys(gate.snapshot().provider).every((key) => allowed.includes(key))).toBe(true)
@@ -250,18 +250,18 @@ describe('ProviderGate state transitions', () => {
 	})
 
 	test('the factory rejects illegal health-state combinations', () => {
-		expect(() => createProviderGate({ ...initialHealth(), state: 'degraded', category: 'none' })).toThrow()
-		expect(() => createProviderGate({ ...initialHealth(), state: 'healthy', category: 'billing' })).toThrow()
-		expect(() => createProviderGate({ ...initialHealth(), state: 'unavailable', category: 'transient' })).toThrow()
-		expect(() => createProviderGate({ ...initialHealth(), state: 'unknown', category: 'auth' })).toThrow()
-		expect(() => createProviderGate({ ...initialHealth(), consecutiveFailures: -1 })).toThrow()
-		expect(() => createProviderGate({ ...initialHealth(), since: 'not a time' })).toThrow()
+		expect(() => createProviderGate({ ...initialHealth(), state: 'degraded', category: 'none' }, () => START)).toThrow()
+		expect(() => createProviderGate({ ...initialHealth(), state: 'healthy', category: 'billing' }, () => START)).toThrow()
+		expect(() => createProviderGate({ ...initialHealth(), state: 'unavailable', category: 'transient' }, () => START)).toThrow()
+		expect(() => createProviderGate({ ...initialHealth(), state: 'unknown', category: 'auth' }, () => START)).toThrow()
+		expect(() => createProviderGate({ ...initialHealth(), consecutiveFailures: -1 }, () => START)).toThrow()
+		expect(() => createProviderGate({ ...initialHealth(), since: 'not a time' }, () => START)).toThrow()
 	})
 })
 
 describe('ProviderGate notice and auto-resume permission', () => {
 	test('a transient suspension notice records degraded state so it cannot auto-resume while healthy', () => {
-		const gate = createProviderGate(initialHealth())
+		const gate = createProviderGate(initialHealth(), () => START)
 		gate.noticeSuspension('run-1', transientSuspension({ autoResumeAfter: at(10) }), at(1))
 		const snapshot = gate.snapshot().provider
 		expect(snapshot.state).toBe('degraded')
@@ -278,14 +278,14 @@ describe('ProviderGate notice and auto-resume permission', () => {
 	})
 
 	test('a suspension notice does not double-count an already-recorded role failure', () => {
-		const gate = createProviderGate(initialHealth())
+		const gate = createProviderGate(initialHealth(), () => START)
 		gate.observeFailure({ category: 'transient' }, at(1))
 		gate.noticeSuspension('run-1', transientSuspension(), at(2))
 		expect(gate.snapshot().provider.consecutiveFailures).toBe(1)
 	})
 
 	test.each(['billing', 'auth', 'request_rejected', 'unknown'] as const)('an operator %s suspension never auto-resumes', (category) => {
-		const gate = createProviderGate(initialHealth())
+		const gate = createProviderGate(initialHealth(), () => START)
 		gate.noticeSuspension('run-1', operatorSuspension(category), at(1))
 		expect(gate.snapshot().provider.state).toBe(category === 'unknown' ? 'unknown' : 'unavailable')
 		expect(gate.autoResumeAllowed(at(10))).toBe(false)
@@ -293,16 +293,28 @@ describe('ProviderGate notice and auto-resume permission', () => {
 		expect(gate.autoResumeAllowed(at(10))).toBe(false)
 	})
 
-	test('a transient suspension downgraded to operator does not auto-resume', () => {
-		const gate = createProviderGate(initialHealth())
-		gate.noticeSuspension('run-1', transientSuspension({ resumePolicy: 'operator' }), at(1))
-		expect(gate.snapshot().resumePolicy).toBe('operator')
+	test('a novel suspension auto-resumes before its deadline and becomes operator at it', () => {
+		const gate = createProviderGate(initialHealth(), () => START)
+		const novel: SuspensionRecord = {
+			category: 'novel',
+			disposition: 'novel',
+			resumePolicy: 'auto',
+			message: 'Unexpected.',
+			suspendedAt: at(0),
+			escalateAfter: at(10),
+		}
+		gate.noticeSuspension('run-1', novel, at(1))
 		gate.observeSuccess(at(2))
+		expect(gate.snapshot().resumePolicy).toBe('auto')
+		expect(gate.snapshot().disposition).toBe('novel')
+		expect(gate.snapshot().escalateAfter).toBe(at(10))
+		expect(gate.snapshot().escalated).toBe(false)
+		expect(gate.autoResumeAllowed(at(9))).toBe(true)
 		expect(gate.autoResumeAllowed(at(10))).toBe(false)
 	})
 
 	test('clearing the suspended run releases the binding, including a mismatched clear', () => {
-		const gate = createProviderGate(initialHealth())
+		const gate = createProviderGate(initialHealth(), () => START)
 		expect(gate.suspendedRunId()).toBeUndefined()
 		expect(gate.autoResumeAllowed(at(1))).toBe(false)
 		gate.noticeSuspension('run-1', transientSuspension(), at(1))
@@ -331,18 +343,18 @@ describe('ProviderHealthMonitor probes', () => {
 		expect(harness.gate.snapshot().provider.consecutiveFailures).toBe(0)
 		expect(harness.healthyCalls()).toBe(1)
 		expect(harness.gate.suspendedRunId()).toBe('run-1')
-		expect(harness.pending()).toBeUndefined()
+		// Without a resume handler the suspension stays bound, so the successful probe keeps probing from the base delay.
+		expect(harness.pending()?.milliseconds).toBe(5_000)
 	})
 
-	test('a successful probe for an operator suspension reports the health change once', async () => {
+	test('a human suspension records the binding but never starts probing', async () => {
 		const harness = createMonitorHarness(initialHealth(), [{ ok: true, status: 200 }])
 		harness.monitor.noticeSuspension('run-1', operatorSuspension('billing'))
 		harness.monitor.start()
-		harness.advance(5_000)
-		await harness.fire()
-		expect(harness.gate.snapshot().provider.state).toBe('healthy')
-		expect(harness.healthyCalls()).toBe(1)
+		expect(harness.delays).toEqual([])
 		expect(harness.pending()).toBeUndefined()
+		expect(harness.gate.snapshot().provider.state).toBe('unavailable')
+		expect(harness.gate.autoResumeAllowed(at(10))).toBe(false)
 	})
 
 	test.each([
@@ -426,28 +438,125 @@ describe('ProviderHealthMonitor probes', () => {
 		expect(harness.healthyCalls()).toBe(0)
 	})
 
-	test('a 404 probe is unknown, allows dispatch, and never auto-resumes', async () => {
-		const harness = createMonitorHarness(initialHealth(), [{ ok: false, transport: false, status: 404 }])
+	test.each([404, 405])('a %i probe is request_rejected and unavailable, not the legacy unknown state', async (status) => {
+		const harness = createMonitorHarness(initialHealth(), [{ ok: false, transport: false, status }])
 		harness.monitor.noticeSuspension('run-1', transientSuspension())
 		harness.monitor.start()
 		harness.advance(5_000)
 		await harness.fire()
 		const snapshot = harness.gate.snapshot().provider
-		expect(snapshot.state).toBe('unknown')
-		expect(snapshot.category).toBe('unknown')
-		expect(harness.gate.canDispatch()).toBe(true)
+		expect(snapshot.state).toBe('unavailable')
+		expect(snapshot.category).toBe('request_rejected')
+		expect(harness.gate.canDispatch()).toBe(false)
 		expect(harness.gate.autoResumeAllowed(at(10))).toBe(false)
-		expect(harness.healthyCalls()).toBe( 1)
+		expect(harness.healthyCalls()).toBe(0)
+	})
+
+	test('a recoverable suspension keeps probing indefinitely', async () => {
+		const failure: ProviderProbeResult = { ok: false, transport: false, status: 503 }
+		const harness = createMonitorHarness(initialHealth({ state: 'degraded', category: 'transient', consecutiveFailures: 1 }), [failure, failure, failure])
+		harness.monitor.noticeSuspension('run-1', transientSuspension())
+		harness.monitor.start()
+		for (let index = 0; index < 3; index++) {
+			const delay = harness.pending()?.milliseconds
+			if (delay === undefined) throw new Error('expected the recoverable probe to stay scheduled')
+			harness.advance(delay)
+			await harness.fire()
+		}
+		expect(harness.pending()).toBeDefined()
+		expect(harness.gate.snapshot().disposition).toBe('recoverable')
+	})
+
+	test('a novel suspension probes before its deadline and stops once escalated', async () => {
+		const novel: SuspensionRecord = {
+			category: 'novel',
+			disposition: 'novel',
+			resumePolicy: 'auto',
+			message: 'Unexpected.',
+			suspendedAt: at(0),
+			escalateAfter: at(20),
+		}
+		const failure: ProviderProbeResult = { ok: false, transport: false, status: 503 }
+		const harness = createMonitorHarness(initialHealth(), [failure, failure, failure])
+		harness.monitor.noticeSuspension('run-1', novel)
+		harness.monitor.start()
+		expect(harness.pending()?.milliseconds).toBe(5_000)
+		harness.advance(5_000)
+		await harness.fire()
+		expect(harness.pending()?.milliseconds).toBe(10_000)
+
+		harness.advance(10_000)
+		await harness.fire()
+		expect(harness.gate.snapshot().escalated).toBe(false)
+		expect(harness.pending()?.milliseconds).toBe(20_000)
+
+		harness.advance(20_000)
+		await harness.fire()
+		expect(harness.gate.snapshot().escalated).toBe(true)
+		expect(harness.gate.snapshot().resumePolicy).toBe('operator')
 		expect(harness.pending()).toBeUndefined()
 	})
 
-	test('a 405 probe is unknown too', async () => {
-		const harness = createMonitorHarness(initialHealth(), [{ ok: false, transport: false, status: 405 }])
-		harness.monitor.noticeSuspension('run-1', transientSuspension())
+	test('a novel autoResumeAfter later than the escalation deadline never probes after escalation', async () => {
+		const novel: SuspensionRecord = {
+			category: 'novel',
+			disposition: 'novel',
+			resumePolicy: 'auto',
+			message: 'Unexpected.',
+			suspendedAt: at(0),
+			escalateAfter: at(10),
+			autoResumeAfter: at(60),
+		}
+		// Only one probe is scripted: a second request would throw and fail the test.
+		const harness = createMonitorHarness(initialHealth(), [{ ok: true, status: 200 }])
+		harness.monitor.noticeSuspension('run-1', novel)
 		harness.monitor.start()
+		expect(harness.pending()?.milliseconds).toBe(5_000)
+
 		harness.advance(5_000)
 		await harness.fire()
-		expect(harness.gate.snapshot().provider.state).toBe('unknown')
+		expect(harness.pending()?.milliseconds).toBe(5_000)
+
+		harness.advance(5_000)
+		await harness.fire()
+		expect(harness.gate.snapshot().escalated).toBe(true)
+		expect(harness.gate.snapshot().provider.state).toBe('healthy')
+		expect(harness.pending()).toBeUndefined()
+	})
+
+	test('a recoverable suspension carrying an incident deadline stops probing at the deadline', async () => {
+		const record: SuspensionRecord = {
+			category: 'transient',
+			disposition: 'recoverable',
+			resumePolicy: 'auto',
+			message: 'Retry later.',
+			suspendedAt: at(0),
+			escalateAfter: at(10),
+		}
+		const failure: ProviderProbeResult = { ok: false, transport: false, status: 503 }
+		const harness = createMonitorHarness(initialHealth(), [failure])
+		harness.monitor.noticeSuspension('run-1', record)
+		harness.monitor.start()
+		expect(harness.gate.snapshot().resumePolicy).toBe('auto')
+		harness.advance(5_000)
+		await harness.fire()
+		expect(harness.pending()?.milliseconds).toBe(10_000)
+
+		harness.advance(10_000)
+		await harness.fire()
+		expect(harness.gate.snapshot().escalated).toBe(true)
+		expect(harness.gate.snapshot().resumePolicy).toBe('operator')
+		expect(harness.gate.canDispatch()).toBe(false)
+		expect(harness.pending()).toBeUndefined()
+	})
+
+	test('a human suspension cancels an already-scheduled probe', () => {
+		const harness = createMonitorHarness(initialHealth(), [])
+		harness.monitor.noticeSuspension('run-1', transientSuspension())
+		harness.monitor.start()
+		expect(harness.pending()).toBeDefined()
+		harness.monitor.noticeSuspension('run-1', operatorSuspension('auth'))
+		expect(harness.pending()).toBeUndefined()
 	})
 })
 
@@ -465,6 +574,29 @@ describe('ProviderHealthMonitor backoff, timing, and overlap', () => {
 			await harness.fire()
 		}
 		expect(harness.delays).toEqual(expected)
+	})
+
+	test('a successful probe resets the failure backoff to the base delay', async () => {
+		const failure: ProviderProbeResult = { ok: false, transport: false, status: 503 }
+		const harness = createMonitorHarness(
+			initialHealth({ state: 'degraded', category: 'transient', consecutiveFailures: 1 }),
+			[failure, failure, { ok: true, status: 200 }, failure],
+		)
+		harness.monitor.noticeSuspension('run-1', transientSuspension({ autoResumeAfter: at(60) }))
+		harness.monitor.start()
+
+		harness.advance(5_000)
+		await harness.fire()
+		harness.advance(10_000)
+		await harness.fire()
+		harness.advance(20_000)
+		await harness.fire()
+		expect(harness.gate.snapshot().provider.consecutiveFailures).toBe(0)
+		expect(harness.pending()?.milliseconds).toBe(25_000)
+
+		harness.advance(25_000)
+		await harness.fire()
+		expect(harness.delays).toEqual([5_000, 10_000, 20_000, 25_000, 5_000])
 	})
 
 	test('jitter uses the injected random value', () => {
@@ -488,7 +620,7 @@ describe('ProviderHealthMonitor backoff, timing, and overlap', () => {
 		expect(harness.delays).toEqual([5_000, 1_000])
 	})
 
-	test('a successful early probe waits for the suspension due time before onHealthy', async () => {
+	test('a successful early probe waits for the suspension due time before probing again', async () => {
 		const harness = createMonitorHarness(
 			initialHealth({ state: 'degraded', category: 'transient', consecutiveFailures: 1 }),
 			[
@@ -571,13 +703,22 @@ describe('ProviderHealthMonitor backoff, timing, and overlap', () => {
 	})
 
 	test('multiple noticeSuspension calls keep one timer and bind the latest run and category', () => {
+		const novel: SuspensionRecord = {
+			category: 'novel',
+			disposition: 'novel',
+			resumePolicy: 'auto',
+			message: 'Unexpected.',
+			suspendedAt: at(0),
+			escalateAfter: at(600),
+		}
 		const harness = createMonitorHarness(initialHealth(), [], [1])
 		harness.monitor.start()
 		harness.monitor.noticeSuspension('run-1', transientSuspension())
-		harness.monitor.noticeSuspension('run-2', operatorSuspension('billing'))
+		harness.monitor.noticeSuspension('run-2', novel)
 		expect(harness.gate.suspendedRunId()).toBe('run-2')
 		expect(harness.gate.snapshot().provider.state).toBe('unavailable')
-		expect(harness.gate.snapshot().provider.category).toBe('billing')
+		expect(harness.gate.snapshot().provider.category).toBe('novel')
+		expect(harness.gate.snapshot().disposition).toBe('novel')
 		expect(harness.delays).toEqual([5_000, 5_000])
 		expect(harness.pending()).toBeDefined()
 	})

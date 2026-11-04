@@ -1,7 +1,8 @@
 import { classifyProviderFailure } from './provider-failure.js'
-import type { ResumePolicy, SuspensionCategory, SuspensionRecord } from './types.js'
+import { dispositionOf, effectiveResumePolicy, isEscalationDue } from './suspension.js'
+import type { FailureDisposition, ResumePolicy, SuspensionCategory, SuspensionRecord } from './types.js'
 
-// The coarse states a provider can be in. 'unknown' means the health probe could not tell (for example a /models endpoint the provider does not implement); it permits dispatch because there is no evidence of failure, but it never permits an automatic resume.
+// The coarse states a provider can be in. 'unknown' means the health probe could not tell; it permits dispatch because there is no evidence of failure, but it never permits an automatic resume. Only a legacy persisted record or the initial process state is unknown.
 export type ProviderHealthState = 'healthy' | 'degraded' | 'unavailable' | 'unknown'
 
 // The health snapshot is deliberately restricted to enum, timestamps, and counters. Endpoint URLs, credentials, model names, headers, request content, and provider error bodies never enter this record.
@@ -18,14 +19,18 @@ export type ProviderHealth = {
 export type HealthView = {
 	provider: ProviderHealth
 	suspendedRunId: string | null
-	// The bound suspension's coarse policy, null when no suspended run is bound (including a boot adoption before its record is hydrated).
+	// The bound suspension's effective policy, null when no suspended run is bound (including a boot adoption before its record is hydrated).
 	resumePolicy: ResumePolicy | null
+	disposition: FailureDisposition | null
+	escalateAfter: string | null
+	// True when this suspension carries an incident deadline that has passed; the derived policy is then operator regardless of the current disposition.
+	escalated: boolean
 }
 
-// The granularity the monitor needs from a probe: a boolean result, the HTTP status when one arrived, whether the failure was transport-level, the provider's requested wait, and a classification when the probe could read a billing/auth signature. The raw body stays with the model-list resolver.
+// The granularity the monitor needs from a probe: a boolean result, the HTTP status when one arrived, whether the failure was transport-level, the provider's requested wait, a classification when the probe could read a known category, and a bounded diagnostic detail. The raw success body is never retained.
 export type ProviderProbeResult =
 	| { ok: true; status: number }
-	| { ok: false; transport: boolean; status?: number; retryAfterMs?: number; category?: SuspensionCategory }
+	| { ok: false; transport: boolean; status?: number; retryAfterMs?: number; category?: SuspensionCategory; reason?: string; detail?: string }
 
 // A failure reduced to what the health state needs. It is structurally satisfied by ProviderFailureClassification, so a role call's classification can be recorded without translation.
 export interface ProviderHealthFailure {
@@ -36,10 +41,10 @@ export interface ProviderHealthFailure {
 export type ProviderProbeSchedule = (callback: () => void, milliseconds: number) => () => void
 
 // The gate's contract:
-// - noticeSuspension binds a paused run and records its category, so a bound transient suspension can never leave the gate healthy.
+// - noticeSuspension binds a paused run and records its category, so a bound suspension can never leave the gate healthy.
 // - clearSuspendedRun releases the binding; resume and terminate call it, including a terminate whose meta is already missing.
 // - observeSuccess/observeFailure are for priority (role) calls only; summary calls never report here.
-// - autoResumeAllowed is true only for a bound transient auto suspension while the provider is healthy and the suspension's due time has arrived.
+// - autoResumeAllowed is true only for a bound automatic suspension before any incident deadline, while the provider is healthy and the suspension's due time has arrived.
 // - The snapshot is coarse by construction; no URL, credential, model name, header, request content, or provider body can enter it.
 export interface ProviderGate {
 	observeSuccess(at: string): void
@@ -55,7 +60,7 @@ export interface ProviderGate {
 	suspendedRunId(): string | undefined
 }
 
-// A transient failure is retried automatically; every other category needs an operator decision. 'unknown' is inconclusive and therefore also operator-only.
+// A transient failure degrades provider health; every other category is unavailable. 'unknown' is inconclusive and therefore dispatchable but never auto-resumed.
 function stateForCategory(category: SuspensionCategory): ProviderHealthState {
 	if (category === 'transient') return 'degraded'
 	if (category === 'unknown') return 'unknown'
@@ -79,7 +84,7 @@ function isValidProviderHealth(health: ProviderHealth): boolean {
 	if (health.state === 'healthy') return health.category === 'none'
 	if (health.state === 'degraded') return health.category === 'transient'
 	if (health.state === 'unknown') return health.category === 'unknown'
-	return health.category === 'billing' || health.category === 'auth' || health.category === 'request_rejected'
+	return health.category === 'billing' || health.category === 'auth' || health.category === 'request_rejected' || health.category === 'novel'
 }
 
 function copyHealth(health: ProviderHealth): ProviderHealth {
@@ -141,7 +146,7 @@ function withNextProbeAt(health: ProviderHealth, nextProbeAt: string | undefined
 	return copy
 }
 
-export function createProviderGate(initial: ProviderHealth): ProviderGate {
+export function createProviderGate(initial: ProviderHealth, now: () => string): ProviderGate {
 	if (!isValidProviderHealth(initial)) throw new Error('createProviderGate: invalid initial provider health state')
 	let health = copyHealth(initial)
 	let boundRunId: string | undefined
@@ -158,7 +163,15 @@ export function createProviderGate(initial: ProviderHealth): ProviderGate {
 			health = withNextProbeAt(health, nextProbeAt)
 		},
 		snapshot() {
-			return { provider: copyHealth(health), suspendedRunId: boundRunId ?? null, resumePolicy: boundSuspension?.resumePolicy ?? null }
+			const at = now()
+			return {
+				provider: copyHealth(health),
+				suspendedRunId: boundRunId ?? null,
+				resumePolicy: boundSuspension === undefined ? null : effectiveResumePolicy(boundSuspension, at),
+				disposition: boundSuspension === undefined ? null : dispositionOf(boundSuspension),
+				escalateAfter: boundSuspension?.escalateAfter ?? null,
+				escalated: boundSuspension !== undefined && isEscalationDue(boundSuspension, at),
+			}
 		},
 		// 'unknown' permits dispatch because it carries no evidence that the provider is broken; 'degraded' and 'unavailable' stop new work.
 		canDispatch() {
@@ -166,7 +179,7 @@ export function createProviderGate(initial: ProviderHealth): ProviderGate {
 		},
 		autoResumeAllowed(at) {
 			if (boundRunId === undefined || boundSuspension === undefined) return false
-			if (boundSuspension.category !== 'transient' || boundSuspension.resumePolicy !== 'auto') return false
+			if (effectiveResumePolicy(boundSuspension, at) !== 'auto') return false
 			if (health.state !== 'healthy') return false
 			if (boundSuspension.autoResumeAfter === undefined) return true
 			const dueMs = Date.parse(boundSuspension.autoResumeAfter)
@@ -215,13 +228,6 @@ function firstProbeDelayMs(suspension: SuspensionRecord, nowMs: number, random: 
 }
 
 function classifyProbeFailure(result: Extract<ProviderProbeResult, { ok: false }>): ProviderHealthFailure {
-	// A model-list endpoint that is absent is inconclusive rather than broken: some OpenAI-compatible servers serve completions but not /models (docs/reference.md "Provider health gate").
-	if (result.status === 404 || result.status === 405) {
-		return {
-			category: 'unknown',
-			...(result.retryAfterMs !== undefined ? { retryAfterMs: result.retryAfterMs } : {}),
-		}
-	}
 	if (result.category !== undefined) {
 		return {
 			category: result.category,
@@ -236,6 +242,11 @@ function classifyProbeFailure(result: Extract<ProviderProbeResult, { ok: false }
 	}
 }
 
+// The monitor probes only while auto-resume is still possible: automatic failures keep probing until an incident deadline, and human ones never start.
+function suspensionNeedsProbing(suspension: SuspensionRecord, at: string): boolean {
+	return effectiveResumePolicy(suspension, at) === 'auto'
+}
+
 export interface ProviderHealthMonitorDependencies {
 	gate: ProviderGate
 	probe: () => Promise<ProviderProbeResult>
@@ -245,7 +256,7 @@ export interface ProviderHealthMonitorDependencies {
 	onHealthy: (at: string) => void
 }
 
-// The monitor's contract: start enables probing, stop cancels/ignores every pending and in-flight probe, noticeSuspension binds and records a new pause, releaseSuspension forgets that pause (optionally continuing to probe an unhealthy provider), every successful probe reports the health change through onHealthy, and a dispatchable inconclusive probe reports it too so blocked work wakes. ensureProbing restarts probing when blocked work arrives after an idle release. A probe rejection is treated as a transient failure. Probes are serialized: a notice during an in-flight probe defers the next schedule until that probe settles, and an epoch guard discards its result.
+// The monitor's contract: start enables probing, stop cancels/ignores every pending and in-flight probe, noticeSuspension binds and records a new pause, releaseSuspension forgets that pause (optionally continuing to probe an unhealthy provider), and every successful probe reports the health change through onHealthy. ensureProbing restarts probing when blocked work arrives after an idle release. A probe rejection is treated as a transient failure. Probes are serialized: a notice during an in-flight probe defers the next schedule until that probe settles, and an epoch guard discards its result.
 export interface ProviderHealthMonitor {
 	start(): void
 	stop(): void
@@ -291,22 +302,30 @@ export function createProviderHealthMonitor(dependencies: ProviderHealthMonitorD
 		// Every successful probe is a health change: the coordinator decides whether to resume and always dispatches settled waiting work.
 		dependencies.onHealthy(at)
 		if (!started) return
-		// A successful probe before the suspension's earliest resume time must not wake the scheduler early; probe again at the due time instead.
 		const suspension = currentSuspension
-		if (suspension === undefined || suspension.resumePolicy !== 'auto' || suspension.autoResumeAfter === undefined) return
-		if (dependencies.gate.autoResumeAllowed(at)) return
-		const dueMs = Date.parse(suspension.autoResumeAfter)
-		if (Number.isNaN(dueMs) || dueMs <= atMs) return
-		schedule(dueMs - atMs)
+		if (suspension === undefined || !suspensionNeedsProbing(suspension, at)) return
+		if (suspension.autoResumeAfter !== undefined) {
+			// The coordinator declines to resume before autoResumeAfter, so wait for the due time rather than spending completion probes every few seconds during a long Retry-After.
+			if (dependencies.gate.autoResumeAllowed(at)) return
+			const dueMs = Date.parse(suspension.autoResumeAfter)
+			if (Number.isNaN(dueMs) || dueMs <= atMs) return
+			// An incident deadline can arrive before the due time; scheduling no later than it (and re-checking in runProbe) avoids one last billed probe after escalation.
+			const deadlineMs = suspension.escalateAfter === undefined ? undefined : Date.parse(suspension.escalateAfter)
+			const nextDelayMs = deadlineMs === undefined || Number.isNaN(deadlineMs) ? dueMs - atMs : Math.min(dueMs - atMs, deadlineMs - atMs)
+			if (nextDelayMs <= 0) return
+			schedule(nextDelayMs)
+			return
+		}
+		// Without an explicit due time a success means the run should resume now; if no handler released the binding, keep probing from the base delay rather than silently stopping.
+		schedule(probeBackoffMs(1, undefined, dependencies.random))
 	}
 
 	function handleProbeFailure(result: Extract<ProviderProbeResult, { ok: false }>, at: string, atMs: number): void {
 		const failure = classifyProbeFailure(result)
-		// An inconclusive probe (a missing /models endpoint) must not keep probing toward an automatic resume; the operator resumes this suspension explicitly.
-		if (failure.category === 'unknown') {
+		const suspension = currentSuspension
+		// A human suspension and any escalated incident are operator decisions: record the failed probe but schedule nothing further.
+		if (suspension !== undefined && !suspensionNeedsProbing(suspension, at)) {
 			dependencies.gate.observeFailure(failure, at)
-			// An inconclusive probe still permits dispatch; report it so a released-but-blocked queue wakes instead of waiting forever.
-			dependencies.onHealthy(at)
 			return
 		}
 		const consecutiveFailures = dependencies.gate.snapshot().provider.consecutiveFailures + 1
@@ -318,6 +337,11 @@ export function createProviderHealthMonitor(dependencies: ProviderHealthMonitorD
 
 	async function runProbe(): Promise<void> {
 		if (!started || probeInFlight) return
+		// The deadline can pass while a timer waits; re-check before issuing a billable request so an escalated incident and a human suspension never probe again.
+		if (currentSuspension !== undefined && !suspensionNeedsProbing(currentSuspension, dependencies.now())) {
+			dependencies.gate.planProbe(undefined)
+			return
+		}
 		probeInFlight = true
 		const epoch = probeEpoch
 		try {
@@ -347,8 +371,14 @@ export function createProviderHealthMonitor(dependencies: ProviderHealthMonitorD
 		start() {
 			if (started) return
 			started = true
-			if (dependencies.gate.suspendedRunId() === undefined) return
 			const atMs = nowMs()
+			if (currentSuspension !== undefined && !suspensionNeedsProbing(currentSuspension, new Date(atMs).toISOString())) {
+				pendingDelayMs = undefined
+				if (cancelTimer !== undefined) cancelTimer()
+				cancelTimer = undefined
+				return
+			}
+			if (dependencies.gate.suspendedRunId() === undefined) return
 			const nextProbeAt = dependencies.gate.snapshot().provider.nextProbeAt
 			if (nextProbeAt !== undefined) {
 				const dueMs = Date.parse(nextProbeAt)
@@ -399,6 +429,12 @@ export function createProviderHealthMonitor(dependencies: ProviderHealthMonitorD
 			dependencies.gate.noticeSuspension(runId, suspension, at)
 			const atMs = Date.parse(at)
 			if (Number.isNaN(atMs)) throw new Error(`Provider health monitor received an invalid timestamp: ${at}`)
+			if (!suspensionNeedsProbing(suspension, at)) {
+				pendingDelayMs = undefined
+				if (cancelTimer !== undefined) cancelTimer()
+				cancelTimer = undefined
+				return
+			}
 			schedule(firstProbeDelayMs(suspension, atMs, dependencies.random))
 		},
 	}

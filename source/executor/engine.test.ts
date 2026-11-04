@@ -330,6 +330,7 @@ function makeDeps(llm: LlmCaller, registryCounter = 0): { deps: EngineDependenci
 		publishDelta: noOpPublishDelta,
 		roleSnapshots,
 		readProjectDoc: () => ({ kind: 'unavailable', reason: 'not used in these tests' }),
+		suspensionIncident: {},
 	}
 	return { deps, events, checkpoints: sink.checkpoints, parkTracker, roleSnapshots }
 }
@@ -4906,6 +4907,32 @@ describe('runRole — provider failure suspensions', () => {
 		const failureEvent = defined(events.find((event) => event.type === 'provider_failure'), 'provider_failure event')
 		expect(payloadField(failureEvent, 'message')).toBe('The model provider failed')
 		expect(payloadField(failureEvent, 'detail')).toBeUndefined()
+	})
+
+	test('a successful call clears the carried incident before a later provider failure', async () => {
+		const guild = buildGuild({ main: { systemPrompt: 'p', tools: ['finish'] } }, 'main')
+		const llm = new FakeLlm()
+		llm.responses = [
+			success([{ id: 'unknown-1', type: 'function', function: { name: 'not_a_guild_tool', arguments: '{}' } }]),
+			providerFailure('novel'),
+		]
+		const { deps } = makeDeps(llm)
+		deps.suspensionIncident.priorSuspension = {
+			category: 'novel',
+			disposition: 'novel',
+			resumePolicy: 'auto',
+			message: 'Unexpected.',
+			suspendedAt: '2020-01-01T00:00:00.000Z',
+			escalateAfter: '2030-01-01T00:00:00.000Z',
+			resumeAttempts: 9,
+		}
+
+		const outcome = await runRole(deps, { loadedGuild: guild, depth: 0, roleName: 'main', task: 'do it' })
+
+		expect(outcome.kind).toBe('suspended')
+		if (outcome.kind !== 'suspended') throw new Error('expected a suspension')
+		expect(outcome.suspension.resumeAttempts).toBe(1)
+		expect(outcome.suspension.escalateAfter).not.toBe('2030-01-01T00:00:00.000Z')
 	})
 
 	test('a provider failure in a delegated child suspends without delivering a card to the parent', async () => {

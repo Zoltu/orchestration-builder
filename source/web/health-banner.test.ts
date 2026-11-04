@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import { deriveHealthBanner } from './static/ts/health-banner.js'
 import type { HealthView } from './static/ts/run-list-feed/index.js'
 
-function health(provider: Partial<HealthView['provider']> = {}, suspendedRunId: string | null = null, resumePolicy: HealthView['resumePolicy'] = null): HealthView {
+function health(provider: Partial<HealthView['provider']> = {}, suspendedRunId: string | null = null, resumePolicy: HealthView['resumePolicy'] = null, disposition: HealthView['disposition'] = null, escalateAfter: string | null = null, escalated = false): HealthView {
 	return {
 		provider: {
 			state: 'healthy',
@@ -14,6 +14,9 @@ function health(provider: Partial<HealthView['provider']> = {}, suspendedRunId: 
 		},
 		suspendedRunId,
 		resumePolicy,
+		disposition,
+		escalateAfter,
+		escalated,
 	}
 }
 
@@ -50,6 +53,41 @@ describe('deriveHealthBanner', () => {
 		expect(deriveHealthBanner(health({ state: 'degraded', category: 'transient' }, 'run-1', 'auto'))).toEqual({
 			tone: 'info',
 			message: 'Model provider unavailable \u2014 retrying automatically.',
+		})
+	})
+
+	test('a recoverable disposition retries automatically', () => {
+		expect(deriveHealthBanner(health({ state: 'degraded', category: 'transient' }, 'run-1', 'auto', 'recoverable'))).toEqual({
+			tone: 'info',
+			message: 'Run suspended \u2014 retrying automatically.',
+		})
+	})
+
+	test('a recoverable incident with a future deadline names when it will stop retrying', () => {
+		expect(deriveHealthBanner(health({ state: 'degraded', category: 'transient' }, 'run-1', 'auto', 'recoverable', '2026-01-01T00:16:00.000Z'))).toEqual({
+			tone: 'info',
+			message: 'Run suspended \u2014 retrying automatically until 2026-01-01T00:16:00.000Z.',
+		})
+	})
+
+	test('a recoverable incident past its inherited deadline needs attention', () => {
+		expect(deriveHealthBanner(health({ state: 'degraded', category: 'transient' }, 'run-1', 'operator', 'recoverable', '2026-01-01T00:05:00.000Z', true))).toEqual({
+			tone: 'warning',
+			message: 'Run suspended \u2014 needs your attention.',
+		})
+	})
+
+	test('a novel incident before its deadline names the escalation time and retries automatically', () => {
+		expect(deriveHealthBanner(health({ state: 'unavailable', category: 'novel' }, 'run-1', 'auto', 'novel', '2026-01-01T00:16:00.000Z'))).toEqual({
+			tone: 'info',
+			message: 'The model provider is failing unexpectedly \u2014 retrying automatically until 2026-01-01T00:16:00.000Z.',
+		})
+	})
+
+	test('an escalated novel incident needs attention', () => {
+		expect(deriveHealthBanner(health({ state: 'unavailable', category: 'novel' }, 'run-1', 'operator', 'novel', '2026-01-01T00:16:00.000Z', true))).toEqual({
+			tone: 'warning',
+			message: 'Run suspended \u2014 needs your attention.',
 		})
 	})
 

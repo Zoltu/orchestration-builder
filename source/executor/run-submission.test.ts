@@ -1213,17 +1213,19 @@ describe('createResumeErroredOrSuspendedRun', () => {
 		return { id: 'item-1', task: 'do it', status: 'error', runId: 'run-20260101-000009', queuedAt: '2026-01-01T00:00:00.000Z', settledAt: '2026-01-01T00:05:00.000Z', error: 'LLM unavailable: connection refused' }
 	}
 
-	function createHarness(input: { metas: Map<string, string>; checkpoints: Map<string, string>; queue?: Array<QueueItemView> }): { resumeErroredOrSuspendedRun: ReturnType<typeof createResumeErroredOrSuspendedRun>; submission: RunSubmission; taskQueue: TaskQueueModule; queue: ReturnType<typeof createQueueStore>; resumedNotes: () => Array<string | undefined>; resumedExplicit: () => Array<boolean | undefined>; resumedPriorSuspensions: () => Array<SuspensionRecord | undefined>; setDeletePauseResult: (result: boolean) => void; deletedPauseRequests: () => string[] } {
+	function createHarness(input: { metas: Map<string, string>; checkpoints: Map<string, string>; queue?: Array<QueueItemView> }): { resumeErroredOrSuspendedRun: ReturnType<typeof createResumeErroredOrSuspendedRun>; submission: RunSubmission; taskQueue: TaskQueueModule; queue: ReturnType<typeof createQueueStore>; resumedNotes: () => Array<string | undefined>; resumedExplicit: () => Array<boolean | undefined>; resumedFreshIncidents: () => Array<boolean | undefined>; resumedPriorSuspensions: () => Array<SuspensionRecord | undefined>; setDeletePauseResult: (result: boolean) => void; deletedPauseRequests: () => string[] } {
 		const queue = createQueueStore(input.queue ?? [])
 		const readers = createReaders(input.metas, input.checkpoints)
 		let resumeNote: string | undefined
 		let explicitResume: boolean | undefined
+		let freshIncident: boolean | undefined
 		let priorSuspension: SuspensionRecord | undefined
 		let deletePauseSucceeds = true
 		const deletedPauseRequests: string[] = []
 		const resumeRun: ResumeRun = async (checkpoint, options) => {
 			resumeNote = options?.resumeNote
 			explicitResume = options?.explicitResume
+			freshIncident = options?.freshIncident
 			priorSuspension = options?.priorSuspension
 			return sampleMeta(checkpoint.runId)
 		}
@@ -1249,6 +1251,7 @@ describe('createResumeErroredOrSuspendedRun', () => {
 			queue,
 			resumedNotes: () => [resumeNote],
 			resumedExplicit: () => [explicitResume],
+			resumedFreshIncidents: () => [freshIncident],
 			resumedPriorSuspensions: () => [priorSuspension],
 			setDeletePauseResult: (result) => {
 				deletePauseSucceeds = result
@@ -1295,7 +1298,7 @@ describe('createResumeErroredOrSuspendedRun', () => {
 		expect(harness.resumedNotes()).toEqual([undefined])
 	})
 
-	test('a suspended resume re-activates the item, clears the priority slot, and passes the prior suspension', async () => {
+	test('a suspended resume re-activates the item, clears the priority slot, and starts a fresh incident', async () => {
 		const runId = 'run-20260101-000009'
 		const metas = new Map([[runId, JSON.stringify(suspendedMeta(runId))]])
 		const checkpoints = new Map([[runId, JSON.stringify(sampleCheckpoint(runId))]])
@@ -1311,7 +1314,8 @@ describe('createResumeErroredOrSuspendedRun', () => {
 		expect(reactivated?.suspendedAt).toBeUndefined()
 		expect(harness.resumedNotes()).toEqual([undefined])
 		expect(harness.resumedExplicit()).toEqual([true])
-		expect(harness.resumedPriorSuspensions()).toEqual([suspension])
+		expect(harness.resumedFreshIncidents()).toEqual([true])
+		expect(harness.resumedPriorSuspensions()).toEqual([undefined])
 
 		await harness.submission.awaitActive()
 		await harness.taskQueue.onRunSettled(sampleMeta(runId))
@@ -1326,7 +1330,8 @@ describe('createResumeErroredOrSuspendedRun', () => {
 
 		expect(harness.resumeErroredOrSuspendedRun(runId, 'credit is topped up')).toEqual({ ok: true, runId })
 		expect(harness.resumedNotes()).toEqual(['The operator resumed this suspended run. Message from the operator: credit is topped up'])
-		expect(harness.resumedPriorSuspensions()).toEqual([suspension])
+		expect(harness.resumedFreshIncidents()).toEqual([true])
+		expect(harness.resumedPriorSuspensions()).toEqual([undefined])
 		await harness.submission.awaitActive()
 	})
 

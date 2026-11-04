@@ -1,5 +1,5 @@
 import { isErrorKind, ValidationError } from './errors.js'
-import { isSuspendedStatus } from './suspension.js'
+import { deriveDisposition, dispositionForCategory, isSuspendedStatus } from './suspension.js'
 import { isLogLevel } from './log-level.js'
 import { isRunIdShape } from './run-id.js'
 import type {
@@ -7,6 +7,7 @@ import type {
 	DeploymentFileConfig,
 	EffortLevel,
 	ExecutorConfig,
+	FailureDisposition,
 	GenerationConfig,
 	GuildConfig,
 	HumanFacingText,
@@ -111,7 +112,17 @@ const resultCardStatuses: readonly ResultCard['status'][] = ['success', 'error',
 
 const runMetaStatuses: readonly RunMeta['status'][] = ['running', 'suspended', 'success', 'error', 'needs_clarification', 'interrupted']
 
-const suspensionCategories: readonly SuspensionCategory[] = ['transient', 'billing', 'auth', 'request_rejected', 'unknown']
+const suspensionCategories: readonly SuspensionCategory[] = ['transient', 'billing', 'auth', 'request_rejected', 'novel', 'unknown']
+
+const failureDispositions: readonly FailureDisposition[] = ['human', 'recoverable', 'novel']
+
+export function isSuspensionCategory(value: unknown): value is SuspensionCategory {
+	return typeof value === 'string' && suspensionCategories.some((category) => category === value)
+}
+
+export function isFailureDisposition(value: unknown): value is FailureDisposition {
+	return typeof value === 'string' && failureDispositions.some((disposition) => disposition === value)
+}
 
 function isIsoTimestamp(value: unknown): value is string {
 	if (!isString(value)) return false
@@ -128,16 +139,31 @@ export function isOperatorPauseRecord(value: unknown): value is OperatorPauseRec
 
 export function isSuspensionRecord(value: unknown): value is SuspensionRecord {
 	if (!isObject(value)) return false
-	if (!isString(value.category) || !suspensionCategories.some((category) => category === value.category)) return false
+	if (!isSuspensionCategory(value.category)) return false
 	if (value.resumePolicy !== 'auto' && value.resumePolicy !== 'operator') return false
-	// Only a transient failure may auto-resume; an operator policy is valid for every category, including a transient suspension downgraded after the automatic-attempt cap.
-	if (value.resumePolicy === 'auto' && value.category !== 'transient') return false
+	let disposition: FailureDisposition
+	if (value.disposition === undefined) {
+		disposition = deriveDisposition(value.category, value.resumePolicy)
+	} else {
+		if (!isFailureDisposition(value.disposition)) return false
+		if (value.disposition !== dispositionForCategory(value.category)) return false
+		disposition = value.disposition
+	}
+	// The disposition and the persisted policy are one decision: human records are operator-only, recoverable and novel records are automatic. A legacy transient record with an operator policy is the removed cap's downgrade and reads as human.
+	const requiredPolicy = disposition === 'human' ? 'operator' : 'auto'
+	if (value.resumePolicy !== requiredPolicy) return false
 	if (!isString(value.message) || value.message === '') return false
 	if (!isIsoTimestamp(value.suspendedAt)) return false
 	if (value.autoResumeAfter !== undefined) {
 		if (value.resumePolicy !== 'auto' || !isIsoTimestamp(value.autoResumeAfter)) return false
 		if (Date.parse(value.autoResumeAfter) < Date.parse(value.suspendedAt)) return false
 	}
+	// The deadline belongs to the incident, so a recoverable record may carry one inherited from an earlier novel failure. A novel failure still starts an incident and therefore requires it; a human decision never carries one.
+	if (value.escalateAfter !== undefined) {
+		if (disposition === 'human' || !isIsoTimestamp(value.escalateAfter)) return false
+		if (Date.parse(value.escalateAfter) < Date.parse(value.suspendedAt)) return false
+	}
+	if (disposition === 'novel' && value.escalateAfter === undefined) return false
 	if (value.resumeAttempts !== undefined && !isNonNegativeInteger(value.resumeAttempts)) return false
 	return true
 }

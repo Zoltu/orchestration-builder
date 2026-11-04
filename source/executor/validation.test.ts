@@ -7,6 +7,7 @@ import {
 	isProjectSettings,
 	isResultCard,
 	isRunMeta,
+	isSuspensionRecord,
 	isTerminalRunStatus,
 	validateDeploymentFileConfig,
 	validateDeploymentRoleReferences,
@@ -87,6 +88,43 @@ describe('boolean guards', () => {
 		expect(isRunMeta({ runId: 'r', task: 't', status: 'suspended', startTime: 'now', suspension: { ...suspension, autoResumeAfter: '2026-01-01T00:00:05.000Z' } })).toBe(false)
 	})
 
+	test('isSuspensionRecord accepts legacy records and validates the new disposition fields', () => {
+		const legacy = { category: 'transient' as const, resumePolicy: 'auto' as const, message: 'Retry later.', suspendedAt: '2026-01-01T00:00:00.000Z' }
+		expect(isSuspensionRecord(legacy)).toBe(true)
+		expect(isSuspensionRecord({ ...legacy, disposition: 'recoverable', resumeAttempts: 100 })).toBe(true)
+		expect(isSuspensionRecord({ ...legacy, disposition: 'human' })).toBe(false)
+		expect(isSuspensionRecord({ ...legacy, disposition: 'unexpected' })).toBe(false)
+		expect(isSuspensionRecord({ ...legacy, disposition: 'recoverable', escalateAfter: '2026-01-01T00:15:00.000Z' })).toBe(true)
+		expect(isSuspensionRecord({ ...legacy, disposition: 'recoverable', escalateAfter: '2025-12-31T23:59:59.000Z' })).toBe(false)
+		// A legacy record downgraded by the removed attempt cap kept its operator policy; it must remain human.
+		const legacyCapped = { ...legacy, resumePolicy: 'operator' as const, resumeAttempts: 6 }
+		expect(isSuspensionRecord(legacyCapped)).toBe(true)
+
+		// A present disposition must match its category mapping and its policy.
+		expect(isSuspensionRecord({ ...legacy, disposition: 'human', resumePolicy: 'operator' })).toBe(false)
+		expect(isSuspensionRecord({ ...legacy, disposition: 'recoverable', resumePolicy: 'operator' })).toBe(false)
+		const human = { category: 'billing' as const, disposition: 'human' as const, resumePolicy: 'operator' as const, message: 'Top up.', suspendedAt: '2026-01-01T00:00:00.000Z' }
+		expect(isSuspensionRecord(human)).toBe(true)
+		expect(isSuspensionRecord({ ...human, resumePolicy: 'auto' })).toBe(false)
+		expect(isSuspensionRecord({ ...human, disposition: 'recoverable' })).toBe(false)
+		expect(isSuspensionRecord({ ...human, escalateAfter: '2026-01-01T00:15:00.000Z' })).toBe(false)
+
+		const novel = {
+			category: 'novel' as const,
+			disposition: 'novel' as const,
+			resumePolicy: 'auto' as const,
+			message: 'Unexpected.',
+			suspendedAt: '2026-01-01T00:00:00.000Z',
+			escalateAfter: '2026-01-01T00:15:00.000Z',
+			autoResumeAfter: '2026-01-01T00:00:05.000Z',
+		}
+		expect(isSuspensionRecord(novel)).toBe(true)
+		expect(isSuspensionRecord({ ...novel, escalateAfter: undefined })).toBe(false)
+		expect(isSuspensionRecord({ ...novel, escalateAfter: '2025-12-31T23:59:59.000Z' })).toBe(false)
+		expect(isSuspensionRecord({ ...novel, escalateAfter: 'not-a-time' })).toBe(false)
+		expect(isSuspensionRecord({ ...novel, resumePolicy: 'operator' })).toBe(false)
+		expect(isSuspensionRecord({ ...novel, disposition: 'recoverable' })).toBe(false)
+	})
 	test('isRunMeta accepts exactly one pause cause on a suspended meta and none otherwise', () => {
 		const suspension = { category: 'billing' as const, resumePolicy: 'operator' as const, message: 'Top up.', suspendedAt: '2026-01-01T00:00:00.000Z' }
 		const pause = { message: 'The operator paused this run.', pausedAt: '2026-01-01T00:00:00.000Z' }

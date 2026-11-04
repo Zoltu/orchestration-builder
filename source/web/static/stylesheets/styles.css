@@ -4385,6 +4385,66 @@ li:last-child {
 	cursor: default;
 }
 
+.suspended-card-details {
+	margin: var(--space-3) 0;
+	border: 1px solid var(--color-border);
+	border-radius: var(--radius-sm);
+	padding: var(--space-2) var(--space-3);
+}
+
+.suspended-card-details-summary {
+	cursor: pointer;
+	color: var(--color-text-muted);
+	font-size: 0.85rem;
+	font-weight: 600;
+}
+
+.suspended-card-diagnostics-heading {
+	margin: var(--space-3) 0 var(--space-1);
+	font-size: 0.8rem;
+	font-weight: 700;
+	text-transform: uppercase;
+	letter-spacing: 0.04em;
+}
+
+.suspended-card-diagnostic-line {
+	margin: 0;
+	font-family: var(--font-mono);
+	font-size: 0.78rem;
+}
+
+.suspended-card-diagnostic-empty,
+.suspended-card-diagnostics-loading,
+.suspended-card-diagnostics-failed {
+	margin: var(--space-2) 0;
+	color: var(--color-text-muted);
+	font-size: 0.85rem;
+}
+
+.suspended-card-diagnostic-detail {
+	margin: var(--space-2) 0;
+	padding: var(--space-2);
+	max-height: 14rem;
+	overflow: auto;
+	border-radius: var(--radius-sm);
+	background: var(--color-surface-sunken);
+	font-size: 0.78rem;
+	white-space: pre-wrap;
+	word-break: break-word;
+}
+
+.suspended-card-copy-diagnostics,
+.suspended-card-diagnostics-retry {
+	margin-top: var(--space-2);
+	border: 1px solid var(--color-border-strong);
+	border-radius: var(--radius-sm);
+	padding: var(--space-1) var(--space-2);
+	background: var(--color-surface);
+	color: var(--color-text);
+	font: inherit;
+	cursor: pointer;
+}
+
 .flow-cta-face-warning {
 	filter: saturate(1.05);
 }

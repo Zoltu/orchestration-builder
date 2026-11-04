@@ -27,17 +27,24 @@ export type OperationOutcome = 'success' | 'error' | 'terminated'
 export type RunStatus = 'running' | 'suspended' | 'success' | 'error' | 'needs_clarification' | 'interrupted' | 'unknown'
 
 // The cause of a suspended pause, mirroring the executor's SuspensionCategory. The UI renders fixed copy per category and never the provider's endpoint, credentials, model, or response body.
-export type SuspensionCategory = 'transient' | 'billing' | 'auth' | 'request_rejected' | 'unknown'
+export type SuspensionCategory = 'transient' | 'billing' | 'auth' | 'request_rejected' | 'novel' | 'unknown'
 
 export type ResumePolicy = 'auto' | 'operator'
+
+// The policy a suspension applies: human requires an operator, recoverable retries automatically without a cap, and novel retries automatically only until its escalation deadline.
+export type FailureDisposition = 'human' | 'recoverable' | 'novel'
 
 // The operator-safe suspension record a suspended run meta carries. `message` is platform-authored; the pause card uses the category's fixed copy instead of rendering provider detail.
 export interface SuspensionRecord {
 	category: SuspensionCategory
+	// Absent only on records persisted before dispositions existed; derive it from category for those.
+	disposition?: FailureDisposition
 	resumePolicy: ResumePolicy
 	message: string
 	suspendedAt: string
 	autoResumeAfter?: string
+	// The moment a novel incident stops auto-resuming and becomes an operator decision. Present only for novel records.
+	escalateAfter?: string
 	resumeAttempts?: number
 }
 

@@ -101,8 +101,8 @@ const QUEUE_STATUS_LABELS: Record<string, string> = {
 	cancelled: 'cancelled',
 }
 
-export function queueStatusLabel(status: string, pauseKind: RunPauseKind = 'none'): string {
-	const suspendedLabel = deriveSuspendedStatusLabel(status, pauseKind)
+export function queueStatusLabel(status: string, pauseKind: RunPauseKind = 'none', needsAttention = false): string {
+	const suspendedLabel = deriveSuspendedStatusLabel(status, pauseKind, needsAttention)
 	if (suspendedLabel !== null) return suspendedLabel
 	return QUEUE_STATUS_LABELS[status] ?? status
 }

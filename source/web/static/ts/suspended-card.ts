@@ -1,11 +1,15 @@
-// The pause card for a suspended run: a separate, non-error surface from the terminal result modal. It shows fixed category copy, the pause time, and the resume/terminate actions; it never renders a result card, error framing, copy-raw, or the provider's technical detail.
+// The pause card for a suspended run: a separate, non-error surface from the terminal result modal. It shows fixed category copy, the pause time, and the resume/terminate actions, plus an on-demand "Technical details" disclosure whose raw provider text is rendered only as preformatted text nodes.
 
 import { isObject } from './guards.js'
 import { isSuspendedStatus } from './interaction-model.js'
 import type { SuspensionCategory, SuspensionRecord } from './interaction-model.js'
 import { isSuspensionRecord } from './run-list-feed/index.js'
 import { isOperatorPauseRecord } from './run-pause.js'
+import { diagnosticsCopyJson } from './run-diagnostics.js'
+import type { RunDiagnostics, SuspendedDiagnosticsLoad } from './run-diagnostics.js'
 import type { LooseH, Vnode } from '../vendor/hyperapp.js'
+
+export type { SuspendedDiagnosticsLoad } from './run-diagnostics.js'
 
 export type SuspendedCardKind = 'operator' | 'provider'
 
@@ -26,6 +30,7 @@ const CATEGORY_COPY: Record<SuspensionCategory, string> = {
 	auth: 'The model provider rejected the deployment\u2019s credentials. Fix the deployment and restart, then resume this run.',
 	transient: 'The model provider is temporarily unavailable. This run can resume when the provider is healthy again.',
 	request_rejected: 'The model endpoint rejected the request. Resume after fixing the deployment.',
+	novel: 'The model provider returned an unexpected failure. The run is retried briefly, then waits for an operator.',
 	unknown: 'The model provider returned an unexpected failure. Resume when the provider is healthy.',
 }
 
@@ -36,7 +41,7 @@ function suspensionCauseCopy(category: SuspensionCategory): string {
 function categoryOf(value: unknown): SuspensionCategory {
 	if (!isObject(value)) return 'unknown'
 	const category = value['category']
-	if (category === 'transient' || category === 'billing' || category === 'auth' || category === 'request_rejected' || category === 'unknown') return category
+	if (category === 'transient' || category === 'billing' || category === 'auth' || category === 'request_rejected' || category === 'novel' || category === 'unknown') return category
 	return 'unknown'
 }
 
@@ -106,6 +111,13 @@ export function suspendedTerminateTarget(runId: string, itemId: string | null): 
 	return { url: `api/runs/${encodeURIComponent(runId)}/terminate`, pendingId: runId }
 }
 
+export interface SuspendedCardDiagnostics {
+	open: boolean
+	load: SuspendedDiagnosticsLoad
+	onToggle: unknown
+	onRetry: unknown
+}
+
 export interface SuspendedCardProps {
 	descriptor: SuspendedCardDescriptor
 	runLabel?: string | null
@@ -116,6 +128,79 @@ export interface SuspendedCardProps {
 	onResume?: unknown
 	onTerminate?: unknown
 	onClose: unknown
+	diagnostics?: SuspendedCardDiagnostics
+	onCopyDiagnostics?: (rawJson: string) => void
+}
+
+function diagnosticsLine(h: LooseH, label: string, value: string): Vnode {
+	return h('p', { class: 'suspended-card-diagnostic-line' }, `${label}: ${value}`)
+}
+
+function suspensionDiagnostics(h: LooseH, diagnostics: RunDiagnostics): Vnode[] {
+	const suspension = diagnostics.suspension
+	if (suspension === null) return [h('p', { class: 'suspended-card-diagnostic-empty' }, 'No suspension record was saved for this run.')]
+	const children: Vnode[] = [
+		h('p', { class: 'suspended-card-diagnostics-heading' }, 'Suspension'),
+		diagnosticsLine(h, 'Category', suspension.category),
+		diagnosticsLine(h, 'Disposition', suspension.disposition),
+		diagnosticsLine(h, 'Effective policy', suspension.resumePolicy),
+		diagnosticsLine(h, 'Suspended at', suspension.suspendedAt),
+		diagnosticsLine(h, 'Escalated', suspension.escalated ? 'yes' : 'no'),
+	]
+	if (suspension.autoResumeAfter !== undefined) children.push(diagnosticsLine(h, 'Auto-resume after', suspension.autoResumeAfter))
+	if (suspension.escalateAfter !== undefined) children.push(diagnosticsLine(h, 'Escalate after', suspension.escalateAfter))
+	if (suspension.resumeAttempts !== undefined) children.push(diagnosticsLine(h, 'Resume attempts', String(suspension.resumeAttempts)))
+	return children
+}
+
+function failureDiagnostics(h: LooseH, diagnostics: RunDiagnostics): Vnode[] {
+	const failure = diagnostics.failure
+	if (failure === null) return [h('p', { class: 'suspended-card-diagnostic-empty' }, 'No provider failure event was found in the run log.')]
+	const role = failure.roleId === undefined ? failure.role : `${failure.role} (${failure.roleId})`
+	const children: Vnode[] = [
+		h('p', { class: 'suspended-card-diagnostics-heading' }, 'Last role failure'),
+		diagnosticsLine(h, 'Timestamp', failure.timestamp),
+		diagnosticsLine(h, 'Role', role),
+		diagnosticsLine(h, 'Category', failure.category),
+	]
+	if (failure.httpStatus !== undefined) children.push(diagnosticsLine(h, 'HTTP status', String(failure.httpStatus)))
+	children.push(diagnosticsLine(h, 'Attempts', String(failure.attempts)))
+	children.push(diagnosticsLine(h, 'Partial output', failure.partialOutput ? 'yes' : 'no'))
+	if (failure.detail !== undefined) children.push(h('pre', { class: 'suspended-card-diagnostic-detail' }, failure.detail))
+	return children
+}
+
+function probeFailureDiagnostics(h: LooseH, diagnostics: RunDiagnostics): Vnode[] {
+	const probe = diagnostics.probeFailure
+	if (probe === null) return []
+	const children: Vnode[] = [
+		h('p', { class: 'suspended-card-diagnostics-heading' }, 'Health probe failure'),
+		diagnosticsLine(h, 'At', probe.at),
+		diagnosticsLine(h, 'Category', probe.category),
+	]
+	if (probe.httpStatus !== undefined) children.push(diagnosticsLine(h, 'HTTP status', String(probe.httpStatus)))
+	if (probe.detail !== undefined) children.push(h('pre', { class: 'suspended-card-diagnostic-detail' }, probe.detail))
+	return children
+}
+
+function diagnosticsBody(h: LooseH, diagnostics: SuspendedCardDiagnostics, onCopyDiagnostics: ((rawJson: string) => void) | undefined): Vnode[] {
+	if (diagnostics.load.status === 'loading') return [h('p', { class: 'suspended-card-diagnostics-loading' }, 'Loading technical details…')]
+	if (diagnostics.load.status === 'failed') {
+		return [
+			h('p', { class: 'suspended-card-diagnostics-failed', role: 'alert' }, 'Technical details could not be loaded.'),
+			h('button', { type: 'button', class: 'suspended-card-diagnostics-retry', onclick: diagnostics.onRetry }, 'Retry'),
+		]
+	}
+	const data = diagnostics.load.data
+	const children: Vnode[] = [
+		...suspensionDiagnostics(h, data),
+		...failureDiagnostics(h, data),
+		...probeFailureDiagnostics(h, data),
+	]
+	if (onCopyDiagnostics !== undefined) {
+		children.push(h('button', { type: 'button', class: 'suspended-card-copy-diagnostics', onclick: (state: unknown) => { onCopyDiagnostics(diagnosticsCopyJson(data)); return state } }, 'Copy diagnostics'))
+	}
+	return children
 }
 
 // The pause card overlay. Its actions carry the run id on data-run-id, the same contract the result modal's recovery buttons use, and Terminate is a destructive action the host confirms before posting.
@@ -143,6 +228,11 @@ export function SuspendedCard(h: LooseH, props: SuspendedCardProps): Vnode {
 	}
 	if (typeof props.notice === 'string' && props.notice !== '') {
 		children.push(h('p', { class: 'suspended-card-notice', role: 'alert' }, props.notice))
+	}
+	if (props.diagnostics !== undefined) {
+		const detailsChildren: Vnode[] = [h('summary', { class: 'suspended-card-details-summary' }, 'Technical details')]
+		if (props.diagnostics.open) detailsChildren.push(...diagnosticsBody(h, props.diagnostics, props.onCopyDiagnostics))
+		children.push(h('details', { class: 'suspended-card-details', open: props.diagnostics.open, ontoggle: props.diagnostics.onToggle }, detailsChildren))
 	}
 	const actions: Vnode[] = []
 	if (props.onResume !== undefined) {

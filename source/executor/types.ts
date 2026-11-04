@@ -191,10 +191,13 @@ export type LlmCallResult =
 	// A failure of the execution substrate itself: the endpoint could not be reached, answered with an error status, or collapsed its stream. It never becomes a ResultCard; the engine suspends the run at its last durable replay point. detail is log-only and never enters the suspension record.
 	| { kind: 'provider_failure'; category: SuspensionCategory; message: string; httpStatus?: number; retryAfterMs?: number; attempts: number; partialOutput: boolean; detail?: string }
 
-// The retry-relevant categories of a model-provider failure. A transient failure may be retried; billing, auth, and request_rejected failures are permanent for the current request and must not be retried.
-export type ProviderFailureCategory = 'transient' | 'billing' | 'auth' | 'request_rejected'
+// The retry-relevant categories of a model-provider failure. A transient failure may be retried; billing, auth, and request_rejected failures are permanent for the current request and must not be retried. Novel is a failure the classifier cannot place in those known categories; it is retried automatically only until its incident deadline.
+export type ProviderFailureCategory = 'transient' | 'billing' | 'auth' | 'request_rejected' | 'novel'
 
 export type SuspensionCategory = ProviderFailureCategory | 'unknown'
+
+// How a failure is handled. Category names the cause; disposition names the policy: human requires an operator, recoverable resumes automatically without a cap, and novel resumes automatically only until its escalation deadline.
+export type FailureDisposition = 'human' | 'recoverable' | 'novel'
 
 export type ResumePolicy = 'auto' | 'operator'
 
@@ -207,11 +210,15 @@ export interface OperatorPauseRecord {
 // The structured, operator-safe reason a run is paused. message is platform-authored copy; provider bodies, URLs, and credentials never reach this record.
 export interface SuspensionRecord {
 	category: SuspensionCategory
+	// Absent only on records persisted before dispositions existed; derive it from category for those.
+	disposition?: FailureDisposition
 	resumePolicy: ResumePolicy
 	message: string
 	suspendedAt: string
 	autoResumeAfter?: string
-	// Cumulative automatic-resume count, retained even when the policy is downgraded to operator so the cap cannot reset on a later manual resume.
+	// The moment a novel incident stops auto-resuming and becomes an operator decision. Present only for novel records.
+	escalateAfter?: string
+	// Cumulative automatic-resume count, kept as diagnostic history across re-suspensions.
 	resumeAttempts?: number
 }
 

@@ -50,6 +50,9 @@ const health = {
 	provider: { state: 'healthy', category: 'none', since: '2026-01-01T00:00:00.000Z', lastCheckedAt: '2026-01-01T00:00:00.000Z', consecutiveFailures: 0 },
 	suspendedRunId: null,
 	resumePolicy: null,
+	disposition: null,
+	escalateAfter: null,
+	escalated: false,
 } as const
 
 const healthEntity = { id: 'provider-health', ...health }
@@ -256,6 +259,9 @@ describe('run-list feed health carrier', () => {
 			provider: { state: 'unavailable', category: 'billing', since: '2026-01-01T00:00:00.000Z', lastCheckedAt: '2026-01-01T00:01:00.000Z', consecutiveFailures: 2, nextProbeAt: '2026-01-01T00:02:00.000Z' },
 			suspendedRunId: 'run-1',
 			resumePolicy: 'operator',
+			disposition: 'human',
+			escalateAfter: null,
+			escalated: false,
 		} as const
 		const first = applyRunListFrame(emptyRunListFeedState(), responder([summary('run-1', { status: 'suspended', suspension: { category: 'billing', resumePolicy: 'operator', message: 'Top up.', suspendedAt: '2026-01-01T00:02:00.000Z', resumeAttempts: 2 } })], unhealthy, null))
 		expect(first.outcome).toBe('snapshot')
@@ -280,7 +286,7 @@ describe('run-list feed health carrier', () => {
 		const first = applyRunListFrame(emptyRunListFeedState(), responder([summary('run-1')], health, null))
 		const revision = runListFeedRevision(first.state)
 		if (revision === null) throw new Error('expected a revision after a snapshot')
-		const degraded = { provider: { ...health.provider, state: 'degraded', category: 'transient', consecutiveFailures: 1 }, suspendedRunId: 'run-1', resumePolicy: 'auto' } as const
+		const degraded = { provider: { ...health.provider, state: 'degraded', category: 'transient', consecutiveFailures: 1 }, suspendedRunId: 'run-1', resumePolicy: 'auto', disposition: 'recoverable', escalateAfter: null, escalated: false } as const
 		const frame = responder([summary('run-1')], degraded, revision)
 		expect(frameKind(frame)).toBe('delta')
 		const applied = applyRunListFrame(first.state, frame)
@@ -299,5 +305,31 @@ describe('run-list feed health carrier', () => {
 		const result = applyRunListFrame(emptyRunListFeedState(), broken)
 		expect(result.outcome).toBe('invalid')
 		expect(result.health).toBeNull()
+	})
+})
+
+describe('run-list feed disposition and escalation fields', () => {
+	test('the health singleton preserves disposition, escalateAfter, and escalated through snapshot and delta', () => {
+		const responder = createRunListFeedResponder({ epoch: 'e', historyLimit: 8 })
+		const novel = {
+			provider: { state: 'unavailable', category: 'novel', since: '2026-01-01T00:00:00.000Z', lastCheckedAt: '2026-01-01T00:01:00.000Z', consecutiveFailures: 2 },
+			suspendedRunId: 'run-1',
+			resumePolicy: 'auto',
+			disposition: 'novel',
+			escalateAfter: '2026-01-01T00:16:00.000Z',
+			escalated: false,
+		} as const
+		const first = applyRunListFrame(emptyRunListFeedState(), responder([summary('run-1', { status: 'suspended', suspension: { category: 'novel', disposition: 'novel', resumePolicy: 'auto', message: 'Unexpected.', suspendedAt: '2026-01-01T00:02:00.000Z', escalateAfter: '2026-01-01T00:16:00.000Z' } })], novel, null))
+		expect(first.health).toEqual(novel)
+		expect(first.summaries?.[0]?.suspension?.disposition).toBe('novel')
+		expect(first.summaries?.[0]?.suspension?.escalateAfter).toBe('2026-01-01T00:16:00.000Z')
+		const revision = runListFeedRevision(first.state)
+		if (revision === null) throw new Error('expected a revision after a snapshot')
+		const escalated = { ...novel, resumePolicy: 'operator', escalated: true } as const
+		const frame = responder([summary('run-1', { status: 'suspended', suspension: { category: 'novel', disposition: 'novel', resumePolicy: 'auto', message: 'Unexpected.', suspendedAt: '2026-01-01T00:02:00.000Z', escalateAfter: '2026-01-01T00:16:00.000Z' } })], escalated, revision)
+		expect(frameKind(frame)).toBe('delta')
+		const applied = applyRunListFrame(first.state, frame)
+		expect(applied.health?.escalated).toBe(true)
+		expect(applied.health?.resumePolicy).toBe('operator')
 	})
 })

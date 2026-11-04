@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { derivePauseTargetRunId, deriveRunPauseKind, deriveSuspendedStatusLabel, hasOperatorPausedRun, isOperatorPaused, pauseFailureCopy, readOperatorPauseRecord, resolvePausePendingRunId } from './static/ts/run-pause.js'
+import { derivePauseTargetRunId, deriveRunPauseKind, deriveRunSuspendedStatusLabel, deriveSuspendedStatusLabel, hasOperatorPausedRun, isOperatorPaused, pauseFailureCopy, readOperatorPauseRecord, resolvePausePendingRunId } from './static/ts/run-pause.js'
 
 const pause = { message: 'The operator paused this run.', pausedAt: '2026-01-01T00:02:00.000Z' }
 const suspension = { category: 'billing', resumePolicy: 'operator', message: 'Top up.', suspendedAt: '2026-01-01T00:02:00.000Z' }
@@ -29,6 +29,19 @@ describe('pause labels', () => {
 		expect(deriveSuspendedStatusLabel('suspended', 'provider')).toBe('suspended')
 		expect(deriveSuspendedStatusLabel('suspended', 'none')).toBe('suspended')
 		expect(deriveSuspendedStatusLabel('running', 'operator')).toBeNull()
+	})
+
+	test('a provider suspension reads needs attention for a human or escalated deadline, while an operator pause stays paused', () => {
+		const now = Date.parse('2026-01-01T00:10:00.000Z')
+		const human = { status: 'suspended', suspension: { category: 'billing', resumePolicy: 'operator', message: 'Top up.', suspendedAt: '2026-01-01T00:02:00.000Z' } }
+		const escalated = { status: 'suspended', suspension: { category: 'novel', disposition: 'novel', resumePolicy: 'auto', message: 'Unexpected.', suspendedAt: '2026-01-01T00:02:00.000Z', escalateAfter: '2026-01-01T00:05:00.000Z' } }
+		const waiting = { status: 'suspended', suspension: { category: 'transient', resumePolicy: 'auto', message: 'Retrying.', suspendedAt: '2026-01-01T00:02:00.000Z' } }
+		const recoverableEscalated = { status: 'suspended', suspension: { category: 'transient', disposition: 'recoverable', resumePolicy: 'auto', message: 'Retrying.', suspendedAt: '2026-01-01T00:02:00.000Z', escalateAfter: '2026-01-01T00:05:00.000Z' } }
+		expect(deriveRunSuspendedStatusLabel(human, 'provider', now)).toBe('needs attention')
+		expect(deriveRunSuspendedStatusLabel(escalated, 'provider', now)).toBe('needs attention')
+		expect(deriveRunSuspendedStatusLabel(recoverableEscalated, 'provider', now)).toBe('needs attention')
+		expect(deriveRunSuspendedStatusLabel(waiting, 'provider', now)).toBe('suspended')
+		expect(deriveRunSuspendedStatusLabel(human, 'operator', now)).toBe('paused')
 	})
 })
 

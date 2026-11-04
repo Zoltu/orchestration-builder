@@ -13,6 +13,7 @@ import { parseRunMeta } from '../run-log/index.js'
 import { renderConfig, renderProjectSettings, renderPendingQuestions, renderRunView } from './render.js'
 import type { BuildInfo } from './build-info.js'
 import type { ReadRunListSummary } from './run-list-cache.js'
+import type { RunDiagnostics } from './run-diagnostics.js'
 import { deriveInteractionModel, deriveInteractionOperationDetail } from './interaction-model-adapter.js'
 import type { FlowFeedResponder } from './static/ts/flow-feed/index.js'
 import type { RunListFeedResponder } from './static/ts/run-list-feed/index.js'
@@ -62,6 +63,8 @@ export interface RequestHandlerConfig {
 	flowFeedResponder: FlowFeedResponder
 	// The run-list endpoint's entity-diff responder: a single server replica (see run-list-feed) answers GET /api/runs with `unchanged`/`delta`/`snapshot` instead of re-sending the whole list each poll.
 	runListFeedResponder: RunListFeedResponder
+	// The on-demand diagnostics reader behind GET /api/runs/:id/diagnostics; null is an unknown, malformed, or traversal-shaped run id and the route answers 404.
+	readRunDiagnostics: (runId: string) => RunDiagnostics | null
 }
 
 // The static-asset leaf: given a GET path that matched no API route, produce the response. Injected so the routing below is exercisable without touching the filesystem or a socket. Async because the index route reads the served body to substitute the page title (see server.ts createServeStatic).
@@ -134,6 +137,13 @@ function handleGetRunByIdVersioned(request: Request, runId: string, dependencies
 	const version = deriveVersion(inputs)
 	if (ifNoneMatchToken(request) === version) return notModified(version)
 	return jsonVersioned(buildRunView(inputs, dependencies), version)
+}
+
+// The diagnostics endpoint is operator-only and on demand: it is deliberately absent from the polled run and flow payloads because it carries raw provider text. The reader owns run-id validation and returns null for anything unknown, so the route only maps that to a no-store 404.
+function handleRunDiagnostics(readRunDiagnostics: (runId: string) => RunDiagnostics | null, runId: string): Response {
+	const diagnostics = readRunDiagnostics(runId)
+	if (diagnostics === null) return jsonNoStore({ ok: false, error: 'not_found' }, 404)
+	return jsonNoStore(diagnostics)
 }
 
 function runLogPage(readRunSnapshot: ReadRunSnapshot, readRunSnapshotStats: ReadRunSnapshotStats, runId: string, query: URLSearchParams): Response {
@@ -549,6 +559,7 @@ export function createRequestHandler(config: RequestHandlerConfig, serveStatic: 
 	const flowFeedResponder = config.flowFeedResponder
 	const runListFeedResponder = config.runListFeedResponder
 	const readHealth = config.readHealth
+	const readRunDiagnostics = config.readRunDiagnostics
 
 	// The leaf set the two versioned poll endpoints share; each named handler accepts the subset it directly uses, so the superset is assignable structurally.
 	const versionedDependencies = {
@@ -585,10 +596,10 @@ export function createRequestHandler(config: RequestHandlerConfig, serveStatic: 
 			if (pathname.startsWith('/api/runs/')) {
 				const rest = decodePathSegment(pathname.slice('/api/runs/'.length))
 				if (rest === undefined) {
-					if (pathname.endsWith('/thread') || pathname.endsWith('/thread/summary')) return jsonNoStore({ ok: false, error: 'not_found' }, 404)
+					if (pathname.endsWith('/thread') || pathname.endsWith('/thread/summary') || pathname.endsWith('/diagnostics')) return jsonNoStore({ ok: false, error: 'not_found' }, 404)
 					return json({ ok: false, error: 'not_found' }, 404)
 				}
-				// Match /log, /flow, or /thread before the bare :id route so they reach their endpoints rather than being swallowed as a run id of "<id>/log", "<id>/flow", or "<id>/thread".
+				// Match /log, /flow, /diagnostics, or /thread before the bare :id route so they reach their endpoints rather than being swallowed as a run id of "<id>/log", "<id>/flow", "<id>/diagnostics", or "<id>/thread".
 				const slashIndex = rest.lastIndexOf('/')
 				if (slashIndex >= 0) {
 					const suffix = rest.slice(slashIndex + 1)
@@ -596,6 +607,7 @@ export function createRequestHandler(config: RequestHandlerConfig, serveStatic: 
 					if (runId !== '') {
 						if (suffix === 'log') return runLogPage(readRunSnapshot, readRunSnapshotStats, runId, url.searchParams)
 						if (suffix === 'flow') return handleGetRunFlowVersioned(request, runId, url.searchParams, versionedDependencies)
+						if (suffix === 'diagnostics') return handleRunDiagnostics(readRunDiagnostics, runId)
 						if (suffix === 'thread') {
 							if (!isSafeThreadRunId(runId)) return jsonNoStore({ ok: false, error: 'not_found' }, 404)
 							return handleGetTaskThread(runId, readTaskThread)

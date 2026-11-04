@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { classifyProviderFailure, hasBillingSignature, type ProviderFailureSignal } from './provider-failure.ts'
+import { classifyProviderFailure, classifyStreamProviderFailure, hasBillingSignature, type ProviderFailureSignal } from './provider-failure.ts'
 
 const NOW = Date.parse('2026-01-01T00:00:00.000Z')
 
@@ -61,9 +61,23 @@ describe('classifyProviderFailure status categories', () => {
 		expect(failure.message).toBe('The model provider could not be reached')
 	})
 
-	test.each([400, 404, 405, 415, 422, 409, 413])('%i is request_rejected', (status) => {
+	test.each([400, 404, 405, 415, 422])('%i is request_rejected', (status) => {
 		const failure = classify({ status, errorBody: 'bad request' })
 		expect(failure.category).toBe('request_rejected')
+		expect(failure.httpStatus).toBe(status)
+	})
+
+	test.each([409, 413, 418, 499])('every other 4xx (%i) is novel', (status) => {
+		const failure = classify({ status, errorBody: 'provider-private-body' })
+		expect(failure.category).toBe('novel')
+		expect(failure.httpStatus).toBe(status)
+		expect(failure.message).toContain('unexpected response')
+		expect(failure.message).not.toContain('provider-private-body')
+	})
+
+	test.each([301, 302, 399])('a non-4xx unexpected status (%i) is novel', (status) => {
+		const failure = classify({ status, errorBody: 'moved' })
+		expect(failure.category).toBe('novel')
 		expect(failure.httpStatus).toBe(status)
 	})
 })
@@ -85,8 +99,8 @@ describe('classifyProviderFailure precedence', () => {
 		expect(classify({ status: 400, errorBody: 'billing required: add credit balance' }).category).toBe('request_rejected')
 	})
 
-	test('413 with a billing-looking body is request_rejected, not billing', () => {
-		expect(classify({ status: 413, errorBody: 'insufficient_quota: payload too large' }).category).toBe('request_rejected')
+	test('413 with a billing-looking body is novel, not billing', () => {
+		expect(classify({ status: 413, errorBody: 'insufficient_quota: payload too large' }).category).toBe('novel')
 	})
 
 	test('5xx with a billing mention stays transient', () => {
@@ -152,6 +166,31 @@ describe('billing signatures', () => {
 		expect(failure.message).not.toContain('sk-secret')
 		expect(failure.message).not.toContain('private')
 		expect(failure.message).toContain('insufficient quota or credit')
+	})
+})
+
+describe('classifyStreamProviderFailure', () => {
+	test('a recognized status keeps its shared mapping', () => {
+		expect(classifyStreamProviderFailure({ status: 401 }).category).toBe('auth')
+		expect(classifyStreamProviderFailure({ status: 500 }).category).toBe('transient')
+		expect(classifyStreamProviderFailure({ status: 409 }).category).toBe('novel')
+	})
+
+	test('a recognized textual error type keeps its mapping', () => {
+		expect(classifyStreamProviderFailure({ type: 'authentication_error' }).category).toBe('auth')
+		expect(classifyStreamProviderFailure({ type: 'rate_limit_error' }).category).toBe('transient')
+		expect(classifyStreamProviderFailure({ type: 'invalid_request_error' }).category).toBe('request_rejected')
+	})
+
+	test('an error payload with no recognized code is novel', () => {
+		expect(classifyStreamProviderFailure({ type: 'error', error: { message: 'something odd happened' } }).category).toBe('novel')
+		expect(classifyStreamProviderFailure({ error: { code: 'mystery_error', message: 'unknown' } }).category).toBe('novel')
+		expect(classifyStreamProviderFailure({ code: 'mystery_error', message: 'unknown' }).category).toBe('novel')
+	})
+
+	test('a stream collapse with no error payload stays transient', () => {
+		expect(classifyStreamProviderFailure({ type: 'response.completed' }).category).toBe('transient')
+		expect(classifyStreamProviderFailure({}).category).toBe('transient')
 	})
 })
 

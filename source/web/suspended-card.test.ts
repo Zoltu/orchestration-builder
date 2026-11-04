@@ -1,5 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import { deriveSuspendedCard, resumeFailureCopy, SuspendedCard, suspendedTerminateTarget, terminateFailureCopy } from './static/ts/suspended-card.js'
+import type { SuspendedCardDiagnostics } from './static/ts/suspended-card.js'
+import type { RunDiagnostics } from './static/ts/run-diagnostics.js'
 import type { SuspensionRecord } from './static/ts/interaction-model.js'
 
 interface Vnode {
@@ -203,5 +205,86 @@ describe('typed suspended action failures', () => {
 			url: 'api/queue/item-1/terminate',
 			pendingId: 'item-1',
 		})
+	})
+})
+
+describe('SuspendedCard technical details', () => {
+	const runId = 'run-20260101-000500'
+	const data: RunDiagnostics = {
+		runId,
+		suspension: { category: 'novel', disposition: 'novel', resumePolicy: 'auto', escalated: false, suspendedAt: '2026-01-01T00:02:00.000Z', escalateAfter: '2026-01-01T00:17:00.000Z', resumeAttempts: 2 },
+		failure: { timestamp: '2026-01-01T00:02:00.000Z', role: 'coder', roleId: 'coder-1', category: 'novel', httpStatus: 500, attempts: 3, partialOutput: true, detail: 'provider body text' },
+		probeFailure: { at: '2026-01-01T00:03:00.000Z', category: 'transient', httpStatus: 503, detail: 'probe body text' },
+	}
+
+	function renderCard(diagnostics: SuspendedCardDiagnostics, onCopyDiagnostics?: (rawJson: string) => void): Vnode {
+		const descriptor = deriveSuspendedCard({ status: 'suspended', suspension, resumable: true })
+		if (descriptor === undefined) throw new Error('expected a suspended descriptor')
+		return SuspendedCard(fakeH, { descriptor, runLabel: runId, runId, onResume: () => undefined, onTerminate: () => undefined, onClose: () => undefined, diagnostics, onCopyDiagnostics })
+	}
+
+	test('the disclosure is closed by default and renders no detail before it opens', () => {
+		const modal = renderCard({ open: false, load: { status: 'ready', data }, onToggle: () => undefined, onRetry: () => undefined })
+		const details = allByTag(modal, 'details')[0]
+		if (details === undefined) throw new Error('expected a details disclosure')
+		expect(details.props.open).toBe(false)
+		expect(allByTag(modal, 'pre')).toHaveLength(0)
+		expect(allText(modal)).toContain('Technical details')
+		expect(allText(modal)).not.toContain('provider body text')
+		expect(allText(modal)).not.toContain('Disposition')
+	})
+
+	test('wires the disclosure toggle to the injected action so opening can request details', () => {
+		const events: unknown[] = []
+		const onToggle = (event: unknown) => { events.push(event) }
+		const modal = renderCard({ open: false, load: { status: 'loading' }, onToggle, onRetry: () => undefined })
+		const details = allByTag(modal, 'details')[0]
+		if (details === undefined) throw new Error('expected a details disclosure')
+		const event = { target: { open: true } }
+		if (typeof details.props.ontoggle !== 'function') throw new Error('expected a toggle handler')
+		details.props.ontoggle(event)
+		expect(events).toEqual([event])
+	})
+
+	test('renders the suspension, failure, and probe as text and preformatted nodes, never Markdown', () => {
+		const modal = renderCard({ open: true, load: { status: 'ready', data }, onToggle: () => undefined, onRetry: () => undefined })
+		const text = allText(modal)
+		for (const expected of ['Category: novel', 'Disposition: novel', 'Effective policy: auto', 'Escalate after: 2026-01-01T00:17:00.000Z', 'Resume attempts: 2', 'Last role failure', 'coder (coder-1)', 'HTTP status: 500', 'Partial output: yes', 'Health probe failure']) {
+			expect(text).toContain(expected)
+		}
+		const pre = allByTag(modal, 'pre')
+		expect(pre.map((node) => node.children.join(''))).toEqual(['provider body text', 'probe body text'])
+		const classes = allByTag(modal, 'div').map((node) => String(node.props.class ?? ''))
+		expect(classes.some((name) => name.includes('markdown'))).toBe(false)
+	})
+
+	test('the copy action hands a JSON string of the diagnostics to the clipboard leaf', () => {
+		const copied: string[] = []
+		const modal = renderCard({ open: true, load: { status: 'ready', data }, onToggle: () => undefined, onRetry: () => undefined }, (rawJson) => { copied.push(rawJson) })
+		const copy = allByTag(modal, 'button').find((button) => button.props.class === 'suspended-card-copy-diagnostics')
+		if (copy === undefined) throw new Error('expected a copy diagnostics button')
+		if (typeof copy.props.onclick !== 'function') throw new Error('expected a copy handler')
+		copy.props.onclick({})
+		expect(copied).toHaveLength(1)
+		expect(JSON.parse(copied[0] ?? '')).toEqual(data)
+	})
+
+	test('a failed load renders a retry affordance instead of a blank or stale card', () => {
+		const retries: unknown[] = []
+		const onRetry = () => { retries.push('retry') }
+		const modal = renderCard({ open: true, load: { status: 'failed' }, onToggle: () => undefined, onRetry })
+		const text = allText(modal)
+		expect(text).toContain('Technical details could not be loaded.')
+		expect(text).not.toContain('provider body text')
+		const retry = allByTag(modal, 'button').find((button) => button.props.class === 'suspended-card-diagnostics-retry')
+		if (retry === undefined) throw new Error('expected a retry button')
+		if (typeof retry.props.onclick !== 'function') throw new Error('expected a retry handler')
+		retry.props.onclick({})
+		expect(retries).toEqual(['retry'])
+	})
+
+	test('a loading load renders a loading state', () => {
+		const modal = renderCard({ open: true, load: { status: 'loading' }, onToggle: () => undefined, onRetry: () => undefined })
+		expect(allText(modal)).toContain('Loading technical details')
 	})
 })

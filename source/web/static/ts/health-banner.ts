@@ -22,9 +22,14 @@ const TRANSIENT_OPERATOR_SUSPENDED_MESSAGE = 'Model provider unavailable \u2014 
 const UNKNOWN_MESSAGE = 'Provider status is being checked \u2014 health is not known yet.'
 const SUSPENDED_AUTO_MESSAGE = 'Run suspended \u2014 retrying automatically.'
 const SUSPENDED_OPERATOR_MESSAGE = 'Run suspended \u2014 resume when ready.'
+const SUSPENDED_ATTENTION_MESSAGE = 'Run suspended \u2014 needs your attention.'
 const DISPATCH_PAUSED_MESSAGE = 'Dispatch paused until the provider is healthy.'
+const NOVEL_RETRY_MESSAGE = 'The model provider is failing unexpectedly \u2014 retrying automatically'
+const SUSPENDED_RETRY_UNTIL_MESSAGE = 'Run suspended \u2014 retrying automatically until'
+const PROVIDER_RETRY_UNTIL_MESSAGE = 'Model provider unavailable \u2014 retrying automatically until'
+const NOVEL_ATTENTION_MESSAGE = 'The model provider is failing unexpectedly \u2014 needs your attention.'
 
-// Maps the coarse health snapshot to one fixed message. The category wins when it names a provider problem, so a billing or auth pause always says what the operator must do. The suspended-run policy, not the category alone, decides whether a transient pause retries automatically: the attempt cap downgrades it to an operator decision while keeping the transient category. Copy mentions a suspended run only when the view names one. An operator pause never binds provider health, so it suppresses the banner entirely even if a stale provider problem is still being reported. An unknown or absent view renders no banner.
+// Maps the coarse health snapshot to one fixed message. A passed escalation deadline wins first, regardless of the current failure's disposition: the deadline belongs to the incident, so a recoverable re-suspension after a novel incident must not read as auto-retrying. Before the deadline, a recoverable or novel incident names the escalation time. A human disposition keeps the category-specific operator action. The category still names a provider problem, so a billing or auth pause always says what the operator must do. Copy mentions a suspended run only when the view names one. An operator pause never binds provider health, so it suppresses the banner entirely even if a stale provider problem is still being reported. An unknown or absent view renders no banner.
 export function deriveHealthBanner(value: unknown, operatorPaused = false): HealthBannerDescriptor | null {
 	if (operatorPaused) return null
 	if (!isHealthView(value)) return null
@@ -33,6 +38,17 @@ export function deriveHealthBanner(value: unknown, operatorPaused = false): Heal
 	const suspendedRunId = health.suspendedRunId
 	const hasSuspendedRun = typeof suspendedRunId === 'string' && suspendedRunId !== ''
 	const autoResume = health.resumePolicy === 'auto'
+	const escalateAfter = typeof health.escalateAfter === 'string' && health.escalateAfter !== '' ? health.escalateAfter : null
+
+	if (health.escalated) return { tone: 'warning', message: hasSuspendedRun ? SUSPENDED_ATTENTION_MESSAGE : NOVEL_ATTENTION_MESSAGE }
+	if (health.disposition === 'recoverable') {
+		if (escalateAfter !== null) return { tone: 'info', message: `${hasSuspendedRun ? SUSPENDED_RETRY_UNTIL_MESSAGE : PROVIDER_RETRY_UNTIL_MESSAGE} ${escalateAfter}.` }
+		return { tone: 'info', message: hasSuspendedRun ? SUSPENDED_AUTO_MESSAGE : TRANSIENT_AUTO_MESSAGE }
+	}
+	if (health.disposition === 'novel') {
+		const until = escalateAfter === null ? '' : ` until ${escalateAfter}`
+		return { tone: 'info', message: `${NOVEL_RETRY_MESSAGE}${until}.` }
+	}
 
 	if (provider.category === 'billing') return { tone: 'warning', message: hasSuspendedRun ? BILLING_SUSPENDED_MESSAGE : BILLING_MESSAGE }
 	if (provider.category === 'auth') return { tone: 'warning', message: hasSuspendedRun ? AUTH_SUSPENDED_MESSAGE : AUTH_MESSAGE }

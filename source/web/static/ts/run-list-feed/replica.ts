@@ -1,7 +1,7 @@
 import { canonicalSerialize, defineCollection } from '../entity-diff/index.js'
 import type { CollectionDefinitions, ReplicaState } from '../entity-diff/index.js'
 import { isObject } from '../guards.js'
-import type { OperatorPauseRecord, ResumePolicy, RunStatus, SuspensionRecord } from '../interaction-model.js'
+import type { FailureDisposition, OperatorPauseRecord, ResumePolicy, RunStatus, SuspensionRecord } from '../interaction-model.js'
 import { isOperatorPauseRecord } from '../run-pause.js'
 
 // The result card and run-level error a run summary carries, declared structurally here so this browser-pure module never imports the server render module (whose ResultCard is the same wire shape).
@@ -54,7 +54,7 @@ export interface RunSummary {
 
 // The coarse provider health carrier the run-list feed rides, so the one-per-second run list also feeds the persistent banner without a second poll. Its fields are exactly the safe health view: no endpoint, credential, model, header, request, or provider body.
 export type ProviderHealthState = 'healthy' | 'degraded' | 'unavailable' | 'unknown'
-export type HealthCategory = 'none' | 'transient' | 'billing' | 'auth' | 'request_rejected' | 'unknown'
+export type HealthCategory = 'none' | 'transient' | 'billing' | 'auth' | 'request_rejected' | 'novel' | 'unknown'
 
 export interface ProviderHealth {
 	state: ProviderHealthState
@@ -70,6 +70,9 @@ export interface HealthView {
 	provider: ProviderHealth
 	suspendedRunId: string | null
 	resumePolicy: ResumePolicy | null
+	disposition: FailureDisposition | null
+	escalateAfter: string | null
+	escalated: boolean
 }
 
 const PROVIDER_HEALTH_ENTITY_ID = 'provider-health' as const
@@ -79,6 +82,9 @@ interface ProviderHealthEntity {
 	provider: ProviderHealth
 	suspendedRunId: string | null
 	resumePolicy: ResumePolicy | null
+	disposition: FailureDisposition | null
+	escalateAfter: string | null
+	escalated: boolean
 }
 
 export interface RunListCollections {
@@ -107,20 +113,26 @@ function isResultCardStatus(value: unknown): value is RunResultCard['status'] {
 }
 
 function isSuspensionCategory(value: unknown): value is SuspensionRecord['category'] {
-	return value === 'transient' || value === 'billing' || value === 'auth' || value === 'request_rejected' || value === 'unknown'
+	return value === 'transient' || value === 'billing' || value === 'auth' || value === 'request_rejected' || value === 'novel' || value === 'unknown'
 }
 
 function isOptionalString(value: unknown): boolean {
 	return value === undefined || typeof value === 'string'
 }
 
+function isFailureDisposition(value: unknown): value is FailureDisposition {
+	return value === 'human' || value === 'recoverable' || value === 'novel'
+}
+
 export function isSuspensionRecord(value: unknown): value is SuspensionRecord {
 	if (!isObject(value)) return false
 	if (!isSuspensionCategory(value['category'])) return false
+	if (value['disposition'] !== undefined && !isFailureDisposition(value['disposition'])) return false
 	if (value['resumePolicy'] !== 'auto' && value['resumePolicy'] !== 'operator') return false
 	if (typeof value['message'] !== 'string') return false
 	if (typeof value['suspendedAt'] !== 'string') return false
 	if (!isOptionalString(value['autoResumeAfter'])) return false
+	if (!isOptionalString(value['escalateAfter'])) return false
 	const attempts = value['resumeAttempts']
 	if (attempts !== undefined && (typeof attempts !== 'number' || !Number.isInteger(attempts) || attempts < 0)) return false
 	return true
@@ -182,11 +194,15 @@ function isProviderHealthState(value: unknown): value is ProviderHealthState {
 }
 
 function isHealthCategory(value: unknown): value is HealthCategory {
-	return value === 'none' || value === 'transient' || value === 'billing' || value === 'auth' || value === 'request_rejected' || value === 'unknown'
+	return value === 'none' || value === 'transient' || value === 'billing' || value === 'auth' || value === 'request_rejected' || value === 'novel' || value === 'unknown'
 }
 
 function isNullableResumePolicy(value: unknown): value is ResumePolicy | null {
 	return value === null || value === 'auto' || value === 'operator'
+}
+
+function isNullableFailureDisposition(value: unknown): value is FailureDisposition | null {
+	return value === null || isFailureDisposition(value)
 }
 
 function isProviderHealth(value: unknown): value is ProviderHealth {
@@ -207,14 +223,20 @@ function isProviderHealthEntity(value: unknown): value is ProviderHealthEntity {
 	if (value['id'] !== PROVIDER_HEALTH_ENTITY_ID) return false
 	if (!isProviderHealth(value['provider'])) return false
 	if (!isNullableString(value['suspendedRunId'])) return false
-	return isNullableResumePolicy(value['resumePolicy'])
+	if (!isNullableResumePolicy(value['resumePolicy'])) return false
+	if (!isNullableFailureDisposition(value['disposition'])) return false
+	if (!isNullableString(value['escalateAfter'])) return false
+	return typeof value['escalated'] === 'boolean'
 }
 
 export function isHealthView(value: unknown): value is HealthView {
 	if (!isObject(value)) return false
 	if (!isProviderHealth(value['provider'])) return false
 	if (!isNullableString(value['suspendedRunId'])) return false
-	return isNullableResumePolicy(value['resumePolicy'])
+	if (!isNullableResumePolicy(value['resumePolicy'])) return false
+	if (!isNullableFailureDisposition(value['disposition'])) return false
+	if (!isNullableString(value['escalateAfter'])) return false
+	return typeof value['escalated'] === 'boolean'
 }
 
 // A cheap change detector: it serializes the mutable fields (not the identity-bearing id) canonically, so a change to any field bumps the entity version while an unchanged entity is stable. canonicalSerialize escapes strings, so free-text task/summary content cannot shift field boundaries and collide two different summaries.
@@ -223,7 +245,7 @@ function runSummaryVersionOf(summary: RunSummaryEntity): string {
 }
 
 function providerHealthVersionOf(health: ProviderHealthEntity): string {
-	return canonicalSerialize([health.provider, health.suspendedRunId, health.resumePolicy])
+	return canonicalSerialize([health.provider, health.suspendedRunId, health.resumePolicy, health.disposition, health.escalateAfter, health.escalated])
 }
 
 export const runListDefinitions: CollectionDefinitions<RunListCollections> = {
@@ -262,7 +284,7 @@ export function runSummariesFromReplicaState(state: RunListReplicaState): RunSum
 export function runListHealthFromReplicaState(state: RunListReplicaState): HealthView | null {
 	const entity = state.health[0]
 	if (entity === undefined) return null
-	return { provider: entity.provider, suspendedRunId: entity.suspendedRunId, resumePolicy: entity.resumePolicy }
+	return { provider: entity.provider, suspendedRunId: entity.suspendedRunId, resumePolicy: entity.resumePolicy, disposition: entity.disposition, escalateAfter: entity.escalateAfter, escalated: entity.escalated }
 }
 
 // Converts a summary to the entity-diff entity: the run id becomes the entity's `id` (the collection key) and the wire `runId` is restored on reconstruction.
@@ -285,7 +307,7 @@ export function runSummaryEntityFor(summary: RunSummary): RunSummaryEntity {
 }
 
 function providerHealthEntityFor(health: HealthView): ProviderHealthEntity {
-	return { id: PROVIDER_HEALTH_ENTITY_ID, provider: health.provider, suspendedRunId: health.suspendedRunId, resumePolicy: health.resumePolicy }
+	return { id: PROVIDER_HEALTH_ENTITY_ID, provider: health.provider, suspendedRunId: health.suspendedRunId, resumePolicy: health.resumePolicy, disposition: health.disposition, escalateAfter: health.escalateAfter, escalated: health.escalated }
 }
 
 // The server replica receives the summaries in whatever order its reader produced them; this module owns the newest-first ordering, so it sorts by run id before building the entity collection. The health singleton rides the same state so its revision participates in the same envelope.

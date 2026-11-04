@@ -1,9 +1,9 @@
 import { isRunCheckpoint } from './checkpoint.js'
 import type { LlmCaller } from './llm.js'
-import { toProviderProbeResult, type ModelProbeResult } from './model-probe.js'
-import { createProviderGate, createProviderHealthMonitor, type HealthView, type ProviderGate, type ProviderHealth, type ProviderHealthFailure, type ProviderProbeSchedule } from './provider-health.js'
+import { classifyProviderFailure } from './provider-failure.js'
+import { createProviderGate, createProviderHealthMonitor, type HealthView, type ProviderGate, type ProviderHealth, type ProviderHealthFailure, type ProviderProbeResult, type ProviderProbeSchedule } from './provider-health.js'
 import type { SuspendedRunResumeResult } from './suspension.js'
-import type { LlmCallResult, RunMeta, SuspensionRecord } from './types.js'
+import type { LlmCallResult, RunMeta, SuspensionCategory, SuspensionRecord } from './types.js'
 import { isRunMeta, safeJsonParse } from './validation.js'
 
 // The gate observes role calls only. A summary call shares the endpoint but is service bookkeeping: routing it here would let a failed label mark the provider unhealthy and suspend or block unrelated work (docs/reference.md "Provider health gate").
@@ -54,9 +54,16 @@ function suspensionFromCheckpointText(checkpointText: string | null): Suspension
 	return parsed.value.suspension
 }
 
+export interface ProviderProbeFailure {
+	at: string
+	category: SuspensionCategory
+	httpStatus?: number
+	detail?: string
+}
+
 export interface ProviderRecoveryDependencies {
 	initialHealth: ProviderHealth
-	probeModel: () => Promise<ModelProbeResult>
+	probeProvider: () => Promise<ProviderProbeResult>
 	scheduleTimeout: ProviderProbeSchedule
 	now: () => string
 	random: () => number
@@ -75,17 +82,41 @@ export interface ProviderRecovery {
 	canDispatch(): boolean
 	mayAutoResume(runId: string, at: string): boolean
 	readHealth(): HealthView
+	readLastProbeFailure(): ProviderProbeFailure | undefined
 	setAutoResumeHandler(handler: (at: string) => void): void
 	ensureProbing(): void
 }
 
+function probeFailureCategory(result: Extract<ProviderProbeResult, { ok: false }>, at: string): SuspensionCategory {
+	if (result.category !== undefined) return result.category
+	if (result.transport || result.status === undefined) return 'transient'
+	const atMs = Date.parse(at)
+	return classifyProviderFailure({ status: result.status, transport: false }, Number.isNaN(atMs) ? 0 : atMs).category
+}
+
 export function createProviderRecovery(dependencies: ProviderRecoveryDependencies): ProviderRecovery {
-	const gate = createProviderGate(dependencies.initialHealth)
+	const gate = createProviderGate(dependencies.initialHealth, dependencies.now)
 	const observeRoleCall = createProviderOutcomeObserver({ gate, now: dependencies.now })
 	let autoResumeHandler: ((at: string) => void) | undefined
+	let lastProbeFailure: ProviderProbeFailure | undefined
+	const probeProvider = async (): Promise<ProviderProbeResult> => {
+		const result = await dependencies.probeProvider()
+		if (result.ok) {
+			lastProbeFailure = undefined
+			return result
+		}
+		const at = dependencies.now()
+		lastProbeFailure = {
+			at,
+			category: probeFailureCategory(result, at),
+			...(result.status !== undefined ? { httpStatus: result.status } : {}),
+			...(result.detail !== undefined ? { detail: result.detail } : {}),
+		}
+		return result
+	}
 	const monitor = createProviderHealthMonitor({
 		gate,
-		probe: async () => toProviderProbeResult(await dependencies.probeModel()),
+		probe: probeProvider,
 		scheduleTimeout: dependencies.scheduleTimeout,
 		now: dependencies.now,
 		random: dependencies.random,
@@ -95,7 +126,8 @@ export function createProviderRecovery(dependencies: ProviderRecoveryDependencie
 	})
 
 	function bind(runId: string, suspension: SuspensionRecord): void {
-		// A new binding never inherits the previous probe deadline; the monitor schedules from the new suspension's own backoff/due time.
+		// A new binding never inherits the previous incident's probe deadline or failure; the monitor schedules from the new suspension's own backoff/due time.
+		lastProbeFailure = undefined
 		gate.planProbe(undefined)
 		monitor.noticeSuspension(runId, suspension)
 		monitor.start()
@@ -141,6 +173,9 @@ export function createProviderRecovery(dependencies: ProviderRecoveryDependencie
 		},
 		readHealth() {
 			return gate.snapshot()
+		},
+		readLastProbeFailure() {
+			return lastProbeFailure === undefined ? undefined : { ...lastProbeFailure }
 		},
 		setAutoResumeHandler(handler) {
 			autoResumeHandler = handler

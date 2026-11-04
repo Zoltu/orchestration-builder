@@ -1,9 +1,10 @@
 // Four-state favicon for the browser tab: one filled triangle in four colors, the color carrying the system state at a glance in a row of tabs. A suspended run is a pause, not work: an operator-policy pause reads as pending-input, while an auto-policy pause reads as waiting. The state is derived from data the product client already polls — the run-list summaries, the pending ask_human questions, and the task queue (the Tick/GotRunList/GotQuestions/GotQueue actions in app.js) — so the favicon needs no request of its own. The module is browser-pure TypeScript (served statically and imported by app.js) and holds no state; its functions are pure, so the TS tests drive them directly, mirroring the sibling labels module convention.
 //
-// State priority: a pending question means the operator is needed, so 'pending-input' wins even while a run is mid-flight — a needs_clarification run is non-terminal, so both signals typically hold at once. A parked needs_input queue item is the same signal for a run whose question lives on the queue item rather than in `/api/questions`. Any summary whose status is not a known terminal status counts as in progress, including 'unknown': that is a run whose meta.json could not be read, which the rest of the UI also renders as "in progress" and keeps polling. A suspended summary is classified by its resume policy instead: an auto pause waits for automatic recovery, while an operator pause needs a decision. With no pending questions, no parked queue item, and no non-terminal summary — including the no-runs-yet initial state — the favicon reads 'complete'.
+// State priority: a pending question means the operator is needed, so 'pending-input' wins even while a run is mid-flight — a needs_clarification run is non-terminal, so both signals typically hold at once. A parked needs_input queue item is the same signal for a run whose question lives on the queue item rather than in `/api/questions`. Any summary whose status is not a known terminal status counts as in progress, including 'unknown': that is a run whose meta.json could not be read, which the rest of the UI also renders as "in progress" and keeps polling. A suspended summary is classified by its effective resume policy instead: a recoverable or novel pause before its incident deadline waits for automatic recovery, while a human pause or any incident past its deadline needs a decision. With no pending questions, no parked queue item, and no non-terminal summary — including the no-runs-yet initial state — the favicon reads 'complete'.
 
 import { isTerminalStatus } from './interaction-model.js'
 import { isOperatorPauseRecord } from './run-pause.js'
+import { readSuspensionStatus } from './suspension-status.js'
 
 // 'pending-input' (yellow) — at least one pending question awaits an operator answer, or an operator-policy suspension needs a decision; 'working' (red) — a run is in progress and no question is pending; 'waiting' (amber) — an auto-resume provider pause holds a run and automatic recovery is expected; 'complete' (green) — nothing in progress and nothing pending, or the initial idle state.
 export type FaviconState = 'pending-input' | 'working' | 'waiting' | 'complete'
@@ -30,21 +31,19 @@ function admitsStatus(value: unknown): value is StatusCarrier {
 	return typeof value === 'object' && value !== null
 }
 
-// A suspended summary's resume policy decides the tone: an operator pause record always needs a decision, while a provider suspension retries automatically only under an auto policy. A malformed or absent record reads as the operator-needed case so the tab never implies automatic recovery it cannot prove.
-function suspendedResumePolicy(value: StatusCarrier): string {
+// A suspended summary's effective policy decides the tone: an operator pause record always needs a decision, while a provider suspension waits only while its derived policy is still auto. A malformed or absent record reads as the operator-needed case so the tab never implies automatic recovery it cannot prove.
+function suspendedResumePolicy(value: StatusCarrier, nowMs: number): string {
 	if (isOperatorPauseRecord(value.pause)) return 'operator'
-	const suspension = value.suspension
-	if (typeof suspension !== 'object' || suspension === null) return 'operator'
-	if (!('resumePolicy' in suspension)) return 'operator'
-	return typeof suspension.resumePolicy === 'string' ? suspension.resumePolicy : 'operator'
+	const status = readSuspensionStatus(value.suspension, nowMs)
+	return status !== null && status.resumePolicy === 'auto' ? 'auto' : 'operator'
 }
 
 // Derives the favicon state from the app's polled data.
 //
-// The summary entries arrive as the server returned them and are read only for `status`: an entry whose status is not a known terminal status counts as in progress, while a non-object entry is ignored — a favicon must never tell the operator everything is done while a run might be active. A non-array argument is treated as no data at all; the app's actions normalize every poll to an array, so this only guards a refactor, and a favicon glitch must never take the UI down regardless.
+// The summary entries arrive as the server returned them and are read for `status` and, when suspended, the suspension's effective policy: an entry whose status is not a known terminal status counts as in progress, while a non-object entry is ignored — a favicon must never tell the operator everything is done while a run might be active. A non-array argument is treated as no data at all; the app's actions normalize every poll to an array, so this only guards a refactor, and a favicon glitch must never take the UI down regardless.
 //
-// `summaries` are the polled run-list summaries (`GET /api/runs`), read only for each entry's `status` field; `pendingQuestions` are the polled pending questions (`GET /api/questions`), read only for their count; `queueItems` are the polled task-queue items (`GET /api/queue`), read only for the needs_input status a parked run carries. A parked needs_input run's question is not in `/api/questions`, so the queue is the only signal that the operator is needed.
-export function deriveFaviconState(summaries?: unknown[], pendingQuestions?: unknown[], queueItems?: unknown[]): FaviconState {
+// `summaries` are the polled run-list summaries (`GET /api/runs`), read for each entry's `status` and suspension fields; `pendingQuestions` are the polled pending questions (`GET /api/questions`), read only for their count; `queueItems` are the polled task-queue items (`GET /api/queue`), read only for the needs_input status a parked run carries. A parked needs_input run's question is not in `/api/questions`, so the queue is the only signal that the operator is needed.
+export function deriveFaviconState(summaries: unknown[] | undefined, pendingQuestions: unknown[] | undefined, queueItems: unknown[] | undefined, nowMs: number): FaviconState {
 	if (Array.isArray(pendingQuestions) && pendingQuestions.length > 0) return 'pending-input'
 	if (Array.isArray(queueItems) && queueItems.some((item) => admitsStatus(item) && item.status === 'needs_input')) return 'pending-input'
 	const queueHasSuspended = Array.isArray(queueItems) && queueItems.some((item) => admitsStatus(item) && item.status === 'suspended')
@@ -56,7 +55,7 @@ export function deriveFaviconState(summaries?: unknown[], pendingQuestions?: unk
 		if (!admitsStatus(summary)) continue
 		const { status } = summary
 		if (status === 'suspended') {
-			if (suspendedResumePolicy(summary) === 'auto') waitingSuspended = true
+			if (suspendedResumePolicy(summary, nowMs) === 'auto') waitingSuspended = true
 			else operatorSuspended = true
 			continue
 		}

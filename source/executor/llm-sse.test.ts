@@ -217,6 +217,15 @@ describe('createResponsesStreamAccumulator event folding', () => {
 		expect(snapshot.items.size).toBe(0)
 	})
 
+	test('a response.failed event records the nested response.error as the error payload', () => {
+		const accumulator = createResponsesStreamAccumulator()
+		accumulator.apply({ type: 'response.failed', response: { status: 'failed', error: { code: 'mystery_error', message: 'generation failed' } } })
+		const snapshot = accumulator.snapshot()
+		expect(snapshot.terminal).toBe('error')
+		expect(snapshot.error).toBe('generation failed')
+		expect(snapshot.errorPayload).toEqual({ error: { code: 'mystery_error', message: 'generation failed' } })
+	})
+
 	test('the wire\'s response.-prefixed item and delta events accumulate exactly like their bare spellings', () => {
 		const accumulator = createResponsesStreamAccumulator()
 		accumulator.apply({ type: 'response.output_item.added', output_index: 0, item: { type: 'reasoning', id: 'rs_1' } })

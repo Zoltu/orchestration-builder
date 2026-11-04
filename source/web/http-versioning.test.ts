@@ -202,7 +202,8 @@ function createVersioningHarness(initialRuns: Array<[string, StoredRun]>, flowFe
 			build: null,
 			flowFeedResponder,
 			runListFeedResponder,
-			readHealth: () => ({ provider: { state: 'unknown', category: 'unknown', since: '2026-01-01T00:00:00.000Z', lastCheckedAt: '2026-01-01T00:00:00.000Z', consecutiveFailures: 0 }, suspendedRunId: null, resumePolicy: null }),
+			readRunDiagnostics: () => null,
+			readHealth: () => ({ provider: { state: 'unknown', category: 'unknown', since: '2026-01-01T00:00:00.000Z', lastCheckedAt: '2026-01-01T00:00:00.000Z', consecutiveFailures: 0 }, suspendedRunId: null, resumePolicy: null, disposition: null, escalateAfter: null, escalated: false }),
 		},
 		async () => new Response('static body'),
 	)

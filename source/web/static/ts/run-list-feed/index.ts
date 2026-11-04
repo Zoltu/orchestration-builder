@@ -16,4 +16,5 @@ export { createRunListFeedResponder } from './responder.js'
 export type { RunListFeedResponder } from './responder.js'
 
 export { isHealthView, isSuspensionRecord } from './replica.js'
+export type { FailureDisposition } from '../interaction-model.js'
 export type { HealthCategory, HealthView, ProviderHealth, ProviderHealthState, RunResultCard, RunSummary, RunSummaryError } from './replica.js'

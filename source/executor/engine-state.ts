@@ -72,7 +72,11 @@ export interface EngineDependencies {
 	roleSnapshots: RoleSnapshotStore
 	// The leaf that reads a role's declared projectDocs from the workspace at run start (project-docs.ts); buildInitialHistory injects the bounded block into the entry role's depth-0 initial user message, so it is read once and rides the checkpoint thereafter.
 	readProjectDoc: ReadProjectDoc
-	// The suspension the run is resuming from, when any; a re-suspension carries its attempt count forward.
+	// The run-scoped incident context a re-suspension inherits. It is cleared by the first successful role call, so a later unrelated failure cannot carry an old attempt count or novel deadline.
+	suspensionIncident: SuspensionIncident
+}
+
+export interface SuspensionIncident {
 	priorSuspension?: SuspensionRecord
 }
 

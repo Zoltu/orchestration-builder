@@ -3,6 +3,7 @@
 import { isObject } from './guards.js'
 import { isSuspendedStatus, isTerminalStatus } from './interaction-model.js'
 import type { OperatorPauseRecord } from './interaction-model.js'
+import { suspensionNeedsAttention } from './suspension-status.js'
 
 export type RunPauseKind = 'none' | 'operator' | 'provider'
 
@@ -35,10 +36,17 @@ export function hasOperatorPausedRun(runs: readonly unknown[]): boolean {
 	return runs.some((run) => isOperatorPaused(run))
 }
 
-// The top bar and row status text for a suspended run; every other status keeps the caller's own label.
-export function deriveSuspendedStatusLabel(status: unknown, pauseKind: RunPauseKind): string | null {
+// The top bar and row status text for a suspended run; every other status keeps the caller's own label. An operator pause stays "paused"; a provider suspension reads "needs attention" when its effective disposition or escalation makes it an operator decision.
+export function deriveSuspendedStatusLabel(status: unknown, pauseKind: RunPauseKind, needsAttention = false): string | null {
 	if (status !== 'suspended') return null
-	return pauseKind === 'operator' ? 'paused' : 'suspended'
+	if (pauseKind === 'operator') return 'paused'
+	return needsAttention ? 'needs attention' : 'suspended'
+}
+
+// The row label for a suspended run, deriving attention from the run's own suspension record and the caller's clock. The provider-vs-operator distinction is preserved: an operator pause still reads "paused".
+export function deriveRunSuspendedStatusLabel(run: unknown, pauseKind: RunPauseKind, nowMs: number): string | null {
+	const status = isObject(run) ? run['status'] : undefined
+	return deriveSuspendedStatusLabel(status, pauseKind, suspensionNeedsAttention(run, nowMs))
 }
 
 // The run a Pause click should address: the one run that is genuinely running, never an unknown-status or paused run.

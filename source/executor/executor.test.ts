@@ -7,6 +7,9 @@ import { EMPTY_TREE_HASH } from './git-primitives.ts'
 import { resumeExecutor, runExecutor, type ExecutorDependencies } from './executor.ts'
 import { createInterruptQueue } from './interrupts.ts'
 import { createOperatorPauseQueue } from './operator-pause.ts'
+import { createProviderAutoResumeCoordinator, createProviderRecovery } from './provider-recovery.ts'
+import { createResumeSuspendedRunAutomatically, createRunSubmission } from './run-submission.ts'
+import { isEscalationDue } from './suspension.ts'
 import type { LlmCallResult, LlmCaller, LlmRequest } from './llm.ts'
 import type { LoadedGuild } from './loader.ts'
 import type { AppendLog, DeleteCheckpoint, RunDirectory, WriteCheckpoint, WriteMeta } from './persistence.ts'
@@ -190,6 +193,106 @@ function makeDeps(llm: FakeLlm, persistence: FakePersistenceFns, loadedGuild: Lo
 	}
 }
 
+
+interface AutomaticResumeResult {
+	first: RunMeta
+	second: RunMeta
+	checkpoint: RunCheckpoint
+	firstDeadline: string
+}
+
+// Drives a real novel suspension through provider recovery, the automatic resume operation, the submission slot, and resumeExecutor with a scripted failed role call.
+async function runAutomaticResume(runId: string, nextFailure: Extract<LlmCallResult, { kind: 'provider_failure' }>): Promise<AutomaticResumeResult> {
+	const guild = buildLoadedGuild({ main: { systemPrompt: 'p', tools: ['finish'] } }, 'main')
+	const llm = new FakeLlm()
+	llm.responses = [providerFailure('novel')]
+	const persistence = makeFakePersistence()
+	const deps = makeDeps(llm, persistence, guild)
+
+	const first = await runExecutor(deps, { runId, guildPath: '/guild', task: 'do it', effort: 'standard', involvement: 'early-engagement' })
+	const firstSuspension = defined(first.suspension, 'first suspension')
+	const firstDeadline = defined(firstSuspension.escalateAfter, 'first escalation deadline')
+
+	const latestMeta = (targetRunId: string): RunMeta | undefined => {
+		for (let index = persistence.state.metas.length - 1; index >= 0; index--) {
+			const meta = persistence.state.metas[index]
+			if (meta !== undefined && meta.runId === targetRunId) return meta
+		}
+		return undefined
+	}
+	const latestCheckpoint = (targetRunId: string): RunCheckpoint | undefined => {
+		for (let index = persistence.state.checkpoints.length - 1; index >= 0; index--) {
+			const checkpoint = persistence.state.checkpoints[index]
+			if (checkpoint !== undefined && checkpoint.runId === targetRunId) return checkpoint
+		}
+		return undefined
+	}
+	const readRunMetaTextById = (targetRunId: string): string | null => {
+		const meta = latestMeta(targetRunId)
+		return meta === undefined ? null : JSON.stringify(meta)
+	}
+	const readRunCheckpointTextById = (targetRunId: string): string | null => {
+		const checkpoint = latestCheckpoint(targetRunId)
+		return checkpoint === undefined ? null : JSON.stringify(checkpoint)
+	}
+
+	const at = firstSuspension.suspendedAt
+	const recovery = createProviderRecovery({
+		initialHealth: { state: 'healthy', category: 'none', since: at, lastCheckedAt: at, consecutiveFailures: 0 },
+		probeProvider: async () => ({ ok: false, transport: true }),
+		scheduleTimeout: () => () => undefined,
+		now: () => at,
+		random: () => 1,
+		readRunMetaTextById,
+		readRunCheckpointTextById,
+	})
+	recovery.noticeSuspension(first)
+	const submission = createRunSubmission({
+		providerSuspension: recovery,
+		onRunSettled: async () => {},
+		startRun: async () => {
+			throw new Error('the automatic resume never starts a fresh run')
+		},
+		resumeRun: async (checkpoint, options) => resumeExecutor(deps, checkpoint, {
+			guildPath: '/guild',
+			...(options?.priorSuspension !== undefined ? { priorSuspension: options.priorSuspension } : {}),
+			...(options?.freshIncident === true ? { freshIncident: true } : {}),
+			...(options?.explicitResume === true ? { explicitResume: true } : {}),
+			...(options?.resumeNote !== undefined ? { operatorNote: options.resumeNote } : {}),
+		}),
+		generateRunId: () => 'run-new',
+		readProjectSettings: () => ({}),
+		runDirectoryExists: () => false,
+		notifyStateChanged: () => {},
+	})
+	const resumeAutomatically = createResumeSuspendedRunAutomatically({
+		runSubmission: submission,
+		readRunMetaById: readRunMetaTextById,
+		readCheckpointById: readRunCheckpointTextById,
+		deletePauseRequest: () => true,
+		taskQueue: {
+			reactivateErrorItem: () => {},
+			reactivateSuspendedItem: () => {},
+			discardSuspendedRun: () => {},
+		},
+	})
+	const coordinator = createProviderAutoResumeCoordinator({
+		recovery,
+		resumeSuspendedRun: (suspendedRunId) => resumeAutomatically(suspendedRunId),
+		onDispatch: () => {},
+	})
+	recovery.setAutoResumeHandler((healthyAt) => coordinator.handleHealthy(healthyAt))
+	recovery.observeRoleCall({ kind: 'success', toolCalls: [] })
+	llm.responses = [nextFailure]
+
+	coordinator.handleHealthy(at)
+	await submission.awaitActive()
+
+	const second = defined(latestMeta(runId), 're-suspended meta')
+	const checkpoint = defined(latestCheckpoint(runId), 're-suspended checkpoint')
+	return { first, second, checkpoint, firstDeadline }
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
@@ -304,6 +407,84 @@ describe('runExecutor', () => {
 		expect(second.suspension?.resumeAttempts).toBe(2)
 	})
 
+	test('a successful call clears the carried incident so a later failure starts a fresh count and deadline', async () => {
+		const guild = buildLoadedGuild({ main: { systemPrompt: 'p', tools: ['finish'] } }, 'main')
+		const llm = new FakeLlm()
+		llm.responses = [providerFailure('novel')]
+		const persistence = makeFakePersistence()
+		const deps = makeDeps(llm, persistence, guild)
+
+		await runExecutor(deps, { runId: 'r-incident-reset', guildPath: '/guild', task: 'do it', effort: 'standard', involvement: 'early-engagement' })
+		const checkpoint = defined(persistence.state.checkpoints[persistence.state.checkpoints.length - 1], 'suspension checkpoint')
+		const staleIncident: RunMeta['suspension'] = {
+			category: 'novel',
+			disposition: 'novel',
+			resumePolicy: 'auto',
+			message: 'Unexpected.',
+			suspendedAt: '2020-01-01T00:00:00.000Z',
+			escalateAfter: '2030-01-01T00:00:00.000Z',
+			resumeAttempts: 9,
+		}
+		llm.responses = [
+			success([{ id: 'unknown-1', type: 'function', function: { name: 'not_a_guild_tool', arguments: '{}' } }]),
+			providerFailure('novel'),
+		]
+
+		const meta = await resumeExecutor(deps, checkpoint, { guildPath: '/guild', ...(staleIncident !== undefined ? { priorSuspension: staleIncident } : {}) })
+		expect(meta.status).toBe('suspended')
+		expect(meta.suspension?.resumeAttempts).toBe(1)
+		expect(meta.suspension?.escalateAfter).not.toBe('2030-01-01T00:00:00.000Z')
+	})
+
+	test('an explicit resume starts a fresh incident instead of inheriting the checkpoint suspension', async () => {
+		const guild = buildLoadedGuild({ main: { systemPrompt: 'p', tools: ['finish'] } }, 'main')
+		const llm = new FakeLlm()
+		llm.responses = [providerFailure('novel')]
+		const persistence = makeFakePersistence()
+		const deps = makeDeps(llm, persistence, guild)
+
+		await runExecutor(deps, { runId: 'r-fresh-incident', guildPath: '/guild', task: 'do it', effort: 'standard', involvement: 'early-engagement' })
+		const checkpoint = defined(persistence.state.checkpoints[persistence.state.checkpoints.length - 1], 'suspension checkpoint')
+		if (checkpoint.suspension !== undefined) checkpoint.suspension.escalateAfter = '2030-01-01T00:00:00.000Z'
+
+		llm.responses = [providerFailure('novel')]
+		const second = await resumeExecutor(deps, checkpoint, { guildPath: '/guild', freshIncident: true })
+		expect(second.status).toBe('suspended')
+		expect(second.suspension?.resumeAttempts).toBe(1)
+		expect(second.suspension?.escalateAfter).not.toBe('2030-01-01T00:00:00.000Z')
+	})
+
+
+	test('an automatic resume persists the same novel incident after a failed retry', async () => {
+		const { first, second, checkpoint, firstDeadline } = await runAutomaticResume('r-auto-incident', providerFailure('novel'))
+		expect(first.suspension?.resumeAttempts).toBe(1)
+		expect(second.status).toBe('suspended')
+		expect(second.suspension?.disposition).toBe('novel')
+		expect(second.suspension?.resumeAttempts).toBe(2)
+		expect(second.suspension?.escalateAfter).toBe(firstDeadline)
+		expect(checkpoint.suspension?.resumeAttempts).toBe(2)
+		expect(checkpoint.suspension?.escalateAfter).toBe(firstDeadline)
+	})
+
+	test('an automatic resume of a novel incident preserves its deadline when the next role call is transient', async () => {
+		const { first, second, checkpoint, firstDeadline } = await runAutomaticResume('r-auto-recoverable-incident', providerFailure('transient'))
+		expect(first.suspension?.resumeAttempts).toBe(1)
+		const secondSuspension = defined(second.suspension, 're-suspended record')
+		const firstDeadlineMs = Date.parse(firstDeadline)
+		const secondSuspendedAtMs = Date.parse(secondSuspension.suspendedAt)
+		const expectedDeadline = firstDeadlineMs < secondSuspendedAtMs ? secondSuspension.suspendedAt : firstDeadline
+		expect(second.status).toBe('suspended')
+		expect(secondSuspension.category).toBe('transient')
+		expect(secondSuspension.disposition).toBe('recoverable')
+		expect(secondSuspension.resumeAttempts).toBe(2)
+		expect(secondSuspension.escalateAfter).toBe(expectedDeadline)
+		expect(checkpoint.suspension?.category).toBe('transient')
+		expect(checkpoint.suspension?.disposition).toBe('recoverable')
+		expect(checkpoint.suspension?.resumeAttempts).toBe(2)
+		expect(checkpoint.suspension?.escalateAfter).toBe(expectedDeadline)
+		expect(isEscalationDue(secondSuspension, new Date(firstDeadlineMs - 1).toISOString())).toBe(false)
+		expect(isEscalationDue(secondSuspension, expectedDeadline)).toBe(true)
+	})
 	test('the checkpoint suspension record is written before the meta and cleared on resume', async () => {
 		const guild = buildLoadedGuild({ main: { systemPrompt: 'p', tools: ['finish'] } }, 'main')
 		const llm = new FakeLlm()

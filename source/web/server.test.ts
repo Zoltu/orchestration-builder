@@ -12,6 +12,7 @@ import type { HealthView } from '../executor/index.js'
 import { isObject, isRunMeta } from '../executor/validation.ts'
 import { parseLogEvents, parseRunMeta, type RunSnapshot } from '../run-log/index.js'
 import type { BuildInfo } from './build-info.ts'
+import { createTaskThreadCoreReader, createTaskThreadReader } from '../task-thread/index.ts'
 import type { TaskThreadResponse, TaskThreadSummarySnapshot } from '../task-thread/index.ts'
 import type { TaskSummary } from '../task-thread/summary.ts'
 import { createRunListCache } from './run-list-cache.ts'
@@ -21,6 +22,7 @@ import type { InteractionModel } from './static/ts/interaction-model.js'
 import { applyRunListFrame, createRunListFeedResponder, emptyRunListFeedState } from './static/ts/run-list-feed/index.js'
 import type { RunSummary } from './static/ts/run-list-feed/index.js'
 import { createRequestHandler, type RequestHandler } from './request-handler.ts'
+import type { RunDiagnostics } from './run-diagnostics.ts'
 import { createServeStatic, createServeTypeScriptSource, resolveStaticAsset, resolveTypeScriptSourceAsset, type ServeAssetFile, type TypeScriptSourceFilesystem } from './server.ts'
 
 function flowModelFromFrame(frame: unknown): InteractionModel {
@@ -500,6 +502,23 @@ snapshots.set('run-chain-failure', {
 	].join('\n'),
 })
 
+snapshots.set('run-20260101-000700', {
+	metaText: JSON.stringify({
+		runId: 'run-20260101-000700',
+		guildPath: 'guild',
+		benchmarkPath: 'bench',
+		task: 'task for run-20260101-000700',
+		status: 'suspended',
+		startTime: '2026-01-01T00:00:00.000Z',
+		suspension: { category: 'transient', disposition: 'recoverable', resumePolicy: 'auto', message: 'Provider temporarily unavailable; retrying automatically.', suspendedAt: '2026-01-01T00:02:00.000Z', resumeAttempts: 1 },
+	}),
+	logText: [
+		JSON.stringify({ timestamp: '2026-01-01T00:00:01.000Z', type: 'role_start', payload: { role: 'orchestrator', roleId: 'orchestrator-0-1', depth: 0, task: 'task for run-20260101-000700' } }),
+		JSON.stringify({ timestamp: '2026-01-01T00:00:02.000Z', type: 'llm_call_start', payload: { role: 'orchestrator', roleId: 'orchestrator-0-1' } }),
+		JSON.stringify({ timestamp: '2026-01-01T00:02:00.000Z', type: 'provider_failure', payload: { role: 'orchestrator', roleId: 'orchestrator-0-1', category: 'transient', httpStatus: 503, attempts: 3, partialOutput: false, detail: 'SECRET PROVIDER BODY', message: 'The model provider is temporarily unavailable' } }),
+	].join('\n'),
+})
+
 interface HandlerHarness {
 	handler: RequestHandler
 	submission: RunSubmission
@@ -540,7 +559,7 @@ function createTestProviderSuspension(): { adoptSuspendedRun(runId: string): voi
 	}
 }
 
-function createHandlerHarness(options: { runIdCollides?: boolean, build?: BuildInfo | null, initialQueueItems?: QueueSeedItem[], initialCheckpoints?: Map<string, string>, initialMetas?: Map<string, string>, flowFeedOptions?: FlowFeedResponderOptions, listRunIds?: ListRunIds, readRunFormat?: ReadRunFormat, canDispatch?: () => boolean, health?: HealthView, readTaskThread?: (runId: string) => TaskThreadResponse | null, requestTaskThreadSummary?: (runId: string) => TaskThreadSummarySnapshot, deletePauseRequest?: () => boolean } = {}): HandlerHarness {
+function createHandlerHarness(options: { runIdCollides?: boolean, build?: BuildInfo | null, initialQueueItems?: QueueSeedItem[], initialCheckpoints?: Map<string, string>, initialMetas?: Map<string, string>, flowFeedOptions?: FlowFeedResponderOptions, listRunIds?: ListRunIds, readRunFormat?: ReadRunFormat, canDispatch?: () => boolean, health?: HealthView, readTaskThread?: (runId: string) => TaskThreadResponse | null, requestTaskThreadSummary?: (runId: string) => TaskThreadSummarySnapshot, deletePauseRequest?: () => boolean, readRunDiagnostics?: (runId: string) => RunDiagnostics | null } = {}): HandlerHarness {
 	let resolveActive: (meta: RunMeta) => void = () => {}
 	let resolveResumed: (meta: RunMeta) => void = () => {}
 	let capturedEffort: EffortLevel | undefined
@@ -686,7 +705,8 @@ function createHandlerHarness(options: { runIdCollides?: boolean, build?: BuildI
 			build: options.build ?? null,
 			flowFeedResponder,
 			runListFeedResponder,
-			readHealth: () => options.health ?? { provider: { state: 'unknown', category: 'unknown', since: '2026-01-01T00:00:00.000Z', lastCheckedAt: '2026-01-01T00:00:00.000Z', consecutiveFailures: 0 }, suspendedRunId: null, resumePolicy: null },
+			readHealth: () => options.health ?? { provider: { state: 'unknown', category: 'unknown', since: '2026-01-01T00:00:00.000Z', lastCheckedAt: '2026-01-01T00:00:00.000Z', consecutiveFailures: 0 }, suspendedRunId: null, resumePolicy: null, disposition: null, escalateAfter: null, escalated: false },
+			readRunDiagnostics: options.readRunDiagnostics ?? (() => null),
 		},
 		async (requestPath) => {
 			staticCalls.push(requestPath)
@@ -1133,9 +1153,9 @@ describe('GET /api/runs (list)', () => {
 		expect(envelope.kind).toBe('snapshot')
 		const list = runSummariesFromFrame(envelope)
 		expect(Array.isArray(list)).toBe(true)
-		expect(list.length).toBe(18)
+		expect(list.length).toBe(19)
 		expect(list.map((entry) => entry.runId)).toEqual([
-			'run-tree', 'run-retry', 'run-long', 'run-interrupted', 'run-flow-details', 'run-effort', 'run-delta', 'run-chain-orphan', 'run-chain-failure', 'run-chain', 'run-cached', 'run-active', 'run-3', 'run-20260101-000300', 'run-20260101-000100', 'run-20260101-000000', 'run-2', 'run-1',
+			'run-tree', 'run-retry', 'run-long', 'run-interrupted', 'run-flow-details', 'run-effort', 'run-delta', 'run-chain-orphan', 'run-chain-failure', 'run-chain', 'run-cached', 'run-active', 'run-3', 'run-20260101-000700', 'run-20260101-000300', 'run-20260101-000100', 'run-20260101-000000', 'run-2', 'run-1',
 		])
 		expect(list).toContainEqual({
 			runId: 'run-interrupted',
@@ -3576,6 +3596,9 @@ describe('GET /api/health', () => {
 		},
 		suspendedRunId: 'run-20260101-000500',
 		resumePolicy: 'operator',
+		disposition: 'human',
+		escalateAfter: null,
+		escalated: false,
 	}
 
 	test('returns exactly the coarse health view', async () => {
@@ -3633,7 +3656,7 @@ describe('provider-gated starts', () => {
 			initialCheckpoints: checkpoints,
 			initialMetas: metas,
 			canDispatch: () => false,
-			health: { provider: { state: 'unavailable', category: 'auth', since: '2026-01-01T00:00:00.000Z', lastCheckedAt: '2026-01-01T00:01:00.000Z', consecutiveFailures: 2 }, suspendedRunId: runId, resumePolicy: 'operator' },
+			health: { provider: { state: 'unavailable', category: 'auth', since: '2026-01-01T00:00:00.000Z', lastCheckedAt: '2026-01-01T00:01:00.000Z', consecutiveFailures: 2 }, suspendedRunId: runId, resumePolicy: 'operator', disposition: 'human', escalateAfter: null, escalated: false },
 		})
 		harness.submission.adoptSuspendedRun(runId)
 		const response = await harness.handler(post(`/api/runs/${runId}/resume`))
@@ -3652,6 +3675,9 @@ describe('provider health carried by the existing polls', () => {
 		provider: { state: 'degraded', category: 'transient', since: '2026-01-01T00:00:00.000Z', lastCheckedAt: '2026-01-01T00:01:00.000Z', consecutiveFailures: 1, nextProbeAt: '2026-01-01T00:02:00.000Z' },
 		suspendedRunId: 'run-20260101-000500',
 		resumePolicy: 'auto',
+		disposition: 'recoverable',
+		escalateAfter: null,
+		escalated: false,
 	}
 
 	test('GET /api/runs carries the health singleton in the same entity-diff envelope', async () => {
@@ -3676,5 +3702,76 @@ describe('provider health carried by the existing polls', () => {
 		for (const secret of ['apiBase', 'apiKey', 'authorization', 'llama-server', 'headers', 'requestBody', 'providerBody', 'model']) {
 			expect(serialized).not.toContain(secret)
 		}
+	})
+})
+
+describe('GET /api/runs/:id/diagnostics', () => {
+	const runId = 'run-20260101-000500'
+	const diagnostics: RunDiagnostics = {
+		runId,
+		suspension: { category: 'transient', disposition: 'recoverable', resumePolicy: 'auto', escalated: false, suspendedAt: '2026-01-01T00:02:00.000Z', resumeAttempts: 2 },
+		failure: { timestamp: '2026-01-01T00:02:00.000Z', role: 'coder', roleId: 'coder-1', category: 'transient', httpStatus: 503, attempts: 3, partialOutput: false, detail: 'provider body' },
+		probeFailure: null,
+	}
+
+	test('returns the reader payload with no-store and never joins the polled payloads', async () => {
+		const { handler } = createHandlerHarness({ readRunDiagnostics: () => diagnostics })
+		const response = await handler(get(`/api/runs/${runId}/diagnostics`))
+		expect(response.status).toBe(200)
+		expect(response.headers.get('cache-control')).toBe('no-store')
+		expect(await response.json()).toEqual(diagnostics)
+		const runView = await handler(get('/api/runs/run-1'))
+		expect(await runView.text()).not.toContain('diagnostics')
+	})
+
+	test('an unknown or traversal-shaped run id is a no-store 404', async () => {
+		const { handler } = createHandlerHarness({ readRunDiagnostics: (requestedRunId) => requestedRunId === runId ? diagnostics : null })
+		const unknown = await handler(get('/api/runs/run-20260101-999999/diagnostics'))
+		expect(unknown.status).toBe(404)
+		expect(unknown.headers.get('cache-control')).toBe('no-store')
+		expect(await unknown.json()).toEqual({ ok: false, error: 'not_found' })
+		const traversal = await handler(get('/api/runs/..%2Frun-20260101-000500/diagnostics'))
+		expect(traversal.status).toBe(404)
+		expect(await traversal.json()).toEqual({ ok: false, error: 'not_found' })
+		const malformedPercent = await handler(get('/api/runs/%/diagnostics'))
+		expect(malformedPercent.status).toBe(404)
+		expect(malformedPercent.headers.get('cache-control')).toBe('no-store')
+		expect(await malformedPercent.json()).toEqual({ ok: false, error: 'not_found' })
+	})
+})
+
+describe('provider failure detail exposure', () => {
+	test('the raw body appears in the raw log and diagnostics endpoint, but never in polled run view, flow, or task-thread payloads', async () => {
+		const runId = 'run-20260101-000700'
+		const raw = rawSnapshotById(runId)
+		const core = createTaskThreadCoreReader({
+			readRunMetaTextById: (requestedRunId) => requestedRunId === runId ? raw.metaText : null,
+			readRunLogTextFromById: (requestedRunId, byteOffset) => requestedRunId === runId ? Buffer.from(raw.logText, 'utf8').subarray(byteOffset).toString('utf8') : '',
+			readRunSnapshotStats: (requestedRunId) => requestedRunId === runId
+				? { meta: raw.metaText === null ? null : { size: raw.metaText.length, mtimeMs: 1 }, log: raw.logText === '' ? null : { size: raw.logText.length, mtimeMs: 1 } }
+				: { meta: null, log: null },
+			readQueueItems: () => [],
+		})
+		const readTaskThread = createTaskThreadReader({
+			readTaskThreadCore: core,
+			peekSummary: () => ({ state: 'none', summary: null }),
+		})
+		const diagnostics: RunDiagnostics = {
+			runId,
+			suspension: { category: 'transient', disposition: 'recoverable', resumePolicy: 'auto', escalated: false, suspendedAt: '2026-01-01T00:02:00.000Z', resumeAttempts: 1 },
+			failure: { timestamp: '2026-01-01T00:02:00.000Z', role: 'orchestrator', roleId: 'orchestrator-0-1', category: 'transient', httpStatus: 503, attempts: 3, partialOutput: false, detail: 'SECRET PROVIDER BODY' },
+			probeFailure: null,
+		}
+		const { handler } = createHandlerHarness({ readTaskThread, readRunDiagnostics: () => diagnostics })
+		const runView = await handler(get(`/api/runs/${runId}`))
+		const flow = await handler(get(`/api/runs/${runId}/flow`))
+		const thread = await handler(get(`/api/runs/${runId}/thread`))
+		const polled = `${await runView.text()} ${await flow.text()} ${await thread.text()}`
+		expect(polled).not.toContain('SECRET PROVIDER BODY')
+
+		const diagnosticsResponse = await handler(get(`/api/runs/${runId}/diagnostics`))
+		expect(await diagnosticsResponse.text()).toContain('SECRET PROVIDER BODY')
+		const rawLog = await handler(get(`/api/runs/${runId}/log`))
+		expect(await rawLog.text()).toContain('SECRET PROVIDER BODY')
 	})
 })

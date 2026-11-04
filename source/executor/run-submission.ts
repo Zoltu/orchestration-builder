@@ -20,6 +20,8 @@ export interface ResumeRunInvocation {
 	queueTracked?: boolean
 	// The suspension a suspended run is resuming from, so a re-suspension keeps its attempt accounting.
 	priorSuspension?: SuspensionRecord
+	// An explicit operator resume starts a fresh incident and must not inherit the checkpoint's old provider suspension.
+	freshIncident?: boolean
 }
 export type ResumeRun = (checkpoint: RunCheckpoint, options?: ResumeRunInvocation) => Promise<RunMeta>
 
@@ -243,57 +245,72 @@ export interface ResumeErroredOrSuspendedRunDependencies {
 }
 
 export type ResumeErroredOrSuspendedRun = (runId: string, note: string | undefined) => ResumeErroredOrSuspendedRunResult
+export type ResumeSuspendedRunAutomatically = (runId: string) => ResumeErroredOrSuspendedRunResult
 
-// The explicit resume from a checkpoint (docs/queueing.md "Resume of an errored or suspended run"): the operator-driven path that re-enters either an error terminal or a suspended pause (the queue answer is the corresponding path for a parked needs_clarification), and startup reconciliation never touches either meta. The run keeps its own run id, start time, effort, involvement, and log level (they live in the checkpoint, and the resume path re-asserts the running meta from them); the optional note rides into the restored conversation; and after the resume fills the active slot, the queue item settled to error or suspended for this run is re-activated so the panel tracks the live run. A provider-suspension resume clears the provider priority and passes the prior suspension into the executor for attempt accounting; an operator-pause resume clears the operator binding and does not pass a provider record. Every explicit resume clears the durable pause marker before starting, so a stale intent cannot pause the run after a later crash. Every rejection is a value, so the HTTP layer maps codes to statuses. This operation is the one owner of an unresumable suspended run's cleanup: it releases the pause and discards the run and its suspended item so an automatic or explicit resume cannot leave a pause blocking the queue.
+// The explicit resume from a checkpoint (docs/queueing.md "Resume of an errored or suspended run"): the operator-driven path that re-enters either an error terminal or a suspended pause (the queue answer is the corresponding path for a parked needs_clarification), and startup reconciliation never touches either meta. The run keeps its own run id, start time, effort, involvement, and log level (they live in the checkpoint, and the resume path re-asserts the running meta from them); the optional note rides into the restored conversation; and after the resume fills the active slot, the queue item settled to error or suspended for this run is re-activated so the panel tracks the live run. An automatic provider-suspension resume clears the provider priority and passes the prior suspension into the executor so the incident keeps its deadline and attempt count; an explicit operator resume instead starts a fresh incident, and an operator-pause resume clears the operator binding without a provider record. Every explicit resume clears the durable pause marker before starting, so a stale intent cannot pause the run after a later crash. Every rejection is a value, so the HTTP layer maps codes to statuses. This operation is the one owner of an unresumable suspended run's cleanup: it releases the pause and discards the run and its suspended item so an automatic or explicit resume cannot leave a pause blocking the queue.
 const SUSPENDED_CHECKPOINT_MISSING_REASON = 'The suspended run could not be resumed because its checkpoint is missing or corrupt, so it was interrupted.'
 const SUSPENDED_UNRESUMABLE_REASON = 'The suspended run is no longer resumable, so it was interrupted.'
 
-export function createResumeErroredOrSuspendedRun(dependencies: ResumeErroredOrSuspendedRunDependencies): ResumeErroredOrSuspendedRun {
-	return (runId, note) => {
-		const rejectSuspendedRun = (error: 'checkpoint_missing' | 'run_not_resumable' | 'run_not_found'): ResumeErroredOrSuspendedRunResult => {
-			dependencies.runSubmission.clearPausedRun(runId)
-			const reason = error === 'checkpoint_missing' ? SUSPENDED_CHECKPOINT_MISSING_REASON : SUSPENDED_UNRESUMABLE_REASON
-			dependencies.taskQueue.discardSuspendedRun(runId, reason)
-			return { ok: false, error }
-		}
-		if (dependencies.runSubmission.activeRunId() !== undefined) return { ok: false, error: 'run_in_progress' }
-		const boundSuspendedRun = dependencies.runSubmission.pausedRunId() === runId
-		const metaText = dependencies.readRunMetaById(runId)
-		if (metaText === null) return boundSuspendedRun ? rejectSuspendedRun('run_not_found') : { ok: false, error: 'run_not_found' }
-		const parsedMeta = safeJsonParse(metaText)
-		const meta = parsedMeta.ok && isRunMeta(parsedMeta.value) ? parsedMeta.value : null
-		if (meta === null) return boundSuspendedRun ? rejectSuspendedRun('run_not_found') : { ok: false, error: 'run_not_found' }
-		if (meta.status !== 'error' && meta.status !== 'suspended') return boundSuspendedRun ? rejectSuspendedRun('run_not_resumable') : { ok: false, error: 'run_not_resumable' }
-		const rejectSuspendedCheckpoint = (): ResumeErroredOrSuspendedRunResult => rejectSuspendedRun('checkpoint_missing')
-		const checkpointText = dependencies.readCheckpointById(runId)
-		if (checkpointText === null) return meta.status === 'suspended' ? rejectSuspendedCheckpoint() : { ok: false, error: 'checkpoint_missing' }
-		const parsedCheckpoint = safeJsonParse(checkpointText)
-		const checkpoint = parsedCheckpoint.ok && isRunCheckpoint(parsedCheckpoint.value) ? parsedCheckpoint.value : null
-		// The directory name is the run's identity; a checkpoint naming a different run id is treated as corrupt, exactly as startup reconciliation treats one (a corrupt checkpoint is no checkpoint — the briefed continuation is the fallback).
-		if (checkpoint === null || checkpoint.runId !== runId) return meta.status === 'suspended' ? rejectSuspendedCheckpoint() : { ok: false, error: 'checkpoint_missing' }
-		// A parked checkpoint belongs to the queue's answer resume, never the explicit resume: the run did not fail or suspend, and re-entering it without an answer would fail fast in resumeExecutor.
-		if (checkpoint.parkedAsk !== undefined) return meta.status === 'suspended' ? rejectSuspendedCheckpoint() : { ok: false, error: 'checkpoint_missing' }
-		// Every explicit resume clears the durable marker before starting: a stale intent left beside an error resume would otherwise pause the run after a later crash.
-		if (!dependencies.deletePauseRequest(runId)) return { ok: false, error: 'pause_intent_clear_failed' }
-		if (meta.status === 'suspended') {
-			// The run meta is the source of truth for the pause cause; the checkpoint copy covers a crash in the meta-write window.
-			const priorSuspension = meta.suspension ?? checkpoint.suspension
-			const priorPause = meta.pause ?? checkpoint.pause
-			const start = dependencies.runSubmission.resume(checkpoint, {
-				explicitResume: true,
-				...(note !== undefined ? { resumeNote: priorPause !== undefined ? `${PAUSED_RESUME_NOTE_PREFIX}${note}` : `${SUSPENDED_RESUME_NOTE_PREFIX}${note}` } : {}),
-				...(priorPause === undefined && priorSuspension !== undefined ? { priorSuspension } : {}),
-			})
-			if (!start.ok) return start
-			dependencies.taskQueue.reactivateSuspendedItem(runId)
-			return { ok: true, runId: checkpoint.runId }
-		}
-		// The settled item returns to the active slot after the resume fills the single slot synchronously, so no scheduler tick can observe the item active against a still-error meta. A run with no matching error item (its record was requeued or cancelled) resumes regardless — the queue record does not gate the run.
-		const start = dependencies.runSubmission.resume(checkpoint, { explicitResume: true, resumeNote: note === undefined ? undefined : `${RESUME_NOTE_PREFIX}${note}` })
+type ResumeMode = 'operator' | 'automatic'
+
+function resumeFromCheckpoint(dependencies: ResumeErroredOrSuspendedRunDependencies, runId: string, note: string | undefined, mode: ResumeMode): ResumeErroredOrSuspendedRunResult {
+	const rejectSuspendedRun = (error: 'checkpoint_missing' | 'run_not_resumable' | 'run_not_found'): ResumeErroredOrSuspendedRunResult => {
+		dependencies.runSubmission.clearPausedRun(runId)
+		const reason = error === 'checkpoint_missing' ? SUSPENDED_CHECKPOINT_MISSING_REASON : SUSPENDED_UNRESUMABLE_REASON
+		dependencies.taskQueue.discardSuspendedRun(runId, reason)
+		return { ok: false, error }
+	}
+	if (dependencies.runSubmission.activeRunId() !== undefined) return { ok: false, error: 'run_in_progress' }
+	const boundSuspendedRun = dependencies.runSubmission.pausedRunId() === runId
+	const metaText = dependencies.readRunMetaById(runId)
+	if (metaText === null) return boundSuspendedRun ? rejectSuspendedRun('run_not_found') : { ok: false, error: 'run_not_found' }
+	const parsedMeta = safeJsonParse(metaText)
+	const meta = parsedMeta.ok && isRunMeta(parsedMeta.value) ? parsedMeta.value : null
+	if (meta === null) return boundSuspendedRun ? rejectSuspendedRun('run_not_found') : { ok: false, error: 'run_not_found' }
+	if (meta.status !== 'error' && meta.status !== 'suspended') return boundSuspendedRun ? rejectSuspendedRun('run_not_resumable') : { ok: false, error: 'run_not_resumable' }
+	// The automatic coordinator only ever re-enters a provider-suspended run; an error terminal belongs to the operator.
+	if (mode === 'automatic' && meta.status !== 'suspended') return { ok: false, error: 'run_not_resumable' }
+	const rejectSuspendedCheckpoint = (): ResumeErroredOrSuspendedRunResult => rejectSuspendedRun('checkpoint_missing')
+	const checkpointText = dependencies.readCheckpointById(runId)
+	if (checkpointText === null) return meta.status === 'suspended' ? rejectSuspendedCheckpoint() : { ok: false, error: 'checkpoint_missing' }
+	const parsedCheckpoint = safeJsonParse(checkpointText)
+	const checkpoint = parsedCheckpoint.ok && isRunCheckpoint(parsedCheckpoint.value) ? parsedCheckpoint.value : null
+	// The directory name is the run's identity; a checkpoint naming a different run id is treated as corrupt, exactly as startup reconciliation treats one (a corrupt checkpoint is no checkpoint — the briefed continuation is the fallback).
+	if (checkpoint === null || checkpoint.runId !== runId) return meta.status === 'suspended' ? rejectSuspendedCheckpoint() : { ok: false, error: 'checkpoint_missing' }
+	// A parked checkpoint belongs to the queue's answer resume, never the explicit resume: the run did not fail or suspend, and re-entering it without an answer would fail fast in resumeExecutor.
+	if (checkpoint.parkedAsk !== undefined) return meta.status === 'suspended' ? rejectSuspendedCheckpoint() : { ok: false, error: 'checkpoint_missing' }
+	// Every explicit resume clears the durable marker before starting: a stale intent left beside an error resume would otherwise pause the run after a later crash.
+	if (!dependencies.deletePauseRequest(runId)) return { ok: false, error: 'pause_intent_clear_failed' }
+	if (meta.status === 'suspended') {
+		// The run meta is the source of truth for the pause cause; the checkpoint copy covers a crash in the meta-write window.
+		const priorSuspension = meta.suspension ?? checkpoint.suspension
+		const priorPause = meta.pause ?? checkpoint.pause
+		// An operator pause is not a provider recovery and must never be resumed by the automatic coordinator.
+		if (mode === 'automatic' && priorPause !== undefined) return { ok: false, error: 'run_not_resumable' }
+		const start = dependencies.runSubmission.resume(checkpoint, {
+			explicitResume: true,
+			// The operator's explicit action starts a fresh incident. The automatic retry carries the prior suspension so a novel incident keeps its deadline and attempt count.
+			...(mode === 'operator' ? { freshIncident: true } : {}),
+			...(mode === 'automatic' && priorSuspension !== undefined ? { priorSuspension } : {}),
+			...(note !== undefined ? { resumeNote: priorPause !== undefined ? `${PAUSED_RESUME_NOTE_PREFIX}${note}` : `${SUSPENDED_RESUME_NOTE_PREFIX}${note}` } : {}),
+		})
 		if (!start.ok) return start
-		dependencies.taskQueue.reactivateErrorItem(runId)
+		dependencies.taskQueue.reactivateSuspendedItem(runId)
 		return { ok: true, runId: checkpoint.runId }
 	}
+	// The settled item returns to the active slot after the resume fills the single slot synchronously, so no scheduler tick can observe the item active against a still-error meta. A run with no matching error item (its record was requeued or cancelled) resumes regardless — the queue record does not gate the run.
+	const start = dependencies.runSubmission.resume(checkpoint, { explicitResume: true, resumeNote: note === undefined ? undefined : `${RESUME_NOTE_PREFIX}${note}` })
+	if (!start.ok) return start
+	dependencies.taskQueue.reactivateErrorItem(runId)
+	return { ok: true, runId: checkpoint.runId }
+}
+
+export function createResumeErroredOrSuspendedRun(dependencies: ResumeErroredOrSuspendedRunDependencies): ResumeErroredOrSuspendedRun {
+	return (runId, note) => resumeFromCheckpoint(dependencies, runId, note, 'operator')
+}
+
+export function createResumeSuspendedRunAutomatically(dependencies: ResumeErroredOrSuspendedRunDependencies): ResumeSuspendedRunAutomatically {
+	return (runId) => resumeFromCheckpoint(dependencies, runId, undefined, 'automatic')
 }
 
 export type ReadPauseStateById = (runId: string) => PauseState | null

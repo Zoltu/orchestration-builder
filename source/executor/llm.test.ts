@@ -491,15 +491,26 @@ describe('createLlmCaller stream consumption', () => {
 		expect(wire.sleeps).toHaveLength(0)
 	})
 
-	test('a mid-stream error payload is a provider failure with the error message and is not retried', async () => {
+	test('an unrecognized mid-stream error payload is a novel provider failure with its bounded detail and is not retried', async () => {
 		const wire = createFakeWire([streamResponse(encodedChunks([
 			dataLine({ type: 'output_text.delta', item_id: 'm1', delta: 'partial' }),
 			dataLine({ error: { message: 'generation failed' } }),
 		]))])
 		const caller = createLlmCaller(MODEL, API_KEY, { llmFetch: wire.llmFetch, sleep: wire.sleep, scheduleTimeout: wire.scheduleTimeout, random: wire.random, now: wire.now })
 		const result = await caller.call({ messages: [] })
-		// The stream error's raw payload rides as the detail, so the body behind the extracted message stays reviewable.
-		expect(result).toMatchObject({ kind: 'provider_failure', message: 'SSE stream reported an error (deltas received for 1 item(s))', detail: '{"error":{"message":"generation failed"}}' })
+		// The stream error's raw payload rides as the detail, so the body behind the platform-authored message stays reviewable.
+		expect(result).toMatchObject({ kind: 'provider_failure', category: 'novel', message: 'The model provider returned an unexpected response', detail: '{"error":{"message":"generation failed"}}' })
+		expect(wire.requests).toHaveLength(1)
+		expect(wire.sleeps).toHaveLength(0)
+	})
+
+	test('a response.failed carrying response.error is a novel provider failure, not a transport collapse', async () => {
+		const wire = createFakeWire([streamResponse(encodedChunks([
+			dataLine({ type: 'response.failed', response: { status: 'failed', error: { message: 'generation failed' } } }),
+		]))])
+		const caller = createLlmCaller(MODEL, API_KEY, { llmFetch: wire.llmFetch, sleep: wire.sleep, scheduleTimeout: wire.scheduleTimeout, random: wire.random, now: wire.now })
+		const result = await caller.call({ messages: [] })
+		expect(result).toMatchObject({ kind: 'provider_failure', category: 'novel', message: 'The model provider returned an unexpected response', detail: '{"error":{"message":"generation failed"}}' })
 		expect(wire.requests).toHaveLength(1)
 		expect(wire.sleeps).toHaveLength(0)
 	})

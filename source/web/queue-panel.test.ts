@@ -99,9 +99,11 @@ describe('queueStatusLabel', () => {
 		expect(queueStatusLabel('mysterious')).toBe('mysterious')
 	})
 
-	test('an operator-paused row reads Paused while a provider suspension reads Suspended', () => {
+	test('an operator-paused row reads Paused while a provider suspension reads Suspended or needs attention', () => {
 		expect(queueStatusLabel('suspended', 'operator')).toBe('paused')
 		expect(queueStatusLabel('suspended', 'provider')).toBe('suspended')
+		expect(queueStatusLabel('suspended', 'provider', true)).toBe('needs attention')
+		expect(queueStatusLabel('suspended', 'operator', true)).toBe('paused')
 	})
 
 	test('a suspended row takes its pause kind from the item record or the matching run summary', () => {

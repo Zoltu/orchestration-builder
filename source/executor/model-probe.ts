@@ -1,15 +1,14 @@
 import { classifyProviderFailure } from './provider-failure.js'
-import type { ProviderProbeResult } from './provider-health.js'
 import { safeJsonParse } from './validation.js'
 import type { SuspensionCategory } from './types.js'
 
-// Probe of the model API's model list (GET {apiBase}/models, the OpenAI-compatible listing). It runs once at boot before the deployment is resolved and again only while the provider-health monitor is probing a suspension; it never runs per role call.
+// Probe of the model API's model list (GET {apiBase}/models, the OpenAI-compatible listing). It runs once at boot before the deployment is resolved for model and context-window discovery; the health monitor uses the separate completion probe, and this never runs per role call.
 // The probe reports outcomes as values instead of throwing: an unreachable endpoint, an HTTP error, a timeout, or an unparseable body are all expected conditions the resolver answers by falling back to configuration (the endpoint being down is a runtime concern that role calls surface as provider failures on their own), so it must never block boot.
 
-// Bound for the whole probe round-trip: neither boot nor a health probe may hang on an endpoint that accepts connections but never answers.
+// Bound for the whole probe round-trip: startup discovery must not hang on an endpoint that accepts connections but never answers.
 export const MODEL_PROBE_TIMEOUT_MS = 5_000
 
-// The result carries enough coarse signal for the health monitor: status, whether the failure was transport-level, Retry-After, and the shared classifier's coarse category. The body remains only for model-list resolution and is never retained on a failure.
+// The result carries the HTTP status, whether the failure was transport-level, Retry-After, and the shared classifier's coarse category for startup diagnostics. The body remains only for model-list resolution and is never retained on a failure.
 export type ModelProbeResult =
 	| { ok: true; body?: unknown; status: number }
 	| { ok: false; reason: string; transport: boolean; status?: number; retryAfterMs?: number; category?: SuspensionCategory }
@@ -19,18 +18,6 @@ export type ModelProbeFetch = (url: string, init: { headers: Record<string, stri
 export interface ModelProbeDependencies {
 	fetch: ModelProbeFetch
 	now: () => number
-}
-
-// The adapter used when the monitor consumes a model probe: it forwards the probe's status, transport flag, Retry-After, and shared classification unchanged. The monitor's own classifier owns the missing-/models (404/405) rule so both paths agree (docs/reference.md "Provider health gate").
-export function toProviderProbeResult(result: ModelProbeResult): ProviderProbeResult {
-	if (result.ok) return { ok: true, status: result.status }
-	return {
-		ok: false,
-		transport: result.transport,
-		...(result.status !== undefined ? { status: result.status } : {}),
-		...(result.retryAfterMs !== undefined ? { retryAfterMs: result.retryAfterMs } : {}),
-		...(result.category !== undefined ? { category: result.category } : {}),
-	}
 }
 
 async function interpretResponse(response: Response, nowMs: number): Promise<ModelProbeResult> {

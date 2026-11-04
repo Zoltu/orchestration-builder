@@ -103,6 +103,7 @@ function failureMessage(category: ProviderFailureCategory, status: number | unde
 	if (category === 'billing') return `The model provider reports insufficient quota or credit${suffix}`
 	if (category === 'auth') return `The model provider rejected the credentials or access${suffix}`
 	if (category === 'request_rejected') return `The model provider rejected the request${suffix}`
+	if (category === 'novel') return `The model provider returned an unexpected response${suffix}`
 	if (status !== undefined && status >= 200 && status < 300) return `The model provider returned an empty or unreadable response${suffix}`
 	if (status === 429) return `The model provider is rate limiting requests${suffix}`
 	if (status === 408 || status === 425) return `The model provider timed out or is temporarily unavailable${suffix}`
@@ -123,8 +124,8 @@ export function classifyProviderFailure(signal: ProviderFailureSignal, nowMs: nu
 	else if (status === 408 || status === 425) category = 'transient'
 	else if (status !== undefined && status >= 500 && status <= 599) category = 'transient'
 	else if (status === 400 || status === 404 || status === 405 || status === 415 || status === 422) category = 'request_rejected'
-	else if (status !== undefined && status >= 400 && status < 500) category = 'request_rejected'
-	else category = 'transient'
+	else if (status !== undefined && status >= 400 && status < 500) category = 'novel'
+	else category = 'novel'
 
 	const classification: ProviderFailureClassification = {
 		category,
@@ -158,7 +159,17 @@ export function classifyStreamProviderFailure(payload: Record<string, unknown>):
 	if (hasBillingSignature(body)) return classifyProviderFailure({ status: 402, errorBody: body, transport: false }, 0)
 	if (textualCode === 'rate_limit_error') return classifyProviderFailure({ status: 429, errorBody: body, transport: false }, 0)
 	if (textualCode === 'server_error') return classifyProviderFailure({ status: 500, errorBody: body, transport: false }, 0)
+	// An error payload with no recognized status or code is a real provider error, so it is novel rather than a transport collapse. A stream that merely ends without a terminal carries no error payload and stays transient.
+	if (carriesStreamError(payload)) return classifyProviderFailure({ transport: false, errorBody: body }, 0)
 	return classifyProviderFailure({ transport: true }, 0)
+}
+
+function carriesStreamError(payload: Record<string, unknown>): boolean {
+	if (payload['error'] !== undefined) return true
+	const type = payload['type']
+	if (typeof type === 'string' && type.toLowerCase().includes('error')) return true
+	const code = payload['code']
+	return typeof code === 'string' && code.toLowerCase().includes('error')
 }
 
 function streamErrorCode(payload: Record<string, unknown>): string | undefined {

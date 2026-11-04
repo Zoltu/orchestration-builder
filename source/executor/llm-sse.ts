@@ -165,6 +165,17 @@ export function createResponsesStreamAccumulator(): ResponsesStreamAccumulator {
 			markTerminal(type === 'completed' ? 'completed' : 'incomplete', event['response'])
 			return
 		}
+		if (type === 'failed') {
+			// A Responses failure nests its error under response.error; normalize it to the error-payload shape the shared classifier and detail path expect. Without this the stream looks like it merely ended and is misclassified as transport.
+			const responseRecord = asRecord(event['response'])
+			const error = responseRecord?.['error']
+			if (error !== undefined) {
+				recordError({ error })
+				return
+			}
+			recordError(event)
+			return
+		}
 		if (type === 'output_item.added') {
 			registerAddedItem(event)
 			return
