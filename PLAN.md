@@ -9,7 +9,7 @@ Milestones are sequential: the design decisions must land before the harness, th
 A small set of operator-only verifications is open. None blocks design or harness work, but all should close before an optimization cycle is trusted:
 
 - Exercise the streaming client end-to-end against the bundled Guild endpoint (`llama-server`, model "Agents A1"); verify the endpoint's llama.cpp build serves the streaming API first.
-- Build the Docker image and run the smoke test outside this environment (Docker is unavailable in-environment): submit a task via the UI or API, confirm the service stays up after the run, and confirm the hardened invocation (`--read-only`, dropped capabilities, non-root) behaves.
+- Build the Docker image and run the smoke test outside this environment (Docker is unavailable in-environment): submit a task via the UI or API, confirm the service stays up after the run, and confirm the hardened invocation (`--read-only`, dropped capabilities, non-root) behaves; a read-only root filesystem disables runtime package installs, which the default image allows through passwordless `sudo`.
 - Verify checkpoint/resume across a container restart (`docker stop` mid-run, restart, confirm the run resumes), if desired.
 - Operator sign-offs open on the shipped product: real-world Guild tasks (representative tasks beyond the benchmark fixtures), full benchmark-suite runs against a real endpoint, and the run visualization in both light and dark themes.
 

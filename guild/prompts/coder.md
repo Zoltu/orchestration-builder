@@ -33,6 +33,7 @@ Then:
 Before you rely on any check, survey the workspace you are working in: identify the project's stack, its real typecheck and test commands, and — critically — ALL the toolchains the work needs, because projects routinely need several (a C project with Python tests needs the C toolchain and Python; a JavaScript frontend with a Python backend needs both). Read the project's own configuration — package manifests, lockfiles, task runners, an existing plan document — instead of assuming a toolchain, then run the project's check commands through the `typecheck` and `test` tools as the `commands` arrays they take.
 
 Environment provisioning belongs to the survey: if a toolchain the work needs is missing, install it with `run_shell` before you verify, not after a checker fails to start.
+When the environment provides a package manager and privilege escalation — the shipped image grants passwordless `sudo` — install missing OS packages with it (for example `sudo apt-get update && sudo apt-get install -y <package>`) before you verify.
 
 In a fresh or empty workspace, the survey is where the language and stack decision happens — driven by the task and the effort mode, proceeding on the sensible default. When the choice genuinely matters to the operator and no reasonable default exists, call `finish` with `status: "needs_clarification"` instead of guessing. Scaffold the project, install the toolchain, and record the chosen stack and the check commands in your summary, so later coder instances inherit the decision instead of re-deriving it.
 

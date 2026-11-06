@@ -4,19 +4,26 @@ WORKDIR /app
 
 # Aim apt at the Debian snapshot the base image was built against (its deb822 sources ship that snapshot's URL commented out above the live mirror).
 # The live mirror drops superseded packages, so only the frozen snapshot keeps rebuilds working, and pinning its metadata digests below makes the install reproducible.
-# Install git (the executor shells out to it for workspace bookkeeping) and ca-certificates, verifying the downloaded archive metadata against the digests captured from this base image's snapshot: a mismatch means the archive history changed under us and the build fails instead of installing from it.
+# Install git (the executor shells out to it for workspace bookkeeping), ca-certificates, and sudo, verifying the downloaded archive metadata against the digests captured from this base image's snapshot: a mismatch means the archive history changed under us and the build fails instead of installing from it.
 # The base image ships no CA trust store, and --no-install-recommends skips git's recommended ca-certificates package, so HTTPS via git and other system TLS clients would fail certificate verification without it; Bun's own bundled roots are unaffected.
 # The digest check doubles as the guard on the sed pair — if they stop matching the sources file, the metadata lands under the live mirror's filenames and sha256sum -c fails on the missing snapshot paths.
+# sudo exists so the model can provision OS toolchains inside the container at run time; it grants root only inside this container, which remains the security boundary, not on the host.
+# The pinned snapshot's Valid-Until is intentionally ignored so runtime apt-get update works; the snapshot is immutable and the build pins its metadata digests.
 RUN <<-EOF
 	set -e
 	sed -i 's|^URIs:|# URIs:|' /etc/apt/sources.list.d/debian.sources
 	sed -i 's|^# http://snapshot|URIs: http://snapshot|' /etc/apt/sources.list.d/debian.sources
+	printf '%s\n' 'Acquire::Check-Valid-Until "false";' > /etc/apt/apt.conf.d/99snapshot-valid-until
 	apt-get update -o Acquire::Check-Valid-Until=false
 	echo "d66e2e0619558676bf085c026cf699c59a61538906128e41909654c2ec9bf741  /var/lib/apt/lists/snapshot.debian.org_archive_debian-security_20260505T000000Z_dists_trixie-security_InRelease
 	046525dd9b1481195c9cecde891d01cd9b3b4c7abb3b4dcde81023a6b6b88453  /var/lib/apt/lists/snapshot.debian.org_archive_debian_20260505T000000Z_dists_trixie-updates_InRelease
 	7592e4ccb4658a58bfe485d3356b3c983bf8ccff7fca1f6091e4d4296284ed18  /var/lib/apt/lists/snapshot.debian.org_archive_debian_20260505T000000Z_dists_trixie_InRelease" | sha256sum -c
-	apt-get install -y --no-install-recommends git ca-certificates
+	apt-get install -y --no-install-recommends git ca-certificates sudo
 	test -s /etc/ssl/certs/ca-certificates.crt
+	printf '%s\n' 'bun ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/bun
+	chmod 0440 /etc/sudoers.d/bun
+	visudo -cf /etc/sudoers.d/bun
+	sudo -u bun sudo -n true
 	rm -rf /var/lib/apt/lists/*
 EOF
 

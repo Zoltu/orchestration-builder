@@ -35,6 +35,10 @@ docker build --build-arg BUILD_SHA=$(git rev-parse HEAD) -t adaptive-orchestrato
 
 The build bakes the commit sha (`BUILD_SHA` — omit it and the sha is left empty) and a UTC build timestamp (added automatically) into the image, and the serving UI shows this identifier in the top bar.
 
+### Installing toolchains at runtime
+
+The `bun` user has passwordless `sudo`, so an agent can install OS packages at run time with `sudo apt-get update && sudo apt-get install -y <package>`. The apt sources point at the pinned Debian snapshot used at build time, so installed package versions are that snapshot's, and the image disables the snapshot's Valid-Until check so a plain `sudo apt-get update` works. Runtime installs require a writable container filesystem and egress to the snapshot; the hardened `--read-only` invocation disables them.
+
 ### Configuration
 
 Configuration is a bundled deployment file (model endpoint, budgets, context policy) with environment variables layered on top, passed via `docker run -e`. Precedence is deployment file first, environment variables second: an override variable replaces only its own field, and unset variables keep the file's value.
